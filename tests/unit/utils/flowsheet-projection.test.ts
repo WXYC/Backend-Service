@@ -84,6 +84,52 @@ describe('projectFlowsheetEntry (BS#1513)', () => {
     expect(projected.entry_type).toBe('talkset');
     expect(projected).not.toHaveProperty('search_doc');
   });
+
+  // BS#1714: fill-only persistence left non-Spotify/non-Apple URLs under the
+  // spotify_url/apple_music_url columns before #1712's ingestion guard shipped.
+  // The projector host-guards them so iOS never binds a Deezer URL to the
+  // hardwired green "Spotify" button.
+  describe('BS#1714 streaming-URL host guard', () => {
+    it('drops a non-Spotify spotify_url to null (Deezer under the Spotify field)', () => {
+      const projected = projectFlowsheetEntry(
+        makeFullFlowsheetRow({ spotify_url: 'https://www.deezer.com/album/254381182' })
+      );
+      expect(projected.spotify_url).toBeNull();
+    });
+
+    it('drops a non-Apple apple_music_url to null', () => {
+      const projected = projectFlowsheetEntry(
+        makeFullFlowsheetRow({ apple_music_url: 'https://tidal.com/browse/album/254381182' })
+      );
+      expect(projected.apple_music_url).toBeNull();
+    });
+
+    it('drops a suffix-spoof host to null (spotify.com.evil.example)', () => {
+      const projected = projectFlowsheetEntry(
+        makeFullFlowsheetRow({ spotify_url: 'https://open.spotify.com.evil.example/album/1' })
+      );
+      expect(projected.spotify_url).toBeNull();
+    });
+
+    it('passes a genuine Spotify/Apple URL through unchanged', () => {
+      const projected = projectFlowsheetEntry(
+        makeFullFlowsheetRow({
+          spotify_url: 'https://open.spotify.com/album/genuine',
+          apple_music_url: 'https://music.apple.com/us/album/genuine',
+        })
+      );
+      expect(projected.spotify_url).toBe('https://open.spotify.com/album/genuine');
+      expect(projected.apple_music_url).toBe('https://music.apple.com/us/album/genuine');
+    });
+
+    it('leaves the other three streaming fields untouched when spotify_url is mislabeled', () => {
+      const row = makeFullFlowsheetRow({ spotify_url: 'https://www.deezer.com/album/1' });
+      const projected = projectFlowsheetEntry(row);
+      expect(projected.youtube_music_url).toBe(row.youtube_music_url);
+      expect(projected.bandcamp_url).toBe(row.bandcamp_url);
+      expect(projected.soundcloud_url).toBe(row.soundcloud_url);
+    });
+  });
 });
 
 describe('pickClientFacingColumns (BS#1534)', () => {
@@ -117,5 +163,35 @@ describe('pickClientFacingColumns (BS#1534)', () => {
     const picked = pickClientFacingColumns(JSON.parse('{"id":7,"__proto__":{"polluted":true}}'));
     expect(picked).toEqual({ id: 7 });
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  // BS#1714: the same host guard on the parsed-JSON CDC `liveFs:update` payload.
+  describe('BS#1714 streaming-URL host guard', () => {
+    it('nulls a present-but-mislabeled spotify_url (Deezer) while keeping the key', () => {
+      const picked = pickClientFacingColumns({ id: 7, spotify_url: 'https://www.deezer.com/album/1' });
+      expect(picked.spotify_url).toBeNull();
+      expect('spotify_url' in picked).toBe(true);
+    });
+
+    it('nulls a present-but-mislabeled apple_music_url', () => {
+      const picked = pickClientFacingColumns({ id: 7, apple_music_url: 'https://tidal.com/browse/album/1' });
+      expect(picked.apple_music_url).toBeNull();
+    });
+
+    it('passes a genuine Spotify/Apple URL through unchanged', () => {
+      const picked = pickClientFacingColumns({
+        id: 7,
+        spotify_url: 'https://open.spotify.com/album/genuine',
+        apple_music_url: 'https://music.apple.com/us/album/genuine',
+      });
+      expect(picked.spotify_url).toBe('https://open.spotify.com/album/genuine');
+      expect(picked.apple_music_url).toBe('https://music.apple.com/us/album/genuine');
+    });
+
+    it('does not invent a streaming key that was absent from the partial row', () => {
+      const picked = pickClientFacingColumns({ id: 7, artist_name: 'Jessica Pratt' });
+      expect(picked).not.toHaveProperty('spotify_url');
+      expect(picked).not.toHaveProperty('apple_music_url');
+    });
   });
 });

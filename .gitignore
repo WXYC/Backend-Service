@@ -4,7 +4,7 @@ coverage
 dist
 mirror-logs
 .env
-.DS_STORE
+.DS_Store
 .cache
 *.tsbuildinfo
 .claude/worktrees/

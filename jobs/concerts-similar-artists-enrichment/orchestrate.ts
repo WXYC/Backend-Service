@@ -1,0 +1,463 @@
+/**
+ * Orchestrator for jobs/concerts-similar-artists-enrichment (BS#1626 + BS#1701).
+ *
+ * The lane-agnostic engine SHARED by both similar-artists lanes: `job.ts`
+ * injects it once per lane with lane-specific deps + `EnrichOptions`. Unit of
+ * work: `(headliner → semantic-index affinity neighbors → cache row)`. Loads a
+ * cohort of ids, chunks it through a batch neighbors endpoint, and OVERWRITES
+ * the cache rows — a full-window nightly re-fetch, not a presence anti-join, so
+ * neighbors stay current with the nightly graph rebuild. The library lane
+ * (BS#1626) loads `artists.id` → `#354` → `artist_similar_artists`; the discogs
+ * lane (BS#1701) loads Discogs ids → `#367` → `discogs_artist_similar_artists`
+ * and additionally sets `allEmptyExpected` (see the all-empty guard below). The
+ * id is opaque here — the deps translate at the boundary.
+ *
+ * Refresh + write model (differs from the genre sibling):
+ *   - non-empty verdict → UPSERT (overwrite) the neighbor list.
+ *   - empty verdict from a RESPONDED chunk → DELETE the row (the genuine
+ *     now-unmapped/ambiguous ~1%).
+ *   - a chunk whose fetch THROWS → counted as errors; its ids enter NEITHER
+ *     the upsert NOR the delete set, so their existing rows survive and are
+ *     retried next run (transport failures must never wipe a healthy row).
+ *
+ * Null-wipe guard: if EVERY responded id came back empty (a non-empty cohort),
+ * the run writes NOTHING — never wiping the collected rows. For the LIBRARY lane
+ * that is the "mapping not yet rebuilt" case or a real fault, so it logs loudly
+ * with `/health` `mapped_artist_count` and escalates (Sentry on a healthy graph;
+ * non-zero exit). For the DISCOGS lane (`allEmptyExpected`) an all-empty sweep is
+ * the EXPECTED common case (its cohort is largely absent from the graph) and the
+ * library-keyspace health count can't judge it — so it suppresses the write the
+ * same way but does NOT probe /health or escalate. A broad-but-partial empties
+ * (empty fraction above `EMPTY_DELETE_FRACTION_CEIL`) suppresses the DELETE
+ * branch too: a partial mapping rebuild shouldn't clear rows, while a genuine
+ * ~1% churn still clears.
+ *
+ * Dep-injected so the unit suite drives the loop without PG or the network —
+ * see tests/unit/jobs/concerts-similar-artists-enrichment/orchestrate.test.ts.
+ */
+
+import type { NeighborsBatchResponse, SimilarArtistNeighbor } from './neighbors-client.js';
+import type { EnrichmentCandidate } from './query.js';
+import type { SimilarArtistsRow } from './writer.js';
+import type { StationPlaysRow } from './station-writer.js';
+import { captureError, log } from './logger.js';
+
+/**
+ * The DELETE branch is suppressed only when BOTH bounds trip: more than
+ * `EMPTY_DELETE_FRACTION_CEIL` of the responded ids came back empty AND at least
+ * `EMPTY_DELETE_MIN_COUNT` of them did. A broad wave of empties smells like a
+ * partial mapping rebuild, not real churn — so hold back the row-clearing (the
+ * UPSERTs of the non-empty verdicts still proceed). The absolute floor keeps a
+ * SMALL cohort honest: on a slow week with ≤4 upcoming headliners, a single
+ * genuinely now-unmapped one is >20% of the set but is real churn, not a
+ * rebuild, so it must still clear. A genuine now-unmapped cohort is the ~1%
+ * homonym tail; a real partial rebuild empties many rows at once.
+ */
+export const EMPTY_DELETE_FRACTION_CEIL = 0.2;
+export const EMPTY_DELETE_MIN_COUNT = 3;
+
+export type Totals = {
+  /** In-library headliners loaded (distinct artists.id). */
+  cohort: number;
+  /** Endpoint chunks that received a response. */
+  chunks: number;
+  /** Ids on responded chunks with a well-formed (array) verdict. */
+  fetched: number;
+  /** Of `fetched`, how many came back with >= 1 neighbor. */
+  with_neighbors: number;
+  /** Total neighbor rows across all non-empty lists. */
+  neighbors_total: number;
+  /** Rows written (inserted-or-overwritten). */
+  enriched: number;
+  /** Rows deleted (responded-empty artists, when the DELETE branch ran). */
+  cleared: number;
+  /** Ids on chunks whose fetch threw — left untouched + retryable. */
+  errors: number;
+  /**
+   * Ids on a RESPONDED chunk that were absent from `results` or carried a
+   * non-array value (a contract violation). Skipped — NOT routed to the DELETE
+   * set — so an upstream omission can't clear a healthy row; retried next run.
+   */
+  malformed: number;
+  /** Set when the overwrite transaction threw (cohort left as-is, retryable). */
+  write_failed: boolean;
+  /** Set when a whole sweep came back empty and the run wrote nothing. */
+  all_empty_skip: boolean;
+  /**
+   * Set (only alongside `all_empty_skip`) when the lane treats an all-empty sweep
+   * as EXPECTED rather than a fault (BS#1701 — the discogs lane via
+   * `EnrichOptions.allEmptyExpected`). Suppresses the Sentry escalation and the
+   * non-zero exit for that lane while STILL suppressing the write (null-wipe
+   * protection is unconditional). The library lane never sets this.
+   */
+  all_empty_expected: boolean;
+  /** Set when the DELETE branch was suppressed by the empty-fraction/count guard. */
+  deletes_suppressed: boolean;
+  /**
+   * Station-plays rows written (BS#1702). Accounted separately from `enriched`
+   * because the station write lands BEFORE the neighbors null-wipe early return —
+   * a heavily-played headliner with no neighbors still gets its count.
+   */
+  station_written: number;
+  /**
+   * Set when a RESPONDED run returned no `source_plays` for any headliner and the
+   * station write wrote nothing (semantic-index#369 not yet deployed, or a fault).
+   * Benign — never a null wipe (this table is UPSERT-only) and never a non-zero
+   * exit; `station_plays` is documented harmless before it's populated.
+   */
+  station_empty_skip: boolean;
+  /** Set when the station-plays UPSERT threw (rows left as-is, retryable). */
+  station_write_failed: boolean;
+};
+
+export const emptyTotals = (): Totals => ({
+  cohort: 0,
+  chunks: 0,
+  fetched: 0,
+  with_neighbors: 0,
+  neighbors_total: 0,
+  enriched: 0,
+  cleared: 0,
+  errors: 0,
+  malformed: 0,
+  write_failed: false,
+  all_empty_skip: false,
+  all_empty_expected: false,
+  deletes_suppressed: false,
+  station_written: 0,
+  station_empty_skip: false,
+  station_write_failed: false,
+});
+
+export interface EnrichDeps {
+  /** Distinct in-library headliner artist ids (upcoming curated). */
+  loadCandidates: () => Promise<EnrichmentCandidate[]>;
+  /** One endpoint chunk (<= cap ids). Throws on transport/HTTP/shape failure. */
+  fetchNeighbors: (libraryArtistIds: number[]) => Promise<NeighborsBatchResponse>;
+  /** Best-effort `/health` probe, read only to enrich the all-empty loud log. */
+  fetchHealth: () => Promise<{ mapped_artist_count: number | null }>;
+  /** Overwrite the cohort's rows (UPSERT + scoped DELETE); returns counts. */
+  overwrite: (upserts: SimilarArtistsRow[], deleteArtistIds: number[]) => Promise<{ written: number; deleted: number }>;
+  /**
+   * UPSERT the cohort's station-plays rows (BS#1702; UPSERT-only, no DELETE).
+   * OPTIONAL (BS#1701): station plays are an in-library signal keyed on
+   * `artists.id` and sourced from the library endpoint's `source_plays`, so the
+   * Discogs lane (Discogs-only headliners, no `artists.id`, `#367` returns no
+   * `source_plays`) OMITS this dep. When absent, the whole station path —
+   * collection, UPSERT, and the `station_empty_skip` guard — is skipped, so the
+   * Discogs lane never mistakes its (structurally empty) plays for an undeployed
+   * `#369`.
+   */
+  writeStation?: (rows: StationPlaysRow[]) => Promise<{ written: number }>;
+  /** Cooperative pause — awaited before each chunk. */
+  awaitQuiet?: () => Promise<void>;
+}
+
+/** Default cohort noun for log lines — the library lane's wording. */
+export const DEFAULT_COHORT_LABEL = 'in-library headliners';
+
+export interface EnrichOptions {
+  /** Top-K neighbors per headliner (K=20 in production). */
+  limit: number;
+  /** Ids per endpoint chunk (<= SEMANTIC_INDEX_NEIGHBORS_BATCH_CAP). */
+  chunkSize: number;
+  dryRun: boolean;
+  /**
+   * Human noun for the cohort in log lines (the orchestrator is lane-agnostic
+   * on the id, so this keeps the `enumerated`/`dry_run_plan` prose accurate).
+   * Defaults to the library lane's `in-library headliners`; the discogs lane
+   * passes `Discogs-only headliners`. Purely cosmetic — does not affect writes.
+   */
+  cohortLabel?: string;
+  /**
+   * When true, treat a wholly-empty neighbor sweep as EXPECTED, not a fault
+   * (BS#1701 — the discogs lane). Most Discogs-only touring artists aren't in the
+   * WXYC-library-built graph at all (the feature's honest impact ceiling), so an
+   * all-empty discogs sweep is the common case — and the `fetchHealth`
+   * `mapped_artist_count` is a LIBRARY-keyspace number that can't disambiguate
+   * "expected-absent" from "fault" for the discogs keyspace anyway. So this lane
+   * skips the health probe + Sentry escalation + non-zero exit on all-empty,
+   * while STILL suppressing the write (a transient endpoint fault must never wipe
+   * collected rows). Defaults to false (the library lane keeps its
+   * fault-alerting all-empty guard, tuned in BS#1702).
+   */
+  allEmptyExpected?: boolean;
+}
+
+const chunk = <T>(arr: T[], size: number): T[][] => {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+};
+
+export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): Promise<Totals> => {
+  const totals = emptyTotals();
+
+  const cohortLabel = options.cohortLabel ?? DEFAULT_COHORT_LABEL;
+
+  const candidates = await deps.loadCandidates();
+  totals.cohort = candidates.length;
+
+  const chunks = chunk(
+    candidates.map((c) => c.artist_id),
+    options.chunkSize
+  );
+  log('info', 'enumerated', `${candidates.length} ${cohortLabel} in the upcoming curated window`, {
+    cohort: candidates.length,
+    cohort_label: cohortLabel,
+    planned_chunks: chunks.length,
+    chunk_size: options.chunkSize,
+    limit: options.limit,
+  });
+
+  if (candidates.length === 0) return totals;
+
+  if (options.dryRun) {
+    log('info', 'dry_run_plan', `(dry-run) would send ${chunks.length} chunk(s) of up to ${options.chunkSize} ids`, {
+      planned_chunks: chunks.length,
+    });
+    return totals;
+  }
+
+  // Collect verdicts only for ids on RESPONDED chunks. A thrown chunk's ids
+  // never enter this map, so they are neither upserted nor deleted.
+  const fetched = new Map<number, SimilarArtistNeighbor[]>();
+  // BS#1702: station play counts collected across chunks, INDEPENDENTLY of the
+  // neighbor verdicts. Persisted before the neighbors null-wipe early return so a
+  // heavily-played artist with no neighbors still gets its count. Captured once
+  // (BS#1701): a lane WITHOUT `writeStation` (the Discogs lane) skips the whole
+  // station path — the collection below and the write block — rather than
+  // mistake its structurally-empty `source_plays` for an undeployed #369.
+  const writeStation = deps.writeStation;
+  const stationPlays = new Map<number, number>();
+
+  for (const ids of chunks) {
+    if (deps.awaitQuiet) await deps.awaitQuiet();
+
+    let response: NeighborsBatchResponse;
+    try {
+      response = await deps.fetchNeighbors(ids);
+    } catch (err) {
+      // Transport / HTTP / shape failure: nothing recorded for this chunk, so
+      // its ids keep their existing rows and are re-fetched next run. Never
+      // abort the whole run over one chunk.
+      totals.errors += ids.length;
+      log('warn', 'chunk_failed', `fetchNeighbors threw; chunk of ${ids.length} left retryable`, {
+        chunk_size: ids.length,
+        first_artist_id: ids[0] ?? null,
+        error_message: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
+      captureError(err, 'chunk_failed', { chunk_size: ids.length });
+      continue;
+    }
+    totals.chunks += 1;
+
+    for (const id of ids) {
+      // BS#1702: the station play count is independent of the neighbor verdict —
+      // collect it first so a malformed/absent/empty neighbor list doesn't skip a
+      // valid play count. The client already validated each value to a
+      // non-negative integer, so a present value is trustworthy; an absent one is
+      // simply not recorded (semantic-index#369 not deployed, or no play data).
+      // Only the station-participating lane (library) collects — the Discogs lane
+      // (no `writeStation`) skips it entirely (BS#1701).
+      if (writeStation) {
+        const plays = response.source_plays[String(id)];
+        if (typeof plays === 'number') stationPlays.set(id, plays);
+      }
+
+      // The contract guarantees every requested id is present as an array (the
+      // client already sanitized well-formed arrays to `{artist_id, weight}` and
+      // dropped non-array values). An id ABSENT here is therefore a contract
+      // violation / partial upstream fault — NOT an observed-empty verdict. Route
+      // it to `malformed` (skip + retry next run), never into `fetched`: an
+      // observed-empty `[]` is delete-eligible, but an omission must never clear
+      // a healthy row (the writer's stated invariant).
+      const raw = response.results[String(id)];
+      if (!Array.isArray(raw)) {
+        totals.malformed += 1;
+        log('warn', 'malformed_verdict', `id ${id} absent/non-array in results; skipping (retryable)`, {
+          artist_id: id,
+        });
+        continue;
+      }
+      fetched.set(id, raw);
+      totals.fetched += 1;
+      if (raw.length > 0) {
+        totals.with_neighbors += 1;
+        totals.neighbors_total += raw.length;
+      }
+    }
+  }
+
+  // A malformed/absent verdict is a semantic-index contract violation (the
+  // endpoint guarantees every requested id present as an array), never an
+  // expected outcome like an empty list — so raise ONE aggregate Sentry signal
+  // per run (the per-id `warn` logs above stay for CloudWatch). This is what
+  // makes a persistent partial-omission run visible even when it still wrote
+  // some rows and therefore exits 0.
+  if (totals.malformed > 0) {
+    captureError(
+      new Error(`${totals.malformed} malformed/absent neighbor verdict(s) — semantic-index contract violation`),
+      'malformed_verdicts',
+      { malformed: totals.malformed, cohort: totals.cohort }
+    );
+  }
+
+  // BS#1702 station-plays write — persisted HERE, BEFORE the neighbors null-wipe
+  // early return, and via its own writer/table: a heavily-played headliner with
+  // no affinity neighbors must still get its `station_plays` count (that is the
+  // cold-start "For You" card this feature exists to surface). UPSERT-only, no
+  // DELETE — a stale count is harmless. Independent of the neighbor write in
+  // every way: it runs even when the neighbors sweep is all-empty, and a
+  // station-write failure leaves the neighbor path untouched (and vice versa).
+  // The whole block is gated on `writeStation` (BS#1701): the Discogs lane omits
+  // it and does no station work at all (no write, no empty-skip guard).
+  const stationRows: StationPlaysRow[] = Array.from(stationPlays, ([artist_id, plays]) => ({ artist_id, plays }));
+  if (writeStation && stationRows.length === 0) {
+    // Station empty-map guard, mirroring the neighbors `all_empty_sweep`: a
+    // RESPONDED run (>=1 chunk came back) with no `source_plays` for any
+    // headliner means the endpoint isn't returning the field yet
+    // (semantic-index#369 undeployed) or faulted. Write nothing and record the
+    // benign skip — never read "endpoint returned no plays" as "all artists have
+    // 0 plays" (which would UPSERT zeros over real counts). Not set on a total
+    // outage (no chunk responded) — that is already carried by `errors`.
+    if (totals.chunks > 0) {
+      totals.station_empty_skip = true;
+      log(
+        'warn',
+        'station_empty_sweep',
+        `no source_plays returned for any of ${totals.chunks} responded chunk(s); writing no station plays`,
+        {
+          responded_chunks: totals.chunks,
+          hint: 'semantic-index#369 (source_plays on neighbors/batch) may not be deployed yet — station_plays stays null on the wire, which is harmless',
+        }
+      );
+    }
+  } else if (writeStation) {
+    try {
+      const { written } = await writeStation(stationRows);
+      totals.station_written = written;
+    } catch (err) {
+      // A station-write failure leaves the rows as they were (retryable next
+      // run). Flag it (distinct from the neighbor `write_failed`) so the
+      // entrypoint's exit-code check can alert; the neighbor path is untouched.
+      totals.station_write_failed = true;
+      log('warn', 'station_write_failed', `writeStationPlays threw for ${stationRows.length} row(s)`, {
+        rows: stationRows.length,
+        error_message: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
+      captureError(err, 'station_write_failed', { rows: stationRows.length });
+    }
+  }
+
+  // Null-wipe guard: a wholly-empty sweep over a non-empty responded set is the
+  // "mapping not yet rebuilt" case (or a real fault). Write nothing.
+  if (fetched.size > 0 && totals.with_neighbors === 0) {
+    totals.all_empty_skip = true;
+    // Expected-quiet lane (discogs, BS#1701): an all-empty sweep is the common
+    // case (most Discogs-only touring artists aren't in the graph), and the
+    // library-keyspace `mapped_artist_count` can't judge the discogs keyspace —
+    // so skip the health probe, the Sentry escalation, and the non-zero exit.
+    // The neighbor write below (the `overwrite` UPSERT + scoped DELETE) is STILL
+    // skipped — this branch `return`s first, and null-wipe protection is
+    // unconditional: a transient endpoint fault must never clear the collected
+    // discogs-lane rows.
+    if (options.allEmptyExpected) {
+      totals.all_empty_expected = true;
+      log(
+        'warn',
+        'all_empty_sweep_expected',
+        `all ${fetched.size} responded headliners returned empty neighbor lists; skipping write (expected — this lane's cohort is largely absent from the graph)`,
+        { responded: fetched.size }
+      );
+      return totals;
+    }
+    const health = await deps.fetchHealth();
+    log(
+      'error',
+      'all_empty_sweep',
+      `all ${fetched.size} responded headliners returned empty neighbor lists; skipping write (no null wipe)`,
+      {
+        responded: fetched.size,
+        mapped_artist_count: health.mapped_artist_count,
+        hint:
+          health.mapped_artist_count !== null && health.mapped_artist_count > 0
+            ? 'graph reports a healthy mapped_artist_count — likely a real fault or an all-unmapped cohort, not a bootstrap'
+            : 'mapped_artist_count is 0/null — mapping not yet rebuilt (bootstrap night); expected pre-rebuild',
+      }
+    );
+    // BS#1702: the non-zero exit for an all-empty sweep is now suppressed when
+    // station plays were written this run (`all_empty_skip && station_written === 0`
+    // in job.ts) — a night that made station-affinity progress isn't "wrote
+    // nothing." That suppression must NOT also blind the alert for a genuine
+    // neighbor-graph fault. Unlike every other exit-suppressible failure kind
+    // (chunk_failed / malformed_verdicts / overwrite_failed / station_write_failed),
+    // the all-empty sweep had no Sentry fallback — only this stderr log — so once
+    // the exit could be suppressed the fault would be invisible to alerting. When
+    // the graph reports a healthy mapped_artist_count the empty sweep is "likely a
+    // real fault, not a bootstrap," so raise ONE aggregate Sentry signal so the
+    // fault stays visible even at exit 0. A 0/null count is the expected
+    // pre-rebuild bootstrap → log only, no Sentry noise.
+    if (health.mapped_artist_count !== null && health.mapped_artist_count > 0) {
+      captureError(
+        new Error(
+          `all ${fetched.size} responded headliners returned empty neighbor lists over a healthy graph ` +
+            `(mapped_artist_count=${health.mapped_artist_count}) — likely a real semantic-index fault`
+        ),
+        'all_empty_sweep',
+        { responded: fetched.size, mapped_artist_count: health.mapped_artist_count }
+      );
+    }
+    return totals;
+  }
+
+  // Partition responded verdicts into overwrite (non-empty) and clear (empty).
+  const upserts: SimilarArtistsRow[] = [];
+  const emptyIds: number[] = [];
+  for (const [artist_id, neighbors] of fetched) {
+    if (neighbors.length > 0) upserts.push({ artist_id, neighbors });
+    else emptyIds.push(artist_id);
+  }
+
+  // Suppress the DELETE branch only on a BROAD wave of empties (both bounds: a
+  // >CEIL fraction AND at least MIN_COUNT of them) — the signature of a partial
+  // mapping rebuild, which shouldn't clear rows. A small number of genuine
+  // now-unmapped headliners (the ~1% churn) stays under the count floor and
+  // clears normally even in a tiny cohort where it exceeds the fraction.
+  const emptyFraction = fetched.size > 0 ? emptyIds.length / fetched.size : 0;
+  let deleteIds = emptyIds;
+  if (emptyIds.length >= EMPTY_DELETE_MIN_COUNT && emptyFraction > EMPTY_DELETE_FRACTION_CEIL) {
+    totals.deletes_suppressed = true;
+    deleteIds = [];
+    log(
+      'warn',
+      'deletes_suppressed',
+      `${emptyIds.length} empty verdicts (${(emptyFraction * 100).toFixed(1)}% of responded, > ${(EMPTY_DELETE_FRACTION_CEIL * 100).toFixed(0)}%); suppressing DELETEs (possible partial rebuild)`,
+      { empty_ids: emptyIds.length, responded: fetched.size, empty_fraction: emptyFraction }
+    );
+  }
+
+  try {
+    const { written, deleted } = await deps.overwrite(upserts, deleteIds);
+    totals.enriched = written;
+    totals.cleared = deleted;
+  } catch (err) {
+    // A write failure leaves the cohort's rows as they were (retryable next
+    // run). Flag it (distinct from per-chunk fetch `errors`) so the entrypoint's
+    // exit-code check can alert; the row set is untouched.
+    totals.write_failed = true;
+    log(
+      'warn',
+      'overwrite_failed',
+      `overwriteNeighbors threw for ${upserts.length} upsert(s) + ${deleteIds.length} delete(s)`,
+      {
+        upserts: upserts.length,
+        deletes: deleteIds.length,
+        error_message: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      }
+    );
+    captureError(err, 'overwrite_failed', { upserts: upserts.length, deletes: deleteIds.length });
+  }
+
+  return totals;
+};

@@ -34,7 +34,9 @@ describe('schema: library canonical_entity_id columns + index (B-1.1)', () => {
     expect(def).toMatch(
       /canonical_entity_resolved_at:\s*timestamp\(\s*['"]canonical_entity_resolved_at['"][\s\S]*?withTimezone:\s*true/
     );
-    expect(def).not.toMatch(/canonical_entity_resolved_at:[\s\S]*?\.notNull\(\)/);
+    // Bound to the column's own declaration line — an unbounded `[\s\S]*?`
+    // would lazily reach the next `.notNull()` column further down the table.
+    expect(def).not.toMatch(/canonical_entity_resolved_at:[^\n]*\.notNull\(\)/);
   });
 
   it('library table declares a B-tree index on canonical_entity_id', () => {

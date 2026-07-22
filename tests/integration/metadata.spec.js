@@ -334,8 +334,12 @@ describe('album_metadata COALESCE projection (BS#897)', () => {
     artwork_url: 'https://bs897.example.com/artwork.jpg',
     discogs_url: 'https://bs897.example.com/discogs',
     release_year: 1979,
-    spotify_url: 'https://bs897.example.com/spotify',
-    apple_music_url: 'https://bs897.example.com/apple',
+    // BS#1714: the read-time serve-seam host guard (transformToIFSEntry) nulls a
+    // spotify_url whose host isn't Spotify (and apple_music_url off Apple), so
+    // these two sentinels must be genuine hosts to survive the projection —
+    // the other eight columns carry the arbitrary bs897.example.com host.
+    spotify_url: 'https://open.spotify.com/album/bs897sentinel',
+    apple_music_url: 'https://music.apple.com/us/album/bs897sentinel',
     youtube_music_url: 'https://bs897.example.com/youtube',
     bandcamp_url: 'https://bs897.example.com/bandcamp',
     soundcloud_url: 'https://bs897.example.com/soundcloud',
@@ -569,6 +573,141 @@ describe('V2 flowsheet genres/styles projection (BS#1441)', () => {
     // the BS#897 fallthrough test).
     expect(entry.genres).not.toEqual(GENRES);
     expect(entry.styles).not.toEqual(STYLES);
+  });
+});
+
+describe('discogs_url synthetic-match sentinel normalization (BS#1628)', () => {
+  // LML synthesizes `(release_id=0, release_url='')` results for streaming-only
+  // and artist-only matches (LML#401/#487), and the enrichment worker persists
+  // that `release_url` verbatim — so synthetic-match rows hold `discogs_url=''`
+  // on disk. That empty string is a deliberate persisted sentinel (BS#1185 keys
+  // off it); it must NOT reach the wire, where clients would render a dead
+  // Discogs link. The read projection normalizes it:
+  // `nullif(coalesce(album_metadata, flowsheet), '')` — coalesce first, so an
+  // `''` verdict in album_metadata stays authoritative over a stale inline
+  // flowsheet URL (Epic D semantics), then nullif for the wire.
+  //
+  // Real (non-empty) discogs_url passthrough is already pinned by the BS#897
+  // block above (SENTINEL.discogs_url asserted toEqual on the wire).
+  //
+  // As in the BS#897/BS#1441 blocks, force LML to 500 so the runtime
+  // fire-and-forget enrichment lands in the catch arm, which writes only the
+  // 3 synthesized search URLs — it can neither clobber the seeded
+  // album_metadata row (ON CONFLICT DO NOTHING) nor touch discogs_url on the
+  // flowsheet inline columns.
+
+  let sql;
+  let mockApiAvailable = false;
+  const SENTINEL_ALBUM_ID = 5; // real library.id; same hygiene as BS#897/BS#1441
+  const STALE_INLINE_URL = 'https://bs1628.example.com/stale-inline-discogs';
+  const SEEDED_ARTWORK_URL = 'https://bs1628.example.com/apple-probe-artwork.jpg';
+
+  beforeAll(async () => {
+    sql = makeSql();
+    mockApiAvailable = await isMockApiAvailable();
+  });
+
+  afterAll(async () => {
+    if (sql) await sql.end();
+  });
+
+  beforeEach(async () => {
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".album_metadata WHERE album_id = ${SENTINEL_ALBUM_ID}`);
+    if (mockApiAvailable) await resetMockApi();
+    await fls_util.join_show(getTestDjId(), global.secondary_access_token);
+  });
+
+  afterEach(async () => {
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".album_metadata WHERE album_id = ${SENTINEL_ALBUM_ID}`);
+    if (mockApiAvailable) await resetMockApi();
+    await fls_util.leave_show(getTestDjId(), global.secondary_access_token);
+  });
+
+  test("free-form row persisted with discogs_url='' projects null on the wire; disk keeps ''", async () => {
+    if (!mockApiAvailable) {
+      console.warn('Skipping: mock API server not available for LML failure simulation');
+      return;
+    }
+    await simulateError('lml', '/api/v1/lookup', 500);
+
+    // Free-form add (no album_id) — the read path's LEFT JOIN misses
+    // album_metadata and coalesce falls through to the inline columns.
+    const addRes = await request
+      .post('/flowsheet')
+      .set('Authorization', global.secondary_access_token)
+      .send({
+        artist_name: 'Chuquimamani-Condori',
+        album_title: 'Edits',
+        track_title: 'BS1628 synthetic sentinel track',
+      })
+      .expect(201);
+
+    // Stamp the worker's synthetic-match persist shape directly (the worker
+    // writes `artwork.release_url ?? null` and `''` passes `??` untouched).
+    // The catch-arm fire-and-forget only sets the 3 search URL columns, so
+    // this cannot be clobbered regardless of landing order.
+    await sql`
+      UPDATE ${sql(`${SCHEMA}.flowsheet`)}
+         SET discogs_url = '', metadata_status = 'enriched_match'
+       WHERE id = ${addRes.body.id}
+    `;
+
+    const getRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
+    const entry = getRes.body.entries.find((e) => e.id === addRes.body.id);
+    expect(entry).toBeDefined();
+
+    // Wire: normalized to null — never the empty-string sentinel.
+    expect(entry.discogs_url).toBeNull();
+
+    // Disk: the persisted sentinel survives untouched — BS#1628 is
+    // read-path-only and must not mutate the stored column.
+    const rows = await sql`
+      SELECT discogs_url FROM ${sql(`${SCHEMA}.flowsheet`)} WHERE id = ${addRes.body.id}
+    `;
+    expect(rows[0].discogs_url).toBe('');
+  });
+
+  test("album_metadata discogs_url='' verdict projects null and masks a stale inline URL", async () => {
+    if (!mockApiAvailable) {
+      console.warn('Skipping: mock API server not available for LML failure simulation');
+      return;
+    }
+    await simulateError('lml', '/api/v1/lookup', 500);
+
+    // Seed the LML#487 synthetic shape: artwork found via the Apple probe,
+    // but no Discogs release — discogs_url holds the '' sentinel.
+    await sql`
+      INSERT INTO ${sql(`${SCHEMA}.album_metadata`)} (album_id, artwork_url, discogs_url)
+      VALUES (${SENTINEL_ALBUM_ID}, ${SEEDED_ARTWORK_URL}, '')
+    `;
+
+    const addRes = await request
+      .post('/flowsheet')
+      .set('Authorization', global.secondary_access_token)
+      .send({
+        album_id: SENTINEL_ALBUM_ID,
+        track_title: 'BS1628 linked sentinel track',
+      })
+      .expect(201);
+
+    // A stale real URL on the inline column (pre-D3 enrichment relic). The
+    // album_metadata '' verdict is newer and authoritative: coalesce picks it
+    // BEFORE nullif runs, so the wire shows null — not this stale URL.
+    await sql`
+      UPDATE ${sql(`${SCHEMA}.flowsheet`)}
+         SET discogs_url = ${STALE_INLINE_URL}
+       WHERE id = ${addRes.body.id}
+    `;
+
+    const getRes = await request.get('/flowsheet').query({ limit: 10 }).send().expect(200);
+    const entry = getRes.body.entries.find((e) => e.id === addRes.body.id);
+    expect(entry).toBeDefined();
+
+    // The join hit the seeded row (artwork projects), and the '' verdict
+    // normalized to null rather than falling through to the stale inline URL.
+    expect(entry.artwork_url).toEqual(SEEDED_ARTWORK_URL);
+    expect(entry.discogs_url).toBeNull();
+    expect(entry.discogs_url).not.toEqual(STALE_INLINE_URL);
   });
 });
 

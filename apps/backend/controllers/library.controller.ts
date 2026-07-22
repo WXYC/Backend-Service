@@ -556,7 +556,17 @@ type UpdateAlbumRequest = {
   artist_id?: number;
   alternate_artist_name?: string | null;
   disc_quantity?: number;
+  // BS#1281 (Not-on-Discogs 1a): the music director's write surface for
+  // suppressing false LML fuzzy matches. camelCase per the issue spec; the DB
+  // columns are `discogs_unavailable` / `discogs_unavailable_note`.
+  // `last_discogs_recheck_at` is deliberately absent — it is server-write-only
+  // (the recheck cron writes it directly), so any client-supplied value is
+  // silently dropped rather than read here.
+  discogsUnavailable?: boolean;
+  discogsUnavailableNote?: string | null;
 };
+
+const MAX_DISCOGS_UNAVAILABLE_NOTE_LENGTH = 500;
 
 const UPDATABLE_ALBUM_FIELDS = [
   'album_title',
@@ -567,7 +577,14 @@ const UPDATABLE_ALBUM_FIELDS = [
   'artist_id',
   'alternate_artist_name',
   'disc_quantity',
+  'discogsUnavailable',
+  'discogsUnavailableNote',
 ] as const;
+
+// `album_title`, `alternate_artist_name`, and `label` are all `varchar(128)`
+// in the library schema. Reject over-length input as a 400 rather than letting
+// it reach the UPDATE and trip PG 22001 ("value too long") → 500 (#1551).
+const MAX_ALBUM_TEXT_LENGTH = 128;
 
 /**
  * PATCH /library/:id with true partial semantics (PR #1154 review issues
@@ -596,14 +613,22 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
     if (typeof body.album_title !== 'string' || body.album_title.trim() === '') {
       throw new WxycError('album_title must be a non-empty string', 400);
     }
-    updates.album_title = body.album_title.trim();
+    const trimmedTitle = body.album_title.trim();
+    if (trimmedTitle.length > MAX_ALBUM_TEXT_LENGTH) {
+      throw new WxycError(`album_title must be ${MAX_ALBUM_TEXT_LENGTH} characters or fewer`, 400);
+    }
+    updates.album_title = trimmedTitle;
   }
 
   if ('alternate_artist_name' in body) {
     if (body.alternate_artist_name !== null && typeof body.alternate_artist_name !== 'string') {
       throw new WxycError('alternate_artist_name must be a string or null', 400);
     }
-    updates.alternate_artist_name = body.alternate_artist_name?.trim() || null;
+    const trimmedAlternate = body.alternate_artist_name?.trim() || null;
+    if (trimmedAlternate !== null && trimmedAlternate.length > MAX_ALBUM_TEXT_LENGTH) {
+      throw new WxycError(`alternate_artist_name must be ${MAX_ALBUM_TEXT_LENGTH} characters or fewer`, 400);
+    }
+    updates.alternate_artist_name = trimmedAlternate;
   }
 
   if (body.disc_quantity !== undefined) {
@@ -616,6 +641,14 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
   if (body.format_id !== undefined) {
     if (!Number.isInteger(body.format_id) || body.format_id < 1) {
       throw new WxycError('format_id must be a positive integer', 400);
+    }
+    // Validate against the format table so a stale/guessed id surfaces as 400
+    // instead of a PG 23503 → 500 (mirrors the label_id guard). This runs
+    // before the label upsert below, so a bad format_id can't strand an orphan
+    // labels row on the failure path (#1550).
+    const formatRow = await libraryService.getFormatById(body.format_id);
+    if (!formatRow) {
+      throw new WxycError('format_id does not reference an existing format', 400);
     }
     updates.format_id = body.format_id;
   }
@@ -667,6 +700,9 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       // long-stable label_id (issue 6). Clearing must be explicit.
       throw new WxycError('label must be a non-empty string; clear the label by sending label_id: null', 400);
     }
+    if (trimmedLabel !== undefined && trimmedLabel.length > MAX_ALBUM_TEXT_LENGTH) {
+      throw new WxycError(`label must be ${MAX_ALBUM_TEXT_LENGTH} characters or fewer`, 400);
+    }
 
     if (labelIdProvided && body.label_id === null) {
       if (trimmedLabel) {
@@ -695,17 +731,85 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
     }
   }
 
-  // Identity-affecting edits invalidate the LML enrichment columns and
-  // re-fire the same pipeline addAlbum runs (issue 12); otherwise
-  // on_streaming / artwork_url / canonical_entity stay bound to the OLD
-  // (artist, title) identity and no drain job repairs them.
+  // --- discogs_unavailable block (BS#1281 / Not-on-Discogs 1a) ------------
+  // Runs before the no-op short-circuit below so a discogs-only PATCH lands in
+  // `updates` and is seen by the effectiveChange check. Enforces the
+  // `note alive ⟺ flag alive` invariant the DB CHECK
+  // (`discogs_unavailable OR discogs_unavailable_note IS NULL`) also guards.
+  const hasUnavailableFlag = 'discogsUnavailable' in body;
+  const hasUnavailableNote = 'discogsUnavailableNote' in body;
+  if (hasUnavailableFlag || hasUnavailableNote) {
+    if (hasUnavailableFlag && typeof body.discogsUnavailable !== 'boolean') {
+      throw new WxycError('discogsUnavailable must be a boolean', 400);
+    }
+
+    let note: string | null | undefined;
+    if (hasUnavailableNote) {
+      if (body.discogsUnavailableNote !== null && typeof body.discogsUnavailableNote !== 'string') {
+        throw new WxycError('discogsUnavailableNote must be a string or null', 400);
+      }
+      note = body.discogsUnavailableNote === null ? null : body.discogsUnavailableNote.trim() || null;
+      if (note !== null && note.length > MAX_DISCOGS_UNAVAILABLE_NOTE_LENGTH) {
+        throw new WxycError(
+          `discogsUnavailableNote must be at most ${MAX_DISCOGS_UNAVAILABLE_NOTE_LENGTH} characters`,
+          400
+        );
+      }
+    }
+
+    // Effective flag: the incoming value if the body sets it, else the row's
+    // current value (so a note-only PATCH is judged against the live flag).
+    const effectiveFlag = hasUnavailableFlag ? (body.discogsUnavailable as boolean) : existing.discogs_unavailable;
+    if (hasUnavailableFlag) {
+      updates.discogs_unavailable = body.discogsUnavailable as boolean;
+    }
+
+    if (!effectiveFlag) {
+      // No flag ⟹ no note. A non-null note here contradicts the invariant;
+      // reject rather than let the DB CHECK surface it as a 500.
+      if (note != null) {
+        throw new WxycError('discogsUnavailableNote requires discogsUnavailable: true', 400);
+      }
+      // Clearing the flag (or a note-null PATCH on an already-unflagged row)
+      // clears any lingering note, even when the body omits it.
+      updates.discogs_unavailable_note = null;
+    } else if (hasUnavailableNote) {
+      updates.discogs_unavailable_note = note ?? null;
+    }
+  }
+  // --- end discogs_unavailable block --------------------------------------
+
+  // Short-circuit a no-op edit: updateAlbumInDB always SETs last_modified =
+  // NOW(), which fires the touch_library_watermark trigger and advances the
+  // catalog conditional-GET watermark — forcing every iOS / dj-site poller to
+  // re-download the full catalog for a write that changed nothing (#1555). A
+  // PATCH resolves to no-op when every computed update already equals the
+  // stored value (e.g. `{artist_id: <same>}`, or a dj-site "Save" that
+  // resubmits the unchanged record). Compare against the already-fetched row
+  // and return it unchanged rather than running the UPDATE.
+  const effectiveChange = (Object.keys(updates) as Array<keyof libraryService.UpdateAlbumRow>).some(
+    (key) => updates[key] !== existing[key as keyof typeof existing]
+  );
+  if (!effectiveChange) {
+    const album = await libraryService.getAlbumFromDB(albumId);
+    res.status(200).json(album);
+    return;
+  }
+
+  // Identity-affecting edits re-fire the same LML pipeline addAlbum runs (issue
+  // 12), so on_streaming / artwork_url / canonical_entity can be rebound to the
+  // NEW (artist, title) identity. We do NOT null those columns up front:
+  // enrichAlbumAfterIdentityChange overwrites each one only on a successful
+  // lookup (refill-then-swap), so an unconfigured LML or a no-match re-lookup
+  // leaves the prior — still-better-than-blank — enrichment intact rather than
+  // permanently wiping it with no repair path (BS#1549).
   const identityChanged =
     (updates.artist_id !== undefined && updates.artist_id !== existing.artist_id) ||
     (updates.album_title !== undefined && updates.album_title !== existing.album_title) ||
     ('alternate_artist_name' in body &&
       (updates.alternate_artist_name ?? null) !== (existing.alternate_artist_name ?? null));
 
-  const updated = await libraryService.updateAlbumInDB(albumId, updates, { resetEnrichment: identityChanged });
+  const updated = await libraryService.updateAlbumInDB(albumId, updates);
   if (!updated) {
     throw new WxycError('Album not found', 404);
   }
@@ -830,11 +934,22 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
   }
   const q = req.query.q ?? '';
 
+  // Express's `simple` query parser yields a string[] for a repeated key, and
+  // parseInt(['1','2']) stringifies to '1,2' → 1, silently coercing instead of
+  // erroring. Reject repeated page/limit keys the same way `q` is rejected
+  // above, so a malformed request fails loudly rather than paginating wrong
+  // (#1553).
+  if (req.query.page !== undefined && typeof req.query.page !== 'string') {
+    throw new WxycError('page must be a single string value', 400);
+  }
   const page = parseInt(req.query.page ?? '0');
   if (isNaN(page) || page < 0) {
     throw new WxycError('page must be a non-negative integer', 400);
   }
 
+  if (req.query.limit !== undefined && typeof req.query.limit !== 'string') {
+    throw new WxycError('limit must be a single string value', 400);
+  }
   const limit = parseInt(req.query.limit ?? String(DEFAULT_LIMIT));
   if (isNaN(limit) || limit < 1) {
     throw new WxycError('limit must be a positive integer', 400);

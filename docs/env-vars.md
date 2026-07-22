@@ -100,6 +100,25 @@ Bounded ring-buffer reports written under `mirror-logs/`. Reports never include 
 - `MIRROR_REPORT_MAX_BYTES` (default `65536` / 64 KiB) — Per-file JSON cap. Oversize payloads are replaced with a `truncated: true` summary.
 - `MIRROR_PENDING_QUEUE_SUMMARIES_MAX` (default `20`) — Max number of pending-queue summaries embedded in a fatal report.
 
+### Legacy mirror reconciliation cron (`jobs/legacy-mirror-reconcile`)
+
+Recurring cron (BS#1707) that self-heals tubafrenzy mirror rows orphaned when the live mirror's one-shot `res.finish` attempt was skipped. Two DB-durable, all-or-nothing sweeps re-drive shows (`shows.legacy_show_id IS NULL`) then their entries + signoff (`flowsheet.legacy_entry_id IS NULL`); partially-mirrored shows are reported for manual remediation, never auto-appended. Schedule is static from `package.json`'s `cron-schedule` (`0 8 * * *` UTC ≈ 03:00 ET); there is no `BACKFILL_CRON_SCHEDULE`-style override.
+
+New knobs:
+
+- `RECONCILE_WINDOW_HOURS` (default `48`) — Bounded recent window. Only shows started within this many hours are candidates; older orphans are the historical-remediation class, deliberately out of scope for this recurring sweep. Positive integer; anything else throws at startup.
+- `RECONCILE_SETTLE_MINUTES` (default `15`) — Settle window for the show-create sweep only. Shows started within this many minutes are skipped so the sweep never races a still-in-flight live mirror (which persists `legacy_show_id` within the `res.finish` settling window). Non-negative integer; `0` disables the settle bound.
+- `RECONCILE_ALERT_THRESHOLD` (default `0`) — The detection signal escalates to a Sentry warning when `orphan_shows + orphan_entries + partial_shows` exceeds this value. The default `0` alerts whenever the sweep found anything to heal or report, so the accruing condition is visible before a user notices. Non-negative integer.
+
+Reuses the shared cooperative-pause names rather than a `RECONCILE_`-prefixed fork: `LIVE_ACTIVITY_LOOKBACK_SECONDS` (default `60`; `0` disables the probe) and `LIVE_ACTIVITY_PAUSE_MS` (default `30000`) — same semantics as `flowsheet-metadata-backfill`. The pause honors `WXYC_SCHEMA_NAME` via the shared `checkLiveActivity` probe.
+
+Runtime vars supplied at `docker run --env-file .env` (all four have historically been a missed step for per-cron images, so they are called out here):
+
+- `TUBAFRENZY_URL` (default `https://www.wxyc.info`) — Base URL of the tubafrenzy mirror API the reconcile POSTs to (read at module load by `@wxyc/legacy-mirror`'s `http-mirror.ts`, shared with the live mirror path).
+- `MIRROR_API_KEY` — Bearer token for the tubafrenzy mirror API. Must match tubafrenzy's mirror-API key. Same var the live mirror uses.
+- `POSTHOG_API_KEY` — Personal/project API key for the per-DJ `backend-mirror` flag gate. When unset the mirror is enabled by default (dev/E2E convention), exactly like the live path. The cron `shutdown()`s the `posthog-node` client in `finally` (posthog-node's background flush timers would otherwise hang a short-lived container on exit).
+- `SENTRY_DSN` — Sentry project DSN. The moved `http-mirror` client reports mirror-call failures to Sentry directly, and the reconcile's detection signal (orphan-count threshold + per-show partial-mirror report) emits `captureMessage` warnings. Without a DSN the SDK silently no-ops; provision it so the self-heal is observable.
+
 ## Metadata Services
 
 - `LIBRARY_METADATA_URL` — library-metadata-lookup base URL (e.g. `http://localhost:8001`). Required for proxy endpoints, metadata enrichment, and track search. All Discogs access is routed through LML. Do not include the `/api/v1` path prefix; the LML client adds it automatically.
@@ -114,6 +133,13 @@ Stricter ceilings for backfill-class LML callers, since one in-flight LML call h
 - `BACKFILL_LML_MAX_CONCURRENT` (default `1`) — Maximum concurrent in-flight backfill `/api/v1/lookup` calls. Tighter than runtime `LML_CLIENT_MAX_CONCURRENT=5` because backfills have no human-facing latency budget; serializing keeps blast radius bounded. The semaphore is belt-and-suspenders defense in case an orchestrator ever becomes concurrent.
 - `BACKFILL_LML_RATE_PER_MIN` (default `20`) — Token-bucket refill rate (and capacity) for backfill LML calls per minute. Tighter than runtime `LML_CLIENT_RATE_PER_MIN=50` to leave headroom for real-time traffic.
 - `BACKFILL_LML_PER_CALL_TIMEOUT_MS` (default `35000`) — Per-call abort budget. Sized to clear LML#370's 25.25 s per-item cascade-exhaustion cap (deployed to LML prod 2026-05-25) plus ~10 s of headroom for LML queue contention with the live backend + ROM. The prior 8000 ms default (BS#994, retro 2026-05-23) was set against the pre-LML#370 topology and aborted before LML could return its `{timeout:true, results:[]}` body for cascade-bait rows — those rows stayed `metadata_attempt_at IS NULL` and the cron re-failed them every pass. BS#1064 / BS#1180 empirical re-validation showed the 35 s budget lets that body reach the empty-results branch so rows drain as `enriched_no_match` instead of looping (per-row `lml_error` rate dropped from ~86% to ~23%). Steady-state floor is drained by BS#1199's planned retry cap. Mirrors BS#992's per-caller `timeoutMs` pattern for the rotation picker.
+
+### flowsheet-metadata-backfill drain shape (BS#1591)
+
+The recurring drain processes rows in **play-descending artist priority**, not `flowsheet.id` order: a work-list is materialized once per run (pending row ids joined to a per-artist total-plays aggregate grouped on `wxyc_schema.normalize_artist_name`, migration 0092) and drained by a monotonic in-memory cursor, so the cache-friendly high-play head enriches first and a failing row can never be re-selected within a run (the BS#1011 wedge-proof property under value order). Non-library artists below a play-floor are excluded **at query time** — no marker stamp, no status change — so the pending cohort deliberately does not drain to 0; the run's `below_floor_skipped` totals bucket / Sentry span attribute is the residual dashboards must subtract (approximate: the count and the work-list are separate statement snapshots, so out-of-band deletes/stamps in the seconds between them can skew it by a few rows — it is recomputed fresh each run). "Library" means: linked rows (`album_id IS NOT NULL`), plus free-text rows whose normalized artist name matches `artists.artist_name` or `artist_search_alias.variant`. Batch loads also fetch `metadata_status` and partition on the worker lifecycle: rows the CDC enrichment worker already drove to a terminal status (it finalizes via `metadata_status` and never writes `metadata_attempt_at`) get a marker-only reconcile stamp with **zero LML calls** (`worker_reconciled` bucket), in-flight `enriching` claims are left untouched (`worker_inflight_skipped`), and `stale_skipped` counts only ids that vanished mid-run (hard deletes / out-of-band marker stamps).
+
+- `BACKFILL_NONLIBRARY_PLAY_FLOOR` (default `5`) — Minimum per-artist total plays for a non-library free-text row to be eligible. The default was decided in the 2026-07-13 BS#1591 triage (enrich repeat freeform artists; deprioritize the deep uncacheable one-off tail that drove the 2026-07-10 LML 502 flood). `0` disables the floor entirely (the eligibility clause is omitted from the work-list SELECT). Below-floor artists graduate automatically once their play count crosses the floor on a later run. Non-negative integer; anything else throws at startup.
+- `BACKFILL_FLOOR_RECENCY_DAYS` (default `30`) — Recency exemption from the floor (BS#1591 design decision 5): rows younger than this many days are always eligible, so consumer-missed rows of below-floor artists stay sweepable instead of being permanently stranded — both today and when BS#895 re-scopes this cron into the hourly gap-recovery sweep. The default is 30 (not something shorter) because an exempt below-floor row sorts near the plays-DESC **tail** of the work-list: the window must outlive a full catch-up drain pass or the row ages out before any run reaches it and strands in the residual. The wide window is near-free — recent rows are almost all worker-enriched already and reconcile without an LML call. A row consumer-missed and left unreached longer than the window still strands until an operator widens the window or lowers the floor. `0` disables the exemption — only sensible while the cron remains a pure historical drain. Non-negative integer; anything else throws at startup.
 
 ### Rotation Discogs release backfill (`jobs/rotation-release-id-backfill`)
 
@@ -130,7 +156,7 @@ Daily cron job for BS#1381. One BS call here = one batch of up to 50 `lml_identi
 
 ### Rotation release-id pollution check (`jobs/rotation-release-id-pollution-check`)
 
-Weekly Python cron for BS#1522 — no new env names. Reuses the existing contracts with in-code defaults when a var is absent from `.env`: `BACKFILL_LML_RATE_PER_MIN` (20, applied to the engine's release GETs), `BACKFILL_LML_RESOLVE_TIMEOUT_MS` (15000, per LML call), `LIVE_ACTIVITY_LOOKBACK_SECONDS` / `LIVE_ACTIVITY_PAUSE_MS` (cooperative pause, same semantics as the TS jobs), `WXYC_SCHEMA_NAME`, and `DRY_RUN` (log would-fire alerts instead of sending). Required set: `DB_*`, `LIBRARY_METADATA_URL`, `LML_API_KEY`, plus `SENTRY_DSN` unless `DRY_RUN` — the job aborts at init rather than run without the ability to alert. Full runbook in `jobs/rotation-release-id-pollution-check/README.md`.
+Weekly Python cron for BS#1522. Reuses the existing contracts with in-code defaults when a var is absent from `.env`: `BACKFILL_LML_RATE_PER_MIN` (20, applied to the engine's release GETs), `BACKFILL_LML_RESOLVE_TIMEOUT_MS` (15000, per LML call), `LIVE_ACTIVITY_LOOKBACK_SECONDS` / `LIVE_ACTIVITY_PAUSE_MS` (cooperative pause, same semantics as the TS jobs), `LIVE_ACTIVITY_MAX_PAUSE_MS` (1800000 / 30 min; `0` uncapped — cumulative pause budget per run, added in BS#1636 so a sustained live show can't wedge the run; keep non-zero in production), `WXYC_SCHEMA_NAME`, and `DRY_RUN` (log would-fire alerts instead of sending). Required set: `DB_*`, `LIBRARY_METADATA_URL`, `LML_API_KEY`, plus `SENTRY_DSN` unless `DRY_RUN` — the job aborts at init rather than run without the ability to alert. Full runbook in `jobs/rotation-release-id-pollution-check/README.md`.
 
 ### Concerts artist LML resolve (`jobs/concerts-artist-lml-resolver`)
 
@@ -197,6 +223,13 @@ The artist identity ETL (`jobs/artist-identity-etl/`) populates the six reconcil
 The triangle-shows ETL (`jobs/triangle-shows-etl/`) mirrors the [triangle-shows](https://github.com/WXYC/triangle-shows) concert calendar into `venues`/`concerts` for the 16 venues the venue-events-scraper doesn't cover (BS#1589). No SSH tunnel and no sync-notify — it pulls the source's public `/api/v1` surface over HTTPS and nothing consumes concerts live yet.
 
 - `TRIANGLE_SHOWS_URL` — Base URL of the triangle-shows API, no trailing slash (a trailing slash is stripped defensively). Required; the job fails fast at startup when unset.
+
+The album-reviews ETL (`jobs/album-reviews-etl/`) mirrors the "Album Review Responses" Google Form spreadsheet into `album_review_submissions` nightly (ADR 0011). No SSH tunnel and no sync-notify — it reads the Sheets REST v4 `values.get` surface authed by a Google service-account JWT (scope `spreadsheets.readonly`; the SA email must have Viewer access to the spreadsheet). All resolvers fail fast at startup when a required var is unset or malformed.
+
+- `ALBUM_REVIEWS_SHEET_ID` — The spreadsheet id (the long token in the sheet's URL). Required.
+- `ALBUM_REVIEWS_SHEET_RANGE` — The tab the form writes to (default `Form Responses 1`). A bare sheet name reads the whole tab; override only if the form is ever re-pointed at a new tab.
+- `GOOGLE_SERVICE_ACCOUNT_JSON_B64` — Base64 of the service account's downloaded JSON key file (`base64 -i key.json`). Required. Base64 because the key JSON is multi-line and must survive the single-line `KEY=VALUE` constraint of the EC2 `.env` and the set-ec2-env-var workflow. Must decode to JSON containing `client_email` and `private_key`.
+- `DRY_RUN` — Locked truthy values: `true`, `1` (case-insensitive). When set, the run fetches + maps + evaluates the run guards but skips every UPSERT and the link pass, emitting a single locked-schema JSON report line on stdout (see `jobs/album-reviews-etl/README.md`). Harmless to forget — the UPSERT is idempotent across reruns.
 
 ### One-shot backfill jobs
 

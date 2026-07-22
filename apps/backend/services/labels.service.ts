@@ -1,5 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 import { db, labels, Label } from '@wxyc/database';
+import { ilikeEscaped } from '../utils/sql-like.js';
 
 export const getAllLabels = async (): Promise<Label[]> => {
   return await db.select().from(labels);
@@ -32,7 +33,7 @@ export const createLabel = async (labelName: string, parentLabelId?: number): Pr
 export const searchLabels = async (query: string, limit = 10): Promise<Label[]> => {
   const searchQuery = sql`
     SELECT * FROM ${labels}
-    WHERE ${labels.label_name} ILIKE ${query + '%'}
+    WHERE ${ilikeEscaped(labels.label_name, query, 'prefix')}
     ORDER BY ${labels.label_name}
     LIMIT ${limit}
   `;

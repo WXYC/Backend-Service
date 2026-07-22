@@ -74,6 +74,7 @@ export const user_activity = {};
 export const labels = {};
 export const library = {
   id: 'id',
+  artist_id: 'artist_id',
   legacy_release_id: 'legacy_release_id',
   on_streaming: 'on_streaming',
   artwork_url: 'artwork_url',
@@ -82,10 +83,14 @@ export const library = {
   canonical_entity_id: 'canonical_entity_id',
   canonical_entity_confidence: 'canonical_entity_confidence',
   canonical_entity_resolved_at: 'canonical_entity_resolved_at',
+  discogs_unavailable: 'discogs_unavailable',
+  discogs_unavailable_note: 'discogs_unavailable_note',
+  last_discogs_recheck_at: 'last_discogs_recheck_at',
 };
 export const artists = {
   id: 'id',
   artist_name: 'artist_name',
+  discogs_artist_id: 'discogs_artist_id',
 };
 export const genres = {};
 export const format = {};
@@ -225,6 +230,27 @@ export const album_metadata = {
   artist_wikipedia_url: 'artist_wikipedia_url',
   updated_at: 'updated_at',
 };
+export const artist_metadata = {
+  discogs_artist_id: 'discogs_artist_id',
+  genres: 'genres',
+  styles: 'styles',
+  updated_at: 'updated_at',
+};
+export const artist_similar_artists = {
+  artist_id: 'artist_id',
+  neighbors: 'neighbors',
+  updated_at: 'updated_at',
+};
+export const artist_station_plays = {
+  artist_id: 'artist_id',
+  plays: 'plays',
+  updated_at: 'updated_at',
+};
+export const discogs_artist_similar_artists = {
+  discogs_artist_id: 'discogs_artist_id',
+  neighbors: 'neighbors',
+  updated_at: 'updated_at',
+};
 export const flowsheet_freetext_resolution = {
   norm_artist: 'norm_artist',
   norm_album: 'norm_album',
@@ -234,6 +260,31 @@ export const flowsheet_freetext_resolution = {
   match_source: 'match_source',
   attempt_at: 'attempt_at',
   resolved_at: 'resolved_at',
+};
+export const album_review_submissions = {
+  id: 'id',
+  album_id: 'album_id',
+  artist_name: 'artist_name',
+  album_title: 'album_title',
+  record_label: 'record_label',
+  artist_blurb: 'artist_blurb',
+  review: 'review',
+  recommended_tracks: 'recommended_tracks',
+  buzzwords: 'buzzwords',
+  fcc_violations: 'fcc_violations',
+  review_purpose: 'review_purpose',
+  reviewer_raw: 'reviewer_raw',
+  social_consent_raw: 'social_consent_raw',
+  social_consent: 'social_consent',
+  released_within_six_months: 'released_within_six_months',
+  rotated: 'rotated',
+  submitted_at: 'submitted_at',
+  source: 'source',
+  source_key: 'source_key',
+  norm_artist: 'norm_artist',
+  norm_album: 'norm_album',
+  add_date: 'add_date',
+  last_modified: 'last_modified',
 };
 export const flowsheet_linkage_review = {
   id: 'id',

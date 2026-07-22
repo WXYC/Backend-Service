@@ -1,0 +1,33 @@
+{
+  "name": "@wxyc/legacy-mirror",
+  "version": "1.0.0",
+  "description": "Shared tubafrenzy legacy-mirror client: HTTP show/entry create + map helpers and the rotation-match probe. One source of truth for the mirror payload shape, consumed by the Express app's live mirror middleware and the jobs/legacy-mirror-reconcile cron (BS#1707).",
+  "author": "WXYC",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sentry/node": "^10.66.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3"
+  },
+  "types": "dist/index.d.ts"
+}

@@ -1,0 +1,28 @@
+{
+  "name": "@wxyc/flowsheet-linked-reenrichment",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot re-enrichment of the BS#1443 enriched_no_match linked cohort (22,773 rows): Lane A flips cohort rows whose album already has populated album_metadata; Lane B re-looks-up the ~314 residual albums via LML's bulk endpoint with a fill-null UPSERT (BS#1638 / BS#1041 donor / LML#784).",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_flowsheet_linked_reenrichment:ci -f ../../Dockerfile.flowsheet-linked-reenrichment ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.66.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0",
+    "@wxyc/metadata": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

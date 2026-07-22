@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/streaming-url-upgrade",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "One-shot remediation: re-query LML for album_metadata + flowsheet rows whose spotify_url or bandcamp_url was persisted as a provider SEARCH URL, then overwrite ONLY the still-search-shaped columns with the verified link LML now returns. Never downgrades a verified link (SQL LIKE guard). Dry-run by default; pass --execute to write. Gated on LML#831 (Spotify drain) + LML#832 (Bandcamp drain). BS#1672.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_streaming_url_upgrade:ci -f ../../Dockerfile.streaming-url-upgrade ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.66.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

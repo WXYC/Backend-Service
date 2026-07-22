@@ -5,7 +5,14 @@
  * artist FK: `headlining_artist_id IS NULL AND headlining_artist_raw IS
  * NOT NULL`. The `IS NULL` half is the idempotency gate — rerunning the
  * job picks up only still-unresolved rows; resolved rows are never
- * re-examined.
+ * re-examined. Tribute-context rows (the word "tribute" in the title or
+ * the raw name) are excluded outright: in a tribute-framed event the
+ * billed name belongs to — or, worse, aliases — the HONOREE, not the
+ * performer, so any match the arms could find is a mislabel by
+ * construction (the Stanczyks "REM Tribute to Lifes Rich Pageant" row
+ * alias-resolved to the real R.E.M.). The cost is that a genuinely
+ * in-library tribute ACT stays unresolved — conservative under-resolution
+ * over fabricated identity, same contract as the upstream extractor.
  *
  * `resolveArtistId` is the strict-then-alias resolver. Strict and alias
  * arms each run a separate SQL JOIN. The CTE keeps the normalization
@@ -128,6 +135,8 @@ export const loadCandidates = async (): Promise<Candidate[]> => {
     FROM ${CONCERTS_TABLE}
     WHERE "headlining_artist_id" IS NULL
       AND "headlining_artist_raw" IS NOT NULL
+      AND ("title" IS NULL OR "title" !~* '\\mtribute')
+      AND "headlining_artist_raw" !~* '\\mtribute'
     ORDER BY "id" ASC
   `);
   return unwrapRows<Candidate>(result);

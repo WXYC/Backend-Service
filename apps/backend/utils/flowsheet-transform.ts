@@ -8,14 +8,7 @@
 import { epochMsToDate } from '@wxyc/database';
 
 export type BackendEntryType =
-  | 'track'
-  | 'show_start'
-  | 'show_end'
-  | 'breakpoint'
-  | 'talkset'
-  | 'dj_join'
-  | 'dj_leave'
-  | 'message';
+  'track' | 'show_start' | 'show_end' | 'breakpoint' | 'talkset' | 'dj_join' | 'dj_leave' | 'message';
 
 /**
  * FLOWSHEET_ENTRY_TYPE_CODE_ID codes (production FLOWSHEET_ENTRY_PROD table):

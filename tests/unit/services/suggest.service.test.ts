@@ -1,4 +1,19 @@
+// Use the real drizzle-orm `sql` tag (the unit suite auto-mocks it) so the
+// service builds a real SQL object we can compile with PgDialect and inspect
+// the escaped ILIKE patterns + ESCAPE clause. The mock @wxyc/database tables
+// are plain string maps, which the real `sql` tag binds as params — fine here.
+jest.unmock('drizzle-orm');
+
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { db } from '../../mocks/database.mock';
+
+const dialect = new PgDialect();
+
+/** Extract the compiled SQL text + bound params for the Nth db.execute call. */
+const compiledExecuteCall = (n = 0) => {
+  const stmt = (db.execute as jest.Mock).mock.calls[n][0];
+  return dialect.sqlToQuery(stmt);
+};
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -33,6 +48,26 @@ describe('suggest.service', () => {
       const result = await suggestArtists('Aut', 1);
 
       expect(result).toEqual(['Autechre']);
+    });
+
+    it('treats a % in the prefix literally (escapes wildcards, adds ESCAPE)', async () => {
+      (db.execute as jest.Mock).mockResolvedValue([]);
+
+      await suggestArtists('A%');
+
+      const { sql: text, params } = compiledExecuteCall();
+      // Prefix "A%" -> escaped "A\%" -> pattern "A\%%" (only the trailing % is a wildcard).
+      expect(params).toContain('A\\%%');
+      expect(text).toContain("ESCAPE '\\'");
+    });
+
+    it('treats a _ in the prefix literally', async () => {
+      (db.execute as jest.Mock).mockResolvedValue([]);
+
+      await suggestArtists('Hot_');
+
+      const { params } = compiledExecuteCall();
+      expect(params).toContain('Hot\\_%');
     });
   });
 
@@ -75,6 +110,19 @@ describe('suggest.service', () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].album_title).toBe('Confield');
+    });
+
+    it('escapes wildcards in both the track prefix and the artist name', async () => {
+      (db.execute as jest.Mock).mockResolvedValue([]);
+
+      await suggestTracks('%', 'AC_DC');
+
+      const { sql: text, params } = compiledExecuteCall();
+      // Prefix "%" must not become a bare wildcard that ignores the LIMIT contract.
+      expect(params).toContain('\\%%');
+      // Artist name is a full-value (exact) ILIKE: escaped, no added wildcards.
+      expect(params).toContain('AC\\_DC');
+      expect(text).toContain("ESCAPE '\\'");
     });
 
     it('skips compilation query when flowsheet results meet limit', async () => {
@@ -131,6 +179,22 @@ describe('suggest.service', () => {
       const result = await getTrackDetails('Unknown Artist', 'Unknown Track');
 
       expect(result).toBeNull();
+    });
+
+    it('escapes wildcards in the artist name and track title (full-value ILIKE)', async () => {
+      (db.execute as jest.Mock).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+
+      await getTrackDetails('AC_DC', '100%');
+
+      const flowsheet = compiledExecuteCall(0);
+      expect(flowsheet.params).toContain('AC\\_DC');
+      expect(flowsheet.params).toContain('100\\%');
+      expect(flowsheet.sql).toContain("ESCAPE '\\'");
+
+      // Library fallback also escapes the artist name.
+      const library = compiledExecuteCall(1);
+      expect(library.params).toContain('AC\\_DC');
+      expect(library.sql).toContain("ESCAPE '\\'");
     });
   });
 });

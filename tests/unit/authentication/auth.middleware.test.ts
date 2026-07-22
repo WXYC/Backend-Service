@@ -139,6 +139,35 @@ describe('requirePermissions middleware', () => {
       expect(res.status).toHaveBeenCalledWith(401);
       expect(next).not.toHaveBeenCalled();
     });
+
+    // RFC 6750 §2.1: the Bearer scheme is case-insensitive. The production
+    // branch must strip the scheme regardless of case and hand jwtVerify only
+    // the token — not the whole "<scheme> <token>" string (BS#1125).
+    it.each(['bearer', 'Bearer', 'BEARER', 'BeArEr'])(
+      'should strip the "%s" scheme and verify the bare token',
+      async (scheme) => {
+        mockJwtPayload({ role: 'dj' });
+        const { req, res, next } = createMocks(`${scheme} valid.jwt.token`);
+        const middleware = requirePermissions({ catalog: ['read'] });
+
+        await middleware(req, res, next);
+
+        expect(mockedJwtVerify).toHaveBeenCalledWith('valid.jwt.token', expect.anything(), expect.anything());
+        expect(next).toHaveBeenCalled();
+        expect(res.status).not.toHaveBeenCalled();
+      }
+    );
+
+    it('should return 401 for a bare "Bearer" with no token, without calling jwtVerify', async () => {
+      const { req, res, next } = createMocks('Bearer');
+      const middleware = requirePermissions({ catalog: ['read'] });
+
+      await middleware(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(401);
+      expect(mockedJwtVerify).not.toHaveBeenCalled();
+      expect(next).not.toHaveBeenCalled();
+    });
   });
 
   describe('role normalization', () => {

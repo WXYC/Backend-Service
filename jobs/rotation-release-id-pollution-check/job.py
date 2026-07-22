@@ -46,6 +46,11 @@ Optional env (in-code defaults when absent):
     BACKFILL_LML_RESOLVE_TIMEOUT_MS=N  default 15000, per LML call
     LIVE_ACTIVITY_LOOKBACK_SECONDS=N   default 60; 0 disables cooperative pause
     LIVE_ACTIVITY_PAUSE_MS=N           default 30000
+    LIVE_ACTIVITY_MAX_PAUSE_MS=N       default 1800000 (30 min). Cumulative
+                                       pause budget per run; once spent the run
+                                       proceeds without pausing, so a non-zero
+                                       budget can never wedge (BS#1636). 0 opts
+                                       out (uncapped) — keep non-zero in prod.
     WXYC_SCHEMA_NAME                   default wxyc_schema
 
 One-shot invocation (smoke test on the EC2 host):
@@ -114,6 +119,11 @@ PROVENANCE_BASELINE: frozenset[int] = frozenset([
 # run-level event beats N per-row alerts (and beats silence).
 DEGRADED_ERROR_FLOOR = 5
 DEGRADED_ERROR_FRACTION = 0.25
+
+# Cumulative cooperative-pause budget per run (BS#1636): once the probe has
+# spent this much wall-clock pausing, it logs a warning and stops yielding so
+# the weekly signal completes. 30 min dwarfs the ~9 min audit itself.
+LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT = 1_800_000.0
 
 _RUN_ID = str(uuid.uuid4())
 
@@ -186,30 +196,55 @@ def run_degraded(error_count: int, scanned: int) -> bool:
     return error_count > max(DEGRADED_ERROR_FLOOR, DEGRADED_ERROR_FRACTION * scanned)
 
 
-def make_pause_probe(conn, schema: str, lookback_seconds: float, pause_ms: float, on_pause=None):
+def make_pause_probe(conn, schema: str, lookback_seconds: float, pause_ms: float,
+                     max_pause_ms: float = LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT,
+                     on_pause=None, on_budget_exhausted=None):
     """Cooperative pause (BS#735): zero-arg callable for the engine's
     ``before_row`` hook. Ports ``shared/database/src/live-activity.ts`` — the
     literal ``'track'`` predicate is what lets the planner match migration
-    0050's partial index; keep it inline rather than parameterised."""
+    0050's partial index; keep it inline rather than parameterised.
+
+    ``now()`` freshness requires ``conn`` to be in autocommit mode: inside a
+    psycopg implicit transaction now() is transaction_timestamp(), frozen at
+    the transaction's first statement, so one track logged after that instant
+    keeps the probe live forever (BS#1636 — Run 1 wedged 34h this way).
+    ``max_pause_ms`` is the second guard: cumulative wall-clock this probe may
+    spend in its pause loop across the whole run. At the default (30 min) no
+    clock or data shape can wedge the run — on exhaustion it fires
+    ``on_budget_exhausted`` once and every later call returns immediately.
+    ``0`` opts out of that ceiling (uncapped): the autocommit fix still bars the
+    frozen-clock wedge, but under a genuinely sustained live show the loop then
+    pauses for as long as DJs keep adding tracks, so keep a non-zero budget in
+    production."""
     sql = (
         f'SELECT 1 FROM "{schema}"."flowsheet" '
         "WHERE \"entry_type\" = 'track' "
         "AND \"add_time\" > now() - (interval '1 second' * %s) LIMIT 1"
     )
+    state = {"paused_s": 0.0, "exhausted": False}
 
     def probe() -> None:
-        if lookback_seconds <= 0:
+        if lookback_seconds <= 0 or state["exhausted"]:
             return
         while True:
+            loop_start = time.monotonic()
             with conn.cursor() as cur:
                 cur.execute(sql, (lookback_seconds,))
                 live = cur.fetchone() is not None
             if not live:
                 return
+            if max_pause_ms > 0 and state["paused_s"] * 1000.0 >= max_pause_ms:
+                state["exhausted"] = True
+                if on_budget_exhausted is not None:
+                    on_budget_exhausted(state["paused_s"])
+                return
             if on_pause is not None:
                 on_pause()
             if pause_ms > 0:
                 time.sleep(pause_ms / 1000.0)
+            # Accrue measured wall-clock (from loop top, so a pause_ms=0
+            # misconfiguration still accrues query time and stays bounded).
+            state["paused_s"] += time.monotonic() - loop_start
 
     return probe
 
@@ -405,6 +440,63 @@ def self_test() -> int:
     check("run invariant", counters["scanned"],
           counters["ok"] + counters["suspect"] + counters["mismatch"] + counters["error"])
 
+    # make_pause_probe behavior against stub connections (BS#1636: Run 1 wedged
+    # for 34h when a frozen now() made the liveness SQL true forever — the
+    # cumulative budget must bound the loop no matter what the SQL returns).
+    class _ProbeCursor:
+        def __init__(self, owner):
+            self._owner = owner
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            self._owner.executes += 1
+
+        def fetchone(self):
+            return (1,) if self._owner.live else None
+
+    class _ProbeConn:
+        def __init__(self, live: bool):
+            self.live = live
+            self.executes = 0
+
+        def cursor(self):
+            return _ProbeCursor(self)
+
+    events = {"pauses": 0, "exhausted": 0}
+    quiet = _ProbeConn(live=False)
+    probe = make_pause_probe(
+        quiet, "wxyc_schema", 60.0, 1.0, max_pause_ms=50.0,
+        on_pause=lambda: events.__setitem__("pauses", events["pauses"] + 1),
+        on_budget_exhausted=lambda _s: events.__setitem__("exhausted", events["exhausted"] + 1),
+    )
+    probe()
+    check("probe not-live returns after one query, no pause", (quiet.executes, events["pauses"]), (1, 0))
+
+    events = {"pauses": 0, "exhausted": 0}
+    busy = _ProbeConn(live=True)
+    probe = make_pause_probe(
+        busy, "wxyc_schema", 60.0, 1.0, max_pause_ms=5.0,
+        on_pause=lambda: events.__setitem__("pauses", events["pauses"] + 1),
+        on_budget_exhausted=lambda _s: events.__setitem__("exhausted", events["exhausted"] + 1),
+    )
+    probe()
+    check("probe exhausts budget on persistent liveness", events["exhausted"], 1)
+    check("probe paused at least once before exhausting", events["pauses"] >= 1, True)
+    executes_at_exhaustion = busy.executes
+    probe()
+    check("exhausted probe stops querying", busy.executes, executes_at_exhaustion)
+    check("exhausted probe does not re-fire the callback", events["exhausted"], 1)
+
+    disabled = _ProbeConn(live=True)
+    probe = make_pause_probe(disabled, "wxyc_schema", 0.0, 1.0, max_pause_ms=5.0)
+    probe()
+    check("probe lookback 0 short-circuits without querying", disabled.executes, 0)
+
     return 1 if failures else 0
 
 
@@ -434,6 +526,8 @@ def main() -> int:
     timeout_s = env_non_negative(os.environ.get("BACKFILL_LML_RESOLVE_TIMEOUT_MS"), 15000.0) / 1000.0
     lookback_s = env_non_negative(os.environ.get("LIVE_ACTIVITY_LOOKBACK_SECONDS"), 60.0)
     pause_ms = env_non_negative(os.environ.get("LIVE_ACTIVITY_PAUSE_MS"), 30000.0)
+    max_pause_ms = env_non_negative(
+        os.environ.get("LIVE_ACTIVITY_MAX_PAUSE_MS"), LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT)
     schema = (os.environ.get("WXYC_SCHEMA_NAME") or "wxyc_schema").replace('"', '""')
 
     log("info", "init", f"{JOB_NAME} initialized", dry_run=dry_run, rate_per_min=rate_per_min,
@@ -449,6 +543,12 @@ def main() -> int:
         password=os.environ["DB_PASSWORD"],
         dbname=os.environ["DB_NAME"],
         application_name=f"wxyc-{JOB_NAME}",
+        # autocommit is load-bearing, not a preference: the cooperative-pause
+        # probe compares flowsheet.add_time against now(), which inside a psycopg
+        # implicit transaction is transaction_timestamp() — frozen at the first
+        # statement. Without this the probe stays live forever once any track is
+        # logged after the run starts (BS#1636). Read-only job; nothing to batch.
+        autocommit=True,
         # Short SELECTs only; a wedged query must not hold the weekly run open.
         options="-c statement_timeout=60000",
     )
@@ -457,8 +557,12 @@ def main() -> int:
             os.environ["LIBRARY_METADATA_URL"], os.environ.get("LML_API_KEY"), rate_per_min, timeout_s
         )
         probe = make_pause_probe(
-            conn, schema, lookback_s, pause_ms,
+            conn, schema, lookback_s, pause_ms, max_pause_ms,
             on_pause=lambda: log("info", "live_activity_pause", "live flowsheet activity detected; pausing"),
+            on_budget_exhausted=lambda paused_s: log(
+                "warning", "live_activity_pause_budget_exhausted",
+                "cooperative-pause budget exhausted; proceeding without further pauses",
+                paused_seconds=round(paused_s, 1), max_pause_ms=max_pause_ms),
         )
         counters = run(conn, client, dry_run, pause_probe=probe)
         log("info", "finished", f"{JOB_NAME} done", dry_run=dry_run, **counters)

@@ -67,6 +67,7 @@ components:
       description: >
         Discriminated union keyed by entry_type.
         track entries include artist_name, album_title, track_title, record_label, rotation_bin, metadata fields.
+        track entries also carry artist_id — the resolved WXYC catalog artist id (flowsheet.album_id → library.artist_id), additive and nullable (null for free-form entries and library rows with no artist link). Shares the artists.id keyspace with concerts.headlining_artist_id / upcoming_show so on-device features (the On Tour likes match) can intersect a liked playcut against concert headliners (BS#1625). Canonical wire contract: FlowsheetV2TrackEntry.artist_id in wxyc-shared/api.yaml (the SSOT).
         track entries MAY also carry upcoming_show — an optional embedded Concert (see the Concert schema and GET /concerts) attached server-side at feed-assembly time when the track's resolved catalog artist (flowsheet.album_id → library.artist_id) has a curated, non-tombstoned, upcoming Triangle-area date (concerts.headlining_artist_id match; soonest date wins). Absent when there is no such match; older clients decode the absent field as "no touring CTA" (BS#1607). The canonical wire contract is FlowsheetV2TrackEntry.upcoming_show in wxyc-shared/api.yaml (the SSOT); this app.yaml is Swagger display only.
         show_start/show_end entries include dj_name and timestamp.
         dj_join/dj_leave entries include dj_name.
@@ -1628,7 +1629,7 @@ paths:
 
   /concerts:
     get:
-      summary: List upcoming concerts (Touring Soon feed)
+      summary: List upcoming concerts (On Tour feed)
       description: >-
         Upcoming non-removed concerts windowed on the venue-local calendar
         date `starts_on`, ordered by `starts_on` ascending, paginated.
@@ -1681,3 +1682,40 @@ paths:
           description: Invalid query parameters
         '401':
           description: Authentication required
+
+  /concerts/{id}:
+    get:
+      summary: Get a single concert by id (public share/deep-link read)
+      description: >-
+        Public, windowless single-concert read (BS#1694). Unlike the list,
+        this endpoint requires NO authentication and applies NO date window:
+        past concerts and concerts delisted at the source (tombstoned
+        upstream — never deleted, never exposed) are served with whatever
+        `status` they last carried, so the wxyc.org/shows share page can
+        render "this one's passed" and the iOS universal-link fallback can
+        resolve any shared id. 200 responses are publicly cacheable
+        (`Cache-Control: public, max-age=300`); handler error responses
+        (400/404/5xx) are pinned `no-store` so a shared cache can never
+        hold a miss. (The router-level 400 for an undecodable path escape
+        carries no cache header; 400 is not heuristically cacheable.) The
+        canonical wire contract is `/concerts/{id}` in wxyc-shared/api.yaml
+        (the SSOT); this app.yaml is Swagger display only.
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: The concert's serial id
+      responses:
+        '200':
+          description: The concert
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Concert'
+        '400':
+          description: Malformed id (non-integer, non-positive, or an undecodable path escape)
+        '404':
+          description: No concert with this id exists

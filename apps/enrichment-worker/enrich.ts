@@ -60,10 +60,7 @@ export type EnrichRow = {
 };
 
 export type FinalizeOutcome =
-  | 'enriched_match'
-  | 'enriched_match_raced'
-  | 'enriched_no_match'
-  | 'enriched_no_match_raced';
+  'enriched_match' | 'enriched_match_raced' | 'enriched_no_match' | 'enriched_no_match_raced';
 
 /**
  * BMI composer provenance (BS#1499). Enum-like text on the flowsheet row,

@@ -511,6 +511,17 @@ export const library = wxyc_schema.table(
     canonical_entity_id: text('canonical_entity_id'),
     canonical_entity_confidence: real('canonical_entity_confidence'),
     canonical_entity_resolved_at: timestamp('canonical_entity_resolved_at', { withTimezone: true }),
+    // "Not on Discogs" flag (BS#1281 / epic #1280). The music director marks a
+    // release the LML pipeline keeps false-fuzzy-matching (embargoed promos,
+    // audience-segment pressings) so lookups stop returning wrong metadata.
+    // `discogs_unavailable_note` is the MD's optional rationale; the
+    // `library_discogs_unavailable_note_check` CHECK enforces
+    // `note alive ⟺ flag alive` at the DB level. `last_discogs_recheck_at` is
+    // server-write-only, stamped by the recheck cron (later sub-issue) — the
+    // PATCH handler never writes it.
+    discogs_unavailable: boolean('discogs_unavailable').default(false).notNull(),
+    discogs_unavailable_note: varchar('discogs_unavailable_note', { length: 500 }),
+    last_discogs_recheck_at: timestamp('last_discogs_recheck_at', { withTimezone: true }),
     // STORED GENERATED tsvector covering the searchable text fields with
     // weight bands (artist=A, album=B). NULL for rows where artist_name has
     // not been backfilled yet — A.2 populates legacy rows, A.3 keeps live
@@ -537,6 +548,17 @@ export const library = wxyc_schema.table(
       ),
       librarySearchDocIdx: index('library_search_doc_idx').using('gin', sql`${table.search_doc}`),
       libraryCanonicalEntityIdIdx: index('library_canonical_entity_id_idx').on(table.canonical_entity_id),
+      // BS#1281: `note alive ⟺ flag alive`. A note may only exist while the
+      // row is flagged unavailable.
+      discogsUnavailableNoteCheck: check(
+        'library_discogs_unavailable_note_check',
+        sql`${table.discogs_unavailable} OR ${table.discogs_unavailable_note} IS NULL`
+      ),
+      // Partial index over the small flagged subset — the recheck cron's
+      // candidate query and the album-level-backfill candidate filter.
+      discogsUnavailableIdx: index('library_discogs_unavailable_idx')
+        .on(table.discogs_unavailable)
+        .where(sql`${table.discogs_unavailable} = true`),
     };
   }
 );
@@ -689,6 +711,12 @@ export const discogsReleaseIdSourceEnum = wxyc_schema.enum('discogs_release_id_s
   'discogs_direct_backfill',
   'library_identity',
   'md_verified',
+  // BS#1281 (Not-on-Discogs 1a). Written by the future recheck cron when a
+  // `library.discogs_unavailable` release is re-checked against Discogs and a
+  // release id is (re)minted. Added in its own migration (before the
+  // library-columns migration) because `ALTER TYPE ... ADD VALUE` is not usable
+  // in the same transaction that adds it.
+  'recheck_after_unavailable',
 ]);
 /**
  * SOURCE: tubafrenzy via `jobs/rotation-etl/`. The music director writes
@@ -849,7 +877,10 @@ export const flowsheet = wxyc_schema.table(
     //   2. Mirror loop-guard — apps/backend/middleware/legacy/flowsheet.mirror.ts
     //      reads `legacy_entry_id != null` as a boolean meaning "this row
     //      came from tubafrenzy, do not mirror back" (avoids an infinite
-    //      ETL → mirror → webhook → ETL loop).
+    //      ETL → mirror → webhook → ETL loop). The reconcile cron
+    //      (jobs/legacy-mirror-reconcile/orchestrate.ts, BS#1707) is a use-#2
+    //      sibling: it records the just-allocated tubafrenzy ID after a
+    //      successful re-driven mirrorCreateEntry, same as the live path.
     //   3. ETL incremental sync key — jobs/flowsheet-etl/job.ts uses the
     //      same `ON CONFLICT (legacy_entry_id)` shape as #1.
     // A future change that populates legacy_entry_id to a placeholder for
@@ -1339,6 +1370,174 @@ export const album_metadata = wxyc_schema.table('album_metadata', {
 });
 
 /**
+ * Artist-level metadata cache, keyed by external Discogs artist id (BS#1624).
+ *
+ * The artist analog of `album_metadata`: a home for per-artist enrichment
+ * that isn't tied to any one album/release. Seeded here with the Discogs
+ * `genres`/`styles` taxonomy that the On Tour feature projects onto
+ * `Concert.genres` (`GET /concerts`) — the same taxonomy #1336 persisted on
+ * `album_metadata` for albums, but resolved for the artist as a whole (LML
+ * majority-take across the artist's releases, LML#781).
+ *
+ * Key: `discogs_artist_id` (PK) — a bare external Discogs id with NO FK, the
+ * same modelling choice as `album_metadata.discogs_artist_id` and
+ * `concerts.headlining_discogs_artist_id`. It is the identity both concert
+ * resolution lanes converge on: the offline LML pass (BS#1614) writes
+ * `concerts.headlining_discogs_artist_id` directly, and a library-resolved
+ * headliner reaches its Discogs id through `artists.discogs_artist_id`. A
+ * bare id (not an FK to `artists.id`) is required because the touring
+ * artists this feature surfaces are largely absent from the WXYC `artists`
+ * table. `.notNull()` is redundant with `.primaryKey()` at the SQL level but
+ * makes `InferInsertModel` mark the column required (same rationale as
+ * `album_metadata.album_id`).
+ *
+ * Population: `jobs/concerts-genre-enrichment/` (nightly, chained after the
+ * artist resolvers). It selects resolved headliners lacking an
+ * `artist_metadata` row, calls LML's bulk artist-genres endpoint (LML#781),
+ * and UPSERTs `ON CONFLICT DO NOTHING` — never overwriting a collected row.
+ * Both `genres` and `styles` are nullable `text[]` (LML may resolve one and
+ * not the other). `artist_bio` (BS#1734) rides the same endpoint (LML#889)
+ * and is stored RAW — no `cleanDiscogsBio` at write time, matching
+ * `album_metadata.artist_bio` / `flowsheet.artist_bio` precedent; cleaning is
+ * a read-time-only concern.
+ */
+export const artist_metadata = wxyc_schema.table('artist_metadata', {
+  discogs_artist_id: integer('discogs_artist_id').primaryKey().notNull(),
+  genres: text('genres').array(),
+  styles: text('styles').array(),
+  artist_bio: text('artist_bio'),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type ArtistMetadata = InferSelectModel<typeof artist_metadata>;
+export type NewArtistMetadata = InferInsertModel<typeof artist_metadata>;
+
+/**
+ * One affinity neighbor of a resolved concert headliner, drawn from the
+ * semantic-index graph (On Tour R3b, BS#1626). Mirrors the `SimilarArtist`
+ * schema in `wxyc-shared/api.yaml` (merged wxyc-shared#222) verbatim, so the
+ * stored jsonb IS the `Concert.similar_artists` wire shape — persisted and
+ * re-emitted with zero field mapping.
+ *
+ * `artist_id` is a WXYC catalog artist id (`artists.id`), the SAME keyspace as
+ * `Concert.headlining_artist_id`, so on-device For You matching intersects it
+ * against liked-artist ids in one id space. `weight` is a raw semantic-index
+ * affinity composite — list-relative (comparable within one headliner's list,
+ * not across lists); persisted as-is, ranked/capped client-side.
+ */
+export type SimilarArtistNeighbor = { artist_id: number; weight: number };
+
+/**
+ * Artist-level cache of an IN-LIBRARY headliner's top-K affinity neighbors from
+ * the semantic-index graph (On Tour R3b, BS#1626), keyed on `artists.id`. The
+ * artist analog of `artist_metadata` (which caches Discogs genres), but keyed
+ * on the LIBRARY artist id rather than the Discogs id — hence a real FK to
+ * `artists.id` (with `ON DELETE CASCADE`), unlike `artist_metadata`'s bare
+ * external Discogs id. Two curated concerts by the same headliner share one row.
+ *
+ * This is the LIBRARY lane of a two-lane design (BS#1701): a Discogs-only
+ * touring headliner (absent from the WXYC library, so no `artists.id`) gets its
+ * neighbor list from the sibling `discogs_artist_similar_artists` table instead,
+ * keyed on the bare Discogs id. `GET /concerts` COALESCEs the two lanes (this
+ * one wins). The affinity graph itself covers both — it is built from EVERYTHING
+ * played in the flowsheet, not just the catalog — so the split is purely about
+ * which id keys the cache row.
+ *
+ * `neighbors` is an ordered `SimilarArtistNeighbor[]` (weight descending) — the
+ * exact `Concert.similar_artists` wire shape — that `GET /concerts` projects via
+ * a null-safe LEFT JOIN on `headlining_artist_id`.
+ *
+ * Population: `jobs/concerts-similar-artists-enrichment/` (nightly, chained
+ * after the artist resolvers + genre enrichment). Unlike genres (static Discogs
+ * data, presence-anti-join idempotency), affinity neighbors are recomputed on
+ * every semantic-index graph rebuild, so the job re-fetches the entire upcoming
+ * curated in-library cohort every night and OVERWRITES (`ON CONFLICT DO UPDATE`)
+ * — keeping neighbors current with the graph.
+ */
+export const artist_similar_artists = wxyc_schema.table('artist_similar_artists', {
+  artist_id: integer('artist_id')
+    .primaryKey()
+    .notNull()
+    .references(() => artists.id, { onDelete: 'cascade' }),
+  neighbors: jsonb('neighbors').$type<SimilarArtistNeighbor[]>().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type ArtistSimilarArtists = InferSelectModel<typeof artist_similar_artists>;
+export type NewArtistSimilarArtists = InferInsertModel<typeof artist_similar_artists>;
+
+/**
+ * Artist-level cache of a headliner's all-time WXYC flowsheet play count from
+ * the semantic-index graph (`artist.total_plays`), keyed on `artists.id` (On
+ * Tour "For You" station-affinity tier, BS#1702). The absolute play count is
+ * the station-affinity signal behind the On Tour "For You" shelf: a cold-start
+ * listener (no personal likes) sees heavy-rotation touring artists ranked by
+ * this scalar. Identical for every listener — carries no listener data.
+ *
+ * Kept in a SIBLING table rather than a column on `artist_similar_artists`
+ * (BS#1626) deliberately: that table's DELETE-on-empty-neighbors lifecycle
+ * would drop a play count for a heavily-played artist that happens to have no
+ * affinity neighbors — exactly the cold-start card this feature exists to
+ * surface. This table is UPSERT-only (no DELETE): a stale row for an artist no
+ * longer touring is harmless (no upcoming concert joins it) and `total_plays`
+ * drifts slowly. A real FK to `artists.id` with `ON DELETE CASCADE`, mirroring
+ * `artist_similar_artists` — the affinity graph is built from the WXYC library,
+ * so only IN-LIBRARY headliners (`concerts.headlining_artist_id IS NOT NULL`)
+ * have a play count.
+ *
+ * Population: `jobs/concerts-similar-artists-enrichment/` reads the `source_plays`
+ * map off the same nightly `neighbors/batch` call (semantic-index#369) and
+ * UPSERTs here — `GET /concerts` LEFT-joins it onto `Concert.station_plays`.
+ */
+export const artist_station_plays = wxyc_schema.table('artist_station_plays', {
+  artist_id: integer('artist_id')
+    .primaryKey()
+    .notNull()
+    .references(() => artists.id, { onDelete: 'cascade' }),
+  plays: integer('plays').notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type ArtistStationPlays = InferSelectModel<typeof artist_station_plays>;
+export type NewArtistStationPlays = InferInsertModel<typeof artist_station_plays>;
+
+/**
+ * DISCOGS lane of the two-lane similar-artists design (BS#1701) — the sibling of
+ * `artist_similar_artists` for headliners that resolved ONLY to a Discogs artist
+ * id (`concerts.headlining_discogs_artist_id`, BS#1614's LML-minted touring
+ * artists) and have no `artists.id` to key the library lane on.
+ *
+ * Keyed on a BARE external Discogs artist id (no FK to `artists.id`), exactly
+ * like `artist_metadata`: the touring artists this lane covers are largely
+ * absent from the WXYC `artists` table, so a library FK is impossible. A single
+ * Discogs-keyed table could NOT replace the library lane — 23 of the 38
+ * currently-covered in-library headliners carry a NULL `artists.discogs_artist_id`
+ * (the column is nullable), so re-keying `artist_similar_artists` on the Discogs
+ * id would drop them (a 61% coverage regression). Hence two lanes, partitioned
+ * by cohort so no headliner is written to both.
+ *
+ * `neighbors` is the SAME `SimilarArtistNeighbor[]` wire shape as the library
+ * lane — the neighbors are WXYC catalog artist ids in both lanes (semantic-index
+ * returns library-code neighbors regardless of the lookup key; #367 reuses
+ * #354's translate path), so on-device For You matching intersects one id space.
+ * `GET /concerts` LEFT-joins on `COALESCE(headlining_discogs_artist_id,
+ * artists.discogs_artist_id)` and COALESCEs `artist_similar_artists.neighbors`
+ * (library lane) over this table's (library wins on the rare both-present row).
+ *
+ * Population: `jobs/concerts-similar-artists-enrichment/` discogs lane (nightly).
+ * Same OVERWRITE (`ON CONFLICT DO UPDATE`) refresh policy as the library lane —
+ * affinity neighbors are recomputed on every semantic-index graph rebuild.
+ */
+export const discogs_artist_similar_artists = wxyc_schema.table('discogs_artist_similar_artists', {
+  discogs_artist_id: integer('discogs_artist_id').primaryKey().notNull(),
+  neighbors: jsonb('neighbors').$type<SimilarArtistNeighbor[]>().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type DiscogsArtistSimilarArtists = InferSelectModel<typeof discogs_artist_similar_artists>;
+export type NewDiscogsArtistSimilarArtists = InferInsertModel<typeof discogs_artist_similar_artists>;
+
+/**
  * Free-text (artist, album) → Discogs release+master resolution cache
  * (BS#1491 / catalog-popularity Phase-2 Track 1).
  *
@@ -1424,6 +1623,176 @@ export const reviews = wxyc_schema.table('reviews', {
   last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   author: varchar('author', { length: 32 }),
 });
+
+/**
+ * Form-sourced album-review ARCHIVE (ADR 0011) — the ~1,650 DJ-written
+ * reviews collected since March 2021 in the "Album Review Responses"
+ * Google Form, mirrored nightly by `jobs/album-reviews-etl/`.
+ *
+ * Deliberately separate from the `reviews` table above: ADR 0006 reserves
+ * `reviews` as the one-per-album, author-owned (`author_dj_id`), MD-queued
+ * in-app Review model at `/reviews`. This archive conflicts with that
+ * model on every axis — multiple reviews per album, free-text alumni
+ * reviewers with no `auth_user`, immutable submissions — so the two never
+ * merge (see docs/adr/0011-album-review-submissions-separate-archive.md).
+ *
+ * Identity is free-text: `album_id` is a best-effort link written only by
+ * the ETL's singleton-match link pass (never overwritten; ON DELETE SET
+ * NULL so a library deletion can't take the submission with it).
+ *
+ * PII: `reviewer_raw` holds real names and the form promised "your name
+ * will not be shared" — stored for internal curation, NEVER emitted by
+ * the read endpoint (the `flowsheet.dj_name` posture). Same for the
+ * name-adjacent asides in `social_consent_raw`.
+ *
+ * `source` is text with a documented vocabulary rather than a pgEnum (the
+ * 0109 lesson: enum additions cost a migration each). Values so far:
+ *   'google_form' — jobs/album-reviews-etl, written explicitly by the ETL.
+ *
+ * `source_key` is the UPSERT natural key: `form:<ISO-8601 UTC>` of the
+ * parsed form timestamp, or the collision-proofed
+ * `nots:<norm_artist>:<norm_album>:<sha256[0:8](reviewer_raw)>` fallback
+ * for the rare timestamp-less row. Partial-unique (WHERE NOT NULL) so any
+ * future source without a natural key can leave it NULL.
+ *
+ * `norm_artist`/`norm_album` are persisted `normalizeArtistName`/
+ * `normalizeAlbumTitle` outputs (the `flowsheet_freetext_resolution`
+ * precedent; `normalizeAlbumTitle` has no SQL twin, so persisting is what
+ * makes re-link passes and dedup queryable). `add_date` is the INSERT-only
+ * import date (the review's own date is `submitted_at`).
+ */
+export const album_review_submissions = wxyc_schema.table(
+  'album_review_submissions',
+  {
+    id: serial('id').primaryKey(),
+    album_id: integer('album_id').references(() => library.id, { onDelete: 'set null' }),
+    // Raw form values, verbatim.
+    artist_name: text('artist_name'),
+    album_title: text('album_title'),
+    record_label: text('record_label'),
+    artist_blurb: text('artist_blurb'),
+    review: text('review'),
+    // Raw, including the form's `!`-rating markers.
+    recommended_tracks: text('recommended_tracks'),
+    buzzwords: text('buzzwords'),
+    // Verbatim — blank ≠ "None"; the n/a family is deliberately NOT collapsed.
+    fcc_violations: text('fcc_violations'),
+    // Raw multi-select.
+    review_purpose: text('review_purpose'),
+    // PII-internal; never exposed by the read endpoint. See table JSDoc.
+    reviewer_raw: text('reviewer_raw'),
+    social_consent_raw: text('social_consent_raw'),
+    social_consent: boolean('social_consent'),
+    released_within_six_months: boolean('released_within_six_months'),
+    rotated: boolean('rotated'),
+    // Form submission instant, parsed as wall-clock America/New_York.
+    submitted_at: timestamp('submitted_at', { withTimezone: true }),
+    source: text('source').notNull().default('google_form'),
+    source_key: text('source_key'),
+    norm_artist: text('norm_artist'),
+    norm_album: text('norm_album'),
+    // INSERT-only import-date anchor; the writer omits it from the ON
+    // CONFLICT set. Review date is `submitted_at`.
+    add_date: date('add_date').defaultNow().notNull(),
+    last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    // The UPSERT conflict target. Partial so a future source may leave
+    // source_key NULL without tripping uniqueness.
+    uniqueIndex('album_review_submissions_source_key_uq')
+      .on(table.source_key)
+      .where(sql`${table.source_key} IS NOT NULL`),
+    index('album_review_submissions_album_id_idx').on(table.album_id),
+    index('album_review_submissions_submitted_at_idx').on(table.submitted_at),
+    index('album_review_submissions_norm_artist_idx').on(table.norm_artist),
+  ]
+);
+
+export type AlbumReviewSubmission = InferSelectModel<typeof album_review_submissions>;
+export type NewAlbumReviewSubmission = InferInsertModel<typeof album_review_submissions>;
+
+/**
+ * External critic-review snippets (ADR 0012) — short attributed excerpts
+ * of published third-party album reviews, surfaced in the iOS playcut
+ * detail view with mandatory attribution + link-out to the original.
+ *
+ * This is the FOURTH, deliberately-distinct review concept and must not be
+ * merged with any of the others:
+ *   - `reviews` (ADR 0006): one-per-album, DJ-authored, in-app Review model.
+ *   - `album_review_submissions` (ADR 0011): archived DJ Google-Form reviews.
+ *   - the closed `AlbumReview` DTO (WXYC/wxyc-shared#229).
+ * Those are all WXYC-authored. This table holds EXTERNAL critic text.
+ *
+ * Copyright posture (ADR 0012): store only a short excerpt (`snippet`,
+ * hard-capped at ~300 chars by the seed writer — the DB caps the column at
+ * 512 for headroom), never full article text; every row carries `source` +
+ * `source_url` so the client can attribute and link out. This is a conscious
+ * departure from the "Complement, Don't Confirm" stance (which keeps crawled
+ * critic text unattributed and internal) — see the ADR for the reasoning.
+ *
+ * Keyed on `library.id` (via `album_id`), the stable stack-wide album key
+ * `album_metadata` also FKs to, so `/proxy/metadata/album` joins these onto
+ * the response by the same resolved album id. `ON DELETE CASCADE`: a critic
+ * review has no meaning without its album.
+ *
+ * `source` is text with a documented vocabulary (the 0109 enum-cost lesson),
+ * not a pgEnum. Values so far:
+ *   'The Quietus' — the spike seed (`scripts/seed-critic-reviews.ts`).
+ *
+ * `source_key` is an optional provenance marker (the originating corpus row
+ * key) for audit; idempotent re-seed is guaranteed by the
+ * `(album_id, source_url)` unique constraint (the UPSERT conflict target),
+ * not by `source_key`. `discogs_release_id` is a nullable hook for a future
+ * release-level reconciliation pass; the spike leaves it NULL.
+ */
+export const album_critic_reviews = wxyc_schema.table(
+  'album_critic_reviews',
+  {
+    id: serial('id').primaryKey(),
+    album_id: integer('album_id')
+      .references(() => library.id, { onDelete: 'cascade' })
+      .notNull(),
+    // Publication / outlet name, e.g. 'The Quietus'. Shown as attribution.
+    source: text('source').notNull(),
+    // Link to the original review. Mandatory — this is the link-out target
+    // and half of the fair-use attribution posture. Also the UPSERT natural
+    // key (paired with album_id).
+    source_url: varchar('source_url', { length: 1024 }).notNull(),
+    // Short attributed excerpt. Capped at ~300 chars by the seed writer; the
+    // column allows 512 for headroom. NEVER full article text (ADR 0012).
+    snippet: varchar('snippet', { length: 512 }).notNull(),
+    // Byline, when known.
+    author: varchar('author', { length: 128 }),
+    // Publication date, when known.
+    published_at: date('published_at'),
+    // Source-native rating as free text (e.g. '8/10'), when present.
+    rating: varchar('rating', { length: 32 }),
+    // Nullable hook for a future release-level reconciliation pass.
+    discogs_release_id: integer('discogs_release_id'),
+    // Originating corpus row key, for audit. Not the idempotency key.
+    source_key: text('source_key'),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    // UPSERT conflict target AND the serve-path lookup index: album_id is the
+    // leading column, so `WHERE album_id = ?` (the selective predicate) is an
+    // index range scan on this index directly. The serve query's residual
+    // `ORDER BY published_at DESC NULLS LAST, id DESC LIMIT 5` is a top-N sort
+    // over only the matched rows — a per-album handful for a curated critic
+    // corpus, capped at CRITIC_REVIEWS_LIMIT (5) on the read — so it stays
+    // sub-ms in memory. A dedicated `(album_id, published_at DESC NULLS LAST,
+    // id DESC)` ordered index would let the planner skip that sort, but the
+    // payoff is immeasurable at this row count while the write-amplification on
+    // every seed/ETL UPSERT is real; it's deliberately deferred until per-album
+    // counts grow enough to warrant it (and the serve path is flag-gated off in
+    // prod today regardless). See ADR 0012.
+    uniqueIndex('album_critic_reviews_album_id_source_url_uq').on(table.album_id, table.source_url),
+  ]
+);
+
+export type AlbumCriticReview = InferSelectModel<typeof album_critic_reviews>;
+export type NewAlbumCriticReview = InferInsertModel<typeof album_critic_reviews>;
 
 export type NewBinEntry = InferInsertModel<typeof bins>;
 export type BinEntry = InferSelectModel<typeof bins>;
@@ -1938,7 +2307,7 @@ export const concertSourceEnum = wxyc_schema.enum('concert_source_enum', [
 
 /**
  * Lifecycle state of a concert. Listener-facing surfaces (the iOS app's
- * "Touring Soon" tab, the dj-site weekly digest) read this to grey out /
+ * "On Tour" tab, the dj-site weekly digest) read this to grey out /
  * hide / strike through. The scraper writes `on_sale` by default and
  * promotes to `sold_out` / `cancelled` when the source page says so.
  */

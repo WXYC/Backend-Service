@@ -1,6 +1,6 @@
 /**
  * Entry point for the triangle-shows-etl job (BS#1589, Phase 1 of the
- * BS#1570 touring-events integration).
+ * BS#1570 on-tour integration).
  *
  * Nightly full-snapshot pull from the triangle-shows concert calendar's
  * neutral `/api/v1/events` surface, mirrored into `venues`/`concerts` for

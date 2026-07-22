@@ -4,7 +4,19 @@ WebSocket endpoint at `/cdc` that broadcasts all database changes via PostgreSQL
 
 ## Endpoint
 
-`ws://host:8080/cdc?key=<CDC_SECRET>` — requires `CDC_SECRET` environment variable.
+`ws://host:8080/cdc` — requires `CDC_SECRET` environment variable.
+
+### Authentication (BS#1136)
+
+Present the shared secret in an `Authorization: Bearer <CDC_SECRET>` header. The upgrade handler compares it against `CDC_SECRET` with `crypto.timingSafeEqual` (length-guarded, constant time). A missing or wrong secret gets a `403 Forbidden` and the socket is destroyed; the presented secret is never logged.
+
+```ts
+new WebSocket('ws://host:8080/cdc', { headers: { Authorization: `Bearer ${CDC_SECRET}` } });
+```
+
+The header path replaces the old `?key=<CDC_SECRET>` query parameter, which leaked the secret to every HTTP-aware intermediary on the path (CloudFront / nginx / EC2 access logs, browser history, request snapshots) even under TLS, and used a non-constant-time `!==` compare vulnerable to a byte-at-a-time timing attack.
+
+**Deprecated shim, removed after one deploy:** the upgrade handler still accepts `?key=<CDC_SECRET>` for backwards compatibility, but every use logs a `[cdc-ws] DEPRECATED: … ?key= …` warning. Migrate any out-of-band consumer to the header, then delete the `?key=` branch in `apps/backend/services/cdc/cdc-websocket.ts` (`extractCdcSecret`). The in-repo consumer (`scripts/sync/reconcile.ts`) already uses the header.
 
 ## Event format
 

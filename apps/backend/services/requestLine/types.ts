@@ -15,11 +15,7 @@ import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
  * `artist-search-alias-consumer` (PR 4).
  */
 export type ArtistSearchAliasSource =
-  | 'discogs_name_variation'
-  | 'discogs_alias'
-  | 'discogs_member'
-  | 'wxyc_library_alt'
-  | (string & {});
+  'discogs_name_variation' | 'discogs_alias' | 'discogs_member' | 'wxyc_library_alt' | (string & {});
 
 /**
  * Surfaced on a search result when the row matched via the alias cache

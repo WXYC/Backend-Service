@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import * as Sentry from '@sentry/node';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { db, flowsheet, shows, rotation, library, truncate, user } from '@wxyc/database';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
@@ -8,6 +9,7 @@ import {
   resolveRadioHour,
   type BackendEntryType,
 } from '../utils/flowsheet-transform.js';
+import { __resetUpcomingShowsMapsCacheForTests } from '../services/concerts.service.js';
 
 const ETL_NOTIFY_KEY = process.env.ETL_NOTIFY_KEY ?? '';
 
@@ -40,6 +42,28 @@ export const internal_route = Router();
  */
 function authenticateInternal(key: string | undefined): boolean {
   return !!ETL_NOTIFY_KEY && key === ETL_NOTIFY_KEY;
+}
+
+/**
+ * POST /internal/test/reset-upcoming-shows-cache — dev/test-only.
+ *
+ * The `upcoming_show` map cache (BS#1616) lives in THIS server process, so the
+ * out-of-process integration spec (which talks to the backend over HTTP) can't
+ * clear it with an in-process helper. It resets through this endpoint instead,
+ * to get a genuine cold read for the anti-N+1 batching + cache-hit assertions.
+ *
+ * Registered ONLY when NODE_ENV is development/test — the route does not exist in
+ * production. Mirrors the `isDevOrTest` gate in internal-bans.route.ts and the
+ * auth server's `/auth/test/*` surface. No auth key: it only clears an ephemeral
+ * in-memory cache (no data at risk) and the route is absent in prod anyway.
+ */
+const isDevOrTest = process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test';
+
+if (isDevOrTest) {
+  internal_route.post('/test/reset-upcoming-shows-cache', (_req, res) => {
+    __resetUpcomingShowsMapsCacheForTests();
+    res.sendStatus(204);
+  });
 }
 
 /**
@@ -86,7 +110,8 @@ interface ResolvedShow {
    * (degraded `Start of show: ${time}` instead of leaking a real name).
    *
    * Null when the show has no resolvable name from either source
-   * (stub shows pre-ETL-fill; legacy rows with no primary_dj_id and no
+   * (stub shows created before the payload carried `djHandle` (BS#1723)
+   * and not yet ETL-filled; legacy rows with no primary_dj_id and no
    * legacy_dj_name).
    */
   dj_name: string | null;
@@ -94,15 +119,31 @@ interface ResolvedShow {
 
 /**
  * Look up a show by legacy_show_id, creating a stub if it doesn't exist.
- * Uses onConflictDoNothing + re-select for concurrent-insert safety.
+ * Uses an insert-or-fill upsert + re-select for concurrent-insert safety:
+ * DO NOTHING when no handle is carried, otherwise ON CONFLICT DO UPDATE
+ * fills `legacy_dj_name` so a lost concurrent-insert race can't drop it.
  *
  * Also resolves the show's display dj_name via a LEFT JOIN to auth_user on
  * `shows.primary_dj_id` — same query path, no extra round-trip. The webhook
  * INSERT writes this onto marker rows so the v2 wire honours the
  * FLOWSHEET_DJ_NAME_NON_NULL contract (BS#1371).
+ *
+ * `legacyDjHandle` is the optional `entry.djHandle` from sign-on/sign-off
+ * marker payloads (tubafrenzy#607, always DJ_HANDLE — never the real name).
+ * When present it names the stub at creation, and heals an existing show
+ * whose name resolves to null — the sign-on race where the BREAKPOINT
+ * delivery creates the stub before the START_OF_SHOW delivery carries the
+ * handle. Without it, `on_air` reports null (= confirmed automation,
+ * "AUTO DJ" on iOS) until the flowsheet ETL's next half-hourly tick (BS#1723).
+ * Normalized with the same `truncate(_, 128)` the ETL applies, so the next
+ * ETL `IS DISTINCT FROM` pass sees an identical byte sequence. A non-null
+ * resolved name always wins — the heal never overwrites (BS#1371/#1449
+ * convention), and `legacy_dj_name IS NULL` in the WHERE guards against a
+ * concurrent ETL write between the probe and the UPDATE.
  */
-async function resolveShow(legacyShowId: number): Promise<ResolvedShow | null> {
+async function resolveShow(legacyShowId: number, legacyDjHandle: string | null): Promise<ResolvedShow | null> {
   if (!legacyShowId) return null;
+  const handle = truncate(legacyDjHandle, 128);
 
   const selectShow = () =>
     db
@@ -116,10 +157,45 @@ async function resolveShow(legacyShowId: number): Promise<ResolvedShow | null> {
       .limit(1);
 
   const existing = await selectShow();
-  if (existing.length > 0) return { id: existing[0].id, dj_name: existing[0].dj_name };
+  if (existing.length > 0) {
+    if (existing[0].dj_name === null && handle !== null) {
+      await db
+        .update(shows)
+        .set({ legacy_dj_name: handle })
+        .where(and(eq(shows.id, existing[0].id), isNull(shows.legacy_dj_name)));
+      const [reread] = await selectShow();
+      return reread ? { id: reread.id, dj_name: reread.dj_name } : { id: existing[0].id, dj_name: existing[0].dj_name };
+    }
+    return { id: existing[0].id, dj_name: existing[0].dj_name };
+  }
 
   // Create a stub show — the ETL will fill in details (end_time, show_name) later.
-  await db.insert(shows).values({ legacy_show_id: legacyShowId, start_time: new Date() }).onConflictDoNothing();
+  //
+  // Conflict arm: the two sign-on deliveries can interleave so tightly that
+  // BOTH probes above see no row; if the handle-bearing delivery then loses
+  // the INSERT race to the nameless one, a bare DO NOTHING would discard the
+  // handle and re-open the BS#1723 window until the next ETL tick. When we
+  // carry a handle, fill legacy_dj_name atomically instead — same
+  // never-overwrite `IS NULL` guard as the heal above, same
+  // onConflictDoUpdate-on-legacy_show_id shape as the flowsheet ETL's shows
+  // upsert. With no handle there is nothing to fill; keep DO NOTHING.
+  const stubValues = {
+    legacy_show_id: legacyShowId,
+    start_time: new Date(),
+    ...(handle !== null && { legacy_dj_name: handle }),
+  };
+  if (handle !== null) {
+    await db
+      .insert(shows)
+      .values(stubValues)
+      .onConflictDoUpdate({
+        target: shows.legacy_show_id,
+        set: { legacy_dj_name: handle },
+        setWhere: isNull(shows.legacy_dj_name),
+      });
+  } else {
+    await db.insert(shows).values(stubValues).onConflictDoNothing();
+  }
 
   const [row] = await selectShow();
   return row ? { id: row.id, dj_name: row.dj_name } : null;
@@ -191,7 +267,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       const rawLibraryId = entry.libraryReleaseId ?? 0;
       const rawRotationId = entry.rotationReleaseId ?? 0;
       const [show, albumId, rotationId] = await Promise.all([
-        resolveShow(entry.radioShowId),
+        resolveShow(entry.radioShowId, typeof entry.djHandle === 'string' ? entry.djHandle : null),
         resolveAlbumId(rawLibraryId),
         resolveRotationId(rawRotationId),
       ]);
@@ -605,29 +681,40 @@ internal_route.post('/streaming-status-webhook', async (req, res) => {
   }
 
   let processed = 0;
-  let errors = 0;
+  const failures: { library_release_id: number; error: string }[] = [];
 
-  try {
-    await db.transaction(async (tx) => {
-      for (const change of changes as StreamingChange[]) {
-        try {
-          const legacyId = change.library_release_id;
-          const onStreaming = change.on_streaming ?? null;
+  // Per-row autocommit (BS#1114). Each UPDATE runs as its own independent
+  // statement rather than inside one shared `db.transaction`. The old shape wrapped
+  // the whole loop in a single transaction with a per-row catch: when one row
+  // raised, Postgres aborted the surrounding transaction, and every later
+  // `tx.update(...)` threw `current transaction is aborted, commands ignored until
+  // end of transaction block`. The per-row catch swallowed all of them into a
+  // meaningless `errors` count while the first row's real error was lost. Without
+  // the wrapper a bad row fails in isolation, the surviving rows still commit, and
+  // the failing row's actual error is surfaced in the response (and to Sentry)
+  // below. These updates are idempotent column writes, so there is no cross-row
+  // invariant that needs the atomicity a shared transaction would give.
+  for (const change of changes as StreamingChange[]) {
+    const legacyId = change.library_release_id;
+    try {
+      const onStreaming = change.on_streaming ?? null;
 
-          await tx.update(library).set({ on_streaming: onStreaming }).where(eq(library.legacy_release_id, legacyId));
+      await db.update(library).set({ on_streaming: onStreaming }).where(eq(library.legacy_release_id, legacyId));
 
-          processed++;
-        } catch (e) {
-          console.error('[webhook] Streaming status update error:', e);
-          errors++;
-        }
-      }
-    });
-  } catch (e) {
-    console.error('[webhook] Streaming status transaction error:', e);
-    res.status(500).json({ error: 'Internal server error' });
-    return;
+      processed++;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(`[webhook] Streaming status update error (library_release_id=${legacyId}):`, e);
+      failures.push({ library_release_id: legacyId, error: message });
+    }
   }
 
-  res.json({ processed, errors });
+  if (failures.length > 0) {
+    Sentry.captureMessage(`[webhook] streaming-status: ${failures.length}/${changes.length} row update(s) failed`, {
+      level: 'warning',
+      extra: { failures: failures.slice(0, 20) },
+    });
+  }
+
+  res.json({ processed, errors: failures.length, failures });
 });

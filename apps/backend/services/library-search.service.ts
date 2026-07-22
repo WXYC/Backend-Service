@@ -20,6 +20,7 @@ import { runCatalogTrackSearchCascade, type TaggedLibraryViewEntry } from './lib
 import type { ArtistMatchHint, ArtistSearchAliasSource } from './requestLine/types.js';
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import WxycError from '../utils/error.js';
+import { ilikeEscaped } from '../utils/sql-like.js';
 
 export type CatalogSort = 'artist' | 'album' | 'plays' | 'date';
 export type CatalogOrder = 'asc' | 'desc';
@@ -183,11 +184,15 @@ export async function searchLibrary(
     const queryWhereAliasOff = buildWhereClause(conditions);
     const branchAWhere = combineWhere(queryWhereAliasOff, filterWhere);
     // Branch (b): the row satisfies `filterWhere` AND its artist_id has an
-    // alias hit AND the row would NOT have matched branch (a). When
-    // queryWhereAliasOff is null (defensive — aliasActive gates on
-    // hasAllFieldCondition so this is unreachable today), the NOT becomes
-    // vacuously false and (b) emits nothing, which is what we want.
-    const dedupeWhere = queryWhereAliasOff ? sql`NOT ${queryWhereAliasOff}` : sql`FALSE`;
+    // alias hit AND the row would NOT have matched branch (a). Uses the
+    // NULL-safe `IS NOT TRUE` rather than `NOT (...)` (BS#1557): `label` is
+    // nullable, so an alias-only hit on a NULL-label row makes
+    // queryWhereAliasOff evaluate to NULL — `NOT NULL` is NULL (dropped from
+    // both arms), but `NULL IS NOT TRUE` is TRUE (kept in b), which is exactly
+    // the alias-only row the feature exists to surface. When queryWhereAliasOff
+    // is null (defensive — aliasActive gates on hasAllFieldCondition so this is
+    // unreachable today), (b) emits nothing, which is what we want.
+    const dedupeWhere = queryWhereAliasOff ? sql`(${queryWhereAliasOff}) IS NOT TRUE` : sql`FALSE`;
     const branchBWhere = combineWhere(dedupeWhere, filterWhere);
 
     const orderBy = sql`${SORT_COLUMNS_UNQUALIFIED[params.sort]} ${orderDirection}, ${SECONDARY_SORT_UNQUALIFIED[params.sort]} ASC, id ASC`;
@@ -331,8 +336,11 @@ export async function searchLibrary(
   // LML's `Semaphore(5) + TokenBucket(50/min)` chokepoint; pagination beyond
   // page 0 stays empty so clients don't scroll a bounded fallback list.
   if (params.page !== 0) return { results, total };
-  // Cascade rows carry no date_lost/date_found — skip when missing filter is set.
-  if (params.missing !== undefined) return { results, total };
+  // Cascade rows carry no date_lost/date_found, so they can never be
+  // known-missing — skip the cascade only for `missing=true` (BS#1552).
+  // `missing=false` (dj-site's default "hide lost records" filter) still runs
+  // it: cascade rows are, by construction, non-missing and must surface.
+  if (params.missing === true) return { results, total };
   const trimmed = params.q.trim();
   if (!passesCascadeGate(trimmed, conditions)) return { results, total };
 
@@ -518,7 +526,7 @@ function buildColumnMatch(field: CatalogField, value: string, exact: boolean): S
   if (exact) {
     return sql`${col} = ${value}`;
   }
-  return sql`${col} ILIKE ${'%' + value + '%'}`;
+  return ilikeEscaped(col, value, 'contains');
 }
 
 function buildAllFieldMatch(value: string, exact: boolean): SQL {
@@ -536,8 +544,7 @@ function buildAllFieldMatch(value: string, exact: boolean): SQL {
   // UNION ALL design (BS#1318) alias-only hits surface from branch (b)'s
   // INNER JOIN against the `alias_hits` CTE, not from an OR predicate
   // injected into this fragment.
-  const pattern = '%' + value + '%';
-  return sql`(${library_artist_view.artist_name} ILIKE ${pattern} OR ${library_artist_view.album_title} ILIKE ${pattern} OR ${library_artist_view.label} ILIKE ${pattern})`;
+  return sql`(${ilikeEscaped(library_artist_view.artist_name, value, 'contains')} OR ${ilikeEscaped(library_artist_view.album_title, value, 'contains')} OR ${ilikeEscaped(library_artist_view.label, value, 'contains')})`;
 }
 
 function buildFilterClause(params: LibraryQueryParams): SQL | null {

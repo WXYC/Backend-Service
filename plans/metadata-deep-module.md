@@ -244,9 +244,7 @@ import { synthesizeSearchUrls } from './helpers/synthesize-search-urls';
 import { cleanDiscogsBio } from './helpers/clean-discogs-bio';
 import { isSyntheticArtwork } from './helpers/is-synthetic-artwork';
 
-export type NormalizedMetadata = {
-  /* snake_case, see "Public surface" */
-};
+export type NormalizedMetadata = {/* snake_case, see "Public surface" */};
 export type MetadataFallbacks = { artist: string; album?: string | null; track?: string | null };
 
 export function normalizeLookup(response: LookupResponse, fallbacks: MetadataFallbacks): NormalizedMetadata {

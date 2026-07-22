@@ -19,6 +19,8 @@ import {
   resolveEntity as lmlResolveEntity,
   searchLibrary,
   envInt,
+  isSpotifyUrl,
+  isAppleMusicUrl,
   LmlClientError,
 } from '@wxyc/lml-client';
 import type { DiscogsMatchResult, DiscogsReleaseMetadata, DiscogsTrackItem, LookupResponse } from '@wxyc/lml-client';
@@ -26,7 +28,13 @@ import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { getDiscogsReleaseIdByLegacyId } from '../services/library.service.js';
 import { filterSpacerGif, isSyntheticArtwork } from '../services/metadata/metadata.service.js';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
-import { lookupAlbumMetadataByKey, type PersistedAlbumMetadata } from '../services/album-metadata-lookup.service.js';
+import {
+  resolveLinkedAlbumId,
+  lookupAlbumMetadataById,
+  lookupCriticReviewsByAlbumId,
+  type PersistedAlbumMetadata,
+} from '../services/album-metadata-lookup.service.js';
+import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
 import { LRUCache } from 'lru-cache';
 import WxycError from '../utils/error.js';
 
@@ -369,8 +377,14 @@ function buildLocalMetadataResponse(persisted: PersistedAlbumMetadata): Record<s
   // real year or null, but check for both shapes defensively (mirrors
   // populateReleaseMetadata + extractAlbumMetadata, #1002).
   if (persisted.release_year) metadata.releaseYear = persisted.release_year;
-  if (persisted.spotify_url) metadata.spotifyUrl = persisted.spotify_url;
-  if (persisted.apple_music_url) metadata.appleMusicUrl = persisted.apple_music_url;
+  // BS#1714: a persisted `spotify_url`/`apple_music_url` mislabeled at the LML
+  // boundary before #1712 shipped (e.g. a Deezer URL under `spotify_url`) is
+  // suppressed rather than served under the hardwired iOS "Spotify"/"Apple
+  // Music" button. Not setting it leaves the L508-509 fallback to synthesize a
+  // real `open.spotify.com/search/…` URL — the same degradation the fresh-LML
+  // branch already emits.
+  if (isSpotifyUrl(persisted.spotify_url)) metadata.spotifyUrl = persisted.spotify_url;
+  if (isAppleMusicUrl(persisted.apple_music_url)) metadata.appleMusicUrl = persisted.apple_music_url;
   if (persisted.youtube_music_url) metadata.youtubeMusicUrl = persisted.youtube_music_url;
   if (persisted.bandcamp_url) metadata.bandcampUrl = persisted.bandcamp_url;
   if (persisted.soundcloud_url) metadata.soundcloudUrl = persisted.soundcloud_url;
@@ -378,7 +392,7 @@ function buildLocalMetadataResponse(persisted: PersistedAlbumMetadata): Record<s
   if (persisted.artist_wikipedia_url) metadata.artistWikipediaUrl = persisted.artist_wikipedia_url;
   // LML-only enrichment fields (BS#1336). The `[...]` array copies match the
   // LML branch's convention and future-proof the field against a cached
-  // lookup layer: `lookupAlbumMetadataByKey` reads fresh from the DB today (no
+  // lookup layer: `lookupAlbumMetadataById` reads fresh from the DB today (no
   // aliasing hazard), but proxy.controller is cache-heavy and the cache-
   // hierarchy work (project #32) may front this lookup with an LRU — at which
   // point an uncopied array assigned onto the response could be mutated by a
@@ -441,14 +455,22 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   // fills missing streaming URLs at the bottom of the handler. iOS sees
   // the same shape it would on the LML-fallthrough path.
   //
+  // Resolve the `album_id` from the normalized `(artist, album)` lookup key
+  // ONCE, then feed it to both the persisted-metadata read and (below) the
+  // critic-reviews read. Resolving per-read would let a flowsheet insert
+  // between the two calls make metadata and reviews describe different albums
+  // for the same request.
+  //
   // A thrown DB error here would propagate as 500 and regress availability
   // versus the LML-fallthrough path (which catches LML errors and degrades
   // to synthesized search URLs). Treat any DB failure as a cache miss and
   // fall through to LML — the caller's worst-case latency goes up, but the
   // request still completes with a 200.
+  let albumId: number | null = null;
   let persisted: PersistedAlbumMetadata | null = null;
   try {
-    persisted = await lookupAlbumMetadataByKey(artistName, releaseTitle);
+    albumId = await resolveLinkedAlbumId(artistName, releaseTitle);
+    if (albumId !== null) persisted = await lookupAlbumMetadataById(albumId);
   } catch (lookupError) {
     console.warn('[ProxyController] local metadata lookup failed; falling through to LML:', lookupError);
   }
@@ -520,6 +542,27 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
     });
   } catch (err) {
     console.warn('[ProxyController] failed to project Sentry attrs', err);
+  }
+
+  // External critic-review snippets (album-critic-reviews slice, ADR 0012).
+  // Flag-gated (`CRITIC_REVIEWS_ENABLED`, default off) so prod behavior — the
+  // response shape and the serve-path query plan — is unchanged until an
+  // operator opts in, keeping this compatible with the #32 hardening freeze
+  // on the album-metadata serve path. Reuses the `album_id` resolved for the
+  // metadata read above (one extra indexed read, not a second key resolve),
+  // and runs whenever the key resolved to a linked album — independent of
+  // whether `album_metadata` enrichment has landed, so a linked album with
+  // reviews but no metadata row still surfaces its reviews. Attached only when
+  // non-empty so an un-seeded album's response is byte-identical to before.
+  // Wrapped in try/catch: the reviews read is strictly additive and must never
+  // break the metadata response, so a DB failure degrades to omitting the field.
+  if (getCriticReviewsConfig().enabled && albumId !== null) {
+    try {
+      const criticReviews = await lookupCriticReviewsByAlbumId(albumId);
+      if (criticReviews.length > 0) metadata.criticReviews = criticReviews;
+    } catch (reviewsError) {
+      console.warn('[ProxyController] critic-reviews lookup failed; omitting criticReviews:', reviewsError);
+    }
   }
 
   res.set('Cache-Control', 'private, max-age=600');

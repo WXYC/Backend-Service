@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/node';
 import { sql, type SQL } from 'drizzle-orm';
 import { db, flowsheet } from '@wxyc/database';
 import {
@@ -6,6 +7,7 @@ import {
   type FlowsheetField,
   type SearchCondition,
 } from './search-parser.service.js';
+import { ilikeEscaped } from '../utils/sql-like.js';
 
 export type SearchParams = {
   q: string;
@@ -54,6 +56,22 @@ type SearchResultRow = {
 };
 
 type CountRow = { total: number };
+
+/**
+ * Upper bound on the exact count reported by /flowsheet/search (BS#1681).
+ *
+ * An unbounded `COUNT(*)` over the `entry_type = 'track'` set is a parallel seq
+ * scan of the whole 3.3 GB / ~2M-row flowsheet heap — ~12s in prod, well past
+ * the 5s HTTP `statement_timeout`, which 500'd the endpoint for every query
+ * (the empty default listing and broad terms like "the" match nearly every
+ * row). Wrapping the count in a `LIMIT COUNT_CAP + 1` derived table bounds the
+ * work to at most this many matching rows regardless of selectivity (33-105ms
+ * measured), at the cost of reporting `COUNT_CAP + 1` as a "10000+" sentinel
+ * once the true match set exceeds the cap. Deep offset pagination past the cap
+ * was never meaningful for the multi-million-row historical archive, and the
+ * forward path (cursor mode) doesn't depend on `total` at all.
+ */
+export const COUNT_CAP = 10000;
 
 export type SearchResult = {
   id: number;
@@ -147,12 +165,41 @@ export async function searchFlowsheet(
     ${limitClause}
   `;
 
-  const countQuery = sql`SELECT COUNT(*)::int AS total ${fullWhere}`;
+  // Capped count (BS#1681): `COUNT(*)` over a `LIMIT COUNT_CAP + 1` derived
+  // table stops scanning once the cap is reached, bounding cost regardless of
+  // how many rows the predicate actually matches.
+  const countQuery = sql`SELECT COUNT(*)::int AS total FROM (SELECT 1 ${fullWhere} LIMIT ${COUNT_CAP + 1}) AS capped`;
 
-  const [dataRows, countRows] = await Promise.all([db.execute(dataQuery), db.execute(countQuery)]);
+  // allSettled, not all: the count is now cheap enough that it should never
+  // time out, but if it (or a future predicate) does, the data page is already
+  // in hand — degrade to a lower-bound total rather than 500-ing the whole
+  // request the way the pre-BS#1681 `Promise.all` did.
+  const [dataSettled, countSettled] = await Promise.allSettled([db.execute(dataQuery), db.execute(countQuery)]);
 
-  const results = (dataRows as unknown as SearchResultRow[]).map(transformRow);
-  const total = (countRows as unknown as CountRow[])[0]?.total ?? 0;
+  if (dataSettled.status === 'rejected') {
+    // No data page means nothing to serve — a data-query failure stays fatal
+    // and propagates to the error handler as a 500.
+    throw dataSettled.reason;
+  }
+
+  const results = (dataSettled.value as unknown as SearchResultRow[]).map(transformRow);
+
+  let total: number;
+  if (countSettled.status === 'fulfilled') {
+    total = (countSettled.value as unknown as CountRow[])[0]?.total ?? 0;
+  } else {
+    // Best-effort total when the count is unavailable: the rows we've already
+    // paged past plus this page. Exact for a partial final page, a lower bound
+    // for a full page, and — only in the rare empty-page-past-end offset case —
+    // an over-estimate bounded by `offset`. In cursor mode `offset` is 0, so
+    // this collapses to the current page size.
+    total = offset + results.length;
+    Sentry.captureException(countSettled.reason, {
+      tags: { subsystem: 'flowsheet-search' },
+      extra: { q, page, limit },
+    });
+    console.error('flowsheet search count query failed; returning lower-bound total', countSettled.reason);
+  }
 
   // nextCursor only when cursor mode is active AND we got a full page —
   // a short page means there are no more rows.
@@ -236,7 +283,7 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
   if (exact) {
     return sql`${col} = ${value}`;
   }
-  return sql`${col} ILIKE ${'%' + value + '%'}`;
+  return ilikeEscaped(col, value, 'contains');
 }
 
 /**
@@ -263,8 +310,7 @@ function buildAllFieldMatch(value: string, exact: boolean): SQL {
   }
   // Trigram fallback: short queries, pure-punctuation strings, and any other
   // input that the tsvector path would tokenize away.
-  const pattern = '%' + value + '%';
-  return sql`(${flowsheet.artist_name} ILIKE ${pattern} OR ${flowsheet.track_title} ILIKE ${pattern} OR ${flowsheet.album_title} ILIKE ${pattern} OR ${flowsheet.record_label} ILIKE ${pattern})`;
+  return sql`(${ilikeEscaped(flowsheet.artist_name, value, 'contains')} OR ${ilikeEscaped(flowsheet.track_title, value, 'contains')} OR ${ilikeEscaped(flowsheet.album_title, value, 'contains')} OR ${ilikeEscaped(flowsheet.record_label, value, 'contains')})`;
 }
 
 function buildDjNameMatch(value: string, exact: boolean): SQL {
@@ -280,7 +326,7 @@ function buildDjNameMatch(value: string, exact: boolean): SQL {
   if (exact) {
     return sql`${flowsheet.dj_name} = ${value}`;
   }
-  return sql`${flowsheet.dj_name} ILIKE ${'%' + value + '%'}`;
+  return ilikeEscaped(flowsheet.dj_name, value, 'contains');
 }
 
 function buildDateMatch(value: string): SQL {

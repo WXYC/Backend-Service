@@ -47,10 +47,26 @@ jest.mock('@sentry/node', () => ({
   captureMessage: (...args: unknown[]) => captureMessageMock(...args),
 }));
 
+// Partial-mock `crypto` so the BS#1136 auth test can prove the compare goes
+// through `timingSafeEqual` (constant time). The real implementation is
+// preserved via `jest.fn(actual.timingSafeEqual)`, so behaviour is unchanged;
+// `jest.spyOn` can't be used because `timingSafeEqual` is non-configurable on
+// the native module object.
+jest.mock('crypto', () => {
+  const actual = jest.requireActual<typeof import('crypto')>('crypto');
+  return {
+    ...actual,
+    timingSafeEqual: jest.fn(actual.timingSafeEqual),
+  };
+});
+
 // Captured server-level handlers so tests can drive the `'connection'` event
 // against a synthetic client. Reset in `beforeEach`.
 const wssHandlers: Record<string, Array<(...args: unknown[]) => void>> = {};
 const wssClients = new Set<unknown>();
+// Shared `handleUpgrade` mock so the BS#1136 auth tests can assert whether a
+// given upgrade request was accepted (handleUpgrade called) or rejected.
+const wssHandleUpgradeMock = jest.fn();
 
 jest.mock('ws', () => {
   const WebSocketServer = jest.fn().mockImplementation(() => {
@@ -60,7 +76,7 @@ jest.mock('ws', () => {
       },
       close: jest.fn(),
       clients: wssClients,
-      handleUpgrade: jest.fn(),
+      handleUpgrade: wssHandleUpgradeMock,
       emit: jest.fn(),
     };
   });
@@ -71,9 +87,14 @@ jest.mock('ws', () => {
 });
 
 import type { Server as HttpServer } from 'http';
+import { timingSafeEqual } from 'crypto';
 import { onCdcErrorEvent, onCdcEvent, onCdcOversizedEvent, startCdcListener, stopCdcListener } from '@wxyc/database';
 import { WebSocketServer } from 'ws';
-import { setupCdcWebSocket, shutdownCdcWebSocket } from '../../../../../../apps/backend/services/cdc/cdc-websocket';
+import {
+  setupCdcWebSocket,
+  shutdownCdcWebSocket,
+  constantTimeEqual,
+} from '../../../../../../apps/backend/services/cdc/cdc-websocket';
 import { startCdcDispatcher, shutdownCdcDispatcher } from '../../../../../../apps/backend/services/cdc/dispatcher';
 
 const makeServer = (): HttpServer => {
@@ -136,6 +157,7 @@ function resetSharedMocks(): void {
   for (const k of Object.keys(wssHandlers)) delete wssHandlers[k];
   wssClients.clear();
   captureMessageMock.mockReset();
+  wssHandleUpgradeMock.mockReset();
 }
 
 describe('startCdcDispatcher (BS#1187)', () => {
@@ -525,6 +547,222 @@ describe('CDC WebSocket back-pressure and ping/pong (BS#1134)', () => {
           expect.stringMatching(/pong|heartbeat/i),
           expect.objectContaining({ level: 'warning' })
         );
+      });
+    });
+  });
+});
+
+/**
+ * BS#1136 — constant-time WebSocket auth via the `Authorization: Bearer`
+ * header, with a one-deploy `?key=` backwards-compatibility shim.
+ *
+ * Pins:
+ *   (a) the secret compare goes through `crypto.timingSafeEqual` (constant
+ *       time), rejects a wrong secret, and never throws on a length mismatch;
+ *   (b) a connection presenting the correct secret in an `Authorization:
+ *       Bearer` header is accepted (`handleUpgrade` called);
+ *   (c) the deprecated `?key=` query-string path still authenticates for one
+ *       deploy but emits a deprecation warning; the header wins when both are
+ *       present; the bearer secret is never written to any log.
+ */
+describe('constantTimeEqual (BS#1136)', () => {
+  it('returns true for identical strings', () => {
+    expect(constantTimeEqual('s3cr3t-value-123', 's3cr3t-value-123')).toBe(true);
+  });
+
+  it('returns false for different strings of equal length', () => {
+    expect(constantTimeEqual('s3cr3t-value-123', 's3cr3t-value-124')).toBe(false);
+  });
+
+  it('returns false (without throwing) when the lengths differ', () => {
+    // A naive `crypto.timingSafeEqual` throws on unequal-length buffers; the
+    // length guard must swallow that and report a plain non-match.
+    expect(() => constantTimeEqual('short', 'a-considerably-longer-secret')).not.toThrow();
+    expect(constantTimeEqual('short', 'a-considerably-longer-secret')).toBe(false);
+  });
+
+  it('delegates the equal-length compare to crypto.timingSafeEqual', () => {
+    (timingSafeEqual as jest.Mock).mockClear();
+    constantTimeEqual('s3cr3t-value-123', 's3cr3t-value-123');
+    expect(timingSafeEqual as jest.Mock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reach crypto.timingSafeEqual on a length mismatch (guards before the call)', () => {
+    (timingSafeEqual as jest.Mock).mockClear();
+    expect(constantTimeEqual('short', 'a-considerably-longer-secret')).toBe(false);
+    expect(timingSafeEqual as jest.Mock).not.toHaveBeenCalled();
+  });
+});
+
+describe('CDC WebSocket upgrade auth (BS#1136)', () => {
+  const SECRET = 'super-secret-cdc-value';
+  let consoleLogSpy: jest.SpyInstance;
+  let consoleWarnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    resetSharedMocks();
+    consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    consoleLogSpy.mockRestore();
+    consoleWarnSpy.mockRestore();
+    await shutdownCdcWebSocket();
+  });
+
+  /** Pull the `'upgrade'` handler `setupCdcWebSocket` registered on the HTTP server. */
+  function getUpgradeHandler(server: HttpServer): (req: unknown, socket: unknown, head: unknown) => void {
+    const call = (server.on as jest.Mock).mock.calls.find((c) => c[0] === 'upgrade');
+    expect(call).toBeDefined();
+    return call![1] as (req: unknown, socket: unknown, head: unknown) => void;
+  }
+
+  function makeUpgradeRequest(opts: { authorization?: string; query?: string }): unknown {
+    return {
+      url: `/cdc${opts.query ?? ''}`,
+      headers: {
+        host: 'localhost:8080',
+        ...(opts.authorization ? { authorization: opts.authorization } : {}),
+      },
+    };
+  }
+
+  function makeSocket(): { write: jest.Mock; destroy: jest.Mock } {
+    return { write: jest.fn(), destroy: jest.fn() };
+  }
+
+  it('accepts a connection authenticated via the Authorization: Bearer header', async () => {
+    await withCdcSecret(SECRET, async () => {
+      const server = makeServer();
+      await setupCdcWebSocket(server);
+      const handler = getUpgradeHandler(server);
+      const socket = makeSocket();
+
+      handler(makeUpgradeRequest({ authorization: `Bearer ${SECRET}` }), socket, Buffer.alloc(0));
+
+      expect(wssHandleUpgradeMock).toHaveBeenCalledTimes(1);
+      expect(socket.destroy).not.toHaveBeenCalled();
+    });
+  });
+
+  it('accepts a Bearer header whose scheme/token separator is a tab or multiple spaces (RFC 7235 1*SP)', async () => {
+    await withCdcSecret(SECRET, async () => {
+      const server = makeServer();
+      await setupCdcWebSocket(server);
+      const handler = getUpgradeHandler(server);
+
+      for (const sep of ['\t', '  ', ' \t ']) {
+        wssHandleUpgradeMock.mockClear();
+        const socket = makeSocket();
+        handler(makeUpgradeRequest({ authorization: `Bearer${sep}${SECRET}` }), socket, Buffer.alloc(0));
+        expect(wssHandleUpgradeMock).toHaveBeenCalledTimes(1);
+        expect(socket.destroy).not.toHaveBeenCalled();
+      }
+    });
+  });
+
+  it('rejects a wrong Bearer secret without calling handleUpgrade', async () => {
+    await withCdcSecret(SECRET, async () => {
+      const server = makeServer();
+      await setupCdcWebSocket(server);
+      const handler = getUpgradeHandler(server);
+      const socket = makeSocket();
+
+      handler(makeUpgradeRequest({ authorization: 'Bearer not-the-secret' }), socket, Buffer.alloc(0));
+
+      expect(wssHandleUpgradeMock).not.toHaveBeenCalled();
+      expect(socket.write).toHaveBeenCalledWith(expect.stringContaining('403'));
+      expect(socket.destroy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('rejects a request that carries no credentials', async () => {
+    await withCdcSecret(SECRET, async () => {
+      const server = makeServer();
+      await setupCdcWebSocket(server);
+      const handler = getUpgradeHandler(server);
+      const socket = makeSocket();
+
+      handler(makeUpgradeRequest({}), socket, Buffer.alloc(0));
+
+      expect(wssHandleUpgradeMock).not.toHaveBeenCalled();
+      expect(socket.destroy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('never writes the bearer secret to a log line', async () => {
+    await withCdcSecret(SECRET, async () => {
+      const server = makeServer();
+      await setupCdcWebSocket(server);
+      const handler = getUpgradeHandler(server);
+
+      handler(makeUpgradeRequest({ authorization: 'Bearer leak-me-if-you-can' }), makeSocket(), Buffer.alloc(0));
+
+      const logged = [...consoleWarnSpy.mock.calls, ...consoleLogSpy.mock.calls].flat().map(String).join(' ');
+      expect(logged).not.toContain('leak-me-if-you-can');
+    });
+  });
+
+  describe('deprecated ?key= backwards-compatibility shim', () => {
+    it('still accepts the correct secret supplied in the query string', async () => {
+      await withCdcSecret(SECRET, async () => {
+        const server = makeServer();
+        await setupCdcWebSocket(server);
+        const handler = getUpgradeHandler(server);
+        const socket = makeSocket();
+
+        handler(makeUpgradeRequest({ query: `?key=${SECRET}` }), socket, Buffer.alloc(0));
+
+        expect(wssHandleUpgradeMock).toHaveBeenCalledTimes(1);
+        expect(socket.destroy).not.toHaveBeenCalled();
+      });
+    });
+
+    it('emits a deprecation warning when the query-string path is used', async () => {
+      await withCdcSecret(SECRET, async () => {
+        const server = makeServer();
+        await setupCdcWebSocket(server);
+        const handler = getUpgradeHandler(server);
+
+        handler(makeUpgradeRequest({ query: `?key=${SECRET}` }), makeSocket(), Buffer.alloc(0));
+
+        expect(consoleWarnSpy).toHaveBeenCalledWith(expect.stringMatching(/deprecat/i));
+      });
+    });
+
+    it('rejects a wrong secret supplied in the query string', async () => {
+      await withCdcSecret(SECRET, async () => {
+        const server = makeServer();
+        await setupCdcWebSocket(server);
+        const handler = getUpgradeHandler(server);
+        const socket = makeSocket();
+
+        handler(makeUpgradeRequest({ query: '?key=wrong' }), socket, Buffer.alloc(0));
+
+        expect(wssHandleUpgradeMock).not.toHaveBeenCalled();
+        expect(socket.destroy).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('prefers the Authorization header over the query string (no deprecation warning)', async () => {
+      await withCdcSecret(SECRET, async () => {
+        const server = makeServer();
+        await setupCdcWebSocket(server);
+        const handler = getUpgradeHandler(server);
+        const socket = makeSocket();
+
+        // Correct header + wrong query → accepted on the header, and the
+        // deprecated-path warning must not fire because ?key= was never read.
+        handler(
+          makeUpgradeRequest({ authorization: `Bearer ${SECRET}`, query: '?key=wrong' }),
+          socket,
+          Buffer.alloc(0)
+        );
+
+        expect(wssHandleUpgradeMock).toHaveBeenCalledTimes(1);
+        expect(consoleWarnSpy).not.toHaveBeenCalledWith(expect.stringMatching(/deprecat/i));
       });
     });
   });

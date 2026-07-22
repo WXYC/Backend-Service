@@ -14,9 +14,16 @@
  * default's `parseInt(... ?? 500)` and get captured as 500s. That's noisy
  * (the failure mode is "auth threw an unexpected exception" — that *should*
  * page) but it's also indistinguishable from genuine 5xx errors. Naming the
- * predicate makes the policy explicit, mirrors `apps/backend/middleware/
- * sentryErrorFilter.ts`, and gives a single place to refine if a noisy class
- * of error emerges.
+ * predicate makes the policy explicit and gives a single place to refine if
+ * a noisy class of error emerges. NOTE: this is deliberately NOT the same
+ * policy as the backend's `shouldCaptureExpressError` (BS#1694 review made
+ * them diverge): the backend suppresses only the trusted integer-4xx band
+ * its errorHandler echoes (`carriedClientStatus`: `expose: true` or the
+ * router's percent-decode URIError, `status` before `statusCode`), while
+ * this filter suppresses ANY sub-500 resolvable status (`statusCode` before
+ * `status`) because better-auth's `APIError`s are the dominant population
+ * here and its fallback handler never echoes messages. Do not edit one
+ * assuming the other matches.
  *
  * Policy: capture iff the error has no resolvable HTTP status, has a NaN
  * status, or has a status of 500 or higher. 4xx errors (validation,

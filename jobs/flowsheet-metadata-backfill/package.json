@@ -1,8 +1,8 @@
 {
   "name": "@wxyc/flowsheet-metadata-backfill",
-  "cron-schedule": "0 6 * * *",
+  "cron-schedule": "0 0 31 2 *",
   "version": "1.0.0",
-  "description": "WXYC recurring metadata drift-repair: enrich flowsheet track rows where LML metadata enrichment never ran (#631 / #638 / #641). Runs once nightly at 06:00 UTC; orchestrator's cooperative pause defers when DJs are active.",
+  "description": "WXYC recurring metadata drift-repair: enrich flowsheet track rows where LML metadata enrichment never ran (#631 / #638 / #641). GATED (never-firing schedule) while the BS#1631 backfill runs and until the BS#1591 play-priority drain lands; formerly nightly 06:00 UTC; orchestrator's cooperative pause defers when DJs are active.",
   "type": "module",
   "main": "./dist/job.js",
   "scripts": {
@@ -14,7 +14,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@sentry/node": "^10.59.0",
+    "@sentry/node": "^10.66.0",
     "@wxyc/database": "^1.0.0",
     "@wxyc/lml-client": "^1.0.0",
     "@wxyc/metadata": "^1.0.0"

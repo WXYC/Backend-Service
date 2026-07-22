@@ -1,5 +1,5 @@
 /**
- * Unit tests for the concerts read service (BS#1603).
+ * Unit tests for the concerts read service (BS#1603, BS#1694).
  *
  * `@wxyc/database` resolves to tests/mocks/database.mock.ts, so these pin
  * the pieces that don't need PostgreSQL:
@@ -8,24 +8,32 @@
  *     key set: no internal ingestion columns.
  *   - The select projection never references the internal columns, so they
  *     can't reach the response regardless of the mapper.
+ *   - `getConcertById` — first-row → DTO via the same mapper as the list,
+ *     empty → null, and the shared leak-barrier projection.
  *
  * Windowing behavior (date-only rows, curated predicate, pagination against
- * real SQL) is covered by tests/integration/concerts.spec.js.
+ * real SQL) is covered by tests/integration/concerts.spec.js; the by-id
+ * read's WINDOWLESS semantics (past + tombstoned rows served) are covered by
+ * tests/integration/concerts-by-id.spec.js.
  */
 import { db } from '@wxyc/database';
 import {
   ConcertDTO,
   ConcertJoinRow,
+  __resetUpcomingShowsMapsCacheForTests,
+  getConcertById,
   getConcertsCount,
   getConcertsPage,
   getUpcomingShowsMaps,
+  getUpcomingShowsMapsCached,
   toConcertDTO,
 } from '../../../apps/backend/services/concerts.service';
 
 /**
  * Compile-time pin: `ConcertDTO` must match the SSOT `Concert` schema in
- * `wxyc-shared/api.yaml` v1.17.0 (event_url added in 1.17.0 / BS#1609). The published `@wxyc/shared` at this
- * worktree's pin (`^1.15.0`) does not yet export a `Concert` DTO, so we
+ * `wxyc-shared/api.yaml` v1.20.0 (artist_bio added in 1.20.0 / BS#1734,
+ * wxyc-shared#247). The published `@wxyc/shared` at this worktree's pin
+ * (`^2.3.0`) does not yet export a `Concert` DTO, so we
  * assert against a hand-mirrored shape derived from the api.yaml operation.
  * When `@wxyc/shared` publishes `Concert`, replace `ApiYamlConcert` below
  * with `import type { Concert } from '@wxyc/shared/dtos'` — the two-way
@@ -59,6 +67,22 @@ type ApiYamlConcert = {
   price_max: number | null;
   age_restriction: string | null;
   status: 'on_sale' | 'sold_out' | 'cancelled' | 'rescheduled';
+  // BS#1624 / wxyc-shared#221: nullable AND optional (not in the api.yaml
+  // `required` set), so `genres?: string[] | null`.
+  genres?: string[] | null;
+  // BS#1734 / wxyc-shared#247: raw Discogs artist bio, same optional +
+  // nullable discipline as `genres`.
+  artist_bio?: string | null;
+  // BS#1626 / wxyc-shared#222: the `SimilarArtist` schema (`{ artist_id, weight }`)
+  // as an optional + nullable array, same discipline as `genres`.
+  similar_artists?: { artist_id: number; weight: number }[] | null;
+  // BS#1702: the station-affinity play count as an optional + nullable integer,
+  // same discipline as `genres`/`similar_artists`.
+  station_plays?: number | null;
+  // BS#1731 (wxyc-shared#244): rotation-membership signal for the "For You"
+  // station-affinity tier. Optional, NOT nullable — the page/by-id projection's
+  // EXISTS always yields a concrete boolean; only the embed omits the key.
+  station_recommended?: boolean;
 };
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -96,6 +120,23 @@ const timedRow: ConcertJoinRow = {
   venue_city: 'Carrboro',
   venue_state: 'NC',
   venue_address: '300 E Main St, Carrboro, NC 27510',
+  // Resolved + enriched headliner: the LEFT JOIN to `artist_metadata` produced
+  // a genres array (BS#1624).
+  genres: ['Rock', 'Electronic'],
+  // Resolved + enriched headliner: the same LEFT JOIN produced a raw Discogs
+  // bio (BS#1734).
+  artist_bio: 'Nilüfer Yanya is a British singer-songwriter and guitarist from London.',
+  // Resolved + enriched headliner: the LEFT JOIN to `artist_similar_artists`
+  // produced an affinity-neighbor array (BS#1626).
+  similar_artists: [
+    { artist_id: 5121, weight: 4.83 },
+    { artist_id: 88, weight: 2.1 },
+  ],
+  // Resolved + enriched headliner: the LEFT JOIN to `artist_station_plays`
+  // produced an all-time play count (BS#1702).
+  station_plays: 312,
+  // Resolved headliner with a rotation-linked library release (BS#1731).
+  station_recommended: true,
 };
 
 const dateOnlyRow: ConcertJoinRow = {
@@ -114,6 +155,15 @@ const dateOnlyRow: ConcertJoinRow = {
   price_max: null,
   age_restriction: null,
   venue_address: null,
+  // Unresolved headliner (headlining_artist_id null): the LEFT JOINs miss, so
+  // the projection yields NULL genres, artist_bio, similar_artists, and
+  // station_plays.
+  genres: null,
+  artist_bio: null,
+  similar_artists: null,
+  station_plays: null,
+  // Unresolved headliner: the EXISTS correlation never matches → false (BS#1731).
+  station_recommended: false,
 };
 
 describe('ConcertDTO structural pin', () => {
@@ -182,6 +232,107 @@ describe('toConcertDTO', () => {
     expect(dto.supporting_artists_raw).toEqual([]);
   });
 
+  // BS#1624 — genres come from the LEFT JOIN to artist_metadata. Present for a
+  // resolved + enriched headliner; null when the headliner is unresolved or the
+  // enrichment hasn't run.
+  it('passes the joined genres array through for a resolved, enriched headliner', () => {
+    const dto = toConcertDTO(timedRow);
+    expect(dto.genres).toEqual(['Rock', 'Electronic']);
+  });
+
+  it('emits null genres for an unresolved headliner (LEFT JOIN miss)', () => {
+    expect(toConcertDTO(dateOnlyRow).genres).toBeNull();
+  });
+
+  it('coalesces an undefined row.genres (projection without the join) to null', () => {
+    const { genres: _drop, ...withoutGenres } = timedRow;
+    void _drop;
+    const dto = toConcertDTO(withoutGenres);
+    expect(dto.genres).toBeNull();
+  });
+
+  // BS#1734 — artist_bio comes from the same LEFT JOIN to artist_metadata as
+  // genres. Present for a resolved + enriched headliner; null when unresolved
+  // or the enrichment hasn't run.
+  it('passes the joined artist_bio through for a resolved, enriched headliner', () => {
+    const dto = toConcertDTO(timedRow);
+    expect(dto.artist_bio).toBe('Nilüfer Yanya is a British singer-songwriter and guitarist from London.');
+  });
+
+  it('emits null artist_bio for an unresolved headliner (LEFT JOIN miss)', () => {
+    expect(toConcertDTO(dateOnlyRow).artist_bio).toBeNull();
+  });
+
+  it('coalesces an undefined row.artist_bio (projection without the join) to null', () => {
+    const { artist_bio: _drop, ...withoutBio } = timedRow;
+    void _drop;
+    const dto = toConcertDTO(withoutBio);
+    expect(dto.artist_bio).toBeNull();
+  });
+
+  // BS#1626 — similar_artists come from the LEFT JOIN to artist_similar_artists.
+  // Present for a resolved + enriched headliner; null when unresolved or the
+  // enrichment hasn't run; null when the embed projection omits the join.
+  it('passes the joined similar_artists array through for a resolved, enriched headliner', () => {
+    const dto = toConcertDTO(timedRow);
+    expect(dto.similar_artists).toEqual([
+      { artist_id: 5121, weight: 4.83 },
+      { artist_id: 88, weight: 2.1 },
+    ]);
+  });
+
+  it('emits null similar_artists for an unresolved headliner (LEFT JOIN miss)', () => {
+    expect(toConcertDTO(dateOnlyRow).similar_artists).toBeNull();
+  });
+
+  it('coalesces an undefined row.similar_artists (embed projection without the join) to null', () => {
+    const { similar_artists: _drop, ...without } = timedRow;
+    void _drop;
+    const dto = toConcertDTO(without);
+    expect(dto.similar_artists).toBeNull();
+  });
+
+  // BS#1702 — station_plays comes from the LEFT JOIN to artist_station_plays.
+  // Present for a resolved + enriched headliner; null when unresolved or the
+  // enrichment hasn't run; null when the embed projection omits the join.
+  it('passes the joined station_plays count through for a resolved, enriched headliner', () => {
+    const dto = toConcertDTO(timedRow);
+    expect(dto.station_plays).toBe(312);
+  });
+
+  it('emits null station_plays for an unresolved headliner (LEFT JOIN miss)', () => {
+    expect(toConcertDTO(dateOnlyRow).station_plays).toBeNull();
+  });
+
+  it('coalesces an undefined row.station_plays (embed projection without the join) to null', () => {
+    const { station_plays: _drop, ...without } = timedRow;
+    void _drop;
+    const dto = toConcertDTO(without);
+    expect(dto.station_plays).toBeNull();
+  });
+
+  // BS#1731 — station_recommended comes from the EXISTS(rotation ⋈ library)
+  // subquery in the page/by-id projection: true for a rotation-linked resolved
+  // headliner, false for an unrotated or unresolved one, and OMITTED (not
+  // coalesced to false) when the embed projection doesn't select it.
+  it('passes station_recommended: true through for a rotation-linked headliner', () => {
+    const dto = toConcertDTO(timedRow);
+    expect(dto.station_recommended).toBe(true);
+  });
+
+  it('passes station_recommended: false through for an unrotated/unresolved headliner', () => {
+    const dto = toConcertDTO(dateOnlyRow);
+    expect(dto.station_recommended).toBe(false);
+  });
+
+  it('omits station_recommended (not false) when the row lacks the key (embed projection)', () => {
+    const { station_recommended: _drop, ...without } = timedRow;
+    void _drop;
+    const dto = toConcertDTO(without);
+    expect(dto.station_recommended).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(dto))).not.toHaveProperty('station_recommended');
+  });
+
   it('emits exactly the Concert wire keys — no internal ingestion columns', () => {
     const dto = toConcertDTO(timedRow);
     expect(Object.keys(dto).sort()).toEqual(
@@ -202,6 +353,11 @@ describe('toConcertDTO', () => {
         'price_max',
         'age_restriction',
         'status',
+        'genres',
+        'artist_bio',
+        'similar_artists',
+        'station_plays',
+        'station_recommended',
       ].sort()
     );
     for (const internal of INTERNAL_COLUMNS) {
@@ -229,6 +385,9 @@ describe('getConcertsPage', () => {
     for (const internal of INTERNAL_COLUMNS) {
       expect(selectedColumns).not.toContain(internal);
     }
+    // BS#1731 — the station_recommended EXISTS is part of the shared page
+    // projection, so it must always be selected here.
+    expect(Object.keys(projection)).toContain('station_recommended');
   });
 });
 
@@ -246,6 +405,75 @@ describe('getConcertsCount', () => {
   it('returns 0 when the aggregate row is missing', async () => {
     mockDb._chain.where.mockReturnValueOnce(Promise.resolve([]));
     await expect(getConcertsCount({ from: '2026-08-01', curated: true })).resolves.toBe(0);
+  });
+});
+
+/**
+ * BS#1694 — single-concert read behind the public `GET /concerts/:id`. The
+ * load-bearing property here is SHAPE PARITY with the list: the same
+ * projection and the same `toConcertDTO` mapper, asserted by comparing the
+ * result to `toConcertDTO(row)` rather than to hand-written literals. The
+ * windowless half of the contract (no `starts_on` bound, no `removed_at`
+ * filter) is real-SQL behavior, pinned in
+ * tests/integration/concerts-by-id.spec.js.
+ */
+describe('getConcertById', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('maps the found row through toConcertDTO — the exact list serialization', async () => {
+    // Terminal .limit(1) resolves the row set for this call.
+    mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([timedRow]));
+
+    await expect(getConcertById(101)).resolves.toEqual(toConcertDTO(timedRow));
+  });
+
+  it('resolves null when no row matches the id', async () => {
+    mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([]));
+
+    await expect(getConcertById(999999)).resolves.toBeNull();
+  });
+
+  // `concerts.id` is an int4 serial, so ids outside (0, 2^31-1] — and
+  // non-integers — can never match a row. The service owns that persistence
+  // fact and short-circuits to null BEFORE the query: the Postgres int4 bind
+  // would otherwise reject the value ("integer out of range") as an unhandled
+  // 500, and the service's `id: number` signature must stay total for
+  // non-route callers (the share-page BFF chain) that skip the controller's
+  // parse guard.
+  it.each([
+    ['int4 max + 1', 2_147_483_648],
+    ['far beyond int4', 99_999_999_999_999],
+    ['zero', 0],
+    ['negative', -7],
+    ['non-integer', 3.5],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['NaN', Number.NaN],
+  ])('short-circuits an impossible id (%s) to null without querying', async (_label, id) => {
+    await expect(getConcertById(id)).resolves.toBeNull();
+
+    expect(mockDb._chain.select).not.toHaveBeenCalled();
+  });
+
+  it('selects the shared list projection — never the internal ingestion columns', async () => {
+    mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([timedRow]));
+
+    await getConcertById(101);
+
+    const projection = mockDb._chain.select.mock.calls[0][0] as Record<string, string>;
+    const selectedColumns = Object.values(projection);
+    for (const internal of INTERNAL_COLUMNS) {
+      expect(selectedColumns).not.toContain(internal);
+    }
+    // Parity pin: the by-id projection carries the BS#1624 genres, BS#1734
+    // artist_bio, BS#1702 station_plays, and BS#1731 station_recommended
+    // fields, so a by-id read can never lag the list's enrichment fields (the
+    // BS#1694 lockstep-join invariant).
+    expect(Object.keys(projection)).toContain('genres');
+    expect(Object.keys(projection)).toContain('artist_bio');
+    expect(Object.keys(projection)).toContain('station_plays');
+    expect(Object.keys(projection)).toContain('station_recommended');
   });
 });
 
@@ -396,5 +624,85 @@ describe('getUpcomingShowsMaps (BS#1613)', () => {
     const { byArtistId, byNormName } = await getUpcomingShowsMaps('2026-08-01');
     expect(byArtistId.size).toBe(0);
     expect(byNormName.size).toBe(0);
+  });
+});
+
+/**
+ * BS#1616 — `getUpcomingShowsMaps` runs on the hot V2 flowsheet read path
+ * (including `getLatest`, the single-entry "now playing" tick the iOS/Android
+ * apps and the uptime canary poll continuously), and each call scans the entire
+ * unbounded upcoming-concerts set to rebuild the two maps.
+ * `getUpcomingShowsMapsCached` wraps the pure builder in a per-process,
+ * promise-valued LRU keyed on the ET `today` string (`max: 2`, `ttl: 60s`) so
+ * repeat reads within the TTL are served without re-querying `concerts`. The
+ * builder itself stays pure and is pinned by the suite above; these pin only the
+ * cache behavior.
+ *
+ * Build count == `db.select` call count: the builder issues exactly one
+ * `db.select(...)` per invocation, and the DB mock aliases `db.select` to
+ * `mockDb._chain.select`, so a warm hit (no build) leaves the counter fixed. The
+ * cache is module-scoped, so `__resetUpcomingShowsMapsCacheForTests()` runs in
+ * `beforeEach` to keep a prior case's maps from leaking into the next.
+ */
+describe('getUpcomingShowsMapsCached (BS#1616 per-process map cache)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    __resetUpcomingShowsMapsCacheForTests();
+  });
+
+  it('builds once on a cold miss', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    await getUpcomingShowsMapsCached('2026-08-01');
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(1);
+  });
+
+  it('serves a warm hit within the TTL without re-querying (identical maps reference)', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    const first = await getUpcomingShowsMapsCached('2026-08-01');
+    const second = await getUpcomingShowsMapsCached('2026-08-01');
+    // Same object reference proves the second call resolved the cached promise,
+    // not a fresh build.
+    expect(second).toBe(first);
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(1);
+  });
+
+  it('rebuilds after __resetUpcomingShowsMapsCacheForTests clears the cache', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([]));
+    await getUpcomingShowsMapsCached('2026-08-01');
+    __resetUpcomingShowsMapsCacheForTests();
+    await getUpcomingShowsMapsCached('2026-08-01');
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(2);
+  });
+
+  it('rebuilds for a distinct today key (date roll → miss)', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([]));
+    await getUpcomingShowsMapsCached('2026-08-01');
+    await getUpcomingShowsMapsCached('2026-08-02'); // a different ET calendar day
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces two concurrent cold calls into a single build', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    const [a, b] = await Promise.all([
+      getUpcomingShowsMapsCached('2026-08-01'),
+      getUpcomingShowsMapsCached('2026-08-01'),
+    ]);
+    // Both callers awaited the same in-flight promise → same resolved object.
+    expect(a).toBe(b);
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache a rejected build — the next call retries', async () => {
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.reject(new Error('boom')))
+      .mockReturnValueOnce(Promise.resolve([]));
+    await expect(getUpcomingShowsMapsCached('2026-08-01')).rejects.toThrow('boom');
+    // The failed promise was evicted, so this is a fresh cold miss (not a cached
+    // error): the builder runs again and resolves.
+    await expect(getUpcomingShowsMapsCached('2026-08-01')).resolves.toEqual({
+      byArtistId: new Map(),
+      byNormName: new Map(),
+    });
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(2);
   });
 });

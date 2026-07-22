@@ -1,8 +1,23 @@
 import { and, asc, eq, gte, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
-import { artists, concerts, db, normalizeFreetextArtist, venues } from '@wxyc/database';
+import {
+  artist_metadata,
+  artist_similar_artists,
+  artist_station_plays,
+  artists,
+  concerts,
+  db,
+  discogs_artist_similar_artists,
+  library,
+  normalizeFreetextArtist,
+  rotation,
+  type SimilarArtistNeighbor,
+  venues,
+} from '@wxyc/database';
+import { LRUCache } from 'lru-cache';
+import * as Sentry from '@sentry/node';
 
 /**
- * Concerts read service — backs `GET /concerts` (BS#1603, touring-events
+ * Concerts read service — backs `GET /concerts` (BS#1603, on-tour
  * Phase 2). Pure DB reads over the `concerts`/`venues` tables that the
  * venue-events-scraper and triangle-shows ETL populate; no LML calls.
  *
@@ -54,6 +69,49 @@ export type ConcertDTO = {
   price_max: number | null;
   age_restriction: string | null;
   status: 'on_sale' | 'sold_out' | 'cancelled' | 'rescheduled';
+  // Discogs genre tags for the resolved headlining artist (BS#1624, On Tour
+  // R2), sourced from `artist_metadata` via a null-safe LEFT JOIN. Null when
+  // the headliner is unresolved OR the nightly genre enrichment hasn't run.
+  // Optional (not in the api.yaml `required` set — wxyc-shared#221) so the
+  // field can land ahead of any consumer and older clients decode forward-
+  // compatibly; mirrored here as `genres?` to keep the compile-time
+  // `Equal<ConcertDTO, ApiYamlConcert>` pin in concerts.service.test.ts honest.
+  genres?: string[] | null;
+  // Raw Discogs artist bio/profile text for the resolved headlining artist
+  // (BS#1734, On Tour R3 "About the Artist"), sourced from `artist_metadata`
+  // via the same null-safe LEFT JOIN as `genres`. Stored and served RAW — no
+  // `cleanDiscogsBio` — matching `album_metadata.artist_bio` /
+  // `flowsheet.artist_bio` precedent (iOS's `DiscogsMarkupParser` renders the
+  // raw markup). Same optional-and-nullable discipline as `genres`.
+  artist_bio?: string | null;
+  // Top-K affinity neighbors of the resolved headlining artist (BS#1626, On Tour
+  // R3b; extended BS#1701), COALESCEd from the two enrichment lanes: the library
+  // lane (`artist_similar_artists`, keyed on `headlining_artist_id`) and the
+  // discogs lane (`discogs_artist_similar_artists`, keyed on the effective
+  // Discogs id — covers Discogs-only touring headliners absent from the WXYC
+  // library). Each `{ artist_id, weight }` is a WXYC catalog id in BOTH lanes, so
+  // on-device For You matching intersects it against liked-artist ids in one id
+  // space. Null when the headliner is in NEITHER lane OR the nightly enrichment
+  // hasn't run. Same optional-and-nullable discipline as `genres` (wxyc-shared#222).
+  similar_artists?: SimilarArtistNeighbor[] | null;
+  // All-time WXYC flowsheet play count of the resolved (in-library) headliner
+  // (BS#1702, On Tour "For You" station-affinity tier), sourced from
+  // `artist_station_plays` via a null-safe LEFT JOIN on `headlining_artist_id`.
+  // The station-affinity signal behind the "For You" shelf — identical for every
+  // listener, carries no listener data. Null when the headliner has no in-library
+  // id OR the nightly enrichment hasn't run. Same optional-and-nullable discipline
+  // as `genres`/`similar_artists` (not in the api.yaml `required` set).
+  station_plays?: number | null;
+  // True when the resolved headliner (`headlining_artist_id`) has at least one
+  // WXYC library release that has been in rotation, any rotation row past or
+  // present (BS#1731, On Tour "For You" tier redesign — supersedes the
+  // `station_plays` play-count signal per wxyc-ios-64#576). Sourced from an
+  // EXISTS over `rotation` JOIN `library`, computed in every page/by-id read
+  // (never null there). Discogs-only headliners (`headlining_artist_id IS
+  // NULL`) always read false. Optional (not in the api.yaml `required` set,
+  // wxyc-shared#244) so the `upcoming_show` embed can omit it — see
+  // `station_plays` for the identical discipline.
+  station_recommended?: boolean;
 };
 
 export type ConcertsQueryFilters = {
@@ -91,6 +149,30 @@ export type ConcertJoinRow = {
   venue_city: string;
   venue_state: string;
   venue_address: string | null;
+  // Optional: only the `getConcertsPage` projection LEFT-joins `artist_metadata`
+  // and selects this. The `getUpcomingShowsMaps` projection omits it, so its
+  // rows leave it undefined and `toConcertDTO` coalesces to null.
+  genres?: string[] | null;
+  // Optional: only the `getConcertsPage` projection LEFT-joins `artist_metadata`
+  // and selects this (BS#1734, same join as `genres`). The `getUpcomingShowsMaps`
+  // projection omits it, so its rows leave it undefined and `toConcertDTO`
+  // coalesces to null.
+  artist_bio?: string | null;
+  // Optional: only the `getConcertsPage` projection LEFT-joins the two
+  // similar-artists lanes and selects the COALESCEd value. The
+  // `getUpcomingShowsMaps` embed omits it (the #1616 hot-path guard), so its rows
+  // leave it undefined and `toConcertDTO` coalesces to null.
+  similar_artists?: SimilarArtistNeighbor[] | null;
+  // Optional: only the `getConcertsPage` / `getConcertById` projection LEFT-joins
+  // `artist_station_plays` and selects this. The `getUpcomingShowsMaps` embed
+  // omits it (the #1616 embed boundary), so its rows leave it undefined and
+  // `toConcertDTO` coalesces to null.
+  station_plays?: number | null;
+  // Optional: only the `getConcertsPage` / `getConcertById` projection selects the
+  // `station_recommended` EXISTS subquery. The `getUpcomingShowsMaps` embed omits
+  // it, so its rows leave it undefined and `toConcertDTO` passes that through
+  // (the field is omitted on the wire there, not coalesced to false).
+  station_recommended?: boolean;
 };
 
 // Explicit select list — the projection is the leak barrier: internal
@@ -154,6 +236,24 @@ export const toConcertDTO = (row: ConcertJoinRow): ConcertDTO => ({
   price_max: toDollars(row.price_max),
   age_restriction: row.age_restriction,
   status: row.status,
+  // Null-safe: a projection that doesn't LEFT-join `artist_metadata` (the
+  // `upcoming_show` embed) leaves `genres` undefined → null on the wire; a
+  // resolved-but-unenriched headliner surfaces as null too (no joined row).
+  genres: row.genres ?? null,
+  // Same null-safe discipline (BS#1734): undefined on the embed projection,
+  // null for a headliner in neither lane or with no enrichment row.
+  artist_bio: row.artist_bio ?? null,
+  // Same null-safe discipline (BS#1626 + BS#1701): undefined on the embed
+  // projection, null for a headliner in neither lane or with no enrichment row.
+  similar_artists: row.similar_artists ?? null,
+  // Same null-safe discipline (BS#1702): undefined on the embed projection, null
+  // for a headliner with no in-library id or no station-plays enrichment row.
+  station_plays: row.station_plays ?? null,
+  // NOT coalesced (BS#1731): the page/by-id projection's EXISTS always supplies a
+  // concrete boolean, so `?? false` would never fire there anyway; on the embed
+  // projection `row.station_recommended` is `undefined` and must stay that way so
+  // `JSON.stringify` omits the key rather than asserting "not recommended".
+  station_recommended: row.station_recommended,
 });
 
 /**
@@ -182,8 +282,74 @@ const buildWhere = ({ from, to, curated }: ConcertsQueryFilters) => {
 };
 
 /**
+ * The headliner's effective Discogs artist id, keyed off whichever resolution
+ * lane stamped the concert: the offline LML pass writes
+ * `concerts.headlining_discogs_artist_id` directly (BS#1614), while a
+ * library-resolved headliner reaches its Discogs id through
+ * `artists.discogs_artist_id`. When both are present they agree (the LML pass
+ * FK-loop-closes on the singleton `artists.discogs_artist_id` match), so the
+ * COALESCE order is immaterial in that case. This is the exact key
+ * `jobs/concerts-genre-enrichment/` writes `artist_metadata` rows under, so the
+ * projection and the enrichment SELECT resolve genres through the same
+ * expression.
+ */
+const effectiveHeadlinerDiscogsId = sql`COALESCE(${concerts.headlining_discogs_artist_id}, ${artists.discogs_artist_id})`;
+
+// Page projection: the shared concerts⋈venues fields plus the LEFT-joined
+// artist-level genres (BS#1624), affinity neighbors (BS#1626 + BS#1701),
+// station plays (BS#1702), and the station-recommended EXISTS (BS#1731). Kept
+// separate from `concertJoinFields` so the `getUpcomingShowsMaps` / count paths
+// (which don't join the enrichment tables) can't accidentally reference those
+// tables' columns.
+//
+// `similar_artists` COALESCEs the two enrichment lanes (BS#1701): the library
+// lane (`artist_similar_artists`, keyed on `headlining_artist_id`) wins over the
+// discogs lane (`discogs_artist_similar_artists`, keyed on
+// `effectiveHeadlinerDiscogsId`) when both are present — the rare overlap where
+// the same Discogs id was independently enriched via the discogs lane resolves
+// to the same neighbors anyway. Null when the headliner is in NEITHER lane.
+const concertPageFields = {
+  ...concertJoinFields,
+  genres: artist_metadata.genres,
+  artist_bio: artist_metadata.artist_bio,
+  similar_artists: sql<
+    SimilarArtistNeighbor[] | null
+  >`COALESCE(${artist_similar_artists.neighbors}, ${discogs_artist_similar_artists.neighbors})`,
+  station_plays: artist_station_plays.plays,
+  // Station-recommended (BS#1731): a scalar EXISTS, not a joined table, so it
+  // lands in both `getConcertsPage` and `getConcertById` automatically without
+  // a `.leftJoin` (and so cannot trigger the BS#1694 "table … is not part of
+  // the query" hazard). Always a real boolean — never null — since EXISTS
+  // itself never returns NULL; a NULL `headlining_artist_id` (Discogs-only
+  // headliner) simply never correlates a match, so it reads false.
+  station_recommended: sql<boolean>`EXISTS (
+    SELECT 1 FROM ${rotation}
+    JOIN ${library} ON ${library.id} = ${rotation.album_id}
+    WHERE ${library.artist_id} = ${concerts.headlining_artist_id}
+  )`,
+};
+
+/**
  * One page of upcoming concerts with their venues embedded, ordered by
  * `starts_on` ascending (id as a stable tiebreak).
+ *
+ * Genres projection (BS#1624): a LEFT JOIN to `artists` (to reach a library
+ * headliner's `discogs_artist_id`) and a LEFT JOIN to `artist_metadata` on the
+ * effective Discogs id. Both are LEFT joins so an unresolved or un-enriched
+ * headliner keeps the row and surfaces `genres: null` — never dropped.
+ *
+ * Similar-artists projection (BS#1626 + BS#1701): TWO LEFT JOINs, one per lane.
+ * The library lane joins `artist_similar_artists` on `headlining_artist_id` (a
+ * clean catalog FK); the discogs lane joins `discogs_artist_similar_artists` on
+ * `effectiveHeadlinerDiscogsId` (the same key the genres join uses), covering
+ * Discogs-only touring headliners that have no in-library id. `similar_artists`
+ * COALESCEs the two (library wins). Both LEFT so a headliner in neither lane
+ * surfaces `similar_artists: null`. Purely additive to the BS#1603 shape.
+ *
+ * Station-plays projection (BS#1702): a LEFT JOIN to `artist_station_plays`,
+ * library-key only (no COALESCE — station plays are an in-library signal) —
+ * surfaces `station_plays: null` for a headliner with no in-library id or no
+ * enrichment row.
  */
 export const getConcertsPage = async (
   filters: ConcertsQueryFilters,
@@ -191,9 +357,17 @@ export const getConcertsPage = async (
   offset: number
 ): Promise<ConcertDTO[]> => {
   const rows = await db
-    .select(concertJoinFields)
+    .select(concertPageFields)
     .from(concerts)
     .innerJoin(venues, eq(venues.id, concerts.venue_id))
+    .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))
+    .leftJoin(artist_metadata, eq(artist_metadata.discogs_artist_id, effectiveHeadlinerDiscogsId))
+    .leftJoin(artist_similar_artists, eq(artist_similar_artists.artist_id, concerts.headlining_artist_id))
+    .leftJoin(
+      discogs_artist_similar_artists,
+      eq(discogs_artist_similar_artists.discogs_artist_id, effectiveHeadlinerDiscogsId)
+    )
+    .leftJoin(artist_station_plays, eq(artist_station_plays.artist_id, concerts.headlining_artist_id))
     .where(buildWhere(filters))
     .orderBy(asc(concerts.starts_on), asc(concerts.id))
     .limit(limit)
@@ -210,6 +384,70 @@ export const getConcertsCount = async (filters: ConcertsQueryFilters): Promise<n
     .where(buildWhere(filters));
 
   return Number(result[0]?.count ?? 0);
+};
+
+/** PostgreSQL int4 ceiling — the largest id a `serial` column can hold. */
+const MAX_SERIAL_ID = 2_147_483_647;
+
+/**
+ * Single-concert read backing the public `GET /concerts/:id` (BS#1694, On
+ * Tour sharing; contract `wxyc-shared/api.yaml` v1.18.0, wxyc-shared#236).
+ * Reuses the list's exact projection (`concertPageFields`, BS#1624 genres
+ * LEFT JOIN included) and the same `toConcertDTO` mapper, so the by-id wire
+ * shape can never drift from `getConcertsPage`'s.
+ *
+ * Deliberately WINDOWLESS — the one place `buildWhere` is NOT used: no
+ * `starts_on` bound and no `removed_at IS NULL` conjunct. The share page and
+ * the iOS universal-link fallback render past and source-delisted
+ * (tombstoned) shows as "this one's passed" with whatever `status` the row
+ * last carried, so those rows must come back rather than 404. The leak
+ * barrier is untouched: the explicit select list never includes `removed_at`
+ * or the other ingestion columns, so a tombstoned row is served without
+ * exposing that it is one.
+ *
+ * Resolves null when no row matches, when the venue INNER JOIN drops a
+ * dangling `venue_id` (same strictness as the list; a Concert without its
+ * embedded Venue can't satisfy the contract), or when the id is impossible
+ * for the int4 serial (non-integral, < 1, or > 2^31-1) — short-circuited
+ * below, before any query. The controller maps null → 404.
+ */
+export const getConcertById = async (id: number): Promise<ConcertDTO | null> => {
+  // `concerts.id` is a serial (int4): an id outside (0, MAX_SERIAL_ID] — or a
+  // non-integer — can never match a row, and without this short-circuit it
+  // would reach the Postgres bind, which rejects it ("integer out of range")
+  // as an unhandled error. The service owns that persistence fact so EVERY
+  // caller (the public route today, the share-page BFF chain tomorrow) gets
+  // miss semantics instead of a bind 500.
+  if (!Number.isInteger(id) || id < 1 || id > MAX_SERIAL_ID) {
+    return null;
+  }
+
+  // Join set MUST stay identical to `getConcertsPage`: both select
+  // `concertPageFields`, and Drizzle throws at runtime ("table … is not part
+  // of the query") if the projection references a table the query never
+  // joined. BS#1626 adding `similar_artists` to the shared projection while
+  // this query was in flight is exactly how the by-id read 500'd on every
+  // row-returning request (BS#1694 hotfix). BS#1702's `station_plays`
+  // (`artist_station_plays` join) and BS#1701's `discogs_artist_similar_artists`
+  // COALESCE lane are the same class of hazard, so BOTH LEFT JOINs are mirrored
+  // here too — the by-id spec's serialization-parity test is the regression guard.
+  const rows = await db
+    .select(concertPageFields)
+    .from(concerts)
+    .innerJoin(venues, eq(venues.id, concerts.venue_id))
+    .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))
+    .leftJoin(artist_metadata, eq(artist_metadata.discogs_artist_id, effectiveHeadlinerDiscogsId))
+    .leftJoin(artist_similar_artists, eq(artist_similar_artists.artist_id, concerts.headlining_artist_id))
+    .leftJoin(
+      discogs_artist_similar_artists,
+      eq(discogs_artist_similar_artists.discogs_artist_id, effectiveHeadlinerDiscogsId)
+    )
+    .leftJoin(artist_station_plays, eq(artist_station_plays.artist_id, concerts.headlining_artist_id))
+    .where(eq(concerts.id, id))
+    .limit(1);
+
+  const row = (rows as ConcertJoinRow[])[0];
+  return row === undefined ? null : toConcertDTO(row);
 };
 
 /**
@@ -229,7 +467,7 @@ type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
 
 /**
  * Batched upcoming-concert lookup backing the V2 flowsheet feed's per-playcut
- * `upcoming_show` enrichment (BS#1607, widened by BS#1613; touring-events
+ * `upcoming_show` enrichment (BS#1607, widened by BS#1613; on-tour
  * Phase 3).
  *
  * ONE indexed query for a whole feed page — never one query per row. The caller
@@ -273,7 +511,7 @@ type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
  *     clean-name filter" rationale). RESIDUAL (accepted; #1614 is the real
  *     lever): two DISTINCT artists sharing a normalized name (homonyms, e.g. two
  *     bands named `Wire`) collapse to one key — the soonest wins and can attach
- *     to a play of the other. Low-harm for a "Touring Soon" CTA, not engineered
+ *     to a play of the other. Low-harm for a "On Tour" CTA, not engineered
  *     around here.
  *
  * The venue-embedding join and DTO mapping reuse `getConcertsPage`'s projection
@@ -321,3 +559,81 @@ export const getUpcomingShowsMaps = async (
 
   return { byArtistId, byNormName };
 };
+
+/** Resolved return of {@link getUpcomingShowsMaps}, aliased for the cache below. */
+type UpcomingShowsMaps = Awaited<ReturnType<typeof getUpcomingShowsMaps>>;
+
+/**
+ * Per-process cache of the two `upcoming_show` maps (BS#1616).
+ *
+ * {@link getUpcomingShowsMaps} runs on the hot V2 flowsheet read path — including
+ * `getLatest`, the single-entry "now playing" tick the iOS/Android apps and the
+ * uptime canary poll continuously — and each call scans the entire unbounded
+ * upcoming-concerts set (`removed_at IS NULL AND starts_on >= today`, no upper
+ * bound) to rebuild the maps. This cache amortizes that: continuous polling
+ * collapses from one full-catalog scan PER read to ~one rebuild per TTL.
+ *
+ * Keyed on the ET `today` string (`nyCalendarDate`, supplied by the caller), so a
+ * midnight roll produces a miss and rebuilds rather than serving a just-passed
+ * show as upcoming. `max: 2` holds today plus a briefly-overlapping yesterday
+ * across the roll; `ttl: 60_000` keeps the amortization benefit (~1 rebuild/min
+ * regardless of poll rate) while surfacing a rare manual concert edit within a
+ * minute — `concerts` otherwise mutates only via the nightly ETL, so intra-day
+ * staleness cost is ~zero.
+ *
+ * The cached VALUE is the `Promise<Maps>`, not the resolved maps, so concurrent
+ * cold callers atomically share one in-flight build (the get/set is synchronous
+ * on Node's single thread). A rejected build is evicted, never cached (see the
+ * wrapper). Per-process only — like the LML lookup coordinator's cache,
+ * cross-instance coalescing is out of scope; session stickiness collapses most
+ * same-key bursts.
+ */
+const upcomingShowsMapsCache = new LRUCache<string, Promise<UpcomingShowsMaps>>({
+  max: 2,
+  ttl: 60_000,
+});
+
+/**
+ * Cached wrapper around {@link getUpcomingShowsMaps} for the hot read path
+ * (`flowsheet.service` `attachUpcomingShows`). A cold miss builds and `.set`s the
+ * in-flight promise synchronously so concurrent callers coalesce onto it; a warm
+ * hit returns the settled promise for the rest of the TTL.
+ *
+ * INVARIANT — the returned maps, and the `ConcertDTO` instances inside them, are
+ * handed out BY REFERENCE to every caller within the TTL and MUST be treated as
+ * read-only. The sole consumer, `attachUpcomingShows`, only reads them (it shares
+ * a `ConcertDTO` onto `entry.upcoming_show`; `transformToV2` spreads it into a
+ * fresh response object and never mutates it). Never mutate a returned map or DTO.
+ *
+ * Error handling: the ORIGINAL promise is returned, so a build failure rejects to
+ * the caller (→ Express error handler) exactly as the uncached builder did. A
+ * SEPARATE `.catch` evicts the rejected entry so the error is not cached — the
+ * next call issues a fresh query. Both consumers handle the rejection, so there
+ * is no unhandled-rejection footgun.
+ */
+export const getUpcomingShowsMapsCached = (today: string): Promise<UpcomingShowsMaps> => {
+  const hit = upcomingShowsMapsCache.get(today);
+  // Boolean attribute is safe via the late setAttribute path (the numeric
+  // string-typing trap of BS#1070/#1081 only affects avg/p50 aggregations on
+  // numbers). Lets prod confirm getLatest's hit ratio — i.e. that it stopped
+  // scanning `concerts` on every poll.
+  Sentry.getActiveSpan()?.setAttribute('concerts.upcoming_maps.cache_hit', hit !== undefined);
+  if (hit !== undefined) {
+    return hit;
+  }
+  const build = getUpcomingShowsMaps(today);
+  upcomingShowsMapsCache.set(today, build);
+  build.catch(() => upcomingShowsMapsCache.delete(today)); // evict on failure; never cache an error
+  return build;
+};
+
+/**
+ * Test-only hook to clear the module-scoped cache between cases — mirrors the
+ * `__reset…ForTests` helpers in `library.service` / `proxy.controller`. Any suite
+ * that exercises the real wrapper (the cache unit tests; the out-of-process
+ * integration spec, via the test-gated `/internal/test/reset-upcoming-shows-cache`
+ * endpoint) must reset it, or a warm entry leaks a prior case's maps.
+ */
+export function __resetUpcomingShowsMapsCacheForTests(): void {
+  upcomingShowsMapsCache.clear();
+}

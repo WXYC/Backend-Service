@@ -23,7 +23,8 @@ import {
   nyCalendarDate,
   nyStartOfDay,
 } from '@wxyc/database';
-import { getUpcomingShowsMaps } from './concerts.service.js';
+import { isSpotifyUrl, isAppleMusicUrl } from '@wxyc/lml-client';
+import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
@@ -204,9 +205,11 @@ const FSEntryFieldsRaw = {
   // library FK join already present on every read path below
   // (`leftJoin(library, library.id = flowsheet.album_id)`). NULL for
   // free-form entries (no album_id) and for library rows with no artist link.
-  // Not a client-facing wire field itself — it's the batch key the V2 feed
-  // uses to attach the per-playcut `upcoming_show` enrichment (BS#1607),
-  // matched against `concerts.headlining_artist_id` (same `artists.id` space).
+  // Two roles: (1) the batch key the V2 feed uses to attach the per-playcut
+  // `upcoming_show` enrichment (BS#1607), matched against
+  // `concerts.headlining_artist_id` (same `artists.id` space); and (2) since
+  // BS#1625, a client-facing wire field — `transformToV2` projects it onto
+  // the V2 track shape as `artist_id` for the iOS On Tour likes match.
   artist_id: library.artist_id,
   request_flag: flowsheet.request_flag,
   segue: flowsheet.segue,
@@ -226,7 +229,13 @@ const FSEntryFieldsRaw = {
   // entries (album_id IS NULL) miss the join and fall through to the
   // inline flowsheet values.
   artwork_url: sql<string | null>`coalesce(${album_metadata.artwork_url}, ${flowsheet.artwork_url})`,
-  discogs_url: sql<string | null>`coalesce(${album_metadata.discogs_url}, ${flowsheet.discogs_url})`,
+  // discogs_url additionally NULLIFs the '' synthetic-match sentinel LML
+  // persists for streaming-only/artist-only matches (LML#401/#487) so it
+  // never reaches the wire (BS#1628). NULLIF wraps the COALESCE — an ''
+  // verdict in album_metadata stays authoritative over a stale inline URL
+  // rather than falling through to it. The persisted '' is deliberate
+  // (BS#1185 keys off it); only the projection normalizes.
+  discogs_url: sql<string | null>`nullif(coalesce(${album_metadata.discogs_url}, ${flowsheet.discogs_url}), '')`,
   release_year: sql<number | null>`coalesce(${album_metadata.release_year}, ${flowsheet.release_year})`,
   spotify_url: sql<string | null>`coalesce(${album_metadata.spotify_url}, ${flowsheet.spotify_url})`,
   apple_music_url: sql<string | null>`coalesce(${album_metadata.apple_music_url}, ${flowsheet.apple_music_url})`,
@@ -250,7 +259,7 @@ const FSEntryFieldsRaw = {
 };
 
 // Raw result type from SQL query
-type FSEntryRaw = {
+export type FSEntryRaw = {
   id: number;
   show_id: number | null;
   album_id: number | null;
@@ -293,65 +302,82 @@ type FSEntryRaw = {
   radio_hour: Date | null;
 };
 
-/** Transform flat SQL result to nested IFSEntry structure */
-const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => ({
-  id: raw.id,
-  show_id: raw.show_id,
-  album_id: raw.album_id,
-  legacy_entry_id: raw.legacy_entry_id ?? null,
-  legacy_release_id: raw.legacy_release_id ?? null,
-  entry_type: raw.entry_type as FSEntry['entry_type'],
-  artist_name: raw.artist_name,
-  album_title: raw.album_title,
-  track_title: raw.track_title,
-  track_position: raw.track_position,
-  record_label: raw.record_label,
-  label_id: raw.label_id,
-  rotation_id: raw.rotation_id,
-  rotation_bin: raw.rotation_bin,
-  artist_id: raw.artist_id ?? null,
-  request_flag: raw.request_flag ?? false,
-  segue: raw.segue ?? false,
-  message: raw.message,
-  play_order: raw.play_order ?? 0,
-  add_time: raw.add_time ?? new Date(),
-  dj_name: raw.dj_name,
-  linkage_source: raw.linkage_source,
-  linkage_confidence: raw.linkage_confidence,
-  linked_at: raw.linked_at,
-  // Metadata columns (on FSEntry since they're on the flowsheet table)
-  artwork_url: raw.artwork_url,
-  discogs_url: raw.discogs_url,
-  release_year: raw.release_year,
-  spotify_url: raw.spotify_url,
-  apple_music_url: raw.apple_music_url,
-  youtube_music_url: raw.youtube_music_url,
-  bandcamp_url: raw.bandcamp_url,
-  soundcloud_url: raw.soundcloud_url,
-  artist_bio: raw.artist_bio,
-  artist_wikipedia_url: raw.artist_wikipedia_url,
-  on_streaming: raw.on_streaming ?? null,
-  metadata_status: raw.metadata_status,
-  enriching_since: raw.enriching_since,
-  radio_hour: raw.radio_hour ?? null,
-  // Nested metadata view (used by transformToV2). genres/styles are
-  // album_metadata-only fields (BS#1441) and so live here, NOT as top-level
-  // IFSEntry/FSEntry fields (that type mirrors the flowsheet table).
-  metadata: {
+/**
+ * Transform flat SQL result to nested IFSEntry structure.
+ *
+ * Exported so the BS#1714 serve-seam host guard can be unit-tested directly:
+ * this is the single producer of every IFSEntry that reaches the `/flowsheet`
+ * (top-level fields) and `/v2/flowsheet` (`transformToV2`, nested `metadata`)
+ * read paths, so guarding the two hardwired streaming URLs here covers both.
+ */
+export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
+  // BS#1714: suppress a persisted `spotify_url`/`apple_music_url` whose host
+  // isn't Spotify/Apple (mislabeled at the LML boundary before #1712 shipped)
+  // so it never reaches the hardwired iOS "Spotify"/"Apple Music" button. No
+  // synthesized fallback exists at this seam, so a mislabeled value drops to
+  // null. Applied once and reused for both the top-level field and the nested
+  // `metadata` object below.
+  const spotify_url = isSpotifyUrl(raw.spotify_url) ? raw.spotify_url : null;
+  const apple_music_url = isAppleMusicUrl(raw.apple_music_url) ? raw.apple_music_url : null;
+  return {
+    id: raw.id,
+    show_id: raw.show_id,
+    album_id: raw.album_id,
+    legacy_entry_id: raw.legacy_entry_id ?? null,
+    legacy_release_id: raw.legacy_release_id ?? null,
+    entry_type: raw.entry_type as FSEntry['entry_type'],
+    artist_name: raw.artist_name,
+    album_title: raw.album_title,
+    track_title: raw.track_title,
+    track_position: raw.track_position,
+    record_label: raw.record_label,
+    label_id: raw.label_id,
+    rotation_id: raw.rotation_id,
+    rotation_bin: raw.rotation_bin,
+    artist_id: raw.artist_id ?? null,
+    request_flag: raw.request_flag ?? false,
+    segue: raw.segue ?? false,
+    message: raw.message,
+    play_order: raw.play_order ?? 0,
+    add_time: raw.add_time ?? new Date(),
+    dj_name: raw.dj_name,
+    linkage_source: raw.linkage_source,
+    linkage_confidence: raw.linkage_confidence,
+    linked_at: raw.linked_at,
+    // Metadata columns (on FSEntry since they're on the flowsheet table)
     artwork_url: raw.artwork_url,
     discogs_url: raw.discogs_url,
     release_year: raw.release_year,
-    spotify_url: raw.spotify_url,
-    apple_music_url: raw.apple_music_url,
+    spotify_url,
+    apple_music_url,
     youtube_music_url: raw.youtube_music_url,
     bandcamp_url: raw.bandcamp_url,
     soundcloud_url: raw.soundcloud_url,
     artist_bio: raw.artist_bio,
     artist_wikipedia_url: raw.artist_wikipedia_url,
-    genres: raw.genres,
-    styles: raw.styles,
-  },
-});
+    on_streaming: raw.on_streaming ?? null,
+    metadata_status: raw.metadata_status,
+    enriching_since: raw.enriching_since,
+    radio_hour: raw.radio_hour ?? null,
+    // Nested metadata view (used by transformToV2). genres/styles are
+    // album_metadata-only fields (BS#1441) and so live here, NOT as top-level
+    // IFSEntry/FSEntry fields (that type mirrors the flowsheet table).
+    metadata: {
+      artwork_url: raw.artwork_url,
+      discogs_url: raw.discogs_url,
+      release_year: raw.release_year,
+      spotify_url,
+      apple_music_url,
+      youtube_music_url: raw.youtube_music_url,
+      bandcamp_url: raw.bandcamp_url,
+      soundcloud_url: raw.soundcloud_url,
+      artist_bio: raw.artist_bio,
+      artist_wikipedia_url: raw.artist_wikipedia_url,
+      genres: raw.genres,
+      styles: raw.styles,
+    },
+  };
+};
 
 /**
  * Resolve the DJ name for a show using the priority:
@@ -1110,8 +1136,11 @@ export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> =>
  * events Phase 3).
  *
  * Batched — ONE indexed concerts query for the whole page via
- * `getUpcomingShowsMaps`, never one per row (the no-N+1 guarantee; project #32
- * perf posture). Each track row resolves through two arms, id first:
+ * `getUpcomingShowsMapsCached`, never one per row (the no-N+1 guarantee; project
+ * #32 perf posture). And that query only fires on a cold build: the wrapper
+ * memoizes the maps per ET day for a short TTL (BS#1616), so the hot poll path
+ * (`getLatest`) skips the concerts scan entirely on warm reads. Each track row
+ * resolves through two arms, id first:
  *   1. id arm — `byArtistId.get(artist_id)`: the album-resolved catalog artist
  *      (`flowsheet.album_id → library.artist_id`) matched a resolved concert.
  *      Precise; the sole BS#1607 path, kept as-is (regression-guarded).
@@ -1148,7 +1177,7 @@ export const attachUpcomingShows = async (entries: IFSEntry[]): Promise<IFSEntry
     return entries;
   }
 
-  const { byArtistId, byNormName } = await getUpcomingShowsMaps(nyCalendarDate(new Date()));
+  const { byArtistId, byNormName } = await getUpcomingShowsMapsCached(nyCalendarDate(new Date()));
 
   for (const entry of entries) {
     if (entry.entry_type !== 'track') {
@@ -1188,6 +1217,15 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         ...baseFields,
         album_id: entry.album_id,
         rotation_id: entry.rotation_id,
+        // Resolved catalog artist id (flowsheet.album_id -> library.artist_id),
+        // already computed on the read path (FSEntryFieldsRaw). Additive,
+        // nullable wire field (BS#1625): null for free-form entries (no
+        // album_id) and library rows with no artist link. Shares the artists.id
+        // keyspace with concerts.headlining_artist_id / upcoming_show, so the
+        // iOS On Tour likes match can intersect a liked playcut against
+        // concert headliners. SSOT: FlowsheetV2TrackEntry.artist_id (wxyc-shared
+        // api.yaml 1.19.0).
+        artist_id: entry.artist_id ?? null,
         artist_name: entry.artist_name,
         album_title: entry.album_title,
         track_title: entry.track_title,

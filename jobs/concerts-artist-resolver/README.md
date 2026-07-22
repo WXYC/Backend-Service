@@ -17,7 +17,7 @@ The conservative bias matches the substrate intent: NULL is the documented stead
 
 ## Idempotency + race-safety
 
-- SELECT predicate: `headlining_artist_id IS NULL AND headlining_artist_raw IS NOT NULL`. Already-resolved rows are never re-examined; the resolver is write-once-trust-forever.
+- SELECT predicate: `headlining_artist_id IS NULL AND headlining_artist_raw IS NOT NULL AND ("title" IS NULL OR "title" !~* '\mtribute') AND "headlining_artist_raw" !~* '\mtribute'`. Already-resolved rows are never re-examined; the resolver is write-once-trust-forever. The tribute arms exclude tribute-context rows outright: in a tribute-framed event the billed name belongs to — or aliases — the honoree, not the performer, so any match either arm finds is a mislabel by construction (the Stanczyks "REM Tribute to Lifes Rich Pageant" row alias-resolved to the real R.E.M. and reached the iOS For You shelf). Word-start `\m` so a name like "Tributaries" doesn't trip it; a genuinely in-library tribute act staying NULL is the same low-recall/zero-wrong-FK trade as the singleton rule.
 - UPDATE WHERE clause: `id = ? AND headlining_artist_id IS NULL`. A concurrent pod or a scraper write that lands between SELECT and UPDATE manifests as a 0-row UPDATE which the orchestrator counts as `raced` rather than `resolved`.
 - A later alias-substrate refresh that would now resolve a previously-unmatched row picks it up on the next cron run. A later alias-substrate refresh that would now produce a _different_ singleton for an already-resolved row does **not** self-heal — that's the conservative-singleton-only trade.
 

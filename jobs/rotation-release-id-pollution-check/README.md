@@ -35,7 +35,9 @@ The `step: finished` JSON log line (four-tag contract: `repo`, `tool`, `step`, `
 
 Required (job aborts at init if missing): `DB_HOST`/`DB_PORT`/`DB_USERNAME`/`DB_PASSWORD`/`DB_NAME`, `LIBRARY_METADATA_URL`, `LML_API_KEY`, and `SENTRY_DSN` (waived under `DRY_RUN` — an alerting job that can't alert must fail loudly, not run silently). All are already in the EC2 `.env` for the sibling LML-calling crons; no additions needed.
 
-Optional (in-code defaults): `DRY_RUN=true` (log would-fire alerts instead of sending), `BACKFILL_LML_RATE_PER_MIN` (20, BS#995), `BACKFILL_LML_RESOLVE_TIMEOUT_MS` (15000), `LIVE_ACTIVITY_LOOKBACK_SECONDS` (60; 0 disables the BS#735 cooperative pause), `LIVE_ACTIVITY_PAUSE_MS` (30000), `WXYC_SCHEMA_NAME` (`wxyc_schema`).
+Optional (in-code defaults): `DRY_RUN=true` (log would-fire alerts instead of sending), `BACKFILL_LML_RATE_PER_MIN` (20, BS#995), `BACKFILL_LML_RESOLVE_TIMEOUT_MS` (15000), `LIVE_ACTIVITY_LOOKBACK_SECONDS` (60; 0 disables the BS#735 cooperative pause), `LIVE_ACTIVITY_PAUSE_MS` (30000), `LIVE_ACTIVITY_MAX_PAUSE_MS` (1800000 = 30 min; 0 uncapped), `WXYC_SCHEMA_NAME` (`wxyc_schema`).
+
+`LIVE_ACTIVITY_MAX_PAUSE_MS` is the cumulative wall-clock budget the cooperative pause may spend deferring to live DJs across one run. Once exhausted the run logs `live_activity_pause_budget_exhausted` and finishes without further pausing (the audit is read-only and LML-paced, so completing the weekly signal beats aborting). It is defense-in-depth behind the real fix for BS#1636: the psycopg connection runs with `autocommit=True` so the pause probe's `now()` advances between probes instead of freezing at `transaction_timestamp()` — without that, a single track logged after the run starts made the liveness SQL true forever and wedged Run 1 for 34h.
 
 ## Manual runs
 

@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/album-reviews-etl",
+  "cron-schedule": "50 4 * * *",
+  "version": "1.0.0",
+  "description": "WXYC nightly pull ETL (album-reviews-sheet-sync plan / ADR 0011): mirror the 'Album Review Responses' Google Form spreadsheet into the album_review_submissions archive table, keyed on source_key (form:<ISO UTC> of the form timestamp; collision-proofed nots: fallback). UPSERT-only — rows are never deleted; a pure-SQL+TS link pass FKs album_id on singleton library matches and never overwrites.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_album_reviews_etl:ci -f ../../Dockerfile.album-reviews-etl ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.59.0",
+    "@wxyc/database": "^1.0.0",
+    "google-auth-library": "^10.9.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

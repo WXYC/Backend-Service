@@ -42,6 +42,14 @@ const TOTALS_KEYS = [
   'backfill.enriched_no_match_raced',
   'backfill.lml_error',
   'backfill.enrich_error',
+  // BS#1591: the deliberate below-floor residual (so pending-cohort
+  // dashboards can subtract it), the vanished-mid-run count (deletes /
+  // out-of-band marker stamps), and the two worker-lifecycle buckets
+  // (reconciled = true worker overlap; inflight = claims left untouched).
+  'backfill.below_floor_skipped',
+  'backfill.stale_skipped',
+  'backfill.worker_reconciled',
+  'backfill.worker_inflight_skipped',
 ];
 
 const matchedResponse: LookupResponse = {
@@ -51,17 +59,35 @@ const matchedResponse: LookupResponse = {
 
 const lastSpanOpts = (): SpanOpts => mockStartSpan.mock.calls[0][0];
 
-// One batch of a single row, then an empty batch to terminate the loop. The
-// live-activity probe defaults to false in the db mock, so the run reaches the
-// `finished` point where the totals span fires; the only startSpan call in
-// scope is the totals span.
+// One-row run through the default (real) work-list builder: pending-count,
+// then the work-list, then the single batch slice — exercising the BS#1591
+// wiring end-to-end. The live-activity probe defaults to false in the db
+// mock, so the run reaches the `finished` point where the totals span fires;
+// the only startSpan call in scope is the totals span.
 const runOneRow = () => {
   (db.execute as jest.Mock)
-    .mockResolvedValueOnce([{ id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', track_title: 'la paradoja' }])
-    .mockResolvedValueOnce([]);
+    .mockResolvedValueOnce([{ pending_total: 1 }])
+    .mockResolvedValueOnce([{ id: 1, plays: 42 }])
+    .mockResolvedValueOnce([
+      {
+        id: 1,
+        artist_name: 'Juana Molina',
+        album_title: 'DOGA',
+        track_title: 'la paradoja',
+        album_id: null,
+        metadata_status: 'pending',
+      },
+    ]);
   const lookup = jest.fn<LookupFn>().mockResolvedValue({ response: matchedResponse, cacheHit: false });
   const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_match');
-  return runBackfill({ lookup, enrich, throttleMs: 0, liveActivityLookbackSeconds: 0 });
+  return runBackfill({
+    lookup,
+    enrich,
+    throttleMs: 0,
+    liveActivityLookbackSeconds: 0,
+    playFloor: 5,
+    floorRecencyDays: 7,
+  });
 };
 
 describe('flowsheet-metadata-backfill run.totals span (BS#1563 op + enrich_error pin)', () => {
@@ -87,6 +113,13 @@ describe('flowsheet-metadata-backfill run.totals span (BS#1563 op + enrich_error
     // enrich_error is the new bucket (#1561) — the corruption tell the wedge
     // needed. It must be present and numeric even when zero.
     expect(attrs['backfill.enrich_error']).toBe(0);
+    // BS#1591 buckets: present and numeric even when zero, so dashboards can
+    // subtract the deliberate below-floor residual from the pending cohort
+    // and watch the worker-lifecycle buckets.
+    expect(attrs['backfill.below_floor_skipped']).toBe(0);
+    expect(attrs['backfill.stale_skipped']).toBe(0);
+    expect(attrs['backfill.worker_reconciled']).toBe(0);
+    expect(attrs['backfill.worker_inflight_skipped']).toBe(0);
     for (const key of TOTALS_KEYS) {
       expect(typeof attrs[key]).toBe('number');
     }

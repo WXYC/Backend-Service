@@ -21,6 +21,18 @@ const mockResolveRotationPickerSource = jest.fn<(rotationId: number) => Promise<
 type RotationTrackMock = { position: string; title: string; duration: string | null; artists: string[] };
 const mockGetRotationTracksFromRelease = jest.fn<(releaseId: number) => Promise<RotationTrackMock[] | null>>();
 
+// PATCH /library/:id (updateAlbum) surface.
+const mockGetLibraryRowById = jest.fn<(id: number) => Promise<Record<string, unknown> | undefined>>();
+const mockUpdateAlbumInDB =
+  jest.fn<(id: number, updates: Record<string, unknown>, opts?: unknown) => Promise<{ id: number } | undefined>>();
+const mockGetFormatById = jest.fn<(id: number) => Promise<{ id: number; format_name: string } | undefined>>();
+const mockArtistExistsInGenre = jest.fn<(artistId: number, genreId: number) => Promise<boolean>>();
+const mockAlbumCodeNumberTaken = jest.fn<(artistId: number, code: number, exclude: number) => Promise<boolean>>();
+const mockUpdateOnStreaming = jest.fn<() => Promise<unknown>>();
+const mockUpdateArtworkUrl = jest.fn<() => Promise<unknown>>();
+const mockGetLabelById = jest.fn<(id: number) => Promise<{ id: number; label_name: string } | undefined>>();
+const mockSearchLibrary = jest.fn<() => Promise<{ results: unknown[]; total: number }>>();
+
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
   markAlbumMissing: mockMarkAlbumMissing,
@@ -37,8 +49,8 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   addToRotation: jest.fn(),
   killRotationInDB: jest.fn(),
   insertAlbum: mockInsertAlbum,
-  updateArtworkUrl: jest.fn(),
-  updateOnStreaming: jest.fn(),
+  updateArtworkUrl: mockUpdateArtworkUrl,
+  updateOnStreaming: mockUpdateOnStreaming,
   updateCanonicalEntity: mockUpdateCanonicalEntity,
   mapLookupToCanonicalEntity: mockMapLookupToCanonicalEntity,
   artistIdFromName: mockArtistIdFromName,
@@ -51,13 +63,25 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   getGenresFromDB: jest.fn(),
   insertGenre: jest.fn(),
   insertFormat: jest.fn(),
+  getFormatById: mockGetFormatById,
   isISODate: jest.fn(),
   resolveRotationPickerSource: mockResolveRotationPickerSource,
   getRotationTracksFromRelease: mockGetRotationTracksFromRelease,
+  getLibraryRowById: mockGetLibraryRowById,
+  updateAlbumInDB: mockUpdateAlbumInDB,
+  artistExistsInGenre: mockArtistExistsInGenre,
+  albumCodeNumberTaken: mockAlbumCodeNumberTaken,
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
   createLabel: mockCreateLabel,
+  getLabelById: mockGetLabelById,
+}));
+
+jest.mock('../../../apps/backend/services/library-search.service', () => ({
+  parseEnumQueryList: () => undefined,
+  parseRotationBinsQueryList: () => undefined,
+  searchLibrary: mockSearchLibrary,
 }));
 
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
@@ -95,6 +119,8 @@ import {
   searchForAlbum,
   addAlbum,
   getRotationTracks,
+  updateAlbum,
+  searchLibraryQueryEndpoint,
 } from '../../../apps/backend/controllers/library.controller';
 
 function mockResponse(): Response {
@@ -562,6 +588,330 @@ describe('library.controller', () => {
       const res = mockResponse();
 
       await expect(getRotationTracks(req, res, next)).rejects.toThrow('upstream timeout');
+    });
+  });
+
+  describe('updateAlbum', () => {
+    const existingRow = {
+      id: 42,
+      artist_id: 7,
+      genre_id: 11,
+      format_id: 1,
+      album_title: 'DOGA',
+      label: 'Sonamos',
+      label_id: 10,
+      alternate_artist_name: null,
+      disc_quantity: 1,
+      code_number: 3,
+      artist_name: 'Juana Molina',
+      discogs_unavailable: false,
+      discogs_unavailable_note: null,
+    };
+
+    const reqFor = (body: Record<string, unknown>) => ({ params: { id: '42' }, body }) as unknown as Request;
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockIsLmlConfigured.mockReturnValue(false);
+      mockGetLibraryRowById.mockResolvedValue(existingRow);
+      mockUpdateAlbumInDB.mockResolvedValue({ id: 42 });
+      mockGetFormatById.mockResolvedValue({ id: 1, format_name: 'CD' });
+      mockGetAlbumFromDB.mockResolvedValue(fullAlbum);
+      mockGetArtistNameById.mockResolvedValue('Juana Molina');
+      mockArtistExistsInGenre.mockResolvedValue(true);
+    });
+
+    describe('format_id existence guard (#1550)', () => {
+      it('returns 400 when format_id does not reference an existing format', async () => {
+        mockGetFormatById.mockResolvedValue(undefined);
+        const res = mockResponse();
+
+        await expect(updateAlbum(reqFor({ format_id: 99999999 }), res, next)).rejects.toThrow(
+          'format_id does not reference an existing format'
+        );
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('does not create an orphan label when an invalid format_id is combined with a new label', async () => {
+        mockGetFormatById.mockResolvedValue(undefined);
+        const res = mockResponse();
+
+        await expect(updateAlbum(reqFor({ format_id: 99999999, label: 'Brand New Label' }), res, next)).rejects.toThrow(
+          'format_id does not reference an existing format'
+        );
+        // format_id is validated before the label upsert, so no labels row is stranded.
+        expect(mockCreateLabel).not.toHaveBeenCalled();
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('accepts a format_id that references an existing format', async () => {
+        mockGetFormatById.mockResolvedValue({ id: 2, format_name: 'Vinyl' });
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ format_id: 2 }), res, next);
+
+        expect(mockGetFormatById).toHaveBeenCalledWith(2);
+        expect(mockUpdateAlbumInDB).toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+    });
+
+    describe('over-length string guards (#1551)', () => {
+      it('returns 400 for an over-length album_title (>128 chars)', async () => {
+        const res = mockResponse();
+
+        await expect(updateAlbum(reqFor({ album_title: 'a'.repeat(129) }), res, next)).rejects.toThrow(
+          'album_title must be 128 characters or fewer'
+        );
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('returns 400 for an over-length alternate_artist_name (>128 chars)', async () => {
+        const res = mockResponse();
+
+        await expect(updateAlbum(reqFor({ alternate_artist_name: 'a'.repeat(129) }), res, next)).rejects.toThrow(
+          'alternate_artist_name must be 128 characters or fewer'
+        );
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('returns 400 for an over-length label (>128 chars) without upserting it', async () => {
+        const res = mockResponse();
+
+        await expect(updateAlbum(reqFor({ label: 'a'.repeat(129) }), res, next)).rejects.toThrow(
+          'label must be 128 characters or fewer'
+        );
+        expect(mockCreateLabel).not.toHaveBeenCalled();
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('accepts an exactly-128-char album_title', async () => {
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ album_title: 'a'.repeat(128) }), res, next);
+
+        expect(mockUpdateAlbumInDB).toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+    });
+
+    describe('no-op short-circuit (#1555)', () => {
+      it('returns 200 without running the UPDATE when artist_id is unchanged', async () => {
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ artist_id: 7 }), res, next);
+
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+        expect(res.json).toHaveBeenCalledWith(fullAlbum);
+      });
+
+      it('returns 200 without running the UPDATE when the submitted album_title equals the stored value', async () => {
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ album_title: 'DOGA' }), res, next);
+
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('runs the UPDATE when a field actually changes', async () => {
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ album_title: 'A Different Title' }), res, next);
+
+        expect(mockUpdateAlbumInDB).toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+    });
+
+    describe('enrichment repair on identity change (#1549)', () => {
+      it('does not null enrichment columns when LML is unconfigured', async () => {
+        mockIsLmlConfigured.mockReturnValue(false);
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ album_title: 'A New Title' }), res, next);
+
+        // Two-arg call, no resetEnrichment flag: updateAlbumInDB never NULLs
+        // on_streaming / artwork_url / canonical_entity_*.
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(42, expect.objectContaining({ album_title: 'A New Title' }));
+        expect(mockUpdateAlbumInDB.mock.calls[0]).toHaveLength(2);
+        // LML unconfigured -> no re-enrichment fired, so nothing is wiped or rewritten.
+        expect(mockUpdateOnStreaming).not.toHaveBeenCalled();
+        expect(mockUpdateArtworkUrl).not.toHaveBeenCalled();
+        expect(mockUpdateCanonicalEntity).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('preserves prior enrichment when the identity re-lookup finds no match', async () => {
+        mockIsLmlConfigured.mockReturnValue(true);
+        mockCheckStreamingAvailability.mockResolvedValue({ on_streaming: null });
+        mockLookupMetadata.mockResolvedValue(null); // no match: coordinator returns null
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ album_title: 'A New Title' }), res, next);
+        // Drain the fire-and-forget canonical-entity lookup before asserting.
+        await new Promise((r) => setImmediate(r));
+
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(42, expect.objectContaining({ album_title: 'A New Title' }));
+        expect(mockUpdateAlbumInDB.mock.calls[0]).toHaveLength(2);
+        // A no-match re-lookup writes nothing, so the prior artwork / streaming /
+        // canonical values survive the edit instead of being NULLed-and-abandoned.
+        expect(mockUpdateOnStreaming).not.toHaveBeenCalled();
+        expect(mockUpdateArtworkUrl).not.toHaveBeenCalled();
+        expect(mockUpdateCanonicalEntity).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('swaps in the newly looked-up artwork/streaming when the re-lookup matches', async () => {
+        mockIsLmlConfigured.mockReturnValue(true);
+        mockCheckStreamingAvailability.mockResolvedValue({ on_streaming: true });
+        mockLookupMetadata.mockResolvedValue({
+          search_type: 'direct',
+          results: [{ artwork: { artwork_url: 'https://i.discogs.com/new.jpg' } }],
+        });
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ album_title: 'A New Title' }), res, next);
+        await new Promise((r) => setImmediate(r));
+
+        expect(mockUpdateOnStreaming).toHaveBeenCalledWith(42, true);
+        expect(mockUpdateArtworkUrl).toHaveBeenCalledWith(42, 'https://i.discogs.com/new.jpg');
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+    });
+
+    // BS#1281 (Not-on-Discogs 1a): PATCH /library/:id accepts the MD's
+    // discogs_unavailable write surface. The DB-tier behaviors (column
+    // defaults, CHECK constraint, migration idempotency — issue tests 1–3)
+    // are covered by the migrate-dryrun + integration CI tiers; these unit
+    // tests cover the handler contract (issue tests 4–6 plus input validation).
+    describe('discogs_unavailable', () => {
+      it('persists a discogsUnavailable + note round-trip (issue test 4)', async () => {
+        const res = mockResponse();
+        await updateAlbum(reqFor({ discogsUnavailable: true, discogsUnavailableNote: 'embargoed promo' }), res, next);
+
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(
+          42,
+          expect.objectContaining({ discogs_unavailable: true, discogs_unavailable_note: 'embargoed promo' })
+        );
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('clears any note when discogsUnavailable is set false with the note omitted (issue test 5)', async () => {
+        // Start from a flagged row that HAS a note, so clearing it is an
+        // observable UPDATE rather than a no-op the #1555 short-circuit skips.
+        mockGetLibraryRowById.mockResolvedValue({
+          ...existingRow,
+          discogs_unavailable: true,
+          discogs_unavailable_note: 'was embargoed',
+        });
+        const res = mockResponse();
+        await updateAlbum(reqFor({ discogsUnavailable: false }), res, next);
+
+        const updates = mockUpdateAlbumInDB.mock.calls[0][1];
+        expect(updates).toMatchObject({ discogs_unavailable: false, discogs_unavailable_note: null });
+      });
+
+      it('drops a client-supplied lastDiscogsRecheckAt — server-write-only (issue test 6)', async () => {
+        const res = mockResponse();
+        await updateAlbum(
+          reqFor({ discogsUnavailable: true, lastDiscogsRecheckAt: '2020-01-01T00:00:00Z' }),
+          res,
+          next
+        );
+
+        const updates = mockUpdateAlbumInDB.mock.calls[0][1];
+        expect(updates).not.toHaveProperty('last_discogs_recheck_at');
+        expect(updates).toMatchObject({ discogs_unavailable: true });
+      });
+
+      it('rejects a non-null note contradicting discogsUnavailable: false (flag⟺note invariant)', async () => {
+        const res = mockResponse();
+        await expect(
+          updateAlbum(reqFor({ discogsUnavailable: false, discogsUnavailableNote: 'still embargoed' }), res, next)
+        ).rejects.toThrow(/discogsUnavailable/);
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('rejects a non-boolean discogsUnavailable', async () => {
+        const res = mockResponse();
+        await expect(updateAlbum(reqFor({ discogsUnavailable: 'yes' }), res, next)).rejects.toThrow(
+          /discogsUnavailable must be a boolean/
+        );
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('rejects a note longer than 500 characters', async () => {
+        const res = mockResponse();
+        await expect(
+          updateAlbum(reqFor({ discogsUnavailable: true, discogsUnavailableNote: 'x'.repeat(501) }), res, next)
+        ).rejects.toThrow(/500/);
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('adds a note to an already-flagged row when only the note is supplied', async () => {
+        mockGetLibraryRowById.mockResolvedValue({ ...existingRow, discogs_unavailable: true });
+        const res = mockResponse();
+        await updateAlbum(reqFor({ discogsUnavailableNote: 'audience-segment only' }), res, next);
+
+        const updates = mockUpdateAlbumInDB.mock.calls[0][1];
+        expect(updates).toMatchObject({ discogs_unavailable_note: 'audience-segment only' });
+        expect(updates).not.toHaveProperty('discogs_unavailable');
+      });
+
+      it('rejects a note on a not-yet-flagged row when the flag is omitted', async () => {
+        // existingRow.discogs_unavailable === false and the body does not flip it.
+        const res = mockResponse();
+        await expect(updateAlbum(reqFor({ discogsUnavailableNote: 'orphan note' }), res, next)).rejects.toThrow(
+          /discogsUnavailable/
+        );
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('accepts a discogs-unavailable-only PATCH (satisfies the at-least-one-field guard)', async () => {
+        const res = mockResponse();
+        await updateAlbum(reqFor({ discogsUnavailable: true }), res, next);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        const updates = mockUpdateAlbumInDB.mock.calls[0][1];
+        expect(updates).toMatchObject({ discogs_unavailable: true });
+        // Flag-only (note untouched) leaves the existing note intact.
+        expect(updates).not.toHaveProperty('discogs_unavailable_note');
+      });
+    });
+  });
+
+  describe('searchLibraryQueryEndpoint', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockSearchLibrary.mockResolvedValue({ results: [], total: 0 });
+    });
+
+    it('returns 400 when the page key is repeated (Express yields string[]) (#1553)', async () => {
+      const req = { query: { page: ['1', '2'] } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(searchLibraryQueryEndpoint(req, res, next)).rejects.toThrow('page must be a single string value');
+      expect(mockSearchLibrary).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 when the limit key is repeated (Express yields string[]) (#1553)', async () => {
+      const req = { query: { limit: ['1', '2'] } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(searchLibraryQueryEndpoint(req, res, next)).rejects.toThrow('limit must be a single string value');
+      expect(mockSearchLibrary).not.toHaveBeenCalled();
+    });
+
+    it('accepts single-valued page/limit and returns 200', async () => {
+      const req = { query: { page: '1', limit: '10' } } as unknown as Request;
+      const res = mockResponse();
+
+      await searchLibraryQueryEndpoint(req, res, next);
+
+      expect(mockSearchLibrary).toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
     });
   });
 });

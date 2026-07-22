@@ -33,7 +33,7 @@ import {
   captureMirrorFailure,
   MIRROR_OPERATION_META,
   type MirrorOperation,
-} from '../../../../apps/backend/middleware/legacy/http.mirror';
+} from '@wxyc/legacy-mirror'; // BS#1707: moved from apps/backend/middleware/legacy/http.mirror
 
 beforeEach(() => {
   mockFetch.mockReset();

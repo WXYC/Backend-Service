@@ -2,9 +2,11 @@
  * CDC WebSocket server for Backend-Service.
  *
  * Attaches to the existing Express HTTP server via the 'upgrade' event,
- * filtered to the /cdc path. Authenticates connections via CDC_SECRET
- * query parameter. Fans out PostgreSQL CDC events (received via the shared
- * dispatcher's `onCdcEvent`) to all connected WebSocket clients.
+ * filtered to the /cdc path. Authenticates connections against CDC_SECRET via
+ * an `Authorization: Bearer` header, compared in constant time (BS#1136); a
+ * deprecated `?key=` query-parameter path is kept for one deploy. Fans out
+ * PostgreSQL CDC events (received via the shared dispatcher's `onCdcEvent`) to
+ * all connected WebSocket clients.
  *
  * The LISTEN startup itself lives in `dispatcher.ts` (BS#1187): the
  * dispatcher always runs so in-process subscribers like
@@ -39,12 +41,68 @@
 import { Server as HttpServer, IncomingMessage } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { URL } from 'url';
+import { timingSafeEqual } from 'crypto';
 import * as Sentry from '@sentry/node';
 import { onCdcEvent } from '@wxyc/database';
 import type { CdcEvent } from '@wxyc/database';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const CDC_PATH = '/cdc';
+
+/**
+ * Constant-time string comparison (BS#1136). The previous auth used
+ * `key !== secret`, a short-circuiting per-character compare that leaks the
+ * secret one byte at a time to a timing attack against the upgrade endpoint.
+ *
+ * `crypto.timingSafeEqual` runs in time independent of where the first
+ * differing byte is, but throws if the two buffers differ in length. We
+ * length-guard first and report a plain non-match — a length mismatch is
+ * already a non-match, and revealing only the length (not the contents) is
+ * the standard, accepted trade-off for a fixed-length shared secret.
+ */
+export function constantTimeEqual(a: string, b: string): boolean {
+  const aBuf = Buffer.from(a, 'utf8');
+  const bBuf = Buffer.from(b, 'utf8');
+  if (aBuf.length !== bBuf.length) return false;
+  return timingSafeEqual(aBuf, bBuf);
+}
+
+/**
+ * Extracts the caller-supplied CDC secret from an upgrade request (BS#1136).
+ *
+ * Preferred: `Authorization: Bearer <secret>`. Headers are not written to
+ * access logs or Sentry's request-context capture by default, so the secret
+ * does not leak to log-retention systems the way a `?key=` query parameter
+ * does (query strings land in CloudFront / nginx / EC2 access logs, browser
+ * history, and request snapshots even under TLS).
+ *
+ * Deprecated (removed after one deploy): `?key=<secret>` in the URL. Kept only
+ * so an in-flight consumer can migrate to the header without a lockstep
+ * deploy; every use logs a deprecation warning. The secret value itself is
+ * never logged. Returns `null` when neither is present.
+ */
+function extractCdcSecret(request: IncomingMessage, url: URL): string | null {
+  const authHeader = request.headers.authorization;
+  if (authHeader) {
+    // `\s+` (not a literal single space) matches the repo's Bearer-parsing
+    // convention (`authenticateBearer` in apps/backend/routes/internal.route.ts,
+    // `auth.middleware.ts`) and RFC 7235's `1*SP` between scheme and token, so a
+    // tab- or multi-space-separated header authenticates instead of spuriously
+    // 403ing or capturing leading whitespace into the compared secret.
+    const match = /^Bearer\s+(.+)$/i.exec(authHeader);
+    if (match) return match[1];
+  }
+
+  const key = url.searchParams.get('key');
+  if (key) {
+    console.warn(
+      '[cdc-ws] DEPRECATED: CDC secret supplied via the ?key= query parameter — migrate to the Authorization: Bearer header (BS#1136). Query strings leak to access logs; this path will be removed after one deploy.'
+    );
+    return key;
+  }
+
+  return null;
+}
 
 /**
  * Per-client outbound-buffer ceiling, in bytes. A consumer that exceeds
@@ -102,10 +160,11 @@ function safeSend(client: WebSocket, msg: string): boolean {
 
 /**
  * Sets up the CDC WebSocket server on the given HTTP server.
- * Handles upgrade requests to /cdc, authenticates via query parameter,
- * and registers a fan-out handler against the shared CDC dispatcher.
- * No-ops (with the canonical `[cdc-ws]` disabled log) when CDC_SECRET
- * is unset — deploy verification matches the same log line.
+ * Handles upgrade requests to /cdc, authenticates via the
+ * `Authorization: Bearer` header (constant-time compare; deprecated `?key=`
+ * shim for one deploy), and registers a fan-out handler against the shared
+ * CDC dispatcher. No-ops (with the canonical `[cdc-ws]` disabled log) when
+ * CDC_SECRET is unset — deploy verification matches the same log line.
  */
 export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
   const secret = process.env.CDC_SECRET;
@@ -124,9 +183,12 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
       return;
     }
 
-    const key = url.searchParams.get('key');
-    if (!key || key !== secret) {
-      console.warn('[cdc-ws] Rejected connection: invalid key');
+    // Auth (BS#1136): prefer the `Authorization: Bearer` header, fall back to
+    // the deprecated `?key=` query parameter for one deploy, and compare with a
+    // constant-time check. Never log the presented secret.
+    const provided = extractCdcSecret(request, url);
+    if (!provided || !constantTimeEqual(provided, secret)) {
+      console.warn('[cdc-ws] Rejected connection: invalid credentials');
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;

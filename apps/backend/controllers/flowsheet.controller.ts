@@ -74,9 +74,10 @@ export interface IFSEntry extends Omit<
   on_streaming: boolean | null;
   metadata: IFSEntryMetadata;
   // Resolved catalog artist for the played release (flowsheet.album_id ->
-  // library.artist_id). Not a wire field — the batch key `attachUpcomingShows`
-  // uses to look up the per-playcut `upcoming_show` (BS#1607). NULL for
-  // free-form entries and unresolved library rows.
+  // library.artist_id). The batch key `attachUpcomingShows` uses to look up the
+  // per-playcut `upcoming_show` (BS#1607), and since BS#1625 also projected
+  // onto the V2 track wire shape as `artist_id`. NULL for free-form entries and
+  // unresolved library rows.
   artist_id: number | null;
   // Per-playcut upcoming-show enrichment (BS#1607). Populated only on track
   // rows whose `artist_id` matched a curated, non-tombstoned, upcoming

@@ -1,0 +1,28 @@
+{
+  "name": "@wxyc/legacy-mirror-reconcile",
+  "cron-schedule": "0 8 * * *",
+  "version": "1.0.0",
+  "description": "WXYC recurring cron (BS#1707): self-heal tubafrenzy mirror rows orphaned when the one-shot res.finish mirror attempt was skipped (flag off at go-live, transient tubafrenzy failure, mid-show flag flip, or a BS restart mid-request). Two DB-durable, all-or-nothing sweeps re-drive shows (legacy_show_id IS NULL) then their entries + signoff (legacy_entry_id IS NULL); partially-mirrored shows are detected and reported for manual remediation, never auto-appended. Reuses @wxyc/legacy-mirror for byte-identical payloads; per-DJ backend-mirror flag gate; pg_try_advisory_lock single-flight; cooperative pause defers when DJs are active.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_legacy_mirror_reconcile:ci -f ../../Dockerfile.legacy-mirror-reconcile ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.66.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/legacy-mirror": "^1.0.0",
+    "posthog-node": "^5.45.2"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

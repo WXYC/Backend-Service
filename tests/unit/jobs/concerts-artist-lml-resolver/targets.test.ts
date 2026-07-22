@@ -102,6 +102,21 @@ describe('loadHeadlinerCandidates', () => {
 
     await expect(loadHeadlinerCandidates(30)).rejects.toThrow(/unrecognized db\.execute\(\) result shape/);
   });
+
+  test('excludes tribute-context rows — a tribute billing must never resolve an identity', async () => {
+    // Mirror of the SQL lane's guard (jobs/concerts-artist-resolver/query.ts):
+    // in a tribute-framed event the billed name belongs to (or aliases) the
+    // HONOREE, not the performer — the Stanczyks "REM Tribute to Lifes Rich
+    // Pageant" row resolved to the real R.E.M. this way. Word-start match
+    // (\m) so "Tributaries" doesn't trip; the title arm is NULL-safe.
+    db.execute.mockResolvedValueOnce([]);
+
+    await loadHeadlinerCandidates(30);
+
+    const text = renderSql(db.execute.mock.calls[0][0]);
+    expect(text).toContain(`("title" IS NULL OR "title" !~* '\\mtribute')`);
+    expect(text).toContain(`"headlining_artist_raw" !~* '\\mtribute'`);
+  });
 });
 
 describe('lookupSingletonLibraryArtistId', () => {

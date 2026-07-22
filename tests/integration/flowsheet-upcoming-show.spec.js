@@ -1,6 +1,6 @@
 /**
  * BS#1607 — per-playcut `upcoming_show` enrichment on the V2 flowsheet feed
- * (touring-events Phase 3).
+ * (on-tour Phase 3).
  *
  * Postgres-backed: seeds a show, flowsheet track rows linked to library
  * albums (whose artists come from the fixed-ID seed fixture), and a set of
@@ -159,6 +159,18 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".venues WHERE slug = $1`, [VENUE_SLUG]);
   };
 
+  /**
+   * Clear the SERVER's per-process `upcoming_show` map cache (BS#1616). The cache
+   * lives in the backend process, out of this out-of-process test's reach, so we
+   * clear it through the dev/test-only `/internal/test/reset-upcoming-shows-cache`
+   * endpoint (the CI-profile backend runs NODE_ENV=test, so the route exists).
+   * Used to force a genuine cold feed read.
+   */
+  const resetUpcomingShowsCache = async () => {
+    const res = await request.post('/internal/test/reset-upcoming-shows-cache');
+    expect(res.status).toBe(204);
+  };
+
   beforeAll(async () => {
     sql = makeSql();
     await cleanup();
@@ -274,6 +286,12 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
     // scraped raw differs — must attach via the canonical name-arm key.
     const t8 = await seedTrack({ albumId: null, artistName: RESOLVED_CANONICAL_NAME, playOrder: 8 });
     insertedTrackIds = [t1, t2, t3, t4, t5, t6, t7, t8];
+
+    // A prior spec file's /flowsheet read may have warmed the server's
+    // upcoming_show map cache (BS#1616) before these concerts existed. Clear it
+    // so the first read in this file rebuilds against the seeded fixtures rather
+    // than serving a stale, concert-free map for the same ET `today` key.
+    await resetUpcomingShowsCache();
   });
 
   afterAll(async () => {
@@ -409,33 +427,13 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
    * the delta tracks the match count); the batched implementation issues a
    * single lookup for the whole page, so the delta is a small constant.
    *
-   * `pg_stat_user_tables` is updated asynchronously by the stats collector and
-   * the backend serves the feed on its own connection pool, so a naive
-   * before/after around one request races the flush. `settledScans` clears the
-   * caller's stats snapshot and polls until the cumulative counter stops
-   * moving, giving a stable reading; the assertion then compares a small-page
-   * delta against a large-page delta rather than trusting an absolute count.
+   * `pg_stat_user_tables` is updated asynchronously by each backend and the
+   * server serves the feed on its own connection pool, so a naive before/after
+   * around one request races the flush. `drainedScans` clears the caller's stats
+   * snapshot and polls until the cumulative counter has held STILL for a
+   * sustained run of reads (not just two — see below), giving a fully drained
+   * reading; the assertions then bound the drained cold and warm deltas.
    */
-  const settledScans = async () => {
-    let last = -1;
-    for (let i = 0; i < 40; i++) {
-      // eslint-disable-next-line no-await-in-loop
-      await sql.unsafe('SELECT pg_stat_clear_snapshot()');
-      // eslint-disable-next-line no-await-in-loop
-      const [row] = await sql.unsafe(
-        `SELECT COALESCE(seq_scan, 0) + COALESCE(idx_scan, 0) AS scans
-           FROM pg_stat_user_tables
-          WHERE schemaname = $1 AND relname = 'concerts'`,
-        [SCHEMA]
-      );
-      const scans = Number(row ? row.scans : 0);
-      if (scans === last) return scans; // two identical reads = flushed
-      last = scans;
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    return last;
-  };
 
   /** Raw cumulative concerts-scan counter (single read, snapshot cleared first). */
   const rawScans = async () => {
@@ -449,53 +447,76 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
     return Number(row ? row.scans : 0);
   };
 
-  /**
-   * concerts-scan delta attributable to EXACTLY ONE feed read of this page.
-   *
-   * `pg_stat_user_tables` is flushed asynchronously by the stats collector, and
-   * the backend serves the feed on its own connection pool, so the scan a feed
-   * read performs is not always visible on the first poll. The naive
-   * `after(settled) - before(settled)` around a single read can settle BEFORE
-   * the read's scan flushes and report a spurious 0. Retrying the whole
-   * before/read/after cycle is worse: each extra feed read adds scans that flush
-   * into a later bracket, inflating the delta above the anti-N+1 ceiling.
-   *
-   * So we issue the feed read exactly ONCE, then poll the counter until it has
-   * both advanced past `before` AND gone stable (two equal consecutive reads) —
-   * capturing this single read's scans without absorbing any other. If it never
-   * advances within the budget the delta stays 0 and the `>= 1` liveness
-   * assertion fails honestly (rather than looping and issuing more reads).
-   */
-  const scanDeltaForOneFeedRead = async () => {
-    const before = await settledScans();
-    await fetchSeededTracks();
+  // `pg_stat_user_tables` is flushed asynchronously per backend (no more often
+  // than ~1s, PGSTAT_MIN_INTERVAL), and one maps build bumps the concerts
+  // counter by SEVERAL (seq/idx probe + heap access, BS#1661). Two helpers read
+  // the cumulative counter drained to a SUSTAINED quiescent value — a longer run
+  // of consecutive equal reads (STABLE × GAP_MS > the 1s flush floor) waits the
+  // whole flush out, so no trailing increment leaks into a later bracket.
+  const STABLE = 6; // consecutive equal reads ⇒ the flush has fully settled
+  const GAP_MS = 200; // STABLE × GAP_MS = 1.2s > the ~1s stats-flush floor
+  const MAX_POLLS = 80;
 
+  /** Drained counter with no advancement requirement (a quiescent baseline). */
+  const quiescedScans = async () => {
     let last = -1;
-    let stableAdvanced = before;
-    for (let i = 0; i < 40; i++) {
+    let run = 0;
+    for (let i = 0; i < MAX_POLLS; i++) {
       const scans = await rawScans(); // eslint-disable-line no-await-in-loop
-      if (scans > before && scans === last) {
-        stableAdvanced = scans;
-        break;
+      if (scans === last) run += 1;
+      else {
+        last = scans;
+        run = 1;
       }
-      last = scans;
-      await new Promise((r) => setTimeout(r, 100)); // eslint-disable-line no-await-in-loop
+      if (run >= STABLE) return scans;
+      await new Promise((r) => setTimeout(r, GAP_MS)); // eslint-disable-line no-await-in-loop
     }
-    return stableAdvanced - before;
+    return last;
+  };
+
+  /**
+   * Drained counter AFTER it has advanced past `baseline`. A read's scan flushes
+   * ~1s late, so a plain quiesce right after the read can latch onto the
+   * PRE-flush plateau (counter still at `baseline`) and declare "drained" before
+   * the read's increments ever appear — they then surface in a later bracket. So
+   * we only begin counting stability once the counter has moved past `baseline`,
+   * guaranteeing this read's whole (multi-increment, atomic-per-commit) flush is
+   * captured here and nothing bleeds forward. If it never advances (a regression
+   * that stopped querying concerts), it exhausts the budget and returns
+   * `baseline`, so the caller's `>= 1` liveness assertion fails honestly.
+   */
+  const drainedScansAbove = async (baseline) => {
+    let last = -1;
+    let run = 0;
+    for (let i = 0; i < MAX_POLLS; i++) {
+      const scans = await rawScans(); // eslint-disable-line no-await-in-loop
+      if (scans > baseline && scans === last) run += 1;
+      else {
+        last = scans;
+        run = 1;
+      }
+      if (scans > baseline && run >= STABLE) return scans;
+      await new Promise((r) => setTimeout(r, GAP_MS)); // eslint-disable-line no-await-in-loop
+    }
+    return last;
   };
 
   // The batched lookup scans `concerts` a small, bounded number of times per
   // feed read regardless of how many matching rows the page carries. A per-row
   // implementation would scan once per matching row, so with MANY_MATCHES rows
-  // the delta would be >= MANY_MATCHES. We assert the delta stays well under
+  // the delta would be >= 1 + MANY_MATCHES. We assert the delta stays well under
   // that count — the clean separation between "one batched query" (a handful of
-  // scans) and "one query per row" (>= 9). An absolute bound is used rather
-  // than a small-vs-large diff because a single query's scan count already
-  // varies by 1-2 (index probe + heap access) run to run.
-  const MANY_MATCHES = 8;
-  const BATCHED_SCAN_CEILING = 5;
+  // scans) and "one query per row" (>= 1 + MANY_MATCHES). An absolute bound is
+  // used rather than a small-vs-large diff because a single query's scan count
+  // already varies run to run (BS#1661: seq_scan-vs-idx_scan + index probe +
+  // heap access observed at 4-6). The ceiling carries one unit of headroom above
+  // that observed max, and MANY_MATCHES is set high enough that the per-row
+  // threshold (13) stays far above the ceiling — so the anti-N+1 contract still
+  // reads cleanly without the ceiling flaking on planner variance.
+  const MANY_MATCHES = 12;
+  const BATCHED_SCAN_CEILING = 7;
 
-  it('batches the lookup: concerts-table scans do not grow with page match count', async () => {
+  it('cold read batches the lookup (bounded scans, no per-row query); warm reads are served from cache (no per-read rebuild)', async () => {
     // Add many more matching tracks, all resolving to ARTIST_WITH_SHOW, so the
     // page has 1 + MANY_MATCHES matches. A per-row lookup would scan concerts
     // once per matching row.
@@ -507,20 +528,55 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
     }
     insertedTrackIds.push(...extraIds);
 
-    const largeDelta = await scanDeltaForOneFeedRead();
+    // Force a genuine COLD read: clear the server's per-process map cache so this
+    // read rebuilds and actually scans `concerts`. Without the reset, a mid-suite
+    // read is warm (BS#1616 memoizes the maps across reads) and scans nothing —
+    // which would make the anti-N+1 assertion below vacuous.
+    await resetUpcomingShowsCache();
 
-    // Liveness lower bound: the feed read must scan `concerts` at LEAST once,
+    // COLD read. `beforeCold` is a quiesced baseline; `afterCold` waits for the
+    // counter to ADVANCE past it and then settle, so this rebuild's whole flush
+    // (which surfaces ~1s late) is captured here and none of its increments
+    // bleed into the warm bracket below.
+    const beforeCold = await quiescedScans();
+    await fetchSeededTracks();
+    const afterCold = await drainedScansAbove(beforeCold);
+    const coldDelta = afterCold - beforeCold;
+
+    // Liveness lower bound: the cold read must scan `concerts` at LEAST once,
     // else the enrichment is a no-op and the whole batching contract is vacuous
     // (a delta of 0 would silently pass a regression that stopped querying
-    // concerts entirely). `scanDeltaForOneFeedRead` retries until it observes a
-    // positive delta (absorbing the async stats-flush race), so `>= 1` is
-    // reliable here, not flaky — see its doc comment for why the naive
-    // before/after can spuriously read 0.
-    expect(largeDelta).toBeGreaterThanOrEqual(1);
+    // concerts entirely).
+    expect(coldDelta).toBeGreaterThanOrEqual(1);
     // Upper bounds (anti-N+1): never one-scan-per-row — a per-row impl would
-    // push this to >= 9.
-    expect(largeDelta).toBeLessThanOrEqual(BATCHED_SCAN_CEILING);
-    expect(largeDelta).toBeLessThan(1 + MANY_MATCHES);
+    // push this to >= 1 + MANY_MATCHES (13). The `< 1 + MANY_MATCHES` assertion
+    // is the load-bearing anti-N+1 guarantee; BATCHED_SCAN_CEILING is the
+    // tighter "still just a handful of scans" bound, with headroom for planner
+    // variance (BS#1661).
+    expect(coldDelta).toBeLessThanOrEqual(BATCHED_SCAN_CEILING);
+    expect(coldDelta).toBeLessThan(1 + MANY_MATCHES);
+
+    // Cache proof (BS#1616): the cold read above warmed the per-day map cache.
+    // Further reads of the same page/today — with NO reset between — are served
+    // entirely from that cache and issue ZERO `concerts` queries (confirmed by
+    // statement logging during development). `pg_stat_user_tables` flushes
+    // asynchronously (~1s) and one build bumps the counter by several (BS#1661),
+    // so a strict "== 0" on the warm bracket races that flush: a cold increment
+    // can slip past `afterCold` into it. That slip is bounded by ONE build
+    // (< BATCHED_SCAN_CEILING) and is INDEPENDENT of how many warm reads we do —
+    // whereas a cache that rebuilt per read would scan WARM_READS times. So we
+    // do WARM_READS (> the ceiling) reads and assert the whole warm bracket
+    // stayed under a single build's worth: cleanly separates "served from cache"
+    // (< ceiling, just flush bleed) from "rebuilt each read" (>= WARM_READS).
+    // The deterministic per-call proof (one build cold, zero warm) is in the
+    // mocked unit tests (concerts.service.test.ts). This is the hot-path win —
+    // getLatest stops scanning concerts on every poll — proven end-to-end.
+    const WARM_READS = 10; // > BATCHED_SCAN_CEILING, so a per-read rebuild overshoots the bound
+    for (let i = 0; i < WARM_READS; i++) {
+      await fetchSeededTracks(); // eslint-disable-line no-await-in-loop
+    }
+    const afterWarm = await quiescedScans();
+    expect(afterWarm - afterCold).toBeLessThan(BATCHED_SCAN_CEILING);
   });
 
   /**

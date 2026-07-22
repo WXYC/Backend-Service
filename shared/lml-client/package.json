@@ -19,8 +19,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@sentry/node": "^10.59.0",
-    "@wxyc/shared": "^1.16.0"
+    "@sentry/node": "^10.66.0",
+    "@wxyc/shared": "^2.3.0"
   },
   "devDependencies": {
     "tsup": "^8.5.1",

@@ -1,12 +1,17 @@
 /**
  * Recurring metadata drift-repair (#641 Phase 1, A.3 of #631).
  *
- * Iterates every `flowsheet` track row where the LML metadata enrichment
- * never ran (`metadata_attempt_at IS NULL`), calls LML's /lookup for each
- * one, and writes the 10-column metadata UPDATE plus the
- * `metadata_attempt_at = now()` stamp. Cross-run resumability is via the
- * WHERE filter alone — successful + no-match rows have the marker;
- * LML-throw rows don't and stay in the retry pool for the next sweep.
+ * Iterates `flowsheet` track rows where the LML metadata enrichment never
+ * ran (`metadata_attempt_at IS NULL`), calls LML's /lookup for each one,
+ * and writes the 10-column metadata UPDATE plus the
+ * `metadata_attempt_at = now()` stamp. Rows drain in play-descending
+ * artist priority with a query-time non-library play-floor (BS#1591; see
+ * `worklist.ts`), so the cache-friendly head enriches first and the
+ * uncacheable one-off tail — the 2026-07-10 LML 502 flood — is excluded at
+ * selection time and reported as `below_floor_skipped`. Cross-run
+ * resumability is via the WHERE filter alone — successful + no-match rows
+ * have the marker; LML-throw rows don't and stay in the retry pool for the
+ * next sweep.
  *
  * Run procedure: registered as a cron job in EC2's crontab via
  * `deploy-base.yml`'s job-type=cron pathway, schedule taken from

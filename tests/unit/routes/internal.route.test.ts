@@ -15,6 +15,16 @@ jest.mock('../../../apps/backend/utils/serverEvents', () => ({
   serverEventsMgr: { broadcast: mockBroadcast },
 }));
 
+// The streaming-status webhook alerts Sentry once per batch when any row fails
+// (BS#1114). Mock it so the failure-surfacing path is assertable without a real
+// Sentry client. Harmless to the flowsheet/rotation blocks, which don't call it.
+const mockCaptureMessage = jest.fn();
+
+jest.mock('@sentry/node', () => ({
+  captureMessage: mockCaptureMessage,
+  captureException: jest.fn(),
+}));
+
 import { db } from '@wxyc/database';
 import express from 'express';
 import request from 'supertest';
@@ -722,6 +732,211 @@ describe('POST /internal/flowsheet-webhook', () => {
     expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'show_start', dj_name: 'Aubrey' }));
   });
 
+  // -- Stub-show naming + heal from payload djHandle (BS#1723) --
+  //
+  // tubafrenzy#607 adds an optional `entry.djHandle` (the show's DJ_HANDLE) to
+  // sign-on/sign-off marker payloads. resolveShow uses it two ways: a stub
+  // `shows` row is created WITH `legacy_dj_name`, and an existing open show
+  // whose name resolves to NULL is healed in place. The heal path is the one
+  // that fixes the live bug: at sign-on the BREAKPOINT delivery precedes the
+  // START_OF_SHOW delivery, so the stub already exists (nameless) when the
+  // handle arrives. Without this, `on_air` reports `null` (= confirmed
+  // automation, "AUTO DJ" on iOS) until the */30 flowsheet-ETL tick.
+  //
+  // Mock-order note: the heal adds a `db.update(shows)` (no terminal await —
+  // the bare chain resolves) plus ONE extra `selectShow()` re-select. Under
+  // `Promise.all`, resolveAlbumId's SELECT dispatches before resolveShow's
+  // continuation runs, so the re-select consumes mockLimit position 3 (after
+  // show-select and album-select), then the sibling-marker probe is position
+  // 4. All `db.update(...)` calls share one mock chain, so heal assertions
+  // inspect the `.set()` payload — `legacy_dj_name` is a key only the shows
+  // heal writes.
+
+  const allUpdateSetCalls = (): Record<string, unknown>[] => {
+    const setMock = (mockChain as unknown as { set: jest.Mock }).set;
+    return setMock.mock.calls.map((c) => c[0] as Record<string, unknown>);
+  };
+
+  const mockOnConflictDoUpdate = (mockChain as unknown as { onConflictDoUpdate: jest.Mock }).onConflictDoUpdate;
+
+  it('creates the stub show WITH legacy_dj_name when the payload carries djHandle', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([]) // resolveShow: no existing show
+      .mockResolvedValueOnce([]) // resolveAlbumId (unlinked)
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'ovni' }]) // post-insert re-select
+      .mockResolvedValueOnce([]); // sibling-marker probe (nothing to heal)
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]); // fresh flowsheet INSERT
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9, djHandle: 'ovni' } });
+
+    expect(res.status).toBe(200);
+    // First .values() call is the shows stub INSERT, second is the flowsheet INSERT.
+    expect(mockValues.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({ legacy_show_id: 1001, legacy_dj_name: 'ovni' })
+    );
+    expect(mockValues.mock.calls[1]![0]).toEqual(
+      expect.objectContaining({ entry_type: 'show_start', dj_name: 'ovni' })
+    );
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it('arms the stub INSERT with an ON CONFLICT DO UPDATE fill so a lost concurrent-insert race still names the show', async () => {
+    // The sequential sign-on race is healed by the existing-row branch, but
+    // the two sign-on deliveries can also interleave so BOTH probes see no
+    // row. Then the handle-bearing delivery can lose the INSERT race; a bare
+    // onConflictDoNothing would discard the handle and leave the stub
+    // nameless until the next ETL tick. The conflict arm must fill
+    // legacy_dj_name (guarded by a never-overwrite setWhere) instead.
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([]) // resolveShow: no existing show at probe time
+      .mockResolvedValueOnce([]) // resolveAlbumId
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'ovni' }]) // post-insert re-select
+      .mockResolvedValueOnce([]); // sibling-marker probe
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9, djHandle: 'ovni' } });
+
+    expect(res.status).toBe(200);
+    // `target` matters: a non-unique conflict target would make PG reject the
+    // INSERT ("no unique or exclusion constraint...") and 500 the webhook.
+    expect(mockOnConflictDoUpdate.mock.calls.map((c) => c[0])).toEqual([
+      expect.objectContaining({
+        target: 'legacy_show_id',
+        set: { legacy_dj_name: 'ovni' },
+        setWhere: expect.anything(),
+      }),
+    ]);
+  });
+
+  it('creates the stub show WITHOUT legacy_dj_name when djHandle is absent (pins pre-#1723 behavior)', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([]) // resolveShow: no existing show
+      .mockResolvedValueOnce([]) // resolveAlbumId
+      .mockResolvedValueOnce([{ id: 9999, dj_name: null }]); // post-insert re-select (still nameless)
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9 } });
+
+    expect(res.status).toBe(200);
+    expect(mockValues.mock.calls[0]![0]).toEqual(expect.objectContaining({ legacy_show_id: 1001 }));
+    expect(mockValues.mock.calls[0]![0]).not.toHaveProperty('legacy_dj_name');
+    expect(mockValues.mock.calls[1]![0]).toEqual(expect.objectContaining({ entry_type: 'show_start', dj_name: null }));
+    // No handle → nothing to fill on conflict; the stub INSERT stays DO NOTHING.
+    expect(mockOnConflictDoUpdate).not.toHaveBeenCalled();
+  });
+
+  it('heals a nameless existing show from djHandle and names the marker INSERT (the sign-on race)', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: null }]) // resolveShow: stub exists, nameless
+      .mockResolvedValueOnce([]) // resolveAlbumId
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'ovni' }]) // post-heal re-select
+      .mockResolvedValueOnce([]); // sibling-marker probe
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9, djHandle: 'ovni' } });
+
+    expect(res.status).toBe(200);
+    expect(allUpdateSetCalls()).toEqual([{ legacy_dj_name: 'ovni' }]);
+    expect(mockValues.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({ entry_type: 'show_start', dj_name: 'ovni' })
+    );
+  });
+
+  it('issues NO shows heal when the show already resolves a name (never overwrite)', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'Aubrey' }]) // already named
+      .mockResolvedValueOnce([]) // resolveAlbumId
+      .mockResolvedValueOnce([]); // sibling-marker probe
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9, djHandle: 'ovni' } });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'show_start', dj_name: 'Aubrey' }));
+  });
+
+  it.each([
+    ['blank', ''],
+    ['whitespace', '   '],
+    ['non-string', 12345],
+  ])('treats a %s djHandle as absent: no heal, no extra re-select', async (_label, badHandle) => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: null }]) // nameless show
+      .mockResolvedValueOnce([]); // resolveAlbumId
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9, djHandle: badHandle } });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdate).not.toHaveBeenCalled();
+    // No heal → no post-heal re-select; nameless show → no sibling probe.
+    expect(mockLimit).toHaveBeenCalledTimes(2);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'show_start', dj_name: null }));
+  });
+
+  it('truncates an over-long djHandle to 128 chars on stub create (ETL byte-parity)', async () => {
+    const expected = 'x'.repeat(128);
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([]) // no existing show
+      .mockResolvedValueOnce([]) // resolveAlbumId
+      .mockResolvedValueOnce([{ id: 9999, dj_name: expected }]) // post-insert re-select
+      .mockResolvedValueOnce([]); // sibling-marker probe
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9, djHandle: `  ${'x'.repeat(200)}  ` } });
+
+    expect(res.status).toBe(200);
+    expect(mockValues.mock.calls[0]![0]).toEqual(expect.objectContaining({ legacy_dj_name: expected }));
+  });
+
+  it('truncates an over-long djHandle to 128 chars on the heal path', async () => {
+    const expected = 'x'.repeat(128);
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: null }]) // nameless show
+      .mockResolvedValueOnce([]) // resolveAlbumId
+      .mockResolvedValueOnce([{ id: 9999, dj_name: expected }]) // post-heal re-select
+      .mockResolvedValueOnce([]); // sibling-marker probe
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 9, djHandle: 'x'.repeat(200) } });
+
+    expect(res.status).toBe(200);
+    expect(allUpdateSetCalls()).toEqual([{ legacy_dj_name: expected }]);
+  });
+
   // -- Delete --
 
   it('returns 200 for valid delete', async () => {
@@ -1050,5 +1265,114 @@ describe('POST /internal/streaming-status-webhook', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.processed).toBe(1);
+  });
+
+  // -- Per-row isolation (BS#1114) --
+  //
+  // The handler previously wrapped every row's UPDATE in one `db.transaction`.
+  // When a mid-loop row raised, Postgres aborted the surrounding transaction and
+  // the per-row catch swallowed both the original error and every subsequent
+  // `current transaction is aborted` — the response came back with a meaningless
+  // `errors` count and the first row's real error lost. The fix drops the shared
+  // transaction so each UPDATE autocommits independently, and surfaces the
+  // failing row's actual error rather than only counting it.
+  //
+  // NOTE: the mocked driver can't reproduce Postgres's transaction-abort
+  // poisoning (it runs the callback against the same chain), so these unit tests
+  // pin the *shape* of the fix — no shared transaction, and the real error
+  // surfaced. The poisoning behaviour itself is covered at the integration tier.
+
+  const chain = (db as unknown as { _chain: Record<string, jest.Mock> })._chain;
+  const dbTransaction = (db as unknown as { transaction: jest.Mock }).transaction;
+
+  it('does not wrap the batch in a single shared transaction', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({
+        changes: [
+          { library_release_id: 42, on_streaming: true },
+          { library_release_id: 99, on_streaming: false },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    // A shared transaction is exactly what let one aborted statement swallow the
+    // rest — the fix runs each row as its own autocommitted UPDATE.
+    expect(dbTransaction).not.toHaveBeenCalled();
+  });
+
+  it('commits the surviving rows and surfaces the failing row with its real error', async () => {
+    // Row index 1 fails; rows 0 and 2 must still commit and the failure must be
+    // reported with the actual error keyed by its library_release_id — not lost
+    // behind a bare `errors` count.
+    chain.where
+      .mockReturnValueOnce(chain) // row 0 commits
+      .mockRejectedValueOnce(new Error('null value violates not-null constraint')) // row 1 fails
+      .mockReturnValueOnce(chain); // row 2 commits
+
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({
+        changes: [
+          { library_release_id: 1, on_streaming: true },
+          { library_release_id: 2, on_streaming: false },
+          { library_release_id: 3, on_streaming: true },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.processed).toBe(2);
+    expect(res.body.errors).toBe(1);
+    expect(res.body.failures).toEqual([
+      expect.objectContaining({
+        library_release_id: 2,
+        error: expect.stringContaining('not-null constraint'),
+      }),
+    ]);
+  });
+
+  it('alerts Sentry once for a batch that had at least one failing row', async () => {
+    chain.where
+      .mockReturnValueOnce(chain)
+      .mockRejectedValueOnce(new Error('deadlock detected'))
+      .mockReturnValueOnce(chain);
+
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({
+        changes: [
+          { library_release_id: 1, on_streaming: true },
+          { library_release_id: 2, on_streaming: false },
+          { library_release_id: 3, on_streaming: true },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockCaptureMessage).toHaveBeenCalledTimes(1);
+    expect(mockCaptureMessage).toHaveBeenCalledWith(
+      expect.stringContaining('streaming-status'),
+      expect.objectContaining({ level: 'warning' })
+    );
+  });
+
+  it('does not alert Sentry and returns an empty failures array when every row commits', async () => {
+    const res = await request(app)
+      .post('/internal/streaming-status-webhook')
+      .set('Authorization', 'Bearer test-secret-key')
+      .send({
+        changes: [
+          { library_release_id: 42, on_streaming: true },
+          { library_release_id: 99, on_streaming: false },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.processed).toBe(2);
+    expect(res.body.errors).toBe(0);
+    expect(res.body.failures).toEqual([]);
+    expect(mockCaptureMessage).not.toHaveBeenCalled();
   });
 });

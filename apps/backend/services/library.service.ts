@@ -5,6 +5,7 @@ import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import { db } from '@wxyc/database';
 import {
+  AlbumFormat,
   Artist,
   NewAlbum,
   NewAlbumFormat,
@@ -48,6 +49,7 @@ import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.se
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
+import { ilikeEscaped } from '../utils/sql-like.js';
 
 /**
  * Catalog freshness watermark for the conditional-GET path (BS#1467 / Epic F
@@ -220,6 +222,17 @@ export const getFormatsFromDB = async () => {
 export const insertFormat = async (new_format: NewAlbumFormat) => {
   const response = await db.insert(format).values(new_format).returning();
   return response[0];
+};
+
+/**
+ * Look up a single format row by id. Used by PATCH /library/:id to validate an
+ * incoming `format_id` against the `format` table so a stale/guessed id
+ * surfaces as a 400 instead of tripping the NOT NULL FK (PG 23503) → 500
+ * (BS#1550), mirroring `labelsService.getLabelById`.
+ */
+export const getFormatById = async (id: number): Promise<AlbumFormat | undefined> => {
+  const result = await db.select().from(format).where(eq(format.id, id)).limit(1);
+  return result[0];
 };
 
 export interface Rotation {
@@ -1502,9 +1515,6 @@ export type ArtistInGenreSearchRow = {
   code_number: number;
 };
 
-/** Escape LIKE/ILIKE metacharacters so user input matches literally. */
-const escapeLikePattern = (value: string): string => value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
-
 /**
  * Prefix search for artists in a genre (catalog add-entry autocomplete).
  * `code_number` is the artist's number within that genre (`artist_genre_code`).
@@ -1523,8 +1533,6 @@ export const searchArtistsInGenre = async (
 
   // Escape %/_ so e.g. q='%a' can't short the prefix-search contract into a
   // contains-anything scan (review issue 14).
-  const pattern = escapeLikePattern(prefix) + '%';
-
   return db
     .select({
       id: artists.id,
@@ -1534,7 +1542,7 @@ export const searchArtistsInGenre = async (
     })
     .from(artists)
     .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
-    .where(and(eq(genre_artist_crossreference.genre_id, genre_id), sql`${artists.artist_name} ILIKE ${pattern}`))
+    .where(and(eq(genre_artist_crossreference.genre_id, genre_id), ilikeEscaped(artists.artist_name, prefix, 'prefix')))
     .orderBy(asc(artists.artist_name))
     .limit(cappedLimit);
 };
@@ -1651,13 +1659,14 @@ export type UpdateAlbumRow = {
   alternate_artist_name?: string | null;
   disc_quantity?: number;
   code_number?: number;
+  // BS#1281 (Not-on-Discogs 1a). `discogs_unavailable_note` accepts an
+  // explicit null (clearing the note when the flag drops); the SET loop below
+  // preserves null because `null !== undefined`.
+  discogs_unavailable?: boolean;
+  discogs_unavailable_note?: string | null;
 };
 
-export const updateAlbumInDB = async (
-  album_id: number,
-  updates: UpdateAlbumRow,
-  opts?: { resetEnrichment?: boolean }
-) => {
+export const updateAlbumInDB = async (album_id: number, updates: UpdateAlbumRow) => {
   const set: Record<string, unknown> = { last_modified: sql`NOW()` };
   for (const key of [
     'album_title',
@@ -1670,21 +1679,20 @@ export const updateAlbumInDB = async (
     'alternate_artist_name',
     'disc_quantity',
     'code_number',
+    'discogs_unavailable',
+    'discogs_unavailable_note',
   ] as const) {
     if (updates[key] !== undefined) set[key] = updates[key];
   }
-  // Identity-affecting edits invalidate LML-derived columns: the old
-  // on_streaming / artwork / canonical-entity linkage belongs to the previous
-  // (artist, title) identity. The controller re-fires enrichment after the
-  // write; nulling first means a failed lookup leaves the row visibly
-  // unenriched instead of silently bound to the wrong identity.
-  if (opts?.resetEnrichment) {
-    set.on_streaming = null;
-    set.artwork_url = null;
-    set.canonical_entity_id = null;
-    set.canonical_entity_confidence = null;
-    set.canonical_entity_resolved_at = null;
-  }
+  // Deliberately NOT nulling the LML-derived columns (on_streaming /
+  // artwork_url / canonical_entity_*) here. The old reset-then-maybe-refill
+  // shape permanently wiped enrichment whenever the post-write re-lookup was
+  // skipped (LML unconfigured) or found no match (transient outage, or a
+  // freeform-radio artist with no Discogs "direct" match) — and no recurring
+  // job repairs those columns (BS#1549). The controller now re-fires
+  // enrichment and overwrites each column only on a successful lookup
+  // (refill-then-swap), so a failed/empty lookup leaves the prior values
+  // intact instead of stranding the row blank.
   const result = await db.update(library).set(set).where(eq(library.id, album_id)).returning({ id: library.id });
   return result[0];
 };
@@ -1704,6 +1712,10 @@ export const getLibraryRowById = async (album_id: number) => {
       disc_quantity: library.disc_quantity,
       code_number: library.code_number,
       artist_name: library.artist_name,
+      // BS#1281: the PATCH handler reads the live flag to judge a note-only
+      // edit against the `flag ⟺ note` invariant.
+      discogs_unavailable: library.discogs_unavailable,
+      discogs_unavailable_note: library.discogs_unavailable_note,
     })
     .from(library)
     .where(eq(library.id, album_id))
@@ -2052,7 +2064,7 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Tagge
                 compilation_track_artist.library_id,
                 rows.map((r) => r.id)
               ),
-              sql`${compilation_track_artist.track_title} ILIKE ${'%' + query + '%'}`
+              ilikeEscaped(compilation_track_artist.track_title, query, 'contains')
             )
           )) as Array<{ library_id: number }>);
   const ctaCovered = new Set(ctaRows.map((r) => r.library_id));
@@ -2314,8 +2326,7 @@ export async function searchLibraryByCTARaw(
 
   await checkLibraryArtistNameHealth();
 
-  const likePattern = `%${trimmed}%`;
-  const matchPredicate = sql`(${compilation_track_artist.track_title} ILIKE ${likePattern} OR ${compilation_track_artist.artist_name} ILIKE ${likePattern})`;
+  const matchPredicate = sql`(${ilikeEscaped(compilation_track_artist.track_title, trimmed, 'contains')} OR ${ilikeEscaped(compilation_track_artist.artist_name, trimmed, 'contains')})`;
   const streamingPredicate = on_streaming !== undefined ? sql` AND ${library.on_streaming} = ${on_streaming}` : sql``;
 
   // Raw SQL because we need both the library_artist_view projection and the

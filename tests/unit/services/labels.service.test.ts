@@ -1,4 +1,12 @@
+// Use the real drizzle-orm `sql` tag (the unit suite auto-mocks it) so
+// searchLabels builds a real SQL object we can compile with PgDialect and
+// inspect the escaped ILIKE pattern + ESCAPE clause.
+jest.unmock('drizzle-orm');
+
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { db, createMockQueryChain } from '../../mocks/database.mock';
+
+const dialect = new PgDialect();
 
 // Reset mocks before each test
 beforeEach(() => {
@@ -104,6 +112,18 @@ describe('labels.service', () => {
       const result = await searchLabels('Nonexistent');
 
       expect(result).toEqual([]);
+    });
+
+    it('treats a _ in the query literally (escapes wildcards, adds ESCAPE)', async () => {
+      (db.execute as jest.Mock).mockResolvedValue([]);
+
+      await searchLabels('_a');
+
+      const stmt = (db.execute as jest.Mock).mock.calls[0][0];
+      const { sql: text, params } = dialect.sqlToQuery(stmt);
+      // "_a" -> escaped "\_a" -> prefix pattern "\_a%".
+      expect(params).toContain('\\_a%');
+      expect(text).toContain("ESCAPE '\\'");
     });
   });
 });

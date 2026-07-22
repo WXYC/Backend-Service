@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-tags: true
 
@@ -69,7 +69,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Fetch base commit for Turbo diff
         if: inputs.target == ''
@@ -77,13 +77,13 @@ jobs:
 
       - name: Set up Node.js
         if: inputs.target == ''
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
 
       - name: Cache node_modules
         if: inputs.target == ''
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: node_modules
           key: deploy-node-modules-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}
@@ -138,7 +138,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-tags: true
 
@@ -241,7 +241,7 @@ jobs:
           fi
 
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.determine_checkout_ref.outputs.checkout_ref }}
 
@@ -267,6 +267,24 @@ jobs:
           aws ecr describe-repositories --repository-names $TARGET_APP --region $AWS_REGION 2>/dev/null || \
             aws ecr create-repository --repository-name $TARGET_APP --region $AWS_REGION
 
+      # Best-effort housekeeping, off the deploy critical path: a missing
+      # ecr:PutLifecyclePolicy permission or a transient API error must not
+      # block the build/deploy. If it fails the step goes yellow (visible)
+      # but the job continues; the only cost is untagged cache layers not
+      # being reaped until the next successful run.
+      - name: Apply ECR Lifecycle Policy
+        continue-on-error: true
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          TARGET_APP=${{ matrix.target }}
+          aws ecr put-lifecycle-policy \
+            --repository-name "$TARGET_APP" \
+            --region "$AWS_REGION" \
+            --lifecycle-policy-text file://.github/ecr-lifecycle-policy.json
+
       - name: Check if image exists in ECR
         id: check_image
         env:
@@ -286,39 +304,59 @@ jobs:
             echo "image_exists=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build Image
+      - name: Compute Image Tags
         if: steps.check_image.outputs.image_exists == 'false'
+        id: image_tags
         run: |
           TARGET_APP=${{ matrix.target }}
-
-          docker build --platform linux/amd64 --build-arg NPM_TOKEN=${{ secrets.NPM_TOKEN }} -f Dockerfile.${TARGET_APP} -t ${TARGET_APP}:ci .
-
-      - name: Tag and Push Image
-        if: steps.check_image.outputs.image_exists == 'false'
-        run: |
-          TARGET_APP=${{ matrix.target }}
-          TAG=${{ steps.determine_version.outputs.deploy_version }}
+          DEPLOY_TAG=${{ steps.determine_version.outputs.deploy_version }}
           SHA_TAG="sha-${{ github.sha }}"
-
           IMAGE_URI="${{ secrets.AWS_ECR_URI }}/${TARGET_APP}"
 
-          echo "Tagging Docker image..."
-          docker tag ${TARGET_APP}:ci $IMAGE_URI:$TAG
-
-          echo "Pushing Docker image to ECR..."
-          docker push $IMAGE_URI:$TAG
-
-          # Always push SHA tag for cache invalidation detection
-          echo "Tagging Docker image with SHA..."
-          docker tag ${TARGET_APP}:ci $IMAGE_URI:$SHA_TAG
-          docker push $IMAGE_URI:$SHA_TAG
-
+          # docker/build-push-action accepts a comma- or newline-separated
+          # tags list. Build it comma-separated on one line so no leading
+          # indentation leaks into a tag. Always include the SHA tag for
+          # cache-invalidation detection.
+          TAGS="$IMAGE_URI:$DEPLOY_TAG,$IMAGE_URI:$SHA_TAG"
           if [[ "${{ inputs.version }}" == "latest" || -z "${{ inputs.version }}" ]]; then
-          echo "Tagging Docker image with 'latest'..."
-          docker tag ${TARGET_APP}:ci $IMAGE_URI:latest
-          echo "Pushing Docker image to ECR with 'latest' tag..."
-          docker push $IMAGE_URI:latest
+            TAGS="$TAGS,$IMAGE_URI:latest"
           fi
+
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+
+      # image-manifest=true,oci-mediatypes=true is required — ECR rejects the
+      # default BuildKit cache-manifest media type on cache-to. Don't switch
+      # to type=gha: its 10GB-per-repo cap thrashes across ~38 images' caches;
+      # ECR registry cache scales per-repo instead. See docs/deploy.md.
+      #
+      # provenance/sbom are disabled on purpose. buildx >=0.11 (which
+      # build-push-action defaults on) generates a provenance attestation when
+      # pushing — mode=max on a public repo like this one — which wraps the
+      # single linux/amd64 image in an OCI image index with an extra,
+      # *untagged* attestation manifest. The ECR lifecycle rule expiring
+      # untagged images after 1 day would then reap the child manifests of a
+      # tagged deploy image, breaking `docker pull :<version>` on a later
+      # rollback. Disabling both keeps the push a single manifest, identical
+      # in shape to the old `docker build`/`docker push`. See docs/deploy.md.
+      #
+      # cache-to uses ignore-error=true so a transient ECR cache-export
+      # failure degrades to a full build instead of failing the deploy;
+      # caching is an optimization, not on the deploy critical path.
+      - name: Build and Push Image
+        if: steps.check_image.outputs.image_exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.${{ matrix.target }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          build-args: |
+            NPM_TOKEN=${{ secrets.NPM_TOKEN }}
+          tags: ${{ steps.image_tags.outputs.tags }}
+          cache-from: type=registry,ref=${{ secrets.AWS_ECR_URI }}/${{ matrix.target }}:buildcache
+          cache-to: type=registry,ref=${{ secrets.AWS_ECR_URI }}/${{ matrix.target }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
 
   migrate:
     needs: [handle-git-tags, setup]
@@ -327,7 +365,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -412,7 +450,7 @@ jobs:
         target: ${{ fromJSON(needs.setup.outputs.targets) }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Download Target Tag
         id: download_deploy_tag

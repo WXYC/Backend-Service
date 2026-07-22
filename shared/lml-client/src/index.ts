@@ -41,6 +41,15 @@ export type {
   StreamingCheckSources,
 } from '@wxyc/shared/dtos';
 
+// BS#1710: streaming-URL host guard. Enforces "a `spotify_url` field must
+// hold a Spotify URL" (and the Apple analogue) at the LML response boundary
+// — `sanitizeLookupStreamingUrls` is applied in `postLookup` +
+// `bulkLookupMetadata` below so every downstream writer + serve seam is
+// covered at one chokepoint. Imported (not just re-exported) so it's in
+// local scope for those callsites.
+import { isSpotifyUrl, isAppleMusicUrl, sanitizeLookupStreamingUrls } from './streaming-url-guard.js';
+export { isSpotifyUrl, isAppleMusicUrl, sanitizeLookupStreamingUrls };
+
 class LmlClientError extends Error {
   constructor(
     message: string,
@@ -525,7 +534,12 @@ async function postLookup(
         options?.timeoutMs
       );
 
-      const parsed = (await response.json()) as LookupResponse;
+      // BS#1710: enforce the streaming-URL host invariant at this untrusted
+      // boundary. LML's `artwork.spotify_url` can carry a non-Spotify URL
+      // (Deezer/Apple/…) sourced from the library `streaming_links` artifact;
+      // null it here so no downstream writer persists it under the Spotify
+      // slot and the writers' `?? searchUrls.spotify_url` fallback wins.
+      const parsed = sanitizeLookupStreamingUrls((await response.json()) as LookupResponse);
 
       // cache_stats schema is freeform today (additionalProperties: true). Until
       // wxyc-shared#86 tightens the type, treat it as a loose record and only
@@ -675,6 +689,12 @@ export async function bulkLookupMetadata(
             console.warn('lml.client: failed to project cache_stats onto bulk span', err);
           }
         }
+      }
+
+      // BS#1710: same streaming-URL host invariant as postLookup, applied to
+      // each per-item verdict's nested LookupResponse (null on `status: error`).
+      for (const item of parsed.results ?? []) {
+        if (item.lookup != null) sanitizeLookupStreamingUrls(item.lookup);
       }
 
       return { results: parsed.results };
@@ -1045,11 +1065,7 @@ export type ArtistResolveMethod = 'identity_store' | 'api_search';
  * `cache_trigram` neighbors never veto.
  */
 export type ArtistResolveCacheLeg =
-  | 'cache_exact'
-  | 'cache_member'
-  | 'cache_alias'
-  | 'cache_name_variation'
-  | 'cache_trigram';
+  'cache_exact' | 'cache_member' | 'cache_alias' | 'cache_name_variation' | 'cache_trigram';
 
 /**
  * Why a name did not resolve. `not_found` / `ambiguous` are terminal;
@@ -1251,6 +1267,210 @@ export async function resolveArtistNamesBulk(
           `resolveArtistNamesBulk: LML returned ${got} for ${names.length} name(s); expected an index-aligned 1:1 array`,
           502
         );
+      }
+
+      return parsed;
+    });
+  });
+}
+
+/**
+ * Wire shape for `POST /api/v1/artists/genres/bulk` (LML#781, BS#1624).
+ *
+ * Reconciled against LML#781's shipped OpenAPI shape (merged as LML#847) and
+ * the wxyc-shared `ArtistGenres*` contract (wxyc-shared#235):
+ *   - Request: a batch of `{ artist_name, discogs_artist_id? }` under `artists`.
+ *   - Response: per-artist `{ genres: string[], styles: string[], source }`,
+ *     index-aligned with the request. `ARTIST_GENRES_BATCH_CAP` (25) mirrors
+ *     LML's router cap.
+ *
+ * Defined locally rather than imported from `@wxyc/shared/dtos` because the
+ * `ArtistGenres*` schemas — though merged into wxyc-shared/api.yaml (#235) —
+ * are not yet in a published `@wxyc/shared` release. Swap these interfaces for
+ * the generated `@wxyc/shared/dtos` types once that package publishes the
+ * schemas; same deferred-adoption path as `ArtistResolveBulkResponse`.
+ */
+
+/** One artist to resolve genres for. `discogs_artist_id` strengthens LML's match when known. */
+export interface ArtistGenresRequestItem {
+  artist_name: string;
+  discogs_artist_id?: number;
+}
+
+/**
+ * Provenance of one artist's genre/style verdict — the retry-vs-negative-cache
+ * discriminator (mirrors `ArtistGenresSource` in wxyc-shared/api.yaml #235):
+ *   - `cache`       — served from the discogs-cache genre/style rows.
+ *   - `discogs_api` — cache miss; the Discogs API fallback produced genres.
+ *   - `not_found`   — Discogs answered; the artist has no genre data. Safe to
+ *                     negative-cache (persist an empty row).
+ *   - `unavailable` — LML could not consult Discogs (no token, saturation
+ *                     breaker open, or a transient fetch failure). RETRY — the
+ *                     consumer must NOT negative-cache a couldn't-ask.
+ */
+export type ArtistGenresSource = 'cache' | 'discogs_api' | 'not_found' | 'unavailable';
+
+/**
+ * Genre/style verdict for one input artist, index-aligned with the request's
+ * `artists` array. Both arrays are always present (possibly empty) — LML may
+ * know the Discogs genre taxonomy for an artist but not the finer-grained
+ * styles, or neither. `source` disambiguates an empty verdict: a confirmed
+ * "no genres" (persist) versus a transient "couldn't ask" (retry).
+ */
+export interface ArtistGenresResultItem {
+  genres: string[];
+  styles: string[];
+  source: ArtistGenresSource;
+  /**
+   * Echoed back from the request by LML (LML#781) for index verification. When
+   * present on both sides, the alignment guard asserts it matches the request
+   * item at the same index — turning the positional contract from a length
+   * check into an identity check. Optional: a name-only request item has no id
+   * for LML to echo.
+   */
+  discogs_artist_id?: number;
+  /**
+   * The Discogs artist `profile` text, raw (BS#1734 / LML#889). Null for
+   * name-only inputs, uncached ids, blank profiles, and not-found tombstones;
+   * independent of `source` — a `cache`/`not_found` verdict may still carry a
+   * real bio.
+   */
+  bio?: string | null;
+}
+
+export interface ArtistGenresBulkRequest {
+  artists: ArtistGenresRequestItem[];
+}
+
+export interface ArtistGenresBulkResponse {
+  /** One verdict per input artist, in input order. */
+  results: ArtistGenresResultItem[];
+}
+
+/**
+ * LML's per-request cap on `fetchArtistGenresBulk` (LML#781), matching the
+ * endpoint's router cap (`_GENRES_INPUT_CAP`). Callers page against this constant.
+ */
+export const ARTIST_GENRES_BATCH_CAP = 25;
+
+/** Per-artist slice of the batch-size-scaled default socket timeout (ms). */
+const ARTIST_GENRES_PER_ITEM_TIMEOUT_MS = 2000;
+
+/** Fixed slack on top of the per-item budget — connection setup + serialization. */
+const ARTIST_GENRES_TIMEOUT_SLACK_MS = 20_000;
+
+/**
+ * Bulk-resolve artist genres/styles via LML's `POST /api/v1/artists/genres/bulk`
+ * (LML#781). Discogs `genres`/`styles` taxonomy for each input artist,
+ * aggregated (majority-take) across the artist's releases in the LML
+ * discogs-cache. Returns one verdict per input artist in input order.
+ *
+ * Consumer: the concerts genre enrichment (BS#1624) — persists the result on
+ * `artist_metadata` keyed by Discogs artist id, projected onto `Concert.genres`.
+ * Runs nightly server-to-server with the LML API key; never in a listener hot
+ * path.
+ *
+ * Wiring mirrors `resolveArtistNamesBulk` (its sibling offline-batch endpoint):
+ * one limiter token per BATCH (LML paces its own fan-out internally); a
+ * batch-size-scaled socket timeout; a `http.client` span with `lml.bulk.size`.
+ * The default `limiter` is the process-wide runtime pool — a big batch can hold
+ * a permit for the whole socket, so any offline caller MUST pass a dedicated
+ * `options.limiter` (the documented consumer does).
+ *
+ * Client-side validation rejects empty + oversize batches before the wire call;
+ * the response is validated to be an index-aligned 1:1 array before return — by
+ * length AND, wherever the request supplied a Discogs id, by LML's echoed
+ * `discogs_artist_id` at each index — so a consumer that zips verdicts to
+ * artists positionally can never mis-attribute a genre set. All failures throw
+ * `LmlClientError`.
+ *
+ * @param artists - Artists to resolve (1..=`ARTIST_GENRES_BATCH_CAP`).
+ * @param options.timeoutMs - Override the batch-size-scaled default socket timeout (ms).
+ * @param options.limiter - Override the default runtime limiter (see the token note above).
+ * @param options.caller - Caller-class label projected onto the span as `lml.caller`.
+ */
+export async function fetchArtistGenresBulk(
+  artists: ArtistGenresRequestItem[],
+  options?: { timeoutMs?: number; limiter?: LmlLimiter; caller?: string }
+): Promise<ArtistGenresBulkResponse> {
+  if (artists.length === 0) {
+    throw new LmlClientError('fetchArtistGenresBulk requires at least 1 artist.', 400);
+  }
+  if (artists.length > ARTIST_GENRES_BATCH_CAP) {
+    throw new LmlClientError(
+      `fetchArtistGenresBulk exceeded the cap of ${ARTIST_GENRES_BATCH_CAP} artists (received ${artists.length}).`,
+      400
+    );
+  }
+
+  const timeoutMs =
+    options?.timeoutMs ?? artists.length * ARTIST_GENRES_PER_ITEM_TIMEOUT_MS + ARTIST_GENRES_TIMEOUT_SLACK_MS;
+
+  const body: ArtistGenresBulkRequest = { artists };
+
+  const activeLimiter = options?.limiter ?? defaultLimiter;
+  return activeLimiter.run(async () => {
+    return await Sentry.startSpan({ name: 'lml.artists.genres.bulk', op: 'http.client' }, async (span) => {
+      try {
+        span.setAttributes({
+          'lml.queue_depth': activeLimiter.state().queueDepth,
+          'lml.bulk.size': artists.length,
+          'lml.caller': options?.caller ?? 'unknown',
+        });
+      } catch (err) {
+        console.warn('lml.client: failed to project queue_depth + bulk.size + caller onto genres span', err);
+      }
+
+      const response = await lmlFetch(
+        '/api/v1/artists/genres/bulk',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+        timeoutMs
+      );
+
+      let parsed: ArtistGenresBulkResponse;
+      try {
+        parsed = (await response.json()) as ArtistGenresBulkResponse;
+      } catch (err) {
+        throw new LmlClientError(
+          `fetchArtistGenresBulk: LML returned an unparseable body: ${(err as Error).message}`,
+          502
+        );
+      }
+
+      // Positional contract: `results[i]` is the verdict for `artists[i]`. A
+      // short / long / missing array — or a null body — would let the consumer
+      // write one artist's genres onto another's Discogs id. Fail loud at the
+      // chokepoint (mirrors `resolveArtistNamesBulk`).
+      if (parsed == null || !Array.isArray(parsed.results) || parsed.results.length !== artists.length) {
+        const got =
+          parsed != null && Array.isArray(parsed.results)
+            ? `${parsed.results.length} result(s)`
+            : 'a non-array results field';
+        throw new LmlClientError(
+          `fetchArtistGenresBulk: LML returned ${got} for ${artists.length} artist(s); expected an index-aligned 1:1 array`,
+          502
+        );
+      }
+
+      // Defense-in-depth beyond length: when both the request item and the
+      // echoed verdict carry a Discogs id, they MUST match at this index. LML
+      // echoes `discogs_artist_id` for exactly this check (LML#781); a mismatch
+      // means the array was reordered under us, which the length check alone
+      // can't catch. The consumer (BS#1624) zips genres to Discogs ids
+      // positionally, so a silent reorder would mis-attribute a genre set.
+      for (let i = 0; i < artists.length; i++) {
+        const sent = artists[i].discogs_artist_id;
+        const echoed = parsed.results[i].discogs_artist_id;
+        if (sent != null && echoed != null && sent !== echoed) {
+          throw new LmlClientError(
+            `fetchArtistGenresBulk: LML echoed discogs_artist_id ${echoed} at index ${i} but the request sent ${sent}; the results array is misordered`,
+            502
+          );
+        }
       }
 
       return parsed;
