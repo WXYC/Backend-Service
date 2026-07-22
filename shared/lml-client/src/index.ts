@@ -821,13 +821,23 @@ export async function validateTrackOnRelease(releaseId: number, track: string, a
  * @returns Streaming availability result with per-source URLs
  */
 export async function checkStreamingAvailability(artist: string, title: string): Promise<StreamingCheckResponse> {
-  const response = await lmlFetch('/api/v1/streaming-check', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ artist, title }),
-  });
+  // BS#1750 / B5: fires on every album add. Route it through the process-wide
+  // `defaultLimiter` — the same shared concurrency/rate gate as `/lookup` —
+  // so this call participates in the admission budget instead of being an
+  // ungoverned direct call that could overrun LML's real concurrency ceiling
+  // alongside the enrichment/backfill limiters. The fetch runs after the
+  // limiter's `semaphore.acquire()` + `tokenBucket.consume(1)`; the permit is
+  // released in the limiter's `finally`. Behavior is otherwise unchanged —
+  // same path, headers, body, and returned `StreamingCheckResponse`.
+  return defaultLimiter.run(async () => {
+    const response = await lmlFetch('/api/v1/streaming-check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ artist, title }),
+    });
 
-  return (await response.json()) as StreamingCheckResponse;
+    return (await response.json()) as StreamingCheckResponse;
+  });
 }
 
 /**

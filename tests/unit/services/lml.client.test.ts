@@ -1758,3 +1758,133 @@ describe('lml.client rate-aware /lookup wrapper (BS#906)', () => {
     expect(getLmlQueueDepth()).toBe(0);
   });
 });
+
+// B5 / BS#1750: checkStreamingAvailability fires on every album add. It used
+// to bypass the shared LML-client limiter, so each album-add was an
+// ungoverned LML call outside the admission budget — an uncounted call class
+// that could overrun LML's real concurrency ceiling alongside the enrichment
+// and backfill limiters. These tests pin that the streaming-check now
+// acquires the same process-wide limiter as /lookup, so it participates in
+// the shared concurrency/rate budget.
+describe('checkStreamingAvailability limiter governance (B5 / BS#1750)', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env = {
+      ...originalEnv,
+      LIBRARY_METADATA_URL: 'http://lml.test:8000',
+      LML_CLIENT_MAX_CONCURRENT: '1',
+      LML_CLIENT_RATE_PER_MIN: '60000', // 1000/sec — effectively no rate cap in tests
+    };
+    _resetLmlClientLimitersForTest();
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+    _resetLmlClientLimitersForTest();
+  });
+
+  it('acquires the shared LML limiter before its streaming-check call (governed, not a direct call)', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let releaseBatch: (() => void) | undefined;
+    const batchReady = new Promise<void>((resolve) => {
+      releaseBatch = resolve;
+    });
+
+    mockFetch.mockImplementation(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await batchReady;
+      inFlight -= 1;
+      return {
+        ok: true,
+        json: () => Promise.resolve({ on_streaming: false, sources: {} }),
+      } as unknown as globalThis.Response;
+    });
+
+    // Two concurrent album-add streaming-checks against a MAX_CONCURRENT=1
+    // limiter. If the call were still a direct fetch, both would be in flight
+    // at once (maxInFlight === 2, queueDepth === 0); routed through the shared
+    // limiter, the second queues behind the first's permit.
+    const calls = [
+      checkStreamingAvailability('Stereolab', 'Aluminum Tunes'),
+      checkStreamingAvailability('Juana Molina', 'DOGA'),
+    ];
+
+    // Poll until the first call reaches fetch (mirrors the BS#906 wrapper test:
+    // the acquire → consume → fetch chain depth can shift without warning).
+    // Cap at 200 ms so a regression that never governs the call fails loudly.
+    const deadline = Date.now() + 200;
+    while (inFlight < 1 && Date.now() < deadline) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    // At most one streaming-check in flight; the other waits on the shared
+    // limiter's queue.
+    expect(maxInFlight).toBe(1);
+    expect(getLmlQueueDepth()).toBeGreaterThan(0);
+
+    // Release the batch and let both finish; the permit + queue drain.
+    if (releaseBatch) releaseBatch();
+    await Promise.all(calls);
+
+    expect(getLmlQueueDepth()).toBe(0);
+  });
+
+  it('shares the same limiter instance as /lookup (a lookup permit blocks a streaming-check)', async () => {
+    // Cross-surface pin: with a single shared permit, an in-flight /lookup must
+    // hold off a concurrent streaming-check. This proves the streaming-check
+    // draws from the same process-wide limiter as /lookup rather than a private
+    // one — the whole point of B5's "shared budget".
+    let lookupInFlight = false;
+    let streamingReached = false;
+    let releaseLookup: (() => void) | undefined;
+    const lookupHold = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+
+    mockFetch.mockImplementation(async (input) => {
+      // Every call in this test passes a string URL as the first fetch arg.
+      const url = input as string;
+      if (url.endsWith('/api/v1/lookup')) {
+        lookupInFlight = true;
+        await lookupHold;
+        return {
+          ok: true,
+          json: () =>
+            Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+        } as unknown as globalThis.Response;
+      }
+      // streaming-check
+      streamingReached = true;
+      return {
+        ok: true,
+        json: () => Promise.resolve({ on_streaming: false, sources: {} }),
+      } as unknown as globalThis.Response;
+    });
+
+    const lookupCall = lookupMetadata('Duke Ellington & John Coltrane', 'In a Sentimental Mood');
+    const streamingCall = checkStreamingAvailability('Jessica Pratt', 'On Your Own Love Again');
+
+    // Let the event loop advance; the lookup grabs the only permit and parks.
+    const deadline = Date.now() + 200;
+    while (!lookupInFlight && Date.now() < deadline) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    // The streaming-check must be queued behind the lookup's permit, so it has
+    // NOT reached fetch yet.
+    expect(lookupInFlight).toBe(true);
+    expect(streamingReached).toBe(false);
+    expect(getLmlQueueDepth()).toBeGreaterThan(0);
+
+    if (releaseLookup) releaseLookup();
+    await Promise.all([lookupCall, streamingCall]);
+
+    // Once the lookup released its permit, the streaming-check ran.
+    expect(streamingReached).toBe(true);
+    expect(getLmlQueueDepth()).toBe(0);
+  });
+});
