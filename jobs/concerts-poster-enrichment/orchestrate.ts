@@ -30,10 +30,18 @@
  * the same way — no row written, naturally retried next run via the same
  * `image_url IS NULL` predicate. There is no attempt-at marker to manage.
  *
+ * Sentry gating: because there is no negative cache, an EXPECTED LML failure
+ * (`LmlClientError` — a 404 for a stale/absent Discogs id, or a 5xx/timeout
+ * during an outage) recurs every run for the same candidate. Those are
+ * counted + warn-logged but NOT captured to Sentry (unconditional capture
+ * would fire one event per night per bad id); only a genuinely-unexpected
+ * error is escalated. Mirrors the genre sibling's `unavailable` routing.
+ *
  * Dep-injected so the unit suite drives the loop without PG or LML — see
  * tests/unit/jobs/concerts-poster-enrichment/orchestrate.test.ts.
  */
 
+import { LmlClientError } from '@wxyc/lml-client';
 import type { EnrichmentCandidate } from './query.js';
 import type { ConcertImageRow } from './writer.js';
 import { captureError, log } from './logger.js';
@@ -151,21 +159,36 @@ export const runEnrichment = async (deps: EnrichDeps, options: EnrichOptions): P
         // re-selected next run (the candidate predicate is the retry
         // substrate). Never abort the run over one artist.
         totals.skipped_no_artist += concertIds.length;
+        // `PromiseRejectedResult.reason` is `any`; receive it as `unknown` so
+        // the `instanceof` narrowing below is type-safe (no-unsafe-assignment).
+        const reason: unknown = outcome.reason;
         log('warn', 'artist_fetch_failed', `getArtistDetails threw for discogs_artist_id ${artistId}; left retryable`, {
           discogs_artist_id: artistId,
           concert_count: concertIds.length,
-          error_message:
-            outcome.reason instanceof Error
-              ? `${outcome.reason.name}: ${outcome.reason.message}`
-              : String(outcome.reason),
+          error_message: reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason),
         });
-        captureError(outcome.reason, 'artist_fetch_failed', { discogs_artist_id: artistId });
+        // An `LmlClientError` is an EXPECTED, retryable condition — a 404 for a
+        // stale/absent Discogs id, or a 5xx/timeout while LML or Discogs is
+        // down. Because this job keeps no negative cache, a stale headliner id
+        // stays a candidate every run, so capturing it unconditionally would
+        // fire one Sentry event PER NIGHT until its show ages out (and one per
+        // distinct headliner during a full LML outage). Count + warn-log it
+        // (visible in the summary) but only escalate a genuinely-unexpected
+        // error to Sentry — mirrors the genre sibling's `unavailable`-is-not-
+        // an-anomaly routing.
+        if (!(reason instanceof LmlClientError)) {
+          captureError(reason, 'artist_fetch_failed', { discogs_artist_id: artistId });
+        }
         continue;
       }
 
       totals.fetched += 1;
-      const imageUrl = outcome.value.image_url;
-      if (!imageUrl || imageUrl.trim() === '') {
+      // Trim once: it is both the blank-skip test AND the value persisted, so a
+      // Discogs profile-markup parse that hands back a whitespace-padded URL
+      // can't land a padded string in `concerts.image_url` (which `GET
+      // /concerts` would serve verbatim to a client that can't load it).
+      const imageUrl = outcome.value.image_url?.trim() ?? '';
+      if (imageUrl === '') {
         // A real, responded verdict with no (or blank) Discogs image. There
         // is no negative cache to persist here (see the module docblock), so
         // this artist's concerts stay candidates and are re-asked next run.
