@@ -156,9 +156,11 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   // `on_air` lets clients render the on-air banner without scanning the fetched
   // entry window for a show_start marker (which can fall outside a 30-entry
   // page). Three states, matching wxyc-shared api.yaml FlowsheetV2PaginatedResponse:
-  // an OnAirInfo object = a named DJ is live; `null` = confirmed automation; the
-  // field ABSENT = the banner query failed (unknown). Only the default paginated
-  // branch carries it — the iOS app polls this branch.
+  // an OnAirInfo object = a human is live (a resolved DJ handle, or the "WXYC"
+  // station brand when the open show has no resolvable name — see
+  // getOnAirDJName); `null` = confirmed automation; the field ABSENT = the banner
+  // query failed (unknown). Only the default paginated branch carries it — the
+  // iOS app polls this branch.
   //
   // Freshness note: this route is wrapped in conditionalGet(getLastModifiedAt),
   // which 304s on the flowsheet watermark. A rare `on_air` change that writes no
