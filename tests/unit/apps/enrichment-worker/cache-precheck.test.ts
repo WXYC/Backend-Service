@@ -91,15 +91,11 @@ const makeCandidate = (overrides: Record<string, unknown> = {}) => ({
 
 const driveOneTick = async (candidate: ReturnType<typeof makeCandidate>): Promise<SpanLike> => {
   const span: SpanLike = { setAttribute: jest.fn() };
-  (Sentry.startSpan as jest.Mock).mockImplementation(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (_opts: unknown, fn: any) => fn(span)
-  );
+  (Sentry.startSpan as jest.Mock).mockImplementation((_opts: unknown, fn: any) => fn(span));
   mockFilterForEnrichment.mockReturnValueOnce(candidate);
   mockClaimRowForEnrichment.mockResolvedValueOnce({ claimed: true, id: candidate.id });
 
   const handler = makeEnrichmentHandler();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   handler({} as any);
   await new Promise((resolve) => setImmediate(resolve));
   return span;
