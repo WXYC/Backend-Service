@@ -134,6 +134,52 @@ describe('runEnrichment (BS#1743)', () => {
     expect(totals).toMatchObject({ fetched: 1, skipped_no_image: 1, enriched: 0 });
   });
 
+  it('persists the TRIMMED image URL when the fetched value has surrounding whitespace', async () => {
+    // A Discogs profile-markup parse can hand back a URL padded with a leading
+    // newline / trailing space. The blank guard already trims to test for
+    // emptiness; the value written must be trimmed too, or GET /concerts serves
+    // a padded string that iOS's URL(string:)/AsyncImage can't load.
+    const { deps, writes } = makeDeps([candidate(1, 100)], {
+      fetchArtistImage: jest
+        .fn<FetchArtistImageFn>()
+        .mockResolvedValue({ image_url: '  https://discogs.example/padded.jpg\n' }),
+    });
+
+    const totals = await runEnrichment(deps, options());
+
+    expect(writes).toEqual([
+      { discogs_artist_id: 100, concert_ids: [1], image_url: 'https://discogs.example/padded.jpg' },
+    ]);
+    expect(totals).toMatchObject({ fetched: 1, enriched: 1, skipped_no_image: 0 });
+  });
+
+  it('accounts skipped_no_image PER CONCERT when a no-image headliner is billed on multiple shows', async () => {
+    // One deduped fetch, but three concert rows stay unpostered — the summary
+    // count (project-32 G-observability) must reflect concerts remaining, not
+    // artists asked.
+    const { deps, writes, fetchArtistImage } = makeDeps([candidate(1, 100), candidate(2, 100), candidate(3, 100)], {
+      fetchArtistImage: jest.fn<FetchArtistImageFn>().mockResolvedValue({ image_url: null }),
+    });
+
+    const totals = await runEnrichment(deps, options());
+
+    expect(fetchArtistImage).toHaveBeenCalledTimes(1);
+    expect(writes).toEqual([]);
+    expect(totals).toMatchObject({ candidates: 3, artists: 1, fetched: 1, skipped_no_image: 3, enriched: 0 });
+  });
+
+  it('accounts skipped_no_artist PER CONCERT when a thrown-fetch headliner is billed on multiple shows', async () => {
+    const { deps, writeImages, fetchArtistImage } = makeDeps([candidate(1, 100), candidate(2, 100)], {
+      fetchArtistImage: jest.fn<FetchArtistImageFn>().mockRejectedValue(new Error('LML 502')),
+    });
+
+    const totals = await runEnrichment(deps, options());
+
+    expect(fetchArtistImage).toHaveBeenCalledTimes(1);
+    expect(writeImages).not.toHaveBeenCalled();
+    expect(totals).toMatchObject({ candidates: 2, artists: 1, fetched: 0, skipped_no_artist: 2, enriched: 0 });
+  });
+
   it('counts a thrown per-artist fetch as skipped_no_artist and continues (left retryable)', async () => {
     const { deps, writeImages, writes } = makeDeps([candidate(1, 100), candidate(2, 200)], {
       fetchArtistImage: jest
