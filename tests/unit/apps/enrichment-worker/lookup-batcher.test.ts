@@ -117,6 +117,22 @@ describe('enrichmentBulkLookup burst coalescing (B3 / BS#1749)', () => {
     expect(items).toHaveLength(4);
   });
 
+  it('forwards the enrichment caller label + budget to the bulk call (parity with per-call path)', async () => {
+    // Parity guard: the per-row `lookupMetadata` path tagged its call with
+    // `caller: 'enrichment-worker'` (the BS#1235 Sentry `lml.caller` label —
+    // missing it degrades to the `unknown` flag-of-shame) and a 29 s
+    // `budgetMs` deadline. Batching must preserve both, or the enrichment
+    // path silently loses its Sentry attribution and its deadline negotiation.
+    mockBulkLookupMetadata.mockImplementation((items) => Promise.resolve(echoAllMatched(items)));
+
+    const p = enrichmentBulkLookup(makeInput('Stereolab'));
+    await flushWindow();
+    await p;
+
+    const [, options] = mockBulkLookupMetadata.mock.calls[0];
+    expect(options).toMatchObject({ caller: 'enrichment-worker', budgetMs: 29000 });
+  });
+
   it('sets extended:true and synthesizes raw_message + fields on each item', async () => {
     mockBulkLookupMetadata.mockImplementation((items) => Promise.resolve(echoAllMatched(items)));
 
