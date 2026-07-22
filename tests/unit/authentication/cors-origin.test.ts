@@ -128,6 +128,29 @@ describe('resolveCorsOrigin', () => {
       expect(pattern.test('https://x/y.wxyc-dj.pages.dev')).toBe(false);
     });
 
+    it('lets `*` span dots, so deeper subdomains under the named zone match', () => {
+      // `/` and `\` are the only separators, so `*` DOES cross dots: a
+      // multi-label host under the wildcard zone is trusted. This is the
+      // intended breadth — safe only because WXYC owns the whole
+      // `wxyc-dj.pages.dev` zone (see `toCorsPattern`'s breadth caveat). Pin it
+      // so a future tightening of the wildcard class can't silently narrow the
+      // trust scope without a failing test.
+      const pattern = previewOf({ FRONTEND_SOURCE: 'https://*.wxyc-dj.pages.dev' });
+      expect(pattern.test('https://a.b.wxyc-dj.pages.dev')).toBe(true);
+      expect(pattern.test('https://deploy.preview.wxyc-dj.pages.dev')).toBe(true);
+    });
+
+    it('lets `*` match an empty label (zero-width), still bounded to the named zone', () => {
+      // `*` compiles to `[^/\\]*` (zero-or-more), so an empty subdomain label
+      // matches. Unreachable from a real browser Origin, but pinned so the
+      // zero-width behavior is documented rather than incidental. Crucially,
+      // the apex without the leading `.` still does NOT match — the literal
+      // separator dot is required.
+      const pattern = previewOf({ FRONTEND_SOURCE: 'https://*.wxyc-dj.pages.dev' });
+      expect(pattern.test('https://.wxyc-dj.pages.dev')).toBe(true);
+      expect(pattern.test('https://wxyc-dj.pages.dev')).toBe(false);
+    });
+
     it('treats the regex metacharacters in the literal portion literally', () => {
       // The dots must be literal dots, not "any character".
       const pattern = previewOf({ FRONTEND_SOURCE: 'https://*.wxyc-dj.pages.dev' });

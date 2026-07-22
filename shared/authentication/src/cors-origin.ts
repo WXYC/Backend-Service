@@ -65,6 +65,16 @@ export type ResolvedCorsOrigin = CorsOriginPattern | CorsOriginPattern[] | false
  * not `https://evil.com` or a suffix like `…pages.dev.evil.com` (the `$`
  * anchor). `[^/\\]` as the wildcard class mirrors better-auth's
  * `wildcardMatch` default separator so both trust layers agree.
+ *
+ * Breadth caveat — `/` and `\` are the ONLY separators, so `*` DOES cross
+ * dots: `https://*.wxyc-dj.pages.dev` also trusts arbitrarily-deep subdomains
+ * (`https://a.b.wxyc-dj.pages.dev`). That is safe here only because WXYC owns
+ * the entire `wxyc-dj.pages.dev` zone — every host under it is a WXYC Pages
+ * deployment, so a wildcard can only widen the subdomains WXYC controls.
+ * Do NOT configure a wildcard over a multi-tenant apex (e.g.
+ * `https://*.pages.dev`): that would trust every Cloudflare Pages project,
+ * including attacker-controlled ones, for credentialed requests. The wildcard
+ * segment must always be pinned to a zone WXYC owns end-to-end.
  */
 function toCorsPattern(entry: string): CorsOriginPattern {
   if (!/[*?]/.test(entry)) return entry;
