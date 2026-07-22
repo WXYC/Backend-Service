@@ -70,7 +70,10 @@ async function upsertConcert(sql, { venueId, sourceId, startsOn, headliningArtis
       starts_on = excluded."starts_on",
       headlining_artist_raw = excluded."headlining_artist_raw",
       ticket_url = excluded."ticket_url",
-      image_url = COALESCE(excluded."image_url", ${sql(SCHEMA)}."concerts"."image_url"),
+      -- Mirrors the writers' \`COALESCE(excluded."image_url", concerts."image_url")\`.
+      -- The stored row is referenced by the bare relation name (its DO UPDATE
+      -- alias), exactly as Drizzle emits it — not schema-qualified.
+      image_url = COALESCE(excluded."image_url", "concerts"."image_url"),
       last_modified = now()
   `;
 }
@@ -129,7 +132,7 @@ describe('concerts.image_url retention on re-upsert (BS#1742)', () => {
     expect(row.image_url).toBe('https://cdn.example/posters/juana-molina.jpg');
   });
 
-  test('a real image populates a previously image-less row (a fresher poster still wins)', async () => {
+  test('a real image populates a previously image-less row', async () => {
     const sourceId = SOURCE_ID_PREFIX + 'populated';
 
     await upsertConcert(sql, {
@@ -153,5 +156,40 @@ describe('concerts.image_url retention on re-upsert (BS#1742)', () => {
 
     const [row] = await sql.unsafe(`SELECT image_url FROM "${SCHEMA}".concerts WHERE source_id = $1`, [sourceId]);
     expect(row.image_url).toBe('https://cdn.example/posters/chuquimamani-condori.jpg');
+  });
+
+  // The load-bearing case for the argument order. The two tests above pass
+  // under BOTH `COALESCE(excluded, stored)` and the flipped
+  // `COALESCE(stored, excluded)` — one has a null incoming, the other a null
+  // stored, so COALESCE returns the same value regardless of order. Only when
+  // BOTH are non-null and DIFFERENT does the order decide the winner, and
+  // incoming-first (the guard under test) must let the fresher poster win.
+  // Flip the writers to keep-existing-first and ONLY this test goes red.
+  test('a fresher poster overwrites a different stored poster (incoming-first, not keep-existing)', async () => {
+    const sourceId = SOURCE_ID_PREFIX + 'refreshed';
+    const oldPoster = 'https://cdn.example/posters/jessica-pratt-old.jpg';
+    const newPoster = 'https://cdn.example/posters/jessica-pratt-new.jpg';
+
+    await upsertConcert(sql, {
+      venueId,
+      sourceId,
+      startsOn: STARTS_ON,
+      headliningArtistRaw: 'Jessica Pratt',
+      ticketUrl: 'https://tickets.example/jessica-pratt',
+      imageUrl: oldPoster,
+    });
+
+    // Re-scrape: the venue swapped in a new poster for the same event.
+    await upsertConcert(sql, {
+      venueId,
+      sourceId,
+      startsOn: STARTS_ON,
+      headliningArtistRaw: 'Jessica Pratt',
+      ticketUrl: 'https://tickets.example/jessica-pratt',
+      imageUrl: newPoster,
+    });
+
+    const [row] = await sql.unsafe(`SELECT image_url FROM "${SCHEMA}".concerts WHERE source_id = $1`, [sourceId]);
+    expect(row.image_url).toBe(newPoster);
   });
 });

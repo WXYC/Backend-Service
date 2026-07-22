@@ -7,7 +7,7 @@
  * whose sql tag returns { sql: templateStrings, values: interpolations }
  * — which makes both halves directly inspectable.
  */
-import { headliningArtistIdConflictClear } from '../../../shared/database/src/concerts-sql';
+import { headliningArtistIdConflictClear, imageUrlConflictCoalesce } from '../../../shared/database/src/concerts-sql';
 import { concerts } from '../../../shared/database/src/schema';
 
 describe('headliningArtistIdConflictClear', () => {
@@ -34,5 +34,39 @@ describe('headliningArtistIdConflictClear', () => {
 
   it('returns a fresh fragment per call (no shared mutable descriptor across upserts)', () => {
     expect(headliningArtistIdConflictClear()).not.toBe(headliningArtistIdConflictClear());
+  });
+});
+
+describe('imageUrlConflictCoalesce', () => {
+  it('builds COALESCE(excluded, stored): the incoming scrape image, then the stored fallback', () => {
+    const frag = imageUrlConflictCoalesce() as unknown as {
+      sql: readonly string[];
+      values: unknown[];
+    };
+    const text = frag.sql.join('<col>');
+
+    expect(text).toBe('COALESCE(excluded."image_url", <col>)');
+  });
+
+  it('is incoming-first, NOT keep-existing-first: excluded precedes the stored-row column', () => {
+    // The load-bearing invariant (BS#1742). Flipping to the
+    // flowsheet-linked-reenrichment keep-existing-first order
+    // (COALESCE(stored, excluded)) would let a stale poster win and turn
+    // this assertion red. `excluded."image_url"` must come BEFORE the
+    // interpolated stored column.
+    const frag = imageUrlConflictCoalesce() as unknown as {
+      sql: readonly string[];
+      values: unknown[];
+    };
+    const text = frag.sql.join('<col>');
+
+    expect(text.indexOf('excluded."image_url"')).toBeLessThan(text.indexOf('<col>'));
+    // The single interpolation is the stored-row column (the fallback arg).
+    expect(frag.values).toHaveLength(1);
+    expect(frag.values[0]).toBe(concerts.image_url);
+  });
+
+  it('returns a fresh fragment per call (no shared mutable descriptor across upserts)', () => {
+    expect(imageUrlConflictCoalesce()).not.toBe(imageUrlConflictCoalesce());
   });
 });
