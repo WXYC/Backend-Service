@@ -111,8 +111,14 @@ export const loadEnrichmentCandidates = async (backfill = false): Promise<Enrich
  * DESC, id DESC LIMIT 1` rather than a bare OR-join, so the pick is
  * deterministic (freshest billing wins a tie, not an arbitrary row) and the
  * lookup returns exactly one concert per artist instead of fanning `am` out
- * across every matching concert. `am.discogs_artist_id` is the PK, so the result
- * is already one row per artist — no `DISTINCT ON` needed.
+ * across every matching concert. `am.discogs_artist_id` is the PK, but
+ * `artists.discogs_artist_id` is NOT unique — two `artists` rows can share one
+ * Discogs id — so the `LEFT JOIN artists` can still fan a single `am` row out
+ * to several. `DISTINCT ON (am.discogs_artist_id)` + a deterministic
+ * `a.id ASC NULLS LAST` tiebreak (BS#1746) collapses that back to one
+ * candidate per `am` row, mirroring `loadEnrichmentCandidates` above; without
+ * it a duplicate crashes the writer's multi-row UPSERT ("ON CONFLICT DO
+ * UPDATE command cannot affect row a second time").
  *
  * A blank-profile artist that a prior run wrote NULL for stays a candidate:
  * there is no attempt marker, so `--bio-backfill` does not converge to a true
@@ -121,7 +127,7 @@ export const loadEnrichmentCandidates = async (backfill = false): Promise<Enrich
  */
 export const loadBioBackfillCandidates = async (): Promise<EnrichmentCandidate[]> => {
   const result: unknown = await db.execute(sql`
-    SELECT
+    SELECT DISTINCT ON (am."discogs_artist_id")
       am."discogs_artist_id" AS discogs_artist_id,
       COALESCE("a"."artist_name", "c"."headlining_artist_raw") AS artist_name
     FROM ${ARTIST_METADATA_TABLE} am
@@ -138,7 +144,7 @@ export const loadBioBackfillCandidates = async (): Promise<EnrichmentCandidate[]
     ) "c" ON TRUE
     WHERE am."artist_bio" IS NULL
       AND COALESCE("a"."artist_name", "c"."headlining_artist_raw") IS NOT NULL
-    ORDER BY am."discogs_artist_id" ASC
+    ORDER BY am."discogs_artist_id" ASC, "a"."id" ASC NULLS LAST
   `);
   return unwrapRows<EnrichmentCandidate>(result);
 };
