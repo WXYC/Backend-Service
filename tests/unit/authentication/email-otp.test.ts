@@ -14,6 +14,11 @@ process.env.AWS_ACCESS_KEY_ID = 'test-key';
 process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
 process.env.AWS_REGION = 'us-east-1';
 process.env.SES_FROM_EMAIL = 'noreply@wxyc.org';
+// tests/setup/unit.setup.ts defaults EMAIL_ENABLED=false for the suite;
+// this file's SES client is already fully mocked, so opt back in to
+// exercise the real send path. The EMAIL_ENABLED gating describe block
+// below overrides this per-test.
+process.env.EMAIL_ENABLED = 'true';
 
 // Import after mocks and env setup
 import { sendOTPEmail, buildOTPEmailHtml } from '../../../shared/authentication/src/email';
@@ -130,6 +135,26 @@ describe('Email OTP', () => {
       );
 
       process.env.SES_FROM_EMAIL = originalFrom;
+    });
+
+    it('should not call the SES client send when EMAIL_ENABLED=false', async () => {
+      process.env.EMAIL_ENABLED = 'false';
+
+      await sendOTPEmail({ to: 'dj@wxyc.org', otp: '123456', type: 'sign-in' });
+
+      expect(mockSend).not.toHaveBeenCalled();
+
+      delete process.env.EMAIL_ENABLED;
+    });
+
+    it('should call the SES client send when EMAIL_ENABLED=true', async () => {
+      process.env.EMAIL_ENABLED = 'true';
+
+      await sendOTPEmail({ to: 'dj@wxyc.org', otp: '123456', type: 'sign-in' });
+
+      expect(mockSend).toHaveBeenCalledTimes(1);
+
+      delete process.env.EMAIL_ENABLED;
     });
   });
 });

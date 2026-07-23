@@ -123,6 +123,15 @@ const EXPECTED_ONLY_IN_WORKFLOW = [
   // harmless but pointless — the backend code never reads it.
   'DEFAULT_ORG_SLUG',
 
+  // Why: SES send gate read only by shared/authentication/src/email.ts,
+  // called from the auth service (sendEmail/sendOTPEmail in
+  // auth.definition.ts), not the backend. Compose sets it on the `auth`
+  // service env block (hardcoded `false`); in GHA CI's host-process model
+  // both services share workflow-level env, so it appears here. Mirroring
+  // it into the compose `backend` env would be harmless but pointless — the
+  // backend code never reads it.
+  'EMAIL_ENABLED',
+
   // Why: mock-api server addressing. Backend reads LIBRARY_METADATA_URL
   // (mirrored). MOCK_API_PORT + MOCK_API_URL exist for the harness side
   // (mock-server start command, test assertions about response bodies).

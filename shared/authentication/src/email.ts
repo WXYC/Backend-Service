@@ -136,6 +136,24 @@ function getConfigurationSetName(): string | undefined {
 }
 
 /**
+ * SES has a 200-message/month quota. `EMAIL_ENABLED` gates the actual
+ * `client.send()` call so test/CI runs (which repeatedly exercise the
+ * password-reset / verification / OTP flows) never burn that quota.
+ * Defaults to enabled (production behavior) when unset; test/CI
+ * environments set `EMAIL_ENABLED=false` explicitly (see
+ * `scripts/ci-env.sh`, `tests/setup/unit.setup.ts`, and
+ * `.github/workflows/test.yml`).
+ */
+export function isEmailSendingEnabled(): boolean {
+  const raw = process.env.EMAIL_ENABLED;
+  if (raw === undefined) {
+    return true;
+  }
+  const normalized = raw.trim().toLowerCase();
+  return normalized !== 'false' && normalized !== '0';
+}
+
+/**
  * Send a transactional email using the unified email system
  */
 export async function sendEmail(email: WXYCEmail): Promise<void> {
@@ -162,6 +180,10 @@ export async function sendEmail(email: WXYCEmail): Promise<void> {
     },
     ConfigurationSetName: getConfigurationSetName(),
   });
+
+  if (!isEmailSendingEnabled()) {
+    return;
+  }
 
   const client = getSesClient();
   await client.send(command);
@@ -267,6 +289,10 @@ export const sendOTPEmail = async ({ to, otp, type }: OTPEmailInput) => {
     },
     ConfigurationSetName: getConfigurationSetName(),
   });
+
+  if (!isEmailSendingEnabled()) {
+    return;
+  }
 
   const client = getSesClient();
   await client.send(command);
