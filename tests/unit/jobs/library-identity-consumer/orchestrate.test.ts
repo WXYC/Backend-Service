@@ -301,7 +301,8 @@ describe('runConsumer — counter unit cleanliness', () => {
       result.totals.rows_skipped.compilation +
       result.totals.rows_skipped.lml_error +
       result.totals.rows_skipped.writer_error +
-      result.totals.rows_skipped.lml_cardinality_mismatch;
+      result.totals.rows_skipped.lml_cardinality_mismatch +
+      result.totals.rows_skipped.lml_untrusted_library_id;
     expect(
       result.totals.scanned === result.totals.rows_resolved + result.totals.rows_unresolved + libraryIdLevelSkipSum
     ).toBe(true);
@@ -341,6 +342,116 @@ describe('runConsumer — counter unit cleanliness', () => {
     expect(result.totals.scanned).toBe(3);
     expect(result.totals.rows_unresolved).toBe(2);
     expect(result.totals.rows_skipped.lml_cardinality_mismatch).toBe(1);
+  });
+
+  it('skips a result whose library_id is not present in the batch input set', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        { id: 1, artist_name: 'A', album_title: 'a' },
+        { id: 2, artist_name: 'B', album_title: 'b' },
+      ])
+      .mockResolvedValue([]);
+
+    // LML returns a result for library_id=999, which was never part of
+    // this batch's inputs. Length still matches rows.length, so the
+    // cardinality check alone would miss this.
+    const bulkResolve = jest.fn<BulkResolveFn>().mockResolvedValue({
+      results: [
+        { kind: 'unresolved', library_id: 1, provenance: [] },
+        { kind: 'unresolved', library_id: 999, provenance: [] },
+      ],
+    });
+    const writeSingleArtist = jest.fn<WriteSingleArtistFn>().mockResolvedValue({
+      source_rows_written: 0,
+      source_rows_skipped_null_confidence: 0,
+    });
+
+    const result = await runConsumer({
+      bulkResolve,
+      writeSingleArtist,
+      batchSize: 500,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { sqlFragment: null, description: 'partition=none' },
+      dryRun: false,
+    });
+
+    expect(result.totals.scanned).toBe(2);
+    expect(result.totals.rows_unresolved).toBe(1);
+    expect(result.totals.rows_skipped.lml_untrusted_library_id).toBe(1);
+  });
+
+  it('skips a result whose library_id is missing from the batch input set (short response)', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        { id: 1, artist_name: 'A', album_title: 'a' },
+        { id: 2, artist_name: 'B', album_title: 'b' },
+      ])
+      .mockResolvedValue([]);
+
+    // LML drops library_id=2 entirely (short response) — caught by the
+    // pre-existing cardinality-mismatch check, not the membership check.
+    const bulkResolve = jest.fn<BulkResolveFn>().mockResolvedValue({
+      results: [{ kind: 'unresolved', library_id: 1, provenance: [] }],
+    });
+    const writeSingleArtist = jest.fn<WriteSingleArtistFn>().mockResolvedValue({
+      source_rows_written: 0,
+      source_rows_skipped_null_confidence: 0,
+    });
+
+    const result = await runConsumer({
+      bulkResolve,
+      writeSingleArtist,
+      batchSize: 500,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { sqlFragment: null, description: 'partition=none' },
+      dryRun: false,
+    });
+
+    expect(result.totals.scanned).toBe(2);
+    expect(result.totals.rows_unresolved).toBe(1);
+    expect(result.totals.rows_skipped.lml_cardinality_mismatch).toBe(1);
+    expect(result.totals.rows_skipped.lml_untrusted_library_id).toBe(0);
+  });
+
+  it('flags a duplicated library_id that compensates for a dropped one (length matches, membership does not)', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        { id: 1, artist_name: 'A', album_title: 'a' },
+        { id: 2, artist_name: 'B', album_title: 'b' },
+      ])
+      .mockResolvedValue([]);
+
+    // LML returns library_id=1 twice and drops library_id=2, keeping
+    // response.results.length === rows.length. The length-only cardinality
+    // check would see nothing wrong; the membership check must flag the
+    // duplicate.
+    const bulkResolve = jest.fn<BulkResolveFn>().mockResolvedValue({
+      results: [
+        { kind: 'unresolved', library_id: 1, provenance: [] },
+        { kind: 'unresolved', library_id: 1, provenance: [] },
+      ],
+    });
+    const writeSingleArtist = jest.fn<WriteSingleArtistFn>().mockResolvedValue({
+      source_rows_written: 0,
+      source_rows_skipped_null_confidence: 0,
+    });
+
+    const result = await runConsumer({
+      bulkResolve,
+      writeSingleArtist,
+      batchSize: 500,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { sqlFragment: null, description: 'partition=none' },
+      dryRun: false,
+    });
+
+    expect(result.totals.scanned).toBe(2);
+    expect(result.totals.rows_unresolved).toBe(1);
+    expect(result.totals.rows_skipped.lml_cardinality_mismatch).toBe(0);
+    expect(result.totals.rows_skipped.lml_untrusted_library_id).toBe(1);
   });
 });
 
@@ -415,7 +526,7 @@ describe('runConsumer — DRY_RUN', () => {
       ].sort()
     );
     expect(Object.keys(captured.would_skip).sort()).toEqual(
-      ['compilation', 'lml_cardinality_mismatch', 'lml_error'].sort()
+      ['compilation', 'lml_cardinality_mismatch', 'lml_error', 'lml_untrusted_library_id'].sort()
     );
     expect(captured.scanned).toBe(3);
     expect(captured.would_resolve).toBe(1);
@@ -423,6 +534,7 @@ describe('runConsumer — DRY_RUN', () => {
     expect(captured.would_skip.compilation).toBe(1);
     expect(captured.would_skip.lml_error).toBe(0);
     expect(captured.would_skip.lml_cardinality_mismatch).toBe(0);
+    expect(captured.would_skip.lml_untrusted_library_id).toBe(0);
     expect(captured.source_rows_skipped_null_confidence).toBe(0);
     expect(captured.lml_total_calls).toBe(1);
   });
