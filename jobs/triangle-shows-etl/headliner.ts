@@ -1,11 +1,13 @@
 /**
- * Clean-headliner extraction (BS#1604) + the clean-name LML gate (BS#1614).
+ * Clean-headliner extraction (BS#1604) + the clean-name LML gate (BS#1614)
+ * + the billing-tail support capture that generalizes extraction into a
+ * full billing parse (BS#1758).
  *
  * Extracted from map.ts so this module stays free of `@wxyc/database`
  * (whose client throws at import time without DB_* env vars) — the
  * BS#1614 name-set export script filters text dumps anywhere, without DB
- * credentials. map.ts re-exports `extractHeadliner`, so ETL-side
- * consumers are unchanged.
+ * credentials. map.ts re-exports `extractHeadliner`/`parseBilling`, so
+ * ETL-side consumers are unchanged.
  *
  * triangle-shows' `artist` field is byte-identical to the event `name`
  * in practice — the full marquee/billing string, not a clean performer —
@@ -143,17 +145,78 @@ const cleanBilling = (original: string): string => {
 };
 
 /**
- * Derive a clean headliner from a billing string. Exported for the unit
- * suite. Returns the trimmed input unchanged when no rule fires, and
- * falls back to the trimmed input when cleanup empties the string (a
- * pure-tag billing like `(SOLD OUT)` is still better stored verbatim
- * than dropped — it just stays unresolved, exactly like today).
+ * Splits an already-isolated SUPPORT_TAIL match into individual support-act
+ * names (BS#1758). Reuses SUPPORT_TAIL's own delimiter tokens — `//`, `w/`
+ * (never `w/o`/`w/out`, same negative lookahead), `feat.`/`ft.`/`featuring`
+ * — plus a bare comma, which is safe to split on HERE (unlike inside the
+ * headliner segment, where `Emerson, Lake & Palmer` must stay whole)
+ * because everything this regex ever runs against is already past a
+ * SUPPORT_TAIL delimiter. `&`/`and`/plain ` with `/` + ` are deliberately
+ * absent, mirroring SUPPORT_TAIL's own conservative set — under-capture
+ * over mis-capture applies to the support half exactly like the headliner
+ * half.
+ *
+ * `parseBilling` runs this against the FULL SUPPORT_TAIL match, leading
+ * delimiter included (` // Squirrel Flower // Sluice`, not just
+ * `Squirrel Flower // Sluice`) — `.split()` against a string that STARTS
+ * with a delimiter always produces a leading empty element, which the
+ * caller's empty-filter drops along with any other stray empty segment.
+ * That's the entire "drop the leading delimiter token" step; no separate
+ * strip regex needed. Global, for `.split()`.
  */
-export const extractHeadliner = (billing: string): string => {
+const TAIL_SPLIT = /\s*,\s*|\s+(?:w\/(?!o(?:ut)?\b)|\/\/)\s*|\s+(?:feat\.|ft\.|featuring)\s+/gi;
+
+/**
+ * Generalizes `extractHeadliner` into the full billing parse (BS#1758):
+ * the clean headliner AND the supporting acts named in the billing's
+ * tail. `extractHeadliner` is now a thin wrapper over this — see below —
+ * so its whole existing suite pins the headliner half byte-identical.
+ *
+ * Support capture piggybacks on the exact SUPPORT_TAIL match `cleanBilling`
+ * already computes in order to strip: re-run here rather than threaded out
+ * of `cleanBilling` (SUPPORT_TAIL carries no `g` flag, so a second
+ * `.exec()` is stateless — no `lastIndex` to collide with the `.replace()`
+ * call inside `cleanBilling`), which keeps the headliner half a literal,
+ * unmodified call into the SAME fixpoint `extractHeadliner` ran directly
+ * before this generalization. SUPPORT_TAIL itself is untouched by this
+ * change.
+ *
+ * The support split runs ONLY inside that already-isolated tail — never on
+ * `&`/`and`/plain ` with `/` + `/AC/DC`/`w/o`, exactly like extraction
+ * itself (SUPPORT_TAIL's own delimiter set, reused verbatim by
+ * `TAIL_SPLIT`). A billing with no tail yields `support: []`. Conservative
+ * by the same contract as the headliner half: under-capture over
+ * mis-capture.
+ */
+export const parseBilling = (billing: string): { headliner: string; support: string[] } => {
   const original = billing.trim();
   const cleaned = cleanBilling(original);
-  return cleaned === '' ? original : cleaned;
+  const headliner = cleaned === '' ? original : cleaned;
+
+  const tailMatch = SUPPORT_TAIL.exec(original);
+  const support = tailMatch
+    ? tailMatch[0]
+        .split(TAIL_SPLIT)
+        .map((name) => name.trim())
+        .filter((name) => name.length > 0)
+    : [];
+
+  return { headliner, support };
 };
+
+/**
+ * Derive a clean headliner from a billing string. Exported for the unit
+ * suite and every pre-BS#1758 caller. Thin wrapper over `parseBilling` —
+ * byte-identical to the pre-generalization implementation, because
+ * `parseBilling`'s headliner half runs the exact same `cleanBilling`
+ * fixpoint + empty-fallback (returns the trimmed input unchanged when no
+ * rule fires, and falls back to the trimmed input when cleanup empties
+ * the string — a pure-tag billing like `(SOLD OUT)` is still better
+ * stored verbatim than dropped, it just stays unresolved) this function
+ * ran directly before the split. That equivalence is the whole point of
+ * the wrapper shape.
+ */
+export const extractHeadliner = (billing: string): string => parseBilling(billing).headliner;
 
 /**
  * Multi-act billing markers the extractor deliberately leaves in place
