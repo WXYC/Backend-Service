@@ -7,6 +7,8 @@ import {
   clampCodePoints,
   extractHeadliner,
   mapEvent,
+  mergeSupportingArtists,
+  parseBilling,
   splitSupportArtists,
   backdatedStart,
 } from '../../../../jobs/triangle-shows-etl/map';
@@ -294,6 +296,82 @@ describe('extractHeadliner — fallback and idempotence', () => {
   });
 });
 
+// BS#1758: `parseBilling` generalizes `extractHeadliner` into
+// `{ headliner, support[] }`. The headliner half is proven byte-identical
+// by the fact that `extractHeadliner` is now a thin wrapper — every case
+// above already pins it exhaustively by construction. These cases cover
+// only the NEW support half: tail parsing and the conservative
+// never-split negatives.
+describe('parseBilling — support-tail parsing (BS#1758)', () => {
+  it.each([
+    // `//` chains split on every occurrence, not just the first.
+    ['Horse Jumper of Love // Squirrel Flower // Sluice', ['Squirrel Flower', 'Sluice']],
+    // `w/`, with and without a space after the token, case-insensitively.
+    ['76th Street w/ Tornsey', ['Tornsey']],
+    ['76th Street w/Tornsey', ['Tornsey']],
+    ['Wednesday W/ Truth Club', ['Truth Club']],
+    // `feat.` / `ft.` / `featuring`.
+    ['Mdou Moctar feat. Mikey Coltun', ['Mikey Coltun']],
+    ['Mdou Moctar ft. Mikey Coltun', ['Mikey Coltun']],
+    ['Mdou Moctar featuring Mikey Coltun', ['Mikey Coltun']],
+    // A comma INSIDE an already-isolated tail splits into multiple names —
+    // never a comma in the headliner segment, since the split domain is
+    // strictly the post-delimiter tail.
+    ['Wednesday w/ Truth Club, DJ Nu-Mark', ['Truth Club', 'DJ Nu-Mark']],
+    ['Horse Jumper of Love // Squirrel Flower, Sluice', ['Squirrel Flower', 'Sluice']],
+    // A dangling separator before the tail (`Foo - w/ Bar`) doesn't leak
+    // into the captured support name.
+    ['Deerhoof - w/ Sword II', ['Sword II']],
+    // Leading tag + framing + tail all stack; support capture is
+    // independent of how much headliner-side cleanup fired.
+    ['(LOW TIX) (18+) An Evening With: Deerhoof w/ Sword II', ['Sword II']],
+    // Extra internal whitespace around the delimiter and the comma is
+    // trimmed off each captured name.
+    ['Deerhoof w/  Sword II  ,  Told Slant', ['Sword II', 'Told Slant']],
+  ])('parseBilling(%j).support -> %j', (input, expectedSupport) => {
+    expect(parseBilling(input).support).toEqual(expectedSupport);
+  });
+
+  it.each([
+    // No tail at all.
+    'Jessica Pratt',
+    // `&` / `and` are never support delimiters — in the tail either, same
+    // as the headliner strip.
+    'Andy Frasco & The U.N',
+    'Nick Cave and the Bad Seeds',
+    // Plain ` with ` and ` + ` are never delimiters.
+    'Elvis Costello with Steve Nieve',
+    'Sylvan Esso + Flock of Dimes',
+    // Slash-bearing names: the delimiter requires leading whitespace, so a
+    // bare `/` inside a name never fires.
+    'AC/DC',
+    'DIIV/Horsegirl',
+    // `w/o` / `w/out` mean "without" — the negative lookahead applies to
+    // the split exactly like it applies to the strip.
+    'Angel w/o Wings',
+    'The Man w/out a Country',
+  ])('parseBilling(%j).support -> [] (never splits)', (input) => {
+    expect(parseBilling(input).support).toEqual([]);
+  });
+
+  it('captures the full remainder as one element when no further tail delimiter fires (conservative: one under-cleaned element over guessed splitting)', () => {
+    // `Presents:` framing is a headliner-side rule (PRESENTS_PREFIX) that
+    // never runs inside an already-isolated support tail.
+    expect(parseBilling('Deerhoof w/ Hopscotch Presents: Late Night Set').support).toEqual([
+      'Hopscotch Presents: Late Night Set',
+    ]);
+  });
+
+  it('returns the same headliner extractHeadliner would, alongside the new support half', () => {
+    const billing = "Acid Mother's Temple w/ Magick Potion";
+    expect(parseBilling(billing)).toEqual({
+      headliner: "Acid Mother's Temple",
+      support: ['Magick Potion'],
+    });
+    expect(parseBilling(billing).headliner).toBe(extractHeadliner(billing));
+  });
+});
+
 describe('mapEvent — clean headliner wiring (BS#1604)', () => {
   it('cleans the billing into headlining_artist_raw while title keeps the full display billing', () => {
     // The 550/550 case: artist byte-identical to name, both the full billing.
@@ -387,6 +465,115 @@ describe('splitSupportArtists', () => {
   it('is what mapEvent feeds supporting_artists_raw', () => {
     const mapped = mapEvent(makeTsEvent({ support_artists: 'Stereolab, Cat Power' }));
     expect(mapped.concert.supporting_artists_raw).toEqual(['Stereolab', 'Cat Power']);
+  });
+});
+
+// BS#1758: `supporting_artists_raw` used to come from `splitSupportArtists`
+// alone; the billing tail's names (`parseBilling`'s support half) are now
+// folded in — the richer signal, since the source's own `support_artists`
+// field is sparse. `mergeSupportingArtists` is the pure merge/dedupe/clamp
+// step; both it and its wiring into `mapEvent` are covered here.
+describe('mergeSupportingArtists (BS#1758)', () => {
+  it('unions billing-derived support with the structured field, billing first', () => {
+    expect(mergeSupportingArtists(['Erin Rae'], ['Kevin Morby'], 'Angel Olsen', 256)).toEqual([
+      'Erin Rae',
+      'Kevin Morby',
+    ]);
+  });
+
+  it('dedupes normalize-insensitively, keeping the first-seen surface form', () => {
+    // 'Erin Rae' (billing tail) and 'erin rae' (structured field) collapse
+    // to one entry via normalizeFreetextArtist; the billing-derived
+    // surface form wins because it is listed first in the union.
+    expect(mergeSupportingArtists(['Erin Rae'], ['erin rae', 'Kevin Morby'], 'Angel Olsen', 256)).toEqual([
+      'Erin Rae',
+      'Kevin Morby',
+    ]);
+  });
+
+  it('dedupes case- and spacing-insensitively within a single source too', () => {
+    expect(mergeSupportingArtists([], ['Told Slant', 'told   slant', 'The Told Slant'], 'Jessica Pratt', 256)).toEqual([
+      'Told Slant',
+    ]);
+  });
+
+  it('drops a support element that normalizes equal to the chosen headliner (a performer is not its own support)', () => {
+    expect(mergeSupportingArtists([], ['Jessica Pratt', 'Told Slant'], 'Jessica Pratt', 256)).toEqual(['Told Slant']);
+    // Case/spacing-insensitive against the headliner too.
+    expect(mergeSupportingArtists([], ['JESSICA   PRATT', 'Told Slant'], 'Jessica Pratt', 256)).toEqual(['Told Slant']);
+  });
+
+  it('clamps each surviving name to the given code-point max', () => {
+    const long = 'x'.repeat(300);
+    const merged = mergeSupportingArtists([long], [], 'Jessica Pratt', 256);
+    expect(merged).toHaveLength(1);
+    expect([...merged[0]]).toHaveLength(256);
+  });
+
+  it('caps the merged array at 32 names (SUPPORT_MAX_COUNT), keeping merge order', () => {
+    const names = Array.from({ length: 40 }, (_, i) => `Support ${i}`);
+    const merged = mergeSupportingArtists([], names, 'Headliner', 256);
+    expect(merged).toHaveLength(32);
+    expect(merged).toEqual(names.slice(0, 32));
+  });
+
+  it('returns [] for no support from either source', () => {
+    expect(mergeSupportingArtists([], [], 'Jessica Pratt', 256)).toEqual([]);
+  });
+});
+
+describe('mapEvent — supporting artists merge (BS#1758)', () => {
+  it('folds the billing-tail support into supporting_artists_raw even when the structured field is empty', () => {
+    const mapped = mapEvent(makeTsEvent({ artist: '76th Street w/ Tornsey', support_artists: null }));
+    expect(mapped.concert.headlining_artist_raw).toBe('76th Street');
+    expect(mapped.concert.supporting_artists_raw).toEqual(['Tornsey']);
+  });
+
+  it('merges billing-tail support with the structured field, deduping a name common to both', () => {
+    const mapped = mapEvent(
+      makeTsEvent({ artist: 'Angel Olsen w/ Erin Rae', support_artists: 'erin rae, Kevin Morby' })
+    );
+    expect(mapped.concert.headlining_artist_raw).toBe('Angel Olsen');
+    expect(mapped.concert.supporting_artists_raw).toEqual(['Erin Rae', 'Kevin Morby']);
+  });
+
+  it('drops a structured-field support entry that duplicates the resolved headliner', () => {
+    // The source's OWN support_artists field lists the headliner again — a
+    // real data-quality shape, not a hypothetical.
+    const mapped = mapEvent(makeTsEvent({ artist: 'Jessica Pratt', support_artists: 'Jessica Pratt, Told Slant' }));
+    expect(mapped.concert.supporting_artists_raw).toEqual(['Told Slant']);
+  });
+
+  it('excludes support against the UPSTREAM headliner field when present, not just the heuristic one', () => {
+    const mapped = mapEvent(
+      makeTsEvent({
+        headliner: 'Deerhoof',
+        artist: 'Deerhoof w/ Deerhoof Trio',
+        support_artists: null,
+      })
+    );
+    expect(mapped.concert.headlining_artist_raw).toBe('Deerhoof');
+    // 'Deerhoof Trio' does not normalize-equal 'Deerhoof', so it survives —
+    // this pins that the exclusion is normalize-EQUAL, not a substring match.
+    expect(mapped.concert.supporting_artists_raw).toEqual(['Deerhoof Trio']);
+  });
+
+  it('still captures billing-tail support when an upstream headliner field wins (support derives from billing, independent of headliner source)', () => {
+    const mapped = mapEvent(
+      makeTsEvent({
+        headliner: 'Acid Mothers Temple',
+        artist: '(An Oddly Tagged) Billing w/ Support',
+        support_artists: null,
+      })
+    );
+    expect(mapped.concert.headlining_artist_raw).toBe('Acid Mothers Temple');
+    expect(mapped.concert.supporting_artists_raw).toEqual(['Support']);
+  });
+
+  it('clamps and caps exactly like mergeSupportingArtists in isolation', () => {
+    const names = Array.from({ length: 40 }, (_, i) => `Support ${i}`).join(', ');
+    const mapped = mapEvent(makeTsEvent({ artist: 'Jessica Pratt', support_artists: names }));
+    expect(mapped.concert.supporting_artists_raw).toHaveLength(32);
   });
 });
 

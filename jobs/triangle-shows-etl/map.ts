@@ -13,17 +13,18 @@
  * of them uniformly.
  */
 
-import { nyCalendarDate, nyWallClockToUtc, type NewConcert } from '@wxyc/database';
-import { extractHeadliner } from './headliner.js';
+import { nyCalendarDate, nyWallClockToUtc, normalizeFreetextArtist, type NewConcert } from '@wxyc/database';
+import { parseBilling } from './headliner.js';
 import type { TsEvent } from './types.js';
 
-// Clean-headliner extraction (BS#1604) + the BS#1614 clean-name LML gate
-// live in headliner.ts — a deliberately DB-free module so the BS#1614
-// name-set export script can import them without tripping
-// `@wxyc/database`'s import-time env guard. Re-exported here so ETL-side
-// consumers keep one import surface.
+// Clean-headliner extraction (BS#1604) + the BS#1614 clean-name LML gate +
+// the BS#1758 billing-tail support parse live in headliner.ts — a
+// deliberately DB-free module so the BS#1614 name-set export script can
+// import them without tripping `@wxyc/database`'s import-time env guard.
+// Re-exported here so ETL-side consumers keep one import surface.
 export {
   extractHeadliner,
+  parseBilling,
   isCleanHeadliner,
   HARD_BILLING_DELIMITERS,
   BILLING_DELIMITER_PATTERNS,
@@ -62,6 +63,52 @@ export const splitSupportArtists = (raw: string | string[] | null): string[] =>
   (Array.isArray(raw) ? raw : (raw ?? '').split(','))
     .map((s) => (typeof s === 'string' ? s.trim() : ''))
     .filter((s) => s.length > 0);
+
+/** Generous upper bound on `supporting_artists_raw`'s length (BS#1758) —
+ *  real billings carry a handful of names at most. Guards a pathological
+ *  merge (a malformed feed, a runaway tail split) from writing an
+ *  unbounded array rather than modeling any real co-bill size. */
+const SUPPORT_MAX_COUNT = 32;
+
+/**
+ * Merge the billing-tail-derived support acts (`parseBilling`'s support
+ * half, BS#1758) with the source's own sparse `support_artists` field into
+ * the final `supporting_artists_raw` array. Billing-derived names are
+ * listed FIRST — the richer signal, since `source.support_artists` is
+ * often empty precisely because the names live in the tail this job used
+ * to discard.
+ *
+ * Deduped normalize-insensitively via `normalizeFreetextArtist` (the
+ * free-text match SSOT the resolver and flowsheet embed key on — using
+ * anything else here would let capture dedup and match keys drift apart),
+ * keeping the FIRST-SEEN surface form. The chosen headliner is dropped
+ * from the result the same way — a performer is not its own support —
+ * compared against the ALREADY-DECIDED `headliner` (upstream field or the
+ * heuristic, whichever won), not the clamped storage form; the exclusion
+ * is an identity check, not a column-width one.
+ *
+ * Each surviving name clamps to `max` code points (the caller passes
+ * `HEADLINER_MAX`, mirroring the headliner's own clamp) and the array
+ * caps at `SUPPORT_MAX_COUNT` — both generous vs. observed billings,
+ * guarding a pathological one rather than a real co-bill.
+ */
+export const mergeSupportingArtists = (
+  billingSupport: string[],
+  structuredSupport: string[],
+  headliner: string,
+  max: number
+): string[] => {
+  const headlinerKey = normalizeFreetextArtist(headliner);
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const name of [...billingSupport, ...structuredSupport]) {
+    const key = normalizeFreetextArtist(name);
+    if (key === '' || key === headlinerKey || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(clampCodePoints(name, max));
+  }
+  return merged.slice(0, SUPPORT_MAX_COUNT);
+};
 
 /** numeric(8,2) tops out at 999999.99, and PG errors rather than
  *  truncates. Judged on the ROUNDED value — toFixed carries 999999.996
@@ -149,12 +196,19 @@ export const mapEvent = (event: TsEvent): MappedEvent => {
   const artist = sanitized.artist?.trim() ?? '';
   const name = sanitized.name.trim();
   const billing = artist || name;
+  // BS#1758: parsed unconditionally, NOT inlined into the `||` below — the
+  // billing tail's support acts (parsedBilling.support) are a property of
+  // the raw billing string regardless of which headliner value wins, so
+  // short-circuiting this call away whenever an upstream headliner is
+  // present would silently stop capturing support the day
+  // WXYC/triangle-shows#18 covers the corpus.
+  const parsedBilling = parseBilling(billing);
   // BS#1604: prefer the upstream clean-performer field when present and
   // non-blank (WXYC/triangle-shows#18 emits it best-effort — nullable,
   // and absent entirely until it deploys); otherwise derive a clean
   // headliner from the billing string. Both routes hit the same clamp.
   const upstreamHeadliner = sanitized.headliner?.trim() ?? '';
-  const headliner = upstreamHeadliner || extractHeadliner(billing);
+  const headliner = upstreamHeadliner || parsedBilling.headliner;
   if (headliner === '') {
     throw new Error(
       `mapEvent: event id ${event.id} has a blank headliner, artist AND name — refusing a headliner-less row`
@@ -198,7 +252,16 @@ export const mapEvent = (event: TsEvent): MappedEvent => {
       // the `name &&` guard keeps a blank name (with a valid artist) from
       // storing a whitespace title.
       title: name && name !== clampedHeadliner ? sanitized.name : null,
-      supporting_artists_raw: splitSupportArtists(sanitized.support_artists),
+      // BS#1758: billing-tail support (richer — often the ONLY signal,
+      // since the source's own field is sparse) merged with the
+      // structured field, deduped against the CHOSEN headliner (whichever
+      // of upstreamHeadliner/parsedBilling.headliner won above).
+      supporting_artists_raw: mergeSupportingArtists(
+        parsedBilling.support,
+        splitSupportArtists(sanitized.support_artists),
+        headliner,
+        HEADLINER_MAX
+      ),
       ticket_url: sanitized.ticket_url,
       image_url: sanitized.image_url,
       // The venue's own event-detail page (BS#1609). The conflict-update that
