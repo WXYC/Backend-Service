@@ -127,33 +127,33 @@ The run-end log lines and Sentry spans (`${JOB_NAME}.run.sync_totals`, `.run.tot
 
 **Sync** (`sync.*`)
 
-| field                | meaning                                                                    |
-| --------------------- | --------------------------------------------------------------------------- |
-| `concerts_scanned`   | Upcoming, non-tombstoned concerts read.                                   |
-| `concerts_changed`   | Of those, how many had a non-empty diff (applyDiff was actually called).  |
-| `inserted`           | New `concert_performers` rows inserted.                                   |
-| `untombstoned`       | Rows whose `removed_at` was cleared (name reappeared).                    |
-| `tombstoned`         | Rows whose `removed_at` was set (name dropped from the array).            |
-| `error`              | Per-concert write failures (caught, counted, loop continues).             |
+| field              | meaning                                                                  |
+| ------------------ | ------------------------------------------------------------------------ |
+| `concerts_scanned` | Upcoming, non-tombstoned concerts read.                                  |
+| `concerts_changed` | Of those, how many had a non-empty diff (applyDiff was actually called). |
+| `inserted`         | New `concert_performers` rows inserted.                                  |
+| `untombstoned`     | Rows whose `removed_at` was cleared (name reappeared).                   |
+| `tombstoned`       | Rows whose `removed_at` was set (name dropped from the array).           |
+| `error`            | Per-concert write failures (caught, counted, loop continues).            |
 
 **Headliner resolve** (`resolver.*`, unchanged from BS#1372) — see the field table this job has always had: `scanned`, `resolved`, `resolved_strict`, `resolved_alias`, `ambiguous`, `unmatched`, `null_raw_skipped`, `error`, `raced`.
 
 **Support resolve arm** (`support.*`)
 
-| field             | meaning                                                                  |
-| ----------------- | ------------------------------------------------------------------------- |
-| `scanned`         | Candidate junction rows read.                                           |
-| `resolved`        | Rows whose `artist_id` was stamped (sum of strict + alias).             |
-| `resolved_strict` | Singleton matches from the strict arm.                                  |
-| `resolved_alias`  | Singleton matches from the alias arm.                                   |
-| `ambiguous`       | >1 distinct `artist_id` after dedup → id stays NULL.                    |
-| `unmatched`       | Zero matches from both arms → id stays NULL.                            |
-| `error`           | Transient resolver/writer failure. Row stays NULL; retried next run.    |
-| `raced`           | Writer's WHERE clause matched 0 rows — a concurrent run set it first.   |
+| field             | meaning                                                               |
+| ----------------- | --------------------------------------------------------------------- |
+| `scanned`         | Candidate junction rows read.                                         |
+| `resolved`        | Rows whose `artist_id` was stamped (sum of strict + alias).           |
+| `resolved_strict` | Singleton matches from the strict arm.                                |
+| `resolved_alias`  | Singleton matches from the alias arm.                                 |
+| `ambiguous`       | >1 distinct `artist_id` after dedup → id stays NULL.                  |
+| `unmatched`       | Zero matches from both arms → id stays NULL.                          |
+| `error`           | Transient resolver/writer failure. Row stays NULL; retried next run.  |
+| `raced`           | Writer's WHERE clause matched 0 rows — a concurrent run set it first. |
 
 **Recompute** (`recompute.*`)
 
-| field           | meaning                                                       |
+| field           | meaning                                                          |
 | --------------- | ---------------------------------------------------------------- |
 | `updated`       | Concerts whose `has_resolved_support` actually flipped this run. |
 | `updated_true`  | Of those, how many flipped to `true`.                            |
