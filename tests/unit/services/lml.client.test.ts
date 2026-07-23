@@ -483,6 +483,77 @@ describe('lml.client', () => {
     });
   });
 
+  describe('lookupMetadata discogsUnavailable gate (BS#1293)', () => {
+    it('skips the LML call and returns a skipped outcome when discogsUnavailable is true', async () => {
+      const result = await lookupMetadata('Foo', 'Bar', undefined, { discogsUnavailable: true });
+
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        results: [],
+        search_type: 'none',
+        song_not_found: false,
+        found_on_compilation: false,
+        timeout: false,
+        outcome: 'skipped_discogs_unavailable',
+      });
+    });
+
+    it('does not consume a Semaphore permit or a TokenBucket token when skipped', async () => {
+      const limiter = createLmlLimiter({ maxConcurrent: 2, ratePerMinute: 10 });
+      const before = limiter.state();
+
+      await lookupMetadata('Foo', 'Bar', undefined, { discogsUnavailable: true, limiter });
+
+      expect(limiter.state()).toEqual(before);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('calls LML normally when forceLookup overrides discogsUnavailable', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+      const limiter = createLmlLimiter({ maxConcurrent: 2, ratePerMinute: 10 });
+
+      const result = await lookupMetadata('Foo', 'Bar', undefined, {
+        discogsUnavailable: true,
+        forceLookup: true,
+        limiter,
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(result.outcome).toBeUndefined();
+      // A real call still holds + releases the permit and consumes exactly
+      // one token — the limiter is back at full capacity once it resolves.
+      expect(limiter.state().availablePermits).toBe(2);
+      expect(limiter.state().availableTokens).toBeCloseTo(9, 0);
+    });
+
+    it('behaves normally (no gate) when discogsUnavailable is omitted', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      const result = await lookupMetadata('Foo', 'Bar');
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(result.outcome).toBeUndefined();
+    });
+
+    it("records lml.lookup.skipped_reason='discogs_unavailable' on the Sentry span", async () => {
+      await lookupMetadata('Foo', 'Bar', undefined, { discogsUnavailable: true });
+
+      const skippedCalls = mockSpanSetAttributes.mock.calls.filter(
+        (args) => (args[0] as Record<string, unknown>)?.['lml.lookup.skipped_reason'] === 'discogs_unavailable'
+      );
+      expect(skippedCalls).toHaveLength(1);
+      expect(mockStartSpan).toHaveBeenCalledWith(expect.objectContaining({ name: 'lml.lookup' }), expect.any(Function));
+    });
+  });
+
   describe('lookupBySong', () => {
     it('sends POST to /api/v1/lookup with only song + raw_message (artist omitted)', async () => {
       // LML's SONG_AS_TRACK strategy is keyed off a song-only request; sending
@@ -776,6 +847,94 @@ describe('lml.client', () => {
       } as unknown as globalThis.Response);
 
       await expect(bulkLookupMetadata([itemFor('A', 'X')])).rejects.toThrow(LmlClientError);
+    });
+  });
+
+  describe('bulkLookupMetadata discogsUnavailable gate (BS#1293)', () => {
+    const itemFor = (artist: string, album?: string, discogsUnavailable?: boolean) => ({
+      artist,
+      album,
+      raw_message: [artist, album].filter(Boolean).join(' - '),
+      ...(discogsUnavailable !== undefined ? { discogsUnavailable } : {}),
+    });
+
+    it('skips the first item and sends only the second item to LML', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [{ index: 0, status: 'match', lookup: { results: [{ library_item: { id: 1 } }] } }],
+          }),
+      } as unknown as globalThis.Response);
+
+      const result = await bulkLookupMetadata([itemFor('A', 'B', true), itemFor('C', 'D')]);
+
+      // Only the unflagged item reaches the wire.
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(init.body as string) as { items: unknown[] };
+      expect(body.items).toEqual([{ artist: 'C', album: 'D', raw_message: 'C - D' }]);
+
+      // Results stay index-aligned with the caller's original input.
+      expect(result.results).toHaveLength(2);
+      expect(result.results[0]).toEqual({
+        index: 0,
+        status: 'skipped_discogs_unavailable',
+        lookup: {
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+          timeout: false,
+          outcome: 'skipped_discogs_unavailable',
+        },
+      });
+      expect(result.results[1]).toMatchObject({ index: 1, status: 'match' });
+    });
+
+    it('makes no LML call when every item is flagged discogsUnavailable', async () => {
+      const result = await bulkLookupMetadata([itemFor('A', 'B', true), itemFor('C', 'D', true)]);
+
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(result.results.map((r) => r.status)).toEqual([
+        'skipped_discogs_unavailable',
+        'skipped_discogs_unavailable',
+      ]);
+      expect(result.results.map((r) => r.index)).toEqual([0, 1]);
+    });
+
+    it('does not consume a limiter permit/token when every item is skipped', async () => {
+      const limiter = createLmlLimiter({ maxConcurrent: 2, ratePerMinute: 10 });
+      const before = limiter.state();
+
+      await bulkLookupMetadata([itemFor('A', 'B', true)], { limiter });
+
+      expect(limiter.state()).toEqual(before);
+    });
+
+    it("records lml.lookup.skipped_reason='discogs_unavailable' on the Sentry span for an all-skipped batch", async () => {
+      await bulkLookupMetadata([itemFor('A', 'B', true)]);
+
+      const skippedCalls = mockSpanSetAttributes.mock.calls.filter(
+        (args) => (args[0] as Record<string, unknown>)?.['lml.lookup.skipped_reason'] === 'discogs_unavailable'
+      );
+      expect(skippedCalls).toHaveLength(1);
+    });
+
+    it('processes a batch with no flagged items exactly as before (no regression)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'B'), itemFor('C', 'D')]);
+
+      const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(init.body as string) as { items: unknown[] };
+      expect(body.items).toEqual([
+        { artist: 'A', album: 'B', raw_message: 'A - B' },
+        { artist: 'C', album: 'D', raw_message: 'C - D' },
+      ]);
     });
   });
 
