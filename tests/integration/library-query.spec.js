@@ -470,7 +470,9 @@ describe('GET /library/query — review-feedback regressions (PR #1154)', () => 
     expect(res.body.total).toBe(0);
   });
 
-  test('an album with multiple active rotation rows appears once', async () => {
+  test('an album with multiple active rotation rows appears once, surfacing the heaviest bin', async () => {
+    // BS#1554: an album active in both H and M must dedup to the single
+    // heaviest active bin (H), not the alphabetically/lightest-first pick.
     await auth.post('/library/rotation').send({ album_id: album.id, rotation_bin: 'H' }).expect(201);
     await auth.post('/library/rotation').send({ album_id: album.id, rotation_bin: 'M' }).expect(201);
 
@@ -480,9 +482,11 @@ describe('GET /library/query — review-feedback regressions (PR #1154)', () => 
       .expect(200);
     const rows = res.body.results.filter((r) => r.id === album.id);
     expect(rows.length).toBe(1);
+    expect(rows[0].rotation_bin).toBe('H');
 
     const binFiltered = await auth.get('/library/query').query({ rotation_bins: 'H,M', limit: 100 }).expect(200);
     const binRows = binFiltered.body.results.filter((r) => r.id === album.id);
     expect(binRows.length).toBe(1);
+    expect(binRows[0].rotation_bin).toBe('H');
   });
 });
