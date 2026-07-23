@@ -112,10 +112,12 @@ export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
 
 // -- Source query ------------------------------------------------------------
 
-/** A raw free-text pair as the DJ typed it. */
+/** A raw free-text pair as the DJ typed it, with a representative track title
+ * (empty string when no usable track exists for the pair). */
 export interface RawPair {
   artist: string;
   album: string;
+  song: string;
 }
 
 /** A normalized dedup key + the representative raw pair to send to LML. */
@@ -124,9 +126,22 @@ export interface NormalizedPair {
   norm_album: string;
   artist: string;
   album: string;
+  song: string;
 }
 
-/** SELECT DISTINCT (artist_name, album_title) of every unlinked track row.
+/** SELECT DISTINCT ON (artist_name, album_title) of every unlinked track row,
+ * carrying a representative `track_title` alongside each pair.
+ *
+ * `DISTINCT ON` (not a plain `SELECT DISTINCT` over three columns) so SQL
+ * returns exactly one row per (artist, album) pair — adding `track_title` to
+ * a bare `SELECT DISTINCT` list would instead return one row per
+ * (artist, album, track) TRIPLE, blowing up the already-uncovered
+ * `album_id IS NULL` scan by ~7x. The ORDER BY prefers a non-empty track
+ * (`btrim(coalesce(track_title, '')) = ''` sorts false-before-true, i.e.
+ * non-empty first) and falls back to a deterministic `track_title ASC` so the
+ * chosen representative is stable across runs. There is NO
+ * `track_title IS NOT NULL` filter — a pair whose plays are all track-less
+ * must still enumerate and resolve album-only, exactly as before this change.
  *
  * Wrapped in `db.transaction` + `SET LOCAL statement_timeout` because the
  * `album_id IS NULL` partition isn't covered by the metadata-drain partial
@@ -138,15 +153,22 @@ export const enumerateFreetextPairs = async (timeoutMs: number = READ_TIMEOUT_DE
   return await db.transaction(async (tx) => {
     await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${timeoutMs}ms'`));
     const rows = (await tx.execute(sql`
-      SELECT DISTINCT "artist_name", "album_title"
+      SELECT DISTINCT ON ("artist_name", "album_title")
+             "artist_name", "album_title", "track_title"
       FROM "wxyc_schema"."flowsheet"
       WHERE "entry_type" = 'track'
         AND "album_id" IS NULL
         AND "artist_name" IS NOT NULL
         AND "album_title" IS NOT NULL
-      ORDER BY "artist_name", "album_title"
-    `)) as unknown as Array<{ artist_name: string; album_title: string }>;
-    return rows.map((r) => ({ artist: String(r.artist_name), album: String(r.album_title) }));
+      ORDER BY "artist_name", "album_title",
+               (btrim(coalesce("track_title", '')) = '') ASC,
+               "track_title" ASC
+    `)) as unknown as Array<{ artist_name: string; album_title: string; track_title: string | null }>;
+    return rows.map((r) => ({
+      artist: String(r.artist_name),
+      album: String(r.album_title),
+      song: r.track_title ? String(r.track_title) : '',
+    }));
   });
 };
 
@@ -175,7 +197,7 @@ export const normalizePairs = (raw: RawPair[]): NormalizedPair[] => {
     if (norm_artist.length === 0 || norm_album.length === 0) continue;
     const key = pairKey(norm_artist, norm_album);
     if (!byKey.has(key)) {
-      byKey.set(key, { norm_artist, norm_album, artist: r.artist, album: r.album });
+      byKey.set(key, { norm_artist, norm_album, artist: r.artist, album: r.album, song: r.song });
     }
   }
   return [...byKey.values()];
@@ -220,11 +242,18 @@ export const filterEligible = (pairs: NormalizedPair[], skip: Set<string>): Norm
 
 /** Map a NormalizedPair into LML's per-item shape. We send the RAW (artist,
  * album) the DJ typed — LML's matcher does its own normalization/fuzzy
- * matching and benefits from the original text, not our collapsed key. */
+ * matching and benefits from the original text, not our collapsed key.
+ *
+ * `song` is populated ONLY when the representative track is non-empty —
+ * album-title-only matching is a much weaker signal than track-aware
+ * matching (BS#1767), but a track-less pair must still fall back to
+ * album-only exactly as before, not send an empty/whitespace `song` that
+ * would confuse LML's matcher. */
 export const buildBulkItems = (pairs: NormalizedPair[]): BulkLookupItem[] =>
   pairs.map((p) => ({
     artist: p.artist,
     album: p.album,
+    ...(p.song && p.song.trim() ? { song: p.song } : {}),
     raw_message: `${p.artist} - ${p.album}`,
   }));
 
