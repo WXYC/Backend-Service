@@ -5,10 +5,23 @@
  * (Backend is thin-writer; LML is sole composer):
  *
  *   library.canonical_entity_id IS NOT NULL
- *   OR library.id IN (
- *     SELECT library_id FROM library_identity
- *     WHERE last_verified_at < NOW() - interval '7 days'
+ *   AND (
+ *     NOT EXISTS (SELECT 1 FROM library_identity WHERE library_id = library.id)
+ *     OR EXISTS (
+ *       SELECT 1 FROM library_identity
+ *       WHERE library_id = library.id
+ *         AND last_verified_at < NOW() - interval '7 days'
+ *     )
  *   )
+ *
+ * BS#1144: the predicate used to be `canonical_entity_id IS NOT NULL OR ...`
+ * — an unconditional disjunct that re-fetched every canonicalized row on
+ * every run regardless of freshness, burning LML quota. The freshness guard
+ * above narrows eligibility to rows with no `library_identity` row yet, or
+ * whose existing row is stale. This intentionally does NOT bring
+ * NULL-canonical_entity_id rows into scope — that's #974's separate,
+ * hand-shipped work, and doing so here would create an unresolved-row
+ * hot-loop.
  *
  * Note on the column name: BS#802's ticket body wrote `last_refreshed_at`,
  * but the column on `library_identity` is `last_verified_at`. We use
@@ -105,7 +118,7 @@ export const resolveStaleThreshold = (
 /**
  * Load the next batch of libraries needing identity refresh.
  *
- * The predicate is the disjunction described above. Rows are skipped when
+ * The predicate is the canonicalized-and-fresh gate described above. Rows are skipped when
  * `artist_name` or `album_title` is NULL — LML's bulk endpoint requires
  * both. (`album_title` is NOT NULL in the schema, but `artist_name` is
  * nullable until the Epic A.2 backfill completes for any future-added
@@ -128,11 +141,16 @@ export const loadBatch = async (
     FROM ${LIBRARY_TABLE}
     WHERE "id" > ${afterId}
       AND "artist_name" IS NOT NULL
+      AND "canonical_entity_id" IS NOT NULL
       AND (
-        "canonical_entity_id" IS NOT NULL
-        OR "id" IN (
-          SELECT "library_id" FROM ${LIBRARY_IDENTITY_TABLE}
-          WHERE "last_verified_at" < NOW() - (interval '1 day' * ${staleDays})
+        NOT EXISTS (
+          SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li
+          WHERE li."library_id" = ${LIBRARY_TABLE}."id"
+        )
+        OR EXISTS (
+          SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li
+          WHERE li."library_id" = ${LIBRARY_TABLE}."id"
+            AND li."last_verified_at" < NOW() - (interval '1 day' * ${staleDays})
         )
       )
       ${partitionClause}

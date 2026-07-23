@@ -112,7 +112,7 @@ describe('loadBatch', () => {
     jest.clearAllMocks();
   });
 
-  it('issues a SELECT that honors the post-#800 predicate (canonical_entity_id OR stale library_identity)', async () => {
+  it('issues a SELECT that honors the post-#800 predicate (canonical_entity_id AND (no identity row OR stale))', async () => {
     (db.execute as jest.Mock).mockResolvedValue([]);
     await loadBatch(0, 500, null, 7);
     expect((db.execute as jest.Mock).mock.calls.length).toBe(1);
@@ -124,6 +124,17 @@ describe('loadBatch', () => {
     expect(serialized).toMatch(/library_identity/);
     expect(serialized).toMatch(/last_verified_at/);
     expect(serialized).toMatch(/artist_name/);
+  });
+
+  it('gates on a freshness guard so canonicalized rows are not unconditionally re-fetched (BS#1144)', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await loadBatch(0, 500, null, 7);
+    const call = (db.execute as jest.Mock).mock.calls[0][0];
+    const serialized = JSON.stringify(call);
+    // The predicate must gate canonicalized rows behind a freshness check
+    // (NOT EXISTS a library_identity row, or the existing one is stale) —
+    // not just an unconditional `canonical_entity_id IS NOT NULL OR ...`.
+    expect(serialized).toMatch(/NOT EXISTS/);
   });
 
   it('returns the rows surfaced by db.execute', async () => {
