@@ -202,7 +202,11 @@ function extractTopLevelEnv(workflow: string): string[] {
     throw new Error('workflow has no top-level `jobs:` key');
   }
   const preJobs = workflow.slice(0, jobsIdx);
-  const topMatch = preJobs.match(/^env:\n((?:\s+[A-Z][A-Z0-9_]*:.*\n)+)/m);
+  // Capture every indented-or-blank line after `env:` — NOT only `KEY:`
+  // lines — so a `#` comment inside the block (e.g. the BS#1729 CI_DB_PORT
+  // annotation) can't truncate the capture and silently drop the keys below
+  // it. The key extraction below already skips comment and blank lines.
+  const topMatch = preJobs.match(/^env:\n((?:(?:[ \t]+\S.*|[ \t]*)\n)+)/m);
   if (!topMatch) {
     throw new Error('workflow top-level `env:` block not found');
   }
@@ -239,7 +243,10 @@ function extractIntegrationTestsJobEnv(workflow: string): string[] {
   // it the LAST entry in the env block (today: BETTER_AUTH_SECRET) is
   // silently dropped.
   const boundedSlice = jobSlice.slice(0, stepsIdx + 1);
-  const envMatch = boundedSlice.match(/\n {4}env:\n((?: {6}[A-Z][A-Z0-9_]*:.*\n)+)/);
+  // Same comment-tolerance as extractTopLevelEnv: capture 6-space-indented
+  // or blank lines (not only `KEY:` lines) so a comment in the job-level env
+  // block can't truncate the capture and drop keys below it.
+  const envMatch = boundedSlice.match(/\n {4}env:\n((?:(?: {6}\S.*| *)\n)+)/);
   if (!envMatch) {
     throw new Error('Integration-Tests job-level `env:` block not found');
   }
