@@ -21,6 +21,7 @@ import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
 import { createAutoDjUser } from './create-auto-dj-user';
+import { createDefaultUser } from './create-default-user';
 import { resolveOrganization } from './resolve-organization';
 import { shouldCaptureAuthExpressError } from './sentry-error-filter';
 import { E2E_INCOMPLETE_USER_ID, E2E_INCOMPLETE_USER_PASSWORD } from './e2e-test-constants';
@@ -460,70 +461,6 @@ Sentry.setupExpressErrorHandler(app, { shouldHandleError: shouldCaptureAuthExpre
 app.use(fallbackErrorHandler);
 
 // Create default user if needed
-const createDefaultUser = async () => {
-  if (process.env.CREATE_DEFAULT_USER !== 'TRUE') return;
-
-  try {
-    const email = process.env.DEFAULT_USER_EMAIL;
-    const username = process.env.DEFAULT_USER_USERNAME;
-    const password = process.env.DEFAULT_USER_PASSWORD;
-    const djName = process.env.DEFAULT_USER_DJ_NAME;
-    const realName = process.env.DEFAULT_USER_REAL_NAME;
-
-    const organizationSlug = process.env.DEFAULT_ORG_SLUG;
-    const organizationName = process.env.DEFAULT_ORG_NAME;
-
-    if (!username || !email || !password || !djName || !realName || !organizationSlug || !organizationName) {
-      throw new Error('Default user credentials are not fully set in environment variables.');
-    }
-
-    const context = await auth.$context;
-    const internalAdapter = context.internalAdapter;
-
-    const existingUser = await internalAdapter.findUserByEmail(email);
-
-    if (existingUser) {
-      console.log('Default user already exists, skipping creation.');
-      return;
-    }
-
-    // Ensure the organization exists (bootstrap: create if missing)
-    const existingOrganization = await context.adapter.findOne<{ id: string }>({
-      model: 'organization',
-      where: [{ field: 'slug', value: organizationSlug }],
-    });
-
-    if (!existingOrganization) {
-      await context.adapter.create({
-        model: 'organization',
-        data: {
-          name: organizationName,
-          slug: organizationSlug,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        },
-      });
-    }
-
-    // Provision user + credential + membership atomically
-    await provisionUser({
-      email,
-      username,
-      password,
-      name: username,
-      realName,
-      djName,
-      organizationSlug,
-      role: 'stationManager',
-    });
-
-    console.log('Default user created successfully with admin role.');
-  } catch (error) {
-    console.error('[DEFAULT USER] Error creating default user:', error);
-    Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'default-user' } });
-  }
-};
-
 // Fix admin roles for existing stationManagers (one-time migration)
 const syncAdminRoles = async () => {
   try {
