@@ -4,6 +4,7 @@ import {
   artist_similar_artists,
   artist_station_plays,
   artists,
+  concertPerformers,
   concerts,
   db,
   discogs_artist_similar_artists,
@@ -648,6 +649,52 @@ type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
  *
  * The venue-embedding join and DTO mapping reuse `getConcertsPage`'s projection
  * so the wire shape can't drift.
+ *
+ * Two-pass construction (BS#1761, parent #1618): the above is PASS 1
+ * (headliners) — unchanged since BS#1613. PASS 2 (support acts) runs after
+ * Pass 1 has fully populated both maps, and reads `concert_performers`
+ * (`role = 'support'`, `removed_at IS NULL`, i.e. "active") INNER JOINed to
+ * the SAME `buildWhere({ from: today, curated: false })`-windowed `concerts`
+ * — an upcoming, non-tombstoned concert with no active support rows
+ * contributes nothing to Pass 2. Reads `concerts_active_starts_on_id_idx` to
+ * drive the outer `concerts` scan, nested-loop into `concert_performers` via
+ * the leading `concert_id` column of `concert_performers_concert_role_
+ * raw_name_idx` — no new index needed (EXPLAIN-verified; see the BS#1761
+ * ticket). Ordered `starts_on ASC, concerts.id ASC, concert_performers.id ASC`
+ * (the last only as a tiebreak among several support acts on ONE concert,
+ * where ordering is otherwise immaterial: every support row on a given
+ * concert maps to the identical `toConcertDTO` output for that concert).
+ *
+ * For each active support row:
+ *   - id-arm — keyed on `concert_performers.artist_id` (the library FK;
+ *     RESOLVED supports only — a Discogs-only-resolved support, a future
+ *     Phase-D concept, has no `artists.id`, so no play's
+ *     `flowsheet.album_id -> library.artist_id` can ever equal it; the name
+ *     arm is that case's only route);
+ *   - name-arm — keyed on `normalizeFreetextArtist(concert_performers.raw_name)`
+ *     for EVERY active support row, resolved or not. Deliberately NOT Pass 1's
+ *     canonical-or-raw preference: a junction `raw_name` is already a clean
+ *     single name post-`parseBilling` (`jobs/triangle-shows-etl/headliner.ts`),
+ *     so an unresolved support name is its own inert-but-matchable key exactly
+ *     like an unresolved clean headliner (BS#1613) — no `artists` join is
+ *     needed to compute it, and a resolved support's raw billing text is used
+ *     even though its canonical catalog name may differ.
+ *
+ * Both arms add a key ONLY when Pass 1 — or an earlier (soonest) Pass-2 row —
+ * hasn't already claimed it (`!byArtistId.has(...)` / `!byNormName.has(...)`).
+ * Because Pass 1 runs to completion first, EVERY headliner key of ANY
+ * upcoming date is already in the map before Pass 2 evaluates a single support
+ * row, so a headliner CTA beats a support CTA for the same key REGARDLESS of
+ * date — no date comparison against the headliner is performed or needed.
+ * Within Pass 2 itself the identical first-write-wins trick (rows ordered
+ * soonest-first) collapses several support dates for the same key to the
+ * soonest, i.e. "soonest wins within a role". No tribute-name guard here
+ * (unlike the BS#1760 SQL resolve arm's `raw_name !~* '\mtribute'` candidate
+ * filter): that guard only protects RESOLUTION from minting a wrong
+ * `artist_id` off a tribute-act's billing text — it doesn't apply to matching
+ * an already-decided key, so an unresolved tribute-act name lighting the name
+ * arm off a coincidentally identical free-text play is the same low-harm
+ * homonym-collision class as the RESIDUAL noted above, not a new risk.
  */
 export const getUpcomingShowsMaps = async (
   today: string
@@ -655,6 +702,7 @@ export const getUpcomingShowsMaps = async (
   const byArtistId = new Map<number, ConcertDTO>();
   const byNormName = new Map<string, ConcertDTO>();
 
+  // Pass 1 — headliners (BS#1607, widened BS#1613). Unchanged.
   const rows = await db
     .select(upcomingShowJoinFields)
     .from(concerts)
@@ -683,6 +731,50 @@ export const getUpcomingShowsMaps = async (
     const dto = toConcertDTO(row);
     if (needsId && artistId !== null) {
       byArtistId.set(artistId, dto);
+    }
+    if (needsName) {
+      byNormName.set(nameKey, dto);
+    }
+  }
+
+  // Pass 2 (BS#1761) — support acts. See the doc comment above for the full
+  // precedence proof: a `.has()` miss below can only mean no headliner (of any
+  // date) claimed this key, since Pass 1 has already fully run.
+  type SupportRow = ConcertJoinRow & { raw_name: string; support_artist_id: number | null };
+
+  const supportRows = await db
+    .select({
+      ...concertJoinFields,
+      raw_name: concertPerformers.raw_name,
+      support_artist_id: concertPerformers.artist_id,
+    })
+    .from(concerts)
+    .innerJoin(concertPerformers, eq(concertPerformers.concert_id, concerts.id))
+    .innerJoin(venues, eq(venues.id, concerts.venue_id))
+    .where(
+      and(
+        eq(concertPerformers.role, 'support'),
+        isNull(concertPerformers.removed_at),
+        buildWhere({ from: today, curated: false })
+      )
+    )
+    .orderBy(asc(concerts.starts_on), asc(concerts.id), asc(concertPerformers.id));
+
+  for (const row of supportRows as SupportRow[]) {
+    // name arm — ALWAYS the raw junction name, resolved or not (see the doc
+    // comment above for why this deliberately skips Pass 1's canonical-or-raw
+    // preference).
+    const nameKey = normalizeFreetextArtist(row.raw_name);
+
+    const needsId = row.support_artist_id !== null && !byArtistId.has(row.support_artist_id);
+    const needsName = nameKey !== '' && !byNormName.has(nameKey);
+    if (!needsId && !needsName) {
+      continue; // a headliner (or an earlier, soonest support) already claimed both arms
+    }
+
+    const dto = toConcertDTO(row);
+    if (needsId && row.support_artist_id !== null) {
+      byArtistId.set(row.support_artist_id, dto);
     }
     if (needsName) {
       byNormName.set(nameKey, dto);
