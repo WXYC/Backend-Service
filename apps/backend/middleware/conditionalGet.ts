@@ -34,6 +34,54 @@ export type WatermarkProvider = () => Promise<Date>;
  * purely because the HTTP `Date` header carries whole-second precision, and
  * applies to both providers.
  */
+/**
+ * Sentinel written to the `ETag` header before the route handler runs, so
+ * that Express's own per-body ETag generation never fires (see below), then
+ * stripped again right before the response is flushed.
+ */
+const ETAG_SUPPRESSED = 'wxyc-no-etag';
+
+/**
+ * Forces `conditionalGet`'s watermark `Last-Modified` to be the SINGLE
+ * freshness validator on a route, by suppressing Express's default per-body
+ * weak `ETag` and marking the response `Cache-Control: no-cache` (BS#1689).
+ *
+ * Without this, a watermarked route emits two independent validators: the
+ * `Last-Modified` this middleware's sibling `conditionalGet` sets, and
+ * Express's own body-hash `ETag`. Express computes that `ETag` and evaluates
+ * `req.fresh` (comparing it and `Last-Modified` against the request's
+ * `If-None-Match`/`If-Modified-Since`) *inside* `res.send`, independently of
+ * — and racing — `conditionalGet`'s own explicit watermark check upstream.
+ * A client whose cached `ETag` happens to match can trip Express's internal
+ * freshness conversion to a raw 304 that never went through
+ * `conditionalGet`'s decision at all, which is how an unspliced empty-body
+ * 304 reached the dj-site frontend (dj-site#983 / dj-site#982).
+ *
+ * Mechanism: `res.send`'s own check is `!this.get('ETag') && typeof etagFn
+ * === 'function'` — pre-setting a sentinel `ETag` here makes that check false,
+ * so Express never computes (or compares against) a real per-body hash. The
+ * sentinel must then be removed from the actual response: overriding
+ * `res.end` (rather than `res.send`/`res.json`) is necessary because Express
+ * sets the `ETag` header synchronously *inside* `send`, before it calls
+ * `this.end(...)` at the very end of that same function — stripping the
+ * header from within our wrapped `end` runs after Express is done with it but
+ * before Node flushes headers to the socket.
+ *
+ * Must run before the route handler.
+ */
+export const singleValidatorCache: RequestHandler = (_req, res, next) => {
+  res.set('ETag', ETAG_SUPPRESSED);
+  res.set('Cache-Control', 'no-cache');
+
+  const originalEnd = res.end.bind(res);
+  res.end = ((...args: Parameters<typeof originalEnd>) => {
+    res.removeHeader('ETag');
+    return originalEnd(...args);
+  }) as typeof res.end;
+
+  next();
+};
+
 export const conditionalGet =
   (getWatermark: WatermarkProvider): RequestHandler =>
   async (req: Request, res: Response, next: NextFunction): Promise<void> => {
