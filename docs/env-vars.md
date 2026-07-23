@@ -15,7 +15,7 @@ Full reference. CLAUDE.md links here. Variables marked _required_ have no defaul
 
 - `DB_HOST`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD` _required_
 - `DB_PORT` (default `5432`)
-- `CI_DB_PORT` (default `5433`)
+- `CI_DB_PORT` (default `15433`) — Host port the `ci-db` container publishes on; kept outside the org's contested local-Postgres port band (5433/5434/5435/5442 — see `docs/testing.md`) so `ci:testmock` doesn't silently shadow onto a native listener on a developer's machine.
 - `WXYC_SCHEMA_NAME` (default `wxyc_schema`)
 - `DB_STATEMENT_TIMEOUT_MS` (default `5000` / 5s) — Server-enforced per-statement timeout on every postgres-js connection. Backend and auth inherit the default — any HTTP-handler query that runs longer than 5s is by definition an orphan (Express's request timeout has already fired). ETLs override to `300000` (5 min) in their Dockerfiles because their bulk passes can legitimately take tens of seconds. Backfills override similarly. Set `0` to disable (use only for unit-test fixtures).
 - `DB_APPLICATION_NAME` (default `wxyc-backend`) — Sets `application_name` on the postgres connection so `pg_stat_activity` makes the source obvious during incident triage. Each Dockerfile overrides this with its own service name (`wxyc-backend`, `wxyc-auth`, `wxyc-flowsheet-etl`, etc.).

@@ -42,6 +42,8 @@ npm run ci:clean         # Tear down containers, volumes, networks
 
 The CI environment uses `dev_env/docker-compose.yml` with Docker profiles (`ci`, `e2e`).
 
+`CI_DB_PORT` (default `15433`) is the host port the ci-db container publishes on, read by `dev_env/docker-compose.yml`, `scripts/ci-test.sh`, `dev_env/db_setup.sh`, and the `ci:test:parallel` npm script. It defaults outside the org's contested local-Postgres band (5433 discogs-cache, 5434 musicbrainz-cache/staging, 5435 wikidata-cache, 5442 BS dev DB — see the org CLAUDE.md) so `ci:testmock` doesn't silently connect to a native listener on one of those ports instead of the Docker-mapped ci-db. If `15433` is also taken on your machine, override it: `CI_DB_PORT=<port> npm run ci:testmock`.
+
 ## CI/CD workflow
 
 GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:

@@ -5,7 +5,7 @@ DB_HOST="localhost"
 DB_PORT=${DB_PORT:-5432}
 
 if [ "$USE_CI" = true ] ; then
-    DB_PORT=${CI_DB_PORT:-5433}
+    DB_PORT=${CI_DB_PORT:-15433}
 fi
 
 PGPASSWORD=$DB_PASSWORD psql -q -h $DB_HOST -p $DB_PORT -U $DB_USERNAME -d 'wxyc_db' < $BASEDIR/install_extensions.sql

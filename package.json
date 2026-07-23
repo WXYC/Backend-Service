@@ -36,7 +36,7 @@
     "ci:env:full": "./scripts/ci-env.sh --full",
     "ci:test": "./scripts/ci-test.sh",
     "ci:test:full": "./scripts/ci-test.sh --full",
-    "ci:test:parallel": "DB_PORT=${CI_DB_PORT:-5433} PORT=${CI_PORT:-8081} BETTER_AUTH_URL=${CI_BETTER_AUTH_URL:-http://localhost:8083/auth} dotenvx run -f .env -- jest --config jest.parallel.config.json --coverage",
+    "ci:test:parallel": "DB_PORT=${CI_DB_PORT:-15433} PORT=${CI_PORT:-8081} BETTER_AUTH_URL=${CI_BETTER_AUTH_URL:-http://localhost:8083/auth} dotenvx run -f .env -- jest --config jest.parallel.config.json --coverage",
     "ci:clean": "docker compose -f dev_env/docker-compose.yml --env-file .env --profile ci down -v",
     "ci:testmock": "npm run ci:env && npm run ci:test && npm run ci:clean",
     "ci:testmock:full": "npm run ci:env:full && npm run ci:test:full && npm run ci:clean",
