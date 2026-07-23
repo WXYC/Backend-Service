@@ -86,9 +86,18 @@ const TIMEOUT_MS = 30000;
  * not LML's. Defaults match LML's config; env-overridable so prod can
  * leave headroom for other LML callers (rom + tubafrenzy).
  *
- * Only the `/lookup` chokepoint is wrapped — the other LML endpoints
- * (release, artist, entity, track-releases, streaming-check, library/search)
- * are PG-cached and don't share the Discogs ceiling.
+ * This is the runtime-lookup chokepoint: `lookupMetadata` + `bulkLookupMetadata`
+ * (both funnel through `postLookup`) — the string-resolve surface that can
+ * produce false Discogs matches, and therefore the surface the BS#1293
+ * `discogsUnavailable` gate covers (`LookupOptions.discogsUnavailable` /
+ * `BulkLookupItem.discogsUnavailable` below). A handful of other exports
+ * (`resolveArtistNamesBulk`, `fetchArtistGenresBulk`, `checkStreamingAvailability`)
+ * also share this Semaphore/TokenBucket pair for Discogs back-pressure but are
+ * NOT part of the discogsUnavailable gate — they don't resolve a free-text
+ * artist/album pair against a possibly-flagged catalog row. The remaining
+ * LML-touching exports (`getRelease`, `getArtistDetails`, `resolveEntity`,
+ * `searchTrackReleases`, `validateTrackOnRelease`, `searchLibrary`) call
+ * PG-cached endpoints and share neither the limiter nor the gate.
  *
  * When B4 (#887) extracts `@wxyc/lml-client`, this whole apparatus moves
  * with the client and stays the chokepoint for every consumer.
@@ -425,6 +434,61 @@ export interface LookupOptions {
    * flag-of-shame so untracked call sites surface in queries.
    */
   caller?: string;
+  /**
+   * BS#1293 runtime-lookup gate. When `true` and `forceLookup` is not also
+   * `true`, `lookupMetadata` short-circuits before acquiring a limiter permit
+   * or a token: no LML call is made, no `Semaphore`/`TokenBucket` accounting
+   * happens, and the caller gets back a `GatedLookupResponse` with
+   * `outcome: 'skipped_discogs_unavailable'` — a `LookupResponse`-shaped empty
+   * result plus the discriminator. Callers set this from a pre-read of
+   * `library.discogs_unavailable` (BS#1281); the gate itself does not query
+   * the database. See the "runtime-lookup chokepoint" doc above for scope.
+   */
+  discogsUnavailable?: boolean;
+  /**
+   * Overrides `discogsUnavailable`, forcing the lookup through as normal.
+   * Used by the discogsUnavailable recheck cron (sub-issue 3, BS#1294) so it
+   * can re-ask LML for a target previously flagged unavailable without a
+   * caller-side handshake that flips `discogsUnavailable` itself (self-review
+   * flagged that as refactor-fragile). No effect when `discogsUnavailable`
+   * is not `true`.
+   */
+  forceLookup?: boolean;
+}
+
+/** Discriminator for a runtime-lookup call the BS#1293 gate short-circuited. */
+export type LookupSkippedOutcome = 'skipped_discogs_unavailable';
+
+/**
+ * `LookupResponse` extended with an optional `outcome` discriminator
+ * (BS#1293). Present only when the runtime-lookup gate skipped the call
+ * (`discogsUnavailable: true` + no `forceLookup`); absent on every real LML
+ * response, so existing consumers that only read the base `LookupResponse`
+ * fields (`results`, `search_type`, etc.) are unaffected.
+ */
+export interface GatedLookupResponse extends LookupResponse {
+  outcome?: LookupSkippedOutcome;
+}
+
+/** Sentry `lml.lookup.skipped_reason` value stamped by the BS#1293 gate. */
+const DISCOGS_UNAVAILABLE_SKIPPED_REASON = 'discogs_unavailable';
+
+/**
+ * Builds the `LookupResponse`-shaped skipped outcome the BS#1293 gate
+ * returns in place of a real LML call — the same required fields a genuine
+ * empty result would carry (`results: []`, `search_type: 'none'`, …) plus
+ * the `outcome` discriminator so a caller can tell "asked LML, got nothing"
+ * apart from "never asked."
+ */
+function buildSkippedLookupResponse(): GatedLookupResponse {
+  return {
+    results: [],
+    search_type: 'none',
+    song_not_found: false,
+    found_on_compilation: false,
+    timeout: false,
+    outcome: 'skipped_discogs_unavailable',
+  };
 }
 
 type LookupBody = {
@@ -453,7 +517,7 @@ export async function lookupMetadata(
   album?: string,
   song?: string,
   options?: LookupOptions
-): Promise<LookupResponse> {
+): Promise<GatedLookupResponse> {
   // LML's /lookup contract requires `raw_message` even when artist/album/song
   // are already structured. Synthesize a free-form description that the LML
   // parser would have produced — matches the e2e fixtures in LML's repo.
@@ -473,6 +537,8 @@ export async function lookupMetadata(
     limiter: options?.limiter,
     budgetMs: options?.budgetMs,
     caller: options?.caller,
+    discogsUnavailable: options?.discogsUnavailable,
+    forceLookup: options?.forceLookup,
   });
 }
 
@@ -502,11 +568,36 @@ export async function lookupBySong(
  * `lml.cache.api_calls > 0`) so per-callsite instrumentation isn't needed for
  * the metadata-backfill pilot or the runtime hot path. Sibling LML-side
  * projection at WXYC/library-metadata-lookup#213.
+ *
+ * BS#1293: the `discogsUnavailable` gate short-circuits here, before the
+ * limiter is touched — a gated call consumes no `Semaphore` permit and no
+ * `TokenBucket` token, because the lookup never happens.
  */
 async function postLookup(
   body: LookupBody,
-  options?: { timeoutMs?: number; limiter?: LmlLimiter; budgetMs?: number; caller?: string }
-): Promise<LookupResponse> {
+  options?: {
+    timeoutMs?: number;
+    limiter?: LmlLimiter;
+    budgetMs?: number;
+    caller?: string;
+    discogsUnavailable?: boolean;
+    forceLookup?: boolean;
+  }
+): Promise<GatedLookupResponse> {
+  if (options?.discogsUnavailable && !options?.forceLookup) {
+    return Sentry.startSpan({ name: 'lml.lookup', op: 'lml.lookup.skipped' }, async (span) => {
+      try {
+        span.setAttributes({
+          'lml.lookup.skipped_reason': DISCOGS_UNAVAILABLE_SKIPPED_REASON,
+          'lml.caller': options?.caller ?? 'unknown',
+        });
+      } catch (err) {
+        console.warn('lml.client: failed to project skipped_reason + caller onto span', err);
+      }
+      return buildSkippedLookupResponse();
+    });
+  }
+
   // BS#906 / G4: Mirror LML's Discogs ceilings on the client so back-pressure
   // surfaces at the BS chokepoint, not as queueing inside LML. The limiter
   // (`fn` runs after `semaphore.acquire()` + `tokenBucket.consume(1)`) keeps
@@ -593,18 +684,32 @@ export interface BulkLookupItem {
    * columns survive the batch, matching the per-row `lookupMetadata` path.
    */
   extended?: boolean;
+  /**
+   * BS#1293 runtime-lookup gate, bulk-item form. When `true`, this item is
+   * pulled out of the wire request entirely — it is never sent to LML, never
+   * charges the shared limiter — and its slot in `BulkLookupResponse.results`
+   * comes back as `{ status: 'skipped_discogs_unavailable', lookup: {
+   * outcome: 'skipped_discogs_unavailable', ... } }`. Sibling items without
+   * the flag are unaffected and still batch together in one LML call. There
+   * is no per-item `forceLookup` override (unlike `lookupMetadata`) — the
+   * caller decides which items to flag at construction time.
+   */
+  discogsUnavailable?: boolean;
 }
 
 /**
  * Per-item verdict from the bulk-lookup endpoint (LML#368). Status is the
  * fast signal: `match` (`lookup.results` non-empty), `no_match` (search ran,
- * no rows), or `error` (per-item exception isolated from siblings).
- * `lookup` is null on error; `message` carries the error class on error.
+ * no rows), `error` (per-item exception isolated from siblings), or
+ * `skipped_discogs_unavailable` (BS#1293 — the item never reached LML because
+ * its `discogsUnavailable` flag was set). `lookup` is null on error; on a skip
+ * it is the same `GatedLookupResponse` shape `lookupMetadata`'s single-item
+ * gate returns. `message` carries the error class on error.
  */
 export interface BulkLookupResultItem {
   index: number;
-  status: 'match' | 'no_match' | 'error';
-  lookup: LookupResponse | null;
+  status: 'match' | 'no_match' | 'error' | LookupSkippedOutcome;
+  lookup: GatedLookupResponse | null;
   message?: string;
 }
 
@@ -640,6 +745,13 @@ const BULK_LOOKUP_INPUT_CAP = 100;
  * Client-side validation rejects empty + oversize batches before the wire
  * call — a 422/400 round-trip costs an LML deploy slot and a TCP RTT for
  * no information gain.
+ *
+ * BS#1293: items with `discogsUnavailable: true` are filtered out of the wire
+ * request before it's built — LML never sees them, and if every item in the
+ * batch is flagged, no HTTP call is made at all (no limiter/token spend
+ * either). Skipped items are spliced back into `results` at their original
+ * index so the response stays index-aligned with the caller's input, matching
+ * the non-gated contract.
  */
 export async function bulkLookupMetadata(
   items: BulkLookupItem[],
@@ -653,6 +765,33 @@ export async function bulkLookupMetadata(
       `bulkLookupMetadata exceeded the cap of ${BULK_LOOKUP_INPUT_CAP} items (received ${items.length}).`,
       400
     );
+  }
+
+  const skippedIndices = new Set<number>();
+  items.forEach((item, index) => {
+    if (item.discogsUnavailable) skippedIndices.add(index);
+  });
+  // Wire body must not carry the BS-local `discogsUnavailable` flag — strip it
+  // even from sent items so a stray `false` doesn't reach LML's schema.
+  const sendItems = items
+    .filter((item) => !item.discogsUnavailable)
+    .map(({ discogsUnavailable: _discogsUnavailable, ...wireItem }) => wireItem);
+
+  // Every item flagged: skip the wire call entirely, same gate as the
+  // single-item path — no limiter/token spend, no fetch.
+  if (sendItems.length === 0) {
+    return Sentry.startSpan({ name: 'lml.lookup.bulk', op: 'lml.lookup.skipped' }, async (span) => {
+      try {
+        span.setAttributes({
+          'lml.bulk.size': items.length,
+          'lml.lookup.skipped_reason': DISCOGS_UNAVAILABLE_SKIPPED_REASON,
+          'lml.caller': options?.caller ?? 'unknown',
+        });
+      } catch (err) {
+        console.warn('lml.client: failed to project bulk.size + skipped_reason + caller onto span', err);
+      }
+      return { results: items.map((_, index) => buildSkippedBulkResultItem(index)) };
+    });
   }
 
   const activeLimiter = options?.limiter ?? defaultLimiter;
@@ -673,7 +812,7 @@ export async function bulkLookupMetadata(
         {
           method: 'POST',
           headers: buildLookupHeaders(options?.budgetMs),
-          body: JSON.stringify({ items }),
+          body: JSON.stringify({ items: sendItems }),
         },
         options?.timeoutMs
       );
@@ -707,9 +846,36 @@ export async function bulkLookupMetadata(
         if (item.lookup != null) sanitizeLookupStreamingUrls(item.lookup);
       }
 
-      return { results: parsed.results };
+      // BS#1293: splice the synthetic skipped verdicts back in at their
+      // original positions and reindex the real verdicts (which LML returned
+      // aligned to `sendItems`, not the caller's original `items`) so the
+      // final array is index-aligned with the caller's input in input order.
+      let sentCursor = 0;
+      const results = items.map((_, index) => {
+        if (skippedIndices.has(index)) {
+          return buildSkippedBulkResultItem(index);
+        }
+        const sentResult = parsed.results[sentCursor];
+        sentCursor += 1;
+        return { ...sentResult, index };
+      });
+
+      return { results };
     });
   });
+}
+
+/**
+ * Synthetic `BulkLookupResultItem` for a BS#1293-gated bulk item — same
+ * shape a real skip produces on the single-item path, indexed to the item's
+ * original position in the caller's input array.
+ */
+function buildSkippedBulkResultItem(index: number): BulkLookupResultItem {
+  return {
+    index,
+    status: 'skipped_discogs_unavailable',
+    lookup: buildSkippedLookupResponse(),
+  };
 }
 
 /**
