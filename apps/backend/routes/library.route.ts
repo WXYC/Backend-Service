@@ -74,6 +74,12 @@ library_route.get('/info', requirePermissions({ catalog: ['read'] }), libraryCon
 
 library_route.patch('/:id', requirePermissions({ catalog: ['write'] }), libraryController.updateAlbum);
 
-library_route.patch('/:id/missing', requirePermissions({ catalog: ['write'] }), libraryController.markMissing);
+// Missing/found stack-marking (BS#393): gated to catalog:read rather than
+// catalog:write so DJs (who only hold catalog:read per shared/authentication/
+// src/auth.roles.ts) can flag a stack missing/found while pulling records.
+// This is a status toggle on an existing row, not a catalog write (add/edit/
+// delete), so it doesn't need the musicDirector-and-above bar the other PATCH
+// /:id (updateAlbum) and POST routes on this router keep.
+library_route.patch('/:id/missing', requirePermissions({ catalog: ['read'] }), libraryController.markMissing);
 
-library_route.patch('/:id/found', requirePermissions({ catalog: ['write'] }), libraryController.markFound);
+library_route.patch('/:id/found', requirePermissions({ catalog: ['read'] }), libraryController.markFound);
