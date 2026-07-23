@@ -1,24 +1,44 @@
 /**
- * Entrypoint for jobs/concerts-artist-resolver (BS#1372).
+ * Entrypoint for jobs/concerts-artist-resolver (BS#1372; extended to a
+ * four-step run by BS#1760, parent #1618, On Tour epic #1588).
  *
- * Daily cron (default `15 5 * * *` UTC). Resolves
- * `concerts.headlining_artist_raw` to `concerts.headlining_artist_id`
- * via the strict-then-alias local resolver using migration 0092's
- * `normalize_artist_name(text)` function and the three functional
- * indexes on `artists`, `artist_search_alias`, and the partial index on
- * `concerts (id) WHERE headlining_artist_id IS NULL`. No LML round-trip.
+ * Daily cron (default `15 5 * * *` UTC), now four ordered steps in one
+ * run — folding the support-act junction sync + resolve into this job
+ * rather than a standalone cron gives a hard step-ordering guarantee two
+ * crons scheduled minutes apart via deploy-base cannot:
  *
- * Idempotent: the SELECT predicate is `headlining_artist_id IS NULL`
- * and the UPDATE's WHERE guard mirrors it — both rerun-safe and race-
- * safe against a parallel pod or a scraper write that lands mid-run.
+ *   1. **Sync** `concert_performers` (role='support') from
+ *      `concerts.supporting_artists_raw` — idempotent UPSERT on
+ *      `(concert_id, role, raw_name)`, array-shrink soft-tombstone,
+ *      reappearance un-tombstone. See sync.ts / sync-db.ts.
+ *   2. **Headliner resolve** — UNCHANGED from BS#1372. Resolves
+ *      `concerts.headlining_artist_raw` to `concerts.headlining_artist_id`
+ *      via the strict-then-alias local resolver using migration 0092's
+ *      `normalize_artist_name(text)` function and the three functional
+ *      indexes on `artists`, `artist_search_alias`, and the partial index
+ *      on `concerts (id) WHERE headlining_artist_id IS NULL`. No LML
+ *      round-trip.
+ *   3. **Support resolve arm** — the same strict-then-alias
+ *      `resolveArtistId` fn (reused verbatim), applied to unresolved
+ *      `concert_performers` rows via a bespoke loop + junction writer.
+ *      See support.ts / support-db.ts.
+ *   4. **Recompute** `concerts.has_resolved_support` — a single
+ *      set-based UPDATE, windowed recompute-from-truth over the active
+ *      concert set. See recompute.ts.
  *
- * Run shape:
- *   - One pass over all eligible `concerts` rows.
- *   - Per-row strict-then-alias resolver (each arm is a separate SQL
- *     query — keeps the strict-wins rule explicit and lets Postgres
- *     short-circuit when strict hits).
- *   - Writes only on singleton match; ambiguous / unmatched / errored
- *     rows leave the FK NULL and increment dedicated counters.
+ * Idempotent throughout: step 1's UPSERT/tombstone predicates, step 2 and
+ * 3's `*_id IS NULL` gates, and step 4's `IS DISTINCT FROM` guard are all
+ * rerun-safe and race-safe against a parallel pod or a scraper write that
+ * lands mid-run.
+ *
+ * Steps run strictly in sequence inside one try block: a fatal failure in
+ * an earlier step (e.g. `loadCandidates` throwing on a lost DB
+ * connection) aborts the remaining steps for this run rather than
+ * attempting them against a known-bad connection — mirrors how
+ * album-reviews-etl's link pass is allowed to fail the whole cron loudly
+ * rather than being isolated. Per-row/per-concert failures WITHIN a step
+ * never abort that step's own loop (each of runSync / runResolver /
+ * runSupportResolver catches and counts per-item errors internally).
  *
  * Invocation:
  *   docker run --rm --env-file .env <image>
@@ -36,6 +56,11 @@ import { closeDatabaseConnection } from '@wxyc/database';
 import { runResolver } from './orchestrate.js';
 import { loadCandidates, resolveArtistId } from './query.js';
 import { writeArtistId } from './writer.js';
+import { runSync } from './sync.js';
+import { loadSyncCandidates, applySyncDiff } from './sync-db.js';
+import { runSupportResolver } from './support.js';
+import { loadSupportCandidates, writeSupportArtistId } from './support-db.js';
+import { recomputeHasResolvedSupport } from './recompute.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 
 const JOB_NAME = 'concerts-artist-resolver';
@@ -46,7 +71,7 @@ const JOB_NAME = 'concerts-artist-resolver';
  * block via `(error as Error).message`. The whole body is wrapped in a
  * try so even `e instanceof Error` (a Proxy with throwing
  * `Symbol.hasInstance`) or a throwing `.message` getter can't escape —
- * symmetric with `safeStringifyThrown` in orchestrate.ts. Mirrors the
+ * symmetric with `safeStringifyThrown` in error-sink.ts. Mirrors the
  * pattern in `jobs/rotation-artist-backfill/job.ts` (BS#1361) — once a
  * third caller appears, promote to `shared/database` or a shared
  * `jobs/` helper.
@@ -101,6 +126,42 @@ const main = async (): Promise<void> => {
       try {
         log('info', 'init', `${JOB_NAME} initialized`);
 
+        // Step 1: sync concert_performers (role='support') from
+        // supporting_artists_raw. Must run before step 3 so this same
+        // cycle's newly-synced rows are visible to the support resolver.
+        const { totals: syncTotals } = await runSync({
+          loadCandidates: loadSyncCandidates,
+          applyDiff: applySyncDiff,
+          onError: (candidate, error) => {
+            log('warn', 'sync_row_error', `sync failed for concert ${candidate.concert_id}`, {
+              concert_id: candidate.concert_id,
+              error_message: errorMessage(error),
+              error_name: errorName(error),
+            });
+            captureError(error, 'sync_row_error', { concert_id: candidate.concert_id });
+          },
+        });
+
+        log('info', 'sync_finished', `${JOB_NAME} sync done`, { ...syncTotals });
+
+        Sentry.startSpan(
+          {
+            name: `${JOB_NAME}.run.sync_totals`,
+            attributes: {
+              'sync.concerts_scanned': syncTotals.concerts_scanned,
+              'sync.concerts_changed': syncTotals.concerts_changed,
+              'sync.inserted': syncTotals.inserted,
+              'sync.untombstoned': syncTotals.untombstoned,
+              'sync.tombstoned': syncTotals.tombstoned,
+              'sync.error': syncTotals.error,
+            },
+          },
+          () => {
+            /* attributes set at creation; nothing else to do */
+          }
+        );
+
+        // Step 2: headliner resolve — UNCHANGED from BS#1372.
         const { totals } = await runResolver({
           loadCandidates,
           resolve: resolveArtistId,
@@ -142,6 +203,66 @@ const main = async (): Promise<void> => {
             /* attributes set at creation; nothing else to do */
           }
         );
+
+        // Step 3: support resolve arm. Reuses resolveArtistId verbatim
+        // (query.js) through the bespoke support.ts loop + support-db.ts
+        // junction writer.
+        const { totals: supportTotals } = await runSupportResolver({
+          loadCandidates: loadSupportCandidates,
+          resolve: resolveArtistId,
+          write: writeSupportArtistId,
+          onError: (candidate, error) => {
+            log('warn', 'support_row_error', `support resolver failed for performer ${candidate.id}`, {
+              performer_id: candidate.id,
+              error_message: errorMessage(error),
+              error_name: errorName(error),
+            });
+            captureError(error, 'support_row_error', { performer_id: candidate.id });
+          },
+        });
+
+        log('info', 'support_finished', `${JOB_NAME} support resolve done`, { ...supportTotals });
+
+        Sentry.startSpan(
+          {
+            name: `${JOB_NAME}.run.support_totals`,
+            attributes: {
+              'support.scanned': supportTotals.scanned,
+              'support.resolved': supportTotals.resolved,
+              'support.resolved_strict': supportTotals.resolved_strict,
+              'support.resolved_alias': supportTotals.resolved_alias,
+              'support.ambiguous': supportTotals.ambiguous,
+              'support.unmatched': supportTotals.unmatched,
+              'support.error': supportTotals.error,
+              'support.raced': supportTotals.raced,
+            },
+          },
+          () => {
+            /* attributes set at creation; nothing else to do */
+          }
+        );
+
+        // Step 4: recompute has_resolved_support from truth over the
+        // active window. Must run after step 3 so this cycle's fresh
+        // support resolutions (and step 1's tombstones/untombstones) are
+        // reflected.
+        const recomputeOutcome = await recomputeHasResolvedSupport();
+
+        log('info', 'recompute_finished', `${JOB_NAME} has_resolved_support recompute done`, { ...recomputeOutcome });
+
+        Sentry.startSpan(
+          {
+            name: `${JOB_NAME}.run.recompute_totals`,
+            attributes: {
+              'recompute.updated': recomputeOutcome.updated,
+              'recompute.updated_true': recomputeOutcome.updated_true,
+              'recompute.updated_false': recomputeOutcome.updated_false,
+            },
+          },
+          () => {
+            /* attributes set at creation; nothing else to do */
+          }
+        );
       } catch (error) {
         log('error', 'failed', `${JOB_NAME} failed`, {
           error_message: errorMessage(error),
@@ -163,7 +284,7 @@ const main = async (): Promise<void> => {
     // `closeLogger` calls `Sentry.close(2000)`, which disables the SDK —
     // if we ran it in the span callback's finally, the parent span's
     // terminal event would land on an already-disabled client and the
-    // whole transaction (including the .totals child span) would be
+    // whole transaction (including the child totals spans) would be
     // dropped silently.
     await safeFinalize('teardown_db', closeDatabaseConnection);
     await safeFinalize('teardown_logger', closeLogger);
