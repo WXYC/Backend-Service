@@ -16,7 +16,8 @@
  * fill-NULLs-only UPDATE — targeting `concert_performers.artist_id`
  * instead of `concerts.headlining_artist_id`, and touching no other
  * column: this Phase-B pure-SQL arm stamps no attempt-at marker (that
- * binds only the future Phase-D LML arm per docs/migrations.md).
+ * binds only the Phase-D LML arm — jobs/concerts-artist-lml-resolver's
+ * supportTarget, BS#1763 — per docs/migrations.md).
  */
 
 import { and, eq, isNull, sql } from 'drizzle-orm';
