@@ -140,19 +140,37 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('enumerateFreetextPairs', () => {
-  it('selects DISTINCT (artist_name, album_title) with the three required predicates', async () => {
-    (db.execute as jest.Mock).mockResolvedValue([{ artist_name: 'J Dilla', album_title: 'Donuts' }]);
+  it('selects DISTINCT ON (artist_name, album_title) with the three required predicates', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([
+      { artist_name: 'J Dilla', album_title: 'Donuts', track_title: 'Waves' },
+    ]);
 
     await enumerateFreetextPairs();
 
-    const call = findExecuteCallMatching(/SELECT\s+DISTINCT\s+"?artist_name"?/i);
+    const call = findExecuteCallMatching(/SELECT\s+DISTINCT\s+ON/i);
     expect(call).toBeDefined();
     const text = renderSql(call?.[0]);
+    expect(text).toMatch(/DISTINCT\s+ON\s*\(\s*"?artist_name"?\s*,\s*"?album_title"?\s*\)/i);
     expect(text).toMatch(/FROM\s+"?wxyc_schema"?\."?flowsheet"?/i);
     expect(text).toMatch(/"?entry_type"?\s*=\s*'track'/i);
     expect(text).toMatch(/"?album_id"?\s+IS\s+NULL/i);
     expect(text).toMatch(/"?artist_name"?\s+IS\s+NOT\s+NULL/i);
     expect(text).toMatch(/"?album_title"?\s+IS\s+NOT\s+NULL/i);
+    // Representative track_title is returned but NEVER filtered — a track-less
+    // pair must still fall back to album-only, not be dropped from the scan.
+    expect(text).toMatch(/"?track_title"?/i);
+    expect(text).not.toMatch(/"?track_title"?\s+IS\s+NOT\s+NULL/i);
+  });
+
+  it('orders by artist, album, then prefers a non-empty track_title (deterministic representative)', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await enumerateFreetextPairs();
+    const call = findExecuteCallMatching(/SELECT\s+DISTINCT\s+ON/i);
+    const text = renderSql(call?.[0]);
+    expect(text).toMatch(/ORDER\s+BY\s+"?artist_name"?\s*,\s*"?album_title"?/i);
+    // Non-empty tracks sort first: (btrim(coalesce(track_title, '')) = '') ASC.
+    expect(text).toMatch(/btrim\s*\(\s*coalesce\s*\(\s*"?track_title"?\s*,\s*''\s*\)\s*\)\s*=\s*''\s*\)?\s*ASC/i);
+    expect(text).toMatch(/"?track_title"?\s+ASC/i);
   });
 
   it('wraps the SELECT in a transaction + SET LOCAL statement_timeout', async () => {
@@ -163,10 +181,18 @@ describe('enumerateFreetextPairs', () => {
     expect(renderSql(setLocalCall?.[0])).toMatch(/99000ms/);
   });
 
-  it('maps rows to { artist, album }', async () => {
-    (db.execute as jest.Mock).mockResolvedValue([{ artist_name: 'Kendrick Lamar', album_title: 'DAMN.' }]);
+  it('maps rows to { artist, album, song } using the representative track_title', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([
+      { artist_name: 'Kendrick Lamar', album_title: 'DAMN.', track_title: 'HUMBLE.' },
+    ]);
     const out = await enumerateFreetextPairs();
-    expect(out).toEqual([{ artist: 'Kendrick Lamar', album: 'DAMN.' }]);
+    expect(out).toEqual([{ artist: 'Kendrick Lamar', album: 'DAMN.', song: 'HUMBLE.' }]);
+  });
+
+  it('maps a null/missing track_title to an empty song (track-less pairs still fall back to album-only)', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([{ artist_name: 'J Dilla', album_title: 'Donuts', track_title: null }]);
+    const out = await enumerateFreetextPairs();
+    expect(out).toEqual([{ artist: 'J Dilla', album: 'Donuts', song: '' }]);
   });
 });
 
@@ -226,6 +252,27 @@ describe('normalizePairs', () => {
       { artist: 'Kendrick Lamar', album: 'DAMN.' },
     ]);
     expect(out).toHaveLength(2);
+  });
+
+  it("carries the representative pair's song (representative track title) through the fold", () => {
+    const out = normalizePairs([
+      { artist: 'Beach Boys', album: 'Pet Sounds (Remastered)', song: "Wouldn't It Be Nice" },
+      { artist: 'The Beach Boys', album: 'Pet Sounds', song: 'God Only Knows' },
+    ]);
+    expect(out).toHaveLength(1);
+    // First-encountered raw pair is the representative — song travels with it,
+    // same determinism contract as artist/album.
+    expect(out[0]).toMatchObject({
+      artist: 'Beach Boys',
+      album: 'Pet Sounds (Remastered)',
+      song: "Wouldn't It Be Nice",
+    });
+  });
+
+  it('carries an empty song through the fold when the representative pair has no usable track', () => {
+    const out = normalizePairs([{ artist: 'J Dilla', album: 'Donuts', song: '' }]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ artist: 'J Dilla', album: 'Donuts', song: '' });
   });
 });
 
@@ -290,6 +337,50 @@ describe('buildBulkItems', () => {
         raw_message: 'The Beach Boys - Pet Sounds (Remastered)',
       },
     ]);
+  });
+
+  it('includes song when the representative pair carries a non-empty track title', () => {
+    const items = buildBulkItems([
+      {
+        norm_artist: 'j dilla',
+        norm_album: 'donuts',
+        artist: 'J Dilla',
+        album: 'Donuts',
+        song: 'Waves',
+      },
+    ]);
+    expect(items).toEqual([
+      {
+        artist: 'J Dilla',
+        album: 'Donuts',
+        song: 'Waves',
+        raw_message: 'J Dilla - Donuts',
+      },
+    ]);
+  });
+
+  it('omits song when the representative track is absent', () => {
+    const items = buildBulkItems([
+      { norm_artist: 'j dilla', norm_album: 'donuts', artist: 'J Dilla', album: 'Donuts' },
+    ]);
+    expect(items[0]).not.toHaveProperty('song');
+    expect(items).toEqual([{ artist: 'J Dilla', album: 'Donuts', raw_message: 'J Dilla - Donuts' }]);
+  });
+
+  it('omits song when the representative track is an empty string', () => {
+    const items = buildBulkItems([
+      { norm_artist: 'j dilla', norm_album: 'donuts', artist: 'J Dilla', album: 'Donuts', song: '' },
+    ]);
+    expect(items[0]).not.toHaveProperty('song');
+    expect(items).toEqual([{ artist: 'J Dilla', album: 'Donuts', raw_message: 'J Dilla - Donuts' }]);
+  });
+
+  it('omits song when the representative track is whitespace-only', () => {
+    const items = buildBulkItems([
+      { norm_artist: 'j dilla', norm_album: 'donuts', artist: 'J Dilla', album: 'Donuts', song: '   ' },
+    ]);
+    expect(items[0]).not.toHaveProperty('song');
+    expect(items).toEqual([{ artist: 'J Dilla', album: 'Donuts', raw_message: 'J Dilla - Donuts' }]);
   });
 });
 

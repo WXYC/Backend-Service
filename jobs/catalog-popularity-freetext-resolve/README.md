@@ -8,10 +8,10 @@ Free text keeps growing: every show adds more unlinked plays. The cron drains th
 
 ## How it works
 
-1. `SELECT DISTINCT (artist_name, album_title)` from `flowsheet WHERE entry_type='track' AND album_id IS NULL`. Scoped inside `db.transaction` + `SET LOCAL statement_timeout` (the `album_id IS NULL` partition isn't index-covered).
-2. Fold the raw pairs into normalized dedup keys in JS: `(normalizeArtistName(artist), normalizeAlbumTitle(album))`. The flowsheet free text holds tens of thousands of edition/pressing variants ("Pet Sounds", "Pet Sounds (Remastered)", "Pet Sounds - 2011 Remaster") that collapse to one logical album. SQL has no album-title normalizer, so the dedup happens in JS; one representative raw pair per key is kept for the LML lookup.
+1. `SELECT DISTINCT ON (artist_name, album_title) artist_name, album_title, track_title` from `flowsheet WHERE entry_type='track' AND album_id IS NULL`, ordered to prefer a non-empty `track_title` (BS#1767 — carries a representative track into the LML lookup instead of album-title-only). Scoped inside `db.transaction` + `SET LOCAL statement_timeout` (the `album_id IS NULL` partition isn't index-covered). `DISTINCT ON` (not a plain `SELECT DISTINCT` over three columns) keeps the scan to one row per `(artist, album)` pair; there is no `track_title IS NOT NULL` filter, so a pair whose plays are all track-less still enumerates and falls back to album-only.
+2. Fold the raw pairs into normalized dedup keys in JS: `(normalizeArtistName(artist), normalizeAlbumTitle(album))`. The flowsheet free text holds tens of thousands of edition/pressing variants ("Pet Sounds", "Pet Sounds (Remastered)", "Pet Sounds - 2011 Remaster") that collapse to one logical album. SQL has no album-title normalizer, so the dedup happens in JS; one representative raw pair per key (artist, album, AND its representative track) is kept for the LML lookup. The dedup key itself stays `(norm_artist, norm_album)` — the track only improves _which release_ LML resolves to, never what gets attributed.
 3. Load the skip set: pairs already resolved (release id present, permanent) or no-match inside the TTL window. `attempt_at IS NULL` rows (never-tried + transient-failed) are always eligible.
-4. Call LML `POST /api/v1/lookup/bulk` with batches of `FREETEXT_RESOLVE_BULK_BATCH_SIZE` items (default 5). The per-batch fetch timeout scales with batch size (`batchSize × 5 s + 5 s` slack), same derivation as `album-level-backfill`.
+4. Call LML `POST /api/v1/lookup/bulk` with batches of `FREETEXT_RESOLVE_BULK_BATCH_SIZE` items (default 5), including `song` on each item ONLY when the representative track is non-empty (a track-less pair sends artist+album exactly as before). The per-batch fetch timeout scales with batch size (`batchSize × 5 s + 5 s` slack), same derivation as `album-level-backfill`.
 5. UPSERT each verdict into `flowsheet_freetext_resolution` keyed on the composite PK `(norm_artist, norm_album)`:
    - **match** with `release_id > 0` → `discogs_release_id` set, `match_confidence` set, `resolved_at = now()`.
    - **no_match** (or the BS#1185 `release_id == 0` streaming-only sentinel) → `discogs_release_id = NULL`, `resolved_at = NULL`. Still UPSERTed (a responded outcome) so `attempt_at` is stamped and the TTL retry window arms.
@@ -84,8 +84,27 @@ SELECT * FROM wxyc_schema.flowsheet_freetext_resolution
 WHERE norm_artist = 'j dilla' AND norm_album = 'donuts';
 ```
 
+## Post-deploy re-drain (BS#1767)
+
+BS#1767 made the resolver carry a representative track title into the LML bulk lookup, lifting the probed match rate from ~6.0% (album-only) to ~22.0% (album + track) — but `loadSkipKeys` skips no-match rows inside the 30-day TTL, so without a one-time re-arm the ~115k existing no-match pairs won't re-attempt for up to a month. This is an **ops step, run manually after the fix deploys** — not part of the job itself.
+
+Re-arm **only** the no-match cohort. A release id is a permanent verdict — never touch a row that already has one. Run the count first to confirm scope (data-safety convention: verify before writing):
+
+```sql
+-- 1. Verify scope first.
+SELECT count(*) FROM wxyc_schema.flowsheet_freetext_resolution WHERE discogs_release_id IS NULL;
+
+-- 2. Re-arm: only no-match rows, never a matched row.
+UPDATE wxyc_schema.flowsheet_freetext_resolution
+SET attempt_at = NULL          -- makes loadSkipKeys treat them as never-tried → eligible next run
+WHERE discogs_release_id IS NULL;
+```
+
+After the re-arm, the next scheduled run (or a manual catch-up per "Run procedure" above) re-attempts the full no-match cohort with the track-aware lookup. Matched rows (`discogs_release_id IS NOT NULL`) are untouched by this UPDATE.
+
 ## Related
 
+- [BS#1767](https://github.com/WXYC/Backend-Service/issues/1767) — carries a representative track title into the bulk lookup (this README's "Post-deploy re-drain" section); +16pts / ~3.7x match-rate lift, 0 regressions in the A/B probe.
 - [BS#1491](https://github.com/WXYC/Backend-Service/issues/1491) — this job's parent issue (blocks Track 2, BS#1492).
 - [BS#1486](https://github.com/WXYC/Backend-Service/issues/1486) — Phase-2 catalog-popularity epic.
 - `WXYC/wiki/plans/catalog-popularity-phase2.md` — the four-track plan; this is Track 1.
