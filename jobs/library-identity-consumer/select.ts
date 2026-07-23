@@ -18,10 +18,18 @@
  * — an unconditional disjunct that re-fetched every canonicalized row on
  * every run regardless of freshness, burning LML quota. The freshness guard
  * above narrows eligibility to rows with no `library_identity` row yet, or
- * whose existing row is stale. This intentionally does NOT bring
- * NULL-canonical_entity_id rows into scope — that's #974's separate,
- * hand-shipped work, and doing so here would create an unresolved-row
- * hot-loop.
+ * whose existing row is stale.
+ *
+ * BS#974: `INCLUDE_NULL_CANONICAL` (default off) expands the predicate to also
+ * cover `canonical_entity_id IS NULL` rows — the ~34K never-canonicalized
+ * libraries, incl. the V/A compilations LML has never classified. The
+ * unresolved-row hot-loop that expansion would otherwise cause (a row LML
+ * can't resolve never lands in `library_identity`, so `NOT EXISTS(li)` stays
+ * true forever) is prevented by the `library.unresolved_attempted_at` no-match
+ * marker + the `UNRESOLVED_RETRY_DAYS` window (see `loadBatch`). Flag off is
+ * byte-identical to the #1144 predicate. This is a one-shot job with no cron
+ * backstop; re-attempt of the marked/stale set happens only on a manual
+ * re-run.
  *
  * Note on the column name: BS#802's ticket body wrote `last_refreshed_at`,
  * but the column on `library_identity` is `last_verified_at`. We use
@@ -116,6 +124,40 @@ export const resolveStaleThreshold = (
 };
 
 /**
+ * BS#974 feature flag: when true, the SELECT predicate expands to also cover
+ * `canonical_entity_id IS NULL` rows (the ~34K never-canonicalized libraries,
+ * incl. the V/A compilations LML has never classified). Defaults OFF so a
+ * deploy is a zero-change no-op until an operator opts in — the staged-rollout
+ * gate. See README.md.
+ */
+export const resolveIncludeNullCanonical = (raw: string | undefined = process.env.INCLUDE_NULL_CANONICAL): boolean => {
+  if (raw === undefined) return false;
+  const lowered = raw.toLowerCase();
+  return lowered === 'true' || lowered === '1';
+};
+
+/**
+ * BS#974: the retry window for the `unresolved_attempted_at` no-match marker —
+ * a *separate* knob from `STALE_THRESHOLD_DAYS` (which governs identity
+ * freshness). A row LML couldn't resolve is re-attempted only after this many
+ * days, so a manual re-run doesn't re-burn LML on rows unlikely to newly
+ * resolve. Defaults to 30, matching the fleet's no-match TTL convention
+ * (`CONCERTS_ARTIST_RESOLVE_NO_MATCH_TTL_DAYS`). Only read when
+ * `INCLUDE_NULL_CANONICAL` is on.
+ */
+export const resolveUnresolvedRetryDays = (
+  raw: string | undefined = process.env.UNRESOLVED_RETRY_DAYS,
+  defaultDays = 30
+): number => {
+  if (raw === undefined) return defaultDays;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`Invalid UNRESOLVED_RETRY_DAYS=${JSON.stringify(raw)}; must be a positive integer.`);
+  }
+  return parsed;
+};
+
+/**
  * Load the next batch of libraries needing identity refresh.
  *
  * The predicate is the canonicalized-and-fresh gate described above. Rows are skipped when
@@ -130,17 +172,41 @@ export const loadBatch = async (
   afterId: number,
   batchSize: number,
   partitionFilter: SQL | null,
-  staleDays: number
+  staleDays: number,
+  includeNullCanonical = false,
+  unresolvedRetryDays = 30
 ): Promise<LibraryRow[]> => {
   const partitionClause = partitionFilter ?? sql``;
-  const rows = (await db.execute(sql`
-    SELECT
-      "id",
-      "artist_name",
-      "album_title"
-    FROM ${LIBRARY_TABLE}
-    WHERE "id" > ${afterId}
-      AND "artist_name" IS NOT NULL
+
+  // The eligibility core. Flag OFF is byte-identical to the post-#1144
+  // predicate (canonicalized rows only: never-resolved OR stale). Flag ON
+  // (BS#974) drops the `canonical_entity_id IS NOT NULL` filter and gates
+  // every first-time candidate on the `unresolved_attempted_at` no-match
+  // marker, so the ~34K NULL-canonical rows come into scope without the
+  // unresolved-row hot-loop (a row LML couldn't resolve isn't re-attempted
+  // until `unresolvedRetryDays` elapse). This also retro-fixes the
+  // pre-existing canonical-unresolved re-attempt, since it too now honors the
+  // marker.
+  const eligibilityCore = includeNullCanonical
+    ? sql`
+      AND (
+        EXISTS (
+          SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li
+          WHERE li."library_id" = ${LIBRARY_TABLE}."id"
+            AND li."last_verified_at" < NOW() - (interval '1 day' * ${staleDays})
+        )
+        OR (
+          NOT EXISTS (
+            SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li
+            WHERE li."library_id" = ${LIBRARY_TABLE}."id"
+          )
+          AND (
+            "unresolved_attempted_at" IS NULL
+            OR "unresolved_attempted_at" < NOW() - (interval '1 day' * ${unresolvedRetryDays})
+          )
+        )
+      )`
+    : sql`
       AND "canonical_entity_id" IS NOT NULL
       AND (
         NOT EXISTS (
@@ -152,7 +218,17 @@ export const loadBatch = async (
           WHERE li."library_id" = ${LIBRARY_TABLE}."id"
             AND li."last_verified_at" < NOW() - (interval '1 day' * ${staleDays})
         )
-      )
+      )`;
+
+  const rows = (await db.execute(sql`
+    SELECT
+      "id",
+      "artist_name",
+      "album_title"
+    FROM ${LIBRARY_TABLE}
+    WHERE "id" > ${afterId}
+      AND "artist_name" IS NOT NULL
+      ${eligibilityCore}
       ${partitionClause}
     ORDER BY "id" ASC
     LIMIT ${batchSize}

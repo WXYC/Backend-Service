@@ -511,6 +511,15 @@ export const library = wxyc_schema.table(
     canonical_entity_id: text('canonical_entity_id'),
     canonical_entity_confidence: real('canonical_entity_confidence'),
     canonical_entity_resolved_at: timestamp('canonical_entity_resolved_at', { withTimezone: true }),
+    // Attempt-at marker (BS#974) for the library-identity-consumer's NULL-
+    // canonical expansion. Stamped only on a *definitive no-match* (LML
+    // `unresolved`/`compilation`) so the one-shot consumer doesn't re-burn LML
+    // on the ~34K NULL-`canonical_entity_id` rows on a manual re-run within
+    // `UNRESOLVED_RETRY_DAYS`. Left NULL on transient failures (retryable) and
+    // NOT stamped on a `single_artist` resolution — the `library_identity` row
+    // is that row's success marker. See docs/migrations.md §Attempt-at markers;
+    // re-attempt is manual-only (this job has no cron backstop).
+    unresolved_attempted_at: timestamp('unresolved_attempted_at', { withTimezone: true }),
     // "Not on Discogs" flag (BS#1281 / epic #1280). The music director marks a
     // release the LML pipeline keeps false-fuzzy-matching (embargoed promos,
     // audience-segment pressings) so lookups stop returning wrong metadata.

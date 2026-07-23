@@ -23,13 +23,15 @@ import { closeDatabaseConnection } from '@wxyc/database';
 
 import { runConsumer } from './orchestrate.js';
 import { bulkResolveLibraries } from './lml-fetch.js';
-import { writeSingleArtist } from './writer.js';
+import { writeSingleArtist, stampUnresolvedAttemptedAt } from './writer.js';
 import {
   resolveBatchSize,
   resolveDryRun,
+  resolveIncludeNullCanonical,
   resolvePartitionFilter,
   resolveStaleThreshold,
   resolveThrottleMs,
+  resolveUnresolvedRetryDays,
 } from './select.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 
@@ -51,9 +53,12 @@ const main = async (): Promise<void> => {
       const result = await runConsumer({
         bulkResolve: bulkResolveLibraries,
         writeSingleArtist,
+        stampUnresolvedAttemptedAt,
         batchSize: resolveBatchSize(),
         throttleMs: resolveThrottleMs(),
         staleDays: resolveStaleThreshold(),
+        includeNullCanonical: resolveIncludeNullCanonical(),
+        unresolvedRetryDays: resolveUnresolvedRetryDays(),
         partition: resolvePartitionFilter(),
         dryRun: resolveDryRun(),
       });

@@ -17,7 +17,11 @@
 import { db } from '@wxyc/database';
 
 import type { BulkResolveResult } from '../../../../jobs/library-identity-consumer/lml-types';
-import { projectMainRow, writeSingleArtist } from '../../../../jobs/library-identity-consumer/writer';
+import {
+  projectMainRow,
+  writeSingleArtist,
+  stampUnresolvedAttemptedAt,
+} from '../../../../jobs/library-identity-consumer/writer';
 
 type SqlChunk = { value?: string | string[]; queryChunks?: SqlChunk[]; raw?: string };
 type SqlLike = {
@@ -202,5 +206,30 @@ describe('writeSingleArtist', () => {
     const calls = (db.execute as jest.Mock).mock.calls;
     const matchedAny = calls.some((c) => JSON.stringify(c[0]).includes('consumer:lml-bulk'));
     expect(matchedAny).toBe(true);
+  });
+});
+
+describe('stampUnresolvedAttemptedAt (BS#974)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (db.execute as jest.Mock).mockResolvedValue([]);
+  });
+
+  it('issues one UPDATE binding the ids as a single ANY(::int[]) array literal', async () => {
+    await stampUnresolvedAttemptedAt([1, 2, 3]);
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(1);
+    const rendered = renderSql((db.execute as jest.Mock).mock.calls[0][0]);
+    expect(rendered).toMatch(/UPDATE[\s\S]*library\b/i);
+    expect(rendered).toMatch(/unresolved_attempted_at/);
+    expect(rendered).toMatch(/NOW\(\)/);
+    // Array-literal bind (BS#1071/#1072), not an IN (...) positional splat.
+    expect(rendered).toMatch(/ANY\(/);
+    expect(rendered).toMatch(/\{1,2,3\}/);
+    expect(rendered).toMatch(/::int\[\]/);
+  });
+
+  it('is a no-op (no query) for an empty id list', async () => {
+    await stampUnresolvedAttemptedAt([]);
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
   });
 });

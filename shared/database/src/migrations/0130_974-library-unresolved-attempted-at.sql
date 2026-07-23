@@ -1,0 +1,16 @@
+-- precondition-guard: not-required (adds a nullable column to `library`; does not touch library_identity* — that table name appears below only in prose)
+-- BS#974: attempt-at marker for the library-identity-consumer's NULL-canonical
+-- expansion. Nullable timestamptz, default NULL. Stamped only on a definitive
+-- LML no-match (`unresolved`/`compilation`) so the one-shot consumer doesn't
+-- re-burn LML on the ~34K NULL-`canonical_entity_id` rows when an operator
+-- re-runs within `UNRESOLVED_RETRY_DAYS`; left NULL on transient failures
+-- (retryable) and never stamped on a `single_artist` resolution (the resolved-
+-- identity row is that row's success marker). See docs/migrations.md
+-- §Attempt-at markers — re-attempt is manual-only (no cron backstop).
+--
+-- DDL-only, additive, nullable → no table rewrite, no backfill, instant on a
+-- 64K-row table. No index: the consumer's SELECT is driven by the library.id
+-- PK id-cursor, not this column. Companion code gates reads behind the
+-- INCLUDE_NULL_CANONICAL flag (default off), so this column is inert until an
+-- operator opts in.
+ALTER TABLE "wxyc_schema"."library" ADD COLUMN "unresolved_attempted_at" timestamp with time zone;
