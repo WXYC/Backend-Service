@@ -53,6 +53,7 @@ Each downstream WXYC app that authenticates against `api.wxyc.org/auth` via OIDC
 - `SES_FROM_EMAIL`
 - `SES_CONFIGURATION_SET_NAME` — Configuration set passed on every `SendEmailCommand`. Optional. Production value: `my-first-configuration-set`. The `wxyc.org` domain identity lists this as its default, so sends from `hello@wxyc.org` (or any other `*@wxyc.org` without its own email-level identity) pick it up automatically. Passing it explicitly here is belt-and-suspenders against the identity-precedence trap — if a future email-level identity for the from address is added without the config set attached, the EventDestination would silently stop seeing OTP / verification / reset traffic, the trap BS#1070 fixed for the legacy `no-reply@wxyc.org` email-level identity.
 - `PASSWORD_RESET_REDIRECT_URL`, `EMAIL_VERIFICATION_REDIRECT_URL`
+- `EMAIL_ENABLED` — Gates the actual `SESClient.send()` call in `shared/authentication/src/email.ts` (`isEmailSendingEnabled()`). SES has a 200-message/month quota, so test/CI must never hit it. Defaults to enabled (`true`) when unset — matching production. Explicitly set to `false` in the unit-test setup (`tests/setup/unit.setup.ts`), the integration-test setup (`tests/setup/integration.setup.js`), the CI docker-compose `auth` service (`dev_env/docker-compose.yml`), and the GHA `Integration-Tests` job's `Start services` step (`.github/workflows/test.yml`). Accepts `false`/`0` (case-insensitive) as disabled; anything else (including unset) is enabled.
 
 ### SES delivery events (`POST /internal/ses-events`)
 

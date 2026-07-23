@@ -437,6 +437,12 @@ jobs:
           # closes the GHA-vs-compose drift that surfaced when BS#1383
           # promoted its case from warn-skip to fail-fast.
           CATALOG_SEARCH_ALIAS_ENABLED: 'true'
+          # SES has a 200-message/month quota. The auth service (host process
+          # here) is the only sendEmail/sendOTPEmail caller; keep real sends
+          # off regardless of whether AWS_ACCESS_KEY_ID etc. are ever set on
+          # this job. See shared/authentication/src/email.ts
+          # `isEmailSendingEnabled`.
+          EMAIL_ENABLED: 'false'
         run: |
           node dev_env/mock-api-server/dist/server.js > /tmp/mock-api.log 2>&1 &
           node apps/auth/dist/app.js > /tmp/auth.log 2>&1 &

@@ -42,6 +42,11 @@ describe('sendEmail', () => {
     process.env.AWS_SECRET_ACCESS_KEY = 'test';
     process.env.AWS_REGION = 'us-east-1';
     process.env.DEFAULT_ORG_NAME = 'WXYC';
+    // tests/setup/unit.setup.ts defaults EMAIL_ENABLED=false for the suite;
+    // this file's SES client is already fully mocked, so opt back in here
+    // to exercise the real send path. The dedicated `EMAIL_ENABLED gating`
+    // describe block below overrides this per-test.
+    process.env.EMAIL_ENABLED = 'true';
 
     // Clear mocks
     jest.clearAllMocks();
@@ -175,6 +180,64 @@ describe('sendEmail', () => {
 
     const callArgs = FreshCommand.mock.calls[0][0] as { ConfigurationSetName?: unknown };
     expect(callArgs.ConfigurationSetName).toBeUndefined();
+  });
+});
+
+describe('EMAIL_ENABLED gating', () => {
+  beforeEach(async () => {
+    process.env.SES_FROM_EMAIL = 'test@wxyc.org';
+    process.env.AWS_ACCESS_KEY_ID = 'test';
+    process.env.AWS_SECRET_ACCESS_KEY = 'test';
+    process.env.AWS_REGION = 'us-east-1';
+    process.env.DEFAULT_ORG_NAME = 'WXYC';
+
+    jest.clearAllMocks();
+    jest.resetModules();
+  });
+
+  afterEach(() => {
+    delete process.env.EMAIL_ENABLED;
+  });
+
+  it('does not call the SES client send when EMAIL_ENABLED is unset', async () => {
+    delete process.env.EMAIL_ENABLED;
+    const emailModule = await import('../../../shared/authentication/src/email');
+
+    // Unset means "enabled" (production default) — confirm the opposite
+    // gate below instead exercises the disabled path.
+    expect(emailModule.isEmailSendingEnabled()).toBe(true);
+  });
+
+  it('does not call the SES client send when EMAIL_ENABLED=false', async () => {
+    process.env.EMAIL_ENABLED = 'false';
+    const emailModule = await import('../../../shared/authentication/src/email');
+
+    await emailModule.sendEmail({
+      type: 'passwordReset',
+      to: 'user@example.com',
+      url: 'https://example.com/reset',
+    });
+
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it('calls the SES client send when EMAIL_ENABLED=true', async () => {
+    process.env.EMAIL_ENABLED = 'true';
+    const emailModule = await import('../../../shared/authentication/src/email');
+
+    await emailModule.sendEmail({
+      type: 'passwordReset',
+      to: 'user@example.com',
+      url: 'https://example.com/reset',
+    });
+
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports isEmailSendingEnabled() false for EMAIL_ENABLED=false', async () => {
+    process.env.EMAIL_ENABLED = 'false';
+    const emailModule = await import('../../../shared/authentication/src/email');
+    expect(emailModule.isEmailSendingEnabled()).toBe(false);
   });
 });
 
