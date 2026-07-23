@@ -31,6 +31,16 @@
 --
 -- Sequence values are advanced past the fixture range with setval() so
 -- subsequent serial inserts (from tests or app code) don't collide.
+--
+-- Every setval() is monotonic (BS#1728): it uses
+-- GREATEST(<fixture-floor>, (SELECT last_value FROM <seq>)) rather than a
+-- bare fixed value. Against a clean CI database this establishes the
+-- fixture's floor same as before. Against the dev-profile clone
+-- (dev_env/seed-clone.sql, loaded BEFORE this fixture and its own sequence
+-- watermarks already past the fixture's range, e.g. library_id_seq at
+-- 70351) a bare setval(seq, 7099, true) would REWIND the sequence below
+-- MAX(id), so the next serial insert collides with an existing clone row.
+-- GREATEST never rewinds an already-ahead sequence.
 -- ==============================================================================
 
 -- ------------------------------------------------------------------------------
@@ -42,7 +52,7 @@ VALUES
   (7001, 'Shape Fixture Label B')
 ON CONFLICT (id) DO NOTHING;
 
-SELECT setval('wxyc_schema.labels_id_seq', 7099, true);
+SELECT setval('wxyc_schema.labels_id_seq', GREATEST(7099, (SELECT last_value FROM wxyc_schema.labels_id_seq)), true);
 
 -- ------------------------------------------------------------------------------
 -- Artists (code_letters intentionally outside the canonical seeded set)
@@ -54,7 +64,7 @@ VALUES
   (7002, 'Shape Fixture Artist Gamma', 'Shape Fixture Artist Gamma', 'XC')
 ON CONFLICT (id) DO NOTHING;
 
-SELECT setval('wxyc_schema.artists_id_seq', 7099, true);
+SELECT setval('wxyc_schema.artists_id_seq', GREATEST(7099, (SELECT last_value FROM wxyc_schema.artists_id_seq)), true);
 
 -- Crossreference rows so library_artist_view INNER JOINs resolve. The
 -- (artist_id, genre_id) unique key is namespaced by our 7000-range
@@ -94,7 +104,7 @@ VALUES
   (7009, 7000, 11, 2, 'Shape Fixture Album Alpha 3',  4, 'Shape Fixture Artist Alpha', NULL,                    NULL)
 ON CONFLICT (id) DO NOTHING;
 
-SELECT setval('wxyc_schema.library_id_seq', 7099, true);
+SELECT setval('wxyc_schema.library_id_seq', GREATEST(7099, (SELECT last_value FROM wxyc_schema.library_id_seq)), true);
 
 -- ------------------------------------------------------------------------------
 -- Rotation (~15 rows)
@@ -149,7 +159,7 @@ VALUES
   (7014, 7007, 'L', '2024-12-01', NULL, 'Shape Fixture Artist Beta',  'Shape Fixture Album Beta 3', NULL,                    70014)
 ON CONFLICT (id) DO NOTHING;
 
-SELECT setval('wxyc_schema.rotation_id_seq', 7099, true);
+SELECT setval('wxyc_schema.rotation_id_seq', GREATEST(7099, (SELECT last_value FROM wxyc_schema.rotation_id_seq)), true);
 
 -- ------------------------------------------------------------------------------
 -- Shows
@@ -177,7 +187,7 @@ VALUES
   (7003, NULL, 'Shape Fixture Mixed-Play-Order Show', '2024-11-20 18:00:00+00', '2024-11-20 21:00:00+00', NULL, 'Shape Fixture DJ Mixed')
 ON CONFLICT (id) DO NOTHING;
 
-SELECT setval('wxyc_schema.shows_id_seq', 7099, true);
+SELECT setval('wxyc_schema.shows_id_seq', GREATEST(7099, (SELECT last_value FROM wxyc_schema.shows_id_seq)), true);
 
 -- ------------------------------------------------------------------------------
 -- Flowsheet (~10 rows across 2 shows)
@@ -229,7 +239,7 @@ VALUES
    1, false, false, NULL, '2024-12-02 20:05:00+00', 'Shape Fixture DJ Two', '2024-12-02 20:05:01+00')
 ON CONFLICT (id) DO NOTHING;
 
-SELECT setval('wxyc_schema.flowsheet_id_seq', 7099, true);
+SELECT setval('wxyc_schema.flowsheet_id_seq', GREATEST(7099, (SELECT last_value FROM wxyc_schema.flowsheet_id_seq)), true);
 
 -- ------------------------------------------------------------------------------
 -- compilation_track_artist (BS#819 — integration tests for CTA-based track search)
@@ -253,7 +263,7 @@ VALUES
   (7002, 7000, 'Shape Fixture Comp Guest Gamma', 'Bioluminescence',   'B1')
 ON CONFLICT (id) DO NOTHING;
 
-SELECT setval('wxyc_schema.compilation_track_artist_id_seq', 7099, true);
+SELECT setval('wxyc_schema.compilation_track_artist_id_seq', GREATEST(7099, (SELECT last_value FROM wxyc_schema.compilation_track_artist_id_seq)), true);
 
 -- ------------------------------------------------------------------------------
 -- Track 2 (Discogs cross-ref via LML /lookup) fixture — BS#825
@@ -291,7 +301,7 @@ VALUES
   (7102, 'Plebs Of The Dawnchorus',  'Plebs Of The Dawnchorus',  'PD')
 ON CONFLICT (id) DO NOTHING;
 
-SELECT setval('wxyc_schema.artists_id_seq', 7199, true);
+SELECT setval('wxyc_schema.artists_id_seq', GREATEST(7199, (SELECT last_value FROM wxyc_schema.artists_id_seq)), true);
 
 INSERT INTO wxyc_schema.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
 VALUES
@@ -312,7 +322,7 @@ VALUES
    65882, 'discogs:master:7777',     0.90, NOW())
 ON CONFLICT (id) DO NOTHING;
 
-SELECT setval('wxyc_schema.library_id_seq', 7199, true);
+SELECT setval('wxyc_schema.library_id_seq', GREATEST(7199, (SELECT last_value FROM wxyc_schema.library_id_seq)), true);
 
 -- CTA row for the CTA-collision release. track_title carries the nonce
 -- query token so Track 1's ILIKE matches; library 7102's album_title and
@@ -324,4 +334,4 @@ VALUES
   (7100, 7102, 'CTA Collision Comp Guest', 'Wbtr2x Cmprs 9azn5', 'B2')
 ON CONFLICT (id) DO NOTHING;
 
-SELECT setval('wxyc_schema.compilation_track_artist_id_seq', 7199, true);
+SELECT setval('wxyc_schema.compilation_track_artist_id_seq', GREATEST(7199, (SELECT last_value FROM wxyc_schema.compilation_track_artist_id_seq)), true);
