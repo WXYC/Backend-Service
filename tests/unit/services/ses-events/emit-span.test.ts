@@ -72,8 +72,10 @@ describe('emitSesEventSpan', () => {
       processingTimeMillis: 1234,
     };
     emitSesEventSpan(event);
-    expect(setAttribute).toHaveBeenCalledWith('ses.delivery_latency_ms', 2500);
-    expect(setAttribute).toHaveBeenCalledWith('ses.processing_time_ms', 1234);
+    const callArgs = startSpan.mock.calls[0] as unknown as [Record<string, unknown>, unknown];
+    const attrs = callArgs[0].attributes as Record<string, unknown>;
+    expect(attrs['ses.delivery_latency_ms']).toBe(2500);
+    expect(attrs['ses.processing_time_ms']).toBe(1234);
   });
 
   it('clamps negative latency to 0 (clock skew defense)', () => {
@@ -87,7 +89,9 @@ describe('emitSesEventSpan', () => {
       processingTimeMillis: 100,
     };
     emitSesEventSpan(event);
-    expect(setAttribute).toHaveBeenCalledWith('ses.delivery_latency_ms', 0);
+    const callArgs = startSpan.mock.calls[0] as unknown as [Record<string, unknown>, unknown];
+    const attrs = callArgs[0].attributes as Record<string, unknown>;
+    expect(attrs['ses.delivery_latency_ms']).toBe(0);
   });
 
   it('sets failed_precondition status on Bounce', () => {

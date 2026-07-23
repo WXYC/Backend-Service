@@ -36,18 +36,9 @@ export function emitSesEventSpan(event: SesEvent): void {
     {
       name: 'ses.event',
       op: 'email.ses',
-      attributes: buildAttributes(event),
+      attributes: { ...buildAttributes(event), ...buildMeasurements(event) },
     },
     (span) => {
-      const measurements = buildMeasurements(event);
-      for (const [name, value] of Object.entries(measurements)) {
-        // Sentry's setAttribute is the supported v10 path; measurements
-        // surface in the trace explorer the same way once attributes start
-        // with a known numeric metric key. We accept the slight loss of
-        // dedicated "measurements" semantics in exchange for an API that
-        // does not require us to chase SDK-internal types.
-        span.setAttribute(name, value);
-      }
       span.setStatus(buildStatus(event));
     }
   );
