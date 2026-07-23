@@ -145,16 +145,18 @@ const backfillDJInfo = async (mappings: DJMapping[]): Promise<number> => {
     for (const m of batch) {
       const djHandleValue = m.djHandle ? `'${m.djHandle.replace(/'/g, "''")}'` : 'NULL';
       const djIdValue = m.djId != null ? String(m.djId) : 'NULL';
-      await db.execute(
+      const result = await db.execute(
         sql.raw(`
         UPDATE ${getSchemaPrefix()}shows
         SET legacy_dj_name = ${djHandleValue}, legacy_dj_id = ${djIdValue}
         WHERE legacy_show_id = ${m.showId} AND legacy_dj_name IS NULL
       `)
       );
+      // Count rows actually touched by the `legacy_dj_name IS NULL` guard,
+      // not the mapping batch — a mapping whose show was already backfilled
+      // (or has no matching legacy_show_id) updates 0 rows.
+      totalUpdated += Number((result as unknown as Record<string, unknown>).count ?? 0);
     }
-
-    totalUpdated += batch.length;
 
     if ((i / BATCH_SIZE + 1) % 5 === 0) {
       console.log(`[backfill] ...${totalUpdated} shows updated so far.`);
@@ -232,9 +234,16 @@ const main = async () => {
 main()
   .catch((err) => {
     console.error('[backfill] Fatal error:', err);
-    process.exit(1);
+    // Set the exit code and rethrow instead of process.exit(1) — exit()
+    // terminates immediately and would skip the .finally() cleanup below
+    // (pg pool + SSH dispose), leaking the legacy DB connection on a fatal
+    // error.
+    process.exitCode = 1;
+    throw err;
   })
   .finally(async () => {
     legacyDB.close();
     await closeDatabaseConnection();
   });
+
+export { fetchReleaseMappings, backfillReleaseIds, fetchDJMappings, backfillDJInfo, resolveAlbumIds, main };
