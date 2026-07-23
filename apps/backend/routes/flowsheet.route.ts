@@ -5,14 +5,22 @@ import * as searchController from '../controllers/search.controller';
 import * as suggestController from '../controllers/suggest.controller';
 import * as flowsheet_service from '../services/flowsheet.service';
 import { flowsheetMirror } from '../middleware/legacy/flowsheet.mirror';
-import { conditionalGet } from '../middleware/conditionalGet';
+import { conditionalGet, singleValidatorCache } from '../middleware/conditionalGet';
 import { showMemberMiddleware } from '../middleware/checkShowMember';
 
 export const flowsheet_route = Router();
 
 // Conditional-GET over the flowsheet watermark (BS#902); the catalog passes a
 // different provider (BS#1467) but reuses the same middleware factory.
-const flowsheetConditionalGet = conditionalGet(flowsheet_service.getLastModifiedAt);
+// `singleValidatorCache` (BS#1689) makes the watermark `Last-Modified` this
+// sets the SINGLE freshness validator on these routes — it suppresses
+// Express's own default per-body `ETag` and marks `Cache-Control: no-cache`,
+// so a client can't trip an independent, un-watermarked 304 off a stale
+// cached ETag. Order matters: it must run before the route handler emits a
+// body, so it's chained ahead of the mirror/controller handlers below rather
+// than folded into the conditionalGet factory (which the catalog route also
+// uses, out of this fix's scope).
+const flowsheetConditionalGet = [conditionalGet(flowsheet_service.getLastModifiedAt), singleValidatorCache];
 
 // Public playlist archive search
 flowsheet_route.get('/search', searchController.searchFlowsheetEndpoint);
