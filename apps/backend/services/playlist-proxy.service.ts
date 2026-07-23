@@ -21,7 +21,7 @@
  */
 import { EventSource } from 'eventsource';
 import { db, flowsheet, album_metadata } from '@wxyc/database';
-import { sql, inArray, and, isNotNull, eq } from 'drizzle-orm';
+import { sql, inArray, and, isNotNull, eq, asc } from 'drizzle-orm';
 
 const TUBAFRENZY_URL = process.env.TUBAFRENZY_URL ?? 'https://www.wxyc.info';
 const MAX_ENTRIES = 200;
@@ -356,7 +356,15 @@ async function enrichPlaycuts(): Promise<void> {
     const rows = await db
       .select({
         key: flowsheetLookupKey,
-        artwork_url: album_metadata.artwork_url,
+        // The legacy library is per-physical-format (BS#1105): multiple
+        // `library` rows — and therefore multiple `album_metadata` rows —
+        // can share one flowsheetLookupKey (same artist_name + album_title,
+        // distinct album_id/artwork_url). Grouping by key alone would be
+        // ambiguous about which artwork_url to keep, so the tie-break is
+        // pinned in SQL: aggregate all matching artwork_urls into an array
+        // ordered by album_id ascending and take the first — deterministically
+        // the lowest album_id's artwork, independent of scan/plan order.
+        artwork_url: sql<string>`(array_agg(${album_metadata.artwork_url} order by ${album_metadata.album_id} asc))[1]`,
       })
       .from(flowsheet)
       // INNER JOIN to album_metadata drops `flowsheet.album_id IS NULL` rows
@@ -367,7 +375,7 @@ async function enrichPlaycuts(): Promise<void> {
       // #511 for what happens when the planner falls off the index.
       .innerJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
       .where(and(inArray(flowsheetLookupKey, keys), isNotNull(album_metadata.artwork_url)))
-      .groupBy(flowsheetLookupKey, album_metadata.artwork_url);
+      .groupBy(flowsheetLookupKey);
 
     // Build new map and only swap on success — preserves existing artwork on DB failure
     const newMap = new Map<number, string>();
@@ -404,6 +412,9 @@ async function enrichSinglePlaycut(entry: TubafrenzyEntry): Promise<void> {
       // Same JOIN + partial-index alignment as enrichPlaycuts — see comment there.
       .innerJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
       .where(and(inArray(flowsheetLookupKey, [key]), isNotNull(album_metadata.artwork_url)))
+      // Deterministic tie-break for split-format albums (BS#1105): lowest
+      // album_id wins, matching enrichPlaycuts' array_agg ordering above.
+      .orderBy(asc(album_metadata.album_id))
       .limit(1);
 
     if (rows.length > 0 && rows[0].artwork_url) {

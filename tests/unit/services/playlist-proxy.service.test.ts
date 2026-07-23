@@ -15,6 +15,7 @@ const mockFrom = jest.fn();
 const mockInnerJoin = jest.fn();
 const mockWhere = jest.fn();
 const mockGroupBy = jest.fn();
+const mockOrderBy = jest.fn();
 const mockLimit = jest.fn();
 
 const mockDbChain = {
@@ -23,6 +24,7 @@ const mockDbChain = {
   innerJoin: mockInnerJoin,
   where: mockWhere,
   groupBy: mockGroupBy,
+  orderBy: mockOrderBy,
   limit: mockLimit,
 };
 mockSelect.mockReturnValue(mockDbChain);
@@ -30,6 +32,7 @@ mockFrom.mockReturnValue(mockDbChain);
 mockInnerJoin.mockReturnValue(mockDbChain);
 mockWhere.mockReturnValue(mockDbChain);
 mockGroupBy.mockResolvedValue([]);
+mockOrderBy.mockReturnValue(mockDbChain);
 mockLimit.mockResolvedValue([]);
 
 jest.mock('@wxyc/database', () => ({
@@ -39,6 +42,7 @@ jest.mock('@wxyc/database', () => ({
     innerJoin: (...args: unknown[]) => mockInnerJoin(...args),
     where: (...args: unknown[]) => mockWhere(...args),
     groupBy: (...args: unknown[]) => mockGroupBy(...args),
+    orderBy: (...args: unknown[]) => mockOrderBy(...args),
     limit: (...args: unknown[]) => mockLimit(...args),
   },
   flowsheet: {
@@ -59,6 +63,7 @@ jest.mock('drizzle-orm', () => ({
   isNotNull: jest.fn(),
   and: jest.fn(),
   eq: jest.fn(),
+  asc: jest.fn(),
 }));
 
 // Mock EventSource — we do not want to open real SSE connections in tests.
@@ -160,6 +165,7 @@ describe('playlist-proxy.service', () => {
     mockInnerJoin.mockReturnValue(mockDbChain);
     mockWhere.mockReturnValue(mockDbChain);
     mockGroupBy.mockResolvedValue([]); // batch enrichment default
+    mockOrderBy.mockReturnValue(mockDbChain);
     mockLimit.mockResolvedValue([]); // single enrichment default
   });
 
@@ -467,6 +473,66 @@ describe('playlist-proxy.service', () => {
       // catches the regression at PR time before the next D4 attempt wedges
       // on a missing column.
       expect(proxySource).not.toMatch(/flowsheet\.artwork_url/);
+    });
+
+    it('enrichPlaycuts groups by lookup key alone and aggregates artwork_url deterministically by lowest album_id (BS#1105)', () => {
+      // Split-format albums (BS#1105): multiple library rows — and therefore
+      // multiple album_metadata rows — can share one flowsheetLookupKey.
+      // Grouping by (key, artwork_url) as before lets the GROUP BY emit one
+      // row per distinct artwork_url for the same key, and Map.set's
+      // last-write-wins made the pick depend on unspecified row order.
+      // The fix groups by the key alone and folds candidates through
+      // array_agg ordered by album_id ascending, taking the first element —
+      // deterministically the lowest album_id's artwork.
+      const chains = proxySource.match(/db\s*\.\s*select[\s\S]*?\.\s*groupBy\([\s\S]*?\)\s*;/g) ?? [];
+      const batchChain = chains.find((c) => /flowsheetLookupKey/.test(c));
+      expect(batchChain).toBeDefined();
+      expect(batchChain).toMatch(/\.groupBy\(\s*flowsheetLookupKey\s*\)/);
+      expect(batchChain).not.toMatch(/\.groupBy\(\s*flowsheetLookupKey\s*,\s*album_metadata\.artwork_url\s*\)/);
+      expect(batchChain).toMatch(
+        /array_agg\(\s*\$\{album_metadata\.artwork_url\}\s*order by\s*\$\{album_metadata\.album_id\}\s*asc\s*\)\)\[1\]/
+      );
+    });
+
+    it('enrichSinglePlaycut orders by album_id ascending before limit(1) (BS#1105)', () => {
+      // Without an ORDER BY, `.limit(1)` on a multi-row match (split-format
+      // album) picks whichever row the planner happens to scan first — the
+      // same non-determinism as enrichPlaycuts, just via LIMIT instead of
+      // GROUP BY. Pin it to the same lowest-album_id tie-break.
+      const chains = proxySource.match(/db\s*\.\s*select[\s\S]*?\.\s*limit\([\s\S]*?\)\s*;/g) ?? [];
+      const singleChain = chains.find((c) => /flowsheetLookupKey/.test(c));
+      expect(singleChain).toBeDefined();
+      expect(singleChain).toMatch(/\.orderBy\(\s*asc\(\s*album_metadata\.album_id\s*\)\s*\)/);
+      // orderBy must precede limit in the chain, not just appear somewhere in it.
+      const orderByIdx = singleChain.indexOf('.orderBy(');
+      const limitIdx = singleChain.indexOf('.limit(');
+      expect(orderByIdx).toBeGreaterThan(-1);
+      expect(orderByIdx).toBeLessThan(limitIdx);
+    });
+
+    it('imports `asc` from drizzle-orm for the single-playcut tie-break', () => {
+      expect(proxySource).toMatch(/\basc\b/);
+    });
+  });
+
+  describe('artwork tie-break: split-format albums (BS#1105)', () => {
+    // Behavioral coverage of the tie-break contract at the drizzle-builder
+    // boundary: enrichSinglePlaycut's query chain must route through
+    // orderBy before limit(1) resolves. The real determinism guarantee (that
+    // Postgres actually returns the lowest album_id's row first) is a SQL
+    // property covered by the real-Postgres integration spec
+    // (tests/integration/playlist-proxy-artwork-tiebreak.spec.js); this mock
+    // can only assert the builder wires orderBy into the chain at all.
+    it('enrichSinglePlaycut calls orderBy before resolving limit(1)', async () => {
+      mockLimit.mockResolvedValue([{ artwork_url: 'https://i.discogs.com/lowest-album-id.jpg' }]);
+
+      await processInitEvent(JSON.stringify([talksetEntry]));
+      await processCreatedEvent(JSON.stringify(juanaMolinaEntry));
+
+      expect(mockOrderBy).toHaveBeenCalled();
+      const result = getRecentEntries(50);
+      const juana = result.playcuts.find((p) => p.artistName === 'Juana Molina');
+      expect(juana?.artworkURL).toBe('https://i.discogs.com/lowest-album-id.jpg');
     });
   });
 });
