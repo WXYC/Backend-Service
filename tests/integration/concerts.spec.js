@@ -677,6 +677,15 @@ describe('GET /concerts station_recommended (BS#1731)', () => {
  * Isolated from the BS#1603/BS#1731 describes above (own venue/source_id
  * prefix, own artist-name prefix) so these seeds can't perturb their
  * assertions.
+ *
+ * The rank domain is GLOBAL — every upcoming gated concert in the DB, not
+ * just this spec's seeded venue — so assertions below prove RELATIVE order
+ * within the seeded set (never an absolute `toBe(N)`), which the SQL
+ * guarantees regardless of what else is gated elsewhere in the DB. Also
+ * covers: a PAST gated concert's by-id rank (null, via the windowless
+ * `getConcertById` read re-testing `starts_on >= today`) and the rank
+ * subquery's final `id ASC` tie-break clause (equal plays AND equal
+ * starts_on).
  */
 describe('GET /concerts station_recommended_rank (BS#1756)', () => {
   const VENUE_SLUG = 'bs1756-probe-room';
@@ -691,6 +700,15 @@ describe('GET /concerts station_recommended_rank (BS#1756)', () => {
   const UNROTATED_ARTIST_NAME = `${ARTIST_NAME_PREFIX}Unrotated Artist`; // resolved, not gated
   const DISCOGS_ONLY_ARTIST_RAW = `${ARTIST_NAME_PREFIX}Discogs-Only Artist`; // never gated
   const DISCOGS_ONLY_ARTIST_DISCOGS_ID = 91756001;
+  // Gated, plays row, but on a PAST date — the by-id windowless+today-guard
+  // case (only reachable via GET /concerts/:id; excluded from the default
+  // GET /concerts window entirely).
+  const PAST_GATED_ARTIST_NAME = `${ARTIST_NAME_PREFIX}PastGated Artist`;
+  // Two gated artists with EQUAL plays whose concerts share a starts_on date,
+  // isolating the rank subquery's final `id ASC` tie-break clause (plays tie
+  // AND date tie, so only concert id can order them).
+  const ID_TIE_ARTIST_A_NAME = `${ARTIST_NAME_PREFIX}IdTieA Artist`;
+  const ID_TIE_ARTIST_B_NAME = `${ARTIST_NAME_PREFIX}IdTieB Artist`;
 
   // Dates deliberately NOT in plays-descending order (RANK1 sits at day 7, the
   // tie pair straddles day 1 and day 8) so a regression that ranked by
@@ -705,12 +723,17 @@ describe('GET /concerts station_recommended_rank (BS#1756)', () => {
     rank3: isoDate(6),
     rank1: isoDate(7),
     tieLater: isoDate(8),
+    idTie: isoDate(9),
   };
   const WINDOW_FROM = isoDate(0);
   const WINDOW_TO = isoDate(30); // comfortably past every DAY.* offset above
+  const PAST_GATED_STARTS_ON = isoDate(-10); // outside the default GET /concerts window
 
   let auth;
   let sql;
+  let pastGatedConcertId;
+  let idTieFirstConcertId;
+  let idTieSecondConcertId;
 
   const insertConcert = async (venueId, key, overrides) => {
     const defaults = {
@@ -731,13 +754,14 @@ describe('GET /concerts station_recommended_rank (BS#1756)', () => {
       removed_at: null,
     };
     const row = { ...defaults, ...overrides };
-    await sql.unsafe(
+    const [inserted] = await sql.unsafe(
       `INSERT INTO "${SCHEMA}".concerts
          (source, source_id, venue_id, starts_on, starts_at, doors_at,
           headlining_artist_raw, headlining_artist_id, headlining_discogs_artist_id,
           title, supporting_artists_raw, ticket_url, image_url, price_min, price_max,
           age_restriction, status, removed_at, event_url, raw_data, scraped_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, '{}'::jsonb, now())`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, '{}'::jsonb, now())
+       RETURNING id`,
       [
         row.source,
         SOURCE_ID_PREFIX + key,
@@ -760,6 +784,7 @@ describe('GET /concerts station_recommended_rank (BS#1756)', () => {
         row.event_url,
       ]
     );
+    return inserted.id;
   };
 
   /** Artist + rotation-linked library release — a BS#1731-gated headliner. */
@@ -831,6 +856,12 @@ describe('GET /concerts station_recommended_rank (BS#1756)', () => {
        VALUES ($1, $1, 'ZZ') RETURNING id`,
       [UNROTATED_ARTIST_NAME]
     );
+    // Gated + plays, but its concert is in the PAST — the by-id
+    // windowless+today-guard case (Fix #2).
+    const pastGatedArtistId = await seedGatedArtist(PAST_GATED_ARTIST_NAME);
+    // Two gated artists with EQUAL plays for the id-only tie-break case (Fix #3).
+    const idTieArtistAId = await seedGatedArtist(ID_TIE_ARTIST_A_NAME);
+    const idTieArtistBId = await seedGatedArtist(ID_TIE_ARTIST_B_NAME);
 
     await seedPlays(rank1ArtistId, 500);
     await seedPlays(rank2ArtistId, 300);
@@ -838,6 +869,9 @@ describe('GET /concerts station_recommended_rank (BS#1756)', () => {
     await seedPlays(tieEarlierArtistId, 100);
     await seedPlays(tieLaterArtistId, 100);
     // noPlaysArtistId intentionally gets no artist_station_plays row.
+    await seedPlays(pastGatedArtistId, 200);
+    await seedPlays(idTieArtistAId, 250);
+    await seedPlays(idTieArtistBId, 250);
 
     await insertConcert(venueId, 'rank1', {
       starts_on: DAY.rank1,
@@ -879,6 +913,23 @@ describe('GET /concerts station_recommended_rank (BS#1756)', () => {
       headlining_artist_raw: DISCOGS_ONLY_ARTIST_RAW,
       headlining_discogs_artist_id: DISCOGS_ONLY_ARTIST_DISCOGS_ID,
     });
+    pastGatedConcertId = await insertConcert(venueId, 'past-gated', {
+      starts_on: PAST_GATED_STARTS_ON,
+      headlining_artist_raw: PAST_GATED_ARTIST_NAME,
+      headlining_artist_id: pastGatedArtistId,
+    });
+    // Same starts_on for both — plays are also equal (250/250), so only the
+    // final `id ASC` tie-break clause can order these two.
+    idTieFirstConcertId = await insertConcert(venueId, 'id-tie-a', {
+      starts_on: DAY.idTie,
+      headlining_artist_raw: ID_TIE_ARTIST_A_NAME,
+      headlining_artist_id: idTieArtistAId,
+    });
+    idTieSecondConcertId = await insertConcert(venueId, 'id-tie-b', {
+      starts_on: DAY.idTie,
+      headlining_artist_raw: ID_TIE_ARTIST_B_NAME,
+      headlining_artist_id: idTieArtistBId,
+    });
   });
 
   afterAll(async () => {
@@ -890,12 +941,22 @@ describe('GET /concerts station_recommended_rank (BS#1756)', () => {
   const seeded = (body) => body.concerts.filter((c) => c.venue.slug === VENUE_SLUG);
   const findByRaw = (body, raw) => seeded(body).find((c) => c.headlining_artist_raw === raw);
 
-  it('ranks the gated set 1-based by plays descending', async () => {
+  it('ranks the gated set by plays descending', async () => {
+    // Absolute rank values are NOT asserted here: the rank domain is GLOBAL
+    // (every upcoming gated concert in the DB, not just this spec's venue —
+    // see the describe-level doc), so an unrelated gated concert elsewhere in
+    // the CI clone could insert gaps above these. Only the RELATIVE order
+    // among the seeded set is guaranteed by the SQL.
     const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, limit: 100 });
     expect(res.status).toBe(200);
-    expect(findByRaw(res.body, RANK1_ARTIST_NAME).station_recommended_rank).toBe(1);
-    expect(findByRaw(res.body, RANK2_ARTIST_NAME).station_recommended_rank).toBe(2);
-    expect(findByRaw(res.body, RANK3_ARTIST_NAME).station_recommended_rank).toBe(3);
+    const rank1 = findByRaw(res.body, RANK1_ARTIST_NAME).station_recommended_rank;
+    const rank2 = findByRaw(res.body, RANK2_ARTIST_NAME).station_recommended_rank;
+    const rank3 = findByRaw(res.body, RANK3_ARTIST_NAME).station_recommended_rank;
+    expect(rank1).not.toBeNull();
+    expect(rank2).not.toBeNull();
+    expect(rank3).not.toBeNull();
+    expect(rank1).toBeLessThan(rank2);
+    expect(rank2).toBeLessThan(rank3);
   });
 
   it('sorts a gated headliner with no artist_station_plays row LAST among the gated set', async () => {
@@ -904,7 +965,24 @@ describe('GET /concerts station_recommended_rank (BS#1756)', () => {
     const noPlays = findByRaw(res.body, NO_PLAYS_ARTIST_NAME);
     expect(noPlays).toBeDefined();
     expect(noPlays.station_recommended).toBe(true); // gated...
-    expect(noPlays.station_recommended_rank).toBe(6); // ...but ranks below every positive-plays gated headliner
+    expect(noPlays.station_recommended_rank).not.toBeNull();
+    // ...but ranks below (a strictly larger rank number than) every
+    // positive-plays gated headliner seeded by this spec, including the
+    // equal-plays id-tie pair (Fix #3) — a higher rank NUMBER here means a
+    // WORSE position, since rank 1 is best.
+    const positivePlaysRanks = [
+      RANK1_ARTIST_NAME,
+      RANK2_ARTIST_NAME,
+      RANK3_ARTIST_NAME,
+      TIE_EARLIER_ARTIST_NAME,
+      TIE_LATER_ARTIST_NAME,
+      ID_TIE_ARTIST_A_NAME,
+      ID_TIE_ARTIST_B_NAME,
+    ].map((name) => findByRaw(res.body, name).station_recommended_rank);
+    for (const rank of positivePlaysRanks) {
+      expect(rank).not.toBeNull();
+      expect(noPlays.station_recommended_rank).toBeGreaterThan(rank);
+    }
   });
 
   it('breaks an equal-plays tie by earlier starts_on ranking lower', async () => {
@@ -912,8 +990,8 @@ describe('GET /concerts station_recommended_rank (BS#1756)', () => {
     expect(res.status).toBe(200);
     const earlier = findByRaw(res.body, TIE_EARLIER_ARTIST_NAME);
     const later = findByRaw(res.body, TIE_LATER_ARTIST_NAME);
-    expect(earlier.station_recommended_rank).toBe(4);
-    expect(later.station_recommended_rank).toBe(5);
+    expect(earlier.station_recommended_rank).not.toBeNull();
+    expect(later.station_recommended_rank).not.toBeNull();
     expect(earlier.station_recommended_rank).toBeLessThan(later.station_recommended_rank);
   });
 
@@ -936,45 +1014,62 @@ describe('GET /concerts station_recommended_rank (BS#1756)', () => {
   });
 
   it('leaves the rank domain unbounded by the request `to` (rank reflects the FULL gated window, not the response subset)', async () => {
-    // Narrow `to` so the response excludes RANK1 (day 7) and TIE_LATER (day 8),
-    // leaving RANK2/RANK3/TIE_EARLIER/NO_PLAYS in the response. If the rank
-    // domain incorrectly picked up the request's `to` bound, RANK2 (the
-    // highest-plays headliner remaining once RANK1 drops out) would shift to
-    // rank 1 instead of staying rank 2 — this is what the ticket's "do NOT
-    // apply the request's `to` bound … to the rank domain" rule guards against.
-    const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: DAY.rank3, limit: 100 });
-    expect(res.status).toBe(200);
-    expect(seeded(res.body).find((c) => c.headlining_artist_raw === RANK1_ARTIST_NAME)).toBeUndefined();
-    expect(seeded(res.body).find((c) => c.headlining_artist_raw === TIE_LATER_ARTIST_NAME)).toBeUndefined();
-    expect(findByRaw(res.body, RANK2_ARTIST_NAME).station_recommended_rank).toBe(2);
-    expect(findByRaw(res.body, RANK3_ARTIST_NAME).station_recommended_rank).toBe(3);
-    expect(findByRaw(res.body, TIE_EARLIER_ARTIST_NAME).station_recommended_rank).toBe(4);
-    expect(findByRaw(res.body, NO_PLAYS_ARTIST_NAME).station_recommended_rank).toBe(6);
+    // The property under test: narrowing `to` to exclude RANK1 must NOT
+    // promote RANK2. Prove it by comparing RANK2's rank across two requests —
+    // the full window and a window narrowed to drop RANK1 (day 7) and
+    // TIE_LATER (day 8) from the response outright — and asserting RANK2's
+    // rank is IDENTICAL in both. If the rank domain wrongly picked up the
+    // request's `to` bound, RANK2 (the highest-plays headliner remaining once
+    // RANK1 drops out of a wrongly-narrowed domain) would shift to the
+    // minimum rank instead of staying put.
+    const full = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, limit: 100 });
+    expect(full.status).toBe(200);
+    const narrowed = await auth.get('/concerts').query({ from: WINDOW_FROM, to: DAY.rank3, limit: 100 });
+    expect(narrowed.status).toBe(200);
+
+    expect(seeded(narrowed.body).find((c) => c.headlining_artist_raw === RANK1_ARTIST_NAME)).toBeUndefined();
+    expect(seeded(narrowed.body).find((c) => c.headlining_artist_raw === TIE_LATER_ARTIST_NAME)).toBeUndefined();
+
+    const rank2Full = findByRaw(full.body, RANK2_ARTIST_NAME).station_recommended_rank;
+    const rank2Narrowed = findByRaw(narrowed.body, RANK2_ARTIST_NAME).station_recommended_rank;
+    expect(rank2Full).not.toBeNull();
+    expect(rank2Narrowed).toBe(rank2Full);
   });
 
   it('leaves the rank domain unaffected by `curated`', async () => {
     const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, curated: true, limit: 100 });
     expect(res.status).toBe(200);
-    expect(findByRaw(res.body, RANK1_ARTIST_NAME).station_recommended_rank).toBe(1);
-    expect(findByRaw(res.body, RANK2_ARTIST_NAME).station_recommended_rank).toBe(2);
-    expect(findByRaw(res.body, NO_PLAYS_ARTIST_NAME).station_recommended_rank).toBe(6);
+    const rank1 = findByRaw(res.body, RANK1_ARTIST_NAME).station_recommended_rank;
+    const rank2 = findByRaw(res.body, RANK2_ARTIST_NAME).station_recommended_rank;
+    const noPlays = findByRaw(res.body, NO_PLAYS_ARTIST_NAME).station_recommended_rank;
+    expect(rank1).not.toBeNull();
+    expect(rank2).not.toBeNull();
+    expect(noPlays).not.toBeNull();
+    expect(rank1).toBeLessThan(rank2);
+    expect(rank2).toBeLessThan(noPlays);
   });
 
   it('holds a stable rank across pagination — identical whether fetched on one page or split across many (the BS#1756 load-bearing property)', async () => {
     // The naive bug this guards against: a `rank() OVER (...)` scoped to the
     // CURRENT PAGE (i.e. placed on the paginated query itself, after
     // LIMIT/OFFSET) would silently re-number 1..N on every page and still pass
-    // a single-page test. Forcing `limit: 2` against 8 seeded concerts spans
-    // at least 4 pages, so the gated set is guaranteed to straddle several.
+    // a single-page test. Forcing `limit: 2` against the 10 in-window seeded
+    // concerts spans at least 5 pages, so the gated set is guaranteed to
+    // straddle several. (The spec seeds 12 concerts total, but the
+    // past-gated one — Fix #2 — sits outside [WINDOW_FROM, WINDOW_TO] and is
+    // correctly excluded from every page here.)
     const reference = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, limit: 100 });
     expect(reference.status).toBe(200);
     const referenceRanks = new Map(
       seeded(reference.body).map((c) => [c.headlining_artist_raw, c.station_recommended_rank])
     );
     // Sanity: this test only proves something if our own gated set is actually
-    // present with the expected ranks.
-    expect(referenceRanks.get(RANK1_ARTIST_NAME)).toBe(1);
-    expect(referenceRanks.get(TIE_LATER_ARTIST_NAME)).toBe(5);
+    // present with real (non-null) ranks, and RANK1 (highest plays) actually
+    // outranks TIE_LATER (a lower-plays tie member) — relative, not absolute,
+    // since the rank domain is global (see the describe-level doc).
+    expect(referenceRanks.get(RANK1_ARTIST_NAME)).not.toBeNull();
+    expect(referenceRanks.get(TIE_LATER_ARTIST_NAME)).not.toBeNull();
+    expect(referenceRanks.get(RANK1_ARTIST_NAME)).toBeLessThan(referenceRanks.get(TIE_LATER_ARTIST_NAME));
 
     const paginatedRanks = new Map();
     let page = 1;
@@ -995,8 +1090,8 @@ describe('GET /concerts station_recommended_rank (BS#1756)', () => {
       page += 1;
       pagesFetched += 1;
     }
-    // Genuinely spans multiple pages for OUR OWN concerts: 8 seeded rows at
-    // limit 2 cannot fit on one page.
+    // Genuinely spans multiple pages for OUR OWN concerts: 10 in-window
+    // seeded rows at limit 2 cannot fit on one page.
     expect(pagesFetched).toBeGreaterThan(1);
 
     for (const [raw, rank] of referenceRanks) {
@@ -1007,10 +1102,48 @@ describe('GET /concerts station_recommended_rank (BS#1756)', () => {
   it('agrees between GET /concerts and GET /concerts/:id for an upcoming gated concert', async () => {
     const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, limit: 100 });
     const rank1 = findByRaw(res.body, RANK1_ARTIST_NAME);
-    expect(rank1.station_recommended_rank).toBe(1);
+    expect(rank1.station_recommended_rank).not.toBeNull();
 
     const byId = await auth.get(`/concerts/${rank1.id}`);
     expect(byId.status).toBe(200);
-    expect(byId.body.station_recommended_rank).toBe(1);
+    // The by-id read recomputes the same rank subquery against venue-local
+    // TODAY rather than the list's `from` — for an UPCOMING concert both
+    // bound the same "today forward" domain, so the two must agree exactly.
+    expect(byId.body.station_recommended_rank).toBe(rank1.station_recommended_rank);
+  });
+
+  it('returns a null station_recommended_rank by id for a PAST gated concert, even though station_recommended stays true', async () => {
+    // GET /concerts/:id is deliberately WINDOWLESS (no `starts_on` bound), so
+    // a past, tombstone-free, gated concert still comes back — but the rank
+    // field's own CASE guard re-tests `starts_on >= today` for THIS row, and
+    // a past `starts_on` fails that regardless of the query's lack of a
+    // window. `station_recommended` is a separate EXISTS with no date
+    // component, so it stays true. A past concert is excluded from the
+    // default GET /concerts window entirely, so it can only be reached here
+    // by id (see the describe-level doc's "windowless+today-guard" note).
+    const byId = await auth.get(`/concerts/${pastGatedConcertId}`);
+    expect(byId.status).toBe(200);
+    expect(byId.body.station_recommended).toBe(true);
+    expect(byId.body.station_recommended_rank).toBeNull();
+  });
+
+  it('breaks an equal-plays, equal-starts_on tie by lower concert id ranking first', async () => {
+    // ID_TIE_ARTIST_A and ID_TIE_ARTIST_B share identical plays (250/250) AND
+    // an identical starts_on (DAY.idTie), so neither the plays-descending nor
+    // the starts_on-ascending clause can order them — only the rank
+    // subquery's final `x."id" < concerts.id` clause can. `idTieFirstConcertId`
+    // and `idTieSecondConcertId` are captured from the seed inserts in
+    // creation order, so the first is guaranteed the lower serial id.
+    expect(idTieFirstConcertId).toBeLessThan(idTieSecondConcertId);
+
+    const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, limit: 100 });
+    expect(res.status).toBe(200);
+    const first = seeded(res.body).find((c) => c.id === idTieFirstConcertId);
+    const second = seeded(res.body).find((c) => c.id === idTieSecondConcertId);
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    expect(first.station_recommended_rank).not.toBeNull();
+    expect(second.station_recommended_rank).not.toBeNull();
+    expect(first.station_recommended_rank).toBeLessThan(second.station_recommended_rank);
   });
 });
