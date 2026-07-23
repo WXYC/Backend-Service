@@ -184,7 +184,7 @@ describe('sendEmail', () => {
 });
 
 describe('EMAIL_ENABLED gating', () => {
-  beforeEach(async () => {
+  beforeEach(() => {
     process.env.SES_FROM_EMAIL = 'test@wxyc.org';
     process.env.AWS_ACCESS_KEY_ID = 'test';
     process.env.AWS_SECRET_ACCESS_KEY = 'test';
