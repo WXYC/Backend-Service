@@ -86,6 +86,16 @@ const FIELD_COLUMNS: Record<CatalogField, SQL> = {
 const albumPlaysJoin = sql`LEFT JOIN ${album_plays} ON ${album_plays.album_id} = ${library_artist_view.id}`;
 const playsColumn = sql`COALESCE(${album_plays.plays}, 0)`;
 
+// BS#1554: when an album has more than one active rotation row (e.g. H and
+// M simultaneously), the DISTINCT ON (id) dedup below must keep the
+// heaviest active bin, not the lightest. `rotation_bin`'s underlying
+// `freq_enum` sorts S < L < M < H < N, so a bare `rotation_bin ASC`/`DESC`
+// picks the wrong end (ASC kept the lightest bin; a bare DESC would let N —
+// which WXYC never treats as a rotation weight — win). This explicit CASE
+// assigns H the lowest ordinal (favored by the `ASC` used at every
+// DISTINCT-ON site) and pins N last so it can never be the surfaced bin.
+const ROTATION_BIN_DEDUP_ORDINAL = sql`CASE rotation_bin WHEN 'H' THEN 1 WHEN 'M' THEN 2 WHEN 'L' THEN 3 WHEN 'S' THEN 4 ELSE 5 END`;
+
 const SORT_COLUMNS: Record<CatalogSort, SQL> = {
   artist: sql`${library_artist_view.artist_name}`,
   album: sql`${library_artist_view.album_title}`,
@@ -268,7 +278,7 @@ export async function searchLibrary(
       ${cte}
       SELECT * FROM (
         SELECT DISTINCT ON (id) * FROM (${unionBody}) AS raw
-        ORDER BY id ASC, rotation_bin ASC
+        ORDER BY id ASC, ${ROTATION_BIN_DEDUP_ORDINAL} ASC
       ) AS deduped
       ORDER BY ${orderBy}
       LIMIT ${params.limit} OFFSET ${offset}
@@ -277,7 +287,7 @@ export async function searchLibrary(
       ${cte}
       SELECT COUNT(*)::int AS total FROM (
         SELECT DISTINCT ON (id) id FROM (${unionBody}) AS raw
-        ORDER BY id ASC, rotation_bin ASC
+        ORDER BY id ASC, ${ROTATION_BIN_DEDUP_ORDINAL} ASC
       ) AS deduped
     `;
   } else {
@@ -311,7 +321,7 @@ export async function searchLibrary(
     dataQuery = sql`
       SELECT * FROM (
         SELECT DISTINCT ON (id) * FROM (${innerSelect}) AS raw
-        ORDER BY id ASC, rotation_bin ASC
+        ORDER BY id ASC, ${ROTATION_BIN_DEDUP_ORDINAL} ASC
       ) AS deduped
       ORDER BY ${orderBy}
       LIMIT ${params.limit} OFFSET ${offset}
@@ -319,7 +329,7 @@ export async function searchLibrary(
     countQuery = sql`
       SELECT COUNT(*)::int AS total FROM (
         SELECT DISTINCT ON (id) id FROM (${innerSelect}) AS raw
-        ORDER BY id ASC, rotation_bin ASC
+        ORDER BY id ASC, ${ROTATION_BIN_DEDUP_ORDINAL} ASC
       ) AS deduped
     `;
   }
