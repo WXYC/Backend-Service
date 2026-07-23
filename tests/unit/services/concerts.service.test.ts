@@ -31,8 +31,8 @@ import {
 
 /**
  * Compile-time pin: `ConcertDTO` must match the SSOT `Concert` schema in
- * `wxyc-shared/api.yaml` v1.20.0 (artist_bio added in 1.20.0 / BS#1734,
- * wxyc-shared#247). The published `@wxyc/shared` at this worktree's pin
+ * `wxyc-shared/api.yaml` v1.21.0 (station_recommended_rank added in 1.21.0 /
+ * BS#1756, wxyc-shared#248). The published `@wxyc/shared` at this worktree's pin
  * (`^2.3.0`) does not yet export a `Concert` DTO, so we
  * assert against a hand-mirrored shape derived from the api.yaml operation.
  * When `@wxyc/shared` publishes `Concert`, replace `ApiYamlConcert` below
@@ -83,6 +83,11 @@ type ApiYamlConcert = {
   // station-affinity tier. Optional, NOT nullable — the page/by-id projection's
   // EXISTS always yields a concrete boolean; only the embed omits the key.
   station_recommended?: boolean;
+  // BS#1756 (wxyc-shared#248): 1-based rank within the station_recommended set,
+  // ordered by all-time WXYC plays. Optional + nullable, same discipline as
+  // `station_plays` (its structural twin) — NOT `station_recommended`'s
+  // non-null boolean.
+  station_recommended_rank?: number | null;
 };
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -137,6 +142,9 @@ const timedRow: ConcertJoinRow = {
   station_plays: 312,
   // Resolved headliner with a rotation-linked library release (BS#1731).
   station_recommended: true,
+  // Gated (station_recommended: true): the correlated subquery placed it 1st
+  // in the station-recommended set (BS#1756).
+  station_recommended_rank: 1,
 };
 
 const dateOnlyRow: ConcertJoinRow = {
@@ -164,6 +172,8 @@ const dateOnlyRow: ConcertJoinRow = {
   station_plays: null,
   // Unresolved headliner: the EXISTS correlation never matches → false (BS#1731).
   station_recommended: false,
+  // Not gated (station_recommended: false): outside the ranked set → null (BS#1756).
+  station_recommended_rank: null,
 };
 
 describe('ConcertDTO structural pin', () => {
@@ -311,6 +321,27 @@ describe('toConcertDTO', () => {
     expect(dto.station_plays).toBeNull();
   });
 
+  // BS#1756 — station_recommended_rank comes from the correlated-subquery
+  // expression in the page/by-id projection: present for a gated headliner,
+  // null for one outside the gated set, and null (not undefined) when the
+  // embed projection omits the expression — same null-safe discipline as
+  // `station_plays`, its structural twin.
+  it('passes the joined station_recommended_rank through for a gated headliner', () => {
+    const dto = toConcertDTO(timedRow);
+    expect(dto.station_recommended_rank).toBe(1);
+  });
+
+  it('emits null station_recommended_rank for a non-gated headliner', () => {
+    expect(toConcertDTO(dateOnlyRow).station_recommended_rank).toBeNull();
+  });
+
+  it('coalesces an undefined row.station_recommended_rank (embed projection without the expression) to null', () => {
+    const { station_recommended_rank: _drop, ...without } = timedRow;
+    void _drop;
+    const dto = toConcertDTO(without);
+    expect(dto.station_recommended_rank).toBeNull();
+  });
+
   // BS#1731 — station_recommended comes from the EXISTS(rotation ⋈ library)
   // subquery in the page/by-id projection: true for a rotation-linked resolved
   // headliner, false for an unrotated or unresolved one, and OMITTED (not
@@ -358,6 +389,7 @@ describe('toConcertDTO', () => {
         'similar_artists',
         'station_plays',
         'station_recommended',
+        'station_recommended_rank',
       ].sort()
     );
     for (const internal of INTERNAL_COLUMNS) {
@@ -388,6 +420,9 @@ describe('getConcertsPage', () => {
     // BS#1731 — the station_recommended EXISTS is part of the shared page
     // projection, so it must always be selected here.
     expect(Object.keys(projection)).toContain('station_recommended');
+    // BS#1756 — the station_recommended_rank correlated subquery is part of
+    // the shared page projection too, so it must always be selected here.
+    expect(Object.keys(projection)).toContain('station_recommended_rank');
   });
 });
 
@@ -467,13 +502,14 @@ describe('getConcertById', () => {
       expect(selectedColumns).not.toContain(internal);
     }
     // Parity pin: the by-id projection carries the BS#1624 genres, BS#1734
-    // artist_bio, BS#1702 station_plays, and BS#1731 station_recommended
-    // fields, so a by-id read can never lag the list's enrichment fields (the
-    // BS#1694 lockstep-join invariant).
+    // artist_bio, BS#1702 station_plays, BS#1731 station_recommended, and
+    // BS#1756 station_recommended_rank fields, so a by-id read can never lag
+    // the list's enrichment fields (the BS#1694 lockstep-join invariant).
     expect(Object.keys(projection)).toContain('genres');
     expect(Object.keys(projection)).toContain('artist_bio');
     expect(Object.keys(projection)).toContain('station_plays');
     expect(Object.keys(projection)).toContain('station_recommended');
+    expect(Object.keys(projection)).toContain('station_recommended_rank');
   });
 });
 
