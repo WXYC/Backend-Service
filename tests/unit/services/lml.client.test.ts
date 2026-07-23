@@ -936,6 +936,34 @@ describe('lml.client', () => {
         { artist: 'C', album: 'D', raw_message: 'C - D' },
       ]);
     });
+
+    // BS#1293 regression: with no flagged items the client must return LML's
+    // verdicts verbatim, preserving each result's own `index`. Reindexing them
+    // positionally would silently defeat downstream misalignment guards that
+    // trust LML's reported index (e.g. album-level-backfill's
+    // `result.index !== i`, BS#1088) — a reordered/gapped response would then
+    // pass the guard and be written against the wrong album.
+    it('preserves LML-reported index for a skip-free batch (no positional reindex)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            // LML returns verdicts out of input order: index 1 before index 0.
+            results: [
+              { index: 1, status: 'match', lookup: { results: [{ library_item: { id: 11 } }] } },
+              { index: 0, status: 'no_match', lookup: { results: [] } },
+            ],
+          }),
+      } as unknown as globalThis.Response);
+
+      const result = await bulkLookupMetadata([itemFor('A', 'B'), itemFor('C', 'D')]);
+
+      // Verbatim passthrough — the reported indices survive in the order LML
+      // sent them, so a positional guard downstream can still catch the skew.
+      expect(result.results.map((r) => r.index)).toEqual([1, 0]);
+      expect(result.results[0]).toMatchObject({ index: 1, status: 'match' });
+      expect(result.results[1]).toMatchObject({ index: 0, status: 'no_match' });
+    });
   });
 
   describe('refreshForIdentities (BS#1381 / LML#525)', () => {
