@@ -63,7 +63,7 @@ services:
       PGUSER: ${DB_USERNAME}
       POSTGRES_DB: ${DB_NAME}
     ports:
-      - '${CI_DB_PORT:-5433}:5432'
+      - '${CI_DB_PORT:-15433}:5432'
     volumes:
       - ci-pg-data:/var/lib/postgresql/data
     healthcheck:
