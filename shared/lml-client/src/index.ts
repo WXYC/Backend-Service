@@ -846,10 +846,23 @@ export async function bulkLookupMetadata(
         if (item.lookup != null) sanitizeLookupStreamingUrls(item.lookup);
       }
 
-      // BS#1293: splice the synthetic skipped verdicts back in at their
-      // original positions and reindex the real verdicts (which LML returned
-      // aligned to `sendItems`, not the caller's original `items`) so the
-      // final array is index-aligned with the caller's input in input order.
+      // BS#1293: with no gated items the wire batch is identical to the
+      // caller's `items` in the same order, so return LML's verdicts
+      // verbatim — preserving each result's own `index`. Reconstructing
+      // positionally in this case would overwrite `.index` with a cursor and
+      // defeat downstream misalignment guards that intentionally trust LML's
+      // reported index (e.g. album-level-backfill's `result.index !== i`
+      // BS#1088 regression pin) and would fabricate `{ index }`-only entries
+      // from a short/gapped response instead of surfacing the mismatch.
+      if (skippedIndices.size === 0) {
+        return { results: parsed.results };
+      }
+
+      // Skips present: the caller's index space diverges from `sendItems`, so
+      // splice the synthetic skipped verdicts back in at their original
+      // positions and reindex the real verdicts (LML returned them aligned to
+      // `sendItems`, not the caller's original `items`) so the final array is
+      // index-aligned with the caller's input in input order.
       let sentCursor = 0;
       const results = items.map((_, index) => {
         if (skippedIndices.has(index)) {
