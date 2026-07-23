@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, isNotNull, isNull, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import {
   artist_metadata,
   artist_similar_artists,
@@ -9,6 +9,7 @@ import {
   discogs_artist_similar_artists,
   library,
   normalizeFreetextArtist,
+  nyCalendarDate,
   rotation,
   type SimilarArtistNeighbor,
   venues,
@@ -102,6 +103,18 @@ export type ConcertDTO = {
   // id OR the nightly enrichment hasn't run. Same optional-and-nullable discipline
   // as `genres`/`similar_artists` (not in the api.yaml `required` set).
   station_plays?: number | null;
+  // 1-based rank of this concert within the station-recommended set (BS#1756,
+  // On Tour "For You" tier — ranks the `station_recommended` gate by all-time
+  // WXYC plays), sourced from a correlated subquery over the ENTIRE gated
+  // upcoming window (`removed_at IS NULL AND starts_on >= from AND
+  // station_recommended` — deliberately NOT the request's `to` bound or
+  // `curated` flag), ordered `COALESCE(plays, 0) DESC, starts_on ASC, id ASC`.
+  // Computed over the whole window regardless of the page's LIMIT/OFFSET, so a
+  // given concert's rank is identical on every page of the same query and
+  // agrees between the list and the by-id read (see `concertPageFields`).
+  // Null for a concert outside the gated set. Same null-safe discipline as
+  // `station_plays` (NOT `station_recommended`'s non-null EXISTS).
+  station_recommended_rank?: number | null;
   // True when the resolved headliner (`headlining_artist_id`) has at least one
   // WXYC library release that has been in rotation, any rotation row past or
   // present (BS#1731, On Tour "For You" tier redesign — supersedes the
@@ -168,6 +181,11 @@ export type ConcertJoinRow = {
   // omits it (the #1616 embed boundary), so its rows leave it undefined and
   // `toConcertDTO` coalesces to null.
   station_plays?: number | null;
+  // Optional: only the `getConcertsPage` / `getConcertById` projection selects the
+  // `station_recommended_rank` correlated-subquery expression (BS#1756). The
+  // `getUpcomingShowsMaps` embed omits it, so its rows leave it undefined and
+  // `toConcertDTO` coalesces to null (same discipline as `station_plays`).
+  station_recommended_rank?: number | null;
   // Optional: only the `getConcertsPage` / `getConcertById` projection selects the
   // `station_recommended` EXISTS subquery. The `getUpcomingShowsMaps` embed omits
   // it, so its rows leave it undefined and `toConcertDTO` passes that through
@@ -249,6 +267,9 @@ export const toConcertDTO = (row: ConcertJoinRow): ConcertDTO => ({
   // Same null-safe discipline (BS#1702): undefined on the embed projection, null
   // for a headliner with no in-library id or no station-plays enrichment row.
   station_plays: row.station_plays ?? null,
+  // Same null-safe discipline as `station_plays` (BS#1756): undefined on the
+  // embed projection, null for a concert outside the gated set.
+  station_recommended_rank: row.station_recommended_rank ?? null,
   // NOT coalesced (BS#1731): the page/by-id projection's EXISTS always supplies a
   // concrete boolean, so `?? false` would never fire there anyway; on the embed
   // projection `row.station_recommended` is `undefined` and must stay that way so
@@ -295,20 +316,66 @@ const buildWhere = ({ from, to, curated }: ConcertsQueryFilters) => {
  */
 const effectiveHeadlinerDiscogsId = sql`COALESCE(${concerts.headlining_discogs_artist_id}, ${artists.discogs_artist_id})`;
 
-// Page projection: the shared concerts⋈venues fields plus the LEFT-joined
-// artist-level genres (BS#1624), affinity neighbors (BS#1626 + BS#1701),
-// station plays (BS#1702), and the station-recommended EXISTS (BS#1731). Kept
-// separate from `concertJoinFields` so the `getUpcomingShowsMaps` / count paths
-// (which don't join the enrichment tables) can't accidentally reference those
-// tables' columns.
-//
-// `similar_artists` COALESCEs the two enrichment lanes (BS#1701): the library
-// lane (`artist_similar_artists`, keyed on `headlining_artist_id`) wins over the
-// discogs lane (`discogs_artist_similar_artists`, keyed on
-// `effectiveHeadlinerDiscogsId`) when both are present — the rare overlap where
-// the same Discogs id was independently enriched via the discogs lane resolves
-// to the same neighbors anyway. Null when the headliner is in NEITHER lane.
-const concertPageFields = {
+/**
+ * True when `headlinerId` has at least one WXYC library release that has been
+ * in rotation — the BS#1731 `station_recommended` gate, factored out (as
+ * `logicalAlbumKeySql` in `logical-album-key.service.ts` factors the
+ * catalog-popularity key derivation) so ONE definition backs both `.station_recommended`'s
+ * outer-row EXISTS and BS#1756's rank subquery, which re-tests the same gate
+ * for an aliased correlated row. Callers pass either a real Drizzle column ref
+ * (`concerts.headlining_artist_id`) or raw aliased SQL for a self-referencing
+ * subquery (`sql.raw('x."headlining_artist_id"')`) — same two-shape contract
+ * as `logicalAlbumKeySql`.
+ */
+const gatedHeadlinerExists = (headlinerId: SQLWrapper): SQL => sql`EXISTS (
+    SELECT 1 FROM ${rotation}
+    JOIN ${library} ON ${library.id} = ${rotation.album_id}
+    WHERE ${library.artist_id} = ${headlinerId}
+  )`;
+
+/**
+ * Page projection, parameterized on `from` (the lower `starts_on` bound of the
+ * BS#1756 rank domain — see `station_recommended_rank` below). Builds a fresh
+ * fields object per call since the rank expression embeds `from` as a bind
+ * value; every other field is `from`-independent.
+ *
+ * The shared concerts⋈venues fields plus the LEFT-joined artist-level genres
+ * (BS#1624), affinity neighbors (BS#1626 + BS#1701), station plays (BS#1702),
+ * the station-recommended EXISTS (BS#1731), and the station-recommended rank
+ * (BS#1756). Kept separate from `concertJoinFields` so the
+ * `getUpcomingShowsMaps` / count paths (which don't join the enrichment
+ * tables) can't accidentally reference those tables' columns.
+ *
+ * `similar_artists` COALESCEs the two enrichment lanes (BS#1701): the library
+ * lane (`artist_similar_artists`, keyed on `headlining_artist_id`) wins over the
+ * discogs lane (`discogs_artist_similar_artists`, keyed on
+ * `effectiveHeadlinerDiscogsId`) when both are present — the rare overlap where
+ * the same Discogs id was independently enriched via the discogs lane resolves
+ * to the same neighbors anyway. Null when the headliner is in NEITHER lane.
+ *
+ * Station-recommended-rank projection (BS#1756): a correlated scalar subquery,
+ * NOT a `.leftJoin`, so — exactly like `station_recommended`'s EXISTS — it
+ * lands in both `getConcertsPage` and `getConcertById` automatically and can
+ * never trip the BS#1694 "table … is not part of the query" hazard (there is
+ * no extra table for the query builder's join graph to be missing). The outer
+ * `CASE` guard re-tests `removed_at IS NULL AND starts_on >= from AND
+ * <gated>` for THIS row before running the inner count, so a row that isn't
+ * itself in the ranked domain — including a past/tombstoned concert reaching
+ * this projection through the WINDOWLESS `getConcertById` query — resolves
+ * null rather than inheriting a rank from a window it isn't in. The inner
+ * correlated subquery re-derives the SAME domain (`removed_at IS NULL AND
+ * starts_on >= from AND <gated>`, aliased `x`/`xsp` to stay distinct from the
+ * outer row) and counts how many domain rows sort strictly before this one
+ * under `COALESCE(plays, 0) DESC, starts_on ASC, id ASC` — that count plus one
+ * is the 1-based rank. Deliberately bounded by `from` ONLY: no `to` bound, no
+ * `curated` flag (the gate is already a strict subset of curated), and NEVER
+ * the outer query's LIMIT/OFFSET — the domain is the entire gated upcoming
+ * window every time, so a concert's rank is identical on every page of the
+ * same query and agrees between the list and the by-id read. A gated
+ * headliner with no `artist_station_plays` row sorts last via
+ * `COALESCE(plays, 0)`.
+ */
+const concertPageFields = (from: string) => ({
   ...concertJoinFields,
   genres: artist_metadata.genres,
   artist_bio: artist_metadata.artist_bio,
@@ -322,12 +389,40 @@ const concertPageFields = {
   // the query" hazard). Always a real boolean — never null — since EXISTS
   // itself never returns NULL; a NULL `headlining_artist_id` (Discogs-only
   // headliner) simply never correlates a match, so it reads false.
-  station_recommended: sql<boolean>`EXISTS (
-    SELECT 1 FROM ${rotation}
-    JOIN ${library} ON ${library.id} = ${rotation.album_id}
-    WHERE ${library.artist_id} = ${concerts.headlining_artist_id}
+  station_recommended: sql<boolean>`${gatedHeadlinerExists(concerts.headlining_artist_id)}`,
+  // Station-recommended-rank (BS#1756): see the `concertPageFields` doc above.
+  // The inner subquery aliases `concerts` as `x` and `artist_station_plays` as
+  // `xsp` — a self-join, since it re-scans the same tables the outer query
+  // already reads — so every raw reference inside it is written
+  // schema-alias-qualified (`x."column"`) rather than through a Drizzle column
+  // ref, which would render fully-qualified to the OUTER (unaliased) table and
+  // collide with the outer row's own reference to that same column.
+  station_recommended_rank: sql<number | null>`(
+    CASE WHEN ${concerts.removed_at} IS NULL
+      AND ${concerts.starts_on} >= ${from}
+      AND ${gatedHeadlinerExists(concerts.headlining_artist_id)}
+    THEN (
+      SELECT (count(*) + 1)::int
+      FROM ${concerts} x
+      LEFT JOIN ${artist_station_plays} xsp ON xsp."artist_id" = x."headlining_artist_id"
+      WHERE x."removed_at" IS NULL
+        AND x."starts_on" >= ${from}
+        AND ${gatedHeadlinerExists(sql.raw('x."headlining_artist_id"'))}
+        AND (
+          COALESCE(xsp."plays", 0) > COALESCE(${artist_station_plays.plays}, 0)
+          OR (
+            COALESCE(xsp."plays", 0) = COALESCE(${artist_station_plays.plays}, 0)
+            AND x."starts_on" < ${concerts.starts_on}
+          )
+          OR (
+            COALESCE(xsp."plays", 0) = COALESCE(${artist_station_plays.plays}, 0)
+            AND x."starts_on" = ${concerts.starts_on}
+            AND x."id" < ${concerts.id}
+          )
+        )
+    ) ELSE NULL END
   )`,
-};
+});
 
 /**
  * One page of upcoming concerts with their venues embedded, ordered by
@@ -350,6 +445,10 @@ const concertPageFields = {
  * library-key only (no COALESCE — station plays are an in-library signal) —
  * surfaces `station_plays: null` for a headliner with no in-library id or no
  * enrichment row.
+ *
+ * Station-recommended-rank projection (BS#1756): `concertPageFields(filters.from)`
+ * — the SAME lower bound this call's own `buildWhere(filters)` already applies —
+ * so the rank domain and the page's own window agree on "upcoming".
  */
 export const getConcertsPage = async (
   filters: ConcertsQueryFilters,
@@ -357,7 +456,7 @@ export const getConcertsPage = async (
   offset: number
 ): Promise<ConcertDTO[]> => {
   const rows = await db
-    .select(concertPageFields)
+    .select(concertPageFields(filters.from))
     .from(concerts)
     .innerJoin(venues, eq(venues.id, concerts.venue_id))
     .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))
@@ -410,6 +509,16 @@ const MAX_SERIAL_ID = 2_147_483_647;
  * embedded Venue can't satisfy the contract), or when the id is impossible
  * for the int4 serial (non-integral, < 1, or > 2^31-1) — short-circuited
  * below, before any query. The controller maps null → 404.
+ *
+ * Station-recommended-rank projection (BS#1756): windowless like the rest of
+ * this read, so `concertPageFields` is called with venue-local TODAY
+ * (`nyCalendarDate(new Date())`, the same helper the controller's `from`
+ * default uses) rather than any request-supplied `from` — there isn't one
+ * here. A past or tombstoned concert then correctly resolves a null rank (its
+ * `starts_on` fails the `>= today` half of the rank field's own CASE guard)
+ * even though this query's WHERE has no window at all; an UPCOMING gated
+ * concert ranks identically to how it ranks on the list, because both
+ * ultimately bound the same "today forward" domain.
  */
 export const getConcertById = async (id: number): Promise<ConcertDTO | null> => {
   // `concerts.id` is a serial (int4): an id outside (0, MAX_SERIAL_ID] — or a
@@ -423,16 +532,19 @@ export const getConcertById = async (id: number): Promise<ConcertDTO | null> => 
   }
 
   // Join set MUST stay identical to `getConcertsPage`: both select
-  // `concertPageFields`, and Drizzle throws at runtime ("table … is not part
-  // of the query") if the projection references a table the query never
+  // `concertPageFields(...)`, and Drizzle throws at runtime ("table … is not
+  // part of the query") if the projection references a table the query never
   // joined. BS#1626 adding `similar_artists` to the shared projection while
   // this query was in flight is exactly how the by-id read 500'd on every
   // row-returning request (BS#1694 hotfix). BS#1702's `station_plays`
   // (`artist_station_plays` join) and BS#1701's `discogs_artist_similar_artists`
   // COALESCE lane are the same class of hazard, so BOTH LEFT JOINs are mirrored
   // here too — the by-id spec's serialization-parity test is the regression guard.
+  // BS#1756's rank field is exempt from this hazard (see `concertPageFields`'s
+  // doc): it's a correlated scalar subquery, not a `.leftJoin`, so there is no
+  // join to mirror — only the `from` argument (venue-local today) to supply.
   const rows = await db
-    .select(concertPageFields)
+    .select(concertPageFields(nyCalendarDate(new Date())))
     .from(concerts)
     .innerJoin(venues, eq(venues.id, concerts.venue_id))
     .leftJoin(artists, eq(artists.id, concerts.headlining_artist_id))

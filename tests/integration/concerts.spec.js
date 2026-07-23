@@ -664,3 +664,353 @@ describe('GET /concerts station_recommended (BS#1731)', () => {
     expect(discogsOnlyById.body.station_recommended).toBe(false);
   });
 });
+
+/**
+ * BS#1756 — `Concert.station_recommended_rank`: the 1-based rank of a
+ * concert within the BS#1731 `station_recommended` gated set, ordered by
+ * all-time WXYC plays (`artist_station_plays.plays`) descending, ties broken
+ * `starts_on ASC, id ASC`, null plays sorting last. Computed over the ENTIRE
+ * gated upcoming window (`removed_at IS NULL AND starts_on >= from AND
+ * station_recommended`) — bounded by `from` only, never the request's `to`,
+ * `curated`, or (the load-bearing property) the page's `limit`/`offset`.
+ *
+ * Isolated from the BS#1603/BS#1731 describes above (own venue/source_id
+ * prefix, own artist-name prefix) so these seeds can't perturb their
+ * assertions.
+ */
+describe('GET /concerts station_recommended_rank (BS#1756)', () => {
+  const VENUE_SLUG = 'bs1756-probe-room';
+  const SOURCE_ID_PREFIX = 'bs1756:';
+  const ARTIST_NAME_PREFIX = 'BS#1756 Probe ';
+  const RANK1_ARTIST_NAME = `${ARTIST_NAME_PREFIX}Rank1 Artist`; // plays 500
+  const RANK2_ARTIST_NAME = `${ARTIST_NAME_PREFIX}Rank2 Artist`; // plays 300
+  const RANK3_ARTIST_NAME = `${ARTIST_NAME_PREFIX}Rank3 Artist`; // plays 150
+  const TIE_EARLIER_ARTIST_NAME = `${ARTIST_NAME_PREFIX}TieEarlier Artist`; // plays 100, earlier date
+  const TIE_LATER_ARTIST_NAME = `${ARTIST_NAME_PREFIX}TieLater Artist`; // plays 100, later date
+  const NO_PLAYS_ARTIST_NAME = `${ARTIST_NAME_PREFIX}NoPlays Artist`; // gated, no artist_station_plays row
+  const UNROTATED_ARTIST_NAME = `${ARTIST_NAME_PREFIX}Unrotated Artist`; // resolved, not gated
+  const DISCOGS_ONLY_ARTIST_RAW = `${ARTIST_NAME_PREFIX}Discogs-Only Artist`; // never gated
+  const DISCOGS_ONLY_ARTIST_DISCOGS_ID = 91756001;
+
+  // Dates deliberately NOT in plays-descending order (RANK1 sits at day 7, the
+  // tie pair straddles day 1 and day 8) so a regression that ranked by
+  // `starts_on` instead of `plays` fails the plays-desc assertions below
+  // rather than accidentally matching by coincidence.
+  const DAY = {
+    tieEarlier: isoDate(1),
+    rank2: isoDate(2),
+    unrotated: isoDate(3),
+    noPlays: isoDate(4),
+    discogsOnly: isoDate(5),
+    rank3: isoDate(6),
+    rank1: isoDate(7),
+    tieLater: isoDate(8),
+  };
+  const WINDOW_FROM = isoDate(0);
+  const WINDOW_TO = isoDate(30); // comfortably past every DAY.* offset above
+
+  let auth;
+  let sql;
+
+  const insertConcert = async (venueId, key, overrides) => {
+    const defaults = {
+      source: 'triangle_shows',
+      starts_at: null,
+      doors_at: null,
+      headlining_artist_id: null,
+      headlining_discogs_artist_id: null,
+      title: null,
+      supporting_artists: [],
+      ticket_url: null,
+      image_url: null,
+      event_url: null,
+      price_min: null,
+      price_max: null,
+      age_restriction: null,
+      status: 'on_sale',
+      removed_at: null,
+    };
+    const row = { ...defaults, ...overrides };
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".concerts
+         (source, source_id, venue_id, starts_on, starts_at, doors_at,
+          headlining_artist_raw, headlining_artist_id, headlining_discogs_artist_id,
+          title, supporting_artists_raw, ticket_url, image_url, price_min, price_max,
+          age_restriction, status, removed_at, event_url, raw_data, scraped_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, '{}'::jsonb, now())`,
+      [
+        row.source,
+        SOURCE_ID_PREFIX + key,
+        venueId,
+        row.starts_on,
+        row.starts_at,
+        row.doors_at,
+        row.headlining_artist_raw,
+        row.headlining_artist_id,
+        row.headlining_discogs_artist_id,
+        row.title,
+        row.supporting_artists,
+        row.ticket_url,
+        row.image_url,
+        row.price_min,
+        row.price_max,
+        row.age_restriction,
+        row.status,
+        row.removed_at,
+        row.event_url,
+      ]
+    );
+  };
+
+  /** Artist + rotation-linked library release — a BS#1731-gated headliner. */
+  const seedGatedArtist = async (name) => {
+    const [artist] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters)
+       VALUES ($1, $1, 'ZZ') RETURNING id`,
+      [name]
+    );
+    const [libraryRow] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".library (artist_id, genre_id, format_id, album_title, code_number)
+       VALUES ($1, (SELECT id FROM "${SCHEMA}".genres LIMIT 1), (SELECT id FROM "${SCHEMA}".format LIMIT 1), $2, 1)
+       RETURNING id`,
+      [artist.id, `${name} LP`]
+    );
+    await sql.unsafe(`INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin) VALUES ($1, 'H')`, [libraryRow.id]);
+    return artist.id;
+  };
+
+  const seedPlays = async (artistId, plays) => {
+    await sql.unsafe(`INSERT INTO "${SCHEMA}".artist_station_plays (artist_id, plays) VALUES ($1, $2)`, [
+      artistId,
+      plays,
+    ]);
+  };
+
+  const cleanup = async () => {
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".concerts WHERE source_id LIKE $1`, [`${SOURCE_ID_PREFIX}%`]);
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".venues WHERE slug = $1`, [VENUE_SLUG]);
+    await sql.unsafe(
+      `DELETE FROM "${SCHEMA}".artist_station_plays WHERE artist_id IN (SELECT id FROM "${SCHEMA}".artists WHERE artist_name LIKE $1)`,
+      [`${ARTIST_NAME_PREFIX}%`]
+    );
+    await sql.unsafe(
+      `DELETE FROM "${SCHEMA}".rotation WHERE album_id IN (SELECT id FROM "${SCHEMA}".library WHERE artist_id IN (SELECT id FROM "${SCHEMA}".artists WHERE artist_name LIKE $1))`,
+      [`${ARTIST_NAME_PREFIX}%`]
+    );
+    await sql.unsafe(
+      `DELETE FROM "${SCHEMA}".library WHERE artist_id IN (SELECT id FROM "${SCHEMA}".artists WHERE artist_name LIKE $1)`,
+      [`${ARTIST_NAME_PREFIX}%`]
+    );
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE artist_name LIKE $1`, [`${ARTIST_NAME_PREFIX}%`]);
+  };
+
+  beforeAll(async () => {
+    auth = createAuthRequest(request, global.access_token);
+    sql = makeSql();
+    await cleanup(); // idempotent across re-runs (shared schema, --runInBand)
+
+    const [venue] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".venues (slug, name, city, state, address)
+       VALUES ($1, 'BS1756 Probe Room', 'Carrboro', 'NC', '300 E Main St')
+       RETURNING id`,
+      [VENUE_SLUG]
+    );
+    const venueId = venue.id;
+
+    const rank1ArtistId = await seedGatedArtist(RANK1_ARTIST_NAME);
+    const rank2ArtistId = await seedGatedArtist(RANK2_ARTIST_NAME);
+    const rank3ArtistId = await seedGatedArtist(RANK3_ARTIST_NAME);
+    const tieEarlierArtistId = await seedGatedArtist(TIE_EARLIER_ARTIST_NAME);
+    const tieLaterArtistId = await seedGatedArtist(TIE_LATER_ARTIST_NAME);
+    // Gated (rotation-linked), but deliberately given NO artist_station_plays
+    // row — the NULL-plays case, which must rank LAST among the gated set.
+    const noPlaysArtistId = await seedGatedArtist(NO_PLAYS_ARTIST_NAME);
+    // Resolved headliner with no rotation-linked release: NOT gated.
+    const [unrotatedArtist] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters)
+       VALUES ($1, $1, 'ZZ') RETURNING id`,
+      [UNROTATED_ARTIST_NAME]
+    );
+
+    await seedPlays(rank1ArtistId, 500);
+    await seedPlays(rank2ArtistId, 300);
+    await seedPlays(rank3ArtistId, 150);
+    await seedPlays(tieEarlierArtistId, 100);
+    await seedPlays(tieLaterArtistId, 100);
+    // noPlaysArtistId intentionally gets no artist_station_plays row.
+
+    await insertConcert(venueId, 'rank1', {
+      starts_on: DAY.rank1,
+      headlining_artist_raw: RANK1_ARTIST_NAME,
+      headlining_artist_id: rank1ArtistId,
+    });
+    await insertConcert(venueId, 'rank2', {
+      starts_on: DAY.rank2,
+      headlining_artist_raw: RANK2_ARTIST_NAME,
+      headlining_artist_id: rank2ArtistId,
+    });
+    await insertConcert(venueId, 'rank3', {
+      starts_on: DAY.rank3,
+      headlining_artist_raw: RANK3_ARTIST_NAME,
+      headlining_artist_id: rank3ArtistId,
+    });
+    await insertConcert(venueId, 'tie-earlier', {
+      starts_on: DAY.tieEarlier,
+      headlining_artist_raw: TIE_EARLIER_ARTIST_NAME,
+      headlining_artist_id: tieEarlierArtistId,
+    });
+    await insertConcert(venueId, 'tie-later', {
+      starts_on: DAY.tieLater,
+      headlining_artist_raw: TIE_LATER_ARTIST_NAME,
+      headlining_artist_id: tieLaterArtistId,
+    });
+    await insertConcert(venueId, 'no-plays', {
+      starts_on: DAY.noPlays,
+      headlining_artist_raw: NO_PLAYS_ARTIST_NAME,
+      headlining_artist_id: noPlaysArtistId,
+    });
+    await insertConcert(venueId, 'unrotated', {
+      starts_on: DAY.unrotated,
+      headlining_artist_raw: UNROTATED_ARTIST_NAME,
+      headlining_artist_id: unrotatedArtist.id,
+    });
+    await insertConcert(venueId, 'discogs-only', {
+      starts_on: DAY.discogsOnly,
+      headlining_artist_raw: DISCOGS_ONLY_ARTIST_RAW,
+      headlining_discogs_artist_id: DISCOGS_ONLY_ARTIST_DISCOGS_ID,
+    });
+  });
+
+  afterAll(async () => {
+    await cleanup();
+    await sql.end();
+  });
+
+  /** Concerts from a response body that belong to this spec's seed. */
+  const seeded = (body) => body.concerts.filter((c) => c.venue.slug === VENUE_SLUG);
+  const findByRaw = (body, raw) => seeded(body).find((c) => c.headlining_artist_raw === raw);
+
+  it('ranks the gated set 1-based by plays descending', async () => {
+    const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, limit: 100 });
+    expect(res.status).toBe(200);
+    expect(findByRaw(res.body, RANK1_ARTIST_NAME).station_recommended_rank).toBe(1);
+    expect(findByRaw(res.body, RANK2_ARTIST_NAME).station_recommended_rank).toBe(2);
+    expect(findByRaw(res.body, RANK3_ARTIST_NAME).station_recommended_rank).toBe(3);
+  });
+
+  it('sorts a gated headliner with no artist_station_plays row LAST among the gated set', async () => {
+    const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, limit: 100 });
+    expect(res.status).toBe(200);
+    const noPlays = findByRaw(res.body, NO_PLAYS_ARTIST_NAME);
+    expect(noPlays).toBeDefined();
+    expect(noPlays.station_recommended).toBe(true); // gated...
+    expect(noPlays.station_recommended_rank).toBe(6); // ...but ranks below every positive-plays gated headliner
+  });
+
+  it('breaks an equal-plays tie by earlier starts_on ranking lower', async () => {
+    const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, limit: 100 });
+    expect(res.status).toBe(200);
+    const earlier = findByRaw(res.body, TIE_EARLIER_ARTIST_NAME);
+    const later = findByRaw(res.body, TIE_LATER_ARTIST_NAME);
+    expect(earlier.station_recommended_rank).toBe(4);
+    expect(later.station_recommended_rank).toBe(5);
+    expect(earlier.station_recommended_rank).toBeLessThan(later.station_recommended_rank);
+  });
+
+  it('emits null station_recommended_rank for a non-gated headliner (resolved, unrotated)', async () => {
+    const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, limit: 100 });
+    expect(res.status).toBe(200);
+    const unrotated = findByRaw(res.body, UNROTATED_ARTIST_NAME);
+    expect(unrotated).toBeDefined();
+    expect(unrotated.station_recommended).toBe(false);
+    expect(unrotated.station_recommended_rank).toBeNull();
+  });
+
+  it('emits null station_recommended_rank for a Discogs-only headliner', async () => {
+    const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, limit: 100 });
+    expect(res.status).toBe(200);
+    const discogsOnly = findByRaw(res.body, DISCOGS_ONLY_ARTIST_RAW);
+    expect(discogsOnly).toBeDefined();
+    expect(discogsOnly.headlining_artist_id).toBeNull();
+    expect(discogsOnly.station_recommended_rank).toBeNull();
+  });
+
+  it('leaves the rank domain unbounded by the request `to` (rank reflects the FULL gated window, not the response subset)', async () => {
+    // Narrow `to` so the response excludes RANK1 (day 7) and TIE_LATER (day 8),
+    // leaving RANK2/RANK3/TIE_EARLIER/NO_PLAYS in the response. If the rank
+    // domain incorrectly picked up the request's `to` bound, RANK2 (the
+    // highest-plays headliner remaining once RANK1 drops out) would shift to
+    // rank 1 instead of staying rank 2 — this is what the ticket's "do NOT
+    // apply the request's `to` bound … to the rank domain" rule guards against.
+    const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: DAY.rank3, limit: 100 });
+    expect(res.status).toBe(200);
+    expect(seeded(res.body).find((c) => c.headlining_artist_raw === RANK1_ARTIST_NAME)).toBeUndefined();
+    expect(seeded(res.body).find((c) => c.headlining_artist_raw === TIE_LATER_ARTIST_NAME)).toBeUndefined();
+    expect(findByRaw(res.body, RANK2_ARTIST_NAME).station_recommended_rank).toBe(2);
+    expect(findByRaw(res.body, RANK3_ARTIST_NAME).station_recommended_rank).toBe(3);
+    expect(findByRaw(res.body, TIE_EARLIER_ARTIST_NAME).station_recommended_rank).toBe(4);
+    expect(findByRaw(res.body, NO_PLAYS_ARTIST_NAME).station_recommended_rank).toBe(6);
+  });
+
+  it('leaves the rank domain unaffected by `curated`', async () => {
+    const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, curated: true, limit: 100 });
+    expect(res.status).toBe(200);
+    expect(findByRaw(res.body, RANK1_ARTIST_NAME).station_recommended_rank).toBe(1);
+    expect(findByRaw(res.body, RANK2_ARTIST_NAME).station_recommended_rank).toBe(2);
+    expect(findByRaw(res.body, NO_PLAYS_ARTIST_NAME).station_recommended_rank).toBe(6);
+  });
+
+  it('holds a stable rank across pagination — identical whether fetched on one page or split across many (the BS#1756 load-bearing property)', async () => {
+    // The naive bug this guards against: a `rank() OVER (...)` scoped to the
+    // CURRENT PAGE (i.e. placed on the paginated query itself, after
+    // LIMIT/OFFSET) would silently re-number 1..N on every page and still pass
+    // a single-page test. Forcing `limit: 2` against 8 seeded concerts spans
+    // at least 4 pages, so the gated set is guaranteed to straddle several.
+    const reference = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, limit: 100 });
+    expect(reference.status).toBe(200);
+    const referenceRanks = new Map(
+      seeded(reference.body).map((c) => [c.headlining_artist_raw, c.station_recommended_rank])
+    );
+    // Sanity: this test only proves something if our own gated set is actually
+    // present with the expected ranks.
+    expect(referenceRanks.get(RANK1_ARTIST_NAME)).toBe(1);
+    expect(referenceRanks.get(TIE_LATER_ARTIST_NAME)).toBe(5);
+
+    const paginatedRanks = new Map();
+    let page = 1;
+    let hasMore = true;
+    let pagesFetched = 0;
+    const MAX_PAGES = 50; // generous safety cap — real total is small (§ WINDOW_TO)
+    while (hasMore) {
+      if (pagesFetched >= MAX_PAGES) {
+        throw new Error(`station_recommended_rank pagination probe exceeded ${MAX_PAGES} pages — aborting`);
+      }
+      // eslint-disable-next-line no-await-in-loop -- sequential pagination walk
+      const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, limit: 2, page });
+      expect(res.status).toBe(200);
+      for (const c of seeded(res.body)) {
+        paginatedRanks.set(c.headlining_artist_raw, c.station_recommended_rank);
+      }
+      hasMore = res.body.pagination.hasMore;
+      page += 1;
+      pagesFetched += 1;
+    }
+    // Genuinely spans multiple pages for OUR OWN concerts: 8 seeded rows at
+    // limit 2 cannot fit on one page.
+    expect(pagesFetched).toBeGreaterThan(1);
+
+    for (const [raw, rank] of referenceRanks) {
+      expect(paginatedRanks.get(raw)).toBe(rank);
+    }
+  });
+
+  it('agrees between GET /concerts and GET /concerts/:id for an upcoming gated concert', async () => {
+    const res = await auth.get('/concerts').query({ from: WINDOW_FROM, to: WINDOW_TO, limit: 100 });
+    const rank1 = findByRaw(res.body, RANK1_ARTIST_NAME);
+    expect(rank1.station_recommended_rank).toBe(1);
+
+    const byId = await auth.get(`/concerts/${rank1.id}`);
+    expect(byId.status).toBe(200);
+    expect(byId.body.station_recommended_rank).toBe(1);
+  });
+});
