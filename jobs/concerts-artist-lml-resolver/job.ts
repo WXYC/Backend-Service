@@ -179,11 +179,15 @@ export const runJob = async (options: ResolveJobOptions): Promise<Totals> => {
   // via this job's Discogs-only lane — otherwise the boolean lags until
   // concerts-artist-resolver's own 05:15 recompute the following day.
   // Unconditional (like concerts-artist-resolver's own step 4): the
-  // windowed recompute is idempotent and cheap (O(upcoming concerts)), so
-  // running it even when this cycle resolved nothing new is a no-op, not a
-  // waste. Skipped under --dry-run: runResolve already wrote nothing, so
-  // recomputing against unchanged junction state would just repeat a prior
-  // no-op read.
+  // windowed recompute is idempotent and cheap (O(upcoming concerts)) and
+  // the IS DISTINCT FROM guard writes no rows when the truth is unchanged,
+  // so running it even when this cycle resolved nothing new is safe, not a
+  // waste. Skipped under --dry-run because the recompute is itself a WRITE
+  // (a windowed UPDATE of has_resolved_support, and last_modified via the
+  // trigger) and --dry-run must write nothing -- not because it's a no-op
+  // read. It is not even guaranteed no-op: the sibling concerts-artist-
+  // resolver run can mutate the junction between cycles, so the boolean may
+  // legitimately change here.
   if (!options.dryRun) {
     const recomputeOutcome = await recomputeHasResolvedSupport();
     log('info', 'recompute_finished', `${JOB_NAME} has_resolved_support recompute done`, { ...recomputeOutcome });
