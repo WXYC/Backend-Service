@@ -75,6 +75,7 @@ export type Totals = {
     lml_error: number;
     writer_error: number;
     lml_cardinality_mismatch: number;
+    lml_untrusted_library_id: number;
   };
   source_rows_skipped_null_confidence: number;
   lml_total_calls: number;
@@ -91,6 +92,7 @@ export type DryRunReport = {
     compilation: number;
     lml_error: number;
     lml_cardinality_mismatch: number;
+    lml_untrusted_library_id: number;
   };
   source_rows_skipped_null_confidence: number;
 };
@@ -111,6 +113,7 @@ const emptyTotals = (): Totals => ({
     lml_error: 0,
     writer_error: 0,
     lml_cardinality_mismatch: 0,
+    lml_untrusted_library_id: 0,
   },
   source_rows_skipped_null_confidence: 0,
   lml_total_calls: 0,
@@ -122,6 +125,7 @@ const formatTotals = (t: Totals): string =>
   `skipped.compilation=${t.rows_skipped.compilation} skipped.lml_error=${t.rows_skipped.lml_error} ` +
   `skipped.writer_error=${t.rows_skipped.writer_error} ` +
   `skipped.lml_cardinality_mismatch=${t.rows_skipped.lml_cardinality_mismatch} ` +
+  `skipped.lml_untrusted_library_id=${t.rows_skipped.lml_untrusted_library_id} ` +
   `source_rows_skipped_null_confidence=${t.source_rows_skipped_null_confidence} ` +
   `lml_calls=${t.lml_total_calls} lml_latency_ms=${t.lml_total_latency_ms}`;
 
@@ -212,7 +216,40 @@ export const runConsumer = async (opts: {
       }
     }
 
+    // Per-row membership validation. The cardinality check above only
+    // catches a short response; it says nothing about whether the
+    // `library_id` on each individual result actually belongs to this
+    // batch's inputs (a duplicated id compensating for a dropped one keeps
+    // response.results.length === rows.length and would sail through the
+    // length-only check). Build the batch's input-id set once and validate
+    // every result's `library_id` against it, tracking already-seen ids so
+    // a duplicate within the same batch is also flagged rather than
+    // silently double-written.
+    const inputIds = new Set(rows.map((r) => r.id));
+    const consumedIds = new Set<number>();
+
     for (const result of response.results) {
+      if (!inputIds.has(result.library_id) || consumedIds.has(result.library_id)) {
+        totals.scanned += 1;
+        totals.rows_skipped.lml_untrusted_library_id += 1;
+        log(
+          'warn',
+          'lml_untrusted_library_id',
+          `LML returned library_id=${result.library_id} not present (or already consumed) in batch ${batchIndex}'s input set`,
+          {
+            batch_index: batchIndex,
+            library_id: result.library_id,
+          }
+        );
+        captureError(
+          new Error(`LML untrusted library_id: ${result.library_id} not in batch ${batchIndex}'s input set`),
+          'lml_untrusted_library_id',
+          { batch_index: batchIndex, library_id: result.library_id }
+        );
+        continue;
+      }
+      consumedIds.add(result.library_id);
+
       totals.scanned += 1;
       switch (result.kind) {
         case 'single_artist':
@@ -266,6 +303,7 @@ export const runConsumer = async (opts: {
           compilation: totals.rows_skipped.compilation,
           lml_error: totals.rows_skipped.lml_error,
           lml_cardinality_mismatch: totals.rows_skipped.lml_cardinality_mismatch,
+          lml_untrusted_library_id: totals.rows_skipped.lml_untrusted_library_id,
         },
         // Source-row unit, not library_id — kept outside `would_skip` so the
         // library_id-level accounting stays clean.
