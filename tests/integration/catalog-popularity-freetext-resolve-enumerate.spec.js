@@ -2,16 +2,24 @@
  * Integration test for the catalog-popularity-freetext-resolve ENUMERATE
  * representative-track selection (BS#1767), against real PostgreSQL.
  *
- * The unit suite (job.test.ts) only regex-asserts the SQL *string* — it cannot
- * observe WHICH track the `DISTINCT ON` / modal ordering actually picks. This
- * spec validates that *behavior* against real PG: for each unlinked
- * `(artist, album)` pair, `enumerateFreetextPairs` must carry the pair's
- * MOST-PLAYED NON-EMPTY `track_title` as its representative `song`, and a pair
- * whose plays are all track-less must still enumerate with `song === ''`
- * (album-only fallback, never dropped).
+ * The unit suite (job.test.ts) imports the REAL `enumerateFreetextPairs` and
+ * pins the exact GROUP BY + DISTINCT ON + ORDER BY it emits (so flipping an
+ * ASC/DESC, dropping the btrim non-empty-first term, or changing the GROUP BY
+ * fails there). This spec validates that pinned SQL's *runtime semantics*
+ * against real PG — which track the modal ordering actually resolves to — the
+ * one thing a string assertion can't observe.
  *
- * Seeded matrix (all rows carry a "bs1767" marker so the mirrored query can
- * scope itself hermetically; album_id NULL so they're unlinked):
+ * It cannot import the job directly: the integration runner is babel-jest with
+ * no TS transform (the job uses `import type`, which the parser rejects), so
+ * this mirrors the enumerate statement verbatim, scoped by an `ILIKE '%bs1767%'`
+ * marker. That is the same pure-SQL convention every sibling spec uses
+ * (flowsheet-metadata-backfill-worklist / -upsert, flowsheet-artwork-repair):
+ * WHEN `enumerateFreetextPairs` is hand-edited, BOTH the unit-suite SQL
+ * assertions AND this statement must follow — the unit suite is the drift
+ * tripwire on the real query, this is the semantics check on that query's shape.
+ *
+ * Seeded matrix (all rows carry a "bs1767" marker so the scoped query, cleanup,
+ * and assertions stay hermetic; album_id NULL so they're unlinked):
  *   - Pair A ('bs1767 artist a', 'bs1767 album a'):
  *       NULL   track × 5 plays  (most-played OVERALL, but empty → must NOT win)
  *       'Modal Track' × 3 plays (most-played NON-empty → MUST win)
@@ -25,14 +33,7 @@
  *
  * Cardinality: exactly one row per distinct pair (2 pairs → 2 rows). The inner
  * GROUP BY only picks a better representative track; it does not change which
- * pairs enumerate.
- *
- * Pure SQL — does NOT import `jobs/catalog-popularity-freetext-resolve/job.ts`.
- * The integration runner is babel-jest with no TS support; the statement below
- * mirrors `enumerateFreetextPairs` (plus a test-hermetic `ILIKE '%bs1767%'`
- * scope), and the JS-side `song` derivation mirrors the enumerate map's
- * `(track_title ?? '').trim()` boundary. When `enumerateFreetextPairs` is
- * hand-edited the SQL + derivation here must follow.
+ * pairs are enumerated.
  *
  * Needs CI to run: requires the Docker integration DB (the `pg` marker tier).
  */

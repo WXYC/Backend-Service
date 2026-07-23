@@ -170,13 +170,19 @@ describe('enumerateFreetextPairs', () => {
     // Inner GROUP BY counts plays per distinct track so the modal one can win.
     expect(text).toMatch(/GROUP\s+BY\s+"?artist_name"?\s*,\s*"?album_title"?\s*,\s*"?track_title"?/i);
     expect(text).toMatch(/count\s*\(\s*\*\s*\)\s+AS\s+play_count/i);
-    expect(text).toMatch(/ORDER\s+BY\s+"?artist_name"?\s*,\s*"?album_title"?/i);
-    // Non-empty tracks sort first: (btrim(coalesce(track_title, '')) = '') ASC.
-    expect(text).toMatch(/btrim\s*\(\s*coalesce\s*\(\s*"?track_title"?\s*,\s*''\s*\)\s*\)\s*=\s*''\s*\)?\s*ASC/i);
-    // Most-played representative wins the DISTINCT ON.
-    expect(text).toMatch(/play_count\s+DESC/i);
-    // Deterministic tiebreak.
-    expect(text).toMatch(/"?track_title"?\s+ASC/i);
+    // Pin the FULL ORDER BY sequence IN ORDER — this is the drift tripwire on
+    // the real query (the integration spec validates this same shape's runtime
+    // semantics against real PG). A flipped ASC/DESC, a dropped btrim
+    // non-empty-first term, or a reordered tiebreak all fail HERE, on the real
+    // function's emitted SQL. Whitespace is collapsed first so the assertion is
+    // a single flat pattern (avoids a nest of `\s*` quantifiers):
+    //   artist_name, album_title,
+    //   (btrim(coalesce(track_title,'')) = '') ASC,   -- non-empty first
+    //   play_count DESC,                              -- most-played wins
+    //   track_title ASC                               -- deterministic tiebreak
+    const flat = text.replace(/\s+/g, ' ');
+    expect(flat).toContain('ORDER BY "artist_name", "album_title",');
+    expect(flat).toContain(`(btrim(coalesce("track_title", '')) = '') ASC, play_count DESC, "track_title" ASC`);
   });
 
   it('wraps the SELECT in a transaction + SET LOCAL statement_timeout', async () => {
