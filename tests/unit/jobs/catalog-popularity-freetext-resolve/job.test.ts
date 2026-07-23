@@ -162,14 +162,20 @@ describe('enumerateFreetextPairs', () => {
     expect(text).not.toMatch(/"?track_title"?\s+IS\s+NOT\s+NULL/i);
   });
 
-  it('orders by artist, album, then prefers a non-empty track_title (deterministic representative)', async () => {
+  it('groups by (artist, album, track) and orders by non-empty-first, then most-played, then deterministic', async () => {
     (db.execute as jest.Mock).mockResolvedValue([]);
     await enumerateFreetextPairs();
     const call = findExecuteCallMatching(/SELECT\s+DISTINCT\s+ON/i);
     const text = renderSql(call?.[0]);
+    // Inner GROUP BY counts plays per distinct track so the modal one can win.
+    expect(text).toMatch(/GROUP\s+BY\s+"?artist_name"?\s*,\s*"?album_title"?\s*,\s*"?track_title"?/i);
+    expect(text).toMatch(/count\s*\(\s*\*\s*\)\s+AS\s+play_count/i);
     expect(text).toMatch(/ORDER\s+BY\s+"?artist_name"?\s*,\s*"?album_title"?/i);
     // Non-empty tracks sort first: (btrim(coalesce(track_title, '')) = '') ASC.
     expect(text).toMatch(/btrim\s*\(\s*coalesce\s*\(\s*"?track_title"?\s*,\s*''\s*\)\s*\)\s*=\s*''\s*\)?\s*ASC/i);
+    // Most-played representative wins the DISTINCT ON.
+    expect(text).toMatch(/play_count\s+DESC/i);
+    // Deterministic tiebreak.
     expect(text).toMatch(/"?track_title"?\s+ASC/i);
   });
 
@@ -193,6 +199,25 @@ describe('enumerateFreetextPairs', () => {
     (db.execute as jest.Mock).mockResolvedValue([{ artist_name: 'J Dilla', album_title: 'Donuts', track_title: null }]);
     const out = await enumerateFreetextPairs();
     expect(out).toEqual([{ artist: 'J Dilla', album: 'Donuts', song: '' }]);
+  });
+
+  it('trims a whitespace-only track_title to an empty song at the enumerate boundary', async () => {
+    // The "usable track?" rule lives HERE (the single trim boundary): a
+    // whitespace-only representative maps to song='' so buildBulkItems can use
+    // a plain truthiness check downstream.
+    (db.execute as jest.Mock).mockResolvedValue([
+      { artist_name: 'J Dilla', album_title: 'Donuts', track_title: '   ' },
+    ]);
+    const out = await enumerateFreetextPairs();
+    expect(out).toEqual([{ artist: 'J Dilla', album: 'Donuts', song: '' }]);
+  });
+
+  it('trims surrounding whitespace off a usable track_title', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([
+      { artist_name: 'J Dilla', album_title: 'Donuts', track_title: '  Waves  ' },
+    ]);
+    const out = await enumerateFreetextPairs();
+    expect(out).toEqual([{ artist: 'J Dilla', album: 'Donuts', song: 'Waves' }]);
   });
 });
 
@@ -239,11 +264,13 @@ describe('normalizePairs', () => {
 
   it('drops pairs whose normalized artist or album is empty', () => {
     const out = normalizePairs([
-      { artist: '   ', album: 'Donuts' },
-      { artist: 'J Dilla', album: '  ' },
-      { artist: 'J Dilla', album: 'Donuts' },
+      { artist: '   ', album: 'Donuts', song: 'Waves' },
+      { artist: 'J Dilla', album: '  ', song: 'Waves' },
+      { artist: 'J Dilla', album: 'Donuts', song: 'Waves' },
     ]);
-    expect(out).toEqual([{ norm_artist: 'j dilla', norm_album: 'donuts', artist: 'J Dilla', album: 'Donuts' }]);
+    expect(out).toEqual([
+      { norm_artist: 'j dilla', norm_album: 'donuts', artist: 'J Dilla', album: 'Donuts', song: 'Waves' },
+    ]);
   });
 
   it('keeps genuinely distinct albums as distinct pairs', () => {
@@ -368,16 +395,11 @@ describe('buildBulkItems', () => {
   });
 
   it('omits song when the representative track is an empty string', () => {
+    // song is already trimmed at the enumerate boundary, so a plain truthiness
+    // check ('' is falsy) omits it. Whitespace-only tracks never reach here —
+    // they were collapsed to '' at the boundary (see enumerateFreetextPairs).
     const items = buildBulkItems([
       { norm_artist: 'j dilla', norm_album: 'donuts', artist: 'J Dilla', album: 'Donuts', song: '' },
-    ]);
-    expect(items[0]).not.toHaveProperty('song');
-    expect(items).toEqual([{ artist: 'J Dilla', album: 'Donuts', raw_message: 'J Dilla - Donuts' }]);
-  });
-
-  it('omits song when the representative track is whitespace-only', () => {
-    const items = buildBulkItems([
-      { norm_artist: 'j dilla', norm_album: 'donuts', artist: 'J Dilla', album: 'Donuts', song: '   ' },
     ]);
     expect(items[0]).not.toHaveProperty('song');
     expect(items).toEqual([{ artist: 'J Dilla', album: 'Donuts', raw_message: 'J Dilla - Donuts' }]);
