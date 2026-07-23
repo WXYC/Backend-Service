@@ -90,6 +90,19 @@ const resolveAlbumIds = async () => {
  */
 const resolveDjNames = async (legacyEntryIds: number[]) => {
   if (legacyEntryIds.length === 0) return;
+  // Bind as a single PG-array-literal string param (`'{2001,2002}'::int[]`)
+  // rather than the bare `${legacyEntryIds}`. Drizzle/postgres-js splats a
+  // JS array into N positional placeholders here — both
+  // `ANY(${array}::int[])` and the bare `ANY(${array})` send
+  // `ANY(($1, $2, …))` over the wire, which PG rejects at arity >= 2 with
+  // "op ANY/ALL (array) requires array on right side" (BS#1071) or "cannot
+  // cast type record to integer[]" (BS#1068). See
+  // jobs/album-level-backfill/job.ts's `resolveAlbums` for the same fix
+  // (BS#1072).
+  //
+  // Safe by construction: TypeScript types `legacyEntryIds: number[]`, so
+  // the join contains only numeric literals — no injection surface.
+  const idArrayLiteral = `{${legacyEntryIds.join(',')}}`;
   // Use rowCount (not the input array length) so the log reflects the actual
   // effect: rows whose dj_name was populated. The two diverge whenever the
   // live insert path beat the ETL to a row, leaving its dj_name already set
@@ -102,7 +115,7 @@ const resolveDjNames = async (legacyEntryIds: number[]) => {
     LEFT JOIN "auth_user" AS u ON u."id" = s."primary_dj_id"
     WHERE f."show_id" = s."id"
       AND f."dj_name" IS NULL
-      AND f."legacy_entry_id" = ANY(${legacyEntryIds})
+      AND f."legacy_entry_id" = ANY(${idArrayLiteral}::int[])
   `);
   const updated = Number(result.count ?? 0);
   log('info', 'resolve-dj-names', `Resolved dj_name for ${updated}/${legacyEntryIds.length} new entries.`, {

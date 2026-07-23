@@ -155,4 +155,28 @@ describe('pickPrimaryLibraryRow (B-2.3)', () => {
     const picked = await pickPrimaryLibraryRow([5, 6, 7]);
     expect(picked).toBeNull();
   });
+
+  it('binds the multi-element (arity >= 2) candidate list as a single array-literal param, not a splat (BS#1072)', async () => {
+    // postgres-js/drizzle splats `${jsArray}` into N positional
+    // placeholders — `ANY(($1,$2,$3))` — which PG rejects at arity >= 2
+    // with "op ANY/ALL (array) requires array on right side" (BS#1071,
+    // and the cast form `ANY(${array}::int[])` fails the same way per
+    // BS#1068). The only shape that survives is `ANY('{10,11,12}'::int[])`
+    // — a single bound text param cast to int[] inside PG. Matches the
+    // pattern already proven in jobs/album-level-backfill/job.ts.
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ id: 11 }]);
+    await pickPrimaryLibraryRow([10, 11, 12]);
+
+    const call = (db.execute as jest.Mock).mock.calls[0][0] as { values?: unknown[] } | undefined;
+    const sqlText = renderSql(call);
+    expect(sqlText).toMatch(/=\s*ANY\(\s*::int\[\]\)/i);
+
+    const values = call?.values ?? [];
+    expect(values).toContain('{10,11,12}');
+    // Anti-assert the broken shapes: no individual numeric param values
+    // from a splat (the BS#1068/BS#1071 symptom).
+    expect(values).not.toContain(10);
+    expect(values).not.toContain(11);
+    expect(values).not.toContain(12);
+  });
 });

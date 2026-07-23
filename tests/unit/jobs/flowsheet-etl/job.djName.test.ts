@@ -131,6 +131,30 @@ describe('runIncremental: dj_name on insert (step 5b.2)', () => {
     expect(djNameUpdate).toBeUndefined();
   });
 
+  it('binds legacy_entry_ids as a single array-literal param at arity >= 2, not a splat (BS#1072)', async () => {
+    // postgres-js/drizzle splats a bare `${jsArray}` in `ANY(${array})`
+    // into N positional placeholders — `ANY(($1,$2,...))` — which PG
+    // rejects at arity >= 2 with "op ANY/ALL (array) requires array on
+    // right side" (BS#1071). The fix binds a single PG array-literal
+    // string (`'{2001,2002}'`) cast with `::int[]`, matching
+    // jobs/album-level-backfill/job.ts's `resolveAlbums`.
+    mockFetchLegacyShows.mockResolvedValue([makeShow()]);
+    mockFetchLegacyEntries.mockResolvedValue([makeEntry({ id: 2001 }), makeEntry({ id: 2002, playOrder: 2 })]);
+
+    await runIncremental();
+
+    const djNameUpdate = findExecuteCallMatching(/UPDATE[\s\S]*flowsheet[\s\S]*dj_name[\s\S]*COALESCE/i);
+    expect(djNameUpdate).toBeDefined();
+    const call = djNameUpdate?.[0] as { values?: unknown[] } | undefined;
+    const sqlText = renderSql(call);
+    expect(sqlText).toMatch(/legacy_entry_id"?\s*=\s*ANY\(\s*::int\[\]\)/i);
+
+    const values = call?.values ?? [];
+    expect(values).toContain('{2001,2002}');
+    expect(values).not.toContain(2001);
+    expect(values).not.toContain(2002);
+  });
+
   it('does not run an unbounded UPDATE (dj_name IS NULL) without a row-id scope', async () => {
     // Regression guard for the wedge: the original resolveDjNames had no
     // row-id scope and rewrote every NULL-dj_name row in flowsheet on each
