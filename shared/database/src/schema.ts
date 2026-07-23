@@ -2473,6 +2473,14 @@ export const concerts = wxyc_schema.table(
     // set so re-UPSERTs preserve the insert moment. See BS#1385 (migration
     // 0093) and the table JSDoc above for the full rationale.
     first_scraped_at: timestamp('first_scraped_at', { withTimezone: true }).defaultNow().notNull(),
+    // Denormalized curated-feed flag (migration 0128, BS#1759, parent
+    // #1618). Lands here inert (always false, no writer yet) — the
+    // sync/resolve slice that populates `concert_performers` maintains it
+    // (true when at least one `role='support'` row for this concert has a
+    // resolved `artist_id` or `discogs_artist_id`), and the curated-feed
+    // slice widens `concerts_curated_starts_on_idx` to read it once it
+    // carries real data. See that index's comment below.
+    has_resolved_support: boolean('has_resolved_support').notNull().default(false),
     last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
@@ -2485,9 +2493,12 @@ export const concerts = wxyc_schema.table(
     // because starts_at is nullable post-0112 (BS#1570 correction 4). The
     // predicate must stay an exact textual twin of `buildWhere`'s curated
     // branch in apps/backend/services/concerts.service.ts or the planner
-    // stops matching the partial index. BS#1618 adds a third
-    // `has_resolved_support` term when it lands — whichever PR merges second
-    // rebases onto the other's predicate.
+    // stops matching the partial index. `has_resolved_support` (migration
+    // 0128, BS#1759) lands inert alongside this index — the predicate
+    // widening to a third `has_resolved_support` term is deliberately
+    // deferred to the later curated-feed slice (BS#1618) so this column
+    // bakes before it changes curation; whichever PR merges that widening
+    // rebases onto whatever else has touched this predicate meanwhile.
     index('concerts_curated_starts_on_idx')
       .on(table.starts_on)
       .where(
@@ -2507,3 +2518,91 @@ export const concerts = wxyc_schema.table(
 
 export type Concert = InferSelectModel<typeof concerts>;
 export type NewConcert = InferInsertModel<typeof concerts>;
+
+/**
+ * Role of a performer on a concert bill. Both values are declared, but only
+ * `support` rows are written by the sync/resolve slice that consumes this
+ * table (migration 0128, BS#1759, parent #1618) — the headliner stays
+ * denormalized on `concerts.headlining_artist_raw` /
+ * `headlining_artist_id` / `headlining_discogs_artist_id`. `headliner` is a
+ * forward seam, not dual-written speculatively.
+ */
+export const concertPerformerRoleEnum = wxyc_schema.enum('concert_performer_role_enum', ['headliner', 'support']);
+
+/**
+ * Per-performer identity rows for a concert bill — the FK substrate for
+ * support-act resolution (migration 0128, BS#1759, parent #1618, On Tour
+ * epic #1588). One row per `(concert_id, role, raw_name)`; a concert with
+ * three support acts gets three `support` rows.
+ *
+ * Resolution mirrors the two-lane shape already established on
+ * `concerts.headlining_*`:
+ *
+ *   - `artist_id` is the Phase-B pure-SQL strict/alias resolve target — FK
+ *     to the WXYC library `artists` table, ON DELETE SET NULL so a deleted
+ *     artist row doesn't take the performer row with it.
+ *   - `discogs_artist_id` is the Phase-D LML verify-before-mint target for
+ *     performers absent from the library — a bare external id with NO FK
+ *     (mirrors `concerts.headlining_discogs_artist_id` /
+ *     `album_metadata.discogs_artist_id`).
+ *   - `discogs_artist_id_source` is provenance for `discogs_artist_id`;
+ *     TEXT with a documented vocabulary rather than a pgEnum (the 0109
+ *     saga: each enum-value addition costs its own migration).
+ *   - `artist_resolve_attempted_at` is an attempt-at marker
+ *     (docs/migrations.md "Attempt-at markers") that binds ONLY the
+ *     Phase-D LML arm — byte-identical semantics to
+ *     `concerts.artist_resolve_attempted_at`: stamped when LML RESPONDED
+ *     (resolved / ambiguous / not_found), left NULL on
+ *     `escalation_unavailable` and transport errors so those rows stay
+ *     immediately retryable. The Phase-B strict/alias arm carries no
+ *     marker, matching today's `concerts-artist-resolver`.
+ *
+ * `removed_at` is a soft-tombstone for array-shrink: when a re-sync drops a
+ * previously-seen support act from the source bill, the row is tombstoned
+ * rather than deleted so capture/resolve history survives a source flap.
+ *
+ * `UNIQUE(concert_id, role, raw_name)` is both the sync upsert target and a
+ * backstop — capture/sync dedupe normalizes names insensitively before
+ * insert, so two raw variants that normalize equal simply resolve to the
+ * same `artist_id` rather than colliding on the constraint. The unique
+ * index's leading `concert_id` column serves the embed/sync join; a
+ * standalone index is deliberately omitted (add a partial
+ * `(concert_id) WHERE role='support' AND removed_at IS NULL AND artist_id
+ * IS NULL` only if a later slice's EXPLAIN shows the resolver candidate
+ * scan needs it — the active-support set is small).
+ *
+ * DDL-only substrate (this migration, no writer yet). The sync/resolve
+ * slice and the curated-feed slice (which widens
+ * `concerts_curated_starts_on_idx` to read `concerts.has_resolved_support`)
+ * land separately per this repo's migration-chain cadence discipline.
+ */
+export const concertPerformers = wxyc_schema.table(
+  'concert_performers',
+  {
+    id: serial('id').primaryKey(),
+    concert_id: integer('concert_id')
+      .notNull()
+      .references(() => concerts.id, { onDelete: 'cascade' }),
+    raw_name: text('raw_name').notNull(),
+    role: concertPerformerRoleEnum('role').notNull(),
+    artist_id: integer('artist_id').references(() => artists.id, { onDelete: 'set null' }),
+    // Discogs artist id for the performer, resolved by the (future) Phase-D
+    // offline LML verify-before-mint pass. External id, no FK —
+    // `concerts.headlining_discogs_artist_id` precedent.
+    discogs_artist_id: integer('discogs_artist_id'),
+    // Provenance for `discogs_artist_id`. See table JSDoc.
+    discogs_artist_id_source: text('discogs_artist_id_source'),
+    // Attempt-at marker (docs/migrations.md "Attempt-at markers"): binds
+    // ONLY the Phase-D LML arm. See table JSDoc.
+    artist_resolve_attempted_at: timestamp('artist_resolve_attempted_at', { withTimezone: true }),
+    // Soft-tombstone for array-shrink. See table JSDoc.
+    removed_at: timestamp('removed_at', { withTimezone: true }),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('concert_performers_concert_role_raw_name_idx').on(table.concert_id, table.role, table.raw_name),
+  ]
+);
+
+export type ConcertPerformer = InferSelectModel<typeof concertPerformers>;
+export type NewConcertPerformer = InferInsertModel<typeof concertPerformers>;

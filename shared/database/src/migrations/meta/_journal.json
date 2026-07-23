@@ -876,6 +876,13 @@
       "when": 1784666353897,
       "tag": "0127_concerts-artist-bio",
       "breakpoints": true
+    },
+    {
+      "idx": 128,
+      "version": "7",
+      "when": 1784784856190,
+      "tag": "0128_concert-performers-support",
+      "breakpoints": true
     }
   ]
 }

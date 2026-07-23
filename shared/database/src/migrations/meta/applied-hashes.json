@@ -123,5 +123,6 @@
   "0124_discogs-artist-similar-artists": "151015f4cfe0c071ee0286dcfdc086a077249a5544551c1e44c0ae5f6db62a79",
   "0125_album-critic-reviews": "d43eac8d0eb8e11929e092cadbfffe4f66e3e181c350d6ee1608ed8b9d72d73d",
   "0126_tribute-context-fk-repair": "58e230fde235f58ec8936c6e02f4dc296441440a3297bd915dcf8d1b0675481a",
-  "0127_concerts-artist-bio": "2a296921ec432d68934c0427a7fe8ce95375df8afc6327f0a69a5f3dbfd7f13a"
+  "0127_concerts-artist-bio": "2a296921ec432d68934c0427a7fe8ce95375df8afc6327f0a69a5f3dbfd7f13a",
+  "0128_concert-performers-support": "a78b77d5d70640aabdb738430b937912f07d35fcc9bf9585ca0415db85d01d0c"
 }
