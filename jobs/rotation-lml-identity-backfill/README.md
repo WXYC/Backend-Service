@@ -9,7 +9,7 @@ Companion to the BS#1380 schema addition (migration `0094_rotation-lml-identity-
 
 ## When to run
 
-Daily cron (default `0 6 * * *` UTC / 02:00 ET), registered automatically by the deploy pipeline. Cooperative pause (BS#735) defers each batch when DJs are active.
+Daily cron (default `0 9 * * *` UTC / 04:00–05:00 ET, moved from `0 6 * * *` by BS#1665 to clear the LML-hitting cron stack — see `docs/ops-cron-scheduling.md`), registered automatically by the deploy pipeline. Cooperative pause (BS#735) defers each batch when DJs are active.
 
 One-shot invocation is supported for ad-hoc operator runs (post-incident catch-up, initial migration deploy, or coverage-gate probes):
 
