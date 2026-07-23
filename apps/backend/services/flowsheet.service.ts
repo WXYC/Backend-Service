@@ -1125,9 +1125,16 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
   return response[0];
 };
 
-/** Gets show metadata (DJs, specialty show name) without fetching entries */
-export const getShowMetadata = async (show_id: number): Promise<ShowMetadata> => {
+/**
+ * Gets show metadata (DJs, specialty show name) without fetching entries.
+ * Returns `undefined` when `show_id` doesn't exist (BS#1113) — mirrors the
+ * `library.service.ts:getAlbumFromDB` convention; the controller translates
+ * this to a 404.
+ */
+export const getShowMetadata = async (show_id: number): Promise<ShowMetadata | undefined> => {
   const show = await db.select().from(shows).where(eq(shows.id, show_id));
+
+  if (!show[0]) return undefined;
 
   const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({
     id: dj.id,
