@@ -1509,6 +1509,16 @@ describe('Retrieve Playlist Object', () => {
   });
 });
 
+describe('Retrieve Playlist Object — unknown show_id', () => {
+  // BS#1113: an unknown show_id previously crashed getShowMetadata's bare
+  // `show[0].specialty_id` dereference into a bare TypeError, surfaced by the
+  // centralized errorHandler as a 500. It should 404 instead. No show/track
+  // fixture needed — the request never gets past the show lookup.
+  test('Unknown show_id returns 404, not 500', async () => {
+    await request.get('/flowsheet/playlist').query({ show_id: 999999999 }).send().expect(404);
+  });
+});
+
 describe('Paginated ordering with ETL-imported entries', () => {
   const postgres = require('postgres');
   let sql;

@@ -579,6 +579,14 @@ export const getShowInfo: RequestHandler<object, unknown, object, { show_id: str
     flowsheet_service.getEntriesByShow(showId),
   ]);
 
+  // `getShowMetadata` returns undefined when show_id doesn't exist in `shows`
+  // (deleted show, typo, scraping the URL space) — without this guard the
+  // spread below throws a bare TypeError that the centralized errorHandler
+  // maps to 500 instead of the correct 404 (BS#1113).
+  if (!showMetadata) {
+    throw new WxycError(`Show ${showId} not found`, 404);
+  }
+
   await flowsheet_service.attachUpcomingShows(entries);
 
   res.status(200).json({

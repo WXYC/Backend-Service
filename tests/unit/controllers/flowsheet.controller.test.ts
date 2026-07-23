@@ -450,6 +450,20 @@ describe('flowsheet.controller', () => {
       expect(mockGetEntriesByShow).not.toHaveBeenCalled();
     });
 
+    it('throws 404 WxycError when getShowMetadata resolves undefined (unknown show_id)', async () => {
+      mockGetShowMetadata.mockResolvedValue(undefined);
+      mockGetEntriesByShow.mockResolvedValue([]);
+
+      const req = createMockReq({ show_id: '999999999' });
+      const res = createMockRes();
+
+      await expect(getShowInfo(req as Request, res as Response, mockNext)).rejects.toThrow(WxycError);
+      await expect(getShowInfo(req as Request, res as Response, mockNext)).rejects.toMatchObject({
+        statusCode: 404,
+      });
+      expect(res.json).not.toHaveBeenCalled();
+    });
+
     it('rejects with error on service failure', async () => {
       const error = new Error('Show not found');
       mockGetShowMetadata.mockRejectedValue(error);
