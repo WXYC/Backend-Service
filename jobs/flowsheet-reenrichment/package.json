@@ -14,7 +14,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@sentry/node": "^10.66.0",
+    "@sentry/node": "^10.67.0",
     "@wxyc/database": "^1.0.0",
     "@wxyc/lml-client": "^1.0.0",
     "@wxyc/metadata": "^1.0.0"
