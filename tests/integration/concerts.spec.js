@@ -397,6 +397,174 @@ describe('GET /concerts (BS#1603)', () => {
 });
 
 /**
+ * BS#1762 — curated feed includes support-resolved concerts: migration 0129
+ * widens `concerts_curated_starts_on_idx` (and `buildWhere`'s curated branch
+ * in concerts.service.ts) to a third OR term, `has_resolved_support`.
+ * Extends the BS#1603 broad-curation decision ("resolution is a realness
+ * proxy") to supporting acts, the same way BS#1614 already did for a
+ * Discogs-only-resolved headliner.
+ *
+ * `has_resolved_support` is a denormalized flag maintained by
+ * `jobs/concerts-artist-resolver`'s support sync/resolve/recompute step
+ * (BS#1760) from the `concert_performers` junction — this suite seeds the
+ * flag directly rather than the junction, since it exercises the READ path
+ * (the index + buildWhere widening), not the resolver that maintains the
+ * flag (covered by tests/integration/concerts-artist-resolver-support.spec.js).
+ *
+ * Isolated from the BS#1603/BS#1731/BS#1756 describes above (own
+ * venue/source_id prefix) so these seeds can't perturb their assertions.
+ */
+describe('GET /concerts curated (support-resolved, BS#1762)', () => {
+  const VENUE_SLUG = 'bs1762-probe-room';
+  const SOURCE_ID_PREFIX = 'bs1762:';
+  const SUPPORT_ONLY_ARTIST_RAW = 'BS#1762 Support-Only Probe Headliner';
+  const HEADLINER_ONLY_ARTIST_NAME = 'BS#1762 Headliner-Only Probe Artist';
+  const UNRESOLVED_ARTIST_RAW = 'BS#1762 Unresolved Probe Headliner';
+  const STARTS_ON = isoDate(17);
+
+  let auth;
+  let sql;
+
+  const insertConcert = async (venueId, key, overrides) => {
+    const defaults = {
+      source: 'triangle_shows',
+      starts_at: null,
+      doors_at: null,
+      headlining_artist_id: null,
+      headlining_discogs_artist_id: null,
+      title: null,
+      supporting_artists: [],
+      ticket_url: null,
+      image_url: null,
+      event_url: null,
+      price_min: null,
+      price_max: null,
+      age_restriction: null,
+      status: 'on_sale',
+      removed_at: null,
+      has_resolved_support: false,
+    };
+    const row = { ...defaults, ...overrides };
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".concerts
+         (source, source_id, venue_id, starts_on, starts_at, doors_at,
+          headlining_artist_raw, headlining_artist_id, headlining_discogs_artist_id,
+          title, supporting_artists_raw, ticket_url, image_url, price_min, price_max,
+          age_restriction, status, removed_at, event_url, has_resolved_support,
+          raw_data, scraped_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, '{}'::jsonb, now())`,
+      [
+        row.source,
+        SOURCE_ID_PREFIX + key,
+        venueId,
+        STARTS_ON,
+        row.starts_at,
+        row.doors_at,
+        row.headlining_artist_raw,
+        row.headlining_artist_id,
+        row.headlining_discogs_artist_id,
+        row.title,
+        row.supporting_artists,
+        row.ticket_url,
+        row.image_url,
+        row.price_min,
+        row.price_max,
+        row.age_restriction,
+        row.status,
+        row.removed_at,
+        row.event_url,
+        row.has_resolved_support,
+      ]
+    );
+  };
+
+  const cleanup = async () => {
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".concerts WHERE source_id LIKE $1`, [`${SOURCE_ID_PREFIX}%`]);
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".venues WHERE slug = $1`, [VENUE_SLUG]);
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE artist_name = $1`, [HEADLINER_ONLY_ARTIST_NAME]);
+  };
+
+  beforeAll(async () => {
+    auth = createAuthRequest(request, global.access_token);
+    sql = makeSql();
+    await cleanup(); // idempotent across re-runs (shared schema, --runInBand)
+
+    const [venue] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".venues (slug, name, city, state, address)
+       VALUES ($1, 'BS1762 Probe Room', 'Carrboro', 'NC', '300 E Main St')
+       RETURNING id`,
+      [VENUE_SLUG]
+    );
+    const venueId = venue.id;
+
+    const [headlinerArtist] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters)
+       VALUES ($1, $1, 'ZZ') RETURNING id`,
+      [HEADLINER_ONLY_ARTIST_NAME]
+    );
+
+    // Support-only-resolved: no headliner resolution in either lane, but a
+    // support act resolved — the new curated lane this migration adds.
+    await insertConcert(venueId, 'support-only', {
+      headlining_artist_raw: SUPPORT_ONLY_ARTIST_RAW,
+      has_resolved_support: true,
+    });
+
+    // Headliner-only-resolved: the pre-existing curated lane (BS#1603).
+    // Membership must be unaffected by the widened predicate.
+    await insertConcert(venueId, 'headliner-only', {
+      headlining_artist_raw: HEADLINER_ONLY_ARTIST_NAME,
+      headlining_artist_id: headlinerArtist.id,
+    });
+
+    // Negative control: no headliner resolution in either lane AND no
+    // resolved support. Must stay excluded from the curated feed — proves
+    // the widening didn't accidentally broaden the predicate past the three
+    // named lanes.
+    await insertConcert(venueId, 'unresolved', {
+      headlining_artist_raw: UNRESOLVED_ARTIST_RAW,
+    });
+  });
+
+  afterAll(async () => {
+    await cleanup();
+    await sql.end();
+  });
+
+  const findByRaw = (body, raw) => body.concerts.find((c) => c.headlining_artist_raw === raw);
+
+  it('includes a support-only-resolved concert in the curated feed', async () => {
+    const res = await auth.get('/concerts').query({ from: STARTS_ON, to: STARTS_ON, curated: 'true', limit: 100 });
+    expect(res.status).toBe(200);
+    const concert = findByRaw(res.body, SUPPORT_ONLY_ARTIST_RAW);
+    expect(concert).toBeDefined();
+    expect(concert.headlining_artist_id).toBeNull();
+  });
+
+  it("leaves a headliner-only concert's curated membership unchanged", async () => {
+    const res = await auth.get('/concerts').query({ from: STARTS_ON, to: STARTS_ON, curated: 'true', limit: 100 });
+    expect(res.status).toBe(200);
+    const concert = findByRaw(res.body, HEADLINER_ONLY_ARTIST_NAME);
+    expect(concert).toBeDefined();
+  });
+
+  it('excludes a concert with no resolved headliner and no resolved support', async () => {
+    const res = await auth.get('/concerts').query({ from: STARTS_ON, to: STARTS_ON, curated: 'true', limit: 100 });
+    expect(res.status).toBe(200);
+    const concert = findByRaw(res.body, UNRESOLVED_ARTIST_RAW);
+    expect(concert).toBeUndefined();
+  });
+
+  it('all three probe rows are present in the uncurated feed (sanity check: curated genuinely filters)', async () => {
+    const res = await auth.get('/concerts').query({ from: STARTS_ON, to: STARTS_ON, limit: 100 });
+    expect(res.status).toBe(200);
+    expect(findByRaw(res.body, SUPPORT_ONLY_ARTIST_RAW)).toBeDefined();
+    expect(findByRaw(res.body, HEADLINER_ONLY_ARTIST_NAME)).toBeDefined();
+    expect(findByRaw(res.body, UNRESOLVED_ARTIST_RAW)).toBeDefined();
+  });
+});
+
+/**
  * BS#1731 — `Concert.station_recommended`: true iff the resolved headliner
  * (`headlining_artist_id`) has ≥1 `library` release with ≥1 `rotation` row
  * (any bin, regardless of `kill_date`), false/omitted otherwise.

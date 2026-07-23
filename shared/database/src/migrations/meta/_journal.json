@@ -883,6 +883,13 @@
       "when": 1784784856190,
       "tag": "0128_concert-performers-support",
       "breakpoints": true
+    },
+    {
+      "idx": 129,
+      "version": "7",
+      "when": 1784819375003,
+      "tag": "0129_concerts-curated-support-idx",
+      "breakpoints": true
     }
   ]
 }

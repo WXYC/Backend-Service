@@ -2474,12 +2474,12 @@ export const concerts = wxyc_schema.table(
     // 0093) and the table JSDoc above for the full rationale.
     first_scraped_at: timestamp('first_scraped_at', { withTimezone: true }).defaultNow().notNull(),
     // Denormalized curated-feed flag (migration 0128, BS#1759, parent
-    // #1618). Lands here inert (always false, no writer yet) — the
-    // sync/resolve slice that populates `concert_performers` maintains it
-    // (true when at least one `role='support'` row for this concert has a
-    // resolved `artist_id` or `discogs_artist_id`), and the curated-feed
-    // slice widens `concerts_curated_starts_on_idx` to read it once it
-    // carries real data. See that index's comment below.
+    // #1618). Maintained by `jobs/concerts-artist-resolver`'s support
+    // sync/resolve step (BS#1760): true when at least one `role='support'`
+    // row for this concert has a resolved `artist_id` or
+    // `discogs_artist_id`. Migration 0129 (BS#1762) widens
+    // `concerts_curated_starts_on_idx` to read it as a third curated-OR
+    // term — see that index's comment below.
     has_resolved_support: boolean('has_resolved_support').notNull().default(false),
     last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   },
@@ -2488,21 +2488,20 @@ export const concerts = wxyc_schema.table(
     index('concerts_venue_starts_at_idx').on(table.venue_id, table.starts_at),
     index('concerts_headlining_artist_starts_at_idx').on(table.headlining_artist_id, table.starts_at),
     // Curated-feed path (Phase 2's GET /concerts?curated=true): resolver-
-    // stamped (catalog FK OR Discogs id — either resolution lane counts,
-    // BS#1614), not tombstoned, windowed by calendar date. starts_on-first
+    // stamped — catalog FK on the headliner, OR a Discogs id on the
+    // headliner, OR a resolved support act — three lanes count (BS#1614 +
+    // BS#1762) — not tombstoned, windowed by calendar date. starts_on-first
     // because starts_at is nullable post-0112 (BS#1570 correction 4). The
     // predicate must stay an exact textual twin of `buildWhere`'s curated
     // branch in apps/backend/services/concerts.service.ts or the planner
-    // stops matching the partial index. `has_resolved_support` (migration
-    // 0128, BS#1759) lands inert alongside this index — the predicate
-    // widening to a third `has_resolved_support` term is deliberately
-    // deferred to the later curated-feed slice (BS#1618) so this column
-    // bakes before it changes curation; whichever PR merges that widening
-    // rebases onto whatever else has touched this predicate meanwhile.
+    // stops matching the partial index. Migration 0129 (BS#1762) widened
+    // this from the two-term form (migration 0116, BS#1614) to also read
+    // `has_resolved_support` (migration 0128, BS#1759) once its
+    // sync/resolve writer (BS#1760) gave the column real data.
     index('concerts_curated_starts_on_idx')
       .on(table.starts_on)
       .where(
-        sql`(${table.headlining_artist_id} IS NOT NULL OR ${table.headlining_discogs_artist_id} IS NOT NULL) AND ${table.removed_at} IS NULL`
+        sql`(${table.headlining_artist_id} IS NOT NULL OR ${table.headlining_discogs_artist_id} IS NOT NULL OR ${table.has_resolved_support}) AND ${table.removed_at} IS NULL`
       ),
     // Default (uncurated) feed path (Phase 2's GET /concerts): non-tombstoned
     // rows windowed by calendar date, ordered by (starts_on, id). The curated

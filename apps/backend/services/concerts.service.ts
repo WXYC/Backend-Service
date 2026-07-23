@@ -284,12 +284,26 @@ export const toConcertDTO = (row: ConcertJoinRow): ConcertDTO => ({
  * `curated: true` the predicate becomes exactly the
  * `concerts_curated_starts_on_idx` partial-index predicate
  * (`(headlining_artist_id IS NOT NULL OR headlining_discogs_artist_id IS
- * NOT NULL) AND removed_at IS NULL`), so the curated feed reads the index.
- * Either resolution lane counts as curated (BS#1614): the catalog FK from
- * the strict/alias resolver, or the Discogs id minted by the offline LML
- * pass for touring artists absent from the library. The OR must stay an
- * exact twin of the index predicate in shared/database/src/schema.ts —
- * widening one without the other silently de-indexes the curated feed.
+ * NOT NULL OR has_resolved_support) AND removed_at IS NULL`), so the
+ * curated feed reads the index. Three lanes count as curated: the catalog
+ * FK from the strict/alias headliner resolver, the Discogs id minted by
+ * the offline LML pass for touring headliners absent from the library
+ * (BS#1614), or a resolved support act (BS#1762) — extending the BS#1603
+ * broad-curation decision ("resolution is a realness proxy") to supports.
+ * The OR must stay an exact twin of the index predicate in
+ * shared/database/src/schema.ts — widening one without the other silently
+ * de-indexes the curated feed.
+ *
+ * `has_resolved_support` is written as `eq(..., true)` here but as a bare
+ * boolean column reference in the index's `sql` template
+ * (`... OR ${table.has_resolved_support}`). These are NOT a textual
+ * mismatch in practice: Postgres's partial-index predicate matcher
+ * canonicalizes a bare boolean expression and `expr = true` to the same
+ * form, so both sides still prove implication and the planner still picks
+ * the index (verified with EXPLAIN against a structural twin of this
+ * table/index — see BS#1762). The `IS NOT NULL` terms have no such
+ * automatic rewrite, which is why those two stay literal twins of the
+ * index's `IS NOT NULL` text.
  */
 const buildWhere = ({ from, to, curated }: ConcertsQueryFilters) => {
   const conditions = [isNull(concerts.removed_at), gte(concerts.starts_on, from)];
@@ -297,7 +311,13 @@ const buildWhere = ({ from, to, curated }: ConcertsQueryFilters) => {
     conditions.push(lte(concerts.starts_on, to));
   }
   if (curated) {
-    conditions.push(or(isNotNull(concerts.headlining_artist_id), isNotNull(concerts.headlining_discogs_artist_id))!);
+    conditions.push(
+      or(
+        isNotNull(concerts.headlining_artist_id),
+        isNotNull(concerts.headlining_discogs_artist_id),
+        eq(concerts.has_resolved_support, true)
+      )!
+    );
   }
   return and(...conditions);
 };
