@@ -39,12 +39,25 @@ export const pickPrimaryLibraryRow = async (libraryIds: number[]): Promise<numbe
   if (libraryIds.length === 0) return null;
   if (libraryIds.length === 1) return libraryIds[0];
 
+  // Bind as a single PG-array-literal string param (`'{10,11,12}'::int[]`)
+  // rather than the bare `${libraryIds}`. Drizzle/postgres-js splats a JS
+  // array into N positional placeholders here — both `ANY(${array}::int[])`
+  // and the bare `ANY(${array})` send `ANY(($1, $2, …))` over the wire,
+  // which PG rejects at arity >= 2 with "op ANY/ALL (array) requires array
+  // on right side" (BS#1071) or "cannot cast type record to integer[]"
+  // (BS#1068). See jobs/album-level-backfill/job.ts's `resolveAlbums` for
+  // the same fix (BS#1072).
+  //
+  // Safe by construction: TypeScript types `libraryIds: number[]`, so the
+  // join contains only numeric literals — no injection surface.
+  const idArrayLiteral = `{${libraryIds.join(',')}}`;
+
   const rows = (await db.execute(sql`
     SELECT l."id"
     FROM "wxyc_schema"."library" l
     LEFT JOIN "wxyc_schema"."format" f ON f."id" = l."format_id"
     LEFT JOIN "wxyc_schema"."album_plays" ap ON ap."album_id" = l."id"
-    WHERE l."id" = ANY(${libraryIds})
+    WHERE l."id" = ANY(${idArrayLiteral}::int[])
     ORDER BY
       CASE WHEN EXISTS (
         SELECT 1
