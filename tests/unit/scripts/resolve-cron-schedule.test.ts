@@ -85,15 +85,19 @@ describe('scripts/resolve-cron-schedule.sh', () => {
     expect(stderr).toMatch(/Missing jobs\/nonexistent-job\/package\.json/);
   });
 
-  // BS#1380: extend the override allowlist to include rotation-lml-identity-backfill.
-  // Same operational story as flowsheet-metadata-backfill — both are LML-bounded
-  // drift-repair crons whose cadence ops occasionally tightens. The allowlist
-  // stays narrow and explicit.
-  it('returns override when BACKFILL_CRON_SCHEDULE is set and target = rotation-lml-identity-backfill', () => {
+  // BS#1665: re-narrowed the override allowlist to drop
+  // rotation-lml-identity-backfill (BS#1380 had added it). Sharing the
+  // allowlist let a single BACKFILL_CRON_SCHEDULE env var snap both jobs to
+  // the same schedule — the same simultaneous-double-fire failure mode
+  // (LML#803) BS#1665 removed, by a different invisible route. Its slot is
+  // now fixed and ignores the override.
+  it('ignores BACKFILL_CRON_SCHEDULE for rotation-lml-identity-backfill (narrow override scope)', () => {
+    const pkgPath = path.join(repoRoot, 'jobs/rotation-lml-identity-backfill/package.json');
+    const ownDefault = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'))['cron-schedule'];
     const { stdout, status } = run('rotation-lml-identity-backfill', {
       BACKFILL_CRON_SCHEDULE: '*/30 * * * *',
     });
     expect(status).toBe(0);
-    expect(stdout.trim()).toBe('*/30 * * * *');
+    expect(stdout.trim()).toBe(ownDefault);
   });
 });

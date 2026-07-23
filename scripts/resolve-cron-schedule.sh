@@ -50,11 +50,16 @@ fi
 # and explicit. Each entry needs a documented operational reason:
 #   - flowsheet-metadata-backfill (BS#914 / H7): nightly metadata sweep;
 #     ops occasionally tightens the cadence (hourly) during C6 retunes
-#   - rotation-lml-identity-backfill (BS#1380): daily LML-identity resolve;
-#     shares the metadata sweep's ops cadence story since both are
-#     LML-bounded drift-repair crons
+#
+# rotation-lml-identity-backfill's slot is fixed at 0 9 * * * by BS#1665 and
+# deliberately NOT env-overridable: sharing this allowlist with
+# flowsheet-metadata-backfill let a single BACKFILL_CRON_SCHEDULE env var
+# snap both jobs to the same schedule, re-creating the exact simultaneous
+# double-fire (LML#803) BS#1665 removed — by a different route, invisibly.
+#
+# Spacing policy: see docs/ops-cron-scheduling.md
 case "$TARGET" in
-  flowsheet-metadata-backfill|rotation-lml-identity-backfill)
+  flowsheet-metadata-backfill)
     if [ -n "${BACKFILL_CRON_SCHEDULE:-}" ]; then
       echo "$BACKFILL_CRON_SCHEDULE"
     else
