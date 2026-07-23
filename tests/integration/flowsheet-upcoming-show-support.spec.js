@@ -397,23 +397,29 @@ describe('V2 flowsheet upcoming_show enrichment — support arm (BS#1761)', () =
   });
 
   /**
-   * EXPLAIN proof (BS#1761 ticket constraint): the support query can drive
-   * off `concerts_active_starts_on_id_idx` for the outer `concerts` scan and
-   * reach `concert_performers` via the leading `concert_id` column of
-   * `concert_performers_concert_role_raw_name_idx` — no new index required.
+   * EXPLAIN proof (BS#1761 ticket constraint): the support query is fully
+   * index-supported with EXISTING indexes — no new index required. Both
+   * `concerts` and `concert_performers` are reached via an index; WHICH
+   * specific index each uses, and the join order, are left to the planner
+   * (with a tiny dataset it legitimately drives off `concert_performers`'s
+   * role index into `concerts` via `concerts_pkey` rather than off
+   * `concerts_active_starts_on_id_idx` — both are valid index-only plans), so
+   * pinning a specific index NAME is brittle. The load-bearing, plan-shape-
+   * stable proof is the ABSENCE of a Seq Scan under `enable_seqscan = off`.
    *
    * Mirrors the `concerts-artist-lml-resolver-writer.spec.js` EXPLAIN
    * pattern: `enable_seqscan = off` inside a ROLLED-BACK transaction
    * neutralizes the tiny-test-dataset confounder (a handful of rows makes a
-   * seq scan cheaper regardless of index availability), so the plan reflects
-   * what the query is structurally capable of at production scale. The
-   * sentinel throw guarantees the setting never leaks past this test.
+   * seq scan cheaper regardless of index availability), so a Seq Scan appears
+   * only if a table is structurally forced to one — its absence is the proof
+   * the query is index-supported at production scale. The sentinel throw
+   * guarantees the setting never leaks past this test.
    *
    * The SQL below is a hand mirror of the Drizzle query in
    * `getUpcomingShowsMaps`'s Pass 2 (apps/backend/services/concerts.service.ts)
    * — when that query's join/where shape changes, this mirror must follow.
    */
-  it('EXPLAIN: the support query can drive off concerts_active_starts_on_id_idx into concert_performers', async () => {
+  it('EXPLAIN: the support query is fully index-supported (no seq scan) at production scale', async () => {
     let planJson;
     const sentinel = new Error('rollback-explain-probe');
     try {
@@ -437,7 +443,15 @@ describe('V2 flowsheet upcoming_show enrichment — support arm (BS#1761)', () =
     } catch (err) {
       if (err !== sentinel) throw err;
     }
-    expect(planJson).toContain('concerts_active_starts_on_id_idx');
-    expect(planJson).toContain('concert_performers');
+    // Both tables are reached (via SOME index — planner's choice), and with
+    // enable_seqscan = off the ABSENCE of a Seq Scan node is the real "index-
+    // supported, no new index required" proof. Deliberately does NOT pin an
+    // index name or join order: a tiny dataset lets the planner drive off
+    // concert_performers into concerts via concerts_pkey, which is still fully
+    // index-driven. `not.toContain('"Node Type":"Seq Scan"')` also closes the
+    // old `toContain('concert_performers')` gap that passed even for a seq scan.
+    expect(planJson).toContain('"Relation Name":"concert_performers"');
+    expect(planJson).toContain('"Relation Name":"concerts"');
+    expect(planJson).not.toContain('"Node Type":"Seq Scan"');
   });
 });
