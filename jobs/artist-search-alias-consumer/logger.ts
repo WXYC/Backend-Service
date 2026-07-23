@@ -28,9 +28,9 @@ type BaseTags = { repo: string; tool: string; run_id: string };
 let baseTags: BaseTags | null = null;
 
 export const resolveTracesSampleRate = (raw: string | undefined = process.env.SENTRY_TRACES_SAMPLE_RATE): number => {
-  if (raw === undefined) return 0;
+  if (raw === undefined) return 1;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return 0;
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return 1;
   return parsed;
 };
 
