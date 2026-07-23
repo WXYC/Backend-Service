@@ -440,14 +440,27 @@ export const auth = betterAuth({
     }),
     after: createAuthMiddleware(async (ctx) => {
       if (ctx.path === '/admin/create-user') {
-        const email = ctx.body?.email;
-        if (!email || typeof email !== 'string') {
+        // BS#1118: key the auto-verify UPDATE off the just-created user's id,
+        // not the request-body email. The admin/create-user endpoint's own
+        // handler lowercases ctx.body.email before storing it and only
+        // checks for a case-sensitive existing match, so an admin submitting
+        // a different case than what ends up on disk (or a pre-existing
+        // case-variant row from another write path) previously meant
+        // `WHERE email = ctx.body.email` could silently miss the new row,
+        // flip an unrelated same-email-different-case row instead, or (in a
+        // create race) flip both. ctx.context.returned is the endpoint's
+        // `ctx.json({ user })` response body — the same mechanism the
+        // /device/token hook below already relies on — so the created id is
+        // available here.
+        const created = ctx.context.returned as { user?: { id?: string } } | undefined;
+        const userId = created?.user?.id;
+        if (!userId || typeof userId !== 'string') {
           return;
         }
 
         // Auto-verify email for admin-created users (trusted operation)
         try {
-          await db.update(user).set({ emailVerified: true }).where(eq(user.email, email));
+          await db.update(user).set({ emailVerified: true }).where(eq(user.id, userId));
         } catch (error) {
           console.error('Error auto-verifying admin-created user:', error);
         }
