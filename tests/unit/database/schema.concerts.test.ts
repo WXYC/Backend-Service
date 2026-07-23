@@ -187,12 +187,42 @@ describe('schema: venues + concerts (migration 0091, venue-events-scraper)', () 
     });
 
     it('declares the starts_on-first curated-feed partial index (resolver-stamped, not tombstoned)', () => {
-      // Predicate widened by migration 0116 (BS#1614): either resolution lane
-      // (catalog FK OR Discogs artist id) counts as curated. Must stay an
-      // exact twin of buildWhere's curated branch in concerts.service.ts.
+      // Predicate widened by migration 0116 (BS#1614), then again by
+      // migration 0129 (BS#1762): three resolution lanes (catalog FK,
+      // Discogs artist id, or a resolved support act) count as curated.
+      // Must stay an exact twin of buildWhere's curated branch in
+      // concerts.service.ts.
       expect(def()).toMatch(
-        /index\(['"]concerts_curated_starts_on_idx['"]\)[\s\S]*?\.on\(table\.starts_on\)[\s\S]*?\.where\([\s\S]*?sql`[\s\S]*?\([\s\S]*?headlining_artist_id[\s\S]*?IS NOT NULL OR [\s\S]*?headlining_discogs_artist_id[\s\S]*?IS NOT NULL\)[\s\S]*?removed_at[\s\S]*?IS NULL/
+        /index\(['"]concerts_curated_starts_on_idx['"]\)[\s\S]*?\.on\(table\.starts_on\)[\s\S]*?\.where\([\s\S]*?sql`[\s\S]*?\([\s\S]*?headlining_artist_id[\s\S]*?IS NOT NULL OR [\s\S]*?headlining_discogs_artist_id[\s\S]*?IS NOT NULL OR [\s\S]*?has_resolved_support[\s\S]*?\)[\s\S]*?removed_at[\s\S]*?IS NULL/
       );
+    });
+
+    it('migration 0129 drops and recreates the index in-transaction (non-CONCURRENTLY) with the three-term predicate', () => {
+      // Drizzle wraps every migration in a transaction, and
+      // CREATE INDEX CONCURRENTLY cannot run inside one — mirrors the same
+      // constraint migration 0116 documents for this same index.
+      const entry129 = journal.entries.find((e) => e.tag.startsWith('0129_'));
+      const sqlPath129 = entry129 ? path.join(migrationsDir, `${entry129.tag}.sql`) : null;
+      const sql129 = sqlPath129 && fs.existsSync(sqlPath129) ? fs.readFileSync(sqlPath129, 'utf-8') : '';
+
+      expect(entry129).toBeDefined();
+      expect(sql129).toMatch(/DROP INDEX IF EXISTS "wxyc_schema"\."concerts_curated_starts_on_idx"/);
+      expect(sql129).toMatch(
+        /CREATE INDEX IF NOT EXISTS "concerts_curated_starts_on_idx" ON "wxyc_schema"\."concerts"/
+      );
+      expect(sql129).toMatch(
+        /WHERE \("wxyc_schema"\."concerts"\."headlining_artist_id" IS NOT NULL OR "wxyc_schema"\."concerts"\."headlining_discogs_artist_id" IS NOT NULL OR "wxyc_schema"\."concerts"\."has_resolved_support"\) AND "wxyc_schema"\."concerts"\."removed_at" IS NULL/
+      );
+
+      // The load-bearing negative: the DDL itself must never say
+      // CONCURRENTLY outside of the commented ops-runbook example, or the
+      // migration fails at apply inside Drizzle's transaction wrapper and
+      // wedges the deploy.
+      const ddlOnly = sql129
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('--'))
+        .join('\n');
+      expect(ddlOnly).not.toMatch(/CONCURRENTLY/);
     });
   });
 

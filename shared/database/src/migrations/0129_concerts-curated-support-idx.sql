@@ -1,0 +1,47 @@
+-- 0129 concerts curated-feed index: widen to a third has_resolved_support
+-- term (BS#1762, parent #1618, On Tour epic #1588).
+--
+-- Extends the BS#1603 broad-curation decision ("resolution is a realness
+-- proxy") to supporting acts: a concert whose only resolved performer is a
+-- support act now belongs in the curated `GET /concerts?curated=true` feed,
+-- the same way a concert with only a Discogs-resolved headliner already
+-- does (migration 0116, BS#1614). `concerts.has_resolved_support`
+-- (migration 0128, BS#1759) has carried real data since
+-- `jobs/concerts-artist-resolver` grew its support sync/resolve/recompute
+-- step (BS#1760); this migration is the curated-feed slice that finally
+-- reads it.
+--
+-- The curated partial index is DROPped and recreated with the widened
+-- three-term predicate `(headlining_artist_id IS NOT NULL OR
+-- headlining_discogs_artist_id IS NOT NULL OR has_resolved_support) AND
+-- removed_at IS NULL`. The `buildWhere` curated branch in
+-- apps/backend/services/concerts.service.ts changes in lockstep (the read
+-- predicate must exactly match the index predicate or the planner falls
+-- back to concerts_active_starts_on_id_idx).
+--
+-- Lock behavior: mirrors 0116 exactly. `concerts` is small (single-digit
+-- thousands of rows), so the in-transaction DROP + CREATE INDEX window is
+-- trivial; no out-of-band CONCURRENTLY pre-build is required. Drizzle wraps
+-- every migration in a transaction, and CREATE INDEX CONCURRENTLY cannot
+-- run inside one — taken literally, a CONCURRENTLY statement here would
+-- fail at apply and wedge the deploy. If the table ever grows enough to
+-- warrant the out-of-band form, the runbook is:
+--
+--   DROP INDEX CONCURRENTLY IF EXISTS "wxyc_schema"."concerts_curated_starts_on_idx";
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "concerts_curated_starts_on_idx"
+--     ON "wxyc_schema"."concerts" USING btree ("starts_on")
+--     WHERE ("wxyc_schema"."concerts"."headlining_artist_id" IS NOT NULL OR "wxyc_schema"."concerts"."headlining_discogs_artist_id" IS NOT NULL OR "wxyc_schema"."concerts"."has_resolved_support")
+--       AND "wxyc_schema"."concerts"."removed_at" IS NULL;
+--
+-- (the in-migration form below is not CONCURRENTLY, for the reason above).
+-- IF EXISTS / IF NOT EXISTS make the migration a no-op against an
+-- environment where that pre-build already ran, per the established index
+-- pattern (0057/0068/0070/0116).
+--
+-- No precondition guard: this migration adds no UNIQUE / CHECK / NOT NULL /
+-- FK constraint (a plain, non-unique CREATE INDEX) and rewrites no rows —
+-- DDL-only. `has_resolved_support` itself was already NOT NULL DEFAULT
+-- false as of migration 0128, so every row already satisfies the column
+-- shape the widened predicate reads.
+DROP INDEX IF EXISTS "wxyc_schema"."concerts_curated_starts_on_idx";--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "concerts_curated_starts_on_idx" ON "wxyc_schema"."concerts" USING btree ("starts_on") WHERE ("wxyc_schema"."concerts"."headlining_artist_id" IS NOT NULL OR "wxyc_schema"."concerts"."headlining_discogs_artist_id" IS NOT NULL OR "wxyc_schema"."concerts"."has_resolved_support") AND "wxyc_schema"."concerts"."removed_at" IS NULL;
