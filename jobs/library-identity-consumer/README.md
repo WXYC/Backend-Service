@@ -76,26 +76,43 @@ docker run --rm --env-file .env -e DRY_RUN=true <ecr-image-uri>:<tag>
 
 ## Environment variables
 
-| Variable                    | Default       | Purpose                                                                              |
-| --------------------------- | ------------- | ------------------------------------------------------------------------------------ |
-| `DATABASE_URL`              | —             | Backend PostgreSQL connection string (required)                                      |
-| `LIBRARY_METADATA_URL`      | —             | LML base URL (required); trailing `/api/v1` is stripped                              |
-| `LML_API_KEY`               | unset         | Bearer token; sent as `Authorization: Bearer …` when set (LML enforces auth in prod) |
-| `BATCH_SIZE`                | `500`         | Inputs per `bulk-resolve-libraries` call; LML caps at 1000                           |
-| `THROTTLE_MS`               | `100`         | Inter-batch sleep, ms (DB + LML pacing)                                              |
-| `STALE_THRESHOLD_DAYS`      | `7`           | Days before a `library_identity` row is re-fetched                                   |
-| `PARTITION_INDEX`           | `0`           | Index of this partition (0-based)                                                    |
-| `PARTITION_COUNT`           | `1`           | Total partition count; `1` = single-container run                                    |
-| `DRY_RUN`                   | unset         | Locked truthy `true`/`1`/`TRUE`: call LML, suppress writes, emit JSON                |
-| `SENTRY_DSN`                | unset         | Optional; Sentry no-ops when unset                                                   |
-| `SENTRY_TRACES_SAMPLE_RATE` | `0`           | Sampling rate for the run span (0–1)                                                 |
-| `WXYC_SCHEMA_NAME`          | `wxyc_schema` | Override only for parallel Jest workers / integration harnesses                      |
+| Variable                    | Default       | Purpose                                                                                                                          |
+| --------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`              | —             | Backend PostgreSQL connection string (required)                                                                                  |
+| `LIBRARY_METADATA_URL`      | —             | LML base URL (required); trailing `/api/v1` is stripped                                                                          |
+| `LML_API_KEY`               | unset         | Bearer token; sent as `Authorization: Bearer …` when set (LML enforces auth in prod)                                             |
+| `BATCH_SIZE`                | `500`         | Inputs per `bulk-resolve-libraries` call; LML caps at 1000                                                                       |
+| `THROTTLE_MS`               | `100`         | Inter-batch sleep, ms (DB + LML pacing)                                                                                          |
+| `STALE_THRESHOLD_DAYS`      | `7`           | Days before a `library_identity` row is re-fetched                                                                               |
+| `INCLUDE_NULL_CANONICAL`    | unset (off)   | BS#974 staged-rollout flag: `true`/`1` brings NULL-`canonical_entity_id` rows into scope (see below)                             |
+| `UNRESOLVED_RETRY_DAYS`     | `30`          | BS#974 no-match retry window for `unresolved_attempted_at` (separate from `STALE_THRESHOLD_DAYS`; only read when the flag is on) |
+| `PARTITION_INDEX`           | `0`           | Index of this partition (0-based)                                                                                                |
+| `PARTITION_COUNT`           | `1`           | Total partition count; `1` = single-container run                                                                                |
+| `DRY_RUN`                   | unset         | Locked truthy `true`/`1`/`TRUE`: call LML, suppress writes, emit JSON                                                            |
+| `SENTRY_DSN`                | unset         | Optional; Sentry no-ops when unset                                                                                               |
+| `SENTRY_TRACES_SAMPLE_RATE` | `0`           | Sampling rate for the run span (0–1)                                                                                             |
+| `WXYC_SCHEMA_NAME`          | `wxyc_schema` | Override only for parallel Jest workers / integration harnesses                                                                  |
 
 ## Idempotency & rerun safety
 
 Every write is an UPSERT; the SELECT predicate moves freshly-written rows out of the staleness bucket. Rerunning is safe.
 
-On a batch-level LML failure, every input is counted as `rows_skipped { lml_error }` and the loop continues to the next batch. The next run re-picks those rows via the SELECT predicate. No tombstone or attempt-marker column is used — the predicate itself is the resumability mechanism.
+On a batch-level LML failure, every input is counted as `rows_skipped { lml_error }` and the loop continues to the next batch. The next run re-picks those rows via the SELECT predicate. In the default (flag-off) mode no attempt-marker column is used — the predicate itself is the resumability mechanism. Under `INCLUDE_NULL_CANONICAL` (below), the `library.unresolved_attempted_at` marker additionally dedups a manual re-run of the no-match rows.
+
+## BS#974 — covering NULL-`canonical_entity_id` rows (`INCLUDE_NULL_CANONICAL`)
+
+By default the SELECT only considers `canonical_entity_id IS NOT NULL` rows, so the ~34K never-canonicalized libraries — including the ~6,300 V/A compilation rows LML has never classified ([#801](https://github.com/WXYC/Backend-Service/issues/801)) — are never scanned. `INCLUDE_NULL_CANONICAL=true` expands the predicate to cover them.
+
+A row LML can't resolve never lands in `library_identity`, so it would be re-attempted on every run (LML quota burn). The `library.unresolved_attempted_at` marker (migration 0130) prevents that: a `kind: unresolved`/`compilation` row is stamped so a subsequent run skips it until `UNRESOLVED_RETRY_DAYS` (default 30) elapse. `single_artist` resolutions are NOT stamped — their `library_identity` row is the success marker.
+
+**This is a one-shot job with no cron backstop** — a stamped row is only re-attempted when an operator re-runs the job past the window. Flag off is byte-identical to the prior behavior.
+
+**Staged rollout** (all manual `docker run` invocations):
+
+1. Deploy the image with `INCLUDE_NULL_CANONICAL` unset → a run behaves exactly as before (zero-change verification).
+2. `docker run … -e INCLUDE_NULL_CANONICAL=true -e DRY_RUN=true …` → confirm `scanned` jumps to ≈ the full library (~64,676) and `would_skip.compilation > 0` (V/A rows now classified).
+3. Optionally subset-first with `PARTITION_INDEX` / `PARTITION_COUNT`.
+4. `docker run … -e INCLUDE_NULL_CANONICAL=true …` for the live drain.
 
 ## Sentry metrics
 

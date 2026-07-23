@@ -16,6 +16,7 @@ import {
   runConsumer,
   type BulkResolveFn,
   type DryRunReport,
+  type StampUnresolvedFn,
   type WriteSingleArtistFn,
 } from '../../../../jobs/library-identity-consumer/orchestrate';
 
@@ -570,5 +571,128 @@ describe('runConsumer — DRY_RUN', () => {
     if (!captured) throw new Error('expected a dry-run report');
     expect(captured.would_skip.lml_error).toBe(2);
     expect(captured.would_resolve).toBe(0);
+  });
+});
+
+describe('runConsumer — BS#974 unresolved-marker stamping', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  // One batch: 2 single_artist (100, 101), 1 compilation (102), 1 unresolved (103).
+  const wireOneBatch = () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        { id: 100, artist_name: 'Juana Molina', album_title: 'DOGA' },
+        { id: 101, artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again' },
+        { id: 102, artist_name: 'Various Artists', album_title: 'A Compilation' },
+        { id: 103, artist_name: 'Some Indie Band', album_title: 'A Record' },
+      ])
+      .mockResolvedValue([]);
+
+    const lmlResponse: BulkResolveResponse = {
+      results: [
+        {
+          kind: 'single_artist',
+          library_id: 100,
+          main: { wikidata_qid: 'Q-juana' },
+          method: 'exact_match',
+          confidence: 1.0,
+          provenance: [{ source: 'wikidata', method: 'exact_match', confidence: 1.0, external_id: 'Q-juana' }],
+        },
+        {
+          kind: 'single_artist',
+          library_id: 101,
+          main: { wikidata_qid: 'Q-jess' },
+          method: 'exact_match',
+          confidence: 1.0,
+          provenance: [{ source: 'wikidata', method: 'exact_match', confidence: 1.0, external_id: 'Q-jess' }],
+        },
+        { kind: 'compilation', library_id: 102, provenance: [] },
+        { kind: 'unresolved', library_id: 103, provenance: [] },
+      ],
+    };
+    const bulkResolve = jest.fn<BulkResolveFn>().mockResolvedValue(lmlResponse);
+    const writeSingleArtist = jest.fn<WriteSingleArtistFn>().mockResolvedValue({
+      source_rows_written: 1,
+      source_rows_skipped_null_confidence: 0,
+    });
+    return { bulkResolve, writeSingleArtist };
+  };
+
+  const baseOpts = (bulkResolve: BulkResolveFn, writeSingleArtist: WriteSingleArtistFn) => ({
+    bulkResolve,
+    writeSingleArtist,
+    batchSize: 500,
+    throttleMs: 0,
+    staleDays: 7,
+    partition: { sqlFragment: null, description: 'partition=none' },
+  });
+
+  it('flag-on stamps ONLY the unresolved + compilation ids (not resolved rows)', async () => {
+    const { bulkResolve, writeSingleArtist } = wireOneBatch();
+    const stampUnresolvedAttemptedAt = jest.fn<StampUnresolvedFn>().mockResolvedValue(undefined);
+
+    await runConsumer({
+      ...baseOpts(bulkResolve, writeSingleArtist),
+      dryRun: false,
+      includeNullCanonical: true,
+      stampUnresolvedAttemptedAt,
+    });
+
+    expect(stampUnresolvedAttemptedAt).toHaveBeenCalledTimes(1);
+    // compilation (102) pushed before unresolved (103), following results order.
+    expect(stampUnresolvedAttemptedAt).toHaveBeenCalledWith([102, 103]);
+  });
+
+  it('flag-off (default) never stamps, even with a stamp fn wired', async () => {
+    const { bulkResolve, writeSingleArtist } = wireOneBatch();
+    const stampUnresolvedAttemptedAt = jest.fn<StampUnresolvedFn>().mockResolvedValue(undefined);
+
+    await runConsumer({
+      ...baseOpts(bulkResolve, writeSingleArtist),
+      dryRun: false,
+      includeNullCanonical: false,
+      stampUnresolvedAttemptedAt,
+    });
+
+    expect(stampUnresolvedAttemptedAt).not.toHaveBeenCalled();
+  });
+
+  it('dry-run never stamps even with the flag on', async () => {
+    const { bulkResolve, writeSingleArtist } = wireOneBatch();
+    const stampUnresolvedAttemptedAt = jest.fn<StampUnresolvedFn>().mockResolvedValue(undefined);
+
+    await runConsumer({
+      ...baseOpts(bulkResolve, writeSingleArtist),
+      dryRun: true,
+      includeNullCanonical: true,
+      stampUnresolvedAttemptedAt,
+    });
+
+    expect(stampUnresolvedAttemptedAt).not.toHaveBeenCalled();
+  });
+
+  it('a stamp failure is swallowed — the drain still completes with correct counters', async () => {
+    const { bulkResolve, writeSingleArtist } = wireOneBatch();
+    const stampUnresolvedAttemptedAt = jest.fn<StampUnresolvedFn>().mockRejectedValue(new Error('stamp 503'));
+
+    const result = await runConsumer({
+      ...baseOpts(bulkResolve, writeSingleArtist),
+      dryRun: false,
+      includeNullCanonical: true,
+      stampUnresolvedAttemptedAt,
+    });
+
+    expect(stampUnresolvedAttemptedAt).toHaveBeenCalledTimes(1);
+    expect(result.totals.rows_resolved).toBe(2);
+    expect(result.totals.rows_unresolved).toBe(1);
+    expect(result.totals.rows_skipped.compilation).toBe(1);
   });
 });

@@ -11,9 +11,11 @@ import {
   loadBatch,
   resolveBatchSize,
   resolveDryRun,
+  resolveIncludeNullCanonical,
   resolvePartitionFilter,
   resolveStaleThreshold,
   resolveThrottleMs,
+  resolveUnresolvedRetryDays,
 } from '../../../../jobs/library-identity-consumer/select';
 
 describe('resolveBatchSize', () => {
@@ -107,6 +109,36 @@ describe('resolveDryRun', () => {
   });
 });
 
+describe('resolveIncludeNullCanonical', () => {
+  it('defaults OFF (undefined / empty / other strings)', () => {
+    expect(resolveIncludeNullCanonical(undefined)).toBe(false);
+    expect(resolveIncludeNullCanonical('')).toBe(false);
+    expect(resolveIncludeNullCanonical('false')).toBe(false);
+    expect(resolveIncludeNullCanonical('0')).toBe(false);
+  });
+
+  it('treats "true" / "1" / "TRUE" as enabled', () => {
+    expect(resolveIncludeNullCanonical('true')).toBe(true);
+    expect(resolveIncludeNullCanonical('1')).toBe(true);
+    expect(resolveIncludeNullCanonical('TRUE')).toBe(true);
+  });
+});
+
+describe('resolveUnresolvedRetryDays', () => {
+  it('defaults to 30 (separate from the 7-day identity-freshness window)', () => {
+    expect(resolveUnresolvedRetryDays(undefined)).toBe(30);
+  });
+
+  it('accepts a positive integer', () => {
+    expect(resolveUnresolvedRetryDays('14')).toBe(14);
+  });
+
+  it('rejects zero or non-integer', () => {
+    expect(() => resolveUnresolvedRetryDays('0')).toThrow();
+    expect(() => resolveUnresolvedRetryDays('abc')).toThrow();
+  });
+});
+
 describe('loadBatch', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -124,6 +156,26 @@ describe('loadBatch', () => {
     expect(serialized).toMatch(/library_identity/);
     expect(serialized).toMatch(/last_verified_at/);
     expect(serialized).toMatch(/artist_name/);
+  });
+
+  it('flag-off (default) keeps the canonical filter and does NOT read the unresolved marker (BS#974 no-change guarantee)', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await loadBatch(0, 500, null, 7); // includeNullCanonical defaults to false
+    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    expect(serialized).toMatch(/canonical_entity_id/);
+    expect(serialized).not.toMatch(/unresolved_attempted_at/);
+  });
+
+  it('flag-on drops the canonical filter and gates first-timers on the unresolved marker (BS#974)', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await loadBatch(0, 500, null, 7, true, 30);
+    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    // NULL-canonical rows are now in scope → the canonical filter is gone...
+    expect(serialized).not.toMatch(/canonical_entity_id/);
+    // ...and the no-match marker gate is present, alongside the stale re-verify.
+    expect(serialized).toMatch(/unresolved_attempted_at/);
+    expect(serialized).toMatch(/last_verified_at/);
+    expect(serialized).toMatch(/NOT EXISTS/);
   });
 
   it('gates on a freshness guard so canonicalized rows are not unconditionally re-fetched (BS#1144)', async () => {

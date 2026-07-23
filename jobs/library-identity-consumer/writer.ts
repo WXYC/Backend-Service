@@ -44,6 +44,7 @@ import { db } from '@wxyc/database';
 import type { BulkResolveResult, ReconciledIdentity } from './lml-types.js';
 
 const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
+const LIBRARY_TABLE = sql.raw(`"${SCHEMA}"."library"`);
 const LIBRARY_IDENTITY_TABLE = sql.raw(`"${SCHEMA}"."library_identity"`);
 const LIBRARY_IDENTITY_SOURCE_TABLE = sql.raw(`"${SCHEMA}"."library_identity_source"`);
 
@@ -193,4 +194,28 @@ export const writeSingleArtist = async (
     source_rows_written: sourceRowsWritten,
     source_rows_skipped_null_confidence: sourceRowsSkippedNullConfidence,
   };
+};
+
+/**
+ * BS#974: stamp the `library.unresolved_attempted_at` no-match marker on the
+ * given library ids. Called (flag-on, non-dry-run) with the batch's
+ * `unresolved` + `compilation` library_ids — the rows LML *responded* on with
+ * a definitive non-resolution — so a manual re-run doesn't re-burn LML on them
+ * within `UNRESOLVED_RETRY_DAYS`. NOT called for `single_artist` (its
+ * `library_identity` row is the success marker) or for transient failures
+ * (`writer_error`/`lml_error`/cardinality/untrusted — those stay retryable).
+ *
+ * Binds the ids as a single Postgres array literal (`= ANY('{...}'::int[])`)
+ * rather than an `IN (...)` splat, per BS#1071/#1072. Empty input is a no-op
+ * (no query). The `id` values are numbers (LibraryRow.id), so the literal is
+ * injection-safe.
+ */
+export const stampUnresolvedAttemptedAt = async (libraryIds: number[]): Promise<void> => {
+  if (libraryIds.length === 0) return;
+  const idArrayLiteral = `{${libraryIds.join(',')}}`;
+  await db.execute(sql`
+    UPDATE ${LIBRARY_TABLE}
+    SET "unresolved_attempted_at" = NOW()
+    WHERE "id" = ANY(${idArrayLiteral}::int[])
+  `);
 };

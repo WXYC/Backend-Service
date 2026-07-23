@@ -4,13 +4,12 @@
  * Post-#800 architecture: Backend is the thin writer; LML is sole composer
  * of cross-cache identity. The orchestrator:
  *
- *   1. SELECTs libraries needing identity refresh (predicate in select.ts):
- *      `library.canonical_entity_id IS NOT NULL OR library.id IN (
- *        SELECT library_id FROM library_identity
- *        WHERE last_verified_at < NOW() - interval '7 days'
- *      )`
- *      (BS#802's body used `last_refreshed_at` — the actual column is
- *      `last_verified_at`; see the PR body's correction note.)
+ *   1. SELECTs libraries needing identity refresh — the predicate lives in
+ *      select.ts:loadBatch. Post-#1144 it gates canonicalized rows behind a
+ *      freshness check (no `library_identity` row yet, OR the existing one is
+ *      stale); BS#974's `INCLUDE_NULL_CANONICAL` flag (default off) expands it
+ *      to also cover NULL-`canonical_entity_id` rows, with the
+ *      `library.unresolved_attempted_at` no-match marker preventing a hot-loop.
  *   2. POSTs each batch (≤ 500 inputs, LML caps at 1000) to LML's
  *      `/api/v1/identity/bulk-resolve-libraries`.
  *   3. For each `BulkResolveResult`:
@@ -51,6 +50,15 @@ export type BulkResolveFn = (inputs: BulkResolveInput[]) => Promise<BulkResolveR
 export type WriteSingleArtistFn = (
   result: Extract<BulkResolveResult, { kind: 'single_artist' }>
 ) => Promise<{ source_rows_written: number; source_rows_skipped_null_confidence: number }>;
+
+/**
+ * BS#974: stamps the `library.unresolved_attempted_at` no-match marker on a
+ * batch's `unresolved` + `compilation` library_ids so a manual re-run doesn't
+ * re-burn LML on them within `UNRESOLVED_RETRY_DAYS`. Injected (like
+ * `bulkResolve`/`writeSingleArtist`) so unit tests can observe the stamped set
+ * without a DB. Production wires it to `writer.ts:stampUnresolvedAttemptedAt`.
+ */
+export type StampUnresolvedFn = (libraryIds: number[]) => Promise<void>;
 
 /**
  * Aggregate counters. The unit is library_ids except where noted.
@@ -138,11 +146,21 @@ export const runConsumer = async (opts: {
   partition: { sqlFragment: SQL | null; description: string };
   dryRun: boolean;
   onDryRunReport?: (report: DryRunReport) => void;
+  // BS#974 — optional so existing callers/tests that predate the NULL-canonical
+  // expansion keep compiling. Defaults reproduce the #1144 behavior exactly.
+  includeNullCanonical?: boolean;
+  unresolvedRetryDays?: number;
+  stampUnresolvedAttemptedAt?: StampUnresolvedFn;
 }): Promise<RunResult> => {
+  const includeNullCanonical = opts.includeNullCanonical ?? false;
+  const unresolvedRetryDays = opts.unresolvedRetryDays ?? 30;
+
   log('info', 'started', `${JOB_NAME} starting`, {
     batch_size: opts.batchSize,
     throttle_ms: opts.throttleMs,
     stale_days: opts.staleDays,
+    include_null_canonical: includeNullCanonical,
+    unresolved_retry_days: unresolvedRetryDays,
     partition: opts.partition.description,
     dry_run: opts.dryRun,
   });
@@ -152,7 +170,14 @@ export const runConsumer = async (opts: {
   let batchIndex = 0;
 
   while (true) {
-    const rows: LibraryRow[] = await loadBatch(lastId, opts.batchSize, opts.partition.sqlFragment, opts.staleDays);
+    const rows: LibraryRow[] = await loadBatch(
+      lastId,
+      opts.batchSize,
+      opts.partition.sqlFragment,
+      opts.staleDays,
+      includeNullCanonical,
+      unresolvedRetryDays
+    );
     if (rows.length === 0) break;
     batchIndex += 1;
 
@@ -227,6 +252,10 @@ export const runConsumer = async (opts: {
     // silently double-written.
     const inputIds = new Set(rows.map((r) => r.id));
     const consumedIds = new Set<number>();
+    // BS#974: library_ids LML responded on with a definitive non-resolution
+    // (`unresolved`/`compilation`). Stamped after the loop (flag-on, non-dry-
+    // run) so a manual re-run doesn't re-burn LML on them within the window.
+    const noMatchLibraryIds: number[] = [];
 
     for (const result of response.results) {
       if (!inputIds.has(result.library_id) || consumedIds.has(result.library_id)) {
@@ -272,12 +301,32 @@ export const runConsumer = async (opts: {
           break;
         case 'unresolved':
           totals.rows_unresolved += 1;
+          noMatchLibraryIds.push(result.library_id);
           break;
         case 'compilation':
           // BS#801 will handle compilation results via library_track_*
           // tables. For BS#802 we count + skip.
           totals.rows_skipped.compilation += 1;
+          noMatchLibraryIds.push(result.library_id);
           break;
+      }
+    }
+
+    // BS#974: stamp the no-match marker so a subsequent manual re-run skips
+    // these until `unresolvedRetryDays` elapse. Only under the flag (off = the
+    // pre-#974 predicate never reads the marker) and never in dry-run. Stamp
+    // failure is a best-effort miss (rows just re-attempt next run), not a
+    // correctness fault — log + continue rather than abort the drain.
+    if (includeNullCanonical && !opts.dryRun && opts.stampUnresolvedAttemptedAt && noMatchLibraryIds.length > 0) {
+      try {
+        await opts.stampUnresolvedAttemptedAt(noMatchLibraryIds);
+      } catch (error) {
+        log('warn', 'stamp_error', `failed to stamp unresolved_attempted_at for batch ${batchIndex}`, {
+          batch_index: batchIndex,
+          count: noMatchLibraryIds.length,
+          error_message: (error as Error).message,
+        });
+        captureError(error, 'stamp_error', { batch_index: batchIndex, count: noMatchLibraryIds.length });
       }
     }
 
