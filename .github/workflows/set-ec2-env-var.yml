@@ -100,7 +100,7 @@ jobs:
           echo "KEY=$KEY" >> "$GITHUB_ENV"
           # Which container re-reads .env after the upsert. Forwarded to the
           # SSH step via `envs:` (same reason as KEY above).
-          echo "TARGET=${{ inputs.restart_target }}" >> "$GITHUB_ENV"
+          echo "RESTART_TARGET=${{ inputs.restart_target }}" >> "$GITHUB_ENV"
           echo "length=${#VALUE}" >> "$GITHUB_OUTPUT"
 
       - name: Upsert in .env + restart target container
@@ -109,17 +109,22 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          envs: KEY,VALUE,TARGET
-          script_stop: true
+          envs: KEY,VALUE,RESTART_TARGET
           script: |
             set -euo pipefail
 
-            # KEY/VALUE/TARGET are passed via the `envs:` field above. Quoting
-            # VALUE with double-quotes so a base64 = doesn't trip up the shell.
+            # KEY/VALUE/RESTART_TARGET are passed via the `envs:` field above.
+            # NB the restart target is RESTART_TARGET, not TARGET: the
+            # appleboy/ssh-action wrapper exports its own TARGET (the path to the
+            # drone-ssh binary) into the forwarded environment, which shadowed a
+            # plain TARGET and made the restart step look for a container named
+            # after the action binary instead of `backend` (the 2026-07-23
+            # LML_API_KEY rotation failure). Quoting VALUE with double-quotes so a
+            # base64 = doesn't trip up the shell.
             if [ -z "${KEY:-}" ] || [ -z "${VALUE:-}" ]; then
               echo "Missing KEY or VALUE in script env"; exit 1
             fi
-            TARGET="${TARGET:-backend}"
+            RESTART_TARGET="${RESTART_TARGET:-backend}"
 
             ENV_FILE="$HOME/.env"
             test -f "$ENV_FILE" || { echo "$ENV_FILE missing on host"; exit 1; }
@@ -140,7 +145,7 @@ jobs:
             echo "Lines after:  $(wc -l < "$ENV_FILE")"
             grep -c "^${KEY}=" "$ENV_FILE" | xargs -I{} echo "Occurrences of ${KEY} in .env: {}"
 
-            # Restart the TARGET container so it picks up the new env var. Each
+            # Restart the RESTART_TARGET container so it picks up the new env var. Each
             # service runs as its own container named after the target, sharing
             # ~/.env (see .github/actions/deploy-service/action.yml). Auth-only
             # vars (e.g. the AUTO_DJ_* bootstrap, consumed at auth startup in
@@ -149,21 +154,21 @@ jobs:
             # The container was started with --env-file .env, and Docker
             # re-reads --env-file only on `docker run`, not `docker restart`,
             # so stop+run with the last-deployed image.
-            CURRENT_IMAGE=$(docker inspect -f '{{.Config.Image}}' "$TARGET" 2>/dev/null || echo "")
-            CURRENT_PORT=$(docker port "$TARGET" 8080/tcp 2>/dev/null | head -1 | awk -F: '{print $NF}' || echo "")
+            CURRENT_IMAGE=$(docker inspect -f '{{.Config.Image}}' "$RESTART_TARGET" 2>/dev/null || echo "")
+            CURRENT_PORT=$(docker port "$RESTART_TARGET" 8080/tcp 2>/dev/null | head -1 | awk -F: '{print $NF}' || echo "")
 
             if [ -z "$CURRENT_IMAGE" ]; then
-              echo "::error::No '$TARGET' container found on EC2. Was it ever deployed?"
+              echo "::error::No '$RESTART_TARGET' container found on EC2. Was it ever deployed?"
               exit 1
             fi
 
-            echo "Restart target: $TARGET"
+            echo "Restart target: $RESTART_TARGET"
             echo "Current image: $CURRENT_IMAGE"
             echo "Current published port: $CURRENT_PORT"
 
-            docker stop "$TARGET"
-            docker rm "$TARGET"
-            docker run -d --name "$TARGET" \
+            docker stop "$RESTART_TARGET"
+            docker rm "$RESTART_TARGET"
+            docker run -d --name "$RESTART_TARGET" \
               -p "${CURRENT_PORT:-8080}:8080" \
               --restart unless-stopped \
               --memory=450m \
@@ -171,7 +176,7 @@ jobs:
               "$CURRENT_IMAGE"
 
             sleep 5
-            docker ps --filter "name=$TARGET" --format '{{.Status}}'
+            docker ps --filter "name=$RESTART_TARGET" --format '{{.Status}}'
 
             # Health check the container we just restarted, on its own
             # published port (not a hardcoded 8080 — backend and auth publish
@@ -185,9 +190,9 @@ jobs:
               echo "Health attempt $i: not ready, retrying..."
               sleep 5
             done
-            echo "::error::$TARGET healthcheck failed on port $HEALTH_PORT after 6 attempts"
+            echo "::error::$RESTART_TARGET healthcheck failed on port $HEALTH_PORT after 6 attempts"
             exit 1
 
       - name: Summary
         run: |
-          echo "Upserted ${{ env.KEY }} (${{ steps.resolve.outputs.length }} chars) on EC2 and restarted the ${{ env.TARGET }} container."
+          echo "Upserted ${{ env.KEY }} (${{ steps.resolve.outputs.length }} chars) on EC2 and restarted the ${{ env.RESTART_TARGET }} container."
