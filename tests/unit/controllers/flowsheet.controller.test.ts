@@ -9,6 +9,7 @@ jest.mock('@sentry/node', () => ({ captureException: mockCaptureException }));
 const mockGetEntriesByPage = jest.fn<() => Promise<unknown[]>>();
 const mockGetEntryCount = jest.fn<() => Promise<number>>();
 const mockGetEntriesByShow = jest.fn<() => Promise<unknown[]>>();
+const mockGetEntriesByRange = jest.fn<() => Promise<unknown[]>>();
 const mockGetNShows = jest.fn<() => Promise<unknown[]>>();
 const mockGetShowMetadata = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockTransformToV2 = jest.fn((entry: unknown) => ({ ...(entry as Record<string, unknown>), v2: true }));
@@ -35,6 +36,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getEntriesByPage: mockGetEntriesByPage,
   getEntryCount: mockGetEntryCount,
   getEntriesByShow: mockGetEntriesByShow,
+  getEntriesByRange: mockGetEntriesByRange,
   getNShows: mockGetNShows,
   getShowMetadata: mockGetShowMetadata,
   transformToV2: mockTransformToV2,
@@ -198,6 +200,62 @@ describe('flowsheet.controller', () => {
       expect(mockGetOnAirDJName).not.toHaveBeenCalled();
       const body = (res.json as jest.Mock).mock.calls[0][0];
       expect(Array.isArray(body)).toBe(true);
+    });
+
+    // BS#1110: non-numeric start_id/end_id used to flow straight into
+    // parseInt arithmetic (yielding NaN), pass the MAX_ITEMS check, and blow up
+    // downstream as a Postgres "invalid input syntax for type integer: NaN"
+    // 500. These must 400 with a message naming the bad parameter instead.
+    describe('range mode validation (BS#1110)', () => {
+      it('rejects a non-numeric start_id with 400 naming start_id', async () => {
+        const req = createMockReq({ start_id: 'abc', end_id: '150' });
+        const res = createMockRes();
+
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toThrow(
+          'start_id must be a valid integer'
+        );
+        expect(mockGetEntriesByRange).not.toHaveBeenCalled();
+      });
+
+      it('rejects a non-numeric end_id with 400 naming end_id', async () => {
+        const req = createMockReq({ start_id: '100', end_id: 'def' });
+        const res = createMockRes();
+
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toThrow(
+          'end_id must be a valid integer'
+        );
+        expect(mockGetEntriesByRange).not.toHaveBeenCalled();
+      });
+
+      it('rejects when both start_id and end_id are non-numeric', async () => {
+        const req = createMockReq({ start_id: 'abc', end_id: 'def' });
+        const res = createMockRes();
+
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+        expect(mockGetEntriesByRange).not.toHaveBeenCalled();
+      });
+
+      it('rejects end_id < start_id with 400', async () => {
+        const req = createMockReq({ start_id: '100', end_id: '50' });
+        const res = createMockRes();
+
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toThrow(
+          'end_id must not be less than start_id'
+        );
+        expect(mockGetEntriesByRange).not.toHaveBeenCalled();
+      });
+
+      it('accepts a valid numeric range', async () => {
+        mockGetEntriesByRange.mockResolvedValue([createMockEntry(100)]);
+
+        const req = createMockReq({ start_id: '100', end_id: '105' });
+        const res = createMockRes();
+
+        await getEntries(req as Request, res as Response, mockNext);
+
+        expect(mockGetEntriesByRange).toHaveBeenCalledWith(100, 105);
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
     });
 
     it('calculates offset from page and limit', async () => {

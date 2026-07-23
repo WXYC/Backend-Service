@@ -115,10 +115,23 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   }
 
   if (query.start_id !== undefined && query.end_id !== undefined) {
-    if (parseInt(query.end_id) - parseInt(query.start_id) - DELETION_OFFSET > MAX_ITEMS) {
+    const startId = parseInt(query.start_id);
+    const endId = parseInt(query.end_id);
+    if (!Number.isInteger(startId)) {
+      throw new WxycError('start_id must be a valid integer', 400);
+    }
+    if (!Number.isInteger(endId)) {
+      throw new WxycError('end_id must be a valid integer', 400);
+    }
+    // end_id < start_id would compute a negative-length range; reject rather
+    // than silently returning an empty/inverted result from getEntriesByRange.
+    if (endId < startId) {
+      throw new WxycError('end_id must not be less than start_id', 400);
+    }
+    if (endId - startId - DELETION_OFFSET > MAX_ITEMS) {
       throw new WxycError('Requested too many entries', 400);
     }
-    const entries = await flowsheet_service.getEntriesByRange(parseInt(query.start_id), parseInt(query.end_id));
+    const entries = await flowsheet_service.getEntriesByRange(startId, endId);
     if (entries.length) {
       await flowsheet_service.attachUpcomingShows(entries);
       res.status(200).json(entries.map(flowsheet_service.transformToV2));
