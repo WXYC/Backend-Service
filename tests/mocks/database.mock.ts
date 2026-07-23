@@ -9,8 +9,11 @@ type MockQueryChain = {
   leftJoin: jest.Mock;
   orderBy: jest.Mock;
   limit: jest.Mock;
+  offset: jest.Mock;
   insert: jest.Mock;
   values: jest.Mock;
+  onConflictDoNothing: jest.Mock;
+  onConflictDoUpdate: jest.Mock;
   returning: jest.Mock;
   update: jest.Mock;
   set: jest.Mock;
@@ -163,7 +166,24 @@ export const concerts = {
   raw_data: 'raw_data',
   scraped_at: 'scraped_at',
   first_scraped_at: 'first_scraped_at',
+  has_resolved_support: 'has_resolved_support',
   last_modified: 'last_modified',
+};
+// Named `concertPerformers` (camelCase) to match the real export in
+// shared/database/src/schema.ts — unlike most multi-word tables in this
+// mock file (e.g. `artist_search_alias`), the real schema.ts binding for
+// `concert_performers` is camelCase.
+export const concertPerformers = {
+  id: 'id',
+  concert_id: 'concert_id',
+  raw_name: 'raw_name',
+  role: 'role',
+  artist_id: 'artist_id',
+  discogs_artist_id: 'discogs_artist_id',
+  discogs_artist_id_source: 'discogs_artist_id_source',
+  artist_resolve_attempted_at: 'artist_resolve_attempted_at',
+  removed_at: 'removed_at',
+  created_at: 'created_at',
 };
 export const album_plays = {
   album_id: 'album_id',
