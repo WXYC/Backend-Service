@@ -112,8 +112,11 @@ export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
 
 // -- Source query ------------------------------------------------------------
 
-/** A raw free-text pair as the DJ typed it, with a representative track title
- * (empty string when no usable track exists for the pair). */
+/** A raw free-text pair as the DJ typed it, with a representative track title.
+ * `song` is trimmed at the enumerate boundary (empty string when no usable
+ * track exists for the pair) — it is the single place the "usable track?" rule
+ * is applied, so every downstream consumer can treat a truthy `song` as ready
+ * to send. */
 export interface RawPair {
   artist: string;
   album: string;
@@ -129,25 +132,38 @@ export interface NormalizedPair {
   song: string;
 }
 
-/** SELECT DISTINCT ON (artist_name, album_title) of every unlinked track row,
- * carrying a representative `track_title` alongside each pair.
+/** SELECT one row per unlinked `(artist, album)` pair, carrying the pair's
+ * MOST-PLAYED non-empty `track_title` as its representative track.
  *
- * `DISTINCT ON` (not a plain `SELECT DISTINCT` over three columns) so SQL
- * returns exactly one row per (artist, album) pair — adding `track_title` to
- * a bare `SELECT DISTINCT` list would instead return one row per
- * (artist, album, track) TRIPLE, blowing up the already-uncovered
- * `album_id IS NULL` scan by ~7x. The ORDER BY prefers a non-empty track
- * (`btrim(coalesce(track_title, '')) = ''` sorts false-before-true, i.e.
- * non-empty first) and falls back to a deterministic `track_title ASC` so the
- * chosen representative is stable across runs. There is NO
- * `track_title IS NOT NULL` filter — a pair whose plays are all track-less
- * must still enumerate and resolve album-only, exactly as before this change.
+ * The most-played track (not the alphabetically-first) is the album's
+ * canonical track — an 'A…' bonus/intro title is an arbitrary, low-signal
+ * representative that resolves to the wrong release (or no release) far more
+ * often. Picking the modal track reduces both wrong-release matches and missed
+ * matches; the A/B probe behind BS#1767 showed track-aware matching lifting the
+ * match rate ~3.7x over album-only with zero regressions.
  *
- * Wrapped in `db.transaction` + `SET LOCAL statement_timeout` because the
- * `album_id IS NULL` partition isn't covered by the metadata-drain partial
- * indexes; the planner falls back to a scan that can exceed the backend's
- * default `statement_timeout`. `SET LOCAL` only scopes inside an explicit
- * transaction with the postgres-js driver. Mirrors
+ * Shape: an inner `GROUP BY (artist_name, album_title, track_title)` counts
+ * plays per distinct track, then `DISTINCT ON (artist_name, album_title)` with
+ * an `ORDER BY` that (1) prefers a non-empty track
+ * (`btrim(coalesce(track_title, '')) = ''` sorts false-before-true, so
+ * non-empty first), (2) then most-played (`play_count DESC`), (3) then a
+ * deterministic `track_title ASC` tiebreak, keeps exactly the modal
+ * representative per pair. Cardinality is UNCHANGED — still one row per
+ * distinct `(artist, album)` pair; the GROUP BY only picks a better
+ * representative track, it does not change which pairs are enumerated. There is
+ * NO `track_title IS NOT NULL` filter — a pair whose plays are all track-less
+ * still enumerates and resolves album-only, exactly as before this change.
+ *
+ * The `normalizePairs` determinism contract still holds: rows remain ordered by
+ * `(artist_name, album_title)` first, so the first-encountered representative
+ * per normalized key is stable across runs.
+ *
+ * The inner GROUP BY subquery measured ~17s on prod (within the raised
+ * `statement_timeout`). Wrapped in `db.transaction` + `SET LOCAL
+ * statement_timeout` because the `album_id IS NULL` partition isn't covered by
+ * the metadata-drain partial indexes; the planner falls back to a scan that can
+ * exceed the backend's default `statement_timeout`. `SET LOCAL` only scopes
+ * inside an explicit transaction with the postgres-js driver. Mirrors
  * `album-level-backfill#enumeratePendingAlbumIds`. */
 export const enumerateFreetextPairs = async (timeoutMs: number = READ_TIMEOUT_DEFAULT): Promise<RawPair[]> => {
   return await db.transaction(async (tx) => {
@@ -155,19 +171,27 @@ export const enumerateFreetextPairs = async (timeoutMs: number = READ_TIMEOUT_DE
     const rows = (await tx.execute(sql`
       SELECT DISTINCT ON ("artist_name", "album_title")
              "artist_name", "album_title", "track_title"
-      FROM "wxyc_schema"."flowsheet"
-      WHERE "entry_type" = 'track'
-        AND "album_id" IS NULL
-        AND "artist_name" IS NOT NULL
-        AND "album_title" IS NOT NULL
+      FROM (
+        SELECT "artist_name", "album_title", "track_title", count(*) AS play_count
+        FROM "wxyc_schema"."flowsheet"
+        WHERE "entry_type" = 'track'
+          AND "album_id" IS NULL
+          AND "artist_name" IS NOT NULL
+          AND "album_title" IS NOT NULL
+        GROUP BY "artist_name", "album_title", "track_title"
+      ) g
       ORDER BY "artist_name", "album_title",
                (btrim(coalesce("track_title", '')) = '') ASC,
+               play_count DESC,
                "track_title" ASC
     `)) as unknown as Array<{ artist_name: string; album_title: string; track_title: string | null }>;
     return rows.map((r) => ({
       artist: String(r.artist_name),
       album: String(r.album_title),
-      song: r.track_title ? String(r.track_title) : '',
+      // Trim the representative track once, HERE, at the single "usable track?"
+      // boundary. Downstream (`buildBulkItems`) treats a truthy `song` as
+      // ready-to-send with no further trimming.
+      song: (r.track_title ?? '').trim(),
     }));
   });
 };
@@ -247,13 +271,15 @@ export const filterEligible = (pairs: NormalizedPair[], skip: Set<string>): Norm
  * `song` is populated ONLY when the representative track is non-empty —
  * album-title-only matching is a much weaker signal than track-aware
  * matching (BS#1767), but a track-less pair must still fall back to
- * album-only exactly as before, not send an empty/whitespace `song` that
- * would confuse LML's matcher. */
+ * album-only exactly as before, not send an empty `song` that would confuse
+ * LML's matcher. The trim/empty decision already happened at the enumerate
+ * boundary (`enumerateFreetextPairs` stores a trimmed `song`), so a plain
+ * truthiness check is all that's needed here. */
 export const buildBulkItems = (pairs: NormalizedPair[]): BulkLookupItem[] =>
   pairs.map((p) => ({
     artist: p.artist,
     album: p.album,
-    ...(p.song && p.song.trim() ? { song: p.song } : {}),
+    ...(p.song ? { song: p.song } : {}),
     raw_message: `${p.artist} - ${p.album}`,
   }));
 
