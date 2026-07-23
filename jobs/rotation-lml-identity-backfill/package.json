@@ -1,6 +1,6 @@
 {
   "name": "@wxyc/rotation-lml-identity-backfill",
-  "cron-schedule": "0 6 * * *",
+  "cron-schedule": "0 9 * * *",
   "version": "1.0.0",
   "description": "WXYC recurring drift-repair: resolve rotation.lml_identity_id via LML for rows with a non-NULL discogs_release_id. Catches rotation-etl-written rows (rotation-etl never calls LML) and addToRotation resolve-failure fallbacks within ~24h (BS#1380).",
   "type": "module",

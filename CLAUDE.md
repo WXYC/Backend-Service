@@ -15,6 +15,7 @@ CLAUDE.md is a router for the always-loaded reference card. Topic depth lives in
 - **[`docs/authentication.md`](docs/authentication.md)** — Roles, permissions matrix, JWT payload, `requirePermissions` middleware flow, `AUTH_BYPASS`, better-auth role-mismatch gotcha
 - **[`docs/testing.md`](docs/testing.md)** — Unit + integration + CI-mock test setup, jest configs, CI workflow job list
 - **[`docs/dev-db-fixture.md`](docs/dev-db-fixture.md)** — Dev DB seed pipeline (`seed_db.sql` + `seed-clone.sql`), `LOAD_CLONE_FIXTURE` gate, `predev` rebuild hook, `db:stop` volume drop
+- **[`docs/ops-cron-scheduling.md`](docs/ops-cron-scheduling.md)** — LML-heavy cron spacing policy; heavy-drain vs light-touch vs hourly-safety-net; slot table
 
 For the org-wide cache-hierarchy reference (BS's `proxy.controller` LRUs in context with the upstream iOS caches and downstream LML caches), see [`WXYC/wiki/architecture/cache-hierarchy.md`](https://github.com/WXYC/wiki/blob/main/architecture/cache-hierarchy.md).
 
