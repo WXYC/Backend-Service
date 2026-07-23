@@ -14,10 +14,10 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@sentry/node": "^10.66.0",
+    "@sentry/node": "^10.67.0",
     "@wxyc/database": "^1.0.0",
     "@wxyc/legacy-mirror": "^1.0.0",
-    "posthog-node": "^5.45.2"
+    "posthog-node": "^5.46.1"
   },
   "peerDependencies": {
     "drizzle-orm": "^0.45.0"
