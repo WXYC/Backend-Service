@@ -14,6 +14,12 @@ on:
 
 env:
   TEST_HOST: http://localhost
+  # Intentionally kept at 5433 (unlike the local-dev default in
+  # dev_env/docker-compose.yml / scripts/ci-test.sh, bumped to 15433 by
+  # BS#1729). GHA runners are ephemeral and never have a local
+  # discogs-cache PG bound to 5433, so there's no collision class here —
+  # changing this value is out of scope for BS#1729's acceptance criteria
+  # ("CI (GitHub Actions) behavior unchanged").
   CI_DB_PORT: 5433
   CI_PORT: 8081
   PORT: 8081

@@ -115,7 +115,7 @@ DB_NAME=wxyc_db
 DB_USERNAME={{placeholder}}
 DB_PASSWORD={{placeholder}}
 DB_PORT=5432
-CI_DB_PORT=5433
+CI_DB_PORT=15433
 
 ### Better-Auth Configuration
 # Base URL for the auth service (must end with /auth)
