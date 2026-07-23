@@ -33,7 +33,7 @@ This exact function (`resolveArtistId` in `query.ts`) is reused **verbatim** by 
 Populates and reconciles the `concert_performers` junction (role=`support`) from each upcoming, non-tombstoned concert's `supporting_artists_raw` array (BS#1758 billing-tail capture). Implemented as a pure per-concert diff (`sync.ts`'s `diffConcertPerformers`, unit-testable with no DB) plus a dep-injected orchestrator loop (`sync.ts`'s `runSync`) wired to real I/O in `sync-db.ts`.
 
 - **Idempotent UPSERT.** One row inserted per array element, `ON CONFLICT (concert_id, role, raw_name) DO NOTHING`. A name already present as an active row is a no-op — this is what makes a re-run against unchanged input insert nothing new.
-- **Array-shrink → soft-tombstone.** An active row whose name fell out of the array gets `removed_at` set to `now()`. **Never hard-deleted** — a tombstoned row retains `artist_id` / `discogs_artist_id` / `artist_resolve_attempted_at`, so a later re-bill doesn't force the (future Phase-D) LML arm to re-spend its budget re-resolving a name that was already resolved once.
+- **Array-shrink → soft-tombstone.** An active row whose name fell out of the array gets `removed_at` set to `now()`. **Never hard-deleted** — a tombstoned row retains `artist_id` / `discogs_artist_id` / `artist_resolve_attempted_at`, so a later re-bill doesn't force the Phase-D LML arm (`jobs/concerts-artist-lml-resolver`'s `supportTarget`) to re-spend its budget re-resolving a name that was already resolved once.
 - **Reappearance → un-tombstone.** A tombstoned row whose name is back in the array gets `removed_at` cleared. Mirrors the concerts writer's own both-directions `removed_at` policy (`triangle-shows-etl/writer.ts`).
 - A row that's both absent from the array and already tombstoned, or both present and already active, produces **no diff** — `runSync` never calls the writer for an empty diff, which is what makes a re-run against unchanged input a true no-op (no writes issued, not just writes that affect zero rows).
 
@@ -56,11 +56,11 @@ WHERE cp.role = 'support'
 
 **Tribute guard is RAW-NAME-ONLY** — a deliberate divergence from the headliner arm's `loadCandidates` (`query.ts`), which also excludes on `title !~* '\mtribute'`. The concert title frames the **headliner** slot; a support act billed at a tribute-titled show is a real opener, not a mislabeled honoree, so only the performer's own raw name gates candidacy here.
 
-The writer (`support-db.ts`'s `writeSupportArtistId`) is fill-NULLs-only (`WHERE id = ? AND artist_id IS NULL`) and stamps **no attempt-at marker** — `concert_performers.artist_resolve_attempted_at` (migration 0128) binds only the future Phase-D LML arm (see `docs/migrations.md`'s "Attempt-at markers" section). Ambiguous and unmatched names leave `artist_id` NULL with no marker either, matching today's headliner SQL arm exactly.
+The writer (`support-db.ts`'s `writeSupportArtistId`) is fill-NULLs-only (`WHERE id = ? AND artist_id IS NULL`) and stamps **no attempt-at marker** — `concert_performers.artist_resolve_attempted_at` (migration 0128) binds only the Phase-D LML arm (`jobs/concerts-artist-lml-resolver`'s `supportTarget`, BS#1763; see `docs/migrations.md`'s "Attempt-at markers" section). Ambiguous and unmatched names leave `artist_id` NULL with no marker either, matching today's headliner SQL arm exactly.
 
 ## `has_resolved_support` recompute
 
-A single set-based UPDATE (`recompute.ts`'s `recomputeHasResolvedSupport`), windowed to the active concert set (`removed_at IS NULL AND starts_on >= todayEastern`), recomputing from truth every run:
+A single set-based UPDATE (`recomputeHasResolvedSupport`, extracted to `shared/database/src/concerts-recompute.ts` by BS#1763 — `recompute.ts` in this job is now a thin re-export shim so `job.ts`'s import site didn't need to change), windowed to the active concert set (`removed_at IS NULL AND starts_on >= todayEastern`), recomputing from truth every run:
 
 ```sql
 has_resolved_support = EXISTS (
@@ -74,7 +74,7 @@ has_resolved_support = EXISTS (
 
 **Why a recompute and not a same-transaction boolean flip at resolve time:** a one-directional flip can't handle the down-transition (tombstone the only resolved support → must go false) without decrement bookkeeping — the exact drift surface a `count` column was rejected to avoid when the substrate landed (migration 0128). A windowed recompute-from-truth is idempotent, handles resolve **and** tombstone/un-tombstone uniformly with the same formula, and is O(upcoming concerts) — hundreds to low-thousands, trivial at this scale.
 
-**Dual-lane resolved predicate** (`artist_id IS NOT NULL OR discogs_artist_id IS NOT NULL`) mirrors the headliner curated predicate — a support act counts as resolved via the library FK (this job's Phase B arm) **or** a bare Discogs id (the future Phase D LML arm). Because that LML arm doesn't exist yet, only the `artist_id` lane is populated in production today; the predicate is written dual-lane now so the future arm's writes are picked up without a query change.
+**Dual-lane resolved predicate** (`artist_id IS NOT NULL OR discogs_artist_id IS NOT NULL`) mirrors the headliner curated predicate — a support act counts as resolved via the library FK (this job's Phase B arm) **or** a bare Discogs id (`jobs/concerts-artist-lml-resolver`'s Phase D LML arm, BS#1763). **Shared across both jobs**: this job's step 4 calls it after the support resolve arm (step 3); `concerts-artist-lml-resolver`'s `runJob` calls the SAME function after its own `runResolve` finishes, so a support resolved via either lane is reflected the SAME cron cycle it resolves in — living in `@wxyc/database` (not either job) is what makes that possible, since jobs are separate npm workspaces and can't import one another's internals.
 
 The UPDATE is guarded `WHERE has_resolved_support IS DISTINCT FROM <computed>` so an unchanged flag is never rewritten — `last_modified` only advances on a genuine transition, mirroring the `setWhere`-guarded no-op-skip convention the concerts writers use (`venue-events-scraper`, `triangle-shows-etl`).
 
@@ -103,7 +103,7 @@ Cadence rationale:
 - `venue-events-scraper` at `0 5 * * *` (new concerts written)
 - `triangle-shows-etl` at `5 5 * * *` (the other concerts source written)
 - `concerts-artist-resolver` at `15 5 * * *` (this job — all four steps)
-- `concerts-artist-lml-resolver` at `35 5 * * *` (the future Phase D LML arm; runs after this job so both this job's SQL arms get first claim)
+- `concerts-artist-lml-resolver` at `35 5 * * *` (the Phase D LML arm, headliner BS#1614 + support BS#1763; runs after this job so both this job's SQL arms get first claim)
 
 Crontab has no dependency semantics; ordering is best-effort by wall clock. If an upstream scraper runs late, this job runs on the prior day's data; the next run picks up the missed rows. Acceptable.
 
@@ -119,7 +119,7 @@ Required env: `DB_*` (postgres connection).
 
 Optional env: `SENTRY_DSN`, `SENTRY_RELEASE`, `SENTRY_TRACES_SAMPLE_RATE`.
 
-No job-specific env vars beyond the shared observability ones above — neither the sync step nor the support arm has a TTL/budget knob (that concept belongs to the future Phase D LML arm, which spends an external API budget; this job's SQL arms are free local queries).
+No job-specific env vars beyond the shared observability ones above — neither the sync step nor the support arm has a TTL/budget knob (that concept belongs to the Phase D LML arm in `jobs/concerts-artist-lml-resolver`, which spends an external API budget; this job's SQL arms are free local queries).
 
 ## Counters
 
@@ -166,7 +166,7 @@ npm run test:unit -- tests/unit/jobs/concerts-artist-resolver tests/unit/databas
 npm run test:integration -- tests/integration/concerts-artist-resolver-support.spec.js
 ```
 
-Unit tests are dep-injected (no PG/LML): `orchestrate.test.ts` / `query.test.ts` (headliner arm, unchanged), `sync.test.ts` (the pure `diffConcertPerformers` diff + the `runSync` loop), `sync-db.test.ts` (SQL-contract + outcome-shape tests for the I/O), `support.test.ts` (the bespoke `runSupportResolver` loop), `support-db.test.ts` (SQL-contract tests for the candidate predicate + writer), `recompute.test.ts` (SQL-contract + outcome-counting tests), `error-sink.test.ts` (the shared onError-sink guard sync.ts/support.ts both use).
+Unit tests are dep-injected (no PG/LML): `orchestrate.test.ts` / `query.test.ts` (headliner arm, unchanged), `sync.test.ts` (the pure `diffConcertPerformers` diff + the `runSync` loop), `sync-db.test.ts` (SQL-contract + outcome-shape tests for the I/O), `support.test.ts` (the bespoke `runSupportResolver` loop), `support-db.test.ts` (SQL-contract tests for the candidate predicate + writer), `error-sink.test.ts` (the shared onError-sink guard sync.ts/support.ts both use). The recompute SQL-contract + outcome-counting tests moved to `tests/unit/database/concerts-recompute.test.ts` alongside the implementation (BS#1763); this job's own `recompute.ts` is now a re-export shim with no logic of its own to test.
 
 The `pg` integration spec (`concerts-artist-resolver-support.spec.js`) exercises sync → resolve → recompute end-to-end against a real Postgres: sync idempotency, array-shrink tombstone + reappearance untombstone, strict/ambiguous support resolution, the raw-name-only tribute guard, and every `has_resolved_support` transition (resolve → tombstone → un-tombstone, the dual-lane predicate, recompute idempotency).
 
@@ -176,4 +176,4 @@ The TypeScript twin's test (`normalize-artist-name.test.ts`) pins the byte-ident
 
 - `jobs/rotation-release-id-backfill/` — dep-injected resolver shape (`loadCandidates → lookup → write`).
 - `jobs/artist-search-alias-consumer/` — daily cron via `cron-schedule` in `package.json`; its writer is the precedent for the parameterised-VALUES pattern this job's sync writer uses for text arrays (never a `'{...}'::text[]` literal — the BS#1068-1073 corruption trap).
-- `jobs/concerts-artist-lml-resolver/` — the sibling job that will add the Phase D LML arm for `concert_performers` (support rows whose `artist_id` this job's SQL arm couldn't fill); its `targets.ts` is the role-agnostic `(raw_name → verdict → row targets)` shape that arm will extend.
+- `jobs/concerts-artist-lml-resolver/` — the sibling job whose Phase D LML arm (BS#1763) resolves `concert_performers` rows (support acts whose `artist_id` this job's SQL arm couldn't fill) via a `supportTarget` registered in its role-agnostic `(raw_name → verdict → row targets)` `targets.ts`, alongside the pre-existing headliner target (BS#1614).

@@ -28,7 +28,8 @@
  *
  * No attempt-at marker: per the BS#1760 issue and docs/migrations.md's
  * "Attempt-at markers" section, `concert_performers.
- * artist_resolve_attempted_at` binds ONLY the future Phase-D LML arm.
+ * artist_resolve_attempted_at` binds ONLY the Phase-D LML arm
+ * (jobs/concerts-artist-lml-resolver's supportTarget, BS#1763).
  * This Phase-B pure-SQL arm stamps nothing on ambiguous/unmatched, same
  * as today's headliner SQL arm.
  */

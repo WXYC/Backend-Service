@@ -423,6 +423,16 @@ export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
 export type CheckLiveActivityFn = (lookbackSeconds: number) => Promise<boolean>;
 export const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(false);
 
+// Stub of shared/database/src/concerts-recompute.ts's `recomputeHasResolvedSupport`
+// (BS#1763). Consumers (jobs/concerts-artist-resolver's job.ts via its thin
+// recompute.ts shim, jobs/concerts-artist-lml-resolver's job.ts directly) only
+// need a controllable resolved value here — the real SQL-shape contract is
+// pinned against the actual module by tests/unit/database/concerts-recompute.test.ts.
+export type RecomputeOutcome = { updated: number; updated_true: number; updated_false: number };
+export const recomputeHasResolvedSupport = jest
+  .fn<() => Promise<RecomputeOutcome>>()
+  .mockResolvedValue({ updated: 0, updated_true: 0, updated_false: 0 });
+
 export { requirePositiveInt, requireNonNegativeInt } from '../../shared/database/src/env-parsers.js';
 export type { IntParserOptions } from '../../shared/database/src/env-parsers.js';
 

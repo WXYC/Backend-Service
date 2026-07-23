@@ -1,12 +1,14 @@
 /**
- * Daily cron: resolve clean unresolved concert headliner names to Discogs
- * artist ids via LML's verify-before-mint bulk endpoint (BS#1614, LML#759).
+ * Daily cron: resolve clean unresolved concert headliner AND support names
+ * to Discogs artist ids via LML's verify-before-mint bulk endpoint
+ * (BS#1614 headliner, BS#1763 support; LML#759).
  *
  * The pure-SQL strict/alias resolver (`jobs/concerts-artist-resolver/`,
  * 05:15 UTC) can only FK names the WXYC library knows; the residual is
- * touring artists WXYC never cataloged. This job sends the CLEAN subset of
- * that residual (`isCleanHeadliner` — the API-budget gate co-located with
- * the extraction rules in `jobs/triangle-shows-etl/headliner.ts`) to
+ * touring artists WXYC never cataloged — headliners AND their support
+ * acts. This job sends the CLEAN subset of that residual (`isCleanHeadliner`
+ * — the API-budget gate co-located with the extraction rules in
+ * `jobs/triangle-shows-etl/headliner.ts`, applied to both roles) to
  * `POST /api/v1/artists/resolve/bulk`, which mints only on exactly one
  * exact-form Discogs candidate with no cache conflict — so a billing
  * string that slips through the gate lands `not_found`, never a wrong id.
@@ -22,18 +24,34 @@
  * (resolved / ambiguous / not_found), left NULL on escalation_unavailable
  * and transport errors, re-attempted when NULL or older than the no-match
  * TTL. Verdict routing and the all-escalation early stop live in
- * orchestrate.ts; the headliner candidate/write SQL lives in targets.ts.
+ * orchestrate.ts; the headliner and support candidate/write SQL both live
+ * in targets.ts. A name billed as both a headliner and a support act
+ * resolves ONCE (orchestrate.ts's per-name dedupe is keyed across both
+ * registered targets) and fans to both.
+ *
+ * After `runResolve` finishes, `runJob` recomputes
+ * `concerts.has_resolved_support` (`recomputeHasResolvedSupport`,
+ * `@wxyc/database` — shared with `jobs/concerts-artist-resolver`'s own
+ * step 4) so a support this run resolved via the Discogs-only lane is
+ * curated the SAME cron cycle, not one cycle later. Skipped under
+ * `--dry-run`, matching `runResolve`'s own no-writes contract.
  *
  * Run procedure: see jobs/concerts-artist-lml-resolver/README.md.
  */
 
 import { sql } from 'drizzle-orm';
-import { closeDatabaseConnection, db, requireNonNegativeInt, requirePositiveInt } from '@wxyc/database';
+import {
+  closeDatabaseConnection,
+  db,
+  recomputeHasResolvedSupport,
+  requireNonNegativeInt,
+  requirePositiveInt,
+} from '@wxyc/database';
 import { ARTIST_RESOLVE_BATCH_CAP, resolveArtistNamesBulk } from '@wxyc/lml-client';
 import { isCleanHeadliner } from '../triangle-shows-etl/headliner.js';
 import { defaultLmlLimiter } from './lml-limiter.js';
 import { runResolve, type Totals } from './orchestrate.js';
-import { headlinerTarget } from './targets.js';
+import { headlinerTarget, supportTarget } from './targets.js';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
 const JOB_NAME = 'concerts-artist-lml-resolver';
@@ -143,9 +161,9 @@ export const runJob = async (options: ResolveJobOptions): Promise<Totals> => {
     dry_run: options.dryRun,
   });
 
-  return await runResolve(
+  const totals = await runResolve(
     {
-      targets: [headlinerTarget],
+      targets: [headlinerTarget, supportTarget],
       gate: isCleanHeadliner,
       resolveBatch: (names) => resolveArtistNamesBulk(names, { limiter: defaultLmlLimiter, caller: JOB_NAME }),
       awaitQuiet: () => awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs),
@@ -156,6 +174,22 @@ export const runJob = async (options: ResolveJobOptions): Promise<Totals> => {
       dryRun: options.dryRun,
     }
   );
+
+  // Keep `has_resolved_support` in sync the SAME cycle a support resolves
+  // via this job's Discogs-only lane — otherwise the boolean lags until
+  // concerts-artist-resolver's own 05:15 recompute the following day.
+  // Unconditional (like concerts-artist-resolver's own step 4): the
+  // windowed recompute is idempotent and cheap (O(upcoming concerts)), so
+  // running it even when this cycle resolved nothing new is a no-op, not a
+  // waste. Skipped under --dry-run: runResolve already wrote nothing, so
+  // recomputing against unchanged junction state would just repeat a prior
+  // no-op read.
+  if (!options.dryRun) {
+    const recomputeOutcome = await recomputeHasResolvedSupport();
+    log('info', 'recompute_finished', `${JOB_NAME} has_resolved_support recompute done`, { ...recomputeOutcome });
+  }
+
+  return totals;
 };
 
 const main = async (): Promise<void> => {

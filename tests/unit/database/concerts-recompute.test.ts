@@ -1,13 +1,25 @@
 /**
- * Unit tests for jobs/concerts-artist-resolver recompute.ts (BS#1760).
+ * Unit tests for shared/database/src/concerts-recompute.ts (BS#1760;
+ * extracted from jobs/concerts-artist-resolver/recompute.ts by BS#1763 so
+ * jobs/concerts-artist-lml-resolver's LML supportTarget can call the same
+ * windowed recompute). Tests the REAL module directly (bypassing the
+ * package-level `@wxyc/database` mock, mirroring
+ * tests/unit/database/live-activity.test.ts and concerts-sql.test.ts) so
+ * the SQL text asserted below is the module's actual output, not a
+ * hand-duplicated stub.
  *
- * Step 4 of the four-step run: a single set-based UPDATE recomputes
- * `concerts.has_resolved_support` from truth over the active window
- * (`removed_at IS NULL AND starts_on >= todayEastern`). Per the locked
- * decision in the issue, this is NOT an in-line boolean flip at resolve
- * time — a windowed recompute-from-truth is the only shape that handles
- * the down-transition (tombstone the only resolved support → must go
- * false) without decrement bookkeeping.
+ * Both `jobs/concerts-artist-resolver/recompute.ts` (thin re-export shim)
+ * and `jobs/concerts-artist-lml-resolver/job.ts` call this same function —
+ * a support resolved by either job's resolve arm flips `has_resolved_
+ * support` on whichever one of them runs the recompute step next.
+ *
+ * Step 4 of concerts-artist-resolver's four-step run: a single set-based
+ * UPDATE recomputes `concerts.has_resolved_support` from truth over the
+ * active window (`removed_at IS NULL AND starts_on >= todayEastern`). Per
+ * the locked decision in the BS#1760 issue, this is NOT an in-line boolean
+ * flip at resolve time — a windowed recompute-from-truth is the only shape
+ * that handles the down-transition (tombstone the only resolved support →
+ * must go false) without decrement bookkeeping.
  *
  * SQL-contract test pins: the EXISTS subquery's dual-lane resolved
  * predicate (artist_id OR discogs_artist_id), the role='support' +
@@ -17,8 +29,12 @@
  * Outcome-counting test pins updated_true/updated_false bucketing off
  * the RETURNING rows.
  */
-import { db } from '../../../mocks/database.mock';
-import { recomputeHasResolvedSupport } from '../../../../jobs/concerts-artist-resolver/recompute';
+jest.mock('../../../shared/database/src/client.js', () => jest.requireActual('../../mocks/database.mock'), {
+  virtual: true,
+});
+
+import { db } from '../../mocks/database.mock';
+import { recomputeHasResolvedSupport } from '../../../shared/database/src/concerts-recompute';
 
 type SqlLike = {
   sql?: string | string[];
