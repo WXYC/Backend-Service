@@ -55,6 +55,16 @@ const ARTIST_BIO_NULL_LIB = 'Hermanos Gutiérrez';
 const ARTIST_BIO_FILL = 'Nilüfer Yanya';
 const BIO_EXT_ACTIVE_RAW = 'Csillagrablók'; // freshest ACTIVE billing for the Discogs-only headliner
 
+// BS#1746 regression: `artists.discogs_artist_id` is not unique, so two library
+// rows can share one Discogs id. Both `loadEnrichmentCandidates` and
+// `loadBioBackfillCandidates` LEFT JOIN artists on that non-unique column, so
+// without a DISTINCT-ON tiebreak a shared id fans out to one candidate row per
+// duplicate `artists` row — which then crashes the writer's multi-row UPSERT
+// ("ON CONFLICT DO UPDATE command cannot affect row a second time").
+const DISCOGS_BIO_NULL_DUPE = 91624008;
+const ARTIST_BIO_NULL_DUPE_A = 'Chuquimamani-Condori'; // lower artists.id — wins the a.id ASC tiebreak
+const ARTIST_BIO_NULL_DUPE_B = 'Duke Ellington & John Coltrane'; // higher artists.id, same discogs_artist_id
+
 function makeSql() {
   return postgres({
     host: process.env.DB_HOST || 'localhost',
@@ -119,14 +129,18 @@ async function upsertArtistGenres(sql, rows) {
 
 /**
  * Bio-backfill candidate mirror of
- * `jobs/concerts-genre-enrichment/query.ts#loadBioBackfillCandidates` (BS#1734),
- * scoped to the test's synthetic ids so the shared CI schema's other null-bio
- * rows can't perturb the assertions (the real query is unscoped). Exercises the
- * `LATERAL … LIMIT 1` name resolution: freshest NON-removed concert billing.
+ * `jobs/concerts-genre-enrichment/query.ts#loadBioBackfillCandidates` (BS#1734,
+ * DISTINCT-ON dedupe added BS#1746), scoped to the test's synthetic ids so the
+ * shared CI schema's other null-bio rows can't perturb the assertions (the real
+ * query is unscoped). Exercises the `LATERAL … LIMIT 1` name resolution:
+ * freshest NON-removed concert billing. `artists.discogs_artist_id` is NOT
+ * unique, so the `LEFT JOIN artists` can fan one `am` row out to several —
+ * `DISTINCT ON (am.discogs_artist_id)` + a deterministic `a.id ASC NULLS LAST`
+ * tiebreak collapses that back to one candidate per artist_metadata row.
  */
 async function loadBioBackfillCandidates(sql, ids) {
   return sql`
-    SELECT
+    SELECT DISTINCT ON (am."discogs_artist_id")
       am."discogs_artist_id" AS discogs_artist_id,
       COALESCE(a."artist_name", c."headlining_artist_raw") AS artist_name
     FROM ${sql(SCHEMA)}."artist_metadata" am
@@ -144,7 +158,7 @@ async function loadBioBackfillCandidates(sql, ids) {
     WHERE am."artist_bio" IS NULL
       AND COALESCE(a."artist_name", c."headlining_artist_raw") IS NOT NULL
       AND am."discogs_artist_id" = ANY(${ids})
-    ORDER BY am."discogs_artist_id" ASC
+    ORDER BY am."discogs_artist_id" ASC, a."id" ASC NULLS LAST
   `;
 }
 
@@ -194,7 +208,7 @@ describe('concerts genre enrichment (BS#1624)', () => {
     // delete hits those seed rows (library_artist_id_artists_id_fk violation).
     // The synthetic ids (9162400x) exist only in this test.
     await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE discogs_artist_id = ANY($1)`, [
-      [DISCOGS_ENRICHED, DISCOGS_LIBRARY_UNENRICHED, DISCOGS_BIO_NULL_LIB, DISCOGS_BIO_FILL],
+      [DISCOGS_ENRICHED, DISCOGS_LIBRARY_UNENRICHED, DISCOGS_BIO_NULL_LIB, DISCOGS_BIO_FILL, DISCOGS_BIO_NULL_DUPE],
     ]);
     await sql.unsafe(`DELETE FROM "${SCHEMA}".artist_metadata WHERE discogs_artist_id = ANY($1)`, [
       [
@@ -207,6 +221,7 @@ describe('concerts genre enrichment (BS#1624)', () => {
         DISCOGS_BIO_NULL_LIB,
         DISCOGS_BIO_NULL_EXT,
         DISCOGS_BIO_FILL,
+        DISCOGS_BIO_NULL_DUPE,
       ],
     ]);
   };
@@ -349,6 +364,28 @@ describe('concerts genre enrichment (BS#1624)', () => {
       headlining_discogs_artist_id: DISCOGS_BIO_NULL_EXT,
     });
 
+    // BS#1746 regression: two `artists` rows sharing one discogs_artist_id (the
+    // column is not unique). One genres-only, null-bio `artist_metadata` row,
+    // but the LEFT JOIN artists on that shared id must not fan it out to two
+    // candidates.
+    // Insertion order matters: the lower-id row (A) must be inserted first so
+    // the test can assert the deterministic `a.id ASC` tiebreak deterministically.
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters, discogs_artist_id)
+       VALUES ($1, $1, 'ZZ', $2)`,
+      [ARTIST_BIO_NULL_DUPE_A, DISCOGS_BIO_NULL_DUPE]
+    );
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters, discogs_artist_id)
+       VALUES ($1, $1, 'ZZ', $2)`,
+      [ARTIST_BIO_NULL_DUPE_B, DISCOGS_BIO_NULL_DUPE]
+    );
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artist_metadata (discogs_artist_id, genres, styles, artist_bio)
+       VALUES ($1, $2, $3, NULL)`,
+      [DISCOGS_BIO_NULL_DUPE, ['Folk'], []]
+    );
+
     // Dedicated mutable null-bio row for the fill test (kept off the load-test ids).
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters, discogs_artist_id)
@@ -489,6 +526,14 @@ describe('concerts genre enrichment (BS#1624)', () => {
       // REMOVED concert (proves removed_at exclusion), not the older active one
       // (proves the starts_on DESC tie-break).
       expect(byId.get(DISCOGS_BIO_NULL_EXT)).toBe(BIO_EXT_ACTIVE_RAW);
+    });
+
+    it('BS#1746: two artists rows sharing one discogs_artist_id yield exactly one candidate', async () => {
+      const rows = await loadBioBackfillCandidates(sql, [DISCOGS_BIO_NULL_DUPE]);
+      expect(rows).toHaveLength(1);
+      // Deterministic tiebreak: lower artists.id wins, not an arbitrary row.
+      expect(Number(rows[0].discogs_artist_id)).toBe(DISCOGS_BIO_NULL_DUPE);
+      expect(rows[0].artist_name).toBe(ARTIST_BIO_NULL_DUPE_A);
     });
 
     it('fills a null bio, never overwrites a populated one, and a re-run over the filled row updates 0', async () => {
