@@ -66,7 +66,10 @@ library_route.get('/formats', requirePermissions({ catalog: ['read'] }), library
 
 library_route.post('/formats', requirePermissions({ catalog: ['write'] }), libraryController.addFormat);
 
-library_route.get('/genres', requirePermissions({ catalog: ['read'] }), libraryController.getGenres);
+// BS#1682: genre names are non-sensitive station-wide reference data (same
+// tier as /playlists and /concerts), and dj-site#1004's argument-pure SSR
+// seed cannot attach a JWT. Public GET; POST stays catalog:write-gated below.
+library_route.get('/genres', libraryController.getGenres);
 
 library_route.post('/genres', requirePermissions({ catalog: ['write'] }), libraryController.addGenre);
 
