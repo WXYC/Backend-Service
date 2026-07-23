@@ -526,6 +526,14 @@ describe('getConcertById', () => {
  *
  * These fixtures carry the extra `artist_name` (the canonical name the LEFT
  * JOIN sources) that `ConcertJoinRow` doesn't; the row shape is a superset.
+ *
+ * BS#1761 adds a SECOND pass (support acts) after this one, reading
+ * `concert_performers` — see the sibling `describe('getUpcomingShowsMaps
+ * support arm (BS#1761)', ...)` block below for those tests. This suite pins
+ * PASS 1 (headliners) only and is otherwise unchanged, so every test here
+ * queues an additional empty `orderBy` result for Pass 2's query (its rows
+ * never affect a headliner-only scenario, per the "only add where absent"
+ * precedence rule).
  */
 describe('getUpcomingShowsMaps (BS#1613)', () => {
   type UpcomingRow = ConcertJoinRow & { artist_name: string | null };
@@ -566,14 +574,16 @@ describe('getUpcomingShowsMaps (BS#1613)', () => {
   };
 
   it('builds byArtistId from resolved rows only, keyed by headlining_artist_id', async () => {
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([resolvedRow, unresolvedCleanRow]));
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.resolve([resolvedRow, unresolvedCleanRow])) // pass 1: headliners
+      .mockReturnValueOnce(Promise.resolve([])); // pass 2: no support rows
     const { byArtistId } = await getUpcomingShowsMaps('2026-08-01');
     expect(byArtistId.size).toBe(1); // the unresolved row is not in the id map
     expect(byArtistId.get(4211)).toEqual(toConcertDTO(resolvedRow));
   });
 
   it('keys a resolved row in byNormName off the CANONICAL name, not the raw', async () => {
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([resolvedRow]));
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([resolvedRow])).mockReturnValueOnce(Promise.resolve([]));
     const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
     // canonical 'Nilüfer Yanya' → 'nilüfer yanya'; the diacritic-free raw
     // 'Nilufer Yanya' → 'nilufer yanya' is NOT the key.
@@ -582,14 +592,16 @@ describe('getUpcomingShowsMaps (BS#1613)', () => {
   });
 
   it('keys an unresolved clean row in byNormName off the raw name', async () => {
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([unresolvedCleanRow]));
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.resolve([unresolvedCleanRow]))
+      .mockReturnValueOnce(Promise.resolve([]));
     const { byArtistId, byNormName } = await getUpcomingShowsMaps('2026-08-01');
     expect(byArtistId.size).toBe(0); // unresolved → absent from the id map
     expect(byNormName.get('wishy')).toEqual(toConcertDTO(unresolvedCleanRow));
   });
 
   it('keys a billing-string raw off its ENTIRE normalized string (inert key)', async () => {
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([billingRow]));
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([billingRow])).mockReturnValueOnce(Promise.resolve([]));
     const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
     expect(byNormName.get('circle jerks & municipal waste')).toEqual(toConcertDTO(billingRow));
     // The individual acts are NOT keys, so a single-artist play can't match.
@@ -610,7 +622,7 @@ describe('getUpcomingShowsMaps (BS#1613)', () => {
       headlining_artist_raw: ' J  Dilla ',
       starts_on: '2026-08-11',
     };
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([messy]));
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([messy])).mockReturnValueOnce(Promise.resolve([]));
     const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
     // Collapsed + trimmed → a play typed 'J Dilla' (single space) matches.
     expect(byNormName.get('j dilla')).toEqual(toConcertDTO(messy));
@@ -623,7 +635,7 @@ describe('getUpcomingShowsMaps (BS#1613)', () => {
     // occurrence of a key is the soonest.
     const soon: UpcomingRow = { ...unresolvedCleanRow, id: 400, starts_on: '2026-08-10' };
     const later: UpcomingRow = { ...unresolvedCleanRow, id: 401, starts_on: '2026-09-10' };
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([soon, later]));
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([soon, later])).mockReturnValueOnce(Promise.resolve([]));
     const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
     expect(byNormName.get('wishy')).toEqual(toConcertDTO(soon));
   });
@@ -631,13 +643,13 @@ describe('getUpcomingShowsMaps (BS#1613)', () => {
   it('collapses multiple dates for one artist id to the SOONEST (first row wins)', async () => {
     const soon: UpcomingRow = { ...resolvedRow, id: 500, starts_on: '2026-08-10' };
     const later: UpcomingRow = { ...resolvedRow, id: 501, starts_on: '2026-09-10' };
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([soon, later]));
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([soon, later])).mockReturnValueOnce(Promise.resolve([]));
     const { byArtistId } = await getUpcomingShowsMaps('2026-08-01');
     expect(byArtistId.get(4211)).toEqual(toConcertDTO(soon));
   });
 
   it('LEFT JOINs artists so a resolved row can source its canonical name', async () => {
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([]));
     await getUpcomingShowsMaps('2026-08-01');
     // The join to artists must be a LEFT join — an INNER join would silently
     // drop every unresolved concert (headlining_artist_id IS NULL), which is
@@ -646,8 +658,9 @@ describe('getUpcomingShowsMaps (BS#1613)', () => {
   });
 
   it('never selects internal ingestion columns', async () => {
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([]));
     await getUpcomingShowsMaps('2026-08-01');
+    // Pass 1's (headliner) projection is the first db.select call.
     const projection = mockDb._chain.select.mock.calls[0][0] as Record<string, string>;
     const selectedColumns = Object.values(projection);
     for (const internal of INTERNAL_COLUMNS) {
@@ -656,10 +669,206 @@ describe('getUpcomingShowsMaps (BS#1613)', () => {
   });
 
   it('returns two empty maps for an empty upcoming set', async () => {
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([]));
     const { byArtistId, byNormName } = await getUpcomingShowsMaps('2026-08-01');
     expect(byArtistId.size).toBe(0);
     expect(byNormName.size).toBe(0);
+  });
+});
+
+/**
+ * BS#1761 — PASS 2 of `getUpcomingShowsMaps`: support acts. Reads active
+ * (non-tombstoned) `concert_performers` rows with `role = 'support'`, joined
+ * to the SAME upcoming/non-tombstoned `concerts` window as Pass 1, ordered
+ * `starts_on ASC, concerts.id ASC` (a `concert_performers.id` tiebreak for
+ * several support rows on ONE concert — see the production doc comment for
+ * why that tie is harmless: every support row on a given concert maps to the
+ * SAME `toConcertDTO` output regardless of which one is processed first).
+ *
+ * Precedence proof: Pass 1 runs to completion (fully populates both maps)
+ * BEFORE Pass 2 evaluates a single row, so `!byArtistId.has(...)` /
+ * `!byNormName.has(...)` can only be true when NO headliner — of ANY upcoming
+ * date — claimed that key. That is the entire "headliner beats support
+ * regardless of date" rule; no date comparison against the headliner's date
+ * is needed or performed.
+ *
+ * Each test here queues an EMPTY Pass 1 result (unless a test explicitly
+ * needs a competing headliner) followed by the Pass 2 fixture rows.
+ */
+describe('getUpcomingShowsMaps support arm (BS#1761)', () => {
+  // Row shape Pass 2 selects: the shared concert⋈venue fields plus the
+  // junction's raw_name and (resolved-or-null) artist_id — see
+  // `concertJoinFields` reuse in the production `getUpcomingShowsMaps`.
+  type SupportRow = ConcertJoinRow & { raw_name: string; support_artist_id: number | null };
+  // Pass-1 fixture shape (mirrors the sibling BS#1613 describe block's
+  // `UpcomingRow`), needed here only for the precedence tests that seed a
+  // competing headliner row.
+  type HeadlinerRow = ConcertJoinRow & { artist_name: string | null };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  // A RESOLVED support act (concert_performers.artist_id set), no competing headliner.
+  const resolvedSupport: SupportRow = {
+    ...timedRow,
+    id: 701,
+    headlining_artist_id: null,
+    headlining_artist_raw: 'Some Unrelated Headliner',
+    starts_on: '2026-08-16',
+    raw_name: 'Kelela',
+    support_artist_id: 850,
+  };
+
+  // An UNRESOLVED support act: a clean single name (post-parseBilling), no artist_id.
+  const unresolvedSupport: SupportRow = {
+    ...timedRow,
+    id: 702,
+    headlining_artist_id: null,
+    headlining_artist_raw: 'A Different Headliner',
+    starts_on: '2026-08-18',
+    raw_name: 'Carmen Villain',
+    support_artist_id: null,
+  };
+
+  it('adds a resolved support to byArtistId when no headliner has claimed the key', async () => {
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.resolve([])) // pass 1: no headliners
+      .mockReturnValueOnce(Promise.resolve([resolvedSupport])); // pass 2
+    const { byArtistId } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byArtistId.get(850)).toEqual(toConcertDTO(resolvedSupport));
+  });
+
+  it('adds an unresolved support to byNormName keyed off its raw name', async () => {
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.resolve([]))
+      .mockReturnValueOnce(Promise.resolve([unresolvedSupport]));
+    const { byArtistId, byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byArtistId.size).toBe(0); // unresolved — absent from the id map
+    expect(byNormName.get('carmen villain')).toEqual(toConcertDTO(unresolvedSupport));
+  });
+
+  it('adds a RESOLVED support to byNormName too, keyed off the RAW name (not a canonical/artists-joined name)', async () => {
+    // Deliberate divergence from Pass 1's headliner arm: the support name arm
+    // always keys off concert_performers.raw_name — resolved or not — never a
+    // canonical `artists.artist_name` substitution. `raw_name` is already a
+    // clean single name post-parseBilling, so no `artists` join is needed.
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.resolve([]))
+      .mockReturnValueOnce(Promise.resolve([resolvedSupport]));
+    const { byArtistId, byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byArtistId.get(850)).toEqual(toConcertDTO(resolvedSupport));
+    expect(byNormName.get('kelela')).toEqual(toConcertDTO(resolvedSupport));
+  });
+
+  it('a headliner beats a support for the SAME id key regardless of date (later headliner, earlier support)', async () => {
+    const laterHeadliner: HeadlinerRow = {
+      ...timedRow,
+      id: 703,
+      headlining_artist_id: 850,
+      headlining_artist_raw: 'Headliner Billing',
+      artist_name: 'Headliner Canonical',
+      starts_on: '2026-09-20', // LATER than the support's date
+    };
+    const earlierSupport: SupportRow = { ...resolvedSupport, starts_on: '2026-08-05' }; // EARLIER
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.resolve([laterHeadliner])) // pass 1
+      .mockReturnValueOnce(Promise.resolve([earlierSupport])); // pass 2
+    const { byArtistId } = await getUpcomingShowsMaps('2026-08-01');
+    // The LATER headliner wins the key even though the support's date is sooner.
+    expect(byArtistId.get(850)).toEqual(toConcertDTO(laterHeadliner));
+  });
+
+  it('a headliner beats a support for the SAME name key regardless of date (later headliner, earlier support)', async () => {
+    const laterHeadliner: HeadlinerRow = {
+      ...timedRow,
+      id: 704,
+      headlining_artist_id: null, // unresolved: name arm keys off the raw
+      headlining_artist_raw: 'Colleen',
+      artist_name: null,
+      starts_on: '2026-09-22', // LATER
+    };
+    const earlierSupport: SupportRow = {
+      ...unresolvedSupport,
+      raw_name: 'Colleen', // same normalized key as the headliner's raw
+      starts_on: '2026-08-06', // EARLIER
+    };
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.resolve([laterHeadliner]))
+      .mockReturnValueOnce(Promise.resolve([earlierSupport]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byNormName.get('colleen')).toEqual(toConcertDTO(laterHeadliner));
+  });
+
+  it('collapses multiple support dates for the SAME id key to the SOONEST (first write wins within support)', async () => {
+    const soon: SupportRow = { ...resolvedSupport, id: 705, starts_on: '2026-08-05' };
+    const later: SupportRow = { ...resolvedSupport, id: 706, starts_on: '2026-09-05' };
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.resolve([])) // pass 1: no headliners
+      .mockReturnValueOnce(Promise.resolve([soon, later])); // pass 2, ordered starts_on ASC
+    const { byArtistId } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byArtistId.get(850)).toEqual(toConcertDTO(soon));
+  });
+
+  it('collapses multiple support dates for the SAME name key to the SOONEST (first write wins within support)', async () => {
+    const soon: SupportRow = { ...unresolvedSupport, id: 707, starts_on: '2026-08-07' };
+    const later: SupportRow = { ...unresolvedSupport, id: 708, starts_on: '2026-09-07' };
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([soon, later]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byNormName.get('carmen villain')).toEqual(toConcertDTO(soon));
+  });
+
+  it('skips a support row entirely once a headliner already claims BOTH its id key and its name key', async () => {
+    const headliner: HeadlinerRow = {
+      ...timedRow,
+      id: 709,
+      headlining_artist_id: 860,
+      headlining_artist_raw: 'Anjimile',
+      artist_name: 'Anjimile',
+      starts_on: '2026-08-09',
+    };
+    const support: SupportRow = {
+      ...resolvedSupport,
+      id: 710,
+      support_artist_id: 860,
+      raw_name: 'Anjimile',
+      starts_on: '2026-08-02', // even sooner — must still lose on BOTH arms
+    };
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.resolve([headliner]))
+      .mockReturnValueOnce(Promise.resolve([support]));
+    const { byArtistId, byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byArtistId.get(860)).toEqual(toConcertDTO(headliner));
+    expect(byNormName.get('anjimile')).toEqual(toConcertDTO(headliner));
+  });
+
+  it('is a no-op when there are no active support rows (byte-identical to pre-1761 output)', async () => {
+    const headliner: HeadlinerRow = { ...timedRow, id: 711, artist_name: 'Nilüfer Yanya' };
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([headliner])).mockReturnValueOnce(Promise.resolve([])); // pass 2: nothing active
+    const { byArtistId, byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byArtistId.get(4211)).toEqual(toConcertDTO(headliner));
+    expect(byNormName.get('nilüfer yanya')).toEqual(toConcertDTO(headliner));
+    expect(byArtistId.size).toBe(1);
+    expect(byNormName.size).toBe(1);
+  });
+
+  it('collapses stray + doubled whitespace in the support name key (free-text SSOT — same normalizer as Pass 1)', async () => {
+    const messy: SupportRow = { ...unresolvedSupport, id: 712, raw_name: ' Carmen  Villain ' };
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([messy]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byNormName.get('carmen villain')).toEqual(toConcertDTO(messy));
+    expect(byNormName.has(' carmen  villain ')).toBe(false);
+  });
+
+  it('never selects internal ingestion columns in the support-pass projection', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([]));
+    await getUpcomingShowsMaps('2026-08-01');
+    // Pass 2's (support) projection is the second db.select call.
+    const projection = mockDb._chain.select.mock.calls[1][0] as Record<string, string>;
+    const selectedColumns = Object.values(projection);
+    for (const internal of INTERNAL_COLUMNS) {
+      expect(selectedColumns).not.toContain(internal);
+    }
   });
 });
 
@@ -674,10 +883,12 @@ describe('getUpcomingShowsMaps (BS#1613)', () => {
  * builder itself stays pure and is pinned by the suite above; these pin only the
  * cache behavior.
  *
- * Build count == `db.select` call count: the builder issues exactly one
- * `db.select(...)` per invocation, and the DB mock aliases `db.select` to
- * `mockDb._chain.select`, so a warm hit (no build) leaves the counter fixed. The
- * cache is module-scoped, so `__resetUpcomingShowsMapsCacheForTests()` runs in
+ * Build count × 2 == `db.select` call count: BS#1761 widened the builder to
+ * TWO passes (headliners, then support acts), so ONE invocation now issues
+ * TWO `db.select(...)` calls — and the DB mock aliases `db.select` to
+ * `mockDb._chain.select`, so a warm hit (no build) still leaves the counter
+ * fixed, but a cold build now advances it by 2, not 1. The cache is
+ * module-scoped, so `__resetUpcomingShowsMapsCacheForTests()` runs in
  * `beforeEach` to keep a prior case's maps from leaking into the next.
  */
 describe('getUpcomingShowsMapsCached (BS#1616 per-process map cache)', () => {
@@ -687,58 +898,69 @@ describe('getUpcomingShowsMapsCached (BS#1616 per-process map cache)', () => {
   });
 
   it('builds once on a cold miss', async () => {
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([]));
     await getUpcomingShowsMapsCached('2026-08-01');
-    expect(mockDb._chain.select).toHaveBeenCalledTimes(1);
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(2); // pass 1 + pass 2
   });
 
   it('serves a warm hit within the TTL without re-querying (identical maps reference)', async () => {
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([]));
     const first = await getUpcomingShowsMapsCached('2026-08-01');
     const second = await getUpcomingShowsMapsCached('2026-08-01');
     // Same object reference proves the second call resolved the cached promise,
     // not a fresh build.
     expect(second).toBe(first);
-    expect(mockDb._chain.select).toHaveBeenCalledTimes(1);
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(2);
   });
 
   it('rebuilds after __resetUpcomingShowsMapsCacheForTests clears the cache', async () => {
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([]));
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.resolve([]))
+      .mockReturnValueOnce(Promise.resolve([]))
+      .mockReturnValueOnce(Promise.resolve([]))
+      .mockReturnValueOnce(Promise.resolve([]));
     await getUpcomingShowsMapsCached('2026-08-01');
     __resetUpcomingShowsMapsCacheForTests();
     await getUpcomingShowsMapsCached('2026-08-01');
-    expect(mockDb._chain.select).toHaveBeenCalledTimes(2);
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(4); // 2 builds × 2 passes
   });
 
   it('rebuilds for a distinct today key (date roll → miss)', async () => {
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([]));
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.resolve([]))
+      .mockReturnValueOnce(Promise.resolve([]))
+      .mockReturnValueOnce(Promise.resolve([]))
+      .mockReturnValueOnce(Promise.resolve([]));
     await getUpcomingShowsMapsCached('2026-08-01');
     await getUpcomingShowsMapsCached('2026-08-02'); // a different ET calendar day
-    expect(mockDb._chain.select).toHaveBeenCalledTimes(2);
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(4); // 2 builds × 2 passes
   });
 
   it('coalesces two concurrent cold calls into a single build', async () => {
-    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([]));
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([])).mockReturnValueOnce(Promise.resolve([]));
     const [a, b] = await Promise.all([
       getUpcomingShowsMapsCached('2026-08-01'),
       getUpcomingShowsMapsCached('2026-08-01'),
     ]);
     // Both callers awaited the same in-flight promise → same resolved object.
     expect(a).toBe(b);
-    expect(mockDb._chain.select).toHaveBeenCalledTimes(1);
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(2); // one build's pass 1 + pass 2
   });
 
   it('does not cache a rejected build — the next call retries', async () => {
+    // Pass 1 rejects, so the build never reaches pass 2's query (sequential
+    // awaits) — only ONE queued value is consumed by the failed attempt.
     mockDb._chain.orderBy
       .mockReturnValueOnce(Promise.reject(new Error('boom')))
+      .mockReturnValueOnce(Promise.resolve([]))
       .mockReturnValueOnce(Promise.resolve([]));
     await expect(getUpcomingShowsMapsCached('2026-08-01')).rejects.toThrow('boom');
     // The failed promise was evicted, so this is a fresh cold miss (not a cached
-    // error): the builder runs again and resolves.
+    // error): the builder runs again — pass 1 then pass 2 — and resolves.
     await expect(getUpcomingShowsMapsCached('2026-08-01')).resolves.toEqual({
       byArtistId: new Map(),
       byNormName: new Map(),
     });
-    expect(mockDb._chain.select).toHaveBeenCalledTimes(2);
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(3); // failed pass 1 + successful pass 1 + pass 2
   });
 });
