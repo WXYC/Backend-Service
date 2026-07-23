@@ -173,14 +173,20 @@ const server = app.listen(port, () => {
   // (`setupMetadataBroadcast`, future consumers) fire whether or not
   // CDC_SECRET is set (BS#1187). The websocket call below self-no-ops
   // when the secret is unset.
-  void startCdcDispatcher();
+  void startCdcDispatcher().catch((err) => {
+    console.error('startCdcDispatcher failed to start:', err);
+    Sentry.captureException(err, { tags: { subsystem: 'cdc' } });
+  });
   // Second CDC handler: rebroadcasts terminal metadata UPDATEs as SSE
   // `liveFs:update` so dj-site stays in sync after the enrichment-worker
   // (BS#892) finalizes a row. Closes BS#893 + BS#628. Registers a handler
   // on the same per-process LISTEN connection — independent of the
   // websocket handler, both fire on every event.
   setupMetadataBroadcast();
-  void setupCdcWebSocket(server);
+  void setupCdcWebSocket(server).catch((err) => {
+    console.error('setupCdcWebSocket failed to start:', err);
+    Sentry.captureException(err, { tags: { subsystem: 'cdc' } });
+  });
   // One-shot warm of the rotation-tracks picker LRUs in
   // `library.service.ts`. Fire-and-forget — the walk shares the LML
   // semaphore with concurrent traffic, and the LRUs are process-local so
