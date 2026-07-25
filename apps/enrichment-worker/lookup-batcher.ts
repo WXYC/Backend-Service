@@ -31,6 +31,17 @@
  * the bulk path (cache-only there, so zero incremental Discogs cost), so the
  * 8 extended-only `DiscogsMatchResult` fields survive the batch.
  *
+ * `allowReleaseResolutionFallback: true` also rides every dispatch (BS#1815):
+ * `/lookup/bulk` hardcodes `allow_release_resolution_fallback=false`
+ * server-side (LML#671's offline-drain kill switch), which silently dropped
+ * non-library album resolution for this worker after the B3 migration off
+ * single-item `/lookup` (whose per-item default is `true`) — the actual gap
+ * in the "parity with the per-call path" claim above. LML#920 turns the flag
+ * into a per-caller query param so this worker can opt back in without
+ * re-enabling it for the offline drains that share `bulkLookupMetadata`
+ * (`album-level-backfill`, `catalog-popularity-freetext-resolve`,
+ * `flowsheet-linked-reenrichment`), which must keep omitting it.
+ *
  * Ownership note: this module holds process-global mutable state (the buffer
  * and the flush timer). That is intentional — the coalescing point must be a
  * singleton per worker process so concurrent CDC ticks share one buffer.
@@ -137,7 +148,19 @@ async function dispatchChunk(chunk: PendingLookup[]): Promise<void> {
   try {
     const response = await bulkLookupMetadata(
       chunk.map((pending) => pending.item),
-      { budgetMs: ENRICHMENT_LML_BUDGET_MS, caller: ENRICHMENT_CALLER }
+      {
+        budgetMs: ENRICHMENT_LML_BUDGET_MS,
+        caller: ENRICHMENT_CALLER,
+        // BS#1815: restore non-library album resolution on the live
+        // enrichment path. `/lookup/bulk` hardcodes the LML#671 offline-drain
+        // kill switch (allow_release_resolution_fallback=false) unless the
+        // caller opts in via LML#920's per-caller query flag. The single-item
+        // `/lookup` this worker used pre-B3 (BS#1749) defaulted the flag
+        // true; only THIS live caller should opt back in — the offline
+        // drains (album-level-backfill, catalog-popularity-freetext-resolve,
+        // flowsheet-linked-reenrichment) must keep the kill switch on.
+        allowReleaseResolutionFallback: true,
+      }
     );
 
     // LML returns one verdict per input in input order, tagged with the

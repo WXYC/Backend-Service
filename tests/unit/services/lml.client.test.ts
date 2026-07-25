@@ -848,6 +848,48 @@ describe('lml.client', () => {
 
       await expect(bulkLookupMetadata([itemFor('A', 'X')])).rejects.toThrow(LmlClientError);
     });
+
+    // BS#1815 / LML#920: `/lookup/bulk` hardcodes allow_release_resolution_fallback
+    // =false server-side (the LML#671 offline-drain kill switch) unless the caller
+    // opts in via this per-caller query flag. The live enrichment worker is the
+    // only caller that should opt in (lookup-batcher.ts); the offline drains
+    // (album-level-backfill, catalog-popularity-freetext-resolve,
+    // flowsheet-linked-reenrichment) must keep the kill switch on by omitting it.
+    it('appends allow_release_resolution_fallback=true to the URL when allowReleaseResolutionFallback is set (BS#1815)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')], { allowReleaseResolutionFallback: true });
+
+      const [url] = mockFetch.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://lml.test:8000/api/v1/lookup/bulk?allow_release_resolution_fallback=true');
+    });
+
+    it('omits allow_release_resolution_fallback from the URL when the option is not set (BS#1815)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')]);
+
+      const [url] = mockFetch.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://lml.test:8000/api/v1/lookup/bulk');
+    });
+
+    it('omits allow_release_resolution_fallback from the URL when the option is explicitly false (BS#1815)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')], { allowReleaseResolutionFallback: false });
+
+      const [url] = mockFetch.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://lml.test:8000/api/v1/lookup/bulk');
+    });
   });
 
   describe('bulkLookupMetadata discogsUnavailable gate (BS#1293)', () => {
