@@ -16,7 +16,7 @@ Free text keeps growing: every show adds more unlinked plays. The cron drains th
    - **match** with `release_id > 0` → `discogs_release_id` set, `match_confidence` set, `resolved_at = now()`.
    - **no_match** (or the BS#1185 `release_id == 0` streaming-only sentinel) → `discogs_release_id = NULL`, `resolved_at = NULL`. Still UPSERTed (a responded outcome) so `attempt_at` is stamped and the TTL retry window arms.
    - **error** (per-item LML exception) or an HTTP-level throw → NOT written, so the pair stays `attempt_at IS NULL` and retries on the next sweep.
-6. Cooperative pause (`awaitQuietWindow`) before each batch yields to live DJ activity.
+6. Before each batch: check the BS#1814 absolute stop-by deadline (below) and, if not yet reached, the cooperative pause (`awaitQuietWindow`) yields to live DJ activity. Both checks are re-applied around the pause, so a DJ active exactly at the stop hour still exits at the stop hour rather than spinning.
 
 `discogs_master_id` stays NULL: Track 1's release leg is independent of LML Track 0 (which surfaces `master_id` in the lookup result). The UPSERT omits `discogs_master_id` from both the INSERT and the UPDATE `set` clause, so a later Track-0-aware run PRESERVES any master id it wrote — never clobbers it back to NULL.
 
@@ -32,6 +32,22 @@ There is **no "retire after N"**. A pair with a release id is permanent (never r
 ## Schedule
 
 Default `45 4 * * *` UTC (00:45 ET) from `package.json` `cron-schedule`, registered via deploy-base. Chosen to sit in the overnight low-traffic window in a free minute that does not collide with the other LML-bounded crons (`artist-search-alias-consumer` 04:15, `rotation-artist-backfill` 04:30, `flowsheet-metadata-backfill` 06:00), so they don't all fan out to LML at once.
+
+### Window bound (BS#1814)
+
+The naive arithmetic at the pre-BS#1814 defaults (`MAX_PAIRS_PER_RUN=5000`, `BULK_BATCH_SIZE=5`, `BULK_RATE_PER_MIN=1`) guaranteed a run could take ~17-24h — well past the overnight window and straight into daytime peak, starving LML's single-worker Discogs concurrency for live callers (the 2026-07-25 incident: a run still alive 15h in, LML `/health` `503`, tubafrenzy/ROM timing out). `FREETEXT_RESOLVE_STOP_BY_UTC` (default `11:00`, ~4 AM PT) is an **absolute UTC wall-clock stop-by**, checked before every batch (and re-checked around the cooperative pause below): once `now` reaches or passes today's stop-by time, the run exits after its in-flight batch — remaining pairs simply drain on the next scheduled run (UPSERTs are idempotent; unwritten pairs stay `attempt_at IS NULL` and are picked up again, so a mid-run stop, even a hard `SIGKILL`, loses no data).
+
+This is a **same-day-only** deadline — it deliberately does NOT roll forward to tomorrow. The nightly `04:45 UTC` run sees a deadline hours in its own future and proceeds normally; a run launched AFTER the stop hour (a manual catch-up, or a misfired daytime launch) sees a deadline already in the past and no-ops immediately rather than computing "the next `11:00`" and running all day. See `computeStopByDeadlineMs`/`isPastStopBy` in `job.ts`.
+
+The run's summary and terminal log line record why it stopped: `stopReason: 'backlog_drained'` (every eligible pair for this run was processed before the deadline) vs `'stop_by_reached'` (the deadline cut the run short) — so a future overrun is visible in the logs instead of silently bleeding into daytime.
+
+### Strengthened cooperative pause (BS#1814)
+
+`LIVE_ACTIVITY_LOOKBACK_SECONDS` default raised `60s → 300s` (5 min). The flowsheet gap between songs is 3-5 min, so the old 60s lookback read "quiet" between almost every track and the job proceeded right into the streaming-check-on-add window a fresh add triggers — the pause never reliably parked the job for an overnight live show. 300s comfortably covers the song gap. The pause loop (`awaitQuietWindow`) is also now deadline-aware: without that, a DJ active continuously right at the stop hour would otherwise carry the run past the deadline indefinitely (the loop previously only exited on quiet). **Note:** `LIVE_ACTIVITY_LOOKBACK_SECONDS` is a generic env-var name shared across jobs — this raised compiled default only changes behavior for _this job's_ container, and only when the var is unset there; if prod sets it explicitly for this job already, update that value too.
+
+### Out of scope (follow-up)
+
+A play-floor on the eligible set (gate free-text pairs on a minimum play count, mirroring BS#1591's `flowsheet-metadata-backfill` fix) would shrink the backlog structurally so the deadline rarely even binds — tracked as a separate fast-follow, not part of BS#1814.
 
 ## Run procedure (manual, e.g. catch-up)
 
@@ -54,18 +70,19 @@ docker run --rm --env-file .env <image> 2>&1 | tee /tmp/freetext-resolve.log
 
 ## Env knobs
 
-| Variable                             | Default            | Meaning                                                                                             |
-| ------------------------------------ | ------------------ | --------------------------------------------------------------------------------------------------- |
-| `FREETEXT_RESOLVE_BULK_BATCH_SIZE`   | `5`                | Items per LML bulk request. LML caps at 100. Raising this scales the per-batch fetch timeout.       |
-| `FREETEXT_RESOLVE_BULK_RATE_PER_MIN` | `1`                | Batches per minute. At the default batch size, 1/min ≈ 5 pairs/min sustained.                       |
-| `FREETEXT_RESOLVE_BULK_BUDGET_MS`    | `25000`            | Per-item budget forwarded to LML as `X-Caller-Budget-Ms`. NOT the batch fetch timeout.              |
-| `FREETEXT_RESOLVE_NO_MATCH_TTL_DAYS` | `30`               | A no-match pair is re-attempted once its `attempt_at` is older than this.                           |
-| `FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN` | `5000`             | Cap on distinct eligible pairs processed per run. `0` disables the cap (drain everything eligible). |
-| `FREETEXT_RESOLVE_READ_TIMEOUT_MS`   | `300000` (5min)    | `SET LOCAL statement_timeout` for the DISTINCT enumerate scan.                                      |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`     | `60`               | Cooperative-pause lookback window; `0` disables.                                                    |
-| `LIBRARY_METADATA_URL`               | (required)         | LML base URL.                                                                                       |
-| `LML_API_KEY`                        | (required in prod) | LML bearer token.                                                                                   |
-| `DATABASE_URL`                       | (required)         | Postgres connection string.                                                                         |
+| Variable                             | Default                   | Meaning                                                                                                                                                                    |
+| ------------------------------------ | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FREETEXT_RESOLVE_BULK_BATCH_SIZE`   | `5`                       | Items per LML bulk request. LML caps at 100. Raising this scales the per-batch fetch timeout.                                                                              |
+| `FREETEXT_RESOLVE_BULK_RATE_PER_MIN` | `1`                       | Batches per minute. At the default batch size, 1/min ≈ 5 pairs/min sustained.                                                                                              |
+| `FREETEXT_RESOLVE_BULK_BUDGET_MS`    | `25000`                   | Per-item budget forwarded to LML as `X-Caller-Budget-Ms`. NOT the batch fetch timeout.                                                                                     |
+| `FREETEXT_RESOLVE_NO_MATCH_TTL_DAYS` | `30`                      | A no-match pair is re-attempted once its `attempt_at` is older than this.                                                                                                  |
+| `FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN` | `5000`                    | Cap on distinct eligible pairs processed per run. `0` disables the cap (drain everything eligible).                                                                        |
+| `FREETEXT_RESOLVE_READ_TIMEOUT_MS`   | `300000` (5min)           | `SET LOCAL statement_timeout` for the DISTINCT enumerate scan.                                                                                                             |
+| `FREETEXT_RESOLVE_STOP_BY_UTC`       | `11:00`                   | BS#1814 absolute UTC wall-clock stop-by ("HH:MM", 24h, zero-padded). Same-day only — never rolls to tomorrow. Checked before every batch and around the cooperative pause. |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`     | `300` (BS#1814, was `60`) | Cooperative-pause lookback window; `0` disables. Deadline-aware (BS#1814): won't spin past `FREETEXT_RESOLVE_STOP_BY_UTC`.                                                 |
+| `LIBRARY_METADATA_URL`               | (required)                | LML base URL.                                                                                                                                                              |
+| `LML_API_KEY`                        | (required in prod)        | LML bearer token.                                                                                                                                                          |
+| `DATABASE_URL`                       | (required)                | Postgres connection string.                                                                                                                                                |
 
 ## Acceptance verification
 
@@ -104,6 +121,7 @@ After the re-arm, the next scheduled run (or a manual catch-up per "Run procedur
 
 ## Related
 
+- [BS#1814](https://github.com/WXYC/Backend-Service/issues/1814) — the absolute stop-by wall-clock bound + strengthened cooperative pause (this README's "Window bound" and "Strengthened cooperative pause" sections above), fixing the overnight-window overrun that starved LML into a congestion collapse on 2026-07-25.
 - [BS#1767](https://github.com/WXYC/Backend-Service/issues/1767) — carries a representative track title into the bulk lookup (this README's "Post-deploy re-drain" section); +16pts / ~3.7x match-rate lift, 0 regressions in the A/B probe.
 - [BS#1491](https://github.com/WXYC/Backend-Service/issues/1491) — this job's parent issue (blocks Track 2, BS#1492).
 - [BS#1486](https://github.com/WXYC/Backend-Service/issues/1486) — Phase-2 catalog-popularity epic.
