@@ -64,8 +64,13 @@ import {
   READ_TIMEOUT_DEFAULT,
   LIVE_ACTIVITY_LOOKBACK_DEFAULT,
   LIVE_ACTIVITY_LOOKBACK_ENV,
+  STOP_BY_ENV,
+  STOP_BY_DEFAULT,
+  parseStopByUtc,
+  isPastStopBy,
   type NormalizedPair,
   type ResolveOptions,
+  type StopBy,
 } from '../../../../jobs/catalog-popularity-freetext-resolve/job';
 
 type SqlLike = {
@@ -111,6 +116,7 @@ const RESET_ENV_KEYS = [
   NO_MATCH_TTL_DAYS_ENV,
   MAX_PAIRS_PER_RUN_ENV,
   LIVE_ACTIVITY_LOOKBACK_ENV,
+  STOP_BY_ENV,
 ];
 const stripEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
   const out = { ...env };
@@ -526,6 +532,33 @@ describe('checkLiveActivity / awaitQuietWindow', () => {
     await awaitQuietWindow(60, 1);
     expect(probe).toHaveBeenCalledTimes(2);
   });
+
+  // BS#1814: the stop-by must bound the pause so an active DJ near the stop hour
+  // cannot carry the run past the deadline via the sleep→re-probe spin.
+  it('awaitQuietWindow returns immediately without probing when shouldStop() is already true', async () => {
+    await awaitQuietWindow(420, 1_000_000, () => true);
+    expect(db.execute as jest.Mock).not.toHaveBeenCalled();
+  });
+
+  it('awaitQuietWindow stops re-probing once shouldStop() flips true, even while a DJ stays active', async () => {
+    const probe = db.execute as jest.Mock;
+    let stop = false;
+    // The probe reports a DJ active forever AND flips the stop predicate; without
+    // the stop-by bound this would spin indefinitely.
+    probe.mockImplementation(() => {
+      stop = true;
+      return Promise.resolve([{}]);
+    });
+    await awaitQuietWindow(420, 1, () => stop);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  // BS#1814: the pause lookback is strengthened from 60s (which slipped through
+  // the 3–5 min song gap) to 420s (7 min) — well above the gap, so an overnight
+  // live show reliably parks the job between songs.
+  it('the strengthened live-activity lookback default is well above the 3–5 min song gap', () => {
+    expect(LIVE_ACTIVITY_LOOKBACK_DEFAULT).toBe(420);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -651,17 +684,30 @@ describe('resolveOptions', () => {
     expect(opts.dryRun).toBe(false);
   });
 
+  it('defaults the stop-by to the overnight bound (11:00 UTC)', () => {
+    const opts = resolveOptions(stripEnv(process.env), []);
+    expect(STOP_BY_DEFAULT).toBe('11:00');
+    expect(opts.stopByUtc).toEqual({ hours: 11, minutes: 0 });
+  });
+
   it('honors env overrides', () => {
     const env = {
       ...stripEnv(process.env),
       [BULK_BATCH_SIZE_ENV]: '10',
       [NO_MATCH_TTL_DAYS_ENV]: '7',
       [MAX_PAIRS_PER_RUN_ENV]: '0',
+      [STOP_BY_ENV]: '10:30',
     };
     const opts = resolveOptions(env, []);
     expect(opts.batchSize).toBe(10);
     expect(opts.noMatchTtlDays).toBe(7);
     expect(opts.maxPairsPerRun).toBe(0); // 0 allowed (non-negative) → disables cap
+    expect(opts.stopByUtc).toEqual({ hours: 10, minutes: 30 });
+  });
+
+  it('disables the stop-by when FREETEXT_RESOLVE_STOP_BY_UTC is set empty', () => {
+    const opts = resolveOptions({ ...stripEnv(process.env), [STOP_BY_ENV]: '' }, []);
+    expect(opts.stopByUtc).toBeNull();
   });
 
   it('throws on invalid batch size', () => {
@@ -786,5 +832,197 @@ describe('runResolve', () => {
     expect(summary.processed).toBe(2);
     expect(summary.batches).toBe(2);
     expect(mockBulkLookupMetadata).toHaveBeenCalledTimes(2);
+  });
+
+  // -------------------------------------------------------------------------
+  // Stop-by wall-clock bound (BS#1814). The nightly cron must not run past an
+  // absolute overnight stop hour and starve LML during the daytime peak.
+  // -------------------------------------------------------------------------
+
+  /** A fixed UTC instant on the incident date, for a deterministic clock. */
+  const utc = (h: number, m = 0): Date => new Date(Date.UTC(2026, 6, 25, h, m, 0, 0));
+
+  it('drains the full eligible set and reports backlog_drained when the stop-by is not reached', async () => {
+    const mock = db.execute as jest.Mock;
+    for (const v of enumerateResult([
+      { artist_name: 'Stereolab', album_title: 'Dots and Loops' },
+      { artist_name: 'Juana Molina', album_title: 'Halo' },
+    ])) {
+      mock.mockResolvedValueOnce(v);
+    }
+    mock.mockResolvedValueOnce([]); // loadSkipKeys empty
+
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'no_match', lookup: { results: [] } }],
+    });
+
+    // 06:00 UTC is well inside the overnight window (before the 11:00 stop-by).
+    const summary = await runResolve(
+      baseOptions({ batchSize: 1, stopByUtc: { hours: 11, minutes: 0 }, now: () => utc(6) })
+    );
+
+    expect(mockBulkLookupMetadata).toHaveBeenCalledTimes(2);
+    expect(summary.stop_reason).toBe('backlog_drained');
+    expect(summary.processed).toBe(2);
+  });
+
+  it('no-ops a misfired daytime run: already past the stop-by → zero batches, stop_by_reached', async () => {
+    const mock = db.execute as jest.Mock;
+    for (const v of enumerateResult([{ artist_name: 'Stereolab', album_title: 'Dots and Loops' }])) {
+      mock.mockResolvedValueOnce(v);
+    }
+    mock.mockResolvedValueOnce([]); // loadSkipKeys empty
+
+    // 14:00 UTC — a manual/misfired daytime run. Today's 11:00 stop-by has
+    // already passed, so the loop must no-op immediately (the absolute wall-clock
+    // must NOT roll forward to tomorrow's 11:00).
+    const summary = await runResolve(
+      baseOptions({ batchSize: 1, stopByUtc: { hours: 11, minutes: 0 }, now: () => utc(14) })
+    );
+
+    expect(mockBulkLookupMetadata).not.toHaveBeenCalled();
+    expect(db.insert as jest.Mock).not.toHaveBeenCalled();
+    expect(summary.stop_reason).toBe('stop_by_reached');
+    expect(summary.processed).toBe(0);
+  });
+
+  it('finishes the in-flight batch then stops when the stop-by passes mid-run (no new batch after deadline)', async () => {
+    const mock = db.execute as jest.Mock;
+    for (const v of enumerateResult([
+      { artist_name: 'Stereolab', album_title: 'Dots and Loops' },
+      { artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again' },
+    ])) {
+      mock.mockResolvedValueOnce(v);
+    }
+    mock.mockResolvedValueOnce([]); // loadSkipKeys empty
+
+    // Start 30s before the stop-by; running the first batch advances the wall
+    // clock past 11:00, so the second iteration's pre-batch check must break.
+    let clockMs = utc(10, 59).getTime();
+    const now = (): Date => new Date(clockMs);
+    mockBulkLookupMetadata.mockImplementation(() => {
+      clockMs = utc(11, 1).getTime(); // now past the stop-by
+      return Promise.resolve({ results: [{ index: 0, status: 'no_match', lookup: { results: [] } }] });
+    });
+
+    const summary = await runResolve(baseOptions({ batchSize: 1, stopByUtc: { hours: 11, minutes: 0 }, now }));
+
+    // Batch 1 ran to completion; batch 2 was never started (deadline hit at the
+    // top of iteration 2). The unprocessed pair stays unwritten → attempt_at IS
+    // NULL → resumable next run with no lost or duplicated work.
+    expect(mockBulkLookupMetadata).toHaveBeenCalledTimes(1);
+    expect((db.insert as jest.Mock).mock.calls.length).toBe(1); // only batch 1's no-match UPSERT
+    expect(summary.stop_reason).toBe('stop_by_reached');
+    expect(summary.processed).toBe(1);
+  });
+
+  it('bounds the cooperative pause: a DJ active at the stop hour still exits (does not spin past it)', async () => {
+    const mock = db.execute as jest.Mock;
+    // enumerate (SET LOCAL + SELECT) + loadSkipKeys, then the live-activity probe.
+    mock
+      .mockResolvedValueOnce({}) // SET LOCAL
+      .mockResolvedValueOnce([{ artist_name: 'Stereolab', album_title: 'Dots and Loops' }])
+      .mockResolvedValueOnce([]); // loadSkipKeys empty
+
+    // Start 30s before the stop-by. The live-activity probe reports a DJ AND
+    // advances the wall clock past 11:00, so the pause loop must exit on the
+    // deadline instead of spinning sleep→re-probe into the daytime peak.
+    let clockMs = new Date(Date.UTC(2026, 6, 25, 10, 59, 30)).getTime();
+    const now = (): Date => new Date(clockMs);
+    mock.mockImplementation(() => {
+      clockMs = new Date(Date.UTC(2026, 6, 25, 11, 0, 30)).getTime(); // now past 11:00
+      return Promise.resolve([{}]); // DJ active
+    });
+
+    const summary = await runResolve(
+      baseOptions({
+        batchSize: 1,
+        liveActivityLookbackSeconds: 420,
+        liveActivityPauseMs: 1,
+        stopByUtc: { hours: 11, minutes: 0 },
+        now,
+      })
+    );
+
+    expect(mockBulkLookupMetadata).not.toHaveBeenCalled();
+    expect(summary.stop_reason).toBe('stop_by_reached');
+    expect(summary.processed).toBe(0);
+  });
+
+  it('disabled stop-by (null) drains the backlog regardless of wall-clock', async () => {
+    const mock = db.execute as jest.Mock;
+    for (const v of enumerateResult([{ artist_name: 'Stereolab', album_title: 'Dots and Loops' }])) {
+      mock.mockResolvedValueOnce(v);
+    }
+    mock.mockResolvedValueOnce([]); // loadSkipKeys empty
+
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'no_match', lookup: { results: [] } }],
+    });
+
+    // Middle of the day, but the stop-by is explicitly disabled (supervised
+    // manual full-drain per the README) — the run proceeds.
+    const summary = await runResolve(baseOptions({ batchSize: 1, stopByUtc: null, now: () => utc(14) }));
+
+    expect(mockBulkLookupMetadata).toHaveBeenCalledTimes(1);
+    expect(summary.stop_reason).toBe('backlog_drained');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stop-by parsing + predicate (BS#1814).
+// ---------------------------------------------------------------------------
+
+describe('parseStopByUtc', () => {
+  it('parses a bare UTC hour', () => {
+    expect(parseStopByUtc('11', '00:00')).toEqual({ hours: 11, minutes: 0 });
+  });
+
+  it('parses HH:MM', () => {
+    expect(parseStopByUtc('11:30', '00:00')).toEqual({ hours: 11, minutes: 30 });
+  });
+
+  it('falls back to the default when the raw value is undefined (env unset)', () => {
+    expect(parseStopByUtc(undefined, '11:00')).toEqual({ hours: 11, minutes: 0 });
+  });
+
+  it('disables the bound (null) on an explicit empty / whitespace value', () => {
+    expect(parseStopByUtc('', '11:00')).toBeNull();
+    expect(parseStopByUtc('   ', '11:00')).toBeNull();
+  });
+
+  it('throws on a malformed value', () => {
+    expect(() => parseStopByUtc('garbage', '11:00')).toThrow(/FREETEXT_RESOLVE_STOP_BY_UTC/);
+  });
+
+  it('throws on an out-of-range hour or minute', () => {
+    expect(() => parseStopByUtc('25:00', '11:00')).toThrow();
+    expect(() => parseStopByUtc('11:60', '11:00')).toThrow();
+  });
+});
+
+describe('isPastStopBy', () => {
+  const on = (h: number, m = 0): Date => new Date(Date.UTC(2026, 6, 25, h, m, 0, 0));
+  const eleven: StopBy = { hours: 11, minutes: 0 };
+
+  it('is never past when the bound is disabled (null)', () => {
+    expect(isPastStopBy(null, on(23))).toBe(false);
+  });
+
+  it('is false before the stop-by', () => {
+    expect(isPastStopBy(eleven, on(10, 59))).toBe(false);
+    expect(isPastStopBy(eleven, on(4, 45))).toBe(false); // the nightly cron start
+  });
+
+  it('is true at and after the stop-by', () => {
+    expect(isPastStopBy(eleven, on(11, 0))).toBe(true);
+    expect(isPastStopBy(eleven, on(11, 1))).toBe(true);
+  });
+
+  it('does NOT roll forward to tomorrow: a stop hour already passed today reads as past', () => {
+    // The critical semantic: a 14:00 run with an 11:00 stop-by must be "past",
+    // not "not-yet (tomorrow 11:00)". Rollover would defeat the daytime no-op.
+    expect(isPastStopBy(eleven, on(14))).toBe(true);
+    expect(isPastStopBy(eleven, on(23, 59))).toBe(true);
   });
 });

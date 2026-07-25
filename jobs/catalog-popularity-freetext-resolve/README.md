@@ -33,6 +33,15 @@ There is **no "retire after N"**. A pair with a release id is permanent (never r
 
 Default `45 4 * * *` UTC (00:45 ET) from `package.json` `cron-schedule`, registered via deploy-base. Chosen to sit in the overnight low-traffic window in a free minute that does not collide with the other LML-bounded crons (`artist-search-alias-consumer` 04:15, `rotation-artist-backfill` 04:30, `flowsheet-metadata-backfill` 06:00), so they don't all fan out to LML at once.
 
+### The run is bounded to the overnight window (BS#1814)
+
+Each batch is 5 free-text pairs drawn from _unlinked_ plays — the least-cached lookups in the system — so nearly every item triggers a full Discogs cascade and holds LML's `Semaphore(5)` for ~25–30 s. At the default rate (1 batch/min) an unbounded run of a large backlog takes 16+ hours of wall clock, so a run that started at 04:45 UTC would overrun deep into the daytime peak and starve LML into a congestion collapse (the 2026-07-25 incident). Two bounds keep the run inside the overnight window:
+
+- **Absolute stop-by wall-clock — `FREETEXT_RESOLVE_STOP_BY_UTC` (default `11:00` UTC, ≈4 AM PT).** Checked before each batch: once the wall clock reaches today's stop-by, the run finishes the in-flight batch and exits (`stop_reason=stop_by_reached`); it never _starts_ a batch past the deadline. The default gives the 04:45 UTC cron a ~6h15m window and stops well before the daytime peak. Because the bound is an **absolute** time-of-day computed against today's date (never rolled forward to tomorrow), it also no-ops a manually-launched or misfired **daytime** run for free — such a run is already past today's stop hour and exits with zero batches. The remaining pairs drain on the next run: UPSERTs are idempotent and the attempt-marker / no-match-TTL retry policy (below) resumes partial progress, so a mid-run stop — even a `SIGKILL` — loses nothing. The stop-by also bounds the cooperative pause: if a DJ is active near the stop hour, the pause loop yields at the deadline instead of spinning `sleep→re-probe` past it. Set the var empty to disable the bound (for a supervised manual full-drain only).
+- **Strengthened cooperative pause — `LIVE_ACTIVITY_LOOKBACK_SECONDS` (default `420`, was `60`).** WXYC broadcasts 24/7, so a live DJ can be adding tracks _during_ the overnight window. The old 60 s lookback slipped through the 3–5 min gap between songs and the job proceeded right into the streaming-check-on-add window. 420 s (7 min) is well above the song-gap range, so an active show reliably parks the job between tracks; it only resumes after ~7 min of true silence. The stop-by bounds the total, so this parking can never carry the run into the daytime.
+
+Together: the **stop-by** bounds the daytime blast radius (the incident), and the **strengthened pause** bounds the overnight residual (yielding to a live overnight show).
+
 ## Run procedure (manual, e.g. catch-up)
 
 ```bash
@@ -46,26 +55,31 @@ ssh wxyc-ec2
 docker run --rm --env-file .env <image> --dry-run
 
 # 4. Run for real. At defaults (batch=5, rate=1/min ≈ 5 pairs/min, cap 5000/run)
-#    one nightly run drains up to 5000 eligible pairs. For a catch-up backfill
-#    of the full long tail, bump FREETEXT_RESOLVE_BULK_RATE_PER_MIN and
-#    FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN=0 (disable the cap).
+#    a nightly run drains what fits in the overnight window before the
+#    FREETEXT_RESOLVE_STOP_BY_UTC=11:00 stop-by (~1875 pairs at the default
+#    rate), then exits; the rest drains on later runs. For a SUPERVISED catch-up
+#    backfill of the full long tail, bump FREETEXT_RESOLVE_BULK_RATE_PER_MIN,
+#    set FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN=0 (disable the pair cap), AND set
+#    FREETEXT_RESOLVE_STOP_BY_UTC= (empty, disable the window bound) — only while
+#    you are watching LML load, since that removes the overrun guard.
 docker run --rm --env-file .env <image> 2>&1 | tee /tmp/freetext-resolve.log
 ```
 
 ## Env knobs
 
-| Variable                             | Default            | Meaning                                                                                             |
-| ------------------------------------ | ------------------ | --------------------------------------------------------------------------------------------------- |
-| `FREETEXT_RESOLVE_BULK_BATCH_SIZE`   | `5`                | Items per LML bulk request. LML caps at 100. Raising this scales the per-batch fetch timeout.       |
-| `FREETEXT_RESOLVE_BULK_RATE_PER_MIN` | `1`                | Batches per minute. At the default batch size, 1/min ≈ 5 pairs/min sustained.                       |
-| `FREETEXT_RESOLVE_BULK_BUDGET_MS`    | `25000`            | Per-item budget forwarded to LML as `X-Caller-Budget-Ms`. NOT the batch fetch timeout.              |
-| `FREETEXT_RESOLVE_NO_MATCH_TTL_DAYS` | `30`               | A no-match pair is re-attempted once its `attempt_at` is older than this.                           |
-| `FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN` | `5000`             | Cap on distinct eligible pairs processed per run. `0` disables the cap (drain everything eligible). |
-| `FREETEXT_RESOLVE_READ_TIMEOUT_MS`   | `300000` (5min)    | `SET LOCAL statement_timeout` for the DISTINCT enumerate scan.                                      |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`     | `60`               | Cooperative-pause lookback window; `0` disables.                                                    |
-| `LIBRARY_METADATA_URL`               | (required)         | LML base URL.                                                                                       |
-| `LML_API_KEY`                        | (required in prod) | LML bearer token.                                                                                   |
-| `DATABASE_URL`                       | (required)         | Postgres connection string.                                                                         |
+| Variable                             | Default            | Meaning                                                                                                                                                                                                     |
+| ------------------------------------ | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FREETEXT_RESOLVE_BULK_BATCH_SIZE`   | `5`                | Items per LML bulk request. LML caps at 100. Raising this scales the per-batch fetch timeout.                                                                                                               |
+| `FREETEXT_RESOLVE_BULK_RATE_PER_MIN` | `1`                | Batches per minute. At the default batch size, 1/min ≈ 5 pairs/min sustained.                                                                                                                               |
+| `FREETEXT_RESOLVE_BULK_BUDGET_MS`    | `25000`            | Per-item budget forwarded to LML as `X-Caller-Budget-Ms`. NOT the batch fetch timeout.                                                                                                                      |
+| `FREETEXT_RESOLVE_NO_MATCH_TTL_DAYS` | `30`               | A no-match pair is re-attempted once its `attempt_at` is older than this.                                                                                                                                   |
+| `FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN` | `5000`             | Cap on distinct eligible pairs processed per run. `0` disables the cap (drain everything eligible).                                                                                                         |
+| `FREETEXT_RESOLVE_STOP_BY_UTC`       | `11:00`            | Absolute stop-by wall-clock (UTC `HH` or `HH:MM`). Finishes the in-flight batch then exits once reached; never starts a batch past it. Empty disables the bound (supervised full-drain only). See Schedule. |
+| `FREETEXT_RESOLVE_READ_TIMEOUT_MS`   | `300000` (5min)    | `SET LOCAL statement_timeout` for the DISTINCT enumerate scan.                                                                                                                                              |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`     | `420`              | Cooperative-pause lookback window (7 min, well above the 3–5 min song gap so an overnight live show parks the job). `0` disables. See Schedule.                                                             |
+| `LIBRARY_METADATA_URL`               | (required)         | LML base URL.                                                                                                                                                                                               |
+| `LML_API_KEY`                        | (required in prod) | LML bearer token.                                                                                                                                                                                           |
+| `DATABASE_URL`                       | (required)         | Postgres connection string.                                                                                                                                                                                 |
 
 ## Acceptance verification
 

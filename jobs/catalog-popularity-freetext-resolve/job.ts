@@ -103,12 +103,32 @@ export const READ_TIMEOUT_ENV = 'FREETEXT_RESOLVE_READ_TIMEOUT_MS';
 export const READ_TIMEOUT_DEFAULT = 5 * 60 * 1000;
 
 /** Cooperative-pause lookback window (seconds). If the most recent flowsheet
- * track was added within this many seconds, defer. `0` disables the probe. */
+ * track was added within this many seconds, defer. `0` disables the probe.
+ *
+ * Sized WELL ABOVE the 3–5 min gap between songs (BS#1814): at the old 60s a
+ * live overnight show slipped through the between-songs gap and the job
+ * proceeded right into the streaming-check-on-add window, contending with the
+ * DJ's live lookups. 420s (7 min) exceeds the upper end of the song-gap range
+ * with margin, so an active show reliably keeps the job parked between tracks;
+ * it only resumes after ~7 min of true silence (the show ended). The stop-by
+ * wall-clock (below) bounds the total so this parking can never carry the run
+ * into the daytime peak. */
 export const LIVE_ACTIVITY_LOOKBACK_ENV = 'LIVE_ACTIVITY_LOOKBACK_SECONDS';
-export const LIVE_ACTIVITY_LOOKBACK_DEFAULT = 60;
+export const LIVE_ACTIVITY_LOOKBACK_DEFAULT = 420;
 
 /** Sleep between re-probes when DJ activity is detected. */
 export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
+
+/** Absolute stop-by wall-clock (UTC time-of-day) past which a run must not start
+ * a new batch — the hard overnight-window bound (BS#1814). Parsed as `HH` or
+ * `HH:MM` UTC; an explicitly empty value disables the bound (for a supervised
+ * manual full-drain). Default 11:00 UTC (≈4 AM PT): the 04:45 UTC cron gets a
+ * ~6h15m window and stops well before the daytime peak that the 2026-07-25
+ * incident spanned. An ABSOLUTE wall-clock (not a relative runtime cap) also
+ * no-ops a manually-launched or misfired daytime run for free — it is already
+ * past today's stop hour. */
+export const STOP_BY_ENV = 'FREETEXT_RESOLVE_STOP_BY_UTC';
+export const STOP_BY_DEFAULT = '11:00';
 
 // -- Source query ------------------------------------------------------------
 
@@ -359,6 +379,57 @@ export const verdictFromLookup = (
   };
 };
 
+// -- Stop-by wall-clock bound (BS#1814) --------------------------------------
+
+/** A parsed stop-by wall-clock, as a UTC time-of-day. */
+export interface StopBy {
+  hours: number;
+  minutes: number;
+}
+
+/** Parse `FREETEXT_RESOLVE_STOP_BY_UTC` (`HH` or `HH:MM`, UTC) into a `StopBy`,
+ * or `null` when the bound is disabled.
+ *
+ * `undefined` (env unset) falls back to `fallback`; an explicitly empty /
+ * whitespace value disables the bound (returns `null`) — the escape hatch for a
+ * supervised manual full-drain. A malformed or out-of-range value throws, so a
+ * typo fails the run loudly instead of silently running unbounded. */
+export const parseStopByUtc = (raw: string | undefined, fallback: string): StopBy | null => {
+  const value = raw === undefined ? fallback : raw;
+  const trimmed = value.trim();
+  if (trimmed === '') return null;
+  const m = /^(\d{1,2})(?::(\d{2}))?$/.exec(trimmed);
+  const hours = m ? Number(m[1]) : NaN;
+  const minutes = m && m[2] !== undefined ? Number(m[2]) : 0;
+  if (!m || hours > 23 || minutes > 59) {
+    throw new Error(
+      `[${JOB_NAME}] Invalid ${STOP_BY_ENV}=${JSON.stringify(raw)}: ` +
+        `expected a UTC 'HH' or 'HH:MM' in 00:00–23:59, or empty to disable.`
+    );
+  }
+  return { hours, minutes };
+};
+
+/** Whether `now` is at or past TODAY's UTC occurrence of the stop-by wall-clock.
+ *
+ * The deadline is computed against `now`'s own UTC date and is NEVER rolled
+ * forward to tomorrow: a stop hour that has already passed today reads as past
+ * (returns `true`), which is exactly what no-ops a manually-launched or misfired
+ * daytime run. A disabled bound (`null`) is never past. */
+export const isPastStopBy = (stopBy: StopBy | null, now: Date): boolean => {
+  if (!stopBy) return false;
+  const deadline = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+    stopBy.hours,
+    stopBy.minutes,
+    0,
+    0
+  );
+  return now.getTime() >= deadline;
+};
+
 // -- Cooperative pause -------------------------------------------------------
 
 /** Probe `flowsheet` for a track row added in the last `lookbackSeconds`.
@@ -378,9 +449,21 @@ export const checkLiveActivity = async (lookbackSeconds: number): Promise<boolea
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Loop: probe → if active, sleep pauseMs → re-probe. Returns when quiet. */
-export const awaitQuietWindow = async (lookbackSeconds: number, pauseMs: number): Promise<void> => {
+/** Loop: probe → if active, sleep pauseMs → re-probe. Returns when quiet.
+ *
+ * `shouldStop` bounds the pause with the stop-by wall-clock (BS#1814): a DJ
+ * active near the stop hour must not carry the run past the deadline via the
+ * sleep→re-probe spin. We treat "already past stop-by" as an immediate exit
+ * before even probing, and re-check after each detected-active probe so the loop
+ * yields the moment the deadline passes rather than sleeping through it. */
+export const awaitQuietWindow = async (
+  lookbackSeconds: number,
+  pauseMs: number,
+  shouldStop: () => boolean = () => false
+): Promise<void> => {
+  if (shouldStop()) return;
   while (await checkLiveActivity(lookbackSeconds)) {
+    if (shouldStop()) return;
     log('info', 'live_activity_pause', `live DJ activity within ${lookbackSeconds}s; deferring ${pauseMs}ms`, {
       lookback_seconds: lookbackSeconds,
       pause_ms: pauseMs,
@@ -524,16 +607,26 @@ export const runBatch = async (
 
 // -- Top-level orchestration -------------------------------------------------
 
+/** Why the resolve loop stopped. `backlog_drained` = ran out of eligible pairs
+ * (or the max-pairs slice) within the window; `stop_by_reached` = hit the
+ * absolute stop-by wall-clock and exited after the in-flight batch (BS#1814).
+ * Logged so future overruns are visible. */
+export type StopReason = 'backlog_drained' | 'stop_by_reached';
+
 export interface ResolveSummary {
   scanned: number;
   eligible: number;
+  /** Pairs actually processed this run (batches that ran). On a stop-by-
+   * truncated run this is less than `eligible` — the remainder drains next run. */
   processed: number;
+  /** Batches that actually ran (not the planned chunk count). */
   batches: number;
   match: number;
   no_match: number;
   error: number;
   upserts: number;
   unexpected_index: number;
+  stop_reason: StopReason;
 }
 
 export interface ResolveOptions {
@@ -546,6 +639,11 @@ export interface ResolveOptions {
   liveActivityLookbackSeconds: number;
   liveActivityPauseMs: number;
   dryRun: boolean;
+  /** Absolute stop-by wall-clock (UTC), or `null` when the bound is disabled.
+   * Optional so existing callers/tests default to an unbounded run. */
+  stopByUtc?: StopBy | null;
+  /** Injectable clock (test seam); defaults to the real wall clock. */
+  now?: () => Date;
 }
 
 export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: string[] = process.argv): ResolveOptions => {
@@ -574,6 +672,8 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
       ctx
     ),
     liveActivityPauseMs: LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+    stopByUtc: parseStopByUtc(env[STOP_BY_ENV], STOP_BY_DEFAULT),
+    now: () => new Date(),
     dryRun: args.includes('--dry-run'),
   };
 };
@@ -585,12 +685,19 @@ const chunk = <T>(arr: T[], size: number): T[][] => {
 };
 
 export const runResolve = async (options: ResolveOptions): Promise<ResolveSummary> => {
+  const now = options.now ?? (() => new Date());
+  const stopBy = options.stopByUtc ?? null;
+  /** True once the wall clock is at/past today's stop-by (BS#1814). */
+  const shouldStop = (): boolean => isPastStopBy(stopBy, now());
+
   log('info', 'started', `${JOB_NAME} starting`, {
     batch_size: options.batchSize,
     rate_per_min: options.ratePerMin,
     budget_ms: options.budgetMs,
     no_match_ttl_days: options.noMatchTtlDays,
     max_pairs_per_run: options.maxPairsPerRun,
+    stop_by_utc: stopBy ? `${String(stopBy.hours).padStart(2, '0')}:${String(stopBy.minutes).padStart(2, '0')}` : null,
+    live_activity_lookback_seconds: options.liveActivityLookbackSeconds,
     dry_run: options.dryRun,
   });
 
@@ -633,6 +740,7 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
       error: 0,
       upserts: 0,
       unexpected_index: 0,
+      stop_reason: 'backlog_drained',
     };
   }
 
@@ -644,14 +752,34 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
   let totalError = 0;
   let totalUpserts = 0;
   let totalUnexpectedIndex = 0;
+  let batchesRun = 0;
+  let processedPairs = 0;
+  let stopReason: StopReason = 'backlog_drained';
 
   for (let i = 0; i < batches.length; i += 1) {
-    await awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs);
+    // Stop-by check BEFORE the batch (and before the pause): never START a new
+    // batch past the deadline (BS#1814). A misfired daytime run trips here on
+    // the first iteration and no-ops with zero batches.
+    if (shouldStop()) {
+      stopReason = 'stop_by_reached';
+      break;
+    }
+
+    await awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs, shouldStop);
+
+    // The cooperative pause may have carried us to/past the stop-by; re-check so
+    // a DJ active near the stop hour doesn't push a new batch past the deadline.
+    if (shouldStop()) {
+      stopReason = 'stop_by_reached';
+      break;
+    }
 
     const t0 = Date.now();
     const result = await runBatch(batches[i], { budgetMs: options.budgetMs, dryRun: false });
     const wallClockMs = Date.now() - t0;
 
+    batchesRun += 1;
+    processedPairs += batches[i].length;
     totalMatch += result.match;
     totalNoMatch += result.no_match;
     totalError += result.error;
@@ -675,16 +803,27 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
     }
   }
 
+  // Log the stop reason distinctly so a future overrun (or a run that keeps
+  // hitting the stop-by with a large backlog) is visible in the logs.
+  log('info', 'loop_complete', `resolve loop stopped: ${stopReason}`, {
+    stop_reason: stopReason,
+    batches_run: batchesRun,
+    batches_planned: batches.length,
+    processed: processedPairs,
+    eligible: eligibleTotal,
+  });
+
   return {
     scanned: raw.length,
     eligible: eligibleTotal,
-    processed: eligible.length,
-    batches: batches.length,
+    processed: processedPairs,
+    batches: batchesRun,
     match: totalMatch,
     no_match: totalNoMatch,
     error: totalError,
     upserts: totalUpserts,
     unexpected_index: totalUnexpectedIndex,
+    stop_reason: stopReason,
   };
 };
 
