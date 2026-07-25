@@ -64,6 +64,11 @@ import {
   READ_TIMEOUT_DEFAULT,
   LIVE_ACTIVITY_LOOKBACK_DEFAULT,
   LIVE_ACTIVITY_LOOKBACK_ENV,
+  STOP_BY_UTC_DEFAULT,
+  STOP_BY_UTC_ENV,
+  parseStopByUtc,
+  computeStopByDeadlineMs,
+  isPastStopBy,
   type NormalizedPair,
   type ResolveOptions,
 } from '../../../../jobs/catalog-popularity-freetext-resolve/job';
@@ -111,6 +116,7 @@ const RESET_ENV_KEYS = [
   NO_MATCH_TTL_DAYS_ENV,
   MAX_PAIRS_PER_RUN_ENV,
   LIVE_ACTIVITY_LOOKBACK_ENV,
+  STOP_BY_UTC_ENV,
 ];
 const stripEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
   const out = { ...env };
@@ -526,6 +532,43 @@ describe('checkLiveActivity / awaitQuietWindow', () => {
     await awaitQuietWindow(60, 1);
     expect(probe).toHaveBeenCalledTimes(2);
   });
+
+  it('awaitQuietWindow with no deadline argument behaves exactly as before (never trips)', async () => {
+    // Backward-compatibility pin: callers that don't pass deadlineMs/now (the
+    // pre-BS#1814 call shape) must see identical behavior — the loop is
+    // bounded ONLY by live activity clearing.
+    const probe = db.execute as jest.Mock;
+    probe.mockResolvedValueOnce([{}]).mockResolvedValueOnce([{}]).mockResolvedValueOnce([]);
+    await awaitQuietWindow(60, 1);
+    expect(probe).toHaveBeenCalledTimes(3);
+  });
+
+  it('awaitQuietWindow exits at the stop-by deadline even while live activity never clears (BS#1814)', async () => {
+    // A DJ active continuously AT the stop hour must not carry the run past
+    // it indefinitely. deadlineMs is already reached relative to `now`, so
+    // the loop must exit after (at most) its first probe — NOT keep sleeping
+    // and re-probing. A very large pauseMs makes a regression (the loop not
+    // exiting) manifest as a jest timeout rather than a silent pass.
+    const probe = db.execute as jest.Mock;
+    probe.mockResolvedValue([{}]); // "always active" — never quiets down on its own
+    const deadlineMs = Date.UTC(2026, 6, 25, 11, 0, 0);
+    const now = jest.fn<() => number>().mockReturnValue(deadlineMs);
+
+    await awaitQuietWindow(60, 999_000, deadlineMs, now);
+
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('awaitQuietWindow keeps pausing past a future deadline while activity persists, then exits once quiet', async () => {
+    const probe = db.execute as jest.Mock;
+    probe.mockResolvedValueOnce([{}]).mockResolvedValueOnce([]);
+    const deadlineMs = Date.UTC(2026, 6, 25, 11, 0, 0);
+    const now = jest.fn<() => number>().mockReturnValue(deadlineMs - 60_000); // a minute before the deadline, both probes
+
+    await awaitQuietWindow(60, 1, deadlineMs, now);
+
+    expect(probe).toHaveBeenCalledTimes(2);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -648,6 +691,7 @@ describe('resolveOptions', () => {
     expect(opts.maxPairsPerRun).toBe(MAX_PAIRS_PER_RUN_DEFAULT);
     expect(opts.readTimeoutMs).toBe(READ_TIMEOUT_DEFAULT);
     expect(opts.liveActivityLookbackSeconds).toBe(LIVE_ACTIVITY_LOOKBACK_DEFAULT);
+    expect(opts.stopByUtc).toBe(STOP_BY_UTC_DEFAULT);
     expect(opts.dryRun).toBe(false);
   });
 
@@ -657,15 +701,23 @@ describe('resolveOptions', () => {
       [BULK_BATCH_SIZE_ENV]: '10',
       [NO_MATCH_TTL_DAYS_ENV]: '7',
       [MAX_PAIRS_PER_RUN_ENV]: '0',
+      [STOP_BY_UTC_ENV]: '13:30',
     };
     const opts = resolveOptions(env, []);
     expect(opts.batchSize).toBe(10);
     expect(opts.noMatchTtlDays).toBe(7);
     expect(opts.maxPairsPerRun).toBe(0); // 0 allowed (non-negative) → disables cap
+    expect(opts.stopByUtc).toBe('13:30');
   });
 
   it('throws on invalid batch size', () => {
     expect(() => resolveOptions({ ...stripEnv(process.env), [BULK_BATCH_SIZE_ENV]: '0' }, [])).toThrow();
+  });
+
+  it('throws on a malformed FREETEXT_RESOLVE_STOP_BY_UTC', () => {
+    expect(() => resolveOptions({ ...stripEnv(process.env), [STOP_BY_UTC_ENV]: 'garbage' }, [])).toThrow();
+    expect(() => resolveOptions({ ...stripEnv(process.env), [STOP_BY_UTC_ENV]: '24:00' }, [])).toThrow();
+    expect(() => resolveOptions({ ...stripEnv(process.env), [STOP_BY_UTC_ENV]: '9:00' }, [])).toThrow();
   });
 
   it('detects --dry-run', () => {
@@ -674,8 +726,61 @@ describe('resolveOptions', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Absolute stop-by wall-clock bound (BS#1814).
+// ---------------------------------------------------------------------------
+
+describe('parseStopByUtc / computeStopByDeadlineMs / isPastStopBy', () => {
+  it('parses a valid zero-padded 24-hour HH:MM', () => {
+    expect(parseStopByUtc('11:00')).toEqual({ hour: 11, minute: 0 });
+    expect(parseStopByUtc('00:00')).toEqual({ hour: 0, minute: 0 });
+    expect(parseStopByUtc('23:59')).toEqual({ hour: 23, minute: 59 });
+  });
+
+  it('rejects malformed stop-by strings', () => {
+    for (const bad of ['garbage', '24:00', '9:00', '11:60', '11', '11:0', '']) {
+      expect(() => parseStopByUtc(bad)).toThrow();
+    }
+  });
+
+  it('computes the deadline as TODAY (same UTC calendar date as now) at the given HH:MM', () => {
+    const nowMs = Date.UTC(2026, 6, 25, 4, 45, 0); // 2026-07-25T04:45:00Z (the nightly run start)
+    const deadlineMs = computeStopByDeadlineMs(nowMs, '11:00');
+    expect(deadlineMs).toBe(Date.UTC(2026, 6, 25, 11, 0, 0, 0));
+  });
+
+  it('is not past stop-by while now is before the same-day deadline', () => {
+    const nowMs = Date.UTC(2026, 6, 25, 4, 45, 0);
+    const deadlineMs = computeStopByDeadlineMs(nowMs, '11:00');
+    expect(isPastStopBy(nowMs, deadlineMs)).toBe(false);
+  });
+
+  it('is past stop-by once now reaches or passes the deadline', () => {
+    const deadlineMs = computeStopByDeadlineMs(Date.UTC(2026, 6, 25, 4, 45, 0), '11:00');
+    expect(isPastStopBy(deadlineMs, deadlineMs)).toBe(true); // exactly at the deadline
+    expect(isPastStopBy(deadlineMs + 1, deadlineMs)).toBe(true); // past it
+  });
+
+  it("does NOT roll the deadline forward to tomorrow when now is already past today's stop-by (daytime manual launch)", () => {
+    // A run launched at 20:00 UTC against an 11:00 UTC stop-by: the naive
+    // "next occurrence of 11:00" would be TOMORROW at 11:00, which would let
+    // the run proceed for another 15h. The correct behavior is a same-day
+    // deadline that's already in the past, so the run stops immediately.
+    const nowMs = Date.UTC(2026, 6, 25, 20, 0, 0); // 2026-07-25T20:00:00Z
+    const deadlineMs = computeStopByDeadlineMs(nowMs, '11:00');
+    expect(deadlineMs).toBe(Date.UTC(2026, 6, 25, 11, 0, 0, 0)); // SAME calendar day, not the 26th
+    expect(new Date(deadlineMs).getUTCDate()).toBe(25);
+    expect(isPastStopBy(nowMs, deadlineMs)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Top-level orchestration.
 // ---------------------------------------------------------------------------
+
+// Arbitrary fixed instant comfortably before the '23:59' stopByUtc default
+// below, so pre-existing (non-deadline) tests never trip the BS#1814 bound
+// regardless of the real wall-clock time the suite happens to run at.
+const FIXED_NOW_MS = Date.UTC(2026, 0, 1, 0, 0, 0); // 2026-01-01T00:00:00Z
 
 const baseOptions = (over: Partial<ResolveOptions> = {}): ResolveOptions => ({
   batchSize: 2,
@@ -686,6 +791,8 @@ const baseOptions = (over: Partial<ResolveOptions> = {}): ResolveOptions => ({
   readTimeoutMs: 300_000,
   liveActivityLookbackSeconds: 0,
   liveActivityPauseMs: 1,
+  stopByUtc: '23:59',
+  now: () => FIXED_NOW_MS,
   dryRun: false,
   ...over,
 });
@@ -786,5 +893,131 @@ describe('runResolve', () => {
     expect(summary.processed).toBe(2);
     expect(summary.batches).toBe(2);
     expect(mockBulkLookupMetadata).toHaveBeenCalledTimes(2);
+  });
+
+  it('a normal drained run reports stopReason backlog_drained and batchesRun === batches', async () => {
+    const mock = db.execute as jest.Mock;
+    for (const v of enumerateResult([{ artist_name: 'J Dilla', album_title: 'Donuts' }])) {
+      mock.mockResolvedValueOnce(v);
+    }
+    mock.mockResolvedValueOnce([]); // loadSkipKeys empty
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'no_match', lookup: { results: [] } }],
+    });
+
+    const summary = await runResolve(baseOptions({ batchSize: 5 }));
+
+    expect(summary.stopReason).toBe('backlog_drained');
+    expect(summary.batchesRun).toBe(summary.batches);
+    expect(summary.batchesRun).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Absolute stop-by wall-clock bound — runResolve integration (BS#1814).
+// ---------------------------------------------------------------------------
+
+describe('runResolve — absolute stop-by deadline (BS#1814)', () => {
+  const enumerateResult = (rows: unknown[]): [unknown, unknown] => [{}, rows];
+
+  it('no-ops immediately (no enumerate, no LML calls, no writes) when the deadline has already passed at startup (daytime manual launch)', async () => {
+    // now is fixed at 20:00 UTC on 2026-07-25; stopByUtc '11:00' resolves to a
+    // same-day 11:00 deadline already 9h in the past — must stop before doing
+    // ANY work, not merely before the first batch.
+    const now = jest.fn<() => number>().mockReturnValue(Date.UTC(2026, 6, 25, 20, 0, 0));
+
+    const summary = await runResolve(baseOptions({ stopByUtc: '11:00', now }));
+
+    expect(summary).toMatchObject({
+      scanned: 0,
+      eligible: 0,
+      processed: 0,
+      batches: 0,
+      batchesRun: 0,
+      stopReason: 'stop_by_reached',
+    });
+    expect(db.execute as jest.Mock).not.toHaveBeenCalled();
+    expect(mockBulkLookupMetadata).not.toHaveBeenCalled();
+    expect(db.insert as jest.Mock).not.toHaveBeenCalled();
+  });
+
+  it('stops the batch loop once the deadline passes mid-run, leaving later pairs unattempted and resumable', async () => {
+    const mock = db.execute as jest.Mock;
+    for (const v of enumerateResult([
+      { artist_name: 'A', album_title: 'X' },
+      { artist_name: 'B', album_title: 'Y' },
+      { artist_name: 'C', album_title: 'Z' },
+    ])) {
+      mock.mockResolvedValueOnce(v);
+    }
+    mock.mockResolvedValueOnce([]); // loadSkipKeys empty
+
+    mockBulkLookupMetadata.mockResolvedValueOnce({
+      results: [{ index: 0, status: 'match', lookup: lookupWithRelease(1) }],
+    });
+
+    const T_START = Date.UTC(2026, 6, 25, 4, 45, 0);
+    const T_PAST = Date.UTC(2026, 6, 25, 12, 0, 1);
+    const now = jest
+      .fn<() => number>()
+      .mockReturnValueOnce(T_START) // initial deadline computation
+      .mockReturnValueOnce(T_START) // startup no-op check
+      .mockReturnValueOnce(T_START) // batch 0's pre-pause check
+      .mockReturnValueOnce(T_START) // batch 0's post-pause check
+      .mockReturnValue(T_PAST); // batch 1's pre-pause check onward: past the deadline
+
+    const summary = await runResolve(baseOptions({ batchSize: 1, stopByUtc: '12:00', now }));
+
+    // Only the first of 3 planned batches actually ran.
+    expect(mockBulkLookupMetadata).toHaveBeenCalledTimes(1);
+    expect((db.insert as jest.Mock).mock.calls.length).toBe(1); // only pair A got UPSERTed
+    expect(summary).toMatchObject({
+      batches: 3, // full plan, unchanged
+      batchesRun: 1, // only one actually executed
+      match: 1,
+      stopReason: 'stop_by_reached',
+    });
+    // Pairs B and C were never sent to runBatch, so upsertVerdict was never
+    // called for them — their flowsheet_freetext_resolution rows (if any)
+    // keep attempt_at IS NULL and are picked up again by loadSkipKeys/
+    // filterEligible on the NEXT run. Nothing was lost or double-written.
+  });
+
+  it('a run with live activity AT the stop hour exits at the deadline instead of spinning in awaitQuietWindow', async () => {
+    const mock = db.execute as jest.Mock;
+    for (const v of enumerateResult([{ artist_name: 'J Dilla', album_title: 'Donuts' }])) {
+      mock.mockResolvedValueOnce(v);
+    }
+    mock.mockResolvedValueOnce([]); // loadSkipKeys empty
+    // Every subsequent db.execute call is the live-activity probe — always
+    // "active" (never quiets down).
+    mock.mockResolvedValue([{}]);
+
+    // The startup/pre-loop checks read as "not yet past" (T_BEFORE) so the
+    // run actually reaches `awaitQuietWindow` — the thing under test — rather
+    // than short-circuiting on the startup no-op guard. Once inside the pause
+    // loop's first probe, `now` reads as AT the deadline, so the loop must
+    // exit on its first iteration instead of sleeping and re-probing.
+    const deadlineInstant = Date.UTC(2026, 6, 25, 11, 0, 0);
+    const now = jest
+      .fn<() => number>()
+      .mockReturnValueOnce(deadlineInstant - 1) // initial deadline computation
+      .mockReturnValueOnce(deadlineInstant - 1) // startup no-op check
+      .mockReturnValueOnce(deadlineInstant - 1) // loop pre-pause check
+      .mockReturnValue(deadlineInstant); // inside awaitQuietWindow onward: AT the deadline
+
+    const summary = await runResolve(
+      baseOptions({
+        batchSize: 5,
+        stopByUtc: '11:00',
+        now,
+        liveActivityLookbackSeconds: 60,
+        liveActivityPauseMs: 999_000, // a regression that fails to break out would time out the test
+      })
+    );
+
+    expect(mockBulkLookupMetadata).not.toHaveBeenCalled();
+    expect(summary.stopReason).toBe('stop_by_reached');
+    expect(summary.batchesRun).toBe(0);
   });
 });

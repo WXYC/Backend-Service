@@ -103,12 +103,33 @@ export const READ_TIMEOUT_ENV = 'FREETEXT_RESOLVE_READ_TIMEOUT_MS';
 export const READ_TIMEOUT_DEFAULT = 5 * 60 * 1000;
 
 /** Cooperative-pause lookback window (seconds). If the most recent flowsheet
- * track was added within this many seconds, defer. `0` disables the probe. */
+ * track was added within this many seconds, defer. `0` disables the probe.
+ *
+ * BS#1814: raised from the original 60s default. The flowsheet gap between
+ * songs is 3-5 minutes, so a 60s lookback almost always reads quiet between
+ * tracks and the job proceeds right into the streaming-check-on-add window a
+ * fresh add triggers — the pause never actually parks the job for an
+ * overnight live show. 300s (5 min) comfortably covers the song gap so a
+ * live DJ reliably keeps the job paused. NOTE: `LIVE_ACTIVITY_LOOKBACK_SECONDS`
+ * is a generic env-var name reused across jobs; raising this compiled default
+ * only changes behavior for THIS job's container, and only when the var is
+ * unset in its environment — if prod sets it explicitly, update that value too. */
 export const LIVE_ACTIVITY_LOOKBACK_ENV = 'LIVE_ACTIVITY_LOOKBACK_SECONDS';
-export const LIVE_ACTIVITY_LOOKBACK_DEFAULT = 60;
+export const LIVE_ACTIVITY_LOOKBACK_DEFAULT = 300;
 
 /** Sleep between re-probes when DJ activity is detected. */
 export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
+
+/** Absolute UTC wall-clock stop-by time ("HH:MM", 24-hour), the BS#1814
+ * primary fix for the overnight-window overrun. Checked before every batch
+ * (and bounds the cooperative pause below) so a run can never bleed past this
+ * time of day, no matter how large the eligible backlog is or how long DJ
+ * activity holds the pause open. `04:45 UTC start + 11:00 UTC stop` leaves a
+ * ~6h15m nightly window, closing well before the daytime peak while sitting
+ * clear of the `rotation-lml-identity-backfill` 09:00 UTC heavy drain's own
+ * start (see docs/ops-cron-scheduling.md) for most of a healthy run. */
+export const STOP_BY_UTC_ENV = 'FREETEXT_RESOLVE_STOP_BY_UTC';
+export const STOP_BY_UTC_DEFAULT = '11:00';
 
 // -- Source query ------------------------------------------------------------
 
@@ -359,6 +380,46 @@ export const verdictFromLookup = (
   };
 };
 
+// -- Absolute stop-by wall-clock bound (BS#1814) -----------------------------
+
+/** 24-hour "HH:MM" UTC time-of-day shape. Zero-padded, strict (no "9:00") —
+ * this is an ops-set env var, not a scraped feed field, so the stricter shape
+ * (vs. e.g. `shared/database/src/ny-time.ts`'s lenient unpadded-hour parser)
+ * fails fast on a fat-fingered value instead of silently misreading it. */
+const STOP_BY_SHAPE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+/** Parse a "HH:MM" (24-hour, UTC) time-of-day string into its hour/minute
+ * parts. Throws with an attributed message on anything else, same fail-fast
+ * posture as `requirePositiveInt`. */
+export const parseStopByUtc = (raw: string, envName: string = STOP_BY_UTC_ENV): { hour: number; minute: number } => {
+  const m = STOP_BY_SHAPE.exec(raw);
+  if (!m) {
+    throw new Error(`Invalid ${envName}=${JSON.stringify(raw)}: must be a 24-hour "HH:MM" UTC time (e.g. "11:00").`);
+  }
+  return { hour: Number(m[1]), minute: Number(m[2]) };
+};
+
+/**
+ * The absolute stop-by deadline (epoch ms): TODAY's UTC calendar date — the
+ * date `nowMs` falls on — at `stopByUtc` ("HH:MM").
+ *
+ * Deliberately same-day-only: this NEVER rolls forward to tomorrow when `now`
+ * is already past today's stop-by time. That is the crux of BS#1814 — the
+ * nightly 04:45 UTC run sees a deadline several hours in its own future and
+ * proceeds normally, but a run launched AFTER the stop hour (a manual
+ * catch-up or a misfired daytime launch, e.g. started 20:00 UTC against an
+ * 11:00 UTC stop-by) must see a deadline already in the past and stop
+ * immediately — not compute "the next 11:00" and run all day until then.
+ */
+export const computeStopByDeadlineMs = (nowMs: number, stopByUtc: string): number => {
+  const { hour, minute } = parseStopByUtc(stopByUtc);
+  const now = new Date(nowMs);
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hour, minute, 0, 0);
+};
+
+/** True once `nowMs` has reached or passed `deadlineMs`. */
+export const isPastStopBy = (nowMs: number, deadlineMs: number): boolean => nowMs >= deadlineMs;
+
 // -- Cooperative pause -------------------------------------------------------
 
 /** Probe `flowsheet` for a track row added in the last `lookbackSeconds`.
@@ -378,9 +439,24 @@ export const checkLiveActivity = async (lookbackSeconds: number): Promise<boolea
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Loop: probe → if active, sleep pauseMs → re-probe. Returns when quiet. */
-export const awaitQuietWindow = async (lookbackSeconds: number, pauseMs: number): Promise<void> => {
-  while (await checkLiveActivity(lookbackSeconds)) {
+/** Loop: probe → if active, sleep pauseMs → re-probe. Returns when quiet OR
+ * when `deadlineMs` (BS#1814 stop-by bound) is reached — whichever first.
+ *
+ * Without this, a DJ active near the stop hour would otherwise carry the pause
+ * loop PAST the deadline indefinitely (the loop only exits on quiet). The
+ * caller (`runResolve`) must still re-check `isPastStopBy` after this
+ * returns: a deadline-triggered return means activity may still be ongoing,
+ * so the caller must stop rather than proceed into the next batch.
+ *
+ * `deadlineMs`/`now` default to values that reproduce the pre-BS#1814
+ * behavior (never trips) so callers that don't pass them are unaffected. */
+export const awaitQuietWindow = async (
+  lookbackSeconds: number,
+  pauseMs: number,
+  deadlineMs: number = Infinity,
+  now: () => number = Date.now
+): Promise<void> => {
+  while ((await checkLiveActivity(lookbackSeconds)) && !isPastStopBy(now(), deadlineMs)) {
     log('info', 'live_activity_pause', `live DJ activity within ${lookbackSeconds}s; deferring ${pauseMs}ms`, {
       lookback_seconds: lookbackSeconds,
       pause_ms: pauseMs,
@@ -524,16 +600,27 @@ export const runBatch = async (
 
 // -- Top-level orchestration -------------------------------------------------
 
+/** Why the run stopped. `stop_by_reached` means the BS#1814 deadline cut the
+ * run short with backlog remaining (safe — it drains next run); `backlog_drained`
+ * means every eligible pair for this run was processed before the deadline. */
+export type StopReason = 'backlog_drained' | 'stop_by_reached';
+
 export interface ResolveSummary {
   scanned: number;
   eligible: number;
   processed: number;
+  /** Planned batch count (`ceil(processed / batchSize)`) — unchanged by a
+   * deadline stop, so it always reflects the full plan for this run. */
   batches: number;
+  /** Batches actually executed before returning. Equal to `batches` unless
+   * `stopReason === 'stop_by_reached'` cut the loop short. */
+  batchesRun: number;
   match: number;
   no_match: number;
   error: number;
   upserts: number;
   unexpected_index: number;
+  stopReason: StopReason;
 }
 
 export interface ResolveOptions {
@@ -545,11 +632,21 @@ export interface ResolveOptions {
   readTimeoutMs: number;
   liveActivityLookbackSeconds: number;
   liveActivityPauseMs: number;
+  /** "HH:MM" 24-hour UTC wall-clock stop-by bound (BS#1814). */
+  stopByUtc: string;
+  /** Injectable clock so tests can drive the deadline deterministically
+   * without fake timers. Defaults to the real `Date.now`. */
+  now: () => number;
   dryRun: boolean;
 }
 
 export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: string[] = process.argv): ResolveOptions => {
   const ctx = { context: JOB_NAME };
+  const rawStopByUtc = env[STOP_BY_UTC_ENV];
+  const stopByUtc = rawStopByUtc === undefined || rawStopByUtc.trim() === '' ? STOP_BY_UTC_DEFAULT : rawStopByUtc;
+  // Validate eagerly (fail fast at option-resolution time), same posture as
+  // the `require*Int` helpers throwing on a malformed value.
+  parseStopByUtc(stopByUtc, STOP_BY_UTC_ENV);
   return {
     batchSize: requirePositiveInt(env[BULK_BATCH_SIZE_ENV], BULK_BATCH_SIZE_ENV, BULK_BATCH_SIZE_DEFAULT, ctx),
     ratePerMin: requirePositiveInt(env[BULK_RATE_PER_MIN_ENV], BULK_RATE_PER_MIN_ENV, BULK_RATE_PER_MIN_DEFAULT, ctx),
@@ -574,6 +671,8 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
       ctx
     ),
     liveActivityPauseMs: LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+    stopByUtc,
+    now: Date.now,
     dryRun: args.includes('--dry-run'),
   };
 };
@@ -584,15 +683,49 @@ const chunk = <T>(arr: T[], size: number): T[][] => {
   return out;
 };
 
+/** The no-op summary returned when the BS#1814 stop-by deadline has already
+ * passed before any work starts (the daytime-manual-launch case). */
+const stopByReachedAtStartupSummary = (): ResolveSummary => ({
+  scanned: 0,
+  eligible: 0,
+  processed: 0,
+  batches: 0,
+  batchesRun: 0,
+  match: 0,
+  no_match: 0,
+  error: 0,
+  upserts: 0,
+  unexpected_index: 0,
+  stopReason: 'stop_by_reached',
+});
+
 export const runResolve = async (options: ResolveOptions): Promise<ResolveSummary> => {
+  const nowFn = options.now ?? Date.now;
+  const deadlineMs = computeStopByDeadlineMs(nowFn(), options.stopByUtc);
+
   log('info', 'started', `${JOB_NAME} starting`, {
     batch_size: options.batchSize,
     rate_per_min: options.ratePerMin,
     budget_ms: options.budgetMs,
     no_match_ttl_days: options.noMatchTtlDays,
     max_pairs_per_run: options.maxPairsPerRun,
+    stop_by_utc: options.stopByUtc,
+    stop_by_deadline: new Date(deadlineMs).toISOString(),
     dry_run: options.dryRun,
   });
+
+  // BS#1814: a run launched after today's stop-by time (a manual catch-up or
+  // a misfired daytime launch) must no-op immediately — no enumerate scan, no
+  // LML calls, no writes — rather than doing any work at all.
+  if (isPastStopBy(nowFn(), deadlineMs)) {
+    log(
+      'warn',
+      'stop_by_reached',
+      `${JOB_NAME}: stop-by deadline (${options.stopByUtc} UTC) already passed at startup; no-op`,
+      { stop_by_utc: options.stopByUtc, stop_by_deadline: new Date(deadlineMs).toISOString() }
+    );
+    return stopByReachedAtStartupSummary();
+  }
 
   const raw = await enumerateFreetextPairs(options.readTimeoutMs);
   const normalized = normalizePairs(raw);
@@ -628,11 +761,13 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
       eligible: eligibleTotal,
       processed: eligible.length,
       batches: batches.length,
+      batchesRun: 0,
       match: 0,
       no_match: 0,
       error: 0,
       upserts: 0,
       unexpected_index: 0,
+      stopReason: 'backlog_drained',
     };
   }
 
@@ -644,10 +779,44 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
   let totalError = 0;
   let totalUpserts = 0;
   let totalUnexpectedIndex = 0;
+  let batchesRun = 0;
+  let stopReason: StopReason = 'backlog_drained';
 
   for (let i = 0; i < batches.length; i += 1) {
-    await awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs);
+    // BS#1814: check before entering the batch (covers the "in flight when
+    // the stop hour passes" case for the PRIOR batch's post-work) as well as
+    // before pausing, so a run that's already past the deadline never even
+    // probes for live activity.
+    if (isPastStopBy(nowFn(), deadlineMs)) {
+      stopReason = 'stop_by_reached';
+      log(
+        'warn',
+        'stop_by_reached',
+        `${JOB_NAME}: stop-by deadline (${options.stopByUtc} UTC) reached before batch ${i + 1}/${batches.length}; stopping`,
+        { batch_index: i + 1, batches: batches.length, stop_by_utc: options.stopByUtc }
+      );
+      break;
+    }
 
+    // The pause loop itself is deadline-aware (BS#1814): a DJ active AT the
+    // stop hour would otherwise carry the run past it indefinitely. But a
+    // deadline-triggered return from the pause doesn't mean activity actually
+    // cleared, so re-check immediately below rather than assuming it's safe
+    // to proceed into the batch.
+    await awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs, deadlineMs, nowFn);
+
+    if (isPastStopBy(nowFn(), deadlineMs)) {
+      stopReason = 'stop_by_reached';
+      log(
+        'warn',
+        'stop_by_reached',
+        `${JOB_NAME}: stop-by deadline (${options.stopByUtc} UTC) reached while paused for live activity before batch ${i + 1}/${batches.length}; stopping`,
+        { batch_index: i + 1, batches: batches.length, stop_by_utc: options.stopByUtc }
+      );
+      break;
+    }
+
+    batchesRun += 1;
     const t0 = Date.now();
     const result = await runBatch(batches[i], { budgetMs: options.budgetMs, dryRun: false });
     const wallClockMs = Date.now() - t0;
@@ -675,16 +844,25 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
     }
   }
 
+  if (stopReason === 'backlog_drained') {
+    log('info', 'backlog_drained', `${JOB_NAME}: drained the eligible backlog for this run (no deadline hit)`, {
+      batches_run: batchesRun,
+      batches: batches.length,
+    });
+  }
+
   return {
     scanned: raw.length,
     eligible: eligibleTotal,
     processed: eligible.length,
     batches: batches.length,
+    batchesRun,
     match: totalMatch,
     no_match: totalNoMatch,
     error: totalError,
     upserts: totalUpserts,
     unexpected_index: totalUnexpectedIndex,
+    stopReason,
   };
 };
 
