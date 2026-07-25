@@ -755,7 +755,33 @@ const BULK_LOOKUP_INPUT_CAP = 100;
  */
 export async function bulkLookupMetadata(
   items: BulkLookupItem[],
-  options?: { timeoutMs?: number; limiter?: LmlLimiter; budgetMs?: number; caller?: string }
+  options?: {
+    timeoutMs?: number;
+    limiter?: LmlLimiter;
+    budgetMs?: number;
+    caller?: string;
+    /**
+     * BS#1815 / LML#920: `/lookup/bulk` hardcodes
+     * `allow_release_resolution_fallback=False` server-side (the LML#671
+     * offline-drain kill switch, built so the 35k-album bulk backfill never
+     * triggers a per-row live Discogs probe). Single-item `/lookup` defaults
+     * that same flag `True`, so the divergence silently disabled non-library
+     * album resolution for any bulk caller — including the live enrichment
+     * worker after it migrated from `/lookup` to `/lookup/bulk` (B3,
+     * BS#1749), which is the regression BS#1815 fixes.
+     *
+     * LML#920 makes the flag a per-caller query param on `/lookup/bulk`
+     * (`?allow_release_resolution_fallback=true`), defaulting to the
+     * pre-existing `false` when omitted. Set this `true` ONLY on the live
+     * enrichment path (`apps/enrichment-worker/lookup-batcher.ts`), which
+     * wants parity with the single-item default. The offline drains
+     * (`jobs/album-level-backfill`, `jobs/catalog-popularity-freetext-resolve`,
+     * `jobs/flowsheet-linked-reenrichment`) must keep omitting it so the
+     * kill switch's actual purpose — no per-row live Discogs on a 35k-item
+     * drain — stays intact.
+     */
+    allowReleaseResolutionFallback?: boolean;
+  }
 ): Promise<BulkLookupResponse> {
   if (items.length === 0) {
     throw new LmlClientError('bulkLookupMetadata requires at least 1 item.', 400);
@@ -807,8 +833,16 @@ export async function bulkLookupMetadata(
         console.warn('lml.client: failed to project queue_depth + bulk.size + caller onto span', err);
       }
 
+      // BS#1815 / LML#920: query-flag opt-in, mirroring the doc comment on
+      // `allowReleaseResolutionFallback` above. Omitted (not `?...=false`)
+      // when unset so the wire request is byte-identical to the pre-#1815
+      // shape for every caller that doesn't pass the option.
+      const bulkPath = options?.allowReleaseResolutionFallback
+        ? '/api/v1/lookup/bulk?allow_release_resolution_fallback=true'
+        : '/api/v1/lookup/bulk';
+
       const response = await lmlFetch(
-        '/api/v1/lookup/bulk',
+        bulkPath,
         {
           method: 'POST',
           headers: buildLookupHeaders(options?.budgetMs),

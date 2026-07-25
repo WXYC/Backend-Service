@@ -133,6 +133,23 @@ describe('enrichmentBulkLookup burst coalescing (B3 / BS#1749)', () => {
     expect(options).toMatchObject({ caller: 'enrichment-worker', budgetMs: 29000 });
   });
 
+  it('sets allowReleaseResolutionFallback:true on the bulk dispatch (BS#1815 non-library resolution restore)', async () => {
+    // BS#1815: B3 (f3fbff5e) migrated this worker from single /lookup (which
+    // defaults allow_release_resolution_fallback=true) to /lookup/bulk (which
+    // hardcodes it false server-side, the LML#671 offline-drain kill switch),
+    // silently disabling non-library album resolution for live enrichment.
+    // LML#920 makes the flag a per-caller query param; the live enrichment
+    // worker must be the one bulk caller that opts back in.
+    mockBulkLookupMetadata.mockImplementation((items) => Promise.resolve(echoAllMatched(items)));
+
+    const p = enrichmentBulkLookup(makeInput('Boards of Canada', 'Inferno'));
+    await flushWindow();
+    await p;
+
+    const [, options] = mockBulkLookupMetadata.mock.calls[0];
+    expect(options).toMatchObject({ allowReleaseResolutionFallback: true });
+  });
+
   it('sets extended:true and synthesizes raw_message + fields on each item', async () => {
     mockBulkLookupMetadata.mockImplementation((items) => Promise.resolve(echoAllMatched(items)));
 
