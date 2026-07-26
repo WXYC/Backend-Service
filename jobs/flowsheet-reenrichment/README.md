@@ -2,6 +2,8 @@
 
 One-shot re-enrichment drain for BS#1433. Rescues ~11,965 `flowsheet` rows written as `enriched_no_match` before LML#583 (merged 2026-06-16T17:53:53Z) closed the library-miss recall gap.
 
+BS#1823 adapted the same drain for a second run shape: re-enriching a recent, bounded slice of a _later_ regression backlog (see "Regression-window run" below), by adding an optional lower bound alongside the original cutoff.
+
 ## Problem
 
 Before LML#583, `(artist, album)` pairs not in the WXYC library returned `results: []` from LML, causing `metadata_status='enriched_no_match'` to be written. Those rows are terminal in the new enum — the CDC consumer never revisits them. With LML#583 live, the same pairs now return Discogs metadata; this job performs a single sweep to recover them.
@@ -78,6 +80,31 @@ docker run --rm --name flowsheet-reenrichment --env-file .env \
 
 > **Note on env-var read timing**: `lml-fetch.ts` reads `BACKFILL_LML_PER_CALL_TIMEOUT_MS` and `lml-limiter.ts` reads `BACKFILL_LML_MAX_CONCURRENT` / `BACKFILL_LML_RATE_PER_MIN` at module-load time. The `--env-file .env` pattern above passes env vars to the container's PID 1 (Node) so they're visible before any module loads. Do NOT export env vars from inside the container after start — they'll be silently ignored.
 
+### Regression-window run (BS#1823)
+
+The same drain also re-enriches a recent, bounded slice of a _later_ regression backlog — e.g. `enriched_no_match` / `album_id`-NULL flowsheet rows written while non-library resolution was briefly broken (the B3 regression, #1815 + LML#920). Set `BACKFILL_WINDOW_START_TS` (optionally alongside `BACKFILL_CUTOFF_TS`) instead of relying on the original pre-LML#583 cutoff alone:
+
+```bash
+docker run --rm --name flowsheet-reenrichment --env-file .env \
+  -e BACKFILL_WINDOW_START_TS='2026-07-22T00:00:00Z' \
+  <ECR-URI>/flowsheet-reenrichment:<tag> 2>&1 \
+  | tee /tmp/flowsheet-reenrichment-window-$(date +%Y%m%d-%H%M%S).log
+```
+
+At least one of `BACKFILL_CUTOFF_TS` / `BACKFILL_WINDOW_START_TS` is required; the job fails fast (before scanning any rows) if neither is set. Window-start-only applies no upper bound (through "now", in effect) — the cohort is `add_time >= BACKFILL_WINDOW_START_TS`. Setting both narrows to their intersection. Each bound is validated independently as strict ISO 8601 (same rules as the original cutoff — see "Environment variables" below); a malformed value fails the same way a malformed cutoff always has.
+
+No new LML flag is needed for either run shape: this job already calls LML via single `lookupMetadata` (`/lookup`), which defaults `allow_release_resolution_fallback=True` and therefore resolves non-library albums on its own — unlike `/lookup/bulk`, which the B3 regression traced to (WXYC/Backend-Service#1815).
+
+**No dry-run mode.** Unlike some sibling jobs (e.g. `rotation-release-id-backfill`, `library-identity-consumer`), this job does not implement `DRY_RUN` — setting it has no effect, and a run performs live UPDATEs immediately. To gauge scope before committing to a run, preview the candidate count for your window first:
+
+```sql
+SELECT COUNT(*) FROM wxyc_schema.flowsheet
+WHERE metadata_status = 'enriched_no_match'
+  AND album_id IS NULL
+  AND artist_name IS NOT NULL
+  AND add_time >= '2026-07-22T00:00:00Z'::timestamptz;
+```
+
 ## Pacing & wall-clock estimate
 
 - Sem(1) + TB(20/min): ~12k rows ÷ 20/min ≈ ~10 hours raw rate
@@ -152,14 +179,15 @@ Monitor real-time LML p95 via Sentry trace explorer; stay within +20% of baselin
 
 ## Environment variables
 
-| Variable                           | Default    | Notes                                                                                              |
-| ---------------------------------- | ---------- | -------------------------------------------------------------------------------------------------- |
-| `BACKFILL_CUTOFF_TS`               | (required) | LML#583 merge timestamp: `2026-06-16T17:53:53Z`. Validated as ISO 8601 + not-in-future at startup. |
-| `LIBRARY_METADATA_URL`             | (required) | LML endpoint                                                                                       |
-| `BACKFILL_BATCH_SIZE`              | 100        | Rows per SELECT                                                                                    |
-| `BACKFILL_LML_MAX_CONCURRENT`      | 1          | Semaphore permit count (positive integer)                                                          |
-| `BACKFILL_LML_RATE_PER_MIN`        | 20         | Token bucket rate (positive integer)                                                               |
-| `BACKFILL_LML_PER_CALL_TIMEOUT_MS` | 35000      | Per-LML-call timeout (ms)                                                                          |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`   | 60         | Set 0 to disable cooperative pause                                                                 |
-| `LIVE_ACTIVITY_PAUSE_MS`           | 30000      | Pause duration when DJ activity detected (ms)                                                      |
-| `SENTRY_DSN`                       | (optional) | Sentry error reporting                                                                             |
+| Variable                           | Default                                             | Notes                                                                                                                                                                                                                                                                                                             |
+| ---------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BACKFILL_CUTOFF_TS`               | (required unless `BACKFILL_WINDOW_START_TS` is set) | LML#583 merge timestamp: `2026-06-16T17:53:53Z`. Validated as ISO 8601 + not-in-future at startup. Upper bound (`add_time < cutoff`).                                                                                                                                                                             |
+| `BACKFILL_WINDOW_START_TS`         | (optional)                                          | Lower bound (`add_time >= start`) for a scoped regression-window run (BS#1823), e.g. `2026-07-22T00:00:00Z`. Validated as strict ISO 8601 at startup — same rules as `BACKFILL_CUTOFF_TS` except a future value is allowed (it simply selects nothing until reached). At least one of the two bounds is required. |
+| `LIBRARY_METADATA_URL`             | (required)                                          | LML endpoint                                                                                                                                                                                                                                                                                                      |
+| `BACKFILL_BATCH_SIZE`              | 100                                                 | Rows per SELECT                                                                                                                                                                                                                                                                                                   |
+| `BACKFILL_LML_MAX_CONCURRENT`      | 1                                                   | Semaphore permit count (positive integer)                                                                                                                                                                                                                                                                         |
+| `BACKFILL_LML_RATE_PER_MIN`        | 20                                                  | Token bucket rate (positive integer)                                                                                                                                                                                                                                                                              |
+| `BACKFILL_LML_PER_CALL_TIMEOUT_MS` | 35000                                               | Per-LML-call timeout (ms)                                                                                                                                                                                                                                                                                         |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`   | 60                                                  | Set 0 to disable cooperative pause                                                                                                                                                                                                                                                                                |
+| `LIVE_ACTIVITY_PAUSE_MS`           | 30000                                               | Pause duration when DJ activity detected (ms)                                                                                                                                                                                                                                                                     |
+| `SENTRY_DSN`                       | (optional)                                          | Sentry error reporting                                                                                                                                                                                                                                                                                            |

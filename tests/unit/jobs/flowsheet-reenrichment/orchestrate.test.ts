@@ -27,27 +27,56 @@ import {
   BATCH_SIZE,
   resolveBatchSize,
   resolveCutoffTs,
+  resolveWindowStartTs,
+  resolveTimeWindow,
   resolveLiveActivityLookback,
   resolveLiveActivityPauseMs,
   requestStop,
   __resetStopForTesting,
 } from '../../../../jobs/flowsheet-reenrichment/orchestrate';
 
-type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: unknown }> };
+/**
+ * Render a drizzle `sql` template object to a string for substring
+ * assertions. Under this repo's test mock (tests/__mocks__/drizzle-orm.ts),
+ * `db.execute(sql\`...\`)`'s argument serializes to `{ sql: string[], values:
+ * unknown[] }`, where `sql` is the literal template fragments and `values`
+ * is the interpolated parameters in positional order — reconstruct the
+ * rendered SQL by interleaving them (a bare `.join('')` of `sql` alone
+ * silently drops every interpolated value, which is invisible only as long
+ * as no assertion needs text that falls after an interpolation point).
+ *
+ * Each value can itself be a nested `sql.raw(...)` chunk (`{ raw: string }`
+ * — e.g. the FLOWSHEET_TABLE identifier) or another nested `sql\`...\`\``
+ * fragment (`{ sql, values }` again) — the BACKFILL_WINDOW_START_TS /
+ * BACKFILL_CUTOFF_TS optional-clause pattern (`cond ? sql\`AND ...\` :
+ * sql\`\``, BS#1823) produces exactly this nesting. Recurse where applicable.
+ */
+type SqlChunk = { sql?: string | string[]; values?: unknown[]; raw?: string };
 const renderSql = (value: unknown): string => {
-  const obj = value as SqlLike | null | undefined;
+  const obj = value as SqlChunk | null | undefined;
   if (!obj) return '';
-  if (Array.isArray(obj.sql)) return obj.sql.join('');
+  if (Array.isArray(obj.sql)) {
+    const fragments = obj.sql;
+    const values = obj.values ?? [];
+    let out = '';
+    for (let i = 0; i < fragments.length; i++) {
+      out += fragments[i];
+      if (i < values.length) out += renderValue(values[i]);
+    }
+    return out;
+  }
   if (typeof obj.sql === 'string') return obj.sql;
-  if (obj.queryChunks) {
-    return obj.queryChunks
-      .map((chunk) => {
-        if (typeof chunk === 'string') return chunk;
-        if (Array.isArray(chunk.value)) return chunk.value.join('');
-        if (typeof chunk.value === 'number' || typeof chunk.value === 'string') return String(chunk.value);
-        return '';
-      })
-      .join('');
+  return '';
+};
+
+/** Render a single interpolated value: scalars verbatim, nested SQL/raw fragments recursively. */
+const renderValue = (v: unknown): string => {
+  if (v == null) return '';
+  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (typeof v === 'object') {
+    const o = v as SqlChunk;
+    if (typeof o.raw === 'string') return o.raw;
+    if (Array.isArray(o.sql)) return renderSql(o);
   }
   return '';
 };
@@ -66,6 +95,8 @@ const matchedResult = () => ({ response: matchedResponse, cacheHit: false as con
 const noMatchResult = () => ({ response: noMatchResponse, cacheHit: false as const });
 
 const CUTOFF = '2026-06-16T17:53:53Z';
+// BS#1823 regression-window lower bound — matches the README's run example.
+const WINDOW_START = '2026-07-22T00:00:00Z';
 
 const makeRow = (id: number) => ({
   id,
@@ -130,6 +161,81 @@ describe('resolveCutoffTs', () => {
   });
 });
 
+describe('resolveWindowStartTs', () => {
+  // BS#1823: optional lower bound for the regression-window re-enrichment
+  // run. Mirrors resolveCutoffTs's strict ISO 8601 + calendar validation
+  // exactly (shared validator), but differs in two ways pinned below:
+  // unset is valid (not required), and a future timestamp is not rejected.
+  it('returns undefined when BACKFILL_WINDOW_START_TS is not set (optional, unlike cutoff)', () => {
+    expect(resolveWindowStartTs(undefined)).toBeUndefined();
+  });
+
+  it('returns the value when set to a valid past ISO timestamp', () => {
+    expect(resolveWindowStartTs(WINDOW_START)).toBe(WINDOW_START);
+  });
+
+  it('returns the value when set to a valid FUTURE ISO timestamp (not rejected, unlike cutoff)', () => {
+    expect(resolveWindowStartTs('2099-01-01T00:00:00Z')).toBe('2099-01-01T00:00:00Z');
+  });
+
+  it('throws on garbage', () => {
+    expect(() => resolveWindowStartTs('not-a-date')).toThrow(/strict ISO 8601/);
+    expect(() => resolveWindowStartTs('yesterday')).toThrow(/strict ISO 8601/);
+  });
+
+  it('throws on non-strict-ISO formats Date.parse accepts but PG would reject (or interpret differently)', () => {
+    expect(() => resolveWindowStartTs('2026-6-16T17:53:53Z')).toThrow(/strict ISO 8601/);
+    expect(() => resolveWindowStartTs('2026/06/16 17:53:53')).toThrow(/strict ISO 8601/);
+    expect(() => resolveWindowStartTs('2026')).toThrow(/strict ISO 8601/);
+    expect(() => resolveWindowStartTs('2026-06-16')).toThrow(/strict ISO 8601/); // date-only
+  });
+
+  it('throws on out-of-range day that Date.parse silently normalizes', () => {
+    expect(() => resolveWindowStartTs('2026-02-30T00:00:00Z')).toThrow(/out-of-range field/);
+    expect(() => resolveWindowStartTs('2026-06-31T00:00:00Z')).toThrow(/out-of-range field/);
+    expect(() => resolveWindowStartTs('2026-13-01T00:00:00Z')).toThrow(/out-of-range field/);
+    expect(() => resolveWindowStartTs('2026-06-16T25:00:00Z')).toThrow(/out-of-range field/);
+  });
+
+  it('accepts timezone-offset form (e.g. -07:00)', () => {
+    expect(resolveWindowStartTs('2026-06-16T10:53:53-07:00')).toBe('2026-06-16T10:53:53-07:00');
+  });
+
+  it('error message names BACKFILL_WINDOW_START_TS, not BACKFILL_CUTOFF_TS (same validator, distinct field)', () => {
+    expect(() => resolveWindowStartTs('garbage')).toThrow(/BACKFILL_WINDOW_START_TS/);
+  });
+});
+
+describe('resolveTimeWindow', () => {
+  // BS#1823: composes the two optional bounds and enforces "at least one is
+  // required" — the drain has no defined cohort with neither set.
+  it('throws when neither BACKFILL_CUTOFF_TS nor BACKFILL_WINDOW_START_TS is set', () => {
+    expect(() => resolveTimeWindow(undefined, undefined)).toThrow(/BACKFILL_CUTOFF_TS/);
+    expect(() => resolveTimeWindow(undefined, undefined)).toThrow(/BACKFILL_WINDOW_START_TS/);
+  });
+
+  it("cutoff-only: resolves cutoffTs, leaves windowStartTs undefined (today's exact behavior preserved)", () => {
+    expect(resolveTimeWindow(CUTOFF, undefined)).toEqual({ cutoffTs: CUTOFF, windowStartTs: undefined });
+  });
+
+  it('window-start-only: resolves windowStartTs, leaves cutoffTs undefined (no upper bound)', () => {
+    expect(resolveTimeWindow(undefined, WINDOW_START)).toEqual({ cutoffTs: undefined, windowStartTs: WINDOW_START });
+  });
+
+  it('both set: resolves both bounds (intersection)', () => {
+    expect(resolveTimeWindow(CUTOFF, WINDOW_START)).toEqual({ cutoffTs: CUTOFF, windowStartTs: WINDOW_START });
+  });
+
+  it('propagates resolveCutoffTs future-rejection when cutoff is set', () => {
+    expect(() => resolveTimeWindow('2099-01-01T00:00:00Z', undefined)).toThrow(/in the future/);
+  });
+
+  it('a malformed BACKFILL_WINDOW_START_TS is rejected the same way a malformed cutoff is', () => {
+    expect(() => resolveTimeWindow(CUTOFF, 'not-a-date')).toThrow(/strict ISO 8601/);
+    expect(() => resolveTimeWindow(undefined, 'not-a-date')).toThrow(/strict ISO 8601/);
+  });
+});
+
 describe('resolveLiveActivityLookback', () => {
   it('falls back to 60 when env var is unset', () => {
     expect(resolveLiveActivityLookback(undefined)).toBe(60);
@@ -189,6 +295,89 @@ describe('runReenrichment — WHERE filter', () => {
     // All 3 rows were scanned
     expect(result.totals.scanned).toBe(3);
     expect(result.totals.still_no_match).toBe(3);
+  });
+
+  // BS#1823: regression-window re-enrichment adds an optional lower bound.
+  it('window-start-only: SELECT carries add_time >= start and omits the upper bound', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
+
+    await runReenrichment({
+      lookup,
+      enrich,
+      windowStartTs: WINDOW_START,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    const firstSelectSql = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
+    expect(firstSelectSql).toMatch(/enriched_no_match/);
+    expect(firstSelectSql).toMatch(/album_id.*IS NULL|IS NULL.*album_id/i);
+    expect(firstSelectSql.toLowerCase()).toMatch(/artist_name.*is not null/);
+    expect(firstSelectSql).toMatch(/add_time"\s*>=\s*/);
+    expect(firstSelectSql).toContain(WINDOW_START);
+    // No upper bound at all — the cutoff's `<` comparison must be absent.
+    // (The id-cursor predicate uses a bare `>`, never `<`, so this is safe.)
+    expect(firstSelectSql).not.toContain('<');
+  });
+
+  it('both bounds set: SELECT carries the intersection (add_time >= start AND add_time < cutoff)', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
+
+    await runReenrichment({
+      lookup,
+      enrich,
+      cutoffTs: CUTOFF,
+      windowStartTs: WINDOW_START,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    const firstSelectSql = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
+    expect(firstSelectSql).toMatch(/add_time"\s*>=\s*/);
+    expect(firstSelectSql).toMatch(/add_time"\s*<\s*/);
+    expect(firstSelectSql).toContain(WINDOW_START);
+    expect(firstSelectSql).toContain(CUTOFF);
+  });
+
+  it("cutoff-only (today's existing config): SELECT has no add_time >= lower bound", async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
+
+    await runReenrichment({ lookup, enrich, cutoffTs: CUTOFF, batchSize: 100, liveActivityLookbackSeconds: 0 });
+
+    const firstSelectSql = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
+    expect(firstSelectSql).not.toMatch(/add_time"\s*>=\s*/);
+    expect(firstSelectSql).toMatch(/add_time"\s*<\s*/);
+  });
+
+  it('neither bound set: rejects before any DB call', async () => {
+    const originalCutoff = process.env.BACKFILL_CUTOFF_TS;
+    const originalWindowStart = process.env.BACKFILL_WINDOW_START_TS;
+    delete process.env.BACKFILL_CUTOFF_TS;
+    delete process.env.BACKFILL_WINDOW_START_TS;
+
+    try {
+      const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult());
+      const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
+
+      await expect(runReenrichment({ lookup, enrich, batchSize: 100, liveActivityLookbackSeconds: 0 })).rejects.toThrow(
+        /At least one of BACKFILL_CUTOFF_TS or BACKFILL_WINDOW_START_TS is required/
+      );
+      expect(db.execute).not.toHaveBeenCalled();
+    } finally {
+      if (originalCutoff === undefined) delete process.env.BACKFILL_CUTOFF_TS;
+      else process.env.BACKFILL_CUTOFF_TS = originalCutoff;
+      if (originalWindowStart === undefined) delete process.env.BACKFILL_WINDOW_START_TS;
+      else process.env.BACKFILL_WINDOW_START_TS = originalWindowStart;
+    }
   });
 });
 
