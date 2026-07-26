@@ -106,8 +106,8 @@ export async function isActiveRotationMatch(entry: RotationMatchEntry): Promise<
         FROM ${rotation} r2
         LEFT JOIN ${library} l2 ON l2.id = r2.album_id
         LEFT JOIN ${artists} a2 ON a2.id = l2.artist_id
-        WHERE r2.add_date <= ${addTime}::date
-          AND (r2.kill_date IS NULL OR r2.kill_date > ${addTime}::date)
+        WHERE r2.add_date <= ${addTime.toISOString()}::date
+          AND (r2.kill_date IS NULL OR r2.kill_date > ${addTime.toISOString()}::date)
           AND (
             ${albumIdCohort}
             OR (
