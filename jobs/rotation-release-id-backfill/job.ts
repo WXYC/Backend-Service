@@ -1,7 +1,7 @@
 /**
  * Entrypoint for jobs/rotation-release-id-backfill (BS#1029).
  *
- * One-shot ETL that pre-resolves Discogs release ids for active rotation
+ * Recurring ETL that pre-resolves Discogs release ids for active rotation
  * rows via LML, persisting to `rotation.discogs_release_id` with
  * `discogs_release_id_source = 'lml_offline_backfill'`. Restores the
  * planned tier-1/tier-2 read path for the dj-site rotation picker
@@ -20,17 +20,20 @@
  *
  * Optional env:
  *   DRY_RUN=true                              skip all UPDATEs; log planned writes
+ *   ROTATION_RELEASE_ID_NO_MATCH_TTL_DAYS=N   default 30
  *   BACKFILL_LML_MAX_CONCURRENT=N             default 1
  *   BACKFILL_LML_RATE_PER_MIN=N               default 20
  *   BACKFILL_LML_PER_CALL_TIMEOUT_MS=N        default 8000
+ *   LIVE_ACTIVITY_LOOKBACK_SECONDS=N          default 60; 0 disables cooperative pause
+ *   LIVE_ACTIVITY_PAUSE_MS=N                  default 30000
  */
 
-import { closeDatabaseConnection } from '@wxyc/database';
+import { closeDatabaseConnection, requirePositiveInt } from '@wxyc/database';
 
 import { runBackfill } from './orchestrate.js';
-import { loadCandidates } from './query.js';
+import { loadCandidates, NO_MATCH_TTL_DAYS_DEFAULT, NO_MATCH_TTL_DAYS_ENV } from './query.js';
 import { lookupReleaseId } from './lml-fetch.js';
-import { writeReleaseId } from './writer.js';
+import { markReleaseIdResolveAttempted, writeReleaseId } from './writer.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 
 const JOB_NAME = 'rotation-release-id-backfill';
@@ -43,20 +46,30 @@ const requireLmlConfigured = (): void => {
 
 const resolveDryRun = (): boolean => {
   const raw = process.env.DRY_RUN;
-  return raw === 'true' || raw === '1';
+  return raw === 'true' || raw === '1' || raw === 'TRUE';
 };
 
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
   const dryRun = resolveDryRun();
+  const noMatchTtlDays = requirePositiveInt(
+    process.env.ROTATION_RELEASE_ID_NO_MATCH_TTL_DAYS,
+    NO_MATCH_TTL_DAYS_ENV,
+    NO_MATCH_TTL_DAYS_DEFAULT,
+    { context: JOB_NAME }
+  );
   try {
     requireLmlConfigured();
-    log('info', 'init', `${JOB_NAME} initialized`, { dry_run: dryRun });
+    log('info', 'init', `${JOB_NAME} initialized`, { dry_run: dryRun, no_match_ttl_days: noMatchTtlDays });
     const { totals } = await runBackfill({
-      loadCandidates,
+      loadCandidates: () => loadCandidates(noMatchTtlDays),
       lookup: lookupReleaseId,
       write: writeReleaseId,
+      markAttempted: markReleaseIdResolveAttempted,
       dryRun,
+      onLivePause: () => {
+        log('info', 'live_activity_pause', 'live flowsheet activity detected; pausing');
+      },
     });
     log('info', 'finished', `${JOB_NAME} done`, { dry_run: dryRun, ...totals });
   } catch (error) {

@@ -4,16 +4,28 @@
  * Iterates active rotation rows (`kill_date IS NULL OR > CURRENT_DATE`) with
  * NULL `discogs_release_id`, asks LML to resolve `(artist_name, album_title)`
  * to a Discogs release id, and writes the result back to BS PG with
- * `discogs_release_id_source = 'lml_offline_backfill'`. One-shot drain;
- * rerun-safe via the `discogs_release_id IS NULL` SELECT predicate.
+ * `discogs_release_id_source = 'lml_offline_backfill'`. Recurring cron;
+ * rerun-safe via the `discogs_release_id IS NULL` SELECT predicate plus a
+ * no-match TTL over `discogs_release_id_resolve_attempted_at`.
  *
  * Pacing and per-call timeouts ride on top of `@wxyc/lml-client`'s
  * `defaultLmlLimiter` configured with `BACKFILL_LML_*` env vars — same
  * safety story as `jobs/flowsheet-metadata-backfill` post-BS#995.
  *
+ * Cooperative pause (BS#735): the orchestrator probes flowsheet for live DJ
+ * activity before each row; disable via `LIVE_ACTIVITY_LOOKBACK_SECONDS=0`
+ * for manual catch-up runs.
+ *
  * Deps are injected so tests can drive the orchestrator without a live
  * LML or DB.
  */
+
+import {
+  LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
+  LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+  checkLiveActivity as defaultCheckLiveActivity,
+  type CheckLiveActivityFn,
+} from '@wxyc/database';
 
 export type Candidate = {
   id: number;
@@ -36,6 +48,7 @@ export type LookupOutcome =
 export type LookupFn = (artist: string, album: string) => Promise<LookupOutcome>;
 
 export type WriteFn = (rotationId: number, releaseId: number) => Promise<{ written: boolean }>;
+export type MarkAttemptedFn = (rotationId: number) => Promise<{ written: boolean }>;
 
 export type Totals = {
   scanned: number;
@@ -50,11 +63,48 @@ export type Totals = {
 
 export type RunResult = { totals: Totals };
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const envNonNegativeInt = (raw: string | undefined, fallback: number): number => {
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  return fallback;
+};
+
+export const resolveLiveActivityLookback = (
+  raw: string | undefined = process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS
+): number => envNonNegativeInt(raw, LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT);
+
+export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
+  envNonNegativeInt(raw, LIVE_ACTIVITY_PAUSE_MS_DEFAULT);
+
+type AttemptBucket = 'unresolved' | 'sentinel_rejected' | 'trust_rejected';
+
+const incrementAttemptBucket = (totals: Totals, bucket: AttemptBucket): void => {
+  switch (bucket) {
+    case 'unresolved':
+      totals.unresolved += 1;
+      return;
+    case 'sentinel_rejected':
+      totals.sentinel_rejected += 1;
+      return;
+    case 'trust_rejected':
+      totals.trust_rejected += 1;
+      return;
+  }
+};
+
 export const runBackfill = async (deps: {
   loadCandidates: LoadCandidatesFn;
   lookup: LookupFn;
   write: WriteFn;
+  markAttempted: MarkAttemptedFn;
   dryRun?: boolean;
+  liveActivityLookbackSeconds?: number;
+  liveActivityPauseMs?: number;
+  checkLiveActivity?: CheckLiveActivityFn;
+  onLivePause?: () => void;
 }): Promise<RunResult> => {
   const totals: Totals = {
     scanned: 0,
@@ -67,8 +117,35 @@ export const runBackfill = async (deps: {
     trust_rejected: 0,
   };
 
+  const liveActivityLookbackSeconds = deps.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
+  const liveActivityPauseMs = deps.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
+  const probe = deps.checkLiveActivity ?? defaultCheckLiveActivity;
+
+  const recordAttemptedOutcome = async (rotationId: number, bucket: AttemptBucket): Promise<void> => {
+    if (deps.dryRun) {
+      incrementAttemptBucket(totals, bucket);
+      return;
+    }
+    const { written } = await deps.markAttempted(rotationId);
+    if (written) {
+      incrementAttemptBucket(totals, bucket);
+    } else {
+      // Same race shape as `writeReleaseId`: the marker UPDATE guards on
+      // `discogs_release_id IS NULL`, so 0 rows means a tubafrenzy paste (or
+      // another resolver run) filled the id after candidate selection.
+      totals.raced += 1;
+    }
+  };
+
   const candidates = await deps.loadCandidates();
   for (const candidate of candidates) {
+    if (liveActivityLookbackSeconds > 0) {
+      while (await probe(liveActivityLookbackSeconds)) {
+        deps.onLivePause?.();
+        if (liveActivityPauseMs > 0) await sleep(liveActivityPauseMs);
+      }
+    }
+
     totals.scanned += 1;
     let outcome: LookupOutcome;
     try {
@@ -85,11 +162,11 @@ export const runBackfill = async (deps: {
       // BS#1516: LML answered, but not with a `direct` match — persisting
       // it would pin a wrong-album release id that tier 1 serves forever
       // (the Yenbett→Tzenni recurrence, BS#1515). The row stays NULL.
-      totals.trust_rejected += 1;
+      await recordAttemptedOutcome(candidate.id, 'trust_rejected');
       continue;
     }
     if (outcome.kind === 'no_match') {
-      totals.unresolved += 1;
+      await recordAttemptedOutcome(candidate.id, 'unresolved');
       continue;
     }
     const releaseId = outcome.releaseId;
@@ -99,7 +176,7 @@ export const runBackfill = async (deps: {
       // poisoned LML response (cache pollution, upstream regression)
       // is contained to one candidate counter instead of crashing the
       // whole nightly batch.
-      totals.sentinel_rejected += 1;
+      await recordAttemptedOutcome(candidate.id, 'sentinel_rejected');
       continue;
     }
     if (deps.dryRun) {

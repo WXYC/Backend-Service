@@ -655,7 +655,7 @@ export const metadataStatusEnum = wxyc_schema.enum('metadata_status_enum', [
   'failed_no_retry',
 ]);
 
-// Provenance for `rotation.discogs_release_id` (BS#1029). Five values:
+// Provenance for `rotation.discogs_release_id` (BS#1029). Values:
 //
 //   tubafrenzy_paste        — mirrored from tubafrenzy ROTATION_RELEASE
 //                             .DISCOGS_RELEASE_ID by `jobs/rotation-etl`,
@@ -784,6 +784,17 @@ export const rotation = wxyc_schema.table(
     discogs_release_id_source: discogsReleaseIdSourceEnum('discogs_release_id_source')
       .notNull()
       .default('tubafrenzy_paste'),
+    // Stamped by `jobs/rotation-release-id-backfill` when the scheduled
+    // resolver receives a definitive LML response for this row: a trusted
+    // direct match, no match, trust-gated fallback, or rejected sentinel. Left
+    // NULL on transient LML failures so those rows stay immediately retryable.
+    // The recurring resolver re-attempts NULL markers every run and stamped
+    // no-match/trust-rejected rows after its no-match TTL. Separate from
+    // `tracklist_lookup_attempted_at` below, which belongs to the rotation
+    // tracklist picker cascade rather than the release-id trusted store.
+    discogs_release_id_resolve_attempted_at: timestamp('discogs_release_id_resolve_attempted_at', {
+      withTimezone: true,
+    }),
     // Stamped by `resolveRotationDiscogsReleaseViaLml` when the tier-3 LML
     // cascade returns nothing for this row. The picker read path skips the
     // LML call when this is set within `ROTATION_TRACKLIST_LOOKUP_NEGATIVE_WINDOW_MS`,
