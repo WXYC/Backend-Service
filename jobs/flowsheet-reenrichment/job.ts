@@ -5,6 +5,13 @@
  * LML#583 (merged 2026-06-16T17:53:53Z) closed the library-miss recall
  * gap. Set BACKFILL_CUTOFF_TS to the LML#583 merge timestamp.
  *
+ * BS#1823 additionally supports BACKFILL_WINDOW_START_TS — an optional
+ * lower bound so the same drain can re-enrich a recent, bounded slice of a
+ * later regression backlog instead of only the original pre-LML#583
+ * cohort. At least one of BACKFILL_CUTOFF_TS / BACKFILL_WINDOW_START_TS is
+ * required; see jobs/flowsheet-reenrichment/README.md for the
+ * regression-window run example.
+ *
  * Run via deploy-manual.yml (target=flowsheet-reenrichment, version=latest),
  * then SSH to EC2 and:
  *
@@ -47,9 +54,16 @@ const requireLmlConfigured = (): void => {
   }
 };
 
-const requireCutoffConfigured = (): void => {
-  if (!process.env.BACKFILL_CUTOFF_TS) {
-    throw new Error('BACKFILL_CUTOFF_TS is not configured; set to the LML#583 merge timestamp (2026-06-16T17:53:53Z).');
+// BS#1823: the drain now accepts either boundary env var (or both). This is
+// an existence-only pre-flight guard — format/calendar/future-timestamp
+// validation for whichever is set stays solely in orchestrate.ts's
+// resolveTimeWindow (via resolveCutoffTs / resolveWindowStartTs), so the
+// strictness can't drift between the two layers.
+const requireTimeWindowConfigured = (): void => {
+  if (!process.env.BACKFILL_CUTOFF_TS && !process.env.BACKFILL_WINDOW_START_TS) {
+    throw new Error(
+      'At least one of BACKFILL_CUTOFF_TS or BACKFILL_WINDOW_START_TS is required; neither is configured.'
+    );
   }
 };
 
@@ -71,8 +85,11 @@ const main = async () => {
   registerSignalHandlers();
   try {
     requireLmlConfigured();
-    requireCutoffConfigured();
-    log('info', 'init', `${JOB_NAME} initialized`, { cutoff_ts: process.env.BACKFILL_CUTOFF_TS });
+    requireTimeWindowConfigured();
+    log('info', 'init', `${JOB_NAME} initialized`, {
+      cutoff_ts: process.env.BACKFILL_CUTOFF_TS ?? null,
+      window_start_ts: process.env.BACKFILL_WINDOW_START_TS ?? null,
+    });
     const result = await runReenrichment({
       lookup: lookupMetadata,
       enrich: reenrichRow,

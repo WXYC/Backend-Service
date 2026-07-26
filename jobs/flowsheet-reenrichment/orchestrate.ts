@@ -5,7 +5,15 @@
  *   metadata_status = 'enriched_no_match'
  *   AND album_id IS NULL
  *   AND artist_name IS NOT NULL
- *   AND add_time < $BACKFILL_CUTOFF_TS
+ *   AND add_time < $BACKFILL_CUTOFF_TS       (optional upper bound)
+ *   AND add_time >= $BACKFILL_WINDOW_START_TS (optional lower bound, BS#1823)
+ *
+ * BS#1823 added the optional BACKFILL_WINDOW_START_TS lower bound so the
+ * same drain can re-enrich a recent, bounded slice of the backlog (e.g. the
+ * B3 regression window, LML#920) instead of only the original pre-LML#583
+ * cohort. At least one of the two bounds is required — see
+ * `resolveTimeWindow`. Cutoff-only preserves the original behavior exactly;
+ * window-start-only applies no upper bound (through "now", in effect).
  *
  * Per-row (not bulk): the cohort is cascade-bound on cold Discogs lookups
  * (the library-miss-by-definition path LML#583 introduces). Per-row gating
@@ -78,6 +86,48 @@ export const resolveBatchSize = (raw: string | undefined = process.env.BACKFILL_
   requirePositiveInt(raw, 'BACKFILL_BATCH_SIZE', BATCH_SIZE);
 
 /**
+ * Shared strict ISO 8601 + calendar validator for the drain's two boundary
+ * env vars (BACKFILL_CUTOFF_TS, BACKFILL_WINDOW_START_TS — BS#1823).
+ * Extracted from resolveCutoffTs's original inline checks so
+ * BACKFILL_WINDOW_START_TS can't drift from BACKFILL_CUTOFF_TS's exact
+ * strictness. Throws using `envName` in the message so each caller's
+ * errors stay field-specific despite sharing one validation path.
+ *
+ * Catches Date.parse-passes-but-PG-rejects inputs like '2026-6-16',
+ * '2026/06/16', '2026', '6/16/2026'. Also enforces calendar-field bounds
+ * (irrespective of TZ) so normalized out-of-range days (e.g. '2026-02-30'
+ * → '2026-03-02') are rejected even though Date.parse accepts them.
+ *
+ * Returns the Date.parse'd epoch ms so a caller needing a future-timestamp
+ * check (only resolveCutoffTs does — see BS#1823's decision that a future
+ * window-start is valid, not an error) doesn't need to re-parse.
+ */
+const validateStrictIso8601 = (raw: string, envName: string): number => {
+  if (!ISO_8601_RE.test(raw)) {
+    throw new Error(
+      `${envName}=${JSON.stringify(raw)} is not strict ISO 8601 (e.g. 2026-06-16T17:53:53Z or 2026-06-16T10:53:53-07:00).`
+    );
+  }
+  const year = Number(raw.slice(0, 4));
+  const month = Number(raw.slice(5, 7));
+  const day = Number(raw.slice(8, 10));
+  const hour = Number(raw.slice(11, 13));
+  const minute = Number(raw.slice(14, 16));
+  const second = Number(raw.slice(17, 19));
+  // Calendar bounds — month, hour, minute, second. Days-in-month uses Date
+  // (day 0 of next month is the last day of this month).
+  const lastDayOfMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (month < 1 || month > 12 || day < 1 || day > lastDayOfMonth || hour > 23 || minute > 59 || second > 59) {
+    throw new Error(`${envName}=${JSON.stringify(raw)} has an out-of-range field (calendar / 24h validation failed).`);
+  }
+  const parsed = Date.parse(raw);
+  if (Number.isNaN(parsed)) {
+    throw new Error(`${envName}=${JSON.stringify(raw)} is not a parseable timestamp.`);
+  }
+  return parsed;
+};
+
+/**
  * Throws when BACKFILL_CUTOFF_TS is missing, syntactically invalid (not
  * strict ISO 8601), has an out-of-range calendar day/hour/etc, or is in
  * the future. Fail-fast so the operator sees a clear message rather than
@@ -91,35 +141,64 @@ export const resolveCutoffTs = (raw: string | undefined = process.env.BACKFILL_C
   if (!raw) {
     throw new Error('BACKFILL_CUTOFF_TS is required; set to the LML#583 merge timestamp (2026-06-16T17:53:53Z).');
   }
-  if (!ISO_8601_RE.test(raw)) {
-    throw new Error(
-      `BACKFILL_CUTOFF_TS=${JSON.stringify(raw)} is not strict ISO 8601 (e.g. 2026-06-16T17:53:53Z or 2026-06-16T10:53:53-07:00).`
-    );
-  }
-  const year = Number(raw.slice(0, 4));
-  const month = Number(raw.slice(5, 7));
-  const day = Number(raw.slice(8, 10));
-  const hour = Number(raw.slice(11, 13));
-  const minute = Number(raw.slice(14, 16));
-  const second = Number(raw.slice(17, 19));
-  // Calendar bounds — month, hour, minute, second. Days-in-month uses Date
-  // (day 0 of next month is the last day of this month).
-  const lastDayOfMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-  if (month < 1 || month > 12 || day < 1 || day > lastDayOfMonth || hour > 23 || minute > 59 || second > 59) {
-    throw new Error(
-      `BACKFILL_CUTOFF_TS=${JSON.stringify(raw)} has an out-of-range field (calendar / 24h validation failed).`
-    );
-  }
-  const parsed = Date.parse(raw);
-  if (Number.isNaN(parsed)) {
-    throw new Error(`BACKFILL_CUTOFF_TS=${JSON.stringify(raw)} is not a parseable timestamp.`);
-  }
+  const parsed = validateStrictIso8601(raw, 'BACKFILL_CUTOFF_TS');
   if (parsed > Date.now()) {
     throw new Error(
       `BACKFILL_CUTOFF_TS=${JSON.stringify(raw)} is in the future; cohort would include legitimately-terminal post-fix rows. Use the LML#583 merge timestamp.`
     );
   }
   return raw;
+};
+
+/**
+ * Optional lower-bound companion to resolveCutoffTs (BS#1823 — scoped
+ * re-enrichment of a recent regression-backlog window). Mirrors its strict
+ * ISO 8601 + calendar validation exactly (shared via validateStrictIso8601),
+ * but differs in two ways:
+ *
+ *   - Unset is valid: returns undefined (the caller applies no lower
+ *     bound), since this bound is optional wherever BACKFILL_CUTOFF_TS is
+ *     supplied instead — see resolveTimeWindow for the "at least one of
+ *     the two" rule.
+ *   - A future timestamp is NOT rejected. A window start staged ahead of
+ *     time simply selects nothing until that instant arrives — a valid
+ *     (if inert) configuration, unlike a future cutoff (which would widen
+ *     the cohort to include legitimately-terminal post-fix rows).
+ */
+export const resolveWindowStartTs = (
+  raw: string | undefined = process.env.BACKFILL_WINDOW_START_TS
+): string | undefined => {
+  if (!raw) return undefined;
+  validateStrictIso8601(raw, 'BACKFILL_WINDOW_START_TS');
+  return raw;
+};
+
+export type TimeWindow = { cutoffTs?: string; windowStartTs?: string };
+
+/**
+ * Resolves the drain's cohort time-window from BACKFILL_CUTOFF_TS /
+ * BACKFILL_WINDOW_START_TS (or explicit overrides — see runReenrichment's
+ * opts). At least one bound is required: a drain with neither has no
+ * defined cohort (an unbounded sweep of the entire enriched_no_match
+ * backlog was never an intended run shape).
+ *
+ *   - Cutoff-only reproduces resolveCutoffTs's exact original behavior
+ *     (required-if-called-alone semantics live in resolveCutoffTs itself;
+ *     here it's simply invoked when cutoffRaw is present).
+ *   - Window-start-only is a valid open-ended "everything from X to now"
+ *     run — no upper bound is applied.
+ *   - Both set narrows to the intersection (a bounded window).
+ */
+export const resolveTimeWindow = (
+  cutoffRaw: string | undefined = process.env.BACKFILL_CUTOFF_TS,
+  windowStartRaw: string | undefined = process.env.BACKFILL_WINDOW_START_TS
+): TimeWindow => {
+  if (!cutoffRaw && !windowStartRaw) {
+    throw new Error('At least one of BACKFILL_CUTOFF_TS or BACKFILL_WINDOW_START_TS is required; neither is set.');
+  }
+  const cutoffTs = cutoffRaw ? resolveCutoffTs(cutoffRaw) : undefined;
+  const windowStartTs = resolveWindowStartTs(windowStartRaw);
+  return { cutoffTs, windowStartTs };
 };
 
 export const resolveLiveActivityLookback = (
@@ -193,7 +272,25 @@ const stopAwareSleep = async (ms: number): Promise<void> => {
   }
 };
 
-const loadBatchOnce = async (afterId: number, batchSize: number, cutoffTs: string): Promise<ReenrichRow[]> => {
+/**
+ * Optional-bound composition (BS#1823): each clause is included only when
+ * its bound is set, mirroring the `cond ? sql\`AND ...\` : sql\`\`` pattern
+ * used elsewhere in this codebase for dynamic WHERE clauses (e.g.
+ * apps/backend/services/library.service.ts's streamingClause,
+ * jobs/flowsheet-metadata-backfill/worklist.ts's partitionFilter). At least
+ * one of cutoffTs/windowStartTs is always set by the time this is called
+ * (resolveTimeWindow enforces it), but both branches degrade to `sql\`\``
+ * (a no-op fragment) when their bound is absent, so this function itself
+ * doesn't need to re-assert that invariant.
+ */
+const loadBatchOnce = async (
+  afterId: number,
+  batchSize: number,
+  cutoffTs: string | undefined,
+  windowStartTs: string | undefined
+): Promise<ReenrichRow[]> => {
+  const cutoffClause = cutoffTs ? sql`AND "add_time" < ${cutoffTs}::timestamptz` : sql``;
+  const windowStartClause = windowStartTs ? sql`AND "add_time" >= ${windowStartTs}::timestamptz` : sql``;
   const rows = (await db.execute(sql`
     SELECT
       "id",
@@ -204,7 +301,8 @@ const loadBatchOnce = async (afterId: number, batchSize: number, cutoffTs: strin
     WHERE "metadata_status" = 'enriched_no_match'
       AND "album_id" IS NULL
       AND "artist_name" IS NOT NULL
-      AND "add_time" < ${cutoffTs}::timestamptz
+      ${cutoffClause}
+      ${windowStartClause}
       AND "id" > ${afterId}
     ORDER BY "id" ASC
     LIMIT ${batchSize}
@@ -222,11 +320,16 @@ const loadBatchOnce = async (afterId: number, batchSize: number, cutoffTs: strin
  * — no custom sentinel needed, since the flag was true at throw time and
  * stays true until __resetStopForTesting (production never resets it).
  */
-const loadBatch = async (afterId: number, batchSize: number, cutoffTs: string): Promise<ReenrichRow[]> => {
+const loadBatch = async (
+  afterId: number,
+  batchSize: number,
+  cutoffTs: string | undefined,
+  windowStartTs: string | undefined
+): Promise<ReenrichRow[]> => {
   let lastError: unknown;
   for (let attempt = 0; attempt < LOAD_BATCH_MAX_ATTEMPTS; attempt += 1) {
     try {
-      return await loadBatchOnce(afterId, batchSize, cutoffTs);
+      return await loadBatchOnce(afterId, batchSize, cutoffTs, windowStartTs);
     } catch (error) {
       lastError = error;
       if (stopRequested || attempt + 1 >= LOAD_BATCH_MAX_ATTEMPTS) throw error;
@@ -297,12 +400,19 @@ export const runReenrichment = async (opts: {
   lookup: LookupFn;
   enrich: EnrichFn;
   cutoffTs?: string;
+  windowStartTs?: string;
   batchSize?: number;
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
 }): Promise<RunResult> => {
-  const cutoffTs = opts.cutoffTs ?? resolveCutoffTs();
+  // BS#1823: resolveTimeWindow enforces "at least one of cutoffTs /
+  // windowStartTs" and applies each bound's own validation (cutoff:
+  // required-if-alone + future-rejection; window-start: optional +
+  // future-allowed). Explicit opts pass through the same validation as
+  // env-sourced values — a caller-supplied override is no longer a
+  // silent bypass.
+  const { cutoffTs, windowStartTs } = resolveTimeWindow(opts.cutoffTs, opts.windowStartTs);
   const batchSize = opts.batchSize ?? resolveBatchSize();
   const liveActivityLookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
@@ -343,7 +453,8 @@ export const runReenrichment = async (opts: {
   };
 
   log('info', 'started', `${JOB_NAME} starting`, {
-    cutoff_ts: cutoffTs,
+    cutoff_ts: cutoffTs ?? null,
+    window_start_ts: windowStartTs ?? null,
     batch_size: batchSize,
     live_activity_lookback_seconds: liveActivityLookbackSeconds,
     live_activity_pause_ms: liveActivityPauseMs,
@@ -374,7 +485,7 @@ export const runReenrichment = async (opts: {
 
       let rows: ReenrichRow[];
       try {
-        rows = await loadBatch(lastId, batchSize, cutoffTs);
+        rows = await loadBatch(lastId, batchSize, cutoffTs, windowStartTs);
       } catch (error) {
         // Distinguish stop-triggered exit from real failure via the same
         // module flag the inner retry observed. No custom sentinel class
