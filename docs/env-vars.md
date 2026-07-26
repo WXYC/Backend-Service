@@ -132,7 +132,7 @@ Stricter ceilings for backfill-class LML callers, since one in-flight LML call h
 
 - `BACKFILL_LML_MAX_CONCURRENT` (default `1`) — Maximum concurrent in-flight backfill `/api/v1/lookup` calls. Tighter than runtime `LML_CLIENT_MAX_CONCURRENT=5` because backfills have no human-facing latency budget; serializing keeps blast radius bounded. The semaphore is belt-and-suspenders defense in case an orchestrator ever becomes concurrent.
 - `BACKFILL_LML_RATE_PER_MIN` (default `20`) — Token-bucket refill rate (and capacity) for backfill LML calls per minute. Tighter than runtime `LML_CLIENT_RATE_PER_MIN=50` to leave headroom for real-time traffic.
-- `BACKFILL_LML_PER_CALL_TIMEOUT_MS` (default `35000`) — Per-call abort budget. Sized to clear LML#370's 25.25 s per-item cascade-exhaustion cap (deployed to LML prod 2026-05-25) plus ~10 s of headroom for LML queue contention with the live backend + ROM. The prior 8000 ms default (BS#994, retro 2026-05-23) was set against the pre-LML#370 topology and aborted before LML could return its `{timeout:true, results:[]}` body for cascade-bait rows — those rows stayed `metadata_attempt_at IS NULL` and the cron re-failed them every pass. BS#1064 / BS#1180 empirical re-validation showed the 35 s budget lets that body reach the empty-results branch so rows drain as `enriched_no_match` instead of looping (per-row `lml_error` rate dropped from ~86% to ~23%). Steady-state floor is drained by BS#1199's planned retry cap. Mirrors BS#992's per-caller `timeoutMs` pattern for the rotation picker.
+- `BACKFILL_LML_PER_CALL_TIMEOUT_MS` — Per-call abort budget. `flowsheet-metadata-backfill` defaults to `35000`, sized to clear LML#370's 25.25 s per-item cascade-exhaustion cap (deployed to LML prod 2026-05-25) plus ~10 s of headroom for LML queue contention with the live backend + ROM. `rotation-release-id-backfill` deliberately keeps the stricter BS#1813 default of `8000` because the active-rotation cohort is small, recurring, and must not occupy LML's serialized Discogs fan-out during live picker traffic.
 
 ### flowsheet-metadata-backfill drain shape (BS#1591)
 
@@ -143,9 +143,10 @@ The recurring drain processes rows in **play-descending artist priority**, not `
 
 ### Rotation Discogs release backfill (`jobs/rotation-release-id-backfill`)
 
-One-shot ETL for BS#1029. Reuses `BACKFILL_LML_*` (above) and adds:
+Recurring cron for BS#1813 / BS#1029. Reuses `BACKFILL_LML_*` (above), `LIVE_ACTIVITY_LOOKBACK_SECONDS`, and `LIVE_ACTIVITY_PAUSE_MS`, and adds:
 
-- `DRY_RUN` (default unset / `false`) — when `'true'` or `'1'`, the orchestrator skips every UPDATE and increments `rows_resolved_dry` instead of `rows_resolved`. Each planned write is still logged. Useful for confirming the candidate set before a real run; harmless to forget — the `discogs_release_id IS NULL` SELECT predicate is idempotent across reruns.
+- `ROTATION_RELEASE_ID_NO_MATCH_TTL_DAYS` (default `30`) — Rows with NULL `discogs_release_id` and a stamped `discogs_release_id_resolve_attempted_at` are skipped until this window expires. Rows whose LML call threw keep the marker NULL and retry on the next cron tick.
+- `DRY_RUN` (default unset / `false`) — when `'true'`, `'TRUE'`, or `'1'`, the orchestrator skips every UPDATE, including marker-only attempts, and increments `rows_resolved_dry` instead of `rows_resolved` for trusted matches. Useful for confirming the candidate set before a real run; harmless to forget — the `discogs_release_id IS NULL` SELECT/WHERE predicate is idempotent across reruns.
 
 ### Rotation artist backfill (`jobs/rotation-artist-backfill`)
 

@@ -18,17 +18,18 @@ The breaker trips on LML's Discogs API work, driven by LML's HTTP endpoints — 
 
 ## Current slot table (UTC)
 
-| Time      | Job                                   | Class                                                                                                             |
-| --------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| 04:15     | `artist-search-alias-consumer`        | light (`search-aliases/bulk`, bounded)                                                                            |
-| 04:30     | `rotation-artist-backfill`            | **heavy drain**                                                                                                   |
-| 04:45     | `catalog-popularity-freetext-resolve` | **heavy drain** (`bulkLookupMetadata`)                                                                            |
-| 05:35     | `concerts-artist-lml-resolver`        | light (upcoming-show cohort)                                                                                      |
-| 05:45     | `concerts-genre-enrichment`           | light (upcoming-show cohort)                                                                                      |
-| 06:05     | `concerts-poster-enrichment`          | light (one call per distinct headliner)                                                                           |
-| 07:00 Mon | `rotation-release-id-pollution-check` | light (weekly, read-only, paced)                                                                                  |
-| **09:00** | **`rotation-lml-identity-backfill`**  | **heavy drain** — moved here by BS#1665, was `0 6 * * *`                                                          |
-| ~~06:00~~ | ~~`flowsheet-metadata-backfill`~~     | **heavy drain — GATED (never fires, `0 0 31 2 *`)**; fate owned by BS#1011 (retire) / BS#895 (hourly reintroduce) |
+| Time                          | Job                                   | Class                                                                                                             |
+| ----------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| 04:15                         | `artist-search-alias-consumer`        | light (`search-aliases/bulk`, bounded)                                                                            |
+| 04:30                         | `rotation-artist-backfill`            | **heavy drain**                                                                                                   |
+| 04:45                         | `catalog-popularity-freetext-resolve` | **heavy drain** (`bulkLookupMetadata`)                                                                            |
+| 05:35                         | `concerts-artist-lml-resolver`        | light (upcoming-show cohort)                                                                                      |
+| 05:45                         | `concerts-genre-enrichment`           | light (upcoming-show cohort)                                                                                      |
+| 06:05                         | `concerts-poster-enrichment`          | light (one call per distinct headliner)                                                                           |
+| 00:17 / 06:17 / 12:17 / 18:17 | `rotation-release-id-backfill`        | **heavy drain** (small active-rotation cohort, per-row `lookupMetadata`; TTL-gated)                               |
+| 07:00 Mon                     | `rotation-release-id-pollution-check` | light (weekly, read-only, paced)                                                                                  |
+| **09:00**                     | **`rotation-lml-identity-backfill`**  | **heavy drain** — moved here by BS#1665, was `0 6 * * *`                                                          |
+| ~~06:00~~                     | ~~`flowsheet-metadata-backfill`~~     | **heavy drain — GATED (never fires, `0 0 31 2 *`)**; fate owned by BS#1011 (retire) / BS#895 (hourly reintroduce) |
 
 `rotation-lml-identity-backfill`'s new `0 9 * * *` slot is clear of the entire 04:15–06:05 stack, ~2h after the weekly Monday pollution check, and ~04:00–05:00 ET — still off-peak for DJs (cooperative pause covers the rest).
 

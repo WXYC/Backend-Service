@@ -12,7 +12,7 @@
  * reverse direction when a later tubafrenzy paste arrives.
  */
 
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { db, rotation } from '@wxyc/database';
 
 export const writeReleaseId = async (rotationId: number, releaseId: number): Promise<{ written: boolean }> => {
@@ -21,6 +21,18 @@ export const writeReleaseId = async (rotationId: number, releaseId: number): Pro
     .set({
       discogs_release_id: releaseId,
       discogs_release_id_source: 'lml_offline_backfill',
+      discogs_release_id_resolve_attempted_at: sql`now()`,
+    })
+    .where(and(eq(rotation.id, rotationId), isNull(rotation.discogs_release_id)))
+    .returning({ id: rotation.id });
+  return { written: updated.length === 1 };
+};
+
+export const markReleaseIdResolveAttempted = async (rotationId: number): Promise<{ written: boolean }> => {
+  const updated = await db
+    .update(rotation)
+    .set({
+      discogs_release_id_resolve_attempted_at: sql`now()`,
     })
     .where(and(eq(rotation.id, rotationId), isNull(rotation.discogs_release_id)))
     .returning({ id: rotation.id });

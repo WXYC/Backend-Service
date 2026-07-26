@@ -1,8 +1,8 @@
 {
   "name": "@wxyc/rotation-release-id-backfill",
-  "job-type": "one-shot",
+  "cron-schedule": "17 */6 * * *",
   "version": "1.0.0",
-  "description": "WXYC one-shot ETL: pre-resolve rotation.discogs_release_id for active rows via LML so the dj-site picker becomes a deterministic SQL read instead of a runtime LML cascade (BS#1029 / BS#994).",
+  "description": "WXYC recurring cron (BS#1813 / BS#1029): trust-gated resolver for active rotation.discogs_release_id NULL rows via LML, with attempt-marker + no-match TTL, cooperative live-DJ pause, and lml_offline_backfill provenance.",
   "type": "module",
   "main": "./dist/job.js",
   "scripts": {

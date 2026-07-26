@@ -19,10 +19,13 @@ import {
   type Candidate,
   type LoadCandidatesFn,
   type LookupFn,
+  type MarkAttemptedFn,
   type WriteFn,
 } from '../../../../jobs/rotation-release-id-backfill/orchestrate';
 
 const makeLoadCandidates = (rows: Candidate[]): LoadCandidatesFn => jest.fn<LoadCandidatesFn>().mockResolvedValue(rows);
+const makeMarkAttempted = (): jest.MockedFunction<MarkAttemptedFn> =>
+  jest.fn<MarkAttemptedFn>().mockResolvedValue({ written: true });
 
 describe('runBackfill', () => {
   test('one resolvable row produces one resolved UPDATE and bumps the counter', async () => {
@@ -31,11 +34,13 @@ describe('runBackfill', () => {
     ]);
     const lookup = jest.fn<LookupFn>().mockResolvedValue({ kind: 'resolved', releaseId: 999001 });
     const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const markAttempted = makeMarkAttempted();
 
-    const result = await runBackfill({ loadCandidates, lookup, write });
+    const result = await runBackfill({ loadCandidates, lookup, write, markAttempted });
 
     expect(write).toHaveBeenCalledTimes(1);
     expect(write).toHaveBeenCalledWith(42, 999001);
+    expect(markAttempted).not.toHaveBeenCalled();
     expect(result.totals.scanned).toBe(1);
     expect(result.totals.resolved).toBe(1);
     expect(result.totals.unresolved).toBe(0);
@@ -49,10 +54,13 @@ describe('runBackfill', () => {
     ]);
     const lookup = jest.fn<LookupFn>().mockResolvedValue({ kind: 'no_match' });
     const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const markAttempted = makeMarkAttempted();
 
-    const result = await runBackfill({ loadCandidates, lookup, write });
+    const result = await runBackfill({ loadCandidates, lookup, write, markAttempted });
 
     expect(write).not.toHaveBeenCalled();
+    expect(markAttempted).toHaveBeenCalledTimes(1);
+    expect(markAttempted).toHaveBeenCalledWith(99);
     expect(result.totals.scanned).toBe(1);
     expect(result.totals.unresolved).toBe(1);
     expect(result.totals.resolved).toBe(0);
@@ -62,10 +70,12 @@ describe('runBackfill', () => {
     const loadCandidates = makeLoadCandidates([{ id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' }]);
     const lookup = jest.fn<LookupFn>().mockRejectedValue(new Error('LML socket timeout'));
     const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const markAttempted = makeMarkAttempted();
 
-    const result = await runBackfill({ loadCandidates, lookup, write });
+    const result = await runBackfill({ loadCandidates, lookup, write, markAttempted });
 
     expect(write).not.toHaveBeenCalled();
+    expect(markAttempted).not.toHaveBeenCalled();
     expect(result.totals.scanned).toBe(1);
     expect(result.totals.lml_error).toBe(1);
     expect(result.totals.resolved).toBe(0);
@@ -82,10 +92,12 @@ describe('runBackfill', () => {
     ]);
     const lookup = jest.fn<LookupFn>().mockResolvedValue({ kind: 'resolved', releaseId: 555 });
     const write = jest.fn<WriteFn>().mockResolvedValue({ written: false });
+    const markAttempted = makeMarkAttempted();
 
-    const result = await runBackfill({ loadCandidates, lookup, write });
+    const result = await runBackfill({ loadCandidates, lookup, write, markAttempted });
 
     expect(write).toHaveBeenCalledTimes(1);
+    expect(markAttempted).not.toHaveBeenCalled();
     expect(result.totals.scanned).toBe(1);
     expect(result.totals.raced).toBe(1);
     expect(result.totals.resolved).toBe(0);
@@ -105,12 +117,15 @@ describe('runBackfill', () => {
       .mockResolvedValueOnce({ kind: 'resolved', releaseId: 0 })
       .mockResolvedValueOnce({ kind: 'resolved', releaseId: 999001 });
     const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const markAttempted = makeMarkAttempted();
 
-    const result = await runBackfill({ loadCandidates, lookup, write });
+    const result = await runBackfill({ loadCandidates, lookup, write, markAttempted });
 
     // Sentinel candidate is skipped, second candidate proceeds to write.
     expect(write).toHaveBeenCalledTimes(1);
     expect(write).toHaveBeenCalledWith(8, 999001);
+    expect(markAttempted).toHaveBeenCalledTimes(1);
+    expect(markAttempted).toHaveBeenCalledWith(7);
     expect(result.totals.scanned).toBe(2);
     expect(result.totals.sentinel_rejected).toBe(1);
     expect(result.totals.resolved).toBe(1);
@@ -120,10 +135,13 @@ describe('runBackfill', () => {
     const loadCandidates = makeLoadCandidates([{ id: 7, artist_name: 'Juana Molina', album_title: 'DOGA' }]);
     const lookup = jest.fn<LookupFn>().mockResolvedValue({ kind: 'resolved', releaseId: -1 });
     const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const markAttempted = makeMarkAttempted();
 
-    const result = await runBackfill({ loadCandidates, lookup, write });
+    const result = await runBackfill({ loadCandidates, lookup, write, markAttempted });
 
     expect(write).not.toHaveBeenCalled();
+    expect(markAttempted).toHaveBeenCalledTimes(1);
+    expect(markAttempted).toHaveBeenCalledWith(7);
     expect(result.totals.sentinel_rejected).toBe(1);
     expect(result.totals.resolved).toBe(0);
   });
@@ -134,10 +152,12 @@ describe('runBackfill', () => {
     ]);
     const lookup = jest.fn<LookupFn>().mockResolvedValue({ kind: 'resolved', releaseId: 999001 });
     const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const markAttempted = makeMarkAttempted();
 
-    const result = await runBackfill({ loadCandidates, lookup, write, dryRun: true });
+    const result = await runBackfill({ loadCandidates, lookup, write, markAttempted, dryRun: true });
 
     expect(write).not.toHaveBeenCalled();
+    expect(markAttempted).not.toHaveBeenCalled();
     expect(result.totals.scanned).toBe(1);
     expect(result.totals.resolved_dry).toBe(1);
     expect(result.totals.resolved).toBe(0);
@@ -156,11 +176,14 @@ describe('runBackfill', () => {
       .mockResolvedValueOnce({ kind: 'trust_rejected', searchType: 'alternative' })
       .mockResolvedValueOnce({ kind: 'resolved', releaseId: 999001 });
     const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const markAttempted = makeMarkAttempted();
 
-    const result = await runBackfill({ loadCandidates, lookup, write });
+    const result = await runBackfill({ loadCandidates, lookup, write, markAttempted });
 
     expect(write).toHaveBeenCalledTimes(1);
     expect(write).toHaveBeenCalledWith(8, 999001);
+    expect(markAttempted).toHaveBeenCalledTimes(1);
+    expect(markAttempted).toHaveBeenCalledWith(21529);
     expect(result.totals.scanned).toBe(2);
     expect(result.totals.trust_rejected).toBe(1);
     expect(result.totals.resolved).toBe(1);
@@ -185,8 +208,9 @@ describe('runBackfill', () => {
       .mockRejectedValueOnce(new Error('LML socket timeout')) // lml_error
       .mockResolvedValueOnce({ kind: 'resolved', releaseId: 222 }); // raced
     const write = jest.fn<WriteFn>().mockResolvedValueOnce({ written: true }).mockResolvedValueOnce({ written: false });
+    const markAttempted = makeMarkAttempted();
 
-    const { totals } = await runBackfill({ loadCandidates, lookup, write });
+    const { totals } = await runBackfill({ loadCandidates, lookup, write, markAttempted });
 
     expect(totals).toEqual({
       scanned: 6,
@@ -207,5 +231,19 @@ describe('runBackfill', () => {
         totals.sentinel_rejected +
         totals.trust_rejected
     );
+  });
+
+  test('attempt-marker race reports raced instead of a no-match bucket', async () => {
+    const loadCandidates = makeLoadCandidates([{ id: 99, artist_name: 'Chuquimamani-Condori', album_title: 'Edits' }]);
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ kind: 'no_match' });
+    const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const markAttempted = jest.fn<MarkAttemptedFn>().mockResolvedValue({ written: false });
+
+    const result = await runBackfill({ loadCandidates, lookup, write, markAttempted });
+
+    expect(markAttempted).toHaveBeenCalledWith(99);
+    expect(result.totals.scanned).toBe(1);
+    expect(result.totals.raced).toBe(1);
+    expect(result.totals.unresolved).toBe(0);
   });
 });
