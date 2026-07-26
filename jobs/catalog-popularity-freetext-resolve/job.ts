@@ -632,8 +632,11 @@ export interface ResolveOptions {
   readTimeoutMs: number;
   liveActivityLookbackSeconds: number;
   liveActivityPauseMs: number;
-  /** "HH:MM" 24-hour UTC wall-clock stop-by bound (BS#1814). */
-  stopByUtc: string;
+  /** "HH:MM" 24-hour UTC wall-clock stop-by bound (BS#1814), or `null` when the
+   * bound is disabled — an explicitly-empty env var requests an unbounded,
+   * supervised full-drain (capped only by `maxPairsPerRun` + the cooperative
+   * pause). An UNSET env var resolves to the default bound, not `null`. */
+  stopByUtc: string | null;
   /** Injectable clock so tests can drive the deadline deterministically
    * without fake timers. Defaults to the real `Date.now`. */
   now: () => number;
@@ -643,10 +646,23 @@ export interface ResolveOptions {
 export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: string[] = process.argv): ResolveOptions => {
   const ctx = { context: JOB_NAME };
   const rawStopByUtc = env[STOP_BY_UTC_ENV];
-  const stopByUtc = rawStopByUtc === undefined || rawStopByUtc.trim() === '' ? STOP_BY_UTC_DEFAULT : rawStopByUtc;
-  // Validate eagerly (fail fast at option-resolution time), same posture as
-  // the `require*Int` helpers throwing on a malformed value.
-  parseStopByUtc(stopByUtc, STOP_BY_UTC_ENV);
+  // UNSET (undefined) → default bound; an EXPLICITLY-empty / whitespace-only
+  // value → disabled (`null`, an unbounded supervised full-drain); any other
+  // value is taken as the bound and validated eagerly below. The unset-vs-empty
+  // distinction is deliberate: an operator must opt into unbounded by clearing
+  // the var, and a stray whitespace value can't silently re-arm the default.
+  let stopByUtc: string | null;
+  if (rawStopByUtc === undefined) {
+    stopByUtc = STOP_BY_UTC_DEFAULT;
+  } else if (rawStopByUtc.trim() === '') {
+    stopByUtc = null;
+  } else {
+    stopByUtc = rawStopByUtc;
+  }
+  // Validate eagerly (fail fast at option-resolution time), same posture as the
+  // `require*Int` helpers throwing on a malformed value. A disabled (`null`)
+  // bound has nothing to validate.
+  if (stopByUtc !== null) parseStopByUtc(stopByUtc, STOP_BY_UTC_ENV);
   return {
     batchSize: requirePositiveInt(env[BULK_BATCH_SIZE_ENV], BULK_BATCH_SIZE_ENV, BULK_BATCH_SIZE_DEFAULT, ctx),
     ratePerMin: requirePositiveInt(env[BULK_RATE_PER_MIN_ENV], BULK_RATE_PER_MIN_ENV, BULK_RATE_PER_MIN_DEFAULT, ctx),
@@ -701,7 +717,10 @@ const stopByReachedAtStartupSummary = (): ResolveSummary => ({
 
 export const runResolve = async (options: ResolveOptions): Promise<ResolveSummary> => {
   const nowFn = options.now ?? Date.now;
-  const deadlineMs = computeStopByDeadlineMs(nowFn(), options.stopByUtc);
+  // A disabled bound (`stopByUtc === null`) resolves to an Infinite deadline
+  // that no `isPastStopBy` check can ever reach, so every deadline guard below
+  // is a no-op and the run is unbounded (the supervised full-drain path).
+  const deadlineMs = options.stopByUtc === null ? Infinity : computeStopByDeadlineMs(nowFn(), options.stopByUtc);
 
   log('info', 'started', `${JOB_NAME} starting`, {
     batch_size: options.batchSize,
@@ -709,8 +728,8 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
     budget_ms: options.budgetMs,
     no_match_ttl_days: options.noMatchTtlDays,
     max_pairs_per_run: options.maxPairsPerRun,
-    stop_by_utc: options.stopByUtc,
-    stop_by_deadline: new Date(deadlineMs).toISOString(),
+    stop_by_utc: options.stopByUtc ?? 'disabled',
+    stop_by_deadline: Number.isFinite(deadlineMs) ? new Date(deadlineMs).toISOString() : null,
     dry_run: options.dryRun,
   });
 

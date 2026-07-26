@@ -39,6 +39,8 @@ The naive arithmetic at the pre-BS#1814 defaults (`MAX_PAIRS_PER_RUN=5000`, `BUL
 
 This is a **same-day-only** deadline — it deliberately does NOT roll forward to tomorrow. The nightly `04:45 UTC` run sees a deadline hours in its own future and proceeds normally; a run launched AFTER the stop hour (a manual catch-up, or a misfired daytime launch) sees a deadline already in the past and no-ops immediately rather than computing "the next `11:00`" and running all day. See `computeStopByDeadlineMs`/`isPastStopBy` in `job.ts`.
 
+**Disabling the bound (supervised full-drain only).** Setting `FREETEXT_RESOLVE_STOP_BY_UTC=` to an explicitly-empty value disables the deadline entirely, so the run drains the whole eligible backlog (capped only by `MAX_PAIRS_PER_RUN` and the cooperative pause) with no window cutoff. This is the escape hatch for a supervised manual catch-up — never for the scheduled cron. Note the deliberate unset-vs-empty distinction: an **unset** var falls back to the default `11:00` bound (the cron stays protected even if the var is dropped from the deploy config); only an **explicitly-empty** var opts into unbounded, and a whitespace-only value counts as empty so a stray space can't silently re-arm the default.
+
 The run's summary and terminal log line record why it stopped: `stopReason: 'backlog_drained'` (every eligible pair for this run was processed before the deadline) vs `'stop_by_reached'` (the deadline cut the run short) — so a future overrun is visible in the logs instead of silently bleeding into daytime.
 
 ### Strengthened cooperative pause (BS#1814)
@@ -63,26 +65,28 @@ docker run --rm --env-file .env <image> --dry-run
 
 # 4. Run for real. At defaults (batch=5, rate=1/min ≈ 5 pairs/min, cap 5000/run)
 #    one nightly run drains up to 5000 eligible pairs. For a catch-up backfill
-#    of the full long tail, bump FREETEXT_RESOLVE_BULK_RATE_PER_MIN and
-#    FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN=0 (disable the cap).
+#    of the full long tail, bump FREETEXT_RESOLVE_BULK_RATE_PER_MIN,
+#    FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN=0 (disable the cap), and — for a
+#    supervised drain that must run past the overnight window —
+#    FREETEXT_RESOLVE_STOP_BY_UTC= (empty, disables the wall-clock stop-by).
 docker run --rm --env-file .env <image> 2>&1 | tee /tmp/freetext-resolve.log
 ```
 
 ## Env knobs
 
-| Variable                             | Default                   | Meaning                                                                                                                                                                    |
-| ------------------------------------ | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `FREETEXT_RESOLVE_BULK_BATCH_SIZE`   | `5`                       | Items per LML bulk request. LML caps at 100. Raising this scales the per-batch fetch timeout.                                                                              |
-| `FREETEXT_RESOLVE_BULK_RATE_PER_MIN` | `1`                       | Batches per minute. At the default batch size, 1/min ≈ 5 pairs/min sustained.                                                                                              |
-| `FREETEXT_RESOLVE_BULK_BUDGET_MS`    | `25000`                   | Per-item budget forwarded to LML as `X-Caller-Budget-Ms`. NOT the batch fetch timeout.                                                                                     |
-| `FREETEXT_RESOLVE_NO_MATCH_TTL_DAYS` | `30`                      | A no-match pair is re-attempted once its `attempt_at` is older than this.                                                                                                  |
-| `FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN` | `5000`                    | Cap on distinct eligible pairs processed per run. `0` disables the cap (drain everything eligible).                                                                        |
-| `FREETEXT_RESOLVE_READ_TIMEOUT_MS`   | `300000` (5min)           | `SET LOCAL statement_timeout` for the DISTINCT enumerate scan.                                                                                                             |
-| `FREETEXT_RESOLVE_STOP_BY_UTC`       | `11:00`                   | BS#1814 absolute UTC wall-clock stop-by ("HH:MM", 24h, zero-padded). Same-day only — never rolls to tomorrow. Checked before every batch and around the cooperative pause. |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`     | `300` (BS#1814, was `60`) | Cooperative-pause lookback window; `0` disables. Deadline-aware (BS#1814): won't spin past `FREETEXT_RESOLVE_STOP_BY_UTC`.                                                 |
-| `LIBRARY_METADATA_URL`               | (required)                | LML base URL.                                                                                                                                                              |
-| `LML_API_KEY`                        | (required in prod)        | LML bearer token.                                                                                                                                                          |
-| `DATABASE_URL`                       | (required)                | Postgres connection string.                                                                                                                                                |
+| Variable                             | Default                   | Meaning                                                                                                                                                                                                                                                                                  |
+| ------------------------------------ | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FREETEXT_RESOLVE_BULK_BATCH_SIZE`   | `5`                       | Items per LML bulk request. LML caps at 100. Raising this scales the per-batch fetch timeout.                                                                                                                                                                                            |
+| `FREETEXT_RESOLVE_BULK_RATE_PER_MIN` | `1`                       | Batches per minute. At the default batch size, 1/min ≈ 5 pairs/min sustained.                                                                                                                                                                                                            |
+| `FREETEXT_RESOLVE_BULK_BUDGET_MS`    | `25000`                   | Per-item budget forwarded to LML as `X-Caller-Budget-Ms`. NOT the batch fetch timeout.                                                                                                                                                                                                   |
+| `FREETEXT_RESOLVE_NO_MATCH_TTL_DAYS` | `30`                      | A no-match pair is re-attempted once its `attempt_at` is older than this.                                                                                                                                                                                                                |
+| `FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN` | `5000`                    | Cap on distinct eligible pairs processed per run. `0` disables the cap (drain everything eligible).                                                                                                                                                                                      |
+| `FREETEXT_RESOLVE_READ_TIMEOUT_MS`   | `300000` (5min)           | `SET LOCAL statement_timeout` for the DISTINCT enumerate scan.                                                                                                                                                                                                                           |
+| `FREETEXT_RESOLVE_STOP_BY_UTC`       | `11:00`                   | BS#1814 absolute UTC wall-clock stop-by ("HH:MM", 24h, zero-padded). Same-day only — never rolls to tomorrow. Checked before every batch and around the cooperative pause. Explicitly empty (`=`) disables the bound (unbounded supervised full-drain); unset falls back to the default. |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`     | `300` (BS#1814, was `60`) | Cooperative-pause lookback window; `0` disables. Deadline-aware (BS#1814): won't spin past `FREETEXT_RESOLVE_STOP_BY_UTC`.                                                                                                                                                               |
+| `LIBRARY_METADATA_URL`               | (required)                | LML base URL.                                                                                                                                                                                                                                                                            |
+| `LML_API_KEY`                        | (required in prod)        | LML bearer token.                                                                                                                                                                                                                                                                        |
+| `DATABASE_URL`                       | (required)                | Postgres connection string.                                                                                                                                                                                                                                                              |
 
 ## Acceptance verification
 
