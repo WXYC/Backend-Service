@@ -36,7 +36,7 @@ docker run --rm --env-file .env $AWS_ECR_URI/rotation-release-id-backfill:latest
 docker run --rm --env-file .env -e DRY_RUN=true $AWS_ECR_URI/rotation-release-id-backfill:latest
 ```
 
-`DRY_RUN=true` runs the LML lookups but skips every UPDATE, including marker-only attempts. The counters surface `resolved_dry` instead of `resolved` for trusted matches. Useful for confirming the candidate set is what you expect before committing.
+`DRY_RUN` (case-insensitive `true`/`1`) runs the LML lookups but skips every UPDATE, including marker-only attempts. The counters surface `resolved_dry` instead of `resolved` for trusted matches. Useful for confirming the candidate set is what you expect before committing.
 
 ## Env
 
@@ -74,13 +74,14 @@ JSON log line emitted on `step: finished`:
   "raced": 1,
   "sentinel_rejected": 0,
   "trust_rejected": 8,
+  "db_error": 0,
   "repo": "Backend-Service",
   "tool": "rotation-release-id-backfill",
   "run_id": "<uuid>"
 }
 ```
 
-Invariant: `scanned == resolved + resolved_dry + unresolved + lml_error + raced + sentinel_rejected + trust_rejected`.
+Invariant: `scanned == resolved + resolved_dry + unresolved + lml_error + raced + sentinel_rejected + trust_rejected + db_error`.
 
 | Counter             | Meaning                                                                                                                                                                                                                                    |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -88,10 +89,11 @@ Invariant: `scanned == resolved + resolved_dry + unresolved + lml_error + raced 
 | `resolved`          | LML returned a positive release id on a `direct` match AND the UPDATE, including the attempt marker, landed cleanly                                                                                                                        |
 | `resolved_dry`      | LML returned a positive release id on a `direct` match; DRY_RUN suppressed the UPDATE                                                                                                                                                      |
 | `unresolved`        | LML returned no Discogs match (`response.results[0].artwork.release_id` was null); marker stamped so the TTL applies                                                                                                                       |
-| `lml_error`         | LML call threw (cold-cache timeout, network blip, etc.); marker stays NULL for next run                                                                                                                                                    |
+| `lml_error`         | LML call threw (cold-cache timeout, network blip, etc.) OR returned a `{timeout:true}` cascade-exhaustion body; marker stays NULL for next run so the transient row stays immediately retryable                                            |
 | `raced`             | UPDATE matched zero rows because a tubafrenzy paste or another resolver run won the race between candidate-select and update                                                                                                               |
 | `sentinel_rejected` | LML returned `<= 0` (cache pollution / upstream regression); pre-empted before release-id write per BS#1429 CHECK fence; marker stamped so the TTL applies                                                                                 |
 | `trust_rejected`    | LML returned a candidate id on a non-`direct` (or absent) `search_type` — an artist-fallback answer pointing at a **different album**; never persisted (BS#1516, the Yenbett→Tzenni recurrence BS#1515). Marker stamped so the TTL applies |
+| `db_error`          | The marker or release-id UPDATE threw (deadlock, connection reset, …); isolated to the row per BS#1820 review so the batch continues, marker stays NULL, row retried next tick                                                             |
 
 `trust_rejected` rows are candidates for LML-side match improvements (or the album has no Discogs release yet); `unresolved` rows need Discogs/catalog additions. Both re-enter the candidate set when `discogs_release_id_resolve_attempted_at` is older than `ROTATION_RELEASE_ID_NO_MATCH_TTL_DAYS`.
 

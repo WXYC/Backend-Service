@@ -45,21 +45,25 @@ const requireLmlConfigured = (): void => {
 };
 
 const resolveDryRun = (): boolean => {
-  const raw = process.env.DRY_RUN;
-  return raw === 'true' || raw === '1' || raw === 'TRUE';
+  const raw = process.env.DRY_RUN?.trim().toLowerCase();
+  return raw === 'true' || raw === '1';
 };
 
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
   const dryRun = resolveDryRun();
-  const noMatchTtlDays = requirePositiveInt(
-    process.env.ROTATION_RELEASE_ID_NO_MATCH_TTL_DAYS,
-    NO_MATCH_TTL_DAYS_ENV,
-    NO_MATCH_TTL_DAYS_DEFAULT,
-    { context: JOB_NAME }
-  );
   try {
     requireLmlConfigured();
+    // Parse the TTL inside the try so a misconfigured value (e.g. a
+    // non-integer, or `0` — requirePositiveInt rejects it) routes through the
+    // catch's Sentry capture + non-zero exit + the finally's connection/logger
+    // cleanup, rather than throwing before any of that is wired up.
+    const noMatchTtlDays = requirePositiveInt(
+      process.env.ROTATION_RELEASE_ID_NO_MATCH_TTL_DAYS,
+      NO_MATCH_TTL_DAYS_ENV,
+      NO_MATCH_TTL_DAYS_DEFAULT,
+      { context: JOB_NAME }
+    );
     log('info', 'init', `${JOB_NAME} initialized`, { dry_run: dryRun, no_match_ttl_days: noMatchTtlDays });
     const { totals } = await runBackfill({
       loadCandidates: () => loadCandidates(noMatchTtlDays),

@@ -24,6 +24,7 @@ import {
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
   LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
   checkLiveActivity as defaultCheckLiveActivity,
+  requireNonNegativeInt,
   type CheckLiveActivityFn,
 } from '@wxyc/database';
 
@@ -59,25 +60,22 @@ export type Totals = {
   raced: number;
   sentinel_rejected: number;
   trust_rejected: number;
+  db_error: number;
 };
 
 export type RunResult = { totals: Totals };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-const envNonNegativeInt = (raw: string | undefined, fallback: number): number => {
-  if (raw === undefined || raw === '') return fallback;
-  const parsed = Number(raw);
-  if (Number.isFinite(parsed) && parsed >= 0) return parsed;
-  return fallback;
-};
-
 export const resolveLiveActivityLookback = (
   raw: string | undefined = process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS
-): number => envNonNegativeInt(raw, LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT);
+): number =>
+  requireNonNegativeInt(raw, 'LIVE_ACTIVITY_LOOKBACK_SECONDS', LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT, {
+    note: 'Use 0 to disable the cooperative pause.',
+  });
 
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
-  envNonNegativeInt(raw, LIVE_ACTIVITY_PAUSE_MS_DEFAULT);
+  requireNonNegativeInt(raw, 'LIVE_ACTIVITY_PAUSE_MS', LIVE_ACTIVITY_PAUSE_MS_DEFAULT, { unit: 'ms' });
 
 type AttemptBucket = 'unresolved' | 'sentinel_rejected' | 'trust_rejected';
 
@@ -115,6 +113,7 @@ export const runBackfill = async (deps: {
     raced: 0,
     sentinel_rejected: 0,
     trust_rejected: 0,
+    db_error: 0,
   };
 
   const liveActivityLookbackSeconds = deps.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
@@ -126,7 +125,17 @@ export const runBackfill = async (deps: {
       incrementAttemptBucket(totals, bucket);
       return;
     }
-    const { written } = await deps.markAttempted(rotationId);
+    let written: boolean;
+    try {
+      ({ written } = await deps.markAttempted(rotationId));
+    } catch {
+      // Isolate a transient DB failure to this row (deadlock, connection
+      // reset, …) instead of throwing out of the loop and abandoning every
+      // remaining candidate. The marker stays NULL, so the row is retried on
+      // the next cron tick — same "stay retryable" guarantee as `lml_error`.
+      totals.db_error += 1;
+      return;
+    }
     if (written) {
       incrementAttemptBucket(totals, bucket);
     } else {
@@ -183,7 +192,16 @@ export const runBackfill = async (deps: {
       totals.resolved_dry += 1;
       continue;
     }
-    const { written } = await deps.write(candidate.id, releaseId);
+    let written: boolean;
+    try {
+      ({ written } = await deps.write(candidate.id, releaseId));
+    } catch {
+      // Isolate a transient DB failure to this row rather than aborting the
+      // batch. The row stays `discogs_release_id IS NULL` and unmarked, so it
+      // is retried on the next cron tick.
+      totals.db_error += 1;
+      continue;
+    }
     if (written) {
       totals.resolved += 1;
     } else {

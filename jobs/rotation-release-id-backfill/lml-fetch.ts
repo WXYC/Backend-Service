@@ -70,7 +70,18 @@ export const lookupReleaseId = async (artist: string, album: string): Promise<Lo
     timeoutMs: TIMEOUT_MS,
   });
   const releaseId = response.results?.[0]?.artwork?.release_id ?? null;
-  if (releaseId === null) return { kind: 'no_match' };
+  if (releaseId === null) {
+    // Distinguish a transient LML timeout body (`{timeout:true, results:[]}`,
+    // e.g. LML#370 cascade-exhaustion) from a definitive no-match. A timeout
+    // means LML couldn't finish resolving — NOT that no release exists. Throw
+    // so the orchestrator counts it as `lml_error` and leaves the row's
+    // `discogs_release_id_resolve_attempted_at` marker NULL (retryable next
+    // tick) instead of stamping it behind the no-match TTL for up to 30 days.
+    if (response.timeout) {
+      throw new Error('LML lookup returned a timeout body; treating as transient so the row stays retryable');
+    }
+    return { kind: 'no_match' };
+  }
   // BS#1516: only a `direct` match may be persisted. Non-direct
   // `search_type` values are artist-fallback answers — `results[0]` is a
   // DIFFERENT album by the same artist (the Yenbett→Tzenni recurrence,
