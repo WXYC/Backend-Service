@@ -720,6 +720,17 @@ describe('resolveOptions', () => {
     expect(() => resolveOptions({ ...stripEnv(process.env), [STOP_BY_UTC_ENV]: '9:00' }, [])).toThrow();
   });
 
+  it('treats an explicitly-empty FREETEXT_RESOLVE_STOP_BY_UTC as disabled (null), distinct from unset', () => {
+    // Escape hatch ported from PR #1818: UNSET resolves to the default bound
+    // (covered by "uses defaults when env is unset" above), but an operator who
+    // EXPLICITLY empties the var is asking for an unbounded, supervised
+    // full-drain, so it resolves to `null` (no deadline) — not the default.
+    // Whitespace-only counts as empty (trimmed) so a stray space can't silently
+    // re-arm the bound.
+    expect(resolveOptions({ ...stripEnv(process.env), [STOP_BY_UTC_ENV]: '' }, []).stopByUtc).toBeNull();
+    expect(resolveOptions({ ...stripEnv(process.env), [STOP_BY_UTC_ENV]: '   ' }, []).stopByUtc).toBeNull();
+  });
+
   it('detects --dry-run', () => {
     expect(resolveOptions(stripEnv(process.env), ['node', 'job.js', '--dry-run']).dryRun).toBe(true);
   });
@@ -1019,5 +1030,29 @@ describe('runResolve — absolute stop-by deadline (BS#1814)', () => {
     expect(mockBulkLookupMetadata).not.toHaveBeenCalled();
     expect(summary.stopReason).toBe('stop_by_reached');
     expect(summary.batchesRun).toBe(0);
+  });
+
+  it('runs unbounded when stopByUtc is null (disabled) — a run past the would-be stop hour still drains, not no-ops', async () => {
+    // The empty-var escape hatch: with the bound disabled, even a run at
+    // 20:00 UTC — hours past any HH:MM stop hour — enumerates and processes
+    // normally (deadline is Infinity, so no isPastStopBy check ever trips) and
+    // reports backlog_drained. Guards against a null leaking into
+    // computeStopByDeadlineMs (which would throw) or a stray no-op.
+    const mock = db.execute as jest.Mock;
+    for (const v of enumerateResult([{ artist_name: 'J Dilla', album_title: 'Donuts' }])) {
+      mock.mockResolvedValueOnce(v);
+    }
+    mock.mockResolvedValueOnce([]); // loadSkipKeys empty
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'no_match', lookup: { results: [] } }],
+    });
+
+    const now = jest.fn<() => number>().mockReturnValue(Date.UTC(2026, 6, 25, 20, 0, 0));
+    const summary = await runResolve(baseOptions({ batchSize: 5, stopByUtc: null, now }));
+
+    expect(mockBulkLookupMetadata).toHaveBeenCalledTimes(1);
+    expect(summary.stopReason).toBe('backlog_drained');
+    expect(summary.batches).toBe(1);
+    expect(summary.batchesRun).toBe(1);
   });
 });
