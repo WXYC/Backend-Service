@@ -14,6 +14,8 @@
  */
 import { jest } from '@jest/globals';
 
+import { type CheckLiveActivityFn } from '@wxyc/database';
+
 import {
   runBackfill,
   type Candidate,
@@ -221,6 +223,7 @@ describe('runBackfill', () => {
       raced: 1,
       sentinel_rejected: 1,
       trust_rejected: 1,
+      db_error: 0,
     });
     expect(totals.scanned).toBe(
       totals.resolved +
@@ -229,7 +232,8 @@ describe('runBackfill', () => {
         totals.lml_error +
         totals.raced +
         totals.sentinel_rejected +
-        totals.trust_rejected
+        totals.trust_rejected +
+        totals.db_error
     );
   });
 
@@ -245,5 +249,90 @@ describe('runBackfill', () => {
     expect(result.totals.scanned).toBe(1);
     expect(result.totals.raced).toBe(1);
     expect(result.totals.unresolved).toBe(0);
+  });
+
+  test('a marker UPDATE that throws is isolated as db_error and the batch continues', async () => {
+    // A transient DB failure (deadlock / connection reset) on one row must
+    // not abandon the remaining candidates — the per-row isolation mirrors
+    // the `lml_error` catch so the row is retried next tick.
+    const loadCandidates = makeLoadCandidates([
+      { id: 1, artist_name: 'Juana Molina', album_title: 'DOGA' },
+      { id: 2, artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again' },
+    ]);
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ kind: 'no_match' });
+    const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const markAttempted = jest
+      .fn<MarkAttemptedFn>()
+      .mockRejectedValueOnce(new Error('deadlock detected'))
+      .mockResolvedValueOnce({ written: true });
+
+    const result = await runBackfill({ loadCandidates, lookup, write, markAttempted });
+
+    expect(markAttempted).toHaveBeenCalledTimes(2); // second row still processed
+    expect(result.totals.scanned).toBe(2);
+    expect(result.totals.db_error).toBe(1);
+    expect(result.totals.unresolved).toBe(1);
+  });
+
+  test('a release-id UPDATE that throws is isolated as db_error, not resolved', async () => {
+    const loadCandidates = makeLoadCandidates([{ id: 1, artist_name: 'Stereolab', album_title: 'Dots and Loops' }]);
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ kind: 'resolved', releaseId: 999 });
+    const write = jest.fn<WriteFn>().mockRejectedValue(new Error('connection reset'));
+    const markAttempted = makeMarkAttempted();
+
+    const result = await runBackfill({ loadCandidates, lookup, write, markAttempted });
+
+    expect(result.totals.scanned).toBe(1);
+    expect(result.totals.db_error).toBe(1);
+    expect(result.totals.resolved).toBe(0);
+  });
+
+  test('cooperative pause defers each row until live activity clears', async () => {
+    const loadCandidates = makeLoadCandidates([{ id: 5, artist_name: 'Stereolab', album_title: 'Dots and Loops' }]);
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ kind: 'resolved', releaseId: 12345 });
+    const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const markAttempted = makeMarkAttempted();
+    const checkLiveActivity = jest
+      .fn<CheckLiveActivityFn>()
+      .mockResolvedValueOnce(true) // DJ active: pause
+      .mockResolvedValueOnce(true) // still active: pause again
+      .mockResolvedValueOnce(false); // quiet: proceed
+    const onLivePause = jest.fn();
+
+    const result = await runBackfill({
+      loadCandidates,
+      lookup,
+      write,
+      markAttempted,
+      liveActivityLookbackSeconds: 60,
+      liveActivityPauseMs: 0, // no real sleep in the unit test
+      checkLiveActivity,
+      onLivePause,
+    });
+
+    expect(checkLiveActivity).toHaveBeenCalledTimes(3);
+    expect(checkLiveActivity).toHaveBeenCalledWith(60);
+    expect(onLivePause).toHaveBeenCalledTimes(2);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(result.totals.resolved).toBe(1);
+  });
+
+  test('cooperative pause probe is skipped when lookback is 0', async () => {
+    const loadCandidates = makeLoadCandidates([{ id: 6, artist_name: 'Cat Power', album_title: 'Moon Pix' }]);
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ kind: 'no_match' });
+    const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const markAttempted = makeMarkAttempted();
+    const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(true);
+
+    await runBackfill({
+      loadCandidates,
+      lookup,
+      write,
+      markAttempted,
+      liveActivityLookbackSeconds: 0,
+      checkLiveActivity,
+    });
+
+    expect(checkLiveActivity).not.toHaveBeenCalled();
   });
 });

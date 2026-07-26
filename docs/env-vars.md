@@ -146,7 +146,7 @@ The recurring drain processes rows in **play-descending artist priority**, not `
 Recurring cron for BS#1813 / BS#1029. Reuses `BACKFILL_LML_*` (above), `LIVE_ACTIVITY_LOOKBACK_SECONDS`, and `LIVE_ACTIVITY_PAUSE_MS`, and adds:
 
 - `ROTATION_RELEASE_ID_NO_MATCH_TTL_DAYS` (default `30`) — Rows with NULL `discogs_release_id` and a stamped `discogs_release_id_resolve_attempted_at` are skipped until this window expires. Rows whose LML call threw keep the marker NULL and retry on the next cron tick.
-- `DRY_RUN` (default unset / `false`) — when `'true'`, `'TRUE'`, or `'1'`, the orchestrator skips every UPDATE, including marker-only attempts, and increments `rows_resolved_dry` instead of `rows_resolved` for trusted matches. Useful for confirming the candidate set before a real run; harmless to forget — the `discogs_release_id IS NULL` SELECT/WHERE predicate is idempotent across reruns.
+- `DRY_RUN` (default unset / `false`) — when case-insensitively `'true'` or `'1'` (leading/trailing whitespace trimmed), the orchestrator skips every UPDATE, including marker-only attempts, and increments `rows_resolved_dry` instead of `rows_resolved` for trusted matches. Useful for confirming the candidate set before a real run; harmless to forget — the `discogs_release_id IS NULL` SELECT/WHERE predicate is idempotent across reruns.
 
 ### Rotation artist backfill (`jobs/rotation-artist-backfill`)
 
