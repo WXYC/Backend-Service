@@ -241,7 +241,27 @@ describe('library.controller', () => {
   });
 
   describe('searchForAlbum', () => {
-    it('returns enriched results when enrichment finishes within the budget', async () => {
+    it('returns local search results without waiting for enrichment to resolve', async () => {
+      const searchResults = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: null }];
+      mockFuzzySearchLibrary.mockResolvedValue(searchResults);
+      // Enrichment that never resolves — proves the response can't be waiting on it.
+      mockEnrichWithArtwork.mockReturnValue(new Promise<unknown[]>(() => undefined));
+
+      const req = { query: { artist_name: 'Autechre' } } as unknown as Request;
+      const res = mockResponse();
+
+      const start = Date.now();
+      await searchForAlbum(req, res, next);
+      const elapsed = Date.now() - start;
+
+      expect(elapsed).toBeLessThan(50);
+      expect(mockFuzzySearchLibrary).toHaveBeenCalledWith('Autechre', undefined, undefined, undefined);
+      expect(mockEnrichWithArtwork).toHaveBeenCalledWith(searchResults);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(searchResults);
+    });
+
+    it('excludes enrichment output from the response even when enrichment resolves immediately', async () => {
       const searchResults = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: null }];
       const enrichedResults = [
         { id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: 'https://i.discogs.com/confield.jpg' },
@@ -254,39 +274,13 @@ describe('library.controller', () => {
 
       await searchForAlbum(req, res, next);
 
-      expect(mockFuzzySearchLibrary).toHaveBeenCalledWith('Autechre', undefined, undefined, undefined);
+      // Fire-and-forget: enrichment is still triggered (and still writes
+      // artwork_url back to the DB for future searches to benefit from), but
+      // the response is built synchronously from the raw search rows before
+      // the detached promise can settle, so it never reflects enrichedResults.
       expect(mockEnrichWithArtwork).toHaveBeenCalledWith(searchResults);
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith(enrichedResults);
-    });
-
-    it('returns raw results without waiting when enrichment exceeds the budget', async () => {
-      const searchResults = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: null }];
-      mockFuzzySearchLibrary.mockResolvedValue(searchResults);
-      // Enrichment that never resolves within any reasonable budget.
-      mockEnrichWithArtwork.mockReturnValue(new Promise<unknown[]>(() => undefined));
-
-      const previous = process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS;
-      process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS = '20';
-      jest.resetModules();
-      const { searchForAlbum: searchWithTightBudget } =
-        await import('../../../apps/backend/controllers/library.controller');
-
-      const req = { query: { artist_name: 'Autechre' } } as unknown as Request;
-      const res = mockResponse();
-
-      const start = Date.now();
-      await searchWithTightBudget(req, res, next);
-      const elapsed = Date.now() - start;
-
-      try {
-        expect(elapsed).toBeLessThan(500);
-        expect(res.status).toHaveBeenCalledWith(200);
-        expect(res.json).toHaveBeenCalledWith(searchResults);
-      } finally {
-        if (previous === undefined) delete process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS;
-        else process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS = previous;
-      }
+      expect(res.json).toHaveBeenCalledWith(searchResults);
     });
 
     it('returns 400 when no query parameters are supplied', async () => {
@@ -331,35 +325,20 @@ describe('library.controller', () => {
       const searchResults = [{ id: 1, artist_name: 'Autechre', album_title: 'Confield', artwork_url: null }];
       mockFuzzySearchLibrary.mockResolvedValue(searchResults);
       const enrichError = new Error('enrichment failed');
-      // Reject *after* the budget would naturally fire — the budget should win
-      // and the rejection should be swallowed.
-      mockEnrichWithArtwork.mockReturnValue(
-        new Promise<unknown[]>((_, reject) => setTimeout(() => reject(enrichError), 500))
-      );
-
-      const previous = process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS;
-      // Budget << reject delay; 50/500/750ms gives ~10x headroom over the
-      // previous 5/50/75ms shape so CI runners under load don't race-invert
-      // and resolve the rejection before the budget fires.
-      process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS = '50';
-      jest.resetModules();
-      const { searchForAlbum: searchWithTightBudget } =
-        await import('../../../apps/backend/controllers/library.controller');
+      // Rejects on the next microtask — well after the handler has already
+      // sent the response, since enrichment is detached and never awaited.
+      mockEnrichWithArtwork.mockReturnValue(Promise.reject(enrichError));
 
       const req = { query: { artist_name: 'Autechre' } } as unknown as Request;
       const res = mockResponse();
 
-      try {
-        await expect(searchWithTightBudget(req, res, next)).resolves.toBeUndefined();
-        expect(res.status).toHaveBeenCalledWith(200);
-        expect(res.json).toHaveBeenCalledWith(searchResults);
-        // Give the late rejection time to settle into the catch handler so the
-        // assertion below isn't subject to a process-level unhandledRejection.
-        await new Promise((resolve) => setTimeout(resolve, 750));
-      } finally {
-        if (previous === undefined) delete process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS;
-        else process.env.LIBRARY_SEARCH_ENRICHMENT_BUDGET_MS = previous;
-      }
+      await expect(searchForAlbum(req, res, next)).resolves.toBeUndefined();
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(searchResults);
+      // Give the detached rejection time to settle into the controller's
+      // `.catch` so the assertion above isn't subject to a process-level
+      // unhandledRejection surfacing after this test completes.
+      await new Promise((resolve) => setTimeout(resolve, 10));
     });
   });
 

@@ -1918,7 +1918,7 @@ describe('library.service', () => {
 
       expect(enriched[0].artwork_url).toBe('https://i.discogs.com/confield.jpg');
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
-        budgetMs: 5000,
+        budgetMs: 2000,
         caller: 'library-enrich-artwork',
         requireSearchType: 'direct',
       });
@@ -2010,7 +2010,7 @@ describe('library.service', () => {
       // Only one LML call (for LP5, not Confield)
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5', undefined, {
-        budgetMs: 5000,
+        budgetMs: 2000,
         caller: 'library-enrich-artwork',
         requireSearchType: 'direct',
       });
