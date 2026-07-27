@@ -232,6 +232,12 @@ The album-reviews ETL (`jobs/album-reviews-etl/`) mirrors the "Album Review Resp
 - `GOOGLE_SERVICE_ACCOUNT_JSON_B64` — Base64 of the service account's downloaded JSON key file (`base64 -i key.json`). Required. Base64 because the key JSON is multi-line and must survive the single-line `KEY=VALUE` constraint of the EC2 `.env` and the set-ec2-env-var workflow. Must decode to JSON containing `client_email` and `private_key`.
 - `DRY_RUN` — Locked truthy values: `true`, `1` (case-insensitive). When set, the run fetches + maps + evaluates the run guards but skips every UPSERT and the link pass, emitting a single locked-schema JSON report line on stdout (see `jobs/album-reviews-etl/README.md`). Harmless to forget — the UPSERT is idempotent across reruns.
 
+The album-critic-reviews ETL (`jobs/album-critic-reviews-etl/`) mirrors the `manifest-latest` release published by the private `WXYC/research-data` repo into `album_critic_reviews` weekly (BS#1830, ADR 0012). No SSH tunnel, no sync-notify, no cooperative pause (writes only its own table, mirroring the `album-reviews-etl` donor's rationale). Matches each manifest item to a linked library album via `resolveLinkedAlbumId` (`@wxyc/database`), then extracts a <=300-char attributed snippet with Haiku for new items only.
+
+- `RESEARCH_DATA_TOKEN` — Read-only token for the private `WXYC/research-data` repo (a fine-grained PAT with `Contents: Read-only`, or a classic PAT with the `repo` scope), used to fetch the `manifest-latest` release's `manifest.jsonl.gz` asset via the GitHub REST API. Required always — even a `DRY_RUN` needs the real manifest to validate against.
+- `ANTHROPIC_API_KEY` — Required for a non-`DRY_RUN` run (Haiku snippet extraction, `claude-haiku-4-5-20251001`). Not required under `DRY_RUN`, which makes zero LLM calls by design (the anti-join + dry-run short-circuit both precede extraction).
+- `DRY_RUN` — Locked truthy values: `true`, `1` (case-insensitive). Runs fetch + parse + match + dedup + anti-join and evaluates the run guards, but skips every Haiku call and every UPSERT, emitting a single locked-schema JSON report line on stdout (see `jobs/album-critic-reviews-etl/README.md`). Harmless to forget — the UPSERT is idempotent across reruns, and the anti-join means a repeated real run makes zero LLM calls for already-seeded pairs anyway.
+
 ### One-shot backfill jobs
 
 One-shot backfill jobs under `jobs/*-backfill/` run via `Manual Build & Deploy` and `docker run`. They share a small set of operator knobs:
