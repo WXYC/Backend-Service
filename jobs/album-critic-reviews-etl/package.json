@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/album-critic-reviews-etl",
+  "cron-schedule": "10 7 * * 0",
+  "version": "1.0.0",
+  "description": "WXYC weekly pull ETL (BS#1830, album-critic-reviews slice / ADR 0012): download the WXYC/research-data manifest.jsonl.gz release asset, match each CorpusItem to a linked library album via the shared exact resolver, extract a <=300-char attributed snippet with Haiku for new items only, and idempotently UPSERT into album_critic_reviews keyed on (album_id, source_url).",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_album_critic_reviews_etl:ci -f ../../Dockerfile.album-critic-reviews-etl ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@sentry/node": "^10.67.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

@@ -307,6 +307,20 @@ export const album_review_submissions = {
   add_date: 'add_date',
   last_modified: 'last_modified',
 };
+export const album_critic_reviews = {
+  id: 'id',
+  album_id: 'album_id',
+  source: 'source',
+  source_url: 'source_url',
+  snippet: 'snippet',
+  author: 'author',
+  published_at: 'published_at',
+  rating: 'rating',
+  discogs_release_id: 'discogs_release_id',
+  source_key: 'source_key',
+  created_at: 'created_at',
+  last_modified: 'last_modified',
+};
 export const flowsheet_linkage_review = {
   id: 'id',
   flowsheet_id: 'flowsheet_id',
