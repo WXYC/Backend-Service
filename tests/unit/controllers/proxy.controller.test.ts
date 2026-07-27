@@ -6,6 +6,9 @@
  */
 import { jest } from '@jest/globals';
 import type { Request, Response, NextFunction } from 'express';
+// Type-only: erased at compile time, so this is safe alongside the
+// jest.mock(...) of the same module's runtime exports below (BS#1827).
+import type { LinkedFlowsheetRow } from '../../../apps/backend/services/album-metadata-lookup.service';
 
 // --- Mocks ---
 
@@ -53,32 +56,22 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
   lmlLookupCoordinator: { lookup: mockLookupMetadata },
 }));
 
-// BS#1331 + ADR 0012: getAlbumMetadata resolves the linked `album_id` ONCE via
-// `resolveLinkedAlbumId`, then feeds it to the by-id persisted-metadata read
-// (`lookupAlbumMetadataById`) and — flag-gated — the by-id critic-reviews read
-// (`lookupCriticReviewsByAlbumId`). Resolving once makes the metadata and
-// reviews reads observe the same album_id atomically and decouples the reviews
-// attach from metadata-enrichment state. Each is mocked so a test can set the
-// resolved id, a local-hit/catch-arm/cold metadata row, or the returned
-// snippets independently.
-const mockResolveLinkedAlbumId = jest.fn<(artist: string, release?: string) => Promise<number | null>>();
+// BS#1331 + ADR 0012 + BS#1827: getAlbumMetadata resolves the linked flowsheet
+// row ONCE via `selectLinkedFlowsheetRow` (album_id + the base catalog fields
+// off the SAME row), then feeds the album_id to the by-id persisted-metadata
+// read (`lookupAlbumMetadataById`) and — flag-gated — the by-id critic-reviews
+// read (`lookupCriticReviewsByAlbumId`). Resolving once makes the base fields,
+// album_id, metadata, and reviews all describe the same row atomically — a
+// two-query version (album_id then a separate base-fields lookup) could let a
+// concurrent flowsheet insert land between the two calls and describe two
+// different rows for one request. Each mock lets a test drive its slice of
+// the contract independently.
+const mockSelectLinkedFlowsheetRow =
+  jest.fn<(artist: string, release?: string) => Promise<LinkedFlowsheetRow | null>>();
 const mockLookupAlbumMetadataById = jest.fn<(albumId: number) => Promise<unknown>>();
 const mockLookupCriticReviewsByAlbumId = jest.fn<(albumId: number) => Promise<unknown[]>>();
-// BS#1827 (local-first playcut details): base fields (record_label/label_id/
-// metadata_status) off the SAME linked flowsheet row `resolveLinkedAlbumId`
-// resolves its album_id from. Mocked separately so a test can drive the
-// base-field survival contract independent of `lookupAlbumMetadataById` /
-// LML — the whole point is these must NOT depend on either succeeding.
-const mockResolveLinkedFlowsheetBase =
-  jest.fn<
-    (
-      artist: string,
-      release?: string
-    ) => Promise<{ record_label: string | null; label_id: number | null; metadata_status: string } | null>
-  >();
 jest.mock('../../../apps/backend/services/album-metadata-lookup.service', () => ({
-  resolveLinkedAlbumId: mockResolveLinkedAlbumId,
-  resolveLinkedFlowsheetBase: mockResolveLinkedFlowsheetBase,
+  selectLinkedFlowsheetRow: mockSelectLinkedFlowsheetRow,
   lookupAlbumMetadataById: mockLookupAlbumMetadataById,
   lookupCriticReviewsByAlbumId: mockLookupCriticReviewsByAlbumId,
 }));
@@ -89,6 +82,16 @@ jest.mock('../../../apps/backend/services/album-metadata-lookup.service', () => 
 // mock's resolved value; the resolved id itself only matters where a test pins
 // the call argument.
 const DEFAULT_LINKED_ALBUM_ID = 4242;
+
+// Default linked-row fixture (BS#1827): album_id resolves but no base catalog
+// fields are known — the pre-existing "cold" cohort every test predating
+// BS#1827 already assumed. Individual base-field tests override this.
+const defaultLinkedRow = (): LinkedFlowsheetRow => ({
+  album_id: DEFAULT_LINKED_ALBUM_ID,
+  record_label: null,
+  label_id: null,
+  metadata_status: 'pending',
+});
 
 // ADR 0012 flag: getConfig().enabled gates the criticReviews attach. Default
 // off (matches prod) so unrelated getAlbumMetadata tests keep their exact
@@ -297,14 +300,14 @@ describe('proxy.controller', () => {
       // Default: a linked album_id resolves (so the reviews attach is
       // reachable) but no persisted metadata row exists — the cold case, so
       // existing tests fall through to LML. Local-hit tests override the by-id
-      // metadata mock below. `clearAllMocks` clears calls, not the resolved
-      // value a prior test set, so both defaults are re-asserted here. BS#1331.
-      mockResolveLinkedAlbumId.mockResolvedValue(DEFAULT_LINKED_ALBUM_ID);
+      // metadata mock below. No base catalog fields on the default row either
+      // (inert — existing tests predate BS#1827 and assert nothing about
+      // recordLabel/labelId/metadataStatus; the base-field-survival suite
+      // below overrides this per test). `clearAllMocks` clears calls, not the
+      // resolved value a prior test set, so the default is re-asserted here.
+      // BS#1331 / BS#1827.
+      mockSelectLinkedFlowsheetRow.mockResolvedValue(defaultLinkedRow());
       mockLookupAlbumMetadataById.mockResolvedValue(null);
-      // Default: no local flowsheet base row (inert — existing tests predate
-      // BS#1827 and assert nothing about recordLabel/labelId/metadataStatus).
-      // The base-field-survival suite below overrides this per test.
-      mockResolveLinkedFlowsheetBase.mockResolvedValue(null);
     });
 
     // ADR 0012: attach external critic-review snippets, flag-gated. These run
@@ -345,7 +348,7 @@ describe('proxy.controller', () => {
 
         // Reviews are read by the resolved album_id, not by artist/release —
         // the resolve happened once and both reads observe the same id.
-        expect(mockResolveLinkedAlbumId).toHaveBeenCalledWith('Juana Molina', 'DOGA');
+        expect(mockSelectLinkedFlowsheetRow).toHaveBeenCalledWith('Juana Molina', 'DOGA');
         expect(mockLookupCriticReviewsByAlbumId).toHaveBeenCalledWith(DEFAULT_LINKED_ALBUM_ID);
         const result = (res.json as jest.Mock).mock.calls[0][0];
         expect(result.criticReviews).toEqual(sampleReviews);
@@ -1023,7 +1026,7 @@ describe('proxy.controller', () => {
 
         await getAlbumMetadata(req, res as Response, mockNext);
 
-        expect(mockResolveLinkedAlbumId).toHaveBeenCalledWith('Cached Artist', 'Cached Album');
+        expect(mockSelectLinkedFlowsheetRow).toHaveBeenCalledWith('Cached Artist', 'Cached Album');
         expect(mockLookupAlbumMetadataById).toHaveBeenCalledWith(DEFAULT_LINKED_ALBUM_ID);
         expect(mockLookupMetadata).not.toHaveBeenCalled();
         expect(res.status).toHaveBeenCalledWith(200);
@@ -1362,7 +1365,7 @@ describe('proxy.controller', () => {
 
       it('falls through to LML when no local row matches (true cold case)', async () => {
         // No linked album resolves at all — the by-id metadata read never runs.
-        mockResolveLinkedAlbumId.mockResolvedValue(null);
+        mockSelectLinkedFlowsheetRow.mockResolvedValue(null);
         mockLookupMetadata.mockResolvedValue({
           results: [
             {
@@ -1390,7 +1393,7 @@ describe('proxy.controller', () => {
 
         await getAlbumMetadata(req, res as Response, mockNext);
 
-        expect(mockResolveLinkedAlbumId).toHaveBeenCalledWith('Cold Artist', 'Cold Album');
+        expect(mockSelectLinkedFlowsheetRow).toHaveBeenCalledWith('Cold Artist', 'Cold Album');
         expect(mockLookupAlbumMetadataById).not.toHaveBeenCalled();
         // LML was consulted because the resolve step found no linked album.
         expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
@@ -1439,11 +1442,18 @@ describe('proxy.controller', () => {
     // fields (artworkUrl, discogsUrl, genres, ...) — it can never blank the
     // base fields. This is the acceptance gate for #1827: simulate an LML
     // failure and assert base fields survive while enrichment fields don't.
+    //
+    // Round 2 (post-review): album_id and the base catalog fields now come
+    // from ONE `selectLinkedFlowsheetRow` call instead of two separate reads
+    // (`resolveLinkedAlbumId` then `resolveLinkedFlowsheetBase`), eliminating
+    // a re-resolution race where a concurrent flowsheet insert between the
+    // two calls could make them describe different rows. Tests that care
+    // assert `toHaveBeenCalledTimes(1)` to pin the single-round-trip contract.
     describe('local-first base fields (BS#1827)', () => {
       it('always echoes artistName/releaseTitle/trackTitle from the query, before any lookup is attempted', async () => {
         // No mocks configured to resolve anything — the point is these three
         // never depend on a successful local or LML lookup in the first place.
-        mockResolveLinkedAlbumId.mockResolvedValue(null);
+        mockSelectLinkedFlowsheetRow.mockResolvedValue(null);
         mockLookupMetadata.mockResolvedValue({
           results: [],
           search_type: 'none',
@@ -1465,7 +1475,7 @@ describe('proxy.controller', () => {
       });
 
       it('omits releaseTitle/trackTitle when not supplied on the request (no fabrication)', async () => {
-        mockResolveLinkedAlbumId.mockResolvedValue(null);
+        mockSelectLinkedFlowsheetRow.mockResolvedValue(null);
         mockLookupMetadata.mockRejectedValue(new Error('LML down'));
 
         const req = { query: { artistName: 'Solo Artist Name Only' } } as unknown as Request;
@@ -1480,13 +1490,12 @@ describe('proxy.controller', () => {
       });
 
       it('free-text row (no linked album_id) + LML failure: artist/release/track survive; recordLabel/labelId/metadataStatus are not fabricated', async () => {
-        // The core free-text scenario the issue names: resolveLinkedAlbumId
-        // returns null (no album_id-bearing flowsheet row for this key), so
-        // resolveLinkedFlowsheetBase is never even reachable for it — there is
-        // no efficient local source for record_label/label_id in that cohort
-        // (see resolveLinkedFlowsheetBase's doc comment). The identity fields
-        // still must not blank out just because LML also fails.
-        mockResolveLinkedAlbumId.mockResolvedValue(null);
+        // The core free-text scenario the issue names: selectLinkedFlowsheetRow
+        // returns null (no album_id-bearing flowsheet row for this key) — there
+        // is no efficient local source for record_label/label_id in that
+        // cohort (see selectLinkedFlowsheetRow's doc comment). The identity
+        // fields still must not blank out just because LML also fails.
+        mockSelectLinkedFlowsheetRow.mockResolvedValue(null);
         mockLookupMetadata.mockRejectedValue(new Error('LML timeout'));
 
         const req = {
@@ -1496,7 +1505,8 @@ describe('proxy.controller', () => {
 
         await getAlbumMetadata(req, res as Response, mockNext);
 
-        expect(mockResolveLinkedFlowsheetBase).not.toHaveBeenCalled();
+        expect(mockSelectLinkedFlowsheetRow).toHaveBeenCalledTimes(1);
+        expect(mockLookupAlbumMetadataById).not.toHaveBeenCalled();
         expect(res.status).toHaveBeenCalledWith(200);
         const result = (res.json as jest.Mock).mock.calls[0][0];
         // Base identity: survives.
@@ -1517,14 +1527,16 @@ describe('proxy.controller', () => {
         // (album_id resolved) that hasn't been enriched into album_metadata
         // yet (persisted stays null, same as the existing "cold" default) —
         // an LML outage must not blank the record_label/label_id/
-        // metadata_status this endpoint can read straight off that row.
-        mockResolveLinkedAlbumId.mockResolvedValue(DEFAULT_LINKED_ALBUM_ID);
-        mockLookupAlbumMetadataById.mockResolvedValue(null);
-        mockResolveLinkedFlowsheetBase.mockResolvedValue({
+        // metadata_status this endpoint can read straight off that row. One
+        // call resolves both album_id and the base fields (`toHaveBeenCalledTimes(1)`
+        // pins that there's no second, separately-racing query anymore).
+        mockSelectLinkedFlowsheetRow.mockResolvedValue({
+          album_id: DEFAULT_LINKED_ALBUM_ID,
           record_label: 'Drag City',
           label_id: 12,
           metadata_status: 'pending',
         });
+        mockLookupAlbumMetadataById.mockResolvedValue(null);
         mockLookupMetadata.mockRejectedValue(new Error('LML down'));
 
         const req = {
@@ -1534,7 +1546,9 @@ describe('proxy.controller', () => {
 
         await getAlbumMetadata(req, res as Response, mockNext);
 
-        expect(mockResolveLinkedFlowsheetBase).toHaveBeenCalledWith('Jessica Pratt', 'On Your Own Love Again');
+        expect(mockSelectLinkedFlowsheetRow).toHaveBeenCalledWith('Jessica Pratt', 'On Your Own Love Again');
+        expect(mockSelectLinkedFlowsheetRow).toHaveBeenCalledTimes(1);
+        expect(mockLookupAlbumMetadataById).toHaveBeenCalledWith(DEFAULT_LINKED_ALBUM_ID);
         expect(res.status).toHaveBeenCalledWith(200);
         const result = (res.json as jest.Mock).mock.calls[0][0];
         // Base identity.
@@ -1552,7 +1566,8 @@ describe('proxy.controller', () => {
       });
 
       it('omits labelId/recordLabel individually when the linked row only knows one of them', async () => {
-        mockResolveLinkedFlowsheetBase.mockResolvedValue({
+        mockSelectLinkedFlowsheetRow.mockResolvedValue({
+          album_id: DEFAULT_LINKED_ALBUM_ID,
           record_label: null,
           label_id: 9,
           metadata_status: 'enriching',
@@ -1572,42 +1587,17 @@ describe('proxy.controller', () => {
         expect(result.metadataStatus).toBe('enriching');
       });
 
-      it('does not call resolveLinkedFlowsheetBase when no linked album_id resolves (avoids a redundant guaranteed-empty query)', async () => {
-        mockResolveLinkedAlbumId.mockResolvedValue(null);
-        mockLookupMetadata.mockResolvedValue({
-          results: [],
-          search_type: 'none',
-          song_not_found: false,
-          found_on_compilation: false,
-        });
-
-        const req = {
-          query: { artistName: 'Never Linked Artist', releaseTitle: 'Never Linked Album' },
-        } as unknown as Request;
-        const res = createMockRes();
-
-        await getAlbumMetadata(req, res as Response, mockNext);
-
-        expect(mockResolveLinkedFlowsheetBase).not.toHaveBeenCalled();
-      });
-
-      it('resolveLinkedFlowsheetBase throws: degrades to omitting base catalog fields only, still responds 200 with persisted data intact', async () => {
-        // Mirrors the critic-reviews / local-metadata try/catch convention
-        // elsewhere in this handler: a failure fetching the NEW base fields
-        // must not regress the EXISTING persisted-metadata response.
-        mockLookupAlbumMetadataById.mockResolvedValue({
-          artwork_url: 'https://i.discogs.com/x.jpg',
-          discogs_url: 'https://www.discogs.com/release/321',
-          release_year: 2018,
-          spotify_url: null,
-          apple_music_url: null,
-          youtube_music_url: null,
-          bandcamp_url: null,
-          soundcloud_url: null,
-          artist_bio: null,
-          artist_wikipedia_url: null,
-        });
-        mockResolveLinkedFlowsheetBase.mockRejectedValue(new Error('db blip'));
+      it('selectLinkedFlowsheetRow throws: falls through to LML, omitting both base and persisted-state fields, still responds 200', async () => {
+        // Mirrors the local-metadata try/catch convention elsewhere in this
+        // handler: a DB blip resolving the row degrades to a cache miss and
+        // falls through to LML, rather than 500ing the request. Because
+        // album_id and the base fields now come from the SAME query (round-2
+        // refactor), a failure here can no longer "partially" fail — the
+        // persisted-metadata read is never reached either, unlike the old
+        // two-query version where a base-fields-only failure could leave an
+        // already-resolved album_id/persisted response intact.
+        mockSelectLinkedFlowsheetRow.mockRejectedValue(new Error('db blip'));
+        mockLookupMetadata.mockRejectedValue(new Error('LML down'));
 
         const req = {
           query: { artistName: 'Resilient Artist', releaseTitle: 'Resilient Album' },
@@ -1616,15 +1606,17 @@ describe('proxy.controller', () => {
 
         await getAlbumMetadata(req, res as Response, mockNext);
 
+        expect(mockLookupAlbumMetadataById).not.toHaveBeenCalled();
         expect(res.status).toHaveBeenCalledWith(200);
         const result = (res.json as jest.Mock).mock.calls[0][0];
+        // Base identity survives — it never depended on this lookup.
         expect(result.artistName).toBe('Resilient Artist');
+        expect(result.releaseTitle).toBe('Resilient Album');
+        // Base catalog fields and enrichment fields are both genuinely absent.
         expect('recordLabel' in result).toBe(false);
         expect('labelId' in result).toBe(false);
         expect('metadataStatus' in result).toBe(false);
-        // Persisted metadata from the (unrelated, successful) by-id lookup
-        // still comes through — the base-field failure is fully isolated.
-        expect(result.discogsUrl).toBe('https://www.discogs.com/release/321');
+        expect('discogsUrl' in result).toBe(false);
       });
     });
   });
