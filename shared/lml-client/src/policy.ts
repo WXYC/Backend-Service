@@ -129,6 +129,14 @@ export const ALL_LML_CALLERS = [
   'apple-music-url-backfill',
   'concerts-genre-enrichment',
   'concerts-artist-lml-resolver',
+  // BS#1826 PR 3: registered alongside the missing `caller` this label's
+  // guard run surfaced at jobs/rotation-release-id-backfill/lml-fetch.ts —
+  // the plan's caller→class map already commits "rotation-*-backfill" to
+  // class 5; this completes that for the release-id backfill specifically.
+  // `rotation-artist-backfill` (the other rotation-*-backfill job) has no
+  // caller-bearing call site — it only calls `refreshForIdentities`, which
+  // takes no `caller` parameter — so it needs no entry here.
+  'rotation-release-id-backfill',
 ] as const;
 
 export type LmlCaller = (typeof ALL_LML_CALLERS)[number];
@@ -168,6 +176,7 @@ const CALLER_CLASS: Record<LmlCaller, LmlCallerClass> = {
   'apple-music-url-backfill': 5,
   'concerts-genre-enrichment': 5,
   'concerts-artist-lml-resolver': 5,
+  'rotation-release-id-backfill': 5,
 };
 
 /**

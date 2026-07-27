@@ -77,6 +77,7 @@ describe('lml-client policy', () => {
         'apple-music-url-backfill': 5,
         'concerts-genre-enrichment': 5,
         'concerts-artist-lml-resolver': 5,
+        'rotation-release-id-backfill': 5,
       };
       for (const [caller, expectedClass] of Object.entries(expected) as [LmlCaller, LmlCallerClass][]) {
         expect(resolveLmlPolicy(caller).class).toBe(expectedClass);
