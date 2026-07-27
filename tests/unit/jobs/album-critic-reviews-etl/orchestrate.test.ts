@@ -168,6 +168,31 @@ describe('runEtl — counters', () => {
     expect(totals.written).toBe(1);
   });
 
+  it('isolates a per-item write error: counted as write_errors, does not wedge the run', async () => {
+    const opts = makeOpts({
+      fetchManifest: () => Promise.resolve(buildManifest([{ sourceUrl: 'https://a/1' }, { sourceUrl: 'https://a/2' }])),
+      matchItem: (item) => Promise.resolve(item.sourceUrl.endsWith('/1') ? 1 : 2),
+      upsertRow: jest
+        .fn()
+        .mockRejectedValueOnce(new Error('value too long for type character varying(32)'))
+        .mockResolvedValueOnce({ inserted: true, updated: false, unchanged: false }),
+    });
+    const totals = await runEtl(opts);
+    expect(totals.write_errors).toBe(1);
+    expect(totals.written).toBe(1);
+    // The extract-then-write loop reached both items despite the first throwing.
+    expect(opts.extractCalls).toHaveLength(2);
+  });
+
+  it('throws when new items existed but every write failed (write_errors -> zero written)', async () => {
+    const opts = makeOpts({
+      fetchManifest: () => Promise.resolve(buildManifest([{ sourceUrl: 'https://a/1' }, { sourceUrl: 'https://a/2' }])),
+      matchItem: (item) => Promise.resolve(item.sourceUrl.endsWith('/1') ? 1 : 2),
+      upsertRow: () => Promise.reject(new Error('db down')),
+    });
+    await expect(runEtl(opts)).rejects.toThrow(/written/i);
+  });
+
   it('reports inserted/updated/unchanged from the writer outcome', async () => {
     const opts = makeOpts({
       fetchManifest: () => Promise.resolve(buildManifest([{ sourceUrl: 'https://a/1' }])),

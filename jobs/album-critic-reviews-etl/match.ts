@@ -21,7 +21,12 @@
 import { resolveLinkedAlbumId } from '@wxyc/database';
 import type { CorpusItem } from './manifest.js';
 
-const DECORATION_SUFFIX = /\s*\((?:reissue|deluxe|remaster(?:ed)?|expanded|ep|deluxe edition)[^)]*\)\s*$/i;
+// `ep\b` (not bare `ep`) so the alternative only strips a real "(EP)"-style
+// tag, never any trailing parenthetical that merely BEGINS with "ep" —
+// "(Epic Sessions)", "(Epilogue)". Without the boundary the fallback would
+// mint a stripped title that exact-matches a DIFFERENT flowsheet album,
+// violating this module's "never attach a review to the wrong album" ceiling.
+const DECORATION_SUFFIX = /\s*\((?:reissue|deluxe|remaster(?:ed)?|expanded|ep\b|deluxe edition)[^)]*\)\s*$/i;
 
 export const stripAlbumDecoration = (album: string): string => album.replace(DECORATION_SUFFIX, '').trim();
 

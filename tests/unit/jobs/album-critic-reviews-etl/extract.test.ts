@@ -11,7 +11,15 @@
  * author when present." The seed script had `extraction.author ?? item.author`
  * (LLM wins); this job does `item.author ?? extraction.author` (manifest wins).
  */
-import { buildRow, MAX_SNIPPET, llmExtract, type Extraction } from '../../../../jobs/album-critic-reviews-etl/extract';
+import {
+  buildRow,
+  MAX_SNIPPET,
+  MAX_AUTHOR,
+  MAX_RATING,
+  MAX_SOURCE_URL,
+  llmExtract,
+  type Extraction,
+} from '../../../../jobs/album-critic-reviews-etl/extract';
 import type { CorpusItem } from '../../../../jobs/album-critic-reviews-etl/manifest';
 
 const item = (overrides: Partial<CorpusItem> = {}): CorpusItem => ({
@@ -116,6 +124,45 @@ describe('buildRow', () => {
   it('carries publishedAt through as published_at, else null', () => {
     expect(buildRow(item({ publishedAt: '2024-09-30' }), 1, extraction())?.published_at).toBe('2024-09-30');
     expect(buildRow(item(), 1, extraction())?.published_at).toBeNull();
+  });
+
+  describe('column-ceiling enforcement (varchar limits from migration 0125)', () => {
+    it('nulls an over-length author rather than overflowing varchar(128); the review still builds', () => {
+      const longAuthor = 'A'.repeat(MAX_AUTHOR + 1);
+      const row = buildRow(item({ author: longAuthor }), 1, extraction({ author: null }));
+      expect(row).not.toBeNull();
+      expect(row?.author).toBeNull();
+      expect(row?.snippet).toBe(extraction().snippet);
+    });
+
+    it('keeps an author exactly at the ceiling', () => {
+      const author = 'A'.repeat(MAX_AUTHOR);
+      expect(buildRow(item({ author }), 1, extraction())?.author).toBe(author);
+    });
+
+    it('nulls an over-length rating rather than overflowing varchar(32); the review still builds', () => {
+      const longRating = '8/10 — one of the very best of the whole year';
+      expect(longRating.length).toBeGreaterThan(MAX_RATING);
+      const row = buildRow(item(), 1, extraction({ rating: longRating }));
+      expect(row).not.toBeNull();
+      expect(row?.rating).toBeNull();
+    });
+
+    it('keeps a rating exactly at the ceiling', () => {
+      const rating = '8'.repeat(MAX_RATING);
+      expect(buildRow(item(), 1, extraction({ rating }))?.rating).toBe(rating);
+    });
+
+    it('rejects the whole row when source_url exceeds varchar(1024) (link-out target cannot be truncated)', () => {
+      const longUrl = `https://example.com/${'x'.repeat(MAX_SOURCE_URL)}`;
+      expect(buildRow(item({ sourceUrl: longUrl }), 1, extraction())).toBeNull();
+    });
+
+    it('keeps a source_url exactly at the ceiling', () => {
+      const url = `https://e/${'x'.repeat(MAX_SOURCE_URL - 10)}`;
+      expect(url.length).toBe(MAX_SOURCE_URL);
+      expect(buildRow(item({ sourceUrl: url }), 1, extraction())?.source_url).toBe(url);
+    });
   });
 });
 

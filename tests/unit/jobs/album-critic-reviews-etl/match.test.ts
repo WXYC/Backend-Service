@@ -44,6 +44,19 @@ describe('stripAlbumDecoration', () => {
     expect(stripAlbumDecoration('On Your Own Love Again (Live)')).toBe('On Your Own Love Again (Live)');
   });
 
+  it.each(['(Epic Sessions)', '(Epilogue)', '(Ephemera)', '(Epitaph)'])(
+    'does NOT strip a parenthetical that merely begins with "ep": %s (ep\\b word boundary)',
+    (paren) => {
+      const title = `Foo ${paren}`;
+      expect(stripAlbumDecoration(title)).toBe(title);
+    }
+  );
+
+  it('still strips a bare "(EP)" tag (the ep\\b boundary matches the real edition tag)', () => {
+    expect(stripAlbumDecoration('Foo (EP)')).toBe('Foo');
+    expect(stripAlbumDecoration('Foo (EP, 2011)')).toBe('Foo');
+  });
+
   it('only strips a TRAILING clause, not one in the middle of the title', () => {
     expect(stripAlbumDecoration('DOGA (Deluxe) Sessions')).toBe('DOGA (Deluxe) Sessions');
   });
