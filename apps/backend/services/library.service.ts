@@ -609,11 +609,22 @@ const ROTATION_TRACKLIST_LOOKUP_NEGATIVE_WINDOW_MS = 7 * MS_PER_DAY;
 const ROTATION_LML_LOOKUP_TIMEOUT_MS = 10000;
 
 /**
- * Budget for `enrichWithArtwork` and `searchLibraryByTrack` — both user-visible
- * read paths that would rather degrade than hold the response on an obscure-
- * artist cascade. See `LookupOptions.budgetMs` for mechanics.
+ * Budget for `searchLibraryByTrack` — a user-visible read path that would
+ * rather degrade than hold the response on an obscure-artist cascade. See
+ * `LookupOptions.budgetMs` for mechanics.
  */
 const LIBRARY_INTERACTIVE_LML_BUDGET_MS = envInt('LIBRARY_INTERACTIVE_LML_BUDGET_MS', 5000);
+
+/**
+ * Per-call LML budget for `enrichWithArtwork`'s lookup. BS#1828 took this call
+ * off the `searchForAlbum` response path entirely (fire-and-forget from the
+ * controller), so this budget no longer bounds request latency — it bounds
+ * how long a detached enrichment can hold an LML/Discogs slot before giving
+ * up, stricter than the interactive (5s) and batch (29s) classes since
+ * artwork enrichment is the most droppable of the three. Should fold into
+ * #1826's per-class policy layer when that lands.
+ */
+const LIBRARY_SEARCH_LML_BUDGET_MS = envInt('LIBRARY_SEARCH_LML_BUDGET_MS', 2000);
 
 /**
  * Wire shape returned by `GET /library/rotation/:rotation_id/tracks`. The
@@ -1066,6 +1077,11 @@ export const updateCanonicalEntity = async (id: number, entityId: string, confid
  * fetches artwork from LML in parallel via Promise.allSettled and writes back
  * to the library table (cache-through). Gracefully degrades if LML is
  * unavailable or times out.
+ *
+ * BS#1828: the `searchForAlbum` controller calls this fire-and-forget — it is
+ * never awaited on the response path — so the mutation of `row.artwork_url`
+ * below only benefits *future* searches via the `updateArtworkUrl` write, not
+ * the in-flight request.
  */
 type ArtworkEnrichable = {
   id: number;
@@ -1083,7 +1099,7 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[
   const settlements = await Promise.allSettled(
     uncached.map(async (row) => {
       const lookupResult = await lmlLookupCoordinator.lookup(row.artist_name, row.album_title, undefined, {
-        budgetMs: LIBRARY_INTERACTIVE_LML_BUDGET_MS,
+        budgetMs: LIBRARY_SEARCH_LML_BUDGET_MS,
         caller: 'library-enrich-artwork',
         requireSearchType: 'direct',
       });
