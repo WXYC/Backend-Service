@@ -48,6 +48,7 @@ jest.unmock('drizzle-orm');
 
 const postgres = require('postgres');
 const { isActiveRotationMatch } = require('@wxyc/legacy-mirror');
+const { closeDatabaseConnection } = require('@wxyc/database');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
@@ -63,27 +64,55 @@ function makeSql() {
   });
 }
 
+// Reference "play" time shared by every window-boundary assertion below, so
+// each fixture row's add_date/kill_date can be picked relative to a single
+// fixed point instead of "now" (avoids day-boundary/DST flakiness).
+const ADD_TIME = new Date('2024-06-14T22:00:00Z');
+
 describe('isActiveRotationMatch against a real Postgres (BS#1821)', () => {
   let sql;
-  let rotationId;
+  const rotationIds = [];
 
   beforeAll(async () => {
     sql = makeSql();
-    // Active rotation row: add_date in the past, kill_date open-ended, so
-    // any add_time from here forward falls inside the window.
+
+    // Three fixture rows, each with a unique synthetic (artist_name,
+    // album_title) so the EXISTS scan can only match the row a given test
+    // is targeting — never a pre-existing seeded rotation row (e.g. the
+    // shared fixture's Jessica Pratt row) and never a sibling row below.
+    //
+    //   1. in-window:   add_date <= ADD_TIME < kill_date(NULL)  -> match
+    //   2. future add_date: add_date > ADD_TIME (release not yet in
+    //      rotation when the play happened) -> no match
+    //   3. killed-before-play: kill_date <= ADD_TIME (release already
+    //      pulled from rotation when the play happened) -> no match
+    //
+    // Without these date-window rows, a fixture that only ever satisfies
+    // `add_date <= add_time < kill_date` trivially would just prove "the
+    // query no longer throws" (BS#1821's actual bug), not that the two
+    // date binds are functioning as a window filter at all.
     const inserted = await sql`
       INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, artist_name, album_title, add_date, kill_date)
-      VALUES (NULL, 'H', 'Jessica Pratt', 'On Your Own Love Again', '2024-01-01', NULL)
+      VALUES
+        (NULL, 'H', 'BS1821 Window Match Artist', 'BS1821 Window Match Album', '2024-01-01', NULL),
+        (NULL, 'H', 'BS1821 Future AddDate Artist', 'BS1821 Future AddDate Album', '2024-07-01', NULL),
+        (NULL, 'H', 'BS1821 Killed Before AddTime Artist', 'BS1821 Killed Before AddTime Album', '2024-01-01', '2024-06-01')
       RETURNING id
     `;
-    rotationId = inserted[0].id;
+    rotationIds.push(...inserted.map((row) => row.id));
   });
 
   afterAll(async () => {
-    if (rotationId != null) {
-      await sql`DELETE FROM ${sql(SCHEMA)}.rotation WHERE id = ${rotationId}`;
+    if (rotationIds.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.rotation WHERE id IN ${sql(rotationIds)}`;
     }
     if (sql) await sql.end({ timeout: 5 });
+    // `@wxyc/legacy-mirror` -> `@wxyc/database` opens the shared postgres-js
+    // pool as a side effect of import (shared/database/src/client.ts's
+    // module-level `createPostgresClient()`). That pool is separate from
+    // this spec's own `sql` client above, so it needs its own teardown or
+    // the process has an open handle after the suite finishes.
+    await closeDatabaseConnection();
   });
 
   test('returns true for a hand-typed (artist_name, album_title) matching an active rotation row', async () => {
@@ -93,12 +122,36 @@ describe('isActiveRotationMatch against a real Postgres (BS#1821)', () => {
     const result = await isActiveRotationMatch({
       rotation_id: null,
       album_id: null,
-      artist_name: 'Jessica Pratt',
-      album_title: 'On Your Own Love Again',
-      add_time: new Date('2024-06-14T22:00:00Z'),
+      artist_name: 'BS1821 Window Match Artist',
+      album_title: 'BS1821 Window Match Album',
+      add_time: ADD_TIME,
     });
 
     expect(result).toBe(true);
+  });
+
+  test('returns false when the rotation row is not yet in rotation at add_time (add_date > add_time)', async () => {
+    const result = await isActiveRotationMatch({
+      rotation_id: null,
+      album_id: null,
+      artist_name: 'BS1821 Future AddDate Artist',
+      album_title: 'BS1821 Future AddDate Album',
+      add_time: ADD_TIME,
+    });
+
+    expect(result).toBe(false);
+  });
+
+  test('returns false when the rotation row was already killed by add_time (kill_date <= add_time)', async () => {
+    const result = await isActiveRotationMatch({
+      rotation_id: null,
+      album_id: null,
+      artist_name: 'BS1821 Killed Before AddTime Artist',
+      album_title: 'BS1821 Killed Before AddTime Album',
+      add_time: ADD_TIME,
+    });
+
+    expect(result).toBe(false);
   });
 
   test('returns false for a non-matching (artist_name, album_title)', async () => {
@@ -107,7 +160,7 @@ describe('isActiveRotationMatch against a real Postgres (BS#1821)', () => {
       album_id: null,
       artist_name: 'Not A Real Rotation Artist BS1821',
       album_title: 'Not A Real Rotation Album BS1821',
-      add_time: new Date('2024-06-14T22:00:00Z'),
+      add_time: ADD_TIME,
     });
 
     expect(result).toBe(false);
