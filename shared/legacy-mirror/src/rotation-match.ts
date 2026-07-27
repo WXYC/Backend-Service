@@ -91,6 +91,18 @@ export async function isActiveRotationMatch(entry: RotationMatchEntry): Promise<
   // NULL with a NOW() default in the schema, so the new-Date fallback is
   // purely defensive against a caller that passes undefined.
   const addTime = entry.add_time != null ? new Date(entry.add_time as Date | string | number) : new Date();
+  // Pre-stringify once: binding a raw JS `Date` into a `sql`` template
+  // reaches postgres-js's outbound `Buffer.byteLength(date)` and throws
+  // (BS#1821 — Drizzle rebinds the date-family serializer to a passthrough).
+  // `::timestamptz::date` (not a bare `::date`) matches the read path's cast
+  // of the `flowsheet.add_time` column reference (flowsheet.service.ts) —
+  // that column is already `timestamptz`, so casting it straight to `::date`
+  // implicitly goes through the session timezone; casting an ISO string
+  // (always UTC-offset per `toISOString()`) straight to `::date` would
+  // instead parse it as a literal calendar date, ignoring session tz. The
+  // explicit `::timestamptz` hop keeps both paths' day-bucketing identical
+  // regardless of session tz.
+  const addTimeIso = addTime.toISOString();
 
   try {
     const albumIdCohort = entry.album_id != null ? sql`r2.album_id = ${entry.album_id}` : sql`false`;
@@ -106,8 +118,8 @@ export async function isActiveRotationMatch(entry: RotationMatchEntry): Promise<
         FROM ${rotation} r2
         LEFT JOIN ${library} l2 ON l2.id = r2.album_id
         LEFT JOIN ${artists} a2 ON a2.id = l2.artist_id
-        WHERE r2.add_date <= ${addTime.toISOString()}::date
-          AND (r2.kill_date IS NULL OR r2.kill_date > ${addTime.toISOString()}::date)
+        WHERE r2.add_date <= ${addTimeIso}::timestamptz::date
+          AND (r2.kill_date IS NULL OR r2.kill_date > ${addTimeIso}::timestamptz::date)
           AND (
             ${albumIdCohort}
             OR (
