@@ -5,14 +5,21 @@
  * feeds it to `lookupAlbumMetadataById` and `lookupCriticReviewsByAlbumId`;
  * all three are mocked away in the controller's suite, so these tests cover
  * the JS-side shape that wouldn't otherwise surface in CI until prod:
- *   - `resolveLinkedAlbumId`: empty/whitespace-key guard (artist or release
- *     blank → null, no DB), cold-case (no match → null), deterministic
- *     `ORDER BY id DESC LIMIT 1` on multi-album_id keys
  *   - `lookupAlbumMetadataById`: PK-lookup projection; absent row → null
  *     fallthrough; no ORDER BY (it's a PK read, not a pick)
  *   - `lookupCriticReviewsByAlbumId`: newest-first ORDER BY, wire-shape
  *     projection (url ← source_url, publishedDate ← published_at, null
  *     optionals omitted)
+ *
+ * `resolveLinkedAlbumId`'s own tests moved to
+ * `tests/unit/database/album-resolve.test.ts` (BS#1829): its implementation
+ * now lives in `@wxyc/database` (`shared/database/src/album-resolve.ts`),
+ * and this file's whole-package `jest.mock('@wxyc/database', ...)` below
+ * can't exercise it — the mock factory doesn't (and can't cheaply) include
+ * a working real implementation, so the service's thin re-export of it would
+ * resolve to `undefined` under this mock. This file still imports it (via
+ * the re-export shim) only insofar as `lookupAlbumMetadataById` /
+ * `lookupCriticReviewsByAlbumId` don't call it directly — they don't.
  *
  * The drizzle DB chain is mocked at the module level so test cases can stub
  * each query's resolved rows independently. Each by-id helper issues exactly
@@ -109,7 +116,6 @@ jest.mock('@wxyc/database', () => ({
 }));
 
 import {
-  resolveLinkedAlbumId,
   lookupAlbumMetadataById,
   lookupCriticReviewsByAlbumId,
 } from '../../../apps/backend/services/album-metadata-lookup.service';
@@ -122,57 +128,6 @@ describe('album-metadata-lookup.service', () => {
     chainSpy.where.mockClear();
     chainSpy.orderBy.mockClear();
     chainSpy.limit.mockClear();
-  });
-
-  describe('resolveLinkedAlbumId', () => {
-    describe('empty-key guard', () => {
-      // Pin the contract that the guard prevents *any* DB call: a regression
-      // that removes the guard would shift these from `select=0` to `select=1`,
-      // letting `'-'`-keyed requests reach the partial index and resolve an
-      // arbitrary album_id.
-      it('returns null without touching the DB when artistName is empty', async () => {
-        expect(await resolveLinkedAlbumId('', 'Some Album')).toBeNull();
-        expect(mockSelect).not.toHaveBeenCalled();
-      });
-
-      it('returns null when artistName is whitespace-only', async () => {
-        expect(await resolveLinkedAlbumId('   ', 'Some Album')).toBeNull();
-        expect(mockSelect).not.toHaveBeenCalled();
-      });
-
-      it('returns null when releaseTitle is undefined (artist-card surfaces fall through to LML)', async () => {
-        expect(await resolveLinkedAlbumId('Some Artist', undefined)).toBeNull();
-        expect(mockSelect).not.toHaveBeenCalled();
-      });
-
-      it('returns null when releaseTitle is empty', async () => {
-        expect(await resolveLinkedAlbumId('Some Artist', '')).toBeNull();
-        expect(mockSelect).not.toHaveBeenCalled();
-      });
-
-      it('returns null when releaseTitle is whitespace-only', async () => {
-        expect(await resolveLinkedAlbumId('Some Artist', '\t  ')).toBeNull();
-        expect(mockSelect).not.toHaveBeenCalled();
-      });
-    });
-
-    it('returns null on the cold case (no matching album_id-bearing flowsheet row)', async () => {
-      mockRowsQueue.push([]);
-      expect(await resolveLinkedAlbumId('Unknown Artist', 'Unknown Album')).toBeNull();
-      expect(mockSelect).toHaveBeenCalledTimes(1);
-    });
-
-    it('returns the album_id and issues ORDER BY for a deterministic row-pick on multi-album_id keys', async () => {
-      // Pin BS#1331 round-2 review fix: dropping the ORDER BY here would
-      // re-introduce iOS-visible flapping between distinct album_metadata
-      // payloads when a lookup key resolves to multiple album_ids
-      // (V/A multi-format, dual-pressings, librarian duplicates — empirically
-      // present in the live `album_id` corpus).
-      mockRowsQueue.push([{ album_id: 42 }]);
-      const albumId = await resolveLinkedAlbumId('Multi Artist', 'Same Title Different Pressings');
-      expect(albumId).toBe(42);
-      expect(chainSpy.orderBy).toHaveBeenCalledTimes(1);
-    });
   });
 
   describe('lookupAlbumMetadataById', () => {
