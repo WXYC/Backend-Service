@@ -36,26 +36,23 @@
  * interest to a detail-view fetch).
  */
 import { sql, eq, desc } from 'drizzle-orm';
-import { db, flowsheet, album_metadata, album_critic_reviews } from '@wxyc/database';
+import { db, album_metadata, album_critic_reviews } from '@wxyc/database';
 import type { CriticReviewItem } from '@wxyc/shared/dtos';
 import type { DiscogsResolvedToken, DiscogsTrackItem } from '@wxyc/lml-client';
 
-const flowsheetLookupKey = sql<string>`lower(trim(${flowsheet.artist_name})) || '-' || lower(trim(coalesce(${flowsheet.album_title}, '')))`;
-
 /**
- * JS-side normalized lookup key. The order of trim() and toLowerCase()
- * is irrelevant for the column shapes in flowsheet (artist names and
- * album titles are ASCII or Latin-1 in steady state), but match the SQL
- * literally for forward-compatibility with Unicode-bearing rows. PG's
- * `trim()` strips only ASCII space by default while JS `.trim()` strips
- * all Unicode whitespace — divergence can produce silent cache misses
- * on NBSP-padded inputs. Documented here so future maintainers see the
- * gap; aligning would require a generated column or a normalize_key()
- * SQL function (migration), so deferred.
+ * Thin re-export shim — `resolveLinkedAlbumId` moved to `@wxyc/database`
+ * (BS#1829, `shared/database/src/album-resolve.ts`) so the upcoming
+ * `jobs/album-critic-reviews-etl/` (#1830) can call the SAME resolver a
+ * `jobs/` workspace can't reach into `apps/backend` for. This path is
+ * preserved deliberately (mirrors the `@wxyc/legacy-mirror` BS#1707
+ * extraction and `concerts-recompute.ts`'s BS#1763 shim in
+ * `jobs/concerts-artist-resolver/recompute.ts`): `apps/backend/controllers/
+ * proxy.controller.ts` still imports from here, so its import site doesn't
+ * need touching. New code should import from `@wxyc/database` directly, as
+ * `scripts/seed-critic-reviews.ts` now does.
  */
-function lookupKey(artist: string, album?: string): string {
-  return `${artist.toLowerCase().trim()}-${(album ?? '').toLowerCase().trim()}`;
-}
+export { resolveLinkedAlbumId } from '@wxyc/database';
 
 /**
  * Persisted album metadata projection. Matches the 18 columns on
@@ -89,52 +86,6 @@ export interface PersistedAlbumMetadata {
   tracklist: DiscogsTrackItem[] | null;
   artist_image_url: string | null;
   bio_tokens: DiscogsResolvedToken[] | null;
-}
-
-/**
- * Resolve `(artistName, releaseTitle)` to the `library.id` of a matching
- * linked flowsheet row, or `null` when no `album_id`-bearing flowsheet row
- * exists for the key. Shared Step-1 for both the album-metadata read
- * (`lookupAlbumMetadataById`) and the critic-reviews read
- * (`lookupCriticReviewsByAlbumId`). Callers that need both — the
- * `/proxy/metadata/album` handler — resolve the key *once* here and pass the
- * id to both reads, so a concurrent flowsheet insert can't make the two
- * reads disagree on which album they describe. The seed writer
- * (`scripts/seed-critic-reviews.ts`) imports this to key its UPSERTs against
- * the exact same normalized flowsheet key the serve path reads.
- *
- * Uses the partial functional index `flowsheet_album_link_lookup_idx`. The
- * explicit `flowsheet.album_id IS NOT NULL` predicate matches the index's
- * WHERE clause verbatim so the planner uses the partial index. `ORDER BY
- * flowsheet.id DESC LIMIT 1` makes the row-pick deterministic on
- * multi-album_id keys (V/A multi-format, dual-pressing, librarian
- * duplicates — verified to exist in the live `album_id` corpus). Two
- * requests for the same lookup key resolve to the same row, eliminating a
- * flapping-response edge that would otherwise let iOS see two different
- * albums for the same query across polls. Sort cost is bounded: the
- * most-popular key has hundreds of matches, not thousands; the post-filter
- * `id DESC` sort on the small match set is sub-ms in practice.
- *
- * An empty/whitespace-only `artistName` or `releaseTitle` short-circuits to
- * `null`: the key `'<artist>-'` (blank release) would otherwise match any
- * linked flowsheet row whose DJ left `album_title` blank and return an
- * arbitrary `album_id`.
- */
-export async function resolveLinkedAlbumId(artistName: string, releaseTitle?: string): Promise<number | null> {
-  const trimmedArtist = artistName.trim();
-  const trimmedRelease = (releaseTitle ?? '').trim();
-  if (trimmedArtist.length === 0 || trimmedRelease.length === 0) return null;
-
-  const key = lookupKey(trimmedArtist, trimmedRelease);
-
-  const candidate = await db
-    .select({ album_id: flowsheet.album_id })
-    .from(flowsheet)
-    .where(sql`${flowsheetLookupKey} = ${key} AND ${flowsheet.album_id} IS NOT NULL`)
-    .orderBy(desc(flowsheet.id))
-    .limit(1);
-
-  return candidate[0]?.album_id ?? null;
 }
 
 /**

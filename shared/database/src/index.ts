@@ -13,3 +13,4 @@ export * from './freetext-norm.js';
 export * from './ny-time.js';
 export * from './concerts-sql.js';
 export * from './concerts-recompute.js';
+export * from './album-resolve.js';

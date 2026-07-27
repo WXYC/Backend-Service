@@ -60,8 +60,7 @@ config();
 
 import { readFileSync } from 'node:fs';
 import { sql } from 'drizzle-orm';
-import { db, closeDatabaseConnection, album_critic_reviews } from '@wxyc/database';
-import { resolveLinkedAlbumId } from '../apps/backend/services/album-metadata-lookup.service.js';
+import { db, closeDatabaseConnection, album_critic_reviews, resolveLinkedAlbumId } from '@wxyc/database';
 
 /** One candidate review, normalized from either source (b1) or (b2). */
 export interface CorpusItem {

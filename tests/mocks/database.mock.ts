@@ -434,6 +434,17 @@ export const recomputeHasResolvedSupport = jest
   .fn<() => Promise<RecomputeOutcome>>()
   .mockResolvedValue({ updated: 0, updated_true: 0, updated_false: 0 });
 
+// Stub of shared/database/src/album-resolve.ts's `resolveLinkedAlbumId`
+// (BS#1829, extracted from apps/backend/services/album-metadata-lookup.
+// service.ts). Consumers (the service's thin re-export, scripts/
+// seed-critic-reviews.ts, and eventually jobs/album-critic-reviews-etl)
+// only need a controllable resolved value here — the real lookup-key +
+// ORDER BY contract is pinned against the actual module by
+// tests/unit/database/album-resolve.test.ts.
+export const resolveLinkedAlbumId = jest
+  .fn<(artistName: string, releaseTitle?: string) => Promise<number | null>>()
+  .mockResolvedValue(null);
+
 export { requirePositiveInt, requireNonNegativeInt } from '../../shared/database/src/env-parsers.js';
 export type { IntParserOptions } from '../../shared/database/src/env-parsers.js';
 
