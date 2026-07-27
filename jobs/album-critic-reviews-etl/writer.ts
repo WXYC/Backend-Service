@@ -33,14 +33,18 @@ export type UpsertOutcome = {
 
 /** The content columns the ON CONFLICT `set` refreshes and the `setWhere`
  *  guard compares — every `Row` key except `album_id`/`source_url` (the
- *  conflict target, equal on both sides by definition). */
+ *  conflict target, equal on both sides by definition) AND
+ *  `discogs_release_id`. The latter is INSERT-only (still in `.values()`, so
+ *  a fresh row carries whatever the manifest supplies — null today): a future
+ *  release-level reconciliation pass OWNS that column, so refreshing it here
+ *  would let this ETL null out a value that pass populated on the rare
+ *  conflict-update path. Mirrors the donor's INSERT-only `album_id`. */
 export const SET_CONTENT_COLUMNS = [
   'source',
   'snippet',
   'author',
   'published_at',
   'rating',
-  'discogs_release_id',
   'source_key',
 ] as const satisfies readonly (keyof Row)[];
 
@@ -55,6 +59,16 @@ const buildConflictSet = (row: Row): { [K in ContentColumn]: Row[K] } & { last_m
 
 const distinctFromArm = (col: ContentColumn, row: Row): SQL => {
   const column = album_critic_reviews[col];
+  if (col === 'published_at') {
+    // `published_at` is a `date` column. A param interpolated into a raw sql
+    // fragment bypasses drizzle's column encoder (it types params only for
+    // real column bindings), so at the driver boundary the bound string can
+    // degrade to text/unknown typing — either a `date IS DISTINCT FROM text`
+    // operator error or an always-distinct comparison that churns
+    // last_modified. The explicit `::date` cast restores date typing. Same
+    // trap the donor album-reviews-etl writer casts its timestamp arm for.
+    return sql`${column} IS DISTINCT FROM ${row[col]}::date`;
+  }
   return sql`${column} IS DISTINCT FROM ${row[col]}`;
 };
 

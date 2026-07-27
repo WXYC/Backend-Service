@@ -25,6 +25,18 @@ import type { CorpusItem } from './manifest.js';
 /** Hard fair-use ceiling (ADR 0012). The DB column is varchar(512); this
  *  writer self-limits tighter and enforces it in code, not just the prompt. */
 export const MAX_SNIPPET = 300;
+
+/** Column ceilings from migration 0125. Enforced in code so an over-length
+ *  LLM-recovered byline/score or a pathological manifest URL can't overflow
+ *  the varchar at insert time and abort the whole run — the write path is
+ *  isolated per-item (orchestrate.ts), but keeping garbage out of the row in
+ *  the first place preserves the card instead of dropping it as a write
+ *  error. `author`/`rating` are attribution niceties: null an over-length
+ *  value, keep the review. `source_url` is load-bearing (link-out target +
+ *  half the natural key) and can't be truncated safely, so reject the row. */
+export const MAX_AUTHOR = 128;
+export const MAX_RATING = 32;
+export const MAX_SOURCE_URL = 1024;
 export const MODEL = 'claude-haiku-4-5-20251001';
 
 export const EXTRACTION_SYSTEM = [
@@ -144,18 +156,25 @@ export const buildRow = (
     }
     if (snippet.length === 0) return null; // couldn't cap cleanly — drop it
   }
+  // The link-out target can't be truncated without breaking it, and it's half
+  // the natural key — reject rather than store a mangled URL.
+  if (item.sourceUrl.length > MAX_SOURCE_URL) return null;
+
+  // REVERSED from the seed script: manifest author wins when present
+  // (issue's explicit instruction).
+  const author = item.author ?? extraction.author ?? null;
+  // Unchanged from the seed script: extraction (LLM-recovered) rating wins.
+  const rating = extraction.rating ?? item.rating ?? null;
   return {
     album_id: albumId,
     source: item.source,
     source_url: item.sourceUrl,
     snippet,
-    // REVERSED from the seed script: manifest author wins when present
-    // (issue's explicit instruction).
-    author: item.author ?? extraction.author ?? null,
+    // Null an over-length byline/score rather than overflow varchar(128)/(32):
+    // the review + snippet stay usable, only the attribution field drops.
+    author: author !== null && author.length <= MAX_AUTHOR ? author : null,
     published_at: item.publishedAt ?? null,
-    // Unchanged from the seed script: extraction (LLM-recovered) rating
-    // wins over the manifest's.
-    rating: extraction.rating ?? item.rating ?? null,
+    rating: rating !== null && rating.length <= MAX_RATING ? rating : null,
     discogs_release_id: item.discogsReleaseId ?? null,
     source_key: `manifest:${item.source}`,
   };

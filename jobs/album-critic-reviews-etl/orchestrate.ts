@@ -29,7 +29,10 @@
  *      throwing is caught and counted (`llm_errors`) — one poisoned article
  *      must not wedge the run. A clean extraction that isn't a usable
  *      review (`buildRow` returns null) is counted (`rejected`), never
- *      thrown.
+ *      thrown. The UPSERT is isolated the same way: a row that throws at
+ *      write time (constraint violation, transient DB error) is counted
+ *      (`write_errors`) and skipped, so it can't abort the run and — via the
+ *      anti-join — permanently wedge every later item on future runs.
  *   9. Guard: new items existed but zero were written -> throw (wholesale
  *      extraction/write regression must not report a green run).
  *
@@ -65,6 +68,9 @@ export interface Totals {
   extracted: number;
   rejected: number;
   llm_errors: number;
+  /** Rows that built cleanly but threw at UPSERT (constraint violation, etc.).
+   *  Isolated per-item so one poisoned row can't wedge the whole run. */
+  write_errors: number;
   inserted: number;
   updated: number;
   unchanged: number;
@@ -83,6 +89,7 @@ const emptyTotals = (): Totals => ({
   extracted: 0,
   rejected: 0,
   llm_errors: 0,
+  write_errors: 0,
   inserted: 0,
   updated: 0,
   unchanged: 0,
@@ -206,10 +213,26 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
     }
 
     totals.extracted += 1;
-    const outcome = await opts.upsertRow(row);
-    if (outcome.inserted) totals.inserted += 1;
-    else if (outcome.updated) totals.updated += 1;
-    else totals.unchanged += 1;
+    // Isolate the write the same way extraction is isolated above: a single
+    // row that violates a column constraint (or any transient DB error) must
+    // not abort the run and — via the anti-join skipping already-written
+    // rows — permanently wedge every item that sorts after it on every
+    // subsequent weekly run. Count it and move on; the zero-written guard
+    // below still fails a wholesale write regression loudly.
+    try {
+      const outcome = await opts.upsertRow(row);
+      if (outcome.inserted) totals.inserted += 1;
+      else if (outcome.updated) totals.updated += 1;
+      else totals.unchanged += 1;
+    } catch (error) {
+      totals.write_errors += 1;
+      log('warn', 'write_error', `UPSERT failed for ${newItem.item.sourceUrl}`, {
+        source_url: newItem.item.sourceUrl,
+        album_id: newItem.albumId,
+        error_message: (error as Error).message,
+      });
+      captureError(error, 'write_error', { source_url: newItem.item.sourceUrl, album_id: newItem.albumId });
+    }
   }
   totals.written = totals.inserted + totals.updated + totals.unchanged;
 
@@ -217,7 +240,7 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
   if (totals.written === 0) {
     throw new Error(
       `${newItems.length} new items reached extraction but 0 were written ` +
-        `(rejected=${totals.rejected}, llm_errors=${totals.llm_errors}) — ` +
+        `(rejected=${totals.rejected}, llm_errors=${totals.llm_errors}, write_errors=${totals.write_errors}) — ` +
         'treating as a wholesale extraction/write regression, not a successful run'
     );
   }

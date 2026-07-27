@@ -127,12 +127,40 @@ describe('upsertRow', () => {
     expect(armColumns.has('last_modified')).toBe(false);
     expect(armColumns.has('album_id')).toBe(false);
     expect(armColumns.has('source_url')).toBe(false);
+    // discogs_release_id is INSERT-only — never refreshed, so never in setWhere.
+    expect(armColumns.has('discogs_release_id')).toBe(false);
   });
 
-  it('pins the content-column list to the insert-row shape minus the conflict key and id/timestamps', () => {
+  it('casts the published_at (date column) setWhere arm with ::date so the bound string keeps date typing', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
+    await upsertRow(makeRow());
+
+    const arms = collectDistinctArms(upsertConfig().setWhere);
+    const publishedAtArm = arms.find((a) => a.column === 'published_at');
+    expect(publishedAtArm).toBeDefined();
+    expect(publishedAtArm?.text).toContain('::date');
+  });
+
+  it('excludes discogs_release_id from the conflict set (INSERT-only; owned by a future reconciliation pass)', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
+    await upsertRow(makeRow());
+
+    const set = upsertConfig().set ?? {};
+    expect(Object.keys(set)).not.toContain('discogs_release_id');
+  });
+
+  it('still carries discogs_release_id in the INSERT values (insert-only, not update-suppressed)', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
+    await upsertRow({ ...makeRow(), discogs_release_id: 999 });
+
+    const values = mockDb._chain.values.mock.calls[0][0] as Record<string, unknown>;
+    expect(values.discogs_release_id).toBe(999);
+  });
+
+  it('pins the content-column list to the insert-row shape minus the conflict key and INSERT-only discogs_release_id', () => {
     const rowKeys = Object.keys(makeRow());
     expect([...SET_CONTENT_COLUMNS].sort()).toEqual(
-      rowKeys.filter((k) => k !== 'album_id' && k !== 'source_url').sort()
+      rowKeys.filter((k) => k !== 'album_id' && k !== 'source_url' && k !== 'discogs_release_id').sort()
     );
   });
 });
