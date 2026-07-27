@@ -122,9 +122,11 @@ describe('metadata.service', () => {
       trackTitle: 'VI Scose Poise',
     });
 
+    // BS#1826 PR 2: `metadata-service` is class 5 (batch/backfill enrichment)
+    // — budget (28000ms) and timeout (29000ms) come from the per-caller
+    // policy layer now, not a call-site `budgetMs` literal.
     expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', 'VI Scose Poise', {
       caller: 'metadata-service',
-      budgetMs: 5000,
     });
   });
 

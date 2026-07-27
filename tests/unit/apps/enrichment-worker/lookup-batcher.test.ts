@@ -117,12 +117,16 @@ describe('enrichmentBulkLookup burst coalescing (B3 / BS#1749)', () => {
     expect(items).toHaveLength(4);
   });
 
-  it('forwards the enrichment caller label + budget to the bulk call (parity with per-call path)', async () => {
+  it('forwards the enrichment caller label to the bulk call (parity with per-call path)', async () => {
     // Parity guard: the per-row `lookupMetadata` path tagged its call with
     // `caller: 'enrichment-worker'` (the BS#1235 Sentry `lml.caller` label —
-    // missing it degrades to the `unknown` flag-of-shame) and a 29 s
-    // `budgetMs` deadline. Batching must preserve both, or the enrichment
-    // path silently loses its Sentry attribution and its deadline negotiation.
+    // missing it degrades to the `unknown` flag-of-shame). Batching must
+    // preserve it, or the enrichment path silently loses its Sentry
+    // attribution. BS#1826 PR 2: the 29 s deadline is no longer a call-site
+    // `budgetMs` literal — `bulkLookupMetadata` now resolves it internally
+    // from the `enrichment-worker` class-5 policy default (28000ms budget /
+    // 29000ms timeout, see `tests/unit/shared/lml-client/policy.test.ts`),
+    // so this call site correctly omits `budgetMs` entirely.
     mockBulkLookupMetadata.mockImplementation((items) => Promise.resolve(echoAllMatched(items)));
 
     const p = enrichmentBulkLookup(makeInput('Stereolab'));
@@ -130,7 +134,8 @@ describe('enrichmentBulkLookup burst coalescing (B3 / BS#1749)', () => {
     await p;
 
     const [, options] = mockBulkLookupMetadata.mock.calls[0];
-    expect(options).toMatchObject({ caller: 'enrichment-worker', budgetMs: 29000 });
+    expect(options).toMatchObject({ caller: 'enrichment-worker' });
+    expect(options).not.toHaveProperty('budgetMs');
   });
 
   it('sets allowReleaseResolutionFallback:true on the bulk dispatch (BS#1815 non-library resolution restore)', async () => {

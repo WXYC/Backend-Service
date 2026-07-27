@@ -782,8 +782,10 @@ describe('proxy.controller', () => {
         // LmlLookupCoordinator forces it on the wire. The coordinator
         // mock receives the callsite args; `extended` is applied inside
         // the (real) coordinator's fetchUncached path.
+        // BS#1826 PR 2: `proxy-album-metadata` is class 2 — budget
+        // (4000ms) and timeout (5000ms) come from the per-caller policy
+        // layer now, not a call-site `budgetMs` literal.
         expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
-          budgetMs: 5000,
           caller: 'proxy-album-metadata',
         });
       });
@@ -1763,11 +1765,14 @@ describe('proxy.controller', () => {
 
       await librarySearch(req, res as Response, mockNext);
 
+      // BS#1826 PR 2: the PRD's protected-search win — `searchLibrary` now
+      // carries the `proxy-library-search` class-1 label.
       expect(mockSearchLibrary).toHaveBeenCalledWith({
         artist: 'Stereolab',
         title: 'Aluminum Tunes',
         q: undefined,
         limit: 5,
+        caller: 'proxy-library-search',
       });
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith(mockResponse);
@@ -1785,12 +1790,18 @@ describe('proxy.controller', () => {
       expect(res.status).toHaveBeenCalledWith(200);
     });
 
-    it('rejects with LmlClientError (handled by errorHandler)', async () => {
-      mockSearchLibrary.mockRejectedValue(new MockLmlClientError('LML not configured', 503));
-      const req = { query: { artist: 'Stereolab' } } as unknown as Request;
+    it('degrades an LmlClientError to a 200 with empty results (class-1 never-5xx contract, BS#1826/#1819)', async () => {
+      // Protected local catalog search must never surface a 5xx to dj-site
+      // autocomplete: an LML timeout/abort/transport failure returns an empty
+      // result set, not an error propagated to the errorHandler.
+      mockSearchLibrary.mockRejectedValue(new MockLmlClientError('LML request timed out', 504));
+      const req = { query: { q: 'Stereolab' } } as unknown as Request;
       const res = createMockRes();
 
-      await expect(librarySearch(req, res as Response, mockNext)).rejects.toThrow('LML not configured');
+      await librarySearch(req, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({ results: [], total: 0, query: 'Stereolab' });
     });
 
     it('rejects with unexpected errors (handled by errorHandler)', async () => {

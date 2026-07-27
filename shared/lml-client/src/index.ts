@@ -142,15 +142,25 @@ export function envInt(name: string, fallback: number): number {
  * BS#1826: soft caller→policy lookup used internally to compute default
  * `timeoutMs`/`budgetMs` when a call passes `{ caller }` without an
  * explicit override. Unlike the public `resolveLmlPolicy` (which throws on
- * an unregistered caller), this NEVER throws — `LookupOptions.caller` stays
- * a loosely-typed `string` until `caller` becomes a compile-time-checked
- * `LmlCaller` (BS#1826 PR 2), so a request path must never crash because of
- * an unregistered or mistyped label. An unregistered/absent caller simply
- * gets no policy default, and the method's own pre-existing default (e.g.
- * `TIMEOUT_MS`) applies unchanged. Note this is NOT true for a *registered*
- * caller: a call site already passing a known `caller` label (several do,
- * for observability) picks up its class default the moment this lands — an
- * intended, env-reversible behavior change, not a no-op (see policy.ts).
+ * an unregistered caller), this NEVER throws.
+ *
+ * PR 2 (BS#1826) types `caller` as `LmlCaller` at every budget-bearing call
+ * site's options type — a mistyped label is now a COMPILE error in
+ * `apps/**`/`shared/**`. But `jobs/**` isn't typechecked (repo convention;
+ * see `docs/env-vars.md`/CLAUDE.md's testing-scope note), and `LookupOptions
+ * .caller` stays optional (not required) at the type level for the reasons
+ * documented on that field — so a `string` still reaches this function at
+ * runtime from an un-typechecked or genuinely caller-less call. This lookup
+ * stays a plain string-keyed `hasOwnProperty` check (not a `resolveLmlPolicy`
+ * throw) so an unregistered/mistyped/absent caller at runtime degrades to
+ * "no policy default" — the method's own pre-existing default (e.g.
+ * `TIMEOUT_MS`) applies unchanged — rather than crashing a live request
+ * path. The PR 3 CI guard is the intended backstop for `jobs/**`.
+ *
+ * A *registered* caller is the opposite of a no-op: it picks up its class
+ * default here, so a call site already passing a known label tightens from
+ * the 30s `TIMEOUT_MS` fallback to its class budget. Intended + env-reversible
+ * (`LML_CLASS{1..5}_TIMEOUT_MS`); see policy.ts's behavioral note.
  */
 function policyForCaller(caller: string | undefined): LmlPolicy | undefined {
   if (caller === undefined) return undefined;
@@ -476,12 +486,19 @@ export interface LookupOptions {
    * BS#1826: a registered caller (see `ALL_LML_CALLERS` in `policy.ts`) now
    * also supplies the DEFAULT `timeoutMs`/`budgetMs` for this call, used
    * only when this options object doesn't set them explicitly — explicit
-   * `timeoutMs`/`budgetMs` always win. Kept as a loose `string` (not the
-   * typed `LmlCaller` union) in this PR so an unregistered/mistyped label
-   * degrades to "no policy default" instead of a compile error or a thrown
-   * runtime error; the typed, required union lands in a follow-up PR.
+   * `timeoutMs`/`budgetMs` always win.
+   *
+   * PR 2 (BS#1826): typed as `LmlCaller` (not a loose `string`) so
+   * `apps/**`/`shared/**` fail to compile on a mistyped or unregistered
+   * label. Kept optional at this key — not `caller: LmlCaller` — because
+   * `LookupOptions` is `Pick`ed into `CoordinatorLookupOptions`
+   * (`apps/backend/services/lml/lookup-coordinator.ts`), whose `lookup()`
+   * forwards a caller-less options object on the zero-args overload; the
+   * runtime lookup path stays soft for a genuinely absent caller (see
+   * `policyForCaller`'s doc comment), and the CI guard (PR 3) is the
+   * backstop that forces every real call site to supply one.
    */
-  caller?: string;
+  caller?: LmlCaller;
   /**
    * BS#1293 runtime-lookup gate. When `true` and `forceLookup` is not also
    * `true`, `lookupMetadata` short-circuits before acquiring a limiter permit
@@ -627,7 +644,7 @@ async function postLookup(
     timeoutMs?: number;
     limiter?: LmlLimiter;
     budgetMs?: number;
-    caller?: string;
+    caller?: LmlCaller;
     discogsUnavailable?: boolean;
     forceLookup?: boolean;
   }
@@ -810,11 +827,19 @@ const BULK_LOOKUP_INPUT_CAP = 100;
  */
 export async function bulkLookupMetadata(
   items: BulkLookupItem[],
-  options?: {
+  options: {
     timeoutMs?: number;
     limiter?: LmlLimiter;
     budgetMs?: number;
-    caller?: string;
+    /**
+     * BS#1826 PR 2: required, typed `LmlCaller` — every registered
+     * `bulkLookupMetadata` caller in tree already supplies this (the
+     * enrichment worker + the three offline bulk drains), so this is a
+     * genuinely enforceable requirement rather than an optional-with-
+     * fallback like `LookupOptions.caller` (see that field's doc comment
+     * for why it stays optional).
+     */
+    caller: LmlCaller;
     /**
      * BS#1815 / LML#920: `/lookup/bulk` hardcodes
      * `allow_release_resolution_fallback=False` server-side (the LML#671
@@ -986,15 +1011,35 @@ function buildSkippedBulkResultItem(index: number): BulkLookupResultItem {
 
 /**
  * Options accepted by the class-3 PG-cached reads (`getRelease`,
- * `getArtistDetails`, `resolveEntity`, `searchTrackReleases`). `caller` is
- * optional in this PR (BS#1826 PR 1) — when omitted, these methods are
- * byte-identical to their pre-BS#1826 behavior (no timeout arg reaches
- * `lmlFetch`, so its own `TIMEOUT_MS` default applies). When present and
- * registered, the caller's class-3 `timeoutMs` (8 s PG-cached-read default,
- * or a per-caller override) is threaded into the `lmlFetch` AbortController.
+ * `getArtistDetails`, `resolveEntity`, `searchTrackReleases`). `caller`
+ * remains OPTIONAL in PR 2 (BS#1826) — unlike `searchLibrary`'s and
+ * `checkStreamingAvailability`'s options, this type has call sites outside
+ * this PR's migration scope (e.g. `apps/backend/controllers/proxy.
+ * controller.ts`'s `getArtistDetails(id)` / `getRelease(discogsReleaseId)`,
+ * `library.service.ts`'s `getRelease(releaseId)` fallback,
+ * `jobs/concerts-poster-enrichment`) that call these methods with no
+ * options at all today. Typed as `LmlCaller` (not a loose `string`) so a
+ * caller that DOES pass a label can't typo it past the compiler; omitted,
+ * these methods stay byte-identical to their pre-BS#1826 behavior (no
+ * timeout arg reaches `lmlFetch`, so its own `TIMEOUT_MS` default applies).
+ * When present and registered, the caller's class-3 `timeoutMs` (8 s
+ * PG-cached-read default, or a per-caller override) is threaded into the
+ * `lmlFetch` AbortController.
  */
 export interface DiscogsReadOptions {
-  caller?: string;
+  caller?: LmlCaller;
+}
+
+/**
+ * Options accepted by `checkStreamingAvailability` (BS#1826 PR 2, class 4).
+ * Unlike the shared `DiscogsReadOptions`, `caller` is REQUIRED here — every
+ * in-tree call site (`library.controller.ts`'s add/update-album streaming
+ * checks) is migrated in this PR to supply a distinct class-4 label
+ * (`library-add-album-streaming` / `library-update-album-streaming`), so
+ * there is no legitimate caller-less call site left to accommodate.
+ */
+export interface StreamingCheckOptions {
+  caller: LmlCaller;
 }
 
 /**
@@ -1116,16 +1161,15 @@ export async function validateTrackOnRelease(releaseId: number, track: string, a
  *
  * @param artist - Artist name
  * @param title - Album title
- * @param options - Optional caller label (BS#1826 class 4: `library-add-
- *   album-streaming` / `library-update-album-streaming`). Omitted callers
- *   are byte-identical to pre-BS#1826 behavior — no timeout reaches
- *   `lmlFetch`, so its `TIMEOUT_MS` default applies.
+ * @param options - REQUIRED caller label (BS#1826 PR 2, class 4:
+ *   `library-add-album-streaming` / `library-update-album-streaming`). See
+ *   `StreamingCheckOptions`.
  * @returns Streaming availability result with per-source URLs
  */
 export async function checkStreamingAvailability(
   artist: string,
   title: string,
-  options?: DiscogsReadOptions
+  options: StreamingCheckOptions
 ): Promise<StreamingCheckResponse> {
   // BS#1750 / B5: fires on every album add. Route it through the process-wide
   // `defaultLimiter` — the same shared concurrency/rate gate as `/lookup` —
@@ -1135,7 +1179,7 @@ export async function checkStreamingAvailability(
   // limiter's `semaphore.acquire()` + `tokenBucket.consume(1)`; the permit is
   // released in the limiter's `finally`. Behavior is otherwise unchanged —
   // same path, headers, body, and returned `StreamingCheckResponse`.
-  const timeoutMs = policyForCaller(options?.caller)?.timeoutMs;
+  const timeoutMs = policyForCaller(options.caller)?.timeoutMs;
   return defaultLimiter.run(async () => {
     const response = await lmlFetch(
       '/api/v1/streaming-check',
@@ -1154,10 +1198,11 @@ export async function checkStreamingAvailability(
 /**
  * Search the library catalog via LML.
  *
- * @param params - Search parameters (artist, title, q, limit) plus an
- *   optional caller label (BS#1826 class 1: `proxy-library-search`).
- *   Omitted callers are byte-identical to pre-BS#1826 behavior — no timeout
- *   reaches `lmlFetch`, so its `TIMEOUT_MS` default applies.
+ * @param params - Search parameters (artist, title, q, limit) plus a
+ *   REQUIRED caller label (BS#1826 PR 2, class 1: `proxy-library-search` —
+ *   the PRD's protected-search win; the sole in-tree call site is migrated
+ *   in this PR, so there is no legitimate caller-less call left to
+ *   accommodate).
  * @returns Library search results
  */
 export async function searchLibrary(params: {
@@ -1165,7 +1210,7 @@ export async function searchLibrary(params: {
   title?: string;
   q?: string;
   limit?: number;
-  caller?: string;
+  caller: LmlCaller;
 }): Promise<LibrarySearchResponse> {
   const searchParams = new URLSearchParams();
   if (params.artist) searchParams.set('artist', params.artist);

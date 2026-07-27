@@ -18,12 +18,17 @@ import {
   getArtistDetails,
   resolveEntity as lmlResolveEntity,
   searchLibrary,
-  envInt,
   isSpotifyUrl,
   isAppleMusicUrl,
   LmlClientError,
 } from '@wxyc/lml-client';
-import type { DiscogsMatchResult, DiscogsReleaseMetadata, DiscogsTrackItem, LookupResponse } from '@wxyc/lml-client';
+import type {
+  DiscogsMatchResult,
+  DiscogsReleaseMetadata,
+  DiscogsTrackItem,
+  LibrarySearchResponse,
+  LookupResponse,
+} from '@wxyc/lml-client';
 import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { getDiscogsReleaseIdByLegacyId } from '../services/library.service.js';
 import { filterSpacerGif, isSyntheticArtwork } from '../services/metadata/metadata.service.js';
@@ -44,14 +49,14 @@ import WxycError from '../utils/error.js';
 // the same inputs (BS#889).
 const searchUrlProvider = new SearchUrlProvider();
 
-/**
- * Budget for the user-visible iOS playlist + dj-site cover-art path. Tight
- * because the controller would rather degrade to synthesized fallback URLs
- * than hold the response on an obscure-artist cascade. Matches the 5 s
- * deadline used by the rotation picker (BS#992). See `LookupOptions.budgetMs`
- * for the mechanics.
- */
-const PROXY_LML_BUDGET_MS = envInt('PROXY_LML_BUDGET_MS', 5000);
+// BS#1826 PR 2: `PROXY_LML_BUDGET_MS` retired. `proxy-album-metadata` is a
+// class-2 caller (budget 4000ms/timeout 5000ms via the per-caller policy
+// layer, `@wxyc/lml-client` `policy.ts`). The old setup passed budgetMs=5000
+// with NO explicit timeout, so the socket rode the 30s `TIMEOUT_MS` default
+// (budget 5s soft-cut, 30s hard ceiling); the new class-2 default keeps a
+// 1s slack between the 4s budget and 5s timeout so a 200-with-fallback can
+// flush before the abort. See `docs/env-vars.md` for the retired-constant →
+// class mapping.
 
 /** Spotify OAuth2 token response. */
 interface SpotifyTokenResponse {
@@ -487,7 +492,6 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
     let artwork: DiscogsMatchResult | undefined;
     try {
       const lookupResponse: LookupResponse = await lmlLookupCoordinator.lookup(artistName, releaseTitle, trackTitle, {
-        budgetMs: PROXY_LML_BUDGET_MS,
         caller: 'proxy-album-metadata',
       });
       artwork = lookupResponse.results?.[0]?.artwork;
@@ -707,12 +711,31 @@ export const librarySearch: RequestHandler<object, unknown, unknown, LibrarySear
 
   if (!artist && !title && !q) throw new WxycError('At least one of artist, title, or q is required', 400);
 
-  const results = await searchLibrary({
-    artist,
-    title,
-    q,
-    limit: limit ? parseInt(limit, 10) : undefined,
-  });
+  let results: LibrarySearchResponse;
+  try {
+    results = await searchLibrary({
+      artist,
+      title,
+      q,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      // BS#1826 PR 2: the PRD's protected-search win — class 1 (3s timeout,
+      // no budget header), so local catalog search can't be starved by
+      // enrichment/batch LML traffic sharing the same default.
+      caller: 'proxy-library-search',
+    });
+  } catch (err) {
+    // BS#1826 / PRD #1819: class 1's contract is "never surface a 5xx —
+    // degrade to empty results." The class-1 timeout is deliberately short
+    // (3s), so a slow/overloaded LML must NOT turn dj-site catalog
+    // autocomplete into an error toast — an LML timeout/abort/transport
+    // failure returns an empty result set (BS holds no local mirror of LML's
+    // SQLite catalog, so "local/empty" is empty here). Only re-throw a
+    // non-LML programming error so genuine bugs still surface.
+    if (!(err instanceof LmlClientError)) throw err;
+    Sentry.getActiveSpan()?.setAttributes({ 'proxy.library_search.degraded': true });
+    console.warn(`[ProxyController] library search degraded to empty (LML ${err.statusCode ?? 'error'})`, err.message);
+    results = { results: [], total: 0, query: q ?? null };
+  }
 
   res.set('Cache-Control', 'private, max-age=60');
   res.status(200).json(results);

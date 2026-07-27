@@ -36,7 +36,6 @@ import {
   getRelease,
   lookupBySong,
   isLmlConfigured,
-  envInt,
   LmlClientError,
   resolveIdentity,
   type LookupResponse,
@@ -588,43 +587,33 @@ const ROTATION_LML_LOOKUP_TTL_NEGATIVE_MS = MS_PER_DAY;
  * cost on every deploy.
  */
 const ROTATION_TRACKLIST_LOOKUP_NEGATIVE_WINDOW_MS = 7 * MS_PER_DAY;
-/**
- * Per-call LML timeout for the picker's tier-3 lookup. 10 s matches
- * tubafrenzy's `RELEASE_LOOKUP_TIMEOUT` (`LibrarySearchClient.java:64`),
- * which is the parity bar we measure picker coverage against. Shorter
- * timeouts cut off LML's cascade before the later strategies that find
- * obscure college-rotation releases get to run — the source of the
- * coverage regression that motivated dropping the BS#1186 budget.
- *
- * Intentionally no `budgetMs` companion: BS#1186 added a 4 s
- * `X-Caller-Budget-Ms` header to short-circuit LML's empty-results
- * cascade. That cap was justified by malformed-query examples
- * (track-titles-as-album-names) and applied uniformly across callers,
- * including this one. For the picker — which always passes real
- * `(artist_name, album_title)` pairs from rotation rows — the cascade's
- * later strategies are exactly where matches come from, so capping at
- * 4 s collapsed picker coverage to ~23 %. The iOS proxy/artwork hot-path
- * callers keep their budgets; only this call site opts out.
- */
-const ROTATION_LML_LOOKUP_TIMEOUT_MS = 10000;
-
-/**
- * Budget for `searchLibraryByTrack` — a user-visible read path that would
- * rather degrade than hold the response on an obscure-artist cascade. See
- * `LookupOptions.budgetMs` for mechanics.
- */
-const LIBRARY_INTERACTIVE_LML_BUDGET_MS = envInt('LIBRARY_INTERACTIVE_LML_BUDGET_MS', 5000);
-
-/**
- * Per-call LML budget for `enrichWithArtwork`'s lookup. BS#1828 took this call
- * off the `searchForAlbum` response path entirely (fire-and-forget from the
- * controller), so this budget no longer bounds request latency — it bounds
- * how long a detached enrichment can hold an LML/Discogs slot before giving
- * up, stricter than the interactive (5s) and batch (29s) classes since
- * artwork enrichment is the most droppable of the three. Should fold into
- * #1826's per-class policy layer when that lands.
- */
-const LIBRARY_SEARCH_LML_BUDGET_MS = envInt('LIBRARY_SEARCH_LML_BUDGET_MS', 2000);
+// BS#1826 PR 2: `ROTATION_LML_LOOKUP_TIMEOUT_MS`, `LIBRARY_INTERACTIVE_LML_
+// BUDGET_MS`, and `LIBRARY_SEARCH_LML_BUDGET_MS` retired — all three now
+// come from the per-caller policy layer (`@wxyc/lml-client` `policy.ts`):
+// `library-rotation-picker` is the BS#992/BS#1186 class-2 override (10s
+// timeout / 9000ms budget, preserving the "no aggressive budget cap"
+// rationale below), `library-track-search` is class 2 (4000ms budget /
+// 5000ms timeout), and `library-enrich-artwork` is the #1828 class-2
+// override (`LIBRARY_SEARCH_LML_BUDGET_MS` env name preserved as the
+// override's env lever). See `docs/env-vars.md` for the retired-constant
+// → class mapping.
+//
+// Per-call LML timeout for the picker's tier-3 lookup. 10 s matches
+// tubafrenzy's `RELEASE_LOOKUP_TIMEOUT` (`LibrarySearchClient.java:64`),
+// which is the parity bar we measure picker coverage against. Shorter
+// timeouts cut off LML's cascade before the later strategies that find
+// obscure college-rotation releases get to run — the source of the
+// coverage regression that motivated dropping the BS#1186 budget.
+//
+// Intentionally no `budgetMs` companion: BS#1186 added a 4 s
+// `X-Caller-Budget-Ms` header to short-circuit LML's empty-results
+// cascade. That cap was justified by malformed-query examples
+// (track-titles-as-album-names) and applied uniformly across callers,
+// including this one. For the picker — which always passes real
+// `(artist_name, album_title)` pairs from rotation rows — the cascade's
+// later strategies are exactly where matches come from, so capping at
+// 4 s collapsed picker coverage to ~23 %. The iOS proxy/artwork hot-path
+// callers keep their budgets; only this call site opts out.
 
 /**
  * Wire shape returned by `GET /library/rotation/:rotation_id/tracks`. The
@@ -769,8 +758,9 @@ export async function resolveRotationPickerSource(rotationId: number): Promise<R
  * isn't a write target on this path either, and a column-mix between
  * paste-URL-prefilled and LML-resolved values would muddy provenance.
  *
- * Bounded at `ROTATION_LML_LOOKUP_TIMEOUT_MS` (10 s) per call — fast-fail
- * for the user-visible picker (BS#992). Caller errors are swallowed so
+ * Bounded at 10 s per call (the `library-rotation-picker` class-2 policy
+ * override, BS#1826) — fast-fail for the user-visible picker (BS#992).
+ * Caller errors are swallowed so
  * the picker degrades to free-text rather than 500ing; the LML client
  * already wraps the call in a Sentry span carrying `lml.cache.*` and
  * `lml.queue_depth` attributes for trace-explorer drill-down.
@@ -818,7 +808,6 @@ async function resolveRotationDiscogsReleaseViaLml(
     // floor for `direct` matches, so this is sufficient — the picker falls
     // through to free-text on rejection.
     const response = await lmlLookupCoordinator.lookup(lookupArtist, albumTitle, undefined, {
-      timeoutMs: ROTATION_LML_LOOKUP_TIMEOUT_MS,
       caller: 'library-rotation-picker',
       requireSearchType: 'direct',
     });
@@ -1099,7 +1088,6 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[
   const settlements = await Promise.allSettled(
     uncached.map(async (row) => {
       const lookupResult = await lmlLookupCoordinator.lookup(row.artist_name, row.album_title, undefined, {
-        budgetMs: LIBRARY_SEARCH_LML_BUDGET_MS,
         caller: 'library-enrich-artwork',
         requireSearchType: 'direct',
       });
@@ -2019,7 +2007,6 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
 async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<TaggedLibraryViewEntry[]> {
   const lookupStart = performance.now();
   const response: LookupResponse = await lookupBySong(query, {
-    budgetMs: LIBRARY_INTERACTIVE_LML_BUDGET_MS,
     caller: 'library-track-search',
   });
   try {

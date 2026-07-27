@@ -44,6 +44,7 @@ import {
   createLmlLimiter,
   getLmlQueueDepth,
   _resetLmlClientLimitersForTest,
+  type LmlCaller,
 } from '@wxyc/lml-client';
 
 describe('lml.client', () => {
@@ -1807,7 +1808,9 @@ describe('lml.client', () => {
         json: () => Promise.resolve(mockResponse),
       } as unknown as globalThis.Response);
 
-      const result = await checkStreamingAvailability('Stereolab', 'Aluminum Tunes');
+      const result = await checkStreamingAvailability('Stereolab', 'Aluminum Tunes', {
+        caller: 'library-add-album-streaming',
+      });
 
       expect(mockFetch).toHaveBeenCalledWith(
         'http://lml.test:8000/api/v1/streaming-check',
@@ -1831,7 +1834,9 @@ describe('lml.client', () => {
           }),
       } as unknown as globalThis.Response);
 
-      const result = await checkStreamingAvailability('Chuquimamani-Condori', 'Edits');
+      const result = await checkStreamingAvailability('Chuquimamani-Condori', 'Edits', {
+        caller: 'library-add-album-streaming',
+      });
 
       expect(result.on_streaming).toBe(false);
     });
@@ -1843,17 +1848,27 @@ describe('lml.client', () => {
         statusText: 'Internal Server Error',
       } as unknown as globalThis.Response);
 
-      await expect(checkStreamingAvailability('Stereolab', 'Aluminum Tunes')).rejects.toThrow(LmlClientError);
+      await expect(
+        checkStreamingAvailability('Stereolab', 'Aluminum Tunes', { caller: 'library-add-album-streaming' })
+      ).rejects.toThrow(LmlClientError);
     });
 
-    it('BS#1826: uses the default 30 s timeout when no caller is passed (byte-identical to pre-policy behavior)', async () => {
+    it('BS#1826 PR 2: uses the default 30 s timeout when the caller is unregistered (soft runtime fallback)', async () => {
+      // `caller` is REQUIRED + typed as `LmlCaller` on `checkStreamingAvailability`
+      // as of PR 2 — every real (typechecked) call site now supplies a
+      // registered label. This test exercises the SOFT runtime path an
+      // untypechecked `jobs/**` caller (or a stale/mistyped label) could still
+      // hit: `policyForCaller` degrades to "no policy default" rather than
+      // throwing, so `lmlFetch`'s own `TIMEOUT_MS` default applies unchanged.
       const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
       mockFetch.mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({ on_streaming: false, sources: {} }),
       } as unknown as globalThis.Response);
 
-      await checkStreamingAvailability('Stereolab', 'Aluminum Tunes');
+      await checkStreamingAvailability('Stereolab', 'Aluminum Tunes', {
+        caller: 'not-a-registered-caller' as unknown as LmlCaller,
+      });
 
       expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 30000)).toHaveLength(1);
       setTimeoutSpy.mockRestore();
@@ -1887,7 +1902,7 @@ describe('lml.client', () => {
         json: () => Promise.resolve({ on_streaming: false, sources: {} }),
       } as unknown as globalThis.Response);
 
-      await checkStreamingAvailability('Stereolab', 'Aluminum Tunes');
+      await checkStreamingAvailability('Stereolab', 'Aluminum Tunes', { caller: 'library-add-album-streaming' });
 
       expect(lastCallHeaders()).toMatchObject({
         Authorization: 'Bearer test-secret',
@@ -1926,7 +1941,7 @@ describe('lml.client', () => {
         json: () => Promise.resolve({ on_streaming: false, sources: {} }),
       } as unknown as globalThis.Response);
 
-      await checkStreamingAvailability('a', 'b');
+      await checkStreamingAvailability('a', 'b', { caller: 'library-add-album-streaming' });
 
       expect(lastCallHeaders()).not.toHaveProperty('Authorization');
     });
@@ -1938,7 +1953,7 @@ describe('lml.client', () => {
         json: () => Promise.resolve({ on_streaming: false, sources: {} }),
       } as unknown as globalThis.Response);
 
-      await checkStreamingAvailability('a', 'b');
+      await checkStreamingAvailability('a', 'b', { caller: 'library-add-album-streaming' });
 
       const headers = lastCallHeaders();
       expect(headers['Content-Type']).toBe('application/json');
@@ -2261,8 +2276,8 @@ describe('checkStreamingAvailability limiter governance (B5 / BS#1750)', () => {
     // at once (maxInFlight === 2, queueDepth === 0); routed through the shared
     // limiter, the second queues behind the first's permit.
     const calls = [
-      checkStreamingAvailability('Stereolab', 'Aluminum Tunes'),
-      checkStreamingAvailability('Juana Molina', 'DOGA'),
+      checkStreamingAvailability('Stereolab', 'Aluminum Tunes', { caller: 'library-add-album-streaming' }),
+      checkStreamingAvailability('Juana Molina', 'DOGA', { caller: 'library-update-album-streaming' }),
     ];
 
     // Poll until the first call reaches fetch (mirrors the BS#906 wrapper test:
@@ -2318,7 +2333,9 @@ describe('checkStreamingAvailability limiter governance (B5 / BS#1750)', () => {
     });
 
     const lookupCall = lookupMetadata('Duke Ellington & John Coltrane', 'In a Sentimental Mood');
-    const streamingCall = checkStreamingAvailability('Jessica Pratt', 'On Your Own Love Again');
+    const streamingCall = checkStreamingAvailability('Jessica Pratt', 'On Your Own Love Again', {
+      caller: 'library-add-album-streaming',
+    });
 
     // Let the event loop advance; the lookup grabs the only permit and parks.
     const deadline = Date.now() + 200;

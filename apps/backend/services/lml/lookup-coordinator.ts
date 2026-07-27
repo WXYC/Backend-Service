@@ -118,18 +118,26 @@ export class LmlLookupCoordinator {
     options?: CoordinatorLookupOptions
   ): Promise<LookupResponse | null> {
     const key = this.cacheKey(artist, album, song);
-    const caller = options?.caller ?? 'unknown';
+    // BS#1826 PR 2: `options?.caller` is now the typed, registered
+    // `LmlCaller` union (or `undefined` on the zero-args overload) — no
+    // longer a loose `string` that could be defaulted to the literal
+    // `'unknown'` and threaded back into a `caller: LmlCaller` field
+    // downstream. `callerLabel` is a `string`-widened copy for Sentry
+    // attribute projection ONLY; `options.caller` itself (still `LmlCaller |
+    // undefined`) is what actually forwards to `fetchUncached` below, so a
+    // real caller is never overwritten and an absent one stays absent.
+    const callerLabel: string = options?.caller ?? 'unknown';
 
     return Sentry.startSpan({ name: 'lml.coordinator.lookup', op: 'function' }, async (span) => {
       const cached = this.cache.get(key);
       if (cached) {
-        this.setSpanAttrs(span, { hit: 'cache', caller });
+        this.setSpanAttrs(span, { hit: 'cache', caller: callerLabel });
         return this.applyTrustGate(cached, options, span);
       }
 
       const existing = this.inflight.get(key);
       if (existing) {
-        this.setSpanAttrs(span, { hit: 'inflight', caller });
+        this.setSpanAttrs(span, { hit: 'inflight', caller: callerLabel });
         return this.applyTrustGate(await existing.promise, options, span);
       }
 
@@ -151,11 +159,14 @@ export class LmlLookupCoordinator {
       // All current callsites read-only; a deep freeze would be safer
       // but costs O(n) per cache-set on every response. Tracked as a
       // follow-up if mutation footguns appear.
-      // Pass the resolved `caller` (not the raw `options?.caller`) so the
-      // wire span's `lml.caller` attribute matches what we projected onto
-      // the coordinator span — single source of truth for the "unknown"
-      // default. The other options forward as-is.
-      const settle = this.fetchUncached(artist, album, song, { ...options, caller })
+      // Forward `options` as-is — `options.caller` is already the same
+      // `LmlCaller | undefined` value `callerLabel` above widened for
+      // Sentry projection, so there is no "resolved vs. raw" divergence
+      // left to reconcile (BS#1826 PR 2: pre-PR2 this defaulted a missing
+      // caller to the literal `'unknown'` and threaded THAT back onto the
+      // wire options; that literal is not a member of `LmlCaller`, so it
+      // can no longer be forwarded through a typed `caller` field).
+      const settle = this.fetchUncached(artist, album, song, options)
         .then((result) => {
           this.cache.set(key, result);
           return result;
@@ -164,7 +175,7 @@ export class LmlLookupCoordinator {
           this.inflight.delete(key);
         });
       this.inflight.set(key, { promise: settle });
-      this.setSpanAttrs(span, { hit: 'miss', caller });
+      this.setSpanAttrs(span, { hit: 'miss', caller: callerLabel });
 
       return this.applyTrustGate(await settle, options, span);
     });

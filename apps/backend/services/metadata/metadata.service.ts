@@ -18,7 +18,6 @@
  *      in `@wxyc/metadata`.
  */
 import { MetadataRequest, AlbumMetadataResult, ArtistMetadataResult, FlowsheetMetadata } from './metadata.types.js';
-import { envInt } from '@wxyc/lml-client';
 import type { DiscogsMatchResult } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif, isSyntheticArtwork } from '@wxyc/metadata';
 import { lmlLookupCoordinator } from '../lml/index.js';
@@ -28,13 +27,13 @@ export { filterSpacerGif, isSyntheticArtwork } from '@wxyc/metadata';
 
 const searchUrls = new SearchUrlProvider();
 
-/**
- * Budget for the metadata-service fire-and-forget LML lookup on flowsheet
- * insert. 5 s matches the other runtime callers — short enough that LML
- * cuts off well before the BS-side 30 s `AbortController` ceiling. See
- * `LookupOptions.budgetMs` for mechanics.
- */
-const METADATA_SERVICE_LML_BUDGET_MS = envInt('METADATA_SERVICE_LML_BUDGET_MS', 5000);
+// BS#1826 PR 2: `METADATA_SERVICE_LML_BUDGET_MS` retired. `metadata-service`
+// is a class-5 caller (batch/backfill enrichment: 28000ms budget / 29000ms
+// timeout via the per-caller policy layer, `@wxyc/lml-client` `policy.ts`)
+// — the fire-and-forget flowsheet-insert path never bounded user-visible
+// latency, so the longer class-5 budget is the correct fit, not a
+// regression. See `docs/env-vars.md` for the retired-constant → class
+// mapping.
 
 /**
  * Check whether the LML service is configured.
@@ -67,7 +66,6 @@ export async function fetchMetadata(request: MetadataRequest): Promise<Flowsheet
 
   const lookupResponse = await lmlLookupCoordinator.lookup(artistName, albumTitle, trackTitle, {
     caller: 'metadata-service',
-    budgetMs: METADATA_SERVICE_LML_BUDGET_MS,
   });
   const artwork: DiscogsMatchResult | null = lookupResponse.results?.[0]?.artwork ?? null;
 

@@ -106,10 +106,13 @@ export const ALL_LML_CALLERS = [
   'library-add-album',
   'library-update-album',
   'flowsheet-linkage',
+  // `library-canonical-entity` is class 2 (warm_cache write-through through
+  // the shared defaultLimiter — see the CALLER_CLASS note), not a budget-less
+  // class-3 read.
+  'library-canonical-entity',
   // Class 3 — identity / release-metadata reads.
   'add_to_rotation',
   'proxy',
-  'library-canonical-entity',
   // Class 4 — streaming availability checks.
   'library-add-album-streaming',
   'library-update-album-streaming',
@@ -143,7 +146,14 @@ const CALLER_CLASS: Record<LmlCaller, LmlCallerClass> = {
   'flowsheet-linkage': 2,
   add_to_rotation: 3,
   proxy: 3,
-  'library-canonical-entity': 3,
+  // Class 2, not 3: this is a `warm_cache` write-through that can reach the
+  // Discogs cascade and runs through the shared `defaultLimiter` — class-2
+  // semantics (soft budget header + short timeout), not a budget-less
+  // class-3 PG-cached read. Class 3 would hold a defaultLimiter permit for
+  // the full 8s with no LML soft-cutoff, back-pressuring concurrent
+  // interactive lookups (BS#994/#995). The prior LIBRARY_LML_BUDGET_MS (5s
+  // budget) is thus preserved in spirit as class 2's 4s budget / 5s timeout.
+  'library-canonical-entity': 2,
   'library-add-album-streaming': 4,
   'library-update-album-streaming': 4,
   'metadata-service': 5,

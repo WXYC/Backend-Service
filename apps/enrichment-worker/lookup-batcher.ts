@@ -65,13 +65,14 @@ const BULK_MAX_ITEMS = 100;
  */
 export const ENRICHMENT_BULK_WINDOW_MS = envInt('ENRICHMENT_BULK_WINDOW_MS', 50);
 
-/**
- * Budget forwarded to LML as `X-Caller-Budget-Ms`. Mirrors the constant the
- * per-row path used in `handler.ts` (tracks the shared client's 30 s fetch
- * timeout with 1 s of slack) so batching doesn't change the deadline the
- * enrichment path negotiates with LML.
- */
-const ENRICHMENT_LML_BUDGET_MS = envInt('ENRICHMENT_LML_BUDGET_MS', 29000);
+// BS#1826 PR 2: `ENRICHMENT_LML_BUDGET_MS` retired here — the batch dispatch
+// below now relies on the `enrichment-worker` class-5 policy default
+// (28000ms budget / 29000ms timeout, `@wxyc/lml-client` `policy.ts`) instead
+// of a locally-duplicated constant. `sweep.ts`'s `STRANDED_TTL_SECONDS`
+// derives from `resolveLmlPolicy('enrichment-worker').budgetMs` directly so
+// the two stay coupled through the SAME source of truth (previously two
+// independent `envInt('ENRICHMENT_LML_BUDGET_MS', 29000)` reads that could
+// drift if only one call site's env var was overridden).
 
 /** Caller-class label projected onto the `lml.caller` Sentry span (BS#1235). */
 const ENRICHMENT_CALLER = 'enrichment-worker';
@@ -149,7 +150,6 @@ async function dispatchChunk(chunk: PendingLookup[]): Promise<void> {
     const response = await bulkLookupMetadata(
       chunk.map((pending) => pending.item),
       {
-        budgetMs: ENRICHMENT_LML_BUDGET_MS,
         caller: ENRICHMENT_CALLER,
         // BS#1815: restore non-library album resolution on the live
         // enrichment path. `/lookup/bulk` hardcodes the LML#671 offline-drain
