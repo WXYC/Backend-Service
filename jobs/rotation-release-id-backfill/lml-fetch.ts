@@ -68,6 +68,10 @@ export const lookupReleaseId = async (artist: string, album: string): Promise<Lo
   const response = await sharedLookupMetadata(decodeHtmlEntities(artist), decodeHtmlEntities(album), undefined, {
     limiter: defaultLmlLimiter,
     timeoutMs: TIMEOUT_MS,
+    // BS#1826 PR 3: register this offline drain's caller label (class 5 —
+    // see the plan's "rotation-*-backfill" entry in the caller→class map)
+    // so the CI guard's jobs/** backstop can verify it.
+    caller: 'rotation-release-id-backfill',
   });
   const releaseId = response.results?.[0]?.artwork?.release_id ?? null;
   if (releaseId === null) {
