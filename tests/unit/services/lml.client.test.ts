@@ -191,6 +191,62 @@ describe('lml.client', () => {
       setTimeoutSpy.mockRestore();
     });
 
+    it('BS#1826: a registered caller supplies the DEFAULT timeoutMs/budgetMs when neither is passed explicitly', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      // library-track-search is a registered class-2 caller: timeoutMs 5000, budgetMs 4000.
+      await lookupMetadata('Autechre', 'Confield', undefined, { caller: 'library-track-search' });
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 5000)).toHaveLength(1);
+      const init = mockFetch.mock.calls[0][1];
+      expect(init?.headers).toMatchObject({ 'X-Caller-Budget-Ms': '4000' });
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('BS#1826: explicit timeoutMs/budgetMs still win over the caller’s policy default (no-behavior-change guarantee)', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      // library-track-search resolves to timeoutMs 5000 / budgetMs 4000, but this
+      // call passes its own explicit values, which must be what actually fires.
+      await lookupMetadata('Autechre', 'Confield', undefined, {
+        caller: 'library-track-search',
+        timeoutMs: 12345,
+        budgetMs: 6789,
+      });
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 12345)).toHaveLength(1);
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 5000)).toHaveLength(0);
+      const init = mockFetch.mock.calls[0][1];
+      expect(init?.headers).toMatchObject({ 'X-Caller-Budget-Ms': '6789' });
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('BS#1826: an unregistered caller string is a safe no-op (falls back to the 30 s default, no throw)', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await expect(
+        lookupMetadata('Autechre', 'Confield', undefined, { caller: 'some-brand-new-caller-nobody-registered' })
+      ).resolves.toBeDefined();
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 30000)).toHaveLength(1);
+      setTimeoutSpy.mockRestore();
+    });
+
     it('omits both option flags from the body when no options are passed', async () => {
       // Read-path callers (request-line, artwork fallback, library
       // services) don't pass options. The body must stay byte-identical
@@ -777,6 +833,42 @@ describe('lml.client', () => {
       const init = mockFetch.mock.calls[0][1];
       if (!init) throw new Error('mockFetch was not called with init args');
       expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+    });
+
+    it('BS#1826: a registered caller supplies the DEFAULT timeoutMs/budgetMs when neither is passed explicitly', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      // enrichment-worker is a registered class-5 caller: timeoutMs 29000, budgetMs 28000.
+      await bulkLookupMetadata([itemFor('A', 'X')], { caller: 'enrichment-worker' });
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 29000)).toHaveLength(1);
+      const init = mockFetch.mock.calls[0][1];
+      expect(init?.headers).toMatchObject({ 'X-Caller-Budget-Ms': '28000' });
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('BS#1826: explicit timeoutMs/budgetMs still win over the caller’s policy default (no-behavior-change guarantee)', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')], {
+        caller: 'enrichment-worker',
+        timeoutMs: 111111,
+        budgetMs: 22222,
+      });
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 111111)).toHaveLength(1);
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 29000)).toHaveLength(0);
+      const init = mockFetch.mock.calls[0][1];
+      expect(init?.headers).toMatchObject({ 'X-Caller-Budget-Ms': '22222' });
+      setTimeoutSpy.mockRestore();
     });
 
     it('projects lml.caller onto the bulk Sentry span when caller is provided', async () => {
@@ -1532,6 +1624,45 @@ describe('lml.client', () => {
       );
       expect(result).toEqual(mockRelease);
     });
+
+    it('BS#1826: uses the default 30 s timeout when no caller is passed (byte-identical to pre-policy behavior)', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ release_id: 1 }),
+      } as unknown as globalThis.Response);
+
+      await getRelease(123);
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 30000)).toHaveLength(1);
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('BS#1826: threads the registered caller’s class-3 policy timeout (8 s) into the AbortController', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ release_id: 1 }),
+      } as unknown as globalThis.Response);
+
+      await getRelease(123, { caller: 'proxy' });
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 8000)).toHaveLength(1);
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 30000)).toHaveLength(0);
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('BS#1826: an unregistered caller string is a safe no-op (falls back to the 30 s default, no throw)', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ release_id: 1 }),
+      } as unknown as globalThis.Response);
+
+      await expect(getRelease(123, { caller: 'not-a-registered-caller' })).resolves.toBeDefined();
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 30000)).toHaveLength(1);
+      setTimeoutSpy.mockRestore();
+    });
   });
 
   describe('getArtistDetails', () => {
@@ -1550,6 +1681,19 @@ describe('lml.client', () => {
       );
       expect(result).toEqual(mockArtist);
     });
+
+    it('BS#1826: threads the registered caller’s class-3 policy timeout into the AbortController', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ artist_id: 3840, name: 'Autechre' }),
+      } as unknown as globalThis.Response);
+
+      await getArtistDetails(3840, { caller: 'proxy' });
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 8000)).toHaveLength(1);
+      setTimeoutSpy.mockRestore();
+    });
   });
 
   describe('resolveEntity', () => {
@@ -1566,6 +1710,19 @@ describe('lml.client', () => {
         expect.objectContaining({ signal: expect.any(AbortSignal) })
       );
       expect(result).toEqual({ name: 'Autechre', type: 'artist', id: 3840 });
+    });
+
+    it('BS#1826: threads the registered caller’s class-3 policy timeout into the AbortController', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ name: 'Autechre', type: 'artist', id: 3840 }),
+      } as unknown as globalThis.Response);
+
+      await resolveEntity('artist', 3840, { caller: 'proxy' });
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 8000)).toHaveLength(1);
+      setTimeoutSpy.mockRestore();
     });
   });
 
@@ -1688,6 +1845,33 @@ describe('lml.client', () => {
 
       await expect(checkStreamingAvailability('Stereolab', 'Aluminum Tunes')).rejects.toThrow(LmlClientError);
     });
+
+    it('BS#1826: uses the default 30 s timeout when no caller is passed (byte-identical to pre-policy behavior)', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ on_streaming: false, sources: {} }),
+      } as unknown as globalThis.Response);
+
+      await checkStreamingAvailability('Stereolab', 'Aluminum Tunes');
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 30000)).toHaveLength(1);
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('BS#1826: threads the registered caller’s class-4 policy timeout (5 s) into the AbortController', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ on_streaming: false, sources: {} }),
+      } as unknown as globalThis.Response);
+
+      await checkStreamingAvailability('Stereolab', 'Aluminum Tunes', { caller: 'library-add-album-streaming' });
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 5000)).toHaveLength(1);
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 30000)).toHaveLength(0);
+      setTimeoutSpy.mockRestore();
+    });
   });
 
   describe('LML_API_KEY bearer header', () => {
@@ -1798,6 +1982,45 @@ describe('lml.client', () => {
       expect(calledUrl).toContain('title=Moon+Pix');
       expect(calledUrl).not.toContain('artist=');
       expect(calledUrl).not.toContain('limit=');
+    });
+
+    it('BS#1826: uses the default 30 s timeout when no caller is passed (byte-identical to pre-policy behavior)', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [], total: 0, query: null }),
+      } as unknown as globalThis.Response);
+
+      await searchLibrary({ artist: 'Stereolab' });
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 30000)).toHaveLength(1);
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('BS#1826: threads the registered caller’s class-1 policy timeout (3 s) into the AbortController', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [], total: 0, query: null }),
+      } as unknown as globalThis.Response);
+
+      await searchLibrary({ artist: 'Stereolab', caller: 'proxy-library-search' });
+
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 3000)).toHaveLength(1);
+      expect(setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 30000)).toHaveLength(0);
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('BS#1826: caller does not leak into the wire query string', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [], total: 0, query: null }),
+      } as unknown as globalThis.Response);
+
+      await searchLibrary({ artist: 'Stereolab', caller: 'proxy-library-search' });
+
+      const calledUrl = mockFetch.mock.calls[0][0] as string;
+      expect(calledUrl).not.toContain('caller');
     });
   });
 });

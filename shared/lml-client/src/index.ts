@@ -50,6 +50,25 @@ export type {
 import { isSpotifyUrl, isAppleMusicUrl, sanitizeLookupStreamingUrls } from './streaming-url-guard.js';
 export { isSpotifyUrl, isAppleMusicUrl, sanitizeLookupStreamingUrls };
 
+// BS#1826: per-caller traffic-class policy layer. `policy.ts` imports
+// `envInt` back from this module (below) — a deliberate circular import
+// that's safe because `envInt` is a hoisted `function` declaration, not a
+// `const`, so it's already bound by the time `policy.ts`'s module-load-time
+// `buildPolicy()` call runs, regardless of which module starts loading
+// first. See `policy.ts`'s module doc for the design.
+import {
+  resolveLmlPolicy,
+  LML_CALLER_POLICY,
+  ALL_LML_CALLERS,
+  _resetLmlPolicyForTest,
+  type LmlCaller,
+  type LmlCallerClass,
+  type LmlCallerLimiter,
+  type LmlPolicy,
+} from './policy.js';
+export { resolveLmlPolicy, LML_CALLER_POLICY, ALL_LML_CALLERS, _resetLmlPolicyForTest };
+export type { LmlCaller, LmlCallerClass, LmlCallerLimiter, LmlPolicy };
+
 class LmlClientError extends Error {
   constructor(
     message: string,
@@ -117,6 +136,27 @@ export function envInt(name: string, fallback: number): number {
   if (Number.isFinite(parsed) && parsed > 0) return parsed;
   console.warn(`lml.client: ${name}=${raw} is invalid (must be positive number); using fallback ${fallback}`);
   return fallback;
+}
+
+/**
+ * BS#1826: soft caller→policy lookup used internally to compute default
+ * `timeoutMs`/`budgetMs` when a call passes `{ caller }` without an
+ * explicit override. Unlike the public `resolveLmlPolicy` (which throws on
+ * an unregistered caller), this NEVER throws — `LookupOptions.caller` stays
+ * a loosely-typed `string` until `caller` becomes a compile-time-checked
+ * `LmlCaller` (BS#1826 PR 2), so a request path must never crash because of
+ * an unregistered or mistyped label. An unregistered/absent caller simply
+ * gets no policy default, and the method's own pre-existing default (e.g.
+ * `TIMEOUT_MS`) applies unchanged. Note this is NOT true for a *registered*
+ * caller: a call site already passing a known `caller` label (several do,
+ * for observability) picks up its class default the moment this lands — an
+ * intended, env-reversible behavior change, not a no-op (see policy.ts).
+ */
+function policyForCaller(caller: string | undefined): LmlPolicy | undefined {
+  if (caller === undefined) return undefined;
+  return Object.prototype.hasOwnProperty.call(LML_CALLER_POLICY, caller)
+    ? LML_CALLER_POLICY[caller as LmlCaller]
+    : undefined;
 }
 
 /**
@@ -432,6 +472,14 @@ export interface LookupOptions {
    * `enrichment-worker`, `library-track-search`). Omit at your peril — missing
    * callers project as `lml.caller=unknown`, which is meant as a Sentry
    * flag-of-shame so untracked call sites surface in queries.
+   *
+   * BS#1826: a registered caller (see `ALL_LML_CALLERS` in `policy.ts`) now
+   * also supplies the DEFAULT `timeoutMs`/`budgetMs` for this call, used
+   * only when this options object doesn't set them explicitly — explicit
+   * `timeoutMs`/`budgetMs` always win. Kept as a loose `string` (not the
+   * typed `LmlCaller` union) in this PR so an unregistered/mistyped label
+   * degrades to "no policy default" instead of a compile error or a thrown
+   * runtime error; the typed, required union lands in a follow-up PR.
    */
   caller?: string;
   /**
@@ -604,6 +652,13 @@ async function postLookup(
   // queue-time outside the http.client span — span duration reflects fetch
   // work only.
   const activeLimiter = options?.limiter ?? defaultLimiter;
+  // BS#1826: the caller-class policy supplies timeoutMs/budgetMs DEFAULTS,
+  // used only when the call site didn't pass an explicit override — see
+  // `policyForCaller`'s doc comment for why an unregistered/absent caller
+  // is a safe no-op rather than a thrown error here.
+  const policy = policyForCaller(options?.caller);
+  const effectiveTimeoutMs = options?.timeoutMs ?? policy?.timeoutMs;
+  const effectiveBudgetMs = options?.budgetMs ?? policy?.budgetMs;
   return activeLimiter.run(async () => {
     return await Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
       try {
@@ -619,10 +674,10 @@ async function postLookup(
         '/api/v1/lookup',
         {
           method: 'POST',
-          headers: buildLookupHeaders(options?.budgetMs),
+          headers: buildLookupHeaders(effectiveBudgetMs),
           body: JSON.stringify(body),
         },
-        options?.timeoutMs
+        effectiveTimeoutMs
       );
 
       // BS#1710: enforce the streaming-URL host invariant at this untrusted
@@ -821,6 +876,10 @@ export async function bulkLookupMetadata(
   }
 
   const activeLimiter = options?.limiter ?? defaultLimiter;
+  // BS#1826: same policy-supplies-the-default treatment as `postLookup`.
+  const policy = policyForCaller(options?.caller);
+  const effectiveTimeoutMs = options?.timeoutMs ?? policy?.timeoutMs;
+  const effectiveBudgetMs = options?.budgetMs ?? policy?.budgetMs;
   return activeLimiter.run(async () => {
     return await Sentry.startSpan({ name: 'lml.lookup.bulk', op: 'http.client' }, async (span) => {
       try {
@@ -845,10 +904,10 @@ export async function bulkLookupMetadata(
         bulkPath,
         {
           method: 'POST',
-          headers: buildLookupHeaders(options?.budgetMs),
+          headers: buildLookupHeaders(effectiveBudgetMs),
           body: JSON.stringify({ items: sendItems }),
         },
-        options?.timeoutMs
+        effectiveTimeoutMs
       );
 
       const parsed = (await response.json()) as BulkLookupResponse & { cache_stats?: unknown };
@@ -926,13 +985,28 @@ function buildSkippedBulkResultItem(index: number): BulkLookupResultItem {
 }
 
 /**
+ * Options accepted by the class-3 PG-cached reads (`getRelease`,
+ * `getArtistDetails`, `resolveEntity`, `searchTrackReleases`). `caller` is
+ * optional in this PR (BS#1826 PR 1) — when omitted, these methods are
+ * byte-identical to their pre-BS#1826 behavior (no timeout arg reaches
+ * `lmlFetch`, so its own `TIMEOUT_MS` default applies). When present and
+ * registered, the caller's class-3 `timeoutMs` (8 s PG-cached-read default,
+ * or a per-caller override) is threaded into the `lmlFetch` AbortController.
+ */
+export interface DiscogsReadOptions {
+  caller?: string;
+}
+
+/**
  * Get full release metadata from LML.
  *
  * @param releaseId - Discogs release ID
+ * @param options - Optional caller label. See `DiscogsReadOptions`.
  * @returns Release metadata including tracklist, genres, styles
  */
-export async function getRelease(releaseId: number): Promise<DiscogsReleaseMetadata> {
-  const response = await lmlFetch(`/api/v1/discogs/release/${releaseId}`);
+export async function getRelease(releaseId: number, options?: DiscogsReadOptions): Promise<DiscogsReleaseMetadata> {
+  const timeoutMs = policyForCaller(options?.caller)?.timeoutMs;
+  const response = await lmlFetch(`/api/v1/discogs/release/${releaseId}`, undefined, timeoutMs);
   return (await response.json()) as DiscogsReleaseMetadata;
 }
 
@@ -940,10 +1014,12 @@ export async function getRelease(releaseId: number): Promise<DiscogsReleaseMetad
  * Get artist details from LML.
  *
  * @param artistId - Discogs artist ID
+ * @param options - Optional caller label. See `DiscogsReadOptions`.
  * @returns Artist details including bio, image, URLs
  */
-export async function getArtistDetails(artistId: number): Promise<DiscogsArtistDetails> {
-  const response = await lmlFetch(`/api/v1/discogs/artist/${artistId}`);
+export async function getArtistDetails(artistId: number, options?: DiscogsReadOptions): Promise<DiscogsArtistDetails> {
+  const timeoutMs = policyForCaller(options?.caller)?.timeoutMs;
+  const response = await lmlFetch(`/api/v1/discogs/artist/${artistId}`, undefined, timeoutMs);
   return (await response.json()) as DiscogsArtistDetails;
 }
 
@@ -952,10 +1028,16 @@ export async function getArtistDetails(artistId: number): Promise<DiscogsArtistD
  *
  * @param type - Entity type: artist, release, or master
  * @param id - Discogs entity ID
+ * @param options - Optional caller label. See `DiscogsReadOptions`.
  * @returns Entity name and basic info
  */
-export async function resolveEntity(type: 'artist' | 'release' | 'master', id: number): Promise<EntityResolveResponse> {
-  const response = await lmlFetch(`/api/v1/discogs/entity/${type}/${id}`);
+export async function resolveEntity(
+  type: 'artist' | 'release' | 'master',
+  id: number,
+  options?: DiscogsReadOptions
+): Promise<EntityResolveResponse> {
+  const timeoutMs = policyForCaller(options?.caller)?.timeoutMs;
+  const response = await lmlFetch(`/api/v1/discogs/entity/${type}/${id}`, undefined, timeoutMs);
   return (await response.json()) as EntityResolveResponse;
 }
 
@@ -965,18 +1047,21 @@ export async function resolveEntity(type: 'artist' | 'release' | 'master', id: n
  * @param track - Track/song title to search for
  * @param artist - Optional artist name for filtering
  * @param limit - Maximum number of results (default 20)
+ * @param options - Optional caller label. See `DiscogsReadOptions`.
  * @returns List of releases containing the track
  */
 export async function searchTrackReleases(
   track: string,
   artist?: string,
-  limit = 20
+  limit = 20,
+  options?: DiscogsReadOptions
 ): Promise<DiscogsTrackReleasesResponse> {
   const params = new URLSearchParams({ track });
   if (artist) params.set('artist', artist);
   if (limit !== 20) params.set('limit', String(limit));
 
-  const response = await lmlFetch(`/api/v1/discogs/track-releases?${params}`);
+  const timeoutMs = policyForCaller(options?.caller)?.timeoutMs;
+  const response = await lmlFetch(`/api/v1/discogs/track-releases?${params}`, undefined, timeoutMs);
   return (await response.json()) as DiscogsTrackReleasesResponse;
 }
 
@@ -1031,9 +1116,17 @@ export async function validateTrackOnRelease(releaseId: number, track: string, a
  *
  * @param artist - Artist name
  * @param title - Album title
+ * @param options - Optional caller label (BS#1826 class 4: `library-add-
+ *   album-streaming` / `library-update-album-streaming`). Omitted callers
+ *   are byte-identical to pre-BS#1826 behavior — no timeout reaches
+ *   `lmlFetch`, so its `TIMEOUT_MS` default applies.
  * @returns Streaming availability result with per-source URLs
  */
-export async function checkStreamingAvailability(artist: string, title: string): Promise<StreamingCheckResponse> {
+export async function checkStreamingAvailability(
+  artist: string,
+  title: string,
+  options?: DiscogsReadOptions
+): Promise<StreamingCheckResponse> {
   // BS#1750 / B5: fires on every album add. Route it through the process-wide
   // `defaultLimiter` — the same shared concurrency/rate gate as `/lookup` —
   // so this call participates in the admission budget instead of being an
@@ -1042,12 +1135,17 @@ export async function checkStreamingAvailability(artist: string, title: string):
   // limiter's `semaphore.acquire()` + `tokenBucket.consume(1)`; the permit is
   // released in the limiter's `finally`. Behavior is otherwise unchanged —
   // same path, headers, body, and returned `StreamingCheckResponse`.
+  const timeoutMs = policyForCaller(options?.caller)?.timeoutMs;
   return defaultLimiter.run(async () => {
-    const response = await lmlFetch('/api/v1/streaming-check', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ artist, title }),
-    });
+    const response = await lmlFetch(
+      '/api/v1/streaming-check',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ artist, title }),
+      },
+      timeoutMs
+    );
 
     return (await response.json()) as StreamingCheckResponse;
   });
@@ -1056,7 +1154,10 @@ export async function checkStreamingAvailability(artist: string, title: string):
 /**
  * Search the library catalog via LML.
  *
- * @param params - Search parameters (artist, title, q, limit)
+ * @param params - Search parameters (artist, title, q, limit) plus an
+ *   optional caller label (BS#1826 class 1: `proxy-library-search`).
+ *   Omitted callers are byte-identical to pre-BS#1826 behavior — no timeout
+ *   reaches `lmlFetch`, so its `TIMEOUT_MS` default applies.
  * @returns Library search results
  */
 export async function searchLibrary(params: {
@@ -1064,6 +1165,7 @@ export async function searchLibrary(params: {
   title?: string;
   q?: string;
   limit?: number;
+  caller?: string;
 }): Promise<LibrarySearchResponse> {
   const searchParams = new URLSearchParams();
   if (params.artist) searchParams.set('artist', params.artist);
@@ -1071,7 +1173,8 @@ export async function searchLibrary(params: {
   if (params.q) searchParams.set('q', params.q);
   if (params.limit) searchParams.set('limit', String(params.limit));
 
-  const response = await lmlFetch(`/api/v1/library/search?${searchParams}`);
+  const timeoutMs = policyForCaller(params.caller)?.timeoutMs;
+  const response = await lmlFetch(`/api/v1/library/search?${searchParams}`, undefined, timeoutMs);
   return (await response.json()) as LibrarySearchResponse;
 }
 
