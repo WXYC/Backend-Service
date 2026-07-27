@@ -1085,8 +1085,9 @@ describe('library.service', () => {
       const results = await searchLibraryByTrack('Back, Baby', 10);
 
       expect(mockLookupBySong).toHaveBeenCalledTimes(1);
+      // BS#1826 PR 2: `library-track-search` is class 2 — budget (4000ms)
+      // and timeout (5000ms) come from the per-caller policy layer now.
       expect(mockLookupBySong).toHaveBeenCalledWith('Back, Baby', {
-        budgetMs: 5000,
         caller: 'library-track-search',
       });
       // Bridge query reads from `library` (with joins) so the unique index
@@ -1502,7 +1503,6 @@ describe('library.service', () => {
 
       expect(mockLookupBySong.mock.calls.length).toBe(callsAfterFirst + 1);
       expect(mockLookupBySong).toHaveBeenLastCalledWith('Different Song', {
-        budgetMs: 5000,
         caller: 'library-track-search',
       });
     });
@@ -1917,8 +1917,10 @@ describe('library.service', () => {
       const enriched = await enrichWithArtwork(results);
 
       expect(enriched[0].artwork_url).toBe('https://i.discogs.com/confield.jpg');
+      // BS#1826 PR 2: `library-enrich-artwork`'s 2000ms budget is now the
+      // class-2 policy override (env `LIBRARY_SEARCH_LML_BUDGET_MS`
+      // preserved), not a call-site literal.
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
-        budgetMs: 2000,
         caller: 'library-enrich-artwork',
         requireSearchType: 'direct',
       });
@@ -2010,7 +2012,6 @@ describe('library.service', () => {
       // Only one LML call (for LP5, not Confield)
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5', undefined, {
-        budgetMs: 2000,
         caller: 'library-enrich-artwork',
         requireSearchType: 'direct',
       });
@@ -2274,8 +2275,10 @@ describe('library.service', () => {
       // `extended: true` is no longer passed at the callsite — the
       // LmlLookupCoordinator (BS#885) forces it on the wire. Coordinator
       // mock receives the callsite args without it.
+      // BS#1826 PR 2: the 10 s timeout is now the `library-rotation-picker`
+      // class-2 override in the per-caller policy layer, not a call-site
+      // `timeoutMs` literal.
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
-        timeoutMs: 10000,
         caller: 'library-rotation-picker',
         requireSearchType: 'direct',
       });
@@ -2305,7 +2308,7 @@ describe('library.service', () => {
         undefined,
         'All the Young Droids: Junkshop Synth Pop 1978-1985',
         undefined,
-        { timeoutMs: 10000, caller: 'library-rotation-picker', requireSearchType: 'direct' }
+        { caller: 'library-rotation-picker', requireSearchType: 'direct' }
       );
     });
 

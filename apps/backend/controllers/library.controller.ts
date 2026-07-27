@@ -16,18 +16,17 @@ import * as bmiPerformanceService from '../services/bmi-performance.service.js';
 import * as labelsService from '../services/labels.service.js';
 import * as librarySearchService from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
-import { checkStreamingAvailability, isLmlConfigured, envInt } from '@wxyc/lml-client';
+import { checkStreamingAvailability, isLmlConfigured } from '@wxyc/lml-client';
 import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import WxycError from '../utils/error.js';
 
-/**
- * Budget for the add-album insert + fire-and-forget canonical-entity paths.
- * The row is already persisted before either call fires, so the budget is
- * about freeing LML's Discogs quota — not about 201 latency. 5 s matches the
- * other runtime-interactive sites. See `LookupOptions.budgetMs` for mechanics.
- */
-const LIBRARY_LML_BUDGET_MS = envInt('LIBRARY_LML_BUDGET_MS', 5000);
+// BS#1826 PR 2: `LIBRARY_LML_BUDGET_MS` retired. Budget for the add-album
+// insert + fire-and-forget canonical-entity paths now comes from the
+// per-caller policy layer (`@wxyc/lml-client` `policy.ts`) — `library-add-
+// album`/`library-update-album` are class 2 (budget 4000ms/timeout 5000ms),
+// `library-canonical-entity` is class 3 (timeout 8000ms, no budget header).
+// See `docs/env-vars.md` for the retired-constant → class mapping.
 
 type NewAlbumRequest = {
   album_title: string;
@@ -103,9 +102,8 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
   if (isLmlConfigured()) {
     const artistName = body.alternate_artist_name || body.artist_name || '';
     const [streamingResult, artworkResult] = await Promise.allSettled([
-      checkStreamingAvailability(artistName, body.album_title),
+      checkStreamingAvailability(artistName, body.album_title, { caller: 'library-add-album-streaming' }),
       lmlLookupCoordinator.lookup(artistName, body.album_title, undefined, {
-        budgetMs: LIBRARY_LML_BUDGET_MS,
         caller: 'library-add-album',
         warm_cache: true,
         requireSearchType: 'direct',
@@ -159,7 +157,6 @@ function fireAndForgetCanonicalEntity(libraryId: number, artistName: string | nu
 
   lmlLookupCoordinator
     .lookup(artistName, albumTitle, undefined, {
-      budgetMs: LIBRARY_LML_BUDGET_MS,
       caller: 'library-canonical-entity',
       warm_cache: true,
       requireSearchType: 'direct',
@@ -828,9 +825,8 @@ async function enrichAlbumAfterIdentityChange(
   if (!displayArtistName) return;
 
   const [streamingResult, artworkResult] = await Promise.allSettled([
-    checkStreamingAvailability(displayArtistName, albumTitle),
+    checkStreamingAvailability(displayArtistName, albumTitle, { caller: 'library-update-album-streaming' }),
     lmlLookupCoordinator.lookup(displayArtistName, albumTitle, undefined, {
-      budgetMs: LIBRARY_LML_BUDGET_MS,
       caller: 'library-update-album',
       warm_cache: true,
       requireSearchType: 'direct',

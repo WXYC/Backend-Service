@@ -33,14 +33,17 @@
  *
  * TTL derivation:
  *
- *   The TTL MUST exceed the worker's LML budget (`ENRICHMENT_LML_BUDGET_MS`
- *   in `handler.ts`) plus enough slack for the finalize UPDATE to land.
- *   Otherwise the sweep races a still-in-flight claim: it reverts the row
- *   to `'pending'` while the worker is mid-LML-fetch, the worker's
- *   finalize then narrows on `metadata_status='enriching'` and matches 0
- *   rows (silently no-ops), and the LML token spend is wasted. Defined
- *   as `max(60s, LML_BUDGET + 30s)` to keep that invariant even if an
- *   operator bumps the LML budget. The 60s floor matches the original
+ *   The TTL MUST exceed the worker's LML budget (BS#1826: the
+ *   `enrichment-worker` class-5 policy entry's `budgetMs`, resolved via
+ *   `resolveLmlPolicy` — the same value `lookup-batcher.ts`'s batch
+ *   dispatch uses, so the two can't drift) plus enough slack for the
+ *   finalize UPDATE to land. Otherwise the sweep races a still-in-flight
+ *   claim: it reverts the row to `'pending'` while the worker is
+ *   mid-LML-fetch, the worker's finalize then narrows on
+ *   `metadata_status='enriching'` and matches 0 rows (silently no-ops), and
+ *   the LML token spend is wasted. Defined as `max(60s, LML_BUDGET + 30s)`
+ *   to keep that invariant even if the policy's budget is bumped via its
+ *   `LML_CLASS5_TIMEOUT_MS` env lever. The 60s floor matches the original
  *   C6 design.
  *
  * Sentry projection:
@@ -61,9 +64,19 @@
 import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
 import { db, flowsheet } from '@wxyc/database';
-import { envInt } from '@wxyc/lml-client';
+import { resolveLmlPolicy } from '@wxyc/lml-client';
 
-const ENRICHMENT_LML_BUDGET_MS = envInt('ENRICHMENT_LML_BUDGET_MS', 29000);
+// BS#1826 PR 2: derive the TTL from the SAME source of truth the worker's
+// batch dispatch (`lookup-batcher.ts`) now uses — the `enrichment-worker`
+// class-5 policy entry — instead of a locally-duplicated
+// `envInt('ENRICHMENT_LML_BUDGET_MS', 29000)` read. Previously both files
+// read the env var independently; an operator overriding only one of the
+// two envs (or only one process picking up a redeploy) could silently
+// desync budget and TTL. `resolveLmlPolicy` throws on an unregistered
+// caller — `'enrichment-worker'` is registered in `ALL_LML_CALLERS`
+// (`policy.ts`), so this is a safe, load-bearing assertion at module load,
+// not a runtime risk.
+const ENRICHMENT_LML_BUDGET_MS = resolveLmlPolicy('enrichment-worker').budgetMs ?? 29000;
 
 /**
  * Seconds a row can sit in `'enriching'` before the sweep reverts it.

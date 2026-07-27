@@ -425,8 +425,10 @@ describe('library.controller', () => {
 
         // Controller returns 201 immediately, before fire-and-forget completes.
         expect(res.status).toHaveBeenCalledWith(201);
+        // BS#1826 PR 2: `library-canonical-entity` is class 3 (no budget
+        // header) — the per-caller policy layer supplies `timeoutMs`
+        // (8000ms), not this call site.
         expect(mockLookupMetadata).toHaveBeenCalledWith('Juana Molina', 'DOGA', undefined, {
-          budgetMs: 5000,
           caller: 'library-canonical-entity',
           warm_cache: true,
           requireSearchType: 'direct',

@@ -62,7 +62,7 @@ describe('lml-client policy', () => {
         'flowsheet-linkage': 2,
         add_to_rotation: 3,
         proxy: 3,
-        'library-canonical-entity': 3,
+        'library-canonical-entity': 2,
         'library-add-album-streaming': 4,
         'library-update-album-streaming': 4,
         'metadata-service': 5,
@@ -99,10 +99,14 @@ describe('lml-client policy', () => {
       expect(policy.budgetMs).toBe(4000);
     });
 
-    it('class 3 PG-cached reads default to 8 s, no budget header', () => {
+    it('write-through library-canonical-entity resolves to class 2 (budget + short timeout), not budget-less class 3', () => {
+      // BS#1826 review fix: a warm_cache write-through that can reach the
+      // Discogs cascade via defaultLimiter must carry a soft budget, unlike
+      // the budget-less class-3 PG-cached reads.
       const policy = resolveLmlPolicy('library-canonical-entity');
-      expect(policy.timeoutMs).toBe(8000);
-      expect(policy.budgetMs).toBeUndefined();
+      expect(policy.class).toBe(2);
+      expect(policy.timeoutMs).toBe(5000);
+      expect(policy.budgetMs).toBe(4000);
     });
 
     it('class 3 "proxy" reads (getRelease/getArtistDetails/resolveEntity) also default to 8 s', () => {
@@ -160,7 +164,7 @@ describe('lml-client policy', () => {
       ['LML_CLASS1_TIMEOUT_MS', 'proxy-library-search', 'timeoutMs', 9999],
       ['LML_CLASS2_TIMEOUT_MS', 'library-track-search', 'timeoutMs', 8888],
       ['LML_CLASS2_BUDGET_MS', 'library-track-search', 'budgetMs', 7777],
-      ['LML_CLASS3_TIMEOUT_MS', 'library-canonical-entity', 'timeoutMs', 6666],
+      ['LML_CLASS3_TIMEOUT_MS', 'proxy', 'timeoutMs', 6666],
       ['LML_CLASS4_TIMEOUT_MS', 'library-add-album-streaming', 'timeoutMs', 5555],
       ['LML_CLASS5_TIMEOUT_MS', 'enrichment-worker', 'timeoutMs', 40000],
     ] as const)('%s overrides %s.%s to %d', (envName, caller, field, value) => {

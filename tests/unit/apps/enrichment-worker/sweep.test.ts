@@ -29,7 +29,8 @@
 import { jest } from '@jest/globals';
 
 import { db, flowsheet } from '@wxyc/database';
-import { sweepStrandedClaims } from '../../../../apps/enrichment-worker/sweep';
+import { resolveLmlPolicy } from '@wxyc/lml-client';
+import { sweepStrandedClaims, STRANDED_TTL_SECONDS } from '../../../../apps/enrichment-worker/sweep';
 
 type SqlLike = {
   sql?: string | string[];
@@ -128,5 +129,38 @@ describe('sweepStrandedClaims (BS#1225)', () => {
     mockDb._chain.returning.mockRejectedValueOnce(dbError);
 
     await expect(sweepStrandedClaims()).rejects.toThrow('connection refused');
+  });
+
+  describe('STRANDED_TTL_SECONDS derivation (BS#1826 PR 2)', () => {
+    // Pre-PR2, `sweep.ts` and `lookup-batcher.ts` each read
+    // `envInt('ENRICHMENT_LML_BUDGET_MS', 29000)` independently — two
+    // module-level reads of the same env var that could desync if an
+    // operator (or a test) overrode only one process's env. PR 2 collapses
+    // both to the SAME source of truth: the `enrichment-worker` class-5
+    // entry in the per-caller policy layer (`@wxyc/lml-client` `policy.ts`).
+    // These tests pin that derivation directly, independent of the
+    // `sweepStrandedClaims` SQL-shape tests above.
+
+    it("derives from resolveLmlPolicy('enrichment-worker').budgetMs, not a locally-duplicated constant", () => {
+      const { budgetMs } = resolveLmlPolicy('enrichment-worker');
+      if (budgetMs === undefined) throw new Error('expected the enrichment-worker class-5 entry to set budgetMs');
+      expect(STRANDED_TTL_SECONDS).toBe(Math.max(60, Math.ceil(budgetMs / 1000) + 30));
+    });
+
+    it('exceeds the enrichment-worker policy budget — the load-bearing TTL > LML_BUDGET invariant', () => {
+      const { budgetMs } = resolveLmlPolicy('enrichment-worker');
+      if (budgetMs === undefined) throw new Error('expected the enrichment-worker class-5 entry to set budgetMs');
+      expect(STRANDED_TTL_SECONDS).toBeGreaterThan(budgetMs / 1000);
+    });
+
+    it('matches the documented class-5 defaults (28000ms budget -> 60s TTL floor)', () => {
+      // Regression pin for the concrete numbers: class 5's default budgetMs
+      // is timeoutMs(29000) - 1000 = 28000, so ceil(28000/1000)+30 = 58,
+      // which the 60s floor overrides — identical to the pre-PR2 constant
+      // (29000ms budget -> ceil(29)+30=59, also floored to 60), so this
+      // migration does not change the sweep's real-world TTL.
+      expect(resolveLmlPolicy('enrichment-worker').budgetMs).toBe(28000);
+      expect(STRANDED_TTL_SECONDS).toBe(60);
+    });
   });
 });
