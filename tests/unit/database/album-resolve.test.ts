@@ -86,7 +86,7 @@ jest.mock(
   { virtual: true }
 );
 
-import { resolveLinkedAlbumId, resolveLinkedFlowsheetBase } from '../../../shared/database/src/album-resolve';
+import { resolveLinkedAlbumId, selectLinkedFlowsheetRow } from '../../../shared/database/src/album-resolve';
 
 describe('album-resolve (shared/database)', () => {
   beforeEach(() => {
@@ -149,62 +149,79 @@ describe('album-resolve (shared/database)', () => {
     });
   });
 
-  // BS#1827 (local-first playcut details): record_label/label_id/
-  // metadata_status live on the SAME flowsheet row `resolveLinkedAlbumId`
-  // resolves its album_id from — written at play time, never LML-derived —
-  // so they survive independent of `album_metadata` enrichment / LML health.
-  // Shares the identical WHERE/ORDER BY/LIMIT (same partial index), so a
-  // given key always describes the same row across both functions.
-  describe('resolveLinkedFlowsheetBase', () => {
+  // BS#1827 (local-first playcut details, round 2 post-review): ONE query
+  // resolves album_id AND record_label/label_id/metadata_status together —
+  // written at play time, never LML-derived, so they survive independent of
+  // `album_metadata` enrichment / LML health. `resolveLinkedAlbumId` above is
+  // now a thin wrapper over this same function (its own tests, unchanged,
+  // already pin the id-only contract); these tests cover the full row shape.
+  describe('selectLinkedFlowsheetRow', () => {
     describe('empty-key guard', () => {
       it('returns null without touching the DB when artistName is empty', async () => {
-        expect(await resolveLinkedFlowsheetBase('', 'Some Album')).toBeNull();
+        expect(await selectLinkedFlowsheetRow('', 'Some Album')).toBeNull();
         expect(mockSelect).not.toHaveBeenCalled();
       });
 
       it('returns null when artistName is whitespace-only', async () => {
-        expect(await resolveLinkedFlowsheetBase('   ', 'Some Album')).toBeNull();
+        expect(await selectLinkedFlowsheetRow('   ', 'Some Album')).toBeNull();
         expect(mockSelect).not.toHaveBeenCalled();
       });
 
       it('returns null when releaseTitle is undefined', async () => {
-        expect(await resolveLinkedFlowsheetBase('Some Artist', undefined)).toBeNull();
+        expect(await selectLinkedFlowsheetRow('Some Artist', undefined)).toBeNull();
         expect(mockSelect).not.toHaveBeenCalled();
       });
 
       it('returns null when releaseTitle is empty', async () => {
-        expect(await resolveLinkedFlowsheetBase('Some Artist', '')).toBeNull();
+        expect(await selectLinkedFlowsheetRow('Some Artist', '')).toBeNull();
         expect(mockSelect).not.toHaveBeenCalled();
       });
 
       it('returns null when releaseTitle is whitespace-only', async () => {
-        expect(await resolveLinkedFlowsheetBase('Some Artist', '\t  ')).toBeNull();
+        expect(await selectLinkedFlowsheetRow('Some Artist', '\t  ')).toBeNull();
         expect(mockSelect).not.toHaveBeenCalled();
       });
     });
 
     it('returns null on the cold case (no matching album_id-bearing flowsheet row)', async () => {
       mockRowsQueue.push([]);
-      expect(await resolveLinkedFlowsheetBase('Unknown Artist', 'Unknown Album')).toBeNull();
+      expect(await selectLinkedFlowsheetRow('Unknown Artist', 'Unknown Album')).toBeNull();
       expect(mockSelect).toHaveBeenCalledTimes(1);
     });
 
-    it('returns record_label/label_id/metadata_status on a hit', async () => {
-      mockRowsQueue.push([{ record_label: 'Drag City', label_id: 7, metadata_status: 'enriched_match' }]);
-      const result = await resolveLinkedFlowsheetBase('Jessica Pratt', 'On Your Own Love Again');
-      expect(result).toEqual({ record_label: 'Drag City', label_id: 7, metadata_status: 'enriched_match' });
+    it('returns album_id/record_label/label_id/metadata_status together on a hit', async () => {
+      mockRowsQueue.push([{ album_id: 99, record_label: 'Drag City', label_id: 7, metadata_status: 'enriched_match' }]);
+      const result = await selectLinkedFlowsheetRow('Jessica Pratt', 'On Your Own Love Again');
+      expect(result).toEqual({
+        album_id: 99,
+        record_label: 'Drag City',
+        label_id: 7,
+        metadata_status: 'enriched_match',
+      });
     });
 
     it('issues ORDER BY for a deterministic row-pick on multi-album_id keys', async () => {
-      mockRowsQueue.push([{ record_label: 'Sonamos', label_id: 3, metadata_status: 'pending' }]);
-      await resolveLinkedFlowsheetBase('Multi Artist', 'Same Title Different Pressings');
+      mockRowsQueue.push([{ album_id: 42, record_label: 'Sonamos', label_id: 3, metadata_status: 'pending' }]);
+      await selectLinkedFlowsheetRow('Multi Artist', 'Same Title Different Pressings');
       expect(chainSpy.orderBy).toHaveBeenCalledTimes(1);
     });
 
     it('passes through a null record_label/label_id (free-text-entered label never captured)', async () => {
-      mockRowsQueue.push([{ record_label: null, label_id: null, metadata_status: 'pending' }]);
-      const result = await resolveLinkedFlowsheetBase('Some Artist', 'Some Album');
-      expect(result).toEqual({ record_label: null, label_id: null, metadata_status: 'pending' });
+      mockRowsQueue.push([{ album_id: 55, record_label: null, label_id: null, metadata_status: 'pending' }]);
+      const result = await selectLinkedFlowsheetRow('Some Artist', 'Some Album');
+      expect(result).toEqual({ album_id: 55, record_label: null, label_id: null, metadata_status: 'pending' });
+    });
+
+    it('backs resolveLinkedAlbumId: the id-only wrapper reads album_id off this same row shape', async () => {
+      // Pins that resolveLinkedAlbumId's thin-wrapper refactor (BS#1827 round
+      // 2) still issues exactly one query and extracts the same album_id a
+      // direct selectLinkedFlowsheetRow caller would see.
+      mockRowsQueue.push([
+        { album_id: 123, record_label: 'Some Label', label_id: 4, metadata_status: 'enriched_match' },
+      ]);
+      const albumId = await resolveLinkedAlbumId('Shared Row Artist', 'Shared Row Album');
+      expect(albumId).toBe(123);
+      expect(mockSelect).toHaveBeenCalledTimes(1);
     });
   });
 });

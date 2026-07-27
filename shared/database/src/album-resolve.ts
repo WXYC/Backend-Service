@@ -43,17 +43,41 @@ function lookupKey(artist: string, album?: string): string {
 }
 
 /**
- * Resolve `(artistName, releaseTitle)` to the `library.id` of a matching
- * linked flowsheet row, or `null` when no `album_id`-bearing flowsheet row
- * exists for the key. Shared Step-1 for both the album-metadata read
- * (`lookupAlbumMetadataById`) and the critic-reviews read
- * (`lookupCriticReviewsByAlbumId`) in
- * `apps/backend/services/album-metadata-lookup.service.ts`. Callers that
- * need both — the `/proxy/metadata/album` handler — resolve the key *once*
- * here and pass the id to both reads, so a concurrent flowsheet insert can't
- * make the two reads disagree on which album they describe. The seed writer
- * (`scripts/seed-critic-reviews.ts`) imports this to key its UPSERTs against
- * the exact same normalized flowsheet key the serve path reads.
+ * The linked-flowsheet row shape both {@link resolveLinkedAlbumId} (the id
+ * alone, for its existing external callers) and the proxy controller's
+ * local-first base-field block (`record_label` / `label_id` /
+ * `metadata_status`, BS#1827) need — see {@link selectLinkedFlowsheetRow}.
+ */
+export interface LinkedFlowsheetRow {
+  album_id: number;
+  record_label: string | null;
+  label_id: number | null;
+  metadata_status: string;
+}
+
+/**
+ * Resolve `(artistName, releaseTitle)` to the matching linked flowsheet row
+ * — `album_id` plus the base (non-enrichment) columns written onto that same
+ * row at play time — or `null` when no `album_id`-bearing flowsheet row
+ * exists for the key. The single shared query behind both
+ * {@link resolveLinkedAlbumId} and the proxy controller's base-field block
+ * (BS#1827): one round trip resolves album_id AND record_label/label_id/
+ * metadata_status from the SAME row, so a concurrent flowsheet insert can't
+ * make them describe two different rows for one request the way two
+ * separate queries could (the bug this consolidation fixes — BS#1827 round
+ * 2 review). `record_label`/`label_id` are written by the DJ, dj-site's
+ * freeform entry, or the ETL and never depend on LML, unlike
+ * `album_metadata.label` (Discogs enrichment, BS#1336); `metadata_status` is
+ * reported faithfully off this row — a replayed/stale value here (e.g. a
+ * re-aired play defaulting back to `pending`) is the terminal-semantics
+ * question iOS#685 owns, not addressed by this function.
+ *
+ * Not part of the small public surface other workspaces import — only
+ * {@link resolveLinkedAlbumId} (used by `jobs/album-critic-reviews-etl` and
+ * `scripts/seed-critic-reviews.ts`, which need only the id) and the proxy
+ * controller's re-export shim (which needs the whole row) call this
+ * directly. Exported because both live outside this file, but treat it as
+ * an internal accessor, not a third general-purpose resolver to reach for.
  *
  * Uses the partial functional index `flowsheet_album_link_lookup_idx`. The
  * explicit `flowsheet.album_id IS NOT NULL` predicate matches the index's
@@ -71,62 +95,19 @@ function lookupKey(artist: string, album?: string): string {
  * `null`: the key `'<artist>-'` (blank release) would otherwise match any
  * linked flowsheet row whose DJ left `album_title` blank and return an
  * arbitrary `album_id`.
- */
-export async function resolveLinkedAlbumId(artistName: string, releaseTitle?: string): Promise<number | null> {
-  const trimmedArtist = artistName.trim();
-  const trimmedRelease = (releaseTitle ?? '').trim();
-  if (trimmedArtist.length === 0 || trimmedRelease.length === 0) return null;
-
-  const key = lookupKey(trimmedArtist, trimmedRelease);
-
-  const candidate = await db
-    .select({ album_id: flowsheet.album_id })
-    .from(flowsheet)
-    .where(sql`${flowsheetLookupKey} = ${key} AND ${flowsheet.album_id} IS NOT NULL`)
-    .orderBy(desc(flowsheet.id))
-    .limit(1);
-
-  return candidate[0]?.album_id ?? null;
-}
-
-/**
- * Base (non-enrichment) flowsheet fields for a linked `(artistName,
- * releaseTitle)` key — added for BS#1827 (local-first playcut details).
- * `record_label` / `label_id` are written onto `flowsheet` at play time (by
- * the DJ, dj-site's freeform entry, or the ETL) and never depend on LML,
- * unlike `album_metadata.label` (Discogs enrichment, BS#1336). Reading them
- * off the SAME row {@link resolveLinkedAlbumId} resolves its `album_id` from
- * means `GET /proxy/metadata/album` can surface a durable label/status even
- * when no `album_metadata` row exists yet and the LML fallthrough fails —
- * see `apps/backend/controllers/proxy.controller.ts`'s `getAlbumMetadata`.
  *
- * Uses the IDENTICAL `WHERE`/`ORDER BY`/`LIMIT` as {@link resolveLinkedAlbumId}
- * (same partial index `flowsheet_album_link_lookup_idx`, same deterministic
- * row-pick), so a given key always describes the same flowsheet row across
- * both calls. Kept as its own query rather than widening
- * `resolveLinkedAlbumId`'s SELECT so that function's existing callers/mocks
- * (`jobs/album-critic-reviews-etl`, `scripts/seed-critic-reviews.ts`, and
- * their test suites) are untouched by this addition.
- *
- * Returns `null` under the same conditions `resolveLinkedAlbumId` does: blank
- * artist/release, or no `album_id`-bearing flowsheet row for the key. A
- * free-text row that has NEVER linked to an `album_id` has no row this query
- * can find either — the partial index is deliberately scoped to `album_id IS
- * NOT NULL` (migration 0081); an equivalent covering the pure free-text
- * cohort would need its own (much larger, whole-table) index, which is out
- * of scope here. Callers fall back to the request's own artist/release/track
- * strings for that cohort — see the caller's doc comment.
+ * A free-text row that has NEVER linked to an `album_id` has no row this
+ * query can find either — the partial index is deliberately scoped to
+ * `album_id IS NOT NULL` (migration 0081); an equivalent covering the pure
+ * free-text cohort would need its own (much larger, whole-table) index,
+ * which is out of scope here. Callers fall back to the request's own
+ * artist/release/track strings for that cohort — see the proxy controller's
+ * doc comment.
  */
-export interface LinkedFlowsheetBase {
-  record_label: string | null;
-  label_id: number | null;
-  metadata_status: string;
-}
-
-export async function resolveLinkedFlowsheetBase(
+export async function selectLinkedFlowsheetRow(
   artistName: string,
   releaseTitle?: string
-): Promise<LinkedFlowsheetBase | null> {
+): Promise<LinkedFlowsheetRow | null> {
   const trimmedArtist = artistName.trim();
   const trimmedRelease = (releaseTitle ?? '').trim();
   if (trimmedArtist.length === 0 || trimmedRelease.length === 0) return null;
@@ -135,6 +116,7 @@ export async function resolveLinkedFlowsheetBase(
 
   const candidate = await db
     .select({
+      album_id: flowsheet.album_id,
       record_label: flowsheet.record_label,
       label_id: flowsheet.label_id,
       metadata_status: flowsheet.metadata_status,
@@ -144,5 +126,35 @@ export async function resolveLinkedFlowsheetBase(
     .orderBy(desc(flowsheet.id))
     .limit(1);
 
-  return candidate[0] ?? null;
+  const row = candidate[0];
+  // The WHERE clause already guarantees album_id IS NOT NULL for any
+  // returned row; the null check here is a defensive type-narrowing (not a
+  // reachable runtime branch) so `LinkedFlowsheetRow.album_id` can be typed
+  // as a definite `number` rather than `number | null`.
+  if (!row || row.album_id === null) return null;
+  return {
+    album_id: row.album_id,
+    record_label: row.record_label,
+    label_id: row.label_id,
+    metadata_status: row.metadata_status,
+  };
+}
+
+/**
+ * Resolve `(artistName, releaseTitle)` to the `library.id` of a matching
+ * linked flowsheet row, or `null` when no `album_id`-bearing flowsheet row
+ * exists for the key. Thin wrapper over {@link selectLinkedFlowsheetRow} —
+ * kept as its own named export with this exact `number | null` signature so
+ * its existing external callers (`jobs/album-critic-reviews-etl`,
+ * `scripts/seed-critic-reviews.ts`, and their test suites) are untouched by
+ * the BS#1827 consolidation. Shared Step-1 for both the album-metadata read
+ * (`lookupAlbumMetadataById`) and the critic-reviews read
+ * (`lookupCriticReviewsByAlbumId`) in
+ * `apps/backend/services/album-metadata-lookup.service.ts`. The seed writer
+ * (`scripts/seed-critic-reviews.ts`) imports this to key its UPSERTs against
+ * the exact same normalized flowsheet key the serve path reads.
+ */
+export async function resolveLinkedAlbumId(artistName: string, releaseTitle?: string): Promise<number | null> {
+  const row = await selectLinkedFlowsheetRow(artistName, releaseTitle);
+  return row?.album_id ?? null;
 }

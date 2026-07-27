@@ -34,8 +34,7 @@ import { getDiscogsReleaseIdByLegacyId } from '../services/library.service.js';
 import { filterSpacerGif, isSyntheticArtwork } from '../services/metadata/metadata.service.js';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
 import {
-  resolveLinkedAlbumId,
-  resolveLinkedFlowsheetBase,
+  selectLinkedFlowsheetRow,
   lookupAlbumMetadataById,
   lookupCriticReviewsByAlbumId,
   type PersistedAlbumMetadata,
@@ -451,21 +450,27 @@ function parseDiscogsReleaseIdFromUrl(url: string): number | undefined {
  * so the p50/p95 cohort distinction stays visible.
  *
  * Local-first base fields (BS#1827): `artistName` / `releaseTitle` /
- * `trackTitle` are assembled from the request itself — and
- * `recordLabel` / `labelId` / `metadataStatus`, when a linked flowsheet row
- * is known, straight off that row via {@link resolveLinkedFlowsheetBase} —
- * BEFORE any persisted-state or LML lookup is attempted below. These are
- * "base": durable BS state, independent of Discogs/LML. Everything else this
- * handler adds afterward (`artworkUrl`, `discogsUrl`, `genres`, `label`,
- * streaming URLs, ...) is "enriched": optional, upstream-dependent, and
- * present only when known. The distinction is implicit in which fields are
- * unconditional vs. conditionally assigned — there's no separate `base` /
- * `enriched` wrapper in the wire shape, and these three new response fields
- * aren't yet in `wxyc-shared/api.yaml` (tracked for the iOS consumer,
- * iOS#685, which also formalizes the `metadata_status`/`isTerminal` contract
- * this sets up). The result: an LML timeout can blank `artworkUrl` etc., but
- * it can never blank artist/track/album/label — see the "local-first base
- * fields" test suite for the exact contract.
+ * `trackTitle` are assembled from the request itself, and `recordLabel` /
+ * `labelId` / `metadataStatus` — when a linked flowsheet row is known —
+ * come from that SAME row via {@link selectLinkedFlowsheetRow}, which also
+ * resolves `albumId`. One query serves both, so the base fields and the
+ * `album_id` the persisted-state read below keys off can never describe two
+ * different flowsheet rows for one request (a two-query version raced a
+ * concurrent flowsheet insert landing between them — fixed in round 2 of
+ * this slice). All of this runs BEFORE any LML lookup is attempted below.
+ * These are "base": durable BS state, independent of Discogs/LML. Everything
+ * else this handler adds afterward (`artworkUrl`, `discogsUrl`, `genres`,
+ * `label`, streaming URLs, ...) is "enriched": optional, upstream-dependent,
+ * and present only when known. The distinction is implicit in which fields
+ * are unconditional vs. conditionally assigned — there's no separate `base`
+ * / `enriched` wrapper in the wire shape, and these three new response
+ * fields aren't yet in `wxyc-shared/api.yaml` (tracked for the iOS consumer,
+ * iOS#685, which also formalizes the `metadata_status`/`isTerminal`
+ * contract this sets up — `metadataStatus` here is a faithful echo of the
+ * row's column, including any replay staleness; iOS#685 owns that terminal-
+ * semantics question, not this handler). The result: an LML timeout can
+ * blank `artworkUrl` etc., but it can never blank artist/track/album/label
+ * — see the "local-first base fields" test suite for the exact contract.
  */
 export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMetadataQuery> = async (req, res) => {
   const { artistName, releaseTitle, trackTitle } = req.query;
@@ -485,50 +490,37 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   // fills missing streaming URLs at the bottom of the handler. iOS sees
   // the same shape it would on the LML-fallthrough path.
   //
-  // Resolve the `album_id` from the normalized `(artist, album)` lookup key
-  // ONCE, then feed it to both the persisted-metadata read and (below) the
-  // critic-reviews read. Resolving per-read would let a flowsheet insert
-  // between the two calls make metadata and reviews describe different albums
-  // for the same request.
+  // Resolve the linked flowsheet row from the normalized `(artist, album)`
+  // lookup key ONCE (BS#1827: album_id plus the base catalog fields, one
+  // query), then feed the album_id to both the persisted-metadata read and
+  // (below) the critic-reviews read. Resolving per-read would let a
+  // flowsheet insert land between the calls and make them describe
+  // different albums for the same request.
   //
   // A thrown DB error here would propagate as 500 and regress availability
   // versus the LML-fallthrough path (which catches LML errors and degrades
   // to synthesized search URLs). Treat any DB failure as a cache miss and
   // fall through to LML — the caller's worst-case latency goes up, but the
-  // request still completes with a 200.
+  // request still completes with a 200. Because album_id and the base
+  // fields now come from the SAME query, a failure here can no longer
+  // "partially" fail — it drops both together, which is the correct model:
+  // there's nothing left to partially succeed at.
   let albumId: number | null = null;
   let persisted: PersistedAlbumMetadata | null = null;
   try {
-    albumId = await resolveLinkedAlbumId(artistName, releaseTitle);
+    const linkedRow = await selectLinkedFlowsheetRow(artistName, releaseTitle);
+    albumId = linkedRow?.album_id ?? null;
+    // Base catalog fields BS wrote at play time (BS#1827): sourced from the
+    // SAME row album_id came from. A free-text row that has never linked to
+    // an album_id has no efficient local source for these three (see
+    // selectLinkedFlowsheetRow's doc comment) — its artist/release/track
+    // identity above still survives via the request echo.
+    if (linkedRow?.record_label) metadata.recordLabel = linkedRow.record_label;
+    if (linkedRow?.label_id != null) metadata.labelId = linkedRow.label_id;
+    if (linkedRow?.metadata_status) metadata.metadataStatus = linkedRow.metadata_status;
     if (albumId !== null) persisted = await lookupAlbumMetadataById(albumId);
   } catch (lookupError) {
     console.warn('[ProxyController] local metadata lookup failed; falling through to LML:', lookupError);
-  }
-
-  // Base catalog fields BS wrote at play time (BS#1827): record_label /
-  // label_id / metadata_status live on the SAME flowsheet row `albumId` was
-  // just resolved from, independent of whether `album_metadata` enrichment
-  // has ever run. Gated on `albumId !== null` — resolveLinkedFlowsheetBase
-  // shares resolveLinkedAlbumId's exact WHERE/ORDER BY/LIMIT, so when that
-  // already came back null there is no row this call could find either; a
-  // free-text row that has never linked to an album_id has no efficient
-  // local source for these three (see resolveLinkedFlowsheetBase's doc
-  // comment) — its artist/release/track identity above still survives via
-  // the request echo. Own try/catch so a failure here degrades to omitting
-  // only these three fields — it must never discard the persisted/LML
-  // metadata resolved above or below.
-  if (albumId !== null) {
-    try {
-      const localBase = await resolveLinkedFlowsheetBase(artistName, releaseTitle);
-      if (localBase?.record_label) metadata.recordLabel = localBase.record_label;
-      if (localBase?.label_id != null) metadata.labelId = localBase.label_id;
-      if (localBase?.metadata_status) metadata.metadataStatus = localBase.metadata_status;
-    } catch (baseFieldsError) {
-      console.warn(
-        '[ProxyController] local flowsheet base lookup failed; omitting base catalog fields:',
-        baseFieldsError
-      );
-    }
   }
 
   if (persisted) Object.assign(metadata, buildLocalMetadataResponse(persisted));

@@ -6,18 +6,20 @@
  *
  * Four exported helpers, keyed on the `album_id` of a matching `flowsheet`
  * row and staged so the handler resolves that id exactly once per request:
- *   - {@link resolveLinkedAlbumId} — normalized `(artist, release)` key →
- *     one `library.id`, via the partial functional index
+ *   - {@link selectLinkedFlowsheetRow} — normalized `(artist, release)` key →
+ *     the matching linked flowsheet row (`album_id` plus the base,
+ *     non-enrichment `record_label` / `label_id` / `metadata_status`
+ *     columns, BS#1827), via the partial functional index
  *     `flowsheet_album_link_lookup_idx` (migration 0081). Deterministic
  *     `ORDER BY flowsheet.id DESC LIMIT 1` row-pick so multi-`album_id` keys
  *     (V/A multi-format, dual-pressings, librarian duplicates) can't flap
- *     between distinct albums across polls.
- *   - {@link resolveLinkedFlowsheetBase} — base (non-enrichment) fields off
- *     the SAME linked flowsheet row (`record_label` / `label_id` /
- *     `metadata_status`, BS#1827): written at play time, never LML-derived,
- *     so they survive independent of whether `album_metadata` enrichment or
- *     LML has ever run for this album. See the `/proxy/metadata/album`
- *     handler's doc comment for how this feeds the local-first base block.
+ *     between distinct albums across polls. One query resolves album_id AND
+ *     the base fields together — see the `/proxy/metadata/album` handler's
+ *     doc comment for how this feeds the local-first base block without a
+ *     second, separately-racing round trip.
+ *   - {@link resolveLinkedAlbumId} — thin `number | null` wrapper over
+ *     {@link selectLinkedFlowsheetRow} for callers that only need the id
+ *     (`jobs/album-critic-reviews-etl`, `scripts/seed-critic-reviews.ts`).
  *   - {@link lookupAlbumMetadataById} — PK-lookup on `album_metadata` for a
  *     resolved id; the 10 base columns the proxy response is built from plus
  *     the 8 LML-only enrichment fields (`discogs_artist_id` / `label` /
@@ -28,9 +30,9 @@
  *     attributed snippets for a resolved id, independent of whether
  *     `album_metadata` enrichment has run.
  *
- * The `/proxy/metadata/album` handler calls {@link resolveLinkedAlbumId}
- * once and feeds the id to both the metadata and reviews reads, so a
- * concurrent flowsheet insert can't make the two reads describe two
+ * The `/proxy/metadata/album` handler calls {@link selectLinkedFlowsheetRow}
+ * once and feeds the resolved `album_id` to both the metadata and reviews
+ * reads, so a concurrent flowsheet insert can't make the reads describe two
  * different albums for one request (the reads used to each re-resolve the
  * key, which was both racy and coupled reviews to the metadata read).
  *
@@ -58,13 +60,15 @@ import type { DiscogsResolvedToken, DiscogsTrackItem } from '@wxyc/lml-client';
  * need touching. New code should import from `@wxyc/database` directly, as
  * `scripts/seed-critic-reviews.ts` now does.
  *
- * `resolveLinkedFlowsheetBase` (BS#1827) lives alongside it in the same
- * `@wxyc/database` module and is re-exported here for the same reason —
- * only `apps/backend/controllers/proxy.controller.ts` needs it today, so
- * there's no `jobs/` consumer yet, but keeping both resolvers importable
- * from one place avoids a second import site to remember.
+ * `selectLinkedFlowsheetRow` (BS#1827, folded from a separate
+ * `resolveLinkedFlowsheetBase` into the combined-row shape in round 2 of the
+ * same slice) lives alongside it in the same `@wxyc/database` module and is
+ * re-exported here for the same reason — only
+ * `apps/backend/controllers/proxy.controller.ts` needs it today, so there's
+ * no `jobs/` consumer yet, but keeping both resolvers importable from one
+ * place avoids a second import site to remember.
  */
-export { resolveLinkedAlbumId, resolveLinkedFlowsheetBase, type LinkedFlowsheetBase } from '@wxyc/database';
+export { resolveLinkedAlbumId, selectLinkedFlowsheetRow, type LinkedFlowsheetRow } from '@wxyc/database';
 
 /**
  * Persisted album metadata projection. Matches the 18 columns on
