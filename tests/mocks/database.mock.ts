@@ -459,6 +459,21 @@ export const resolveLinkedAlbumId = jest
   .fn<(artistName: string, releaseTitle?: string) => Promise<number | null>>()
   .mockResolvedValue(null);
 
+// Stub of shared/database/src/album-resolve.ts's `resolveLinkedFlowsheetBase`
+// (BS#1827, local-first playcut details). The one consumer today (the
+// service's thin re-export, read by apps/backend/controllers/
+// proxy.controller.ts) only needs a controllable resolved value here — the
+// real lookup-key + ORDER BY contract is pinned against the actual module by
+// tests/unit/database/album-resolve.test.ts.
+export interface LinkedFlowsheetBase {
+  record_label: string | null;
+  label_id: number | null;
+  metadata_status: string;
+}
+export const resolveLinkedFlowsheetBase = jest
+  .fn<(artistName: string, releaseTitle?: string) => Promise<LinkedFlowsheetBase | null>>()
+  .mockResolvedValue(null);
+
 export { requirePositiveInt, requireNonNegativeInt } from '../../shared/database/src/env-parsers.js';
 export type { IntParserOptions } from '../../shared/database/src/env-parsers.js';
 

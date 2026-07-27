@@ -1,10 +1,10 @@
 /**
  * Local read helpers backing the cache-first `/proxy/metadata/album` path
  * (BS#1331) and the external critic-review snippets attached to it
- * (album-critic-reviews slice, ADR 0012). All three read BS's own persisted
- * state so the steady-state serve path skips the LML cascade entirely.
+ * (album-critic-reviews slice, ADR 0012). All read BS's own persisted state
+ * so the steady-state serve path skips the LML cascade entirely.
  *
- * Three exported helpers, keyed on the `album_id` of a matching `flowsheet`
+ * Four exported helpers, keyed on the `album_id` of a matching `flowsheet`
  * row and staged so the handler resolves that id exactly once per request:
  *   - {@link resolveLinkedAlbumId} — normalized `(artist, release)` key →
  *     one `library.id`, via the partial functional index
@@ -12,6 +12,12 @@
  *     `ORDER BY flowsheet.id DESC LIMIT 1` row-pick so multi-`album_id` keys
  *     (V/A multi-format, dual-pressings, librarian duplicates) can't flap
  *     between distinct albums across polls.
+ *   - {@link resolveLinkedFlowsheetBase} — base (non-enrichment) fields off
+ *     the SAME linked flowsheet row (`record_label` / `label_id` /
+ *     `metadata_status`, BS#1827): written at play time, never LML-derived,
+ *     so they survive independent of whether `album_metadata` enrichment or
+ *     LML has ever run for this album. See the `/proxy/metadata/album`
+ *     handler's doc comment for how this feeds the local-first base block.
  *   - {@link lookupAlbumMetadataById} — PK-lookup on `album_metadata` for a
  *     resolved id; the 10 base columns the proxy response is built from plus
  *     the 8 LML-only enrichment fields (`discogs_artist_id` / `label` /
@@ -51,8 +57,14 @@ import type { DiscogsResolvedToken, DiscogsTrackItem } from '@wxyc/lml-client';
  * proxy.controller.ts` still imports from here, so its import site doesn't
  * need touching. New code should import from `@wxyc/database` directly, as
  * `scripts/seed-critic-reviews.ts` now does.
+ *
+ * `resolveLinkedFlowsheetBase` (BS#1827) lives alongside it in the same
+ * `@wxyc/database` module and is re-exported here for the same reason —
+ * only `apps/backend/controllers/proxy.controller.ts` needs it today, so
+ * there's no `jobs/` consumer yet, but keeping both resolvers importable
+ * from one place avoids a second import site to remember.
  */
-export { resolveLinkedAlbumId } from '@wxyc/database';
+export { resolveLinkedAlbumId, resolveLinkedFlowsheetBase, type LinkedFlowsheetBase } from '@wxyc/database';
 
 /**
  * Persisted album metadata projection. Matches the 18 columns on

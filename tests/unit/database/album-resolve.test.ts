@@ -86,7 +86,7 @@ jest.mock(
   { virtual: true }
 );
 
-import { resolveLinkedAlbumId } from '../../../shared/database/src/album-resolve';
+import { resolveLinkedAlbumId, resolveLinkedFlowsheetBase } from '../../../shared/database/src/album-resolve';
 
 describe('album-resolve (shared/database)', () => {
   beforeEach(() => {
@@ -146,6 +146,65 @@ describe('album-resolve (shared/database)', () => {
       const albumId = await resolveLinkedAlbumId('Multi Artist', 'Same Title Different Pressings');
       expect(albumId).toBe(42);
       expect(chainSpy.orderBy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // BS#1827 (local-first playcut details): record_label/label_id/
+  // metadata_status live on the SAME flowsheet row `resolveLinkedAlbumId`
+  // resolves its album_id from — written at play time, never LML-derived —
+  // so they survive independent of `album_metadata` enrichment / LML health.
+  // Shares the identical WHERE/ORDER BY/LIMIT (same partial index), so a
+  // given key always describes the same row across both functions.
+  describe('resolveLinkedFlowsheetBase', () => {
+    describe('empty-key guard', () => {
+      it('returns null without touching the DB when artistName is empty', async () => {
+        expect(await resolveLinkedFlowsheetBase('', 'Some Album')).toBeNull();
+        expect(mockSelect).not.toHaveBeenCalled();
+      });
+
+      it('returns null when artistName is whitespace-only', async () => {
+        expect(await resolveLinkedFlowsheetBase('   ', 'Some Album')).toBeNull();
+        expect(mockSelect).not.toHaveBeenCalled();
+      });
+
+      it('returns null when releaseTitle is undefined', async () => {
+        expect(await resolveLinkedFlowsheetBase('Some Artist', undefined)).toBeNull();
+        expect(mockSelect).not.toHaveBeenCalled();
+      });
+
+      it('returns null when releaseTitle is empty', async () => {
+        expect(await resolveLinkedFlowsheetBase('Some Artist', '')).toBeNull();
+        expect(mockSelect).not.toHaveBeenCalled();
+      });
+
+      it('returns null when releaseTitle is whitespace-only', async () => {
+        expect(await resolveLinkedFlowsheetBase('Some Artist', '\t  ')).toBeNull();
+        expect(mockSelect).not.toHaveBeenCalled();
+      });
+    });
+
+    it('returns null on the cold case (no matching album_id-bearing flowsheet row)', async () => {
+      mockRowsQueue.push([]);
+      expect(await resolveLinkedFlowsheetBase('Unknown Artist', 'Unknown Album')).toBeNull();
+      expect(mockSelect).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns record_label/label_id/metadata_status on a hit', async () => {
+      mockRowsQueue.push([{ record_label: 'Drag City', label_id: 7, metadata_status: 'enriched_match' }]);
+      const result = await resolveLinkedFlowsheetBase('Jessica Pratt', 'On Your Own Love Again');
+      expect(result).toEqual({ record_label: 'Drag City', label_id: 7, metadata_status: 'enriched_match' });
+    });
+
+    it('issues ORDER BY for a deterministic row-pick on multi-album_id keys', async () => {
+      mockRowsQueue.push([{ record_label: 'Sonamos', label_id: 3, metadata_status: 'pending' }]);
+      await resolveLinkedFlowsheetBase('Multi Artist', 'Same Title Different Pressings');
+      expect(chainSpy.orderBy).toHaveBeenCalledTimes(1);
+    });
+
+    it('passes through a null record_label/label_id (free-text-entered label never captured)', async () => {
+      mockRowsQueue.push([{ record_label: null, label_id: null, metadata_status: 'pending' }]);
+      const result = await resolveLinkedFlowsheetBase('Some Artist', 'Some Album');
+      expect(result).toEqual({ record_label: null, label_id: null, metadata_status: 'pending' });
     });
   });
 });
