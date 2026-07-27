@@ -64,8 +64,21 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
 const mockResolveLinkedAlbumId = jest.fn<(artist: string, release?: string) => Promise<number | null>>();
 const mockLookupAlbumMetadataById = jest.fn<(albumId: number) => Promise<unknown>>();
 const mockLookupCriticReviewsByAlbumId = jest.fn<(albumId: number) => Promise<unknown[]>>();
+// BS#1827 (local-first playcut details): base fields (record_label/label_id/
+// metadata_status) off the SAME linked flowsheet row `resolveLinkedAlbumId`
+// resolves its album_id from. Mocked separately so a test can drive the
+// base-field survival contract independent of `lookupAlbumMetadataById` /
+// LML — the whole point is these must NOT depend on either succeeding.
+const mockResolveLinkedFlowsheetBase =
+  jest.fn<
+    (
+      artist: string,
+      release?: string
+    ) => Promise<{ record_label: string | null; label_id: number | null; metadata_status: string } | null>
+  >();
 jest.mock('../../../apps/backend/services/album-metadata-lookup.service', () => ({
   resolveLinkedAlbumId: mockResolveLinkedAlbumId,
+  resolveLinkedFlowsheetBase: mockResolveLinkedFlowsheetBase,
   lookupAlbumMetadataById: mockLookupAlbumMetadataById,
   lookupCriticReviewsByAlbumId: mockLookupCriticReviewsByAlbumId,
 }));
@@ -288,6 +301,10 @@ describe('proxy.controller', () => {
       // value a prior test set, so both defaults are re-asserted here. BS#1331.
       mockResolveLinkedAlbumId.mockResolvedValue(DEFAULT_LINKED_ALBUM_ID);
       mockLookupAlbumMetadataById.mockResolvedValue(null);
+      // Default: no local flowsheet base row (inert — existing tests predate
+      // BS#1827 and assert nothing about recordLabel/labelId/metadataStatus).
+      // The base-field-survival suite below overrides this per test.
+      mockResolveLinkedFlowsheetBase.mockResolvedValue(null);
     });
 
     // ADR 0012: attach external critic-review snippets, flag-gated. These run
@@ -1410,6 +1427,204 @@ describe('proxy.controller', () => {
         await getAlbumMetadata(req, res as Response, mockNext);
 
         expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.upstream_calls': 0 });
+      });
+    });
+
+    // --- Local-first base fields (BS#1827) ---
+    //
+    // Base playcut metadata (artist/release/track identity, plus
+    // record_label/label_id/metadata_status when a linked flowsheet row is
+    // known) is assembled from durable BS state BEFORE any LML lookup is
+    // attempted, so an LML failure/timeout can only drop OPTIONAL enrichment
+    // fields (artworkUrl, discogsUrl, genres, ...) — it can never blank the
+    // base fields. This is the acceptance gate for #1827: simulate an LML
+    // failure and assert base fields survive while enrichment fields don't.
+    describe('local-first base fields (BS#1827)', () => {
+      it('always echoes artistName/releaseTitle/trackTitle from the query, before any lookup is attempted', async () => {
+        // No mocks configured to resolve anything — the point is these three
+        // never depend on a successful local or LML lookup in the first place.
+        mockResolveLinkedAlbumId.mockResolvedValue(null);
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = {
+          query: { artistName: 'Chuquimamani-Condori', releaseTitle: 'Edits', trackTitle: 'Call Your Name' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.artistName).toBe('Chuquimamani-Condori');
+        expect(result.releaseTitle).toBe('Edits');
+        expect(result.trackTitle).toBe('Call Your Name');
+      });
+
+      it('omits releaseTitle/trackTitle when not supplied on the request (no fabrication)', async () => {
+        mockResolveLinkedAlbumId.mockResolvedValue(null);
+        mockLookupMetadata.mockRejectedValue(new Error('LML down'));
+
+        const req = { query: { artistName: 'Solo Artist Name Only' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.artistName).toBe('Solo Artist Name Only');
+        expect('releaseTitle' in result).toBe(false);
+        expect('trackTitle' in result).toBe(false);
+      });
+
+      it('free-text row (no linked album_id) + LML failure: artist/release/track survive; recordLabel/labelId/metadataStatus are not fabricated', async () => {
+        // The core free-text scenario the issue names: resolveLinkedAlbumId
+        // returns null (no album_id-bearing flowsheet row for this key), so
+        // resolveLinkedFlowsheetBase is never even reachable for it — there is
+        // no efficient local source for record_label/label_id in that cohort
+        // (see resolveLinkedFlowsheetBase's doc comment). The identity fields
+        // still must not blank out just because LML also fails.
+        mockResolveLinkedAlbumId.mockResolvedValue(null);
+        mockLookupMetadata.mockRejectedValue(new Error('LML timeout'));
+
+        const req = {
+          query: { artistName: 'Free Text Artist', releaseTitle: 'Free Text Album', trackTitle: 'Some Track' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockResolveLinkedFlowsheetBase).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        // Base identity: survives.
+        expect(result.artistName).toBe('Free Text Artist');
+        expect(result.releaseTitle).toBe('Free Text Album');
+        expect(result.trackTitle).toBe('Some Track');
+        // No locally-known label/status for this cohort — omitted, not null.
+        expect('recordLabel' in result).toBe(false);
+        expect('labelId' in result).toBe(false);
+        expect('metadataStatus' in result).toBe(false);
+        // Enriched-only fields are genuinely absent (LML failed).
+        expect('discogsUrl' in result).toBe(false);
+        expect('artworkUrl' in result).toBe(false);
+      });
+
+      it('linked row known locally + LML failure: recordLabel/labelId/metadataStatus ALSO survive, only enrichment fields go missing', async () => {
+        // The other half of the acceptance criterion: a linked flowsheet row
+        // (album_id resolved) that hasn't been enriched into album_metadata
+        // yet (persisted stays null, same as the existing "cold" default) —
+        // an LML outage must not blank the record_label/label_id/
+        // metadata_status this endpoint can read straight off that row.
+        mockResolveLinkedAlbumId.mockResolvedValue(DEFAULT_LINKED_ALBUM_ID);
+        mockLookupAlbumMetadataById.mockResolvedValue(null);
+        mockResolveLinkedFlowsheetBase.mockResolvedValue({
+          record_label: 'Drag City',
+          label_id: 12,
+          metadata_status: 'pending',
+        });
+        mockLookupMetadata.mockRejectedValue(new Error('LML down'));
+
+        const req = {
+          query: { artistName: 'Jessica Pratt', releaseTitle: 'On Your Own Love Again', trackTitle: 'Back, Baby' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockResolveLinkedFlowsheetBase).toHaveBeenCalledWith('Jessica Pratt', 'On Your Own Love Again');
+        expect(res.status).toHaveBeenCalledWith(200);
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        // Base identity.
+        expect(result.artistName).toBe('Jessica Pratt');
+        expect(result.releaseTitle).toBe('On Your Own Love Again');
+        expect(result.trackTitle).toBe('Back, Baby');
+        // Base catalog fields sourced locally — survive the LML failure.
+        expect(result.recordLabel).toBe('Drag City');
+        expect(result.labelId).toBe(12);
+        expect(result.metadataStatus).toBe('pending');
+        // Enrichment-only fields are genuinely absent (nothing persisted, LML failed).
+        expect('discogsUrl' in result).toBe(false);
+        expect('artworkUrl' in result).toBe(false);
+        expect('genres' in result).toBe(false);
+      });
+
+      it('omits labelId/recordLabel individually when the linked row only knows one of them', async () => {
+        mockResolveLinkedFlowsheetBase.mockResolvedValue({
+          record_label: null,
+          label_id: 9,
+          metadata_status: 'enriching',
+        });
+        mockLookupMetadata.mockRejectedValue(new Error('LML down'));
+
+        const req = {
+          query: { artistName: 'Partial Base Artist', releaseTitle: 'Partial Base Album' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect('recordLabel' in result).toBe(false);
+        expect(result.labelId).toBe(9);
+        expect(result.metadataStatus).toBe('enriching');
+      });
+
+      it('does not call resolveLinkedFlowsheetBase when no linked album_id resolves (avoids a redundant guaranteed-empty query)', async () => {
+        mockResolveLinkedAlbumId.mockResolvedValue(null);
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = {
+          query: { artistName: 'Never Linked Artist', releaseTitle: 'Never Linked Album' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockResolveLinkedFlowsheetBase).not.toHaveBeenCalled();
+      });
+
+      it('resolveLinkedFlowsheetBase throws: degrades to omitting base catalog fields only, still responds 200 with persisted data intact', async () => {
+        // Mirrors the critic-reviews / local-metadata try/catch convention
+        // elsewhere in this handler: a failure fetching the NEW base fields
+        // must not regress the EXISTING persisted-metadata response.
+        mockLookupAlbumMetadataById.mockResolvedValue({
+          artwork_url: 'https://i.discogs.com/x.jpg',
+          discogs_url: 'https://www.discogs.com/release/321',
+          release_year: 2018,
+          spotify_url: null,
+          apple_music_url: null,
+          youtube_music_url: null,
+          bandcamp_url: null,
+          soundcloud_url: null,
+          artist_bio: null,
+          artist_wikipedia_url: null,
+        });
+        mockResolveLinkedFlowsheetBase.mockRejectedValue(new Error('db blip'));
+
+        const req = {
+          query: { artistName: 'Resilient Artist', releaseTitle: 'Resilient Album' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.artistName).toBe('Resilient Artist');
+        expect('recordLabel' in result).toBe(false);
+        expect('labelId' in result).toBe(false);
+        expect('metadataStatus' in result).toBe(false);
+        // Persisted metadata from the (unrelated, successful) by-id lookup
+        // still comes through — the base-field failure is fully isolated.
+        expect(result.discogsUrl).toBe('https://www.discogs.com/release/321');
       });
     });
   });

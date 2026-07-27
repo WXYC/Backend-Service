@@ -35,6 +35,7 @@ import { filterSpacerGif, isSyntheticArtwork } from '../services/metadata/metada
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
 import {
   resolveLinkedAlbumId,
+  resolveLinkedFlowsheetBase,
   lookupAlbumMetadataById,
   lookupCriticReviewsByAlbumId,
   type PersistedAlbumMetadata,
@@ -448,11 +449,35 @@ function parseDiscogsReleaseIdFromUrl(url: string): number | undefined {
  * `proxy.metadata.album.upstream_calls` Sentry attribute reads 0 on
  * local hit, 1 on cold fallthrough — splittable in the trace explorer
  * so the p50/p95 cohort distinction stays visible.
+ *
+ * Local-first base fields (BS#1827): `artistName` / `releaseTitle` /
+ * `trackTitle` are assembled from the request itself — and
+ * `recordLabel` / `labelId` / `metadataStatus`, when a linked flowsheet row
+ * is known, straight off that row via {@link resolveLinkedFlowsheetBase} —
+ * BEFORE any persisted-state or LML lookup is attempted below. These are
+ * "base": durable BS state, independent of Discogs/LML. Everything else this
+ * handler adds afterward (`artworkUrl`, `discogsUrl`, `genres`, `label`,
+ * streaming URLs, ...) is "enriched": optional, upstream-dependent, and
+ * present only when known. The distinction is implicit in which fields are
+ * unconditional vs. conditionally assigned — there's no separate `base` /
+ * `enriched` wrapper in the wire shape, and these three new response fields
+ * aren't yet in `wxyc-shared/api.yaml` (tracked for the iOS consumer,
+ * iOS#685, which also formalizes the `metadata_status`/`isTerminal` contract
+ * this sets up). The result: an LML timeout can blank `artworkUrl` etc., but
+ * it can never blank artist/track/album/label — see the "local-first base
+ * fields" test suite for the exact contract.
  */
 export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMetadataQuery> = async (req, res) => {
   const { artistName, releaseTitle, trackTitle } = req.query;
 
   if (!artistName) throw new WxycError('artistName query parameter is required', 400);
+
+  // Base identity fields (BS#1827): exactly what the caller already asked
+  // about, so assembled unconditionally before any lookup below — nothing
+  // that happens next (a DB blip, an LML timeout) can ever erase these.
+  const metadata: Record<string, unknown> = { artistName };
+  if (releaseTitle) metadata.releaseTitle = releaseTitle;
+  if (trackTitle) metadata.trackTitle = trackTitle;
 
   // Cache-first: consult BS's own persisted state before going to LML.
   // Catch-arm-shape rows (YT/BC/SC populated, Apple/Spotify/artwork null)
@@ -480,7 +505,33 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
     console.warn('[ProxyController] local metadata lookup failed; falling through to LML:', lookupError);
   }
 
-  const metadata: Record<string, unknown> = persisted ? buildLocalMetadataResponse(persisted) : {};
+  // Base catalog fields BS wrote at play time (BS#1827): record_label /
+  // label_id / metadata_status live on the SAME flowsheet row `albumId` was
+  // just resolved from, independent of whether `album_metadata` enrichment
+  // has ever run. Gated on `albumId !== null` — resolveLinkedFlowsheetBase
+  // shares resolveLinkedAlbumId's exact WHERE/ORDER BY/LIMIT, so when that
+  // already came back null there is no row this call could find either; a
+  // free-text row that has never linked to an album_id has no efficient
+  // local source for these three (see resolveLinkedFlowsheetBase's doc
+  // comment) — its artist/release/track identity above still survives via
+  // the request echo. Own try/catch so a failure here degrades to omitting
+  // only these three fields — it must never discard the persisted/LML
+  // metadata resolved above or below.
+  if (albumId !== null) {
+    try {
+      const localBase = await resolveLinkedFlowsheetBase(artistName, releaseTitle);
+      if (localBase?.record_label) metadata.recordLabel = localBase.record_label;
+      if (localBase?.label_id != null) metadata.labelId = localBase.label_id;
+      if (localBase?.metadata_status) metadata.metadataStatus = localBase.metadata_status;
+    } catch (baseFieldsError) {
+      console.warn(
+        '[ProxyController] local flowsheet base lookup failed; omitting base catalog fields:',
+        baseFieldsError
+      );
+    }
+  }
+
+  if (persisted) Object.assign(metadata, buildLocalMetadataResponse(persisted));
   let upstreamCalls = 0;
 
   if (!persisted) {

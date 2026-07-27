@@ -88,3 +88,61 @@ export async function resolveLinkedAlbumId(artistName: string, releaseTitle?: st
 
   return candidate[0]?.album_id ?? null;
 }
+
+/**
+ * Base (non-enrichment) flowsheet fields for a linked `(artistName,
+ * releaseTitle)` key — added for BS#1827 (local-first playcut details).
+ * `record_label` / `label_id` are written onto `flowsheet` at play time (by
+ * the DJ, dj-site's freeform entry, or the ETL) and never depend on LML,
+ * unlike `album_metadata.label` (Discogs enrichment, BS#1336). Reading them
+ * off the SAME row {@link resolveLinkedAlbumId} resolves its `album_id` from
+ * means `GET /proxy/metadata/album` can surface a durable label/status even
+ * when no `album_metadata` row exists yet and the LML fallthrough fails —
+ * see `apps/backend/controllers/proxy.controller.ts`'s `getAlbumMetadata`.
+ *
+ * Uses the IDENTICAL `WHERE`/`ORDER BY`/`LIMIT` as {@link resolveLinkedAlbumId}
+ * (same partial index `flowsheet_album_link_lookup_idx`, same deterministic
+ * row-pick), so a given key always describes the same flowsheet row across
+ * both calls. Kept as its own query rather than widening
+ * `resolveLinkedAlbumId`'s SELECT so that function's existing callers/mocks
+ * (`jobs/album-critic-reviews-etl`, `scripts/seed-critic-reviews.ts`, and
+ * their test suites) are untouched by this addition.
+ *
+ * Returns `null` under the same conditions `resolveLinkedAlbumId` does: blank
+ * artist/release, or no `album_id`-bearing flowsheet row for the key. A
+ * free-text row that has NEVER linked to an `album_id` has no row this query
+ * can find either — the partial index is deliberately scoped to `album_id IS
+ * NOT NULL` (migration 0081); an equivalent covering the pure free-text
+ * cohort would need its own (much larger, whole-table) index, which is out
+ * of scope here. Callers fall back to the request's own artist/release/track
+ * strings for that cohort — see the caller's doc comment.
+ */
+export interface LinkedFlowsheetBase {
+  record_label: string | null;
+  label_id: number | null;
+  metadata_status: string;
+}
+
+export async function resolveLinkedFlowsheetBase(
+  artistName: string,
+  releaseTitle?: string
+): Promise<LinkedFlowsheetBase | null> {
+  const trimmedArtist = artistName.trim();
+  const trimmedRelease = (releaseTitle ?? '').trim();
+  if (trimmedArtist.length === 0 || trimmedRelease.length === 0) return null;
+
+  const key = lookupKey(trimmedArtist, trimmedRelease);
+
+  const candidate = await db
+    .select({
+      record_label: flowsheet.record_label,
+      label_id: flowsheet.label_id,
+      metadata_status: flowsheet.metadata_status,
+    })
+    .from(flowsheet)
+    .where(sql`${flowsheetLookupKey} = ${key} AND ${flowsheet.album_id} IS NOT NULL`)
+    .orderBy(desc(flowsheet.id))
+    .limit(1);
+
+  return candidate[0] ?? null;
+}
