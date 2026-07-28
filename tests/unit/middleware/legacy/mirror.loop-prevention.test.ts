@@ -148,7 +148,8 @@ describe('mirror loop prevention', () => {
       mockMirrorCreateEntry.mockResolvedValue(99);
 
       void runMiddleware(flowsheetMirror.addEntry, { ...baseEntry, legacy_entry_id: null }).then(() => {
-        expect(mockCacheEntryId).toHaveBeenCalledWith(1, 99);
+        // BS#1103: cached by the flowsheet row id (baseEntry.id = 42), not play_order.
+        expect(mockCacheEntryId).toHaveBeenCalledWith(42, 99);
         expect(mockDbUpdate).toHaveBeenCalled();
         done();
       });

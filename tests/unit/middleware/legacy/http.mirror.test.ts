@@ -133,13 +133,18 @@ describe('http.mirror', () => {
     });
   });
 
+  // BS#1103: entryIdMap is keyed by the flowsheet row id (a globally-unique
+  // surrogate), not play_order (only unique per-show — see
+  // entry-id-map-collision.test.ts for the cross-show collision this
+  // fixed). The Map itself is key-agnostic, so these tests just pin its
+  // basic get/set/clear contract against arbitrary numeric keys.
   describe('entryIdMap', () => {
-    it('stores and retrieves entry IDs by play_order', () => {
+    it('stores and retrieves entry IDs by flowsheet row id', () => {
       cacheEntryId(5, 42);
       expect(getCachedEntryId(5)).toBe(42);
     });
 
-    it('returns undefined for unknown play_order', () => {
+    it('returns undefined for unknown flowsheet row id', () => {
       expect(getCachedEntryId(999)).toBeUndefined();
     });
 
