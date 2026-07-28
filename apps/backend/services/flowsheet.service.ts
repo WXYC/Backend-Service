@@ -1198,8 +1198,11 @@ export const attachUpcomingShows = async (entries: IFSEntry[]): Promise<IFSEntry
   // the id arm with a non-null artist_id, or the name arm with a non-empty
   // artist_name. (Almost every track carries a name, so this mainly short-
   // circuits all-marker pages.)
+  // `entry?.` guards a transient undefined array element (Sentry
+  // BACKEND-SERVICE-2T) — statically every element of `entries` should be a
+  // real IFSEntry, but a bad element must not 500 the prefilter.
   const hasMatchableTrack = entries.some(
-    (entry) => entry.entry_type === 'track' && (entry.artist_id !== null || !!entry.artist_name?.trim())
+    (entry) => entry?.entry_type === 'track' && (entry.artist_id !== null || !!entry.artist_name?.trim())
   );
   if (!hasMatchableTrack) {
     return entries;
@@ -1208,7 +1211,9 @@ export const attachUpcomingShows = async (entries: IFSEntry[]): Promise<IFSEntry
   const { byArtistId, byNormName } = await getUpcomingShowsMapsCached(nyCalendarDate(new Date()));
 
   for (const entry of entries) {
-    if (entry.entry_type !== 'track') {
+    // Same defensive guard as the prefilter above (Sentry BACKEND-SERVICE-2T):
+    // skip a falsy element instead of reading `.entry_type` off undefined.
+    if (!entry || entry.entry_type !== 'track') {
       continue;
     }
     const byId = entry.artist_id !== null ? byArtistId.get(entry.artist_id) : undefined;

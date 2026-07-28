@@ -233,6 +233,32 @@ describe('attachUpcomingShows (BS#1607 id arm + BS#1613 name arm)', () => {
     expect(entries[0].upcoming_show).toBeUndefined();
     expect(entries[1].upcoming_show).toBeUndefined();
   });
+
+  // Sentry BACKEND-SERVICE-2T: GET /flowsheet/latest 500'd once with
+  // `TypeError: Cannot read properties of undefined (reading 'entry_type')`.
+  // Statically every element of `entries` should be a real IFSEntry
+  // (`getEntriesByPage` builds them via `raw.map(transformToIFSEntry)`), so
+  // this pins the defense against a transient bad array element rather than
+  // a reachable-by-design case: neither the `.some(...)` prefilter nor the
+  // `for...of` loop may read `.entry_type` off `undefined`.
+  it('does not throw on an undefined array element and still enriches the valid track (BACKEND-SERVICE-2T)', async () => {
+    const concert = makeConcert({ headlining_artist_id: 4211 });
+    lookup.mockResolvedValueOnce(maps(new Map([[4211, concert]])));
+    const validEntry = createTrackEntry({ id: 1, artist_id: 4211, artist_name: 'Juana Molina' });
+    // A hole in the array — the transient bad element the Sentry issue saw.
+    const entries = [validEntry, undefined] as IFSEntry[];
+
+    await expect(attachUpcomingShows(entries)).resolves.toBe(entries);
+
+    expect(validEntry.upcoming_show).toBe(concert);
+    expect(entries[1]).toBeUndefined();
+  });
+
+  it('skips the DB when the only entries are an undefined element and a non-matchable marker', async () => {
+    const entries = [undefined, createTrackEntry({ id: 2, entry_type: 'show_start' })] as IFSEntry[];
+    await expect(attachUpcomingShows(entries)).resolves.toBe(entries);
+    expect(lookup).not.toHaveBeenCalled();
+  });
 });
 
 describe('transformToV2 upcoming_show projection (BS#1607)', () => {

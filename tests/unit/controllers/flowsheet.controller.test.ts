@@ -411,6 +411,27 @@ describe('flowsheet.controller', () => {
       expect(mockTransformToV2).not.toHaveBeenCalled();
     });
 
+    // Sentry BACKEND-SERVICE-2T: a single fired occurrence had `entries[0]`
+    // reach `transformToV2` as `undefined` (statically `getEntriesByPage`
+    // should never return a hole, so this is defensive against a transient
+    // bad element rather than a reachable-by-design case). The fix checks
+    // `entries[0]` truthiness instead of `entries.length`, degrading to the
+    // same 204 the empty-array branch already returns.
+    it('returns 204 without throwing when entries[0] is undefined (Sentry BACKEND-SERVICE-2T)', async () => {
+      mockGetEntriesByPage.mockResolvedValue([undefined] as unknown[]);
+
+      const req = createMockReq();
+      const res = createMockRes();
+
+      await getLatest(req as Request, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(204);
+      expect(res.end).toHaveBeenCalled();
+      expect(res.json).not.toHaveBeenCalled();
+      expect(mockTransformToV2).not.toHaveBeenCalled();
+      expect(mockAttachUpcomingShows).not.toHaveBeenCalled();
+    });
+
     it('rejects with error on service failure', async () => {
       const error = new Error('DB timeout');
       mockGetEntriesByPage.mockRejectedValue(error);

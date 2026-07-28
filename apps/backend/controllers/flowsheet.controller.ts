@@ -191,9 +191,13 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
 
 export const getLatest: RequestHandler = async (req, res) => {
   const entries = await flowsheet_service.getEntriesByPage(0, 1);
-  if (entries.length) {
+  // `entries[0]` truthy-checked rather than `entries.length`: a transient
+  // undefined element (Sentry BACKEND-SERVICE-2T) must degrade to the same
+  // 204 the empty-array case already returns, not throw on transformToV2.
+  const entry = entries[0];
+  if (entry) {
     await flowsheet_service.attachUpcomingShows(entries);
-    res.status(200).json(flowsheet_service.transformToV2(entries[0]));
+    res.status(200).json(flowsheet_service.transformToV2(entry));
   } else {
     res.status(204).end();
   }
