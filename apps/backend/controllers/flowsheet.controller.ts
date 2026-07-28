@@ -241,6 +241,39 @@ const sendProjectedEntry = (res: Response, statusCode: number, entry: FSEntry): 
   res.status(statusCode).json(projectFlowsheetEntry(entry));
 };
 
+/**
+ * Build a track row from the request's own snapshot fields, with
+ * `album_id: null`. Shared by both routes that land here: an explicit
+ * `album_id: null` (BS#933) and a positive `album_id` that misses in
+ * `library` (BS#1680 — library linkage is an enrichment annotation, not a
+ * precondition for recording the play; see the not-found branch above).
+ */
+function buildSnapshotFieldsEntry(body: FSEntryRequestBody, show_id: number, dj_name: string | null): NewFSEntry {
+  if (body.album_title === undefined || body.artist_name === undefined || body.track_title === undefined) {
+    throw new WxycError('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title', 400);
+  }
+  // Explicit allowlist instead of `...body` spread (BS#1099). Any other body
+  // key — `metadata_status`, `legacy_entry_id`, `play_order`, etc. — would
+  // otherwise propagate verbatim into the INSERT and let a flowsheet:write
+  // caller mutate server-internal columns.
+  return {
+    artist_name: body.artist_name,
+    album_title: body.album_title,
+    track_title: body.track_title,
+    track_position: body.track_position ?? null,
+    record_label: body.record_label,
+    label_id: body.label_id,
+    album_id: null,
+    rotation_id: body.rotation_id,
+    request_flag: body.request_flag,
+    segue: body.segue ?? false,
+    message: body.message,
+    entry_type: body.entry_type,
+    show_id,
+    dj_name,
+  };
+}
+
 // either an id is provided (meaning it came from the user's bin or was fuzzy found)
 // or it's not provided in which case whe just throw the data provided into the table w/ album_id = NULL
 export const addEntry: RequestHandler = async (req: Request<object, object, FSEntryRequestBody>, res) => {
@@ -290,12 +323,26 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     // that doesn't exist in `library` — possible when the dj-site picker
     // payload references a library row that's been deleted, or when a
     // rotation→library FK has desynced. BS#933 covered the explicit-null
-    // case; this guards the equally-reachable not-found case. Without it the
-    // following `albumInfo.record_label = ...` / `...albumInfo` spread throws
-    // a bare TypeError that the centralized errorHandler maps to 500 — the
-    // signal at the root of BS#1271's POST /flowsheet internal_error bursts.
+    // case; this guards the equally-reachable not-found case. BS#1271 turned
+    // the bare TypeError (from the following `albumInfo.record_label = ...` /
+    // `...albumInfo` spread) into a clean signal, but rejecting the whole
+    // entry was the wrong disposition: library linkage is an enrichment
+    // annotation, not a precondition for recording the play. BS#1680 falls
+    // through to the same snapshot-fields path used for an explicit
+    // `album_id: null`, keeping the DJ's play recorded with `album_id: null`,
+    // and logs a Sentry warning so the desync stays visible for data-hygiene
+    // follow-up — the same asymmetric-fallback philosophy as the LML-timeout
+    // degrade (BS#873) and the nameless-DJ marker suppression (epic #1288).
     if (!albumInfo) {
-      throw new WxycError(`Album ${body.album_id} not found in library`, 404);
+      Sentry.captureMessage('Flowsheet album_id not found in library — degrading to snapshot fields', {
+        level: 'warning',
+        tags: { tool: 'flowsheet' },
+        extra: { album_id: body.album_id, show_id: latestShow.id },
+      });
+      const fsEntry = buildSnapshotFieldsEntry(body, latestShow.id, dj_name);
+      const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+      sendProjectedEntry(res, 201, completedEntry);
+      return;
     }
 
     if (body.record_label !== undefined) {
@@ -316,33 +363,12 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
     sendProjectedEntry(res, 201, completedEntry);
-  } else if (body.album_title === undefined || body.artist_name === undefined || body.track_title === undefined) {
-    throw new WxycError('Bad Request, Missing Flowsheet Parameters: album_title, artist_name, track_title', 400);
   } else {
-    // Explicit allowlist instead of `...body` spread (BS#1099). Any other
-    // body key — `metadata_status`, `legacy_entry_id`, `play_order`, etc. —
-    // would otherwise propagate verbatim into the INSERT and let a
-    // flowsheet:write caller mutate server-internal columns.
-    // `album_id` is included so explicit `null` from the snapshot branch
-    // (BS#933) still lands on the row; in this branch `body.album_id` is
-    // already constrained to null/undefined by the discriminator above.
-    const fsEntry: NewFSEntry = {
-      artist_name: body.artist_name,
-      album_title: body.album_title,
-      track_title: body.track_title,
-      track_position: body.track_position ?? null,
-      record_label: body.record_label,
-      label_id: body.label_id,
-      album_id: body.album_id,
-      rotation_id: body.rotation_id,
-      request_flag: body.request_flag,
-      segue: body.segue ?? false,
-      message: body.message,
-      entry_type: body.entry_type,
-      show_id: latestShow.id,
-      dj_name,
-    };
-
+    // No album_id (explicit null from the dj-site rotation snapshot, BS#933,
+    // or simply omitted): insert the request's own snapshot fields with
+    // album_id: null. Shares `buildSnapshotFieldsEntry` with the lookup-miss
+    // fallback above (BS#1680) so both routes into this shape stay identical.
+    const fsEntry = buildSnapshotFieldsEntry(body, latestShow.id, dj_name);
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
     sendProjectedEntry(res, 201, completedEntry);
   }
