@@ -17,9 +17,15 @@ async function isMirrorEnabled(req: Request): Promise<boolean> {
   const client = getPostHogClient();
   const distinctId = (req as any).user?.id ?? req.ip ?? 'anonymous';
   const enabled = await client.isFeatureEnabled('backend-mirror', distinctId);
-  const result = enabled ?? false;
-  console.log(`[mirror] enabled=${result} source=posthog`);
-  return result;
+  if (enabled === undefined) {
+    // PostHog couldn't resolve the flag (client error/timeout/unknown flag):
+    // fail closed, under a distinct source label so a deliberate flag-off
+    // (source=posthog) stays distinguishable from this default in the logs.
+    console.log('[mirror] enabled=false source=posthog-default');
+    return false;
+  }
+  console.log(`[mirror] enabled=${enabled} source=posthog`);
+  return enabled;
 }
 
 export const createBackendMirrorMiddleware =
