@@ -139,4 +139,13 @@ describe('mirror flag observability log line', () => {
 
     expect(consoleLogSpy).toHaveBeenCalledWith('[mirror] enabled=false source=posthog');
   });
+
+  it('logs enabled=false source=posthog-default when the flag resolves undefined (fail-closed)', async () => {
+    process.env.POSTHOG_API_KEY = 'test-key';
+    mockPostHogInstance.isFeatureEnabled.mockResolvedValueOnce(undefined);
+
+    await runMiddlewareOnce();
+
+    expect(consoleLogSpy).toHaveBeenCalledWith('[mirror] enabled=false source=posthog-default');
+  });
 });
