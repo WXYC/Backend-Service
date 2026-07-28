@@ -310,7 +310,7 @@ jobs:
       # -- a known, intentional skew (BS#1424), not drift. This job doesn't
       # validate migration syntax against prod's PG major; the
       # `migrate-dryrun` job below does, against a real RDS snapshot. See
-      # docs/migrations.md#dev-ci-postgres-version-vs-prod-rds-read-before-writing-ddl.
+      # docs/migrations.md#devci-postgres-version-vs-prod-rds-read-before-writing-ddl.
       postgres:
         image: postgres:18.0-alpine
         env:
