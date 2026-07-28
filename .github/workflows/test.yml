@@ -103,6 +103,13 @@ jobs:
               - 'package.json'
               - 'package-lock.json'
               - 'tsconfig.base.json'
+              # BS#1807: `tests/unit/scripts/ci-env-surface-parity.test.ts`
+              # (BS#958) diffs these two files' env-var surfaces against
+              # each other. Without them in `src`, a PR that edits only one
+              # of them skips `unit-tests` entirely — the guard for these
+              # files never runs on a change to the exact files it checks.
+              - '.github/workflows/test.yml'
+              - 'dev_env/docker-compose.yml'
 
       - name: Determine if integration tests should run
         id: should-run
