@@ -84,14 +84,18 @@
  *
  * BS#1842: `TYPE_REQUIRED_METHODS` / `TYPE_OPTIONAL_METHODS` below are still a
  * hardcoded list — but before scanning any call site, `main()` runs a
- * drift-check (`checkMethodListDrift`) that DERIVES the same set from
- * `shared/lml-client/src/index.ts` itself (which exported function
- * signatures actually accept a `caller` field, by direct inline presence, a
- * `Pick<..., 'caller'>` literal, or a reference to a type this file's own
- * `interface`/`type` declarations give a `caller` field) and fails loudly on
- * any mismatch. A new caller-aware method added to `index.ts` without a
- * matching entry here — the exact gap this issue collects — now fails CI
- * with a tooling error instead of silently scanning nothing for it.
+ * drift-check (`checkMethodListDrift`) that DERIVES the same set, AND each
+ * method's required-vs-optional bucket, from `shared/lml-client/src/index.ts`
+ * itself (which exported function signatures actually accept a `caller`
+ * field, by direct inline presence, a `Pick<..., 'caller'>` literal, or a
+ * reference to a type this file's own `interface`/`type` declarations give a
+ * `caller` field — and whether that field itself is `caller:` or `caller?:`)
+ * and fails loudly on any mismatch. This closes two gaps: a new caller-aware
+ * method added to `index.ts` without a matching entry here (the core gap
+ * this issue collects), AND a tracked method whose `caller` field tightens
+ * from optional to required (or loosens the other way) in `index.ts` without
+ * moving it to the matching bucket here — the latter would otherwise let the
+ * guard silently under-enforce `caller` presence for that method.
  *
  * Exit codes:
  *   0 — every matched call site is classified correctly.
@@ -102,8 +106,9 @@
  *       `shared/lml-client/src/policy.ts` (the single source of truth this
  *       script parses rather than hardcoding a second copy of the list),
  *       couldn't read `index.ts`, or the BS#1842 method-list drift-check
- *       found a caller-aware export this script doesn't track (or a tracked
- *       method index.ts no longer marks caller-aware).
+ *       found a caller-aware export this script doesn't track, a tracked
+ *       method index.ts no longer marks caller-aware, or a tracked method's
+ *       required-vs-optional bucket no longer matches index.ts.
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -399,13 +404,15 @@ function findMatchingClose(content, openIdx, openChar, closeChar) {
 
 /**
  * BS#1842: find every `interface`/`type` declaration in `index.ts` whose body
- * has a `caller` field (`caller:` or `caller?:`), returning the set of type
- * names. Used to resolve a function parameter that references one of these
- * types by name (e.g. `options?: CallerOption`) back to "this function is
- * caller-aware", without a full TS parser.
+ * has a `caller` field (`caller:` or `caller?:`), returning `Map<typeName,
+ * { required: boolean }>` — `required` is whether that field lacks the `?`
+ * (i.e. `caller: LmlCaller` vs `caller?: LmlCaller`). Used to resolve a
+ * function parameter that references one of these types by name (e.g.
+ * `options?: CallerOption`) back to "this function is caller-aware, and
+ * required/optional per the TYPE's own field", without a full TS parser.
  */
 function findCallerBearingTypeNames(codeOnly) {
-  const names = new Set();
+  const info = new Map();
   const re = /\b(?:export\s+)?(?:interface|type)\s+([A-Za-z_$][\w$]*)[^{=]*(=\s*)?\{/g;
   let m;
   while ((m = re.exec(codeOnly)) !== null) {
@@ -413,9 +420,10 @@ function findCallerBearingTypeNames(codeOnly) {
     const closeIdx = findMatchingClose(codeOnly, openIdx, '{', '}');
     if (closeIdx === null) continue;
     const body = codeOnly.slice(openIdx + 1, closeIdx);
-    if (/\bcaller\s*\??\s*:/.test(body)) names.add(m[1]);
+    const fieldMatch = body.match(/\bcaller(\??)\s*:/);
+    if (fieldMatch) info.set(m[1], { required: fieldMatch[1] !== '?' });
   }
-  return names;
+  return info;
 }
 
 /**
@@ -439,44 +447,115 @@ function findExportedFunctionParams(codeOnly) {
 }
 
 /**
- * BS#1842: derive the set of `index.ts` exported function names that accept
- * a `caller` label — by direct inline presence (`caller?:`/`caller:` in an
- * inline options object type), a `Pick<SomeType, 'caller'>`-style quoted key,
- * or a reference to a type name this file's own declarations give a `caller`
- * field (resolved via `findCallerBearingTypeNames`). This is the "should be
- * tracked by TYPE_REQUIRED_METHODS/TYPE_OPTIONAL_METHODS" ground truth the
- * drift-check compares against.
+ * BS#1842: derive `Map<name, required>` of `index.ts` exported function names
+ * that accept a `caller` label, three ways:
+ *
+ *   1. Direct inline presence (`caller?:`/`caller:` in an inline options
+ *      object type, e.g. `bulkLookupMetadata`/`searchLibrary`) — `required`
+ *      read straight off that occurrence's own `?`.
+ *   2. A `Pick<SomeType, 'caller'>`-style reference (e.g. `lookupBySong`) —
+ *      `required` inherited from `SomeType`'s own `caller` field via
+ *      `findCallerBearingTypeNames`. Deliberately scoped to `Pick<...>`
+ *      specifically (not a bare `'caller'` string anywhere in the params)
+ *      so an unrelated `Omit<SomeType, 'caller'>` — which REMOVES the field
+ *      — or a stray `'caller'` string elsewhere can't false-positive.
+ *   3. A bare reference to a type name this file's own declarations give a
+ *      `caller` field (e.g. `options?: CallerOption`) — `required` inherited
+ *      the same way as (2).
+ *
+ * `required` is `undefined` when a match is found but its source type isn't
+ * in `typeInfo` (shouldn't happen for real code — `Pick`/type-ref matches are
+ * only found via `typeNameAlt`, which is itself built from `typeInfo`'s keys
+ * — kept only as a defensive fallback); callers must treat `undefined` as
+ * "can't classify, don't fail on it" rather than a mismatch.
+ *
+ * This is the "should be tracked by TYPE_REQUIRED_METHODS/TYPE_OPTIONAL_METHODS,
+ * in THIS bucket" ground truth the drift-check compares against.
  */
+/**
+ * Blank out any `Omit<TypeName, ...'caller'...>` occurrence for a known
+ * caller-bearing `TypeName` — `Omit` REMOVES the named key, so a type
+ * reference appearing only inside such a wrapper must not register as
+ * "this function accepts `caller`" via the plain type-name-reference check.
+ * Blanking (not just testing) so the substring can't also satisfy a
+ * DIFFERENT, legitimate match elsewhere in the same params text.
+ */
+function stripOmitCallerRemovals(paramsText, typeNames) {
+  let cleaned = paramsText;
+  for (const t of typeNames) {
+    const omitRe = new RegExp(`\\bOmit\\s*<\\s*${escapeRegExp(t)}\\s*,[^>]*['"]caller['"][^>]*>`, 'g');
+    cleaned = cleaned.replace(omitRe, (m) => ' '.repeat(m.length));
+  }
+  return cleaned;
+}
+
 function deriveCallerAwareMethodNames(indexSrc) {
   const codeOnly = blankComments(indexSrc);
-  const typeNames = findCallerBearingTypeNames(codeOnly);
-  const typeNameAlt = [...typeNames].map(escapeRegExp).join('|');
-  const typeRefRe = typeNameAlt ? new RegExp(`\\b(?:${typeNameAlt})\\b`) : null;
+  const typeInfo = findCallerBearingTypeNames(codeOnly);
+  const typeNames = [...typeInfo.keys()];
+  const typeNameAlt = typeNames.map(escapeRegExp).join('|');
+  const typeRefRe = typeNameAlt ? new RegExp(`\\b(${typeNameAlt})\\b`) : null;
+  const pickRe = typeNameAlt ? new RegExp(`\\bPick\\s*<\\s*(${typeNameAlt})\\s*,[^>]*['"]caller['"][^>]*>`) : null;
 
-  const result = new Set();
+  const result = new Map();
   for (const [name, paramsText] of findExportedFunctionParams(codeOnly)) {
-    const hasInlineCaller = /\bcaller\s*\??\s*:/.test(paramsText);
-    const hasQuotedCaller = /['"]caller['"]/.test(paramsText);
-    const hasTypeRef = typeRefRe ? typeRefRe.test(paramsText) : false;
-    if (hasInlineCaller || hasQuotedCaller || hasTypeRef) result.add(name);
+    const inlineMatch = paramsText.match(/\bcaller(\??)\s*:/);
+    // Omit-wrapped references only matter for the type-based checks — inline
+    // `caller:`/`caller?:` detection has nothing to do with a type name.
+    const cleanedForTypeRefs = stripOmitCallerRemovals(paramsText, typeNames);
+    const pickMatch = pickRe ? cleanedForTypeRefs.match(pickRe) : null;
+    const typeRefMatch = typeRefRe ? cleanedForTypeRefs.match(typeRefRe) : null;
+
+    if (inlineMatch) {
+      result.set(name, inlineMatch[1] !== '?');
+    } else if (pickMatch) {
+      result.set(name, typeInfo.get(pickMatch[1])?.required);
+    } else if (typeRefMatch) {
+      result.set(name, typeInfo.get(typeRefMatch[1])?.required);
+    }
   }
   return result;
 }
 
 /**
- * BS#1842: compare the derived caller-aware method set (from `index.ts`)
- * against this script's own hardcoded `ALL_METHODS`. Returns sorted
- * `{ missing, stale }` arrays — `missing` is a caller-aware export this
- * script doesn't scan for (the gap this issue exists to close); `stale` is a
- * tracked method `index.ts` no longer marks caller-aware (renamed/removed —
- * the entry should be dropped here too so it can't mask a real drift later).
- * Both are failures; a clean tree returns `{ missing: [], stale: [] }`.
+ * BS#1842: compare the derived caller-aware method map (from `index.ts`)
+ * against this script's own hardcoded `TYPE_REQUIRED_METHODS`/
+ * `TYPE_OPTIONAL_METHODS`. Returns sorted `{ missing, stale, misclassified }`:
+ *   - `missing` — a caller-aware export this script doesn't scan for at all
+ *     (the core gap this issue exists to close).
+ *   - `stale` — a tracked method `index.ts` no longer marks caller-aware
+ *     (renamed/removed — the entry should be dropped here too so it can't
+ *     mask a real drift later).
+ *   - `misclassified` — a method present in BOTH sets, but index.ts's own
+ *     `caller` field optionality no longer matches which bucket it's
+ *     hardcoded into (e.g. a field tightened from `caller?:` to `caller:`
+ *     without moving the entry to `TYPE_REQUIRED_METHODS`) — the guard would
+ *     silently under-enforce `caller` presence for that method otherwise.
+ *     Skips any method whose derived `required` came back `undefined`
+ *     (couldn't classify — see `deriveCallerAwareMethodNames`).
+ * All three are failures; a clean tree returns all-empty arrays.
  */
 function checkMethodListDrift(indexSrc) {
   const derived = deriveCallerAwareMethodNames(indexSrc);
-  const missing = [...derived].filter((n) => !ALL_METHODS.has(n)).sort();
-  const stale = [...ALL_METHODS].filter((n) => !derived.has(n)).sort();
-  return { missing, stale };
+  const derivedNames = new Set(derived.keys());
+  const missing = [...derivedNames].filter((n) => !ALL_METHODS.has(n)).sort();
+  const stale = [...ALL_METHODS].filter((n) => !derivedNames.has(n)).sort();
+
+  const misclassified = [];
+  for (const [name, required] of derived) {
+    if (required === undefined || !ALL_METHODS.has(name)) continue;
+    const hardcodedRequired = TYPE_REQUIRED_METHODS.has(name);
+    if (hardcodedRequired !== required) {
+      misclassified.push({
+        name,
+        derived: required ? 'required' : 'optional',
+        registered: hardcodedRequired ? 'required' : 'optional',
+      });
+    }
+  }
+  misclassified.sort((a, b) => a.name.localeCompare(b.name));
+
+  return { missing, stale, misclassified };
 }
 
 /**
@@ -684,7 +763,7 @@ function main() {
   const registeredCallers = loadRegisteredCallers();
 
   const drift = checkMethodListDrift(loadIndexSource());
-  if (drift.missing.length > 0 || drift.stale.length > 0) {
+  if (drift.missing.length > 0 || drift.stale.length > 0 || drift.misclassified.length > 0) {
     console.error(
       "FAIL(tooling): this script's tracked method list has drifted from shared/lml-client/src/index.ts (BS#1842)."
     );
@@ -697,6 +776,13 @@ function main() {
       console.error(
         `      Tracked method(s) index.ts no longer marks caller-aware (renamed/removed?): ${drift.stale.join(', ')}`
       );
+    }
+    if (drift.misclassified.length > 0) {
+      for (const { name, derived, registered } of drift.misclassified) {
+        console.error(
+          `      ${name}: index.ts's own \`caller\` field is now ${derived}, but this script has it in TYPE_${registered.toUpperCase()}_METHODS.`
+        );
+      }
     }
     console.error(
       '      Update TYPE_REQUIRED_METHODS / TYPE_OPTIONAL_METHODS in scripts/check-lml-caller-classification.mjs.'

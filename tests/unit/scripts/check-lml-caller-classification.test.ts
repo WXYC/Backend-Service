@@ -101,6 +101,46 @@ describe('check-lml-caller-classification.mjs (BS#1842 method-list drift-check)'
     expect(result.stderr).toMatch(/getRelease/);
   });
 
+  it("fails (exit 2) when a tracked type's `caller` field tightens from optional to required without moving its methods to TYPE_REQUIRED_METHODS", () => {
+    // CallerOption backs 4 TYPE_OPTIONAL_METHODS entries (getRelease,
+    // getArtistDetails, resolveEntity, searchTrackReleases). Tightening its
+    // own `caller?:` field to `caller:` flips all 4 methods' derived
+    // required-ness without moving them in the (unmodified) guard script —
+    // exactly the "guard silently under-enforces" scenario the drift-check's
+    // misclassified branch exists to catch.
+    const result = runWithIndexSource((src) =>
+      src.replace(
+        'export interface CallerOption {\n  caller?: LmlCaller;\n}',
+        'export interface CallerOption {\n  caller: LmlCaller;\n}'
+      )
+    );
+    expect(result.status).toBe(2);
+    expect(result.stderr).toMatch(/FAIL\(tooling\): this script's tracked method list has drifted/);
+    for (const name of ['getRelease', 'getArtistDetails', 'resolveEntity', 'searchTrackReleases']) {
+      expect(result.stderr).toMatch(
+        new RegExp(
+          `${name}: index\\.ts's own \`caller\` field is now required, but this script has it in TYPE_OPTIONAL_METHODS`
+        )
+      );
+    }
+  });
+
+  it('does not flag a Pick/Omit-adjacent stray quoted "caller" that is not inside a Pick<...>', () => {
+    // Regression guard: the derivation only treats a quoted 'caller' as a
+    // signal when it appears inside Pick<SomeCallerBearingType, ...'caller'...>
+    // — an unrelated Omit<SomeType, 'caller'> (which REMOVES the field) or a
+    // bare 'caller' string elsewhere must not false-positive as caller-aware.
+    const synthetic = `
+      export interface HasCaller { caller?: string; }
+      export async function omitsCaller(x: number, options?: Omit<HasCaller, 'caller'>): Promise<void> { void x; void options; }
+      export async function unrelatedString(x: number, tag: 'caller' | 'other'): Promise<void> { void x; void tag; }
+    `;
+    const result = runWithIndexSource(() => synthetic);
+    expect(result.status).toBe(2); // still fails: the 11 real tracked methods are all "stale" against this tiny synthetic file
+    expect(result.stderr).not.toMatch(/omitsCaller/);
+    expect(result.stderr).not.toMatch(/unrelatedString/);
+  });
+
   it('derives caller-awareness through an inline field, a Pick<...> quoted key, and a named-type reference alike', () => {
     // A minimal synthetic index.ts: three ways an export can be caller-aware
     // (matching lookupBySong's Pick<LookupOptions, 'caller'> pattern, an
