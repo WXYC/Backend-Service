@@ -7,9 +7,10 @@
  * Phase 3 of the tubafrenzy decommission (WXYC/wiki#88): `getRecentEntries`
  * is now async (a live Postgres query, not an in-memory read), so the
  * controller awaits it and there is no more `isConnected()` SSE gate. A
- * thrown DB error is converted to a 503 (via WxycError + the shared
- * errorHandler middleware) rather than propagating as a 500 — this is an
- * unauthenticated endpoint mobile clients poll on a fixed interval.
+ * DB error is surfaced as a DIRECT 503 response — never thrown through the
+ * error pipeline, whose Sentry filter captures every >=500. This is an
+ * unauthenticated endpoint mobile clients poll on a fixed interval, so a
+ * captured 503 would mean one Sentry event per poll during a DB blip.
  */
 import { jest } from '@jest/globals';
 import type { Request, Response, NextFunction } from 'express';
@@ -23,7 +24,6 @@ jest.mock('../../../apps/backend/services/playlist-proxy.service', () => ({
 }));
 
 import { getRecentEntries } from '../../../apps/backend/controllers/playlist.controller';
-import WxycError from '../../../apps/backend/utils/error';
 
 // --- Helpers ---
 
@@ -162,17 +162,18 @@ describe('playlist.controller', () => {
       expect(mockGetRecentEntries).toHaveBeenCalledWith(1);
     });
 
-    it('throws a 503 WxycError when the service rejects (DB failure)', async () => {
+    it('returns a direct 503 when the service rejects (DB failure), without throwing into the error pipeline', async () => {
       mockGetRecentEntries.mockRejectedValue(new Error('connection terminated'));
 
       const req = { query: { v: '2' } } as unknown as Request;
       const res = createMockRes();
 
-      await expect(getRecentEntries(req, res as Response, noopNext)).rejects.toMatchObject({
-        statusCode: 503,
-      });
-      await expect(getRecentEntries(req, res as Response, noopNext)).rejects.toBeInstanceOf(WxycError);
-      expect(res.status).not.toHaveBeenCalled();
+      await expect(getRecentEntries(req, res as Response, noopNext)).resolves.toBeUndefined();
+
+      expect(res.status).toHaveBeenCalledWith(503);
+      expect(res.json).toHaveBeenCalledWith({ message: 'Playlist data temporarily unavailable' });
+      expect(res.set).not.toHaveBeenCalled();
+      expect(noopNext).not.toHaveBeenCalled();
     });
 
     it('preserves talksets and breakpoints unchanged', async () => {

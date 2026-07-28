@@ -5,7 +5,6 @@
  * playlist in tubafrenzy's grouped format with artworkURL on playcuts.
  */
 import { RequestHandler } from 'express';
-import WxycError from '../utils/error.js';
 import { getRecentEntries as getEntries } from '../services/playlist-proxy.service.js';
 
 /**
@@ -22,12 +21,13 @@ import { getRecentEntries as getEntries } from '../services/playlist-proxy.servi
  *
  * Cache-Control: public, max-age=30 (30 seconds).
  *
- * A DB failure is caught here and surfaced as a 503 (via the shared
- * `errorHandler` middleware) rather than a 500: this is an unauthenticated
- * endpoint mobile clients poll on a fixed interval, so a transient DB hiccup
- * should read as "try again shortly", not a hard failure. Mirrors the
- * pre-Phase-3 503 this endpoint already returned while the SSE connection
- * hadn't received its init event yet.
+ * A DB failure is caught here and written as a DIRECT 503 response — it must
+ * not be thrown into the error pipeline, because `sentryErrorFilter` captures
+ * every >=500 and this unauthenticated endpoint is polled on a fixed interval
+ * by every mobile client, so a transient DB blip would emit one Sentry event
+ * per poll (the catalog-search 503 flood pattern). The direct write mirrors
+ * the pre-Phase-3 code, which returned its "SSE not ready" 503 the same way,
+ * uncaptured. A 503 (not 500) so clients read it as "try again shortly".
  */
 export const getRecentEntries: RequestHandler = async (req, res) => {
   let n = Number(req.query.n);
@@ -42,7 +42,8 @@ export const getRecentEntries: RequestHandler = async (req, res) => {
     result = await getEntries(n);
   } catch (err) {
     console.error('[playlist] Failed to fetch recent entries:', err);
-    throw new WxycError('Playlist data temporarily unavailable', 503);
+    res.status(503).json({ message: 'Playlist data temporarily unavailable' });
+    return;
   }
 
   res.set('Cache-Control', 'public, max-age=30');
