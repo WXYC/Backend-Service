@@ -358,8 +358,48 @@ jobs:
           cache-from: type=registry,ref=${{ secrets.AWS_ECR_URI }}/${{ matrix.target }}:buildcache
           cache-to: type=registry,ref=${{ secrets.AWS_ECR_URI }}/${{ matrix.target }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
 
+  reclaim-disk:
+    # Reclaim host disk ONCE, before any job pulls an image onto the shared
+    # EC2 host (the earliest such pull is `migrate`'s db-migrate pull), so a
+    # near-full host frees its own headroom first and can never deadlock on a
+    # pull with "no space left on device" — the 2026-07-27 wedge, where the
+    # per-rollout GC ran only *after* the pull that had already failed. A
+    # single gate (not a per-target step) means the global sweep runs once,
+    # not ~38× across the deploy matrix. See docs/deploy.md.
+    needs: [setup]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.has_targets == 'true'
+    steps:
+      - name: Reclaim Docker disk
+        # Best-effort headroom: reclaiming must never fail the deploy, so no
+        # `set -e` and `continue-on-error` — a full/unreachable host still lets
+        # migrate + deploy proceed (and fail loudly there if truly out of space).
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Keep only the newest 1 version per repo to free maximum headroom
+            # before the matrix pulls; the post-pull GCs (deploy-service +
+            # Deploy Cron Job) restore the keep-2 rollback buffer per repo once
+            # each new image lands. Soft `rmi` (never -f) so an image pinned by
+            # a running or stopped container survives; dangling-only `prune -f`
+            # (never `-a` / `--volumes` — an over-prune could strand a cron
+            # behind the host's static ~12 h ECR token). Every line ends
+            # `|| true`, so a GC hiccup is inert.
+            echo "Disk before reclaim:"; df -h / | tail -1
+            docker images --format '{{.Repository}} {{.Tag}}' | \
+              grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' | \
+              sort -k1,1 -k2,2Vr | \
+              awk '{ if ($1 in seen) print $1 ":" $2; else seen[$1]=1 }' | \
+              xargs -r -n1 docker rmi 2>/dev/null || true
+            docker image prune -f 2>/dev/null || true
+            echo "Disk after reclaim:"; df -h / | tail -1
+
   migrate:
-    needs: [handle-git-tags, setup]
+    needs: [handle-git-tags, setup, reclaim-disk]
     runs-on: ubuntu-latest
     if: needs.setup.outputs.has_targets == 'true'
 
@@ -437,7 +477,7 @@ jobs:
             docker image prune -f 2>/dev/null || true
 
   deploy:
-    needs: [setup, handle-git-tags, build, migrate]
+    needs: [setup, handle-git-tags, build, migrate, reclaim-disk]
     runs-on: ubuntu-latest
     if: needs.setup.outputs.has_targets == 'true'
     strategy:
@@ -508,35 +548,6 @@ jobs:
 
           echo "target_type=$TARGET_TYPE" >> $GITHUB_OUTPUT
 
-      - name: Reclaim Docker disk before pull
-        # Runs for EVERY target (incl. one-shot-job targets with no rollout
-        # step) BEFORE the rollout's `docker pull`, so a near-full host reclaims
-        # its own headroom first and can never deadlock — the failure mode
-        # behind the 2026-07-27 wedge, where the post-pull GC was unreachable
-        # because the pull failed on `no space left on device`. See
-        # docs/deploy.md (2026-07-27 full-disk wedge).
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            set -e
-            # Keep only the newest 1 version per repo here to free maximum
-            # headroom before the pull; the post-pull GC restores the keep-2
-            # rollback buffer once the new image lands. Soft `rmi` (never -f)
-            # so an image pinned by a running or stopped container survives;
-            # dangling-only `prune -f` (never `-a` / `--volumes`). Every line
-            # ends `|| true`, so a GC hiccup never fails the deploy.
-            echo "Disk before reclaim:"; df -h / | tail -1
-            docker images --format '{{.Repository}} {{.Tag}}' | \
-              grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' | \
-              sort -k1,1 -k2,2Vr | \
-              awk '{ if ($1 in seen) print $1 ":" $2; else seen[$1]=1 }' | \
-              xargs -r -n1 docker rmi 2>/dev/null || true
-            docker image prune -f 2>/dev/null || true
-            echo "Disk after reclaim:"; df -h / | tail -1
-
       - name: Deploy Service
         if: steps.deploy_vars.outputs.target_type == 'app'
         uses: ./.github/actions/deploy-service
@@ -598,10 +609,10 @@ jobs:
             crontab -l
 
             # Post-pull GC keeps the newest 2 versions per repo (current + one
-            # rollback buffer). The pre-pull reclaim (Reclaim Docker disk step)
-            # keeps only 1 to free headroom before this pull; this restores the
-            # buffer. Soft `rmi` (never -f) so an image pinned by a running or
-            # stopped container survives.
+            # rollback buffer). The pre-pull `reclaim-disk` job keeps only 1 to
+            # free headroom before the matrix pulls; this restores the buffer.
+            # Soft `rmi` (never -f) so an image pinned by a running or stopped
+            # container survives.
             echo "Cleaning up old Docker images (keep newest 2 per repo)..."
             docker images --format '{{.Repository}} {{.Tag}}' | \
               grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' | \
