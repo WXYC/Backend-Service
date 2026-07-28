@@ -3,7 +3,8 @@ import type { Request, Response, NextFunction } from 'express';
 
 // Mock Sentry
 const mockCaptureException = jest.fn();
-jest.mock('@sentry/node', () => ({ captureException: mockCaptureException }));
+const mockCaptureMessage = jest.fn();
+jest.mock('@sentry/node', () => ({ captureException: mockCaptureException, captureMessage: mockCaptureMessage }));
 
 // Mock the service module
 const mockGetEntriesByPage = jest.fn<() => Promise<unknown[]>>();
@@ -660,17 +661,80 @@ describe('flowsheet.controller', () => {
       );
     });
 
-    it('throws WxycError 404 when a positive album_id is not found in library (BS#1271)', async () => {
+    it('degrades to snapshot-fields insert when a positive album_id is not found in library (BS#1680)', async () => {
       // BS#933 narrowed the lookup-branch predicate from `!== undefined` to
       // `!= null`, fixing the explicit-null case. A positive `album_id` that
       // doesn't match any `library.id` (deleted between dj-site picker fetch
       // and POST, or rotation→library FK desync) still slipped through and
       // produced a bare TypeError on the next line — captured as a 500 with
       // no Sentry exception, the signal at the root of BS#1271's POST
-      // /flowsheet internal_error bursts. The guard now turns the not-found
-      // case into a clean 404 WxycError.
+      // /flowsheet internal_error bursts. BS#1271 turned that into a clean
+      // 404, but rejecting the whole entry was the wrong disposition: library
+      // linkage is an enrichment annotation, not a precondition for
+      // recording the play. BS#1680 flips the disposition — the entry is
+      // still inserted, with the request's own snapshot fields and
+      // album_id: null, and a Sentry warning records the desync.
       // Mock the not-found case explicitly: real `getAlbumFromDB` returns
       // `undefined` on no match (see library.service.test.ts:1759).
+      mockGetAlbumFromDB.mockResolvedValue(undefined);
+
+      const completedEntry = {
+        id: 5,
+        show_id: activeShow.id,
+        artist_name: 'Chuquimamani-Condori',
+        album_title: 'Edits',
+        track_title: 'Crispy Duck',
+        record_label: 'Duophonic',
+        album_id: null,
+        play_order: 5,
+        add_time: new Date(),
+      };
+      mockAddTrack.mockResolvedValue(completedEntry);
+
+      const req = createMockBodyReq({
+        album_id: 9999,
+        artist_name: 'Chuquimamani-Condori',
+        album_title: 'Edits',
+        track_title: 'Crispy Duck',
+        record_label: 'Duophonic',
+      });
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      expect(mockGetAlbumFromDB).toHaveBeenCalledWith(9999);
+      // The write must still happen, with album_id nulled out rather than
+      // the not-found id propagating.
+      expect(mockAddTrack).toHaveBeenCalledWith(
+        expect.objectContaining({
+          artist_name: 'Chuquimamani-Condori',
+          album_title: 'Edits',
+          track_title: 'Crispy Duck',
+          record_label: 'Duophonic',
+          album_id: null,
+          show_id: activeShow.id,
+        })
+      );
+      expect(res.status).toHaveBeenCalledWith(201);
+      expect(res.json).toHaveBeenCalledWith(completedEntry);
+
+      // The desync must stay visible for data-hygiene follow-up even though
+      // the request itself succeeds.
+      expect(mockCaptureMessage).toHaveBeenCalledWith(
+        expect.stringContaining('not found in library'),
+        expect.objectContaining({
+          level: 'warning',
+          tags: expect.objectContaining({ tool: 'flowsheet' }),
+          extra: expect.objectContaining({ album_id: 9999, show_id: activeShow.id }),
+        })
+      );
+    });
+
+    it('returns 400 when album lookup misses and required snapshot fields are also missing', async () => {
+      // The snapshot-fields fallback still needs artist_name/album_title to
+      // write a meaningful row; a malformed request that omits both (bypassing
+      // the FSEntryRequestBody type contract) must fail cleanly rather than
+      // attempt an insert with undefined columns.
       mockGetAlbumFromDB.mockResolvedValue(undefined);
 
       const req = createMockBodyReq({
@@ -680,13 +744,9 @@ describe('flowsheet.controller', () => {
       });
       const res = createMockRes();
 
-      await expect(addEntry(req as Request, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
       await expect(addEntry(req as Request, res as Response, mockNext)).rejects.toMatchObject({
-        statusCode: 404,
-        message: expect.stringContaining('9999'),
+        statusCode: 400,
       });
-      expect(mockGetAlbumFromDB).toHaveBeenCalledWith(9999);
-      // INSERT must not run when the album lookup misses.
       expect(mockAddTrack).not.toHaveBeenCalled();
     });
 
