@@ -334,12 +334,17 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     // follow-up — the same asymmetric-fallback philosophy as the LML-timeout
     // degrade (BS#873) and the nameless-DJ marker suppression (epic #1288).
     if (!albumInfo) {
+      // Build first so a missing snapshot field's 400 throws before we ever
+      // claim we degraded — buildSnapshotFieldsEntry validates album_title /
+      // artist_name / track_title and throws on the reject path (BS#1680
+      // review: the Sentry warning must not fire when the entry was rejected,
+      // not recorded).
+      const fsEntry = buildSnapshotFieldsEntry(body, latestShow.id, dj_name);
       Sentry.captureMessage('Flowsheet album_id not found in library — degrading to snapshot fields', {
         level: 'warning',
         tags: { tool: 'flowsheet' },
         extra: { album_id: body.album_id, show_id: latestShow.id },
       });
-      const fsEntry = buildSnapshotFieldsEntry(body, latestShow.id, dj_name);
       const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
       sendProjectedEntry(res, 201, completedEntry);
       return;

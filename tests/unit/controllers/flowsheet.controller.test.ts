@@ -748,6 +748,9 @@ describe('flowsheet.controller', () => {
         statusCode: 400,
       });
       expect(mockAddTrack).not.toHaveBeenCalled();
+      // The reject path never recorded the entry, so it must not claim a
+      // degrade happened — no Sentry warning on this path.
+      expect(mockCaptureMessage).not.toHaveBeenCalled();
     });
 
     it('passes segue field through for library-linked tracks (album_id provided)', async () => {
