@@ -452,9 +452,28 @@ jobs:
 
             CRON_ID="wxyc_ecr_refresh"
             LOG_DIR="/var/log/wxyc/cron"
-            mkdir -p "$LOG_DIR"
+            LOG_FILE="$LOG_DIR/ecr-refresh.log"
 
-            CRON_CMD="(aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ECR_URI) >> $LOG_DIR/ecr-refresh.log 2>&1"
+            # /var/log is root-owned on stock Amazon Linux/Ubuntu; a plain
+            # `mkdir` here would fail for the unprivileged SSH/cron user
+            # and, under `set -e`, abort before the crontab entry is ever
+            # written -- silently, since the step is continue-on-error.
+            # sudo is the established pattern for privileged host edits on
+            # this box (see docs/ops-album-level-backfill-phase3.md,
+            # docs/ops-lml-cron-revalidation.md, both `sudo sed -i` against
+            # /opt/wxyc/.env over the same non-interactive SSH path), so
+            # create-then-own the dir once, idempotently.
+            sudo mkdir -p "$LOG_DIR"
+            sudo chown "$(id -u):$(id -g)" "$LOG_DIR"
+
+            # User crontabs run with a minimal PATH (no /usr/local/bin),
+            # so resolve the binaries here (this login shell has the full
+            # PATH) and bake the absolute paths into the installed
+            # command -- cron never has to resolve `aws`/`docker` itself.
+            AWS_BIN=$(command -v aws)
+            DOCKER_BIN=$(command -v docker)
+
+            CRON_CMD="($AWS_BIN ecr get-login-password --region $AWS_REGION | $DOCKER_BIN login --username AWS --password-stdin $AWS_ECR_URI) >> $LOG_FILE 2>&1"
 
             # Serialize against the per-target crontab installs below (and
             # against concurrent deploy-base runs) with the same lockfile.
@@ -468,6 +487,19 @@ jobs:
 
             echo "Installed/refreshed crontab entry:"
             crontab -l | grep -F "$CRON_ID"
+
+            # Validate the installed command actually works NOW, at
+            # install time, instead of waiting up to 6h to find out. Runs
+            # the exact string just written to the crontab (absolute
+            # paths, real dir), so a broken instance-role grant, an
+            # unwritable log dir, or a PATH miss surfaces as a visible
+            # (non-blocking, per continue-on-error above) failed step in
+            # THIS run rather than a silent gap discovered only when the
+            # next consumer cron's pull fails.
+            echo "Validating refresh command..."
+            eval "$CRON_CMD"
+            echo "Refresh command succeeded. Last log lines:"
+            tail -n 5 "$LOG_FILE"
 
   migrate:
     needs: [handle-git-tags, setup, reclaim-disk]
