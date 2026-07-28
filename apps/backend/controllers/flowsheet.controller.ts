@@ -134,7 +134,10 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     const entries = await flowsheet_service.getEntriesByRange(startId, endId);
     if (entries.length) {
       await flowsheet_service.attachUpcomingShows(entries);
-      res.status(200).json(entries.map(flowsheet_service.transformToV2));
+      // `.filter(Boolean)` guards a transient nullish array element (Sentry
+      // BACKEND-SERVICE-2T / BS#1864) — attachUpcomingShows already tolerates
+      // one, but transformToV2 still dereferences .entry_type unguarded.
+      res.status(200).json(entries.filter(Boolean).map(flowsheet_service.transformToV2));
     } else {
       res.status(404).json({ message: 'No Tracks found' });
     }
@@ -179,8 +182,13 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   // which 304s on the flowsheet watermark. A rare `on_air` change that writes no
   // flowsheet row (e.g. a mid-show dj_name_override edit) can be masked behind a
   // stale 304 until the next flowsheet mutation.
+  // `.filter(Boolean)` guards a transient nullish array element (Sentry
+  // BACKEND-SERVICE-2T / BS#1864) — attachUpcomingShows already tolerates
+  // one, but transformToV2 still dereferences .entry_type unguarded. Kept at
+  // the call site rather than inside transformToV2 so every other caller's
+  // wire shape stays untouched.
   res.status(200).json({
-    entries: entries.map(flowsheet_service.transformToV2),
+    entries: entries.filter(Boolean).map(flowsheet_service.transformToV2),
     total,
     page,
     limit,
@@ -191,9 +199,13 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
 
 export const getLatest: RequestHandler = async (req, res) => {
   const entries = await flowsheet_service.getEntriesByPage(0, 1);
-  if (entries.length) {
+  // `entries[0]` truthy-checked rather than `entries.length`: a transient
+  // nullish element (Sentry BACKEND-SERVICE-2T / BS#1864) must degrade to the
+  // same 204 the empty-array case already returns, not throw on transformToV2.
+  const entry = entries[0];
+  if (entry) {
     await flowsheet_service.attachUpcomingShows(entries);
-    res.status(200).json(flowsheet_service.transformToV2(entries[0]));
+    res.status(200).json(flowsheet_service.transformToV2(entry));
   } else {
     res.status(204).end();
   }
