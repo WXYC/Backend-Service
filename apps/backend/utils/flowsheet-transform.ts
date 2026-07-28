@@ -58,20 +58,10 @@ export const resolveRadioHour = (entryType: BackendEntryType, radioHourMs: numbe
 
 /**
  * Truncate a string to a max length, returning null if empty.
- * Matches the VARCHAR(128) / VARCHAR(250) limits in the schema. Postgres
- * `varchar(n)` counts Unicode codepoints, not UTF-16 code units or bytes, so
- * truncation must walk codepoints too (BS#1090). `String.prototype.slice`
- * counts UTF-16 code units: a codepoint outside the Basic Multilingual Plane
- * (any 4-byte-UTF-8 character — emoji, many CJK Extension B+ ideographs) is
- * stored as a surrogate *pair*, and a naive code-unit slice can land between
- * the high and low surrogate, splitting the pair into invalid UTF-16 that
- * serializes to invalid/lossy UTF-8 on the wire to Postgres. `Array.from`
- * (like the spread operator) iterates by codepoint, keeping surrogate pairs
- * intact.
+ * Matches the VARCHAR(128) / VARCHAR(250) limits in the schema.
  */
 export const truncate = (value: string | null | undefined, maxLength: number): string | null => {
   if (!value || value.trim().length === 0) return null;
   const trimmed = value.trim();
-  const codepoints = Array.from(trimmed);
-  return codepoints.length <= maxLength ? trimmed : codepoints.slice(0, maxLength).join('');
+  return trimmed.length <= maxLength ? trimmed : trimmed.slice(0, maxLength);
 };

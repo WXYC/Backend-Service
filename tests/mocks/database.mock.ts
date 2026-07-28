@@ -400,10 +400,16 @@ export const epochMsToDate = (epochMs: number | null): Date | null => {
   return Number.isNaN(date.getTime()) ? null : date;
 };
 
+// BS#1090: truncate on codepoint boundaries (Array.from), not UTF-16 code
+// units (String.prototype.slice) — mirrors the real fix in
+// shared/database/src/legacy/etl-utils.ts so this mock doesn't drift back
+// into re-introducing the surrogate-pair-splitting bug for every caller
+// that resolves `@wxyc/database` to this mock under unit tests.
 export const truncate = (value: string | null | undefined, maxLength: number): string | null => {
   if (!value || value.trim().length === 0) return null;
   const trimmed = value.trim();
-  return trimmed.length <= maxLength ? trimmed : trimmed.slice(0, maxLength);
+  const codepoints = Array.from(trimmed);
+  return codepoints.length <= maxLength ? trimmed : codepoints.slice(0, maxLength).join('');
 };
 
 export const parseTabRow = (line: string, columnCount: number): string[] | null => {
