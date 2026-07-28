@@ -1,5 +1,6 @@
 {
   "name": "@wxyc/flowsheet-etl",
+  "job-type": "one-shot",
   "cron-schedule": "*/30 * * * *",
   "version": "1.0.0",
   "description": "WXYC Flowsheet ETL: Import and sync flowsheet data from tubafrenzy",
