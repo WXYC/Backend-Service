@@ -79,3 +79,64 @@ describe('PostHog client usage', () => {
     expect(mockPostHogInstance.isFeatureEnabled).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('mirror flag observability log line', () => {
+  const origApiKey = process.env.POSTHOG_API_KEY;
+  let consoleLogSpy: jest.SpiedFunction<typeof console.log>;
+
+  beforeEach(() => {
+    mockGetPostHogClient.mockClear();
+    mockPostHogInstance.isFeatureEnabled.mockClear();
+    mockPostHogInstance.shutdown.mockClear();
+    consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    if (origApiKey === undefined) {
+      delete process.env.POSTHOG_API_KEY;
+    } else {
+      process.env.POSTHOG_API_KEY = origApiKey;
+    }
+    consoleLogSpy.mockRestore();
+  });
+
+  async function runMiddlewareOnce() {
+    const createCommand = jest.fn().mockResolvedValue(['SQL1']);
+    const middleware = createBackendMirrorMiddleware(createCommand);
+    const { req, res } = createMockReqRes();
+    const next = jest.fn();
+
+    await middleware(req, res, next);
+    res.send(JSON.stringify({ ok: true }));
+    res.emit('finish');
+
+    await new Promise((r) => setTimeout(r, 50));
+  }
+
+  it('logs enabled=true source=env-default when POSTHOG_API_KEY is unset', async () => {
+    delete process.env.POSTHOG_API_KEY;
+
+    await runMiddlewareOnce();
+
+    expect(consoleLogSpy).toHaveBeenCalledWith('[mirror] enabled=true source=env-default');
+    expect(mockGetPostHogClient).not.toHaveBeenCalled();
+  });
+
+  it('logs enabled=true source=posthog when the flag resolves true', async () => {
+    process.env.POSTHOG_API_KEY = 'test-key';
+    mockPostHogInstance.isFeatureEnabled.mockResolvedValueOnce(true);
+
+    await runMiddlewareOnce();
+
+    expect(consoleLogSpy).toHaveBeenCalledWith('[mirror] enabled=true source=posthog');
+  });
+
+  it('logs enabled=false source=posthog when the flag resolves false', async () => {
+    process.env.POSTHOG_API_KEY = 'test-key';
+    mockPostHogInstance.isFeatureEnabled.mockResolvedValueOnce(false);
+
+    await runMiddlewareOnce();
+
+    expect(consoleLogSpy).toHaveBeenCalledWith('[mirror] enabled=false source=posthog');
+  });
+});

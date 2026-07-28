@@ -9,12 +9,17 @@ import { getPostHogClient } from '../../utils/posthog.js';
  * local development and E2E tests work without external dependencies.
  */
 async function isMirrorEnabled(req: Request): Promise<boolean> {
-  if (!process.env.POSTHOG_API_KEY) return true;
+  if (!process.env.POSTHOG_API_KEY) {
+    console.log('[mirror] enabled=true source=env-default');
+    return true;
+  }
 
   const client = getPostHogClient();
   const distinctId = (req as any).user?.id ?? req.ip ?? 'anonymous';
   const enabled = await client.isFeatureEnabled('backend-mirror', distinctId);
-  return enabled ?? false;
+  const result = enabled ?? false;
+  console.log(`[mirror] enabled=${result} source=posthog`);
+  return result;
 }
 
 export const createBackendMirrorMiddleware =
