@@ -203,6 +203,23 @@ describe('flowsheet.controller', () => {
       expect(Array.isArray(body)).toBe(true);
     });
 
+    // Sentry BACKEND-SERVICE-2T / BS#1864: the shows_limit branch shares the
+    // same unguarded `.map(transformToV2)` shape as the other getEntries
+    // branches — apply the same call-site guard for symmetry.
+    it('omits a nullish entry from the shows_limit projected array without throwing', async () => {
+      const validEntry = createMockEntry(1);
+      mockGetNShows.mockResolvedValue([{ id: 1 }]);
+      mockGetEntriesByShow.mockResolvedValue([validEntry, undefined] as unknown[]);
+
+      const req = createMockReq({ shows_limit: '1' });
+      const res = createMockRes();
+
+      await getEntries(req as Request, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith([{ ...validEntry, v2: true }]);
+    });
+
     // BS#1110: non-numeric start_id/end_id used to flow straight into
     // parseInt arithmetic (yielding NaN), pass the MAX_ITEMS check, and blow up
     // downstream as a Postgres "invalid input syntax for type integer: NaN"
@@ -531,6 +548,26 @@ describe('flowsheet.controller', () => {
       expect(res.json).toHaveBeenCalledWith({
         ...mockShowMetadata,
         entries: entries.map((e) => ({ ...e, v2: true })),
+      });
+    });
+
+    // Sentry BACKEND-SERVICE-2T / BS#1864: getShowInfo shares the same
+    // unguarded `.map(transformToV2)` shape as getEntries — apply the same
+    // call-site guard for symmetry.
+    it('omits a nullish entry from the projected entries array without throwing', async () => {
+      const validEntry = createMockEntry(1);
+      mockGetShowMetadata.mockResolvedValue(mockShowMetadata);
+      mockGetEntriesByShow.mockResolvedValue([validEntry, undefined] as unknown[]);
+
+      const req = createMockReq({ show_id: '1' });
+      const res = createMockRes();
+
+      await getShowInfo(req as Request, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({
+        ...mockShowMetadata,
+        entries: [{ ...validEntry, v2: true }],
       });
     });
 
