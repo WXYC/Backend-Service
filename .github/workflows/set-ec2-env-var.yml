@@ -1,18 +1,21 @@
 name: Set EC2 env var (manual)
 
 # One-shot ops workflow: upserts a single env var into the EC2 host's .env
-# file and restarts the target container (backend or auth) so it picks up
-# the change. Avoids a full image rebuild for env-var-only changes.
+# file and restarts the target container (backend, auth, or
+# enrichment-worker) so it picks up the change. Avoids a full image rebuild
+# for env-var-only changes.
 #
 # Usage:
 #   gh workflow run set-ec2-env-var.yml --ref main -f key=LML_API_KEY -f secret_name=LML_API_KEY
 #   gh workflow run set-ec2-env-var.yml --ref main -f key=AUTO_DJ_PASSWORD -f restart_target=auth
+#   gh workflow run set-ec2-env-var.yml --ref main -f key=LML_API_KEY -f restart_target=enrichment-worker
 #
 # The value is read from a GH secret whose name is provided via secret_name
 # (defaults to the same name as `key`). The value never appears in logs;
 # the verify step prints only key + length. restart_target selects which
 # container is stopped+run to re-read .env (backend by default; auth for
-# vars only the auth service consumes, e.g. AUTO_DJ_*).
+# vars only the auth service consumes, e.g. AUTO_DJ_*; enrichment-worker for
+# vars only that CDC consumer reads, e.g. its own LML_API_KEY rotations).
 
 on:
   workflow_dispatch:
@@ -26,13 +29,14 @@ on:
         required: false
         type: string
       restart_target:
-        description: 'Container to stop+run so it re-reads .env. auth for AUTO_DJ_*/auth-only vars; backend otherwise.'
+        description: 'Container to stop+run so it re-reads .env. auth for AUTO_DJ_*/auth-only vars; enrichment-worker for vars only that CDC consumer reads; backend otherwise.'
         required: false
         default: 'backend'
         type: choice
         options:
           - backend
           - auth
+          - enrichment-worker
 
 # Workflow-level GITHUB_TOKEN scope. No job in this file pushes code,
 # comments on PRs, or creates releases; all writes to external services
