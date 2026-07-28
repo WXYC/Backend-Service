@@ -86,10 +86,10 @@ runs:
             ${{ inputs.aws_ecr_uri }}/$TARGET_APP:$DEPLOY_TAG
 
           # Post-pull GC keeps the newest 2 versions per repo (current + one
-          # rollback buffer). The pre-pull reclaim in deploy-base.yml keeps
-          # only 1 to free headroom on a near-full host before this pull; this
-          # step restores the buffer after the new image lands. Soft `rmi`
-          # (never -f): an image pinned by a running or stopped container
+          # rollback buffer). The pre-pull `reclaim-disk` job in deploy-base.yml
+          # keeps only 1 to free headroom on a near-full host before the matrix
+          # pulls; this restores the buffer after the new image lands. Soft
+          # `rmi` (never -f): an image pinned by a running or stopped container
           # refuses removal and is swallowed by `|| true`.
           echo "Cleaning up old Docker images (keep newest 2 per repo)..."
           docker images --format '{{.Repository}} {{.Tag}}' | \
