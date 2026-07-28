@@ -244,10 +244,54 @@ function classDefaults(cls: LmlCallerClass): { timeoutMs: number; budgetMs?: num
     case 5: {
       const timeoutMs = envInt('LML_CLASS5_TIMEOUT_MS', 29000);
       // Codebase convention: budgetMs ≈ timeoutMs − 1000 (plan line 27) so
-      // LML's soft cutoff fires before the socket aborts.
-      return { timeoutMs, budgetMs: Math.max(0, timeoutMs - 1000), limiter: 'none' };
+      // LML's soft cutoff fires before the socket aborts. May come out <= 0
+      // for a very low `LML_CLASS5_TIMEOUT_MS` override — `sanitizeBudgetMs`
+      // (applied to every table entry in `buildPolicy`) catches that.
+      return { timeoutMs, budgetMs: timeoutMs - 1000, limiter: 'none' };
     }
   }
+}
+
+/**
+ * BS#1842: guard against two operator-misconfiguration edges in a caller's
+ * final `{ timeoutMs, budgetMs }` pair, after class defaults AND per-caller
+ * overrides are both applied:
+ *
+ *   - `budgetMs <= 0` — e.g. a low `LML_CLASS5_TIMEOUT_MS` override drives
+ *     the derived `timeoutMs - 1000` non-positive. `buildLookupHeaders`
+ *     sends `X-Caller-Budget-Ms` whenever `budgetMs !== undefined` — a `0`
+ *     header would instruct LML to soft-cut before any work happens.
+ *   - `budgetMs >= timeoutMs` — the socket aborts before (or exactly when)
+ *     the soft budget would fire, so the header can never take effect. Class
+ *     2's `LML_CLASS2_TIMEOUT_MS` / `LML_CLASS2_BUDGET_MS` env knobs are read
+ *     independently (no cross-check at the env layer), so this is reachable
+ *     from ops config alone, no code change required.
+ *
+ * Both edges warn (never throw — a live request path must not crash on a
+ * misconfigured env var) and fall back to "no budget header" (`undefined`),
+ * matching the documented `envInt`-style warn-on-invalid convention used
+ * throughout this package. A well-formed `0 < budgetMs < timeoutMs` passes
+ * through unchanged.
+ */
+function sanitizeBudgetMs(caller: LmlCaller, timeoutMs: number, budgetMs: number | undefined): number | undefined {
+  if (budgetMs === undefined) return undefined;
+  if (budgetMs <= 0) {
+    console.warn(
+      `lml.client: policy for caller "${caller}" computed budgetMs=${budgetMs} (<= 0); omitting the ` +
+        'X-Caller-Budget-Ms header instead of soft-cutting immediately. Check LML_CLASS{2,5}_TIMEOUT_MS / ' +
+        'LML_CLASS2_BUDGET_MS env overrides.'
+    );
+    return undefined;
+  }
+  if (budgetMs >= timeoutMs) {
+    console.warn(
+      `lml.client: policy for caller "${caller}" has budgetMs=${budgetMs} >= timeoutMs=${timeoutMs}; the soft ` +
+        'budget could never fire before the socket aborts, so omitting the X-Caller-Budget-Ms header. Check ' +
+        'LML_CLASS{2,5}_TIMEOUT_MS / LML_CLASS2_BUDGET_MS env overrides.'
+    );
+    return undefined;
+  }
+  return budgetMs;
 }
 
 /**
@@ -285,6 +329,13 @@ function buildPolicy(): Record<LmlCaller, LmlPolicy> {
     ...table.add_to_rotation,
     timeoutMs: envInt(ADD_TO_ROTATION_TIMEOUT_ENV, ADD_TO_ROTATION_TIMEOUT_FALLBACK_MS),
   };
+
+  // BS#1842: sanitize every entry's final budgetMs AFTER class defaults and
+  // per-caller overrides are both applied — a misconfig can originate from
+  // either layer (a class-level env knob, or an override's own env knob).
+  for (const caller of ALL_LML_CALLERS) {
+    table[caller].budgetMs = sanitizeBudgetMs(caller, table[caller].timeoutMs, table[caller].budgetMs);
+  }
 
   return table;
 }

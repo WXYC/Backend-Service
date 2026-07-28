@@ -82,6 +82,17 @@
  * in `.github/workflows/test.yml`, next to "legacy_entry_id writes" (whose
  * three-use-invariant script this one's structure mirrors).
  *
+ * BS#1842: `TYPE_REQUIRED_METHODS` / `TYPE_OPTIONAL_METHODS` below are still a
+ * hardcoded list — but before scanning any call site, `main()` runs a
+ * drift-check (`checkMethodListDrift`) that DERIVES the same set from
+ * `shared/lml-client/src/index.ts` itself (which exported function
+ * signatures actually accept a `caller` field, by direct inline presence, a
+ * `Pick<..., 'caller'>` literal, or a reference to a type this file's own
+ * `interface`/`type` declarations give a `caller` field) and fails loudly on
+ * any mismatch. A new caller-aware method added to `index.ts` without a
+ * matching entry here — the exact gap this issue collects — now fails CI
+ * with a tooling error instead of silently scanning nothing for it.
+ *
  * Exit codes:
  *   0 — every matched call site is classified correctly.
  *   1 — one or more violations found (missing caller / unregistered caller /
@@ -89,7 +100,10 @@
  *       @wxyc/lml-client in jobs/**).
  *   2 — tooling error: couldn't load `ALL_LML_CALLERS` from
  *       `shared/lml-client/src/policy.ts` (the single source of truth this
- *       script parses rather than hardcoding a second copy of the list).
+ *       script parses rather than hardcoding a second copy of the list),
+ *       couldn't read `index.ts`, or the BS#1842 method-list drift-check
+ *       found a caller-aware export this script doesn't track (or a tracked
+ *       method index.ts no longer marks caller-aware).
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -101,6 +115,7 @@ import { isInvokedDirectly } from './lib/main-module.mjs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const POLICY_PATH = resolve(REPO_ROOT, 'shared/lml-client/src/policy.ts');
+const INDEX_PATH = resolve(REPO_ROOT, 'shared/lml-client/src/index.ts');
 
 // The 11 caller-aware `@wxyc/lml-client` exports, split by whether `caller`
 // is REQUIRED at the type level (see this file's header doc). Deliberately
@@ -152,6 +167,16 @@ function loadRegisteredCallers() {
     process.exit(2);
   }
   return new Set(callers);
+}
+
+/** Read `shared/lml-client/src/index.ts` — the source the BS#1842 drift-check parses. */
+function loadIndexSource() {
+  try {
+    return readFileSync(INDEX_PATH, 'utf-8');
+  } catch (err) {
+    console.error(`FAIL(tooling): could not read ${relative(REPO_ROOT, INDEX_PATH)}: ${err.message}`);
+    process.exit(2);
+  }
 }
 
 function listSourceFiles(rootRelativePath) {
@@ -340,6 +365,118 @@ function findMatchingCloseParen(content, openParenIdx) {
 /** Escape a string for embedding in a `RegExp`. */
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Generic bracket-depth matcher (BS#1842) — like `findMatchingCloseParen` but
+ * parametrized over the open/close character pair, so it also matches `{`/`}`
+ * for interface/type bodies. Respects string content so an unrelated
+ * open/close char inside a string literal can't desync the depth count;
+ * comments should already be blanked in the input (callers pass `blankComments`
+ * output) so a stray bracket in a JSDoc example can't either.
+ */
+function findMatchingClose(content, openIdx, openChar, closeChar) {
+  let depth = 0;
+  for (let i = openIdx; i < content.length; i++) {
+    const c = content[i];
+    if (c === "'" || c === '"' || c === '`') {
+      const quote = c;
+      i++;
+      while (i < content.length && content[i] !== quote) {
+        if (content[i] === '\\') i++;
+        i++;
+      }
+      continue;
+    }
+    if (c === openChar) depth++;
+    else if (c === closeChar) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return null;
+}
+
+/**
+ * BS#1842: find every `interface`/`type` declaration in `index.ts` whose body
+ * has a `caller` field (`caller:` or `caller?:`), returning the set of type
+ * names. Used to resolve a function parameter that references one of these
+ * types by name (e.g. `options?: CallerOption`) back to "this function is
+ * caller-aware", without a full TS parser.
+ */
+function findCallerBearingTypeNames(codeOnly) {
+  const names = new Set();
+  const re = /\b(?:export\s+)?(?:interface|type)\s+([A-Za-z_$][\w$]*)[^{=]*(=\s*)?\{/g;
+  let m;
+  while ((m = re.exec(codeOnly)) !== null) {
+    const openIdx = m.index + m[0].length - 1;
+    const closeIdx = findMatchingClose(codeOnly, openIdx, '{', '}');
+    if (closeIdx === null) continue;
+    const body = codeOnly.slice(openIdx + 1, closeIdx);
+    if (/\bcaller\s*\??\s*:/.test(body)) names.add(m[1]);
+  }
+  return names;
+}
+
+/**
+ * BS#1842: find every top-level `export [async ]function NAME(...)`
+ * declaration, returning `Map<name, rawParamListText>`. The whole parameter
+ * list (balanced on parens, comments already blanked) is returned as one
+ * string so a caller-detecting regex can search it regardless of how deeply
+ * an inline options object type is nested.
+ */
+function findExportedFunctionParams(codeOnly) {
+  const map = new Map();
+  const re = /\bexport\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<[^>(]*>)?\s*\(/g;
+  let m;
+  while ((m = re.exec(codeOnly)) !== null) {
+    const openIdx = m.index + m[0].length - 1;
+    const closeIdx = findMatchingClose(codeOnly, openIdx, '(', ')');
+    if (closeIdx === null) continue;
+    map.set(m[1], codeOnly.slice(openIdx + 1, closeIdx));
+  }
+  return map;
+}
+
+/**
+ * BS#1842: derive the set of `index.ts` exported function names that accept
+ * a `caller` label — by direct inline presence (`caller?:`/`caller:` in an
+ * inline options object type), a `Pick<SomeType, 'caller'>`-style quoted key,
+ * or a reference to a type name this file's own declarations give a `caller`
+ * field (resolved via `findCallerBearingTypeNames`). This is the "should be
+ * tracked by TYPE_REQUIRED_METHODS/TYPE_OPTIONAL_METHODS" ground truth the
+ * drift-check compares against.
+ */
+function deriveCallerAwareMethodNames(indexSrc) {
+  const codeOnly = blankComments(indexSrc);
+  const typeNames = findCallerBearingTypeNames(codeOnly);
+  const typeNameAlt = [...typeNames].map(escapeRegExp).join('|');
+  const typeRefRe = typeNameAlt ? new RegExp(`\\b(?:${typeNameAlt})\\b`) : null;
+
+  const result = new Set();
+  for (const [name, paramsText] of findExportedFunctionParams(codeOnly)) {
+    const hasInlineCaller = /\bcaller\s*\??\s*:/.test(paramsText);
+    const hasQuotedCaller = /['"]caller['"]/.test(paramsText);
+    const hasTypeRef = typeRefRe ? typeRefRe.test(paramsText) : false;
+    if (hasInlineCaller || hasQuotedCaller || hasTypeRef) result.add(name);
+  }
+  return result;
+}
+
+/**
+ * BS#1842: compare the derived caller-aware method set (from `index.ts`)
+ * against this script's own hardcoded `ALL_METHODS`. Returns sorted
+ * `{ missing, stale }` arrays — `missing` is a caller-aware export this
+ * script doesn't scan for (the gap this issue exists to close); `stale` is a
+ * tracked method `index.ts` no longer marks caller-aware (renamed/removed —
+ * the entry should be dropped here too so it can't mask a real drift later).
+ * Both are failures; a clean tree returns `{ missing: [], stale: [] }`.
+ */
+function checkMethodListDrift(indexSrc) {
+  const derived = deriveCallerAwareMethodNames(indexSrc);
+  const missing = [...derived].filter((n) => !ALL_METHODS.has(n)).sort();
+  const stale = [...ALL_METHODS].filter((n) => !derived.has(n)).sort();
+  return { missing, stale };
 }
 
 /**
@@ -545,6 +682,28 @@ function lineOf(content, index) {
 
 function main() {
   const registeredCallers = loadRegisteredCallers();
+
+  const drift = checkMethodListDrift(loadIndexSource());
+  if (drift.missing.length > 0 || drift.stale.length > 0) {
+    console.error(
+      "FAIL(tooling): this script's tracked method list has drifted from shared/lml-client/src/index.ts (BS#1842)."
+    );
+    if (drift.missing.length > 0) {
+      console.error(
+        `      New caller-aware export(s) not in TYPE_REQUIRED_METHODS/TYPE_OPTIONAL_METHODS: ${drift.missing.join(', ')}`
+      );
+    }
+    if (drift.stale.length > 0) {
+      console.error(
+        `      Tracked method(s) index.ts no longer marks caller-aware (renamed/removed?): ${drift.stale.join(', ')}`
+      );
+    }
+    console.error(
+      '      Update TYPE_REQUIRED_METHODS / TYPE_OPTIONAL_METHODS in scripts/check-lml-caller-classification.mjs.'
+    );
+    process.exit(2);
+  }
+
   const perFileViolations = [];
 
   for (const root of SOURCE_ROOTS) {
@@ -580,4 +739,13 @@ if (isInvokedDirectly(import.meta.url)) {
   main();
 }
 
-export { checkFile, loadRegisteredCallers, ALL_METHODS, TYPE_REQUIRED_METHODS, TYPE_OPTIONAL_METHODS };
+export {
+  checkFile,
+  loadRegisteredCallers,
+  loadIndexSource,
+  deriveCallerAwareMethodNames,
+  checkMethodListDrift,
+  ALL_METHODS,
+  TYPE_REQUIRED_METHODS,
+  TYPE_OPTIONAL_METHODS,
+};

@@ -164,7 +164,9 @@ describe('lml-client policy', () => {
     it.each([
       ['LML_CLASS1_TIMEOUT_MS', 'proxy-library-search', 'timeoutMs', 9999],
       ['LML_CLASS2_TIMEOUT_MS', 'library-track-search', 'timeoutMs', 8888],
-      ['LML_CLASS2_BUDGET_MS', 'library-track-search', 'budgetMs', 7777],
+      // Below the class-2 default timeoutMs (5000) — BS#1842's budget-vs-timeout
+      // sanitizer would otherwise null out a budget >= timeout as a misconfig.
+      ['LML_CLASS2_BUDGET_MS', 'library-track-search', 'budgetMs', 4444],
       ['LML_CLASS3_TIMEOUT_MS', 'proxy', 'timeoutMs', 6666],
       ['LML_CLASS4_TIMEOUT_MS', 'library-add-album-streaming', 'timeoutMs', 5555],
       ['LML_CLASS5_TIMEOUT_MS', 'enrichment-worker', 'timeoutMs', 40000],
@@ -184,6 +186,62 @@ describe('lml-client policy', () => {
       process.env.LML_CLASS1_TIMEOUT_MS = '-5';
       _resetLmlPolicyForTest();
       expect(resolveLmlPolicy('proxy-library-search').timeoutMs).toBe(3000);
+    });
+  });
+
+  describe('budgetMs misconfig edges (BS#1842)', () => {
+    let warnSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    });
+
+    afterEach(() => {
+      warnSpy.mockRestore();
+    });
+
+    it('class 5: a low LML_CLASS5_TIMEOUT_MS driving budgetMs <= 0 omits the budget header and warns', () => {
+      process.env.LML_CLASS5_TIMEOUT_MS = '800'; // 800 - 1000 = -200
+      _resetLmlPolicyForTest();
+      const policy = resolveLmlPolicy('enrichment-worker');
+      expect(policy.timeoutMs).toBe(800);
+      expect(policy.budgetMs).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/budgetMs=-200 \(<= 0\)/));
+    });
+
+    it('class 5: budgetMs exactly 0 (LML_CLASS5_TIMEOUT_MS=1000) also omits the header', () => {
+      process.env.LML_CLASS5_TIMEOUT_MS = '1000';
+      _resetLmlPolicyForTest();
+      const policy = resolveLmlPolicy('enrichment-worker');
+      expect(policy.budgetMs).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/budgetMs=0 \(<= 0\)/));
+    });
+
+    it('class 2: LML_CLASS2_BUDGET_MS >= LML_CLASS2_TIMEOUT_MS omits the header and warns', () => {
+      process.env.LML_CLASS2_TIMEOUT_MS = '5000';
+      process.env.LML_CLASS2_BUDGET_MS = '5000';
+      _resetLmlPolicyForTest();
+      const policy = resolveLmlPolicy('library-track-search');
+      expect(policy.timeoutMs).toBe(5000);
+      expect(policy.budgetMs).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/budgetMs=5000 >= timeoutMs=5000/));
+    });
+
+    it('class 2: a well-formed budget < timeout passes through unchanged with no warning', () => {
+      process.env.LML_CLASS2_TIMEOUT_MS = '5000';
+      process.env.LML_CLASS2_BUDGET_MS = '3000';
+      _resetLmlPolicyForTest();
+      const policy = resolveLmlPolicy('library-track-search');
+      expect(policy.budgetMs).toBe(3000);
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it('a class-1/3/4 caller with no budgetMs at all is unaffected (undefined stays undefined, no warning)', () => {
+      _resetLmlPolicyForTest();
+      expect(resolveLmlPolicy('proxy-library-search').budgetMs).toBeUndefined();
+      expect(resolveLmlPolicy('proxy').budgetMs).toBeUndefined();
+      expect(resolveLmlPolicy('library-add-album-streaming').budgetMs).toBeUndefined();
+      expect(warnSpy).not.toHaveBeenCalled();
     });
   });
 
