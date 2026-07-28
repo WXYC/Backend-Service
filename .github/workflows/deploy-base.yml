@@ -398,6 +398,77 @@ jobs:
             docker image prune -f 2>/dev/null || true
             echo "Disk after reclaim:"; df -h / | tail -1
 
+  ecr-refresh-cron:
+    # Installs (idempotently, self-healing) the host crontab entry that
+    # keeps the EC2 host's ECR auth token from going stale between pulls.
+    # ECR issues a static ~12h token and the host has no credential helper
+    # installed (see "Host disk reclamation" above); a cron container that
+    # fires after the host's last `docker login` is >12h old fails its
+    # `docker pull` invisibly -- no exited container, no failure marker
+    # anywhere a human would see (BS#1183, the 2026-05-28
+    # flowsheet-metadata-backfill miss). Deploys incidentally refresh the
+    # token via their own `docker login` steps (build/migrate/deploy all
+    # log in), but that depends on deploy cadence -- a quiet stretch with
+    # no merges lets the token lapse regardless. This job asserts a
+    # standalone 6-hourly refresh independent of deploy activity,
+    # comfortably inside the 12h window.
+    #
+    # Reuses the SAME flock-serialized crontab-install idiom as "Deploy
+    # Cron Job" below (read-modify-write guarded against concurrent matrix
+    # writers via the same lockfile), keyed on its own CRON_ID so it
+    # coexists with the per-target `wxyc_<target>` entries without
+    # touching them. No AWS credentials are embedded in the installed
+    # crontab line -- the EC2 instance role already carries ECR
+    # authorization (the existing crons' successful pulls prove the role
+    # works whenever the cached login is fresh), so the command resolves
+    # credentials from the instance metadata service at execution time
+    # instead of a static secret sitting in a world-readable crontab file.
+    # stderr is routed to a log file, NOT /dev/null -- routing the refresh
+    # job itself to /dev/null would recreate the exact silent-failure
+    # blind spot this issue is about, one layer up.
+    #
+    # Runs once per workflow invocation and is NOT gated on
+    # `needs.setup.outputs.has_targets`, so the entry self-heals even on a
+    # docs-only push where no target builds or deploys -- a rebuilt or
+    # reprovisioned host regains the refresh cron on the next push to
+    # `main` regardless of what changed. Gated on `validate_inputs` only,
+    # so an invalid `deploy-manual.yml` input still short-circuits before
+    # the host is touched. Best-effort: a transient SSH/host hiccup must
+    # never fail the deploy. See docs/deploy.md.
+    needs: [validate_inputs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install ECR auth refresh cron
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            AWS_ECR_URI=${{ secrets.AWS_ECR_URI }}
+            AWS_REGION=${{ secrets.AWS_REGION }}
+
+            CRON_ID="wxyc_ecr_refresh"
+            LOG_DIR="/var/log/wxyc/cron"
+            mkdir -p "$LOG_DIR"
+
+            CRON_CMD="(aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ECR_URI) >> $LOG_DIR/ecr-refresh.log 2>&1"
+
+            # Serialize against the per-target crontab installs below (and
+            # against concurrent deploy-base runs) with the same lockfile.
+            LOCKFILE=/tmp/crontab-deploy.lock
+            TMPFILE=$(mktemp /tmp/crontab-ecr-refresh.XXXXXX)
+            (
+              flock 9
+              (crontab -l 2>/dev/null | grep -v "$CRON_ID" || true; echo "0 */6 * * * $CRON_CMD # $CRON_ID") > "$TMPFILE" && crontab "$TMPFILE"
+            ) 9>"$LOCKFILE"
+            rm -f "$TMPFILE"
+
+            echo "Installed/refreshed crontab entry:"
+            crontab -l | grep -F "$CRON_ID"
+
   migrate:
     needs: [handle-git-tags, setup, reclaim-disk]
     runs-on: ubuntu-latest
