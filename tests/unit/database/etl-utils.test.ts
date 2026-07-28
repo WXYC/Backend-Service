@@ -110,6 +110,13 @@ describe('truncate (real implementation — BS#1090 codepoint-boundary truncatio
     expect(truncateReal(value, 2)).toBe('\u{1F3B8}\u{1F3B9}');
   });
 
+  it('does not tear the surrogate pair when the cut falls right after an astral character', () => {
+    // 3 codepoints (A, astral guitar, B); maxLength=2 keeps 'A' + the intact
+    // emoji. The old `String.prototype.slice(0, 2)` code-unit slice would
+    // instead cut mid-surrogate-pair, yielding the torn 'A\uD83C'.
+    expect(truncateReal('A\u{1F3B8}B', 2)).toBe('A\u{1F3B8}');
+  });
+
   it('still truncates plain ASCII on a codepoint boundary as before', () => {
     expect(truncateReal('abcdefghij', 5)).toBe('abcde');
   });

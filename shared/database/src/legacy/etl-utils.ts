@@ -61,6 +61,10 @@ export const epochMsToDate = (epochMs: number | null): Date | null => {
 export const truncate = (value: string | null | undefined, maxLength: number): string | null => {
   if (!value || value.trim().length === 0) return null;
   const trimmed = value.trim();
+  // Fast path: codepoint count can never exceed UTF-16 code-unit count, so a
+  // trimmed string within the limit by code-unit length is always within the
+  // limit by codepoint count too — skip the Array.from materialization below.
+  if (trimmed.length <= maxLength) return trimmed;
   const codepoints = Array.from(trimmed);
   return codepoints.length <= maxLength ? trimmed : codepoints.slice(0, maxLength).join('');
 };

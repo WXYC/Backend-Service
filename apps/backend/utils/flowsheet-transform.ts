@@ -55,13 +55,3 @@ export const isMessageEntryType = (entryType: string): boolean =>
  */
 export const resolveRadioHour = (entryType: BackendEntryType, radioHourMs: number | null): Date | null =>
   entryType === 'breakpoint' ? epochMsToDate(radioHourMs) : null;
-
-/**
- * Truncate a string to a max length, returning null if empty.
- * Matches the VARCHAR(128) / VARCHAR(250) limits in the schema.
- */
-export const truncate = (value: string | null | undefined, maxLength: number): string | null => {
-  if (!value || value.trim().length === 0) return null;
-  const trimmed = value.trim();
-  return trimmed.length <= maxLength ? trimmed : trimmed.slice(0, maxLength);
-};
