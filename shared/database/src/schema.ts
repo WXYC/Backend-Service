@@ -832,10 +832,15 @@ export const discogsReleaseIdSourceEnum = wxyc_schema.enum('discogs_release_id_s
   'recheck_after_unavailable',
 ]);
 /**
- * SOURCE: tubafrenzy via `jobs/rotation-etl/`. The music director writes
- * rotation rows in tubafrenzy; Backend-Service is downstream. Tubafrenzy
- * permits and the rotation-etl preserves shapes that constraints added
- * here can easily contradict:
+ * SOURCE: dj-site via Backend. The music director writes rotation rows in
+ * dj-site; Backend-Service is the canonical authority (flipped from
+ * tubafrenzy in Phase 3 of the tubafrenzy decommission — WXYC/wiki#88).
+ * `jobs/rotation-etl/` is retained as one-shot code (see
+ * jobs/rotation-etl/package.json) and is no longer scheduled. Tubafrenzy
+ * remains a SECONDARY writer until Phase 6a: `/internal/rotation-webhook`
+ * is still live and still accepts pushes from the classic `/wxycdb` UI.
+ * Shapes this table carries — from the tubafrenzy-via-ETL era and from that
+ * still-open webhook path — that Backend-canonical writes must accept:
  *
  *   - Multiple active rows per (album_id, rotation_bin) over an album's
  *     lifecycle (re-bins, re-adds, label-driven re-promotes). Do NOT add
@@ -846,11 +851,13 @@ export const discogsReleaseIdSourceEnum = wxyc_schema.enum('discogs_release_id_s
  *   - `kill_date` in the future (scheduled-kill rows are written ahead
  *     of time and only become "killed" when the date passes).
  *   - Rows with a populated `legacy_rotation_id` that haven't yet been
- *     joined to a library row by id.
+ *     joined to a library row by id. dj-site-originated rows leave this
+ *     NULL, but the still-live rotation webhook keeps landing new
+ *     populated values.
  *
- * Constraints added to this table must accept the full upstream shape, or
- * they will block the next ETL pass. See WXYC/Backend-Service#702 +
- * CLAUDE.md (Rotation ETL: sync from tubafrenzy).
+ * Constraints added to this table must accept the full shape above, or they
+ * will block a Backend-canonical write or a webhook delivery. See
+ * WXYC/Backend-Service#702 + CLAUDE.md (Rotation ETL: sync from tubafrenzy).
  */
 export const rotation = wxyc_schema.table(
   'rotation',
@@ -956,11 +963,17 @@ export const rotation = wxyc_schema.table(
 export type NewFSEntry = InferInsertModel<typeof flowsheet>;
 export type FSEntry = InferSelectModel<typeof flowsheet>;
 /**
- * SOURCE: tubafrenzy via the real-time webhook (`/internal/tubafrenzy-event`)
- * and `jobs/flowsheet-etl/`. DJs write flowsheet entries from tubafrenzy or
- * dj-site; tubafrenzy is the canonical authority and Backend-Service is
- * downstream. Shapes the upstream permits and the ETL/webhook preserve
- * include:
+ * SOURCE: dj-site via Backend. DJs write flowsheet entries from dj-site;
+ * Backend-Service is the canonical authority (flipped from tubafrenzy in
+ * Phase 3 of the tubafrenzy decommission — WXYC/wiki#88).
+ * `jobs/flowsheet-etl/` is retained as one-shot code (see
+ * jobs/flowsheet-etl/package.json) and is no longer scheduled. Tubafrenzy
+ * remains a SECONDARY writer until Phase 6a: the real-time webhook at
+ * `/internal/flowsheet-webhook` is still live and still accepts entries
+ * from the classic UI, and Backend still mirrors its own writes back out to
+ * tubafrenzy MySQL while the PostHog `backend-mirror` flag is on. Shapes
+ * this table carries — from the tubafrenzy-via-webhook/ETL era and from
+ * those still-open paths — that Backend-canonical writes must accept:
  *
  *   - NULL `show_id`, `album_id`, `rotation_id` (entries that pre-date a
  *     show, talkset / message rows, or never-linked tracks).
@@ -968,22 +981,24 @@ export type FSEntry = InferSelectModel<typeof flowsheet>;
  *     (talkset / breakpoint / message / dj_join / dj_leave entries — see
  *     `flowsheetEntryTypeEnum` for non-track shapes).
  *   - `play_order` is set independently by tubafrenzy (webhook path) and
- *     dj-site (live insert path); the two paths can produce overlapping
- *     values and the read layer reconciles. Do NOT add a per-show UNIQUE
- *     on `play_order` — see the 2026-05-01 incident memo.
+ *     dj-site (live insert path). BOTH paths are still live, so the two can
+ *     still produce overlapping values and the read layer reconciles. Do
+ *     NOT add a per-show UNIQUE on `play_order` — see the 2026-05-01
+ *     incident memo.
  *   - NULL metadata fields (`artwork_url`, `discogs_url`, `*_url`,
  *     `release_year`, `artist_bio`, `artist_wikipedia_url`,
  *     `metadata_attempt_at`) are valid before LML enrichment runs;
  *     `metadata_attempt_at` is specifically NULL on transient LML failures
  *     so the row stays retryable.
  *   - `legacy_entry_id` is unique per row when present, but a sizable
- *     residual of dj-site-originated rows have NULL `legacy_entry_id`.
+ *     residual of dj-site-originated rows have NULL `legacy_entry_id`;
+ *     webhook-originated rows still arrive with it populated.
  *   - `linkage_source` and `linkage_confidence` are NULL until B-2 / B-3
  *     resolves a linkage; do not add NOT NULL.
  *
- * Constraints added here must accept the full upstream shape, or they will
- * block the next ETL pass / webhook write. See WXYC/Backend-Service#702 +
- * the 2026-05-01 flowsheet/rotation incident.
+ * Constraints added here must accept the full shape above, or they will
+ * block a Backend-canonical write or a webhook delivery. See
+ * WXYC/Backend-Service#702 + the 2026-05-01 flowsheet/rotation incident.
  */
 export const flowsheet = wxyc_schema.table(
   'flowsheet',
@@ -2005,11 +2020,17 @@ export const artist_crossreference = wxyc_schema.table(
 export type NewShow = InferInsertModel<typeof shows>;
 export type Show = InferSelectModel<typeof shows>;
 /**
- * SOURCE: tubafrenzy via `jobs/flowsheet-etl/` (and the live show-lifecycle
- * mirror in `apps/backend/middleware/legacy/flowsheet.mirror.ts`).
- * Tubafrenzy is the canonical authority for the show calendar / who's on
- * air; Backend-Service is downstream. Shapes the upstream permits and the
- * ETL preserves include:
+ * SOURCE: dj-site via Backend. Backend-Service is the canonical authority
+ * for the show calendar / who's on air (flipped from tubafrenzy in Phase 3
+ * of the tubafrenzy decommission — WXYC/wiki#88); `jobs/flowsheet-etl/` is
+ * retained as one-shot code (see jobs/flowsheet-etl/package.json) and is no
+ * longer scheduled. Tubafrenzy remains a SECONDARY writer until Phase 6a
+ * via the show-lifecycle path on `/internal/flowsheet-webhook`, and the
+ * live mirror in `apps/backend/middleware/legacy/flowsheet.mirror.ts` still
+ * replicates Backend's own show lifecycle out to tubafrenzy while the
+ * PostHog `backend-mirror` flag is on. Shapes this table carries — from the
+ * tubafrenzy-via-ETL/mirror era and from that still-open webhook path —
+ * that Backend-canonical writes must accept:
  *
  *   - NULL `primary_dj_id` (legacy shows that pre-date the auth_user
  *     migration; "shadow" / fill-in shows logged before the operator
@@ -2018,11 +2039,13 @@ export type Show = InferSelectModel<typeof shows>;
  *   - NULL `show_name` (most shows; only specialty shows carry a name).
  *   - NULL `end_time` (the active show — set when the DJ closes the show).
  *   - NULL `legacy_show_id`, `legacy_dj_id`, `legacy_dj_name` for shows
- *     that originated in dj-site (no tubafrenzy round-trip yet).
+ *     that originated in dj-site and have not been mirrored to tubafrenzy
+ *     (`legacy_show_id` is persisted by `mirrorCreateShow` when the mirror
+ *     is on, so this is not a permanent property of a dj-site show).
  *
- * Constraints added here must accept the full upstream shape, or they will
- * block the next flowsheet-etl pass / show-lifecycle webhook.
- * See WXYC/Backend-Service#702.
+ * Constraints added here must accept the full shape above, or they will
+ * block a Backend-canonical write or a webhook delivery. See
+ * WXYC/Backend-Service#702.
  */
 export const shows = wxyc_schema.table(
   'shows',
