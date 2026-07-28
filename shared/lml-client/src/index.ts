@@ -1010,9 +1010,16 @@ function buildSkippedBulkResultItem(index: number): BulkLookupResultItem {
 }
 
 /**
- * Options accepted by the class-3 PG-cached reads (`getRelease`,
- * `getArtistDetails`, `resolveEntity`, `searchTrackReleases`). `caller`
- * remains OPTIONAL in PR 2 (BS#1826) — unlike `searchLibrary`'s and
+ * Bare optional-`caller` options bag, used ONLY by the class-3 PG-cached
+ * reads (`getRelease`, `getArtistDetails`, `resolveEntity`,
+ * `searchTrackReleases`) — NOT by `checkStreamingAvailability` (which has its
+ * own `StreamingCheckOptions`, `caller` required) or `searchLibrary` (which
+ * inlines its own `{ ...; caller: LmlCaller }` params object instead of
+ * reusing this type). Neutrally named (BS#1842 — the prior `DiscogsReadOptions`
+ * name invited a future field meant only for these 4 reads to silently widen
+ * a type it doesn't actually share with anything else).
+ *
+ * `caller` remains OPTIONAL in PR 2 (BS#1826) — unlike `searchLibrary`'s and
  * `checkStreamingAvailability`'s options, this type has call sites outside
  * this PR's migration scope (e.g. `apps/backend/controllers/proxy.
  * controller.ts`'s `getArtistDetails(id)` / `getRelease(discogsReleaseId)`,
@@ -1026,13 +1033,13 @@ function buildSkippedBulkResultItem(index: number): BulkLookupResultItem {
  * PG-cached-read default, or a per-caller override) is threaded into the
  * `lmlFetch` AbortController.
  */
-export interface DiscogsReadOptions {
+export interface CallerOption {
   caller?: LmlCaller;
 }
 
 /**
  * Options accepted by `checkStreamingAvailability` (BS#1826 PR 2, class 4).
- * Unlike the shared `DiscogsReadOptions`, `caller` is REQUIRED here — every
+ * Unlike the shared `CallerOption`, `caller` is REQUIRED here — every
  * in-tree call site (`library.controller.ts`'s add/update-album streaming
  * checks) is migrated in this PR to supply a distinct class-4 label
  * (`library-add-album-streaming` / `library-update-album-streaming`), so
@@ -1046,10 +1053,10 @@ export interface StreamingCheckOptions {
  * Get full release metadata from LML.
  *
  * @param releaseId - Discogs release ID
- * @param options - Optional caller label. See `DiscogsReadOptions`.
+ * @param options - Optional caller label. See `CallerOption`.
  * @returns Release metadata including tracklist, genres, styles
  */
-export async function getRelease(releaseId: number, options?: DiscogsReadOptions): Promise<DiscogsReleaseMetadata> {
+export async function getRelease(releaseId: number, options?: CallerOption): Promise<DiscogsReleaseMetadata> {
   const timeoutMs = policyForCaller(options?.caller)?.timeoutMs;
   const response = await lmlFetch(`/api/v1/discogs/release/${releaseId}`, undefined, timeoutMs);
   return (await response.json()) as DiscogsReleaseMetadata;
@@ -1059,10 +1066,10 @@ export async function getRelease(releaseId: number, options?: DiscogsReadOptions
  * Get artist details from LML.
  *
  * @param artistId - Discogs artist ID
- * @param options - Optional caller label. See `DiscogsReadOptions`.
+ * @param options - Optional caller label. See `CallerOption`.
  * @returns Artist details including bio, image, URLs
  */
-export async function getArtistDetails(artistId: number, options?: DiscogsReadOptions): Promise<DiscogsArtistDetails> {
+export async function getArtistDetails(artistId: number, options?: CallerOption): Promise<DiscogsArtistDetails> {
   const timeoutMs = policyForCaller(options?.caller)?.timeoutMs;
   const response = await lmlFetch(`/api/v1/discogs/artist/${artistId}`, undefined, timeoutMs);
   return (await response.json()) as DiscogsArtistDetails;
@@ -1073,13 +1080,13 @@ export async function getArtistDetails(artistId: number, options?: DiscogsReadOp
  *
  * @param type - Entity type: artist, release, or master
  * @param id - Discogs entity ID
- * @param options - Optional caller label. See `DiscogsReadOptions`.
+ * @param options - Optional caller label. See `CallerOption`.
  * @returns Entity name and basic info
  */
 export async function resolveEntity(
   type: 'artist' | 'release' | 'master',
   id: number,
-  options?: DiscogsReadOptions
+  options?: CallerOption
 ): Promise<EntityResolveResponse> {
   const timeoutMs = policyForCaller(options?.caller)?.timeoutMs;
   const response = await lmlFetch(`/api/v1/discogs/entity/${type}/${id}`, undefined, timeoutMs);
@@ -1092,14 +1099,14 @@ export async function resolveEntity(
  * @param track - Track/song title to search for
  * @param artist - Optional artist name for filtering
  * @param limit - Maximum number of results (default 20)
- * @param options - Optional caller label. See `DiscogsReadOptions`.
+ * @param options - Optional caller label. See `CallerOption`.
  * @returns List of releases containing the track
  */
 export async function searchTrackReleases(
   track: string,
   artist?: string,
   limit = 20,
-  options?: DiscogsReadOptions
+  options?: CallerOption
 ): Promise<DiscogsTrackReleasesResponse> {
   const params = new URLSearchParams({ track });
   if (artist) params.set('artist', artist);
@@ -1582,7 +1589,7 @@ const ARTIST_RESOLVE_TIMEOUT_SLACK_MS = 30_000;
  */
 export async function resolveArtistNamesBulk(
   names: string[],
-  options?: { timeoutMs?: number; limiter?: LmlLimiter; caller?: string; dryRun?: boolean }
+  options?: { timeoutMs?: number; limiter?: LmlLimiter; caller?: LmlCaller; dryRun?: boolean }
 ): Promise<ArtistResolveBulkResponse> {
   if (names.length === 0) {
     throw new LmlClientError('resolveArtistNamesBulk requires at least 1 name.', 400);
@@ -1772,7 +1779,7 @@ const ARTIST_GENRES_TIMEOUT_SLACK_MS = 20_000;
  */
 export async function fetchArtistGenresBulk(
   artists: ArtistGenresRequestItem[],
-  options?: { timeoutMs?: number; limiter?: LmlLimiter; caller?: string }
+  options?: { timeoutMs?: number; limiter?: LmlLimiter; caller?: LmlCaller }
 ): Promise<ArtistGenresBulkResponse> {
   if (artists.length === 0) {
     throw new LmlClientError('fetchArtistGenresBulk requires at least 1 artist.', 400);
