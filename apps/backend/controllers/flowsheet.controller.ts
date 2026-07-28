@@ -105,7 +105,10 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
 
     if (entries.length) {
       await flowsheet_service.attachUpcomingShows(entries);
-      res.status(200).json(entries.map(flowsheet_service.transformToV2));
+      // `.filter(Boolean)` guards a transient nullish array element (Sentry
+      // BACKEND-SERVICE-2T / BS#1864) — attachUpcomingShows already tolerates
+      // one, but transformToV2 still dereferences .entry_type unguarded.
+      res.status(200).json(entries.filter(Boolean).map(flowsheet_service.transformToV2));
     } else {
       res.status(404).json({
         message: 'No Tracks found',
@@ -645,8 +648,11 @@ export const getShowInfo: RequestHandler<object, unknown, object, { show_id: str
 
   await flowsheet_service.attachUpcomingShows(entries);
 
+  // `.filter(Boolean)` guards a transient nullish array element (Sentry
+  // BACKEND-SERVICE-2T / BS#1864) — attachUpcomingShows already tolerates
+  // one, but transformToV2 still dereferences .entry_type unguarded.
   res.status(200).json({
     ...showMetadata,
-    entries: entries.map(flowsheet_service.transformToV2),
+    entries: entries.filter(Boolean).map(flowsheet_service.transformToV2),
   });
 };
