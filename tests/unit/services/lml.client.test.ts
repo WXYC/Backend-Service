@@ -599,6 +599,7 @@ describe('lml.client', () => {
         song_not_found: false,
         found_on_compilation: false,
         timeout: false,
+        degraded: false,
         outcome: 'skipped_discogs_unavailable',
       });
     });
@@ -1119,6 +1120,7 @@ describe('lml.client', () => {
           song_not_found: false,
           found_on_compilation: false,
           timeout: false,
+          degraded: false,
           outcome: 'skipped_discogs_unavailable',
         },
       });
