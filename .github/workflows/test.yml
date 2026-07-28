@@ -306,6 +306,11 @@ jobs:
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     services:
+      # NOTE: postgres:18.0-alpine is newer than prod RDS (PostgreSQL 14.22)
+      # -- a known, intentional skew (BS#1424), not drift. This job doesn't
+      # validate migration syntax against prod's PG major; the
+      # `migrate-dryrun` job below does, against a real RDS snapshot. See
+      # docs/migrations.md#dev-ci-postgres-version-vs-prod-rds-read-before-writing-ddl.
       postgres:
         image: postgres:18.0-alpine
         env:
