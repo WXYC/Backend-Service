@@ -85,10 +85,16 @@ runs:
             --health-start-period=30s \
             ${{ inputs.aws_ecr_uri }}/$TARGET_APP:$DEPLOY_TAG
 
-          echo "Cleaning up old Docker images..."
+          # Post-pull GC keeps the newest 2 versions per repo (current + one
+          # rollback buffer). The pre-pull reclaim in deploy-base.yml keeps
+          # only 1 to free headroom on a near-full host before this pull; this
+          # step restores the buffer after the new image lands. Soft `rmi`
+          # (never -f): an image pinned by a running or stopped container
+          # refuses removal and is swallowed by `|| true`.
+          echo "Cleaning up old Docker images (keep newest 2 per repo)..."
           docker images --format '{{.Repository}} {{.Tag}}' | \
             grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' | \
             sort -k1,1 -k2,2Vr | \
-            awk '{ if ($1 in seen) print $1 ":" $2; else seen[$1]=1 }' | \
+            awk '{ c[$1]++; if (c[$1] > 2) print $1 ":" $2 }' | \
             xargs -r -n1 docker rmi 2>/dev/null || true
           docker image prune -f 2>/dev/null || true

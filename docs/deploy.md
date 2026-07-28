@@ -40,6 +40,16 @@ The `npm ci` layer still busts on any `package-lock.json` change — exactly the
 
 **ECR storage**: the `:buildcache` tag holds the live cache manifest per repo; `.github/ecr-lifecycle-policy.json` (applied via `Apply ECR Lifecycle Policy`, run every `build` invocation so a newly-created repository picks it up on its first build) expires untagged images (the dangling layers left behind each time `:buildcache` is retagged) after 1 day and caps `sha-*` tags at the 20 most recent per repo. The `buildcache` tag itself is never matched by either rule, since it's always tagged and never has the `sha-` prefix.
 
+## Host disk reclamation (pre-pull GC)
+
+<!-- @rule id=reclaim-before-pull enforced-by=none added=2026-07-27 incidents=#run-30313671442 -->
+
+The lifecycle policy above governs the **ECR registry**, not the **EC2 host's local image store**. Every deploy pulls a fresh version-tagged image per affected target onto the shared prod host (32 GB root FS), and each rollout path GCs old images — but the GC used to run _after_ `docker pull`. On 2026-07-27 the host filled to 93%, and from then on every deploy's image extraction failed with `no space left on device` **before** its own GC could run: full disk → failed rollout → GC skipped → still full, a self-perpetuating wedge that only cleared once ~10 GB of images were reclaimed by hand ([run 30313671442](https://github.com/WXYC/Backend-Service/actions/runs/30313671442)).
+
+The fix is a **pre-pull** reclaim: the `deploy` job's `Reclaim Docker disk before pull` step runs for every matrix target (including one-shot-job targets that have no rollout of their own) _before_ `Deploy Service` / `Deploy Cron Job`, so a near-full host reclaims its own headroom first and can never deadlock on its own pull. Retention is **asymmetric**: the pre-pull sweep keeps only the newest **1** version per repo (maximum headroom under pressure), and the two post-pull GCs (`deploy-service/action.yml`, `Deploy Cron Job`) keep the newest **2** — current plus one rollback buffer. Net at-rest footprint is 2 versions per repo; the previous version survives for a fast `deploy-manual.yml` rollback.
+
+Safety invariants, matched across all three blocks: `docker rmi` is always **soft** (never `-f`, `2>/dev/null || true`), so an image pinned by a running or stopped container refuses removal and is skipped — the running services and each cron's current tag (pinned by its last exited `<name>-cron` container) can never be reaped. Pruning is dangling-only (`docker image prune -f`, **never** `-a` or `--volumes`): a blind `prune -a` would delete the freshly-pulled cron images that legitimately have 0 containers until their next scheduled fire, and the host's ECR auth is a static ~12 h token with no credential helper, so an over-prune could strand a cron that then can't re-pull. `sha-*` images are not a host concern — both rollout paths pull only `:$DEPLOY_TAG`; the sole host `sha-*` image is `db-migrate`, trimmed to current by the `migrate` job. Do not move the reclaim back after the pull, and do not switch to `prune -a`.
+
 ## CI workflow pin maintenance
 
 Three classes of pin in `.github/workflows/*.yml` exist for supply-chain reasons (mirrors WXYC/request-o-matic#124's free-tier hardening; see WXYC/wiki#67 for the org-wide rollout). They will bit-rot and need occasional bumps:
