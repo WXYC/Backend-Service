@@ -81,7 +81,8 @@ const startShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
     const entryBody = mapEntryToTubafrenzy(announcementEntry[0], tubafrenzyShowId);
     const entryId = await mirrorCreateEntry(entryBody);
     if (entryId != null) {
-      cacheEntryId(announcementEntry[0].play_order, entryId);
+      // BS#1103: key by the flowsheet row id, not play_order (only unique per-show).
+      cacheEntryId(announcementEntry[0].id, entryId);
       try {
         await db.update(flowsheet).set({ legacy_entry_id: entryId }).where(eq(flowsheet.id, announcementEntry[0].id));
       } catch (e) {
@@ -119,7 +120,8 @@ export const endShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
     const entryBody = mapEntryToTubafrenzy(announcementEntry[0], tubafrenzyShowId);
     const entryId = await mirrorCreateEntry(entryBody);
     if (entryId != null) {
-      cacheEntryId(announcementEntry[0].play_order, entryId);
+      // BS#1103: key by the flowsheet row id, not play_order (only unique per-show).
+      cacheEntryId(announcementEntry[0].id, entryId);
       try {
         await db.update(flowsheet).set({ legacy_entry_id: entryId }).where(eq(flowsheet.id, announcementEntry[0].id));
       } catch (e) {
@@ -324,7 +326,10 @@ export const addEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entry) 
   const body = mapEntryToTubafrenzy(entry, radioShowID, isRotationMatch);
   const tubafrenzyId = await mirrorCreateEntry(body);
   if (tubafrenzyId != null) {
-    cacheEntryId(entry.play_order, tubafrenzyId);
+    // BS#1103: key by the flowsheet row id, not play_order — play_order
+    // resets per show, so two shows in the same process lifetime can
+    // collide on the same slot and evict each other's cached entry.
+    cacheEntryId(entry.id, tubafrenzyId);
     // Persist the mapping so the ETL can deduplicate
     try {
       await db.update(flowsheet).set({ legacy_entry_id: tubafrenzyId }).where(eq(flowsheet.id, entry.id));
@@ -338,7 +343,8 @@ export const updateEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entr
   // Message-only rows aren't updateable
   if (entry?.message && entry.message.trim() !== '') return;
 
-  const cachedId = getCachedEntryId(entry.play_order);
+  // BS#1103: key by the flowsheet row id, not play_order — see cacheEntryId call in addEntry above.
+  const cachedId = getCachedEntryId(entry.id);
 
   // Loop guard: entry has a legacy ID but we didn't cache it this lifecycle —
   // it was imported by the ETL, not created by our mirror. Don't mirror back.
@@ -347,7 +353,7 @@ export const updateEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entr
   // Use cache (fast path) or fall back to persisted legacy_entry_id (after restart)
   const tubafrenzyId = cachedId ?? entry.legacy_entry_id;
   if (tubafrenzyId == null) {
-    console.warn('[mirror] No tubafrenzy ID for play_order', entry.play_order);
+    console.warn('[mirror] No tubafrenzy ID for flowsheet row', entry.id);
     return;
   }
 

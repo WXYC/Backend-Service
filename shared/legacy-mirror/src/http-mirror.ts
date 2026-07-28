@@ -12,7 +12,18 @@ import * as Sentry from '@sentry/node';
 const TUBAFRENZY_URL = process.env.TUBAFRENZY_URL ?? 'https://www.wxyc.info';
 const MIRROR_API_KEY = process.env.MIRROR_API_KEY ?? '';
 
-/** In-memory map: Backend-Service play_order → tubafrenzy entry ID */
+/**
+ * In-memory map: Backend-Service flowsheet row ID → tubafrenzy entry ID.
+ *
+ * Keyed by the globally-unique `flowsheet.id` surrogate, NOT `play_order`
+ * (BS#1103). `play_order` only resets to 1 per show (post-#693), so two
+ * shows created back-to-back in the same process lifetime can both cache
+ * an entry at the same play_order slot — the second show's `cacheEntryId`
+ * write would silently evict the first show's cached tubafrenzy ID, and a
+ * later PATCH on the first show's entry would resolve to the second show's
+ * tubafrenzy row. The row id has no such collision: it's a serial PK
+ * unique across every show for the lifetime of the process.
+ */
 const entryIdMap = new Map<number, number>();
 
 /**
@@ -244,12 +255,14 @@ export async function mirrorUpdateEntry(tubafrenzyId: number, body: Record<strin
   }
 }
 
-export function cacheEntryId(playOrder: number, tubafrenzyId: number): void {
-  entryIdMap.set(playOrder, tubafrenzyId);
+/** `entryId` is the Backend-Service `flowsheet.id` row surrogate (BS#1103), not `play_order`. */
+export function cacheEntryId(entryId: number, tubafrenzyId: number): void {
+  entryIdMap.set(entryId, tubafrenzyId);
 }
 
-export function getCachedEntryId(playOrder: number): number | undefined {
-  return entryIdMap.get(playOrder);
+/** `entryId` is the Backend-Service `flowsheet.id` row surrogate (BS#1103), not `play_order`. */
+export function getCachedEntryId(entryId: number): number | undefined {
+  return entryIdMap.get(entryId);
 }
 
 export function clearEntryIdMap(): void {
