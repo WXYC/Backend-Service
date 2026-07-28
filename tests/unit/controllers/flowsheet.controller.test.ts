@@ -257,6 +257,22 @@ describe('flowsheet.controller', () => {
         expect(mockGetEntriesByRange).toHaveBeenCalledWith(100, 105);
         expect(res.status).toHaveBeenCalledWith(200);
       });
+
+      // Sentry BACKEND-SERVICE-2T / BS#1864: the range branch shares the same
+      // unguarded `.map(transformToV2)` shape as the default branch — apply
+      // the same call-site guard for symmetry.
+      it('omits a nullish entry from the range-mode projected array without throwing', async () => {
+        const validEntry = createMockEntry(100);
+        mockGetEntriesByRange.mockResolvedValue([validEntry, undefined] as unknown[]);
+
+        const req = createMockReq({ start_id: '100', end_id: '105' });
+        const res = createMockRes();
+
+        await getEntries(req as Request, res as Response, mockNext);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        expect(res.json).toHaveBeenCalledWith([{ ...validEntry, v2: true }]);
+      });
     });
 
     it('calculates offset from page and limit', async () => {
@@ -309,6 +325,30 @@ describe('flowsheet.controller', () => {
       expect(mockTransformToV2).toHaveBeenCalledWith(entries[0], 0, entries);
       expect(mockTransformToV2).toHaveBeenCalledWith(entries[1], 1, entries);
       expect(mockTransformToV2).toHaveBeenCalledWith(entries[2], 2, entries);
+    });
+
+    // Sentry BACKEND-SERVICE-2T / BS#1864: this is the higher-traffic branch
+    // (dj-site's 60s poll + the iOS app) that shares the same unguarded
+    // `.map(transformToV2)` deref as getLatest. A nullish element must be
+    // dropped from the projected array rather than throwing; the guard lives
+    // at the call site (not inside transformToV2), so every other caller's
+    // wire shape stays untouched.
+    it('omits a nullish entry from the projected entries array without throwing', async () => {
+      const validEntry = createMockEntry(1);
+      const entries = [validEntry, undefined] as unknown[];
+      mockGetEntriesByPage.mockResolvedValue(entries);
+      mockGetEntryCount.mockResolvedValue(2);
+      mockGetOnAirDJName.mockResolvedValue(null);
+
+      const req = createMockReq();
+      const res = createMockRes();
+
+      await getEntries(req as Request, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      const body = (res.json as jest.Mock).mock.calls[0][0] as Record<string, unknown>;
+      expect(body.entries).toEqual([{ ...validEntry, v2: true }]);
+      expect(mockTransformToV2).toHaveBeenCalledTimes(1);
     });
 
     describe('validation', () => {
@@ -409,6 +449,24 @@ describe('flowsheet.controller', () => {
       expect(res.end).toHaveBeenCalled();
       expect(res.json).not.toHaveBeenCalled();
       expect(mockTransformToV2).not.toHaveBeenCalled();
+    });
+
+    // Sentry BACKEND-SERVICE-2T / BS#1864: a transient nullish entries[0] must
+    // degrade to the same 204 the empty-array case already returns, rather
+    // than throwing inside transformToV2's unguarded `.entry_type` deref.
+    it('returns 204 without throwing when entries[0] is nullish', async () => {
+      mockGetEntriesByPage.mockResolvedValue([undefined] as unknown[]);
+
+      const req = createMockReq();
+      const res = createMockRes();
+
+      await getLatest(req as Request, res as Response, mockNext);
+
+      expect(res.status).toHaveBeenCalledWith(204);
+      expect(res.end).toHaveBeenCalled();
+      expect(res.json).not.toHaveBeenCalled();
+      expect(mockTransformToV2).not.toHaveBeenCalled();
+      expect(mockAttachUpcomingShows).not.toHaveBeenCalled();
     });
 
     it('rejects with error on service failure', async () => {

@@ -233,6 +233,32 @@ describe('attachUpcomingShows (BS#1607 id arm + BS#1613 name arm)', () => {
     expect(entries[0].upcoming_show).toBeUndefined();
     expect(entries[1].upcoming_show).toBeUndefined();
   });
+
+  // Sentry BACKEND-SERVICE-2T / BS#1864: GET /flowsheet/latest 500'd once with
+  // `TypeError: Cannot read properties of undefined (reading 'entry_type')`.
+  // Every producer feeding this function should return a dense array, so this
+  // is defensive hardening against a transient bad element, not a reachable-
+  // by-design case. The `.some(...)` prefilter short-circuits on the first
+  // matching track and stops iterating, while the `for...of` body visits every
+  // slot — so a nullish element positioned AFTER a real track slips past the
+  // prefilter and trips the loop. This is the exact shape that must not throw.
+  it('tolerates a nullish array element positioned after a real track', async () => {
+    const concert = makeConcert({ headlining_artist_id: 4211 });
+    lookup.mockResolvedValueOnce(maps(new Map([[4211, concert]])));
+    const validEntry = createTrackEntry({ id: 1, artist_id: 4211, artist_name: 'Juana Molina' });
+    const entries = [validEntry, undefined] as IFSEntry[];
+
+    await expect(attachUpcomingShows(entries)).resolves.toBe(entries);
+
+    expect(validEntry.upcoming_show).toBe(concert);
+    expect(entries[1]).toBeUndefined();
+  });
+
+  it('skips the DB when the only entries are a nullish element and a non-matchable marker', async () => {
+    const entries = [undefined, createTrackEntry({ id: 2, entry_type: 'show_start' })] as IFSEntry[];
+    await expect(attachUpcomingShows(entries)).resolves.toBe(entries);
+    expect(lookup).not.toHaveBeenCalled();
+  });
 });
 
 describe('transformToV2 upcoming_show projection (BS#1607)', () => {
