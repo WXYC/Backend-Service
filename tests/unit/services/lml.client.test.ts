@@ -900,6 +900,9 @@ describe('lml.client', () => {
       expect(init.headers).toMatchObject({
         'X-Caller-Class': '5',
         'X-Caller-Reason': 'catalog-popularity-freetext-resolve',
+        // class-5's default budgetMs (28000) must COEXIST with the new headers —
+        // pins against a regression that drops X-Caller-Budget-Ms when they're present.
+        'X-Caller-Budget-Ms': '28000',
       });
     });
 
@@ -914,6 +917,21 @@ describe('lml.client', () => {
       const init = mockFetch.mock.calls[0][1];
       if (!init) throw new Error('mockFetch was not called with init args');
       expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
+    });
+
+    it('BS#1843: an unregistered caller string omits X-Caller-Class/X-Caller-Reason too (safe no-op, mirrors the postLookup call site)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')], { caller: 'some-brand-new-caller-nobody-registered' });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      const headerKeys = Object.keys(init.headers ?? {});
+      expect(headerKeys).not.toContain('X-Caller-Class');
+      expect(headerKeys).not.toContain('X-Caller-Reason');
     });
 
     it('BS#1826: a registered caller supplies the DEFAULT timeoutMs/budgetMs when neither is passed explicitly', async () => {

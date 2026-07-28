@@ -365,9 +365,11 @@ const CALLER_BUDGET_HEADER = 'X-Caller-Budget-Ms';
 
 /**
  * BS#1843: wire-signal prelim for BS#1819 Pass 2. Forwards the BS-internal
- * `resolveLmlPolicy(caller).class` (BS#1826, `policy.ts`) as an integer
- * `1`-`5` so LML can eventually key lane routing/guarding off of it
- * (WXYC/library-metadata-lookup#928). Sending this ahead of any LML-side
+ * caller traffic class (BS#1826, `policy.ts`) as an integer `1`-`5` so LML
+ * can eventually key lane routing/guarding off of it
+ * (WXYC/library-metadata-lookup#928), resolved via the soft, non-throwing
+ * `policyForCaller` (NOT the throwing `resolveLmlPolicy`; see
+ * `buildLookupHeaders` below). Sending this ahead of any LML-side
  * read is inert — LML ignores unknown headers today.
  */
 const CALLER_CLASS_HEADER = 'X-Caller-Class';
@@ -375,8 +377,10 @@ const CALLER_CLASS_HEADER = 'X-Caller-Class';
 /**
  * BS#1843: companion to `CALLER_CLASS_HEADER`. Forwards the raw `caller`
  * label itself so LML can eventually attribute per-caller telemetry
- * (WXYC/library-metadata-lookup#931) — the read seam to mirror is LML's
- * `lookup/router.py:431` (`Header(alias="X-Caller-Budget-Ms")`).
+ * (WXYC/library-metadata-lookup#931). The read seam to mirror is LML's
+ * existing `X-Caller-Budget-Ms` declaration (near `lookup/router.py:431`) —
+ * #931 adds a SIBLING `Header(alias="X-Caller-Reason")` there, NOT a reuse
+ * of the budget alias.
  */
 const CALLER_REASON_HEADER = 'X-Caller-Reason';
 
