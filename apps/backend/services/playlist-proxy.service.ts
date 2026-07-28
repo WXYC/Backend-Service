@@ -1,30 +1,43 @@
 /**
  * Playlist proxy service.
  *
- * Subscribes to tubafrenzy's SSE stream at /playlists/recentStream, maintains
- * an in-memory copy of the current playlist, and enriches playcuts with
- * artwork URLs by joining flowsheet to album_metadata via flowsheet.album_id.
- * Client requests are served instantly from memory via getRecentEntries().
+ * Historically this subscribed to tubafrenzy's SSE stream at
+ * /playlists/recentStream and served GET /playlists/recentEntries from an
+ * in-memory copy of the last 200 entries. WXYC/wiki#88 (Phase 3 of the
+ * tubafrenzy decommission) removes tubafrenzy's outbound HTTP surface, so
+ * this service now sources the same public contract directly from
+ * Backend-Service's own Postgres `flowsheet` table.
+ *
+ * Query shape: the most recent MAX_ENTRIES (200) flowsheet rows (any
+ * entry_type, ordered by flowsheet.id DESC — the same "most recent"
+ * convention `flowsheet.service.ts`'s `getEntriesByPage` uses, since
+ * flowsheet.id is globally monotonic across shows) are grouped into
+ * playcuts/talksets/breakpoints exactly as the old SSE-fed in-memory store
+ * was. Playcuts are then sliced to the caller's requested `n`; talksets and
+ * breakpoints are returned in full (unsliced) — matching the pre-Phase-3
+ * behavior byte-for-byte at the GroupedResponse shape level.
+ *
+ * entry_type -> tubafrenzy wire vocabulary mapping (see PR description for
+ * the full rationale): 'track' -> playcut; 'talkset' | 'dj_join' |
+ * 'dj_leave' | 'message' -> talkset; 'breakpoint' -> breakpoint;
+ * 'show_start' | 'show_end' -> showDelimiter (omitted from every output
+ * array, matching tubafrenzy's v=2 wire contract). This mirrors
+ * `shared/legacy-mirror/src/http-mirror.ts`'s `mapEntryToTubafrenzy` /
+ * `isNonTrackEntry`, the codebase's own canonical BS-entry_type ->
+ * tubafrenzy-flowsheetEntryType mapping (flowsheetEntryType 7 covers both
+ * real talksets and dj_join/dj_leave; 9/10 are show_start/show_end).
  *
  * Exported API:
- *   startPlaylistProxy() — open the SSE connection (call once at startup)
- *   stopPlaylistProxy()  — close the SSE connection and cancel pending reconnects
- *   getRecentEntries(n)  — current enriched playlist, sliced to n entries
- *   isConnected()        — true once the init event has been processed
- *
- * Internal helpers are also exported for testability:
- *   processInitEvent(data)    — parse + store the init payload
- *   processCreatedEvent(data) — add one entry
- *   processUpdatedEvent(data) — replace one entry
- *   processDeletedEvent(data) — remove one entry
- *   resetState()              — clear in-memory store (tests only)
+ *   getRecentEntries(n) — query Postgres for the current playlist grouped
+ *                         by entry type, sliced to n playcuts. Async (was
+ *                         sync pre-Phase-3, since there is no more
+ *                         in-memory buffer to read synchronously).
  */
-import { EventSource } from 'eventsource';
-import { db, flowsheet, album_metadata } from '@wxyc/database';
-import { sql, inArray, and, isNotNull, eq, asc } from 'drizzle-orm';
+import { db, flowsheet, album_metadata, rotation, library, artists } from '@wxyc/database';
+import { sql, inArray, and, isNotNull, eq, desc } from 'drizzle-orm';
 
-const TUBAFRENZY_URL = process.env.TUBAFRENZY_URL ?? 'https://www.wxyc.info';
 const MAX_ENTRIES = 200;
+const HOUR_MS = 3_600_000;
 
 /** Compute a normalized lookup key from artist and album for matching against flowsheet rows. */
 function lookupKey(artist: string, album: string): string {
@@ -34,25 +47,55 @@ function lookupKey(artist: string, album: string): string {
 /** SQL expression that computes the same lookup key from flowsheet columns. */
 const flowsheetLookupKey = sql<string>`lower(trim(${flowsheet.artist_name})) || '-' || lower(trim(coalesce(${flowsheet.album_title}, '')))`;
 
+/**
+ * Whether a flowsheet row actively matches a rotation record, expressed as
+ * the `rotation.rotation_bin` letter or NULL. Structurally identical to
+ * `FSEntryFieldsRaw.rotation_bin` in `apps/backend/services/flowsheet.service.ts`
+ * (kept in sync at the expression level, not literally imported/shared —
+ * same convention `shared/legacy-mirror/src/rotation-match.ts`'s
+ * `isActiveRotationMatch` already documents for this same three-cohort
+ * match). Primary source is the FK join (`leftJoin(rotation, rotation.id =
+ * flowsheet.rotation_id)`); the fallback subquery only fires when that join
+ * misses and the entry looks like a real track (non-empty artist + album),
+ * covering DJs who typed an entry by hand instead of using the rotation
+ * picker. This is also the exact classification
+ * `shared/legacy-mirror/src/http-mirror.ts`'s `mapEntryToTubafrenzy` used
+ * to decide tubafrenzy's flowsheetEntryType=2 (rotation) at mirror time, so
+ * reusing it here is the most faithful available reconstruction of what
+ * tubafrenzy's own recentStream would have reported.
+ */
+const rotationBinExpr = sql<string | null>`
+  COALESCE(
+    ${rotation.rotation_bin},
+    CASE WHEN ${flowsheet.rotation_id} IS NULL
+      AND coalesce(${flowsheet.artist_name}, '') <> ''
+      AND coalesce(${flowsheet.album_title}, '') <> ''
+    THEN (
+      SELECT r2.rotation_bin
+      FROM ${rotation} r2
+      LEFT JOIN ${library} l2 ON l2.id = r2.album_id
+      LEFT JOIN ${artists} a2 ON a2.id = l2.artist_id
+      WHERE r2.add_date <= ${flowsheet.add_time}::date
+        AND (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
+        AND (
+          (${flowsheet.album_id} IS NOT NULL AND r2.album_id = ${flowsheet.album_id})
+          OR (
+            lower(trim(coalesce(r2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
+            AND lower(trim(coalesce(r2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
+          )
+          OR (
+            lower(trim(coalesce(a2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
+            AND lower(trim(coalesce(l2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
+          )
+        )
+      ORDER BY r2.id
+      LIMIT 1
+    )
+    END
+  )
+`;
+
 // --- Types ---
-
-interface TubafrenzyPlaycutData {
-  songTitle: string;
-  artistName: string;
-  releaseTitle: string;
-  labelName: string;
-  rotation: string;
-  request: string;
-}
-
-interface TubafrenzyEntry {
-  id: number;
-  chronOrderID: number;
-  hour: number;
-  timeCreated: number;
-  entryType: 'playcut' | 'talkset' | 'breakpoint' | 'showDelimiter';
-  playcut?: TubafrenzyPlaycutData;
-}
 
 interface GroupedPlaycut {
   id: number;
@@ -81,272 +124,192 @@ export interface GroupedResponse {
   breakpoints: BaseEntry[];
 }
 
-// --- In-memory store ---
+type RecentRow = {
+  id: number;
+  entry_type: string;
+  add_time: Date;
+  radio_hour: Date | null;
+  track_title: string | null;
+  artist_name: string | null;
+  album_title: string | null;
+  record_label: string | null;
+  request_flag: boolean | null;
+  rotation_bin: string | null;
+};
 
-let entries: TubafrenzyEntry[] = [];
-let artworkMap: Map<number, string> = new Map(); // entry ID → artwork URL
-let connected = false;
+/** tubafrenzy wire-vocabulary bucket a flowsheet.entry_type maps to. `null` means omit (showDelimiter). */
+type EntryBucket = 'playcut' | 'talkset' | 'breakpoint' | null;
+
+function classifyEntryType(entryType: string): EntryBucket {
+  switch (entryType) {
+    case 'track':
+      return 'playcut';
+    case 'talkset':
+    case 'dj_join':
+    case 'dj_leave':
+    case 'message':
+      return 'talkset';
+    case 'breakpoint':
+      return 'breakpoint';
+    case 'show_start':
+    case 'show_end':
+      return null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Top-of-hour epoch ms for a row, matching tubafrenzy's `hour` wire field.
+ *
+ * Breakpoints use `flowsheet.radio_hour` when present — the exact top-of-hour
+ * tubafrenzy marks (schema.ts: "the row's logging instant, ~1 min before the
+ * hour" — flooring add_time would round a pre-hour breakpoint down to the
+ * PRIOR hour, per BS#1448/#1449). Falls back to the floor-add_time formula
+ * for rows that predate the radio_hour backfill.
+ *
+ * Every other entry type floors add_time to the top of the hour, reusing
+ * `shared/legacy-mirror/src/http-mirror.ts`'s `mapEntryToTubafrenzy`
+ * `radioHour` formula verbatim (`Math.floor(startMs / 3_600_000) *
+ * 3_600_000`) — that function computes the same "hour" concept for the
+ * mirror-write direction (BS -> tubafrenzy), so reusing its formula here is
+ * the most faithful reconstruction of what tubafrenzy's own recentStream
+ * `hour` field would have held.
+ */
+function computeHourMs(row: RecentRow): number {
+  if (row.entry_type === 'breakpoint' && row.radio_hour) {
+    return row.radio_hour.getTime();
+  }
+  const startMs = row.add_time.getTime();
+  return Math.floor(startMs / HOUR_MS) * HOUR_MS;
+}
+
+function toBaseEntry(row: RecentRow): BaseEntry {
+  return {
+    id: row.id,
+    // flowsheet.id is globally monotonic across shows (see
+    // flowsheet.service.ts's getEntriesByRange / getEntriesByShow comments),
+    // making it the natural analog of tubafrenzy's chronOrderID — a stable,
+    // strictly-increasing chronological order key. Not a reconstruction of
+    // tubafrenzy's own GLOBAL_ORDER_ID numbering (show*1000+seq), which no
+    // longer exists once tubafrenzy is decommissioned; consumers only rely
+    // on chronOrderID for ordering/dedup, not on its numeric scheme.
+    chronOrderID: row.id,
+    hour: computeHourMs(row),
+    timeCreated: row.add_time.getTime(),
+  };
+}
 
 // --- Public API ---
 
 /**
- * Whether the SSE connection has received its init event.
+ * Query Postgres for the current playlist, grouped by entry type.
+ *
+ * Playcuts are sliced to `n` (most recent first); talksets and breakpoints
+ * are returned in full — matching the pre-Phase-3 in-memory behavior, which
+ * capped its whole buffer at MAX_ENTRIES (200, any type) and only sliced
+ * the playcuts sub-array at read time.
  */
-export function isConnected(): boolean {
-  return connected;
-}
+export async function getRecentEntries(n: number): Promise<GroupedResponse> {
+  const rows: RecentRow[] = await db
+    .select({
+      id: flowsheet.id,
+      entry_type: flowsheet.entry_type,
+      add_time: flowsheet.add_time,
+      radio_hour: flowsheet.radio_hour,
+      track_title: flowsheet.track_title,
+      artist_name: flowsheet.artist_name,
+      album_title: flowsheet.album_title,
+      record_label: flowsheet.record_label,
+      request_flag: flowsheet.request_flag,
+      rotation_bin: rotationBinExpr,
+    })
+    .from(flowsheet)
+    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .orderBy(desc(flowsheet.id))
+    .limit(MAX_ENTRIES);
 
-/**
- * Return the current enriched playlist, grouped by entry type.
- * Playcuts are sliced to `n`; talksets and breakpoints are returned in full.
- */
-export function getRecentEntries(n: number): GroupedResponse {
-  const playcuts: GroupedPlaycut[] = [];
-  const talksets: BaseEntry[] = [];
-  const breakpoints: BaseEntry[] = [];
+  const playcutRows: RecentRow[] = [];
+  const talksetRows: RecentRow[] = [];
+  const breakpointRows: RecentRow[] = [];
 
-  for (const entry of entries) {
-    switch (entry.entryType) {
+  for (const row of rows) {
+    switch (classifyEntryType(row.entry_type)) {
       case 'playcut':
-        if (entry.playcut) {
-          const grouped: GroupedPlaycut = {
-            id: entry.id,
-            chronOrderID: entry.chronOrderID,
-            hour: entry.hour,
-            timeCreated: entry.timeCreated,
-            songTitle: entry.playcut.songTitle,
-            artistName: entry.playcut.artistName,
-            releaseTitle: entry.playcut.releaseTitle,
-            labelName: entry.playcut.labelName,
-            rotation: entry.playcut.rotation,
-            request: entry.playcut.request,
-          };
-          const artwork = artworkMap.get(entry.id);
-          if (artwork) {
-            grouped.artworkURL = artwork;
-          }
-          playcuts.push(grouped);
-        }
+        playcutRows.push(row);
         break;
       case 'talkset':
-        talksets.push({
-          id: entry.id,
-          chronOrderID: entry.chronOrderID,
-          hour: entry.hour,
-          timeCreated: entry.timeCreated,
-        });
+        talksetRows.push(row);
         break;
       case 'breakpoint':
-        breakpoints.push({
-          id: entry.id,
-          chronOrderID: entry.chronOrderID,
-          hour: entry.hour,
-          timeCreated: entry.timeCreated,
-        });
+        breakpointRows.push(row);
         break;
-      // showDelimiter entries are omitted
+      // null (showDelimiter: show_start / show_end) is omitted entirely.
     }
   }
 
+  const slicedPlaycuts = playcutRows.slice(0, n);
+  const artworkMap = await enrichPlaycuts(slicedPlaycuts);
+
+  const playcuts: GroupedPlaycut[] = slicedPlaycuts.map((row) => {
+    const grouped: GroupedPlaycut = {
+      id: row.id,
+      chronOrderID: row.id,
+      hour: computeHourMs(row),
+      timeCreated: row.add_time.getTime(),
+      songTitle: row.track_title ?? '',
+      artistName: row.artist_name ?? '',
+      releaseTitle: row.album_title ?? '',
+      labelName: row.record_label ?? '',
+      rotation: row.rotation_bin !== null ? 'true' : 'false',
+      request: row.request_flag ? 'true' : 'false',
+    };
+    const artwork = artworkMap.get(row.id);
+    if (artwork) {
+      grouped.artworkURL = artwork;
+    }
+    return grouped;
+  });
+
   return {
-    playcuts: playcuts.slice(0, n),
-    talksets,
-    breakpoints,
+    playcuts,
+    talksets: talksetRows.map(toBaseEntry),
+    breakpoints: breakpointRows.map(toBaseEntry),
   };
-}
-
-/**
- * Open the SSE connection to tubafrenzy. Call once at startup.
- */
-export function startPlaylistProxy(): void {
-  stopped = false;
-  connectSSE();
-}
-
-/**
- * Close the SSE connection, cancel pending reconnects, and clear state.
- * Idempotent: safe to call multiple times.
- *
- * The `stopped` flag gates the 'error' handler so an error that fires
- * *after* this call (queued in the EventLoop, or emitted by `close()`
- * itself in some EventSource implementations) cannot schedule a fresh
- * reconnect (BS#1132).
- */
-export function stopPlaylistProxy(): void {
-  stopped = true;
-  if (currentEventSource) {
-    currentEventSource.close();
-    currentEventSource = null;
-  }
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  connected = false;
-}
-
-/**
- * Clear all in-memory state. For tests only.
- */
-export function resetState(): void {
-  stopPlaylistProxy();
-  entries = [];
-  artworkMap = new Map();
-}
-
-// --- SSE connection ---
-//
-// Reconnection relies on two mechanisms:
-//   1. The `eventsource` package detects TCP-level disconnections and
-//      emits an `error` event, which triggers reconnection with backoff.
-//   2. Tubafrenzy sends `:heartbeat` SSE comments every 30 seconds,
-//      keeping the TCP connection alive so idle timeouts don't fire.
-//
-// There is intentionally no application-level heartbeat timer here.
-// SSE comments are invisible to addEventListener (per the spec), so any
-// timer that resets only on named events will misfire on an idle-but-alive
-// connection, causing unnecessary reconnects and EventSource leaks.
-
-let reconnectDelay = 1000;
-const MAX_RECONNECT_DELAY = 30000;
-let currentEventSource: EventSource | null = null;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-// `stopped` gates the 'error' handler from scheduling a reconnect after
-// `stopPlaylistProxy()`. Cleared by `startPlaylistProxy`/`connectSSE`.
-let stopped = false;
-
-function connectSSE(): void {
-  stopped = false;
-  const url = `${TUBAFRENZY_URL}/playlists/recentStream`;
-  console.log(`[playlist-proxy] Connecting to SSE: ${url}`);
-
-  if (currentEventSource) {
-    currentEventSource.close();
-    currentEventSource = null;
-  }
-
-  const es = new EventSource(url);
-  currentEventSource = es;
-
-  es.addEventListener('init', (event: MessageEvent) => {
-    reconnectDelay = 1000;
-    processInitEvent(event.data).catch((err) => console.error('[playlist-proxy] Error processing init event:', err));
-  });
-
-  es.addEventListener('created', (event: MessageEvent) => {
-    processCreatedEvent(event.data).catch((err) =>
-      console.error('[playlist-proxy] Error processing created event:', err)
-    );
-  });
-
-  es.addEventListener('updated', (event: MessageEvent) => {
-    processUpdatedEvent(event.data).catch((err) =>
-      console.error('[playlist-proxy] Error processing updated event:', err)
-    );
-  });
-
-  es.addEventListener('deleted', (event: MessageEvent) => {
-    processDeletedEvent(event.data);
-  });
-
-  es.addEventListener('error', () => {
-    es.close();
-    if (currentEventSource === es) currentEventSource = null;
-
-    // If the operator has stopped the proxy, do not schedule a
-    // reconnect. Without this guard, errors that fire after stop
-    // (queued in the EventLoop, or emitted by `close()` itself)
-    // would silently reopen the upstream connection. BS#1132.
-    if (stopped) return;
-
-    console.error(`[playlist-proxy] SSE error, reconnecting in ${reconnectDelay}ms`);
-
-    // Clear any prior pending timer before assigning a fresh one.
-    // Cascading 'error' events (e.g. during a deploy disconnect)
-    // would otherwise stack parallel reconnects, each invoking
-    // `connectSSE()` independently. BS#1132.
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(() => connectSSE(), reconnectDelay);
-
-    // Only escalate the backoff when a reconnect is actually scheduled.
-    reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
-  });
-}
-
-// --- Event processing (exported for testability) ---
-
-/**
- * Process the init event: replace the entire in-memory store.
- */
-export async function processInitEvent(data: string): Promise<void> {
-  const parsed: TubafrenzyEntry[] = JSON.parse(data);
-  entries = parsed;
-  connected = true;
-  console.log(`[playlist-proxy] Init: ${entries.length} entries`);
-  await enrichPlaycuts();
-}
-
-/**
- * Process a created event: add one entry to the store.
- */
-export async function processCreatedEvent(data: string): Promise<void> {
-  const entry: TubafrenzyEntry = JSON.parse(data);
-  entries.unshift(entry);
-
-  // Trim oldest entries to prevent unbounded growth
-  if (entries.length > MAX_ENTRIES) {
-    const removed = entries.splice(MAX_ENTRIES);
-    for (const r of removed) artworkMap.delete(r.id);
-  }
-
-  console.log(`[playlist-proxy] Created: ${entry.entryType} #${entry.id}`);
-  if (entry.entryType === 'playcut' && entry.playcut) {
-    await enrichSinglePlaycut(entry);
-  }
-}
-
-/**
- * Process an updated event: replace an existing entry by id.
- */
-export async function processUpdatedEvent(data: string): Promise<void> {
-  const entry: TubafrenzyEntry = JSON.parse(data);
-  const idx = entries.findIndex((e) => e.id === entry.id);
-  if (idx !== -1) {
-    entries[idx] = entry;
-  } else {
-    entries.unshift(entry);
-  }
-  console.log(`[playlist-proxy] Updated: ${entry.entryType} #${entry.id}`);
-  if (entry.entryType === 'playcut' && entry.playcut) {
-    await enrichSinglePlaycut(entry);
-  }
-}
-
-/**
- * Process a deleted event: remove an entry by id.
- */
-export function processDeletedEvent(data: string): void {
-  const { id } = JSON.parse(data) as { id: number };
-  entries = entries.filter((e) => e.id !== id);
-  artworkMap.delete(id);
-  console.log(`[playlist-proxy] Deleted: #${id}`);
 }
 
 // --- Enrichment ---
 
+interface PlaycutCandidate {
+  id: number;
+  artist_name: string | null;
+  album_title: string | null;
+}
+
 /**
- * Batch-enrich all playcut entries with artwork URLs from album_metadata,
+ * Batch-enrich the given playcut rows with artwork URLs from album_metadata,
  * joined via flowsheet.album_id (BS#1012 / D5).
+ *
+ * The legacy library is per-physical-format (BS#1105): one lookup key
+ * (`lower(trim(artist_name)) || '-' || lower(trim(coalesce(album_title,
+ * '')))`) can match multiple album_metadata rows (a CD and an LP issue of
+ * the same album, each with its own artwork_url) — including rows the
+ * candidate's own `flowsheet.album_id` doesn't point at, since a sibling
+ * format's flowsheet row may carry artwork this one's album_id lacks. The
+ * deterministic tie-break, preserved verbatim from the pre-Phase-3
+ * implementation (commit d0b8317d, closes #1105): aggregate every matching
+ * artwork_url into an array ordered by album_id ascending and take the
+ * first element — deterministically the lowest album_id's artwork,
+ * independent of scan/plan order.
  */
-async function enrichPlaycuts(): Promise<void> {
-  const playcutEntries = entries.filter((e) => e.entryType === 'playcut' && e.playcut);
-  if (playcutEntries.length === 0) return;
+async function enrichPlaycuts(candidates: PlaycutCandidate[]): Promise<Map<number, string>> {
+  if (candidates.length === 0) return new Map();
 
   const keyToIds = new Map<string, number[]>();
-  for (const entry of playcutEntries) {
-    const key = lookupKey(entry.playcut!.artistName, entry.playcut!.releaseTitle);
+  for (const candidate of candidates) {
+    const key = lookupKey(candidate.artist_name ?? '', candidate.album_title ?? '');
     const ids = keyToIds.get(key) ?? [];
-    ids.push(entry.id);
+    ids.push(candidate.id);
     keyToIds.set(key, ids);
   }
 
@@ -356,14 +319,8 @@ async function enrichPlaycuts(): Promise<void> {
     const rows = await db
       .select({
         key: flowsheetLookupKey,
-        // The legacy library is per-physical-format (BS#1105): multiple
-        // `library` rows — and therefore multiple `album_metadata` rows —
-        // can share one flowsheetLookupKey (same artist_name + album_title,
-        // distinct album_id/artwork_url). Grouping by key alone would be
-        // ambiguous about which artwork_url to keep, so the tie-break is
-        // pinned in SQL: aggregate all matching artwork_urls into an array
-        // ordered by album_id ascending and take the first — deterministically
-        // the lowest album_id's artwork, independent of scan/plan order.
+        // See the enrichPlaycuts docstring above for the split-format
+        // tie-break rationale (BS#1105).
         artwork_url: sql<string>`(array_agg(${album_metadata.artwork_url} order by ${album_metadata.album_id} asc))[1]`,
       })
       .from(flowsheet)
@@ -373,54 +330,26 @@ async function enrichPlaycuts(): Promise<void> {
       // NULL` (migration 0081) so the planner indexes the lookup_key probe
       // instead of seq-scanning the 2.6M-row flowsheet table. See incident
       // #511 for what happens when the planner falls off the index.
+      // `flowsheet_artwork_lookup_idx` (migration 0057) was DROPPED in
+      // migration 0082 — this query never relied on it.
       .innerJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
       .where(and(inArray(flowsheetLookupKey, keys), isNotNull(album_metadata.artwork_url)))
       .groupBy(flowsheetLookupKey);
 
-    // Build new map and only swap on success — preserves existing artwork on DB failure
-    const newMap = new Map<number, string>();
+    const map = new Map<number, string>();
     for (const row of rows) {
       if (row.key && row.artwork_url) {
         const entryIds = keyToIds.get(row.key);
         if (entryIds) {
           for (const id of entryIds) {
-            newMap.set(id, row.artwork_url);
+            map.set(id, row.artwork_url);
           }
         }
       }
     }
-    artworkMap = newMap;
-
-    console.log(`[playlist-proxy] Enriched ${artworkMap.size} playcuts with artwork`);
+    return map;
   } catch (err) {
-    console.error('[playlist-proxy] DB enrichment failed, preserving existing artwork data:', err);
-  }
-}
-
-/**
- * Enrich a single playcut entry with artwork from album_metadata (BS#1012 / D5).
- */
-async function enrichSinglePlaycut(entry: TubafrenzyEntry): Promise<void> {
-  if (!entry.playcut) return;
-
-  const key = lookupKey(entry.playcut.artistName, entry.playcut.releaseTitle);
-
-  try {
-    const rows = await db
-      .select({ artwork_url: album_metadata.artwork_url })
-      .from(flowsheet)
-      // Same JOIN + partial-index alignment as enrichPlaycuts — see comment there.
-      .innerJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
-      .where(and(inArray(flowsheetLookupKey, [key]), isNotNull(album_metadata.artwork_url)))
-      // Deterministic tie-break for split-format albums (BS#1105): lowest
-      // album_id wins, matching enrichPlaycuts' array_agg ordering above.
-      .orderBy(asc(album_metadata.album_id))
-      .limit(1);
-
-    if (rows.length > 0 && rows[0].artwork_url) {
-      artworkMap.set(entry.id, rows[0].artwork_url);
-    }
-  } catch (err) {
-    console.error(`[playlist-proxy] Failed to enrich entry #${entry.id}:`, err);
+    console.error('[playlist-proxy] artwork enrichment failed:', err);
+    return new Map();
   }
 }
