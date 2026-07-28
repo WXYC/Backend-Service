@@ -1,4 +1,9 @@
 services:
+  # NOTE: postgres:18.0-alpine here (and on ci-db/e2e-db/etl-pg below) is
+  # newer than prod RDS (PostgreSQL 14.22) -- a known, intentional skew, not
+  # drift. Migrations must target PG14 syntax regardless of what this
+  # container accepts. See docs/migrations.md#dev-ci-postgres-version-vs-prod-rds-read-before-writing-ddl
+  # (BS#1424).
   db:
     image: postgres:18.0-alpine
     profiles: [dev]
@@ -54,6 +59,7 @@ services:
       # integration tests' fixed-ID assumptions.
       - ./seed-clone.sql:/init/seed-clone.sql
 
+  # See the dev/prod PG version-skew note above the `db` service.
   ci-db:
     image: postgres:18.0-alpine
     profiles: [ci]
@@ -261,6 +267,7 @@ services:
 
   # E2E Test Profile Services
   # These services are specifically for running E2E tests with the frontend
+  # See the dev/prod PG version-skew note above the `db` service.
   e2e-db:
     image: postgres:18.0-alpine
     profiles: [e2e]
@@ -408,6 +415,7 @@ services:
       retries: 15
       start_period: 20s
 
+  # See the dev/prod PG version-skew note above the `db` service.
   etl-pg:
     image: postgres:18.0-alpine
     profiles: [etl]
