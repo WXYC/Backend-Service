@@ -508,6 +508,35 @@ jobs:
 
           echo "target_type=$TARGET_TYPE" >> $GITHUB_OUTPUT
 
+      - name: Reclaim Docker disk before pull
+        # Runs for EVERY target (incl. one-shot-job targets with no rollout
+        # step) BEFORE the rollout's `docker pull`, so a near-full host reclaims
+        # its own headroom first and can never deadlock — the failure mode
+        # behind the 2026-07-27 wedge, where the post-pull GC was unreachable
+        # because the pull failed on `no space left on device`. See
+        # docs/deploy.md (2026-07-27 full-disk wedge).
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            # Keep only the newest 1 version per repo here to free maximum
+            # headroom before the pull; the post-pull GC restores the keep-2
+            # rollback buffer once the new image lands. Soft `rmi` (never -f)
+            # so an image pinned by a running or stopped container survives;
+            # dangling-only `prune -f` (never `-a` / `--volumes`). Every line
+            # ends `|| true`, so a GC hiccup never fails the deploy.
+            echo "Disk before reclaim:"; df -h / | tail -1
+            docker images --format '{{.Repository}} {{.Tag}}' | \
+              grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' | \
+              sort -k1,1 -k2,2Vr | \
+              awk '{ if ($1 in seen) print $1 ":" $2; else seen[$1]=1 }' | \
+              xargs -r -n1 docker rmi 2>/dev/null || true
+            docker image prune -f 2>/dev/null || true
+            echo "Disk after reclaim:"; df -h / | tail -1
+
       - name: Deploy Service
         if: steps.deploy_vars.outputs.target_type == 'app'
         uses: ./.github/actions/deploy-service
@@ -568,11 +597,16 @@ jobs:
             echo "CRONTAB:"
             crontab -l
 
-            echo "Cleaning up old Docker images..."
+            # Post-pull GC keeps the newest 2 versions per repo (current + one
+            # rollback buffer). The pre-pull reclaim (Reclaim Docker disk step)
+            # keeps only 1 to free headroom before this pull; this restores the
+            # buffer. Soft `rmi` (never -f) so an image pinned by a running or
+            # stopped container survives.
+            echo "Cleaning up old Docker images (keep newest 2 per repo)..."
             docker images --format '{{.Repository}} {{.Tag}}' | \
               grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' | \
               sort -k1,1 -k2,2Vr | \
-              awk '{ if ($1 in seen) print $1 ":" $2; else seen[$1]=1 }' | \
+              awk '{ c[$1]++; if (c[$1] > 2) print $1 ":" $2 }' | \
               xargs -r -n1 docker rmi 2>/dev/null || true
             docker image prune -f 2>/dev/null || true
 
