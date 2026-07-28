@@ -1,17 +1,27 @@
 /**
  * Unit tests for the playlist proxy service.
  *
- * Tests SSE event parsing, in-memory store management, and artwork
- * enrichment from album_metadata (joined via flowsheet.album_id). The
- * EventSource connection is mocked; only the pure logic is exercised here.
+ * Phase 3 of the tubafrenzy decommission (WXYC/wiki#88) replaced the SSE-fed
+ * in-memory store with a direct Postgres query. These tests mock the `db`
+ * query builder and exercise: entry_type -> tubafrenzy wire-vocabulary
+ * mapping, hour/chronOrderID/timeCreated synthesis, rotation/request string
+ * coercion, playcut slicing vs. unsliced talksets/breakpoints, and artwork
+ * enrichment (including the BS#1105 split-format tie-break, preserved from
+ * the pre-Phase-3 implementation).
  */
 import { jest } from '@jest/globals';
 
 // --- Mocks ---
 
-// Mock the database module
+// Mock the database module. A single shared chain object is reused for both
+// query shapes getRecentEntries issues:
+//   1. main entries query:   select().from(flowsheet).leftJoin(rotation, ...).orderBy(...).limit(...)
+//   2. artwork batch query:  select().from(flowsheet).innerJoin(album_metadata, ...).where(...).groupBy(...)
+// The two are distinguished by their terminal method: `.limit()` resolves
+// the main entries rows, `.groupBy()` resolves the artwork rows.
 const mockSelect = jest.fn();
 const mockFrom = jest.fn();
+const mockLeftJoin = jest.fn();
 const mockInnerJoin = jest.fn();
 const mockWhere = jest.fn();
 const mockGroupBy = jest.fn();
@@ -21,6 +31,7 @@ const mockLimit = jest.fn();
 const mockDbChain = {
   select: mockSelect,
   from: mockFrom,
+  leftJoin: mockLeftJoin,
   innerJoin: mockInnerJoin,
   where: mockWhere,
   groupBy: mockGroupBy,
@@ -29,6 +40,7 @@ const mockDbChain = {
 };
 mockSelect.mockReturnValue(mockDbChain);
 mockFrom.mockReturnValue(mockDbChain);
+mockLeftJoin.mockReturnValue(mockDbChain);
 mockInnerJoin.mockReturnValue(mockDbChain);
 mockWhere.mockReturnValue(mockDbChain);
 mockGroupBy.mockResolvedValue([]);
@@ -39,6 +51,7 @@ jest.mock('@wxyc/database', () => ({
   db: {
     select: (...args: unknown[]) => mockSelect(...args),
     from: (...args: unknown[]) => mockFrom(...args),
+    leftJoin: (...args: unknown[]) => mockLeftJoin(...args),
     innerJoin: (...args: unknown[]) => mockInnerJoin(...args),
     where: (...args: unknown[]) => mockWhere(...args),
     groupBy: (...args: unknown[]) => mockGroupBy(...args),
@@ -46,14 +59,39 @@ jest.mock('@wxyc/database', () => ({
     limit: (...args: unknown[]) => mockLimit(...args),
   },
   flowsheet: {
+    id: 'id',
+    entry_type: 'entry_type',
+    add_time: 'add_time',
+    radio_hour: 'radio_hour',
+    track_title: 'track_title',
     artist_name: 'artist_name',
     album_title: 'album_title',
-    artwork_url: 'artwork_url',
+    record_label: 'record_label',
+    request_flag: 'request_flag',
+    rotation_id: 'rotation_id',
     album_id: 'album_id',
   },
   album_metadata: {
     album_id: 'album_metadata.album_id',
     artwork_url: 'album_metadata.artwork_url',
+  },
+  rotation: {
+    id: 'rotation.id',
+    rotation_bin: 'rotation.rotation_bin',
+    album_id: 'rotation.album_id',
+    artist_name: 'rotation.artist_name',
+    album_title: 'rotation.album_title',
+    add_date: 'rotation.add_date',
+    kill_date: 'rotation.kill_date',
+  },
+  library: {
+    id: 'library.id',
+    artist_id: 'library.artist_id',
+    album_title: 'library.album_title',
+  },
+  artists: {
+    id: 'artists.id',
+    artist_name: 'artists.artist_name',
   },
 }));
 
@@ -63,21 +101,7 @@ jest.mock('drizzle-orm', () => ({
   isNotNull: jest.fn(),
   and: jest.fn(),
   eq: jest.fn(),
-  asc: jest.fn(),
-}));
-
-// Mock EventSource — we do not want to open real SSE connections in tests.
-// The service file imports EventSource as a default import.
-const mockEventSourceInstance = {
-  addEventListener: jest.fn(),
-  close: jest.fn(),
-  readyState: 1,
-};
-
-jest.mock('eventsource', () => ({
-  __esModule: true,
-  default: jest.fn(() => mockEventSourceInstance),
-  EventSource: jest.fn(() => mockEventSourceInstance),
+  desc: jest.fn(),
 }));
 
 // Suppress console output in tests
@@ -85,350 +109,364 @@ jest.spyOn(console, 'log').mockImplementation(() => {});
 jest.spyOn(console, 'error').mockImplementation(() => {});
 jest.spyOn(console, 'warn').mockImplementation(() => {});
 
-import {
-  processInitEvent,
-  processCreatedEvent,
-  processDeletedEvent,
-  processUpdatedEvent,
-  getRecentEntries,
-  isConnected,
-  resetState,
-} from '../../../apps/backend/services/playlist-proxy.service';
+import { getRecentEntries } from '../../../apps/backend/services/playlist-proxy.service';
 
 // --- Fixtures: representative WXYC data ---
+// (see the org CLAUDE.md "Example Music Data" section for the canonical pool)
 
-const ninaSimoneEntry = {
-  id: 2602249,
-  chronOrderID: 171606010,
-  hour: 1775080800000,
-  timeCreated: 1775082908948,
-  entryType: 'playcut' as const,
-  playcut: {
-    songTitle: 'I Shall Be Released',
-    artistName: 'Nina Simone',
-    releaseTitle: 'Best of',
-    labelName: 'BMG',
-    request: 'false',
-    rotation: 'false',
-  },
-};
-
-const juanaMolinaEntry = {
+const jessicaPrattRow = {
   id: 2602250,
-  chronOrderID: 171606011,
-  hour: 1775080800000,
-  timeCreated: 1775082999000,
-  entryType: 'playcut' as const,
-  playcut: {
-    songTitle: 'la paradoja',
-    artistName: 'Juana Molina',
-    releaseTitle: 'DOGA',
-    labelName: 'Sonamos',
-    request: 'false',
-    rotation: 'false',
-  },
+  entry_type: 'track',
+  add_time: new Date('2026-07-28T20:47:33.000Z'),
+  radio_hour: null,
+  track_title: 'Back, Baby',
+  artist_name: 'Jessica Pratt',
+  album_title: 'On Your Own Love Again',
+  record_label: 'Drag City',
+  request_flag: false,
+  rotation_bin: null,
 };
 
-const talksetEntry = {
+const juanaMolinaRow = {
+  id: 2602249,
+  entry_type: 'track',
+  add_time: new Date('2026-07-28T20:41:08.000Z'),
+  radio_hour: null,
+  track_title: 'la paradoja',
+  artist_name: 'Juana Molina',
+  album_title: 'DOGA',
+  record_label: 'Sonamos',
+  request_flag: true,
+  rotation_bin: 'M',
+};
+
+const talksetRow = {
   id: 2602247,
-  chronOrderID: 171606008,
-  hour: 1775080800000,
-  timeCreated: 1775082820391,
-  entryType: 'talkset' as const,
+  entry_type: 'talkset',
+  add_time: new Date('2026-07-28T20:33:40.000Z'),
+  radio_hour: null,
+  track_title: null,
+  artist_name: null,
+  album_title: null,
+  record_label: null,
+  request_flag: null,
+  rotation_bin: null,
 };
 
-const breakpointEntry = {
+const djJoinRow = {
+  id: 2602246,
+  entry_type: 'dj_join',
+  add_time: new Date('2026-07-28T20:30:00.000Z'),
+  radio_hour: null,
+  track_title: null,
+  artist_name: null,
+  album_title: null,
+  record_label: null,
+  request_flag: null,
+  rotation_bin: null,
+};
+
+const djLeaveRow = { ...djJoinRow, id: 2602245, entry_type: 'dj_leave' };
+const messageRow = { ...djJoinRow, id: 2602244, entry_type: 'message' };
+
+const breakpointRow = {
   id: 2602238,
-  chronOrderID: 171605047,
-  hour: 1775077200000,
-  timeCreated: 1775076979166,
-  entryType: 'breakpoint' as const,
+  entry_type: 'breakpoint',
+  // Logged ~1 min before the top of the hour, per schema.ts's radio_hour comment.
+  add_time: new Date('2026-07-28T19:59:12.000Z'),
+  radio_hour: new Date('2026-07-28T20:00:00.000Z'),
+  track_title: null,
+  artist_name: null,
+  album_title: null,
+  record_label: null,
+  request_flag: null,
+  rotation_bin: null,
 };
 
-const showDelimiterEntry = {
-  id: 2602200,
-  chronOrderID: 171605000,
-  hour: 1775073600000,
-  timeCreated: 1775073600000,
-  entryType: 'showDelimiter' as const,
+const legacyBreakpointRowNoRadioHour = {
+  ...breakpointRow,
+  id: 2602237,
+  radio_hour: null, // pre-backfill row
 };
+
+const showStartRow = {
+  id: 2602200,
+  entry_type: 'show_start',
+  add_time: new Date('2026-07-28T18:00:00.000Z'),
+  radio_hour: null,
+  track_title: null,
+  artist_name: null,
+  album_title: null,
+  record_label: null,
+  request_flag: null,
+  rotation_bin: null,
+};
+
+const showEndRow = { ...showStartRow, id: 2602199, entry_type: 'show_end' };
 
 // --- Tests ---
 
 describe('playlist-proxy.service', () => {
   beforeEach(() => {
-    resetState();
     jest.clearAllMocks();
-    // Reset the db chain mocks
     mockSelect.mockReturnValue(mockDbChain);
     mockFrom.mockReturnValue(mockDbChain);
+    mockLeftJoin.mockReturnValue(mockDbChain);
     mockInnerJoin.mockReturnValue(mockDbChain);
     mockWhere.mockReturnValue(mockDbChain);
-    mockGroupBy.mockResolvedValue([]); // batch enrichment default
     mockOrderBy.mockReturnValue(mockDbChain);
-    mockLimit.mockResolvedValue([]); // single enrichment default
+    mockGroupBy.mockResolvedValue([]); // artwork query default: no matches
+    mockLimit.mockResolvedValue([]); // main entries query default: empty
   });
 
-  describe('isConnected', () => {
-    it('returns false before init event is processed', () => {
-      expect(isConnected()).toBe(false);
-    });
+  describe('getRecentEntries — grouping and entry_type mapping', () => {
+    it('maps track rows to playcuts', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
 
-    it('returns true after init event is processed', async () => {
-      await processInitEvent(JSON.stringify([ninaSimoneEntry, talksetEntry, breakpointEntry]));
-      expect(isConnected()).toBe(true);
-    });
-  });
+      const result = await getRecentEntries(50);
 
-  describe('processInitEvent', () => {
-    it('parses init event into grouped response', async () => {
-      await processInitEvent(JSON.stringify([ninaSimoneEntry, talksetEntry, breakpointEntry]));
-
-      const result = getRecentEntries(50);
       expect(result.playcuts).toHaveLength(1);
+      expect(result.playcuts[0].songTitle).toBe('Back, Baby');
+      expect(result.playcuts[0].artistName).toBe('Jessica Pratt');
+      expect(result.playcuts[0].releaseTitle).toBe('On Your Own Love Again');
+      expect(result.playcuts[0].labelName).toBe('Drag City');
+    });
+
+    it('maps talkset rows to talksets', async () => {
+      mockLimit.mockResolvedValue([talksetRow]);
+
+      const result = await getRecentEntries(50);
+
       expect(result.talksets).toHaveLength(1);
-      expect(result.breakpoints).toHaveLength(1);
-    });
-
-    it('flattens playcut nested object to top level', async () => {
-      await processInitEvent(JSON.stringify([ninaSimoneEntry]));
-
-      const result = getRecentEntries(50);
-      const playcut = result.playcuts[0];
-      expect(playcut.songTitle).toBe('I Shall Be Released');
-      expect(playcut.artistName).toBe('Nina Simone');
-      expect(playcut.releaseTitle).toBe('Best of');
-      expect(playcut.labelName).toBe('BMG');
-      expect(playcut.request).toBe('false');
-      expect(playcut.rotation).toBe('false');
-    });
-
-    it('preserves base fields on playcuts', async () => {
-      await processInitEvent(JSON.stringify([ninaSimoneEntry]));
-
-      const result = getRecentEntries(50);
-      const playcut = result.playcuts[0];
-      expect(playcut.id).toBe(2602249);
-      expect(playcut.chronOrderID).toBe(171606010);
-      expect(playcut.hour).toBe(1775080800000);
-      expect(playcut.timeCreated).toBe(1775082908948);
-    });
-
-    it('preserves talkset fields unchanged', async () => {
-      await processInitEvent(JSON.stringify([talksetEntry]));
-
-      const result = getRecentEntries(50);
       expect(result.talksets[0]).toEqual({
         id: 2602247,
-        chronOrderID: 171606008,
-        hour: 1775080800000,
-        timeCreated: 1775082820391,
+        chronOrderID: 2602247,
+        hour: new Date('2026-07-28T20:00:00.000Z').getTime(),
+        timeCreated: talksetRow.add_time.getTime(),
       });
     });
 
-    it('preserves breakpoint fields unchanged', async () => {
-      await processInitEvent(JSON.stringify([breakpointEntry]));
+    it('maps dj_join, dj_leave, and message rows to talksets (mirrors mapEntryToTubafrenzy flowsheetEntryType=7)', async () => {
+      mockLimit.mockResolvedValue([djJoinRow, djLeaveRow, messageRow]);
 
-      const result = getRecentEntries(50);
-      expect(result.breakpoints[0]).toEqual({
-        id: 2602238,
-        chronOrderID: 171605047,
-        hour: 1775077200000,
-        timeCreated: 1775076979166,
-      });
+      const result = await getRecentEntries(50);
+
+      expect(result.talksets).toHaveLength(3);
+      expect(result.talksets.map((t) => t.id)).toEqual(
+        expect.arrayContaining([djJoinRow.id, djLeaveRow.id, messageRow.id])
+      );
     });
 
-    it('omits showDelimiter entries', async () => {
-      await processInitEvent(JSON.stringify([ninaSimoneEntry, showDelimiterEntry, talksetEntry, breakpointEntry]));
+    it('maps breakpoint rows to breakpoints', async () => {
+      mockLimit.mockResolvedValue([breakpointRow]);
 
-      const result = getRecentEntries(50);
+      const result = await getRecentEntries(50);
+
+      expect(result.breakpoints).toHaveLength(1);
+      expect(result.breakpoints[0].id).toBe(2602238);
+    });
+
+    it('omits show_start and show_end rows entirely (showDelimiter, matching tubafrenzy v=2 wire contract)', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow, showStartRow, talksetRow, breakpointRow, showEndRow]);
+
+      const result = await getRecentEntries(50);
+
       expect(result.playcuts).toHaveLength(1);
       expect(result.talksets).toHaveLength(1);
       expect(result.breakpoints).toHaveLength(1);
     });
 
-    it('enriches playcuts with artwork from DB', async () => {
-      mockGroupBy.mockResolvedValue([{ key: 'nina simone-best of', artwork_url: 'https://i.discogs.com/nina.jpg' }]);
+    it('queries the most recent MAX_ENTRIES (200) rows ordered by flowsheet.id DESC', async () => {
+      await getRecentEntries(50);
 
-      await processInitEvent(JSON.stringify([ninaSimoneEntry]));
-
-      const result = getRecentEntries(50);
-      expect(result.playcuts[0].artworkURL).toBe('https://i.discogs.com/nina.jpg');
-    });
-
-    it('handles entries with no metadata match (artworkURL omitted)', async () => {
-      mockGroupBy.mockResolvedValue([]);
-
-      await processInitEvent(JSON.stringify([ninaSimoneEntry]));
-
-      const result = getRecentEntries(50);
-      expect(result.playcuts[0].artworkURL).toBeUndefined();
-    });
-
-    it('preserves existing artwork when DB fails on re-init', async () => {
-      // First init succeeds with artwork
-      mockGroupBy.mockResolvedValue([{ key: 'nina simone-best of', artwork_url: 'https://i.discogs.com/nina.jpg' }]);
-      await processInitEvent(JSON.stringify([ninaSimoneEntry]));
-      expect(getRecentEntries(50).playcuts[0].artworkURL).toBe('https://i.discogs.com/nina.jpg');
-
-      // Second init: DB fails — existing artwork should be preserved
-      mockGroupBy.mockRejectedValue(new Error('DB connection lost'));
-      await processInitEvent(JSON.stringify([ninaSimoneEntry]));
-
-      const result = getRecentEntries(50);
-      expect(result.playcuts[0].artworkURL).toBe('https://i.discogs.com/nina.jpg');
+      expect(mockOrderBy).toHaveBeenCalled();
+      expect(mockLimit).toHaveBeenCalledWith(200);
     });
   });
 
-  describe('processCreatedEvent', () => {
-    it('adds a new playcut entry', async () => {
-      await processInitEvent(JSON.stringify([ninaSimoneEntry, talksetEntry]));
-      await processCreatedEvent(JSON.stringify(juanaMolinaEntry));
-
-      const result = getRecentEntries(50);
-      expect(result.playcuts).toHaveLength(2);
-      expect(result.playcuts.some((p) => p.artistName === 'Juana Molina')).toBe(true);
-    });
-
-    it('adds a new talkset entry', async () => {
-      await processInitEvent(JSON.stringify([ninaSimoneEntry]));
-      const newTalkset = { ...talksetEntry, id: 9999, chronOrderID: 999999 };
-      await processCreatedEvent(JSON.stringify(newTalkset));
-
-      const result = getRecentEntries(50);
-      expect(result.talksets).toHaveLength(1);
-      expect(result.talksets[0].id).toBe(9999);
-    });
-
-    it('caps entries at MAX_ENTRIES (200) and trims oldest', async () => {
-      // Init with 200 entries (at capacity)
-      const initEntries = Array.from({ length: 200 }, (_, i) => ({
-        ...ninaSimoneEntry,
-        id: 1000 + i,
-        chronOrderID: 100000 + i,
-        timeCreated: 1775082908948 + i,
+  describe('getRecentEntries — playcut slicing vs. unsliced talksets/breakpoints', () => {
+    it('slices playcuts to n but returns all talksets/breakpoints found in the window', async () => {
+      const manyPlaycuts = Array.from({ length: 10 }, (_, i) => ({
+        ...jessicaPrattRow,
+        id: 3000 + i,
       }));
-      await processInitEvent(JSON.stringify(initEntries));
+      mockLimit.mockResolvedValue([...manyPlaycuts, talksetRow, breakpointRow]);
 
-      // Add one more — should trim the oldest
-      const newEntry = { ...juanaMolinaEntry, id: 9999, chronOrderID: 999999 };
-      await processCreatedEvent(JSON.stringify(newEntry));
+      const result = await getRecentEntries(3);
 
-      const result = getRecentEntries(200);
-      expect(result.playcuts).toHaveLength(200);
-      // Newest should be first
-      expect(result.playcuts[0].artistName).toBe('Juana Molina');
-      // Last entry from init array (id: 1199) should have been trimmed
-      expect(result.playcuts.some((p) => p.id === 1199)).toBe(false);
-    });
-
-    it('enriches newly created playcuts with artwork', async () => {
-      await processInitEvent(JSON.stringify([talksetEntry]));
-
-      mockLimit.mockResolvedValue([{ artwork_url: 'https://i.discogs.com/juana.jpg' }]);
-
-      await processCreatedEvent(JSON.stringify(juanaMolinaEntry));
-
-      const result = getRecentEntries(50);
-      const juana = result.playcuts.find((p) => p.artistName === 'Juana Molina');
-      expect(juana?.artworkURL).toBe('https://i.discogs.com/juana.jpg');
-    });
-  });
-
-  describe('processDeletedEvent', () => {
-    it('removes an entry by id', async () => {
-      await processInitEvent(JSON.stringify([ninaSimoneEntry, talksetEntry, breakpointEntry]));
-      processDeletedEvent(JSON.stringify({ id: ninaSimoneEntry.id }));
-
-      const result = getRecentEntries(50);
-      expect(result.playcuts).toHaveLength(0);
-      expect(result.talksets).toHaveLength(1);
-      expect(result.breakpoints).toHaveLength(1);
-    });
-
-    it('removes a talkset entry by id', async () => {
-      await processInitEvent(JSON.stringify([talksetEntry, breakpointEntry]));
-      processDeletedEvent(JSON.stringify({ id: talksetEntry.id }));
-
-      const result = getRecentEntries(50);
-      expect(result.talksets).toHaveLength(0);
-    });
-
-    it('handles deletion of non-existent entry gracefully', async () => {
-      await processInitEvent(JSON.stringify([ninaSimoneEntry]));
-      processDeletedEvent(JSON.stringify({ id: 99999 }));
-
-      const result = getRecentEntries(50);
-      expect(result.playcuts).toHaveLength(1);
-    });
-  });
-
-  describe('processUpdatedEvent', () => {
-    it('replaces an existing entry', async () => {
-      await processInitEvent(JSON.stringify([ninaSimoneEntry, talksetEntry]));
-
-      const updatedEntry = {
-        ...ninaSimoneEntry,
-        playcut: {
-          ...ninaSimoneEntry.playcut,
-          songTitle: 'Feeling Good',
-        },
-      };
-
-      await processUpdatedEvent(JSON.stringify(updatedEntry));
-
-      const result = getRecentEntries(50);
-      expect(result.playcuts).toHaveLength(1);
-      expect(result.playcuts[0].songTitle).toBe('Feeling Good');
-    });
-
-    it('enriches updated playcuts with artwork', async () => {
-      await processInitEvent(JSON.stringify([ninaSimoneEntry]));
-
-      mockLimit.mockResolvedValue([{ artwork_url: 'https://i.discogs.com/updated.jpg' }]);
-
-      await processUpdatedEvent(JSON.stringify(ninaSimoneEntry));
-
-      const result = getRecentEntries(50);
-      expect(result.playcuts[0].artworkURL).toBe('https://i.discogs.com/updated.jpg');
-    });
-  });
-
-  describe('getRecentEntries', () => {
-    it('slices results to n', async () => {
-      const entries = Array.from({ length: 10 }, (_, i) => ({
-        ...ninaSimoneEntry,
-        id: 1000 + i,
-        chronOrderID: 100000 + i,
-        timeCreated: 1775082908948 + i,
-      }));
-
-      await processInitEvent(JSON.stringify(entries));
-
-      const result = getRecentEntries(3);
       expect(result.playcuts).toHaveLength(3);
+      expect(result.talksets).toHaveLength(1);
+      expect(result.breakpoints).toHaveLength(1);
     });
 
-    it('returns empty groups when not connected', () => {
-      const result = getRecentEntries(50);
+    it('keeps the most recent playcuts first (rows already arrive DESC by id)', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow, juanaMolinaRow]);
+
+      const result = await getRecentEntries(1);
+
+      expect(result.playcuts).toHaveLength(1);
+      expect(result.playcuts[0].id).toBe(jessicaPrattRow.id);
+    });
+
+    it('returns empty groups when the table has no recent rows', async () => {
+      mockLimit.mockResolvedValue([]);
+
+      const result = await getRecentEntries(50);
+
       expect(result.playcuts).toEqual([]);
       expect(result.talksets).toEqual([]);
       expect(result.breakpoints).toEqual([]);
     });
   });
 
+  describe('getRecentEntries — id-derived chronOrderID/timeCreated', () => {
+    it('uses flowsheet.id for both id and chronOrderID (globally monotonic, matches flowsheet.service.ts convention)', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+
+      const result = await getRecentEntries(50);
+
+      expect(result.playcuts[0].id).toBe(jessicaPrattRow.id);
+      expect(result.playcuts[0].chronOrderID).toBe(jessicaPrattRow.id);
+    });
+
+    it('uses add_time epoch ms for timeCreated', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+
+      const result = await getRecentEntries(50);
+
+      expect(result.playcuts[0].timeCreated).toBe(jessicaPrattRow.add_time.getTime());
+    });
+  });
+
+  describe('getRecentEntries — hour computation', () => {
+    it('floors add_time to the top of the hour for track rows (mirrors mapEntryToTubafrenzy radioHour formula)', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+
+      const result = await getRecentEntries(50);
+
+      expect(result.playcuts[0].hour).toBe(new Date('2026-07-28T20:00:00.000Z').getTime());
+    });
+
+    it('uses flowsheet.radio_hour verbatim for breakpoints when present (BS#1448/#1449 — flooring add_time would round to the prior hour)', async () => {
+      mockLimit.mockResolvedValue([breakpointRow]);
+
+      const result = await getRecentEntries(50);
+
+      expect(result.breakpoints[0].hour).toBe(breakpointRow.radio_hour.getTime());
+      // add_time (19:59:12) floors to 19:00, which would be WRONG for this row.
+      expect(result.breakpoints[0].hour).not.toBe(new Date('2026-07-28T19:00:00.000Z').getTime());
+    });
+
+    it('falls back to floor(add_time) for breakpoints with no radio_hour (pre-backfill rows)', async () => {
+      mockLimit.mockResolvedValue([legacyBreakpointRowNoRadioHour]);
+
+      const result = await getRecentEntries(50);
+
+      expect(result.breakpoints[0].hour).toBe(new Date('2026-07-28T19:00:00.000Z').getTime());
+    });
+  });
+
+  describe('getRecentEntries — rotation/request string coercion', () => {
+    // Preserving the legacy tubafrenzy wire-format quirk: rotation/request
+    // are "true"/"false" STRINGS, not booleans (see PR description).
+    it('emits rotation as the string "true" when rotation_bin is non-null', async () => {
+      mockLimit.mockResolvedValue([juanaMolinaRow]);
+
+      const result = await getRecentEntries(50);
+
+      expect(result.playcuts[0].rotation).toBe('true');
+      expect(typeof result.playcuts[0].rotation).toBe('string');
+    });
+
+    it('emits rotation as the string "false" when rotation_bin is null', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+
+      const result = await getRecentEntries(50);
+
+      expect(result.playcuts[0].rotation).toBe('false');
+    });
+
+    it('emits request as the string "true"/"false" from request_flag', async () => {
+      mockLimit.mockResolvedValue([juanaMolinaRow, jessicaPrattRow]);
+
+      const result = await getRecentEntries(50);
+
+      const juana = result.playcuts.find((p) => p.artistName === 'Juana Molina');
+      const jessica = result.playcuts.find((p) => p.artistName === 'Jessica Pratt');
+      expect(juana?.request).toBe('true');
+      expect(typeof juana?.request).toBe('string');
+      expect(jessica?.request).toBe('false');
+    });
+  });
+
+  describe('getRecentEntries — artwork enrichment', () => {
+    it('enriches playcuts with artwork from DB', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockGroupBy.mockResolvedValue([
+        { key: 'jessica pratt-on your own love again', artwork_url: 'https://i.discogs.com/jessica.jpg' },
+      ]);
+
+      const result = await getRecentEntries(50);
+
+      expect(result.playcuts[0].artworkURL).toBe('https://i.discogs.com/jessica.jpg');
+    });
+
+    it('omits artworkURL when there is no metadata match', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockGroupBy.mockResolvedValue([]);
+
+      const result = await getRecentEntries(50);
+
+      expect(result.playcuts[0].artworkURL).toBeUndefined();
+    });
+
+    it('degrades to no artwork (rather than throwing) when the artwork query fails', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockGroupBy.mockRejectedValue(new Error('DB connection lost'));
+
+      const result = await getRecentEntries(50);
+
+      expect(result.playcuts[0].artworkURL).toBeUndefined();
+    });
+
+    it('does not query artwork at all when there are no playcuts', async () => {
+      mockLimit.mockResolvedValue([talksetRow, breakpointRow]);
+
+      await getRecentEntries(50);
+
+      expect(mockGroupBy).not.toHaveBeenCalled();
+    });
+
+    it('only enriches the sliced playcuts, not the full 200-row window', async () => {
+      const manyPlaycuts = Array.from({ length: 10 }, (_, i) => ({
+        ...jessicaPrattRow,
+        id: 4000 + i,
+      }));
+      mockLimit.mockResolvedValue(manyPlaycuts);
+      mockGroupBy.mockResolvedValue([]);
+
+      await getRecentEntries(3);
+
+      // inArray(flowsheetLookupKey, keys) is the first arg passed through
+      // `and(...)` to `.where(...)` — drizzle-orm is mocked, so we can only
+      // assert the query executed once (batched), not literally introspect
+      // the key list through the mocked `and`/`inArray`.
+      expect(mockGroupBy).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('artwork query: partial-index alignment (regression for #511, BS#1012)', () => {
     // The post-D5 partial functional index `flowsheet_album_link_lookup_idx`
     // (migration 0081) only covers rows where `album_id IS NOT NULL`. The
-    // playlist-proxy queries an INNER JOIN of flowsheet ⨝ album_metadata,
-    // which drops `flowsheet.album_id IS NULL` rows naturally and therefore
-    // matches the partial-index predicate so the lookup_key probe is an
-    // index scan instead of a 2.6M-row seq scan (incident #511).
+    // artwork query INNER JOINs flowsheet ⨝ album_metadata, which drops
+    // `flowsheet.album_id IS NULL` rows naturally and therefore matches the
+    // partial-index predicate so the lookup_key probe is an index scan
+    // instead of a 2.6M-row seq scan (incident #511).
     //
-    // Source-grep over the deployed file is the right shape because the
-    // bug class is a *missing* clause in the SQL builder. A behavioural test
-    // wouldn't catch a future regression where someone adds a new query
-    // path without the join + filter; the source-grep does.
+    // Source-grep over the deployed file is the right shape because the bug
+    // class is a *missing* clause in the SQL builder. A behavioural test
+    // wouldn't catch a future regression where someone adds a new query path
+    // without the join + filter; the source-grep does.
     const fs = jest.requireActual<typeof import('fs')>('fs');
     const path = jest.requireActual<typeof import('path')>('path');
 
@@ -437,28 +475,26 @@ describe('playlist-proxy.service', () => {
       'utf-8'
     );
 
-    it('imports `and`, `isNotNull`, and `eq` from drizzle-orm', () => {
+    it('imports `and`, `isNotNull`, `eq`, and `desc` from drizzle-orm', () => {
       expect(proxySource).toMatch(/from\s+'drizzle-orm'/);
       expect(proxySource).toMatch(/\band\b/);
       expect(proxySource).toMatch(/\bisNotNull\b/);
       expect(proxySource).toMatch(/\beq\b/);
+      expect(proxySource).toMatch(/\bdesc\b/);
     });
 
-    it('imports album_metadata alongside flowsheet from @wxyc/database', () => {
+    it('imports album_metadata, rotation, library, and artists alongside flowsheet from @wxyc/database', () => {
       expect(proxySource).toMatch(/from\s+'@wxyc\/database'/);
       expect(proxySource).toMatch(/\balbum_metadata\b/);
+      expect(proxySource).toMatch(/\brotation\b/);
+      expect(proxySource).toMatch(/\blibrary\b/);
+      expect(proxySource).toMatch(/\bartists\b/);
     });
 
-    it('every flowsheet artwork SELECT inner-joins album_metadata on album_id and filters isNotNull(album_metadata.artwork_url)', () => {
-      // Find every WHERE that targets the flowsheetLookupKey-on-flowsheet
-      // pattern. Each must be paired with an `.innerJoin(album_metadata, ...)`
-      // upstream in the same chain and combined with
-      // `isNotNull(album_metadata.artwork_url)` so the partial index fires.
-      // Two call sites exist today (enrichPlaycuts, enrichSinglePlaycut); any
-      // future addition should match the same shape.
-      const chains = proxySource.match(/db\s*\.\s*select[\s\S]*?\.\s*(?:groupBy|limit)\([\s\S]*?\)\s*;/g) ?? [];
+    it('the flowsheet artwork SELECT inner-joins album_metadata on album_id and filters isNotNull(album_metadata.artwork_url)', () => {
+      const chains = proxySource.match(/db\s*\.\s*select[\s\S]*?\.\s*groupBy\([\s\S]*?\)\s*;/g) ?? [];
       const artworkChains = chains.filter((c) => /flowsheetLookupKey/.test(c));
-      expect(artworkChains.length).toBeGreaterThanOrEqual(2);
+      expect(artworkChains.length).toBe(1);
       for (const chain of artworkChains) {
         expect(chain).toMatch(
           /\.innerJoin\(\s*album_metadata\s*,\s*eq\(\s*album_metadata\.album_id\s*,\s*flowsheet\.album_id\s*\)\s*\)/
@@ -474,16 +510,21 @@ describe('playlist-proxy.service', () => {
       // on a missing column.
       expect(proxySource).not.toMatch(/flowsheet\.artwork_url/);
     });
+  });
 
-    it('enrichPlaycuts groups by lookup key alone and aggregates artwork_url deterministically by lowest album_id (BS#1105)', () => {
-      // Split-format albums (BS#1105): multiple library rows — and therefore
-      // multiple album_metadata rows — can share one flowsheetLookupKey.
-      // Grouping by (key, artwork_url) as before lets the GROUP BY emit one
-      // row per distinct artwork_url for the same key, and Map.set's
-      // last-write-wins made the pick depend on unspecified row order.
-      // The fix groups by the key alone and folds candidates through
-      // array_agg ordered by album_id ascending, taking the first element —
-      // deterministically the lowest album_id's artwork.
+  describe('artwork tie-break: split-format albums (BS#1105)', () => {
+    // Preserved verbatim from the pre-Phase-3 implementation (commit
+    // d0b8317d, closes #1105). See enrichPlaycuts' docstring in the service
+    // file for the full rationale.
+    const fs = jest.requireActual<typeof import('fs')>('fs');
+    const path = jest.requireActual<typeof import('path')>('path');
+
+    const proxySource = fs.readFileSync(
+      path.resolve(__dirname, '../../../apps/backend/services/playlist-proxy.service.ts'),
+      'utf-8'
+    );
+
+    it('groups by lookup key alone and aggregates artwork_url deterministically by lowest album_id', () => {
       const chains = proxySource.match(/db\s*\.\s*select[\s\S]*?\.\s*groupBy\([\s\S]*?\)\s*;/g) ?? [];
       const batchChain = chains.find((c) => /flowsheetLookupKey/.test(c));
       expect(batchChain).toBeDefined();
@@ -494,45 +535,15 @@ describe('playlist-proxy.service', () => {
       );
     });
 
-    it('enrichSinglePlaycut orders by album_id ascending before limit(1) (BS#1105)', () => {
-      // Without an ORDER BY, `.limit(1)` on a multi-row match (split-format
-      // album) picks whichever row the planner happens to scan first — the
-      // same non-determinism as enrichPlaycuts, just via LIMIT instead of
-      // GROUP BY. Pin it to the same lowest-album_id tie-break.
-      const chains = proxySource.match(/db\s*\.\s*select[\s\S]*?\.\s*limit\([\s\S]*?\)\s*;/g) ?? [];
-      const singleChain = chains.find((c) => /flowsheetLookupKey/.test(c));
-      expect(singleChain).toBeDefined();
-      expect(singleChain).toMatch(/\.orderBy\(\s*asc\(\s*album_metadata\.album_id\s*\)\s*\)/);
-      // orderBy must precede limit in the chain, not just appear somewhere in it.
-      const orderByIdx = singleChain.indexOf('.orderBy(');
-      const limitIdx = singleChain.indexOf('.limit(');
-      expect(orderByIdx).toBeGreaterThan(-1);
-      expect(orderByIdx).toBeLessThan(limitIdx);
-    });
+    it('behaviorally resolves the artwork the mocked tie-break query returns onto the matching playcut', async () => {
+      mockLimit.mockResolvedValue([juanaMolinaRow]);
+      mockGroupBy.mockResolvedValue([
+        { key: 'juana molina-doga', artwork_url: 'https://i.discogs.com/lowest-album-id.jpg' },
+      ]);
 
-    it('imports `asc` from drizzle-orm for the single-playcut tie-break', () => {
-      expect(proxySource).toMatch(/\basc\b/);
-    });
-  });
+      const result = await getRecentEntries(50);
 
-  describe('artwork tie-break: split-format albums (BS#1105)', () => {
-    // Behavioral coverage of the tie-break contract at the drizzle-builder
-    // boundary: enrichSinglePlaycut's query chain must route through
-    // orderBy before limit(1) resolves. The real determinism guarantee (that
-    // Postgres actually returns the lowest album_id's row first) is a SQL
-    // property covered by the real-Postgres integration spec
-    // (tests/integration/playlist-proxy-artwork-tiebreak.spec.js); this mock
-    // can only assert the builder wires orderBy into the chain at all.
-    it('enrichSinglePlaycut calls orderBy before resolving limit(1)', async () => {
-      mockLimit.mockResolvedValue([{ artwork_url: 'https://i.discogs.com/lowest-album-id.jpg' }]);
-
-      await processInitEvent(JSON.stringify([talksetEntry]));
-      await processCreatedEvent(JSON.stringify(juanaMolinaEntry));
-
-      expect(mockOrderBy).toHaveBeenCalled();
-      const result = getRecentEntries(50);
-      const juana = result.playcuts.find((p) => p.artistName === 'Juana Molina');
-      expect(juana?.artworkURL).toBe('https://i.discogs.com/lowest-album-id.jpg');
+      expect(result.playcuts[0].artworkURL).toBe('https://i.discogs.com/lowest-album-id.jpg');
     });
   });
 });

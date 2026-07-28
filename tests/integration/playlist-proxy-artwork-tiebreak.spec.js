@@ -2,17 +2,16 @@
  * Integration test for the playlist-proxy artwork tie-break contract
  * (BS#1105), against a REAL Postgres.
  *
- * `enrichPlaycuts` / `enrichSinglePlaycut` in
- * `apps/backend/services/playlist-proxy.service.ts` join `flowsheet` to
- * `album_metadata` via `flowsheet.album_id`. Per the `library` schema
- * comment (`shared/database/src/schema.ts`, "Multiple library rows pointing
- * at the same (artists.id, album_title)"), the legacy library is
- * per-physical-format: a CD and an LP issue of the same album are distinct
- * `library` rows, each with its own `album_metadata.artwork_url`. Before the
- * fix, the batch query grouped by `(flowsheetLookupKey, artwork_url)` and
- * the single-entry query had no `ORDER BY` before `LIMIT 1` — both let
- * Postgres row order (unspecified without an explicit ORDER BY) decide
- * which format's artwork won, non-deterministically across runs.
+ * `enrichPlaycuts` in `apps/backend/services/playlist-proxy.service.ts`
+ * joins `flowsheet` to `album_metadata` via `flowsheet.album_id`. Per the
+ * `library` schema comment (`shared/database/src/schema.ts`, "Multiple
+ * library rows pointing at the same (artists.id, album_title)"), the legacy
+ * library is per-physical-format: a CD and an LP issue of the same album are
+ * distinct `library` rows, each with its own `album_metadata.artwork_url`.
+ * Before the fix (commit d0b8317d, closes #1105), the batch query grouped by
+ * `(flowsheetLookupKey, artwork_url)`, which let Postgres row order
+ * (unspecified without an explicit tie-break) decide which format's artwork
+ * won, non-deterministically across runs.
  *
  * DECISION: tie-break = lowest `album_id` wins. This spec mirrors the fixed
  * SQL directly (pure SQL, no TS import — the integration runner is
@@ -21,9 +20,22 @@
  * responsibility). When the service's query shape changes, this SQL must
  * follow.
  *
+ * Phase 3 of the tubafrenzy decommission (WXYC/wiki#88) replaced the
+ * SSE-fed in-memory store with a direct Postgres query for
+ * `getRecentEntries`, but `enrichPlaycuts`'s artwork query shape — and
+ * therefore this spec's mirrored SQL — is UNCHANGED: the same batch
+ * lookup-key query, reused verbatim, now enriches the candidates
+ * `getRecentEntries` fetches on each call instead of the SSE-derived
+ * in-memory buffer. The single-entry `enrichSinglePlaycut` path (a separate
+ * `ORDER BY album_id ASC LIMIT 1` query, previously used for incremental
+ * SSE `created`/`updated` events) no longer exists — there is no more
+ * incremental event stream to enrich a single new entry from, so that
+ * query shape (and its mirrored `singleQuery` coverage here) was removed
+ * rather than adapted.
+ *
  * Unit coverage (`tests/unit/services/playlist-proxy.service.test.ts`)
- * covers the Drizzle builder shape (array_agg/orderBy wiring); this spec
- * covers the actual PostgreSQL non-determinism this fixes.
+ * covers the Drizzle builder shape (array_agg wiring); this spec covers the
+ * actual PostgreSQL non-determinism this fixes.
  *
  * Probe rows live in the reserved 7150-range, reusing fixture artist 7000
  * ('XA'), genre 11 ('Rock'), format 1 ('cd') — see
@@ -90,22 +102,6 @@ async function batchQuery(sql, keys) {
   `;
 }
 
-/**
- * Mirror of the FIXED `enrichSinglePlaycut` query: same JOIN + filter,
- * explicit ORDER BY album_id ASC before LIMIT 1.
- */
-async function singleQuery(sql, key) {
-  return sql`
-    SELECT am.artwork_url AS "artwork_url"
-    FROM ${sql(SCHEMA)}.flowsheet f
-    INNER JOIN ${sql(SCHEMA)}.album_metadata am ON am.album_id = f.album_id
-    WHERE (lower(trim(f.artist_name)) || '-' || lower(trim(coalesce(f.album_title, '')))) = ${key}
-      AND am.artwork_url IS NOT NULL
-    ORDER BY am.album_id ASC
-    LIMIT 1
-  `;
-}
-
 /** Mirror of the PRE-FIX batch query (grouped by key + artwork_url, no tie-break). */
 async function preFixBatchQuery(sql, keys) {
   return sql`
@@ -168,14 +164,5 @@ describe('playlist-proxy artwork tie-break for split-format albums (real PG, BS#
     expect(first[0].artwork_url).toBe(CD_ARTWORK);
     expect(second[0].artwork_url).toBe(CD_ARTWORK);
     expect(third[0].artwork_url).toBe(CD_ARTWORK);
-  });
-
-  it('fixed single-entry query (ORDER BY + LIMIT 1) returns the lowest album_id row deterministically', async () => {
-    const first = await singleQuery(sql, LOOKUP_KEY);
-    const second = await singleQuery(sql, LOOKUP_KEY);
-
-    expect(first).toHaveLength(1);
-    expect(first[0].artwork_url).toBe(CD_ARTWORK);
-    expect(second[0].artwork_url).toBe(CD_ARTWORK);
   });
 });
