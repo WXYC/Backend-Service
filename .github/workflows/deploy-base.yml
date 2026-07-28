@@ -344,7 +344,7 @@ jobs:
       # caching is an optimization, not on the deploy critical path.
       - name: Build and Push Image
         if: steps.check_image.outputs.image_exists == 'false'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.${{ matrix.target }}
