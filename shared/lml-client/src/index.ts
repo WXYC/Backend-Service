@@ -364,15 +364,49 @@ function getBaseUrl(): string {
 const CALLER_BUDGET_HEADER = 'X-Caller-Budget-Ms';
 
 /**
+ * BS#1843: wire-signal prelim for BS#1819 Pass 2. Forwards the BS-internal
+ * `resolveLmlPolicy(caller).class` (BS#1826, `policy.ts`) as an integer
+ * `1`-`5` so LML can eventually key lane routing/guarding off of it
+ * (WXYC/library-metadata-lookup#928). Sending this ahead of any LML-side
+ * read is inert — LML ignores unknown headers today.
+ */
+const CALLER_CLASS_HEADER = 'X-Caller-Class';
+
+/**
+ * BS#1843: companion to `CALLER_CLASS_HEADER`. Forwards the raw `caller`
+ * label itself so LML can eventually attribute per-caller telemetry
+ * (WXYC/library-metadata-lookup#931) — the read seam to mirror is LML's
+ * `lookup/router.py:431` (`Header(alias="X-Caller-Budget-Ms")`).
+ */
+const CALLER_REASON_HEADER = 'X-Caller-Reason';
+
+/**
  * Build the request headers for a `/lookup` or `/lookup/bulk` POST. Returns a
  * fresh object so callers can safely mutate. `budgetMs` becomes the
  * `CALLER_BUDGET_HEADER` value when set; absent budget means no header (LML
  * keeps the pre-A10 safety branch).
+ *
+ * BS#1843: `caller` becomes `CALLER_CLASS_HEADER` + `CALLER_REASON_HEADER`
+ * when it resolves to a REGISTERED policy via the same soft `policyForCaller`
+ * lookup `postLookup`/`bulkLookupMetadata` already use for their timeout/
+ * budget defaults (as opposed to the throwing public `resolveLmlPolicy`) —
+ * an absent OR unregistered caller (e.g. a stale/mistyped label reaching here
+ * at runtime from an un-typechecked `jobs/**` call site) omits both headers
+ * rather than crashing the request path, mirroring `policyForCaller`'s
+ * documented safe-no-op contract. Both headers are otherwise inert wire
+ * enrichment until LML reads them (see the header doc comments above).
  */
-function buildLookupHeaders(budgetMs?: number): Record<string, string> {
+function buildLookupHeaders(budgetMs?: number, caller?: LmlCaller): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (budgetMs !== undefined) {
     headers[CALLER_BUDGET_HEADER] = String(budgetMs);
+  }
+  if (caller !== undefined) {
+    const policy = policyForCaller(caller);
+    if (policy !== undefined) {
+      headers[CALLER_CLASS_HEADER] = String(policy.class);
+      headers[CALLER_REASON_HEADER] = caller;
+    }
   }
   return headers;
 }
@@ -691,7 +725,7 @@ async function postLookup(
         '/api/v1/lookup',
         {
           method: 'POST',
-          headers: buildLookupHeaders(effectiveBudgetMs),
+          headers: buildLookupHeaders(effectiveBudgetMs, options?.caller),
           body: JSON.stringify(body),
         },
         effectiveTimeoutMs
@@ -929,7 +963,7 @@ export async function bulkLookupMetadata(
         bulkPath,
         {
           method: 'POST',
-          headers: buildLookupHeaders(effectiveBudgetMs),
+          headers: buildLookupHeaders(effectiveBudgetMs, options?.caller),
           body: JSON.stringify({ items: sendItems }),
         },
         effectiveTimeoutMs

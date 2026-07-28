@@ -294,6 +294,54 @@ describe('lml.client', () => {
       expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
     });
 
+    // BS#1843: wire-signal prelim for LML#928 (lane routing) / LML#931
+    // (caller-reason telemetry). Forwarding is inert on its own — LML ignores
+    // both headers until those sub-issues land a read seam mirroring
+    // library-metadata-lookup's `lookup/router.py:431`.
+    it('BS#1843: forwards X-Caller-Class + X-Caller-Reason for a registered class-1 caller (proxy-library-search)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield', undefined, { caller: 'proxy-library-search' });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(init.headers).toMatchObject({ 'X-Caller-Class': '1', 'X-Caller-Reason': 'proxy-library-search' });
+    });
+
+    it('BS#1843: omits X-Caller-Class and X-Caller-Reason when caller is absent (byte-identical to pre-change)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Stereolab', 'Aluminum Tunes');
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
+    });
+
+    it('BS#1843: an unregistered caller string omits X-Caller-Class/X-Caller-Reason too (safe no-op, mirrors timeout/budget defaulting)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield', undefined, { caller: 'some-brand-new-caller-nobody-registered' });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      const headerKeys = Object.keys(init.headers ?? {});
+      expect(headerKeys).not.toContain('X-Caller-Class');
+      expect(headerKeys).not.toContain('X-Caller-Reason');
+    });
+
     it('projects lml.caller onto the Sentry span when caller is provided', async () => {
       mockFetch.mockResolvedValue({
         ok: true,
@@ -834,6 +882,38 @@ describe('lml.client', () => {
       const init = mockFetch.mock.calls[0][1];
       if (!init) throw new Error('mockFetch was not called with init args');
       expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+    });
+
+    // BS#1843: same wire-signal prelim as the postLookup call site above,
+    // exercised here for the ~L932 bulk call site. catalog-popularity-freetext-resolve
+    // is a real class-5 bulkLookupMetadata caller (jobs/catalog-popularity-freetext-resolve).
+    it('BS#1843: forwards X-Caller-Class + X-Caller-Reason for a registered class-5 caller (catalog-popularity-freetext-resolve)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')], { caller: 'catalog-popularity-freetext-resolve' });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(init.headers).toMatchObject({
+        'X-Caller-Class': '5',
+        'X-Caller-Reason': 'catalog-popularity-freetext-resolve',
+      });
+    });
+
+    it('BS#1843: omits X-Caller-Class and X-Caller-Reason when caller is absent (byte-identical to pre-change)', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')]);
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
     });
 
     it('BS#1826: a registered caller supplies the DEFAULT timeoutMs/budgetMs when neither is passed explicitly', async () => {
