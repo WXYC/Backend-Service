@@ -2,7 +2,7 @@ services:
   # NOTE: postgres:18.0-alpine here (and on ci-db/e2e-db/etl-pg below) is
   # newer than prod RDS (PostgreSQL 14.22) -- a known, intentional skew, not
   # drift. Migrations must target PG14 syntax regardless of what this
-  # container accepts. See docs/migrations.md#dev-ci-postgres-version-vs-prod-rds-read-before-writing-ddl
+  # container accepts. See docs/migrations.md#devci-postgres-version-vs-prod-rds-read-before-writing-ddl
   # (BS#1424).
   db:
     image: postgres:18.0-alpine
