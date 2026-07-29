@@ -64,6 +64,13 @@ function makeChain() {
       chainSpy.limit(...args);
       return Promise.resolve(resolveValue);
     },
+    // The batched critic-reviews query (lookupCriticReviewsByAlbumIds) has no
+    // terminal `.limit(...)` — it caps per-album in JS — so the chain itself
+    // must be awaitable at the `.orderBy(...)` step, mirroring the real
+    // drizzle query builder (every step is thenable, not just the one after
+    // an explicit `.limit()`).
+    then: (resolve: (value: Array<Record<string, unknown>>) => void, reject?: (reason?: unknown) => void) =>
+      Promise.resolve(resolveValue).then(resolve, reject),
   };
   resolveValue = mockRowsQueue.shift() ?? [];
   return chain;
@@ -118,6 +125,7 @@ jest.mock('@wxyc/database', () => ({
 import {
   lookupAlbumMetadataById,
   lookupCriticReviewsByAlbumId,
+  lookupCriticReviewsByAlbumIds,
 } from '../../../apps/backend/services/album-metadata-lookup.service';
 
 describe('album-metadata-lookup.service', () => {
@@ -312,6 +320,100 @@ describe('album-metadata-lookup.service', () => {
       // Pin that the reviews query carries an ORDER BY (the newest-first +
       // stable-tiebreak contract) rather than relying on insertion order.
       expect(chainSpy.orderBy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('lookupCriticReviewsByAlbumIds (batched, BS#1870)', () => {
+    // Batched sibling backing flowsheet feed-assembly's attachCriticReviews:
+    // one query for a whole page's album_ids, grouped + capped in JS, reusing
+    // the same wire projection as the single-album lookup above.
+
+    it('returns an empty map and never touches the DB when albumIds is empty', async () => {
+      const result = await lookupCriticReviewsByAlbumIds([]);
+      expect(result).toEqual(new Map());
+      expect(mockSelect).not.toHaveBeenCalled();
+    });
+
+    it('returns an empty map when no rows match any requested album_id', async () => {
+      mockRowsQueue.push([]);
+      const result = await lookupCriticReviewsByAlbumIds([42, 99]);
+      expect(result).toEqual(new Map());
+      expect(mockSelect).toHaveBeenCalledTimes(1);
+      // Single indexed query for the whole batch — the no-N+1 guarantee.
+      expect(chainSpy.where).toHaveBeenCalledTimes(1);
+    });
+
+    it('groups rows by album_id and projects each onto the wire shape', async () => {
+      mockRowsQueue.push([
+        {
+          album_id: 501,
+          source: 'The Quietus',
+          source_url: 'https://thequietus.com/articles/juana-molina-doga',
+          snippet: 'A record that dissolves the line between song and texture.',
+          author: 'A. Critic',
+          published_at: '2024-03-15',
+          rating: '8.0',
+        },
+        {
+          album_id: 777,
+          source: 'Pitchfork',
+          source_url: 'https://pitchfork.com/reviews/albums/example',
+          snippet: 'The most quietly radical thing she has made.',
+          author: null,
+          published_at: null,
+          rating: null,
+        },
+      ]);
+      const result = await lookupCriticReviewsByAlbumIds([501, 777]);
+
+      expect(result.get(501)).toEqual([
+        {
+          source: 'The Quietus',
+          url: 'https://thequietus.com/articles/juana-molina-doga',
+          snippet: 'A record that dissolves the line between song and texture.',
+          author: 'A. Critic',
+          publishedDate: '2024-03-15',
+          rating: '8.0',
+        },
+      ]);
+      expect(result.get(777)).toEqual([
+        {
+          source: 'Pitchfork',
+          url: 'https://pitchfork.com/reviews/albums/example',
+          snippet: 'The most quietly radical thing she has made.',
+        },
+      ]);
+      // An album with no matching rows is absent from the map entirely (not
+      // present with an empty array) — the caller treats the two identically.
+      expect(result.has(999)).toBe(false);
+    });
+
+    it('caps each album at CRITIC_REVIEWS_LIMIT (5), keeping the newest-first rows', async () => {
+      // Rows arrive pre-ordered by the query's ORDER BY (album_id, then
+      // published_at DESC NULLS LAST, id DESC) — six rows for one album, the
+      // 6th (oldest) must be dropped by the per-bucket cap.
+      const rows = Array.from({ length: 6 }, (_, i) => ({
+        album_id: 501,
+        source: `Source ${i}`,
+        source_url: `https://example.com/${i}`,
+        snippet: `Snippet ${i}`,
+        author: null,
+        published_at: `2024-01-${String(10 - i).padStart(2, '0')}`, // descending
+        rating: null,
+      }));
+      mockRowsQueue.push(rows);
+
+      const result = await lookupCriticReviewsByAlbumIds([501]);
+      const bucket = result.get(501);
+      expect(bucket).toHaveLength(5);
+      expect(bucket?.map((r) => r.source)).toEqual(['Source 0', 'Source 1', 'Source 2', 'Source 3', 'Source 4']);
+    });
+
+    it('pins the (album_id, published_at DESC NULLS LAST, id DESC) ORDER BY contract', async () => {
+      mockRowsQueue.push([]);
+      await lookupCriticReviewsByAlbumIds([501]);
+      expect(chainSpy.orderBy).toHaveBeenCalledTimes(1);
+      expect(chainSpy.orderBy).toHaveBeenCalledWith('album_id', expect.anything(), expect.anything());
     });
   });
 });

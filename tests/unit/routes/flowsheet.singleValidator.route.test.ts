@@ -13,6 +13,11 @@ const mockGetEntriesByPage = jest.fn<() => Promise<unknown[]>>().mockResolvedVal
 const mockGetEntryCount = jest.fn<() => Promise<number>>().mockResolvedValue(0);
 const mockGetOnAirDJName = jest.fn<() => Promise<string | null>>().mockResolvedValue(null);
 const mockAttachUpcomingShows = jest.fn((entries: unknown[]) => Promise.resolve(entries));
+// BS#1870: getEntries/getLatest also call attachCriticReviews (batched
+// critic-review attach) alongside attachUpcomingShows — no-op passthrough
+// here, same as the upcoming-shows mock; this file only pins the watermark
+// header wiring, not the attach behavior itself.
+const mockAttachCriticReviews = jest.fn((entries: unknown[]) => Promise.resolve(entries));
 const mockTransformToV2 = jest.fn((entry: unknown) => entry);
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
@@ -21,6 +26,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getEntryCount: mockGetEntryCount,
   getOnAirDJName: mockGetOnAirDJName,
   attachUpcomingShows: mockAttachUpcomingShows,
+  attachCriticReviews: mockAttachCriticReviews,
   transformToV2: mockTransformToV2,
 }));
 
