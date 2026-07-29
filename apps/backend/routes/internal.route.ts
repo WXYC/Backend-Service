@@ -2,6 +2,7 @@ import { Router } from 'express';
 import * as Sentry from '@sentry/node';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { db, flowsheet, shows, rotation, library, truncate, user } from '@wxyc/database';
+import { getAlbumIdByLegacyId } from '../services/library.service.js';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
 import {
   mapProdEntryType,
@@ -489,16 +490,13 @@ const VALID_ROTATION_BINS = new Set(['S', 'L', 'M', 'H', 'N']);
 /**
  * Resolve a Backend-Service album_id from a tubafrenzy LIBRARY_RELEASE_ID.
  * Returns null if the library release ID is 0 or not found.
+ *
+ * Thin wrapper over `library.service.getAlbumIdByLegacyId` — the legacy→serial
+ * bridge now lives in one place (BS#1880). Kept so the inbound call sites below
+ * read unchanged.
  */
-async function resolveAlbumId(legacyLibraryReleaseId: number): Promise<number | null> {
-  if (!legacyLibraryReleaseId) return null;
-
-  const [row] = await db
-    .select({ id: library.id })
-    .from(library)
-    .where(eq(library.legacy_release_id, legacyLibraryReleaseId))
-    .limit(1);
-  return row?.id ?? null;
+function resolveAlbumId(legacyLibraryReleaseId: number): Promise<number | null> {
+  return getAlbumIdByLegacyId(legacyLibraryReleaseId);
 }
 
 /**
