@@ -1250,6 +1250,16 @@ export const attachUpcomingShows = async (entries: IFSEntry[]): Promise<IFSEntry
  *      `/proxy/metadata/album` handler uses. Default off, so this attach adds
  *      zero queries to the hot public flowsheet path until an operator opts
  *      in (Post-launch service hardening / project #32 posture).
+ *   3. **Fails open.** The lookup + fan-out runs inside its own try/catch:
+ *      a DB error is reported via `Sentry.captureException` and swallowed,
+ *      returning `entries` unmodified (no `critic_reviews` attached) rather
+ *      than rejecting. This is called `Promise.all`'d with
+ *      `attachUpcomingShows` at every `GET /flowsheet` call site, and
+ *      `CRITIC_REVIEWS_ENABLED` is already on in prod, so an unguarded
+ *      rejection here would 500 the hottest public endpoint on a mere
+ *      `album_critic_reviews` blip — the same "strictly additive, must never
+ *      break the response" contract `proxy.controller.ts` applies to this
+ *      identical lookup on the metadata-proxy serve path.
  *
  * Batched — ONE indexed `album_critic_reviews` query for the whole page via
  * `lookupCriticReviewsByAlbumIds`, never one per row (the same no-N+1
@@ -1296,16 +1306,31 @@ export const attachCriticReviews = async (entries: IFSEntry[]): Promise<IFSEntry
     ),
   ];
 
-  const reviewsByAlbumId = await lookupCriticReviewsByAlbumIds(albumIds);
+  // Same "strictly additive, must never break the response" contract
+  // proxy.controller.ts's `/proxy/metadata/album` handler applies to this
+  // exact lookup (see its comment there). Here the stakes are higher: this
+  // runs Promise.all'd with attachUpcomingShows at all 5 GET /flowsheet call
+  // sites, and CRITIC_REVIEWS_ENABLED is already true in prod, so an
+  // unguarded rejection here would 500 the hottest public endpoint on a mere
+  // album_critic_reviews DB blip. Degrade to "no cards" instead: report to
+  // Sentry and hand the page back untouched.
+  try {
+    const reviewsByAlbumId = await lookupCriticReviewsByAlbumIds(albumIds);
 
-  for (const entry of entries) {
-    if (!entry || entry.entry_type !== 'track' || entry.album_id === null) {
-      continue;
+    for (const entry of entries) {
+      if (!entry || entry.entry_type !== 'track' || entry.album_id === null) {
+        continue;
+      }
+      const reviews = reviewsByAlbumId.get(entry.album_id);
+      if (reviews !== undefined && reviews.length > 0) {
+        entry.critic_reviews = reviews;
+      }
     }
-    const reviews = reviewsByAlbumId.get(entry.album_id);
-    if (reviews !== undefined && reviews.length > 0) {
-      entry.critic_reviews = reviews;
-    }
+  } catch (err) {
+    Sentry.captureException(err, {
+      tags: { subsystem: 'attach-critic-reviews' },
+      extra: { album_id_count: albumIds.length },
+    });
   }
   return entries;
 };
