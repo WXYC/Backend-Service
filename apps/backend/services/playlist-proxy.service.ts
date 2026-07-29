@@ -99,6 +99,12 @@ type RecentRow = {
   album_title: string | null;
   record_label: string | null;
   request_flag: boolean | null;
+  segue: boolean | null;
+  // Marker text: the label the v=1 flat format emits as `artistName` on
+  // breakpoint / showDelimiter entries (consumer-invisible — see the v=1
+  // serializer), and the source of tubafrenzy's own breakpoint/showDelimiter
+  // artistName via the mirror. Unused by the v=2 grouped output.
+  message: string | null;
   rotation_id: number | null;
   album_id: number | null;
   // FK-lane rotation_bin only (rotation.rotation_bin via the rotation_id
@@ -171,6 +177,41 @@ function toBaseEntry(row: RecentRow): BaseEntry {
   };
 }
 
+/**
+ * Fetch the most recent `limit` flowsheet rows (any entry_type, ordered by
+ * flowsheet.id DESC), with the FK-lane rotation_bin joined in. Shared by both
+ * the v=2 grouped path (`getRecentEntries`, limit = MAX_ENTRIES) and the v=1
+ * flat path (`getRecentEntriesFlat`, limit = the caller's n). The fallback
+ * rotation lane runs separately, post-classification (BS#1862).
+ */
+async function fetchRecentRows(limit: number): Promise<RecentRow[]> {
+  return db
+    .select({
+      id: flowsheet.id,
+      entry_type: flowsheet.entry_type,
+      add_time: flowsheet.add_time,
+      radio_hour: flowsheet.radio_hour,
+      track_title: flowsheet.track_title,
+      artist_name: flowsheet.artist_name,
+      album_title: flowsheet.album_title,
+      record_label: flowsheet.record_label,
+      request_flag: flowsheet.request_flag,
+      segue: flowsheet.segue,
+      message: flowsheet.message,
+      rotation_id: flowsheet.rotation_id,
+      album_id: flowsheet.album_id,
+      // FK-lane rotation_bin only. The correlated fallback subquery this used
+      // to COALESCE with was removed (BS#1862) — it seq-scanned `library`
+      // for every window row and cost ~2.4s. The fallback runs post-slice in
+      // resolveFallbackRotation over the track rows that survive classification.
+      rotation_bin: rotation.rotation_bin,
+    })
+    .from(flowsheet)
+    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .orderBy(desc(flowsheet.id))
+    .limit(limit);
+}
+
 // --- Public API ---
 
 /**
@@ -182,29 +223,7 @@ function toBaseEntry(row: RecentRow): BaseEntry {
  * the playcuts sub-array at read time.
  */
 export async function getRecentEntries(n: number): Promise<GroupedResponse> {
-  const rows: RecentRow[] = await db
-    .select({
-      id: flowsheet.id,
-      entry_type: flowsheet.entry_type,
-      add_time: flowsheet.add_time,
-      radio_hour: flowsheet.radio_hour,
-      track_title: flowsheet.track_title,
-      artist_name: flowsheet.artist_name,
-      album_title: flowsheet.album_title,
-      record_label: flowsheet.record_label,
-      request_flag: flowsheet.request_flag,
-      rotation_id: flowsheet.rotation_id,
-      album_id: flowsheet.album_id,
-      // FK-lane rotation_bin only. The correlated fallback subquery this used
-      // to COALESCE with was removed (BS#1862) — it seq-scanned `library`
-      // for every window row and cost ~2.4s. The fallback now runs post-slice
-      // in resolveFallbackRotation over the <= n sliced playcuts.
-      rotation_bin: rotation.rotation_bin,
-    })
-    .from(flowsheet)
-    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
-    .orderBy(desc(flowsheet.id))
-    .limit(MAX_ENTRIES);
+  const rows = await fetchRecentRows(MAX_ENTRIES);
 
   const playcutRows: RecentRow[] = [];
   const talksetRows: RecentRow[] = [];
@@ -260,6 +279,133 @@ export async function getRecentEntries(n: number): Promise<GroupedResponse> {
     talksets: talksetRows.map(toBaseEntry),
     breakpoints: breakpointRows.map(toBaseEntry),
   };
+}
+
+// --- v=1 flat contract (Android; tubafrenzy's FlowsheetEntryJsonSerializer.toJson) ---
+
+/** Playcut fields nested under `playcut` in the v=1 flat wire format. */
+interface FlatPlaycutFields {
+  artistName: string;
+  songTitle: string;
+  releaseTitle: string;
+  labelName: string;
+  rotation: string;
+  request: string;
+  segue: string;
+}
+
+/**
+ * One entry in the v=1 flat array (see §2.2 of the tubafrenzy decommission
+ * plan / tubafrenzy's `FlowsheetEntryJsonSerializer.toJson`). Every entry
+ * carries the base fields + an `entryType` discriminator. Playcuts nest their
+ * typed fields under `playcut`; breakpoints and showDelimiters carry an
+ * `artistName` label (consumer-invisible — the Android DTO has no top-level
+ * artistName and reads the breakpoint hour from `hour`; iOS consumes the v=2
+ * grouped shape, not this one — but emitted for byte-faithfulness).
+ */
+export interface FlatEntry {
+  id: number;
+  chronOrderID: number;
+  hour: number;
+  timeCreated: number;
+  entryType: 'playcut' | 'talkset' | 'breakpoint' | 'showDelimiter';
+  playcut?: FlatPlaycutFields;
+  artistName?: string;
+}
+
+type FlatBucket = 'playcut' | 'talkset' | 'breakpoint' | 'showDelimiter';
+
+/**
+ * Flat-format entry_type classification. Unlike `classifyEntryType` (v=2),
+ * this never drops a row: show_start/show_end map to `showDelimiter` (v=1
+ * includes them). Unknown types fall to `talkset`, the benign non-track
+ * bucket — the BS entry_type enum is closed, so this is defensive only.
+ */
+function classifyFlatEntryType(entryType: string): FlatBucket {
+  switch (entryType) {
+    case 'track':
+      return 'playcut';
+    case 'breakpoint':
+      return 'breakpoint';
+    case 'show_start':
+    case 'show_end':
+      return 'showDelimiter';
+    case 'talkset':
+    case 'dj_join':
+    case 'dj_leave':
+    case 'message':
+    default:
+      return 'talkset';
+  }
+}
+
+function toFlatEntry(row: RecentRow, fallbackRotationMap: Map<number, string>): FlatEntry {
+  const base = {
+    id: row.id,
+    chronOrderID: row.id,
+    hour: computeHourMs(row),
+    timeCreated: row.add_time.getTime(),
+  };
+  switch (classifyFlatEntryType(row.entry_type)) {
+    case 'playcut': {
+      // Same COALESCE(FK, fallback) rotation semantics as the v=2 path.
+      const rotationBin = row.rotation_bin ?? fallbackRotationMap.get(row.id) ?? null;
+      return {
+        ...base,
+        entryType: 'playcut',
+        playcut: {
+          artistName: row.artist_name ?? '',
+          songTitle: row.track_title ?? '',
+          releaseTitle: row.album_title ?? '',
+          labelName: row.record_label ?? '',
+          rotation: rotationBin !== null ? 'true' : 'false',
+          request: row.request_flag ? 'true' : 'false',
+          segue: row.segue ? 'true' : 'false',
+        },
+      };
+    }
+    case 'talkset':
+      return { ...base, entryType: 'talkset' };
+    case 'breakpoint':
+      // tubafrenzy stored the breakpoint label as the uppercased message (the
+      // mirror's `message.toUpperCase() || 'BREAKPOINT'`); reproduce it.
+      return { ...base, entryType: 'breakpoint', artistName: (row.message ?? '').trim().toUpperCase() || 'BREAKPOINT' };
+    case 'showDelimiter':
+      // The mirror sent the show marker's `message` as tubafrenzy's artistName.
+      return { ...base, entryType: 'showDelimiter', artistName: row.message ?? '' };
+  }
+}
+
+/**
+ * Query Postgres for the current playlist as the v=1 flat array (the Android
+ * contract; BS#1866). Returns the most recent min(n, MAX_ENTRIES) rows of ANY
+ * type — matching tubafrenzy's `getNRecentFlowsheetEntries(n)` semantic where
+ * `n` bounds total entries, not playcuts — serialized flat with the
+ * `entryType` discriminator. showDelimiter (show_start/show_end) entries are
+ * INCLUDED, unlike the v=2 grouped path. No artwork enrichment (v=1 never
+ * carried it — Android does its own artwork lookup client-side).
+ */
+export async function getRecentEntriesFlat(n: number): Promise<FlatEntry[]> {
+  const rows = await fetchRecentRows(Math.min(n, MAX_ENTRIES));
+
+  // Rotation fallback only needs the track rows (the playcut candidates).
+  const trackRows = rows.filter((row) => classifyFlatEntryType(row.entry_type) === 'playcut');
+  const fallbackRotationMap = await resolveFallbackRotation(trackRows);
+
+  return rows.map((row) => toFlatEntry(row, fallbackRotationMap));
+}
+
+/**
+ * The `X-Last-Modified` value for a window: the max `timeCreated` (add_time
+ * epoch ms) across the given entries, or 0 for an empty window. tubafrenzy's
+ * header is its cache's last-modified instant; the plan (§2.4) specifies the
+ * max timeCreated of the served window, which increases whenever a newer entry
+ * appears. Computed from the served payload, so the v=2 value can miss a
+ * showDelimiter that the grouped shape drops — inconsequential, since v=2
+ * (iOS) never sends `?since`, and the bridge's `?since` path stays on legacy.
+ */
+export function lastModifiedFromTimestamps(timestamps: number[]): number {
+  return timestamps.length > 0 ? Math.max(...timestamps) : 0;
 }
 
 // --- Enrichment ---

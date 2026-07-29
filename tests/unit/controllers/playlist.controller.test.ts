@@ -2,25 +2,29 @@
  * Unit tests for the playlist controller.
  *
  * The playlist proxy service is mocked; tests verify the HTTP handler
- * correctly reads query params, sets headers, and delegates to the service.
+ * correctly reads query params, routes v=1 (flat) vs v=2 (grouped), sets
+ * headers (incl. X-Last-Modified, BS#1866), and delegates to the service.
  *
  * Phase 3 of the tubafrenzy decommission (WXYC/wiki#88): `getRecentEntries`
- * is now async (a live Postgres query, not an in-memory read), so the
- * controller awaits it and there is no more `isConnected()` SSE gate. A
- * DB error is surfaced as a DIRECT 503 response — never thrown through the
- * error pipeline, whose Sentry filter captures every >=500. This is an
- * unauthenticated endpoint mobile clients poll on a fixed interval, so a
- * captured 503 would mean one Sentry event per poll during a DB blip.
+ * is now async (a live Postgres query). A DB error is surfaced as a DIRECT
+ * 503 response — never thrown through the error pipeline, whose Sentry filter
+ * captures every >=500. This is an unauthenticated endpoint mobile clients
+ * poll on a fixed interval, so a captured 503 would mean one Sentry event per
+ * poll during a DB blip.
  */
 import { jest } from '@jest/globals';
 import type { Request, Response, NextFunction } from 'express';
 
 // --- Mocks ---
 
-const mockGetRecentEntries = jest.fn();
+const mockGetGrouped = jest.fn();
+const mockGetFlat = jest.fn();
 
 jest.mock('../../../apps/backend/services/playlist-proxy.service', () => ({
-  getRecentEntries: (...args: unknown[]) => mockGetRecentEntries(...args),
+  getRecentEntries: (...args: unknown[]) => mockGetGrouped(...args),
+  getRecentEntriesFlat: (...args: unknown[]) => mockGetFlat(...args),
+  // Real logic so header-value assertions are meaningful.
+  lastModifiedFromTimestamps: (ts: number[]) => (ts.length > 0 ? Math.max(...ts) : 0),
 }));
 
 import { getRecentEntries } from '../../../apps/backend/controllers/playlist.controller';
@@ -32,14 +36,18 @@ const createMockRes = () => {
   res.status = jest.fn().mockReturnValue(res) as unknown as Response['status'];
   res.json = jest.fn().mockReturnValue(res) as unknown as Response['json'];
   res.set = jest.fn().mockReturnValue(res) as unknown as Response['set'];
+  res.append = jest.fn().mockReturnValue(res) as unknown as Response['append'];
   return res;
 };
 
 const noopNext: NextFunction = jest.fn();
 
+const setCalls = (res: Partial<Response>) => (res.set as jest.Mock).mock.calls as [string, string][];
+const headerValue = (res: Partial<Response>, name: string) => setCalls(res).find(([k]) => k === name)?.[1];
+
 // --- Fixture data: representative WXYC entries ---
 
-const sampleResponse = {
+const sampleGrouped = {
   playcuts: [
     {
       id: 2602250,
@@ -67,35 +75,52 @@ const sampleResponse = {
       rotation: 'true',
     },
   ],
-  talksets: [
-    {
-      id: 2602247,
-      chronOrderID: 2602247,
-      hour: 1775080800000,
-      timeCreated: 1775082820391,
-    },
-  ],
-  breakpoints: [
-    {
-      id: 2602238,
-      chronOrderID: 2602238,
-      hour: 1775077200000,
-      timeCreated: 1775076979166,
-    },
-  ],
+  talksets: [{ id: 2602247, chronOrderID: 2602247, hour: 1775080800000, timeCreated: 1775082820391 }],
+  breakpoints: [{ id: 2602238, chronOrderID: 2602238, hour: 1775077200000, timeCreated: 1775076979166 }],
 };
+// Max timeCreated across all grouped entries.
+const GROUPED_MAX_TS = 1775082999000;
+
+const sampleFlat = [
+  {
+    id: 2602250,
+    chronOrderID: 2602250,
+    hour: 1775080800000,
+    timeCreated: 1775082908948,
+    entryType: 'playcut',
+    playcut: {
+      artistName: 'Jessica Pratt',
+      songTitle: 'Back, Baby',
+      releaseTitle: 'On Your Own Love Again',
+      labelName: 'Drag City',
+      rotation: 'false',
+      request: 'false',
+      segue: 'false',
+    },
+  },
+  { id: 2602247, chronOrderID: 2602247, hour: 1775080800000, timeCreated: 1775082820391, entryType: 'talkset' },
+  {
+    id: 2602238,
+    chronOrderID: 2602238,
+    hour: 1775077200000,
+    timeCreated: 1775076979166,
+    entryType: 'breakpoint',
+    artistName: 'BREAKPOINT',
+  },
+];
+const FLAT_MAX_TS = 1775082908948;
 
 // --- Tests ---
 
 describe('playlist.controller', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockGetGrouped.mockResolvedValue(sampleGrouped);
+    mockGetFlat.mockResolvedValue(sampleFlat);
   });
 
-  describe('getRecentEntries', () => {
+  describe('v=2 grouped path (iOS)', () => {
     it('returns enriched playcuts with artworkURL', async () => {
-      mockGetRecentEntries.mockResolvedValue(sampleResponse);
-
       const req = { query: { v: '2', n: '50' } } as unknown as Request;
       const res = createMockRes();
 
@@ -105,66 +130,103 @@ describe('playlist.controller', () => {
       const body = (res.json as jest.Mock).mock.calls[0][0];
       expect(body.playcuts[0].artworkURL).toBe('https://i.discogs.com/jessica.jpg');
       expect(body.playcuts[1].artworkURL).toBeUndefined();
+      expect(mockGetFlat).not.toHaveBeenCalled();
     });
 
-    it('sets Cache-Control: public, max-age=30', async () => {
-      mockGetRecentEntries.mockResolvedValue(sampleResponse);
-
+    it('sets Cache-Control, X-Last-Modified (max timeCreated), and Access-Control-Expose-Headers', async () => {
       const req = { query: { v: '2' } } as unknown as Request;
       const res = createMockRes();
 
       await getRecentEntries(req, res as Response, noopNext);
 
       expect(res.set).toHaveBeenCalledWith('Cache-Control', 'public, max-age=30');
+      expect(headerValue(res, 'X-Last-Modified')).toBe(String(GROUPED_MAX_TS));
+      // Appended (not set) so the CORS-exposed X-Request-Id survives.
+      expect(res.append).toHaveBeenCalledWith('Access-Control-Expose-Headers', 'X-Last-Modified');
     });
 
-    it('passes n param to service (slices entries)', async () => {
-      mockGetRecentEntries.mockResolvedValue(sampleResponse);
-
-      const req = { query: { v: '2', n: '5' } } as unknown as Request;
-      const res = createMockRes();
-
-      await getRecentEntries(req, res as Response, noopNext);
-
-      expect(mockGetRecentEntries).toHaveBeenCalledWith(5);
+    it('passes n to the grouped service; defaults to 50; clamps [1, 100]', async () => {
+      const cases: [string | undefined, number][] = [
+        ['5', 5],
+        [undefined, 50],
+        ['500', 100],
+        ['0', 1],
+        ['abc', 50],
+      ];
+      for (const [n, expected] of cases) {
+        jest.clearAllMocks();
+        mockGetGrouped.mockResolvedValue(sampleGrouped);
+        const req = { query: n === undefined ? { v: '2' } : { v: '2', n } } as unknown as Request;
+        await getRecentEntries(req, createMockRes() as Response, noopNext);
+        expect(mockGetGrouped).toHaveBeenCalledWith(expected);
+      }
     });
 
-    it('defaults n to 50 when not provided', async () => {
-      mockGetRecentEntries.mockResolvedValue(sampleResponse);
-
+    it('preserves talksets and breakpoints unchanged', async () => {
       const req = { query: { v: '2' } } as unknown as Request;
       const res = createMockRes();
 
       await getRecentEntries(req, res as Response, noopNext);
 
-      expect(mockGetRecentEntries).toHaveBeenCalledWith(50);
+      const body = (res.json as jest.Mock).mock.calls[0][0];
+      expect(body.talksets).toEqual(sampleGrouped.talksets);
+      expect(body.breakpoints).toEqual(sampleGrouped.breakpoints);
     });
+  });
 
-    it('clamps n to 100 when n exceeds maximum', async () => {
-      mockGetRecentEntries.mockResolvedValue(sampleResponse);
-
-      const req = { query: { v: '2', n: '500' } } as unknown as Request;
+  describe('v=1 flat path (Android; default when v absent)', () => {
+    it('routes to the flat service when v is absent (the Android contract)', async () => {
+      const req = { query: {} } as unknown as Request;
       const res = createMockRes();
 
       await getRecentEntries(req, res as Response, noopNext);
 
-      expect(mockGetRecentEntries).toHaveBeenCalledWith(100);
+      expect(mockGetFlat).toHaveBeenCalled();
+      expect(mockGetGrouped).not.toHaveBeenCalled();
+      expect((res.json as jest.Mock).mock.calls[0][0]).toBe(sampleFlat);
     });
 
-    it('clamps n to 1 when n is zero or negative', async () => {
-      mockGetRecentEntries.mockResolvedValue(sampleResponse);
-
-      const req = { query: { v: '2', n: '0' } } as unknown as Request;
+    it('routes to the flat service for v=1', async () => {
+      const req = { query: { v: '1' } } as unknown as Request;
       const res = createMockRes();
 
       await getRecentEntries(req, res as Response, noopNext);
 
-      expect(mockGetRecentEntries).toHaveBeenCalledWith(1);
+      expect(mockGetFlat).toHaveBeenCalled();
+      expect(mockGetGrouped).not.toHaveBeenCalled();
     });
 
-    it('returns a direct 503 when the service rejects (DB failure), without throwing into the error pipeline', async () => {
-      mockGetRecentEntries.mockRejectedValue(new Error('connection terminated'));
+    it('defaults n to 200 and clamps [1, 200] (tubafrenzy total-entries semantic)', async () => {
+      const cases: [string | undefined, number][] = [
+        [undefined, 200],
+        ['35', 35],
+        ['999', 200],
+        ['0', 1],
+      ];
+      for (const [n, expected] of cases) {
+        jest.clearAllMocks();
+        mockGetFlat.mockResolvedValue(sampleFlat);
+        const req = { query: n === undefined ? {} : { n } } as unknown as Request;
+        await getRecentEntries(req, createMockRes() as Response, noopNext);
+        expect(mockGetFlat).toHaveBeenCalledWith(expected);
+      }
+    });
 
+    it('sets X-Last-Modified from the flat window and Access-Control-Expose-Headers', async () => {
+      const req = { query: {} } as unknown as Request;
+      const res = createMockRes();
+
+      await getRecentEntries(req, res as Response, noopNext);
+
+      expect(res.set).toHaveBeenCalledWith('Cache-Control', 'public, max-age=30');
+      expect(headerValue(res, 'X-Last-Modified')).toBe(String(FLAT_MAX_TS));
+      expect(res.append).toHaveBeenCalledWith('Access-Control-Expose-Headers', 'X-Last-Modified');
+    });
+  });
+
+  describe('DB failure', () => {
+    it('returns a direct 503 (grouped) without setting headers or calling next', async () => {
+      mockGetGrouped.mockRejectedValue(new Error('connection terminated'));
       const req = { query: { v: '2' } } as unknown as Request;
       const res = createMockRes();
 
@@ -176,28 +238,15 @@ describe('playlist.controller', () => {
       expect(noopNext).not.toHaveBeenCalled();
     });
 
-    it('preserves talksets and breakpoints unchanged', async () => {
-      mockGetRecentEntries.mockResolvedValue(sampleResponse);
-
-      const req = { query: { v: '2' } } as unknown as Request;
+    it('returns a direct 503 (flat) without setting headers', async () => {
+      mockGetFlat.mockRejectedValue(new Error('connection terminated'));
+      const req = { query: {} } as unknown as Request;
       const res = createMockRes();
 
       await getRecentEntries(req, res as Response, noopNext);
 
-      const body = (res.json as jest.Mock).mock.calls[0][0];
-      expect(body.talksets).toEqual(sampleResponse.talksets);
-      expect(body.breakpoints).toEqual(sampleResponse.breakpoints);
-    });
-
-    it('handles non-numeric n param gracefully (defaults to 50)', async () => {
-      mockGetRecentEntries.mockResolvedValue(sampleResponse);
-
-      const req = { query: { v: '2', n: 'abc' } } as unknown as Request;
-      const res = createMockRes();
-
-      await getRecentEntries(req, res as Response, noopNext);
-
-      expect(mockGetRecentEntries).toHaveBeenCalledWith(50);
+      expect(res.status).toHaveBeenCalledWith(503);
+      expect(res.set).not.toHaveBeenCalled();
     });
   });
 });
