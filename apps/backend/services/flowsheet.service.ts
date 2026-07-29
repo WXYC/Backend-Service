@@ -25,6 +25,8 @@ import {
 } from '@wxyc/database';
 import { isSpotifyUrl, isAppleMusicUrl } from '@wxyc/lml-client';
 import { getUpcomingShowsMapsCached } from './concerts.service.js';
+import { lookupCriticReviewsByAlbumIds } from './album-metadata-lookup.service.js';
+import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
@@ -1229,6 +1231,85 @@ export const attachUpcomingShows = async (entries: IFSEntry[]): Promise<IFSEntry
   return entries;
 };
 
+/**
+ * Attach batched critic-review snippets to a feed page of entries
+ * (album-critic-reviews slice, ADR 0012; BS#1870). Modeled directly on
+ * {@link attachUpcomingShows} — same "batch a page, mutate in place" shape —
+ * but deliberately narrower in two ways:
+ *
+ *   1. **Id-arm only.** Keys strictly on the track's resolved `album_id`
+ *      (`flowsheet.album_id`, populated only for library-linked plays) via
+ *      {@link lookupCriticReviewsByAlbumIds}. There is NO name-arm fallback
+ *      like `attachUpcomingShows`'s BS#1613 hybrid — a review must never
+ *      attach by fuzzy artist-name match, only by the exact linked album,
+ *      mirroring the `album-critic-reviews-etl` writer's own exact-match
+ *      ceiling (it never guesses an album for a review either).
+ *   2. **Flag-gated.** Early-returns without touching the DB when
+ *      `getCriticReviewsConfig().enabled` is false — the same
+ *      `CRITIC_REVIEWS_ENABLED` gate `proxy.controller.ts`'s
+ *      `/proxy/metadata/album` handler uses. Default off, so this attach adds
+ *      zero queries to the hot public flowsheet path until an operator opts
+ *      in (Post-launch service hardening / project #32 posture).
+ *
+ * Batched — ONE indexed `album_critic_reviews` query for the whole page via
+ * `lookupCriticReviewsByAlbumIds`, never one per row (the same no-N+1
+ * guarantee `attachUpcomingShows` documents). Unlike the concerts maps, this
+ * is NOT memoized: the key set (the page's distinct `album_id`s) varies per
+ * page and the query is a plain indexed lookup, so a short-TTL cache would
+ * mostly miss while adding bookkeeping for no real savings.
+ *
+ * Watermark/staleness note (document, don't engineer): `GET /flowsheet` and
+ * `GET /flowsheet/latest` 304 on the flowsheet watermark (`conditionalGet`,
+ * BS#902/BS#1689). The weekly `album-critic-reviews-etl` (BS#1830) writes
+ * only `album_critic_reviews` and does not advance that watermark, so a
+ * freshly-written review can stay masked behind a stale 304 until the next
+ * ordinary flowsheet mutation — potentially minutes during a live broadcast.
+ * This is accepted: unlike the concerts ET-midnight fold (which corrects a
+ * genuine correctness cliff — a past show's CTA would otherwise render
+ * indefinitely), a late-surfacing review is a freshness lag with no
+ * incorrect state, so it is not worth folding into the watermark.
+ *
+ * Returns the same array reference with matched entries mutated in place;
+ * the caller maps the result through `transformToV2`, which reads
+ * `entry.critic_reviews`.
+ */
+export const attachCriticReviews = async (entries: IFSEntry[]): Promise<IFSEntry[]> => {
+  if (!getCriticReviewsConfig().enabled) {
+    return entries;
+  }
+
+  // Same defensive `entry?.` guard as attachUpcomingShows's prefilter
+  // (Sentry BACKEND-SERVICE-2T / BS#1864): a transient nullish array element
+  // must not throw here either.
+  const hasLinkedTrack = entries.some((entry) => entry?.entry_type === 'track' && entry.album_id !== null);
+  if (!hasLinkedTrack) {
+    return entries;
+  }
+
+  const albumIds = [
+    ...new Set(
+      entries
+        .filter((entry): entry is IFSEntry & { album_id: number } => {
+          return !!entry && entry.entry_type === 'track' && entry.album_id !== null;
+        })
+        .map((entry) => entry.album_id)
+    ),
+  ];
+
+  const reviewsByAlbumId = await lookupCriticReviewsByAlbumIds(albumIds);
+
+  for (const entry of entries) {
+    if (!entry || entry.entry_type !== 'track' || entry.album_id === null) {
+      continue;
+    }
+    const reviews = reviewsByAlbumId.get(entry.album_id);
+    if (reviews !== undefined && reviews.length > 0) {
+      entry.critic_reviews = reviews;
+    }
+  }
+  return entries;
+};
+
 export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
   const baseFields = {
     id: entry.id,
@@ -1296,6 +1377,13 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         // absent field as "no touring CTA". The SSOT field is optional +
         // nullable, so this present-or-absent projection is spec-conformant.
         ...(entry.upcoming_show ? { upcoming_show: entry.upcoming_show } : {}),
+        // Batched critic-review snippets (BS#1870). Emitted ONLY when
+        // `attachCriticReviews` found at least one seeded review for this
+        // track's `album_id` (flag on + a linked album with reviews) — absent
+        // otherwise, so a no-match or flag-off track row is byte-identical to
+        // its pre-1870 shape. Mirrors the `upcoming_show` present-or-absent
+        // projection above.
+        ...(entry.critic_reviews && entry.critic_reviews.length > 0 ? { critic_reviews: entry.critic_reviews } : {}),
       };
 
     case 'show_start':

@@ -7,6 +7,7 @@ import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/datab
 type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
 import type { ConcertDTO } from '../services/concerts.service.js';
+import type { CriticReviewItem } from '@wxyc/shared/dtos';
 import { projectFlowsheetEntry } from '../utils/flowsheet-projection.js';
 import { stashMirrorData } from '../middleware/legacy/mirror.middleware.js';
 import WxycError from '../utils/error.js';
@@ -85,6 +86,15 @@ export interface IFSEntry extends Omit<
   // `upcoming_show` on the V2 track wire shape (SSOT `FlowsheetV2TrackEntry`,
   // wxyc-shared api.yaml 1.16.0), reusing the `Concert` schema verbatim.
   upcoming_show?: ConcertDTO | null;
+  // Batched critic-review snippets (album-critic-reviews slice, ADR 0012;
+  // BS#1870), keyed strictly on this track's `album_id` — id-arm only, no
+  // name-arm fuzzy match (unlike `upcoming_show`'s BS#1613 hybrid). Populated
+  // only when `attachCriticReviews` found at least one seeded
+  // `album_critic_reviews` row for the entry's `album_id`, and only when the
+  // `CRITIC_REVIEWS_ENABLED` flag is on; absent/undefined otherwise.
+  // `transformToV2` emits it as `critic_reviews` on the V2 track wire shape,
+  // reusing the generated `CriticReviewItem` from `@wxyc/shared` verbatim.
+  critic_reviews?: CriticReviewItem[];
 }
 
 const MAX_ITEMS = 200;
@@ -133,7 +143,13 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     const entries = await flowsheet_service.getEntriesByShow(...recentShows.map((show) => show.id));
 
     if (entries.length) {
-      await flowsheet_service.attachUpcomingShows(entries);
+      // The two attaches are independent (they set different, disjoint
+      // fields on each entry), so run them concurrently rather than
+      // serializing two DB round trips.
+      await Promise.all([
+        flowsheet_service.attachUpcomingShows(entries),
+        flowsheet_service.attachCriticReviews(entries),
+      ]);
       res.status(200).json(projectEntriesV2(entries));
     } else {
       res.status(404).json({
@@ -162,7 +178,10 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     }
     const entries = await flowsheet_service.getEntriesByRange(startId, endId);
     if (entries.length) {
-      await flowsheet_service.attachUpcomingShows(entries);
+      await Promise.all([
+        flowsheet_service.attachUpcomingShows(entries),
+        flowsheet_service.attachCriticReviews(entries),
+      ]);
       res.status(200).json(projectEntriesV2(entries));
     } else {
       res.status(404).json({ message: 'No Tracks found' });
@@ -189,9 +208,11 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     }),
   ]);
 
-  // Attach the per-playcut upcoming-show enrichment (BS#1607) before
-  // projecting to V2 — one batched concerts query for the whole page.
-  await flowsheet_service.attachUpcomingShows(entries);
+  // Attach the per-playcut upcoming-show enrichment (BS#1607) and the
+  // batched critic-review snippets (BS#1870) before projecting to V2 — one
+  // batched concerts query plus one batched (flag-gated) reviews query for
+  // the whole page. Independent attaches, so run concurrently.
+  await Promise.all([flowsheet_service.attachUpcomingShows(entries), flowsheet_service.attachCriticReviews(entries)]);
 
   const totalPages = Math.ceil(total / limit);
 
@@ -225,7 +246,7 @@ export const getLatest: RequestHandler = async (req, res) => {
   // same 204 the empty-array case already returns, not throw on transformToV2.
   const entry = entries[0];
   if (entry) {
-    await flowsheet_service.attachUpcomingShows(entries);
+    await Promise.all([flowsheet_service.attachUpcomingShows(entries), flowsheet_service.attachCriticReviews(entries)]);
     res.status(200).json(flowsheet_service.transformToV2(entry));
   } else {
     // A non-empty page whose head is nullish is the same unexplained anomaly
@@ -670,7 +691,7 @@ export const getShowInfo: RequestHandler<object, unknown, object, { show_id: str
     throw new WxycError(`Show ${showId} not found`, 404);
   }
 
-  await flowsheet_service.attachUpcomingShows(entries);
+  await Promise.all([flowsheet_service.attachUpcomingShows(entries), flowsheet_service.attachCriticReviews(entries)]);
 
   res.status(200).json({
     ...showMetadata,

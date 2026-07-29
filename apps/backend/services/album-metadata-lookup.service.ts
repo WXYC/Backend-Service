@@ -4,7 +4,7 @@
  * (album-critic-reviews slice, ADR 0012). All read BS's own persisted state
  * so the steady-state serve path skips the LML cascade entirely.
  *
- * Four exported helpers, keyed on the `album_id` of a matching `flowsheet`
+ * Five exported helpers, keyed on the `album_id` of a matching `flowsheet`
  * row and staged so the handler resolves that id exactly once per request:
  *   - {@link selectLinkedFlowsheetRow} — normalized `(artist, release)` key →
  *     the matching linked flowsheet row (`album_id` plus the base,
@@ -29,6 +29,11 @@
  *   - {@link lookupCriticReviewsByAlbumId} — up to `CRITIC_REVIEWS_LIMIT`
  *     attributed snippets for a resolved id, independent of whether
  *     `album_metadata` enrichment has run.
+ *   - {@link lookupCriticReviewsByAlbumIds} — batched sibling of
+ *     {@link lookupCriticReviewsByAlbumId} for flowsheet feed-assembly
+ *     (`attachCriticReviews`, `apps/backend/services/flowsheet.service.ts`):
+ *     one indexed query for a whole page's `album_id`s instead of one per
+ *     row, capped and ordered identically per album.
  *
  * The `/proxy/metadata/album` handler calls {@link selectLinkedFlowsheetRow}
  * once and feeds the resolved `album_id` to both the metadata and reviews
@@ -43,7 +48,7 @@
  * linked-row cohort (the steady state for entries old enough to be of
  * interest to a detail-view fetch).
  */
-import { sql, eq, desc } from 'drizzle-orm';
+import { sql, eq, desc, inArray } from 'drizzle-orm';
 import { db, album_metadata, album_critic_reviews } from '@wxyc/database';
 import type { CriticReviewItem } from '@wxyc/shared/dtos';
 import type { DiscogsResolvedToken, DiscogsTrackItem } from '@wxyc/lml-client';
@@ -204,18 +209,109 @@ export async function lookupCriticReviewsByAlbumId(albumId: number): Promise<Cri
     .orderBy(sql`${album_critic_reviews.published_at} DESC NULLS LAST`, desc(album_critic_reviews.id))
     .limit(CRITIC_REVIEWS_LIMIT);
 
-  // Project to the wire shape, omitting optional fields when null so the
-  // response carries only present keys (matches the metadata handler's
-  // "assign only when present" convention).
-  return rows.map((row) => {
-    const item: CriticReviewItem = {
-      source: row.source,
-      url: row.source_url,
-      snippet: row.snippet,
-    };
-    if (row.author) item.author = row.author;
-    if (row.published_at) item.publishedDate = row.published_at;
-    if (row.rating) item.rating = row.rating;
-    return item;
-  });
+  return rows.map(projectCriticReviewRow);
+}
+
+/**
+ * Row shape shared by {@link lookupCriticReviewsByAlbumId} and
+ * {@link lookupCriticReviewsByAlbumIds} — the six `album_critic_reviews`
+ * columns both queries select (everything except the internal `id` /
+ * `album_id` / `discogs_release_id` / `source_key` / timestamps).
+ */
+type CriticReviewRow = {
+  source: string;
+  source_url: string;
+  snippet: string;
+  author: string | null;
+  published_at: string | null;
+  rating: string | null;
+};
+
+/**
+ * Project one `album_critic_reviews` row onto the wire shape, omitting
+ * optional fields when null so the response carries only present keys
+ * (matches the metadata handler's "assign only when present" convention).
+ * Extracted so the single-album and batched lookups can't drift on the
+ * projection (source → source, url ← source_url, publishedDate ←
+ * published_at).
+ */
+function projectCriticReviewRow(row: CriticReviewRow): CriticReviewItem {
+  const item: CriticReviewItem = {
+    source: row.source,
+    url: row.source_url,
+    snippet: row.snippet,
+  };
+  if (row.author) item.author = row.author;
+  if (row.published_at) item.publishedDate = row.published_at;
+  if (row.rating) item.rating = row.rating;
+  return item;
+}
+
+/**
+ * Batched sibling of {@link lookupCriticReviewsByAlbumId} for flowsheet
+ * feed-assembly (`attachCriticReviews`, album-critic-reviews slice / ADR
+ * 0012). ONE query for a whole page's worth of linked track rows — a
+ * `WHERE album_id = ANY(...)` scan against the same
+ * `album_critic_reviews_album_id_source_url_uq` index the single-album read
+ * uses — rather than one query per row (the no-N+1 guarantee `upcoming_show`
+ * / `attachUpcomingShows` documents; project #32 perf posture).
+ *
+ * Returns `[]` immediately without touching the DB when `albumIds` is empty
+ * (the caller's prefilter already short-circuits this in practice, but the
+ * guard makes the function safe to call directly).
+ *
+ * Per-album ordering and cap match the single-album read exactly
+ * (`published_at DESC NULLS LAST`, then `id DESC` as a stable tiebreak,
+ * capped at `CRITIC_REVIEWS_LIMIT`): the query orders globally by
+ * `(album_id, published_at DESC NULLS LAST, id DESC)` so every album's rows
+ * arrive already in the right order, then this function groups them by
+ * `album_id` in JS and stops appending once a bucket hits the cap — cheaper
+ * than a `ROW_NUMBER() OVER (PARTITION BY album_id ...)` window for the
+ * per-request row counts this endpoint sees, and it reuses
+ * {@link projectCriticReviewRow} so the wire projection can't drift from the
+ * single-album read.
+ *
+ * A key absent from the returned map means that album has no seeded
+ * snippets — the caller (`attachCriticReviews`) treats "absent" and "empty
+ * array" identically (both leave `critic_reviews` unset on the entry).
+ */
+export async function lookupCriticReviewsByAlbumIds(albumIds: number[]): Promise<Map<number, CriticReviewItem[]>> {
+  const result = new Map<number, CriticReviewItem[]>();
+  if (albumIds.length === 0) {
+    return result;
+  }
+
+  const rows = await db
+    .select({
+      album_id: album_critic_reviews.album_id,
+      source: album_critic_reviews.source,
+      source_url: album_critic_reviews.source_url,
+      snippet: album_critic_reviews.snippet,
+      author: album_critic_reviews.author,
+      published_at: album_critic_reviews.published_at,
+      rating: album_critic_reviews.rating,
+    })
+    .from(album_critic_reviews)
+    .where(inArray(album_critic_reviews.album_id, albumIds))
+    .orderBy(
+      album_critic_reviews.album_id,
+      sql`${album_critic_reviews.published_at} DESC NULLS LAST`,
+      desc(album_critic_reviews.id)
+    );
+
+  for (const row of rows) {
+    let bucket = result.get(row.album_id);
+    if (bucket === undefined) {
+      bucket = [];
+      result.set(row.album_id, bucket);
+    }
+    // Rows for a given album_id arrive already newest-first (the ORDER BY
+    // above), so capping here — rather than re-sorting per group — preserves
+    // that order and just stops once a bucket is full.
+    if (bucket.length < CRITIC_REVIEWS_LIMIT) {
+      bucket.push(projectCriticReviewRow(row));
+    }
+  }
+
+  return result;
 }

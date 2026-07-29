@@ -19,6 +19,12 @@ const mockTransformToV2 = jest.fn((entry: unknown) => ({ ...(entry as Record<str
 // tests/unit/services/flowsheet.attachUpcomingShows.test.ts); returning the
 // same array keeps these controller tests focused on the HTTP wiring.
 const mockAttachUpcomingShows = jest.fn((entries: unknown[]) => Promise.resolve(entries));
+// BS#1870: the same feed paths also call attachCriticReviews (batched
+// critic-review attach, album-critic-reviews slice / ADR 0012), wired at the
+// same 5 call sites as attachUpcomingShows. No-op passthrough for the same
+// reason — the enrichment logic itself is unit-tested in
+// tests/unit/services/flowsheet.attachCriticReviews.test.ts.
+const mockAttachCriticReviews = jest.fn((entries: unknown[]) => Promise.resolve(entries));
 const mockAddTrack = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>();
 const mockGetOnAirDJName = jest.fn<() => Promise<string | null>>();
@@ -42,6 +48,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getShowMetadata: mockGetShowMetadata,
   transformToV2: mockTransformToV2,
   attachUpcomingShows: mockAttachUpcomingShows,
+  attachCriticReviews: mockAttachCriticReviews,
   addTrack: mockAddTrack,
   getLatestShow: mockGetLatestShow,
   getOnAirDJName: mockGetOnAirDJName,
@@ -203,6 +210,21 @@ describe('flowsheet.controller', () => {
       expect(Array.isArray(body)).toBe(true);
     });
 
+    // BS#1870: the shows_limit branch is one of the 5 attachCriticReviews
+    // call sites (mirrors attachUpcomingShows's BS#1607 wiring).
+    it('attaches critic reviews on the shows_limit branch', async () => {
+      const entries = [createMockEntry(1)];
+      mockGetNShows.mockResolvedValue([{ id: 1 }]);
+      mockGetEntriesByShow.mockResolvedValue(entries);
+
+      const req = createMockReq({ shows_limit: '1' });
+      const res = createMockRes();
+
+      await getEntries(req as Request, res as Response, mockNext);
+
+      expect(mockAttachCriticReviews).toHaveBeenCalledWith(entries);
+    });
+
     // Sentry BACKEND-SERVICE-2T / BS#1864: the shows_limit branch shares the
     // same unguarded `.map(transformToV2)` shape as the other getEntries
     // branches — the shared projectEntriesV2 guard drops the nullish slot and
@@ -277,6 +299,19 @@ describe('flowsheet.controller', () => {
         expect(res.status).toHaveBeenCalledWith(200);
       });
 
+      // BS#1870: the range branch is one of the 5 attachCriticReviews call sites.
+      it('attaches critic reviews on the range branch', async () => {
+        const entries = [createMockEntry(100)];
+        mockGetEntriesByRange.mockResolvedValue(entries);
+
+        const req = createMockReq({ start_id: '100', end_id: '105' });
+        const res = createMockRes();
+
+        await getEntries(req as Request, res as Response, mockNext);
+
+        expect(mockAttachCriticReviews).toHaveBeenCalledWith(entries);
+      });
+
       // Sentry BACKEND-SERVICE-2T / BS#1864: the range branch shares the same
       // unguarded `.map(transformToV2)` shape as the default branch — the
       // shared projectEntriesV2 guard drops the nullish slot and captures it.
@@ -345,6 +380,22 @@ describe('flowsheet.controller', () => {
       expect(mockTransformToV2).toHaveBeenCalledWith(entries[0], 0, entries);
       expect(mockTransformToV2).toHaveBeenCalledWith(entries[1], 1, entries);
       expect(mockTransformToV2).toHaveBeenCalledWith(entries[2], 2, entries);
+    });
+
+    // BS#1870: the default paginated branch (the one the iOS app polls) must
+    // attach critic reviews alongside upcoming shows before projecting to V2.
+    it('attaches critic reviews before projecting to V2', async () => {
+      const entries = [createMockEntry(1)];
+      mockGetEntriesByPage.mockResolvedValue(entries);
+      mockGetEntryCount.mockResolvedValue(1);
+      mockGetOnAirDJName.mockResolvedValue(null);
+
+      const req = createMockReq();
+      const res = createMockRes();
+
+      await getEntries(req as Request, res as Response, mockNext);
+
+      expect(mockAttachCriticReviews).toHaveBeenCalledWith(entries);
     });
 
     // Sentry BACKEND-SERVICE-2T / BS#1864: this is the higher-traffic branch
@@ -472,6 +523,8 @@ describe('flowsheet.controller', () => {
       expect(mockTransformToV2).toHaveBeenCalledWith(entry);
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({ ...entry, v2: true });
+      // BS#1870: getLatest is one of the 5 attachCriticReviews call sites.
+      expect(mockAttachCriticReviews).toHaveBeenCalledWith([entry]);
     });
 
     it('returns 204 with no body when no entries exist', async () => {
@@ -509,6 +562,7 @@ describe('flowsheet.controller', () => {
       expect(res.json).not.toHaveBeenCalled();
       expect(mockTransformToV2).not.toHaveBeenCalled();
       expect(mockAttachUpcomingShows).not.toHaveBeenCalled();
+      expect(mockAttachCriticReviews).not.toHaveBeenCalled();
       expect(mockCaptureException).toHaveBeenCalledTimes(1);
     });
 
@@ -575,6 +629,8 @@ describe('flowsheet.controller', () => {
         ...mockShowMetadata,
         entries: entries.map((e) => ({ ...e, v2: true })),
       });
+      // BS#1870: getShowInfo is one of the 5 attachCriticReviews call sites.
+      expect(mockAttachCriticReviews).toHaveBeenCalledWith(entries);
     });
 
     // Sentry BACKEND-SERVICE-2T / BS#1864: getShowInfo shares the same
