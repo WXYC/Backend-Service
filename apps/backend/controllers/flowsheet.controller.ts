@@ -89,6 +89,35 @@ export interface IFSEntry extends Omit<
 
 const MAX_ITEMS = 200;
 const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
+
+/**
+ * Project a page of flowsheet entries to their V2 wire shape, tolerating — but
+ * not hiding — a transient nullish array element (Sentry BACKEND-SERVICE-2T /
+ * BS#1864). Every producer feeds this a dense `.map(transformToIFSEntry)`
+ * array, so a nullish slot is an unexplained anomaly: we drop it rather than
+ * 500 a public read path (`transformToV2` dereferences `.entry_type`
+ * unguarded), but capture it to Sentry so the producer defect stays
+ * diagnosable instead of silently vanishing from the feed. The 500 was the
+ * only signal that surfaced this in the first place; swallowing it wholesale
+ * would leave a recurrence invisible.
+ *
+ * This is the single choke point shared by every list read path
+ * (`getEntries`'s three branches + `getShowInfo`); guarding here rather than
+ * inside `transformToV2` keeps the single-entry callers' wire shape untouched.
+ */
+const projectEntriesV2 = (entries: IFSEntry[]): Record<string, unknown>[] => {
+  const dense = entries.filter(Boolean);
+  const dropped = entries.length - dense.length;
+  if (dropped > 0) {
+    Sentry.captureException(
+      new Error(
+        `Dropped ${dropped} nullish flowsheet ${dropped === 1 ? 'entry' : 'entries'} before V2 projection (BS#1864)`
+      )
+    );
+  }
+  return dense.map(flowsheet_service.transformToV2);
+};
+
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res) => {
   const { query } = req;
 
@@ -105,10 +134,7 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
 
     if (entries.length) {
       await flowsheet_service.attachUpcomingShows(entries);
-      // `.filter(Boolean)` guards a transient nullish array element (Sentry
-      // BACKEND-SERVICE-2T / BS#1864) — attachUpcomingShows already tolerates
-      // one, but transformToV2 still dereferences .entry_type unguarded.
-      res.status(200).json(entries.filter(Boolean).map(flowsheet_service.transformToV2));
+      res.status(200).json(projectEntriesV2(entries));
     } else {
       res.status(404).json({
         message: 'No Tracks found',
@@ -137,10 +163,7 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     const entries = await flowsheet_service.getEntriesByRange(startId, endId);
     if (entries.length) {
       await flowsheet_service.attachUpcomingShows(entries);
-      // `.filter(Boolean)` guards a transient nullish array element (Sentry
-      // BACKEND-SERVICE-2T / BS#1864) — attachUpcomingShows already tolerates
-      // one, but transformToV2 still dereferences .entry_type unguarded.
-      res.status(200).json(entries.filter(Boolean).map(flowsheet_service.transformToV2));
+      res.status(200).json(projectEntriesV2(entries));
     } else {
       res.status(404).json({ message: 'No Tracks found' });
     }
@@ -185,13 +208,8 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   // which 304s on the flowsheet watermark. A rare `on_air` change that writes no
   // flowsheet row (e.g. a mid-show dj_name_override edit) can be masked behind a
   // stale 304 until the next flowsheet mutation.
-  // `.filter(Boolean)` guards a transient nullish array element (Sentry
-  // BACKEND-SERVICE-2T / BS#1864) — attachUpcomingShows already tolerates
-  // one, but transformToV2 still dereferences .entry_type unguarded. Kept at
-  // the call site rather than inside transformToV2 so every other caller's
-  // wire shape stays untouched.
   res.status(200).json({
-    entries: entries.filter(Boolean).map(flowsheet_service.transformToV2),
+    entries: projectEntriesV2(entries),
     total,
     page,
     limit,
@@ -210,6 +228,12 @@ export const getLatest: RequestHandler = async (req, res) => {
     await flowsheet_service.attachUpcomingShows(entries);
     res.status(200).json(flowsheet_service.transformToV2(entry));
   } else {
+    // A non-empty page whose head is nullish is the same unexplained anomaly
+    // projectEntriesV2 captures on the list paths — surface it here too rather
+    // than letting it hide behind an ordinary empty-flowsheet 204.
+    if (entries.length > 0) {
+      Sentry.captureException(new Error('Dropped a nullish flowsheet head entry before V2 projection (BS#1864)'));
+    }
     res.status(204).end();
   }
 };
@@ -648,11 +672,8 @@ export const getShowInfo: RequestHandler<object, unknown, object, { show_id: str
 
   await flowsheet_service.attachUpcomingShows(entries);
 
-  // `.filter(Boolean)` guards a transient nullish array element (Sentry
-  // BACKEND-SERVICE-2T / BS#1864) — attachUpcomingShows already tolerates
-  // one, but transformToV2 still dereferences .entry_type unguarded.
   res.status(200).json({
     ...showMetadata,
-    entries: entries.filter(Boolean).map(flowsheet_service.transformToV2),
+    entries: projectEntriesV2(entries),
   });
 };
