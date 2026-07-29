@@ -1,6 +1,7 @@
 /**
  * Integration test for the flowsheet-metadata-backfill play-priority
- * work-list SELECT (BS#1591), against real PostgreSQL.
+ * work-list SELECT (BS#1591, predicate cut over to `metadata_status` by
+ * BS#895), against real PostgreSQL.
  *
  * The unit suite (worklist.test.ts) pins the statement's *shape* under the
  * mocked drizzle harness; this spec validates its *semantics* — the
@@ -10,10 +11,14 @@
  * sides of the membership join).
  *
  * Seeded matrix (all artists carry a "bs1591" marker so the mirrored query
- * can scope itself; every historical row's add_time is back-dated past the
- * 60s race guard):
+ * can scope itself; every historical row's add_time is back-dated 30 days,
+ * well past any grace window; `recoveryWindowHours: 0` is passed explicitly
+ * in every `scopedWorkList` call below so this spec's 30-day-old fixture
+ * rows stay reachable — this file is exercising the BS#1591 play-priority
+ * eligibility matrix, not BS#895's recovery-window ceiling, which has its
+ * own dedicated coverage further down):
  *   - bs1591-highplay: 6 pending plays, non-library → eligible (>= floor 5)
- *   - bs1591-boosted: 2 pending + 4 already-stamped plays, non-library →
+ *   - bs1591-boosted: 2 pending + 4 already-enriched plays, non-library →
  *     eligible (plays counts ALL rows, not just pending)
  *   - bs1591-lowfreq: 2 pending plays, non-library → EXCLUDED (below floor)
  *   - The bs1591-Catalog-Artist: 1 play, matches artists row
@@ -44,16 +49,20 @@ const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
 const PLAY_FLOOR = 5;
 const RECENCY_DAYS = 7;
+const GRACE_MINUTES = 15;
 
 /** The scoped pending predicate shared by both mirrored statements. */
-async function countScopedPending(sql) {
+async function countScopedPending(sql, { graceMinutes = GRACE_MINUTES, recoveryWindowHours = 0 } = {}) {
+  const recoveryClause =
+    recoveryWindowHours > 0 ? sql`AND f."add_time" > now() - (${recoveryWindowHours} * interval '1 hour')` : sql``;
   const rows = await sql`
     SELECT COUNT(*)::int AS pending_total
     FROM ${sql(SCHEMA)}.flowsheet f
     WHERE f."entry_type" = 'track'
       AND f."artist_name" IS NOT NULL
-      AND f."metadata_attempt_at" IS NULL
-      AND f."add_time" < now() - interval '60 seconds'
+      AND f."metadata_status" = 'pending'
+      AND f."add_time" < now() - (${graceMinutes} * interval '1 minute')
+      ${recoveryClause}
       AND f."artist_name" ILIKE '%bs1591%'
   `;
   return rows[0].pending_total;
@@ -62,14 +71,22 @@ async function countScopedPending(sql) {
 /**
  * Mirror of the work-list statement in
  * `jobs/flowsheet-metadata-backfill/worklist.ts:buildWorkList`, INCLUDING
- * its conditional assembly: the recency arm is omitted at recencyDays=0 and
- * the whole eligibility clause at playFloor=0, so the floor-0 / recency-0
- * tests below execute the same statement SHAPES production would render
- * (a tautology stand-in would hide a dangling AND/OR in the omitted
- * shapes). Arm order mirrors production too — free comparisons before the
- * correlated EXISTS, which probes the join-bound p.artist_norm.
+ * its conditional assembly: the recency arm is omitted at recencyDays=0, the
+ * whole eligibility clause at playFloor=0, and the BS#895 recovery-window
+ * ceiling at recoveryWindowHours=0, so the floor-0 / recency-0 /
+ * recovery-window-0 tests below execute the same statement SHAPES
+ * production would render (a tautology stand-in would hide a dangling
+ * AND/OR in the omitted shapes). Arm order mirrors production too — free
+ * comparisons before the correlated EXISTS, which probes the join-bound
+ * p.artist_norm. `recoveryWindowHours` defaults to 0 (disabled) here,
+ * opposite of production's live-cron default (6) — this spec's fixture
+ * rows are deliberately 30 days old to exercise the BS#1591 play-priority
+ * matrix, unrelated to the recovery-window ceiling.
  */
-async function scopedWorkList(sql, { playFloor = PLAY_FLOOR, recencyDays = RECENCY_DAYS } = {}) {
+async function scopedWorkList(
+  sql,
+  { playFloor = PLAY_FLOOR, recencyDays = RECENCY_DAYS, graceMinutes = GRACE_MINUTES, recoveryWindowHours = 0 } = {}
+) {
   const recencyArm = recencyDays > 0 ? sql`OR f."add_time" > now() - (${recencyDays} * interval '1 day')` : sql``;
   const eligibility =
     playFloor > 0
@@ -82,6 +99,8 @@ async function scopedWorkList(sql, { playFloor = PLAY_FLOOR, recencyDays = RECEN
         )
       )`
       : sql``;
+  const recoveryClause =
+    recoveryWindowHours > 0 ? sql`AND f."add_time" > now() - (${recoveryWindowHours} * interval '1 hour')` : sql``;
   return await sql`
     WITH plays AS (
       SELECT ${sql(SCHEMA)}.normalize_artist_name("artist_name") AS artist_norm, COUNT(*)::int AS plays
@@ -99,8 +118,9 @@ async function scopedWorkList(sql, { playFloor = PLAY_FLOOR, recencyDays = RECEN
     JOIN plays p ON p.artist_norm = ${sql(SCHEMA)}.normalize_artist_name(f."artist_name")
     WHERE f."entry_type" = 'track'
       AND f."artist_name" IS NOT NULL
-      AND f."metadata_attempt_at" IS NULL
-      AND f."add_time" < now() - interval '60 seconds'
+      AND f."metadata_status" = 'pending'
+      AND f."add_time" < now() - (${graceMinutes} * interval '1 minute')
+      ${recoveryClause}
       AND f."artist_name" ILIKE '%bs1591%'
       ${eligibility}
     ORDER BY p.plays DESC, p.artist_norm ASC, f."id" ASC
@@ -113,16 +133,22 @@ describe('flowsheet-metadata-backfill work-list (real PG, BS#1591)', () => {
   const artistIds = [];
   const libraryIds = [];
 
-  /** Insert a flowsheet track row with an explicit add_time offset. */
+  /**
+   * Insert a flowsheet track row with an explicit add_time offset.
+   * `stamped` mirrors the pre-BS#895 name (an already-enriched row); it now
+   * sets `metadata_status = 'enriched_match'` instead of stamping the
+   * historical `metadata_attempt_at` marker, since BS#895 made
+   * `metadata_status` the control-flow gate.
+   */
   async function seedPlay(artist, { ageInterval = '30 days', albumId = null, stamped = false } = {}) {
     const rows = await sql`
       INSERT INTO ${sql(SCHEMA)}.flowsheet
         (play_order, entry_type, artist_name, album_title, track_title,
-         request_flag, segue, album_id, add_time, metadata_attempt_at)
+         request_flag, segue, album_id, add_time, metadata_status)
       VALUES
         (98765, 'track', ${artist}, 'BS1591 Test Album', 'BS1591 Test Track',
          false, false, ${albumId}, now() - ${ageInterval}::interval,
-         ${stamped ? sql`now()` : null})
+         ${stamped ? 'enriched_match' : 'pending'})
       RETURNING id
     `;
     flowsheetIds.push(rows[0].id);
@@ -275,5 +301,55 @@ describe('flowsheet-metadata-backfill work-list (real PG, BS#1591)', () => {
     const artists = new Set(workList.map((r) => r.artist_name));
 
     expect(artists.has('bs1591-recent')).toBe(false);
+  });
+
+  describe('BS#895 grace window + recovery-window ceiling (real interval arithmetic)', () => {
+    it('graceMinutes excludes a row younger than the window, regardless of eligibility', async () => {
+      // A row inserted seconds ago is well inside the default 15-minute
+      // grace window — the consumer should get first crack, so the sweep
+      // predicate must exclude it even though it would otherwise be
+      // eligible (linked, so it clears the floor trivially).
+      const libraryRows = await sql`
+        INSERT INTO ${sql(SCHEMA)}.library
+          (artist_id, genre_id, format_id, album_title, code_number, artist_name)
+        VALUES
+          (1, 11, 1, 'bs1591-grace-window-test-album', 9872, 'Built to Spill')
+        RETURNING id
+      `;
+      libraryIds.push(libraryRows[0].id);
+      await seedPlay('bs1591-grace-window-fresh', { ageInterval: '0 seconds', albumId: libraryRows[0].id });
+
+      const workList = await scopedWorkList(sql, { graceMinutes: 15 });
+      expect(workList.some((r) => r.artist_name === 'bs1591-grace-window-fresh')).toBe(false);
+
+      // A near-zero grace window lets it back in — proves the exclusion
+      // above came from the grace clause, not some other predicate arm.
+      const workListNoGrace = await scopedWorkList(sql, { graceMinutes: 0 });
+      expect(workListNoGrace.some((r) => r.artist_name === 'bs1591-grace-window-fresh')).toBe(true);
+    });
+
+    it('recoveryWindowHours excludes a row older than the ceiling, even when otherwise eligible', async () => {
+      // bs1591-highplay is 30 days old and clears the floor on play count
+      // alone (6 >= 5) — the strongest possible eligibility signal. A 6-hour
+      // recovery-window ceiling must still exclude it: the ceiling is a
+      // hard AND, not part of the eligibility OR-disjunction.
+      const workList = await scopedWorkList(sql, { recoveryWindowHours: 6 });
+      expect(workList.some((r) => r.artist_name === 'bs1591-highplay')).toBe(false);
+
+      // The recent row (1h old) survives the same 6h ceiling.
+      expect(workList.some((r) => r.artist_name === 'bs1591-recent')).toBe(true);
+
+      const pendingTotal = await countScopedPending(sql, { recoveryWindowHours: 6 });
+      expect(pendingTotal).toBe(workList.length);
+    });
+
+    it('recoveryWindowHours=0 (disabled) restores the full historical-catch-up shape', async () => {
+      const workListDisabled = await scopedWorkList(sql, { recoveryWindowHours: 0 });
+      const workListEnabled = await scopedWorkList(sql, { recoveryWindowHours: 6 });
+
+      // With the ceiling off, the 30-day-old highplay rows are back.
+      expect(workListDisabled.some((r) => r.artist_name === 'bs1591-highplay')).toBe(true);
+      expect(workListDisabled.length).toBeGreaterThan(workListEnabled.length);
+    });
   });
 });

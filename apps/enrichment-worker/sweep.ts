@@ -11,9 +11,10 @@
  * flips any `'enriching'` row whose `enriching_since` is older than the
  * stranded-claim TTL back to `'pending'`. The next CDC INSERT for the
  * same flowsheet id is rare (CDC fires on INSERT, not UPDATE), so the
- * actual re-enrichment path for swept rows is the nightly backfill cron
- * (`jobs/flowsheet-metadata-backfill`), which selects on
- * `metadata_attempt_at IS NULL`.
+ * actual re-enrichment path for swept rows is the hourly backfill cron
+ * (`jobs/flowsheet-metadata-backfill`, Epic C C6 / BS#895), which selects
+ * on `metadata_status = 'pending'` — the exact status this sweep reverts a
+ * stranded row to.
  *
  * SQL contract:
  *

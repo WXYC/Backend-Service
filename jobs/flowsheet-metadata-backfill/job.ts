@@ -1,22 +1,30 @@
 /**
- * Recurring metadata drift-repair (#641 Phase 1, A.3 of #631).
+ * Recurring metadata drift-repair — Epic C C6 (BS#895) hourly gap-recovery
+ * sweep behind the CDC enrichment consumer (`apps/enrichment-worker`,
+ * BS#892). Originally the historical drain (#641 Phase 1, A.3 of #631).
  *
  * Iterates `flowsheet` track rows where the LML metadata enrichment never
- * ran (`metadata_attempt_at IS NULL`), calls LML's /lookup for each one,
- * and writes the 10-column metadata UPDATE plus the
- * `metadata_attempt_at = now()` stamp. Rows drain in play-descending
- * artist priority with a query-time non-library play-floor (BS#1591; see
- * `worklist.ts`), so the cache-friendly head enriches first and the
- * uncacheable one-off tail — the 2026-07-10 LML 502 flood — is excluded at
- * selection time and reported as `below_floor_skipped`. Cross-run
- * resumability is via the WHERE filter alone — successful + no-match rows
- * have the marker; LML-throw rows don't and stay in the retry pool for the
+ * ran (`metadata_status = 'pending'`, past the consumer grace window and
+ * inside the recovery-window ceiling — see `orchestrate.ts`), calls LML's
+ * /lookup for each one, and writes the 10-column metadata UPDATE plus the
+ * status flip to a terminal value. Rows drain in play-descending artist
+ * priority with a query-time non-library play-floor (BS#1591; see
+ * `worklist.ts`) — largely dormant under the C6 recovery-window ceiling,
+ * kept intact for the historical-catch-up shape. Cross-run resumability is
+ * via the WHERE filter alone — successful + no-match rows flip off
+ * `'pending'`; LML-throw rows don't and stay in the retry pool for the
  * next sweep.
+ *
+ * Also runs the epic #1810 W4 self-heal pass ahead of the main drain:
+ * re-selects rotation-linked `enriched_no_match` rows whose linked
+ * `rotation.discogs_release_id` transitioned NULL→present since this job
+ * last tried them (state-change-gated — see `worklist.ts`).
  *
  * Run procedure: registered as a cron job in EC2's crontab via
  * `deploy-base.yml`'s job-type=cron pathway, schedule taken from
- * package.json's `cron-schedule` (`0 6 * * *` UTC = 02:00 ET overnight).
- * The container runs to completion or is killed by the next deploy / a
+ * package.json's `cron-schedule` (`10 * * * *` UTC, hourly — the `:10`
+ * offset reserved for this job in `docs/ops-cron-scheduling.md`). The
+ * container runs to completion or is killed by the next deploy / a
  * manual `docker rm -f flowsheet-metadata-backfill-cron`. The orchestrator's
  * cooperative pause (#735) defers each batch when DJ activity is observed
  * on `flowsheet`, so the job is safe to run in the always-on WXYC booth.
@@ -32,6 +40,7 @@ import { closeDatabaseConnection } from '@wxyc/database';
 import { runBackfill } from './orchestrate.js';
 import { lookupMetadata, getLookupCache } from './lml-fetch.js';
 import { applyEnrichment } from './enrich.js';
+import { buildRotationSelfHealCandidates } from './worklist.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 
 const JOB_NAME = 'flowsheet-metadata-backfill';
@@ -57,6 +66,11 @@ const main = async () => {
       lookup: lookupMetadata,
       enrich: applyEnrichment,
       cacheStats: () => getLookupCache().stats(),
+      // BS#895 / epic #1810 W4: only production wires the self-heal
+      // candidate builder, so it runs here and stays off by default in
+      // every other `runBackfill` caller (tests, catch-up scripts) unless
+      // they opt in explicitly.
+      buildSelfHealCandidates: buildRotationSelfHealCandidates,
     });
   } catch (error) {
     log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });

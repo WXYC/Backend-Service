@@ -1,6 +1,6 @@
 /**
  * Integration test for the flowsheet-metadata-backfill writer contract
- * (BS#1027 / Epic D).
+ * (BS#1027 / Epic D, guard cut over to `metadata_status` by BS#895).
  *
  * The historical drain in `jobs/flowsheet-metadata-backfill/enrich.ts`
  * used to write the 10-column metadata payload inline on `flowsheet` for
@@ -12,7 +12,7 @@
  * This spec validates the four-way matrix:
  *   - Linked + match: `album_metadata` row materializes with the full
  *     10-column payload; the flowsheet inline columns stay untouched
- *     (album_id, marker stamped, no inline writes).
+ *     (album_id, status flipped to enriched_match, no inline writes).
  *   - Linked + no-match: only the 3 search URLs land in `album_metadata`;
  *     the 7 other columns are NULL on INSERT; flowsheet inline columns
  *     stay untouched.
@@ -25,10 +25,11 @@
  *   - The `setWhere: updated_at < NOW()` race guard prevents a delayed
  *     backfill cycle from clobbering a fresher runtime/worker enrichment
  *     of the same album_id.
- *   - The `metadata_attempt_at` marker stamp happens on all four branches.
- *   - The marker-based idempotency guard (`metadata_attempt_at IS NULL`)
- *     leaves an already-stamped flowsheet row untouched (returning empty
- *     → raced metric in the application layer).
+ *   - `metadata_status` flips to the terminal value (+ the historical
+ *     `metadata_attempt_at` marker still stamps) on all four branches.
+ *   - The status-based idempotency guard (`metadata_status = 'pending'`,
+ *     BS#895) leaves an already-flipped flowsheet row untouched (returning
+ *     empty → raced metric in the application layer).
  *
  * Pure SQL — does NOT import `jobs/flowsheet-metadata-backfill/enrich.ts`.
  * Integration runner is babel-jest with no TS support; mirrors the
@@ -88,19 +89,24 @@ async function upsertLinkedNoMatch(sql, albumId, searchUrls) {
   `;
 }
 
-/** Marker-only flowsheet stamp used on both linked branches after the album_metadata UPSERT. */
-async function stampMarker(sql, flowsheetId) {
+/**
+ * Status-flip + marker flowsheet stamp used on both linked branches after
+ * the album_metadata UPSERT (BS#895: guards on `metadata_status = 'pending'`
+ * instead of the old `metadata_attempt_at IS NULL` marker).
+ */
+async function stampMarker(sql, flowsheetId, status) {
   const rows = await sql`
     UPDATE ${sql(SCHEMA)}.flowsheet
-       SET metadata_attempt_at = NOW()
+       SET metadata_attempt_at = NOW(),
+           metadata_status = ${status}
      WHERE id = ${flowsheetId}
-       AND metadata_attempt_at IS NULL
+       AND metadata_status = 'pending'
     RETURNING id
   `;
   return rows.length;
 }
 
-/** Unlinked+match writes the 10 inline columns and the marker on flowsheet. */
+/** Unlinked+match writes the 10 inline columns, flips metadata_status, and stamps the marker on flowsheet. */
 async function inlineMatch(sql, flowsheetId, payload) {
   const rows = await sql`
     UPDATE ${sql(SCHEMA)}.flowsheet
@@ -114,24 +120,26 @@ async function inlineMatch(sql, flowsheetId, payload) {
            soundcloud_url       = ${payload.soundcloud_url},
            artist_bio           = ${payload.artist_bio},
            artist_wikipedia_url = ${payload.artist_wikipedia_url},
-           metadata_attempt_at  = NOW()
+           metadata_attempt_at  = NOW(),
+           metadata_status      = 'enriched_match'
      WHERE id = ${flowsheetId}
-       AND metadata_attempt_at IS NULL
+       AND metadata_status = 'pending'
     RETURNING id
   `;
   return rows.length;
 }
 
-/** Unlinked+no-match writes the 3 search URLs and the marker inline. */
+/** Unlinked+no-match writes the 3 search URLs, flips metadata_status, and stamps the marker inline. */
 async function inlineNoMatch(sql, flowsheetId, searchUrls) {
   const rows = await sql`
     UPDATE ${sql(SCHEMA)}.flowsheet
        SET youtube_music_url   = ${searchUrls.youtube_music_url},
            bandcamp_url        = ${searchUrls.bandcamp_url},
            soundcloud_url      = ${searchUrls.soundcloud_url},
-           metadata_attempt_at = NOW()
+           metadata_attempt_at = NOW(),
+           metadata_status     = 'enriched_no_match'
      WHERE id = ${flowsheetId}
-       AND metadata_attempt_at IS NULL
+       AND metadata_status = 'pending'
     RETURNING id
   `;
   return rows.length;
@@ -212,7 +220,7 @@ describe('flowsheet-metadata-backfill writer contract (real PG, BS#1027)', () =>
     insertedFlowsheetIds.push(flowsheetId);
 
     await upsertLinkedMatch(sql, albumId, FULL_PAYLOAD);
-    const stamped = await stampMarker(sql, flowsheetId);
+    const stamped = await stampMarker(sql, flowsheetId, 'enriched_match');
     expect(stamped).toBe(1);
 
     // album_metadata holds the 10-column payload
@@ -229,7 +237,7 @@ describe('flowsheet-metadata-backfill writer contract (real PG, BS#1027)', () =>
     const fsRows = await sql`
       SELECT artwork_url, discogs_url, release_year, spotify_url, apple_music_url,
              youtube_music_url, bandcamp_url, soundcloud_url, artist_bio,
-             artist_wikipedia_url, metadata_attempt_at
+             artist_wikipedia_url, metadata_attempt_at, metadata_status
       FROM ${sql(SCHEMA)}.flowsheet WHERE id = ${flowsheetId}
     `;
     expect(fsRows[0].artwork_url).toBeNull();
@@ -242,8 +250,9 @@ describe('flowsheet-metadata-backfill writer contract (real PG, BS#1027)', () =>
     expect(fsRows[0].soundcloud_url).toBeNull();
     expect(fsRows[0].artist_bio).toBeNull();
     expect(fsRows[0].artist_wikipedia_url).toBeNull();
-    // marker IS stamped
+    // marker IS stamped, status flipped
     expect(fsRows[0].metadata_attempt_at).not.toBeNull();
+    expect(fsRows[0].metadata_status).toBe('enriched_match');
   });
 
   test('linked + no-match: 3 URLs land in album_metadata, 7 columns NULL, flowsheet inline stays NULL', async () => {
@@ -253,7 +262,7 @@ describe('flowsheet-metadata-backfill writer contract (real PG, BS#1027)', () =>
     insertedFlowsheetIds.push(flowsheetId);
 
     await upsertLinkedNoMatch(sql, albumId, SEARCH_URLS);
-    const stamped = await stampMarker(sql, flowsheetId);
+    const stamped = await stampMarker(sql, flowsheetId, 'enriched_no_match');
     expect(stamped).toBe(1);
 
     const amRows = await sql`
@@ -272,7 +281,7 @@ describe('flowsheet-metadata-backfill writer contract (real PG, BS#1027)', () =>
     expect(amRows[0].artist_wikipedia_url).toBeNull();
 
     const fsRows = await sql`
-      SELECT artwork_url, youtube_music_url, bandcamp_url, soundcloud_url, metadata_attempt_at
+      SELECT artwork_url, youtube_music_url, bandcamp_url, soundcloud_url, metadata_attempt_at, metadata_status
       FROM ${sql(SCHEMA)}.flowsheet WHERE id = ${flowsheetId}
     `;
     expect(fsRows[0].artwork_url).toBeNull();
@@ -280,6 +289,7 @@ describe('flowsheet-metadata-backfill writer contract (real PG, BS#1027)', () =>
     expect(fsRows[0].bandcamp_url).toBeNull();
     expect(fsRows[0].soundcloud_url).toBeNull();
     expect(fsRows[0].metadata_attempt_at).not.toBeNull();
+    expect(fsRows[0].metadata_status).toBe('enriched_no_match');
   });
 
   test('unlinked + match: 10 inline columns land on flowsheet; no album_metadata row created', async () => {
@@ -292,7 +302,7 @@ describe('flowsheet-metadata-backfill writer contract (real PG, BS#1027)', () =>
     const fsRows = await sql`
       SELECT artwork_url, discogs_url, release_year, spotify_url, apple_music_url,
              youtube_music_url, bandcamp_url, soundcloud_url, artist_bio,
-             artist_wikipedia_url, metadata_attempt_at, album_id
+             artist_wikipedia_url, metadata_attempt_at, metadata_status, album_id
       FROM ${sql(SCHEMA)}.flowsheet WHERE id = ${flowsheetId}
     `;
     expect(fsRows[0].album_id).toBeNull();
@@ -301,6 +311,7 @@ describe('flowsheet-metadata-backfill writer contract (real PG, BS#1027)', () =>
     expect(fsRows[0].release_year).toBe(FULL_PAYLOAD.release_year);
     expect(fsRows[0].artist_bio).toBe(FULL_PAYLOAD.artist_bio);
     expect(fsRows[0].metadata_attempt_at).not.toBeNull();
+    expect(fsRows[0].metadata_status).toBe('enriched_match');
   });
 
   test('unlinked + no-match: 3 URLs land inline; no album_metadata row created', async () => {
@@ -312,7 +323,7 @@ describe('flowsheet-metadata-backfill writer contract (real PG, BS#1027)', () =>
 
     const fsRows = await sql`
       SELECT youtube_music_url, bandcamp_url, soundcloud_url, artwork_url,
-             metadata_attempt_at, album_id
+             metadata_attempt_at, metadata_status, album_id
       FROM ${sql(SCHEMA)}.flowsheet WHERE id = ${flowsheetId}
     `;
     expect(fsRows[0].album_id).toBeNull();
@@ -321,6 +332,7 @@ describe('flowsheet-metadata-backfill writer contract (real PG, BS#1027)', () =>
     expect(fsRows[0].soundcloud_url).toBe(SEARCH_URLS.soundcloud_url);
     expect(fsRows[0].artwork_url).toBeNull();
     expect(fsRows[0].metadata_attempt_at).not.toBeNull();
+    expect(fsRows[0].metadata_status).toBe('enriched_no_match');
   });
 
   test('race guard: a stale backfill upsert against a future-dated album_metadata row leaves it untouched', async () => {
@@ -388,16 +400,17 @@ describe('flowsheet-metadata-backfill writer contract (real PG, BS#1027)', () =>
     expect(after[0].artwork_url).toBe(FULL_PAYLOAD.artwork_url);
   });
 
-  test('marker idempotency: stamping an already-stamped flowsheet row returns 0 (raced outcome)', async () => {
+  test('status-guard idempotency: stamping an already-flipped flowsheet row returns 0 (raced outcome)', async () => {
     const flowsheetId = await insertFlowsheetRow(sql, 'marker-raced', null);
     insertedFlowsheetIds.push(flowsheetId);
 
     // First stamp lands.
-    const first = await stampMarker(sql, flowsheetId);
+    const first = await stampMarker(sql, flowsheetId, 'enriched_match');
     expect(first).toBe(1);
 
-    // Second stamp races against the marker IS NULL guard.
-    const second = await stampMarker(sql, flowsheetId);
+    // Second stamp races against the metadata_status = 'pending' guard
+    // (BS#895) — the row is no longer 'pending' after the first stamp.
+    const second = await stampMarker(sql, flowsheetId, 'enriched_match');
     expect(second).toBe(0);
   });
 });

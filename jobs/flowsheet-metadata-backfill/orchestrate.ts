@@ -1,37 +1,58 @@
 /**
- * Backfill orchestrator for #638 (historical metadata drain, A.1.a of #631).
+ * Backfill orchestrator. Originally the historical metadata drain (#638,
+ * A.1.a of #631); retuned by BS#895 (Epic C C6) into the hourly gap-recovery
+ * sweep behind the CDC enrichment consumer (`apps/enrichment-worker`,
+ * BS#892).
  *
- * Iterates `flowsheet` track rows where `metadata_attempt_at IS NULL`,
- * calls LML for each one, and applies the 10-column UPDATE via
- * `applyEnrichment`. Designed to be resumable and failure-tolerant:
+ * Iterates `flowsheet` track rows where `metadata_status = 'pending'`, calls
+ * LML for each one, and applies the 10-column UPDATE via `applyEnrichment`.
+ * Designed to be resumable and failure-tolerant:
  *
  *   - The WHERE filter is `entry_type='track' AND artist_name IS NOT NULL
- *     AND metadata_attempt_at IS NULL AND add_time < now() - interval '60
- *     seconds'`. The marker (#658) is set on every successful enrichment
- *     attempt — match or no-match — so the same filter cleanly identifies
- *     the un-tried tail at any point in the lifecycle (see #639).
- *   - The 60-second race guard avoids racing the runtime fire-and-forget
- *     UPDATE on rows just inserted via the tubafrenzy webhook.
+ *     AND metadata_status = 'pending' AND add_time < now() -
+ *     (graceMinutes * interval '1 minute')`, optionally ANDed with a hard
+ *     `add_time > now() - (recoveryWindowHours * interval '1 hour')`
+ *     ceiling. `metadata_status` (BS#891) is the explicit enrichment
+ *     lifecycle enum; it's set on every row by default and flipped to a
+ *     terminal value by whichever writer enriches the row (the CDC worker,
+ *     this job, or the W4 self-heal pass below), so the same filter cleanly
+ *     identifies the un-tried tail at any point in the lifecycle. Replaces
+ *     the pre-BS#891 implicit marker (`metadata_attempt_at IS NULL`) — see
+ *     `docs/migrations.md` "Attempt-at markers" and `worklist.ts`'s module
+ *     docstring for the full BS#895 predicate-swap rationale.
+ *   - `graceMinutes` (default 15) gives the CDC consumer first crack at a
+ *     freshly-inserted row before the sweep spends an LML call on it —
+ *     replaces the old 60-second guard, which existed only to dodge the
+ *     — now-removed (Epic C C5 / #894) — runtime fire-and-forget writer.
+ *   - `recoveryWindowHours` (default 6) is the design constraint from the
+ *     2026-07-23 comment on #895: #1011 retired the historical daily drain
+ *     WITHOUT draining it, so ~748k rows sit at `metadata_status='pending'`
+ *     far older than any grace window. Without this ceiling the hourly
+ *     sweep would match the entire undrained backlog on its first run
+ *     instead of the "tens of rows/hour" C6 sizing assumes.
  *   - Within a single run, row order comes from a play-priority work-list
  *     materialized once at run start (BS#1591, `worklist.ts`): pending row
  *     ids ordered by per-artist total plays descending, with non-library
  *     artists below a configurable play-floor excluded at query time. The
  *     high-value cache-friendly head drains first; the uncacheable one-off
  *     tail stops consuming Discogs fan-out (the 2026-07-10 LML 502 flood).
- *     A monotonic array cursor drains the list — it advances
- *     unconditionally, so a failing row can never be re-selected within a
- *     run (the BS#1011 wedge-proof property, preserved under value order
- *     where a naive head-of-cohort re-SELECT would jam on the highest-play
- *     failing row). Across runs, the WHERE filter is what restarts — the
- *     work-list doesn't need to persist. Rows inserted mid-run are not in
- *     the list and simply wait for the next run (the live enrichment-worker
- *     owns new rows anyway).
+ *     (In steady state under the C6 recovery-window ceiling, every
+ *     candidate row is already far younger than the floor's recency
+ *     exemption, so this machinery is effectively dormant — see
+ *     `worklist.ts`.) A monotonic array cursor drains the list — it
+ *     advances unconditionally, so a failing row can never be re-selected
+ *     within a run (the BS#1011 wedge-proof property, preserved under value
+ *     order where a naive head-of-cohort re-SELECT would jam on the
+ *     highest-play failing row). Across runs, the WHERE filter is what
+ *     restarts — the work-list doesn't need to persist. Rows inserted
+ *     mid-run are not in the list and simply wait for the next run (the
+ *     live enrichment-worker owns new rows anyway).
  *   - A per-row failure — an LML throw (`lml_error`) or a DB-write throw
  *     (`enrich_error`, e.g. a mojibake title overflowing a varchar column,
  *     BS#1011) — is logged, counted, and the loop continues. The row stays
- *     `metadata_attempt_at IS NULL`, so the next sweep (recurring
- *     drift-repair, #639 Phase 2) retries it; the in-run cursor still
- *     advances, so one bad row can never wedge the drain.
+ *     `metadata_status = 'pending'`, so the next sweep retries it; the
+ *     in-run cursor still advances, so one bad row can never wedge the
+ *     drain.
  *   - Cooperative pause: WXYC has no quiet hours — there is always a DJ in
  *     the booth. Before the work-list build and before each batch, the
  *     orchestrator probes `flowsheet` for
@@ -43,24 +64,32 @@
  *     uses migration 0050's partial index on (add_time DESC) WHERE
  *     entry_type='track', so the per-batch cost is one buffer read.
  *     Set `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` to disable for catch-up runs.
+ *   - W4 self-heal (epic #1810, folded into this issue per the 2026-07-25
+ *     scoping comment): a small, separate pass ahead of the main drain
+ *     re-selects rotation-linked rows stuck at `metadata_status =
+ *     'enriched_no_match'` whose linked `rotation.discogs_release_id` has
+ *     transitioned NULL→present since this job last tried them —
+ *     state-change-gated, not blind time. See
+ *     `worklist.ts:buildRotationSelfHealCandidates` for the exact gate and
+ *     `enrich.ts`'s `fromStatus` option for how the same `applyEnrichment`
+ *     write path is reused against a different starting status.
  *
  * Concurrent CDC-worker overlap: the live enrichment worker
- * (`apps/enrichment-worker`) finalizes rows via `metadata_status` and — by
- * BS#891 design — never writes `metadata_attempt_at`, so worker-enriched
- * rows stay inside this job's marker-based pending cohort. (The old
- * marker-stamping runtime fire-and-forget path was removed in Epic C C5 /
- * #894; the worker is the sole live enricher.) The batch loader therefore
- * selects `metadata_status` and the loop partitions on it: rows the worker
- * already drove to a terminal status get a marker-only reconcile stamp (no
- * LML call — the enrichment already happened; the stamp just closes the
- * marker state machine so the cohort converges), rows the worker has
- * in-flight (`enriching`) are left untouched for the next run, and only
- * still-`pending` rows spend a lookup. The residual race window — a row
- * claimed by the worker between its slice's SELECT and its turn in the
- * per-row loop — is seconds wide and benign: both writers persist
- * near-identical top-match LML payloads through orthogonal guards, and the
- * job's marker stamp removes the row from every future work-list. The
- * 60-second `add_time` race guard covers the just-inserted case.
+ * (`apps/enrichment-worker`) finalizes rows via `metadata_status` — the
+ * SAME column this job's own selection predicate now reads (BS#895), so a
+ * row the worker claims (`'pending' → 'enriching'`) or finalizes
+ * (`→ 'enriched_match'` / `'enriched_no_match'` / `'failed_no_retry'`)
+ * simply stops matching this job's WHERE on the very next statement — no
+ * separate reconcile pass is needed to keep the pending cohort converging.
+ * The batch loader still re-checks `metadata_status = 'pending'` at load
+ * time and still fetches the column so the (now largely dormant, kept as a
+ * fail-safe) worker-lifecycle partition below can leave a row the worker
+ * claimed between the work-list snapshot and this row's turn in the loop
+ * completely untouched rather than racing it. That race window is seconds
+ * wide and benign either way: a row that flips out of `'pending'` in that
+ * window simply vanishes from `loadBatchByIds`'s result (counted as
+ * `stale_skipped`, same bucket as a hard-deleted row) and both writers
+ * would have persisted the same top-match payload regardless.
  *
  * The `lookup` and `enrich` functions are injected so tests can drive the
  * orchestration without a live LML or DB. Production wires them to
@@ -80,7 +109,7 @@ import {
 } from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
 import type { EnrichRow, EnrichOutcome } from './enrich.js';
-import { stampDeadLetter as defaultStampDeadLetter } from './enrich.js';
+import { applyEnrichment as defaultApplyEnrichment, stampDeadLetter as defaultStampDeadLetter } from './enrich.js';
 import type { LookupResult } from './lml-fetch.js';
 import { captureError, log } from './logger.js';
 import {
@@ -88,6 +117,7 @@ import {
   FLOWSHEET_TABLE,
   unwrapRows,
   type BuildWorkListFn,
+  type BuildSelfHealCandidatesFn,
 } from './worklist.js';
 
 const JOB_NAME = 'flowsheet-metadata-backfill';
@@ -183,13 +213,68 @@ export const resolvePlayFloor = (raw: string | undefined = process.env.BACKFILL_
 
 /**
  * Resolve `BACKFILL_FLOOR_RECENCY_DAYS` (BS#1591 decision 5). `0` disables
- * the recency exemption — only sensible while this cron remains a pure
- * historical drain; keep it non-zero once BS#895 lands.
+ * the recency exemption — only sensible for a pure historical catch-up run
+ * (`recoveryWindowHours=0`); the live BS#895 hourly cron keeps it non-zero
+ * (though the exemption is largely dormant once the recovery-window ceiling
+ * is active — see `worklist.ts`).
  */
 export const resolveFloorRecencyDays = (raw: string | undefined = process.env.BACKFILL_FLOOR_RECENCY_DAYS): number =>
   requireNonNegativeInt(raw, 'BACKFILL_FLOOR_RECENCY_DAYS', FLOOR_RECENCY_DAYS_DEFAULT, {
     unit: 'days',
     note: 'Use 0 to disable the recency exemption from the play-floor.',
+  });
+
+/**
+ * Default consumer grace window in minutes (BS#895 / Epic C C6): rows
+ * younger than this are never eligible for the sweep, regardless of the
+ * play-floor/eligibility arms — the CDC consumer gets first crack. Replaces
+ * the pre-C6 60-second race guard, which existed only to dodge the — now
+ * removed (#894) — runtime fire-and-forget writer. 15 matches the ticket's
+ * explicit design (`WHERE metadata_status = 'pending' AND inserted_at <
+ * now() - interval '15 minutes'`).
+ */
+export const GRACE_MINUTES_DEFAULT = 15;
+
+/**
+ * Resolve `BACKFILL_GRACE_MINUTES` (BS#895). `0` disables the grace window
+ * (every pending row is immediately eligible) — only sensible for a
+ * catch-up run; the live hourly cron keeps it non-zero so it doesn't race
+ * the consumer on a row inserted seconds ago.
+ */
+export const resolveGraceMinutes = (raw: string | undefined = process.env.BACKFILL_GRACE_MINUTES): number =>
+  requireNonNegativeInt(raw, 'BACKFILL_GRACE_MINUTES', GRACE_MINUTES_DEFAULT, {
+    unit: 'minutes',
+    note: 'Use 0 to disable the consumer grace window.',
+  });
+
+/**
+ * Default recovery-window ceiling in hours (BS#895 / Epic C C6, the
+ * 2026-07-23 design constraint on #895): rows older than this are excluded
+ * from the sweep predicate entirely. Required because #1011 retired the
+ * historical daily drain WITHOUT draining it — ~748k rows sit at
+ * `metadata_status='pending'` far older than any grace window, and without
+ * this ceiling the hourly sweep would match the whole undrained backlog on
+ * its first run instead of the "tens of rows/hour" the C6 sizing assumes,
+ * false-triggering the "thousands → consumer leak" alarm. 6 hours covers a
+ * deploy, a restart, or a full evening's CDC event-loss window (the
+ * scenarios #895's body names) with comfortable margin, while staying two
+ * orders of magnitude below the age of the undrained backlog.
+ */
+export const RECOVERY_WINDOW_HOURS_DEFAULT = 6;
+
+/**
+ * Resolve `BACKFILL_RECOVERY_WINDOW_HOURS` (BS#895). `0` disables the
+ * ceiling — only sensible for a deliberate historical catch-up run (e.g. a
+ * future one-shot drain of the retired backlog), NEVER for the live hourly
+ * cron: with the ceiling off the sweep matches the entire undrained
+ * historical `pending` cohort on every run.
+ */
+export const resolveRecoveryWindowHours = (
+  raw: string | undefined = process.env.BACKFILL_RECOVERY_WINDOW_HOURS
+): number =>
+  requireNonNegativeInt(raw, 'BACKFILL_RECOVERY_WINDOW_HOURS', RECOVERY_WINDOW_HOURS_DEFAULT, {
+    unit: 'hours',
+    note: 'Use 0 to disable the recovery-window ceiling (historical catch-up runs only — never the live hourly cron).',
   });
 
 /**
@@ -285,9 +370,11 @@ const extractSqlState = (error: unknown): string | undefined => {
  *
  * Everything else — deadlock (`40P01`), serialization failure (`40001`),
  * connection errors, or an SQLSTATE we can't determine — is transient, so the
- * row stays `metadata_attempt_at IS NULL` and the next sweep retries it. Fail
- * safe toward retry, never toward silently dead-lettering a row a retry could
- * have enriched.
+ * row stays at whatever `metadata_status` it entered `processRow` with
+ * (`'pending'` for the main sweep, `'enriched_no_match'` for the W4
+ * self-heal re-attempt) and the next sweep retries it. Fail safe toward
+ * retry, never toward silently dead-lettering a row a retry could have
+ * enriched.
  */
 export const isPermanentEnrichError = (error: unknown): boolean => {
   const sqlState = extractSqlState(error);
@@ -330,25 +417,37 @@ export type Totals = {
   // worklist.ts) — so dashboards need this to subtract.
   below_floor_skipped: number;
   // BS#1591: work-list ids that VANISHED before their batch load — the row
-  // was hard-deleted mid-run (flowsheet deleteEntry), or its marker was
-  // stamped by an out-of-band writer. NOT worker overlap: the CDC worker
-  // never writes `metadata_attempt_at`, so worker-enriched rows cannot trip
-  // the marker re-check — they surface as `worker_reconciled` instead.
+  // was hard-deleted mid-run (flowsheet deleteEntry), or (BS#895) the CDC
+  // worker claimed or finalized it between the work-list snapshot and this
+  // slice's load. Since `loadBatchByIds` re-checks `metadata_status =
+  // 'pending'` (the same predicate the work-list itself used), a row the
+  // worker touched in that narrow window now surfaces HERE rather than as
+  // `worker_reconciled` — see that field's doc for the pre-BS#895 shape,
+  // where the broader marker-based re-check routinely caught worker-claimed
+  // rows this bucket couldn't see.
   stale_skipped: number;
-  // BS#1591 review follow-up: work-list rows the CDC worker had already
-  // driven to a terminal `metadata_status` (enriched_match /
-  // enriched_no_match / failed_no_retry) by batch-load time. The enrichment
-  // already happened (or terminally failed) on the worker's side, so no LML
-  // call is spent — the job stamps `metadata_attempt_at` only, closing the
-  // marker state machine so the pending cohort converges. This bucket IS
-  // the worker-overlap signal.
+  // BS#1591 review follow-up. Dormant since BS#895 (see `loadBatchByIds`'s
+  // docstring) — kept as a fail-safe bucket, not a routinely-exercised
+  // signal. Pre-BS#895: work-list rows the CDC worker had already driven to
+  // a terminal `metadata_status` (enriched_match / enriched_no_match /
+  // failed_no_retry) by batch-load time; the job stamped
+  // `metadata_attempt_at` only, closing the old marker state machine.
   worker_reconciled: number;
-  // BS#1591 review follow-up: work-list rows the worker had claimed
-  // (`metadata_status = 'enriching'`) — or carrying an unrecognized future
-  // status — at batch-load time. Left completely untouched (no LML, no
-  // stamp): a live claim finalizes and reconciles next run; a wedged claim
-  // is the C6 sweep's job to requeue, not ours to race.
+  // BS#1591 review follow-up. Also dormant since BS#895 for the same
+  // reason. Pre-BS#895: work-list rows the worker had claimed
+  // (`metadata_status = 'enriching'`) — or carried an unrecognized future
+  // status — at batch-load time, left completely untouched.
   worker_inflight_skipped: number;
+  // BS#895 / epic #1810 W4: rotation-linked `enriched_no_match` rows the
+  // self-heal pass found this run, whose linked `rotation.discogs_release_id`
+  // transitioned NULL→present since this job's last attempt (or were never
+  // attempted by this job). See `worklist.ts:buildRotationSelfHealCandidates`.
+  self_heal_candidates: number;
+  // BS#895 / epic #1810 W4: of `self_heal_candidates`, how many the re-attempt
+  // resolved to a real Discogs match (`enriched_match`). The rest stayed
+  // `enriched_no_match` (LML still couldn't resolve it) or hit `lml_error` /
+  // `enrich_error` (folded into those shared buckets, not counted here).
+  self_heal_resolved: number;
 };
 
 export type ProcessOutcome = EnrichOutcome | 'lml_error' | 'enrich_error';
@@ -374,25 +473,31 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * status: 'lml_error' when the LML lookup threw, 'enrich_error' when the
  * per-row DB write threw. BOTH failures are logged, captured, and consumed
  * — neither bubbles up, so a single bad row cannot abort the run. The row
- * stays `metadata_attempt_at IS NULL` so the next sweep retries it.
+ * stays at whatever `metadata_status` it entered this call with so the next
+ * sweep retries it. `deps.enrich` / `deps.stampDeadLetter` are injected so
+ * the same function drives both the main sweep (`fromStatus: 'pending'`,
+ * the default inside `enrich.ts`) and the W4 rotation self-heal pass
+ * (`fromStatus: 'enriched_no_match'`, wired by the caller in `runBackfill`)
+ * without duplicating this loop.
  *
  * The enrich catch is load-bearing, not defensive boilerplate: without it a
  * single row whose synthesized search URL overflows a varchar(512) column
  * (mojibake titles from the legacy latin1→UTF-8 ETL) throws mid-batch, the
  * throw propagates to `main` → exit 1, and because the failed UPDATE never
- * stamps `metadata_attempt_at`, the id-cursor re-selects that same row as the
- * smallest pending id on the next run and crashes again — a permanent stall
- * (BS#1011). Isolating the throw here lets the cursor advance past it.
+ * flips the row off its starting status, the work-list/candidate-list
+ * re-selects that same row on the next run and crashes again — a permanent
+ * stall (BS#1011). Isolating the throw here lets the cursor advance past it.
  *
  * Dead-lettering (BS#1562): isolating the throw kept the cursor moving but
- * still left the poison row `metadata_attempt_at IS NULL`, so it was
- * re-attempted (and re-failed, and re-logged) every nightly run forever — the
- * pending cohort never reached literal 0, breaking BS#1011's "cohort == 0"
- * retire criterion. When the SQLSTATE marks the failure *permanent* (data
- * exception / integrity violation — `isPermanentEnrichError`), we stamp the
- * marker via `stampDeadLetter` so the row leaves the pending cohort. Genuinely
- * transient failures (deadlock, serialization, connection drop, or an
- * unreadable code) are left unstamped and retryable, exactly as before.
+ * still left the poison row retryable forever, so it was re-attempted (and
+ * re-failed, and re-logged) every run — the pending cohort never converged,
+ * breaking BS#1011's "cohort == 0" retire criterion (and its C6-successor
+ * "recovery sweep finds < 100 rows" criterion). When the SQLSTATE marks the
+ * failure *permanent* (data exception / integrity violation —
+ * `isPermanentEnrichError`), we flip the row to `failed_no_retry` via
+ * `stampDeadLetter` so it leaves the cohort. Genuinely transient failures
+ * (deadlock, serialization, connection drop, or an unreadable code) are left
+ * unstamped and retryable, exactly as before.
  */
 export const processRow = async (
   row: EnrichRow,
@@ -420,7 +525,8 @@ export const processRow = async (
   } catch (error) {
     // Classify the failure by SQLSTATE. A permanent error (data exception /
     // integrity violation) will reproduce every run, so dead-letter the row —
-    // stamp the marker so it leaves the `metadata_attempt_at IS NULL` cohort.
+    // flip it to `failed_no_retry` so it leaves whichever cohort it entered
+    // from (`'pending'` or, for W4 self-heal, `'enriched_no_match'`).
     // Transient errors stay unstamped and retryable.
     const deadLettered = isPermanentEnrichError(error);
     // Defend against non-Error throws (`throw 'string'`, `throw { code: x }`) —
@@ -494,14 +600,20 @@ export type BatchRow = EnrichRow & { metadata_status: string };
 const intArrayLiteral = (ids: readonly number[]): string => `{${ids.join(',')}}`;
 
 /**
- * Load one work-list slice's rows by id (BS#1591). The work-list already
- * guaranteed the canonical pending filter at build time; here the marker is
- * re-checked (rows stamped out-of-band mid-run drop out) and
- * `metadata_status` is fetched so the caller can partition on the worker's
- * lifecycle — the CDC worker finalizes via status WITHOUT stamping the
- * marker, so a status-blind loader would re-enrich worker-enriched rows and
- * race in-flight claims (`applyEnrichment`'s id+marker guard remains the
- * last line of defense).
+ * Load one work-list slice's rows by id (BS#1591; predicate cut over to
+ * `metadata_status` by BS#895). The work-list already guaranteed the
+ * canonical pending filter at build time; here the status is re-checked
+ * (rows the CDC worker claimed or finalized between the work-list snapshot
+ * and this slice's load drop out) and `metadata_status` is fetched so the
+ * caller can partition on the worker's lifecycle. Since the work-list's own
+ * SELECT (`worklist.ts`) already filters on `metadata_status = 'pending'`,
+ * this re-check is now the SAME predicate as the selection — in steady
+ * state every returned row already has `metadata_status = 'pending'`, so
+ * the worker-lifecycle partition below is a fail-safe against the narrow
+ * mid-run race window, not a routinely-exercised path (contrast the
+ * pre-BS#895 shape, where the broader `metadata_attempt_at IS NULL`
+ * predicate routinely returned worker-claimed rows that needed partitioning
+ * out here).
  *
  * `= ANY` does not preserve order, so the caller re-orders results to
  * work-list order.
@@ -520,23 +632,54 @@ const loadBatchByIds = async (ids: number[]): Promise<BatchRow[]> => {
       "metadata_status"
     FROM ${FLOWSHEET_TABLE}
     WHERE "id" = ANY(${idArrayLiteral}::int[])
-      AND "metadata_attempt_at" IS NULL
+      AND "metadata_status" = 'pending'
   `),
     'batch load'
   );
 };
 
 /**
+ * Load the W4 self-heal candidate slice's rows by id (BS#895 / epic #1810).
+ * Mirrors `loadBatchByIds`'s re-check-at-load-time shape, but against
+ * `metadata_status = 'enriched_no_match'` — the status these candidates are
+ * re-attempted FROM (see `enrich.ts`'s `fromStatus` option) — instead of
+ * `'pending'`. No worker-lifecycle partition is needed here: a terminal
+ * `'enriched_no_match'` row is never claimed by the CDC worker (the worker
+ * only claims `'pending'` rows via new CDC INSERT events), so the only
+ * realistic way a candidate drops out between the worklist snapshot and
+ * this load is a concurrent overlapping run of this same job — rare for an
+ * hourly single-instance cron, but the re-check makes it safe regardless.
+ */
+const loadSelfHealRowsByIds = async (ids: number[]): Promise<EnrichRow[]> => {
+  if (ids.length === 0) return [];
+  const idArrayLiteral = intArrayLiteral(ids);
+  return unwrapRows<EnrichRow>(
+    await db.execute(sql`
+    SELECT
+      "id",
+      "artist_name",
+      "album_title",
+      "track_title",
+      "album_id"
+    FROM ${FLOWSHEET_TABLE}
+    WHERE "id" = ANY(${idArrayLiteral}::int[])
+      AND "metadata_status" = 'enriched_no_match'
+  `),
+    'self-heal batch load'
+  );
+};
+
+/**
  * Marker-only reconcile for rows the CDC worker already drove to a terminal
- * `metadata_status` (BS#1591 review follow-up). The enrichment happened on
- * the worker's side; stamping `metadata_attempt_at` here spends zero LML
- * budget, removes the row from every future work-list, and keeps the
- * "pending ≈ below-floor residual" retire criterion convergent — without
- * it, the marker-based cohort would grow by every worker-enriched row
- * forever and each would eventually burn a redundant lookup. The marker
- * guard keeps the stamp idempotent; `metadata_status` is left untouched
- * (it is the worker's column — `failed_no_retry` rows stay visible for
- * manual triage). Returns the number of rows actually stamped.
+ * `metadata_status` (BS#1591 review follow-up). Dormant since BS#895 — see
+ * `loadBatchByIds`'s docstring — because `loadBatchByIds`'s own WHERE now
+ * excludes non-`'pending'` rows, so `reconcileIds` (below) is empty in
+ * steady state. Kept as a fail-safe: if a future caller ever widens
+ * `loadBatchByIds` back to a broader predicate, worker-terminal rows still
+ * get a zero-LML-cost marker stamp here instead of a redundant lookup.
+ * `metadata_status` is left untouched (it is the worker's column —
+ * `failed_no_retry` rows stay visible for manual triage). Returns the
+ * number of rows actually stamped.
  */
 const reconcileWorkerRows = async (ids: number[]): Promise<number> => {
   if (ids.length === 0) return 0;
@@ -561,7 +704,8 @@ const formatTotals = (totals: Totals): string =>
   `enriched_no_match_raced=${totals.enriched_no_match_raced} lml_error=${totals.lml_error} ` +
   `enrich_error=${totals.enrich_error} below_floor_skipped=${totals.below_floor_skipped} ` +
   `stale_skipped=${totals.stale_skipped} worker_reconciled=${totals.worker_reconciled} ` +
-  `worker_inflight_skipped=${totals.worker_inflight_skipped}`;
+  `worker_inflight_skipped=${totals.worker_inflight_skipped} ` +
+  `self_heal_candidates=${totals.self_heal_candidates} self_heal_resolved=${totals.self_heal_resolved}`;
 
 /**
  * Project the run totals onto a Sentry span with numeric attributes set at
@@ -605,6 +749,12 @@ const projectTotalsSpan = (totals: Totals): void => {
         'backfill.stale_skipped': totals.stale_skipped,
         'backfill.worker_reconciled': totals.worker_reconciled,
         'backfill.worker_inflight_skipped': totals.worker_inflight_skipped,
+        // BS#895 / epic #1810 W4: candidates found by the rotation
+        // self-heal pass and how many resolved to a real match, so the
+        // "~100 already-id'd no-match rows resolve" acceptance signal is
+        // queryable/alertable, not just visible in the structured log.
+        'backfill.self_heal_candidates': totals.self_heal_candidates,
+        'backfill.self_heal_resolved': totals.self_heal_resolved,
       },
     },
     () => {
@@ -625,7 +775,21 @@ export const runBackfill = async (opts: {
   cacheStats?: CacheStatsFn;
   playFloor?: number;
   floorRecencyDays?: number;
+  graceMinutes?: number;
+  recoveryWindowHours?: number;
   buildWorkList?: BuildWorkListFn;
+  /**
+   * BS#895 / epic #1810 W4. Gate for the rotation self-heal pass: when
+   * provided, `runBackfill` runs the pass (candidates from this fn, enriched
+   * via `selfHealEnrich`/`selfHealStampDeadLetter` below); when omitted, the
+   * pass is skipped entirely — no extra `db.execute` call, byte-identical to
+   * pre-W4 behavior. `job.ts` always wires the real
+   * `buildRotationSelfHealCandidates` in production; tests that don't care
+   * about W4 simply omit it.
+   */
+  buildSelfHealCandidates?: BuildSelfHealCandidatesFn;
+  selfHealEnrich?: EnrichFn;
+  selfHealStampDeadLetter?: StampDeadLetterFn;
 }): Promise<RunResult> => {
   const batchSize = opts.batchSize ?? resolveBatchSize();
   // The env path is guarded by requirePositiveInt, but the injectable seam
@@ -642,6 +806,8 @@ export const runBackfill = async (opts: {
   const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
   const playFloor = opts.playFloor ?? resolvePlayFloor();
   const floorRecencyDays = opts.floorRecencyDays ?? resolveFloorRecencyDays();
+  const graceMinutes = opts.graceMinutes ?? resolveGraceMinutes();
+  const recoveryWindowHours = opts.recoveryWindowHours ?? resolveRecoveryWindowHours();
   const buildList = opts.buildWorkList ?? defaultBuildWorkList;
 
   log('info', 'started', `${JOB_NAME} starting`, {
@@ -652,6 +818,8 @@ export const runBackfill = async (opts: {
     live_activity_pause_ms: liveActivityPauseMs,
     play_floor: playFloor,
     floor_recency_days: floorRecencyDays,
+    grace_minutes: graceMinutes,
+    recovery_window_hours: recoveryWindowHours,
   });
 
   const totals: Totals = {
@@ -666,11 +834,13 @@ export const runBackfill = async (opts: {
     stale_skipped: 0,
     worker_reconciled: 0,
     worker_inflight_skipped: 0,
+    self_heal_candidates: 0,
+    self_heal_resolved: 0,
   };
 
   // Cooperative pause (#735): yield whenever a DJ is actively touching the
-  // playout. Gates the work-list build (itself a heavy read) and every
-  // batch slice.
+  // playout. Gates the self-heal pass, the work-list build (itself a heavy
+  // read), and every batch slice.
   const waitForQuietBooth = async (): Promise<void> => {
     if (liveActivityLookbackSeconds <= 0) return;
     while (await probe(liveActivityLookbackSeconds)) {
@@ -682,12 +852,75 @@ export const runBackfill = async (opts: {
     }
   };
 
+  // W4 self-heal (BS#895 / epic #1810), gated on `opts.buildSelfHealCandidates`
+  // being provided. Runs BEFORE the main pending drain: it's a tiny,
+  // high-value correction (rotation rows that just got a resolved Discogs
+  // id) that shouldn't be starved by a busy main-sweep night.
+  if (opts.buildSelfHealCandidates) {
+    await waitForQuietBooth();
+    const selfHealEnrich: EnrichFn =
+      opts.selfHealEnrich ??
+      ((row, response) => defaultApplyEnrichment(row, response, { fromStatus: 'enriched_no_match' }));
+    const selfHealStampDeadLetter: StampDeadLetterFn =
+      opts.selfHealStampDeadLetter ?? ((rowId) => defaultStampDeadLetter(rowId, { fromStatus: 'enriched_no_match' }));
+
+    const selfHealIds = await opts.buildSelfHealCandidates();
+    totals.self_heal_candidates = selfHealIds.length;
+
+    if (selfHealIds.length > 0) {
+      log(
+        'info',
+        'self_heal_candidates_found',
+        `W4 self-heal: ${selfHealIds.length} rotation-linked no-match row(s) to re-attempt`,
+        { self_heal_candidates: selfHealIds.length }
+      );
+
+      let selfHealCursor = 0;
+      while (selfHealCursor < selfHealIds.length) {
+        await waitForQuietBooth();
+        const sliceEnd = Math.min(selfHealCursor + batchSize, selfHealIds.length);
+        const sliceIds = selfHealIds.slice(selfHealCursor, sliceEnd);
+        selfHealCursor = sliceEnd;
+
+        const rows = await loadSelfHealRowsByIds(sliceIds);
+        const rowsById = new Map(rows.map((row) => [Number(row.id), row]));
+        const orderedRows = sliceIds.flatMap((id) => {
+          const row = rowsById.get(id);
+          return row ? [row] : [];
+        });
+
+        for (const row of orderedRows) {
+          const { outcome, cacheHit } = await processRow(row, {
+            lookup: opts.lookup,
+            enrich: selfHealEnrich,
+            stampDeadLetter: selfHealStampDeadLetter,
+          });
+          totals.scanned += 1;
+          totals[outcome] += 1;
+          if (outcome === 'enriched_match' || outcome === 'enriched_match_raced') {
+            totals.self_heal_resolved += 1;
+          }
+          if (throttleMs > 0 && !cacheHit) await sleep(throttleMs);
+        }
+      }
+
+      log(
+        'info',
+        'self_heal_done',
+        `W4 self-heal pass done: ${totals.self_heal_resolved}/${totals.self_heal_candidates} resolved`,
+        { self_heal_candidates: totals.self_heal_candidates, self_heal_resolved: totals.self_heal_resolved }
+      );
+    }
+  }
+
   await waitForQuietBooth();
   const buildStart = Date.now();
   const workList = await buildList({
     playFloor,
     recencyDays: floorRecencyDays,
     partitionFilter: partition.sqlFragment,
+    graceMinutes,
+    recoveryWindowHours,
   });
   totals.below_floor_skipped = workList.belowFloorSkipped;
   const workListSize = workList.ids.length;
@@ -703,7 +936,7 @@ export const runBackfill = async (opts: {
   // Monotonic cursor over the materialized work-list (BS#1591 design
   // decision 1). It advances before the slice is processed and no outcome
   // can rewind it, so a failing row — which deliberately stays
-  // `metadata_attempt_at IS NULL` for the next run — can never be
+  // `metadata_status = 'pending'` for the next run — can never be
   // re-selected within this run. That is the BS#1011 wedge-proof property
   // under play-descending order, where a naive head-of-cohort re-SELECT
   // would jam on the highest-play failing row forever.

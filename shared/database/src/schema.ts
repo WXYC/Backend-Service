@@ -1110,63 +1110,15 @@ export const flowsheet = wxyc_schema.table(
     // block for the trigger fan-out. The DESC ordering makes `MAX()` an
     // O(1) leaf-page peek for any caller that prefers the row-level view.
     index('flowsheet_updated_at_idx').on(sql`${table.updated_at} DESC`),
-    // Partial B-tree on (id) covering the `metadata_attempt_at IS NULL`
-    // tail. Both #638 (historical drain) and #639 Phase 2 (recurring
-    // drift-repair sweep) keyset-paginate through this slice — without
-    // the index every batch seq-scans the 2.6M+ row table just to find
-    // the small NULL residual. See migration 0070 + issue #659. Built
-    // CONCURRENTLY out-of-band on prod before the migration deploys.
-    index('flowsheet_metadata_attempt_pending_idx')
-      .on(table.id)
-      .where(
-        sql`${table.entry_type} = 'track' AND ${table.artist_name} IS NOT NULL AND ${table.metadata_attempt_at} IS NULL`
-      ),
-    // Covering variant of the partial index above. The base index gets
-    // the orchestrator to the right id range fast; the covering one
-    // additionally INCLUDEs (artist_name, album_title, track_title,
-    // add_time) so the orchestrator's loadBatch SELECT is an index-only
-    // scan — no heap fetches per row, and the `add_time < now() - 60s`
-    // race-guard predicate evaluates from the INCLUDE column.
-    //
-    // The 2026-05-04 #640 pilot showed 2125 ReadIOPS sustained (71% of
-    // the gp3 3000 IOPS ceiling) for 0.834 rows/s — ~2550 reads per row,
-    // dominated by heap fetches for those four columns and the buffer-
-    // eviction collateral those reads produced on /library/* queries.
-    // Index-only scan eliminates the per-row heap fetch on the SELECT
-    // side; the buffer cache stays warm for the API path.
-    //
-    // INCLUDE columns are stored in the leaf pages and used for
-    // index-only scans without heap access. The visibility map gates
-    // when index-only scan applies — long-tail rows that autovacuum has
-    // marked all-visible are eligible. Recently-UPDATEd rows aren't, but
-    // the orchestrator moves forward by id and never re-reads its own
-    // updates.
-    //
-    // Storage cost: ~250-350 MB on a 40 GB gp3 instance (~1% of disk).
-    // Per-UPDATE write cost: one extra partial-index entry to delete
-    // when the row's `metadata_attempt_at` flips to non-NULL — a single
-    // leaf-page write. Net IOPS reduction: ~95% on reads, +1 leaf
-    // write per UPDATE. Read:write ratio in the pilot was 92:1.
-    //
-    // INCLUDE columns aren't expressible through Drizzle's `index()`
-    // builder, so the migration SQL is hand-edited (same pattern as the
-    // hand-added IF NOT EXISTS in 0057, 0068, 0070). Drizzle's snapshot
-    // sees this as a plain partial `(id)` index with no INCLUDE, so
-    // future drizzle:generate runs don't drift; the actual DB carries
-    // the INCLUDE columns via the migration SQL.
-    index('flowsheet_metadata_attempt_pending_covering_idx')
-      .on(table.id)
-      .where(
-        sql`${table.entry_type} = 'track' AND ${table.artist_name} IS NOT NULL AND ${table.metadata_attempt_at} IS NULL`
-      ),
-    // BS#891. Partial B-tree on (id) covering the `metadata_status = 'pending'`
-    // slice. Replaces the `metadata_attempt_at IS NULL` partials above as the
-    // sweep predicate once Epic C C6 (#895) flips the cron to read this
-    // column. Both partials coexist during the transition — drop the old
-    // `*_metadata_attempt_pending_*` partials in the same PR that flips the
-    // cron, not here. Same predicate shape as 0070: filter on the three
-    // clauses the cron query carries (entry_type, artist_name, the
-    // lifecycle column itself).
+    // BS#891 / BS#895 (Epic C C6). Partial B-tree on (id) covering the
+    // `metadata_status = 'pending'` slice — the cron's sweep predicate as of
+    // the C6 retune. Replaced the `flowsheet_metadata_attempt_pending_idx` /
+    // `_covering_idx` pair (migrations 0070 / 0074, dropped by 0132 in the
+    // same PR that flipped the cron predicate — see 0132's comment header)
+    // which covered `metadata_attempt_at IS NULL`, the pre-BS#891 implicit
+    // marker. Same predicate shape as 0070: filter on the three clauses the
+    // cron query carries (entry_type, artist_name, the lifecycle column
+    // itself).
     //
     // Built CONCURRENTLY out-of-band on prod first via:
     //   CREATE INDEX CONCURRENTLY flowsheet_metadata_status_pending_idx
@@ -1217,6 +1169,30 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_album_id_enriched_idx')
       .on(table.album_id)
       .where(sql`${table.album_id} IS NOT NULL AND ${table.metadata_attempt_at} IS NOT NULL`),
+    // BS#895 (Epic C C6 / epic #1810 W4). Partial B-tree on `rotation_id`
+    // covering the W4 self-heal candidate query: rotation-linked rows stuck
+    // at `metadata_status = 'enriched_no_match'`. `jobs/flowsheet-metadata-backfill`
+    // joins FROM the small `rotation` table (a few hundred active rows)
+    // INTO this index to find its already-blank flowsheet rows, rather than
+    // seq-scanning the multi-million-row table — `rotation_id` is an FK
+    // column and Postgres never auto-indexes those (see
+    // `flowsheet_show_id_idx` above for the same story on `show_id`).
+    // `rotation_id IS NOT NULL` keeps the index limited to linked rows —
+    // the overwhelming majority of `flowsheet` never sets it. Expected size:
+    // low hundreds of entries (epic #1810's 2026-07-25 audit counted 100
+    // rotation-linked `enriched_no_match` rows already carrying an unused
+    // `rotation.discogs_release_id`, plus 308 lacking one); grows slowly
+    // with rotation traffic.
+    //
+    // Built CONCURRENTLY out-of-band on prod first via:
+    //   CREATE INDEX CONCURRENTLY flowsheet_rotation_no_match_idx
+    //     ON wxyc_schema.flowsheet (rotation_id)
+    //     WHERE metadata_status = 'enriched_no_match' AND rotation_id IS NOT NULL;
+    // Migration SQL carries IF NOT EXISTS so the apply is a no-op against
+    // the prod DB where the index is already present.
+    index('flowsheet_rotation_no_match_idx')
+      .on(table.rotation_id)
+      .where(sql`${table.metadata_status} = 'enriched_no_match' AND ${table.rotation_id} IS NOT NULL`),
   ]
 );
 

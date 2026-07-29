@@ -1,5 +1,6 @@
 /**
- * Play-priority work-list for the flowsheet-metadata-backfill drain (BS#1591).
+ * Play-priority work-list for the flowsheet-metadata-backfill drain (BS#1591),
+ * retuned into the Epic C C6 hourly recovery sweep by BS#895.
  *
  * Replaces the id-order `loadBatch` cursor's row selection: one SELECT at run
  * start returns every eligible pending row id, ordered by per-artist total
@@ -24,7 +25,20 @@
  *   - Recency exemption (decision 5, guarding the BS#895 recovery-sweep
  *     role): rows younger than `recencyDays` are always eligible, so
  *     consumer-missed rows of below-floor artists stay sweepable.
- *     `recencyDays = 0` disables the exemption.
+ *     `recencyDays = 0` disables the exemption. In practice, once BS#895's
+ *     `recoveryWindowHours` ceiling (below) is active, every candidate row
+ *     is already far younger than `recencyDays` (default 30 days vs. a
+ *     handful of hours), so this exemption arm is always satisfied and the
+ *     play-floor/library-eligibility machinery effectively becomes a no-op
+ *     for the live hourly cron — kept intact rather than removed because it
+ *     still gates the historical-catch-up shape (`recoveryWindowHours=0`).
+ *   - Grace window + recovery-window ceiling (BS#895 / Epic C C6, see
+ *     `BuildWorkListArgs`): `graceMinutes` gives the CDC consumer first
+ *     crack at a freshly-inserted row before the sweep spends an LML call on
+ *     it; `recoveryWindowHours` is a hard age ceiling that keeps the sweep
+ *     from re-matching the ~748k-row undrained historical backlog (#1011
+ *     retired the daily drain without draining it — see the 2026-07-23
+ *     design-constraint comment on #895).
  *   - Ordering is `(plays DESC, artist_norm ASC, id ASC)`. The artist_norm
  *     tiebreaker keeps same-artist rows contiguous even when distinct
  *     artists share a play count, concentrating the run-scoped LookupCache
@@ -37,12 +51,12 @@
  * complement predicate. The two statements share the `pendingPredicate`
  * fragment so they cannot drift. The count runs FIRST as a cheap defensive
  * guard (see the note at the early-exit below); the two statements are
- * separate snapshots, so a row hard-deleted, marker-stamped by an
- * out-of-band writer (the live CDC worker never writes the marker — it
- * finalizes via `metadata_status`), or aging past the 60s guard in between
- * can skew the subtraction by a few rows. That is why it is clamped at 0
- * and why the retire-criterion docs call the residual approximate — the
- * field is observability, not control flow.
+ * separate snapshots, so a row hard-deleted, claimed by the live CDC worker
+ * (which flips `metadata_status` off `'pending'` — the sole control-flow
+ * gate since BS#895), or aging past the grace window in between can skew
+ * the subtraction by a few rows. That is why it is clamped at 0 and why the
+ * retire-criterion docs call the residual approximate — the field is
+ * observability, not control flow.
  *
  * Cost: the `plays` CTE is a seq scan + regexp + GROUP BY over ~2.9M track
  * rows and the outer join computes `normalize_artist_name` per pending row.
@@ -73,6 +87,7 @@ const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""
 export const FLOWSHEET_TABLE = sql.raw(`"${SCHEMA}"."flowsheet"`);
 const ARTISTS_TABLE = sql.raw(`"${SCHEMA}"."artists"`);
 const ARTIST_SEARCH_ALIAS_TABLE = sql.raw(`"${SCHEMA}"."artist_search_alias"`);
+const ROTATION_TABLE = sql.raw(`"${SCHEMA}"."rotation"`);
 const NORMALIZE_FN = sql.raw(`"${SCHEMA}"."normalize_artist_name"`);
 
 export type WorkList = {
@@ -90,25 +105,53 @@ export type BuildWorkListArgs = {
   playFloor: number;
   recencyDays: number;
   partitionFilter: SQL | null;
+  /**
+   * BS#895 (Epic C C6 retune). Consumer grace window in minutes: rows
+   * younger than this are never eligible, giving the CDC enrichment
+   * worker (`apps/enrichment-worker`) first crack before the recovery
+   * sweep spends an LML call on the same row. Replaces the old 60-second
+   * race guard (sized only to dodge the — now-removed — runtime
+   * fire-and-forget writer) now that this cron's role is "catch what the
+   * consumer missed," not "beat a concurrent writer by a few seconds."
+   */
+  graceMinutes: number;
+  /**
+   * BS#895 (Epic C C6 retune, 2026-07-23 design constraint). Hard age
+   * ceiling in hours: rows older than this are excluded from the pending
+   * predicate entirely, regardless of the play-floor/library eligibility
+   * arms below. Required because #1011 retired the historical daily drain
+   * WITHOUT draining it — ~748k rows sit at `metadata_status='pending'`
+   * older than any grace window, and without this ceiling the hourly sweep
+   * would match all of them on its first run instead of the "tens of
+   * rows/hour" the C6 sizing assumes, false-triggering the "thousands →
+   * consumer leak" alarm. `0` disables the ceiling (only sensible for a
+   * catch-up/backfill run, never for the live hourly cron).
+   */
+  recoveryWindowHours: number;
 };
 
 export type BuildWorkListFn = (args: BuildWorkListArgs) => Promise<WorkList>;
 
 /**
- * The canonical pending predicate — the same four clauses the id-cursor
- * drain used (entry_type, artist_name, marker, 60s race guard vs the
- * runtime fire-and-forget UPDATE) plus the optional PARTITION_INDEX /
- * PARTITION_COUNT fragment. Shared by the count and work-list statements so
- * the subtraction-based below-floor count cannot drift from the selection.
- * Both statements alias flowsheet as `f`; the partition fragment's
- * unqualified `"id"` resolves to `f."id"` (no other relation in scope
- * carries an `id` column).
+ * The canonical pending predicate — entry_type/artist_name/lifecycle-status
+ * clauses, the consumer grace window, the optional recovery-window ceiling,
+ * and the optional PARTITION_INDEX / PARTITION_COUNT fragment. Shared by the
+ * count and work-list statements so the subtraction-based below-floor count
+ * cannot drift from the selection. Both statements alias flowsheet as `f`;
+ * the partition fragment's unqualified `"id"` resolves to `f."id"` (no other
+ * relation in scope carries an `id` column).
+ *
+ * BS#895 (Epic C C6): `metadata_status = 'pending'` replaces the pre-BS#891
+ * implicit marker (`metadata_attempt_at IS NULL`) as the control-flow gate —
+ * see the module docstring and `docs/migrations.md` "Attempt-at markers".
+ * The grace-window clause replaces the old 60-second race guard.
  */
-const pendingPredicate = (partitionFilter: SQL | null): SQL => sql`
+const pendingPredicate = (partitionFilter: SQL | null, graceMinutes: number, recoveryWindowHours: number): SQL => sql`
   f."entry_type" = 'track'
       AND f."artist_name" IS NOT NULL
-      AND f."metadata_attempt_at" IS NULL
-      AND f."add_time" < now() - interval '60 seconds'
+      AND f."metadata_status" = 'pending'
+      AND f."add_time" < now() - (${graceMinutes} * interval '1 minute')
+      ${recoveryWindowHours > 0 ? sql`AND f."add_time" > now() - (${recoveryWindowHours} * interval '1 hour')` : sql``}
       ${partitionFilter ?? sql``}
 `;
 
@@ -135,15 +178,17 @@ export const unwrapRows = <T>(result: unknown, statement: string): T[] => {
 /**
  * Build the run's work-list. Two statements:
  *
- *   1. `COUNT(*)` of the whole pending cohort — served by the partial index
- *      from #659/#660, cheap. NOTE the zero-count early-exit below is a
- *      defensive guard, not a steady-state optimization: with the floor on,
- *      the deliberate below-floor residual keeps this count permanently
- *      non-zero (the pending cohort no longer drains to literal 0), so the
- *      exit fires only in floor-disabled fully-drained worlds, fresh
- *      environments, and CI. A BS#895 hourly re-scope that wants a cheap
- *      no-op probe needs a different key (e.g. an EXISTS over the
- *      recency/linked arms) — this count cannot provide it.
+ *   1. `COUNT(*)` of the whole pending cohort — served by the
+ *      `flowsheet_metadata_status_pending_idx` partial index, cheap. Under
+ *      the pre-BS#895 historical-drain shape (`recoveryWindowHours=0`) the
+ *      zero-count early-exit below was a purely defensive guard: with the
+ *      play-floor on, the deliberate below-floor residual kept this count
+ *      permanently non-zero, so the exit only fired in floor-disabled
+ *      fully-drained worlds, fresh environments, and CI. BS#895's
+ *      `recoveryWindowHours` ceiling is what turns this into the "cheap
+ *      no-op probe" the hourly cron actually needs: it scopes the count down
+ *      to a genuinely small, genuinely-reachable-zero window instead of the
+ *      unbounded historical cohort.
  *   2. The priority SELECT: plays aggregate CTE + library-artists CTE +
  *      pending predicate + eligibility disjunction + priority ORDER BY.
  *
@@ -152,12 +197,18 @@ export const unwrapRows = <T>(result: unknown, statement: string): T[] => {
  * executes the unreferenced CTE, so there is no cost to the simpler
  * single-shape assembly.
  */
-export const buildWorkList: BuildWorkListFn = async ({ playFloor, recencyDays, partitionFilter }) => {
+export const buildWorkList: BuildWorkListFn = async ({
+  playFloor,
+  recencyDays,
+  partitionFilter,
+  graceMinutes,
+  recoveryWindowHours,
+}) => {
   const countRows = unwrapRows<{ pending_total: number | string }>(
     await db.execute(sql`
     SELECT COUNT(*)::int AS pending_total
     FROM ${FLOWSHEET_TABLE} f
-    WHERE ${pendingPredicate(partitionFilter)}
+    WHERE ${pendingPredicate(partitionFilter, graceMinutes, recoveryWindowHours)}
   `),
     'pending count'
   );
@@ -236,7 +287,7 @@ export const buildWorkList: BuildWorkListFn = async ({ playFloor, recencyDays, p
     SELECT f."id" AS id, p.plays AS plays
     FROM ${FLOWSHEET_TABLE} f
     JOIN plays p ON p.artist_norm = ${NORMALIZE_FN}(f."artist_name")
-    WHERE ${pendingPredicate(partitionFilter)}${eligibility}
+    WHERE ${pendingPredicate(partitionFilter, graceMinutes, recoveryWindowHours)}${eligibility}
     ORDER BY p.plays DESC, p.artist_norm ASC, f."id" ASC
   `),
     'work-list select'
@@ -251,11 +302,88 @@ export const buildWorkList: BuildWorkListFn = async ({ playFloor, recencyDays, p
 
   // Exact complement of the eligibility disjunction within the pending set,
   // computed by subtraction. Clamped: mid-build races (a row hard-deleted,
-  // marker-stamped by an out-of-band writer — the CDC worker never writes
-  // the marker — or a fresh row aging past the 60s guard, between the two
-  // statements) can skew by a few rows, and this field is observability
-  // only; the retire-criterion comparison in the docs is approximate.
+  // claimed by the CDC worker, or a fresh row aging past the grace window,
+  // between the two statements) can skew by a few rows, and this field is
+  // observability only; the retire-criterion comparison in the docs is
+  // approximate.
   const belowFloorSkipped = playFloor === 0 ? 0 : Math.max(0, pendingTotal - ids.length);
 
   return { ids, plays, pendingTotal, belowFloorSkipped };
 };
+
+/**
+ * BS#895 / epic #1810 W4 ("make `enriched_no_match` self-heal"). Defensive
+ * cap on the self-heal candidate list — this cohort is expected to be a few
+ * hundred rows (epic #1810's 2026-07-25 audit: 100 rotation-linked
+ * `enriched_no_match` rows already carrying an unused `discogs_release_id`,
+ * plus 308 lacking one), so this is a safety ceiling against an unforeseen
+ * write-pattern anomaly, not an operational lever. Not env-configurable —
+ * unlike the tunables above, there's no legitimate reason to widen it.
+ */
+export const SELF_HEAL_MAX_CANDIDATES = 2000;
+
+/**
+ * W4 self-heal candidate query (epic #1810, folded into BS#895 per the
+ * 2026-07-25 scoping comment on this issue). Re-selects rotation-linked
+ * flowsheet rows stuck at the terminal `metadata_status = 'enriched_no_match'`
+ * once their linked `rotation.discogs_release_id` transitions NULL→present —
+ * e.g. after `jobs/rotation-release-id-backfill`'s six-hourly resolver mints
+ * an id for a rotation row that was blank when this job (or the CDC worker)
+ * last tried it.
+ *
+ * STATE-CHANGE-GATED, not blind time (the ticket's explicit requirement):
+ * a candidate must satisfy
+ *
+ *   f.metadata_attempt_at IS NULL
+ *   OR r.discogs_release_id_resolve_attempted_at > f.metadata_attempt_at
+ *
+ * — i.e. either this job has never re-attempted the row since it went
+ * `enriched_no_match` (the common case: the CDC worker, not this job, wrote
+ * the terminal status, so `metadata_attempt_at` is NULL — see
+ * `apps/enrichment-worker/enrich.ts`'s "No `metadata_attempt_at` stamping
+ * here" contract), or the rotation resolver has stamped a definitive
+ * response strictly AFTER this job's last attempt. Once this job re-attempts
+ * a row (`applyEnrichment` with `fromStatus: 'enriched_no_match'` — see
+ * `enrich.ts` — always stamps `metadata_attempt_at = now()`, win or lose),
+ * the row drops out of the candidate set until the rotation id changes
+ * again: no TTL, no blind re-scan, no re-burning LML on a row that still
+ * won't resolve. Reuses two existing columns rather than adding a new
+ * marker — `rotation.discogs_release_id_resolve_attempted_at` (migration
+ * 0131, BS#1813) and `flowsheet.metadata_attempt_at` (migration 0069) — so
+ * this needed no schema change beyond the `flowsheet_rotation_no_match_idx`
+ * partial index (migration 0132) that makes the join cheap.
+ *
+ * Deliberately does NOT require `r.discogs_release_id_resolve_attempted_at`
+ * to be non-NULL: a rotation row can acquire a `discogs_release_id` from a
+ * source that never stamps that marker (`tubafrenzy_paste` paste-URL
+ * prefill, `library_identity` from `addToRotation` — see
+ * `discogsReleaseIdSourceEnum` in schema.ts). Such a row still satisfies the
+ * `metadata_attempt_at IS NULL` disjunct on its first encounter (the common
+ * worker-authored case) and is picked up the same way.
+ *
+ * `ORDER BY f.id ASC` is arbitrary-but-deterministic — this cohort has no
+ * play-priority story of its own (it piggybacks on the main sweep's
+ * per-row LML pacing), so simple insertion order is fine.
+ */
+export const buildRotationSelfHealCandidates = async (): Promise<number[]> => {
+  const rows = unwrapRows<{ id: number | string }>(
+    await db.execute(sql`
+    SELECT f."id" AS id
+    FROM ${FLOWSHEET_TABLE} f
+    JOIN ${ROTATION_TABLE} r ON r."id" = f."rotation_id"
+    WHERE f."metadata_status" = 'enriched_no_match'
+      AND f."rotation_id" IS NOT NULL
+      AND r."discogs_release_id" IS NOT NULL
+      AND (
+        f."metadata_attempt_at" IS NULL
+        OR r."discogs_release_id_resolve_attempted_at" > f."metadata_attempt_at"
+      )
+    ORDER BY f."id" ASC
+    LIMIT ${SELF_HEAL_MAX_CANDIDATES}
+  `),
+    'rotation self-heal candidates'
+  );
+  return rows.map((row) => Number(row.id));
+};
+
+export type BuildSelfHealCandidatesFn = typeof buildRotationSelfHealCandidates;

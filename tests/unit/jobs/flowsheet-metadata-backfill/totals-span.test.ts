@@ -45,11 +45,16 @@ const TOTALS_KEYS = [
   // BS#1591: the deliberate below-floor residual (so pending-cohort
   // dashboards can subtract it), the vanished-mid-run count (deletes /
   // out-of-band marker stamps), and the two worker-lifecycle buckets
-  // (reconciled = true worker overlap; inflight = claims left untouched).
+  // (reconciled = true worker overlap; inflight = claims left untouched;
+  // both dormant fail-safes since BS#895 — see orchestrate.ts).
   'backfill.below_floor_skipped',
   'backfill.stale_skipped',
   'backfill.worker_reconciled',
   'backfill.worker_inflight_skipped',
+  // BS#895 / epic #1810 W4: rotation self-heal candidates found and how
+  // many resolved to a real match this run.
+  'backfill.self_heal_candidates',
+  'backfill.self_heal_resolved',
 ];
 
 const matchedResponse: LookupResponse = {
@@ -120,6 +125,10 @@ describe('flowsheet-metadata-backfill run.totals span (BS#1563 op + enrich_error
     expect(attrs['backfill.stale_skipped']).toBe(0);
     expect(attrs['backfill.worker_reconciled']).toBe(0);
     expect(attrs['backfill.worker_inflight_skipped']).toBe(0);
+    // Self-heal is gated on buildSelfHealCandidates being provided
+    // (job.ts-only in production); this run omits it, so both stay 0.
+    expect(attrs['backfill.self_heal_candidates']).toBe(0);
+    expect(attrs['backfill.self_heal_resolved']).toBe(0);
     for (const key of TOTALS_KEYS) {
       expect(typeof attrs[key]).toBe('number');
     }

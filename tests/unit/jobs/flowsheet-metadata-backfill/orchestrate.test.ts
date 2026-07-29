@@ -1,31 +1,39 @@
 /**
  * Unit tests for flowsheet-metadata-backfill orchestrate.ts.
  *
- * Pins five behaviors the historical drain depends on (BS#1591 shape: a
- * play-priority work-list materialized once per run, drained by a
- * monotonic array cursor — see worklist.test.ts for the work-list SQL):
+ * Pins the behaviors the drain depends on (BS#1591 shape retuned by BS#895
+ * into the Epic C C6 hourly recovery sweep: a play-priority work-list
+ * materialized once per run, drained by a monotonic array cursor — see
+ * worklist.test.ts for the work-list SQL):
  *   1. Rows are processed in work-list (play-descending) order; each batch
- *      slice loads by id-array with a `metadata_attempt_at IS NULL`
+ *      slice loads by id-array with a `metadata_status = 'pending'`
  *      re-check + `metadata_status` fetch, re-orders results to work-list
  *      order, and PARTITIONS on the worker lifecycle: only still-`pending`
  *      rows reach LML; worker-terminal rows (enriched_match /
  *      enriched_no_match / failed_no_retry) get a marker-only reconcile
- *      stamp (`worker_reconciled`); `enriching` and unknown statuses are
- *      left untouched (`worker_inflight_skipped`).
+ *      stamp (`worker_reconciled`, dormant since BS#895 — see
+ *      orchestrate.ts); `enriching` and unknown statuses are left untouched
+ *      (`worker_inflight_skipped`, also dormant).
  *   2. processRow returns 'lml_error' on a thrown lookup; the orchestrator
- *      counts it and continues. The row stays metadata_attempt_at IS NULL
- *      via `applyEnrichment` *not* being called on the error path — and the
- *      no-wedge test pins that it is never re-selected within the run.
+ *      counts it and continues. The row stays at its starting
+ *      `metadata_status` via `applyEnrichment` *not* being called on the
+ *      error path — and the no-wedge test pins that it is never re-selected
+ *      within the run.
  *   3. Match → enriched_match outcome; no-match → enriched_no_match outcome.
  *      Totals are bumped on the right counter; below_floor_skipped and
- *      stale_skipped (vanished ids: hard-deleted or marker stamped
- *      out-of-band — the CDC worker never writes the marker, so worker
- *      overlap surfaces as worker_reconciled instead) surface in totals
- *      and log lines.
- *   4. resolvePartitionFilter / resolvePlayFloor / resolveFloorRecencyDays
- *      handle defaults, valid input, and throw on bad input.
+ *      stale_skipped (vanished ids: hard-deleted, or — since BS#895 —
+ *      claimed/finalized by the CDC worker between the work-list snapshot
+ *      and this slice's load) surface in totals and log lines.
+ *   4. resolvePartitionFilter / resolvePlayFloor / resolveFloorRecencyDays /
+ *      resolveGraceMinutes / resolveRecoveryWindowHours handle defaults,
+ *      valid input, and throw on bad input.
  *   5. The array cursor advances unconditionally and the loop terminates
  *      when the work-list is exhausted (no terminal empty poll).
+ *   6. The W4 self-heal pass (BS#895 / epic #1810) is fully gated on
+ *      `opts.buildSelfHealCandidates` being provided — every test above that
+ *      omits it exercises byte-identical pre-W4 behavior (no extra
+ *      `db.execute` call); a dedicated describe block below drives it
+ *      explicitly.
  */
 import { jest } from '@jest/globals';
 
@@ -33,23 +41,31 @@ import { db, type CheckLiveActivityFn } from '@wxyc/database';
 import {
   BATCH_SIZE,
   FLOOR_RECENCY_DAYS_DEFAULT,
+  GRACE_MINUTES_DEFAULT,
   PLAY_FLOOR_DEFAULT,
+  RECOVERY_WINDOW_HOURS_DEFAULT,
   THROTTLE_MS,
   isPermanentEnrichError,
   processRow,
   resolveBatchSize,
   resolveFloorRecencyDays,
+  resolveGraceMinutes,
   resolveLiveActivityLookback,
   resolveLiveActivityPauseMs,
   resolvePartitionFilter,
   resolvePlayFloor,
+  resolveRecoveryWindowHours,
   resolveThrottleMs,
   runBackfill,
   type EnrichFn,
   type LookupFn,
   type StampDeadLetterFn,
 } from '../../../../jobs/flowsheet-metadata-backfill/orchestrate';
-import type { BuildWorkListFn, WorkList } from '../../../../jobs/flowsheet-metadata-backfill/worklist';
+import type {
+  BuildSelfHealCandidatesFn,
+  BuildWorkListFn,
+  WorkList,
+} from '../../../../jobs/flowsheet-metadata-backfill/worklist';
 import type { LookupResponse } from '@wxyc/lml-client';
 
 type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
@@ -524,6 +540,55 @@ describe('resolveFloorRecencyDays (BS#1591 / decision 5)', () => {
   });
 });
 
+describe('resolveGraceMinutes (BS#895 / Epic C C6)', () => {
+  it('falls back to GRACE_MINUTES_DEFAULT (15) when env var is unset or empty', () => {
+    // 15, per the ticket's explicit design: the consumer grace window
+    // before the recovery sweep spends an LML call on a row.
+    expect(GRACE_MINUTES_DEFAULT).toBe(15);
+    expect(resolveGraceMinutes(undefined)).toBe(15);
+    expect(resolveGraceMinutes('')).toBe(15);
+  });
+
+  it('accepts 0 (disables the consumer grace window)', () => {
+    expect(resolveGraceMinutes('0')).toBe(0);
+  });
+
+  it('returns the parsed value for a positive integer', () => {
+    expect(resolveGraceMinutes('45')).toBe(45);
+  });
+
+  it('throws on negative, non-integer, or garbage input', () => {
+    expect(() => resolveGraceMinutes('-1')).toThrow(/BACKFILL_GRACE_MINUTES/);
+    expect(() => resolveGraceMinutes('1.5')).toThrow(/BACKFILL_GRACE_MINUTES/);
+    expect(() => resolveGraceMinutes('abc')).toThrow(/BACKFILL_GRACE_MINUTES/);
+  });
+});
+
+describe('resolveRecoveryWindowHours (BS#895 / Epic C C6, 2026-07-23 design constraint)', () => {
+  it('falls back to RECOVERY_WINDOW_HOURS_DEFAULT (6) when env var is unset or empty', () => {
+    // 6 hours: covers a deploy/restart/CDC-event-loss window with margin,
+    // while staying orders of magnitude below the age of the ~748k-row
+    // undrained historical backlog #1011 left at metadata_status='pending'.
+    expect(RECOVERY_WINDOW_HOURS_DEFAULT).toBe(6);
+    expect(resolveRecoveryWindowHours(undefined)).toBe(6);
+    expect(resolveRecoveryWindowHours('')).toBe(6);
+  });
+
+  it('accepts 0 (disables the ceiling — historical catch-up runs only)', () => {
+    expect(resolveRecoveryWindowHours('0')).toBe(0);
+  });
+
+  it('returns the parsed value for a positive integer', () => {
+    expect(resolveRecoveryWindowHours('24')).toBe(24);
+  });
+
+  it('throws on negative, non-integer, or garbage input', () => {
+    expect(() => resolveRecoveryWindowHours('-1')).toThrow(/BACKFILL_RECOVERY_WINDOW_HOURS/);
+    expect(() => resolveRecoveryWindowHours('0.5')).toThrow(/BACKFILL_RECOVERY_WINDOW_HOURS/);
+    expect(() => resolveRecoveryWindowHours('abc')).toThrow(/BACKFILL_RECOVERY_WINDOW_HOURS/);
+  });
+});
+
 describe('runBackfill (BS#1591 work-list drain)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -601,7 +666,29 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
     });
 
     expect(buildWorkList).toHaveBeenCalledTimes(1);
-    expect(buildWorkList).toHaveBeenCalledWith({ playFloor: 3, recencyDays: 2, partitionFilter: null });
+    expect(buildWorkList).toHaveBeenCalledWith({
+      playFloor: 3,
+      recencyDays: 2,
+      partitionFilter: null,
+      graceMinutes: GRACE_MINUTES_DEFAULT,
+      recoveryWindowHours: RECOVERY_WINDOW_HOURS_DEFAULT,
+    });
+  });
+
+  it('passes resolved graceMinutes / recoveryWindowHours into the work-list builder', async () => {
+    const buildWorkList = injectWorkList([]);
+
+    await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      graceMinutes: 45,
+      recoveryWindowHours: 12,
+      buildWorkList,
+    });
+
+    expect(buildWorkList).toHaveBeenCalledWith(expect.objectContaining({ graceMinutes: 45, recoveryWindowHours: 12 }));
   });
 
   it('processes the work-list in play-descending order across batch slices and terminates when exhausted', async () => {
@@ -638,7 +725,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
     const sql1 = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
     expect(sql1).toMatch(/=\s*ANY\(/i);
     expect(sql1).toMatch(/::int\[\]/);
-    expect(sql1).toMatch(/"metadata_attempt_at"\s+IS\s+NULL/i);
+    expect(sql1).toMatch(/"metadata_status"\s*=\s*'pending'/i);
     expect(sql1).toMatch(/"album_id"/);
     expect(sql1).not.toMatch(/ORDER BY/i);
     const values1 = ((db.execute as jest.Mock).mock.calls[0]?.[0] as { values?: unknown[] })?.values;
@@ -1279,5 +1366,198 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
     expect(result.totals.enriched_no_match).toBe(0);
     expect(result.totals.enriched_no_match_raced).toBe(1);
     expect(result.totals.lml_error).toBe(0);
+  });
+});
+
+describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(false));
+  const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_match');
+
+  type EnrichRowFixture = {
+    id: number;
+    artist_name: string;
+    album_title: string | null;
+    track_title: string | null;
+    album_id: number | null;
+  };
+  const selfHealRowFor = (id: number, artist = `rotation-artist-${id}`): EnrichRowFixture => ({
+    id,
+    artist_name: artist,
+    album_title: null,
+    track_title: null,
+    album_id: null,
+  });
+
+  const injectWorkList = (entries: Array<[number, number]> = []): jest.Mock<BuildWorkListFn> =>
+    jest.fn<BuildWorkListFn>().mockResolvedValue({
+      ids: entries.map(([id]) => id),
+      plays: entries.map(([, plays]) => plays),
+      pendingTotal: entries.length,
+      belowFloorSkipped: 0,
+    });
+
+  it('is skipped entirely when buildSelfHealCandidates is not provided — byte-identical pre-W4 behavior (no extra db.execute call)', async () => {
+    const buildWorkList = injectWorkList();
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      buildWorkList,
+    });
+
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
+    expect(result.totals.self_heal_candidates).toBe(0);
+    expect(result.totals.self_heal_resolved).toBe(0);
+  });
+
+  it('zero candidates found: no batch load, no LML calls, totals stay 0', async () => {
+    const buildWorkList = injectWorkList();
+    const buildSelfHealCandidates = jest.fn<BuildSelfHealCandidatesFn>().mockResolvedValue([]);
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      buildWorkList,
+      buildSelfHealCandidates,
+    });
+
+    expect(buildSelfHealCandidates).toHaveBeenCalledTimes(1);
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
+    expect(result.totals.self_heal_candidates).toBe(0);
+    expect(result.totals.self_heal_resolved).toBe(0);
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('runs BEFORE the main pending drain (a tiny high-value correction should not be starved by a busy main sweep)', async () => {
+    const buildWorkList = injectWorkList();
+    const buildSelfHealCandidates = jest.fn<BuildSelfHealCandidatesFn>().mockResolvedValue([]);
+
+    await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      buildWorkList,
+      buildSelfHealCandidates,
+    });
+
+    expect(buildSelfHealCandidates.mock.invocationCallOrder[0]).toBeLessThan(buildWorkList.mock.invocationCallOrder[0]);
+  });
+
+  it('loads candidate rows scoped to metadata_status=enriched_no_match, calls selfHealEnrich for each, and counts resolved matches (match + match_raced)', async () => {
+    const buildWorkList = injectWorkList();
+    const buildSelfHealCandidates = jest.fn<BuildSelfHealCandidatesFn>().mockResolvedValue([201, 202, 203]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([selfHealRowFor(201), selfHealRowFor(202), selfHealRowFor(203)]);
+
+    const selfHealEnrich = jest
+      .fn<EnrichFn>()
+      .mockResolvedValueOnce('enriched_match')
+      .mockResolvedValueOnce('enriched_no_match')
+      .mockResolvedValueOnce('enriched_match_raced');
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      buildWorkList,
+      buildSelfHealCandidates,
+      selfHealEnrich,
+    });
+
+    expect(selfHealEnrich).toHaveBeenCalledTimes(3);
+    expect(result.totals.self_heal_candidates).toBe(3);
+    expect(result.totals.self_heal_resolved).toBe(2);
+    expect(result.totals.scanned).toBe(3);
+    expect(result.totals.enriched_match).toBe(1);
+    expect(result.totals.enriched_no_match).toBe(1);
+    expect(result.totals.enriched_match_raced).toBe(1);
+
+    const sql = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
+    expect(sql).toMatch(/=\s*ANY\(/i);
+    expect(sql).toMatch(/"metadata_status"\s*=\s*'enriched_no_match'/i);
+  });
+
+  it('routes a permanent enrich failure through selfHealStampDeadLetter (dead-lettered, not enrich_error retryable forever)', async () => {
+    const buildWorkList = injectWorkList();
+    const buildSelfHealCandidates = jest.fn<BuildSelfHealCandidatesFn>().mockResolvedValue([301]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([selfHealRowFor(301)]);
+
+    const permanentError = Object.assign(new Error('varchar overflow'), { code: '22001' });
+    const selfHealEnrich = jest.fn<EnrichFn>().mockRejectedValue(permanentError);
+    const selfHealStampDeadLetter = jest.fn<StampDeadLetterFn>().mockResolvedValue(undefined);
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      buildWorkList,
+      buildSelfHealCandidates,
+      selfHealEnrich,
+      selfHealStampDeadLetter,
+    });
+
+    expect(selfHealStampDeadLetter).toHaveBeenCalledWith(301);
+    expect(result.totals.enrich_error).toBe(1);
+    expect(result.totals.self_heal_resolved).toBe(0);
+  });
+
+  it('a candidate id that vanishes before the self-heal batch load is silently skipped (no LML call, no scanned bump)', async () => {
+    const buildWorkList = injectWorkList();
+    const buildSelfHealCandidates = jest.fn<BuildSelfHealCandidatesFn>().mockResolvedValue([401, 402]);
+    // Only 401 comes back — 402 vanished (e.g. a concurrent overlapping run
+    // already re-attempted it) between the candidate snapshot and the load.
+    (db.execute as jest.Mock).mockResolvedValueOnce([selfHealRowFor(401)]);
+    const selfHealEnrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_match');
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      buildWorkList,
+      buildSelfHealCandidates,
+      selfHealEnrich,
+    });
+
+    expect(selfHealEnrich).toHaveBeenCalledTimes(1);
+    expect(result.totals.scanned).toBe(1);
+    expect(result.totals.self_heal_candidates).toBe(2);
+  });
+
+  it('respects the cooperative pause before the candidate build and before each batch', async () => {
+    const buildWorkList = injectWorkList();
+    const buildSelfHealCandidates = jest.fn<BuildSelfHealCandidatesFn>().mockResolvedValue([501]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([selfHealRowFor(501)]);
+    const selfHealEnrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_match');
+    const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(false);
+
+    await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 60,
+      liveActivityPauseMs: 0,
+      checkLiveActivity,
+      buildWorkList,
+      buildSelfHealCandidates,
+      selfHealEnrich,
+    });
+
+    // At least one probe before the self-heal candidate build, distinct
+    // from the probes the main drain's own tests already pin.
+    expect(checkLiveActivity.mock.calls.length).toBeGreaterThan(0);
+    expect(checkLiveActivity.mock.invocationCallOrder[0]).toBeLessThan(
+      buildSelfHealCandidates.mock.invocationCallOrder[0]
+    );
   });
 });

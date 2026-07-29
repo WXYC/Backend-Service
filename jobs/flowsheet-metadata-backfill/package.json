@@ -1,8 +1,8 @@
 {
   "name": "@wxyc/flowsheet-metadata-backfill",
-  "cron-schedule": "0 0 31 2 *",
+  "cron-schedule": "10 * * * *",
   "version": "1.0.0",
-  "description": "WXYC recurring metadata drift-repair: enrich flowsheet track rows where LML metadata enrichment never ran (#631 / #638 / #641). GATED (never-firing schedule) while the BS#1631 backfill runs and until the BS#1591 play-priority drain lands; formerly nightly 06:00 UTC; orchestrator's cooperative pause defers when DJs are active.",
+  "description": "WXYC Epic C C6 (BS#895) hourly gap-recovery sweep: enrich flowsheet track rows the CDC enrichment consumer (apps/enrichment-worker) missed (metadata_status='pending', past a 15-min consumer grace window, inside a 6h recovery-window ceiling), plus the epic #1810 W4 rotation self-heal pass. Formerly nightly 06:00 UTC (#631 / #638 / #641), then gated off entirely while BS#1631 and the BS#1591 play-priority drain landed; orchestrator's cooperative pause defers when DJs are active.",
   "type": "module",
   "main": "./dist/job.js",
   "scripts": {
