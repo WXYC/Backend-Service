@@ -1790,6 +1790,58 @@ export const album_critic_reviews = wxyc_schema.table(
 export type AlbumCriticReview = InferSelectModel<typeof album_critic_reviews>;
 export type NewAlbumCriticReview = InferInsertModel<typeof album_critic_reviews>;
 
+/**
+ * "Searched, found nothing" marker for `jobs/uncovered-release-list` (BS#1877,
+ * ADR 0013's "uncovered-release list handoff"). One row per `library.id` that
+ * has ever been INCLUDED in a published `uncovered-releases.jsonl` snapshot —
+ * written the moment a release is handed off to `WXYC/research-data` for
+ * search, not after any confirmation search happened or found something.
+ *
+ * Why a dedicated table instead of a `source_key` convention on
+ * `album_critic_reviews` (the ADR's other named option): every column that
+ * table's UPSERT natural key would need to carry — `source`, `source_url`,
+ * `snippet` — is `NOT NULL` and semantically "this IS a review." Recording
+ * "we looked, found nothing" there would mean inventing sentinel values for
+ * columns whose whole contract is "a real review's attribution," polluting
+ * the exact table `GET /proxy/metadata/album` reads. A separate table keeps
+ * "has a review" (`album_critic_reviews`, real rows only) and "already
+ * handed off for search" (this table) as two independently-true predicates —
+ * both anti-joined by the job, never conflated.
+ *
+ * Semantics are deliberately "publish-once, never retry": a release that
+ * comes up empty is not re-searched on a future cycle (the ticket's core
+ * requirement — see BS#1877), and a release that DOES get a review lands in
+ * `album_critic_reviews` independently via the existing manifest ETL
+ * (`jobs/album-critic-reviews-etl`), so the rotation anti-join already
+ * excludes it there too — this table's exclusion is redundant-but-harmless
+ * in that case. `handoff_count`/`last_handed_off_at` are audit-only (should
+ * stay at 1 / == `first_handed_off_at` under normal operation); they exist
+ * so a re-inclusion bug is visible in the data rather than silent. FK +
+ * `ON DELETE CASCADE` mirrors `album_critic_reviews`: if a library row is
+ * ever deleted, its search-handoff marker should not survive as an orphan.
+ */
+export const uncovered_release_search_markers = wxyc_schema.table(
+  'uncovered_release_search_markers',
+  {
+    id: serial('id').primaryKey(),
+    album_id: integer('album_id')
+      .references(() => library.id, { onDelete: 'cascade' })
+      .notNull(),
+    first_handed_off_at: timestamp('first_handed_off_at', { withTimezone: true }).defaultNow().notNull(),
+    last_handed_off_at: timestamp('last_handed_off_at', { withTimezone: true }).defaultNow().notNull(),
+    handoff_count: integer('handoff_count').default(1).notNull(),
+  },
+  (table) => [
+    // One marker row per album — the UPSERT conflict target the job's
+    // `recordHandoffs` writer uses (ON CONFLICT (album_id) DO UPDATE
+    // last_handed_off_at = now(), handoff_count = handoff_count + 1).
+    uniqueIndex('uncovered_release_search_markers_album_id_uq').on(table.album_id),
+  ]
+);
+
+export type UncoveredReleaseSearchMarker = InferSelectModel<typeof uncovered_release_search_markers>;
+export type NewUncoveredReleaseSearchMarker = InferInsertModel<typeof uncovered_release_search_markers>;
+
 export type NewBinEntry = InferInsertModel<typeof bins>;
 export type BinEntry = InferSelectModel<typeof bins>;
 export const bins = wxyc_schema.table('bins', {
