@@ -436,6 +436,16 @@ jobs:
           # tests/unit/services/lml.client.test.ts:792-793.
           LML_CLIENT_MAX_CONCURRENT: '10000'
           LML_CLIENT_RATE_PER_MIN: '60000'
+          # BS#1748: the default limiter's circuit breaker must not trip
+          # mid-suite. Several existing specs (e.g. metadata.spec.js)
+          # deliberately fire multiple consecutive simulated LML 500s against
+          # this SAME process-wide limiter to exercise fallback behavior; a
+          # default-sized threshold (5) would risk opening the breaker and
+          # shedding calls for later, unrelated tests. Set far above anything
+          # the suite could plausibly trip. Pinned by
+          # tests/unit/scripts/lml-limiter-test-env.test.ts.
+          LML_CIRCUIT_BREAKER_THRESHOLD: '100000'
+          LML_CIRCUIT_BREAKER_RESET_MS: '100'
           # Default org wiring: matches the slug seeded by dev_env/seed_db.sql.
           # Consumed by the org-sync hooks and the user.create.after
           # auto-membership hook in shared/authentication/src/auth.definition.ts.

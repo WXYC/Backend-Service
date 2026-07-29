@@ -53,6 +53,16 @@ describe('lml.client', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     process.env = { ...originalEnv, LIBRARY_METADATA_URL: 'http://lml.test:8000' };
+    // BS#1748: the default limiter now carries a circuit breaker with
+    // consecutive-failure state that persists across `it()` blocks in this
+    // file (module-level singleton, same pre-existing sharing story as the
+    // Semaphore/TokenBucket — see the BS#955 comment on `_resetLmlClientLimitersForTest`
+    // below). Reset it before every test so one test's simulated LML
+    // failure(s) can never accumulate toward another, unrelated test's
+    // breaker trip. Full-capacity reset is strictly safer than whatever
+    // state a prior test left behind (never less permissive), so this is a
+    // pure isolation improvement, not a behavior change for any passing test.
+    _resetLmlClientLimitersForTest();
   });
 
   afterAll(() => {
