@@ -11,7 +11,8 @@
  *     UPDATE `flowsheet` to flip `metadata_status = 'enriched_match'` (plus
  *     the historical `metadata_attempt_at = now()` stamp) only.
  *   - Linked + no-match: UPSERT just the 4 synthesized search URLs into
- *     `album_metadata`, then flip `metadata_status = 'enriched_no_match'`
+ *     `album_metadata` (fill-null on conflict — BS#895, never clobbers an
+ *     existing real value), then flip `metadata_status = 'enriched_no_match'`
  *     on `flowsheet`.
  *   - Unlinked (album_id IS NULL) + match: write the 10 metadata columns
  *     inline on `flowsheet`, flipping the status in the same .set() block.
@@ -284,9 +285,18 @@ export const applyEnrichment = async (
   if (row.album_id !== null) {
     // Linked + no-match: UPSERT just the 4 search URLs into album_metadata
     // (Apple stays out per BS#1192). INSERT path leaves the other 6 columns
-    // NULL (no LML match to fill them); UPDATE path leaves them untouched
-    // on existing rows (preserves any prior out-of-band values, matching
-    // the unlinked path's deliberate non-clobbering on no-match).
+    // NULL (no LML match to fill them). UPDATE path uses FILL-NULL conflict
+    // semantics — `COALESCE(album_metadata.col, excluded.col)`, mirroring
+    // `jobs/flowsheet-linked-reenrichment`'s `upsertAlbumMatchFillNull` —
+    // so a column only fills when it's currently NULL and an existing REAL
+    // value (a verified streaming link the `streaming-url-upgrade` sibling
+    // job wrote, or a prior out-of-band value) is never overwritten by a
+    // low-value synthesized `.../search/...` template. This is load-bearing
+    // as of BS#895 / epic #1810 W4: the rotation self-heal pass routes
+    // already-terminal `enriched_no_match` linked rows back through this
+    // exact UPSERT on every re-attempt, so a plain unconditional `set`
+    // (the pre-W4 shape, when this branch was reached at most once per row)
+    // would let a self-heal re-attempt silently clobber an upgraded URL.
     await db
       .insert(album_metadata)
       .values({
@@ -300,12 +310,16 @@ export const applyEnrichment = async (
       .onConflictDoUpdate({
         target: album_metadata.album_id,
         set: {
-          spotify_url: searchUrls.spotify_url,
-          youtube_music_url: searchUrls.youtube_music_url,
-          bandcamp_url: searchUrls.bandcamp_url,
-          soundcloud_url: searchUrls.soundcloud_url,
+          spotify_url: sql`COALESCE(${album_metadata.spotify_url}, excluded."spotify_url")`,
+          youtube_music_url: sql`COALESCE(${album_metadata.youtube_music_url}, excluded."youtube_music_url")`,
+          bandcamp_url: sql`COALESCE(${album_metadata.bandcamp_url}, excluded."bandcamp_url")`,
+          soundcloud_url: sql`COALESCE(${album_metadata.soundcloud_url}, excluded."soundcloud_url")`,
+          // Explicit NOW() — never COALESCE'd. Freezing updated_at would
+          // neuter the setWhere race guard below.
           updated_at: sql`NOW()`,
         },
+        // Race guard: never clobber a fresher worker/runtime/upgrade write
+        // that landed after this UPSERT's snapshot was read.
         setWhere: sql`${album_metadata.updated_at} < NOW()`,
       });
     const updated = await db

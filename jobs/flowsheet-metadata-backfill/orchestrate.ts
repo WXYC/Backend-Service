@@ -120,6 +120,16 @@ import {
   type BuildSelfHealCandidatesFn,
 } from './worklist.js';
 
+/**
+ * BS#895 review follow-up (finding #4): reports how many `metadata_status =
+ * 'pending'` rows are older than the `recoveryWindowHours` ceiling — the
+ * rows the ceiling silently strands (see
+ * `worklist.ts:countStrandedPastRecoveryWindow`'s docstring for the full
+ * rationale). Signature matches the real function so tests can inject a
+ * stub without depending on `db.execute` mock-queue ordering.
+ */
+export type CountStrandedPastRecoveryWindowFn = (recoveryWindowHours: number) => Promise<number>;
+
 const JOB_NAME = 'flowsheet-metadata-backfill';
 
 export const BATCH_SIZE = 500;
@@ -438,16 +448,50 @@ export type Totals = {
   // (`metadata_status = 'enriching'`) — or carried an unrecognized future
   // status — at batch-load time, left completely untouched.
   worker_inflight_skipped: number;
+  // BS#895 review follow-up (finding #4): `metadata_status = 'pending'`
+  // rows older than `recoveryWindowHours` — the cohort the ceiling
+  // excludes from every sweep, permanently, with no automated path back.
+  // The ceiling is load-bearing (it's what keeps the hourly sweep from
+  // re-matching the ~748k-row undrained historical backlog #1011 left
+  // behind), so this doesn't remove it — it makes the silent exclusion
+  // observable instead. See `worklist.ts:countStrandedPastRecoveryWindow`.
+  // 0 both when nothing is stranded AND when the counting pass wasn't
+  // wired in (it's opt-in via `runBackfill`'s `countStrandedPastRecoveryWindow`
+  // option, mirroring the self-heal gate below, so every pre-existing test
+  // that omits it keeps exercising byte-identical behavior).
+  stranded_past_recovery_window: number;
   // BS#895 / epic #1810 W4: rotation-linked `enriched_no_match` rows the
   // self-heal pass found this run, whose linked `rotation.discogs_release_id`
   // transitioned NULL→present since this job's last attempt (or were never
   // attempted by this job). See `worklist.ts:buildRotationSelfHealCandidates`.
   self_heal_candidates: number;
-  // BS#895 / epic #1810 W4: of `self_heal_candidates`, how many the re-attempt
-  // resolved to a real Discogs match (`enriched_match`). The rest stayed
-  // `enriched_no_match` (LML still couldn't resolve it) or hit `lml_error` /
-  // `enrich_error` (folded into those shared buckets, not counted here).
+  // BS#895 review follow-up (finding #5a): self-heal candidate ids that
+  // vanished between `buildRotationSelfHealCandidates`' snapshot and
+  // `loadSelfHealRowsByIds`' load — mirrors the main loop's `stale_skipped`
+  // bucket so the self-heal cohort reconciles (`candidates == skipped +
+  // scanned`, same identity `stale_skipped` gives the main sweep).
+  self_heal_skipped: number;
+  // BS#895 review follow-up (finding #5b): self-heal rows actually driven
+  // through `processRow` this run. Kept as its OWN counter — and
+  // `self_heal_resolved` / `self_heal_no_match` / `self_heal_lml_error` /
+  // `self_heal_enrich_error` below as their own counters — rather than
+  // folding into the shared `scanned` / `enriched_match` / `enriched_no_match`
+  // / `lml_error` / `enrich_error` buckets, so a dashboard reading those
+  // shared buckets isn't silently inflated by a self-heal catch-up burst
+  // (the very "< 100 rows median" signal this ticket's C6 sizing criterion
+  // depends on).
+  self_heal_scanned: number;
+  // Of `self_heal_scanned`, how many the re-attempt resolved to a real
+  // Discogs match (`enriched_match` or the raced variant — same data
+  // outcome either way, see `applyEnrichment`'s race-detector doc).
   self_heal_resolved: number;
+  // Of `self_heal_scanned`, how many stayed unresolved after the re-attempt
+  // (`enriched_no_match` or its raced variant) — LML still couldn't answer
+  // even with the rotation id now present (see worklist.ts's coupling note
+  // on `buildRotationSelfHealCandidates`).
+  self_heal_no_match: number;
+  self_heal_lml_error: number;
+  self_heal_enrich_error: number;
 };
 
 export type ProcessOutcome = EnrichOutcome | 'lml_error' | 'enrich_error';
@@ -705,7 +749,11 @@ const formatTotals = (totals: Totals): string =>
   `enrich_error=${totals.enrich_error} below_floor_skipped=${totals.below_floor_skipped} ` +
   `stale_skipped=${totals.stale_skipped} worker_reconciled=${totals.worker_reconciled} ` +
   `worker_inflight_skipped=${totals.worker_inflight_skipped} ` +
-  `self_heal_candidates=${totals.self_heal_candidates} self_heal_resolved=${totals.self_heal_resolved}`;
+  `stranded_past_recovery_window=${totals.stranded_past_recovery_window} ` +
+  `self_heal_candidates=${totals.self_heal_candidates} self_heal_skipped=${totals.self_heal_skipped} ` +
+  `self_heal_scanned=${totals.self_heal_scanned} self_heal_resolved=${totals.self_heal_resolved} ` +
+  `self_heal_no_match=${totals.self_heal_no_match} self_heal_lml_error=${totals.self_heal_lml_error} ` +
+  `self_heal_enrich_error=${totals.self_heal_enrich_error}`;
 
 /**
  * Project the run totals onto a Sentry span with numeric attributes set at
@@ -749,12 +797,25 @@ const projectTotalsSpan = (totals: Totals): void => {
         'backfill.stale_skipped': totals.stale_skipped,
         'backfill.worker_reconciled': totals.worker_reconciled,
         'backfill.worker_inflight_skipped': totals.worker_inflight_skipped,
-        // BS#895 / epic #1810 W4: candidates found by the rotation
-        // self-heal pass and how many resolved to a real match, so the
-        // "~100 already-id'd no-match rows resolve" acceptance signal is
-        // queryable/alertable, not just visible in the structured log.
+        // BS#895 review follow-up (finding #4): rows the recovery-window
+        // ceiling has permanently excluded from the sweep. Read this as a
+        // time series in Sentry (e.g. an anomaly-detection alert on the
+        // attribute's trend, mirroring the org's CloudWatch
+        // ANOMALY_DETECTION_BAND convention) — a single run can't tell
+        // "non-zero" from "non-zero and growing" on its own.
+        'backfill.stranded_past_recovery_window': totals.stranded_past_recovery_window,
+        // BS#895 / epic #1810 W4: self-heal's OWN counters, deliberately
+        // separate from the shared scanned/enriched_match/enriched_no_match/
+        // lml_error/enrich_error buckets above (review finding #5b) so a
+        // self-heal catch-up burst can't silently inflate the main sweep's
+        // "< 100 rows median" signal.
         'backfill.self_heal_candidates': totals.self_heal_candidates,
+        'backfill.self_heal_skipped': totals.self_heal_skipped,
+        'backfill.self_heal_scanned': totals.self_heal_scanned,
         'backfill.self_heal_resolved': totals.self_heal_resolved,
+        'backfill.self_heal_no_match': totals.self_heal_no_match,
+        'backfill.self_heal_lml_error': totals.self_heal_lml_error,
+        'backfill.self_heal_enrich_error': totals.self_heal_enrich_error,
       },
     },
     () => {
@@ -790,6 +851,17 @@ export const runBackfill = async (opts: {
   buildSelfHealCandidates?: BuildSelfHealCandidatesFn;
   selfHealEnrich?: EnrichFn;
   selfHealStampDeadLetter?: StampDeadLetterFn;
+  /**
+   * BS#895 review follow-up (finding #4). Gate for the stranded-past-
+   * recovery-window count: when provided, `runBackfill` runs it once at
+   * run start and reports `totals.stranded_past_recovery_window`; when
+   * omitted, the count is skipped (stays 0) — no extra `db.execute` call,
+   * so every pre-existing test that omits it keeps exercising
+   * byte-identical behavior. Same opt-in shape as `buildSelfHealCandidates`
+   * above. `job.ts` always wires the real
+   * `worklist.ts:countStrandedPastRecoveryWindow` in production.
+   */
+  countStrandedPastRecoveryWindow?: CountStrandedPastRecoveryWindowFn;
 }): Promise<RunResult> => {
   const batchSize = opts.batchSize ?? resolveBatchSize();
   // The env path is guarded by requirePositiveInt, but the injectable seam
@@ -834,9 +906,59 @@ export const runBackfill = async (opts: {
     stale_skipped: 0,
     worker_reconciled: 0,
     worker_inflight_skipped: 0,
+    stranded_past_recovery_window: 0,
     self_heal_candidates: 0,
+    self_heal_skipped: 0,
+    self_heal_scanned: 0,
     self_heal_resolved: 0,
+    self_heal_no_match: 0,
+    self_heal_lml_error: 0,
+    self_heal_enrich_error: 0,
   };
+
+  // BS#895 review follow-up (finding #4): report the stranded-past-ceiling
+  // count once at run start, before the self-heal pass or the main drain —
+  // a cheap, single COUNT (see worklist.ts's docstring for the cost
+  // rationale) that turns the recovery-window ceiling's silent exclusion
+  // into an observable signal. Best-effort: a throw here must never abort
+  // an otherwise-healthy run, mirroring `projectTotalsSpan`'s try/catch at
+  // the end of this function.
+  if (opts.countStrandedPastRecoveryWindow) {
+    try {
+      totals.stranded_past_recovery_window = await opts.countStrandedPastRecoveryWindow(recoveryWindowHours);
+      if (totals.stranded_past_recovery_window > 0) {
+        log(
+          'warn',
+          'stranded_past_recovery_window',
+          `${totals.stranded_past_recovery_window} pending row(s) are older than the ` +
+            `${recoveryWindowHours}h recovery-window ceiling and will never be swept until an operator ` +
+            `widens BACKFILL_RECOVERY_WINDOW_HOURS or runs a dedicated catch-up pass`,
+          {
+            stranded_past_recovery_window: totals.stranded_past_recovery_window,
+            recovery_window_hours: recoveryWindowHours,
+          }
+        );
+        // Trend ("is this growing") is a Sentry-side concern (see the
+        // `countStrandedPastRecoveryWindow` docstring) — this fires on every
+        // non-zero run so the alert itself can apply anomaly-detection /
+        // rate-of-change rules against the numeric span attribute rather
+        // than this stateless cron trying to remember the last run's count.
+        Sentry.captureMessage(`${JOB_NAME}.stranded_past_recovery_window`, {
+          level: 'warning',
+          tags: { step: 'stranded_past_recovery_window' },
+          extra: {
+            stranded_past_recovery_window: totals.stranded_past_recovery_window,
+            recovery_window_hours: recoveryWindowHours,
+          },
+        });
+      }
+    } catch (error) {
+      log('warn', 'stranded_past_recovery_window_failed', 'countStrandedPastRecoveryWindow threw; continuing run', {
+        error_message: error instanceof Error ? error.message : String(error),
+      });
+      captureError(error, 'stranded_past_recovery_window_failed');
+    }
+  }
 
   // Cooperative pause (#735): yield whenever a DJ is actively touching the
   // playout. Gates the self-heal pass, the work-list build (itself a heavy
@@ -888,6 +1010,15 @@ export const runBackfill = async (opts: {
           const row = rowsById.get(id);
           return row ? [row] : [];
         });
+        // BS#895 review follow-up (finding #5a): mirrors the main loop's
+        // `stale_skipped += sliceIds.length - orderedRows.length` — an id
+        // the candidate query returned that vanished by load time (a
+        // concurrent overlapping run already re-attempted it; terminal
+        // `enriched_no_match` rows are never claimed by the CDC worker, so
+        // that's the only realistic cause here). Keeps the self-heal
+        // cohort reconciling: `self_heal_candidates == self_heal_skipped +
+        // self_heal_scanned`.
+        totals.self_heal_skipped += sliceIds.length - orderedRows.length;
 
         for (const row of orderedRows) {
           const { outcome, cacheHit } = await processRow(row, {
@@ -895,10 +1026,21 @@ export const runBackfill = async (opts: {
             enrich: selfHealEnrich,
             stampDeadLetter: selfHealStampDeadLetter,
           });
-          totals.scanned += 1;
-          totals[outcome] += 1;
+          // BS#895 review follow-up (finding #5b): self-heal outcomes route
+          // to their OWN counters, never the shared `scanned` /
+          // `enriched_match` / `enriched_no_match` / `lml_error` /
+          // `enrich_error` buckets above — see the Totals doc for why
+          // blending would silently inflate the main sweep's dashboard
+          // signal.
+          totals.self_heal_scanned += 1;
           if (outcome === 'enriched_match' || outcome === 'enriched_match_raced') {
             totals.self_heal_resolved += 1;
+          } else if (outcome === 'enriched_no_match' || outcome === 'enriched_no_match_raced') {
+            totals.self_heal_no_match += 1;
+          } else if (outcome === 'lml_error') {
+            totals.self_heal_lml_error += 1;
+          } else {
+            totals.self_heal_enrich_error += 1;
           }
           if (throttleMs > 0 && !cacheHit) await sleep(throttleMs);
         }
@@ -908,7 +1050,15 @@ export const runBackfill = async (opts: {
         'info',
         'self_heal_done',
         `W4 self-heal pass done: ${totals.self_heal_resolved}/${totals.self_heal_candidates} resolved`,
-        { self_heal_candidates: totals.self_heal_candidates, self_heal_resolved: totals.self_heal_resolved }
+        {
+          self_heal_candidates: totals.self_heal_candidates,
+          self_heal_skipped: totals.self_heal_skipped,
+          self_heal_scanned: totals.self_heal_scanned,
+          self_heal_resolved: totals.self_heal_resolved,
+          self_heal_no_match: totals.self_heal_no_match,
+          self_heal_lml_error: totals.self_heal_lml_error,
+          self_heal_enrich_error: totals.self_heal_enrich_error,
+        }
       );
     }
   }

@@ -40,6 +40,7 @@ import { db } from '@wxyc/database';
 import {
   buildWorkList,
   buildRotationSelfHealCandidates,
+  countStrandedPastRecoveryWindow,
   SELF_HEAL_MAX_CANDIDATES,
 } from '../../../../jobs/flowsheet-metadata-backfill/worklist';
 import { resolvePartitionFilter } from '../../../../jobs/flowsheet-metadata-backfill/orchestrate';
@@ -418,5 +419,60 @@ describe('buildRotationSelfHealCandidates (BS#895 / epic #1810 W4)', () => {
     (db.execute as jest.Mock).mockResolvedValueOnce({ rowCount: 1 });
 
     await expect(buildRotationSelfHealCandidates()).rejects.toThrow(/unrecognized db\.execute\(\) result shape/);
+  });
+});
+
+describe('countStrandedPastRecoveryWindow (BS#895 review finding #4)', () => {
+  beforeEach(() => {
+    (db.execute as jest.Mock).mockReset();
+  });
+
+  it('returns 0 without querying when recoveryWindowHours <= 0 (the ceiling is disabled — "stranded past the ceiling" is not meaningful)', async () => {
+    expect(await countStrandedPastRecoveryWindow(0)).toBe(0);
+    expect(await countStrandedPastRecoveryWindow(-1)).toBe(0);
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(0);
+  });
+
+  it('runs a single COUNT query scoped to metadata_status=pending, entry_type=track, artist_name NOT NULL, and add_time past the ceiling, with the hours as a bound param', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ stranded_total: 12 }]);
+
+    const result = await countStrandedPastRecoveryWindow(6);
+
+    expect(result).toBe(12);
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(1);
+    const sql = renderDeep(execCall(0));
+    expect(sql).toMatch(/COUNT\(\*\)/i);
+    expect(sql).toMatch(/"entry_type"\s*=\s*'track'/);
+    expect(sql).toMatch(/"artist_name"\s+IS\s+NOT\s+NULL/i);
+    expect(sql).toMatch(/"metadata_status"\s*=\s*'pending'/i);
+    expect(sql).toMatch(/"add_time"\s*<=\s*now\(\)\s*-\s*\(\s*\d*\s*\*\s*interval\s*'1 hour'\s*\)/i);
+    expect(collectParams(execCall(0))).toContain(6);
+  });
+
+  it('coerces a string-typed driver total to a number', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ stranded_total: '9' }]);
+
+    expect(await countStrandedPastRecoveryWindow(6)).toBe(9);
+  });
+
+  it('accepts the {rows: [...]} driver result wrapper', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce({ rows: [{ stranded_total: 3 }] });
+
+    expect(await countStrandedPastRecoveryWindow(6)).toBe(3);
+  });
+
+  it('throws loudly on an unrecognized db.execute result shape instead of silently reporting 0', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce({ rowCount: 1 });
+
+    await expect(countStrandedPastRecoveryWindow(6)).rejects.toThrow(/unrecognized db\.execute\(\) result shape/);
+  });
+
+  it('throws loudly when the count returns no row or a non-numeric total', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+    await expect(countStrandedPastRecoveryWindow(6)).rejects.toThrow(/returned 0 rows/);
+
+    (db.execute as jest.Mock).mockReset();
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ stranded_total: 'not-a-number' }]);
+    await expect(countStrandedPastRecoveryWindow(6)).rejects.toThrow(/non-numeric/);
   });
 });

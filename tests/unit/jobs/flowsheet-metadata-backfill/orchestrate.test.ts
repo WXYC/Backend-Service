@@ -36,6 +36,19 @@
  *      explicitly.
  */
 import { jest } from '@jest/globals';
+import * as Sentry from '@sentry/node';
+
+// The `stranded-past-recovery-window observability` describe block below
+// asserts on `Sentry.captureMessage` calls. `jest.spyOn` fails on this
+// package build ("Cannot redefine property: captureMessage" — its exports
+// aren't configurable), so mock the module instead, preserving every OTHER
+// real (safe-no-op-when-uninitialized) export via `requireActual` — every
+// other test in this file relies on `startSpan` / `captureException` / etc.
+// behaving exactly as they do today, unmocked.
+jest.mock('@sentry/node', () => {
+  const actual = jest.requireActual('@sentry/node');
+  return { ...actual, captureMessage: jest.fn() };
+});
 
 import { db, type CheckLiveActivityFn } from '@wxyc/database';
 import {
@@ -57,6 +70,7 @@ import {
   resolveRecoveryWindowHours,
   resolveThrottleMs,
   runBackfill,
+  type CountStrandedPastRecoveryWindowFn,
   type EnrichFn,
   type LookupFn,
   type StampDeadLetterFn,
@@ -1452,7 +1466,7 @@ describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
     expect(buildSelfHealCandidates.mock.invocationCallOrder[0]).toBeLessThan(buildWorkList.mock.invocationCallOrder[0]);
   });
 
-  it('loads candidate rows scoped to metadata_status=enriched_no_match, calls selfHealEnrich for each, and counts resolved matches (match + match_raced)', async () => {
+  it('loads candidate rows scoped to metadata_status=enriched_no_match, calls selfHealEnrich for each, and routes outcomes to self-heal-scoped counters — NOT the shared scanned/enriched_match/enriched_no_match buckets (review finding #5b)', async () => {
     const buildWorkList = injectWorkList();
     const buildSelfHealCandidates = jest.fn<BuildSelfHealCandidatesFn>().mockResolvedValue([201, 202, 203]);
     (db.execute as jest.Mock).mockResolvedValueOnce([selfHealRowFor(201), selfHealRowFor(202), selfHealRowFor(203)]);
@@ -1475,18 +1489,48 @@ describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
 
     expect(selfHealEnrich).toHaveBeenCalledTimes(3);
     expect(result.totals.self_heal_candidates).toBe(3);
+    expect(result.totals.self_heal_skipped).toBe(0);
+    expect(result.totals.self_heal_scanned).toBe(3);
     expect(result.totals.self_heal_resolved).toBe(2);
-    expect(result.totals.scanned).toBe(3);
-    expect(result.totals.enriched_match).toBe(1);
-    expect(result.totals.enriched_no_match).toBe(1);
-    expect(result.totals.enriched_match_raced).toBe(1);
+    expect(result.totals.self_heal_no_match).toBe(1);
+    expect(result.totals.self_heal_lml_error).toBe(0);
+    expect(result.totals.self_heal_enrich_error).toBe(0);
+    // The shared main-sweep buckets must stay untouched — a self-heal
+    // catch-up burst must never inflate the "< 100 rows median" signal the
+    // main sweep's dashboards read from these fields.
+    expect(result.totals.scanned).toBe(0);
+    expect(result.totals.enriched_match).toBe(0);
+    expect(result.totals.enriched_no_match).toBe(0);
+    expect(result.totals.enriched_match_raced).toBe(0);
+    expect(result.totals.lml_error).toBe(0);
+    expect(result.totals.enrich_error).toBe(0);
 
     const sql = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
     expect(sql).toMatch(/=\s*ANY\(/i);
     expect(sql).toMatch(/"metadata_status"\s*=\s*'enriched_no_match'/i);
   });
 
-  it('routes a permanent enrich failure through selfHealStampDeadLetter (dead-lettered, not enrich_error retryable forever)', async () => {
+  it('counts a self-heal lml_error into self_heal_lml_error, not the shared lml_error bucket', async () => {
+    const buildWorkList = injectWorkList();
+    const buildSelfHealCandidates = jest.fn<BuildSelfHealCandidatesFn>().mockResolvedValue([211]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([selfHealRowFor(211)]);
+    const failingLookup = jest.fn<LookupFn>().mockRejectedValue(new Error('LML unreachable'));
+
+    const result = await runBackfill({
+      lookup: failingLookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      buildWorkList,
+      buildSelfHealCandidates,
+    });
+
+    expect(result.totals.self_heal_lml_error).toBe(1);
+    expect(result.totals.self_heal_scanned).toBe(1);
+    expect(result.totals.lml_error).toBe(0);
+  });
+
+  it('routes a permanent enrich failure through selfHealStampDeadLetter (dead-lettered, not enrich_error retryable forever) and counts it in self_heal_enrich_error', async () => {
     const buildWorkList = injectWorkList();
     const buildSelfHealCandidates = jest.fn<BuildSelfHealCandidatesFn>().mockResolvedValue([301]);
     (db.execute as jest.Mock).mockResolvedValueOnce([selfHealRowFor(301)]);
@@ -1507,11 +1551,12 @@ describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
     });
 
     expect(selfHealStampDeadLetter).toHaveBeenCalledWith(301);
-    expect(result.totals.enrich_error).toBe(1);
+    expect(result.totals.self_heal_enrich_error).toBe(1);
     expect(result.totals.self_heal_resolved).toBe(0);
+    expect(result.totals.enrich_error).toBe(0);
   });
 
-  it('a candidate id that vanishes before the self-heal batch load is silently skipped (no LML call, no scanned bump)', async () => {
+  it('a candidate id that vanishes before the self-heal batch load counts into self_heal_skipped (review finding #5a — no LML call, no self_heal_scanned bump)', async () => {
     const buildWorkList = injectWorkList();
     const buildSelfHealCandidates = jest.fn<BuildSelfHealCandidatesFn>().mockResolvedValue([401, 402]);
     // Only 401 comes back — 402 vanished (e.g. a concurrent overlapping run
@@ -1530,8 +1575,12 @@ describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
     });
 
     expect(selfHealEnrich).toHaveBeenCalledTimes(1);
-    expect(result.totals.scanned).toBe(1);
+    expect(result.totals.self_heal_scanned).toBe(1);
+    expect(result.totals.self_heal_skipped).toBe(1);
     expect(result.totals.self_heal_candidates).toBe(2);
+    // The reconciliation identity finding #5a establishes: candidates ==
+    // skipped + scanned.
+    expect(result.totals.self_heal_skipped + result.totals.self_heal_scanned).toBe(result.totals.self_heal_candidates);
   });
 
   it('respects the cooperative pause before the candidate build and before each batch', async () => {
@@ -1559,5 +1608,142 @@ describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
     expect(checkLiveActivity.mock.invocationCallOrder[0]).toBeLessThan(
       buildSelfHealCandidates.mock.invocationCallOrder[0]
     );
+  });
+});
+
+describe('stranded-past-recovery-window observability (BS#895 review finding #4)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult(false));
+  const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_match');
+
+  const injectWorkList = (entries: Array<[number, number]> = []): jest.Mock<BuildWorkListFn> =>
+    jest.fn<BuildWorkListFn>().mockResolvedValue({
+      ids: entries.map(([id]) => id),
+      plays: entries.map(([, plays]) => plays),
+      pendingTotal: entries.length,
+      belowFloorSkipped: 0,
+    });
+
+  // `@sentry/node` is module-mocked at the top of this file (`captureMessage`
+  // only — every other export is the real, safe-no-op-when-uninitialized
+  // implementation) specifically so these tests can assert on it.
+  const captureMessageMock = Sentry.captureMessage as jest.Mock;
+
+  it('is skipped entirely when countStrandedPastRecoveryWindow is not provided — byte-identical pre-fix behavior (opt-in, same shape as buildSelfHealCandidates)', async () => {
+    const buildWorkList = injectWorkList();
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      buildWorkList,
+    });
+
+    expect(result.totals.stranded_past_recovery_window).toBe(0);
+    expect(captureMessageMock).not.toHaveBeenCalled();
+  });
+
+  it('reports 0 and stays silent when nothing is stranded', async () => {
+    const buildWorkList = injectWorkList();
+    const countStrandedPastRecoveryWindow = jest.fn<CountStrandedPastRecoveryWindowFn>().mockResolvedValue(0);
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      buildWorkList,
+      countStrandedPastRecoveryWindow,
+    });
+
+    expect(countStrandedPastRecoveryWindow).toHaveBeenCalledTimes(1);
+    expect(result.totals.stranded_past_recovery_window).toBe(0);
+    expect(captureMessageMock).not.toHaveBeenCalled();
+  });
+
+  it('forwards the resolved recoveryWindowHours into the count fn, reports a non-zero count in totals, and fires a Sentry warning', async () => {
+    const buildWorkList = injectWorkList();
+    const countStrandedPastRecoveryWindow = jest.fn<CountStrandedPastRecoveryWindowFn>().mockResolvedValue(42);
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      recoveryWindowHours: 9,
+      buildWorkList,
+      countStrandedPastRecoveryWindow,
+    });
+
+    expect(countStrandedPastRecoveryWindow).toHaveBeenCalledWith(9);
+    expect(result.totals.stranded_past_recovery_window).toBe(42);
+    expect(captureMessageMock).toHaveBeenCalledTimes(1);
+    const [message, captureOpts] = captureMessageMock.mock.calls[0] as [
+      string,
+      { level?: string; tags?: Record<string, unknown>; extra?: Record<string, unknown> },
+    ];
+    expect(message).toMatch(/stranded_past_recovery_window/);
+    expect(captureOpts.level).toBe('warning');
+    expect(captureOpts.extra?.stranded_past_recovery_window).toBe(42);
+  });
+
+  it('runs BEFORE the self-heal pass and the main work-list build (run-start observability)', async () => {
+    const buildWorkList = injectWorkList();
+    const buildSelfHealCandidates = jest.fn<BuildSelfHealCandidatesFn>().mockResolvedValue([]);
+    const countStrandedPastRecoveryWindow = jest.fn<CountStrandedPastRecoveryWindowFn>().mockResolvedValue(0);
+
+    await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      buildWorkList,
+      buildSelfHealCandidates,
+      countStrandedPastRecoveryWindow,
+    });
+
+    expect(countStrandedPastRecoveryWindow.mock.invocationCallOrder[0]).toBeLessThan(
+      buildSelfHealCandidates.mock.invocationCallOrder[0]
+    );
+    expect(countStrandedPastRecoveryWindow.mock.invocationCallOrder[0]).toBeLessThan(
+      buildWorkList.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('swallows a throw from countStrandedPastRecoveryWindow and continues the run (best-effort, never aborts an otherwise-healthy run)', async () => {
+    const buildWorkList = injectWorkList([[10, 3]]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([
+      {
+        id: 10,
+        artist_name: 'artist-10',
+        album_title: null,
+        track_title: null,
+        album_id: null,
+        metadata_status: 'pending',
+      },
+    ]);
+    const countStrandedPastRecoveryWindow = jest
+      .fn<CountStrandedPastRecoveryWindowFn>()
+      .mockRejectedValue(new Error('connection reset'));
+
+    const result = await runBackfill({
+      lookup,
+      enrich,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      playFloor: 5,
+      floorRecencyDays: 7,
+      buildWorkList,
+      countStrandedPastRecoveryWindow,
+    });
+
+    expect(result.totals.stranded_past_recovery_window).toBe(0);
+    // The rest of the run still completed — the main drain processed its row.
+    expect(result.totals.scanned).toBe(1);
+    expect(captureMessageMock).not.toHaveBeenCalled();
   });
 });

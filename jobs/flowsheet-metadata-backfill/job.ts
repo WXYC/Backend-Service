@@ -40,7 +40,7 @@ import { closeDatabaseConnection } from '@wxyc/database';
 import { runBackfill } from './orchestrate.js';
 import { lookupMetadata, getLookupCache } from './lml-fetch.js';
 import { applyEnrichment } from './enrich.js';
-import { buildRotationSelfHealCandidates } from './worklist.js';
+import { buildRotationSelfHealCandidates, countStrandedPastRecoveryWindow } from './worklist.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 
 const JOB_NAME = 'flowsheet-metadata-backfill';
@@ -71,6 +71,9 @@ const main = async () => {
       // every other `runBackfill` caller (tests, catch-up scripts) unless
       // they opt in explicitly.
       buildSelfHealCandidates: buildRotationSelfHealCandidates,
+      // BS#895 review follow-up (finding #4): same opt-in shape — only
+      // production reports the stranded-past-recovery-window count.
+      countStrandedPastRecoveryWindow,
     });
   } catch (error) {
     log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });

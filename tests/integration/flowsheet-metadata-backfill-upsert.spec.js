@@ -30,6 +30,11 @@
  *   - The status-based idempotency guard (`metadata_status = 'pending'`,
  *     BS#895) leaves an already-flipped flowsheet row untouched (returning
  *     empty → raced metric in the application layer).
+ *   - BS#895 finding #3: the linked+no-match album_metadata UPSERT's
+ *     conflict path is fill-null (COALESCE(existing, excluded) per search-URL
+ *     column), not an unconditional overwrite — load-bearing once the epic
+ *     #1810 W4 self-heal pass starts routing already-terminal
+ *     `enriched_no_match` rows back through this UPSERT on every re-attempt.
  *
  * Pure SQL — does NOT import `jobs/flowsheet-metadata-backfill/enrich.ts`.
  * Integration runner is babel-jest with no TS support; mirrors the
@@ -398,6 +403,65 @@ describe('flowsheet-metadata-backfill writer contract (real PG, BS#1027)', () =>
       SELECT artwork_url FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${albumId}
     `;
     expect(after[0].artwork_url).toBe(FULL_PAYLOAD.artwork_url);
+  });
+
+  test('BS#895 finding #3: a no-match UPSERT against an already-populated album_metadata row preserves the real streaming URLs (fill-null COALESCE, not an unconditional overwrite)', async () => {
+    // The scenario this guards: a rotation-linked flowsheet row is
+    // `enriched_no_match` and album_metadata already carries a REAL
+    // spotify_url (e.g. landed via the streaming-url-upgrade sibling job).
+    // Before BS#895, the linked+no-match branch was reached at most once
+    // per row (no automated path revisited a terminal enriched_no_match
+    // row), so an unconditional overwrite was latent but unreachable. The
+    // epic #1810 W4 self-heal pass now routes exactly this row shape back
+    // through the same UPSERT on every re-attempt — an unconditional
+    // overwrite would silently replace the real URL with a low-value
+    // `.../search/...` template. Mirrors the FIXED
+    // `jobs/flowsheet-metadata-backfill/enrich.ts` linked+no-match UPSERT
+    // (COALESCE(album_metadata.col, excluded.col) per column); when that
+    // file is hand-edited this mirror must follow.
+    const albumId = await insertLibraryAlbum(sql, 'no-match-fill-null');
+    insertedAlbumIds.push(albumId);
+
+    const REAL_SPOTIFY_URL = 'https://open.spotify.com/album/realUpgradedId123';
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, spotify_url, updated_at)
+      VALUES
+        (${albumId}, ${REAL_SPOTIFY_URL}, NOW() - INTERVAL '1 hour')
+    `;
+
+    const searchUrls = {
+      spotify_url: 'https://open.spotify.com/search/should-not-land',
+      youtube_music_url: SEARCH_URLS.youtube_music_url,
+      bandcamp_url: SEARCH_URLS.bandcamp_url,
+      soundcloud_url: SEARCH_URLS.soundcloud_url,
+    };
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, spotify_url, youtube_music_url, bandcamp_url, soundcloud_url, updated_at)
+      VALUES
+        (${albumId}, ${searchUrls.spotify_url}, ${searchUrls.youtube_music_url},
+         ${searchUrls.bandcamp_url}, ${searchUrls.soundcloud_url}, NOW())
+      ON CONFLICT (album_id) DO UPDATE
+         SET spotify_url        = COALESCE(${sql(SCHEMA)}.album_metadata.spotify_url, EXCLUDED.spotify_url),
+             youtube_music_url  = COALESCE(${sql(SCHEMA)}.album_metadata.youtube_music_url, EXCLUDED.youtube_music_url),
+             bandcamp_url       = COALESCE(${sql(SCHEMA)}.album_metadata.bandcamp_url, EXCLUDED.bandcamp_url),
+             soundcloud_url     = COALESCE(${sql(SCHEMA)}.album_metadata.soundcloud_url, EXCLUDED.soundcloud_url),
+             updated_at         = NOW()
+       WHERE ${sql(SCHEMA)}.album_metadata.updated_at < NOW()
+    `;
+
+    const after = await sql`
+      SELECT spotify_url, youtube_music_url, bandcamp_url, soundcloud_url
+      FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${albumId}
+    `;
+    // The pre-existing real URL survives — COALESCE's first arg won.
+    expect(after[0].spotify_url).toBe(REAL_SPOTIFY_URL);
+    // The 3 previously-NULL columns fill from this run's synthesized URLs —
+    // fill-null still fills, it just never overwrites a populated column.
+    expect(after[0].youtube_music_url).toBe(SEARCH_URLS.youtube_music_url);
+    expect(after[0].bandcamp_url).toBe(SEARCH_URLS.bandcamp_url);
+    expect(after[0].soundcloud_url).toBe(SEARCH_URLS.soundcloud_url);
   });
 
   test('status-guard idempotency: stamping an already-flipped flowsheet row returns 0 (raced outcome)', async () => {

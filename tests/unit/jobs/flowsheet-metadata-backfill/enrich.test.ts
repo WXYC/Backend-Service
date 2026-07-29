@@ -520,10 +520,50 @@ describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () =
     };
     expect(conflictCfg.set).not.toHaveProperty('artwork_url');
     expect(conflictCfg.set).not.toHaveProperty('artist_bio');
-    expect(conflictCfg.set.spotify_url).toContain('open.spotify.com/search');
-    expect(conflictCfg.set.youtube_music_url).toContain('music.youtube.com/search');
+    // BS#895 finding #3: the conflict-path set clause fill-nulls each of the
+    // 4 search-URL columns via COALESCE(existing, excluded) rather than
+    // overwriting unconditionally — see the dedicated COALESCE test below
+    // for the full clobber-prevention contract. Spot-check here that this
+    // branch is no longer a bare string (the pre-fix shape) but a COALESCE
+    // expression; the synthesized value itself is asserted via `values`
+    // (the mocked drizzle harness blanks interpolated args from the
+    // rendered `.sql` text — see `boundValues`/`renderSql`'s doc comment).
+    expect(typeof conflictCfg.set.spotify_url).not.toBe('string');
+    expect(renderSql(conflictCfg.set.spotify_url)).toMatch(/COALESCE/i);
+    expect(renderSql(conflictCfg.set.spotify_url)).toContain('excluded."spotify_url"');
+    expect(typeof conflictCfg.set.youtube_music_url).not.toBe('string');
+    expect(renderSql(conflictCfg.set.youtube_music_url)).toMatch(/COALESCE/i);
+    expect(renderSql(conflictCfg.set.youtube_music_url)).toContain('excluded."youtube_music_url"');
     expect(conflictCfg.setWhere).toBeDefined();
     expect(renderSql(conflictCfg.setWhere)).toMatch(/<\s*NOW\(\)/i);
+  });
+
+  it('on no-match: conflict-path set clause fill-nulls all 4 search-URL columns via COALESCE(existing, excluded) — never clobbers a real streaming URL (BS#895 W4 self-heal re-attempt safety)', async () => {
+    await applyEnrichment(linkedRow, noMatchResponse);
+
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as {
+      set: Record<string, unknown>;
+    };
+    for (const field of ['spotify_url', 'youtube_music_url', 'bandcamp_url', 'soundcloud_url'] as const) {
+      const rendered = renderSql(conflictCfg.set[field]);
+      const values = boundValues(conflictCfg.set[field]);
+      // The rendered template text is `COALESCE(<interpolated>, excluded."<field>")`
+      // — the mocked drizzle harness blanks the interpolated arg from the
+      // joined `.sql` text (same shape documented on `boundValues` above),
+      // so the visible text alone already proves the existing-column
+      // reference sits BEFORE the literal `, excluded."<field>")` suffix —
+      // i.e. COALESCE's first (winning) argument is the existing value, not
+      // `excluded`. `values` confirms an interpolation happened at all
+      // (the mock's album_metadata.<field> placeholder is the field's own
+      // name — see tests/mocks/database.mock.ts).
+      expect(rendered).toMatch(/^COALESCE\(/i);
+      expect(rendered).toBe(`COALESCE(, excluded."${field}")`);
+      expect(values).toContain(field);
+    }
+    // updated_at is NOT COALESCE'd — freezing it would neuter the setWhere
+    // race guard (a stale run could never re-pass `updated_at < NOW()`).
+    expect(renderSql(conflictCfg.set.updated_at)).not.toMatch(/COALESCE/i);
+    expect(renderSql(conflictCfg.set.updated_at)).toMatch(/NOW\(\)/i);
   });
 
   it('on no-match: flowsheet UPDATE flips metadata_status + stamps metadata_attempt_at only (no inline URLs)', async () => {

@@ -43,9 +43,11 @@ describe('schema: flowsheet metadata_status cutover + W4 rotation self-heal inde
       expect(fs.existsSync(migrationPath)).toBe(true);
     });
 
-    it('drops both pre-BS#891 metadata_attempt_at partial indexes', () => {
-      expect(migrationSql).toMatch(/DROP INDEX\s+"wxyc_schema"\."flowsheet_metadata_attempt_pending_idx"/i);
-      expect(migrationSql).toMatch(/DROP INDEX\s+"wxyc_schema"\."flowsheet_metadata_attempt_pending_covering_idx"/i);
+    it('drops both pre-BS#891 metadata_attempt_at partial indexes with IF EXISTS (idempotent — lets an operator pre-drop out-of-band)', () => {
+      expect(migrationSql).toMatch(/DROP INDEX\s+IF EXISTS\s+"wxyc_schema"\."flowsheet_metadata_attempt_pending_idx"/i);
+      expect(migrationSql).toMatch(
+        /DROP INDEX\s+IF EXISTS\s+"wxyc_schema"\."flowsheet_metadata_attempt_pending_covering_idx"/i
+      );
     });
 
     it('creates flowsheet_rotation_no_match_idx with IF NOT EXISTS for prod-prebuilt CONCURRENTLY', () => {
