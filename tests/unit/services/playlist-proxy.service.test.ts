@@ -27,6 +27,8 @@ const mockWhere = jest.fn();
 const mockGroupBy = jest.fn();
 const mockOrderBy = jest.fn();
 const mockLimit = jest.fn();
+// db.execute(sql`...`) resolves the batched rotation-fallback query (BS#1862).
+const mockExecute = jest.fn();
 
 const mockDbChain = {
   select: mockSelect,
@@ -46,6 +48,7 @@ mockWhere.mockReturnValue(mockDbChain);
 mockGroupBy.mockResolvedValue([]);
 mockOrderBy.mockReturnValue(mockDbChain);
 mockLimit.mockResolvedValue([]);
+mockExecute.mockResolvedValue([]); // rotation fallback: no matches by default
 
 jest.mock('@wxyc/database', () => ({
   db: {
@@ -57,6 +60,7 @@ jest.mock('@wxyc/database', () => ({
     groupBy: (...args: unknown[]) => mockGroupBy(...args),
     orderBy: (...args: unknown[]) => mockOrderBy(...args),
     limit: (...args: unknown[]) => mockLimit(...args),
+    execute: (...args: unknown[]) => mockExecute(...args),
   },
   flowsheet: {
     id: 'id',
@@ -96,7 +100,7 @@ jest.mock('@wxyc/database', () => ({
 }));
 
 jest.mock('drizzle-orm', () => ({
-  sql: Object.assign(jest.fn(), { raw: jest.fn() }),
+  sql: Object.assign(jest.fn(), { raw: jest.fn(), join: jest.fn() }),
   inArray: jest.fn(),
   isNotNull: jest.fn(),
   and: jest.fn(),
@@ -124,6 +128,12 @@ const jessicaPrattRow = {
   album_title: 'On Your Own Love Again',
   record_label: 'Drag City',
   request_flag: false,
+  // No FK rotation link and no fallback match -> not in rotation. As a
+  // hand-typed track (rotation_id null, artist+album present) it IS a
+  // fallback candidate, so getRecentEntries runs the batched fallback query
+  // for it — which the mock resolves to no match by default.
+  rotation_id: null,
+  album_id: 7001,
   rotation_bin: null,
 };
 
@@ -137,7 +147,29 @@ const juanaMolinaRow = {
   album_title: 'DOGA',
   record_label: 'Sonamos',
   request_flag: true,
+  // FK rotation hit: rotation_id set, so rotation.rotation_bin comes back from
+  // the window join and this row is NOT a fallback candidate.
+  rotation_id: 940,
+  album_id: 8001,
   rotation_bin: 'M',
+};
+
+// Hand-typed play that matches an active rotation only through the fallback
+// lane (rotation_id null, so no FK badge; the batched fallback query resolves
+// it). BS#1862.
+const handTypedRotationRow = {
+  id: 2602251,
+  entry_type: 'track',
+  add_time: new Date('2026-07-28T20:50:00.000Z'),
+  radio_hour: null,
+  track_title: 'Call Your Name',
+  artist_name: 'Chuquimamani-Condori',
+  album_title: 'Edits',
+  record_label: 'self-released',
+  request_flag: false,
+  rotation_id: null,
+  album_id: null,
+  rotation_bin: null,
 };
 
 const talksetRow = {
@@ -217,6 +249,7 @@ describe('playlist-proxy.service', () => {
     mockOrderBy.mockReturnValue(mockDbChain);
     mockGroupBy.mockResolvedValue([]); // artwork query default: no matches
     mockLimit.mockResolvedValue([]); // main entries query default: empty
+    mockExecute.mockResolvedValue([]); // rotation fallback default: no matches
   });
 
   describe('getRecentEntries — grouping and entry_type mapping', () => {
@@ -396,6 +429,88 @@ describe('playlist-proxy.service', () => {
       expect(juana?.request).toBe('true');
       expect(typeof juana?.request).toBe('string');
       expect(jessica?.request).toBe('false');
+    });
+  });
+
+  describe('getRecentEntries — rotation fallback lane (BS#1862)', () => {
+    // The FK join supplies rotation_bin for picker-added rotation plays in the
+    // window query; the batched db.execute fallback resolves only the
+    // hand-typed cohort (rotation_id NULL) post-slice. These tests exercise
+    // that split and the batched-not-per-row invariant that motivated BS#1862.
+    it('resolves rotation "true" for a hand-typed entry via the batched fallback query', async () => {
+      mockLimit.mockResolvedValue([handTypedRotationRow]);
+      mockExecute.mockResolvedValue([{ fid: handTypedRotationRow.id, rotation_bin: 'H' }]);
+
+      const result = await getRecentEntries(50);
+
+      const entry = result.playcuts.find((p) => p.id === handTypedRotationRow.id);
+      expect(entry?.rotation).toBe('true');
+    });
+
+    it('resolves rotation "false" for a hand-typed entry the fallback query does not match', async () => {
+      mockLimit.mockResolvedValue([handTypedRotationRow]);
+      mockExecute.mockResolvedValue([]); // no active rotation matched
+
+      const result = await getRecentEntries(50);
+
+      const entry = result.playcuts.find((p) => p.id === handTypedRotationRow.id);
+      expect(entry?.rotation).toBe('false');
+    });
+
+    it('prefers the FK rotation_bin without consulting the fallback for a picker-added rotation play', async () => {
+      // juanaMolinaRow has rotation_id set: the window join supplies its
+      // rotation_bin, so it is not an eligible fallback candidate.
+      mockLimit.mockResolvedValue([juanaMolinaRow]);
+
+      const result = await getRecentEntries(50);
+
+      expect(result.playcuts[0].rotation).toBe('true');
+      // No eligible candidates -> the batched fallback query never runs.
+      expect(mockExecute).not.toHaveBeenCalled();
+    });
+
+    it('runs the batched fallback query exactly once for a mix of eligible hand-typed playcuts', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow, handTypedRotationRow, juanaMolinaRow]);
+
+      await getRecentEntries(50);
+
+      // One batched query covers every eligible candidate (jessica + hand-typed),
+      // never one-query-per-row (the BS#1862 regression guard).
+      expect(mockExecute).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not run the fallback query when there are no playcuts', async () => {
+      mockLimit.mockResolvedValue([talksetRow, breakpointRow]);
+
+      await getRecentEntries(50);
+
+      expect(mockExecute).not.toHaveBeenCalled();
+    });
+
+    it('resolves only the sliced playcuts and runs the fallback once regardless of window size', async () => {
+      const manyPlaycuts = Array.from({ length: 10 }, (_, i) => ({
+        ...handTypedRotationRow,
+        id: 5000 + i,
+      }));
+      mockLimit.mockResolvedValue(manyPlaycuts);
+      mockExecute.mockResolvedValue([{ fid: 5000, rotation_bin: 'H' }]);
+
+      const result = await getRecentEntries(3);
+
+      expect(result.playcuts).toHaveLength(3);
+      expect(mockExecute).toHaveBeenCalledTimes(1);
+      expect(result.playcuts.find((p) => p.id === 5000)?.rotation).toBe('true');
+      expect(result.playcuts.find((p) => p.id === 5001)?.rotation).toBe('false');
+    });
+
+    it('degrades to rotation "false" (rather than throwing) when the fallback query fails', async () => {
+      mockLimit.mockResolvedValue([handTypedRotationRow]);
+      mockExecute.mockRejectedValue(new Error('DB connection lost'));
+
+      const result = await getRecentEntries(50);
+
+      const entry = result.playcuts.find((p) => p.id === handTypedRotationRow.id);
+      expect(entry?.rotation).toBe('false');
     });
   });
 

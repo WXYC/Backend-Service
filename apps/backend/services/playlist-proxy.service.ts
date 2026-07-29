@@ -27,6 +27,18 @@
  * tubafrenzy-flowsheetEntryType mapping (flowsheetEntryType 7 covers both
  * real talksets and dj_join/dj_leave; 9/10 are show_start/show_end).
  *
+ * Rotation-badge resolution runs in two lanes (BS#1862). The primary source
+ * is the FK join (`leftJoin(rotation, rotation.id = flowsheet.rotation_id)`),
+ * computed cheaply in the main window query. The fallback — a text/album_id
+ * match against active rotations for entries a DJ typed by hand instead of
+ * picking from rotation (`rotation_id IS NULL`) — is deferred to a single
+ * batched query over the SLICED (<= n) playcuts only, run post-slice
+ * alongside artwork enrichment. It used to be a correlated subquery in the
+ * SELECT list evaluated for every one of the 200 window rows, which
+ * seq-scanned the 64k-row `library` table per row and cost ~2.4s
+ * server-side regardless of `n` (BS#1862); batching it drops the cost to
+ * ~10-30ms while preserving the exact COALESCE(FK, fallback) semantics.
+ *
  * Exported API:
  *   getRecentEntries(n) — query Postgres for the current playlist grouped
  *                         by entry type, sliced to n playcuts. Async (was
@@ -38,6 +50,7 @@ import { sql, inArray, and, isNotNull, eq, desc } from 'drizzle-orm';
 
 const MAX_ENTRIES = 200;
 const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
 
 /** Compute a normalized lookup key from artist and album for matching against flowsheet rows. */
 function lookupKey(artist: string, album: string): string {
@@ -46,54 +59,6 @@ function lookupKey(artist: string, album: string): string {
 
 /** SQL expression that computes the same lookup key from flowsheet columns. */
 const flowsheetLookupKey = sql<string>`lower(trim(${flowsheet.artist_name})) || '-' || lower(trim(coalesce(${flowsheet.album_title}, '')))`;
-
-/**
- * Whether a flowsheet row actively matches a rotation record, expressed as
- * the `rotation.rotation_bin` letter or NULL. Structurally identical to
- * `FSEntryFieldsRaw.rotation_bin` in `apps/backend/services/flowsheet.service.ts`
- * (kept in sync at the expression level, not literally imported/shared —
- * same convention `shared/legacy-mirror/src/rotation-match.ts`'s
- * `isActiveRotationMatch` already documents for this same three-cohort
- * match). Primary source is the FK join (`leftJoin(rotation, rotation.id =
- * flowsheet.rotation_id)`); the fallback subquery only fires when that join
- * misses and the entry looks like a real track (non-empty artist + album),
- * covering DJs who typed an entry by hand instead of using the rotation
- * picker. This is also the exact classification
- * `shared/legacy-mirror/src/http-mirror.ts`'s `mapEntryToTubafrenzy` used
- * to decide tubafrenzy's flowsheetEntryType=2 (rotation) at mirror time, so
- * reusing it here is the most faithful available reconstruction of what
- * tubafrenzy's own recentStream would have reported.
- */
-const rotationBinExpr = sql<string | null>`
-  COALESCE(
-    ${rotation.rotation_bin},
-    CASE WHEN ${flowsheet.rotation_id} IS NULL
-      AND coalesce(${flowsheet.artist_name}, '') <> ''
-      AND coalesce(${flowsheet.album_title}, '') <> ''
-    THEN (
-      SELECT r2.rotation_bin
-      FROM ${rotation} r2
-      LEFT JOIN ${library} l2 ON l2.id = r2.album_id
-      LEFT JOIN ${artists} a2 ON a2.id = l2.artist_id
-      WHERE r2.add_date <= ${flowsheet.add_time}::date
-        AND (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
-        AND (
-          (${flowsheet.album_id} IS NOT NULL AND r2.album_id = ${flowsheet.album_id})
-          OR (
-            lower(trim(coalesce(r2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
-            AND lower(trim(coalesce(r2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
-          )
-          OR (
-            lower(trim(coalesce(a2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
-            AND lower(trim(coalesce(l2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
-          )
-        )
-      ORDER BY r2.id
-      LIMIT 1
-    )
-    END
-  )
-`;
 
 // --- Types ---
 
@@ -134,6 +99,12 @@ type RecentRow = {
   album_title: string | null;
   record_label: string | null;
   request_flag: boolean | null;
+  rotation_id: number | null;
+  album_id: number | null;
+  // FK-lane rotation_bin only (rotation.rotation_bin via the rotation_id
+  // join). NULL here does NOT mean "not in rotation" — a hand-typed entry
+  // with rotation_id NULL can still match an active rotation via the
+  // post-slice fallback lane. See resolveFallbackRotation.
   rotation_bin: string | null;
 };
 
@@ -222,7 +193,13 @@ export async function getRecentEntries(n: number): Promise<GroupedResponse> {
       album_title: flowsheet.album_title,
       record_label: flowsheet.record_label,
       request_flag: flowsheet.request_flag,
-      rotation_bin: rotationBinExpr,
+      rotation_id: flowsheet.rotation_id,
+      album_id: flowsheet.album_id,
+      // FK-lane rotation_bin only. The correlated fallback subquery this used
+      // to COALESCE with was removed (BS#1862) — it seq-scanned `library`
+      // for every window row and cost ~2.4s. The fallback now runs post-slice
+      // in resolveFallbackRotation over the <= n sliced playcuts.
+      rotation_bin: rotation.rotation_bin,
     })
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
@@ -249,9 +226,16 @@ export async function getRecentEntries(n: number): Promise<GroupedResponse> {
   }
 
   const slicedPlaycuts = playcutRows.slice(0, n);
-  const artworkMap = await enrichPlaycuts(slicedPlaycuts);
+  const [artworkMap, fallbackRotationMap] = await Promise.all([
+    enrichPlaycuts(slicedPlaycuts),
+    resolveFallbackRotation(slicedPlaycuts),
+  ]);
 
   const playcuts: GroupedPlaycut[] = slicedPlaycuts.map((row) => {
+    // COALESCE(FK rotation_bin, fallback rotation_bin) — the exact semantics
+    // the old inline COALESCE(rotation.rotation_bin, <correlated subquery>)
+    // produced, now split across two lanes for performance (BS#1862).
+    const rotationBin = row.rotation_bin ?? fallbackRotationMap.get(row.id) ?? null;
     const grouped: GroupedPlaycut = {
       id: row.id,
       chronOrderID: row.id,
@@ -261,7 +245,7 @@ export async function getRecentEntries(n: number): Promise<GroupedResponse> {
       artistName: row.artist_name ?? '',
       releaseTitle: row.album_title ?? '',
       labelName: row.record_label ?? '',
-      rotation: row.rotation_bin !== null ? 'true' : 'false',
+      rotation: rotationBin !== null ? 'true' : 'false',
       request: row.request_flag ? 'true' : 'false',
     };
     const artwork = artworkMap.get(row.id);
@@ -350,6 +334,135 @@ async function enrichPlaycuts(candidates: PlaycutCandidate[]): Promise<Map<numbe
     return map;
   } catch (err) {
     console.error('[playlist-proxy] artwork enrichment failed:', err);
+    return new Map();
+  }
+}
+
+interface FallbackCandidate {
+  id: number;
+  rotation_id: number | null;
+  album_id: number | null;
+  artist_name: string | null;
+  album_title: string | null;
+  add_time: Date;
+}
+
+/**
+ * Resolve the rotation-badge FALLBACK for hand-typed playcuts, batched
+ * (BS#1862).
+ *
+ * The primary rotation source is the FK join in `getRecentEntries`'s window
+ * query (`rotation.rotation_bin` via `flowsheet.rotation_id`). This fallback
+ * covers only the cohort that join can't reach: track entries a DJ typed by
+ * hand instead of picking from the rotation UI (`rotation_id IS NULL`) that
+ * nonetheless match an active rotation record. It reconstructs the exact
+ * match tubafrenzy's own flowsheetEntryType=2 (rotation) classification
+ * used, three branches:
+ *   (a) direct album_id match (`flowsheet.album_id = rotation.album_id`);
+ *   (b) rotation's own denormalized artist/album text;
+ *   (c) rotation -> library -> artists text (rotations added via the picker
+ *       carry an album_id link but may have NULL artist_name/album_title).
+ * As in the original, a row must have a non-empty artist AND album to be a
+ * candidate, and the lowest `rotation.id` match wins.
+ *
+ * Why batched instead of the original per-row correlated subquery: that
+ * subquery was evaluated for every one of the 200 window rows (before the
+ * slice), and branch (c) forced a full seq scan of the 64k-row `library`
+ * table per row — ~2.4s server-side, constant in `n` (BS#1862). Here the
+ * active-rotation set is materialized ONCE (an index nested-loop into
+ * library, not a per-row seq scan) and matched against the <= n sliced
+ * candidates, dropping the cost to ~10-30ms.
+ *
+ * The `active_rot` date bounds are a padded superset of the candidate batch's
+ * play dates (min-1d .. max+1d) so a single materialized scan covers every
+ * candidate; the final join re-applies the exact per-candidate active-window
+ * predicate (`add_date <= play_date < kill_date`), so correctness does not
+ * depend on the bound padding. Degrades to an empty map on query failure
+ * (badge shows 'false' rather than 500-ing the endpoint), mirroring
+ * enrichPlaycuts.
+ *
+ * @returns Map of flowsheet.id -> rotation_bin for the candidates that
+ *          matched an active rotation. Absent ids had no fallback match.
+ */
+async function resolveFallbackRotation(candidates: FallbackCandidate[]): Promise<Map<number, string>> {
+  // Only hand-typed track rows with a non-null, non-empty artist AND album,
+  // and no FK rotation link, are fallback candidates — the exact gate the
+  // original CASE used (`flowsheet.rotation_id IS NULL AND
+  // coalesce(artist_name,'') <> '' AND coalesce(album_title,'') <> ''`). NOT
+  // trimmed: the original SQL gate is untrimmed, and trimming here would drop a
+  // whitespace-only-artist linked row that the album_id branch could still
+  // badge (SQL `trim()` collapses it to '' downstream, matching the original).
+  const eligible = candidates.filter(
+    (c) => c.rotation_id == null && (c.artist_name ?? '') !== '' && (c.album_title ?? '') !== ''
+  );
+  if (eligible.length === 0) return new Map();
+
+  // Padded (±1 day) UTC date bounds spanning the batch, so the materialized
+  // active-rotation set is a superset of every candidate's per-day active
+  // window. The DB session is UTC (RDS default) and `add_time::date` casts in
+  // session TZ, so a UTC date bound matches; the ±1d padding is cheap
+  // insurance against any session-TZ skew. The final join re-checks each
+  // candidate's exact window regardless, so the padding only affects how many
+  // rotation rows are materialized, never the result.
+  const times = eligible.map((c) => c.add_time.getTime());
+  const boundLo = new Date(Math.min(...times) - DAY_MS).toISOString().slice(0, 10);
+  const boundHi = new Date(Math.max(...times) + DAY_MS).toISOString().slice(0, 10);
+
+  // One VALUES row per candidate: (flowsheet id, album_id, normalized artist,
+  // normalized album, play date). Normalization is done IN SQL — the same
+  // `lower(trim(coalesce(...)))` the active_rot side uses — so both sides of
+  // the equality join share Postgres semantics. Normalizing the candidate
+  // side in JS instead (`.toLowerCase().trim()`) would desync the join: JS
+  // `.trim()` strips all whitespace, but Postgres `trim()` strips only spaces,
+  // so an artist/album with an edge tab or newline would normalize differently
+  // on the two sides and match (or miss) differently than the original query.
+  const candRows = eligible.map(
+    (c) =>
+      sql`(${c.id}::int, ${c.album_id}::int, lower(trim(coalesce(${c.artist_name}::text, ''))), lower(trim(coalesce(${c.album_title}::text, ''))), ${c.add_time.toISOString()}::timestamptz::date)`
+  );
+
+  try {
+    const result = await db.execute(sql`
+      WITH cand(fid, album_id, norm_artist, norm_album, play_date) AS (
+        VALUES ${sql.join(candRows, sql`, `)}
+      ),
+      active_rot AS MATERIALIZED (
+        SELECT
+          r2.id,
+          r2.rotation_bin,
+          r2.album_id,
+          r2.add_date,
+          r2.kill_date,
+          lower(trim(coalesce(r2.artist_name, ''))) AS r_artist,
+          lower(trim(coalesce(r2.album_title, ''))) AS r_album,
+          lower(trim(coalesce(a2.artist_name, ''))) AS lib_artist,
+          lower(trim(coalesce(l2.album_title, ''))) AS lib_album
+        FROM ${rotation} r2
+        LEFT JOIN ${library} l2 ON l2.id = r2.album_id
+        LEFT JOIN ${artists} a2 ON a2.id = l2.artist_id
+        WHERE r2.add_date <= ${boundHi}::date
+          AND (r2.kill_date IS NULL OR r2.kill_date > ${boundLo}::date)
+      )
+      SELECT DISTINCT ON (cand.fid) cand.fid AS fid, ar.rotation_bin AS rotation_bin
+      FROM cand
+      JOIN active_rot ar
+        ON ar.add_date <= cand.play_date
+       AND (ar.kill_date IS NULL OR ar.kill_date > cand.play_date)
+      WHERE (cand.album_id IS NOT NULL AND ar.album_id = cand.album_id)
+         OR (ar.r_artist = cand.norm_artist AND ar.r_album = cand.norm_album)
+         OR (ar.lib_artist = cand.norm_artist AND ar.lib_album = cand.norm_album)
+      ORDER BY cand.fid, ar.id
+    `);
+
+    const map = new Map<number, string>();
+    for (const row of result as unknown as Array<{ fid: number; rotation_bin: string | null }>) {
+      if (row.rotation_bin != null) {
+        map.set(Number(row.fid), row.rotation_bin);
+      }
+    }
+    return map;
+  } catch (err) {
+    console.error('[playlist-proxy] rotation fallback resolution failed:', err);
     return new Map();
   }
 }
