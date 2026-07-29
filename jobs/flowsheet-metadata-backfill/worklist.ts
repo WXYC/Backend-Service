@@ -364,6 +364,35 @@ export const SELF_HEAL_MAX_CANDIDATES = 2000;
  * `ORDER BY f.id ASC` is arbitrary-but-deterministic — this cohort has no
  * play-priority story of its own (it piggybacks on the main sweep's
  * per-row LML pacing), so simple insertion order is fine.
+ *
+ * BS#895 review follow-up (finding #6, decision-only — no behavior change):
+ * `r.discogs_release_id IS NOT NULL` is a SELECTION heuristic, not a
+ * resolution mechanism. This query does not pass the resolved id to LML —
+ * the row is re-enriched via the SAME text-based `lookupMetadata(artist,
+ * album, track)` `/lookup` call every other candidate uses (see
+ * `orchestrate.ts`'s `selfHealEnrich` default), never LML's
+ * `/releases/resolve` by-id endpoint. That's deliberate: epic #1810's W2
+ * (#1811, "consume rotation.discogs_release_id via /releases/resolve") was
+ * closed as superseded once the 2026-07-25 re-diagnosis identified the
+ * actual root cause of blank rotation metadata as a B3 regression (#1815,
+ * merged) — the live enrichment path's `/lookup` (single-row, not the
+ * `/lookup/bulk` this job avoids) already resolves non-library releases via
+ * text search once `allow_release_resolution_fallback` is honored, so no
+ * by-id resolver was needed. Resurrecting a by-id path here would re-open
+ * that closed decision without a new requirement forcing it — see the
+ * #895/#1874 PR discussion for the fuller reasoning.
+ *
+ * The practical consequence: this heuristic's usefulness depends entirely
+ * on `/lookup`'s text search actually finding the now-known-to-exist
+ * release, NOT on the id being present. If that coupling ever regresses
+ * (e.g. a future change reintroduces a bulk-style kill switch on this
+ * job's `/lookup` calls, or LML's text search degrades), the SELECTION
+ * would still fire — `self_heal_candidates` stays healthy — but the
+ * RESOLUTION would silently stop working. `self_heal_candidates` vs
+ * `self_heal_resolved` (`Totals`, `orchestrate.ts`) is the pair to watch:
+ * a sustained gap between them (candidates found every run, resolved
+ * staying near zero) is the signal that this coupling has broken, not a
+ * sign that the candidates themselves are wrong.
  */
 export const buildRotationSelfHealCandidates = async (): Promise<number[]> => {
   const rows = unwrapRows<{ id: number | string }>(
@@ -387,3 +416,63 @@ export const buildRotationSelfHealCandidates = async (): Promise<number[]> => {
 };
 
 export type BuildSelfHealCandidatesFn = typeof buildRotationSelfHealCandidates;
+
+/**
+ * BS#895 review follow-up (finding #3 of the code-review pass): the
+ * `recoveryWindowHours` ceiling is load-bearing (it's what keeps the hourly
+ * sweep from re-matching the ~748k-row undrained historical `pending`
+ * backlog #1011 left behind — see `pendingPredicate` above), but it means
+ * any genuine consumer-miss OLDER than the window is silently excluded from
+ * every future sweep forever, with no automated path back to `'pending'`
+ * eligibility. This turns that silent exclusion into an observable count:
+ * rows that are still `metadata_status = 'pending'` (never enriched) AND
+ * older than the ceiling — i.e. exactly the complement the ceiling carves
+ * off `pendingPredicate`'s cohort.
+ *
+ * Reuses the SAME `flowsheet_metadata_status_pending_idx` partial index the
+ * main pending-count already scans (same cost profile as that existing
+ * query — see worklist.ts's module docstring on the `plays` CTE / count
+ * cost — not a new index, not a new scan shape). Gated on
+ * `recoveryWindowHours > 0`: with the ceiling disabled (historical
+ * catch-up shape) nothing is excluded by age, so "stranded past the
+ * ceiling" isn't a meaningful concept and the query is skipped entirely
+ * (returns 0, zero extra cost).
+ *
+ * Trend ("growing") detection is deliberately NOT computed here — this
+ * job is a stateless cron run with no persisted cross-run memory, so
+ * "is this count bigger than last run's" isn't something a single
+ * invocation can answer on its own. The count is projected as a numeric
+ * Sentry span attribute (`backfill.stranded_past_recovery_window`, see
+ * `runBackfill`) specifically so the trend can be read off Sentry's own
+ * time-series / anomaly-detection alerting on that attribute — the same
+ * pattern the org uses for CloudWatch metrics (see `wxyc-canary`'s
+ * `ANOMALY_DETECTION_BAND` convention referenced in the org CLAUDE.md) —
+ * rather than reinventing trend-tracking state inside the job.
+ */
+export const countStrandedPastRecoveryWindow = async (recoveryWindowHours: number): Promise<number> => {
+  if (recoveryWindowHours <= 0) return 0;
+
+  const rows = unwrapRows<{ stranded_total: number | string }>(
+    await db.execute(sql`
+    SELECT COUNT(*)::int AS stranded_total
+    FROM ${FLOWSHEET_TABLE} f
+    WHERE f."entry_type" = 'track'
+      AND f."artist_name" IS NOT NULL
+      AND f."metadata_status" = 'pending'
+      AND f."add_time" <= now() - (${recoveryWindowHours} * interval '1 hour')
+  `),
+    'stranded past recovery window count'
+  );
+  if (rows.length !== 1) {
+    throw new Error(
+      `flowsheet-metadata-backfill: stranded-past-recovery-window count returned ${rows.length} rows; expected 1`
+    );
+  }
+  const strandedTotal = Number(rows[0].stranded_total);
+  if (!Number.isFinite(strandedTotal)) {
+    throw new Error(
+      `flowsheet-metadata-backfill: stranded-past-recovery-window count returned non-numeric ${JSON.stringify(rows[0])}`
+    );
+  }
+  return strandedTotal;
+};

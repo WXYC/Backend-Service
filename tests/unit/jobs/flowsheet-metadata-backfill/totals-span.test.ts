@@ -51,10 +51,20 @@ const TOTALS_KEYS = [
   'backfill.stale_skipped',
   'backfill.worker_reconciled',
   'backfill.worker_inflight_skipped',
-  // BS#895 / epic #1810 W4: rotation self-heal candidates found and how
-  // many resolved to a real match this run.
+  // BS#895 review follow-up (finding #4): rows the recovery-window ceiling
+  // has permanently excluded from the sweep.
+  'backfill.stranded_past_recovery_window',
+  // BS#895 / epic #1810 W4: rotation self-heal's OWN counters (review
+  // finding #5b — deliberately separate from the shared buckets above so a
+  // self-heal catch-up burst can't silently inflate the main sweep's "< 100
+  // rows median" dashboard signal).
   'backfill.self_heal_candidates',
+  'backfill.self_heal_skipped',
+  'backfill.self_heal_scanned',
   'backfill.self_heal_resolved',
+  'backfill.self_heal_no_match',
+  'backfill.self_heal_lml_error',
+  'backfill.self_heal_enrich_error',
 ];
 
 const matchedResponse: LookupResponse = {
@@ -125,10 +135,17 @@ describe('flowsheet-metadata-backfill run.totals span (BS#1563 op + enrich_error
     expect(attrs['backfill.stale_skipped']).toBe(0);
     expect(attrs['backfill.worker_reconciled']).toBe(0);
     expect(attrs['backfill.worker_inflight_skipped']).toBe(0);
-    // Self-heal is gated on buildSelfHealCandidates being provided
-    // (job.ts-only in production); this run omits it, so both stay 0.
+    // Self-heal and the stranded-past-recovery-window count are both
+    // gated on their respective opt-in options being provided (job.ts-only
+    // in production); this run omits both, so everything stays 0.
+    expect(attrs['backfill.stranded_past_recovery_window']).toBe(0);
     expect(attrs['backfill.self_heal_candidates']).toBe(0);
+    expect(attrs['backfill.self_heal_skipped']).toBe(0);
+    expect(attrs['backfill.self_heal_scanned']).toBe(0);
     expect(attrs['backfill.self_heal_resolved']).toBe(0);
+    expect(attrs['backfill.self_heal_no_match']).toBe(0);
+    expect(attrs['backfill.self_heal_lml_error']).toBe(0);
+    expect(attrs['backfill.self_heal_enrich_error']).toBe(0);
     for (const key of TOTALS_KEYS) {
       expect(typeof attrs[key]).toBe('number');
     }

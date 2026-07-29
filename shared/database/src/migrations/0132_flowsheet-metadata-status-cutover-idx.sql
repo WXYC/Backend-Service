@@ -16,7 +16,11 @@
 --        historical bookkeeping (`docs/migrations.md` "Attempt-at markers").
 --        `DROP INDEX` (no CONCURRENTLY) is fine here — it's metadata-only,
 --        no table scan, near-instant even under the ACCESS EXCLUSIVE lock
---        Drizzle's transaction wrapper requires.
+--        Drizzle's transaction wrapper requires. `IF EXISTS` on both, same
+--        convention as 0054/0065/0072/0082/0083/0095/0098: makes the drop
+--        idempotent so an operator MAY pre-drop them out-of-band ahead of
+--        the deploy (see Production ops below) without the in-migration
+--        DROP then failing on a not-found object.
 --
 --   3. CREATE `flowsheet_rotation_no_match_idx`, a partial B-tree on
 --      `rotation_id` covering `metadata_status = 'enriched_no_match' AND
@@ -31,7 +35,18 @@
 --      unused `discogs_release_id`, plus 308 lacking one) — grows slowly.
 --
 -- Production ops:
---   - The two DROPs run inline in this migration (cheap, see above).
+--   - The two DROPs are cheap enough (metadata-only, no table scan) to run
+--     inline in this migration under the ACCESS EXCLUSIVE lock Drizzle's
+--     transaction wrapper takes. An operator MAY instead pre-drop them
+--     out-of-band on the hot `flowsheet` table before the deploy, mirroring
+--     how the CREATE below is built CONCURRENTLY out-of-band (same shape as
+--     0098's predecessor-index retirement):
+--       DROP INDEX CONCURRENTLY IF EXISTS "wxyc_schema"."flowsheet_metadata_attempt_pending_idx";
+--       DROP INDEX CONCURRENTLY IF EXISTS "wxyc_schema"."flowsheet_metadata_attempt_pending_covering_idx";
+--     `DROP INDEX CONCURRENTLY` takes only a `ShareUpdateExclusiveLock`, so
+--     it's a strictly more cautious option than the default inline DROP.
+--     Either way, the `IF EXISTS` on the in-migration form makes the merge
+--     a safe no-op afterward — no ordering dependency between the two paths.
 --   - `CREATE INDEX flowsheet_rotation_no_match_idx` is NOT `CONCURRENTLY`
 --     because Drizzle wraps each migration file in a transaction and
 --     `CREATE INDEX CONCURRENTLY cannot run inside a transaction block` —
@@ -51,6 +66,6 @@
 --     already ran and populated `metadata_status` for every historical row,
 --     so the new predicate is correct from the moment it's live.
 
-DROP INDEX "wxyc_schema"."flowsheet_metadata_attempt_pending_idx";--> statement-breakpoint
-DROP INDEX "wxyc_schema"."flowsheet_metadata_attempt_pending_covering_idx";--> statement-breakpoint
+DROP INDEX IF EXISTS "wxyc_schema"."flowsheet_metadata_attempt_pending_idx";--> statement-breakpoint
+DROP INDEX IF EXISTS "wxyc_schema"."flowsheet_metadata_attempt_pending_covering_idx";--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "flowsheet_rotation_no_match_idx" ON "wxyc_schema"."flowsheet" USING btree ("rotation_id") WHERE "wxyc_schema"."flowsheet"."metadata_status" = 'enriched_no_match' AND "wxyc_schema"."flowsheet"."rotation_id" IS NOT NULL;
