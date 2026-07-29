@@ -72,6 +72,8 @@ jest.mock('@wxyc/database', () => ({
     album_title: 'album_title',
     record_label: 'record_label',
     request_flag: 'request_flag',
+    segue: 'segue',
+    message: 'message',
     rotation_id: 'rotation_id',
     album_id: 'album_id',
   },
@@ -113,7 +115,11 @@ jest.spyOn(console, 'log').mockImplementation(() => {});
 jest.spyOn(console, 'error').mockImplementation(() => {});
 jest.spyOn(console, 'warn').mockImplementation(() => {});
 
-import { getRecentEntries } from '../../../apps/backend/services/playlist-proxy.service';
+import {
+  getRecentEntries,
+  getRecentEntriesFlat,
+  lastModifiedFromTimestamps,
+} from '../../../apps/backend/services/playlist-proxy.service';
 
 // --- Fixtures: representative WXYC data ---
 // (see the org CLAUDE.md "Example Music Data" section for the canonical pool)
@@ -128,6 +134,8 @@ const jessicaPrattRow = {
   album_title: 'On Your Own Love Again',
   record_label: 'Drag City',
   request_flag: false,
+  segue: false,
+  message: null,
   // No FK rotation link and no fallback match -> not in rotation. As a
   // hand-typed track (rotation_id null, artist+album present) it IS a
   // fallback candidate, so getRecentEntries runs the batched fallback query
@@ -147,6 +155,8 @@ const juanaMolinaRow = {
   album_title: 'DOGA',
   record_label: 'Sonamos',
   request_flag: true,
+  segue: true,
+  message: null,
   // FK rotation hit: rotation_id set, so rotation.rotation_bin comes back from
   // the window join and this row is NOT a fallback candidate.
   rotation_id: 940,
@@ -167,6 +177,8 @@ const handTypedRotationRow = {
   album_title: 'Edits',
   record_label: 'self-released',
   request_flag: false,
+  segue: false,
+  message: null,
   rotation_id: null,
   album_id: null,
   rotation_bin: null,
@@ -212,6 +224,8 @@ const breakpointRow = {
   album_title: null,
   record_label: null,
   request_flag: null,
+  segue: null,
+  message: 'BREAKPOINT',
   rotation_bin: null,
 };
 
@@ -231,10 +245,17 @@ const showStartRow = {
   album_title: null,
   record_label: null,
   request_flag: null,
+  segue: null,
+  message: 'Start of Show: DJ Probe joined the set',
   rotation_bin: null,
 };
 
-const showEndRow = { ...showStartRow, id: 2602199, entry_type: 'show_end' };
+const showEndRow = {
+  ...showStartRow,
+  id: 2602199,
+  entry_type: 'show_end',
+  message: 'End of Show: DJ Probe left the set',
+};
 
 // --- Tests ---
 
@@ -659,6 +680,207 @@ describe('playlist-proxy.service', () => {
       const result = await getRecentEntries(50);
 
       expect(result.playcuts[0].artworkURL).toBe('https://i.discogs.com/lowest-album-id.jpg');
+    });
+  });
+
+  describe('getRecentEntriesFlat — v=1 flat wire format (BS#1866)', () => {
+    it('returns a flat array, not the grouped object', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow, talksetRow]);
+
+      const result = await getRecentEntriesFlat(50);
+
+      expect(Array.isArray(result)).toBe(true);
+      expect(result).toHaveLength(2);
+    });
+
+    it('serializes a track as a playcut entry with a nested playcut object', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+
+      const [entry] = await getRecentEntriesFlat(50);
+
+      expect(entry).toMatchObject({
+        id: jessicaPrattRow.id,
+        chronOrderID: jessicaPrattRow.id,
+        entryType: 'playcut',
+        timeCreated: jessicaPrattRow.add_time.getTime(),
+      });
+      expect(entry.playcut).toEqual({
+        artistName: 'Jessica Pratt',
+        songTitle: 'Back, Baby',
+        releaseTitle: 'On Your Own Love Again',
+        labelName: 'Drag City',
+        rotation: 'false',
+        request: 'false',
+        segue: 'false',
+      });
+    });
+
+    it('INCLUDES show_start/show_end as showDelimiter entries (unlike v=2 grouped)', async () => {
+      mockLimit.mockResolvedValue([showStartRow, jessicaPrattRow, showEndRow]);
+
+      const result = await getRecentEntriesFlat(50);
+
+      const delimiters = result.filter((e) => e.entryType === 'showDelimiter');
+      expect(delimiters.map((d) => d.id)).toEqual([showStartRow.id, showEndRow.id]);
+      // showDelimiter carries the marker message as artistName (consumer-invisible).
+      expect(delimiters[0].artistName).toBe('Start of Show: DJ Probe joined the set');
+      expect(delimiters[1].artistName).toBe('End of Show: DJ Probe left the set');
+      expect(delimiters[0].playcut).toBeUndefined();
+    });
+
+    it('maps breakpoint to entryType "breakpoint" with the uppercased message as artistName', async () => {
+      mockLimit.mockResolvedValue([breakpointRow]);
+
+      const [entry] = await getRecentEntriesFlat(50);
+
+      expect(entry.entryType).toBe('breakpoint');
+      expect(entry.artistName).toBe('BREAKPOINT');
+      // breakpoint hour uses radio_hour verbatim (shared with v=2).
+      expect(entry.hour).toBe(breakpointRow.radio_hour.getTime());
+    });
+
+    it('maps talkset/dj_join/dj_leave/message to entryType "talkset"', async () => {
+      mockLimit.mockResolvedValue([talksetRow, djJoinRow, djLeaveRow, messageRow]);
+
+      const result = await getRecentEntriesFlat(50);
+
+      expect(result.every((e) => e.entryType === 'talkset')).toBe(true);
+      expect(result.every((e) => e.playcut === undefined && e.artistName === undefined)).toBe(true);
+    });
+
+    it('emits segue as a "true"/"false" string in the nested playcut', async () => {
+      mockLimit.mockResolvedValue([juanaMolinaRow, jessicaPrattRow]);
+
+      const result = await getRecentEntriesFlat(50);
+
+      const juana = result.find((e) => e.playcut?.artistName === 'Juana Molina');
+      const jessica = result.find((e) => e.playcut?.artistName === 'Jessica Pratt');
+      expect(juana?.playcut?.segue).toBe('true');
+      expect(jessica?.playcut?.segue).toBe('false');
+    });
+
+    it('resolves the rotation fallback for a hand-typed playcut', async () => {
+      mockLimit.mockResolvedValue([handTypedRotationRow]);
+      mockExecute.mockResolvedValue([{ fid: handTypedRotationRow.id, rotation_bin: 'H' }]);
+
+      const [entry] = await getRecentEntriesFlat(50);
+
+      expect(entry.playcut?.rotation).toBe('true');
+    });
+
+    it('does not enrich artwork (v=1 carries none)', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+
+      const [entry] = await getRecentEntriesFlat(50);
+
+      expect('artworkURL' in entry).toBe(false);
+      expect(entry.playcut).not.toHaveProperty('imageURL');
+      expect(mockGroupBy).not.toHaveBeenCalled();
+    });
+
+    it('bounds the window to n TOTAL entries (min(n, 200)), not n playcuts', async () => {
+      await getRecentEntriesFlat(35);
+      expect(mockLimit).toHaveBeenCalledWith(35);
+
+      await getRecentEntriesFlat(500);
+      expect(mockLimit).toHaveBeenCalledWith(200);
+    });
+
+    it('carries the base fields on every entry type', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow, talksetRow, breakpointRow, showStartRow]);
+
+      const result = await getRecentEntriesFlat(50);
+
+      for (const e of result) {
+        expect(typeof e.id).toBe('number');
+        expect(typeof e.chronOrderID).toBe('number');
+        expect(typeof e.hour).toBe('number');
+        expect(typeof e.timeCreated).toBe('number');
+        expect(typeof e.entryType).toBe('string');
+      }
+    });
+  });
+
+  describe('X-Last-Modified (lastModifiedFromTimestamps)', () => {
+    it('returns the max timestamp of the window', () => {
+      expect(lastModifiedFromTimestamps([100, 500, 300])).toBe(500);
+    });
+
+    it('returns 0 for an empty window', () => {
+      expect(lastModifiedFromTimestamps([])).toBe(0);
+    });
+  });
+
+  describe('client-contract parity (BS#1866)', () => {
+    // A diacritic-bearing name (from wxyc-shared/test-utils) exercises the iOS
+    // repairingMojibake() no-op path: the emitted bytes must be clean UTF-8.
+    const niluferRow = {
+      ...jessicaPrattRow,
+      id: 2602260,
+      track_title: 'Midnight Sun',
+      artist_name: 'Nilüfer Yanya',
+      album_title: 'PAINLESS',
+      record_label: 'ATO Records',
+    };
+
+    it('v=1 flat playcut matches the Android PlaylistResponseDto shape', async () => {
+      mockLimit.mockResolvedValue([niluferRow]);
+
+      const [entry] = await getRecentEntriesFlat(50);
+
+      // PlaylistResponseDto: id:Int, entryType:String, playcut:?, hour:Long, chronOrderID:Int
+      expect(Number.isInteger(entry.id)).toBe(true);
+      expect(typeof entry.entryType).toBe('string');
+      expect(Number.isInteger(entry.hour)).toBe(true);
+      expect(Number.isInteger(entry.chronOrderID)).toBe(true);
+      // PlayCutDetailsDto: rotation/request/songTitle/labelName/artistName/releaseTitle (all String)
+      const pc = entry.playcut;
+      expect(pc).toBeDefined();
+      for (const key of ['rotation', 'request', 'songTitle', 'labelName', 'artistName', 'releaseTitle'] as const) {
+        expect(typeof pc?.[key]).toBe('string');
+      }
+      // Diacritic preserved byte-for-byte (no mojibake).
+      expect(pc?.artistName).toBe('Nilüfer Yanya');
+    });
+
+    it('v=1 flat marker entries deserialize cleanly (Android renders by entryType)', async () => {
+      mockLimit.mockResolvedValue([talksetRow, breakpointRow, showStartRow]);
+
+      const result = await getRecentEntriesFlat(50);
+
+      for (const e of result) {
+        expect(['talkset', 'breakpoint', 'showDelimiter']).toContain(e.entryType);
+        expect(e.playcut).toBeUndefined();
+      }
+    });
+
+    it('v=2 grouped playcut matches the iOS Playcut decoder shape', async () => {
+      mockLimit.mockResolvedValue([niluferRow]);
+
+      const result = await getRecentEntries(50);
+      const pc = result.playcuts[0];
+
+      // iOS Playcut: id/hour/chronOrderID/timeCreated (UInt64), songTitle/artistName (String),
+      // rotation decoded as Bool-or-String (here the "true"/"false" string).
+      expect(Number.isInteger(pc.id)).toBe(true);
+      expect(Number.isInteger(pc.hour)).toBe(true);
+      expect(Number.isInteger(pc.chronOrderID)).toBe(true);
+      expect(Number.isInteger(pc.timeCreated)).toBe(true);
+      expect(typeof pc.songTitle).toBe('string');
+      expect(typeof pc.artistName).toBe('string');
+      expect(typeof pc.rotation).toBe('string');
+      expect(pc.artistName).toBe('Nilüfer Yanya');
+    });
+
+    it('v=2 grouped exposes the iOS Playlist keys (playcuts/talksets/breakpoints)', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow, talksetRow, breakpointRow]);
+
+      const result = await getRecentEntries(50);
+
+      expect(result).toHaveProperty('playcuts');
+      expect(result).toHaveProperty('talksets');
+      expect(result).toHaveProperty('breakpoints');
+      // iOS reads showMarkers/onAir via decodeIfPresent — their absence is tolerated.
     });
   });
 });

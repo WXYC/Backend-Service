@@ -304,7 +304,7 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
   });
 
   test('groups playcuts/talksets/breakpoints and omits show_start/show_end', async () => {
-    const res = await request.get('/playlists/recentEntries').query({ n: 100 }).expect(200);
+    const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
 
     expect(res.headers['cache-control']).toBe('public, max-age=30');
 
@@ -323,7 +323,7 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
   });
 
   test('resolves both split-format plays to the lower album_id artwork (BS#1105 tie-break, end to end)', async () => {
-    const res = await request.get('/playlists/recentEntries').query({ n: 100 }).expect(200);
+    const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
 
     const cdEntry = res.body.playcuts.find((p) => p.id === flowsheetIds[0]);
     const lpEntry = res.body.playcuts.find((p) => p.id === flowsheetIds[1]);
@@ -338,7 +338,7 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
   });
 
   test('emits request as a "true"/"false" string, not a boolean', async () => {
-    const res = await request.get('/playlists/recentEntries').query({ n: 100 }).expect(200);
+    const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
 
     const cdEntry = res.body.playcuts.find((p) => p.id === flowsheetIds[0]);
     const lpEntry = res.body.playcuts.find((p) => p.id === flowsheetIds[1]);
@@ -349,7 +349,7 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
   });
 
   test('emits rotation as "true" via the fallback text-match query for a hand-typed entry with no rotation_id (branch b)', async () => {
-    const res = await request.get('/playlists/recentEntries').query({ n: 100 }).expect(200);
+    const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
 
     const rotationMatchEntry = res.body.playcuts.find((p) => p.id === flowsheetIds[2]);
     expect(rotationMatchEntry).toBeDefined();
@@ -361,7 +361,7 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
   });
 
   test('emits rotation as "true" via the album_id branch for a hand-typed entry whose text matches no rotation (branch a, BS#1862)', async () => {
-    const res = await request.get('/playlists/recentEntries').query({ n: 100 }).expect(200);
+    const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
 
     const albumIdMatchEntry = res.body.playcuts.find((p) => p.id === flowsheetIds[8]);
     expect(albumIdMatchEntry).toBeDefined();
@@ -371,7 +371,7 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
   });
 
   test('emits rotation as "true" via the rotation->library->artists branch for a hand-typed entry with no album_id (branch c, BS#1862)', async () => {
-    const res = await request.get('/playlists/recentEntries').query({ n: 100 }).expect(200);
+    const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
 
     const libraryLinkedEntry = res.body.playcuts.find((p) => p.id === flowsheetIds[9]);
     expect(libraryLinkedEntry).toBeDefined();
@@ -382,7 +382,7 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
   });
 
   test('does NOT badge a rotation-text match whose artist has a trailing newline (JS-vs-SQL trim parity, BS#1862)', async () => {
-    const res = await request.get('/playlists/recentEntries').query({ n: 100 }).expect(200);
+    const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
 
     const newlineEntry = res.body.playcuts.find((p) => p.id === flowsheetIds[10]);
     expect(newlineEntry).toBeDefined();
@@ -394,16 +394,74 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
   });
 
   test('breakpoint hour uses radio_hour verbatim, not floor(add_time)', async () => {
-    const res = await request.get('/playlists/recentEntries').query({ n: 100 }).expect(200);
+    const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
 
     const breakpointEntry = res.body.breakpoints.find((b) => b.id === flowsheetIds[5]);
     expect(breakpointEntry).toBeDefined();
     expect(breakpointEntry.hour).toBe(new Date('2026-07-28T20:00:00.000Z').getTime());
   });
 
-  test('clamps n and returns 200 for the default/no-param case', async () => {
-    const res = await request.get('/playlists/recentEntries').expect(200);
+  test('v=2 defaults to <=50 playcuts and returns the grouped object', async () => {
+    const res = await request.get('/playlists/recentEntries').query({ v: 2 }).expect(200);
     expect(Array.isArray(res.body.playcuts)).toBe(true);
     expect(res.body.playcuts.length).toBeLessThanOrEqual(50);
+  });
+
+  // --- v=1 flat wire format (Android; BS#1866) ---
+
+  test('v absent -> flat ARRAY (Android contract), with X-Last-Modified exposed', async () => {
+    const res = await request.get('/playlists/recentEntries').query({ n: 100 }).expect(200);
+
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.headers['x-last-modified']).toMatch(/^\d+$/);
+    expect(Number(res.headers['x-last-modified'])).toBeGreaterThan(0);
+    expect(res.headers['access-control-expose-headers']).toContain('X-Last-Modified');
+  });
+
+  test('flat: a track is a playcut entry with a nested playcut object', async () => {
+    const res = await request.get('/playlists/recentEntries').query({ v: 1, n: 100 }).expect(200);
+
+    const cd = res.body.find((e) => e.id === flowsheetIds[0]);
+    expect(cd).toBeDefined();
+    expect(cd.entryType).toBe('playcut');
+    expect(cd.playcut).toMatchObject({
+      artistName: ARTIST_NAME,
+      songTitle: 'Probe Track (CD press)',
+      releaseTitle: ALBUM_TITLE,
+      rotation: 'false',
+      request: 'false',
+      segue: 'false',
+    });
+  });
+
+  test('flat: INCLUDES show_start/show_end as showDelimiter entries (unlike v=2)', async () => {
+    const res = await request.get('/playlists/recentEntries').query({ v: 1, n: 100 }).expect(200);
+
+    const showStart = res.body.find((e) => e.id === flowsheetIds[6]);
+    const showEnd = res.body.find((e) => e.id === flowsheetIds[7]);
+    expect(showStart).toBeDefined();
+    expect(showEnd).toBeDefined();
+    expect(showStart.entryType).toBe('showDelimiter');
+    expect(showEnd.entryType).toBe('showDelimiter');
+    expect(showStart.playcut).toBeUndefined();
+  });
+
+  test('flat: breakpoint carries entryType "breakpoint"; talkset/dj_join carry "talkset"', async () => {
+    const res = await request.get('/playlists/recentEntries').query({ v: 1, n: 100 }).expect(200);
+
+    const bp = res.body.find((e) => e.id === flowsheetIds[5]);
+    const talkset = res.body.find((e) => e.id === flowsheetIds[3]);
+    const djJoin = res.body.find((e) => e.id === flowsheetIds[4]);
+    expect(bp.entryType).toBe('breakpoint');
+    expect(talkset.entryType).toBe('talkset');
+    expect(djJoin.entryType).toBe('talkset');
+  });
+
+  test('flat: rotation badge resolves the same as v=2 (hand-typed branch-b match)', async () => {
+    const res = await request.get('/playlists/recentEntries').query({ v: 1, n: 100 }).expect(200);
+
+    const rotationMatch = res.body.find((e) => e.id === flowsheetIds[2]);
+    expect(rotationMatch.entryType).toBe('playcut');
+    expect(rotationMatch.playcut.rotation).toBe('true');
   });
 });
