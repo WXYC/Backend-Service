@@ -1,0 +1,213 @@
+{
+  "1": [],
+  "3": [
+    {
+      "url": "https://www.allaboutjazz.com/ensemble-volcanic-ash-pluto-in-aquarius-janel-leppin-cuneiform-records",
+      "allowed": false,
+      "reason": "disallowed for AI-opt-out token 'ClaudeBot'",
+      "fetch_failed": false
+    },
+    {
+      "url": "http://expose.org/index.php/articles/display/janel-leppin-slowly-melting-pluto-in-aquarius-2.html",
+      "allowed": true,
+      "reason": "could not fetch robots.txt (HTTP Error 404: Not Found)",
+      "fetch_failed": true
+    }
+  ],
+  "5": [
+    {
+      "url": "https://chapelboro.com/town-square/live-local/take-me-with-you-live-and-local-with-mellow-swells",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    },
+    {
+      "url": "https://hub.rtp.org/event/shuffle-mellow-swells/",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    }
+  ],
+  "9": [
+    {
+      "url": "https://faroutmagazine.co.uk/noura-mint-seymali-yenbett-album-review/",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    },
+    {
+      "url": "https://www.afropop.org/articles/audio-review-noura-mint-seymali-yenbett",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    }
+  ],
+  "12": [
+    {
+      "url": "https://www.albumoftheyear.org/album/1108802-the-paradise-bangkok-molam-international-band-araya-lam.php",
+      "allowed": false,
+      "reason": "disallowed for AI-opt-out token 'ClaudeBot'",
+      "fetch_failed": false
+    },
+    {
+      "url": "https://www.therealcosmos.com/transmission/the-paradise-bangkok-molam-international-band-araya-lam/",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    }
+  ],
+  "14": [
+    {
+      "url": "https://en.debaser.it/vladislav-delay/entain/review-cosmicjocker",
+      "allowed": false,
+      "reason": "disallowed for AI-opt-out token 'ClaudeBot'",
+      "fetch_failed": false
+    },
+    {
+      "url": "https://www.albumoftheyear.org/album/40445-vladislav-delay-entain/user-reviews/",
+      "allowed": false,
+      "reason": "disallowed for AI-opt-out token 'ClaudeBot'",
+      "fetch_failed": false
+    }
+  ],
+  "16": [
+    {
+      "url": "https://www.hhv-mag.com/review/k-frimpong-his-cubano-fiestas-the-black-album/?lang=en",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    },
+    {
+      "url": "https://www.hhv.de/en/records/item/k-frimpong-and-his-cubano-fiestas-the-black-album-1303896",
+      "allowed": true,
+      "reason": "could not fetch robots.txt (<urlopen error timed out>)",
+      "fetch_failed": true
+    }
+  ],
+  "18": [
+    {
+      "url": "https://www.jazzmusicarchives.com/review/mark-dimond-y-su-sabor-brujeria/229464",
+      "allowed": true,
+      "reason": "could not fetch robots.txt (HTTP Error 403: Forbidden)",
+      "fetch_failed": true
+    },
+    {
+      "url": "https://fania.com/artist-essentials/markolino-dimond/",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    }
+  ],
+  "21": [
+    {
+      "url": "https://ra.co/reviews/34245",
+      "allowed": false,
+      "reason": "disallowed for AI-opt-out token 'ClaudeBot'",
+      "fetch_failed": false
+    },
+    {
+      "url": "https://ra.co/reviews/36342",
+      "allowed": false,
+      "reason": "disallowed for AI-opt-out token 'ClaudeBot'",
+      "fetch_failed": false
+    }
+  ],
+  "24": [
+    {
+      "url": "https://recorder.blog.hu/2026/01/08/rad_nyomultam_sajnos_de_mindegy_most_mar_rec_hu?token=fba2b6ee31c4eaca8dd53b5f8246b0cd",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    },
+    {
+      "url": "https://www.facebook.com/csillagrablok/",
+      "allowed": false,
+      "reason": "disallowed for AI-opt-out token 'ClaudeBot'",
+      "fetch_failed": false
+    }
+  ],
+  "26": [
+    {
+      "url": "https://dekrentenuitdepop.blogspot.com/2026/04/review-hiding-places-secret-to-good.html",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    },
+    {
+      "url": "https://wruv.wordpress.com/2026/05/07/hiding-places-the-secret-to-good-living-2/",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    }
+  ],
+  "29": [
+    {
+      "url": "https://theneedledrop.com/news/low-bo-blur-husk-album/",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    },
+    {
+      "url": "https://www.wordplaymagazine.com/blog-1/2025/8/23/lowb-husk-album-10-questions",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    }
+  ],
+  "30": [
+    {
+      "url": "https://www.pastemagazine.com/music/nashpaints/nashpaints-everyone-good-is-called-molly-album-review",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    },
+    {
+      "url": "https://www.allmusic.com/album/everyone-good-is-called-molly-mw0004763393",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    }
+  ],
+  "34": [
+    {
+      "url": "https://loudandclearreviews.com/space-cadet-2025-film-review/",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    },
+    {
+      "url": "https://www.joblo.com/space-cadet-review/",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    }
+  ],
+  "36": [
+    {
+      "url": "https://djmag.com/news/carre-shares-new-ep-hibiscus-tempa-listen",
+      "allowed": false,
+      "reason": "disallowed for AI-opt-out token 'ClaudeBot'",
+      "fetch_failed": false
+    },
+    {
+      "url": "https://djmag.com/reviews/carre-hibiscus-ep",
+      "allowed": false,
+      "reason": "disallowed for AI-opt-out token 'ClaudeBot'",
+      "fetch_failed": false
+    }
+  ],
+  "39": [
+    {
+      "url": "https://www.albumoftheyear.org/album/1673877-mei-semones-kurage.php",
+      "allowed": false,
+      "reason": "disallowed for AI-opt-out token 'ClaudeBot'",
+      "fetch_failed": false
+    },
+    {
+      "url": "https://stereogum.com/2488945/mei-semones-announces-new-ep-kurage-hear-koneko-feat-liana-flores/music",
+      "allowed": true,
+      "reason": "no matching disallow rule",
+      "fetch_failed": false
+    }
+  ]
+}

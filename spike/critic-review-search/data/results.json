@@ -1,0 +1,27 @@
+{
+  "_comment": "Final per-item automated verdicts from the live validation run (16-item representative subset of the labeled 40-sample, issue #1873). ground_truth is taken verbatim from fixture/labeled_sample.json. automated is what pipeline.py concluded after the live search->shortlist->robots->fetch->classify->verify chain (data/search/, data/robots/, data/fetched/). See REPORT.md for full narrative.",
+  "subset_ids": [1, 3, 5, 9, 12, 14, 16, 18, 21, 24, 26, 29, 30, 34, 36, 39],
+  "items": [
+    { "id": 1, "ground_truth": "editorial", "automated": "not_found", "miss_reason": "search_recall" },
+    { "id": 3, "ground_truth": "editorial", "automated": "not_found", "miss_reason": "robots_block+technical_failure" },
+    { "id": 5, "ground_truth": "retail", "automated": "not_found", "miss_reason": null },
+    { "id": 9, "ground_truth": "editorial", "automated": "not_found", "miss_reason": "waf_block" },
+    { "id": 12, "ground_truth": "retail", "automated": "not_found", "miss_reason": null },
+    { "id": 14, "ground_truth": "editorial", "automated": "attached", "miss_reason": null },
+    { "id": 16, "ground_truth": "editorial", "automated": "attached", "miss_reason": null },
+    { "id": 18, "ground_truth": "retail", "automated": "not_found", "miss_reason": null },
+    { "id": 21, "ground_truth": "editorial", "automated": "not_found", "miss_reason": "robots_block" },
+    { "id": 24, "ground_truth": "editorial", "automated": "attached", "miss_reason": null },
+    { "id": 26, "ground_truth": "editorial", "automated": "not_found", "miss_reason": "waf_block" },
+    { "id": 29, "ground_truth": "retail", "automated": "not_found", "miss_reason": null },
+    { "id": 30, "ground_truth": "editorial", "automated": "not_found", "miss_reason": "waf_block" },
+    { "id": 34, "ground_truth": "nothing", "automated": "not_found", "miss_reason": null },
+    { "id": 36, "ground_truth": "editorial", "automated": "attached", "miss_reason": null },
+    { "id": 39, "ground_truth": "editorial", "automated": "attached", "miss_reason": null }
+  ],
+  "bonus_guardrail_trial": {
+    "description": "Not part of the 40-sample. Deliberately fetched HHV Mag's review of K. Frimpong's 'The Blue Album' while targeting 'The Black Album' (item 16) -- same artist, real editorial review, wrong release. Live demonstration of the Decosimo-trap guard.",
+    "automated": "rejected_mismatch",
+    "would_have_been_a_false_attach_without_the_guard": true
+  }
+}

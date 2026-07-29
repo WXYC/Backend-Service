@@ -1,0 +1,123 @@
+# 0013 — Search-augmented critic-review discovery for the uncovered rotation tail (ADR 0012 mode a)
+
+Status: **Proposed** — this is a design + spike deliverable ([Backend-Service#1873](https://github.com/WXYC/Backend-Service/issues/1873)), not a final decision. It is reviewable and expected to be argued with before a production ticket is filed against it.
+
+## Context
+
+[ADR 0012](0012-external-critic-reviews.md) named two ingestion sources for `album_critic_reviews`: (b) the crawled corpus in `WXYC/research-data`, built and shipped; and (a) "structured relations (publisher review APIs / linked-data where a review URL is directly resolvable for a release)," never built. A 2026-07-28 measurement (40-release random sample of the post-Pitchfork uncovered new-adds, hand-probed by web search) found that mode (b)'s fixed crawl list — even fully expanded plus Pitchfork — structurally cannot close the gap: **68% (27/40) of uncovered releases had a findable editorial review somewhere**, but **21 of those 27 hits were long-tail outlets no fixed crawl list reaches** (Maximum Rocknroll, Ban Ban Ton Ton, Avant Music News, All About Jazz, Far Out, and a dozen others, one-review-each). Only 6 of 27 came from an outlet already in the crawl corpus. This ADR is mode (a), realized as release-driven web search: for each uncovered rotation release, search the web for a review, verify it's the exact release and genuinely editorial, and ingest that one article.
+
+The measurement also reconfirmed the ADR 0012 non-negotiable: **0/40 wrong-release hits** in the manual probe. Any automated version of this must preserve that discipline exactly, because the automated version runs at scale and unsupervised, where a human probe self-corrects.
+
+## Decision
+
+**We adopt Option B: a targeted-search crawler living in `WXYC/research-data`, emitting rows into the existing manifest pipeline, unchanged.**
+
+```
+Backend-Service (uncovered-release list)
+        |
+        v
+research-data: search-mode crawler
+  search(artist, album) -> candidate URLs
+  -> classify editorial vs retail/listing (heuristic + small-LLM hybrid)
+  -> verify EXACT release (guard: reject same-artist-wrong-album)
+  -> robots.txt + AI-opt-out check, per candidate domain, before fetch
+  -> fetch + extract first paragraph
+  -> emit reviews/searched.jsonl row: {artist, album, source, sourceUrl,
+     articleText, ...} -- artist/album are the library-canonical pair,
+     not whatever the article's own byline/title says
+        |
+        v
+build_manifest.py  (UNCHANGED)
+        |
+        v
+manifest-latest release asset  (UNCHANGED)
+        |
+        v
+album-critic-reviews-etl  (UNCHANGED: resolveLinkedAlbumId, dedup, Haiku
+                            extract.ts snippet cap, anti-join, UPSERT)
+        |
+        v
+album_critic_reviews  ->  GET /proxy/metadata/album (CRITIC_REVIEWS_ENABLED)
+```
+
+### Why Option B over Option A
+
+The ticket posed this as the central open decision. Option A (an all-in-Backend-Service job, sibling to `album-critic-reviews-etl`, doing search+fetch+classify+extract+UPSERT with no manifest round-trip) was seriously considered. Option B wins on three points that matter more than the extra hop:
+
+1. **The exact-match ceiling is sidestepped, not fought.** `album-critic-reviews-etl`'s `match.ts` does exact `(artist, album)` matching against `library` with one narrow decoration-strip retry — deliberately, per its own README, "to avoid ever attaching a review to the wrong album." A search-sourced row that carries whatever title string the _outlet_ used (which may be decorated, translated, or a joint review of two releases — see the "Pluto in Aquarius" case in the spike report) would degrade that resolver's hit rate or, worse, pressure someone to loosen it. Writing the row with the **library-canonical** `(artist, album)` pair from the start (Backend-Service already knows this pair — it's what put the release on the uncovered-list in the first place) makes the ETL's exact-match resolve trivially, for free, without touching `match.ts` at all.
+2. **Reuse, not reimplementation, of politeness infrastructure.** research-data's `crawl_reviews.py` already has a documented, working posture for AI-crawler opt-out (honor `ClaudeBot`/`anthropic-ai` blocks, fall back to Wayback for Resident Advisor and New Commute), rate limiting, and resumability. Option A would have to build a parallel copy of all of that inside Backend-Service's cron env, which also means adding outbound web-egress to a service currently under the [Post-launch service hardening](https://github.com/orgs/WXYC/projects/32) freeze.
+3. **The freeze.** Project #32 is explicitly about _not_ adding scope to the touched serve-path files during the hardening window. A new outbound-search-and-fetch subsystem living inside Backend-Service is exactly the kind of addition that window exists to defer. research-data has no such freeze.
+
+The cost is real and worth naming: an extra publish/fetch hop (research-data still has to get the new rows into a manifest release, same as mode (b)), and research-data becomes a second place doing "ETL-shaped" work instead of pure corpus crawling. Both are judged acceptable — the manifest hop already exists and is cheap; research-data's crawler already does search-adjacent work (Wayback CDX discovery, sitemap enumeration).
+
+## Search provider evaluation
+
+Evaluated for the workload the ticket sizes: ~72 residual uncovered releases now, plus a few dozen new rotation adds per week — **a few hundred queries/month**, comfortably in every candidate's lowest paid (or free) tier.
+
+| Provider                                                       | Status (2026-07)                                                               | Cost at our volume                                                                                                                                     | ToS posture                                                                                                                                                                                                                                                                                                                    | Verdict                                                                                                                                                                                                                                                         |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Brave Search API**                                           | Active, open to new signups                                                    | Free tier (~~$5/mo credit ≈ 1,000 queries) covers our whole workload; paid "Data for AI" tier is $5/mo per 2,000 queries (~~$2.50/1k) if we outgrow it | Standard terms prohibit storing/caching raw SERP responses and prohibit using results to train/benchmark AI models; commercial-facing use requires a "POWERED BY BRAVE" attribution unless a custom-attribution waiver is granted                                                                                              | **Recommended**                                                                                                                                                                                                                                                 |
+| **Google Programmable Search Engine (Custom Search JSON API)** | **Closed to new customers**; full discontinuation announced for **2027-01-01** | 100 free queries/day, then $5/1,000 up to a 10k/day hard cap                                                                                           | N/A — moot                                                                                                                                                                                                                                                                                                                     | **Disqualified.** Cannot start a new production dependency on a product already on a sunset clock.                                                                                                                                                              |
+| **Bing Search API**                                            | **Retired 2025-08-11.** No public endpoint exists.                             | N/A                                                                                                                                                    | N/A                                                                                                                                                                                                                                                                                                                            | **Disqualified.** The named successor, "Grounding with Bing Search," is not a SERP API — it requires provisioning the full Azure AI Agents framework around it and published comparisons show 40–483% higher cost than the old v7 API for equivalent workloads. |
+| **SerpAPI**                                                    | Active                                                                         | $25/mo minimum paid plan for 1,000 searches (free tier caps at 250/mo, likely enough alone, but the cheapest _paid_ headroom is 40x Brave's)           | SerpAPI scrapes Google's own results pages without a licensing relationship with Google; **Google filed suit against SerpApi in 2026** alleging unauthorized access under the CFAA. SerpAPI indemnifies customers on paid plans, but the underlying legal posture of the data source itself is contested in active litigation. | **Not recommended.** Higher cost and an active, unresolved legal dispute over the lawfulness of the data source is a bad foundation for a project whose entire design center is "respect other people's terms of service."                                      |
+
+**Recommendation: Brave Search API**, paid "Data for AI" tier or the free tier if it clears the volume (it likely does). It is the only evaluated option that is (a) still open to new customers, (b) priced for trivial cost at our volume, and (c) has a coherent, currently-enforced ToS with a legitimate path for AI-agent consumption. The storage restriction in Brave's terms is a non-issue for our design: **we never persist raw SERP JSON.** Brave (or whichever provider) is used purely as an ephemeral navigation aid — "here are some candidate URLs" — exactly the way a person uses a search engine before bookmarking a page. What we persist is the _outlet's own article content_, fetched directly from the outlet's own URL under the outlet's own robots.txt, which is a completely separate legal question from the search API's terms.
+
+This spike used the WebSearch/WebFetch tools available in this environment as a stand-in for a real provider integration (see "Spike scope" below); a production build swaps in a real Brave API client at the `search(artist, album) -> candidate URLs` boundary and nowhere else — the classify/verify/extract/robots pipeline downstream of that boundary is provider-agnostic and unchanged.
+
+## Uncovered-release list handoff
+
+**A committed file, refreshed by a scheduled Backend-Service job, not a live read endpoint or direct DB access.** Three options were on the table:
+
+- **Committed file (chosen).** A Backend-Service job computes `rotation × album_critic_reviews` anti-joined against already-searched releases (a new small tracking table or a `source_key` convention analogous to the ETL's `manifest:${source}` — TBD in the production ticket) and commits a small JSON/CSV file of `(artist, album, library_id)` rows to research-data (or opens a PR there) on a schedule. research-data's search crawler reads that file, same shape as `crawl_reviews.py` reading its own committed corpus for resumability.
+- **Small read endpoint.** Rejected for now: it means research-data needs live credentials to call back into Backend-Service, a new cross-repo runtime coupling in the opposite direction from every existing integration (research-data has never called Backend-Service; Backend-Service pulls research-data's _published artifact_, the manifest release). It also puts a new authenticated surface on Backend-Service during the Project #32 freeze.
+- **Direct DB access.** Rejected: research-data has never had, and per the org's data-safety posture should not get, direct credentials to `wxyc_db`. It would also couple research-data's crawl schedule to Backend-Service's schema, a much tighter coupling than a periodic snapshot file.
+
+The committed-file approach mirrors the existing manifest-release pattern's spirit (Backend-Service pulls a **published artifact**, not a live query) just running in the other direction. It is fully asynchronous, requires no new authenticated surface on either side, and is trivially auditable (the file's git history shows exactly what was ever searched for and when).
+
+## Editorial classifier: heuristic + small-LLM hybrid
+
+The manual 2026-07-28 probe used human/LLM judgment throughout ("four agents, each verifying candidate pages") — there was no purely mechanical classifier to fall back on for comparison. The spike validates a **two-stage hybrid**, and the live run shows why neither stage alone is sufficient:
+
+1. **Heuristic pre-filter** (`spike/critic-review-search/src/classify.py`): a domain deny-list (Discogs, Bandcamp _store_ — but not Bandcamp Daily, Spotify, Apple Music, RateYourMusic, Last.fm, Genius) plus retail/listing signals (retailer domains, `/shop/`, `/product(s)/`, "add to cart" style text, radio-chart trackers). Cheap, deterministic, catches the bulk of non-candidates before spending a fetch on them. In the live validation run this stage correctly dropped every marketplace/store URL in the search results (Discogs, Bandcamp storefronts, Boomkat, Mr Bongo, Piccadilly Records, Rush Hour, and others) with zero editorial false-exclusions observed.
+2. **Small-LLM verification on the fetch** (stood in for by WebFetch's model in the spike; production would use a small, cheap model call analogous to `album-critic-reviews-etl/extract.ts`'s Haiku call): asked to say whether the fetched page is genuinely editorial criticism (not a retail page, streaming page, news announcement, interview, or user-submitted aggregator rating) and to state the artist/album/first-paragraph it found. This stage caught cases the domain heuristic structurally cannot: a local-radio segment announcement on a legitimate news domain (`chapelboro.com`), a "new single" news post on a real review site (`theneedledrop.com`), and a review of a same-titled but entirely unrelated film (`loudandclearreviews.com`) — all correctly rejected as not-editorial or not-a-match in the live run, none of which a domain allow/deny list could ever catch.
+
+Neither stage is trusted alone for the accept decision — see the next section.
+
+## Exact-match guard: code-level, not LLM-trusted (the "Decosimo trap")
+
+Named for WXYC rotation artist Joseph Decosimo, who has released multiple distinct albums (_While You Were Slumbering_, _Beehive Cathedral_, _Sequatchie Valley_) — the general risk class is "review of the right artist, wrong release." `verify_exact_release()` in the spike (`spike/critic-review-search/src/verify.py`) deliberately mirrors `album-critic-reviews-etl`'s `match.ts` posture rather than inventing a new one: normalized-exact match on **both** artist and album (diacritic-stripped, case-folded, punctuation-collapsed), one narrow decoration-strip retry (trailing "(deluxe edition)"/"(remastered)"/etc.), **no broad fuzzy/pg_trgm matching**. When the fetch stage can't cleanly state which album a page is about (a joint review of two releases, for instance — see the "Pluto in Aquarius" case below), the guard treats that as a rejection, not a 50/50 guess.
+
+Critically, **the small-LLM's own "yes this is a review" verdict does not bypass this guard.** The live validation run staged a real test of this: it deliberately fetched HHV Mag's genuine, high-quality editorial review of K. Frimpong's _The Blue Album_ while the pipeline's target was _The Black Album_ (same artist, same trusted outlet, both real reviews). The LLM correctly said `is_editorial_review: true` — it _is_ a real review — but `verify_exact_release()` correctly rejected it (`REJECTED_MISMATCH`, "album mismatch (Decosimo trap)") because the album string didn't match. Without the code-level guard sitting downstream of the LLM's judgment, this would have been a false attach. See the full 40-sample report for the numbers; the sample itself has no literal Decosimo case, so this was run as a supplementary live guard-rail trial, not one of the scored 16.
+
+## robots.txt + AI-opt-out: automatic and per-fetch, not curated
+
+research-data's existing crawlers hit a small, hand-picked list of ~15 outlets; each one's robots.txt was researched _once_, by a person, before a crawler for it was written (`docs/candidate-sources.md` documents exactly this: Resident Advisor and New Commute are read via Wayback specifically because someone checked and found they block `ClaudeBot`/`anthropic-ai`). A search-driven crawler hits domains nobody has ever looked at, chosen per-release at runtime — there is no curated list to lean on. The spike's `robots.py` makes this automatic: before any fetch, it pulls `robots.txt` for the candidate's domain and checks both (1) a general wildcard `Disallow`, and (2) a rule specifically naming `ClaudeBot` or `anthropic-ai` (the same tokens research-data's docs call out), reporting a distinct reason string for each so the two concepts named in issue #1873's constraints — "robots.txt" and "AI-opt-out" — stay honestly distinguishable in logs rather than conflated into one generic "blocked" bucket. A robots.txt fetch that itself fails (404, timeout) fails open per RFC 9309 §2.3.1.3; the fetch it's gating is itself the actual test of reachability.
+
+**Live-run finding, not a hypothetical:** in the 16-item validation subset, All About Jazz, Resident Advisor, and DJ Mag — three of the fixture's ground-truth outlets — are _currently_ robots-disallowed for `ClaudeBot`/`anthropic-ai`. The pipeline correctly skipped all three rather than fetch them; two of the three releases still got a legitimate review attached from a _different_ outlet found in the same search. This is the guard working as intended, not a defect, and it is direct, current evidence (not just research-data's older documentation) that this check needs to be live and per-fetch, not a one-time list.
+
+**Fetch-identity note (a limitation of this spike, not the design):** the same run also hit three `HTTP 403`s from sites whose `robots.txt` explicitly allowed the fetch (Far Out Magazine, Treble, Paste) — an active WAF/bot-challenge layer, unrelated to robots.txt policy. Two of those three domains (Treble, Paste) are _already_ successfully and routinely crawled by research-data's own `crawl_reviews.py`, which uses a standard, honest HTTP client (Python `requests`, real headers, real rate-limiting) rather than this spike's stand-in fetch tool. That strongly suggests these are an artifact of the spike's specific tool, not a genuine unreachability — see "Spike scope" below and the production recommendation in the follow-up tickets.
+
+## Dedup against already-covered releases
+
+The uncovered-release list handoff (above) is itself the primary dedup mechanism: a release only appears in the committed list if the `rotation × album_critic_reviews` anti-join says it has zero rows today, so the search crawler never re-searches a release that already has a card. Two secondary layers stay unchanged from the existing pipeline and need no new work: `album-critic-reviews-etl`'s anti-join (`antijoin.ts`) against `(album_id, source_url)` pairs already prevents re-extracting a URL the ETL has already written, and its dedup (`dedup.ts`) already handles "more than one source reviewed this album" by ranked preference — a search-sourced row just needs a place in `RANKED_SOURCES` (or, more likely, falls into the existing deterministic name-sorted tail, since search-sourced outlets are by definition not on any fixed list). One new consideration for the production ticket: the committed uncovered-release list needs its own "already searched, found nothing" marker (distinct from "already has a review") so a release that came up empty doesn't get re-searched every single week — see follow-up tickets.
+
+## Spike scope and what stood in for what
+
+Per the ticket's instruction, the spike used the **WebSearch/WebFetch tools available in this environment** as a stand-in for a real Brave Search API integration and a real HTTP fetch client, respectively. This has one concrete consequence worth flagging precisely, because it affects how the spike's "findable-rate" number should be read: WebFetch itself refuses `web.archive.org` URLs outright, which blocked a live demonstration of the Wayback-fallback pattern for the AI-opt-out cases (Resident Advisor), and WebFetch's fetch identity appears to trigger WAF challenges on at least two domains (Treble, Paste) that research-data's own crawler already fetches successfully today. Production's actual implementation — a direct HTTP client living in research-data, sibling to `crawl_reviews.py`'s `SESSION` — does not have either limitation. The spike's measured findable-rate should therefore be read as a **conservative lower bound** on what a production fetch implementation would achieve, not the ceiling. See `spike/critic-review-search/REPORT.md` for the full breakdown and numbers.
+
+## Consequences
+
+- research-data gains a new crawl mode (`search`) alongside its existing per-source crawlers, and a new small input artifact (the committed uncovered-release list) it did not previously consume from anywhere.
+- Backend-Service gains one new small scheduled job (compute + commit/PR the uncovered-release list) — the only new Backend-Service-side surface this design requires, and it is a read-only anti-join plus a git write to a repo Backend-Service doesn't otherwise touch, not a new outbound web-egress or authenticated-endpoint surface. This keeps the design compatible with the Project #32 freeze.
+- `album-critic-reviews-etl`, `build_manifest.py`, and the serve path are **entirely unchanged** — this is the point of Option B. `album_critic_reviews` gains a growing tail of one-review-per-obscure-outlet rows, same shape as today's rows, no schema change.
+- A new class of source ("search-found, one-off, not on any fixed list") means `dedup.ts`'s `RANKED_SOURCES` will increasingly see sources it doesn't recognize, falling to the deterministic tail — already-designed-for, per that file's own comment, but worth re-confirming doesn't need a ranking pass once search-sourced volume is non-trivial.
+- The exact-match ceiling stays exactly as tight as `album-critic-reviews-etl` already enforces; this design adds no new mis-attribution surface, only a new _source_ of exact-matched rows.
+
+## Related
+
+- [ADR 0012](0012-external-critic-reviews.md) — the table, the fair-use posture, the flag gate this design feeds.
+- [Backend-Service#1873](https://github.com/WXYC/Backend-Service/issues/1873) — this design's ticket, including the labeled 40-sample ground truth.
+- [Backend-Service#1830](https://github.com/WXYC/Backend-Service/issues/1830) / `jobs/album-critic-reviews-etl/README.md` — the unchanged consumer pipeline.
+- `WXYC/research-data#5` — the manifest publish pipeline this design's output flows through unmodified.
+- `spike/critic-review-search/` (this repo) — the validated spike code and full metrics report.

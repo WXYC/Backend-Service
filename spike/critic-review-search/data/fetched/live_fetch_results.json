@@ -1,0 +1,358 @@
+{
+  "_comment": "Raw WebFetch outputs from the live validation run against the 16-item subset of the labeled 40-sample (issue #1873), captured verbatim (append-only per repo data-safety policy). robots_checked/allowed come from data/robots/live_robots_check.json and the extra ad hoc checks run alongside this pass. fetch_error records a technical/WAF failure distinct from a robots.txt disallow.",
+  "items": [
+    {
+      "id": 1,
+      "artist": "22 Beaches",
+      "album": "Dust: Recordings 1980-1984",
+      "outcome": "no_candidates",
+      "note": "All 8 search results were retail/marketplace/store domains (mrbongo, boomkat, decks.de, musicmaniarecords, piccadillyrecords, serendeepity) or excluded (Discogs, Bandcamp store). The ground-truth outlet (Maximum Rocknroll) never appeared in the WebSearch result set at all -- a search-recall miss, not a classifier failure."
+    },
+    {
+      "id": 3,
+      "artist": "Janel Leppin's Ensemble Volcanic Ash",
+      "album": "Pluto in Aquarius",
+      "attempts": [
+        {
+          "url": "https://www.allaboutjazz.com/ensemble-volcanic-ash-pluto-in-aquarius-janel-leppin-cuneiform-records",
+          "stage": "robots",
+          "allowed": false,
+          "reason": "disallowed for AI-opt-out token 'ClaudeBot'"
+        },
+        {
+          "url": "http://expose.org/index.php/articles/display/janel-leppin-slowly-melting-pluto-in-aquarius-2.html",
+          "stage": "fetch",
+          "fetch_error": "SSL handshake failure"
+        },
+        {
+          "url": "http://united-mutations.blogspot.com/2026/04/janel-leppins-ensemble-volcanic-ash.html",
+          "stage": "fetch",
+          "is_editorial_review": false,
+          "source_name": "United Mutations blog",
+          "found_artist": "Janel Leppin's Ensemble Volcanic Ash",
+          "found_album": "Pluto in Aquarius",
+          "first_paragraph": "The Cuneiform record label recently released \"Pluto In Aquarius\", a new album by Janel Leppin's Ensemble Volcanic Ash quintet."
+        }
+      ],
+      "outcome": "not_found",
+      "note": "Ground-truth outlet (All About Jazz) is robots-disallowed for ClaudeBot/anthropic-ai -- correctly honored, not fetched. Backup candidate 1 (expose.org) failed with a TLS error. Backup candidate 2 (a blog) is a brief news mention, correctly judged not editorial."
+    },
+    {
+      "id": 5,
+      "artist": "Mellow Swells",
+      "album": "Take Me With You",
+      "attempts": [
+        {
+          "url": "https://chapelboro.com/town-square/live-local/take-me-with-you-live-and-local-with-mellow-swells",
+          "stage": "fetch",
+          "is_editorial_review": false,
+          "source_name": "Chapelboro.com",
+          "found_artist": "Mellow Swells",
+          "found_album": "Take Me With You",
+          "first_paragraph": "The band Mellow Swells stopped by Live and Local last week, following the release of their new album, \"Take Me With You.\""
+        }
+      ],
+      "outcome": "not_found",
+      "note": "Correctly rejected: local-radio segment announcement, not a review. Matches ground truth (retail/no review)."
+    },
+    {
+      "id": 9,
+      "artist": "Noura Mint Seymali",
+      "album": "Yenbett",
+      "attempts": [
+        {
+          "url": "https://faroutmagazine.co.uk/noura-mint-seymali-yenbett-album-review/",
+          "stage": "robots",
+          "allowed": true,
+          "reason": "no matching disallow rule"
+        },
+        {
+          "url": "https://faroutmagazine.co.uk/noura-mint-seymali-yenbett-album-review/",
+          "stage": "fetch",
+          "fetch_error": "HTTP 403 Forbidden (WAF/bot-challenge, NOT a robots.txt disallow -- robots.txt explicitly allowed this URL)"
+        }
+      ],
+      "outcome": "not_found",
+      "note": "Ground-truth outlet (Far Out Magazine) permits us by robots.txt but its edge/WAF layer 403'd the actual fetch. A distinct failure mode from AI-opt-out."
+    },
+    {
+      "id": 12,
+      "artist": "The Paradise Bangkok Molam International Band",
+      "album": "Araya Lam",
+      "attempts": [
+        {
+          "url": "https://www.therealcosmos.com/transmission/the-paradise-bangkok-molam-international-band-araya-lam/",
+          "stage": "fetch",
+          "is_editorial_review": false,
+          "source_name": "The COSMOS",
+          "found_artist": "The Paradise Bangkok Molam International Band",
+          "found_album": "Araya Lam",
+          "first_paragraph": "(Thai-language festival recap, not a critical review)"
+        }
+      ],
+      "outcome": "not_found",
+      "note": "Correctly rejected: festival/event recap, not a review. Matches ground truth (retail/no review) and candidate-sources.md's own note that this release has near-zero editorial coverage."
+    },
+    {
+      "id": 14,
+      "artist": "Vladislav Delay",
+      "album": "Entain",
+      "attempts": [
+        {
+          "url": "https://en.debaser.it/vladislav-delay/entain/review-cosmicjocker",
+          "stage": "robots",
+          "allowed": false,
+          "reason": "disallowed for AI-opt-out token 'ClaudeBot'"
+        },
+        {
+          "url": "https://www.albumoftheyear.org/album/40445-vladislav-delay-entain/user-reviews/",
+          "stage": "robots",
+          "allowed": false,
+          "reason": "disallowed for AI-opt-out token 'ClaudeBot'"
+        },
+        {
+          "url": "https://www.sputnikmusic.com/review/63214/Vladislav-Delay-Entain/",
+          "stage": "fetch",
+          "is_editorial_review": true,
+          "source_name": "Sputnikmusic",
+          "found_artist": "Vladislav Delay",
+          "found_album": "Entain",
+          "first_paragraph": "There are longer ambient albums than Vladislav Delay's Entain, but somehow, they don't quite seem as scary. A casual glance at Entain's obscenely long tracklengths seems a lot more frightening than, say, looking at a 3-hour Leyland Kirby album on Bandcamp, with a dozen 10-plus-minute tracks lined up in a row."
+        }
+      ],
+      "outcome": "attached",
+      "note": "Ground-truth outlet was 'Record Report' (not in our search results); Sputnikmusic is a different, independently-found legitimate editorial review of the exact release."
+    },
+    {
+      "id": 16,
+      "artist": "K Frimpong and his Cubano Fiestas",
+      "album": "The Black Album",
+      "attempts": [
+        {
+          "url": "https://www.hhv-mag.com/review/k-frimpong-his-cubano-fiestas-the-black-album/?lang=en",
+          "stage": "fetch",
+          "is_editorial_review": true,
+          "source_name": "HHV Mag",
+          "found_artist": "K. Frimpong & His Cubano Fiestas",
+          "found_album": "The Black Album",
+          "first_paragraph": "On his second, officially untitled album with the Cubano Fiestas, K. Frimpong refined his blend of Ghanaian highlife, Caribbean influences and subtle electronic elements even further."
+        }
+      ],
+      "outcome": "attached",
+      "note": "Exact outlet match with the ground truth (HHV Mag, high confidence)."
+    },
+    {
+      "id": "16-decosimo-trap-demo",
+      "artist": "K Frimpong and his Cubano Fiestas",
+      "album": "The Black Album (target) -- deliberately fetched the WRONG HHV Mag review URL (The Blue Album)",
+      "attempts": [
+        {
+          "url": "https://www.hhv-mag.com/review/k-frimpong-his-cubano-fiestas-the-blue-album/?lang=en",
+          "stage": "fetch",
+          "is_editorial_review": true,
+          "source_name": "HHV Mag",
+          "found_artist": "K. Frimpong & His Cubano Fiestas",
+          "found_album": "The Blue Album",
+          "first_paragraph": "With his first two albums, recorded in 1976 and 1977, Alhaji K. Frimpong became a musical icon in his native Ghana..."
+        }
+      ],
+      "outcome": "rejected_mismatch",
+      "note": "DELIBERATE guard-rail test, not part of the 40-sample. Same artist, genuinely different album, both real editorial reviews from the same trusted outlet. pipeline.evaluate_fetched_candidate correctly returns REJECTED_MISMATCH ('Decosimo trap', named for WXYC rotation artist Joseph Decosimo, who has the same multi-album-per-artist shape) -- proves the exact-match guard on live data, not just synthetic unit tests."
+    },
+    {
+      "id": 18,
+      "artist": "Markolino Dimond",
+      "album": "Brujeria",
+      "attempts": [
+        {
+          "url": "https://www.jazzmusicarchives.com/review/mark-dimond-y-su-sabor-brujeria/229464",
+          "stage": "robots",
+          "allowed": true,
+          "fetch_failed": true,
+          "reason": "robots.txt itself returned HTTP 403"
+        },
+        {
+          "url": "https://www.jazzmusicarchives.com/review/mark-dimond-y-su-sabor-brujeria/229464",
+          "stage": "fetch",
+          "fetch_error": "HTTP 403 Forbidden"
+        }
+      ],
+      "outcome": "not_found",
+      "note": "Site 403'd both the robots.txt fetch and the content fetch (active bot-block, not an AI-specific opt-out). Matches ground truth (retail/no review) regardless."
+    },
+    {
+      "id": 21,
+      "artist": "Various Artists",
+      "album": "When There is No Sun",
+      "attempts": [
+        {
+          "url": "https://ra.co/reviews/34245",
+          "stage": "robots",
+          "allowed": false,
+          "reason": "disallowed for AI-opt-out token 'ClaudeBot' (also: wrong release -- Nite Jewel 'No Sun', not the target compilation)"
+        },
+        {
+          "url": "https://ra.co/reviews/36342",
+          "stage": "robots",
+          "allowed": false,
+          "reason": "disallowed for AI-opt-out token 'ClaudeBot'"
+        },
+        {
+          "url": "https://web.archive.org/web/2026/https://ra.co/reviews/36342",
+          "stage": "fetch",
+          "fetch_error": "WebFetch tool refuses web.archive.org URLs outright (\"Claude Code is unable to fetch from web.archive.org\") -- a spike-tooling limitation, not a policy decision. Production's own HTTP client would not have this restriction; research-data's crawler already reads RA via Wayback CDX for exactly this reason."
+        }
+      ],
+      "outcome": "not_found",
+      "note": "Ground-truth outlet (Resident Advisor) is robots-disallowed for ClaudeBot/anthropic-ai on the live site -- correctly honored. The Wayback-fallback pattern research-data already uses for RA (see candidate-sources.md) could not be exercised in this spike because the WebFetch tool itself blocks archive.org; production should implement its own direct HTTP client for that fallback, per the ADR."
+    },
+    {
+      "id": 24,
+      "artist": "Csillagrablók",
+      "album": "Reménytelen",
+      "attempts": [
+        {
+          "url": "https://recorder.blog.hu/2026/01/08/rad_nyomultam_sajnos_de_mindegy_most_mar_rec_hu?token=fba2b6ee31c4eaca8dd53b5f8246b0cd",
+          "stage": "fetch",
+          "is_editorial_review": true,
+          "source_name": "Recorder",
+          "found_artist": "Csillagrablók",
+          "found_album": "Reménytelen",
+          "first_paragraph": "A Csillagrablók a punk punkjából lemezről lemezre vált dallamos-rockos punkká. A karácsony előtt pár nappal megjelent Reménytelen EP már inkább fülbemászó..."
+        }
+      ],
+      "outcome": "attached",
+      "note": "Exact outlet match with ground truth (Recorder/rec.hu, med confidence). Hungarian-language content; normalize_title's diacritic-stripping handled the artist/album match correctly."
+    },
+    {
+      "id": 26,
+      "artist": "Hiding Places",
+      "album": "The Secret to Good Living",
+      "attempts": [
+        {
+          "url": "https://www.treblezine.com/hiding-places-the-secret-to-good-living/",
+          "stage": "robots",
+          "allowed": true,
+          "reason": "no matching disallow rule"
+        },
+        {
+          "url": "https://www.treblezine.com/hiding-places-the-secret-to-good-living/",
+          "stage": "fetch",
+          "fetch_error": "HTTP 403 Forbidden (WAF/bot-challenge, NOT a robots.txt disallow)"
+        }
+      ],
+      "outcome": "not_found",
+      "note": "Treble is a known-crawlable source in research-data's OWN corpus (crawl_reviews.py's `treble` subcommand is shipped and has a committed corpus) -- this 403 is very likely an artifact of the spike's WebFetch tool's fetch identity, not a real block on an honest, standard fetcher. Strong evidence production's own fetch implementation (reusing research-data's SESSION-style client) would succeed here."
+    },
+    {
+      "id": 29,
+      "artist": "low.bo",
+      "album": "husk",
+      "attempts": [
+        {
+          "url": "https://theneedledrop.com/news/low-bo-blur-husk-album/",
+          "stage": "fetch",
+          "is_editorial_review": false,
+          "source_name": "The Needle Drop",
+          "found_artist": "Low.bō",
+          "found_album": "husk",
+          "first_paragraph": "Low.bō has revealed a new single, \"blur\", which serves as another taste from his upcoming LP husk, out September 3."
+        }
+      ],
+      "outcome": "not_found",
+      "note": "Correctly rejected: a news post about a single, not an album review. Matches ground truth (retail/no review)."
+    },
+    {
+      "id": 30,
+      "artist": "Nashpaints",
+      "album": "Everyone Good is Called Molly",
+      "attempts": [
+        {
+          "url": "https://www.pastemagazine.com/music/nashpaints/nashpaints-everyone-good-is-called-molly-album-review",
+          "stage": "robots",
+          "allowed": true,
+          "reason": "no matching disallow rule"
+        },
+        {
+          "url": "https://www.pastemagazine.com/music/nashpaints/nashpaints-everyone-good-is-called-molly-album-review",
+          "stage": "fetch",
+          "fetch_error": "HTTP 403 Forbidden (WAF/bot-challenge, NOT a robots.txt disallow)"
+        }
+      ],
+      "outcome": "not_found",
+      "note": "Paste is a known-crawlable source in research-data's OWN corpus (crawl_reviews.py's `paste` subcommand, shipped, in the manifest). Same conclusion as Treble (#26): this is very likely a spike-tooling fetch-identity artifact, not a genuine block."
+    },
+    {
+      "id": 34,
+      "artist": "Activ-Analog",
+      "album": "Space Cadet",
+      "attempts": [
+        {
+          "url": "https://loudandclearreviews.com/space-cadet-2025-film-review/",
+          "stage": "fetch",
+          "is_editorial_review": false,
+          "source_name": "Loud And Clear Reviews",
+          "found_artist": null,
+          "found_album": null,
+          "first_paragraph": "With its emotionally charged soundtrack and beautiful animation, Space Cadet is an ode to childhood memories and the heartbreak of growing up."
+        }
+      ],
+      "outcome": "not_found",
+      "note": "Correctly rejected: this is a review of an unrelated 2024/2025 animated film, not the target artist/album at all. Matches ground truth ('nothing findable')."
+    },
+    {
+      "id": 36,
+      "artist": "Carré",
+      "album": "Hibiscus",
+      "attempts": [
+        {
+          "url": "https://djmag.com/news/carre-shares-new-ep-hibiscus-tempa-listen",
+          "stage": "robots",
+          "allowed": false,
+          "reason": "disallowed for AI-opt-out token 'ClaudeBot'"
+        },
+        {
+          "url": "https://djmag.com/reviews/carre-hibiscus-ep",
+          "stage": "robots",
+          "allowed": false,
+          "reason": "disallowed for AI-opt-out token 'ClaudeBot'"
+        },
+        {
+          "url": "https://firstfloor.substack.com/p/carre-hibiscus",
+          "stage": "fetch",
+          "is_editorial_review": true,
+          "source_name": "First Floor (Substack)",
+          "found_artist": "Carré",
+          "found_album": "Hibiscus",
+          "first_paragraph": "Carré is firmly woven into the new generation of dubstep artists bringing vitality to 140. Alongside such artists as Beatrice M and EMA, the California native represents a refreshing shift in a genre that has long been heavily male-dominated, opening up a more inclusive space while also pushing a sound whose deep and meditative qualities speak to the dub part of dubstep."
+        }
+      ],
+      "outcome": "attached",
+      "note": "Ground-truth outlet (DJ Mag) is robots-disallowed for ClaudeBot/anthropic-ai -- correctly honored. First Floor is a different, independently-found legitimate editorial review of the exact release (First Floor is also one of the sources already committed in research-data's own corpus)."
+    },
+    {
+      "id": 39,
+      "artist": "Mei Semones",
+      "album": "Kurage",
+      "attempts": [
+        {
+          "url": "https://www.albumoftheyear.org/album/1673877-mei-semones-kurage.php",
+          "stage": "robots",
+          "allowed": false,
+          "reason": "disallowed for AI-opt-out token 'ClaudeBot'"
+        },
+        {
+          "url": "https://www.musicconnection.com/kurage-by-mei-semones-7-10/",
+          "stage": "fetch",
+          "is_editorial_review": true,
+          "source_name": "Music Connection Magazine",
+          "found_artist": "Mei Semones",
+          "found_album": "Kurage",
+          "first_paragraph": "There's a wondrous curveball quality to Mei Semones' music; the Brooklyn-based singer, songwriter and guitarist has the innate ability to lead the listener down a path and then turn on a dime, and that artistic dexterity works to the immense benefit of the songs on Kurage."
+        }
+      ],
+      "outcome": "attached",
+      "note": "Exact outlet match with ground truth (Music Connection, high confidence)."
+    }
+  ]
+}

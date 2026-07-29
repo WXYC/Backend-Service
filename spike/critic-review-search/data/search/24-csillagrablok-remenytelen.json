@@ -1,0 +1,31 @@
+{
+  "id": 24,
+  "artist": "Csillagrablók",
+  "album": "Reménytelen",
+  "query": "\"Csillagrablók\" \"Reménytelen\" review",
+  "results": [
+    {
+      "url": "https://recorder.blog.hu/2026/01/08/rad_nyomultam_sajnos_de_mindegy_most_mar_rec_hu?token=fba2b6ee31c4eaca8dd53b5f8246b0cd",
+      "title": "Rad nyomultam sajnos, de mindegy most mar - Rec.hu - Recorder"
+    },
+    { "url": "https://www.facebook.com/csillagrablok/", "title": "Csillagrablók | Facebook" },
+    {
+      "url": "https://keretblog.hu/csillagrablok-ez-mar-picsarock-puxy-lemez/",
+      "title": "Minden oreg faszit lesmarolok - Itt az uj Csillagrablók / KERET"
+    },
+    {
+      "url": "https://book24.hu/konyv/romantikus/romantikus-regeny/hopeless-remenytelen-remenytelen-1",
+      "title": "Konyv: Colleen Hoover: Hopeless - Remenytelen (unrelated book)"
+    },
+    {
+      "url": "https://www.madachkonyv.com/Hopeless-Remenytelen-Remenytelen-1-d4192.htm?tab=description",
+      "title": "Colleen Hoover Hopeless (unrelated book)"
+    },
+    {
+      "url": "https://csillagrablok.bandcamp.com/album/abnorm-lis",
+      "title": "Abnormalis - Music | Csillagrablók - Bandcamp (DIFFERENT ALBUM)"
+    },
+    { "url": "https://kolorado.hu/en/csillagrablok", "title": "Csillagrablók - KOLORADO 2025" },
+    { "url": "https://open.spotify.com/artist/1BxM4PiFJz1ElqVnBmB0oe", "title": "Csillagrablók | Spotify" }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "id": 34,
+  "artist": "Activ-Analog",
+  "album": "Space Cadet",
+  "query": "\"Activ-Analog\" \"Space Cadet\" review",
+  "results": [
+    {
+      "url": "https://loudandclearreviews.com/space-cadet-2025-film-review/",
+      "title": "Space Cadet (2025) Review: Charming Film (unrelated -- film)"
+    },
+    { "url": "https://www.joblo.com/space-cadet-review/", "title": "Space Cadet Review (unrelated -- film)" },
+    {
+      "url": "https://www.imdb.com/title/tt21469794/reviews/",
+      "title": "Space Cadet (2024) - User reviews - IMDb (unrelated -- film)"
+    },
+    {
+      "url": "https://www.metacritic.com/movie/space-cadet/",
+      "title": "Space Cadet Reviews - Metacritic (unrelated -- film)"
+    },
+    {
+      "url": "https://www.siophmedia.com/reviews/space-cadet",
+      "title": "Space Cadet: Review — sioph media (unrelated -- film)"
+    },
+    {
+      "url": "https://www.allbud.com/marijuana-strains/sativa-dominant-hybrid/space-cadet",
+      "title": "Space Cadet Marijuana Strain Information & Reviews (unrelated)"
+    },
+    {
+      "url": "https://www.pluggedin.com/movie-reviews/space-cadet-2024/",
+      "title": "Space Cadet - Plugged In (unrelated -- film)"
+    }
+  ],
+  "note": "Ground truth is 'nothing findable' (low confidence). Zero results are about this artist at all -- 'Space Cadet' collides with an unrelated 2024 film and a cannabis strain. True-negative/no-op test."
+}

@@ -1,0 +1,26 @@
+{
+  "sample_size": 16,
+  "editorial_detection": {
+    "true_positives": 5,
+    "false_positives": 0,
+    "true_negatives": 5,
+    "false_negatives": 6,
+    "precision": 1.0,
+    "recall": 0.45454545454545453
+  },
+  "exact_match_false_attach_count": 0,
+  "exact_match_precision": 1.0,
+  "automated_findable_rate": 0.3125,
+  "manual_findable_rate_baseline": 0.675,
+  "false_negative_breakdown": {
+    "search_recall": 1,
+    "robots_block+technical_failure": 1,
+    "waf_block": 3,
+    "robots_block": 1
+  },
+  "bonus_guardrail_trial": {
+    "description": "Not part of the 40-sample. Deliberately fetched HHV Mag's review of K. Frimpong's 'The Blue Album' while targeting 'The Black Album' (item 16) -- same artist, real editorial review, wrong release. Live demonstration of the Decosimo-trap guard.",
+    "automated": "rejected_mismatch",
+    "would_have_been_a_false_attach_without_the_guard": true
+  }
+}

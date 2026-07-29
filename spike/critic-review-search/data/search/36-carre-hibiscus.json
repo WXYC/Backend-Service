@@ -1,0 +1,26 @@
+{
+  "id": 36,
+  "artist": "Carré",
+  "album": "Hibiscus",
+  "query": "\"Carré\" \"Hibiscus\" review DJ Mag",
+  "results": [
+    {
+      "url": "https://djmag.com/news/carre-shares-new-ep-hibiscus-tempa-listen",
+      "title": "Carré shares new EP, 'Hibiscus', on Tempa: Listen | DJ Mag"
+    },
+    { "url": "https://www.discogs.com/release/36476077-Carr%C3%A9-Hibiscus", "title": "Carré – Hibiscus" },
+    { "url": "https://djmag.com/reviews/carre-hibiscus-ep", "title": "Carré - Hibiscus EP | DJ Mag" },
+    { "url": "https://djmag.com/features/selections-carre", "title": "Selections: Carré | DJ Mag" },
+    { "url": "https://boomkat.com/products/hibiscus-ep", "title": "Carré - Hibiscus EP - Boomkat" },
+    {
+      "url": "https://firstfloor.substack.com/p/carre-hibiscus",
+      "title": "Carré – Hibiscus - by Oli Warwick - First Floor"
+    },
+    { "url": "https://djmag.com/reviews", "title": "DJ Mag - Reviews (index page, not a specific review)" },
+    { "url": "https://carre-carre.bandcamp.com/album/hibiscus", "title": "Hibiscus - Mercy | Carré - Bandcamp" },
+    {
+      "url": "https://open.spotify.com/track/3DAkxGV8Wk1QCrmBnl9m5R",
+      "title": "Hibiscus - song and lyrics by Carré, Bbyafricka | Spotify"
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "id": 14,
+  "artist": "Vladislav Delay",
+  "album": "Entain",
+  "query": "\"Vladislav Delay\" \"Entain\" review",
+  "results": [
+    {
+      "url": "https://en.debaser.it/vladislav-delay/entain/review-cosmicjocker",
+      "title": "Vladislav Delay's Entain: A Nocturnal Electronic Journey"
+    },
+    {
+      "url": "https://www.albumoftheyear.org/album/40445-vladislav-delay-entain/user-reviews/",
+      "title": "Vladislav Delay - Entain - User Reviews - Album of The Year"
+    },
+    {
+      "url": "https://www.sputnikmusic.com/review/63214/Vladislav-Delay-Entain/",
+      "title": "Vladislav Delay - Entain (album review) | Sputnikmusic"
+    },
+    {
+      "url": "https://www.albumoftheyear.org/album/40445-vladislav-delay-entain.php",
+      "title": "Vladislav Delay - Entain - Reviews - Album of The Year"
+    },
+    {
+      "url": "http://brainwashed.com/weddle/reviews/entain.html",
+      "title": "CD Review: Vladislav Delay Entain - Brainwashed"
+    },
+    {
+      "url": "https://nedprime.medium.com/music-review-vladislav-delay-entain-ab5f5453ec0",
+      "title": "Music Review: Vladislav Delay — Entain. | by NedPrime | Medium"
+    },
+    {
+      "url": "https://boomkat.com/products/entain-2023-remaster",
+      "title": "VLADISLAV DELAY - Entain (2023 Remaster) - Boomkat"
+    },
+    {
+      "url": "https://rateyourmusic.com/release/album/vladislav-delay/entain/",
+      "title": "Entain by Vladislav Delay (Album, Glitch) - Rate Your Music"
+    },
+    {
+      "url": "https://www.discogs.com/master/6240-Vladislav-Delay-Entain",
+      "title": "Vladislav Delay – Entain. | Releases | Discogs"
+    }
+  ],
+  "note": "The ticket's ground-truth outlet for this row is 'Record Report'; it did not appear in this automated query's result set (see report -- automated recall gap vs the manual probe)."
+}

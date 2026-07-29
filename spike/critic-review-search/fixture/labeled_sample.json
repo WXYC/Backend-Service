@@ -1,0 +1,362 @@
+[
+  {
+    "id": 1,
+    "bin": "H",
+    "artist": "22 Beaches",
+    "album": "Dust: Recordings 1980-1984",
+    "verdict": "editorial",
+    "outlet": "Maximum Rocknroll",
+    "confidence": "high"
+  },
+  {
+    "id": 2,
+    "bin": "H",
+    "artist": "Bim Sherman",
+    "album": "Ghetto Dub",
+    "verdict": "editorial",
+    "outlet": "Ban Ban Ton Ton",
+    "confidence": "high"
+  },
+  {
+    "id": 3,
+    "bin": "H",
+    "artist": "Janel Leppin's Ensemble Volcanic Ash",
+    "album": "Pluto in Aquarius",
+    "verdict": "editorial",
+    "outlet": "All About Jazz",
+    "confidence": "high"
+  },
+  {
+    "id": 4,
+    "bin": "H",
+    "artist": "Lolina",
+    "album": "Monopoly of Mistakes",
+    "verdict": "editorial",
+    "outlet": "Record Turnover",
+    "confidence": "low"
+  },
+  {
+    "id": 5,
+    "bin": "H",
+    "artist": "Mellow Swells",
+    "album": "Take Me With You",
+    "verdict": "retail",
+    "outlet": null,
+    "confidence": "med"
+  },
+  {
+    "id": 6,
+    "bin": "H",
+    "artist": "MfanaTouchLine",
+    "album": "Ntjaka",
+    "verdict": "retail",
+    "outlet": null,
+    "confidence": "high"
+  },
+  {
+    "id": 7,
+    "bin": "H",
+    "artist": "Molasses",
+    "album": "Ring of Fire",
+    "verdict": "editorial",
+    "outlet": "Outside Noise",
+    "confidence": "high"
+  },
+  {
+    "id": 8,
+    "bin": "H",
+    "artist": "Nakibembe Embaire Group & Naoyuki Uchida",
+    "album": "Phantom Keys",
+    "verdict": "editorial",
+    "outlet": "Avant Music News",
+    "confidence": "high"
+  },
+  {
+    "id": 9,
+    "bin": "H",
+    "artist": "Noura Mint Seymali",
+    "album": "Yenbett",
+    "verdict": "editorial",
+    "outlet": "Far Out Magazine",
+    "confidence": "high"
+  },
+  {
+    "id": 10,
+    "bin": "H",
+    "artist": "Reese McHenry",
+    "album": "Forever",
+    "verdict": "editorial",
+    "outlet": "The Indy Review",
+    "confidence": "high"
+  },
+  {
+    "id": 11,
+    "bin": "H",
+    "artist": "Sam Wenc",
+    "album": "Language at an Angle",
+    "verdict": "editorial",
+    "outlet": "The Slow Music Movement",
+    "confidence": "high"
+  },
+  {
+    "id": 12,
+    "bin": "H",
+    "artist": "The Paradise Bangkok Molam International Band",
+    "album": "Araya Lam",
+    "verdict": "retail",
+    "outlet": null,
+    "confidence": "med"
+  },
+  {
+    "id": 13,
+    "bin": "H",
+    "artist": "Various Artists",
+    "album": "The Resonance Sessions",
+    "verdict": "editorial",
+    "outlet": "Mountain Xpress",
+    "confidence": "med"
+  },
+  {
+    "id": 14,
+    "bin": "H",
+    "artist": "Vladislav Delay",
+    "album": "Entain",
+    "verdict": "editorial",
+    "outlet": "Record Report",
+    "confidence": "high"
+  },
+  {
+    "id": 15,
+    "bin": "M",
+    "artist": "Joy Harjo",
+    "album": "insomnia & seven steps to grace",
+    "verdict": "retail",
+    "outlet": null,
+    "confidence": "med"
+  },
+  {
+    "id": 16,
+    "bin": "M",
+    "artist": "K Frimpong and his Cubano Fiestas",
+    "album": "The Black Album",
+    "verdict": "editorial",
+    "outlet": "HHV Mag",
+    "confidence": "high"
+  },
+  {
+    "id": 17,
+    "bin": "M",
+    "artist": "Libélula Dorada",
+    "album": "In-Correcto 213",
+    "verdict": "retail",
+    "outlet": null,
+    "confidence": "med"
+  },
+  {
+    "id": 18,
+    "bin": "M",
+    "artist": "Markolino Dimond",
+    "album": "Brujeria",
+    "verdict": "retail",
+    "outlet": null,
+    "confidence": "med"
+  },
+  {
+    "id": 19,
+    "bin": "M",
+    "artist": "Picture",
+    "album": "Eeeeeeee",
+    "verdict": "editorial",
+    "outlet": "Inverted Audio",
+    "confidence": "high"
+  },
+  {
+    "id": 20,
+    "bin": "M",
+    "artist": "Various Artists",
+    "album": "A Guide to the Birdsong of Migration",
+    "verdict": "retail",
+    "outlet": null,
+    "confidence": "med"
+  },
+  {
+    "id": 21,
+    "bin": "M",
+    "artist": "Various Artists",
+    "album": "When There is No Sun",
+    "verdict": "editorial",
+    "outlet": "Resident Advisor",
+    "confidence": "high"
+  },
+  {
+    "id": 22,
+    "bin": "M",
+    "artist": "xavisphone",
+    "album": "balanca e paixao",
+    "verdict": "retail",
+    "outlet": null,
+    "confidence": "high"
+  },
+  {
+    "id": 23,
+    "bin": "L",
+    "artist": "Carrie deCunzo Mirande",
+    "album": "My Shadow",
+    "verdict": "editorial",
+    "outlet": "HHV Mag",
+    "confidence": "high"
+  },
+  {
+    "id": 24,
+    "bin": "L",
+    "artist": "Csillagrablók",
+    "album": "Reménytelen",
+    "verdict": "editorial",
+    "outlet": "Recorder (Rec.hu)",
+    "confidence": "med"
+  },
+  {
+    "id": 25,
+    "bin": "L",
+    "artist": "Eleni Mandell",
+    "album": "Tailspin",
+    "verdict": "editorial",
+    "outlet": "Elsewhere (Graham Reid)",
+    "confidence": "high"
+  },
+  {
+    "id": 26,
+    "bin": "L",
+    "artist": "Hiding Places",
+    "album": "The Secret to Good Living",
+    "verdict": "editorial",
+    "outlet": "Treble",
+    "confidence": "high"
+  },
+  {
+    "id": 27,
+    "bin": "L",
+    "artist": "i26 Connector",
+    "album": "i26 Connector",
+    "verdict": "editorial",
+    "outlet": "No Expectations (Josh Terry)",
+    "confidence": "high"
+  },
+  {
+    "id": 28,
+    "bin": "L",
+    "artist": "Julian Calendar",
+    "album": "Speaking a Dead Language",
+    "verdict": "retail",
+    "outlet": null,
+    "confidence": "med"
+  },
+  {
+    "id": 29,
+    "bin": "L",
+    "artist": "low.bo",
+    "album": "husk",
+    "verdict": "retail",
+    "outlet": null,
+    "confidence": "med"
+  },
+  {
+    "id": 30,
+    "bin": "L",
+    "artist": "Nashpaints",
+    "album": "Everyone Good is Called Molly",
+    "verdict": "editorial",
+    "outlet": "Paste",
+    "confidence": "high"
+  },
+  {
+    "id": 31,
+    "bin": "L",
+    "artist": "Plixid",
+    "album": "Plixid",
+    "verdict": "editorial",
+    "outlet": "In Sheeps Clothing",
+    "confidence": "med"
+  },
+  {
+    "id": 32,
+    "bin": "L",
+    "artist": "Spider Taylor",
+    "album": "Surge Studio Music",
+    "verdict": "editorial",
+    "outlet": "First Floor",
+    "confidence": "high"
+  },
+  {
+    "id": 33,
+    "bin": "L",
+    "artist": "Universal Light",
+    "album": "Universal Light",
+    "verdict": "editorial",
+    "outlet": "Magnet Magazine",
+    "confidence": "high"
+  },
+  {
+    "id": 34,
+    "bin": "S",
+    "artist": "Activ-Analog",
+    "album": "Space Cadet",
+    "verdict": "nothing",
+    "outlet": null,
+    "confidence": "low"
+  },
+  {
+    "id": 35,
+    "bin": "S",
+    "artist": "Ana Frango Elétrico",
+    "album": "A Sua Diversão / Não Tem Nada Não",
+    "verdict": "editorial",
+    "outlet": "HHV Mag",
+    "confidence": "med"
+  },
+  {
+    "id": 36,
+    "bin": "S",
+    "artist": "Carré",
+    "album": "Hibiscus",
+    "verdict": "editorial",
+    "outlet": "DJ Mag",
+    "confidence": "high"
+  },
+  {
+    "id": 37,
+    "bin": "S",
+    "artist": "Kath Bloom and David Shapiro",
+    "album": "Equal b/w People Have Their Dreams",
+    "verdict": "retail",
+    "outlet": null,
+    "confidence": "med"
+  },
+  {
+    "id": 38,
+    "bin": "S",
+    "artist": "Kelela",
+    "album": "point blank",
+    "verdict": "retail",
+    "outlet": null,
+    "confidence": "med"
+  },
+  {
+    "id": 39,
+    "bin": "S",
+    "artist": "Mei Semones",
+    "album": "Kurage",
+    "verdict": "editorial",
+    "outlet": "Music Connection",
+    "confidence": "high"
+  },
+  {
+    "id": 40,
+    "bin": "S",
+    "artist": "Merce Lemon & Fust",
+    "album": "Cup of Loneliness / Choices",
+    "verdict": "editorial",
+    "outlet": "Swim Into The Sound",
+    "confidence": "high"
+  }
+]

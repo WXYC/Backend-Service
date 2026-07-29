@@ -1,0 +1,26 @@
+{
+  "id": 5,
+  "artist": "Mellow Swells",
+  "album": "Take Me With You",
+  "query": "\"Mellow Swells\" \"Take Me With You\" review",
+  "results": [
+    {
+      "url": "https://chapelboro.com/town-square/live-local/take-me-with-you-live-and-local-with-mellow-swells",
+      "title": "'Take Me With You': Live and Local with Mellow Swells! - Chapelboro.com"
+    },
+    { "url": "https://hub.rtp.org/event/shuffle-mellow-swells/", "title": "Shuffle: Mellow Swells - Hub RTP" },
+    {
+      "url": "https://www.instagram.com/mellowswells/",
+      "title": "Mellow Swells (@mellowswells) • Instagram photos and videos"
+    },
+    {
+      "url": "https://www.penguinrandomhouse.com/books/761105/take-me-with-you-by-steven-rowley/",
+      "title": "Take Me with You by Steven Rowley (unrelated book)"
+    },
+    { "url": "https://www.karenika.com/archives/61785", "title": "Review: Take Me With You « karenika (unrelated)" },
+    {
+      "url": "https://www.amazon.com/Take-Me-You-Steven-Rowley/dp/0593851498",
+      "title": "Amazon.com: Take Me with You (unrelated book)"
+    }
+  ]
+}

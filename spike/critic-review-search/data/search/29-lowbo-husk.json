@@ -1,0 +1,36 @@
+{
+  "id": 29,
+  "artist": "low.bo",
+  "album": "husk",
+  "query": "\"low.bo\" \"husk\" album review",
+  "results": [
+    {
+      "url": "https://theneedledrop.com/news/low-bo-blur-husk-album/",
+      "title": "Low.bo releases new single \"blur\" & reveals new album's title, 'husk'"
+    },
+    { "url": "https://open.spotify.com/album/4F1umIY4hA97LdQV1cXlbS", "title": "husk - Album by Low.bo | Spotify" },
+    {
+      "url": "https://www.wordplaymagazine.com/blog-1/2025/8/23/lowb-husk-album-10-questions",
+      "title": "Low.bo - husk (Album) + 10 Questions - Wordplay Magazine"
+    },
+    {
+      "url": "https://atwoodmagazine.com/husk-lowbo-debut-album-interview-music-feature/",
+      "title": "\"Raw, Experimental, & Definitive\": Low.bo Debuts with husk - Atwood Magazine"
+    },
+    { "url": "https://x.com/lowboooo/status/1963260487614816283", "title": "low.bo on X" },
+    {
+      "url": "https://mundanemag.com/low-bo-unveils-husk-a-cinematic-meditation-on-loves-cycles/",
+      "title": "Low.bo Unveils husk: A Cinematic Meditation on Love's Cycles | Mundane"
+    },
+    {
+      "url": "https://www.thelunacollective.co/journal/qa-lowbo",
+      "title": "Q&A: Low.bo, the Self-Producing Voice of Alternative R&B — The Luna Collective"
+    },
+    { "url": "https://elasticstage.com/lowbo", "title": "Low.bo - elasticStage" },
+    {
+      "url": "https://www.youtube.com/watch?v=vzxnoT4h5K4",
+      "title": "Low.bo Speaks on recently released album husk - YouTube"
+    }
+  ],
+  "note": "Ground truth is 'retail' (no editorial review found manually) -- these results are Q&A/interview/feature pieces, not reviews; a true-negative test of whether the pipeline correctly attaches nothing."
+}
