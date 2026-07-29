@@ -2,6 +2,7 @@ import { jest } from '@jest/globals';
 import type { Request, Response, NextFunction } from 'express';
 
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
+const mockGetAlbumByLegacyId = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
 const mockMarkAlbumMissing = jest.fn<() => Promise<{ id: number } | undefined>>();
 const mockMarkAlbumFound = jest.fn<() => Promise<{ id: number } | undefined>>();
 const mockFuzzySearchLibrary = jest.fn<() => Promise<unknown[]>>();
@@ -35,6 +36,7 @@ const mockSearchLibrary = jest.fn<() => Promise<{ results: unknown[]; total: num
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
+  getAlbumByLegacyId: mockGetAlbumByLegacyId,
   markAlbumMissing: mockMarkAlbumMissing,
   markAlbumFound: mockMarkAlbumFound,
   fuzzySearchLibrary: mockFuzzySearchLibrary,
@@ -118,6 +120,7 @@ import {
   markFound,
   searchForAlbum,
   addAlbum,
+  getAlbum,
   getRotationTracks,
   updateAlbum,
   searchLibraryQueryEndpoint,
@@ -893,6 +896,84 @@ describe('library.controller', () => {
 
       expect(mockSearchLibrary).toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
+    });
+  });
+
+  describe('getAlbum', () => {
+    it('returns 200 with the album when album_id is provided (serial path)', async () => {
+      mockGetAlbumFromDB.mockResolvedValue(fullAlbum);
+      const req = { query: { album_id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getAlbum(req, res, next);
+
+      expect(mockGetAlbumFromDB).toHaveBeenCalledWith(42);
+      expect(mockGetAlbumByLegacyId).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(fullAlbum);
+    });
+
+    it('returns 400 when neither album_id nor legacy_release_id is provided', async () => {
+      const req = { query: {} } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getAlbum(req, res, next)).rejects.toThrow('missing album identifier');
+      expect(mockGetAlbumFromDB).not.toHaveBeenCalled();
+    });
+
+    it('resolves legacy_release_id and returns 200 with the album (serial in id)', async () => {
+      mockGetAlbumByLegacyId.mockResolvedValue(fullAlbum);
+      const req = { query: { legacy_release_id: '65880' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getAlbum(req, res, next);
+
+      expect(mockGetAlbumByLegacyId).toHaveBeenCalledWith(65880);
+      expect(mockGetAlbumFromDB).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(fullAlbum);
+    });
+
+    it('prefers legacy_release_id over album_id when both are present', async () => {
+      mockGetAlbumByLegacyId.mockResolvedValue(fullAlbum);
+      const req = { query: { legacy_release_id: '65880', album_id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getAlbum(req, res, next);
+
+      expect(mockGetAlbumByLegacyId).toHaveBeenCalledWith(65880);
+      expect(mockGetAlbumFromDB).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 when legacy_release_id resolves to no catalog row', async () => {
+      mockGetAlbumByLegacyId.mockResolvedValue(undefined);
+      const req = { query: { legacy_release_id: '999999999' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getAlbum(req, res, next)).rejects.toThrow('No catalog album for that legacy_release_id');
+    });
+
+    // '65880xyz' locks in strict Number() parsing (parseInt would have accepted
+    // the leading digits); '0'/'-5' are non-positive; 'not-a-number' is NaN.
+    it.each([['not-a-number'], ['0'], ['-5'], ['65880xyz']])(
+      'returns 400 for an invalid legacy_release_id (%s)',
+      async (bad) => {
+        const req = { query: { legacy_release_id: bad } } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(getAlbum(req, res, next)).rejects.toThrow('Invalid legacy_release_id');
+        expect(mockGetAlbumByLegacyId).not.toHaveBeenCalled();
+      }
+    );
+
+    it('returns 400 for a repeated legacy_release_id (Express yields string[]) (#1553-style guard)', async () => {
+      // Number(['1','2']) → Number("1,2") → NaN, so a fabricated partial id is
+      // rejected rather than silently used.
+      const req = { query: { legacy_release_id: ['1', '2'] } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getAlbum(req, res, next)).rejects.toThrow('Invalid legacy_release_id');
+      expect(mockGetAlbumByLegacyId).not.toHaveBeenCalled();
     });
   });
 });

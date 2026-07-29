@@ -1806,6 +1806,41 @@ export const getAlbumFromDB = async (album_id: number) => {
   return serializeReconciledIdentity(album[0]);
 };
 
+/**
+ * Resolve a Backend-Service catalog `library.id` (the serial PK) from a
+ * tubafrenzy `LIBRARY_RELEASE.ID`, which BS stores in the separate
+ * `library.legacy_release_id` column. Returns null for a 0/falsy legacy id or
+ * when no catalog row carries it.
+ *
+ * The two id spaces are distinct: external callers (LML `library.db.id`,
+ * `wxyc.info/libraryRelease?id=`, the request line) speak the legacy id, while
+ * every BS catalog read is keyed on the serial. This is the single home for the
+ * bridge — `routes/internal.route.ts` delegates here (BS#1880), matching the
+ * `libraryId === legacy_release_id` convention documented on the `/proxy/library`
+ * routes (`controllers/proxy.controller.ts`).
+ */
+export const getAlbumIdByLegacyId = async (legacyReleaseId: number): Promise<number | null> => {
+  if (!legacyReleaseId) return null;
+  const [row] = await db
+    .select({ id: library.id })
+    .from(library)
+    .where(eq(library.legacy_release_id, legacyReleaseId))
+    .limit(1);
+  return row?.id ?? null;
+};
+
+/**
+ * Fetch a catalog album by its tubafrenzy `legacy_release_id`, returning the
+ * same shape as {@link getAlbumFromDB}. Returns undefined when the legacy id
+ * resolves to no catalog row — e.g. a release present in the daily-rebuilt
+ * `library.db` but not yet synced into BS Postgres.
+ */
+export const getAlbumByLegacyId = async (legacyReleaseId: number) => {
+  const albumId = await getAlbumIdByLegacyId(legacyReleaseId);
+  if (albumId === null) return undefined;
+  return getAlbumFromDB(albumId);
+};
+
 export const markAlbumMissing = async (album_id: number) => {
   const result = await db
     .update(library)

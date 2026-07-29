@@ -508,10 +508,37 @@ export const addGenre: RequestHandler = async (req, res) => {
   res.status(201).json(insertion);
 };
 
-export const getAlbum: RequestHandler<object, unknown, unknown, { album_id: string }> = async (req, res) => {
+export const getAlbum: RequestHandler<
+  object,
+  unknown,
+  unknown,
+  { album_id?: string; legacy_release_id?: string }
+> = async (req, res) => {
   const { query } = req;
+
+  // dj.wxyc.org per-release permalink front door (BS#1880): external callers
+  // (LML, wxyc.info, the request line) hold the tubafrenzy `legacy_release_id`,
+  // not the BS serial `library.id`. When given a legacy id, resolve it to the
+  // serial so a legacy-keyed permalink can reach the catalog. 404 when it maps
+  // to no catalog row (a `library.db` release not yet synced into BS Postgres).
+  if (query.legacy_release_id !== undefined) {
+    // Strict `Number()` (not `parseInt`) so trailing garbage ("65880xyz") and a
+    // repeated param (Express yields `string[]` → "1,2") both become NaN and are
+    // rejected, rather than silently parsing a partial/fabricated id.
+    const legacyId = Number(query.legacy_release_id);
+    if (!Number.isInteger(legacyId) || legacyId <= 0) {
+      throw new WxycError('Invalid legacy_release_id', 400);
+    }
+    const album = await libraryService.getAlbumByLegacyId(legacyId);
+    if (album === undefined) {
+      throw new WxycError('No catalog album for that legacy_release_id', 404);
+    }
+    res.status(200).json(album);
+    return;
+  }
+
   if (query.album_id === undefined) {
-    throw new WxycError('Bad Request, missing album identifier: album_id', 400);
+    throw new WxycError('Bad Request, missing album identifier: album_id or legacy_release_id', 400);
   }
 
   const album = await libraryService.getAlbumFromDB(parseInt(query.album_id));
