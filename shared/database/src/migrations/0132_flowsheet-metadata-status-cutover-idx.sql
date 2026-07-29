@@ -1,0 +1,56 @@
+-- BS#895 (Epic C C6 retune). Cuts the flowsheet-metadata-backfill cron's
+-- sweep predicate over from the pre-BS#891 implicit marker
+-- (`metadata_attempt_at IS NULL`) to the explicit `metadata_status = 'pending'`
+-- enum column, and adds the partial index the new epic #1810 W4 self-heal
+-- query needs. Three DDL statements:
+--
+--   1/2. DROP the two `metadata_attempt_at IS NULL` partial indexes
+--        (`flowsheet_metadata_attempt_pending_idx` / `_covering_idx`,
+--        migrations 0070 / 0074). BS#891 (migration 0078) already shipped
+--        their replacement, `flowsheet_metadata_status_pending_idx`
+--        (`metadata_status = 'pending'`), specifically so both partials
+--        could coexist during the transition — see that index's comment in
+--        schema.ts, which named this exact PR as the drop point. Nothing
+--        else in the codebase selects on `metadata_attempt_at IS NULL` as
+--        of this PR (grepped 2026-07-28): the column is now write-only
+--        historical bookkeeping (`docs/migrations.md` "Attempt-at markers").
+--        `DROP INDEX` (no CONCURRENTLY) is fine here — it's metadata-only,
+--        no table scan, near-instant even under the ACCESS EXCLUSIVE lock
+--        Drizzle's transaction wrapper requires.
+--
+--   3. CREATE `flowsheet_rotation_no_match_idx`, a partial B-tree on
+--      `rotation_id` covering `metadata_status = 'enriched_no_match' AND
+--      rotation_id IS NOT NULL`. Backs the new W4 self-heal candidate query
+--      in `jobs/flowsheet-metadata-backfill/worklist.ts`, which joins FROM
+--      the small `rotation` table INTO flowsheet on `rotation_id` to find
+--      rotation-linked rows stuck blank after a `rotation.discogs_release_id`
+--      NULL→present transition. `rotation_id` is an FK column and Postgres
+--      never auto-indexes those (same story as `flowsheet_show_id_idx`).
+--      Expected size: low hundreds of entries (epic #1810's 2026-07-25 audit:
+--      100 rotation-linked `enriched_no_match` rows already carrying an
+--      unused `discogs_release_id`, plus 308 lacking one) — grows slowly.
+--
+-- Production ops:
+--   - The two DROPs run inline in this migration (cheap, see above).
+--   - `CREATE INDEX flowsheet_rotation_no_match_idx` is NOT `CONCURRENTLY`
+--     because Drizzle wraps each migration file in a transaction and
+--     `CREATE INDEX CONCURRENTLY cannot run inside a transaction block` —
+--     same constraint as 0057, 0061, 0068, 0070, 0074, 0078, 0080. Build it
+--     out-of-band on prod first via:
+--       CREATE INDEX CONCURRENTLY "flowsheet_rotation_no_match_idx"
+--         ON "wxyc_schema"."flowsheet" USING btree ("rotation_id")
+--         WHERE "metadata_status" = 'enriched_no_match'
+--           AND "rotation_id" IS NOT NULL;
+--     No AccessExclusiveLock, no INSERT pause. Then merge this PR —
+--     `IF NOT EXISTS` makes the migration apply a no-op against the prod DB
+--     where the index is already present, while fresh dev/CI databases pick
+--     it up on first migrate. Same shape as 0068, 0070, 0074, 0080.
+--   - Deploy this migration in the SAME PR (or strictly before) the cron
+--     predicate flip lands — see BS#895 sequencing and
+--     `docs/flowsheet-metadata-status-backfill.md`, whose BS#891 backfill
+--     already ran and populated `metadata_status` for every historical row,
+--     so the new predicate is correct from the moment it's live.
+
+DROP INDEX "wxyc_schema"."flowsheet_metadata_attempt_pending_idx";--> statement-breakpoint
+DROP INDEX "wxyc_schema"."flowsheet_metadata_attempt_pending_covering_idx";--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "flowsheet_rotation_no_match_idx" ON "wxyc_schema"."flowsheet" USING btree ("rotation_id") WHERE "wxyc_schema"."flowsheet"."metadata_status" = 'enriched_no_match' AND "wxyc_schema"."flowsheet"."rotation_id" IS NOT NULL;

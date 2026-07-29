@@ -18,18 +18,18 @@ The breaker trips on LML's Discogs API work, driven by LML's HTTP endpoints — 
 
 ## Current slot table (UTC)
 
-| Time                          | Job                                   | Class                                                                                                             |
-| ----------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| 04:15                         | `artist-search-alias-consumer`        | light (`search-aliases/bulk`, bounded)                                                                            |
-| 04:30                         | `rotation-artist-backfill`            | **heavy drain**                                                                                                   |
-| 04:45                         | `catalog-popularity-freetext-resolve` | **heavy drain** (`bulkLookupMetadata`)                                                                            |
-| 05:35                         | `concerts-artist-lml-resolver`        | light (upcoming-show cohort)                                                                                      |
-| 05:45                         | `concerts-genre-enrichment`           | light (upcoming-show cohort)                                                                                      |
-| 06:05                         | `concerts-poster-enrichment`          | light (one call per distinct headliner)                                                                           |
-| 00:17 / 06:17 / 12:17 / 18:17 | `rotation-release-id-backfill`        | **heavy drain** (small active-rotation cohort, per-row `lookupMetadata`; TTL-gated)                               |
-| 07:00 Mon                     | `rotation-release-id-pollution-check` | light (weekly, read-only, paced)                                                                                  |
-| **09:00**                     | **`rotation-lml-identity-backfill`**  | **heavy drain** — moved here by BS#1665, was `0 6 * * *`                                                          |
-| ~~06:00~~                     | ~~`flowsheet-metadata-backfill`~~     | **heavy drain — GATED (never fires, `0 0 31 2 *`)**; fate owned by BS#1011 (retire) / BS#895 (hourly reintroduce) |
+| Time                          | Job                                   | Class                                                                               |
+| ----------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------- |
+| 04:15                         | `artist-search-alias-consumer`        | light (`search-aliases/bulk`, bounded)                                              |
+| 04:30                         | `rotation-artist-backfill`            | **heavy drain**                                                                     |
+| 04:45                         | `catalog-popularity-freetext-resolve` | **heavy drain** (`bulkLookupMetadata`)                                              |
+| 05:35                         | `concerts-artist-lml-resolver`        | light (upcoming-show cohort)                                                        |
+| 05:45                         | `concerts-genre-enrichment`           | light (upcoming-show cohort)                                                        |
+| 06:05                         | `concerts-poster-enrichment`          | light (one call per distinct headliner)                                             |
+| 00:17 / 06:17 / 12:17 / 18:17 | `rotation-release-id-backfill`        | **heavy drain** (small active-rotation cohort, per-row `lookupMetadata`; TTL-gated) |
+| 07:00 Mon                     | `rotation-release-id-pollution-check` | light (weekly, read-only, paced)                                                    |
+| **09:00**                     | **`rotation-lml-identity-backfill`**  | **heavy drain** — moved here by BS#1665, was `0 6 * * *`                            |
+| **:10 hourly**                | **`flowsheet-metadata-backfill`**     | **exempt from slot-exclusivity** — BS#895 hourly recovery sweep, see below          |
 
 `rotation-lml-identity-backfill`'s new `0 9 * * *` slot is clear of the entire 04:15–06:05 stack, ~2h after the weekly Monday pollution check, and ~04:00–05:00 ET — still off-peak for DJs (cooperative pause covers the rest).
 
@@ -40,9 +40,9 @@ The breaker trips on LML's Discogs API work, driven by LML's HTTP endpoints — 
 - `concerts-artist-resolver` (05:15) — pure-SQL strict/alias resolver, no LML. (`concerts-artist-lml-resolver` at 05:35 is the LML-touching one.)
 - `concerts-similar-artists-enrichment` (05:55, hits semantic-index not LML), `venue-events-scraper`, `triangle-shows-etl`, `album-reviews-etl`, `legacy-mirror-reconcile` — non-LML.
 
-## The future hourly safety net (BS#895)
+## The hourly safety net (BS#895)
 
-BS#895 will re-introduce `flowsheet-metadata-backfill` as an hourly `0 * * * *` recovery sweep. It is **exempt from slot-exclusivity by construction** — governed by the static LML gate (`BACKFILL_LML_MAX_CONCURRENT=1`, `BACKFILL_LML_RATE_PER_MIN=20`) + cooperative pause, not by its slot. But it MUST pick an offset minute that avoids landing on a heavy-drain minute. Currently `:00` (`rotation-lml-identity-backfill` after BS#1665, plus the `*/30` ETL trio) and `:30` (`rotation-artist-backfill`, plus the `*/30` ETL trio) are taken. `:10` is clear of every current cron and of the non-LML ETL trio — e.g. `10 * * * *`. Whoever unblocks BS#895 should record the chosen minute here.
+`flowsheet-metadata-backfill` runs as an hourly `10 * * * *` recovery sweep, per `package.json`'s `cron-schedule`. It is **exempt from slot-exclusivity by construction** — governed by the static LML gate (`BACKFILL_LML_MAX_CONCURRENT=1`, `BACKFILL_LML_RATE_PER_MIN=20`) + cooperative pause, not by its slot. Its `:10` offset was chosen because it was clear of every current cron and of the non-LML ETL trio (`:00` was taken by `rotation-lml-identity-backfill` after BS#1665 plus the `*/30` ETL trio; `:30` by `rotation-artist-backfill` plus the same trio). Its own workload is bounded by two knobs (`BACKFILL_GRACE_MINUTES`, default 15 — gives the CDC consumer first crack at a fresh row; `BACKFILL_RECOVERY_WINDOW_HOURS`, default 6 — hard age ceiling that excludes the ~748k-row undrained historical `pending` backlog #1011 left behind), not by this policy's heavy-drain/light-touch classification.
 
 ## Grandfathered margin gap: 04:30 / 04:45
 

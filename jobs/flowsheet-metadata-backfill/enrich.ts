@@ -1,30 +1,50 @@
 /**
  * Per-row enrichment: turn an LML response into either a flowsheet inline
  * UPDATE (free-form / unlinked rows) or an `album_metadata` UPSERT plus a
- * marker-only flowsheet UPDATE (linked rows). Mirrors the D3 worker pattern
+ * status-flip flowsheet UPDATE (linked rows). Mirrors the D3 worker pattern
  * in `apps/enrichment-worker/enrich.ts` (BS#899) and closes the historical
  * inline-only drain (BS#1027).
  *
  * Result shape:
  *   - Linked (album_id != null) + match: UPSERT `album_metadata` with the
  *     10-column payload (race-guarded by `updated_at < NOW()`), then
- *     UPDATE `flowsheet` to stamp `metadata_attempt_at = now()` only.
+ *     UPDATE `flowsheet` to flip `metadata_status = 'enriched_match'` (plus
+ *     the historical `metadata_attempt_at = now()` stamp) only.
  *   - Linked + no-match: UPSERT just the 4 synthesized search URLs into
- *     `album_metadata`, then stamp the marker on `flowsheet`.
+ *     `album_metadata`, then flip `metadata_status = 'enriched_no_match'`
+ *     on `flowsheet`.
  *   - Unlinked (album_id IS NULL) + match: write the 10 metadata columns
- *     inline on `flowsheet`, stamping the marker in the same .set() block.
+ *     inline on `flowsheet`, flipping the status in the same .set() block.
  *   - Unlinked + no-match: write the 4 synthesized search URLs inline on
- *     `flowsheet`, stamp the marker.
- *   - On LML throw: caller catches and DOES NOT call this. The row stays
- *     `metadata_attempt_at IS NULL` so the next sweep retries it.
+ *     `flowsheet`, flip the status.
+ *   - On LML throw: caller catches and DOES NOT call this. The row stays at
+ *     whatever `metadata_status` it entered with (`'pending'` for the main
+ *     sweep, `'enriched_no_match'` for the W4 self-heal re-attempt — see
+ *     `fromStatus` below) so the next sweep retries it.
  *
- * Idempotency guard: the flowsheet WHERE narrows by `id = $row.id AND
- * metadata_attempt_at IS NULL`. Critically different from the worker
- * (`apps/enrichment-worker/enrich.ts`), which guards on
- * `metadata_status='enriching'`: the backfill operates on rows the consumer
- * never claimed (no `enriching` transition), so the marker is the right
- * invariant. Borrow the album_metadata UPSERT shape from the worker; do
- * NOT borrow its status-based guard.
+ * Idempotency guard (BS#895 / Epic C C6): the flowsheet WHERE narrows by
+ * `id = $row.id AND metadata_status = $fromStatus`. Before BS#895 this
+ * guarded on `metadata_attempt_at IS NULL` — the pre-BS#891 implicit
+ * marker — because the backfill operated on rows the consumer never
+ * claimed and the marker was the only control-flow signal available. Once
+ * the C6 retune made `metadata_status = 'pending'` the sweep's own
+ * selection predicate (`worklist.ts`), the guard had to move to the same
+ * column or every row this job enriched would stay `'pending'` forever and
+ * get re-selected — and re-billed to LML — on every subsequent hourly run.
+ * `fromStatus` defaults to `'pending'` (the main sweep) and is overridden to
+ * `'enriched_no_match'` by the W4 rotation self-heal pass
+ * (`orchestrate.ts`), which re-attempts rows already in that terminal
+ * state. Mirrors the worker's status-based guard shape
+ * (`apps/enrichment-worker/enrich.ts`, `metadata_status='enriching'`) more
+ * closely now, though the two still diverge on which status they guard
+ * FROM and which they leave a row at on failure.
+ *
+ * `metadata_attempt_at` is still stamped alongside the status flip on every
+ * responded outcome (match or no-match) — it is no longer the control-flow
+ * gate, but stays as the historical/audit marker several other jobs still
+ * read (`jobs/album-metadata-backfill`'s `verifyComplete`,
+ * `flowsheet_album_id_enriched_idx`). See `docs/migrations.md` "Attempt-at
+ * markers".
  *
  * BS#1336 NOTE: the worker now writes 8 additional LML-only columns
  * (discogs_artist_id, label, full_release_date, genres, styles, tracklist,
@@ -40,10 +60,18 @@
  * jobs; replaces the inline duplicates previously pinned by parity tests.
  */
 
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
 import type { DiscogsMatchResult, LookupResponse } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
+
+/**
+ * The two `metadata_status` values `applyEnrichment` / `stampDeadLetter` can
+ * be called with a row already in. Typed as a narrow string union (not the
+ * drizzle enum object) so the unit harness — which mocks `@wxyc/database`
+ * without the real enum — can construct values without importing schema.ts.
+ */
+export type EnrichFromStatus = 'pending' | 'enriched_no_match';
 
 export type EnrichRow = {
   id: number;
@@ -129,24 +157,38 @@ export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | n
  * Returns the outcome so the orchestrator can count it. Errors propagate
  * up — this function does not swallow.
  *
+ * `opts.fromStatus` (default `'pending'`) is the `metadata_status` value the
+ * row must currently hold — the idempotency/race-guard predicate, and the
+ * state the W4 rotation self-heal pass (`orchestrate.ts`) overrides to
+ * `'enriched_no_match'` when re-attempting an already-terminal row. See the
+ * module docstring for why this replaced the old marker-IS-NULL guard.
+ *
  * The `.returning({ id: ... })` call is the race detector: when the
- * orchestrator's SELECT and this UPDATE bracket a runtime-path stamp on
- * the same row, the WHERE's `metadata_attempt_at IS NULL` no longer
- * matches and Postgres updates 0 rows. Returning an empty array tells
- * the caller "the runtime path beat us" — `*_raced` outcome — so metrics
- * separate "I personally enriched this row" from "this row was enriched
- * by *someone* during the run." The data outcome is identical either way
- * (both writers produce the same payload).
+ * orchestrator's SELECT and this UPDATE bracket a concurrent writer's claim
+ * on the same row (the CDC worker flipping it off `fromStatus`), the
+ * WHERE's `metadata_status = $fromStatus` no longer matches and Postgres
+ * updates 0 rows. Returning an empty array tells the caller "someone else
+ * beat us" — `*_raced` outcome — so metrics separate "I personally enriched
+ * this row" from "this row was enriched by *someone* during the run." The
+ * data outcome is identical either way (both writers produce the same
+ * payload).
  */
-export const applyEnrichment = async (row: EnrichRow, response: LookupResponse): Promise<EnrichOutcome> => {
+export const applyEnrichment = async (
+  row: EnrichRow,
+  response: LookupResponse,
+  opts: { fromStatus?: EnrichFromStatus } = {}
+): Promise<EnrichOutcome> => {
+  const fromStatus = opts.fromStatus ?? 'pending';
   const artwork = extractArtwork(response);
   const searchUrls = synthesizeSearchUrls(row);
 
-  // Marker-only flowsheet UPDATE used on the linked path. Stamp lives alone
-  // in the .set() because the 10 metadata columns landed in album_metadata
-  // a step earlier; the flowsheet write only records "we attempted this
-  // row" so the next sweep skips it.
-  const markerWhere = and(eq(flowsheet.id, row.id), isNull(flowsheet.metadata_attempt_at));
+  // Status-guarded flowsheet UPDATE used on the linked path. The status
+  // flip (to the terminal `enriched_match`/`enriched_no_match` value) lives
+  // alone in the .set() because the 10 metadata columns landed in
+  // album_metadata a step earlier; the flowsheet write only records "we
+  // attempted this row" and moves it off `fromStatus` so the next sweep
+  // skips it.
+  const guardWhere = and(eq(flowsheet.id, row.id), eq(flowsheet.metadata_status, fromStatus));
 
   if (artwork) {
     const payload = {
@@ -194,10 +236,11 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
 
     if (row.album_id !== null) {
       // Linked + match: 10-col payload lands in album_metadata; flowsheet
-      // UPDATE only stamps the marker. The album_metadata UPSERT is
-      // idempotent (same album_id → same row) and guarded by
-      // `updated_at < NOW()` so a delayed backfill cycle can't overwrite
-      // a fresher runtime or worker enrichment of the same album_id.
+      // UPDATE only flips the status (+ the historical marker stamp). The
+      // album_metadata UPSERT is idempotent (same album_id → same row) and
+      // guarded by `updated_at < NOW()` so a delayed backfill cycle can't
+      // overwrite a fresher runtime or worker enrichment of the same
+      // album_id.
       await db
         .insert(album_metadata)
         .values({ album_id: row.album_id, ...payload, updated_at: sql`NOW()` })
@@ -208,8 +251,8 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
         });
       const updated = await db
         .update(flowsheet)
-        .set({ metadata_attempt_at: sql`now()` })
-        .where(markerWhere)
+        .set({ metadata_attempt_at: sql`now()`, metadata_status: 'enriched_match' })
+        .where(guardWhere)
         .returning({ id: flowsheet.id });
       return updated.length === 0 ? 'enriched_match_raced' : 'enriched_match';
     }
@@ -222,12 +265,13 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
       .update(flowsheet)
       .set({
         ...payload,
-        // Stamp lives inside the same .set() so a partial UPDATE can't
-        // mark a row as "attempted" without writing the data we just
-        // fetched (#639 codified this single-block contract).
+        // Status flip + marker stamp live inside the same .set() so a
+        // partial UPDATE can't leave a row "attempted" without writing the
+        // data we just fetched (#639 codified this single-block contract).
         metadata_attempt_at: sql`now()`,
+        metadata_status: 'enriched_match',
       })
-      .where(sql`"id" = ${row.id} AND "metadata_attempt_at" IS NULL`)
+      .where(sql`"id" = ${row.id} AND "metadata_status" = ${fromStatus}`)
       .returning({ id: flowsheet.id });
     return updated.length === 0 ? 'enriched_match_raced' : 'enriched_match';
   }
@@ -266,8 +310,8 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
       });
     const updated = await db
       .update(flowsheet)
-      .set({ metadata_attempt_at: sql`now()` })
-      .where(markerWhere)
+      .set({ metadata_attempt_at: sql`now()`, metadata_status: 'enriched_no_match' })
+      .where(guardWhere)
       .returning({ id: flowsheet.id });
     return updated.length === 0 ? 'enriched_no_match_raced' : 'enriched_no_match';
   }
@@ -280,48 +324,56 @@ export const applyEnrichment = async (row: EnrichRow, response: LookupResponse):
       bandcamp_url: searchUrls.bandcamp_url,
       soundcloud_url: searchUrls.soundcloud_url,
       metadata_attempt_at: sql`now()`,
+      metadata_status: 'enriched_no_match',
     })
-    .where(sql`"id" = ${row.id} AND "metadata_attempt_at" IS NULL`)
+    .where(sql`"id" = ${row.id} AND "metadata_status" = ${fromStatus}`)
     .returning({ id: flowsheet.id });
   return updated.length === 0 ? 'enriched_no_match_raced' : 'enriched_no_match';
 };
 
 /**
- * Best-effort marker-only stamp for a *permanently*-failing row (BS#1562).
+ * Best-effort dead-letter stamp for a *permanently*-failing row (BS#1562,
+ * status-flip updated for BS#895 / Epic C C6).
  *
  * When `applyEnrichment` throws with an SQLSTATE that re-running the same row
  * would always reproduce (e.g. a mojibake title whose synthesized Bandcamp
  * URL overflows `flowsheet.bandcamp_url varchar(512)` — SQLSTATE 22001), the
- * row never got its `metadata_attempt_at` marker, so the id-cursor re-selects
- * it every nightly run and the pending cohort never reaches literal 0 — which
- * breaks BS#1011's "cohort COUNT == 0 → retire the cron" completion criterion.
+ * row needs to leave the sweep's selection predicate or the id-cursor
+ * re-selects — and re-fails on — it every run, and the pending cohort never
+ * converges (breaking BS#1011's "cohort COUNT == 0 → retire the cron"
+ * completion criterion, and its C6-successor "recovery sweep finds < 100
+ * rows" criterion).
  *
- * This dead-letters the row: it stamps `metadata_attempt_at = now()` alone
- * (writing none of the URLs that overflowed) so the row leaves the
- * `metadata_attempt_at IS NULL` cohort while staying distinguishable from a
- * successful enrichment (its metadata columns stay NULL). The WHERE mirrors
- * `applyEnrichment`'s marker-IS-NULL race guard so a concurrent runtime stamp
- * still wins.
+ * This dead-letters the row: it flips `metadata_status = 'failed_no_retry'`
+ * (the enum's own terminal value for "exceeded the retry budget," per
+ * `metadataStatusEnum` in schema.ts) and stamps `metadata_attempt_at = now()`
+ * (writing none of the URLs that overflowed), so the row leaves both the
+ * main sweep's `fromStatus` cohort and — since `failed_no_retry` is not
+ * `enriched_no_match` — the W4 rotation self-heal candidate set, while
+ * staying distinguishable from a successful enrichment (its metadata columns
+ * stay NULL) and visible for manual triage. `opts.fromStatus` (default
+ * `'pending'`) is the status the row must currently hold; the WHERE mirrors
+ * `applyEnrichment`'s guard so a concurrent writer's claim still wins.
  *
  * MUST be best-effort: any throw from the stamp itself is swallowed so it can
  * never re-wedge the drain the way the original poison-pill jam did (BS#1561).
  * The orchestrator's id-cursor advances regardless, so at worst a stamp that
  * fails to land leaves the row for a future sweep — never a stall.
  */
-export const stampDeadLetter = async (rowId: number): Promise<void> => {
+export const stampDeadLetter = async (rowId: number, opts: { fromStatus?: EnrichFromStatus } = {}): Promise<void> => {
+  const fromStatus = opts.fromStatus ?? 'pending';
   try {
     await db
       .update(flowsheet)
-      .set({ metadata_attempt_at: sql`now()` })
-      // Raw `id AND metadata_attempt_at IS NULL` predicate, mirroring the
-      // unlinked-path UPDATE above — the marker-IS-NULL race guard means a
-      // concurrent runtime stamp still wins, and there's nothing to write but
-      // the marker itself.
-      .where(sql`"id" = ${rowId} AND "metadata_attempt_at" IS NULL`);
+      .set({ metadata_attempt_at: sql`now()`, metadata_status: 'failed_no_retry' })
+      // Raw `id AND metadata_status = $fromStatus` predicate, mirroring
+      // applyEnrichment's guard above — a concurrent writer's claim still
+      // wins, and there's nothing to write but the status flip + marker.
+      .where(sql`"id" = ${rowId} AND "metadata_status" = ${fromStatus}`);
   } catch {
-    // Swallow: the marker is a drain-hygiene optimization, not a correctness
-    // requirement. Re-throwing here would defeat the whole purpose (isolating
-    // the poison row so the cursor advances). The enrich failure was already
-    // logged and captured by the caller.
+    // Swallow: dead-lettering is a drain-hygiene optimization, not a
+    // correctness requirement. Re-throwing here would defeat the whole
+    // purpose (isolating the poison row so the cursor advances). The enrich
+    // failure was already logged and captured by the caller.
   }
 };

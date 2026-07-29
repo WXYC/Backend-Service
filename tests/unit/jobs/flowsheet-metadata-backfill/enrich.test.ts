@@ -1,15 +1,20 @@
 /**
  * Unit tests for flowsheet-metadata-backfill enrich.ts.
  *
- * Pins the row-level UPDATE shape against three #639 contract guarantees:
+ * Pins the row-level UPDATE shape against #639's contract guarantees, cut
+ * over to the `metadata_status` guard by BS#895 (Epic C C6):
  *   1. On LML success-with-match, all 10 metadata columns are written and
- *      `metadata_attempt_at = sql\`now()\`` is in the same .set() block.
+ *      `metadata_status = 'enriched_match'` (+ the historical
+ *      `metadata_attempt_at = sql\`now()\`` marker) is in the same .set()
+ *      block.
  *   2. On LML success-no-match, the three search-URL columns are written
- *      and `metadata_attempt_at` is still stamped — no-match is still an
- *      attempt the recurring sweep should not retry.
+ *      and `metadata_status = 'enriched_no_match'` is set — no-match is
+ *      still an attempt the recurring sweep should not retry.
  *   3. The .set() block calls `eq(flowsheet.id, row.id)` AND
- *      `isNull(flowsheet.metadata_attempt_at)` so a runtime stamp landing
- *      between the orchestrator's SELECT and this UPDATE wins.
+ *      `eq(flowsheet.metadata_status, fromStatus)` (default `'pending'`) so
+ *      a concurrent writer (the CDC worker claiming the row, or — for the
+ *      W4 self-heal pass, `fromStatus: 'enriched_no_match'` — a different
+ *      race) landing between the caller's SELECT and this UPDATE wins.
  *
  * spacer.gif filter and Discogs bio cleanup are covered directly in
  * tests/unit/shared/metadata/; exercised here transitively via
@@ -26,7 +31,21 @@ import {
 } from '../../../../jobs/flowsheet-metadata-backfill/enrich';
 import type { LookupResponse } from '@wxyc/lml-client';
 
-type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
+type SqlLike = {
+  sql?: string | string[];
+  values?: unknown[];
+  queryChunks?: Array<string | { value?: string | string[] }>;
+};
+/**
+ * `drizzle-orm` is mocked in the unit harness to `{ sql: string[], values }`
+ * (the raw template's text chunks and its bound params, kept separate) —
+ * same shape `worklist.test.ts`'s harness uses. `renderSql` below only
+ * stitches the TEMPLATE TEXT back together (the bound params render as
+ * nothing in that shape), so a column name interpolated as a literal in the
+ * template is visible via `renderSql`, but a bound VALUE (e.g. the
+ * `fromStatus` string param) is only visible via `boundValues`.
+ */
+const boundValues = (value: unknown): unknown[] => (value as SqlLike | null | undefined)?.values ?? [];
 const renderSql = (value: unknown): string => {
   const obj = value as SqlLike | null | undefined;
   if (!obj) return '';
@@ -110,7 +129,7 @@ describe('applyEnrichment', () => {
     mockDb._chain.returning.mockResolvedValue([{ id: baseRow.id }]);
   });
 
-  it('writes 10 metadata columns and stamps metadata_attempt_at on LML success-with-match', async () => {
+  it('writes 10 metadata columns, flips metadata_status to enriched_match, and stamps the historical metadata_attempt_at marker on LML success-with-match', async () => {
     const outcome = await applyEnrichment(baseRow, matchedResponse);
     expect(outcome).toBe('enriched_match');
     expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
@@ -125,17 +144,20 @@ describe('applyEnrichment', () => {
       youtube_music_url: 'https://music.youtube.com/album/aaa',
       // bandcamp_url / soundcloud_url were null on the LML response → fall
       // back to the synthesized search URLs (mirrors metadata.service.ts).
+      metadata_status: 'enriched_match',
     });
     expect(setArgs.bandcamp_url).toContain('bandcamp.com/search');
     expect(setArgs.soundcloud_url).toContain('soundcloud.com/search');
     // Bio is cleaned of Discogs markup tags
     expect(setArgs.artist_bio).toBe('Rob Brown and Sean Booth are Autechre.');
     expect(setArgs.artist_wikipedia_url).toBe('https://en.wikipedia.org/wiki/Autechre');
-    // The stamp is the canonical sql`now()` chunk, not a JS Date
+    // The stamp is the canonical sql`now()` chunk, not a JS Date. Still
+    // written (BS#895: no longer the control-flow gate, but kept for the
+    // other jobs still keyed on it — see enrich.ts's module docstring).
     expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/now\(\)/i);
   });
 
-  it('writes synthesized search URLs (4) and stamps on LML success-no-match (empty results)', async () => {
+  it('writes synthesized search URLs (4), flips metadata_status to enriched_no_match, and stamps the marker on LML success-no-match (empty results)', async () => {
     const outcome = await applyEnrichment(baseRow, noMatchResponse);
     expect(outcome).toBe('enriched_no_match');
 
@@ -147,6 +169,7 @@ describe('applyEnrichment', () => {
     expect(setArgs.youtube_music_url).toContain('music.youtube.com/search');
     expect(setArgs.bandcamp_url).toContain('bandcamp.com/search');
     expect(setArgs.soundcloud_url).toContain('soundcloud.com/search');
+    expect(setArgs.metadata_status).toBe('enriched_no_match');
     expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/now\(\)/i);
     // The 6 non-search-URL metadata columns should NOT be set on no-match
     // (so they remain NULL in the DB) — the runtime path produces the same
@@ -266,24 +289,34 @@ describe('applyEnrichment', () => {
     }
   );
 
-  it('idempotency guard: WHERE narrows by id AND metadata_attempt_at IS NULL', async () => {
-    // The WHERE makes the UPDATE a no-op against rows the runtime path
-    // already stamped. Verify .where() was called once with a single
-    // drizzle expression whose rendered SQL references both columns.
+  it('idempotency guard: WHERE narrows by id AND metadata_status = fromStatus (default pending)', async () => {
+    // The WHERE makes the UPDATE a no-op against rows a concurrent writer
+    // (the CDC worker claiming this row) already moved off `fromStatus`.
+    // Verify .where() was called once with a single expression whose
+    // rendered SQL references both columns, bound to the default status.
     await applyEnrichment(baseRow, matchedResponse);
     expect(mockDb._chain.where).toHaveBeenCalledTimes(1);
     const whereArg = mockDb._chain.where.mock.calls[0]?.[0];
     const rendered = renderSql(whereArg);
     expect(rendered).toMatch(/id/);
-    expect(rendered.toLowerCase()).toMatch(/metadata_attempt_at/);
+    expect(rendered.toLowerCase()).toMatch(/metadata_status/);
+    expect(boundValues(whereArg)).toContain('pending');
   });
 
-  it('returns enriched_match_raced when 0 rows update (runtime path stamped first)', async () => {
-    // Race scenario: between the orchestrator's SELECT and this UPDATE,
-    // the runtime path landed its own stamp on the same row, so
-    // `metadata_attempt_at IS NULL` no longer matches and Postgres
-    // updates 0 rows. The data outcome is identical (both writers
-    // produce the same payload) — only the metric splits.
+  it('defaults fromStatus to pending but honors an explicit override (W4 self-heal reuse)', async () => {
+    await applyEnrichment(baseRow, matchedResponse, { fromStatus: 'enriched_no_match' });
+    const whereArg = mockDb._chain.where.mock.calls[0]?.[0];
+    const values = boundValues(whereArg);
+    expect(values).toContain('enriched_no_match');
+    expect(values).not.toContain('pending');
+  });
+
+  it('returns enriched_match_raced when 0 rows update (a concurrent writer claimed the row first)', async () => {
+    // Race scenario: between the caller's SELECT and this UPDATE, a
+    // concurrent writer (the CDC worker) moved the row off `fromStatus`, so
+    // the guard no longer matches and Postgres updates 0 rows. The data
+    // outcome is identical (both writers produce the same payload) — only
+    // the metric splits.
     mockDb._chain.returning.mockResolvedValueOnce([]);
 
     const outcome = await applyEnrichment(baseRow, matchedResponse);
@@ -301,17 +334,19 @@ describe('applyEnrichment', () => {
 /**
  * Epic D / BS#1027 — when the backfill row is linked to a library album
  * (`album_id !== null`), the 10-column metadata payload UPSERTs into
- * `album_metadata` keyed by album_id, and the flowsheet UPDATE only stamps
- * `metadata_attempt_at`. The race detector stays on the flowsheet UPDATE
- * (marker IS NULL guard), and the album_metadata UPSERT carries a
- * `updated_at < NOW()` setWhere so a delayed backfill cycle can't clobber
- * a fresher runtime/worker enrichment. Mirrors the D3 worker pattern in
- * `apps/enrichment-worker/enrich.ts` (BS#899).
+ * `album_metadata` keyed by album_id, and the flowsheet UPDATE only flips
+ * `metadata_status` (+ stamps the historical `metadata_attempt_at`
+ * marker). The race detector stays on the flowsheet UPDATE (BS#895:
+ * `metadata_status = fromStatus` guard), and the album_metadata UPSERT
+ * carries a `updated_at < NOW()` setWhere so a delayed backfill cycle can't
+ * clobber a fresher runtime/worker enrichment. Mirrors the D3 worker
+ * pattern in `apps/enrichment-worker/enrich.ts` (BS#899).
  *
- * Critical contract difference from the worker: the backfill stamps
- * `metadata_attempt_at` and guards on `metadata_attempt_at IS NULL`. The
- * worker uses `metadata_status='enriching'`. The backfill operates on rows
- * the consumer never claimed, so the marker is the right invariant.
+ * Contract difference from the worker, narrowed by BS#895: both now guard
+ * on `metadata_status`, but the backfill's `fromStatus` defaults to
+ * `'pending'` (rows the consumer never claimed) while the W4 self-heal pass
+ * overrides it to `'enriched_no_match'` (rows already terminal); the worker
+ * always guards on `'enriching'` (a claim it made itself).
  */
 describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () => {
   beforeEach(() => {
@@ -358,12 +393,13 @@ describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () =
     expect(renderSql(conflictCfg.setWhere)).toMatch(/<\s*NOW\(\)/i);
   });
 
-  it('on match: flowsheet UPDATE stamps only metadata_attempt_at (no inline metadata columns)', async () => {
+  it('on match: flowsheet UPDATE flips metadata_status + stamps metadata_attempt_at only (no inline metadata columns)', async () => {
     await applyEnrichment(linkedRow, matchedResponse);
 
     expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
     const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/now\(\)/i);
+    expect(setArgs.metadata_status).toBe('enriched_match');
     // The 10 metadata columns must NOT appear on the flowsheet UPDATE — that's
     // the whole point of the D3 dual-write split. The inline drift this fixes
     // is exactly this previous behavior.
@@ -446,10 +482,11 @@ describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () =
     }
   );
 
-  it('on match: flowsheet WHERE still uses the marker-IS-NULL race detector (one where call, non-empty predicate)', async () => {
-    // Linked path uses typed `and(eq(flowsheet.id, row.id), isNull(flowsheet.metadata_attempt_at))`
-    // builders. Column refs are compile-time checked against the schema; the
-    // race-detector behavior is covered by the _raced tests below.
+  it('on match: flowsheet WHERE still uses the metadata_status race detector (one where call, non-empty predicate)', async () => {
+    // Linked path uses typed `and(eq(flowsheet.id, row.id),
+    // eq(flowsheet.metadata_status, fromStatus))` builders (BS#895). Column
+    // refs are compile-time checked against the schema; the race-detector
+    // behavior is covered by the _raced tests below.
     await applyEnrichment(linkedRow, matchedResponse);
     expect(mockDb._chain.where).toHaveBeenCalledTimes(1);
     expect(mockDb._chain.where.mock.calls[0]?.[0]).toBeDefined();
@@ -489,20 +526,22 @@ describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () =
     expect(renderSql(conflictCfg.setWhere)).toMatch(/<\s*NOW\(\)/i);
   });
 
-  it('on no-match: flowsheet UPDATE stamps only metadata_attempt_at (no inline URLs)', async () => {
+  it('on no-match: flowsheet UPDATE flips metadata_status + stamps metadata_attempt_at only (no inline URLs)', async () => {
     await applyEnrichment(linkedRow, noMatchResponse);
 
     const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/now\(\)/i);
+    expect(setArgs.metadata_status).toBe('enriched_no_match');
     expect(setArgs).not.toHaveProperty('youtube_music_url');
     expect(setArgs).not.toHaveProperty('bandcamp_url');
     expect(setArgs).not.toHaveProperty('soundcloud_url');
   });
 
   it('on match: returns enriched_match_raced when the flowsheet UPDATE matches 0 rows', async () => {
-    // album_metadata UPSERT lands; flowsheet UPDATE races because the
-    // marker was already stamped by another writer (runtime/worker path) in
-    // the window between the orchestrator's SELECT and this UPDATE.
+    // album_metadata UPSERT lands; flowsheet UPDATE races because a
+    // concurrent writer (the CDC worker) already moved the row off
+    // `fromStatus` in the window between the caller's SELECT and this
+    // UPDATE.
     mockDb._chain.returning.mockResolvedValueOnce([]);
 
     const outcome = await applyEnrichment(linkedRow, matchedResponse);
@@ -522,16 +561,18 @@ describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () =
 });
 
 /**
- * BS#1562 — dead-letter the poison rows so the pending cohort can drain to 0.
+ * BS#1562 — dead-letter the poison rows so the pending cohort can converge
+ * (updated for BS#895's status-flip control flow).
  *
  * A deterministic enrich failure (e.g. a mojibake title whose synthesized
  * Bandcamp URL overflows `flowsheet.bandcamp_url varchar(512)`, SQLSTATE
- * 22001) never stamps `metadata_attempt_at` on its own — `applyEnrichment`
- * throws before the marker write lands. `stampDeadLetter` is the marker-only
- * UPDATE the orchestrator calls on a *permanent* enrich failure so the row
- * leaves the `metadata_attempt_at IS NULL` cohort without persisting the URLs
- * that failed. It is best-effort: it must never re-throw, so a stamp failure
- * can't re-wedge the drain the way the original poison-pill jam did.
+ * 22001) never flips `metadata_status` on its own — `applyEnrichment` throws
+ * before the write lands. `stampDeadLetter` is the status-flip UPDATE the
+ * orchestrator calls on a *permanent* enrich failure: it moves the row to
+ * `metadata_status = 'failed_no_retry'` (the enum's own terminal value) and
+ * stamps the historical `metadata_attempt_at` marker, without persisting the
+ * URLs that failed. It is best-effort: it must never re-throw, so a stamp
+ * failure can't re-wedge the drain the way the original poison-pill jam did.
  */
 describe('stampDeadLetter', () => {
   beforeEach(() => {
@@ -539,23 +580,33 @@ describe('stampDeadLetter', () => {
     mockDb._chain.returning.mockResolvedValue([{ id: baseRow.id }]);
   });
 
-  it('issues a marker-only UPDATE (metadata_attempt_at = now()) with no metadata columns', async () => {
+  it('issues an UPDATE that flips metadata_status to failed_no_retry and stamps metadata_attempt_at, with no metadata columns', async () => {
     await stampDeadLetter(baseRow.id);
 
     expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
     const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
-    // Only the marker is written — none of the URL/metadata columns that
-    // might have overflowed on the failed enrich are persisted.
-    expect(Object.keys(setArgs)).toEqual(['metadata_attempt_at']);
+    // Only the status flip + marker are written — none of the URL/metadata
+    // columns that might have overflowed on the failed enrich are persisted.
+    expect(Object.keys(setArgs).sort()).toEqual(['metadata_attempt_at', 'metadata_status']);
+    expect(setArgs.metadata_status).toBe('failed_no_retry');
     expect(renderSql(setArgs.metadata_attempt_at)).toMatch(/now\(\)/i);
   });
 
-  it('guards the UPDATE by id AND metadata_attempt_at IS NULL (mirrors applyEnrichment)', async () => {
+  it('guards the UPDATE by id AND metadata_status = fromStatus (default pending), mirroring applyEnrichment', async () => {
     await stampDeadLetter(baseRow.id);
     expect(mockDb._chain.where).toHaveBeenCalledTimes(1);
-    const rendered = renderSql(mockDb._chain.where.mock.calls[0]?.[0]);
+    const whereArg = mockDb._chain.where.mock.calls[0]?.[0];
+    const rendered = renderSql(whereArg);
     expect(rendered).toMatch(/id/);
-    expect(rendered.toLowerCase()).toMatch(/metadata_attempt_at/);
+    expect(rendered.toLowerCase()).toMatch(/metadata_status/);
+    expect(boundValues(whereArg)).toContain('pending');
+  });
+
+  it('honors an explicit fromStatus override (W4 self-heal reuse)', async () => {
+    await stampDeadLetter(baseRow.id, { fromStatus: 'enriched_no_match' });
+    const values = boundValues(mockDb._chain.where.mock.calls[0]?.[0]);
+    expect(values).toContain('enriched_no_match');
+    expect(values).not.toContain('pending');
   });
 
   it('never re-throws when the stamp UPDATE itself fails (best-effort)', async () => {
