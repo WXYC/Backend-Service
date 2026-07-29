@@ -28,6 +28,11 @@ jest.mock('../../../apps/backend/config/criticReviews', () => ({
   getConfig: mockCriticReviewsConfig,
 }));
 
+const mockCaptureException = jest.fn();
+jest.mock('@sentry/node', () => ({
+  captureException: (...args: unknown[]) => mockCaptureException(...args),
+}));
+
 import { attachCriticReviews, transformToV2 } from '../../../apps/backend/services/flowsheet.service';
 import * as albumMetadataLookupService from '../../../apps/backend/services/album-metadata-lookup.service';
 
@@ -198,6 +203,26 @@ describe('attachCriticReviews (BS#1870, id-arm only)', () => {
     const entries = [undefined, createTrackEntry({ id: 2, entry_type: 'show_start' })] as IFSEntry[];
     await expect(attachCriticReviews(entries)).resolves.toBe(entries);
     expect(lookup).not.toHaveBeenCalled();
+  });
+
+  // BS#1872 review-bounce: attachCriticReviews is Promise.all'd with
+  // attachUpcomingShows at all 5 GET /flowsheet call sites, and
+  // CRITIC_REVIEWS_ENABLED is already true in prod, so a rejection here
+  // must not propagate — that would 500 the hottest public endpoint on a
+  // mere album_critic_reviews DB blip. Mirrors proxy.controller.ts's
+  // "strictly additive, must never break the response" contract for the
+  // same lookup on the metadata-proxy serve path.
+  it('degrades to no cards and reports to Sentry when the batched lookup rejects, instead of rejecting itself', async () => {
+    mockCriticReviewsConfig.mockReturnValue({ enabled: true });
+    const dbError = new Error('connection terminated unexpectedly');
+    lookup.mockRejectedValueOnce(dbError);
+    const entries = [createTrackEntry({ id: 1, album_id: 501 })];
+
+    await expect(attachCriticReviews(entries)).resolves.toBe(entries);
+
+    expect(entries[0].critic_reviews).toBeUndefined();
+    expect(mockCaptureException).toHaveBeenCalledTimes(1);
+    expect(mockCaptureException.mock.calls[0][0]).toBe(dbError);
   });
 });
 
