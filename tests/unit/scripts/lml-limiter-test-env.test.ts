@@ -1,6 +1,6 @@
 /**
  * Pin that BOTH CI environments disable the LML client's process-wide rate
- * limiter (BS#955):
+ * limiter (BS#955) and its BS#1748 circuit breaker:
  *
  *   1. `dev_env/docker-compose.yml` — for `npm run ci:testmock` (local
  *      docker-based CI repro).
@@ -26,6 +26,15 @@
  * (see `tests/unit/services/lml.client.test.ts:792`). This test pins the
  * same convention into both CI environments so the next limiter env var
  * (or a future tweak to G4's defaults) can't silently regress the suite.
+ *
+ * BS#1748 added a circuit breaker to the SAME process-wide `defaultLimiter`
+ * that opens after `LML_CIRCUIT_BREAKER_THRESHOLD` consecutive shed/failed
+ * calls. Several existing integration specs (e.g. `metadata.spec.js`)
+ * deliberately fire multiple consecutive simulated LML 500s against this
+ * limiter to exercise fallback behavior — a default-sized threshold (5)
+ * would risk tripping the breaker mid-suite and shedding calls for later,
+ * unrelated tests. Both CI surfaces must set the threshold far above
+ * anything the integration suite could plausibly trip.
  *
  * Source-grep test (no docker, no PG) — same style as the adjacent
  * `init-db-clone-gate.test.ts`.
@@ -82,6 +91,33 @@ describe('LML client limiter env vars (BS#955)', () => {
       const captured = startServicesBlock.match(/LML_CLIENT_RATE_PER_MIN:\s*['"]?(\d+)['"]?/)?.[1];
       expect(captured).toBeDefined();
       expect(Number(captured)).toBeGreaterThanOrEqual(10000);
+    });
+  });
+});
+
+describe('LML client circuit breaker env vars (BS#1748)', () => {
+  describe('dev_env/docker-compose.yml ci backend (local ci:testmock)', () => {
+    const backendBlock = extractServiceBlock('backend');
+
+    it('sets LML_CIRCUIT_BREAKER_THRESHOLD far above anything the integration suite could trip', () => {
+      // Default in lml-client's index.ts is 5 consecutive failures. Several
+      // existing specs (metadata.spec.js) deliberately fire multiple
+      // consecutive simulated LML 500s against the SAME process-wide
+      // defaultLimiter — a low threshold would open the breaker mid-suite
+      // and shed calls for later, unrelated tests.
+      const captured = backendBlock.match(/LML_CIRCUIT_BREAKER_THRESHOLD=(\d+)/)?.[1];
+      expect(captured).toBeDefined();
+      expect(Number(captured)).toBeGreaterThanOrEqual(1000);
+    });
+  });
+
+  describe('.github/workflows/test.yml Start services env (GHA CI)', () => {
+    const startServicesBlock = extractStartServicesEnv();
+
+    it('sets LML_CIRCUIT_BREAKER_THRESHOLD far above anything the integration suite could trip', () => {
+      const captured = startServicesBlock.match(/LML_CIRCUIT_BREAKER_THRESHOLD:\s*['"]?(\d+)['"]?/)?.[1];
+      expect(captured).toBeDefined();
+      expect(Number(captured)).toBeGreaterThanOrEqual(1000);
     });
   });
 });

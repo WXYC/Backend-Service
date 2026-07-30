@@ -81,6 +81,44 @@ class LmlClientError extends Error {
 
 export { LmlClientError };
 
+/**
+ * Reason a call was shed (fast-failed) by the limiter before — or without —
+ * reaching LML (BS#1748). Distinguishes the two shedding triggers so tests
+ * and future observability can tell "the queue was too slow" apart from
+ * "the breaker had already given up" without parsing the message string.
+ */
+export type LmlShedReason = 'queue_deadline_exceeded' | 'circuit_open';
+
+/**
+ * Thrown when the limiter sheds a call instead of admitting it (BS#1748):
+ * either the pre-admission queue wait exceeded its deadline, or the circuit
+ * breaker was open. Extends `LmlClientError` (statusCode 503) so every
+ * existing catch arm that already treats an `LmlClientError` as "this LML
+ * call failed, leave the row in its pre-terminal state for the recovery
+ * sweep" needs NO changes — a shed looks exactly like any other transient
+ * LML failure to callers:
+ *
+ *   - `apps/enrichment-worker/enrich.ts` / `handler.ts`: the row stays
+ *     `enriching`; the C6 stranded-claim sweep (#895, now a live safety net)
+ *     reverts it to `pending` past `STRANDED_TTL_SECONDS`.
+ *   - `apps/backend/services/metadata/enrichment.service.ts`: the catch arm
+ *     writes synthesized search URLs, never stamping `metadata_attempt_at`.
+ *   - `apps/backend/services/library.service.ts`'s `enrichWithArtwork`:
+ *     `Promise.allSettled` already logs-and-continues on ANY rejection.
+ *
+ * `reason` is exposed for tests/observability that want to distinguish the
+ * two triggers without string-matching `message`.
+ */
+export class LmlSheddedError extends LmlClientError {
+  constructor(
+    public readonly reason: LmlShedReason,
+    message: string
+  ) {
+    super(message, 503);
+    this.name = 'LmlSheddedError';
+  }
+}
+
 // BS#873: matches `jobs/flowsheet-metadata-backfill/lml-fetch.ts` so the
 // runtime path tolerates the same cold-cache LML cascade the backfill
 // already accepts. Safe because every BS caller of /lookup runs
@@ -169,6 +207,13 @@ function policyForCaller(caller: string | undefined): LmlPolicy | undefined {
     : undefined;
 }
 
+/** One queued `acquire()` call awaiting a permit. */
+interface SemaphoreWaiter {
+  resolve: () => void;
+  reject: (err: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
 /**
  * FIFO permit semaphore. acquire() resolves when a permit is available;
  * release() returns the permit to the next waiter (or restores it if no one
@@ -177,27 +222,60 @@ function policyForCaller(caller: string | undefined): LmlPolicy | undefined {
 export class Semaphore {
   private permits: number;
   private readonly capacity: number;
-  private readonly waiters: Array<() => void> = [];
+  private readonly waiters: SemaphoreWaiter[] = [];
 
   constructor(permits: number) {
     this.permits = permits;
     this.capacity = permits;
   }
 
-  async acquire(): Promise<void> {
+  /**
+   * Acquire a permit. Resolves immediately if one is free; otherwise queues
+   * FIFO behind existing waiters.
+   *
+   * BS#1748: pass `maxWaitMs` to bound the queue wait. If no permit frees up
+   * within that window, the wait is abandoned — the waiter is dropped from
+   * the queue and the returned promise rejects with
+   * `LmlSheddedError('queue_deadline_exceeded', ...)` instead of hanging
+   * indefinitely. Omit `maxWaitMs` (the default) to preserve the original
+   * unbounded-wait behavior — still the correct shape for limiters built
+   * without a `queueDeadlineMs` (e.g. the backfill jobs' dedicated
+   * limiters, which have no human-facing latency budget).
+   */
+  async acquire(maxWaitMs?: number): Promise<void> {
     if (this.permits > 0) {
       this.permits -= 1;
       return;
     }
-    return new Promise<void>((resolve) => {
-      this.waiters.push(resolve);
+    return new Promise<void>((resolve, reject) => {
+      const waiter: SemaphoreWaiter = {
+        resolve: () => {
+          if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+          resolve();
+        },
+        reject,
+      };
+      if (maxWaitMs !== undefined) {
+        waiter.timer = setTimeout(() => {
+          // Single-threaded JS: this only fires if the waiter is STILL
+          // queued — release() clears the timer (via waiter.resolve, above)
+          // in the same synchronous tick it dequeues a waiter, so there is
+          // no race between "already handed a permit" and "timed out."
+          const idx = this.waiters.indexOf(waiter);
+          if (idx !== -1) {
+            this.waiters.splice(idx, 1);
+            reject(new LmlSheddedError('queue_deadline_exceeded', `LML limiter queue wait exceeded ${maxWaitMs}ms`));
+          }
+        }, maxWaitMs);
+      }
+      this.waiters.push(waiter);
     });
   }
 
   release(): void {
     const next = this.waiters.shift();
     if (next) {
-      next();
+      next.resolve();
     } else if (this.permits < this.capacity) {
       this.permits += 1;
     }
@@ -265,6 +343,92 @@ export class TokenBucket {
   }
 }
 
+/** Circuit breaker lifecycle state (BS#1748). */
+export type LmlBreakerState = 'closed' | 'open' | 'half-open';
+
+/**
+ * Consecutive-failure circuit breaker for the LML limiter (BS#1748).
+ *
+ * CLOSED (normal): every call proceeds. `recordFailure()` bumps a
+ * consecutive-failure counter; `recordSuccess()` resets it to 0. Reaching
+ * `failureThreshold` consecutive failures opens the breaker.
+ *
+ * OPEN: `canProceed()` returns `false` (fast-fail — no semaphore/token-bucket
+ * touched, no queue wait) until `resetTimeoutMs` has elapsed since the
+ * breaker opened. Once elapsed, the NEXT `canProceed()` call transitions to
+ * HALF_OPEN and is itself admitted as the trial probe. That transition is
+ * deliberately synchronous (no `await` between the state read and the
+ * write), so exactly one caller wins it even under concurrent callers.
+ *
+ * HALF_OPEN: only the probe admitted by the OPEN -> HALF_OPEN transition is
+ * in flight; every other concurrent `canProceed()` call is shed until the
+ * probe settles. `recordSuccess()` closes the breaker (and resets the
+ * failure counter); `recordFailure()` reopens it and restarts the cooldown
+ * clock from the moment of THIS reopening, not the original.
+ *
+ * Deliberately a simple consecutive-failure/cooldown breaker, not a rolling
+ * error-rate window — its behavior is exactly characterizable with fake
+ * timers in tests without needing a windowing model, matching the issue's
+ * ask (BS#1748: "fast-fail... recovers when LML heals," not a percentile
+ * SLO). A queue-deadline shed (`Semaphore`'s `LmlSheddedError`) counts as a
+ * failure here too — sustained slowness manifests as either callers unable
+ * to get admitted (permits held too long) or admitted calls themselves
+ * timing out/erroring; both are "LML is degraded" signals.
+ */
+export class LmlCircuitBreaker {
+  private state: LmlBreakerState = 'closed';
+  private consecutiveFailures = 0;
+  private openedAt = 0;
+
+  constructor(
+    private readonly failureThreshold: number,
+    private readonly resetTimeoutMs: number
+  ) {}
+
+  /**
+   * Whether a call may proceed right now. Has a side effect: transitions
+   * OPEN -> HALF_OPEN (admitting this call as the trial probe) once the
+   * cooldown has elapsed. Call once per attempted `run()`; follow up with
+   * `recordSuccess()`/`recordFailure()` once the attempt settles.
+   */
+  canProceed(): boolean {
+    if (this.state === 'closed') return true;
+    if (this.state === 'open') {
+      if (Date.now() - this.openedAt >= this.resetTimeoutMs) {
+        this.state = 'half-open';
+        return true;
+      }
+      return false;
+    }
+    // half-open: the probe admitted by the transition above is still in
+    // flight (hasn't called recordSuccess/recordFailure yet) — every other
+    // concurrent caller is shed until it does.
+    return false;
+  }
+
+  recordSuccess(): void {
+    this.consecutiveFailures = 0;
+    this.state = 'closed';
+  }
+
+  recordFailure(): void {
+    if (this.state === 'half-open') {
+      this.state = 'open';
+      this.openedAt = Date.now();
+      return;
+    }
+    this.consecutiveFailures += 1;
+    if (this.consecutiveFailures >= this.failureThreshold) {
+      this.state = 'open';
+      this.openedAt = Date.now();
+    }
+  }
+
+  getState(): LmlBreakerState {
+    return this.state;
+  }
+}
+
 /**
  * Concurrency + rate-limit gate. Composes a `Semaphore` (max concurrent
  * in-flight) and a `TokenBucket` (call-rate ceiling) into a single
@@ -274,30 +438,81 @@ export class TokenBucket {
  * pattern from `apps/backend/services/lml/lml.client.ts:postLookup()` before
  * this package extraction, and is the same shape adopted by the backfill
  * (jobs/flowsheet-metadata-backfill/lml-limiter.ts) for BS#995.
+ *
+ * BS#1748: `run()` also sheds — throws `LmlSheddedError` instead of calling
+ * `fn` — when the (optional) circuit breaker is open, or when the (optional)
+ * `queueDeadlineMs` elapses before a permit is admitted. See
+ * `createLmlLimiter`'s doc for the opt-in config that wires both in.
  */
 export interface LmlLimiter {
   /** Acquire a permit + a token, run fn, release the permit in finally. */
   run<T>(fn: () => Promise<T>): Promise<T>;
   /** Snapshot for tests + observability hooks (span attributes, metrics). */
-  state(): { queueDepth: number; availablePermits: number; availableTokens: number };
+  state(): {
+    queueDepth: number;
+    availablePermits: number;
+    availableTokens: number;
+    /** Present only when this limiter was built with a `breaker` config. */
+    breakerState?: LmlBreakerState;
+  };
+}
+
+/** Config accepted by `createLmlLimiter`. */
+export interface LmlLimiterConfig {
+  maxConcurrent: number;
+  ratePerMinute: number;
+  /**
+   * BS#1748: bound the Semaphore's admission wait. A call that can't be
+   * admitted within this many ms is shed (`LmlSheddedError`,
+   * `'queue_deadline_exceeded'`) instead of continuing to queue. Omit to
+   * preserve the pre-BS#1748 unbounded-wait behavior — the correct shape
+   * for limiters with no human-facing latency budget (the backfill/job-level
+   * limiters; see docs/env-vars.md's "Backfill LML rate gating" section).
+   */
+  queueDeadlineMs?: number;
+  /**
+   * BS#1748: circuit breaker config. Omit to run without a breaker (the
+   * pre-BS#1748 shape — e.g. every job-level limiter today).
+   */
+  breaker?: { failureThreshold: number; resetTimeoutMs: number };
 }
 
 /**
- * Compose a `Semaphore` + `TokenBucket` into a single `run`-style gate.
- * Pass explicit config in tests; in production the runtime path's
- * `defaultLimiter` reads from `LML_CLIENT_*` env vars, and per-surface
- * limiters (e.g. the backfill's stricter `BACKFILL_LML_*` defaults) wire
- * their own config at construction.
+ * Compose a `Semaphore` + `TokenBucket` (+ optional BS#1748 queue deadline /
+ * circuit breaker) into a single `run`-style gate. Pass explicit config in
+ * tests; in production the runtime path's `defaultLimiter` reads from
+ * `LML_CLIENT_*`/`LML_LIMITER_*`/`LML_CIRCUIT_BREAKER_*` env vars, and
+ * per-surface limiters (e.g. the backfill's stricter `BACKFILL_LML_*`
+ * defaults) wire their own config at construction — typically omitting
+ * `queueDeadlineMs`/`breaker` so they keep the original unbounded-wait shape.
  */
-export function createLmlLimiter(config: { maxConcurrent: number; ratePerMinute: number }): LmlLimiter {
+export function createLmlLimiter(config: LmlLimiterConfig): LmlLimiter {
   const semaphore = new Semaphore(config.maxConcurrent);
   const tokenBucket = new TokenBucket({ capacity: config.ratePerMinute, refillPerMinute: config.ratePerMinute });
+  const breaker = config.breaker
+    ? new LmlCircuitBreaker(config.breaker.failureThreshold, config.breaker.resetTimeoutMs)
+    : undefined;
   return {
     async run<T>(fn: () => Promise<T>): Promise<T> {
-      await semaphore.acquire();
+      if (breaker && !breaker.canProceed()) {
+        throw new LmlSheddedError('circuit_open', 'LML limiter circuit breaker is open; shedding without waiting');
+      }
+      try {
+        await semaphore.acquire(config.queueDeadlineMs);
+      } catch (err) {
+        // Queue-deadline shed. No permit was granted, so no `finally` release
+        // is owed — only record the breaker failure and rethrow.
+        breaker?.recordFailure();
+        throw err;
+      }
       try {
         await tokenBucket.consume(1);
-        return await fn();
+        const result = await fn();
+        breaker?.recordSuccess();
+        return result;
+      } catch (err) {
+        breaker?.recordFailure();
+        throw err;
       } finally {
         semaphore.release();
       }
@@ -307,9 +522,61 @@ export function createLmlLimiter(config: { maxConcurrent: number; ratePerMinute:
         queueDepth: semaphore.queueDepth,
         availablePermits: semaphore.availablePermits,
         availableTokens: tokenBucket.availableTokens,
+        breakerState: breaker?.getState(),
       };
     },
   };
+}
+
+/**
+ * BS#1748 default: bounds the process-wide limiter's Semaphore admission
+ * wait. 15 s leaves real headroom under the enrichment-worker sweep's 60 s
+ * `STRANDED_TTL_SECONDS` floor even at the largest per-call fetch timeout in
+ * the tree (the module's fire-and-forget `TIMEOUT_MS` default, 30 s) — see
+ * `warnIfQueueDeadlineTooLoose` below, which turns that relationship into a
+ * runtime guard instead of a comment-only invariant.
+ */
+const DEFAULT_LML_LIMITER_QUEUE_DEADLINE_MS = 15_000;
+
+/** BS#1748 default: consecutive shed/failed calls before the breaker opens. */
+const DEFAULT_LML_CIRCUIT_BREAKER_THRESHOLD = 5;
+
+/** BS#1748 default: cooldown (ms) before an open breaker allows a half-open probe. */
+const DEFAULT_LML_CIRCUIT_BREAKER_RESET_MS = 30_000;
+
+export {
+  DEFAULT_LML_LIMITER_QUEUE_DEADLINE_MS,
+  DEFAULT_LML_CIRCUIT_BREAKER_THRESHOLD,
+  DEFAULT_LML_CIRCUIT_BREAKER_RESET_MS,
+};
+
+/**
+ * Conservative mirror of `apps/enrichment-worker/sweep.ts`'s
+ * `STRANDED_TTL_SECONDS` 60 s floor. Duplicated as a literal (not imported)
+ * because `shared/lml-client` cannot depend on `apps/enrichment-worker` —
+ * see that file's own derivation comment for why 60 s is the floor. Used
+ * only for the module-load sanity warning below, never for a control-flow
+ * decision.
+ */
+const STRANDED_TTL_FLOOR_MS = 60_000;
+
+/**
+ * BS#1748 acceptance criterion: "total deadline < STRANDED_TTL_SECONDS."
+ * Warns (never throws — a live process must not crash on a misconfigured
+ * env var) when `LML_LIMITER_QUEUE_DEADLINE_MS` plus the module's default
+ * fetch timeout would leave no headroom under the sweep's stranded-claim
+ * TTL floor — mirrors this package's `sanitizeBudgetMs` warn-on-invalid
+ * convention (BS#1842, policy.ts).
+ */
+function warnIfQueueDeadlineTooLoose(queueDeadlineMs: number): void {
+  if (queueDeadlineMs + TIMEOUT_MS >= STRANDED_TTL_FLOOR_MS) {
+    console.warn(
+      `lml.client: LML_LIMITER_QUEUE_DEADLINE_MS=${queueDeadlineMs} leaves no headroom under the ` +
+        `enrichment-worker sweep's ${STRANDED_TTL_FLOOR_MS}ms STRANDED_TTL_SECONDS floor (queueDeadlineMs + ` +
+        `the ${TIMEOUT_MS}ms default fetch timeout >= ${STRANDED_TTL_FLOOR_MS}ms) — a shed call could take as ` +
+        'long as a strand would. Lower LML_LIMITER_QUEUE_DEADLINE_MS.'
+    );
+  }
 }
 
 /**
@@ -320,13 +587,30 @@ export function createLmlLimiter(config: { maxConcurrent: number; ratePerMinute:
  * metadata-backfill job constructs its own stricter limiter for BS#995 and
  * passes it via `LookupOptions.limiter`; that surface never shares this
  * default.
+ *
+ * BS#1748: also wires in the bounded queue deadline + circuit breaker via
+ * `LML_LIMITER_QUEUE_DEADLINE_MS` / `LML_CIRCUIT_BREAKER_THRESHOLD` /
+ * `LML_CIRCUIT_BREAKER_RESET_MS`. See docs/env-vars.md for the full design
+ * and the CI-safety overrides — several existing integration specs (e.g.
+ * `tests/integration/metadata.spec.js`) deliberately fire multiple
+ * consecutive simulated LML 500s against this SAME process-wide limiter, so
+ * both CI surfaces set the breaker threshold far above anything the
+ * integration suite could trip, mirroring the BS#955 precedent for
+ * `LML_CLIENT_MAX_CONCURRENT`/`LML_CLIENT_RATE_PER_MIN`.
  */
 let defaultLimiter: LmlLimiter;
 
 function initDefaultLimiter(): void {
+  const queueDeadlineMs = envInt('LML_LIMITER_QUEUE_DEADLINE_MS', DEFAULT_LML_LIMITER_QUEUE_DEADLINE_MS);
+  warnIfQueueDeadlineTooLoose(queueDeadlineMs);
   defaultLimiter = createLmlLimiter({
     maxConcurrent: envInt('LML_CLIENT_MAX_CONCURRENT', 5),
     ratePerMinute: envInt('LML_CLIENT_RATE_PER_MIN', 50),
+    queueDeadlineMs,
+    breaker: {
+      failureThreshold: envInt('LML_CIRCUIT_BREAKER_THRESHOLD', DEFAULT_LML_CIRCUIT_BREAKER_THRESHOLD),
+      resetTimeoutMs: envInt('LML_CIRCUIT_BREAKER_RESET_MS', DEFAULT_LML_CIRCUIT_BREAKER_RESET_MS),
+    },
   });
 }
 
