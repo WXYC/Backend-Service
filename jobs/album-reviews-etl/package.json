@@ -14,9 +14,9 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@sentry/node": "^10.67.0",
+    "@sentry/node": "^10.68.0",
     "@wxyc/database": "^1.0.0",
-    "google-auth-library": "^10.9.0"
+    "google-auth-library": "^10.9.1"
   },
   "peerDependencies": {
     "drizzle-orm": "^0.45.0"
