@@ -163,6 +163,77 @@ describe('artwork DiscogsProvider', () => {
         caller: 'artwork-discogs-fallback',
       });
     });
+
+    it('throws on a soft-degraded LML 200 (timeout) with no usable artwork (BS#1890)', async () => {
+      // BS#1089 covered LML's *throw* path; LML has a second transient mode it
+      // missed: an HTTP 200 with empty `results` because the server-side hard
+      // cap fired (`timeout: true`, LML#370). That is "ran out of time," not a
+      // confirmed absence — treat it exactly like the throw path so the finder
+      // tags the response `errored` and the proxy skips the 24h negative cache.
+      mockLookupMetadata.mockResolvedValue({
+        results: [],
+        timeout: true,
+        search_type: 'none',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      await expect(provider.search({ artist: 'Autechre', album: 'Confield' })).rejects.toThrow(/degraded|timeout/i);
+    });
+
+    it('throws on a soft-degraded LML 200 (degraded) with no usable artwork (BS#1890)', async () => {
+      // `degraded: true` (LML#930) means LML deliberately shed the enrichment
+      // tail — and `fetch_artwork` is one of those shed tail steps — under a
+      // caller deadline / admission pressure / unavailable upstream. An empty
+      // artwork sweep here is "couldn't ask," not "no artwork exists."
+      mockLookupMetadata.mockResolvedValue({
+        results: [],
+        degraded: true,
+        degraded_reason: 'deadline_exceeded',
+        search_type: 'none',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      await expect(provider.search({ artist: 'Autechre', album: 'Confield' })).rejects.toThrow(/degraded|timeout/i);
+    });
+
+    it('returns artwork on a degraded 200 that still carried a usable result (BS#1890)', async () => {
+      // A degraded response whose (warm-cache) results still include artwork is
+      // a real hit — return it rather than throwing. The transient signal only
+      // matters when the degraded sweep produced nothing usable.
+      mockLookupMetadata.mockResolvedValue({
+        results: [
+          {
+            library_item: {
+              id: 1,
+              title: 'Confield',
+              artist: 'Autechre',
+              call_number: 'Electronic CD AUT 1/1',
+              library_url: 'https://library.wxyc.org/1',
+            },
+            artwork: {
+              release_id: 12345,
+              release_url: 'https://www.discogs.com/release/12345',
+              artwork_url: 'https://i.discogs.com/confield.jpg',
+              album: 'Confield',
+              artist: 'Autechre',
+              confidence: 0.95,
+            },
+          },
+        ],
+        degraded: true,
+        degraded_reason: 'cache_only',
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      const results = await provider.search({ artist: 'Autechre', album: 'Confield' });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].artworkUrl).toBe('https://i.discogs.com/confield.jpg');
+    });
   });
 
   describe('searchTrack', () => {
