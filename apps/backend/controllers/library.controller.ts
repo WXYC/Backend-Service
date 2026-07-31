@@ -913,6 +913,39 @@ export const markFound: RequestHandler<{ id: string }> = async (req, res) => {
   res.status(200).json(album);
 };
 
+/**
+ * POST /library/:id/discogs-recheck (BS#1283 / epic #1280 sub-issue 3).
+ *
+ * Manual counterpart to the daily `library-discogs-unavailable-recheck`
+ * cron: force-asks LML for a fresh Discogs match on this release (bypassing
+ * the runtime BS#1293 `discogsUnavailable` gate), so an MD can close the
+ * "embargo just lifted, want it now" gap instead of waiting for the next
+ * cron tick. Runs the same 0.95-confidence-floor / sticky-false-match-fixed
+ * writer path as the cron — see `libraryService.recheckDiscogsAvailability`.
+ *
+ * Gated on `catalog:write` (musicDirector + stationManager) — same bar as
+ * the other catalog-mutating routes on this router (`updateAlbum`,
+ * `addAlbum`), not the lighter `catalog:read` bar `markMissing`/`markFound`
+ * use, because this can rewrite `rotation.discogs_release_id`.
+ */
+export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, res) => {
+  const albumId = parseAlbumId(req.params.id);
+
+  const existing = await libraryService.getLibraryRowById(albumId);
+  if (!existing) {
+    throw new WxycError('Album not found', 404);
+  }
+  if (!existing.artist_name || !existing.album_title) {
+    throw new WxycError('Cannot recheck a release without artist_name and album_title', 400);
+  }
+  if (!isLmlConfigured()) {
+    throw new WxycError('LML is not configured', 503);
+  }
+
+  const result = await libraryService.recheckDiscogsAvailability(albumId, existing.artist_name, existing.album_title);
+  res.status(200).json(result);
+};
+
 // ---------------------------------------------------------------------------
 // GET /library/query — query-builder search over the catalog
 // ---------------------------------------------------------------------------

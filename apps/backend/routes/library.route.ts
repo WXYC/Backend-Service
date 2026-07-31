@@ -86,3 +86,12 @@ library_route.patch('/:id', requirePermissions({ catalog: ['write'] }), libraryC
 library_route.patch('/:id/missing', requirePermissions({ catalog: ['read'] }), libraryController.markMissing);
 
 library_route.patch('/:id/found', requirePermissions({ catalog: ['read'] }), libraryController.markFound);
+
+// BS#1283 (epic #1280 sub-issue 3): manual counterpart to the daily
+// library-discogs-unavailable-recheck cron. Gated to catalog:write (same bar
+// as updateAlbum/addAlbum) since it can rewrite rotation.discogs_release_id.
+library_route.post(
+  '/:id/discogs-recheck',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.manualDiscogsRecheck
+);

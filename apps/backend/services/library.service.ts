@@ -3,6 +3,7 @@ import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
+import WxycError from '../utils/error.js';
 import { db } from '@wxyc/database';
 import {
   AlbumFormat,
@@ -35,6 +36,7 @@ import {
 import {
   getRelease,
   lookupBySong,
+  lookupMetadata,
   isLmlConfigured,
   LmlClientError,
   resolveIdentity,
@@ -1811,6 +1813,109 @@ export const getLibraryRowById = async (album_id: number) => {
     .where(eq(library.id, album_id))
     .limit(1);
   return rows[0];
+};
+
+/**
+ * Outcome of a manual `POST /library/:id/discogs-recheck` (BS#1283 / epic
+ * #1280 sub-issue 3). Mirrors the outcome taxonomy of the daily
+ * `jobs/library-discogs-unavailable-recheck` cron's per-row path (that
+ * standalone job package can't import from `apps/backend`, so the logic
+ * below is intentionally duplicated — same pattern as
+ * `jobs/rotation-release-id-backfill/lml-fetch.ts`'s BS#1516 trust gate
+ * "mirrors the coordinator... which this job can't use because it imports
+ * lml-client directly").
+ */
+export type DiscogsRecheckOutcome =
+  | { outcome: 'matched'; discogsReleaseId: number; confidence: number }
+  | { outcome: 'low_confidence_match'; confidence: number }
+  | { outcome: 'no_match' };
+
+/** Same floor as the daily recheck cron's `CONFIDENCE_FLOOR` — see `jobs/library-discogs-unavailable-recheck/orchestrate.ts`'s module doc for the rationale (stricter than the runtime lookup path's confidence bands, closing the "Natanya adversarial loop"). */
+const DISCOGS_RECHECK_CONFIDENCE_FLOOR = 0.95;
+
+const stampDiscogsRecheckTimestamp = async (album_id: number): Promise<void> => {
+  await db
+    .update(library)
+    .set({ last_discogs_recheck_at: sql`now()` })
+    .where(eq(library.id, album_id));
+};
+
+/**
+ * Force-asks LML for a fresh Discogs match on a `discogs_unavailable`-
+ * flaggable release, bypassing the runtime BS#1293 gate via
+ * `forceLookup: true`. Applies the same 0.95 confidence floor, transactional
+ * high-confidence writer (NO `IS NULL` guard on the rotation UPDATE — the
+ * sticky-false-match fix, see `jobs/library-discogs-unavailable-recheck/
+ * writer.ts`'s module doc), and low-confidence Sentry counter as the daily
+ * cron. Used by the manual `POST /library/:id/discogs-recheck` admin
+ * endpoint so an MD can close the "embargo just lifted, want it now" gap
+ * without waiting for the next cron tick.
+ */
+export const recheckDiscogsAvailability = async (
+  album_id: number,
+  artist_name: string,
+  album_title: string
+): Promise<DiscogsRecheckOutcome> => {
+  const response = await lookupMetadata(artist_name, album_title, undefined, {
+    forceLookup: true,
+    caller: 'library-discogs-unavailable-recheck',
+  });
+
+  const top = response.results?.[0];
+  const releaseId = top?.artwork?.release_id;
+  // `release_id: 0` is the BS#1185 streaming-only sentinel — not a linkable
+  // Discogs release; treat as no_match, same as the cron's lml-fetch.ts.
+  if (typeof releaseId !== 'number' || releaseId <= 0) {
+    await stampDiscogsRecheckTimestamp(album_id);
+    return { outcome: 'no_match' };
+  }
+
+  const rawConfidence = top?.artwork?.confidence;
+  const confidence = typeof rawConfidence === 'number' ? rawConfidence : 0;
+
+  if (confidence < DISCOGS_RECHECK_CONFIDENCE_FLOOR) {
+    try {
+      Sentry.metrics.count('lml.lookup.recheck.match_found_on_flagged', 1, {
+        attributes: { confidence, artist_name, album_title, library_id: album_id },
+      });
+    } catch {
+      // Observability must never break the request path; swallow.
+    }
+    await stampDiscogsRecheckTimestamp(album_id);
+    return { outcome: 'low_confidence_match', confidence };
+  }
+
+  const written = await db.transaction(async (tx) => {
+    // No IS-NULL guard — BY DESIGN. See jobs/library-discogs-unavailable-
+    // recheck/writer.ts's module doc for the sticky-false-match rationale.
+    // rotation.album_id is not unique (re-bins/re-adds), so this updates
+    // EVERY rotation row for the album, not just one.
+    await tx
+      .update(rotation)
+      .set({
+        discogs_release_id: releaseId,
+        discogs_release_id_source: 'recheck_after_unavailable',
+      })
+      .where(eq(rotation.album_id, album_id));
+
+    const libraryUpdated = await tx
+      .update(library)
+      .set({
+        discogs_unavailable: false,
+        discogs_unavailable_note: null,
+        last_discogs_recheck_at: sql`now()`,
+      })
+      .where(eq(library.id, album_id))
+      .returning({ id: library.id });
+
+    return libraryUpdated.length === 1;
+  });
+
+  if (!written) {
+    throw new WxycError('Album not found', 404);
+  }
+
+  return { outcome: 'matched', discogsReleaseId: releaseId, confidence };
 };
 
 /** True when `artist_id` already owns an album with this `code_number` (excluding `exclude_album_id`). */

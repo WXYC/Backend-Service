@@ -191,6 +191,17 @@ Recurring cron for BS#1813 / BS#1029. Reuses `BACKFILL_LML_*` (above), `LIVE_ACT
 - `ROTATION_RELEASE_ID_NO_MATCH_TTL_DAYS` (default `30`) — Rows with NULL `discogs_release_id` and a stamped `discogs_release_id_resolve_attempted_at` are skipped until this window expires. Rows whose LML call threw keep the marker NULL and retry on the next cron tick.
 - `DRY_RUN` (default unset / `false`) — when case-insensitively `'true'` or `'1'` (leading/trailing whitespace trimmed), the orchestrator skips every UPDATE, including marker-only attempts, and increments `rows_resolved_dry` instead of `rows_resolved` for trusted matches. Useful for confirming the candidate set before a real run; harmless to forget — the `discogs_release_id IS NULL` SELECT/WHERE predicate is idempotent across reruns.
 
+### Library discogs_unavailable recheck (`jobs/library-discogs-unavailable-recheck`)
+
+Daily cron for BS#1283 / epic #1280 sub-issue 3. Job-scoped limiter (not `BACKFILL_LML_*`) so this surface's accounting is independent of the other backfills'; read at module load by `lml-limiter.ts:createLmlLimiter` (first two) and `lml-fetch.ts` (third):
+
+- `LIBRARY_DISCOGS_UNAVAILABLE_RECHECK_BATCH_SIZE` (default `50`) — Candidate query `LIMIT`. Prevents a stampede if a bulk-flagging pass ever lands many `discogs_unavailable` rows at once.
+- `LIBRARY_DISCOGS_UNAVAILABLE_RECHECK_MAX_CONCURRENT` (default `1`) — Maximum concurrent in-flight recheck `/api/v1/lookup` calls.
+- `LIBRARY_DISCOGS_UNAVAILABLE_RECHECK_RATE_PER_MIN` (default `20`) — Token-bucket refill rate/capacity per minute.
+- `LIBRARY_DISCOGS_UNAVAILABLE_RECHECK_LML_TIMEOUT_MS` (default `8000`) — Per-call abort budget; same rationale as `rotation-release-id-backfill`'s `BACKFILL_LML_PER_CALL_TIMEOUT_MS` default (small recurring cohort, must not occupy LML's serialized Discogs fan-out).
+
+No `DRY_RUN` / no-match-TTL knob: the candidate query's own `last_discogs_recheck_at`-vs-7-days predicate is the idempotency + retry-window gate (a row rechecked today isn't reselected until the window passes), and there's no separate "confirmed no match" vs "never tried" marker to protect — every outcome (match / low-confidence / no-match) stamps the same timestamp.
+
 ### Rotation artist backfill (`jobs/rotation-artist-backfill`)
 
 Daily cron job for BS#1381. One BS call here = one batch of up to 50 `lml_identity_id`s; LML fans out internally to per-source release + artist Discogs calls, so this job has a fundamentally different timeout shape than the per-row backfill jobs above. Reuses `BACKFILL_LML_MAX_CONCURRENT` and `BACKFILL_LML_RATE_PER_MIN` (applied to **batch calls**, not Discogs egress), and adds:
