@@ -23,6 +23,25 @@ describe('parseIdFile', () => {
   it('throws with a source:line context on a non-integer line', () => {
     expect(() => parseIdFile('1\nnot-an-id\n2\n', 'fixture.txt')).toThrow(/fixture\.txt:2/);
   });
+
+  it('rejects a negative id (legacy ids are positive)', () => {
+    expect(() => parseIdFile('1\n-5\n', 'fixture.txt')).toThrow(/fixture\.txt:2/);
+  });
+
+  it('rejects zero', () => {
+    expect(() => parseIdFile('0\n', 'fixture.txt')).toThrow(/fixture\.txt:1.*range/);
+  });
+
+  it('rejects an out-of-int4-range id that would Number() to an imprecise float', () => {
+    // 99999999999999999999 passes a bare \d+ test but Number()s to an
+    // imprecise float that could never match a real int4 row id — the silent
+    // membership-miss the range guard exists to prevent.
+    expect(() => parseIdFile('99999999999999999999\n', 'fixture.txt')).toThrow(/range/);
+  });
+
+  it('accepts the max int4 id', () => {
+    expect(parseIdFile('2147483647\n', 'test')).toEqual(new Set([2147483647]));
+  });
 });
 
 describe('FileKeyspaceSource', () => {

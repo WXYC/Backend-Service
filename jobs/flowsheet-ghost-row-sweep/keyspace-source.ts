@@ -37,20 +37,35 @@ export interface LegacyKeyspaceSource {
  * Parse a newline-delimited list of integer ids. Blank lines and
  * `#`-prefixed comment lines are skipped so an operator can hand-annotate
  * an extracted id file. A non-blank, non-comment line that isn't a bare
- * integer is a malformed extraction and fails loudly rather than silently
- * dropping (or worse, silently NaN-ing into an always-false membership
- * test that would flag every row as a ghost).
+ * positive integer within the `legacy_entry_id` / `legacy_rotation_id`
+ * column's range (a positive 32-bit int) is a malformed extraction and fails
+ * loudly rather than silently dropping. The range check matters as much as
+ * the digit check: an out-of-range value like `99999999999999999999` passes
+ * a bare `\d+` test but `Number()`s to an *imprecise* float that would never
+ * match a real row's id — silently converting one corrupt line into a false
+ * membership miss (and, at scale, false ghosts) — exactly the silent-membership
+ * corruption this parser exists to prevent.
  */
+/** `legacy_entry_id` / `legacy_rotation_id` are PostgreSQL `integer` (int4); this is their max. */
+const MAX_LEGACY_ID = 2_147_483_647;
+
 export const parseIdFile = (contents: string, sourceLabel: string): Set<number> => {
   const ids = new Set<number>();
   const lines = contents.split('\n');
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i].trim();
     if (line === '' || line.startsWith('#')) continue;
-    if (!/^-?\d+$/.test(line)) {
-      throw new Error(`${sourceLabel}:${i + 1}: expected an integer id, got ${JSON.stringify(line)}`);
+    if (!/^\d+$/.test(line)) {
+      throw new Error(`${sourceLabel}:${i + 1}: expected a positive integer id, got ${JSON.stringify(line)}`);
     }
-    ids.add(Number(line));
+    const id = Number(line);
+    if (id < 1 || id > MAX_LEGACY_ID) {
+      throw new Error(
+        `${sourceLabel}:${i + 1}: id ${JSON.stringify(line)} is outside the supported range 1..${MAX_LEGACY_ID} ` +
+          '(legacy_entry_id / legacy_rotation_id are positive 32-bit integers)'
+      );
+    }
+    ids.add(id);
   }
   return ids;
 };
