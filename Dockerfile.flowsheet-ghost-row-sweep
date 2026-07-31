@@ -1,0 +1,49 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /flowsheet-ghost-row-sweep-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/flowsheet-ghost-row-sweep ./jobs/flowsheet-ghost-row-sweep
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-ghost-row-sweep
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /flowsheet-ghost-row-sweep
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/flowsheet-ghost-row-sweep/package* ./jobs/flowsheet-ghost-row-sweep/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./flowsheet-ghost-row-sweep-builder/jobs/flowsheet-ghost-row-sweep/dist ./jobs/flowsheet-ghost-row-sweep/dist
+COPY --from=builder ./flowsheet-ghost-row-sweep-builder/shared/database/dist ./shared/database/dist
+
+# The candidate SELECTs walk `flowsheet` (2.6M rows) with an id-cursor scan;
+# the API's tight 5s default statement timeout is too aggressive for the
+# batch scans as the cursor advances.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+
+# Async commit: a mid-run failure never strands a page, since the resume
+# cursor only advances after a page's DELETE commits — an unwritten row is
+# just re-selected and re-tested on the next run.
+ENV DB_SYNCHRONOUS_COMMIT=off
+
+# Identifies the connection in pg_stat_activity during triage.
+ENV DB_APPLICATION_NAME=wxyc-flowsheet-ghost-row-sweep
+
+# ENTRYPOINT + empty CMD so docker-level args (`--execute`, `--dry-run`)
+# pass through to the job rather than replacing the launcher — the
+# Dockerfile.streaming-url-remediation pattern. With `CMD ["npm", "start"]`,
+# `docker run <image> --execute` would REPLACE the CMD and npm would never run.
+ENTRYPOINT ["node", "/flowsheet-ghost-row-sweep/jobs/flowsheet-ghost-row-sweep/dist/job.js"]
+CMD []
