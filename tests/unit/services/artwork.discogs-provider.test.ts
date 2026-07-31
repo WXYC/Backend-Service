@@ -136,12 +136,17 @@ describe('artwork DiscogsProvider', () => {
       expect(results).toHaveLength(0);
     });
 
-    it('returns empty on LML error', async () => {
-      mockLookupMetadata.mockRejectedValue(new Error('LML down'));
+    it('propagates the error on LML failure (BS#1089) instead of swallowing it to empty', async () => {
+      // Pre-BS#1089 this resolved to `[]`, making a transient LML timeout/5xx
+      // indistinguishable from a confirmed "no match" — the bug that let a
+      // brief LML outage get negative-cached as "no artwork" for 24h at the
+      // proxy controller. `ArtworkFinder.find` is the caller that now
+      // depends on this throwing so it can tag the response `errored: true`
+      // instead of treating an all-empty sweep as a confirmed absence.
+      const lmlError = new Error('LML down');
+      mockLookupMetadata.mockRejectedValue(lmlError);
 
-      const results = await provider.search({ artist: 'Autechre', album: 'Confield' });
-
-      expect(results).toEqual([]);
+      await expect(provider.search({ artist: 'Autechre', album: 'Confield' })).rejects.toThrow(lmlError);
     });
 
     it('uses song when album is not provided', async () => {

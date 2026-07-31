@@ -140,7 +140,18 @@ jest.mock('../../../apps/backend/services/artwork/finder', () => ({
   getArtworkFinder: () => ({ find: mockFind }),
 }));
 
-// LRU cache mock (proxy controller uses it for artwork caching)
+// LRU cache mock (proxy controller uses it for artwork caching).
+//
+// Note (BS#1089): this monorepo has a *second*, nested `lru-cache` install
+// under `apps/backend/node_modules/` (separate from the hoisted root copy),
+// so `proxy.controller.ts`'s `import { LRUCache } from 'lru-cache'` resolves
+// to a different physical module than this `jest.mock('lru-cache', ...)`
+// call does from this file's location — the mock below is never actually
+// substituted into proxy.controller.ts, which runs against the real
+// `lru-cache` package. That's harmless for the tests that only depend on a
+// cache starting empty, but it means the negative-cache tests below can't
+// assert on a mocked `.set`/`.has` — they instead assert on the REAL cache's
+// observable behavior (does a follow-up request re-hit the finder or not).
 jest.mock('lru-cache', () => ({
   LRUCache: jest.fn().mockImplementation(() => ({
     get: jest.fn(),
@@ -290,6 +301,113 @@ describe('proxy.controller', () => {
       const res = createMockRes();
 
       await expect(searchArtwork(req, res as Response, mockNext)).rejects.toThrow(error);
+    });
+
+    // --- BS#1089: negative-cache must not conflate a transient upstream
+    // error with a confirmed "no artwork" result. `artworkCache`/
+    // `negativeCache` are real module-level LRU singletons here (see the
+    // `jest.mock('lru-cache', ...)` note above — it isn't actually wired
+    // into proxy.controller.ts in this monorepo layout), so these tests
+    // assert on the cache's real, observable effect on a follow-up request
+    // rather than on a mocked `.set` call. Each test uses an artist/release
+    // pair not used by any other `searchArtwork` test in this file, since
+    // the cache persists across tests within this run.
+
+    it('does not negative-cache a transient upstream failure: returns 502, and a follow-up request re-attempts the lookup', async () => {
+      // Mirrors ArtworkFinder.find's `errored: true` tag: every provider
+      // came back empty because it threw (e.g. an LML timeout), not because
+      // it confirmed there's no artwork. A negative-cache write here would
+      // strand this key as "no artwork" for the full 24h TTL even after LML
+      // recovers — proven below by a second, identical request re-hitting
+      // the finder instead of short-circuiting to a cached 404.
+      //
+      // `mockReset()` (not just the outer `beforeEach`'s `clearAllMocks()`)
+      // because `clearMocks`/`clearAllMocks` don't drain a queued-but-
+      // unconsumed `mockResolvedValueOnce` — if this test's second call
+      // never reaches the finder (the bug this test guards against), that
+      // second queued value would otherwise leak into the next test.
+      mockFind.mockReset();
+      mockFind.mockResolvedValueOnce({
+        artworkUrl: null,
+        releaseUrl: null,
+        album: null,
+        artist: null,
+        source: null,
+        confidence: 0,
+        errored: true,
+      });
+      mockFind.mockResolvedValueOnce({
+        artworkUrl: 'https://i.discogs.com/edits.jpg',
+        releaseUrl: 'https://discogs.com/release/1',
+        album: 'Edits',
+        artist: 'Chuquimamani-Condori',
+        source: 'discogs',
+        confidence: 0.9,
+      });
+      mockFetch.mockResolvedValue({
+        ok: true,
+        arrayBuffer: () => Promise.resolve(Buffer.from('img').buffer),
+        headers: new Headers({ 'content-type': 'image/jpeg' }),
+      } as unknown as globalThis.Response);
+      mockClassifyNSFW.mockResolvedValue('sfw');
+
+      const req = { query: { artistName: 'Chuquimamani-Condori', releaseTitle: 'Edits' } } as unknown as Request;
+
+      const firstRes = createMockRes();
+      await searchArtwork(req, firstRes as Response, mockNext);
+      expect(firstRes.status).toHaveBeenCalledWith(502);
+
+      const secondRes = createMockRes();
+      await searchArtwork(req, secondRes as Response, mockNext);
+
+      // Nothing was cached, so the second request re-consults the finder
+      // (and this time gets a real match) instead of short-circuiting.
+      expect(mockFind).toHaveBeenCalledTimes(2);
+      expect(secondRes.status).toHaveBeenCalledWith(200);
+    });
+
+    it('negative-caches a confirmed absence: returns 404, and a follow-up request short-circuits without re-invoking the finder', async () => {
+      // Every provider ran to completion and confirmed no match — this IS
+      // the legitimate negative-cache case (albums genuinely absent from
+      // Discogs), so a subsequent identical request should be served from
+      // the cache rather than re-attempting the lookup for the rest of the
+      // TTL.
+      //
+      // `mockReset()` for the same reason as the previous test — guards
+      // against a queued-but-unconsumed `mockResolvedValueOnce` leaking in
+      // from a prior test (`clearMocks` doesn't drain that queue).
+      mockFind.mockReset();
+      mockFind.mockResolvedValueOnce({
+        artworkUrl: null,
+        releaseUrl: null,
+        album: null,
+        artist: null,
+        source: null,
+        confidence: 0,
+        errored: false,
+      });
+      // If the second request reached the finder again, this would resolve
+      // to a real match — the assertion below proves it never does.
+      mockFind.mockResolvedValueOnce({
+        artworkUrl: 'https://i.discogs.com/obscure.jpg',
+        releaseUrl: 'https://discogs.com/release/2',
+        album: 'Obscure Album',
+        artist: 'Obscure Artist',
+        source: 'discogs',
+        confidence: 0.9,
+      });
+
+      const req = { query: { artistName: 'Obscure Artist', releaseTitle: 'Obscure Album' } } as unknown as Request;
+
+      const firstRes = createMockRes();
+      await searchArtwork(req, firstRes as Response, mockNext);
+      expect(firstRes.status).toHaveBeenCalledWith(404);
+
+      const secondRes = createMockRes();
+      await searchArtwork(req, secondRes as Response, mockNext);
+
+      expect(mockFind).toHaveBeenCalledTimes(1);
+      expect(secondRes.status).toHaveBeenCalledWith(404);
     });
   });
 
