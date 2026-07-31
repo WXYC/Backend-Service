@@ -69,6 +69,10 @@ import {
 export { resolveLmlPolicy, LML_CALLER_POLICY, ALL_LML_CALLERS, _resetLmlPolicyForTest };
 export type { LmlCaller, LmlCallerClass, LmlCallerLimiter, LmlPolicy };
 
+import { LmlCircuitBreaker, type CircuitState, type CircuitBreakerConfig } from './circuit-breaker.js';
+export { LmlCircuitBreaker } from './circuit-breaker.js';
+export type { CircuitState, CircuitBreakerConfig } from './circuit-breaker.js';
+
 class LmlClientError extends Error {
   constructor(
     message: string,
@@ -80,6 +84,35 @@ class LmlClientError extends Error {
 }
 
 export { LmlClientError };
+
+/**
+ * Discriminator for a runtime-lookup call the BS#1748 limiter shed rather than
+ * sent to LML: either the pre-admission queue wait exceeded
+ * `LML_LIMITER_MAX_QUEUE_WAIT_MS` (`shed_limiter_saturated`) or the per-limiter
+ * circuit breaker was open (`shed_breaker_open`). Distinct from the BS#1293
+ * `skipped_discogs_unavailable` outcome (that call was never *meant* to reach
+ * LML; a shed call was meant to but couldn't).
+ */
+export type LookupShedOutcome = 'shed_limiter_saturated' | 'shed_breaker_open';
+
+/**
+ * Thrown by `LmlLimiter.run` when a call is shed instead of admitted — either
+ * the bounded `Semaphore.acquire` deadline passed (`shed_limiter_saturated`)
+ * or the circuit breaker was open (`shed_breaker_open`). The lookup wrappers
+ * (`postLookup`/`bulkLookupMetadata`) catch it and convert to the empty
+ * `GatedLookupResponse` shed shape — callers on the lookup path never see the
+ * throw. It extends `LmlClientError` (status 503) so the handful of non-lookup
+ * limiter callers (`checkStreamingAvailability`, `resolveArtistNamesBulk`,
+ * `fetchArtistGenresBulk`) that don't convert it degrade through their
+ * existing `LmlClientError` / rejection handling exactly as they would on a
+ * transient LML unavailability — no caller changes required.
+ */
+export class LimiterShedError extends LmlClientError {
+  constructor(public readonly reason: LookupShedOutcome) {
+    super(`LML limiter shed: ${reason}`, 503);
+    this.name = 'LimiterShedError';
+  }
+}
 
 // BS#873: matches `jobs/flowsheet-metadata-backfill/lml-fetch.ts` so the
 // runtime path tolerates the same cold-cache LML cascade the backfill
@@ -184,13 +217,42 @@ export class Semaphore {
     this.capacity = permits;
   }
 
-  async acquire(): Promise<void> {
+  /**
+   * Acquire a permit. When a permit is free it is taken synchronously.
+   * Otherwise the caller parks in the FIFO queue until `release()` hands it a
+   * permit.
+   *
+   * BS#1748: pass `maxWaitMs` to bound that wait. If the deadline passes
+   * before a permit frees, the waiter removes ITSELF from the queue and the
+   * returned promise rejects with `LimiterShedError('shed_limiter_saturated')`
+   * — no permit is held, so accounting is unaffected. Omitting `maxWaitMs`
+   * keeps the original unbounded behavior (job-level limiters that don't opt
+   * into a queue deadline).
+   */
+  async acquire(maxWaitMs?: number): Promise<void> {
     if (this.permits > 0) {
       this.permits -= 1;
       return;
     }
-    return new Promise<void>((resolve) => {
-      this.waiters.push(resolve);
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const waiter = (): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        resolve();
+      };
+      this.waiters.push(waiter);
+      if (maxWaitMs !== undefined) {
+        timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          const idx = this.waiters.indexOf(waiter);
+          if (idx !== -1) this.waiters.splice(idx, 1);
+          reject(new LimiterShedError('shed_limiter_saturated'));
+        }, maxWaitMs);
+      }
     });
   }
 
@@ -278,8 +340,15 @@ export class TokenBucket {
 export interface LmlLimiter {
   /** Acquire a permit + a token, run fn, release the permit in finally. */
   run<T>(fn: () => Promise<T>): Promise<T>;
-  /** Snapshot for tests + observability hooks (span attributes, metrics). */
-  state(): { queueDepth: number; availablePermits: number; availableTokens: number };
+  /** Snapshot for tests + observability hooks (span attributes, metrics).
+   *  `breakerState` is present only on limiters configured with a breaker
+   *  (BS#1748) — `undefined` on the unbounded job-level limiters. */
+  state(): {
+    queueDepth: number;
+    availablePermits: number;
+    availableTokens: number;
+    breakerState?: CircuitState;
+  };
 }
 
 /**
@@ -288,16 +357,55 @@ export interface LmlLimiter {
  * `defaultLimiter` reads from `LML_CLIENT_*` env vars, and per-surface
  * limiters (e.g. the backfill's stricter `BACKFILL_LML_*` defaults) wire
  * their own config at construction.
+ *
+ * BS#1748 admission control is OPT-IN, per limiter:
+ *   - `queueWaitMs` bounds the pre-admission FIFO wait. On expiry `run` sheds
+ *     with `LimiterShedError('shed_limiter_saturated')`. Omit to keep the
+ *     unbounded wait (job-level limiters).
+ *   - `breaker` adds an instance-scoped circuit breaker (never module scope —
+ *     see `circuit-breaker.ts`). While open, `run` fast-fails with
+ *     `LimiterShedError('shed_breaker_open')` without acquiring. Omit for no
+ *     breaker. A "failure" is an LML HTTP timeout (504) or a saturation shed;
+ *     a fast non-timeout error and a normal empty response are healthy.
+ * Only the process-wide `defaultLimiter` opts into both today; the backfill /
+ * job limiters pass neither and are byte-identical to their pre-#1748 shape.
  */
-export function createLmlLimiter(config: { maxConcurrent: number; ratePerMinute: number }): LmlLimiter {
+export function createLmlLimiter(config: {
+  maxConcurrent: number;
+  ratePerMinute: number;
+  queueWaitMs?: number;
+  breaker?: CircuitBreakerConfig;
+}): LmlLimiter {
   const semaphore = new Semaphore(config.maxConcurrent);
   const tokenBucket = new TokenBucket({ capacity: config.ratePerMinute, refillPerMinute: config.ratePerMinute });
+  const breaker = config.breaker ? new LmlCircuitBreaker(config.breaker) : undefined;
   return {
     async run<T>(fn: () => Promise<T>): Promise<T> {
-      await semaphore.acquire();
+      // Breaker gate — fast-fail while open, before touching the semaphore.
+      if (breaker && !breaker.tryAdmit()) {
+        throw new LimiterShedError('shed_breaker_open');
+      }
+      // Bounded (or unbounded) admission wait. A saturation shed counts as a
+      // breaker failure — sustained queue saturation should trip the breaker.
+      try {
+        await semaphore.acquire(config.queueWaitMs);
+      } catch (err) {
+        if (breaker && err instanceof LimiterShedError) breaker.recordFailure();
+        throw err;
+      }
       try {
         await tokenBucket.consume(1);
-        return await fn();
+        const result = await fn();
+        breaker?.recordSuccess();
+        return result;
+      } catch (err) {
+        // Only LML HTTP timeouts feed the breaker; a fast non-timeout error
+        // (e.g. a 502) means LML is responsive, so treat it as healthy.
+        if (breaker) {
+          if (isLmlTimeoutError(err)) breaker.recordFailure();
+          else breaker.recordSuccess();
+        }
+        throw err;
       } finally {
         semaphore.release();
       }
@@ -307,9 +415,23 @@ export function createLmlLimiter(config: { maxConcurrent: number; ratePerMinute:
         queueDepth: semaphore.queueDepth,
         availablePermits: semaphore.availablePermits,
         availableTokens: tokenBucket.availableTokens,
+        breakerState: breaker?.currentState,
       };
     },
   };
+}
+
+/**
+ * Classify a thrown error as an LML HTTP timeout — the failure mode the
+ * BS#1748 breaker exists to short-circuit. `lmlFetch` converts an
+ * `AbortController` fire into `LmlClientError(…, 504)`; the raw `AbortError`
+ * name is checked too for defense. A `LimiterShedError` (saturation) is
+ * counted at the acquire site, not here, so it's excluded.
+ */
+function isLmlTimeoutError(err: unknown): boolean {
+  if (err instanceof LimiterShedError) return false;
+  if (err instanceof LmlClientError) return err.statusCode === 504;
+  return (err as { name?: string } | null)?.name === 'AbortError';
 }
 
 /**
@@ -327,8 +449,29 @@ function initDefaultLimiter(): void {
   defaultLimiter = createLmlLimiter({
     maxConcurrent: envInt('LML_CLIENT_MAX_CONCURRENT', 5),
     ratePerMinute: envInt('LML_CLIENT_RATE_PER_MIN', 50),
+    // BS#1748: the runtime limiter opts into bounded admission + a breaker so a
+    // saturated LML fast-fails instead of hanging for minutes. The queue-wait
+    // default (5000) plus the class-5 socket timeout (29000) stay well under
+    // the enrichment-worker's 60 s STRANDED_TTL — see the deadline-invariant
+    // unit test. All three knobs are env-overridable (CI raises the breaker
+    // threshold so the integration suite's simulated LML failures can't trip
+    // it mid-run).
+    queueWaitMs: envInt('LML_LIMITER_MAX_QUEUE_WAIT_MS', LML_LIMITER_MAX_QUEUE_WAIT_MS_DEFAULT),
+    breaker: {
+      failureThreshold: envInt('LML_BREAKER_FAILURE_THRESHOLD', LML_BREAKER_FAILURE_THRESHOLD_DEFAULT),
+      openMs: envInt('LML_BREAKER_OPEN_MS', LML_BREAKER_OPEN_MS_DEFAULT),
+    },
   });
 }
+
+/**
+ * BS#1748 admission-control defaults, named so the deadline-invariant unit
+ * test can assert `LML_LIMITER_MAX_QUEUE_WAIT_MS + LML_CLASS5_TIMEOUT_MS <
+ * STRANDED_TTL` against the real constants rather than re-typed literals.
+ */
+export const LML_LIMITER_MAX_QUEUE_WAIT_MS_DEFAULT = 5000;
+export const LML_BREAKER_FAILURE_THRESHOLD_DEFAULT = 5;
+export const LML_BREAKER_OPEN_MS_DEFAULT = 30000;
 
 initDefaultLimiter();
 
@@ -570,11 +713,48 @@ export type LookupSkippedOutcome = 'skipped_discogs_unavailable';
  * fields (`results`, `search_type`, etc.) are unaffected.
  */
 export interface GatedLookupResponse extends LookupResponse {
-  outcome?: LookupSkippedOutcome;
+  outcome?: LookupSkippedOutcome | LookupShedOutcome;
 }
 
 /** Sentry `lml.lookup.skipped_reason` value stamped by the BS#1293 gate. */
 const DISCOGS_UNAVAILABLE_SKIPPED_REASON = 'discogs_unavailable';
+
+/**
+ * BS#1748: the `LookupResponse`-shaped empty result the limiter returns in
+ * place of a real LML call when a call is shed (queue saturated or breaker
+ * open). Mirrors `buildSkippedLookupResponse` field-for-field — every current
+ * caller already degrades on this empty shape (`enrichWithArtwork`'s
+ * `if (!artworkUrl) return;`, etc.) — plus the shed `outcome` discriminator so
+ * a caller that cares can tell a shed apart from an honest no-match. Never a
+ * terminal `failed`, never a `pending` write.
+ */
+function buildShedLookupResponse(reason: LookupShedOutcome): GatedLookupResponse {
+  return {
+    results: [],
+    search_type: 'none',
+    song_not_found: false,
+    found_on_compilation: false,
+    timeout: false,
+    degraded: false,
+    outcome: reason,
+  };
+}
+
+/**
+ * Build the shed `GatedLookupResponse` inside a Sentry span that carries the
+ * `lml.shed_reason` attribute, so a shed is queryable in the trace explorer
+ * (`lml.shed_reason:shed_breaker_open`) the same way the BS#1293 skip is.
+ */
+function shedLookupResponse(reason: LookupShedOutcome, caller: LmlCaller | undefined): GatedLookupResponse {
+  return Sentry.startSpan({ name: 'lml.lookup', op: 'lml.lookup.shed' }, (span) => {
+    try {
+      span.setAttributes({ 'lml.shed_reason': reason, 'lml.caller': caller ?? 'unknown' });
+    } catch (err) {
+      console.warn('lml.client: failed to project shed_reason + caller onto span', err);
+    }
+    return buildShedLookupResponse(reason);
+  });
+}
 
 /**
  * Builds the `LookupResponse`-shaped skipped outcome the BS#1293 gate
@@ -715,62 +895,69 @@ async function postLookup(
   const policy = policyForCaller(options?.caller);
   const effectiveTimeoutMs = options?.timeoutMs ?? policy?.timeoutMs;
   const effectiveBudgetMs = options?.budgetMs ?? policy?.budgetMs;
-  return activeLimiter.run(async () => {
-    return await Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
-      try {
-        span.setAttributes({
-          'lml.queue_depth': activeLimiter.state().queueDepth,
-          'lml.caller': options?.caller ?? 'unknown',
-        });
-      } catch (err) {
-        console.warn('lml.client: failed to project queue_depth + caller onto span', err);
-      }
+  try {
+    return await activeLimiter.run(async () => {
+      return await Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
+        try {
+          span.setAttributes({
+            'lml.queue_depth': activeLimiter.state().queueDepth,
+            'lml.caller': options?.caller ?? 'unknown',
+          });
+        } catch (err) {
+          console.warn('lml.client: failed to project queue_depth + caller onto span', err);
+        }
 
-      const response = await lmlFetch(
-        '/api/v1/lookup',
-        {
-          method: 'POST',
-          headers: buildLookupHeaders(effectiveBudgetMs, options?.caller),
-          body: JSON.stringify(body),
-        },
-        effectiveTimeoutMs
-      );
+        const response = await lmlFetch(
+          '/api/v1/lookup',
+          {
+            method: 'POST',
+            headers: buildLookupHeaders(effectiveBudgetMs, options?.caller),
+            body: JSON.stringify(body),
+          },
+          effectiveTimeoutMs
+        );
 
-      // BS#1710: enforce the streaming-URL host invariant at this untrusted
-      // boundary. LML's `artwork.spotify_url` can carry a non-Spotify URL
-      // (Deezer/Apple/…) sourced from the library `streaming_links` artifact;
-      // null it here so no downstream writer persists it under the Spotify
-      // slot and the writers' `?? searchUrls.spotify_url` fallback wins.
-      const parsed = sanitizeLookupStreamingUrls((await response.json()) as LookupResponse);
+        // BS#1710: enforce the streaming-URL host invariant at this untrusted
+        // boundary. LML's `artwork.spotify_url` can carry a non-Spotify URL
+        // (Deezer/Apple/…) sourced from the library `streaming_links` artifact;
+        // null it here so no downstream writer persists it under the Spotify
+        // slot and the writers' `?? searchUrls.spotify_url` fallback wins.
+        const parsed = sanitizeLookupStreamingUrls((await response.json()) as LookupResponse);
 
-      // cache_stats schema is freeform today (additionalProperties: true). Until
-      // wxyc-shared#86 tightens the type, treat it as a loose record and only
-      // forward numeric fields onto the span. Narrow defensively to a real plain
-      // object — Object.entries on a string/array would produce junk attributes
-      // like lml.cache.0=...
-      const stats = (parsed as { cache_stats?: unknown }).cache_stats;
-      if (stats && typeof stats === 'object' && !Array.isArray(stats)) {
-        const attrs: Record<string, number> = {};
-        for (const [key, value] of Object.entries(stats)) {
-          if (typeof value === 'number' && Number.isFinite(value)) {
-            attrs[`lml.cache.${key}`] = value;
+        // cache_stats schema is freeform today (additionalProperties: true). Until
+        // wxyc-shared#86 tightens the type, treat it as a loose record and only
+        // forward numeric fields onto the span. Narrow defensively to a real plain
+        // object — Object.entries on a string/array would produce junk attributes
+        // like lml.cache.0=...
+        const stats = (parsed as { cache_stats?: unknown }).cache_stats;
+        if (stats && typeof stats === 'object' && !Array.isArray(stats)) {
+          const attrs: Record<string, number> = {};
+          for (const [key, value] of Object.entries(stats)) {
+            if (typeof value === 'number' && Number.isFinite(value)) {
+              attrs[`lml.cache.${key}`] = value;
+            }
+          }
+          if (Object.keys(attrs).length > 0) {
+            // Observability must never break the request path. If the Sentry SDK
+            // (or a custom transport hook) throws, swallow the error and continue
+            // — the lookup result is what callers depend on.
+            try {
+              span.setAttributes(attrs);
+            } catch (err) {
+              console.warn('lml.client: failed to project cache_stats onto span', err);
+            }
           }
         }
-        if (Object.keys(attrs).length > 0) {
-          // Observability must never break the request path. If the Sentry SDK
-          // (or a custom transport hook) throws, swallow the error and continue
-          // — the lookup result is what callers depend on.
-          try {
-            span.setAttributes(attrs);
-          } catch (err) {
-            console.warn('lml.client: failed to project cache_stats onto span', err);
-          }
-        }
-      }
 
-      return parsed;
+        return parsed;
+      });
     });
-  });
+  } catch (err) {
+    if (err instanceof LimiterShedError) {
+      return shedLookupResponse(err.reason, options?.caller);
+    }
+    throw err;
+  }
 }
 
 /**
@@ -819,7 +1006,7 @@ export interface BulkLookupItem {
  */
 export interface BulkLookupResultItem {
   index: number;
-  status: 'match' | 'no_match' | 'error' | LookupSkippedOutcome;
+  status: 'match' | 'no_match' | 'error' | LookupSkippedOutcome | LookupShedOutcome;
   lookup: GatedLookupResponse | null;
   message?: string;
 }
@@ -944,95 +1131,102 @@ export async function bulkLookupMetadata(
   const policy = policyForCaller(options?.caller);
   const effectiveTimeoutMs = options?.timeoutMs ?? policy?.timeoutMs;
   const effectiveBudgetMs = options?.budgetMs ?? policy?.budgetMs;
-  return activeLimiter.run(async () => {
-    return await Sentry.startSpan({ name: 'lml.lookup.bulk', op: 'http.client' }, async (span) => {
-      try {
-        span.setAttributes({
-          'lml.queue_depth': activeLimiter.state().queueDepth,
-          'lml.bulk.size': items.length,
-          'lml.caller': options?.caller ?? 'unknown',
+  try {
+    return await activeLimiter.run(async () => {
+      return await Sentry.startSpan({ name: 'lml.lookup.bulk', op: 'http.client' }, async (span) => {
+        try {
+          span.setAttributes({
+            'lml.queue_depth': activeLimiter.state().queueDepth,
+            'lml.bulk.size': items.length,
+            'lml.caller': options?.caller ?? 'unknown',
+          });
+        } catch (err) {
+          console.warn('lml.client: failed to project queue_depth + bulk.size + caller onto span', err);
+        }
+
+        // BS#1815 / LML#920: query-flag opt-in, mirroring the doc comment on
+        // `allowReleaseResolutionFallback` above. Omitted (not `?...=false`)
+        // when unset so the wire request is byte-identical to the pre-#1815
+        // shape for every caller that doesn't pass the option.
+        const bulkPath = options?.allowReleaseResolutionFallback
+          ? '/api/v1/lookup/bulk?allow_release_resolution_fallback=true'
+          : '/api/v1/lookup/bulk';
+
+        const response = await lmlFetch(
+          bulkPath,
+          {
+            method: 'POST',
+            headers: buildLookupHeaders(effectiveBudgetMs, options?.caller),
+            body: JSON.stringify({ items: sendItems }),
+          },
+          effectiveTimeoutMs
+        );
+
+        const parsed = (await response.json()) as BulkLookupResponse & { cache_stats?: unknown };
+
+        // Same defensive cache_stats projection as postLookup (line ~463).
+        // LML aggregates the in-process cache counters across the whole batch
+        // via a single `init_cache_stats()` at the route top, so one set of
+        // attributes per bulk call is correct.
+        const stats = parsed.cache_stats;
+        if (stats && typeof stats === 'object' && !Array.isArray(stats)) {
+          const attrs: Record<string, number> = {};
+          for (const [key, value] of Object.entries(stats)) {
+            if (typeof value === 'number' && Number.isFinite(value)) {
+              attrs[`lml.cache.${key}`] = value;
+            }
+          }
+          if (Object.keys(attrs).length > 0) {
+            try {
+              span.setAttributes(attrs);
+            } catch (err) {
+              console.warn('lml.client: failed to project cache_stats onto bulk span', err);
+            }
+          }
+        }
+
+        // BS#1710: same streaming-URL host invariant as postLookup, applied to
+        // each per-item verdict's nested LookupResponse (null on `status: error`).
+        for (const item of parsed.results ?? []) {
+          if (item.lookup != null) sanitizeLookupStreamingUrls(item.lookup);
+        }
+
+        // BS#1293: with no gated items the wire batch is identical to the
+        // caller's `items` in the same order, so return LML's verdicts
+        // verbatim — preserving each result's own `index`. Reconstructing
+        // positionally in this case would overwrite `.index` with a cursor and
+        // defeat downstream misalignment guards that intentionally trust LML's
+        // reported index (e.g. album-level-backfill's `result.index !== i`
+        // BS#1088 regression pin) and would fabricate `{ index }`-only entries
+        // from a short/gapped response instead of surfacing the mismatch.
+        if (skippedIndices.size === 0) {
+          return { results: parsed.results };
+        }
+
+        // Skips present: the caller's index space diverges from `sendItems`, so
+        // splice the synthetic skipped verdicts back in at their original
+        // positions and reindex the real verdicts (LML returned them aligned to
+        // `sendItems`, not the caller's original `items`) so the final array is
+        // index-aligned with the caller's input in input order.
+        let sentCursor = 0;
+        const results = items.map((_, index) => {
+          if (skippedIndices.has(index)) {
+            return buildSkippedBulkResultItem(index);
+          }
+          const sentResult = parsed.results[sentCursor];
+          sentCursor += 1;
+          return { ...sentResult, index };
         });
-      } catch (err) {
-        console.warn('lml.client: failed to project queue_depth + bulk.size + caller onto span', err);
-      }
 
-      // BS#1815 / LML#920: query-flag opt-in, mirroring the doc comment on
-      // `allowReleaseResolutionFallback` above. Omitted (not `?...=false`)
-      // when unset so the wire request is byte-identical to the pre-#1815
-      // shape for every caller that doesn't pass the option.
-      const bulkPath = options?.allowReleaseResolutionFallback
-        ? '/api/v1/lookup/bulk?allow_release_resolution_fallback=true'
-        : '/api/v1/lookup/bulk';
-
-      const response = await lmlFetch(
-        bulkPath,
-        {
-          method: 'POST',
-          headers: buildLookupHeaders(effectiveBudgetMs, options?.caller),
-          body: JSON.stringify({ items: sendItems }),
-        },
-        effectiveTimeoutMs
-      );
-
-      const parsed = (await response.json()) as BulkLookupResponse & { cache_stats?: unknown };
-
-      // Same defensive cache_stats projection as postLookup (line ~463).
-      // LML aggregates the in-process cache counters across the whole batch
-      // via a single `init_cache_stats()` at the route top, so one set of
-      // attributes per bulk call is correct.
-      const stats = parsed.cache_stats;
-      if (stats && typeof stats === 'object' && !Array.isArray(stats)) {
-        const attrs: Record<string, number> = {};
-        for (const [key, value] of Object.entries(stats)) {
-          if (typeof value === 'number' && Number.isFinite(value)) {
-            attrs[`lml.cache.${key}`] = value;
-          }
-        }
-        if (Object.keys(attrs).length > 0) {
-          try {
-            span.setAttributes(attrs);
-          } catch (err) {
-            console.warn('lml.client: failed to project cache_stats onto bulk span', err);
-          }
-        }
-      }
-
-      // BS#1710: same streaming-URL host invariant as postLookup, applied to
-      // each per-item verdict's nested LookupResponse (null on `status: error`).
-      for (const item of parsed.results ?? []) {
-        if (item.lookup != null) sanitizeLookupStreamingUrls(item.lookup);
-      }
-
-      // BS#1293: with no gated items the wire batch is identical to the
-      // caller's `items` in the same order, so return LML's verdicts
-      // verbatim — preserving each result's own `index`. Reconstructing
-      // positionally in this case would overwrite `.index` with a cursor and
-      // defeat downstream misalignment guards that intentionally trust LML's
-      // reported index (e.g. album-level-backfill's `result.index !== i`
-      // BS#1088 regression pin) and would fabricate `{ index }`-only entries
-      // from a short/gapped response instead of surfacing the mismatch.
-      if (skippedIndices.size === 0) {
-        return { results: parsed.results };
-      }
-
-      // Skips present: the caller's index space diverges from `sendItems`, so
-      // splice the synthetic skipped verdicts back in at their original
-      // positions and reindex the real verdicts (LML returned them aligned to
-      // `sendItems`, not the caller's original `items`) so the final array is
-      // index-aligned with the caller's input in input order.
-      let sentCursor = 0;
-      const results = items.map((_, index) => {
-        if (skippedIndices.has(index)) {
-          return buildSkippedBulkResultItem(index);
-        }
-        const sentResult = parsed.results[sentCursor];
-        sentCursor += 1;
-        return { ...sentResult, index };
+        return { results };
       });
-
-      return { results };
     });
-  });
+  } catch (err) {
+    if (err instanceof LimiterShedError) {
+      return shedBulkResponse(items.length, err.reason, options.caller);
+    }
+    throw err;
+  }
 }
 
 /**
@@ -1046,6 +1240,38 @@ function buildSkippedBulkResultItem(index: number): BulkLookupResultItem {
     status: 'skipped_discogs_unavailable',
     lookup: buildSkippedLookupResponse(),
   };
+}
+
+/**
+ * BS#1748: shed verdict for a bulk item when the whole batch was shed by the
+ * limiter (queue saturated or breaker open). Same empty-`lookup` shed shape
+ * the single-item path returns, one per input index. Every current bulk caller
+ * (the enrichment worker + offline drains) already treats a non-`match`
+ * verdict as "leave it for the next cycle," so a shed batch is retried, not
+ * lost — never a terminal `error`, never a `pending` write.
+ */
+function buildShedBulkResultItem(index: number, reason: LookupShedOutcome): BulkLookupResultItem {
+  return {
+    index,
+    status: reason,
+    lookup: buildShedLookupResponse(reason),
+  };
+}
+
+/**
+ * Build the all-items-shed `BulkLookupResponse` inside a Sentry span carrying
+ * `lml.shed_reason` + `lml.bulk.size`, mirroring the single-item
+ * `shedLookupResponse` observability seam.
+ */
+function shedBulkResponse(itemCount: number, reason: LookupShedOutcome, caller: LmlCaller): BulkLookupResponse {
+  return Sentry.startSpan({ name: 'lml.lookup.bulk', op: 'lml.lookup.shed' }, (span) => {
+    try {
+      span.setAttributes({ 'lml.shed_reason': reason, 'lml.bulk.size': itemCount, 'lml.caller': caller });
+    } catch (err) {
+      console.warn('lml.client: failed to project shed_reason + bulk.size + caller onto span', err);
+    }
+    return { results: Array.from({ length: itemCount }, (_, index) => buildShedBulkResultItem(index, reason)) };
+  });
 }
 
 /**

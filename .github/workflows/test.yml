@@ -436,6 +436,11 @@ jobs:
           # tests/unit/services/lml.client.test.ts:792-793.
           LML_CLIENT_MAX_CONCURRENT: '10000'
           LML_CLIENT_RATE_PER_MIN: '60000'
+          # BS#1748: raise the breaker threshold effectively out of reach so a
+          # burst of simulated LML timeouts in one --runInBand spec can't open
+          # the process-wide breaker and leak the 30 s open window into later
+          # specs.
+          LML_BREAKER_FAILURE_THRESHOLD: '1000000'
           # Default org wiring: matches the slug seeded by dev_env/seed_db.sql.
           # Consumed by the org-sync hooks and the user.create.after
           # auto-membership hook in shared/authentication/src/auth.definition.ts.
