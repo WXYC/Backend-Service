@@ -1861,6 +1861,19 @@ export const recheckDiscogsAvailability = async (
     caller: 'library-discogs-unavailable-recheck',
   });
 
+  // Distinguish a transient LML timeout body (`{timeout:true, results:[]}`,
+  // e.g. LML#370 cascade-exhaustion) from a definitive no-match — same guard
+  // as the daily cron's `jobs/library-discogs-unavailable-recheck/lml-fetch
+  // .ts`. Throw instead of stamping `last_discogs_recheck_at` / returning
+  // `no_match`: a timeout body is not evidence of "no Discogs match", and
+  // stamping it here would wrongly exclude the row from the cron's 7-day
+  // recheck window for a full week over a purely transient LML failure. The
+  // thrown error surfaces as a 5xx on the admin endpoint, which is retryable
+  // immediately (unlike the week-long deferral a wrong stamp would cause).
+  if (response.timeout) {
+    throw new Error('LML lookup returned a timeout body; treating as transient so the row stays retryable');
+  }
+
   const top = response.results?.[0];
   const releaseId = top?.artwork?.release_id;
   // `release_id: 0` is the BS#1185 streaming-only sentinel — not a linkable
