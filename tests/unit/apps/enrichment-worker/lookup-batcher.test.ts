@@ -40,7 +40,12 @@ class FakeLmlClientError extends Error {
 }
 
 type BulkItem = { artist?: string; album?: string; song?: string; raw_message: string; extended?: boolean };
-type BulkResult = { index: number; status: 'match' | 'no_match' | 'error'; lookup: unknown; message?: string };
+type BulkResult = {
+  index: number;
+  status: 'match' | 'no_match' | 'error' | 'shed_limiter_saturated' | 'shed_breaker_open';
+  lookup: unknown;
+  message?: string;
+};
 
 const mockBulkLookupMetadata = jest.fn<(items: BulkItem[], options?: unknown) => Promise<{ results: BulkResult[] }>>();
 
@@ -263,6 +268,34 @@ describe('enrichmentBulkLookup burst coalescing (B3 / BS#1749)', () => {
     await expect(okResult).resolves.toMatchObject({ status: 'resolved' });
     await expect(badResult).resolves.toMatchObject({ status: 'rejected' });
   });
+
+  it.each(['shed_limiter_saturated', 'shed_breaker_open'] as const)(
+    'rejects (not resolves) a %s shed verdict so the row stays retryable, never terminal no-match (BS#1748)',
+    async (shedStatus) => {
+      // BS#1748: a shed verdict carries a NON-null empty `lookup`. If the
+      // batcher resolved it, the handler would finalize it as a terminal
+      // `enriched_no_match` — burning the row on a transient LML saturation the
+      // shed was meant to defer. This worker owns the `pending` claim, so a
+      // shed must reject like a bulk-call failure, leaving the row `enriching`
+      // for C6 recovery. Guard the exact resolve/reject fork.
+      mockBulkLookupMetadata.mockResolvedValueOnce({
+        results: [{ index: 0, status: shedStatus, lookup: { results: [], outcome: shedStatus } }],
+      });
+
+      const p = enrichmentBulkLookup(makeInput('Stereolab'));
+      const observed = p.then(
+        () => ({ status: 'resolved' as const }),
+        (e: Error) => ({ status: 'rejected' as const, message: e.message })
+      );
+
+      await flushWindow();
+
+      await expect(observed).resolves.toMatchObject({
+        status: 'rejected',
+        message: expect.stringContaining(shedStatus),
+      });
+    }
+  );
 
   it('rejects every caller in a chunk when the bulk call itself throws', async () => {
     mockBulkLookupMetadata.mockRejectedValueOnce(new FakeLmlClientError('LML request timed out', 504));

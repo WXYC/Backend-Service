@@ -379,6 +379,18 @@ export function createLmlLimiter(config: {
   const semaphore = new Semaphore(config.maxConcurrent);
   const tokenBucket = new TokenBucket({ capacity: config.ratePerMinute, refillPerMinute: config.ratePerMinute });
   const breaker = config.breaker ? new LmlCircuitBreaker(config.breaker) : undefined;
+  // BS#1748: a breaker without a bounded queue wait is a latent footgun — an
+  // OPEN→HALF_OPEN probe that then parks forever on a saturated semaphore would
+  // never clear `probeInFlight`, wedging the breaker open permanently. The only
+  // configured breaker today (the runtime defaultLimiter) always pairs the two;
+  // warn loudly if a future caller decouples them rather than silently risking
+  // the wedge.
+  if (breaker && config.queueWaitMs === undefined) {
+    console.warn(
+      'lml.client: createLmlLimiter got a breaker without queueWaitMs — a half-open probe could park ' +
+        'forever on a saturated semaphore and wedge the breaker open. Pair a breaker with queueWaitMs.'
+    );
+  }
   return {
     async run<T>(fn: () => Promise<T>): Promise<T> {
       // Breaker gate — fast-fail while open, before touching the semaphore.
@@ -1245,10 +1257,15 @@ function buildSkippedBulkResultItem(index: number): BulkLookupResultItem {
 /**
  * BS#1748: shed verdict for a bulk item when the whole batch was shed by the
  * limiter (queue saturated or breaker open). Same empty-`lookup` shed shape
- * the single-item path returns, one per input index. Every current bulk caller
- * (the enrichment worker + offline drains) already treats a non-`match`
- * verdict as "leave it for the next cycle," so a shed batch is retried, not
- * lost — never a terminal `error`, never a `pending` write.
+ * the single-item path returns, one per input index. The `status` is the
+ * discriminator a caller MUST branch on: the shed `lookup` is a NON-null empty
+ * response, so a caller that only null-checks `lookup` would finalize it as a
+ * no-match. The live enrichment worker (`apps/enrichment-worker/
+ * lookup-batcher.ts`) — the only `pending`-owning bulk caller, and one that
+ * runs on the breaker-bearing `defaultLimiter`, so it genuinely sees sheds —
+ * treats these two statuses as retryable, leaving the row `enriching` for C6
+ * recovery rather than writing a terminal state. The offline drains run on
+ * their own breaker-less limiters and never shed.
  */
 function buildShedBulkResultItem(index: number, reason: LookupShedOutcome): BulkLookupResultItem {
   return {
