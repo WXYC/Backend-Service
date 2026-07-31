@@ -398,10 +398,10 @@ export async function searchLibrary(
     return dup?.matched_via_alias ? { ...r, matched_via_alias: dup.matched_via_alias } : r;
   });
   const cascadeIds = new Set(cascadeResults.map((r) => r.id));
-  const merged = sortAlbumRows(
-    [...enrichedCascade, ...results.filter((r) => !cascadeIds.has(r.id))],
-    params
-  ).slice(0, params.limit);
+  const merged = sortAlbumRows([...enrichedCascade, ...results.filter((r) => !cascadeIds.has(r.id))], params).slice(
+    0,
+    params.limit
+  );
   const added = cascadeResults.filter((r) => !aliasById.has(r.id)).length;
   // Known imprecision, acceptable: a cascade row that duplicates an alias row
   // beyond page 0 can be double-counted in `total`, and — because the

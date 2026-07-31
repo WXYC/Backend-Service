@@ -256,7 +256,9 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       // silently swapped for an empty cascade result.
       expect(mockLookupBySong).not.toHaveBeenCalled();
       expect(results).toHaveLength(1);
-      expect(results[0].matched_via_alias).toEqual([{ matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' }]);
+      expect(results[0].matched_via_alias).toEqual([
+        { matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' },
+      ]);
     });
 
     it('all trigram rows alias-tagged, Track 2 (LML) resolves — merged cascade-first', async () => {
@@ -352,7 +354,9 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(results[0].id).toBe(101);
       expect(results[0].matched_via?.[0]).toMatchObject({ source: 'discogs_release' });
       const aliasHit = results.find((r) => r.id === 42);
-      expect(aliasHit?.matched_via_alias).toEqual([{ matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' }]);
+      expect(aliasHit?.matched_via_alias).toEqual([
+        { matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' },
+      ]);
     });
   });
 
