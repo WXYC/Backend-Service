@@ -689,6 +689,7 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
         if (criticReviews.length > 0) metadata.criticReviews = criticReviews;
       } catch (reviewsError) {
         console.warn('[ProxyController] critic-reviews lookup failed; omitting criticReviews:', reviewsError);
+        cacheable = false;
       }
     }
 
