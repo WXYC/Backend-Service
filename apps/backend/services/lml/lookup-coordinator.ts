@@ -51,7 +51,14 @@
 import * as Sentry from '@sentry/node';
 import { LRUCache } from 'lru-cache';
 
-import { lookupMetadata, type LookupOptions, type LookupResponse } from '@wxyc/lml-client';
+import {
+  lookupMetadata,
+  shedReasonOf,
+  LimiterShedError,
+  type GatedLookupResponse,
+  type LookupOptions,
+  type LookupResponse,
+} from '@wxyc/lml-client';
 
 /**
  * Options accepted by `LmlLookupCoordinator.lookup`. Mirrors `LookupOptions`
@@ -95,7 +102,11 @@ export class LmlLookupCoordinator {
   /**
    * Look up metadata for an artist/album/song triple. Coalesces concurrent
    * same-key calls; serves cached responses within TTL. Errors are not
-   * cached. When `requireSearchType` is set, returns `null` on mismatch
+   * cached — and a BS#1748 limiter shed (which the client resolves as an
+   * empty response, not a throw) is treated AS an error here: re-thrown, not
+   * cached, so a transient breaker-open window can't poison the LRU or the
+   * downstream artwork negative cache (BS#1089). When `requireSearchType` is
+   * set, returns `null` on mismatch
    * after projecting `lml.coordinator.trust_reject_reason` onto the span;
    * otherwise the return is the raw `LookupResponse`.
    */
@@ -168,6 +179,19 @@ export class LmlLookupCoordinator {
       // can no longer be forwarded through a typed `caller` field).
       const settle = this.fetchUncached(artist, album, song, options)
         .then((result) => {
+          // BS#1748: a limiter shed RESOLVES as an empty LookupResponse (the
+          // client degrades simple callers gracefully), but caching it here —
+          // and letting it flow to ArtworkFinder as an empty array — would
+          // record a transient ~30 s breaker-open / queue saturation as a
+          // CONFIRMED no-match for 5 min (this LRU) to ~24 h (the artwork
+          // negative cache), the exact BS#1089 regression. Surface a shed as
+          // the transient failure it is: throw so it's neither cached here nor
+          // negative-cached downstream (ArtworkFinder's erroredResponse path),
+          // matching how a timeout already behaves at this boundary.
+          const shedReason = shedReasonOf(result);
+          if (shedReason) {
+            throw new LimiterShedError(shedReason);
+          }
           this.cache.set(key, result);
           return result;
         })
@@ -209,7 +233,10 @@ export class LmlLookupCoordinator {
     album: string | undefined,
     song: string | undefined,
     options: CoordinatorLookupOptions | undefined
-  ): Promise<LookupResponse> {
+    // Accurate return type: `lookupMetadata` yields a `GatedLookupResponse`
+    // (a `LookupResponse` plus the optional `outcome` discriminator), which is
+    // what lets `shedReasonOf(result)` read `.outcome` without a cast (BS#1748).
+  ): Promise<GatedLookupResponse> {
     return lookupMetadata(artist, album, song, {
       extended: true,
       warm_cache: options?.warm_cache,

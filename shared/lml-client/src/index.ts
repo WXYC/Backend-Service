@@ -753,6 +753,24 @@ function buildShedLookupResponse(reason: LookupShedOutcome): GatedLookupResponse
 }
 
 /**
+ * BS#1748: return the shed reason if `response` is a limiter shed, else
+ * `undefined`. A shed RESOLVES as an empty `GatedLookupResponse` (the client's
+ * graceful-degradation contract for simple callers), but consumers that
+ * negative-cache an empty result — the `LmlLookupCoordinator` LRU and the
+ * downstream `ArtworkFinder` — must tell a transient shed apart from a
+ * confirmed no-match (the BS#1089 discrimination) and treat the shed as a
+ * transient failure instead of caching it. Accepts any object with an optional
+ * `outcome` so a plain `LookupResponse` (no `outcome` in its type) can be
+ * passed without a cast.
+ */
+export function shedReasonOf(response: {
+  outcome?: LookupSkippedOutcome | LookupShedOutcome;
+}): LookupShedOutcome | undefined {
+  const outcome = response.outcome;
+  return outcome === 'shed_limiter_saturated' || outcome === 'shed_breaker_open' ? outcome : undefined;
+}
+
+/**
  * Build the shed `GatedLookupResponse` inside a Sentry span that carries the
  * `lml.shed_reason` attribute, so a shed is queryable in the trace explorer
  * (`lml.shed_reason:shed_breaker_open`) the same way the BS#1293 skip is.

@@ -38,6 +38,7 @@ import {
   createLmlLimiter,
   lookupMetadata,
   bulkLookupMetadata,
+  shedReasonOf,
   resolveLmlPolicy,
   LML_LIMITER_MAX_QUEUE_WAIT_MS_DEFAULT,
   LML_BREAKER_FAILURE_THRESHOLD_DEFAULT,
@@ -277,6 +278,18 @@ describe('BS#1748 limiter admission bounds', () => {
       const lim = createLmlLimiter({ maxConcurrent: 1, ratePerMinute: 100_000 });
       await expect(lim.run(() => Promise.resolve('ok'))).resolves.toBe('ok');
       expect(lim.state().breakerState).toBeUndefined();
+    });
+  });
+
+  describe('shedReasonOf', () => {
+    it('returns the reason for each shed outcome', () => {
+      expect(shedReasonOf({ outcome: 'shed_limiter_saturated' })).toBe('shed_limiter_saturated');
+      expect(shedReasonOf({ outcome: 'shed_breaker_open' })).toBe('shed_breaker_open');
+    });
+
+    it('returns undefined for a non-shed response (empty, skipped, or plain)', () => {
+      expect(shedReasonOf({})).toBeUndefined();
+      expect(shedReasonOf({ outcome: 'skipped_discogs_unavailable' })).toBeUndefined();
     });
   });
 
