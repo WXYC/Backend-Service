@@ -138,6 +138,43 @@ function attachAliasHint<R extends LibraryArtistViewEntry & AliasHitFields>(row:
   };
 }
 
+/**
+ * A row that carries the three BS#1281 discogs-unavailable columns
+ * (`library` directly, or any join projection over it).
+ */
+type DiscogsUnavailableSource = {
+  discogs_unavailable: boolean;
+  discogs_unavailable_note: string | null;
+  last_discogs_recheck_at: Date | null;
+};
+
+/**
+ * Rename the three BS#1281 discogs-unavailable columns from their DB
+ * snake_case to the camelCase wire shape wxyc-shared's api.yaml (Album /
+ * UpdateAlbumRequest schemas, #156) deliberately uses for this trio — the
+ * PATCH write path (`library.controller.ts#UPDATABLE_ALBUM_FIELDS`) already
+ * reads `discogsUnavailable`/`discogsUnavailableNote` off the request body in
+ * camelCase; this is the matching read-side rename (BS#1895). `Date` values
+ * pass through unconverted — `res.json()` serializes them to ISO strings via
+ * `Date.prototype.toJSON`, same as every other Date-typed field on these
+ * read surfaces (`add_date`, `last_modified`, ...).
+ */
+function withDiscogsUnavailableCamelCase<T extends DiscogsUnavailableSource>(
+  row: T
+): Omit<T, keyof DiscogsUnavailableSource> & {
+  discogsUnavailable: boolean;
+  discogsUnavailableNote: string | null;
+  lastDiscogsRecheckAt: Date | null;
+} {
+  const { discogs_unavailable, discogs_unavailable_note, last_discogs_recheck_at, ...rest } = row;
+  return {
+    ...rest,
+    discogsUnavailable: discogs_unavailable,
+    discogsUnavailableNote: discogs_unavailable_note,
+    lastDiscogsRecheckAt: last_discogs_recheck_at,
+  };
+}
+
 /** A row that carries the six external-ID fields (artist row, view row, or any join projection). */
 type ReconciledIdentitySource = {
   discogs_artist_id: number | null;
@@ -1140,6 +1177,14 @@ const LIBRARY_VIEW_PROJECTION = {
   apple_music_artist_id: artists.apple_music_artist_id,
   bandcamp_id: artists.bandcamp_id,
   artist_id: library.artist_id,
+  // BS#1895 (Not-on-Discogs epic #1280 sub-issue 5): serialize the MD-set
+  // flag onto every catalog read surface. `serializeLibraryArtistViewEntry`
+  // renames these to camelCase at the wire boundary, matching the
+  // deliberately-camelCase discogs* fields in wxyc-shared api.yaml's Album /
+  // UpdateAlbumRequest schemas (BS#1281's write-path convention).
+  discogs_unavailable: library.discogs_unavailable,
+  discogs_unavailable_note: library.discogs_unavailable_note,
+  last_discogs_recheck_at: library.last_discogs_recheck_at,
 } as const;
 
 /**
@@ -1185,7 +1230,10 @@ const LIBRARY_VIEW_PROJECTION_RAW = sql`
   ${artists.spotify_artist_id} AS spotify_artist_id,
   ${artists.apple_music_artist_id} AS apple_music_artist_id,
   ${artists.bandcamp_id} AS bandcamp_id,
-  ${library.artist_id} AS artist_id
+  ${library.artist_id} AS artist_id,
+  ${library.discogs_unavailable} AS discogs_unavailable,
+  ${library.discogs_unavailable_note} AS discogs_unavailable_note,
+  ${library.last_discogs_recheck_at} AS last_discogs_recheck_at
 `;
 
 /**
@@ -1511,10 +1559,16 @@ export const fuzzySearchLibrary = async (
  * `matched_via` rides through when the row came from the catalog-track-search
  * cascade (CTA / LML `/lookup` fallback), otherwise absent.
  */
-export type LibraryArtistViewResponse = Omit<LibraryArtistViewEntry, ReconciledIdentityKey> & {
+export type LibraryArtistViewResponse = Omit<
+  LibraryArtistViewEntry,
+  ReconciledIdentityKey | keyof DiscogsUnavailableSource
+> & {
   reconciled_identity: ReconciledIdentity | null;
   matched_via?: TrackMatchHint[];
   matched_via_alias?: ArtistMatchHint[];
+  discogsUnavailable: boolean;
+  discogsUnavailableNote: string | null;
+  lastDiscogsRecheckAt: Date | null;
 };
 
 /**
@@ -1522,10 +1576,11 @@ export type LibraryArtistViewResponse = Omit<LibraryArtistViewEntry, ReconciledI
  * Used at the read-endpoint boundary so the four `/library*` endpoints all
  * return the same nested-identity shape, regardless of whether they read the
  * view or join `artists` directly. Tagged rows (carrying `matched_via`)
- * preserve the tag through serialization.
+ * preserve the tag through serialization. BS#1895: also renames the three
+ * discogs-unavailable columns to their camelCase wire form.
  */
 export function serializeLibraryArtistViewEntry(row: TaggedLibraryViewEntry): LibraryArtistViewResponse {
-  return serializeReconciledIdentity(row) as LibraryArtistViewResponse;
+  return withDiscogsUnavailableCamelCase(serializeReconciledIdentity(row)) as LibraryArtistViewResponse;
 }
 
 /**
@@ -1818,6 +1873,11 @@ export const getAlbumFromDB = async (album_id: number) => {
       spotify_artist_id: artists.spotify_artist_id,
       apple_music_artist_id: artists.apple_music_artist_id,
       bandcamp_id: artists.bandcamp_id,
+      // BS#1895: album-detail read surface (GET /library/info?album_id= —
+      // the "GET /library/:id" surface in the issue's terms).
+      discogs_unavailable: library.discogs_unavailable,
+      discogs_unavailable_note: library.discogs_unavailable_note,
+      last_discogs_recheck_at: library.last_discogs_recheck_at,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -1834,7 +1894,7 @@ export const getAlbumFromDB = async (album_id: number) => {
     .limit(1);
 
   if (!album[0]) return undefined;
-  return serializeReconciledIdentity(album[0]);
+  return withDiscogsUnavailableCamelCase(serializeReconciledIdentity(album[0]));
 };
 
 /**
@@ -1870,6 +1930,45 @@ export const getAlbumByLegacyId = async (legacyReleaseId: number) => {
   const albumId = await getAlbumIdByLegacyId(legacyReleaseId);
   if (albumId === null) return undefined;
   return getAlbumFromDB(albumId);
+};
+
+/** Wire-shape of {@link getDiscogsUnavailableFlagsById}'s result. */
+export type DiscogsUnavailableFlags = {
+  discogsUnavailable: boolean;
+  discogsUnavailableNote: string | null;
+  lastDiscogsRecheckAt: Date | null;
+};
+
+/**
+ * Fetch just the three BS#1281 discogs-unavailable columns for a
+ * `library.id`, camelCased for the wire. BS#1895: the proxy iOS surface
+ * (`GET /proxy/metadata/album`, `proxy.controller.ts#getAlbumMetadata`)
+ * resolves an `album_id` against `flowsheet`/`album_metadata`, neither of
+ * which carries this MD-set flag — it lives only on `library`. This is the
+ * dedicated single-column lookup for that call site, deliberately narrower
+ * than {@link getAlbumFromDB} (no joins to `artists`/`format`/`genres`) since
+ * the proxy handler only needs the flag trio, not the full catalog row.
+ * Returns `undefined` when `album_id` doesn't resolve to a library row.
+ */
+export const getDiscogsUnavailableFlagsById = async (
+  album_id: number
+): Promise<DiscogsUnavailableFlags | undefined> => {
+  const rows = await db
+    .select({
+      discogs_unavailable: library.discogs_unavailable,
+      discogs_unavailable_note: library.discogs_unavailable_note,
+      last_discogs_recheck_at: library.last_discogs_recheck_at,
+    })
+    .from(library)
+    .where(eq(library.id, album_id))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return undefined;
+  return {
+    discogsUnavailable: row.discogs_unavailable,
+    discogsUnavailableNote: row.discogs_unavailable_note,
+    lastDiscogsRecheckAt: row.last_discogs_recheck_at,
+  };
 };
 
 export const markAlbumMissing = async (album_id: number) => {

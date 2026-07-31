@@ -181,6 +181,9 @@ function makeViewRow(overrides: Partial<LibraryArtistViewEntry> = {}): LibraryAr
     spotify_artist_id: null,
     apple_music_artist_id: null,
     bandcamp_id: null,
+    discogs_unavailable: false,
+    discogs_unavailable_note: null,
+    last_discogs_recheck_at: null,
     ...overrides,
   };
 }
@@ -222,5 +225,45 @@ describe('serializeLibraryArtistViewEntry', () => {
   test('returns reconciled_identity=null for a view row whose artist is unreconciled', () => {
     const wire = serializeLibraryArtistViewEntry(makeViewRow());
     expect(wire.reconciled_identity).toBeNull();
+  });
+
+  // BS#1895 (Not-on-Discogs epic #1280 sub-issue 5): discogs_unavailable
+  // (+ note, + last recheck timestamp) must reach catalog-search /
+  // album-detail responses, renamed to the camelCase wire form wxyc-shared's
+  // api.yaml (#156) uses for this trio.
+  describe('discogs-unavailable fields (BS#1895)', () => {
+    test('a flagged album serializes discogsUnavailable: true with its note', () => {
+      const wire = serializeLibraryArtistViewEntry(
+        makeViewRow({
+          discogs_unavailable: true,
+          discogs_unavailable_note: 'Embargoed promo pressing, MD confirmed 2026-06-01',
+        })
+      );
+
+      expect(wire.discogsUnavailable).toBe(true);
+      expect(wire.discogsUnavailableNote).toBe('Embargoed promo pressing, MD confirmed 2026-06-01');
+    });
+
+    test('an unflagged album serializes discogsUnavailable: false, not omitted', () => {
+      const wire = serializeLibraryArtistViewEntry(makeViewRow({ discogs_unavailable: false }));
+
+      expect(wire.discogsUnavailable).toBe(false);
+      expect(wire.discogsUnavailableNote).toBeNull();
+    });
+
+    test('passes lastDiscogsRecheckAt through when the recheck cron has stamped it', () => {
+      const recheckedAt = new Date('2026-07-20T04:00:00Z');
+      const wire = serializeLibraryArtistViewEntry(makeViewRow({ last_discogs_recheck_at: recheckedAt }));
+
+      expect(wire.lastDiscogsRecheckAt).toBe(recheckedAt);
+    });
+
+    test('strips the snake_case source columns from the wire shape', () => {
+      const wire = serializeLibraryArtistViewEntry(makeViewRow({ discogs_unavailable: true }));
+
+      expect(wire).not.toHaveProperty('discogs_unavailable');
+      expect(wire).not.toHaveProperty('discogs_unavailable_note');
+      expect(wire).not.toHaveProperty('last_discogs_recheck_at');
+    });
   });
 });

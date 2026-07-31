@@ -88,6 +88,7 @@ import {
   runCatalogTrackSearchCascade,
   __resetTrackSearchCacheForTests,
   getAlbumFromDB,
+  getDiscogsUnavailableFlagsById,
   markAlbumMissing,
   markAlbumFound,
   enrichWithArtwork,
@@ -1737,6 +1738,9 @@ describe('library.service', () => {
         spotify_artist_id: null,
         apple_music_artist_id: null,
         bandcamp_id: null,
+        discogs_unavailable: false,
+        discogs_unavailable_note: null,
+        last_discogs_recheck_at: null,
       };
       const chain = createMockQueryChain([mockAlbum]);
       db.select.mockReturnValue(chain);
@@ -1756,12 +1760,110 @@ describe('library.service', () => {
       expect(db.select).toHaveBeenCalled();
     });
 
+    // BS#1895: album-detail (GET /library/info?album_id=, the "GET
+    // /library/:id" surface) must serialize the MD-set Not-on-Discogs flag,
+    // camelCased and with the snake_case source columns stripped.
+    it('serializes discogsUnavailable/discogsUnavailableNote/lastDiscogsRecheckAt and strips the source columns', async () => {
+      const recheckedAt = new Date('2026-07-15T00:00:00Z');
+      const mockAlbum = {
+        id: 42,
+        code_letters: 'AU',
+        code_artist_number: 1,
+        code_number: 3,
+        artist_name: 'Autechre',
+        alphabetical_name: 'Autechre',
+        album_title: 'Confield',
+        record_label: 'Warp',
+        label_id: 10,
+        plays: 5,
+        add_date: new Date('2024-01-15'),
+        last_modified: new Date('2024-03-01'),
+        format_name: 'CD',
+        genre_name: 'Electronic',
+        date_lost: null,
+        date_found: null,
+        on_streaming: true,
+        discogs_artist_id: null,
+        musicbrainz_artist_id: null,
+        wikidata_qid: null,
+        spotify_artist_id: null,
+        apple_music_artist_id: null,
+        bandcamp_id: null,
+        discogs_unavailable: true,
+        discogs_unavailable_note: 'Embargoed promo, MD-confirmed',
+        last_discogs_recheck_at: recheckedAt,
+      };
+      const chain = createMockQueryChain([mockAlbum]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockAlbum]);
+
+      const result = await getAlbumFromDB(42);
+
+      expect(result).toMatchObject({
+        discogsUnavailable: true,
+        discogsUnavailableNote: 'Embargoed promo, MD-confirmed',
+        lastDiscogsRecheckAt: recheckedAt,
+      });
+      expect(result).not.toHaveProperty('discogs_unavailable');
+      expect(result).not.toHaveProperty('discogs_unavailable_note');
+      expect(result).not.toHaveProperty('last_discogs_recheck_at');
+    });
+
     it('returns undefined when album not found', async () => {
       const chain = createMockQueryChain([]);
       db.select.mockReturnValue(chain);
       chain.limit = jest.fn().mockResolvedValue([]);
 
       const result = await getAlbumFromDB(999);
+
+      expect(result).toBeUndefined();
+    });
+  });
+
+  describe('getDiscogsUnavailableFlagsById (BS#1895)', () => {
+    it('returns the camelCased flag trio for a flagged library row', async () => {
+      const recheckedAt = new Date('2026-07-15T00:00:00Z');
+      const rows = [
+        {
+          discogs_unavailable: true,
+          discogs_unavailable_note: 'Embargoed promo',
+          last_discogs_recheck_at: recheckedAt,
+        },
+      ];
+      const chain = createMockQueryChain(rows);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue(rows);
+
+      const result = await getDiscogsUnavailableFlagsById(4242);
+
+      expect(result).toEqual({
+        discogsUnavailable: true,
+        discogsUnavailableNote: 'Embargoed promo',
+        lastDiscogsRecheckAt: recheckedAt,
+      });
+    });
+
+    it('returns false/null defaults for an unflagged library row', async () => {
+      const rows = [{ discogs_unavailable: false, discogs_unavailable_note: null, last_discogs_recheck_at: null }];
+      const chain = createMockQueryChain(rows);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue(rows);
+
+      const result = await getDiscogsUnavailableFlagsById(4242);
+
+      expect(result).toEqual({
+        discogsUnavailable: false,
+        discogsUnavailableNote: null,
+        lastDiscogsRecheckAt: null,
+      });
+    });
+
+    it('returns undefined when the album_id resolves to no library row', async () => {
+      const chain = createMockQueryChain([]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([]);
+
+      const result = await getDiscogsUnavailableFlagsById(999999);
 
       expect(result).toBeUndefined();
     });
