@@ -61,6 +61,16 @@ describe('LML client limiter env vars (BS#955)', () => {
       expect(captured).toBeDefined();
       expect(Number(captured)).toBeGreaterThanOrEqual(10000);
     });
+
+    it('sets LML_BREAKER_FAILURE_THRESHOLD out of reach (BS#1748)', () => {
+      // Default is 5. The breaker lives on the process-wide defaultLimiter, so
+      // a burst of 5 simulated LML timeouts in one --runInBand spec would open
+      // it and leak the 30 s open window into later specs. CI raises the
+      // threshold out of reach to disable that cross-spec coupling.
+      const captured = backendBlock.match(/LML_BREAKER_FAILURE_THRESHOLD=(\d+)/)?.[1];
+      expect(captured).toBeDefined();
+      expect(Number(captured)).toBeGreaterThanOrEqual(100000);
+    });
   });
 
   describe('.github/workflows/test.yml Start services env (GHA CI)', () => {
@@ -82,6 +92,12 @@ describe('LML client limiter env vars (BS#955)', () => {
       const captured = startServicesBlock.match(/LML_CLIENT_RATE_PER_MIN:\s*['"]?(\d+)['"]?/)?.[1];
       expect(captured).toBeDefined();
       expect(Number(captured)).toBeGreaterThanOrEqual(10000);
+    });
+
+    it('sets LML_BREAKER_FAILURE_THRESHOLD out of reach (BS#1748)', () => {
+      const captured = startServicesBlock.match(/LML_BREAKER_FAILURE_THRESHOLD:\s*['"]?(\d+)['"]?/)?.[1];
+      expect(captured).toBeDefined();
+      expect(Number(captured)).toBeGreaterThanOrEqual(100000);
     });
   });
 });
