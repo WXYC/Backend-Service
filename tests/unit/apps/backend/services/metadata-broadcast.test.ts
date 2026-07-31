@@ -20,7 +20,7 @@ jest.mock('@sentry/node', () => ({
 
 jest.mock('../../../../../apps/backend/utils/serverEvents.js', () => ({
   Topics: { liveFs: 'live-fs-topic' },
-  FsEvents: { update: 'update' },
+  FsEvents: { update: 'update', insert: 'insert' },
   serverEventsMgr: { broadcast: jest.fn() },
 }));
 
@@ -31,6 +31,7 @@ jest.mock('@wxyc/database', () => ({
 import * as Sentry from '@sentry/node';
 import {
   filterMetadataUpdate,
+  filterMetadataInsert,
   setupMetadataBroadcast,
 } from '../../../../../apps/backend/services/metadata-broadcast/metadata-broadcast';
 import { onCdcEvent } from '@wxyc/database';
@@ -197,5 +198,146 @@ describe('setupMetadataBroadcast Sentry path (BS-2)', () => {
 
     expect(serverEventsMgr.broadcast).toHaveBeenCalledTimes(1);
     expect(Sentry.captureException).not.toHaveBeenCalled();
+  });
+});
+
+const flowsheetInsert = (overrides: Partial<Record<string, unknown>> = {}): CdcEvent => ({
+  table: 'flowsheet',
+  schema: 'wxyc_schema',
+  action: 'INSERT',
+  data: {
+    id: 77,
+    entry_type: 'track',
+    metadata_status: 'pending',
+    ...overrides,
+  },
+  timestamp: 1779856000000,
+});
+
+describe('filterMetadataInsert (BS#1888)', () => {
+  // Symmetric with filterMetadataUpdate: a flowsheet INSERT of a `track` row is
+  // the Epic C "a new track was played" event. The CDC trigger captures every
+  // insert source (dj-site/iOS addEntry, flowsheet ETL, auto-dj), so a live
+  // subscriber appends the row regardless of origin. The row is `pending` at
+  // insert; enrichment arrives seconds later as the existing `liveFs:update`.
+
+  it('projects the client-facing row as the payload on a track INSERT, dropping internal columns', () => {
+    const event = flowsheetInsert({
+      artist_name: 'Jessica Pratt',
+      album_title: 'On Your Own Love Again',
+      track_title: 'Back, Baby',
+      record_label: 'Drag City',
+      // pre-enrichment: enrichment fields still null
+      artwork_url: null,
+      release_year: null,
+      // internal columns on the raw CDC row — must be stripped
+      search_doc: "'jessica':1A",
+      composer: 'Jessica Pratt',
+      legacy_entry_id: 8888,
+    });
+    expect(filterMetadataInsert(event)).toEqual({
+      id: 77,
+      entry_type: 'track',
+      metadata_status: 'pending',
+      artist_name: 'Jessica Pratt',
+      album_title: 'On Your Own Love Again',
+      track_title: 'Back, Baby',
+      record_label: 'Drag City',
+      artwork_url: null,
+      release_year: null,
+    });
+  });
+
+  it('strips every internal column and keeps client columns from a full CDC row', () => {
+    // makeFullFlowsheetRow() supplies its own id (42) + entry_type ('track'),
+    // which win over flowsheetInsert's defaults via the spread.
+    const payload = filterMetadataInsert(flowsheetInsert(makeFullFlowsheetRow()));
+    expect(payload).not.toBeNull();
+    for (const internalKey of INTERNAL_FLOWSHEET_COLUMNS) {
+      expect(payload).not.toHaveProperty(internalKey);
+    }
+    expect(payload).toMatchObject({ id: 42, entry_type: 'track' });
+  });
+
+  it('skips a non-track INSERT (marker/message rows are not the "new track" signal)', () => {
+    expect(filterMetadataInsert(flowsheetInsert({ entry_type: 'breakpoint' }))).toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ entry_type: 'message' }))).toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ entry_type: 'dj_join' }))).toBeNull();
+  });
+
+  it('skips UPDATE events (those are the enrichment output, handled by filterMetadataUpdate)', () => {
+    expect(filterMetadataInsert({ ...flowsheetInsert(), action: 'UPDATE' })).toBeNull();
+  });
+
+  it('skips DELETE events', () => {
+    expect(filterMetadataInsert({ ...flowsheetInsert(), action: 'DELETE' })).toBeNull();
+  });
+
+  it('skips events for tables other than flowsheet', () => {
+    expect(filterMetadataInsert({ ...flowsheetInsert(), table: 'rotation' })).toBeNull();
+  });
+
+  it('skips when data is missing', () => {
+    expect(filterMetadataInsert({ ...flowsheetInsert(), data: null })).toBeNull();
+  });
+
+  it('skips when id is missing or not a number', () => {
+    expect(filterMetadataInsert(flowsheetInsert({ id: undefined }))).toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ id: 'seventy-seven' }))).toBeNull();
+  });
+});
+
+describe('setupMetadataBroadcast liveFs:insert registration (BS#1888)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('broadcasts a liveFs:insert on a track INSERT via a second CDC registration', () => {
+    (serverEventsMgr.broadcast as jest.Mock).mockImplementation(() => undefined);
+
+    setupMetadataBroadcast();
+
+    // Two registrations: [0] = update (asserted above), [1] = insert.
+    expect((onCdcEvent as jest.Mock).mock.calls.length).toBe(2);
+    const insertCb = (onCdcEvent as jest.Mock).mock.calls[1][0] as (event: CdcEvent) => void;
+    insertCb(flowsheetInsert({ artist_name: 'Stereolab', album_title: 'Aluminum Tunes' }));
+
+    expect(serverEventsMgr.broadcast).toHaveBeenCalledTimes(1);
+    const [topic, frame] = (serverEventsMgr.broadcast as jest.Mock).mock.calls[0];
+    expect(topic).toBe('live-fs-topic');
+    expect(frame).toMatchObject({
+      type: 'insert',
+      payload: expect.objectContaining({ id: 77, entry_type: 'track', metadata_status: 'pending' }),
+    });
+  });
+
+  it('does not broadcast on a non-track INSERT', () => {
+    (serverEventsMgr.broadcast as jest.Mock).mockImplementation(() => undefined);
+
+    setupMetadataBroadcast();
+
+    const insertCb = (onCdcEvent as jest.Mock).mock.calls[1][0] as (event: CdcEvent) => void;
+    insertCb(flowsheetInsert({ entry_type: 'show_start' }));
+
+    expect(serverEventsMgr.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('captures an insert-broadcast exception to Sentry with module tag', () => {
+    (serverEventsMgr.broadcast as jest.Mock).mockImplementation(() => {
+      throw new Error('insert boom');
+    });
+
+    setupMetadataBroadcast();
+
+    const insertCb = (onCdcEvent as jest.Mock).mock.calls[1][0] as (event: CdcEvent) => void;
+    insertCb(flowsheetInsert());
+
+    expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+    const [err, context] = (Sentry.captureException as jest.Mock).mock.calls[0];
+    expect((err as Error).message).toBe('insert boom');
+    expect(context).toMatchObject({
+      tags: expect.objectContaining({ module: 'metadata-broadcast' }),
+      extra: expect.objectContaining({ id: 77 }),
+    });
   });
 });

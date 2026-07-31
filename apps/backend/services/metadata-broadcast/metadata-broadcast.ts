@@ -46,6 +46,7 @@
 import * as Sentry from '@sentry/node';
 import type { CdcEvent } from '@wxyc/database';
 import { onCdcEvent } from '@wxyc/database';
+import type { LiveFsInsertEvent } from '@wxyc/shared/dtos';
 import { serverEventsMgr, Topics, FsEvents } from '../../utils/serverEvents.js';
 import { pickClientFacingColumns } from '../../utils/flowsheet-projection.js';
 
@@ -91,6 +92,48 @@ export function filterMetadataUpdate(event: CdcEvent): LiveFsUpdatePayload | nul
 }
 
 /**
+ * Pure filter for the `liveFs:insert` broadcast (BS#1888) — returns the
+ * client-facing row payload on a match, null on skip.
+ *
+ * Fires on a flowsheet INSERT of a `track` row: the Epic C ([#877]) "a new
+ * track was played" event. The CDC trigger captures every insert source (a
+ * dj-site/iOS `addEntry`, the flowsheet ETL, the auto-dj orchestrator), so a
+ * subscriber appends the row live regardless of origin, no polling. The row is
+ * `metadata_status: 'pending'` at insert; its enrichment fields arrive seconds
+ * later as the existing `liveFs:update`. INSERT and UPDATE are distinct CDC
+ * actions, so the two broadcasters never double-emit for one row.
+ *
+ * Scoped to `entry_type === 'track'`. Marker / message rows (`show_start`,
+ * `dj_join`, breakpoints, talksets) are excluded: they aren't the "new track"
+ * signal the iOS consumer ([wxyc-ios-64#269]) appends, and excluding them keeps
+ * a bulk historical flowsheet import from flooding live subscribers with
+ * non-track rows. A steady-state insert is always a live/recent row, so a
+ * normal play still broadcasts.
+ *
+ * Same `CLIENT_FACING_FLOWSHEET_COLUMNS` projection as the update broadcast
+ * (BS#1534) — internal CDC columns never ride the anonymous stream. The payload
+ * is the generated `LiveFsInsertEvent['payload']` (`FlowsheetEntryResponse`)
+ * from `@wxyc/shared` (#273), whose enrichment fields are nullable so a
+ * pre-enrichment row is valid.
+ */
+export function filterMetadataInsert(event: CdcEvent): LiveFsInsertEvent['payload'] | null {
+  if (event.table !== 'flowsheet') return null;
+  if (event.action !== 'INSERT') return null;
+  if (!event.data) return null;
+
+  const data = event.data as Record<string, unknown>;
+  if (data.entry_type !== 'track') return null;
+
+  const id = data.id;
+  if (typeof id !== 'number') return null;
+
+  return {
+    ...pickClientFacingColumns(data),
+    id,
+  } as LiveFsInsertEvent['payload'];
+}
+
+/**
  * Register the metadata-broadcast CDC handler. Call once at startup, after
  * `serverEventsMgr` is ready. Sits alongside `setupCdcWebSocket()` — both
  * register independent `onCdcEvent` handlers against the per-process LISTEN
@@ -117,6 +160,27 @@ export function setupMetadataBroadcast(): void {
       Sentry.captureException(err, {
         tags: { module: 'metadata-broadcast', subsystem: 'sse' },
         extra: { id: payload.id, metadata_status: payload.metadata_status },
+      });
+    }
+  });
+
+  // BS#1888: broadcast `liveFs:insert` the instant a track row is created,
+  // before enrichment. A separate `onCdcEvent` registration (INSERT vs the
+  // update handler's UPDATE) so the two never double-emit for one row — a track
+  // fires `insert` on creation, then `update` when its metadata_status reaches a
+  // terminal state. Same per-process LISTEN + own-clients-only fan-out.
+  onCdcEvent((event) => {
+    const payload = filterMetadataInsert(event);
+    if (!payload) return;
+    try {
+      serverEventsMgr.broadcast(Topics.liveFs, {
+        type: FsEvents.insert,
+        payload,
+      });
+    } catch (err) {
+      Sentry.captureException(err, {
+        tags: { module: 'metadata-broadcast', subsystem: 'sse' },
+        extra: { id: payload.id },
       });
     }
   });

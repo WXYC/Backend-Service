@@ -25,7 +25,11 @@ export const PrimaryDjEvents = {
 } as const;
 
 export const FsEvents = {
-  add: 'add',
+  // `insert` is the `LiveFsInsertEvent` discriminator (wxyc-shared#273); it is
+  // broadcast on a new track row (BS#1888). `update`/`refetch` are the existing
+  // members. (Renamed from the never-broadcast `add: 'add'`, whose value didn't
+  // match the contract discriminator.)
+  insert: 'insert',
   delete: 'delete',
   update: 'update',
   refetch: 'refetch',
