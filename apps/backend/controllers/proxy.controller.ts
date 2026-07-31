@@ -468,6 +468,12 @@ function parseDiscogsReleaseIdFromUrl(url: string): number | undefined {
 
 const albumMetadataCache = new LRUCache<string, Record<string, unknown>>({
   max: 2000,
+  // BS#1893: bound worst-case memory, not just entry count. An album entry can
+  // carry a large `tracklist` (box sets, 100+ tracks) plus `bioTokens`; the
+  // count-only cap let a pathological Discogs release balloon this cache
+  // unbounded per entry. Mirrors the sibling `artworkCache`'s `maxSize` cap.
+  maxSize: 32 * 1024 * 1024, // 32 MB total
+  sizeCalculation: (value) => Buffer.byteLength(JSON.stringify(value)) || 1,
   ttl: 1000 * 60 * 60, // 1h (BS#988)
 });
 
@@ -478,6 +484,14 @@ export function __resetAlbumMetadataCacheForTests(): void {
 
 /** Base fields excluded from the cached value — see the cache's doc comment above. */
 const ALBUM_METADATA_BASE_FIELDS = new Set(['artistName', 'releaseTitle', 'trackTitle']);
+
+// BS#1893: `metadata_status` values whose row is still mid-enrichment. A
+// `pending` / `enriching` album has no terminal `album_metadata` yet — the CDC
+// worker lands enrichment seconds later — so memoizing the point-in-time
+// snapshot would strand a stale `metadataStatus` + missing fields for the full
+// 1h TTL on this proxy path. The terminal states (`enriched_match`,
+// `enriched_no_match`, `failed_no_retry`) are stable and safe to cache.
+const NON_TERMINAL_METADATA_STATUSES = new Set(['pending', 'enriching']);
 
 function extractAlbumMetadataEnrichment(metadata: Record<string, unknown>): Record<string, unknown> {
   const enrichment: Record<string, unknown> = {};
@@ -693,6 +707,13 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
       }
     }
 
+    // BS#1893: never memoize a non-terminal (pending/enriching) snapshot. Its
+    // enrichment lands seconds later via the CDC worker, and a 1h-cached pending
+    // snapshot would mask that freshness on this path until the TTL expires.
+    if (typeof metadata.metadataStatus === 'string' && NON_TERMINAL_METADATA_STATUSES.has(metadata.metadataStatus)) {
+      cacheable = false;
+    }
+
     if (cacheable) {
       albumMetadataCache.set(cacheKey, extractAlbumMetadataEnrichment(metadata));
     }
@@ -817,12 +838,25 @@ export const getArtistMetadata: RequestHandler<object, unknown, unknown, ArtistM
 
 const entityResolveCache = new LRUCache<string, { body: Record<string, unknown> | null }>({
   max: 2000,
-  ttl: 1000 * 60 * 60 * 24, // 24h (BS#988)
+  ttl: 1000 * 60 * 60 * 24, // 24h (BS#988) — positive resolutions are immutable
 });
+
+// BS#1893: a confirmed 404 is negative-cached, but LML resolves entities out of
+// its discogs-cache, which has known transient-404 windows during rebuilds (the
+// discogs-cache-rebuild <-> LML race). Decouple the negative TTL from the 24h
+// positive one so a rebuild-transient absence self-corrects in minutes instead
+// of pinning "not found" per container for a full day. Mirrors the sibling
+// `tracklistCache`'s 10-min 404 memo.
+const ENTITY_RESOLVE_NEGATIVE_TTL_MS = 1000 * 60 * 10; // 10 min
 
 /** Test-only: drop cached entries between cases. */
 export function __resetEntityResolveCacheForTests(): void {
   entityResolveCache.clear();
+}
+
+/** Test-only: remaining TTL (ms) for a cached entity-resolve entry. */
+export function __getEntityResolveRemainingTtlForTests(type: string, id: number): number {
+  return entityResolveCache.getRemainingTTL(entityResolveCacheKey(type, id));
 }
 
 function entityResolveCacheKey(type: string, id: number): string {
@@ -867,7 +901,9 @@ export const resolveEntity: RequestHandler<object, unknown, unknown, EntityResol
         // request for the same type+id doesn't re-hit LML for the rest of
         // the TTL. Any other status is a transient failure and is
         // deliberately NOT cached; the original error still propagates.
-        entityResolveCache.set(cacheKey, { body: null });
+        // BS#1893: give the 404 a short TTL (not the 24h positive default) so a
+        // discogs-cache-rebuild-transient absence self-corrects quickly.
+        entityResolveCache.set(cacheKey, { body: null }, { ttl: ENTITY_RESOLVE_NEGATIVE_TTL_MS });
       }
       throw err;
     }
