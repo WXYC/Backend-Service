@@ -1,0 +1,82 @@
+-- @no-precondition-needed: no constraint is added. `fold_artist_name(text)` is
+--   an IMMUTABLE PARALLEL SAFE function total over `text` (coalesce(NULL,'')),
+--   and `artists_fold_name_idx` is a plain (non-unique) btree on the function's
+--   output — neither admits a data invariant that current rows must satisfy. A
+--   NULL `artist_name` cannot raise (the column is NOT NULL anyway; the coalesce
+--   is defense-in-depth so the index never emits a NULL key).
+-- @no-analyze-needed: no UPDATE in this migration. The CREATE INDEX populates
+--   index stats during the build; the table's row counts and column stats are
+--   unaffected.
+--
+-- 0134 — `fold_artist_name(text)` SQL function + functional index on
+-- `artists` supporting the catalog write-boundary artist matcher (BS#1897).
+--
+-- The Music Director add-album path resolves an artist by name in
+-- `artistIdFromName` (apps/backend/services/library.service.ts). The old
+-- predicate was `lower(artists.artist_name) = lower($name)`, which is
+-- collation-aware but NOT Unicode-form aware: `Nilüfer Yanya` in NFC (`ü` =
+-- U+00FC) vs NFD (`u` + U+0308) is byte-distinct, misses the match, and the
+-- add-artist path then inserts a duplicate `artists` row. The ASCII-fold
+-- `Nilufer Yanya` becomes a third. Duplicate artist rows silently partition
+-- `library` rows across `artist_id`s and break reconciled-identity attachment.
+-- This is the runtime-path sibling of BS#1095 (library-etl `ensureArtist`) and
+-- BS#521 (artist-identity-etl); unlike those it survives tubafrenzy turndown
+-- and is the write path MDs are onboarding onto now (WXYC/wiki#89 Phase 3.5).
+--
+-- `fold_artist_name` collapses three axes of the same name onto one key:
+--   1. Unicode composition form — via `normalize(..., NFD)`.
+--   2. Diacritics — decompose to NFD, then strip the Combining Diacritical
+--      Marks block U+0300–U+036F, so `Nilüfer` and the ASCII-fold `Nilufer`
+--      collapse. (`normalize(..., NFC)` alone does NOT do this — NFC never
+--      removes a diaeresis — which is why the function decomposes and strips.)
+--   3. Case — via the trailing `lower()`.
+-- It deliberately does NOT strip a leading "The " (that is
+-- `normalize_artist_name`'s job, migration 0092); this fold is a strict
+-- superset of the pre-existing `lower()` matcher, adding only form/diacritic
+-- insensitivity, so it must not newly merge "The Notwist" with "Notwist".
+--
+-- TypeScript twin: `shared/database/src/fold-artist-name.ts` (`foldArtistName`),
+-- so the `jobs/artist-unicode-dedup` in-memory preview and unit tests fold the
+-- same way. The unit test `tests/unit/database/fold-artist-name.test.ts` pins
+-- the contract; this function must change with that file.
+--
+-- Collation note (same foot-gun 0092 documents): PG `lower()` is catalog-marked
+-- IMMUTABLE but is actually lc_ctype-dependent. The functional index freezes
+-- whatever lc_ctype the cluster has at build time. WXYC RDS runs `en_US.UTF-8`;
+-- if that ever changes (or a restore targets a different lc_ctype), REINDEX
+-- `artists_fold_name_idx`.
+--
+-- Regex-escape note: the character class `'[\u0300-\u036f]'` relies on
+-- `standard_conforming_strings = on` (PG default) so the backslash reaches the
+-- regex engine literally, which then interprets `\uXXXX`. Both `normalize()`
+-- (PG13+) and `\uXXXX` regex escapes are available on prod PG14 and the PG18
+-- dev/CI container (see docs/migrations.md dev-prod-pg-version-skew).
+--
+-- Index rationale: `artistIdFromName` runs on the interactive MD add-album
+-- write boundary and now matches on `fold_artist_name(artist_name)`. Without a
+-- functional index that predicate forces a seq scan over the ~120k `artists`
+-- rows per add. `artists_fold_name_idx` is a plain (non-unique) btree — the
+-- catalog has real folded-name duplicate groups (this is exactly the defect
+-- BS#1897's dedup job resolves), and the matcher's `LIMIT 1` + genre scoping
+-- picks a single row deterministically, so non-uniqueness is required.
+--
+-- Concurrency: per docs/migrations.md `if-not-exists-index`, the prod runbook is
+-- to build the index out-of-band with CREATE INDEX CONCURRENTLY first so this
+-- migration is a no-op against the running DB; the IF NOT EXISTS clause lets it
+-- apply cleanly in either order. The function itself (CREATE OR REPLACE
+-- FUNCTION) is metadata-only and acquires no row-level lock; safe in-band. The
+-- in-migration index form is NOT CONCURRENTLY because Drizzle wraps each
+-- migration in a transaction (CONCURRENTLY cannot run inside a transaction).
+--
+-- Production runbook (run outside any transaction, after the function exists):
+--
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "artists_fold_name_idx"
+--     ON "wxyc_schema"."artists" (wxyc_schema.fold_artist_name("artist_name"));
+--
+-- Companion job: jobs/artist-unicode-dedup/ (this PR).
+
+CREATE OR REPLACE FUNCTION wxyc_schema.fold_artist_name(input text) RETURNS text
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+  SELECT lower(regexp_replace(normalize(coalesce(input, ''), NFD), '[\u0300-\u036f]', '', 'g'));
+$$;--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "artists_fold_name_idx" ON "wxyc_schema"."artists" USING btree (wxyc_schema.fold_artist_name("artist_name"));

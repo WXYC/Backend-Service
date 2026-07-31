@@ -918,6 +918,13 @@
       "when": 1785512607327,
       "tag": "0133_1895-serialize-discogs-unavailable",
       "breakpoints": true
+    },
+    {
+      "idx": 134,
+      "version": "7",
+      "when": 1785512607328,
+      "tag": "0134_fold-artist-name",
+      "breakpoints": true
     }
   ]
 }
