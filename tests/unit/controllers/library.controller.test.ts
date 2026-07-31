@@ -479,6 +479,63 @@ describe('library.controller', () => {
         expect(mockUpdateCanonicalEntity).not.toHaveBeenCalled();
       });
     });
+
+    describe('discogs_unavailable gate (BS#1294 1c)', () => {
+      beforeEach(() => {
+        mockGetArtistNameById.mockResolvedValue('Juana Molina');
+        mockIsLmlConfigured.mockReturnValue(true);
+        mockCheckStreamingAvailability.mockResolvedValue({ on_streaming: null });
+        mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'none' });
+        mockMapLookupToCanonicalEntity.mockReturnValue(null);
+      });
+
+      const req = () =>
+        ({
+          body: {
+            album_title: 'DOGA',
+            artist_id: 42,
+            // The artwork-lookup call reads `body.artist_name` directly (not
+            // the canonical name resolved via getArtistNameById), so it must
+            // be present here to assert the exact call args below.
+            artist_name: 'Juana Molina',
+            label: 'Sonamos',
+            genre_id: 11,
+            format_id: 1,
+          },
+        }) as unknown as Request;
+
+      it('pre-reads the freshly inserted row and forwards discogsUnavailable: false to the artwork lookup (fresh-insert no-op)', async () => {
+        mockInsertAlbum.mockImplementation((album) =>
+          Promise.resolve({ id: 501, ...album, discogs_unavailable: false })
+        );
+
+        const res = mockResponse();
+        await addAlbum(req(), res, next);
+
+        expect(mockLookupMetadata).toHaveBeenCalledWith(
+          'Juana Molina',
+          'DOGA',
+          undefined,
+          expect.objectContaining({ caller: 'library-add-album', discogsUnavailable: false })
+        );
+      });
+
+      it('forwards discogsUnavailable: true when the inserted row is already flagged (constructed case — never happens on fresh-insert)', async () => {
+        mockInsertAlbum.mockImplementation((album) =>
+          Promise.resolve({ id: 501, ...album, discogs_unavailable: true })
+        );
+
+        const res = mockResponse();
+        await addAlbum(req(), res, next);
+
+        expect(mockLookupMetadata).toHaveBeenCalledWith(
+          'Juana Molina',
+          'DOGA',
+          undefined,
+          expect.objectContaining({ caller: 'library-add-album', discogsUnavailable: true })
+        );
+      });
+    });
   });
 
   describe('getRotationTracks', () => {

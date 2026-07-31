@@ -60,7 +60,7 @@ import { lookupMetadata, type LookupOptions, type LookupResponse } from '@wxyc/l
  */
 export type CoordinatorLookupOptions = Pick<
   LookupOptions,
-  'budgetMs' | 'timeoutMs' | 'caller' | 'warm_cache' | 'limiter'
+  'budgetMs' | 'timeoutMs' | 'caller' | 'warm_cache' | 'limiter' | 'discogsUnavailable'
 > & {
   /**
    * When set, the coordinator returns `null` if the resolved response's
@@ -217,6 +217,7 @@ export class LmlLookupCoordinator {
       timeoutMs: options?.timeoutMs,
       caller: options?.caller,
       limiter: options?.limiter,
+      discogsUnavailable: options?.discogsUnavailable,
     });
   }
 

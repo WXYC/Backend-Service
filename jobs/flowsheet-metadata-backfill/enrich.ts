@@ -84,6 +84,13 @@ export type EnrichRow = {
   // (free-form entries, until their linkage resolves). Sourced from the
   // orchestrator's SELECT (`loadBatch` in orchestrate.ts).
   album_id: number | null;
+  // BS#1294 (1c): the linked album's `library.discogs_unavailable` flag,
+  // pre-read by the orchestrator's batch loader (LEFT JOIN library) and
+  // passed through to the lookupMetadata gate (BS#1293). Optional/undefined
+  // for unlinked rows (album_id IS NULL — no library row to join) and in
+  // hand-built test fixtures that predate this field; the lookup helper
+  // treats both the same as `false`.
+  discogs_unavailable?: boolean;
 };
 
 export type EnrichOutcome = 'enriched_match' | 'enriched_match_raced' | 'enriched_no_match' | 'enriched_no_match_raced';

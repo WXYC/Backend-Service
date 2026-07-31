@@ -309,7 +309,7 @@ describe('processRow', () => {
     const result = await processRow(row, { lookup, enrich });
 
     expect(result).toEqual({ outcome: 'enriched_match', cacheHit: false });
-    expect(lookup).toHaveBeenCalledWith('Autechre', 'Confield', 'VI Scose Poise');
+    expect(lookup).toHaveBeenCalledWith('Autechre', 'Confield', 'VI Scose Poise', undefined);
     expect(enrich).toHaveBeenCalledWith(row, matchedResponse);
   });
 
@@ -501,7 +501,17 @@ describe('processRow', () => {
 
     await processRow(sparseRow, { lookup, enrich });
 
-    expect(lookup).toHaveBeenCalledWith('Lone Anonymous', undefined, undefined);
+    expect(lookup).toHaveBeenCalledWith('Lone Anonymous', undefined, undefined, undefined);
+  });
+
+  it('BS#1294 (1c): forwards row.discogs_unavailable to the lookup call', async () => {
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult(false));
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_no_match');
+    const flaggedRow = { ...row, discogs_unavailable: true };
+
+    await processRow(flaggedRow, { lookup, enrich });
+
+    expect(lookup).toHaveBeenCalledWith('Autechre', 'Confield', 'VI Scose Poise', true);
   });
 });
 
@@ -748,6 +758,38 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
     expect(values2).toContain('{20}');
   });
 
+  it('BS#1294 (1c): batch SELECT LEFT JOINs library and pre-reads discogs_unavailable; flagged rows never reach LML', async () => {
+    const buildWorkList = injectWorkList([[10, 12]]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ ...rowFor(10), discogs_unavailable: true }]);
+
+    const flaggedLookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult(false));
+
+    const result = await runBackfill({
+      lookup: flaggedLookup,
+      enrich,
+      batchSize: 1,
+      throttleMs: 0,
+      liveActivityLookbackSeconds: 0,
+      playFloor: 5,
+      floorRecencyDays: 7,
+      buildWorkList,
+    });
+
+    const sql1 = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
+    // renderSql doesn't traverse the nested `sql.raw` table-name chunks
+    // (FLOWSHEET_TABLE / LIBRARY_TABLE both render as empty strings here —
+    // the pre-existing tests above never assert on `FROM` content for the
+    // same reason), so pin the JOIN shape via the alias + ON clause instead.
+    expect(sql1).toMatch(/LEFT\s+JOIN/i);
+    expect(sql1).toMatch(/ON\s+f\."?album_id"?\s*=\s*l\."?id"?/i);
+    expect(sql1).toMatch(/COALESCE\s*\(\s*l\."?discogs_unavailable"?\s*,\s*false\s*\)\s+AS\s+"?discogs_unavailable"?/i);
+
+    // The flag reached the lookup call — lml-client's gate (BS#1293) is
+    // what actually skips the LML call; this pins the wire, not the gate.
+    expect(flaggedLookup).toHaveBeenCalledWith('artist-10', undefined, undefined, true);
+    expect(result.totals.scanned).toBe(1);
+  });
+
   it('no-wedge: a failing row is never re-selected within the run; it stays for the next run (BS#1011 lineage)', async () => {
     // The hard-won BS#1011 property under the new ordering: an lml_error row
     // stays metadata_attempt_at IS NULL (deliberately retryable), so a naive
@@ -818,7 +860,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
     expect(result.totals.stale_skipped).toBe(1);
     expect(result.totals.scanned).toBe(1);
     expect(lookup).toHaveBeenCalledTimes(1);
-    expect(lookup).toHaveBeenCalledWith('artist-20', undefined, undefined);
+    expect(lookup).toHaveBeenCalledWith('artist-20', undefined, undefined, undefined);
   });
 
   it('reconciles worker-terminal rows with a marker-only stamp and zero LML calls (worker_reconciled)', async () => {
@@ -857,7 +899,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
     expect(result.totals.scanned).toBe(1);
     expect(result.totals.enriched_match).toBe(1);
     expect(lookup).toHaveBeenCalledTimes(1);
-    expect(lookup).toHaveBeenCalledWith('artist-20', undefined, undefined);
+    expect(lookup).toHaveBeenCalledWith('artist-20', undefined, undefined, undefined);
 
     // The reconcile statement is a marker-guarded, marker-only UPDATE with
     // RETURNING (the count comes from rows actually stamped), binding the

@@ -121,7 +121,15 @@ const hasUpstreamTimeout = (response: LookupResponse): boolean => response.timeo
  */
 export type LookupResult = { response: LookupResponse; cacheHit: boolean };
 
-export const lookupMetadata = async (artist: string, album?: string, track?: string): Promise<LookupResult> => {
+export const lookupMetadata = async (
+  artist: string,
+  album?: string,
+  track?: string,
+  // BS#1294 (1c): pre-read `library.discogs_unavailable` from the
+  // orchestrator's batch loader; forwarded to the BS#1293 gate in
+  // `@wxyc/lml-client`, which short-circuits the LML call.
+  discogsUnavailable?: boolean
+): Promise<LookupResult> => {
   const cached = activeCache.get(artist, album);
   if (cached !== undefined) return { response: cached, cacheHit: true };
 
@@ -129,6 +137,7 @@ export const lookupMetadata = async (artist: string, album?: string, track?: str
     limiter: defaultLmlLimiter,
     timeoutMs: TIMEOUT_MS,
     caller: 'flowsheet-metadata-backfill',
+    discogsUnavailable,
   });
 
   if (!hasUpstreamTimeout(response)) {

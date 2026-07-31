@@ -52,7 +52,7 @@ describe('loadCandidates', () => {
     expect(rows).toEqual([{ id: 42, artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again' }]);
     const text = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
     expect(text).toMatch(/FROM\s+"?wxyc_schema"?\."?rotation"?/i);
-    expect(text).toMatch(/"kill_date"\s+IS\s+NULL\s+OR\s+"kill_date"\s+>\s+CURRENT_DATE/i);
+    expect(text).toMatch(/"?\w*"?\."?kill_date"?\s+IS\s+NULL\s+OR\s+"?\w*"?\."?kill_date"?\s*>\s*CURRENT_DATE/i);
     expect(text).toMatch(/"discogs_release_id"\s+IS\s+NULL/i);
     expect(text).toMatch(/"artist_name"\s+IS\s+NOT\s+NULL/i);
     expect(text).toMatch(/"album_title"\s+IS\s+NOT\s+NULL/i);
@@ -77,5 +77,21 @@ describe('loadCandidates', () => {
     const text = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
     expect(text).not.toMatch(/tubafrenzy_paste/i);
     expect(text).not.toMatch(/discogs_release_id_source\s*=/i);
+  });
+
+  test('BS#1294 (1c): LEFT JOINs library on album_id and pre-reads discogs_unavailable, defaulting unlinked rows to false', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([
+      { id: 42, artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again', discogs_unavailable: true },
+    ]);
+
+    await loadCandidates(30);
+
+    const text = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
+    expect(text).toMatch(/LEFT\s+JOIN\s+"?wxyc_schema"?\."?library"?/i);
+    expect(text).toMatch(/ON\s+r\."?album_id"?\s*=\s*l\."?id"?/i);
+    // COALESCE to false so rotation rows with no linked library row (a
+    // nullable album_id — freeform / unlinked entries) remain candidates
+    // instead of being silently excluded by a NULL flag.
+    expect(text).toMatch(/COALESCE\s*\(\s*l\."?discogs_unavailable"?\s*,\s*false\s*\)\s+AS\s+"?discogs_unavailable"?/i);
   });
 });

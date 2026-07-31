@@ -167,7 +167,14 @@ export interface ResolvedAlbum {
  * Same statement-timeout wrapper as `enumeratePendingAlbumIds` — the
  * `library` table is PK-lookup-shaped via `= ANY($1)` but the `artists`
  * LEFT JOIN can be slow if the artist row count grows; the timeout caps
- * the worst case. */
+ * the worst case.
+ *
+ * BS#1294 (1c): `AND l."discogs_unavailable" = false` is the primary
+ * bulk-path gate — flagged albums are excluded here, before they ever
+ * enter a batch or reach `bulkLookupMetadata`, which is cheaper than the
+ * per-item gate in `@wxyc/lml-client` (BS#1293, defense-in-depth) because
+ * it never builds the LML request payload for them. The partial index
+ * `library_discogs_unavailable_idx` (BS#1281) makes this predicate cheap. */
 export const resolveAlbums = async (
   albumIds: number[],
   timeoutMs: number = READ_TIMEOUT_DEFAULT
@@ -200,6 +207,7 @@ export const resolveAlbums = async (
       LEFT JOIN "wxyc_schema"."artists" a ON l."artist_id" = a."id"
       WHERE l."id" = ANY(${idArrayLiteral}::int[])
         AND COALESCE(a."artist_name", l."artist_name") IS NOT NULL
+        AND l."discogs_unavailable" = false
     `)) as unknown as Array<{ album_id: number; artist_name: string; album_title: string }>;
     return rows.map((r) => ({
       album_id: Number(r.album_id),

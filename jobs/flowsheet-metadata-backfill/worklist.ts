@@ -85,6 +85,9 @@ import { db } from '@wxyc/database';
  */
 const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
 export const FLOWSHEET_TABLE = sql.raw(`"${SCHEMA}"."flowsheet"`);
+// BS#1294 (1c): the batch loader LEFT JOINs library to pre-read
+// `discogs_unavailable` for the lookupMetadata gate (BS#1293).
+export const LIBRARY_TABLE = sql.raw(`"${SCHEMA}"."library"`);
 const ARTISTS_TABLE = sql.raw(`"${SCHEMA}"."artists"`);
 const ARTIST_SEARCH_ALIAS_TABLE = sql.raw(`"${SCHEMA}"."artist_search_alias"`);
 const ROTATION_TABLE = sql.raw(`"${SCHEMA}"."rotation"`);
