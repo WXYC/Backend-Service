@@ -187,6 +187,17 @@ describe('recheckDiscogsAvailability', () => {
     expect(result).toEqual({ outcome: 'no_match' });
   });
 
+  it("LML timeout body: throws and does NOT stamp last_discogs_recheck_at or write no_match (mirrors the cron's lml-fetch.ts guard)", async () => {
+    (mockLookupMetadata as jest.Mock).mockResolvedValue({ timeout: true, results: [] });
+
+    await expect(recheckDiscogsAvailability(42, 'Some Artist', 'Some Album')).rejects.toThrow(/timeout/i);
+
+    // No timestamp stamp, no rotation/library writes, no Sentry counter.
+    expect(db.update).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(mockSentryMetricsCount).not.toHaveBeenCalled();
+  });
+
   it('multi-rotation-row: updates ALL rotation rows for the album_id in one statement (issue test 9)', async () => {
     (mockLookupMetadata as jest.Mock).mockResolvedValue({
       results: [{ artwork: { release_id: 12345, confidence: 0.99 } }],
