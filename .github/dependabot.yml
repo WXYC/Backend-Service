@@ -40,6 +40,16 @@ updates:
       # upgrade TypeScript as a tracked change once the toolchain supports TS7.
       - dependency-name: 'typescript'
         update-types: ['version-update:semver-major']
+      # Hold better-auth 1.6.25: it tightened the client-plugin option-inference
+      # types so jwtClient() no longer satisfies BetterAuthClientPlugin, and
+      # `npm run typecheck` fails in shared/authentication/src/auth.client.ts
+      # (TS2322). 1.6.25 is the current latest, so there is no fixed release to
+      # move to. Lift this once an upstream version restores client-plugin type
+      # compatibility. See PR #1834 (closed).
+      - dependency-name: 'better-auth'
+        versions: ['1.6.25']
+      - dependency-name: '@better-auth/*'
+        versions: ['1.6.25']
 
   - package-ecosystem: 'github-actions'
     directory: '/'
