@@ -88,6 +88,28 @@ describe('foldArtistName', () => {
     });
   });
 
+  describe('preserves non-decomposing letters (safe under-merge direction, BS#1897 review LOW)', () => {
+    // These letters carry no combining-mark decomposition under NFD, so the
+    // fold leaves them intact — it strips diacritics but never transliterates.
+    // Pinning them guards the SAFE direction: a future character-class
+    // "improvement" that folded ß→ss / ł→l / ı→i would over-merge distinct
+    // artists, and these assertions would catch it.
+    it('does NOT fold ß to "ss"', () => {
+      expect(foldArtistName('Straße')).toBe('straße');
+    });
+
+    it('does NOT fold ł to "l" (Łódź: ł kept, only ó/ź lose accents)', () => {
+      expect(foldArtistName('Łódź')).toBe('łodz');
+      expect(foldArtistName('ł')).toBe('ł');
+      expect(foldArtistName('ł')).not.toBe(foldArtistName('l'));
+    });
+
+    it('keeps Turkish dotless ı distinct from i', () => {
+      expect(foldArtistName('ı')).toBe('ı');
+      expect(foldArtistName('ı')).not.toBe(foldArtistName('i'));
+    });
+  });
+
   describe('total over nullish input (mirrors SQL coalesce(input, ""))', () => {
     it.each([
       ['null', null],
