@@ -403,12 +403,20 @@ export async function searchLibrary(
     params.limit
   );
   const added = cascadeResults.filter((r) => !aliasById.has(r.id)).length;
-  // Known imprecision, acceptable: a cascade row that duplicates an alias row
-  // beyond page 0 can be double-counted in `total`, and — because the
-  // `page !== 0` guard above returns before this merge ever runs — `total`
-  // on page 0 (inflated by `added`) can disagree with the same query's page 1
-  // `total` (not inflated). Bounded by cascade size (<= limit) and confined
-  // to this single fallback page; not worth chasing exactness.
+  // Known imprecision, acceptable: this merge only runs on page 0 (the
+  // `page !== 0` guard above returns first), so both a count skew and a
+  // row-set skew are possible against later pages — all bounded by cascade
+  // size (<= limit) and, by construction, over alias *noise* rows, never the
+  // cascade's real answer:
+  //   - `total`: a cascade row that duplicates an alias row beyond page 0 can
+  //     be double-counted, and page 0's total (inflated by `added`) can
+  //     disagree with the same query's page 1 total (not inflated).
+  //   - row set: when there are more than `limit` alias rows, the sort+slice
+  //     can bump some page-0 alias rows out of the page; page 1 is served by
+  //     the raw SQL query at `OFFSET limit`, so those displaced alias-noise
+  //     rows aren't picked up there either. The cascade's real answer stays on
+  //     page 0, so the dropped rows are only fuzzy alias noise.
+  // Not worth chasing exactness for a bounded fallback page.
   return { results: merged, total: total + added };
 }
 

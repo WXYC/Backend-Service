@@ -358,6 +358,191 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         { matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' },
       ]);
     });
+
+    it('BS#1886: Track 2 resolves a non-streaming row under on_streaming=true — cascade row is scoped out, never leaks', async () => {
+      process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      resetCatalogSearchAliasConfig();
+      process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'true';
+      resetCatalogTrackSearchConfig();
+
+      // The Track 2 bridge row is NOT on streaming. `searchLibraryByTrackRaw`
+      // does not honor `on_streaming`, so without the shared-cascade scope it
+      // would leak into an `on_streaming=true` result (Both-mode has no
+      // in-memory re-filter of its own, unlike `/library/query`).
+      const nonStreamingTrackRow = {
+        id: 101,
+        code_letters: 'PR',
+        code_artist_number: 1,
+        code_number: 2,
+        artist_name: 'Jessica Pratt',
+        alphabetical_name: 'Pratt, Jessica',
+        album_title: 'On Your Own Love Again',
+        format_name: 'CD',
+        genre_name: 'Rock',
+        rotation_bin: null,
+        add_date: new Date('2024-02-01'),
+        label: 'Drag City',
+        label_id: null,
+        on_streaming: false,
+        album_artist: null,
+        plays: 12,
+        artwork_url: null,
+        legacy_release_id: 555,
+        artist_id: 9002,
+        discogs_artist_id: null,
+        musicbrainz_artist_id: null,
+        wikidata_qid: null,
+        spotify_artist_id: null,
+        apple_music_artist_id: null,
+        bandcamp_id: null,
+      };
+
+      const tsvectorChain = createMockQueryChain([]);
+      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
+      const libraryChain = createMockQueryChain([nonStreamingTrackRow]);
+      libraryChain.limit = jest.fn().mockResolvedValue([nonStreamingTrackRow]);
+      const ctaChain = createMockQueryChain([]);
+      ctaChain.where = jest.fn().mockResolvedValue([]);
+      const chains = [tsvectorChain, libraryChain, ctaChain];
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = chains[Math.min(callIndex, chains.length - 1)];
+        callIndex += 1;
+        return chain;
+      });
+
+      db.execute.mockReset();
+      db.execute.mockResolvedValue([
+        {
+          ...baseViewRow,
+          on_streaming: true,
+          alias_max_sim: 0.4,
+          alias_matched_variant: 'Thee Oh Sees',
+          alias_matched_source: 'discogs_name_variation',
+        },
+      ]);
+
+      mockLookupBySong.mockReset();
+      mockLookupBySong.mockResolvedValue({
+        results: [
+          {
+            library_item: {
+              id: 555,
+              title: 'On Your Own Love Again',
+              artist: 'Jessica Pratt',
+              call_number: 'Rock CD PR 1/2',
+              library_url: 'https://library.wxyc.org/release/555',
+            },
+            matched_via: [{ title: 'Back, Baby', artist_credit: null, confidence: 0.92, source: 'discogs_release' }],
+          },
+        ],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      const results = await searchLibrary('Back, Baby', undefined, undefined, 5, true);
+
+      // The cascade ran (LML was consulted) but its sole row is non-streaming,
+      // so it's scoped out; only the streaming alias trigram row survives.
+      expect(mockLookupBySong).toHaveBeenCalledTimes(1);
+      expect(results.find((r) => r.id === 101)).toBeUndefined();
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(42);
+    });
+
+    it('BS#1886: cascade row collides with an alias id — merge carries matched_via_alias onto the cascade row', async () => {
+      process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      resetCatalogSearchAliasConfig();
+      process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'true';
+      resetCatalogTrackSearchConfig();
+
+      // Cascade bridge row shares id 42 with the alias trigram row below.
+      const collidingTrackRow = {
+        id: 42,
+        code_letters: 'OH',
+        code_artist_number: 7,
+        code_number: 1,
+        artist_name: 'OHSEES',
+        alphabetical_name: 'OHSEES',
+        album_title: 'A Weird Exits',
+        format_name: 'CD',
+        genre_name: 'Rock',
+        rotation_bin: null,
+        add_date: new Date('2024-01-15'),
+        label: 'Castle Face',
+        label_id: null,
+        on_streaming: true,
+        album_artist: null,
+        plays: 7,
+        artwork_url: null,
+        legacy_release_id: 555,
+        artist_id: 9001,
+        discogs_artist_id: null,
+        musicbrainz_artist_id: null,
+        wikidata_qid: null,
+        spotify_artist_id: null,
+        apple_music_artist_id: null,
+        bandcamp_id: null,
+      };
+
+      const tsvectorChain = createMockQueryChain([]);
+      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
+      const libraryChain = createMockQueryChain([collidingTrackRow]);
+      libraryChain.limit = jest.fn().mockResolvedValue([collidingTrackRow]);
+      const ctaChain = createMockQueryChain([]);
+      ctaChain.where = jest.fn().mockResolvedValue([]);
+      const chains = [tsvectorChain, libraryChain, ctaChain];
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = chains[Math.min(callIndex, chains.length - 1)];
+        callIndex += 1;
+        return chain;
+      });
+
+      db.execute.mockReset();
+      db.execute.mockResolvedValue([
+        {
+          ...baseViewRow,
+          alias_max_sim: 0.4,
+          alias_matched_variant: 'Thee Oh Sees',
+          alias_matched_source: 'discogs_name_variation',
+        },
+      ]);
+
+      mockLookupBySong.mockReset();
+      mockLookupBySong.mockResolvedValue({
+        results: [
+          {
+            library_item: {
+              id: 555,
+              title: 'A Weird Exits',
+              artist: 'OHSEES',
+              call_number: 'Rock CD OH 1/7',
+              library_url: 'https://library.wxyc.org/release/555',
+            },
+            matched_via: [{ title: 'Back, Baby', artist_credit: null, confidence: 0.92, source: 'discogs_release' }],
+          },
+        ],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      const results = await searchLibrary('Back, Baby');
+
+      // Single merged row (ids collide): the cascade's matched_via is the
+      // stronger signal AND the alias hint rides along, matching the
+      // `/library/query` merge.
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(42);
+      expect(results[0].matched_via?.[0]).toMatchObject({ source: 'discogs_release' });
+      expect(results[0].matched_via_alias).toEqual([
+        { matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' },
+      ]);
+    });
   });
 
   describe('/library/query (library-search.service.searchLibrary)', () => {
