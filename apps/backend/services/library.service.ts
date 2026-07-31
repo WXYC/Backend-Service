@@ -52,6 +52,14 @@ import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearc
 import { isCompilationArtist } from './requestLine/matching/index.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
 
+// Schema-qualified reference to the `fold_artist_name(text)` SQL function
+// (migration 0134 / BS#1897). Derived from `WXYC_SCHEMA_NAME` the same way the
+// `@wxyc/database` `pgSchema` object and the job SQL builders are, so the
+// per-worker test-isolation schema resolves correctly. `""`-escaped for the
+// (theoretical) quoted-identifier case, mirroring `worklist.ts`.
+const FOLD_SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
+const FOLD_ARTIST_NAME_FN = sql.raw(`"${FOLD_SCHEMA}"."fold_artist_name"`);
+
 /**
  * Catalog freshness watermark for the conditional-GET path (BS#1467 / Epic F
  * pattern). Returns `library_watermark.last_modified_at`, the single-row
@@ -1646,7 +1654,16 @@ export const artistIdFromName = async (artist_name: string, genre_id: number): P
     .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
     .where(
       and(
-        sql`lower(${artists.artist_name}) = lower(${artist_name})`,
+        // Unicode-form + diacritic + case insensitive match (BS#1897). The
+        // former `lower(artist_name) = lower($name)` is collation-aware but NOT
+        // Unicode-form aware: `Nilüfer Yanya` in NFC (`ü` = U+00FC) vs NFD (`u`
+        // + U+0308) is byte-distinct and misses, so the caller falls through to
+        // insertArtist and creates a duplicate `artists` row. `fold_artist_name`
+        // (migration 0134) folds NFC/NFD/ASCII-fold/case onto one key on BOTH
+        // sides — an app-side `.normalize('NFC')` on the input alone can't match
+        // an NFD-stored row. Backed by `artists_fold_name_idx`. The genre
+        // scoping below is preserved unchanged.
+        sql`${FOLD_ARTIST_NAME_FN}(${artists.artist_name}) = ${FOLD_ARTIST_NAME_FN}(${artist_name})`,
         eq(genre_artist_crossreference.genre_id, genre_id)
       )
     )
@@ -1660,7 +1677,21 @@ export const artistIdFromName = async (artist_name: string, genre_id: number): P
 };
 
 export const insertArtist = async (new_artist: NewArtist) => {
-  const response = await db.insert(artists).values(new_artist).returning();
+  // Store names NFC-canonical (BS#1897). The matcher folds NFC/NFD/ASCII-fold
+  // together for *lookup*, but the *stored* form must be a single canonical
+  // shape or later exact-equality consumers (e.g. the artist-identity ETL
+  // match, BS#521) see spurious NFC/NFD splits. NFC preserves the diacritics
+  // themselves, so the display string (bound by the librarian V/A invariant)
+  // is unchanged — only the composition form is canonicalized. `code_letters`
+  // and `alphabetical_name` can carry diacritics from the source, so they get
+  // the same treatment for consistency with `artist_name`.
+  const normalized: NewArtist = {
+    ...new_artist,
+    artist_name: new_artist.artist_name.normalize('NFC'),
+    alphabetical_name: new_artist.alphabetical_name.normalize('NFC'),
+    code_letters: new_artist.code_letters.normalize('NFC'),
+  };
+  const response = await db.insert(artists).values(normalized).returning();
   return response[0];
 };
 
