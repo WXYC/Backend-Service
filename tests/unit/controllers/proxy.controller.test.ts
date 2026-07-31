@@ -117,11 +117,24 @@ jest.mock('@sentry/node', () => ({
   getActiveSpan: mockGetActiveSpan,
 }));
 
-// library.service mock — only the helper libraryTracks consumes.
+// library.service mock — only the helper libraryTracks consumes
+// getDiscogsReleaseIdByLegacyId. BS#1895: getAlbumMetadata also resolves
+// getDiscogsUnavailableFlagsById(albumId) — defaults to `undefined` (no
+// library row found), matching every pre-#1895 test's assumption that the
+// response shape excludes discogsUnavailable unless a test opts in.
 const mockGetDiscogsReleaseIdByLegacyId = jest.fn<(legacyId: number) => Promise<number | null>>();
+const mockGetDiscogsUnavailableFlagsById = jest.fn<
+  (
+    albumId: number
+  ) => Promise<
+    | { discogsUnavailable: boolean; discogsUnavailableNote: string | null; lastDiscogsRecheckAt: Date | null }
+    | undefined
+  >
+>(() => Promise.resolve(undefined));
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getDiscogsReleaseIdByLegacyId: mockGetDiscogsReleaseIdByLegacyId,
+  getDiscogsUnavailableFlagsById: mockGetDiscogsUnavailableFlagsById,
 }));
 
 // Artwork finder mock (still used for Last.fm/iTunes fallback in searchArtwork)
@@ -563,6 +576,86 @@ describe('proxy.controller', () => {
         expect(res.status).toHaveBeenCalledWith(200);
         const result = (res.json as jest.Mock).mock.calls[0][0];
         expect(result).not.toHaveProperty('criticReviews');
+      });
+    });
+
+    // BS#1895 (Not-on-Discogs epic #1280 sub-issue 5): iOS reads this
+    // handler for playcut-detail metadata (the surface behind
+    // `PlaylistEntry.artworkURL`), so the MD-set flag needs to reach it too.
+    // `discogs_unavailable` lives on `library`, not `album_metadata`, so this
+    // is a dedicated lookup keyed on the same resolved `album_id` critic
+    // reviews uses — same additive-failure and gating contract.
+    describe('discogsUnavailable attach (BS#1895)', () => {
+      it('a flagged album: attaches discogsUnavailable: true and its note', async () => {
+        mockGetDiscogsUnavailableFlagsById.mockResolvedValueOnce({
+          discogsUnavailable: true,
+          discogsUnavailableNote: 'Embargoed promo, MD-confirmed',
+          lastDiscogsRecheckAt: null,
+        });
+        const req = { query: { artistName: 'Juana Molina', releaseTitle: 'DOGA' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockGetDiscogsUnavailableFlagsById).toHaveBeenCalledWith(DEFAULT_LINKED_ALBUM_ID);
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.discogsUnavailable).toBe(true);
+        expect(result.discogsUnavailableNote).toBe('Embargoed promo, MD-confirmed');
+      });
+
+      it('an unflagged album: attaches discogsUnavailable: false, not omitted', async () => {
+        mockGetDiscogsUnavailableFlagsById.mockResolvedValueOnce({
+          discogsUnavailable: false,
+          discogsUnavailableNote: null,
+          lastDiscogsRecheckAt: null,
+        });
+        const req = { query: { artistName: 'Juana Molina', releaseTitle: 'DOGA' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result).toHaveProperty('discogsUnavailable', false);
+        expect(result).not.toHaveProperty('discogsUnavailableNote');
+      });
+
+      it('no library row for the resolved album_id: omits discogsUnavailable entirely', async () => {
+        mockGetDiscogsUnavailableFlagsById.mockResolvedValue(undefined);
+        const req = { query: { artistName: 'Unseeded', releaseTitle: 'Album' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result).not.toHaveProperty('discogsUnavailable');
+      });
+
+      it('lookup throws: degrades to omitting discogsUnavailable, still responds 200', async () => {
+        // `mockRejectedValueOnce` (not the persistent `mockRejectedValue`):
+        // this lookup runs unconditionally whenever albumId resolves (no
+        // flag gate, unlike criticReviews), so a persistent rejection would
+        // leak into every later test in this file that doesn't explicitly
+        // re-arm the mock — including the cache tests below, which assert
+        // exact call counts.
+        mockGetDiscogsUnavailableFlagsById.mockRejectedValueOnce(new Error('db down'));
+        const req = { query: { artistName: 'Any', releaseTitle: 'Album' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result).not.toHaveProperty('discogsUnavailable');
+      });
+
+      it('no linked album_id: never calls the lookup', async () => {
+        mockSelectLinkedFlowsheetRow.mockResolvedValue(null);
+        const req = { query: { artistName: 'Freetext Only', releaseTitle: 'Never Linked' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockGetDiscogsUnavailableFlagsById).not.toHaveBeenCalled();
       });
     });
 

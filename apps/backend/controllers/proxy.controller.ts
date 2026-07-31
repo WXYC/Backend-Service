@@ -40,7 +40,7 @@ import type {
   LookupResponse,
 } from '@wxyc/lml-client';
 import { lmlLookupCoordinator } from '../services/lml/index.js';
-import { getDiscogsReleaseIdByLegacyId } from '../services/library.service.js';
+import { getDiscogsReleaseIdByLegacyId, getDiscogsUnavailableFlagsById } from '../services/library.service.js';
 import { filterSpacerGif, isSyntheticArtwork } from '../services/metadata/metadata.service.js';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
 import {
@@ -703,6 +703,39 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
         if (criticReviews.length > 0) metadata.criticReviews = criticReviews;
       } catch (reviewsError) {
         console.warn('[ProxyController] critic-reviews lookup failed; omitting criticReviews:', reviewsError);
+        cacheable = false;
+      }
+    }
+
+    // BS#1895 (Not-on-Discogs epic #1280 sub-issue 5): iOS reads this
+    // handler for the playcut-detail metadata behind the artwork/detail
+    // panel, so the MD-set flag needs to reach it too — otherwise a flagged
+    // release keeps showing the "missing artwork" empty state instead of the
+    // "not on Discogs" messaging. `discogs_unavailable` lives on `library`,
+    // not `album_metadata` (this handler's usual source) or `flowsheet`, so
+    // it's a dedicated lookup keyed on the SAME `albumId` resolved above
+    // rather than a join into either persisted-state read. Reuses the same
+    // gate as critic reviews (`albumId !== null` — a free-text row that never
+    // linked to a catalog album has no library row to flag) and the same
+    // additive-failure contract: a DB blip degrades to omitting the field
+    // rather than failing the request.
+    if (albumId !== null) {
+      try {
+        const discogsFlags = await getDiscogsUnavailableFlagsById(albumId);
+        if (discogsFlags) {
+          metadata.discogsUnavailable = discogsFlags.discogsUnavailable;
+          if (discogsFlags.discogsUnavailableNote !== null) {
+            metadata.discogsUnavailableNote = discogsFlags.discogsUnavailableNote;
+          }
+          if (discogsFlags.lastDiscogsRecheckAt !== null) {
+            metadata.lastDiscogsRecheckAt = discogsFlags.lastDiscogsRecheckAt;
+          }
+        }
+      } catch (discogsFlagsError) {
+        console.warn(
+          '[ProxyController] discogs-unavailable lookup failed; omitting discogsUnavailable:',
+          discogsFlagsError
+        );
         cacheable = false;
       }
     }

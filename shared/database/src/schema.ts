@@ -1989,6 +1989,13 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       bandcamp_id: artists.bandcamp_id,
       // Keyed read for the artist_search_alias LATERAL JOIN (PR 5).
       artist_id: library.artist_id,
+      // BS#1895 (Serialize discogsUnavailable / Not-on-Discogs epic #1280
+      // sub-issue 5): the MD-set flag + optional rationale + server-write-only
+      // recheck timestamp, so every read of `library_artist_view` can gate
+      // rendering on it. Camelcased at the wire boundary (serializeLibraryArtistViewEntry).
+      discogs_unavailable: library.discogs_unavailable,
+      discogs_unavailable_note: library.discogs_unavailable_note,
+      last_discogs_recheck_at: library.last_discogs_recheck_at,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -2031,6 +2038,9 @@ export type LibraryArtistViewEntry = {
   apple_music_artist_id: string | null;
   bandcamp_id: string | null;
   artist_id: number;
+  discogs_unavailable: boolean;
+  discogs_unavailable_note: string | null;
+  last_discogs_recheck_at: Date | null;
 };
 
 // Per-album play count, aggregated from `flowsheet` track entries. The MV is

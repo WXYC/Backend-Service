@@ -64,6 +64,11 @@ export type AlbumSearchResultRow = {
   album_artist: string | null;
   matched_via?: TrackMatchHint[];
   matched_via_alias?: ArtistMatchHint[];
+  // BS#1895 (Not-on-Discogs epic #1280 sub-issue 5): the MD-set flag, so
+  // catalog-search cards can gate rendering the same way album-detail does.
+  discogsUnavailable: boolean;
+  discogsUnavailableNote: string | null;
+  lastDiscogsRecheckAt: Date | string | null;
 };
 
 const FIELD_COLUMNS: Record<CatalogField, SQL> = {
@@ -234,6 +239,9 @@ export async function searchLibrary(
       ${playsColumn} AS plays,
       ${library_artist_view.on_streaming} AS on_streaming,
       ${library_artist_view.album_artist} AS album_artist,
+      ${library_artist_view.discogs_unavailable} AS discogs_unavailable,
+      ${library_artist_view.discogs_unavailable_note} AS discogs_unavailable_note,
+      ${library_artist_view.last_discogs_recheck_at} AS last_discogs_recheck_at,
       NULL::real AS alias_max_sim,
       NULL::text AS alias_matched_variant,
       NULL::text AS alias_matched_source`;
@@ -253,6 +261,9 @@ export async function searchLibrary(
       ${playsColumn} AS plays,
       ${library_artist_view.on_streaming} AS on_streaming,
       ${library_artist_view.album_artist} AS album_artist,
+      ${library_artist_view.discogs_unavailable} AS discogs_unavailable,
+      ${library_artist_view.discogs_unavailable_note} AS discogs_unavailable_note,
+      ${library_artist_view.last_discogs_recheck_at} AS last_discogs_recheck_at,
       alias_hits.max_sim AS alias_max_sim,
       alias_hits.matched_variant AS alias_matched_variant,
       alias_hits.matched_source AS alias_matched_source`;
@@ -325,7 +336,10 @@ export async function searchLibrary(
         ${library_artist_view.rotation_bin} AS rotation_bin,
         ${playsColumn} AS plays,
         ${library_artist_view.on_streaming} AS on_streaming,
-        ${library_artist_view.album_artist} AS album_artist
+        ${library_artist_view.album_artist} AS album_artist,
+        ${library_artist_view.discogs_unavailable} AS discogs_unavailable,
+        ${library_artist_view.discogs_unavailable_note} AS discogs_unavailable_note,
+        ${library_artist_view.last_discogs_recheck_at} AS last_discogs_recheck_at
       ${fromClause}
     `;
     dataQuery = sql`
@@ -517,6 +531,9 @@ function taggedRowToAlbumSearchResultRow(row: TaggedLibraryViewEntry): AlbumSear
     plays: row.plays,
     on_streaming: row.on_streaming,
     album_artist: row.album_artist,
+    discogsUnavailable: row.discogs_unavailable,
+    discogsUnavailableNote: row.discogs_unavailable_note,
+    lastDiscogsRecheckAt: row.last_discogs_recheck_at,
   };
   if (row.matched_via) projected.matched_via = row.matched_via;
   if (row.matched_via_alias) projected.matched_via_alias = row.matched_via_alias;
@@ -542,6 +559,15 @@ type RawRow = {
   plays: number | null;
   on_streaming: boolean | null;
   album_artist: string | null;
+  discogs_unavailable: boolean;
+  discogs_unavailable_note: string | null;
+  // Raw `db.execute` rows can come back as either a `Date` or an
+  // already-serialized string depending on the postgres-js type parser for
+  // the query shape (mirrors `add_date` above, which has the same dual
+  // shape) — passed through as-is; `res.json()` serializes a `Date` via
+  // `toJSON()` and leaves a string alone, so both branches reach the wire as
+  // the same ISO shape.
+  last_discogs_recheck_at: Date | string | null;
 };
 
 function toAlbumSearchResultRow(row: RawRow): AlbumSearchResultRow {
@@ -561,6 +587,9 @@ function toAlbumSearchResultRow(row: RawRow): AlbumSearchResultRow {
     plays: row.plays,
     on_streaming: row.on_streaming,
     album_artist: row.album_artist,
+    discogsUnavailable: row.discogs_unavailable,
+    discogsUnavailableNote: row.discogs_unavailable_note,
+    lastDiscogsRecheckAt: row.last_discogs_recheck_at,
   };
   if (
     row.alias_max_sim !== null &&
