@@ -137,6 +137,11 @@ export const ALL_LML_CALLERS = [
   // caller-bearing call site — it only calls `refreshForIdentities`, which
   // takes no `caller` parameter — so it needs no entry here.
   'rotation-release-id-backfill',
+  // BS#1283 (epic #1280 sub-issue 3): the daily discogs_unavailable recheck
+  // cron. Class 5 — batch/backfill enrichment, dedicated per-job limiter
+  // (`jobs/library-discogs-unavailable-recheck/lml-limiter.ts`), never the
+  // shared `defaultLimiter`.
+  'library-discogs-unavailable-recheck',
 ] as const;
 
 export type LmlCaller = (typeof ALL_LML_CALLERS)[number];
@@ -177,6 +182,7 @@ const CALLER_CLASS: Record<LmlCaller, LmlCallerClass> = {
   'concerts-genre-enrichment': 5,
   'concerts-artist-lml-resolver': 5,
   'rotation-release-id-backfill': 5,
+  'library-discogs-unavailable-recheck': 5,
 };
 
 /**

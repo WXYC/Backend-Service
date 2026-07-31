@@ -78,6 +78,7 @@ describe('lml-client policy', () => {
         'concerts-genre-enrichment': 5,
         'concerts-artist-lml-resolver': 5,
         'rotation-release-id-backfill': 5,
+        'library-discogs-unavailable-recheck': 5,
       };
       for (const [caller, expectedClass] of Object.entries(expected) as [LmlCaller, LmlCallerClass][]) {
         expect(resolveLmlPolicy(caller).class).toBe(expectedClass);

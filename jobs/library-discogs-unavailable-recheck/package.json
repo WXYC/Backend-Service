@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/library-discogs-unavailable-recheck",
+  "cron-schedule": "0 6 * * *",
+  "version": "1.0.0",
+  "description": "WXYC recurring cron (BS#1283 / epic #1280 sub-issue 3): rechecks library rows the MD flagged `discogs_unavailable` — embargoed promos eventually clear Discogs, audience-segment releases never do. Force-bypasses the runtime discogsUnavailable gate, applies a 0.95 confidence floor, and overwrites any stale rotation.discogs_release_id on a high-confidence match (sticky-false-match fix).",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_library_discogs_unavailable_recheck:ci -f ../../Dockerfile.library-discogs-unavailable-recheck ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.67.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

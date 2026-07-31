@@ -34,6 +34,20 @@ const mockUpdateArtworkUrl = jest.fn<() => Promise<unknown>>();
 const mockGetLabelById = jest.fn<(id: number) => Promise<{ id: number; label_name: string } | undefined>>();
 const mockSearchLibrary = jest.fn<() => Promise<{ results: unknown[]; total: number }>>();
 
+// POST /library/:id/discogs-recheck (BS#1283).
+const mockRecheckDiscogsAvailability =
+  jest.fn<
+    (
+      id: number,
+      artistName: string,
+      albumTitle: string
+    ) => Promise<
+      | { outcome: 'matched'; discogsReleaseId: number; confidence: number }
+      | { outcome: 'low_confidence_match'; confidence: number }
+      | { outcome: 'no_match' }
+    >
+  >();
+
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
   getAlbumByLegacyId: mockGetAlbumByLegacyId,
@@ -73,6 +87,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   updateAlbumInDB: mockUpdateAlbumInDB,
   artistExistsInGenre: mockArtistExistsInGenre,
   albumCodeNumberTaken: mockAlbumCodeNumberTaken,
+  recheckDiscogsAvailability: mockRecheckDiscogsAvailability,
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
@@ -124,6 +139,7 @@ import {
   getRotationTracks,
   updateAlbum,
   searchLibraryQueryEndpoint,
+  manualDiscogsRecheck,
 } from '../../../apps/backend/controllers/library.controller';
 
 function mockResponse(): Response {
@@ -1031,6 +1047,99 @@ describe('library.controller', () => {
 
       await expect(getAlbum(req, res, next)).rejects.toThrow('Invalid legacy_release_id');
       expect(mockGetAlbumByLegacyId).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('manualDiscogsRecheck (BS#1283)', () => {
+    const flaggedRow = {
+      id: 42,
+      artist_name: 'Chuquimamani-Condori',
+      album_title: 'Edits',
+      discogs_unavailable: true,
+      discogs_unavailable_note: 'embargoed promo',
+    };
+
+    beforeEach(() => {
+      mockIsLmlConfigured.mockReturnValue(true);
+    });
+
+    it('returns 400 for a non-numeric id', async () => {
+      const req = { params: { id: 'abc' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(manualDiscogsRecheck(req, res, next)).rejects.toThrow('Invalid album ID');
+      expect(mockGetLibraryRowById).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 when the album does not exist', async () => {
+      mockGetLibraryRowById.mockResolvedValue(undefined);
+      const req = { params: { id: '999' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(manualDiscogsRecheck(req, res, next)).rejects.toThrow('Album not found');
+      expect(mockRecheckDiscogsAvailability).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 when the row has no artist_name/album_title to look up', async () => {
+      mockGetLibraryRowById.mockResolvedValue({ ...flaggedRow, artist_name: null, album_title: null });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(manualDiscogsRecheck(req, res, next)).rejects.toThrow(
+        'Cannot recheck a release without artist_name and album_title'
+      );
+      expect(mockRecheckDiscogsAvailability).not.toHaveBeenCalled();
+    });
+
+    it('returns 503 when LML is not configured', async () => {
+      mockGetLibraryRowById.mockResolvedValue(flaggedRow);
+      mockIsLmlConfigured.mockReturnValue(false);
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(manualDiscogsRecheck(req, res, next)).rejects.toThrow('LML is not configured');
+      expect(mockRecheckDiscogsAvailability).not.toHaveBeenCalled();
+    });
+
+    it('returns the matched outcome shape', async () => {
+      mockGetLibraryRowById.mockResolvedValue(flaggedRow);
+      mockRecheckDiscogsAvailability.mockResolvedValue({
+        outcome: 'matched',
+        discogsReleaseId: 99999,
+        confidence: 0.98,
+      });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await manualDiscogsRecheck(req, res, next);
+
+      expect(mockRecheckDiscogsAvailability).toHaveBeenCalledWith(42, 'Chuquimamani-Condori', 'Edits');
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({ outcome: 'matched', discogsReleaseId: 99999, confidence: 0.98 });
+    });
+
+    it('returns the low_confidence_match outcome shape', async () => {
+      mockGetLibraryRowById.mockResolvedValue(flaggedRow);
+      mockRecheckDiscogsAvailability.mockResolvedValue({ outcome: 'low_confidence_match', confidence: 0.85 });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await manualDiscogsRecheck(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({ outcome: 'low_confidence_match', confidence: 0.85 });
+    });
+
+    it('returns the no_match outcome shape', async () => {
+      mockGetLibraryRowById.mockResolvedValue(flaggedRow);
+      mockRecheckDiscogsAvailability.mockResolvedValue({ outcome: 'no_match' });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await manualDiscogsRecheck(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({ outcome: 'no_match' });
     });
   });
 });
