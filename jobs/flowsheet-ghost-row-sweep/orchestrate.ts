@@ -49,19 +49,27 @@
  * the intended semantics and require no explicit child cleanup — the FK
  * handles it.
  *
- * Two safety nets a plain anti-join-and-DELETE doesn't get for free:
+ * Three safety nets a plain anti-join-and-DELETE doesn't get for free:
  *
- *   - **Empty/truncated keyspace floor** (`GHOST_SWEEP_MIN_KEYSPACE_SIZE`,
- *     default 1). A `LegacyKeyspaceSource` that returns an empty (or
- *     suspiciously tiny) `Set` — a missing file, a truncated extraction, a
- *     misconfigured path — would anti-join *every* row as a ghost. Nothing
- *     about that failure mode is distinguishable in-process from "tubafrenzy
- *     genuinely has zero surviving rows," so the run refuses outright rather
- *     than risk `--execute` emptying a live table. `--execute` from
- *     job.ts's CLI is already required for it to even read from a
- *     `LegacyKeyspaceSource` that has never proven itself against
- *     production; this floor is what makes an operator's fat-fingered path
- *     fail loud instead of erasing the tables.
+ *   - **Empty keyspace floor** (`GHOST_SWEEP_MIN_KEYSPACE_SIZE`, default 1).
+ *     A `LegacyKeyspaceSource` that returns an empty (or suspiciously tiny)
+ *     `Set` — a missing file, a truncated extraction, a misconfigured path —
+ *     would anti-join *every* row as a ghost. Nothing about that failure
+ *     mode is distinguishable in-process from "tubafrenzy genuinely has zero
+ *     surviving rows," so the run refuses outright rather than risk
+ *     `--execute` emptying a live table. `--execute` from job.ts's CLI is
+ *     already required for it to even read from a `LegacyKeyspaceSource` that
+ *     has never proven itself against production; this floor is what makes an
+ *     operator's fat-fingered *empty*-file path fail loud.
+ *   - **Ghost-fraction ceiling** (`GHOST_SWEEP_MAX_GHOST_RATIO`, default
+ *     0.5). The floor above only catches a *fully empty* keyspace; a keyspace
+ *     truncated to a small-but-nonzero fraction of its real size sails past
+ *     it and would flag the majority of a live table as ghosts. Once a full
+ *     page has been scanned, a running ghost fraction above the ceiling
+ *     aborts the target (before that page's DELETE, so a truncated keyspace
+ *     trips with zero rows removed) — a healthy sweep clears a small residual
+ *     of failed-webhook orphans, never most of the table. Evaluated in
+ *     dry-run too, so it surfaces during the operator's dry-run review.
  *   - **Post-run ghost-free verification.** Async commit
  *     (`DB_SYNCHRONOUS_COMMIT=off`, set by the Dockerfile per the
  *     bulk-update playbook) means a page's DELETE can
@@ -69,10 +77,18 @@
  *     crash inside the fsync window — the id-cursor would already have
  *     advanced past it, so a resumed follow-up run using the logged cursor
  *     would never re-select that row. After a target's main sweep finishes
- *     cleanly (not stopped, not failed), the same afterId..end range is
- *     re-scanned read-only; any ghost still present fails the run loudly
- *     (`remaining` in the summary) instead of silently leaving a permanent
- *     leftover behind an already-advanced cursor.
+ *     cleanly (not stopped, not failed) *and actually deleted something*, the
+ *     same afterId..end range — exactly what this run swept — is re-scanned
+ *     read-only; any ghost still present fails the run loudly (`remaining` in
+ *     the summary) instead of silently leaving a permanent leftover behind an
+ *     already-advanced cursor. Scope note: verification covers this run's
+ *     `[afterId, end]` range, not the whole table — the async-commit hazard
+ *     it guards is a Postgres *crash*, which breaks the client's connection
+ *     and ends the run as a `failed` (not a clean `stopped`), so a range
+ *     swept by an earlier clean stop never carried an undetected lost DELETE.
+ *     A single run from `afterId=0` therefore verifies the whole table; after
+ *     a *failed* run, resume from a conservative cursor rather than the last
+ *     logged one.
  *
  * Cooperative pause, SIGTERM stop, and loadBatch retry mirror
  * `jobs/streaming-url-remediation/orchestrate.ts`.
@@ -110,8 +126,30 @@ export const ANALYZE_TIMEOUT_MS_DEFAULT = 300_000;
  * few surviving rows — and trusting it would anti-join nearly every row as
  * a ghost. 1 (not 0) is the default so a keyspace source that returns an
  * empty Set on a read error it swallowed is still caught.
+ *
+ * The floor only catches an *empty* Set, though — a keyspace that lost most
+ * (but not all) of its ids to a partial extraction sails past it and would
+ * anti-join the majority of a live table as ghosts. `MAX_GHOST_RATIO`
+ * (below) is the companion guard for that failure mode.
  */
 export const MIN_KEYSPACE_SIZE_DEFAULT = 1;
+
+/**
+ * Ceiling on the running ghost fraction (`ghosts / scanned`) a sweep will
+ * tolerate before refusing to continue. The absolute keyspace floor only
+ * catches a *fully empty* Set; a keyspace truncated to a small-but-nonzero
+ * fraction of its real size passes the floor and would flag the majority of
+ * a live table as ghosts. A healthy sweep clears a small residual of failed
+ * delete-webhook orphans, never most of the table — so once a full page has
+ * been scanned, a ghost fraction above this ceiling almost always means the
+ * keyspace source is truncated or pointed at the wrong data, and the run
+ * refuses rather than mass-delete. The guard arms only after the first full
+ * page (see `runTarget`) so a genuinely tiny fixture table can't trip it,
+ * and applies in dry-run too so an operator sees it during the mandatory
+ * dry-run review, before ever passing `--execute`. Set to 1 to disable (a
+ * deliberate large-sweep run only).
+ */
+export const MAX_GHOST_RATIO_DEFAULT = 0.5;
 
 const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
 const FLOWSHEET_TABLE = sql.raw(`"${SCHEMA}"."flowsheet"`);
@@ -253,6 +291,24 @@ export const resolveMinKeyspaceSize = (raw: string | undefined = process.env.GHO
     note: 'Refuses the run if either loaded keyspace is smaller than this. Use 0 to disable (a deliberate tiny/empty-fixture run only).',
   });
 
+/**
+ * Parse `GHOST_SWEEP_MAX_GHOST_RATIO` — a float in `(0, 1]`, not an integer,
+ * so it can't reuse the shared int parsers. Empty/unset → default. `1`
+ * disables the guard (the ratio can never exceed 1). `<= 0` is rejected: a
+ * ceiling of 0 would abort on the very first ghost, which is never intended.
+ */
+export const resolveMaxGhostRatio = (raw: string | undefined = process.env.GHOST_SWEEP_MAX_GHOST_RATIO): number => {
+  if (raw === undefined || raw.trim() === '') return MAX_GHOST_RATIO_DEFAULT;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0 || n > 1) {
+    throw new Error(
+      `Invalid GHOST_SWEEP_MAX_GHOST_RATIO=${JSON.stringify(raw)}: must be a number in (0, 1]. ` +
+        'Set 1 to disable the guard (a deliberate large-sweep run only).'
+    );
+  }
+  return n;
+};
+
 export const resolveAfterId = (envName: string, raw: string | undefined): number =>
   requireNonNegativeInt(raw, envName, 0, {
     note: 'Resume cursor — the summary log of the previous run carries the per-target last_id.',
@@ -363,6 +419,8 @@ export const runSweep = async (opts: {
   sampleSize?: number;
   /** Refuses the run if either loaded keyspace is smaller than this. 0 disables (tests / deliberate tiny fixtures only). */
   minKeyspaceSize?: number;
+  /** Aborts a target once its running ghost fraction exceeds this (after the first full page). 1 disables. */
+  maxGhostRatio?: number;
   flowsheetAfterId?: number;
   rotationAfterId?: number;
   liveActivityLookbackSeconds?: number;
@@ -381,6 +439,7 @@ export const runSweep = async (opts: {
   const analyzeTimeoutMs = opts.analyzeTimeoutMs ?? resolveAnalyzeTimeoutMs();
   const sampleSize = opts.sampleSize ?? resolveSampleSize();
   const minKeyspaceSize = opts.minKeyspaceSize ?? resolveMinKeyspaceSize();
+  const maxGhostRatio = opts.maxGhostRatio ?? resolveMaxGhostRatio();
   const flowsheetAfterId =
     opts.flowsheetAfterId ??
     resolveAfterId('GHOST_SWEEP_FLOWSHEET_AFTER_ID', process.env.GHOST_SWEEP_FLOWSHEET_AFTER_ID);
@@ -426,6 +485,7 @@ export const runSweep = async (opts: {
     delete_timeout_ms: deleteTimeoutMs,
     analyze_timeout_ms: analyzeTimeoutMs,
     sample_size: sampleSize,
+    max_ghost_ratio: maxGhostRatio,
     flowsheet_after_id: flowsheetAfterId,
     rotation_after_id: rotationAfterId,
     live_activity_lookback_seconds: liveActivityLookbackSeconds,
@@ -535,6 +595,39 @@ export const runSweep = async (opts: {
         ghostIds.push(row.id);
       }
 
+      // Truncated/mostly-wrong keyspace guard: the absolute keyspace floor
+      // only catches an *empty* Set, not a keyspace that lost most of its ids
+      // to a partial extraction. Once a full page has been scanned, if the
+      // running ghost fraction exceeds the ceiling, refuse to keep going — a
+      // healthy sweep clears a small residual, not the majority of a live
+      // table. Checked before this page's DELETE so a truncated keyspace
+      // trips on the first full page with zero rows removed, and evaluated in
+      // dry-run too so it surfaces during the operator's dry-run review.
+      if (maxGhostRatio < 1 && totals.scanned >= batchSize && totals.ghosts / totals.scanned > maxGhostRatio) {
+        const ghostRatio = totals.ghosts / totals.scanned;
+        const ratioError = new Error(
+          `Refusing to continue: ${target} ghost fraction ${ghostRatio.toFixed(4)} exceeds ` +
+            `GHOST_SWEEP_MAX_GHOST_RATIO=${maxGhostRatio} after ${totals.scanned} rows scanned ` +
+            `(${totals.ghosts} flagged as ghosts). A healthy sweep clears a small residual; a majority-ghost ` +
+            'scan almost always means the keyspace source is truncated or pointed at the wrong data. Set ' +
+            'GHOST_SWEEP_MAX_GHOST_RATIO=1 to disable this guard for a deliberate large-sweep run.'
+        );
+        failure = { error: ratioError };
+        log('error', 'ghost_ratio_exceeded', ratioError.message, {
+          target,
+          scanned: totals.scanned,
+          ghosts: totals.ghosts,
+          ghost_ratio: ghostRatio,
+          max_ghost_ratio: maxGhostRatio,
+        });
+        captureError(ratioError, 'ghost_ratio_exceeded', {
+          target,
+          scanned: totals.scanned,
+          ghosts: totals.ghosts,
+        });
+        break;
+      }
+
       // rows are ORDER BY pk ASC, so the last row carries the page's max id.
       const batchMaxId = rows[rows.length - 1].id;
 
@@ -599,10 +692,13 @@ export const runSweep = async (opts: {
     // target just swept and confirm zero ghosts remain — see the module
     // doc's "Post-run ghost-free verification" note (async commit can lose
     // a DELETE the main loop believed had committed). Only meaningful for a
-    // clean execute finish: skipped on dry-run (nothing was deleted to
-    // verify) and on a stopped/failed run (an incomplete sweep is expected
-    // to still have ghosts in its unswept tail).
-    if (!dryRun && !result.stopped && !failure) {
+    // clean execute finish that actually deleted: skipped on dry-run
+    // (nothing was deleted to verify), on a stopped/failed run (an
+    // incomplete sweep is expected to still have ghosts in its unswept
+    // tail), and on a target that removed nothing (`wrote === false` — no
+    // DELETE happened, so there is no lost-durability window to re-scan for,
+    // and re-scanning the whole range would only burn a second full pass).
+    if (!dryRun && !result.stopped && !failure && wrote) {
       try {
         const remaining = await countRemainingGhosts(target, afterId, keyspace, batchSize);
         if (remaining === null) {
@@ -625,14 +721,24 @@ export const runSweep = async (opts: {
           }
         }
       } catch (error) {
-        // A verification-scan error (not a residue finding) is treated like
-        // any other read failure this run couldn't recover from.
-        log('warn', 'verification_error', `${target} post-run verification failed to run`, {
-          target,
-          error_message: errorMessage(error),
-        });
-        captureError(error, 'verification_error', { target });
-        failure = failure ?? { error };
+        if (stopRequested) {
+          // A SIGTERM landed mid-verification and surfaced as a loadBatch
+          // throw (a retry saw the stop flag and rethrew). Classify it as a
+          // graceful stop, exactly as the main loop does at its own loadBatch
+          // site — not a run failure — so the exit code matches the operator
+          // action regardless of where in the scan the signal landed.
+          result.stopped = true;
+        } else {
+          // A genuine verification-scan error (not a residue finding) is
+          // treated like any other read failure this run couldn't recover
+          // from.
+          log('warn', 'verification_error', `${target} post-run verification failed to run`, {
+            target,
+            error_message: errorMessage(error),
+          });
+          captureError(error, 'verification_error', { target });
+          failure = failure ?? { error };
+        }
       }
     }
   };
