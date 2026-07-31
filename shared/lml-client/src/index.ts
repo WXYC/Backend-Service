@@ -1264,8 +1264,16 @@ function buildSkippedBulkResultItem(index: number): BulkLookupResultItem {
  * lookup-batcher.ts`) — the only `pending`-owning bulk caller, and one that
  * runs on the breaker-bearing `defaultLimiter`, so it genuinely sees sheds —
  * treats these two statuses as retryable, leaving the row `enriching` for C6
- * recovery rather than writing a terminal state. The offline drains run on
- * their own breaker-less limiters and never shed.
+ * recovery rather than writing a terminal state.
+ *
+ * The offline bulk drains vary: only `flowsheet-metadata-backfill` (C6) passes
+ * its own breaker-less limiter. The others (`album-level-backfill`,
+ * `catalog-popularity-freetext-resolve`, `flowsheet-linked-reenrichment`) pass
+ * NO limiter, so they too run on the breaker-bearing `defaultLimiter` and CAN
+ * shed. That's safe because each fail-closes: a shed `status` is neither
+ * `match` nor `no_match`, so it falls into their retryable `else`/error branch
+ * — never a terminal write, always re-attempted next run. Do NOT assume any
+ * bulk caller "never sheds" — branch on `status`, not on `lookup` nullity.
  */
 function buildShedBulkResultItem(index: number, reason: LookupShedOutcome): BulkLookupResultItem {
   return {
