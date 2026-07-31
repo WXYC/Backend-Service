@@ -1,74 +1,36 @@
 /**
- * Minimal LML lookup fetcher for the library.artwork_url backfill (#637).
+ * LML lookup fetcher for the library.artwork_url backfill (#637, BS#1282).
  *
- * Mirrors `jobs/flowsheet-metadata-backfill/lml-fetch.ts` near-verbatim. The
- * vendored copy (rather than importing `apps/backend/services/lml/lml.client.ts`)
- * keeps the one-shot job's build graph independent of the @wxyc/backend Express
- * app. Same isolation reason — see that file's header for the full rationale.
+ * Was a vendored `fetch()` straight to `${baseUrl()}/api/v1/lookup` — this
+ * file's own header used to say it "mirrors flowsheet-metadata-backfill/
+ * lml-fetch.ts near-verbatim," i.e. it duplicated logic that job had already
+ * migrated onto `@wxyc/lml-client.lookupMetadata` (the shared HTTP +
+ * Sentry-instrumentation chokepoint from BS#887). BS#1282 finishes that
+ * consolidation: this is now a thin wrapper, matching
+ * `jobs/rotation-release-id-backfill/lml-fetch.ts`'s shape.
  *
- * Per-call budget: 30s. The orchestrator caps in-flight requests at one (via
- * the inter-row throttle), so the longer per-call timeout cannot pile up on
- * LML.
+ * `opts.discogsUnavailable` threads the BS#1293 runtime-lookup gate.
+ * `orchestrate.ts` pre-reads `library.discogs_unavailable` for each
+ * candidate row and passes it through here — when `true`,
+ * `sharedLookupMetadata` short-circuits before any HTTP call or
+ * limiter/token spend and returns a `GatedLookupResponse` with
+ * `outcome: 'skipped_discogs_unavailable'`, so a flagged album's
+ * `artwork_url` is never overwritten with a false Discogs match (the
+ * Natanya-record complaint this epic exists to fix).
  *
- * Note: this fetcher does NOT go through `apps/backend/services/lml/lml.client.ts`,
- * so the Sentry-span wrap from #646 doesn't apply here. Trace propagation
- * relies on @sentry/node v10+ undici auto-instrumentation; same posture as
- * `flowsheet-metadata-backfill`.
+ * No `caller` label is passed. `library-artwork-url-backfill` is not yet
+ * registered in `shared/lml-client/src/policy.ts`'s `ALL_LML_CALLERS`
+ * (BS#1826) — an absent/unregistered caller is `policyForCaller`'s
+ * documented safe no-op, so this call keeps the client's 30s `TIMEOUT_MS`
+ * default, matching this job's pre-migration behavior. Registering a
+ * caller label (and picking up class-5 batch/backfill budgets) is a
+ * separate follow-up if this job's call volume ever needs it.
  */
 
-import type { LmlLookupResponse } from './lml-types.js';
+import { lookupMetadata as sharedLookupMetadata, type GatedLookupResponse } from '@wxyc/lml-client';
 
-const TIMEOUT_MS = 30000;
-
-const baseUrl = (): string => {
-  const url = process.env.LIBRARY_METADATA_URL;
-  if (!url) {
-    throw new Error('LIBRARY_METADATA_URL is not configured');
-  }
-  return url.replace(/\/api\/v1\/?$/, '').replace(/\/$/, '');
-};
-
-export const lookupMetadata = async (artist: string, album?: string): Promise<LmlLookupResponse> => {
-  // LML's /lookup contract requires `raw_message` even when artist/album are
-  // already structured. Synthesize "<artist> - <album>" — matches the shape
-  // the parser expects in LML's e2e fixtures.
-  const parts = [artist, album].filter((p): p is string => Boolean(p));
-  const rawMessage = parts.join(' - ');
-
-  const body: Record<string, string> = { artist, raw_message: rawMessage };
-  if (album) body.album = album;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
-  // LML enforces auth in production (LML_REQUIRE_AUTH=true). Send the bearer
-  // header when LML_API_KEY is set; the backend's lml.client.ts does the same.
-  // Sending it before the flag flips is harmless.
-  const apiKey = process.env.LML_API_KEY;
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) {
-    headers.Authorization = `Bearer ${apiKey}`;
-  }
-
-  try {
-    const response = await fetch(`${baseUrl()}/api/v1/lookup`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`LML responded ${response.status} ${response.statusText}`);
-    }
-
-    return (await response.json()) as LmlLookupResponse;
-  } catch (error) {
-    if ((error as Error).name === 'AbortError') {
-      throw new Error('LML request timed out', { cause: error });
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-};
+export const lookupMetadata = (
+  artist: string,
+  album?: string,
+  opts?: { discogsUnavailable?: boolean }
+): Promise<GatedLookupResponse> => sharedLookupMetadata(artist, album, undefined, opts);

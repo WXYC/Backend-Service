@@ -4,7 +4,8 @@
  * Pins the orchestrator's contract:
  *   1. The loadBatch SELECT carries the canonical filter (library JOIN
  *      artists, l.artwork_url IS NULL, a.discogs_artist_id IS NOT NULL,
- *      id-cursor, ORDER BY id ASC, LIMIT batchSize).
+ *      l.discogs_unavailable = false, id-cursor, ORDER BY id ASC, LIMIT
+ *      batchSize).
  *   2. processRow returns 'lml_error' on a thrown lookup; the orchestrator
  *      counts it and continues. The row stays artwork_url IS NULL via
  *      `applyEnrichment` *not* being called on the error path.
@@ -15,6 +16,9 @@
  *      throws on bad inputs.
  *   5. The id-cursor advances across batches and the loop terminates when
  *      a batch returns empty.
+ *   6. BS#1282: processRow passes the row's pre-read `discogs_unavailable`
+ *      flag through to `lookup()` as `{ discogsUnavailable }` — the BS#1293
+ *      per-row gate, defense-in-depth on top of loadBatch's WHERE filter.
  */
 import { jest } from '@jest/globals';
 
@@ -30,7 +34,7 @@ import {
   type EnrichFn,
   type LookupFn,
 } from '../../../../jobs/library-artwork-url-backfill/orchestrate';
-import type { LmlLookupResponse } from '../../../../jobs/library-artwork-url-backfill/lml-types';
+import type { GatedLookupResponse, LookupResponse } from '@wxyc/lml-client';
 
 type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
 const renderSql = (value: unknown): string => {
@@ -51,14 +55,34 @@ const renderSql = (value: unknown): string => {
   return '';
 };
 
-const matchedResponse: LmlLookupResponse = {
-  results: [{ library_item: { id: 1 }, artwork: { artwork_url: 'https://i.discogs.com/art.jpg' } }],
+const matchedResponse: LookupResponse = {
+  results: [
+    {
+      library_item: { id: 1 },
+      artwork: {
+        release_id: 12345,
+        release_url: 'https://www.discogs.com/release/12345',
+        artwork_url: 'https://i.discogs.com/art.jpg',
+      },
+    },
+  ],
   search_type: 'direct',
 };
 
-const noMatchResponse: LmlLookupResponse = {
+const noMatchResponse: LookupResponse = {
   results: [],
   search_type: 'none',
+};
+
+// Skipped-by-gate response shape: the BS#1293 gate in @wxyc/lml-client
+// returns this for a `discogsUnavailable: true` call instead of making an
+// LML HTTP request. Structurally identical to a genuine no-match from this
+// job's point of view (extractArtwork sees empty results either way) — see
+// `GatedLookupResponse` in shared/lml-client/src/index.ts.
+const skippedResponse: GatedLookupResponse = {
+  results: [],
+  search_type: 'none',
+  outcome: 'skipped_discogs_unavailable',
 };
 
 describe('resolvePartitionFilter', () => {
@@ -134,7 +158,7 @@ describe('processRow', () => {
     jest.clearAllMocks();
   });
 
-  const row = { id: 42, artist_name: 'Juana Molina', album_title: 'DOGA' };
+  const row = { id: 42, artist_name: 'Juana Molina', album_title: 'DOGA', discogs_unavailable: false };
 
   it('returns enriched_match and calls enrich on LML success-with-match', async () => {
     const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResponse);
@@ -143,7 +167,7 @@ describe('processRow', () => {
     const outcome = await processRow(row, { lookup, enrich });
 
     expect(outcome).toBe('enriched_match');
-    expect(lookup).toHaveBeenCalledWith('Juana Molina', 'DOGA');
+    expect(lookup).toHaveBeenCalledWith('Juana Molina', 'DOGA', { discogsUnavailable: false });
     expect(enrich).toHaveBeenCalledWith(row, matchedResponse);
   });
 
@@ -167,6 +191,30 @@ describe('processRow', () => {
     // Critical: the row's artwork_url stays NULL because we never call
     // enrich. The next sweep can re-attempt transient LML failures.
     expect(enrich).not.toHaveBeenCalled();
+  });
+
+  // BS#1282 / BS#1293 gate tests.
+  it('passes discogsUnavailable: true through to lookup for a flagged row (defense-in-depth)', async () => {
+    const flaggedRow = { ...row, discogs_unavailable: true };
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(skippedResponse);
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_no_match');
+
+    const outcome = await processRow(flaggedRow, { lookup, enrich });
+
+    expect(lookup).toHaveBeenCalledWith('Juana Molina', 'DOGA', { discogsUnavailable: true });
+    // A gate-skipped response is structurally a no-match to this job: no
+    // artwork, no UPDATE, row stays retryable-but-flagged.
+    expect(outcome).toBe('enriched_no_match');
+    expect(enrich).toHaveBeenCalledWith(flaggedRow, skippedResponse);
+  });
+
+  it('passes discogsUnavailable: false through for an unflagged row (behavior parity)', async () => {
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResponse);
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('enriched_match');
+
+    await processRow(row, { lookup, enrich });
+
+    expect(lookup).toHaveBeenCalledWith('Juana Molina', 'DOGA', { discogsUnavailable: false });
   });
 });
 
@@ -196,9 +244,22 @@ describe('runBackfill', () => {
     expect(sql).toMatch(/JOIN\s+AS\s+a\s+ON\s+a\."id"\s*=\s*l\."artist_id"/i);
     expect(sql.toLowerCase()).toMatch(/"artwork_url"\s+is\s+null/);
     expect(sql.toLowerCase()).toMatch(/"discogs_artist_id"\s+is\s+not\s+null/);
+    // BS#1282 / BS#1281: the primary bulk-path gate — flagged rows never
+    // enter the candidate set.
+    expect(sql.toLowerCase()).toMatch(/"discogs_unavailable"\s*=\s*false/);
     expect(sql).toMatch(/l\."id"\s*>/);
     expect(sql).toMatch(/ORDER BY[\s\S]*l\."id"\s+ASC/i);
     expect(sql).toMatch(/LIMIT/i);
+  });
+
+  it('selects discogs_unavailable so processRow can pass it through as a defense-in-depth gate', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+
+    await runBackfill({ lookup, enrich, throttleMs: 0 });
+
+    const call = (db.execute as jest.Mock).mock.calls[0];
+    const sql = renderSql(call?.[0]);
+    expect(sql.toLowerCase()).toMatch(/select[\s\S]*"discogs_unavailable"[\s\S]*from/);
   });
 
   it('composes the partition fragment into the SELECT WHERE when partitioning is active', async () => {
@@ -229,10 +290,10 @@ describe('runBackfill', () => {
 
   it('advances the id-cursor across batches and terminates on empty', async () => {
     const batch1 = [
-      { id: 10, artist_name: 'a', album_title: 'a1' },
-      { id: 20, artist_name: 'b', album_title: 'b1' },
+      { id: 10, artist_name: 'a', album_title: 'a1', discogs_unavailable: false },
+      { id: 20, artist_name: 'b', album_title: 'b1', discogs_unavailable: false },
     ];
-    const batch2 = [{ id: 30, artist_name: 'c', album_title: 'c1' }];
+    const batch2 = [{ id: 30, artist_name: 'c', album_title: 'c1', discogs_unavailable: false }];
 
     (db.execute as jest.Mock).mockResolvedValueOnce(batch1).mockResolvedValueOnce(batch2).mockResolvedValueOnce([]);
 
@@ -253,9 +314,9 @@ describe('runBackfill', () => {
 
   it('counts lml_error when LML throws and continues processing', async () => {
     const batch = [
-      { id: 10, artist_name: 'a', album_title: 'a1' },
-      { id: 20, artist_name: 'b', album_title: 'b1' },
-      { id: 30, artist_name: 'c', album_title: 'c1' },
+      { id: 10, artist_name: 'a', album_title: 'a1', discogs_unavailable: false },
+      { id: 20, artist_name: 'b', album_title: 'b1', discogs_unavailable: false },
+      { id: 30, artist_name: 'c', album_title: 'c1', discogs_unavailable: false },
     ];
 
     (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);
@@ -291,8 +352,8 @@ describe('runBackfill', () => {
     // variant when 0 rows updated. The orchestrator must bump the matching
     // counter rather than treating it as a regular match.
     const batch = [
-      { id: 10, artist_name: 'a', album_title: 'a1' },
-      { id: 20, artist_name: 'b', album_title: 'b1' },
+      { id: 10, artist_name: 'a', album_title: 'a1', discogs_unavailable: false },
+      { id: 20, artist_name: 'b', album_title: 'b1', discogs_unavailable: false },
     ];
 
     (db.execute as jest.Mock).mockResolvedValueOnce(batch).mockResolvedValueOnce([]);

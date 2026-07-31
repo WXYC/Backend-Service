@@ -37,11 +37,20 @@
  * The `lookup` and `enrich` functions are injected so tests can drive the
  * orchestration without a live LML or DB. Production wires them to
  * `lml-fetch.ts:lookupMetadata` and `enrich.ts:applyEnrichment`.
+ *
+ * BS#1282 / BS#1281: `loadBatch`'s WHERE also excludes
+ * `library.discogs_unavailable = true` rows — the primary bulk-path gate,
+ * cheap via the `library_discogs_unavailable_idx` partial index (mirrors the
+ * `album-level-backfill` candidate filter from sub-issue 1c). `EnrichRow`
+ * still carries `discogs_unavailable` so `processRow` can pass it through to
+ * `lookup()` as defense-in-depth (BS#1293's per-call gate) — relevant if the
+ * flag flips true between this SELECT and the row's lookup call, or if a
+ * future caller drives `processRow` against a row the WHERE didn't filter.
  */
 
 import { sql, type SQL } from 'drizzle-orm';
 import { db } from '@wxyc/database';
-import type { LmlLookupResponse } from './lml-types.js';
+import type { LookupResponse } from '@wxyc/lml-client';
 import type { EnrichRow, EnrichOutcome } from './enrich.js';
 import { captureError, log } from './logger.js';
 
@@ -141,9 +150,13 @@ export const resolvePartitionFilter = (
   };
 };
 
-export type LookupFn = (artist: string, album?: string) => Promise<LmlLookupResponse>;
+export type LookupFn = (
+  artist: string,
+  album?: string,
+  opts?: { discogsUnavailable?: boolean }
+) => Promise<LookupResponse>;
 
-export type EnrichFn = (row: EnrichRow, response: LmlLookupResponse) => Promise<EnrichOutcome>;
+export type EnrichFn = (row: EnrichRow, response: LookupResponse) => Promise<EnrichOutcome>;
 
 export type Totals = {
   scanned: number;
@@ -174,9 +187,13 @@ export const processRow = async (
   const artist = row.artist_name;
   const album = row.album_title;
 
-  let response: LmlLookupResponse;
+  let response: LookupResponse;
   try {
-    response = await deps.lookup(artist, album);
+    // BS#1282: pass the pre-read `discogs_unavailable` flag through as the
+    // BS#1293 gate's `discogsUnavailable` option — defense-in-depth on top
+    // of `loadBatch`'s WHERE, which already excludes flagged rows from the
+    // candidate set (see the module docstring).
+    response = await deps.lookup(artist, album, { discogsUnavailable: row.discogs_unavailable });
   } catch (error) {
     log('warn', 'lml_error', `LML lookup failed for library.id=${row.id}`, {
       library_id: row.id,
@@ -202,14 +219,23 @@ export const processRow = async (
  * was nullable until A.2's backfill shipped) — guarantees a non-null artist
  * for the LML lookup regardless of A.2 backfill state.
  *
- * No supporting partial index. The flowsheet-metadata-backfill precedent
- * relies on `flowsheet_metadata_attempt_pending_idx` (#659) because that
- * job scans the 1.86M-row flowsheet tail. This job's eligible set is
- * bounded by the ~24% of artists with a Discogs identity (~5.7K) joined
- * to their library rows (~18.5K out of 64K total), small enough that an
- * unindexed seq-scan-then-hash-join per ~37 batches is acceptable for a
- * one-shot pass during a low-traffic window. If this becomes recurring or
- * the resolvable set grows materially, ship a partial index migration:
+ * BS#1282 / BS#1281: also excludes `l."discogs_unavailable" = true` rows —
+ * the primary bulk-path gate (cheaper than the per-item `discogsUnavailable`
+ * check inside `@wxyc/lml-client.lookupMetadata`, since flagged rows never
+ * enter the candidate set at all) and selects the column so `processRow` can
+ * still pass it through per-row as defense-in-depth. The
+ * `library_discogs_unavailable_idx` partial index (sub-issue 1a) keeps this
+ * predicate cheap.
+ *
+ * No supporting partial index for the `artwork_url IS NULL` predicate. The
+ * flowsheet-metadata-backfill precedent relies on
+ * `flowsheet_metadata_attempt_pending_idx` (#659) because that job scans the
+ * 1.86M-row flowsheet tail. This job's eligible set is bounded by the ~24%
+ * of artists with a Discogs identity (~5.7K) joined to their library rows
+ * (~18.5K out of 64K total), small enough that an unindexed seq-scan-then-
+ * hash-join per ~37 batches is acceptable for a one-shot pass during a
+ * low-traffic window. If this becomes recurring or the resolvable set grows
+ * materially, ship a partial index migration:
  * `CREATE INDEX CONCURRENTLY library_artwork_pending_idx ON
  * wxyc_schema.library (id) WHERE artwork_url IS NULL` (paired with the
  * artists join, per the deploy runbook for index-with-IF-NOT-EXISTS in
@@ -221,11 +247,13 @@ const loadBatch = async (afterId: number, batchSize: number, partitionFilter: SQ
     SELECT
       l."id",
       a."artist_name" AS "artist_name",
-      l."album_title"
+      l."album_title",
+      l."discogs_unavailable"
     FROM ${LIBRARY_TABLE} AS l
     JOIN ${ARTISTS_TABLE} AS a ON a."id" = l."artist_id"
     WHERE l."artwork_url" IS NULL
       AND a."discogs_artist_id" IS NOT NULL
+      AND l."discogs_unavailable" = false
       AND l."id" > ${afterId}
       ${partitionClause}
     ORDER BY l."id" ASC

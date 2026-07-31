@@ -26,17 +26,33 @@
  * Spacer.gif filter: applied via `@wxyc/metadata` so Discogs `spacer.gif`
  * placeholders never land in `library.artwork_url` (a non-null spacer URL
  * is still rendered as broken artwork).
+ *
+ * BS#1282: `response` is typed against `@wxyc/lml-client`'s real
+ * `LookupResponse`/`DiscogsMatchResult` DTOs (was a hand-rolled minimal
+ * slice, `LmlLookupResponse`/`LmlArtwork` in the now-deleted `lml-types.ts`)
+ * now that the job imports `@wxyc/lml-client` for the fetch itself. A
+ * `discogsUnavailable`-gated skip comes back as a `LookupResponse`-shaped
+ * empty result (`results: []`), so `extractArtwork` treats it identically
+ * to a genuine no-match — the row stays NULL and is left for the next
+ * sweep, same as before this migration.
  */
 
 import { sql } from 'drizzle-orm';
 import { db, library } from '@wxyc/database';
 import { filterSpacerGif } from '@wxyc/metadata';
-import type { LmlArtwork, LmlLookupResponse } from './lml-types.js';
+import type { DiscogsMatchResult, LookupResponse } from '@wxyc/lml-client';
 
 export type EnrichRow = {
   id: number;
   artist_name: string;
   album_title: string;
+  /**
+   * MD "Not on Discogs" flag (BS#1281). Pre-read by `orchestrate.ts`'s
+   * `loadBatch` so `processRow` can pass it through to the lookup as the
+   * BS#1293 gate's `discogsUnavailable` option. Not read by `applyEnrichment`
+   * itself — the gate happens before this function ever sees a response.
+   */
+  discogs_unavailable: boolean;
 };
 
 export type EnrichOutcome = 'enriched_match' | 'enriched_match_raced' | 'enriched_no_match';
@@ -49,7 +65,7 @@ export type EnrichOutcome = 'enriched_match' | 'enriched_match_raced' | 'enriche
  * `artwork: null`. All three end up writing nothing and leaving the row
  * NULL.
  */
-export const extractArtwork = (response: LmlLookupResponse): LmlArtwork | null => {
+export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | null => {
   const first = response.results?.[0];
   if (!first) return null;
   if (!first.artwork) return null;
@@ -62,7 +78,7 @@ export const extractArtwork = (response: LmlLookupResponse): LmlArtwork | null =
  * Returns the outcome so the orchestrator can count it. Errors propagate up —
  * this function does not swallow.
  */
-export const applyEnrichment = async (row: EnrichRow, response: LmlLookupResponse): Promise<EnrichOutcome> => {
+export const applyEnrichment = async (row: EnrichRow, response: LookupResponse): Promise<EnrichOutcome> => {
   const artwork = extractArtwork(response);
   const url = artwork ? filterSpacerGif(artwork.artwork_url) : null;
 
