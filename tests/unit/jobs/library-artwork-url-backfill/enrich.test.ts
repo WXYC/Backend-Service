@@ -4,21 +4,29 @@
  * Pins the row-level UPDATE shape against #637's contract:
  *   1. On LML success-with-match (artwork URL present, not a spacer.gif),
  *      the .set() block writes only `artwork_url` — single-column UPDATE.
- *   2. On LML success-no-match (empty results, missing artwork field, null
- *      artwork, or a URL that filters down to null after spacer-stripping),
- *      no UPDATE is issued — the row stays NULL so a future sweep retries.
+ *   2. On LML success-no-match (empty results, missing artwork field, an
+ *      artwork block with no artwork_url, or a URL that filters down to
+ *      null after spacer-stripping), no UPDATE is issued — the row stays
+ *      NULL so a future sweep retries.
  *   3. The .where() narrows by id AND `artwork_url IS NULL` so a runtime
  *      stamp landing between the orchestrator's SELECT and this UPDATE wins.
  *   4. The race detector returns `enriched_match_raced` when 0 rows update.
  *
  * Also pins the spacer.gif filter (mirrors flowsheet-metadata-backfill until
  * #649's shared helper lands).
+ *
+ * BS#1282: response fixtures are typed against `@wxyc/lml-client`'s real
+ * `LookupResponse`/`DiscogsMatchResult` DTOs. `DiscogsMatchResult.artwork_url`
+ * is `string | undefined` on the wire (not nullable), so the "no usable
+ * artwork" cases below are an absent `artwork` field vs. an `artwork` block
+ * with no `artwork_url` — there's no longer an explicit-`null` variant to
+ * construct.
  */
 import { jest } from '@jest/globals';
 
 import { db, library } from '@wxyc/database';
 import { applyEnrichment, extractArtwork, type EnrichRow } from '../../../../jobs/library-artwork-url-backfill/enrich';
-import type { LmlLookupResponse } from '../../../../jobs/library-artwork-url-backfill/lml-types';
+import type { LookupResponse } from '@wxyc/lml-client';
 
 type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
 const renderSql = (value: unknown): string => {
@@ -48,30 +56,40 @@ const baseRow: EnrichRow = {
   id: 42,
   artist_name: 'Juana Molina',
   album_title: 'DOGA',
+  discogs_unavailable: false,
 };
 
-const matchedResponse: LmlLookupResponse = {
+const matchedResponse: LookupResponse = {
   results: [
     {
       library_item: { id: 1 },
-      artwork: { artwork_url: 'https://i.discogs.com/art.jpg' },
+      artwork: {
+        release_id: 12345,
+        release_url: 'https://www.discogs.com/release/12345',
+        artwork_url: 'https://i.discogs.com/art.jpg',
+      },
     },
   ],
   search_type: 'direct',
 };
 
-const noMatchResponse: LmlLookupResponse = {
+const noMatchResponse: LookupResponse = {
   results: [],
   search_type: 'none',
 };
 
-const noArtworkResponse: LmlLookupResponse = {
-  results: [{ library_item: { id: 1 }, artwork: null }],
+const noArtworkResponse: LookupResponse = {
+  results: [{ library_item: { id: 1 } }],
   search_type: 'direct',
 };
 
-const nullArtworkUrlResponse: LmlLookupResponse = {
-  results: [{ library_item: { id: 1 }, artwork: { artwork_url: null } }],
+const nullArtworkUrlResponse: LookupResponse = {
+  results: [
+    {
+      library_item: { id: 1 },
+      artwork: { release_id: 12345, release_url: 'https://www.discogs.com/release/12345' },
+    },
+  ],
   search_type: 'direct',
 };
 
@@ -100,13 +118,13 @@ describe('applyEnrichment', () => {
     expect(mockDb.update).not.toHaveBeenCalled();
   });
 
-  it('treats artwork: null the same as no-match (no UPDATE)', async () => {
+  it('treats a missing artwork field the same as no-match (no UPDATE)', async () => {
     const outcome = await applyEnrichment(baseRow, noArtworkResponse);
     expect(outcome).toBe('enriched_no_match');
     expect(mockDb.update).not.toHaveBeenCalled();
   });
 
-  it('treats artwork_url: null the same as no-match (no UPDATE)', async () => {
+  it('treats an artwork block with no artwork_url the same as no-match (no UPDATE)', async () => {
     const outcome = await applyEnrichment(baseRow, nullArtworkUrlResponse);
     expect(outcome).toBe('enriched_no_match');
     expect(mockDb.update).not.toHaveBeenCalled();
@@ -117,11 +135,15 @@ describe('applyEnrichment', () => {
     // artwork_url, defeating the search-path short-circuit. The filter drops
     // it; after that, the row has no artwork to write, so the outcome is
     // no-match (no UPDATE).
-    const spacerResponse: LmlLookupResponse = {
+    const spacerResponse: LookupResponse = {
       results: [
         {
           library_item: { id: 1 },
-          artwork: { artwork_url: 'https://s.discogs.com/images/spacer.gif' },
+          artwork: {
+            release_id: 12345,
+            release_url: 'https://www.discogs.com/release/12345',
+            artwork_url: 'https://s.discogs.com/images/spacer.gif',
+          },
         },
       ],
       search_type: 'direct',
@@ -171,14 +193,6 @@ describe('extractArtwork', () => {
   });
 
   it('returns null when results[0] has no artwork field', () => {
-    const response: LmlLookupResponse = {
-      results: [{ library_item: { id: 1 } }],
-      search_type: 'direct',
-    };
-    expect(extractArtwork(response)).toBeNull();
-  });
-
-  it('returns null when results[0].artwork is explicitly null', () => {
     expect(extractArtwork(noArtworkResponse)).toBeNull();
   });
 });
