@@ -61,6 +61,21 @@ export class DiscogsProvider implements ArtworkProvider {
       });
     }
 
+    // BS#1890: BS#1089 only closed LML's *throw* path. LML has a second
+    // transient mode that returns HTTP 200: `timeout: true` (server-side hard
+    // cap fired mid-pipeline, LML#370) or `degraded: true` (deliberately shed
+    // the enrichment tail — and `fetch_artwork` is one of those shed steps —
+    // under a caller deadline / admission pressure / unavailable upstream,
+    // LML#930). Either is "couldn't answer," not a confirmed absence. When such
+    // a response yields no usable artwork, throw so the finder folds it into
+    // BS#1089's `errored` tagging and the proxy skips the 24h negative cache —
+    // same posture as a timeout/5xx. A degraded response that still carried
+    // artwork (warm-cache hit) is a real result and falls through untouched.
+    if (results.length === 0 && (lookupResponse.timeout === true || lookupResponse.degraded === true)) {
+      const mode = lookupResponse.timeout === true ? 'timeout' : 'degraded';
+      throw new Error(`[DiscogsProvider] LML returned a soft-degraded ${mode} 200 with no usable artwork`);
+    }
+
     results.sort((a, b) => b.confidence - a.confidence);
     return results;
   }
