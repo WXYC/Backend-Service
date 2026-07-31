@@ -182,6 +182,7 @@ import {
   __resetAlbumMetadataCacheForTests,
   __resetArtistMetadataCacheForTests,
   __resetEntityResolveCacheForTests,
+  __getEntityResolveRemainingTtlForTests,
   __resetSpotifyTrackCacheForTests,
 } from '../../../apps/backend/controllers/proxy.controller';
 
@@ -439,6 +440,60 @@ describe('proxy.controller', () => {
       // starts cold, same discipline as `__resetLibraryTracksCacheForTests`
       // below in the `libraryTracks` suite.
       __resetAlbumMetadataCacheForTests();
+    });
+
+    // BS#1893: don't memoize a non-terminal (pending/enriching) album snapshot —
+    // its enrichment lands seconds later via the CDC worker, and a 1h-cached
+    // pending snapshot would mask that freshness on this path. The lru-cache mock
+    // isn't wired into the controller (nested install; see the mock note up top),
+    // so these assert the REAL cache's observable effect: does a repeat request
+    // re-resolve the linked row, or short-circuit on a cached response?
+    describe('non-terminal metadata_status caching (BS#1893)', () => {
+      it('does not cache a pending album snapshot: a repeat request re-resolves instead of serving stale pending', async () => {
+        mockSelectLinkedFlowsheetRow.mockResolvedValue({
+          album_id: DEFAULT_LINKED_ALBUM_ID,
+          record_label: null,
+          label_id: null,
+          metadata_status: 'pending',
+        });
+        mockLookupAlbumMetadataById.mockResolvedValue(null); // no album_metadata row yet
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = { query: { artistName: 'Pending Artist', releaseTitle: 'Pending Album' } } as unknown as Request;
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+
+        // Not cached → the second request re-resolves the linked row.
+        expect(mockSelectLinkedFlowsheetRow).toHaveBeenCalledTimes(2);
+      });
+
+      it('caches a terminal (enriched_match) album snapshot: a repeat request short-circuits without re-resolving', async () => {
+        mockSelectLinkedFlowsheetRow.mockResolvedValue({
+          album_id: DEFAULT_LINKED_ALBUM_ID,
+          record_label: null,
+          label_id: null,
+          metadata_status: 'enriched_match',
+        });
+        mockLookupAlbumMetadataById.mockResolvedValue({
+          artwork_url: 'https://i.discogs.com/enriched.jpg',
+          discogs_url: 'https://www.discogs.com/release/1',
+          release_year: 2020,
+        });
+
+        const req = { query: { artistName: 'Enriched Artist', releaseTitle: 'Enriched Album' } } as unknown as Request;
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+
+        // Cached (a terminal, stable snapshot) → the second request is served
+        // from the response cache and never re-resolves. Also exercises the new
+        // `sizeCalculation`/`maxSize` write path (BS#1893) end to end.
+        expect(mockSelectLinkedFlowsheetRow).toHaveBeenCalledTimes(1);
+      });
     });
 
     // ADR 0012: attach external critic-review snippets, flag-gated. These run
@@ -1869,7 +1924,14 @@ describe('proxy.controller', () => {
         // shape in the cache for the full TTL, same failure mode the
         // sibling local-DB/LML tests above guard against.
         mockCriticReviewsConfig.mockReturnValue({ enabled: true });
-        mockSelectLinkedFlowsheetRow.mockResolvedValue(defaultLinkedRow());
+        // Terminal status so caching is gated ONLY by the reviews-throw guard
+        // under test, not by BS#1893's non-terminal (pending) rule.
+        mockSelectLinkedFlowsheetRow.mockResolvedValue({
+          album_id: DEFAULT_LINKED_ALBUM_ID,
+          record_label: null,
+          label_id: null,
+          metadata_status: 'enriched_no_match',
+        });
         mockLookupAlbumMetadataById.mockResolvedValue(null);
         mockLookupMetadata.mockResolvedValue({
           results: [],
@@ -1894,7 +1956,15 @@ describe('proxy.controller', () => {
 
       it('still caches when the critic-reviews read succeeds', async () => {
         mockCriticReviewsConfig.mockReturnValue({ enabled: true });
-        mockSelectLinkedFlowsheetRow.mockResolvedValue(defaultLinkedRow());
+        // Terminal status so the response is cacheable — this test asserts a
+        // successful reviews read does NOT block caching (BS#1893's pending rule
+        // would otherwise mask that behavior).
+        mockSelectLinkedFlowsheetRow.mockResolvedValue({
+          album_id: DEFAULT_LINKED_ALBUM_ID,
+          record_label: null,
+          label_id: null,
+          metadata_status: 'enriched_no_match',
+        });
         mockLookupAlbumMetadataById.mockResolvedValue(null);
         mockLookupMetadata.mockResolvedValue({
           results: [],
@@ -1923,7 +1993,15 @@ describe('proxy.controller', () => {
       });
 
       it('keys the cache on the CRITIC_REVIEWS_ENABLED flag state so a flag flip is not served a stale shape', async () => {
-        mockSelectLinkedFlowsheetRow.mockResolvedValue(defaultLinkedRow());
+        // Terminal status so both flag states cache — the two LML calls below
+        // then prove the flag is part of the KEY (each flag state is a distinct
+        // cold entry), not merely that BS#1893 skipped caching a pending row.
+        mockSelectLinkedFlowsheetRow.mockResolvedValue({
+          album_id: DEFAULT_LINKED_ALBUM_ID,
+          record_label: null,
+          label_id: null,
+          metadata_status: 'enriched_no_match',
+        });
         mockLookupAlbumMetadataById.mockResolvedValue(null);
         mockLookupMetadata.mockResolvedValue({
           results: [],
@@ -2330,6 +2408,30 @@ describe('proxy.controller', () => {
         );
 
         expect(mockResolveEntity).toHaveBeenCalledTimes(2);
+      });
+
+      it('negative-caches a 404 with a short TTL, decoupled from the 24h positive TTL (BS#1893)', async () => {
+        const { LmlClientError } = await import('@wxyc/lml-client');
+
+        // A 404 mid discogs-cache-rebuild is transient-prone; its negative memo
+        // must expire in minutes, not sit for the 24h positive TTL.
+        mockResolveEntity.mockRejectedValueOnce(new LmlClientError('Not found', 404));
+        const negReq = { query: { type: 'release', id: '909090' } } as unknown as Request;
+        await expect(resolveEntity(negReq, createMockRes() as Response, mockNext)).rejects.toThrow();
+
+        const negTtl = __getEntityResolveRemainingTtlForTests('release', 909090);
+        expect(negTtl).toBeGreaterThan(0);
+        // ~10 min (small slack for the sub-ms cache clock), and — the point of
+        // the decoupling — far below the 24h positive TTL asserted just below.
+        expect(negTtl).toBeLessThanOrEqual(10 * 60 * 1000 + 1000);
+
+        // A positive resolution keeps the long 24h TTL — proves the decoupling.
+        mockResolveEntity.mockResolvedValueOnce({ name: 'Broadcast', type: 'artist', id: 7003 });
+        const posReq = { query: { type: 'artist', id: '7003' } } as unknown as Request;
+        await resolveEntity(posReq, createMockRes() as Response, mockNext);
+
+        const posTtl = __getEntityResolveRemainingTtlForTests('artist', 7003);
+        expect(posTtl).toBeGreaterThan(60 * 60 * 1000); // well over an hour
       });
 
       it('projects cache_hit onto the Sentry span', async () => {
