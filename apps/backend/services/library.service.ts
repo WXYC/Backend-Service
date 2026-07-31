@@ -1424,7 +1424,20 @@ async function searchLibraryBothMode(
 
   if (trimmed.length >= 2) {
     const trigramResults = await searchLibraryByTrigramBoth(trimmed, n, on_streaming);
-    if (trigramResults.length > 0) return trigramResults;
+    // BS#1885: an alias-only trigram hit must not suppress the cascade —
+    // same root cause as the /library/query surface (library-search.service.ts).
+    // A genuine (non-alias) trigram row is still a strong enough signal to
+    // short-circuit as before.
+    if (trigramResults.some((r) => !r.matched_via_alias)) return trigramResults;
+    if (trigramResults.length > 0) {
+      const cascade = await runCatalogTrackSearchCascade(trimmed, n, on_streaming);
+      if (cascade.length === 0) return trigramResults;
+      // Cascade-first: this path has no `sort` param (bounded request-line
+      // list, default n=5), and a resolved track match outranks a fuzzy
+      // alias hit.
+      const cascadeIds = new Set(cascade.map((r) => r.id));
+      return [...cascade, ...trigramResults.filter((r) => !cascadeIds.has(r.id))].slice(0, n);
+    }
   }
 
   return runCatalogTrackSearchCascade(trimmed, n, on_streaming);
