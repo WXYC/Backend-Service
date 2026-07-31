@@ -1,0 +1,39 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+WORKDIR /artist-unicode-dedup-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/artist-unicode-dedup ./jobs/artist-unicode-dedup
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/artist-unicode-dedup
+
+#Production stage
+FROM node:24-alpine AS prod
+
+WORKDIR /artist-unicode-dedup
+
+COPY ./package* ./
+COPY ./jobs/artist-unicode-dedup/package* ./jobs/artist-unicode-dedup/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./artist-unicode-dedup-builder/jobs/artist-unicode-dedup/dist ./jobs/artist-unicode-dedup/dist
+COPY --from=builder ./artist-unicode-dedup-builder/shared/database/dist ./shared/database/dist
+
+# Bulk repoint workload. Async commit is safe: the job is idempotent (a merged
+# fold-group drops out of the `HAVING count(*) > 1` set) and each group's writes
+# are one transaction. High statement timeout so a group under live load does
+# not abort mid-merge.
+ENV DB_APPLICATION_NAME=wxyc-artist-unicode-dedup
+ENV DB_STATEMENT_TIMEOUT_MS=900000
+ENV DB_SYNCHRONOUS_COMMIT=off
+
+# ENTRYPOINT + empty CMD so docker-level args (e.g. `--execute`) pass through to
+# the job rather than replacing the launcher. node resolves `@wxyc/database` via
+# the standard walk up to /artist-unicode-dedup/node_modules.
+ENTRYPOINT ["node", "/artist-unicode-dedup/jobs/artist-unicode-dedup/dist/job.js"]
+CMD []

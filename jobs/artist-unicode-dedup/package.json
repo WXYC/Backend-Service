@@ -1,0 +1,25 @@
+{
+  "name": "@wxyc/artist-unicode-dedup",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot dedup: merge pre-existing Unicode-form-duplicate artists rows (NFC/NFD/ASCII-fold), repointing every artist_id FK to the survivor. Dry-run by default; --execute to write.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_artist_unicode_dedup:ci -f ../../Dockerfile.artist-unicode-dedup ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
