@@ -1389,7 +1389,17 @@ export async function runCatalogTrackSearchCascade(
   }
   if (flags.discogsEnabled) {
     const trackResults = await searchLibraryByTrackRaw(query, limit);
-    if (trackResults.length > 0) return trackResults;
+    // BS#1885: `searchLibraryByTrackRaw` (unlike `searchLibraryByCTARaw`) does
+    // not honor `on_streaming`, so scope its rows here — at the shared cascade
+    // boundary — rather than only in the `/library/query` caller. Both-mode
+    // (`GET /library/?on_streaming=…`) has no in-memory re-filter of its own,
+    // so without this a streaming-scoped request could receive a Track 2 row
+    // of the wrong streaming status. `on_streaming === undefined` (no filter)
+    // and `null` rows under an active filter mirror the `/library/query`
+    // predicate in `library-search.service.ts::runCascade`.
+    const scoped =
+      on_streaming === undefined ? trackResults : trackResults.filter((row) => row.on_streaming === on_streaming);
+    if (scoped.length > 0) return scoped;
   }
   return [];
 }
@@ -1434,9 +1444,17 @@ async function searchLibraryBothMode(
       if (cascade.length === 0) return trigramResults;
       // Cascade-first: this path has no `sort` param (bounded request-line
       // list, default n=5), and a resolved track match outranks a fuzzy
-      // alias hit.
+      // alias hit. On an id collision, carry the alias row's
+      // `matched_via_alias` onto the cascade row (mirrors the `/library/query`
+      // merge in `library-search.service.ts`) so the two surfaces agree on the
+      // wire shape rather than one silently dropping the alias hint.
+      const trigramById = new Map(trigramResults.map((r) => [r.id, r]));
+      const enrichedCascade = cascade.map((r) => {
+        const dup = trigramById.get(r.id);
+        return dup?.matched_via_alias ? { ...r, matched_via_alias: dup.matched_via_alias } : r;
+      });
       const cascadeIds = new Set(cascade.map((r) => r.id));
-      return [...cascade, ...trigramResults.filter((r) => !cascadeIds.has(r.id))].slice(0, n);
+      return [...enrichedCascade, ...trigramResults.filter((r) => !cascadeIds.has(r.id))].slice(0, n);
     }
   }
 
