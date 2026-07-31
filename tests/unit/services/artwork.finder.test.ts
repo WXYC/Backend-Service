@@ -122,7 +122,10 @@ describe('ArtworkFinder', () => {
       source: 'discogs',
       confidence: 0.95,
     };
-    const finder = new ArtworkFinder([matchingProvider('itunes', lowConfidence), matchingProvider('discogs', highConfidence)]);
+    const finder = new ArtworkFinder([
+      matchingProvider('itunes', lowConfidence),
+      matchingProvider('discogs', highConfidence),
+    ]);
 
     const result = await finder.find(sampleRequest);
 
