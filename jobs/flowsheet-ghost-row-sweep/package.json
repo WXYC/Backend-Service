@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/flowsheet-ghost-row-sweep",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "One-shot dry-run-by-default sweep (BS#1887): anti-join flowsheet.legacy_entry_id / rotation.legacy_rotation_id against a pluggable authoritative keyspace source and DELETE the orphans (ghost rows left behind by the upsert-only tubafrenzy ETLs, BS#1083). File-backed LegacyKeyspaceSource for tests today; the prod dump adapter and the actual prod run are BS#1083 / BS#1543. Batched DELETE + ANALYZE-after per the bulk-update playbook, id-cursor resume, cooperative pause, SIGTERM graceful stop.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_flowsheet_ghost_row_sweep:ci -f ../../Dockerfile.flowsheet-ghost-row-sweep ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.67.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
