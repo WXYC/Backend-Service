@@ -33,9 +33,15 @@ COPY --from=builder ./flowsheet-ghost-row-sweep-builder/shared/database/dist ./s
 # batch scans as the cursor advances.
 ENV DB_STATEMENT_TIMEOUT_MS=300000
 
-# Async commit: a mid-run failure never strands a page, since the resume
-# cursor only advances after a page's DELETE commits — an unwritten row is
-# just re-selected and re-tested on the next run.
+# Async commit. A mid-run failure the Node client SEES (a thrown error) never
+# strands a page: the resume cursor only advances after a page's DELETE
+# commits, so an unwritten row is just re-selected and re-tested on the next
+# run. Async commit's real risk is a crash the client DOESN'T see — a page
+# the client believed had committed, lost to a Postgres crash inside the
+# fsync window, with the cursor already past it. That's what the job's
+# post-run verification pass (orchestrate.ts, real-PG re-scan after
+# --execute) exists to catch: it fails the run loudly instead of leaving a
+# silent permanent leftover behind an already-advanced cursor.
 ENV DB_SYNCHRONOUS_COMMIT=off
 
 # Identifies the connection in pg_stat_activity during triage.
