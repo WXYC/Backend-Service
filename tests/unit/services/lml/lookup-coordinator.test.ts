@@ -15,9 +15,22 @@ import type { LookupResponse } from '@wxyc/lml-client';
 
 const mockLookupMetadata = jest.fn<(...args: unknown[]) => Promise<LookupResponse>>();
 
+// Faithful stand-ins for the two BS#1748 symbols the coordinator now imports.
+class FakeLimiterShedError extends Error {
+  statusCode = 503;
+  constructor(public readonly reason: string) {
+    super(`LML limiter shed: ${reason}`);
+    this.name = 'LimiterShedError';
+  }
+}
+const fakeShedReasonOf = (r: { outcome?: string }): string | undefined =>
+  r.outcome === 'shed_limiter_saturated' || r.outcome === 'shed_breaker_open' ? r.outcome : undefined;
+
 jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   envInt: (_name: string, fallback: number) => fallback,
+  shedReasonOf: fakeShedReasonOf,
+  LimiterShedError: FakeLimiterShedError,
 }));
 
 // Capture span attribute writes so the requireSearchType tests can assert
@@ -282,6 +295,38 @@ describe('LmlLookupCoordinator', () => {
       await expect(
         lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, { caller: 'b' })
       ).resolves.toBeDefined();
+    });
+
+    // BS#1748: a limiter shed RESOLVES as an empty LookupResponse rather than
+    // throwing. The coordinator must treat it as a transient error — re-throw,
+    // not cache — so a ~30 s breaker-open window can't be recorded as a
+    // confirmed no-match for 5 min (this LRU) / ~24 h (the downstream artwork
+    // negative cache), the BS#1089 regression.
+    it.each(['shed_limiter_saturated', 'shed_breaker_open'] as const)(
+      'treats a %s shed as a transient error: re-throws instead of returning the empty response',
+      async (outcome) => {
+        mockLookupMetadata.mockResolvedValueOnce({ results: [], outcome });
+
+        await expect(
+          lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, { caller: 'a' })
+        ).rejects.toMatchObject({ name: 'LimiterShedError', reason: outcome });
+      }
+    );
+
+    it('does not cache a shed — the next call issues a fresh wire lookup that can succeed', async () => {
+      mockLookupMetadata
+        .mockResolvedValueOnce({ results: [], outcome: 'shed_breaker_open' })
+        .mockResolvedValueOnce(fakeResponse());
+
+      await expect(
+        lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, { caller: 'a' })
+      ).rejects.toMatchObject({ name: 'LimiterShedError' });
+
+      // A shed left nothing in the LRU, so this retry hits the wire again and
+      // gets the real match — not a cached empty.
+      const result = await lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, { caller: 'b' });
+      expect(result.results).toHaveLength(1);
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
     });
   });
 
