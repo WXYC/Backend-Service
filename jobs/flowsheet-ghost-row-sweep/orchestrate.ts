@@ -35,9 +35,12 @@
  * `ANALYZE` after each table's write pass, per the bulk-update playbook.
  * Resumability is id-cursor per target (`GHOST_SWEEP_FLOWSHEET_AFTER_ID` /
  * `GHOST_SWEEP_ROTATION_AFTER_ID`); the cursor advances only after a page's
- * DELETE commits (or in dry-run, which writes nothing to strand), so a
- * mid-run failure never stands unswept ghosts behind the logged cursor —
- * re-running from the same cursor re-selects and re-tests them.
+ * DELETE call returns successfully (or in dry-run, which writes nothing to
+ * strand), so a failure the client SEES (a thrown error) never strands
+ * unswept ghosts behind the logged cursor — re-running from the same cursor
+ * re-selects and re-tests them. A failure the client DOESN'T see (a page
+ * that appeared to commit but didn't survive a crash under async commit)
+ * is a distinct hazard the post-run verification pass below exists to catch.
  *
  * Blast radius (verified against schema, see the issue body): deleting a
  * `flowsheet` row cascades to `flowsheet_linkage_review` (migration 0067,
@@ -45,6 +48,31 @@
  * `flowsheet.rotation_id` (migration 0097, `ON DELETE SET NULL`). Both are
  * the intended semantics and require no explicit child cleanup — the FK
  * handles it.
+ *
+ * Two safety nets a plain anti-join-and-DELETE doesn't get for free:
+ *
+ *   - **Empty/truncated keyspace floor** (`GHOST_SWEEP_MIN_KEYSPACE_SIZE`,
+ *     default 1). A `LegacyKeyspaceSource` that returns an empty (or
+ *     suspiciously tiny) `Set` — a missing file, a truncated extraction, a
+ *     misconfigured path — would anti-join *every* row as a ghost. Nothing
+ *     about that failure mode is distinguishable in-process from "tubafrenzy
+ *     genuinely has zero surviving rows," so the run refuses outright rather
+ *     than risk `--execute` emptying a live table. `--execute` from
+ *     job.ts's CLI is already required for it to even read from a
+ *     `LegacyKeyspaceSource` that has never proven itself against
+ *     production; this floor is what makes an operator's fat-fingered path
+ *     fail loud instead of erasing the tables.
+ *   - **Post-run ghost-free verification.** Async commit
+ *     (`DB_SYNCHRONOUS_COMMIT=off`, set by the Dockerfile per the
+ *     bulk-update playbook) means a page's DELETE can
+ *     appear to succeed to the Node client and then be lost to a Postgres
+ *     crash inside the fsync window — the id-cursor would already have
+ *     advanced past it, so a resumed follow-up run using the logged cursor
+ *     would never re-select that row. After a target's main sweep finishes
+ *     cleanly (not stopped, not failed), the same afterId..end range is
+ *     re-scanned read-only; any ghost still present fails the run loudly
+ *     (`remaining` in the summary) instead of silently leaving a permanent
+ *     leftover behind an already-advanced cursor.
  *
  * Cooperative pause, SIGTERM stop, and loadBatch retry mirror
  * `jobs/streaming-url-remediation/orchestrate.ts`.
@@ -74,6 +102,16 @@ export const SAMPLE_SIZE_DEFAULT = 20;
 
 export const DELETE_TIMEOUT_MS_DEFAULT = 300_000;
 export const ANALYZE_TIMEOUT_MS_DEFAULT = 300_000;
+
+/**
+ * Floor below which a loaded keyspace is refused rather than trusted. An
+ * empty or near-empty `Set` almost always means the keyspace source is
+ * missing/truncated/misconfigured, not that tubafrenzy genuinely has that
+ * few surviving rows — and trusting it would anti-join nearly every row as
+ * a ghost. 1 (not 0) is the default so a keyspace source that returns an
+ * empty Set on a read error it swallowed is still caught.
+ */
+export const MIN_KEYSPACE_SIZE_DEFAULT = 1;
 
 const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
 const FLOWSHEET_TABLE = sql.raw(`"${SCHEMA}"."flowsheet"`);
@@ -210,6 +248,11 @@ export const resolveSampleSize = (raw: string | undefined = process.env.GHOST_SW
     note: 'Use 0 to omit the orphan-id sample from the summary.',
   });
 
+export const resolveMinKeyspaceSize = (raw: string | undefined = process.env.GHOST_SWEEP_MIN_KEYSPACE_SIZE): number =>
+  requireNonNegativeInt(raw, 'GHOST_SWEEP_MIN_KEYSPACE_SIZE', MIN_KEYSPACE_SIZE_DEFAULT, {
+    note: 'Refuses the run if either loaded keyspace is smaller than this. Use 0 to disable (a deliberate tiny/empty-fixture run only).',
+  });
+
 export const resolveAfterId = (envName: string, raw: string | undefined): number =>
   requireNonNegativeInt(raw, envName, 0, {
     note: 'Resume cursor — the summary log of the previous run carries the per-target last_id.',
@@ -256,6 +299,8 @@ export type TargetTotals = {
   batches: number;
   last_id: number;
   sample: number[];
+  /** Ghosts still present after a post-run re-scan (execute + clean-finish only); -1 when not verified. */
+  remaining: number;
 };
 
 export type RunResult = {
@@ -274,7 +319,40 @@ const emptyTargetTotals = (): TargetTotals => ({
   batches: 0,
   last_id: 0,
   sample: [],
+  remaining: -1,
 });
+
+/**
+ * Read-only re-scan of `[afterId, end]` for `target`, counting rows whose
+ * legacy id is still absent from `keyspace` — the same net the main sweep
+ * just applied, minus the delete. Used only for post-run verification, so a
+ * non-zero result means the corresponding page's DELETE didn't durably
+ * land (see the module doc's async-commit note) even though the main loop
+ * believed it had.
+ *
+ * Returns `null` (not a count) if a SIGTERM interrupts the re-scan before
+ * it reaches the end of the range — a partial count would understate
+ * `remaining` and could read as "verified clean" when it's really
+ * "stopped early." The caller treats `null` as unverified, not zero.
+ */
+const countRemainingGhosts = async (
+  target: SweepTarget,
+  afterId: number,
+  keyspace: Set<number>,
+  batchSize: number
+): Promise<number | null> => {
+  let lastId = afterId;
+  let remaining = 0;
+  while (true) {
+    if (stopRequested) return null;
+    const rows = await loadBatch(target, lastId, batchSize);
+    if (rows.length === 0) return remaining;
+    for (const row of rows) {
+      if (!keyspace.has(row.legacy_id)) remaining += 1;
+    }
+    lastId = rows[rows.length - 1].id;
+  }
+};
 
 export const runSweep = async (opts: {
   dryRun: boolean;
@@ -283,6 +361,8 @@ export const runSweep = async (opts: {
   deleteTimeoutMs?: number;
   analyzeTimeoutMs?: number;
   sampleSize?: number;
+  /** Refuses the run if either loaded keyspace is smaller than this. 0 disables (tests / deliberate tiny fixtures only). */
+  minKeyspaceSize?: number;
   flowsheetAfterId?: number;
   rotationAfterId?: number;
   liveActivityLookbackSeconds?: number;
@@ -300,6 +380,7 @@ export const runSweep = async (opts: {
   const deleteTimeoutMs = opts.deleteTimeoutMs ?? resolveDeleteTimeoutMs();
   const analyzeTimeoutMs = opts.analyzeTimeoutMs ?? resolveAnalyzeTimeoutMs();
   const sampleSize = opts.sampleSize ?? resolveSampleSize();
+  const minKeyspaceSize = opts.minKeyspaceSize ?? resolveMinKeyspaceSize();
   const flowsheetAfterId =
     opts.flowsheetAfterId ??
     resolveAfterId('GHOST_SWEEP_FLOWSHEET_AFTER_ID', process.env.GHOST_SWEEP_FLOWSHEET_AFTER_ID);
@@ -368,15 +449,18 @@ export const runSweep = async (opts: {
   // not a per-target one, since neither target's anti-join can proceed
   // without it.
   let keyspaces: { flowsheet: Set<number>; rotation: Set<number> } | null = null;
+  let loadedKeyspaceSizes: { flowsheet: number; rotation: number } | null = null;
   try {
     const [flowsheetIds, rotationIds] = await Promise.all([
       opts.keyspaceSource.loadFlowsheetIds(),
       opts.keyspaceSource.loadRotationIds(),
     ]);
+    loadedKeyspaceSizes = { flowsheet: flowsheetIds.size, rotation: rotationIds.size };
     keyspaces = { flowsheet: flowsheetIds, rotation: rotationIds };
     log('info', 'keyspace_loaded', 'keyspace source loaded', {
       flowsheet_keyspace_size: flowsheetIds.size,
       rotation_keyspace_size: rotationIds.size,
+      min_keyspace_size: minKeyspaceSize,
     });
   } catch (error) {
     failure = { error };
@@ -384,6 +468,39 @@ export const runSweep = async (opts: {
       error_message: errorMessage(error),
     });
     captureError(error, 'keyspace_load_failed');
+  }
+
+  // Refuse rather than trust a suspiciously small keyspace — see the module
+  // doc's "Empty/truncated keyspace floor" note. A missing or truncated
+  // LegacyKeyspaceSource file would otherwise anti-join nearly every row as
+  // a ghost. Checked outside the load try/catch so this failure gets its
+  // own distinct step/message instead of being folded into
+  // `keyspace_load_failed` (the load itself succeeded; the *content* is
+  // what's rejected).
+  if (
+    keyspaces &&
+    loadedKeyspaceSizes &&
+    minKeyspaceSize > 0 &&
+    (loadedKeyspaceSizes.flowsheet < minKeyspaceSize || loadedKeyspaceSizes.rotation < minKeyspaceSize)
+  ) {
+    const sizeError = new Error(
+      `Refusing to run: loaded keyspace is below the floor (flowsheet=${loadedKeyspaceSizes.flowsheet}, ` +
+        `rotation=${loadedKeyspaceSizes.rotation}, floor=${minKeyspaceSize}). This almost always means the ` +
+        'keyspace source file is missing, truncated, or pointed at the wrong path — not that tubafrenzy ' +
+        'genuinely has that few surviving rows. Set GHOST_SWEEP_MIN_KEYSPACE_SIZE=0 to override for a ' +
+        'deliberate tiny/empty-fixture run.'
+    );
+    failure = { error: sizeError };
+    keyspaces = null;
+    log('error', 'keyspace_too_small', sizeError.message, {
+      flowsheet_keyspace_size: loadedKeyspaceSizes.flowsheet,
+      rotation_keyspace_size: loadedKeyspaceSizes.rotation,
+      min_keyspace_size: minKeyspaceSize,
+    });
+    captureError(sizeError, 'keyspace_too_small', {
+      flowsheet_keyspace_size: loadedKeyspaceSizes.flowsheet,
+      rotation_keyspace_size: loadedKeyspaceSizes.rotation,
+    });
   }
 
   const runTarget = async (target: SweepTarget, afterId: number, keyspace: Set<number>): Promise<void> => {
@@ -477,6 +594,47 @@ export const runSweep = async (opts: {
         // swept. Surface it loudly but don't fail the whole run over stats.
       }
     }
+
+    // Post-run verification: re-scan the same [afterId, end] range this
+    // target just swept and confirm zero ghosts remain — see the module
+    // doc's "Post-run ghost-free verification" note (async commit can lose
+    // a DELETE the main loop believed had committed). Only meaningful for a
+    // clean execute finish: skipped on dry-run (nothing was deleted to
+    // verify) and on a stopped/failed run (an incomplete sweep is expected
+    // to still have ghosts in its unswept tail).
+    if (!dryRun && !result.stopped && !failure) {
+      try {
+        const remaining = await countRemainingGhosts(target, afterId, keyspace, batchSize);
+        if (remaining === null) {
+          // SIGTERM landed during verification itself; leave `remaining`
+          // at its -1 default rather than claim a count that never
+          // finished, and let the stopped path own the summary.
+          result.stopped = true;
+        } else {
+          totals.remaining = remaining;
+          if (remaining > 0) {
+            const verr = new Error(
+              `${target}: ${remaining} ghost row(s) still present after --execute — a page's DELETE likely ` +
+                'lost durability to a crash under async commit (DB_SYNCHRONOUS_COMMIT=off); re-run to sweep them.'
+            );
+            log('error', 'verification_failed', verr.message, { target, remaining });
+            captureError(verr, 'verification_failed', { target, remaining });
+            failure = failure ?? { error: verr };
+          } else {
+            log('info', 'verified', `${target} verified ghost-free`, { target });
+          }
+        }
+      } catch (error) {
+        // A verification-scan error (not a residue finding) is treated like
+        // any other read failure this run couldn't recover from.
+        log('warn', 'verification_error', `${target} post-run verification failed to run`, {
+          target,
+          error_message: errorMessage(error),
+        });
+        captureError(error, 'verification_error', { target });
+        failure = failure ?? { error };
+      }
+    }
   };
 
   if (keyspaces) {
@@ -506,10 +664,12 @@ export const runSweep = async (opts: {
         'sweep.flowsheet.ghosts': result.flowsheet.ghosts,
         'sweep.flowsheet.removed': result.flowsheet.removed,
         'sweep.flowsheet.last_id': result.flowsheet.last_id,
+        'sweep.flowsheet.remaining': result.flowsheet.remaining,
         'sweep.rotation.scanned': result.rotation.scanned,
         'sweep.rotation.ghosts': result.rotation.ghosts,
         'sweep.rotation.removed': result.rotation.removed,
         'sweep.rotation.last_id': result.rotation.last_id,
+        'sweep.rotation.remaining': result.rotation.remaining,
         'sweep.stopped': result.stopped,
         'sweep.failed': result.failed,
       },

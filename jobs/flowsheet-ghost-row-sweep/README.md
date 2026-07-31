@@ -40,7 +40,9 @@ Both are the intended semantics. The integration suite (`tests/integration/flows
 ## Batching, resume, safety
 
 - **Batched DELETE + `ANALYZE`-after** per the bulk-update playbook (`docs/bulk-update-playbook.md`) — one `id = ANY(...)` statement per page, `ANALYZE` on a target's table after its write pass (skipped on dry-run / no-op).
-- **Id-cursor resume** per target (`GHOST_SWEEP_FLOWSHEET_AFTER_ID` / `GHOST_SWEEP_ROTATION_AFTER_ID`). The cursor advances only after a page's DELETE commits — a mid-run failure never strands unswept ghosts behind the logged cursor; a re-run from the previous cursor re-selects and re-tests them (idempotent: a swept row is gone, a still-present row just never matches the net again unless the keyspace changes).
+- **Id-cursor resume** per target (`GHOST_SWEEP_FLOWSHEET_AFTER_ID` / `GHOST_SWEEP_ROTATION_AFTER_ID`). The cursor advances only after a page's DELETE call returns successfully — a failure the client sees (a thrown error) never strands unswept ghosts behind the logged cursor; a re-run from the previous cursor re-selects and re-tests them.
+- **Empty/truncated keyspace floor** (`GHOST_SWEEP_MIN_KEYSPACE_SIZE`, default 1). A `LegacyKeyspaceSource` that returns an empty or suspiciously tiny `Set` — a missing file, a truncated extraction, a misconfigured path — would anti-join nearly every row as a ghost. The run refuses outright rather than risk `--execute` emptying a live table over a bad path. Set to `0` only for a deliberate tiny/empty-fixture test run.
+- **Post-run ghost-free verification** (execute + clean finish only). Async commit (`DB_SYNCHRONOUS_COMMIT=off`, set by the Dockerfile) means a page's DELETE can appear to succeed to the Node client and then be lost to a Postgres crash inside the fsync window, with the id-cursor already past it — a resumed follow-up run using the logged cursor would never re-select that row. After a target's main sweep finishes cleanly, the same range is re-scanned read-only; any ghost still present fails the run loudly (`remaining` in the summary) instead of silently leaving a permanent leftover.
 - **Cooperative pause + SIGTERM graceful stop** — mirrors the sibling jobs' `checkLiveActivity` pause and signal handling (`jobs/streaming-url-remediation` is the structural donor). The sweep deletes from the live `flowsheet` table, so it defers when DJs are active.
 
 ## Local dry-run against a fixture
@@ -69,25 +71,26 @@ Pass `--execute` to write (guard it against a test schema — see Constraints be
 
 ## Environment variables
 
-| Variable                              | Default    | Notes                                                                  |
-| ------------------------------------- | ---------- | ---------------------------------------------------------------------- |
-| `GHOST_SWEEP_FLOWSHEET_KEYSPACE_FILE` | (required) | Path to the newline-delimited flowsheet id file                        |
-| `GHOST_SWEEP_ROTATION_KEYSPACE_FILE`  | (required) | Path to the newline-delimited rotation id file                         |
-| `GHOST_SWEEP_BATCH_SIZE`              | 5000       | Rows per SELECT page / DELETE statement (bulk-update playbook default) |
-| `GHOST_SWEEP_DELETE_TIMEOUT_MS`       | 300000     | `SET LOCAL statement_timeout` around each batch DELETE                 |
-| `GHOST_SWEEP_ANALYZE_TIMEOUT_MS`      | 300000     | `SET LOCAL statement_timeout` around each post-pass `ANALYZE`          |
-| `GHOST_SWEEP_SAMPLE_SIZE`             | 20         | Orphan ids carried in each target's summary; 0 to omit                 |
-| `GHOST_SWEEP_FLOWSHEET_AFTER_ID`      | 0          | Resume cursor for the flowsheet target                                 |
-| `GHOST_SWEEP_ROTATION_AFTER_ID`       | 0          | Resume cursor for the rotation target                                  |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`      | 60         | Set 0 to disable the cooperative pause                                 |
-| `LIVE_ACTIVITY_PAUSE_MS`              | 30000      | Pause duration when DJ activity detected (ms)                          |
-| `SENTRY_DSN`                          | (optional) | Sentry error reporting                                                 |
+| Variable                              | Default    | Notes                                                                                                                  |
+| ------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `GHOST_SWEEP_FLOWSHEET_KEYSPACE_FILE` | (required) | Path to the newline-delimited flowsheet id file                                                                        |
+| `GHOST_SWEEP_ROTATION_KEYSPACE_FILE`  | (required) | Path to the newline-delimited rotation id file                                                                         |
+| `GHOST_SWEEP_BATCH_SIZE`              | 5000       | Rows per SELECT page / DELETE statement (bulk-update playbook default)                                                 |
+| `GHOST_SWEEP_DELETE_TIMEOUT_MS`       | 300000     | `SET LOCAL statement_timeout` around each batch DELETE                                                                 |
+| `GHOST_SWEEP_ANALYZE_TIMEOUT_MS`      | 300000     | `SET LOCAL statement_timeout` around each post-pass `ANALYZE`                                                          |
+| `GHOST_SWEEP_SAMPLE_SIZE`             | 20         | Orphan ids carried in each target's summary; 0 to omit                                                                 |
+| `GHOST_SWEEP_MIN_KEYSPACE_SIZE`       | 1          | Refuses the run if either loaded keyspace is smaller than this; 0 to disable (deliberate tiny/empty-fixture runs only) |
+| `GHOST_SWEEP_FLOWSHEET_AFTER_ID`      | 0          | Resume cursor for the flowsheet target                                                                                 |
+| `GHOST_SWEEP_ROTATION_AFTER_ID`       | 0          | Resume cursor for the rotation target                                                                                  |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`      | 60         | Set 0 to disable the cooperative pause                                                                                 |
+| `LIVE_ACTIVITY_PAUSE_MS`              | 30000      | Pause duration when DJ activity detected (ms)                                                                          |
+| `SENTRY_DSN`                          | (optional) | Sentry error reporting                                                                                                 |
 
 CLI flags: `--execute` (write mode), `--dry-run` (explicit no-op, the default; passing both fails fast).
 
 ## Testing
 
-- `tests/unit/jobs/flowsheet-ghost-row-sweep/orchestrate.test.ts` — mocked-db unit coverage of the loop: batching, id-cursor advance, dry-run vs. `--execute`, delete-failure cursor safety, keyspace-load failure.
+- `tests/unit/jobs/flowsheet-ghost-row-sweep/orchestrate.test.ts` — mocked-db unit coverage of the loop: batching, id-cursor advance, dry-run vs. `--execute`, delete-failure cursor safety, keyspace-load failure, the empty/undersized-keyspace floor, and post-run verification (both a clean re-scan and a caught residual ghost).
 - `tests/unit/jobs/flowsheet-ghost-row-sweep/keyspace-source.test.ts` — `parseIdFile` + `FileKeyspaceSource` against real temp files.
 - `tests/integration/flowsheet-ghost-row-sweep.spec.js` — real PostgreSQL: the anti-join SELECT + DELETE mirror `orchestrate.ts`'s SQL, and both blast-radius behaviors (cascade + SET NULL) are asserted against the actual schema.
 

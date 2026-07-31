@@ -16,6 +16,17 @@
  *      the failing page and marks the run failed.
  *   6. A keyspace-source load failure ends the run before either target's
  *      loadBatch is ever called.
+ *   7. A keyspace smaller than the configured floor refuses the whole run
+ *      before either target loads a batch — even if only one target's
+ *      keyspace is undersized.
+ *   8. Post-run verification (execute + clean finish only): a target that
+ *      still shows a ghost on re-scan fails the run and records
+ *      `remaining`; a clean re-scan records `remaining: 0` and leaves the
+ *      run unfailed.
+ *
+ * Tests below that intentionally pass an empty keyspace Set to exercise
+ * behaviors unrelated to the empty-keyspace floor pass `minKeyspaceSize: 0`
+ * to disable it — see describe block 7 for the floor's own coverage.
  */
 import { jest } from '@jest/globals';
 
@@ -92,6 +103,7 @@ describe('runSweep — dry-run', () => {
       deleteBatch,
       analyzeTable,
       liveActivityLookbackSeconds: 0,
+      minKeyspaceSize: 0, // rotation's keyspace is deliberately empty here; unrelated to the floor test below
     });
 
     expect(result.failed).toBe(false);
@@ -109,8 +121,10 @@ describe('runSweep — execute', () => {
   it('deletes exactly the ghost ids per page and ANALYZEs a target that wrote', async () => {
     (db.execute as jest.Mock)
       .mockResolvedValueOnce([makeRow(1, 100), makeRow(2, 200), makeRow(3, 300)])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([]); // rotation: no candidates
+      .mockResolvedValueOnce([]) // flowsheet main loop exhausted
+      .mockResolvedValueOnce([]) // flowsheet post-run verification re-scan: clean
+      .mockResolvedValueOnce([]) // rotation: no candidates
+      .mockResolvedValueOnce([]); // rotation post-run verification re-scan: clean
 
     const deleteBatch = jest.fn<DeleteBatchFn>().mockResolvedValue(2);
     const analyzeTable = jest.fn<AnalyzeFn>().mockResolvedValue(undefined);
@@ -121,12 +135,15 @@ describe('runSweep — execute', () => {
       deleteBatch,
       analyzeTable,
       liveActivityLookbackSeconds: 0,
+      minKeyspaceSize: 0, // rotation's keyspace is deliberately empty here; unrelated to the floor test below
     });
 
     expect(result.failed).toBe(false);
     expect(deleteBatch).toHaveBeenCalledTimes(1);
     expect(deleteBatch).toHaveBeenCalledWith('flowsheet', [2, 3], expect.any(Number));
     expect(result.flowsheet.removed).toBe(2);
+    expect(result.flowsheet.remaining).toBe(0);
+    expect(result.rotation.remaining).toBe(0);
     expect(analyzeTable).toHaveBeenCalledTimes(1);
     expect(analyzeTable).toHaveBeenCalledWith('flowsheet', expect.any(Number));
   });
@@ -142,11 +159,12 @@ describe('runSweep — execute', () => {
     const analyzeTable = jest.fn<AnalyzeFn>().mockResolvedValue(undefined);
 
     const result = await runSweep({
-      dryRun: true,
+      dryRun: true, // dry-run: no post-run verification, so the db.execute count below stays exactly 4
       keyspaceSource: keyspaceSource([1, 2, 3], []), // nothing is a ghost
       deleteBatch,
       analyzeTable,
       liveActivityLookbackSeconds: 0,
+      minKeyspaceSize: 0, // rotation's keyspace is deliberately empty here; unrelated to the floor test below
     });
 
     expect(result.flowsheet.scanned).toBe(3);
@@ -167,6 +185,7 @@ describe('runSweep — execute', () => {
       deleteBatch,
       analyzeTable,
       liveActivityLookbackSeconds: 0,
+      minKeyspaceSize: 0, // both keyspaces are deliberately empty here; unrelated to the floor test below
     });
 
     expect(result.failed).toBe(true);
@@ -174,6 +193,73 @@ describe('runSweep — execute', () => {
     // max id (2) never lands in last_id, so a re-run re-selects it.
     expect(result.flowsheet.last_id).toBe(0);
     expect(analyzeTable).not.toHaveBeenCalled();
+    // The delete failure short-circuits before post-run verification runs.
+    expect(result.flowsheet.remaining).toBe(-1);
+  });
+
+  it('post-run verification fails the run when a ghost is still present after DELETE (async-commit rollback)', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([makeRow(1, 100), makeRow(2, 200)]) // flowsheet main loop: id 2 is a ghost
+      .mockResolvedValueOnce([]) // flowsheet main loop exhausted
+      // Verification re-scan from afterId=0: the DELETE call reported
+      // success, but row 2 is still here — simulates a page that appeared
+      // to commit and was then lost to a crash under async commit.
+      .mockResolvedValueOnce([makeRow(2, 200)])
+      .mockResolvedValueOnce([]); // verification re-scan exhausted
+
+    const deleteBatch = jest.fn<DeleteBatchFn>().mockResolvedValue(1);
+    const analyzeTable = jest.fn<AnalyzeFn>().mockResolvedValue(undefined);
+
+    const result = await runSweep({
+      dryRun: false,
+      keyspaceSource: keyspaceSource([100], [1]), // rotation kept non-empty so it isn't the thing under test
+      deleteBatch,
+      analyzeTable,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    expect(result.failed).toBe(true);
+    expect(result.flowsheet.remaining).toBe(1);
+    // The main loop's own bookkeeping still reports the delete as applied —
+    // verification is what catches the discrepancy, not the loop itself.
+    expect(result.flowsheet.removed).toBe(1);
+  });
+});
+
+describe('runSweep — empty/undersized keyspace floor', () => {
+  it('refuses the run when either target keyspace is below the default floor, before any batch loads', async () => {
+    const result = await runSweep({
+      dryRun: true,
+      keyspaceSource: keyspaceSource([], [1, 2, 3]), // flowsheet keyspace is empty; rotation is fine
+      liveActivityLookbackSeconds: 0,
+    });
+
+    expect(result.failed).toBe(true);
+    expect(db.execute).not.toHaveBeenCalled();
+  });
+
+  it('a fully empty keyspace on both targets also refuses (the common "file missing" shape)', async () => {
+    const result = await runSweep({
+      dryRun: true,
+      keyspaceSource: keyspaceSource([], []),
+      liveActivityLookbackSeconds: 0,
+    });
+
+    expect(result.failed).toBe(true);
+    expect(db.execute).not.toHaveBeenCalled();
+  });
+
+  it('minKeyspaceSize: 0 disables the floor for a deliberate empty-fixture run', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]); // every target/verification call: empty
+
+    const result = await runSweep({
+      dryRun: true,
+      keyspaceSource: keyspaceSource([], []),
+      minKeyspaceSize: 0,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    expect(result.failed).toBe(false);
   });
 });
 
