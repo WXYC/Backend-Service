@@ -128,7 +128,10 @@ describe('searchLibrary — alias-only primary no longer suppresses the cascade 
   it('case 1: alias-only primary — cascade runs and its row merges with the surviving alias rows', async () => {
     enableAlias();
     db.execute
-      .mockResolvedValueOnce([aliasRow({ id: 43, artist_name: 'Duane Allman' }, 'Duane'), aliasRow({ id: 44, artist_name: 'Duane Pitre' }, 'Duane')])
+      .mockResolvedValueOnce([
+        aliasRow({ id: 43, artist_name: 'Duane Allman' }, 'Duane'),
+        aliasRow({ id: 44, artist_name: 'Duane Pitre' }, 'Duane'),
+      ])
       .mockResolvedValueOnce([{ total: 4, total_non_alias: 0 }]);
     mockRunCatalogTrackSearchCascade.mockResolvedValue([cascadeRow({ id: 99 })]);
 
@@ -148,7 +151,9 @@ describe('searchLibrary — alias-only primary no longer suppresses the cascade 
   it('case 2: mixed primary (a non-alias row present) — cascade never runs', async () => {
     enableAlias();
     db.execute
-      .mockResolvedValueOnce([{ ...baseQueryRow, alias_max_sim: null, alias_matched_variant: null, alias_matched_source: null }])
+      .mockResolvedValueOnce([
+        { ...baseQueryRow, alias_max_sim: null, alias_matched_variant: null, alias_matched_source: null },
+      ])
       .mockResolvedValueOnce([{ total: 1, total_non_alias: 1 }]);
 
     const { results, total } = await searchLibrary(PARAMS);
@@ -186,7 +191,9 @@ describe('searchLibrary — alias-only primary no longer suppresses the cascade 
     expect(results).toHaveLength(1);
     expect(results[0].id).toBe(42);
     expect(results[0].matched_via).toEqual(cascadeRow({ id: 42 }).matched_via);
-    expect(results[0].matched_via_alias).toEqual([{ matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' }]);
+    expect(results[0].matched_via_alias).toEqual([
+      { matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' },
+    ]);
     // The colliding cascade row isn't a NEW row, so total isn't inflated.
     expect(total).toBe(1);
   });
