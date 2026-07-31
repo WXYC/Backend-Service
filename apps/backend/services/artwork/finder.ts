@@ -33,6 +33,17 @@ export class ArtworkFinder {
     }
 
     const allResults: ArtworkSearchResult[] = [];
+    // BS#1089: a provider that throws (LML timeout/5xx/network blip) hasn't
+    // confirmed "no artwork" — it just failed to answer. Track that
+    // separately from a provider that ran and genuinely found nothing, so a
+    // request where no provider found anything doesn't look the same
+    // whether every provider searched and came up empty or one of them
+    // never got to answer. This only matters when nothing was found at all
+    // — a later provider's real match still wins outright below, so a
+    // transient Discogs failure followed by a Last.fm hit is "found," not
+    // "errored" (don't infect a positive result from a partially-failing
+    // fallback chain).
+    let anyProviderErrored = false;
 
     for (const provider of this.providers) {
       try {
@@ -41,11 +52,16 @@ export class ArtworkFinder {
         console.log(`[ArtworkFinder] Provider ${provider.name} returned ${results.length} results`);
       } catch (error) {
         console.error(`[ArtworkFinder] Provider ${provider.name} failed:`, error);
+        anyProviderErrored = true;
         continue;
       }
     }
 
     if (allResults.length === 0) {
+      if (anyProviderErrored) {
+        console.log('[ArtworkFinder] No artwork found and at least one provider errored — not a confirmed absence');
+        return this.erroredResponse();
+      }
       console.log('[ArtworkFinder] No artwork found from any provider');
       return this.emptyResponse();
     }
@@ -70,7 +86,8 @@ export class ArtworkFinder {
   }
 
   /**
-   * Create an empty artwork response.
+   * Create an empty artwork response — a confirmed absence: every provider
+   * that was asked ran to completion and found nothing.
    */
   private emptyResponse(): ArtworkResponse {
     return {
@@ -81,6 +98,17 @@ export class ArtworkFinder {
       source: null,
       confidence: 0,
     };
+  }
+
+  /**
+   * Same empty shape as {@link emptyResponse}, tagged `errored: true`
+   * (BS#1089). Returned when nothing was found AND at least one provider
+   * never got to confirm an answer because it threw. Callers (the
+   * `/proxy/artwork/search` negative cache) must not treat this the same as
+   * a confirmed absence.
+   */
+  private erroredResponse(): ArtworkResponse {
+    return { ...this.emptyResponse(), errored: true };
   }
 }
 

@@ -166,6 +166,17 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
   });
 
   if (!result.artworkUrl) {
+    if (result.errored) {
+      // BS#1089: every provider that came back empty did so by throwing
+      // (LML timeout/5xx/network blip), not by confirming there's no
+      // artwork. Skip the negative cache — writing here would strand up to
+      // 24h of cold artwork cells per container once LML recovers, since
+      // this cache is per-process (see the module doc above). Respond with
+      // a retryable upstream failure instead of a false "confirmed no
+      // artwork" 404.
+      res.status(502).json({ message: 'Artwork lookup temporarily unavailable' });
+      return;
+    }
     negativeCache.set(cacheKey, true);
     res.status(404).json({ message: 'No artwork found' });
     return;

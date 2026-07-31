@@ -237,6 +237,17 @@ export interface ArtworkResponse {
   artist: string | null;
   source: string | null;
   confidence: number;
+  /**
+   * BS#1089: true when every provider that came back with zero results did
+   * so by throwing (LML timeout/5xx/network blip, or another provider-side
+   * exception) rather than confirming an empty match. Distinguishes
+   * "couldn't determine" from "confirmed no artwork" so a caller like the
+   * `/proxy/artwork/search` negative cache doesn't treat a transient
+   * upstream failure as a durable negative result. Absent (falsy) on a
+   * genuine match or a confirmed-empty search — existing callers that don't
+   * read this field see unchanged behavior.
+   */
+  errored?: boolean;
 }
 
 /**

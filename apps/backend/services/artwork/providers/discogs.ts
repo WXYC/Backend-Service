@@ -30,15 +30,19 @@ export class DiscogsProvider implements ArtworkProvider {
       return [];
     }
 
-    let lookupResponse;
-    try {
-      lookupResponse = await lmlLookupCoordinator.lookup(request.artist || '', request.album, request.song, {
-        caller: 'artwork-discogs-fallback',
-      });
-    } catch (error) {
-      console.warn('[DiscogsProvider] LML lookup failed:', error);
-      return [];
-    }
+    // BS#1089: let a lookup failure propagate instead of swallowing it to
+    // `[]`. `lmlLookupCoordinator.lookup` never caches errors and rethrows
+    // whatever `lookupMetadata` threw — in practice always an
+    // `LmlClientError` (timeout/5xx/network blip; see `@wxyc/lml-client`'s
+    // `lmlFetch`). Swallowing it here made a transient LML outage
+    // indistinguishable from "LML answered and found nothing," which is
+    // exactly what let a brief LML degradation get cached as "confirmed no
+    // artwork" for 24h. `ArtworkFinder.find` is the caller that now tells
+    // the two apart (a thrown error vs. an empty array) and tags its
+    // response accordingly.
+    const lookupResponse = await lmlLookupCoordinator.lookup(request.artist || '', request.album, request.song, {
+      caller: 'artwork-discogs-fallback',
+    });
 
     const results: ArtworkSearchResult[] = [];
     for (const item of lookupResponse.results ?? []) {
