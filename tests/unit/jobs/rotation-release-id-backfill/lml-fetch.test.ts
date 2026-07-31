@@ -202,3 +202,33 @@ describe('jobs/rotation-release-id-backfill/lml-fetch (search_type trust gate, B
     expect(result).toEqual({ kind: 'resolved', releaseId: 35719330 });
   });
 });
+
+describe('jobs/rotation-release-id-backfill/lml-fetch (discogsUnavailable gate, BS#1294)', () => {
+  it('forwards discogsUnavailable through to the shared lookupMetadata opts', async () => {
+    const mockLookup = jest.fn().mockResolvedValue({ search_type: 'none', results: [] });
+
+    const { lookupReleaseId } = await loadModule(mockLookup);
+    await lookupReleaseId('Jessica Pratt', 'On Your Own Love Again', true);
+
+    expect(mockLookup).toHaveBeenCalledWith(
+      'Jessica Pratt',
+      'On Your Own Love Again',
+      undefined,
+      expect.objectContaining({ discogsUnavailable: true })
+    );
+  });
+
+  it('omits discogsUnavailable (undefined) when the caller does not pass it', async () => {
+    const mockLookup = jest.fn().mockResolvedValue({ search_type: 'none', results: [] });
+
+    const { lookupReleaseId } = await loadModule(mockLookup);
+    await lookupReleaseId('Jessica Pratt', 'On Your Own Love Again');
+
+    expect(mockLookup).toHaveBeenCalledWith(
+      'Jessica Pratt',
+      'On Your Own Love Again',
+      undefined,
+      expect.objectContaining({ discogsUnavailable: undefined })
+    );
+  });
+});

@@ -32,6 +32,11 @@ export type Candidate = {
   id: number;
   artist_name: string;
   album_title: string;
+  // BS#1294 (1c): pre-read via `query.ts`'s LEFT JOIN on `library`; forwarded
+  // to the lookupMetadata gate (BS#1293). Optional — absent in hand-built
+  // test fixtures that predate this field, and `lookupReleaseId` treats
+  // undefined the same as `false`.
+  discogs_unavailable?: boolean;
 };
 
 export type LoadCandidatesFn = () => Promise<Candidate[]>;
@@ -46,7 +51,7 @@ export type LoadCandidatesFn = () => Promise<Candidate[]>;
 export type LookupOutcome =
   { kind: 'resolved'; releaseId: number } | { kind: 'no_match' } | { kind: 'trust_rejected'; searchType: string };
 
-export type LookupFn = (artist: string, album: string) => Promise<LookupOutcome>;
+export type LookupFn = (artist: string, album: string, discogsUnavailable?: boolean) => Promise<LookupOutcome>;
 
 export type WriteFn = (rotationId: number, releaseId: number) => Promise<{ written: boolean }>;
 export type MarkAttemptedFn = (rotationId: number) => Promise<{ written: boolean }>;
@@ -158,7 +163,7 @@ export const runBackfill = async (deps: {
     totals.scanned += 1;
     let outcome: LookupOutcome;
     try {
-      outcome = await deps.lookup(candidate.artist_name, candidate.album_title);
+      outcome = await deps.lookup(candidate.artist_name, candidate.album_title, candidate.discogs_unavailable);
     } catch {
       // The row stays `discogs_release_id IS NULL`, so it's picked up
       // again on the next run when LML's cache is warmer. The job entry

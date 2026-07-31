@@ -64,7 +64,14 @@ const decodeHtmlEntities = (input: string): string =>
     return String.fromCodePoint(codepoint);
   });
 
-export const lookupReleaseId = async (artist: string, album: string): Promise<LookupOutcome> => {
+export const lookupReleaseId = async (
+  artist: string,
+  album: string,
+  // BS#1294 (1c): pre-read `library.discogs_unavailable` via the candidate
+  // query's LEFT JOIN (`query.ts`); forwarded to the BS#1293 gate in
+  // `@wxyc/lml-client`, which short-circuits the LML call.
+  discogsUnavailable?: boolean
+): Promise<LookupOutcome> => {
   const response = await sharedLookupMetadata(decodeHtmlEntities(artist), decodeHtmlEntities(album), undefined, {
     limiter: defaultLmlLimiter,
     timeoutMs: TIMEOUT_MS,
@@ -72,6 +79,7 @@ export const lookupReleaseId = async (artist: string, album: string): Promise<Lo
     // see the plan's "rotation-*-backfill" entry in the caller→class map)
     // so the CI guard's jobs/** backstop can verify it.
     caller: 'rotation-release-id-backfill',
+    discogsUnavailable,
   });
   const releaseId = response.results?.[0]?.artwork?.release_id ?? null;
   if (releaseId === null) {

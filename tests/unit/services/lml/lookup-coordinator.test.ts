@@ -100,6 +100,22 @@ describe('LmlLookupCoordinator', () => {
         expect.objectContaining({ extended: true })
       );
     });
+
+    it('BS#1294 (1c): forwards discogsUnavailable through to lookupMetadata', async () => {
+      mockLookupMetadata.mockResolvedValue(fakeResponse());
+
+      await lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, {
+        caller: 'library-add-album',
+        discogsUnavailable: true,
+      });
+
+      expect(mockLookupMetadata).toHaveBeenCalledWith(
+        'Autechre',
+        'Confield',
+        undefined,
+        expect.objectContaining({ discogsUnavailable: true })
+      );
+    });
   });
 
   describe('in-flight coalescing', () => {

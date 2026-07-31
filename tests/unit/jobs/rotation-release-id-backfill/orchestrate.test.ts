@@ -50,6 +50,21 @@ describe('runBackfill', () => {
     expect(result.totals.raced).toBe(0);
   });
 
+  test('BS#1294 (1c): forwards candidate.discogs_unavailable to the lookup call', async () => {
+    const loadCandidates = makeLoadCandidates([
+      { id: 42, artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again', discogs_unavailable: true },
+    ]);
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ kind: 'no_match' });
+    const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const markAttempted = makeMarkAttempted();
+
+    await runBackfill({ loadCandidates, lookup, write, markAttempted });
+
+    // The flag reached the lookup call — lml-client's gate (BS#1293) is
+    // what actually skips the LML call; this pins the wire, not the gate.
+    expect(lookup).toHaveBeenCalledWith('Jessica Pratt', 'On Your Own Love Again', true);
+  });
+
   test('LML finds no Discogs match → unresolved counter, no write', async () => {
     const loadCandidates = makeLoadCandidates([
       { id: 99, artist_name: 'Chuquimamani-Condori', album_title: 'Untitled Acetate' },

@@ -230,6 +230,17 @@ describe('resolveAlbums', () => {
     expect(setLocalCall).toBeDefined();
     expect(renderSql(setLocalCall?.[0])).toMatch(/90000ms/);
   });
+
+  it('BS#1294 (1c): filters out library rows flagged discogs_unavailable (primary bulk-path gate)', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+
+    await resolveAlbums([1, 2, 3]);
+
+    const call = findExecuteCallMatching(/FROM\s+"?wxyc_schema"?\."?library"?/i);
+    expect(call).toBeDefined();
+    const text = renderSql(call?.[0]);
+    expect(text).toMatch(/l\."?discogs_unavailable"?\s*=\s*false/i);
+  });
 });
 
 // ---------------------------------------------------------------------------

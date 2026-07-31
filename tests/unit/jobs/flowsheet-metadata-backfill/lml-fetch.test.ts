@@ -122,6 +122,21 @@ describe('jobs/flowsheet-metadata-backfill/lml-fetch (BS#994 / BS#1180 timeout k
     expect(callArgs.limiter).toBeDefined();
     expect(callArgs).toHaveProperty('timeoutMs', 35_000);
   });
+
+  it('BS#1294 (1c): forwards discogsUnavailable through to the shared lookupMetadata opts', async () => {
+    delete process.env.BACKFILL_LML_PER_CALL_TIMEOUT_MS;
+    const mockLookup = jest.fn().mockResolvedValue(emptyResponse);
+
+    const { lookupMetadata } = await loadModule(mockLookup);
+    await lookupMetadata('Chuquimamani-Condori', 'Edits', 'Call Your Name', true);
+
+    expect(mockLookup).toHaveBeenCalledWith(
+      'Chuquimamani-Condori',
+      'Edits',
+      'Call Your Name',
+      expect.objectContaining({ discogsUnavailable: true })
+    );
+  });
 });
 
 describe('jobs/flowsheet-metadata-backfill/lml-fetch (run-scoped (artist, album) dedup)', () => {

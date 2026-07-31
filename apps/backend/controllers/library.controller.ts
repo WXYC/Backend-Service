@@ -103,10 +103,17 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     const artistName = body.alternate_artist_name || body.artist_name || '';
     const [streamingResult, artworkResult] = await Promise.allSettled([
       checkStreamingAvailability(artistName, body.album_title, { caller: 'library-add-album-streaming' }),
+      // BS#1294 (1c): pre-read the just-inserted row's discogs_unavailable
+      // flag. On the fresh-insert path this is always false (the row was
+      // just created with the schema default — BS#1281 / plan §3), so the
+      // gate is a no-op here. Wired for consistency with the other three
+      // lookupMetadata callers, and for the day addAlbum gains a dedup/
+      // upsert path that could re-touch an already-flagged row.
       lmlLookupCoordinator.lookup(artistName, body.album_title, undefined, {
         caller: 'library-add-album',
         warm_cache: true,
         requireSearchType: 'direct',
+        discogsUnavailable: inserted_album.discogs_unavailable,
       }),
     ]);
 

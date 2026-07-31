@@ -115,6 +115,7 @@ import { captureError, log } from './logger.js';
 import {
   buildWorkList as defaultBuildWorkList,
   FLOWSHEET_TABLE,
+  LIBRARY_TABLE,
   unwrapRows,
   type BuildWorkListFn,
   type BuildSelfHealCandidatesFn,
@@ -343,7 +344,14 @@ export const resolvePartitionFilter = (
  * the wall-clock budget the throttle would otherwise spend waiting after
  * a no-op cache return.
  */
-export type LookupFn = (artist: string, album?: string, track?: string) => Promise<LookupResult>;
+export type LookupFn = (
+  artist: string,
+  album?: string,
+  track?: string,
+  // BS#1294 (1c): pre-read `row.discogs_unavailable`, forwarded to the
+  // BS#1293 gate.
+  discogsUnavailable?: boolean
+) => Promise<LookupResult>;
 
 export type EnrichFn = (row: EnrichRow, response: LookupResponse) => Promise<EnrichOutcome>;
 
@@ -553,7 +561,7 @@ export const processRow = async (
 
   let result: LookupResult;
   try {
-    result = await deps.lookup(artist, album, track);
+    result = await deps.lookup(artist, album, track, row.discogs_unavailable);
   } catch (error) {
     log('warn', 'lml_error', `LML lookup failed for flowsheet.id=${row.id}`, {
       flowsheet_id: row.id,
@@ -668,15 +676,17 @@ const loadBatchByIds = async (ids: number[]): Promise<BatchRow[]> => {
   return unwrapRows<BatchRow>(
     await db.execute(sql`
     SELECT
-      "id",
-      "artist_name",
-      "album_title",
-      "track_title",
-      "album_id",
-      "metadata_status"
-    FROM ${FLOWSHEET_TABLE}
-    WHERE "id" = ANY(${idArrayLiteral}::int[])
-      AND "metadata_status" = 'pending'
+      f."id",
+      f."artist_name",
+      f."album_title",
+      f."track_title",
+      f."album_id",
+      f."metadata_status",
+      COALESCE(l."discogs_unavailable", false) AS "discogs_unavailable"
+    FROM ${FLOWSHEET_TABLE} f
+    LEFT JOIN ${LIBRARY_TABLE} l ON f."album_id" = l."id"
+    WHERE f."id" = ANY(${idArrayLiteral}::int[])
+      AND f."metadata_status" = 'pending'
   `),
     'batch load'
   );
@@ -700,14 +710,16 @@ const loadSelfHealRowsByIds = async (ids: number[]): Promise<EnrichRow[]> => {
   return unwrapRows<EnrichRow>(
     await db.execute(sql`
     SELECT
-      "id",
-      "artist_name",
-      "album_title",
-      "track_title",
-      "album_id"
-    FROM ${FLOWSHEET_TABLE}
-    WHERE "id" = ANY(${idArrayLiteral}::int[])
-      AND "metadata_status" = 'enriched_no_match'
+      f."id",
+      f."artist_name",
+      f."album_title",
+      f."track_title",
+      f."album_id",
+      COALESCE(l."discogs_unavailable", false) AS "discogs_unavailable"
+    FROM ${FLOWSHEET_TABLE} f
+    LEFT JOIN ${LIBRARY_TABLE} l ON f."album_id" = l."id"
+    WHERE f."id" = ANY(${idArrayLiteral}::int[])
+      AND f."metadata_status" = 'enriched_no_match'
   `),
     'self-heal batch load'
   );
