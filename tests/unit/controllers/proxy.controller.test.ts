@@ -1861,6 +1861,67 @@ describe('proxy.controller', () => {
         expect(mockSelectLinkedFlowsheetRow).toHaveBeenCalledTimes(2);
       });
 
+      it('does not cache when the critic-reviews read throws: a repeat request re-attempts the whole lookup', async () => {
+        // The critic-reviews sub-read is optional per-response (a throw
+        // degrades to omitting the field, same as before), but it must
+        // still prevent the whole album response from being memoized —
+        // otherwise a transient reviews-DB blip strands a reviews-less
+        // shape in the cache for the full TTL, same failure mode the
+        // sibling local-DB/LML tests above guard against.
+        mockCriticReviewsConfig.mockReturnValue({ enabled: true });
+        mockSelectLinkedFlowsheetRow.mockResolvedValue(defaultLinkedRow());
+        mockLookupAlbumMetadataById.mockResolvedValue(null);
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+        mockLookupCriticReviewsByAlbumId.mockRejectedValue(new Error('reviews db blip'));
+
+        const req = {
+          query: { artistName: 'Flaky Reviews Artist', releaseTitle: 'Flaky Reviews Album' },
+        } as unknown as Request;
+
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+
+        // Both requests independently re-attempt the full lookup — nothing
+        // was cached from the first (failed-reviews) attempt.
+        expect(mockLookupCriticReviewsByAlbumId).toHaveBeenCalledTimes(2);
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
+      });
+
+      it('still caches when the critic-reviews read succeeds', async () => {
+        mockCriticReviewsConfig.mockReturnValue({ enabled: true });
+        mockSelectLinkedFlowsheetRow.mockResolvedValue(defaultLinkedRow());
+        mockLookupAlbumMetadataById.mockResolvedValue(null);
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+        mockLookupCriticReviewsByAlbumId.mockResolvedValue([
+          { source: 'The Quietus', url: 'https://thequietus.com/y', snippet: 'snippet' },
+        ]);
+
+        const req = {
+          query: { artistName: 'Healthy Reviews Artist', releaseTitle: 'Healthy Reviews Album' },
+        } as unknown as Request;
+
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+        const secondRes = createMockRes();
+        await getAlbumMetadata(req, secondRes as Response, mockNext);
+
+        // The second request is served entirely from cache.
+        expect(mockLookupCriticReviewsByAlbumId).toHaveBeenCalledTimes(1);
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+        expect((secondRes.json as jest.Mock).mock.calls[0][0].criticReviews).toEqual([
+          { source: 'The Quietus', url: 'https://thequietus.com/y', snippet: 'snippet' },
+        ]);
+      });
+
       it('keys the cache on the CRITIC_REVIEWS_ENABLED flag state so a flag flip is not served a stale shape', async () => {
         mockSelectLinkedFlowsheetRow.mockResolvedValue(defaultLinkedRow());
         mockLookupAlbumMetadataById.mockResolvedValue(null);
