@@ -182,6 +182,21 @@ async function dispatchChunk(chunk: PendingLookup[]): Promise<void> {
         pending.reject(new LmlClientError(verdict.message ?? `bulk lookup error for item ${index}`, 502));
         return;
       }
+      // BS#1748: a shed verdict (`shed_limiter_saturated` / `shed_breaker_open`)
+      // carries a NON-null empty `lookup`, so it would otherwise fall through to
+      // `resolve` and be finalized as a terminal `enriched_no_match` — burning
+      // the row on a transient LML saturation the shed was meant to defer.
+      // Unlike the interactive class-2 callers (which re-enrich on the next
+      // read), this worker owns the `pending` claim, so a shed MUST be
+      // retryable: reject it exactly like a bulk-call failure so the row is
+      // left `enriching` for the C6 stranded-claim sweep to recover once LML
+      // recovers. (This worker shares the process-wide `defaultLimiter`, which
+      // is the limiter that carries the breaker — it is NOT on a dedicated
+      // limiter, so it genuinely sees sheds.)
+      if (verdict.status === 'shed_limiter_saturated' || verdict.status === 'shed_breaker_open') {
+        pending.reject(new LmlClientError(`bulk lookup shed for item ${index}: ${verdict.status}`, 503));
+        return;
+      }
       pending.resolve(verdict.lookup);
     });
   } catch (err) {
