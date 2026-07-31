@@ -8,6 +8,16 @@
  *
  * All handlers require `requirePermissions({})` + `trackActivity` +
  * `proxyRateLimit` middleware applied at the route level.
+ *
+ * Every handler that fans out to an upstream (LML or Spotify) sits behind an
+ * in-process LRU cache (BS#988, following BS#1089's negative-cache rule): a
+ * confirmed absence (a definitive 404 from the upstream) is cached, but a
+ * transient failure (timeout/5xx/network) never is — caching a transient
+ * failure would strand a degraded response for the full TTL even after the
+ * upstream recovers. `searchArtwork`'s `artworkCache`/`negativeCache` pair
+ * originated the pattern; `getAlbumMetadata`, `getArtistMetadata`,
+ * `resolveEntity`, and `getSpotifyTrack` each declare their own cache
+ * immediately above their handler.
  */
 import { RequestHandler } from 'express';
 import * as Sentry from '@sentry/node';
@@ -439,10 +449,60 @@ function parseDiscogsReleaseIdFromUrl(url: string): number | undefined {
   return Number.isFinite(id) && id > 0 ? id : undefined;
 }
 
+// --- Album metadata cache (BS#988) ---
+//
+// Positive-only server-side memo of the assembled `/proxy/metadata/album`
+// enrichment (everything except the request-echoed `artistName`/
+// `releaseTitle`/`trackTitle` base fields — see `albumMetadataCacheKey` and
+// the write site in the handler below). Keeping the base fields out of the
+// cached value means a hit never echoes back a different caller's exact
+// request casing; those three are always assembled fresh from the CURRENT
+// request, cache hit or miss.
+//
+// Never written on a transient failure (BS#1089 rule, mirrored here): a
+// local DB blip or an LML timeout/5xx/network error leaves the assembled
+// response only partially resolved, and caching that degraded shape would
+// strand it for the full TTL even after the upstream recovers. Only a
+// fully-resolved attempt — a persisted-state hit, or a completed (matched
+// or definitively empty) LML round-trip — is cached.
+
+const albumMetadataCache = new LRUCache<string, Record<string, unknown>>({
+  max: 2000,
+  ttl: 1000 * 60 * 60, // 1h (BS#988)
+});
+
+/** Test-only: drop cached entries between cases. */
+export function __resetAlbumMetadataCacheForTests(): void {
+  albumMetadataCache.clear();
+}
+
+/** Base fields excluded from the cached value — see the cache's doc comment above. */
+const ALBUM_METADATA_BASE_FIELDS = new Set(['artistName', 'releaseTitle', 'trackTitle']);
+
+function extractAlbumMetadataEnrichment(metadata: Record<string, unknown>): Record<string, unknown> {
+  const enrichment: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    if (!ALBUM_METADATA_BASE_FIELDS.has(key)) enrichment[key] = value;
+  }
+  return enrichment;
+}
+
+/**
+ * CRITIC_REVIEWS_ENABLED is the one feature flag that changes this
+ * response's shape (adds `criticReviews`) — folded into the key so a flag
+ * flip can't serve a stale shape out of the TTL window. Mirrors
+ * `trackSearchCacheKey` in `library.service.ts`.
+ */
+function albumMetadataCacheKey(artistName: string, releaseTitle?: string, trackTitle?: string): string {
+  const flagBit = getCriticReviewsConfig().enabled ? '1' : '0';
+  const norm = (s?: string) => (s || '').toLowerCase().trim();
+  return `${norm(artistName)}|${norm(releaseTitle)}|${norm(trackTitle)}:${flagBit}`;
+}
+
 /**
  * GET /proxy/metadata/album
  *
- * Cache-first (BS#1331). The handler consults persisted state — the
+ * Cache-first (BS#1331; server-side response memo BS#988). The handler consults persisted state — the
  * `album_metadata` JOIN to `flowsheet` via the normalized `(artist,
  * album)` lookup key, partial-indexed by `flowsheet_album_link_lookup_idx`
  * — before going to LML. On a local hit it serves what BS already knows,
@@ -489,143 +549,195 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   if (!artistName) throw new WxycError('artistName query parameter is required', 400);
 
   // Base identity fields (BS#1827): exactly what the caller already asked
-  // about, so assembled unconditionally before any lookup below — nothing
-  // that happens next (a DB blip, an LML timeout) can ever erase these.
+  // about, so assembled unconditionally before any lookup or cache check
+  // below — nothing that happens next (a DB blip, an LML timeout, a cache
+  // hit populated by a differently-cased prior request) can ever erase or
+  // relabel these.
   const metadata: Record<string, unknown> = { artistName };
   if (releaseTitle) metadata.releaseTitle = releaseTitle;
   if (trackTitle) metadata.trackTitle = trackTitle;
 
-  // Cache-first: consult BS's own persisted state before going to LML.
-  // Catch-arm-shape rows (YT/BC/SC populated, Apple/Spotify/artwork null)
-  // count as hits; the persisted nulls are served, then `searchUrlProvider`
-  // fills missing streaming URLs at the bottom of the handler. iOS sees
-  // the same shape it would on the LML-fallthrough path.
-  //
-  // Resolve the linked flowsheet row from the normalized `(artist, album)`
-  // lookup key ONCE (BS#1827: album_id plus the base catalog fields, one
-  // query), then feed the album_id to both the persisted-metadata read and
-  // (below) the critic-reviews read. Resolving per-read would let a
-  // flowsheet insert land between the calls and make them describe
-  // different albums for the same request.
-  //
-  // A thrown DB error here would propagate as 500 and regress availability
-  // versus the LML-fallthrough path (which catches LML errors and degrades
-  // to synthesized search URLs). Treat any DB failure as a cache miss and
-  // fall through to LML — the caller's worst-case latency goes up, but the
-  // request still completes with a 200. Because album_id and the base
-  // fields now come from the SAME query, a failure here can no longer
-  // "partially" fail — it drops both together, which is the correct model:
-  // there's nothing left to partially succeed at.
-  let albumId: number | null = null;
-  let persisted: PersistedAlbumMetadata | null = null;
-  try {
-    const linkedRow = await selectLinkedFlowsheetRow(artistName, releaseTitle);
-    albumId = linkedRow?.album_id ?? null;
-    // Base catalog fields BS wrote at play time (BS#1827): sourced from the
-    // SAME row album_id came from. A free-text row that has never linked to
-    // an album_id has no efficient local source for these three (see
-    // selectLinkedFlowsheetRow's doc comment) — its artist/release/track
-    // identity above still survives via the request echo.
-    if (linkedRow?.record_label) metadata.recordLabel = linkedRow.record_label;
-    if (linkedRow?.label_id != null) metadata.labelId = linkedRow.label_id;
-    if (linkedRow?.metadata_status) metadata.metadataStatus = linkedRow.metadata_status;
-    if (albumId !== null) persisted = await lookupAlbumMetadataById(albumId);
-  } catch (lookupError) {
-    console.warn('[ProxyController] local metadata lookup failed; falling through to LML:', lookupError);
-  }
+  // BS#988: server-side cache in front of the persisted-state read + LML
+  // round-trip below. A hit short-circuits both entirely — see
+  // `albumMetadataCache`'s doc comment above for what is (and isn't) cached.
+  const cacheKey = albumMetadataCacheKey(artistName, releaseTitle, trackTitle);
+  const cachedEnrichment = albumMetadataCache.get(cacheKey);
+  const cacheHit = cachedEnrichment !== undefined;
 
-  if (persisted) Object.assign(metadata, buildLocalMetadataResponse(persisted));
   let upstreamCalls = 0;
+  let albumId: number | null = null;
 
-  if (!persisted) {
-    // Count the LML attempt before awaiting it — counting on success only
-    // would conflate the LML-failure cohort with the local-hit cohort on
-    // the trace explorer's `upstream_calls=0` split, masking LML incidents
-    // as healthy cache-hit growth.
-    upstreamCalls += 1;
-    let artwork: DiscogsMatchResult | undefined;
+  if (cacheHit) {
+    Object.assign(metadata, cachedEnrichment);
+  } else {
+    // Cache-first: consult BS's own persisted state before going to LML.
+    // Catch-arm-shape rows (YT/BC/SC populated, Apple/Spotify/artwork null)
+    // count as hits; the persisted nulls are served, then `searchUrlProvider`
+    // fills missing streaming URLs at the bottom of the handler. iOS sees
+    // the same shape it would on the LML-fallthrough path.
+    //
+    // Resolve the linked flowsheet row from the normalized `(artist, album)`
+    // lookup key ONCE (BS#1827: album_id plus the base catalog fields, one
+    // query), then feed the album_id to both the persisted-metadata read and
+    // (below) the critic-reviews read. Resolving per-read would let a
+    // flowsheet insert land between the calls and make them describe
+    // different albums for the same request.
+    //
+    // A thrown DB error here would propagate as 500 and regress availability
+    // versus the LML-fallthrough path (which catches LML errors and degrades
+    // to synthesized search URLs). Treat any DB failure as a cache miss and
+    // fall through to LML — the caller's worst-case latency goes up, but the
+    // request still completes with a 200. Because album_id and the base
+    // fields now come from the SAME query, a failure here can no longer
+    // "partially" fail — it drops both together, which is the correct model:
+    // there's nothing left to partially succeed at.
+    let persisted: PersistedAlbumMetadata | null = null;
+    // BS#988: gates the cache write below. A degraded response — a local DB
+    // blip or a transient (timeout/5xx/network) LML failure — must never be
+    // memoized for the full TTL; mirrors the #1089 rule for the artwork
+    // negative cache (only a fully-resolved attempt is cacheable).
+    let cacheable = true;
     try {
-      const lookupResponse: LookupResponse = await lmlLookupCoordinator.lookup(artistName, releaseTitle, trackTitle, {
-        caller: 'proxy-album-metadata',
-      });
-      artwork = lookupResponse.results?.[0]?.artwork;
-    } catch (searchError) {
-      console.warn('[ProxyController] LML lookup failed:', searchError);
+      const linkedRow = await selectLinkedFlowsheetRow(artistName, releaseTitle);
+      albumId = linkedRow?.album_id ?? null;
+      // Base catalog fields BS wrote at play time (BS#1827): sourced from the
+      // SAME row album_id came from. A free-text row that has never linked to
+      // an album_id has no efficient local source for these three (see
+      // selectLinkedFlowsheetRow's doc comment) — its artist/release/track
+      // identity above still survives via the request echo.
+      if (linkedRow?.record_label) metadata.recordLabel = linkedRow.record_label;
+      if (linkedRow?.label_id != null) metadata.labelId = linkedRow.label_id;
+      if (linkedRow?.metadata_status) metadata.metadataStatus = linkedRow.metadata_status;
+      if (albumId !== null) persisted = await lookupAlbumMetadataById(albumId);
+    } catch (lookupError) {
+      console.warn('[ProxyController] local metadata lookup failed; falling through to LML:', lookupError);
+      cacheable = false;
     }
 
-    if (artwork) {
-      populateCommonMetadataFields(metadata, artwork);
-      populateReleaseMetadata(metadata, {
-        year: artwork.release_year,
-        genres: artwork.genres,
-        styles: artwork.styles,
-        label: artwork.label,
-        artist_id: artwork.discogs_artist_id,
-        released: artwork.full_release_date,
-        tracklist: artwork.tracklist,
-        artwork_url: artwork.artwork_url,
-      });
+    if (persisted) Object.assign(metadata, buildLocalMetadataResponse(persisted));
+
+    if (!persisted) {
+      // Count the LML attempt before awaiting it — counting on success only
+      // would conflate the LML-failure cohort with the local-hit cohort on
+      // the trace explorer's `upstream_calls=0` split, masking LML incidents
+      // as healthy cache-hit growth.
+      upstreamCalls += 1;
+      let artwork: DiscogsMatchResult | undefined;
+      try {
+        const lookupResponse: LookupResponse = await lmlLookupCoordinator.lookup(artistName, releaseTitle, trackTitle, {
+          caller: 'proxy-album-metadata',
+        });
+        artwork = lookupResponse.results?.[0]?.artwork;
+      } catch (searchError) {
+        console.warn('[ProxyController] LML lookup failed:', searchError);
+        cacheable = false;
+      }
+
+      if (artwork) {
+        populateCommonMetadataFields(metadata, artwork);
+        populateReleaseMetadata(metadata, {
+          year: artwork.release_year,
+          genres: artwork.genres,
+          styles: artwork.styles,
+          label: artwork.label,
+          artist_id: artwork.discogs_artist_id,
+          released: artwork.full_release_date,
+          tracklist: artwork.tracklist,
+          artwork_url: artwork.artwork_url,
+        });
+      }
+    }
+
+    // Fallback: construct search URLs for services without persisted/LML URLs.
+    // Per-service semantics live in `SearchUrlProvider` (BS#889) — each
+    // service uses a different field-fallback order, so the URLs are no
+    // longer guaranteed to share a query string. Old behavior was a single
+    // combined `${artistName} ${searchTerm}` for all three; the new behavior
+    // matches the runtime path and the recurring backfill so iOS gets
+    // identical search URLs regardless of which BS path produced them.
+    //
+    // Post-BS#1185: Spotify and Apple Music also have search-URL fallbacks so
+    // iOS doesn't show greyed buttons when LML fails or returns zero results.
+    //
+    // BS#1192's verified-rejection invariant is a *write-path* concern (don't
+    // persist synth URLs in album_metadata). Synthesizing at request time
+    // doesn't poison persisted state, and both the local-hit and LML
+    // branches synthesize here so iOS sees identical degradation behavior
+    // regardless of which branch served the request.
+    const fallbackUrls = searchUrlProvider.getAllSearchUrls(artistName, releaseTitle, trackTitle);
+    if (!metadata.spotifyUrl) metadata.spotifyUrl = fallbackUrls.spotifyUrl;
+    if (!metadata.appleMusicUrl) metadata.appleMusicUrl = fallbackUrls.appleMusicUrl;
+    if (!metadata.youtubeMusicUrl) metadata.youtubeMusicUrl = fallbackUrls.youtubeMusicUrl;
+    if (!metadata.bandcampUrl) metadata.bandcampUrl = fallbackUrls.bandcampUrl;
+    if (!metadata.soundcloudUrl) metadata.soundcloudUrl = fallbackUrls.soundcloudUrl;
+
+    // External critic-review snippets (album-critic-reviews slice, ADR 0012).
+    // Flag-gated (`CRITIC_REVIEWS_ENABLED`, default off) so prod behavior — the
+    // response shape and the serve-path query plan — is unchanged until an
+    // operator opts in, keeping this compatible with the #32 hardening freeze
+    // on the album-metadata serve path. Reuses the `album_id` resolved for the
+    // metadata read above (one extra indexed read, not a second key resolve),
+    // and runs whenever the key resolved to a linked album — independent of
+    // whether `album_metadata` enrichment has landed, so a linked album with
+    // reviews but no metadata row still surfaces its reviews. Attached only when
+    // non-empty so an un-seeded album's response is byte-identical to before.
+    // Wrapped in try/catch: the reviews read is strictly additive and must never
+    // break the metadata response, so a DB failure degrades to omitting the field.
+    if (getCriticReviewsConfig().enabled && albumId !== null) {
+      try {
+        const criticReviews = await lookupCriticReviewsByAlbumId(albumId);
+        if (criticReviews.length > 0) metadata.criticReviews = criticReviews;
+      } catch (reviewsError) {
+        console.warn('[ProxyController] critic-reviews lookup failed; omitting criticReviews:', reviewsError);
+      }
+    }
+
+    if (cacheable) {
+      albumMetadataCache.set(cacheKey, extractAlbumMetadataEnrichment(metadata));
     }
   }
 
-  // Fallback: construct search URLs for services without persisted/LML URLs.
-  // Per-service semantics live in `SearchUrlProvider` (BS#889) — each
-  // service uses a different field-fallback order, so the URLs are no
-  // longer guaranteed to share a query string. Old behavior was a single
-  // combined `${artistName} ${searchTerm}` for all three; the new behavior
-  // matches the runtime path and the recurring backfill so iOS gets
-  // identical search URLs regardless of which BS path produced them.
-  //
-  // Post-BS#1185: Spotify and Apple Music also have search-URL fallbacks so
-  // iOS doesn't show greyed buttons when LML fails or returns zero results.
-  //
-  // BS#1192's verified-rejection invariant is a *write-path* concern (don't
-  // persist synth URLs in album_metadata). Synthesizing at request time
-  // doesn't poison persisted state, and both the local-hit and LML
-  // branches synthesize here so iOS sees identical degradation behavior
-  // regardless of which branch served the request.
-  const fallbackUrls = searchUrlProvider.getAllSearchUrls(artistName, releaseTitle, trackTitle);
-  if (!metadata.spotifyUrl) metadata.spotifyUrl = fallbackUrls.spotifyUrl;
-  if (!metadata.appleMusicUrl) metadata.appleMusicUrl = fallbackUrls.appleMusicUrl;
-  if (!metadata.youtubeMusicUrl) metadata.youtubeMusicUrl = fallbackUrls.youtubeMusicUrl;
-  if (!metadata.bandcampUrl) metadata.bandcampUrl = fallbackUrls.bandcampUrl;
-  if (!metadata.soundcloudUrl) metadata.soundcloudUrl = fallbackUrls.soundcloudUrl;
-
-  // Project the upstream-call count onto the active Sentry span so we can
-  // split p50/p95 by cohort in the trace explorer. Wrap in a try/except —
-  // observability must never break the request path.
+  // Project the upstream-call count + cache result onto the active Sentry
+  // span so we can split p50/p95 by cohort in the trace explorer. Wrap in
+  // try/except — observability must never break the request path. Two
+  // separate calls (not one merged object) so each attribute name is
+  // independently greppable in the trace explorer.
   try {
     Sentry.getActiveSpan()?.setAttributes({
       'proxy.metadata.album.upstream_calls': upstreamCalls,
+    });
+    Sentry.getActiveSpan()?.setAttributes({
+      'proxy.metadata.album.cache_hit': cacheHit,
     });
   } catch (err) {
     console.warn('[ProxyController] failed to project Sentry attrs', err);
   }
 
-  // External critic-review snippets (album-critic-reviews slice, ADR 0012).
-  // Flag-gated (`CRITIC_REVIEWS_ENABLED`, default off) so prod behavior — the
-  // response shape and the serve-path query plan — is unchanged until an
-  // operator opts in, keeping this compatible with the #32 hardening freeze
-  // on the album-metadata serve path. Reuses the `album_id` resolved for the
-  // metadata read above (one extra indexed read, not a second key resolve),
-  // and runs whenever the key resolved to a linked album — independent of
-  // whether `album_metadata` enrichment has landed, so a linked album with
-  // reviews but no metadata row still surfaces its reviews. Attached only when
-  // non-empty so an un-seeded album's response is byte-identical to before.
-  // Wrapped in try/catch: the reviews read is strictly additive and must never
-  // break the metadata response, so a DB failure degrades to omitting the field.
-  if (getCriticReviewsConfig().enabled && albumId !== null) {
-    try {
-      const criticReviews = await lookupCriticReviewsByAlbumId(albumId);
-      if (criticReviews.length > 0) metadata.criticReviews = criticReviews;
-    } catch (reviewsError) {
-      console.warn('[ProxyController] critic-reviews lookup failed; omitting criticReviews:', reviewsError);
-    }
-  }
-
   res.set('Cache-Control', 'private, max-age=600');
   res.status(200).json(metadata);
 };
+
+// --- Artist metadata cache (BS#988) ---
+//
+// Single cache holding either the assembled response body (a hit) or `body:
+// null` (a confirmed absence — LML resolved the id and definitively found
+// no artist). The `{ body }` wrapper is required because `LRUCache`'s value
+// type must extend `{}` — a bare `Record<string, unknown> | null` value
+// type doesn't typecheck, since `null` isn't assignable to `{}`. Mirrors
+// `tracklistCache`/`libraryTracks`'s shape below: a transient failure
+// (timeout/5xx/network — anything but a 404) is never written here, only
+// rethrown, so a repeat request keeps retrying LML for the rest of the TTL
+// (BS#1089 rule).
+
+const artistMetadataCache = new LRUCache<number, { body: Record<string, unknown> | null }>({
+  max: 2000,
+  ttl: 1000 * 60 * 60, // 1h (BS#988)
+});
+
+/** Test-only: drop cached entries between cases. */
+export function __resetArtistMetadataCacheForTests(): void {
+  artistMetadataCache.clear();
+}
 
 /**
  * GET /proxy/metadata/artist
@@ -633,6 +745,9 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
  * Fetches artist metadata (bio, Wikipedia URL, image) from LML by artist ID.
  * Bio is available as both raw Discogs markup (`bio`) and pre-parsed structured
  * tokens (`bioTokens`) for direct rendering by clients.
+ *
+ * Cache-first (BS#988): a hit (positive or confirmed-negative) short-circuits
+ * before any LML call.
  */
 export const getArtistMetadata: RequestHandler<object, unknown, unknown, ArtistMetadataQuery> = async (req, res) => {
   const { artistId } = req.query;
@@ -642,25 +757,85 @@ export const getArtistMetadata: RequestHandler<object, unknown, unknown, ArtistM
   const id = parseInt(artistId, 10);
   if (isNaN(id)) throw new WxycError('artistId must be an integer', 400);
 
-  const artist = await getArtistDetails(id);
+  let cacheHit = true;
+  let cached = artistMetadataCache.get(id);
 
-  const wikipediaUrl = artist.urls.find((url) => url.includes('wikipedia.org')) ?? null;
+  if (cached === undefined) {
+    cacheHit = false;
+    try {
+      const artist = await getArtistDetails(id);
+      const wikipediaUrl = artist.urls.find((url) => url.includes('wikipedia.org')) ?? null;
+      cached = {
+        body: {
+          discogsArtistId: artist.artist_id,
+          bio: artist.profile ?? null,
+          bioTokens: artist.profile_tokens ?? null,
+          wikipediaUrl,
+          imageUrl: artist.image_url ?? null,
+        },
+      };
+      artistMetadataCache.set(id, cached);
+    } catch (err) {
+      if (err instanceof LmlClientError && err.statusCode === 404) {
+        // BS#988: confirmed absence — cache the negative so a repeat
+        // request for the same id doesn't re-hit LML for the rest of the
+        // TTL. Any other status (502/504/...) is a transient failure and
+        // is deliberately NOT cached — the original error still propagates
+        // below so the response shape on a miss is unchanged.
+        artistMetadataCache.set(id, { body: null });
+      }
+      throw err;
+    }
+  }
+
+  try {
+    Sentry.getActiveSpan()?.setAttributes({ 'proxy.metadata.artist.cache_hit': cacheHit });
+  } catch (err) {
+    console.warn('[ProxyController] failed to project Sentry attrs', err);
+  }
+
+  if (cached.body === null) {
+    // Cache hit on a confirmed absence recorded by a prior miss above.
+    throw new WxycError('Artist not found', 404);
+  }
 
   res.set('Cache-Control', 'private, max-age=3600');
-  res.status(200).json({
-    discogsArtistId: artist.artist_id,
-    bio: artist.profile ?? null,
-    bioTokens: artist.profile_tokens ?? null,
-    wikipediaUrl,
-    imageUrl: artist.image_url ?? null,
-  });
+  res.status(200).json(cached.body);
 };
+
+// --- Entity resolve cache (BS#988) ---
+//
+// Same `{ body }`-wrapped shape as `artistMetadataCache` above (required
+// because `LRUCache`'s value type must extend `{}`, so a bare nullable
+// value type doesn't typecheck): the cached value is either the response
+// body (a hit) or `body: null` (a confirmed absence — LML resolved type+id
+// and definitively found nothing). A transient failure is never cached,
+// only rethrown (BS#1089 rule). 24h TTL matches the client Cache-Control
+// max-age already set below — resolved Discogs entity identities are
+// effectively immutable once minted.
+
+const entityResolveCache = new LRUCache<string, { body: Record<string, unknown> | null }>({
+  max: 2000,
+  ttl: 1000 * 60 * 60 * 24, // 24h (BS#988)
+});
+
+/** Test-only: drop cached entries between cases. */
+export function __resetEntityResolveCacheForTests(): void {
+  entityResolveCache.clear();
+}
+
+function entityResolveCacheKey(type: string, id: number): string {
+  return `${type}:${id}`;
+}
 
 /**
  * GET /proxy/entity/resolve
  *
  * Resolves a Discogs entity (artist, release, master) by type and ID via LML.
  * Returns the entity's name and basic info.
+ *
+ * Cache-first (BS#988): a hit (positive or confirmed-negative) short-circuits
+ * before any LML call.
  */
 export const resolveEntity: RequestHandler<object, unknown, unknown, EntityResolveQuery> = async (req, res) => {
   const { type, id } = req.query;
@@ -675,74 +850,155 @@ export const resolveEntity: RequestHandler<object, unknown, unknown, EntityResol
   const entityId = parseInt(id, 10);
   if (isNaN(entityId)) throw new WxycError('id must be an integer', 400);
 
-  const result = await lmlResolveEntity(type as 'artist' | 'release' | 'master', entityId);
+  const cacheKey = entityResolveCacheKey(type, entityId);
+  let cacheHit = true;
+  let cached = entityResolveCache.get(cacheKey);
+
+  if (cached === undefined) {
+    cacheHit = false;
+    try {
+      const result = await lmlResolveEntity(type as 'artist' | 'release' | 'master', entityId);
+      cached = { body: { name: result.name, type: result.type, id: result.id } };
+      entityResolveCache.set(cacheKey, cached);
+    } catch (err) {
+      if (err instanceof LmlClientError && err.statusCode === 404) {
+        // BS#988: confirmed absence — cache the negative so a repeat
+        // request for the same type+id doesn't re-hit LML for the rest of
+        // the TTL. Any other status is a transient failure and is
+        // deliberately NOT cached; the original error still propagates.
+        entityResolveCache.set(cacheKey, { body: null });
+      }
+      throw err;
+    }
+  }
+
+  try {
+    Sentry.getActiveSpan()?.setAttributes({ 'proxy.entity.resolve.cache_hit': cacheHit });
+  } catch (err) {
+    console.warn('[ProxyController] failed to project Sentry attrs', err);
+  }
+
+  if (cached.body === null) {
+    // Cache hit on a confirmed absence recorded by a prior miss above.
+    throw new WxycError('Entity not found', 404);
+  }
 
   res.set('Cache-Control', 'private, max-age=86400');
-  res.status(200).json({ name: result.name, type: result.type, id: result.id });
+  res.status(200).json(cached.body);
 };
+
+// --- Spotify track cache (BS#988) ---
+//
+// Same `{ body }`-wrapped shape as `artistMetadataCache`/`entityResolveCache`
+// above (required because `LRUCache`'s value type must extend `{}`): the
+// cached value is either the response body (a hit) or `body: null` (a
+// confirmed absence — Spotify returned a definitive 404 for the track id).
+// A transient failure (token/auth failure, non-404 fetch failure) is never
+// cached (BS#1089 rule), and neither is the "Spotify isn't configured at
+// all" 503 — that's an environment-wide condition, not a per-track fact.
+
+const spotifyTrackCache = new LRUCache<string, { body: Record<string, unknown> | null }>({
+  max: 2000,
+  ttl: 1000 * 60 * 60, // 1h (BS#988) — same tier as album/artist metadata.
+});
+
+/** Test-only: drop cached entries between cases. */
+export function __resetSpotifyTrackCacheForTests(): void {
+  spotifyTrackCache.clear();
+}
 
 /**
  * GET /proxy/spotify/track/:id
  *
  * Fetches Spotify track metadata using backend credentials.
+ *
+ * Cache-first (BS#988): a hit (positive or confirmed-negative) short-circuits
+ * before any Spotify call (token fetch included).
  */
 export const getSpotifyTrack: RequestHandler<SpotifyTrackParams> = async (req, res) => {
   const { id } = req.params;
 
   if (!id) throw new WxycError('Track ID is required', 400);
 
-  // Use the SpotifyProvider's internal auth to call the Spotify API
-  const spotifyClientId = process.env.SPOTIFY_CLIENT_ID;
-  const spotifyClientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+  let cacheHit = true;
+  let cached = spotifyTrackCache.get(id);
 
-  if (!spotifyClientId || !spotifyClientSecret) {
-    res.status(503).json({ message: 'Spotify integration not configured' });
-    return;
-  }
+  if (cached === undefined) {
+    cacheHit = false;
 
-  // Get or refresh Spotify access token
-  const tokenResponse = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${Buffer.from(`${spotifyClientId}:${spotifyClientSecret}`).toString('base64')}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: 'grant_type=client_credentials',
-  });
+    // Use the SpotifyProvider's internal auth to call the Spotify API
+    const spotifyClientId = process.env.SPOTIFY_CLIENT_ID;
+    const spotifyClientSecret = process.env.SPOTIFY_CLIENT_SECRET;
 
-  if (!tokenResponse.ok) {
-    console.error(`[ProxyController] Spotify auth failed: ${tokenResponse.status}`);
-    res.status(502).json({ message: 'Spotify authentication failed' });
-    return;
-  }
-
-  const tokenData: SpotifyTokenResponse = (await tokenResponse.json()) as SpotifyTokenResponse;
-
-  const trackResponse = await fetch(`https://api.spotify.com/v1/tracks/${encodeURIComponent(id)}`, {
-    headers: {
-      Authorization: `Bearer ${tokenData.access_token}`,
-    },
-  });
-
-  if (!trackResponse.ok) {
-    if (trackResponse.status === 404) {
-      res.status(404).json({ message: 'Track not found' });
+    if (!spotifyClientId || !spotifyClientSecret) {
+      res.status(503).json({ message: 'Spotify integration not configured' });
       return;
     }
-    console.error(`[ProxyController] Spotify track fetch failed: ${trackResponse.status}`);
-    res.status(502).json({ message: 'Failed to fetch track from Spotify' });
+
+    // Get or refresh Spotify access token
+    const tokenResponse = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${spotifyClientId}:${spotifyClientSecret}`).toString('base64')}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'grant_type=client_credentials',
+    });
+
+    if (!tokenResponse.ok) {
+      console.error(`[ProxyController] Spotify auth failed: ${tokenResponse.status}`);
+      res.status(502).json({ message: 'Spotify authentication failed' });
+      return;
+    }
+
+    const tokenData: SpotifyTokenResponse = (await tokenResponse.json()) as SpotifyTokenResponse;
+
+    const trackResponse = await fetch(`https://api.spotify.com/v1/tracks/${encodeURIComponent(id)}`, {
+      headers: {
+        Authorization: `Bearer ${tokenData.access_token}`,
+      },
+    });
+
+    if (!trackResponse.ok) {
+      if (trackResponse.status === 404) {
+        // BS#988: confirmed absence — cache the negative so a repeat
+        // request for the same id doesn't re-hit Spotify for the rest of
+        // the TTL.
+        spotifyTrackCache.set(id, { body: null });
+        res.status(404).json({ message: 'Track not found' });
+        return;
+      }
+      console.error(`[ProxyController] Spotify track fetch failed: ${trackResponse.status}`);
+      res.status(502).json({ message: 'Failed to fetch track from Spotify' });
+      return;
+    }
+
+    const track: SpotifyTrackApiResponse = (await trackResponse.json()) as SpotifyTrackApiResponse;
+    cached = {
+      body: {
+        title: track.name,
+        artist: track.artists?.[0]?.name || '',
+        album: track.album?.name || '',
+        artworkUrl: track.album?.images?.[0]?.url || null,
+      },
+    };
+    spotifyTrackCache.set(id, cached);
+  }
+
+  try {
+    Sentry.getActiveSpan()?.setAttributes({ 'proxy.spotify.track.cache_hit': cacheHit });
+  } catch (err) {
+    console.warn('[ProxyController] failed to project Sentry attrs', err);
+  }
+
+  if (cached.body === null) {
+    // Cache hit on a confirmed absence recorded by a prior miss above.
+    res.status(404).json({ message: 'Track not found' });
     return;
   }
 
-  const track: SpotifyTrackApiResponse = (await trackResponse.json()) as SpotifyTrackApiResponse;
-
   res.set('Cache-Control', 'private, max-age=600');
-  res.status(200).json({
-    title: track.name,
-    artist: track.artists?.[0]?.name || '',
-    album: track.album?.name || '',
-    artworkUrl: track.album?.images?.[0]?.url || null,
-  });
+  res.status(200).json(cached.body);
 };
 
 /**

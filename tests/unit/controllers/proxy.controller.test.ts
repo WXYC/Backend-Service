@@ -179,6 +179,10 @@ import {
   librarySearch,
   libraryTracks,
   __resetLibraryTracksCacheForTests,
+  __resetAlbumMetadataCacheForTests,
+  __resetArtistMetadataCacheForTests,
+  __resetEntityResolveCacheForTests,
+  __resetSpotifyTrackCacheForTests,
 } from '../../../apps/backend/controllers/proxy.controller';
 
 // --- Helpers ---
@@ -426,6 +430,15 @@ describe('proxy.controller', () => {
       // BS#1331 / BS#1827.
       mockSelectLinkedFlowsheetRow.mockResolvedValue(defaultLinkedRow());
       mockLookupAlbumMetadataById.mockResolvedValue(null);
+      // BS#988: this suite reuses artist/release names across many
+      // independent `it()`s (e.g. "Autechre"/"Confield", "Jessica Pratt"/"On
+      // Your Own Love Again"). Without a reset, the new response cache
+      // introduced by BS#988 would make a later test's identical request
+      // silently short-circuit to an earlier test's cached response instead
+      // of exercising its own mocks — reset before every test so each one
+      // starts cold, same discipline as `__resetLibraryTracksCacheForTests`
+      // below in the `libraryTracks` suite.
+      __resetAlbumMetadataCacheForTests();
     });
 
     // ADR 0012: attach external critic-review snippets, flag-gated. These run
@@ -1737,11 +1750,165 @@ describe('proxy.controller', () => {
         expect('discogsUrl' in result).toBe(false);
       });
     });
+
+    // --- Server-side response cache (BS#988) ---
+    //
+    // The cache-first local-lookup suite above proves BS's own persisted
+    // state short-circuits LML. This suite proves the NEW layer in front of
+    // BOTH the persisted-state read and the LML round-trip: an identical
+    // repeat request is served from an in-process cache without touching
+    // either, and — mirroring the #1089 negative-cache rule for
+    // `searchArtwork` — a transient failure (a local DB blip or an LML
+    // timeout/5xx/network error) is never memoized, so a repeat request
+    // after a transient failure keeps retrying.
+    describe('server-side response cache (BS#988)', () => {
+      it('serves an identical repeat request from cache without a second LML round-trip', async () => {
+        mockSelectLinkedFlowsheetRow.mockResolvedValue(null);
+        mockLookupMetadata.mockResolvedValue({
+          results: [
+            {
+              library_item: { id: 1, title: 'Ege Bamyasi', artist: 'Can', call_number: '', library_url: '' },
+              artwork: {
+                release_id: 555,
+                release_url: 'https://www.discogs.com/release/555',
+                artwork_url: 'https://i.discogs.com/can.jpg',
+                album: 'Ege Bamyasi',
+                artist: 'Can',
+                confidence: 0.9,
+              },
+            },
+          ],
+          search_type: 'direct',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = { query: { artistName: 'Can', releaseTitle: 'Ege Bamyasi' } } as unknown as Request;
+
+        const firstRes = createMockRes();
+        await getAlbumMetadata(req, firstRes as Response, mockNext);
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+        const firstResult = (firstRes.json as jest.Mock).mock.calls[0][0];
+        expect(firstResult.discogsReleaseId).toBe(555);
+
+        const secondRes = createMockRes();
+        await getAlbumMetadata(req, secondRes as Response, mockNext);
+
+        // Neither the local lookup nor LML is re-consulted.
+        expect(mockSelectLinkedFlowsheetRow).toHaveBeenCalledTimes(1);
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+        const secondResult = (secondRes.json as jest.Mock).mock.calls[0][0];
+        expect(secondResult.discogsReleaseId).toBe(555);
+        // Base identity fields are still assembled fresh from THIS request.
+        expect(secondResult.artistName).toBe('Can');
+      });
+
+      it('projects cache_hit=true onto the Sentry span on a repeat request, cache_hit=false on the first', async () => {
+        mockSelectLinkedFlowsheetRow.mockResolvedValue(null);
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = {
+          query: { artistName: 'Cache Hit Artist', releaseTitle: 'Cache Hit Album' },
+        } as unknown as Request;
+
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.cache_hit': false });
+
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.cache_hit': true });
+        // A cache hit makes zero upstream calls, same as a local hit.
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.upstream_calls': 0 });
+      });
+
+      it('does not cache a transient LML failure: a repeat request re-attempts the lookup', async () => {
+        // Mirrors the #1089 artwork negative-cache test: an LML timeout/5xx/
+        // network blip must never strand a degraded response in the cache
+        // for the full TTL.
+        mockSelectLinkedFlowsheetRow.mockResolvedValue(null);
+        mockLookupMetadata.mockRejectedValue(new Error('LML timeout'));
+
+        const req = {
+          query: { artistName: 'Flaky LML Artist', releaseTitle: 'Flaky LML Album' },
+        } as unknown as Request;
+
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not cache a local-lookup DB failure: a repeat request re-attempts the local read', async () => {
+        mockSelectLinkedFlowsheetRow.mockRejectedValue(new Error('db blip'));
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const req = {
+          query: { artistName: 'Flaky DB Artist', releaseTitle: 'Flaky DB Album' },
+        } as unknown as Request;
+
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+
+        expect(mockSelectLinkedFlowsheetRow).toHaveBeenCalledTimes(2);
+      });
+
+      it('keys the cache on the CRITIC_REVIEWS_ENABLED flag state so a flag flip is not served a stale shape', async () => {
+        mockSelectLinkedFlowsheetRow.mockResolvedValue(defaultLinkedRow());
+        mockLookupAlbumMetadataById.mockResolvedValue(null);
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+        mockLookupCriticReviewsByAlbumId.mockResolvedValue([
+          { source: 'The Quietus', url: 'https://thequietus.com/x', snippet: 'snippet' },
+        ]);
+
+        const req = {
+          query: { artistName: 'Flag Split Artist', releaseTitle: 'Flag Split Album' },
+        } as unknown as Request;
+
+        // Flag off: cached without criticReviews.
+        mockCriticReviewsConfig.mockReturnValue({ enabled: false });
+        const offRes = createMockRes();
+        await getAlbumMetadata(req, offRes as Response, mockNext);
+        expect((offRes.json as jest.Mock).mock.calls[0][0]).not.toHaveProperty('criticReviews');
+
+        // Flag on: a DIFFERENT cache key, so the response is computed fresh
+        // (not served from the flag-off entry) and carries criticReviews.
+        mockCriticReviewsConfig.mockReturnValue({ enabled: true });
+        const onRes = createMockRes();
+        await getAlbumMetadata(req, onRes as Response, mockNext);
+        expect((onRes.json as jest.Mock).mock.calls[0][0].criticReviews).toEqual([
+          { source: 'The Quietus', url: 'https://thequietus.com/x', snippet: 'snippet' },
+        ]);
+
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
+      });
+    });
   });
 
   // --- getArtistMetadata ---
 
   describe('getArtistMetadata', () => {
+    beforeEach(() => {
+      // BS#988: reset the response cache between tests — several tests below
+      // reuse the same artistId (e.g. `3840`) for both a success case and a
+      // rejection case, which would otherwise short-circuit on a cached hit
+      // from an earlier test.
+      __resetArtistMetadataCacheForTests();
+    });
+
     it('throws WxycError 400 when artistId is missing', async () => {
       const req = { query: {} } as unknown as Request;
       const res = createMockRes();
@@ -1877,11 +2044,105 @@ describe('proxy.controller', () => {
 
       await expect(getArtistMetadata(req, res as Response, mockNext)).rejects.toThrow('Connection refused');
     });
+
+    // --- Server-side response cache (BS#988) ---
+    describe('server-side response cache (BS#988)', () => {
+      it('serves an identical repeat request from cache without a second LML call', async () => {
+        mockGetArtistDetails.mockResolvedValue({
+          artist_id: 7001,
+          name: 'Broadcast',
+          profile: 'A British band.',
+          profile_tokens: null,
+          image_url: 'https://i.discogs.com/broadcast.jpg',
+          name_variations: [],
+          aliases: [],
+          members: [],
+          urls: [],
+          cached: false,
+        });
+
+        const req = { query: { artistId: '7001' } } as unknown as Request;
+
+        const firstRes = createMockRes();
+        await getArtistMetadata(req, firstRes as Response, mockNext);
+        expect(mockGetArtistDetails).toHaveBeenCalledTimes(1);
+
+        const secondRes = createMockRes();
+        await getArtistMetadata(req, secondRes as Response, mockNext);
+
+        expect(mockGetArtistDetails).toHaveBeenCalledTimes(1);
+        expect(secondRes.status).toHaveBeenCalledWith(200);
+        const secondResult = (secondRes.json as jest.Mock).mock.calls[0][0];
+        expect(secondResult.discogsArtistId).toBe(7001);
+      });
+
+      it('negative-caches a confirmed 404: a repeat request rejects without re-invoking LML', async () => {
+        const { LmlClientError } = await import('@wxyc/lml-client');
+        mockGetArtistDetails.mockRejectedValue(new LmlClientError('Not found', 404));
+
+        const req = { query: { artistId: '404404' } } as unknown as Request;
+
+        await expect(getArtistMetadata(req, createMockRes() as Response, mockNext)).rejects.toThrow();
+        expect(mockGetArtistDetails).toHaveBeenCalledTimes(1);
+
+        await expect(getArtistMetadata(req, createMockRes() as Response, mockNext)).rejects.toThrow('not found');
+        // The second (cached) rejection never re-consults LML.
+        expect(mockGetArtistDetails).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not negative-cache a transient failure: a repeat request re-invokes LML', async () => {
+        // Mirrors the #1089 rule: only a confirmed absence (404) is
+        // negatively cached, never a timeout/5xx/network blip.
+        const { LmlClientError } = await import('@wxyc/lml-client');
+        mockGetArtistDetails.mockRejectedValue(new LmlClientError('LML request timed out', 504));
+
+        const req = { query: { artistId: '504504' } } as unknown as Request;
+
+        await expect(getArtistMetadata(req, createMockRes() as Response, mockNext)).rejects.toThrow(
+          'LML request timed out'
+        );
+        await expect(getArtistMetadata(req, createMockRes() as Response, mockNext)).rejects.toThrow(
+          'LML request timed out'
+        );
+
+        expect(mockGetArtistDetails).toHaveBeenCalledTimes(2);
+      });
+
+      it('projects cache_hit onto the Sentry span', async () => {
+        mockGetArtistDetails.mockResolvedValue({
+          artist_id: 8001,
+          name: 'Stereolab',
+          profile: null,
+          profile_tokens: null,
+          image_url: null,
+          name_variations: [],
+          aliases: [],
+          members: [],
+          urls: [],
+          cached: false,
+        });
+
+        const req = { query: { artistId: '8001' } } as unknown as Request;
+
+        await getArtistMetadata(req, createMockRes() as Response, mockNext);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.artist.cache_hit': false });
+
+        await getArtistMetadata(req, createMockRes() as Response, mockNext);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.artist.cache_hit': true });
+      });
+    });
   });
 
   // --- resolveEntity ---
 
   describe('resolveEntity', () => {
+    beforeEach(() => {
+      // BS#988: reset the response cache between tests — the artist/3840
+      // type+id pair is reused across a success case and a rejection case
+      // below, which would otherwise short-circuit on a cached hit.
+      __resetEntityResolveCacheForTests();
+    });
+
     it('throws WxycError 400 when type or id is missing', async () => {
       const req = { query: { type: 'artist' } } as unknown as Request;
       const res = createMockRes();
@@ -1962,6 +2223,66 @@ describe('proxy.controller', () => {
 
       await expect(resolveEntity(req, res as Response, mockNext)).rejects.toThrow('LML request timed out');
     });
+
+    // --- Server-side response cache (BS#988) ---
+    describe('server-side response cache (BS#988)', () => {
+      it('serves an identical repeat request from cache without a second LML call', async () => {
+        mockResolveEntity.mockResolvedValue({ name: 'Broadcast', type: 'artist', id: 7002 });
+
+        const req = { query: { type: 'artist', id: '7002' } } as unknown as Request;
+
+        const firstRes = createMockRes();
+        await resolveEntity(req, firstRes as Response, mockNext);
+        expect(mockResolveEntity).toHaveBeenCalledTimes(1);
+
+        const secondRes = createMockRes();
+        await resolveEntity(req, secondRes as Response, mockNext);
+
+        expect(mockResolveEntity).toHaveBeenCalledTimes(1);
+        expect(secondRes.json).toHaveBeenCalledWith({ name: 'Broadcast', type: 'artist', id: 7002 });
+      });
+
+      it('negative-caches a confirmed 404: a repeat request rejects without re-invoking LML', async () => {
+        const { LmlClientError } = await import('@wxyc/lml-client');
+        mockResolveEntity.mockRejectedValue(new LmlClientError('Not found', 404));
+
+        const req = { query: { type: 'release', id: '404405' } } as unknown as Request;
+
+        await expect(resolveEntity(req, createMockRes() as Response, mockNext)).rejects.toThrow();
+        expect(mockResolveEntity).toHaveBeenCalledTimes(1);
+
+        await expect(resolveEntity(req, createMockRes() as Response, mockNext)).rejects.toThrow('not found');
+        expect(mockResolveEntity).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not negative-cache a transient failure: a repeat request re-invokes LML', async () => {
+        const { LmlClientError } = await import('@wxyc/lml-client');
+        mockResolveEntity.mockRejectedValue(new LmlClientError('LML request timed out', 504));
+
+        const req = { query: { type: 'master', id: '504505' } } as unknown as Request;
+
+        await expect(resolveEntity(req, createMockRes() as Response, mockNext)).rejects.toThrow(
+          'LML request timed out'
+        );
+        await expect(resolveEntity(req, createMockRes() as Response, mockNext)).rejects.toThrow(
+          'LML request timed out'
+        );
+
+        expect(mockResolveEntity).toHaveBeenCalledTimes(2);
+      });
+
+      it('projects cache_hit onto the Sentry span', async () => {
+        mockResolveEntity.mockResolvedValue({ name: 'Stereolab', type: 'artist', id: 8002 });
+
+        const req = { query: { type: 'artist', id: '8002' } } as unknown as Request;
+
+        await resolveEntity(req, createMockRes() as Response, mockNext);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.entity.resolve.cache_hit': false });
+
+        await resolveEntity(req, createMockRes() as Response, mockNext);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.entity.resolve.cache_hit': true });
+      });
+    });
   });
 
   // --- getSpotifyTrack ---
@@ -1973,6 +2294,8 @@ describe('proxy.controller', () => {
       process.env = { ...originalEnv };
       process.env.SPOTIFY_CLIENT_ID = 'test-client-id';
       process.env.SPOTIFY_CLIENT_SECRET = 'test-client-secret';
+      // BS#988: reset the response cache between tests.
+      __resetSpotifyTrackCacheForTests();
     });
 
     afterAll(() => {
@@ -2065,6 +2388,109 @@ describe('proxy.controller', () => {
       await getSpotifyTrack(req, res as Response, mockNext);
 
       expect(res.status).toHaveBeenCalledWith(502);
+    });
+
+    // --- Server-side response cache (BS#988) ---
+    describe('server-side response cache (BS#988)', () => {
+      it('serves an identical repeat request from cache without a second Spotify call', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ access_token: 'mock-token', expires_in: 3600 }),
+        } as globalThis.Response);
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              name: 'Tomorrow Never Knows',
+              artists: [{ name: 'Broadcast' }],
+              album: { name: 'Tender Buttons', images: [{ url: 'https://i.scdn.co/image/xyz' }] },
+            }),
+        } as globalThis.Response);
+
+        const req = { params: { id: 'cache-hit-track-id' } } as unknown as Request;
+
+        const firstRes = createMockRes();
+        await getSpotifyTrack(req, firstRes as Response, mockNext);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+
+        const secondRes = createMockRes();
+        await getSpotifyTrack(req, secondRes as Response, mockNext);
+
+        // No further fetch calls (token or track) — served entirely from cache.
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+        expect(secondRes.json).toHaveBeenCalledWith({
+          title: 'Tomorrow Never Knows',
+          artist: 'Broadcast',
+          album: 'Tender Buttons',
+          artworkUrl: 'https://i.scdn.co/image/xyz',
+        });
+      });
+
+      it('negative-caches a confirmed 404: a repeat request short-circuits without re-invoking Spotify', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ access_token: 'mock-token', expires_in: 3600 }),
+        } as globalThis.Response);
+        mockFetch.mockResolvedValueOnce({ ok: false, status: 404 } as globalThis.Response);
+
+        const req = { params: { id: 'negative-cache-track-id' } } as unknown as Request;
+
+        const firstRes = createMockRes();
+        await getSpotifyTrack(req, firstRes as Response, mockNext);
+        expect(firstRes.status).toHaveBeenCalledWith(404);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+
+        const secondRes = createMockRes();
+        await getSpotifyTrack(req, secondRes as Response, mockNext);
+
+        expect(secondRes.status).toHaveBeenCalledWith(404);
+        // No further fetch calls on the cached-negative repeat.
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not negative-cache a transient auth failure: a repeat request re-invokes Spotify', async () => {
+        // Mirrors the #1089 rule: only a confirmed absence (404) is
+        // negatively cached, never a transient upstream failure.
+        mockFetch.mockResolvedValueOnce({ ok: false, status: 401 } as globalThis.Response);
+        mockFetch.mockResolvedValueOnce({ ok: false, status: 401 } as globalThis.Response);
+
+        const req = { params: { id: 'transient-failure-track-id' } } as unknown as Request;
+
+        const firstRes = createMockRes();
+        await getSpotifyTrack(req, firstRes as Response, mockNext);
+        expect(firstRes.status).toHaveBeenCalledWith(502);
+
+        const secondRes = createMockRes();
+        await getSpotifyTrack(req, secondRes as Response, mockNext);
+        expect(secondRes.status).toHaveBeenCalledWith(502);
+
+        // Both requests independently hit Spotify — nothing was cached.
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+      });
+
+      it('projects cache_hit onto the Sentry span', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ access_token: 'mock-token', expires_in: 3600 }),
+        } as globalThis.Response);
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              name: 'Track',
+              artists: [{ name: 'Artist' }],
+              album: { name: 'Album', images: [] },
+            }),
+        } as globalThis.Response);
+
+        const req = { params: { id: 'sentry-cache-hit-track-id' } } as unknown as Request;
+
+        await getSpotifyTrack(req, createMockRes() as Response, mockNext);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.spotify.track.cache_hit': false });
+
+        await getSpotifyTrack(req, createMockRes() as Response, mockNext);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.spotify.track.cache_hit': true });
+      });
     });
   });
 
