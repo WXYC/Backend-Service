@@ -283,10 +283,20 @@ export async function searchLibrary(
       ORDER BY ${orderBy}
       LIMIT ${params.limit} OFFSET ${offset}
     `;
+    // BS#1885: also count non-alias rows, so the caller can tell "matched
+    // via alias only" (cascade must run) apart from "matched for real"
+    // (short-circuit as today) without re-deriving it from the page rows —
+    // a genuine non-alias row can sort beyond `limit` and be absent from
+    // `results` on page 0. Safe to carry `alias_max_sim` through the same
+    // DISTINCT ON (id) dedupe as the data query: branch (a) always projects
+    // NULL, branch (b) always projects non-null, and branch (b)'s dedupe
+    // predicate guarantees a given id can't appear in both.
     countQuery = sql`
       ${cte}
-      SELECT COUNT(*)::int AS total FROM (
-        SELECT DISTINCT ON (id) id FROM (${unionBody}) AS raw
+      SELECT COUNT(*)::int AS total,
+             COUNT(*) FILTER (WHERE alias_max_sim IS NULL)::int AS total_non_alias
+      FROM (
+        SELECT DISTINCT ON (id) id, alias_max_sim FROM (${unionBody}) AS raw
         ORDER BY id ASC, ${ROTATION_BIN_DEDUP_ORDINAL} ASC
       ) AS deduped
     `;
@@ -337,9 +347,16 @@ export async function searchLibrary(
   const [dataRows, countRows] = await Promise.all([db.execute(dataQuery), db.execute(countQuery)]);
 
   const results = (dataRows as unknown as RawRow[]).map(toAlbumSearchResultRow);
-  const total = (countRows as unknown as { total: number }[])[0]?.total ?? 0;
-
-  if (results.length > 0 || total > 0) return { results, total };
+  const countRow = (countRows as unknown as { total: number; total_non_alias?: number }[])[0];
+  const total = countRow?.total ?? 0;
+  // BS#1885: alias-branch hits must not count toward "primary search found
+  // something." Alias OFF: totalNonAlias === total, so the gate below is
+  // byte-identical to the pre-fix `total > 0 || results.length > 0`. Alias
+  // ON: a genuine (non-alias) row still short-circuits with zero new LML
+  // traffic; an alias-only (or empty) primary set falls through to the
+  // cascade guards below.
+  const totalNonAlias = aliasActive ? (countRow?.total_non_alias ?? 0) : total;
+  if (totalNonAlias > 0 || (!aliasActive && results.length > 0)) return { results, total };
 
   // Catalog-track-search cascade (BS#977, multi-word relaxation BS#1146).
   // Guards trim worst-case inputs (typo storms, query-builder abuse) before
@@ -364,7 +381,35 @@ export async function searchLibrary(
     },
     () => runCascade(params, trimmed)
   );
-  return { results: cascadeResults, total: cascadeResults.length };
+  if (cascadeResults.length === 0) return { results, total };
+  // Today's pure-fallback path (zero primary rows at all — alias OFF or
+  // alias ON with no alias hits either), unchanged.
+  if (results.length === 0) return { results: cascadeResults, total: cascadeResults.length };
+
+  // BS#1885: alias rows and cascade rows both exist — merge rather than
+  // overwrite so the alias-noise rows (e.g. "Duane" for a "Nuane" query)
+  // don't hide the cascade's real answer, and vice versa.
+  const aliasById = new Map(results.map((r) => [r.id, r]));
+  const enrichedCascade = cascadeResults.map((r) => {
+    const dup = aliasById.get(r.id);
+    // Id collision: the cascade already resolved this row for real — keep
+    // the cascade row (its matched_via is the stronger signal) but carry the
+    // alias hint along too so the UI can show both.
+    return dup?.matched_via_alias ? { ...r, matched_via_alias: dup.matched_via_alias } : r;
+  });
+  const cascadeIds = new Set(cascadeResults.map((r) => r.id));
+  const merged = sortAlbumRows(
+    [...enrichedCascade, ...results.filter((r) => !cascadeIds.has(r.id))],
+    params
+  ).slice(0, params.limit);
+  const added = cascadeResults.filter((r) => !aliasById.has(r.id)).length;
+  // Known imprecision, acceptable: a cascade row that duplicates an alias row
+  // beyond page 0 can be double-counted in `total`, and — because the
+  // `page !== 0` guard above returns before this merge ever runs — `total`
+  // on page 0 (inflated by `added`) can disagree with the same query's page 1
+  // `total` (not inflated). Bounded by cascade size (<= limit) and confined
+  // to this single fallback page; not worth chasing exactness.
+  return { results: merged, total: total + added };
 }
 
 async function runCascade(params: LibraryQueryParams, q: string): Promise<AlbumSearchResultRow[]> {
@@ -395,18 +440,32 @@ async function runCascade(params: LibraryQueryParams, q: string): Promise<AlbumS
   if (filtered.length === 0) return [];
 
   const projected = filtered.map(taggedRowToAlbumSearchResultRow);
+  return sortAlbumRows(projected, params);
+}
 
+/**
+ * Sort album rows by the caller's `sort`/`order`, with the same secondary
+ * tiebreak + id tiebreak the catalog's primary SQL query uses. Shared by the
+ * cascade (whose rows never touch SQL `ORDER BY`) and the alias/cascade merge
+ * (BS#1885), which re-sorts a combined row set after `runCascade` and the
+ * primary alias rows are spliced together.
+ */
+function sortAlbumRows(
+  rows: AlbumSearchResultRow[],
+  params: Pick<LibraryQueryParams, 'sort' | 'order'>
+): AlbumSearchResultRow[] {
   const direction = params.order === 'asc' ? 1 : -1;
   const primaryKey = SORT_KEYS[params.sort];
   const secondaryKey = SECONDARY_SORT_KEYS[params.sort];
-  projected.sort((a, b) => {
+  const sorted = [...rows];
+  sorted.sort((a, b) => {
     const primary = compareSortable(a[primaryKey], b[primaryKey]) * direction;
     if (primary !== 0) return primary;
     const secondary = compareSortable(a[secondaryKey], b[secondaryKey]);
     if (secondary !== 0) return secondary;
     return a.id - b.id;
   });
-  return projected;
+  return sorted;
 }
 
 type SortableKey = 'artist_name' | 'album_title' | 'plays' | 'add_date';

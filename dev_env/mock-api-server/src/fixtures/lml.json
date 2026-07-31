@@ -334,6 +334,39 @@
         "pg_time_ms": 2,
         "api_time_ms": 0
       }
+    },
+    "opaline drift census": {
+      "results": [
+        {
+          "library_item": {
+            "id": 65900,
+            "title": "Nine Rooms",
+            "artist": "Radial Thicket",
+            "call_number": "Rock CD RT 1/1",
+            "library_url": "https://library.wxyc.org/release/65900"
+          },
+          "matched_via": [
+            {
+              "title": "Opaline Drift Census",
+              "artist_credit": null,
+              "position": "A1",
+              "confidence": 0.93,
+              "source": "discogs_master"
+            }
+          ]
+        }
+      ],
+      "search_type": "song_as_artist",
+      "song_not_found": false,
+      "found_on_compilation": false,
+      "cache_stats": {
+        "memory_hits": 0,
+        "pg_hits": 1,
+        "pg_misses": 0,
+        "api_calls": 0,
+        "pg_time_ms": 2,
+        "api_time_ms": 0
+      }
     }
   }
 }

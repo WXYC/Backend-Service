@@ -39,9 +39,14 @@ jest.mock('@sentry/node', () => ({
   getActiveSpan: () => mockGetActiveSpan(),
 }));
 
-import { searchLibrary, searchByArtist } from '../../../apps/backend/services/library.service';
+import {
+  searchLibrary,
+  searchByArtist,
+  __resetTrackSearchCacheForTests,
+} from '../../../apps/backend/services/library.service';
 import { searchLibrary as searchCatalogQuery } from '../../../apps/backend/services/library-search.service';
 import { resetConfig as resetCatalogSearchAliasConfig } from '../../../apps/backend/config/catalogSearchAlias';
+import { resetConfig as resetCatalogTrackSearchConfig } from '../../../apps/backend/config/catalogTrackSearch';
 
 const baseViewRow = {
   id: 42,
@@ -179,6 +184,178 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
     });
   });
 
+  describe('searchLibrary (Both-mode) — alias-only trigram hits no longer suppress the cascade (BS#1885)', () => {
+    const originalCta = process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+    const originalDiscogs = process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+
+    beforeEach(() => {
+      delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+      delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+      resetCatalogTrackSearchConfig();
+      __resetTrackSearchCacheForTests();
+    });
+
+    afterAll(() => {
+      if (originalCta === undefined) delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
+      else process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = originalCta;
+      if (originalDiscogs === undefined) delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
+      else process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = originalDiscogs;
+      resetCatalogTrackSearchConfig();
+    });
+
+    it('a genuine (non-alias) trigram row present — early return, cascade never runs', async () => {
+      process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      resetCatalogSearchAliasConfig();
+
+      const tsvectorChain = createMockQueryChain([]);
+      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
+      db.select.mockReset();
+      db.select.mockReturnValue(tsvectorChain);
+
+      db.execute.mockReset();
+      db.execute.mockResolvedValue([
+        { ...baseViewRow, alias_max_sim: null, alias_matched_variant: null, alias_matched_source: null },
+        {
+          ...baseViewRow,
+          id: 43,
+          alias_max_sim: 0.4,
+          alias_matched_variant: 'Thee Oh Sees',
+          alias_matched_source: 'discogs_name_variation',
+        },
+      ]);
+
+      const results = await searchLibrary('OHSEES');
+
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+      expect(results).toHaveLength(2);
+    });
+
+    it('all trigram rows alias-tagged, cascade flags off — rows returned unchanged', async () => {
+      process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      resetCatalogSearchAliasConfig();
+
+      const tsvectorChain = createMockQueryChain([]);
+      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
+      db.select.mockReset();
+      db.select.mockReturnValue(tsvectorChain);
+
+      db.execute.mockReset();
+      db.execute.mockResolvedValue([
+        {
+          ...baseViewRow,
+          alias_max_sim: 0.4,
+          alias_matched_variant: 'Thee Oh Sees',
+          alias_matched_source: 'discogs_name_variation',
+        },
+      ]);
+
+      const results = await searchLibrary('Thee Oh Sees');
+
+      // Cascade flags default off, so runCatalogTrackSearchCascade no-ops
+      // without touching LML or the DB — proving the alias-only rows aren't
+      // silently swapped for an empty cascade result.
+      expect(mockLookupBySong).not.toHaveBeenCalled();
+      expect(results).toHaveLength(1);
+      expect(results[0].matched_via_alias).toEqual([{ matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' }]);
+    });
+
+    it('all trigram rows alias-tagged, Track 2 (LML) resolves — merged cascade-first', async () => {
+      process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      resetCatalogSearchAliasConfig();
+      process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'true';
+      resetCatalogTrackSearchConfig();
+
+      // Jessica Pratt / "On Your Own Love Again" — WXYC canonical fixture
+      // (matches the Track 2 case in library.service.test.ts).
+      const trackRow = {
+        id: 101,
+        code_letters: 'PR',
+        code_artist_number: 1,
+        code_number: 2,
+        artist_name: 'Jessica Pratt',
+        alphabetical_name: 'Pratt, Jessica',
+        album_title: 'On Your Own Love Again',
+        format_name: 'CD',
+        genre_name: 'Rock',
+        rotation_bin: null,
+        add_date: new Date('2024-02-01'),
+        label: 'Drag City',
+        label_id: null,
+        on_streaming: true,
+        album_artist: null,
+        plays: 12,
+        artwork_url: null,
+        legacy_release_id: 555,
+        artist_id: 9002,
+        discogs_artist_id: null,
+        musicbrainz_artist_id: null,
+        wikidata_qid: null,
+        spotify_artist_id: null,
+        apple_music_artist_id: null,
+        bandcamp_id: null,
+      };
+
+      const tsvectorChain = createMockQueryChain([]);
+      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
+      const libraryChain = createMockQueryChain([trackRow]);
+      libraryChain.limit = jest.fn().mockResolvedValue([trackRow]);
+      const ctaChain = createMockQueryChain([]);
+      ctaChain.where = jest.fn().mockResolvedValue([]);
+      // CTA/Track 1 stays off (only CATALOG_TRACK_SEARCH_DISCOGS_ENABLED is
+      // set above), so `db.select` is only called for: tsvector, the Track 2
+      // library bridge query, and the CTA-exclusion query — no separate
+      // alias-off trigram `db.select` call, since the alias-enabled trigram
+      // path reads via raw `db.execute` SQL instead.
+      const chains = [tsvectorChain, libraryChain, ctaChain];
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = chains[Math.min(callIndex, chains.length - 1)];
+        callIndex += 1;
+        return chain;
+      });
+
+      db.execute.mockReset();
+      db.execute.mockResolvedValue([
+        {
+          ...baseViewRow,
+          alias_max_sim: 0.4,
+          alias_matched_variant: 'Thee Oh Sees',
+          alias_matched_source: 'discogs_name_variation',
+        },
+      ]);
+
+      mockLookupBySong.mockReset();
+      mockLookupBySong.mockResolvedValue({
+        results: [
+          {
+            library_item: {
+              id: 555,
+              title: 'On Your Own Love Again',
+              artist: 'Jessica Pratt',
+              call_number: 'Rock CD PR 1/2',
+              library_url: 'https://library.wxyc.org/release/555',
+            },
+            matched_via: [{ title: 'Back, Baby', artist_credit: null, confidence: 0.92, source: 'discogs_release' }],
+          },
+        ],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+      });
+
+      const results = await searchLibrary('Back, Baby');
+
+      expect(mockLookupBySong).toHaveBeenCalledTimes(1);
+      expect(results).toHaveLength(2);
+      // Cascade-first ordering.
+      expect(results[0].id).toBe(101);
+      expect(results[0].matched_via?.[0]).toMatchObject({ source: 'discogs_release' });
+      const aliasHit = results.find((r) => r.id === 42);
+      expect(aliasHit?.matched_via_alias).toEqual([{ matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' }]);
+    });
+  });
+
   describe('/library/query (library-search.service.searchLibrary)', () => {
     const baseQueryParams = {
       q: 'Thee Oh Sees',
@@ -243,7 +420,12 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
             alias_matched_source: 'discogs_name_variation',
           },
         ])
-        .mockResolvedValueOnce([{ total: 1 }]);
+        // BS#1885: this row is alias-only (total_non_alias: 0), so the new
+        // gate falls through toward the cascade guards — proven harmless
+        // here because searchLibrary (library.service) isn't mocked in this
+        // file and the cascade flags default off, so runCatalogTrackSearchCascade
+        // resolves [] and the alias row passes through unchanged.
+        .mockResolvedValueOnce([{ total: 1, total_non_alias: 0 }]);
 
       const { results } = await searchCatalogQuery(baseQueryParams);
 
@@ -267,7 +449,9 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
             alias_matched_source: null,
           },
         ])
-        .mockResolvedValueOnce([{ total: 1 }]);
+        // BS#1885: a genuine (non-alias) row — total_non_alias: 1 pins the
+        // short-circuit gate (no cascade fallthrough for a real primary hit).
+        .mockResolvedValueOnce([{ total: 1, total_non_alias: 1 }]);
 
       const { results } = await searchCatalogQuery(baseQueryParams);
 
@@ -347,7 +531,8 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         alias_matched_source: 'discogs_name_variation',
       };
       db.execute.mockReset();
-      db.execute.mockResolvedValueOnce([nullLabelAliasRow]).mockResolvedValueOnce([{ total: 1 }]);
+      // BS#1885: alias-only row (total_non_alias: 0).
+      db.execute.mockResolvedValueOnce([nullLabelAliasRow]).mockResolvedValueOnce([{ total: 1, total_non_alias: 0 }]);
 
       const { results } = await searchCatalogQuery(baseQueryParams);
 
@@ -380,7 +565,8 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       resetCatalogSearchAliasConfig();
       stubGenreFormatLookups();
       db.execute.mockReset();
-      db.execute.mockResolvedValueOnce([baseQueryRow]).mockResolvedValueOnce([{ total: 1 }]);
+      // baseQueryRow carries no alias fields — a genuine (non-alias) row.
+      db.execute.mockResolvedValueOnce([baseQueryRow]).mockResolvedValueOnce([{ total: 1, total_non_alias: 1 }]);
 
       await searchCatalogQuery(baseQueryParams);
 

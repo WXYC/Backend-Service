@@ -149,6 +149,142 @@ describe('GET /library/query — alias-aware LATERAL JOIN (PR 5)', () => {
   });
 });
 
+/**
+ * GET /library/query — alias-only primary no longer suppresses the catalog-
+ * track-search cascade (BS#1885).
+ *
+ * Root cause: the alias branch (above) makes a query "match" whenever it
+ * fuzzy-hits an unrelated artist's `artist_search_alias` variant, even when
+ * that match is noise (e.g. a real track title that happens to trigram-match
+ * an unrelated artist's name variation). Pre-fix, any alias hit — however
+ * spurious — counted as "the primary search found something" and the
+ * catalog-track-search cascade (BS#977) never ran, so the query's real
+ * answer (an in-library album resolved via LML's song lookup) never
+ * surfaced.
+ *
+ * Seeds two unrelated library rows:
+ *   - DECOY: an ordinary album whose artist carries an `artist_search_alias`
+ *     variant set to the exact query string below, guaranteeing a
+ *     deterministic pg_trgm `%` hit (avoids relying on a borderline
+ *     similarity threshold in CI).
+ *   - TARGET: a `legacy_release_id`-bearing album that the mock LML
+ *     (`dev_env/mock-api-server/src/fixtures/lml.json` `songLookup` map)
+ *     resolves the query to.
+ *
+ * The query should surface BOTH rows: the decoy with `matched_via_alias`
+ * (still a real feature, unrelated to this bug), and the target with
+ * `matched_via` (the cascade now runs instead of being suppressed).
+ */
+describe('GET /library/query — alias-only primary no longer suppresses the cascade (BS#1885)', () => {
+  let auth;
+  let sql;
+  const wxycSchema = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+
+  const DECOY_ARTIST_ID = 9101;
+  const DECOY_LIBRARY_ID = 9101;
+  const DECOY_ARTIST_NAME = 'Vestibule Choir';
+  const TARGET_ARTIST_ID = 9102;
+  const TARGET_LIBRARY_ID = 9102;
+  const TARGET_LEGACY_RELEASE_ID = 65900;
+  // Lowercase nonce, unused anywhere else in the fixtures, so it can never
+  // accidentally ILIKE/tsvector-match real catalog text (mirrors the opaque
+  // multi-word query tokens in tests/fixtures/shape.sql). Set as the decoy's
+  // alias variant verbatim, so `variant % query` is a trivial (similarity
+  // 1.0) pg_trgm hit rather than a borderline one.
+  const QUERY = 'opaline drift census';
+
+  beforeAll(async () => {
+    auth = createAuthRequest(request, global.access_token);
+    sql = getTestDb();
+    await cleanupBs1885Rows(sql, wxycSchema);
+
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.artists (id, artist_name, alphabetical_name, code_letters)
+       VALUES ($1, $2, $2, 'VC'), ($3, 'Radial Thicket', 'Radial Thicket', 'RT')
+       ON CONFLICT (id) DO NOTHING`,
+      [DECOY_ARTIST_ID, DECOY_ARTIST_NAME, TARGET_ARTIST_ID]
+    );
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+       VALUES ($1, $3, 9101), ($2, $3, 9102)
+       ON CONFLICT (artist_id, genre_id) DO NOTHING`,
+      [DECOY_ARTIST_ID, TARGET_ARTIST_ID, TEST_GENRE_ID]
+    );
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.library
+         (id, artist_id, genre_id, format_id, album_title, code_number, artist_name, label, label_id, legacy_release_id)
+       VALUES
+         ($1, $2, $6, $7, 'Low Tide Almanac', 1, $8, 'Driftless Records', NULL, NULL),
+         ($3, $4, $6, $7, 'Nine Rooms', 1, 'Radial Thicket', NULL, NULL, $5)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        DECOY_LIBRARY_ID,
+        DECOY_ARTIST_ID,
+        TARGET_LIBRARY_ID,
+        TARGET_ARTIST_ID,
+        TARGET_LEGACY_RELEASE_ID,
+        TEST_GENRE_ID,
+        TEST_FORMAT_ID,
+        DECOY_ARTIST_NAME,
+      ]
+    );
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.artist_search_alias
+         (artist_id, source, variant, related_artist_id, external_subject_id,
+          external_object_id, active, method, confidence, last_verified_at)
+       VALUES ($1, 'discogs_name_variation', $2, NULL, NULL, NULL, NULL, 'name_variation', 0.95, NOW())
+       ON CONFLICT (artist_id, source, variant) DO UPDATE SET last_verified_at = NOW()`,
+      [DECOY_ARTIST_ID, QUERY]
+    );
+  });
+
+  afterAll(async () => {
+    await cleanupBs1885Rows(sql, wxycSchema);
+  });
+
+  test('cascade now runs: response carries both the alias row and the resolved cascade row', async () => {
+    const res = await auth.get('/library/query').query({ q: QUERY, limit: 50 }).expect(200);
+
+    const aliasHit = res.body.results.find((r) => r.id === DECOY_LIBRARY_ID);
+    const cascadeHit = res.body.results.find((r) => r.id === TARGET_LIBRARY_ID);
+
+    if (cascadeHit === undefined) {
+      // Warn-skip mirrors the pattern in library.spec.js / library-query.spec.js:
+      // a missing cascade hit in CI means the backend is running without the
+      // catalog-track-search flags, not a regression in this fix.
+      console.warn(
+        '[BS#1885] /library/query cascade row absent for the alias-only-primary case. Likely the ' +
+          'backend is running without CATALOG_TRACK_SEARCH_DISCOGS_ENABLED=true (or ' +
+          'CATALOG_SEARCH_ALIAS_ENABLED=true). Set both in .env and restart `npm run dev`.'
+      );
+      return;
+    }
+    expect(cascadeHit.album_title).toBe('Nine Rooms');
+    expect(Array.isArray(cascadeHit.matched_via)).toBe(true);
+    expect(cascadeHit.matched_via.length).toBeGreaterThanOrEqual(1);
+
+    expect(aliasHit).toBeDefined();
+    expect(aliasHit.matched_via_alias).toEqual([{ matched_variant: QUERY, source: 'discogs_name_variation' }]);
+  });
+
+  test('a non-alias primary hit against the same seed still short-circuits (no matched_via rows)', async () => {
+    const res = await auth.get('/library/query').query({ q: DECOY_ARTIST_NAME, limit: 50 }).expect(200);
+
+    const hit = res.body.results.find((r) => r.id === DECOY_LIBRARY_ID);
+    expect(hit).toBeDefined();
+    res.body.results.forEach((row) => {
+      expect(row.matched_via).toBeUndefined();
+    });
+  });
+});
+
+async function cleanupBs1885Rows(sql, wxycSchema) {
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.artist_search_alias WHERE artist_id IN (9101, 9102)`);
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.library WHERE id IN (9101, 9102)`);
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.genre_artist_crossreference WHERE artist_id IN (9101, 9102)`);
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.artists WHERE id IN (9101, 9102)`);
+}
+
 async function cleanupSeededRows(sql, wxycSchema) {
   // Delete in FK-safe order. artist_search_alias FKs onto artists; library
   // FKs onto artists.
