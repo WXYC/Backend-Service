@@ -68,7 +68,7 @@ Point `DB_*` at a snapshot (or prod -- the job is read-only) and leave `EMAIL_EN
 
 - `job.ts` -- thin process entrypoint: init logging, run once, capture any failure to Sentry once, always close the DB pool + logger.
 - `orchestrate.ts` -- the `run()` spine (watermark read → window resolve → query → render → send-or-skip → conditional watermark advance), separated from `job.ts` so it's unit-testable without the module-load `void main()`.
-- `query.ts` -- the digest SQL (`updated_at`-keyed, `entry_type='track'`, `LIMIT MAX_DIGEST_ROWS`) + `NoMatchRow` row type + the `unwrapRows` result-shape guard.
+- `query.ts` -- the digest SQL (`updated_at`-keyed, `entry_type='track'`, `LIMIT MAX_DIGEST_ROWS`) + `NoMatchRow` row type + the `unwrapRows` result-shape guard. The `> :since` bound is pre-stringified (`${since.toISOString()}::timestamptz`) and the timestamps are selected as `extract(epoch ...)` and rebuilt into `Date`s, because `@wxyc/database`'s Drizzle client rebinds the postgres-js date-family parser **and** serializer to a passthrough: a raw JS `Date` param throws inside postgres-js's `Bind`, and timestamptz reads come back as strings (see the file header and `feedback_drizzle_date_serializer_override`). Compiled to `dist/query.cjs` (tsup cjs entry) so the integration spec runs the REAL function through that driver.
 - `format.ts` -- pure rendering (subject, sections, grouping, Discogs URL synthesis, PT time formatting). No DB/network; heavily unit-tested.
 - `watermark.ts` -- `cronjob_runs` read/write + the first-run window bound + the advance-on-success/no-advance-on-failure decision.
 - `email.ts` -- self-contained SES sender (does not import `@wxyc/authentication` -- see the header comment for why).
