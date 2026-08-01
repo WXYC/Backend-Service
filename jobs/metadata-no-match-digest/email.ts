@@ -70,8 +70,27 @@ export interface DigestEmailContent {
   text: string;
 }
 
-/** Send the digest to `to`. Throws on missing `SES_FROM_EMAIL` config or an SES send failure -- the caller (`job.ts`) uses that to decide not to advance the watermark. */
-export async function sendDigestEmail(to: string, content: DigestEmailContent): Promise<void> {
+/**
+ * Send the digest to `to`. Returns `true` when an email was actually
+ * dispatched, `false` when sending is disabled (`EMAIL_ENABLED=false`) and
+ * the call was a no-op -- the caller (`job.ts`) logs a dry-run preview on
+ * `false` and deliberately does NOT advance the watermark, so a real
+ * (enabled) run still sees the misses. Throws on missing `SES_FROM_EMAIL`
+ * config or an SES send failure, which the caller uses to leave the
+ * watermark unadvanced so the next run retries the window.
+ *
+ * `Charset: 'UTF-8'` is set on every `Content` -- the subject always carries
+ * an em-dash (U+2014) and bodies routinely carry an ellipsis and diacritic
+ * artist names; without it SES defaults the MIME part to us-ascii and
+ * clients render mojibake.
+ */
+export async function sendDigestEmail(to: string, content: DigestEmailContent): Promise<boolean> {
+  // Gate first: a disabled dry run is a clean no-op that must not require any
+  // SES configuration to be present.
+  if (!isEmailSendingEnabled()) {
+    return false;
+  }
+
   const from = process.env.SES_FROM_EMAIL;
   if (!from) {
     throw new Error('Missing AWS SES configuration: SES_FROM_EMAIL');
@@ -81,19 +100,16 @@ export async function sendDigestEmail(to: string, content: DigestEmailContent): 
     Source: from,
     Destination: { ToAddresses: [to] },
     Message: {
-      Subject: { Data: content.subject },
+      Subject: { Data: content.subject, Charset: 'UTF-8' },
       Body: {
-        Text: { Data: content.text },
-        Html: { Data: content.html },
+        Text: { Data: content.text, Charset: 'UTF-8' },
+        Html: { Data: content.html, Charset: 'UTF-8' },
       },
     },
     ConfigurationSetName: getConfigurationSetName(),
   });
 
-  if (!isEmailSendingEnabled()) {
-    return;
-  }
-
   const client = getSesClient();
   await client.send(command);
+  return true;
 }

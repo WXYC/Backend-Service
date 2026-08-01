@@ -58,18 +58,19 @@ describe('email.ts', () => {
   });
 
   describe('sendDigestEmail', () => {
-    it('sends to the given recipient with the digest subject/html/text', async () => {
-      await sendDigestEmail('jake@wxyc.org', content);
+    it('sends to the given recipient with UTF-8-charset subject/html/text and returns true', async () => {
+      const result = await sendDigestEmail('jake@wxyc.org', content);
 
+      expect(result).toBe(true);
       expect(SendEmailCommand).toHaveBeenCalledWith(
         expect.objectContaining({
           Source: 'test@wxyc.org',
           Destination: { ToAddresses: ['jake@wxyc.org'] },
           Message: {
-            Subject: { Data: content.subject },
+            Subject: { Data: content.subject, Charset: 'UTF-8' },
             Body: {
-              Text: { Data: content.text },
-              Html: { Data: content.html },
+              Text: { Data: content.text, Charset: 'UTF-8' },
+              Html: { Data: content.html, Charset: 'UTF-8' },
             },
           },
         })
@@ -106,13 +107,24 @@ describe('email.ts', () => {
       await expect(mod.sendDigestEmail('jake@wxyc.org', content)).rejects.toThrow('SES_FROM_EMAIL');
     });
 
-    it('never calls SESClient.send when EMAIL_ENABLED=false (mock/disabled path -- no live SES call)', async () => {
+    it('returns false and never calls SESClient.send when EMAIL_ENABLED=false (mock/disabled path -- no live SES call)', async () => {
       process.env.EMAIL_ENABLED = 'false';
       jest.resetModules();
       const mod = await import('../../../../jobs/metadata-no-match-digest/email');
 
-      await mod.sendDigestEmail('jake@wxyc.org', content);
+      const result = await mod.sendDigestEmail('jake@wxyc.org', content);
 
+      expect(result).toBe(false);
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+
+    it('returns false (never throws) when disabled even if SES_FROM_EMAIL is missing -- disabled is a clean no-op', async () => {
+      process.env.EMAIL_ENABLED = 'false';
+      delete process.env.SES_FROM_EMAIL;
+      jest.resetModules();
+      const mod = await import('../../../../jobs/metadata-no-match-digest/email');
+
+      await expect(mod.sendDigestEmail('jake@wxyc.org', content)).resolves.toBe(false);
       expect(mockSend).not.toHaveBeenCalled();
     });
 
