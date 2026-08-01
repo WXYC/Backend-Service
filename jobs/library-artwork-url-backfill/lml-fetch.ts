@@ -18,13 +18,17 @@
  * `artwork_url` is never overwritten with a false Discogs match (the
  * Natanya-record complaint this epic exists to fix).
  *
- * No `caller` label is passed. `library-artwork-url-backfill` is not yet
- * registered in `shared/lml-client/src/policy.ts`'s `ALL_LML_CALLERS`
- * (BS#1826) — an absent/unregistered caller is `policyForCaller`'s
- * documented safe no-op, so this call keeps the client's 30s `TIMEOUT_MS`
- * default, matching this job's pre-migration behavior. Registering a
- * caller label (and picking up class-5 batch/backfill budgets) is a
- * separate follow-up if this job's call volume ever needs it.
+ * BS#1910: `caller: 'library-artwork-url-backfill'` is now threaded through
+ * — registered as class 5 (batch/backfill enrichment) in
+ * `shared/lml-client/src/policy.ts`'s `ALL_LML_CALLERS`. This closes the D4
+ * gate library-metadata-lookup's `/lookup` location-union feature depends
+ * on (`plans/location-union-transparent-results.md`): LML skips its
+ * recall-index probe for callers it sees as low-priority
+ * (`X-Caller-Class=5`), and this job's traffic was previously invisible to
+ * that check. Registering the label also picks up the class-5
+ * timeout/budget defaults (29s timeout / 28s soft budget) in place of the
+ * bare client default (30s, no budget header) — an intended consequence of
+ * classification, not a regression, for a fire-and-forget one-shot backfill.
  */
 
 import { lookupMetadata as sharedLookupMetadata, type GatedLookupResponse } from '@wxyc/lml-client';
@@ -33,4 +37,5 @@ export const lookupMetadata = (
   artist: string,
   album?: string,
   opts?: { discogsUnavailable?: boolean }
-): Promise<GatedLookupResponse> => sharedLookupMetadata(artist, album, undefined, opts);
+): Promise<GatedLookupResponse> =>
+  sharedLookupMetadata(artist, album, undefined, { ...opts, caller: 'library-artwork-url-backfill' });
