@@ -40,6 +40,7 @@ The breaker trips on LML's Discogs API work, driven by LML's HTTP endpoints — 
 - `flowsheet-etl`, `library-etl`, `rotation-etl` (`*/30 * * * *`, fire at `:00` and `:30` every hour) — none depend on `@wxyc/lml-client`; `rotation-etl`'s `discogs` references are legacy-dump column names, not API calls. Safe to share a minute with them.
 - `concerts-artist-resolver` (05:15) — pure-SQL strict/alias resolver, no LML. (`concerts-artist-lml-resolver` at 05:35 is the LML-touching one.)
 - `concerts-similar-artists-enrichment` (05:55, hits semantic-index not LML), `venue-events-scraper`, `triangle-shows-etl`, `album-reviews-etl`, `legacy-mirror-reconcile` — non-LML.
+- `metadata-no-match-digest` (`07 15 * * *` UTC, daily) — reads `flowsheet`/`shows`/`cronjob_runs` directly and sends via SES; no `@wxyc/lml-client` dependency, cannot trip the breaker. Its `:07` past 15:00 UTC slot was picked only to avoid the `:00` slot shared by the `*/30` ETL trio + hourly `artist-identity-etl`, a host-load courtesy unrelated to this policy.
 
 ## The hourly safety net (BS#895)
 

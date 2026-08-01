@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/metadata-no-match-digest",
+  "cron-schedule": "07 15 * * *",
+  "version": "1.0.0",
+  "description": "Daily EC2-cron digest: reads the cronjob_runs watermark, queries flowsheet for rows that flipped to metadata_status='enriched_no_match' since the last run (filtered/sorted on updated_at, never metadata_attempt_at -- the live CDC enrichment worker deliberately leaves that NULL on no-match rows), and emails a digest to DIGEST_RECIPIENT_EMAIL: catalog/rotation-linked misses listed in full, freeform misses aggregated by artist, each line with a synthesized Discogs search URL. Zero misses sends no email but still advances the watermark. Read-only against flowsheet; no schema migration.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_metadata_no_match_digest:ci -f ../../Dockerfile.metadata-no-match-digest ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-ses": "^3.1096.0",
+    "@sentry/node": "^10.68.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
