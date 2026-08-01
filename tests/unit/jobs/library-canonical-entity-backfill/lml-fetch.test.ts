@@ -1,5 +1,6 @@
 /**
- * Unit tests for library-canonical-entity-backfill lml-fetch.ts (BS#1910).
+ * Unit tests for library-canonical-entity-backfill lml-fetch.ts (BS#1910,
+ * limiter threading BS#1911 review).
  *
  * Pins the post-migration thin-wrapper contract, replacing the pre-BS#1910
  * raw-`fetch()` behavior:
@@ -12,7 +13,11 @@
  *   3. `timeoutMs: 30000` is passed explicitly, preserving this job's
  *      pre-migration per-call abort budget exactly (see this module's own
  *      docstring for why 30s, not the class-5 default of 29s).
- *   4. The module never touches the global `fetch` directly — the raw
+ *   4. Every call also carries this job's own dedicated `defaultLmlLimiter`
+ *      (`./lml-limiter.js`) — per the class-5 convention in
+ *      `shared/lml-client/src/policy.ts`, a class-5 caller must never ride
+ *      the shared process-wide `defaultLimiter`.
+ *   5. The module never touches the global `fetch` directly — the raw
  *      `fetch()` this file used to hand-roll is gone.
  */
 import { jest } from '@jest/globals';
@@ -27,36 +32,55 @@ afterEach(() => {
 
 const loadModule = async (
   mockLookup: jest.Mock
-): Promise<typeof import('../../../../jobs/library-canonical-entity-backfill/lml-fetch.js')> => {
+): Promise<{
+  lookupMetadata: typeof import('../../../../jobs/library-canonical-entity-backfill/lml-fetch.js').lookupMetadata;
+  limiterMock: { run: jest.Mock };
+}> => {
+  // Mock the local limiter module — we only care about the args passed to
+  // sharedLookupMetadata. Avoids needing to fully stub all of
+  // @wxyc/lml-client's exports (Semaphore, TokenBucket, createLmlLimiter)
+  // that lml-limiter.ts pulls in at module-load. Capture the mock object
+  // itself (not just its shape) so tests can assert the exact same
+  // reference was threaded through as `options.limiter`.
+  const limiterMock = { run: jest.fn() };
+  jest.doMock('../../../../jobs/library-canonical-entity-backfill/lml-limiter.js', () => ({
+    defaultLmlLimiter: limiterMock,
+  }));
   jest.doMock('@wxyc/lml-client', () => ({
     lookupMetadata: mockLookup,
   }));
-  return import('../../../../jobs/library-canonical-entity-backfill/lml-fetch.js');
+  const mod = await import('../../../../jobs/library-canonical-entity-backfill/lml-fetch.js');
+  return { lookupMetadata: mod.lookupMetadata, limiterMock };
 };
 
 describe('jobs/library-canonical-entity-backfill/lml-fetch', () => {
-  it('delegates to @wxyc/lml-client.lookupMetadata with artist/album, the registered caller, and timeoutMs=30000', async () => {
+  it('delegates to @wxyc/lml-client.lookupMetadata with artist/album, the registered caller, timeoutMs=30000, and the dedicated limiter', async () => {
     const mockLookup = jest.fn().mockResolvedValue({ results: [], search_type: 'none' });
 
-    const { lookupMetadata } = await loadModule(mockLookup);
+    const { lookupMetadata, limiterMock } = await loadModule(mockLookup);
     await lookupMetadata('Juana Molina', 'DOGA');
 
     expect(mockLookup).toHaveBeenCalledTimes(1);
+    // Exact-object pin (not expect.any(Object)/toHaveProperty): a stray
+    // extra option (e.g. a leaked discogsUnavailable) would pass unnoticed
+    // under the looser assertions this replaces.
     expect(mockLookup).toHaveBeenCalledWith('Juana Molina', 'DOGA', undefined, {
       caller: 'library-canonical-entity-backfill',
       timeoutMs: 30000,
+      limiter: limiterMock,
     });
   });
 
   it('forwards album omission (album-less lookups still call through)', async () => {
     const mockLookup = jest.fn().mockResolvedValue({ results: [], search_type: 'none' });
 
-    const { lookupMetadata } = await loadModule(mockLookup);
+    const { lookupMetadata, limiterMock } = await loadModule(mockLookup);
     await lookupMetadata('Jessica Pratt');
 
     expect(mockLookup).toHaveBeenCalledWith('Jessica Pratt', undefined, undefined, {
       caller: 'library-canonical-entity-backfill',
       timeoutMs: 30000,
+      limiter: limiterMock,
     });
   });
 

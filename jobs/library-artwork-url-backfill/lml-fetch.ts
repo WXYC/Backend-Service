@@ -25,10 +25,23 @@
  * on (`plans/location-union-transparent-results.md`): LML skips its
  * recall-index probe for callers it sees as low-priority
  * (`X-Caller-Class=5`), and this job's traffic was previously invisible to
- * that check. Registering the label also picks up the class-5
- * timeout/budget defaults (29s timeout / 28s soft budget) in place of the
- * bare client default (30s, no budget header) — an intended consequence of
- * classification, not a regression, for a fire-and-forget one-shot backfill.
+ * that check. Registering the label also picks up the class-5 defaults — a
+ * 29s client timeout plus an `X-Caller-Budget-Ms: 28000` header — in place
+ * of the bare client default (30s, no budget header). The header's real
+ * effect is not "28s soft budget": LML clamps the effective search budget to
+ * `min(header − 200ms, LML_SEARCH_BUDGET_MS)`, and prod's
+ * `LML_SEARCH_BUDGET_MS` default is 4000ms, so this job's empty-results
+ * lookups now cut off around ~4s instead of grinding on to LML's headerless
+ * hard cap (`LML_SEARCH_HARD_TIMEOUT_MS`, default 25000ms). Still an
+ * intended consequence of classification, not a regression, for a
+ * fire-and-forget one-shot backfill. Unlike the canonical-entity sibling,
+ * this job deliberately stays on the shared client's process-wide
+ * `defaultLimiter`: it runs as its own container with a strictly-sequential
+ * orchestrator, so the limiter is process-local (no interactive contention
+ * is possible), a shed resolves to an unstamped row that the next sweep
+ * retries, and swapping limiters would change long-standing runtime
+ * behavior for no benefit — the class-5 dedicated-limiter convention
+ * question is BS#1914's to settle fleet-wide.
  */
 
 import { lookupMetadata as sharedLookupMetadata, type GatedLookupResponse } from '@wxyc/lml-client';
