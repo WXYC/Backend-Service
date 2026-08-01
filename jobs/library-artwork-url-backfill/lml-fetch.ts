@@ -34,21 +34,25 @@
  * lookups now cut off around ~4s instead of grinding on to LML's headerless
  * hard cap (`LML_SEARCH_HARD_TIMEOUT_MS`, default 25000ms). Still an
  * intended consequence of classification, not a regression, for a
- * fire-and-forget one-shot backfill. Unlike the canonical-entity sibling,
- * this job deliberately stays on the shared client's process-wide
- * `defaultLimiter`: it runs as its own container with a strictly-sequential
- * orchestrator, so the limiter is process-local (no interactive contention
- * is possible), a shed resolves to an unstamped row that the next sweep
- * retries, and swapping limiters would change long-standing runtime
- * behavior for no benefit — the class-5 dedicated-limiter convention
- * question is BS#1914's to settle fleet-wide.
+ * fire-and-forget one-shot backfill. This job now passes its own dedicated
+ * limiter from `./lml-limiter.js`, per the class-5 convention in
+ * `shared/lml-client/src/policy.ts` (a class-5 caller MUST supply its own
+ * dedicated limiter, never the shared process-wide `defaultLimiter`), sized
+ * 1-concurrent/50-per-min to preserve the pacing of the `defaultLimiter` it
+ * replaced — see that file for the rationale.
  */
 
 import { lookupMetadata as sharedLookupMetadata, type GatedLookupResponse } from '@wxyc/lml-client';
+
+import { defaultLmlLimiter } from './lml-limiter.js';
 
 export const lookupMetadata = (
   artist: string,
   album?: string,
   opts?: { discogsUnavailable?: boolean }
 ): Promise<GatedLookupResponse> =>
-  sharedLookupMetadata(artist, album, undefined, { ...opts, caller: 'library-artwork-url-backfill' });
+  sharedLookupMetadata(artist, album, undefined, {
+    ...opts,
+    caller: 'library-artwork-url-backfill',
+    limiter: defaultLmlLimiter,
+  });
