@@ -114,13 +114,20 @@ export function inferIncomingStreamingStatus(
  *   2. `incomingStatus === undefined` → the service was not consulted (or
  *      its verdict was genuinely unknown) this round; return `current`
  *      unchanged. Never invent a verdict LML didn't assert.
- *   3. `'verified'` → adopt the incoming url and status.
- *   4. `'absent'` → terminal; url forced null regardless of any stray
- *      incoming url (LML's contract pairs `absent` with a null url, but the
- *      guard is defensive). Negative-cached: `precheck.ts` never re-asks an
- *      `absent` field — the exact per-play amplifier BS#1747 killed.
- *   5. `'unresolved'` → transient; status flips to `'unresolved'`, url
- *      carries forward from `current` (never fabricated — a non-verified
+ *   3. incoming `'verified'` → adopt the incoming url and status. This is the
+ *      one transition allowed to supersede a prior terminal `absent` (a
+ *      release that finally appeared on the service) — checked ahead of rule
+ *      4 so a genuine positive always wins.
+ *   4. `current.status === 'absent'` → terminal, return `current` unchanged.
+ *      A negative-cached field is NEVER downgraded by a later
+ *      `unresolved`/`absent` flap: that would resurrect it for re-ask
+ *      (`precheck.ts` selects on `unresolved`), the exact per-play amplifier
+ *      BS#1747/#1089 killed. Only rule 3's genuine `verified` may supersede it.
+ *   5. incoming `'absent'` → adopt terminal `absent`; url forced null
+ *      regardless of any stray incoming url (LML's contract pairs `absent`
+ *      with a null url, but the guard is defensive).
+ *   6. incoming `'unresolved'` → transient; status flips to `'unresolved'`,
+ *      url carries forward from `current` (never fabricated — a non-verified
  *      service carries no url by LML's contract).
  */
 export function mergeStreamingField(
@@ -131,6 +138,7 @@ export function mergeStreamingField(
   if (current.status === 'verified') return current;
   if (incomingStatus === undefined) return current;
   if (incomingStatus === 'verified') return { status: 'verified', url: incomingUrl ?? null };
+  if (current.status === 'absent') return current;
   if (incomingStatus === 'absent') return { status: 'absent', url: null };
   return { status: 'unresolved', url: current.url };
 }
