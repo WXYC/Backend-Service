@@ -265,9 +265,15 @@ function classDefaults(cls: LmlCallerClass): { timeoutMs: number; budgetMs?: num
     case 5: {
       const timeoutMs = envInt('LML_CLASS5_TIMEOUT_MS', 29000);
       // Codebase convention: budgetMs ≈ timeoutMs − 1000 (plan line 27) so
-      // LML's soft cutoff fires before the socket aborts. May come out <= 0
-      // for a very low `LML_CLASS5_TIMEOUT_MS` override — `sanitizeBudgetMs`
-      // (applied to every table entry in `buildPolicy`) catches that.
+      // LML's soft cutoff fires before the socket aborts.
+      // NB: that framing is misleading — LML clamps the effective search
+      // budget to min(header − 200ms, LML_SEARCH_BUDGET_MS) (prod default
+      // 4000), and the header's presence activates LML's empty-state
+      // cutoff, so class-5 callers really get a ~4s cutoff, not ~28s. See
+      // jobs/library-canonical-entity-backfill/lml-fetch.ts and BS#1914
+      // (fleet-wide correction). May come out <= 0 for a very low
+      // `LML_CLASS5_TIMEOUT_MS` override — `sanitizeBudgetMs` (applied to
+      // every table entry in `buildPolicy`) catches that.
       return { timeoutMs, budgetMs: timeoutMs - 1000, limiter: 'none' };
     }
   }
