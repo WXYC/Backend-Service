@@ -249,6 +249,21 @@ export const album_metadata = {
   soundcloud_url: 'soundcloud_url',
   artist_bio: 'artist_bio',
   artist_wikipedia_url: 'artist_wikipedia_url',
+  discogs_artist_id: 'discogs_artist_id',
+  label: 'label',
+  full_release_date: 'full_release_date',
+  genres: 'genres',
+  styles: 'styles',
+  tracklist: 'tracklist',
+  artist_image_url: 'artist_image_url',
+  bio_tokens: 'bio_tokens',
+  // BS#1915: per-service streaming resolution status + shared re-ask
+  // attempt counter — see shared/database/src/schema.ts and
+  // apps/enrichment-worker/enrich.ts (mergeStreamingField).
+  spotify_status: 'spotify_status',
+  apple_music_status: 'apple_music_status',
+  bandcamp_status: 'bandcamp_status',
+  streaming_reask_attempts: 'streaming_reask_attempts',
   updated_at: 'updated_at',
 };
 export const artist_metadata = {

@@ -40,12 +40,269 @@
  * (BS#1184 / BS#1192: shared `synthesizeSearchUrls` omits Spotify; the
  * inline version here persists a synthesized URL). Pinned by parity test:
  *   - tests/unit/apps/enrichment-worker/synthesize-search-urls-parity.test.ts (BS#889 / BS#1189)
+ *
+ * BS#1915 (bounded self-heal of unresolved streaming links). The linked-match
+ * arm now reads the album's PRIOR persisted spotify/apple_music/bandcamp
+ * status+url before writing, and merges each field with the fresh LML
+ * verdict via `mergeStreamingField` (never downgrading an already-`verified`
+ * field, forcing `absent` fields' url to null and terminal, and leaving
+ * `unresolved` fields transient/retry-eligible). `streaming_reask_attempts`
+ * — one shared per-album counter, not per-service, since a single LML
+ * re-ask resolves all three services' verdicts at once — increments ONLY on
+ * the `onConflictDoUpdate` branch (a genuine re-ask against an EXISTING
+ * row); a fresh album's first-ever write leaves the column at its schema
+ * DEFAULT 0, because the first ask is not a re-ask. Migration 0135 (schema)
+ * carries the full design rationale; `precheck.ts` is the read side that
+ * gates further re-asks at `STREAMING_REASK_ATTEMPT_CAP`.
  */
 
 import { and, eq, sql } from 'drizzle-orm';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
-import type { DiscogsMatchResult, LookupResponse } from '@wxyc/lml-client';
+import type { DiscogsMatchResult, LookupResponse, StreamingResolutionStatus } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
+
+/**
+ * Bound on `album_metadata.streaming_reask_attempts` (BS#1915). Once an
+ * album has been re-asked this many times with a field still `unresolved`,
+ * `precheck.ts` stops treating it as re-ask-eligible — the "no unbounded
+ * re-ask loop" half of the #1747 amplifier guard. A named, tunable constant
+ * (not env-derived, mirroring the codebase's per-caller hardcoded-override
+ * convention in `shared/lml-client/src/policy.ts` for values with no
+ * expected operational need to tune live) so precheck.ts, enrich.ts, and
+ * the streaming-reask sweep can't drift against three independent copies.
+ */
+export const STREAMING_REASK_ATTEMPT_CAP = 3;
+
+/** One persisted streaming-service field's state: its resolution verdict (if any) and its url (if verified). */
+export interface StreamingFieldState {
+  status: StreamingResolutionStatus | null;
+  url: string | null;
+}
+
+/**
+ * Infer the effective incoming per-service verdict for one streaming field
+ * on a fresh LML response, combining LML#1053's explicit `streaming_status`
+ * (when present) with the legacy url-presence signal.
+ *
+ * Explicit status always wins. A bare non-null url with NO explicit status
+ * is inferred `'verified'` — a url existing IS the verification, and this
+ * keeps the merge backward compatible with LML responses that predate the
+ * LML#1053 producer rollout (or a path that resolves a url without ever
+ * populating `streaming_status`), which is exactly today's `matchResponse`
+ * shape in the existing test suite. No url and no explicit status is
+ * genuinely unknown — returns `undefined` rather than inventing a verdict
+ * LML never actually asserted (an `unresolved` or `absent` guess here would
+ * corrupt the merge's terminal/negative-cache guarantees).
+ */
+export function inferIncomingStreamingStatus(
+  explicitStatus: StreamingResolutionStatus | undefined,
+  url: string | null | undefined
+): StreamingResolutionStatus | undefined {
+  if (explicitStatus) return explicitStatus;
+  return url ? 'verified' : undefined;
+}
+
+/**
+ * Merge one persisted streaming-service field with a fresh incoming verdict
+ * (already combined via `inferIncomingStreamingStatus`).
+ *
+ * Rules, in priority order:
+ *   1. `current.status === 'verified'` → return `current` unchanged. A
+ *      verified URL is NEVER overwritten — not by a fresh 'verified' (which
+ *      would carry the same URL anyway), and certainly not by a later
+ *      'unresolved'/'absent' flap from a re-ask.
+ *   2. `incomingStatus === undefined` → the service was not consulted (or
+ *      its verdict was genuinely unknown) this round; return `current`
+ *      unchanged. Never invent a verdict LML didn't assert.
+ *   3. `'verified'` → adopt the incoming url and status.
+ *   4. `'absent'` → terminal; url forced null regardless of any stray
+ *      incoming url (LML's contract pairs `absent` with a null url, but the
+ *      guard is defensive). Negative-cached: `precheck.ts` never re-asks an
+ *      `absent` field — the exact per-play amplifier BS#1747 killed.
+ *   5. `'unresolved'` → transient; status flips to `'unresolved'`, url
+ *      carries forward from `current` (never fabricated — a non-verified
+ *      service carries no url by LML's contract).
+ */
+export function mergeStreamingField(
+  current: StreamingFieldState,
+  incomingStatus: StreamingResolutionStatus | undefined,
+  incomingUrl: string | null | undefined
+): StreamingFieldState {
+  if (current.status === 'verified') return current;
+  if (incomingStatus === undefined) return current;
+  if (incomingStatus === 'verified') return { status: 'verified', url: incomingUrl ?? null };
+  if (incomingStatus === 'absent') return { status: 'absent', url: null };
+  return { status: 'unresolved', url: current.url };
+}
+
+/**
+ * Read the album's prior persisted per-service streaming state before a
+ * (re-)write. Returns all-null state for an album with no `album_metadata`
+ * row yet (a fresh first-ever match) — `mergeStreamingField` treats that
+ * identically to a row whose columns are all still NULL.
+ */
+async function selectPriorStreamingState(albumId: number): Promise<{
+  spotify: StreamingFieldState;
+  apple_music: StreamingFieldState;
+  bandcamp: StreamingFieldState;
+}> {
+  const rows = await db
+    .select({
+      spotify_status: album_metadata.spotify_status,
+      spotify_url: album_metadata.spotify_url,
+      apple_music_status: album_metadata.apple_music_status,
+      apple_music_url: album_metadata.apple_music_url,
+      bandcamp_status: album_metadata.bandcamp_status,
+      bandcamp_url: album_metadata.bandcamp_url,
+    })
+    .from(album_metadata)
+    .where(eq(album_metadata.album_id, albumId))
+    .limit(1);
+  const prior = rows[0] as
+    | {
+        spotify_status: string | null;
+        spotify_url: string | null;
+        apple_music_status: string | null;
+        apple_music_url: string | null;
+        bandcamp_status: string | null;
+        bandcamp_url: string | null;
+      }
+    | undefined;
+  return {
+    spotify: {
+      status: (prior?.spotify_status ?? null) as StreamingResolutionStatus | null,
+      url: prior?.spotify_url ?? null,
+    },
+    apple_music: {
+      status: (prior?.apple_music_status ?? null) as StreamingResolutionStatus | null,
+      url: prior?.apple_music_url ?? null,
+    },
+    bandcamp: {
+      status: (prior?.bandcamp_status ?? null) as StreamingResolutionStatus | null,
+      url: prior?.bandcamp_url ?? null,
+    },
+  };
+}
+
+/**
+ * UPSERT a matched album's full metadata payload into `album_metadata`,
+ * merging the three streaming-verdict fields against the album's prior
+ * state (BS#1915 — see `mergeStreamingField` / `inferIncomingStreamingStatus`
+ * above) and bumping the shared `streaming_reask_attempts` counter on a
+ * genuine re-ask (the `onConflictDoUpdate` branch, which fires only when a
+ * row already existed for this album).
+ *
+ * Extracted from `finalizeRow`'s linked-match arm so BOTH callers share one
+ * write path: the live CDC handler (via `finalizeRow`, which also owns the
+ * flowsheet-row-scoped composer write) and the hourly streaming-reask sweep
+ * (`streaming-reask.ts`), which has no flowsheet row to finalize — it
+ * operates directly on `album_metadata` for an already-terminal album.
+ */
+export async function upsertMatchedAlbumMetadata(
+  albumId: number,
+  artwork: DiscogsMatchResult,
+  searchUrls: { spotify_url: string; youtube_music_url: string; bandcamp_url: string; soundcloud_url: string }
+): Promise<void> {
+  const prior = await selectPriorStreamingState(albumId);
+  const spotify = mergeStreamingField(
+    prior.spotify,
+    inferIncomingStreamingStatus(artwork.streaming_status?.spotify, artwork.spotify_url),
+    artwork.spotify_url
+  );
+  const appleMusic = mergeStreamingField(
+    prior.apple_music,
+    inferIncomingStreamingStatus(artwork.streaming_status?.apple_music, artwork.apple_music_url),
+    artwork.apple_music_url
+  );
+  const bandcamp = mergeStreamingField(
+    prior.bandcamp,
+    inferIncomingStreamingStatus(artwork.streaming_status?.bandcamp, artwork.bandcamp_url),
+    artwork.bandcamp_url
+  );
+
+  // The album_metadata UPSERT is idempotent (same album_id → same row) and
+  // guarded by `updated_at < NOW()` so a concurrent stale write (e.g. a
+  // delayed drift-repair backfill) can't overwrite a fresher enrichment.
+  const payload = {
+    artwork_url: filterSpacerGif(artwork.artwork_url),
+    discogs_url: artwork.release_url ?? null,
+    // Discogs returns 0 as "year unknown"; coerce to null so iOS doesn't
+    // render literal "0". Mirrors metadata.service.ts (#1002).
+    release_year: artwork.release_year || null,
+    // A verified streaming URL wins outright; anything else (absent /
+    // unresolved / never-consulted) falls back to the synthesized search
+    // URL for Spotify and Bandcamp — unchanged from pre-#1915 behavior, and
+    // never a downgrade of a prior verified URL (merged above). Apple Music
+    // has NO fallback — null is load-bearing "no verified iTunes match"
+    // (BS#1192), now disambiguated by `apple_music_status` instead of
+    // silently freezing a transient null (BS#1915 — the whole point of
+    // this ticket).
+    spotify_url: spotify.status === 'verified' ? spotify.url : searchUrls.spotify_url,
+    spotify_status: spotify.status,
+    apple_music_url: appleMusic.url,
+    apple_music_status: appleMusic.status,
+    youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url,
+    bandcamp_url: bandcamp.status === 'verified' ? bandcamp.url : searchUrls.bandcamp_url,
+    bandcamp_status: bandcamp.status,
+    soundcloud_url: artwork.soundcloud_url ?? searchUrls.soundcloud_url,
+    artist_bio: artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null,
+    artist_wikipedia_url: artwork.wikipedia_url ?? null,
+    // LML-only enrichment fields (BS#1336). Present on `artwork` only
+    // because handler.ts now sets `extended: true`; without it these would
+    // all write null. Persisting them lets the BS#1331 cache-first read
+    // path emit the artist+release subtree on a hit instead of shedding
+    // it. `profile_tokens` maps to the `bio_tokens` column (iOS's
+    // `bioTokens`). No cleanup/synthesis here — raw passthroughs of what
+    // LML resolved for the top-1 release match; the read side
+    // (`buildLocalMetadataResponse`) projects + filters to match the
+    // cold-fallthrough wire shape.
+    discogs_artist_id: artwork.discogs_artist_id ?? null,
+    label: artwork.label ?? null,
+    full_release_date: artwork.full_release_date ?? null,
+    genres: artwork.genres ?? null,
+    styles: artwork.styles ?? null,
+    tracklist: artwork.tracklist ?? null,
+    artist_image_url: artwork.artist_image_url ?? null,
+    bio_tokens: artwork.profile_tokens ?? null,
+  };
+  await db
+    .insert(album_metadata)
+    .values({ album_id: albumId, ...payload, updated_at: sql`NOW()` })
+    .onConflictDoUpdate({
+      target: album_metadata.album_id,
+      set: {
+        ...payload,
+        // BS#1915: bump the shared per-album re-ask counter ONLY on a
+        // genuine re-ask — this conflict branch fires exactly when a row
+        // already existed for this album. A fresh album's first-ever
+        // INSERT above leaves the column at its schema DEFAULT 0; the
+        // first ask is not a re-ask.
+        streaming_reask_attempts: sql`${album_metadata.streaming_reask_attempts} + 1`,
+        updated_at: sql`NOW()`,
+      },
+      setWhere: sql`${album_metadata.updated_at} < NOW()`,
+    });
+}
+
+/**
+ * Bump the shared per-album `streaming_reask_attempts` counter with no
+ * other write — the hourly streaming-reask sweep's outcome when LML
+ * responds but returns no artwork at all for a candidate that previously
+ * matched (a rare Discogs-side flap, not the common case). Spending an
+ * attempt without a fresh verdict still counts toward the bound: an album
+ * that keeps failing to re-match must still eventually stop being retried.
+ * Does NOT touch `updated_at`'s `setWhere` guard semantics — this is a
+ * plain UPDATE, not the insert/upsert `finalizeRow` path uses.
+ */
+export async function bumpStreamingReaskAttempts(albumId: number): Promise<void> {
+  await db
+    .update(album_metadata)
+    .set({
+      streaming_reask_attempts: sql`${album_metadata.streaming_reask_attempts} + 1`,
+      updated_at: sql`NOW()`,
+    })
+    .where(eq(album_metadata.album_id, albumId));
+}
 
 export type EnrichRow = {
   id: number;
@@ -181,53 +438,12 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
 
   if (artwork) {
     if (row.album_id !== null) {
-      // Linked + match: 10-col payload lands in album_metadata; flowsheet
-      // UPDATE only flips status. The album_metadata UPSERT is idempotent
-      // (same album_id → same row) and guarded by `updated_at < NOW()` so
-      // a concurrent stale write (e.g. delayed drift-repair backfill)
-      // can't overwrite a fresher enrichment.
-      const payload = {
-        artwork_url: filterSpacerGif(artwork.artwork_url),
-        discogs_url: artwork.release_url ?? null,
-        // Discogs returns 0 as "year unknown"; coerce to null so iOS doesn't
-        // render literal "0". Mirrors metadata.service.ts (#1002).
-        release_year: artwork.release_year || null,
-        // Prefer LML-supplied streaming URLs; fall back to synthesized.
-        // Apple Music has no fallback — null is load-bearing "no verified
-        // iTunes match" signal (BS#1192).
-        spotify_url: artwork.spotify_url ?? searchUrls.spotify_url,
-        apple_music_url: artwork.apple_music_url ?? null,
-        youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url,
-        bandcamp_url: artwork.bandcamp_url ?? searchUrls.bandcamp_url,
-        soundcloud_url: artwork.soundcloud_url ?? searchUrls.soundcloud_url,
-        artist_bio: artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null,
-        artist_wikipedia_url: artwork.wikipedia_url ?? null,
-        // LML-only enrichment fields (BS#1336). Present on `artwork` only
-        // because handler.ts now sets `extended: true`; without it these
-        // would all write null. Persisting them lets the BS#1331 cache-first
-        // read path emit the artist+release subtree on a hit instead of
-        // shedding it. `profile_tokens` maps to the `bio_tokens` column
-        // (iOS's `bioTokens`). No cleanup/synthesis here — raw passthroughs
-        // of what LML resolved for the top-1 release match; the read side
-        // (`buildLocalMetadataResponse`) projects + filters to match the
-        // cold-fallthrough wire shape.
-        discogs_artist_id: artwork.discogs_artist_id ?? null,
-        label: artwork.label ?? null,
-        full_release_date: artwork.full_release_date ?? null,
-        genres: artwork.genres ?? null,
-        styles: artwork.styles ?? null,
-        tracklist: artwork.tracklist ?? null,
-        artist_image_url: artwork.artist_image_url ?? null,
-        bio_tokens: artwork.profile_tokens ?? null,
-      };
-      await db
-        .insert(album_metadata)
-        .values({ album_id: row.album_id, ...payload, updated_at: sql`NOW()` })
-        .onConflictDoUpdate({
-          target: album_metadata.album_id,
-          set: { ...payload, updated_at: sql`NOW()` },
-          setWhere: sql`${album_metadata.updated_at} < NOW()`,
-        });
+      // Linked + match: the 10(+3 streaming-status +1 attempts)-col payload
+      // lands in album_metadata; flowsheet UPDATE only flips status. See
+      // `upsertMatchedAlbumMetadata` for the merge + UPSERT (BS#1915 also
+      // calls it directly from the hourly streaming-reask sweep, which has
+      // no flowsheet row to finalize).
+      await upsertMatchedAlbumMetadata(row.album_id, artwork, searchUrls);
       const updated = await db
         .update(flowsheet)
         // composer rides the flowsheet UPDATE, not the album_metadata UPSERT

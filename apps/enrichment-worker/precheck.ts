@@ -30,30 +30,62 @@
  * complete load-bearing set here. The four search-URL columns are
  * deliberately excluded: they are synthesized locally on every no-match and
  * so never distinguish a real match from a poisoned shell.
+ *
+ * BS#1915 (bounded self-heal of unresolved streaming links) layers a second
+ * gate on top: even with load-bearing artwork/discogs present, a row is NOT
+ * "done" while a streaming field (`spotify_status` / `apple_music_status` /
+ * `bandcamp_status`) is `'unresolved'` AND the album is still under
+ * `STREAMING_REASK_ATTEMPT_CAP` — that combination re-calls LML too, so a
+ * transient "couldn't check" null self-heals instead of freezing forever.
+ * `'absent'` stays terminal (never re-asked — preserves #1747's amplifier
+ * fix) and a NULL status (never-consulted) does not force a re-ask; only an
+ * explicit `'unresolved'` does. See `enrich.ts` for the merge logic that
+ * writes these columns and the shared per-album `streaming_reask_attempts`
+ * counter.
  */
 
-import { and, eq, isNotNull, or } from 'drizzle-orm';
+import { and, eq, isNotNull, or, sql } from 'drizzle-orm';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
 
-import { resolveComposer, type EnrichRow } from './enrich.js';
+import { resolveComposer, STREAMING_REASK_ATTEMPT_CAP, type EnrichRow } from './enrich.js';
 
 /**
  * True when the album already has a persisted, load-bearing Discogs match in
- * `album_metadata` — i.e. `artwork_url` OR `discogs_url` is non-null. False
- * when the row is missing, all-null, or a search-URL-only shell, so the
- * caller re-calls LML and the false no-match self-heals (BS#1089 guard).
+ * `album_metadata` (`artwork_url` OR `discogs_url` non-null) AND no
+ * streaming field is still bounded-re-ask-eligible (BS#1915 — see file
+ * header). False when the row is missing, all-null, a search-URL-only shell
+ * (BS#1089 guard), or carries an `'unresolved'` streaming field under the
+ * attempt cap, so the caller re-calls LML and the row self-heals.
  *
  * Only linked rows (flowsheet `album_id` non-null) have an `album_metadata`
  * row to consult; the caller gates on that before invoking this.
  */
 export async function hasLoadBearingAlbumMetadata(albumId: number): Promise<boolean> {
+  // COALESCE(..., false) is load-bearing, not decorative: SQL's
+  // three-valued logic makes `col = 'unresolved'` evaluate to NULL (not
+  // false) when `col` is NULL, so for the common case of all three status
+  // columns still NULL (never consulted), the un-coalesced expression would
+  // evaluate to NULL — and negating a NULL WHERE-clause term excludes the
+  // row, silently breaking the base BS#1747 skip for every plain
+  // load-bearing row. COALESCE pins the "nothing to re-ask" default to an
+  // explicit false before negating.
+  const needsStreamingReask = sql<boolean>`COALESCE(
+    ${album_metadata.streaming_reask_attempts} < ${STREAMING_REASK_ATTEMPT_CAP}
+    AND (
+      ${album_metadata.spotify_status} = 'unresolved'
+      OR ${album_metadata.apple_music_status} = 'unresolved'
+      OR ${album_metadata.bandcamp_status} = 'unresolved'
+    ),
+    false
+  )`;
   const rows = await db
     .select({ album_id: album_metadata.album_id })
     .from(album_metadata)
     .where(
       and(
         eq(album_metadata.album_id, albumId),
-        or(isNotNull(album_metadata.artwork_url), isNotNull(album_metadata.discogs_url))
+        or(isNotNull(album_metadata.artwork_url), isNotNull(album_metadata.discogs_url)),
+        sql`NOT ${needsStreamingReask}`
       )
     )
     .limit(1);
