@@ -758,6 +758,26 @@ describe('mergeStreamingField + inferIncomingStreamingStatus (BS#1915)', () => {
       });
     });
 
+    it('never downgrades a terminal absent field — a later unresolved/absent flap is ignored (BS#1747/#1089)', () => {
+      // Reachable when the album is pulled in to heal a SIBLING unresolved
+      // field: the whole row is re-merged, and if LML's fresh probe flaps the
+      // already-absent service to 'unresolved', the field must NOT be
+      // resurrected for re-ask (that is the negative-cache amplifier
+      // BS#1747/#1089 killed).
+      const current: StreamingFieldState = { status: 'absent', url: null };
+      expect(mergeStreamingField(current, asStatus('unresolved'), null)).toEqual(current);
+      expect(mergeStreamingField(current, asStatus('absent'), null)).toEqual(current);
+      expect(mergeStreamingField(current, undefined, undefined)).toEqual(current);
+    });
+
+    it('absent → verified: a genuine resolved url supersedes a prior absent (a release that finally appeared)', () => {
+      const current: StreamingFieldState = { status: 'absent', url: null };
+      expect(mergeStreamingField(current, asStatus('verified'), 'https://example.com/new')).toEqual({
+        status: 'verified',
+        url: 'https://example.com/new',
+      });
+    });
+
     it('unresolved: transient — status flips to unresolved; url carries forward from current, never fabricated', () => {
       expect(mergeStreamingField(FRESH, asStatus('unresolved'), null)).toEqual({ status: 'unresolved', url: null });
       const current: StreamingFieldState = { status: 'unresolved', url: null };

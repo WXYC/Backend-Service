@@ -43,6 +43,9 @@ function mergeStreamingField(current, incoming) {
   const incomingStatus = incoming ? incoming.status || (incoming.url ? 'verified' : undefined) : undefined;
   if (incomingStatus === undefined) return current;
   if (incomingStatus === 'verified') return { status: 'verified', url: incoming.url ?? null };
+  // Terminal `absent` is never downgraded by an `unresolved`/`absent` flap
+  // (BS#1747/#1089) — only the `verified` above may supersede it.
+  if (current.status === 'absent') return current;
   if (incomingStatus === 'absent') return { status: 'absent', url: null };
   return { status: 'unresolved', url: current.url };
 }
@@ -257,5 +260,38 @@ describe('enrichment-worker streaming self-heal — BS#1915 candidate query + wr
     expect(row.apple_music_status).toBe('verified');
     // bandcamp's prior 'unresolved' is preserved verbatim, not reset.
     expect(row.bandcamp_status).toBe('unresolved');
+  });
+
+  test('(e) TERMINAL under sibling heal: a terminal absent field is not resurrected when the row is re-merged to heal an unresolved sibling (BS#1747/#1089)', async () => {
+    const albumId = await insertLibraryAlbum(sql, 'absent-survives-sibling-heal');
+    insertedAlbumIds.push(albumId);
+    // spotify is terminal-absent; apple_music is the pending field that keeps
+    // the row a re-ask candidate. The whole row gets re-merged for apple's
+    // sake — spotify must not ride along back into 'unresolved'.
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, spotify_status, spotify_url, apple_music_status, streaming_reask_attempts, updated_at)
+      VALUES
+        (${albumId}, 'https://i.discogs.com/x.jpg', 'absent', NULL, 'unresolved', 0, NOW())
+    `;
+
+    expect(await findCandidateAlbumIds(sql, [albumId])).toEqual([albumId]);
+
+    // LML's fresh probe this round flaps the already-absent spotify to
+    // 'unresolved' while apple heals to verified.
+    await applyReaskVerdict(sql, albumId, {
+      spotify: { status: 'unresolved', url: null },
+      apple_music: { status: 'verified', url: 'https://music.apple.com/album/healed' },
+    });
+
+    const row = await readStreamingState(sql, albumId);
+    // The terminal absent is preserved — NOT downgraded to unresolved.
+    expect(row.spotify_status).toBe('absent');
+    expect(row.spotify_url).toBeNull();
+    expect(row.apple_music_status).toBe('verified');
+
+    // Row is fully resolved now (apple verified, spotify terminal-absent) —
+    // it drops out of candidacy rather than re-asking the resurrected spotify.
+    expect(await findCandidateAlbumIds(sql, [albumId])).toEqual([]);
   });
 });
