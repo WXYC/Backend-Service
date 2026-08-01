@@ -210,6 +210,13 @@ B-1.2 / BS#1911 review. Job-scoped limiter (not `BACKFILL_LML_*`) so this surfac
 - `LIBRARY_CANONICAL_ENTITY_BACKFILL_MAX_CONCURRENT` (default `1`) — Semaphore permits; matches `orchestrate.ts`'s strictly-sequential loop (one in-flight LML request at a time) — raising this without also changing the orchestrator's loop shape would just queue extra permits nothing will ever claim.
 - `LIBRARY_CANONICAL_ENTITY_BACKFILL_RATE_PER_MIN` (default `50`) — Token-bucket refill rate/capacity per minute. Deliberately above the sibling jobs' 20/min: this job drains the live `library.canonical_entity_id` retry pool (~34,520 rows on prod), and a full sweep at 20/min is ~29h versus ~11.5h at 50/min; rationale in `lml-limiter.ts`.
 
+### Library artwork-url backfill (`jobs/library-artwork-url-backfill`)
+
+BS#1911 review, third commit. Job-scoped limiter (not `BACKFILL_LML_*`) so this surface's accounting is independent of the other backfills'; read at module load by `lml-limiter.ts:createLmlLimiter`:
+
+- `LIBRARY_ARTWORK_URL_BACKFILL_MAX_CONCURRENT` (default `1`) — Semaphore permits; matches `orchestrate.ts`'s strictly-sequential loop (one in-flight LML request at a time) — raising this without also changing the orchestrator's loop shape would just queue extra permits nothing will ever claim.
+- `LIBRARY_ARTWORK_URL_BACKFILL_RATE_PER_MIN` (default `50`) — Token-bucket refill rate/capacity per minute. Set to match the shared `defaultLimiter` rate this job previously rode (not the sibling jobs' 20/min), so giving it a dedicated limiter is pacing-neutral; rationale in `lml-limiter.ts`.
+
 ### Rotation artist backfill (`jobs/rotation-artist-backfill`)
 
 Daily cron job for BS#1381. One BS call here = one batch of up to 50 `lml_identity_id`s; LML fans out internally to per-source release + artist Discogs calls, so this job has a fundamentally different timeout shape than the per-row backfill jobs above. Reuses `BACKFILL_LML_MAX_CONCURRENT` and `BACKFILL_LML_RATE_PER_MIN` (applied to **batch calls**, not Discogs egress), and adds:
