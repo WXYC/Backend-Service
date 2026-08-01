@@ -342,6 +342,27 @@ describe('lml.client', () => {
       expect(headerKeys).not.toContain('X-Caller-Reason');
     });
 
+    // BS#1910: closes the D4 prod-gate for LML's `/lookup` location-union
+    // feature — both jobs are registered as class 5 (batch/backfill) so LML
+    // can skip its recall-index probe for this traffic (see
+    // shared/lml-client/src/policy.ts's ALL_LML_CALLERS comment).
+    it.each(['library-artwork-url-backfill', 'library-canonical-entity-backfill'] as const)(
+      'forwards X-Caller-Class=5 for the registered class-5 caller (%s)',
+      async (caller) => {
+        mockFetch.mockResolvedValue({
+          ok: true,
+          json: () =>
+            Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+        } as unknown as globalThis.Response);
+
+        await lookupMetadata('Juana Molina', 'DOGA', undefined, { caller });
+
+        const init = mockFetch.mock.calls[0][1];
+        if (!init) throw new Error('mockFetch was not called with init args');
+        expect(init.headers).toMatchObject({ 'X-Caller-Class': '5', 'X-Caller-Reason': caller });
+      }
+    );
+
     it('projects lml.caller onto the Sentry span when caller is provided', async () => {
       mockFetch.mockResolvedValue({
         ok: true,

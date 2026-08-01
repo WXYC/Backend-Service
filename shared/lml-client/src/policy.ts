@@ -142,6 +142,19 @@ export const ALL_LML_CALLERS = [
   // (`jobs/library-discogs-unavailable-recheck/lml-limiter.ts`), never the
   // shared `defaultLimiter`.
   'library-discogs-unavailable-recheck',
+  // BS#1910: closes the D4 prod-gate for LML's `/lookup` location-union
+  // feature (library-metadata-lookup's
+  // `plans/location-union-transparent-results.md`) — LML skips its new
+  // recall-index probe only for callers it sees as low-priority
+  // (`X-Caller-Class=5`); both of these jobs already send real `/lookup`
+  // traffic and were previously invisible to that gate.
+  // `library-artwork-url-backfill` already called through
+  // `@wxyc/lml-client` (this registration was its own docstring's
+  // documented deferred follow-up); `library-canonical-entity-backfill`
+  // is migrated off a raw `fetch()` onto the shared client in the same PR
+  // so it can carry the label at all.
+  'library-artwork-url-backfill',
+  'library-canonical-entity-backfill',
 ] as const;
 
 export type LmlCaller = (typeof ALL_LML_CALLERS)[number];
@@ -183,6 +196,8 @@ const CALLER_CLASS: Record<LmlCaller, LmlCallerClass> = {
   'concerts-artist-lml-resolver': 5,
   'rotation-release-id-backfill': 5,
   'library-discogs-unavailable-recheck': 5,
+  'library-artwork-url-backfill': 5,
+  'library-canonical-entity-backfill': 5,
 };
 
 /**

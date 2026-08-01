@@ -1,27 +1,38 @@
 #Build stage
 FROM node:24-alpine AS builder
 
+ARG NPM_TOKEN
 WORKDIR /library-canonical-entity-backfill-builder
 
+COPY ./.npmrc ./
 COPY ./package.json ./package-lock.json ./
 COPY ./tsconfig.base.json ./
 COPY ./shared/database ./shared/database
+COPY ./shared/lml-client ./shared/lml-client
 COPY ./jobs/library-canonical-entity-backfill ./jobs/library-canonical-entity-backfill
 
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/library-canonical-entity-backfill
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/library-canonical-entity-backfill
 
 #Production stage
 FROM node:24-alpine AS prod
 
+ARG NPM_TOKEN
 WORKDIR /library-canonical-entity-backfill
 
+COPY ./.npmrc ./
 COPY ./package* ./
 COPY ./jobs/library-canonical-entity-backfill/package* ./jobs/library-canonical-entity-backfill/
 COPY ./shared/database/package* ./shared/database/
+COPY ./shared/lml-client/package* ./shared/lml-client/
 
-RUN npm install --omit=dev
+# `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
+# (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
+# .npmrc the prod stage's npm install 401s on @wxyc/shared. Mirrors the
+# pattern in Dockerfile.library-artwork-url-backfill / Dockerfile.backend.
+RUN npm install --omit=dev && rm -f .npmrc
 
 COPY --from=builder ./library-canonical-entity-backfill-builder/jobs/library-canonical-entity-backfill/dist ./jobs/library-canonical-entity-backfill/dist
 COPY --from=builder ./library-canonical-entity-backfill-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./library-canonical-entity-backfill-builder/shared/lml-client/dist ./shared/lml-client/dist
 
 CMD ["npm", "start", "--workspace=@wxyc/library-canonical-entity-backfill"]

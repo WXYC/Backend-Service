@@ -1,5 +1,5 @@
 /**
- * Unit tests for library-artwork-url-backfill lml-fetch.ts (BS#1282).
+ * Unit tests for library-artwork-url-backfill lml-fetch.ts (BS#1282, BS#1910).
  *
  * Pins the thin-wrapper contract:
  *   1. `lookupMetadata` delegates to `@wxyc/lml-client.lookupMetadata`,
@@ -12,6 +12,9 @@
  *      through.
  *   3. Omitting `opts` (the pre-migration call shape every existing test
  *      exercises) still works — `opts` is optional.
+ *   4. BS#1910: every call also carries `caller: 'library-artwork-url-backfill'`
+ *      — the registered class-5 label that closes the LML location-union
+ *      D4 gate (see `shared/lml-client/src/policy.ts`).
  */
 import { jest } from '@jest/globals';
 
@@ -33,14 +36,16 @@ const loadModule = async (
 };
 
 describe('jobs/library-artwork-url-backfill/lml-fetch', () => {
-  it('delegates to @wxyc/lml-client.lookupMetadata with artist/album and no opts', async () => {
+  it('delegates to @wxyc/lml-client.lookupMetadata with artist/album, no discogsUnavailable, and the registered caller', async () => {
     const mockLookup = jest.fn().mockResolvedValue({ results: [], search_type: 'none' });
 
     const { lookupMetadata } = await loadModule(mockLookup);
     await lookupMetadata('Juana Molina', 'DOGA');
 
     expect(mockLookup).toHaveBeenCalledTimes(1);
-    expect(mockLookup).toHaveBeenCalledWith('Juana Molina', 'DOGA', undefined, undefined);
+    expect(mockLookup).toHaveBeenCalledWith('Juana Molina', 'DOGA', undefined, {
+      caller: 'library-artwork-url-backfill',
+    });
   });
 
   it('forwards album omission (album-less lookups still call through)', async () => {
@@ -49,7 +54,9 @@ describe('jobs/library-artwork-url-backfill/lml-fetch', () => {
     const { lookupMetadata } = await loadModule(mockLookup);
     await lookupMetadata('Jessica Pratt');
 
-    expect(mockLookup).toHaveBeenCalledWith('Jessica Pratt', undefined, undefined, undefined);
+    expect(mockLookup).toHaveBeenCalledWith('Jessica Pratt', undefined, undefined, {
+      caller: 'library-artwork-url-backfill',
+    });
   });
 
   it('forwards { discogsUnavailable: true } through to the shared client (BS#1293 gate)', async () => {
@@ -62,7 +69,10 @@ describe('jobs/library-artwork-url-backfill/lml-fetch', () => {
     const { lookupMetadata } = await loadModule(mockLookup);
     const result = await lookupMetadata('Natanya', 'Live at the Cave', { discogsUnavailable: true });
 
-    expect(mockLookup).toHaveBeenCalledWith('Natanya', 'Live at the Cave', undefined, { discogsUnavailable: true });
+    expect(mockLookup).toHaveBeenCalledWith('Natanya', 'Live at the Cave', undefined, {
+      discogsUnavailable: true,
+      caller: 'library-artwork-url-backfill',
+    });
     expect(result).toEqual({ results: [], search_type: 'none', outcome: 'skipped_discogs_unavailable' });
   });
 
@@ -77,7 +87,18 @@ describe('jobs/library-artwork-url-backfill/lml-fetch', () => {
 
     expect(mockLookup).toHaveBeenCalledWith('Chuquimamani-Condori', 'Edits', undefined, {
       discogsUnavailable: false,
+      caller: 'library-artwork-url-backfill',
     });
+  });
+
+  it('always carries the registered class-5 caller label (BS#1910, closes the LML location-union D4 gate)', async () => {
+    const mockLookup = jest.fn().mockResolvedValue({ results: [], search_type: 'none' });
+
+    const { lookupMetadata } = await loadModule(mockLookup);
+    await lookupMetadata('Stereolab', 'Aluminum Tunes');
+
+    const [, , , opts] = mockLookup.mock.calls[0] as [unknown, unknown, unknown, { caller?: string }];
+    expect(opts?.caller).toBe('library-artwork-url-backfill');
   });
 
   it('resolves with whatever the shared client returns (pass-through, no local reshaping)', async () => {

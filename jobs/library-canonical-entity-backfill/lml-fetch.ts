@@ -1,78 +1,48 @@
 /**
- * Minimal LML lookup fetcher for the B-1.2 backfill.
+ * LML lookup fetcher for the library.canonical_entity_id backfill (B-1.2).
  *
- * Mirrors a subset of `apps/backend/services/lml/lml.client.ts`. We duplicate
- * rather than import because that file is part of the @wxyc/backend Express
- * app and depends on app-only modules; pulling it into a one-shot job would
- * couple their build graphs and force the job container to ship the entire
- * backend tree.
+ * BS#1910: migrated off a vendored `fetch()` straight to
+ * `${baseUrl()}/api/v1/lookup` onto `@wxyc/lml-client.lookupMetadata` — the
+ * shared HTTP + Sentry-instrumentation chokepoint every other backfill job
+ * already uses (mirrors `jobs/library-artwork-url-backfill/lml-fetch.ts`).
+ * The prior hand-rolled fetch could never carry a `caller` label, so it was
+ * invisible to the BS#1826 caller-classification policy and to LML's
+ * `X-Caller-Class` header (BS#1843) — exactly the D4 gap
+ * library-metadata-lookup's `/lookup` location-union feature depends on BS
+ * closing (`plans/location-union-transparent-results.md`): LML skips its
+ * recall-index probe for callers it sees as low-priority
+ * (`X-Caller-Class=5`), and this job's traffic was previously unclassified.
+ * Registering `library-canonical-entity-backfill` as class 5 in
+ * `shared/lml-client/src/policy.ts` closes that gap.
  *
- * The wrapper:
- *   - Reads LIBRARY_METADATA_URL from env (same convention as the backend
- *     client; supports a trailing /api/v1).
- *   - Aborts on a 5s per-call timeout. The throttle in `orchestrate.ts`
- *     keeps long timeout chains from compounding into LML.
- *   - Throws a plain Error on non-2xx, abort, and network failure. The
- *     orchestrator catches and counts as `error`, so the per-row error
- *     contract stays "bubble up = retry on next sweep."
+ * This is a transport swap, not a behavior change:
+ *   - `timeoutMs: 30000` is passed explicitly (rather than left to default
+ *     to the class-5 policy's 29s) so this job's per-call abort budget
+ *     stays byte-identical to its pre-migration value — this job
+ *     deliberately runs a longer timeout than the interactive-path default
+ *     because it processes long-tail rows that trigger Discogs/MusicBrainz
+ *     fallback chains, and `orchestrate.ts`'s `THROTTLE_MS=100` sequential
+ *     loop caps in-flight requests at one, so the longer per-call cap
+ *     doesn't risk piling up on LML.
+ *   - The bearer header (`LML_API_KEY`, when set) is applied identically by
+ *     the shared client's chokepoint.
+ *   - A thrown failure (timeout, non-2xx, network error) still surfaces as
+ *     a plain `Error` (`LmlClientError extends Error`) that
+ *     `orchestrate.ts`'s `processRow` catches and counts as `'error'`, so a
+ *     bad row still rolls forward to the next sweep unchanged — only the
+ *     thrown message text differs from the old vendored fetch's.
+ *   - The shared client additionally runs the JSON response through
+ *     `sanitizeLookupStreamingUrls` (BS#1710) before returning. This is a
+ *     no-op for this job: `resolve.ts`'s `resolveCanonicalEntity` only reads
+ *     `results[0].artwork.release_id` and `search_type`, never any
+ *     streaming-URL field.
  */
 
+import { lookupMetadata as sharedLookupMetadata } from '@wxyc/lml-client';
 import type { LmlLookupResponse } from './lml-types.js';
 
-// 30s, not the backend client's 5s. The backfill processes long-tail rows
-// LML hasn't cached, which trigger Discogs/MusicBrainz fallback chains that
-// routinely exceed 5s. The orchestrator's throttle (100ms between rows)
-// caps in-flight requests at one, so the longer per-call cap doesn't risk
-// piling up on LML; it just lets slow lookups complete instead of failing.
-const TIMEOUT_MS = 30000;
-
-const baseUrl = (): string => {
-  const url = process.env.LIBRARY_METADATA_URL;
-  if (!url) {
-    throw new Error('LIBRARY_METADATA_URL is not configured');
-  }
-  return url.replace(/\/api\/v1\/?$/, '').replace(/\/$/, '');
-};
-
-export const lookupMetadata = async (artist: string, album?: string): Promise<LmlLookupResponse> => {
-  // LML's /lookup contract requires `raw_message` even when artist/album are
-  // already structured. Synthesize "<artist> - <album>" — matches the shape
-  // the parser expects in LML's e2e fixtures.
-  const rawMessage = album ? `${artist} - ${album}` : artist;
-  const body: Record<string, string> = { artist, raw_message: rawMessage };
-  if (album) body.album = album;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
-  // LML now enforces auth in production (LML_REQUIRE_AUTH=true). Send the
-  // bearer header when LML_API_KEY is set; the backend's lml.client.ts
-  // does the same. Sending it before the flag flips is harmless.
-  const apiKey = process.env.LML_API_KEY;
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) {
-    headers.Authorization = `Bearer ${apiKey}`;
-  }
-
-  try {
-    const response = await fetch(`${baseUrl()}/api/v1/lookup`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`LML responded ${response.status} ${response.statusText}`);
-    }
-
-    return (await response.json()) as LmlLookupResponse;
-  } catch (error) {
-    if ((error as Error).name === 'AbortError') {
-      throw new Error('LML request timed out', { cause: error });
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-};
+export const lookupMetadata = (artist: string, album?: string): Promise<LmlLookupResponse> =>
+  sharedLookupMetadata(artist, album, undefined, {
+    caller: 'library-canonical-entity-backfill',
+    timeoutMs: 30000,
+  });
