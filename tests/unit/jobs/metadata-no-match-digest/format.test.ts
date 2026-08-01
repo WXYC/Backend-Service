@@ -265,4 +265,41 @@ describe('buildDigestEmail', () => {
     const digest = buildDigestEmail(rows, { since, runStart });
     expect(digest.text).toMatch(/Catalog\/rotation-linked[\s\S]*None/);
   });
+
+  it('escapes HTML-special characters in rendered labels so no raw markup reaches the body', () => {
+    const evil = makeRow(juanaMolinaLaParadoja, {
+      rotation_id: 7,
+      artist_name: 'A<b>&"z',
+      track_title: 'x',
+    });
+    const digest = buildDigestEmail([evil], { since, runStart });
+    expect(digest.html).toContain('A&lt;b&gt;&amp;&quot;z');
+    expect(digest.html).not.toContain('A<b>&"z');
+  });
+
+  it('caps Section A at sectionAMax and collapses the remainder to "…and N more catalog/rotation-linked"', () => {
+    const rows = Array.from({ length: 4 }, (_, i) =>
+      makeRow(juanaMolinaLaParadoja, { rotation_id: 100 + i, id: 600 + i })
+    );
+    const digest = buildDigestEmail(rows, { since, runStart, sectionAMax: 2 });
+    expect(digest.text).toContain('#600');
+    expect(digest.text).toContain('#601');
+    expect(digest.text).not.toContain('#602');
+    expect(digest.text).toMatch(/and 2 more catalog\/rotation-linked/);
+    expect(digest.html).toContain('and 2 more catalog/rotation-linked');
+  });
+
+  it('flags a row-capped (truncated) result set with a "+" total and a "capped" note', () => {
+    const rows = [makeRow(juanaMolinaLaParadoja, { rotation_id: 1 })];
+    const digest = buildDigestEmail(rows, { since, runStart, truncated: true });
+    expect(digest.text).toContain('1+ total');
+    expect(digest.text.toLowerCase()).toContain('capped');
+  });
+
+  it('does not flag truncation in the normal (untruncated) case', () => {
+    const rows = [makeRow(juanaMolinaLaParadoja, { rotation_id: 1 })];
+    const digest = buildDigestEmail(rows, { since, runStart });
+    expect(digest.text).toContain('1 total');
+    expect(digest.text.toLowerCase()).not.toContain('capped');
+  });
 });

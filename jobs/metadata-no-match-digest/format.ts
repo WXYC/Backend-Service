@@ -78,6 +78,14 @@ export interface FreeformGrouping {
 export const FREEFORM_TOP_N = 25;
 
 /**
+ * Max Section A (rotation-linked) lines rendered in full before collapsing to
+ * a "…and N more" line. Bounds the email body even when the whole
+ * `MAX_DIGEST_ROWS` result set is rotation-linked (a stalled-watermark
+ * backlog); normal daily volume is far below this.
+ */
+export const SECTION_A_MAX = 200;
+
+/**
  * Group freeform misses by artist, count desc (artist name asc as a
  * deterministic tiebreak), capped at `topN` with the remainder reported as
  * `moreCount` for the "…and X more" line.
@@ -128,6 +136,10 @@ export interface BuildDigestOptions {
   runStart: Date;
   /** Freeform artist-group cap before "…and X more" (default `FREEFORM_TOP_N`). */
   topN?: number;
+  /** True when the query hit `MAX_DIGEST_ROWS` -- the counts below are of the loaded subset, not the full window; the header flags this. */
+  truncated?: boolean;
+  /** Section A (rotation-linked) render cap before "…and N more" (default `SECTION_A_MAX`). */
+  sectionAMax?: number;
 }
 
 /**
@@ -138,16 +150,24 @@ export interface BuildDigestOptions {
 export const buildDigestEmail = (rows: NoMatchRow[], options: BuildDigestOptions): DigestEmailContent | null => {
   if (rows.length === 0) return null;
 
-  const { since, runStart, topN = FREEFORM_TOP_N } = options;
+  const { since, runStart, topN = FREEFORM_TOP_N, truncated = false, sectionAMax = SECTION_A_MAX } = options;
   const { rotationLinked, freeform } = splitByLinkage(rows);
   const { top, moreCount } = groupFreeformByArtist(freeform, topN);
 
   const subject = buildSubject(rows.length, runStart);
   const sinceLabel = formatPacificDateTime(since);
   const runStartLabel = formatPacificDateTime(runStart);
-  const header = `${rows.length} total since ${sinceLabel} — ${rotationLinked.length} catalog/rotation-linked, ${freeform.length} freeform.`;
+  const countPrefix = truncated ? `${rows.length}+` : `${rows.length}`;
+  const cappedNote = truncated
+    ? ' (result set capped at the row limit — the digest window may be backed up; counts are of the loaded subset.)'
+    : '';
+  const header = `${countPrefix} total since ${sinceLabel} — ${rotationLinked.length} catalog/rotation-linked, ${freeform.length} freeform.${cappedNote}`;
 
-  const rotationLines = rotationLinked.map(formatRotationLine);
+  const rotationShown = rotationLinked.slice(0, sectionAMax);
+  const rotationOmitted = Math.max(0, rotationLinked.length - sectionAMax);
+  const rotationLines = rotationShown.map(formatRotationLine);
+  const rotationMoreLine =
+    rotationOmitted > 0 ? `…and ${rotationOmitted} more catalog/rotation-linked (omitted)` : null;
   const freeformLines = top.map(({ artist, count }) => ({
     label: `${artist} — ${count} play${count === 1 ? '' : 's'}`,
     url: synthesizeDiscogsSearchUrl(artist, null),
@@ -164,6 +184,7 @@ export const buildDigestEmail = (rows: NoMatchRow[], options: BuildDigestOptions
     '',
     'Section A — Catalog/rotation-linked (investigate):',
     ...(rotationLines.length > 0 ? rotationLines.map(({ label, url }) => `  ${label} (${url})`) : ['  None.']),
+    ...(rotationMoreLine ? [`  ${rotationMoreLine}`] : []),
     '',
     'Section B — Freeform:',
     ...(freeformLines.length > 0 ? freeformLines.map(({ label, url }) => `  ${label} (${url})`) : ['  None.']),
@@ -177,7 +198,7 @@ export const buildDigestEmail = (rows: NoMatchRow[], options: BuildDigestOptions
     rotationLines.length > 0
       ? rotationLines
           .map(({ label, url }) => `<li>${escapeHtml(label)} — <a href="${url}">Discogs search</a></li>`)
-          .join('')
+          .join('') + (rotationMoreLine ? `<li>${escapeHtml(rotationMoreLine)}</li>` : '')
       : '<li>None.</li>';
   const htmlFreeformItems =
     freeformLines.length > 0

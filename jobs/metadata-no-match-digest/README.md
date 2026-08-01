@@ -12,7 +12,9 @@ Backend-Service enriches a flowsheet playcut asynchronously: the row is inserted
 2. Queries `flowsheet` for rows that became `enriched_no_match` since the watermark (`query.ts`), filtered and sorted on `flowsheet.updated_at` -- **never** `metadata_attempt_at`. The live CDC enrichment worker deliberately leaves `metadata_attempt_at` NULL on `enriched_no_match` rows (see the column's comment in `shared/database/src/schema.ts`), so filtering on it would surface almost nothing.
 3. If there is at least one miss, renders (`format.ts`) and sends **one** HTML+text digest email via SES (`email.ts`) to `DIGEST_RECIPIENT_EMAIL`, then advances the watermark to the run's start instant.
 4. If there are zero misses, sends nothing but still advances the watermark -- no empty daily email, and the window doesn't get re-scanned next time.
-5. Read-only against `flowsheet`: no INSERT/UPDATE/DELETE, no schema migration.
+5. If sending is disabled (`EMAIL_ENABLED=false`), it logs a preview of what it would have sent and does **not** advance the watermark -- an observe-only dry run, so a later real run still sees the misses.
+6. The query is restricted to `entry_type='track'` and capped at `MAX_DIGEST_ROWS` (5000); `format.ts` further caps Section A's rendered lines at `SECTION_A_MAX` (200). Both are backstops against an unbounded email if the watermark ever stalls (repeated send failures, or the cron down for a long stretch); a capped run flags it in the header.
+7. Read-only against `flowsheet`: no INSERT/UPDATE/DELETE, no schema migration.
 
 ## Email content
 
@@ -25,7 +27,7 @@ Backend-Service enriches a flowsheet playcut asynchronously: the row is inserted
 
 ## Watermark semantics
 
-`runStart = new Date()` is captured **before** the query runs. The watermark (`cronjob_runs.last_run`) advances to `runStart` on a successful send **or** a 0-row run. On a send failure, the watermark is **not** advanced, so the next run retries the exact same window (`job.ts`'s `run()` still exits non-zero so the failure is visible in the container's exit code / Sentry).
+`runStart = new Date()` is captured **before** the query runs. The watermark (`cronjob_runs.last_run`) advances to `runStart` on a successful send **or** a 0-row run. It is **not** advanced on a send failure (the next run retries the exact same window, and `orchestrate.ts`'s `run()` rethrows so `job.ts` exits non-zero and captures the failure to Sentry exactly once) **or** on a disabled observe-only run (so a later real run still sees the misses).
 
 First run (no `cronjob_runs` row yet) bounds the window to the last `FIRST_RUN_WINDOW_HOURS` (24h, one cadence period) instead of dumping the entire historical backlog into one email.
 
@@ -44,7 +46,7 @@ See `docs/env-vars.md` for the full reference. This job uses:
 - `DIGEST_RECIPIENT_EMAIL` (default `jake@wxyc.org`) -- the digest recipient.
 - `SES_FROM_EMAIL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` -- SES send config (shared with the auth service's transactional email).
 - `SES_CONFIGURATION_SET_NAME` (optional) -- set as `ConfigurationSetName` on the `SendEmailCommand` when present.
-- `EMAIL_ENABLED` (default enabled) -- set `false` to short-circuit before any SES client is constructed. Test/CI always run with this `false` (`tests/setup/unit.setup.ts`).
+- `EMAIL_ENABLED` (default enabled) -- set `false` for an observe-only run: `sendDigestEmail` short-circuits before any SES client is constructed (and without requiring `SES_FROM_EMAIL`), the job logs a preview of what it would have sent, and the watermark is left unadvanced. Test/CI always run with this `false` (`tests/setup/unit.setup.ts`).
 - `WXYC_SCHEMA_NAME` (default `wxyc_schema`) -- schema-qualifies the raw digest query so parallel Jest workers on per-schema DBs don't collide.
 - Standard DB connection vars (`DB_HOST`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD`, `DB_PORT`) and `SENTRY_DSN` (optional).
 
@@ -60,12 +62,13 @@ or, from the repo root with dependencies built:
 npm --workspace=jobs/metadata-no-match-digest run start
 ```
 
-Point `DB_*` at a snapshot (never prod without read-only intent understood) and leave `EMAIL_ENABLED=false` for a dry run that still logs what it would have sent.
+Point `DB_*` at a snapshot (or prod -- the job is read-only) and leave `EMAIL_ENABLED=false` for an observe-only dry run: it logs a preview of the digest it would have sent and leaves the watermark unadvanced, so it doesn't consume the window a real run needs.
 
 ## Files
 
-- `job.ts` -- entrypoint: watermark read → window resolve → query → render → send (if any rows) → conditional watermark advance.
-- `query.ts` -- the digest SQL + `NoMatchRow` row type.
+- `job.ts` -- thin process entrypoint: init logging, run once, capture any failure to Sentry once, always close the DB pool + logger.
+- `orchestrate.ts` -- the `run()` spine (watermark read → window resolve → query → render → send-or-skip → conditional watermark advance), separated from `job.ts` so it's unit-testable without the module-load `void main()`.
+- `query.ts` -- the digest SQL (`updated_at`-keyed, `entry_type='track'`, `LIMIT MAX_DIGEST_ROWS`) + `NoMatchRow` row type + the `unwrapRows` result-shape guard.
 - `format.ts` -- pure rendering (subject, sections, grouping, Discogs URL synthesis, PT time formatting). No DB/network; heavily unit-tested.
 - `watermark.ts` -- `cronjob_runs` read/write + the first-run window bound + the advance-on-success/no-advance-on-failure decision.
 - `email.ts` -- self-contained SES sender (does not import `@wxyc/authentication` -- see the header comment for why).
