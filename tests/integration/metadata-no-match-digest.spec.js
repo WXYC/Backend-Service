@@ -89,14 +89,22 @@ describe('metadata-no-match-digest query (real PG)', () => {
 
   it('returns only rows updated strictly after `since` (the exclusive watermark boundary on updated_at)', async () => {
     const older = await seedRow('nmd-boundary-older');
-    // `older.updated_at` is the exact boundary: the newer row is inserted in a
-    // later transaction, so its trigger-set updated_at is strictly greater.
+    // Capture the boundary from the DB clock with a >1ms gap on each side.
+    // postgres-js parses timestamptz into a millisecond-precision JS Date, so
+    // a boundary taken directly from a row's microsecond `updated_at` would
+    // round DOWN and (wrongly) re-include that row under the strict `>`; the
+    // pg_sleep gaps make the boundary unambiguous regardless of that rounding.
+    // (Production is unaffected: the watermark is a JS-generated `runStart`,
+    // already millisecond precision.)
+    await sql`SELECT pg_sleep(0.02)`;
+    const [{ since }] = await sql`SELECT now() AS since`;
+    await sql`SELECT pg_sleep(0.02)`;
     const newer = await seedRow('nmd-boundary-newer');
 
-    const ids = (await queryNoMatchRows(sql, older.updated_at)).map((r) => r.id);
+    const ids = (await queryNoMatchRows(sql, since)).map((r) => r.id);
 
-    expect(ids).toContain(newer.id);
-    expect(ids).not.toContain(older.id); // strict `>`: the boundary row itself is excluded
+    expect(ids).toContain(newer.id); // updated after the boundary
+    expect(ids).not.toContain(older.id); // updated before the boundary -- excluded
   });
 
   it("excludes non-'track' entry types even when stamped enriched_no_match", async () => {
