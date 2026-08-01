@@ -1362,6 +1362,34 @@ export const album_metadata = wxyc_schema.table('album_metadata', {
   tracklist: jsonb('tracklist'),
   artist_image_url: varchar('artist_image_url', { length: 512 }),
   bio_tokens: jsonb('bio_tokens'),
+  // BS#1915 (bounded self-heal of unresolved streaming links, consuming
+  // LML#1053's per-service verdict). A `*_url` column alone can't
+  // distinguish "checked, genuinely absent" from "couldn't check, transient"
+  // — both leave it NULL. These three carry LML's disambiguating verdict per
+  // service. TEXT with a documented vocabulary rather than a pgEnum (the
+  // 0109 lesson: enum-value additions cost their own migration) — mirrors
+  // the `source`-style columns elsewhere in this file (e.g.
+  // `album_review_submissions.source`, `concerts.headlining_discogs_artist_id_source`).
+  // Values: 'verified' (URL present, terminal) | 'absent' (consulted, no
+  // match, terminal — negative-cached, never re-asked, preserving #1747's
+  // amplifier fix) | 'unresolved' (couldn't check — transient, re-ask
+  // eligible while under the attempt cap). NULL = never consulted (LML's
+  // key-omission convention, mirrored here) and must NOT be treated as
+  // `absent` — `apps/enrichment-worker/precheck.ts` only re-asks a service
+  // currently `unresolved`, never a NULL or `absent` one.
+  spotify_status: text('spotify_status'),
+  apple_music_status: text('apple_music_status'),
+  bandcamp_status: text('bandcamp_status'),
+  // Shared per-album re-ask attempt counter — NOT per-service. A single LML
+  // re-ask resolves all three services' verdicts in one call, so the bound
+  // is naturally per-album, not per-(album, service). Incremented only on a
+  // genuine re-ask (an UPSERT against an EXISTING row via
+  // `apps/enrichment-worker/enrich.ts`'s `onConflictDoUpdate`); a fresh
+  // album's first-ever write leaves this at its DEFAULT 0. Gated at
+  // `STREAMING_REASK_ATTEMPT_CAP` (`enrich.ts`, default 3) so a
+  // persistently-unresolved field eventually stops being re-probed — the
+  // "no unbounded re-ask loop" half of the #1747 amplifier guard.
+  streaming_reask_attempts: integer('streaming_reask_attempts').notNull().default(0),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
