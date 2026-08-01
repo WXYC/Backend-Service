@@ -39,6 +39,12 @@ export type {
   StreamingCheckResponse,
   StreamingSourceMatch,
   StreamingCheckSources,
+  // BS#1915: LML#1053's per-service streaming resolution verdict on
+  // DiscogsMatchResult.streaming_status. Re-exported here (not just left
+  // nested inside DiscogsMatchResult) so consumers like the enrichment
+  // worker's bounded self-heal can name the status union directly.
+  StreamingResolution,
+  StreamingResolutionStatus,
 } from '@wxyc/shared/dtos';
 
 // BS#1710: streaming-URL host guard. Enforces "a `spotify_url` field must

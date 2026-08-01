@@ -16,8 +16,15 @@
 import { jest } from '@jest/globals';
 
 import { album_metadata, db, flowsheet } from '@wxyc/database';
-import type { LookupResponse } from '@wxyc/lml-client';
-import { extractArtwork, finalizeRow, synthesizeSearchUrls } from '../../../../apps/enrichment-worker/enrich';
+import type { LookupResponse, StreamingResolutionStatus } from '@wxyc/lml-client';
+import {
+  extractArtwork,
+  finalizeRow,
+  inferIncomingStreamingStatus,
+  mergeStreamingField,
+  synthesizeSearchUrls,
+  type StreamingFieldState,
+} from '../../../../apps/enrichment-worker/enrich';
 
 const mockDb = db as unknown as {
   insert: jest.Mock;
@@ -277,6 +284,11 @@ describe('finalizeRow (BS#892 PR-2)', () => {
 describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // BS#1915: the linked-match arm now reads prior per-service streaming
+    // state before merging (see `mergeStreamingField`). Default: no prior
+    // album_metadata row (a fresh album) — tests that need an existing row
+    // override with `mockDb._chain.limit.mockReturnValueOnce(...)`.
+    mockDb._chain.limit.mockReturnValue(Promise.resolve([]));
   });
 
   it('on match: UPSERTs the 10-column payload into album_metadata', async () => {
@@ -505,6 +517,252 @@ describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata
 
     expect(outcome).toBe('enriched_match_raced');
     expect(mockDb.insert).toHaveBeenCalledWith(album_metadata);
+  });
+});
+
+/**
+ * BS#1915 — bounded self-heal of unresolved streaming links, consuming
+ * LML#1053's per-service `verified` / `absent` / `unresolved` verdict on
+ * `DiscogsMatchResult.streaming_status`.
+ *
+ * The linked-match arm now reads the album's PRIOR persisted streaming
+ * state before writing, and merges it with the fresh LML verdict via
+ * `mergeStreamingField` — never downgrading an already-`verified` field,
+ * treating `absent` as terminal (url forced null), and leaving `unresolved`
+ * transient (retry-eligible). `streaming_reask_attempts` — the shared
+ * per-album bound, not per-service — increments ONLY on the conflict-update
+ * branch (a genuine re-ask against an existing row); a fresh album's
+ * first-ever write leaves it at the schema DEFAULT 0.
+ */
+describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-match arm', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockDb._chain.limit.mockReturnValue(Promise.resolve([]));
+  });
+
+  it('fresh album: persists a verified/absent/unresolved per-service status alongside each url', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    const response = {
+      results: [
+        {
+          artwork: {
+            artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+            release_url: 'https://discogs.com/release/123',
+            spotify_url: 'https://open.spotify.com/album/x',
+            apple_music_url: null,
+            bandcamp_url: null,
+            streaming_status: { spotify: 'verified', apple_music: 'unresolved', bandcamp: 'absent' },
+          },
+        },
+      ],
+    } as unknown as LookupResponse;
+
+    await finalizeRow(LINKED_ROW, response);
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload.spotify_status).toBe('verified');
+    expect(insertPayload.spotify_url).toBe('https://open.spotify.com/album/x');
+    expect(insertPayload.apple_music_status).toBe('unresolved');
+    expect(insertPayload.apple_music_url).toBeNull();
+    expect(insertPayload.bandcamp_status).toBe('absent');
+    // Bandcamp (unlike Apple Music) keeps its pre-#1915 synthesized
+    // search-URL fallback for any non-verified status — status='absent' is
+    // tracked, but the displayed url still falls back so the UX doesn't
+    // regress. Only Apple Music has no fallback (BS#1192).
+    expect(insertPayload.bandcamp_url).toContain('bandcamp.com/search');
+  });
+
+  it('infers verified from a bare non-null url when streaming_status is entirely absent (pre-LML#1053 compatibility)', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    // matchResponse carries real spotify_url/apple_music_url but no
+    // streaming_status object at all (an LML predating the LML#1053
+    // producer rollout, or a path that doesn't resolve one).
+    await finalizeRow(LINKED_ROW, matchResponse);
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload.spotify_status).toBe('verified');
+    expect(insertPayload.spotify_url).toBe('https://open.spotify.com/album/x');
+    expect(insertPayload.apple_music_status).toBe('verified');
+    expect(insertPayload.apple_music_url).toBe('https://music.apple.com/album/y');
+  });
+
+  it('never overwrites a previously verified URL, even when a later re-ask flaps to unresolved or absent', async () => {
+    mockDb._chain.limit.mockReturnValueOnce(
+      Promise.resolve([
+        {
+          spotify_status: 'verified',
+          spotify_url: 'https://open.spotify.com/album/PRIOR',
+          apple_music_status: 'verified',
+          apple_music_url: 'https://music.apple.com/album/PRIOR',
+          bandcamp_status: null,
+          bandcamp_url: null,
+        },
+      ])
+    );
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    const flappyResponse = {
+      results: [
+        {
+          artwork: {
+            artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+            release_url: 'https://discogs.com/release/123',
+            spotify_url: null,
+            apple_music_url: null,
+            streaming_status: { spotify: 'unresolved', apple_music: 'absent' },
+          },
+        },
+      ],
+    } as unknown as LookupResponse;
+
+    await finalizeRow(LINKED_ROW, flappyResponse);
+
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
+    expect(conflictCfg.set.spotify_status).toBe('verified');
+    expect(conflictCfg.set.spotify_url).toBe('https://open.spotify.com/album/PRIOR');
+    expect(conflictCfg.set.apple_music_status).toBe('verified');
+    expect(conflictCfg.set.apple_music_url).toBe('https://music.apple.com/album/PRIOR');
+  });
+
+  it('absent is terminal: url stays null and status is absent regardless of prior unresolved state', async () => {
+    mockDb._chain.limit.mockReturnValueOnce(
+      Promise.resolve([
+        {
+          apple_music_status: 'unresolved',
+          apple_music_url: null,
+          spotify_status: null,
+          spotify_url: null,
+          bandcamp_status: null,
+          bandcamp_url: null,
+        },
+      ])
+    );
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    const response = {
+      results: [
+        {
+          artwork: {
+            artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+            release_url: 'https://discogs.com/release/123',
+            apple_music_url: null,
+            streaming_status: { apple_music: 'absent' },
+          },
+        },
+      ],
+    } as unknown as LookupResponse;
+
+    await finalizeRow(LINKED_ROW, response);
+
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
+    expect(conflictCfg.set.apple_music_status).toBe('absent');
+    expect(conflictCfg.set.apple_music_url).toBeNull();
+  });
+
+  it('bumps streaming_reask_attempts only on the conflict-update branch, never on the fresh-insert branch', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+    await finalizeRow(LINKED_ROW, matchResponse);
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload).not.toHaveProperty('streaming_reask_attempts');
+
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
+    expect(conflictCfg.set.streaming_reask_attempts).toBeDefined();
+  });
+
+  it('a never-consulted service (key omitted, no url) preserves whatever prior state existed — never invents a verdict', async () => {
+    mockDb._chain.limit.mockReturnValueOnce(
+      Promise.resolve([
+        {
+          bandcamp_status: 'unresolved',
+          bandcamp_url: null,
+          spotify_status: null,
+          spotify_url: null,
+          apple_music_status: null,
+          apple_music_url: null,
+        },
+      ])
+    );
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    const response = {
+      results: [
+        {
+          artwork: {
+            artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+            release_url: 'https://discogs.com/release/123',
+            spotify_url: null,
+            apple_music_url: null,
+            bandcamp_url: null,
+            // bandcamp key deliberately omitted from streaming_status —
+            // never consulted this round.
+            streaming_status: { spotify: 'unresolved' },
+          },
+        },
+      ],
+    } as unknown as LookupResponse;
+
+    await finalizeRow(LINKED_ROW, response);
+
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
+    expect(conflictCfg.set.bandcamp_status).toBe('unresolved');
+    // The prior unresolved status is preserved (not reset to null/absent),
+    // and — same fallback rule as above — the displayed bandcamp_url stays
+    // the synthesized search URL since the status still isn't 'verified'.
+    expect(conflictCfg.set.bandcamp_url).toContain('bandcamp.com/search');
+  });
+});
+
+describe('mergeStreamingField + inferIncomingStreamingStatus (BS#1915)', () => {
+  const FRESH: StreamingFieldState = { status: null, url: null };
+
+  describe('inferIncomingStreamingStatus', () => {
+    it('trusts an explicit status over url presence', () => {
+      expect(inferIncomingStreamingStatus('unresolved', 'https://example.com/x')).toBe('unresolved');
+    });
+
+    it('infers verified from a bare non-null url when no explicit status is given', () => {
+      expect(inferIncomingStreamingStatus(undefined, 'https://example.com/x')).toBe('verified');
+    });
+
+    it('returns undefined (genuinely unknown) when there is neither an explicit status nor a url', () => {
+      expect(inferIncomingStreamingStatus(undefined, null)).toBeUndefined();
+      expect(inferIncomingStreamingStatus(undefined, undefined)).toBeUndefined();
+    });
+  });
+
+  describe('mergeStreamingField', () => {
+    const asStatus = (s: StreamingResolutionStatus) => s;
+
+    it('never-consulted this round (incomingStatus undefined) preserves the current state exactly', () => {
+      const current: StreamingFieldState = { status: 'unresolved', url: null };
+      expect(mergeStreamingField(current, undefined, undefined)).toEqual(current);
+    });
+
+    it('never overwrites an already-verified field — not with a fresh url, not with absent, not with unresolved', () => {
+      const current: StreamingFieldState = { status: 'verified', url: 'https://example.com/PRIOR' };
+      expect(mergeStreamingField(current, asStatus('verified'), 'https://example.com/NEW')).toEqual(current);
+      expect(mergeStreamingField(current, asStatus('absent'), null)).toEqual(current);
+      expect(mergeStreamingField(current, asStatus('unresolved'), null)).toEqual(current);
+    });
+
+    it('verified: adopts the incoming url and status', () => {
+      expect(mergeStreamingField(FRESH, asStatus('verified'), 'https://example.com/x')).toEqual({
+        status: 'verified',
+        url: 'https://example.com/x',
+      });
+    });
+
+    it('absent: terminal — url forced null regardless of any stray incoming url', () => {
+      expect(mergeStreamingField(FRESH, asStatus('absent'), 'https://example.com/should-be-ignored')).toEqual({
+        status: 'absent',
+        url: null,
+      });
+    });
+
+    it('unresolved: transient — status flips to unresolved; url carries forward from current, never fabricated', () => {
+      expect(mergeStreamingField(FRESH, asStatus('unresolved'), null)).toEqual({ status: 'unresolved', url: null });
+      const current: StreamingFieldState = { status: 'unresolved', url: null };
+      expect(mergeStreamingField(current, asStatus('unresolved'), null)).toEqual({ status: 'unresolved', url: null });
+    });
   });
 });
 

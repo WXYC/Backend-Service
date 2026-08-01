@@ -160,3 +160,116 @@ describe('enrichment-worker cache-first pre-check predicate (real PG)', () => {
     expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
   });
 });
+
+/**
+ * BS#1915 — bounded self-heal of unresolved streaming links. Load-bearing
+ * artwork/discogs alone is no longer sufficient to call a row "done": a
+ * streaming field still `unresolved` and under the attempt cap must ALSO
+ * keep the predicate false so the worker re-asks LML. `absent` stays
+ * terminal (never re-asked, preserving #1747), and NULL (never-consulted)
+ * must not be mistaken for a re-ask-eligible `unresolved`.
+ *
+ * @see WXYC/Backend-Service#1915
+ * @see WXYC/library-metadata-lookup#1053
+ */
+describe('enrichment-worker cache-first pre-check predicate — BS#1915 streaming self-heal gate (real PG)', () => {
+  let sql;
+  const insertedAlbumIds = [];
+
+  beforeAll(() => {
+    sql = getTestDb();
+  });
+
+  afterAll(async () => {
+    if (insertedAlbumIds.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ANY(${insertedAlbumIds})`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${insertedAlbumIds})`;
+    }
+  });
+
+  test('SELF-HEAL: load-bearing artwork present but apple_music unresolved under the cap → false (worker re-asks)', async () => {
+    const albumId = await insertLibraryAlbum(sql, 'streaming-unresolved-under-cap');
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, apple_music_status, streaming_reask_attempts, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'unresolved', 0, NOW())
+    `;
+
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(false);
+  });
+
+  test('BOUNDED: the same unresolved field stops being re-ask-eligible once the attempt cap is hit → true', async () => {
+    const albumId = await insertLibraryAlbum(sql, 'streaming-unresolved-at-cap');
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, apple_music_status, streaming_reask_attempts, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'unresolved', 3, NOW())
+    `;
+
+    // No unbounded re-ask loop: attempts >= STREAMING_REASK_ATTEMPT_CAP (3)
+    // means the worker accepts the frozen null and stops asking.
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
+  });
+
+  test('TERMINAL: an absent streaming field is never re-asked, regardless of the attempt count', async () => {
+    const albumId = await insertLibraryAlbum(sql, 'streaming-absent');
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, apple_music_status, streaming_reask_attempts, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'absent', 0, NOW())
+    `;
+
+    // 'absent' is terminal — negative-cached, never re-asked, preserving the
+    // #1747 amplifier fix. True even with zero prior attempts.
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
+  });
+
+  test('NEVER-CONSULTED: a NULL streaming status (not unresolved, not absent) does not force a re-ask', async () => {
+    const albumId = await insertLibraryAlbum(sql, 'streaming-never-consulted');
+    insertedAlbumIds.push(albumId);
+    // apple_music_status left NULL — the key-omission convention for
+    // "never consulted." Must NOT be treated as re-ask-eligible the way
+    // 'unresolved' is.
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, artwork_url, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', NOW())
+    `;
+
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
+  });
+
+  test('ANY-FIELD: one unresolved-under-cap field blocks "done" even when the other two are resolved', async () => {
+    const albumId = await insertLibraryAlbum(sql, 'streaming-mixed-verdicts');
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, spotify_status, bandcamp_status, apple_music_status, streaming_reask_attempts, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'verified', 'absent', 'unresolved', 1, NOW())
+    `;
+
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(false);
+  });
+
+  test('SELF-HEAL flip: unresolved-under-cap flips to verified → predicate flips false → true', async () => {
+    const albumId = await insertLibraryAlbum(sql, 'streaming-heal-flip');
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, apple_music_status, streaming_reask_attempts, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'unresolved', 1, NOW())
+    `;
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(false);
+
+    await sql`
+      UPDATE ${sql(SCHEMA)}.album_metadata
+         SET apple_music_status = 'verified',
+             apple_music_url = 'https://music.apple.com/album/healed',
+             updated_at = NOW()
+       WHERE album_id = ${albumId}
+    `;
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
+  });
+});

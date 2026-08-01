@@ -28,6 +28,7 @@ import { envInt } from '@wxyc/lml-client';
 import { drainInFlightCandidates, makeEnrichmentHandler } from './handler.js';
 import { startHealthcheckServer, type HealthState } from './healthcheck.js';
 import { sweepStrandedClaims } from './sweep.js';
+import { reaskUnresolvedStreaming } from './streaming-reask.js';
 
 /**
  * Stranded-claim sweep cadence (BS#1225). The C6 contract is "recover any
@@ -38,6 +39,24 @@ import { sweepStrandedClaims } from './sweep.js';
  * deploy-config typo can't produce a tight-loop `setInterval(fn, 0)`.
  */
 const SWEEP_INTERVAL_MS = envInt('ENRICHMENT_SWEEP_INTERVAL_MS', 60_000);
+
+/**
+ * Streaming self-heal sweep cadence (BS#1915). Hourly is the backoff
+ * spacing the design specifies — no per-row `next_retry_at` column, no
+ * exponential schedule; an unresolved streaming field is re-asked at most
+ * once per tick, bounded overall by `STREAMING_REASK_ATTEMPT_CAP`
+ * (`enrich.ts`). Override via env for shorter-cycle integration runs.
+ */
+const STREAMING_REASK_SWEEP_INTERVAL_MS = envInt('ENRICHMENT_STREAMING_REASK_SWEEP_INTERVAL_MS', 3_600_000);
+
+/**
+ * Per-tick cap on how many albums one streaming-reask sweep re-asks. Bounds
+ * the worst-case LML call burst from a single tick (a large unresolved
+ * backlog drains over several hourly ticks rather than one large burst);
+ * `enrichmentBulkLookup`'s burst coalescing plus the shared client's
+ * Semaphore(5)/TokenBucket chokepoint further smooth the actual dispatch.
+ */
+const STREAMING_REASK_SWEEP_BATCH_SIZE = envInt('ENRICHMENT_STREAMING_REASK_SWEEP_BATCH_SIZE', 200);
 
 /**
  * Per-step bound for the shutdown path so SIGTERM never hangs if PG (or
@@ -132,10 +151,16 @@ const main = async (): Promise<void> => {
   // tear the in-flight UPDATE's connection.
   let shuttingDown = false;
   let activeSweep: Promise<void> | null = null;
+  // BS#1915: the streaming-reask sweep gets its own overlap latch + timer
+  // ref, mirroring the stranded-claim sweep above but independent of it —
+  // an hourly tick running long must not block (or be blocked by) the 60s
+  // stranded-claim tick.
+  let activeStreamingReaskSweep: Promise<void> | null = null;
   // Mutable holder so the shutdown closure (declared next) can clear the
   // timer that's only assigned later, after the initial sweep. Holding via
   // a ref keeps the binding `const` and survives `prefer-const`.
   const sweepTimerRef: { current: NodeJS.Timeout | undefined } = { current: undefined };
+  const streamingReaskSweepTimerRef: { current: NodeJS.Timeout | undefined } = { current: undefined };
 
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) return;
@@ -144,14 +169,16 @@ const main = async (): Promise<void> => {
     console.log(`[enrichment-worker] received ${signal}; shutting down`);
     try {
       if (sweepTimerRef.current !== undefined) clearInterval(sweepTimerRef.current);
+      if (streamingReaskSweepTimerRef.current !== undefined) clearInterval(streamingReaskSweepTimerRef.current);
       // Each step is bounded + best-effort via runShutdownStep so a hang
       // or throw in one (e.g. a wedged CDC LISTEN socket — BS#1014 lists
       // the exact failure modes) doesn't skip the cleanup steps that
       // follow. The ordering still matters:
       //   1. Stop CDC dispatches first so new `handleCandidate` calls
       //      don't fire fresh DB writes during the sweep wait.
-      //   2. Drain any in-flight sweep so closeDatabaseConnection
-      //      doesn't tear its UPDATE.
+      //   2. Drain any in-flight sweep (both the stranded-claim sweep and
+      //      the BS#1915 streaming-reask sweep) so closeDatabaseConnection
+      //      doesn't tear an in-flight UPDATE.
       //   3. Drain in-flight `handleCandidate` invocations (BS#1108) so
       //      pending LML lookups can finalize their `metadata_status`
       //      write before the pool closes. Bounded by
@@ -163,6 +190,9 @@ const main = async (): Promise<void> => {
       await runShutdownStep('stop_cdc', stopCdcListener);
       if (activeSweep !== null) {
         await runShutdownStep('drain_sweep', activeSweep);
+      }
+      if (activeStreamingReaskSweep !== null) {
+        await runShutdownStep('drain_streaming_reask_sweep', activeStreamingReaskSweep);
       }
       // BS#1108: signal-driven count of candidates that didn't finish in
       // time. Mirrors the backend's `metric: 'in_flight_dropped'` tag
@@ -290,6 +320,17 @@ const main = async (): Promise<void> => {
     void scheduleSweep();
   }, SWEEP_INTERVAL_MS);
 
+  // BS#1915: bounded self-heal of unresolved streaming links. Unlike the
+  // stranded-claim sweep above, this does NOT fire an immediate first tick
+  // on startup — an unresolved streaming field isn't "stranded" the way a
+  // half-claimed row is, it's just waiting its next hourly turn, and firing
+  // on every deploy would correlate a burst of re-ask LML calls with
+  // deploy frequency. The first tick fires after one full
+  // STREAMING_REASK_SWEEP_INTERVAL_MS.
+  streamingReaskSweepTimerRef.current = setInterval(() => {
+    void scheduleStreamingReaskSweep();
+  }, STREAMING_REASK_SWEEP_INTERVAL_MS);
+
   /**
    * Schedule a sweep tick with overlap and shutdown guards. The
    * `activeSweep` latch causes a tick to skip cleanly if the previous one
@@ -306,6 +347,21 @@ const main = async (): Promise<void> => {
       activeSweep = null;
     });
     await activeSweep;
+  }
+
+  /**
+   * Schedule a streaming-reask sweep tick (BS#1915), with the same
+   * overlap + shutdown guards as `scheduleSweep` above, on its own
+   * independent latch so a long-running hourly tick can't starve (or be
+   * starved by) the 60s stranded-claim tick.
+   */
+  async function scheduleStreamingReaskSweep(): Promise<void> {
+    if (shuttingDown) return;
+    if (activeStreamingReaskSweep !== null) return;
+    activeStreamingReaskSweep = runStreamingReaskSweep().finally(() => {
+      activeStreamingReaskSweep = null;
+    });
+    await activeStreamingReaskSweep;
   }
 };
 
@@ -327,6 +383,32 @@ async function runSweep(): Promise<void> {
       tags: { component: 'enrichment-worker', step: 'stranded_claim_sweep' },
     });
     console.error('[enrichment-worker] sweep failed', { error: message });
+  }
+}
+
+/**
+ * Wrap one streaming-reask sweep tick (BS#1915). Same defensive shape as
+ * `runSweep` above: catch DB/LML errors here so an unhealthy tick can't
+ * unhandled-reject and tear down the worker via setInterval's fire-and-forget
+ * callback. `reaskUnresolvedStreaming` itself already isolates per-candidate
+ * failures (`Promise.allSettled`); this catch is for a failure in the
+ * candidate-selection query itself.
+ */
+async function runStreamingReaskSweep(): Promise<void> {
+  try {
+    const result = await reaskUnresolvedStreaming(STREAMING_REASK_SWEEP_BATCH_SIZE);
+    if (result.candidates > 0) {
+      console.log(
+        `[enrichment-worker] streaming-reask sweep processed ${result.candidates} candidate(s): ` +
+          `${result.succeeded} succeeded, ${result.failed} failed (stay eligible for the next tick)`
+      );
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    Sentry.captureException(err, {
+      tags: { component: 'enrichment-worker', step: 'streaming_reask_sweep' },
+    });
+    console.error('[enrichment-worker] streaming-reask sweep failed', { error: message });
   }
 }
 
