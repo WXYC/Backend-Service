@@ -76,6 +76,7 @@ jest.mock('drizzle-orm', () => {
   };
 });
 
+import { sql } from 'drizzle-orm';
 import {
   parseTabRow,
   toNullableString,
@@ -95,6 +96,8 @@ import {
   buildLegacySourcedSetMap,
   buildLegacySourcedSetWhere,
   buildAlbumCacheKey,
+  ensureArtist,
+  findArtistId,
 } from '../../../jobs/library-etl/job';
 
 describe('library-etl job helpers', () => {
@@ -666,6 +669,110 @@ describe('library-etl job helpers', () => {
         .filter((k): k is string => Boolean(k))
         .sort();
       expect(whereKeys).toEqual(setKeys);
+    });
+  });
+
+  // BS#1095: `ensureArtist` + `findArtistId` matched existing `artists` rows
+  // via `lower(artist_name) = lower($name)`, which is collation-aware but not
+  // Unicode-form aware — 'Nilüfer Yanya' in NFC ('ü' = U+00FC) vs NFD ('u' +
+  // U+0308) is byte-distinct and misses, so the ETL inserted a duplicate row
+  // per composition form. The fix swaps both predicates to
+  // `fold_artist_name(artist_name) = fold_artist_name($name)` (migration
+  // 0134), mirroring the BS#1897 runtime-path fix in
+  // `apps/backend/services/library.service.ts` `artistIdFromName`. These are
+  // structural regression guards over the fully-mocked `sql` tag (the actual
+  // NFC/NFD collapse behavior is PG-side and is pinned by an integration spec
+  // against real Postgres — the mocked DB here can't execute `fold_artist_name`
+  // itself).
+  describe('ensureArtist / findArtistId Unicode-form fold match (BS#1095)', () => {
+    // 'ü' precomposed (U+00FC) vs decomposed ('u' + combining diaeresis
+    // U+0308) — same visual name, byte-distinct strings, mixed case so a
+    // regression to `.toLowerCase()` pre-processing would also be caught.
+    const NILUFER_NFC = 'Nilüfer Yanya'.normalize('NFC');
+    const NILUFER_NFD = NILUFER_NFC.normalize('NFD');
+
+    const sqlMock = sql as unknown as jest.Mock;
+
+    /**
+     * Find `sql` tagged-template calls shaped like
+     * `sql\`${FOLD_FN}(${artists.artist_name}) = ${FOLD_FN}(${name})\`` —
+     * i.e. the 2nd and 4th interpolated values are equal (the same
+     * schema-qualified `fold_artist_name` SQL-function reference used on both
+     * sides) and the 4th is the exact, untouched `name` argument.
+     */
+    const findFoldNameCalls = (name: string) =>
+      sqlMock.mock.calls.filter(
+        (args) =>
+          args[4] === name &&
+          args[1] != null &&
+          typeof args[1] === 'object' &&
+          'raw' in (args[1] as object) &&
+          args[1] === args[3]
+      );
+
+    const makeSelectOnlyDbClient = (existingRows: Array<{ id: number; artist_name: string }>) => {
+      const limitMock = jest.fn().mockResolvedValue(existingRows);
+      const whereMock = jest.fn(() => ({ limit: limitMock }));
+      const innerJoinMock = jest.fn(() => ({ where: whereMock }));
+      const fromMock = jest.fn(() => ({ where: whereMock, innerJoin: innerJoinMock }));
+      const selectMock = jest.fn(() => ({ from: fromMock }));
+      return { select: selectMock } as any;
+    };
+
+    it('ensureArtist (various-artist branch) compares fold_artist_name(column) = fold_artist_name(name), not a pre-lowered value, for both NFC and NFD spellings', async () => {
+      const dbClientNfc = makeSelectOnlyDbClient([{ id: 42, artist_name: NILUFER_NFC }]);
+      const resultNfc = await ensureArtist(dbClientNfc, NILUFER_NFC, NILUFER_NFC, true, 1, 'NY', 0, new Map());
+      expect(resultNfc.id).toBe(42);
+
+      const dbClientNfd = makeSelectOnlyDbClient([{ id: 42, artist_name: NILUFER_NFC }]);
+      const resultNfd = await ensureArtist(dbClientNfd, NILUFER_NFD, NILUFER_NFD, true, 1, 'NY', 0, new Map());
+      expect(resultNfd.id).toBe(42);
+
+      const nfcCalls = findFoldNameCalls(NILUFER_NFC);
+      const nfdCalls = findFoldNameCalls(NILUFER_NFD);
+      expect(nfcCalls.length).toBeGreaterThan(0);
+      expect(nfdCalls.length).toBeGreaterThan(0);
+      expect((nfcCalls[0][1] as { raw: string }).raw).toContain('fold_artist_name');
+      // Same fold-function reference used for both the NFC and NFD lookups —
+      // the DB-side function is what collapses the two forms, not app code.
+      expect(nfcCalls[0][1]).toBe(nfdCalls[0][1]);
+    });
+
+    it('ensureArtist (genre-scoped branch) compares fold_artist_name(column) = fold_artist_name(name)', async () => {
+      const dbClient = makeSelectOnlyDbClient([{ id: 7, artist_name: NILUFER_NFC }]);
+      const result = await ensureArtist(dbClient, NILUFER_NFD, NILUFER_NFD, false, 11, 'NY', 3, new Map());
+      expect(result.id).toBe(7);
+
+      const calls = findFoldNameCalls(NILUFER_NFD);
+      expect(calls.length).toBeGreaterThan(0);
+      expect((calls[0][1] as { raw: string }).raw).toContain('fold_artist_name');
+    });
+
+    it('findArtistId compares fold_artist_name(column) = fold_artist_name(name) for both NFC and NFD spellings', async () => {
+      const dbClientNfc = makeSelectOnlyDbClient([{ id: 99 }]);
+      const idNfc = await findArtistId(dbClientNfc, NILUFER_NFC, 'NY', new Map());
+      expect(idNfc).toBe(99);
+
+      const dbClientNfd = makeSelectOnlyDbClient([{ id: 99 }]);
+      const idNfd = await findArtistId(dbClientNfd, NILUFER_NFD, 'NY', new Map());
+      expect(idNfd).toBe(99);
+
+      const nfcCalls = findFoldNameCalls(NILUFER_NFC);
+      const nfdCalls = findFoldNameCalls(NILUFER_NFD);
+      expect(nfcCalls.length).toBeGreaterThan(0);
+      expect(nfdCalls.length).toBeGreaterThan(0);
+      expect((nfcCalls[0][1] as { raw: string }).raw).toContain('fold_artist_name');
+      expect(nfcCalls[0][1]).toBe(nfdCalls[0][1]);
+    });
+
+    it('leaves the code_letters comparison on lower() (not folded)', async () => {
+      const dbClient = makeSelectOnlyDbClient([{ id: 5 }]);
+      await findArtistId(dbClient, NILUFER_NFC, 'NY', new Map());
+
+      // The code_letters predicate is a plain `sql` call carrying a bare
+      // lowercased string value, not a { raw } fold-function reference.
+      const codeLettersCalls = sqlMock.mock.calls.filter((args) => args.includes('ny'));
+      expect(codeLettersCalls.length).toBeGreaterThan(0);
     });
   });
 });
