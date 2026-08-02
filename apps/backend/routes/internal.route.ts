@@ -352,6 +352,15 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
         // anchored to the first INSERT's values, mutable metadata-ish
         // fields move with the latest webhook payload.
         //
+        // `request_flag` (BS#1857 / BS#1623) is deliberately EXCLUDED here
+        // too, joining `segue`: for a live show, BS's DJ-facing
+        // PATCH /flowsheet is the authoritative writer for both flags.
+        // Refreshing `request_flag` from tubafrenzy's copy on every
+        // conflict-refresh could revert a DJ's toggle if tubafrenzy's
+        // mirror ever lags or diverges from BS's live state. The fresh-
+        // INSERT branch above still writes it from the payload — this only
+        // scopes the never-overwrite rule to the re-sync UPDATE path.
+        //
         // `dj_name` is conditionally refreshed only when the resolver
         // produced a non-null value (defense-in-depth for the stub-then-
         // fill race: webhook may have inserted with dj_name=NULL when the
@@ -366,7 +375,6 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
           track_title: trackTitle,
           record_label: truncate(entry.labelName, 128),
           message: isMsgType ? truncate(entry.artistName, 250) : null,
-          request_flag: !!entry.requestFlag,
           entry_type: entryType,
         };
         if (markerDjName !== null) {

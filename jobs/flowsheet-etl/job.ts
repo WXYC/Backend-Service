@@ -370,6 +370,14 @@ export const runIncremental = async (): Promise<SyncResult> => {
       .onConflictDoUpdate({
         target: shows.legacy_show_id,
         set: {
+          // start_time (BS#1084): the webhook's resolveShow stub-inserts a
+          // show with start_time = NOW() when a legacy_show_id it doesn't
+          // yet know arrives (apps/backend/routes/internal.route.ts). That
+          // NOW() is a BS-invented placeholder with no authority — tubafrenzy
+          // is the source of truth for show metadata via this UPSERT, so the
+          // next incremental tick must overwrite the stub value with the
+          // authoritative one rather than leaving it to drift forever.
+          start_time: sql`excluded.start_time`,
           end_time: sql`excluded.end_time`,
           show_name: sql`excluded.show_name`,
           legacy_dj_name: sql`excluded.legacy_dj_name`,
@@ -378,6 +386,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
         // Same dead-tuple amplification mechanic as the flowsheet upsert
         // below, lower volume. See BS#1059.
         setWhere: sql`
+          ${shows.start_time} IS DISTINCT FROM excluded.start_time OR
           ${shows.end_time} IS DISTINCT FROM excluded.end_time OR
           ${shows.show_name} IS DISTINCT FROM excluded.show_name OR
           ${shows.legacy_dj_name} IS DISTINCT FROM excluded.legacy_dj_name OR
@@ -459,14 +468,20 @@ export const runIncremental = async (): Promise<SyncResult> => {
       })
       .onConflictDoUpdate({
         target: flowsheet.legacy_entry_id,
+        // request_flag / segue (BS#1857 / BS#1623): deliberately OMITTED
+        // from this SET list (and still written on INSERT above via
+        // `.values`). For a live show, BS's DJ-facing PATCH /flowsheet is
+        // the authoritative writer for these two flags — blindly refreshing
+        // them from tubafrenzy's copy on every re-sync could revert a DJ's
+        // toggle if tubafrenzy's mirror ever lags or diverges. A brand-new
+        // tubafrenzy entry still gets its flags from `.values` on first
+        // INSERT; only the re-sync UPDATE path leaves them alone.
         set: {
           artist_name: sql`excluded.artist_name`,
           album_title: sql`excluded.album_title`,
           track_title: sql`excluded.track_title`,
           record_label: sql`excluded.record_label`,
           message: sql`excluded.message`,
-          request_flag: sql`excluded.request_flag`,
-          segue: sql`excluded.segue`,
           entry_type: sql`excluded.entry_type`,
           add_time: sql`excluded.add_time`,
           show_id: sql`excluded.show_id`,
@@ -486,8 +501,6 @@ export const runIncremental = async (): Promise<SyncResult> => {
           ${flowsheet.track_title} IS DISTINCT FROM excluded.track_title OR
           ${flowsheet.record_label} IS DISTINCT FROM excluded.record_label OR
           ${flowsheet.message} IS DISTINCT FROM excluded.message OR
-          ${flowsheet.request_flag} IS DISTINCT FROM excluded.request_flag OR
-          ${flowsheet.segue} IS DISTINCT FROM excluded.segue OR
           ${flowsheet.entry_type} IS DISTINCT FROM excluded.entry_type OR
           ${flowsheet.add_time} IS DISTINCT FROM excluded.add_time OR
           ${flowsheet.show_id} IS DISTINCT FROM excluded.show_id OR
