@@ -92,6 +92,88 @@ describe('buildTrustedClients', () => {
     });
   });
 
+  describe('CRM client', () => {
+    it('produces a CRM entry with parsed comma-separated redirect URLs', () => {
+      const clients = buildTrustedClients({
+        CRM_OIDC_CLIENT_ID: 'crm',
+        CRM_OIDC_CLIENT_SECRET: 'shh',
+        CRM_OIDC_REDIRECT_URLS: 'https://a/cb,https://b/cb',
+      });
+
+      expect(clients).toHaveLength(1);
+      expect(clients[0]).toEqual({
+        clientId: 'crm',
+        clientSecret: 'shh',
+        redirectUrls: ['https://a/cb', 'https://b/cb'],
+        name: 'WXYC CRM',
+        type: 'web',
+        disabled: false,
+        icon: undefined,
+        metadata: null,
+        skipConsent: true,
+      });
+    });
+
+    it('trims surrounding whitespace around comma-separated redirect URLs', () => {
+      const clients = buildTrustedClients({
+        CRM_OIDC_CLIENT_ID: 'crm',
+        CRM_OIDC_CLIENT_SECRET: 'shh',
+        CRM_OIDC_REDIRECT_URLS: ' https://a/cb , https://b/cb ',
+      });
+
+      expect(clients[0].redirectUrls).toEqual(['https://a/cb', 'https://b/cb']);
+    });
+
+    it('omits the CRM entry when CRM_OIDC_REDIRECT_URLS is unset', () => {
+      const clients = buildTrustedClients({
+        CRM_OIDC_CLIENT_ID: 'crm',
+        CRM_OIDC_CLIENT_SECRET: 'shh',
+      });
+
+      expect(clients).toEqual([]);
+    });
+
+    it('omits the CRM entry when CRM_OIDC_REDIRECT_URLS has only blank entries', () => {
+      // ' , , ,' → ['', '', '', ''] after trim+filter Boolean → [].
+      const clients = buildTrustedClients({
+        CRM_OIDC_CLIENT_ID: 'crm',
+        CRM_OIDC_CLIENT_SECRET: 'shh',
+        CRM_OIDC_REDIRECT_URLS: ' , , ,',
+      });
+
+      expect(clients).toEqual([]);
+    });
+
+    it('keeps the valid URLs and drops the blank entries when both are mixed', () => {
+      const clients = buildTrustedClients({
+        CRM_OIDC_CLIENT_ID: 'crm',
+        CRM_OIDC_CLIENT_SECRET: 'shh',
+        CRM_OIDC_REDIRECT_URLS: 'https://a/cb, , https://b/cb',
+      });
+
+      expect(clients).toHaveLength(1);
+      expect(clients[0].redirectUrls).toEqual(['https://a/cb', 'https://b/cb']);
+    });
+
+    it('omits the CRM entry when CRM_OIDC_CLIENT_ID is unset', () => {
+      const clients = buildTrustedClients({
+        CRM_OIDC_CLIENT_SECRET: 'shh',
+        CRM_OIDC_REDIRECT_URLS: 'https://a/cb',
+      });
+
+      expect(clients).toEqual([]);
+    });
+
+    it('omits the CRM entry when CRM_OIDC_CLIENT_SECRET is unset', () => {
+      const clients = buildTrustedClients({
+        CRM_OIDC_CLIENT_ID: 'crm',
+        CRM_OIDC_REDIRECT_URLS: 'https://a/cb',
+      });
+
+      expect(clients).toEqual([]);
+    });
+  });
+
   describe('wiki.js client', () => {
     it('preserves the existing inline-literal shape field-for-field', () => {
       // Behavior-preserving refactor: a Wiki.js entry built from the same env
@@ -197,12 +279,12 @@ describe('buildTrustedClients', () => {
   });
 
   describe('all clients together', () => {
-    it('returns Wiki.js first, Flowsheet second, WXYC Canary third, when all are fully configured', () => {
+    it('returns Wiki.js first, Flowsheet second, WXYC CRM third, WXYC Canary fourth, when all are fully configured', () => {
       // Full-shape assertion (not just `.name`): a refactor that silently
       // flips wiki.js's `type: 'web' → 'public'` or drops `skipConsent` from
       // flowsheet would sail past a name-only check. The individual describe
       // blocks pin the shape when each client is configured in isolation;
-      // pin it again in the "all three together" configuration so an
+      // pin it again in the "all four together" configuration so an
       // ordering-dependent bug (e.g. mutation of a shared literal) can't
       // hide either.
       const clients = buildTrustedClients({
@@ -212,10 +294,13 @@ describe('buildTrustedClients', () => {
         FLOWSHEET_OIDC_CLIENT_ID: 'flowsheet',
         FLOWSHEET_OIDC_CLIENT_SECRET: 'shh',
         FLOWSHEET_OIDC_REDIRECT_URLS: 'https://flowsheet.wxyc.org/auth/callback',
+        CRM_OIDC_CLIENT_ID: 'crm',
+        CRM_OIDC_CLIENT_SECRET: 'crm-secret',
+        CRM_OIDC_REDIRECT_URLS: 'https://crm.wxyc.org/auth/callback',
         WXYC_CANARY_OIDC_CLIENT_ID: 'wxyc-canary',
       });
 
-      expect(clients).toHaveLength(3);
+      expect(clients).toHaveLength(4);
       expect(clients[0]).toEqual({
         clientId: 'wiki-id',
         clientSecret: 'wiki-secret',
@@ -239,6 +324,17 @@ describe('buildTrustedClients', () => {
         skipConsent: true,
       });
       expect(clients[2]).toEqual({
+        clientId: 'crm',
+        clientSecret: 'crm-secret',
+        redirectUrls: ['https://crm.wxyc.org/auth/callback'],
+        name: 'WXYC CRM',
+        type: 'web',
+        disabled: false,
+        icon: undefined,
+        metadata: null,
+        skipConsent: true,
+      });
+      expect(clients[3]).toEqual({
         clientId: 'wxyc-canary',
         clientSecret: undefined,
         redirectUrls: ['https://canary.wxyc.invalid/authorize-echo'],
@@ -372,6 +468,18 @@ describe('buildTrustedClients', () => {
       expect(clients[0].clientId).toBe('flowsheet');
       expect(clients[0].clientSecret).toBe('shh');
     });
+
+    it('trims whitespace off CRM env vars', () => {
+      const clients = buildTrustedClients({
+        CRM_OIDC_CLIENT_ID: '  crm\n',
+        CRM_OIDC_CLIENT_SECRET: '  shh  ',
+        CRM_OIDC_REDIRECT_URLS: 'https://crm.wxyc.org/auth/callback',
+      });
+
+      expect(clients).toHaveLength(1);
+      expect(clients[0].clientId).toBe('crm');
+      expect(clients[0].clientSecret).toBe('shh');
+    });
   });
 
   describe('canary redirect placeholder uses .invalid TLD', () => {
@@ -450,7 +558,19 @@ describe('buildTrustedClients', () => {
       ).toThrow(/shared-id/);
     });
 
-    it('does not throw when three distinct clientIds are configured (happy-path regression)', () => {
+    it('throws on a CRM/canary collision (symmetry check)', () => {
+      // Same protection extended to the new CRM block.
+      expect(() =>
+        buildTrustedClients({
+          CRM_OIDC_CLIENT_ID: 'shared-id',
+          CRM_OIDC_CLIENT_SECRET: 'shh',
+          CRM_OIDC_REDIRECT_URLS: 'https://crm.wxyc.org/auth/callback',
+          WXYC_CANARY_OIDC_CLIENT_ID: 'shared-id',
+        })
+      ).toThrow(/shared-id/);
+    });
+
+    it('does not throw when four distinct clientIds are configured (happy-path regression)', () => {
       // No behavior change for the correctly-configured case — this is the
       // one already exercised by "all clients together" but pinned separately
       // so a regression that always-throws on non-empty input is caught.
@@ -462,6 +582,9 @@ describe('buildTrustedClients', () => {
           FLOWSHEET_OIDC_CLIENT_ID: 'flowsheet',
           FLOWSHEET_OIDC_CLIENT_SECRET: 'shh',
           FLOWSHEET_OIDC_REDIRECT_URLS: 'https://flowsheet.wxyc.org/auth/callback',
+          CRM_OIDC_CLIENT_ID: 'crm',
+          CRM_OIDC_CLIENT_SECRET: 'crm-secret',
+          CRM_OIDC_REDIRECT_URLS: 'https://crm.wxyc.org/auth/callback',
           WXYC_CANARY_OIDC_CLIENT_ID: 'wxyc-canary',
         })
       ).not.toThrow();
