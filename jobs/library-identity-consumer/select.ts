@@ -5,20 +5,37 @@
  * (Backend is thin-writer; LML is sole composer):
  *
  *   library.canonical_entity_id IS NOT NULL
- *   AND (
- *     NOT EXISTS (SELECT 1 FROM library_identity WHERE library_id = library.id)
- *     OR EXISTS (
- *       SELECT 1 FROM library_identity
- *       WHERE library_id = library.id
- *         AND last_verified_at < NOW() - interval '7 days'
- *     )
+ *   AND NOT EXISTS (
+ *     SELECT 1 FROM library_identity
+ *     WHERE library_id = library.id
+ *       AND last_verified_at >= NOW() - interval '7 days'
  *   )
  *
  * BS#1144: the predicate used to be `canonical_entity_id IS NOT NULL OR ...`
  * — an unconditional disjunct that re-fetched every canonicalized row on
- * every run regardless of freshness, burning LML quota. The freshness guard
- * above narrows eligibility to rows with no `library_identity` row yet, or
- * whose existing row is stale.
+ * every run regardless of freshness, burning LML quota. The fix narrowed
+ * eligibility to rows with no `library_identity` row yet, or whose existing
+ * row is stale: `NOT EXISTS (SELECT 1 FROM library_identity WHERE library_id
+ * = library.id) OR EXISTS (SELECT 1 FROM library_identity WHERE library_id =
+ * library.id AND last_verified_at < NOW() - interval '7 days')`.
+ *
+ * BS#1800: simplified to the single `NOT EXISTS (... AND last_verified_at
+ * >= ...)` form above. `library_identity.library_id` is a PRIMARY KEY (see
+ * schema.ts), so there is at most one `library_identity` row per library —
+ * call its existence P and its freshness F. The #1144 form was `NOT P OR (P
+ * AND NOT F)`, which is `NOT P OR NOT F` (i.e. "no row yet, or the row
+ * isn't fresh") for exactly the same reason `A OR (A AND B)` reduces to `A
+ * OR B` when `A` and `NOT A` partition the cases — here P and NOT P do. Its
+ * negation, `NOT (NOT P OR NOT F)` = `P AND F` ("a row exists and is
+ * fresh"), is exactly what `EXISTS (... AND last_verified_at >= ...)` tests,
+ * so `NOT EXISTS (... AND last_verified_at >= ...)` is `NOT P OR NOT F` —
+ * the identical predicate in one subquery instead of two. This equivalence
+ * only holds because of the PK (at most one row to reason about); it would
+ * NOT hold for a one-to-many child table. Behavioral coverage (fresh
+ * excluded; absent/stale included) lives in
+ * tests/integration/library-identity-consumer-select.spec.js — see that
+ * file's docstring for why it embeds this predicate literally rather than
+ * importing loadBatch() directly.
  *
  * BS#974: `INCLUDE_NULL_CANONICAL` (default off) expands the predicate to also
  * cover `canonical_entity_id IS NULL` rows — the ~34K never-canonicalized
@@ -178,15 +195,20 @@ export const loadBatch = async (
 ): Promise<LibraryRow[]> => {
   const partitionClause = partitionFilter ?? sql``;
 
-  // The eligibility core. Flag OFF is byte-identical to the post-#1144
-  // predicate (canonicalized rows only: never-resolved OR stale). Flag ON
-  // (BS#974) drops the `canonical_entity_id IS NOT NULL` filter and gates
-  // every first-time candidate on the `unresolved_attempted_at` no-match
-  // marker, so the ~34K NULL-canonical rows come into scope without the
-  // unresolved-row hot-loop (a row LML couldn't resolve isn't re-attempted
-  // until `unresolvedRetryDays` elapse). This also retro-fixes the
-  // pre-existing canonical-unresolved re-attempt, since it too now honors the
-  // marker.
+  // The eligibility core. Flag OFF is byte-identical (post-BS#1800
+  // simplification -- see the module docstring for the equivalence proof) to
+  // the post-#1144 predicate (canonicalized rows only: never-resolved OR
+  // stale). Flag ON (BS#974) drops the `canonical_entity_id IS NOT NULL`
+  // filter and gates every first-time candidate on the
+  // `unresolved_attempted_at` no-match marker, so the ~34K NULL-canonical
+  // rows come into scope without the unresolved-row hot-loop (a row LML
+  // couldn't resolve isn't re-attempted until `unresolvedRetryDays` elapse).
+  // This also retro-fixes the pre-existing canonical-unresolved re-attempt,
+  // since it too now honors the marker. (The flag-ON branch keeps its
+  // separate `NOT EXISTS(any)` subquery rather than the flag-OFF
+  // simplification below -- its NOT-EXISTS arm is further gated by the
+  // no-match-marker AND clause, so it isn't the pure `NOT P OR NOT F` shape
+  // the PK equivalence applies to.)
   const eligibilityCore = includeNullCanonical
     ? sql`
       AND (
@@ -208,16 +230,10 @@ export const loadBatch = async (
       )`
     : sql`
       AND "canonical_entity_id" IS NOT NULL
-      AND (
-        NOT EXISTS (
-          SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li
-          WHERE li."library_id" = ${LIBRARY_TABLE}."id"
-        )
-        OR EXISTS (
-          SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li
-          WHERE li."library_id" = ${LIBRARY_TABLE}."id"
-            AND li."last_verified_at" < NOW() - (interval '1 day' * ${staleDays})
-        )
+      AND NOT EXISTS (
+        SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li
+        WHERE li."library_id" = ${LIBRARY_TABLE}."id"
+          AND li."last_verified_at" >= NOW() - (interval '1 day' * ${staleDays})
       )`;
 
   const rows = (await db.execute(sql`

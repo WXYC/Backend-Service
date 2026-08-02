@@ -199,13 +199,25 @@ describe('EMAIL_ENABLED gating', () => {
     delete process.env.EMAIL_ENABLED;
   });
 
-  it('does not call the SES client send when EMAIL_ENABLED is unset', async () => {
+  it('calls the SES client send when EMAIL_ENABLED is unset (defaults to enabled, the production behavior)', async () => {
     delete process.env.EMAIL_ENABLED;
     const emailModule = await import('../../../shared/authentication/src/email');
 
-    // Unset means "enabled" (production default) — confirm the opposite
-    // gate below instead exercises the disabled path.
     expect(emailModule.isEmailSendingEnabled()).toBe(true);
+
+    // BS#1800: the original version of this test stopped at the boolean
+    // helper check above and never drove sendEmail/asserted mockSend --
+    // which meant it couldn't catch a real regression like the gate inside
+    // sendEmail() being inverted (e.g. `if (isEmailSendingEnabled()) return;`),
+    // which would silently disable all production email since unset is the
+    // production default. Drive the real send path here too.
+    await emailModule.sendEmail({
+      type: 'passwordReset',
+      to: 'user@example.com',
+      url: 'https://example.com/reset',
+    });
+
+    expect(mockSend).toHaveBeenCalledTimes(1);
   });
 
   it('does not call the SES client send when EMAIL_ENABLED=false', async () => {

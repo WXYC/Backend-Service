@@ -183,10 +183,21 @@ describe('loadBatch', () => {
     await loadBatch(0, 500, null, 7);
     const call = (db.execute as jest.Mock).mock.calls[0][0];
     const serialized = JSON.stringify(call);
-    // The predicate must gate canonicalized rows behind a freshness check
-    // (NOT EXISTS a library_identity row, or the existing one is stale) —
-    // not just an unconditional `canonical_entity_id IS NOT NULL OR ...`.
+    // Structural regression check only -- this can't distinguish the fixed
+    // predicate from the pre-#1144 bug (`canonical_entity_id IS NOT NULL OR
+    // ...`, an unconditional disjunct that also contains "NOT EXISTS" deeper
+    // in its OR branch), so it's necessary but not sufficient. The genuine
+    // behavioral fixture (a FRESH identity row excluded; an ABSENT or STALE
+    // one included) lives in
+    // tests/integration/library-identity-consumer-select.spec.js against a
+    // real Postgres -- a mocked db.execute here can't observe selection
+    // behavior, only the SQL text passed to it.
     expect(serialized).toMatch(/NOT EXISTS/);
+    // Post-BS#1800 simplification (library_identity.library_id is a PK, so
+    // `NOT EXISTS(any) OR EXISTS(stale)` === `NOT EXISTS(fresh)` -- see the
+    // module docstring): the flag-off branch is now a single NOT EXISTS, not
+    // the two-subquery `OR EXISTS` shape.
+    expect(serialized).not.toMatch(/OR EXISTS/);
   });
 
   it('returns the rows surfaced by db.execute', async () => {

@@ -139,10 +139,13 @@ function getConfigurationSetName(): string | undefined {
  * SES has a 200-message/month quota. `EMAIL_ENABLED` gates the actual
  * `client.send()` call so test/CI runs (which repeatedly exercise the
  * password-reset / verification / OTP flows) never burn that quota.
- * Defaults to enabled (production behavior) when unset; test/CI
- * environments set `EMAIL_ENABLED=false` explicitly (see
- * `scripts/ci-env.sh`, `tests/setup/unit.setup.ts`, and
- * `.github/workflows/test.yml`).
+ * Defaults to enabled (production behavior) when unset. `scripts/ci-env.sh`
+ * does NOT set this var -- test/CI environments set `EMAIL_ENABLED=false`
+ * explicitly in two other places: `tests/setup/unit.setup.ts` (the jest
+ * unit-test-runner process itself) and, for the separately-spawned auth/
+ * backend servers the integration suite talks to over HTTP, on
+ * `dev_env/docker-compose.yml`'s `auth` service (CI profile, hardcoded) and
+ * `.github/workflows/test.yml`'s Integration-Tests "Start services" step.
  */
 export function isEmailSendingEnabled(): boolean {
   const raw = process.env.EMAIL_ENABLED;
