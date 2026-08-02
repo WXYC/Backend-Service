@@ -26,13 +26,26 @@ jest.mock('jose', () => ({
 // back in to actually exercise the catalog:read vs public gate.
 jest.mock('@wxyc/authentication', () => jest.requireActual('../../../shared/authentication/src/auth.middleware'));
 
+import { jest as jestGlobals } from '@jest/globals';
+import { jwtVerify } from 'jose';
 import express from 'express';
 import request from 'supertest';
+
+const mockedJwtVerify = jwtVerify as jest.MockedFunction<typeof jwtVerify>;
+
+function mockRole(role: string) {
+  mockedJwtVerify.mockResolvedValue({
+    payload: { sub: 'test-user-id', email: 'test@wxyc.org', role },
+    protectedHeader: { alg: 'RS256' },
+    key: {} as any,
+  });
+}
 
 // Collaborator mocks below mirror tests/unit/routes/library-missing-found-permissions.route.test.ts
 // -- only enough is stubbed here to let library.route's import chain resolve
 // without touching a real DB, LML, or lru-cache.
 const mockGetGenresFromDB = jest.fn<() => Promise<Array<{ id: number; genre: string }>>>();
+const mockInsertGenre = jestGlobals.fn<() => Promise<{ id: number }>>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   markAlbumMissing: jest.fn(),
@@ -60,7 +73,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   generateAlbumCodeNumber: jest.fn(),
   generateArtistNumber: jest.fn(),
   getGenresFromDB: mockGetGenresFromDB,
-  insertGenre: jest.fn(),
+  insertGenre: mockInsertGenre,
   insertFormat: jest.fn(),
   getFormatById: jest.fn(),
   isISODate: jest.fn(),
@@ -120,5 +133,45 @@ describe('GET /library/genres — public tier (BS#1682)', () => {
     const res = await request(app).get('/library/genres');
     expect(res.status).toBe(200);
     expect(mockGetGenresFromDB).toHaveBeenCalled();
+  });
+});
+
+/**
+ * BS#1682 relaxed GET /library/genres only. This is the negative-assertion
+ * companion (BS#1800 follow-up): POST /library/genres must stay
+ * catalog:write-gated (musicDirector+) so a future accidental relaxation of
+ * the sibling write route is caught. Mirrors the real-middleware wiring +
+ * mockRole helper from tests/unit/routes/library-missing-found-permissions.route.test.ts.
+ */
+describe('POST /library/genres — stays catalog:write-gated (BS#1682 / BS#1800)', () => {
+  beforeEach(() => {
+    mockedJwtVerify.mockReset();
+    mockInsertGenre.mockReset().mockResolvedValue({ id: 1 });
+  });
+
+  test('a musicDirector-role token (catalog:write) is authorized', async () => {
+    mockRole('musicDirector');
+    const res = await request(app)
+      .post('/library/genres')
+      .set('Authorization', 'Bearer test-token')
+      .send({ name: 'Rock', description: 'Rock music' });
+    expect(res.status).toBe(201);
+    expect(mockInsertGenre).toHaveBeenCalled();
+  });
+
+  test('a dj-role token (catalog:read only) is rejected', async () => {
+    mockRole('dj');
+    const res = await request(app)
+      .post('/library/genres')
+      .set('Authorization', 'Bearer test-token')
+      .send({ name: 'Rock', description: 'Rock music' });
+    expect(res.status).toBe(403);
+    expect(mockInsertGenre).not.toHaveBeenCalled();
+  });
+
+  test('a request with no Authorization header is rejected', async () => {
+    const res = await request(app).post('/library/genres').send({ name: 'Rock', description: 'Rock music' });
+    expect(res.status).toBe(401);
+    expect(mockInsertGenre).not.toHaveBeenCalled();
   });
 });

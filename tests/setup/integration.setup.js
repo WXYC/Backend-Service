@@ -6,9 +6,10 @@ process.env.NODE_ENV = 'test';
 process.env.USE_MOCK_SERVICES = 'true';
 // This only affects the jest test-runner process, not the separately
 // spawned auth/backend servers the integration suite talks to over HTTP —
-// those get EMAIL_ENABLED=false from ci-env.sh / test.yml's "Start
-// services" step. Set here too for parity with any in-process helper that
-// imports shared/authentication directly.
+// those get EMAIL_ENABLED=false from dev_env/docker-compose.yml's `auth`
+// service (CI profile) / test.yml's "Start services" step, NOT from
+// ci-env.sh (which doesn't set this var). Set here too for parity with any
+// in-process helper that imports shared/authentication directly.
 process.env.EMAIL_ENABLED = process.env.EMAIL_ENABLED ?? 'false';
 
 global.primary_dj_id = null;
