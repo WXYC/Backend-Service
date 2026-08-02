@@ -894,6 +894,60 @@ export const getLatestShow = async (): Promise<Show | undefined> => {
 };
 
 /**
+ * True when the newest flowsheet entry belonging to `showId` is a
+ * `show_end` marker.
+ *
+ * Belt-and-braces guard for `joinShow` (BS#1861 option (b)). The tubafrenzy
+ * webhook's stub-show flow can leave `shows.end_time` NULL for a window
+ * after a legacy sign-off (`resolveShow`'s "Create a stub show" comment in
+ * apps/backend/routes/internal.route.ts) — the webhook now also sets
+ * `end_time` at write time as a fast-path (BS#1861 option (a)), but this is
+ * a second, independent signal: a show whose last entry is `show_end` is
+ * closed regardless of what `end_time` currently holds, so `joinShow` can
+ * still route a go-live in that window to a new show even if the fast-path
+ * write above raced or was somehow missed.
+ *
+ * Ordered by `id DESC` (insertion order), not `play_order DESC` —
+ * `changeOrder` can renumber `play_order` for track reordering within a
+ * show, but marker rows are never reordered and the serial PK is an
+ * unambiguous "newest".
+ */
+export const isLatestEntryShowEnd = async (showId: number): Promise<boolean> => {
+  const [latest] = await db
+    .select({ entry_type: flowsheet.entry_type })
+    .from(flowsheet)
+    .where(eq(flowsheet.show_id, showId))
+    .orderBy(desc(flowsheet.id))
+    .limit(1);
+  return latest?.entry_type === 'show_end';
+};
+
+/**
+ * True when `dj_id` is already an active participant in `show` — either the
+ * primary DJ or a co-host whose `show_djs.active` is true.
+ *
+ * Belt-and-braces guard for `joinShow` (BS#1861 option (c)): a retried
+ * "Go Live" toggle that lands on an already-open show for a DJ already live
+ * on it is not a genuine join, and should not write another `dj_join`
+ * marker (the issue's 16:37:59 duplicate-marker trace). `addDJToShow`
+ * itself already no-ops the marker write when a co-host's `show_djs` row is
+ * found active (it only inserts/notifies on first join or reactivates from
+ * inactive) — this check makes that guarantee explicit at the call site and
+ * additionally covers the primary DJ, whose `show_djs` row this check does
+ * not assume is present.
+ */
+export const isDjAlreadyActiveOnShow = async (show: Show, dj_id: string): Promise<boolean> => {
+  if (show.primary_dj_id === dj_id) return true;
+
+  const [row] = await db
+    .select({ active: show_djs.active })
+    .from(show_djs)
+    .where(and(eq(show_djs.show_id, show.id), eq(show_djs.dj_id, dj_id)))
+    .limit(1);
+  return row?.active === true;
+};
+
+/**
  * Display name shown on air for a live show whose DJ we cannot name — an
  * anonymous human at the controls. The most common cause is a tubafrenzy
  * sign-on with a blank `djHandle`, which leaves `shows.legacy_dj_name` null:
