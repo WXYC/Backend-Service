@@ -476,6 +476,18 @@ jobs:
         # Note: Tests must run sequentially (--runInBand) because they share
         # show state, DJ sessions, and flowsheet entries. Parallel execution
         # causes tests to interfere with each other's join/leave operations.
+        env:
+          # BS#133: enable the admin-ban integration tests on gating CI.
+          # getAdminToken() (tests/utils/anonymous_auth.js) signs in as the
+          # dedicated test_station_manager fixture account, not the shared
+          # AUTH_USERNAME/AUTH_PASSWORD (test_dj1, a plain DJ used elsewhere
+          # to assert permission boundaries) — so this flag doesn't need an
+          # admin credential wired in here. Deliberately scoped to this step
+          # (not the job- or workflow-level env) so it's outside the three
+          # scopes tests/unit/scripts/ci-env-surface-parity.test.ts diffs
+          # against dev_env/docker-compose.yml; the local ci:testmock flow
+          # is untouched by this change.
+          TEST_ADMIN_BAN: 'true'
         run: npm run ci:test
 
       - name: Show service logs on failure

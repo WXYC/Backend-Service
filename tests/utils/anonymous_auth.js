@@ -67,7 +67,7 @@ async function getAnonymousToken() {
 
 /**
  * Bans an anonymous user via better-auth admin API.
- * Requires admin credentials to be set in AUTH_USERNAME and AUTH_PASSWORD env vars.
+ * Signs in as the dedicated test_station_manager fixture account via getAdminToken.
  *
  * @param {string} userId - The user ID to ban
  * @param {string} reason - The ban reason
@@ -103,7 +103,7 @@ async function banUser(userId, reason, expiresInSeconds) {
 
 /**
  * Unbans a user via better-auth admin API.
- * Requires admin credentials to be set in AUTH_USERNAME and AUTH_PASSWORD env vars.
+ * Signs in as the dedicated test_station_manager fixture account via getAdminToken.
  *
  * @param {string} userId - The user ID to unban
  * @returns {Promise<void>}
@@ -128,17 +128,21 @@ async function unbanUser(userId) {
 
 /**
  * Gets an admin JWT token for admin operations.
- * Uses AUTH_USERNAME and AUTH_PASSWORD env vars.
+ *
+ * Signs in as the dedicated test_station_manager fixture account (seeded by
+ * dev_env/seed_db.sql with a global 'admin' role via the better-auth admin
+ * plugin) rather than reading AUTH_USERNAME/AUTH_PASSWORD. Those env vars
+ * are the shared integration-test login (a plain DJ — test_dj1 in CI, see
+ * .github/workflows/test.yml) that other specs use to assert DJ-scoped
+ * permission boundaries; repointing them to an admin account would flip
+ * those assertions. Matches the sign-in pattern already used by
+ * admin-create-user-email-verify.spec.js and auth-auto-membership.spec.js.
  *
  * @returns {Promise<string>} Admin JWT token
  */
 async function getAdminToken() {
-  const username = process.env.AUTH_USERNAME;
-  const password = process.env.AUTH_PASSWORD;
-
-  if (!username || !password) {
-    throw new Error('AUTH_USERNAME and AUTH_PASSWORD environment variables must be set for admin operations');
-  }
+  const username = 'test_station_manager';
+  const password = 'testpassword123';
 
   // Sign in as admin
   const signInResponse = await fetch(`${BETTER_AUTH_URL}/sign-in/username`, {
