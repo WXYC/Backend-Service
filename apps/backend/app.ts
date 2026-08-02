@@ -38,14 +38,14 @@ import { startSseMetrics, stopSseMetrics } from './services/sse/sse-metrics.js';
 import { serverEventsMgr } from './utils/serverEvents.js';
 import { startRotationTracksCacheWarm } from './services/rotation-tracks-cache-warm.service.js';
 import { drainInFlightEnrichments } from './services/metadata/enrichment.service.js';
+import { checkDatabase } from './services/health/database-check.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
 import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
 import { requestIdMiddleware } from './middleware/requestId.js';
 import { responseMetricsMiddleware } from './middleware/responseMetrics.js';
 import { requirePermissions, resolveCorsOrigin } from '@wxyc/authentication';
-import { closeDatabaseConnection, db } from '@wxyc/database';
-import { sql } from 'drizzle-orm';
+import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 
 const port = process.env.PORT || 8080;
@@ -133,15 +133,31 @@ app.get('/testAuth', requirePermissions({ flowsheet: ['read'] }), async (req, re
 // WXYC service exposes the same status enum + per-dependency `services`
 // map. wxyc-canary checks `r.ok` only, so the body change is non-breaking
 // for the alarm. See WXYC/Backend-Service#804.
+//
+// The DB probe itself is classified by `checkDatabase()` (BS#662, epic
+// #665): a bare `catch {}` around `SELECT 1` used to collapse every
+// failure — auth, timeout, connection refused — into the same hardcoded
+// "unavailable" string, so an operator reading the response body couldn't
+// tell why it was failing without pulling logs. `services.database` now
+// carries the classified vocabulary (`auth-error | rate-limited |
+// upstream-error | network-error | error`), mirroring LML's `/health`
+// `discogs_api` probe (WXYC/library-metadata-lookup#226) so dashboards and
+// smoke tests can pattern-match across both endpoints, plus a top-level
+// `cause` with the underlying message. Status codes are unchanged (200/503).
 app.get('/healthcheck', async (req, res) => {
-  try {
-    await db.execute(sql`SELECT 1`);
+  const result = await checkDatabase();
+  if (result.status === 'ok') {
     const body: HealthCheckResponse = { status: 'healthy', services: { database: 'ok' } };
     res.json(body);
-  } catch {
-    const body: HealthCheckResponse = { status: 'unhealthy', services: { database: 'unavailable' } };
-    res.status(503).json(body);
+    return;
   }
+  console.error(`[HEALTHCHECK] database check failed (${result.status}): ${result.cause}`);
+  const body: HealthCheckResponse = {
+    status: 'unhealthy',
+    services: { database: result.status },
+    cause: result.cause,
+  };
+  res.status(503).json(body);
 });
 
 // SNS subscriber for SES Configuration Set events (`ses-delivery-events-prod`
