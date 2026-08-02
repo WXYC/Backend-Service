@@ -47,7 +47,7 @@ import * as Sentry from '@sentry/node';
 // behaving exactly as they do today, unmocked.
 jest.mock('@sentry/node', () => {
   const actual = jest.requireActual('@sentry/node');
-  return { ...actual, captureMessage: jest.fn() };
+  return { ...actual, captureMessage: jest.fn(), addBreadcrumb: jest.fn() };
 });
 
 import { db, type CheckLiveActivityFn } from '@wxyc/database';
@@ -80,7 +80,7 @@ import type {
   BuildWorkListFn,
   WorkList,
 } from '../../../../jobs/flowsheet-metadata-backfill/worklist';
-import type { LookupResponse } from '@wxyc/lml-client';
+import { LmlAuthError, LmlClientError, type LookupResponse } from '@wxyc/lml-client';
 
 type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
 const renderSql = (value: unknown): string => {
@@ -512,6 +512,107 @@ describe('processRow', () => {
     await processRow(flaggedRow, { lookup, enrich });
 
     expect(lookup).toHaveBeenCalledWith('Autechre', 'Confield', 'VI Scose Poise', true);
+  });
+});
+
+describe('processRow — LmlAuthError fail-fast (BS#1094 Layer 3)', () => {
+  const row = {
+    id: 42,
+    artist_name: 'Autechre',
+    album_title: 'Confield',
+    track_title: 'VI Scose Poise',
+    album_id: null,
+  };
+
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env = { ...originalEnv, LML_API_KEY: 'sk_live_abcdef1234567890' };
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  it('rethrows an LmlAuthError instead of returning an lml_error outcome — the row is NOT dead-lettered as retryable-forever', async () => {
+    const lookup = jest.fn<LookupFn>().mockRejectedValue(new LmlAuthError('LML responded with 401: Unauthorized', 401));
+    const enrich = jest.fn<EnrichFn>();
+
+    await expect(processRow(row, { lookup, enrich })).rejects.toThrow(LmlAuthError);
+    expect(enrich).not.toHaveBeenCalled();
+  });
+
+  it('propagates a 403 LmlAuthError the same way as a 401', async () => {
+    const lookup = jest.fn<LookupFn>().mockRejectedValue(new LmlAuthError('LML responded with 403: Forbidden', 403));
+    const enrich = jest.fn<EnrichFn>();
+
+    await expect(processRow(row, { lookup, enrich })).rejects.toThrow(LmlAuthError);
+  });
+
+  it('does NOT rethrow a generic LmlClientError (non-auth) — still counted as the retryable lml_error outcome', async () => {
+    const lookup = jest.fn<LookupFn>().mockRejectedValue(new LmlClientError('LML request failed', 502));
+    const enrich = jest.fn<EnrichFn>();
+
+    const result = await processRow(row, { lookup, enrich });
+
+    expect(result).toEqual({ outcome: 'lml_error', cacheHit: false });
+    expect(enrich).not.toHaveBeenCalled();
+  });
+
+  it('adds a Sentry breadcrumb carrying the bearer fingerprint before rethrowing', async () => {
+    const lookup = jest.fn<LookupFn>().mockRejectedValue(new LmlAuthError('LML responded with 401: Unauthorized', 401));
+    const enrich = jest.fn<EnrichFn>();
+
+    await expect(processRow(row, { lookup, enrich })).rejects.toThrow(LmlAuthError);
+
+    const addBreadcrumb = Sentry.addBreadcrumb as jest.MockedFunction<typeof Sentry.addBreadcrumb>;
+    expect(addBreadcrumb).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: 'lml.auth',
+        data: expect.objectContaining({ bearer_fingerprint: 'sk_l...7890' }),
+      })
+    );
+  });
+
+  it('logs an lml_auth_error line with the bearer fingerprint (bearer configured)', async () => {
+    const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
+    const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
+    initLogger({ repo: 'Backend-Service', tool: 'test', runId: 'run-id-lml-auth-error' });
+    const writeSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    try {
+      const lookup = jest
+        .fn<LookupFn>()
+        .mockRejectedValue(new LmlAuthError('LML responded with 401: Unauthorized', 401));
+      const enrich = jest.fn<EnrichFn>();
+
+      await expect(processRow(row, { lookup, enrich })).rejects.toThrow(LmlAuthError);
+
+      const authErrorLine = writeSpy.mock.calls
+        .map((args) => String(args[0]))
+        .find((l) => l.includes('"step":"lml_auth_error"'));
+      if (!authErrorLine) throw new Error('expected an lml_auth_error log line');
+      const parsed = JSON.parse(authErrorLine.trim());
+      expect(parsed.bearer_fingerprint).toBe('sk_l...7890');
+      expect(parsed.status_code).toBe(401);
+    } finally {
+      writeSpy.mockRestore();
+      await closeLogger();
+    }
+  });
+
+  it('renders bearer_fingerprint as "unset" when LML_API_KEY is not configured', async () => {
+    process.env = { ...originalEnv, LML_API_KEY: undefined };
+    const lookup = jest.fn<LookupFn>().mockRejectedValue(new LmlAuthError('LML responded with 403: Forbidden', 403));
+    const enrich = jest.fn<EnrichFn>();
+
+    await expect(processRow(row, { lookup, enrich })).rejects.toThrow(LmlAuthError);
+
+    const addBreadcrumb = Sentry.addBreadcrumb as jest.MockedFunction<typeof Sentry.addBreadcrumb>;
+    expect(addBreadcrumb).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ bearer_fingerprint: 'unset' }) })
+    );
   });
 });
 

@@ -37,6 +37,8 @@ import {
   ARTIST_GENRES_BATCH_CAP,
   type ArtistGenresSource,
   LmlClientError,
+  LmlAuthError,
+  lmlApiKeyFingerprint,
   checkStreamingAvailability,
   searchLibrary,
   Semaphore,
@@ -606,6 +608,91 @@ describe('lml.client', () => {
       const result = await lookupMetadata('Autechre', 'Confield');
 
       expect(result.results[0].artwork?.spotify_url).toBe(url);
+    });
+  });
+
+  describe('LmlAuthError classification (BS#1094 Layer 3)', () => {
+    it('throws LmlAuthError (not a bare LmlClientError) on a 401 response', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+      } as unknown as globalThis.Response);
+
+      await expect(lookupMetadata('Autechre', 'Confield')).rejects.toThrow(LmlAuthError);
+    });
+
+    it('throws LmlAuthError on a 403 response', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: 'Forbidden',
+      } as unknown as globalThis.Response);
+
+      await expect(lookupMetadata('Autechre', 'Confield')).rejects.toThrow(LmlAuthError);
+    });
+
+    it('carries the rejected status code on the thrown LmlAuthError', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+      } as unknown as globalThis.Response);
+
+      const caught: LmlAuthError = await lookupMetadata('Autechre', 'Confield').catch(
+        (e: unknown) => e as LmlAuthError
+      );
+      expect(caught).toBeInstanceOf(LmlAuthError);
+      expect(caught.statusCode).toBe(401);
+    });
+
+    it('LmlAuthError is an instanceof LmlClientError so existing catch-all sites keep working', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: 'Forbidden',
+      } as unknown as globalThis.Response);
+
+      const caught: unknown = await lookupMetadata('Autechre', 'Confield').catch((e: unknown) => e);
+      expect(caught).toBeInstanceOf(LmlClientError);
+    });
+
+    it('does NOT classify a non-auth 4xx (e.g. 404) as LmlAuthError', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+      } as unknown as globalThis.Response);
+
+      const caught: unknown = await lookupMetadata('Autechre', 'Confield').catch((e: unknown) => e);
+      expect(caught).toBeInstanceOf(LmlClientError);
+      expect(caught).not.toBeInstanceOf(LmlAuthError);
+    });
+
+    it('does NOT classify a 5xx as LmlAuthError', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+      } as unknown as globalThis.Response);
+
+      const caught: unknown = await lookupMetadata('Autechre', 'Confield').catch((e: unknown) => e);
+      expect(caught).toBeInstanceOf(LmlClientError);
+      expect(caught).not.toBeInstanceOf(LmlAuthError);
+    });
+  });
+
+  describe('lmlApiKeyFingerprint (BS#1094 Layer 3)', () => {
+    it('renders the first 4 and last 4 characters, joined by an ellipsis', () => {
+      expect(lmlApiKeyFingerprint('sk_live_abcdef1234567890')).toBe('sk_l...7890');
+    });
+
+    it('returns undefined when the key is unset', () => {
+      expect(lmlApiKeyFingerprint(undefined)).toBeUndefined();
+    });
+
+    it('returns undefined for a key too short to fingerprint without leaking most of it', () => {
+      expect(lmlApiKeyFingerprint('short1')).toBeUndefined();
     });
   });
 

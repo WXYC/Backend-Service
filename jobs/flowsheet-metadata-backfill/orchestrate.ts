@@ -52,7 +52,10 @@
  *     BS#1011) — is logged, counted, and the loop continues. The row stays
  *     `metadata_status = 'pending'`, so the next sweep retries it; the
  *     in-run cursor still advances, so one bad row can never wedge the
- *     drain.
+ *     drain. BS#1094 Layer 3 carve-out: an `LmlAuthError` (401/403 — the
+ *     shared `LML_API_KEY` bearer was rejected) is NOT treated as a
+ *     per-row `lml_error` — it aborts the whole run instead. See
+ *     `processRow`'s doc comment for the full rationale.
  *   - Cooperative pause: WXYC has no quiet hours — there is always a DJ in
  *     the booth. Before the work-list build and before each batch, the
  *     orchestrator probes `flowsheet` for
@@ -107,7 +110,7 @@ import {
   requirePositiveInt,
   type CheckLiveActivityFn,
 } from '@wxyc/database';
-import type { LookupResponse } from '@wxyc/lml-client';
+import { LmlAuthError, lmlApiKeyFingerprint, type LookupResponse } from '@wxyc/lml-client';
 import type { EnrichRow, EnrichOutcome } from './enrich.js';
 import { applyEnrichment as defaultApplyEnrichment, stampDeadLetter as defaultStampDeadLetter } from './enrich.js';
 import type { LookupResult } from './lml-fetch.js';
@@ -550,6 +553,23 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * `stampDeadLetter` so it leaves the cohort. Genuinely transient failures
  * (deadlock, serialization, connection drop, or an unreadable code) are left
  * unstamped and retryable, exactly as before.
+ *
+ * BS#1094 Layer 3 carve-out: an `LmlAuthError` (401/403 — the shared
+ * `LML_API_KEY` bearer was rejected) is NOT swallowed into the `lml_error`
+ * bucket. Every other LML throw is a per-row, plausibly-transient failure
+ * that the next sweep should simply retry; an auth rejection means EVERY
+ * row in this run (and the next, and the next) will fail identically until
+ * an operator re-coordinates the bearer rotation across consumers — looping
+ * on it just produces thousands of individually-unremarkable `lml_error`
+ * Sentry events with no aggregated signal that auth, specifically, is
+ * broken (the silent-stall failure mode BS#1094 was filed to close). So
+ * this branch logs + captures with a bearer fingerprint for triage, then
+ * RETHROWS — the throw propagates out of this run's batch loop, out of
+ * `runBackfill`, to `job.ts`'s top-level catch, which sets
+ * `process.exitCode = 1`. A loud, visible cron failure in GHA / Railway
+ * beats an invisible per-row loop. Acceptable per BS#1094's documented
+ * tradeoff: a brief auth blip kills one hourly run; the cron retries next
+ * cycle regardless.
  */
 export const processRow = async (
   row: EnrichRow,
@@ -563,6 +583,30 @@ export const processRow = async (
   try {
     result = await deps.lookup(artist, album, track, row.discogs_unavailable);
   } catch (error) {
+    if (error instanceof LmlAuthError) {
+      const bearerFingerprint = lmlApiKeyFingerprint() ?? 'unset';
+      Sentry.addBreadcrumb({
+        category: 'lml.auth',
+        message: `LML rejected the shared bearer with ${error.statusCode}`,
+        level: 'error',
+        data: { bearer_fingerprint: bearerFingerprint, status_code: error.statusCode, flowsheet_id: row.id },
+      });
+      log(
+        'error',
+        'lml_auth_error',
+        `LML rejected the shared LML_API_KEY bearer (status ${error.statusCode}) on flowsheet.id=${row.id} — aborting run instead of looping`,
+        { flowsheet_id: row.id, status_code: error.statusCode, bearer_fingerprint: bearerFingerprint }
+      );
+      captureError(error, 'lml_auth_error', {
+        flowsheet_id: row.id,
+        artist,
+        album,
+        track,
+        status_code: error.statusCode,
+        bearer_fingerprint: bearerFingerprint,
+      });
+      throw error;
+    }
     log('warn', 'lml_error', `LML lookup failed for flowsheet.id=${row.id}`, {
       flowsheet_id: row.id,
       error_message: (error as Error).message,
