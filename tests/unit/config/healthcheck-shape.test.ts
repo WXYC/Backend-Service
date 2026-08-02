@@ -15,6 +15,15 @@
  * exercises the live request/response path.
  *
  * Background: WXYC/Backend-Service#804, WXYC/wxyc-shared#108.
+ *
+ * BS#662 / epic #665: the backend failure branch no longer hardcodes
+ * `database: 'unavailable'` — `checkDatabase()` (see
+ * `apps/backend/services/health/database-check.ts`, unit-tested directly in
+ * `tests/unit/services/health/database-check.test.ts`) classifies the actual
+ * DB failure into `auth-error | rate-limited | upstream-error |
+ * network-error | error`, mirroring LML's `/health` `discogs_api` probe
+ * vocabulary, and the response gains a top-level `cause` string. Status
+ * codes (200/503) are unchanged.
  */
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
@@ -38,9 +47,20 @@ describe('/healthcheck response shape (HealthCheckResponse from @wxyc/shared)', 
       expect(backendAppSource).toMatch(/database\s*:\s*['"]ok['"]/);
     });
 
-    it('failure body uses status: "unhealthy" with services.database: "unavailable" and 503 status', () => {
+    it('delegates the DB probe to checkDatabase() from the health-check module (BS#662)', () => {
+      expect(backendAppSource).toMatch(
+        /import\s+\{\s*checkDatabase\s*\}\s+from\s+['"]\.\/services\/health\/database-check\.js['"]/
+      );
+      expect(backendAppSource).toMatch(/checkDatabase\s*\(\s*\)/);
+    });
+
+    it('failure body uses status: "unhealthy" with a classified services.database + cause, and 503 status', () => {
       expect(backendAppSource).toMatch(/status\s*:\s*['"]unhealthy['"]/);
-      expect(backendAppSource).toMatch(/database\s*:\s*['"]unavailable['"]/);
+      // services.database now carries the classified result (BS#662), not a
+      // hardcoded 'unavailable' literal.
+      expect(backendAppSource).toMatch(/database\s*:\s*result\.status/);
+      expect(backendAppSource).toMatch(/cause\s*:\s*result\.cause/);
+      expect(backendAppSource).not.toMatch(/database\s*:\s*['"]unavailable['"]/);
       // The catch branch must still set 503 (canary alarm depends on it).
       expect(backendAppSource).toMatch(/\.status\(\s*503\s*\)/);
     });
