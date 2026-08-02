@@ -127,7 +127,8 @@ async function unbanUser(userId) {
 }
 
 /**
- * Gets an admin JWT token for admin operations.
+ * Gets an admin bearer session token for admin operations (e.g.
+ * /admin/ban-user, /admin/unban-user).
  *
  * Signs in as the dedicated test_station_manager fixture account (seeded by
  * dev_env/seed_db.sql with a global 'admin' role via the better-auth admin
@@ -138,19 +139,25 @@ async function unbanUser(userId) {
  * those assertions. Matches the sign-in pattern already used by
  * admin-create-user-email-verify.spec.js and auth-auto-membership.spec.js.
  *
- * @returns {Promise<string>} Admin JWT token
+ * Returns the raw session token from the `set-auth-token` response header —
+ * the same convention signInAnonymous() relies on — not a `/token` JWT. The
+ * `bearer()` plugin (shared/authentication/src/auth.definition.ts) only
+ * accepts that HMAC-signed session token on `Authorization: Bearer`; the
+ * `jwt()` plugin's asymmetric-signed JWT is a separate mechanism for
+ * external resource-server verification and fails the bearer plugin's
+ * signature check, so passing it here would 401.
+ *
+ * @returns {Promise<string>} Admin bearer session token
  */
 async function getAdminToken() {
   const username = 'test_station_manager';
   const password = 'testpassword123';
 
-  // Sign in as admin
   const signInResponse = await fetch(`${BETTER_AUTH_URL}/sign-in/username`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    credentials: 'include',
     body: JSON.stringify({ username, password }),
   });
 
@@ -159,37 +166,13 @@ async function getAdminToken() {
     throw new Error(`Admin sign-in failed: ${signInResponse.status} ${errorText}`);
   }
 
-  // Extract session cookies from response
-  const cookies = signInResponse.headers.getSetCookie();
+  const token = signInResponse.headers.get('set-auth-token');
 
-  if (!cookies || cookies.length === 0) {
-    throw new Error('No session cookie received from admin sign-in');
+  if (!token) {
+    throw new Error('No session token received from admin sign-in');
   }
 
-  // Combine cookies for JWT request
-  const cookieHeader = cookies.map((cookie) => cookie.split(';')[0].trim()).join('; ');
-
-  // Get JWT token
-  const jwtResponse = await fetch(`${BETTER_AUTH_URL}/token`, {
-    method: 'GET',
-    headers: {
-      Cookie: cookieHeader,
-    },
-    credentials: 'include',
-  });
-
-  if (!jwtResponse.ok) {
-    const errorText = await jwtResponse.text();
-    throw new Error(`Admin JWT token request failed: ${jwtResponse.status} ${errorText}`);
-  }
-
-  const jwtData = await jwtResponse.json();
-
-  if (!jwtData?.token) {
-    throw new Error('No token in admin JWT response');
-  }
-
-  return jwtData.token;
+  return token;
 }
 
 module.exports = {
