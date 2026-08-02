@@ -176,13 +176,17 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
 
   // Check negative cache first (NSFW or not found)
   if (negativeCache.has(cacheKey)) {
-    // BS#989: chokepoint cache-stats projection. Only one call per terminal
-    // branch below — whichever cache decided the outcome for THIS request —
-    // rather than one per raw `.get`/`.has`/`.set` call; a request only ever
-    // hits at most one of `negativeCache`/`artworkCache` decisively (the
-    // negative-cache check short-circuits before `artworkCache` is ever
-    // touched), so there's no ambiguity about "the cache touched by the
-    // request" the projected attributes describe.
+    // BS#989: chokepoint cache-stats projection. `recordCacheLookup` projects
+    // fixed `cache_hit`/`cache_name`/`cache_size` keys onto the active request
+    // span, so two calls on one request collide — `setAttributes` is
+    // last-write-wins on those keys. We therefore project exactly once per
+    // request, on the branch that DECIDES it: the negative-cache hit here, the
+    // artwork hit below, or — on a full miss (negative miss AND artwork miss) —
+    // the single write branch that resolves the request further down (negative
+    // set, or artwork set). The intermediate artwork get-miss is deliberately
+    // NOT projected on its own; its outcome is carried by whichever write
+    // branch runs, and projecting it too would clobber that terminal signal
+    // with a stale `cache_name='artwork', cache_size=0`.
     recordCacheLookup('negative', true, negativeCache);
     res.status(404).json({ message: 'No artwork available' });
     return;
@@ -197,7 +201,6 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
     res.status(200).send(cached.data);
     return;
   }
-  recordCacheLookup('artwork', false, artworkCache);
 
   const finder = getArtworkFinder();
   const result = await finder.find({

@@ -510,6 +510,35 @@ describe('proxy.controller', () => {
           cache_capacity: 1000,
         });
       });
+
+      it('projects only the terminal negative-cache decision on a full miss, never the intermediate artwork miss (BS#989 span-collision fix)', async () => {
+        mockFind.mockResolvedValue({
+          artworkUrl: null,
+          releaseUrl: null,
+          album: null,
+          artist: null,
+          source: null,
+          confidence: 0,
+          errored: false,
+        });
+
+        const req = {
+          query: { artistName: 'Collision Guard Artist', releaseTitle: 'Collision Guard Album' },
+        } as unknown as Request;
+
+        await searchArtwork(req, createMockRes() as Response, mockNext);
+
+        // A full miss touches artworkCache (miss) then writes negativeCache, but
+        // both project onto the SAME request span with the same fixed keys. Only
+        // the terminal negative decision must be projected — projecting the
+        // artwork get-miss too would clobber it (last-write-wins), leaving a
+        // misleading span. Exactly one projection, and never `cache_name:'artwork'`.
+        expect(mockSpanSetAttributes).toHaveBeenCalledTimes(1);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith(
+          expect.objectContaining({ cache_name: 'negative', cache_hit: false })
+        );
+        expect(mockSpanSetAttributes).not.toHaveBeenCalledWith(expect.objectContaining({ cache_name: 'artwork' }));
+      });
     });
   });
 

@@ -107,9 +107,16 @@ export function recordCacheEviction(cacheName: CacheName): void {
 
 /**
  * Open a single `op: 'BackgroundJob'` Sentry span and project
- * `cache.<name>.evictions.count` (since the previous emit) + `cache.<name>.size`
- * for every registered cache, then reset the eviction counters to 0 so the
- * next emit reads as a rate, not a cumulative total.
+ * `cache.<name>.evictions.count` (since the previous *recorded* emit) +
+ * `cache.<name>.size` for every registered cache, then reset the eviction
+ * counters to 0 so the next emit reads as a rate, not a cumulative total.
+ *
+ * The reset is gated on `span.isRecording()`: when the BackgroundJob span is
+ * sampled out, `setAttributes` is a no-op (the counts were never captured), so
+ * resetting anyway would silently drop that interval's eviction pressure. When
+ * unsampled we keep the running counts to roll into the next emit — the count
+ * on a recorded emit is therefore "evictions since the last recorded emit,"
+ * which stays a faithful (if coarser under low sampling) rate.
  *
  * Exported for direct invocation in tests/ad-hoc runs without waiting on the
  * interval; `startPeriodicEmit` is the production entry point.
@@ -123,7 +130,9 @@ export function emitPeriodicCacheStats(caches: readonly RegisteredCache[]): void
         attrs[`cache.${name}.size`] = cache.size;
       }
       span.setAttributes(attrs);
-      for (const { name } of caches) evictionCounts.set(name, 0);
+      if (span.isRecording()) {
+        for (const { name } of caches) evictionCounts.set(name, 0);
+      }
     });
   } catch (err) {
     console.warn('[CacheStats] failed to project periodic cache-stats span', err);
