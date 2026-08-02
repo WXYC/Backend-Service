@@ -105,9 +105,10 @@ export const MAX_PAIRS_PER_RUN_DEFAULT = 5_000;
  * (`enumerateFreetextPairs`'s `total_plays`), not any one track — see
  * `shared/database/src/freetext-enumerate.ts`. Default conservatively to `2`:
  * single-play one-offs dominate the wasted cost the 2026-07-25 incident (see
- * BS#1814) traced to this job. `0`/unset disables the floor (drain
- * everything eligible), mirroring the `MAX_PAIRS_PER_RUN=0`-disables
- * convention above. Mirrors BS#1591's non-library play-floor for the sibling
+ * BS#1814) traced to this job. `0` disables the floor (drain everything
+ * eligible); unset applies the default (`2`) — same shape as the
+ * `MAX_PAIRS_PER_RUN=0`-disables convention above, just with a non-zero
+ * default. Mirrors BS#1591's non-library play-floor for the sibling
  * `flowsheet-metadata-backfill` job. A pair excluded by the floor this run is
  * not permanently excluded — it's simply not enumerated until its play count
  * (recomputed fresh every run from live `flowsheet` data) crosses the floor. */

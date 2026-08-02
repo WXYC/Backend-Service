@@ -23,7 +23,7 @@
  * exclusion is NOT permanent (a later play crossing the floor re-includes
  * it), and the actual drain order (including a tie-break case).
  *
- * Four independently-scoped marker groups (own `bs1822<letter>` prefix each)
+ * Five independently-scoped marker groups (own `bs1822<letter>` prefix each)
  * so one test's seed data / mid-suite mutation (Group B tops itself up)
  * can't influence another test's expectations:
  *   - Group A (floor gate): 'artist low' 1 play (below floor 2, excluded);
@@ -36,6 +36,16 @@
  *   - Group D (deterministic tiebreak): two pairs TIED on total plays (2
  *     each) but different artist names — the outer re-order's secondary
  *     `artist_name ASC` tiebreak must apply.
+ *   - Group E (defense-in-depth: floor is PAIR-level, not per-track): ONE
+ *     pair with TWO DISTINCT tracks, each played exactly once (play_count=1
+ *     per track, total_plays=2 for the pair). Group A's "at the floor" case
+ *     is a single track played twice, which a WRONGLY per-track floor
+ *     (`WHERE play_count >= minPlays` instead of the pair-level
+ *     `total_plays`) would still pass — so Group A alone can't catch that
+ *     regression. Group E's two distinct singly-played tracks only clear a
+ *     floor of 2 when the tracks' play counts are SUMMED across the pair;
+ *     under a per-track floor neither individual track (play_count=1) would
+ *     clear it and the pair would be wrongly excluded.
  *
  * Needs CI to run: requires the Docker integration DB (the `pg` marker tier)
  * plus a built `@wxyc/database` (`dist/`), same as running the app itself —
@@ -92,6 +102,12 @@ describe('catalog-popularity-freetext-resolve enumerate play-floor + play-descen
     // Group D — tied total plays (2 each), different artist names.
     for (let i = 0; i < 2; i += 1) await seedPlay('bs1822d artist b', 'bs1822d album b', 'Track');
     for (let i = 0; i < 2; i += 1) await seedPlay('bs1822d artist a', 'bs1822d album a', 'Track');
+
+    // Group E — one pair, TWO DISTINCT tracks, each played once (play_count=1
+    // per track; total_plays=2 for the pair). Only clears floor 2 under a
+    // correct PAIR-level SUM, not a per-track floor.
+    await seedPlay('bs1822e artist multi-track', 'bs1822e album multi-track', 'Track One');
+    await seedPlay('bs1822e artist multi-track', 'bs1822e album multi-track', 'Track Two');
   });
 
   afterAll(async () => {
@@ -132,5 +148,15 @@ describe('catalog-popularity-freetext-resolve enumerate play-floor + play-descen
   it('breaks a total_plays tie deterministically (artist_name ASC) so the drain order is stable', async () => {
     const rows = (await enumerateFreetextPairs(undefined, 0)).filter((r) => r.artist.startsWith('bs1822d'));
     expect(rows.map((r) => r.artist)).toEqual(['bs1822d artist a', 'bs1822d artist b']);
+  });
+
+  it('includes a pair whose plays are split across two DISTINCT tracks (1 play each) once summed — the floor is PAIR-level, not per-track', async () => {
+    // Neither individual track clears a floor of 2 on its own (play_count=1
+    // each) — this only passes under a correct pair-level SUM(play_count)
+    // across the pair's tracks. A regression to a per-track floor would wrongly
+    // exclude this pair even though Group A's single-track "at the floor" case
+    // above would still (mis-)pass.
+    const rows = (await enumerateFreetextPairs(undefined, 2)).filter((r) => r.artist.startsWith('bs1822e'));
+    expect(rows.map((r) => r.artist)).toEqual(['bs1822e artist multi-track']);
   });
 });
