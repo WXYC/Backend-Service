@@ -9,6 +9,7 @@ Free text keeps growing: every show adds more unlinked plays. The cron drains th
 ## How it works
 
 1. `SELECT DISTINCT ON (artist_name, album_title) artist_name, album_title, track_title` from `flowsheet WHERE entry_type='track' AND album_id IS NULL`, over an inner `GROUP BY (artist_name, album_title, track_title)` play-count so the ordering can pick the pair's **most-played non-empty** `track_title` as its representative (BS#1767 — carries a representative track into the LML lookup instead of album-title-only). The most-played track is the album's canonical track; an alphabetically-first 'A…' bonus/intro title is an arbitrary, low-signal representative that resolves worse. Ordering: non-empty first (`btrim(coalesce(track_title,''))='' ASC`), then `play_count DESC`, then `track_title ASC` (deterministic tiebreak). Scoped inside `db.transaction` + `SET LOCAL statement_timeout` (the `album_id IS NULL` partition isn't index-covered; the GROUP BY subquery measured ~17s on prod, within the raised timeout). `DISTINCT ON` over the grouped subquery keeps the result to one row per `(artist, album)` pair (cardinality unchanged — the GROUP BY only picks a better representative track); there is no `track_title IS NOT NULL` filter, so a pair whose plays are all track-less still enumerates and falls back to album-only.
+   - **Play-floor + play-descending drain (BS#1822).** A middle layer sums the inner GROUP BY's per-track `play_count` across a pair's tracks (`SUM(play_count) OVER (PARTITION BY artist_name, album_title) AS total_plays`). When `FREETEXT_RESOLVE_MIN_PLAYS` is set above `0`, a `WHERE total_plays >= :minPlays` predicate gates the eligible set BEFORE `DISTINCT ON` reduces it to one representative row per pair — a pair with only 1-2 plays overall (the uncacheable long tail that starved LML on 2026-07-25, see BS#1814) is skipped entirely, never sent to LML. The floor is a **live recomputation** every run, not a persisted exclusion: a pair that clears the floor later (more plays accrue) simply becomes eligible on a subsequent run with no separate re-arm step. The whole `DISTINCT ON` query is then wrapped in an outer `SELECT ... ORDER BY total_plays DESC, artist_name ASC, album_title ASC` so pairs drain most-played-first (the outer re-order is necessary because `DISTINCT ON` requires its own leading `ORDER BY` to match its distinct columns, so the play-descending order can't be bolted onto that same clause) — the representative-track pick's inner ordering (non-empty-first, most-played, deterministic tiebreak) is completely unchanged by this.
 2. Fold the raw pairs into normalized dedup keys in JS: `(normalizeArtistName(artist), normalizeAlbumTitle(album))`. The flowsheet free text holds tens of thousands of edition/pressing variants ("Pet Sounds", "Pet Sounds (Remastered)", "Pet Sounds - 2011 Remaster") that collapse to one logical album. SQL has no album-title normalizer, so the dedup happens in JS; one representative raw pair per key (artist, album, AND its representative track) is kept for the LML lookup. The dedup key itself stays `(norm_artist, norm_album)` — the track only improves _which release_ LML resolves to, never what gets attributed.
 3. Load the skip set: pairs already resolved (release id present, permanent) or no-match inside the TTL window. `attempt_at IS NULL` rows (never-tried + transient-failed) are always eligible.
 4. Call LML `POST /api/v1/lookup/bulk` with batches of `FREETEXT_RESOLVE_BULK_BATCH_SIZE` items (default 5), including `song` on each item ONLY when the representative track is non-empty (a track-less pair sends artist+album exactly as before). The per-batch fetch timeout scales with batch size (`batchSize × 5 s + 5 s` slack), same derivation as `album-level-backfill`.
@@ -47,9 +48,9 @@ The run's summary and terminal log line record why it stopped: `stopReason: 'bac
 
 `LIVE_ACTIVITY_LOOKBACK_SECONDS` default raised `60s → 300s` (5 min). The flowsheet gap between songs is 3-5 min, so the old 60s lookback read "quiet" between almost every track and the job proceeded right into the streaming-check-on-add window a fresh add triggers — the pause never reliably parked the job for an overnight live show. 300s comfortably covers the song gap. The pause loop (`awaitQuietWindow`) is also now deadline-aware: without that, a DJ active continuously right at the stop hour would otherwise carry the run past the deadline indefinitely (the loop previously only exited on quiet). **Note:** `LIVE_ACTIVITY_LOOKBACK_SECONDS` is a generic env-var name shared across jobs — this raised compiled default only changes behavior for _this job's_ container, and only when the var is unset there; if prod sets it explicitly for this job already, update that value too.
 
-### Out of scope (follow-up)
+### Play-floor + play-descending drain (BS#1822)
 
-A play-floor on the eligible set (gate free-text pairs on a minimum play count, mirroring BS#1591's `flowsheet-metadata-backfill` fix) would shrink the backlog structurally so the deadline rarely even binds — tracked as a separate fast-follow, not part of BS#1814.
+The fast-follow flagged above landed as BS#1822: `FREETEXT_RESOLVE_MIN_PLAYS` (default `2`) gates the eligible set on a minimum PAIR-level play count and the enumerate query drains pairs most-played-first, both described in "How it works" above. This shrinks the backlog structurally (the uncacheable single-play long tail is never enumerated at all) so the BS#1814 stop-by deadline rarely even binds — a run tends to fit the overnight window on its own instead of relying on the deadline to cut it short.
 
 ## Run procedure (manual, e.g. catch-up)
 
@@ -63,10 +64,12 @@ ssh wxyc-ec2
 # 3. Dry-run first to verify env + scope (enumerates + normalizes + filters, no LML calls, no writes)
 docker run --rm --env-file .env <image> --dry-run
 
-# 4. Run for real. At defaults (batch=5, rate=1/min ≈ 5 pairs/min, cap 5000/run)
-#    one nightly run drains up to 5000 eligible pairs. For a catch-up backfill
-#    of the full long tail, bump FREETEXT_RESOLVE_BULK_RATE_PER_MIN,
-#    FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN=0 (disable the cap), and — for a
+# 4. Run for real. At defaults (batch=5, rate=1/min ≈ 5 pairs/min, cap 5000/run,
+#    min plays=2) one nightly run drains up to 5000 eligible pairs,
+#    most-played first. For a catch-up backfill of the full long tail
+#    (including sub-floor one-offs), bump FREETEXT_RESOLVE_BULK_RATE_PER_MIN,
+#    FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN=0 (disable the cap),
+#    FREETEXT_RESOLVE_MIN_PLAYS=0 (disable the floor), and — for a
 #    supervised drain that must run past the overnight window —
 #    FREETEXT_RESOLVE_STOP_BY_UTC= (empty, disables the wall-clock stop-by).
 docker run --rm --env-file .env <image> 2>&1 | tee /tmp/freetext-resolve.log
@@ -81,6 +84,7 @@ docker run --rm --env-file .env <image> 2>&1 | tee /tmp/freetext-resolve.log
 | `FREETEXT_RESOLVE_BULK_BUDGET_MS`    | `25000`                   | Per-item budget forwarded to LML as `X-Caller-Budget-Ms`. NOT the batch fetch timeout.                                                                                                                                                                                                   |
 | `FREETEXT_RESOLVE_NO_MATCH_TTL_DAYS` | `30`                      | A no-match pair is re-attempted once its `attempt_at` is older than this.                                                                                                                                                                                                                |
 | `FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN` | `5000`                    | Cap on distinct eligible pairs processed per run. `0` disables the cap (drain everything eligible).                                                                                                                                                                                      |
+| `FREETEXT_RESOLVE_MIN_PLAYS`         | `2`                       | BS#1822 minimum PAIR-level play-count floor (summed across a pair's tracks), gating the eligible set before enumeration. `0`/unset disables the floor (drain everything eligible, including single-play pairs).                                                                          |
 | `FREETEXT_RESOLVE_READ_TIMEOUT_MS`   | `300000` (5min)           | `SET LOCAL statement_timeout` for the DISTINCT enumerate scan.                                                                                                                                                                                                                           |
 | `FREETEXT_RESOLVE_STOP_BY_UTC`       | `11:00`                   | BS#1814 absolute UTC wall-clock stop-by ("HH:MM", 24h, zero-padded). Same-day only — never rolls to tomorrow. Checked before every batch and around the cooperative pause. Explicitly empty (`=`) disables the bound (unbounded supervised full-drain); unset falls back to the default. |
 | `LIVE_ACTIVITY_LOOKBACK_SECONDS`     | `300` (BS#1814, was `60`) | Cooperative-pause lookback window; `0` disables. Deadline-aware (BS#1814): won't spin past `FREETEXT_RESOLVE_STOP_BY_UTC`.                                                                                                                                                               |
@@ -125,6 +129,7 @@ After the re-arm, the next scheduled run (or a manual catch-up per "Run procedur
 
 ## Related
 
+- [BS#1822](https://github.com/WXYC/Backend-Service/issues/1822) — the play-count floor + play-descending drain (this README's "How it works" step 1 sub-bullet and "Play-floor + play-descending drain" section above), mirroring BS#1591's `flowsheet-metadata-backfill` fix so the job stops burning LML budget on the uncacheable single-play long tail.
 - [BS#1814](https://github.com/WXYC/Backend-Service/issues/1814) — the absolute stop-by wall-clock bound + strengthened cooperative pause (this README's "Window bound" and "Strengthened cooperative pause" sections above), fixing the overnight-window overrun that starved LML into a congestion collapse on 2026-07-25.
 - [BS#1767](https://github.com/WXYC/Backend-Service/issues/1767) — carries a representative track title into the bulk lookup (this README's "Post-deploy re-drain" section); +16pts / ~3.7x match-rate lift, 0 regressions in the A/B probe.
 - [BS#1491](https://github.com/WXYC/Backend-Service/issues/1491) — this job's parent issue (blocks Track 2, BS#1492).

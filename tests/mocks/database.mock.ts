@@ -524,24 +524,32 @@ export type { RawPair } from '../../shared/database/src/freetext-enumerate.js';
 // keep consuming it in the same order unchanged. The real SQL-shape contract
 // is pinned against the actual module directly by
 // tests/unit/database/freetext-enumerate.test.ts.
-export const enumerateFreetextPairs = async (
-  _timeoutMs?: number
-): Promise<Array<{ artist: string; album: string; song: string }>> => {
-  return db.transaction(async (tx: unknown) => {
-    const { execute } = tx as { execute: (arg: unknown) => Promise<unknown> };
-    await execute({}); // SET LOCAL statement_timeout placeholder
-    const rows = (await execute({})) as Array<{
-      artist_name: string;
-      album_title: string;
-      track_title: string | null;
-    }>;
-    return rows.map((r) => ({
-      artist: String(r.artist_name),
-      album: String(r.album_title),
-      song: (r.track_title ?? '').trim(),
-    }));
-  }) as unknown as Promise<Array<{ artist: string; album: string; song: string }>>;
-};
+//
+// Wrapped in `jest.fn(...)` (BS#1822) so job.test.ts can assert `runResolve`
+// threads `options.minPlays` into this call (`.mock.calls`) without needing to
+// duplicate the real floor/order-by SQL logic here — that contract is pinned
+// against the actual module by tests/unit/database/freetext-enumerate.test.ts
+// and the real-PG integration spec. `clearMocks: true` in jest.unit.config.ts
+// resets `.mock.calls` between tests but preserves this factory-supplied
+// implementation (only `mockReset()`, not `mockClear()`, would drop it).
+export const enumerateFreetextPairs = jest.fn(
+  async (_timeoutMs?: number, _minPlays?: number): Promise<Array<{ artist: string; album: string; song: string }>> => {
+    return db.transaction(async (tx: unknown) => {
+      const { execute } = tx as { execute: (arg: unknown) => Promise<unknown> };
+      await execute({}); // SET LOCAL statement_timeout placeholder
+      const rows = (await execute({})) as Array<{
+        artist_name: string;
+        album_title: string;
+        track_title: string | null;
+      }>;
+      return rows.map((r) => ({
+        artist: String(r.artist_name),
+        album: String(r.album_title),
+        song: (r.track_title ?? '').trim(),
+      }));
+    }) as unknown as Promise<Array<{ artist: string; album: string; song: string }>>;
+  }
+);
 
 // Pure normalizers (no DB dependency) re-exported from source so consumer jobs
 // resolving @wxyc/database via this mock still get the real implementation.
