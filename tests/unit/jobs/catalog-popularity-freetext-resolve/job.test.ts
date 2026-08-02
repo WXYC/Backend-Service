@@ -18,6 +18,11 @@ const mockBulkLookupMetadata = jest.fn<(items: unknown, opts?: unknown) => Promi
 jest.mock('@wxyc/lml-client', () => ({
   __esModule: true,
   bulkLookupMetadata: mockBulkLookupMetadata,
+  // BS#1518: faithful stand-in for the shared trust predicate `verdictFromLookup`
+  // now delegates to, mirroring its real (and only) rule — see
+  // tests/unit/jobs/rotation-release-id-backfill/lml-fetch.test.ts for the
+  // same pattern against the same predicate.
+  isTrustedLmlAlbumMatch: (r: { search_type?: string }) => r?.search_type === 'direct',
 }));
 
 const mockSentryAddBreadcrumb = jest.fn<(b: unknown) => void>();
@@ -70,8 +75,20 @@ import {
   parseStopByUtc,
   computeStopByDeadlineMs,
   isPastStopBy,
+  // BS#1518: trust gate + existing-row re-verdict sweep.
+  REVERIFY_FLAG,
+  EXECUTE_FLAG,
+  countReverifyCandidates,
+  loadReverifyCandidates,
+  selectReverifyTargets,
+  nullTrustRejectedRow,
+  runReverifyBatch,
+  resolveReverifyOptions,
+  runReverify,
   type NormalizedPair,
   type ResolveOptions,
+  type ReverifyCandidateRow,
+  type ReverifyTarget,
 } from '../../../../jobs/catalog-popularity-freetext-resolve/job';
 
 type SqlLike = {
@@ -123,8 +140,16 @@ const stripEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
   return out;
 };
 
-// A lookup response carrying a real release (release_id > 0).
-const lookupWithRelease = (releaseId = 12345, confidence = 0.91): { results: unknown[] } => ({
+// A lookup response carrying a real release (release_id > 0). `searchType`
+// defaults to 'direct' (BS#1518's trust gate passes) so every pre-existing
+// call site that predates the gate keeps its original "this is a real match"
+// intent; pass a non-direct value to exercise the gate's reject path.
+const lookupWithRelease = (
+  releaseId = 12345,
+  confidence = 0.91,
+  searchType: string = 'direct'
+): { results: unknown[]; search_type: string } => ({
+  search_type: searchType,
   results: [
     { artwork: { release_id: releaseId, release_url: `https://www.discogs.com/release/${releaseId}`, confidence } },
   ],
@@ -354,16 +379,69 @@ describe('verdictFromLookup', () => {
     const v = verdictFromLookup(pair, lookupWithRelease(0));
     expect(v.discogs_release_id).toBeNull();
     expect(v.match_confidence).toBeNull();
+    expect(v.trustRejected).toBeUndefined();
   });
 
   it('returns a null verdict when there is no artwork', () => {
     const v = verdictFromLookup(pair, { results: [] });
     expect(v.discogs_release_id).toBeNull();
+    expect(v.trustRejected).toBeUndefined();
   });
 
   it('returns a null verdict when lookup is null', () => {
     const v = verdictFromLookup(pair, null);
     expect(v.discogs_release_id).toBeNull();
+    expect(v.trustRejected).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // BS#1518: trust-gate a candidate release id on isTrustedLmlAlbumMatch.
+  // ---------------------------------------------------------------------------
+
+  it.each(['fallback', 'alternative', 'compilation', 'song_as_artist', 'none'])(
+    "collapses a candidate release id to the null verdict AND flags trustRejected when search_type is '%s' (not direct)",
+    (searchType) => {
+      const v = verdictFromLookup(pair, lookupWithRelease(9999, 0.87, searchType));
+      // Byte-identical to the genuine-no-match shape (same two nulled fields)
+      // PLUS the trustRejected flag a genuine no-match never carries — the
+      // spec's "collapses to the SAME null verdict branch" requirement.
+      expect(v).toEqual({
+        norm_artist: 'j dilla',
+        norm_album: 'donuts',
+        discogs_release_id: null,
+        match_confidence: null,
+        trustRejected: true,
+      });
+    }
+  );
+
+  it('fails closed (rejects) when search_type is absent entirely', () => {
+    // No `search_type` key at all — the SSOT models it optional; a caller
+    // that maintains its own trimmed response type may omit it entirely.
+    const lookup = { results: [{ artwork: { release_id: 9999, confidence: 0.87 } }] };
+    const v = verdictFromLookup(pair, lookup);
+    expect(v.discogs_release_id).toBeNull();
+    expect(v.trustRejected).toBe(true);
+  });
+
+  it('still resolves a direct match unaffected by the gate', () => {
+    const v = verdictFromLookup(pair, lookupWithRelease(4242, 0.95, 'direct'));
+    expect(v).toEqual({
+      norm_artist: 'j dilla',
+      norm_album: 'donuts',
+      discogs_release_id: 4242,
+      match_confidence: 0.95,
+    });
+    expect(v.trustRejected).toBeUndefined();
+  });
+
+  it('does NOT gate the BS#1185 streaming-only sentinel on search_type (already null before the gate check)', () => {
+    // release_id === 0 short-circuits to the null branch before
+    // isTrustedLmlAlbumMatch is ever consulted, regardless of search_type —
+    // this is not a trust rejection, so trustRejected must stay absent.
+    const v = verdictFromLookup(pair, lookupWithRelease(0, undefined, 'alternative'));
+    expect(v.discogs_release_id).toBeNull();
+    expect(v.trustRejected).toBeUndefined();
   });
 });
 
@@ -572,6 +650,43 @@ describe('runBatch', () => {
       'catalog-popularity-freetext-resolve.unexpected_index',
       expect.objectContaining({ fingerprint: ['catalog-popularity-freetext-resolve', 'unexpected_index'] })
     );
+  });
+
+  // ---------------------------------------------------------------------------
+  // BS#1518: trust_rejected counter.
+  // ---------------------------------------------------------------------------
+
+  it('BS#1518: a match with a non-direct search_type UPSERTs a null release id and counts trust_rejected (not no_match)', async () => {
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [
+        { index: 0, status: 'match', lookup: lookupWithRelease(9999, 0.5, 'alternative') },
+        { index: 1, status: 'match', lookup: lookupWithRelease() }, // direct — unaffected
+      ],
+    });
+    const out = await runBatch([pairA, pairB], { budgetMs: 25000, dryRun: false });
+    // Both LML results carry 'match' status (LML answered both), so `match`
+    // reflects the wire status same as before this gate — only the PERSISTED
+    // verdict differs, and only `trust_rejected` (not `no_match`) records it.
+    expect(out).toMatchObject({ match: 2, no_match: 0, trust_rejected: 1, upserts: 2 });
+
+    const insertChain = (db as unknown as { _chain: Record<string, jest.Mock> })._chain;
+    const rejectedValues = insertChain.values.mock.calls[0]?.[0] as { discogs_release_id: number | null };
+    const trustedValues = insertChain.values.mock.calls[1]?.[0] as { discogs_release_id: number | null };
+    expect(rejectedValues.discogs_release_id).toBeNull();
+    expect(trustedValues.discogs_release_id).toBe(12345);
+  });
+
+  it('a genuine no_match status does not increment trust_rejected', async () => {
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'no_match', lookup: { results: [] } }],
+    });
+    const out = await runBatch([pairA], { budgetMs: 25000, dryRun: false });
+    expect(out).toMatchObject({ match: 0, no_match: 1, trust_rejected: 0 });
+  });
+
+  it('dry-run reports trust_rejected: 0 (no LML call, nothing to gate)', async () => {
+    const out = await runBatch([pairA, pairB], { budgetMs: 25000, dryRun: true });
+    expect(out).toMatchObject({ trust_rejected: 0 });
   });
 });
 
@@ -997,5 +1112,253 @@ describe('runResolve — absolute stop-by deadline (BS#1814)', () => {
     expect(summary.stopReason).toBe('backlog_drained');
     expect(summary.batches).toBe(1);
     expect(summary.batchesRun).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BS#1518: existing-row re-verdict sweep (`--reverify-existing`).
+// ---------------------------------------------------------------------------
+
+describe('selectReverifyTargets', () => {
+  const jDilla: NormalizedPair = { norm_artist: 'j dilla', norm_album: 'donuts', artist: 'J Dilla', album: 'Donuts' };
+  const kendrick: NormalizedPair = {
+    norm_artist: 'kendrick lamar',
+    norm_album: 'damn.',
+    artist: 'Kendrick Lamar',
+    album: 'DAMN.',
+  };
+
+  it('keeps only normalized pairs whose key is an existing resolved candidate row', () => {
+    const candidates = new Map<string, ReverifyCandidateRow>([
+      [pairKey('j dilla', 'donuts'), { norm_artist: 'j dilla', norm_album: 'donuts', discogs_release_id: 9999 }],
+    ]);
+    expect(selectReverifyTargets([jDilla, kendrick], candidates)).toEqual([jDilla]);
+  });
+
+  it('returns an empty array when no normalized pair matches any candidate', () => {
+    expect(selectReverifyTargets([jDilla, kendrick], new Map())).toEqual([]);
+  });
+
+  it('returns an empty array when there are no normalized pairs to check', () => {
+    const candidates = new Map<string, ReverifyCandidateRow>([
+      [pairKey('j dilla', 'donuts'), { norm_artist: 'j dilla', norm_album: 'donuts', discogs_release_id: 9999 }],
+    ]);
+    expect(selectReverifyTargets([], candidates)).toEqual([]);
+  });
+});
+
+describe('countReverifyCandidates / loadReverifyCandidates', () => {
+  it('counts rows scoped to discogs_release_id IS NOT NULL AND match_source = lml_bulk_lookup', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ count: 3 }]);
+    const count = await countReverifyCandidates();
+    expect(count).toBe(3);
+    const text = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
+    expect(text).toMatch(/FROM\s+"?wxyc_schema"?\."?flowsheet_freetext_resolution"?/i);
+    expect(text).toMatch(/"?discogs_release_id"?\s+IS\s+NOT\s+NULL/i);
+    expect(text).toMatch(/"?match_source"?\s*=/i);
+  });
+
+  it('returns 0 when no rows match', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+    expect(await countReverifyCandidates()).toBe(0);
+  });
+
+  it('loads candidate rows keyed by pairKey', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([
+      { norm_artist: 'j dilla', norm_album: 'donuts', discogs_release_id: 9999 },
+    ]);
+    const map = await loadReverifyCandidates();
+    expect(map.size).toBe(1);
+    expect(map.get(pairKey('j dilla', 'donuts'))).toEqual({
+      norm_artist: 'j dilla',
+      norm_album: 'donuts',
+      discogs_release_id: 9999,
+    });
+  });
+});
+
+describe('nullTrustRejectedRow', () => {
+  it('NULLs discogs_release_id, discogs_master_id, and resolved_at, guarded on the previous release id', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ norm_artist: 'j dilla' }]);
+    const out = await nullTrustRejectedRow('j dilla', 'donuts', 9999);
+    expect(out).toEqual({ written: true });
+
+    const text = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
+    expect(text).toMatch(/UPDATE\s+"?wxyc_schema"?\."?flowsheet_freetext_resolution"?/i);
+    expect(text).toMatch(/"?discogs_release_id"?\s*=\s*NULL/i);
+    expect(text).toMatch(/"?discogs_master_id"?\s*=\s*NULL/i);
+    expect(text).toMatch(/"?resolved_at"?\s*=\s*NULL/i);
+    expect(text).toMatch(/WHERE/i);
+  });
+
+  it('reports written: false when the guard finds 0 rows (raced — a concurrent write already changed it)', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+    const out = await nullTrustRejectedRow('j dilla', 'donuts', 9999);
+    expect(out).toEqual({ written: false });
+  });
+});
+
+describe('runReverifyBatch', () => {
+  const target: ReverifyTarget = {
+    norm_artist: 'j dilla',
+    norm_album: 'donuts',
+    artist: 'J Dilla',
+    album: 'Donuts',
+    discogs_release_id: 9999,
+  };
+
+  it('nulls a trust-rejected row when --execute is set', async () => {
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'match', lookup: lookupWithRelease(4242, 0.5, 'alternative') }],
+    });
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ norm_artist: 'j dilla' }]);
+
+    const out = await runReverifyBatch([target], { budgetMs: 25000, execute: true });
+    expect(out).toMatchObject({ nulled: 1, unchanged: 0, raced: 0, error: 0 });
+    expect(db.execute as jest.Mock).toHaveBeenCalledTimes(1);
+  });
+
+  it('dry-run (execute: false) writes nothing but still counts the row as nulled (planned)', async () => {
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'match', lookup: lookupWithRelease(4242, 0.5, 'alternative') }],
+    });
+
+    const out = await runReverifyBatch([target], { budgetMs: 25000, execute: false });
+    expect(out).toMatchObject({ nulled: 1, unchanged: 0, raced: 0, error: 0 });
+    // The core data-safety assertion: dry-run makes zero DB writes.
+    expect(db.execute as jest.Mock).not.toHaveBeenCalled();
+    expect(db.update as jest.Mock).not.toHaveBeenCalled();
+  });
+
+  it('leaves a still-trusted direct match untouched (never REPLACES an id, only nulls a rejected one)', async () => {
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'match', lookup: lookupWithRelease(4242, 0.99, 'direct') }],
+    });
+    const out = await runReverifyBatch([target], { budgetMs: 25000, execute: true });
+    expect(out).toMatchObject({ nulled: 0, unchanged: 1 });
+    expect(db.execute as jest.Mock).not.toHaveBeenCalled();
+  });
+
+  it('leaves a row untouched when the fresh lookup is a genuine no-match this time (not a trust rejection)', async () => {
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'no_match', lookup: { results: [] } }],
+    });
+    const out = await runReverifyBatch([target], { budgetMs: 25000, execute: true });
+    expect(out).toMatchObject({ nulled: 0, unchanged: 1 });
+    expect(db.execute as jest.Mock).not.toHaveBeenCalled();
+  });
+
+  it('counts a raced guard trip separately from a clean null', async () => {
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'match', lookup: lookupWithRelease(4242, 0.5, 'alternative') }],
+    });
+    (db.execute as jest.Mock).mockResolvedValueOnce([]); // guard tripped: 0 rows updated
+    const out = await runReverifyBatch([target], { budgetMs: 25000, execute: true });
+    expect(out).toMatchObject({ nulled: 0, raced: 1 });
+  });
+
+  it('counts a per-item LML error and leaves the row untouched', async () => {
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'error', lookup: null, message: 'BoomError' }],
+    });
+    const out = await runReverifyBatch([target], { budgetMs: 25000, execute: true });
+    expect(out).toMatchObject({ error: 1, nulled: 0, unchanged: 0 });
+  });
+
+  it('an HTTP-level throw counts the whole chunk as error', async () => {
+    mockBulkLookupMetadata.mockRejectedValueOnce(new Error('LML timed out'));
+    const out = await runReverifyBatch([target], { budgetMs: 25000, execute: true });
+    expect(out).toMatchObject({ error: 1, nulled: 0 });
+  });
+
+  it('returns an all-zero result for an empty target list without calling LML', async () => {
+    const out = await runReverifyBatch([], { budgetMs: 25000, execute: true });
+    expect(out).toEqual({ batchSize: 0, nulled: 0, unchanged: 0, raced: 0, error: 0, unexpected_index: 0 });
+    expect(mockBulkLookupMetadata).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveReverifyOptions', () => {
+  it('defaults execute to false (dry-run by default)', () => {
+    const options = resolveReverifyOptions({}, []);
+    expect(options.execute).toBe(false);
+  });
+
+  it('sets execute: true when --execute is passed', () => {
+    const options = resolveReverifyOptions({}, [EXECUTE_FLAG]);
+    expect(options.execute).toBe(true);
+  });
+
+  it('the reverify mode is selected by REVERIFY_FLAG, distinct from the normal run flags', () => {
+    expect(REVERIFY_FLAG).toBe('--reverify-existing');
+    expect(EXECUTE_FLAG).toBe('--execute');
+    // Passing REVERIFY_FLAG alone (no --execute) does not flip execute on —
+    // main() checks REVERIFY_FLAG to pick the mode; resolveReverifyOptions
+    // only reads EXECUTE_FLAG for the write toggle.
+    const options = resolveReverifyOptions({}, [REVERIFY_FLAG]);
+    expect(options.execute).toBe(false);
+  });
+});
+
+describe('runReverify', () => {
+  const reverifyOptions = (execute: boolean) => ({
+    batchSize: 5,
+    ratePerMin: 1000, // avoid inter-batch sleeps slowing the test
+    budgetMs: 25000,
+    readTimeoutMs: READ_TIMEOUT_DEFAULT,
+    liveActivityLookbackSeconds: 0,
+    liveActivityPauseMs: 0,
+    execute,
+  });
+
+  it('no-ops cleanly (no LML calls) when there are zero candidates', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ count: 0 }]);
+    const summary = await runReverify(reverifyOptions(false));
+    expect(summary).toMatchObject({ candidateCount: 0, matched: 0, batches: 0, nulled: 0 });
+    expect(mockBulkLookupMetadata).not.toHaveBeenCalled();
+  });
+
+  it('dry-run: locates the candidate via current enumerate data, gates it, and reports nulled without writing', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ count: 1 }]); // countReverifyCandidates
+    (db.execute as jest.Mock).mockResolvedValueOnce([
+      { norm_artist: 'j dilla', norm_album: 'donuts', discogs_release_id: 9999 },
+    ]); // loadReverifyCandidates
+    (enumerateFreetextPairs as jest.Mock).mockResolvedValueOnce([{ artist: 'J Dilla', album: 'Donuts', song: '' }]);
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'match', lookup: lookupWithRelease(4242, 0.5, 'alternative') }],
+    });
+
+    const summary = await runReverify(reverifyOptions(false));
+    expect(summary).toMatchObject({ candidateCount: 1, matched: 1, unmatched: 0, nulled: 1, unchanged: 0 });
+    // Only the two read calls above — no UPDATE in dry-run.
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(2);
+  });
+
+  it('--execute: nulls the trust-rejected candidate', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ count: 1 }]); // countReverifyCandidates
+    (db.execute as jest.Mock).mockResolvedValueOnce([
+      { norm_artist: 'j dilla', norm_album: 'donuts', discogs_release_id: 9999 },
+    ]); // loadReverifyCandidates
+    (enumerateFreetextPairs as jest.Mock).mockResolvedValueOnce([{ artist: 'J Dilla', album: 'Donuts', song: '' }]);
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'match', lookup: lookupWithRelease(4242, 0.5, 'alternative') }],
+    });
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ norm_artist: 'j dilla' }]); // nullTrustRejectedRow
+
+    const summary = await runReverify(reverifyOptions(true));
+    expect(summary).toMatchObject({ candidateCount: 1, matched: 1, nulled: 1, unchanged: 0, raced: 0 });
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(3);
+  });
+
+  it('counts a candidate as unmatched (left untouched) when its raw text is no longer found', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([{ count: 1 }]); // countReverifyCandidates
+    (db.execute as jest.Mock).mockResolvedValueOnce([
+      { norm_artist: 'stray artist', norm_album: 'stray album', discogs_release_id: 555 },
+    ]); // loadReverifyCandidates
+    (enumerateFreetextPairs as jest.Mock).mockResolvedValueOnce([{ artist: 'J Dilla', album: 'Donuts', song: '' }]);
+
+    const summary = await runReverify(reverifyOptions(false));
+    expect(summary).toMatchObject({ candidateCount: 1, matched: 0, unmatched: 1, batches: 0 });
+    expect(mockBulkLookupMetadata).not.toHaveBeenCalled();
   });
 });
