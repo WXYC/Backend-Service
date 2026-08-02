@@ -25,7 +25,8 @@ jest.mock('@sentry/node', () => ({
   captureException: jest.fn(),
 }));
 
-import { db } from '@wxyc/database';
+import { db, shows } from '@wxyc/database';
+import { and, eq, isNull } from 'drizzle-orm';
 import express from 'express';
 import request from 'supertest';
 
@@ -559,6 +560,74 @@ describe('POST /internal/flowsheet-webhook', () => {
     const setMock = (mockChain as unknown as { set: jest.Mock }).set;
     return setMock.mock.calls[0]![0] as Record<string, unknown>;
   };
+
+  // -- show_end → shows.end_time fast-path (BS#1861 option (a)) --
+  //
+  // The webhook's stub-show flow defers `shows.end_time` to the next
+  // flowsheet-etl tick; a show_end delivery now also backfills it here, from
+  // the same timestamp the marker row itself gets, guarded WHERE end_time IS
+  // NULL so a redelivery (or a value the ETL already repaired) is never
+  // clobbered. Each test drains the heal probe empty and forces a fresh
+  // INSERT so this new update is the ONLY update call in the request,
+  // keeping the shared mock chain's `.set`/`.where` call history unambiguous.
+
+  it('sets shows.end_time from the marker timestamp on a show_end delivery', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'Iman Amadou' }]) // resolveShow
+      .mockResolvedValueOnce([]) // resolveAlbumId
+      .mockResolvedValueOnce([]) // heal probe → nothing to heal
+      .mockResolvedValue([]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]); // fresh INSERT
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, flowsheetEntryType: 10 } });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(mockUpdate).toHaveBeenCalledWith(shows);
+    expect(lastUpdateSet()).toEqual({ end_time: new Date(validEntry.startTime) });
+
+    const whereMock = (mockChain as unknown as { where: jest.Mock }).where;
+    expect(whereMock).toHaveBeenCalledWith(and(eq(shows.id, 9999), isNull(shows.end_time)));
+  });
+
+  it('does not touch shows.end_time on a non-show_end delivery', async () => {
+    mockLimit.mockReset();
+    mockLimit
+      .mockResolvedValueOnce([{ id: 9999, dj_name: 'Iman Amadou' }]) // resolveShow
+      .mockResolvedValueOnce([]) // resolveAlbumId
+      .mockResolvedValueOnce([]) // heal probe → nothing to heal
+      .mockResolvedValue([]);
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]); // fresh INSERT
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: validEntry }); // track (flowsheetEntryType: 6)
+
+    expect(res.status).toBe(200);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it('does not touch shows.end_time on a show_end delivery with no resolvable show (radioShowId=0)', async () => {
+    mockLimit.mockReset();
+    mockReturning.mockReset();
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]); // fresh INSERT
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({
+        action: 'create',
+        entry: { ...validEntry, flowsheetEntryType: 10, radioShowId: 0, libraryReleaseId: 0, rotationReleaseId: 0 },
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
 
   it('UPDATE on conflict refreshes dj_name for a marker entry when the show resolves to a non-null name', async () => {
     // resolveShow → {id:9999, dj_name:'Aubrey'}; INSERT conflict (empty

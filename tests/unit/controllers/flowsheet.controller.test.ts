@@ -38,6 +38,11 @@ const mockStartShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockAddDJToShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockEndShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockServiceLeaveShow = jest.fn<() => Promise<Record<string, unknown>>>();
+// BS#1861 (b)/(c): joinShow's belt-and-braces checks. Default to the
+// pre-existing behavior (show open per end_time, DJ not already active) so
+// every joinShow test not specifically about these guards is unaffected.
+const mockIsLatestEntryShowEnd = jest.fn<() => Promise<boolean>>().mockResolvedValue(false);
+const mockIsDjAlreadyActiveOnShow = jest.fn<() => Promise<boolean>>().mockResolvedValue(false);
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getEntriesByPage: mockGetEntriesByPage,
@@ -62,6 +67,8 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   addDJToShow: mockAddDJToShow,
   endShow: mockEndShow,
   leaveShow: mockServiceLeaveShow,
+  isLatestEntryShowEnd: mockIsLatestEntryShowEnd,
+  isDjAlreadyActiveOnShow: mockIsDjAlreadyActiveOnShow,
 }));
 
 // flowsheet-projection is intentionally NOT mocked — the controller boundary
@@ -1536,6 +1543,52 @@ describe('flowsheet.controller', () => {
 
       await expect(joinShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
       expect(mockStartShow).not.toHaveBeenCalled();
+    });
+
+    it('does not query isLatestEntryShowEnd when end_time already marks the show closed', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+
+      const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      // The extra check is only needed when end_time is still null — an
+      // already-closed show doesn't need the belt-and-braces query.
+      expect(mockIsLatestEntryShowEnd).not.toHaveBeenCalled();
+      expect(mockStartShow).toHaveBeenCalled();
+    });
+
+    it('(b) starts a new show when the latest entry on an end_time-null show is show_end (BS#1861)', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 5, end_time: null });
+      mockIsLatestEntryShowEnd.mockResolvedValueOnce(true);
+      mockStartShow.mockResolvedValue({ id: 6, primary_dj_id: 'caller-dj' });
+
+      const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockIsLatestEntryShowEnd).toHaveBeenCalledWith(5);
+      expect(mockStartShow).toHaveBeenCalled();
+      expect(mockAddDJToShow).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('(c) no-ops when the DJ is already active on the current show, instead of writing a duplicate dj_join (BS#1861)', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 7, end_time: null, primary_dj_id: 'someone-else' });
+      mockIsDjAlreadyActiveOnShow.mockResolvedValueOnce(true);
+
+      const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockIsDjAlreadyActiveOnShow).toHaveBeenCalledWith(expect.objectContaining({ id: 7 }), 'caller-dj');
+      expect(mockAddDJToShow).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({ show_id: 7, dj_id: 'caller-dj', active: true });
     });
   });
 

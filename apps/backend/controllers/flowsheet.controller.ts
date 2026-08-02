@@ -595,7 +595,21 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     }
   }
 
-  if (current_show?.end_time !== null) {
+  // (b) Belt-and-braces (BS#1861): the tubafrenzy webhook's stub-show flow
+  // can leave `shows.end_time` NULL for a window after a legacy sign-off —
+  // option (a) now backfills it at write time, but this is a second,
+  // independent signal that doesn't depend on that write having landed.
+  // Treat the show as closed when its newest flowsheet entry is a
+  // `show_end` marker, regardless of what `end_time` currently holds, so a
+  // DJ going live in that window starts a NEW show instead of being
+  // guest-joined into the one that just ended. Only checked when `end_time`
+  // is still null — an already-closed show doesn't need the extra query.
+  const latestEntryIsShowEnd =
+    current_show !== undefined &&
+    current_show.end_time === null &&
+    (await flowsheet_service.isLatestEntryShowEnd(current_show.id));
+
+  if (current_show?.end_time !== null || latestEntryIsShowEnd) {
     const show_session: Show = await flowsheet_service.startShow(
       req.body.dj_id,
       req.body.show_name,
@@ -604,6 +618,13 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     );
 
     res.status(200).json(show_session);
+  } else if (await flowsheet_service.isDjAlreadyActiveOnShow(current_show, req.body.dj_id)) {
+    // (c) No-op duplicate dj_join (BS#1861): the requesting DJ is already
+    // active on this show — either the primary DJ or an active co-host — so
+    // this is a retried "Go Live" toggle, not a genuine join. Hand back
+    // their existing (already-active) membership without writing another
+    // dj_join marker (the issue's 16:37:59 duplicate-marker trace).
+    res.status(200).json({ show_id: current_show.id, dj_id: req.body.dj_id, active: true } satisfies ShowDJ);
   } else {
     // Override is only consumed on the new-show path. Co-host join uses the
     // auth_user.dj_name resolution unchanged.

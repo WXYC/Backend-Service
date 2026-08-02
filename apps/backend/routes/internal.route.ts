@@ -304,6 +304,12 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // Date. Computed once and shared by the INSERT and the ON-CONFLICT heal.
       const breakpointRadioHour = resolveRadioHour(entryType, entry.radioHour ?? null);
 
+      // Shared by the row's `add_time` and, for `show_end` markers, the
+      // `shows.end_time` fast-path below — one clock reading per delivery
+      // so the two never drift apart by the few ms between two `new Date()`
+      // calls when `entry.startTime` is absent.
+      const markerTimestamp = entry.startTime ? new Date(entry.startTime) : new Date();
+
       // INSERT ... ON CONFLICT DO NOTHING RETURNING { id }: either we win
       // the insert and PG hands back exactly one row, or a concurrent
       // INSERT / prior webhook delivery already claimed the
@@ -337,7 +343,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
           request_flag: !!entry.requestFlag,
           segue: false,
           play_order: entry.sequenceWithinShow ?? 0,
-          add_time: entry.startTime ? new Date(entry.startTime) : new Date(),
+          add_time: markerTimestamp,
           radio_hour: breakpointRadioHour,
         })
         .onConflictDoNothing()
@@ -386,6 +392,39 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
           refresh.radio_hour = breakpointRadioHour;
         }
         await db.update(flowsheet).set(refresh).where(eq(flowsheet.legacy_entry_id, entry.id));
+      }
+
+      // show_end → shows.end_time fast-path (BS#1861, option (a)).
+      //
+      // The stub-show flow above ("Create a stub show" in resolveShow)
+      // deliberately leaves a webhook-created show's metadata — including
+      // `end_time` — to the next flowsheet-etl incremental tick. That's fine
+      // for a show that's still being DJed, but a `show_end` marker means
+      // tubafrenzy just signed the show off — until the ETL's next tick
+      // (today, up to half-hourly) runs, `shows.end_time` stays NULL and the
+      // show reads as still open. `POST /flowsheet/join`'s start-vs-join
+      // decision keys on exactly that column (see BS#1861 (b) for the second,
+      // independent guard), so a DJ going live in that window would be
+      // silently guest-joined into the just-ended show instead of starting a
+      // new one.
+      //
+      // Fix: set `shows.end_time` here too, from the same timestamp the
+      // marker row itself gets. This is a fast-path, not a takeover — the
+      // ETL's shows UPSERT (jobs/flowsheet-etl/job.ts) remains authoritative
+      // for refinement and unconditionally overwrites `end_time` from
+      // tubafrenzy's own value on its next tick (value-aware `setWhere`, BS
+      // #1059/#1956), so a discrepancy between this webhook guess and
+      // tubafrenzy's real sign-off timestamp self-heals within one ETL cycle.
+      //
+      // `WHERE end_time IS NULL` is the data-safety guard (mirrors #1371's
+      // dj_name-at-write-time precedent on these same marker rows): never
+      // rewrite a value the ETL — or an earlier delivery of this same
+      // `show_end` — already repaired.
+      if (entryType === 'show_end' && showId !== null) {
+        await db
+          .update(shows)
+          .set({ end_time: markerTimestamp })
+          .where(and(eq(shows.id, showId), isNull(shows.end_time)));
       }
 
       // Sibling-marker heal (BS#1444 — residual of BS#1371).
