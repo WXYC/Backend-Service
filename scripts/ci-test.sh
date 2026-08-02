@@ -31,14 +31,20 @@ export MOCK_API_URL=http://localhost:${MOCK_API_PORT:-9090}
 if [ "$FULL_MODE" = true ]; then
   echo "Running full test suite..."
   echo "  - Rate limiting tests: ENABLED"
-  echo "  - Admin ban tests: DISABLED (requires AUTH_USERNAME/AUTH_PASSWORD - see GitHub issue)"
+  echo "  - Admin ban tests: DISABLED (gating CI enables these separately via"
+  echo "    TEST_ADMIN_BAN in the 'Run Integration Tests' step of"
+  echo "    .github/workflows/test.yml, BS#133 — uncomment below to also"
+  echo "    exercise them against this local docker-based flow)"
   export TEST_RATE_LIMITING=true
   # Pass rate limit config to test runner (must match docker-compose.yml values)
   export RATE_LIMIT_REGISTRATION_WINDOW_MS=2000
   export RATE_LIMIT_REGISTRATION_MAX=5
   export RATE_LIMIT_REQUEST_WINDOW_MS=2000
   export RATE_LIMIT_REQUEST_MAX=20
-  # TEST_ADMIN_BAN disabled until admin credentials are configured
+  # getAdminToken() (tests/utils/anonymous_auth.js) signs in as the
+  # dedicated test_station_manager fixture account (seeded by
+  # dev_env/seed_db.sql), so no AUTH_USERNAME/AUTH_PASSWORD wiring is
+  # needed here — uncomment to opt this local flow in too.
   # export TEST_ADMIN_BAN=true
 else
   echo "Running standard test suite..."

@@ -271,8 +271,10 @@ describe('Request Line Endpoint', () => {
   });
 
   describe('User Banning', () => {
-    // Skip these tests if admin credentials aren't configured or TEST_ADMIN_BAN isn't explicitly enabled
-    // Admin tests require valid credentials that exist in the auth database
+    // Skip these tests unless TEST_ADMIN_BAN is explicitly enabled.
+    // getAdminToken() (tests/utils/anonymous_auth.js) signs in as the
+    // dedicated test_station_manager fixture account, so no separate
+    // credential configuration is required.
     const enableAdminTests = process.env.TEST_ADMIN_BAN === 'true';
     const describeOrSkip = enableAdminTests ? describe : describe.skip;
 
