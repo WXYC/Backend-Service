@@ -1120,12 +1120,19 @@ describe('runResolve — absolute stop-by deadline (BS#1814)', () => {
 // ---------------------------------------------------------------------------
 
 describe('selectReverifyTargets', () => {
-  const jDilla: NormalizedPair = { norm_artist: 'j dilla', norm_album: 'donuts', artist: 'J Dilla', album: 'Donuts' };
+  const jDilla: NormalizedPair = {
+    norm_artist: 'j dilla',
+    norm_album: 'donuts',
+    artist: 'J Dilla',
+    album: 'Donuts',
+    song: '',
+  };
   const kendrick: NormalizedPair = {
     norm_artist: 'kendrick lamar',
     norm_album: 'damn.',
     artist: 'Kendrick Lamar',
     album: 'DAMN.',
+    song: '',
   };
 
   it('keeps only normalized pairs whose key is an existing resolved candidate row', () => {
@@ -1178,7 +1185,7 @@ describe('countReverifyCandidates / loadReverifyCandidates', () => {
 });
 
 describe('nullTrustRejectedRow', () => {
-  it('NULLs discogs_release_id, discogs_master_id, and resolved_at, guarded on the previous release id', async () => {
+  it('NULLs discogs_release_id, discogs_master_id, resolved_at, and match_confidence, guarded on the previous release id', async () => {
     (db.execute as jest.Mock).mockResolvedValueOnce([{ norm_artist: 'j dilla' }]);
     const out = await nullTrustRejectedRow('j dilla', 'donuts', 9999);
     expect(out).toEqual({ written: true });
@@ -1188,6 +1195,7 @@ describe('nullTrustRejectedRow', () => {
     expect(text).toMatch(/"?discogs_release_id"?\s*=\s*NULL/i);
     expect(text).toMatch(/"?discogs_master_id"?\s*=\s*NULL/i);
     expect(text).toMatch(/"?resolved_at"?\s*=\s*NULL/i);
+    expect(text).toMatch(/"?match_confidence"?\s*=\s*NULL/i);
     expect(text).toMatch(/WHERE/i);
   });
 
