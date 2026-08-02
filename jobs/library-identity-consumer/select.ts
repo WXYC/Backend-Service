@@ -30,8 +30,21 @@
  * fresh"), is exactly what `EXISTS (... AND last_verified_at >= ...)` tests,
  * so `NOT EXISTS (... AND last_verified_at >= ...)` is `NOT P OR NOT F` —
  * the identical predicate in one subquery instead of two. This equivalence
- * only holds because of the PK (at most one row to reason about); it would
- * NOT hold for a one-to-many child table. Behavioral coverage (fresh
+ * rests on TWO preconditions, both currently true: the PK (at most one row
+ * to reason about; it would NOT hold for a one-to-many child table), and
+ * `library_identity.last_verified_at` being `NOT NULL` (see schema.ts) — so
+ * `>= threshold` and `< threshold` are true complements (exactly one holds)
+ * for any row that exists. If that column were ever made nullable, a row
+ * with a NULL `last_verified_at` would break the complement: both
+ * `last_verified_at >= threshold` and `last_verified_at < threshold`
+ * evaluate to unknown/false per SQL's three-valued logic, so neither
+ * `EXISTS` clause would match it. The two forms would then diverge on
+ * exactly that row: the old form's `EXISTS(... < threshold)` finds nothing,
+ * falling through to `NOT P` — false, since the row exists — so the row is
+ * EXCLUDED; the new form's `NOT EXISTS(... >= threshold)` also finds
+ * nothing, so `NOT EXISTS(...)` is true and the row is INCLUDED. A future
+ * nullable `last_verified_at` would need to re-derive this predicate rather
+ * than assume the simplification still holds. Behavioral coverage (fresh
  * excluded; absent/stale included) lives in
  * tests/integration/library-identity-consumer-select.spec.js — see that
  * file's docstring for why it embeds this predicate literally rather than
