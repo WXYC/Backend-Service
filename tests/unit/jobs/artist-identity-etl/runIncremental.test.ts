@@ -214,6 +214,52 @@ describe('runIncremental', () => {
     expect(mockExecuteUpdate).toHaveBeenCalledTimes(1);
   });
 
+  test('matches an NFD-form artists row to an NFC-form LML library_name (BS#521)', async () => {
+    // Precomposed ü (U+00FC) vs the NFD form ("u" + combining diaeresis,
+    // U+0308) -- byte-distinct, visually and semantically identical.
+    const nfcName = 'Nilüfer Yanya';
+    const nfdName = nfcName.normalize('NFD');
+    expect(nfdName).not.toBe(nfcName); // sanity: the two forms really are byte-distinct
+
+    mockFetchLml.mockResolvedValue([lmlRow(nfcName, { discogs_artist_id: 42 })]);
+    mockSelectExisting.mockReturnValue([existingRow(nfdName)]);
+    mockExecuteUpdate.mockResolvedValue([{ id: 1 }]);
+
+    const result = await runIncremental();
+
+    expect(result.matched).toBe(1);
+    expect(result.updated).toBe(1);
+    expect(result.columnsWritten).toBe(1);
+  });
+
+  test('matches an NFC-form artists row to an NFD-form LML library_name (symmetric)', async () => {
+    const nfcName = 'Csillagrablók';
+    const nfdName = nfcName.normalize('NFD');
+    expect(nfdName).not.toBe(nfcName);
+
+    mockFetchLml.mockResolvedValue([lmlRow(nfdName, { discogs_artist_id: 7 })]);
+    mockSelectExisting.mockReturnValue([existingRow(nfcName)]);
+    mockExecuteUpdate.mockResolvedValue([{ id: 1 }]);
+
+    const result = await runIncremental();
+
+    expect(result.matched).toBe(1);
+    expect(result.updated).toBe(1);
+  });
+
+  test('does NOT collapse a case-different name (NFC-only, never case-fold)', async () => {
+    // Guards the Wire/WIRE distinct-artist trap the issue calls out: NFC
+    // normalization must never widen into a case fold.
+    mockFetchLml.mockResolvedValue([lmlRow('Wire', { discogs_artist_id: 99 })]);
+    mockSelectExisting.mockReturnValue([existingRow('WIRE')]);
+
+    const result = await runIncremental();
+
+    expect(result.matched).toBe(0);
+    expect(result.updated).toBe(0);
+    expect(mockExecuteUpdate).not.toHaveBeenCalled();
+  });
+
   test('updates the last-run timestamp on every successful path', async () => {
     // empty path
     mockFetchLml.mockResolvedValue([]);

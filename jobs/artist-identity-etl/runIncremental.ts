@@ -48,7 +48,24 @@ export const runIncremental = async (): Promise<SyncResult> => {
   // multiple rows. We keep the first match per name for conflict
   // detection (preserving the previous loadExisting semantic), but the
   // bulk UPDATE below applies COALESCE across every matching row.
-  const names = identities.map((i) => i.library_name);
+  //
+  // Both sides of the name match are NFC-normalized (BS#521): an LML
+  // `library_name` and the corresponding `artists.artist_name` can be
+  // byte-distinct while visually and semantically identical -- e.g. NFC
+  // `Nilüfer` (precomposed ü, U+00FC) vs NFD `Nilüfer` ("u" + combining
+  // diaeresis, U+0308) -- which silently defeated the previous exact
+  // `=` match. This is deliberately NFC-only: no case-fold, no
+  // diacritic-strip, no "The " strip. `artists.artist_name` has no
+  // unique constraint and the artist-unicode-dedup one-shot (BS#1897)
+  // is not confirmed run on prod, so a broader fold here (as the
+  // catalog-write matcher does post-#1897, see #1095) risks COALESCE-ing
+  // external ids across two rows a human might be deliberately keeping
+  // distinct (e.g. `Wire` vs `WIRE`). NFC normalization alone can't
+  // cause that kind of cross-artist collision -- it only collapses
+  // byte-distinct encodings of the identical character sequence -- so
+  // it's provably collision-free while still fixing the dominant
+  // NFC/NFD-drift defect.
+  const names = identities.map((i) => i.library_name.normalize('NFC'));
   const existingRows = await db
     .select({
       artist_name: artists.artist_name,
@@ -60,12 +77,13 @@ export const runIncremental = async (): Promise<SyncResult> => {
       bandcamp_id: artists.bandcamp_id,
     })
     .from(artists)
-    .where(inArray(artists.artist_name, names));
+    .where(inArray(sql`normalize(${artists.artist_name}, NFC)`, names));
 
   const firstByName = new Map<string, ExistingArtistIdentity>();
   for (const row of existingRows) {
-    if (!firstByName.has(row.artist_name)) {
-      firstByName.set(row.artist_name, row);
+    const key = row.artist_name.normalize('NFC');
+    if (!firstByName.has(key)) {
+      firstByName.set(key, row);
     }
   }
 
@@ -75,7 +93,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
   const fillCandidates: LmlIdentity[] = [];
 
   for (const lml of identities) {
-    const existing = firstByName.get(lml.library_name);
+    const existing = firstByName.get(lml.library_name.normalize('NFC'));
     if (!existing) continue;
     matched++;
 
@@ -113,9 +131,14 @@ export const runIncremental = async (): Promise<SyncResult> => {
   // Per-cell type casts are required because postgres-js infers VALUES
   // column types from the first row and several columns can legitimately
   // be NULL there.
+  //
+  // v.library_name is NFC-normalized here (same rule as the SELECT
+  // above) so the join predicate below can compare it directly against
+  // `normalize(a.artist_name, NFC)` -- both sides land in the same
+  // canonical composed form.
   const valuesRows = fillCandidates.map(
     (v) =>
-      sql`(${v.library_name}::text, ${v.discogs_artist_id}::integer, ${v.musicbrainz_artist_id}::varchar(64), ${v.wikidata_qid}::varchar(32), ${v.spotify_artist_id}::varchar(64), ${v.apple_music_artist_id}::varchar(64), ${v.bandcamp_id}::varchar(255))`
+      sql`(${v.library_name.normalize('NFC')}::text, ${v.discogs_artist_id}::integer, ${v.musicbrainz_artist_id}::varchar(64), ${v.wikidata_qid}::varchar(32), ${v.spotify_artist_id}::varchar(64), ${v.apple_music_artist_id}::varchar(64), ${v.bandcamp_id}::varchar(255))`
   );
 
   const updated = await db.execute(sql`
@@ -136,7 +159,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
       apple_music_artist_id,
       bandcamp_id
     )
-    WHERE a.artist_name = v.library_name
+    WHERE normalize(a.artist_name, NFC) = v.library_name
       AND (
         (a.discogs_artist_id     IS NULL AND v.discogs_artist_id     IS NOT NULL) OR
         (a.musicbrainz_artist_id IS NULL AND v.musicbrainz_artist_id IS NOT NULL) OR

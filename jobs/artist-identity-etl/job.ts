@@ -6,11 +6,21 @@
  *   node dist/job.js          one-shot incremental (default)
  *   node dist/job.js --poll   continuous polling
  *
- * Matching: exact case-sensitive equality on
- * `entity.identity.library_name = artists.artist_name`. Both sides treat
- * `library_name` as the canonical artist key so exact match covers most
- * real entries; mismatches surface in the run log as unmatched and can
- * inform a follow-up normalization pass.
+ * Matching: NFC-normalized, otherwise case-sensitive, equality on
+ * `entity.identity.library_name = artists.artist_name` (BS#521). Both
+ * sides are normalized to Unicode NFC (canonical composition) before
+ * comparison, so an LML-supplied name and its `artists` row still match
+ * when one is stored in a different composition form (e.g. NFD) -- the
+ * dominant defect in the initial full-scan reconciliation match rate
+ * (see BS#521). This is deliberately NFC-only: no case-fold, no
+ * diacritic-strip, no "The " strip. `artists.artist_name` has no unique
+ * constraint, so a broader fold (as the catalog-write matcher applies
+ * post-#1897, see #1095) risks COALESCE-ing external ids across two rows
+ * a human might be deliberately keeping distinct (e.g. `Wire` vs
+ * `WIRE`). NFC normalization alone can't cause that kind of collision --
+ * it only collapses byte-distinct encodings of the identical character
+ * sequence. Remaining mismatches (case, diacritic-fold, punctuation,
+ * etc.) still surface in the run log as unmatched.
  *
  * Update strategy: only fills nulls. Each column on `artists` keeps its
  * existing value if non-null (so any value entered by the library staff
