@@ -82,23 +82,6 @@ The helper writes all 10 columns on every successful enrichment. A successful en
 
 **Load-bearing dependency: the `bandcamp_url IS NULL` signal is only reliable because `fetchMetadata` _always_ synthesizes a `bandcamp_url` search-URL fallback when LML returns no Bandcamp link.** If that fallback is removed (or made conditional on LML returning a real Bandcamp result), the signal collapses to "either never enriched, or enriched and the artist has no Bandcamp" — and every downstream backfill predicate filtering on `bandcamp_url IS NULL` starts re-attempting already-enriched rows. The `metadata_attempt_at` column (migrations.md, Attempt-at markers) is the more durable progress marker; new code should prefer it.
 
-## One-shot Recovery: `scripts/backfill-metadata.ts`
-
-For populating metadata on rows inserted before enrichment was wired in (PR #627), or for rows where a prior enrichment failed silently because LML auth was misconfigured (see Configuration), there's a one-shot script:
-
-```bash
-dotenvx run -f .env -- npx tsx scripts/backfill-metadata.ts
-```
-
-Env knobs:
-
-- `BACKFILL_LIMIT` — number of entries to process (default `1000`)
-- `BACKFILL_DRY_RUN` — set `true` to preview without updating
-
-**Same semantics as the runtime path.** The script always UPDATEs every fetched row, including no-artwork rows that get only the search-URL fallbacks. Filter is `WHERE bandcamp_url IS NULL AND entry_type = 'track'`, so re-runs naturally skip rows already touched by any prior enrichment regardless of artwork outcome.
-
-For the historical tail (legacy NULL rows accumulated before #627 deployed), see [#631](https://github.com/WXYC/Backend-Service/issues/631) — that work needs a containerized backfill job rather than the inline script.
-
 ## Conditional GET (304 Not Modified)
 
 The flowsheet endpoints support conditional requests via the `Last-Modified` header and either the `If-Modified-Since` header or `since` query parameter. This allows clients to avoid re-downloading unchanged data.
