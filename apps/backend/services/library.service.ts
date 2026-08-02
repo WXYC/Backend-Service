@@ -2483,11 +2483,13 @@ export function __resetTrackSearchCacheForTests(): void {
  * return the mapped `EnrichedLibraryResult[]` (BS rows, `matched_via`, LML
  * ordering) without touching LML or the BS PG JOIN.
  *
- * **Telemetry (BS#828).** Wraps the call in a `catalog.track_search` Sentry
- * span and projects three attributes onto it: `track_search.cache_hit` (true
- * on hit, false on miss), `track_search.master_lookup_ms` (LML hop only —
- * 0 on cache hit, set by the inner via the active span on miss), and
- * `track_search.latency_ms` (total). Pattern: wrap-at-chokepoint +
+ * **Telemetry (BS#828, BS#989).** Wraps the call in a `catalog.track_search`
+ * Sentry span and projects onto it: the unified BS#989 cache stats via
+ * `recordCacheLookup('track_search', ...)` — `cache_hit` (true on hit, false
+ * on miss) plus `cache_name` / `cache_size` / `cache_capacity`, replacing the
+ * former `track_search.cache_hit`-only attribute; `track_search.master_lookup_ms`
+ * (LML hop only — 0 on cache hit, set by the inner via the active span on
+ * miss); and `track_search.latency_ms` (total). Pattern: wrap-at-chokepoint +
  * project-onto-span (sibling: LML#213 / BS#646 for LML cache_stats).
  * Callers up the cascade in `searchLibrary` must not add their own
  * instrumentation.

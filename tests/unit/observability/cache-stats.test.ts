@@ -24,9 +24,9 @@ const mockGetActiveSpan = jest.fn<() => { setAttributes: typeof mockSpanSetAttri
 }));
 
 const mockBackgroundSpanSetAttributes = jest.fn();
-const mockStartSpan = jest.fn(
-  (_opts: { name: string; op: string }, callback: (span: { setAttributes: (attrs: object) => void }) => unknown) =>
-    callback({ setAttributes: mockBackgroundSpanSetAttributes })
+type MockBackgroundSpan = { setAttributes: (attrs: object) => void; isRecording: () => boolean };
+const mockStartSpan = jest.fn((_opts: { name: string; op: string }, callback: (span: MockBackgroundSpan) => unknown) =>
+  callback({ setAttributes: mockBackgroundSpanSetAttributes, isRecording: () => true })
 );
 
 jest.mock('@sentry/node', () => ({
@@ -56,7 +56,9 @@ describe('cache-stats', () => {
     // installed by an earlier test (e.g. the "swallows Sentry.startSpan
     // throwing" case below) — reinstall the default pass-through explicitly
     // so tests stay isolated.
-    mockStartSpan.mockImplementation((_opts, callback) => callback({ setAttributes: mockBackgroundSpanSetAttributes }));
+    mockStartSpan.mockImplementation((_opts, callback) =>
+      callback({ setAttributes: mockBackgroundSpanSetAttributes, isRecording: () => true })
+    );
     __resetCacheStatsForTests();
   });
 
@@ -160,6 +162,25 @@ describe('cache-stats', () => {
       emitPeriodicCacheStats(caches);
       expect(mockBackgroundSpanSetAttributes).toHaveBeenLastCalledWith(
         expect.objectContaining({ 'cache.artwork.evictions.count': 0 })
+      );
+    });
+
+    it('keeps eviction counts when the span is not recording, so an unsampled emit does not drop them', () => {
+      recordCacheEviction('artwork');
+      const caches: RegisteredCache[] = [{ name: 'artwork', cache: fakeCache(10, 200) }];
+
+      // First emit lands on an unsampled (non-recording) BackgroundJob span:
+      // setAttributes is a no-op, so the reset must be skipped or the single
+      // eviction is lost forever between emits.
+      mockStartSpan.mockImplementationOnce((_opts, callback) =>
+        callback({ setAttributes: mockBackgroundSpanSetAttributes, isRecording: () => false })
+      );
+      emitPeriodicCacheStats(caches);
+
+      // Next emit is recorded and must still see the carried-over eviction.
+      emitPeriodicCacheStats(caches);
+      expect(mockBackgroundSpanSetAttributes).toHaveBeenLastCalledWith(
+        expect.objectContaining({ 'cache.artwork.evictions.count': 1 })
       );
     });
 
