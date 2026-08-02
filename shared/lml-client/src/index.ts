@@ -101,6 +101,59 @@ class LmlClientError extends Error {
 export { LmlClientError };
 
 /**
+ * BS#1094 Layer 3: thrown in place of a bare `LmlClientError` when LML
+ * rejects a request with 401 or 403. Extends `LmlClientError` (not a
+ * sibling class) so every pre-existing `catch (err) { if (err instanceof
+ * LmlClientError) ... }` site keeps working unchanged, while callers that
+ * need to fail fast on the auth class specifically — the flowsheet-metadata
+ * backfill orchestrator, see `jobs/flowsheet-metadata-backfill/orchestrate.ts`
+ * — can `instanceof LmlAuthError` to distinguish "the shared LML_API_KEY
+ * bearer was rejected" from every other transient LML failure (timeout,
+ * 5xx, saturation shed, ...).
+ *
+ * Why this matters: before this class existed, `lmlFetch` mapped every
+ * `status < 500` verbatim onto a generic `LmlClientError`, so a rotated (or
+ * dropped) bearer looked identical to any other 4xx to every catch site.
+ * The backfill orchestrator bucketed all of them as the same retryable
+ * `lml_error`, leaving the row `metadata_status = 'pending'` — the next
+ * hourly sweep re-asked LML, got rejected again, and repeated forever. A
+ * distinct class lets a caller opt into fail-fast behavior for auth
+ * specifically without reinterpreting HTTP status codes at every call site.
+ */
+export class LmlAuthError extends LmlClientError {
+  constructor(message: string, statusCode: 401 | 403) {
+    super(message, statusCode);
+    this.name = 'LmlAuthError';
+  }
+}
+
+/**
+ * Minimum key length before `lmlApiKeyFingerprint` will render a
+ * first-4/last-4 fingerprint. Below this, first-4 + last-4 would overlap or
+ * cover most of the secret, so the fingerprint would leak more of the key
+ * than it's meant to.
+ */
+const MIN_FINGERPRINTABLE_KEY_LENGTH = 8;
+
+/**
+ * First/last 4 characters of the configured `LML_API_KEY`, joined by an
+ * ellipsis (e.g. `sk_l...7890`) — never the full key. BS#1094 acceptance:
+ * "Sentry breadcrumb on auth-class failures includes the bearer fingerprint
+ * ... so post-incident triage knows whether it's a rotation issue or a
+ * different auth path." Lives here (not in a job's own logger) because this
+ * module is the sole reader of `LML_API_KEY` (see the chokepoint comment in
+ * `lmlFetch` below).
+ *
+ * Returns `undefined` when the key is unset, or shorter than
+ * `MIN_FINGERPRINTABLE_KEY_LENGTH` — a short key's first-4/last-4 would
+ * leak most or all of the secret rather than merely identifying it.
+ */
+export function lmlApiKeyFingerprint(apiKey: string | undefined = process.env.LML_API_KEY): string | undefined {
+  if (!apiKey || apiKey.length < MIN_FINGERPRINTABLE_KEY_LENGTH) return undefined;
+  return `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}`;
+}
+
+/**
  * Discriminator for a runtime-lookup call the BS#1748 limiter shed rather than
  * sent to LML: either the pre-admission queue wait exceeded
  * `LML_LIMITER_MAX_QUEUE_WAIT_MS` (`shed_limiter_saturated`) or the per-limiter
@@ -613,6 +666,12 @@ async function lmlFetch(path: string, init?: RequestInit, timeoutMs?: number): P
     });
 
     if (!response.ok) {
+      // BS#1094 Layer 3: classify 401/403 distinctly from every other
+      // status. Everything else keeps the pre-existing mapping (5xx -> 502,
+      // other 4xx verbatim).
+      if (response.status === 401 || response.status === 403) {
+        throw new LmlAuthError(`LML responded with ${response.status}: ${response.statusText}`, response.status);
+      }
       throw new LmlClientError(
         `LML responded with ${response.status}: ${response.statusText}`,
         response.status >= 500 ? 502 : response.status
