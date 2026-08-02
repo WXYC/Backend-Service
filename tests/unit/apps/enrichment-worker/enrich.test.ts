@@ -18,6 +18,7 @@ import { jest } from '@jest/globals';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
 import type { LookupResponse, StreamingResolutionStatus } from '@wxyc/lml-client';
 import {
+  buildStreamingFieldConflictSet,
   extractArtwork,
   finalizeRow,
   inferIncomingStreamingStatus,
@@ -38,6 +39,25 @@ const mockDb = db as unknown as {
     onConflictDoNothing: jest.Mock;
   };
 };
+
+/**
+ * Renders a mocked drizzle-orm `sql` fragment's template text back to a
+ * string, splicing `<col>` at each interpolation point — same convention as
+ * `tests/unit/shared/database/concerts-sql.test.ts` /
+ * `tests/unit/jobs/rotation-release-id-backfill/writer.test.ts`. Works here
+ * because `buildStreamingFieldConflictSet` (BS#1923) writes each CASE
+ * comparison out at its use site rather than nesting sub-fragments — every
+ * returned `SQL` is a single flat `{ sql, values }` under the
+ * `tests/__mocks__/drizzle-orm.ts` mock, never a `values` entry that is
+ * itself another `sql` fragment.
+ */
+type SqlLike = { sql?: readonly string[]; values?: unknown[] };
+const renderSql = (value: unknown): string => {
+  const frag = value as SqlLike | null | undefined;
+  if (!frag?.sql) return '';
+  return frag.sql.join('<col>');
+};
+const sqlValues = (value: unknown): unknown[] => (value as SqlLike | null | undefined)?.values ?? [];
 
 // Default row is UNLINKED (album_id=null) — preserves pre-D3 behavior for the
 // existing assertions below. Linked-path tests use LINKED_ROW.
@@ -284,11 +304,6 @@ describe('finalizeRow (BS#892 PR-2)', () => {
 describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    // BS#1915: the linked-match arm now reads prior per-service streaming
-    // state before merging (see `mergeStreamingField`). Default: no prior
-    // album_metadata row (a fresh album) — tests that need an existing row
-    // override with `mockDb._chain.limit.mockReturnValueOnce(...)`.
-    mockDb._chain.limit.mockReturnValue(Promise.resolve([]));
   });
 
   it('on match: UPSERTs the 10-column payload into album_metadata', async () => {
@@ -521,6 +536,169 @@ describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata
 });
 
 /**
+ * BS#1923 — `buildStreamingFieldConflictSet` builds the `onConflictDoUpdate`
+ * `set` fragments for one streaming field as SQL `CASE` expressions over the
+ * LIVE `album_metadata` columns, closing the TOCTOU window the old
+ * read-then-merge-then-write flow left open (a concurrent CDC verify landing
+ * during the LML round-trip could get clobbered by a write computed against
+ * a now-stale JS snapshot). These tests pin the exact CASE text and column
+ * bindings per `mergeStreamingField` rule/incoming-verdict combination —
+ * independent of `finalizeRow`/`upsertMatchedAlbumMetadata`, which the
+ * describe blocks further below exercise end to end (still via the mocked
+ * `db`, asserting the SAME fragments land in the real `set` object).
+ */
+describe('buildStreamingFieldConflictSet (BS#1923)', () => {
+  // A field WITH a synthesized search-URL fallback (spotify/bandcamp).
+  const FALLBACK = 'https://open.spotify.com/search/fallback';
+
+  describe('a field with a search-URL fallback (spotify/bandcamp shape)', () => {
+    it('incoming undefined (never consulted): status left unchanged; url recomputes the fresh fallback unless already verified', () => {
+      const frag = buildStreamingFieldConflictSet(
+        album_metadata.spotify_status,
+        album_metadata.spotify_url,
+        undefined,
+        null,
+        FALLBACK
+      );
+
+      expect(renderSql(frag.status)).toBe('<col>');
+      expect(sqlValues(frag.status)).toEqual([album_metadata.spotify_status]);
+
+      expect(renderSql(frag.url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+      expect(sqlValues(frag.url)).toEqual([album_metadata.spotify_status, album_metadata.spotify_url, FALLBACK]);
+    });
+
+    it("incoming 'verified': status becomes 'verified' unconditionally; url adopts incomingUrl unless the live row is already verified", () => {
+      const frag = buildStreamingFieldConflictSet(
+        album_metadata.spotify_status,
+        album_metadata.spotify_url,
+        'verified',
+        'https://open.spotify.com/album/NEW',
+        FALLBACK
+      );
+
+      expect(renderSql(frag.status)).toBe("'verified'");
+      expect(sqlValues(frag.status)).toEqual([]);
+
+      expect(renderSql(frag.url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+      expect(sqlValues(frag.url)).toEqual([
+        album_metadata.spotify_status,
+        album_metadata.spotify_url,
+        'https://open.spotify.com/album/NEW',
+      ]);
+    });
+
+    it("incoming 'absent': status becomes 'absent' unless already verified; url falls back to the fresh search URL in that same branch", () => {
+      const frag = buildStreamingFieldConflictSet(
+        album_metadata.bandcamp_status,
+        album_metadata.bandcamp_url,
+        'absent',
+        null,
+        FALLBACK
+      );
+
+      expect(renderSql(frag.status)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE 'absent' END");
+      expect(sqlValues(frag.status)).toEqual([album_metadata.bandcamp_status, album_metadata.bandcamp_status]);
+
+      expect(renderSql(frag.url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+      expect(sqlValues(frag.url)).toEqual([album_metadata.bandcamp_status, album_metadata.bandcamp_url, FALLBACK]);
+    });
+
+    it("incoming 'unresolved': status becomes 'unresolved' unless already verified OR already absent (both terminal); url recomputes the fresh fallback in the same non-verified branch", () => {
+      const frag = buildStreamingFieldConflictSet(
+        album_metadata.bandcamp_status,
+        album_metadata.bandcamp_url,
+        'unresolved',
+        null,
+        FALLBACK
+      );
+
+      expect(renderSql(frag.status)).toBe(
+        "CASE WHEN <col> = 'verified' OR <col> = 'absent' THEN <col> ELSE 'unresolved' END"
+      );
+      expect(sqlValues(frag.status)).toEqual([
+        album_metadata.bandcamp_status,
+        album_metadata.bandcamp_status,
+        album_metadata.bandcamp_status,
+      ]);
+
+      expect(renderSql(frag.url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+      expect(sqlValues(frag.url)).toEqual([album_metadata.bandcamp_status, album_metadata.bandcamp_url, FALLBACK]);
+    });
+  });
+
+  describe('a field with NO fallback (Apple Music shape, BS#1192)', () => {
+    it('incoming undefined: status AND url both left completely unchanged (no CASE at all)', () => {
+      const frag = buildStreamingFieldConflictSet(
+        album_metadata.apple_music_status,
+        album_metadata.apple_music_url,
+        undefined,
+        null,
+        null
+      );
+
+      expect(renderSql(frag.status)).toBe('<col>');
+      expect(sqlValues(frag.status)).toEqual([album_metadata.apple_music_status]);
+      // No fallback → no CASE at all; the url column is left as a bare
+      // self-reference (a structural no-op UPDATE, not a search-URL guess).
+      expect(renderSql(frag.url)).toBe('<col>');
+      expect(sqlValues(frag.url)).toEqual([album_metadata.apple_music_url]);
+    });
+
+    it("incoming 'verified': same shape as a fallback field — adopts incomingUrl unless already verified (no fallback needed on this branch)", () => {
+      const frag = buildStreamingFieldConflictSet(
+        album_metadata.apple_music_status,
+        album_metadata.apple_music_url,
+        'verified',
+        'https://music.apple.com/album/NEW',
+        null
+      );
+
+      expect(renderSql(frag.status)).toBe("'verified'");
+      expect(renderSql(frag.url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+      expect(sqlValues(frag.url)).toEqual([
+        album_metadata.apple_music_status,
+        album_metadata.apple_music_url,
+        'https://music.apple.com/album/NEW',
+      ]);
+    });
+
+    it("incoming 'absent': url's non-verified branch is forced NULL (the fallback param), not a search URL", () => {
+      const frag = buildStreamingFieldConflictSet(
+        album_metadata.apple_music_status,
+        album_metadata.apple_music_url,
+        'absent',
+        null,
+        null
+      );
+
+      expect(renderSql(frag.status)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE 'absent' END");
+      expect(renderSql(frag.url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+      expect(sqlValues(frag.url)).toEqual([album_metadata.apple_music_status, album_metadata.apple_music_url, null]);
+    });
+
+    it("incoming 'unresolved': url is left as the bare live column in EVERY branch — never changes for an unresolved verdict", () => {
+      const frag = buildStreamingFieldConflictSet(
+        album_metadata.apple_music_status,
+        album_metadata.apple_music_url,
+        'unresolved',
+        null,
+        null
+      );
+
+      expect(renderSql(frag.status)).toBe(
+        "CASE WHEN <col> = 'verified' OR <col> = 'absent' THEN <col> ELSE 'unresolved' END"
+      );
+      // No CASE for the url at all — matches `mergeStreamingField` rule 6
+      // (carry `current.url` forward unchanged) with no post-merge fallback
+      // ternary layered on top (unlike spotify/bandcamp).
+      expect(renderSql(frag.url)).toBe('<col>');
+      expect(sqlValues(frag.url)).toEqual([album_metadata.apple_music_url]);
+    });
+  });
+});
+
+/**
  * BS#1915 — bounded self-heal of unresolved streaming links, consuming
  * LML#1053's per-service `verified` / `absent` / `unresolved` verdict on
  * `DiscogsMatchResult.streaming_status`.
@@ -533,11 +711,18 @@ describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata
  * per-album bound, not per-service — increments ONLY on the conflict-update
  * branch (a genuine re-ask against an existing row); a fresh album's
  * first-ever write leaves it at the schema DEFAULT 0.
+ *
+ * BS#1923 folds that merge directly into the UPSERT as CASE expressions
+ * over the LIVE row (`buildStreamingFieldConflictSet`, tested independently
+ * above) — the describe block below exercises `finalizeRow` end to end and
+ * asserts the resulting `set` fragments structurally (their rendered CASE
+ * text + bound values), since they are no longer plain merged JS values.
+ * BS#1924 gates the `streaming_reask_attempts` bump on a pre-existing
+ * load-bearing match, tested further below.
  */
 describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-match arm', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockDb._chain.limit.mockReturnValue(Promise.resolve([]));
   });
 
   it('fresh album: persists a verified/absent/unresolved per-service status alongside each url', async () => {
@@ -586,19 +771,7 @@ describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-matc
     expect(insertPayload.apple_music_url).toBe('https://music.apple.com/album/y');
   });
 
-  it('never overwrites a previously verified URL, even when a later re-ask flaps to unresolved or absent', async () => {
-    mockDb._chain.limit.mockReturnValueOnce(
-      Promise.resolve([
-        {
-          spotify_status: 'verified',
-          spotify_url: 'https://open.spotify.com/album/PRIOR',
-          apple_music_status: 'verified',
-          apple_music_url: 'https://music.apple.com/album/PRIOR',
-          bandcamp_status: null,
-          bandcamp_url: null,
-        },
-      ])
-    );
+  it('never overwrites a previously verified URL, even when a later re-ask flaps to unresolved or absent (BS#1923: checked against the LIVE row, not a stale read)', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
     const flappyResponse = {
       results: [
@@ -616,26 +789,38 @@ describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-matc
 
     await finalizeRow(LINKED_ROW, flappyResponse);
 
+    // There is no more prior-state mock to flap against — the write no
+    // longer reads a snapshot at all. The invariant instead has to hold
+    // structurally: the CASE's FIRST branch, evaluated by Postgres against
+    // whatever the row actually holds at write time, is always "is the live
+    // status already verified — if so, keep the live status/url verbatim."
+    // A concurrently-verified row can therefore never be downgraded by this
+    // write, regardless of what LML's flappy verdict says.
     const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
-    expect(conflictCfg.set.spotify_status).toBe('verified');
-    expect(conflictCfg.set.spotify_url).toBe('https://open.spotify.com/album/PRIOR');
-    expect(conflictCfg.set.apple_music_status).toBe('verified');
-    expect(conflictCfg.set.apple_music_url).toBe('https://music.apple.com/album/PRIOR');
+    expect(renderSql(conflictCfg.set.spotify_status)).toBe(
+      "CASE WHEN <col> = 'verified' OR <col> = 'absent' THEN <col> ELSE 'unresolved' END"
+    );
+    expect(sqlValues(conflictCfg.set.spotify_status)).toEqual([
+      album_metadata.spotify_status,
+      album_metadata.spotify_status,
+      album_metadata.spotify_status,
+    ]);
+    expect(renderSql(conflictCfg.set.spotify_url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+    // The THEN branch (live status IS verified) reads the LIVE spotify_url
+    // column, not a fabricated/stale value — that is what makes the prior
+    // verified URL survive a flappy re-ask.
+    expect(sqlValues(conflictCfg.set.spotify_url)[0]).toBe(album_metadata.spotify_status);
+    expect(sqlValues(conflictCfg.set.spotify_url)[1]).toBe(album_metadata.spotify_url);
+
+    expect(renderSql(conflictCfg.set.apple_music_status)).toBe(
+      "CASE WHEN <col> = 'verified' THEN <col> ELSE 'absent' END"
+    );
+    expect(renderSql(conflictCfg.set.apple_music_url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+    expect(sqlValues(conflictCfg.set.apple_music_url)[0]).toBe(album_metadata.apple_music_status);
+    expect(sqlValues(conflictCfg.set.apple_music_url)[1]).toBe(album_metadata.apple_music_url);
   });
 
-  it('absent is terminal: url stays null and status is absent regardless of prior unresolved state', async () => {
-    mockDb._chain.limit.mockReturnValueOnce(
-      Promise.resolve([
-        {
-          apple_music_status: 'unresolved',
-          apple_music_url: null,
-          spotify_status: null,
-          spotify_url: null,
-          bandcamp_status: null,
-          bandcamp_url: null,
-        },
-      ])
-    );
+  it('absent is terminal: the non-verified branch forces status=absent/url=NULL, whether the live row was already absent or newly flapping there', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
     const response = {
       results: [
@@ -653,35 +838,21 @@ describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-matc
     await finalizeRow(LINKED_ROW, response);
 
     const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
-    expect(conflictCfg.set.apple_music_status).toBe('absent');
-    expect(conflictCfg.set.apple_music_url).toBeNull();
-  });
-
-  it('bumps streaming_reask_attempts only on the conflict-update branch, never on the fresh-insert branch', async () => {
-    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
-
-    await finalizeRow(LINKED_ROW, matchResponse);
-
-    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(insertPayload).not.toHaveProperty('streaming_reask_attempts');
-
-    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
-    expect(conflictCfg.set.streaming_reask_attempts).toBeDefined();
-  });
-
-  it('a never-consulted service (key omitted, no url) preserves whatever prior state existed — never invents a verdict', async () => {
-    mockDb._chain.limit.mockReturnValueOnce(
-      Promise.resolve([
-        {
-          bandcamp_status: 'unresolved',
-          bandcamp_url: null,
-          spotify_status: null,
-          spotify_url: null,
-          apple_music_status: null,
-          apple_music_url: null,
-        },
-      ])
+    expect(renderSql(conflictCfg.set.apple_music_status)).toBe(
+      "CASE WHEN <col> = 'verified' THEN <col> ELSE 'absent' END"
     );
+    // Apple Music has no search-URL fallback (BS#1192) — the non-verified
+    // branch's url is the literal NULL fallback param, not a live-column
+    // carry-forward.
+    expect(renderSql(conflictCfg.set.apple_music_url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+    expect(sqlValues(conflictCfg.set.apple_music_url)).toEqual([
+      album_metadata.apple_music_status,
+      album_metadata.apple_music_url,
+      null,
+    ]);
+  });
+
+  it('a never-consulted service (key omitted, no url) is left as a bare self-reference — structurally cannot invent a verdict', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
     const response = {
       results: [
@@ -692,8 +863,9 @@ describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-matc
             spotify_url: null,
             apple_music_url: null,
             bandcamp_url: null,
-            // bandcamp key deliberately omitted from streaming_status —
-            // never consulted this round.
+            // bandcamp key deliberately omitted from streaming_status, and
+            // its url is null — inferIncomingStreamingStatus returns
+            // undefined (genuinely never consulted this round).
             streaming_status: { spotify: 'unresolved' },
           },
         },
@@ -703,11 +875,71 @@ describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-matc
     await finalizeRow(LINKED_ROW, response);
 
     const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
-    expect(conflictCfg.set.bandcamp_status).toBe('unresolved');
-    // The prior unresolved status is preserved (not reset to null/absent),
-    // and — same fallback rule as above — the displayed bandcamp_url stays
-    // the synthesized search URL since the status still isn't 'verified'.
-    expect(conflictCfg.set.bandcamp_url).toContain('bandcamp.com/search');
+    // status is a bare column self-reference — whatever the live row holds
+    // survives untouched, never overwritten with an invented verdict.
+    expect(renderSql(conflictCfg.set.bandcamp_status)).toBe('<col>');
+    expect(sqlValues(conflictCfg.set.bandcamp_status)).toEqual([album_metadata.bandcamp_status]);
+    // bandcamp DOES have a search-URL fallback (unlike Apple Music), so its
+    // url still recomputes the fresh synthesized search URL whenever the
+    // live status isn't verified — same recompute rule as every other
+    // non-verified branch, unrelated to this round's never-consulted status.
+    expect(renderSql(conflictCfg.set.bandcamp_url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+    const bandcampUrlValues = sqlValues(conflictCfg.set.bandcamp_url);
+    expect(bandcampUrlValues[0]).toBe(album_metadata.bandcamp_status);
+    expect(bandcampUrlValues[1]).toBe(album_metadata.bandcamp_url);
+    expect(bandcampUrlValues[2]).toContain('bandcamp.com/search');
+  });
+});
+
+/**
+ * BS#1924 — the shared per-album `streaming_reask_attempts` counter must
+ * increment only on a GENUINE re-ask of an already-enriched album, never on
+ * a BS#1089 no-match shell row's first real match (a shell already has an
+ * `album_metadata` row — search-URLs only — so its first real match also
+ * hits the `onConflictDoUpdate` branch and used to miscount 0->1 before any
+ * actual re-ask happened). The gate gets checked against the LIVE
+ * `artwork_url`/`discogs_url` columns as they stood BEFORE this write (the
+ * same pre-UPDATE-row evaluation every other `set` expression in this
+ * statement relies on) — composes with the BS#1923 CASE rewrite in the same
+ * `set` clause. The actual VALUE this CASE resolves to at conflict time (0
+ * for a shell's first match, N+1 for a genuine re-ask) is a real-Postgres
+ * fact, pinned by the integration spec
+ * (tests/integration/enrichment-worker-streaming-toctou.spec.js); this
+ * suite pins the CASE's structure and its wiring into `finalizeRow`.
+ */
+describe('finalizeRow (BS#1924) — re-ask counter gated on a pre-existing load-bearing match', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('never appears in the fresh-INSERT branch — a brand-new row leaves the counter at its schema DEFAULT 0', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+    await finalizeRow(LINKED_ROW, matchResponse);
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload).not.toHaveProperty('streaming_reask_attempts');
+  });
+
+  it('the conflict-update CASE only increments when the live row already carries artwork_url OR discogs_url', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+    await finalizeRow(LINKED_ROW, matchResponse);
+
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
+    expect(renderSql(conflictCfg.set.streaming_reask_attempts)).toBe(
+      'CASE\n' +
+        '          WHEN <col> IS NOT NULL OR <col> IS NOT NULL\n' +
+        '          THEN <col> + 1\n' +
+        '          ELSE <col>\n' +
+        '        END'
+    );
+    expect(sqlValues(conflictCfg.set.streaming_reask_attempts)).toEqual([
+      album_metadata.artwork_url,
+      album_metadata.discogs_url,
+      album_metadata.streaming_reask_attempts,
+      album_metadata.streaming_reask_attempts,
+    ]);
   });
 });
 
