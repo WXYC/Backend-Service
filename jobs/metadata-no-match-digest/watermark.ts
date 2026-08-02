@@ -10,10 +10,29 @@
  * needs.
  */
 import { eq } from 'drizzle-orm';
-import { db, cronjob_runs } from '@wxyc/database';
+import { db, cronjob_runs, requirePositiveInt } from '@wxyc/database';
 
 /** First run (no `cronjob_runs` row yet): bound the window to the last cadence period rather than dumping full history. */
 export const FIRST_RUN_WINDOW_HOURS = 24;
+
+/** Default play-age ceiling: a no-match whose play (`add_time`) is older than this is a
+ *  backfill re-touch, not a new play, and is excluded from the digest. 48h is comfortably
+ *  above the default 6h C6 gap-recovery window (BACKFILL_RECOVERY_WINDOW_HOURS) so a
+ *  legitimately-new play the CDC worker missed and C6 recovered still surfaces. */
+export const DIGEST_MAX_PLAY_AGE_HOURS_DEFAULT = 48;
+
+/** Lower bound on `flowsheet.add_time` (play recency) for the digest window. */
+export const resolvePlayAgeCutoff = (
+  runStart: Date,
+  raw: string | undefined = process.env.DIGEST_MAX_PLAY_AGE_HOURS
+): Date =>
+  new Date(
+    runStart.getTime() -
+      requirePositiveInt(raw, 'DIGEST_MAX_PLAY_AGE_HOURS', DIGEST_MAX_PLAY_AGE_HOURS_DEFAULT, { unit: 'hours' }) *
+        60 *
+        60 *
+        1000
+  );
 
 type DbClient = typeof db;
 

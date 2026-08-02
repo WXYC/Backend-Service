@@ -124,18 +124,26 @@ const epochToDateStrict = (epochSeconds: number | string): Date => new Date(Numb
 
 /**
  * Rows that flipped to `enriched_no_match` strictly after `since`
- * (exclusive -- matches the watermark's `> :last_run` semantics), newest
+ * (exclusive -- matches the watermark's `> :last_run` semantics) AND whose
+ * play itself is recent (`add_time > playAgeCutoff`), newest
  * rotation/catalog-linked rows first (`rotation_id IS NOT NULL` sorts
  * ahead of freeform), then newest-first within each group, capped at
  * `MAX_DIGEST_ROWS`. Restricted to `entry_type = 'track'`: only track rows
  * are ever enriched (markers/messages stay `pending`), but the explicit
  * predicate hardens against a stray non-track row surfacing.
  *
- * `since` is pre-stringified and the timestamps are selected as epoch to
- * sidestep the postgres-js date-serializer/parser passthrough -- see the file
- * header.
+ * Two independent bounds, not one: `since` (the watermark) still catches a
+ * row newly *flipped* to no-match, while `playAgeCutoff` requires the play
+ * itself to be recent. Without the second bound, a backfill re-touching old
+ * plays (old `add_time`, fresh `updated_at` -- the `bump_flowsheet_updated_at`
+ * trigger fires on every write) floods the digest with historical rows that
+ * aren't new. See `watermark.ts`'s `resolvePlayAgeCutoff` / BS#1921.
+ *
+ * `since` and `playAgeCutoff` are both pre-stringified and the timestamps are
+ * selected as epoch to sidestep the postgres-js date-serializer/parser
+ * passthrough -- see the file header.
  */
-export const queryNoMatchRows = async (since: Date): Promise<NoMatchRow[]> => {
+export const queryNoMatchRows = async (since: Date, playAgeCutoff: Date): Promise<NoMatchRow[]> => {
   const query = sql`
     SELECT
       f."id" AS "id",
@@ -156,6 +164,7 @@ export const queryNoMatchRows = async (since: Date): Promise<NoMatchRow[]> => {
     WHERE f."metadata_status" = 'enriched_no_match'
       AND f."entry_type" = 'track'
       AND f."updated_at" > ${since.toISOString()}::timestamptz
+      AND f."add_time" > ${playAgeCutoff.toISOString()}::timestamptz
     ORDER BY (f."rotation_id" IS NOT NULL) DESC, f."updated_at" DESC
     LIMIT ${MAX_DIGEST_ROWS}
   `;

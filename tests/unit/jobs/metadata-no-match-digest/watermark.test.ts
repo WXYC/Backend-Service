@@ -32,9 +32,13 @@ const fakeDb = {
   insert: mockInsert,
 };
 
+// `requirePositiveInt` is re-exported from its pure source module (not
+// jest.requireActual('@wxyc/database'), which would pull in the real DB
+// client) -- same approach as the shared `tests/mocks/database.mock.ts`.
 jest.mock('@wxyc/database', () => ({
   db: fakeDb,
   cronjob_runs: { job_name: 'job_name', last_run: 'last_run' },
+  requirePositiveInt: jest.requireActual('../../../../shared/database/src/env-parsers.js').requirePositiveInt,
 }));
 
 jest.mock('drizzle-orm', () => ({
@@ -43,8 +47,10 @@ jest.mock('drizzle-orm', () => ({
 
 import {
   advanceWatermarkIfSuccessful,
+  DIGEST_MAX_PLAY_AGE_HOURS_DEFAULT,
   FIRST_RUN_WINDOW_HOURS,
   getLastRun,
+  resolvePlayAgeCutoff,
   resolveWindowStart,
   updateLastRun,
 } from '../../../../jobs/metadata-no-match-digest/watermark';
@@ -64,6 +70,33 @@ describe('resolveWindowStart', () => {
 
   it('FIRST_RUN_WINDOW_HOURS is one cadence period (24h)', () => {
     expect(FIRST_RUN_WINDOW_HOURS).toBe(24);
+  });
+});
+
+describe('resolvePlayAgeCutoff', () => {
+  const runStart = new Date('2026-07-31T15:07:00Z');
+
+  it('defaults to DIGEST_MAX_PLAY_AGE_HOURS_DEFAULT (48h) when the env var is unset', () => {
+    const cutoff = resolvePlayAgeCutoff(runStart, undefined);
+    expect(DIGEST_MAX_PLAY_AGE_HOURS_DEFAULT).toBe(48);
+    expect(cutoff.getTime()).toBe(runStart.getTime() - DIGEST_MAX_PLAY_AGE_HOURS_DEFAULT * 60 * 60 * 1000);
+  });
+
+  it('honors a DIGEST_MAX_PLAY_AGE_HOURS env override', () => {
+    const cutoff = resolvePlayAgeCutoff(runStart, '12');
+    expect(cutoff.getTime()).toBe(runStart.getTime() - 12 * 60 * 60 * 1000);
+  });
+
+  it('rejects 0 -- a blackhole setting, unlike BACKFILL_RECOVERY_WINDOW_HOURS where 0 disables the ceiling', () => {
+    expect(() => resolvePlayAgeCutoff(runStart, '0')).toThrow(/DIGEST_MAX_PLAY_AGE_HOURS/);
+  });
+
+  it('rejects a non-numeric value', () => {
+    expect(() => resolvePlayAgeCutoff(runStart, 'not-a-number')).toThrow(/DIGEST_MAX_PLAY_AGE_HOURS/);
+  });
+
+  it('rejects a negative value', () => {
+    expect(() => resolvePlayAgeCutoff(runStart, '-5')).toThrow(/DIGEST_MAX_PLAY_AGE_HOURS/);
   });
 });
 

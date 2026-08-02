@@ -10,10 +10,12 @@ import { jest, describe, it, expect, beforeEach } from '@jest/globals';
 
 const mockGetLastRun = jest.fn();
 const mockResolveWindowStart = jest.fn();
+const mockResolvePlayAgeCutoff = jest.fn();
 const mockAdvanceWatermark = jest.fn();
 jest.mock('../../../../jobs/metadata-no-match-digest/watermark', () => ({
   getLastRun: mockGetLastRun,
   resolveWindowStart: mockResolveWindowStart,
+  resolvePlayAgeCutoff: mockResolvePlayAgeCutoff,
   advanceWatermarkIfSuccessful: mockAdvanceWatermark,
 }));
 
@@ -47,12 +49,14 @@ import { run } from '../../../../jobs/metadata-no-match-digest/orchestrate';
 
 const DIGEST = { subject: 's', html: '<p>h</p>', text: 't' };
 const WINDOW_START = new Date('2026-07-30T15:07:00Z');
+const PLAY_AGE_CUTOFF = new Date('2026-07-29T15:07:00Z');
 
 describe('orchestrate.run()', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetLastRun.mockResolvedValue(new Date('2026-07-30T15:07:00Z') as never);
     mockResolveWindowStart.mockReturnValue(WINDOW_START);
+    mockResolvePlayAgeCutoff.mockReturnValue(PLAY_AGE_CUTOFF);
     mockAdvanceWatermark.mockResolvedValue(true as never);
     mockResolveDigestRecipient.mockReturnValue('jake@wxyc.org');
   });
@@ -108,7 +112,7 @@ describe('orchestrate.run()', () => {
     await run();
 
     expect(mockResolveWindowStart).toHaveBeenCalledWith(null, expect.any(Date));
-    expect(mockQueryNoMatchRows).toHaveBeenCalledWith(WINDOW_START);
+    expect(mockQueryNoMatchRows).toHaveBeenCalledWith(WINDOW_START, PLAY_AGE_CUTOFF);
   });
 
   it('passes truncated=true to the formatter when the query hits MAX_DIGEST_ROWS', async () => {
