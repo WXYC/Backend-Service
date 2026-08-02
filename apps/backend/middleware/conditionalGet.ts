@@ -38,8 +38,16 @@ export type WatermarkProvider = () => Promise<Date>;
  * Sentinel written to the `ETag` header before the route handler runs, so
  * that Express's own per-body ETag generation never fires (see below), then
  * stripped again right before the response is flushed.
+ *
+ * Randomized per process (BS#1800 hardening) rather than a fixed literal: a
+ * conforming client can never legitimately echo this value back (it's
+ * stripped before flush, so no client ever observes it), but a fixed literal
+ * left a theoretical bypass — a client that happened to send
+ * `If-None-Match` equal to the exact literal would trip Express's internal
+ * freshness match and get an empty-body 304 that skipped `conditionalGet`
+ * entirely. Computed once here at module load, not per-request.
  */
-const ETAG_SUPPRESSED = 'wxyc-no-etag';
+const ETAG_SUPPRESSED = `wxyc-no-etag-${crypto.randomUUID()}`;
 
 /**
  * Forces `conditionalGet`'s watermark `Last-Modified` to be the SINGLE
