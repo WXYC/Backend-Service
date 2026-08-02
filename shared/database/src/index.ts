@@ -15,3 +15,4 @@ export * from './ny-time.js';
 export * from './concerts-sql.js';
 export * from './concerts-recompute.js';
 export * from './album-resolve.js';
+export * from './freetext-enumerate.js';
