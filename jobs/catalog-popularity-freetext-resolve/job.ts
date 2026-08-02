@@ -476,9 +476,17 @@ export interface BatchResult {
   /** BS#1518: count of `match`-status results whose candidate release id was
    * rejected by `isTrustedLmlAlbumMatch` (non-`direct` search_type) and so
    * collapsed to a no-match write instead of persisting a wrong-album id.
-   * Distinct from `no_match` (LML found no candidate at all) — mirrors the
-   * `trust_rejected` counter shape `jobs/rotation-release-id-backfill`
-   * (BS#1519) added for the same gate. */
+   * This is a SUB-COUNT of `match` (every trust-rejected result is ALSO
+   * counted in `match`, since LML did return a wire-level match — only the
+   * persisted verdict differs), NOT a mutually exclusive outcome bucket
+   * alongside it: `match + no_match + error` still sums to `batchSize`, but
+   * `match` no longer implies "a release id was persisted" once a trust
+   * rejection is possible. Same counter NAME as `jobs/rotation-release-id-backfill`
+   * (BS#1519) for the same gate, but that job's totals ARE a mutually
+   * exclusive partition (each candidate lands in exactly one bucket) — this
+   * one is shaped differently because `match`/`no_match` here reflect LML's
+   * wire status, not the post-gate verdict. Distinct from `no_match` (LML
+   * found no candidate at all — never a trust rejection). */
   trust_rejected: number;
 }
 
@@ -1012,11 +1020,13 @@ export interface ReverifyTarget extends NormalizedPair {
  *
  * `discogs_master_id` is nulled alongside `discogs_release_id`: a master id
  * derived from a since-rejected release id is equally polluted. `resolved_at`
- * is nulled too, preserving `upsertVerdict`'s documented invariant that the
- * column means "when a release was last attached" — it would otherwise carry
- * a stale non-null timestamp on a row whose release id is now null.
- * `attempt_at` and `match_source` are left untouched; this write only undoes
- * the specific columns BS#1518 identified as polluted. */
+ * and `match_confidence` are nulled too, matching `upsertVerdict`'s no-match
+ * write shape (both columns are meaningless once there's no release id) and
+ * preserving the documented `resolved_at` invariant ("when a release was
+ * last attached") — either would otherwise carry a stale non-null value on a
+ * row whose release id is now null. `attempt_at` and `match_source` are left
+ * untouched; this write only undoes the specific columns BS#1518 identified
+ * as polluted. */
 export const nullTrustRejectedRow = async (
   normArtist: string,
   normAlbum: string,
@@ -1026,7 +1036,8 @@ export const nullTrustRejectedRow = async (
     UPDATE "wxyc_schema"."flowsheet_freetext_resolution"
     SET "discogs_release_id" = NULL,
         "discogs_master_id" = NULL,
-        "resolved_at" = NULL
+        "resolved_at" = NULL,
+        "match_confidence" = NULL
     WHERE "norm_artist" = ${normArtist}
       AND "norm_album" = ${normAlbum}
       AND "discogs_release_id" = ${previousReleaseId}
