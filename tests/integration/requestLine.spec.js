@@ -3,8 +3,6 @@ const postgres = require('postgres');
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { signInAnonymous, unbanUser, BETTER_AUTH_URL } = require('../utils/anonymous_auth');
 
-const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
-
 // Helper to get a new anonymous auth token
 const getTestToken = async () => {
   const { token, userId, user } = await signInAnonymous();
@@ -294,11 +292,13 @@ describe('Request Line Endpoint', () => {
       // for its fingerprint case. Cleanup below still goes through the real
       // unbanUser() HTTP flow (no session side effect there), so this test
       // still needs the admin credentials TEST_ADMIN_BAN gates.
+      // better-auth's tables live in the `public` schema, not the per-worker
+      // WXYC_SCHEMA_NAME domain schema (migration 0020 creates auth_user with
+      // no schema qualifier; the domain FKs reference "public"."auth_user").
+      // check-request-ban.spec.js targets ${SCHEMA}.banned_fingerprints — a
+      // domain table — so it does not hit this distinction.
       async function banUserDirectly(sql, userId, reason) {
-        await sql.unsafe(`UPDATE ${SCHEMA}.auth_user SET banned = true, ban_reason = $1 WHERE id = $2`, [
-          reason,
-          userId,
-        ]);
+        await sql.unsafe(`UPDATE public.auth_user SET banned = true, ban_reason = $1 WHERE id = $2`, [reason, userId]);
       }
 
       // Exchanges a still-valid session token for a JWT via better-auth's
