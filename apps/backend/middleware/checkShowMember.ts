@@ -19,11 +19,11 @@ export const showMemberMiddleware: RequestHandler = async (req, res, next) => {
     const user_id = req.auth?.id || req.auth?.sub || res.locals.decodedJWT?.id || res.locals.decodedJWT?.userId;
     const dj_in_show = show_djs.some((dj) => dj.id === user_id);
 
-    if (dj_in_show) {
-      next();
-    } else {
+    if (!dj_in_show) {
       res.status(400).json({ message: 'Bad Request: DJ not a member of show' });
+      return;
     }
+    next();
   } catch (e) {
     next(e);
   }
