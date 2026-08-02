@@ -77,9 +77,10 @@ export const captureError = (error: unknown, step: string, extra: Record<string,
 
 /** Warning-level Sentry message (no exception object) — used for the
  *  source-staleness signal, which is a condition, not a thrown error.
- *  Message-based, so it needs no tracing (BS crons default
- *  SENTRY_TRACES_SAMPLE_RATE=0; span-attribute alerts would be
- *  dead-on-arrival here, see BS#1457). */
+ *  Message-based, so it needs no tracing either way — BS crons now
+ *  default `SENTRY_TRACES_SAMPLE_RATE` to 1.0 (BS#1299/PR#1782 flipped
+ *  the earlier 0 default); see BS#1457 for why span-attribute-only
+ *  alerts needed explicit tracing before that flip. */
 export const captureWarning = (message: string, step: string, extra: Record<string, unknown> = {}): void => {
   Sentry.captureMessage(message, { level: 'warning', tags: { step }, extra });
 };

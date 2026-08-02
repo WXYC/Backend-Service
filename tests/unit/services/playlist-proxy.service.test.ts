@@ -6,25 +6,28 @@
  * query builder and exercise: entry_type -> tubafrenzy wire-vocabulary
  * mapping, hour/chronOrderID/timeCreated synthesis, rotation/request string
  * coercion, playcut slicing vs. unsliced talksets/breakpoints, and artwork
- * enrichment (including the BS#1105 split-format tie-break, preserved from
- * the pre-Phase-3 implementation).
+ * enrichment (including the BS#1105 split-format tie-break, rewritten from
+ * an `array_agg(...)[1]` to a `DISTINCT ON` by BS#1800).
  */
 import { jest } from '@jest/globals';
 
 // --- Mocks ---
 
-// Mock the database module. A single shared chain object is reused for both
-// query shapes getRecentEntries issues:
-//   1. main entries query:   select().from(flowsheet).leftJoin(rotation, ...).orderBy(...).limit(...)
-//   2. artwork batch query:  select().from(flowsheet).innerJoin(album_metadata, ...).where(...).groupBy(...)
-// The two are distinguished by their terminal method: `.limit()` resolves
-// the main entries rows, `.groupBy()` resolves the artwork rows.
+// Mock the database module. A single shared chain object is reused for the
+// main entries query shape getRecentEntries issues:
+//   select().from(flowsheet).leftJoin(rotation, ...).orderBy(...).limit(...)
+// resolved by its terminal `.limit()`. The artwork batch query is a separate
+// entry point/chain (BS#1800 rewrote it from `.select()...groupBy()` to
+// `.selectDistinctOn()...orderBy()`, and `.orderBy()` is also a *non-terminal*
+// link in the main chain above, so it needs its own mock chain to avoid the
+// two meanings colliding):
+//   selectDistinctOn().from(flowsheet).innerJoin(album_metadata, ...).where(...).orderBy(...)
+// resolved by its terminal `.orderBy()`.
 const mockSelect = jest.fn();
 const mockFrom = jest.fn();
 const mockLeftJoin = jest.fn();
 const mockInnerJoin = jest.fn();
 const mockWhere = jest.fn();
-const mockGroupBy = jest.fn();
 const mockOrderBy = jest.fn();
 const mockLimit = jest.fn();
 // db.execute(sql`...`) resolves the batched rotation-fallback query (BS#1862).
@@ -36,7 +39,6 @@ const mockDbChain = {
   leftJoin: mockLeftJoin,
   innerJoin: mockInnerJoin,
   where: mockWhere,
-  groupBy: mockGroupBy,
   orderBy: mockOrderBy,
   limit: mockLimit,
 };
@@ -45,19 +47,40 @@ mockFrom.mockReturnValue(mockDbChain);
 mockLeftJoin.mockReturnValue(mockDbChain);
 mockInnerJoin.mockReturnValue(mockDbChain);
 mockWhere.mockReturnValue(mockDbChain);
-mockGroupBy.mockResolvedValue([]);
 mockOrderBy.mockReturnValue(mockDbChain);
 mockLimit.mockResolvedValue([]);
 mockExecute.mockResolvedValue([]); // rotation fallback: no matches by default
 
+// Separate chain for the artwork `db.selectDistinctOn(...)` query (BS#1105 /
+// BS#1800) — kept apart from mockDbChain because its terminal call is
+// `.orderBy()`, which mockDbChain's main-entries chain also uses, but
+// non-terminally (before `.limit()`).
+const mockSelectDistinctOn = jest.fn();
+const mockArtworkFrom = jest.fn();
+const mockArtworkInnerJoin = jest.fn();
+const mockArtworkWhere = jest.fn();
+const mockArtworkOrderBy = jest.fn();
+
+const artworkChain = {
+  from: mockArtworkFrom,
+  innerJoin: mockArtworkInnerJoin,
+  where: mockArtworkWhere,
+  orderBy: mockArtworkOrderBy,
+};
+mockSelectDistinctOn.mockReturnValue(artworkChain);
+mockArtworkFrom.mockReturnValue(artworkChain);
+mockArtworkInnerJoin.mockReturnValue(artworkChain);
+mockArtworkWhere.mockReturnValue(artworkChain);
+mockArtworkOrderBy.mockResolvedValue([]); // artwork query default: no matches
+
 jest.mock('@wxyc/database', () => ({
   db: {
     select: (...args: unknown[]) => mockSelect(...args),
+    selectDistinctOn: (...args: unknown[]) => mockSelectDistinctOn(...args),
     from: (...args: unknown[]) => mockFrom(...args),
     leftJoin: (...args: unknown[]) => mockLeftJoin(...args),
     innerJoin: (...args: unknown[]) => mockInnerJoin(...args),
     where: (...args: unknown[]) => mockWhere(...args),
-    groupBy: (...args: unknown[]) => mockGroupBy(...args),
     orderBy: (...args: unknown[]) => mockOrderBy(...args),
     limit: (...args: unknown[]) => mockLimit(...args),
     execute: (...args: unknown[]) => mockExecute(...args),
@@ -108,6 +131,7 @@ jest.mock('drizzle-orm', () => ({
   and: jest.fn(),
   eq: jest.fn(),
   desc: jest.fn(),
+  asc: jest.fn(),
 }));
 
 // Suppress console output in tests
@@ -268,9 +292,13 @@ describe('playlist-proxy.service', () => {
     mockInnerJoin.mockReturnValue(mockDbChain);
     mockWhere.mockReturnValue(mockDbChain);
     mockOrderBy.mockReturnValue(mockDbChain);
-    mockGroupBy.mockResolvedValue([]); // artwork query default: no matches
     mockLimit.mockResolvedValue([]); // main entries query default: empty
     mockExecute.mockResolvedValue([]); // rotation fallback default: no matches
+    mockSelectDistinctOn.mockReturnValue(artworkChain);
+    mockArtworkFrom.mockReturnValue(artworkChain);
+    mockArtworkInnerJoin.mockReturnValue(artworkChain);
+    mockArtworkWhere.mockReturnValue(artworkChain);
+    mockArtworkOrderBy.mockResolvedValue([]); // artwork query default: no matches
   });
 
   describe('getRecentEntries — grouping and entry_type mapping', () => {
@@ -538,7 +566,7 @@ describe('playlist-proxy.service', () => {
   describe('getRecentEntries — artwork enrichment', () => {
     it('enriches playcuts with artwork from DB', async () => {
       mockLimit.mockResolvedValue([jessicaPrattRow]);
-      mockGroupBy.mockResolvedValue([
+      mockArtworkOrderBy.mockResolvedValue([
         { key: 'jessica pratt-on your own love again', artwork_url: 'https://i.discogs.com/jessica.jpg' },
       ]);
 
@@ -549,7 +577,7 @@ describe('playlist-proxy.service', () => {
 
     it('omits artworkURL when there is no metadata match', async () => {
       mockLimit.mockResolvedValue([jessicaPrattRow]);
-      mockGroupBy.mockResolvedValue([]);
+      mockArtworkOrderBy.mockResolvedValue([]);
 
       const result = await getRecentEntries(50);
 
@@ -558,7 +586,7 @@ describe('playlist-proxy.service', () => {
 
     it('degrades to no artwork (rather than throwing) when the artwork query fails', async () => {
       mockLimit.mockResolvedValue([jessicaPrattRow]);
-      mockGroupBy.mockRejectedValue(new Error('DB connection lost'));
+      mockArtworkOrderBy.mockRejectedValue(new Error('DB connection lost'));
 
       const result = await getRecentEntries(50);
 
@@ -570,7 +598,7 @@ describe('playlist-proxy.service', () => {
 
       await getRecentEntries(50);
 
-      expect(mockGroupBy).not.toHaveBeenCalled();
+      expect(mockArtworkOrderBy).not.toHaveBeenCalled();
     });
 
     it('only enriches the sliced playcuts, not the full 200-row window', async () => {
@@ -579,7 +607,7 @@ describe('playlist-proxy.service', () => {
         id: 4000 + i,
       }));
       mockLimit.mockResolvedValue(manyPlaycuts);
-      mockGroupBy.mockResolvedValue([]);
+      mockArtworkOrderBy.mockResolvedValue([]);
 
       await getRecentEntries(3);
 
@@ -587,7 +615,7 @@ describe('playlist-proxy.service', () => {
       // `and(...)` to `.where(...)` — drizzle-orm is mocked, so we can only
       // assert the query executed once (batched), not literally introspect
       // the key list through the mocked `and`/`inArray`.
-      expect(mockGroupBy).toHaveBeenCalledTimes(1);
+      expect(mockArtworkOrderBy).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -611,12 +639,13 @@ describe('playlist-proxy.service', () => {
       'utf-8'
     );
 
-    it('imports `and`, `isNotNull`, `eq`, and `desc` from drizzle-orm', () => {
+    it('imports `and`, `isNotNull`, `eq`, `desc`, and `asc` from drizzle-orm', () => {
       expect(proxySource).toMatch(/from\s+'drizzle-orm'/);
       expect(proxySource).toMatch(/\band\b/);
       expect(proxySource).toMatch(/\bisNotNull\b/);
       expect(proxySource).toMatch(/\beq\b/);
       expect(proxySource).toMatch(/\bdesc\b/);
+      expect(proxySource).toMatch(/\basc\b/);
     });
 
     it('imports album_metadata, rotation, library, and artists alongside flowsheet from @wxyc/database', () => {
@@ -628,7 +657,7 @@ describe('playlist-proxy.service', () => {
     });
 
     it('the flowsheet artwork SELECT inner-joins album_metadata on album_id and filters isNotNull(album_metadata.artwork_url)', () => {
-      const chains = proxySource.match(/db\s*\.\s*select[\s\S]*?\.\s*groupBy\([\s\S]*?\)\s*;/g) ?? [];
+      const chains = proxySource.match(/db\s*\.\s*selectDistinctOn[\s\S]*?\.\s*orderBy\([\s\S]*?\)\s*;/g) ?? [];
       const artworkChains = chains.filter((c) => /flowsheetLookupKey/.test(c));
       expect(artworkChains.length).toBe(1);
       for (const chain of artworkChains) {
@@ -649,9 +678,11 @@ describe('playlist-proxy.service', () => {
   });
 
   describe('artwork tie-break: split-format albums (BS#1105)', () => {
-    // Preserved verbatim from the pre-Phase-3 implementation (commit
-    // d0b8317d, closes #1105). See enrichPlaycuts' docstring in the service
-    // file for the full rationale.
+    // Originally an `array_agg(... ORDER BY album_id ASC)[1]` preserved
+    // verbatim from the pre-Phase-3 implementation (commit d0b8317d, closes
+    // #1105). BS#1800 replaced the array-materializing aggregate with a
+    // `DISTINCT ON` selecting the same (lowest-album_id) row directly — see
+    // enrichPlaycuts' docstring in the service file for the full rationale.
     const fs = jest.requireActual<typeof import('fs')>('fs');
     const path = jest.requireActual<typeof import('path')>('path');
 
@@ -660,20 +691,19 @@ describe('playlist-proxy.service', () => {
       'utf-8'
     );
 
-    it('groups by lookup key alone and aggregates artwork_url deterministically by lowest album_id', () => {
-      const chains = proxySource.match(/db\s*\.\s*select[\s\S]*?\.\s*groupBy\([\s\S]*?\)\s*;/g) ?? [];
+    it('selects DISTINCT ON the lookup key, ordered by lookup key then album_id ascending, without array_agg', () => {
+      const chains = proxySource.match(/db\s*\.\s*selectDistinctOn[\s\S]*?\.\s*orderBy\([\s\S]*?\)\s*;/g) ?? [];
       const batchChain = chains.find((c) => /flowsheetLookupKey/.test(c));
       expect(batchChain).toBeDefined();
-      expect(batchChain).toMatch(/\.groupBy\(\s*flowsheetLookupKey\s*\)/);
-      expect(batchChain).not.toMatch(/\.groupBy\(\s*flowsheetLookupKey\s*,\s*album_metadata\.artwork_url\s*\)/);
-      expect(batchChain).toMatch(
-        /array_agg\(\s*\$\{album_metadata\.artwork_url\}\s*order by\s*\$\{album_metadata\.album_id\}\s*asc\s*\)\)\[1\]/
-      );
+      expect(batchChain).toMatch(/\.selectDistinctOn\(\s*\[\s*flowsheetLookupKey\s*\]\s*,/);
+      expect(batchChain).toMatch(/\.orderBy\(\s*flowsheetLookupKey\s*,\s*asc\(\s*album_metadata\.album_id\s*\)\s*\)/);
+      expect(batchChain).not.toMatch(/array_agg/);
+      expect(batchChain).not.toMatch(/\.groupBy\(/);
     });
 
     it('behaviorally resolves the artwork the mocked tie-break query returns onto the matching playcut', async () => {
       mockLimit.mockResolvedValue([juanaMolinaRow]);
-      mockGroupBy.mockResolvedValue([
+      mockArtworkOrderBy.mockResolvedValue([
         { key: 'juana molina-doga', artwork_url: 'https://i.discogs.com/lowest-album-id.jpg' },
       ]);
 
@@ -775,7 +805,7 @@ describe('playlist-proxy.service', () => {
 
       expect('artworkURL' in entry).toBe(false);
       expect(entry.playcut).not.toHaveProperty('imageURL');
-      expect(mockGroupBy).not.toHaveBeenCalled();
+      expect(mockArtworkOrderBy).not.toHaveBeenCalled();
     });
 
     it('bounds the window to n TOTAL entries (min(n, 200)), not n playcuts', async () => {

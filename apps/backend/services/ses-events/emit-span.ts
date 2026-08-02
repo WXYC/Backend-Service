@@ -17,10 +17,13 @@ import type { SesEvent } from './types.js';
  *     email.bounce_subtype:   (Bounce only)
  *     email.delay_type:       (DeliveryDelay only)
  *     email.reject_reason:    (Reject only) trimmed to 500 chars
- *
- *   measurements:
- *     ses.delivery_latency_ms: (Delivery only) ms from mail.timestamp to delivery.timestamp
- *     ses.processing_time_ms:  (Delivery only) delivery.processingTimeMillis
+ *     ses.delivery_latency_ms: (Delivery only) ms from mail.timestamp to
+ *                             delivery.timestamp — folded into the same
+ *                             creation-time attributes bag (not a separate
+ *                             `measurements` block) so Sentry indexes it
+ *                             numerically for avg/percentile aggregation
+ *     ses.processing_time_ms:  (Delivery only) delivery.processingTimeMillis,
+ *                             folded in alongside ses.delivery_latency_ms
  *
  *   span status:
  *     ok                 on Send/Delivery
