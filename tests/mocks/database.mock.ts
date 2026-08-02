@@ -501,6 +501,48 @@ export const selectLinkedFlowsheetRow = jest
 export { requirePositiveInt, requireNonNegativeInt } from '../../shared/database/src/env-parsers.js';
 export type { IntParserOptions } from '../../shared/database/src/env-parsers.js';
 
+// Re-export the pure `RawPair` TYPE from source (type-only — erased at
+// compile time, no runtime import, so it can't pull in the module's `db`
+// dependency below).
+export type { RawPair } from '../../shared/database/src/freetext-enumerate.js';
+
+// Self-contained MOCK of shared/database/src/freetext-enumerate.ts's
+// `enumerateFreetextPairs` (BS#1799 extraction from
+// jobs/catalog-popularity-freetext-resolve/job.ts). Can't re-export the VALUE
+// from source the way the pure normalizers above are (contrast
+// normalizeArtistName/freetextPairKey/etc.): its `./client.js` import is a bare
+// relative specifier that the `^.*/shared/database/src/client(\.js)?$` mapper
+// entry below does NOT match (that regex requires the literal specifier to
+// already contain "/shared/database/src/client", which a same-directory `./`
+// import never does) — re-exporting it would load the REAL
+// shared/database/src/client.ts unconditionally at THIS file's own import
+// time and throw on missing DB env vars for every suite that imports
+// `@wxyc/database`. This mock instead calls straight through THIS file's own
+// `db` mock (the same `db.transaction` -> two `db.execute` calls -> row-
+// mapping shape as the real function) so job.ts's `runResolve` unit tests,
+// which drive `db.execute` with a sequenced `mockResolvedValueOnce` queue,
+// keep consuming it in the same order unchanged. The real SQL-shape contract
+// is pinned against the actual module directly by
+// tests/unit/database/freetext-enumerate.test.ts.
+export const enumerateFreetextPairs = async (
+  _timeoutMs?: number
+): Promise<Array<{ artist: string; album: string; song: string }>> => {
+  return db.transaction(async (tx: unknown) => {
+    const { execute } = tx as { execute: (arg: unknown) => Promise<unknown> };
+    await execute({}); // SET LOCAL statement_timeout placeholder
+    const rows = (await execute({})) as Array<{
+      artist_name: string;
+      album_title: string;
+      track_title: string | null;
+    }>;
+    return rows.map((r) => ({
+      artist: String(r.artist_name),
+      album: String(r.album_title),
+      song: (r.track_title ?? '').trim(),
+    }));
+  }) as unknown as Promise<Array<{ artist: string; album: string; song: string }>>;
+};
+
 // Pure normalizers (no DB dependency) re-exported from source so consumer jobs
 // resolving @wxyc/database via this mock still get the real implementation.
 export { normalizeArtistName } from '../../shared/database/src/normalize-artist-name.js';
