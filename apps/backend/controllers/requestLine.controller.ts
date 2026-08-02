@@ -190,8 +190,38 @@ export const parseMessage: RequestHandler<object, unknown, { message: string }> 
 };
 
 /**
- * Search the library.
- * GET /library/search
+ * GET /library/search — public catalog search backing the request line.
+ *
+ * Canonical caller: the request-line flow (`POST /request`), where a
+ * listener names a song and the DJ (or an automated matcher) looks up the
+ * closest catalog hit to attach to the request before submitting it. Lives
+ * in `requestLine.controller.ts` but is mounted under `/library` in
+ * `library.route.ts` — see that file's header comment for how this sits
+ * alongside `GET /library/` and `GET /library/query`. Not to be confused
+ * with `GET /proxy/library/search` (`proxy.controller.ts`), which proxies
+ * straight through to LML's own `/library/search` for dj-site's flowsheet
+ * autocomplete; this endpoint reads BS's own catalog via `searchLibrary` in
+ * `library.service.ts`.
+ *
+ * Auth: `requirePermissions({})` — any authenticated JWT, including an
+ * anonymous better-auth session. No `catalog:read`/`catalog:write` role is
+ * required, which makes this the only one of the three library-search
+ * variants a bare listener session can call.
+ *
+ * Query semantics: at least one of `artist`, `title`, or `query` is
+ * required (400 otherwise). A free-text `query` routes through
+ * `searchLibrary`'s tsvector + trigram + CTA/LML cascade
+ * (`searchLibraryBothMode`); `artist` and/or `title` alone route through the
+ * trigram-only `fuzzySearchLibrary` path. See `searchLibrary` in
+ * `library.service.ts` for the full cascade and the
+ * `CATALOG_TRACK_SEARCH_CTA_ENABLED` / `CATALOG_TRACK_SEARCH_DISCOGS_ENABLED`
+ * / `CATALOG_SEARCH_ALIAS_ENABLED` flags that gate its fallback stages.
+ *
+ * Response shape: `{ success: true, results: EnrichedLibraryResult[], total,
+ * query: { artist, title, query, limit } }` — the only one of the three
+ * that wraps its rows in a `{ success, ... }` envelope, rather than
+ * returning a bare array (`GET /library/`) or an offset-paginated
+ * `{ results, total, page, totalPages }` object (`GET /library/query`).
  */
 export const searchLibraryEndpoint: RequestHandler<object, unknown, unknown, LibrarySearchQuery> = async (
   req,
