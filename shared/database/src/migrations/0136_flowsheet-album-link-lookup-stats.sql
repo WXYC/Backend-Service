@@ -1,0 +1,54 @@
+-- @no-precondition-needed: CREATE STATISTICS adds no constraint (no UNIQUE /
+--   CHECK / NOT NULL / FK) — it only records a request for the planner to
+--   build extended statistics on an expression. No data invariant can be
+--   violated by any existing row.
+--
+-- 0136 — extended statistics on the `flowsheet_album_link_lookup_idx`
+-- (migration 0081) expression, formalizing an out-of-band prod fix (BS#1044).
+--
+-- During the BS#1012 / D5 post-deploy smoke on 2026-05-23, the
+-- playlist-proxy's init query timed out at the 5s statement_timeout
+-- because the planner picked Parallel Seq Scan on `flowsheet` (2.6M rows,
+-- 12.3s actual) instead of `flowsheet_album_link_lookup_idx`. The partial
+-- functional index was in place and valid, but PG had no selectivity
+-- statistics for the functional expression
+-- (`lower(trim(artist_name)) || '-' || lower(trim(coalesce(album_title, '')))`),
+-- so for the query's 125-value IN list the planner overestimated matching
+-- rows and preferred the seq-scan path. Creating extended statistics on the
+-- expression (+ an ANALYZE to populate them) flipped the plan to
+-- `Index Scan using flowsheet_album_link_lookup_idx`, 39.9 ms total — a
+-- 310x speedup. That fix was applied directly on prod RDS and was never
+-- captured in a migration, so fresh dev databases never got it and the
+-- schema-parity test at
+-- tests/unit/database/schema.flowsheet-album-link-lookup-idx.test.ts
+-- couldn't pin it. This migration is that missing capture.
+--
+-- The expression here must stay byte-identical to the one
+-- `flowsheet_album_link_lookup_idx` (migration 0081) and the playlist-proxy
+-- SQL builder (`apps/backend/services/playlist-proxy.service.ts`) use —
+-- drift between the index's expression and the statistics' expression makes
+-- the statistics dead weight (the planner only consults extended statistics
+-- that exactly match a query's expression shape).
+--
+-- CREATE STATISTICS is PG10+ (expression/ndistinct/dependencies kinds are
+-- PG10+; this form with no explicit kind list defaults to all three).
+-- Confirmed available on prod PG14.22 and the PG18 dev/CI container (see
+-- docs/migrations.md dev-prod-pg-version-skew) — no compatibility gap.
+--
+-- `IF NOT EXISTS` makes this migration a no-op against prod, where the
+-- statistics object was already created out-of-band; a fresh dev database
+-- picks it up on first migrate. Same shape as the `if-not-exists-index`
+-- convention in docs/migrations.md, applied here to CREATE STATISTICS
+-- instead of CREATE INDEX.
+--
+-- Lock behavior: `CREATE STATISTICS` takes no table lock beyond the brief
+-- catalog-row insert (it only records the request — the statistics
+-- themselves populate on the next ANALYZE, matching the PG docs). The
+-- trailing `ANALYZE` takes no exclusive lock either: unlike `VACUUM`,
+-- `ANALYZE` is transaction-safe (it can run inside a transaction block, so
+-- Drizzle's per-migration transaction wrapper does not need special
+-- handling here) — see 0112's trailing `ANALYZE "wxyc_schema"."concerts";`
+-- for the same in-migration pattern. Safe to apply live; on the 2.6M-row
+-- `flowsheet` table the default statistics target keeps the scan brief.
+CREATE STATISTICS IF NOT EXISTS "flowsheet_album_link_lookup_stats" ON (lower(trim("artist_name")) || '-' || lower(trim(coalesce("album_title", '')))) FROM "wxyc_schema"."flowsheet";--> statement-breakpoint
+ANALYZE "wxyc_schema"."flowsheet";
