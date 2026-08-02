@@ -694,6 +694,17 @@ describe('lml.client', () => {
     it('returns undefined for a key too short to fingerprint without leaking most of it', () => {
       expect(lmlApiKeyFingerprint('short1')).toBeUndefined();
     });
+
+    it('returns undefined at exactly 8 chars, where first-4/last-4 would expose the whole key', () => {
+      // 'abcdefgh' -> slice(0,4)='abcd', slice(-4)='efgh' — edge to edge, every
+      // character revealed. The guard must reject this boundary, not render it.
+      expect(lmlApiKeyFingerprint('abcdefgh')).toBeUndefined();
+    });
+
+    it('renders at 9 chars, the smallest length that keeps a character hidden', () => {
+      // 'abcdefghi' -> 'abcd...fghi'; the middle char ('e') stays concealed.
+      expect(lmlApiKeyFingerprint('abcdefghi')).toBe('abcd...fghi');
+    });
   });
 
   describe('lookupMetadata discogsUnavailable gate (BS#1293)', () => {
