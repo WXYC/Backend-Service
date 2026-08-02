@@ -8,6 +8,37 @@ import { getCatalogLastModifiedAt } from '../services/library.service.js';
 
 export const library_route = Router();
 
+// -----------------------------------------------------------------------
+// Three library-search variants (BS#980)
+// -----------------------------------------------------------------------
+//
+// This router mounts three GET endpoints that all search the catalog but
+// serve different callers with different auth, query shapes, and response
+// shapes. Read the docstring on each handler before adding a fourth or
+// changing one of these three:
+//
+//   - `GET /search` -> `requestLineController.searchLibraryEndpoint`. Public
+//     (any JWT, no `catalog:*` permission) — backs the request-line flow.
+//     Free-text `query` and/or `artist`/`title`; returns a `{ success,
+//     results, total, query }` envelope.
+//   - `GET /` -> `libraryController.searchForAlbum`. `catalog:read` —
+//     backs dj-site's "classic" experience catalog search (plus the
+//     streaming-only "Browse Exclusive Albums" view). `artist_name` /
+//     `album_title` / `on_streaming`; returns a bare result array.
+//   - `GET /query` -> `libraryController.searchLibraryQueryEndpoint`.
+//     `catalog:read` — backs dj-site's "modern" experience query-builder
+//     panel (Catalog Track Search project, WXYC/projects/30), client-gated
+//     there by `NEXT_PUBLIC_CATALOG_TRACK_SEARCH_UI_ENABLED`. Field-scoped
+//     `q` syntax (`artist:`, `album:`, `label:`) plus sort/filter/offset
+//     pagination; returns a `{ results, total, page, totalPages }` page.
+//
+// All three ultimately share the same tsvector + trigram + CTA/LML fallback
+// cascade for plain-text queries (`searchLibraryBothMode` /
+// `library-search.service.ts`'s cascade gate) — they differ in how a caller
+// reaches that cascade and how the result is shaped on the wire, not in the
+// underlying catalog data. As of this writing all three are live production
+// surfaces for distinct callers; none is a deprecated shim.
+
 // Public library search endpoint (for request line feature)
 // Requires JWT auth but no specific role/permissions
 library_route.get('/search', requirePermissions({}), trackActivity, requestLineController.searchLibraryEndpoint);

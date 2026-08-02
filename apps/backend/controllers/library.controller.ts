@@ -190,6 +190,45 @@ type AlbumQueryParams = {
   on_streaming?: string;
 };
 
+/**
+ * GET /library/ — legacy-shape catalog search.
+ *
+ * Canonical caller: dj-site's "classic" experience catalog panel
+ * (`useSearchCatalogQuery`, `experiences/classic/catalog/SearchResults.tsx`)
+ * — Search-by-Artist / Search-by-Album / Search-Both modes, plus the
+ * streaming-only "Browse Exclusive Albums" view (`on_streaming` alone, no
+ * text query — see #872). Still live alongside `GET /library/query`; the
+ * modern experience's query-builder panel (`experiences/modern/catalog/`)
+ * uses `/query` instead, so the two coexist by UI generation rather than one
+ * superseding the other. `code_letters`/`code_artist_number` lookup is
+ * accepted as a query shape but not implemented (throws 501 — see
+ * `TODO: Library Code Lookup` below).
+ *
+ * Auth: `requirePermissions({ catalog: ['read'] })` — DJ role or above.
+ *
+ * Delegates to `libraryService.fuzzySearchLibrary(artist_name, album_title,
+ * n, on_streaming)`: both fields identical (dj-site's Search-Both mode)
+ * routes through the full tsvector + trigram + CTA/LML cascade
+ * (`searchLibraryBothMode`, same cascade `GET /library/search` uses); both
+ * fields set but different keeps the legacy OR-of-trigrams semantics
+ * (`artist_name % :artist OR album_title % :album`, `<->` distance order);
+ * either field alone is a single-column trigram search. Cascade fallback
+ * stages are gated by `CATALOG_TRACK_SEARCH_CTA_ENABLED` /
+ * `CATALOG_TRACK_SEARCH_DISCOGS_ENABLED`; alias-aware trigram matching is
+ * gated by `CATALOG_SEARCH_ALIAS_ENABLED`.
+ *
+ * Artwork enrichment (`enrichWithArtwork`) runs fire-and-forget after the
+ * response is computed — a slow/rate-limited LML artwork lookup never adds
+ * to this endpoint's latency; an un-warmed album's artwork appears on the
+ * *next* search instead (BS#1828).
+ *
+ * Response shape: a bare `LibraryArtistViewResponse[]` (serialized
+ * `library_artist_view` rows, `matched_via`/`matched_via_alias` present when
+ * the row came from a fallback cascade stage) — no envelope, no pagination
+ * metadata. Contrast `GET /library/search`'s `{ success, results, total,
+ * query }` envelope and `GET /library/query`'s `{ results, total, page,
+ * totalPages }` page.
+ */
 export const searchForAlbum: RequestHandler = async (req: Request<object, object, object, AlbumQueryParams>, res) => {
   const { query } = req;
   // `on_streaming` is sufficient on its own to scope the result set (used by
@@ -970,6 +1009,46 @@ const VALID_CATALOG_ORDERS: CatalogOrder[] = ['asc', 'desc'];
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 
+/**
+ * GET /library/query — query-builder catalog search (Catalog Track Search
+ * project, WXYC/projects/30).
+ *
+ * Canonical caller: dj-site's "modern" experience catalog panel
+ * (`useSearchLibraryQueryQuery` / `useSearchLibraryQueryInfiniteQuery`,
+ * `lib/features/catalog/api.ts`), gated client-side behind dj-site's
+ * `NEXT_PUBLIC_CATALOG_TRACK_SEARCH_UI_ENABLED` flag. Distinct from the
+ * legacy `GET /library/` search this coexists with — see that handler's
+ * docstring and `library.route.ts`'s header comment for how the two split
+ * by UI generation.
+ *
+ * Auth: `requirePermissions({ catalog: ['read'] })` — DJ role or above.
+ *
+ * Query semantics: `q` is parsed by `search-parser.service.ts`
+ * (`parseSearchQuery` + `CATALOG_PARSER_CONFIG`) into field-scoped
+ * conditions (`artist:`, `album:`, `label:`, bare `all`-field terms,
+ * negation, AND/OR) rather than the plain artist/title split `GET
+ * /library/` and `GET /library/search` use. Offset-paginated
+ * (`page`/`limit`, default limit 50, max 100 — see `DEFAULT_LIMIT` /
+ * `MAX_LIMIT` above); sortable by `artist` | `album` | `plays` | `date` in
+ * either `order`; filterable by `on_streaming`, `missing`,
+ * `genres`/`genre`, `formats`/`format`, and `rotation_bins`.
+ *
+ * Ranking/filter semantics live in `librarySearchService.searchLibrary`
+ * (`library-search.service.ts`): a plain-text, non-negated, ≤6-condition
+ * query of at least `MIN_CASCADE_QUERY_LENGTH` (4) characters
+ * (`passesCascadeGate`) reaches the same tsvector + trigram + CTA/LML
+ * cascade the other two endpoints use; anything else (field-scoped,
+ * negated, or too short) is a pure SQL filter/sort with no cascade.
+ * `CATALOG_TRACK_SEARCH_CTA_ENABLED` / `CATALOG_TRACK_SEARCH_DISCOGS_ENABLED`
+ * gate the cascade's fallback stages; `CATALOG_SEARCH_ALIAS_ENABLED` gates
+ * alias-aware matching via `artist_search_alias`.
+ *
+ * Response shape: `{ results: AlbumSearchResultRow[], total, page,
+ * totalPages }` — an offset-paginated page with a richer per-row shape than
+ * `GET /library/` (adds `label`, `rotation_bin`, `plays`,
+ * `discogsUnavailable`, etc.). Contrast `GET /library/`'s bare array and
+ * `GET /library/search`'s `{ success, results, total, query }` envelope.
+ */
 export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown, LibraryQueryParams> = async (
   req,
   res
