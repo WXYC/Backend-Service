@@ -106,6 +106,31 @@ export function buildTrustedClients(env: NodeJS.ProcessEnv): Client[] {
     }
   }
 
+  const crmClientId = readEnv(env.CRM_OIDC_CLIENT_ID);
+  const crmClientSecret = readEnv(env.CRM_OIDC_CLIENT_SECRET);
+  if (crmClientId && crmClientSecret) {
+    const redirectUrls = (env.CRM_OIDC_REDIRECT_URLS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (redirectUrls.length > 0) {
+      registrations.push({
+        source: 'WXYC CRM',
+        client: {
+          clientId: crmClientId,
+          clientSecret: crmClientSecret,
+          redirectUrls,
+          name: 'WXYC CRM',
+          type: 'web',
+          disabled: false,
+          icon: undefined,
+          metadata: null,
+          skipConsent: true,
+        },
+      });
+    }
+  }
+
   // wxyc-canary — the synthetic-DJ probe that runs every 5 min and walks the
   // full OIDC code + PKCE dance to catch the regression class that produced
   // #1571 (`oauthConsent` schema drift → login 500). Deliberately a PUBLIC
@@ -156,7 +181,7 @@ function assertUniqueClientIds(registrations: readonly Registration[]): void {
     if (existingSource !== undefined) {
       throw new Error(
         `OIDC trustedClients: duplicate clientId "${client.clientId}" registered by both ${existingSource} and ${source}. ` +
-          `Check that WIKIJS_OIDC_CLIENT_ID, FLOWSHEET_OIDC_CLIENT_ID, and WXYC_CANARY_OIDC_CLIENT_ID are all set to distinct values.`
+          `Check that WIKIJS_OIDC_CLIENT_ID, FLOWSHEET_OIDC_CLIENT_ID, CRM_OIDC_CLIENT_ID, and WXYC_CANARY_OIDC_CLIENT_ID are all set to distinct values.`
       );
     }
     bySeenId.set(client.clientId, source);
