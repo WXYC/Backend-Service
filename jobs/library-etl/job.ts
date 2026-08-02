@@ -19,6 +19,16 @@ import {
 const legacyDB = MirrorSQL.instance();
 const JOB_NAME = 'library-etl';
 
+// Schema-qualified reference to the `fold_artist_name(text)` SQL function
+// (migration 0134 / BS#1095, mirroring the `artistIdFromName` runtime-path
+// fix in `apps/backend/services/library.service.ts` for BS#1897). Derived
+// from `WXYC_SCHEMA_NAME` the same way the `@wxyc/database` `pgSchema` object
+// and the other job SQL builders are, so the per-worker test-isolation
+// schema resolves correctly. `""`-escaped for the (theoretical)
+// quoted-identifier case.
+const FOLD_SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
+const FOLD_ARTIST_NAME_FN = sql.raw(`"${FOLD_SCHEMA}"."fold_artist_name"`);
+
 type LegacyReleaseRow = {
   release_id: number;
   release_title: string;
@@ -381,14 +391,25 @@ const ensureArtist = async (
   const cached = artistCache.get(artistKey);
   if (cached) return cached;
 
-  const nameLower = artistName.toLowerCase().trim();
   const lettersLower = normalizedLetters.toLowerCase().trim();
   const query = isVarious
     ? dbClient
         .select({ id: artists.id, artist_name: artists.artist_name })
         .from(artists)
         .where(
-          and(sql`lower(${artists.artist_name}) = ${nameLower}`, sql`lower(${artists.code_letters}) = ${lettersLower}`)
+          and(
+            // Unicode-form + diacritic + case insensitive match (BS#1095,
+            // mirroring the BS#1897 runtime-path fix). The former
+            // `lower(artist_name) = lower($name)` is collation-aware but NOT
+            // Unicode-form aware: `Nilüfer Yanya` in NFC (`ü` = U+00FC) vs
+            // NFD (`u` + U+0308) is byte-distinct and misses, so this ETL
+            // inserted a duplicate `artists` row per composition form.
+            // `fold_artist_name` (migration 0134) folds NFC/NFD/ASCII-fold/
+            // case onto one key on BOTH sides — an app-side `.toLowerCase()`
+            // on the input alone can't match an NFD-stored row.
+            sql`${FOLD_ARTIST_NAME_FN}(${artists.artist_name}) = ${FOLD_ARTIST_NAME_FN}(${artistName})`,
+            sql`lower(${artists.code_letters}) = ${lettersLower}`
+          )
         )
         .limit(1)
     : dbClient
@@ -397,7 +418,7 @@ const ensureArtist = async (
         .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
         .where(
           and(
-            sql`lower(${artists.artist_name}) = ${nameLower}`,
+            sql`${FOLD_ARTIST_NAME_FN}(${artists.artist_name}) = ${FOLD_ARTIST_NAME_FN}(${artistName})`,
             sql`lower(${artists.code_letters}) = ${lettersLower}`,
             eq(genre_artist_crossreference.genre_id, genreId),
             eq(genre_artist_crossreference.artist_genre_code, artistGenreCode)
@@ -482,7 +503,11 @@ const findArtistId = async (
     .from(artists)
     .where(
       and(
-        sql`lower(${artists.artist_name}) = ${artistName.toLowerCase().trim()}`,
+        // Unicode-form + diacritic + case insensitive match (BS#1095,
+        // mirroring the BS#1897 runtime-path fix + this file's `ensureArtist`
+        // above). See the comment there for the byte-distinct NFC/NFD
+        // collision this replaces.
+        sql`${FOLD_ARTIST_NAME_FN}(${artists.artist_name}) = ${FOLD_ARTIST_NAME_FN}(${artistName})`,
         sql`lower(${artists.code_letters}) = ${codeLetters.toLowerCase().trim()}`
       )
     )
@@ -1177,6 +1202,8 @@ export {
   buildAlbumCacheKey,
   buildLegacySourcedSetMap,
   buildLegacySourcedSetWhere,
+  ensureArtist,
+  findArtistId,
 };
 
 run().catch((error) => {
