@@ -42,21 +42,42 @@
  *   - tests/unit/apps/enrichment-worker/synthesize-search-urls-parity.test.ts (BS#889 / BS#1189)
  *
  * BS#1915 (bounded self-heal of unresolved streaming links). The linked-match
- * arm now reads the album's PRIOR persisted spotify/apple_music/bandcamp
- * status+url before writing, and merges each field with the fresh LML
- * verdict via `mergeStreamingField` (never downgrading an already-`verified`
- * field, forcing `absent` fields' url to null and terminal, and leaving
- * `unresolved` fields transient/retry-eligible). `streaming_reask_attempts`
- * — one shared per-album counter, not per-service, since a single LML
- * re-ask resolves all three services' verdicts at once — increments ONLY on
- * the `onConflictDoUpdate` branch (a genuine re-ask against an EXISTING
- * row); a fresh album's first-ever write leaves the column at its schema
- * DEFAULT 0, because the first ask is not a re-ask. Migration 0135 (schema)
- * carries the full design rationale; `precheck.ts` is the read side that
- * gates further re-asks at `STREAMING_REASK_ATTEMPT_CAP`.
+ * arm merges each of the three per-service streaming fields (spotify,
+ * apple_music, bandcamp) with the fresh LML verdict via `mergeStreamingField`
+ * (never downgrading an already-`verified` field, forcing `absent` fields'
+ * url to null and terminal, and leaving `unresolved` fields transient/
+ * retry-eligible). `streaming_reask_attempts` — one shared per-album counter,
+ * not per-service, since a single LML re-ask resolves all three services'
+ * verdicts at once — increments ONLY on a genuine re-ask against an EXISTING,
+ * already-matched row (see BS#1924 below); a fresh album's first-ever write
+ * leaves the column at its schema DEFAULT 0, because the first ask is not a
+ * re-ask. Migration 0135 (schema) carries the full design rationale;
+ * `precheck.ts` is the read side that gates further re-asks at
+ * `STREAMING_REASK_ATTEMPT_CAP`.
+ *
+ * BS#1923 (TOCTOU fix). The original merge read the album's PRIOR persisted
+ * streaming state via a separate SELECT *before* the LML round-trip, then
+ * wrote the merge verdict computed against that now-stale snapshot. A live
+ * CDC verify landing during the round-trip (rare, but real) could get
+ * silently clobbered back to `unresolved` plus a search URL — the write
+ * never looked at the row as it actually stood at write time. The fix folds
+ * the merge directly into the UPSERT's `onConflictDoUpdate` `set` clause as
+ * SQL `CASE` expressions over the LIVE `album_metadata` columns
+ * (`buildStreamingFieldConflictSet`), so the read and the write are the same
+ * atomic statement — there is no longer a separate read to go stale. The
+ * INSERT branch (a genuinely fresh album) still merges in plain JS against
+ * an all-NULL state, since there is no live row to race against there.
+ *
+ * BS#1924 (re-ask counter miscount fix). The counter used to increment
+ * whenever the write hit the `onConflictDoUpdate` branch — but a BS#1089
+ * no-match SHELL row (search-URL-only) already has an `album_metadata` row,
+ * so its first REAL match also hits that branch and miscounted 0->1 before
+ * any actual re-ask happened. The increment is now gated on the row already
+ * carrying a load-bearing match (`artwork_url` OR `discogs_url` present)
+ * *before* this write — a shell->matched transition leaves the counter at 0.
  */
 
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
 import type { DiscogsMatchResult, LookupResponse, StreamingResolutionStatus } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
@@ -143,62 +164,111 @@ export function mergeStreamingField(
   return { status: 'unresolved', url: current.url };
 }
 
+/** A field with no synthesized search-URL fallback (Apple Music, BS#1192) never falls back — its non-verified branches keep/null the live URL directly instead of substituting a fresh search URL. */
+const NO_FALLBACK = null;
+
+/** A never-persisted album: `mergeStreamingField` treats this identically to a row whose streaming columns are all still NULL. */
+const FRESH_STREAMING_STATE: StreamingFieldState = { status: null, url: null };
+
 /**
- * Read the album's prior persisted per-service streaming state before a
- * (re-)write. Returns all-null state for an album with no `album_metadata`
- * row yet (a fresh first-ever match) — `mergeStreamingField` treats that
- * identically to a row whose columns are all still NULL.
+ * One field's `onConflictDoUpdate` `set` fragments (BS#1923): SQL `CASE`
+ * expressions over the LIVE `statusCol`/`urlCol` values, translating
+ * `mergeStreamingField`'s rules so the merge and the write are the same
+ * atomic statement — no separate SELECT that could go stale during the LML
+ * round-trip.
+ *
+ * `incomingStatus`/`incomingUrl` are plain JS values fixed for this call
+ * (this round's LML verdict) — only the "current persisted state" side of
+ * the merge needs to become SQL, since that is the side a concurrent writer
+ * could have changed since this call started. Per incoming verdict:
+ *
+ *   - `undefined` (never consulted this round): status is left unchanged
+ *     (whatever the live row already holds). A field WITH a search-URL
+ *     fallback still recomputes it fresh whenever the live status isn't
+ *     `'verified'` — unrelated to whether this field was asked this round;
+ *     that mirrors the pre-#1915 last-writer-wins fallback recompute. A
+ *     field with no fallback (Apple Music) leaves its url unchanged too.
+ *   - `'verified'`: status becomes `'verified'` unconditionally (rule 3 of
+ *     `mergeStreamingField` supersedes a prior `'absent'`); url adopts
+ *     `incomingUrl` UNLESS the live row is already `'verified'`, in which
+ *     case the live url is kept — a verified field is never downgraded,
+ *     evaluated against the row as it stands at write time, not a stale
+ *     snapshot.
+ *   - `'absent'`: status becomes `'absent'` unless the live row is already
+ *     `'verified'` (kept). url becomes the fallback (or NULL with no
+ *     fallback) in that same non-verified branch — `current.status ===
+ *     'absent'` (keep) and adopting `'absent'` fresh collapse to the same
+ *     final url here, so one branch covers both.
+ *   - `'unresolved'`: status becomes `'unresolved'` unless the live row is
+ *     already `'verified'` OR already `'absent'` (both terminal, kept). url
+ *     recomputes the fresh fallback in the non-verified branch for a field
+ *     WITH a fallback (same recompute as the `undefined` case); for Apple
+ *     Music (no fallback) the url never changes for an `'unresolved'`
+ *     verdict, in every reachable branch — so it is left as the live column
+ *     untouched.
+ *
+ * Every `${statusCol} = 'verified'` (and `'absent'`) comparison below is
+ * written out at its use site rather than factored into a shared
+ * sub-fragment — a flat template per branch, directly inspectable by a test
+ * via `.sql`/`.values` without needing to recurse through nested `SQL`
+ * objects (see `buildStreamingFieldConflictSet`'s unit tests). These
+ * predicates read the LIVE row (evaluated by Postgres against the
+ * pre-UPDATE row, same as every other `set` expression in an
+ * `ON CONFLICT DO UPDATE`) — this is exactly what closes the TOCTOU window:
+ * whatever a concurrent CDC verify wrote before this UPDATE commits is what
+ * these CASEs see.
  */
-async function selectPriorStreamingState(albumId: number): Promise<{
-  spotify: StreamingFieldState;
-  apple_music: StreamingFieldState;
-  bandcamp: StreamingFieldState;
-}> {
-  const rows = await db
-    .select({
-      spotify_status: album_metadata.spotify_status,
-      spotify_url: album_metadata.spotify_url,
-      apple_music_status: album_metadata.apple_music_status,
-      apple_music_url: album_metadata.apple_music_url,
-      bandcamp_status: album_metadata.bandcamp_status,
-      bandcamp_url: album_metadata.bandcamp_url,
-    })
-    .from(album_metadata)
-    .where(eq(album_metadata.album_id, albumId))
-    .limit(1);
-  const prior = rows[0] as
-    | {
-        spotify_status: string | null;
-        spotify_url: string | null;
-        apple_music_status: string | null;
-        apple_music_url: string | null;
-        bandcamp_status: string | null;
-        bandcamp_url: string | null;
-      }
-    | undefined;
+export function buildStreamingFieldConflictSet(
+  statusCol: AnyColumn,
+  urlCol: AnyColumn,
+  incomingStatus: StreamingResolutionStatus | undefined,
+  incomingUrl: string | null,
+  fallbackUrl: string | null
+): { status: SQL; url: SQL } {
+  const hasFallback = fallbackUrl !== NO_FALLBACK;
+
+  if (incomingStatus === undefined) {
+    return {
+      status: sql`${statusCol}`,
+      url: hasFallback
+        ? sql`CASE WHEN ${statusCol} = 'verified' THEN ${urlCol} ELSE ${fallbackUrl} END`
+        : sql`${urlCol}`,
+    };
+  }
+
+  if (incomingStatus === 'verified') {
+    return {
+      status: sql`'verified'`,
+      url: sql`CASE WHEN ${statusCol} = 'verified' THEN ${urlCol} ELSE ${incomingUrl} END`,
+    };
+  }
+
+  if (incomingStatus === 'absent') {
+    return {
+      status: sql`CASE WHEN ${statusCol} = 'verified' THEN ${statusCol} ELSE 'absent' END`,
+      url: sql`CASE WHEN ${statusCol} = 'verified' THEN ${urlCol} ELSE ${fallbackUrl} END`,
+    };
+  }
+
+  // incomingStatus === 'unresolved'
   return {
-    spotify: {
-      status: (prior?.spotify_status ?? null) as StreamingResolutionStatus | null,
-      url: prior?.spotify_url ?? null,
-    },
-    apple_music: {
-      status: (prior?.apple_music_status ?? null) as StreamingResolutionStatus | null,
-      url: prior?.apple_music_url ?? null,
-    },
-    bandcamp: {
-      status: (prior?.bandcamp_status ?? null) as StreamingResolutionStatus | null,
-      url: prior?.bandcamp_url ?? null,
-    },
+    status: sql`CASE WHEN ${statusCol} = 'verified' OR ${statusCol} = 'absent' THEN ${statusCol} ELSE 'unresolved' END`,
+    url: hasFallback ? sql`CASE WHEN ${statusCol} = 'verified' THEN ${urlCol} ELSE ${fallbackUrl} END` : sql`${urlCol}`,
   };
 }
 
 /**
- * UPSERT a matched album's full metadata payload into `album_metadata`,
- * merging the three streaming-verdict fields against the album's prior
- * state (BS#1915 — see `mergeStreamingField` / `inferIncomingStreamingStatus`
- * above) and bumping the shared `streaming_reask_attempts` counter on a
- * genuine re-ask (the `onConflictDoUpdate` branch, which fires only when a
- * row already existed for this album).
+ * UPSERT a matched album's full metadata payload into `album_metadata`.
+ *
+ * The re-ask (`onConflictDoUpdate`) branch merges the three streaming-verdict
+ * fields against the LIVE row via SQL `CASE` expressions
+ * (`buildStreamingFieldConflictSet`, BS#1923) instead of a separate
+ * SELECT-then-merge-then-write — closing the TOCTOU window a concurrent CDC
+ * verify could land in during the LML round-trip. It also bumps the shared
+ * `streaming_reask_attempts` counter, but ONLY when the row already carried a
+ * load-bearing match before this write (BS#1924) — a fresh album's INSERT
+ * (below) and a BS#1089 no-match shell's first real match both leave the
+ * counter at its schema DEFAULT 0.
  *
  * Extracted from `finalizeRow`'s linked-match arm so BOTH callers share one
  * write path: the live CDC handler (via `finalizeRow`, which also owns the
@@ -211,22 +281,23 @@ export async function upsertMatchedAlbumMetadata(
   artwork: DiscogsMatchResult,
   searchUrls: { spotify_url: string; youtube_music_url: string; bandcamp_url: string; soundcloud_url: string }
 ): Promise<void> {
-  const prior = await selectPriorStreamingState(albumId);
-  const spotify = mergeStreamingField(
-    prior.spotify,
-    inferIncomingStreamingStatus(artwork.streaming_status?.spotify, artwork.spotify_url),
-    artwork.spotify_url
-  );
-  const appleMusic = mergeStreamingField(
-    prior.apple_music,
-    inferIncomingStreamingStatus(artwork.streaming_status?.apple_music, artwork.apple_music_url),
+  const spotifyIncomingStatus = inferIncomingStreamingStatus(artwork.streaming_status?.spotify, artwork.spotify_url);
+  const appleMusicIncomingStatus = inferIncomingStreamingStatus(
+    artwork.streaming_status?.apple_music,
     artwork.apple_music_url
   );
-  const bandcamp = mergeStreamingField(
-    prior.bandcamp,
-    inferIncomingStreamingStatus(artwork.streaming_status?.bandcamp, artwork.bandcamp_url),
-    artwork.bandcamp_url
-  );
+  const bandcampIncomingStatus = inferIncomingStreamingStatus(artwork.streaming_status?.bandcamp, artwork.bandcamp_url);
+  const spotifyIncomingUrl = artwork.spotify_url ?? null;
+  const appleMusicIncomingUrl = artwork.apple_music_url ?? null;
+  const bandcampIncomingUrl = artwork.bandcamp_url ?? null;
+
+  // INSERT branch (a genuinely fresh album — no live row to race against):
+  // merge in plain JS against an all-NULL prior state. This is a pure
+  // computation over this call's own incoming verdict, with no DB read
+  // involved, so there is no snapshot that could go stale.
+  const freshSpotify = mergeStreamingField(FRESH_STREAMING_STATE, spotifyIncomingStatus, spotifyIncomingUrl);
+  const freshAppleMusic = mergeStreamingField(FRESH_STREAMING_STATE, appleMusicIncomingStatus, appleMusicIncomingUrl);
+  const freshBandcamp = mergeStreamingField(FRESH_STREAMING_STATE, bandcampIncomingStatus, bandcampIncomingUrl);
 
   // The album_metadata UPSERT is idempotent (same album_id → same row) and
   // guarded by `updated_at < NOW()` so a concurrent stale write (e.g. a
@@ -240,18 +311,20 @@ export async function upsertMatchedAlbumMetadata(
     // A verified streaming URL wins outright; anything else (absent /
     // unresolved / never-consulted) falls back to the synthesized search
     // URL for Spotify and Bandcamp — unchanged from pre-#1915 behavior, and
-    // never a downgrade of a prior verified URL (merged above). Apple Music
-    // has NO fallback — null is load-bearing "no verified iTunes match"
-    // (BS#1192), now disambiguated by `apple_music_status` instead of
-    // silently freezing a transient null (BS#1915 — the whole point of
-    // this ticket).
-    spotify_url: spotify.status === 'verified' ? spotify.url : searchUrls.spotify_url,
-    spotify_status: spotify.status,
-    apple_music_url: appleMusic.url,
-    apple_music_status: appleMusic.status,
+    // never a downgrade of a prior verified URL. Apple Music has NO
+    // fallback — null is load-bearing "no verified iTunes match" (BS#1192),
+    // disambiguated by `apple_music_status` instead of silently freezing a
+    // transient null (BS#1915). This INSERT-branch payload only ever runs
+    // against a fresh (all-NULL) prior, so there is nothing to downgrade
+    // here — the conflict branch below is where that guarantee is load-
+    // bearing.
+    spotify_url: freshSpotify.status === 'verified' ? freshSpotify.url : searchUrls.spotify_url,
+    spotify_status: freshSpotify.status,
+    apple_music_url: freshAppleMusic.url,
+    apple_music_status: freshAppleMusic.status,
     youtube_music_url: artwork.youtube_music_url ?? searchUrls.youtube_music_url,
-    bandcamp_url: bandcamp.status === 'verified' ? bandcamp.url : searchUrls.bandcamp_url,
-    bandcamp_status: bandcamp.status,
+    bandcamp_url: freshBandcamp.status === 'verified' ? freshBandcamp.url : searchUrls.bandcamp_url,
+    bandcamp_status: freshBandcamp.status,
     soundcloud_url: artwork.soundcloud_url ?? searchUrls.soundcloud_url,
     artist_bio: artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null,
     artist_wikipedia_url: artwork.wikipedia_url ?? null,
@@ -273,6 +346,33 @@ export async function upsertMatchedAlbumMetadata(
     artist_image_url: artwork.artist_image_url ?? null,
     bio_tokens: artwork.profile_tokens ?? null,
   };
+
+  // BS#1923: the conflict (re-ask) branch replaces the plain-JS merged
+  // values above with CASE expressions over the LIVE row — see
+  // `buildStreamingFieldConflictSet`'s header for the rule-by-rule
+  // translation from `mergeStreamingField`.
+  const spotifyConflict = buildStreamingFieldConflictSet(
+    album_metadata.spotify_status,
+    album_metadata.spotify_url,
+    spotifyIncomingStatus,
+    spotifyIncomingUrl,
+    searchUrls.spotify_url
+  );
+  const appleMusicConflict = buildStreamingFieldConflictSet(
+    album_metadata.apple_music_status,
+    album_metadata.apple_music_url,
+    appleMusicIncomingStatus,
+    appleMusicIncomingUrl,
+    NO_FALLBACK
+  );
+  const bandcampConflict = buildStreamingFieldConflictSet(
+    album_metadata.bandcamp_status,
+    album_metadata.bandcamp_url,
+    bandcampIncomingStatus,
+    bandcampIncomingUrl,
+    searchUrls.bandcamp_url
+  );
+
   await db
     .insert(album_metadata)
     .values({ album_id: albumId, ...payload, updated_at: sql`NOW()` })
@@ -280,12 +380,27 @@ export async function upsertMatchedAlbumMetadata(
       target: album_metadata.album_id,
       set: {
         ...payload,
-        // BS#1915: bump the shared per-album re-ask counter ONLY on a
-        // genuine re-ask — this conflict branch fires exactly when a row
-        // already existed for this album. A fresh album's first-ever
-        // INSERT above leaves the column at its schema DEFAULT 0; the
-        // first ask is not a re-ask.
-        streaming_reask_attempts: sql`${album_metadata.streaming_reask_attempts} + 1`,
+        spotify_status: spotifyConflict.status,
+        spotify_url: spotifyConflict.url,
+        apple_music_status: appleMusicConflict.status,
+        apple_music_url: appleMusicConflict.url,
+        bandcamp_status: bandcampConflict.status,
+        bandcamp_url: bandcampConflict.url,
+        // BS#1924: bump the shared per-album re-ask counter ONLY when the
+        // row already carried a load-bearing match (artwork_url OR
+        // discogs_url present) BEFORE this write — a genuine re-ask of an
+        // already-enriched album. Both column refs read the PRE-UPDATE row
+        // (Postgres evaluates every `SET` expression in one UPDATE against
+        // the row as it stood before the statement, same as the streaming
+        // CASEs above), so a BS#1089 no-match SHELL row (search-URL only,
+        // both those columns still NULL) resolving its first REAL match
+        // does NOT miscount as a re-ask — that shell->matched transition
+        // leaves the counter at 0, same as a brand-new INSERT.
+        streaming_reask_attempts: sql`CASE
+          WHEN ${album_metadata.artwork_url} IS NOT NULL OR ${album_metadata.discogs_url} IS NOT NULL
+          THEN ${album_metadata.streaming_reask_attempts} + 1
+          ELSE ${album_metadata.streaming_reask_attempts}
+        END`,
         updated_at: sql`NOW()`,
       },
       setWhere: sql`${album_metadata.updated_at} < NOW()`,
