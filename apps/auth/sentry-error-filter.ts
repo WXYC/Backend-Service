@@ -32,6 +32,12 @@
  * The auth service has no equivalent of `LmlClientError` to special-case —
  * better-auth's plugin errors propagate as `APIError` instances with `status`
  * codes that the default predicate already filters correctly.
+ *
+ * NOTE (BS#1221): `./fallback-error-handler.ts` calls `Sentry.captureException`
+ * unconditionally, deliberately overriding this predicate for anything that
+ * reaches the generic Express fallback chain. The two files are not
+ * contradictory — this predicate governs only `setupExpressErrorHandler`'s
+ * own capture.
  */
 export function shouldCaptureAuthExpressError(error: Error): boolean {
   const raw = (error as { statusCode?: number | string }).statusCode ?? (error as { status?: number | string }).status;
