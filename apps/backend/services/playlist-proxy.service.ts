@@ -46,7 +46,7 @@
  *                         in-memory buffer to read synchronously).
  */
 import { db, flowsheet, album_metadata, rotation, library, artists } from '@wxyc/database';
-import { sql, inArray, and, isNotNull, eq, desc } from 'drizzle-orm';
+import { sql, inArray, and, isNotNull, eq, desc, asc } from 'drizzle-orm';
 
 const MAX_ENTRIES = 200;
 const HOUR_MS = 3_600_000;
@@ -426,11 +426,15 @@ interface PlaycutCandidate {
  * the same album, each with its own artwork_url) — including rows the
  * candidate's own `flowsheet.album_id` doesn't point at, since a sibling
  * format's flowsheet row may carry artwork this one's album_id lacks. The
- * deterministic tie-break, preserved verbatim from the pre-Phase-3
- * implementation (commit d0b8317d, closes #1105): aggregate every matching
- * artwork_url into an array ordered by album_id ascending and take the
- * first element — deterministically the lowest album_id's artwork,
- * independent of scan/plan order.
+ * deterministic tie-break — lowest album_id wins, independent of scan/plan
+ * order — was originally an `array_agg(artwork_url ORDER BY album_id ASC)[1]`
+ * (commit d0b8317d, closes #1105), which materializes every matching
+ * artwork_url per group just to discard all but the first. BS#1800 replaced
+ * it with `SELECT DISTINCT ON (lookup key)` ordered by the same
+ * `(lookup key, album_id ASC)`: Postgres still scans every matching row but
+ * never builds the intermediate array, and — since a tie on `album_id` can
+ * only occur for rows sharing the same `album_metadata` row, hence the same
+ * `artwork_url` — the selected value is identical to the array_agg form.
  */
 async function enrichPlaycuts(candidates: PlaycutCandidate[]): Promise<Map<number, string>> {
   if (candidates.length === 0) return new Map();
@@ -447,11 +451,14 @@ async function enrichPlaycuts(candidates: PlaycutCandidate[]): Promise<Map<numbe
 
   try {
     const rows = await db
-      .select({
-        key: flowsheetLookupKey,
+      .selectDistinctOn([flowsheetLookupKey], {
         // See the enrichPlaycuts docstring above for the split-format
-        // tie-break rationale (BS#1105).
-        artwork_url: sql<string>`(array_agg(${album_metadata.artwork_url} order by ${album_metadata.album_id} asc))[1]`,
+        // tie-break rationale (BS#1105 / BS#1800): DISTINCT ON the lookup
+        // key, ordered by the same key then album_id ASC, picks the
+        // lowest-album_id row's artwork_url per group without materializing
+        // an array.
+        key: flowsheetLookupKey,
+        artwork_url: album_metadata.artwork_url,
       })
       .from(flowsheet)
       // INNER JOIN to album_metadata drops `flowsheet.album_id IS NULL` rows
@@ -464,7 +471,7 @@ async function enrichPlaycuts(candidates: PlaycutCandidate[]): Promise<Map<numbe
       // migration 0082 — this query never relied on it.
       .innerJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
       .where(and(inArray(flowsheetLookupKey, keys), isNotNull(album_metadata.artwork_url)))
-      .groupBy(flowsheetLookupKey);
+      .orderBy(flowsheetLookupKey, asc(album_metadata.album_id));
 
     const map = new Map<number, string>();
     for (const row of rows) {
