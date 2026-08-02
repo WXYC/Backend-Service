@@ -250,6 +250,21 @@ describe('POST /internal/flowsheet-webhook', () => {
     expect(lastInsertValues()).toEqual(expect.objectContaining({ album_id: 7777 }));
   });
 
+  // BS#1857 / BS#1623: a fresh INSERT still writes request_flag straight from
+  // the tubafrenzy payload — the never-refresh rule scopes only to the
+  // conflict-UPDATE branch (pinned separately below).
+  it('writes request_flag from the payload on a fresh INSERT', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, requestFlag: true } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ request_flag: true }));
+  });
+
   it('writes album_id: null when libraryReleaseId is 0 (no library link)', async () => {
     // libraryReleaseId=0 short-circuits resolveAlbumId — no album SELECT issued.
     mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
@@ -645,6 +660,28 @@ describe('POST /internal/flowsheet-webhook', () => {
     const setClause = lastUpdateSet();
     expect(setClause).not.toHaveProperty('dj_name');
     expect(setClause).toEqual(expect.objectContaining({ entry_type: 'track' }));
+  });
+
+  // -- ON CONFLICT UPDATE never refreshes request_flag (BS#1857 / BS#1623) --
+  //
+  // BS's DJ-facing PATCH /flowsheet is the authoritative writer for
+  // request_flag on a live show. The conflict-refresh branch here must never
+  // overwrite it from tubafrenzy's payload — that would silently revert a
+  // DJ's toggle on the next redelivery. The fresh-INSERT branch (asserted
+  // elsewhere in this file, e.g. "returns 200 for valid create") still writes
+  // it from the payload; only the re-sync UPDATE path omits it.
+
+  it('UPDATE on conflict OMITS request_flag regardless of the incoming payload value (BS#1857 / BS#1623)', async () => {
+    mockReturning.mockResolvedValueOnce([]); // conflict signal
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', entry: { ...validEntry, requestFlag: true } });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdate).toHaveBeenCalled();
+    expect(lastUpdateSet()).not.toHaveProperty('request_flag');
   });
 
   // -- Sibling-marker heal probe-before-write (BS#1444) --

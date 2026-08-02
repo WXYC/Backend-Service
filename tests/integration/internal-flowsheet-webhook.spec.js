@@ -239,6 +239,65 @@ describe('POST /internal/flowsheet-webhook — concurrent INSERT race (BS#909)',
     expect(rows[0].album_title).toBe('DOGA (remastered)');
   });
 
+  // BS#1857 / BS#1623: a live show's request_flag/segue are authoritatively
+  // owned by BS's DJ-facing PATCH /flowsheet. A tubafrenzy re-sync (webhook
+  // conflict-refresh) must not revert a DJ's toggle back to tubafrenzy's
+  // stale copy, while a brand-new entry must still receive its flags from
+  // the first delivery.
+  test('a DJ-toggled request_flag survives a webhook entry-refresh; a new entry still gets flags on first sync', async () => {
+    // First delivery: fresh INSERT with requestFlag=false from tubafrenzy.
+    const initial = buildEntry({ requestFlag: false });
+    const firstRes = await request
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', INTERNAL_KEY)
+      .send({ action: 'create', entry: initial });
+    expect(firstRes.status).toBe(200);
+
+    const [afterInsert] = await sql.unsafe(`SELECT request_flag FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [
+      LEGACY_ENTRY_ID,
+    ]);
+    expect(afterInsert.request_flag).toBe(false);
+
+    // A DJ toggles the flag on via PATCH /flowsheet (simulated directly —
+    // this spec exercises the webhook, not the DJ-facing route).
+    await sql.unsafe(`UPDATE ${SCHEMA}.flowsheet SET request_flag = true WHERE legacy_entry_id = $1`, [
+      LEGACY_ENTRY_ID,
+    ]);
+
+    // tubafrenzy redelivers the entry — its copy still carries requestFlag=false
+    // (it never saw the DJ's BS-side toggle) and a different album_title so the
+    // conflict-refresh path actually fires an UPDATE.
+    const stale = buildEntry({ requestFlag: false, releaseTitle: 'DOGA (remastered)' });
+    const secondRes = await request
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', INTERNAL_KEY)
+      .send({ action: 'update', entry: stale });
+    expect(secondRes.status).toBe(200);
+
+    const [afterRefresh] = await sql.unsafe(
+      `SELECT album_title, request_flag FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`,
+      [LEGACY_ENTRY_ID]
+    );
+    // The refresh moved the unrelated mutable field...
+    expect(afterRefresh.album_title).toBe('DOGA (remastered)');
+    // ...but did NOT revert the DJ's toggle back to tubafrenzy's stale false.
+    expect(afterRefresh.request_flag).toBe(true);
+  });
+
+  test('a brand-new entry still receives requestFlag from tubafrenzy on first delivery', async () => {
+    const entry = buildEntry({ requestFlag: true });
+    const res = await request
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', INTERNAL_KEY)
+      .send({ action: 'create', entry });
+    expect(res.status).toBe(200);
+
+    const [row] = await sql.unsafe(`SELECT request_flag FROM ${SCHEMA}.flowsheet WHERE legacy_entry_id = $1`, [
+      LEGACY_ENTRY_ID,
+    ]);
+    expect(row.request_flag).toBe(true);
+  });
+
   // BS#1444 (residual of #1371): the show_start is the FIRST entry of a show,
   // so it loses a structural race — when it arrives the stub `shows` row has no
   // `legacy_dj_name` yet, and the marker lands NULL. The ETL fills the name

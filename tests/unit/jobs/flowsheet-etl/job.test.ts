@@ -254,6 +254,64 @@ describe('runIncremental', () => {
       expect(arg.setWhere).toBeTruthy();
     }
   });
+
+  // BS#1084: the stub `shows` row the webhook inserts with start_time = NOW()
+  // (apps/backend/routes/internal.route.ts's resolveShow) must be repaired by
+  // the next incremental tick — the shows UPSERT's conflict set must include
+  // start_time, or the wrong-but-NOW() value persists forever. PG semantics
+  // (the setWhere churn-guard actually firing an UPDATE) are pinned in
+  // tests/integration/flowsheet-etl-shows-start-time-repair.spec.js; this is
+  // the shape check that the Drizzle call site carries the column at all.
+  it('includes start_time in the shows onConflictDoUpdate set (BS#1084)', async () => {
+    mockFetchLegacyShows.mockResolvedValue([makeShow()]);
+    mockFetchLegacyEntries.mockResolvedValue([]);
+
+    await runIncremental();
+
+    const showsUpsertCall = chain.onConflictDoUpdate.mock.calls.find(
+      ([arg]: [{ target: unknown }]) => arg.target === shows.legacy_show_id
+    );
+    expect(showsUpsertCall).toBeDefined();
+    const [arg] = showsUpsertCall as [{ set: Record<string, unknown> }];
+    expect(arg.set).toHaveProperty('start_time');
+  });
+
+  // BS#1857 / BS#1623: request_flag/segue are authoritatively owned by BS's
+  // DJ-facing PATCH /flowsheet on a live show. The entries onConflictDoUpdate
+  // must NOT refresh either column from tubafrenzy's copy (they stay in
+  // .values() for the INSERT branch only — asserted separately below). PG
+  // semantics (a differing incoming value not reverting the stored one) are
+  // pinned in tests/integration/flowsheet-etl-setwhere.spec.js.
+  it('omits request_flag and segue from the entries onConflictDoUpdate set (BS#1857 / BS#1623)', async () => {
+    mockFetchLegacyShows.mockResolvedValue([makeShow()]);
+    mockFetchLegacyEntries.mockResolvedValue([makeEntry()]);
+
+    await runIncremental();
+
+    const entriesUpsertCall = chain.onConflictDoUpdate.mock.calls.find(
+      ([arg]: [{ target: unknown }]) => arg.target === flowsheet.legacy_entry_id
+    );
+    expect(entriesUpsertCall).toBeDefined();
+    const [arg] = entriesUpsertCall as [{ set: Record<string, unknown> }];
+    expect(arg.set).not.toHaveProperty('request_flag');
+    expect(arg.set).not.toHaveProperty('segue');
+  });
+
+  it('still writes request_flag/segue on the INSERT values for a brand-new entry (BS#1857 / BS#1623)', async () => {
+    mockFetchLegacyShows.mockResolvedValue([makeShow()]);
+    mockFetchLegacyEntries.mockResolvedValue([makeEntry({ requestFlag: 1, segueFlag: 1 })]);
+
+    await runIncremental();
+
+    const insertCalls = chain.values.mock.calls;
+    const flowsheetInsert = insertCalls.find(
+      (call: unknown[]) => (call[0] as Record<string, unknown>).legacy_entry_id === 2001
+    );
+    expect(flowsheetInsert).toBeDefined();
+    const values = flowsheetInsert![0] as Record<string, unknown>;
+    expect(values.request_flag).toBe(true);
+    expect(values.segue).toBe(true);
+  });
 });
 
 /**
