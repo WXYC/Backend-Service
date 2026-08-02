@@ -1,4 +1,5 @@
 import { Request, RequestHandler } from 'express';
+import * as Sentry from '@sentry/node';
 import {
   Album,
   Artist,
@@ -19,6 +20,7 @@ import type { CatalogSort, CatalogOrder } from '../services/library-search.servi
 import { checkStreamingAvailability, isLmlConfigured } from '@wxyc/lml-client';
 import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
+import { getPostHogClient } from '../utils/posthog.js';
 import WxycError from '../utils/error.js';
 
 // BS#1826 PR 2: `LIBRARY_LML_BUDGET_MS` retired. Budget for the add-album
@@ -125,6 +127,42 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
       }
     } else if (streamingResult.status === 'rejected') {
       console.warn('Streaming check failed for new album:', streamingResult.reason);
+    }
+
+    // BS#1228 (LML#376 follow-up): capture which streaming services errored
+    // out so a future retry-policy decision can be data-driven. Pure
+    // observability — never persisted to `library.*`, independent of the
+    // on_streaming verdict above (a service can error while others still
+    // resolve a match). Each emit is its own try/catch so a PostHog outage
+    // can't suppress the Sentry span projection or vice versa.
+    if (streamingResult.status === 'fulfilled' && streamingResult.value.errored_sources?.length) {
+      try {
+        getPostHogClient().capture({
+          distinctId: String(inserted_album.id),
+          event: 'streaming_check_partial_error',
+          properties: {
+            album_id: inserted_album.id,
+            artist: artistName,
+            title: body.album_title,
+            on_streaming_verdict: streamingResult.value.on_streaming,
+            errored_sources: streamingResult.value.errored_sources,
+          },
+        });
+      } catch (e) {
+        console.warn('Failed to emit streaming-check telemetry:', (e as Error).message);
+      }
+
+      try {
+        // `on_streaming` is `boolean | null`; Sentry's SpanAttributeValue has
+        // no `null` member, so a null verdict (LML's "inconclusive" case)
+        // omits the attribute entirely rather than coercing it to a string.
+        Sentry.getActiveSpan()?.setAttributes({
+          'streaming_check.errored_sources': streamingResult.value.errored_sources,
+          'streaming_check.on_streaming': streamingResult.value.on_streaming ?? undefined,
+        });
+      } catch (e) {
+        console.warn('Failed to project streaming-check telemetry onto span:', (e as Error).message);
+      }
     }
 
     if (artworkResult.status === 'rejected') {
