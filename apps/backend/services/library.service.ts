@@ -51,6 +51,7 @@ import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrack
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
+import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from './observability/cache-stats.js';
 
 // Schema-qualified reference to the `fold_artist_name(text)` SQL function
 // (migration 0134 / BS#1897). Derived from `WXYC_SCHEMA_NAME` the same way the
@@ -2437,7 +2438,21 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Tagge
 const trackSearchCache = new LRUCache<string, TaggedLibraryViewEntry[]>({
   max: 1000,
   ttl: 1000 * 60 * 10, // 10 minutes
+  // BS#989: count capacity-driven displacements for the periodic eviction
+  // emit. `reason === 'evict'` excludes TTL expiry / explicit delete / set
+  // replacement — see cache-stats.ts's module doc.
+  dispose: (_value, _key, reason) => {
+    if (reason === 'evict') recordCacheEviction('track_search');
+  },
 });
+
+/**
+ * Registered for the once-per-minute cache-stats periodic emit (BS#989) —
+ * see `startPeriodicEmit` wiring in `apps/backend/app.ts`.
+ */
+export function libraryServiceCachesForPeriodicEmit(): RegisteredCache[] {
+  return [{ name: 'track_search', cache: trackSearchCache }];
+}
 
 function getFlagStateHash(): string {
   const c = getCatalogTrackSearchConfig();
@@ -2502,11 +2517,10 @@ export async function searchLibraryByTrackRaw(query: string, limit: number): Pro
 
     const key = trackSearchCacheKey(query);
     const cached = trackSearchCache.get(key);
-    if (cached !== undefined) {
-      span.setAttribute('track_search.cache_hit', true);
+    const cacheHit = cached !== undefined;
+    if (cacheHit) {
       results = cached.slice(0, limit);
     } else {
-      span.setAttribute('track_search.cache_hit', false);
       // Fetch the full LML-bounded result; the cache stores the un-sliced array.
       try {
         results = await searchLibraryByTrackUncachedOrThrow(query);
@@ -2519,6 +2533,14 @@ export async function searchLibraryByTrackRaw(query: string, limit: number): Pro
       }
       results = results.slice(0, limit);
     }
+    // BS#989: chokepoint cache-stats projection (cache_hit/cache_name/
+    // cache_size/cache_capacity) — placed after the possible `.set()` above
+    // so `cache_size` reflects the post-touch occupancy. Replaces the old
+    // `track_search.cache_hit`-only `span.setAttribute` call; `span` here
+    // IS the active span (we're inside this method's own `Sentry.startSpan`
+    // callback), so `recordCacheLookup`'s `Sentry.getActiveSpan()` resolves
+    // to the same span this function already owns.
+    recordCacheLookup('track_search', cacheHit, trackSearchCache);
 
     // Observability must never break the request path. If the Sentry SDK
     // (or a custom transport hook) throws, swallow the error and continue.

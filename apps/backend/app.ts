@@ -37,6 +37,9 @@ import { setupMetadataBroadcast } from './services/metadata-broadcast/index.js';
 import { startSseMetrics, stopSseMetrics } from './services/sse/sse-metrics.js';
 import { serverEventsMgr } from './utils/serverEvents.js';
 import { startRotationTracksCacheWarm } from './services/rotation-tracks-cache-warm.service.js';
+import { startPeriodicEmit, stopPeriodicEmit } from './services/observability/cache-stats.js';
+import { proxyCachesForPeriodicEmit } from './controllers/proxy.controller.js';
+import { libraryServiceCachesForPeriodicEmit } from './services/library.service.js';
 import { drainInFlightEnrichments } from './services/metadata/enrichment.service.js';
 import { checkDatabase } from './services/health/database-check.js';
 import { activeShow } from './middleware/checkActiveShow.js';
@@ -207,6 +210,14 @@ const server = app.listen(port, () => {
   // the work would otherwise have to happen on the first picker open per
   // row after every restart. See `services/rotation-tracks-cache-warm.service.ts`.
   startRotationTracksCacheWarm();
+  // BS#989 (G6): once-per-minute cache-stats emit for the eight in-process
+  // LRU caches (proxy.controller.ts's seven + library.service.ts's
+  // track_search), projecting eviction pressure + current size onto a
+  // "BackgroundJob" Sentry span even without a sampled request span. Safe
+  // to call here (not before) — every cache-owning module is already fully
+  // loaded by the time this listen callback runs, since Node resolves the
+  // whole static import graph before executing any handler.
+  startPeriodicEmit([...proxyCachesForPeriodicEmit(), ...libraryServiceCachesForPeriodicEmit()]);
 });
 
 // Strictly greater than the LML client's 30 s AbortController
@@ -239,6 +250,7 @@ function shutdown(signal: string): void {
   stopAlbumPlaysRefresh();
   stopAlbumPopularityRefresh();
   stopSseMetrics();
+  stopPeriodicEmit();
   void shutdownCdcWebSocket();
   void shutdownCdcDispatcher();
   // BS#905: observe enrichments abandoned mid-flight. Sentry captureMessage
