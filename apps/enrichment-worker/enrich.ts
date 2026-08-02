@@ -77,10 +77,20 @@
  * *before* this write — a shell->matched transition leaves the counter at 0.
  */
 
-import { and, eq, sql, type AnyColumn, type SQL } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
 import type { DiscogsMatchResult, LookupResponse, StreamingResolutionStatus } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
+import { buildStreamingFieldConflictSet, NO_FALLBACK } from './streaming-merge-sql.js';
+
+// Re-exported unchanged so `tests/unit/apps/enrichment-worker/enrich.test.ts`
+// (which pins this function's exact `.sql`/`.values` output against the real
+// module) keeps importing it from this same path — see
+// `streaming-merge-sql.ts`'s header for why the implementation itself moved
+// (BS#1945: a side-effect-free module a plain `.spec.js` integration test can
+// `require` as a compiled dist, closing the mirror-drift gap that function
+// used to carry).
+export { buildStreamingFieldConflictSet };
 
 /**
  * Bound on `album_metadata.streaming_reask_attempts` (BS#1915). Once an
@@ -164,98 +174,8 @@ export function mergeStreamingField(
   return { status: 'unresolved', url: current.url };
 }
 
-/** A field with no synthesized search-URL fallback (Apple Music, BS#1192) never falls back — its non-verified branches keep/null the live URL directly instead of substituting a fresh search URL. */
-const NO_FALLBACK = null;
-
 /** A never-persisted album: `mergeStreamingField` treats this identically to a row whose streaming columns are all still NULL. */
 const FRESH_STREAMING_STATE: StreamingFieldState = { status: null, url: null };
-
-/**
- * One field's `onConflictDoUpdate` `set` fragments (BS#1923): SQL `CASE`
- * expressions over the LIVE `statusCol`/`urlCol` values, translating
- * `mergeStreamingField`'s rules so the merge and the write are the same
- * atomic statement — no separate SELECT that could go stale during the LML
- * round-trip.
- *
- * `incomingStatus`/`incomingUrl` are plain JS values fixed for this call
- * (this round's LML verdict) — only the "current persisted state" side of
- * the merge needs to become SQL, since that is the side a concurrent writer
- * could have changed since this call started. Per incoming verdict:
- *
- *   - `undefined` (never consulted this round): status is left unchanged
- *     (whatever the live row already holds). A field WITH a search-URL
- *     fallback still recomputes it fresh whenever the live status isn't
- *     `'verified'` — unrelated to whether this field was asked this round;
- *     that mirrors the pre-#1915 last-writer-wins fallback recompute. A
- *     field with no fallback (Apple Music) leaves its url unchanged too.
- *   - `'verified'`: status becomes `'verified'` unconditionally (rule 3 of
- *     `mergeStreamingField` supersedes a prior `'absent'`); url adopts
- *     `incomingUrl` UNLESS the live row is already `'verified'`, in which
- *     case the live url is kept — a verified field is never downgraded,
- *     evaluated against the row as it stands at write time, not a stale
- *     snapshot.
- *   - `'absent'`: status becomes `'absent'` unless the live row is already
- *     `'verified'` (kept). url becomes the fallback (or NULL with no
- *     fallback) in that same non-verified branch — `current.status ===
- *     'absent'` (keep) and adopting `'absent'` fresh collapse to the same
- *     final url here, so one branch covers both.
- *   - `'unresolved'`: status becomes `'unresolved'` unless the live row is
- *     already `'verified'` OR already `'absent'` (both terminal, kept). url
- *     recomputes the fresh fallback in the non-verified branch for a field
- *     WITH a fallback (same recompute as the `undefined` case); for Apple
- *     Music (no fallback) the url never changes for an `'unresolved'`
- *     verdict, in every reachable branch — so it is left as the live column
- *     untouched.
- *
- * Every `${statusCol} = 'verified'` (and `'absent'`) comparison below is
- * written out at its use site rather than factored into a shared
- * sub-fragment — a flat template per branch, directly inspectable by a test
- * via `.sql`/`.values` without needing to recurse through nested `SQL`
- * objects (see `buildStreamingFieldConflictSet`'s unit tests). These
- * predicates read the LIVE row (evaluated by Postgres against the
- * pre-UPDATE row, same as every other `set` expression in an
- * `ON CONFLICT DO UPDATE`) — this is exactly what closes the TOCTOU window:
- * whatever a concurrent CDC verify wrote before this UPDATE commits is what
- * these CASEs see.
- */
-export function buildStreamingFieldConflictSet(
-  statusCol: AnyColumn,
-  urlCol: AnyColumn,
-  incomingStatus: StreamingResolutionStatus | undefined,
-  incomingUrl: string | null,
-  fallbackUrl: string | null
-): { status: SQL; url: SQL } {
-  const hasFallback = fallbackUrl !== NO_FALLBACK;
-
-  if (incomingStatus === undefined) {
-    return {
-      status: sql`${statusCol}`,
-      url: hasFallback
-        ? sql`CASE WHEN ${statusCol} = 'verified' THEN ${urlCol} ELSE ${fallbackUrl} END`
-        : sql`${urlCol}`,
-    };
-  }
-
-  if (incomingStatus === 'verified') {
-    return {
-      status: sql`'verified'`,
-      url: sql`CASE WHEN ${statusCol} = 'verified' THEN ${urlCol} ELSE ${incomingUrl} END`,
-    };
-  }
-
-  if (incomingStatus === 'absent') {
-    return {
-      status: sql`CASE WHEN ${statusCol} = 'verified' THEN ${statusCol} ELSE 'absent' END`,
-      url: sql`CASE WHEN ${statusCol} = 'verified' THEN ${urlCol} ELSE ${fallbackUrl} END`,
-    };
-  }
-
-  // incomingStatus === 'unresolved'
-  return {
-    status: sql`CASE WHEN ${statusCol} = 'verified' OR ${statusCol} = 'absent' THEN ${statusCol} ELSE 'unresolved' END`,
-    url: hasFallback ? sql`CASE WHEN ${statusCol} = 'verified' THEN ${urlCol} ELSE ${fallbackUrl} END` : sql`${urlCol}`,
-  };
-}
 
 /**
  * UPSERT a matched album's full metadata payload into `album_metadata`.

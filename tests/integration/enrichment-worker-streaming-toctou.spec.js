@@ -3,17 +3,30 @@
  * BS#1924), replacing the old read-then-merge-then-write flow in
  * `apps/enrichment-worker/enrich.ts#upsertMatchedAlbumMetadata`.
  *
- * Pure SQL against the live `album_metadata` table — does NOT import
- * `apps/enrichment-worker/enrich.ts`. Same rationale as every other
- * enrichment-worker integration spec in this directory (see
- * `enrichment-worker-cache-precheck.spec.js` / `enrichment-worker-streaming-
- * reask.spec.js` headers): the integration runner is babel-jest with no TS
- * support (drizzle-orm + ts-jest incompatibility). `fieldConflictSql` mirrors
- * `enrich.ts#buildStreamingFieldConflictSet` field-for-field — when that
- * function is hand-edited, this mirror must follow (the unit suite,
- * `tests/unit/apps/enrichment-worker/enrich.test.ts`, pins its exact CASE
- * text/values against the real module; this spec pins the *behavior* those
- * CASEs produce against a real row, including the race #1923 closes).
+ * BS#1945: this spec imports and runs the REAL
+ * `buildStreamingFieldConflictSet` (BS#1923) — extracted to the
+ * side-effect-free `apps/enrichment-worker/streaming-merge-sql.ts` precisely
+ * so a plain `.spec.js` integration test can `require` its compiled
+ * `dist/streaming-merge-sql.cjs` (dual esm+cjs tsup entry, same recipe as
+ * `jobs/artist-unicode-dedup/merge.ts` / `tests/integration/
+ * artist-unicode-dedup-merge.spec.js`) and exercise the GENUINE CASE
+ * expressions against a real row — no hand-duplicated SQL mirror left to
+ * drift when `buildStreamingFieldConflictSet` is edited. Before this,
+ * `fieldConflictSql` here was a hand-written copy of that function; a
+ * hand-edit of the real one without a matching edit here left this spec
+ * green against stale SQL. The unit suite,
+ * `tests/unit/apps/enrichment-worker/enrich.test.ts`, separately pins
+ * `buildStreamingFieldConflictSet`'s exact `.sql`/`.values` text; this spec
+ * pins the *runtime behavior* those CASEs produce against real Postgres,
+ * including the race #1923 closes.
+ *
+ * The BS#1924 `streaming_reask_attempts` gate is NOT part of that
+ * extraction (it is an inline CASE inside `upsertMatchedAlbumMetadata`,
+ * never its own named/exported function) and stays a hand-mirrored literal
+ * below — kept byte-identical to `enrich.ts`'s SET expression. Its logic is
+ * a single three-column CASE (tiny, low drift risk) versus
+ * `buildStreamingFieldConflictSet`'s four-branch-times-three-field surface,
+ * which is where BS#1945 scopes the fix.
  *
  * BS#1923 (TOCTOU): the old flow read the album's prior streaming state via
  * a separate SELECT *before* the LML round-trip, then wrote the merge
@@ -39,94 +52,109 @@
  * match, even though that write also hits the same UPDATE (the row already
  * existed as a shell). Tests (b)/(c) cover both sides of that gate.
  *
+ * Needs CI to run: requires the Docker integration DB (the `pg` marker
+ * tier) plus a built `@wxyc/enrichment-worker` (`dist/streaming-merge-
+ * sql.cjs`) and a built `@wxyc/database` (`dist/`) — CI's Build step
+ * (`npm run build`) produces both before the integration tier runs.
+ *
  * @see WXYC/Backend-Service#1923
  * @see WXYC/Backend-Service#1924
  * @see WXYC/Backend-Service#1915 (the self-heal mechanism these two harden)
  * @see WXYC/Backend-Service#1089 (the no-match shell row BS#1924 protects)
+ * @see WXYC/Backend-Service#1945 (this spec's mirror-drift fix)
  */
 
+// `@wxyc/database` -> `drizzle-orm`, and the compiled `streaming-merge-sql.cjs`
+// below also requires the real `drizzle-orm` for its `sql` tag. The repo-wide
+// `tests/__mocks__/drizzle-orm.ts` manual mock (written for the ts-jest unit
+// config, see jest.unit.config.ts) is a Jest node_modules manual mock, which
+// Jest substitutes automatically for ANY test file that requires
+// `drizzle-orm` — no `jest.mock(...)` call needed to trigger it — including
+// this babel-jest-transformed integration spec, where that `.ts` mock file
+// fails to parse (no TypeScript-stripping transform is registered for
+// `jest.config.json`). `jest.unmock` opts this file back into the real
+// `drizzle-orm` package so `@wxyc/database`'s real postgres-js driver and the
+// real `buildStreamingFieldConflictSet` CASE-building both run for real —
+// hoisted above the requires below by babel-plugin-jest-hoist (same
+// convention as `artist-unicode-dedup-merge.spec.js` /
+// `catalog-popularity-freetext-resolve-enumerate.spec.js`).
+jest.unmock('drizzle-orm');
+
+const path = require('path');
 const { getTestDb } = require('../utils/db');
+const { db, album_metadata, closeDatabaseConnection } = require('@wxyc/database');
+const { sql, eq, and } = require('drizzle-orm');
+
+// The REAL `buildStreamingFieldConflictSet` (BS#1923), compiled by the
+// workspace `build` (tsup dual-format esm+cjs); CI's Build step runs before
+// the integration tier. Rebuild after editing `streaming-merge-sql.ts`
+// (`npm run build --workspace=@wxyc/enrichment-worker`).
+const streamingMergeSql = require(
+  path.join(__dirname, '..', '..', 'apps', 'enrichment-worker', 'dist', 'streaming-merge-sql.cjs')
+);
+const { buildStreamingFieldConflictSet, NO_FALLBACK } = streamingMergeSql;
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
 /**
- * Mirrors `enrich.ts#buildStreamingFieldConflictSet` for ONE streaming
- * field. `incoming` is `{status, url}` or undefined (the service's key was
- * omitted from this round's LML verdict — never consulted this round).
- * `fallbackUrl` is the synthesized search-URL fallback for a field that has
- * one (spotify/bandcamp), or `null` for Apple Music (BS#1192, no fallback).
- * Returns `{status, url}` postgres.js SQL fragments built from the LIVE
- * `statusCol`/`urlCol` — nested directly into the caller's UPDATE (postgres.js
- * "Building queries" — `${ sql`` }` for sql fragments), never a JS value
- * computed from a prior SELECT.
+ * Runs ONE atomic UPDATE against `album_metadata`, mirroring the `set`
+ * clause of `enrich.ts#upsertMatchedAlbumMetadata`'s `onConflictDoUpdate`
+ * (BS#1923 + BS#1924) closely enough to exercise both fixes:
+ *   - The three streaming fields (spotify/apple_music/bandcamp) use the REAL
+ *     `buildStreamingFieldConflictSet` — no reimplementation (BS#1945).
+ *   - `streaming_reask_attempts` stays a hand-mirrored CASE (see header) —
+ *     it reads `artwork_url`/`discogs_url` as they stood BEFORE this same
+ *     statement's writes, exactly like every other `set` expression in a
+ *     drizzle `.update(...).set(...)` (or an `ON CONFLICT DO UPDATE`) —
+ *     evaluated by Postgres against the pre-statement row.
+ *
+ * A plain UPDATE (not `db.insert(...).onConflictDoUpdate(...)`) because
+ * every test here pre-seeds the row via raw SQL, so production's write
+ * always takes the conflict branch — which behaves identically to this
+ * UPDATE against the already-existing row.
  */
-function fieldConflictSql(sql, statusCol, urlCol, incoming, fallbackUrl) {
-  const incomingStatus = incoming ? incoming.status : undefined;
-  const incomingUrl = incoming ? (incoming.url ?? null) : null;
-  const hasFallback = fallbackUrl !== null;
+async function atomicConflictUpdate(albumId, { artworkUrl, discogsUrl, verdict, searchUrls }) {
+  const spotify = buildStreamingFieldConflictSet(
+    album_metadata.spotify_status,
+    album_metadata.spotify_url,
+    verdict.spotify?.status,
+    verdict.spotify?.url ?? null,
+    searchUrls.spotify_url
+  );
+  const appleMusic = buildStreamingFieldConflictSet(
+    album_metadata.apple_music_status,
+    album_metadata.apple_music_url,
+    verdict.apple_music?.status,
+    verdict.apple_music?.url ?? null,
+    NO_FALLBACK
+  );
+  const bandcamp = buildStreamingFieldConflictSet(
+    album_metadata.bandcamp_status,
+    album_metadata.bandcamp_url,
+    verdict.bandcamp?.status,
+    verdict.bandcamp?.url ?? null,
+    searchUrls.bandcamp_url
+  );
 
-  if (incomingStatus === undefined) {
-    return {
-      status: sql`${sql(statusCol)}`,
-      url: hasFallback
-        ? sql`CASE WHEN ${sql(statusCol)} = 'verified' THEN ${sql(urlCol)} ELSE ${fallbackUrl} END`
-        : sql`${sql(urlCol)}`,
-    };
-  }
-  if (incomingStatus === 'verified') {
-    return {
-      status: sql`'verified'`,
-      url: sql`CASE WHEN ${sql(statusCol)} = 'verified' THEN ${sql(urlCol)} ELSE ${incomingUrl} END`,
-    };
-  }
-  if (incomingStatus === 'absent') {
-    return {
-      status: sql`CASE WHEN ${sql(statusCol)} = 'verified' THEN ${sql(statusCol)} ELSE 'absent' END`,
-      url: sql`CASE WHEN ${sql(statusCol)} = 'verified' THEN ${sql(urlCol)} ELSE ${fallbackUrl} END`,
-    };
-  }
-  // incomingStatus === 'unresolved'
-  return {
-    status: sql`CASE WHEN ${sql(statusCol)} = 'verified' OR ${sql(statusCol)} = 'absent' THEN ${sql(statusCol)} ELSE 'unresolved' END`,
-    url: hasFallback
-      ? sql`CASE WHEN ${sql(statusCol)} = 'verified' THEN ${sql(urlCol)} ELSE ${fallbackUrl} END`
-      : sql`${sql(urlCol)}`,
-  };
-}
-
-/**
- * Mirrors the `onConflictDoUpdate` `set` clause of
- * `enrich.ts#upsertMatchedAlbumMetadata` (BS#1923 + BS#1924) as ONE atomic
- * UPDATE: the three streaming fields' CASEs (BS#1923) plus the
- * `streaming_reask_attempts` gate (BS#1924), which reads `artwork_url`/
- * `discogs_url` as they stood BEFORE this same statement's writes — Postgres
- * evaluates every `SET` expression in an UPDATE against the pre-statement
- * row, exactly like every other `set` expression here.
- */
-async function atomicConflictUpdate(sql, albumId, { artworkUrl, discogsUrl, verdict, searchUrls }) {
-  const spotify = fieldConflictSql(sql, 'spotify_status', 'spotify_url', verdict.spotify, searchUrls.spotify_url);
-  const appleMusic = fieldConflictSql(sql, 'apple_music_status', 'apple_music_url', verdict.apple_music, null);
-  const bandcamp = fieldConflictSql(sql, 'bandcamp_status', 'bandcamp_url', verdict.bandcamp, searchUrls.bandcamp_url);
-
-  await sql`
-    UPDATE ${sql(SCHEMA)}.album_metadata
-       SET artwork_url = ${artworkUrl},
-           discogs_url = ${discogsUrl},
-           spotify_status = ${spotify.status},
-           spotify_url = ${spotify.url},
-           apple_music_status = ${appleMusic.status},
-           apple_music_url = ${appleMusic.url},
-           bandcamp_status = ${bandcamp.status},
-           bandcamp_url = ${bandcamp.url},
-           streaming_reask_attempts = CASE
-             WHEN artwork_url IS NOT NULL OR discogs_url IS NOT NULL
-             THEN streaming_reask_attempts + 1
-             ELSE streaming_reask_attempts
-           END,
-           updated_at = NOW()
-     WHERE album_id = ${albumId}
-       AND updated_at < NOW()
-  `;
+  await db
+    .update(album_metadata)
+    .set({
+      artwork_url: artworkUrl,
+      discogs_url: discogsUrl,
+      spotify_status: spotify.status,
+      spotify_url: spotify.url,
+      apple_music_status: appleMusic.status,
+      apple_music_url: appleMusic.url,
+      bandcamp_status: bandcamp.status,
+      bandcamp_url: bandcamp.url,
+      streaming_reask_attempts: sql`CASE
+        WHEN ${album_metadata.artwork_url} IS NOT NULL OR ${album_metadata.discogs_url} IS NOT NULL
+        THEN ${album_metadata.streaming_reask_attempts} + 1
+        ELSE ${album_metadata.streaming_reask_attempts}
+      END`,
+      updated_at: sql`NOW()`,
+    })
+    .where(and(eq(album_metadata.album_id, albumId), sql`${album_metadata.updated_at} < NOW()`));
 }
 
 async function readRow(sql, albumId) {
@@ -166,6 +194,12 @@ describe('enrichment-worker streaming UPSERT — atomic CASE merge (BS#1923) + r
       await sql`DELETE FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ANY(${insertedAlbumIds})`;
       await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${insertedAlbumIds})`;
     }
+    // `@wxyc/database` opens the shared postgres-js pool as a side effect of
+    // import (shared/database/src/client.ts's module-level
+    // `createPostgresClient()`). That pool is separate from this spec's own
+    // `sql` client above (`getTestDb()`), so it needs its own teardown or the
+    // process has an open handle after the suite finishes.
+    await closeDatabaseConnection();
   });
 
   test('(a) TOCTOU CLOSED: a concurrent verify landing before the atomic write executes survives a flapping re-ask verdict', async () => {
@@ -196,7 +230,7 @@ describe('enrichment-worker streaming UPSERT — atomic CASE merge (BS#1923) + r
     // just-verified row (the merge would have run against the STALE
     // 'unresolved' snapshot). The atomic CASE evaluates the row as it
     // stands right now instead.
-    await atomicConflictUpdate(sql, albumId, {
+    await atomicConflictUpdate(albumId, {
       artworkUrl: 'https://i.discogs.com/x.jpg',
       discogsUrl: 'https://discogs.com/release/1',
       verdict: { spotify: { status: 'absent', url: null } },
@@ -222,7 +256,7 @@ describe('enrichment-worker streaming UPSERT — atomic CASE merge (BS#1923) + r
         (${albumId}, 'https://open.spotify.com/search/shell-fallback', 0, NOW())
     `;
 
-    await atomicConflictUpdate(sql, albumId, {
+    await atomicConflictUpdate(albumId, {
       artworkUrl: 'https://i.discogs.com/first-real-match.jpg',
       discogsUrl: 'https://discogs.com/release/2',
       verdict: { spotify: { status: 'verified', url: 'https://open.spotify.com/album/real' } },
@@ -249,7 +283,7 @@ describe('enrichment-worker streaming UPSERT — atomic CASE merge (BS#1923) + r
         (${albumId}, 'https://i.discogs.com/existing.jpg', 'https://discogs.com/release/3', 'unresolved', 0, NOW())
     `;
 
-    await atomicConflictUpdate(sql, albumId, {
+    await atomicConflictUpdate(albumId, {
       artworkUrl: 'https://i.discogs.com/existing.jpg',
       discogsUrl: 'https://discogs.com/release/3',
       verdict: { spotify: { status: 'unresolved', url: null } },
@@ -260,7 +294,7 @@ describe('enrichment-worker streaming UPSERT — atomic CASE merge (BS#1923) + r
     expect(row.streaming_reask_attempts).toBe(1);
 
     // A SECOND genuine re-ask increments again — not a one-time fluke.
-    await atomicConflictUpdate(sql, albumId, {
+    await atomicConflictUpdate(albumId, {
       artworkUrl: 'https://i.discogs.com/existing.jpg',
       discogsUrl: 'https://discogs.com/release/3',
       verdict: { spotify: { status: 'unresolved', url: null } },
@@ -280,7 +314,7 @@ describe('enrichment-worker streaming UPSERT — atomic CASE merge (BS#1923) + r
         (${albumId}, 'https://i.discogs.com/x.jpg', 'https://discogs.com/release/4', 'verified', 'https://open.spotify.com/album/ALREADY-VERIFIED', 0, NOW())
     `;
 
-    await atomicConflictUpdate(sql, albumId, {
+    await atomicConflictUpdate(albumId, {
       artworkUrl: 'https://i.discogs.com/x.jpg',
       discogsUrl: 'https://discogs.com/release/4',
       verdict: { spotify: { status: 'absent', url: null } },
