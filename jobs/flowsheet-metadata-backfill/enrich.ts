@@ -145,18 +145,28 @@ export const synthesizeSearchUrls = (
 };
 
 /**
- * Pick the first artwork from an LML response, or null on no-match.
+ * Pick the first present artwork from an LML response, or null on no-match.
+ *
+ * Walks `results` in order rather than reading only `results[0].artwork`
+ * (BS#961). LML's `search_type: 'direct'` shape always carries the artwork
+ * on `results[0]`, so the walk resolves on the first iteration there — but
+ * `search_type: 'compilation'` responses can return several `library_item`
+ * rows where an earlier entry's `artwork` is null and a later entry's is
+ * populated (LML's `items_with_artwork` pairs each library item with its own
+ * independently-resolved artwork, or `None`). Reading only index 0 silently
+ * dropped that artwork; walking the array covers both shapes with one code
+ * path, so no `search_type` branching is needed here.
  *
  * "No artwork" covers three LML response shapes that all mean the same
- * thing operationally: empty `results`, a `results[0]` with no `artwork`
- * field, or `artwork: null`. All three end up writing search URLs and
- * stamping the marker.
+ * thing operationally: empty `results`, every result missing an `artwork`
+ * field, or every result's `artwork` explicitly null. All three end up
+ * writing search URLs and stamping the marker.
  */
 export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | null => {
-  const first = response.results?.[0];
-  if (!first) return null;
-  if (!first.artwork) return null;
-  return first.artwork;
+  for (const result of response.results ?? []) {
+    if (result.artwork) return result.artwork;
+  }
+  return null;
 };
 
 /**

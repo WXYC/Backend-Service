@@ -120,6 +120,29 @@ const noArtworkResponse: LookupResponse = {
   search_type: 'direct',
 };
 
+// BS#961: a representative `search_type: 'compilation'` response. LML matched
+// the track on a Various-Artists compilation shelf row (results[0]) — a
+// `library_item` with no attached `artwork` — and a later entry carries the
+// track's actual resolved release. Modeled on the "Chambers Brothers / People
+// Get Ready" case from the issue's impact-quantification pass.
+const compilationResponse: LookupResponse = {
+  results: [
+    { library_item: { id: 1 }, artwork: null },
+    {
+      library_item: { id: 2 },
+      artwork: {
+        release_id: 67890,
+        release_url: 'https://www.discogs.com/release/67890',
+        artwork_url: 'https://i.discogs.com/comp-art.jpg',
+        release_year: 1975,
+      },
+    },
+  ],
+  search_type: 'compilation',
+  song_not_found: false,
+  found_on_compilation: true,
+};
+
 describe('applyEnrichment', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -686,5 +709,22 @@ describe('extractArtwork', () => {
   it('returns the first result’s artwork object on success-with-match', () => {
     const got = extractArtwork(matchedResponse);
     expect(got?.release_id).toBe(12345);
+  });
+
+  // BS#961
+  it('walks past a results[0] with no artwork to a later compilation match', () => {
+    const got = extractArtwork(compilationResponse);
+    expect(got).not.toBeNull();
+    expect(got?.release_id).toBe(67890);
+  });
+
+  it('returns null when every result in a compilation response lacks artwork', () => {
+    expect(
+      extractArtwork({
+        results: [{ library_item: { id: 1 }, artwork: null }, { library_item: { id: 2 } }],
+        search_type: 'compilation',
+        found_on_compilation: true,
+      })
+    ).toBeNull();
   });
 });
