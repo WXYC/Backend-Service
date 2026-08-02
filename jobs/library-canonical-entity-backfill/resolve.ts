@@ -17,7 +17,17 @@
  *   - no_match — empty result set, OR a direct match whose top result has no
  *     pinable Discogs release_id. The orchestrator does not stamp anything
  *     so the next sweep retries.
+ *
+ * BS#1356: the `search_type === 'direct'` check delegates to the shared
+ * `isTrustedLmlAlbumMatch` predicate (`@wxyc/lml-client`) instead of
+ * re-deriving the comparison locally. This converts the absent-`search_type`
+ * case from a branch-order accident (falling through to `review` because
+ * `undefined !== 'direct'`) to an explicit fail-closed call — same verdict
+ * (still `review`, never `auto_accept`), now backed by a documented,
+ * shared contract instead of an implicit fallthrough.
  */
+
+import { isTrustedLmlAlbumMatch } from '@wxyc/lml-client';
 
 import type { LmlLookupResponse } from './lml-types.js';
 
@@ -48,7 +58,7 @@ export const resolveCanonicalEntity = (response: LmlLookupResponse): Resolution 
 
   const releaseId = top.artwork?.release_id;
 
-  if (response.search_type === 'direct') {
+  if (isTrustedLmlAlbumMatch(response)) {
     if (typeof releaseId !== 'number') {
       return { status: 'no_match' };
     }

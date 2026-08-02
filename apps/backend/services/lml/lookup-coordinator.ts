@@ -55,6 +55,7 @@ import {
   lookupMetadata,
   shedReasonOf,
   LimiterShedError,
+  isTrustedLmlAlbumMatch,
   type GatedLookupResponse,
   type LookupOptions,
   type LookupResponse,
@@ -217,7 +218,12 @@ export class LmlLookupCoordinator {
     span: ReturnType<typeof Sentry.getActiveSpan>
   ): LookupResponse | null {
     if (!options?.requireSearchType) return response;
-    if (response.search_type === options.requireSearchType) return response;
+    // BS#1356: delegates to the shared predicate instead of re-deriving the
+    // `search_type === 'direct'` comparison inline. `requireSearchType`'s
+    // only literal value is `'direct'`, so this is behavior-identical to the
+    // prior direct comparison — including the fail-closed-on-absent case,
+    // which strict equality inside the predicate already handles.
+    if (isTrustedLmlAlbumMatch(response)) return response;
     if (span) {
       try {
         span.setAttribute('lml.coordinator.trust_reject_reason', `search_type:${response.search_type}`);

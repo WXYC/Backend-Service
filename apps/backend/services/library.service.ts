@@ -1052,17 +1052,22 @@ export const updateArtworkUrl = async (id: number, artwork_url: string | null) =
  * a coarse band kept around so future analyses can re-judge weak matches
  * once LML exposes a real signal.
  *
- * The non-direct rows are load-bearing for `flowsheet-linkage.service.ts`,
- * which calls `mapLookupToCanonicalEntity` on the raw (non-gated) lookup
- * response and uses the band to gate auto-link vs. gray-zone-review.
- * `library.controller.fireAndForgetCanonicalEntity` instead gates with
- * `requireSearchType: 'direct'` at the coordinator (BS#1355) — a deliberate
- * tightening, not a refactor: the old caller path persisted canonical
- * entities for non-direct matches (fallback / alternative / compilation /
- * song_as_artist) with their banded confidence; the gated path persists
- * only `search_type === 'direct'` (band 0.9). The non-direct bands stay
- * here for flowsheet-linkage; do not reuse them on the librarian-write
- * path without re-opening the BS#1355 decision.
+ * BS#1356: these bands are DESCRIPTIVE audit metadata, not a write gate.
+ * The only auto-accept authority for a `LookupResponse` is the
+ * `isTrustedLmlAlbumMatch` predicate (`@wxyc/lml-client`, `src/trust.ts`) —
+ * every live write path (the coordinator's `applyTrustGate`, which every
+ * `fireAndForgetCanonicalEntity` call goes through via
+ * `requireSearchType: 'direct'`, BS#1355) sits behind that predicate before
+ * `mapLookupToCanonicalEntity` below ever runs, so only `search_type ===
+ * 'direct'` (band 0.9) reaches this table on any reachable path today. The
+ * non-direct bands (0.3 / 0.5) stay for retroactive analysis and for
+ * `flowsheet-linkage.service.ts`, which reads this same table but has had
+ * **no production caller since PR #894** (the enrichment-worker superseded
+ * its inline fire-and-forget wiring) — it is dormant, not load-bearing.
+ * Do not treat a non-direct band as license to auto-persist; if
+ * flowsheet-linkage is ever revived, route it through
+ * `isTrustedLmlAlbumMatch` (or, for track-context callers, the reserved
+ * `isTrustedLmlTrackContextMatch`) rather than reading this table directly.
  */
 const SEARCH_TYPE_CONFIDENCE: Record<LookupResponse['search_type'], number | null> = {
   direct: 0.9,

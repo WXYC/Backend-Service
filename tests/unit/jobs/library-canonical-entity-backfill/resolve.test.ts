@@ -114,6 +114,21 @@ describe('resolveCanonicalEntity', () => {
         expect(resolveCanonicalEntity(response).status).toBe('review');
       }
     });
+
+    it('routes an absent search_type to review, not auto_accept (BS#1356 fail-closed)', () => {
+      // Pre-BS#1356 this fell through to `review` by branch-order accident
+      // (`undefined !== 'direct'`); the resolver now delegates to the shared
+      // `isTrustedLmlAlbumMatch` predicate, which explicitly fails closed on
+      // an absent search_type. Same verdict, no longer an accident.
+      const response = responseFor({
+        results: [itemWithReleaseId(33)],
+        search_type: undefined,
+      });
+
+      const result = resolveCanonicalEntity(response);
+
+      expect(result.status).toBe('review');
+    });
   });
 
   describe('no_match branch', () => {
