@@ -109,29 +109,52 @@ export type DeployGuardDeps = {
 const defaultIsLocalDev = (): boolean => process.env.LOCAL_DEV === '1';
 
 /**
+ * Shared fetch-with-timeout-and-error-translation scaffold for
+ * `fetchLmlHealth`, `probeRefreshEndpoint`, and `isDescendantOnGithub`.
+ * Owns the `AbortController` + `setTimeout` + try/finally-clearTimeout
+ * plumbing and the common catch ladder: a `DeployGuardError` thrown while
+ * building the request (e.g. `baseUrl()`) or by the fetch itself passes
+ * through unchanged; an aborted request becomes `${label} timed out after
+ * ${timeoutMs}ms`; anything else becomes `${label} request failed: <message>`.
+ *
+ * Deliberately does NOT check `response.ok` or parse the body — each
+ * caller keeps its own status/JSON handling, since that's the one part
+ * that genuinely differs between the three callers.
+ */
+const guardedFetch = async (
+  fetchImpl: FetchLike,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  label: string
+): Promise<Response> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchImpl(url, { ...init, signal: controller.signal });
+  } catch (e) {
+    if (e instanceof DeployGuardError) throw e;
+    if ((e as Error).name === 'AbortError') {
+      throw new DeployGuardError(`${label} timed out after ${timeoutMs}ms`);
+    }
+    throw new DeployGuardError(`${label} request failed: ${(e as Error).message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
  * Fetch LML's `/health` body. Throws on non-2xx, abort, or network failure.
  */
 export const fetchLmlHealth = async (
   fetchImpl: FetchLike = fetch,
   signalTimeoutMs: number = HEALTH_TIMEOUT_MS
 ): Promise<HealthResponse> => {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), signalTimeoutMs);
-  try {
-    const response = await fetchImpl(`${baseUrl()}${HEALTH_PATH}`, { signal: controller.signal });
-    if (!response.ok) {
-      throw new DeployGuardError(`LML /health responded ${response.status} ${response.statusText}`);
-    }
-    return (await response.json()) as HealthResponse;
-  } catch (e) {
-    if (e instanceof DeployGuardError) throw e;
-    if ((e as Error).name === 'AbortError') {
-      throw new DeployGuardError(`LML /health timed out after ${signalTimeoutMs}ms`);
-    }
-    throw new DeployGuardError(`LML /health request failed: ${(e as Error).message}`);
-  } finally {
-    clearTimeout(timer);
+  const response = await guardedFetch(fetchImpl, `${baseUrl()}${HEALTH_PATH}`, {}, signalTimeoutMs, 'LML /health');
+  if (!response.ok) {
+    throw new DeployGuardError(`LML /health responded ${response.status} ${response.statusText}`);
   }
+  return (await response.json()) as HealthResponse;
 };
 
 /**
@@ -161,31 +184,17 @@ export const probeRefreshEndpoint = async (
   fetchImpl: FetchLike = fetch,
   signalTimeoutMs: number = PROBE_TIMEOUT_MS
 ): Promise<boolean> => {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), signalTimeoutMs);
-  try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    const apiKey = process.env.LML_API_KEY;
-    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-    const response = await fetchImpl(`${baseUrl()}${REFRESH_PATH}`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ identity_ids: [] }),
-      signal: controller.signal,
-    });
-    return !ENDPOINT_ABSENT_STATUSES.has(response.status);
-  } catch (e) {
-    // Surface a DeployGuardError from baseUrl() (e.g. LIBRARY_METADATA_URL
-    // unset) as-is — re-wrapping it as "probe request failed" would mislabel a
-    // config error as a network error. Mirrors fetchLmlHealth / isDescendantOnGithub.
-    if (e instanceof DeployGuardError) throw e;
-    if ((e as Error).name === 'AbortError') {
-      throw new DeployGuardError(`LML cache-refresh probe timed out after ${signalTimeoutMs}ms`);
-    }
-    throw new DeployGuardError(`LML cache-refresh probe request failed: ${(e as Error).message}`);
-  } finally {
-    clearTimeout(timer);
-  }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const apiKey = process.env.LML_API_KEY;
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  const response = await guardedFetch(
+    fetchImpl,
+    `${baseUrl()}${REFRESH_PATH}`,
+    { method: 'POST', headers, body: JSON.stringify({ identity_ids: [] }) },
+    signalTimeoutMs,
+    'LML cache-refresh probe'
+  );
+  return !ENDPOINT_ABSENT_STATUSES.has(response.status);
 };
 
 /**
@@ -202,38 +211,27 @@ export const isDescendantOnGithub = async (
   fetchImpl: FetchLike = fetch,
   signalTimeoutMs: number = COMPARE_TIMEOUT_MS
 ): Promise<boolean> => {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), signalTimeoutMs);
-  try {
-    const headers: Record<string, string> = { Accept: 'application/vnd.github+json' };
-    const token = process.env.GITHUB_TOKEN;
-    if (token) headers.Authorization = `Bearer ${token}`;
-    // URL-encode `base` and `head` so a malformed sha containing `?`, `#`,
-    // `/`, or `..` can't change the request path semantics. `compare`
-    // treats the basehead range as opaque ref strings — encoding is safe
-    // for the all-hex case AND defensive against an LML /health regression
-    // that emits a non-sha value.
-    const range = `${encodeURIComponent(base)}...${encodeURIComponent(head)}`;
-    const response = await fetchImpl(`https://api.github.com/repos/${LML_REPO}/compare/${range}`, {
-      headers,
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      throw new DeployGuardError(
-        `GitHub compare ${base}...${head} responded ${response.status} ${response.statusText}`
-      );
-    }
-    const body = (await response.json()) as { status?: string };
-    return body.status === 'identical' || body.status === 'ahead';
-  } catch (e) {
-    if (e instanceof DeployGuardError) throw e;
-    if ((e as Error).name === 'AbortError') {
-      throw new DeployGuardError(`GitHub compare timed out after ${signalTimeoutMs}ms`);
-    }
-    throw new DeployGuardError(`GitHub compare request failed: ${(e as Error).message}`);
-  } finally {
-    clearTimeout(timer);
+  const headers: Record<string, string> = { Accept: 'application/vnd.github+json' };
+  const token = process.env.GITHUB_TOKEN;
+  if (token) headers.Authorization = `Bearer ${token}`;
+  // URL-encode `base` and `head` so a malformed sha containing `?`, `#`,
+  // `/`, or `..` can't change the request path semantics. `compare`
+  // treats the basehead range as opaque ref strings — encoding is safe
+  // for the all-hex case AND defensive against an LML /health regression
+  // that emits a non-sha value.
+  const range = `${encodeURIComponent(base)}...${encodeURIComponent(head)}`;
+  const response = await guardedFetch(
+    fetchImpl,
+    `https://api.github.com/repos/${LML_REPO}/compare/${range}`,
+    { headers },
+    signalTimeoutMs,
+    'GitHub compare'
+  );
+  if (!response.ok) {
+    throw new DeployGuardError(`GitHub compare ${base}...${head} responded ${response.status} ${response.statusText}`);
   }
+  const body = (await response.json()) as { status?: string };
+  return body.status === 'identical' || body.status === 'ahead';
 };
 
 export type DeployGuardResult = { allowed: true; commit_sha: string | null; reason: string };
