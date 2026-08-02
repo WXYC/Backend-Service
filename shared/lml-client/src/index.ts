@@ -56,6 +56,15 @@ export type {
 import { isSpotifyUrl, isAppleMusicUrl, sanitizeLookupStreamingUrls } from './streaming-url-guard.js';
 export { isSpotifyUrl, isAppleMusicUrl, sanitizeLookupStreamingUrls };
 
+// BS#1356: shared search_type trust predicates. `isTrustedLmlAlbumMatch` is
+// the single authority every album-context write gate delegates to (the
+// coordinator's `applyTrustGate` in `apps/backend/services/lml/
+// lookup-coordinator.ts`, plus the two offline job gates); no in-package
+// callsite needs it, so it's re-exported only. `isTrustedLmlTrackContextMatch`
+// is reserved for BS#1359 and likewise has no callsite yet.
+export { isTrustedLmlAlbumMatch, isTrustedLmlTrackContextMatch } from './trust.js';
+export type { LmlTrustGateInput } from './trust.js';
+
 // BS#1826: per-caller traffic-class policy layer. `policy.ts` imports
 // `envInt` back from this module (below) — a deliberate circular import
 // that's safe because `envInt` is a hoisted `function` declaration, not a

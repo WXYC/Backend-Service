@@ -26,11 +26,18 @@ class FakeLimiterShedError extends Error {
 const fakeShedReasonOf = (r: { outcome?: string }): string | undefined =>
   r.outcome === 'shed_limiter_saturated' || r.outcome === 'shed_breaker_open' ? r.outcome : undefined;
 
+// Faithful stand-in for the BS#1356 predicate `applyTrustGate` now delegates
+// to. Mirrors `isTrustedLmlAlbumMatch`'s real (and only) rule — fail closed
+// on anything but a `direct` search_type — so these tests keep asserting the
+// coordinator's actual gating behavior rather than a mocked verdict.
+const fakeIsTrustedLmlAlbumMatch = (r: { search_type?: string }): boolean => r.search_type === 'direct';
+
 jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   envInt: (_name: string, fallback: number) => fallback,
   shedReasonOf: fakeShedReasonOf,
   LimiterShedError: FakeLimiterShedError,
+  isTrustedLmlAlbumMatch: fakeIsTrustedLmlAlbumMatch,
 }));
 
 // Capture span attribute writes so the requireSearchType tests can assert

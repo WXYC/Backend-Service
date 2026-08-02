@@ -17,6 +17,9 @@ const loadModule = async (
   }));
   jest.doMock('@wxyc/lml-client', () => ({
     lookupMetadata: mockLookup,
+    // BS#1356: faithful stand-in for the shared trust predicate lml-fetch.ts
+    // now delegates to, mirroring its real (and only) rule.
+    isTrustedLmlAlbumMatch: (r: { search_type?: string }) => r.search_type === 'direct',
   }));
   return import('../../../../jobs/rotation-release-id-backfill/lml-fetch.js');
 };

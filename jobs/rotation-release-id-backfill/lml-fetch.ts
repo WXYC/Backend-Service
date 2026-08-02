@@ -18,9 +18,15 @@
  * `search_type` and must not be persisted; BS#1516). Mirrors the runtime
  * tier-3 path's extraction plus its BS#1351/BS#1355 trust gate so the SAME
  * entity is persisted whether the resolution happened at runtime or offline.
+ *
+ * BS#1356: the trust check now delegates to the shared `isTrustedLmlAlbumMatch`
+ * predicate (`@wxyc/lml-client`) instead of re-deriving the `search_type ===
+ * 'direct'` comparison locally — the same predicate the coordinator's
+ * `applyTrustGate` uses, so this offline path and the runtime path can no
+ * longer drift on what counts as trusted. No verdict change.
  */
 
-import { lookupMetadata as sharedLookupMetadata } from '@wxyc/lml-client';
+import { lookupMetadata as sharedLookupMetadata, isTrustedLmlAlbumMatch } from '@wxyc/lml-client';
 
 import { defaultLmlLimiter } from './lml-limiter.js';
 import type { LookupOutcome } from './orchestrate.js';
@@ -100,9 +106,11 @@ export const lookupReleaseId = async (
   // BS#1515), and a persisted wrong id is served by tier 1 forever; the
   // runtime BS#1351 gate never re-checks stored ids. Fail closed when
   // `search_type` is absent: no trust signal, no persist. Mirrors the
-  // coordinator's `requireSearchType: 'direct'` (BS#1355), which this job
-  // can't use because it imports `@wxyc/lml-client` directly.
-  if (response.search_type !== 'direct') {
+  // coordinator's `requireSearchType: 'direct'` (BS#1355) via the shared
+  // `isTrustedLmlAlbumMatch` predicate (BS#1356) — this job imports
+  // `@wxyc/lml-client` directly rather than going through the coordinator,
+  // but both now delegate to the same gate.
+  if (!isTrustedLmlAlbumMatch(response)) {
     return { kind: 'trust_rejected', searchType: response.search_type ?? 'absent' };
   }
   // `release_id: 0` (BS#1185 streaming-only sentinel) intentionally passes
