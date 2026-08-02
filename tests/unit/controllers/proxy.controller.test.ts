@@ -197,6 +197,8 @@ import {
   __resetEntityResolveCacheForTests,
   __getEntityResolveRemainingTtlForTests,
   __resetSpotifyTrackCacheForTests,
+  __resetArtworkCacheForTests,
+  __resetNegativeCacheForTests,
 } from '../../../apps/backend/controllers/proxy.controller';
 
 // --- Helpers ---
@@ -426,6 +428,88 @@ describe('proxy.controller', () => {
 
       expect(mockFind).toHaveBeenCalledTimes(1);
       expect(secondRes.status).toHaveBeenCalledWith(404);
+    });
+
+    // BS#989: `artworkCache`/`negativeCache` chokepoint cache-stats
+    // projection. Reset both caches first (new test-only hooks, mirroring
+    // every other proxy cache) so `cache_size` is deterministic — the rest
+    // of this describe block deliberately reuses the module-level singleton
+    // across tests via unique artist/release names (see the comment above),
+    // so a shared reset here would only affect tests that run after it.
+    describe('cache-stats projection (BS#989)', () => {
+      beforeEach(() => {
+        __resetArtworkCacheForTests();
+        __resetNegativeCacheForTests();
+      });
+
+      it('projects cache_name="artwork" onto the Sentry span for the positive-artwork path', async () => {
+        mockFind.mockResolvedValue({
+          artworkUrl: 'https://i.discogs.com/cache-stats.jpg',
+          releaseUrl: 'https://discogs.com/release/cache-stats',
+          album: 'Cache Stats Album',
+          artist: 'Cache Stats Artist',
+          source: 'discogs',
+          confidence: 0.95,
+        });
+        mockFetch.mockResolvedValue({
+          ok: true,
+          arrayBuffer: () => Promise.resolve(Buffer.from('img').buffer),
+          headers: new Headers({ 'content-type': 'image/jpeg' }),
+        } as unknown as globalThis.Response);
+        mockClassifyNSFW.mockResolvedValue('sfw');
+
+        const req = {
+          query: { artistName: 'Cache Stats Artist', releaseTitle: 'Cache Stats Album' },
+        } as unknown as Request;
+
+        await searchArtwork(req, createMockRes() as Response, mockNext);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          cache_hit: false,
+          cache_name: 'artwork',
+          cache_size: 1,
+          cache_capacity: 200,
+        });
+
+        await searchArtwork(req, createMockRes() as Response, mockNext);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          cache_hit: true,
+          cache_name: 'artwork',
+          cache_size: 1,
+          cache_capacity: 200,
+        });
+      });
+
+      it('projects cache_name="negative" onto the Sentry span for the confirmed-absence path', async () => {
+        mockFind.mockResolvedValue({
+          artworkUrl: null,
+          releaseUrl: null,
+          album: null,
+          artist: null,
+          source: null,
+          confidence: 0,
+          errored: false,
+        });
+
+        const req = {
+          query: { artistName: 'Cache Stats Negative Artist', releaseTitle: 'Cache Stats Negative Album' },
+        } as unknown as Request;
+
+        await searchArtwork(req, createMockRes() as Response, mockNext);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          cache_hit: false,
+          cache_name: 'negative',
+          cache_size: 1,
+          cache_capacity: 1000,
+        });
+
+        await searchArtwork(req, createMockRes() as Response, mockNext);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          cache_hit: true,
+          cache_name: 'negative',
+          cache_size: 1,
+          cache_capacity: 1000,
+        });
+      });
     });
   });
 
@@ -1965,10 +2049,23 @@ describe('proxy.controller', () => {
         } as unknown as Request;
 
         await getAlbumMetadata(req, createMockRes() as Response, mockNext);
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.cache_hit': false });
+        // BS#989: chokepoint cache-stats projection (replaces the old
+        // `proxy.metadata.album.cache_hit`-only attribute). cache_size=1
+        // because the miss path populates the cache before this call.
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          cache_hit: false,
+          cache_name: 'metadata_album',
+          cache_size: 1,
+          cache_capacity: 2000,
+        });
 
         await getAlbumMetadata(req, createMockRes() as Response, mockNext);
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.cache_hit': true });
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          cache_hit: true,
+          cache_name: 'metadata_album',
+          cache_size: 1,
+          cache_capacity: 2000,
+        });
         // A cache hit makes zero upstream calls, same as a local hit.
         expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.upstream_calls': 0 });
       });
@@ -2357,10 +2454,22 @@ describe('proxy.controller', () => {
         const req = { query: { artistId: '8001' } } as unknown as Request;
 
         await getArtistMetadata(req, createMockRes() as Response, mockNext);
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.artist.cache_hit': false });
+        // BS#989: chokepoint cache-stats projection (replaces the old
+        // `proxy.metadata.artist.cache_hit`-only attribute).
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          cache_hit: false,
+          cache_name: 'metadata_artist',
+          cache_size: 1,
+          cache_capacity: 2000,
+        });
 
         await getArtistMetadata(req, createMockRes() as Response, mockNext);
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.artist.cache_hit': true });
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          cache_hit: true,
+          cache_name: 'metadata_artist',
+          cache_size: 1,
+          cache_capacity: 2000,
+        });
       });
     });
   });
@@ -2533,10 +2642,22 @@ describe('proxy.controller', () => {
         const req = { query: { type: 'artist', id: '8002' } } as unknown as Request;
 
         await resolveEntity(req, createMockRes() as Response, mockNext);
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.entity.resolve.cache_hit': false });
+        // BS#989: chokepoint cache-stats projection (replaces the old
+        // `proxy.entity.resolve.cache_hit`-only attribute).
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          cache_hit: false,
+          cache_name: 'entity_resolve',
+          cache_size: 1,
+          cache_capacity: 2000,
+        });
 
         await resolveEntity(req, createMockRes() as Response, mockNext);
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.entity.resolve.cache_hit': true });
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          cache_hit: true,
+          cache_name: 'entity_resolve',
+          cache_size: 1,
+          cache_capacity: 2000,
+        });
       });
     });
   });
@@ -2742,10 +2863,22 @@ describe('proxy.controller', () => {
         const req = { params: { id: 'sentry-cache-hit-track-id' } } as unknown as Request;
 
         await getSpotifyTrack(req, createMockRes() as Response, mockNext);
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.spotify.track.cache_hit': false });
+        // BS#989: chokepoint cache-stats projection (replaces the old
+        // `proxy.spotify.track.cache_hit`-only attribute).
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          cache_hit: false,
+          cache_name: 'spotify_track',
+          cache_size: 1,
+          cache_capacity: 2000,
+        });
 
         await getSpotifyTrack(req, createMockRes() as Response, mockNext);
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.spotify.track.cache_hit': true });
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          cache_hit: true,
+          cache_name: 'spotify_track',
+          cache_size: 1,
+          cache_capacity: 2000,
+        });
       });
     });
   });
@@ -3015,6 +3148,34 @@ describe('proxy.controller', () => {
           ],
         })
       );
+    });
+
+    it('projects cache_name="tracklist" onto the Sentry span for hit and miss (BS#989)', async () => {
+      mockGetDiscogsReleaseIdByLegacyId.mockResolvedValue(42);
+      mockGetRelease.mockResolvedValue({
+        release_id: 42,
+        title: 'On Your Own Love Again',
+        artist: 'Jessica Pratt',
+        tracklist: [{ position: 'A1', title: 'Wrong Hand', duration: '3:42', artists: [] }],
+      });
+
+      const req = { params: { libraryId: '12345' } } as unknown as Request;
+
+      await libraryTracks(req, createMockRes() as Response, mockNext);
+      expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+        cache_hit: false,
+        cache_name: 'tracklist',
+        cache_size: 1,
+        cache_capacity: 500,
+      });
+
+      await libraryTracks(req, createMockRes() as Response, mockNext);
+      expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+        cache_hit: true,
+        cache_name: 'tracklist',
+        cache_size: 1,
+        cache_capacity: 500,
+      });
     });
   });
 });

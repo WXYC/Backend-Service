@@ -52,6 +52,7 @@ import {
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
 import { LRUCache } from 'lru-cache';
 import WxycError from '../utils/error.js';
+import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from '../services/observability/cache-stats.js';
 
 // Shared instance — stateless, safe to reuse across requests. Centralizes
 // fallback-URL synthesis so this controller, the runtime metadata service,
@@ -123,13 +124,32 @@ const artworkCache = new LRUCache<string, CachedArtwork>({
   maxSize: 20 * 1024 * 1024, // 20 MB total
   sizeCalculation: (value) => value.data.byteLength,
   ttl: 1000 * 60 * 60, // 1 hour for positive results
+  // BS#989: count capacity-driven displacements for the periodic eviction
+  // emit. `reason === 'evict'` excludes TTL expiry / explicit delete / set
+  // replacement — see cache-stats.ts's module doc.
+  dispose: (_value, _key, reason) => {
+    if (reason === 'evict') recordCacheEviction('artwork');
+  },
 });
 
 /** Separate cache for negative results (NSFW or not found) with longer TTL. */
 const negativeCache = new LRUCache<string, boolean>({
   max: 1000,
   ttl: 1000 * 60 * 60 * 24, // 24 hours
+  dispose: (_value, _key, reason) => {
+    if (reason === 'evict') recordCacheEviction('negative');
+  },
 });
+
+/** Test-only: drop cached entries between cases (mirrors the other proxy caches). */
+export function __resetArtworkCacheForTests(): void {
+  artworkCache.clear();
+}
+
+/** Test-only: drop cached entries between cases (mirrors the other proxy caches). */
+export function __resetNegativeCacheForTests(): void {
+  negativeCache.clear();
+}
 
 function artworkCacheKey(artistName: string, releaseTitle?: string): string {
   return `${artistName.toLowerCase().trim()}|${(releaseTitle || '').toLowerCase().trim()}`;
@@ -156,6 +176,14 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
 
   // Check negative cache first (NSFW or not found)
   if (negativeCache.has(cacheKey)) {
+    // BS#989: chokepoint cache-stats projection. Only one call per terminal
+    // branch below — whichever cache decided the outcome for THIS request —
+    // rather than one per raw `.get`/`.has`/`.set` call; a request only ever
+    // hits at most one of `negativeCache`/`artworkCache` decisively (the
+    // negative-cache check short-circuits before `artworkCache` is ever
+    // touched), so there's no ambiguity about "the cache touched by the
+    // request" the projected attributes describe.
+    recordCacheLookup('negative', true, negativeCache);
     res.status(404).json({ message: 'No artwork available' });
     return;
   }
@@ -163,11 +191,13 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
   // Check positive cache
   const cached = artworkCache.get(cacheKey);
   if (cached) {
+    recordCacheLookup('artwork', true, artworkCache);
     res.set('Content-Type', cached.contentType);
     res.set('Cache-Control', 'private, max-age=600');
     res.status(200).send(cached.data);
     return;
   }
+  recordCacheLookup('artwork', false, artworkCache);
 
   const finder = getArtworkFinder();
   const result = await finder.find({
@@ -188,6 +218,7 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
       return;
     }
     negativeCache.set(cacheKey, true);
+    recordCacheLookup('negative', false, negativeCache);
     res.status(404).json({ message: 'No artwork found' });
     return;
   }
@@ -197,6 +228,7 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
   if (!imageResponse.ok) {
     console.warn(`[ProxyController] Failed to download artwork from ${result.artworkUrl}: ${imageResponse.status}`);
     negativeCache.set(cacheKey, true);
+    recordCacheLookup('negative', false, negativeCache);
     res.status(404).json({ message: 'Failed to fetch artwork image' });
     return;
   }
@@ -209,12 +241,14 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
   if (nsfwResult === 'nsfw') {
     console.log(`[ProxyController] NSFW artwork blocked for ${artistName} - ${releaseTitle || '(no album)'}`);
     negativeCache.set(cacheKey, true);
+    recordCacheLookup('negative', false, negativeCache);
     res.status(404).json({ message: 'No artwork available' });
     return;
   }
 
   // Cache and return the SFW image
   artworkCache.set(cacheKey, { contentType, data: imageBuffer });
+  recordCacheLookup('artwork', false, artworkCache);
 
   res.set('Content-Type', contentType);
   res.set('Cache-Control', 'private, max-age=600');
@@ -475,6 +509,9 @@ const albumMetadataCache = new LRUCache<string, Record<string, unknown>>({
   maxSize: 32 * 1024 * 1024, // 32 MB total
   sizeCalculation: (value) => Buffer.byteLength(JSON.stringify(value)) || 1,
   ttl: 1000 * 60 * 60, // 1h (BS#988)
+  dispose: (_value, _key, reason) => {
+    if (reason === 'evict') recordCacheEviction('metadata_album');
+  },
 });
 
 /** Test-only: drop cached entries between cases. */
@@ -752,21 +789,21 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
     }
   }
 
-  // Project the upstream-call count + cache result onto the active Sentry
-  // span so we can split p50/p95 by cohort in the trace explorer. Wrap in
-  // try/except — observability must never break the request path. Two
-  // separate calls (not one merged object) so each attribute name is
-  // independently greppable in the trace explorer.
+  // Project the upstream-call count onto the active Sentry span so we can
+  // split p50/p95 by cohort in the trace explorer. Wrap in try/except —
+  // observability must never break the request path.
   try {
     Sentry.getActiveSpan()?.setAttributes({
       'proxy.metadata.album.upstream_calls': upstreamCalls,
     });
-    Sentry.getActiveSpan()?.setAttributes({
-      'proxy.metadata.album.cache_hit': cacheHit,
-    });
   } catch (err) {
     console.warn('[ProxyController] failed to project Sentry attrs', err);
   }
+  // BS#989: chokepoint cache-stats projection (cache_hit/cache_name/
+  // cache_size/cache_capacity), replacing the old `proxy.metadata.album.
+  // cache_hit`-only attribute. Positioned after the possible `.set()` above
+  // so `cache_size` reflects post-touch occupancy.
+  recordCacheLookup('metadata_album', cacheHit, albumMetadataCache);
 
   res.set('Cache-Control', 'private, max-age=600');
   res.status(200).json(metadata);
@@ -787,6 +824,9 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
 const artistMetadataCache = new LRUCache<number, { body: Record<string, unknown> | null }>({
   max: 2000,
   ttl: 1000 * 60 * 60, // 1h (BS#988)
+  dispose: (_value, _key, reason) => {
+    if (reason === 'evict') recordCacheEviction('metadata_artist');
+  },
 });
 
 /** Test-only: drop cached entries between cases. */
@@ -843,11 +883,9 @@ export const getArtistMetadata: RequestHandler<object, unknown, unknown, ArtistM
     }
   }
 
-  try {
-    Sentry.getActiveSpan()?.setAttributes({ 'proxy.metadata.artist.cache_hit': cacheHit });
-  } catch (err) {
-    console.warn('[ProxyController] failed to project Sentry attrs', err);
-  }
+  // BS#989: chokepoint cache-stats projection, replacing the old
+  // `proxy.metadata.artist.cache_hit`-only attribute.
+  recordCacheLookup('metadata_artist', cacheHit, artistMetadataCache);
 
   if (cached.body === null) {
     // Cache hit on a confirmed absence recorded by a prior miss above.
@@ -872,6 +910,9 @@ export const getArtistMetadata: RequestHandler<object, unknown, unknown, ArtistM
 const entityResolveCache = new LRUCache<string, { body: Record<string, unknown> | null }>({
   max: 2000,
   ttl: 1000 * 60 * 60 * 24, // 24h (BS#988) — positive resolutions are immutable
+  dispose: (_value, _key, reason) => {
+    if (reason === 'evict') recordCacheEviction('entity_resolve');
+  },
 });
 
 // BS#1893: a confirmed 404 is negative-cached, but LML resolves entities out of
@@ -942,11 +983,9 @@ export const resolveEntity: RequestHandler<object, unknown, unknown, EntityResol
     }
   }
 
-  try {
-    Sentry.getActiveSpan()?.setAttributes({ 'proxy.entity.resolve.cache_hit': cacheHit });
-  } catch (err) {
-    console.warn('[ProxyController] failed to project Sentry attrs', err);
-  }
+  // BS#989: chokepoint cache-stats projection, replacing the old
+  // `proxy.entity.resolve.cache_hit`-only attribute.
+  recordCacheLookup('entity_resolve', cacheHit, entityResolveCache);
 
   if (cached.body === null) {
     // Cache hit on a confirmed absence recorded by a prior miss above.
@@ -970,6 +1009,9 @@ export const resolveEntity: RequestHandler<object, unknown, unknown, EntityResol
 const spotifyTrackCache = new LRUCache<string, { body: Record<string, unknown> | null }>({
   max: 2000,
   ttl: 1000 * 60 * 60, // 1h (BS#988) — same tier as album/artist metadata.
+  dispose: (_value, _key, reason) => {
+    if (reason === 'evict') recordCacheEviction('spotify_track');
+  },
 });
 
 /** Test-only: drop cached entries between cases. */
@@ -1055,11 +1097,9 @@ export const getSpotifyTrack: RequestHandler<SpotifyTrackParams> = async (req, r
     spotifyTrackCache.set(id, cached);
   }
 
-  try {
-    Sentry.getActiveSpan()?.setAttributes({ 'proxy.spotify.track.cache_hit': cacheHit });
-  } catch (err) {
-    console.warn('[ProxyController] failed to project Sentry attrs', err);
-  }
+  // BS#989: chokepoint cache-stats projection, replacing the old
+  // `proxy.spotify.track.cache_hit`-only attribute.
+  recordCacheLookup('spotify_track', cacheHit, spotifyTrackCache);
 
   if (cached.body === null) {
     // Cache hit on a confirmed absence recorded by a prior miss above.
@@ -1158,6 +1198,9 @@ interface LibraryTracksResponse {
 const tracklistCache = new LRUCache<number, LibraryTrackEntry[]>({
   max: 500,
   ttl: 1000 * 60 * 10,
+  dispose: (_value, _key, reason) => {
+    if (reason === 'evict') recordCacheEviction('tracklist');
+  },
 });
 
 /** Test-only: drop cached entries between cases. */
@@ -1217,6 +1260,7 @@ export const libraryTracks: RequestHandler<{ libraryId: string }> = async (req, 
   }
 
   let tracks = tracklistCache.get(discogsReleaseId);
+  const tracklistHit = tracks !== undefined;
   if (!tracks) {
     try {
       const release = await getRelease(discogsReleaseId);
@@ -1232,6 +1276,9 @@ export const libraryTracks: RequestHandler<{ libraryId: string }> = async (req, 
     }
     tracklistCache.set(discogsReleaseId, tracks);
   }
+  // BS#989: chokepoint cache-stats projection, positioned after the
+  // possible `.set()` above so `cache_size` reflects post-touch occupancy.
+  recordCacheLookup('tracklist', tracklistHit, tracklistCache);
 
   const body: LibraryTracksResponse = {
     library_id: libraryId,
@@ -1242,3 +1289,20 @@ export const libraryTracks: RequestHandler<{ libraryId: string }> = async (req, 
   res.set('Cache-Control', 'private, max-age=600');
   res.status(200).json(body);
 };
+
+/**
+ * Registered for the once-per-minute cache-stats periodic emit (BS#989) —
+ * see `startPeriodicEmit` wiring in `apps/backend/app.ts`. `library.service.ts`
+ * registers its own `track_search` cache separately (`libraryServiceCachesForPeriodicEmit`).
+ */
+export function proxyCachesForPeriodicEmit(): RegisteredCache[] {
+  return [
+    { name: 'artwork', cache: artworkCache },
+    { name: 'negative', cache: negativeCache },
+    { name: 'tracklist', cache: tracklistCache },
+    { name: 'metadata_album', cache: albumMetadataCache },
+    { name: 'metadata_artist', cache: artistMetadataCache },
+    { name: 'entity_resolve', cache: entityResolveCache },
+    { name: 'spotify_track', cache: spotifyTrackCache },
+  ];
+}

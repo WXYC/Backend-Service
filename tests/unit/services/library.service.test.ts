@@ -1620,15 +1620,27 @@ describe('library.service', () => {
 
       await searchLibraryByTrack('Back, Baby', 10);
 
-      // cache_hit is emitted as a singular setAttribute call.
-      expect(mockSpanSetAttribute).toHaveBeenCalledWith('track_search.cache_hit', false);
+      // BS#989: cache-stats chokepoint projects the generic cache_hit/
+      // cache_name/cache_size/cache_capacity shape (replaces the old
+      // track_search.cache_hit-only setAttribute call). cache_size=1
+      // because the miss path populates the cache before this call.
+      expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+        cache_hit: false,
+        cache_name: 'track_search',
+        cache_size: 1,
+        cache_capacity: 1000,
+      });
       // master_lookup_ms is projected by the inner method via the active span.
       const setAttrsKeys = mockSpanSetAttributes.mock.calls.flatMap((c) => Object.keys(c[0] as object));
       expect(setAttrsKeys).toContain('track_search.master_lookup_ms');
       expect(setAttrsKeys).toContain('track_search.latency_ms');
-      // All emitted timing values are finite numbers.
+      // All emitted `*_ms` timing values are finite numbers. Scoped to `_ms`
+      // keys (not every setAttributes call) because the BS#989 cache-stats
+      // projection above shares this same mock and carries non-numeric
+      // `cache_name` (string) / `cache_hit` (boolean) values.
       for (const call of mockSpanSetAttributes.mock.calls) {
-        for (const value of Object.values(call[0] as Record<string, unknown>)) {
+        for (const [key, value] of Object.entries(call[0] as Record<string, unknown>)) {
+          if (!key.endsWith('_ms')) continue;
           expect(typeof value).toBe('number');
           expect(Number.isFinite(value as number)).toBe(true);
         }
@@ -1650,7 +1662,13 @@ describe('library.service', () => {
       expect(mockLookupBySong).not.toHaveBeenCalled();
       expect(results).toHaveLength(1);
       expect(mockStartSpan).toHaveBeenCalledTimes(1);
-      expect(mockSpanSetAttribute).toHaveBeenCalledWith('track_search.cache_hit', true);
+      // cache_size stays 1 — a hit doesn't write a second entry for the same key.
+      expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+        cache_hit: true,
+        cache_name: 'track_search',
+        cache_size: 1,
+        cache_capacity: 1000,
+      });
       const setAttrsKeys = mockSpanSetAttributes.mock.calls.flatMap((c) => Object.keys(c[0] as object));
       expect(setAttrsKeys).toContain('track_search.latency_ms');
       // master_lookup_ms is not projected on hit — the inner method never runs.
