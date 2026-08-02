@@ -32,7 +32,7 @@ jest.mock('@sentry/node', () => ({
   close: jest.fn(() => Promise.resolve(true)),
 }));
 
-import { db, flowsheet_freetext_resolution } from '@wxyc/database';
+import { db, flowsheet_freetext_resolution, enumerateFreetextPairs } from '@wxyc/database';
 import {
   normalizePairs,
   loadSkipKeys,
@@ -60,6 +60,8 @@ import {
   NO_MATCH_TTL_DAYS_ENV,
   MAX_PAIRS_PER_RUN_DEFAULT,
   MAX_PAIRS_PER_RUN_ENV,
+  MIN_PLAYS_DEFAULT,
+  MIN_PLAYS_ENV,
   READ_TIMEOUT_DEFAULT,
   LIVE_ACTIVITY_LOOKBACK_DEFAULT,
   LIVE_ACTIVITY_LOOKBACK_ENV,
@@ -111,6 +113,7 @@ const RESET_ENV_KEYS = [
   BULK_BUDGET_MS_ENV,
   NO_MATCH_TTL_DAYS_ENV,
   MAX_PAIRS_PER_RUN_ENV,
+  MIN_PLAYS_ENV,
   LIVE_ACTIVITY_LOOKBACK_ENV,
   STOP_BY_UTC_ENV,
 ];
@@ -601,6 +604,7 @@ describe('resolveOptions', () => {
     expect(opts.budgetMs).toBe(BULK_BUDGET_MS_DEFAULT);
     expect(opts.noMatchTtlDays).toBe(NO_MATCH_TTL_DAYS_DEFAULT);
     expect(opts.maxPairsPerRun).toBe(MAX_PAIRS_PER_RUN_DEFAULT);
+    expect(opts.minPlays).toBe(MIN_PLAYS_DEFAULT);
     expect(opts.readTimeoutMs).toBe(READ_TIMEOUT_DEFAULT);
     expect(opts.liveActivityLookbackSeconds).toBe(LIVE_ACTIVITY_LOOKBACK_DEFAULT);
     expect(opts.stopByUtc).toBe(STOP_BY_UTC_DEFAULT);
@@ -613,13 +617,24 @@ describe('resolveOptions', () => {
       [BULK_BATCH_SIZE_ENV]: '10',
       [NO_MATCH_TTL_DAYS_ENV]: '7',
       [MAX_PAIRS_PER_RUN_ENV]: '0',
+      [MIN_PLAYS_ENV]: '3',
       [STOP_BY_UTC_ENV]: '13:30',
     };
     const opts = resolveOptions(env, []);
     expect(opts.batchSize).toBe(10);
     expect(opts.noMatchTtlDays).toBe(7);
     expect(opts.maxPairsPerRun).toBe(0); // 0 allowed (non-negative) → disables cap
+    expect(opts.minPlays).toBe(3);
     expect(opts.stopByUtc).toBe('13:30');
+  });
+
+  it('FREETEXT_RESOLVE_MIN_PLAYS=0 disables the play-count floor (BS#1822)', () => {
+    const opts = resolveOptions({ ...stripEnv(process.env), [MIN_PLAYS_ENV]: '0' }, []);
+    expect(opts.minPlays).toBe(0); // 0 allowed (non-negative) → disables the floor, drains everything eligible
+  });
+
+  it('throws on a negative FREETEXT_RESOLVE_MIN_PLAYS', () => {
+    expect(() => resolveOptions({ ...stripEnv(process.env), [MIN_PLAYS_ENV]: '-1' }, [])).toThrow();
   });
 
   it('throws on invalid batch size', () => {
@@ -711,6 +726,7 @@ const baseOptions = (over: Partial<ResolveOptions> = {}): ResolveOptions => ({
   budgetMs: 25000,
   noMatchTtlDays: 30,
   maxPairsPerRun: 0,
+  minPlays: 0,
   readTimeoutMs: 300_000,
   liveActivityLookbackSeconds: 0,
   liveActivityPauseMs: 1,
@@ -833,6 +849,21 @@ describe('runResolve', () => {
     expect(summary.stopReason).toBe('backlog_drained');
     expect(summary.batchesRun).toBe(summary.batches);
     expect(summary.batchesRun).toBe(1);
+  });
+
+  it('threads options.minPlays into enumerateFreetextPairs (BS#1822)', async () => {
+    const mock = db.execute as jest.Mock;
+    for (const v of enumerateResult([{ artist_name: 'J Dilla', album_title: 'Donuts' }])) {
+      mock.mockResolvedValueOnce(v);
+    }
+    mock.mockResolvedValueOnce([]); // loadSkipKeys empty
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'no_match', lookup: { results: [] } }],
+    });
+
+    await runResolve(baseOptions({ batchSize: 5, readTimeoutMs: 12_345, minPlays: 3 }));
+
+    expect(enumerateFreetextPairs as jest.Mock).toHaveBeenCalledWith(12_345, 3);
   });
 });
 

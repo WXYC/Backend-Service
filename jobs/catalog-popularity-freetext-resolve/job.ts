@@ -99,6 +99,21 @@ export const NO_MATCH_TTL_DAYS_DEFAULT = 30;
 export const MAX_PAIRS_PER_RUN_ENV = 'FREETEXT_RESOLVE_MAX_PAIRS_PER_RUN';
 export const MAX_PAIRS_PER_RUN_DEFAULT = 5_000;
 
+/** Minimum PAIR-level play-count floor (BS#1822), gating the eligible set at
+ * enumerate time so a run stops burning LML budget on the uncacheable
+ * single-play long tail. Applied to the SUM of a pair's per-track play counts
+ * (`enumerateFreetextPairs`'s `total_plays`), not any one track — see
+ * `shared/database/src/freetext-enumerate.ts`. Default conservatively to `2`:
+ * single-play one-offs dominate the wasted cost the 2026-07-25 incident (see
+ * BS#1814) traced to this job. `0`/unset disables the floor (drain
+ * everything eligible), mirroring the `MAX_PAIRS_PER_RUN=0`-disables
+ * convention above. Mirrors BS#1591's non-library play-floor for the sibling
+ * `flowsheet-metadata-backfill` job. A pair excluded by the floor this run is
+ * not permanently excluded — it's simply not enumerated until its play count
+ * (recomputed fresh every run from live `flowsheet` data) crosses the floor. */
+export const MIN_PLAYS_ENV = 'FREETEXT_RESOLVE_MIN_PLAYS';
+export const MIN_PLAYS_DEFAULT = 2;
+
 /** Statement timeout for the enumerate scan. The `album_id IS NULL` partition
  * of `flowsheet` is large; a generous timeout covers the DISTINCT scan. */
 export const READ_TIMEOUT_ENV = 'FREETEXT_RESOLVE_READ_TIMEOUT_MS';
@@ -566,6 +581,7 @@ export interface ResolveOptions {
   budgetMs: number;
   noMatchTtlDays: number;
   maxPairsPerRun: number;
+  minPlays: number;
   readTimeoutMs: number;
   liveActivityLookbackSeconds: number;
   liveActivityPauseMs: number;
@@ -616,6 +632,7 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
       MAX_PAIRS_PER_RUN_DEFAULT,
       ctx
     ),
+    minPlays: requireNonNegativeInt(env[MIN_PLAYS_ENV], MIN_PLAYS_ENV, MIN_PLAYS_DEFAULT, ctx),
     readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT, ctx),
     liveActivityLookbackSeconds: requireNonNegativeInt(
       env[LIVE_ACTIVITY_LOOKBACK_ENV],
@@ -665,6 +682,7 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
     budget_ms: options.budgetMs,
     no_match_ttl_days: options.noMatchTtlDays,
     max_pairs_per_run: options.maxPairsPerRun,
+    min_plays: options.minPlays,
     stop_by_utc: options.stopByUtc ?? 'disabled',
     stop_by_deadline: Number.isFinite(deadlineMs) ? new Date(deadlineMs).toISOString() : null,
     dry_run: options.dryRun,
@@ -683,7 +701,7 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
     return stopByReachedAtStartupSummary();
   }
 
-  const raw = await enumerateFreetextPairs(options.readTimeoutMs);
+  const raw = await enumerateFreetextPairs(options.readTimeoutMs, options.minPlays);
   const normalized = normalizePairs(raw);
   const skip = await loadSkipKeys(options.noMatchTtlDays);
   let eligible = filterEligible(normalized, skip);
