@@ -43,16 +43,30 @@ const { queryNoMatchRows, MAX_DIGEST_ROWS } = require(
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
+// A play-age cutoff far enough in the past to be a no-op against every
+// `add_time` these tests seed (all within the last few minutes, or the
+// explicit 90-day-old backfill-shape row below, which is asserted separately).
+// Used at the pre-existing call sites so the new `add_time` bound doesn't
+// change their behavior.
+const PERMISSIVE_PLAY_AGE_CUTOFF = new Date(0);
+
 describe('metadata-no-match-digest queryNoMatchRows (REAL fn, real PG)', () => {
   let sql;
   const flowsheetIds = [];
   const showIds = [];
   const rotationIds = [];
 
-  /** Insert a flowsheet row already stamped `enriched_no_match` (or an override), returning its id. */
+  /**
+   * Insert a flowsheet row already stamped `enriched_no_match` (or an
+   * override), returning its id. `addTime` defaults to the current instant;
+   * pass a JS `Date` to backdate it (e.g. simulating a backfill re-touching
+   * an old play) -- the raw `sql` client from `getTestDb()` binds a JS `Date`
+   * directly, unlike the Drizzle client `queryNoMatchRows` itself uses (see
+   * the file header).
+   */
   async function seedRow(
     artist,
-    { entryType = 'track', rotationId = null, showId = null, metadataStatus = 'enriched_no_match' } = {}
+    { entryType = 'track', rotationId = null, showId = null, metadataStatus = 'enriched_no_match', addTime = null } = {}
   ) {
     const rows = await sql`
       INSERT INTO ${sql(SCHEMA)}.flowsheet
@@ -60,7 +74,7 @@ describe('metadata-no-match-digest queryNoMatchRows (REAL fn, real PG)', () => {
          request_flag, segue, rotation_id, show_id, add_time, metadata_status)
       VALUES
         (91234, ${entryType}, ${artist}, 'NMD Album', 'NMD Track',
-         false, false, ${rotationId}, ${showId}, now(), ${metadataStatus})
+         false, false, ${rotationId}, ${showId}, ${addTime ?? new Date()}, ${metadataStatus})
       RETURNING id
     `;
     const id = Number(rows[0].id);
@@ -117,7 +131,7 @@ describe('metadata-no-match-digest queryNoMatchRows (REAL fn, real PG)', () => {
     const id = await seedRow('nmd-driver-seam', { rotationId, showId });
 
     // Before the fix this rejected with Drizzle's "Failed query" wrapper.
-    const rows = await queryNoMatchRows(since);
+    const rows = await queryNoMatchRows(since, PERMISSIVE_PLAY_AGE_CUTOFF);
 
     const row = rows.find((r) => r.id === id);
     expect(row).toBeDefined();
@@ -133,7 +147,7 @@ describe('metadata-no-match-digest queryNoMatchRows (REAL fn, real PG)', () => {
     const [{ since }] = await sql`SELECT now() - interval '1 minute' AS since`;
     const id = await seedRow('nmd-null-start');
 
-    const row = (await queryNoMatchRows(since)).find((r) => r.id === id);
+    const row = (await queryNoMatchRows(since, PERMISSIVE_PLAY_AGE_CUTOFF)).find((r) => r.id === id);
     expect(row).toBeDefined();
     expect(row.start_time).toBeNull();
     expect(row.rotation_id).toBeNull();
@@ -148,7 +162,7 @@ describe('metadata-no-match-digest queryNoMatchRows (REAL fn, real PG)', () => {
     await sql`SELECT pg_sleep(0.02)`;
     const newer = await seedRow('nmd-boundary-newer');
 
-    const ids = (await queryNoMatchRows(since)).map((r) => r.id);
+    const ids = (await queryNoMatchRows(since, PERMISSIVE_PLAY_AGE_CUTOFF)).map((r) => r.id);
     expect(ids).toContain(newer);
     expect(ids).not.toContain(older);
   });
@@ -158,7 +172,7 @@ describe('metadata-no-match-digest queryNoMatchRows (REAL fn, real PG)', () => {
     const track = await seedRow('nmd-entrytype-track', { entryType: 'track' });
     const talkset = await seedRow('nmd-entrytype-talkset', { entryType: 'talkset' });
 
-    const ids = (await queryNoMatchRows(since)).map((r) => r.id);
+    const ids = (await queryNoMatchRows(since, PERMISSIVE_PLAY_AGE_CUTOFF)).map((r) => r.id);
     expect(ids).toContain(track);
     expect(ids).not.toContain(talkset);
   });
@@ -168,7 +182,7 @@ describe('metadata-no-match-digest queryNoMatchRows (REAL fn, real PG)', () => {
     const noMatch = await seedRow('nmd-status-nomatch', { metadataStatus: 'enriched_no_match' });
     const matched = await seedRow('nmd-status-match', { metadataStatus: 'enriched_match' });
 
-    const ids = (await queryNoMatchRows(since)).map((r) => r.id);
+    const ids = (await queryNoMatchRows(since, PERMISSIVE_PLAY_AGE_CUTOFF)).map((r) => r.id);
     expect(ids).toContain(noMatch);
     expect(ids).not.toContain(matched);
   });
@@ -181,7 +195,7 @@ describe('metadata-no-match-digest queryNoMatchRows (REAL fn, real PG)', () => {
     const freeform = await seedRow('nmd-order-freeform', { rotationId: null });
     const linked = await seedRow('nmd-order-linked', { rotationId });
 
-    const result = await queryNoMatchRows(since);
+    const result = await queryNoMatchRows(since, PERMISSIVE_PLAY_AGE_CUTOFF);
     const linkedPos = result.findIndex((r) => r.id === linked);
     const freeformPos = result.findIndex((r) => r.id === freeform);
     expect(linkedPos).toBeGreaterThanOrEqual(0);
@@ -191,5 +205,26 @@ describe('metadata-no-match-digest queryNoMatchRows (REAL fn, real PG)', () => {
 
   it('exports the MAX_DIGEST_ROWS cap the query LIMITs on', () => {
     expect(MAX_DIGEST_ROWS).toBe(5000);
+  });
+
+  describe('play-recency bound (BS#1921)', () => {
+    it('excludes a backfill re-touch: old add_time (90d), fresh updated_at (the INSERT trigger), against a far-past since', async () => {
+      const [{ since }] = await sql`SELECT now() - interval '365 days' AS since`;
+      const [{ playAgeCutoff }] = await sql`SELECT now() - interval '48 hours' AS "playAgeCutoff"`;
+      const oldAddTime = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+      const id = await seedRow('nmd-backfill-old-play', { addTime: oldAddTime });
+
+      const ids = (await queryNoMatchRows(since, playAgeCutoff)).map((r) => r.id);
+      expect(ids).not.toContain(id);
+    });
+
+    it('includes a genuinely new play: recent add_time + recent updated_at, against the same cutoff', async () => {
+      const [{ since }] = await sql`SELECT now() - interval '365 days' AS since`;
+      const [{ playAgeCutoff }] = await sql`SELECT now() - interval '48 hours' AS "playAgeCutoff"`;
+      const id = await seedRow('nmd-new-play'); // addTime defaults to now()
+
+      const ids = (await queryNoMatchRows(since, playAgeCutoff)).map((r) => r.id);
+      expect(ids).toContain(id);
+    });
   });
 });

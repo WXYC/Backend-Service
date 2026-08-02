@@ -32,7 +32,7 @@ import { db } from '@wxyc/database';
 import { MAX_DIGEST_ROWS, queryNoMatchRows } from './query.js';
 import { buildDigestEmail } from './format.js';
 import { resolveDigestRecipient, sendDigestEmail } from './email.js';
-import { advanceWatermarkIfSuccessful, getLastRun, resolveWindowStart } from './watermark.js';
+import { advanceWatermarkIfSuccessful, getLastRun, resolvePlayAgeCutoff, resolveWindowStart } from './watermark.js';
 import { log, errorMessage } from './logger.js';
 
 export const JOB_NAME = 'metadata-no-match-digest';
@@ -41,13 +41,15 @@ export const run = async (): Promise<void> => {
   const runStart = new Date();
   const lastRun = await getLastRun(JOB_NAME);
   const windowStart = resolveWindowStart(lastRun, runStart);
+  const playAgeCutoff = resolvePlayAgeCutoff(runStart);
 
   log('info', 'query', 'scanning flowsheet for new enriched_no_match rows', {
     window_start: windowStart.toISOString(),
+    play_age_cutoff: playAgeCutoff.toISOString(),
     first_run: lastRun === null,
   });
 
-  const rows = await queryNoMatchRows(windowStart);
+  const rows = await queryNoMatchRows(windowStart, playAgeCutoff);
   const digest = buildDigestEmail(rows, {
     since: windowStart,
     runStart,
