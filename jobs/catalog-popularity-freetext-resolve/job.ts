@@ -30,6 +30,17 @@
  * reuse only the LML-rate cooperative pause (`awaitQuietWindow`) so the job
  * yields to live DJ activity, same as `album-level-backfill`.
  *
+ * BS#1518 (gate-not-provenance, per the BS#1356 decision memo §6):
+ * `verdictFromLookup` only persists a release id from a `direct` LML
+ * `search_type` (`isTrustedLmlAlbumMatch`, `@wxyc/lml-client`) — a non-direct
+ * candidate collapses to the same null verdict a genuine no-match uses, and a
+ * `trust_rejected` counter distinguishes the two in the run totals. The only
+ * live reader of this table, `album-popularity-refresh.service.ts`, applies no
+ * confidence floor of its own, so an ungated wrong-album id would flow
+ * straight into popularity attribution. `--reverify-existing` (see the
+ * "Existing-row re-verdict sweep" section below) is a separate one-shot mode
+ * on this same job that re-checks rows resolved before the gate landed.
+ *
  * Run procedure: see jobs/catalog-popularity-freetext-resolve/README.md.
  */
 
@@ -44,7 +55,12 @@ import {
   enumerateFreetextPairs,
   type RawPair,
 } from '@wxyc/database';
-import { bulkLookupMetadata, type BulkLookupItem, type BulkLookupResponse } from '@wxyc/lml-client';
+import {
+  bulkLookupMetadata,
+  isTrustedLmlAlbumMatch,
+  type BulkLookupItem,
+  type BulkLookupResponse,
+} from '@wxyc/lml-client';
 import * as Sentry from '@sentry/node';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
@@ -267,6 +283,17 @@ export interface ResolutionVerdict {
   discogs_release_id: number | null;
   /** LML's per-result confidence, or null when there's no match. */
   match_confidence: number | null;
+  /**
+   * BS#1518: present (and `true`) ONLY when a candidate release id existed
+   * (`artwork.release_id > 0`) but failed `isTrustedLmlAlbumMatch` — a
+   * non-`direct` `search_type` answer. Absent (`undefined`) for both a
+   * genuine no-match (no candidate at all) and a trusted match, so callers
+   * that don't care (e.g. `upsertVerdict`, which never reads this field) see
+   * no behavior change. Lets `runBatch` / the `--reverify-existing` sweep
+   * distinguish "LML answered but we didn't trust it" from "LML found
+   * nothing" for their `trust_rejected` counters.
+   */
+  trustRejected?: true;
 }
 
 /** UPSERT one resolution verdict into `flowsheet_freetext_resolution`,
@@ -310,26 +337,41 @@ export const upsertVerdict = async (v: ResolutionVerdict): Promise<void> => {
 /** Extract the release verdict from an LML bulk per-item result. The release
  * id lives on `lookup.results[0].artwork.release_id`; `> 0` is a real release,
  * `0` is the BS#1185 streaming-only sentinel (NOT a linkable release) — both
- * the sentinel and a genuine no-match collapse to a null release id. */
+ * the sentinel and a genuine no-match collapse to a null release id.
+ *
+ * BS#1518: a candidate release id (`releaseId > 0`) is only extracted when
+ * `isTrustedLmlAlbumMatch` accepts the response's `search_type` (`direct`).
+ * A non-direct candidate — the artist-fallback answer that names a DIFFERENT
+ * album by the same artist (the Yenbett→Tzenni recurrence, BS#1515/BS#1516) —
+ * collapses to the SAME null verdict a genuine no-match uses, with
+ * `trustRejected: true` set so the caller's totals can tell the two apart.
+ * The no-match path (no candidate at all) is untouched: `trustRejected` stays
+ * absent, so its `upsertVerdict` write and no-match TTL semantics are
+ * byte-identical to before this gate. */
 export const verdictFromLookup = (
   pair: NormalizedPair,
   lookup: BulkLookupResponse['results'][number]['lookup']
 ): ResolutionVerdict => {
-  const artwork = lookup?.results?.[0]?.artwork;
-  const releaseId = artwork?.release_id ?? 0;
-  if (artwork && releaseId > 0) {
-    return {
-      norm_artist: pair.norm_artist,
-      norm_album: pair.norm_album,
-      discogs_release_id: releaseId,
-      match_confidence: typeof artwork.confidence === 'number' ? artwork.confidence : null,
-    };
-  }
-  return {
+  const nullVerdict = (trustRejected?: true): ResolutionVerdict => ({
     norm_artist: pair.norm_artist,
     norm_album: pair.norm_album,
     discogs_release_id: null,
     match_confidence: null,
+    ...(trustRejected ? { trustRejected } : {}),
+  });
+
+  if (!lookup) return nullVerdict();
+  const artwork = lookup.results?.[0]?.artwork;
+  const releaseId = artwork?.release_id ?? 0;
+  if (!artwork || releaseId <= 0) return nullVerdict();
+
+  if (!isTrustedLmlAlbumMatch(lookup)) return nullVerdict(true);
+
+  return {
+    norm_artist: pair.norm_artist,
+    norm_album: pair.norm_album,
+    discogs_release_id: releaseId,
+    match_confidence: typeof artwork.confidence === 'number' ? artwork.confidence : null,
   };
 };
 
@@ -431,6 +473,13 @@ export interface BatchResult {
    * input-order contract; we skip the write rather than UPSERT the wrong pair.
    * Regression-pin mirroring `album-level-backfill`'s BS#1088 defense. */
   unexpected_index: number;
+  /** BS#1518: count of `match`-status results whose candidate release id was
+   * rejected by `isTrustedLmlAlbumMatch` (non-`direct` search_type) and so
+   * collapsed to a no-match write instead of persisting a wrong-album id.
+   * Distinct from `no_match` (LML found no candidate at all) — mirrors the
+   * `trust_rejected` counter shape `jobs/rotation-release-id-backfill`
+   * (BS#1519) added for the same gate. */
+  trust_rejected: number;
 }
 
 /** Run one batch end-to-end: bulk call → UPSERT verdicts. Per-item LML errors
@@ -451,11 +500,19 @@ export const runBatch = async (
     log('info', 'batch_dry_run', `dry-run: would call bulkLookup with ${items.length} items`, {
       items: items.length,
     });
-    return { batchSize: items.length, match: 0, no_match: 0, error: 0, upserts: 0, unexpected_index: 0 };
+    return {
+      batchSize: items.length,
+      match: 0,
+      no_match: 0,
+      error: 0,
+      upserts: 0,
+      unexpected_index: 0,
+      trust_rejected: 0,
+    };
   }
 
   if (items.length === 0) {
-    return { batchSize: 0, match: 0, no_match: 0, error: 0, upserts: 0, unexpected_index: 0 };
+    return { batchSize: 0, match: 0, no_match: 0, error: 0, upserts: 0, unexpected_index: 0, trust_rejected: 0 };
   }
 
   const timeoutMs = computeBulkTimeoutMs(items.length);
@@ -474,13 +531,22 @@ export const runBatch = async (
       error_message: errorMessage,
     });
     captureError(err, 'lml_batch_failed', extra);
-    return { batchSize: items.length, match: 0, no_match: 0, error: items.length, upserts: 0, unexpected_index: 0 };
+    return {
+      batchSize: items.length,
+      match: 0,
+      no_match: 0,
+      error: items.length,
+      upserts: 0,
+      unexpected_index: 0,
+      trust_rejected: 0,
+    };
   }
 
   let match = 0;
   let no_match = 0;
   let error = 0;
   let unexpected_index = 0;
+  let trust_rejected = 0;
   let firstMismatchIndex: number | null = null;
   let firstMismatchGot: number | null = null;
   const upsertPromises: Array<Promise<void>> = [];
@@ -505,6 +571,10 @@ export const runBatch = async (
       // A 'match' status with a streaming-only sentinel (release_id == 0)
       // still lands a no-match verdict (release id null) — recorded so the TTL
       // arms, since LML did respond.
+      // BS#1518: a 'match' status whose candidate failed the trust gate ALSO
+      // lands a no-match verdict (verdictFromLookup already collapsed it) —
+      // count it separately so trust rejections are visible in run totals.
+      if (verdict.trustRejected) trust_rejected += 1;
       upsertPromises.push(upsertVerdict(verdict));
     } else if (result.status === 'no_match') {
       no_match += 1;
@@ -548,7 +618,7 @@ export const runBatch = async (
     });
   }
 
-  return { batchSize: items.length, match, no_match, error, upserts, unexpected_index };
+  return { batchSize: items.length, match, no_match, error, upserts, unexpected_index, trust_rejected };
 };
 
 // -- Top-level orchestration -------------------------------------------------
@@ -573,6 +643,9 @@ export interface ResolveSummary {
   error: number;
   upserts: number;
   unexpected_index: number;
+  /** BS#1518: total `trust_rejected` verdicts across all batches this run —
+   * see `BatchResult.trust_rejected`. */
+  trust_rejected: number;
   stopReason: StopReason;
 }
 
@@ -667,6 +740,7 @@ const stopByReachedAtStartupSummary = (): ResolveSummary => ({
   error: 0,
   upserts: 0,
   unexpected_index: 0,
+  trust_rejected: 0,
   stopReason: 'stop_by_reached',
 });
 
@@ -742,6 +816,7 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
       error: 0,
       upserts: 0,
       unexpected_index: 0,
+      trust_rejected: 0,
       stopReason: 'backlog_drained',
     };
   }
@@ -754,6 +829,7 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
   let totalError = 0;
   let totalUpserts = 0;
   let totalUnexpectedIndex = 0;
+  let totalTrustRejected = 0;
   let batchesRun = 0;
   let stopReason: StopReason = 'backlog_drained';
 
@@ -801,6 +877,7 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
     totalError += result.error;
     totalUpserts += result.upserts;
     totalUnexpectedIndex += result.unexpected_index;
+    totalTrustRejected += result.trust_rejected;
 
     log('info', 'batch_done', `batch ${i + 1}/${batches.length} done`, {
       batch_index: i + 1,
@@ -811,6 +888,7 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
       lml_error: result.error,
       upserts: result.upserts,
       unexpected_index: result.unexpected_index,
+      trust_rejected: result.trust_rejected,
       wall_clock_ms: wallClockMs,
     });
 
@@ -837,17 +915,375 @@ export const runResolve = async (options: ResolveOptions): Promise<ResolveSummar
     error: totalError,
     upserts: totalUpserts,
     unexpected_index: totalUnexpectedIndex,
+    trust_rejected: totalTrustRejected,
     stopReason,
   };
+};
+
+// -- Existing-row re-verdict sweep (BS#1518 `--reverify-existing`) ----------
+//
+// The gate above only affects FRESH resolutions. Rows the pre-gate code
+// already resolved via a non-direct match are never re-attempted under the
+// normal no-match TTL retry policy (`loadSkipKeys` skips any row with a
+// non-null `discogs_release_id` unconditionally — see its WHERE clause). This
+// one-shot mode re-checks those existing rows through the SAME gated
+// `verdictFromLookup` path and nulls the ones that no longer pass.
+//
+// `flowsheet_freetext_resolution` stores only the NORMALIZED key, not the raw
+// (artist, album) text LML's matcher needs (see `buildBulkItems`'s doc
+// comment) — resolution rows are keyed on `(norm_artist, norm_album)` alone.
+// So the sweep re-derives a representative raw pair per key the same way the
+// normal run does: `enumerateFreetextPairs` (no play floor — a previously-
+// resolved pair may have since dropped under any floor but should still be
+// reverified) + `normalizePairs`, then intersects with the resolved-row set.
+// A resolved row whose key isn't found in that intersection (its flowsheet
+// rows got linked, deleted, or otherwise vanished since resolution) is left
+// untouched — there is nothing to re-verify it against, so this sweep makes
+// no claim about it either way.
+//
+// Dry-run is the default (mirrors `flowsheet-linked-reenrichment` /
+// `streaming-url-remediation`): every LML lookup still happens (read-only)
+// and every row that WOULD be nulled is logged, but no UPDATE runs unless
+// `--execute` is also passed. Nulling is row-by-row, guarded on the release
+// id read at candidate-selection time — a concurrent write (the normal cron
+// re-resolving the same pair) can't be silently clobbered; the guard tripping
+// is counted as `raced`, not `nulled`.
+
+export const REVERIFY_FLAG = '--reverify-existing';
+export const EXECUTE_FLAG = '--execute';
+
+/** COUNT of rows this sweep considers "previously resolved by this job" —
+ * the SELECT-count-first the data-safety convention asks for, logged before
+ * any LML call or write. */
+export const countReverifyCandidates = async (): Promise<number> => {
+  const rows = (await db.execute(sql`
+    SELECT count(*)::int AS count
+    FROM "wxyc_schema"."flowsheet_freetext_resolution"
+    WHERE "discogs_release_id" IS NOT NULL
+      AND "match_source" = ${MATCH_SOURCE}
+  `)) as unknown as Array<{ count: number | string }>;
+  return Number(rows?.[0]?.count ?? 0);
+};
+
+export interface ReverifyCandidateRow {
+  norm_artist: string;
+  norm_album: string;
+  discogs_release_id: number;
+}
+
+/** Load every candidate row (same WHERE as `countReverifyCandidates`), keyed
+ * by `pairKey` for the intersection against the current enumerate pass. */
+export const loadReverifyCandidates = async (): Promise<Map<string, ReverifyCandidateRow>> => {
+  const rows = (await db.execute(sql`
+    SELECT "norm_artist", "norm_album", "discogs_release_id"
+    FROM "wxyc_schema"."flowsheet_freetext_resolution"
+    WHERE "discogs_release_id" IS NOT NULL
+      AND "match_source" = ${MATCH_SOURCE}
+  `)) as unknown as Array<{ norm_artist: string; norm_album: string; discogs_release_id: number }>;
+  const out = new Map<string, ReverifyCandidateRow>();
+  for (const r of rows) {
+    const row: ReverifyCandidateRow = {
+      norm_artist: String(r.norm_artist),
+      norm_album: String(r.norm_album),
+      discogs_release_id: Number(r.discogs_release_id),
+    };
+    out.set(pairKey(row.norm_artist, row.norm_album), row);
+  }
+  return out;
+};
+
+/** Pure candidate predicate: keep only the normalized pairs whose key is an
+ * existing resolved row. Exported separately from `runReverify` so it's
+ * trivially unit-testable without any DB or LML mocking. */
+export const selectReverifyTargets = (
+  normalized: NormalizedPair[],
+  candidates: Map<string, ReverifyCandidateRow>
+): NormalizedPair[] => normalized.filter((p) => candidates.has(pairKey(p.norm_artist, p.norm_album)));
+
+export interface ReverifyTarget extends NormalizedPair {
+  discogs_release_id: number;
+}
+
+/** Row-by-row NULL of a single trust-rejected reverify candidate. Guarded on
+ * `previousReleaseId` (the value read at candidate-selection time) so a
+ * concurrent write — most likely the normal cron re-resolving the SAME pair
+ * afresh between this sweep's SELECT and its UPDATE — can't be silently
+ * clobbered; 0 rows updated means the guard tripped (`written: false`).
+ *
+ * `discogs_master_id` is nulled alongside `discogs_release_id`: a master id
+ * derived from a since-rejected release id is equally polluted. `resolved_at`
+ * is nulled too, preserving `upsertVerdict`'s documented invariant that the
+ * column means "when a release was last attached" — it would otherwise carry
+ * a stale non-null timestamp on a row whose release id is now null.
+ * `attempt_at` and `match_source` are left untouched; this write only undoes
+ * the specific columns BS#1518 identified as polluted. */
+export const nullTrustRejectedRow = async (
+  normArtist: string,
+  normAlbum: string,
+  previousReleaseId: number
+): Promise<{ written: boolean }> => {
+  const rows = (await db.execute(sql`
+    UPDATE "wxyc_schema"."flowsheet_freetext_resolution"
+    SET "discogs_release_id" = NULL,
+        "discogs_master_id" = NULL,
+        "resolved_at" = NULL
+    WHERE "norm_artist" = ${normArtist}
+      AND "norm_album" = ${normAlbum}
+      AND "discogs_release_id" = ${previousReleaseId}
+    RETURNING "norm_artist"
+  `)) as unknown as Array<{ norm_artist: string }>;
+  return { written: rows.length > 0 };
+};
+
+export interface ReverifyBatchResult {
+  batchSize: number;
+  /** Rows nulled (`--execute`) or that WOULD be nulled (dry-run). */
+  nulled: number;
+  /** Rows whose fresh verdict still trusts the existing release id (or is a
+   * genuine no-match this time) — left untouched either way. */
+  unchanged: number;
+  /** `nullTrustRejectedRow`'s guard tripped: something else wrote this row
+   * between candidate-selection and the UPDATE. Only possible with `--execute`. */
+  raced: number;
+  error: number;
+  unexpected_index: number;
+}
+
+/** Run one reverify chunk: bulk call → re-verdict each target through the
+ * SAME `verdictFromLookup` gate → null the trust-rejected ones (or just log
+ * the plan, in dry-run). Mirrors `runBatch`'s per-item isolation: an HTTP
+ * throw counts the whole chunk as `error`; a per-item LML error is isolated. */
+export const runReverifyBatch = async (
+  targets: ReverifyTarget[],
+  options: { budgetMs: number; execute: boolean }
+): Promise<ReverifyBatchResult> => {
+  const items = buildBulkItems(targets);
+  const empty: ReverifyBatchResult = {
+    batchSize: items.length,
+    nulled: 0,
+    unchanged: 0,
+    raced: 0,
+    error: 0,
+    unexpected_index: 0,
+  };
+  if (items.length === 0) return empty;
+
+  const timeoutMs = computeBulkTimeoutMs(items.length);
+  let response: BulkLookupResponse;
+  try {
+    response = await bulkLookupMetadata(items, {
+      budgetMs: options.budgetMs,
+      timeoutMs,
+      caller: JOB_NAME,
+    });
+  } catch (err) {
+    const errorMessage = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    log('warn', 'reverify_batch_failed', 'bulkLookupMetadata threw during reverify; batch counted as error', {
+      size: items.length,
+      error_message: errorMessage,
+    });
+    captureError(err, 'reverify_batch_failed', { size: items.length });
+    return { ...empty, error: items.length };
+  }
+
+  let nulled = 0;
+  let unchanged = 0;
+  let raced = 0;
+  let error = 0;
+  let unexpected_index = 0;
+
+  for (let i = 0; i < targets.length; i++) {
+    const result = response.results[i];
+    if (!result || result.index !== i) {
+      unexpected_index += 1;
+      log('warn', 'reverify_unexpected_result_index', `LML result.index mismatch at position ${i}; skipping`, {
+        expected_index: i,
+        got_index: result?.index ?? null,
+      });
+      continue;
+    }
+    if (result.status !== 'match' && result.status !== 'no_match') {
+      // status === 'error' (or a skip/shed shape): transient — leave the row
+      // untouched, it's still a candidate on the next manual reverify run.
+      error += 1;
+      continue;
+    }
+
+    const target = targets[i];
+    const verdict = verdictFromLookup(target, result.lookup);
+    if (!verdict.trustRejected) {
+      // Still a trusted direct match (possibly a different release id — this
+      // sweep never REPLACES an id, only nulls a rejected one) or a genuine
+      // no-match this time. Either way, leave the persisted row as-is.
+      unchanged += 1;
+      continue;
+    }
+
+    if (!options.execute) {
+      log(
+        'info',
+        'reverify_dry_run_would_null',
+        `(dry-run) would null ${target.norm_artist} - ${target.norm_album} (was release_id=${target.discogs_release_id})`,
+        {
+          norm_artist: target.norm_artist,
+          norm_album: target.norm_album,
+          previous_release_id: target.discogs_release_id,
+        }
+      );
+      nulled += 1;
+      continue;
+    }
+
+    const { written } = await nullTrustRejectedRow(target.norm_artist, target.norm_album, target.discogs_release_id);
+    if (written) {
+      nulled += 1;
+    } else {
+      raced += 1;
+    }
+  }
+
+  return { batchSize: items.length, nulled, unchanged, raced, error, unexpected_index };
+};
+
+export interface ReverifyOptions {
+  batchSize: number;
+  ratePerMin: number;
+  budgetMs: number;
+  readTimeoutMs: number;
+  liveActivityLookbackSeconds: number;
+  liveActivityPauseMs: number;
+  execute: boolean;
+}
+
+export const resolveReverifyOptions = (
+  env: NodeJS.ProcessEnv = process.env,
+  args: string[] = process.argv
+): ReverifyOptions => {
+  const ctx = { context: `${JOB_NAME}-reverify` };
+  return {
+    batchSize: requirePositiveInt(env[BULK_BATCH_SIZE_ENV], BULK_BATCH_SIZE_ENV, BULK_BATCH_SIZE_DEFAULT, ctx),
+    ratePerMin: requirePositiveInt(env[BULK_RATE_PER_MIN_ENV], BULK_RATE_PER_MIN_ENV, BULK_RATE_PER_MIN_DEFAULT, ctx),
+    budgetMs: requirePositiveInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT, ctx),
+    readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT, ctx),
+    liveActivityLookbackSeconds: requireNonNegativeInt(
+      env[LIVE_ACTIVITY_LOOKBACK_ENV],
+      LIVE_ACTIVITY_LOOKBACK_ENV,
+      LIVE_ACTIVITY_LOOKBACK_DEFAULT,
+      ctx
+    ),
+    liveActivityPauseMs: LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+    execute: args.includes(EXECUTE_FLAG),
+  };
+};
+
+export interface ReverifySummary {
+  candidateCount: number;
+  /** Candidates whose normalized key was found in the current enumerate pass
+   * (so a fresh LML lookup was possible). */
+  matched: number;
+  /** Candidates NOT found — left untouched, no claim made either way. */
+  unmatched: number;
+  batches: number;
+  nulled: number;
+  unchanged: number;
+  raced: number;
+  error: number;
+  unexpected_index: number;
+  execute: boolean;
+}
+
+export const runReverify = async (options: ReverifyOptions): Promise<ReverifySummary> => {
+  log('info', 'reverify_started', `${JOB_NAME} ${REVERIFY_FLAG} starting`, { execute: options.execute });
+
+  const candidateCount = await countReverifyCandidates();
+  log('info', 'reverify_candidates', `${candidateCount} existing resolved rows eligible for re-verdict`, {
+    candidate_count: candidateCount,
+  });
+
+  const summary: ReverifySummary = {
+    candidateCount,
+    matched: 0,
+    unmatched: 0,
+    batches: 0,
+    nulled: 0,
+    unchanged: 0,
+    raced: 0,
+    error: 0,
+    unexpected_index: 0,
+    execute: options.execute,
+  };
+
+  if (candidateCount === 0) return summary;
+
+  const candidates = await loadReverifyCandidates();
+  // No play floor (0): a previously-resolved pair should be reverified even
+  // if its play count has since dropped below the normal run's floor.
+  const raw = await enumerateFreetextPairs(options.readTimeoutMs, 0);
+  const normalized = normalizePairs(raw);
+  const targetPairs = selectReverifyTargets(normalized, candidates);
+  const targets: ReverifyTarget[] = targetPairs.map((p) => ({
+    ...p,
+    discogs_release_id: candidates.get(pairKey(p.norm_artist, p.norm_album))!.discogs_release_id,
+  }));
+
+  summary.matched = targets.length;
+  summary.unmatched = candidateCount - targets.length;
+  log(
+    'info',
+    'reverify_enumerated',
+    `${targets.length}/${candidateCount} existing resolved rows located in current unlinked flowsheet data ` +
+      `(${summary.unmatched} skipped — no current raw text found, left untouched)`,
+    { matched: summary.matched, unmatched: summary.unmatched, candidate_count: candidateCount }
+  );
+
+  const batches = chunk(targets, options.batchSize);
+  summary.batches = batches.length;
+  const interBatchSleepMs = Math.max(0, Math.floor(60_000 / options.ratePerMin));
+
+  for (let i = 0; i < batches.length; i += 1) {
+    await awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs);
+
+    const t0 = Date.now();
+    const result = await runReverifyBatch(batches[i], { budgetMs: options.budgetMs, execute: options.execute });
+    summary.nulled += result.nulled;
+    summary.unchanged += result.unchanged;
+    summary.raced += result.raced;
+    summary.error += result.error;
+    summary.unexpected_index += result.unexpected_index;
+
+    log('info', 'reverify_batch_done', `reverify batch ${i + 1}/${batches.length} done`, {
+      batch_index: i + 1,
+      batches: batches.length,
+      scanned: result.batchSize,
+      nulled: result.nulled,
+      unchanged: result.unchanged,
+      raced: result.raced,
+      error: result.error,
+      unexpected_index: result.unexpected_index,
+      wall_clock_ms: Date.now() - t0,
+    });
+
+    if (i < batches.length - 1 && interBatchSleepMs > 0) {
+      await sleep(interBatchSleepMs);
+    }
+  }
+
+  return summary;
 };
 
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
 
   try {
-    const options = resolveOptions();
-    const summary = await runResolve(options);
-    log('info', 'finished', `${JOB_NAME} done`, { ...summary });
+    if (process.argv.includes(REVERIFY_FLAG)) {
+      const options = resolveReverifyOptions();
+      const summary = await runReverify(options);
+      log('info', 'finished', `${JOB_NAME} ${REVERIFY_FLAG} done`, { mode: 'reverify', ...summary });
+    } else {
+      const options = resolveOptions();
+      const summary = await runResolve(options);
+      log('info', 'finished', `${JOB_NAME} done`, { mode: 'resolve', ...summary });
+    }
   } catch (err) {
     captureError(err, 'main');
     log('error', 'failed', `${JOB_NAME} failed: ${err instanceof Error ? err.message : String(err)}`, {

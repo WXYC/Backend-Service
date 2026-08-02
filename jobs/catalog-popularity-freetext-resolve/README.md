@@ -14,12 +14,39 @@ Free text keeps growing: every show adds more unlinked plays. The cron drains th
 3. Load the skip set: pairs already resolved (release id present, permanent) or no-match inside the TTL window. `attempt_at IS NULL` rows (never-tried + transient-failed) are always eligible.
 4. Call LML `POST /api/v1/lookup/bulk` with batches of `FREETEXT_RESOLVE_BULK_BATCH_SIZE` items (default 5), including `song` on each item ONLY when the representative track is non-empty (a track-less pair sends artist+album exactly as before). The per-batch fetch timeout scales with batch size (`batchSize × 5 s + 5 s` slack), same derivation as `album-level-backfill`.
 5. UPSERT each verdict into `flowsheet_freetext_resolution` keyed on the composite PK `(norm_artist, norm_album)`:
-   - **match** with `release_id > 0` → `discogs_release_id` set, `match_confidence` set, `resolved_at = now()`.
-   - **no_match** (or the BS#1185 `release_id == 0` streaming-only sentinel) → `discogs_release_id = NULL`, `resolved_at = NULL`. Still UPSERTed (a responded outcome) so `attempt_at` is stamped and the TTL retry window arms.
+   - **match** with `release_id > 0` AND a trusted `search_type` (BS#1518, see below) → `discogs_release_id` set, `match_confidence` set, `resolved_at = now()`.
+   - **no_match** (or the BS#1185 `release_id == 0` streaming-only sentinel, or a **match** whose `search_type` failed the BS#1518 trust gate) → `discogs_release_id = NULL`, `resolved_at = NULL`. Still UPSERTed (a responded outcome) so `attempt_at` is stamped and the TTL retry window arms.
    - **error** (per-item LML exception) or an HTTP-level throw → NOT written, so the pair stays `attempt_at IS NULL` and retries on the next sweep.
 6. Before each batch: check the BS#1814 absolute stop-by deadline (below) and, if not yet reached, the cooperative pause (`awaitQuietWindow`) yields to live DJ activity. Both checks are re-applied around the pause, so a DJ active exactly at the stop hour still exits at the stop hour rather than spinning.
 
 `discogs_master_id` stays NULL: Track 1's release leg is independent of LML Track 0 (which surfaces `master_id` in the lookup result). The UPSERT omits `discogs_master_id` from both the INSERT and the UPDATE `set` clause, so a later Track-0-aware run PRESERVES any master id it wrote — never clobbers it back to NULL.
+
+## Trust gate (BS#1518)
+
+`verdictFromLookup` only persists a candidate `release_id` when LML's `search_type` is `direct` (`isTrustedLmlAlbumMatch`, `@wxyc/lml-client` — the same predicate `jobs/rotation-release-id-backfill` gates on, BS#1516/BS#1519). A non-`direct` candidate (`fallback`, `alternative`, `compilation`, `song_as_artist`, or an absent `search_type` — fail-closed) is an artist-fallback answer: `results[0]` can name a **different album by the same artist** (the Yenbett→Tzenni recurrence, BS#1515). It collapses to the same null verdict a genuine no-match uses — `discogs_release_id` stays NULL, `attempt_at` is stamped so it sits behind the normal no-match TTL — and a `trust_rejected` counter in the run summary (distinct from `no_match` and `match`) surfaces how often the gate fires.
+
+This is **gate-not-provenance**: no schema change, no `match_search_type` column. The BS#1356 decision memo §6 covers why (the only live reader of this table, `apps/backend/services/album-popularity-refresh.service.ts`, applies no confidence floor to `discogs_release_id`/`discogs_master_id`, so an ungated wrong-album id would flow straight into popularity attribution with no downstream filter to catch it).
+
+### Existing-row re-verdict sweep (`--reverify-existing`)
+
+The gate above only affects fresh resolutions going forward. Rows this job resolved via a non-direct match **before** the gate landed are permanent under the normal retry policy (`loadSkipKeys` skips any row with a non-null `discogs_release_id` unconditionally, gate or no gate) — they will never self-heal. `--reverify-existing` is a one-shot mode on this same job that re-checks them:
+
+1. `SELECT count(*)` scoped to `discogs_release_id IS NOT NULL AND match_source = 'lml_bulk_lookup'` — logged before anything else runs (data-safety: verify scope before writing).
+2. Load those candidate rows (only the normalized `(norm_artist, norm_album)` key + the release id is stored — there's no raw text column on this table).
+3. Re-derive a representative RAW `(artist, album)` pair per key the same way the normal run does (`enumerateFreetextPairs` with no play floor + `normalizePairs`) and intersect with the candidate set. A candidate whose key isn't found (its flowsheet rows got linked, deleted, or otherwise vanished) is left untouched — there's nothing to re-verify it against.
+4. Re-resolve each matched candidate through the bulk endpoint and the SAME `verdictFromLookup` gate. A fresh verdict that's still `trustRejected` gets its `discogs_release_id` AND `discogs_master_id` NULLed (a master id derived from a since-rejected release id is equally polluted) plus `resolved_at` NULLed (preserves the "resolved_at means a release is attached" invariant), row-by-row, guarded on the release id read in step 2 so a concurrent write (the normal cron re-resolving the same pair) can't be silently clobbered — the guard tripping counts as `raced`, not `nulled`. A row that's still trusted (even with a different release id) or a genuine no-match this time is left untouched; this sweep only ever NULLs, never replaces.
+
+Dry-run by default — every LML lookup still happens (read-only) and every row that WOULD be nulled is logged, but no UPDATE runs. Pass `--execute` to write:
+
+```bash
+# Dry-run first — logs candidate count + every row that WOULD be nulled, writes nothing.
+docker run --rm --env-file .env <image> --reverify-existing
+
+# Execute for real.
+docker run --rm --env-file .env <image> --reverify-existing --execute
+```
+
+This is a **post-merge ops step**, run manually once after the gate deploys — not part of the recurring cron's normal schedule.
 
 ## Retry policy
 
@@ -129,6 +156,7 @@ After the re-arm, the next scheduled run (or a manual catch-up per "Run procedur
 
 ## Related
 
+- [BS#1518](https://github.com/WXYC/Backend-Service/issues/1518) — the trust gate + `--reverify-existing` sweep (this README's "Trust gate" section above); [BS#1356](https://github.com/WXYC/Backend-Service/issues/1356) decision memo §6 is the spec. [BS#1516](https://github.com/WXYC/Backend-Service/issues/1516) / [BS#1519](https://github.com/WXYC/Backend-Service/pull/1519) is the sibling gate on `jobs/rotation-release-id-backfill` this mirrors (same predicate, same `trust_rejected` counter shape).
 - [BS#1822](https://github.com/WXYC/Backend-Service/issues/1822) — the play-count floor + play-descending drain (this README's "How it works" step 1 sub-bullet and "Play-floor + play-descending drain" section above), mirroring BS#1591's `flowsheet-metadata-backfill` fix so the job stops burning LML budget on the uncacheable single-play long tail.
 - [BS#1814](https://github.com/WXYC/Backend-Service/issues/1814) — the absolute stop-by wall-clock bound + strengthened cooperative pause (this README's "Window bound" and "Strengthened cooperative pause" sections above), fixing the overnight-window overrun that starved LML into a congestion collapse on 2026-07-25.
 - [BS#1767](https://github.com/WXYC/Backend-Service/issues/1767) — carries a representative track title into the bulk lookup (this README's "Post-deploy re-drain" section); +16pts / ~3.7x match-rate lift, 0 regressions in the A/B probe.
