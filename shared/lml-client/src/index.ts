@@ -130,19 +130,23 @@ export class LmlAuthError extends LmlClientError {
 /**
  * Minimum key length before `lmlApiKeyFingerprint` will render a
  * first-4/last-4 fingerprint. Below this, first-4 + last-4 would overlap or
- * cover most of the secret, so the fingerprint would leak more of the key
- * than it's meant to.
+ * cover the whole secret, so the fingerprint would leak more of the key than
+ * it's meant to. At exactly 8 the two 4-char slices are edge-to-edge and
+ * expose every character (`abcd...efgh` for `abcdefgh`), so 9 is the smallest
+ * length that keeps at least one character hidden.
  */
-const MIN_FINGERPRINTABLE_KEY_LENGTH = 8;
+const MIN_FINGERPRINTABLE_KEY_LENGTH = 9;
 
 /**
  * First/last 4 characters of the configured `LML_API_KEY`, joined by an
  * ellipsis (e.g. `sk_l...7890`) — never the full key. BS#1094 acceptance:
  * "Sentry breadcrumb on auth-class failures includes the bearer fingerprint
  * ... so post-incident triage knows whether it's a rotation issue or a
- * different auth path." Lives here (not in a job's own logger) because this
- * module is the sole reader of `LML_API_KEY` (see the chokepoint comment in
- * `lmlFetch` below).
+ * different auth path." Lives here — the same module that attaches the bearer
+ * in `lmlFetch` — so the fingerprint is derived at the point of use and every
+ * caller shares one rendering. (Other jobs read `LML_API_KEY` directly for
+ * their own LML fetches; this is not the sole reader, just the canonical
+ * fingerprint helper.)
  *
  * Returns `undefined` when the key is unset, or shorter than
  * `MIN_FINGERPRINTABLE_KEY_LENGTH` — a short key's first-4/last-4 would
@@ -669,6 +673,17 @@ async function lmlFetch(path: string, init?: RequestInit, timeoutMs?: number): P
       // BS#1094 Layer 3: classify 401/403 distinctly from every other
       // status. Everything else keeps the pre-existing mapping (5xx -> 502,
       // other 4xx verbatim).
+      //
+      // Both 401 and 403 are auth-fatal here, and deliberately so: LML's
+      // `core/auth.py` returns 401 only when the Authorization header is
+      // *missing* (dropped bearer), and 403 when the header is present but the
+      // bearer is *wrong* — a rotated or revoked key (`reason=invalid_token_value`)
+      // or a malformed scheme. A rotated bearer, the primary scenario this
+      // layer exists to catch, is therefore a 403, not a 401; narrowing to
+      // 401-only would blind the classifier to it. LML checks the shared bearer
+      // once per request with no per-resource authorization, so an LML auth
+      // 4xx is global (every row fails identically), never query-dependent —
+      // there is no single "head row" that a spurious per-query 403 could wedge.
       if (response.status === 401 || response.status === 403) {
         throw new LmlAuthError(`LML responded with ${response.status}: ${response.statusText}`, response.status);
       }

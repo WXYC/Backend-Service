@@ -1524,6 +1524,48 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
     expect(result.totals.enriched_no_match_raced).toBe(1);
     expect(result.totals.lml_error).toBe(0);
   });
+
+  it('rethrows an LmlAuthError out of the batch loop instead of continuing the drain (BS#1094 Layer 3)', async () => {
+    // The load-bearing propagation claim, verified end-to-end rather than by
+    // inspection: a two-row work-list where the FIRST lookup throws
+    // LmlAuthError (a rotated bearer -> LML 403). processRow rethrows, and
+    // because runBackfill awaits it (orchestrate.ts:1193) with no surrounding
+    // try/catch, the throw must escape the inner for-loop AND the outer
+    // while-loop, rejecting runBackfill entirely. job.ts's top-level catch
+    // (job.ts:78-81) turns that rejection into process.exitCode = 1, so a
+    // rotation fails the cron run instead of stalling forever. A future per-row
+    // try/catch that swallowed the throw would restore the infinite loop this
+    // layer exists to prevent — and would flip this test red.
+    const buildWorkList = injectWorkList([
+      [30, 12],
+      [10, 5],
+    ]);
+    (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(30), rowFor(10)]);
+
+    const authLookup = jest
+      .fn<LookupFn>()
+      .mockRejectedValue(new LmlAuthError('LML responded with 403: Forbidden', 403));
+    const enrichSpy = jest.fn<EnrichFn>().mockResolvedValue('enriched_match');
+
+    await expect(
+      runBackfill({
+        lookup: authLookup,
+        enrich: enrichSpy,
+        batchSize: 2,
+        throttleMs: 0,
+        liveActivityLookbackSeconds: 0,
+        playFloor: 5,
+        floorRecencyDays: 7,
+        buildWorkList,
+      })
+    ).rejects.toThrow(LmlAuthError);
+
+    // Aborted at the very first row: row 2 (id=10) never reached lookup and no
+    // enrichment ran — the drain stopped rather than advancing or looping.
+    expect(authLookup).toHaveBeenCalledTimes(1);
+    expect(authLookup.mock.calls[0]?.[0]).toBe('artist-30');
+    expect(enrichSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
