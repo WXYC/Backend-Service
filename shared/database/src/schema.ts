@@ -59,6 +59,8 @@ export const user = pgTable(
     djName: varchar('dj_name', { length: 255 }),
     appSkin: varchar('app_skin', { length: 255 }).notNull().default('modern-light'),
     isAnonymous: boolean('is_anonymous').notNull().default(false),
+    // Single source of truth for onboarding completeness — never re-derive from profile
+    // fields (real_name/dj_name) in a backfill or elsewhere; see docs/authentication.md (BS#1451).
     hasCompletedOnboarding: boolean('has_completed_onboarding').notNull().default(false),
     // Cross-cutting capabilities independent of role hierarchy (e.g., 'editor', 'webmaster')
     capabilities: text('capabilities').array().notNull().default([]),
