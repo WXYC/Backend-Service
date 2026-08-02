@@ -130,6 +130,23 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
   },
 }));
 
+// BS#1228: streaming-check partial-error telemetry (PostHog capture + Sentry
+// span projection). Mirrors the `getPostHogClient` mock shape in
+// tests/unit/middleware/legacy/mirror.posthog.test.ts and the
+// `Sentry.getActiveSpan()?.setAttributes(...)` span mock shape in
+// tests/unit/services/library-search.cascade-span.test.ts.
+const mockPostHogCapture = jest.fn();
+const mockGetPostHogClient = jest.fn(() => ({ capture: mockPostHogCapture }));
+jest.mock('../../../apps/backend/utils/posthog', () => ({
+  getPostHogClient: mockGetPostHogClient,
+}));
+
+type SpanLike = { setAttributes: jest.Mock };
+const mockSpan: SpanLike = { setAttributes: jest.fn() };
+jest.mock('@sentry/node', () => ({
+  getActiveSpan: () => mockSpan,
+}));
+
 import {
   markMissing,
   markFound,
@@ -550,6 +567,113 @@ describe('library.controller', () => {
           undefined,
           expect.objectContaining({ caller: 'library-add-album', discogsUnavailable: true })
         );
+      });
+    });
+
+    // BS#1228 (LML#376 follow-up): `errored_sources` is thrown on the floor
+    // today — capture it to PostHog + a Sentry span attribute so a future
+    // retry-policy decision can be made from real production patterns.
+    describe('streaming-check partial-error telemetry (BS#1228)', () => {
+      const req = () =>
+        ({
+          body: {
+            album_title: 'DOGA',
+            artist_id: 42,
+            artist_name: 'Juana Molina',
+            label: 'Sonamos',
+            genre_id: 11,
+            format_id: 1,
+          },
+        }) as unknown as Request;
+
+      beforeEach(() => {
+        mockGetArtistNameById.mockResolvedValue('Juana Molina');
+        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 501, ...album }));
+        // Some cases below exercise a non-null on_streaming verdict, which
+        // re-persists via updateOnStreaming and reassigns `inserted_album` in
+        // the controller — give it a resolved value so that reassignment
+        // doesn't collapse to undefined (this mock has no default elsewhere).
+        mockUpdateOnStreaming.mockResolvedValue({ id: 501 });
+        mockIsLmlConfigured.mockReturnValue(true);
+        mockLookupMetadata.mockResolvedValue({ results: [], search_type: 'none' });
+        mockMapLookupToCanonicalEntity.mockReturnValue(null);
+      });
+
+      it('emits a streaming_check_partial_error PostHog event when LML reports errored_sources', async () => {
+        mockCheckStreamingAvailability.mockResolvedValue({
+          on_streaming: null,
+          errored_sources: ['spotify', 'apple_music'],
+        });
+
+        const res = mockResponse();
+        await addAlbum(req(), res, next);
+
+        expect(mockPostHogCapture).toHaveBeenCalledTimes(1);
+        expect(mockPostHogCapture).toHaveBeenCalledWith({
+          distinctId: '501',
+          event: 'streaming_check_partial_error',
+          properties: {
+            album_id: 501,
+            artist: 'Juana Molina',
+            title: 'DOGA',
+            on_streaming_verdict: null,
+            errored_sources: ['spotify', 'apple_music'],
+          },
+        });
+      });
+
+      it('projects streaming_check.errored_sources and streaming_check.on_streaming onto the active Sentry span', async () => {
+        mockCheckStreamingAvailability.mockResolvedValue({
+          on_streaming: false,
+          errored_sources: ['bandcamp'],
+        });
+
+        const res = mockResponse();
+        await addAlbum(req(), res, next);
+
+        expect(mockSpan.setAttributes).toHaveBeenCalledWith({
+          'streaming_check.errored_sources': ['bandcamp'],
+          'streaming_check.on_streaming': false,
+        });
+      });
+
+      it('does not emit telemetry when errored_sources is an empty array', async () => {
+        mockCheckStreamingAvailability.mockResolvedValue({ on_streaming: true, errored_sources: [] });
+
+        const res = mockResponse();
+        await addAlbum(req(), res, next);
+
+        expect(mockPostHogCapture).not.toHaveBeenCalled();
+        expect(mockSpan.setAttributes).not.toHaveBeenCalled();
+      });
+
+      it('does not emit telemetry when errored_sources is absent (pre-1.8.0 shape / defensive optional chaining)', async () => {
+        mockCheckStreamingAvailability.mockResolvedValue({ on_streaming: true });
+
+        const res = mockResponse();
+        await addAlbum(req(), res, next);
+
+        expect(mockPostHogCapture).not.toHaveBeenCalled();
+        expect(mockSpan.setAttributes).not.toHaveBeenCalled();
+      });
+
+      it('swallows a PostHog capture failure and degrades to console.warn instead of bubbling up', async () => {
+        mockCheckStreamingAvailability.mockResolvedValue({
+          on_streaming: null,
+          errored_sources: ['spotify'],
+        });
+        mockPostHogCapture.mockImplementationOnce(() => {
+          throw new Error('posthog unreachable');
+        });
+        const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        const res = mockResponse();
+        await addAlbum(req(), res, next);
+
+        expect(res.status).toHaveBeenCalledWith(201);
+        expect(consoleWarnSpy).toHaveBeenCalledWith('Failed to emit streaming-check telemetry:', 'posthog unreachable');
+
+        consoleWarnSpy.mockRestore();
       });
     });
   });
