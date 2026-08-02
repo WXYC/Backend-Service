@@ -99,6 +99,10 @@ export interface IFSEntry extends Omit<
 
 const MAX_ITEMS = 200;
 const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
+// flowsheet.id is a Postgres int4 column; a value outside this range parses
+// fine as a JS integer (passing Number.isInteger) but blows up downstream as
+// an unhandled "value out of range for type integer" Postgres error (BS#1800).
+const INT4_MAX = 2147483647;
 
 /**
  * Project a page of flowsheet entries to their V2 wire shape, tolerating — but
@@ -167,6 +171,15 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     }
     if (!Number.isInteger(endId)) {
       throw new WxycError('end_id must be a valid integer', 400);
+    }
+    // BS#1800: a value that parses as a valid JS integer can still exceed the
+    // flowsheet.id int4 column's range (e.g. start_id=2200000000), which
+    // Number.isInteger alone doesn't catch. Reject before it reaches Postgres.
+    if (startId < 0 || startId > INT4_MAX) {
+      throw new WxycError('start_id must be within the valid integer range', 400);
+    }
+    if (endId < 0 || endId > INT4_MAX) {
+      throw new WxycError('end_id must be within the valid integer range', 400);
     }
     // end_id < start_id would compute a negative-length range; reject rather
     // than silently returning an empty/inverted result from getEntriesByRange.

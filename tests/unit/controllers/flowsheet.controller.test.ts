@@ -330,6 +330,86 @@ describe('flowsheet.controller', () => {
       });
     });
 
+    // BS#1800 (follow-up to BS#1110 / PR #1788): start_id/end_id values that
+    // parse as valid JS integers but exceed the flowsheet.id int4 column's
+    // range used to sail past the Number.isInteger guard and reach Postgres,
+    // which raised "value out of range for type integer" as an unhandled 500.
+    // These must 400 with a message naming the bad parameter, same as the
+    // NaN case above.
+    describe('range mode int4-bounds validation (BS#1800)', () => {
+      it('rejects a start_id above INT4_MAX with 400 naming start_id', async () => {
+        const req = createMockReq({ start_id: '2200000000', end_id: '2200000100' });
+        const res = createMockRes();
+
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toThrow(
+          'start_id must be within the valid integer range'
+        );
+        expect(mockGetEntriesByRange).not.toHaveBeenCalled();
+      });
+
+      it('rejects an end_id above INT4_MAX with 400 naming end_id', async () => {
+        const req = createMockReq({ start_id: '100', end_id: '2200000100' });
+        const res = createMockRes();
+
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toThrow(
+          'end_id must be within the valid integer range'
+        );
+        expect(mockGetEntriesByRange).not.toHaveBeenCalled();
+      });
+
+      it('rejects a negative start_id with 400', async () => {
+        const req = createMockReq({ start_id: '-1', end_id: '105' });
+        const res = createMockRes();
+
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toThrow(
+          'start_id must be within the valid integer range'
+        );
+        expect(mockGetEntriesByRange).not.toHaveBeenCalled();
+      });
+
+      it('rejects a negative end_id with 400', async () => {
+        const req = createMockReq({ start_id: '100', end_id: '-5' });
+        const res = createMockRes();
+
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toThrow(
+          'end_id must be within the valid integer range'
+        );
+        expect(mockGetEntriesByRange).not.toHaveBeenCalled();
+      });
+
+      it('rejects with a WxycError (400) rather than throwing an unhandled error', async () => {
+        const req = createMockReq({ start_id: '2200000000', end_id: '2200000100' });
+        const res = createMockRes();
+
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+        expect(mockGetEntriesByRange).not.toHaveBeenCalled();
+      });
+
+      it('still accepts a normal in-range request (no regression)', async () => {
+        mockGetEntriesByRange.mockResolvedValue([createMockEntry(100)]);
+
+        const req = createMockReq({ start_id: '100', end_id: '105' });
+        const res = createMockRes();
+
+        await getEntries(req as Request, res as Response, mockNext);
+
+        expect(mockGetEntriesByRange).toHaveBeenCalledWith(100, 105);
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('accepts start_id/end_id exactly at INT4_MAX and 0 boundaries', async () => {
+        mockGetEntriesByRange.mockResolvedValue([createMockEntry(0)]);
+
+        const req = createMockReq({ start_id: '0', end_id: '5' });
+        const res = createMockRes();
+
+        await getEntries(req as Request, res as Response, mockNext);
+
+        expect(mockGetEntriesByRange).toHaveBeenCalledWith(0, 5);
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+    });
+
     it('calculates offset from page and limit', async () => {
       mockGetEntriesByPage.mockResolvedValue([]);
       mockGetEntryCount.mockResolvedValue(100);
