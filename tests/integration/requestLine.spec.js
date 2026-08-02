@@ -271,15 +271,18 @@ describe('Request Line Endpoint', () => {
   });
 
   describe('User Banning', () => {
-    // Skip these tests unless TEST_ADMIN_BAN is explicitly enabled.
-    // getAdminToken() (tests/utils/anonymous_auth.js) signs in as the
-    // dedicated test_station_manager fixture account, so no separate
-    // credential configuration is required.
-    const enableAdminTests = process.env.TEST_ADMIN_BAN === 'true';
-    const describeOrSkip = enableAdminTests ? describe : describe.skip;
-
-    describeOrSkip('with admin credentials', () => {
-      it('should return 403 when user is banned', async () => {
+    describe('with admin credentials', () => {
+      // Permanently skipped (independent of TEST_ADMIN_BAN — see BS#1941):
+      // this route is gated by requirePermissions({}), whose AUTH_BYPASS
+      // branch (the regime CI's Integration-Tests job runs under) never
+      // checks payload.banned the way the production JWT-verify branch
+      // does, and the bearer token getTestToken() supplies here is a raw
+      // session token (not a decodable JWT) in the first place — so the
+      // ban can never be observed to 403 through this route as currently
+      // written. The sibling admin-ban test in check-request-ban.spec.js
+      // (POST /auth/check-request-ban, which queries auth_user.banned
+      // directly) is unaffected and is enabled via TEST_ADMIN_BAN.
+      it.skip('should return 403 when user is banned', async () => {
         // Get a new anonymous user
         const { token, userId } = await getTestToken();
 
