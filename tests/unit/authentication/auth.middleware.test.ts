@@ -115,6 +115,100 @@ describe('requirePermissions middleware', () => {
       expect(next).toHaveBeenCalled();
       expect(req.auth?.id).toBe(userId);
     });
+
+    // BS#1941: the bypass branch skips JWKS signature verification but must
+    // still honor a decodable JWT's `banned` claim exactly like the
+    // production JWT-verify branch does (see the "token validation" ->
+    // banned coverage below is production-only today; this pins the bypass
+    // side). Before this fix, a banned user's JWT sailed straight through to
+    // next() under AUTH_BYPASS (the regime CI's Integration-Tests job runs
+    // under).
+    describe('banned claim', () => {
+      it('should return 403 with the same shape as the production branch when the JWT-shaped bypass token has banned: true', async () => {
+        mockedDecodeJwt.mockReturnValue({
+          sub: 'banned-user-id',
+          email: 'banned@wxyc.org',
+          banned: true,
+          banReason: 'spamming slurs',
+        });
+        const { req, res, next } = createMocks('Bearer some.jwt.token');
+        const middleware = requirePermissions({ bin: ['read'] });
+
+        await middleware(req, res, next);
+
+        expect(next).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(403);
+        expect(res.json).toHaveBeenCalledWith({
+          message: 'Access denied',
+          reason: 'spamming slurs',
+        });
+      });
+
+      it('should fall back to "Account suspended" when banned: true but banReason is absent', async () => {
+        mockedDecodeJwt.mockReturnValue({
+          sub: 'banned-user-id',
+          email: 'banned@wxyc.org',
+          banned: true,
+        });
+        const { req, res, next } = createMocks('Bearer some.jwt.token');
+        const middleware = requirePermissions({ bin: ['read'] });
+
+        await middleware(req, res, next);
+
+        expect(next).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(403);
+        expect(res.json).toHaveBeenCalledWith({
+          message: 'Access denied',
+          reason: 'Account suspended',
+        });
+      });
+
+      it('should call next() when the JWT-shaped bypass token has banned: false', async () => {
+        mockedDecodeJwt.mockReturnValue({
+          sub: 'clean-user-id',
+          email: 'clean@wxyc.org',
+          banned: false,
+        });
+        const { req, res, next } = createMocks('Bearer some.jwt.token');
+        const middleware = requirePermissions({ bin: ['read'] });
+
+        await middleware(req, res, next);
+
+        expect(next).toHaveBeenCalled();
+        expect(res.status).not.toHaveBeenCalled();
+        expect(req.auth?.id).toBe('clean-user-id');
+      });
+
+      it('should call next() when the JWT-shaped bypass token has no banned claim at all', async () => {
+        mockedDecodeJwt.mockReturnValue({
+          sub: 'clean-user-id',
+          email: 'clean@wxyc.org',
+        });
+        const { req, res, next } = createMocks('Bearer some.jwt.token');
+        const middleware = requirePermissions({ bin: ['read'] });
+
+        await middleware(req, res, next);
+
+        expect(next).toHaveBeenCalled();
+        expect(res.status).not.toHaveBeenCalled();
+        expect(req.auth?.id).toBe('clean-user-id');
+      });
+
+      it('should still fall back to the raw token as user ID when the token is not a decodable JWT (banned check never runs)', async () => {
+        mockedDecodeJwt.mockImplementation(() => {
+          throw new Error('Invalid token');
+        });
+        const userId = 'raw-session-token';
+        const { req, res, next } = createMocks(`Bearer ${userId}`);
+        const middleware = requirePermissions({ bin: ['read'] });
+
+        await middleware(req, res, next);
+
+        expect(next).toHaveBeenCalled();
+        expect(res.status).not.toHaveBeenCalled();
+        expect(req.auth?.id).toBe(userId);
+      });
+    });
   });
 
   describe('token validation', () => {

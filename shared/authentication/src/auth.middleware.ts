@@ -120,6 +120,22 @@ export function requirePermissions(required: RequiredPermissions) {
           // now refuses the implicit spread; the cast makes the existing
           // intent explicit without changing runtime behavior.
           req.auth = { ...payload, id: userId } as WXYCAuthJwtPayload;
+
+          // Check if user is banned (BS#1941): this branch skips JWKS
+          // signature verification but a JWT-shaped bypass token still
+          // carries the same `banned`/`banReason` claims better-auth's JWT
+          // plugin spreads onto the payload the production branch verifies
+          // below (~line 184). Without this check, AUTH_BYPASS mode (the
+          // regime CI's Integration-Tests job runs under) let a banned
+          // user's decodable JWT sail straight through to `next()`. Mirrors
+          // the production branch's status code and error shape exactly so
+          // bypass and prod never diverge on ban enforcement.
+          if (req.auth.banned) {
+            return res.status(403).json({
+              message: 'Access denied',
+              reason: req.auth.banReason || 'Account suspended',
+            });
+          }
         }
       } catch {
         req.auth = { id: token } as WXYCAuthJwtPayload;

@@ -1,6 +1,9 @@
 require('dotenv').config({ path: '../../.env' });
+const postgres = require('postgres');
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
-const { signInAnonymous, banUser, unbanUser, getAdminToken } = require('../utils/anonymous_auth');
+const { signInAnonymous, unbanUser, BETTER_AUTH_URL } = require('../utils/anonymous_auth');
+
+const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
 // Helper to get a new anonymous auth token
 const getTestToken = async () => {
@@ -272,17 +275,51 @@ describe('Request Line Endpoint', () => {
 
   describe('User Banning', () => {
     describe('with admin credentials', () => {
-      // Permanently skipped (independent of TEST_ADMIN_BAN — see BS#1941):
-      // this route is gated by requirePermissions({}), whose AUTH_BYPASS
-      // branch (the regime CI's Integration-Tests job runs under) never
-      // checks payload.banned the way the production JWT-verify branch
-      // does, and the bearer token getTestToken() supplies here is a raw
-      // session token (not a decodable JWT) in the first place — so the
-      // ban can never be observed to 403 through this route as currently
-      // written. The sibling admin-ban test in check-request-ban.spec.js
-      // (POST /auth/check-request-ban, which queries auth_user.banned
-      // directly) is unaffected and is enabled via TEST_ADMIN_BAN.
-      it.skip('should return 403 when user is banned', async () => {
+      // Gated the same way as check-request-ban.spec.js's admin-ban case
+      // (BS#133 / BS#1941): cleanup below still needs the test_station_manager
+      // admin fixture account via unbanUser(), so this test stays opt-in
+      // rather than running by default in local dev.
+      const enableAdminBan = process.env.TEST_ADMIN_BAN === 'true';
+      const itIfAdminBan = enableAdminBan ? it : it.skip;
+
+      // Flips auth_user.banned directly via SQL instead of better-auth's
+      // /admin/ban-user endpoint (BS#1941). banUser() unconditionally calls
+      // internalAdapter.deleteUserSessions(), which would kill the very
+      // session this test needs alive to mint a JWT *after* the ban below —
+      // the whole point of the fix is that AUTH_BYPASS only trusts the
+      // `banned` claim baked into a JWT at mint time, so the JWT has to be
+      // minted post-ban. Direct SQL is the existing project convention for
+      // setup that would otherwise trip an HTTP side effect —
+      // check-request-ban.spec.js's banned_fingerprints INSERT does the same
+      // for its fingerprint case. Cleanup below still goes through the real
+      // unbanUser() HTTP flow (no session side effect there), so this test
+      // still needs the admin credentials TEST_ADMIN_BAN gates.
+      async function banUserDirectly(sql, userId, reason) {
+        await sql.unsafe(`UPDATE ${SCHEMA}.auth_user SET banned = true, ban_reason = $1 WHERE id = $2`, [
+          reason,
+          userId,
+        ]);
+      }
+
+      // Exchanges a still-valid session token for a JWT via better-auth's
+      // /token endpoint (the jwt() plugin) — mirrors
+      // check-request-ban.spec.js's getAnonymousJwt(). Test-scoped: every
+      // other test in this file keeps using getTestToken()'s raw session
+      // token, which AUTH_BYPASS's catch-all also accepts but which
+      // decodeJwt cannot parse into a `banned` claim (see BS#1941).
+      async function mintJwt(sessionToken) {
+        const jwtRes = await fetch(`${BETTER_AUTH_URL}/token`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${sessionToken}` },
+        });
+        if (!jwtRes.ok) {
+          throw new Error(`Failed to fetch JWT: ${jwtRes.status} ${await jwtRes.text()}`);
+        }
+        const { token } = await jwtRes.json();
+        return token;
+      }
+
+      itIfAdminBan('should return 403 when user is banned', async () => {
         // Get a new anonymous user
         const { token, userId } = await getTestToken();
 
@@ -293,18 +330,37 @@ describe('Request Line Endpoint', () => {
           .send({ message: 'Test before ban' });
         expect(beforeBanResponse.status).toBe(200);
 
-        // Ban the user
-        await banUser(userId, 'Test ban');
+        const sql = postgres({
+          host: process.env.DB_HOST || 'localhost',
+          port: parseInt(process.env.DB_PORT || process.env.CI_DB_PORT || '5433', 10),
+          database: process.env.DB_NAME || 'wxyc_db',
+          user: process.env.DB_USERNAME || 'test-user',
+          password: process.env.DB_PASSWORD || 'test-pw',
+          onnotice: () => {},
+          max: 1,
+        });
 
-        // Request should now return 403
-        const afterBanResponse = await request
-          .post('/request')
-          .set('Authorization', `Bearer ${token}`)
-          .send({ message: 'Test after ban' });
-        expect(afterBanResponse.status).toBe(403);
+        try {
+          // Ban the user (direct SQL — see banUserDirectly above for why)
+          await banUserDirectly(sql, userId, 'Test ban');
 
-        // Clean up: unban the user
-        await unbanUser(userId);
+          // Mint a fresh JWT *after* the ban so its `banned` claim reflects
+          // the current DB state — better-auth's cookieCache is off, so
+          // /token always round-trips through the database (auth.definition.ts).
+          const bannedJwt = await mintJwt(token);
+
+          // Request should now return 403
+          const afterBanResponse = await request
+            .post('/request')
+            .set('Authorization', `Bearer ${bannedJwt}`)
+            .send({ message: 'Test after ban' });
+          expect(afterBanResponse.status).toBe(403);
+        } finally {
+          // Clean up: unban the user (real admin HTTP flow) and close the
+          // direct SQL client.
+          await unbanUser(userId);
+          await sql.end();
+        }
       });
     });
   });
