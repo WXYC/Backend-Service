@@ -47,7 +47,7 @@
 import { and, eq, isNotNull, or, sql } from 'drizzle-orm';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
 
-import { resolveComposer, STREAMING_REASK_ATTEMPT_CAP, type EnrichRow } from './enrich.js';
+import { isBandcampReaskEnabled, resolveComposer, STREAMING_REASK_ATTEMPT_CAP, type EnrichRow } from './enrich.js';
 
 /**
  * True when the album already has a persisted, load-bearing Discogs match in
@@ -69,12 +69,22 @@ export async function hasLoadBearingAlbumMetadata(albumId: number): Promise<bool
   // row, silently breaking the base BS#1747 skip for every plain
   // load-bearing row. COALESCE pins the "nothing to re-ask" default to an
   // explicit false before negating.
+  // Bandcamp re-ask de-freeze (ENRICHMENT_BANDCAMP_REASK): kept in lockstep
+  // with the positive form in `streaming-reask.ts#findUnresolvedStreamingCandidates`
+  // — see that function for the full rationale. A load-bearing row whose
+  // Bandcamp is a NULL-status search-fallback (the legacy frozen shape) is NOT
+  // "done": this negative gate returns false for it so a subsequent PLAY
+  // re-asks LML (the sweep covers albums that aren't played again). Gated, so
+  // flag-off is a byte-for-byte no-op.
+  const bandcampFrozenReask = isBandcampReaskEnabled()
+    ? sql` OR (${album_metadata.bandcamp_status} IS NULL AND ${album_metadata.bandcamp_url} LIKE ${'%bandcamp.com/search%'})`
+    : sql``;
   const needsStreamingReask = sql<boolean>`COALESCE(
     ${album_metadata.streaming_reask_attempts} < ${STREAMING_REASK_ATTEMPT_CAP}
     AND (
       ${album_metadata.spotify_status} = 'unresolved'
       OR ${album_metadata.apple_music_status} = 'unresolved'
-      OR ${album_metadata.bandcamp_status} = 'unresolved'
+      OR ${album_metadata.bandcamp_status} = 'unresolved'${bandcampFrozenReask}
     ),
     false
   )`;

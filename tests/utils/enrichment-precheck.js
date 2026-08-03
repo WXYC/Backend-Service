@@ -46,6 +46,15 @@ const STREAMING_REASK_ATTEMPT_CAP = 3;
  *   LML (self-heal path).
  */
 async function hasLoadBearingMetadata(sql, albumId) {
+  // Bandcamp re-ask de-freeze (ENRICHMENT_BANDCAMP_REASK) mirror: when the
+  // gate is on, a load-bearing row whose Bandcamp is a NULL-status
+  // `bandcamp.com/search` fallback (the legacy frozen shape) is re-ask
+  // eligible too. Read at call time so a test can toggle the env var per
+  // case; empty fragment (flag off) is a byte-for-byte no-op.
+  const bandcampFrozenReask =
+    process.env.ENRICHMENT_BANDCAMP_REASK === 'true'
+      ? sql`OR (bandcamp_status IS NULL AND bandcamp_url LIKE ${'%bandcamp.com/search%'})`
+      : sql``;
   const rows = await sql`
     SELECT 1
       FROM ${sql(SCHEMA)}.album_metadata
@@ -65,6 +74,7 @@ async function hasLoadBearingMetadata(sql, albumId) {
            spotify_status = 'unresolved'
            OR apple_music_status = 'unresolved'
            OR bandcamp_status = 'unresolved'
+           ${bandcampFrozenReask}
          ),
          false
        )

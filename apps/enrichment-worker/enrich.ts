@@ -105,6 +105,30 @@ export { buildStreamingFieldConflictSet };
  */
 export const STREAMING_REASK_ATTEMPT_CAP = 3;
 
+/**
+ * Feature gate for the Bandcamp re-ask de-freeze (iOS Bandcamp
+ * search-fallback program). Default OFF, so merging this change is a no-op
+ * against the live worker: nothing in the write path or the sweep/precheck
+ * predicates changes until an operator sets `ENRICHMENT_BANDCAMP_REASK=true`.
+ *
+ * The gate exists for the cross-repo interlock, NOT because the behavior is
+ * risky in isolation: the LML-side workstreams are what teach LML to resolve
+ * a direct Bandcamp URL (and to return an explicit `streaming_status.bandcamp
+ * = 'unresolved'` on a cold miss). Flipping this on before LML can actually
+ * resolve Bandcamp would burn all three `streaming_reask_attempts` against an
+ * LML that still has no answer, wasting the bound. Flip it on once the LML
+ * side is live so a re-ask can actually produce a direct URL.
+ *
+ * Read at call time (not module load) so tests — and a live operator
+ * toggling the Railway variable + restarting the worker — see the current
+ * value. Strict `=== 'true'`: any other value (including `'1'`/`'yes'`) is
+ * off, matching the repo's other boolean env reads (the `DRY_RUN` flag in
+ * the rotation-artist-backfill job).
+ */
+export function isBandcampReaskEnabled(): boolean {
+  return process.env.ENRICHMENT_BANDCAMP_REASK === 'true';
+}
+
 /** One persisted streaming-service field's state: its resolution verdict (if any) and its url (if verified). */
 export interface StreamingFieldState {
   status: StreamingResolutionStatus | null;
@@ -207,7 +231,24 @@ export async function upsertMatchedAlbumMetadata(
     artwork.streaming_status?.apple_music,
     artwork.apple_music_url
   );
-  const bandcampIncomingStatus = inferIncomingStreamingStatus(artwork.streaming_status?.bandcamp, artwork.bandcamp_url);
+  // Bandcamp re-ask de-freeze (ENRICHMENT_BANDCAMP_REASK): when a matched
+  // album comes back with NO Bandcamp verdict at all (no direct url, no
+  // explicit `streaming_status.bandcamp`), the pre-existing behavior persists
+  // `bandcamp_status = NULL` — indistinguishable from "never consulted", so
+  // `precheck.ts` / the BS#1915 sweep never re-ask it and the row freezes on
+  // its `bandcamp.com/search?q=` fallback forever (the Bandcamp analog of the
+  // BS#1747 permanent-null freeze). Coerce that `undefined` to `'unresolved'`
+  // (retryable) so the status-driven sweep picks it back up and a later
+  // LML-resolved direct URL supersedes the fallback. The URL itself is left
+  // to the existing search-fallback logic below (display fallback preserved);
+  // only the STATUS becomes "retryable, not verified". Bandcamp-ONLY on
+  // purpose: an explicit LML verdict ('verified'/'absent') is untouched (it's
+  // returned non-undefined and wins here), and Apple/Spotify inference is
+  // deliberately not coerced — Apple Music's NULL is load-bearing "no
+  // verified iTunes match" (BS#1192) and must never become a re-ask magnet.
+  const bandcampInferred = inferIncomingStreamingStatus(artwork.streaming_status?.bandcamp, artwork.bandcamp_url);
+  const bandcampIncomingStatus =
+    isBandcampReaskEnabled() && bandcampInferred === undefined ? 'unresolved' : bandcampInferred;
   const spotifyIncomingUrl = artwork.spotify_url ?? null;
   const appleMusicIncomingUrl = artwork.apple_music_url ?? null;
   const bandcampIncomingUrl = artwork.bandcamp_url ?? null;
