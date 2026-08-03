@@ -126,3 +126,30 @@ library_route.post(
   requirePermissions({ catalog: ['write'] }),
   libraryController.manualDiscogsRecheck
 );
+
+// Compilation-track (CTA) write path — BS#1964 / Phase 3.5 `/wxycdb` cutover
+// (contract: wxyc-shared api.yaml v1.28.0, WXYC/wxyc-shared#291). Makes V/A
+// per-track artists writable so compilation track search survives the
+// tubafrenzy turndown. `{id}` is the serial `library.id` (like the sibling
+// `/:id` PATCH/missing/found routes). GET list is `catalog:read` (any DJ);
+// the additive POST and the Discogs-suggestions read are `catalog:write` (the
+// MD/SM librarian bar, matching addAlbum/updateAlbum). The two-segment
+// suggestions GET is registered before the one-segment list GET so it can't be
+// shadowed.
+library_route.get(
+  '/:id/compilation-tracks/discogs-suggestions',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.getCompilationTrackDiscogsSuggestions
+);
+
+library_route.get(
+  '/:id/compilation-tracks',
+  requirePermissions({ catalog: ['read'] }),
+  libraryController.getCompilationTracks
+);
+
+library_route.post(
+  '/:id/compilation-tracks',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.writeCompilationTracks
+);

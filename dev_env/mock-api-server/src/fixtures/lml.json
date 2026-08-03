@@ -112,6 +112,27 @@
     }
   },
   "releases": {
+    "5559001": {
+      "release_id": 5559001,
+      "title": "Freeform Frequencies Vol. 3",
+      "artist": "Various",
+      "year": 1998,
+      "label": "Duophonic Super 45s",
+      "artist_id": null,
+      "genres": ["Electronic"],
+      "styles": ["Compilation", "Leftfield"],
+      "tracklist": [
+        { "position": "1", "title": "La Paradoja", "duration": "3:40", "artists": ["Juana Molina"] },
+        { "position": "2", "title": "Back, Baby", "duration": "4:10", "artists": ["Jessica Pratt"] },
+        { "position": "3", "title": "Call Your Name", "duration": "5:02", "artists": ["Chuquimamani-Condori", "DJ E"] },
+        { "position": "4", "title": "Untitled Interlude", "duration": "1:12", "artists": [] }
+      ],
+      "artwork_url": "https://img.discogs.com/va-freeform-frequencies-vol3.jpg",
+      "release_url": "https://www.discogs.com/release/5559001",
+      "cached": false,
+      "artists": [{ "artist_id": null, "name": "Various", "join": "", "role": null }],
+      "released": "1998-06-01"
+    },
     "4080": {
       "release_id": 4080,
       "title": "Confield",
