@@ -1609,3 +1609,87 @@ describe('V1 API - entry_type field', () => {
     expect(getRes.body.entries[0].entry_type).toBeDefined();
   });
 });
+
+/*
+ * BS#1962: discogsUnavailable / discogsUnavailableNote on the single-row
+ * mutation echo (POST /flowsheet) — parity with the paginated read path's
+ * transformToV2 (#1908). Seeds a dedicated library row (reusing artist_id 1 /
+ * genre_id 11 / format_id 1's existing genre_artist_crossreference so
+ * getAlbumFromDB's inner joins resolve) rather than mutating the widely-shared
+ * seed album_id 1, to avoid any cross-test interference.
+ */
+describe('discogsUnavailable on the flowsheet mutation echo (BS#1962)', () => {
+  let sql;
+  let flaggedAlbumId;
+
+  beforeAll(async () => {
+    sql = makeSql();
+    const rows = await sql`
+      INSERT INTO ${sql(SCHEMA)}.library
+        (artist_id, genre_id, format_id, album_title, code_number, discogs_unavailable, discogs_unavailable_note)
+      VALUES
+        (1, 11, 1, 'BS1962 Test Embargoed Pressing', 9001, true, 'Embargoed promo pressing')
+      RETURNING id
+    `;
+    flaggedAlbumId = rows[0].id;
+  });
+
+  afterAll(async () => {
+    if (flaggedAlbumId) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ${flaggedAlbumId}`;
+    }
+    if (sql) await sql.end({ timeout: 5 });
+  });
+
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+  });
+
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('flagged library-linked track: echo carries discogsUnavailable: true + the note', async () => {
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: flaggedAlbumId,
+        track_title: 'Test Track',
+      })
+      .expect(201);
+
+    expect(res.body.discogsUnavailable).toBe(true);
+    expect(res.body.discogsUnavailableNote).toBe('Embargoed promo pressing');
+  });
+
+  test('unlinked free-text track: echo omits discogsUnavailable / discogsUnavailableNote', async () => {
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        artist_name: 'Csillagrablók',
+        album_title: 'BS1962 Free-Text Album',
+        track_title: 'BS1962 Free-Text Track',
+        record_label: 'self-released',
+      })
+      .expect(201);
+
+    expect(res.body).not.toHaveProperty('discogsUnavailable');
+    expect(res.body).not.toHaveProperty('discogsUnavailableNote');
+  });
+
+  test('library-linked but unflagged track (seed album_id 1): echo carries discogsUnavailable: false (present)', async () => {
+    const res = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({
+        album_id: 1, // Built to Spill - Keep it Like a Secret (seeded, unflagged)
+        track_title: 'Carry the Zero',
+      })
+      .expect(201);
+
+    expect(res.body).toHaveProperty('discogsUnavailable', false);
+    expect(res.body).not.toHaveProperty('discogsUnavailableNote');
+  });
+});

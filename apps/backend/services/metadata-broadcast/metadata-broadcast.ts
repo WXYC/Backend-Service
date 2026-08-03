@@ -48,7 +48,8 @@ import type { CdcEvent } from '@wxyc/database';
 import { onCdcEvent } from '@wxyc/database';
 import type { LiveFsInsertEvent } from '@wxyc/shared/dtos';
 import { serverEventsMgr, Topics, FsEvents } from '../../utils/serverEvents.js';
-import { pickClientFacingColumns } from '../../utils/flowsheet-projection.js';
+import { pickClientFacingColumns, toDiscogsUnavailableWireFields } from '../../utils/flowsheet-projection.js';
+import { getCachedDiscogsUnavailableFlags, invalidateDiscogsUnavailableFlags } from './discogs-unavailable-cache.js';
 
 const TERMINAL_STATUSES = new Set(['enriched_match', 'enriched_no_match', 'failed_no_retry']);
 
@@ -141,11 +142,46 @@ export function filterMetadataInsert(event: CdcEvent): LiveFsInsertEvent['payloa
  * `apps/backend/services/cdc/dispatcher.ts`). The dispatcher runs whether
  * or not the websocket is configured (BS#1187), so this handler fires in
  * environments without `CDC_SECRET`.
+ *
+ * BS#1962: both handlers additionally enrich a library-linked payload with
+ * `discogsUnavailable` / `discogsUnavailableNote` before broadcasting, for
+ * parity with the paginated read path's `transformToV2` (#1908). The filters
+ * (`filterMetadataUpdate` / `filterMetadataInsert`) stay pure and synchronous
+ * — their "no DB" testability seam is load-bearing for the existing filter
+ * unit tests — so the enrichment lives here, gated behind a non-null
+ * `album_id`: a non-library row (`album_id === null`) takes the ORIGINAL
+ * fully-synchronous path unchanged (the `await` on an already-resolved
+ * value would still defer the broadcast to a later microtask and break the
+ * "broadcast fired synchronously" assertions those fixtures pin). Only a
+ * library-linked row pays the extra (cached, coalesced) read.
+ *
+ * The cache read is fire-and-forget from the CDC dispatcher's perspective:
+ * `startCdcDispatcher` invokes every registered callback synchronously and
+ * does not await them (`cdc-listener.ts`'s `cb(event)` inside a try that only
+ * catches *synchronous* throws), so the `void (async () => {...})()` IIFE
+ * below — whose own inner `try/catch` swallows every rejection — never
+ * leaves a dangling unhandled rejection for the dispatcher to see.
+ *
+ * Ordering: `getCachedDiscogsUnavailableFlags` coalesces concurrent lookups
+ * for the same `album_id` onto one in-flight promise (see
+ * `discogs-unavailable-cache.ts`). A same-row `insert` (cold, slow read)
+ * followed seconds later by its terminal `update` share that promise; both
+ * `await` the identical object, and promise continuations resolve FIFO by
+ * await-registration order, so `insert` still broadcasts before `update`.
+ * Only cross-album_id ordering (a cold read for album A racing a warm hit
+ * for album B) can reorder — benign, since SSE patches are per-`id` and
+ * convergent on both dj-site and iOS.
+ *
+ * A third handler invalidates the discogs-unavailable cache on every `library`
+ * UPDATE/DELETE. `library` is CDC-tracked (`cdc_library`, migration 0046), so a
+ * `discogs_unavailable` flip NOTIFYs every BS instance's LISTEN connection —
+ * driving invalidation from here (rather than the write path, which only runs
+ * on the one instance that served the PATCH) drops the flipped album from every
+ * instance's cache, so the fresh flag appears on the very next broadcast
+ * regardless of which instance serves it. See `discogs-unavailable-cache.ts`.
  */
 export function setupMetadataBroadcast(): void {
-  onCdcEvent((event) => {
-    const payload = filterMetadataUpdate(event);
-    if (!payload) return;
+  const broadcastUpdate = (payload: LiveFsUpdatePayload): void => {
     try {
       serverEventsMgr.broadcast(Topics.liveFs, {
         type: FsEvents.update,
@@ -162,16 +198,33 @@ export function setupMetadataBroadcast(): void {
         extra: { id: payload.id, metadata_status: payload.metadata_status },
       });
     }
+  };
+
+  onCdcEvent((event) => {
+    const payload = filterMetadataUpdate(event);
+    if (!payload) return;
+    const albumId = typeof payload.album_id === 'number' ? payload.album_id : null;
+    if (albumId === null) {
+      broadcastUpdate(payload);
+      return;
+    }
+    void (async () => {
+      try {
+        const flags = await getCachedDiscogsUnavailableFlags(albumId);
+        Object.assign(payload, toDiscogsUnavailableWireFields(flags));
+      } catch {
+        // Additive-failure (BS#1962): a DB blip on the enrichment read must
+        // never suppress the broadcast — omit the fields and send the
+        // pre-#1962 payload shape. Deliberately swallowed here (not
+        // rethrown) so it can never trip the broadcast-level Sentry capture
+        // in broadcastUpdate, which stays scoped to genuine broadcast
+        // failures.
+      }
+      broadcastUpdate(payload);
+    })();
   });
 
-  // BS#1888: broadcast `liveFs:insert` the instant a track row is created,
-  // before enrichment. A separate `onCdcEvent` registration (INSERT vs the
-  // update handler's UPDATE) so the two never double-emit for one row — a track
-  // fires `insert` on creation, then `update` when its metadata_status reaches a
-  // terminal state. Same per-process LISTEN + own-clients-only fan-out.
-  onCdcEvent((event) => {
-    const payload = filterMetadataInsert(event);
-    if (!payload) return;
+  const broadcastInsert = (payload: LiveFsInsertEvent['payload']): void => {
     try {
       serverEventsMgr.broadcast(Topics.liveFs, {
         type: FsEvents.insert,
@@ -183,5 +236,47 @@ export function setupMetadataBroadcast(): void {
         extra: { id: payload.id },
       });
     }
+  };
+
+  // BS#1888: broadcast `liveFs:insert` the instant a track row is created,
+  // before enrichment. A separate `onCdcEvent` registration (INSERT vs the
+  // update handler's UPDATE) so the two never double-emit for one row — a track
+  // fires `insert` on creation, then `update` when its metadata_status reaches a
+  // terminal state. Same per-process LISTEN + own-clients-only fan-out.
+  onCdcEvent((event) => {
+    const payload = filterMetadataInsert(event);
+    if (!payload) return;
+    const albumId = typeof payload.album_id === 'number' ? payload.album_id : null;
+    if (albumId === null) {
+      broadcastInsert(payload);
+      return;
+    }
+    void (async () => {
+      try {
+        const flags = await getCachedDiscogsUnavailableFlags(albumId);
+        Object.assign(payload, toDiscogsUnavailableWireFields(flags));
+      } catch {
+        // Additive-failure — see the update handler's comment above.
+      }
+      broadcastInsert(payload);
+    })();
+  });
+
+  // BS#1962: invalidate the discogs-unavailable cache off the same CDC stream.
+  // `library` is CDC-tracked (`cdc_library`, migration 0046), so a
+  // `discogs_unavailable` flip — an MD's PATCH /library/{id}, or the recheck
+  // cron — NOTIFYs every BS instance's LISTEN connection; dropping the cached
+  // flag on every instance here (not just the one that served the write) means
+  // the fresh flag rides the very next broadcast on whichever instance serves
+  // it. Purely synchronous — no broadcast, so no ordering interaction with the
+  // two enrich handlers above. Scoped to UPDATE/DELETE: a fresh INSERT gets a
+  // new serial id no flowsheet row can FK yet, so it can't already be cached.
+  onCdcEvent((event) => {
+    if (event.table !== 'library') return;
+    if (event.action !== 'UPDATE' && event.action !== 'DELETE') return;
+    if (!event.data) return;
+    const id = (event.data as Record<string, unknown>).id;
+    if (typeof id !== 'number') return;
+    invalidateDiscogsUnavailableFlags(id);
   });
 }

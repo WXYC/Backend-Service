@@ -904,6 +904,11 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
     throw new WxycError('Album not found', 404);
   }
 
+  // BS#1962: the SSE feeder's discogs-unavailable cache is invalidated off the
+  // `cdc_library` CDC stream (see `metadata-broadcast.ts`), not from here — this
+  // UPDATE's own NOTIFY drops the flipped album from every BS instance's cache,
+  // so no write-path poke is needed.
+
   if (identityChanged && isLmlConfigured()) {
     const canonicalArtistName =
       updates.artist_name ?? existing.artist_name ?? (await libraryService.getArtistNameById(existing.artist_id));

@@ -28,6 +28,18 @@ jest.mock('@wxyc/database', () => ({
   onCdcEvent: jest.fn(),
 }));
 
+// BS#1962: the SSE feeder's discogs-unavailable enrichment is a thin guard
+// around this cache module (LRU + in-flight coalescing tested on its own in
+// discogs-unavailable-cache.test.ts). Mocking it here isolates these tests to
+// the broadcast-handler plumbing: the album_id guard, the additive-failure
+// try/catch, and same-row insert/update ordering over a shared promise.
+const mockGetCachedDiscogsUnavailableFlags = jest.fn<() => Promise<unknown>>();
+const mockInvalidateDiscogsUnavailableFlags = jest.fn();
+jest.mock('../../../../../apps/backend/services/metadata-broadcast/discogs-unavailable-cache.js', () => ({
+  getCachedDiscogsUnavailableFlags: mockGetCachedDiscogsUnavailableFlags,
+  invalidateDiscogsUnavailableFlags: mockInvalidateDiscogsUnavailableFlags,
+}));
+
 import * as Sentry from '@sentry/node';
 import {
   filterMetadataUpdate,
@@ -36,6 +48,9 @@ import {
 } from '../../../../../apps/backend/services/metadata-broadcast/metadata-broadcast';
 import { onCdcEvent } from '@wxyc/database';
 import { serverEventsMgr } from '../../../../../apps/backend/utils/serverEvents.js';
+
+/** Flushes pending microtasks (the cache-await + Object.assign + broadcast chain). */
+const flushAsync = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 const flowsheetUpdate = (overrides: Partial<Record<string, unknown>> = {}): CdcEvent => ({
   table: 'flowsheet',
@@ -297,8 +312,9 @@ describe('setupMetadataBroadcast liveFs:insert registration (BS#1888)', () => {
 
     setupMetadataBroadcast();
 
-    // Two registrations: [0] = update (asserted above), [1] = insert.
-    expect((onCdcEvent as jest.Mock).mock.calls.length).toBe(2);
+    // Three registrations: [0] = update, [1] = insert, [2] = library-CDC cache
+    // invalidation (BS#1962). The insert handler stays at index [1].
+    expect((onCdcEvent as jest.Mock).mock.calls.length).toBe(3);
     const insertCb = (onCdcEvent as jest.Mock).mock.calls[1][0] as (event: CdcEvent) => void;
     insertCb(flowsheetInsert({ artist_name: 'Stereolab', album_title: 'Aluminum Tunes' }));
 
@@ -339,5 +355,201 @@ describe('setupMetadataBroadcast liveFs:insert registration (BS#1888)', () => {
       tags: expect.objectContaining({ module: 'metadata-broadcast' }),
       extra: expect.objectContaining({ id: 77 }),
     });
+  });
+});
+
+describe('setupMetadataBroadcast discogs-unavailable enrichment (BS#1962)', () => {
+  // AC #3 (non-library rows omit the field) is covered by every existing
+  // test above — none of their fixtures set album_id, so they stay on the
+  // fully-synchronous no-cache-call path unchanged. These tests cover the
+  // album_id-bearing branch: the guarded async enrich, additive-failure
+  // degrade, and same-row insert/update ordering over a shared (coalesced)
+  // promise.
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (serverEventsMgr.broadcast as jest.Mock).mockImplementation(() => undefined);
+  });
+
+  it('enriches an update broadcast for a flagged library-linked album (id + note)', async () => {
+    mockGetCachedDiscogsUnavailableFlags.mockResolvedValueOnce({
+      discogsUnavailable: true,
+      discogsUnavailableNote: 'Embargoed promo pressing',
+      lastDiscogsRecheckAt: null,
+    });
+
+    setupMetadataBroadcast();
+    const updateCb = (onCdcEvent as jest.Mock).mock.calls[0][0] as (event: CdcEvent) => void;
+    updateCb(flowsheetUpdate({ album_id: 501 }));
+
+    await flushAsync();
+
+    expect(mockGetCachedDiscogsUnavailableFlags).toHaveBeenCalledWith(501);
+    expect(serverEventsMgr.broadcast).toHaveBeenCalledTimes(1);
+    const [, frame] = (serverEventsMgr.broadcast as jest.Mock).mock.calls[0];
+    expect(frame.payload).toMatchObject({
+      id: 42,
+      discogsUnavailable: true,
+      discogsUnavailableNote: 'Embargoed promo pressing',
+    });
+  });
+
+  it('emits discogsUnavailable: false (present, not omitted) for a linked-unflagged album', async () => {
+    mockGetCachedDiscogsUnavailableFlags.mockResolvedValueOnce({
+      discogsUnavailable: false,
+      discogsUnavailableNote: null,
+      lastDiscogsRecheckAt: null,
+    });
+
+    setupMetadataBroadcast();
+    const updateCb = (onCdcEvent as jest.Mock).mock.calls[0][0] as (event: CdcEvent) => void;
+    updateCb(flowsheetUpdate({ album_id: 501 }));
+
+    await flushAsync();
+
+    const [, frame] = (serverEventsMgr.broadcast as jest.Mock).mock.calls[0];
+    expect(frame.payload).toHaveProperty('discogsUnavailable', false);
+    expect(frame.payload).not.toHaveProperty('discogsUnavailableNote');
+  });
+
+  it('a null album_id never calls the cache and stays on the synchronous path (AC #3)', () => {
+    setupMetadataBroadcast();
+    const updateCb = (onCdcEvent as jest.Mock).mock.calls[0][0] as (event: CdcEvent) => void;
+    updateCb(flowsheetUpdate()); // default fixture carries no album_id
+
+    // No await/flush at all: if this were routed onto the async enrich path,
+    // the broadcast would not yet have fired synchronously here.
+    expect(serverEventsMgr.broadcast).toHaveBeenCalledTimes(1);
+    expect(mockGetCachedDiscogsUnavailableFlags).not.toHaveBeenCalled();
+    const [, frame] = (serverEventsMgr.broadcast as jest.Mock).mock.calls[0];
+    expect(frame.payload).not.toHaveProperty('discogsUnavailable');
+    expect(frame.payload).not.toHaveProperty('discogsUnavailableNote');
+  });
+
+  it('a rejected cache lookup degrades to omitting the fields — broadcast still fires, no Sentry trip', async () => {
+    mockGetCachedDiscogsUnavailableFlags.mockRejectedValueOnce(new Error('db blip'));
+
+    setupMetadataBroadcast();
+    const updateCb = (onCdcEvent as jest.Mock).mock.calls[0][0] as (event: CdcEvent) => void;
+    updateCb(flowsheetUpdate({ album_id: 501 }));
+
+    await flushAsync();
+
+    expect(serverEventsMgr.broadcast).toHaveBeenCalledTimes(1);
+    const [, frame] = (serverEventsMgr.broadcast as jest.Mock).mock.calls[0];
+    expect(frame.payload).not.toHaveProperty('discogsUnavailable');
+    expect(frame.payload).not.toHaveProperty('discogsUnavailableNote');
+    // The additive-failure catch is INNER and swallowing — it must not trip
+    // the broadcast-level Sentry capture, which stays scoped to genuine
+    // serverEventsMgr.broadcast failures.
+    expect(Sentry.captureException).not.toHaveBeenCalled();
+  });
+
+  it('the same per-path Sentry extra shape (id + metadata_status) still fires on a broadcast failure with album_id present', async () => {
+    mockGetCachedDiscogsUnavailableFlags.mockResolvedValueOnce({
+      discogsUnavailable: true,
+      discogsUnavailableNote: null,
+      lastDiscogsRecheckAt: null,
+    });
+    (serverEventsMgr.broadcast as jest.Mock).mockImplementation(() => {
+      throw new Error('boom');
+    });
+
+    setupMetadataBroadcast();
+    const updateCb = (onCdcEvent as jest.Mock).mock.calls[0][0] as (event: CdcEvent) => void;
+    updateCb(flowsheetUpdate({ album_id: 501 }));
+
+    await flushAsync();
+
+    expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+    const [, context] = (Sentry.captureException as jest.Mock).mock.calls[0];
+    expect(context).toMatchObject({
+      tags: expect.objectContaining({ module: 'metadata-broadcast' }),
+      extra: expect.objectContaining({ id: 42, metadata_status: 'enriched_match' }),
+    });
+  });
+
+  it('insert then update for the same cold album_id broadcast in insert-before-update order (coalesced shared promise)', async () => {
+    // Every call to the (mocked) cache returns the SAME pending promise —
+    // the faithful stand-in for the real cache module's in-flight
+    // coalescing (both the insert and update handler await the identical
+    // promise). Both handlers register their `await` in call order, so
+    // resolving the shared promise resumes them FIFO: insert broadcasts
+    // before update.
+    let resolveShared!: (value: unknown) => void;
+    const sharedPromise = new Promise((resolve) => {
+      resolveShared = resolve;
+    });
+    mockGetCachedDiscogsUnavailableFlags.mockReturnValue(sharedPromise);
+
+    setupMetadataBroadcast();
+    const updateCb = (onCdcEvent as jest.Mock).mock.calls[0][0] as (event: CdcEvent) => void;
+    const insertCb = (onCdcEvent as jest.Mock).mock.calls[1][0] as (event: CdcEvent) => void;
+
+    insertCb(flowsheetInsert({ id: 501, album_id: 501 }));
+    updateCb(flowsheetUpdate({ id: 501, album_id: 501 }));
+
+    resolveShared({ discogsUnavailable: true, discogsUnavailableNote: null, lastDiscogsRecheckAt: null });
+    await flushAsync();
+
+    expect(serverEventsMgr.broadcast).toHaveBeenCalledTimes(2);
+    const [, firstFrame] = (serverEventsMgr.broadcast as jest.Mock).mock.calls[0];
+    const [, secondFrame] = (serverEventsMgr.broadcast as jest.Mock).mock.calls[1];
+    expect(firstFrame.type).toBe('insert');
+    expect(secondFrame.type).toBe('update');
+  });
+});
+
+describe('setupMetadataBroadcast library-CDC cache invalidation (BS#1962)', () => {
+  // The third onCdcEvent registration invalidates the discogs-unavailable cache
+  // off the same CDC stream, so a `library` flag flip is dropped from every BS
+  // instance's cache (not just the one that served the PATCH). Registered LAST,
+  // so `mock.calls[2]` is this handler and the update/insert indices above are
+  // unchanged.
+  const libraryCb = (): ((event: CdcEvent) => void) => {
+    setupMetadataBroadcast();
+    return (onCdcEvent as jest.Mock).mock.calls[2][0] as (event: CdcEvent) => void;
+  };
+
+  const libraryEvent = (overrides: Partial<CdcEvent> = {}): CdcEvent => ({
+    table: 'library',
+    schema: 'wxyc_schema',
+    action: 'UPDATE',
+    data: { id: 42, discogs_unavailable: true },
+    timestamp: 1779856000000,
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('invalidates the cache for the library row id on a library UPDATE', () => {
+    libraryCb()(libraryEvent({ action: 'UPDATE' }));
+    expect(mockInvalidateDiscogsUnavailableFlags).toHaveBeenCalledWith(42);
+    expect(mockInvalidateDiscogsUnavailableFlags).toHaveBeenCalledTimes(1);
+  });
+
+  it('invalidates the cache for the library row id on a library DELETE', () => {
+    libraryCb()(libraryEvent({ action: 'DELETE', data: { id: 7 } }));
+    expect(mockInvalidateDiscogsUnavailableFlags).toHaveBeenCalledWith(7);
+  });
+
+  it('does NOT invalidate on a library INSERT (a fresh serial id can not be cached yet)', () => {
+    libraryCb()(libraryEvent({ action: 'INSERT' }));
+    expect(mockInvalidateDiscogsUnavailableFlags).not.toHaveBeenCalled();
+  });
+
+  it('ignores non-library tables', () => {
+    libraryCb()(libraryEvent({ table: 'flowsheet' }));
+    expect(mockInvalidateDiscogsUnavailableFlags).not.toHaveBeenCalled();
+  });
+
+  it('skips an event whose data is missing or carries a non-numeric id', () => {
+    const cb = libraryCb();
+    cb(libraryEvent({ data: null }));
+    cb(libraryEvent({ data: { id: 'forty-two' } }));
+    cb(libraryEvent({ data: {} }));
+    expect(mockInvalidateDiscogsUnavailableFlags).not.toHaveBeenCalled();
   });
 });

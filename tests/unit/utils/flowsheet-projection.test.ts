@@ -1,9 +1,11 @@
 import {
   projectFlowsheetEntry,
   pickClientFacingColumns,
+  toDiscogsUnavailableWireFields,
   CLIENT_FACING_FLOWSHEET_COLUMNS,
 } from '../../../apps/backend/utils/flowsheet-projection';
 import { INTERNAL_FLOWSHEET_COLUMNS, makeFullFlowsheetRow } from '../../fixtures/flowsheet-row.fixture';
+import type { DiscogsUnavailableFlags } from '../../../apps/backend/services/library.service';
 
 /**
  * BS#1513. The mutation (`addEntry`/`deleteEntry`/`updateEntry`/`changeOrder`)
@@ -193,5 +195,64 @@ describe('pickClientFacingColumns (BS#1534)', () => {
       expect(picked).not.toHaveProperty('spotify_url');
       expect(picked).not.toHaveProperty('apple_music_url');
     });
+  });
+});
+
+describe('toDiscogsUnavailableWireFields (BS#1962)', () => {
+  // Mirrors #1908's flowsheet.discogsUnavailable.test.ts wire-shape cases —
+  // this is the single point where the SSE feeder and the mutation-echo
+  // feeder share the present-or-absent camelCase semantics with the V2 read
+  // path's transformToV2.
+
+  it('undefined (no album_id, or album_id misses in library) -> {} (both absent)', () => {
+    const result = toDiscogsUnavailableWireFields(undefined);
+    expect(result).toEqual({});
+    expect(result).not.toHaveProperty('discogsUnavailable');
+    expect(result).not.toHaveProperty('discogsUnavailableNote');
+  });
+
+  it('resolved row with the flag UNSET -> discogsUnavailable: false present, note absent', () => {
+    const flags: DiscogsUnavailableFlags = {
+      discogsUnavailable: false,
+      discogsUnavailableNote: null,
+      lastDiscogsRecheckAt: null,
+    };
+    const result = toDiscogsUnavailableWireFields(flags);
+    expect(result).toEqual({ discogsUnavailable: false });
+    expect(result).not.toHaveProperty('discogsUnavailableNote');
+  });
+
+  it('resolved row with the flag SET + a note -> both fields present', () => {
+    const flags: DiscogsUnavailableFlags = {
+      discogsUnavailable: true,
+      discogsUnavailableNote: 'Embargoed promo pressing',
+      lastDiscogsRecheckAt: null,
+    };
+    const result = toDiscogsUnavailableWireFields(flags);
+    expect(result).toEqual({
+      discogsUnavailable: true,
+      discogsUnavailableNote: 'Embargoed promo pressing',
+    });
+  });
+
+  it('resolved row with the flag SET but no note -> only discogsUnavailable present', () => {
+    const flags: DiscogsUnavailableFlags = {
+      discogsUnavailable: true,
+      discogsUnavailableNote: null,
+      lastDiscogsRecheckAt: null,
+    };
+    const result = toDiscogsUnavailableWireFields(flags);
+    expect(result).toEqual({ discogsUnavailable: true });
+    expect(result).not.toHaveProperty('discogsUnavailableNote');
+  });
+
+  it('never emits lastDiscogsRecheckAt — that rides the proxy album-detail surface only', () => {
+    const flags: DiscogsUnavailableFlags = {
+      discogsUnavailable: true,
+      discogsUnavailableNote: 'note',
+      lastDiscogsRecheckAt: new Date('2026-07-01T00:00:00Z'),
+    };
+    const result = toDiscogsUnavailableWireFields(flags);
+    expect(result).not.toHaveProperty('lastDiscogsRecheckAt');
   });
 });
