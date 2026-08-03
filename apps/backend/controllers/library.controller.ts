@@ -1029,6 +1029,138 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
 };
 
 // ---------------------------------------------------------------------------
+// Compilation-track (CTA) write path — BS#1964 / Phase 3.5 `/wxycdb` cutover.
+//
+// Backs api.yaml v1.28.0 (WXYC/wxyc-shared#291): GET lists a release's stored
+// V/A per-track artists, POST additively writes an explicit client-confirmed
+// list, and GET .../discogs-suggestions returns a release's tracklist as
+// write-ready rows without writing. The `{id}` path param is the serial
+// `library.id` (like the sibling `/library/:id` PATCH/missing/found routes),
+// resolved to a Discogs release via `library_identity` for the suggestions
+// read. BS keeps LOCAL wire types here (mirroring `NewAlbumRequest` /
+// `UpdateAlbumRequest`) rather than importing `@wxyc/shared`, so this surface
+// ships without a shared publish. Service logic: `library.service.ts`.
+// ---------------------------------------------------------------------------
+
+type CompilationTrackInputWire = {
+  artist_name?: unknown;
+  track_title?: unknown;
+  track_position?: unknown;
+};
+
+type CompilationTracksWriteBody = {
+  tracks?: CompilationTrackInputWire[];
+};
+
+// Column caps from `compilation_track_artist` (schema.ts): reject over-length
+// input as a 400 rather than letting it reach the INSERT and trip PG 22001
+// ("value too long") → 500. Mirrors `updateAlbum`'s `MAX_ALBUM_TEXT_LENGTH`.
+const CTA_ARTIST_NAME_MAX = 255;
+const CTA_TRACK_TITLE_MAX = 255;
+const CTA_TRACK_POSITION_MAX = 20;
+
+/** Normalize an optional nullable free-text field: absent/blank/whitespace → null. */
+const normalizeOptionalCtaText = (v: unknown): string | null => {
+  if (typeof v !== 'string') return null;
+  const trimmed = v.trim();
+  return trimmed === '' ? null : trimmed;
+};
+
+type CompilationTrackValidationResult =
+  { ok: true; tracks: libraryService.CompilationTrackInputRow[] } | { ok: false; message: string };
+
+/**
+ * Validate + normalize a `CompilationTracksWriteRequest` body (pure, so it's
+ * unit-testable without a DB). `artist_name` is required and non-blank
+ * (api.yaml `minLength: 1`); `track_title` / `track_position` are optional and
+ * nullable, with blank/whitespace coerced to null so the `track_title IS NULL`
+ * partial unique index behaves. All three are length-capped to their columns.
+ */
+export function validateCompilationTracksBody(body: CompilationTracksWriteBody): CompilationTrackValidationResult {
+  if (!body || !Array.isArray(body.tracks) || body.tracks.length === 0) {
+    return { ok: false, message: 'tracks must be a non-empty array' };
+  }
+  const tracks: libraryService.CompilationTrackInputRow[] = [];
+  for (let i = 0; i < body.tracks.length; i++) {
+    const t = body.tracks[i];
+    if (t === null || typeof t !== 'object') {
+      return { ok: false, message: `tracks[${i}] must be an object` };
+    }
+    const artistRaw = t.artist_name;
+    if (typeof artistRaw !== 'string' || artistRaw.trim() === '') {
+      return { ok: false, message: `tracks[${i}].artist_name is required and must be a non-empty string` };
+    }
+    const artist_name = artistRaw.trim();
+    if (artist_name.length > CTA_ARTIST_NAME_MAX) {
+      return { ok: false, message: `tracks[${i}].artist_name exceeds ${CTA_ARTIST_NAME_MAX} characters` };
+    }
+    const track_title = normalizeOptionalCtaText(t.track_title);
+    if (track_title !== null && track_title.length > CTA_TRACK_TITLE_MAX) {
+      return { ok: false, message: `tracks[${i}].track_title exceeds ${CTA_TRACK_TITLE_MAX} characters` };
+    }
+    const track_position = normalizeOptionalCtaText(t.track_position);
+    if (track_position !== null && track_position.length > CTA_TRACK_POSITION_MAX) {
+      return { ok: false, message: `tracks[${i}].track_position exceeds ${CTA_TRACK_POSITION_MAX} characters` };
+    }
+    tracks.push({ artist_name, track_title, track_position });
+  }
+  return { ok: true, tracks };
+}
+
+/** GET /library/:id/compilation-tracks — list a release's stored CTA rows. */
+export const getCompilationTracks: RequestHandler<{ id: string }> = async (req, res) => {
+  const libraryId = parseAlbumId(req.params.id);
+  if (!(await libraryService.libraryRowExists(libraryId))) {
+    throw new WxycError('Library release not found', 404);
+  }
+  const tracks = await libraryService.getCompilationTracks(libraryId);
+  res.status(200).json({ library_id: libraryId, tracks });
+};
+
+/**
+ * POST /library/:id/compilation-tracks — additive write of an explicit,
+ * client-confirmed CTA list. Body is validated (400) before the library-row
+ * existence gate (404). Existing rows matched on the CTA uniqueness keys are
+ * skipped, never mutated (D6). Reports `inserted` vs `skipped` and returns the
+ * release's full stored set after the write.
+ */
+export const writeCompilationTracks: RequestHandler<{ id: string }, unknown, CompilationTracksWriteBody> = async (
+  req,
+  res
+) => {
+  const libraryId = parseAlbumId(req.params.id);
+  const validation = validateCompilationTracksBody(req.body);
+  if (!validation.ok) {
+    throw new WxycError(validation.message, 400);
+  }
+  if (!(await libraryService.libraryRowExists(libraryId))) {
+    throw new WxycError('Library release not found', 404);
+  }
+  const result = await libraryService.writeCompilationTracks(libraryId, validation.tracks);
+  res.status(200).json({
+    library_id: libraryId,
+    inserted: result.inserted,
+    skipped: result.skipped,
+    tracks: result.tracks,
+  });
+};
+
+/**
+ * GET /library/:id/compilation-tracks/discogs-suggestions — autopopulate
+ * source: the linked Discogs release's tracklist as write-ready
+ * `CompilationTrackInput` rows, without writing. `discogs_release_id: null` +
+ * empty `tracks` means "no upstream release resolved → manual entry".
+ */
+export const getCompilationTrackDiscogsSuggestions: RequestHandler<{ id: string }> = async (req, res) => {
+  const libraryId = parseAlbumId(req.params.id);
+  if (!(await libraryService.libraryRowExists(libraryId))) {
+    throw new WxycError('Library release not found', 404);
+  }
+  const { discogs_release_id, tracks } = await libraryService.getCompilationTrackSuggestions(libraryId);
+  res.status(200).json({ library_id: libraryId, discogs_release_id, tracks });
+};
+
+// ---------------------------------------------------------------------------
 // GET /library/query — query-builder search over the catalog
 // ---------------------------------------------------------------------------
 

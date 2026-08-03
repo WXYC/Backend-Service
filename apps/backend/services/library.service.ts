@@ -1019,6 +1019,168 @@ export async function getRotationTracksFromRelease(releaseId: number): Promise<R
   return pending;
 }
 
+// ============================================================================
+// Compilation-track (CTA) write path — BS#1964 / Phase 3.5 `/wxycdb` cutover.
+//
+// `compilation_track_artist` (CTA) makes V/A per-track artists searchable, but
+// today rows arrive only via the insert-only `jobs/library-etl` MySQL mirror.
+// When `/wxycdb` goes dark that mirror stops; these functions back the api.yaml
+// v1.28.0 CTA write path (WXYC/wxyc-shared#291) so compilations added afterward
+// keep per-track artist search. The write is additive-only (the D6 decision —
+// the insert-only residue is never reconciled here) and Discogs-agnostic (it
+// carries only the durable free-text triple, so it survives the future
+// `library_track` rename, BS#801). HTTP surface: `library.controller.ts`.
+// ============================================================================
+
+/** A stored CTA row, projected onto the api.yaml `CompilationTrack` shape. */
+export interface CompilationTrackRow {
+  id: number;
+  artist_name: string;
+  track_title: string | null;
+  track_position: string | null;
+}
+
+/** A validated, write-ready CTA row (api.yaml `CompilationTrackInput`). */
+export interface CompilationTrackInputRow {
+  artist_name: string;
+  track_title: string | null;
+  track_position: string | null;
+}
+
+/** Outcome of an additive CTA write (api.yaml `CompilationTracksWriteResponse`). */
+export interface CompilationTracksWriteResult {
+  inserted: number;
+  skipped: number;
+  tracks: CompilationTrackRow[];
+}
+
+/**
+ * Does a `library` row exist for this serial id? Cheap existence probe for the
+ * CTA handlers' 404 gate. The CTA `{id}` path param is the serial `library.id`
+ * (like `/library/:id` PATCH/missing/found), not the legacy id.
+ */
+export async function libraryRowExists(libraryId: number): Promise<boolean> {
+  const rows = await db.select({ id: library.id }).from(library).where(eq(library.id, libraryId)).limit(1);
+  return rows.length > 0;
+}
+
+/**
+ * Serial-`library.id` twin of `getDiscogsReleaseIdByLegacyId` (BS#836). The CTA
+ * suggestions read keys on the serial id the dj-site edit surface holds (what
+ * `addAlbum` returns), so it reads `library_identity` directly by `library_id`
+ * rather than bridging through `library.legacy_release_id`. Returns null when
+ * the row has no `library_identity` entry or no resolved `discogs_release_id`.
+ */
+export async function getDiscogsReleaseIdByLibraryId(libraryId: number): Promise<number | null> {
+  const rows = await db
+    .select({ discogs_release_id: library_identity.discogs_release_id })
+    .from(library_identity)
+    .where(eq(library_identity.library_id, libraryId))
+    .limit(1);
+  return rows[0]?.discogs_release_id ?? null;
+}
+
+/** List a release's stored CTA rows, oldest first (stable insertion order). */
+export async function getCompilationTracks(libraryId: number): Promise<CompilationTrackRow[]> {
+  return db
+    .select({
+      id: compilation_track_artist.id,
+      artist_name: compilation_track_artist.artist_name,
+      track_title: compilation_track_artist.track_title,
+      track_position: compilation_track_artist.track_position,
+    })
+    .from(compilation_track_artist)
+    .where(eq(compilation_track_artist.library_id, libraryId))
+    .orderBy(asc(compilation_track_artist.id));
+}
+
+/**
+ * Additive CTA write. Every input row is inserted with an untargeted
+ * `ON CONFLICT DO NOTHING`, which arbiters on *both* CTA unique indexes
+ * (`cta_unique_idx` on `(library_id, artist_name, track_title)` and the
+ * `cta_unique_null_track_idx` partial covering `track_title IS NULL`). A row
+ * that duplicates one already stored — or one earlier in the same batch — is
+ * absorbed by the conflict clause and never lands, so `RETURNING` yields
+ * exactly the newly-inserted rows. `skipped` is therefore `input − inserted`,
+ * and the identity `inserted + skipped == input.length` holds even when the
+ * batch carries intra-request duplicates (api.yaml v1.28.0
+ * `CompilationTracksWriteResponse` semantics). Existing rows are never mutated
+ * — this path cannot replace or delete (the D6 boundary).
+ */
+export async function writeCompilationTracks(
+  libraryId: number,
+  inputs: CompilationTrackInputRow[]
+): Promise<CompilationTracksWriteResult> {
+  const values = inputs.map((t) => ({
+    library_id: libraryId,
+    artist_name: t.artist_name,
+    track_title: t.track_title,
+    track_position: t.track_position,
+  }));
+  const insertedRows = await db
+    .insert(compilation_track_artist)
+    .values(values)
+    .onConflictDoNothing()
+    .returning({ id: compilation_track_artist.id });
+  const tracks = await getCompilationTracks(libraryId);
+  return {
+    inserted: insertedRows.length,
+    skipped: inputs.length - insertedRows.length,
+    tracks,
+  };
+}
+
+/**
+ * Autopopulate source for the CTA edit surface: resolve the Discogs release
+ * linked to this library row and return its tracklist as write-ready
+ * `CompilationTrackInput` rows — *without writing*. This is the only
+ * Discogs-touching call in the CTA surface (a single `getRelease`, not the
+ * per-track N-validation fan-out that timed out in BS#1117); the client
+ * confirms/edits the rows and POSTs them back.
+ *
+ * Each track's per-track artist credit is flattened onto CTA's single
+ * `artist_name` free-text field via the same `projectInlineTracklist` used by
+ * the rotation-tracks picker (empty per-track `artists[]` falls back to the
+ * release-level artist — "Various" on a V/A comp — and multi-artist credits
+ * join on `', '`), so the two surfaces can't drift.
+ *
+ * `discogs_release_id: null` + empty `tracks` encodes "no upstream release
+ * resolved → manual entry". An LML 404 / `not_found` tombstone on an
+ * otherwise-resolved id degrades the same way (id echoed, empty tracks) rather
+ * than erroring, matching `getRotationTracksFromRelease`.
+ */
+export async function getCompilationTrackSuggestions(
+  libraryId: number
+): Promise<{ discogs_release_id: number | null; tracks: CompilationTrackInputRow[] }> {
+  const releaseId = await getDiscogsReleaseIdByLibraryId(libraryId);
+  if (releaseId === null) {
+    return { discogs_release_id: null, tracks: [] };
+  }
+
+  let release: DiscogsReleaseMetadata;
+  try {
+    release = await getRelease(releaseId);
+  } catch (err) {
+    if (err instanceof LmlClientError && err.statusCode === 404) {
+      return { discogs_release_id: releaseId, tracks: [] };
+    }
+    throw err;
+  }
+  if (release.not_found) {
+    return { discogs_release_id: releaseId, tracks: [] };
+  }
+
+  const projected = projectInlineTracklist(release.tracklist, release.artist) ?? [];
+  const tracks: CompilationTrackInputRow[] = projected.map((t) => ({
+    // `projectInlineTracklist` guarantees a non-empty `artists[]` (it seeds the
+    // release-artist fallback), so the join is always a real credit.
+    artist_name: t.artists.join(', '),
+    track_title: t.title,
+    track_position: t.position,
+  }));
+  return { discogs_release_id: releaseId, tracks };
+}
+
 export const updateOnStreaming = async (id: number, on_streaming: boolean | null) => {
   const response = await db.update(library).set({ on_streaming }).where(eq(library.id, id)).returning();
   return response[0];
