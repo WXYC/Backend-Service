@@ -61,7 +61,8 @@ export { isSpotifyUrl, isAppleMusicUrl, sanitizeLookupStreamingUrls };
 // coordinator's `applyTrustGate` in `apps/backend/services/lml/
 // lookup-coordinator.ts`, plus the two offline job gates); no in-package
 // callsite needs it, so it's re-exported only. `isTrustedLmlTrackContextMatch`
-// is reserved for BS#1359 and likewise has no callsite yet.
+// (BS#1359) is wired into `apps/enrichment-worker/enrich.ts#extractArtwork`,
+// the live CDC track-context path.
 export { isTrustedLmlAlbumMatch, isTrustedLmlTrackContextMatch } from './trust.js';
 export type { LmlTrustGateInput } from './trust.js';
 

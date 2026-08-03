@@ -57,11 +57,20 @@
  * sql.cjs`) and a built `@wxyc/database` (`dist/`) — CI's Build step
  * (`npm run build`) produces both before the integration tier runs.
  *
+ * Test (e) covers BS#1359's downgrade-guard fix to the LINKED NO-MATCH arm:
+ * once the track-context trust gate widens which `search_type`s land there
+ * (`alternative`/`fallback`/`song_as_artist` now join a genuine LML miss),
+ * that arm's `spotify_url`/`bandcamp_url` writes are guarded by the same
+ * `buildStreamingFieldConflictSet` builder (`incomingStatus=undefined`, "no
+ * verdict this round") so a later untrusted re-match can never clobber an
+ * earlier verified URL.
+ *
  * @see WXYC/Backend-Service#1923
  * @see WXYC/Backend-Service#1924
  * @see WXYC/Backend-Service#1915 (the self-heal mechanism these two harden)
  * @see WXYC/Backend-Service#1089 (the no-match shell row BS#1924 protects)
  * @see WXYC/Backend-Service#1945 (this spec's mirror-drift fix)
+ * @see WXYC/Backend-Service#1359 (test (e): the no-match arm downgrade guard)
  */
 
 // `@wxyc/database` -> `drizzle-orm`, and the compiled `streaming-merge-sql.cjs`
@@ -152,6 +161,44 @@ async function atomicConflictUpdate(albumId, { artworkUrl, discogsUrl, verdict, 
         THEN ${album_metadata.streaming_reask_attempts} + 1
         ELSE ${album_metadata.streaming_reask_attempts}
       END`,
+      updated_at: sql`NOW()`,
+    })
+    .where(and(eq(album_metadata.album_id, albumId), sql`${album_metadata.updated_at} < NOW()`));
+}
+
+/**
+ * BS#1359: mirrors `enrich.ts#finalizeRow`'s linked no-match arm's guarded
+ * conflict UPDATE — only `spotify_url`/`bandcamp_url` via
+ * `buildStreamingFieldConflictSet(status, url, undefined, null, fallback)`
+ * ("no verdict this round"), leaving the status columns untouched. Unlike
+ * `atomicConflictUpdate` above (the MATCH arm, which also writes
+ * artwork_url/discogs_url/status), this never touches those columns — the
+ * no-match arm doesn't have a verdict to write. Proves the widened no-match
+ * set (BS#1359 routes untrusted `alternative`/`fallback`/`song_as_artist`
+ * search_types here too, not just a genuine LML miss) still can't downgrade
+ * a verified URL, against real Postgres.
+ */
+async function noMatchConflictUpdate(albumId, { spotifyFallback, bandcampFallback }) {
+  const spotify = buildStreamingFieldConflictSet(
+    album_metadata.spotify_status,
+    album_metadata.spotify_url,
+    undefined,
+    null,
+    spotifyFallback
+  );
+  const bandcamp = buildStreamingFieldConflictSet(
+    album_metadata.bandcamp_status,
+    album_metadata.bandcamp_url,
+    undefined,
+    null,
+    bandcampFallback
+  );
+
+  await db
+    .update(album_metadata)
+    .set({
+      spotify_url: spotify.url,
+      bandcamp_url: bandcamp.url,
       updated_at: sql`NOW()`,
     })
     .where(and(eq(album_metadata.album_id, albumId), sql`${album_metadata.updated_at} < NOW()`));
@@ -324,5 +371,50 @@ describe('enrichment-worker streaming UPSERT — atomic CASE merge (BS#1923) + r
     const row = await readRow(sql, albumId);
     expect(row.spotify_status).toBe('verified');
     expect(row.spotify_url).toBe('https://open.spotify.com/album/ALREADY-VERIFIED');
+  });
+
+  test('(e) BS#1359: the no-match arm never downgrades a verified spotify_url, while a non-verified sibling recomputes its search fallback', async () => {
+    const verifiedAlbumId = await insertLibraryAlbum(sql, 'bs1359-no-match-verified');
+    const unresolvedAlbumId = await insertLibraryAlbum(sql, 'bs1359-no-match-unresolved');
+    insertedAlbumIds.push(verifiedAlbumId, unresolvedAlbumId);
+
+    // Seed one album with a live verified spotify_url (as if an earlier play
+    // matched `direct`) and a sibling album whose spotify field was never
+    // resolved (a plain search-URL shell).
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, discogs_url, spotify_status, spotify_url, updated_at)
+      VALUES
+        (${verifiedAlbumId}, 'https://i.discogs.com/verified.jpg', 'https://discogs.com/release/verified',
+         'verified', 'https://open.spotify.com/album/VERIFIED-SURVIVES', NOW())
+    `;
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, spotify_url, updated_at)
+      VALUES
+        (${unresolvedAlbumId}, 'https://open.spotify.com/search/stale-fallback', NOW())
+    `;
+
+    // Both albums now hit the linked no-match arm — e.g. a later play
+    // resolved to an untrusted search_type (BS#1359 widens this arm's
+    // reachability beyond a genuine LML miss). Neither write carries a
+    // streaming verdict (incomingStatus=undefined in both CASE builders).
+    await noMatchConflictUpdate(verifiedAlbumId, {
+      spotifyFallback: 'https://open.spotify.com/search/should-not-be-used',
+      bandcampFallback: null,
+    });
+    await noMatchConflictUpdate(unresolvedAlbumId, {
+      spotifyFallback: 'https://open.spotify.com/search/fresh-fallback',
+      bandcampFallback: null,
+    });
+
+    const verifiedRow = await readRow(sql, verifiedAlbumId);
+    expect(verifiedRow.spotify_status).toBe('verified');
+    expect(verifiedRow.spotify_url).toBe('https://open.spotify.com/album/VERIFIED-SURVIVES');
+
+    const unresolvedRow = await readRow(sql, unresolvedAlbumId);
+    // Not verified — the CASE recomputes the fresh search fallback rather
+    // than keeping the earlier stale one.
+    expect(unresolvedRow.spotify_url).toBe('https://open.spotify.com/search/fresh-fallback');
   });
 });

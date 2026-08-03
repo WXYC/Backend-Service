@@ -79,6 +79,7 @@
 
 import { and, eq, sql } from 'drizzle-orm';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
+import { isTrustedLmlTrackContextMatch } from '@wxyc/lml-client';
 import type { DiscogsMatchResult, LookupResponse, StreamingResolutionStatus } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
 import { buildStreamingFieldConflictSet, NO_FALLBACK } from './streaming-merge-sql.js';
@@ -440,6 +441,13 @@ export const synthesizeSearchUrls = (
 };
 
 export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | null => {
+  // BS#1359: track-context trust gate. A DJ-played track only auto-persists
+  // Discogs data when LML confirms the track is on the returned release
+  // (direct or compilation). alternative/fallback/song_as_artist/none/absent
+  // are same-artist substitutions (Yenbett class) — treat them as no-match so
+  // all three callers (finalizeRow, empty-outcome, streaming-reask) route to
+  // the existing "LML found nothing" path from this one chokepoint.
+  if (!isTrustedLmlTrackContextMatch(response)) return null;
   const first = response.results?.[0];
   if (!first) return null;
   if (!first.artwork) return null;
@@ -535,6 +543,27 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
     // NULL (no LML match to fill them); UPDATE path leaves them untouched
     // on existing rows (preserves any prior out-of-band values, same
     // semantics as the unlinked path).
+    //
+    // BS#1359: on a (now wider) no-match, never clobber a previously verified
+    // streaming URL. Reuse the BS#1923 CASE builder with incomingStatus=undefined
+    // ("no verdict this round"): keep a live verified url, else recompute the
+    // fresh search fallback. Status columns are left untouched (this arm
+    // asserts no verdict). youtube/soundcloud have no status column, so they
+    // stay plain overwrites; apple_music is not written here.
+    const spotifyNoMatch = buildStreamingFieldConflictSet(
+      album_metadata.spotify_status,
+      album_metadata.spotify_url,
+      undefined,
+      null,
+      searchUrls.spotify_url
+    );
+    const bandcampNoMatch = buildStreamingFieldConflictSet(
+      album_metadata.bandcamp_status,
+      album_metadata.bandcamp_url,
+      undefined,
+      null,
+      searchUrls.bandcamp_url
+    );
     await db
       .insert(album_metadata)
       .values({
@@ -548,9 +577,9 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
       .onConflictDoUpdate({
         target: album_metadata.album_id,
         set: {
-          spotify_url: searchUrls.spotify_url,
+          spotify_url: spotifyNoMatch.url,
+          bandcamp_url: bandcampNoMatch.url,
           youtube_music_url: searchUrls.youtube_music_url,
-          bandcamp_url: searchUrls.bandcamp_url,
           soundcloud_url: searchUrls.soundcloud_url,
           updated_at: sql`NOW()`,
         },

@@ -18,8 +18,9 @@ import type { LookupResponse } from '@wxyc/lml-client';
 
 import { classifyEmptyCause, isEmptyOutcome } from '../../../../apps/enrichment-worker/empty-outcome';
 
-const makeMatchResponse = (artworkOverrides: Record<string, unknown> = {}) =>
+const makeMatchResponse = (artworkOverrides: Record<string, unknown> = {}, searchType = 'direct') =>
   ({
+    search_type: searchType,
     results: [
       {
         artwork: {
@@ -89,5 +90,34 @@ describe('classifyEmptyCause (BS#969 G7)', () => {
     // but the function is defensive — if invoked on a non-empty response, the
     // 'unknown' tag surfaces the misuse without crashing.
     expect(classifyEmptyCause(makeMatchResponse())).toBe('unknown');
+  });
+});
+
+/**
+ * BS#1359 — track-context trust gate. `extractArtwork` (which both
+ * `isEmptyOutcome` and `classifyEmptyCause` wrap) now returns null for an
+ * untrusted `search_type` even when `artwork_url` is populated — an
+ * `alternative`/`fallback` match that previously classified as a real match
+ * (or a degraded one) now classifies as `lml_no_match`, same as a genuine
+ * LML miss. A trusted-but-degraded `direct` match still classifies
+ * `lml_degraded` — the gate must not suppress the genuinely useful signal.
+ */
+describe('BS#1359 track-context trust gate', () => {
+  it("an 'alternative' match with a populated artwork_url now classifies as lml_no_match (was a match)", () => {
+    const response = makeMatchResponse({}, 'alternative');
+    expect(isEmptyOutcome(response)).toBe(true);
+    expect(classifyEmptyCause(response)).toBe('lml_no_match');
+  });
+
+  it("a 'fallback' match with a populated artwork_url now classifies as lml_no_match (was a match)", () => {
+    const response = makeMatchResponse({}, 'fallback');
+    expect(isEmptyOutcome(response)).toBe(true);
+    expect(classifyEmptyCause(response)).toBe('lml_no_match');
+  });
+
+  it("a trusted 'direct' match with a null artwork_url still classifies lml_degraded (trusted-but-degraded is unchanged)", () => {
+    const response = makeMatchResponse({ artwork_url: null }, 'direct');
+    expect(isEmptyOutcome(response)).toBe(true);
+    expect(classifyEmptyCause(response)).toBe('lml_degraded');
   });
 });

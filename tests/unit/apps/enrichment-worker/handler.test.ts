@@ -110,6 +110,7 @@ const driveOneTick = async (): Promise<SpanLike> => {
 };
 
 const matchResponseWithArtwork = {
+  search_type: 'direct',
   results: [
     {
       artwork: {
@@ -121,6 +122,12 @@ const matchResponseWithArtwork = {
 };
 
 const degradedResponse = {
+  // BS#1359: without a trusted search_type, extractArtwork now returns null
+  // for this response, which would flip isEmptyOutcome's classification from
+  // lml_degraded to lml_no_match (suppressed) — breaking the captureMessage
+  // assertion below. 'direct' keeps this a genuinely trusted-but-degraded
+  // response.
+  search_type: 'direct',
   results: [
     {
       artwork: {
@@ -178,6 +185,31 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
     // Dashboard aggregation of the no-match rate uses the
     // `enrichment.outcome` span attribute, not per-event Sentry issues.
     mockEnrichmentBulkLookup.mockResolvedValueOnce(noMatchResponse);
+    mockFinalizeRow.mockResolvedValueOnce('enriched_no_match');
+
+    const span = await driveOneTick();
+
+    expect(span.setAttribute).toHaveBeenCalledWith('enrichment.outcome', 'enriched_no_match');
+    expect(Sentry.captureMessage).not.toHaveBeenCalled();
+  });
+
+  it('does NOT fire captureMessage on an untrusted search_type with a populated artwork_url (BS#1359 — classifies lml_no_match, suppressed)', async () => {
+    // Pins that the BS#1359 gate doesn't introduce new Sentry noise: an
+    // `alternative`/`fallback` match that used to classify as lml_match (or
+    // lml_degraded) now classifies as lml_no_match via extractArtwork's
+    // gate, which was already suppressed before this change.
+    const untrustedMatchResponse = {
+      search_type: 'fallback',
+      results: [
+        {
+          artwork: {
+            artwork_url: 'https://i.discogs.com/wrong-album/cover.jpg',
+            release_url: 'https://discogs.com/release/wrong',
+          },
+        },
+      ],
+    };
+    mockEnrichmentBulkLookup.mockResolvedValueOnce(untrustedMatchResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_no_match');
 
     const span = await driveOneTick();

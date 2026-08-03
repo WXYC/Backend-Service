@@ -104,6 +104,12 @@ const driveOneTick = async (candidate: ReturnType<typeof makeCandidate>): Promis
 };
 
 const matchResponse = {
+  // BS#1359: search_type is required for extractArtwork's track-context
+  // gate. finalizeRow is mocked in this file, but the handler's post-finalize
+  // isEmptyOutcome(response) call still runs the real extractArtwork against
+  // this fixture — 'direct' keeps it classifying as a genuine match rather
+  // than tripping the gate and flipping to lml_no_match.
+  search_type: 'direct',
   results: [
     {
       artwork: {

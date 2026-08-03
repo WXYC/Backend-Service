@@ -16,9 +16,9 @@
  *   - A **track-context** write — a DJ played this track and LML confirms it
  *     lives on the returned release — can also trust `compilation`: a V/A
  *     comp genuinely carrying that track is a correct match, not a
- *     same-artist substitution. See `isTrustedLmlTrackContextMatch`,
- *     reserved for BS#1359 (PR 3 of this reconciliation) and not wired into
- *     any callsite yet.
+ *     same-artist substitution. See `isTrustedLmlTrackContextMatch`, wired
+ *     into the live CDC enrichment path at
+ *     `apps/enrichment-worker/enrich.ts#extractArtwork` (BS#1359).
  *
  * Both predicates fail closed on an absent/undefined `search_type`: no trust
  * signal means no auto-accept. Neither bundles payload extraction (e.g.
@@ -76,14 +76,15 @@ export function isTrustedLmlAlbumMatch(response: LmlTrustGateInput): boolean {
 
 /**
  * True iff `response` is a `direct` OR `compilation` search_type match.
- * Reserved for BS#1359 (PR 3 of the trust-gate reconciliation) — a
- * DJ-played *track*, not a librarian-typed album, is the context here: LML
- * confirms the typed track appears on the returned release, and a V/A
- * compilation genuinely carrying that track is a correct match, not the
- * same-artist substitution `isTrustedLmlAlbumMatch` guards against.
- * `alternative` stays excluded even in track context — it's LML's
- * closest-match fallback when neither the artist nor the album was
- * confirmed, carrying no track-level confirmation at all.
+ * Wired into `apps/enrichment-worker/enrich.ts#extractArtwork` (BS#1359) —
+ * the live CDC track-context path: a DJ-played *track*, not a
+ * librarian-typed album, is the context here: LML confirms the typed track
+ * appears on the returned release, and a V/A compilation genuinely carrying
+ * that track is a correct match, not the same-artist substitution
+ * `isTrustedLmlAlbumMatch` guards against. `alternative` stays excluded even
+ * in track context — it's LML's closest-match fallback when neither the
+ * artist nor the album was confirmed, carrying no track-level confirmation
+ * at all.
  *
  * | search_type      | album match (`isTrustedLmlAlbumMatch`) | track-context match (this fn) | why |
  * |------------------|:---------------------------------------:|:------------------------------:|-----|
@@ -93,10 +94,6 @@ export function isTrustedLmlAlbumMatch(response: LmlTrustGateInput): boolean {
  * | fallback         | rejected                                 | rejected                         | artist-only fallback answer |
  * | song_as_artist   | rejected                                 | rejected                         | title matched as an artist name, not this track |
  * | none / absent    | rejected                                 | rejected                         | no result / no trust signal |
- *
- * Not wired into any callsite in this PR — BS#1359 lands the
- * `metadata.service.ts` migration (and the wider track-context job family)
- * on its own option-A approval.
  */
 export function isTrustedLmlTrackContextMatch(response: LmlTrustGateInput): boolean {
   return response.search_type === 'direct' || response.search_type === 'compilation';
