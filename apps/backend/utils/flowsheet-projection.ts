@@ -1,5 +1,6 @@
 import type { FSEntry } from '@wxyc/database';
 import { isSpotifyUrl, isAppleMusicUrl } from '@wxyc/lml-client';
+import type { DiscogsUnavailableFlags } from '../services/library.service.js';
 
 /**
  * Client-facing flowsheet-row projection (BS#1513).
@@ -165,4 +166,40 @@ export function pickClientFacingColumns(row: Record<string, unknown>): Record<st
     projected.apple_music_url = null;
   }
   return projected;
+}
+
+/**
+ * Wire shape merged onto both the realtime (SSE) and mutation-echo flowsheet
+ * payloads (BS#1962). Deliberately just the two fields the published
+ * `FlowsheetEntryResponse` contract (v3.2.0) carries for this pair —
+ * `lastDiscogsRecheckAt` rides the proxy album-detail surface only, not the
+ * flowsheet track shape (see #1908's `transformToV2`).
+ */
+export type DiscogsUnavailableWireFields = {
+  discogsUnavailable?: boolean;
+  discogsUnavailableNote?: string;
+};
+
+/**
+ * Project a {@link DiscogsUnavailableFlags} read (or its absence) onto the
+ * present-or-absent camelCase wire shape both feeders merge onto their
+ * payload — the single point where this semantic lives, so the SSE feeder
+ * (`metadata-broadcast.ts`) and the mutation-echo feeder
+ * (`flowsheet.controller.ts`'s `sendProjectedEntry`) can't drift from each
+ * other or from the V2 read path's `transformToV2` (BS#1908).
+ *
+ * - `undefined` (no `album_id`, or `album_id` misses in `library`) -> `{}`
+ *   (both fields absent).
+ * - a resolved row -> `discogsUnavailable` is ALWAYS emitted (true or false —
+ *   a linked-but-unflagged row emits `false`, matching #1908's `!== null`
+ *   gate on the read path), and `discogsUnavailableNote` only when non-null.
+ */
+export function toDiscogsUnavailableWireFields(
+  flags: DiscogsUnavailableFlags | undefined
+): DiscogsUnavailableWireFields {
+  if (!flags) return {};
+  return {
+    discogsUnavailable: flags.discogsUnavailable,
+    ...(flags.discogsUnavailableNote !== null ? { discogsUnavailableNote: flags.discogsUnavailableNote } : {}),
+  };
 }

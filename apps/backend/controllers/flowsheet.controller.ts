@@ -8,7 +8,8 @@ type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
 import type { ConcertDTO } from '../services/concerts.service.js';
 import type { CriticReviewItem } from '@wxyc/shared/dtos';
-import { projectFlowsheetEntry } from '../utils/flowsheet-projection.js';
+import { projectFlowsheetEntry, toDiscogsUnavailableWireFields } from '../utils/flowsheet-projection.js';
+import { getDiscogsUnavailableFlagsById } from '../services/library.service.js';
 import { stashMirrorData } from '../middleware/legacy/mirror.middleware.js';
 import WxycError from '../utils/error.js';
 
@@ -341,10 +342,33 @@ export type FSEntryRequestBody = {
  * mutation site can't pick up the projection without the stash. The stash is
  * inert on routes with no mirror middleware attached (changeOrder today) and
  * becomes load-bearing automatically if one is wired up.
+ *
+ * BS#1962: when the entry has a non-null `album_id`, additionally merges
+ * `discogsUnavailable` / `discogsUnavailableNote` onto the projected body —
+ * parity with the paginated read path's `transformToV2` (#1908) and the SSE
+ * feeder (`metadata-broadcast.ts`). The lookup is a single, uncached,
+ * freshest-wins direct read: mutations are DJ-paced and single-row, so there's
+ * no N+1 concern here (contrast the SSE hot path's LRU + coalescing, needed
+ * because a backfill burst can replay many terminal broadcasts for the same
+ * album_id in a short window). Additive-failure (mirrors the proxy path,
+ * `proxy.controller.ts`'s `getDiscogsUnavailableFlagsById` call site): a DB
+ * blip on this read degrades to omitting the fields, never 500s the mutation.
  */
-const sendProjectedEntry = (res: Response, statusCode: number, entry: FSEntry): void => {
+const sendProjectedEntry = async (res: Response, statusCode: number, entry: FSEntry): Promise<void> => {
   stashMirrorData(res, entry);
-  res.status(statusCode).json(projectFlowsheetEntry(entry));
+  const projected = projectFlowsheetEntry(entry);
+  if (entry.album_id != null) {
+    try {
+      const flags = await getDiscogsUnavailableFlagsById(entry.album_id);
+      Object.assign(projected, toDiscogsUnavailableWireFields(flags));
+    } catch (err) {
+      console.warn(
+        `[flowsheet.controller] discogs-unavailable lookup failed for album_id=${entry.album_id}; omitting field:`,
+        err
+      );
+    }
+  }
+  res.status(statusCode).json(projected);
 };
 
 /**
@@ -406,7 +430,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       dj_name,
     };
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    sendProjectedEntry(res, 201, completedEntry);
+    await sendProjectedEntry(res, 201, completedEntry);
     return;
   }
 
@@ -452,7 +476,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
         extra: { album_id: body.album_id, show_id: latestShow.id },
       });
       const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-      sendProjectedEntry(res, 201, completedEntry);
+      await sendProjectedEntry(res, 201, completedEntry);
       return;
     }
 
@@ -473,7 +497,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    sendProjectedEntry(res, 201, completedEntry);
+    await sendProjectedEntry(res, 201, completedEntry);
   } else {
     // No album_id (explicit null from the dj-site rotation snapshot, BS#933,
     // or simply omitted): insert the request's own snapshot fields with
@@ -481,7 +505,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     // fallback above (BS#1680) so both routes into this shape stay identical.
     const fsEntry = buildSnapshotFieldsEntry(body, latestShow.id, dj_name);
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    sendProjectedEntry(res, 201, completedEntry);
+    await sendProjectedEntry(res, 201, completedEntry);
   }
 };
 
@@ -499,7 +523,7 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
   if (!removedEntry) {
     throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
   }
-  sendProjectedEntry(res, 200, removedEntry);
+  await sendProjectedEntry(res, 200, removedEntry);
 };
 
 export type UpdateRequestBody = {
@@ -569,7 +593,7 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
   if (!updatedEntry) {
     throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
   }
-  sendProjectedEntry(res, 200, updatedEntry);
+  await sendProjectedEntry(res, 200, updatedEntry);
 };
 
 export type JoinRequestBody = {
@@ -721,18 +745,24 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
   }
 
   const release = await orderMutex.acquire();
+  let updatedEntry;
   try {
-    const updatedEntry = await flowsheet_service.changeOrder(entry_id, new_position);
-    // The service 404s when the entry is missing at transaction start, but its
-    // confirmation read runs post-commit — a concurrent delete landing in that
-    // window returns undefined. See the 404 rationale on deleteEntry above.
-    if (!updatedEntry) {
-      throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
-    }
-    sendProjectedEntry(res, 200, updatedEntry);
+    updatedEntry = await flowsheet_service.changeOrder(entry_id, new_position);
   } finally {
     release();
   }
+  // The projection's discogs-unavailable read (BS#1962) and the response write
+  // don't need the reorder lock — only the play_order mutation does — so they
+  // run after `release()` to keep the extra DB round-trip out of the critical
+  // section other reorders serialize behind.
+  //
+  // The service 404s when the entry is missing at transaction start, but its
+  // confirmation read runs post-commit — a concurrent delete landing in that
+  // window returns undefined. See the 404 rationale on deleteEntry above.
+  if (!updatedEntry) {
+    throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
+  }
+  await sendProjectedEntry(res, 200, updatedEntry);
 };
 
 export interface ShowMetadata extends Show {
