@@ -1366,6 +1366,39 @@ export const exportCatalog: RequestHandler = async (req, res) => {
 };
 
 // ---------------------------------------------------------------------------
+// GET /library/catalog/compilation-tracks — CTA bulk export (BS#1965)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sibling of {@link exportCatalog} for the Backend-sourced library.db producer
+ * (discogs-etl#351): stream every compilation_track_artist row as gzipped NDJSON
+ * (one CatalogCompilationTrackRow per line) so the producer can build library.db's
+ * `compilation_track_artist` table over HTTP. Same freshness (the
+ * `conditionalGet(getCatalogLastModifiedAt)` middleware short-circuits to 304 on
+ * an unchanged `library_watermark`), same pre-gzipped per-watermark cache, and
+ * the same Accept-Encoding negotiation as the library export — this handler is a
+ * memcpy on the hot path.
+ */
+export const exportCompilationTracks: RequestHandler = async (req, res) => {
+  const gzipped = await catalogExportService.getCompilationTracksExportGzip();
+  const acceptsGzip = req.acceptsEncodings('gzip') === 'gzip';
+
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Vary', 'Accept-Encoding');
+
+  if (acceptsGzip) {
+    res.setHeader('Content-Encoding', 'gzip');
+    res.setHeader('Content-Length', gzipped.length);
+    res.status(200).end(gzipped);
+    return;
+  }
+
+  const inflated = gunzipSync(gzipped);
+  res.setHeader('Content-Length', inflated.length);
+  res.status(200).end(inflated);
+};
+
+// ---------------------------------------------------------------------------
 // GET /library/bmi-performance-list — played-works export for BMI (BS#1500)
 // ---------------------------------------------------------------------------
 

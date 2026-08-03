@@ -58,6 +58,17 @@ library_route.get(
   libraryController.exportCatalog
 );
 
+// CTA sibling of the catalog export (BS#1965): compilation_track_artist rows for
+// the Backend-sourced library.db producer (discogs-etl#351). Same `catalog:read`
+// auth, same `library_watermark` conditional-GET. A distinct literal path, so it
+// is not shadowed by `/catalog` regardless of registration order.
+library_route.get(
+  '/catalog/compilation-tracks',
+  requirePermissions({ catalog: ['read'] }),
+  conditionalGet(getCatalogLastModifiedAt),
+  libraryController.exportCompilationTracks
+);
+
 // BMI played-works export (BS#1500 — tubafrenzy `recentBMI` successor). Gated
 // to MD/SM via `catalog:['write']` (DJs/members lack it), which is exactly the
 // librarian/MD submission audience with no new permission minted. Keyed on a

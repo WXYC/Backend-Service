@@ -21,6 +21,8 @@ import {
   format,
   genres,
   genre_artist_crossreference,
+  artist_crossreference,
+  compilation_track_artist,
   rotation,
   album_plays,
   album_popularity,
@@ -43,7 +45,11 @@ import { logicalAlbumKeySql } from './logical-album-key.service.js';
  */
 export type CatalogExportRow = {
   id: number;
+  legacy_release_id: number;
   artist_name: string;
+  alternate_artist_name: string | null;
+  album_artist: string | null;
+  cross_reference_names: string | null;
   album_title: string;
   code_letters: string;
   code_number: number;
@@ -67,7 +73,11 @@ export type CatalogExportRow = {
  */
 const projectRow = (row: CatalogExportRow): CatalogExportRow => ({
   id: row.id,
+  legacy_release_id: row.legacy_release_id,
   artist_name: row.artist_name,
+  alternate_artist_name: row.alternate_artist_name,
+  album_artist: row.album_artist,
+  cross_reference_names: row.cross_reference_names,
   album_title: row.album_title,
   code_letters: row.code_letters,
   code_number: row.code_number,
@@ -147,14 +157,51 @@ export const serializeCatalogNdjson = (rows: CatalogExportRow[]): string =>
  *    means the logical album has no plays at all (linked or free-text), per the
  *    merged SSOT contract. Same watermark-lag caveat as `plays` (the refresh does
  *    not advance `library_watermark`).
+ *  - the four BS#1965 library.db-producer fields: `legacy_release_id`,
+ *    `alternate_artist_name`, and `album_artist` are raw `library` columns;
+ *    `cross_reference_names` is the pipe-joined artist-alias string from the
+ *    `artist_aliases` CTE (see its inline comment). These feed the Backend-sourced
+ *    `library.db` producer (discogs-etl#351) — `legacy_release_id` becomes
+ *    library.db's `library.id`. `cross_reference_names` rides `library_watermark`
+ *    freshness like `plays`/`popularity`: an `artist_crossreference` edit surfaces
+ *    only on the next watermark-advancing write — acceptable day-scale lag for the
+ *    daily producer.
  *
  * One scan per watermark (cached below), so the full-table cost is paid ~daily.
  */
 export const getCatalogExportRows = async (): Promise<CatalogExportRow[]> => {
   const rows = await db.execute(sql`
+    WITH artist_aliases AS (
+      -- Per-artist alias aggregation for cross_reference_names (BS#1965,
+      -- discogs-etl#334). UNION folds artist_crossreference in BOTH FK directions
+      -- into (artist_id, other_id) pairs so a row filed under either endpoint
+      -- surfaces the other; string_agg DISTINCT ... ORDER BY yields a stable,
+      -- deduplicated, alphabetically-ordered pipe-joined string — the deterministic
+      -- analogue of the legacy MySQL GROUP_CONCAT(DISTINCT ... SEPARATOR ' | ').
+      -- O(crossref rows), joined once per artist, NOT a per-library correlated scan.
+      SELECT cp.artist_id AS artist_id,
+             string_agg(DISTINCT ${artists.artist_name}, ' | ' ORDER BY ${artists.artist_name})
+               AS cross_reference_names
+      FROM (
+        SELECT ${artist_crossreference.source_artist_id} AS artist_id,
+               ${artist_crossreference.target_artist_id} AS other_id
+        FROM ${artist_crossreference}
+        UNION
+        SELECT ${artist_crossreference.target_artist_id} AS artist_id,
+               ${artist_crossreference.source_artist_id} AS other_id
+        FROM ${artist_crossreference}
+      ) cp
+        INNER JOIN ${artists} ON ${artists.id} = cp.other_id
+      WHERE cp.other_id <> cp.artist_id
+      GROUP BY cp.artist_id
+    )
     SELECT DISTINCT ON (${library.id})
       ${library.id}                            AS id,
+      ${library.legacy_release_id}             AS legacy_release_id,
       COALESCE(${library.artist_name}, ${artists.artist_name}) AS artist_name,
+      ${library.alternate_artist_name}         AS alternate_artist_name,
+      ${library.album_artist}                  AS album_artist,
+      artist_aliases.cross_reference_names     AS cross_reference_names,
       ${library.album_title}                   AS album_title,
       ${artists.code_letters}                  AS code_letters,
       ${library.code_number}                   AS code_number,
@@ -175,6 +222,7 @@ export const getCatalogExportRows = async (): Promise<CatalogExportRow[]> => {
       INNER JOIN ${genre_artist_crossreference}
         ON ${genre_artist_crossreference.artist_id} = ${library.artist_id}
        AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
+      LEFT JOIN artist_aliases ON artist_aliases.artist_id = ${library.artist_id}
       LEFT JOIN ${rotation} ON ${rotation.album_id} = ${library.id}
       LEFT JOIN ${album_plays} ON ${album_plays.album_id} = ${library.id}
       LEFT JOIN ${album_popularity} ON ${album_popularity.logical_album_key} = ${logicalAlbumKeySql(
@@ -205,3 +253,91 @@ const catalogExportCache = createWatermarkCache<Buffer>(getCatalogLastModifiedAt
  * doesn't accept gzip.
  */
 export const getCatalogExportGzip = (): Promise<Buffer> => catalogExportCache.get();
+
+// ---------------------------------------------------------------------------
+// Compilation-track (CTA) export (BS#1965) — sibling of the catalog export
+// ---------------------------------------------------------------------------
+
+/**
+ * One compilation_track_artist row as exported to the library.db producer
+ * (BS#1965 / discogs-etl#351). Feeds library.db's `compilation_track_artist`
+ * table (3 columns), the sibling of the `library` table that `CatalogExportRow`
+ * feeds. Keyed on `legacy_release_id` — the owning library row's surrogate key,
+ * which `CatalogExportRow` also emits AS library.db's `library.id` — so the
+ * producer maps `legacy_release_id` -> `compilation_track_artist.library_release_id`.
+ * Deliberately drops the CTA row `id` + `track_position`: library.db's 3-column
+ * CTA table carries neither.
+ */
+export type CompilationTrackExportRow = {
+  legacy_release_id: number;
+  artist_name: string;
+  track_title: string | null;
+};
+
+/**
+ * Project to exactly the CTA export contract fields, in a fixed key order.
+ * Explicit projection (not a passthrough) so the CTA row `id`, the serial
+ * `library_id`, or `track_position` can never leak into the produced library.db.
+ */
+const projectCompilationTrackRow = (row: CompilationTrackExportRow): CompilationTrackExportRow => ({
+  legacy_release_id: row.legacy_release_id,
+  artist_name: row.artist_name,
+  track_title: row.track_title,
+});
+
+/**
+ * Serialize CTA export rows to NDJSON (one JSON object per line). Empty input
+ * yields an empty string (no trailing newline to mis-parse as a row).
+ */
+export const serializeCompilationTracksNdjson = (rows: CompilationTrackExportRow[]): string =>
+  rows.map((row) => JSON.stringify(projectCompilationTrackRow(row))).join('\n');
+
+/**
+ * Read every compilation_track_artist row as flat export rows, keyed on the
+ * owning library row's `legacy_release_id` (NOT the serial CTA `library_id`).
+ * INNER JOIN to `library` because `compilation_track_artist.library_id` is a
+ * NOT-NULL cascade FK, so every CTA row has exactly one library parent with a
+ * (now total, BS#1963) `legacy_release_id`. Ordered by `legacy_release_id` (then
+ * CTA `id` for a stable tiebreak), matching the legacy MySQL export's
+ * `ORDER BY LIBRARY_RELEASE_ID`.
+ *
+ * One scan per watermark (cached below). CTA freshness rides `library_watermark`
+ * (see the endpoint docblock): a new compilation's rows surface as soon as its
+ * library add advances the watermark; a standalone CTA edit lags to the next
+ * library write — acceptable day-scale lag for the daily producer.
+ */
+export const getCompilationTrackExportRows = async (): Promise<CompilationTrackExportRow[]> => {
+  const rows = await db.execute(sql`
+    SELECT
+      ${library.legacy_release_id}             AS legacy_release_id,
+      ${compilation_track_artist.artist_name}  AS artist_name,
+      ${compilation_track_artist.track_title}  AS track_title
+    FROM ${compilation_track_artist}
+      INNER JOIN ${library} ON ${library.id} = ${compilation_track_artist.library_id}
+    ORDER BY ${library.legacy_release_id} ASC, ${compilation_track_artist.id} ASC
+  `);
+  return rows as unknown as CompilationTrackExportRow[];
+};
+
+/**
+ * Build the gzipped NDJSON CTA payload from a fresh scan.
+ */
+const buildCompilationTracksExportGzip = async (): Promise<Buffer> => {
+  const rows = await getCompilationTrackExportRows();
+  return gzipSync(Buffer.from(serializeCompilationTracksNdjson(rows), 'utf8'));
+};
+
+// One shared gzipped copy per pod, rebuilt only when the catalog watermark
+// advances (≈daily) — same watermark as the library export, so the two exports
+// the producer fetches together stay a consistent snapshot.
+const compilationTracksExportCache = createWatermarkCache<Buffer>(
+  getCatalogLastModifiedAt,
+  buildCompilationTracksExportGzip
+);
+
+/**
+ * The gzipped NDJSON CTA export for the current watermark. Served as-is on the
+ * gzip-accepting path; gunzipped by the controller for the rare client that
+ * doesn't accept gzip.
+ */
+export const getCompilationTracksExportGzip = (): Promise<Buffer> => compilationTracksExportCache.get();

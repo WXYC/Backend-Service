@@ -49,18 +49,23 @@ const PROBE_POP_LIBFALLBACK = 7061; // NULL canonical -> ELSE branch key 'librar
 const POP_LIBFALLBACK_KEY = `library:${PROBE_POP_LIBFALLBACK}`;
 const POP_LIBFALLBACK_TOTAL = 7; // seeded album_popularity.plays for the library: key
 
-// Exactly the export contract field set (#1468 AC + #1493 popularity), sorted.
+// Exactly the export contract field set (#1468 AC + #1493 popularity + the four
+// BS#1965 library.db-producer fields), sorted.
 const CONTRACT_KEYS = [
+  'album_artist',
   'album_title',
+  'alternate_artist_name',
   'artist_name',
   'artwork_url',
   'code_artist_number',
   'code_letters',
   'code_number',
+  'cross_reference_names',
   'format_name',
   'genre_name',
   'id',
   'label',
+  'legacy_release_id',
   'on_streaming',
   'plays',
   'popularity',

@@ -250,11 +250,25 @@ components:
         One catalog row in the `GET /library/catalog` NDJSON export (BS#1468).
         `rotation_bin` / `rotation_kill_date` are raw (the most-recently-added
         rotation record per album); the client evaluates "in rotation" locally.
+        BS#1965 added the four library.db-producer fields (legacy_release_id,
+        alternate_artist_name, album_artist, cross_reference_names); the SSOT
+        (wxyc-shared api.yaml) carries the authoritative descriptions.
       properties:
         id:
           type: integer
+        legacy_release_id:
+          type: integer
         artist_name:
           type: string
+        alternate_artist_name:
+          type: string
+          nullable: true
+        album_artist:
+          type: string
+          nullable: true
+        cross_reference_names:
+          type: string
+          nullable: true
         album_title:
           type: string
         code_letters:
@@ -293,6 +307,26 @@ components:
         rotation_kill_date:
           type: string
           format: date
+          nullable: true
+
+    CatalogCompilationTrackRow:
+      type: object
+      description: >
+        One compilation_track_artist row in the `GET
+        /library/catalog/compilation-tracks` NDJSON export (BS#1965). Keyed on
+        `legacy_release_id` (the owning library row's surrogate key, which the
+        producer maps to library.db's compilation_track_artist.library_release_id).
+        The SSOT (wxyc-shared api.yaml) carries the authoritative description.
+      required:
+        - legacy_release_id
+        - artist_name
+      properties:
+        legacy_release_id:
+          type: integer
+        artist_name:
+          type: string
+        track_title:
+          type: string
           nullable: true
 
     BmiPerformanceRow:
@@ -1347,6 +1381,57 @@ paths:
             application/x-ndjson:
               schema:
                 $ref: '#/components/schemas/CatalogExportRow'
+        '304':
+          description: Catalog unchanged since `If-Modified-Since` / `since`.
+        '401':
+          description: Missing or invalid bearer token.
+
+  /library/catalog/compilation-tracks:
+    get:
+      summary: Bulk compilation-track (CTA) export (gzipped NDJSON, conditional-GET)
+      description: >
+        Sibling of `GET /library/catalog` for the Backend-sourced library.db
+        producer (BS#1965 / discogs-etl#351): every compilation_track_artist row
+        as one gzipped NDJSON body (one CatalogCompilationTrackRow per line), so
+        the producer can build library.db's `compilation_track_artist` table over
+        HTTP. Same `library_watermark` conditional-GET (`If-Modified-Since` /
+        `?since=` -> `304`) as the library export. Rows are keyed on
+        `legacy_release_id` (the owning library row's surrogate key) and ordered
+        by it.
+      security:
+        - BearerAuth: ['catalog-read']
+      parameters:
+        - name: If-Modified-Since
+          in: header
+          required: false
+          description: RFC 9110 HTTP date from a prior response's `Last-Modified`.
+          schema:
+            type: string
+        - name: since
+          in: query
+          required: false
+          description: Alternative to `If-Modified-Since` (any parseable date string).
+          schema:
+            type: string
+      responses:
+        '200':
+          description: All CTA rows as gzipped NDJSON. One CatalogCompilationTrackRow per line.
+          headers:
+            Last-Modified:
+              description: Catalog watermark; echo back as `If-Modified-Since`.
+              schema:
+                type: string
+            Content-Encoding:
+              description: '`gzip` when the request accepts gzip.'
+              schema:
+                type: string
+            Vary:
+              schema:
+                type: string
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: '#/components/schemas/CatalogCompilationTrackRow'
         '304':
           description: Catalog unchanged since `If-Modified-Since` / `since`.
         '401':
