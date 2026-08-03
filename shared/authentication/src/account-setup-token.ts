@@ -25,6 +25,9 @@ export const ACCOUNT_SETUP_TOKEN_DEFAULT_SECONDS = 60 * 60 * 24 * 7;
 export const accountSetupTokenExpiresInSeconds = (): number => {
   const raw = process.env.ACCOUNT_SETUP_TOKEN_EXPIRES_IN;
   if (raw === undefined) return ACCOUNT_SETUP_TOKEN_DEFAULT_SECONDS;
-  const parsed = Number.parseInt(raw.trim(), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : ACCOUNT_SETUP_TOKEN_DEFAULT_SECONDS;
+  // Number() (not parseInt) so trailing garbage like "3600abc" falls back to the
+  // default rather than silently parsing to 3600 — honoring the documented
+  // "unset, non-numeric, or non-positive falls back" contract (docs/env-vars.md).
+  const parsed = Number(raw.trim());
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : ACCOUNT_SETUP_TOKEN_DEFAULT_SECONDS;
 };

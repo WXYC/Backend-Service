@@ -117,10 +117,20 @@ export const auth = betterAuth({
       // to avoid referencing `auth` before its initializer completes.
       if (isNewUserSetup) {
         try {
-          await db
+          const extended = await db
             .update(verification)
             .set({ expiresAt: new Date(Date.now() + accountSetupTokenExpiresInSeconds() * 1000) })
-            .where(eq(verification.identifier, `reset-password:${token}`));
+            .where(eq(verification.identifier, `reset-password:${token}`))
+            .returning({ id: verification.id });
+          // better-auth minted this row microseconds ago, so a zero-row match is
+          // never expected — it would mean the `reset-password:` identifier
+          // contract drifted (e.g. a better-auth upgrade) and the DJ silently got
+          // an un-extended 1-hour link, re-opening BS#1969 with no other signal.
+          if (extended.length === 0) {
+            Sentry.captureException(new Error('Account-setup token expiry extension matched no verification row'), {
+              tags: { subsystem: 'account-setup-invite', step: 'extend-token-expiry' },
+            });
+          }
         } catch (error) {
           console.error('Error extending account-setup token expiry:', error);
           Sentry.captureException(error, {
@@ -129,22 +139,23 @@ export const auth = betterAuth({
         }
       }
 
-      // Awaited (previously fire-and-forget with console.error only) so SES
-      // throttling/bounces reach Sentry instead of being invisible (BS#1969).
-      // Swallow after capturing to preserve the endpoint's generic 200 — the
-      // caller must not learn whether the address exists from a thrown send.
-      try {
-        await sendEmail({
-          type: emailType,
-          to: user.email,
-          url: resetUrl,
-        });
-      } catch (error) {
+      // Fire-and-forget so the /request-password-reset response isn't held open
+      // on the SES round-trip — this hook is awaited by better-auth's
+      // runInBackgroundOrAwait, so awaiting the send would block the endpoint on
+      // SES latency for every reset. Throttles/bounces still reach Sentry rather
+      // than vanishing (BS#1969). Mirrors the emailVerification hook below; the
+      // endpoint keeps its generic 200 so a caller can't learn whether the
+      // address exists.
+      void sendEmail({
+        type: emailType,
+        to: user.email,
+        url: resetUrl,
+      }).catch((error) => {
         console.error(`Error sending ${emailType} email:`, error);
         Sentry.captureException(error, {
           tags: { subsystem: 'auth-reset-email', email_type: emailType },
         });
-      }
+      });
     },
     onPasswordReset: async ({ user }, request) => {
       console.log(`Password for user ${user.email} has been reset.`);

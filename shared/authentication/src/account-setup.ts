@@ -41,30 +41,34 @@ export interface AccountSetupInviteResult {
  * `BETTER_AUTH_URL` is ever unset.
  *
  * The SES send is awaited so callers (`provisionUser`, CSV import) report an
- * accurate `emailSent`; failures are captured to Sentry and returned, never
- * thrown — provisioning must not abort just because the email bounced.
+ * accurate `emailSent`. Every failure path — resolving the auth context,
+ * minting the token, or the send itself — is captured to Sentry and returned as
+ * `{ sent: false }`, NEVER thrown: `provisionUser` calls this inside its
+ * user-cleanup try block, so a throw here would roll back the just-provisioned
+ * user instead of leaving it in place for an admin resend from the roster.
  */
 export async function createAndSendAccountSetupInvite(
   input: AccountSetupInviteInput
 ): Promise<AccountSetupInviteResult> {
   const { userId, email, redirectTo } = input;
-  const context = await auth.$context;
-
-  // URL-path-safe opaque token (base64url: no `/`, `+`, or `=`). Format differs
-  // from better-auth's own generateId(24) reset tokens but that is irrelevant —
-  // the GET redirect and complete-onboarding match on the exact string.
-  const token = randomBytes(24).toString('base64url');
-  const expiresAt = new Date(Date.now() + accountSetupTokenExpiresInSeconds() * 1000);
-  await context.internalAdapter.createVerificationValue({
-    value: userId,
-    identifier: `reset-password:${token}`,
-    expiresAt,
-  });
-
-  const rawUrl = `${context.baseURL}/reset-password/${token}?callbackURL=${encodeURIComponent(redirectTo)}`;
-  const setupUrl = buildResetUrl(rawUrl, process.env.PASSWORD_RESET_REDIRECT_URL?.trim());
 
   try {
+    const context = await auth.$context;
+
+    // URL-path-safe opaque token (base64url: no `/`, `+`, or `=`). Format differs
+    // from better-auth's own generateId(24) reset tokens but that is irrelevant —
+    // the GET redirect and complete-onboarding match on the exact string.
+    const token = randomBytes(24).toString('base64url');
+    const expiresAt = new Date(Date.now() + accountSetupTokenExpiresInSeconds() * 1000);
+    await context.internalAdapter.createVerificationValue({
+      value: userId,
+      identifier: `reset-password:${token}`,
+      expiresAt,
+    });
+
+    const rawUrl = `${context.baseURL}/reset-password/${token}?callbackURL=${encodeURIComponent(redirectTo)}`;
+    const setupUrl = buildResetUrl(rawUrl, process.env.PASSWORD_RESET_REDIRECT_URL?.trim());
+
     await sendAccountSetupEmail({ to: email, setupUrl });
     return { sent: true };
   } catch (error) {

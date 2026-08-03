@@ -136,4 +136,23 @@ describe('createAndSendAccountSetupInvite()', () => {
     await createAndSendAccountSetupInvite(input);
     expect(mockCreateVerificationValue).toHaveBeenCalledTimes(1);
   });
+
+  it('returns { sent: false, error } without throwing when minting the token fails', async () => {
+    // provisionUser calls this inside its user-cleanup try block, so a throw
+    // here would roll back the just-provisioned user. A mint failure must be
+    // swallowed to sent:false (never thrown), exactly like a send failure.
+    mockCreateVerificationValue.mockRejectedValue(new Error('verification insert failed') as never);
+
+    const result = await createAndSendAccountSetupInvite(input);
+
+    expect(result).toEqual({ sent: false, error: 'verification insert failed' });
+    expect(mockSendAccountSetupEmail).not.toHaveBeenCalled();
+    expect(mockSentryCaptureException).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { subsystem: 'account-setup-invite' },
+        extra: { userId: input.userId, email: input.email },
+      })
+    );
+  });
 });
