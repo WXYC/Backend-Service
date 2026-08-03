@@ -1138,16 +1138,19 @@ export async function writeCompilationTracks(
  * per-track N-validation fan-out that timed out in BS#1117); the client
  * confirms/edits the rows and POSTs them back.
  *
- * Each track's per-track artist credit is flattened onto CTA's single
- * `artist_name` free-text field via the same `projectInlineTracklist` used by
- * the rotation-tracks picker (empty per-track `artists[]` falls back to the
- * release-level artist — "Various" on a V/A comp — and multi-artist credits
- * join on `', '`), so the two surfaces can't drift.
+ * Delegates the release fetch to `getRotationTracksFromRelease`, so the CTA
+ * suggestions and rotation-tracks picker share one cached resolver: the
+ * per-release LRU + in-flight coalescing means a repeated suggestions read (or
+ * one racing a rotation-picker open on the same release) doesn't re-pay LML's
+ * 2-9 s cold release fetch, and the single `projectInlineTracklist` projection
+ * keeps the two surfaces from drifting. Each per-track artist credit flattens
+ * onto CTA's single `artist_name` free-text field (empty per-track `artists[]`
+ * falls back to the release-level artist — "Various" on a V/A comp — and
+ * multi-artist credits join on `', '`).
  *
  * `discogs_release_id: null` + empty `tracks` encodes "no upstream release
- * resolved → manual entry". An LML 404 / `not_found` tombstone on an
- * otherwise-resolved id degrades the same way (id echoed, empty tracks) rather
- * than erroring, matching `getRotationTracksFromRelease`.
+ * resolved → manual entry". A `null` from `getRotationTracksFromRelease` (LML
+ * 404 / absent tracklist) degrades the same way with the id echoed.
  */
 export async function getCompilationTrackSuggestions(
   libraryId: number
@@ -1157,20 +1160,7 @@ export async function getCompilationTrackSuggestions(
     return { discogs_release_id: null, tracks: [] };
   }
 
-  let release: DiscogsReleaseMetadata;
-  try {
-    release = await getRelease(releaseId);
-  } catch (err) {
-    if (err instanceof LmlClientError && err.statusCode === 404) {
-      return { discogs_release_id: releaseId, tracks: [] };
-    }
-    throw err;
-  }
-  if (release.not_found) {
-    return { discogs_release_id: releaseId, tracks: [] };
-  }
-
-  const projected = projectInlineTracklist(release.tracklist, release.artist) ?? [];
+  const projected = (await getRotationTracksFromRelease(releaseId)) ?? [];
   const tracks: CompilationTrackInputRow[] = projected.map((t) => ({
     // `projectInlineTracklist` guarantees a non-empty `artists[]` (it seeds the
     // release-artist fallback), so the join is always a real credit.

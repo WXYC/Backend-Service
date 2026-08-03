@@ -70,6 +70,16 @@ describe('validateCompilationTracksBody (BS#1964 CTA write validation)', () => {
       false
     );
   });
+
+  it('accepts a list at the 500-entry cap but rejects one over it', () => {
+    const track = { artist_name: 'Guest' };
+    expect(validateCompilationTracksBody({ tracks: Array(500).fill(track) }).ok).toBe(true);
+    const over = validateCompilationTracksBody({ tracks: Array(501).fill(track) });
+    expect(over.ok).toBe(false);
+    if (!over.ok) {
+      expect(over.message).toMatch(/exceed/i);
+    }
+  });
 });
 
 describe('getCompilationTracks controller (BS#1964)', () => {
