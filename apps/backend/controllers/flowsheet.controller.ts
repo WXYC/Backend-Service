@@ -73,6 +73,15 @@ export interface IFSEntry extends Omit<
   label_id: number | null;
   rotation_bin: string | null;
   on_streaming: boolean | null;
+  // BS#1908 (Not-on-Discogs epic #1280): MD-set discogs-unavailable flag +
+  // note, sourced from the joined `library` row — NOT nested under `metadata`
+  // (that object is the flowsheet/album_metadata COALESCE view; this pair is
+  // library-only, same source as `on_streaming` above). `null` when the entry
+  // has no library row (freeform/message/talkset/breakpoint, or an unlinked
+  // track); `transformToV2` reads that nullability to distinguish "no library
+  // row" (omit the wire field) from "library row, flag false" (emit `false`).
+  discogs_unavailable: boolean | null;
+  discogs_unavailable_note: string | null;
   metadata: IFSEntryMetadata;
   // Resolved catalog artist for the played release (flowsheet.album_id ->
   // library.artist_id). The batch key `attachUpcomingShows` uses to look up the
