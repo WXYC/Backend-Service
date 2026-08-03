@@ -585,6 +585,66 @@ describe('flowsheet.controller', () => {
       });
     });
 
+    // BS#1960: `getEntriesByPage`'s deferred-join rewrite fixed the deep-OFFSET
+    // 500 (Postgres was paying the 3-LEFT-JOIN cost for every discarded row,
+    // ~11ms/row, hitting the 5s statement_timeout past an offset of ~450-500).
+    // This guard is a separate cost/DoS ceiling on top of that fix — see
+    // MAX_OFFSET in flowsheet.controller.ts — so an absurd page*limit fails
+    // fast with a 400 instead of ever reaching the query.
+    describe('deep-offset guard (BS#1960)', () => {
+      it('rejects an offset (page * limit) exceeding MAX_OFFSET with 400', async () => {
+        // page 501 * limit 100 = offset 50,100 > MAX_OFFSET (50,000).
+        const req = createMockReq({ page: '501', limit: '100' });
+        const res = createMockRes();
+
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toThrow(
+          'Requested page depth too large'
+        );
+        expect(mockGetEntriesByPage).not.toHaveBeenCalled();
+      });
+
+      it('rejects with a WxycError (400), not an unhandled error', async () => {
+        const req = createMockReq({ page: '501', limit: '100' });
+        const res = createMockRes();
+
+        await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+      });
+
+      it('accepts an offset exactly at MAX_OFFSET (page 500 * limit 100 = 50,000)', async () => {
+        mockGetEntriesByPage.mockResolvedValue([]);
+        mockGetEntryCount.mockResolvedValue(0);
+        mockGetOnAirDJName.mockResolvedValue(null);
+
+        const req = createMockReq({ page: '500', limit: '100' });
+        const res = createMockRes();
+
+        await getEntries(req as Request, res as Response, mockNext);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        expect(mockGetEntriesByPage).toHaveBeenCalledWith(50000, 100);
+      });
+
+      // The acceptance floor this cap must clear: a UI paginator walking to
+      // page 50 at the default-ish limit=100 (offset 5,000) must stay green.
+      it('accepts page=50&limit=100 (offset 5,000) — the deep-paging acceptance case', async () => {
+        const entries = [createMockEntry(1)];
+        mockGetEntriesByPage.mockResolvedValue(entries);
+        mockGetEntryCount.mockResolvedValue(10000);
+        mockGetOnAirDJName.mockResolvedValue(null);
+
+        const req = createMockReq({ page: '50', limit: '100' });
+        const res = createMockRes();
+
+        await getEntries(req as Request, res as Response, mockNext);
+
+        expect(mockGetEntriesByPage).toHaveBeenCalledWith(5000, 100);
+        expect(res.status).toHaveBeenCalledWith(200);
+        expect(res.json).toHaveBeenCalledWith(
+          expect.objectContaining({ entries: entries.map((e) => ({ ...e, v2: true })), page: 50, limit: 100 })
+        );
+      });
+    });
+
     it('rejects with error on service failure', async () => {
       const error = new Error('DB connection failed');
       mockGetEntriesByPage.mockRejectedValue(error);

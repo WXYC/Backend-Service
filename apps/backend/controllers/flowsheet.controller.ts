@@ -112,6 +112,17 @@ const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual 
 // fine as a JS integer (passing Number.isInteger) but blows up downstream as
 // an unhandled "value out of range for type integer" Postgres error (BS#1800).
 const INT4_MAX = 2147483647;
+// BS#1960 cost/DoS guard on `page * limit` (the OFFSET passed to
+// getEntriesByPage). The BS#1960 deferred-join rewrite of getEntriesByPage
+// made deep offsets cheap (a bare flowsheet.id PK index scan, no joins on
+// the discarded rows), so this is not a correctness bound — it's a ceiling
+// on how much index-scanning a single request can ask for. Set well above
+// any realistic UI paging depth: the acceptance floor is page=50 at
+// limit=100 (offset 5,000), and this allows offset up to page 500 at
+// limit=100 — 10x that. A genuine deep-history pull (further back than a UI
+// paginator would ever click) should use the start_id/end_id range path
+// above, which is a true index range scan regardless of depth.
+const MAX_OFFSET = 50_000;
 
 /**
  * Project a page of flowsheet entries to their V2 wire shape, tolerating — but
@@ -217,6 +228,12 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   if (isNaN(page) || page < 0) throw new WxycError('page must be a non-negative number', 400);
 
   const offset = page * limit;
+  // BS#1960: reject an out-of-envelope page depth before it reaches the
+  // query, rather than letting a client walk arbitrarily deep pages. See
+  // MAX_OFFSET above for the cap rationale.
+  if (offset > MAX_OFFSET) {
+    throw new WxycError('Requested page depth too large', 400);
+  }
   const [entries, total, onAirDjName] = await Promise.all([
     flowsheet_service.getEntriesByPage(offset, limit),
     flowsheet_service.getEntryCount(),
@@ -236,6 +253,13 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   // the whole page. Independent attaches, so run concurrently.
   await Promise.all([flowsheet_service.attachUpcomingShows(entries), flowsheet_service.attachCriticReviews(entries)]);
 
+  // BS#1960 note: totalPages is derived from the full row estimate, so it can
+  // advertise more pages than MAX_OFFSET actually permits (e.g. ~26k pages at
+  // limit=100 against a ~2.6M-row table, while offset is capped at 50k / page
+  // 500). A client that lets a user jump past the cap gets an explicit 400
+  // rather than the old timeout-500; genuine deep-history reads belong on the
+  // start_id/end_id range path. Left unclamped deliberately — totalPages stays
+  // an honest "how many pages of data exist" for the "Page X of N" display.
   const totalPages = Math.ceil(total / limit);
 
   // `on_air` lets clients render the on-air banner without scanning the fetched

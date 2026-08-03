@@ -493,17 +493,46 @@ export const getEntryCount = async (): Promise<number> => {
   return Number(row?.count ?? 0);
 };
 
-/** Gets flowsheet entries by page with metadata joins */
+/**
+ * Gets flowsheet entries by page with metadata joins.
+ *
+ * BS#1960: deferred-join / late-row-lookup rewrite. The naive form —
+ * OFFSET/LIMIT applied to the fully-joined query — makes Postgres compute
+ * the joined row (3 LEFT JOINs against rotation/library/album_metadata) for
+ * every one of the `offset` discarded rows before it can discard them.
+ * Latency grew ~11ms per discarded row and the endpoint 500'd once `offset`
+ * passed ~450-500, hitting this RDS instance's 5s statement_timeout — plain
+ * OFFSET-with-joins pagination pathology.
+ *
+ * The fix: resolve the page of `flowsheet.id`s FIRST, against the bare PK
+ * index (no joins touched), then join only that already-bounded `limit`-row
+ * set. `page` is a subquery-in-FROM (`.as('page')`) so it plans as an index
+ * range scan over `flowsheet.id DESC` — the same cheap shape
+ * `getEntriesByRange` already gets from its `WHERE id BETWEEN` predicate.
+ * The inner `ORDER BY ... OFFSET ... LIMIT` picks the page; the outer
+ * `ORDER BY flowsheet.id DESC` re-establishes descending order after the
+ * join (a join doesn't guarantee it preserves the subquery's row order).
+ * flowsheet.id is a unique, monotonic PK, so no tie-break column is needed
+ * here (contrast `getEntriesByShow`, which ties on `play_order`).
+ */
 export const getEntriesByPage = async (offset: number, limit: number): Promise<IFSEntry[]> => {
+  const page = db
+    .select({ id: flowsheet.id })
+    .from(flowsheet)
+    .orderBy(desc(flowsheet.id))
+    .offset(offset)
+    .limit(limit)
+    .as('page');
+
   const raw = await db
     .select(FSEntryFieldsRaw)
-    .from(flowsheet)
+    .from(page)
+    .innerJoin(flowsheet, eq(flowsheet.id, page.id))
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
-    .orderBy(desc(flowsheet.id))
-    .offset(offset)
-    .limit(limit);
+    .orderBy(desc(flowsheet.id));
+
   return raw.map(transformToIFSEntry);
 };
 

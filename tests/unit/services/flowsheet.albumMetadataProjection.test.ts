@@ -43,10 +43,20 @@ function installRecursiveSelectMock(): MockCapture {
       capture.leftJoinCalls.push({ table, on });
       return c;
     });
+    // BS#1960: getEntriesByPage's deferred-join rewrite adds an innerJoin
+    // (bounded id-page -> flowsheet) ahead of the pre-existing leftJoins.
+    // Not tracked in capture.leftJoinCalls — the leftJoin-count assertions
+    // below are specifically about the 3 LEFT JOINs, unaffected by it.
+    c.innerJoin = jest.fn().mockReturnValue(c);
     c.where = jest.fn().mockReturnValue(c);
     c.orderBy = jest.fn().mockReturnValue(c);
     c.offset = jest.fn().mockReturnValue(c);
-    c.limit = jest.fn().mockResolvedValue([] as never);
+    // Chain-returning, not terminal: getEntriesByPage's inner id-subquery
+    // chains .limit(m).as('page') — .as needs a chain to call onto.
+    c.limit = jest.fn().mockReturnValue(c);
+    // Terminal for the id-subquery: returns a stand-in Subquery whose `.id`
+    // is what the outer query's innerJoin predicate references.
+    c.as = jest.fn().mockReturnValue({ id: 'mock-page-id' });
     // Drizzle terminal methods that may be awaited directly
     c.then = jest.fn().mockImplementation((onFulfilled: (v: unknown) => unknown) => {
       return Promise.resolve([]).then(onFulfilled);

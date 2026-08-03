@@ -61,10 +61,20 @@ function installRecursiveSelectMock(): MockCapture {
       capture.leftJoinCalls.push({ table, on });
       return c;
     });
+    // BS#1960: getEntriesByPage's deferred-join rewrite adds an innerJoin
+    // (bounded id-page -> flowsheet) ahead of the pre-existing leftJoins.
+    // Not tracked in capture.leftJoinCalls — the "still exactly 3 leftJoins"
+    // assertion below is specifically about rotation/library/album_metadata.
+    c.innerJoin = jest.fn().mockReturnValue(c);
     c.where = jest.fn().mockReturnValue(c);
     c.orderBy = jest.fn().mockReturnValue(c);
     c.offset = jest.fn().mockReturnValue(c);
-    c.limit = jest.fn().mockResolvedValue([] as never);
+    // Chain-returning, not terminal: getEntriesByPage's inner id-subquery
+    // chains .limit(m).as('page') — .as needs a chain to call onto.
+    c.limit = jest.fn().mockReturnValue(c);
+    // Terminal for the id-subquery: returns a stand-in Subquery whose `.id`
+    // is what the outer query's innerJoin predicate references.
+    c.as = jest.fn().mockReturnValue({ id: 'mock-page-id' });
     c.then = jest.fn().mockImplementation((onFulfilled: (v: unknown) => unknown) => {
       return Promise.resolve([]).then(onFulfilled);
     });
@@ -90,10 +100,13 @@ describe('flowsheet.service — discogs-unavailable SQL projection (BS#1908)', (
   });
 
   describe.each([
-    ['getEntriesByPage', () => getEntriesByPage(0, 10)],
-    ['getEntriesByRange', () => getEntriesByRange(1, 10)],
-    ['getEntriesByShow', () => getEntriesByShow(1)],
-  ] as const)('%s', (_name, run) => {
+    // BS#1960: getEntriesByPage's deferred-join rewrite issues a constant TWO
+    // db.select calls (the bare id-page subquery, then the joined lookup) —
+    // still page-size-independent (no N+1), just no longer exactly one.
+    ['getEntriesByPage', () => getEntriesByPage(0, 10), 2],
+    ['getEntriesByRange', () => getEntriesByRange(1, 10), 1],
+    ['getEntriesByShow', () => getEntriesByShow(1), 1],
+  ] as const)('%s', (_name, run, expectedSelectCalls) => {
     it('projects discogs_unavailable/discogs_unavailable_note as raw library column refs', async () => {
       await run();
 
@@ -112,10 +125,10 @@ describe('flowsheet.service — discogs-unavailable SQL projection (BS#1908)', (
       expect(capture.leftJoinCalls).toHaveLength(3);
     });
 
-    it('issues exactly one db.select call regardless of page size (no N+1)', async () => {
+    it('issues a constant number of db.select calls regardless of page size (no N+1)', async () => {
       await run();
 
-      expect(capture.selectCallCount).toBe(1);
+      expect(capture.selectCallCount).toBe(expectedSelectCalls);
     });
   });
 });
