@@ -1059,6 +1059,12 @@ const CTA_ARTIST_NAME_MAX = 255;
 const CTA_TRACK_TITLE_MAX = 255;
 const CTA_TRACK_POSITION_MAX = 20;
 
+// Upper bound on tracks per additive write. A real V/A tracklist is well under
+// this (Discogs box sets top out in the low hundreds); the cap keeps a single
+// request from building an unbounded multi-row INSERT. Reject as 400 rather
+// than truncating, so the client sees that its list was too large.
+const CTA_MAX_TRACKS = 500;
+
 /** Normalize an optional nullable free-text field: absent/blank/whitespace → null. */
 const normalizeOptionalCtaText = (v: unknown): string | null => {
   if (typeof v !== 'string') return null;
@@ -1074,11 +1080,15 @@ type CompilationTrackValidationResult =
  * unit-testable without a DB). `artist_name` is required and non-blank
  * (api.yaml `minLength: 1`); `track_title` / `track_position` are optional and
  * nullable, with blank/whitespace coerced to null so the `track_title IS NULL`
- * partial unique index behaves. All three are length-capped to their columns.
+ * partial unique index behaves. All three are length-capped to their columns,
+ * and the list itself is capped at `CTA_MAX_TRACKS` entries.
  */
 export function validateCompilationTracksBody(body: CompilationTracksWriteBody): CompilationTrackValidationResult {
   if (!body || !Array.isArray(body.tracks) || body.tracks.length === 0) {
     return { ok: false, message: 'tracks must be a non-empty array' };
+  }
+  if (body.tracks.length > CTA_MAX_TRACKS) {
+    return { ok: false, message: `tracks must not exceed ${CTA_MAX_TRACKS} entries` };
   }
   const tracks: libraryService.CompilationTrackInputRow[] = [];
   for (let i = 0; i < body.tracks.length; i++) {
