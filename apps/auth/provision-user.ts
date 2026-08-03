@@ -4,9 +4,14 @@
  * endpoint and by createDefaultUser() at startup.
  */
 
-import * as Sentry from '@sentry/node';
 import { randomBytes } from 'node:crypto';
-import { auth, formatUsernameError, validateUsername, WXYCRoles } from '@wxyc/authentication';
+import {
+  auth,
+  createAndSendAccountSetupInvite,
+  formatUsernameError,
+  validateUsername,
+  WXYCRoles,
+} from '@wxyc/authentication';
 import { db, user } from '@wxyc/database';
 import { eq } from 'drizzle-orm';
 
@@ -172,38 +177,30 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
       await db.update(user).set({ role: 'admin' }).where(eq(user.id, newUser.id));
     }
 
-    // 10. Trigger password reset flow to send welcome email with a tokenized setup URL.
-    // The sendResetPassword hook in auth.definition.ts detects hasCompletedOnboarding === false
-    // and sends the accountSetup email template instead of a plain password reset.
-    //
-    // AWAITED (not fire-and-forget) so we can report `emailSent` to the caller.
-    // A swallow-style .catch() leaks: the dj-site UI reports success, but the
-    // user gets no email and has no way to log in. The provisioning itself
-    // succeeded though — user row, credential, and member row are committed —
-    // so we don't throw.
+    // 10. Send the welcome email carrying a long-lived account-setup token.
+    // createAndSendAccountSetupInvite mints its own `reset-password:<token>`
+    // verification row with the account-setup TTL (default 7 days, BS#1969) —
+    // distinct from a genuine password reset's 1-hour token — and awaits the
+    // SES send so `emailSent` reflects the real outcome (Sentry-captured on
+    // failure inside the helper). `emailSent: false` means the account was
+    // provisioned (user row, credential, and member row are committed) but the
+    // setup email did not go out — the caller surfaces this so an admin can
+    // resend from the roster. Never throws, so provisioning is not aborted.
     const frontendUrl = process.env.FRONTEND_SOURCE || 'http://localhost:3000';
-    let emailSent = true;
-    let emailError: string | undefined;
-    try {
-      await auth.api.requestPasswordReset({
-        body: { email, redirectTo: `${frontendUrl}/onboarding` },
-        headers: new Headers({ origin: frontendUrl }),
-      });
-    } catch (error) {
-      emailSent = false;
-      emailError = errorMessage(error);
-      console.error('[PROVISION USER] Failed to trigger setup email:', error);
-      Sentry.captureException(error, {
-        tags: { subsystem: 'provision-user', step: 'request-password-reset' },
-        extra: { email, userId: newUser.id },
-      });
+    const invite = await createAndSendAccountSetupInvite({
+      userId: newUser.id,
+      email,
+      redirectTo: `${frontendUrl}/onboarding`,
+    });
+    if (!invite.sent) {
+      console.error('[PROVISION USER] Failed to send setup email:', invite.error);
     }
 
     return {
       user: newUser,
       member: createdMember,
-      emailSent,
-      emailError,
+      emailSent: invite.sent,
+      emailError: invite.error,
     };
   } catch (error) {
     // Clean up: delete the orphaned user so we don't leave partial state

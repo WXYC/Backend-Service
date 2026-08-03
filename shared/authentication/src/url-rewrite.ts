@@ -14,3 +14,26 @@ export const rewriteUrlForFrontend = (url: string): string => {
     return url;
   }
 };
+
+/**
+ * Rewrite a Better Auth reset/setup URL to the frontend host and, when a
+ * dedicated reset-page path is configured (`PASSWORD_RESET_REDIRECT_URL`),
+ * attach it as a `redirectTo` query param. Extracted from `auth.definition.ts`
+ * so both the `sendResetPassword` hook and the `createAndSendAccountSetupInvite`
+ * helper build byte-identical links.
+ */
+export const buildResetUrl = (url: string, redirectTo?: string): string => {
+  const rewrittenUrl = rewriteUrlForFrontend(url);
+
+  if (!redirectTo) {
+    return rewrittenUrl;
+  }
+
+  try {
+    const parsed = new URL(rewrittenUrl);
+    parsed.searchParams.set('redirectTo', redirectTo);
+    return parsed.toString();
+  } catch {
+    return rewrittenUrl;
+  }
+};
