@@ -5,5 +5,8 @@ export * from './auth.username';
 export * from './cors-origin';
 export * from './device-authorization';
 export { sendAccountSetupEmail } from './email';
+export { createAndSendAccountSetupInvite } from './account-setup';
+export type { AccountSetupInviteInput, AccountSetupInviteResult } from './account-setup';
+export { accountSetupTokenExpiresInSeconds, ACCOUNT_SETUP_TOKEN_DEFAULT_SECONDS } from './account-setup-token';
 export { bootstrapTrustedClients } from './bootstrap-trusted-clients';
 export { buildTrustedClients } from './oidc-trusted-clients';

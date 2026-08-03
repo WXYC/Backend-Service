@@ -41,23 +41,8 @@ import {
 import { sendEmail, sendOTPEmail, sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
 import { buildTrustedClients } from './oidc-trusted-clients';
 import { buildLoginPage } from './oidc-login-page';
-import { rewriteUrlForFrontend } from './url-rewrite';
-
-const buildResetUrl = (url: string, redirectTo?: string) => {
-  const rewrittenUrl = rewriteUrlForFrontend(url);
-
-  if (!redirectTo) {
-    return rewrittenUrl;
-  }
-
-  try {
-    const parsed = new URL(rewrittenUrl);
-    parsed.searchParams.set('redirectTo', redirectTo);
-    return parsed.toString();
-  } catch {
-    return rewrittenUrl;
-  }
-};
+import { buildResetUrl, rewriteUrlForFrontend } from './url-rewrite';
+import { accountSetupTokenExpiresInSeconds } from './account-setup-token';
 
 // Type annotation avoids TS2742: tsup's DTS emitter cannot reference
 // better-auth's internal anonymous plugin types (unexported subpath).
@@ -110,7 +95,7 @@ export const auth = betterAuth({
     requireEmailVerification: true,
     minPasswordLength: 8,
     disableSignUp: true,
-    sendResetPassword: async ({ user, url }, request) => {
+    sendResetPassword: async ({ user, url, token }, request) => {
       const redirectTo = process.env.PASSWORD_RESET_REDIRECT_URL?.trim();
       const resetUrl = buildResetUrl(url, redirectTo);
 
@@ -122,13 +107,44 @@ export const auth = betterAuth({
 
       const emailType = isNewUserSetup ? 'accountSetup' : 'passwordReset';
 
-      void sendEmail({
-        type: emailType,
-        to: user.email,
-        url: resetUrl,
-      }).catch((error) => {
+      // Account-setup invites that reach this hook (admin roster "Send Invite"
+      // resend, or a forgot-password by a not-yet-onboarded DJ) arrive with
+      // better-auth's 1-hour reset token already minted. Extend it to the
+      // account-setup TTL so the emailed link matches provisionUser's long-lived
+      // invite — DJs act on setup links days later (BS#1969). Genuine password
+      // resets (completed users) keep the 1-hour default untouched. Uses `db`
+      // directly (like the other hooks in this file) rather than `auth.$context`
+      // to avoid referencing `auth` before its initializer completes.
+      if (isNewUserSetup) {
+        try {
+          await db
+            .update(verification)
+            .set({ expiresAt: new Date(Date.now() + accountSetupTokenExpiresInSeconds() * 1000) })
+            .where(eq(verification.identifier, `reset-password:${token}`));
+        } catch (error) {
+          console.error('Error extending account-setup token expiry:', error);
+          Sentry.captureException(error, {
+            tags: { subsystem: 'account-setup-invite', step: 'extend-token-expiry' },
+          });
+        }
+      }
+
+      // Awaited (previously fire-and-forget with console.error only) so SES
+      // throttling/bounces reach Sentry instead of being invisible (BS#1969).
+      // Swallow after capturing to preserve the endpoint's generic 200 — the
+      // caller must not learn whether the address exists from a thrown send.
+      try {
+        await sendEmail({
+          type: emailType,
+          to: user.email,
+          url: resetUrl,
+        });
+      } catch (error) {
         console.error(`Error sending ${emailType} email:`, error);
-      });
+        Sentry.captureException(error, {
+          tags: { subsystem: 'auth-reset-email', email_type: emailType },
+        });
+      }
     },
     onPasswordReset: async ({ user }, request) => {
       console.log(`Password for user ${user.email} has been reset.`);

@@ -66,7 +66,12 @@ const mockAuthContext = {
   },
 };
 
-const mockRequestPasswordReset = jest.fn().mockResolvedValue({ status: true } as never);
+// provisionUser now sends the welcome email via createAndSendAccountSetupInvite
+// (which mints a long-lived account-setup token and reports the real SES
+// outcome) instead of auth.api.requestPasswordReset. The helper's own minting /
+// URL / Sentry behavior is unit-tested in account-setup.test.ts; here we only
+// assert provisionUser calls it correctly and maps its result onto emailSent.
+const mockCreateInvite = jest.fn().mockResolvedValue({ sent: true } as never);
 
 jest.mock('@wxyc/authentication', () => {
   // Use the real validator so the tests exercise the production regex.
@@ -75,10 +80,8 @@ jest.mock('@wxyc/authentication', () => {
     ...actual,
     auth: {
       $context: Promise.resolve(mockAuthContext),
-      api: {
-        requestPasswordReset: (...args: unknown[]) => mockRequestPasswordReset(...args),
-      },
     },
+    createAndSendAccountSetupInvite: (...args: unknown[]) => mockCreateInvite(...args),
     WXYCRoles: {
       member: {},
       dj: {},
@@ -140,6 +143,7 @@ function setUpHappyPath() {
   mockAdapterCreate.mockResolvedValue(fakeMember);
   mockAdapterUpdate.mockResolvedValue(undefined);
   mockDeleteUser.mockResolvedValue(undefined);
+  mockCreateInvite.mockResolvedValue({ sent: true } as never);
 }
 
 // --- Tests ---
@@ -397,34 +401,35 @@ describe('provisionUser()', () => {
     });
   });
 
-  describe('welcome email', () => {
-    it('should trigger password reset flow after successful provisioning', async () => {
+  describe('account-setup invite', () => {
+    it('should send the setup invite after successful provisioning with the onboarding redirect', async () => {
       await provisionUser(validInput);
 
-      expect(mockRequestPasswordReset).toHaveBeenCalledWith({
-        body: { email: validInput.email, redirectTo: expect.stringContaining('/onboarding') },
-        headers: expect.any(Headers),
+      expect(mockCreateInvite).toHaveBeenCalledWith({
+        userId: fakeUser.id,
+        email: validInput.email,
+        redirectTo: expect.stringContaining('/onboarding'),
       });
     });
 
-    it('should not trigger password reset if user creation fails', async () => {
+    it('should not send the invite if user creation fails', async () => {
       mockCreateUser.mockRejectedValue(new Error('unique constraint violated'));
 
       await provisionUser(validInput).catch(() => {});
 
-      expect(mockRequestPasswordReset).not.toHaveBeenCalled();
+      expect(mockCreateInvite).not.toHaveBeenCalled();
     });
 
-    it('should not trigger password reset if member creation fails', async () => {
+    it('should not send the invite if member creation fails', async () => {
       mockAdapterCreate.mockRejectedValue(new Error('DB constraint violation'));
 
       await provisionUser(validInput).catch(() => {});
 
-      expect(mockRequestPasswordReset).not.toHaveBeenCalled();
+      expect(mockCreateInvite).not.toHaveBeenCalled();
     });
 
-    it('should not block provisioning if password reset trigger fails', async () => {
-      mockRequestPasswordReset.mockRejectedValue(new Error('SES error'));
+    it('should not block provisioning if the setup email fails to send', async () => {
+      mockCreateInvite.mockResolvedValue({ sent: false, error: 'SES error' } as never);
 
       const result = await provisionUser(validInput);
 
@@ -432,7 +437,7 @@ describe('provisionUser()', () => {
     });
 
     it('should report emailSent=true on success', async () => {
-      mockRequestPasswordReset.mockResolvedValue({ status: true } as never);
+      mockCreateInvite.mockResolvedValue({ sent: true } as never);
 
       const result = await provisionUser(validInput);
 
@@ -440,9 +445,8 @@ describe('provisionUser()', () => {
       expect(result.emailError).toBeUndefined();
     });
 
-    it('should report emailSent=false with emailError on failure', async () => {
-      mockSentryCaptureException.mockClear();
-      mockRequestPasswordReset.mockRejectedValue(new Error('SES throttled'));
+    it('should report emailSent=false with emailError when the send fails', async () => {
+      mockCreateInvite.mockResolvedValue({ sent: false, error: 'SES throttled' } as never);
 
       const result = await provisionUser(validInput);
 
@@ -451,25 +455,16 @@ describe('provisionUser()', () => {
       // user still created — provisioning is not aborted
       expect(result.user).toEqual(fakeUser);
       expect(result.member).toBeDefined();
-      // observability: regression-guard so dropping the Sentry capture would
-      // fail loudly instead of silently degrading monitoring
-      expect(mockSentryCaptureException).toHaveBeenCalledWith(
-        expect.any(Error),
-        expect.objectContaining({
-          tags: { subsystem: 'provision-user', step: 'request-password-reset' },
-          extra: expect.objectContaining({ email: validInput.email, userId: fakeUser.id }),
-        })
-      );
     });
 
-    it('should await the password reset call (not fire-and-forget)', async () => {
+    it('should await the invite send (not fire-and-forget)', async () => {
       let resolved = false;
-      mockRequestPasswordReset.mockImplementation(
+      mockCreateInvite.mockImplementation(
         () =>
-          new Promise<void>((resolve) => {
+          new Promise((resolve) => {
             setTimeout(() => {
               resolved = true;
-              resolve();
+              resolve({ sent: true });
             }, 10);
           })
       );
