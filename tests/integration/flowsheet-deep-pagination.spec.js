@@ -54,10 +54,17 @@ describe('GET /flowsheet deep OFFSET pagination (BS#1960)', () => {
     // n=1 is the OLDEST row in the batch (lowest id), n=BATCH_SIZE the
     // NEWEST (highest id) — the batch is therefore the most-recent
     // BATCH_SIZE rows in the whole table once this insert commits.
+    //
+    // The explicit `$1::text` / `$2::int` casts are load-bearing: postgres-js
+    // prepares this statement and `$1` is used both bare (feeding the `text`
+    // artist_name column) and inside a `||` concat, which makes the server
+    // deduce two conflicting types for the same parameter — a
+    // `PostgresError: inconsistent types deduced for parameter $1` (42P08).
+    // Pinning each parameter's type removes the ambiguity. Don't drop them.
     const rows = await sql.unsafe(
       `INSERT INTO "${SCHEMA}".flowsheet (entry_type, artist_name, track_title, play_order)
-       SELECT 'track', $1, $1 || ' #' || n, n
-       FROM generate_series(1, $2) AS n
+       SELECT 'track', $1::text, $1::text || ' #' || n, n
+       FROM generate_series(1, $2::int) AS n
        RETURNING id`,
       [MARKER, BATCH_SIZE]
     );
