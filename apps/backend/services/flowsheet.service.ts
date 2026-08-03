@@ -253,6 +253,19 @@ const FSEntryFieldsRaw = {
   genres: album_metadata.genres,
   styles: album_metadata.styles,
   on_streaming: library.on_streaming,
+  // BS#1908 (Not-on-Discogs epic #1280): the MD-set discogs-unavailable flag,
+  // mirroring BS#1895's other read surfaces onto the V2 flowsheet album embed.
+  // Sourced directly off the already-joined `library` row below (see
+  // leftJoin(library, ...) in getEntriesByPage/getEntriesByRange/getEntriesByShow)
+  // rather than a per-row call to `getDiscogsUnavailableFlagsById` — that
+  // single-id helper is BS#1895's proxy-path lookup and would reintroduce the
+  // N+1 the flowsheet read path forbids. A library-linked row picks the flag up
+  // as part of this SAME query; a non-library row (freeform track with no
+  // album_id, message/talkset/breakpoint/marker rows) gets SQL NULL from the
+  // LEFT JOIN miss, which transformToV2 reads as "omit the field" per the
+  // published contract (boolean-when-present, not required).
+  discogs_unavailable: library.discogs_unavailable,
+  discogs_unavailable_note: library.discogs_unavailable_note,
   metadata_status: flowsheet.metadata_status,
   enriching_since: flowsheet.enriching_since,
   // tubafrenzy's authoritative top-of-hour for breakpoint rows (BS#1449); NULL
@@ -299,6 +312,11 @@ export type FSEntryRaw = {
   genres: string[] | null;
   styles: string[] | null;
   on_streaming: boolean | null;
+  // BS#1908: null when the LEFT JOIN to `library` misses (no album_id, or an
+  // album_id with no matching library row); a joined row always yields a
+  // real boolean (the column is NOT NULL on `library`).
+  discogs_unavailable: boolean | null;
+  discogs_unavailable_note: string | null;
   metadata_status: FSEntry['metadata_status'];
   enriching_since: Date | null;
   radio_hour: Date | null;
@@ -358,6 +376,11 @@ export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
     artist_bio: raw.artist_bio,
     artist_wikipedia_url: raw.artist_wikipedia_url,
     on_streaming: raw.on_streaming ?? null,
+    // BS#1908: pass through as-is (no `?? null` collapse needed beyond the
+    // type already being nullable) — see FSEntryRaw's docstring for the
+    // "null means no library row" contract transformToV2 relies on.
+    discogs_unavailable: raw.discogs_unavailable ?? null,
+    discogs_unavailable_note: raw.discogs_unavailable_note ?? null,
     metadata_status: raw.metadata_status,
     enriching_since: raw.enriching_since,
     radio_hour: raw.radio_hour ?? null,
@@ -1444,6 +1467,22 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         genres: entry.metadata?.genres?.length ? entry.metadata.genres : null,
         styles: entry.metadata?.styles?.length ? entry.metadata.styles : null,
         on_streaming: entry.on_streaming ?? null,
+        // BS#1908 (Not-on-Discogs epic #1280): MD-set discogs-unavailable flag
+        // on the V2 flowsheet album embed, matching BS#1895's other read
+        // surfaces and the already-published wxyc-shared@3.2.0 contract
+        // (FlowsheetEntryResponse.discogsUnavailable — boolean, NOT required;
+        // discogsUnavailableNote — nullable string). Wire is deliberately
+        // camelCase (the `withDiscogsUnavailableCamelCase` convention),
+        // unlike the snake_case siblings above. Emitted only when this track
+        // resolved to a library row (`entry.discogs_unavailable !== null`) —
+        // a freeform/unlinked track omits the field entirely rather than
+        // sending `null`/`false`, mirroring the upcoming_show/critic_reviews
+        // present-or-absent projection pattern below. The note is emitted
+        // independently whenever non-null (a library row can have the flag
+        // set with no note, or not have a library row at all — both leave
+        // discogs_unavailable_note null, so this single check covers both).
+        ...(entry.discogs_unavailable !== null ? { discogsUnavailable: entry.discogs_unavailable } : {}),
+        ...(entry.discogs_unavailable_note !== null ? { discogsUnavailableNote: entry.discogs_unavailable_note } : {}),
         // BS#891. iOS branches on this to decide whether to render inline
         // metadata or fall back to the proxy-fetch path
         // (WXYC/wxyc-ios-64#270). Always present on track rows once the
