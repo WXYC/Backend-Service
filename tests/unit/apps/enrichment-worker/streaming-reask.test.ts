@@ -101,6 +101,7 @@ describe('reaskUnresolvedStreaming (BS#1915)', () => {
   it('dispatches enrichmentBulkLookup per candidate through the shared batch-lane batcher, and upserts a fresh match', async () => {
     mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([CANDIDATE]));
     mockEnrichmentBulkLookup.mockResolvedValueOnce({
+      search_type: 'direct',
       results: [
         { artwork: { artwork_url: 'https://i.discogs.com/x.jpg', release_url: 'https://discogs.com/release/1' } },
       ],
@@ -143,6 +144,7 @@ describe('reaskUnresolvedStreaming (BS#1915)', () => {
     const second = { album_id: 8, artist_name: 'Chuquimamani-Condori', album_title: 'Edits' };
     mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([CANDIDATE, second]));
     mockEnrichmentBulkLookup.mockRejectedValueOnce(new Error('transient')).mockResolvedValueOnce({
+      search_type: 'direct',
       results: [
         { artwork: { artwork_url: 'https://i.discogs.com/y.jpg', release_url: 'https://discogs.com/release/2' } },
       ],
@@ -153,5 +155,49 @@ describe('reaskUnresolvedStreaming (BS#1915)', () => {
     expect(mockUpsertMatchedAlbumMetadata).toHaveBeenCalledTimes(1);
     expect(mockUpsertMatchedAlbumMetadata.mock.calls[0]?.[0]).toBe(8);
     expect(result).toEqual({ candidates: 2, succeeded: 1, failed: 1 });
+  });
+
+  /**
+   * BS#1359 — the reask arm inherits the track-context gate from the single
+   * `extractArtwork` chokepoint even though this lookup is album-level
+   * (`track_title: null`). The plan documents this as an intentional
+   * degeneration to album-context (only `direct` is reachable in practice —
+   * a track-less lookup does not surface `compilation`), which is strictly
+   * more conservative than the pre-gate "any artwork" behavior: an untrusted
+   * re-match spends an attempt via `bumpStreamingReaskAttempts` instead of
+   * healing streaming off an unconfirmed album re-match.
+   */
+  describe('BS#1359 track-context trust gate on the reask arm', () => {
+    it("search_type 'direct' upserts a fresh match", async () => {
+      mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([CANDIDATE]));
+      mockEnrichmentBulkLookup.mockResolvedValueOnce({
+        search_type: 'direct',
+        results: [
+          { artwork: { artwork_url: 'https://i.discogs.com/z.jpg', release_url: 'https://discogs.com/release/3' } },
+        ],
+      });
+
+      const result = await reaskUnresolvedStreaming(100);
+
+      expect(mockUpsertMatchedAlbumMetadata).toHaveBeenCalledTimes(1);
+      expect(mockBumpStreamingReaskAttempts).not.toHaveBeenCalled();
+      expect(result).toEqual({ candidates: 1, succeeded: 1, failed: 0 });
+    });
+
+    it("an untrusted search_type (e.g. 'fallback') with a populated artwork object routes to bumpStreamingReaskAttempts, not upsertMatchedAlbumMetadata", async () => {
+      mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([CANDIDATE]));
+      mockEnrichmentBulkLookup.mockResolvedValueOnce({
+        search_type: 'fallback',
+        results: [
+          { artwork: { artwork_url: 'https://i.discogs.com/wrong.jpg', release_url: 'https://discogs.com/release/4' } },
+        ],
+      });
+
+      const result = await reaskUnresolvedStreaming(100);
+
+      expect(mockUpsertMatchedAlbumMetadata).not.toHaveBeenCalled();
+      expect(mockBumpStreamingReaskAttempts).toHaveBeenCalledWith(7);
+      expect(result).toEqual({ candidates: 1, succeeded: 1, failed: 0 });
+    });
   });
 });

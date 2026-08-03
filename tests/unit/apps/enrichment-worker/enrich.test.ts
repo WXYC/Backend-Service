@@ -72,6 +72,7 @@ const ROW = {
 const LINKED_ROW = { ...ROW, album_id: 5678 };
 
 const matchResponse = {
+  search_type: 'direct',
   results: [
     {
       artwork: {
@@ -96,6 +97,7 @@ const noMatchResponse = { results: [] } as unknown as LookupResponse;
 // the top-1 artwork block carries the 8 LML-only fields. Mirrors the shape in
 // proxy.controller's extended-mode test fixture.
 const extendedMatchResponse = {
+  search_type: 'direct',
   results: [
     {
       artwork: {
@@ -135,6 +137,7 @@ const extendedMatchResponse = {
 // → composer_source = 'discogs_release'. Multiple names join with '; '.
 // Exercises the linked + unlinked match arms with a release-provenance writer.
 const releaseWriterMatchResponse = {
+  search_type: 'direct',
   results: [
     {
       artwork: {
@@ -248,6 +251,7 @@ describe('finalizeRow (BS#892 PR-2)', () => {
   it('coerces release_year=0 (Discogs "year unknown" sentinel) to null', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
     const response = {
+      search_type: 'direct',
       results: [{ artwork: { artwork_url: 'https://i.discogs.com/x.jpg', release_year: 0 } }],
     } as unknown as LookupResponse;
 
@@ -260,6 +264,7 @@ describe('finalizeRow (BS#892 PR-2)', () => {
   it('strips spacer.gif placeholder from artwork_url', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
     const response = {
+      search_type: 'direct',
       results: [{ artwork: { artwork_url: 'https://i.discogs.com/spacer.gif' } }],
     } as unknown as LookupResponse;
 
@@ -288,6 +293,72 @@ describe('finalizeRow (BS#892 PR-2)', () => {
 
     await expect(finalizeRow(ROW, matchResponse)).rejects.toThrow('connection refused');
   });
+});
+
+/**
+ * BS#1359 — track-context trust gate, exercised through `finalizeRow` end to
+ * end (as opposed to the `extractArtwork` unit tests above, which pin the
+ * predicate in isolation). AC bullet 2 asks these consequences to be
+ * explicit: a trusted `compilation` match still takes the match arm (a V/A
+ * comp genuinely carrying the track is a correct match, not a substitution),
+ * and an untrusted `alternative`/`fallback` match — even with a populated
+ * `artwork` object — takes the SAME no-match arm a genuine LML miss does.
+ */
+describe('finalizeRow (BS#1359) — track-context trust gate end to end', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("a trusted 'compilation' match takes the match arm (regression pin: compilation is accepted)", async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    const compilationResponse = {
+      search_type: 'compilation',
+      results: [
+        {
+          artwork: {
+            artwork_url: 'https://i.discogs.com/comp/cover.jpg',
+            release_url: 'https://discogs.com/release/999',
+          },
+        },
+      ],
+    } as unknown as LookupResponse;
+
+    const outcome = await finalizeRow(ROW, compilationResponse);
+
+    expect(outcome).toBe('enriched_match');
+    const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setCall.metadata_status).toBe('enriched_match');
+    expect(setCall.artwork_url).toBe('https://i.discogs.com/comp/cover.jpg');
+  });
+
+  it.each(['alternative', 'fallback', 'song_as_artist'])(
+    "an untrusted '%s' match (artwork populated) takes the no-match arm, same as a genuine LML miss",
+    async (searchType) => {
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+      const untrustedResponse = {
+        search_type: searchType,
+        results: [
+          {
+            artwork: {
+              artwork_url: 'https://i.discogs.com/wrong-album/cover.jpg',
+              release_url: 'https://discogs.com/release/wrong',
+            },
+          },
+        ],
+      } as unknown as LookupResponse;
+
+      const outcome = await finalizeRow(ROW, untrustedResponse);
+
+      expect(outcome).toBe('enriched_no_match');
+      const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(setCall.metadata_status).toBe('enriched_no_match');
+      // The 6 non-search-URL metadata columns are NOT in the .set() — same
+      // shape as a genuine LML miss, never the wrong-album artwork.
+      expect(setCall.artwork_url).toBeUndefined();
+      expect(setCall.discogs_url).toBeUndefined();
+      expect(setCall.spotify_url).toContain('open.spotify.com/search');
+    }
+  );
 });
 
 /**
@@ -490,8 +561,47 @@ describe('finalizeRow (BS#899 / Epic D D3) — linked row UPSERTs album_metadata
     };
     expect(conflictCfg.set).not.toHaveProperty('artwork_url');
     expect(conflictCfg.set).not.toHaveProperty('artist_bio');
-    expect(conflictCfg.set.spotify_url).toContain('open.spotify.com/search');
+    // BS#1359: the no-match arm's spotify_url/bandcamp_url conflict-update
+    // set are now CASE fragments (buildStreamingFieldConflictSet with
+    // incomingStatus=undefined) instead of plain search-URL overwrites —
+    // never clobber a previously verified URL. See the downgrade-guard test
+    // below for the full CASE structure + value pin.
+    expect(renderSql(conflictCfg.set.spotify_url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+    expect(sqlValues(conflictCfg.set.spotify_url)).toEqual([
+      album_metadata.spotify_status,
+      album_metadata.spotify_url,
+      expect.stringContaining('open.spotify.com/search'),
+    ]);
+    // youtube/soundcloud carry no status column — they stay plain
+    // search-URL overwrites, unchanged by BS#1359.
     expect(conflictCfg.set.youtube_music_url).toContain('music.youtube.com/search');
+  });
+
+  it('on no-match: the spotify_url/bandcamp_url conflict fragments never clobber a previously verified URL (BS#1359)', async () => {
+    // Downgrade guard: pin that the no-match arm's CASE fragments open with
+    // "is the live status already verified — if so, keep the live url
+    // verbatim" as their FIRST branch, mirroring the BS#1923 structural test
+    // for the match arm above. This is the fix for the reachability gap the
+    // plan calls out — an untrusted `alternative`/`fallback` search_type now
+    // routes through this arm too, so the same album can match `direct` on
+    // one play (persisting a `verified` spotify_url) and an untrusted type on
+    // a later play — this CASE is what stops that later write from
+    // downgrading the earlier verified URL.
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+    await finalizeRow(LINKED_ROW, noMatchResponse);
+
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
+    expect(renderSql(conflictCfg.set.spotify_url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+    expect(sqlValues(conflictCfg.set.spotify_url)[0]).toBe(album_metadata.spotify_status);
+    expect(sqlValues(conflictCfg.set.spotify_url)[1]).toBe(album_metadata.spotify_url);
+    expect(renderSql(conflictCfg.set.bandcamp_url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+    expect(sqlValues(conflictCfg.set.bandcamp_url)[0]).toBe(album_metadata.bandcamp_status);
+    expect(sqlValues(conflictCfg.set.bandcamp_url)[1]).toBe(album_metadata.bandcamp_url);
+    // Status columns are untouched — this arm asserts no verdict.
+    expect(conflictCfg.set).not.toHaveProperty('spotify_status');
+    expect(conflictCfg.set).not.toHaveProperty('bandcamp_status');
+    expect(conflictCfg.set).not.toHaveProperty('apple_music_url');
   });
 
   it('on no-match: flowsheet UPDATE only flips status (race detector stays on flowsheet)', async () => {
@@ -728,6 +838,7 @@ describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-matc
   it('fresh album: persists a verified/absent/unresolved per-service status alongside each url', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
     const response = {
+      search_type: 'direct',
       results: [
         {
           artwork: {
@@ -774,6 +885,7 @@ describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-matc
   it('never overwrites a previously verified URL, even when a later re-ask flaps to unresolved or absent (BS#1923: checked against the LIVE row, not a stale read)', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
     const flappyResponse = {
+      search_type: 'direct',
       results: [
         {
           artwork: {
@@ -823,6 +935,7 @@ describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-matc
   it('absent is terminal: the non-verified branch forces status=absent/url=NULL, whether the live row was already absent or newly flapping there', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
     const response = {
+      search_type: 'direct',
       results: [
         {
           artwork: {
@@ -855,6 +968,7 @@ describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-matc
   it('a never-consulted service (key omitted, no url) is left as a bare self-reference — structurally cannot invent a verdict', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
     const response = {
+      search_type: 'direct',
       results: [
         {
           artwork: {
@@ -1076,7 +1190,7 @@ describe('synthesizeSearchUrls (per-service precedence)', () => {
 });
 
 describe('extractArtwork', () => {
-  it("returns the first result's artwork on match", () => {
+  it("returns the first result's artwork on a trusted 'direct' match", () => {
     expect(extractArtwork(matchResponse)).toEqual(matchResponse.results![0]!.artwork);
   });
 
@@ -1085,10 +1199,48 @@ describe('extractArtwork', () => {
   });
 
   it('returns null when results[0] has no artwork field', () => {
-    expect(extractArtwork({ results: [{}] } as unknown as LookupResponse)).toBeNull();
+    expect(extractArtwork({ results: [{}], search_type: 'direct' } as unknown as LookupResponse)).toBeNull();
   });
 
   it('returns null when results is undefined', () => {
-    expect(extractArtwork({} as unknown as LookupResponse)).toBeNull();
+    expect(extractArtwork({ search_type: 'direct' } as unknown as LookupResponse)).toBeNull();
+  });
+
+  /**
+   * BS#1359 — track-context trust gate. `isTrustedLmlTrackContextMatch`
+   * accepts `direct` and `compilation`; every other `search_type` (including
+   * absent) is a same-artist substitution (the Yenbett class) and must be
+   * treated as no-match regardless of whether LML populated an `artwork`
+   * object.
+   */
+  describe('BS#1359 track-context trust gate', () => {
+    const withSearchType = (searchType: string | undefined) =>
+      ({
+        results: [
+          {
+            artwork: {
+              artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+              release_url: 'https://discogs.com/release/123',
+            },
+          },
+        ],
+        ...(searchType !== undefined ? { search_type: searchType } : {}),
+      }) as unknown as LookupResponse;
+
+    it("accepts 'compilation' (a V/A comp genuinely carrying the track is a correct match)", () => {
+      const response = withSearchType('compilation');
+      expect(extractArtwork(response)).toEqual(response.results![0]!.artwork);
+    });
+
+    it.each(['alternative', 'fallback', 'song_as_artist', 'none'])(
+      "rejects search_type '%s' even when artwork is populated",
+      (searchType) => {
+        expect(extractArtwork(withSearchType(searchType))).toBeNull();
+      }
+    );
+
+    it('rejects an absent search_type (fail-closed)', () => {
+      expect(extractArtwork(withSearchType(undefined))).toBeNull();
+    });
   });
 });
