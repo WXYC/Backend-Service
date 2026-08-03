@@ -22,6 +22,7 @@ import {
   extractArtwork,
   finalizeRow,
   inferIncomingStreamingStatus,
+  isBandcampReaskEnabled,
   mergeStreamingField,
   synthesizeSearchUrls,
   type StreamingFieldState,
@@ -1253,6 +1254,184 @@ describe('extractArtwork', () => {
 
     it('rejects an absent search_type (fail-closed)', () => {
       expect(extractArtwork(withSearchType(undefined))).toBeNull();
+    });
+  });
+});
+
+/**
+ * Bandcamp re-ask de-freeze (iOS Bandcamp search-fallback program).
+ *
+ * The freeze this un-sticks: a MATCHED album (load-bearing artwork/discogs
+ * present) for which LML returns no direct `bandcamp_url` and no explicit
+ * `streaming_status.bandcamp` currently persists `bandcamp_status = NULL` +
+ * the synthesized `bandcamp.com/search?q=` fallback URL. NULL is
+ * indistinguishable from "never consulted" — neither `precheck.ts` nor the
+ * BS#1915 streaming-reask sweep ever re-ask a NULL-status field — so once
+ * the LML-side workstreams teach LML to resolve a direct Bandcamp URL, that
+ * fresh URL can never reach the already-written row: it stays frozen on the
+ * search fallback forever (the same class of permanent-null freeze BS#1747
+ * documents for the Apple/Spotify precheck skip).
+ *
+ * The interlock, Bandcamp-only, behind `ENRICHMENT_BANDCAMP_REASK` (default
+ * off, so merging is a no-op until the LML side is live): when LML returns a
+ * match with no Bandcamp verdict at all, infer `'unresolved'` (retryable)
+ * instead of leaving the status NULL. The displayed URL still falls back to
+ * the search URL (no UX regression — same as pre-#1915 Bandcamp), but the
+ * STATUS now says "retryable, not verified", so the existing status-driven
+ * sweep re-asks it and a later direct URL supersedes the fallback. The
+ * coercion is Bandcamp-scoped on purpose: Apple Music's NULL is load-bearing
+ * "no verified iTunes match" (BS#1192) and must NOT become a re-ask magnet.
+ */
+describe('Bandcamp re-ask de-freeze — ENRICHMENT_BANDCAMP_REASK gate', () => {
+  const priorFlag = process.env.ENRICHMENT_BANDCAMP_REASK;
+
+  afterEach(() => {
+    if (priorFlag === undefined) delete process.env.ENRICHMENT_BANDCAMP_REASK;
+    else process.env.ENRICHMENT_BANDCAMP_REASK = priorFlag;
+  });
+
+  describe('isBandcampReaskEnabled', () => {
+    it("is true only for the exact string 'true'", () => {
+      process.env.ENRICHMENT_BANDCAMP_REASK = 'true';
+      expect(isBandcampReaskEnabled()).toBe(true);
+    });
+
+    it('is false when unset', () => {
+      delete process.env.ENRICHMENT_BANDCAMP_REASK;
+      expect(isBandcampReaskEnabled()).toBe(false);
+    });
+
+    it.each(['false', '1', 'yes', 'TRUE', ''])("is false for a non-'true' value (%p)", (raw) => {
+      process.env.ENRICHMENT_BANDCAMP_REASK = raw;
+      expect(isBandcampReaskEnabled()).toBe(false);
+    });
+  });
+
+  // Linked match whose artwork carries NO bandcamp signal at all: no direct
+  // url, no streaming_status object. This is exactly the shape that freezes
+  // bandcamp_status at NULL today.
+  const bandcampMissingResponse = {
+    search_type: 'direct',
+    results: [
+      {
+        artwork: {
+          artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+          release_url: 'https://discogs.com/release/123',
+          spotify_url: 'https://open.spotify.com/album/x',
+          apple_music_url: null,
+          bandcamp_url: null,
+        },
+      },
+    ],
+  } as unknown as LookupResponse;
+
+  describe('flag OFF (default) — behavior is exactly as before', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      delete process.env.ENRICHMENT_BANDCAMP_REASK;
+    });
+
+    it('a match with no bandcamp url/status leaves bandcamp_status NULL on the fresh INSERT', async () => {
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+      await finalizeRow(LINKED_ROW, bandcampMissingResponse);
+
+      const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(insertPayload.bandcamp_status).toBeNull();
+      // The display URL still falls back to the synthesized search URL.
+      expect(insertPayload.bandcamp_url).toContain('bandcamp.com/search');
+    });
+
+    it('the conflict branch leaves bandcamp_status a bare, unchanged column reference (never consulted)', async () => {
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+      await finalizeRow(LINKED_ROW, bandcampMissingResponse);
+
+      const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
+      expect(renderSql(conflictCfg.set.bandcamp_status)).toBe('<col>');
+      expect(sqlValues(conflictCfg.set.bandcamp_status)).toEqual([album_metadata.bandcamp_status]);
+    });
+  });
+
+  describe('flag ON — a bandcamp-less match becomes retryable (unresolved), not frozen', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      process.env.ENRICHMENT_BANDCAMP_REASK = 'true';
+    });
+
+    it("persists bandcamp_status='unresolved' + the search-fallback url on the fresh INSERT", async () => {
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+      await finalizeRow(LINKED_ROW, bandcampMissingResponse);
+
+      const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(insertPayload.bandcamp_status).toBe('unresolved');
+      // Display fallback preserved — status carries the "retryable" signal,
+      // the URL stays clickable.
+      expect(insertPayload.bandcamp_url).toContain('bandcamp.com/search');
+    });
+
+    it('the conflict branch flips bandcamp_status to the retryable CASE (unless already verified/absent)', async () => {
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+      await finalizeRow(LINKED_ROW, bandcampMissingResponse);
+
+      const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
+      // Same shape buildStreamingFieldConflictSet emits for an incoming
+      // 'unresolved' verdict: terminal verified/absent are preserved, anything
+      // else (NULL included) becomes 'unresolved'.
+      expect(renderSql(conflictCfg.set.bandcamp_status)).toBe(
+        "CASE WHEN <col> = 'verified' OR <col> = 'absent' THEN <col> ELSE 'unresolved' END"
+      );
+      // URL recomputes the search fallback in the non-verified branch.
+      expect(renderSql(conflictCfg.set.bandcamp_url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+      const bandcampUrlValues = sqlValues(conflictCfg.set.bandcamp_url);
+      expect(bandcampUrlValues[2]).toContain('bandcamp.com/search');
+    });
+
+    it('does NOT touch a genuinely verified bandcamp — a real direct url still infers verified', async () => {
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+      // matchResponse carries a real bandcamp_url → inferred 'verified',
+      // coercion never fires.
+      await finalizeRow(LINKED_ROW, matchResponse);
+
+      const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(insertPayload.bandcamp_status).toBe('verified');
+      expect(insertPayload.bandcamp_url).toBe('https://artist.bandcamp.com/album/w');
+    });
+
+    it("does NOT override an explicit LML 'absent' bandcamp verdict (absent stays terminal)", async () => {
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+      const absentResponse = {
+        search_type: 'direct',
+        results: [
+          {
+            artwork: {
+              artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+              release_url: 'https://discogs.com/release/123',
+              bandcamp_url: null,
+              streaming_status: { bandcamp: 'absent' },
+            },
+          },
+        ],
+      } as unknown as LookupResponse;
+
+      await finalizeRow(LINKED_ROW, absentResponse);
+
+      const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(insertPayload.bandcamp_status).toBe('absent');
+    });
+
+    it('leaves Apple Music and Spotify inference untouched — coercion is Bandcamp-only', async () => {
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+      // bandcampMissingResponse has apple_music_url null and no apple status —
+      // Apple must stay NULL (never a re-ask magnet), only bandcamp is coerced.
+      await finalizeRow(LINKED_ROW, bandcampMissingResponse);
+
+      const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(insertPayload.apple_music_status).toBeNull();
+      // Spotify DID carry a url → verified, unrelated to the bandcamp coercion.
+      expect(insertPayload.spotify_status).toBe('verified');
     });
   });
 });

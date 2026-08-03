@@ -58,6 +58,14 @@ function mergeStreamingField(current, incoming) {
  * same reason here).
  */
 async function findCandidateAlbumIds(sql, albumIds) {
+  // Bandcamp re-ask de-freeze (ENRICHMENT_BANDCAMP_REASK) mirror — see
+  // `streaming-reask.ts#findUnresolvedStreamingCandidates`. Read at call time
+  // so a test can toggle the env var per case; empty fragment (flag off) is a
+  // byte-for-byte no-op against every pre-existing assertion in this spec.
+  const bandcampFrozenReask =
+    process.env.ENRICHMENT_BANDCAMP_REASK === 'true'
+      ? sql`OR (bandcamp_status IS NULL AND bandcamp_url LIKE ${'%bandcamp.com/search%'})`
+      : sql``;
   const rows = await sql`
     SELECT album_id
       FROM ${sql(SCHEMA)}.album_metadata
@@ -69,6 +77,7 @@ async function findCandidateAlbumIds(sql, albumIds) {
            spotify_status = 'unresolved'
            OR apple_music_status = 'unresolved'
            OR bandcamp_status = 'unresolved'
+           ${bandcampFrozenReask}
          ),
          false
        )
@@ -292,6 +301,114 @@ describe('enrichment-worker streaming self-heal — BS#1915 candidate query + wr
 
     // Row is fully resolved now (apple verified, spotify terminal-absent) —
     // it drops out of candidacy rather than re-asking the resurrected spotify.
+    expect(await findCandidateAlbumIds(sql, [albumId])).toEqual([]);
+  });
+});
+
+/**
+ * Bandcamp re-ask de-freeze (ENRICHMENT_BANDCAMP_REASK) — the candidate query
+ * reaches the LEGACY frozen backlog: rows enriched before the write-side
+ * coercion went live carry `bandcamp_status = NULL` + a `bandcamp.com/search`
+ * fallback URL, which the plain `bandcamp_status = 'unresolved'` disjunct can
+ * never match. Real-PG coverage of the gated NULL+search-fallback disjunct
+ * added to `findUnresolvedStreamingCandidates` (mirrored above), and of the
+ * end-to-end heal to a direct Bandcamp URL on re-ask.
+ *
+ * @see WXYC/Backend-Service#1747 (the freeze), #1915 (the self-heal sweep)
+ */
+describe('enrichment-worker streaming self-heal — Bandcamp de-freeze candidate query (real PG)', () => {
+  let sql;
+  const insertedAlbumIds = [];
+  const priorFlag = process.env.ENRICHMENT_BANDCAMP_REASK;
+
+  beforeAll(() => {
+    sql = getTestDb();
+  });
+
+  afterAll(async () => {
+    if (priorFlag === undefined) delete process.env.ENRICHMENT_BANDCAMP_REASK;
+    else process.env.ENRICHMENT_BANDCAMP_REASK = priorFlag;
+    if (insertedAlbumIds.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ANY(${insertedAlbumIds})`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${insertedAlbumIds})`;
+    }
+  });
+
+  async function insertFrozenBandcampRow(sql, suffix) {
+    const albumId = await insertLibraryAlbum(sql, 'bandcamp-freeze-' + suffix);
+    insertedAlbumIds.push(albumId);
+    // The exact frozen shape: load-bearing artwork present, bandcamp_status
+    // NULL, bandcamp_url the synthesized search fallback.
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, bandcamp_url, streaming_reask_attempts, updated_at)
+      VALUES
+        (${albumId}, 'https://i.discogs.com/x.jpg', 'https://bandcamp.com/search?q=Chuquimamani-Condori%20Edits', 0, NOW())
+    `;
+    return albumId;
+  }
+
+  test('FLAG OFF: a NULL-status search-fallback bandcamp row is NOT a candidate (current behavior preserved)', async () => {
+    delete process.env.ENRICHMENT_BANDCAMP_REASK;
+    const albumId = await insertFrozenBandcampRow(sql, 'flag-off');
+    expect(await findCandidateAlbumIds(sql, [albumId])).toEqual([]);
+  });
+
+  test('FLAG ON: the same frozen bandcamp row becomes a candidate', async () => {
+    process.env.ENRICHMENT_BANDCAMP_REASK = 'true';
+    const albumId = await insertFrozenBandcampRow(sql, 'flag-on');
+    expect(await findCandidateAlbumIds(sql, [albumId])).toEqual([albumId]);
+  });
+
+  test('FLAG ON: an absent bandcamp (also carries a search-fallback url) is NEVER a candidate — terminal', async () => {
+    process.env.ENRICHMENT_BANDCAMP_REASK = 'true';
+    const albumId = await insertLibraryAlbum(sql, 'bandcamp-absent-terminal');
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, bandcamp_status, bandcamp_url, streaming_reask_attempts, updated_at)
+      VALUES
+        (${albumId}, 'https://i.discogs.com/x.jpg', 'absent', 'https://bandcamp.com/search?q=x', 0, NOW())
+    `;
+    // The `IS NULL` guard in the gated disjunct excludes an absent row even
+    // though its url matches the search-fallback LIKE.
+    expect(await findCandidateAlbumIds(sql, [albumId])).toEqual([]);
+  });
+
+  test('FLAG ON: HEAL — a re-ask that resolves a direct bandcamp url flips the row to verified and out of candidacy', async () => {
+    process.env.ENRICHMENT_BANDCAMP_REASK = 'true';
+    const albumId = await insertFrozenBandcampRow(sql, 'heal');
+    expect(await findCandidateAlbumIds(sql, [albumId])).toEqual([albumId]);
+
+    // LML (now Bandcamp-capable) returns a direct album URL on the re-ask.
+    await applyReaskVerdict(sql, albumId, {
+      bandcamp: { status: 'verified', url: 'https://chuquimamani.bandcamp.com/album/edits' },
+    });
+
+    const row = await readStreamingState(sql, albumId);
+    expect(row.bandcamp_status).toBe('verified');
+    expect(row.bandcamp_url).toBe('https://chuquimamani.bandcamp.com/album/edits');
+    // Resolved — no longer frozen, no longer a candidate.
+    expect(await findCandidateAlbumIds(sql, [albumId])).toEqual([]);
+  });
+
+  test('FLAG ON: BOUNDED — a frozen bandcamp that LML still cannot resolve stops at the attempt cap', async () => {
+    process.env.ENRICHMENT_BANDCAMP_REASK = 'true';
+    const albumId = await insertFrozenBandcampRow(sql, 'bounded');
+
+    let reaskCount = 0;
+    for (let i = 0; i < STREAMING_REASK_ATTEMPT_CAP + 3; i++) {
+      const candidates = await findCandidateAlbumIds(sql, [albumId]);
+      if (candidates.length === 0) break;
+      // Mirror the write-side coercion: a match with no bandcamp verdict
+      // persists 'unresolved' (retryable) rather than leaving it NULL.
+      await applyReaskVerdict(sql, albumId, { bandcamp: { status: 'unresolved', url: null } });
+      reaskCount++;
+    }
+
+    expect(reaskCount).toBe(STREAMING_REASK_ATTEMPT_CAP);
+    const row = await readStreamingState(sql, albumId);
+    expect(row.streaming_reask_attempts).toBe(STREAMING_REASK_ATTEMPT_CAP);
     expect(await findCandidateAlbumIds(sql, [albumId])).toEqual([]);
   });
 });

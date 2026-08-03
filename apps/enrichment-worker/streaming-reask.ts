@@ -41,6 +41,7 @@ import { album_metadata, db, library } from '@wxyc/database';
 import {
   bumpStreamingReaskAttempts,
   extractArtwork,
+  isBandcampReaskEnabled,
   STREAMING_REASK_ATTEMPT_CAP,
   synthesizeSearchUrls,
   upsertMatchedAlbumMetadata,
@@ -69,12 +70,28 @@ export interface StreamingReaskCandidate {
  * kept for defense-in-depth and literal parity with precheck.ts.
  */
 export async function findUnresolvedStreamingCandidates(limit: number): Promise<StreamingReaskCandidate[]> {
+  // Bandcamp re-ask de-freeze (ENRICHMENT_BANDCAMP_REASK): the plain
+  // `bandcamp_status = 'unresolved'` disjunct below only catches rows written
+  // AFTER the write-side coercion in `enrich.ts` starts stamping 'unresolved'.
+  // Rows that were enriched BEFORE the gate went live carry
+  // `bandcamp_status = NULL` + a `bandcamp.com/search?q=` fallback URL — the
+  // frozen shape. This extra disjunct (gated, so flag-off is a byte-for-byte
+  // no-op) reaches that legacy backlog directly, WITHOUT a data migration:
+  // a NULL status paired with the synthesized search-fallback URL is exactly
+  // "matched, but Bandcamp never resolved to a direct URL". `absent` rows also
+  // carry a search-fallback URL but are excluded here by the `IS NULL` guard
+  // (they are terminal, never re-asked). Still bounded by the shared
+  // `streaming_reask_attempts < CAP` guard, and once re-asked the coercion
+  // moves them onto the clean `= 'unresolved'` disjunct.
+  const bandcampFrozenReask = isBandcampReaskEnabled()
+    ? sql` OR (${album_metadata.bandcamp_status} IS NULL AND ${album_metadata.bandcamp_url} LIKE ${'%bandcamp.com/search%'})`
+    : sql``;
   const needsStreamingReask = sql<boolean>`COALESCE(
     ${album_metadata.streaming_reask_attempts} < ${STREAMING_REASK_ATTEMPT_CAP}
     AND (
       ${album_metadata.spotify_status} = 'unresolved'
       OR ${album_metadata.apple_music_status} = 'unresolved'
-      OR ${album_metadata.bandcamp_status} = 'unresolved'
+      OR ${album_metadata.bandcamp_status} = 'unresolved'${bandcampFrozenReask}
     ),
     false
   )`;

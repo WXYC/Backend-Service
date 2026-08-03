@@ -273,3 +273,83 @@ describe('enrichment-worker cache-first pre-check predicate — BS#1915 streamin
     expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
   });
 });
+
+/**
+ * Bandcamp re-ask de-freeze (ENRICHMENT_BANDCAMP_REASK) — the precheck gate.
+ * A load-bearing row whose Bandcamp is the legacy frozen shape
+ * (`bandcamp_status = NULL` + a `bandcamp.com/search` fallback URL) is
+ * "done" today (skip LML), which is the freeze. With the gate on, it is NOT
+ * done: the predicate returns false so a subsequent PLAY re-asks LML. Flag
+ * off is a byte-for-byte no-op (asserted alongside each on case). Mirrors the
+ * positive form validated in `enrichment-worker-streaming-reask.spec.js`.
+ *
+ * @see WXYC/Backend-Service#1747 (the freeze), #1915 (the self-heal sweep)
+ */
+describe('enrichment-worker cache-first pre-check predicate — Bandcamp de-freeze gate (real PG)', () => {
+  let sql;
+  const insertedAlbumIds = [];
+  const priorFlag = process.env.ENRICHMENT_BANDCAMP_REASK;
+
+  beforeAll(() => {
+    sql = getTestDb();
+  });
+
+  afterAll(async () => {
+    if (priorFlag === undefined) delete process.env.ENRICHMENT_BANDCAMP_REASK;
+    else process.env.ENRICHMENT_BANDCAMP_REASK = priorFlag;
+    if (insertedAlbumIds.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ANY(${insertedAlbumIds})`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${insertedAlbumIds})`;
+    }
+  });
+
+  async function insertFrozenBandcampRow(sql, suffix) {
+    const albumId = await insertLibraryAlbum(sql, 'bandcamp-freeze-' + suffix);
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, bandcamp_url, updated_at)
+      VALUES
+        (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'https://bandcamp.com/search?q=Stereolab%20Aluminum%20Tunes', NOW())
+    `;
+    return albumId;
+  }
+
+  test('FLAG OFF: a NULL-status search-fallback bandcamp row is still "done" → true (skip, current behavior)', async () => {
+    delete process.env.ENRICHMENT_BANDCAMP_REASK;
+    const albumId = await insertFrozenBandcampRow(sql, 'precheck-off');
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
+  });
+
+  test('FLAG ON: the same frozen bandcamp row is NOT done → false (worker re-asks LML on the next play)', async () => {
+    process.env.ENRICHMENT_BANDCAMP_REASK = 'true';
+    const albumId = await insertFrozenBandcampRow(sql, 'precheck-on');
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(false);
+  });
+
+  test('FLAG ON: an absent bandcamp with a search-fallback url stays "done" → true (terminal, never re-asked)', async () => {
+    process.env.ENRICHMENT_BANDCAMP_REASK = 'true';
+    const albumId = await insertLibraryAlbum(sql, 'bandcamp-absent-precheck');
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, bandcamp_status, bandcamp_url, updated_at)
+      VALUES
+        (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'absent', 'https://bandcamp.com/search?q=x', NOW())
+    `;
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
+  });
+
+  test('FLAG ON: a verified bandcamp (direct url, not a search fallback) stays "done" → true', async () => {
+    process.env.ENRICHMENT_BANDCAMP_REASK = 'true';
+    const albumId = await insertLibraryAlbum(sql, 'bandcamp-verified-precheck');
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, bandcamp_status, bandcamp_url, updated_at)
+      VALUES
+        (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'verified', 'https://stereolab.bandcamp.com/album/aluminum-tunes', NOW())
+    `;
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
+  });
+});
