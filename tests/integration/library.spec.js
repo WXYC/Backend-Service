@@ -1,5 +1,8 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest, expectErrorContains, expectFields, expectArray } = require('../utils/test_helpers');
+const { getTestDb } = require('../utils/db');
+
+const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
 /**
  * Library Endpoints Integration Tests
@@ -108,6 +111,40 @@ describe('Library Catalog', () => {
 
       expectFields(res.body, 'id', 'album_title');
       expect(res.body.album_title).toContain('Test Album');
+    });
+
+    // BS#1963: a Backend-sourced catalog add mints its own legacy_release_id
+    // from a Postgres sequence floored at 1,000,000, above the tubafrenzy id
+    // space (legacy max ~72,276), so the Backend-authored library.db producer
+    // can emit a stored `legacy_release_id AS id` without colliding with the
+    // legacy surrogate keys. The minted id must also resolve the same row
+    // through the BS#1880 legacy-keyed front door (GET /library/info).
+    test('mints legacy_release_id >= 1,000,000 on add and resolves via /library/info', async () => {
+      const res = await auth
+        .post('/library')
+        .send({
+          album_title: `Legacy Mint Test ${Date.now()}`,
+          artist_name: 'Built to Spill',
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+
+      expect(res.body).toHaveProperty('legacy_release_id');
+      const minted = res.body.legacy_release_id;
+      expect(typeof minted).toBe('number');
+      expect(minted).toBeGreaterThanOrEqual(1000000);
+
+      try {
+        const info = await auth.get('/library/info').query({ legacy_release_id: minted }).expect(200);
+        expect(info.body.id).toBe(res.body.id);
+      } finally {
+        // Clean up the row this test inserted (the pool is shared with the
+        // rest of the integration suite; do NOT close it).
+        const sql = getTestDb();
+        await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ${res.body.id}`;
+      }
     });
 
     test('returns 400 when album_title is missing', async () => {

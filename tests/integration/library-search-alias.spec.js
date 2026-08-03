@@ -186,6 +186,11 @@ describe('GET /library/query — alias-only primary no longer suppresses the cas
   const TARGET_ARTIST_ID = 9102;
   const TARGET_LIBRARY_ID = 9102;
   const TARGET_LEGACY_RELEASE_ID = 65900;
+  // BS#1963: library.legacy_release_id is now NOT NULL (Backend mints it from a
+  // sequence). The decoy row previously seeded it as NULL; give it its own
+  // distinct id. The value is never asserted on — it just has to be non-null and
+  // not collide with TARGET_LEGACY_RELEASE_ID or the shape.sql fixtures.
+  const DECOY_LEGACY_RELEASE_ID = 65901;
   // Lowercase nonce, unused anywhere else in the fixtures, so it can never
   // accidentally ILIKE/tsvector-match real catalog text (mirrors the opaque
   // multi-word query tokens in tests/fixtures/shape.sql). Set as the decoy's
@@ -214,7 +219,7 @@ describe('GET /library/query — alias-only primary no longer suppresses the cas
       `INSERT INTO ${wxycSchema}.library
          (id, artist_id, genre_id, format_id, album_title, code_number, artist_name, label, label_id, legacy_release_id)
        VALUES
-         ($1, $2, $6, $7, 'Low Tide Almanac', 1, $8, 'Driftless Records', NULL, NULL),
+         ($1, $2, $6, $7, 'Low Tide Almanac', 1, $8, 'Driftless Records', NULL, $9),
          ($3, $4, $6, $7, 'Nine Rooms', 1, 'Radial Thicket', NULL, NULL, $5)
        ON CONFLICT (id) DO NOTHING`,
       [
@@ -226,6 +231,7 @@ describe('GET /library/query — alias-only primary no longer suppresses the cas
         TEST_GENRE_ID,
         TEST_FORMAT_ID,
         DECOY_ARTIST_NAME,
+        DECOY_LEGACY_RELEASE_ID,
       ]
     );
     await sql.unsafe(
