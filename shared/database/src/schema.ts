@@ -438,6 +438,19 @@ export const format = wxyc_schema.table('format', {
 
 export type NewAlbum = InferInsertModel<typeof library>;
 export type Album = InferSelectModel<typeof library>;
+
+// Backend-minted `legacy_release_id` sequence (BS#1963). Floored at
+// 1,000,000 so Backend-authored catalog adds (POST /library → insertAlbum)
+// never collide with the tubafrenzy legacy id space (legacy max ~72,276 <
+// this floor). This lets the Backend-sourced library.db producer emit a
+// stored `legacy_release_id AS id`. The column default below draws from this
+// sequence, so the mint fires ONLY on the addAlbum path — the ETL insert
+// (jobs/library-etl/job.ts) and every seed/fixture set legacy_release_id
+// explicitly, so the default is inert there.
+export const libraryLegacyReleaseIdSeq = wxyc_schema.sequence('library_legacy_release_id_seq', {
+  startWith: 1000000,
+  minValue: 1000000,
+});
 /**
  * SOURCE: legacy MySQL via `scripts/run-library-etl.sh` (and tubafrenzy
  * mirror writes for live additions). Library staff curate the music
@@ -489,7 +502,14 @@ export const library = wxyc_schema.table(
     disc_quantity: smallint('disc_quantity').default(1).notNull(),
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     plays: integer('plays').default(0).notNull(),
-    legacy_release_id: integer('legacy_release_id'),
+    // BS#1963: Backend-minted surrogate key. NOT NULL + a nextval default off
+    // `library_legacy_release_id_seq` (floor 1,000,000) mints an id on catalog
+    // adds that omit the column (insertAlbum), while the ETL/seeds/fixtures set
+    // it explicitly and so bypass the default. Backend mints are authoritative
+    // for the rows they create, so the source-tagged constraint is confirmed.
+    legacy_release_id: integer('legacy_release_id')
+      .default(sql`nextval('"wxyc_schema"."library_legacy_release_id_seq"'::regclass)`)
+      .notNull(), // eslint-disable-line wxyc/source-tagged-constraint-confirmed
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     add_date: timestamp('add_date', { withTimezone: true }).defaultNow().notNull(),
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed

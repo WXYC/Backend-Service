@@ -132,5 +132,6 @@
   "0133_1895-serialize-discogs-unavailable": "af5ec3f4a1028819cb47301c4ff939cbf766fdfd5399685ea671c2c471e65620",
   "0134_fold-artist-name": "fd865d83c820b9437ae31073f3d30eced23b874b076256c2db1c0dcac3829a5b",
   "0135_album-metadata-streaming-reask": "ee0309ccc3e4ded44d7dfd9f301f1f2b905c2fd2f36f31a99837356aee1327e5",
-  "0136_flowsheet-album-link-lookup-stats": "cb520c875456af28a5e54fe080f8b3364b211b7c560f4e8f9bf6e92e28d2899c"
+  "0136_flowsheet-album-link-lookup-stats": "cb520c875456af28a5e54fe080f8b3364b211b7c560f4e8f9bf6e92e28d2899c",
+  "0137_mint-legacy-release-id": "f3718406cf1e32ffe2ccba30d286434eac8c139abbeb5a0e2a7e109d6345d85f"
 }
