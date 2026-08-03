@@ -52467,7 +52467,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 1336	703	6	3	\N	Throw Ya Gunz 12"	\N	3	1	0	2002-02-01 23:59:21.362+00	2002-04-24 01:39:20.624+00	\N	\N	2102	\N	\N	t	\N	\N	Onyx	\N	\N	\N
 1341	705	6	3	\N	Who Stole My Last Piece of Chicken 12"	\N	1	1	0	2002-02-01 23:59:22.374+00	2002-04-24 01:39:21.113+00	\N	\N	2116	\N	\N	t	\N	\N	Organized Konfusion	\N	\N	\N
 1353	712	6	3	\N	Mr. Gutterman (Manumixes) 12"	\N	2	1	0	2002-02-01 23:59:24.417+00	2002-04-24 01:39:22.214+00	\N	\N	2145	\N	\N	t	\N	\N	Greg Osby	\N	\N	\N
-1355	713	6	3	\N	Player's Ball 12"	\N	1	1	0	2002-02-01 23:59:24.637+00	2002-04-24 01:39:22.342+00	\N	\N	\N	\N	\N	\N	\N	\N	Outkast	\N	\N	\N
+1355	713	6	3	\N	Player's Ball 12"	\N	1	1	0	2002-02-01 23:59:24.637+00	2002-04-24 01:39:22.342+00	\N	\N	1000000	\N	\N	\N	\N	\N	Outkast	\N	\N	\N
 16509	6161	11	1	\N	Bruiser	\N	1	1	0	2002-11-02 22:30:10.692+00	2002-11-02 22:30:10.692+00	\N	\N	21499	\N	\N	t	\N	\N	Eggs	discogs:master:87205	0.95	2026-04-28 05:57:07.702987+00
 1358	713	6	3	\N	Elevators 12"	\N	3	1	0	2002-02-01 23:59:24.837+00	2002-04-24 01:39:22.423+00	\N	\N	2151	\N	\N	t	\N	\N	Outkast	\N	\N	\N
 25048	9278	11	3	\N	Rehearsals for Retirement	\N	7	1	0	2003-01-12 04:20:51.579+00	2003-01-12 04:20:51.579+00	\N	\N	32782	\N	\N	t	\N	\N	Phil Ochs	discogs:master:132991	0.95	2026-04-28 05:57:34.048239+00
@@ -58147,7 +58147,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 42	19	6	3	\N	Take a Ride 12"	\N	2	1	0	2002-02-01 23:57:22.111+00	2002-04-24 01:37:52.794+00	\N	\N	59	\N	\N	t	\N	\N	Alphabet Soup	discogs:release:1167594	0.95	2026-04-28 04:59:32.713473+00
 43	20	6	1	\N	The Pleasure of Leisure	\N	1	1	0	2002-02-01 23:57:22.271+00	2002-04-24 01:37:53.019+00	\N	\N	64	\N	\N	t	\N	\N	Alien	discogs:release:74242	0.95	2026-04-28 04:59:37.386002+00
 44	21	6	3	\N	Journey 12"	\N	1	1	0	2002-02-01 23:57:22.301+00	2002-04-24 01:37:53.061+00	\N	\N	65	\N	\N	t	\N	\N	Amphibians	discogs:release:3623035	0.95	2026-04-28 04:59:42.195417+00
-45	22	6	3	\N	This Girl is Off on Her Own  12"	\N	1	1	0	2002-02-01 23:57:22.351+00	2002-04-24 01:37:53.104+00	\N	\N	\N	\N	\N	\N	\N	\N	Antoinette	discogs:master:363677	0.95	2026-04-28 04:59:47.010975+00
+45	22	6	3	\N	This Girl is Off on Her Own  12"	\N	1	1	0	2002-02-01 23:57:22.351+00	2002-04-24 01:37:53.104+00	\N	\N	1000001	\N	\N	\N	\N	\N	Antoinette	discogs:master:363677	0.95	2026-04-28 04:59:47.010975+00
 46	23	6	3	\N	I'll Always Be There for You	\N	1	1	0	2002-02-01 23:57:22.441+00	2002-04-24 01:37:53.151+00	\N	\N	67	\N	\N	t	\N	\N	Anquette	discogs:master:190927	0.95	2026-04-28 04:59:51.813004+00
 47	24	6	3	\N	Cooked 12"	\N	1	1	0	2002-02-01 23:57:22.511+00	2002-04-24 01:37:53.195+00	\N	\N	68	\N	\N	t	\N	\N	Animals on Wheels	discogs:master:42981	0.95	2026-04-28 04:59:56.610986+00
 48	25	6	1	\N	Tragic Epilogue	\N	2	1	0	2002-02-01 23:57:22.642+00	2002-04-24 01:37:53.265+00	\N	\N	70	\N	\N	t	\N	\N	Antipop Consortium	discogs:master:32713	0.95	2026-04-28 05:00:01.42629+00
@@ -75983,15 +75983,15 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 1712	866	6	1	\N	Corner The Market	\N	2	1	0	2002-02-01 23:59:57.224+00	2002-04-24 01:39:39.724+00	\N	\N	2603	\N	\N	t	\N	https://i.discogs.com/hd9bIDFEWyWBbMAxt0s1HYwyu8adwHg6YvmnpdGYsXg/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM4NDg0/OS0xMTMyNzY0NTY3/LmpwZWc.jpeg	Sensational	discogs:master:101956	0.95	2026-04-28 05:56:32.374923+00
 4696	1822	7	3	\N	Bridge Into the New Age	\N	1	1	0	2002-02-02 00:04:34.523+00	2002-04-24 01:42:01.123+00	\N	\N	6562	\N	\N	t	\N	https://i.discogs.com/4REKUhjLMgKX9PbLVaKyT4GVziCnxjlrS8XeyBDNFJY/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTExNTgw/NjAwLTE1MTg4NzYw/ODctMTc3MS5qcGVn.jpeg	Azar Lawrence	discogs:master:482098	0.95	2026-04-28 05:56:37.766469+00
 4697	1822	7	3	\N	Summer Solstice	\N	2	1	0	2002-02-02 00:04:34.583+00	2002-04-24 01:42:01.172+00	\N	\N	6563	\N	\N	t	\N	https://i.discogs.com/cRAqGg7fKb-T67DPgq4ASdHQsVAo7PazyxYF80eSTVQ/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTYxOTY5/OTctMTcyNjU1NjYw/Ni05ODMxLmpwZWc.jpeg	Azar Lawrence	discogs:master:699307	0.95	2026-04-28 05:56:37.766469+00
-49	25	6	3	\N	What am I?  12"	\N	3	1	0	2002-02-01 23:57:22.702+00	2002-04-24 01:37:53.291+00	\N	\N	\N	\N	\N	\N	\N	\N	Antipop Consortium	discogs:master:32713	0.95	2026-04-28 05:00:04.087599+00
-52	28	6	3	\N	Do Fa Self  12"	\N	1	1	0	2002-02-01 23:57:23.242+00	2002-04-24 01:37:53.571+00	\N	\N	\N	\N	\N	\N	\N	\N	Apache	discogs:master:182851	0.95	2026-04-28 05:00:32.610189+00
-143	64	6	3	\N	Studda Step  12"	\N	7	1	0	2002-02-01 23:57:33.077+00	2002-04-24 01:37:59.418+00	\N	\N	\N	\N	\N	\N	\N	\N	Biz Markie	\N	\N	\N
+49	25	6	3	\N	What am I?  12"	\N	3	1	0	2002-02-01 23:57:22.702+00	2002-04-24 01:37:53.291+00	\N	\N	1000002	\N	\N	\N	\N	\N	Antipop Consortium	discogs:master:32713	0.95	2026-04-28 05:00:04.087599+00
+52	28	6	3	\N	Do Fa Self  12"	\N	1	1	0	2002-02-01 23:57:23.242+00	2002-04-24 01:37:53.571+00	\N	\N	1000003	\N	\N	\N	\N	\N	Apache	discogs:master:182851	0.95	2026-04-28 05:00:32.610189+00
+143	64	6	3	\N	Studda Step  12"	\N	7	1	0	2002-02-01 23:57:33.077+00	2002-04-24 01:37:59.418+00	\N	\N	1000004	\N	\N	\N	\N	\N	Biz Markie	\N	\N	\N
 4750	1836	7	1	\N	Las Seis Tentaciones	\N	1	1	0	2002-02-02 00:04:38.619+00	2002-04-24 01:42:06.745+00	\N	\N	6622	\N	\N	f	\N	https://i.discogs.com/yxxlF0iD8TRknjL_ikvUTS7pzudmYmyWqRORJ92wMDc/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTc0NzM0/MzItMTQ0MjE4MTgw/My0zNjUwLmpwZWc.jpeg	La Musgana	\N	\N	\N
 4713	1826	7	3	\N	Illuminations	\N	1	1	0	2002-02-02 00:04:35.674+00	2002-04-24 01:42:02.727+00	\N	\N	6579	\N	\N	f	\N	https://i.discogs.com/jXhJYf3mtxUAvwgfFn5R8z5PqEmYIj5XQed_kIr4Fno/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTU1Njk2/NDYtMTU1MDUwNzEx/Ny00NjkwLmpwZWc.jpeg	T.J. Lawrence	\N	\N	\N
-2052	1052	6	3	\N	Papa's Song 12"	\N	4	1	0	2002-02-02 00:00:30.702+00	2002-04-24 01:39:57.952+00	\N	\N	\N	\N	\N	\N	\N	\N	2Pac	\N	\N	\N
-3610	1442	7	3	\N	The Best of  [missing]	\N	3	1	0	2002-02-02 00:02:56.081+00	2002-04-24 01:41:10.033+00	\N	\N	\N	\N	\N	\N	\N	\N	Tommy Dorsey	\N	\N	\N
-3611	1442	7	3	\N	This Is  [missing]	\N	4	1	0	2002-02-02 00:02:56.141+00	2002-04-24 01:41:10.059+00	\N	\N	\N	\N	\N	\N	\N	\N	Tommy Dorsey	\N	\N	\N
-4129	1612	7	1	\N	The Montreal Tapes (w/ P. Motian & G. Rubalcaba	\N	17	1	0	2002-02-02 00:03:45.692+00	2002-04-24 01:41:35.35+00	\N	\N	\N	\N	\N	\N	\N	\N	Charlie Haden	\N	\N	\N
+2052	1052	6	3	\N	Papa's Song 12"	\N	4	1	0	2002-02-02 00:00:30.702+00	2002-04-24 01:39:57.952+00	\N	\N	1000005	\N	\N	\N	\N	\N	2Pac	\N	\N	\N
+3610	1442	7	3	\N	The Best of  [missing]	\N	3	1	0	2002-02-02 00:02:56.081+00	2002-04-24 01:41:10.033+00	\N	\N	1000006	\N	\N	\N	\N	\N	Tommy Dorsey	\N	\N	\N
+3611	1442	7	3	\N	This Is  [missing]	\N	4	1	0	2002-02-02 00:02:56.141+00	2002-04-24 01:41:10.059+00	\N	\N	1000007	\N	\N	\N	\N	\N	Tommy Dorsey	\N	\N	\N
+4129	1612	7	1	\N	The Montreal Tapes (w/ P. Motian & G. Rubalcaba	\N	17	1	0	2002-02-02 00:03:45.692+00	2002-04-24 01:41:35.35+00	\N	\N	1000008	\N	\N	\N	\N	\N	Charlie Haden	\N	\N	\N
 15	5	6	3	\N	Vocally Pumpin'	\N	3	1	0	2002-02-01 23:57:21.079+00	2002-04-24 01:37:51.251+00	\N	\N	19	\N	\N	t	\N	\N	Above the Law	\N	\N	\N
 18	6	6	1	\N	Clean Singles	\N	2	1	0	2002-02-01 23:57:21.149+00	2002-04-24 01:37:51.339+00	\N	\N	22	\N	\N	t	\N	\N	Abstract Tribe Unique	\N	\N	\N
 22	8	6	3	\N	Dragster b/w Elementz 12"	\N	1	1	0	2002-02-01 23:57:21.29+00	2002-04-24 01:37:51.514+00	\N	\N	27	\N	\N	t	\N	\N	Accidental Heroes	\N	\N	\N
@@ -78087,15 +78087,15 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 9959	3774	10	1	\N	Native	\N	1	1	0	2002-02-02 00:11:44.421+00	2002-04-24 01:48:47.415+00	\N	\N	12706	\N	\N	t	\N	https://i.discogs.com/8cWD9zgV_yomLjB4tLHzUnMNx00TvoIV3rpFtWm8sy0/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTEyODEx/OTc0LTE1Nzg1NzIw/NDMtOTIyNS5qcGVn.jpeg	Ras Alan & the Lions	\N	\N	\N
 8097	3149	9	1	\N	Land	\N	1	1	0	2002-02-02 00:09:27.454+00	2002-04-24 01:46:54.699+00	\N	\N	10657	\N	\N	f	\N	https://i.discogs.com/SUXD0KuNt4c8BOatXMNVXunLOcyi3hMuqlG6IU4zDOk/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTEwOTAx/MDA1LTE1MDYyMDk5/MDQtMzY0Ni5qcGVn.jpeg	Robert Mirabal	\N	\N	\N
 6836	2512	7	3	\N	You are So Lovely	\N	1	1	0	2002-02-02 00:07:36.745+00	2002-04-24 01:45:18.27+00	\N	\N	9143	\N	\N	t	\N	https://i.discogs.com/O-QEH4Kyd24BUVbrFcbLJOlPEY4KLTICHqobUFlvgIs/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTgwNDYz/OTMtMTQ1NDEwNjU3/MS01MTkzLmpwZWc.jpeg	Lawrence Welk	\N	\N	\N
-6928	2553	7	1	\N	Road Movie	\N	1	1	0	2002-02-02 00:07:44.275+00	2002-04-24 01:45:29.459+00	\N	\N	\N	\N	\N	\N	\N	\N	Michael  Wintsch	\N	\N	\N
-6994	2581	7	1	\N	Cobra (2 CD's: studio, live	\N	5	1	0	2002-02-02 00:07:49.633+00	2002-04-24 01:45:37.351+00	\N	\N	\N	\N	\N	\N	\N	\N	John Zorn	\N	\N	\N
-7016	2582	7	1	\N	Dialogue	\N	3	1	0	2002-02-02 00:07:51.926+00	2002-04-24 01:45:40.143+00	\N	\N	\N	\N	\N	\N	\N	\N	Zoviet France	\N	\N	\N
-7164	2661	9	3	\N	Precious Memories	\N	1	1	0	2002-02-02 00:08:05.236+00	2002-04-24 01:46:01.872+00	\N	\N	\N	\N	\N	\N	\N	\N	Bluegrass  Meditations	\N	\N	\N
-7842	2989	9	3	\N	Yesterday and Today	\N	1	1	0	2002-02-02 00:09:04.921+00	2002-04-24 01:46:41.531+00	\N	\N	\N	\N	\N	\N	\N	\N	Reverend Claude  Jeter	\N	\N	\N
-8977	1087	9	1	\N	Klezmer Music 1908-27 vol.  1	\N	255	1	0	2002-02-02 00:11:01.459+00	2002-04-24 01:47:59.619+00	A	\N	\N	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
-8978	1087	9	1	\N	Klezmer Music 1908-27 vol.  2	\N	255	1	0	2002-02-02 00:11:01.499+00	2002-04-24 01:47:59.645+00	B	\N	\N	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
-9064	1087	9	1	\N	Wizard  - Women of the North	\N	323	1	0	2002-02-02 00:11:04.694+00	2002-04-24 01:48:02.184+00	\N	\N	\N	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
-9643	3671	10	3	\N	Reggae Sun (w/ Ronnie Davis	\N	1	1	0	2002-02-02 00:11:30.23+00	2002-04-24 01:48:30.069+00	\N	\N	\N	\N	\N	\N	\N	\N	Gregory Isaacs	\N	\N	\N
+6928	2553	7	1	\N	Road Movie	\N	1	1	0	2002-02-02 00:07:44.275+00	2002-04-24 01:45:29.459+00	\N	\N	1000009	\N	\N	\N	\N	\N	Michael  Wintsch	\N	\N	\N
+6994	2581	7	1	\N	Cobra (2 CD's: studio, live	\N	5	1	0	2002-02-02 00:07:49.633+00	2002-04-24 01:45:37.351+00	\N	\N	1000010	\N	\N	\N	\N	\N	John Zorn	\N	\N	\N
+7016	2582	7	1	\N	Dialogue	\N	3	1	0	2002-02-02 00:07:51.926+00	2002-04-24 01:45:40.143+00	\N	\N	1000011	\N	\N	\N	\N	\N	Zoviet France	\N	\N	\N
+7164	2661	9	3	\N	Precious Memories	\N	1	1	0	2002-02-02 00:08:05.236+00	2002-04-24 01:46:01.872+00	\N	\N	1000012	\N	\N	\N	\N	\N	Bluegrass  Meditations	\N	\N	\N
+7842	2989	9	3	\N	Yesterday and Today	\N	1	1	0	2002-02-02 00:09:04.921+00	2002-04-24 01:46:41.531+00	\N	\N	1000013	\N	\N	\N	\N	\N	Reverend Claude  Jeter	\N	\N	\N
+8977	1087	9	1	\N	Klezmer Music 1908-27 vol.  1	\N	255	1	0	2002-02-02 00:11:01.459+00	2002-04-24 01:47:59.619+00	A	\N	1000014	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
+8978	1087	9	1	\N	Klezmer Music 1908-27 vol.  2	\N	255	1	0	2002-02-02 00:11:01.499+00	2002-04-24 01:47:59.645+00	B	\N	1000015	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
+9064	1087	9	1	\N	Wizard  - Women of the North	\N	323	1	0	2002-02-02 00:11:04.694+00	2002-04-24 01:48:02.184+00	\N	\N	1000016	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
+9643	3671	10	3	\N	Reggae Sun (w/ Ronnie Davis	\N	1	1	0	2002-02-02 00:11:30.23+00	2002-04-24 01:48:30.069+00	\N	\N	1000017	\N	\N	\N	\N	\N	Gregory Isaacs	\N	\N	\N
 5543	2140	7	1	\N	Pendabellum	\N	1	1	0	2002-02-02 00:05:48.008+00	2002-04-24 01:42:55.97+00	\N	\N	7600	\N	\N	f	\N	\N	Pendabellum	\N	\N	\N
 44157	1236	7	3	\N	White Rabbit	\N	7	1	0	2002-02-02 00:01:46.872+00	2010-05-11 23:16:49.718+00	\N	\N	4170	\N	\N	t	\N	\N	George Benson	discogs:master:64220	0.95	2026-04-28 05:58:42.334563+00
 44388	16651	4	1	\N	Les Corps Eblouis	\N	1	1	0	2010-07-07 18:15:11.726+00	2010-07-07 18:15:11.726+00	\N	\N	56115	\N	\N	t	\N	\N	Christian Calon	discogs:release:243277	0.95	2026-04-28 05:58:42.334563+00
@@ -80739,7 +80739,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 11962	4454	11	3	\N	Crocodile Tears	\N	1	1	0	2002-07-01 00:34:39.474+00	2002-07-01 00:34:39.474+00	\N	\N	15162	\N	\N	t	\N	https://i.discogs.com/jwfmJNjuVnZRCPID5BiTWVuCGdYvhciydO8KJXHd-1g/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTEwMDMx/OTM1LTE0OTA0NDM4/NDktMTQ0Ny5qcGVn.jpeg	Batfish Boys	\N	\N	\N
 14114	5234	11	3	\N	Crocodile Tears	\N	1	1	0	2002-07-13 15:42:32.543+00	2002-07-13 15:42:32.543+00	\N	\N	18087	\N	\N	t	\N	https://i.discogs.com/9TA2Cb5W__4WjSoCop7s5mTKtq5OK4PogEWRHNegnA8/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTEzOTQ0/MzMtMTIxNjI4MDYw/Ny5qcGVn.jpeg	Chesterfields	\N	\N	\N
 14969	5536	11	3	\N	Lullaby	\N	1	1	0	2002-07-13 15:52:28.44+00	2002-07-13 15:52:28.44+00	\N	\N	19302	\N	\N	f	\N	https://i.discogs.com/x0xf4BW9EJZ2uVf5XvFNkORHTfO5FtPT_9oseg22lUQ/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTQwODY4/MjItMTQ2Mzk3MjAy/NS0yOTc4LmpwZWc.jpeg	Crocodile Shop	\N	\N	\N
-10484	2920	9	1	\N	Daddy-O Daddy!  Rare Family Songs of Woody Guthrie	\N	14	1	0	2002-03-23 00:47:13.582+00	2002-04-24 01:49:08.268+00	\N	\N	\N	\N	\N	\N	\N	\N	Woody Guthrie	\N	\N	\N
+10484	2920	9	1	\N	Daddy-O Daddy!  Rare Family Songs of Woody Guthrie	\N	14	1	0	2002-03-23 00:47:13.582+00	2002-04-24 01:49:08.268+00	\N	\N	1000018	\N	\N	\N	\N	\N	Woody Guthrie	\N	\N	\N
 13252	4947	11	3	\N	Stop!	\N	1	1	0	2002-07-01 00:38:45.287+00	2002-07-01 00:38:45.287+00	\N	\N	16854	\N	\N	t	\N	\N	Sam Brown	discogs:master:101939	0.95	2026-04-28 05:56:58.804094+00
 13663	5070	11	3	\N	Nude	\N	5	1	0	2002-07-13 15:37:04.181+00	2002-07-13 15:37:04.181+00	\N	\N	17429	\N	\N	t	\N	\N	Camel	discogs:master:33650	0.95	2026-04-28 05:56:58.804094+00
 10001	3797	10	1	\N	Isis	\N	5	1	0	2002-02-02 00:11:46.253+00	2002-04-24 01:48:49.419+00	\N	\N	12751	\N	\N	t	\N	\N	Sister Carol	\N	\N	\N
@@ -83142,8 +83142,8 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 14983	5542	11	3	\N	Daylight Again	\N	6	1	0	2002-07-13 15:52:38.194+00	2002-07-13 15:52:38.194+00	\N	\N	19322	\N	\N	f	\N	\N	Crosby Stills Nash Young	\N	\N	\N
 14984	5542	11	3	\N	Allies	\N	7	1	0	2002-07-13 15:52:38.564+00	2002-07-13 15:52:38.564+00	\N	\N	19323	\N	\N	f	\N	\N	Crosby Stills Nash Young	\N	\N	\N
 14991	5545	11	3	\N	The Bounty Hunter	\N	3	1	0	2002-07-13 15:52:42.169+00	2002-07-13 15:52:42.169+00	\N	\N	19330	\N	\N	t	\N	https://i.discogs.com/ZRj5_xFY_YmK-NbJSW-V2rPEgiZjJbR-WXvpXP3O8wY/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0MTk5/NzQtMTM0NTkwNDk0/OS04OTM4LmpwZWc.jpeg	Mike Cross	\N	\N	\N
-17149	6798	11	1	\N	Goops, The	\N	1	1	0	2002-11-02 22:41:44.039+00	2002-11-02 22:41:44.039+00	\N	\N	\N	\N	\N	\N	\N	\N	The Goops	\N	\N	\N
-17529	6479	11	4	\N	Land Beyond the Sun b/w  Everywhere Was Everything	\N	2	1	0	2002-11-02 22:46:29.7+00	2002-11-02 22:46:29.7+00	A	\N	\N	\N	\N	\N	\N	\N	Flying Saucer Attack	\N	\N	\N
+17149	6798	11	1	\N	Goops, The	\N	1	1	0	2002-11-02 22:41:44.039+00	2002-11-02 22:41:44.039+00	\N	\N	1000019	\N	\N	\N	\N	\N	The Goops	\N	\N	\N
+17529	6479	11	4	\N	Land Beyond the Sun b/w  Everywhere Was Everything	\N	2	1	0	2002-11-02 22:46:29.7+00	2002-11-02 22:46:29.7+00	A	\N	1000020	\N	\N	\N	\N	\N	Flying Saucer Attack	\N	\N	\N
 15004	5550	11	3	\N	Big Fish Stories	\N	1	1	0	2002-07-13 15:52:51.583+00	2002-07-13 15:52:51.573+00	\N	\N	19350	\N	\N	f	\N	\N	The Crowd	\N	\N	\N
 15009	5552	11	3	\N	Diamonds and Dirt	\N	1	1	0	2002-07-13 15:52:54.107+00	2002-07-13 15:52:54.107+00	\N	\N	19355	\N	\N	t	\N	\N	Rodney Crowell	\N	\N	\N
 15011	5552	11	3	\N	But What Will the Neighbors Think (1980)	\N	3	1	0	2002-07-13 15:52:54.828+00	2002-07-13 15:52:54.828+00	\N	\N	19357	\N	\N	t	\N	\N	Rodney Crowell	\N	\N	\N
@@ -85406,16 +85406,16 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 19994	7803	11	3	\N	The Kinks, Vol. 2 - the History of British Pop	\N	1	1	0	2002-11-06 16:35:06.981+00	2002-11-06 16:35:06.981+00	\N	\N	26402	\N	\N	t	\N	\N	The Kinks	\N	\N	\N
 19995	7804	11	3	\N	Blind	\N	1	1	0	2002-11-06 16:35:07.772+00	2002-11-06 16:35:07.772+00	\N	\N	26403	\N	\N	t	\N	\N	King Carcass	\N	\N	\N
 19996	7805	11	3	\N	Like No Other [EP]	\N	1	1	0	2002-11-06 16:35:09.364+00	2002-11-06 16:35:09.364+00	\N	\N	26405	\N	\N	f	\N	\N	Kiaro Skuro	\N	\N	\N
-20794	7375	11	3	\N	Performance:  Rockin' the Fillmore	\N	2	1	0	2002-11-06 16:46:13.399+00	2002-11-06 16:46:13.399+00	\N	\N	\N	\N	\N	\N	\N	\N	Humble Pie	discogs:master:79292	0.95	2026-04-28 05:57:20.802523+00
+20794	7375	11	3	\N	Performance:  Rockin' the Fillmore	\N	2	1	0	2002-11-06 16:46:13.399+00	2002-11-06 16:46:13.399+00	\N	\N	1000021	\N	\N	\N	\N	\N	Humble Pie	discogs:master:79292	0.95	2026-04-28 05:57:20.802523+00
 19998	7807	11	3	\N	Flight and Light	\N	1	1	0	2002-11-06 16:35:10.836+00	2002-11-06 16:35:10.836+00	\N	\N	26407	\N	\N	t	\N	\N	Kisbus Interruptus	\N	\N	\N
 19999	7808	11	4	\N	The Boy + 2	\N	1	1	0	2002-11-06 16:35:11.587+00	2002-11-06 16:35:11.587+00	A	\N	26408	\N	\N	t	\N	\N	King Kong	\N	\N	\N
 20000	7808	11	4	\N	Movie Star + 2	\N	1	1	0	2002-11-06 16:35:11.948+00	2002-11-06 16:35:11.948+00	B	\N	26409	\N	\N	t	\N	\N	King Kong	\N	\N	\N
 19572	7385	11	1	\N	Love Oh Love / The Man!	\N	1	2	0	2002-11-06 16:27:34.891+00	2002-11-06 16:27:34.891+00	\N	\N	25811	2026-03-20 17:30:21.852+00	\N	t	\N	\N	Leroy Hutson	\N	\N	\N
-20842	8328	11	1	\N	A Living Memorial in Deutschland	\N	2	1	0	2002-11-06 16:46:40.027+00	2002-11-06 16:46:40.027+00	\N	\N	\N	\N	\N	\N	\N	\N	The In Out	discogs:release:2418755	0.95	2026-04-28 05:57:20.802523+00
+20842	8328	11	1	\N	A Living Memorial in Deutschland	\N	2	1	0	2002-11-06 16:46:40.027+00	2002-11-06 16:46:40.027+00	\N	\N	1000022	\N	\N	\N	\N	\N	The In Out	discogs:release:2418755	0.95	2026-04-28 05:57:20.802523+00
 24369	9035	11	3	\N	Orange	\N	2	1	0	2003-01-12 04:10:52.978+00	2003-01-12 04:10:52.978+00	\N	\N	31962	\N	\N	t	\N	https://i.discogs.com/xdzBamMo1DfTgzf_jIWmw-ptAZellSGXHjY40NM4hXk/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTU4Nzc1/ODUtMTQwNTE4MzA3/Ni05NzU3LmpwZWc.jpeg	National Peoples' Gang	\N	\N	\N
 22593	8448	11	2	\N	Untied	\N	1	1	0	2003-01-08 21:25:52.948+00	2003-01-08 21:25:52.948+00	\N	\N	29734	\N	\N	t	\N	https://i.discogs.com/47dpzELAKEv7rkCQSIOeepLFoJv5kTShhXcdAhHWKJA/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTE2ODUz/OTE2LTE2MTAyMjMw/NzYtMjM2OS5qcGVn.jpeg	Languis	discogs:master:1914570	0.95	2026-04-28 05:57:26.185305+00
 24408	9052	11	3	\N	No Boundaries	\N	2	1	0	2003-01-12 04:11:31.533+00	2003-01-12 04:11:31.533+00	\N	\N	32010	\N	\N	t	\N	https://i.discogs.com/bv2oOehphFZ0qCldjn3NqdykCep3wqHU40_O8RdtJcw/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTExNTg4/OTM4LTE1MTg5OTIy/MzgtMTYwMC5qcGVn.jpeg	Native	\N	\N	\N
-22850	8525	11	1	\N	OM	\N	1	1	0	2003-01-12 03:47:18.104+00	2003-01-12 03:47:18.104+00	\N	\N	\N	\N	\N	\N	\N	\N	Clifton Lee Mann	discogs:release:11930005	0.95	2026-04-28 05:57:26.185305+00
+22850	8525	11	1	\N	OM	\N	1	1	0	2003-01-12 03:47:18.104+00	2003-01-12 03:47:18.104+00	\N	\N	1000023	\N	\N	\N	\N	\N	Clifton Lee Mann	discogs:release:11930005	0.95	2026-04-28 05:57:26.185305+00
 24371	9036	11	3	\N	National Velvet	\N	1	1	0	2003-01-12 04:10:54.64+00	2003-01-12 04:10:54.64+00	\N	\N	31964	\N	\N	f	\N	https://i.discogs.com/P0TMaBzUGpjNFfQC2I7hnrTGDCqWjMnEV-HryJNIgu8/rs:fit/g:sm/q:90/h:594/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTQ3NTI5/LTE2ODAwMzU5Mjkt/NDk4NS5qcGVn.jpeg	National Velvet	discogs:master:322617	0.95	2026-04-28 05:57:31.416183+00
 24407	9052	11	3	\N	In a Strange Land	\N	1	1	0	2003-01-12 04:11:31.043+00	2003-01-12 04:11:31.043+00	\N	\N	32009	\N	\N	t	\N	https://i.discogs.com/D8x2mfQFJLC3hdb3tOymqSgf9fbLGoKfELggT9GAdgk/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTEzMjQz/MTkxLTE1NTA1OTcy/MzctNjAyOS5qcGVn.jpeg	Native	\N	\N	\N
 28631	10596	11	4	\N	Emboldened Navigator [ep]	\N	1	1	0	2003-09-08 18:42:32.275+00	2003-09-08 18:42:32.275+00	\N	\N	37390	\N	\N	t	\N	\N	Frog Eyes	\N	\N	\N
@@ -85423,8 +85423,8 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 22470	7915	11	1	\N	Fade In Fade Out	\N	2	1	0	2002-11-26 20:50:19.298+00	2002-11-26 20:50:19.298+00	\N	\N	29562	\N	\N	t	\N	https://i.discogs.com/d3EMNPPoAbofpfVaZiwG82s4WRAJHi61bdiEdPXkRgM/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTIyMzkw/NzUwLTE2NDY0NTA2/MjAtMzkyMi5qcGVn.jpeg	Landing	\N	\N	\N
 24412	9055	11	1	\N	Playtime	\N	1	1	0	2003-01-12 04:11:37.202+00	2003-01-12 04:11:37.202+00	\N	\N	32016	\N	\N	t	\N	https://i.discogs.com/_tivMLHSYHBk4Ga6rcJ0nfUbq3kMs7yVbfTYrz4mGNM/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTEyNDU5/ODMxLTE1MzU3MTU5/NjQtOTI3MS5qcGVn.jpeg	National Health	discogs:master:978715	0.95	2026-04-28 05:57:31.416183+00
 24417	9059	11	1	\N	Dekkagar	\N	1	1	0	2003-01-12 04:11:44.863+00	2003-01-12 04:11:44.863+00	\N	\N	32023	\N	\N	t	\N	https://i.discogs.com/718ADgJN0VKyxJxdvH_S-BViS4-BHF3ZTAKNclc8nIk/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTE5NjQx/MjUzLTE2MjczOTYz/NTEtNTIxMS5qcGVn.jpeg	The National Trust	discogs:master:232852	0.95	2026-04-28 05:57:31.416183+00
-20088	7896	11	1	\N	K	\N	1	1	0	2002-11-06 16:37:03.278+00	2002-11-06 16:37:03.278+00	\N	\N	\N	\N	\N	\N	\N	\N	Kulashaker	\N	\N	\N
-21049	7896	11	1	\N	Peasants, Pigs and Astronauts	\N	2	1	0	2002-11-06 16:48:26.09+00	2002-11-06 16:48:26.09+00	\N	\N	\N	\N	\N	\N	\N	\N	Kulashaker	\N	\N	\N
+20088	7896	11	1	\N	K	\N	1	1	0	2002-11-06 16:37:03.278+00	2002-11-06 16:37:03.278+00	\N	\N	1000024	\N	\N	\N	\N	\N	Kulashaker	\N	\N	\N
+21049	7896	11	1	\N	Peasants, Pigs and Astronauts	\N	2	1	0	2002-11-06 16:48:26.09+00	2002-11-06 16:48:26.09+00	\N	\N	1000025	\N	\N	\N	\N	\N	Kulashaker	\N	\N	\N
 20001	7809	11	1	\N	Hubbub	\N	1	1	0	2002-11-06 16:35:13.44+00	2002-11-06 16:35:13.44+00	\N	\N	26411	\N	\N	t	\N	\N	King Buts	\N	\N	\N
 20002	7810	11	3	\N	The Kingbees	\N	1	1	0	2002-11-06 16:35:14.301+00	2002-11-06 16:35:14.301+00	\N	\N	26412	\N	\N	t	\N	\N	Kingbees	\N	\N	\N
 20006	7814	11	3	\N	Halo [CD -- but filed with vinyl]	\N	1	1	0	2002-11-06 16:35:21.091+00	2002-11-06 16:35:21.091+00	\N	\N	26417	\N	\N	t	\N	\N	Kicking Giant	\N	\N	\N
@@ -87717,7 +87717,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 24977	9259	11	1	\N	Kim Chee is Cabbage [EP]	\N	2	1	0	2003-01-12 04:20:01.296+00	2003-01-12 04:20:01.296+00	\N	\N	32707	\N	\N	t	\N	\N	Number One Cup	\N	\N	\N
 26639	9859	11	1	\N	Rame	\N	1	1	0	2003-02-08 22:18:18.141+00	2003-02-08 22:18:18.141+00	\N	\N	34884	\N	\N	t	\N	\N	Propeller	discogs:master:832075	0.95	2026-04-28 05:57:36.646035+00
 27604	10192	11	3	\N	National Breakout	\N	2	1	0	2003-02-08 22:27:00.492+00	2003-02-08 22:27:00.492+00	\N	\N	36074	\N	\N	t	\N	https://i.discogs.com/KWo8zzd-zgJF4LdeHA3adaio1iLo6oswh9pcJ-zdGOQ/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTI2MDE1/MDctMTI5MjYwNjkx/My5qcGVn.jpeg	The Romantics	discogs:master:233037	0.95	2026-04-28 05:57:39.39301+00
-28014	10367	11	1	\N	The Song Is You	\N	1	1	0	2003-02-26 18:08:56.6+00	2003-02-26 18:08:56.6+00	\N	\N	\N	\N	\N	\N	\N	\N	Ancient Greeks	discogs:master:788042	0.95	2026-04-28 05:57:41.977704+00
+28014	10367	11	1	\N	The Song Is You	\N	1	1	0	2003-02-26 18:08:56.6+00	2003-02-26 18:08:56.6+00	\N	\N	1000026	\N	\N	\N	\N	\N	Ancient Greeks	discogs:master:788042	0.95	2026-04-28 05:57:41.977704+00
 28024	866	6	1	\N	Natural Shine	\N	6	1	0	2003-02-26 18:44:06.107+00	2003-02-26 18:44:06.107+00	\N	\N	36597	\N	\N	t	\N	https://i.discogs.com/A2EqwDiguEXUn403j7Xfw3mb5MLUPSIMI9J4e-kI6rg/rs:fit/g:sm/q:90/h:200/w:200/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTIwODE2/OS0xMDg1Njc5MTIy/LmpwZw.jpeg	Sensational	discogs:master:101085	0.95	2026-04-28 05:57:41.977704+00
 24982	9261	11	3	\N	Tooth, Fang and Claw	\N	2	1	0	2003-01-12 04:20:05.072+00	2003-01-12 04:20:05.072+00	\N	\N	32712	\N	\N	t	\N	\N	Ted Nugent	\N	\N	\N
 28724	1899	7	6	\N	Taboo	\N	5	1	0	2003-09-21 19:34:04.014+00	2003-09-21 19:34:04.014+00	\N	\N	37524	\N	\N	t	\N	\N	Arthur Lyman	discogs:master:110874	0.95	2026-04-28 05:57:45.455523+00
@@ -87729,9 +87729,9 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 24999	9262	11	3	\N	Cooloorta Moon [missing]	\N	5	1	0	2003-01-12 04:20:14.155+00	2003-01-12 04:20:14.155+00	\N	\N	32729	\N	\N	t	\N	\N	Nurse with Wound	\N	\N	\N
 20064	7872	11	3	Billy J. Kramer with the Dakotas	Best Of	\N	1	1	0	2002-11-06 16:36:34.687+00	2002-11-06 16:36:34.687+00	\N	\N	26510	\N	\N	t	\N	\N	Billy J. Kramer	\N	\N	\N
 28118	7982	11	1	\N	Sands	\N	3	1	0	2003-03-18 20:00:57.283+00	2003-03-18 20:00:57.277+00	\N	\N	36700	\N	\N	t	\N	https://i.discogs.com/Uny1QAqO8fu7mjk0WHfgPW7ZoT4ehjtfJ2iKZ0AnyGU/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTU4MzI2/Ni0xMjM4MzQ1MTQ2/LmpwZWc.jpeg	Lanterna	\N	\N	\N
-25279	9382	11	1	\N	Space and Time	\N	1	1	0	2003-01-12 04:25:03+00	2003-01-12 04:25:03+00	\N	\N	\N	\N	\N	\N	\N	\N	Orange Alabaster  Mushroom	\N	\N	\N
-26438	9813	11	3	\N	G.I. Blues (original soundtrack]	\N	16	1	0	2003-02-08 22:16:17.618+00	2003-02-08 22:16:17.618+00	\N	\N	\N	\N	\N	\N	\N	\N	Elvis Presley	\N	\N	\N
-27938	10328	7	6	\N	...And Now We Come To    Distances	\N	1	1	0	2003-02-18 18:30:27.762+00	2003-02-18 18:30:27.762+00	\N	\N	\N	\N	\N	\N	\N	\N	Gloria Loring	\N	\N	\N
+25279	9382	11	1	\N	Space and Time	\N	1	1	0	2003-01-12 04:25:03+00	2003-01-12 04:25:03+00	\N	\N	1000027	\N	\N	\N	\N	\N	Orange Alabaster  Mushroom	\N	\N	\N
+26438	9813	11	3	\N	G.I. Blues (original soundtrack]	\N	16	1	0	2003-02-08 22:16:17.618+00	2003-02-08 22:16:17.618+00	\N	\N	1000028	\N	\N	\N	\N	\N	Elvis Presley	\N	\N	\N
+27938	10328	7	6	\N	...And Now We Come To    Distances	\N	1	1	0	2003-02-18 18:30:27.762+00	2003-02-18 18:30:27.762+00	\N	\N	1000029	\N	\N	\N	\N	\N	Gloria Loring	\N	\N	\N
 25001	9262	11	3	\N	Gyllenskold/Brained [missing]	\N	7	1	0	2003-01-12 04:20:15.156+00	2003-01-12 04:20:15.156+00	\N	\N	32731	\N	\N	t	\N	\N	Nurse with Wound	\N	\N	\N
 25002	9262	11	3	\N	The Ladies Home Tickler [missing]	\N	8	1	0	2003-01-12 04:20:15.637+00	2003-01-12 04:20:15.637+00	\N	\N	32732	\N	\N	t	\N	\N	Nurse with Wound	\N	\N	\N
 25005	9262	11	1	\N	Chance Meeting on a Dissecting Table	\N	11	1	0	2003-01-12 04:20:17.129+00	2003-01-12 04:20:17.129+00	\N	\N	32735	\N	\N	t	\N	\N	Nurse with Wound	\N	\N	\N
@@ -90178,7 +90178,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 32429	12116	11	3	Link Wray & the Raymen	Link Wray & the Raymen	\N	4	1	0	2004-03-14 08:13:19.078+00	2004-03-14 08:13:19.078+00	\N	\N	41993	\N	\N	t	\N	\N	Link Wray	\N	\N	\N
 34235	12747	11	3	\N	Golly Wobblers from Hell	\N	1	1	0	2004-03-14 08:14:39.921+00	2004-03-14 08:14:39.921+00	\N	\N	44195	\N	\N	f	\N	\N	Snake Out	\N	\N	\N
 33685	12547	11	1	\N	The Best of The Sir Douglas Quintet	\N	5	1	0	2004-03-14 08:14:33.156+00	2004-03-14 08:14:33.156+00	\N	\N	43532	\N	\N	t	\N	\N	The Sir Douglas Quintet	\N	\N	\N
-32565	12155	11	3	\N	Must've Been Something I Took  Last Night	\N	1	1	0	2004-03-14 08:13:21.281+00	2004-03-14 08:13:21.281+00	\N	\N	\N	\N	\N	\N	\N	\N	Yard Trauma	\N	\N	\N
+32565	12155	11	3	\N	Must've Been Something I Took  Last Night	\N	1	1	0	2004-03-14 08:13:21.281+00	2004-03-14 08:13:21.281+00	\N	\N	1000030	\N	\N	\N	\N	\N	Yard Trauma	\N	\N	\N
 33843	12586	11	1	\N	Libertine	\N	4	1	0	2004-03-14 08:14:34.828+00	2004-03-14 08:14:34.828+00	\N	\N	43706	\N	\N	t	\N	\N	Silkworm	discogs:master:420582	0.95	2026-04-28 05:58:01.675449+00
 30030	11170	11	1	\N	Hellzapoppin	\N	4	1	0	2004-03-14 08:12:47.281+00	2004-03-14 08:12:47.281+00	\N	\N	39173	\N	\N	t	\N	\N	The 3Ds	\N	\N	\N
 33831	12584	11	3	\N	Clone Theory [EP]	\N	6	1	0	2004-03-14 08:14:34.703+00	2004-03-14 08:14:34.703+00	\N	\N	43693	\N	\N	t	\N	\N	Six Finger Satellite	\N	\N	\N
@@ -92108,7 +92108,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 34733	12897	11	1	\N	All Is Well	\N	1	1	0	2004-03-14 08:14:45.75+00	2004-03-14 08:14:45.75+00	\N	\N	44778	\N	\N	t	\N	\N	The Spiny Anteaters	discogs:master:185197	0.95	2026-04-28 05:58:04.807674+00
 34265	12759	11	1	\N	Pseudo-Nouveau / Fifty Fifty	\N	1	1	0	2004-03-14 08:14:40.281+00	2004-03-14 08:14:40.281+00	\N	\N	44230	\N	\N	f	\N	\N	Sneakster	\N	\N	\N
 31798	11888	11	1	\N	Weak Moments	\N	1	1	0	2004-03-14 08:13:11.171+00	2004-03-14 08:13:11.171+00	\N	\N	41239	\N	\N	t	\N	\N	Weak Moments	\N	\N	\N
-34044	12680	11	1	\N	The Power of Gemini(a	\N	2	1	0	2004-03-14 08:14:37.531+00	2004-03-14 08:14:37.531+00	\N	\N	\N	\N	\N	\N	\N	\N	Sleestak	\N	\N	\N
+34044	12680	11	1	\N	The Power of Gemini(a	\N	2	1	0	2004-03-14 08:14:37.531+00	2004-03-14 08:14:37.531+00	\N	\N	1000031	\N	\N	\N	\N	\N	Sleestak	\N	\N	\N
 33097	12316	11	3	\N	Twin Cadillac Valentine [EP]	\N	2	1	0	2004-03-14 08:14:24.921+00	2004-03-14 08:14:24.921+00	\N	\N	42799	\N	\N	t	\N	\N	Screaming Blue Messiahs	\N	\N	\N
 30248	11265	11	1	\N	To Live and Shave in L.A.	\N	2	1	0	2004-03-14 08:12:50.421+00	2004-03-14 08:12:50.421+00	\N	\N	39436	\N	\N	t	\N	\N	To Live and Shave in L.A.	\N	\N	\N
 31471	11744	11	1	\N	Blankside Songs	\N	1	1	0	2004-03-14 08:13:06.875+00	2004-03-14 08:13:06.875+00	\N	\N	40843	\N	\N	t	\N	\N	Viva	\N	\N	\N
@@ -94178,7 +94178,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 39321	10827	11	1	\N	Turn the Lights Out	\N	4	1	0	2007-07-10 17:32:05.072+00	2007-07-10 17:32:05.072+00	\N	\N	50338	\N	\N	t	\N	\N	The Ponys	discogs:master:149632	0.95	2026-04-28 05:58:18.255037+00
 36470	2164	7	1	\N	It's De Lovely	\N	2	1	0	2004-09-01 15:28:50.391+00	2004-09-01 15:28:50.391+00	\N	\N	46859	\N	\N	t	\N	\N	Cole Porter	\N	\N	\N
 39524	14691	11	1	\N	Walls	\N	1	1	0	2007-11-30 19:30:28.652+00	2007-11-30 19:30:28.652+00	\N	\N	50594	\N	\N	t	\N	\N	Apparat	discogs:master:37100	0.95	2026-04-28 05:58:18.255037+00
-39947	14869	2	1	\N	Philippines:  Women Artists of Lake Sebu	\N	1	1	0	2008-05-01 21:44:33.342+00	2008-05-01 21:44:33.342+00	\N	\N	\N	\N	\N	\N	\N	\N	Lemhadong Collective	\N	\N	\N
+39947	14869	2	1	\N	Philippines:  Women Artists of Lake Sebu	\N	1	1	0	2008-05-01 21:44:33.342+00	2008-05-01 21:44:33.342+00	\N	\N	1000032	\N	\N	\N	\N	\N	Lemhadong Collective	\N	\N	\N
 39756	2502	7	1	\N	Fingering an Idea	\N	3	1	0	2008-02-13 00:28:38.673+00	2008-02-13 00:28:38.673+00	\N	\N	50864	\N	\N	t	\N	\N	David Watson	discogs:release:1121472	0.95	2026-04-28 05:58:20.962015+00
 39950	2312	7	3	\N	Someone to Watch Over Me	\N	35	1	0	2008-05-03 17:51:36.352+00	2008-05-03 17:51:36.352+00	\N	\N	51097	\N	\N	t	\N	\N	Frank Sinatra	discogs:master:394282	0.95	2026-04-28 05:58:20.962015+00
 36894	1188	7	3	\N	Steve Allen Plays Hi-Fi Music for Influentials	\N	2	1	0	2004-12-30 23:56:14.454+00	2004-12-30 23:56:14.453+00	\N	\N	47369	\N	\N	t	\N	\N	Steve Allen	\N	\N	\N
@@ -94345,7 +94345,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 35294	13084	11	1	\N	Starry Wisdom Band	\N	1	1	0	2004-03-14 08:14:52.968+00	2004-03-14 08:14:52.968+00	\N	\N	45417	\N	\N	f	\N	\N	Starry Wisdom Band	\N	\N	\N
 38717	14359	4	1	\N	The Animation of Lists and the Archytan Transpositions	\N	1	1	0	2006-11-01 22:42:06.654+00	2006-11-01 22:42:06.654+00	\N	\N	49605	\N	\N	t	\N	\N	Warren Burt	\N	\N	\N
 37564	13944	11	1	\N	A Certain Trigger	\N	1	1	0	2005-08-16 21:27:25.576+00	2005-08-16 21:27:25.576+00	\N	\N	48237	\N	\N	t	\N	\N	Maximo Park	\N	\N	\N
-39259	14588	11	1	\N	Too Young to Know Better.  Too Hard To Care!	\N	1	1	0	2007-06-21 23:27:47.867+00	2007-06-21 23:27:47.867+00	\N	\N	\N	\N	\N	\N	\N	\N	The Giant Robots	\N	\N	\N
+39259	14588	11	1	\N	Too Young to Know Better.  Too Hard To Care!	\N	1	1	0	2007-06-21 23:27:47.867+00	2007-06-21 23:27:47.867+00	\N	\N	1000033	\N	\N	\N	\N	\N	The Giant Robots	\N	\N	\N
 39375	14630	9	1	\N	Singing Songs of Praise	\N	1	1	0	2007-08-11 17:55:11.28+00	2007-08-11 17:55:11.28+00	\N	\N	50406	\N	\N	t	\N	\N	Spiritualaires of Hurtsboro, Alabama	\N	\N	\N
 36946	13699	9	1	\N	Little Niche	\N	2	1	0	2005-01-18 17:26:43.483+00	2005-01-18 17:26:43.483+00	\N	\N	47436	\N	\N	t	\N	https://i.discogs.com/LlOUgoZgXJroKecTnVjCuW6B0P8zg7fPeEj_f4q5WB4/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTEzMjA2/NzQzLTE2NDE1NDIz/NzMtMTEyNS5qcGVn.jpeg	Don White	\N	\N	\N
 36149	5206	11	1	\N	The Best of Ray Charles: The Atlantic Years	\N	16	1	0	2004-06-18 00:19:02.121+00	2004-06-18 00:19:02.121+00	\N	\N	46475	\N	\N	t	\N	\N	Ray Charles	discogs:master:278393	0.95	2026-04-28 05:58:10.185777+00
@@ -95382,7 +95382,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 38910	14444	11	1	\N	Amorino	\N	1	1	0	2007-01-11 00:06:17.283+00	2007-01-11 00:06:17.283+00	\N	\N	49841	\N	\N	t	\N	\N	Isobel Campbell	discogs:master:118615	0.95	2026-04-28 05:58:18.255037+00
 39156	14554	4	1	\N	What?	\N	1	1	0	2007-05-15 22:54:11.005+00	2007-05-15 22:54:11.005+00	\N	\N	50148	\N	\N	t	\N	\N	Folke Rabe	discogs:master:494669	0.95	2026-04-28 05:58:18.255037+00
 38141	14167	11	1	\N	Revel in the Static	\N	1	1	0	2006-03-08 00:32:41.86+00	2006-03-08 00:32:41.86+00	\N	\N	48924	\N	\N	t	\N	\N	Animals & Men	\N	\N	\N
-36306	9319	11	1	Various Artists	I Am A Cold Rock.  I Am Dull Grass: A Tribute to Will Oldham	\N	16	1	0	2004-07-25 22:58:09.126+00	2004-07-25 22:58:09.126+00	\N	\N	\N	\N	\N	\N	\N	\N	Will Oldham	\N	\N	\N
+36306	9319	11	1	Various Artists	I Am A Cold Rock.  I Am Dull Grass: A Tribute to Will Oldham	\N	16	1	0	2004-07-25 22:58:09.126+00	2004-07-25 22:58:09.126+00	\N	\N	1000034	\N	\N	\N	\N	\N	Will Oldham	\N	\N	\N
 39467	7524	11	3	\N	I Think We're Alone Now	\N	4	1	0	2007-11-12 19:40:29.789+00	2007-11-12 19:40:29.789+00	\N	\N	50520	\N	\N	t	\N	\N	Tommy James	discogs:master:1146607	0.95	2026-04-28 05:58:18.255037+00
 35731	10319	11	1	\N	Jersey Girls [EP]	\N	5	1	0	2004-03-14 08:14:59.234+00	2004-03-14 08:14:59.234+00	\N	\N	45981	\N	\N	t	\N	\N	Rye Coalition	\N	\N	\N
 37090	13761	11	1	Alec K. Redfern and The Eyesores	The Quiet Room	\N	1	1	0	2005-03-16 04:25:45.098+00	2005-03-16 04:25:45.098+00	\N	\N	47642	\N	\N	t	\N	\N	Alec K. Redfern	\N	\N	\N
@@ -95417,7 +95417,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 35677	13233	11	1	\N	Kick Your Ass	\N	2	1	0	2004-03-14 08:14:58.015+00	2004-03-14 08:14:58.015+00	\N	\N	45898	\N	\N	t	\N	\N	Swingin' Neckbreakers	\N	\N	\N
 37623	9452	6	1	\N	Choice Cuts vol.1 [EP]	\N	4	1	0	2005-08-27 16:30:46.351+00	2005-08-27 16:30:46.351+00	\N	\N	48316	\N	\N	t	\N	\N	Hydroponic Sound System	\N	\N	\N
 38461	11701	11	1	\N	All Your Things Are Gone	\N	6	1	0	2006-07-09 19:04:43.854+00	2006-07-09 19:04:43.854+00	\N	\N	49304	\N	\N	t	\N	\N	Victory at Sea	discogs:master:249512	0.95	2026-04-28 05:58:15.526726+00
-36151	13412	11	1	\N	Through the Sun Door	\N	1	1	0	2004-06-18 00:20:14.68+00	2004-06-18 00:20:14.68+00	\N	\N	\N	\N	\N	\N	\N	\N	White  Magic	\N	\N	\N
+36151	13412	11	1	\N	Through the Sun Door	\N	1	1	0	2004-06-18 00:20:14.68+00	2004-06-18 00:20:14.68+00	\N	\N	1000035	\N	\N	\N	\N	\N	White  Magic	\N	\N	\N
 38990	13640	6	1	\N	For Hero: For Fool	\N	3	1	0	2007-02-21 23:18:50.388+00	2007-02-21 23:18:50.388+00	\N	\N	49941	\N	\N	t	\N	\N	Subtle	discogs:master:134357	0.95	2026-04-28 05:58:18.255037+00
 39013	13330	6	1	\N	Disko Donkey	\N	2	1	0	2007-03-29 21:51:15.546+00	2007-03-29 21:51:15.546+00	\N	\N	49967	\N	\N	t	\N	\N	Mochipet	discogs:master:1458999	0.95	2026-04-28 05:58:18.255037+00
 39794	14051	11	1	\N	Lady's Bridge	\N	3	1	0	2008-02-26 23:48:23.991+00	2008-02-26 23:48:23.991+00	\N	\N	50919	\N	\N	t	\N	\N	Richard Hawley	discogs:master:206052	0.95	2026-04-28 05:58:20.962015+00
@@ -95439,7 +95439,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 35375	13127	11	3	\N	Join the Army	\N	2	1	0	2004-03-14 08:14:54.14+00	2004-03-14 08:14:54.14+00	\N	\N	45524	\N	\N	t	\N	\N	Suicidal Tendencies	discogs:master:18717	0.95	2026-04-28 05:58:07.456861+00
 35521	13173	11	1	\N	Contacto Espacial con el Tercer Sexo	\N	1	1	0	2004-03-14 08:14:55.984+00	2004-03-14 08:14:55.984+00	\N	\N	45711	\N	\N	f	\N	\N	Sukia	discogs:master:33004	0.95	2026-04-28 05:58:07.456861+00
 36665	13609	6	1	\N	Coaster	\N	1	1	0	2004-10-27 15:38:33.329+00	2004-10-27 15:38:33.329+00	\N	\N	47102	\N	\N	t	\N	\N	Quantazelle	discogs:release:402230	0.95	2026-04-28 05:58:10.185777+00
-35663	13228	11	1	\N	Brokedick Cars	\N	5	1	0	2004-03-14 08:14:57.859+00	2004-03-14 08:14:57.859+00	\N	\N	\N	\N	\N	\N	\N	\N	The Swirlies	\N	\N	\N
+35663	13228	11	1	\N	Brokedick Cars	\N	5	1	0	2004-03-14 08:14:57.859+00	2004-03-14 08:14:57.859+00	\N	\N	1000036	\N	\N	\N	\N	\N	The Swirlies	\N	\N	\N
 36696	13615	6	1	\N	Naoise E.P.	\N	1	1	0	2004-11-03 17:05:45.58+00	2004-11-03 17:05:45.58+00	\N	\N	47137	\N	\N	t	\N	\N	Dosh	discogs:master:58804	0.95	2026-04-28 05:58:10.185777+00
 36809	4422	11	1	Bardo Pond + Tom Carter	4/23/03	\N	11	1	0	2004-08-25 18:21:15.15+00	2004-12-06 00:00:09.452+00	\N	\N	46839	\N	\N	t	\N	\N	Bardo Pond	discogs:master:404026	0.95	2026-04-28 05:58:10.185777+00
 37052	10047	11	1	\N	Around the Sun	\N	35	1	0	2005-02-27 21:46:37.261+00	2005-02-27 21:46:37.261+00	\N	\N	47588	\N	\N	t	\N	\N	R.E.M.	discogs:master:57821	0.95	2026-04-28 05:58:12.846059+00
@@ -96114,7 +96114,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 35714	13255	11	1	\N	Sweet Country Rock Ass	\N	3	1	0	2004-03-14 08:14:58.734+00	2004-03-14 08:14:58.734+00	\N	\N	45951	\N	\N	f	\N	\N	Syrup USA	\N	\N	\N
 39866	14838	11	1	\N	In The Future	\N	1	1	0	2008-04-01 23:14:25.132+00	2008-04-01 23:14:25.132+00	\N	\N	51001	\N	\N	t	\N	\N	Black Mountain	discogs:master:32720	0.95	2026-04-28 05:58:20.962015+00
 39973	14880	11	3	\N	Rock Me Baby	\N	1	1	0	2008-05-12 19:38:08.28+00	2008-05-12 19:38:08.28+00	\N	\N	51124	\N	\N	t	\N	\N	David Cassidy	discogs:master:94071	0.95	2026-04-28 05:58:20.962015+00
-35428	13140	11	1	\N	Shimmer	\N	5	1	0	2004-03-14 08:14:54.718+00	2004-03-14 08:14:54.718+00	\N	\N	\N	\N	\N	\N	\N	\N	Surgery	\N	\N	\N
+35428	13140	11	1	\N	Shimmer	\N	5	1	0	2004-03-14 08:14:54.718+00	2004-03-14 08:14:54.718+00	\N	\N	1000037	\N	\N	\N	\N	\N	Surgery	\N	\N	\N
 39595	1087	10	6	\N	Box of Dub: Dubstep and Future Dub	\N	289	3	0	2007-12-28 03:58:18.177+00	2007-12-28 03:58:18.177+00	\N	\N	50680	\N	\N	f	\N	\N	Various Artists	\N	\N	\N
 35524	13175	11	1	\N	Safari in a Living Graveyard	\N	1	1	0	2004-03-14 08:14:56.031+00	2004-03-14 08:14:56.031+00	\N	\N	45715	\N	\N	t	\N	\N	Surf Trio	\N	\N	\N
 35400	13133	11	4	\N	Borungku Si Derita + 2	\N	5	1	0	2004-03-14 08:14:54.406+00	2004-03-14 08:14:54.406+00	\N	\N	45550	\N	\N	t	\N	\N	Sun City Girls	\N	\N	\N
@@ -96379,7 +96379,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 37055	575	6	1	\N	Danny the Dog [soundtrack]	\N	9	1	0	2005-02-27 21:48:16.026+00	2005-02-27 21:48:16.026+00	\N	\N	47592	\N	\N	t	\N	\N	Massive Attack	\N	\N	\N
 37276	7052	11	1	\N	East Infection EP	\N	3	1	0	2005-05-10 17:18:23.715+00	2005-05-10 17:18:23.715+00	\N	\N	47872	\N	\N	t	\N	\N	Gogol Bordello	\N	\N	\N
 38939	8483	11	1	Gothic Archies	The Tragic Treasury: Songs from a Series of Unfortunate Events	\N	13	1	0	2007-02-08 22:22:16.174+00	2007-02-08 22:22:16.174+00	\N	\N	49877	\N	\N	t	\N	\N	Magnetic Fields	\N	\N	\N
-39565	14711	8	1	\N	Yage Pinta!  Psychedelic Shaman Songs of Santiago Mutumbajoy	\N	1	1	0	2007-12-11 23:25:58.213+00	2007-12-11 23:25:58.213+00	\N	\N	\N	\N	\N	\N	\N	\N	Santiago Mutumbajoy	\N	\N	\N
+39565	14711	8	1	\N	Yage Pinta!  Psychedelic Shaman Songs of Santiago Mutumbajoy	\N	1	1	0	2007-12-11 23:25:58.213+00	2007-12-11 23:25:58.213+00	\N	\N	1000038	\N	\N	\N	\N	\N	Santiago Mutumbajoy	\N	\N	\N
 36968	4011	11	1	\N	Daddy Wants a Cold Beer	\N	4	1	0	2005-01-28 02:15:58.528+00	2005-01-28 02:15:58.528+00	\N	\N	47466	\N	\N	t	\N	\N	A-Bones	\N	\N	\N
 35157	13026	11	3	\N	We Are Not Amused	\N	2	1	0	2004-03-14 08:14:51.046+00	2004-03-14 08:14:51.046+00	\N	\N	45253	\N	\N	t	\N	\N	Straw Dogs	discogs:master:408162	0.95	2026-04-28 05:58:07.456861+00
 36161	13417	11	1	\N	Five Pillars of Soul	\N	1	1	0	2004-06-18 00:50:33.702+00	2004-06-18 00:50:33.702+00	\N	\N	46493	\N	\N	t	\N	\N	John Wilkes Booze	discogs:master:463640	0.95	2026-04-28 05:58:10.185777+00
@@ -96543,7 +96543,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 38823	14412	11	6	\N	At the End of the Sky 12"	\N	1	1	0	2007-01-02 03:33:29.656+00	2007-01-02 03:33:29.656+00	\N	\N	49734	\N	\N	t	\N	\N	Darkel	\N	\N	\N
 36976	13710	11	1	\N	Miami	\N	1	1	0	2005-01-28 02:20:48.512+00	2005-01-28 02:20:48.512+00	\N	\N	47478	\N	\N	t	\N	\N	Chi-Pig	\N	\N	\N
 36488	13539	11	1	\N	Light Flows the Putrid Dawn	\N	1	1	0	2004-09-09 19:25:47.174+00	2004-09-09 19:25:47.174+00	\N	\N	46877	\N	\N	t	\N	\N	Black Out Beach	\N	\N	\N
-39566	14712	11	1	\N	I Believe in You.  Your Magic is Real.	\N	1	1	0	2007-12-11 23:26:45.039+00	2007-12-11 23:26:45.039+00	\N	\N	\N	\N	\N	\N	\N	\N	YACHT	\N	\N	\N
+39566	14712	11	1	\N	I Believe in You.  Your Magic is Real.	\N	1	1	0	2007-12-11 23:26:45.039+00	2007-12-11 23:26:45.039+00	\N	\N	1000039	\N	\N	\N	\N	\N	YACHT	\N	\N	\N
 36188	13432	11	1	\N	From St. Petersburg With Love	\N	1	1	0	2004-06-23 18:46:06.754+00	2004-06-23 18:46:06.754+00	\N	\N	46528	\N	\N	t	\N	\N	Julia Vorontsova	discogs:release:8014186	0.95	2026-04-28 05:58:10.185777+00
 36442	10441	11	1	\N	Satin Black	\N	2	1	0	2004-08-25 18:15:07.41+00	2004-08-25 18:15:07.41+00	\N	\N	46824	\N	\N	t	\N	\N	Paik	discogs:master:9470	0.95	2026-04-28 05:58:10.185777+00
 36452	13526	11	1	\N	End Note	\N	1	1	0	2004-08-25 18:20:22.553+00	2004-08-25 18:20:22.553+00	\N	\N	46836	\N	\N	t	\N	\N	Enablers	discogs:master:72434	0.95	2026-04-28 05:58:10.185777+00
@@ -97102,7 +97102,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 39959	14874	11	1	\N	Businessmen and Ghosts	\N	1	1	0	2008-05-05 22:52:20.874+00	2008-05-05 22:52:20.874+00	\N	\N	51107	\N	\N	t	\N	\N	Working for a Nuclear Free City	\N	\N	\N
 36140	8540	11	3	\N	Twenty Golden Hits	\N	10	1	0	2004-06-10 16:31:04.666+00	2004-06-10 16:31:04.666+00	\N	\N	46465	\N	\N	t	\N	\N	The Mamas and Papas	\N	\N	\N
 37474	13902	11	1	\N	And Everything Else	\N	1	1	0	2005-07-08 17:30:56.445+00	2005-07-08 17:30:56.445+00	\N	\N	48128	\N	\N	t	\N	\N	Nobody	discogs:master:19248	0.95	2026-04-28 05:58:12.846059+00
-37374	13871	11	1	\N	Trowel and Era	\N	1	1	0	2005-06-01 13:30:07.627+00	2005-06-01 13:30:07.627+00	\N	\N	\N	\N	\N	\N	\N	\N	Apothecary  Hymns	\N	\N	\N
+37374	13871	11	1	\N	Trowel and Era	\N	1	1	0	2005-06-01 13:30:07.627+00	2005-06-01 13:30:07.627+00	\N	\N	1000040	\N	\N	\N	\N	\N	Apothecary  Hymns	\N	\N	\N
 38379	5064	11	1	\N	Garden Ruin	\N	8	1	0	2006-06-01 00:37:56.433+00	2006-06-01 00:37:56.433+00	\N	\N	49212	\N	\N	t	\N	\N	Calexico	discogs:master:64033	0.95	2026-04-28 05:58:15.526726+00
 36920	2136	7	1	Peyroux, Madeleine	Madeleine Peyroux	\N	2	1	0	2005-01-07 03:10:09.533+00	2005-01-07 03:10:09.533+00	\N	\N	47402	\N	\N	t	\N	\N	Madeleine Peyroux	\N	\N	\N
 38527	12615	11	1	\N	The Sun Awakens	\N	9	1	0	2006-09-07 22:00:11.087+00	2006-09-07 22:00:11.087+00	\N	\N	49381	\N	\N	t	\N	\N	Six Organs of Admittance	discogs:master:81589	0.95	2026-04-28 05:58:15.526726+00
@@ -97304,7 +97304,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 39102	14531	6	1	\N	High Energy/ I Wanna Be Your Lover	\N	1	1	0	2007-05-08 21:49:59.267+00	2007-05-08 21:49:59.267+00	\N	\N	50081	\N	\N	t	\N	\N	La Bionda	\N	\N	\N
 38922	2496	7	1	David S. Ware Quartet	Balladware	\N	13	1	0	2007-01-17 22:19:32.247+00	2007-01-17 22:19:32.247+00	\N	\N	49855	\N	\N	t	\N	\N	David S. Ware	\N	\N	\N
 39095	14526	11	1	\N	Make History	\N	1	1	0	2007-05-08 21:34:39.84+00	2007-05-08 21:34:39.84+00	\N	\N	50071	\N	\N	t	\N	\N	Thunderbirds Are Now!	discogs:master:776957	0.95	2026-04-28 05:58:18.255037+00
-36090	1087	7	1	\N	No W... Now!  A Musical Petition Against George W. Bush	\N	245	1	0	2004-06-02 17:25:28.516+00	2004-06-02 17:25:28.516+00	\N	\N	\N	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
+36090	1087	7	1	\N	No W... Now!  A Musical Petition Against George W. Bush	\N	245	1	0	2004-06-02 17:25:28.516+00	2004-06-02 17:25:28.516+00	\N	\N	1000041	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 35821	8687	11	1	\N	Punk Rock	\N	23	1	0	2004-04-20 02:04:00.967+00	2004-04-20 02:04:00.967+00	\N	\N	46088	\N	\N	t	\N	\N	Mekons	\N	\N	\N
 37143	10629	6	6	\N	Broad Factor	\N	3	1	0	2005-03-24 17:12:26.035+00	2005-03-24 17:12:26.035+00	\N	\N	47706	\N	\N	t	\N	\N	Madlib	\N	\N	\N
 39380	6269	11	3	\N	The Everly Brothers	\N	12	1	0	2007-08-15 00:02:09.113+00	2007-08-15 00:02:09.113+00	\N	\N	50411	\N	\N	t	\N	\N	Everly Brothers	discogs:master:123980	0.95	2026-04-28 05:58:18.255037+00
@@ -97859,7 +97859,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 39672	14755	11	1	\N	Hope for Men	\N	1	1	0	2008-01-17 00:41:41.665+00	2008-01-17 00:41:41.665+00	\N	\N	50770	\N	\N	t	\N	\N	Pissed Jeans	discogs:master:61532	0.95	2026-04-28 05:58:18.255037+00
 39701	11721	11	3	\N	Roses are Red	\N	6	1	0	2008-01-28 22:12:18.061+00	2008-01-28 22:12:18.061+00	\N	\N	50803	\N	\N	t	\N	\N	Bobby Vinton	discogs:master:234685	0.95	2026-04-28 05:58:18.255037+00
 37633	1087	7	1	\N	Vision vol. 3 (w/ DVD)	\N	240	1	0	2005-09-03 23:18:20.262+00	2005-09-03 23:18:20.262+00	B`	\N	48324	\N	\N	f	\N	\N	Various Artists	\N	\N	\N
-38909	13412	11	1	\N	Dat Rosa Mel Apibus	\N	2	1	0	2007-01-11 00:01:46.255+00	2007-01-11 00:01:46.255+00	\N	\N	\N	\N	\N	\N	\N	\N	White  Magic	\N	\N	\N
+38909	13412	11	1	\N	Dat Rosa Mel Apibus	\N	2	1	0	2007-01-11 00:01:46.255+00	2007-01-11 00:01:46.255+00	\N	\N	1000042	\N	\N	\N	\N	\N	White  Magic	\N	\N	\N
 37200	13807	7	1	\N	In the Kingdom of Kitsch You Will Be a Monster	\N	1	1	0	2005-04-14 16:31:47.489+00	2005-04-14 16:31:47.489+00	\N	\N	47779	\N	\N	t	\N	\N	Shining	\N	\N	\N
 37646	13934	11	1	\N	The Fire in Our Throats Will Beckon the Thaw	\N	2	1	0	2005-09-04 00:38:50.691+00	2005-09-04 00:38:50.691+00	\N	\N	48343	\N	\N	t	\N	\N	Pelican	\N	\N	\N
 36871	13665	11	2	\N	Haunted House [EP]	\N	1	1	0	2004-10-06 16:30:14.495+00	2004-12-25 22:12:39.938+00	\N	\N	47016	\N	\N	t	\N	\N	Haunted House	\N	\N	\N
@@ -98200,7 +98200,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 40035	14911	9	1	\N	Ghost Dance	\N	1	1	0	2008-05-20 23:51:49.267+00	2008-05-20 23:51:49.267+00	\N	\N	51192	\N	\N	t	\N	\N	Pine Hill Haints	\N	\N	\N
 44484	16696	4	1	\N	More than my old piano	\N	1	1	0	2010-07-07 20:14:14.555+00	2010-07-07 20:14:14.555+00	\N	\N	56252	\N	\N	t	\N	\N	Erik Griswold	discogs:release:14644001	0.95	2026-04-28 05:58:42.334563+00
 44585	16764	4	3	\N	symphony 6	\N	1	1	0	2010-07-13 17:40:35.801+00	2010-07-13 17:40:35.801+00	\N	\N	56378	\N	\N	t	\N	\N	Gustav Mahler	discogs:master:1875327	0.95	2026-04-28 05:58:42.334563+00
-42127	1087	1	1	\N	Nigeria Special:  Modern Highlife, Afro-Sounds & Nigerian Blues 1970-6	\N	157	1	0	2008-07-09 20:17:24.784+00	2008-07-09 20:17:24.784+00	\N	\N	\N	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
+42127	1087	1	1	\N	Nigeria Special:  Modern Highlife, Afro-Sounds & Nigerian Blues 1970-6	\N	157	1	0	2008-07-09 20:17:24.784+00	2008-07-09 20:17:24.784+00	\N	\N	1000043	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 43390	16217	11	3	\N	Transfigurations on Lap Steel Guitar	\N	1	1	0	2009-07-28 23:40:39.933+00	2009-07-28 23:40:39.933+00	\N	\N	54979	\N	\N	t	\N	\N	Evan Miller	\N	\N	\N
 40452	15098	3	1	\N	Revisited	\N	4	1	0	2008-06-19 05:07:32.156+00	2008-06-19 05:07:32.156+00	\N	\N	51688	\N	\N	t	\N	\N	Mississippi John Hurt	\N	\N	\N
 41815	15567	2	1	\N	Devotional and Love Songs	\N	4	1	0	2008-06-23 03:49:50.625+00	2008-06-23 03:49:50.625+00	\N	\N	53207	\N	\N	t	\N	\N	Nusrat Fateh Ali Khan	\N	\N	\N
@@ -98273,7 +98273,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 42413	1087	13	1	\N	News Goo: The More You Watch, The Less You Know [Sounding Off for a Democratic Media]	\N	8	1	0	2008-09-13 22:40:47.39+00	2008-09-13 22:40:47.39+00	\N	\N	53880	\N	\N	f	\N	\N	Various Artists	\N	\N	\N
 42972	14831	4	1	\N	Dharma Warriors	\N	8	1	0	2009-03-02 23:20:20.473+00	2009-03-02 23:20:20.473+00	\N	\N	54514	\N	\N	t	\N	\N	Henry Flynt	\N	\N	\N
 41758	15527	2	1	\N	Sarod	\N	1	1	0	2008-06-23 03:49:49.593+00	2008-06-23 03:49:49.593+00	\N	\N	53145	\N	\N	f	\N	\N	Buddhadev Das Gupta	\N	\N	\N
-41940	1087	2	1	\N	Music from Yemen  [missing 8/04]	\N	4	1	0	2008-06-23 03:49:52.906+00	2008-06-23 03:49:52.906+00	\N	\N	\N	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
+41940	1087	2	1	\N	Music from Yemen  [missing 8/04]	\N	4	1	0	2008-06-23 03:49:52.906+00	2008-06-23 03:49:52.906+00	\N	\N	1000044	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 42217	5310	11	3	\N	Weekend in London	\N	8	1	0	2008-08-17 15:41:20.669+00	2008-08-17 15:41:20.669+00	\N	\N	53656	\N	\N	t	\N	\N	Dave Clark	\N	\N	\N
 44670	16820	4	3	\N	Dance Music	\N	1	1	0	2010-07-13 22:14:39.571+00	2010-07-13 22:14:39.571+00	\N	\N	56482	\N	\N	t	\N	\N	Praetorius	\N	\N	\N
 44590	16767	4	1	\N	Range of Light/ the fifth lake	\N	1	1	0	2010-07-13 17:44:29.339+00	2010-07-13 17:44:29.339+00	\N	\N	56385	\N	\N	t	\N	\N	Sasha Matson	\N	\N	\N
@@ -98607,7 +98607,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 40576	15142	3	3	\N	Memorial Album	\N	1	1	0	2008-06-19 05:07:34.515+00	2008-06-19 05:07:34.515+00	\N	\N	51828	\N	\N	t	\N	\N	George Lewis	\N	\N	\N
 44080	15916	11	4	\N	A Personal Hell	\N	3	1	0	2010-04-13 23:59:30.779+00	2010-04-13 23:59:30.779+00	\N	\N	55765	\N	\N	t	\N	\N	Jason Crumer	\N	\N	\N
 44212	16565	11	6	\N	The Eclipse of 1453	\N	1	1	0	2010-06-01 22:53:07.152+00	2010-06-01 22:53:07.152+00	\N	\N	55914	\N	\N	t	\N	\N	Daily Void	\N	\N	\N
-42660	1087	1	1	\N	Nigeria 70:  Lagos Jump	\N	162	1	0	2008-10-09 21:43:46.327+00	2008-10-09 21:43:46.327+00	\N	\N	\N	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
+42660	1087	1	1	\N	Nigeria 70:  Lagos Jump	\N	162	1	0	2008-10-09 21:43:46.327+00	2008-10-09 21:43:46.327+00	\N	\N	1000045	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 44452	16681	4	3	\N	Visions & Miracles	\N	1	1	0	2010-07-07 19:41:12.566+00	2010-07-07 19:41:12.566+00	\N	\N	56211	\N	\N	t	\N	\N	Ensemble Alcatraz	\N	\N	\N
 40610	15159	3	3	\N	Strike Like Lightning	\N	1	1	0	2008-06-19 05:07:35.687+00	2008-06-19 05:07:35.687+00	\N	\N	51863	\N	\N	t	\N	\N	Lonnie Mack	discogs:master:254723	0.95	2026-04-28 05:58:24.30889+00
 44315	16549	4	3	\N	Jesu, joy of man's desiring	\N	1	1	0	2010-07-07 16:49:50.413+00	2010-07-07 16:49:50.413+00	\N	\N	56031	\N	\N	t	\N	\N	Johann Sebastian Bach	discogs:master:1045892	0.95	2026-04-28 05:58:42.334563+00
@@ -98684,7 +98684,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 42449	15822	5	3	\N	Up in Smoke	\N	3	1	0	2008-09-13 22:59:41.109+00	2008-09-13 22:59:41.109+00	\N	\N	53919	\N	\N	t	\N	\N	Cheech and Chong	\N	\N	\N
 43664	1087	8	1	\N	Tumbele! Biguine, Afro & Latin Sounds from the French Caribbean, 1963-74	\N	201	1	0	2009-11-02 23:32:51.236+00	2009-11-02 23:32:51.236+00	\N	\N	55295	\N	\N	f	\N	\N	Various Artists	\N	\N	\N
 40391	15083	3	1	\N	Singin' the Blues	\N	1	1	0	2008-06-19 05:07:30.781+00	2008-06-19 05:07:30.781+00	\N	\N	51610	\N	\N	t	\N	\N	Bobby Hinton	\N	\N	\N
-42257	15716	11	3	\N	MFSB:  The Truth Behind the Philly Legend	\N	1	1	0	2008-08-29 18:14:54.802+00	2008-08-29 18:14:54.802+00	\N	\N	\N	\N	\N	\N	\N	\N	MFSB	\N	\N	\N
+42257	15716	11	3	\N	MFSB:  The Truth Behind the Philly Legend	\N	1	1	0	2008-08-29 18:14:54.802+00	2008-08-29 18:14:54.802+00	\N	\N	1000046	\N	\N	\N	\N	\N	MFSB	\N	\N	\N
 41727	15503	2	1	\N	Belly Dance!: The Best of George Abdo and His Flames of Araby Orchestra	\N	2	1	0	2008-06-23 03:49:48.984+00	2008-06-23 03:49:48.984+00	\N	\N	53109	\N	\N	t	\N	\N	George Abdo	\N	\N	\N
 41856	15582	2	3	Keiko Matsuo and Her Ensemble	18th Century Traditional Music of Japan: Koto Music of the Edo Period	\N	1	1	0	2008-06-23 03:49:51.296+00	2008-06-23 03:49:51.296+00	\N	\N	53252	\N	\N	t	\N	\N	Keiko Matsuo	\N	\N	\N
 42623	9458	11	4	split 7" with Ariel Pink	Unusual Animals, Vol. 3	\N	4	1	0	2008-09-23 23:56:37.867+00	2008-09-23 23:56:37.867+00	\N	\N	54105	\N	\N	t	\N	\N	Half-Handed Cloud	\N	\N	\N
@@ -99218,7 +99218,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 43742	16355	3	1	\N	The Best of	\N	1	1	0	2009-12-02 20:56:33.782+00	2009-12-02 20:56:33.782+00	\N	\N	55388	\N	\N	t	\N	\N	Shirley Ellis	\N	\N	\N
 42547	15869	5	3	\N	Radio Dinner	\N	3	1	0	2008-09-13 22:59:48.125+00	2008-09-13 22:59:48.125+00	\N	\N	54020	\N	\N	t	\N	https://i.discogs.com/4Zj1tSdppBtwUeliMQycLvnrRiib2TAUBhRfK_e9Vvc/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTQ4ODM5/MDMtMTQwNjUxODgz/MS02ODg4LmpwZWc.jpeg	National Lampoon	discogs:master:856883	0.95	2026-04-28 05:58:29.915994+00
 42754	4980	11	3	\N	Perfect from now on	\N	7	1	0	2008-11-17 21:54:29.053+00	2008-11-17 21:54:29.053+00	\N	\N	54266	\N	\N	t	\N	\N	Built to Spill	discogs:master:64003	0.95	2026-04-28 05:58:29.915994+00
-42994	16049	4	1	\N	Specimens	\N	1	1	0	2009-03-17 23:25:44.39+00	2009-03-17 23:25:44.39+00	\N	\N	\N	\N	\N	\N	\N	\N	Melissa  St. Pierre	\N	\N	\N
+42994	16049	4	1	\N	Specimens	\N	1	1	0	2009-03-17 23:25:44.39+00	2009-03-17 23:25:44.39+00	\N	\N	1000047	\N	\N	\N	\N	\N	Melissa  St. Pierre	\N	\N	\N
 43208	16136	11	1	\N	A Little of This-the Barbara Ruskin Songbook	\N	1	1	0	2009-06-16 15:06:35.986+00	2009-06-16 15:06:35.986+00	\N	\N	54777	\N	\N	t	\N	\N	Barbara Ruskin	\N	\N	\N
 41518	15476	1	1	\N	Songhai 2: Pozo del Deseo [cd-single]	\N	2	1	0	2008-06-22 17:08:24.109+00	2008-06-22 17:08:24.109+00	\N	\N	52878	\N	\N	t	\N	\N	Songhai	\N	\N	\N
 41052	1087	3	1	\N	Mama Don't Allow No Easy Riders Here	\N	103	1	0	2008-06-19 05:07:45.093+00	2008-06-19 05:07:45.093+00	\N	\N	52368	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
@@ -99346,7 +99346,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 40925	15282	3	3	\N	A Josh White Program	\N	2	1	0	2008-06-19 05:07:42.765+00	2008-06-19 05:07:42.765+00	\N	\N	52225	\N	\N	t	\N	\N	Josh White	discogs:master:346211	0.95	2026-04-28 05:58:24.30889+00
 41269	15361	1	1	\N	Living Magic	\N	1	1	0	2008-06-22 17:08:19.921+00	2008-06-22 17:08:19.921+00	\N	\N	52601	\N	\N	t	\N	\N	Trilok Gurtu	discogs:master:1094283	0.95	2026-04-28 05:58:24.30889+00
 42108	15657	11	1	\N	Circular sounds	\N	1	1	0	2008-07-08 22:58:05.363+00	2008-07-08 22:58:05.363+00	\N	\N	53525	\N	\N	t	\N	\N	Kelley Stoltz	discogs:master:241512	0.95	2026-04-28 05:58:29.915994+00
-42266	15720	7	1	\N	Frippe's Protocol:  The Environmental Control	\N	1	1	0	2008-09-02 18:30:10.149+00	2008-09-02 18:30:10.149+00	\N	\N	\N	\N	\N	\N	\N	\N	Bengt Frippe Nordstrom	\N	\N	\N
+42266	15720	7	1	\N	Frippe's Protocol:  The Environmental Control	\N	1	1	0	2008-09-02 18:30:10.149+00	2008-09-02 18:30:10.149+00	\N	\N	1000048	\N	\N	\N	\N	\N	Bengt Frippe Nordstrom	\N	\N	\N
 44257	16587	11	1	\N	Peaceful, the World Lays me down	\N	1	1	0	2010-06-29 15:22:07.138+00	2010-06-29 15:22:07.138+00	\N	\N	55967	\N	\N	t	\N	\N	Noah & the Whale	\N	\N	\N
 42352	15770	13	1	\N	The Voice of Langston Hughes	\N	1	1	0	2008-09-13 22:40:36.015+00	2008-09-13 22:40:36.015+00	\N	\N	53817	\N	\N	t	\N	\N	Langston Hughes	discogs:release:7047838	0.95	2026-04-28 05:58:29.915994+00
 42649	15919	11	1	\N	Season of Sweets	\N	1	1	0	2008-10-07 23:24:36.637+00	2008-10-07 23:24:36.637+00	\N	\N	54137	\N	\N	t	\N	\N	Modey Lemon	discogs:master:327032	0.95	2026-04-28 05:58:29.915994+00
@@ -99779,7 +99779,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 41018	1087	3	1	\N	Mississippi Delta Blues, Vol. 1	\N	69	1	0	2008-06-19 05:07:44.515+00	2008-06-19 05:07:44.515+00	\N	\N	52330	\N	\N	f	\N	\N	Various Artists	\N	\N	\N
 43223	16140	11	1	\N	Life is Short	\N	1	1	0	2009-06-16 23:51:33.101+00	2009-06-16 23:51:33.101+00	\N	\N	54791	\N	\N	t	\N	\N	Lucky Fonz III	\N	\N	\N
 40507	15120	3	1	\N	Jo-Ann Kelly [1969 debut]	\N	1	1	0	2008-06-19 05:07:33.218+00	2008-06-19 05:07:33.218+00	\N	\N	51751	\N	\N	t	\N	\N	Jo-Ann Kelly	\N	\N	\N
-41340	15387	1	1	Fela Ransome Kuti & Africa 70	Expensive Shit /  Confusion / I.T.T.	\N	26	1	0	2008-06-22 17:08:21.109+00	2008-06-22 17:08:21.109+00	\N	\N	\N	\N	\N	\N	\N	\N	Fela Anikulapo Kuti	\N	\N	\N
+41340	15387	1	1	Fela Ransome Kuti & Africa 70	Expensive Shit /  Confusion / I.T.T.	\N	26	1	0	2008-06-22 17:08:21.109+00	2008-06-22 17:08:21.109+00	\N	\N	1000049	\N	\N	\N	\N	\N	Fela Anikulapo Kuti	\N	\N	\N
 43784	16368	6	1	\N	Best of	\N	1	1	0	2009-12-23 00:06:03.018+00	2009-12-23 00:06:03.018+00	\N	\N	55429	\N	\N	t	\N	\N	Big Pun	\N	\N	\N
 41070	1087	3	1	\N	Deep South	\N	121	1	0	2008-06-19 05:07:45.421+00	2008-06-19 05:07:45.421+00	\N	\N	52388	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 42762	15960	11	1	\N	The Best of Michael Chapman (1969-71)...plus	\N	1	1	0	2008-11-18 16:57:47.324+00	2008-11-18 16:57:47.324+00	\N	\N	54274	\N	\N	t	\N	\N	Michael Chapman	\N	\N	\N
@@ -100027,7 +100027,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 40457	15102	3	3	\N	In Europe	\N	1	1	0	2008-06-19 05:07:32.281+00	2008-06-19 05:07:32.281+00	\N	\N	51695	\N	\N	t	\N	\N	John Jackson	\N	\N	\N
 41939	1087	2	1	\N	Afghanistan: Music from Kabul [missing 8/04]	\N	3	1	0	2008-06-23 03:49:52.89+00	2008-06-23 03:49:52.89+00	\N	\N	53348	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 42879	16000	7	1	\N	Going to Church	\N	1	1	0	2009-01-28 00:41:47.813+00	2009-01-28 00:41:47.813+00	\N	\N	54405	\N	\N	t	\N	\N	Joe Maneri	\N	\N	\N
-42130	1087	6	1	\N	Well Deep:  Ten Years of Big Dada Recordings	\N	685	1	0	2008-07-09 20:25:13.826+00	2008-07-09 20:25:13.826+00	\N	\N	\N	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
+42130	1087	6	1	\N	Well Deep:  Ten Years of Big Dada Recordings	\N	685	1	0	2008-07-09 20:25:13.826+00	2008-07-09 20:25:13.826+00	\N	\N	1000050	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 41176	15305	1	1	\N	Volume 1: Trovador	\N	1	1	0	2008-06-22 17:08:18.25+00	2008-06-22 17:08:18.25+00	\N	\N	52489	\N	\N	t	\N	\N	Africando	\N	\N	\N
 44695	16828	4	1	\N	Bathtub Curve	\N	1	1	0	2010-07-13 22:31:14.46+00	2010-07-13 22:31:14.46+00	\N	\N	56509	\N	\N	t	\N	\N	Brian Reinbolt	discogs:release:1028957	0.95	2026-04-28 05:58:42.334563+00
 42155	15676	11	1	\N	Dreamland	\N	1	1	0	2008-07-25 20:00:44.535+00	2008-07-25 20:00:44.534+00	\N	\N	53582	\N	\N	t	\N	\N	Beat Circus	\N	\N	\N
@@ -100222,7 +100222,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 44031	16488	11	1	\N	Life Control	\N	1	1	0	2010-03-30 22:52:55.13+00	2010-03-30 22:52:55.13+00	\N	\N	55714	\N	\N	t	\N	\N	Night Control	discogs:release:2125759	0.95	2026-04-28 05:58:42.334563+00
 44189	16027	11	1	\N	Couple Tracks	\N	3	1	0	2010-05-19 00:49:19.301+00	2010-05-19 00:49:19.301+00	\N	\N	55888	\N	\N	t	\N	\N	Fucked Up	discogs:master:276367	0.95	2026-04-28 05:58:42.334563+00
 44758	14903	4	1	\N	Exusiai	\N	2	1	0	2010-07-13 23:16:49.636+00	2010-07-13 23:16:49.636+00	\N	\N	56584	\N	\N	t	\N	\N	Carl Stone	discogs:release:324393	0.95	2026-04-28 05:58:42.334563+00
-42662	1087	8	1	\N	Bachata Roja:  Acoustic Bachata From The Cabaret Era	\N	194	1	0	2008-10-09 21:48:03.368+00	2008-10-09 21:48:03.368+00	\N	\N	\N	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
+42662	1087	8	1	\N	Bachata Roja:  Acoustic Bachata From The Cabaret Era	\N	194	1	0	2008-10-09 21:48:03.368+00	2008-10-09 21:48:03.368+00	\N	\N	1000051	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 40297	15043	3	1	\N	Mississippi Delta Bluesman	\N	5	1	0	2008-06-19 05:07:28.906+00	2008-06-19 05:07:28.906+00	\N	\N	51497	\N	\N	t	\N	\N	Honeyboy Edwards	\N	\N	\N
 43757	16359	11	1	\N	fifty-four minutes twenty seconds	\N	1	1	0	2009-12-15 23:50:03.128+00	2009-12-15 23:50:03.128+00	\N	\N	55404	\N	\N	f	\N	\N	Collage	\N	\N	\N
 44393	16652	4	1	\N	Beauty in the Beast	\N	5	1	0	2010-07-07 18:18:42.94+00	2010-07-07 18:18:42.94+00	\N	\N	56123	\N	\N	t	\N	\N	Wendy Walter Carlos	\N	\N	\N
@@ -100513,7 +100513,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 43858	16404	9	1	\N	Christ Tree	\N	1	1	0	2010-01-26 16:58:10.912+00	2010-01-26 16:58:10.912+00	\N	\N	55507	\N	\N	t	\N	\N	Trees Community	\N	\N	\N
 40712	15195	3	1	\N	I'm Ready	\N	3	1	0	2008-06-19 05:07:37.765+00	2008-06-19 05:07:37.765+00	\N	\N	51980	\N	\N	t	\N	\N	Lucky Peterson	discogs:master:963123	0.95	2026-04-28 05:58:24.30889+00
 41533	15483	1	1	Tarika	D	\N	6	1	0	2008-06-22 17:08:24.375+00	2008-06-22 17:08:24.375+00	\N	\N	52895	\N	\N	t	\N	\N	Tarika Sammy	\N	\N	\N
-41601	1087	1	3	\N	WOMAD:  An Introduction to Africa	\N	19	1	0	2008-06-22 17:08:25.296+00	2008-06-22 17:08:25.296+00	\N	\N	\N	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
+41601	1087	1	3	\N	WOMAD:  An Introduction to Africa	\N	19	1	0	2008-06-22 17:08:25.296+00	2008-06-22 17:08:25.296+00	\N	\N	1000052	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 41598	1087	1	3	\N	Master Drummers of Dagbon, Volume 2: Drumming from Northern Ghana	\N	16	1	0	2008-06-22 17:08:25.281+00	2008-06-22 17:08:25.265+00	B	\N	52964	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 42645	6364	11	1	\N	Honky Tonk Kind	\N	6	1	0	2008-10-07 23:21:17.744+00	2008-10-07 23:21:17.744+00	\N	\N	54132	\N	\N	t	\N	\N	Charlie Feathers	\N	\N	\N
 41431	15417	1	1	\N	Zulu Heartbeat	\N	3	1	0	2008-06-22 17:08:22.593+00	2008-06-22 17:08:22.593+00	\N	\N	52783	\N	\N	t	\N	\N	Mamelang	discogs:master:1386073	0.95	2026-04-28 05:58:24.30889+00
@@ -100780,7 +100780,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 44447	16679	4	3	\N	new world symphony	\N	3	1	0	2010-07-07 19:29:43.431+00	2010-07-07 19:29:43.431+00	\N	\N	56203	\N	\N	t	\N	\N	Antonin Dvorak	discogs:master:265276	0.95	2026-04-28 05:58:42.334563+00
 43582	16309	11	1	\N	Liver & Lungs	\N	2	1	0	2009-10-06 22:36:56.238+00	2009-10-06 22:36:56.238+00	\N	\N	55196	\N	\N	f	\N	\N	Landed	\N	\N	\N
 43473	16256	11	1	\N	The Satanic Satanist	\N	1	1	0	2009-09-01 22:45:09.357+00	2009-09-01 22:45:09.357+00	\N	\N	55070	\N	\N	t	\N	\N	Portugal the Man	\N	\N	\N
-41966	1087	2	1	\N	Chinese Han Music:  Zhang Melodies	\N	22	1	0	2008-06-23 03:49:53.25+00	2008-06-23 03:49:53.25+00	\N	\N	\N	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
+41966	1087	2	1	\N	Chinese Han Music:  Zhang Melodies	\N	22	1	0	2008-06-23 03:49:53.25+00	2008-06-23 03:49:53.25+00	\N	\N	1000053	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 43818	1087	10	1	\N	Greensleeves One Drop Rhythm #02	\N	297	1	0	2009-12-29 23:42:36.368+00	2009-12-29 23:42:36.368+00	\N	\N	55466	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 41144	1087	3	1	\N	Atlantic Sisters of Soul	\N	186	1	0	2008-06-19 05:07:46.578+00	2008-06-19 05:07:46.578+00	\N	\N	52467	\N	\N	f	\N	\N	Various Artists	\N	\N	\N
 41637	1087	1	1	\N	African Troubadours: The Best of African Singer/Songwriters	\N	60	1	0	2008-06-22 17:08:25.718+00	2008-06-22 17:08:25.718+00	\N	\N	53010	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
@@ -100844,12 +100844,12 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 42101	14920	11	3	\N	Smiling Faces with Bad Reputations	\N	3	1	0	2008-07-07 19:12:05.874+00	2008-07-07 19:12:05.874+00	\N	\N	53517	\N	\N	t	\N	\N	Mike Heron	\N	\N	\N
 42663	1087	2	1	\N	Radio Myanmar (Burma)	\N	136	1	0	2008-10-09 21:49:11.509+00	2008-10-09 21:49:11.509+00	\N	\N	54154	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 40491	15112	3	3	\N	Blues by Lonnie Johnson	\N	1	1	0	2008-06-19 05:07:32.906+00	2008-06-19 05:07:32.906+00	\N	\N	51732	\N	\N	t	\N	\N	Lonnie Johnson	\N	\N	\N
-42510	15852	5	1	\N	Stories:  Off the Shallow End	\N	2	1	0	2008-09-13 22:59:46.359+00	2008-09-13 22:59:46.359+00	\N	\N	\N	\N	\N	\N	\N	\N	Kevin Kling	\N	\N	\N
+42510	15852	5	1	\N	Stories:  Off the Shallow End	\N	2	1	0	2008-09-13 22:59:46.359+00	2008-09-13 22:59:46.359+00	\N	\N	1000054	\N	\N	\N	\N	\N	Kevin Kling	\N	\N	\N
 43396	1087	1	1	\N	Marvellous Boy: Calypso from West Africa	\N	167	1	0	2009-08-04 23:01:10.896+00	2009-08-04 23:01:10.896+00	\N	\N	54985	\N	\N	f	\N	\N	Various Artists	\N	\N	\N
 41677	1087	1	3	\N	Ethiopian Urban and Tribal Music, volume 2: Gold from Wax	\N	85	1	0	2008-06-22 17:08:26.125+00	2008-06-22 17:08:26.125+00	B	\N	53052	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 44639	16799	4	3	\N	Gaite Parisienne	\N	1	1	0	2010-07-13 18:48:43.246+00	2010-07-13 18:48:43.246+00	\N	\N	56442	\N	\N	t	\N	\N	Offenbach	\N	\N	\N
 40946	15288	3	3	\N	Clowning with the World	\N	7	1	0	2008-06-19 05:07:43.14+00	2008-06-19 05:07:43.14+00	\N	\N	52248	\N	\N	t	\N	\N	Sonny Boy Williamson	\N	\N	\N
-42121	1087	6	1	\N	Don't Stop:  Recording Tap	\N	686	1	0	2008-07-09 19:54:43.999+00	2008-07-09 19:54:43.999+00	\N	\N	\N	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
+42121	1087	6	1	\N	Don't Stop:  Recording Tap	\N	686	1	0	2008-07-09 19:54:43.999+00	2008-07-09 19:54:43.999+00	\N	\N	1000055	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 44261	16590	11	3	\N	Interference	\N	1	1	0	2010-06-29 22:31:20.299+00	2010-06-29 22:31:20.299+00	\N	\N	55971	\N	\N	t	\N	\N	Interference	\N	\N	\N
 41310	15379	1	1	\N	Oyaya!	\N	4	1	0	2008-06-22 17:08:20.625+00	2008-06-22 17:08:20.625+00	\N	\N	52648	\N	\N	t	\N	\N	Angelique Kidjo	\N	\N	\N
 44390	16652	4	1	\N	Sonic seasonings	\N	2	1	0	2010-07-07 18:18:06.102+00	2010-07-07 18:18:06.102+00	\N	\N	56120	\N	\N	t	\N	\N	Wendy Walter Carlos	\N	\N	\N
@@ -101245,7 +101245,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 42881	2113	7	1	\N	Petit Oiseau	\N	24	1	0	2009-01-28 00:42:25.338+00	2009-01-28 00:42:25.338+00	\N	\N	54407	\N	\N	t	\N	\N	William Parker	\N	\N	\N
 44178	9194	11	1	\N	The calcination of scout niblett	\N	3	1	0	2010-05-18 22:51:58.477+00	2010-05-18 22:51:58.477+00	\N	\N	55874	\N	\N	t	\N	\N	Scout Niblett	discogs:master:225713	0.95	2026-04-28 05:58:42.334563+00
 44807	16890	4	3	\N	Tannhauser	\N	3	1	0	2010-07-14 00:09:33.556+00	2010-07-14 00:09:33.556+00	\N	\N	56640	\N	\N	t	\N	\N	Richard Wagner	discogs:master:390505	0.95	2026-04-28 05:58:42.334563+00
-42128	1087	1	1	\N	African Virtuosos:  The Classic Guinean Guitar	\N	156	1	0	2008-07-09 20:18:45.928+00	2008-07-09 20:18:45.928+00	\N	\N	\N	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
+42128	1087	1	1	\N	African Virtuosos:  The Classic Guinean Guitar	\N	156	1	0	2008-07-09 20:18:45.928+00	2008-07-09 20:18:45.928+00	\N	\N	1000056	\N	\N	\N	\N	\N	Various Artists	\N	\N	\N
 42958	16036	11	1	\N	Pleasures & Treasures	\N	1	1	0	2009-02-24 23:46:52.097+00	2009-02-24 23:46:52.097+00	\N	\N	54497	\N	\N	t	\N	\N	Sic Alps	\N	\N	\N
 42357	15774	13	3	Dr. Martin Luther King, Jr.	Free at Last (1968)	\N	1	1	0	2008-09-13 22:40:37.625+00	2008-09-13 22:40:37.625+00	\N	\N	53822	\N	\N	t	\N	\N	Martin Luther King	\N	\N	\N
 40729	15205	3	3	\N	Black Bottom	\N	1	1	0	2008-06-19 05:07:38.062+00	2008-06-19 05:07:38.062+00	\N	\N	51998	\N	\N	t	\N	\N	Ma Rainey	\N	\N	\N
@@ -102588,7 +102588,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 48675	17464	12	1	\N	Maracas, Marimbas & Mambos	\N	49	1	0	2012-02-23 19:57:00.797+00	2012-02-23 19:57:00.797+00	\N	\N	60713	\N	\N	\N	\N	\N	Soundtracks - M	\N	\N	\N
 47018	17435	11	3	\N	K-Tel Super Star Collection!	\N	17	1	0	2012-02-18 01:32:36.046+00	2012-02-18 01:32:36.046+00	\N	\N	59007	\N	\N	f	\N	\N	Various Artists - Rock - K	\N	\N	\N
 46881	17432	11	1	\N	Here (fort Hazel comp)	\N	72	1	0	2012-02-17 01:10:21.681+00	2012-02-17 01:10:21.681+00	\N	\N	58868	\N	\N	\N	\N	\N	Various Artists - Rock - H	\N	\N	\N
-49599	7195	7	1	\N	Wrack: Cracked Reflection]	\N	6	1	0	2012-08-14 23:20:59.57+00	2012-08-14 23:20:59.57+00	\N	\N	\N	\N	\N	\N	\N	\N	Kyle Bruckmann	\N	\N	\N
+49599	7195	7	1	\N	Wrack: Cracked Reflection]	\N	6	1	0	2012-08-14 23:20:59.57+00	2012-08-14 23:20:59.57+00	\N	\N	1000057	\N	\N	\N	\N	\N	Kyle Bruckmann	\N	\N	\N
 46966	17433	11	1	\N	Insound tour support, vol. 1	\N	75	1	0	2012-02-17 15:25:18.901+00	2012-02-17 15:25:18.901+00	\N	\N	58955	\N	\N	\N	\N	\N	Various Artists - Rock - I	\N	\N	\N
 47079	17436	11	3	\N	Let's Disco	\N	37	1	0	2012-02-18 01:57:34.062+00	2012-02-18 01:57:34.062+00	\N	\N	59070	\N	\N	f	\N	\N	Various Artists - Rock - L	\N	\N	\N
 45374	17107	8	1	\N	Las Flores de la Vida	\N	3	1	0	2010-12-07 19:53:42.661+00	2010-12-07 19:53:42.661+00	\N	\N	57268	\N	\N	t	\N	\N	Compay Segundo	discogs:master:203723	0.95	2026-04-28 05:58:50.714947+00
@@ -103898,7 +103898,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 46714	17430	11	3	\N	From Twisted Minds Come	\N	23	1	0	2012-02-16 21:01:33.274+00	2012-02-16 21:01:33.274+00	\N	\N	58696	\N	\N	\N	\N	\N	Various Artists - Rock - F	\N	\N	\N
 49845	17781	2	1	Ali Bahrami Fard	I will not stand alone	\N	1	1	0	2012-11-06 23:50:19.27+00	2012-11-06 23:50:19.27+00	\N	\N	61977	\N	\N	t	\N	\N	Kayhan Kahlor	\N	\N	\N
 49162	17488	9	1	Emily Barker & the Red Clay Halo	Almanac	\N	1	1	0	2012-03-07 00:34:20.997+00	2012-03-07 00:34:20.997+00	\N	\N	61216	\N	\N	t	\N	\N	Emily Barker	\N	\N	\N
-47987	17447	11	3	\N	warner comp- Menu: Hot Platter	\N	25	1	0	2012-02-19 22:30:26.082+00	2012-02-19 22:30:26.082+00	\N	\N	\N	\N	\N	\N	\N	\N	Various Artists - Rock - W	\N	\N	\N
+47987	17447	11	3	\N	warner comp- Menu: Hot Platter	\N	25	1	0	2012-02-19 22:30:26.082+00	2012-02-19 22:30:26.082+00	\N	\N	1000058	\N	\N	\N	\N	\N	Various Artists - Rock - W	\N	\N	\N
 46592	17428	11	1	\N	Dry Lungs, vol. 4	\N	52	1	0	2012-02-16 19:49:31.204+00	2012-02-16 19:49:31.204+00	\N	\N	58567	\N	\N	\N	\N	\N	Various Artists - Rock - D	\N	\N	\N
 45609	17138	6	1	\N	Eastern STandard Time	\N	1	1	0	2010-12-15 00:13:18.045+00	2010-12-15 00:13:18.045+00	\N	\N	57522	\N	\N	t	\N	\N	Kooley High	\N	\N	\N
 48843	17469	12	1	\N	Rent	\N	30	1	0	2012-02-23 21:38:16.2+00	2012-02-23 21:38:16.2+00	\N	\N	60890	\N	\N	\N	\N	\N	Soundtracks - R	\N	\N	\N
@@ -104268,7 +104268,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 49285	15960	11	3	\N	The Resurrection and Revenge of the Clayton Peacock	\N	4	1	0	2012-04-30 22:40:36.837+00	2012-04-30 22:40:36.837+00	\N	\N	61349	\N	\N	t	\N	\N	Michael Chapman	\N	\N	\N
 48930	17470	12	1	\N	Sweet Sweetback's Badass song	\N	74	1	0	2012-02-23 22:07:33.565+00	2012-02-23 22:07:33.565+00	\N	\N	60981	\N	\N	\N	\N	\N	Soundtracks - S	\N	\N	\N
 48268	17454	12	3	Mark Knopfler	Cal	\N	41	1	0	2012-02-23 00:57:12.435+00	2012-02-23 00:57:12.435+00	\N	\N	60297	\N	\N	t	\N	\N	Soundtracks - C	\N	\N	\N
-47931	17445	11	1	\N	Ultra Chicks-Vol. 2,  Lolita Ya-Ya	\N	13	1	0	2012-02-19 16:48:23.374+00	2012-02-19 16:49:08.468+00	b	\N	\N	\N	\N	\N	\N	\N	Various Artists - Rock - U	\N	\N	\N
+47931	17445	11	1	\N	Ultra Chicks-Vol. 2,  Lolita Ya-Ya	\N	13	1	0	2012-02-19 16:48:23.374+00	2012-02-19 16:49:08.468+00	b	\N	1000059	\N	\N	\N	\N	\N	Various Artists - Rock - U	\N	\N	\N
 49216	10575	11	6	\N	We all raise our voices to the air (Live songs 4/11 to 8/11)	\N	9	3	0	2012-04-02 20:07:24.566+00	2012-04-02 20:07:24.566+00	\N	\N	61275	\N	\N	t	\N	\N	The Decemberists	\N	\N	\N
 46742	17430	11	1	\N	Fit for Kings	\N	55	1	0	2012-02-16 21:08:48.046+00	2012-02-16 21:08:48.046+00	\N	\N	58726	\N	\N	f	\N	\N	Various Artists - Rock - F	\N	\N	\N
 47011	17435	11	3	\N	Knebworth	\N	8	1	0	2012-02-18 01:30:04.31+00	2012-02-18 01:30:04.31+00	\N	\N	59000	\N	\N	f	\N	\N	Various Artists - Rock - K	\N	\N	\N
@@ -104287,7 +104287,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 45548	1087	8	1	\N	This is samba	\N	129	2	0	2010-12-09 18:51:04.343+00	2010-12-09 18:51:04.343+00	\N	\N	57459	\N	\N	f	\N	\N	Various Artists	\N	\N	\N
 49960	1966	7	3	Chris Corsano	Scraps and Shadows	\N	8	1	0	2012-12-05 00:14:16.573+00	2012-12-05 00:14:16.573+00	\N	\N	62106	\N	\N	t	\N	\N	Joe McPhee	\N	\N	\N
 46570	17428	11	3	\N	Dope Guns & Fucking	\N	24	1	0	2012-02-16 19:39:13.934+00	2012-02-16 19:39:13.934+00	\N	\N	58545	\N	\N	\N	\N	\N	Various Artists - Rock - D	\N	\N	\N
-46287	17425	11	3	\N	Aqui  e Portugal	\N	46	1	0	2012-02-15 21:40:02.671+00	2012-02-15 21:40:02.671+00	\N	\N	\N	\N	\N	\N	\N	\N	Various Artists - Rock - A	\N	\N	\N
+46287	17425	11	3	\N	Aqui  e Portugal	\N	46	1	0	2012-02-15 21:40:02.671+00	2012-02-15 21:40:02.671+00	\N	\N	1000060	\N	\N	\N	\N	\N	Various Artists - Rock - A	\N	\N	\N
 46375	17426	11	1	\N	Brave New Waves	\N	46	1	0	2012-02-16 15:54:19.286+00	2012-02-16 15:54:19.286+00	\N	\N	58345	\N	\N	f	\N	\N	Various Artists - Rock - B	\N	\N	\N
 45300	17070	8	1	\N	Conjunto Norteno	\N	1	1	0	2010-12-07 16:33:58.742+00	2010-12-07 16:33:58.742+00	\N	\N	57186	\N	\N	t	\N	\N	Maya y Cantu	\N	\N	\N
 47716	17443	11	1	\N	Southern Tree (Polyvinyl)	\N	187	1	0	2012-02-18 19:24:32.253+00	2012-02-18 19:24:32.253+00	\N	\N	59726	\N	\N	\N	\N	\N	Various Artists - Rock - S	\N	\N	\N
@@ -104539,7 +104539,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 49625	7025	11	1	\N	Class Clown spots a UFO	\N	23	1	0	2012-08-21 22:58:03.647+00	2012-08-21 22:58:03.647+00	\N	\N	61735	\N	\N	t	\N	\N	Guided by Voices	discogs:master:440159	0.95	2026-04-28 05:58:57.669333+00
 45668	17169	11	3	\N	meets Zola Jesus	\N	1	1	0	2011-02-01 23:47:56.279+00	2011-02-01 23:47:56.279+00	\N	\N	57581	\N	\N	t	\N	\N	LA Vampires	\N	\N	\N
 46681	17429	11	1	\N	Eighteenth Street Lounge Soundtracks (label comp)	\N	49	1	0	2012-02-16 20:41:40.229+00	2012-02-16 20:41:40.229+00	\N	\N	58661	\N	\N	\N	\N	\N	Various Artists - Rock - E	\N	\N	\N
-49656	16620	4	1	\N	Variations on a loop]	\N	2	1	0	2012-09-04 23:22:30.075+00	2012-09-04 23:22:30.075+00	\N	\N	\N	\N	\N	\N	\N	\N	Aidan Baker	discogs:master:768219	0.95	2026-04-28 05:58:57.669333+00
+49656	16620	4	1	\N	Variations on a loop]	\N	2	1	0	2012-09-04 23:22:30.075+00	2012-09-04 23:22:30.075+00	\N	\N	1000061	\N	\N	\N	\N	\N	Aidan Baker	discogs:master:768219	0.95	2026-04-28 05:58:57.669333+00
 45494	1087	8	1	\N	Orchestas Tipicas, 1st recordings 1926-38	\N	72	1	0	2010-12-09 18:31:54.237+00	2010-12-09 18:31:54.237+00	\N	\N	57403	\N	\N	f	\N	\N	Various Artists	\N	\N	\N
 49907	17809	6	1	\N	Flight Musik	\N	1	1	0	2012-11-21 00:20:25.29+00	2012-11-21 00:20:25.29+00	\N	\N	62043	\N	\N	t	\N	\N	DJ Diamond	\N	\N	\N
 45917	1087	6	3	\N	Scientist Launches Dubstep into Outer Space	\N	702	1	0	2011-06-28 22:43:02.612+00	2011-06-28 22:43:02.612+00	\N	\N	57843	\N	\N	f	\N	\N	Various Artists	\N	\N	\N
@@ -104935,7 +104935,7 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 53380	19516	15	1	\N	Ep 7	\N	7	1	0	2016-10-29 16:28:56.22+00	2016-10-29 16:28:56.22+00	\N	\N	65879	\N	\N	t	\N	https://i.discogs.com/MY7RyW8Qc3HP835WD9rdkyAd0eefakoserojLcXmehA/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTEzOTYy/LTEzNzk0NzgxNzEt/OTUyMi5qcGVn.jpeg	Autechre	\N	\N	\N
 52025	15984	4	1	Stephen Vitiello	Fable	\N	4	1	0	2015-02-11 01:02:43.738+00	2015-02-11 01:02:43.738+00	\N	\N	64379	\N	\N	t	\N	https://i.discogs.com/FWKV5IgE10iY4Dy9yEX796gdYtCvUVf7-O8NkF_5gF0/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTYyMDQx/MDMtMTQxMzY1NDAw/NS03MzEzLmpwZWc.jpeg	Lawrence English	\N	\N	\N
 1360	713	6	3	\N	Bad Boy remix 12"	\N	5	1	0	2002-02-01 23:59:24.998+00	2002-04-24 01:39:22.497+00	\N	\N	2154	\N	\N	t	\N	\N	Outkast	\N	\N	\N
-50552	18091	11	1	\N	The Elektrik Karousel]	\N	1	1	0	2013-07-21 02:12:41.997+00	2013-07-21 02:12:41.997+00	\N	\N	\N	\N	\N	\N	\N	\N	The Focus Group	discogs:master:555170	0.95	2026-04-28 05:59:03.590118+00
+50552	18091	11	1	\N	The Elektrik Karousel]	\N	1	1	0	2013-07-21 02:12:41.997+00	2013-07-21 02:12:41.997+00	\N	\N	1000062	\N	\N	\N	\N	\N	The Focus Group	discogs:master:555170	0.95	2026-04-28 05:59:03.590118+00
 52555	15984	4	1	\N	The peregrine	\N	5	1	0	2015-10-06 22:17:58.421+00	2015-10-06 22:17:58.421+00	\N	\N	64956	\N	\N	t	\N	https://i.discogs.com/aMoK4QKTEoWILHCq572zI5F1ooDryrLrm1twhZMi83E/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTcwMjcy/NDUtMTQzMTk4Mzc3/MS01Njk3LmpwZWc.jpeg	Lawrence English	discogs:master:837769	0.95	2026-04-28 05:59:09.12573+00
 52597	19068	6	6	\N	Pollution	\N	1	1	0	2015-10-21 00:04:17.165+00	2015-10-21 00:04:17.165+00	\N	\N	65005	\N	\N	t	\N	https://i.discogs.com/xQmTJI_wKI9g_pPKAjs0o_bgE9_DfmXPwsknq4d9xq8/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTczNTQ0/OTQtMTQzOTY0MDEx/Ni04ODUyLmpwZWc.jpeg	Lawrence Le Doux	discogs:master:1039135	0.95	2026-04-28 05:59:16.361031+00
 53351	19502	11	1	Jacqueline Thibault	Galaxies	\N	1	1	0	2016-10-18 22:47:03.822+00	2016-10-18 22:47:03.822+00	\N	\N	65843	\N	\N	t	\N	https://i.discogs.com/AS6SZkV3EFo9aAyhLb79kZhfmb0PC-nK9-Yg_jY6PfY/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTUyMDMw/MjctMTQzMTExMjQ0/OS03NzQwLmpwZWc.jpeg	Laurence Vanay	discogs:master:637950	0.95	2026-04-28 05:59:16.361031+00
@@ -107593,9 +107593,9 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 59185	22319	6	1	\N	Sensational	\N	1	1	0	2021-09-29 15:45:12.51+00	2024-03-12 23:20:25.49+00	\N	\N	69158	\N	\N	t	\N	https://i.discogs.com/AQgvmEQLrJ1S0mVIF3o32XZt9OubbGXwBA1ySJkBXEg/rs:fit/g:sm/q:90/h:600/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTE5NDM1/MTg5LTE2MjU4NTcw/NjctMTQ4OC5qcGVn.jpeg	Erika de Casier	discogs:master:2172934	0.95	2026-04-28 05:59:38.191653+00
 58345	20532	11	3	\N	Did you know there's a tunnel under Ocean Blvd	\N	8	1	0	2023-03-25 23:41:25.877+00	2023-03-25 23:41:25.877+00	\N	\N	69891	\N	\N	t	\N	https://i.discogs.com/oNznqEmohfrc2E3TRCwGMaghwlBBdxP4J-tZFkkTkSk/rs:fit/g:sm/q:90/h:600/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTMwMzYz/NjgwLTE3MTI3OTky/OTktNTg3Mi5qcGVn.jpeg	Lana del Rey	\N	\N	\N
 55017	17985	6	4	\N	Wrest	\N	2	1	0	2017-12-13 00:19:50.909+00	2017-12-13 00:19:50.909+00	\N	\N	67180	\N	\N	t	\N	\N	Shawn O'Sullivan	\N	\N	\N
-58055	17464	12	1	\N	Mame (broadway version feat: angela lansbury	\N	79	1	0	2012-02-23 20:08:38.438+00	2022-10-12 00:16:56.814+00	\N	\N	\N	\N	\N	\N	\N	\N	Soundtracks - M	\N	\N	\N
-58138	21795	8	2	\N	Acabou Chorare	\N	1	1	0	2022-12-02 00:11:14.361+00	2022-12-02 00:11:14.361+00	\N	\N	\N	\N	\N	\N	\N	\N	Os  Novos Baianos	\N	\N	\N
-58222	21834	15	1	\N	Threshold	\N	1	1	0	2023-01-25 01:00:04.694+00	2023-01-25 01:00:04.694+00	\N	\N	\N	\N	\N	\N	\N	\N	Sig Nu Girls	\N	\N	\N
+58055	17464	12	1	\N	Mame (broadway version feat: angela lansbury	\N	79	1	0	2012-02-23 20:08:38.438+00	2022-10-12 00:16:56.814+00	\N	\N	1000063	\N	\N	\N	\N	\N	Soundtracks - M	\N	\N	\N
+58138	21795	8	2	\N	Acabou Chorare	\N	1	1	0	2022-12-02 00:11:14.361+00	2022-12-02 00:11:14.361+00	\N	\N	1000064	\N	\N	\N	\N	\N	Os  Novos Baianos	\N	\N	\N
+58222	21834	15	1	\N	Threshold	\N	1	1	0	2023-01-25 01:00:04.694+00	2023-01-25 01:00:04.694+00	\N	\N	1000065	\N	\N	\N	\N	\N	Sig Nu Girls	\N	\N	\N
 55001	10658	7	3	Duot	Food	\N	11	1	0	2017-12-06 01:31:33.106+00	2017-12-06 01:31:33.106+00	\N	\N	67166	\N	\N	t	\N	\N	Andy Moor	\N	\N	\N
 55002	20156	6	3	\N	Lack	\N	2	1	0	2017-12-06 01:45:07.512+00	2017-12-06 01:45:07.512+00	\N	\N	67167	\N	\N	t	\N	\N	Pan Daijing	\N	\N	\N
 55012	1087	1	3	\N	Pop Makossa: the invasive dance beat of Cameroon, 1976-1984	\N	223	1	0	2017-12-13 00:04:33.571+00	2017-12-13 00:04:33.571+00	\N	\N	67175	\N	\N	f	\N	\N	Various Artists	\N	\N	\N
@@ -110244,18 +110244,18 @@ COPY wxyc_schema.library (id, artist_id, genre_id, format_id, alternate_artist_n
 69967	13700	11	1	\N	Decimation Blues	\N	6	1	0	2026-04-24 15:01:06.565+00	2026-04-24 15:01:06.565+00	\N	\N	72133	1970-01-01 00:00:00+00	1970-01-01 00:00:00+00	\N	\N	\N	Castanets	discogs:master:745514	0.95	2026-04-28 05:59:51.939104+00
 61521	23242	6	6	\N	Khadijah / Jail Break	\N	1	1	0	2002-02-01 23:57:49.45+00	2025-08-17 16:43:09.31+00	\N	\N	758	\N	\N	f	\N	https://i.discogs.com/1-L09Um5sfud22VJmotpy-PDSg6I9ncq-62LDs_N7b4/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTMxMzU3/MC0xMTk3NTU2OTUw/LmpwZWc.jpeg	Dirt Nation	\N	\N	\N
 69955	27026	11	1	\N	Space and Time	\N	1	1	0	2003-01-12 04:25:03+00	2003-01-12 04:25:03+00	\N	\N	33083	\N	\N	f	\N	\N	Orange Alabaster Mushroom	\N	\N	\N
-61026	23090	6	6	Company Flow & Cannibal Ox	DPA (as seen on t.v.) /  Iron Galaxy	\N	3	1	0	2002-02-01 23:57:42.48+00	2025-07-26 16:50:41.244+00	\N	\N	\N	\N	\N	\N	\N	\N	Company Flow	\N	\N	\N
+61026	23090	6	6	Company Flow & Cannibal Ox	DPA (as seen on t.v.) /  Iron Galaxy	\N	3	1	0	2002-02-01 23:57:42.48+00	2025-07-26 16:50:41.244+00	\N	\N	1000066	\N	\N	\N	\N	\N	Company Flow	\N	\N	\N
 61314	23190	7	1	\N	Here's to You, Charlie Brown: 50 Great Years!	\N	1	1	0	2002-02-02 00:01:51.218+00	2025-08-11 15:28:25.458+00	\N	\N	4232	\N	\N	t	\N	\N	David Benoit	discogs:master:1297030	0.95	2026-04-28 05:59:43.731847+00
-61613	23260	9	1	\N	His Folkway Years  1963-1968	\N	2	1	0	2002-02-02 00:08:07.649+00	2025-08-19 16:00:59.164+00	\N	\N	\N	\N	\N	\N	\N	\N	Dock Boggs	\N	\N	\N
-61673	8744	11	4	Division of Laura Lee & Milemarker	My Ears Are Burning  / The Soul of Laura	\N	1	1	0	2003-01-12 03:57:10.806+00	2025-08-20 00:06:14.866+00	B	\N	\N	\N	\N	\N	\N	\N	Milemarker	\N	\N	\N
-61690	23280	7	3	\N	The Best of Dorothy Love Coates and  the Original Gospel Harmonettes vol. 1	\N	1	1	0	2002-02-02 00:02:33.919+00	2025-08-20 16:35:43.289+00	\N	\N	\N	\N	\N	\N	\N	\N	Dorothy Love Coates	\N	\N	\N
-62611	21507	4	3	\N	Symphony No.3  (Gloria) (Music for the first 127 intervals of the harmonic series)	\N	1	1	0	2002-07-01 00:38:07.523+00	2025-10-01 20:45:17.841+00	\N	\N	\N	\N	\N	\N	\N	\N	Glenn Branca	\N	\N	\N
-62911	23645	11	3	\N	A Taste  Of the Blues	\N	1	1	0	2002-02-02 00:08:03.002+00	2025-10-10 16:48:18.959+00	\N	\N	\N	\N	\N	\N	\N	\N	Heather Bishop	\N	\N	\N
-63309	4805	11	1	\N	Gonzo: More Than all  the 45's	\N	1	1	0	2002-07-01 00:37:30.85+00	2025-10-24 17:27:34.614+00	\N	\N	\N	\N	\N	\N	\N	\N	James Booker	\N	\N	\N
+61613	23260	9	1	\N	His Folkway Years  1963-1968	\N	2	1	0	2002-02-02 00:08:07.649+00	2025-08-19 16:00:59.164+00	\N	\N	1000067	\N	\N	\N	\N	\N	Dock Boggs	\N	\N	\N
+61673	8744	11	4	Division of Laura Lee & Milemarker	My Ears Are Burning  / The Soul of Laura	\N	1	1	0	2003-01-12 03:57:10.806+00	2025-08-20 00:06:14.866+00	B	\N	1000068	\N	\N	\N	\N	\N	Milemarker	\N	\N	\N
+61690	23280	7	3	\N	The Best of Dorothy Love Coates and  the Original Gospel Harmonettes vol. 1	\N	1	1	0	2002-02-02 00:02:33.919+00	2025-08-20 16:35:43.289+00	\N	\N	1000069	\N	\N	\N	\N	\N	Dorothy Love Coates	\N	\N	\N
+62611	21507	4	3	\N	Symphony No.3  (Gloria) (Music for the first 127 intervals of the harmonic series)	\N	1	1	0	2002-07-01 00:38:07.523+00	2025-10-01 20:45:17.841+00	\N	\N	1000070	\N	\N	\N	\N	\N	Glenn Branca	\N	\N	\N
+62911	23645	11	3	\N	A Taste  Of the Blues	\N	1	1	0	2002-02-02 00:08:03.002+00	2025-10-10 16:48:18.959+00	\N	\N	1000071	\N	\N	\N	\N	\N	Heather Bishop	\N	\N	\N
+63309	4805	11	1	\N	Gonzo: More Than all  the 45's	\N	1	1	0	2002-07-01 00:37:30.85+00	2025-10-24 17:27:34.614+00	\N	\N	1000072	\N	\N	\N	\N	\N	James Booker	\N	\N	\N
 63406	23810	11	1	\N	R.I.P.	\N	2	1	0	2002-11-06 16:47:13.165+00	2025-10-27 20:17:50.528+00	\N	\N	27590	\N	\N	t	\N	\N	Jejune	discogs:master:1780019	0.95	2026-04-28 05:59:49.230116+00
-64002	23999	11	2	\N	Wormslayer	\N	3	1	0	2026-03-13 15:46:35.819+00	2026-03-13 15:58:54.371+00	\N	\N	\N	\N	\N	\N	\N	\N	Kula Shaker	discogs:master:4114408	0.95	2026-04-28 05:59:51.939104+00
-63679	23859	11	4	Johnny Angel & Song of Zarathrustra	Merckx  / Recommend for Digestion + 1	\N	1	1	0	2002-11-06 16:32:32.689+00	2025-11-01 20:07:13.816+00	\N	\N	\N	\N	\N	\N	\N	\N	Johnny Angel	\N	\N	\N
-63733	19006	11	4	Josh Moore & Ryan Gustafson	Be not afraid  b/w New Morning	\N	1	1	0	2008-07-25 20:44:37.648+00	2025-11-02 16:43:28.463+00	\N	\N	\N	\N	\N	\N	\N	\N	Josh Moore	\N	\N	\N
+64002	23999	11	2	\N	Wormslayer	\N	3	1	0	2026-03-13 15:46:35.819+00	2026-03-13 15:58:54.371+00	\N	\N	1000073	\N	\N	\N	\N	\N	Kula Shaker	discogs:master:4114408	0.95	2026-04-28 05:59:51.939104+00
+63679	23859	11	4	Johnny Angel & Song of Zarathrustra	Merckx  / Recommend for Digestion + 1	\N	1	1	0	2002-11-06 16:32:32.689+00	2025-11-01 20:07:13.816+00	\N	\N	1000074	\N	\N	\N	\N	\N	Johnny Angel	\N	\N	\N
+63733	19006	11	4	Josh Moore & Ryan Gustafson	Be not afraid  b/w New Morning	\N	1	1	0	2008-07-25 20:44:37.648+00	2025-11-02 16:43:28.463+00	\N	\N	1000075	\N	\N	\N	\N	\N	Josh Moore	\N	\N	\N
 69949	27011	11	2	\N	The Mirror	\N	2	1	0	2026-04-18 15:31:08.833+00	2026-04-18 16:30:45.859+00	\N	\N	72126	1970-01-01 00:00:00+00	1970-01-01 00:00:00+00	\N	\N	\N	Buck Meek	discogs:master:4147060	0.95	2026-04-28 05:59:51.939104+00
 69925	27013	15	2	Neggy Gemmy	She Comes from Nowhere	\N	1	1	0	2026-04-09 15:15:29.768+00	2026-04-09 15:15:29.768+00	\N	\N	72114	\N	\N	\N	\N	\N	Negative Gemini	\N	\N	\N
 69926	27014	11	1	\N	In Tall Buildings	\N	1	1	0	2026-04-09 15:23:43.55+00	2026-04-09 15:23:43.55+00	\N	\N	72115	\N	\N	\N	\N	\N	In Tall Buildings	\N	\N	\N
@@ -134057,6 +134057,17 @@ SELECT pg_catalog.setval('wxyc_schema.format_id_seq', 6, true);
 --
 
 SELECT pg_catalog.setval('wxyc_schema.library_id_seq', 70351, true);
+
+
+--
+-- Name: library_legacy_release_id_seq; Type: SEQUENCE SET; Schema: wxyc_schema; Owner: -
+-- BS#1963: advance the Backend-mint sequence past the max legacy_release_id
+-- loaded above (the 76 formerly-NULL rows now carry 1000000..1000075, mirroring
+-- what the prod migration backfill produces) so the first dev catalog-add mint
+-- cannot collide with a clone row under the unique library_legacy_release_id_idx.
+--
+
+SELECT pg_catalog.setval('wxyc_schema.library_legacy_release_id_seq', (SELECT GREATEST(MAX(legacy_release_id), 1000000) FROM wxyc_schema.library), true);
 
 
 --
