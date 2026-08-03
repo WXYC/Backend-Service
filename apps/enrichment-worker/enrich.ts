@@ -448,10 +448,18 @@ export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | n
   // all three callers (finalizeRow, empty-outcome, streaming-reask) route to
   // the existing "LML found nothing" path from this one chokepoint.
   if (!isTrustedLmlTrackContextMatch(response)) return null;
-  const first = response.results?.[0];
-  if (!first) return null;
-  if (!first.artwork) return null;
-  return first.artwork;
+  // Walk `results` in order rather than reading only `results[0].artwork`.
+  // An accepted `compilation` response can pair each `library_item` with its
+  // own independently-resolved artwork (LML's `items_with_artwork`), so the
+  // first entry's `artwork` may be null while a later entry carries it
+  // (BS#961). Reading only index 0 would drop that artwork and silently route
+  // a genuine compilation match — the exact shape the gate above just chose
+  // to accept — to the no-match arm. Mirrors the sibling walk in
+  // `jobs/flowsheet-metadata-backfill/enrich.ts#extractArtwork`.
+  for (const result of response.results ?? []) {
+    if (result.artwork) return result.artwork;
+  }
+  return null;
 };
 
 /**

@@ -1232,6 +1232,18 @@ describe('extractArtwork', () => {
       expect(extractArtwork(response)).toEqual(response.results![0]!.artwork);
     });
 
+    it("walks past a null-artwork results[0] to a later compilation entry that carries it (BS#961 shape — the gate accepts 'compilation', so extraction must too)", () => {
+      const laterArtwork = {
+        artwork_url: 'https://i.discogs.com/comp/later.jpg',
+        release_url: 'https://discogs.com/release/comp',
+      };
+      const response = {
+        search_type: 'compilation',
+        results: [{ artwork: null }, { artwork: laterArtwork }],
+      } as unknown as LookupResponse;
+      expect(extractArtwork(response)).toEqual(laterArtwork);
+    });
+
     it.each(['alternative', 'fallback', 'song_as_artist', 'none'])(
       "rejects search_type '%s' even when artwork is populated",
       (searchType) => {
