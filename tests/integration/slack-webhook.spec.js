@@ -34,6 +34,22 @@ describe('Slack Webhook (Mock API)', () => {
     await resetMockApi();
   });
 
+  // The mock server's error rules are PROCESS-GLOBAL and survive the suite that
+  // armed them. The last test below arms a slack 500 with no `count`, so it is
+  // unbounded — without this teardown it leaks into every suite that runs after
+  // this file, and any later `POST /request` comes back 200 with
+  // `result.success: false`. The `beforeEach` reset above only protects the
+  // tests INSIDE this file; nothing was cleaning up on the way out.
+  //
+  // That made suite ORDER load-bearing, which is why it stayed hidden: jest
+  // ordered requestLine.spec.js ahead of this file, so the leaked rule was never
+  // observed. BS#1965 added tests elsewhere, the ordering shifted, and
+  // requestLine.spec.js started failing on a rule this file left armed.
+  afterAll(async () => {
+    if (!mockApiAvailable) return;
+    await resetMockApi();
+  });
+
   test('song request posts message to mock Slack webhook', async () => {
     if (!mockApiAvailable || !testToken) return;
 
