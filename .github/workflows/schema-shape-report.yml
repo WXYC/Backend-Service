@@ -1,20 +1,29 @@
-name: Schema shape report
+name: Schema shape probe self-test
 
-# When a PR touches schema.ts or a migration SQL file, generate a markdown
-# summary of the new constraints (UNIQUE / NOT NULL / CHECK / FK), probe the
-# staging Postgres clone for rows that would violate them, and post / update
-# a single PR comment with the result.
+# Fail-loudly regression detector for `scripts/schema-shape-report.mjs`.
 #
-# Non-blocking only for a genuine staging-unavailable condition (#703's
-# spec): the script itself catches that case internally and always exits 0
-# with a "manual check required" comment. A script that cannot start at all
-# (module resolution, syntax error, bad args) is a build defect, not a
-# transient outage, and fails this check — see #1982.
+# This workflow used to own the PR comment as well. It no longer does: #1982
+# folded the actual data probe into the `migrate-dryrun` job in test.yml, which
+# already restores the latest automated prod snapshot into an ephemeral sandbox
+# and therefore needs no standing staging credential. `STAGING_DATABASE_URL_RO`
+# — the secret this workflow probed for two months — was never provisioned, so
+# the report never produced a single row count. Exactly one thing now owns the
+# `<!-- wxyc-schema-shape-report -->` marker, and it is test.yml.
 #
-# Self-testing: this file and scripts/schema-shape-report.mjs are themselves
-# in the `paths` filter below, so a PR that edits either one triggers a real
-# run instead of relying on the next unrelated migration PR to notice a
-# regression.
+# What is left here is the half that must stay loud. The probe inside
+# migrate-dryrun is deliberately advisory (it must never redden a required
+# migration gate), which means a script that cannot start would degrade to a
+# warning annotation nobody reads — the exact silent-failure mode of #1982,
+# where ESM module resolution was broken from 2026-06-09 and the check stayed
+# green across 47 migrations. This job re-runs that startup path with no
+# database and no AWS spend, and it FAILS on regression.
+#
+# Coverage note: `migrate-dryrun` is gated on the `db-init` paths filter, which
+# already covers both `shared/database/src/schema.ts` and
+# `shared/database/src/migrations/**`. So every PR that can introduce a new
+# constraint still gets a real report. The narrowing is limited to edits of the
+# probe's own machinery (this file and the script), which change no constraint
+# and now get this self-test instead of a live probe.
 
 on:
   pull_request:
@@ -26,16 +35,18 @@ on:
       - '.github/workflows/schema-shape-report.yml'
       - 'scripts/schema-shape-report.mjs'
 
+# No `pull-requests: write` — this job posts nothing. The comment is owned by
+# the migrate-dryrun job in test.yml.
 permissions:
   contents: read
-  pull-requests: write
 
 concurrency:
-  group: schema-shape-report-${{ github.event.pull_request.number }}
+  group: schema-shape-self-test-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  shape-report:
+  self-test:
+    name: Schema shape probe self-test
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -54,44 +65,28 @@ jobs:
           node-version: '24'
           cache: 'npm'
 
-      - name: Install postgres client (isolated from workspace)
-        # We don't need the full workspace install for this script — the
-        # `postgres` client is the only runtime dep. We install into a
-        # throwaway dir OUTSIDE the workspace root so npm has no
-        # `package.json`/`.npmrc` context to walk — otherwise npm hits
-        # GitHub Packages for `@wxyc/shared` metadata and 401s since
-        # this step intentionally doesn't expose NPM_TOKEN. The previous
-        # `--no-package-lock` workaround (PR #1377) didn't suffice
-        # because npm still consults the root manifest. Observed on PR
-        # #1348 / runs 27185185058 + 27222288445.
+      - name: Install postgres client
+        # KEEP IN SYNC with the `Install minimal deps for dryrun script` step
+        # in test.yml's migrate-dryrun job. The whole point of this self-test
+        # is to exercise the same module-resolution path the real probe uses;
+        # if the two installs diverge, this job starts testing something else
+        # and #1982 can recur undetected.
         #
-        # The script is ESM (`import postgres from 'postgres'`), and
-        # Node's ESM resolver ignores NODE_PATH entirely — that's a
-        # CommonJS-only mechanism. The resolver does walk up parent
-        # `node_modules` dirs from the importing file though, so a
-        # symlink at the workspace root's node_modules/ makes the
-        # isolated install resolvable without npm ever touching the
-        # workspace manifest. See #1982.
-        run: |
-          mkdir -p .cache/pg-client
-          cd .cache/pg-client
-          npm init -y > /dev/null
-          npm install --no-audit --no-fund postgres@^3.4.9
-          cd "$GITHUB_WORKSPACE"
-          mkdir -p node_modules
-          ln -sfn "$GITHUB_WORKSPACE/.cache/pg-client/node_modules/postgres" node_modules/postgres
+        # `--workspaces=false` skips workspace resolution, but npm still reads
+        # the root manifest and resolves the `@wxyc/shared` dependency against
+        # GitHub Packages, so NPM_TOKEN is required (verified: without it the
+        # install dies with E401 on `@wxyc%2fshared`). This replaces the old
+        # isolated-install-plus-symlink workaround, which existed only because
+        # Node's ESM loader ignores NODE_PATH.
+        run: npm install --workspaces=false --no-save --no-package-lock --no-audit --no-fund postgres drizzle-orm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Verify postgres module resolves (ESM smoke check)
-        # Allowed to fail the job. This is the regression detector for the
-        # install/symlink mechanism above, independent of anything the
-        # report script itself does — see #1982 (this exact class of
-        # failure, module resolution silently broken since 2026-06-09,
-        # is what this step exists to catch going forward). On failure it
-        # also seeds .cache/comment.md so the later post-comment step (which
-        # runs unconditionally) still leaves reviewers a real explanation
-        # rather than a bare red check.
+        # The #1982 regression detector proper. Node's ESM resolver walks up
+        # parent node_modules dirs from the importing file, so this is a real
+        # test of the install above rather than a tautology.
         run: |
-          set +e
           node -e "
             import('postgres')
               .then(() => { console.log('postgres module resolves OK'); })
@@ -100,111 +95,27 @@ jobs:
                 process.exit(1);
               });
           "
-          EXIT_CODE=$?
-          set -e
-          if [ "$EXIT_CODE" -ne 0 ]; then
-            mkdir -p .cache
-            cat > .cache/comment.md <<EOF
-          <!-- wxyc-schema-shape-report -->
-          ## Schema constraint shape report
 
-          _data-shape report errored (exit $EXIT_CODE): postgres module failed to resolve via ESM import — install/symlink step regressed; manual check required_
-          EOF
-            exit "$EXIT_CODE"
-          fi
-
-      - name: Compute diff
-        id: diff
+      - name: Run the report script end-to-end with no probe target
+        # Exercises everything the live probe does except the SQL round-trip:
+        # module load, diff parse, all five constraint detectors, SELECT
+        # generation and markdown rendering. With no probe target configured
+        # the script must still exit 0 and emit a marker-bearing comment body
+        # (#703's never-throw contract). A non-zero exit or a missing marker
+        # means the script is broken and the real probe would silently produce
+        # nothing — which is the failure this job exists to catch.
         run: |
           set -euo pipefail
-          BASE_REF="origin/${{ github.event.pull_request.base.ref }}"
           mkdir -p .cache
-          git diff "$BASE_REF"...HEAD -- \
+          BASE_REF='${{ github.event.pull_request.base.ref }}'
+          git diff "origin/${BASE_REF}...HEAD" -- \
             'shared/database/src/schema.ts' \
             'shared/database/src/migrations/*.sql' \
-            > .cache/pr.diff || true
-          echo "diff_bytes=$(wc -c < .cache/pr.diff)" >> "$GITHUB_OUTPUT"
-
-      - name: Generate comment body
-        id: report
-        env:
-          STAGING_DATABASE_URL_RO: ${{ secrets.STAGING_DATABASE_URL_RO }}
-          STAGING_SCHEMA_NAME: ${{ vars.STAGING_SCHEMA_NAME }}
-          STAGING_SNAPSHOT_LABEL: ${{ vars.STAGING_SNAPSHOT_LABEL }}
-        run: |
-          set +e
-          # The script never throws for business-logic failures (no DB URL,
-          # staging unreachable, a query erroring) — it always emits a
-          # comment-shaped markdown blob to stdout and exits 0 for those,
-          # per #703's "manual check required" spec. A non-zero exit here
-          # means the script itself couldn't start or run to completion
-          # (module resolution, syntax error, an uncaught crash outside
-          # main()'s own catch) — that's a real build defect, not a
-          # transient outage, so it fails this step. See #1982.
-          node scripts/schema-shape-report.mjs --diff .cache/pr.diff > .cache/comment.md 2> .cache/script.err
-          EXIT_CODE=$?
-          set -e
-          if [ "$EXIT_CODE" -ne 0 ]; then
-            ERR_TEXT=$(tr '\n' ' ' < .cache/script.err | sed 's/[][`*_]//g' | head -c 300)
-            cat > .cache/comment.md <<EOF
-          <!-- wxyc-schema-shape-report -->
-          ## Schema constraint shape report
-
-          _data-shape report errored (exit $EXIT_CODE): ${ERR_TEXT:-no stderr captured}; manual check required_
-          EOF
-            echo "schema-shape-report.mjs exited $EXIT_CODE — script could not run to completion. stderr:" >&2
-            cat .cache/script.err >&2
-            exit "$EXIT_CODE"
+            > .cache/pr.diff
+          node scripts/schema-shape-report.mjs --diff .cache/pr.diff > .cache/comment.md
+          echo '--- rendered comment (not posted) ---'
+          cat .cache/comment.md
+          if ! grep -q '<!-- wxyc-schema-shape-report -->' .cache/comment.md; then
+            echo 'schema-shape-report.mjs produced no marker-bearing comment body' >&2
+            exit 1
           fi
-
-      - name: Find existing comment
-        id: find-comment
-        # Runs even if the report step above failed the job, so a
-        # script-startup failure still gets an explanatory PR comment
-        # instead of only a red check with no context — see #1982.
-        if: ${{ !cancelled() }}
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const marker = '<!-- wxyc-schema-shape-report -->';
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              per_page: 100,
-            });
-            const existing = comments.find(
-              (c) => c.user?.type === 'Bot' && c.body && c.body.includes(marker),
-            ) || comments.find((c) => c.body && c.body.includes(marker));
-            return existing ? existing.id : '';
-
-      - name: Post or update comment
-        if: ${{ !cancelled() }}
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const fs = require('fs');
-            const marker = '<!-- wxyc-schema-shape-report -->';
-            // Defensive: every failure path above (script error, smoke-check
-            // failure) writes .cache/comment.md before exiting non-zero, but
-            // this guards against a future step that fails before doing so
-            // rather than crashing this step with an ENOENT.
-            const body = fs.existsSync('.cache/comment.md')
-              ? fs.readFileSync('.cache/comment.md', 'utf8')
-              : `${marker}\n## Schema constraint shape report\n\n_data-shape report errored: no comment body was produced; manual check required_\n`;
-            const existingId = ${{ steps.find-comment.outputs.result || 'null' }};
-            if (existingId) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existingId,
-                body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body,
-              });
-            }

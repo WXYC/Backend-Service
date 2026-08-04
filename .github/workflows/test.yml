@@ -530,14 +530,44 @@ jobs:
   #     runner's /32 just-in-time and revokes it in always() teardown,
   #     so the SG carries no persistent ingress rules between runs.
   #     See WXYC/Backend-Service#726 (preflight) and #757 (JIT ingress).
+  #
+  # This job also hosts the schema-shape probe (#703, folded in here by #1982).
+  # The probe answers "how many rows that exist in prod TODAY would this new
+  # constraint reject" and posts the answer as a PR comment. It lives here
+  # because this job already restores exactly that data, so the report needs no
+  # standing staging credential — #703's `STAGING_DATABASE_URL_RO` was never
+  # provisioned and #1982 chose the fold over minting a new long-lived secret.
+  #
+  # Two invariants for anyone editing the probe steps:
+  #   1. The probe MUST run before `Run drizzle:migrate against sandbox`. After
+  #      the migrations apply, the count is zero by construction (or the
+  #      migration failed) and the report is worthless.
+  #   2. The probe is ADVISORY and must never fail this job. `Migration Dry-Run
+  #      (prod-shaped data)` is a required status check whose real job is
+  #      catching DDL that prod data rejects; a flaky reporting nicety must not
+  #      be able to block every merge. Hence `continue-on-error: true` on every
+  #      probe step. The loud-on-regression half of #1982 lives in the separate
+  #      `schema-shape-report.yml` self-test, which has no DB and no AWS spend.
   migrate-dryrun:
     name: Migration Dry-Run (prod-shaped data)
     needs: [detect-changes]
     if: needs.detect-changes.outputs.db-init == 'true'
     runs-on: ubuntu-latest
+    # Widened from the workflow-level `contents: read` floor solely so the
+    # probe can post its report. No other job in this file writes via
+    # GITHUB_TOKEN. See docs/deploy.md "CI workflow pin maintenance".
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v7
+        with:
+          # Full history so the shape-probe diff step below can find the merge
+          # base. `ref` is deliberately left at the default (the PR merge
+          # commit) — the dry-run must apply migrations as they would land on
+          # main, not as they sit on the head branch.
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -557,6 +587,30 @@ jobs:
         run: npm install --workspaces=false --no-save --no-package-lock --no-audit --no-fund postgres drizzle-orm
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Compute schema diff for shape probe
+        # Cheap and DB-free, so it runs before any AWS spend — if the diff
+        # can't be computed we'd rather know now. Advisory (see the job header):
+        # a git hiccup here must not fail the migration gate.
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          mkdir -p .cache
+          BASE_REF='${{ github.event.pull_request.base.ref }}'
+          # Resolve the merge base off FETCH_HEAD rather than a
+          # `refs/remotes/origin/*` tracking ref: `actions/checkout` does not
+          # guarantee it configures the tracking refspec, but `git fetch`
+          # always writes FETCH_HEAD. Works whether HEAD is the PR merge
+          # commit (today's default) or the head commit.
+          git fetch --no-tags origin "$BASE_REF"
+          MERGE_BASE=$(git merge-base FETCH_HEAD HEAD)
+          git diff "$MERGE_BASE" HEAD -- \
+            'shared/database/src/schema.ts' \
+            'shared/database/src/migrations/*.sql' \
+            > .cache/pr.diff
+          echo "shape-probe diff: $(wc -c < .cache/pr.diff) bytes against $MERGE_BASE"
 
       - name: Configure AWS credentials
         # Long-lived AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY pattern
@@ -616,11 +670,23 @@ jobs:
           # 'DBSnapshot must have state available but actually has
           # creating'). The trailing `[-1]` then gives the most-recent
           # *available* snapshot.
-          SNAPSHOT_ID=$(aws rds describe-db-snapshots \
+          # Resolved in one call (two `describe` calls could straddle a new
+          # snapshot appearing) and split with `cut` rather than `read`, which
+          # returns non-zero at EOF and would trip `set -e`.
+          SNAPSHOT_INFO=$(aws rds describe-db-snapshots \
             --db-instance-identifier "${{ secrets.PROD_DB_ID }}" \
             --snapshot-type automated \
-            --query 'sort_by(DBSnapshots[?Status==`available`], &SnapshotCreateTime)[-1].DBSnapshotIdentifier' \
+            --query 'sort_by(DBSnapshots[?Status==`available`], &SnapshotCreateTime)[-1].[DBSnapshotIdentifier,SnapshotCreateTime]' \
             --output text)
+          SNAPSHOT_ID=$(printf '%s' "$SNAPSHOT_INFO" | cut -f1)
+          SNAPSHOT_TIME=$(printf '%s' "$SNAPSHOT_INFO" | cut -f2)
+          # SnapshotCreateTime, NOT the snapshot identifier, is what the shape
+          # probe renders as provenance. Automated snapshot ids are formatted
+          # `rds:<db-instance-identifier>-<timestamp>`, so echoing one into a
+          # PR comment would publish the prod instance identifier that
+          # `secrets.PROD_DB_ID` exists to keep out of this PUBLIC repo.
+          # GITHUB_TOKEN secret-masking does not cover an API request body.
+          echo "SNAPSHOT_TIME=$SNAPSHOT_TIME" >> "$GITHUB_ENV"
           SANDBOX_ID="dryrun-${{ github.run_id }}"
           echo "SANDBOX_ID=$SANDBOX_ID" >> "$GITHUB_ENV"
           aws rds restore-db-instance-from-db-snapshot \
@@ -635,6 +701,50 @@ jobs:
             --db-instance-identifier "$SANDBOX_ID" \
             --query 'DBInstances[0].Endpoint.Address' --output text)
           echo "DB_HOST=$ENDPOINT" >> "$GITHUB_ENV"
+
+      - name: Probe pre-migration data shape
+        # ORDER IS LOAD-BEARING: this must stay above `Run drizzle:migrate`.
+        # The report's only claim is "N rows that exist in prod today would be
+        # rejected"; once the migrations apply, N is 0 by construction.
+        #
+        # Advisory: `continue-on-error` plus the script's own never-throw
+        # contract mean neither a probe crash nor an unreachable sandbox can
+        # redden the required migration gate. The script emits a
+        # comment-shaped blob and exits 0 for every business-logic failure
+        # (no target, query error, timeout); a non-zero exit means it could
+        # not start at all, and we still hand the reader that fact rather
+        # than a silent no-op.
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        # Hard ceiling so a hung probe cannot hold the sandbox open until the
+        # job's 6-hour default timeout. The script's own limits (10s connect,
+        # 30s per statement) should keep it far under this.
+        timeout-minutes: 5
+        env:
+          SHAPE_PROBE_DB_HOST: ${{ env.DB_HOST }}
+          SHAPE_PROBE_DB_PORT: '5432'
+          SHAPE_PROBE_DB_NAME: ${{ secrets.PROD_DB_NAME }}
+          SHAPE_PROBE_DB_USERNAME: ${{ secrets.PROD_DB_USERNAME }}
+          SHAPE_PROBE_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
+          SHAPE_PROBE_SNAPSHOT_LABEL: >-
+            automated prod RDS snapshot ${{ env.SNAPSHOT_TIME }}, restored to
+            ephemeral sandbox for run ${{ github.run_id }}
+        run: |
+          set +e
+          node scripts/schema-shape-report.mjs --diff .cache/pr.diff > .cache/comment.md 2> .cache/script.err
+          EXIT_CODE=$?
+          set -e
+          if [ "$EXIT_CODE" -ne 0 ]; then
+            ERR_TEXT=$(tr '\n' ' ' < .cache/script.err | sed 's/[][`*_]//g' | head -c 300)
+            cat > .cache/comment.md <<EOF
+          <!-- wxyc-schema-shape-report -->
+          ## Schema constraint shape report
+
+          _data-shape report errored (exit $EXIT_CODE): ${ERR_TEXT:-no stderr captured}; manual check required_
+          EOF
+            echo "::warning title=Schema shape probe failed::schema-shape-report.mjs exited $EXIT_CODE; the migration dry-run itself is unaffected"
+            cat .cache/script.err >&2
+          fi
 
       - name: Run drizzle:migrate against sandbox
         env:
@@ -672,3 +782,55 @@ jobs:
               --skip-final-snapshot \
               --delete-automated-backups
           fi
+
+      - name: Post or update schema-shape comment
+        # Deliberately the LAST step in the job, after both teardown steps.
+        # Posting a comment is the least important thing this job does and the
+        # only step that talks to a third-party API on the happy path; running
+        # it after teardown means GitHub API latency, rate limiting, or an
+        # outright failure can never delay or skip the RDS cleanup.
+        #
+        # `always()` so a failed dry-run still reports its (pre-migration)
+        # numbers — that is precisely the case where a reviewer wants them.
+        # `continue-on-error` so a comment we cannot post never reddens the
+        # required check. Silently skips when the probe produced nothing
+        # (e.g. the restore failed, so there was never anything to probe):
+        # a stale-but-honest previous comment beats overwriting it with noise
+        # about an infrastructure failure the red check already reports.
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- wxyc-schema-shape-report -->';
+            if (!fs.existsSync('.cache/comment.md')) {
+              core.info('No shape report was produced this run; leaving any existing comment untouched.');
+              return;
+            }
+            const body = fs.readFileSync('.cache/comment.md', 'utf8');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing =
+              comments.find((c) => c.user?.type === 'Bot' && c.body && c.body.includes(marker)) ||
+              comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
