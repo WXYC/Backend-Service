@@ -18,9 +18,10 @@
  *
  * Postgres-backed (the BS analogue of the org `pg` marker): direct SQL seeds
  * isolated fixtures, supertest drives the HTTP surface. All seeded rows live in a
- * dedicated 7170-range this spec owns end-to-end (created + reaped here), so it
- * can't collide with the shared shape fixture or the 7050-range the sibling
- * catalog-export spec uses.
+ * dedicated 900170+ range this spec owns end-to-end (created + reaped here) and
+ * every assertion binds to a row this file seeded — no dependency on the shared
+ * shape fixture, and above the prod-clone fixture's id space (see the id block
+ * below for why that matters).
  */
 
 const zlib = require('zlib');
@@ -32,11 +33,19 @@ const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const GEN = 11; // 'Rock'
 const FMT = 1; // 'cd'
 
-// Isolated artists: a "main" filing artist + three cross-reference partners.
-const ART_MAIN = 7170;
-const ART_XREF_A = 7171; // 'BS1965 Xref Beta'
-const ART_XREF_B = 7172; // 'BS1965 Xref Gamma'
-const ART_XREF_C = 7175; // 'bs1965 Xref Delta' — lowercase initial, the collation probe
+// Fixture id range. 900000+ deliberately: the dev prod-clone fixture
+// (`dev_env/seed-clone.sql`, loaded when LOAD_CLONE_FIXTURE=true) occupies
+// artists 1-27050 and library 1-70351, so the 7xxx range this spec originally
+// used collided with real clone rows (artists 7169-7178 are Helmet, Helms, Hem,
+// Karl Hendricks, Jimi Hendrix, ...). Under the clone, the ON CONFLICT DO
+// NOTHING seeds below silently no-op onto those rows and the afterAll DELETEs
+// reap catalog data the spec never created. CI never loads the clone, so this
+// was dev-only — but "dev-only data loss" is still data loss.
+const ART_MAIN = 900170;
+const ART_XREF_A = 900171; // 'BS1965 Xref Beta'
+const ART_XREF_B = 900172; // 'BS1965 Xref Gamma'
+const ART_XREF_C = 900175; // 'bs1965 Xref Delta' — lowercase initial, the collation probe
+const ART_NO_XREF = 900179; // has no artist_crossreference rows at all
 const XREF_A_NAME = 'BS1965 Xref Beta';
 const XREF_B_NAME = 'BS1965 Xref Gamma';
 const XREF_C_NAME = 'bs1965 Xref Delta';
@@ -45,23 +54,31 @@ const XREF_C_NAME = 'bs1965 Xref Delta';
 // COLLATE "C") — an ARRAY on the wire, never the pipe-joined string library.db
 // stores (the producer does that join itself).
 //
-// The lowercase-initial third name is the load-bearing part of this fixture.
-// Under COLLATE "C", 'b' (U+0062) sorts after 'B' (U+0042), so Delta lands LAST:
-//   ['BS1965 Xref Beta', 'BS1965 Xref Gamma', 'bs1965 Xref Delta']
-// Under the database's default en_US.UTF-8 collation, case is ignored at the
-// primary level and Delta would sort BETWEEN Beta and Gamma. The two orderings
-// disagree, so this array pins that the query really is collation-explicit
-// rather than accidentally passing on the local database's default.
+// Under COLLATE "C", 'b' (U+0062) sorts after 'B' (U+0042), so Delta lands LAST.
+// On prod (RDS PostgreSQL 14.22, glibc) the database default en_US.utf8 ignores
+// case at the primary level and would instead sort Delta BETWEEN Beta and Gamma,
+// so there the collation is doing real, observable work.
+//
+// It does NOT do observable work here, and this assertion cannot prove it is
+// present. CI and dev run postgres:18.0-alpine; musl does not implement glibc
+// locales, so the database reports datcollate=en_US.utf8 but collates by byte
+// order — identical to COLLATE "C". Deleting the COLLATE from the query leaves
+// this expectation green. The guard that actually fails on its removal is the
+// source-level one in tests/unit/services/catalog-export.sql-invariants.test.ts;
+// see that file's docblock for the measured before/after on both platforms.
+// Keep this assertion anyway: it pins the array contents and dedup/self-exclusion,
+// and it is the assertion that would catch a real ordering bug on a glibc host.
 const EXPECTED_XREF = [XREF_A_NAME, XREF_B_NAME, XREF_C_NAME];
 
-const LIB_PRODUCER = 7173; // library row under ART_MAIN, with album_artist + alternate
-const LIB_CTA = 7174; // library row under ART_MAIN that owns the seeded CTA rows
+const LIB_PRODUCER = 900173; // library row under ART_MAIN, with album_artist + alternate
+const LIB_CTA = 900174; // library row under ART_MAIN that owns the seeded CTA rows
+const LIB_NO_XREF = 900180; // library row under ART_NO_XREF (empty-array probe)
 
 // Row-eligibility probe: an artist deliberately given NO genre_artist_crossreference
 // entry for GEN, so its library row fails the catalog export's 4-INNER-JOIN
 // predicate. Its CTA rows must be dropped from the CTA export too.
-const ART_NO_GAC = 7176;
-const LIB_NO_GAC = 7177;
+const ART_NO_GAC = 900176;
+const LIB_NO_GAC = 900177;
 
 function makeSql() {
   return postgres({
@@ -114,15 +131,16 @@ describe('GET /library/catalog + /compilation-tracks — library.db producer pat
               ($2, $5, $5, 'ZB'),
               ($3, $6, $6, 'ZC'),
               ($4, $7, $7, 'ZD'),
-              ($8, 'BS1965 Ineligible Artist', 'BS1965 Ineligible Artist', 'ZE')
+              ($8, 'BS1965 Ineligible Artist', 'BS1965 Ineligible Artist', 'ZE'),
+              ($9, 'BS1965 No Xref Artist', 'BS1965 No Xref Artist', 'ZF')
        ON CONFLICT (id) DO NOTHING`,
-      [ART_MAIN, ART_XREF_A, ART_XREF_B, ART_XREF_C, XREF_A_NAME, XREF_B_NAME, XREF_C_NAME, ART_NO_GAC]
+      [ART_MAIN, ART_XREF_A, ART_XREF_B, ART_XREF_C, XREF_A_NAME, XREF_B_NAME, XREF_C_NAME, ART_NO_GAC, ART_NO_XREF]
     );
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
-       VALUES ($1, $5, 970), ($2, $5, 971), ($3, $5, 972), ($4, $5, 973)
+       VALUES ($1, $6, 970), ($2, $6, 971), ($3, $6, 972), ($4, $6, 973), ($5, $6, 974)
        ON CONFLICT (artist_id, genre_id) DO NOTHING`,
-      [ART_MAIN, ART_XREF_A, ART_XREF_B, ART_XREF_C, GEN]
+      [ART_MAIN, ART_XREF_A, ART_XREF_B, ART_XREF_C, ART_NO_XREF, GEN]
     );
 
     // Cross-references in BOTH FK directions, plus a redundant reverse row and a
@@ -182,6 +200,19 @@ describe('GET /library/catalog + /compilation-tracks — library.db producer pat
       [LIB_NO_GAC]
     );
 
+    // Empty-array probe: an eligible library row whose artist has no
+    // artist_crossreference rows in either direction. Seeded here rather than
+    // borrowing a shared-fixture row so the assertion can't be invalidated by an
+    // unrelated fixture edit (or by the prod clone supplying a same-id row that
+    // DOES have cross-references).
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".library
+         (id, artist_id, genre_id, format_id, album_title, code_number, artist_name)
+       VALUES ($1, $2, $3, $4, 'BS1965 No Xref Probe', 74, 'BS1965 No Xref Artist')
+       ON CONFLICT (id) DO NOTHING`,
+      [LIB_NO_XREF, ART_NO_XREF, GEN, FMT]
+    );
+
     // Capture the minted legacy_release_ids (BS#1963 nextval default; not
     // hardcodable) so assertions bind to the real surrogate keys.
     const mainRow = await sql.unsafe(`SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = $1`, [LIB_PRODUCER]);
@@ -197,8 +228,10 @@ describe('GET /library/catalog + /compilation-tracks — library.db producer pat
       // compilation_track_artist.library_id is ON DELETE CASCADE, so the library
       // delete reaps the seeded CTA rows. artist_crossreference has no FK to
       // library; reap it explicitly. Delete library rows before artists (FK).
-      const artistIds = [ART_MAIN, ART_XREF_A, ART_XREF_B, ART_XREF_C, ART_NO_GAC];
-      await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id IN ($1, $2, $3)`, [LIB_PRODUCER, LIB_CTA, LIB_NO_GAC]);
+      const artistIds = [ART_MAIN, ART_XREF_A, ART_XREF_B, ART_XREF_C, ART_NO_GAC, ART_NO_XREF];
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id = ANY($1::int[])`, [
+        [LIB_PRODUCER, LIB_CTA, LIB_NO_GAC, LIB_NO_XREF],
+      ]);
       await sql.unsafe(
         `DELETE FROM "${SCHEMA}".artist_crossreference
          WHERE source_artist_id = ANY($1::int[]) OR target_artist_id = ANY($1::int[])`,
@@ -263,11 +296,11 @@ describe('GET /library/catalog + /compilation-tracks — library.db producer pat
 
   test('cross_reference_names is an EMPTY ARRAY for an artist with no cross-references', async () => {
     // Contract: empty array, not null and not absent, so the producer never has
-    // to distinguish "no aliases" from "field missing". The CTA-owning row shares
-    // ART_MAIN — which HAS cross-references — so use a shape-fixture row whose
-    // artist (7001 'Beta') has none seeded.
+    // to distinguish "no aliases" from "field missing". Binds to this spec's own
+    // ART_NO_XREF row (seeded with a genre crossref so it IS export-eligible, but
+    // with no artist_crossreference rows in either direction).
     const byId = new Map(parseRows(await getCatalog(auth)).map((r) => [r.id, r]));
-    const noXref = byId.get(7002); // 'Shape Fixture Album Beta 1', artist 7001
+    const noXref = byId.get(LIB_NO_XREF);
     expect(noXref).toBeDefined();
     expect(noXref.cross_reference_names).toEqual([]);
     expect(noXref.cross_reference_names).not.toBeNull();

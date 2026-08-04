@@ -56,8 +56,11 @@ import { describe, it, expect } from '@jest/globals';
 import { readFileSync, readdirSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { createRequire } from 'module';
-import type { CatalogExportRow as PrivateRow } from '../../../apps/backend/services/catalog-export.service';
-import type { CatalogExportRow as SharedRow } from '@wxyc/shared/dtos';
+import type {
+  CatalogExportRow as PrivateRow,
+  CompilationTrackExportRow as PrivateCtaRow,
+} from '../../../apps/backend/services/catalog-export.service';
+import type { CatalogExportRow as SharedRow, CatalogCompilationTrackRow as SharedCtaRow } from '@wxyc/shared/dtos';
 
 // ---------------------------------------------------------------------------
 // Compile-time contract (belt-and-suspenders; enforced by a real `tsc`, e.g.
@@ -80,6 +83,10 @@ const _sharedBinAcceptsRawString: SharedRow['rotation_bin'] = 'N';
 void _privateBinAcceptsRawString;
 void _sharedBinAcceptsRawString;
 
+// Same mutual key-set equality for the BS#1965 CTA export pair.
+const _ctaKeysAgree: KeysEqual<PrivateCtaRow, SharedCtaRow> = true;
+void _ctaKeysAgree;
+
 // ---------------------------------------------------------------------------
 // Runtime contract (the assertion that actually fails CI on drift).
 // ---------------------------------------------------------------------------
@@ -88,12 +95,12 @@ void _sharedBinAcceptsRawString;
  * Field names declared in the private `export type CatalogExportRow = { ... }`
  * block of `apps/backend/services/catalog-export.service.ts`.
  */
-function extractPrivateRowKeys(): string[] {
+function extractPrivateRowKeys(typeName: string): string[] {
   const servicePath = resolve(__dirname, '../../../apps/backend/services/catalog-export.service.ts');
   const source = readFileSync(servicePath, 'utf-8');
-  const block = source.match(/export type CatalogExportRow = \{([\s\S]*?)\};/)?.[1];
+  const block = source.match(new RegExp(`export type ${typeName} = \\{([\\s\\S]*?)\\};`))?.[1];
   if (!block) {
-    throw new Error('private `export type CatalogExportRow = { ... }` block not found in catalog-export.service.ts');
+    throw new Error(`private \`export type ${typeName} = { ... }\` block not found in catalog-export.service.ts`);
   }
   return extractObjectTypeKeys(block);
 }
@@ -107,8 +114,8 @@ function extractPrivateRowKeys(): string[] {
  * (not a checked-in copy) makes the `@wxyc/shared` dependency bump load-bearing:
  * a version without `CatalogExportRow` makes this throw.
  */
-function extractSsotRowKeys(): string[] {
-  const block = readSsotCatalogExportRowBlock();
+function extractSsotRowKeys(schemaName: string): string[] {
+  const block = readSsotRowBlock(schemaName);
   return extractObjectTypeKeys(block);
 }
 
@@ -116,7 +123,7 @@ function extractSsotRowKeys(): string[] {
  * Locate and return the raw text of the SSOT `CatalogExportRow: { ... }` schema
  * block from the installed `@wxyc/shared` bundled declaration file.
  */
-function readSsotCatalogExportRowBlock(): string {
+function readSsotRowBlock(schemaName: string): string {
   const require = createRequire(__filename);
   // dist/dtos/index.js -> dist/
   const distDir = dirname(dirname(require.resolve('@wxyc/shared/dtos')));
@@ -127,12 +134,11 @@ function readSsotCatalogExportRowBlock(): string {
   const decl = readFileSync(join(distDir, bundle), 'utf-8');
   // The schema block: `CatalogExportRow: { ... };` under components['schemas'].
   // Balance braces from the opening `{` so nested members don't end it early.
-  const startToken = 'CatalogExportRow: {';
+  const startToken = `${schemaName}: {`;
   const startIdx = decl.indexOf(startToken);
   if (startIdx === -1) {
     throw new Error(
-      `SSOT CatalogExportRow schema not found in ${bundle}. ` +
-        'Is the installed @wxyc/shared new enough to carry it (>= 1.13.0)?'
+      `SSOT ${schemaName} schema not found in ${bundle}. ` + 'Is the installed @wxyc/shared new enough to carry it?'
     );
   }
   const braceOpen = startIdx + startToken.length - 1;
@@ -201,8 +207,8 @@ function extractObjectTypeKeys(body: string): string[] {
 }
 
 describe('CatalogExportRow parity: private TS type vs @wxyc/shared SSOT schema (BS#1477)', () => {
-  const privateKeys = extractPrivateRowKeys();
-  const ssotKeys = extractSsotRowKeys();
+  const privateKeys = extractPrivateRowKeys('CatalogExportRow');
+  const ssotKeys = extractSsotRowKeys('CatalogExportRow');
 
   it('extracts a non-trivial key set from each side (sanity)', () => {
     // Guards against an extractor that silently matches nothing and lets a real
@@ -223,7 +229,7 @@ describe('CatalogExportRow parity: private TS type vs @wxyc/shared SSOT schema (
     // ships the RAW rotation bin so an off-cohort value can't break a strict
     // enum decoder. If api.yaml ever re-narrows rotation_bin to RotationBin, the
     // generated type references the enum and this fails.
-    const ssotBlock = readSsotCatalogExportRowBlock();
+    const ssotBlock = readSsotRowBlock('CatalogExportRow');
     const binLine = ssotBlock.split('\n').find((l) => /\brotation_bin\b\s*\??\s*:/.test(l));
     expect(binLine).toBeDefined();
     expect(binLine).toMatch(/:\s*string\b/);
@@ -238,5 +244,50 @@ describe('CatalogExportRow parity: private TS type vs @wxyc/shared SSOT schema (
     expect(binLine).toBeDefined();
     expect(binLine).toMatch(/rotation_bin\s*:\s*string\s*\|\s*null\s*;/);
     expect(binLine).not.toMatch(/RotationBin/);
+  });
+});
+
+describe('CompilationTrackExportRow parity: private TS type vs @wxyc/shared SSOT schema (BS#1965)', () => {
+  // Same guard, same reasons, for the CTA export's hand-defined wire shape. The
+  // docblock above nominates itself as the template for "the next bulk endpoint
+  // that hand-defines its wire shape instead of consuming the SSOT type" — this
+  // is that endpoint (GET /library/catalog/compilation-tracks), so the extractors
+  // are parameterized and reused rather than copied.
+  //
+  // The drift this catches is worse here than for CatalogExportRow, because the
+  // consumer is a byte-parity gate: the library.db producer (discogs-etl#351)
+  // writes these three columns into SQLite and discogs-etl#346 diffs the result
+  // against the legacy MySQL artifact. A field added on one side only shifts the
+  // produced table's shape with nothing else in the chain to notice.
+  // Same "what this does NOT guard" caveat as above applies: the SSOT marks
+  // `track_title` optional (no `required:` entry) where the private type marks it
+  // required. That `?`-vs-required difference is expected and tolerated — the
+  // key-set comparison strips the `?`. The third hand-maintained copy in
+  // `app.yaml` is still unguarded (BS#1479).
+  const privateKeys = extractPrivateRowKeys('CompilationTrackExportRow');
+  const ssotKeys = extractSsotRowKeys('CatalogCompilationTrackRow');
+
+  it('extracts a non-trivial key set from each side (sanity)', () => {
+    // The CTA row is deliberately narrow (3 columns), so the floor is 3 rather
+    // than the 10 the wide catalog row uses. Still guards an extractor that
+    // silently matches nothing and lets drift pass as two empty, "equal" sets.
+    expect(privateKeys.length).toBeGreaterThanOrEqual(3);
+    expect(ssotKeys.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('the private CompilationTrackExportRow key set equals the SSOT CatalogCompilationTrackRow key set', () => {
+    expect(privateKeys).toEqual(ssotKeys);
+  });
+
+  it('carries exactly the three library.db CTA columns — no id / track_position / library_id leak', () => {
+    // library.db's compilation_track_artist table has 3 columns. The BS serial
+    // CTA `id`, the serial `library_id` (the export is keyed on
+    // legacy_release_id instead), and `track_position` are all deliberately
+    // dropped; shipping any of them breaks parity with the legacy artifact.
+    expect(privateKeys).toEqual(['artist_name', 'legacy_release_id', 'track_title']);
+    for (const leaked of ['id', 'library_id', 'track_position']) {
+      expect(privateKeys).not.toContain(leaked);
+      expect(ssotKeys).not.toContain(leaked);
+    }
   });
 });
