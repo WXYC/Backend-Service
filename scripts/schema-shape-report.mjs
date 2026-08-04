@@ -53,6 +53,7 @@
 
 import postgres from 'postgres';
 import { readFileSync } from 'fs';
+import { pathToFileURL } from 'url';
 
 // ---------------------------------------------------------------------------
 // Comment marker — the workflow uses this to find a previous comment and
@@ -419,16 +420,53 @@ function formatColumnsAsJsonObject(columns) {
 }
 
 /**
+ * Build the WHERE clause for a unique-constraint probe.
+ *
+ * PostgreSQL indexes are `NULLS DISTINCT` by default: two NULLs are never
+ * considered equal, so a row whose key contains a NULL can never conflict with
+ * any other row. For a multi-column key the exemption is per-ROW, not per-
+ * column — equality against a NULL column yields NULL, so if ANY key column is
+ * NULL that row is exempt. The probe must therefore count only rows where
+ * EVERY key column is non-NULL.
+ *
+ * Without this guard, `GROUP BY <cols> HAVING count(*) > 1` collapses every
+ * NULL-keyed row into one giant phantom "duplicate group" and the report
+ * claims a constraint would be rejected when `CREATE UNIQUE INDEX` applies
+ * cleanly. That produced a 72,599-row false positive on `shows.specialty_id`
+ * — see the reproduction in #1984.
+ *
+ * A partial index's own predicate is ANDed with the guard, never replaced by
+ * it: both must hold for a row to be a genuine conflict candidate.
+ *
+ * PG15+ `NULLS NOT DISTINCT` would invert this, making NULL-keyed rows
+ * conflict after all. It cannot reach prod today: prod RDS is PG14, and
+ * `NULLS NOT DISTINCT` is a `42601 syntax error` there — the `migrate-dryrun`
+ * gate is precisely what catches it (BS#1424, where PR #1414 tried exactly
+ * this and was rejected). The detector also only sources unique constraints
+ * from drizzle `uniqueIndex(...)` / `.unique()` in schema.ts, neither of which
+ * emits that clause. If prod is ever upgraded to PG15+, this guard must become
+ * conditional on the index's null-handling — `docs/migrations.md`'s
+ * `dev-prod-pg-version-skew` rule is the checklist that should bring you here.
+ */
+function buildUniqueWhereClause(constraint) {
+  const predicates = constraint.columns.map((c) =>
+    c.kind === 'col' ? `${quoteIdent(c.name)} IS NOT NULL` : `(${c.text}) IS NOT NULL`
+  );
+  if (constraint.where) predicates.unshift(`(${constraint.where})`);
+  return `WHERE ${predicates.join(' AND ')}`;
+}
+
+/**
  * Build the SELECT that finds violating rows for a given constraint.
  * Returns null if we can't generate a sensible query (e.g. unknown table).
  */
-function buildSelect(constraint) {
+export function buildSelect(constraint) {
   switch (constraint.kind) {
     case 'unique': {
       if (!constraint.table || constraint.columns.length === 0) return null;
       const cols = formatColumnsForSelect(constraint.columns);
       const keys = formatColumnsAsJsonObject(constraint.columns);
-      const whereClause = constraint.where ? `WHERE ${constraint.where}` : '';
+      const whereClause = buildUniqueWhereClause(constraint);
       return {
         sql: `
           SELECT count(*)::bigint AS dup_groups,
@@ -753,7 +791,17 @@ function truncate(s, n) {
   return s.length <= n ? s : s.slice(0, n - 1) + '…';
 }
 
-main().catch((err) => {
-  // Last-resort safety net: never crash the workflow.
-  console.log(erroredComment(truncate(String(err && err.message ? err.message : err), 200)));
-});
+// Only run the CLI when executed directly. The module already exported
+// COMMENT_MARKER, but an unconditional `main()` at import time contradicted
+// that — importing the file to test its pure SQL-generation would have run the
+// whole report. Guarding it lets `buildSelect` be exercised against a real
+// PostgreSQL from a harness while `node scripts/schema-shape-report.mjs` keeps
+// behaving exactly as before.
+const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (invokedDirectly) {
+  main().catch((err) => {
+    // Last-resort safety net: never crash the workflow.
+    console.log(erroredComment(truncate(String(err && err.message ? err.message : err), 200)));
+  });
+}
