@@ -77,6 +77,23 @@ export const ENRICHMENT_BULK_WINDOW_MS = envInt('ENRICHMENT_BULK_WINDOW_MS', 50)
 /** Caller-class label projected onto the `lml.caller` Sentry span (BS#1235). */
 const ENRICHMENT_CALLER = 'enrichment-worker';
 
+/**
+ * BS#1978: default-off suppression lever for `X-Caller-Budget-Ms` on THIS
+ * worker's bulk dispatch. Set `ENRICHMENT_SUPPRESS_LML_BUDGET=true` to arm
+ * it; merging this change is otherwise a byte-for-byte no-op. See the
+ * comment on `dispatchChunk`'s `budgetMs` line below for the full WHY.
+ *
+ * Read at call time (not captured in a module-scope `const`) so a test can
+ * flip `process.env` without re-importing the module, and so a live
+ * operator's `.env` edit + container restart takes effect without a code
+ * change — mirrors `apps/enrichment-worker/enrich.ts`'s
+ * `isBandcampReaskEnabled` convention (strict `=== 'true'`; any other value,
+ * including `'1'`/`'yes'`, is off).
+ */
+export function isSuppressLmlBudgetEnabled(): boolean {
+  return process.env.ENRICHMENT_SUPPRESS_LML_BUDGET === 'true';
+}
+
 /** The per-row fields the worker resolves before enqueuing a lookup. */
 export interface EnrichmentLookupInput {
   artist_name: string;
@@ -160,6 +177,74 @@ async function dispatchChunk(chunk: PendingLookup[]): Promise<void> {
         // drains (album-level-backfill, catalog-popularity-freetext-resolve,
         // flowsheet-linked-reenrichment) must keep the kill switch on.
         allowReleaseResolutionFallback: true,
+        // BS#1978 (blocked by / building on BS#1914): when
+        // `ENRICHMENT_SUPPRESS_LML_BUDGET=true`, suppress `X-Caller-Budget-Ms`
+        // on this dispatch by passing `budgetMs: null` — the BS#1914 lever
+        // (`resolveCallBudgetMs` + `sanitizeCallBudgetMs`, `@wxyc/lml-client`)
+        // that omits the header from the wire request entirely, distinct from
+        // leaving `budgetMs` unset (which inherits the `enrichment-worker`
+        // class-5 policy default of 28000). Flag OFF (default): the object
+        // literally has no `budgetMs` key, so this dispatch is byte-for-byte
+        // identical to pre-#1978 behavior.
+        //
+        // WHY suppress at all: BS#1914 established that class 5's header
+        // value is mostly symbolic — LML clamps the effective search budget
+        // to `min(header − 200ms, LML_SEARCH_BUDGET_MS)` (prod leaves
+        // `LML_SEARCH_BUDGET_MS` unset, defaulting to 4000ms), so this
+        // caller's real ceiling is ~4s regardless of the header's magnitude.
+        // That 4s fast-degrade is the CORRECT, deliberate behavior for the
+        // offline drains that share `bulkLookupMetadata`
+        // (`album-level-backfill`, `catalog-popularity-freetext-resolve`,
+        // `flowsheet-linked-reenrichment`, every other `*-backfill` job) — a
+        // hard-miss row should give up quickly and free the shared Discogs
+        // ceiling for the next row, so those callers must keep sending the
+        // header unconditionally; do not extend this flag to them. It is
+        // WRONG for THIS caller specifically: `enrichment-worker` enriches
+        // new rotation arrivals — albums in neither `library.db` nor the
+        // library-filtered Discogs cache — whose cold non-library release
+        // resolution measures 4-20s on prod (2026-08-04 replay evidence,
+        // BS#1978/BS#1914). Under the 4s clamp, LML gives up on exactly the
+        // rows that need the most time, writing a terminal
+        // `enriched_no_match` for an album that a headerless retry would
+        // have resolved (59% of one day's 41 rotation-linked no-match rows
+        // recovered on replay).
+        //
+        // MECHANISM: the header's mere PRESENCE — not its magnitude — is
+        // what arms two LML-side gates: the empty-state cascade cutoff
+        // (WXYC/library-metadata-lookup#345) and the enrichment-tail shed
+        // (WXYC/library-metadata-lookup#930). Omitting it does NOT raise
+        // either gate's ceiling — it removes the empty-state cutoff so a
+        // genuine hard miss falls through to LML's own hard cap instead of
+        // giving up early. The resulting bounds once suppressed: LML's
+        // `LML_SEARCH_HARD_TIMEOUT_MS` (default 25000ms, unset in prod) on
+        // LML's side, and this client's class-5 `timeoutMs` (29000ms,
+        // `policy.ts`) on the socket — the AbortController fires at 29s
+        // regardless of what LML does, so 29s is the true worst-case ceiling
+        // a suppressed call can hold a `defaultLimiter` permit for. `sweep.ts`'s
+        // `STRANDED_TTL_SECONDS` (60s) is unaffected by this flag — it
+        // derives from the POLICY TABLE's `budgetMs` (`resolveLmlPolicy`),
+        // which this per-call override never mutates; see that file's
+        // BS#1978 test coverage for the arithmetic confirming 60s still
+        // comfortably exceeds the ~34s worst case (29s timeout + up to 5s
+        // `LML_LIMITER_MAX_QUEUE_WAIT_MS` pre-admission queue wait).
+        //
+        // Limiter-occupancy tradeoff (raised explicitly per the BS#1978
+        // constraints, not resolved here): this worker shares the
+        // process-wide `defaultLimiter` (BS#1748 — deliberately NOT a
+        // dedicated one), so a suppressed cold lookup can hold its permit for
+        // ~25s (LML's own hard cap) and up to 29s in the worst case (this
+        // client's AbortController, if LML overruns that cap), instead of the
+        // ~4s the empty-state cutoff bounded it to — reducing concurrent
+        // enrichment throughput and increasing pre-admission queue pressure
+        // on that shared Semaphore(5). A saturated queue sheds to
+        // `outcome: 'shed_limiter_saturated'` (bounded by
+        // `LML_LIMITER_MAX_QUEUE_WAIT_MS`, 5s) rather than hanging, and a
+        // shed verdict is already rejected as retryable, never resolved into
+        // a terminal no-match (BS#1748, the `shed_limiter_saturated` /
+        // `shed_breaker_open` branch below). See the BS#1978 PR description
+        // for the throughput math; a dedicated limiter for this worker is a
+        // candidate follow-up, not filed here.
+        ...(isSuppressLmlBudgetEnabled() ? { budgetMs: null } : {}),
       }
     );
 
