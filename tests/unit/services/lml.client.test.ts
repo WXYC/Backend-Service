@@ -296,6 +296,63 @@ describe('lml.client', () => {
       expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
     });
 
+    it('BS#1914: budgetMs: null omits X-Caller-Budget-Ms even when the caller has a policy default', async () => {
+      // Distinct from "not provided" (undefined) above: undefined falls
+      // through to inherit the caller's class default (library-track-search
+      // would otherwise supply 4000 here); null is the explicit suppression
+      // signal that opts back into LML's headerless ~25s
+      // LML_SEARCH_HARD_TIMEOUT_MS grind instead. See policy.ts's module
+      // docstring "CORRECTED MODEL" note.
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield', undefined, {
+        caller: 'library-track-search',
+        budgetMs: null,
+      });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+    });
+
+    it('BS#1914: a per-call budgetMs <= 0 is sanitized away (warn + omit), the same guard the policy table gets', async () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield', undefined, { budgetMs: 0, timeoutMs: 5000 });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/budgetMs=0 \(<= 0\)/));
+      warnSpy.mockRestore();
+    });
+
+    it('BS#1914: a per-call budgetMs >= timeoutMs is sanitized away (warn + omit), the same guard the policy table gets', async () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield', undefined, { budgetMs: 5000, timeoutMs: 5000 });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/budgetMs=5000 >= timeoutMs=5000/));
+      warnSpy.mockRestore();
+    });
+
     // BS#1843: wire-signal prelim for LML#928 (lane routing) / LML#931
     // (caller-reason telemetry). Forwarding is inert on its own — LML ignores
     // both headers until those sub-issues land a read seam mirroring
@@ -1002,6 +1059,64 @@ describe('lml.client', () => {
       const init = mockFetch.mock.calls[0][1];
       if (!init) throw new Error('mockFetch was not called with init args');
       expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+    });
+
+    it('BS#1914: budgetMs: null omits X-Caller-Budget-Ms even when the caller has a policy default', async () => {
+      // enrichment-worker's class-5 policy default would otherwise supply
+      // budgetMs: 28000 — null is the BS#1914 suppression signal that opts
+      // back into LML's headerless ~25s grind instead. Landing the flag that
+      // actually flips this caller is WXYC/Backend-Service#1978; this only
+      // proves the lever works.
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')], { caller: 'enrichment-worker', budgetMs: null });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+    });
+
+    it('BS#1914: a per-call budgetMs <= 0 is sanitized away (warn + omit), the same guard the policy table gets', async () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')], {
+        caller: 'album-level-backfill',
+        budgetMs: -5,
+        timeoutMs: 5000,
+      });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/budgetMs=-5 \(<= 0\)/));
+      warnSpy.mockRestore();
+    });
+
+    it('BS#1914: a per-call budgetMs >= timeoutMs is sanitized away (warn + omit), the same guard the policy table gets', async () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')], {
+        caller: 'album-level-backfill',
+        budgetMs: 5000,
+        timeoutMs: 5000,
+      });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/budgetMs=5000 >= timeoutMs=5000/));
+      warnSpy.mockRestore();
     });
 
     // BS#1843: same wire-signal prelim as the postLookup call site above,
