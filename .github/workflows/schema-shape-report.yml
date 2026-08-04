@@ -5,7 +5,16 @@ name: Schema shape report
 # staging Postgres clone for rows that would violate them, and post / update
 # a single PR comment with the result.
 #
-# Non-blocking: this workflow always exits 0. The comment is informational.
+# Non-blocking only for a genuine staging-unavailable condition (#703's
+# spec): the script itself catches that case internally and always exits 0
+# with a "manual check required" comment. A script that cannot start at all
+# (module resolution, syntax error, bad args) is a build defect, not a
+# transient outage, and fails this check — see #1982.
+#
+# Self-testing: this file and scripts/schema-shape-report.mjs are themselves
+# in the `paths` filter below, so a PR that edits either one triggers a real
+# run instead of relying on the next unrelated migration PR to notice a
+# regression.
 
 on:
   pull_request:
@@ -14,6 +23,8 @@ on:
     paths:
       - 'shared/database/src/schema.ts'
       - 'shared/database/src/migrations/*.sql'
+      - '.github/workflows/schema-shape-report.yml'
+      - 'scripts/schema-shape-report.mjs'
 
 permissions:
   contents: read
@@ -53,11 +64,54 @@ jobs:
         # `--no-package-lock` workaround (PR #1377) didn't suffice
         # because npm still consults the root manifest. Observed on PR
         # #1348 / runs 27185185058 + 27222288445.
+        #
+        # The script is ESM (`import postgres from 'postgres'`), and
+        # Node's ESM resolver ignores NODE_PATH entirely — that's a
+        # CommonJS-only mechanism. The resolver does walk up parent
+        # `node_modules` dirs from the importing file though, so a
+        # symlink at the workspace root's node_modules/ makes the
+        # isolated install resolvable without npm ever touching the
+        # workspace manifest. See #1982.
         run: |
           mkdir -p .cache/pg-client
           cd .cache/pg-client
           npm init -y > /dev/null
           npm install --no-audit --no-fund postgres@^3.4.9
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p node_modules
+          ln -sfn "$GITHUB_WORKSPACE/.cache/pg-client/node_modules/postgres" node_modules/postgres
+
+      - name: Verify postgres module resolves (ESM smoke check)
+        # Allowed to fail the job. This is the regression detector for the
+        # install/symlink mechanism above, independent of anything the
+        # report script itself does — see #1982 (this exact class of
+        # failure, module resolution silently broken since 2026-06-09,
+        # is what this step exists to catch going forward). On failure it
+        # also seeds .cache/comment.md so the later post-comment step (which
+        # runs unconditionally) still leaves reviewers a real explanation
+        # rather than a bare red check.
+        run: |
+          set +e
+          node -e "
+            import('postgres')
+              .then(() => { console.log('postgres module resolves OK'); })
+              .catch((err) => {
+                console.error('postgres module failed to resolve via ESM import:', err.message);
+                process.exit(1);
+              });
+          "
+          EXIT_CODE=$?
+          set -e
+          if [ "$EXIT_CODE" -ne 0 ]; then
+            mkdir -p .cache
+            cat > .cache/comment.md <<EOF
+          <!-- wxyc-schema-shape-report -->
+          ## Schema constraint shape report
+
+          _data-shape report errored (exit $EXIT_CODE): postgres module failed to resolve via ESM import — install/symlink step regressed; manual check required_
+          EOF
+            exit "$EXIT_CODE"
+          fi
 
       - name: Compute diff
         id: diff
@@ -77,16 +131,20 @@ jobs:
           STAGING_DATABASE_URL_RO: ${{ secrets.STAGING_DATABASE_URL_RO }}
           STAGING_SCHEMA_NAME: ${{ vars.STAGING_SCHEMA_NAME }}
           STAGING_SNAPSHOT_LABEL: ${{ vars.STAGING_SNAPSHOT_LABEL }}
-          # `postgres` is installed in the isolated dir above; the script
-          # does a bare `import postgres from 'postgres'` and resolves it
-          # via NODE_PATH.
-          NODE_PATH: .cache/pg-client/node_modules
         run: |
-          set -uo pipefail
-          # The script itself never throws — it always emits a comment-shaped
-          # markdown blob to stdout, even on internal failures.
-          if ! node scripts/schema-shape-report.mjs --diff .cache/pr.diff > .cache/comment.md 2> .cache/script.err; then
-            EXIT_CODE=$?
+          set +e
+          # The script never throws for business-logic failures (no DB URL,
+          # staging unreachable, a query erroring) — it always emits a
+          # comment-shaped markdown blob to stdout and exits 0 for those,
+          # per #703's "manual check required" spec. A non-zero exit here
+          # means the script itself couldn't start or run to completion
+          # (module resolution, syntax error, an uncaught crash outside
+          # main()'s own catch) — that's a real build defect, not a
+          # transient outage, so it fails this step. See #1982.
+          node scripts/schema-shape-report.mjs --diff .cache/pr.diff > .cache/comment.md 2> .cache/script.err
+          EXIT_CODE=$?
+          set -e
+          if [ "$EXIT_CODE" -ne 0 ]; then
             ERR_TEXT=$(tr '\n' ' ' < .cache/script.err | sed 's/[][`*_]//g' | head -c 300)
             cat > .cache/comment.md <<EOF
           <!-- wxyc-schema-shape-report -->
@@ -94,12 +152,17 @@ jobs:
 
           _data-shape report errored (exit $EXIT_CODE): ${ERR_TEXT:-no stderr captured}; manual check required_
           EOF
+            echo "schema-shape-report.mjs exited $EXIT_CODE — script could not run to completion. stderr:" >&2
+            cat .cache/script.err >&2
+            exit "$EXIT_CODE"
           fi
-          # Always succeed — the comment carries the failure mode in its text.
-          exit 0
 
       - name: Find existing comment
         id: find-comment
+        # Runs even if the report step above failed the job, so a
+        # script-startup failure still gets an explanatory PR comment
+        # instead of only a red check with no context — see #1982.
+        if: ${{ !cancelled() }}
         uses: actions/github-script@v9
         with:
           script: |
@@ -116,11 +179,19 @@ jobs:
             return existing ? existing.id : '';
 
       - name: Post or update comment
+        if: ${{ !cancelled() }}
         uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
-            const body = fs.readFileSync('.cache/comment.md', 'utf8');
+            const marker = '<!-- wxyc-schema-shape-report -->';
+            // Defensive: every failure path above (script error, smoke-check
+            // failure) writes .cache/comment.md before exiting non-zero, but
+            // this guards against a future step that fails before doing so
+            // rather than crashing this step with an ENOENT.
+            const body = fs.existsSync('.cache/comment.md')
+              ? fs.readFileSync('.cache/comment.md', 'utf8')
+              : `${marker}\n## Schema constraint shape report\n\n_data-shape report errored: no comment body was produced; manual check required_\n`;
             const existingId = ${{ steps.find-comment.outputs.result || 'null' }};
             if (existingId) {
               await github.rest.issues.updateComment({
