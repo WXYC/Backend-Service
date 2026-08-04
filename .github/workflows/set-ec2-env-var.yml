@@ -70,6 +70,13 @@ jobs:
           AUTO_DJ_PASSWORD: ${{ secrets.AUTO_DJ_PASSWORD }}
           CREATE_AUTO_DJ_USER: ${{ secrets.CREATE_AUTO_DJ_USER }}
           AUTO_DJ_EMAIL: ${{ secrets.AUTO_DJ_EMAIL }}
+          # Enrichment-worker X-Caller-Budget-Ms suppression (WXYC/Backend-Service#1978).
+          # Non-sensitive boolean ('true' to arm, anything else / unset is off),
+          # carried through the allowlist for the same reason as CREATE_AUTO_DJ_USER
+          # above: it needs to be flippable on a live worker without an image
+          # rebuild. Pass restart_target=enrichment-worker — no other container
+          # reads it. Rollback is the same invocation with the secret set to 'false'.
+          ENRICHMENT_SUPPRESS_LML_BUDGET: ${{ secrets.ENRICHMENT_SUPPRESS_LML_BUDGET }}
         run: |
           set -euo pipefail
           KEY="${{ inputs.key }}"
@@ -81,6 +88,7 @@ jobs:
             AUTO_DJ_PASSWORD) VALUE="$AUTO_DJ_PASSWORD" ;;
             CREATE_AUTO_DJ_USER) VALUE="$CREATE_AUTO_DJ_USER" ;;
             AUTO_DJ_EMAIL) VALUE="$AUTO_DJ_EMAIL" ;;
+            ENRICHMENT_SUPPRESS_LML_BUDGET) VALUE="$ENRICHMENT_SUPPRESS_LML_BUDGET" ;;
             *)
               echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
               exit 1
