@@ -310,4 +310,57 @@ describe('enrichmentBulkLookup burst coalescing (B3 / BS#1749)', () => {
     await expect(aObserved).resolves.toBe('LML request timed out');
     await expect(bObserved).resolves.toBe('LML request timed out');
   });
+
+  describe('ENRICHMENT_SUPPRESS_LML_BUDGET (BS#1978)', () => {
+    // These pin the OPTIONS OBJECT dispatchChunk builds — fast unit coverage
+    // of this module's own flag-reading logic. The wire-layer assertion (the
+    // actual HTTP header dispatchChunk's real bulkLookupMetadata call
+    // produces) lives in lookup-batcher.budget-suppression.test.ts, which
+    // deliberately does NOT mock @wxyc/lml-client so it can intercept
+    // `global.fetch` instead — this file's `@wxyc/lml-client` mock can only
+    // ever prove what dispatchChunk HANDED to the client, not what the
+    // client put on the wire.
+    const originalEnv = process.env;
+
+    afterEach(() => {
+      process.env = originalEnv;
+    });
+
+    it('flag ON: passes budgetMs: null (the BS#1914 suppression signal) on the bulk dispatch', async () => {
+      process.env = { ...originalEnv, ENRICHMENT_SUPPRESS_LML_BUDGET: 'true' };
+      mockBulkLookupMetadata.mockImplementation((items) => Promise.resolve(echoAllMatched(items)));
+
+      const p = enrichmentBulkLookup(makeInput('Stereolab'));
+      await flushWindow();
+      await p;
+
+      const [, options] = mockBulkLookupMetadata.mock.calls[0];
+      expect(options).toMatchObject({ budgetMs: null });
+    });
+
+    it('flag unset (default): omits budgetMs entirely — byte-for-byte identical to pre-#1978 dispatch', async () => {
+      process.env = { ...originalEnv };
+      delete process.env.ENRICHMENT_SUPPRESS_LML_BUDGET;
+      mockBulkLookupMetadata.mockImplementation((items) => Promise.resolve(echoAllMatched(items)));
+
+      const p = enrichmentBulkLookup(makeInput('Stereolab'));
+      await flushWindow();
+      await p;
+
+      const [, options] = mockBulkLookupMetadata.mock.calls[0];
+      expect(options).not.toHaveProperty('budgetMs');
+    });
+
+    it('flag "false": omits budgetMs — only the exact string "true" arms suppression', async () => {
+      process.env = { ...originalEnv, ENRICHMENT_SUPPRESS_LML_BUDGET: 'false' };
+      mockBulkLookupMetadata.mockImplementation((items) => Promise.resolve(echoAllMatched(items)));
+
+      const p = enrichmentBulkLookup(makeInput('Stereolab'));
+      await flushWindow();
+      await p;
+
+      const [, options] = mockBulkLookupMetadata.mock.calls[0];
+      expect(options).not.toHaveProperty('budgetMs');
+    });
+  });
 });

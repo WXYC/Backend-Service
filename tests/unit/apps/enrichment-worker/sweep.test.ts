@@ -29,7 +29,7 @@
 import { jest } from '@jest/globals';
 
 import { db, flowsheet } from '@wxyc/database';
-import { resolveLmlPolicy } from '@wxyc/lml-client';
+import { resolveLmlPolicy, LML_LIMITER_MAX_QUEUE_WAIT_MS_DEFAULT } from '@wxyc/lml-client';
 import { sweepStrandedClaims, STRANDED_TTL_SECONDS } from '../../../../apps/enrichment-worker/sweep';
 
 type SqlLike = {
@@ -161,6 +161,66 @@ describe('sweepStrandedClaims (BS#1225)', () => {
       // migration does not change the sweep's real-world TTL.
       expect(resolveLmlPolicy('enrichment-worker').budgetMs).toBe(28000);
       expect(STRANDED_TTL_SECONDS).toBe(60);
+    });
+  });
+
+  describe('STRANDED_TTL_SECONDS verified against a suppressed budget (BS#1978)', () => {
+    // BS#1978's ENRICHMENT_SUPPRESS_LML_BUDGET flag adds a PER-CALL
+    // `budgetMs: null` override at lookup-batcher.ts's dispatchChunk call
+    // site — it does not touch shared/lml-client/src/policy.ts's table.
+    // STRANDED_TTL_SECONDS derives from resolveLmlPolicy('enrichment-worker')
+    // .budgetMs (the TABLE value), which the per-call override can never
+    // mutate, so this constant is byte-identical whether the flag is on or
+    // off. This block exists to pin that explicitly and to verify the
+    // invariant `sweep.ts`'s docstring requires (TTL > worst-case in-flight
+    // time) still holds once a call can legitimately run to LML's full
+    // headerless cascade instead of the ~4s empty-state cutoff.
+    //
+    // Worst-case suppressed in-flight arithmetic:
+    //   - Suppressing the header does NOT raise any timeout — it only
+    //     removes LML's empty-state cutoff (the gate armed by the header's
+    //     PRESENCE, not magnitude; see policy.ts's BS#1914 "CORRECTED MODEL").
+    //     A genuine hard miss now falls through to LML's own hard cap,
+    //     `LML_SEARCH_HARD_TIMEOUT_MS` (default 25000ms, unset in prod).
+    //   - But the load-bearing ceiling for "how long can a suppressed call
+    //     hold a defaultLimiter permit" is NOT that 25s LML-side cap — it's
+    //     this client's class-5 `timeoutMs` (29000ms), because the
+    //     AbortController in `lmlFetch` fires at 29s regardless of whether
+    //     LML itself would have given up sooner. 29s > 25s, so the client
+    //     timeout is the true dominant bound.
+    //   - On top of that, a call can spend up to `LML_LIMITER_MAX_QUEUE_WAIT_MS`
+    //     (5000ms default) waiting for a permit on the shared `defaultLimiter`
+    //     BEFORE the LML call even starts (BS#1748 admission bound), so the
+    //     full worst-case wall-clock time from `enrichmentBulkLookup` to a
+    //     settled promise is 29000 + 5000 = 34000ms.
+    //   - 34000ms must stay comfortably under STRANDED_TTL_SECONDS * 1000
+    //     (60000ms) or the sweep could revert a still-in-flight suppressed
+    //     claim back to 'pending' (see sweep.ts's TTL-derivation docstring
+    //     for why that race matters — it silently no-ops the worker's
+    //     eventual finalize UPDATE and wastes the LML token spend).
+    const SUPPRESSED_CLIENT_TIMEOUT_MS = 29_000;
+    const WORST_CASE_SUPPRESSED_INFLIGHT_MS = SUPPRESSED_CLIENT_TIMEOUT_MS + LML_LIMITER_MAX_QUEUE_WAIT_MS_DEFAULT;
+
+    it("suppressing the header does not change resolveLmlPolicy('enrichment-worker').budgetMs or STRANDED_TTL_SECONDS", () => {
+      // The flag lives entirely in lookup-batcher.ts's dispatchChunk; this
+      // module (sweep.ts) never reads ENRICHMENT_SUPPRESS_LML_BUDGET and
+      // needed no code change for BS#1978. Pin both derived values so a
+      // future refactor that accidentally threads the flag into policy.ts
+      // (which WOULD change this) fails here.
+      expect(resolveLmlPolicy('enrichment-worker').budgetMs).toBe(28000);
+      expect(STRANDED_TTL_SECONDS).toBe(60);
+    });
+
+    it('matches the documented class-5 client timeout (29000ms) and admission bound (5000ms)', () => {
+      expect(resolveLmlPolicy('enrichment-worker').timeoutMs).toBe(SUPPRESSED_CLIENT_TIMEOUT_MS);
+      expect(LML_LIMITER_MAX_QUEUE_WAIT_MS_DEFAULT).toBe(5000);
+      expect(WORST_CASE_SUPPRESSED_INFLIGHT_MS).toBe(34_000);
+    });
+
+    it('STRANDED_TTL_SECONDS comfortably exceeds the worst-case suppressed in-flight time (60s > 34s)', () => {
+      expect(STRANDED_TTL_SECONDS * 1000).toBeGreaterThan(WORST_CASE_SUPPRESSED_INFLIGHT_MS);
+      // "Comfortably" quantified: at least 25s of slack, not a near-miss.
+      expect(STRANDED_TTL_SECONDS * 1000 - WORST_CASE_SUPPRESSED_INFLIGHT_MS).toBeGreaterThanOrEqual(25_000);
     });
   });
 });
