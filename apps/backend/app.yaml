@@ -258,6 +258,7 @@ components:
           type: integer
         legacy_release_id:
           type: integer
+          nullable: true
         artist_name:
           type: string
         alternate_artist_name:
@@ -267,8 +268,16 @@ components:
           type: string
           nullable: true
         cross_reference_names:
-          type: string
+          type: array
           nullable: true
+          items:
+            type: string
+          description: >
+            Cross-referenced artist names, in either FK direction, ordered by
+            Unicode code point. An ARRAY, not the pipe-joined string library.db
+            stores — the producer does the `" | "` join itself, because nothing
+            constrains an artist name from containing a pipe. Empty array when
+            the artist has no cross-references.
         album_title:
           type: string
         code_letters:
@@ -325,8 +334,11 @@ components:
           type: integer
         artist_name:
           type: string
+          minLength: 1
+          maxLength: 255
         track_title:
           type: string
+          maxLength: 255
           nullable: true
 
     BmiPerformanceRow:
@@ -1398,6 +1410,12 @@ paths:
         `?since=` -> `304`) as the library export. Rows are keyed on
         `legacy_release_id` (the owning library row's surrogate key) and ordered
         by it.
+
+        A CTA row is emitted only if its owning library row is itself eligible
+        for `GET /library/catalog` — same four INNER JOINs, notably
+        `genre_artist_crossreference` on the (artist_id, genre_id) pair. An
+        unfiltered export would ship `library_release_id` values that join to
+        nothing in the `library` table the sibling endpoint produces.
       security:
         - BearerAuth: ['catalog-read']
       parameters:

@@ -946,6 +946,13 @@
       "when": 1785643907962,
       "tag": "0137_mint-legacy-release-id",
       "breakpoints": true
+    },
+    {
+      "idx": 138,
+      "version": "7",
+      "when": 1785643907963,
+      "tag": "0138_catalog-export-watermark-triggers",
+      "breakpoints": true
     }
   ]
 }
