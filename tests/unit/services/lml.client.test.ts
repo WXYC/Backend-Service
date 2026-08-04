@@ -319,7 +319,7 @@ describe('lml.client', () => {
       expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
     });
 
-    it('BS#1914: a per-call budgetMs <= 0 is sanitized away (warn + omit), the same guard the policy table gets', async () => {
+    it('BS#1914: a per-call budgetMs <= 0 is sanitized away (warn + omit) by sanitizeCallBudgetMs', async () => {
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
       mockFetch.mockResolvedValue({
         ok: true,
@@ -327,7 +327,7 @@ describe('lml.client', () => {
           Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
       } as unknown as globalThis.Response);
 
-      await lookupMetadata('Autechre', 'Confield', undefined, { budgetMs: 0, timeoutMs: 5000 });
+      await lookupMetadata('Autechre', 'Confield', undefined, { budgetMs: 0 });
 
       const init = mockFetch.mock.calls[0][1];
       if (!init) throw new Error('mockFetch was not called with init args');
@@ -336,8 +336,32 @@ describe('lml.client', () => {
       warnSpy.mockRestore();
     });
 
-    it('BS#1914: a per-call budgetMs >= timeoutMs is sanitized away (warn + omit), the same guard the policy table gets', async () => {
+    it('BS#1914: a per-call non-finite budgetMs (NaN) is sanitized away (warn + omit), closing the NaN-on-the-wire hole', async () => {
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+      } as unknown as globalThis.Response);
+
+      await lookupMetadata('Autechre', 'Confield', undefined, { budgetMs: NaN });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/non-finite budgetMs=NaN/));
+      warnSpy.mockRestore();
+    });
+
+    it('BS#1914: a per-call budgetMs >= timeoutMs is NOT sanitized away — that branch is policy-table-only', async () => {
+      // Regression guard for the BS#1914 review finding: extending the
+      // policy table's `budgetMs >= timeoutMs` rejection to per-call
+      // overrides reasons from the header's raw VALUE, which is the false
+      // model this ticket corrects — under LML's real min-clamp, a
+      // nominally-too-large header still collapses to the tiny effective
+      // budget and fires it well before any socket abort. See the real
+      // call-site shapes below (rotation-release-id-backfill etc.) that
+      // this guard must not silently mute.
       mockFetch.mockResolvedValue({
         ok: true,
         json: () =>
@@ -348,10 +372,34 @@ describe('lml.client', () => {
 
       const init = mockFetch.mock.calls[0][1];
       if (!init) throw new Error('mockFetch was not called with init args');
-      expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/budgetMs=5000 >= timeoutMs=5000/));
-      warnSpy.mockRestore();
+      expect(init.headers).toMatchObject({ 'X-Caller-Budget-Ms': '5000' });
     });
+
+    // BS#1914 regression: the real production call-site shapes the review
+    // flagged as at-risk from a naive "reuse sanitizeBudgetMs wholesale"
+    // fix. Each of these passes an explicit `timeoutMs` (from its own
+    // *_TIMEOUT_MS env var, default shown) with NO `budgetMs` of its own, so
+    // it inherits the class-5 policy default (28000 at today's defaults) —
+    // and 28000 >= 8000 on every single call. The header must still go out.
+    it.each([
+      ['rotation-release-id-backfill', 8000],
+      ['library-discogs-unavailable-recheck', 8000],
+    ] as const)(
+      'BS#1914 regression: %s (timeoutMs=%d, no explicit budgetMs) still sends its class-5 header',
+      async (caller, timeoutMs) => {
+        mockFetch.mockResolvedValue({
+          ok: true,
+          json: () =>
+            Promise.resolve({ results: [], search_type: 'none', song_not_found: false, found_on_compilation: false }),
+        } as unknown as globalThis.Response);
+
+        await lookupMetadata('Autechre', 'Confield', undefined, { caller, timeoutMs });
+
+        const init = mockFetch.mock.calls[0][1];
+        if (!init) throw new Error('mockFetch was not called with init args');
+        expect(init.headers).toMatchObject({ 'X-Caller-Budget-Ms': '28000' });
+      }
+    );
 
     // BS#1843: wire-signal prelim for LML#928 (lane routing) / LML#931
     // (caller-reason telemetry). Forwarding is inert on its own — LML ignores
@@ -1079,7 +1127,7 @@ describe('lml.client', () => {
       expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
     });
 
-    it('BS#1914: a per-call budgetMs <= 0 is sanitized away (warn + omit), the same guard the policy table gets', async () => {
+    it('BS#1914: a per-call budgetMs <= 0 is sanitized away (warn + omit) by sanitizeCallBudgetMs', async () => {
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
       mockFetch.mockResolvedValue({
         ok: true,
@@ -1099,8 +1147,32 @@ describe('lml.client', () => {
       warnSpy.mockRestore();
     });
 
-    it('BS#1914: a per-call budgetMs >= timeoutMs is sanitized away (warn + omit), the same guard the policy table gets', async () => {
+    it('BS#1914: a per-call non-finite budgetMs (NaN) is sanitized away (warn + omit), closing the NaN-on-the-wire hole', async () => {
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: [] }),
+      } as unknown as globalThis.Response);
+
+      await bulkLookupMetadata([itemFor('A', 'X')], {
+        caller: 'album-level-backfill',
+        budgetMs: NaN,
+        timeoutMs: 5000,
+      });
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/non-finite budgetMs=NaN/));
+      warnSpy.mockRestore();
+    });
+
+    it('BS#1914: a per-call budgetMs >= timeoutMs is NOT sanitized away — that branch is policy-table-only', async () => {
+      // Mirrors the postLookup regression guard above: extending the >=
+      // timeoutMs rejection to per-call overrides would flip
+      // album-level-backfill's trailing partial batch (batchSize <= 4,
+      // where computeBulkTimeoutMs(batchSize) <= BULK_BUDGET_MS_DEFAULT)
+      // from "sends the header" to "omits it" every run.
       mockFetch.mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({ results: [] }),
@@ -1114,10 +1186,35 @@ describe('lml.client', () => {
 
       const init = mockFetch.mock.calls[0][1];
       if (!init) throw new Error('mockFetch was not called with init args');
-      expect(Object.keys((init.headers as Record<string, string>) ?? {})).not.toContain('X-Caller-Budget-Ms');
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/budgetMs=5000 >= timeoutMs=5000/));
-      warnSpy.mockRestore();
+      expect(init.headers).toMatchObject({ 'X-Caller-Budget-Ms': '5000' });
     });
+
+    // BS#1914 regression: the three bulk offline drains' real shape —
+    // `budgetMs: BULK_BUDGET_MS_DEFAULT` (25000) paired with `timeoutMs:
+    // computeBulkTimeoutMs(batchSize) = batchSize * 5000 + 5000` — puts
+    // `budgetMs >= timeoutMs` at every `batchSize <= 4`, which includes the
+    // trailing partial batch of any run. The header must go out regardless.
+    it.each([
+      ['album-level-backfill', 1, 10000],
+      ['album-level-backfill', 4, 25000], // the exact tie the review flagged
+      ['album-level-backfill', 5, 30000], // safe case, for contrast
+      ['flowsheet-linked-reenrichment', 4, 25000],
+      ['catalog-popularity-freetext-resolve', 4, 25000],
+    ] as const)(
+      'BS#1914 regression: %s batchSize=%d (timeoutMs=%d, budgetMs=25000) still sends its header',
+      async (caller, _batchSize, timeoutMs) => {
+        mockFetch.mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ results: [] }),
+        } as unknown as globalThis.Response);
+
+        await bulkLookupMetadata([itemFor('A', 'X')], { caller, budgetMs: 25000, timeoutMs });
+
+        const init = mockFetch.mock.calls[0][1];
+        if (!init) throw new Error('mockFetch was not called with init args');
+        expect(init.headers).toMatchObject({ 'X-Caller-Budget-Ms': '25000' });
+      }
+    );
 
     // BS#1843: same wire-signal prelim as the postLookup call site above,
     // exercised here for the ~L932 bulk call site. catalog-popularity-freetext-resolve

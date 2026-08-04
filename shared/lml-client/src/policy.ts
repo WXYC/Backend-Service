@@ -78,16 +78,26 @@
  *     frozen by this gap. WXYC/library-metadata-lookup#1112 tracks that the
  *     shed still discards release-resolution work LML already paid for.
  *   - Class 2: the header value (4000) is close to the effective budget
- *     (3800), so the false model was only mildly wrong here. No change.
+ *     (3800), so the false model was only mildly wrong here — with one
+ *     pre-existing exception, tracked separately, not fixed here:
+ *     `library-rotation-picker`'s per-caller override sets a budget
+ *     unconditionally, while `library.service.ts` documents at length that
+ *     this call site intentionally sends NO budget companion because a 4s
+ *     cap collapsed its coverage. Under the corrected model the override
+ *     re-imposes that same cap. See WXYC/Backend-Service#1983.
  *
  * `LookupOptions.budgetMs: null` (`index.ts`) is the lever this correction
  * adds: an explicit, distinct-from-`undefined` suppression signal that omits
  * `X-Caller-Budget-Ms` from the wire request entirely, restoring the
- * headerless ~25s grind for a caller that wants LML's full cascade instead
- * of the ~4s fast-degrade. `sanitizeBudgetMs` (below, now exported) is
- * applied to that per-call override the same way it's applied to every
- * policy-table entry, so a bad literal at a call site can't emit a
- * nonsensical header either.
+ * headerless path for a caller that wants LML's full cascade instead of the
+ * empty-state fast-degrade. `sanitizeCallBudgetMs` (below) applies the
+ * always-safe half of `sanitizeBudgetMs`'s guard — `<= 0` plus a
+ * `Number.isFinite` check — to that per-call override, so a bad literal at
+ * a call site can't emit a nonsensical header. It deliberately does NOT
+ * apply the `>= timeoutMs` half: that branch's own rationale is rooted in
+ * the same false model this correction removes, and reusing it here would
+ * silently flip several real callers' wire behavior — see
+ * `sanitizeCallBudgetMs`'s docstring for the specifics.
  */
 
 import { envInt } from './index.js';
@@ -339,8 +349,7 @@ function classDefaults(cls: LmlCallerClass): { timeoutMs: number; budgetMs?: num
       // the module docstring's "PER-CLASS EMPTY-STATE DECISION"), not a
       // docs-only fix. May still come out <= 0 for a very low
       // `LML_CLASS5_TIMEOUT_MS` override — `sanitizeBudgetMs` (applied to
-      // every table entry in `buildPolicy`, and to per-call overrides too —
-      // see `index.ts`) catches that.
+      // every table entry in `buildPolicy`) catches that.
       return { timeoutMs, budgetMs: timeoutMs - 1000, limiter: 'none' };
     }
   }
@@ -362,35 +371,88 @@ function classDefaults(cls: LmlCallerClass): { timeoutMs: number; budgetMs?: num
  *     from ops config alone, no code change required.
  *
  * Both edges warn (never throw — a live request path must not crash on a
- * misconfigured env var or a bad call-site literal) and fall back to "no
- * budget header" (`undefined`), matching the documented `envInt`-style
- * warn-on-invalid convention used throughout this package. A well-formed
- * `0 < budgetMs < timeoutMs` passes through unchanged.
+ * misconfigured env var) and fall back to "no budget header" (`undefined`),
+ * matching the documented `envInt`-style warn-on-invalid convention used
+ * throughout this package. A well-formed `0 < budgetMs < timeoutMs` passes
+ * through unchanged.
  *
- * BS#1914: exported (was module-private) so `index.ts` can route a per-call
- * `options.budgetMs` override through the exact same guard the policy table
- * gets — a call site can misconfigure a literal just as easily as an env
- * knob can misconfigure a class default, and the two edges above apply
- * identically either way. `caller` is typed as a plain `string` (not
- * `LmlCaller`) so `index.ts` can pass an unregistered/absent caller's label
- * (or `'unknown'`) through to the warning text without a cast — this
- * function only ever reads `caller` for that message, never looks it up.
+ * Policy-table-only. BS#1914 (per-call overrides) deliberately does NOT
+ * reuse this function wholesale — see `sanitizeCallBudgetMs` below for why,
+ * and why that's a narrower guard rather than this one exported as-is.
  */
-export function sanitizeBudgetMs(caller: string, timeoutMs: number, budgetMs: number | undefined): number | undefined {
+function sanitizeBudgetMs(caller: LmlCaller, timeoutMs: number, budgetMs: number | undefined): number | undefined {
   if (budgetMs === undefined) return undefined;
   if (budgetMs <= 0) {
     console.warn(
-      `lml.client: caller "${caller}" resolved to budgetMs=${budgetMs} (<= 0); omitting the X-Caller-Budget-Ms ` +
-        'header instead of soft-cutting immediately. Check the class defaults (LML_CLASS{2,5}_TIMEOUT_MS / ' +
-        'LML_CLASS2_BUDGET_MS) or a per-call `budgetMs` override.'
+      `lml.client: policy for caller "${caller}" computed budgetMs=${budgetMs} (<= 0); omitting the ` +
+        'X-Caller-Budget-Ms header instead of soft-cutting immediately. Check LML_CLASS{2,5}_TIMEOUT_MS / ' +
+        'LML_CLASS2_BUDGET_MS env overrides.'
     );
     return undefined;
   }
   if (budgetMs >= timeoutMs) {
     console.warn(
-      `lml.client: caller "${caller}" resolved to budgetMs=${budgetMs} >= timeoutMs=${timeoutMs}; the soft ` +
-        'budget could never fire before the socket aborts, so omitting the X-Caller-Budget-Ms header. Check the ' +
-        'class defaults (LML_CLASS{2,5}_TIMEOUT_MS / LML_CLASS2_BUDGET_MS) or a per-call `budgetMs` override.'
+      `lml.client: policy for caller "${caller}" has budgetMs=${budgetMs} >= timeoutMs=${timeoutMs}; the soft ` +
+        'budget could never fire before the socket aborts, so omitting the X-Caller-Budget-Ms header. Check ' +
+        'LML_CLASS{2,5}_TIMEOUT_MS / LML_CLASS2_BUDGET_MS env overrides.'
+    );
+    return undefined;
+  }
+  return budgetMs;
+}
+
+/**
+ * BS#1914: the per-call analogue of `sanitizeBudgetMs` above, deliberately
+ * narrower — it does NOT reject `budgetMs >= timeoutMs`.
+ *
+ * `sanitizeBudgetMs`'s `>= timeoutMs` branch reasons from the header's raw
+ * VALUE ("the soft budget could never fire before the socket aborts") —
+ * exactly the false model this ticket exists to correct. Under LML's real
+ * `min(header − 200ms, LML_SEARCH_BUDGET_MS)` clamp, a header that's
+ * nominally `>= timeoutMs` still collapses to LML's tiny effective budget
+ * (~4s in prod) and fires it comfortably before any socket abort — the
+ * cutoff WAS working; the raw-value comparison was measuring the wrong
+ * thing entirely. Reusing that branch for per-call overrides would flip
+ * real production callers from "sends the header" to "omits it" — the
+ * OPPOSITE of the BS#1914 decision record's "class-5 offline drains keep
+ * the header" call — for cases like:
+ *
+ *   - `jobs/rotation-release-id-backfill` / `jobs/library-discogs-
+ *     unavailable-recheck`: both pass an explicit `timeoutMs: 8000`
+ *     (`*_TIMEOUT_MS` env, default 8000) with no `budgetMs` of their own, so
+ *     they inherit the class-5 policy default (`28000` at today's defaults).
+ *     `28000 >= 8000` on every single call.
+ *   - `jobs/album-level-backfill` / `jobs/flowsheet-linked-reenrichment` /
+ *     `jobs/catalog-popularity-freetext-resolve`: each computes
+ *     `timeoutMs = batchSize * 5000 + 5000` and passes an explicit
+ *     `budgetMs` (`BULK_BUDGET_MS_DEFAULT`, `25000`) — `budgetMs >=
+ *     timeoutMs` whenever `batchSize <= 4`, which includes every run's
+ *     trailing partial batch.
+ *
+ * So only the always-safe `<= 0` branch applies here, plus a
+ * `Number.isFinite` check `sanitizeBudgetMs` doesn't need: every value that
+ * reaches it comes from `envInt` (guaranteed finite) or a hardcoded
+ * constant, but a per-call literal computed at a call site has no such
+ * guarantee, and an unguarded `NaN` would reach the wire as literally
+ * `X-Caller-Budget-Ms: NaN`.
+ *
+ * Whether the `>= timeoutMs` branch belongs on the POLICY table either is
+ * an open question this function deliberately leaves unresolved — see the
+ * discussion on WXYC/Backend-Service#1914.
+ */
+export function sanitizeCallBudgetMs(caller: string, budgetMs: number | undefined): number | undefined {
+  if (budgetMs === undefined) return undefined;
+  if (!Number.isFinite(budgetMs)) {
+    console.warn(
+      `lml.client: caller "${caller}" resolved to a non-finite budgetMs=${budgetMs}; omitting the ` +
+        'X-Caller-Budget-Ms header. Check the per-call `budgetMs` override for a bad computation (e.g. NaN).'
+    );
+    return undefined;
+  }
+  if (budgetMs <= 0) {
+    console.warn(
+      `lml.client: caller "${caller}" resolved to budgetMs=${budgetMs} (<= 0); omitting the X-Caller-Budget-Ms ` +
+        'header instead of soft-cutting immediately. Check the per-call `budgetMs` override.'
     );
     return undefined;
   }
