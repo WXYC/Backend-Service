@@ -56,9 +56,6 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Fetch base branch
-        run: git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.ref }}
-
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
@@ -108,7 +105,17 @@ jobs:
           set -euo pipefail
           mkdir -p .cache
           BASE_REF='${{ github.event.pull_request.base.ref }}'
-          git diff "origin/${BASE_REF}...HEAD" -- \
+          # Full fetch (no --depth=1) plus an explicit merge-base, matching the
+          # probe step in test.yml. The original workflow shallow-fetched the
+          # base and used `git diff origin/main...HEAD`, which dies with
+          # "no merge base" whenever the branch is behind main — a depth-1
+          # fetch gets main's tip and nothing else, so there is no common
+          # ancestor to find. That went unnoticed because the diff was
+          # suffixed `|| true`, silently yielding an EMPTY diff and a
+          # "no schema or migration changes detected" comment.
+          git fetch --no-tags origin "$BASE_REF"
+          MERGE_BASE=$(git merge-base FETCH_HEAD HEAD)
+          git diff "$MERGE_BASE" HEAD -- \
             'shared/database/src/schema.ts' \
             'shared/database/src/migrations/*.sql' \
             > .cache/pr.diff
