@@ -147,13 +147,21 @@ export async function reaskUnresolvedStreaming(limit: number): Promise<Streaming
 }
 
 async function reaskOne(candidate: StreamingReaskCandidate): Promise<void> {
-  const response = await enrichmentBulkLookup({
-    artist_name: candidate.artist_name,
-    album_title: candidate.album_title,
-    // Album-level re-ask — no specific playcut track is driving this
-    // sweep, so there is no track title to narrow the lookup with.
-    track_title: null,
-  });
+  const response = await enrichmentBulkLookup(
+    {
+      artist_name: candidate.artist_name,
+      album_title: candidate.album_title,
+      // Album-level re-ask — no specific playcut track is driving this
+      // sweep, so there is no track title to narrow the lookup with.
+      track_title: null,
+    },
+    // `'sweep'` lane (BS#1978): this sweep is a bounded batch drain over
+    // albums that ALREADY carry a Discogs match, so it keeps LML's ~4s
+    // empty-state fast-degrade unconditionally and is never affected by
+    // `ENRICHMENT_SUPPRESS_LML_BUDGET`. Declared explicitly rather than
+    // relying on the enqueue default so the intent survives a refactor.
+    'sweep'
+  );
   const artwork = extractArtwork(response);
   if (artwork) {
     // Reuse the ONE canonical search-URL synthesizer (parity-tested against

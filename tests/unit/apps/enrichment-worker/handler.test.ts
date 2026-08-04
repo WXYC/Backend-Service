@@ -230,12 +230,15 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
     await driveOneTick();
 
     expect(mockEnrichmentBulkLookup).toHaveBeenCalledTimes(1);
+    // BS#1978: the CDC path must declare the 'live' lane — that is the only
+    // lane ENRICHMENT_SUPPRESS_LML_BUDGET is allowed to affect.
     expect(mockEnrichmentBulkLookup).toHaveBeenCalledWith(
       expect.objectContaining({
         artist_name: 'Juana Molina',
         album_title: 'DOGA',
         track_title: 'la paradoja',
-      })
+      }),
+      'live'
     );
   });
 

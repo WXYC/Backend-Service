@@ -35,7 +35,13 @@ jest.mock('@sentry/node', () => ({
     await callback({ setAttributes: mockSpanSetAttributes }),
 }));
 
-import { bulkLookupMetadata, ALL_LML_CALLERS, LML_CALLER_POLICY, type LmlCaller } from '@wxyc/lml-client';
+import {
+  bulkLookupMetadata,
+  ALL_LML_CALLERS,
+  LML_CALLER_POLICY,
+  _resetLmlClientLimitersForTest,
+  type LmlCaller,
+} from '@wxyc/lml-client';
 import {
   enrichmentBulkLookup,
   _resetLookupBatcherForTest,
@@ -67,6 +73,14 @@ describe('dispatchChunk X-Caller-Budget-Ms suppression (BS#1978)', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     _resetLookupBatcherForTest();
+    // The shared `defaultLimiter`'s TokenBucket(50/min) is module-scope and
+    // survives between tests, while fake timers freeze Date.now() so it never
+    // refills. This file drives one real call per test through it, and the
+    // class-5 caller list below is DERIVED from a registry that keeps growing
+    // — so without this reset the file silently parks on an un-advanced fake
+    // timer inside TokenBucket.consume once class 5 passes ~47 entries, and
+    // hangs to the Jest timeout with no diagnostic.
+    _resetLmlClientLimitersForTest();
     mockFetch.mockReset();
     mockFetch.mockResolvedValue(okEmptyResponse());
     process.env = { ...originalEnv, LIBRARY_METADATA_URL: 'http://lml.test:8000' };
@@ -78,9 +92,9 @@ describe('dispatchChunk X-Caller-Budget-Ms suppression (BS#1978)', () => {
   });
 
   it('flag ON: the real bulkLookupMetadata wire request omits X-Caller-Budget-Ms', async () => {
-    process.env.ENRICHMENT_SUPPRESS_LML_BUDGET = 'true';
+    process.env.ENRICHMENT_SUPPRESS_LML_BUDGET = 'TRUE';
 
-    await flushAndSettle(enrichmentBulkLookup(makeInput('Chuquimamani-Condori')));
+    await flushAndSettle(enrichmentBulkLookup(makeInput('Chuquimamani-Condori'), 'live'));
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const init = mockFetch.mock.calls[0][1];
@@ -91,7 +105,7 @@ describe('dispatchChunk X-Caller-Budget-Ms suppression (BS#1978)', () => {
   it('flag OFF (unset, the default): still sends X-Caller-Budget-Ms at the enrichment-worker class-5 default', async () => {
     delete process.env.ENRICHMENT_SUPPRESS_LML_BUDGET;
 
-    await flushAndSettle(enrichmentBulkLookup(makeInput('Csillagrablók')));
+    await flushAndSettle(enrichmentBulkLookup(makeInput('Csillagrablók'), 'live'));
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const init = mockFetch.mock.calls[0][1];
@@ -102,12 +116,76 @@ describe('dispatchChunk X-Caller-Budget-Ms suppression (BS#1978)', () => {
   it('flag "false": still sends the header — only the exact string "true" arms suppression', async () => {
     process.env.ENRICHMENT_SUPPRESS_LML_BUDGET = 'false';
 
-    await flushAndSettle(enrichmentBulkLookup(makeInput('Hermanos Gutiérrez')));
+    await flushAndSettle(enrichmentBulkLookup(makeInput('Hermanos Gutiérrez'), 'live'));
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const init = mockFetch.mock.calls[0][1];
     if (!init) throw new Error('mockFetch was not called with init args');
     expect(init.headers).toMatchObject({ 'X-Caller-Budget-Ms': '28000' });
+  });
+
+  describe('lane scoping: the sweep lane never suppresses (BS#1978 review finding)', () => {
+    // `dispatchChunk` is NOT exclusive to the CDC path. `streaming-reask.ts`
+    // (BS#1915) drives an hourly batch of up to 200 albums that ALREADY carry
+    // a Discogs match through the SAME `enrichmentBulkLookup` buffer. Headers
+    // are per-request, not per-item, so before the lane split a sweep
+    // candidate that landed in the same 50ms window as a live CDC row rode a
+    // suppressed request — silently extending the flag to a batch drain that
+    // must keep the ~4s fast-degrade.
+
+    it('flag ON: a sweep-lane lookup still sends X-Caller-Budget-Ms', async () => {
+      process.env.ENRICHMENT_SUPPRESS_LML_BUDGET = 'TRUE';
+
+      await flushAndSettle(enrichmentBulkLookup(makeInput('Jessica Pratt'), 'sweep'));
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(init.headers).toMatchObject({ 'X-Caller-Budget-Ms': '28000' });
+    });
+
+    it('flag ON: an unmarked lookup defaults to the sweep lane and still sends the header', async () => {
+      process.env.ENRICHMENT_SUPPRESS_LML_BUDGET = 'TRUE';
+
+      await flushAndSettle(enrichmentBulkLookup(makeInput('Stereolab')));
+
+      const init = mockFetch.mock.calls[0][1];
+      if (!init) throw new Error('mockFetch was not called with init args');
+      expect(init.headers).toMatchObject({ 'X-Caller-Budget-Ms': '28000' });
+    });
+
+    it('flag ON: a mixed window splits into two requests — live suppressed, sweep not', async () => {
+      process.env.ENRICHMENT_SUPPRESS_LML_BUDGET = 'TRUE';
+
+      const live = enrichmentBulkLookup(makeInput('Juana Molina'), 'live');
+      const sweep = enrichmentBulkLookup(makeInput('Cat Power'), 'sweep');
+      jest.advanceTimersByTime(ENRICHMENT_BULK_WINDOW_MS);
+      await Promise.allSettled([live, sweep]);
+
+      // Two dispatches, not one coalesced chunk — the partition is what makes
+      // a per-lane header decision expressible at all.
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      const headersByCall = mockFetch.mock.calls.map(
+        (call) => ((call[1]?.headers as Record<string, string>) ?? {})['X-Caller-Budget-Ms']
+      );
+      // One request carries the header, exactly one omits it.
+      expect(headersByCall.filter((value) => value === undefined)).toHaveLength(1);
+      expect(headersByCall.filter((value) => value === '28000')).toHaveLength(1);
+    });
+
+    it('flag OFF: a mixed window still splits by lane, both carrying the header', async () => {
+      delete process.env.ENRICHMENT_SUPPRESS_LML_BUDGET;
+
+      const live = enrichmentBulkLookup(makeInput('Juana Molina'), 'live');
+      const sweep = enrichmentBulkLookup(makeInput('Cat Power'), 'sweep');
+      jest.advanceTimersByTime(ENRICHMENT_BULK_WINDOW_MS);
+      await Promise.allSettled([live, sweep]);
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      for (const call of mockFetch.mock.calls) {
+        expect(call[1]?.headers).toMatchObject({ 'X-Caller-Budget-Ms': '28000' });
+      }
+    });
   });
 
   describe('suppression is scoped to this call site only (BS#1978 acceptance criterion)', () => {
@@ -124,7 +202,14 @@ describe('dispatchChunk X-Caller-Budget-Ms suppression (BS#1978)', () => {
       }
     });
 
-    it.each(otherClass5Callers)(
+    it('has at least one non-enrichment-worker class-5 caller to guard', () => {
+      // it.each throws "called with an empty Array of table data" rather than
+      // skipping, so a class-boundary refactor that empties this list would
+      // surface as a confusing hard failure instead of an honest signal.
+      expect(otherClass5Callers.length).toBeGreaterThan(0);
+    });
+
+    it.each(otherClass5Callers.length > 0 ? otherClass5Callers : (['__none__'] as unknown as LmlCaller[]))(
       '%s: still sends X-Caller-Budget-Ms via a direct bulkLookupMetadata call even when ENRICHMENT_SUPPRESS_LML_BUDGET=true',
       async (caller: LmlCaller) => {
         process.env.ENRICHMENT_SUPPRESS_LML_BUDGET = 'true';

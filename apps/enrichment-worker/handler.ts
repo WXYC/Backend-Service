@@ -211,7 +211,11 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
           // discogs_artist_id/artist_image_url/profile_tokens) still land in
           // album_metadata (BS#1336) — cache-only on the bulk path (LML#685),
           // so no incremental Discogs cost.
-          const response = await enrichmentBulkLookup(candidate);
+          // `'live'` lane (BS#1978): this is the CDC path whose cold
+          // non-library rotation arrivals the budget suppression exists for.
+          // The lane is declared here rather than inferred inside the batcher
+          // because the batcher coalesces both sources into one buffer.
+          const response = await enrichmentBulkLookup(candidate, 'live');
           outcome = await finalizeRow(candidate, response);
           // G7 (BS#969): defer the captureMessage until after the
           // span.setAttribute below, but compute the classification while the

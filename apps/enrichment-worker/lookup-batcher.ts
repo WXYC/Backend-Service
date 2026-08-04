@@ -48,6 +48,7 @@
  * `_resetLookupBatcherForTest` clears it between tests.
  */
 
+import * as Sentry from '@sentry/node';
 import { bulkLookupMetadata, envInt, LmlClientError, type BulkLookupItem, type LookupResponse } from '@wxyc/lml-client';
 
 /**
@@ -78,20 +79,86 @@ export const ENRICHMENT_BULK_WINDOW_MS = envInt('ENRICHMENT_BULK_WINDOW_MS', 50)
 const ENRICHMENT_CALLER = 'enrichment-worker';
 
 /**
- * BS#1978: default-off suppression lever for `X-Caller-Budget-Ms` on THIS
- * worker's bulk dispatch. Set `ENRICHMENT_SUPPRESS_LML_BUDGET=true` to arm
- * it; merging this change is otherwise a byte-for-byte no-op. See the
- * comment on `dispatchChunk`'s `budgetMs` line below for the full WHY.
+ * Which of this worker's two dispatch sources a buffered lookup came from.
+ * The distinction exists ONLY to scope BS#1978's budget suppression, and it
+ * is why `flushBuffer` partitions before chunking (see `isBudgetSuppressed`).
+ *
+ *   - `'live'` — the CDC handler (`handler.ts`), one lookup per new
+ *     flowsheet row. THE caller BS#1978 is about: new rotation arrivals,
+ *     cold non-library release resolution, 4-20s on prod.
+ *   - `'sweep'` — the hourly bounded streaming re-ask (`streaming-reask.ts`,
+ *     BS#1915), up to `ENRICHMENT_STREAMING_REASK_SWEEP_BATCH_SIZE` (200)
+ *     albums that ALREADY carry a load-bearing Discogs match and are only
+ *     being upgraded for streaming links. That is a batch drain, so it keeps
+ *     the ~4s empty-state fast-degrade unconditionally.
+ *
+ * Defaults to `'sweep'` at the enqueue point: a future caller that forgets
+ * to declare its lane inherits today's unchanged behavior rather than
+ * silently picking up suppression.
+ */
+export type EnrichmentLookupLane = 'live' | 'sweep';
+
+/**
+ * BS#1978: default-off suppression lever for `X-Caller-Budget-Ms`, scoped to
+ * the `'live'` CDC lane. Set `ENRICHMENT_SUPPRESS_LML_BUDGET=TRUE` to arm it;
+ * merging this change is otherwise a byte-for-byte no-op.
+ *
+ * WHY suppress at all: BS#1914 established that class 5's header value is
+ * mostly symbolic — LML clamps its effective search budget to
+ * `min(header − 200ms, LML_SEARCH_BUDGET_MS)` (prod leaves
+ * `LML_SEARCH_BUDGET_MS` unset, defaulting to 4000ms), so this caller's real
+ * ceiling is ~4s regardless of the header's magnitude. That 4s fast-degrade
+ * is the CORRECT, deliberate behavior for a batch drain — a hard-miss row
+ * should give up quickly and free the shared Discogs ceiling for the next
+ * row — which is why the `'sweep'` lane and every other class-5 caller
+ * (`album-level-backfill`, `catalog-popularity-freetext-resolve`,
+ * `flowsheet-linked-reenrichment`, every `*-backfill` job) keep sending the
+ * header unconditionally. It is WRONG for the `'live'` lane specifically:
+ * that lane enriches new rotation arrivals — albums in neither `library.db`
+ * nor the library-filtered Discogs cache — whose cold non-library release
+ * resolution measures 4-20s on prod. Under the 4s clamp LML gives up on
+ * exactly the rows that need the most time, and the worker writes a terminal
+ * `enriched_no_match` for an album a headerless retry would have resolved
+ * (59% of one day's 41 rotation-linked no-match rows recovered on a
+ * 2026-08-04 replay).
+ *
+ * MECHANISM: the header's mere PRESENCE — not its magnitude — arms LML's
+ * empty-state cascade cutoff (WXYC/library-metadata-lookup#345) and
+ * enrichment-tail shed (WXYC/library-metadata-lookup#930). Omitting it does
+ * NOT raise either ceiling; it removes the empty-state cutoff so a genuine
+ * hard miss falls through to LML's own hard cap. Bounds once suppressed:
+ * LML's `LML_SEARCH_HARD_TIMEOUT_MS` (25000ms) and, more tightly, this
+ * client's class-5 `timeoutMs` (29000ms — the `AbortController` fires at 29s
+ * regardless of what LML does, making 29s the true worst-case `defaultLimiter`
+ * permit hold). `sweep.ts`'s `STRANDED_TTL_SECONDS` is unaffected: it derives
+ * from the POLICY TABLE's `budgetMs`, which a per-call override never mutates.
  *
  * Read at call time (not captured in a module-scope `const`) so a test can
- * flip `process.env` without re-importing the module, and so a live
- * operator's `.env` edit + container restart takes effect without a code
- * change — mirrors `apps/enrichment-worker/enrich.ts`'s
- * `isBandcampReaskEnabled` convention (strict `=== 'true'`; any other value,
- * including `'1'`/`'yes'`, is off).
+ * flip `process.env` without re-importing the module, and so an operator's
+ * `.env` edit + container restart takes effect without a code change —
+ * mirrors `enrich.ts`'s `isBandcampReaskEnabled` convention.
+ *
+ * Case-insensitive, and `TRUE` is the DOCUMENTED value, unlike
+ * `isBandcampReaskEnabled`'s strict lowercase `=== 'true'`. That is not
+ * gratuitous drift: this flag is delivered through
+ * `.github/workflows/set-ec2-env-var.yml`, whose resolve step runs
+ * `::add-mask::` on the value, so a lowercase `true` would make GitHub redact
+ * every occurrence of the word "true" in the rest of that run's logs —
+ * including the `docker ps` status line an operator reads to confirm the
+ * flip. `TRUE` matches the `CREATE_AUTO_DJ_USER` precedent already in that
+ * allowlist and does not collide with common log text.
  */
 export function isSuppressLmlBudgetEnabled(): boolean {
-  return process.env.ENRICHMENT_SUPPRESS_LML_BUDGET === 'true';
+  return (process.env.ENRICHMENT_SUPPRESS_LML_BUDGET ?? '').toLowerCase() === 'true';
+}
+
+/**
+ * Whether a given lane's dispatch should omit `X-Caller-Budget-Ms`. The ONE
+ * place the flag and the lane are combined, so neither the enqueue point nor
+ * `dispatchChunk` has to re-derive it.
+ */
+function isBudgetSuppressed(lane: EnrichmentLookupLane): boolean {
+  return lane === 'live' && isSuppressLmlBudgetEnabled();
 }
 
 /** The per-row fields the worker resolves before enqueuing a lookup. */
@@ -103,6 +170,7 @@ export interface EnrichmentLookupInput {
 
 interface PendingLookup {
   item: BulkLookupItem;
+  lane: EnrichmentLookupLane;
   resolve: (response: LookupResponse) => void;
   reject: (error: unknown) => void;
 }
@@ -133,9 +201,12 @@ function toBulkItem(input: EnrichmentLookupInput): BulkLookupItem {
  * this row (resolves on match/no-match, rejects on a per-item error or a
  * failed bulk call), so callers are drop-in with the per-row path.
  */
-export function enrichmentBulkLookup(input: EnrichmentLookupInput): Promise<LookupResponse> {
+export function enrichmentBulkLookup(
+  input: EnrichmentLookupInput,
+  lane: EnrichmentLookupLane = 'sweep'
+): Promise<LookupResponse> {
   return new Promise<LookupResponse>((resolve, reject) => {
-    buffer.push({ item: toBulkItem(input), resolve, reject });
+    buffer.push({ item: toBulkItem(input), lane, resolve, reject });
     scheduleFlush();
   });
 }
@@ -153,16 +224,51 @@ function scheduleFlush(): void {
  * `BULK_MAX_ITEMS`. Chunks fire concurrently; the shared client's limiter
  * (Semaphore(5) + TokenBucket) gates their Discogs amplification, so this
  * never over-consumes the shared rate pool even for a large burst.
+ *
+ * BS#1978: partition by lane BEFORE chunking. Headers are a property of the
+ * HTTP request, not of an item within it, so one chunk carries one budget
+ * decision for all of its items. Both lanes buffer into this single shared
+ * coalescing point (that is the whole purpose of B3 / BS#1749), so without
+ * this split a `'sweep'` candidate landing in the same 50ms window as a
+ * `'live'` row would ride a suppressed request — silently extending the flag
+ * to the hourly 200-album batch drain it must never touch. The partition is
+ * unconditional rather than gated on the flag: it costs one pass over the
+ * buffer, and making the grouping depend on the flag would mean the shape of
+ * a dispatch changes with an env var, which is exactly the kind of coupling
+ * that made this bug possible.
  */
 function flushBuffer(): void {
   const pending = buffer;
   buffer = [];
-  for (let start = 0; start < pending.length; start += BULK_MAX_ITEMS) {
-    void dispatchChunk(pending.slice(start, start + BULK_MAX_ITEMS));
+  const lanes: EnrichmentLookupLane[] = ['live', 'sweep'];
+  for (const lane of lanes) {
+    const lanePending = pending.filter((entry) => entry.lane === lane);
+    for (let start = 0; start < lanePending.length; start += BULK_MAX_ITEMS) {
+      void dispatchChunk(lanePending.slice(start, start + BULK_MAX_ITEMS), lane);
+    }
   }
 }
 
-async function dispatchChunk(chunk: PendingLookup[]): Promise<void> {
+async function dispatchChunk(chunk: PendingLookup[], lane: EnrichmentLookupLane): Promise<void> {
+  const suppressBudget = isBudgetSuppressed(lane);
+  // BS#1978: record the lane and the resolved suppression decision on a span
+  // so the post-rollout comparison the rollout plan calls for can actually
+  // partition suppressed from unsuppressed dispatches. Without this the only
+  // way to separate the two cohorts in Sentry is by wall-clock guesswork
+  // around the flip, which a mid-window flip or a rollback destroys.
+  Sentry.startSpan(
+    {
+      name: 'enrichment.bulk.dispatch',
+      attributes: {
+        'enrichment.lane': lane,
+        'enrichment.budget_suppressed': suppressBudget,
+        'enrichment.chunk_size': chunk.length,
+      },
+    },
+    () => {
+      /* attributes set at creation; the dispatch itself is spanned by the client */
+    }
+  );
   try {
     const response = await bulkLookupMetadata(
       chunk.map((pending) => pending.item),
@@ -177,74 +283,15 @@ async function dispatchChunk(chunk: PendingLookup[]): Promise<void> {
         // drains (album-level-backfill, catalog-popularity-freetext-resolve,
         // flowsheet-linked-reenrichment) must keep the kill switch on.
         allowReleaseResolutionFallback: true,
-        // BS#1978 (blocked by / building on BS#1914): when
-        // `ENRICHMENT_SUPPRESS_LML_BUDGET=true`, suppress `X-Caller-Budget-Ms`
-        // on this dispatch by passing `budgetMs: null` — the BS#1914 lever
-        // (`resolveCallBudgetMs` + `sanitizeCallBudgetMs`, `@wxyc/lml-client`)
-        // that omits the header from the wire request entirely, distinct from
-        // leaving `budgetMs` unset (which inherits the `enrichment-worker`
-        // class-5 policy default of 28000). Flag OFF (default): the object
-        // literally has no `budgetMs` key, so this dispatch is byte-for-byte
-        // identical to pre-#1978 behavior.
-        //
-        // WHY suppress at all: BS#1914 established that class 5's header
-        // value is mostly symbolic — LML clamps the effective search budget
-        // to `min(header − 200ms, LML_SEARCH_BUDGET_MS)` (prod leaves
-        // `LML_SEARCH_BUDGET_MS` unset, defaulting to 4000ms), so this
-        // caller's real ceiling is ~4s regardless of the header's magnitude.
-        // That 4s fast-degrade is the CORRECT, deliberate behavior for the
-        // offline drains that share `bulkLookupMetadata`
-        // (`album-level-backfill`, `catalog-popularity-freetext-resolve`,
-        // `flowsheet-linked-reenrichment`, every other `*-backfill` job) — a
-        // hard-miss row should give up quickly and free the shared Discogs
-        // ceiling for the next row, so those callers must keep sending the
-        // header unconditionally; do not extend this flag to them. It is
-        // WRONG for THIS caller specifically: `enrichment-worker` enriches
-        // new rotation arrivals — albums in neither `library.db` nor the
-        // library-filtered Discogs cache — whose cold non-library release
-        // resolution measures 4-20s on prod (2026-08-04 replay evidence,
-        // BS#1978/BS#1914). Under the 4s clamp, LML gives up on exactly the
-        // rows that need the most time, writing a terminal
-        // `enriched_no_match` for an album that a headerless retry would
-        // have resolved (59% of one day's 41 rotation-linked no-match rows
-        // recovered on replay).
-        //
-        // MECHANISM: the header's mere PRESENCE — not its magnitude — is
-        // what arms two LML-side gates: the empty-state cascade cutoff
-        // (WXYC/library-metadata-lookup#345) and the enrichment-tail shed
-        // (WXYC/library-metadata-lookup#930). Omitting it does NOT raise
-        // either gate's ceiling — it removes the empty-state cutoff so a
-        // genuine hard miss falls through to LML's own hard cap instead of
-        // giving up early. The resulting bounds once suppressed: LML's
-        // `LML_SEARCH_HARD_TIMEOUT_MS` (default 25000ms, unset in prod) on
-        // LML's side, and this client's class-5 `timeoutMs` (29000ms,
-        // `policy.ts`) on the socket — the AbortController fires at 29s
-        // regardless of what LML does, so 29s is the true worst-case ceiling
-        // a suppressed call can hold a `defaultLimiter` permit for. `sweep.ts`'s
-        // `STRANDED_TTL_SECONDS` (60s) is unaffected by this flag — it
-        // derives from the POLICY TABLE's `budgetMs` (`resolveLmlPolicy`),
-        // which this per-call override never mutates; see that file's
-        // BS#1978 test coverage for the arithmetic confirming 60s still
-        // comfortably exceeds the ~34s worst case (29s timeout + up to 5s
-        // `LML_LIMITER_MAX_QUEUE_WAIT_MS` pre-admission queue wait).
-        //
-        // Limiter-occupancy tradeoff (raised explicitly per the BS#1978
-        // constraints, not resolved here): this worker shares the
-        // process-wide `defaultLimiter` (BS#1748 — deliberately NOT a
-        // dedicated one), so a suppressed cold lookup can hold its permit for
-        // ~25s (LML's own hard cap) and up to 29s in the worst case (this
-        // client's AbortController, if LML overruns that cap), instead of the
-        // ~4s the empty-state cutoff bounded it to — reducing concurrent
-        // enrichment throughput and increasing pre-admission queue pressure
-        // on that shared Semaphore(5). A saturated queue sheds to
-        // `outcome: 'shed_limiter_saturated'` (bounded by
-        // `LML_LIMITER_MAX_QUEUE_WAIT_MS`, 5s) rather than hanging, and a
-        // shed verdict is already rejected as retryable, never resolved into
-        // a terminal no-match (BS#1748, the `shed_limiter_saturated` /
-        // `shed_breaker_open` branch below). See the BS#1978 PR description
-        // for the throughput math; a dedicated limiter for this worker is a
-        // candidate follow-up, not filed here.
-        ...(isSuppressLmlBudgetEnabled() ? { budgetMs: null } : {}),
+        // BS#1978: omit `X-Caller-Budget-Ms` for the `'live'` lane when the
+        // flag is armed, via BS#1914's `budgetMs: null` lever (distinct from
+        // leaving it unset, which inherits the class-5 policy default of
+        // 28000). `isSuppressLmlBudgetEnabled`'s docstring above carries the
+        // full rationale, the LML-side mechanism and the limiter-occupancy
+        // tradeoff; `flushBuffer` explains why the lane split has to happen
+        // before chunking. Suppression off => no `budgetMs` key at all, so
+        // the dispatch is byte-for-byte identical to pre-#1978 behavior.
+        ...(suppressBudget ? { budgetMs: null } : {}),
       }
     );
 

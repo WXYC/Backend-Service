@@ -109,8 +109,12 @@ describe('reaskUnresolvedStreaming (BS#1915)', () => {
 
     const result = await reaskUnresolvedStreaming(100);
 
+    // BS#1978: the lane argument is load-bearing, not incidental — this sweep
+    // must dispatch on the 'sweep' lane so it keeps LML's ~4s empty-state
+    // fast-degrade even when ENRICHMENT_SUPPRESS_LML_BUDGET is armed.
     expect(mockEnrichmentBulkLookup).toHaveBeenCalledWith(
-      expect.objectContaining({ artist_name: 'Sessa', album_title: 'Pequena Vertigem de Amor', track_title: null })
+      expect.objectContaining({ artist_name: 'Sessa', album_title: 'Pequena Vertigem de Amor', track_title: null }),
+      'sweep'
     );
     expect(mockUpsertMatchedAlbumMetadata).toHaveBeenCalledTimes(1);
     expect(mockUpsertMatchedAlbumMetadata.mock.calls[0]?.[0]).toBe(7);

@@ -71,11 +71,17 @@ jobs:
           CREATE_AUTO_DJ_USER: ${{ secrets.CREATE_AUTO_DJ_USER }}
           AUTO_DJ_EMAIL: ${{ secrets.AUTO_DJ_EMAIL }}
           # Enrichment-worker X-Caller-Budget-Ms suppression (WXYC/Backend-Service#1978).
-          # Non-sensitive boolean ('true' to arm, anything else / unset is off),
-          # carried through the allowlist for the same reason as CREATE_AUTO_DJ_USER
-          # above: it needs to be flippable on a live worker without an image
-          # rebuild. Pass restart_target=enrichment-worker — no other container
-          # reads it. Rollback is the same invocation with the secret set to 'false'.
+          # Non-sensitive boolean. Set it to uppercase 'TRUE' to arm (the reader
+          # is case-insensitive, but the resolve step below runs ::add-mask:: on
+          # whatever value it forwards, so a lowercase 'true' would redact every
+          # occurrence of the word "true" in the rest of this run's logs —
+          # including the docker ps line confirming the restart). Anything else,
+          # or unset, is off. Carried through the allowlist for the same reason
+          # as CREATE_AUTO_DJ_USER above: it needs to be flippable on a live
+          # worker without an image rebuild. Pass
+          # restart_target=enrichment-worker — no other container reads it.
+          # Rollback is the same invocation with the secret set to 'FALSE'
+          # (not cleared — the resolve step hard-fails on an empty value).
           ENRICHMENT_SUPPRESS_LML_BUDGET: ${{ secrets.ENRICHMENT_SUPPRESS_LML_BUDGET }}
         run: |
           set -euo pipefail
