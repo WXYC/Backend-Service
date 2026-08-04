@@ -18,7 +18,7 @@ const sampleRow = (overrides: Partial<CatalogExportRow> = {}): CatalogExportRow 
   artist_name: 'Juana Molina',
   alternate_artist_name: null,
   album_artist: null,
-  cross_reference_names: null,
+  cross_reference_names: [],
   album_title: 'DOGA',
   code_letters: 'MO',
   code_number: 42,
@@ -111,26 +111,60 @@ describe('catalog-export.service: serializeCatalogNdjson', () => {
     expect(parsed).toHaveProperty('popularity', null);
   });
 
-  it('round-trips the BS#1965 producer fields, keeping the nullable trio as JSON null when unset', () => {
-    // legacy_release_id is required (non-null); the three curated free-text fields
-    // are genuine library gaps and must ship as JSON null, not be dropped.
+  it('round-trips the BS#1965 producer fields, keeping the nullable pair as JSON null when unset', () => {
+    // legacy_release_id is required (non-null server-side); the two curated
+    // free-text fields are genuine library gaps and must ship as JSON null, not
+    // be dropped. cross_reference_names is the third producer field but is never
+    // null on the wire — see the empty-array test below.
     const populated = sampleRow({
       legacy_release_id: 1_234_567,
       album_artist: 'Various',
       alternate_artist_name: 'V/A',
-      cross_reference_names: 'Grouper | Liz Harris',
     });
     const parsedPopulated = JSON.parse(serializeCatalogNdjson([populated]));
     expect(parsedPopulated.legacy_release_id).toBe(1_234_567);
     expect(parsedPopulated.album_artist).toBe('Various');
     expect(parsedPopulated.alternate_artist_name).toBe('V/A');
-    expect(parsedPopulated.cross_reference_names).toBe('Grouper | Liz Harris');
 
-    const unset = sampleRow({ album_artist: null, alternate_artist_name: null, cross_reference_names: null });
+    const unset = sampleRow({ album_artist: null, alternate_artist_name: null });
     const parsedUnset = JSON.parse(serializeCatalogNdjson([unset]));
     expect(parsedUnset).toHaveProperty('album_artist', null);
     expect(parsedUnset).toHaveProperty('alternate_artist_name', null);
-    expect(parsedUnset).toHaveProperty('cross_reference_names', null);
+  });
+
+  it('ships cross_reference_names as an ARRAY, never a pipe-joined string', () => {
+    // The wire must not carry the ' | ' delimiter library.db stores: nothing
+    // constrains artists.artist_name from containing '|' or ' | ', so a joined
+    // string would silently split into phantom aliases downstream (LML splits
+    // this field on the pipe) with no escaping rule to recover from. The
+    // producer does the join itself when it writes the SQLite column.
+    const row = sampleRow({ cross_reference_names: ['Grouper', 'Liz Harris'] });
+    const parsed = JSON.parse(serializeCatalogNdjson([row]));
+
+    expect(Array.isArray(parsed.cross_reference_names)).toBe(true);
+    expect(parsed.cross_reference_names).toEqual(['Grouper', 'Liz Harris']);
+  });
+
+  it('round-trips an alias containing a pipe as ONE name — the reason the wire is an array', () => {
+    // The regression this shape exists to prevent. A single alias whose text
+    // contains the legacy delimiter survives as one element; under the old
+    // pipe-joined string it was indistinguishable from two aliases.
+    const row = sampleRow({ cross_reference_names: ['Godspeed You! Black Emperor | GY!BE'] });
+    const parsed = JSON.parse(serializeCatalogNdjson([row]));
+
+    expect(parsed.cross_reference_names).toHaveLength(1);
+    expect(parsed.cross_reference_names[0]).toBe('Godspeed You! Black Emperor | GY!BE');
+  });
+
+  it('ships an EMPTY ARRAY (not null, not absent) for an artist with no cross-references', () => {
+    // Contract: "Empty array when the artist has no cross-references" — the
+    // server COALESCEs the LEFT JOIN null away so the producer never has to
+    // distinguish "no aliases" from "field absent".
+    const parsed = JSON.parse(serializeCatalogNdjson([sampleRow({ cross_reference_names: [] })]));
+
+    expect(parsed).toHaveProperty('cross_reference_names');
+    expect(parsed.cross_reference_names).toEqual([]);
+    expect(parsed.cross_reference_names).not.toBeNull();
   });
 });
 

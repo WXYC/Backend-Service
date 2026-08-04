@@ -49,7 +49,7 @@ export type CatalogExportRow = {
   artist_name: string;
   alternate_artist_name: string | null;
   album_artist: string | null;
-  cross_reference_names: string | null;
+  cross_reference_names: string[];
   album_title: string;
   code_letters: string;
   code_number: number;
@@ -159,13 +159,16 @@ export const serializeCatalogNdjson = (rows: CatalogExportRow[]): string =>
  *    not advance `library_watermark`).
  *  - the four BS#1965 library.db-producer fields: `legacy_release_id`,
  *    `alternate_artist_name`, and `album_artist` are raw `library` columns;
- *    `cross_reference_names` is the pipe-joined artist-alias string from the
- *    `artist_aliases` CTE (see its inline comment). These feed the Backend-sourced
- *    `library.db` producer (discogs-etl#351) — `legacy_release_id` becomes
- *    library.db's `library.id`. `cross_reference_names` rides `library_watermark`
- *    freshness like `plays`/`popularity`: an `artist_crossreference` edit surfaces
- *    only on the next watermark-advancing write — acceptable day-scale lag for the
- *    daily producer.
+ *    `cross_reference_names` is the artist-alias ARRAY from the `artist_aliases`
+ *    CTE (see its inline comment). These feed the Backend-sourced `library.db`
+ *    producer (discogs-etl#351) — `legacy_release_id` becomes library.db's
+ *    `library.id`, and the producer does the `" | "` join itself when it writes
+ *    the SQLite column. Unlike `plays`/`popularity`, `cross_reference_names` does
+ *    NOT ride a stale watermark: migration 0138 attaches
+ *    `touch_library_watermark()` to `artist_crossreference`, so a cross-reference
+ *    edit advances the watermark and rebuilds this cache on its own. Without that
+ *    trigger the failure is silent and unbounded, not a lag — the producer would
+ *    304 forever against a body that will never contain the new alias.
  *
  * One scan per watermark (cached below), so the full-table cost is paid ~daily.
  */
@@ -175,12 +178,28 @@ export const getCatalogExportRows = async (): Promise<CatalogExportRow[]> => {
       -- Per-artist alias aggregation for cross_reference_names (BS#1965,
       -- discogs-etl#334). UNION folds artist_crossreference in BOTH FK directions
       -- into (artist_id, other_id) pairs so a row filed under either endpoint
-      -- surfaces the other; string_agg DISTINCT ... ORDER BY yields a stable,
-      -- deduplicated, alphabetically-ordered pipe-joined string — the deterministic
-      -- analogue of the legacy MySQL GROUP_CONCAT(DISTINCT ... SEPARATOR ' | ').
+      -- surfaces the other. Aggregated as an ARRAY, not the pipe-joined string
+      -- library.db stores: nothing constrains artists.artist_name from containing
+      -- '|' or ' | ', so a joined wire value would silently split into phantom
+      -- aliases downstream (LML splits this field on the pipe) with no escaping
+      -- rule to recover from. The producer does the join when it writes SQLite.
+      --
+      -- ORDER BY ... COLLATE "C" (Unicode code point), NOT the database default.
+      -- en_US.UTF-8 ignores punctuation and case at the primary level, so it
+      -- orders exactly the diacritic- and punctuation-bearing names most likely
+      -- to carry aliases unstably across locales. The legacy MySQL
+      -- GROUP_CONCAT(DISTINCT ... SEPARATOR ' | ') this replaces has no ORDER BY
+      -- at all, so there is no legacy order to match — pick the deterministic
+      -- one. The COLLATE must repeat on the DISTINCT argument: Postgres requires
+      -- an aggregate's ORDER BY expression to appear in its argument list, and
+      -- a bare column is a different expression from that column COLLATE "C".
+      -- Collation is a comparison property, not a value transform, so the
+      -- emitted strings are byte-identical either way.
+      --
       -- O(crossref rows), joined once per artist, NOT a per-library correlated scan.
       SELECT cp.artist_id AS artist_id,
-             string_agg(DISTINCT ${artists.artist_name}, ' | ' ORDER BY ${artists.artist_name})
+             array_agg(DISTINCT ${artists.artist_name} COLLATE "C"
+                       ORDER BY ${artists.artist_name} COLLATE "C")
                AS cross_reference_names
       FROM (
         SELECT ${artist_crossreference.source_artist_id} AS artist_id,
@@ -201,7 +220,11 @@ export const getCatalogExportRows = async (): Promise<CatalogExportRow[]> => {
       COALESCE(${library.artist_name}, ${artists.artist_name}) AS artist_name,
       ${library.alternate_artist_name}         AS alternate_artist_name,
       ${library.album_artist}                  AS album_artist,
-      artist_aliases.cross_reference_names     AS cross_reference_names,
+      -- COALESCE, not a raw LEFT JOIN null: the contract says an artist with no
+      -- cross-references ships an empty array, so the producer never has to
+      -- distinguish "no aliases" from "field absent".
+      COALESCE(artist_aliases.cross_reference_names, ARRAY[]::varchar[])
+                                               AS cross_reference_names,
       ${library.album_title}                   AS album_title,
       ${artists.code_letters}                  AS code_letters,
       ${library.code_number}                   AS code_number,
@@ -293,18 +316,36 @@ export const serializeCompilationTracksNdjson = (rows: CompilationTrackExportRow
   rows.map((row) => JSON.stringify(projectCompilationTrackRow(row))).join('\n');
 
 /**
- * Read every compilation_track_artist row as flat export rows, keyed on the
- * owning library row's `legacy_release_id` (NOT the serial CTA `library_id`).
- * INNER JOIN to `library` because `compilation_track_artist.library_id` is a
- * NOT-NULL cascade FK, so every CTA row has exactly one library parent with a
- * (now total, BS#1963) `legacy_release_id`. Ordered by `legacy_release_id` (then
- * CTA `id` for a stable tiebreak), matching the legacy MySQL export's
- * `ORDER BY LIBRARY_RELEASE_ID`.
+ * Read every EXPORT-ELIGIBLE compilation_track_artist row as flat export rows,
+ * keyed on the owning library row's `legacy_release_id` (NOT the serial CTA
+ * `library_id`). Ordered by `legacy_release_id` (then CTA `id` for a stable
+ * tiebreak), matching the legacy MySQL export's `ORDER BY LIBRARY_RELEASE_ID`.
+ *
+ * ROW ELIGIBILITY — this repeats `getCatalogExportRows`' four INNER JOINs
+ * (artists, format, genres, and genre_artist_crossreference on the
+ * artist_id + genre_id PAIR), not just the join to `library`. That export is not
+ * "every library row": a row whose (artist, genre) pair has no
+ * `genre_artist_crossreference` entry is silently dropped from it — a shape the
+ * ETL preserves (see the schema comment on that table). Exporting CTA rows
+ * unfiltered would ship `library_release_id` values that join to nothing in
+ * library.db's `library` table, and LML's CTA UNION would surface a compilation
+ * track whose release row it cannot resolve. The two endpoints must apply the
+ * same predicate; the pg integration spec pins that they do.
+ *
+ * The joins are eligibility filters only — no column from them is projected, so
+ * this stays a semi-join in spirit. `genre_artist_crossreference` is the only
+ * one that can drop rows in practice (the other three are NOT NULL FKs), but
+ * all four are written out so the predicate reads as a copy of the sibling
+ * query rather than a subset a later edit could drift from.
  *
  * One scan per watermark (cached below). CTA freshness rides `library_watermark`
- * (see the endpoint docblock): a new compilation's rows surface as soon as its
- * library add advances the watermark; a standalone CTA edit lags to the next
- * library write — acceptable day-scale lag for the daily producer.
+ * and migration 0138 attaches `touch_library_watermark()` to
+ * `compilation_track_artist`, so a CTA write advances the watermark on its own.
+ * That trigger is load-bearing, not belt-and-suspenders: the CTA POST always
+ * FOLLOWS the library add it would otherwise ride, so without it the cached body
+ * for the library-add watermark never contains the tracks and this endpoint 304s
+ * until some unrelated write moves the watermark. Post-tubafrenzy-turndown there
+ * is no daily library sync to eventually supply that write.
  */
 export const getCompilationTrackExportRows = async (): Promise<CompilationTrackExportRow[]> => {
   const rows = await db.execute(sql`
@@ -314,6 +355,12 @@ export const getCompilationTrackExportRows = async (): Promise<CompilationTrackE
       ${compilation_track_artist.track_title}  AS track_title
     FROM ${compilation_track_artist}
       INNER JOIN ${library} ON ${library.id} = ${compilation_track_artist.library_id}
+      INNER JOIN ${artists} ON ${artists.id} = ${library.artist_id}
+      INNER JOIN ${format} ON ${format.id} = ${library.format_id}
+      INNER JOIN ${genres} ON ${genres.id} = ${library.genre_id}
+      INNER JOIN ${genre_artist_crossreference}
+        ON ${genre_artist_crossreference.artist_id} = ${library.artist_id}
+       AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
     ORDER BY ${library.legacy_release_id} ASC, ${compilation_track_artist.id} ASC
   `);
   return rows as unknown as CompilationTrackExportRow[];
@@ -328,8 +375,35 @@ const buildCompilationTracksExportGzip = async (): Promise<Buffer> => {
 };
 
 // One shared gzipped copy per pod, rebuilt only when the catalog watermark
-// advances (≈daily) — same watermark as the library export, so the two exports
-// the producer fetches together stay a consistent snapshot.
+// advances — same watermark as the library export, so the two exports the
+// producer fetches together stay a consistent snapshot.
+//
+// SIZING (the api.yaml "size it before shipping" note). This is a SECOND
+// long-lived resident buffer on a memory-constrained host, so it was measured
+// rather than assumed, against the 2026-07-19 prod library.db snapshot's real
+// artist/title strings at the prod CTA row count (144,778):
+//
+//                          rows      raw     gzipped   resident
+//   catalog export       64,815   28.5 MB    2.6 MB     2.6 MB
+//   CTA export          144,778   13.1 MB    3.2 MB     3.2 MB
+//
+// The CTA buffer is slightly LARGER than the catalog one despite carrying 3
+// fields instead of 19 — 2.2x the rows outweighs the narrower shape. Resident
+// cost of this endpoint is therefore ~3.2 MB, and ~5.8 MB for both.
+//
+// The steady state is not the interesting number; the build path is. It
+// materializes every row as a JS object, then the full NDJSON string, then a
+// Buffer, before gzip discards all three — a measured ~39 MB heap peak (plus the
+// ~13 MB off-heap Buffer), roughly 12x what stays resident. That transient is
+// still SMALLER than the one the catalog export already pays on the same
+// watermark (28.5 MB of string vs 13.1 MB), so this endpoint does not raise the
+// process's high-water mark; it just reaches it twice.
+//
+// Verdict: not material — keep the sibling endpoint rather than folding these
+// rows into /library/catalog behind `?include=compilation_tracks`. Revisit if
+// the CTA table grows past ~1M rows, or if a future consumer needs a payload
+// that can't be built streaming-free. The `?include=` fold is the documented
+// fallback and stays open (api.yaml leaves the shape open).
 const compilationTracksExportCache = createWatermarkCache<Buffer>(
   getCatalogLastModifiedAt,
   buildCompilationTracksExportGzip
