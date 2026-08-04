@@ -1977,6 +1977,9 @@ export const shows = wxyc_schema.table(
     // dj-site-originated shows.
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     uniqueIndex('shows_legacy_show_id_idx').on(table.legacy_show_id),
+    // THROWAWAY — verification of the folded schema-shape probe (#1982). Never merge.
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    uniqueIndex('shape_probe_verification_idx').on(table.specialty_id),
     // shows_legacy_dj_name_trgm_idx was dropped in migrations 0054 + 0065 —
     // search no longer joins through shows; dj-name reads come from
     // flowsheet.dj_name + flowsheet_dj_name_trgm_idx. Declaration removed to
