@@ -77,6 +77,7 @@ import {
   LML_CALLER_POLICY,
   ALL_LML_CALLERS,
   _resetLmlPolicyForTest,
+  sanitizeBudgetMs,
   type LmlCaller,
   type LmlCallerClass,
   type LmlCallerLimiter,
@@ -588,6 +589,14 @@ function getBaseUrl(): string {
  * present, LML short-circuits its empty-results cascade once the budget
  * elapses (WXYC/library-metadata-lookup#403/#404). Emitted by `postLookup`
  * and `bulkLookupMetadata` when the caller sets `options.budgetMs`.
+ *
+ * BS#1914: the value sent is NOT the effective budget LML honors — LML
+ * clamps to `min(header − 200ms, LML_SEARCH_BUDGET_MS)` (prod default
+ * 4000ms) — and the header's mere presence is what arms the empty-state
+ * cutoff this comment describes. See `policy.ts`'s module docstring
+ * "CORRECTED MODEL" paragraph for the full contract, and `LookupOptions.
+ * budgetMs`'s doc comment below for the `null` lever that omits this header
+ * entirely.
  */
 const CALLER_BUDGET_HEADER = 'X-Caller-Budget-Ms';
 
@@ -641,6 +650,30 @@ function buildLookupHeaders(budgetMs?: number, caller?: LmlCaller): Record<strin
     }
   }
   return headers;
+}
+
+/**
+ * BS#1914: resolve the final `budgetMs` `postLookup`/`bulkLookupMetadata`
+ * route into `sanitizeBudgetMs` (and, from there, into `buildLookupHeaders`).
+ *
+ * `undefined` and `null` mean different things for `options.budgetMs`, so a
+ * bare `??` can't combine it with the caller's policy default the way
+ * `effectiveTimeoutMs` combines with `policy?.timeoutMs` — `??` treats both
+ * as nullish and would silently fall through to the policy default either
+ * way. `undefined` ("not passed") is meant to keep inheriting that default;
+ * `null` is a deliberate suppression signal — the caller wants NO
+ * `X-Caller-Budget-Ms` header at all, even though its class would otherwise
+ * supply one. That's the only lever a BS caller has to opt back into LML's
+ * headerless ~25s `LML_SEARCH_HARD_TIMEOUT_MS` grind instead of the ~4s
+ * empty-state cutoff every header-bearing call gets today (see `policy.ts`'s
+ * module docstring "CORRECTED MODEL" paragraph).
+ */
+function resolveCallBudgetMs(
+  callBudgetMs: number | null | undefined,
+  policyBudgetMs: number | undefined
+): number | undefined {
+  if (callBudgetMs === null) return undefined;
+  return callBudgetMs ?? policyBudgetMs;
 }
 
 async function lmlFetch(path: string, init?: RequestInit, timeoutMs?: number): Promise<Response> {
@@ -746,14 +779,39 @@ export interface LookupOptions {
    * (WXYC/library-metadata-lookup#345). When set, LML short-circuits its
    * empty-results cascade once the budget elapses
    * (WXYC/library-metadata-lookup#403/#404) instead of burning Discogs quota
-   * on a response the caller has already abandoned. Pair with `timeoutMs`:
-   * set `budgetMs ~= timeoutMs - 1000` so LML's cutoff fires before the
-   * fetch aborts, leaving room for transport + the LML response slack.
-   * Omit to inherit LML's env soft budget (`LML_SEARCH_BUDGET_MS`, default
-   * 4 s) which only fires when at least one prior strategy returned results
-   * — the no-header path keeps the pre-A10 warm-cache / write-path semantics.
+   * on a response the caller has already abandoned.
+   *
+   * BS#1914 — the real contract, corrected: the value sent here is NOT the
+   * effective budget LML honors. LML clamps to `min(this value − 200ms,
+   * LML_SEARCH_BUDGET_MS)` (prod default 4000ms, unset), so a large
+   * `budgetMs` (e.g. 28000) is mostly symbolic — it still clamps to ~4s. The
+   * header's mere *presence*, not its magnitude, is what arms LML's
+   * empty-state cascade cutoff. A caller supplying a registered `caller`
+   * (below) gets this from its class's policy default (see `policy.ts`)
+   * unless it sets its own value here, which always wins.
+   *
+   * Three distinct states, since `undefined` and `null` are NOT
+   * interchangeable:
+   *   - **omitted / `undefined`** — inherit the resolved `caller`'s class
+   *     default (or LML's own env soft budget when no `caller` resolves).
+   *   - **a positive number `< timeoutMs`** — sent verbatim as the header
+   *     value, subject to LML's min-clamp above.
+   *   - **`null`** — BS#1914 suppression signal. Omits `X-Caller-Budget-Ms`
+   *     from the wire request entirely, even when the resolved `caller`'s
+   *     class would otherwise supply a default — restoring the headerless
+   *     ~25s `LML_SEARCH_HARD_TIMEOUT_MS` grind for a caller that genuinely
+   *     wants LML's full cascade instead of the ~4s fast-degrade. Intended
+   *     first consumer: the live `enrichment-worker`, behind its own
+   *     default-off flag (WXYC/Backend-Service#1978) — not flipped by this
+   *     option's mere existence.
+   *
+   * Whatever value survives the three states above is run through the same
+   * misconfiguration guard the policy table gets (`sanitizeBudgetMs`,
+   * `policy.ts`, BS#1842/BS#1914): a resolved `budgetMs <= 0` or
+   * `>= timeoutMs` warns and is treated as "no budget header" instead of
+   * going out on the wire nonsensically.
    */
-  budgetMs?: number;
+  budgetMs?: number | null;
   /**
    * Caller-class label projected onto the Sentry `lml.lookup` span as the
    * `lml.caller` attribute (BS#1235). Used to slice the rolled-up p95 in
@@ -982,7 +1040,7 @@ async function postLookup(
   options?: {
     timeoutMs?: number;
     limiter?: LmlLimiter;
-    budgetMs?: number;
+    budgetMs?: number | null;
     caller?: LmlCaller;
     discogsUnavailable?: boolean;
     forceLookup?: boolean;
@@ -1014,7 +1072,17 @@ async function postLookup(
   // is a safe no-op rather than a thrown error here.
   const policy = policyForCaller(options?.caller);
   const effectiveTimeoutMs = options?.timeoutMs ?? policy?.timeoutMs;
-  const effectiveBudgetMs = options?.budgetMs ?? policy?.budgetMs;
+  // BS#1914: resolve the null-vs-undefined suppression semantics first, then
+  // run the result through the same misconfiguration guard the policy table
+  // gets (BS#1842) — a per-call override can be just as wrong as a bad env
+  // knob. `?? TIMEOUT_MS` mirrors `lmlFetch`'s own fallback so the guard's
+  // `budgetMs >= timeoutMs` check compares against the timeout that will
+  // actually govern the fetch, not `undefined`.
+  const effectiveBudgetMs = sanitizeBudgetMs(
+    options?.caller ?? 'unknown',
+    effectiveTimeoutMs ?? TIMEOUT_MS,
+    resolveCallBudgetMs(options?.budgetMs, policy?.budgetMs)
+  );
   try {
     return await activeLimiter.run(async () => {
       return await Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
@@ -1176,7 +1244,8 @@ export async function bulkLookupMetadata(
   options: {
     timeoutMs?: number;
     limiter?: LmlLimiter;
-    budgetMs?: number;
+    /** See `LookupOptions.budgetMs`'s doc comment for the `null` (BS#1914 suppression) vs `undefined` distinction. */
+    budgetMs?: number | null;
     /**
      * BS#1826 PR 2: required, typed `LmlCaller` — every registered
      * `bulkLookupMetadata` caller in tree already supplies this (the
@@ -1250,7 +1319,12 @@ export async function bulkLookupMetadata(
   // BS#1826: same policy-supplies-the-default treatment as `postLookup`.
   const policy = policyForCaller(options?.caller);
   const effectiveTimeoutMs = options?.timeoutMs ?? policy?.timeoutMs;
-  const effectiveBudgetMs = options?.budgetMs ?? policy?.budgetMs;
+  // BS#1914: same null-vs-undefined resolution + sanitize guard as `postLookup`.
+  const effectiveBudgetMs = sanitizeBudgetMs(
+    options?.caller ?? 'unknown',
+    effectiveTimeoutMs ?? TIMEOUT_MS,
+    resolveCallBudgetMs(options?.budgetMs, policy?.budgetMs)
+  );
   try {
     return await activeLimiter.run(async () => {
       return await Sentry.startSpan({ name: 'lml.lookup.bulk', op: 'http.client' }, async (span) => {

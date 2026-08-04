@@ -27,6 +27,67 @@
  * This module intentionally has no side effects of its own beyond reading
  * env vars inside `resolveLmlPolicy` — no fetch, no Sentry, no limiter
  * construction. Those stay in `index.ts`, which is the actual chokepoint.
+ *
+ * CORRECTED MODEL (BS#1914). The plan's "budgetMs ≈ timeoutMs − 1000, so
+ * LML's soft cutoff fires before the socket aborts" formula (still visible
+ * below in the class-5 branch of `classDefaults`, kept because changing the
+ * emitted wire value is a real behavior change, not a docs fix) rests on a
+ * false picture of what the `X-Caller-Budget-Ms` header actually does on
+ * LML's side. LML computes its effective search budget as
+ * `min(header − 200ms, LML_SEARCH_BUDGET_MS)` (LML `core/search.py`
+ * `resolve_effective_search_budget_ms`); prod leaves `LML_SEARCH_BUDGET_MS`
+ * unset, defaulting to 4000ms. So the header can only ever TIGHTEN LML's
+ * budget, never extend it — a class-5 caller's 28000ms header is mostly
+ * symbolic, clamped down to ~4s same as class 2's 4000ms header (→ 3800ms
+ * effective). The header's mere *presence* — not its magnitude — is also
+ * what arms LML's empty-state cascade cutoff (LML#345) and enrichment-tail
+ * shed (LML#930); a caller that sends NO header instead grinds on to LML's
+ * own hard cap, `LML_SEARCH_HARD_TIMEOUT_MS` (default 25000ms, also unset in
+ * prod). Raising the effective budget fleet-wide is an LML-side lever
+ * (`LML_SEARCH_BUDGET_MS`, tracked at WXYC/library-metadata-lookup#1111,
+ * itself past its own stated expiry) or a new LML per-caller trust feature —
+ * out of scope for this client.
+ *
+ * PER-CLASS EMPTY-STATE DECISION (BS#1914), now that the real contract is
+ * known:
+ *
+ *   - Class 5, **offline drains** (`flowsheet-metadata-backfill`,
+ *     `album-level-backfill`, `catalog-popularity-freetext-resolve`,
+ *     `flowsheet-linked-reenrichment`, every `*-backfill` job): KEEP sending
+ *     the header. The ~4s empty-state fast-degrade is the desired behavior
+ *     for a bulk drain — a hard-miss row should give up quickly and free the
+ *     shared Discogs ceiling for the next row — so this is now a deliberate
+ *     choice rather than an inherited accident.
+ *   - Class 5, the live CDC **`enrichment-worker`**: the 4s cutoff is WRONG
+ *     for this caller and is actively producing user-visible metadata gaps.
+ *     This worker enriches new rotation arrivals — albums in neither
+ *     `library.db` nor the library-filtered Discogs cache — whose cold
+ *     non-library release resolution measures 4–20s on prod. Under the
+ *     effective 4s budget, LML returns either an empty `timeout: true` body
+ *     or `degraded: true, degraded_reason: 'deadline_exceeded'` with
+ *     `artwork: null`, and the worker writes a terminal `enriched_no_match`.
+ *     A 2026-08-04 replay of one day's 41 rotation-linked no-match playcuts,
+ *     headerless, recovered 24 (59%) as full Discogs matches with artwork
+ *     (see the evidence comment on BS#1914). This caller is the intended
+ *     FIRST consumer of the `budgetMs: null` suppression lever below;
+ *     flipping it is WXYC/Backend-Service#1978 (blocked by this ticket,
+ *     ships behind its own default-off flag) — NOT done here. The sibling
+ *     WXYC/Backend-Service#1977 stops recording a deadline shed as a
+ *     terminal no-match (independent of the budget lever), and
+ *     WXYC/Backend-Service#1979 is the one-shot drain for rows already
+ *     frozen by this gap. WXYC/library-metadata-lookup#1112 tracks that the
+ *     shed still discards release-resolution work LML already paid for.
+ *   - Class 2: the header value (4000) is close to the effective budget
+ *     (3800), so the false model was only mildly wrong here. No change.
+ *
+ * `LookupOptions.budgetMs: null` (`index.ts`) is the lever this correction
+ * adds: an explicit, distinct-from-`undefined` suppression signal that omits
+ * `X-Caller-Budget-Ms` from the wire request entirely, restoring the
+ * headerless ~25s grind for a caller that wants LML's full cascade instead
+ * of the ~4s fast-degrade. `sanitizeBudgetMs` (below, now exported) is
+ * applied to that per-call override the same way it's applied to every
+ * policy-table entry, so a bad literal at a call site can't emit a
+ * nonsensical header either.
  */
 
 import { envInt } from './index.js';
@@ -264,16 +325,22 @@ function classDefaults(cls: LmlCallerClass): { timeoutMs: number; budgetMs?: num
       return { timeoutMs: envInt('LML_CLASS4_TIMEOUT_MS', 5000), limiter: 'default' };
     case 5: {
       const timeoutMs = envInt('LML_CLASS5_TIMEOUT_MS', 29000);
-      // Codebase convention: budgetMs ≈ timeoutMs − 1000 (plan line 27) so
-      // LML's soft cutoff fires before the socket aborts.
-      // NB: that framing is misleading — LML clamps the effective search
-      // budget to min(header − 200ms, LML_SEARCH_BUDGET_MS) (prod default
-      // 4000), and the header's presence activates LML's empty-state
-      // cutoff, so class-5 callers really get a ~4s cutoff, not ~28s. See
-      // jobs/library-canonical-entity-backfill/lml-fetch.ts and BS#1914
-      // (fleet-wide correction). May come out <= 0 for a very low
+      // Historical formula, kept: budgetMs = timeoutMs − 1000 (plan line 27).
+      // Its original rationale ("so LML's soft cutoff fires before the
+      // socket aborts") was FALSE — see the module docstring's "CORRECTED
+      // MODEL" paragraph (BS#1914) for the real contract. LML clamps the
+      // effective search budget to min(header − 200ms, LML_SEARCH_BUDGET_MS)
+      // (prod default 4000), so this class's real empty-state cutoff is ~4s,
+      // not ~28s, regardless of what timeoutMs derives here. The formula
+      // itself is kept — not replaced with a flat constant — only because it
+      // reliably yields a positive, sub-timeoutMs value across every sane
+      // `LML_CLASS5_TIMEOUT_MS` override, and changing the emitted wire
+      // value is a genuine behavior change (a caller-by-caller decision, see
+      // the module docstring's "PER-CLASS EMPTY-STATE DECISION"), not a
+      // docs-only fix. May still come out <= 0 for a very low
       // `LML_CLASS5_TIMEOUT_MS` override — `sanitizeBudgetMs` (applied to
-      // every table entry in `buildPolicy`) catches that.
+      // every table entry in `buildPolicy`, and to per-call overrides too —
+      // see `index.ts`) catches that.
       return { timeoutMs, budgetMs: timeoutMs - 1000, limiter: 'none' };
     }
   }
@@ -295,26 +362,35 @@ function classDefaults(cls: LmlCallerClass): { timeoutMs: number; budgetMs?: num
  *     from ops config alone, no code change required.
  *
  * Both edges warn (never throw — a live request path must not crash on a
- * misconfigured env var) and fall back to "no budget header" (`undefined`),
- * matching the documented `envInt`-style warn-on-invalid convention used
- * throughout this package. A well-formed `0 < budgetMs < timeoutMs` passes
- * through unchanged.
+ * misconfigured env var or a bad call-site literal) and fall back to "no
+ * budget header" (`undefined`), matching the documented `envInt`-style
+ * warn-on-invalid convention used throughout this package. A well-formed
+ * `0 < budgetMs < timeoutMs` passes through unchanged.
+ *
+ * BS#1914: exported (was module-private) so `index.ts` can route a per-call
+ * `options.budgetMs` override through the exact same guard the policy table
+ * gets — a call site can misconfigure a literal just as easily as an env
+ * knob can misconfigure a class default, and the two edges above apply
+ * identically either way. `caller` is typed as a plain `string` (not
+ * `LmlCaller`) so `index.ts` can pass an unregistered/absent caller's label
+ * (or `'unknown'`) through to the warning text without a cast — this
+ * function only ever reads `caller` for that message, never looks it up.
  */
-function sanitizeBudgetMs(caller: LmlCaller, timeoutMs: number, budgetMs: number | undefined): number | undefined {
+export function sanitizeBudgetMs(caller: string, timeoutMs: number, budgetMs: number | undefined): number | undefined {
   if (budgetMs === undefined) return undefined;
   if (budgetMs <= 0) {
     console.warn(
-      `lml.client: policy for caller "${caller}" computed budgetMs=${budgetMs} (<= 0); omitting the ` +
-        'X-Caller-Budget-Ms header instead of soft-cutting immediately. Check LML_CLASS{2,5}_TIMEOUT_MS / ' +
-        'LML_CLASS2_BUDGET_MS env overrides.'
+      `lml.client: caller "${caller}" resolved to budgetMs=${budgetMs} (<= 0); omitting the X-Caller-Budget-Ms ` +
+        'header instead of soft-cutting immediately. Check the class defaults (LML_CLASS{2,5}_TIMEOUT_MS / ' +
+        'LML_CLASS2_BUDGET_MS) or a per-call `budgetMs` override.'
     );
     return undefined;
   }
   if (budgetMs >= timeoutMs) {
     console.warn(
-      `lml.client: policy for caller "${caller}" has budgetMs=${budgetMs} >= timeoutMs=${timeoutMs}; the soft ` +
-        'budget could never fire before the socket aborts, so omitting the X-Caller-Budget-Ms header. Check ' +
-        'LML_CLASS{2,5}_TIMEOUT_MS / LML_CLASS2_BUDGET_MS env overrides.'
+      `lml.client: caller "${caller}" resolved to budgetMs=${budgetMs} >= timeoutMs=${timeoutMs}; the soft ` +
+        'budget could never fire before the socket aborts, so omitting the X-Caller-Budget-Ms header. Check the ' +
+        'class defaults (LML_CLASS{2,5}_TIMEOUT_MS / LML_CLASS2_BUDGET_MS) or a per-call `budgetMs` override.'
     );
     return undefined;
   }
