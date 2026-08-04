@@ -325,8 +325,11 @@ export const serializeCompilationTracksNdjson = (rows: CompilationTrackExportRow
  * (artists, format, genres, and genre_artist_crossreference on the
  * artist_id + genre_id PAIR), not just the join to `library`. That export is not
  * "every library row": a row whose (artist, genre) pair has no
- * `genre_artist_crossreference` entry is silently dropped from it — a shape the
- * ETL preserves (see the schema comment on that table). Exporting CTA rows
+ * `genre_artist_crossreference` entry is silently dropped from it, and the
+ * upstream tubafrenzy library genuinely contains such rows (the ETL preserves
+ * the full upstream shape rather than synthesizing the missing pair — see the
+ * `library` table docblock in `schema.ts` on tolerating upstream gaps).
+ * Exporting CTA rows
  * unfiltered would ship `library_release_id` values that join to nothing in
  * library.db's `library` table, and LML's CTA UNION would surface a compilation
  * track whose release row it cannot resolve. The two endpoints must apply the
@@ -375,8 +378,13 @@ const buildCompilationTracksExportGzip = async (): Promise<Buffer> => {
 };
 
 // One shared gzipped copy per pod, rebuilt only when the catalog watermark
-// advances — same watermark as the library export, so the two exports the
-// producer fetches together stay a consistent snapshot.
+// advances — same watermark as the library export. The two exports the producer
+// fetches are separate HTTP requests sharing a watermark VALUE, not one
+// transaction: they are a consistent snapshot only while the watermark is stable
+// across both fetches. If it advances between them the producer can pair
+// catalog@T with CTA@T+1 — a CTA legacy_release_id with no row yet in the catalog
+// body — so the producer must treat a Last-Modified change across the two GETs as
+// "re-fetch both". The pairing self-heals on the next producer run regardless.
 //
 // SIZING (the api.yaml "size it before shipping" note). This is a SECOND
 // long-lived resident buffer on a memory-constrained host, so it was measured
@@ -397,7 +405,11 @@ const buildCompilationTracksExportGzip = async (): Promise<Buffer> => {
 // ~13 MB off-heap Buffer), roughly 12x what stays resident. That transient is
 // still SMALLER than the one the catalog export already pays on the same
 // watermark (28.5 MB of string vs 13.1 MB), so this endpoint does not raise the
-// process's high-water mark; it just reaches it twice.
+// per-build high-water mark. Both caches key on the SAME watermark, though, so a
+// single advance followed by concurrent first-hits to both endpoints runs the two
+// rebuilds at once and their transients STACK (sum, not max) rather than reaching
+// the peak twice serially — the thundering-herd guard in watermark-cache dedups
+// within an endpoint, not across the two. Still well within budget at these sizes.
 //
 // Verdict: not material — keep the sibling endpoint rather than folding these
 // rows into /library/catalog behind `?include=compilation_tracks`. Revisit if

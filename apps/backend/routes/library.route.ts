@@ -60,8 +60,17 @@ library_route.get(
 
 // CTA sibling of the catalog export (BS#1965): compilation_track_artist rows for
 // the Backend-sourced library.db producer (discogs-etl#351). Same `catalog:read`
-// auth, same `library_watermark` conditional-GET. A distinct literal path, so it
-// is not shadowed by `/catalog` regardless of registration order.
+// auth, same `library_watermark` conditional-GET.
+//
+// REGISTRATION ORDER IS LOAD-BEARING — keep this next to the '/catalog' literal
+// above, ahead of the '/:id' routes. The competing route is not '/catalog' (two
+// distinct literals never shadow each other, in any order); it is the TEMPLATED
+// GET '/:id/compilation-tracks' further down, which matches this same URL with
+// id === 'catalog'. Registered after it, Express hands this request to that
+// handler, `Number('catalog')` is NaN, and the producer gets a 4xx/5xx — with no
+// auth-layer signal to distinguish it, since both routes carry the identical
+// catalog:['read'] permission. The integration spec's 200 from this path is what
+// proves the ordering holds.
 library_route.get(
   '/catalog/compilation-tracks',
   requirePermissions({ catalog: ['read'] }),
