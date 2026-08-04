@@ -6,14 +6,23 @@
  * Reads the PR's diff against the merge base on stdin (or via `--diff <file>`),
  * detects newly-introduced schema constraints (uniqueIndex / .unique() / .notNull()
  * SET-NOT-NULL ALTERs / check / FK additions), generates a SELECT that finds
- * rows which would violate each constraint, runs the SELECT against the staging
- * Postgres clone (via STAGING_DATABASE_URL_RO), and prints a markdown comment
- * summary to stdout.
+ * rows which would violate each constraint, runs the SELECT against the probe
+ * target, and prints a markdown comment summary to stdout.
+ *
+ * The probe target is the ephemeral RDS sandbox that the `migrate-dryrun` job
+ * in `.github/workflows/test.yml` restores from the most recent automated prod
+ * snapshot. That job invokes this script BEFORE it applies the pending
+ * migrations, which is the whole point: the question is "how many rows that
+ * exist in prod today would this new constraint reject", and after the
+ * migrations run the answer is zero by construction. #703 originally specified
+ * a standing staging clone (`STAGING_DATABASE_URL_RO`); that credential was
+ * never provisioned, and #1982 folded the probe into `migrate-dryrun` rather
+ * than mint a new long-lived one.
  *
  * The script is deliberately conservative: it never throws to the workflow.
- * If anything goes wrong (no DB URL, parse failure, query timeout) it prints
- * a graceful "manual check required" comment and exits 0 so the workflow can
- * still post it.
+ * If anything goes wrong (no probe target, parse failure, query timeout) it
+ * prints a graceful "manual check required" comment and exits 0 so the
+ * workflow can still post it. Every query runs in a READ ONLY transaction.
  *
  * Usage:
  *   git diff origin/main...HEAD -- shared/database/src/schema.ts shared/database/src/migrations | \
@@ -22,13 +31,24 @@
  *   # or
  *   node scripts/schema-shape-report.mjs --diff /tmp/pr.diff > comment.md
  *
- * Env:
- *   STAGING_DATABASE_URL_RO   — PostgreSQL connection URL with read-only credentials
- *                               on a staging clone of prod. Optional.
- *   STAGING_SCHEMA_NAME       — Schema name (defaults to `wxyc_schema`).
- *   STAGING_SNAPSHOT_LABEL    — Free-form label for the snapshot date in the comment.
+ * Env (probe target — discrete params preferred, URL accepted):
+ *   SHAPE_PROBE_DB_HOST / _PORT / _NAME / _USERNAME / _PASSWORD
+ *                               — discrete connection params. This is what
+ *                                 `migrate-dryrun` passes; it avoids having to
+ *                                 percent-encode a secret password into a URL
+ *                                 in shell.
+ *   SHAPE_PROBE_DATABASE_URL    — PostgreSQL connection URL. Alternative to the
+ *                                 discrete params; takes precedence if set.
+ *                                 `STAGING_DATABASE_URL_RO` is still honored as
+ *                                 an alias for #703 continuity.
+ *   SHAPE_PROBE_SCHEMA_NAME     — Schema name (defaults to `wxyc_schema`).
+ *                                 Alias: `STAGING_SCHEMA_NAME`.
+ *   SHAPE_PROBE_SNAPSHOT_LABEL  — Free-form provenance label for the snapshot
+ *                                 the numbers came from, rendered in the
+ *                                 comment header. Alias: `STAGING_SNAPSHOT_LABEL`.
  *
  * See: https://github.com/WXYC/Backend-Service/issues/703
+ *      https://github.com/WXYC/Backend-Service/issues/1982
  */
 
 import postgres from 'postgres';
@@ -40,10 +60,34 @@ import { readFileSync } from 'fs';
 // ---------------------------------------------------------------------------
 export const COMMENT_MARKER = '<!-- wxyc-schema-shape-report -->';
 
-const SCHEMA_NAME = process.env.STAGING_SCHEMA_NAME || 'wxyc_schema';
-const SNAPSHOT_LABEL = process.env.STAGING_SNAPSHOT_LABEL || new Date().toISOString().slice(0, 10);
+const SCHEMA_NAME = process.env.SHAPE_PROBE_SCHEMA_NAME || process.env.STAGING_SCHEMA_NAME || 'wxyc_schema';
+const SNAPSHOT_LABEL =
+  process.env.SHAPE_PROBE_SNAPSHOT_LABEL || process.env.STAGING_SNAPSHOT_LABEL || new Date().toISOString().slice(0, 10);
 const SAMPLE_LIMIT = 5;
 const PER_QUERY_TIMEOUT_MS = 30000;
+
+/**
+ * Column names whose VALUES must never be echoed into the rendered comment.
+ *
+ * The comment lands on a pull request in a PUBLIC repository, and since #1982
+ * the probe runs against a restore of the real prod snapshot rather than the
+ * never-provisioned staging clone #703 assumed. A duplicate-group probe on,
+ * say, `auth_user.email` would otherwise paste live addresses into a
+ * world-readable comment. Counts — the actionable part of the report — are
+ * unaffected; only the sample key VALUES are masked, and the column name is
+ * still shown so the reviewer knows what to go look at themselves.
+ */
+const PII_COLUMN_PATTERN =
+  /(email|password|token|secret|phone|address|ip_addr|fingerprint|real_name|dj_name|user_id|dj_id)/i;
+const REDACTED = '[redacted]';
+
+/** Mask the VALUES of PII-bearing keys in a sampled duplicate group. */
+function redactSampleKeys(keys) {
+  if (!keys || typeof keys !== 'object') return keys;
+  return Object.fromEntries(
+    Object.entries(keys).map(([name, value]) => [name, PII_COLUMN_PATTERN.test(name) ? REDACTED : value])
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Diff loading
@@ -508,7 +552,7 @@ function renderUniqueResult(constraint, row) {
   const sampleTable =
     samples.length > 0
       ? '\n\nSample groups:\n\n| keys | rows |\n|---|---|\n' +
-        samples.map((s) => `| \`${JSON.stringify(s.keys)}\` | ${s.rows} |`).join('\n')
+        samples.map((s) => `| \`${JSON.stringify(redactSampleKeys(s.keys))}\` | ${s.rows} |`).join('\n')
       : '';
   return [
     `- WARNING — ${renderConstraintHeader(constraint)}`,
@@ -546,7 +590,36 @@ function commentEnvelope(body) {
 }
 
 function unavailableComment(reason) {
-  return commentEnvelope(`_staging probe unavailable, manual data-shape check required (${reason})_`);
+  return commentEnvelope(`_data-shape probe unavailable, manual check required (${reason})_`);
+}
+
+/**
+ * Resolve where to probe. Discrete params are preferred over a URL because the
+ * `migrate-dryrun` caller already holds the sandbox credentials as separate
+ * GitHub secrets, and assembling them into a URL in shell would mean
+ * percent-encoding a secret password in a `run:` block.
+ *
+ * Returns null when nothing is configured — the caller renders the
+ * "probe unavailable" comment and still exits 0.
+ */
+function resolveProbeTarget() {
+  const url = process.env.SHAPE_PROBE_DATABASE_URL || process.env.STAGING_DATABASE_URL_RO;
+  if (url) return { kind: 'url', value: url };
+
+  const host = process.env.SHAPE_PROBE_DB_HOST;
+  if (host) {
+    return {
+      kind: 'options',
+      value: {
+        host,
+        port: Number(process.env.SHAPE_PROBE_DB_PORT || 5432),
+        database: process.env.SHAPE_PROBE_DB_NAME,
+        username: process.env.SHAPE_PROBE_DB_USERNAME,
+        password: process.env.SHAPE_PROBE_DB_PASSWORD,
+      },
+    };
+  }
+  return null;
 }
 
 function erroredComment(message) {
@@ -590,26 +663,32 @@ async function main() {
     return;
   }
 
-  const dbUrl = process.env.STAGING_DATABASE_URL_RO;
-  if (!dbUrl) {
+  const target = resolveProbeTarget();
+  if (!target) {
     const list = constraints.map((c) => `- ${renderConstraintHeader(c)}`).join('\n');
     console.log(
       commentEnvelope(
-        `_staging probe unavailable, manual data-shape check required (\`STAGING_DATABASE_URL_RO\` not set)_\n\nDetected new constraints:\n\n${list}`
+        `_data-shape probe unavailable, manual check required (no probe target configured — \`SHAPE_PROBE_DB_HOST\` / \`SHAPE_PROBE_DATABASE_URL\` unset)_\n\nDetected new constraints:\n\n${list}`
       )
     );
     return;
   }
 
+  const clientOptions = {
+    max: 1,
+    idle_timeout: 5,
+    connect_timeout: 10,
+    // The probe target is a restore of a prod snapshot; NOTICE noise from it
+    // is not our signal. Mirrors scripts/dryrun-migrate.mjs.
+    onnotice: () => {},
+    // Keep statement_timeout server-side. Each query also wraps in
+    // `SET LOCAL statement_timeout` via a transaction below.
+  };
+
   let sql;
   try {
-    sql = postgres(dbUrl, {
-      max: 1,
-      idle_timeout: 5,
-      connect_timeout: 10,
-      // Keep statement_timeout server-side. Each query also wraps in
-      // `SET LOCAL statement_timeout` via a transaction below.
-    });
+    sql =
+      target.kind === 'url' ? postgres(target.value, clientOptions) : postgres({ ...target.value, ...clientOptions });
   } catch (err) {
     console.log(unavailableComment(`could not initialize Postgres client: ${err.message}`));
     return;
@@ -626,6 +705,10 @@ async function main() {
     }
     try {
       const rows = await sql.begin(async (tx) => {
+        // READ ONLY first: PostgreSQL only accepts `SET TRANSACTION` before the
+        // transaction's first query. The probe has no business writing to a
+        // restore of prod, and this makes that structural rather than implied.
+        await tx.unsafe('SET TRANSACTION READ ONLY');
         await tx.unsafe(`SET LOCAL statement_timeout = ${PER_QUERY_TIMEOUT_MS}`);
         return tx.unsafe(built.sql);
       });
@@ -644,7 +727,7 @@ async function main() {
   }
 
   const headerLines = [
-    `Snapshot: \`${SNAPSHOT_LABEL}\` (staging Postgres clone, schema \`${SCHEMA_NAME}\`).`,
+    `Probed: \`${SNAPSHOT_LABEL}\` (schema \`${SCHEMA_NAME}\`), before the pending migrations were applied.`,
     '',
     'This PR adds:',
     '',
