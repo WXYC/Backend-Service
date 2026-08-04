@@ -282,7 +282,7 @@ describe('enrichmentBulkLookup burst coalescing (B3 / BS#1749)', () => {
         results: [{ index: 0, status: shedStatus, lookup: { results: [], outcome: shedStatus } }],
       });
 
-      const p = enrichmentBulkLookup(makeInput('Stereolab'));
+      const p = enrichmentBulkLookup(makeInput('Stereolab'), 'live');
       const observed = p.then(
         () => ({ status: 'resolved' as const }),
         (e: Error) => ({ status: 'rejected' as const, message: e.message })
@@ -327,10 +327,10 @@ describe('enrichmentBulkLookup burst coalescing (B3 / BS#1749)', () => {
     });
 
     it('flag ON: passes budgetMs: null (the BS#1914 suppression signal) on the bulk dispatch', async () => {
-      process.env = { ...originalEnv, ENRICHMENT_SUPPRESS_LML_BUDGET: 'true' };
+      process.env = { ...originalEnv, ENRICHMENT_SUPPRESS_LML_BUDGET: 'TRUE' };
       mockBulkLookupMetadata.mockImplementation((items) => Promise.resolve(echoAllMatched(items)));
 
-      const p = enrichmentBulkLookup(makeInput('Stereolab'));
+      const p = enrichmentBulkLookup(makeInput('Stereolab'), 'live');
       await flushWindow();
       await p;
 
@@ -343,7 +343,7 @@ describe('enrichmentBulkLookup burst coalescing (B3 / BS#1749)', () => {
       delete process.env.ENRICHMENT_SUPPRESS_LML_BUDGET;
       mockBulkLookupMetadata.mockImplementation((items) => Promise.resolve(echoAllMatched(items)));
 
-      const p = enrichmentBulkLookup(makeInput('Stereolab'));
+      const p = enrichmentBulkLookup(makeInput('Stereolab'), 'live');
       await flushWindow();
       await p;
 
@@ -355,7 +355,7 @@ describe('enrichmentBulkLookup burst coalescing (B3 / BS#1749)', () => {
       process.env = { ...originalEnv, ENRICHMENT_SUPPRESS_LML_BUDGET: 'false' };
       mockBulkLookupMetadata.mockImplementation((items) => Promise.resolve(echoAllMatched(items)));
 
-      const p = enrichmentBulkLookup(makeInput('Stereolab'));
+      const p = enrichmentBulkLookup(makeInput('Stereolab'), 'live');
       await flushWindow();
       await p;
 

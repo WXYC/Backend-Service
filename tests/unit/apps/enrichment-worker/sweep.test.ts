@@ -29,7 +29,7 @@
 import { jest } from '@jest/globals';
 
 import { db, flowsheet } from '@wxyc/database';
-import { resolveLmlPolicy, LML_LIMITER_MAX_QUEUE_WAIT_MS_DEFAULT } from '@wxyc/lml-client';
+import { envInt, resolveLmlPolicy, LML_LIMITER_MAX_QUEUE_WAIT_MS_DEFAULT } from '@wxyc/lml-client';
 import { sweepStrandedClaims, STRANDED_TTL_SECONDS } from '../../../../apps/enrichment-worker/sweep';
 
 type SqlLike = {
@@ -198,8 +198,18 @@ describe('sweepStrandedClaims (BS#1225)', () => {
     //     claim back to 'pending' (see sweep.ts's TTL-derivation docstring
     //     for why that race matters — it silently no-ops the worker's
     //     eventual finalize UPDATE and wastes the LML token spend).
-    const SUPPRESSED_CLIENT_TIMEOUT_MS = 29_000;
-    const WORST_CASE_SUPPRESSED_INFLIGHT_MS = SUPPRESSED_CLIENT_TIMEOUT_MS + LML_LIMITER_MAX_QUEUE_WAIT_MS_DEFAULT;
+    //   - IMPORTANT: both contributors are resolved the way PRODUCTION
+    //     resolves them, not from the compile-time defaults. `timeoutMs`
+    //     comes from `resolveLmlPolicy` (which reads LML_CLASS5_TIMEOUT_MS)
+    //     and the admission bound from `envInt('LML_LIMITER_MAX_QUEUE_WAIT_MS',
+    //     ...)` — the same read `createLmlLimiter` performs. Asserting
+    //     against the bare `*_DEFAULT` constant instead would let exactly the
+    //     override that breaks the invariant (e.g.
+    //     LML_LIMITER_MAX_QUEUE_WAIT_MS=40000 => 69s worst case > 60s TTL)
+    //     sail through this guard green.
+    const SUPPRESSED_CLIENT_TIMEOUT_MS = resolveLmlPolicy('enrichment-worker').timeoutMs;
+    const ADMISSION_WAIT_MS = envInt('LML_LIMITER_MAX_QUEUE_WAIT_MS', LML_LIMITER_MAX_QUEUE_WAIT_MS_DEFAULT);
+    const WORST_CASE_SUPPRESSED_INFLIGHT_MS = SUPPRESSED_CLIENT_TIMEOUT_MS + ADMISSION_WAIT_MS;
 
     it("suppressing the header does not change resolveLmlPolicy('enrichment-worker').budgetMs or STRANDED_TTL_SECONDS", () => {
       // The flag lives entirely in lookup-batcher.ts's dispatchChunk; this
@@ -211,9 +221,10 @@ describe('sweepStrandedClaims (BS#1225)', () => {
       expect(STRANDED_TTL_SECONDS).toBe(60);
     });
 
-    it('matches the documented class-5 client timeout (29000ms) and admission bound (5000ms)', () => {
-      expect(resolveLmlPolicy('enrichment-worker').timeoutMs).toBe(SUPPRESSED_CLIENT_TIMEOUT_MS);
+    it('matches the documented class-5 client timeout (29000ms) and admission bound (5000ms) at default config', () => {
+      expect(SUPPRESSED_CLIENT_TIMEOUT_MS).toBe(29_000);
       expect(LML_LIMITER_MAX_QUEUE_WAIT_MS_DEFAULT).toBe(5000);
+      expect(ADMISSION_WAIT_MS).toBe(5000);
       expect(WORST_CASE_SUPPRESSED_INFLIGHT_MS).toBe(34_000);
     });
 
