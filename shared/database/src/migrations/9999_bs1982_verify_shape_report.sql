@@ -1,0 +1,11 @@
+-- THROWAWAY — not a real migration. Exists only to give
+-- schema-shape-report.mjs (#1982) a real constraint to probe against the
+-- staging clone so the fix can be verified end to end before merge. This
+-- file is never applied via drizzle:migrate (not registered in
+-- _journal.json) and this branch is not merged to main.
+--
+-- flowsheet.rotation_id already references rotation.id with
+-- onDelete: 'set null' in schema.ts (see shared/database/src/schema.ts) —
+-- this restates the same FK so the shape-report script's migration-SQL
+-- detector has a real, already-consistent relationship to query.
+ALTER TABLE "wxyc_schema"."flowsheet" ADD CONSTRAINT "flowsheet_rotation_id_rotation_id_fk_bs1982_verify" FOREIGN KEY ("rotation_id") REFERENCES "wxyc_schema"."rotation"("id");
