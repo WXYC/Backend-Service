@@ -191,3 +191,109 @@ describe('reenrichRow', () => {
     expect(setArgs.release_year).toBeNull();
   });
 });
+
+/**
+ * BS#1998: shed classification, ported from the sibling drain's BS#1995
+ * Arm 3 guard (`jobs/flowsheet-metadata-backfill/enrich.ts`).
+ *
+ * This job's no-match arm is a pure no-op, so — unlike the sibling — a shed
+ * response cannot *corrupt* a row here: nothing is written either way. What
+ * it corrupts is the VERDICT. `still_no_match` is what the runbook tells the
+ * operator to read as "LML looked and there is genuinely nothing there," and
+ * it is the counter that decides whether a re-run is warranted. Laundering a
+ * breaker shed into that bucket reports an un-asked row as an answered one,
+ * and the row is never retried within the run.
+ *
+ * The distinct `upstream_unavailable_skipped` outcome keeps the two apart.
+ * Both are no-ops at the DB level; only the count differs — which is the
+ * entire point.
+ */
+describe('reenrichRow (BS#1998) — upstream_unavailable classification', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockDb._chain.returning.mockResolvedValue([{ id: baseRow.id }]);
+  });
+
+  const shedResponse: LookupResponse = {
+    results: [],
+    search_type: 'none',
+    degraded: true,
+    degraded_reason: 'upstream_unavailable',
+  };
+
+  it('degraded_reason: upstream_unavailable with no match is upstream_unavailable_skipped, not still_no_match', async () => {
+    const outcome = await reenrichRow(baseRow, shedResponse);
+
+    expect(outcome).toBe('upstream_unavailable_skipped');
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  // Post-LML#1128 the search leg emits the same marker the tail legs always
+  // have, so this shape now covers the incident's dominant case too — the
+  // reason the sibling job's "indistinguishable search-leg shed" caveat is
+  // retired. See LML `lookup/orchestrator.py`'s `degraded = state.upstream_shed`.
+  it('search-leg shed (LML#1128: empty results carrying the marker) is skipped, not counted as a verdict', async () => {
+    const searchLegShed: LookupResponse = {
+      results: [],
+      search_type: 'none',
+      song_not_found: true,
+      degraded: true,
+      degraded_reason: 'upstream_unavailable',
+    };
+
+    const outcome = await reenrichRow(baseRow, searchLegShed);
+
+    expect(outcome).toBe('upstream_unavailable_skipped');
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  // Mirrors the sibling's B2 review finding: LML's degraded-response builder
+  // returns whatever the tail legs produced BEFORE the breaker tripped, so a
+  // degraded response CAN carry a complete match. Discarding it would
+  // downgrade a real answer to a retry and re-spend the very Discogs ceiling
+  // the shed exists to protect.
+  it('degraded_reason: upstream_unavailable WITH a populated match still writes as a normal match', async () => {
+    const shedWithMatch: LookupResponse = {
+      ...matchedResponse,
+      degraded: true,
+      degraded_reason: 'upstream_unavailable',
+    };
+
+    const outcome = await reenrichRow(baseRow, shedWithMatch);
+
+    expect(outcome).toBe('match');
+    expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setArgs.metadata_status).toBe('enriched_match');
+  });
+
+  // The BS#1748 client-side limiter shed carries no `degraded_reason` at all
+  // — it never reached LML — and is discriminated by `outcome` via
+  // `shedReasonOf`. This job's limiter is unbounded today, so this is a
+  // defensive pin, exactly as the sibling job documents it.
+  it.each(['shed_limiter_saturated', 'shed_breaker_open'])(
+    'BS#1748 client-side shed (outcome: %s) is skipped, not counted as a verdict',
+    async (outcome) => {
+      const limiterShed = {
+        results: [],
+        search_type: 'none',
+        outcome,
+      } as unknown as LookupResponse;
+
+      expect(await reenrichRow(baseRow, limiterShed)).toBe('upstream_unavailable_skipped');
+      expect(mockDb.update).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    ['deadline_exceeded', { results: [], search_type: 'none', degraded: true, degraded_reason: 'deadline_exceeded' }],
+    ['timeout', { results: [], search_type: 'none', timeout: true }],
+    ['genuine empty', { results: [], search_type: 'none', timeout: false, degraded: false }],
+  ])(
+    'regression pin: %s STILL counts as still_no_match (deliberate terminal verdicts — do not widen the guard)',
+    async (_name, response) => {
+      expect(await reenrichRow(baseRow, response as LookupResponse)).toBe('still_no_match');
+      expect(mockDb.update).not.toHaveBeenCalled();
+    }
+  );
+});

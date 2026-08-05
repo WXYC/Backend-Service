@@ -247,10 +247,22 @@ export const applyEnrichment = async (
   // continuing to burn through the worklist.
   //
   // Deliberately narrower than the sibling shapes below, which all stay
-  // terminal regardless of artwork: LML's SEARCH leg (`core/search.py:953`)
-  // swallows the same breaker-open condition into `Outcome.empty()` with no
-  // marker at all — indistinguishable from a genuine no-match today
-  // (tracked as a separate LML-side ticket; not solved here) — and
+  // terminal regardless of artwork.
+  //
+  // BS#1998 UPDATE: this guard's coverage widened without its code
+  // changing. When BS#1995 shipped, LML's SEARCH leg (`core/search.py`)
+  // swallowed the same breaker-open condition into a bare `Outcome.empty()`
+  // with no marker, so the incident's dominant shape was indistinguishable
+  // from a genuine no-match and stayed terminal here. LML#1126/#1128 closed
+  // that: the search leg now records `state.upstream_shed`, which
+  // `lookup/orchestrator.py` projects onto the same `degraded: true` /
+  // `degraded_reason: 'upstream_unavailable'` fields the tail legs always
+  // set — so the condition above already catches it. Nothing to widen.
+  //
+  // The corollary matters more: a bare empty carrying NO marker is now
+  // unambiguously a genuine no-match, and terminalizing it is correct. Do
+  // not "fix" the regression pin in `enrich.test.ts` that asserts this —
+  // flipping it would stop the drain terminalizing anything at all.
   // `degraded_reason: 'deadline_exceeded'` / `response.timeout === true`
   // are both documented, deliberate terminal outcomes for this class-5
   // offline-drain caller (see `shared/lml-client/src/policy.ts`'s BS#1914

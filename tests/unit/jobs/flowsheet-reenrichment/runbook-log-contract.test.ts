@@ -274,4 +274,50 @@ describe('runbook log contract — finished', () => {
     expect(finished?.still_no_match).toBe(1);
     expect(finished?.lml_error).toBe(0);
   });
+
+  // BS#1998: the README's post-run jq filter now projects these two fields.
+  // A filter that names a field the summary doesn't emit renders `null`
+  // silently — which for `upstream_unavailable_skipped` would hide exactly
+  // the signal the operator needs to decide whether the run under-covered
+  // its cohort. Pin both so the filter and the log can't drift apart.
+  it('emits upstream_unavailable_skipped and dry_run in the finished summary (runbook jq filter reads both)', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ response: matchedResponse, cacheHit: false });
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('upstream_unavailable_skipped');
+
+    const stdoutLines = captureJson('stdout');
+    await runReenrichment({ lookup, enrich, cutoffTs: CUTOFF, batchSize: 1, liveActivityLookbackSeconds: 0 });
+
+    const finished = stdoutLines.find((l) => l.step === 'finished');
+    expect(finished?.upstream_unavailable_skipped).toBe(1);
+    // A shed is not a verdict — it must not inflate still_no_match.
+    expect(finished?.still_no_match).toBe(0);
+    expect(finished?.flipped).toBe(0);
+    expect(finished?.dry_run).toBe(false);
+  });
+
+  it('emits dry_run: true and a zeroed outcome set when DRY_RUN suppressed the work', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1), makeRow(2)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ response: matchedResponse, cacheHit: false });
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
+
+    const stdoutLines = captureJson('stdout');
+    await runReenrichment({
+      lookup,
+      enrich,
+      cutoffTs: CUTOFF,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+      dryRun: true,
+    });
+
+    const finished = stdoutLines.find((l) => l.step === 'finished');
+    expect(finished?.dry_run).toBe(true);
+    // `scanned` IS the deliverable — it's the cohort count the runbook records.
+    expect(finished?.scanned).toBe(2);
+    expect(finished?.flipped).toBe(0);
+    expect(finished?.still_no_match).toBe(0);
+  });
 });

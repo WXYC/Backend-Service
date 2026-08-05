@@ -97,6 +97,10 @@ const noMatchResult = () => ({ response: noMatchResponse, cacheHit: false as con
 const CUTOFF = '2026-06-16T17:53:53Z';
 // BS#1823 regression-window lower bound — matches the README's run example.
 const WINDOW_START = '2026-07-22T00:00:00Z';
+// BS#1998 incident window — the interval over which the 2026-08-03/04 LML
+// breaker flap terminalized 26,387 rows. Matches the README's run example.
+const INCIDENT_START = '2026-08-04T06:00:00Z';
+const INCIDENT_END = '2026-08-04T23:00:00Z';
 
 const makeRow = (id: number) => ({
   id,
@@ -369,7 +373,7 @@ describe('runReenrichment — WHERE filter', () => {
       const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
 
       await expect(runReenrichment({ lookup, enrich, batchSize: 100, liveActivityLookbackSeconds: 0 })).rejects.toThrow(
-        /At least one of BACKFILL_CUTOFF_TS or BACKFILL_WINDOW_START_TS is required/
+        /At least one of BACKFILL_CUTOFF_TS/
       );
       expect(db.execute).not.toHaveBeenCalled();
     } finally {
@@ -378,6 +382,202 @@ describe('runReenrichment — WHERE filter', () => {
       if (originalWindowStart === undefined) delete process.env.BACKFILL_WINDOW_START_TS;
       else process.env.BACKFILL_WINDOW_START_TS = originalWindowStart;
     }
+  });
+});
+
+/**
+ * BS#1998: the 2026-08-03/04 breaker incident froze 26,387 rows spanning
+ * add_time 2004→2026. They are NOT identifiable by add_time — the drain that
+ * froze them was working the historical backlog — only by the `updated_at`
+ * instant at which they were terminalized. This block pins the third and
+ * fourth window bounds, keyed on `updated_at`, composed the same way BS#1823
+ * composed the add_time pair.
+ *
+ * Why `updated_at` is a stable selector here despite being mutable: this
+ * job's no-match arm writes nothing, so `updated_at` moves only for rows
+ * that simultaneously leave the cohort via `metadata_status='enriched_match'`.
+ * The predicate does not eat its own tail. (An unrelated writer touching a
+ * cohort row WILL evict it — see the README's leakage note.)
+ */
+describe('runReenrichment — updated_at window (BS#1998)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('updated-after only: SELECT carries updated_at >= and no updated_at upper bound', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
+
+    await runReenrichment({
+      lookup,
+      enrich,
+      updatedAfterTs: INCIDENT_START,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    const firstSelectSql = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
+    expect(firstSelectSql).toMatch(/updated_at"\s*>=\s*/);
+    expect(firstSelectSql).toContain(INCIDENT_START);
+    expect(firstSelectSql).not.toMatch(/updated_at"\s*<\s*/);
+    // The add_time pair must stay absent — the two windows are independent.
+    expect(firstSelectSql).not.toMatch(/add_time/);
+  });
+
+  it('both updated_at bounds: SELECT carries the incident window intersection', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
+
+    await runReenrichment({
+      lookup,
+      enrich,
+      updatedAfterTs: INCIDENT_START,
+      updatedBeforeTs: INCIDENT_END,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    const firstSelectSql = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
+    expect(firstSelectSql).toMatch(/updated_at"\s*>=\s*/);
+    expect(firstSelectSql).toMatch(/updated_at"\s*<\s*/);
+    expect(firstSelectSql).toContain(INCIDENT_START);
+    expect(firstSelectSql).toContain(INCIDENT_END);
+  });
+
+  // The BS#1998 run shape: the incident cohort spans the whole add_time
+  // range, so it is selected by updated_at ALONE. This is the case that
+  // would be impossible if the add_time pair were still mandatory.
+  it('an updated_at bound alone satisfies the at-least-one-bound requirement', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
+
+    await expect(
+      runReenrichment({
+        lookup,
+        enrich,
+        updatedAfterTs: INCIDENT_START,
+        updatedBeforeTs: INCIDENT_END,
+        batchSize: 100,
+        liveActivityLookbackSeconds: 0,
+      })
+    ).resolves.toBeDefined();
+    expect(db.execute).toHaveBeenCalled();
+  });
+
+  it('composes with the add_time pair: all four bounds land in one SELECT', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
+
+    await runReenrichment({
+      lookup,
+      enrich,
+      cutoffTs: CUTOFF,
+      windowStartTs: WINDOW_START,
+      updatedAfterTs: INCIDENT_START,
+      updatedBeforeTs: INCIDENT_END,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    const firstSelectSql = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]);
+    for (const ts of [CUTOFF, WINDOW_START, INCIDENT_START, INCIDENT_END]) {
+      expect(firstSelectSql).toContain(ts);
+    }
+  });
+
+  it.each([
+    ['updatedAfterTs', { updatedAfterTs: 'not-a-date' }],
+    ['updatedBeforeTs', { updatedBeforeTs: '2026-02-30T00:00:00Z' }],
+  ])('%s is validated with the same strictness as the add_time bounds', async (_name, override) => {
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
+
+    await expect(
+      runReenrichment({ lookup, enrich, batchSize: 100, liveActivityLookbackSeconds: 0, ...override })
+    ).rejects.toThrow(/strict ISO 8601|out-of-range field/);
+    expect(db.execute).not.toHaveBeenCalled();
+  });
+});
+
+describe('runReenrichment — upstream_unavailable_skipped counter (BS#1998)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('counts a shed row separately from still_no_match and leaves it selectable', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1), makeRow(2)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult());
+    const enrich = jest
+      .fn<EnrichFn>()
+      .mockResolvedValueOnce('upstream_unavailable_skipped')
+      .mockResolvedValueOnce('still_no_match');
+
+    const result = await runReenrichment({
+      lookup,
+      enrich,
+      updatedAfterTs: INCIDENT_START,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+    });
+
+    expect(result.totals.upstream_unavailable_skipped).toBe(1);
+    expect(result.totals.still_no_match).toBe(1);
+    expect(result.totals.scanned).toBe(2);
+    // A shed is not a flip — `flipped` tracks real matches only.
+    expect(result.flipped).toBe(0);
+  });
+});
+
+describe('runReenrichment — dry run (BS#1998)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('scans the cohort but makes zero LML calls and zero enrich calls', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1), makeRow(2)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
+
+    const result = await runReenrichment({
+      lookup,
+      enrich,
+      updatedAfterTs: INCIDENT_START,
+      updatedBeforeTs: INCIDENT_END,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+      dryRun: true,
+    });
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(enrich).not.toHaveBeenCalled();
+    // The scan itself still happens — that count is the deliverable.
+    expect(result.totals.scanned).toBe(2);
+    expect(result.totals.match).toBe(0);
+    expect(result.flipped).toBe(0);
+    expect(result.dryRun).toBe(true);
+  });
+
+  it('defaults to a live run so the existing BS#1433/BS#1823 recipes are unchanged', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(matchedResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('match');
+
+    const result = await runReenrichment({ lookup, enrich, cutoffTs: CUTOFF, liveActivityLookbackSeconds: 0 });
+
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(enrich).toHaveBeenCalledTimes(1);
+    expect(result.dryRun).toBe(false);
   });
 });
 
