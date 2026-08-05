@@ -25,6 +25,11 @@
  * `jobs/va-apple-music-url-remediation/orchestrate.ts`; when that is
  * hand-edited, the SQL here must follow.
  *
+ * The `::text` casts on bound params are deliberate: postgres-js raises
+ * "inconsistent types deduced for parameter $N" (42P08) at Parse time when a
+ * parameter is reused across two type contexts, and a Parse-time failure fails
+ * every test in the file regardless of the data.
+ *
  * Needs CI to run: requires the Docker integration DB (the `pg` marker tier).
  */
 
@@ -65,8 +70,9 @@ const MUST_NOT_MATCH_NET = ['Stereolab', 'Juana Molina', 'Cat Power', 'Jessica P
 describe('BS#2000 candidate net (real Postgres)', () => {
   let sql;
 
-  beforeAll(async () => {
-    sql = await getTestDb();
+  beforeAll(() => {
+    // getTestDb() is synchronous — it returns the shared postgres-js pool.
+    sql = getTestDb();
   });
 
   it('fold_artist_name exists and decomposes diacritics', async () => {
@@ -78,14 +84,14 @@ describe('BS#2000 candidate net (real Postgres)', () => {
 
   it.each(MUST_MATCH)('selects %p through the folded net', async (artist) => {
     const rows = await sql`
-      SELECT ${sql(SCHEMA)}.fold_artist_name(${artist}) ~ ${VA_NET_REGEX} AS matched
+      SELECT ${sql(SCHEMA)}.fold_artist_name(${artist}::text) ~ ${VA_NET_REGEX}::text AS matched
     `;
     expect(rows[0].matched).toBe(true);
   });
 
   it.each(MUST_NOT_MATCH_NET)('does not select unrelated artist %p', async (artist) => {
     const rows = await sql`
-      SELECT ${sql(SCHEMA)}.fold_artist_name(${artist}) ~ ${VA_NET_REGEX} AS matched
+      SELECT ${sql(SCHEMA)}.fold_artist_name(${artist}::text) ~ ${VA_NET_REGEX}::text AS matched
     `;
     expect(rows[0].matched).toBe(false);
   });
@@ -93,8 +99,8 @@ describe('BS#2000 candidate net (real Postgres)', () => {
   it('an unfolded lower() net would MISS the diacritic row (the regression)', async () => {
     // Pins the reason the fold is in SQL rather than only in TypeScript.
     const rows = await sql`
-      SELECT lower('Vàrious Artists') ~ ${VA_NET_REGEX} AS unfolded,
-             ${sql(SCHEMA)}.fold_artist_name('Vàrious Artists') ~ ${VA_NET_REGEX} AS folded
+      SELECT lower('Vàrious Artists') ~ ${VA_NET_REGEX}::text AS unfolded,
+             ${sql(SCHEMA)}.fold_artist_name('Vàrious Artists') ~ ${VA_NET_REGEX}::text AS folded
     `;
     expect(rows[0].unfolded).toBe(false);
     expect(rows[0].folded).toBe(true);
@@ -104,8 +110,8 @@ describe('BS#2000 candidate net (real Postgres)', () => {
     const DONOR_REGEX = '(various|soundtrack|compilation|v/a|v\\.a\\.)';
     for (const artist of ['V.A', 'V.A - Jazz', 'V.A 1998']) {
       const rows = await sql`
-        SELECT ${sql(SCHEMA)}.fold_artist_name(${artist}) ~ ${DONOR_REGEX} AS donor,
-               ${sql(SCHEMA)}.fold_artist_name(${artist}) ~ ${VA_NET_REGEX} AS widened
+        SELECT ${sql(SCHEMA)}.fold_artist_name(${artist}::text) ~ ${DONOR_REGEX}::text AS donor,
+               ${sql(SCHEMA)}.fold_artist_name(${artist}::text) ~ ${VA_NET_REGEX}::text AS widened
       `;
       expect(rows[0].donor).toBe(false);
       expect(rows[0].widened).toBe(true);
