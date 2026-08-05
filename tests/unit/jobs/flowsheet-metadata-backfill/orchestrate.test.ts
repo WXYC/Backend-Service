@@ -80,6 +80,7 @@ import type {
   BuildWorkListFn,
   WorkList,
 } from '../../../../jobs/flowsheet-metadata-backfill/worklist';
+import { BreakerPauseCeilingExceededError } from '../../../../jobs/flowsheet-metadata-backfill/lml-health';
 import type {
   BreakerProbeResult,
   CheckDiscogsBreakerFn,
@@ -769,7 +770,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       playFloor: 5,
       floorRecencyDays: 7,
     });
@@ -790,7 +791,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       playFloor: 3,
       floorRecencyDays: 2,
       buildWorkList,
@@ -814,7 +815,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       graceMinutes: 45,
       recoveryWindowHours: 12,
       buildWorkList,
@@ -841,7 +842,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       batchSize: 2,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       playFloor: 5,
       floorRecencyDays: 7,
       buildWorkList,
@@ -879,7 +880,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       batchSize: 1,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       playFloor: 5,
       floorRecencyDays: 7,
       buildWorkList,
@@ -923,7 +924,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       batchSize: 1,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       playFloor: 5,
       floorRecencyDays: 7,
       buildWorkList,
@@ -963,7 +964,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       batchSize: 2,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       playFloor: 5,
       floorRecencyDays: 7,
       buildWorkList,
@@ -1002,7 +1003,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       playFloor: 5,
       floorRecencyDays: 7,
       buildWorkList,
@@ -1046,7 +1047,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       playFloor: 5,
       floorRecencyDays: 7,
       buildWorkList,
@@ -1095,7 +1096,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
         enrich,
         throttleMs: 0,
         liveActivityLookbackSeconds: 0,
-        breakerProbeIntervalBatches: 0,
+        breakerProbeIntervalMs: 0,
         playFloor: 5,
         floorRecencyDays: 7,
         buildWorkList,
@@ -1159,7 +1160,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       enrich: enrichLocal,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       playFloor: 5,
       floorRecencyDays: 7,
       buildWorkList,
@@ -1199,7 +1200,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       enrich: enrichPoison,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       playFloor: 5,
       floorRecencyDays: 7,
       buildWorkList,
@@ -1246,7 +1247,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 60,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       liveActivityPauseMs: 0,
       checkLiveActivity,
       playFloor: 5,
@@ -1275,7 +1276,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       liveActivityPauseMs: 0,
       checkLiveActivity,
       playFloor: 5,
@@ -1297,7 +1298,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 120,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       liveActivityPauseMs: 0,
       checkLiveActivity,
       playFloor: 5,
@@ -1308,13 +1309,28 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
     expect(checkLiveActivity).toHaveBeenCalledWith(120);
   });
 
-  describe('LML Discogs breaker gate (BS#1995 Arm 2)', () => {
+  describe('LML Discogs breaker gate (BS#1995 Arm 2, redesigned per review B1/B3/D1/D2/D3)', () => {
     const breakerResult = (
       outcome: BreakerProbeResult['outcome'],
       liveRequestsTotal: number | null = null
     ): BreakerProbeResult => ({ outcome, liveRequestsTotal });
 
-    it('a closed breaker proceeds without pausing and probes once per batch', async () => {
+    /**
+     * A queue-based fake clock for `breakerNow` (the test-only clock seam
+     * scoped to just the breaker gate — see `runBackfill`'s doc comment for
+     * why this is isolated from every OTHER `Date.now()` call the function
+     * makes). Each call returns the next queued value; once exhausted it
+     * keeps returning the last one.
+     */
+    const queueClock = (...values: number[]): (() => number) => {
+      let i = 0;
+      return () => values[Math.min(i++, values.length - 1)];
+    };
+
+    it('probes on the first row of a run; a second row processed before the interval elapses does NOT trigger another probe', async () => {
+      // Constant clock: every call returns the same instant, so row 2's
+      // interval check always computes a 0ms gap — deterministically
+      // "not due" regardless of real wall-clock speed.
       const checkDiscogsBreaker = jest.fn<CheckDiscogsBreakerFn>().mockResolvedValue(breakerResult('closed', 10));
       const buildWorkList = injectWorkList([
         [10, 4],
@@ -1330,17 +1346,54 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
         liveActivityLookbackSeconds: 0,
         checkDiscogsBreaker,
         breakerPauseMs: 0,
+        breakerNow: () => 1000,
         playFloor: 5,
         floorRecencyDays: 7,
         buildWorkList,
       });
 
-      // One batch (both rows fit in batchSize=2) → exactly one probe, not
-      // one per row.
       expect(checkDiscogsBreaker).toHaveBeenCalledTimes(1);
       expect(result.totals.breaker_probes).toBe(1);
       expect(result.totals.breaker_pauses).toBe(0);
       expect(result.totals.scanned).toBe(2);
+    });
+
+    it('probes again once the interval has elapsed, checked per row — never gated by the batch boundary', async () => {
+      // Every breakerNow() call advances far past the interval, so both
+      // rows are "due." Deliberately spans 5 rows in ONE batch to pin that
+      // the gate is checked per row (not once at the batch's start) — a
+      // batch-boundary design (rejected in review) would probe once here
+      // regardless of how many rows it contains.
+      let t = 0;
+      const breakerNow = () => (t += 100_000);
+      const checkDiscogsBreaker = jest.fn<CheckDiscogsBreakerFn>().mockResolvedValue(breakerResult('closed'));
+      const buildWorkList = injectWorkList([
+        [10, 5],
+        [20, 4],
+        [30, 3],
+        [40, 2],
+        [50, 1],
+      ]);
+      (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10), rowFor(20), rowFor(30), rowFor(40), rowFor(50)]);
+
+      const result = await runBackfill({
+        lookup,
+        enrich,
+        batchSize: 5,
+        throttleMs: 0,
+        liveActivityLookbackSeconds: 0,
+        checkDiscogsBreaker,
+        breakerPauseMs: 0,
+        breakerProbeIntervalMs: 1000,
+        breakerNow,
+        playFloor: 5,
+        floorRecencyDays: 7,
+        buildWorkList,
+      });
+
+      expect(checkDiscogsBreaker).toHaveBeenCalledTimes(5);
+      expect(result.totals.breaker_probes).toBe(5);
+      expect(result.totals.scanned).toBe(5);
     });
 
     it('an open breaker pauses (sleep + re-probe) until it clears, then proceeds', async () => {
@@ -1364,13 +1417,13 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
         buildWorkList,
       });
 
-      // Two open reads before the third (closed) lets the batch proceed.
+      // Two open reads before the third (closed) lets the row proceed.
       expect(checkDiscogsBreaker).toHaveBeenCalledTimes(3);
       expect(result.totals.breaker_probes).toBe(3);
       expect(result.totals.breaker_pauses).toBe(2);
       expect(result.totals.scanned).toBe(1);
-      // The row was still processed — the pause deferred the batch, it
-      // didn't drop it.
+      // The row was still processed — the pause deferred it, it didn't
+      // drop it.
       expect(lookup).toHaveBeenCalledWith('artist-10', undefined, undefined, undefined);
     });
 
@@ -1445,7 +1498,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       expect(result.totals.scanned).toBe(1);
     });
 
-    it('breakerProbeIntervalBatches: 0 disables the gate entirely — never probes', async () => {
+    it('breakerProbeIntervalMs: 0 disables the gate entirely — never probes', async () => {
       const checkDiscogsBreaker = jest.fn<CheckDiscogsBreakerFn>().mockResolvedValue(breakerResult('open'));
       const buildWorkList = injectWorkList([
         [10, 4],
@@ -1460,7 +1513,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
         throttleMs: 0,
         liveActivityLookbackSeconds: 0,
         checkDiscogsBreaker,
-        breakerProbeIntervalBatches: 0,
+        breakerProbeIntervalMs: 0,
         playFloor: 5,
         floorRecencyDays: 7,
         buildWorkList,
@@ -1475,83 +1528,173 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       expect(result.totals.scanned).toBe(2);
     });
 
-    it('breakerProbeIntervalBatches > 1 probes only every Nth batch, not every batch', async () => {
-      const checkDiscogsBreaker = jest.fn<CheckDiscogsBreakerFn>().mockResolvedValue(breakerResult('closed'));
-      const buildWorkList = injectWorkList([
-        [10, 4],
-        [20, 3],
-        [30, 2],
-        [40, 1],
-      ]);
-      (db.execute as jest.Mock)
-        .mockResolvedValueOnce([rowFor(10)])
-        .mockResolvedValueOnce([rowFor(20)])
-        .mockResolvedValueOnce([rowFor(30)])
-        .mockResolvedValueOnce([rowFor(40)]);
+    // BS#1995 review B3: a pause loop with no ceiling is invisible exactly
+    // when it matters — this gate runs BEFORE the first batch_done, so a
+    // run that pauses for its entire lifetime would otherwise emit no
+    // batch_done, no finished, and no Sentry totals span at all.
+    describe('B3: pause ceiling', () => {
+      it('a breaker stuck open past the cumulative ceiling aborts the run loudly instead of pausing forever', async () => {
+        const checkDiscogsBreaker = jest.fn<CheckDiscogsBreakerFn>().mockResolvedValue(breakerResult('open'));
+        const buildWorkList = injectWorkList([[10, 4]]);
+        (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10)]);
 
-      const result = await runBackfill({
-        lookup,
-        enrich,
-        batchSize: 1,
-        throttleMs: 0,
-        liveActivityLookbackSeconds: 0,
-        checkDiscogsBreaker,
-        breakerProbeIntervalBatches: 2,
-        breakerPauseMs: 0,
-        playFloor: 5,
-        floorRecencyDays: 7,
-        buildWorkList,
+        await expect(
+          runBackfill({
+            lookup,
+            enrich,
+            throttleMs: 0,
+            liveActivityLookbackSeconds: 0,
+            checkDiscogsBreaker,
+            breakerPauseMs: 5,
+            breakerMaxPauseMs: 10,
+            playFloor: 5,
+            floorRecencyDays: 7,
+            buildWorkList,
+          })
+        ).rejects.toThrow(BreakerPauseCeilingExceededError);
+
+        // The run never got to process the row — it aborted while paused.
+        expect(lookup).not.toHaveBeenCalled();
+        // Loud: captured to Sentry, not just logged.
+        expect(Sentry.captureMessage).toHaveBeenCalledWith(
+          expect.stringContaining('breaker_pause_ceiling_exceeded'),
+          expect.objectContaining({ level: 'error' })
+        );
       });
 
-      // 4 batches at interval 2 → probes on batch 2 and batch 4.
-      expect(checkDiscogsBreaker).toHaveBeenCalledTimes(2);
-      expect(result.totals.breaker_probes).toBe(2);
-      expect(result.totals.scanned).toBe(4);
+      it('breakerMaxPauseMs: 0 means uncapped — never throws even after many pause cycles', async () => {
+        // Breaker clears on the 4th probe; with a very low pause but an
+        // uncapped ceiling the run must still complete normally.
+        const checkDiscogsBreaker = jest
+          .fn<CheckDiscogsBreakerFn>()
+          .mockResolvedValueOnce(breakerResult('open'))
+          .mockResolvedValueOnce(breakerResult('open'))
+          .mockResolvedValueOnce(breakerResult('open'))
+          .mockResolvedValueOnce(breakerResult('closed'));
+        const buildWorkList = injectWorkList([[10, 4]]);
+        (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10)]);
+
+        const result = await runBackfill({
+          lookup,
+          enrich,
+          throttleMs: 0,
+          liveActivityLookbackSeconds: 0,
+          checkDiscogsBreaker,
+          breakerPauseMs: 1,
+          breakerMaxPauseMs: 0,
+          playFloor: 5,
+          floorRecencyDays: 7,
+          buildWorkList,
+        });
+
+        expect(result.totals.scanned).toBe(1);
+        expect(result.totals.breaker_pauses).toBe(3);
+      });
     });
 
-    it('probes once per batch even when the batch has many rows (never per row)', async () => {
-      const checkDiscogsBreaker = jest.fn<CheckDiscogsBreakerFn>().mockResolvedValue(breakerResult('closed'));
-      const buildWorkList = injectWorkList([
-        [10, 5],
-        [20, 4],
-        [30, 3],
-        [40, 2],
-        [50, 1],
-      ]);
-      (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10), rowFor(20), rowFor(30), rowFor(40), rowFor(50)]);
+    // BS#1995 review D1/D2: the per-probe measurement pairing.
+    describe('D1/D2: discogs_req_per_min_measured pairing', () => {
+      it('D1: a negative delta (counter went backwards — process restart or a different process behind the load balancer) reports null and logs it as invalid, not a negative rate', async () => {
+        const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
+        const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
+        initLogger({ repo: 'Backend-Service', tool: 'test', runId: 'run-id-d1' });
+        const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
-      const result = await runBackfill({
-        lookup,
-        enrich,
-        batchSize: 5,
-        throttleMs: 0,
-        liveActivityLookbackSeconds: 0,
-        checkDiscogsBreaker,
-        breakerPauseMs: 0,
-        playFloor: 5,
-        floorRecencyDays: 7,
-        buildWorkList,
+        try {
+          const checkDiscogsBreaker = jest
+            .fn<CheckDiscogsBreakerFn>()
+            .mockResolvedValueOnce(breakerResult('closed', 100))
+            .mockResolvedValueOnce(breakerResult('closed', 50)); // went backwards
+          const buildWorkList = injectWorkList([
+            [10, 4],
+            [20, 3],
+          ]);
+          (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10), rowFor(20)]);
+
+          const result = await runBackfill({
+            lookup,
+            enrich,
+            batchSize: 2,
+            throttleMs: 0,
+            liveActivityLookbackSeconds: 0,
+            checkDiscogsBreaker,
+            breakerPauseMs: 0,
+            breakerProbeIntervalMs: 1,
+            breakerNow: queueClock(0, 0, 60_000, 60_000),
+            playFloor: 5,
+            floorRecencyDays: 7,
+            buildWorkList,
+          });
+
+          expect(result.totals.scanned).toBe(2);
+          const lines = writeSpy.mock.calls.map((args) => String(args[0]));
+          const invalidLine = lines.find((l) => l.includes('"step":"breaker_req_per_min_invalid"'));
+          if (!invalidLine) throw new Error('expected a breaker_req_per_min_invalid log line');
+          const parsed = JSON.parse(invalidLine.trim());
+          expect(parsed.previous_live_requests_total).toBe(100);
+          expect(parsed.current_live_requests_total).toBe(50);
+
+          const batchDoneLines = lines
+            .filter((l) => l.includes('"step":"batch_done"'))
+            .map((l) => JSON.parse(l.trim()));
+          const last = batchDoneLines[batchDoneLines.length - 1];
+          expect(last.discogs_req_per_min_measured).toBeNull();
+          // Still tracks the latest reading (50), not stuck at the stale 100.
+          expect(last.discogs_live_requests_total).toBe(50);
+        } finally {
+          writeSpy.mockRestore();
+          await closeLogger();
+        }
       });
 
-      expect(result.totals.scanned).toBe(5);
-      expect(checkDiscogsBreaker).toHaveBeenCalledTimes(1);
+      it('D2: a failed/unconfigured probe between two valid ones does NOT inflate the next req/min figure (paired timestamp+counter advance together)', async () => {
+        // probe1: closed+100 @ t=0. probe2: probe_error (no counter) @
+        // t=30000. probe3: closed+115 @ t=60000. The correct window for
+        // the rate is probe1->probe3 (60s, 15 requests = 15/min) — NOT
+        // probe2->probe3 (30s, 15 requests = 30/min), which is what an
+        // unpaired implementation would report by wrongly treating
+        // probe2's timestamp as the baseline despite it carrying no count.
+        const checkDiscogsBreaker = jest
+          .fn<CheckDiscogsBreakerFn>()
+          .mockResolvedValueOnce(breakerResult('closed', 100))
+          .mockResolvedValueOnce({ outcome: 'probe_error', liveRequestsTotal: null, error: 'timeout' })
+          .mockResolvedValueOnce(breakerResult('closed', 115));
+        const buildWorkList = injectWorkList([
+          [10, 6],
+          [20, 5],
+          [30, 4],
+        ]);
+        (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10), rowFor(20), rowFor(30)]);
+
+        const result = await runBackfill({
+          lookup,
+          enrich,
+          batchSize: 3,
+          throttleMs: 0,
+          liveActivityLookbackSeconds: 0,
+          checkDiscogsBreaker,
+          breakerPauseMs: 0,
+          breakerProbeIntervalMs: 1,
+          breakerNow: queueClock(0, 0, 30_000, 30_000, 60_000, 60_000),
+          playFloor: 5,
+          floorRecencyDays: 7,
+          buildWorkList,
+        });
+
+        expect(result.totals.scanned).toBe(3);
+        expect(checkDiscogsBreaker).toHaveBeenCalledTimes(3);
+      });
     });
 
-    it('logs discogs_breaker_state / discogs_live_requests_total / discogs_req_per_min_measured on batch_done, from measured live_requests_total deltas', async () => {
+    it('logs discogs_breaker_probe_outcome / discogs_live_requests_total / discogs_req_per_min_measured / discogs_breaker_probe_at_ms on batch_done (BS#1995 review S5 rename + D3 timestamp)', async () => {
       const initLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).initLogger;
       const closeLogger = (await import('../../../../jobs/flowsheet-metadata-backfill/logger')).closeLogger;
       initLogger({ repo: 'Backend-Service', tool: 'test', runId: 'run-id-breaker-log' });
       const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
-      // Deterministic, strictly-increasing clock so the requests-per-minute
-      // math (a delta over elapsed wall-clock time) can never land on a
-      // same-millisecond zero-elapsed read and report null flakily — every
-      // Date.now() call anywhere in this run (not just the breaker probe)
-      // advances the same shared tick.
-      let tick = 0;
-      const dateNowSpy = jest.spyOn(Date, 'now').mockImplementation(() => 1_700_000_000_000 + tick++ * 1000);
 
       try {
-        // Two batches; live_requests_total climbs 100 -> 130 between probes.
+        // Two rows in one batch; live_requests_total climbs 100 -> 130
+        // across a clean 60s window (0 -> 60000) for an exact 30 req/min.
         const checkDiscogsBreaker = jest
           .fn<CheckDiscogsBreakerFn>()
           .mockResolvedValueOnce(breakerResult('closed', 100))
@@ -1560,16 +1703,18 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
           [10, 4],
           [20, 3],
         ]);
-        (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10)]).mockResolvedValueOnce([rowFor(20)]);
+        (db.execute as jest.Mock).mockResolvedValueOnce([rowFor(10), rowFor(20)]);
 
         await runBackfill({
           lookup,
           enrich,
-          batchSize: 1,
+          batchSize: 2,
           throttleMs: 0,
           liveActivityLookbackSeconds: 0,
           checkDiscogsBreaker,
           breakerPauseMs: 0,
+          breakerProbeIntervalMs: 1,
+          breakerNow: queueClock(0, 0, 60_000, 60_000),
           playFloor: 5,
           floorRecencyDays: 7,
           buildWorkList,
@@ -1577,20 +1722,16 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
 
         const lines = writeSpy.mock.calls.map((args) => String(args[0]));
         const batchDoneLines = lines.filter((l) => l.includes('"step":"batch_done"')).map((l) => JSON.parse(l.trim()));
-        expect(batchDoneLines).toHaveLength(2);
+        expect(batchDoneLines).toHaveLength(1);
 
-        // First batch: no prior probe to diff against.
-        expect(batchDoneLines[0].discogs_breaker_state).toBe('closed');
-        expect(batchDoneLines[0].discogs_live_requests_total).toBe(100);
-        expect(batchDoneLines[0].discogs_req_per_min_measured).toBeNull();
-
-        // Second batch: a real delta is measurable (exact figure depends on
-        // wall-clock elapsed between probes; just pin sign + presence).
-        expect(batchDoneLines[1].discogs_live_requests_total).toBe(130);
-        expect(typeof batchDoneLines[1].discogs_req_per_min_measured).toBe('number');
-        expect(batchDoneLines[1].discogs_req_per_min_measured).toBeGreaterThan(0);
+        const line = batchDoneLines[0];
+        expect(line.discogs_breaker_probe_outcome).toBe('closed');
+        expect(line.discogs_live_requests_total).toBe(130);
+        expect(line.discogs_req_per_min_measured).toBe(30);
+        expect(line.discogs_breaker_probe_at_ms).toBe(60_000);
+        // Renamed field is gone.
+        expect(line).not.toHaveProperty('discogs_breaker_state');
       } finally {
-        dateNowSpy.mockRestore();
         writeSpy.mockRestore();
         await closeLogger();
       }
@@ -1631,7 +1772,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
           enrich,
           throttleMs: 0,
           liveActivityLookbackSeconds: 0,
-          breakerProbeIntervalBatches: 0,
+          breakerProbeIntervalMs: 0,
           cacheStats,
           playFloor: 5,
           floorRecencyDays: 7,
@@ -1681,7 +1822,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
           enrich,
           throttleMs: 0,
           liveActivityLookbackSeconds: 0,
-          breakerProbeIntervalBatches: 0,
+          breakerProbeIntervalMs: 0,
           playFloor: 5,
           floorRecencyDays: 7,
           buildWorkList,
@@ -1732,7 +1873,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
             enrich,
             throttleMs: 0,
             liveActivityLookbackSeconds: 0,
-            breakerProbeIntervalBatches: 0,
+            breakerProbeIntervalMs: 0,
             cacheStats,
             playFloor: 5,
             floorRecencyDays: 7,
@@ -1788,7 +1929,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
           enrich,
           throttleMs: THROTTLE,
           liveActivityLookbackSeconds: 0,
-          breakerProbeIntervalBatches: 0,
+          breakerProbeIntervalMs: 0,
           playFloor: 5,
           floorRecencyDays: 7,
           buildWorkList,
@@ -1824,7 +1965,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
       enrich: enrichWithRaces,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       playFloor: 5,
       floorRecencyDays: 7,
       buildWorkList,
@@ -1867,7 +2008,7 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
         batchSize: 2,
         throttleMs: 0,
         liveActivityLookbackSeconds: 0,
-        breakerProbeIntervalBatches: 0,
+        breakerProbeIntervalMs: 0,
         playFloor: 5,
         floorRecencyDays: 7,
         buildWorkList,
@@ -1921,7 +2062,7 @@ describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       buildWorkList,
     });
 
@@ -1939,7 +2080,7 @@ describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       buildWorkList,
       buildSelfHealCandidates,
     });
@@ -1960,7 +2101,7 @@ describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       buildWorkList,
       buildSelfHealCandidates,
     });
@@ -1984,7 +2125,7 @@ describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       buildWorkList,
       buildSelfHealCandidates,
       selfHealEnrich,
@@ -2024,7 +2165,7 @@ describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       buildWorkList,
       buildSelfHealCandidates,
     });
@@ -2048,7 +2189,7 @@ describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       buildWorkList,
       buildSelfHealCandidates,
       selfHealEnrich,
@@ -2074,7 +2215,7 @@ describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       buildWorkList,
       buildSelfHealCandidates,
       selfHealEnrich,
@@ -2101,7 +2242,7 @@ describe('W4 rotation self-heal pass (BS#895 / epic #1810)', () => {
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 60,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       liveActivityPauseMs: 0,
       checkLiveActivity,
       buildWorkList,
@@ -2147,7 +2288,7 @@ describe('stranded-past-recovery-window observability (BS#895 review finding #4)
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       buildWorkList,
     });
 
@@ -2164,7 +2305,7 @@ describe('stranded-past-recovery-window observability (BS#895 review finding #4)
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       buildWorkList,
       countStrandedPastRecoveryWindow,
     });
@@ -2183,7 +2324,7 @@ describe('stranded-past-recovery-window observability (BS#895 review finding #4)
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       recoveryWindowHours: 9,
       buildWorkList,
       countStrandedPastRecoveryWindow,
@@ -2211,7 +2352,7 @@ describe('stranded-past-recovery-window observability (BS#895 review finding #4)
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       buildWorkList,
       buildSelfHealCandidates,
       countStrandedPastRecoveryWindow,
@@ -2246,7 +2387,7 @@ describe('stranded-past-recovery-window observability (BS#895 review finding #4)
       enrich,
       throttleMs: 0,
       liveActivityLookbackSeconds: 0,
-      breakerProbeIntervalBatches: 0,
+      breakerProbeIntervalMs: 0,
       playFloor: 5,
       floorRecencyDays: 7,
       buildWorkList,

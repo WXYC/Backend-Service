@@ -40,6 +40,16 @@ describe('jobs/flowsheet-metadata-backfill/lml-fetch (BS#994 / BS#1180 timeout k
     }));
     jest.doMock('@wxyc/lml-client', () => ({
       lookupMetadata: mockLookup,
+      // BS#1995 review S6: lml-fetch.ts's cache-exclusion guard now also
+      // calls shedReasonOf. Stubbed inline (not via jest.requireActual —
+      // that reintroduces the exact policy.ts/envInt module-load chain
+      // this mock exists to dodge) with the same two-outcome discriminator
+      // `@wxyc/lml-client`'s real implementation uses; pinned independently
+      // by tests/unit/shared/lml-client's own suite.
+      shedReasonOf: (response: { outcome?: string }) =>
+        response.outcome === 'shed_limiter_saturated' || response.outcome === 'shed_breaker_open'
+          ? response.outcome
+          : undefined,
     }));
     // Module evaluates env at load — must doMock + import after env setup.
     return import('../../../../jobs/flowsheet-metadata-backfill/lml-fetch.js');
@@ -198,6 +208,16 @@ describe('jobs/flowsheet-metadata-backfill/lml-fetch (run-scoped (artist, album)
     }));
     jest.doMock('@wxyc/lml-client', () => ({
       lookupMetadata: mockLookup,
+      // BS#1995 review S6: lml-fetch.ts's cache-exclusion guard now also
+      // calls shedReasonOf. Stubbed inline (not via jest.requireActual —
+      // that reintroduces the exact policy.ts/envInt module-load chain
+      // this mock exists to dodge) with the same two-outcome discriminator
+      // `@wxyc/lml-client`'s real implementation uses; pinned independently
+      // by tests/unit/shared/lml-client's own suite.
+      shedReasonOf: (response: { outcome?: string }) =>
+        response.outcome === 'shed_limiter_saturated' || response.outcome === 'shed_breaker_open'
+          ? response.outcome
+          : undefined,
     }));
     return import('../../../../jobs/flowsheet-metadata-backfill/lml-fetch.js');
   };
@@ -360,6 +380,56 @@ describe('jobs/flowsheet-metadata-backfill/lml-fetch (run-scoped (artist, album)
     expect(mockLookup).toHaveBeenCalledTimes(2);
     expect(second.cacheHit).toBe(false);
     expect(cache.stats()).toEqual({ size: 0, hits: 0, misses: 0, overwrites: 0 });
+  });
+
+  it('does NOT cache a shedReasonOf-shaped response (outcome: shed_breaker_open, no degraded_reason) (BS#1995 review S6)', async () => {
+    // The BS#1748 limiter shed shape carries no degraded_reason at all —
+    // only an `outcome` discriminator. This job's limiter is unbounded
+    // today so no shed can reach here yet, but the guard must already
+    // recognize it so a future bounded-limiter swap doesn't silently
+    // reopen the caching half of the incident this ticket closes.
+    const shedResponse = {
+      ...emptyResponse,
+      outcome: 'shed_breaker_open' as const,
+    };
+    const mockLookup = jest.fn().mockResolvedValue(shedResponse);
+    const fetchMod = await loadModule(mockLookup);
+    const cache = await freshCache(fetchMod);
+
+    const first = await fetchMod.lookupMetadata('Shed', 'Album', 'a');
+    expect(first.cacheHit).toBe(false);
+    expect(cache.stats()).toEqual({ size: 0, hits: 0, misses: 0, overwrites: 0 });
+
+    const second = await fetchMod.lookupMetadata('Shed', 'Album', 'b');
+    expect(mockLookup).toHaveBeenCalledTimes(2);
+    expect(second.cacheHit).toBe(false);
+    expect(cache.stats()).toEqual({ size: 0, hits: 0, misses: 0, overwrites: 0 });
+  });
+
+  it('DOES cache an upstream_unavailable response that carries a populated match (BS#1995 review B2)', async () => {
+    // LML's degraded-response builder still returns whatever the tail legs
+    // already produced before the breaker tripped — fetch_artwork runs
+    // BEFORE enrich_metadata/identity resolution, both of which can raise
+    // the breaker-open error. A response like this is a genuine, cacheable
+    // match, not an unanswered shed; excluding it from the cache would
+    // needlessly cost every sibling row of the pair an LML round-trip.
+    const upstreamUnavailableWithMatch = {
+      ...fullResponse,
+      degraded: true,
+      degraded_reason: 'upstream_unavailable' as const,
+    };
+    const mockLookup = jest.fn().mockResolvedValue(upstreamUnavailableWithMatch);
+    const fetchMod = await loadModule(mockLookup);
+    const cache = await freshCache(fetchMod);
+
+    const first = await fetchMod.lookupMetadata('Sonic Youth', 'Daydream Nation', 'Teen Age Riot');
+    expect(first.cacheHit).toBe(false);
+    expect(cache.stats()).toEqual({ size: 1, hits: 0, misses: 1, overwrites: 0 });
+
+    const second = await fetchMod.lookupMetadata('Sonic Youth', 'Daydream Nation', 'Silver Rocket');
+    expect(mockLookup).toHaveBeenCalledTimes(1); // second call was a cache hit
+    expect(second.cacheHit).toBe(true);
+    expect(second.response.results[0].artwork?.release_id).toBe(555);
   });
 
   it('a real no-match on the same key as a prior timeout response gets cached (the timeout did not block future caching)', async () => {

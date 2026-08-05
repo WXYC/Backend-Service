@@ -29,7 +29,7 @@ import {
   stampDeadLetter,
   type EnrichRow,
 } from '../../../../jobs/flowsheet-metadata-backfill/enrich';
-import type { LookupResponse } from '@wxyc/lml-client';
+import type { GatedLookupResponse, LookupResponse } from '@wxyc/lml-client';
 
 type SqlLike = {
   sql?: string | string[];
@@ -446,6 +446,88 @@ describe('applyEnrichment (BS#1995 Arm 3) — upstream_unavailable classificatio
     expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
     const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(setArgs.metadata_status).toBe('enriched_no_match');
+  });
+
+  // BS#1995 review B2: LML's degraded-response builder still returns
+  // whatever the tail legs already produced BEFORE the breaker tripped —
+  // fetch_artwork runs before enrich_metadata/identity resolution, both of
+  // which can raise the breaker-open error. Discarding a populated match
+  // here would silently downgrade a real answer to a retry and add load to
+  // the very Discogs ceiling this PR protects. Only skip when there is no
+  // usable verdict.
+  it('B2: degraded_reason upstream_unavailable WITH a populated match proceeds as a normal enriched_match (unlinked row)', async () => {
+    const upstreamUnavailableWithMatch: LookupResponse = {
+      results: [
+        {
+          library_item: { id: 1 },
+          artwork: { release_id: 999, release_url: 'https://www.discogs.com/release/999' },
+        },
+      ],
+      search_type: 'direct',
+      degraded: true,
+      degraded_reason: 'upstream_unavailable',
+    };
+
+    const outcome = await applyEnrichment(baseRow, upstreamUnavailableWithMatch);
+
+    expect(outcome).toBe('enriched_match');
+    expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setArgs.metadata_status).toBe('enriched_match');
+    expect(setArgs.discogs_url).toBe('https://www.discogs.com/release/999');
+  });
+
+  it('B2: degraded_reason upstream_unavailable WITH a populated match proceeds as a normal enriched_match (linked row — album_metadata UPSERT)', async () => {
+    const upstreamUnavailableWithMatch: LookupResponse = {
+      results: [
+        {
+          library_item: { id: 1 },
+          artwork: { release_id: 999, release_url: 'https://www.discogs.com/release/999' },
+        },
+      ],
+      search_type: 'direct',
+      degraded: true,
+      degraded_reason: 'upstream_unavailable',
+    };
+
+    const outcome = await applyEnrichment(linkedRow, upstreamUnavailableWithMatch);
+
+    expect(outcome).toBe('enriched_match');
+    expect(mockDb.insert).toHaveBeenCalledWith(album_metadata);
+  });
+
+  // BS#1995 review S6: the BS#1748 limiter shed shape carries no
+  // degraded_reason at all — only an outcome discriminator. Not reachable
+  // from this job's unbounded limiter today, but the classification must
+  // already recognize it so a future bounded-limiter swap can't silently
+  // reopen the exact incident this ticket closes.
+  it('S6: a shedReasonOf-shaped response (outcome: shed_breaker_open, no degraded_reason, no artwork) is also skipped', async () => {
+    const shedResponse: GatedLookupResponse = {
+      results: [],
+      search_type: 'none',
+      timeout: false,
+      degraded: false,
+      outcome: 'shed_breaker_open',
+    };
+
+    const outcome = await applyEnrichment(baseRow, shedResponse);
+
+    expect(outcome).toBe('upstream_unavailable_skipped');
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  it('S6: a shedReasonOf-shaped response WITH a populated match still proceeds as enriched_match', async () => {
+    const shedResponseWithMatch: GatedLookupResponse = {
+      results: [
+        { library_item: { id: 1 }, artwork: { release_id: 42, release_url: 'https://www.discogs.com/release/42' } },
+      ],
+      search_type: 'direct',
+      outcome: 'shed_limiter_saturated',
+    };
+
+    const outcome = await applyEnrichment(baseRow, shedResponseWithMatch);
+
+    expect(outcome).toBe('enriched_match');
   });
 });
 
