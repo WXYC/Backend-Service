@@ -26,23 +26,21 @@
 
 import { type LmlLimiter, Semaphore, TokenBucket, createLmlLimiter as createSharedLmlLimiter } from '@wxyc/lml-client';
 
+import { parseEnvInt } from './env-int.js';
+
 export { type LmlLimiter, Semaphore, TokenBucket };
 
-const envInt = (name: string, fallback: number): number => {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') return fallback;
-  // Number(raw) (not parseInt) so partial-parse strings like "20banana"
-  // surface as NaN and get rejected, instead of silently coercing to 20.
-  // Matches the contract in `@wxyc/lml-client`.
-  const parsed = Number(raw);
-  if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  // Surface misconfigurations at startup so an operator who set `=0`
-  // intending to disable the limiter sees their value was rejected
-  // instead of silently falling back. A 0-permit semaphore would
-  // deadlock, which is why we don't accept it.
-  console.warn(`lml-limiter: ${name}=${raw} is invalid (must be positive number); using fallback ${fallback}`);
-  return fallback;
-};
+// Surface misconfigurations at startup so an operator who set `=0`
+// intending to disable the limiter sees their value was rejected instead
+// of silently falling back. A 0-permit semaphore would deadlock, which is
+// why we don't accept it (bound: 'positive').
+const envInt = (name: string, fallback: number): number =>
+  parseEnvInt(
+    name,
+    fallback,
+    'positive',
+    (raw) => `lml-limiter: ${name}=${raw} is invalid (must be positive number); using fallback ${fallback}`
+  );
 
 /**
  * Wraps `@wxyc/lml-client.createLmlLimiter` so callers can omit config and

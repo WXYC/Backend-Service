@@ -111,7 +111,7 @@ const runOneRow = () => {
     // BS#1995 Arm 2: disable the breaker-gate probe — this test isn't
     // about it, and skipping it keeps the run from touching the real
     // `fetch` default.
-    breakerProbeIntervalBatches: 0,
+    breakerProbeIntervalMs: 0,
     playFloor: 5,
     floorRecencyDays: 7,
   });
@@ -159,7 +159,7 @@ describe('flowsheet-metadata-backfill run.totals span (BS#1563 op + enrich_error
     expect(attrs['backfill.self_heal_lml_error']).toBe(0);
     expect(attrs['backfill.self_heal_enrich_error']).toBe(0);
     // BS#1995: no upstream_unavailable response in this run, and the
-    // breaker gate is disabled (breakerProbeIntervalBatches: 0), so every
+    // breaker gate is disabled (breakerProbeIntervalMs: 0), so every
     // new bucket stays 0 — present and numeric, never absent.
     expect(attrs['backfill.upstream_unavailable_skipped']).toBe(0);
     expect(attrs['backfill.self_heal_upstream_unavailable_skipped']).toBe(0);

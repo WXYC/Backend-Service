@@ -30,21 +30,26 @@
  *     pacing changes or schema changes. Cache is consulted before the
  *     LML call; on miss the call result is stored EXCEPT when LML
  *     signaled a cascade timeout (`response.timeout === true`) or
- *     (BS#1995 Arm 3) a breaker-open shed (`degraded_reason:
- *     'upstream_unavailable'`) — those responses are NOT cached, so
- *     sibling rows of the same `(artist, album)` later in the same run
- *     still each call LML (each gets its own chance to land while LML
- *     recovers), and any NEW flowsheet rows of that pair in future cron
- *     runs start with a fresh cache and a fresh LML call. The
- *     originating row of a cascade timeout is still drained as
- *     `enriched_no_match` by `applyEnrichment` (intentional per the 35 s
- *     timeout budget above — the alternative is the row loops every cron
- *     pass), so in that case this guard only saves peers in this run and
- *     successor rows in future runs, not the row that received the
- *     timeout body itself. The originating row of a breaker-open shed is
- *     NOT drained at all — `applyEnrichment` refuses to write any verdict
- *     for it (see `enrich.ts`'s `upstream_unavailable_skipped` outcome) —
- *     so that row is retried on a later sweep too. On hit, per-track URL fields are stripped at the
+ *     (BS#1995 Arm 3, tightened after review) an UNANSWERED breaker-open
+ *     shed — `degraded_reason: 'upstream_unavailable'` or a `shedReasonOf`
+ *     match, AND no usable artwork (`extractArtwork(response) === null`;
+ *     see `isUnansweredShed` below and its `enrich.ts` twin) — those
+ *     responses are NOT cached, so sibling rows of the same
+ *     `(artist, album)` later in the same run still each call LML (each
+ *     gets its own chance to land while LML recovers), and any NEW
+ *     flowsheet rows of that pair in future cron runs start with a fresh
+ *     cache and a fresh LML call. A breaker-open response that DOES carry
+ *     a match (LML's tail legs can complete before the breaker trips) is
+ *     cached normally, same as any other match. The originating row of a
+ *     cascade timeout is still drained as `enriched_no_match` by
+ *     `applyEnrichment` (intentional per the 35 s timeout budget above —
+ *     the alternative is the row loops every cron pass), so in that case
+ *     this guard only saves peers in this run and successor rows in
+ *     future runs, not the row that received the timeout body itself. The
+ *     originating row of a genuinely unanswered breaker-open shed is NOT
+ *     drained at all — `applyEnrichment` refuses to write any verdict for
+ *     it (see `enrich.ts`'s `upstream_unavailable_skipped` outcome) — so
+ *     that row is retried on a later sweep too. On hit, per-track URL fields are stripped at the
  *     cache boundary (BS#1185 search URLs + BS#1192 apple_music_url
  *     are track-aware on LML's side); enrich.ts's existing `??`
  *     fallback drops through to per-row synthesis for the search URLs.
@@ -63,21 +68,25 @@
  * (#888 regression), so this shim doesn't repeat that assertion.
  */
 
-import { lookupMetadata as sharedLookupMetadata, type LookupResponse } from '@wxyc/lml-client';
+import {
+  lookupMetadata as sharedLookupMetadata,
+  shedReasonOf,
+  type GatedLookupResponse,
+  type LookupResponse,
+} from '@wxyc/lml-client';
 
+import { parseEnvInt } from './env-int.js';
+import { extractArtwork } from './enrich.js';
 import { defaultLmlLimiter } from './lml-limiter.js';
 import { defaultLookupCache, type LookupCache } from './lookup-cache.js';
 
-const envInt = (name: string, fallback: number): number => {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') return fallback;
-  // Number(raw) (not parseInt) so partial-parse strings like "8000banana"
-  // surface as NaN and get rejected instead of silently coercing.
-  const parsed = Number(raw);
-  if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  console.warn(`lml-fetch: ${name}=${raw} is invalid (must be positive number); using fallback ${fallback}`);
-  return fallback;
-};
+const envInt = (name: string, fallback: number): number =>
+  parseEnvInt(
+    name,
+    fallback,
+    'positive',
+    (raw) => `lml-fetch: ${name}=${raw} is invalid (must be positive number); using fallback ${fallback}`
+  );
 
 const TIMEOUT_MS = envInt('BACKFILL_LML_PER_CALL_TIMEOUT_MS', 35_000);
 
@@ -116,20 +125,38 @@ export const getLookupCache = (): LookupCache => activeCache;
 const hasUpstreamTimeout = (response: LookupResponse): boolean => response.timeout === true;
 
 /**
- * BS#1995 Arm 3: `degraded_reason: 'upstream_unavailable'` means LML's
- * Discogs breaker was open and it never got to ask — same "transient signal
- * about LML load, not an answer about (artist, album)" shape as
- * `hasUpstreamTimeout` above, and for the same reason must not be cached.
- * Caching one would lock in an unanswered-not-no-match verdict for every
- * subsequent row of the same (artist, album) for the rest of the run —
- * exactly the kind of silent freeze this ticket exists to close, just at
- * the cache layer instead of the write layer. `enrich.ts:applyEnrichment`
- * separately refuses to write a terminal verdict for this response shape;
- * this guard keeps a poisoned entry from ever reaching a sibling row's
- * cache hit in the first place.
+ * BS#1995 Arm 3 (tightened after review — B2 + S6): a breaker-open response
+ * is only a "transient signal about LML load, not an answer" — the same
+ * shape as `hasUpstreamTimeout` above, and for the same reason must not be
+ * cached — when it carries no usable match. LML's degraded-response builder
+ * still returns whatever the tail legs already produced before the breaker
+ * tripped (`fetch_artwork` runs BEFORE `enrich_metadata`/identity
+ * resolution, both of which can raise the breaker-open error), so a
+ * `degraded_reason: 'upstream_unavailable'` response CAN carry a complete,
+ * cacheable match. Caching a genuinely unanswered one would lock in an
+ * unanswered-not-no-match verdict for every subsequent row of the same
+ * (artist, album) for the rest of the run; `enrich.ts:applyEnrichment`
+ * mirrors this exact `artwork === null` gate so the two decisions never
+ * diverge (a response this guard excludes from the cache is also a
+ * response `applyEnrichment` refuses to write a verdict for, and vice
+ * versa).
+ *
+ * S6: also checks `shedReasonOf` — the shed shape `@wxyc/lml-client`'s
+ * limiter returns when a call is shed (queue saturated or breaker open,
+ * BS#1748) carries no `degraded_reason` at all, only an `outcome`
+ * discriminator. This job's limiter is unbounded today so no shed can
+ * reach here, but the moment a bounded shape is applied to this caller
+ * every shed would otherwise silently re-poison the cache exactly like the
+ * incident this ticket closes.
  */
-const isUpstreamUnavailable = (response: LookupResponse): boolean =>
-  response.degraded_reason === 'upstream_unavailable';
+const isUnansweredShed = (response: LookupResponse): boolean => {
+  // Safe cast, not a type-hole — see enrich.ts's identical cast for why:
+  // `lookupMetadata` already resolves `GatedLookupResponse` under the hood;
+  // this module's local `LookupResponse` typing just doesn't carry it.
+  const isShed =
+    response.degraded_reason === 'upstream_unavailable' || shedReasonOf(response as GatedLookupResponse) !== undefined;
+  return isShed && extractArtwork(response) === null;
+};
 
 /**
  * Result of a lookup, with provenance: did we serve from cache?
@@ -161,7 +188,7 @@ export const lookupMetadata = async (
     discogsUnavailable,
   });
 
-  if (!hasUpstreamTimeout(response) && !isUpstreamUnavailable(response)) {
+  if (!hasUpstreamTimeout(response) && !isUnansweredShed(response)) {
     activeCache.set(artist, album, response);
   }
   return { response, cacheHit: false };

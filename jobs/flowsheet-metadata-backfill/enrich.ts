@@ -22,11 +22,16 @@
  *     whatever `metadata_status` it entered with (`'pending'` for the main
  *     sweep, `'enriched_no_match'` for the W4 self-heal re-attempt — see
  *     `fromStatus` below) so the next sweep retries it.
- *   - `degraded_reason: 'upstream_unavailable'` (BS#1995 Arm 3): no write at
- *     all. LML's Discogs breaker was open and it never got to ask — writing
- *     a terminal `enriched_no_match` here is the 2026-08-03/04 incident.
- *     Returns `'upstream_unavailable_skipped'`; the row stays at whatever
- *     `metadata_status` it entered with, same as an LML throw.
+ *   - `degraded_reason: 'upstream_unavailable'` or a `shedReasonOf` match,
+ *     WITHOUT a usable match (BS#1995 Arm 3, tightened after review — B2 +
+ *     S6): no write at all. LML's Discogs breaker was open and it never
+ *     got to ask — writing a terminal `enriched_no_match` here is the
+ *     2026-08-03/04 incident. Returns `'upstream_unavailable_skipped'`;
+ *     the row stays at whatever `metadata_status` it entered with, same as
+ *     an LML throw. WITH a usable match (LML's tail legs can complete
+ *     before the breaker trips), falls through to the normal match path
+ *     below instead — discarding a real answer would be worse than doing
+ *     nothing.
  *
  * Idempotency guard (BS#895 / Epic C C6): the flowsheet WHERE narrows by
  * `id = $row.id AND metadata_status = $fromStatus`. Before BS#895 this
@@ -68,7 +73,7 @@
 
 import { and, eq, sql } from 'drizzle-orm';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
-import type { DiscogsMatchResult, LookupResponse } from '@wxyc/lml-client';
+import { shedReasonOf, type DiscogsMatchResult, type GatedLookupResponse, type LookupResponse } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
 
 /**
@@ -207,37 +212,65 @@ export const applyEnrichment = async (
   opts: { fromStatus?: EnrichFromStatus } = {}
 ): Promise<EnrichOutcome> => {
   const fromStatus = opts.fromStatus ?? 'pending';
+  const artwork = extractArtwork(response);
 
-  // BS#1995 Arm 3 (narrow classification fix): LML's Discogs circuit breaker
-  // being open surfaces on this response's TAIL legs (artwork / enrichment /
-  // identity — `lookup/orchestrator.py:1251`/`:1282`) as
-  // `degraded: true, degraded_reason: 'upstream_unavailable'` — LML never
-  // got to ask Discogs at all. Writing a terminal `enriched_no_match` here
-  // is exactly the 2026-08-03/04 incident: a breaker-open response is
-  // indistinguishable from a genuine no-match at the `results` level, so
-  // 17 hours of flapping silently froze 26,387 rows. Skip the write
-  // entirely — no status flip, no `metadata_attempt_at` stamp, no
-  // `album_metadata` UPSERT — so the row stays at whatever `fromStatus` it
-  // entered this call with (normally `'pending'`) and is retried on a later
-  // sweep, by which point the orchestrator's breaker gate
-  // (`orchestrate.ts`'s `waitForClosedBreaker`) should already be pausing
-  // the drain rather than continuing to burn through the worklist.
+  // BS#1995 Arm 3 (narrow classification fix, tightened after review — B2 +
+  // S6): LML's Discogs circuit breaker being open surfaces on this
+  // response's TAIL legs (artwork / enrichment / identity —
+  // `lookup/orchestrator.py:1251`/`:1282`) as `degraded: true,
+  // degraded_reason: 'upstream_unavailable'`, and the shared client's
+  // bounded-limiter shed shape (BS#1748, not reachable from this job's
+  // unbounded limiter today, but tested defensively) as an `outcome`
+  // discriminator via `shedReasonOf` — LML never got to ask Discogs at all.
+  // Writing a terminal `enriched_no_match` here is exactly the
+  // 2026-08-03/04 incident: a breaker-open response is indistinguishable
+  // from a genuine no-match at the `results` level, so 17 hours of flapping
+  // silently froze 26,387 rows.
+  //
+  // ONLY skip when there is no usable verdict: LML's degraded-response
+  // builder still returns whatever the tail legs already produced BEFORE
+  // the breaker tripped (`fetch_artwork` runs before
+  // `enrich_metadata`/identity resolution, both of which can raise the
+  // breaker-open error), so a shed/degraded response CAN carry a complete,
+  // trustworthy match. Discarding a populated match here would silently
+  // downgrade a real answer to a retry and add load to the exact Discogs
+  // ceiling this PR protects — worse than doing nothing. When `artwork` IS
+  // present, fall through to the normal match path below exactly as if the
+  // response weren't degraded at all.
+  //
+  // When there's no usable verdict, skip the write entirely — no status
+  // flip, no `metadata_attempt_at` stamp, no `album_metadata` UPSERT — so
+  // the row stays at whatever `fromStatus` it entered this call with
+  // (normally `'pending'`) and is retried on a later sweep, by which point
+  // the orchestrator's breaker gate (`orchestrate.ts`'s
+  // `waitForClosedBreaker`) should already be pausing the drain rather than
+  // continuing to burn through the worklist.
   //
   // Deliberately narrower than the sibling shapes below, which all stay
-  // terminal: LML's SEARCH leg (`core/search.py:953`) swallows the same
-  // breaker-open condition into `Outcome.empty()` with no marker at all —
-  // indistinguishable from a genuine no-match today (tracked as a separate
-  // LML-side ticket; not solved here) — and `degraded_reason:
-  // 'deadline_exceeded'` / `response.timeout === true` are both documented,
-  // deliberate terminal outcomes for this class-5 offline-drain caller (see
-  // `shared/lml-client/src/policy.ts`'s BS#1914 decision record and
-  // `lml-fetch.ts`'s BS#1064/BS#1180 timeout-budget history) — do not widen
-  // this branch to catch them.
-  if (response.degraded_reason === 'upstream_unavailable') {
+  // terminal regardless of artwork: LML's SEARCH leg (`core/search.py:953`)
+  // swallows the same breaker-open condition into `Outcome.empty()` with no
+  // marker at all — indistinguishable from a genuine no-match today
+  // (tracked as a separate LML-side ticket; not solved here) — and
+  // `degraded_reason: 'deadline_exceeded'` / `response.timeout === true`
+  // are both documented, deliberate terminal outcomes for this class-5
+  // offline-drain caller (see `shared/lml-client/src/policy.ts`'s BS#1914
+  // decision record and `lml-fetch.ts`'s BS#1064/BS#1180 timeout-budget
+  // history) — do not widen this branch to catch them.
+  // The cast is safe, not a type-hole: `@wxyc/lml-client`'s `lookupMetadata`
+  // already resolves `GatedLookupResponse` (`LookupResponse` plus the
+  // optional shed `outcome` discriminator) under the hood — `lml-fetch.ts`'s
+  // local `LookupResult` just narrows the declared type to the base
+  // `LookupResponse`. Mirrors the established pattern at
+  // `apps/backend/services/lml/lookup-coordinator.ts` (`fetchUncached`'s
+  // return type), which types its own result as `GatedLookupResponse`
+  // specifically so `shedReasonOf` can read `.outcome` without a cast.
+  const shedReason = shedReasonOf(response as GatedLookupResponse);
+  const isUnansweredShed =
+    (response.degraded_reason === 'upstream_unavailable' || shedReason !== undefined) && artwork === null;
+  if (isUnansweredShed) {
     return 'upstream_unavailable_skipped';
   }
 
-  const artwork = extractArtwork(response);
   const searchUrls = synthesizeSearchUrls(row);
 
   // Status-guarded flowsheet UPDATE used on the linked path. The status

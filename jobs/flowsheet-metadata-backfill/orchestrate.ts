@@ -116,9 +116,11 @@ import { applyEnrichment as defaultApplyEnrichment, stampDeadLetter as defaultSt
 import type { LookupResult } from './lml-fetch.js';
 import {
   probeDiscogsBreaker as defaultProbeDiscogsBreaker,
+  resolveBreakerMaxPauseMs,
   resolveBreakerPauseMs,
-  resolveBreakerProbeIntervalBatches,
+  resolveBreakerProbeIntervalMs,
   shouldPauseForBreaker,
+  BreakerPauseCeilingExceededError,
   type BreakerProbeResult,
   type CheckDiscogsBreakerFn,
 } from './lml-health.js';
@@ -525,8 +527,9 @@ export type Totals = {
   self_heal_upstream_unavailable_skipped: number;
   // BS#1995 Arm 2: how many times the drain probed LML's `/health`
   // Discogs-breaker signal, and how many of those probes found a
-  // non-`closed` breaker and paused the batch. Probed once per batch (not
-  // per row) — see `orchestrate.ts`'s `waitForClosedBreaker`.
+  // non-`closed` breaker and paused the drain. Checked per row, but the
+  // underlying network call is throttled to at most once every
+  // `breakerProbeIntervalMs` — see `waitForClosedBreaker`'s doc comment.
   breaker_probes: number;
   breaker_pauses: number;
 };
@@ -927,17 +930,36 @@ export const runBackfill = async (opts: {
   checkLiveActivity?: CheckLiveActivityFn;
   /**
    * BS#1995 Arm 2. Low-duty-cycle gate on LML's `/health` Discogs breaker
-   * (`lml-health.ts`): probed once per batch (never per row — see
-   * `waitForClosedBreaker` below), a non-`closed` breaker pauses the drain
-   * for `breakerPauseMs` and re-probes rather than continuing to write
-   * verdicts. `job.ts` always wires the real `probeDiscogsBreaker` in
-   * production; tests inject a stub or omit it to exercise the default.
+   * (`lml-health.ts`). Checked on every row (a cheap `Date.now()` read —
+   * see `waitForClosedBreaker` below), but the actual `/health` network
+   * call only fires once `breakerProbeIntervalMs` has elapsed since the
+   * last one; a non-`closed` breaker pauses the drain for `breakerPauseMs`
+   * and re-probes rather than continuing to write verdicts. Unlike
+   * `buildSelfHealCandidates` / `countStrandedPastRecoveryWindow` below,
+   * `job.ts` does NOT explicitly pass this — production wiring happens
+   * entirely through this option's own `?? defaultProbeDiscogsBreaker`
+   * fallback a few lines down, the same way `checkLiveActivity` above gets
+   * its real implementation. Tests inject a stub to control probe timing/
+   * outcomes, or set `breakerProbeIntervalMs: 0` to disable the gate
+   * outright when a test doesn't care about it.
    */
   checkDiscogsBreaker?: CheckDiscogsBreakerFn;
-  /** How many batches elapse between breaker probes. `0` disables the gate entirely. */
-  breakerProbeIntervalBatches?: number;
+  /** Wall-clock ms between breaker probes. `0` disables the gate entirely. */
+  breakerProbeIntervalMs?: number;
   /** Sleep between re-probes while the breaker stays non-`closed`. */
   breakerPauseMs?: number;
+  /** BS#1995 review B3. Cumulative pause-time ceiling; `0` uncapped. Exceeding it throws `BreakerPauseCeilingExceededError`. */
+  breakerMaxPauseMs?: number;
+  /**
+   * Test-only clock seam for the breaker gate's OWN timing (probe cadence
+   * gating + the req/min pairing math) — defaults to the real `Date.now`.
+   * Deliberately scoped to just the breaker gate (not threaded through
+   * `worklist_built`'s unrelated `build_ms` timing or anything else in this
+   * function) so a test can drive fully deterministic probe-interval and
+   * rate-math scenarios without needing to account for every OTHER
+   * `Date.now()` call this function happens to make.
+   */
+  breakerNow?: () => number;
   cacheStats?: CacheStatsFn;
   playFloor?: number;
   floorRecencyDays?: number;
@@ -982,8 +1004,10 @@ export const runBackfill = async (opts: {
   const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
   const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
   const probeBreaker = opts.checkDiscogsBreaker ?? defaultProbeDiscogsBreaker;
-  const breakerProbeIntervalBatches = opts.breakerProbeIntervalBatches ?? resolveBreakerProbeIntervalBatches();
+  const breakerProbeIntervalMs = opts.breakerProbeIntervalMs ?? resolveBreakerProbeIntervalMs();
   const breakerPauseMs = opts.breakerPauseMs ?? resolveBreakerPauseMs();
+  const breakerMaxPauseMs = opts.breakerMaxPauseMs ?? resolveBreakerMaxPauseMs();
+  const breakerNow = opts.breakerNow ?? Date.now;
   const playFloor = opts.playFloor ?? resolvePlayFloor();
   const floorRecencyDays = opts.floorRecencyDays ?? resolveFloorRecencyDays();
   const graceMinutes = opts.graceMinutes ?? resolveGraceMinutes();
@@ -996,8 +1020,9 @@ export const runBackfill = async (opts: {
     partition: partition.description,
     live_activity_lookback_seconds: liveActivityLookbackSeconds,
     live_activity_pause_ms: liveActivityPauseMs,
-    breaker_probe_interval_batches: breakerProbeIntervalBatches,
+    breaker_probe_interval_ms: breakerProbeIntervalMs,
     breaker_pause_ms: breakerPauseMs,
+    breaker_max_pause_ms: breakerMaxPauseMs,
     play_floor: playFloor,
     floor_recency_days: floorRecencyDays,
     grace_minutes: graceMinutes,
@@ -1030,84 +1055,171 @@ export const runBackfill = async (opts: {
     breaker_pauses: 0,
   };
 
-  // BS#1995 Arm 2. Run-scoped breaker-gate state: how many batches have
-  // elapsed since the last probe (`breakerProbeIntervalBatches` gates how
-  // often `waitForClosedBreaker` actually calls `probeBreaker`), and the
-  // latest reading for the `batch_done` / `finished` log lines. `Date.now()`
-  // deltas against `discogs_live_requests_total` give a genuine measured
-  // req/min figure the process-local token bucket can't see (BS#1995's
-  // whole point — see `lml-health.ts`'s module docstring).
-  let breakerBatchesSinceProbe = 0;
-  let breakerLastLiveRequestsTotal: number | null = null;
-  let breakerLastProbeAtMs: number | null = null;
+  // BS#1995 Arm 2 (redesigned per review B1/B3/D1/D2/D3). Run-scoped
+  // breaker-gate state.
+  //
+  // `breakerLastProbeAttemptAtMs` gates HOW OFTEN a probe fires at all
+  // (B1: time-driven, checked cheaply on every row, not once per batch) —
+  // it advances on every ATTEMPT, success or failure, so an unreachable
+  // `/health` endpoint can't turn "probe at most every
+  // breakerProbeIntervalMs" into "probe every row" by never advancing.
+  //
+  // `breakerLastMeasurement` is a SEPARATE, PAIRED (timestamp, counter)
+  // reading used only for the req/min math (D2): it advances ONLY
+  // together, and ONLY on a probe that returned a real
+  // `discogs_live_requests_total`. Advancing the clock half of this pair
+  // on a failed/unconfigured probe made the NEXT successful probe's
+  // elapsed-time window longer than its counter delta and roughly doubled
+  // the reported rate — review caught this before it shipped.
+  let breakerLastProbeAttemptAtMs: number | null = null;
+  let breakerLastMeasurement: { atMs: number; liveRequestsTotal: number } | null = null;
   let breakerLatestOutcome: BreakerProbeResult['outcome'] | null = null;
   let breakerLatestReqPerMin: number | null = null;
+  // B3: cumulative pause time across the WHOLE run (main sweep + W4
+  // self-heal share this single counter), mirroring
+  // `LIVE_ACTIVITY_MAX_PAUSE_MS`'s "cumulative pause budget per run"
+  // semantics in `jobs/rotation-release-id-pollution-check`.
+  let breakerTotalPauseMs = 0;
 
   const probeBreakerAndMeasure = async (): Promise<BreakerProbeResult> => {
     const result = await probeBreaker();
     totals.breaker_probes += 1;
-    const now = Date.now();
-    if (
-      result.liveRequestsTotal !== null &&
-      breakerLastLiveRequestsTotal !== null &&
-      breakerLastProbeAtMs !== null &&
-      now > breakerLastProbeAtMs
-    ) {
-      const deltaRequests = result.liveRequestsTotal - breakerLastLiveRequestsTotal;
-      const deltaMinutes = (now - breakerLastProbeAtMs) / 60_000;
-      // A negative delta means the counter reset (LML process restarted
-      // between probes) — that isn't a measurement, so report unknown
-      // rather than a nonsensical negative rate.
-      breakerLatestReqPerMin = deltaRequests >= 0 ? deltaRequests / deltaMinutes : null;
-    } else {
-      breakerLatestReqPerMin = null;
-    }
-    if (result.liveRequestsTotal !== null) breakerLastLiveRequestsTotal = result.liveRequestsTotal;
-    breakerLastProbeAtMs = now;
+    breakerLastProbeAttemptAtMs = breakerNow();
     breakerLatestOutcome = result.outcome;
+
     if (result.outcome === 'probe_error') {
       log('warn', 'breaker_probe_failed', 'LML /health breaker probe failed; failing open (drain continues)', {
         error_message: result.error,
       });
     }
+
+    if (result.liveRequestsTotal === null) {
+      // No counter reading this probe (unconfigured / probe_error / an
+      // unreadable body). Leave the paired measurement untouched (D2) —
+      // `readBreakerFields` below reports the last VALID reading, which
+      // may now be one probe interval stale; that staleness is bounded by
+      // `breakerProbeIntervalMs` and self-evident from the accompanying
+      // `breaker_probe_failed` warn line, so it isn't nulled out.
+      return result;
+    }
+
+    if (breakerLastMeasurement !== null) {
+      const deltaRequests = result.liveRequestsTotal - breakerLastMeasurement.liveRequestsTotal;
+      const deltaMs = breakerLastProbeAttemptAtMs - breakerLastMeasurement.atMs;
+      if (deltaRequests < 0) {
+        // D1: `discogs_live_requests_total` is a per-LML-PROCESS counter
+        // read through a load balancer (documented limitation, not fixed
+        // here — see lml-health.ts's module docstring). A negative delta
+        // means either that process restarted between probes, or this
+        // probe landed on a DIFFERENT process than the last one — either
+        // way it isn't a real measurement. Log it as explicitly INVALID
+        // rather than silently reporting null with no explanation, so an
+        // operator watching `batch_done` can tell "no signal yet" apart
+        // from "the signal just contradicted itself."
+        log(
+          'warn',
+          'breaker_req_per_min_invalid',
+          'discogs_live_requests_total went backwards between probes (process restart, or a per-process signal behind a load balancer — see lml-health.ts) — not a real measurement',
+          {
+            previous_live_requests_total: breakerLastMeasurement.liveRequestsTotal,
+            current_live_requests_total: result.liveRequestsTotal,
+          }
+        );
+        breakerLatestReqPerMin = null;
+      } else if (deltaMs > 0) {
+        breakerLatestReqPerMin = deltaRequests / (deltaMs / 60_000);
+      } else {
+        breakerLatestReqPerMin = null;
+      }
+    } else {
+      breakerLatestReqPerMin = null;
+    }
+    breakerLastMeasurement = { atMs: breakerLastProbeAttemptAtMs, liveRequestsTotal: result.liveRequestsTotal };
     return result;
   };
 
-  // Cooperative pause's sibling for BS#1995 Arm 2: yield whenever LML's
-  // Discogs breaker is open/half_open, so this drain (plus every other
-  // heavy LML cron sharing the same Discogs ceiling) gets a chance to
-  // recover instead of continuing to hammer a struggling upstream. Probed
-  // once per `breakerProbeIntervalBatches` batches (default every batch),
-  // never per row — the ticket's explicit constraint that the back-pressure
-  // signal must not itself hammer LML. `breakerProbeIntervalBatches <= 0`
-  // disables the gate outright (no probes, always fails open).
+  // Cooperative pause's sibling for BS#1995 Arm 2 (review B1 redesign):
+  // yield whenever LML's Discogs breaker is open/half_open. Checked on
+  // EVERY row (a cheap `Date.now()` comparison — "not per row" binds the
+  // NETWORK CALL below, per the ticket's explicit constraint, not this
+  // check), but the underlying `/health` request only actually fires once
+  // `breakerProbeIntervalMs` has elapsed since the last attempt. A
+  // batch-boundary cadence was tried first and rejected in review: at this
+  // job's own recommended catch-up rate (`BACKFILL_LML_RATE_PER_MIN=6`,
+  // see the job README) a 500-row default batch takes ~83 minutes, so a
+  // breaker that opened one row into a batch would run the drain,
+  // undetected, for the next hour-plus — reproducing the incident at the
+  // exact resolution this gate exists to prevent. `breakerProbeIntervalMs
+  // <= 0` disables the gate outright (no probes, always fails open).
   const waitForClosedBreaker = async (): Promise<void> => {
-    if (breakerProbeIntervalBatches <= 0) return;
-    breakerBatchesSinceProbe += 1;
-    if (breakerBatchesSinceProbe < breakerProbeIntervalBatches) {
+    if (breakerProbeIntervalMs <= 0) return;
+    const now = breakerNow();
+    if (breakerLastProbeAttemptAtMs !== null && now - breakerLastProbeAttemptAtMs < breakerProbeIntervalMs) {
       return;
     }
-    breakerBatchesSinceProbe = 0;
     let result = await probeBreakerAndMeasure();
     while (shouldPauseForBreaker(result)) {
       totals.breaker_pauses += 1;
       log('warn', 'breaker_pause', `LML Discogs breaker is ${result.outcome}; pausing drain ${breakerPauseMs}ms`, {
         breaker_state: result.outcome,
         pause_ms: breakerPauseMs,
+        total_pause_ms: breakerTotalPauseMs,
       });
-      if (breakerPauseMs > 0) await sleep(breakerPauseMs);
+      if (breakerPauseMs > 0) {
+        await sleep(breakerPauseMs);
+        breakerTotalPauseMs += breakerPauseMs;
+      }
+      // B3: a pause loop with no ceiling is invisible exactly when it
+      // matters most — this runs BEFORE the first `batch_done`, so a run
+      // that pauses for its entire lifetime emits no `batch_done`, no
+      // `finished`, and no Sentry totals span (the July 2026 incident had
+      // LML's breaker stuck HALF_OPEN for ~8h; the next cron tick's
+      // `docker rm -f` would have ended that as a silent zero-progress
+      // run). A wedged breaker must be loud.
+      if (breakerMaxPauseMs > 0 && breakerTotalPauseMs >= breakerMaxPauseMs) {
+        const message =
+          `LML Discogs breaker has been non-closed for a cumulative ${breakerTotalPauseMs}ms this run ` +
+          `(>= BACKFILL_BREAKER_MAX_PAUSE_MS=${breakerMaxPauseMs}ms); aborting instead of pausing indefinitely`;
+        log('error', 'breaker_pause_ceiling_exceeded', message, {
+          total_pause_ms: breakerTotalPauseMs,
+          breaker_max_pause_ms: breakerMaxPauseMs,
+          breaker_state: result.outcome,
+        });
+        Sentry.captureMessage(`${JOB_NAME}.breaker_pause_ceiling_exceeded`, {
+          level: 'error',
+          tags: { step: 'breaker_pause_ceiling_exceeded' },
+          extra: {
+            total_pause_ms: breakerTotalPauseMs,
+            breaker_max_pause_ms: breakerMaxPauseMs,
+            breaker_state: result.outcome,
+          },
+        });
+        throw new BreakerPauseCeilingExceededError(message);
+      }
       result = await probeBreakerAndMeasure();
     }
   };
 
   const readBreakerFields = (): {
-    discogs_breaker_state: BreakerProbeResult['outcome'] | null;
+    // S5: renamed from `discogs_breaker_state` — this field carries PROBE
+    // OUTCOMES (`unconfigured`, `probe_error`), not only real breaker
+    // states, and the README's "back off on anything other than closed"
+    // guidance was accidentally telling operators to back off on the two
+    // outcomes the gate deliberately treats as proceed. The name now says
+    // what it actually is.
+    discogs_breaker_probe_outcome: BreakerProbeResult['outcome'] | null;
     discogs_live_requests_total: number | null;
     discogs_req_per_min_measured: number | null;
+    // D3: the timestamp of the last probe ATTEMPT, so an operator reading
+    // `docker logs` can judge exactly how fresh this batch_done line's
+    // breaker reading is instead of inferring "sustained" from seeing the
+    // same figure repeated across several lines.
+    discogs_breaker_probe_at_ms: number | null;
   } => ({
-    discogs_breaker_state: breakerLatestOutcome,
-    discogs_live_requests_total: breakerLastLiveRequestsTotal,
+    discogs_breaker_probe_outcome: breakerLatestOutcome,
+    discogs_live_requests_total: breakerLastMeasurement?.liveRequestsTotal ?? null,
     discogs_req_per_min_measured: breakerLatestReqPerMin,
+    discogs_breaker_probe_at_ms: breakerLastProbeAttemptAtMs,
   });
 
   // BS#895 review follow-up (finding #4): report the stranded-past-ceiling
@@ -1194,7 +1306,6 @@ export const runBackfill = async (opts: {
       let selfHealCursor = 0;
       while (selfHealCursor < selfHealIds.length) {
         await waitForQuietBooth();
-        await waitForClosedBreaker();
         const sliceEnd = Math.min(selfHealCursor + batchSize, selfHealIds.length);
         const sliceIds = selfHealIds.slice(selfHealCursor, sliceEnd);
         selfHealCursor = sliceEnd;
@@ -1216,6 +1327,11 @@ export const runBackfill = async (opts: {
         totals.self_heal_skipped += sliceIds.length - orderedRows.length;
 
         for (const row of orderedRows) {
+          // BS#1995 Arm 2 (review B1): checked per row, not per batch —
+          // see `waitForClosedBreaker`'s doc comment for why the batch
+          // boundary is too coarse a clock at this job's own recommended
+          // catch-up rate.
+          await waitForClosedBreaker();
           const { outcome, cacheHit } = await processRow(row, {
             lookup: opts.lookup,
             enrich: selfHealEnrich,
@@ -1296,7 +1412,6 @@ export const runBackfill = async (opts: {
 
   while (cursor < workListSize) {
     await waitForQuietBooth();
-    await waitForClosedBreaker();
 
     const sliceEnd = Math.min(cursor + batchSize, workListSize);
     const sliceIds = workList.ids.slice(cursor, sliceEnd);
@@ -1336,6 +1451,10 @@ export const runBackfill = async (opts: {
 
     batchIndex += 1;
     for (const row of pendingRows) {
+      // BS#1995 Arm 2 (review B1): checked per row, not per batch — see
+      // `waitForClosedBreaker`'s doc comment for why the batch boundary is
+      // too coarse a clock at this job's own recommended catch-up rate.
+      await waitForClosedBreaker();
       const { outcome, cacheHit } = await processRow(row, { lookup: opts.lookup, enrich: opts.enrich });
       totals.scanned += 1;
       totals[outcome] += 1;
