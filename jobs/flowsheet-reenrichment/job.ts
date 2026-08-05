@@ -54,16 +54,24 @@ const requireLmlConfigured = (): void => {
   }
 };
 
-// BS#1823: the drain now accepts either boundary env var (or both). This is
-// an existence-only pre-flight guard — format/calendar/future-timestamp
-// validation for whichever is set stays solely in orchestrate.ts's
-// resolveTimeWindow (via resolveCutoffTs / resolveWindowStartTs), so the
-// strictness can't drift between the two layers.
+// BS#1823: the drain now accepts either boundary env var (or both).
+// BS#1998 added the `updated_at` pair, so this guard covers four. It is an
+// existence-only pre-flight — format/calendar/future-timestamp validation
+// for whichever is set stays solely in orchestrate.ts's resolveTimeWindow,
+// so the strictness can't drift between the two layers. Keep this list in
+// sync with resolveTimeWindow's: a bound accepted there but missing here is
+// rejected before the drain ever reaches it (the BS#1998 run shape, which
+// sets only the updated_at pair, is exactly that case).
+const TIME_WINDOW_ENV_VARS = [
+  'BACKFILL_CUTOFF_TS',
+  'BACKFILL_WINDOW_START_TS',
+  'BACKFILL_UPDATED_AFTER_TS',
+  'BACKFILL_UPDATED_BEFORE_TS',
+] as const;
+
 const requireTimeWindowConfigured = (): void => {
-  if (!process.env.BACKFILL_CUTOFF_TS && !process.env.BACKFILL_WINDOW_START_TS) {
-    throw new Error(
-      'At least one of BACKFILL_CUTOFF_TS or BACKFILL_WINDOW_START_TS is required; neither is configured.'
-    );
+  if (!TIME_WINDOW_ENV_VARS.some((name) => process.env[name])) {
+    throw new Error(`At least one of ${TIME_WINDOW_ENV_VARS.join(', ')} is required; none is configured.`);
   }
 };
 
@@ -89,6 +97,9 @@ const main = async () => {
     log('info', 'init', `${JOB_NAME} initialized`, {
       cutoff_ts: process.env.BACKFILL_CUTOFF_TS ?? null,
       window_start_ts: process.env.BACKFILL_WINDOW_START_TS ?? null,
+      updated_after_ts: process.env.BACKFILL_UPDATED_AFTER_TS ?? null,
+      updated_before_ts: process.env.BACKFILL_UPDATED_BEFORE_TS ?? null,
+      dry_run: process.env.DRY_RUN ?? null,
     });
     const result = await runReenrichment({
       lookup: lookupMetadata,

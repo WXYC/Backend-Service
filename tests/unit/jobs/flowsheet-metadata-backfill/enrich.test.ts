@@ -360,10 +360,18 @@ describe('applyEnrichment', () => {
  * indistinguishable from a genuine no-match at the `results` level — being
  * written as a terminal `enriched_no_match`. LML marks this shape ONLY on
  * its tail legs (`degraded: true, degraded_reason: 'upstream_unavailable'`);
- * the search leg swallows the same condition into an ordinary empty result
- * with no marker (a separate, not-yet-solvable-here problem). This describe
- * block pins the ONE new branch plus regression-pins the three sibling
- * shapes that must stay terminal.
+ * the search leg swallowed the same condition into an ordinary empty result
+ * with no marker (a separate, not-yet-solvable-here problem at the time).
+ * This describe block pins the ONE new branch plus regression-pins the three
+ * sibling shapes that must stay terminal.
+ *
+ * BS#1998: LML#1126/#1128 closed the search-leg gap — it now sets
+ * `state.upstream_shed`, which the orchestrator projects onto the same two
+ * wire fields the tail legs set, so the guard below already covers it with
+ * no code change. The consequence for THIS block is the bare-empty pin:
+ * an unmarked empty is now unambiguously a genuine no-match, so its
+ * `enriched_no_match` assertion is correct on the merits rather than a
+ * concession to ambiguity. It must not be flipped.
  */
 describe('applyEnrichment (BS#1995 Arm 3) — upstream_unavailable classification', () => {
   beforeEach(() => {
@@ -432,7 +440,12 @@ describe('applyEnrichment (BS#1995 Arm 3) — upstream_unavailable classificatio
     expect(setArgs.metadata_status).toBe('enriched_no_match');
   });
 
-  it('regression pin: a genuine empty result (results: [], timeout: false, degraded: false) STILL terminalizes (indistinguishable search-leg shed — blocked on the separate LML-side ticket)', async () => {
+  // BS#1998: retitled, not re-asserted. Pre-LML#1128 this pin encoded a
+  // known-lossy compromise (an unmarked empty MIGHT have been a search-leg
+  // shed and we could not tell). Post-LML#1128 a shed always carries the
+  // marker, so an unmarked empty IS a genuine no-match and terminalizing it
+  // is simply right. Same expectation, different — and now sound — reason.
+  it('regression pin: a genuine empty result (results: [], timeout: false, degraded: false) terminalizes (post-LML#1128 an unmarked empty is unambiguously a real no-match)', async () => {
     const bareEmptyResponse: LookupResponse = {
       results: [],
       search_type: 'none',

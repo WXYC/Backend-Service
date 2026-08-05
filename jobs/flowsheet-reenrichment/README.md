@@ -4,6 +4,8 @@ One-shot re-enrichment drain for BS#1433. Rescues ~11,965 `flowsheet` rows writt
 
 BS#1823 adapted the same drain for a second run shape: re-enriching a recent, bounded slice of a _later_ regression backlog (see "Regression-window run" below), by adding an optional lower bound alongside the original cutoff.
 
+BS#1998 added a third: the 26,286 rows the 2026-08-03/04 LML breaker incident froze outside WXYC/Backend-Service#1979's window (see "Incident-cohort run" below). Those rows span the whole `add_time` range and are selectable only by `updated_at`, so this run shape adds an independent window on that column — plus an opt-in `DRY_RUN` scope preview and a shed-vs-verdict split in the outcome counters.
+
 ## Problem
 
 Before LML#583, `(artist, album)` pairs not in the WXYC library returned `results: []` from LML, causing `metadata_status='enriched_no_match'` to be written. Those rows are terminal in the new enum — the CDC consumer never revisits them. With LML#583 live, the same pairs now return Discogs metadata; this job performs a single sweep to recover them.
@@ -95,7 +97,9 @@ At least one of `BACKFILL_CUTOFF_TS` / `BACKFILL_WINDOW_START_TS` is required; t
 
 No new LML flag is needed for either run shape: this job already calls LML via single `lookupMetadata` (`/lookup`), which defaults `allow_release_resolution_fallback=True` and therefore resolves non-library albums on its own — unlike `/lookup/bulk`, which the B3 regression traced to (WXYC/Backend-Service#1815).
 
-**No dry-run mode.** Unlike some sibling jobs (e.g. `rotation-release-id-backfill`, `library-identity-consumer`), this job does not implement `DRY_RUN` — setting it has no effect, and a run performs live UPDATEs immediately. To gauge scope before committing to a run, preview the candidate count for your window first:
+**Dry-run mode (BS#1998, opt-in).** `DRY_RUN=true` walks the cohort with the real SELECT — same predicate, same paging, same cooperative pause — but calls neither LML nor `enrich`, so it costs nothing and writes nothing. The `scanned` total it reports IS the cohort count. It is opt-in, not the default: this job has written immediately since BS#1433, and both documented run recipes above assume that, so flipping the default would silently turn a re-run of either into a no-op. Unrecognized values throw rather than falling back to "live" — a typo'd `DRY_RUN` that writes when the operator believed it was previewing is the failure worth being loud about.
+
+You can also preview the candidate count in SQL without deploying anything:
 
 ```sql
 SELECT COUNT(*) FROM wxyc_schema.flowsheet
@@ -104,6 +108,46 @@ WHERE metadata_status = 'enriched_no_match'
   AND artist_name IS NOT NULL
   AND add_time >= '2026-07-22T00:00:00Z'::timestamptz;
 ```
+
+### Incident-cohort run (BS#1998)
+
+The 2026-08-03/04 LML Discogs-breaker flap terminalized **26,387** rows as `enriched_no_match` over ~17 hours. WXYC/Backend-Service#1979 covers only **101** of them — its `add_time >= '2026-06-16T17:53:53Z'` predicate excludes the historical backlog the sibling `flowsheet-metadata-backfill-catchup` container was actually draining at the time. The other **26,286** are this run shape's job.
+
+Those rows are **not selectable by `add_time`** — they span 2004→2026, essentially the whole table. The only thing they share is _when they were frozen_, so BS#1998 added an independent window on `updated_at`:
+
+**What this run shape covers.** Re-measured on prod 2026-08-05 (read-only), the incident window partitions as:
+
+| slice                                                       |   rows |
+| ----------------------------------------------------------- | -----: |
+| all `enriched_no_match` track rows in the window            | 26,387 |
+| — **this job's cohort** (`album_id IS NULL`)                | 26,323 |
+| — linked (`album_id IS NOT NULL`), outside this job's guard |     64 |
+| non-track rows the base predicate would drop                |      0 |
+
+The 64 linked rows stay out of scope: the `album_id IS NULL` clause in both the SELECT and `reenrichRow`'s UPDATE is the linkage-race guard, and relaxing it here would reintroduce the very race `match_raced` exists to detect. They are nearly all covered elsewhere — 60 fall inside `jobs/flowsheet-linked-reenrichment`'s (BS#1638) frozen `add_time < 2026-06-16` predicate, and 42 of those already have a populated `album_metadata` row, so that job's zero-LML Lane A flips them without a single Discogs call. Re-running it is the right handling. **The residual is 4 rows** (linked, `add_time >= 2026-06-16`, outside both frozen predicates) across ≤12 distinct albums — small enough to fix by hand, and recorded here so it isn't silently inherited as "covered."
+
+```bash
+docker run --rm --name flowsheet-reenrichment --env-file .env \
+  -e BACKFILL_UPDATED_AFTER_TS='2026-08-04T06:00:00Z' \
+  -e BACKFILL_UPDATED_BEFORE_TS='2026-08-04T23:00:00Z' \
+  -e DRY_RUN=true \
+  <ECR-URI>/flowsheet-reenrichment:<tag> 2>&1 \
+  | tee /tmp/flowsheet-reenrichment-incident-$(date +%Y%m%d-%H%M%S).log
+```
+
+Drop `DRY_RUN` for the live run. The two pairs are independent axes and compose: supplying an `add_time` bound as well narrows to the intersection, and either pair alone satisfies the at-least-one-bound requirement.
+
+**Why an `updated_at` window doesn't eat its own tail.** Selecting on a mutable column that the drain itself rewrites would normally be a trap. It isn't here, because this job's no-match arm writes nothing (`enrich.ts` change 2): `updated_at` moves only for rows that simultaneously leave the cohort via `metadata_status='enriched_match'`. Matched rows exit; no-match and shed-skipped rows stay exactly where they were. No id-freeze artifact is needed.
+
+**The one real leak:** an _unrelated_ writer touching a cohort row mid-run bumps its `updated_at` past the upper bound and evicts it permanently. `streaming-url-upgrade` is the plausible candidate — it re-queries LML for search-shaped URLs, which is precisely what these rows carry. This under-counts; it never corrupts. Don't run those jobs concurrently, and treat a post-run residual count that fell by more than the run's own `match` total as evidence this happened.
+
+**Pre-flight, in addition to the checklist above:**
+
+1. **LML#1128 must be live in prod**, not just staging. It is what makes a search-leg shed distinguishable from a genuine no-match; without it the run's `still_no_match` total is untrustworthy in exactly the way the incident was. LML deploys prod from the `prod` branch — check `/health`'s `commit_sha` against `prod`'s HEAD, not `main`'s.
+2. **Build the partial index for this predicate.** The existing `flowsheet_reenrichment_idx` covers the three base clauses but not the `updated_at` bound; that is fine (it still eliminates the heap scan), so reuse it rather than building a second one-shot index.
+3. **Record the dry-run `scanned` count on WXYC/Backend-Service#1998** before authorizing the live run. That number is the frozen cohort size, and the post-run residual is measured against it.
+
+Post-run, read `upstream_unavailable_skipped` alongside `still_no_match` (see below). A non-zero skip count means the run under-covered its cohort and should be repeated once LML is healthy — the skipped rows are untouched and still selectable.
 
 ## Pacing & wall-clock estimate
 
@@ -134,13 +178,13 @@ Monitor real-time LML p95 via Sentry trace explorer; stay within +20% of baselin
 
 ## Post-run
 
-1. **Source the flip count** from the `finished` / `stopped` / `failed` summary log line. `-R` (raw input) is required for `fromjson?` to skip non-JSON lines safely — the `console.warn` env-validation lines from lml-fetch / lml-limiter would otherwise crash a default-mode jq invocation:
+1. **Source the flip count** from the `finished` / `stopped` / `failed` summary log line. Read `upstream_unavailable_skipped` (BS#1998) alongside `still_no_match`: the latter is a verdict, the former is a question LML never got to ask. A non-zero skip count means the run under-covered its cohort — re-run once LML is healthy; those rows were not written and are still selectable. `-R` (raw input) is required for `fromjson?` to skip non-JSON lines safely — the `console.warn` env-validation lines from lml-fetch / lml-limiter would otherwise crash a default-mode jq invocation:
 
    ```bash
    # Read from the tee'd file (preferred — survives --rm container removal)
    cat /tmp/flowsheet-reenrichment-*.log | \
      jq -rR 'fromjson? | select(.step=="finished" or .step=="stopped" or .step=="failed") |
-       "step=\(.step) scanned=\(.scanned) flipped=\(.flipped) match_raced=\(.match_raced) still_no_match=\(.still_no_match) lml_error=\(.lml_error) db_error=\(.db_error) last_id=\(.last_id)"'
+       "step=\(.step) dry_run=\(.dry_run) scanned=\(.scanned) flipped=\(.flipped) match_raced=\(.match_raced) still_no_match=\(.still_no_match) upstream_unavailable_skipped=\(.upstream_unavailable_skipped) lml_error=\(.lml_error) db_error=\(.db_error) last_id=\(.last_id)"'
    ```
 
    If `step=stopped` or `step=failed`, the run did NOT complete the cohort. Re-run it to drain the remainder (the WHERE filter is idempotent against rows the run already flipped); the `last_id` field from the partial run is the resume cursor (the next run's first SELECT will skip everything `id ≤ last_id`). Document the totals from the final completed run as a comment on BS#1433.
@@ -183,6 +227,9 @@ Monitor real-time LML p95 via Sentry trace explorer; stay within +20% of baselin
 | ---------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BACKFILL_CUTOFF_TS`               | (required unless `BACKFILL_WINDOW_START_TS` is set) | LML#583 merge timestamp: `2026-06-16T17:53:53Z`. Validated as ISO 8601 + not-in-future at startup. Upper bound (`add_time < cutoff`).                                                                                                                                                                             |
 | `BACKFILL_WINDOW_START_TS`         | (optional)                                          | Lower bound (`add_time >= start`) for a scoped regression-window run (BS#1823), e.g. `2026-07-22T00:00:00Z`. Validated as strict ISO 8601 at startup — same rules as `BACKFILL_CUTOFF_TS` except a future value is allowed (it simply selects nothing until reached). At least one of the two bounds is required. |
+| `BACKFILL_UPDATED_AFTER_TS`        | (optional)                                          | Lower bound (`updated_at >= start`) for the BS#1998 incident-cohort run, e.g. `2026-08-04T06:00:00Z`. Validated as strict ISO 8601; a future value is allowed (selects nothing). Independent of the `add_time` pair — the two compose.                                                                            |
+| `BACKFILL_UPDATED_BEFORE_TS`       | (optional)                                          | Upper bound (`updated_at < end`), e.g. `2026-08-04T23:00:00Z`. Same validation. At least one of the four time bounds is required.                                                                                                                                                                                 |
+| `DRY_RUN`                          | `false`                                             | BS#1998. `true` scans the cohort and reports `scanned` with zero LML calls and zero writes. Only exact `true`/`false` accepted — anything else throws rather than silently running live.                                                                                                                          |
 | `LIBRARY_METADATA_URL`             | (required)                                          | LML endpoint                                                                                                                                                                                                                                                                                                      |
 | `BACKFILL_BATCH_SIZE`              | 100                                                 | Rows per SELECT                                                                                                                                                                                                                                                                                                   |
 | `BACKFILL_LML_MAX_CONCURRENT`      | 1                                                   | Semaphore permit count (positive integer)                                                                                                                                                                                                                                                                         |

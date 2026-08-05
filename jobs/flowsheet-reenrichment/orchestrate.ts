@@ -5,15 +5,30 @@
  *   metadata_status = 'enriched_no_match'
  *   AND album_id IS NULL
  *   AND artist_name IS NOT NULL
- *   AND add_time < $BACKFILL_CUTOFF_TS       (optional upper bound)
- *   AND add_time >= $BACKFILL_WINDOW_START_TS (optional lower bound, BS#1823)
+ *   AND add_time < $BACKFILL_CUTOFF_TS        (optional upper bound)
+ *   AND add_time >= $BACKFILL_WINDOW_START_TS  (optional lower bound, BS#1823)
+ *   AND updated_at >= $BACKFILL_UPDATED_AFTER_TS  (optional, BS#1998)
+ *   AND updated_at < $BACKFILL_UPDATED_BEFORE_TS  (optional, BS#1998)
  *
  * BS#1823 added the optional BACKFILL_WINDOW_START_TS lower bound so the
  * same drain can re-enrich a recent, bounded slice of the backlog (e.g. the
  * B3 regression window, LML#920) instead of only the original pre-LML#583
- * cohort. At least one of the two bounds is required — see
- * `resolveTimeWindow`. Cutoff-only preserves the original behavior exactly;
+ * cohort. Cutoff-only preserves the original behavior exactly;
  * window-start-only applies no upper bound (through "now", in effect).
+ *
+ * BS#1998 added the `updated_at` pair as a second, independent axis. The
+ * 2026-08-03/04 LML breaker flap terminalized 26,387 rows while this drain's
+ * sibling was working the historical backlog, so those victims span the
+ * whole `add_time` range and cannot be selected by it at all — the only
+ * thing they share is WHEN they were frozen. At least one of the four
+ * bounds is required; see `resolveTimeWindow`.
+ *
+ * Why an `updated_at` window is stable despite selecting on a mutable
+ * column: this job's no-match arm writes nothing (`enrich.ts` change 2), so
+ * `updated_at` moves only for rows that simultaneously leave the cohort via
+ * `metadata_status='enriched_match'`. The predicate does not eat its own
+ * tail, and no id-freeze artifact is needed. The one leak is an UNRELATED
+ * writer touching a cohort row mid-run, which evicts it — see the README.
  *
  * Per-row (not bulk): the cohort is cascade-bound on cold Discogs lookups
  * (the library-miss-by-definition path LML#583 introduces). Per-row gating
@@ -173,12 +188,51 @@ export const resolveWindowStartTs = (
   return raw;
 };
 
-export type TimeWindow = { cutoffTs?: string; windowStartTs?: string };
+/**
+ * BS#1998: bounds on `updated_at`, the instant a row was last written.
+ *
+ * The add_time pair above cannot express the BS#1998 cohort. The
+ * 2026-08-03/04 LML breaker flap terminalized 26,387 rows while the
+ * historical drain was working the pre-2026 backlog, so the victims span
+ * `add_time` 2004→2026 — the entire table. What they share is *when they
+ * were frozen*, which only `updated_at` records.
+ *
+ * Validated identically to the add_time pair (strict ISO 8601 + calendar
+ * bounds) and, like BACKFILL_WINDOW_START_TS, a future value is allowed:
+ * it simply selects nothing. Neither bound gets the cutoff's
+ * future-rejection, which exists because a future *upper* bound on
+ * `add_time` would silently widen the original pre-LML#583 cohort to
+ * include legitimately-terminal post-fix rows. That reasoning is specific
+ * to that cutoff's role and does not transfer.
+ */
+export const resolveUpdatedAfterTs = (
+  raw: string | undefined = process.env.BACKFILL_UPDATED_AFTER_TS
+): string | undefined => {
+  if (!raw) return undefined;
+  validateStrictIso8601(raw, 'BACKFILL_UPDATED_AFTER_TS');
+  return raw;
+};
+
+export const resolveUpdatedBeforeTs = (
+  raw: string | undefined = process.env.BACKFILL_UPDATED_BEFORE_TS
+): string | undefined => {
+  if (!raw) return undefined;
+  validateStrictIso8601(raw, 'BACKFILL_UPDATED_BEFORE_TS');
+  return raw;
+};
+
+export type TimeWindow = {
+  cutoffTs?: string;
+  windowStartTs?: string;
+  updatedAfterTs?: string;
+  updatedBeforeTs?: string;
+};
 
 /**
  * Resolves the drain's cohort time-window from BACKFILL_CUTOFF_TS /
- * BACKFILL_WINDOW_START_TS (or explicit overrides — see runReenrichment's
- * opts). At least one bound is required: a drain with neither has no
+ * BACKFILL_WINDOW_START_TS / BACKFILL_UPDATED_AFTER_TS /
+ * BACKFILL_UPDATED_BEFORE_TS (or explicit overrides — see runReenrichment's
+ * opts). At least one bound is required: a drain with none has no
  * defined cohort (an unbounded sweep of the entire enriched_no_match
  * backlog was never an intended run shape).
  *
@@ -188,17 +242,54 @@ export type TimeWindow = { cutoffTs?: string; windowStartTs?: string };
  *   - Window-start-only is a valid open-ended "everything from X to now"
  *     run — no upper bound is applied.
  *   - Both set narrows to the intersection (a bounded window).
+ *
+ * BS#1998 added the `updated_at` pair as an INDEPENDENT axis, not a
+ * replacement: the two pairs intersect when both are supplied, and either
+ * pair alone satisfies the at-least-one requirement. The BS#1998 run shape
+ * uses the updated_at pair alone.
  */
 export const resolveTimeWindow = (
   cutoffRaw: string | undefined = process.env.BACKFILL_CUTOFF_TS,
-  windowStartRaw: string | undefined = process.env.BACKFILL_WINDOW_START_TS
+  windowStartRaw: string | undefined = process.env.BACKFILL_WINDOW_START_TS,
+  updatedAfterRaw: string | undefined = process.env.BACKFILL_UPDATED_AFTER_TS,
+  updatedBeforeRaw: string | undefined = process.env.BACKFILL_UPDATED_BEFORE_TS
 ): TimeWindow => {
-  if (!cutoffRaw && !windowStartRaw) {
-    throw new Error('At least one of BACKFILL_CUTOFF_TS or BACKFILL_WINDOW_START_TS is required; neither is set.');
+  if (!cutoffRaw && !windowStartRaw && !updatedAfterRaw && !updatedBeforeRaw) {
+    throw new Error(
+      'At least one of BACKFILL_CUTOFF_TS, BACKFILL_WINDOW_START_TS, BACKFILL_UPDATED_AFTER_TS or BACKFILL_UPDATED_BEFORE_TS is required; none is set.'
+    );
   }
   const cutoffTs = cutoffRaw ? resolveCutoffTs(cutoffRaw) : undefined;
   const windowStartTs = resolveWindowStartTs(windowStartRaw);
-  return { cutoffTs, windowStartTs };
+  const updatedAfterTs = resolveUpdatedAfterTs(updatedAfterRaw);
+  const updatedBeforeTs = resolveUpdatedBeforeTs(updatedBeforeRaw);
+  return { cutoffTs, windowStartTs, updatedAfterTs, updatedBeforeTs };
+};
+
+/**
+ * BS#1998: opt-in scope preview. `DRY_RUN=true` walks the cohort with the
+ * real SELECT — same predicate, same paging, same cooperative pause — but
+ * calls neither LML nor `enrich`, so the run costs nothing and writes
+ * nothing. The `scanned` total it reports IS the cohort count, which the
+ * BS#1998 runbook records before authorizing a live run.
+ *
+ * Deliberately opt-IN rather than dry-run-by-default. This job has been an
+ * immediately-writing operational tool since BS#1433 and its README's run
+ * recipes (and BS#1823's) assume that; flipping the default would silently
+ * turn a re-run of either documented recipe into a no-op, which is a worse
+ * failure than the one dry-run-by-default protects against.
+ *
+ * Accepts only exact `true`/`false` (case-insensitive). Anything else is a
+ * typo, and a typo'd `DRY_RUN` that falls back to "live" would write when
+ * the operator believed it was previewing — so unrecognized values throw
+ * rather than warn-and-continue.
+ */
+export const resolveDryRun = (raw: string | undefined = process.env.DRY_RUN): boolean => {
+  if (raw === undefined || raw === '') return false;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+  throw new Error(`DRY_RUN=${JSON.stringify(raw)} is not a boolean; use "true" or "false".`);
 };
 
 export const resolveLiveActivityLookback = (
@@ -221,6 +312,15 @@ export type Totals = {
   match: number;
   match_raced: number;
   still_no_match: number;
+  /**
+   * BS#1998: rows LML was never able to ask Discogs about (breaker shed, or
+   * the BS#1748 client-side limiter shed). Held apart from `still_no_match`
+   * because only the latter is a verdict — see `enrich.ts`'s guard. A
+   * non-zero count means the run under-covered its cohort and should be
+   * re-run once LML is healthy; the rows themselves are untouched and stay
+   * selectable.
+   */
+  upstream_unavailable_skipped: number;
   lml_error: number;
   db_error: number;
 };
@@ -228,6 +328,8 @@ export type Totals = {
 export type RunResult = {
   totals: Totals;
   flipped: number;
+  /** BS#1998: true when DRY_RUN suppressed every LML call and every write. */
+  dryRun: boolean;
   stopped: boolean;
   /**
    * True iff the run terminated via the failed-step path (uncaught loop
@@ -283,14 +385,14 @@ const stopAwareSleep = async (ms: number): Promise<void> => {
  * (a no-op fragment) when their bound is absent, so this function itself
  * doesn't need to re-assert that invariant.
  */
-const loadBatchOnce = async (
-  afterId: number,
-  batchSize: number,
-  cutoffTs: string | undefined,
-  windowStartTs: string | undefined
-): Promise<ReenrichRow[]> => {
+const loadBatchOnce = async (afterId: number, batchSize: number, window: TimeWindow): Promise<ReenrichRow[]> => {
+  const { cutoffTs, windowStartTs, updatedAfterTs, updatedBeforeTs } = window;
   const cutoffClause = cutoffTs ? sql`AND "add_time" < ${cutoffTs}::timestamptz` : sql``;
   const windowStartClause = windowStartTs ? sql`AND "add_time" >= ${windowStartTs}::timestamptz` : sql``;
+  // BS#1998: the incident-cohort axis. Independent of the add_time pair —
+  // both compose, and either pair alone is a valid run shape.
+  const updatedAfterClause = updatedAfterTs ? sql`AND "updated_at" >= ${updatedAfterTs}::timestamptz` : sql``;
+  const updatedBeforeClause = updatedBeforeTs ? sql`AND "updated_at" < ${updatedBeforeTs}::timestamptz` : sql``;
   const rows = (await db.execute(sql`
     SELECT
       "id",
@@ -303,6 +405,8 @@ const loadBatchOnce = async (
       AND "artist_name" IS NOT NULL
       ${cutoffClause}
       ${windowStartClause}
+      ${updatedAfterClause}
+      ${updatedBeforeClause}
       AND "id" > ${afterId}
     ORDER BY "id" ASC
     LIMIT ${batchSize}
@@ -320,16 +424,11 @@ const loadBatchOnce = async (
  * — no custom sentinel needed, since the flag was true at throw time and
  * stays true until __resetStopForTesting (production never resets it).
  */
-const loadBatch = async (
-  afterId: number,
-  batchSize: number,
-  cutoffTs: string | undefined,
-  windowStartTs: string | undefined
-): Promise<ReenrichRow[]> => {
+const loadBatch = async (afterId: number, batchSize: number, window: TimeWindow): Promise<ReenrichRow[]> => {
   let lastError: unknown;
   for (let attempt = 0; attempt < LOAD_BATCH_MAX_ATTEMPTS; attempt += 1) {
     try {
-      return await loadBatchOnce(afterId, batchSize, cutoffTs, windowStartTs);
+      return await loadBatchOnce(afterId, batchSize, window);
     } catch (error) {
       lastError = error;
       if (stopRequested || attempt + 1 >= LOAD_BATCH_MAX_ATTEMPTS) throw error;
@@ -401,18 +500,22 @@ export const runReenrichment = async (opts: {
   enrich: EnrichFn;
   cutoffTs?: string;
   windowStartTs?: string;
+  updatedAfterTs?: string;
+  updatedBeforeTs?: string;
+  dryRun?: boolean;
   batchSize?: number;
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
 }): Promise<RunResult> => {
-  // BS#1823: resolveTimeWindow enforces "at least one of cutoffTs /
-  // windowStartTs" and applies each bound's own validation (cutoff:
-  // required-if-alone + future-rejection; window-start: optional +
-  // future-allowed). Explicit opts pass through the same validation as
-  // env-sourced values — a caller-supplied override is no longer a
-  // silent bypass.
-  const { cutoffTs, windowStartTs } = resolveTimeWindow(opts.cutoffTs, opts.windowStartTs);
+  // BS#1823: resolveTimeWindow enforces "at least one bound" and applies
+  // each bound's own validation (cutoff: required-if-alone +
+  // future-rejection; the other three: optional + future-allowed). Explicit
+  // opts pass through the same validation as env-sourced values — a
+  // caller-supplied override is no longer a silent bypass.
+  const window = resolveTimeWindow(opts.cutoffTs, opts.windowStartTs, opts.updatedAfterTs, opts.updatedBeforeTs);
+  const { cutoffTs, windowStartTs, updatedAfterTs, updatedBeforeTs } = window;
+  const dryRun = opts.dryRun ?? resolveDryRun();
   const batchSize = opts.batchSize ?? resolveBatchSize();
   const liveActivityLookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
@@ -455,6 +558,9 @@ export const runReenrichment = async (opts: {
   log('info', 'started', `${JOB_NAME} starting`, {
     cutoff_ts: cutoffTs ?? null,
     window_start_ts: windowStartTs ?? null,
+    updated_after_ts: updatedAfterTs ?? null,
+    updated_before_ts: updatedBeforeTs ?? null,
+    dry_run: dryRun,
     batch_size: batchSize,
     live_activity_lookback_seconds: liveActivityLookbackSeconds,
     live_activity_pause_ms: liveActivityPauseMs,
@@ -465,6 +571,7 @@ export const runReenrichment = async (opts: {
     match: 0,
     match_raced: 0,
     still_no_match: 0,
+    upstream_unavailable_skipped: 0,
     lml_error: 0,
     db_error: 0,
   };
@@ -485,7 +592,7 @@ export const runReenrichment = async (opts: {
 
       let rows: ReenrichRow[];
       try {
-        rows = await loadBatch(lastId, batchSize, cutoffTs, windowStartTs);
+        rows = await loadBatch(lastId, batchSize, window);
       } catch (error) {
         // Distinguish stop-triggered exit from real failure via the same
         // module flag the inner retry observed. No custom sentinel class
@@ -509,6 +616,17 @@ export const runReenrichment = async (opts: {
       const before = { ...totals };
 
       for (const row of rows) {
+        // BS#1998 dry run: count the row and move on. The scan is the whole
+        // deliverable — no LML call, no enrich call, no write.
+        if (dryRun) {
+          totals.scanned += 1;
+          lastId = row.id;
+          if (stopRequested) {
+            stopped = true;
+            break;
+          }
+          continue;
+        }
         const outcome = await processRow(row, deps);
         totals.scanned += 1;
         totals[outcome] += 1;
@@ -537,6 +655,7 @@ export const runReenrichment = async (opts: {
         match: totals.match - before.match,
         match_raced: totals.match_raced - before.match_raced,
         still_no_match: totals.still_no_match - before.still_no_match,
+        upstream_unavailable_skipped: totals.upstream_unavailable_skipped - before.upstream_unavailable_skipped,
         lml_error: totals.lml_error - before.lml_error,
         db_error: totals.db_error - before.db_error,
         flipped: totals.match - before.match,
@@ -556,6 +675,7 @@ export const runReenrichment = async (opts: {
         attributes: {
           'reenrichment.flipped_count': flipped(),
           'reenrichment.still_no_match_count': totals.still_no_match,
+          'reenrichment.upstream_unavailable_skipped_count': totals.upstream_unavailable_skipped,
           'reenrichment.match_raced_count': totals.match_raced,
           'reenrichment.lml_error_count': totals.lml_error,
           'reenrichment.db_error_count': totals.db_error,
@@ -593,6 +713,7 @@ export const runReenrichment = async (opts: {
     log(level, step, `${JOB_NAME} ${step}`, {
       ...totals,
       flipped: flipped(),
+      dry_run: dryRun,
       last_id: lastId,
       stopped,
       failed: failed !== null,
@@ -602,5 +723,5 @@ export const runReenrichment = async (opts: {
       captureError(failed.error, 'failed', { last_id: lastId, scanned: totals.scanned, flipped: flipped() });
     }
   }
-  return { totals, flipped: flipped(), stopped, failed: failed !== null };
+  return { totals, flipped: flipped(), dryRun, stopped, failed: failed !== null };
 };
