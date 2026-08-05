@@ -501,6 +501,13 @@ export const selectLinkedFlowsheetRow = jest
 export { requirePositiveInt, requireNonNegativeInt } from '../../shared/database/src/env-parsers.js';
 export type { IntParserOptions } from '../../shared/database/src/env-parsers.js';
 
+// Same pure-module-path rationale as the env parsers above: `fold-artist-name`
+// has no runtime deps, so re-exporting it directly (never via the `@wxyc/database`
+// barrel) keeps `client.js` out of the mock. BS#2000's V/A arbiter layers the
+// leading-anchored compilation rule on top of this exact fold so the SQL
+// candidate net and the TS arbiter can't drift.
+export { foldArtistName } from '../../shared/database/src/fold-artist-name.js';
+
 // Re-export the pure `RawPair` TYPE from source (type-only — erased at
 // compile time, no runtime import, so it can't pull in the module's `db`
 // dependency below).

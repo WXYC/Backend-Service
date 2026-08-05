@@ -186,7 +186,7 @@ New class-4 labels (BS#1826 PR 2): `checkStreamingAvailability` on the add/updat
   - **Rollback**: set the secret to `FALSE` (`gh secret set ENRICHMENT_SUPPRESS_LML_BUDGET --body FALSE`) and re-run the same workflow invocation — reverts to today's ~4s empty-state cutoff with zero code change, since the flag is read fresh on every dispatch and only `true`/`TRUE` arms it. Set `FALSE` rather than clearing the secret: the workflow's resolve step hard-fails on an empty value, so an empty secret aborts the run instead of disarming the flag.
   - Post-rollout: a follow-up comment on WXYC/Backend-Service#1978 should record the observed `enriched_no_match` rate for rotation-linked rows before vs. after (per the issue's acceptance criteria) — not done as part of shipping the flag itself.
 
-### Backfill LML rate gating (`jobs/flowsheet-metadata-backfill`, `jobs/rotation-release-id-backfill`)
+### Backfill LML rate gating (`jobs/flowsheet-metadata-backfill`, `jobs/rotation-release-id-backfill`, `jobs/apple-music-url-backfill`, `jobs/va-apple-music-url-remediation`)
 
 Stricter ceilings for backfill-class LML callers, since one in-flight LML call held for the full per-call timeout saturates LML's serialized Discogs fan-out and starves real-time iOS/dj-site clients (BS#994 / BS#995). The first two are read at module load by each job's `lml-limiter.ts:createLmlLimiter`; the third by `lml-fetch.ts`. All three are positive integers; non-positive or unparseable values fall back to the default with a `console.warn`. Mutating `process.env` after first import does NOT reconfigure the singletons — restart the container to change a value. Each job creates its own `defaultLmlLimiter` so the same env name applied to one container does not lock-step the other.
 
@@ -387,3 +387,19 @@ The naming convention is asymmetric on purpose: `*_USE_NEW_HOOK_*` (LML, semanti
 **Sync mechanism (CI grep-assert, per repo):** every repo that documents one or more flags ships a CI check that asserts (a) every flag named in this canonical table appears in the consumer's local doc, and (b) every flag named in the consumer's local doc appears here. The Backend-side script is `scripts/check-cross-cache-identity-flags.sh`; it runs in the existing CI pipeline (`.github/workflows/test.yml`) as a `Cross-cache-identity flag-doc consistency` job. A second-tier check (every flag named in code matches the doc) ships with the E2-BS substrate PR, since the code references don't exist yet at this PR's open time.
 
 **Audit (post-launch).** A quarterly task tracked under `cross-cache-identity-followup` diffs the canonical Backend list against actual code references in each consumer repo.
+
+### V/A Apple-URL remediation (`jobs/va-apple-music-url-remediation`, BS#2000)
+
+One-shot. Reuses the `BACKFILL_LML_*` family above (and therefore its standing pre-flight rule: **verify the sibling cron containers are Exited** before running, since they share LML's Discogs budget) plus the shared `LIVE_ACTIVITY_*` cooperative-pause knobs. Dry-run is the default and makes **zero** LML calls, so sizing the run is free.
+
+**Cross-service dependency, not optional:** this job must run only after LML's `LML_APPLE_MUSIC_RATE_PER_MIN` has been rolled up (60 → 300 → 600) **and confirmed live**. At the default, LML#904 measured ~56% of `find_track_url` probes timing out on LML's own self-throttle and returning null — which is indistinguishable at the call site from a genuine no-match, and would make this job NULL correct URLs. See the `LML_APPLE_MUSIC_RATE_PER_MIN` entry above.
+
+- `VA_REMEDIATION_BATCH_SIZE` (default `2000`) — page size for both phases' candidate SELECT and the VALUES-join UPDATE.
+- `VA_REMEDIATION_FLOWSHEET_AFTER_ID` / `VA_REMEDIATION_ALBUM_AFTER_ID` (default `0`) — per-phase id-cursor resume, from the previous run's summary `last_id`. Parsed with `requireNonNegativeInt`, so `0` legitimately means "start at the beginning" (the `envInt` used by sibling jobs requires `> 0` and would silently fall back).
+- `VA_REMEDIATION_UPDATE_TIMEOUT_MS` / `VA_REMEDIATION_ANALYZE_TIMEOUT_MS` (default `300000`) — `SET LOCAL statement_timeout` around the batched UPDATE and the post-pass `ANALYZE`.
+- `VA_REMEDIATION_SECOND_PASS_DELAY_MS` (default `15000`) — delay between confirmation passes. A `none` verdict requires three consecutive null passes; LML#706's streaming post-process fills asynchronously, so an immediate re-ask would just re-observe the same gap.
+- `VA_REMEDIATION_MAX_RESCUE_RATE` (default `0.1`) — abort ceiling on the observed rescue rate (a triple that nulls on pass 1 and resolves on a later pass is a directly-observed throttle-null). With three passes the rate is `p(1-p)(1+p)`: ≈0.38 at LML#904's measured `p≈0.56`, ≈0.05 at a healthy `p≈0.05`, so the default cleanly separates the two regimes. This is the backstop; the primary gate is the Sentry null-rate check after the rate roll-up.
+- `VA_REMEDIATION_MIN_RESCUE_SAMPLE` (default `50`) — first-pass nulls that must accumulate before the rescue rate is judged, so early noise can't halt a healthy run.
+- `VA_REMEDIATION_MAX_INDETERMINATE` (default `0` = no early abort) — ceiling on indeterminate triples before aborting mid-run. Independent of the end-of-run failure: the run exits non-zero whenever any triple stayed indeterminate, because the acceptance criterion ("no candidate row retains an unadjudicated pre-#1139 URL") is then not met.
+
+Full runbook, including the two-arm design and the load-bearing phase order, in `jobs/va-apple-music-url-remediation/README.md`.

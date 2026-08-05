@@ -75,6 +75,7 @@ describe('lml-client policy', () => {
         'flowsheet-reenrichment': 5,
         'streaming-url-upgrade': 5,
         'apple-music-url-backfill': 5,
+        'va-apple-music-url-remediation': 5,
         'concerts-genre-enrichment': 5,
         'concerts-artist-lml-resolver': 5,
         'rotation-release-id-backfill': 5,
