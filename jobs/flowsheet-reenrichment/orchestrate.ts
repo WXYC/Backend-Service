@@ -198,27 +198,62 @@ export const resolveWindowStartTs = (
  * were frozen*, which only `updated_at` records.
  *
  * Validated identically to the add_time pair (strict ISO 8601 + calendar
- * bounds) and, like BACKFILL_WINDOW_START_TS, a future value is allowed:
- * it simply selects nothing. Neither bound gets the cutoff's
- * future-rejection, which exists because a future *upper* bound on
- * `add_time` would silently widen the original pre-LML#583 cohort to
- * include legitimately-terminal post-fix rows. That reasoning is specific
- * to that cutoff's role and does not transfer.
+ * bounds). A future value is allowed on the LOWER bound, where it simply
+ * selects nothing. The UPPER bound is not symmetric — see
+ * `assertWindowShape`, which rejects it outright when it stands alone.
+ *
+ * Shared implementation rather than three near-identical copies (review
+ * round 1): the original two-copy shape is what let `job.ts`'s pre-flight
+ * list drift from `resolveTimeWindow`'s in the first place, and cloning it
+ * a third time would guarantee the next optional-bound change lands in only
+ * some of them.
  */
-export const resolveUpdatedAfterTs = (
-  raw: string | undefined = process.env.BACKFILL_UPDATED_AFTER_TS
-): string | undefined => {
+const resolveOptionalIso8601 = (raw: string | undefined, envName: string): string | undefined => {
   if (!raw) return undefined;
-  validateStrictIso8601(raw, 'BACKFILL_UPDATED_AFTER_TS');
+  validateStrictIso8601(raw, envName);
   return raw;
 };
 
+export const resolveUpdatedAfterTs = (
+  raw: string | undefined = process.env.BACKFILL_UPDATED_AFTER_TS
+): string | undefined => resolveOptionalIso8601(raw, 'BACKFILL_UPDATED_AFTER_TS');
+
 export const resolveUpdatedBeforeTs = (
   raw: string | undefined = process.env.BACKFILL_UPDATED_BEFORE_TS
-): string | undefined => {
-  if (!raw) return undefined;
-  validateStrictIso8601(raw, 'BACKFILL_UPDATED_BEFORE_TS');
-  return raw;
+): string | undefined => resolveOptionalIso8601(raw, 'BACKFILL_UPDATED_BEFORE_TS');
+
+/**
+ * Two shape assertions on the `updated_at` pair, both closing ways an
+ * operator typo silently becomes a catastrophic or vacuous run (review
+ * round 1).
+ *
+ * 1. **An upper bound may not stand alone.** `updated_at < X` with no lower
+ *    bound is not a narrow window — it is "every unlinked no-match row this
+ *    table has ever held," since essentially all of them were last written
+ *    before any plausible X. That is the unbounded sweep `resolveTimeWindow`
+ *    already declares was never an intended run shape, and at TB(20/min) it
+ *    would be days of Discogs calls: the same over-broad-drain shape as the
+ *    incident this job now exists to repair. The `add_time` axis has no
+ *    equivalent hazard — `add_time < cutoff` IS the original BS#1433 cohort
+ *    — which is why the rule binds only this pair.
+ *
+ * 2. **The bounds must be ordered.** A transposed pair validates fine
+ *    individually and yields an empty intersection, so the run reports
+ *    `scanned: 0` — the exact number the runbook tells the operator to
+ *    record as the frozen cohort size. Silently reading "already drained"
+ *    off a typo is worse than failing loudly.
+ */
+const assertWindowShape = (updatedAfterTs?: string, updatedBeforeTs?: string): void => {
+  if (updatedBeforeTs && !updatedAfterTs) {
+    throw new Error(
+      'BACKFILL_UPDATED_BEFORE_TS was set without BACKFILL_UPDATED_AFTER_TS. An upper bound alone selects the entire unlinked enriched_no_match backlog, not a window; set the lower bound too.'
+    );
+  }
+  if (updatedAfterTs && updatedBeforeTs && Date.parse(updatedAfterTs) >= Date.parse(updatedBeforeTs)) {
+    throw new Error(
+      `BACKFILL_UPDATED_AFTER_TS (${updatedAfterTs}) must be strictly before BACKFILL_UPDATED_BEFORE_TS (${updatedBeforeTs}); the window as given selects nothing.`
+    );
+  }
 };
 
 export type TimeWindow = {
@@ -248,6 +283,21 @@ export type TimeWindow = {
  * pair alone satisfies the at-least-one requirement. The BS#1998 run shape
  * uses the updated_at pair alone.
  */
+/**
+ * The complete set of cohort-bound env vars, exported so `job.ts`'s
+ * pre-flight existence check can't drift from what `resolveTimeWindow`
+ * actually accepts. That drift is precisely the bug BS#1998 had to fix:
+ * `job.ts` listed only the two add_time bounds and rejected the updated_at
+ * run shape before the drain ever reached this function. One list, two
+ * readers.
+ */
+export const TIME_WINDOW_ENV_VARS = [
+  'BACKFILL_CUTOFF_TS',
+  'BACKFILL_WINDOW_START_TS',
+  'BACKFILL_UPDATED_AFTER_TS',
+  'BACKFILL_UPDATED_BEFORE_TS',
+] as const;
+
 export const resolveTimeWindow = (
   cutoffRaw: string | undefined = process.env.BACKFILL_CUTOFF_TS,
   windowStartRaw: string | undefined = process.env.BACKFILL_WINDOW_START_TS,
@@ -255,14 +305,13 @@ export const resolveTimeWindow = (
   updatedBeforeRaw: string | undefined = process.env.BACKFILL_UPDATED_BEFORE_TS
 ): TimeWindow => {
   if (!cutoffRaw && !windowStartRaw && !updatedAfterRaw && !updatedBeforeRaw) {
-    throw new Error(
-      'At least one of BACKFILL_CUTOFF_TS, BACKFILL_WINDOW_START_TS, BACKFILL_UPDATED_AFTER_TS or BACKFILL_UPDATED_BEFORE_TS is required; none is set.'
-    );
+    throw new Error(`At least one of ${TIME_WINDOW_ENV_VARS.join(', ')} is required; none is set.`);
   }
   const cutoffTs = cutoffRaw ? resolveCutoffTs(cutoffRaw) : undefined;
   const windowStartTs = resolveWindowStartTs(windowStartRaw);
   const updatedAfterTs = resolveUpdatedAfterTs(updatedAfterRaw);
   const updatedBeforeTs = resolveUpdatedBeforeTs(updatedBeforeRaw);
+  assertWindowShape(updatedAfterTs, updatedBeforeTs);
   return { cutoffTs, windowStartTs, updatedAfterTs, updatedBeforeTs };
 };
 
@@ -279,18 +328,40 @@ export const resolveTimeWindow = (
  * turn a re-run of either documented recipe into a no-op, which is a worse
  * failure than the one dry-run-by-default protects against.
  *
- * Accepts only exact `true`/`false` (case-insensitive). Anything else is a
- * typo, and a typo'd `DRY_RUN` that falls back to "live" would write when
- * the operator believed it was previewing — so unrecognized values throw
- * rather than warn-and-continue.
+ * Truthy values are `true` / `1`, falsey are `false` / `0`, both
+ * case-insensitive and whitespace-trimmed — the locked set `docs/env-vars.md`
+ * documents for every other `DRY_RUN` in the fleet (`album-reviews-etl`,
+ * `library-identity-consumer`, `rotation-release-id-backfill`, …). Accepting
+ * only `true`/`false` here (review round 1) would have made `-e DRY_RUN=1`
+ * — muscle memory from any of those jobs — abort with a Sentry-captured
+ * `failed` line, reading as a crash rather than a flag-format complaint.
+ *
+ * Anything OUTSIDE that set still throws rather than falling back to "live":
+ * a typo'd `DRY_RUN` that writes when the operator believed it was
+ * previewing is the failure worth being loud about.
  */
 export const resolveDryRun = (raw: string | undefined = process.env.DRY_RUN): boolean => {
   if (raw === undefined || raw === '') return false;
   const normalized = raw.trim().toLowerCase();
-  if (normalized === 'true') return true;
-  if (normalized === 'false') return false;
-  throw new Error(`DRY_RUN=${JSON.stringify(raw)} is not a boolean; use "true" or "false".`);
+  if (normalized === 'true' || normalized === '1') return true;
+  if (normalized === 'false' || normalized === '0') return false;
+  throw new Error(`DRY_RUN=${JSON.stringify(raw)} is not a boolean; use "true"/"1" or "false"/"0".`);
 };
+
+/**
+ * BS#1998 review round 1: consecutive-shed abort threshold. `0` disables.
+ * Default 25 — comfortably above any plausible transient blip at this job's
+ * TB(20/min) pacing (~75 s of shedding), well below the point where the run
+ * has wasted meaningful budget on an upstream that cannot answer.
+ */
+export const MAX_CONSECUTIVE_SHEDS = 25;
+
+export const resolveMaxConsecutiveSheds = (
+  raw: string | undefined = process.env.BACKFILL_MAX_CONSECUTIVE_SHEDS
+): number =>
+  requireNonNegativeInt(raw, 'BACKFILL_MAX_CONSECUTIVE_SHEDS', MAX_CONSECUTIVE_SHEDS, {
+    note: 'Use 0 to disable the consecutive-shed abort.',
+  });
 
 export const resolveLiveActivityLookback = (
   raw: string | undefined = process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS
@@ -503,6 +574,7 @@ export const runReenrichment = async (opts: {
   updatedAfterTs?: string;
   updatedBeforeTs?: string;
   dryRun?: boolean;
+  maxConsecutiveSheds?: number;
   batchSize?: number;
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
@@ -516,6 +588,7 @@ export const runReenrichment = async (opts: {
   const window = resolveTimeWindow(opts.cutoffTs, opts.windowStartTs, opts.updatedAfterTs, opts.updatedBeforeTs);
   const { cutoffTs, windowStartTs, updatedAfterTs, updatedBeforeTs } = window;
   const dryRun = opts.dryRun ?? resolveDryRun();
+  const maxConsecutiveSheds = opts.maxConsecutiveSheds ?? resolveMaxConsecutiveSheds();
   const batchSize = opts.batchSize ?? resolveBatchSize();
   const liveActivityLookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
@@ -541,6 +614,11 @@ export const runReenrichment = async (opts: {
   // Returns true iff the run should stop (SIGTERM observed during the wait).
   // Disabled (returns false immediately) when lookback==0.
   const waitForQuietPeriod = async (): Promise<boolean> => {
+    // BS#1998 review round 1: a dry run reads nothing a DJ contends with and
+    // writes nothing at all, so deferring it to a quiet period buys no safety
+    // and can strand a scope preview in `live_activity_pause` for the length
+    // of a show — right when the operator is trying to size the run.
+    if (dryRun) return stopRequested;
     if (liveActivityLookbackSeconds <= 0) return false;
     let active = await safeProbe();
     while (active) {
@@ -561,6 +639,7 @@ export const runReenrichment = async (opts: {
     updated_after_ts: updatedAfterTs ?? null,
     updated_before_ts: updatedBeforeTs ?? null,
     dry_run: dryRun,
+    max_consecutive_sheds: maxConsecutiveSheds,
     batch_size: batchSize,
     live_activity_lookback_seconds: liveActivityLookbackSeconds,
     live_activity_pause_ms: liveActivityPauseMs,
@@ -577,6 +656,7 @@ export const runReenrichment = async (opts: {
   };
   const matchRacedIds: number[] = [];
   let matchRacedTruncatedCount = 0;
+  let consecutiveSheds = 0;
   let lastId = 0;
   let batchIndex = 0;
   let stopped = false;
@@ -635,6 +715,43 @@ export const runReenrichment = async (opts: {
           else matchRacedTruncatedCount += 1;
         }
         lastId = row.id;
+
+        // BS#1998 review round 1: abort when LML is shedding every request.
+        //
+        // Classifying a shed (enrich.ts) stops it corrupting the verdict, but
+        // on its own it does nothing to stop the run. With the breaker open,
+        // every row returns a shed, and the drain would issue 26k real HTTP
+        // lookups over ~22h against an LML that cannot answer one of them,
+        // then report `upstream_unavailable_skipped: 26323` and ask the
+        // operator to start over. That is a lot of load applied to an
+        // already-unhealthy upstream to accomplish nothing.
+        //
+        // Deliberately NOT a port of the sibling's `/health` breaker gate
+        // (`jobs/flowsheet-metadata-backfill/lml-health.ts`). That gate probes
+        // an endpoint whose Discogs check short-circuits ONLY while the
+        // breaker is non-closed — so on the healthy path, which is ~every run,
+        // each probe spends a live Discogs call from the very ceiling it
+        // exists to protect. Counting the sheds we already have in hand costs
+        // nothing, needs no new dependency, and reacts to the condition itself
+        // rather than to a proxy for it.
+        //
+        // Reset on ANY other outcome (including `still_no_match` and
+        // `lml_error`): the trigger is a SUSTAINED all-shed streak, not
+        // cumulative sheds — a breaker flapping in and out still lets real
+        // work through, and that run should continue.
+        if (outcome === 'upstream_unavailable_skipped') {
+          consecutiveSheds += 1;
+          if (maxConsecutiveSheds > 0 && consecutiveSheds >= maxConsecutiveSheds) {
+            failed = {
+              error: new Error(
+                `LML shed ${consecutiveSheds} consecutive lookups (BACKFILL_MAX_CONSECUTIVE_SHEDS=${maxConsecutiveSheds}); aborting rather than burning the cohort against an open breaker. No rows were written by the shed responses; re-run once LML is healthy.`
+              ),
+            };
+            break;
+          }
+        } else {
+          consecutiveSheds = 0;
+        }
         // Stop check between rows (round 3): with batch_size=100 and ~3s/row
         // a batch can take ~5 min — far beyond docker's 10s default grace.
         // Per-row check keeps the README's "finishes its in-flight row" claim
@@ -663,7 +780,11 @@ export const runReenrichment = async (opts: {
         total_scanned: totals.scanned,
       });
 
-      if (stopped) break;
+      // `failed` is checked alongside `stopped` because the shed-abort above
+      // sets it from inside the per-row loop, where `break` only leaves that
+      // loop — without this the run would log the abort and then calmly fetch
+      // the next batch, which is the opposite of aborting.
+      if (stopped || failed) break;
     }
   } finally {
     // Summary span carrying numeric attributes (BS#1081 typing-trap workaround).
@@ -676,6 +797,10 @@ export const runReenrichment = async (opts: {
           'reenrichment.flipped_count': flipped(),
           'reenrichment.still_no_match_count': totals.still_no_match,
           'reenrichment.upstream_unavailable_skipped_count': totals.upstream_unavailable_skipped,
+          // Without this a dry run's span is byte-identical to a live run
+          // that matched nothing — the catastrophic outcome the span exists
+          // to surface (review round 1).
+          'reenrichment.dry_run': dryRun,
           'reenrichment.match_raced_count': totals.match_raced,
           'reenrichment.lml_error_count': totals.lml_error,
           'reenrichment.db_error_count': totals.db_error,
