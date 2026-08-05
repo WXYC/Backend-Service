@@ -568,7 +568,7 @@ describe('resolveDryRun (BS#1998 review)', () => {
     ['', false],
     [undefined, false],
   ])('parses %p as %p', (raw, expected) => {
-    expect(resolveDryRun(raw as string | undefined)).toBe(expected);
+    expect(resolveDryRun(raw)).toBe(expected);
   });
 
   it.each(['yes', 'no', 'on', '2', 'ture'])(
