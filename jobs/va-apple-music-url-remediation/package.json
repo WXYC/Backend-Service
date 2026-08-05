@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/va-apple-music-url-remediation",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "One-shot V/A Apple-Music-URL remediation (BS#2000): re-adjudicate flowsheet.apple_music_url against LML's post-#1139 guarded matcher, and invalidate album_metadata.apple_music_url to 'unresolved' so the BS#1915 re-ask sweep re-resolves it. Flowsheet phase runs first (nulling album_metadata unmasks flowsheet's value). Dry-run by default; --execute to write. Depends on LML#1139 guard + cache purge deployed.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_va_apple_music_url_remediation:ci -f ../../Dockerfile.va-apple-music-url-remediation ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.68.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

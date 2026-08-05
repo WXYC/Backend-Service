@@ -198,6 +198,11 @@ export const ALL_LML_CALLERS = [
   'flowsheet-reenrichment',
   'streaming-url-upgrade',
   'apple-music-url-backfill',
+  // BS#2000: the V/A remediation one-shot. Same shape as its
+  // `apple-music-url-backfill` donor (offline re-query of persisted
+  // apple_music_url rows), inverted polarity — that job filled nulls, this one
+  // re-adjudicates non-nulls against the post-LML#1139 guarded matcher.
+  'va-apple-music-url-remediation',
   'concerts-genre-enrichment',
   'concerts-artist-lml-resolver',
   // BS#1826 PR 3: registered alongside the missing `caller` this label's
@@ -263,6 +268,7 @@ const CALLER_CLASS: Record<LmlCaller, LmlCallerClass> = {
   'flowsheet-reenrichment': 5,
   'streaming-url-upgrade': 5,
   'apple-music-url-backfill': 5,
+  'va-apple-music-url-remediation': 5,
   'concerts-genre-enrichment': 5,
   'concerts-artist-lml-resolver': 5,
   'rotation-release-id-backfill': 5,

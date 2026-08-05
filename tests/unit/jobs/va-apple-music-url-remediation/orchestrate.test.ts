@@ -1,0 +1,369 @@
+/**
+ * BS#2000 orchestrator.
+ *
+ * The behaviors pinned here are the ones that keep the job from destroying the
+ * data it exists to protect:
+ *
+ *   1. Dry-run makes ZERO LML calls — sizing the work is free.
+ *   2. One lookup per DISTINCT (artist, album, track), fanned to every row
+ *      carrying that triple (BS#1192: Apple URLs are track-aware).
+ *   3. A `none` verdict requires THREE consecutive null passes; a URL on pass
+ *      2 or 3 short-circuits to `url` and counts as an observed throttle-null.
+ *   4. An `indeterminate` triple is SKIPPED and the page CONTINUES — never a
+ *      halt-in-place, which would wedge the run (the BS#1011 shape).
+ *   5. The SQL net is a superset; the arbiter is what actually decides.
+ *   6. The write is a compare-and-set, because this job overwrites a non-null
+ *      value while two other writers touch the same column.
+ *   7. ANALYZE after the write pass, and `updated_at` omitted on flowsheet.
+ *   8. Phase order: flowsheet BEFORE album_metadata.
+ */
+import { jest } from '@jest/globals';
+
+import { db } from '@wxyc/database';
+import {
+  VA_NET_REGEX,
+  analyzeTable,
+  applyFlowsheetBatch,
+  invalidateAlbumBatch,
+  resolveAfterId,
+  resolveBatchSize,
+  resolveDryRun,
+  resolveMaxRescueRate,
+  runRemediation,
+  tripleKey,
+  __resetStopForTesting,
+  type FlowsheetFix,
+} from '../../../../jobs/va-apple-music-url-remediation/orchestrate';
+
+type SqlLike = { sql?: string | string[]; values?: unknown[]; raw?: string; join?: unknown[]; sep?: unknown };
+const renderSql = (value: unknown): string => {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string' || typeof value === 'number') return String(value);
+  const obj = value as SqlLike;
+  if (typeof obj.raw === 'string') return obj.raw;
+  if (Array.isArray(obj.join)) return obj.join.map(renderSql).join(renderSql(obj.sep));
+  if (Array.isArray(obj.sql)) {
+    const values = obj.values ?? [];
+    return obj.sql.map((chunk, i) => chunk + (i < values.length ? renderSql(values[i]) : '')).join('');
+  }
+  if (typeof obj.sql === 'string') return obj.sql;
+  return '';
+};
+
+const queueExecute = (...results: unknown[]): void => {
+  const mock = db.execute as jest.Mock;
+  for (const result of results) mock.mockResolvedValueOnce(result as never);
+};
+
+const findExecuteCall = (pattern: RegExp): string =>
+  (db.execute as jest.Mock).mock.calls.map((c) => renderSql(c?.[0])).find((s) => pattern.test(s)) ?? '';
+
+const APPLE_URL = 'https://music.apple.com/us/song/im-on-my-way/777';
+const NEW_URL = 'https://music.apple.com/us/song/im-on-my-way/999';
+
+const vaRow = (id: number, overrides: Record<string, unknown> = {}) => ({
+  id,
+  artist_name: 'Various Artists - Blues',
+  album_title: 'Blues Classics 1927-1940',
+  track_title: "I'm On My Way",
+  apple_music_url: APPLE_URL,
+  ...overrides,
+});
+
+const withUrl = (url: string | null) => ({ results: [{ artwork: { apple_music_url: url } }] });
+const EMPTY = { results: [] };
+
+/** flowsheet: count, page, empty page. album: count, empty page. */
+const queueSinglePageRun = (rows: unknown[]) => queueExecute([{ count: rows.length }], rows, [], [{ count: 0 }], []);
+
+const noopAnalyze = jest.fn(async () => {});
+const passThroughApply = jest.fn((fixes: FlowsheetFix[]) => Promise.resolve(fixes.length));
+const noopInvalidate = jest.fn((ids: number[]) => Promise.resolve(ids.length));
+
+const baseOpts = (overrides: Record<string, unknown> = {}) => ({
+  dryRun: false,
+  applyBatchFn: passThroughApply as never,
+  invalidateAlbumFn: noopInvalidate as never,
+  analyzeFn: noopAnalyze as never,
+  checkLiveActivityFn: (async () => {}) as never,
+  ...overrides,
+});
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  __resetStopForTesting();
+  process.env.LIVE_ACTIVITY_PAUSE_MS = '0';
+  process.env.VA_REMEDIATION_SECOND_PASS_DELAY_MS = '0';
+  delete process.env.VA_REMEDIATION_FLOWSHEET_AFTER_ID;
+  delete process.env.VA_REMEDIATION_ALBUM_AFTER_ID;
+});
+
+describe('resolveDryRun', () => {
+  it('defaults to dry-run', () => {
+    expect(resolveDryRun(['node', 'job.js'])).toBe(true);
+  });
+  it('--execute switches writes on', () => {
+    expect(resolveDryRun(['node', 'job.js', '--execute'])).toBe(false);
+  });
+  it('throws on contradictory flags', () => {
+    expect(() => resolveDryRun(['node', 'job.js', '--execute', '--dry-run'])).toThrow(/contradictory/i);
+  });
+});
+
+describe('env resolvers', () => {
+  it('accepts a zero resume cursor as "start at the beginning"', () => {
+    // The BS#1631 donor's envInt requires > 0 and would silently fall back
+    // here, which is why the cursor uses requireNonNegativeInt instead.
+    expect(resolveAfterId('VA_REMEDIATION_FLOWSHEET_AFTER_ID', '0')).toBe(0);
+    expect(resolveAfterId('VA_REMEDIATION_FLOWSHEET_AFTER_ID', '4200')).toBe(4200);
+  });
+
+  it('rejects a nonsensical rescue-rate ceiling', () => {
+    expect(resolveMaxRescueRate('0.2')).toBeCloseTo(0.2);
+    expect(() => resolveMaxRescueRate('0')).toThrow(/fraction/);
+    expect(() => resolveMaxRescueRate('1.5')).toThrow(/fraction/);
+  });
+
+  it('rejects a zero batch size', () => {
+    expect(() => resolveBatchSize('0')).toThrow(/VA_REMEDIATION_BATCH_SIZE/);
+  });
+});
+
+describe('tripleKey', () => {
+  it('keys on all three axes because Apple URLs are track-aware (BS#1192)', () => {
+    const a = tripleKey('Various Artists', 'Blues', 'Track One');
+    expect(tripleKey('various artists', 'blues', 'track one')).toBe(a);
+    expect(tripleKey('Various Artists', 'Blues', 'Track Two')).not.toBe(a);
+  });
+});
+
+describe('candidate net', () => {
+  it('folds the artist in SQL and uses the widened V/A regex', async () => {
+    queueSinglePageRun([]);
+    await runRemediation(baseOpts({ dryRun: true }));
+    const countSql = findExecuteCall(/COUNT/);
+    // The fold must happen in SQL: lower('Vàrious Artists') matches none of
+    // the alternatives, so a lower()-based net would drop diacritic rows
+    // before the arbiter ever saw them.
+    expect(countSql).toMatch(/fold_artist_name/);
+    expect(countSql).toContain('apple_music_url" IS NOT NULL');
+    // Widened from the donor's `v\.a\.`, which is not a superset of
+    // is_compilation_artist (misses the dotless `v.a` family).
+    expect(VA_NET_REGEX).toContain('v[./]');
+  });
+});
+
+describe('dry-run', () => {
+  it('makes ZERO LML calls and zero writes', async () => {
+    const lookup = jest.fn();
+    queueSinglePageRun([vaRow(1), vaRow(2, { track_title: 'Another' })]);
+
+    const result = await runRemediation(baseOpts({ dryRun: true, lookup: lookup }));
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(passThroughApply).not.toHaveBeenCalled();
+    expect(noopAnalyze).not.toHaveBeenCalled();
+    expect(result.flowsheet.distinctTriples).toBe(2);
+    expect(result.flowsheet.arbitrated).toBe(2);
+  });
+});
+
+describe('triple dedupe', () => {
+  it('fans one lookup out to every row carrying that triple', async () => {
+    const lookup = jest.fn(() => Promise.resolve(withUrl(NEW_URL)));
+    queueSinglePageRun([vaRow(1), vaRow(2), vaRow(3)]);
+
+    const result = await runRemediation(baseOpts({ lookup: lookup }));
+
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(result.flowsheet.distinctTriples).toBe(1);
+    expect(passThroughApply.mock.calls[0][0]).toHaveLength(3);
+  });
+});
+
+describe('multi-pass confirmation before NULL', () => {
+  it('requires three consecutive nulls to write a NULL', async () => {
+    const lookup = jest.fn(() => Promise.resolve(withUrl(null)));
+    queueSinglePageRun([vaRow(1)]);
+
+    const result = await runRemediation(baseOpts({ lookup: lookup }));
+
+    expect(lookup).toHaveBeenCalledTimes(3);
+    expect(result.flowsheet.written_null).toBe(1);
+    expect(passThroughApply.mock.calls[0][0][0]).toMatchObject({ id: 1, url: null, oldUrl: APPLE_URL });
+  });
+
+  it('a URL on a later pass rescues the row and counts as a throttle-null', async () => {
+    // This is the LML#904 failure the job must survive: the first probe timed
+    // out on LML's own throttle, not because there is no match.
+    const lookup = jest
+      .fn()
+      .mockResolvedValueOnce(withUrl(null) as never)
+      .mockResolvedValueOnce(withUrl(NEW_URL) as never);
+    queueSinglePageRun([vaRow(1)]);
+
+    const result = await runRemediation(baseOpts({ lookup: lookup }));
+
+    expect(lookup).toHaveBeenCalledTimes(2);
+    expect(result.flowsheet.written_url).toBe(1);
+    expect(result.flowsheet.rescued).toBe(1);
+    expect(result.flowsheet.first_pass_nulls).toBe(1);
+    expect(passThroughApply.mock.calls[0][0][0]).toMatchObject({ url: NEW_URL });
+  });
+
+  it('does not spend confirmation passes on an indeterminate response', async () => {
+    const lookup = jest.fn(() => Promise.resolve(EMPTY));
+    queueSinglePageRun([vaRow(1)]);
+
+    await runRemediation(baseOpts({ lookup: lookup }));
+
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('indeterminate handling (anti-wedge)', () => {
+  it('skips the triple, continues the page, and fails the run at the END', async () => {
+    // Halting in place with the cursor at page start would re-select the same
+    // page forever — the BS#1011 wedge. A genuinely unfindable compilation
+    // returns empty results on every attempt, so this is the expected case.
+    const lookup = jest.fn((artist: unknown) =>
+      Promise.resolve((artist as string).includes('Latin') ? EMPTY : withUrl(NEW_URL))
+    );
+    queueSinglePageRun([vaRow(1, { artist_name: 'Various Artists - Latin' }), vaRow(2)]);
+
+    const result = await runRemediation(baseOpts({ lookup: lookup }));
+
+    expect(result.flowsheet.indeterminate).toBe(1);
+    // The healthy row on the same page was still processed and written.
+    expect(result.flowsheet.written_url).toBe(1);
+    expect(result.flowsheet.last_id).toBe(2);
+    // ...and the run reports failure so the AC isn't falsely claimed.
+    expect(result.failed).toBe(true);
+  });
+
+  it('does not fail a dry-run for indeterminates', async () => {
+    queueSinglePageRun([vaRow(1)]);
+    const result = await runRemediation(baseOpts({ dryRun: true, lookup: jest.fn() }));
+    expect(result.failed).toBe(false);
+  });
+});
+
+describe('the arbiter, not the net, decides', () => {
+  it('never writes a row the SQL net caught but the arbiter rejects', async () => {
+    const lookup = jest.fn(() => Promise.resolve(withUrl(NEW_URL)));
+    // `Various Production` matches the coarse regex and is NOT a V/A credit.
+    queueSinglePageRun([vaRow(1, { artist_name: 'Various Production' }), vaRow(2)]);
+
+    const result = await runRemediation(baseOpts({ lookup: lookup }));
+
+    expect(result.flowsheet.scanned).toBe(2);
+    expect(result.flowsheet.arbitrated).toBe(1);
+    const written = passThroughApply.mock.calls[0][0];
+    expect(written.map((f) => f.id)).toEqual([2]);
+  });
+});
+
+describe('phase order', () => {
+  it('runs flowsheet before album_metadata', async () => {
+    // Nulling album_metadata unmasks flowsheet's value via the read-path
+    // coalesce, so the fall-through target must already be clean.
+    queueExecute([{ count: 1 }], [vaRow(1)], [], [{ count: 1 }], [{ album_id: 7, artist_name: 'Various Artists' }], []);
+    const order: string[] = [];
+    const apply = jest.fn((f: FlowsheetFix[]) => {
+      order.push('flowsheet');
+      return Promise.resolve(f.length);
+    });
+    const invalidate = jest.fn((ids: number[]) => {
+      order.push('album');
+      return Promise.resolve(ids.length);
+    });
+
+    await runRemediation(
+      baseOpts({
+        lookup: () => Promise.resolve(withUrl(NEW_URL)),
+        applyBatchFn: apply,
+        invalidateAlbumFn: invalidate,
+      })
+    );
+
+    expect(order).toEqual(['flowsheet', 'album']);
+  });
+
+  it('skips the album phase when flowsheet failed', async () => {
+    queueExecute([{ count: 1 }], [vaRow(1)], []);
+    const apply = jest.fn(() => Promise.reject(new Error('boom')));
+    const invalidate = jest.fn(() => Promise.resolve(0));
+
+    const result = await runRemediation(
+      baseOpts({
+        lookup: () => Promise.resolve(withUrl(NEW_URL)),
+        applyBatchFn: apply,
+        invalidateAlbumFn: invalidate,
+      })
+    );
+
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(result.failed).toBe(true);
+  });
+});
+
+describe('applyFlowsheetBatch SQL', () => {
+  it('is a compare-and-set that omits updated_at', async () => {
+    (db.transaction as jest.Mock).mockImplementation((cb: (tx: unknown) => unknown) =>
+      Promise.resolve(cb({ execute: db.execute }))
+    );
+    queueExecute({ count: 1 }, { count: 1 });
+
+    await applyFlowsheetBatch([{ id: 1, url: NEW_URL, oldUrl: APPLE_URL }], 1000);
+
+    const updateSql = findExecuteCall(/UPDATE/);
+    // The compare-and-set: two other writers touch this column, and unlike the
+    // fill-only siblings this job overwrites a NON-NULL value.
+    expect(updateSql).toMatch(/IS NOT DISTINCT FROM v\."old_url"/);
+    // migration 0084's bump_flowsheet_updated_at trigger owns the stamp.
+    expect(updateSql).not.toMatch(/updated_at/);
+    expect(updateSql).toMatch(/apple_music_url" = v\."url"/);
+    expect(updateSql).not.toMatch(/spotify_url/);
+  });
+});
+
+describe('invalidateAlbumBatch SQL', () => {
+  it('sets status unresolved and resets the re-ask counter', async () => {
+    (db.transaction as jest.Mock).mockImplementation((cb: (tx: unknown) => unknown) =>
+      Promise.resolve(cb({ execute: db.execute }))
+    );
+    queueExecute({ count: 1 }, { count: 1 });
+
+    await invalidateAlbumBatch([7, 8], 1000);
+
+    const updateSql = findExecuteCall(/UPDATE/);
+    // Handing the row to the BS#1915 hourly re-ask sweep rather than
+    // re-verifying it here — album_metadata is album-keyed while the URL is a
+    // track deep-link, so there is no honest triple to re-query with.
+    expect(updateSql).toMatch(/apple_music_status" = 'unresolved'/);
+    expect(updateSql).toMatch(/streaming_reask_attempts" = 0/);
+    expect(updateSql).toMatch(/apple_music_url" = NULL/);
+    // Guarded so a concurrent write can't be clobbered.
+    expect(updateSql).toMatch(/apple_music_url" IS NOT NULL/);
+  });
+});
+
+describe('ANALYZE pairing', () => {
+  it('runs ANALYZE after the flowsheet write pass', async () => {
+    // No CI check covers this for a TS job — check-bulk-update-analyze.mjs
+    // scans .sql files only — so the bulk-update-playbook rule is pinned here.
+    queueSinglePageRun([vaRow(1)]);
+    await runRemediation(baseOpts({ lookup: () => Promise.resolve(withUrl(NEW_URL)) }));
+    expect(noopAnalyze).toHaveBeenCalledWith('flowsheet', expect.any(Number));
+  });
+
+  it('emits ANALYZE in a raised-timeout transaction', async () => {
+    (db.transaction as jest.Mock).mockImplementation((cb: (tx: unknown) => unknown) =>
+      Promise.resolve(cb({ execute: db.execute }))
+    );
+    queueExecute({}, {});
+    await analyzeTable('flowsheet', 300_000);
+    expect(findExecuteCall(/statement_timeout/)).toContain('300000');
+    expect(findExecuteCall(/ANALYZE/)).toMatch(/ANALYZE/);
+  });
+});

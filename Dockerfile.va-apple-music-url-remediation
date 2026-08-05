@@ -1,0 +1,61 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /va-apple-music-url-remediation-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./shared/lml-client ./shared/lml-client
+COPY ./jobs/va-apple-music-url-remediation ./jobs/va-apple-music-url-remediation
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/va-apple-music-url-remediation
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /va-apple-music-url-remediation
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/va-apple-music-url-remediation/package* ./jobs/va-apple-music-url-remediation/
+COPY ./shared/database/package* ./shared/database/
+COPY ./shared/lml-client/package* ./shared/lml-client/
+
+# `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
+# (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
+# .npmrc the prod stage's npm install 401s on @wxyc/shared.
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./va-apple-music-url-remediation-builder/jobs/va-apple-music-url-remediation/dist ./jobs/va-apple-music-url-remediation/dist
+COPY --from=builder ./va-apple-music-url-remediation-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./va-apple-music-url-remediation-builder/shared/lml-client/dist ./shared/lml-client/dist
+
+# The candidate SELECTs walk `flowsheet` (~1.9M rows) through
+# `fold_artist_name(artist_name)`, which no index covers (the trigram GIN is on
+# the raw column), so every page is a seq scan. The API's tight 5s default
+# statement timeout is far too aggressive for that.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+
+# NOTE: deliberately NOT setting DB_SYNCHRONOUS_COMMIT=off, unlike the BS#1715
+# streaming-url-remediation donor this Dockerfile derives from. That job could
+# afford async commit because a write lost to an RDS crash was self-healing:
+# its rows stayed net-matched until fixed, so a re-run simply re-selected them.
+# Here a re-verified row STAYS in the candidate net whether or not its write
+# landed (still V/A, still non-null), so a lost write is invisible to any
+# re-scan — and the id-cursor would have advanced past it. The failure would be
+# silent, and re-deriving it costs a fresh LML round-trip per triple. Durable
+# commits are the cheaper side of that trade.
+
+# Identifies the connection in pg_stat_activity during triage.
+ENV DB_APPLICATION_NAME=wxyc-va-apple-music-url-remediation
+
+# ENTRYPOINT + empty CMD so docker-level args (`--execute`, `--dry-run`) pass
+# through to the job rather than replacing the launcher. With
+# `CMD ["npm", "start"]`, `docker run <image> --execute` would REPLACE the CMD
+# and npm would never run.
+ENTRYPOINT ["node", "/va-apple-music-url-remediation/jobs/va-apple-music-url-remediation/dist/job.js"]
+CMD []
