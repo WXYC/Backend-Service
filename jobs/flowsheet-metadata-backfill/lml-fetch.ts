@@ -29,17 +29,22 @@
  *     multiplier. The cache cuts the LML call budget by ~42% without
  *     pacing changes or schema changes. Cache is consulted before the
  *     LML call; on miss the call result is stored EXCEPT when LML
- *     signaled a cascade timeout (`response.timeout === true`) — those
- *     responses are NOT cached, so sibling rows of the same
- *     `(artist, album)` later in the same run still each call LML
- *     (each gets its own chance to land while LML recovers), and any
- *     NEW flowsheet rows of that pair in future cron runs start with a
- *     fresh cache and a fresh LML call. The originating row is still
- *     drained as `enriched_no_match` by `applyEnrichment` (intentional
- *     per the 35 s timeout budget above — the alternative is the row
- *     loops every cron pass) so this guard does not save the row that
- *     received the timeout body, only its peers in this run and any
- *     successor rows in future runs. On hit, per-track URL fields are stripped at the
+ *     signaled a cascade timeout (`response.timeout === true`) or
+ *     (BS#1995 Arm 3) a breaker-open shed (`degraded_reason:
+ *     'upstream_unavailable'`) — those responses are NOT cached, so
+ *     sibling rows of the same `(artist, album)` later in the same run
+ *     still each call LML (each gets its own chance to land while LML
+ *     recovers), and any NEW flowsheet rows of that pair in future cron
+ *     runs start with a fresh cache and a fresh LML call. The
+ *     originating row of a cascade timeout is still drained as
+ *     `enriched_no_match` by `applyEnrichment` (intentional per the 35 s
+ *     timeout budget above — the alternative is the row loops every cron
+ *     pass), so in that case this guard only saves peers in this run and
+ *     successor rows in future runs, not the row that received the
+ *     timeout body itself. The originating row of a breaker-open shed is
+ *     NOT drained at all — `applyEnrichment` refuses to write any verdict
+ *     for it (see `enrich.ts`'s `upstream_unavailable_skipped` outcome) —
+ *     so that row is retried on a later sweep too. On hit, per-track URL fields are stripped at the
  *     cache boundary (BS#1185 search URLs + BS#1192 apple_music_url
  *     are track-aware on LML's side); enrich.ts's existing `??`
  *     fallback drops through to per-row synthesis for the search URLs.
@@ -111,6 +116,22 @@ export const getLookupCache = (): LookupCache => activeCache;
 const hasUpstreamTimeout = (response: LookupResponse): boolean => response.timeout === true;
 
 /**
+ * BS#1995 Arm 3: `degraded_reason: 'upstream_unavailable'` means LML's
+ * Discogs breaker was open and it never got to ask — same "transient signal
+ * about LML load, not an answer about (artist, album)" shape as
+ * `hasUpstreamTimeout` above, and for the same reason must not be cached.
+ * Caching one would lock in an unanswered-not-no-match verdict for every
+ * subsequent row of the same (artist, album) for the rest of the run —
+ * exactly the kind of silent freeze this ticket exists to close, just at
+ * the cache layer instead of the write layer. `enrich.ts:applyEnrichment`
+ * separately refuses to write a terminal verdict for this response shape;
+ * this guard keeps a poisoned entry from ever reaching a sibling row's
+ * cache hit in the first place.
+ */
+const isUpstreamUnavailable = (response: LookupResponse): boolean =>
+  response.degraded_reason === 'upstream_unavailable';
+
+/**
  * Result of a lookup, with provenance: did we serve from cache?
  * The orchestrator uses `cacheHit` to skip the per-row throttle on
  * hits (the throttle exists to space LML calls; a cache hit makes no
@@ -140,7 +161,7 @@ export const lookupMetadata = async (
     discogsUnavailable,
   });
 
-  if (!hasUpstreamTimeout(response)) {
+  if (!hasUpstreamTimeout(response) && !isUpstreamUnavailable(response)) {
     activeCache.set(artist, album, response);
   }
   return { response, cacheHit: false };

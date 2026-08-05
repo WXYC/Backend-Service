@@ -355,6 +355,101 @@ describe('applyEnrichment', () => {
 });
 
 /**
+ * BS#1995 Arm 3 (narrow classification fix): the 2026-08-03/04 incident
+ * root-caused to a breaker-open LML response — a 200 with empty results,
+ * indistinguishable from a genuine no-match at the `results` level — being
+ * written as a terminal `enriched_no_match`. LML marks this shape ONLY on
+ * its tail legs (`degraded: true, degraded_reason: 'upstream_unavailable'`);
+ * the search leg swallows the same condition into an ordinary empty result
+ * with no marker (a separate, not-yet-solvable-here problem). This describe
+ * block pins the ONE new branch plus regression-pins the three sibling
+ * shapes that must stay terminal.
+ */
+describe('applyEnrichment (BS#1995 Arm 3) — upstream_unavailable classification', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockDb._chain.returning.mockResolvedValue([{ id: baseRow.id }]);
+  });
+
+  const upstreamUnavailableResponse: LookupResponse = {
+    results: [],
+    search_type: 'none',
+    degraded: true,
+    degraded_reason: 'upstream_unavailable',
+  };
+
+  it('degraded_reason: upstream_unavailable does NOT terminalize and writes nothing (unlinked row)', async () => {
+    const outcome = await applyEnrichment(baseRow, upstreamUnavailableResponse);
+
+    expect(outcome).toBe('upstream_unavailable_skipped');
+    expect(mockDb.update).not.toHaveBeenCalled();
+    expect(mockDb.insert).not.toHaveBeenCalled();
+  });
+
+  it('degraded_reason: upstream_unavailable does NOT terminalize and writes nothing (linked row)', async () => {
+    const outcome = await applyEnrichment(linkedRow, upstreamUnavailableResponse);
+
+    expect(outcome).toBe('upstream_unavailable_skipped');
+    expect(mockDb.update).not.toHaveBeenCalled();
+    expect(mockDb.insert).not.toHaveBeenCalled();
+  });
+
+  it('degraded_reason: upstream_unavailable is the same outcome regardless of fromStatus (W4 self-heal reuses this path too)', async () => {
+    const outcome = await applyEnrichment(baseRow, upstreamUnavailableResponse, { fromStatus: 'enriched_no_match' });
+
+    expect(outcome).toBe('upstream_unavailable_skipped');
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  it('regression pin: degraded_reason: deadline_exceeded with no artwork STILL terminalizes (BS#1914 deliberate class-5 behavior — unchanged by this ticket)', async () => {
+    const deadlineExceededResponse: LookupResponse = {
+      results: [],
+      search_type: 'none',
+      degraded: true,
+      degraded_reason: 'deadline_exceeded',
+    };
+
+    const outcome = await applyEnrichment(baseRow, deadlineExceededResponse);
+
+    expect(outcome).toBe('enriched_no_match');
+    expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setArgs.metadata_status).toBe('enriched_no_match');
+  });
+
+  it('regression pin: timeout: true STILL terminalizes (BS#1064/BS#1180 35s budget decision — unchanged by this ticket)', async () => {
+    const timeoutResponse: LookupResponse = {
+      results: [],
+      search_type: 'none',
+      timeout: true,
+    };
+
+    const outcome = await applyEnrichment(baseRow, timeoutResponse);
+
+    expect(outcome).toBe('enriched_no_match');
+    expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setArgs.metadata_status).toBe('enriched_no_match');
+  });
+
+  it('regression pin: a genuine empty result (results: [], timeout: false, degraded: false) STILL terminalizes (indistinguishable search-leg shed — blocked on the separate LML-side ticket)', async () => {
+    const bareEmptyResponse: LookupResponse = {
+      results: [],
+      search_type: 'none',
+      timeout: false,
+      degraded: false,
+    };
+
+    const outcome = await applyEnrichment(baseRow, bareEmptyResponse);
+
+    expect(outcome).toBe('enriched_no_match');
+    expect(mockDb.update).toHaveBeenCalledWith(flowsheet);
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setArgs.metadata_status).toBe('enriched_no_match');
+  });
+});
+
+/**
  * Epic D / BS#1027 — when the backfill row is linked to a library album
  * (`album_id !== null`), the 10-column metadata payload UPSERTs into
  * `album_metadata` keyed by album_id, and the flowsheet UPDATE only flips
