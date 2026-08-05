@@ -22,6 +22,11 @@
  *     whatever `metadata_status` it entered with (`'pending'` for the main
  *     sweep, `'enriched_no_match'` for the W4 self-heal re-attempt — see
  *     `fromStatus` below) so the next sweep retries it.
+ *   - `degraded_reason: 'upstream_unavailable'` (BS#1995 Arm 3): no write at
+ *     all. LML's Discogs breaker was open and it never got to ask — writing
+ *     a terminal `enriched_no_match` here is the 2026-08-03/04 incident.
+ *     Returns `'upstream_unavailable_skipped'`; the row stays at whatever
+ *     `metadata_status` it entered with, same as an LML throw.
  *
  * Idempotency guard (BS#895 / Epic C C6): the flowsheet WHERE narrows by
  * `id = $row.id AND metadata_status = $fromStatus`. Before BS#895 this
@@ -93,7 +98,12 @@ export type EnrichRow = {
   discogs_unavailable?: boolean;
 };
 
-export type EnrichOutcome = 'enriched_match' | 'enriched_match_raced' | 'enriched_no_match' | 'enriched_no_match_raced';
+export type EnrichOutcome =
+  | 'enriched_match'
+  | 'enriched_match_raced'
+  | 'enriched_no_match'
+  | 'enriched_no_match_raced'
+  | 'upstream_unavailable_skipped';
 
 /**
  * Synthesize the four search URLs the runtime path falls back to on
@@ -197,6 +207,36 @@ export const applyEnrichment = async (
   opts: { fromStatus?: EnrichFromStatus } = {}
 ): Promise<EnrichOutcome> => {
   const fromStatus = opts.fromStatus ?? 'pending';
+
+  // BS#1995 Arm 3 (narrow classification fix): LML's Discogs circuit breaker
+  // being open surfaces on this response's TAIL legs (artwork / enrichment /
+  // identity — `lookup/orchestrator.py:1251`/`:1282`) as
+  // `degraded: true, degraded_reason: 'upstream_unavailable'` — LML never
+  // got to ask Discogs at all. Writing a terminal `enriched_no_match` here
+  // is exactly the 2026-08-03/04 incident: a breaker-open response is
+  // indistinguishable from a genuine no-match at the `results` level, so
+  // 17 hours of flapping silently froze 26,387 rows. Skip the write
+  // entirely — no status flip, no `metadata_attempt_at` stamp, no
+  // `album_metadata` UPSERT — so the row stays at whatever `fromStatus` it
+  // entered this call with (normally `'pending'`) and is retried on a later
+  // sweep, by which point the orchestrator's breaker gate
+  // (`orchestrate.ts`'s `waitForClosedBreaker`) should already be pausing
+  // the drain rather than continuing to burn through the worklist.
+  //
+  // Deliberately narrower than the sibling shapes below, which all stay
+  // terminal: LML's SEARCH leg (`core/search.py:953`) swallows the same
+  // breaker-open condition into `Outcome.empty()` with no marker at all —
+  // indistinguishable from a genuine no-match today (tracked as a separate
+  // LML-side ticket; not solved here) — and `degraded_reason:
+  // 'deadline_exceeded'` / `response.timeout === true` are both documented,
+  // deliberate terminal outcomes for this class-5 offline-drain caller (see
+  // `shared/lml-client/src/policy.ts`'s BS#1914 decision record and
+  // `lml-fetch.ts`'s BS#1064/BS#1180 timeout-budget history) — do not widen
+  // this branch to catch them.
+  if (response.degraded_reason === 'upstream_unavailable') {
+    return 'upstream_unavailable_skipped';
+  }
+
   const artwork = extractArtwork(response);
   const searchUrls = synthesizeSearchUrls(row);
 

@@ -65,6 +65,14 @@ const TOTALS_KEYS = [
   'backfill.self_heal_no_match',
   'backfill.self_heal_lml_error',
   'backfill.self_heal_enrich_error',
+  // BS#1995 Arm 3: the refusal-to-write bucket for a breaker-open LML
+  // response (`degraded_reason: 'upstream_unavailable'`) — see enrich.ts —
+  // and its self-heal-pass twin.
+  'backfill.upstream_unavailable_skipped',
+  'backfill.self_heal_upstream_unavailable_skipped',
+  // BS#1995 Arm 2: breaker-gate activity this run.
+  'backfill.breaker_probes',
+  'backfill.breaker_pauses',
 ];
 
 const matchedResponse: LookupResponse = {
@@ -100,6 +108,10 @@ const runOneRow = () => {
     enrich,
     throttleMs: 0,
     liveActivityLookbackSeconds: 0,
+    // BS#1995 Arm 2: disable the breaker-gate probe — this test isn't
+    // about it, and skipping it keeps the run from touching the real
+    // `fetch` default.
+    breakerProbeIntervalBatches: 0,
     playFloor: 5,
     floorRecencyDays: 7,
   });
@@ -146,6 +158,13 @@ describe('flowsheet-metadata-backfill run.totals span (BS#1563 op + enrich_error
     expect(attrs['backfill.self_heal_no_match']).toBe(0);
     expect(attrs['backfill.self_heal_lml_error']).toBe(0);
     expect(attrs['backfill.self_heal_enrich_error']).toBe(0);
+    // BS#1995: no upstream_unavailable response in this run, and the
+    // breaker gate is disabled (breakerProbeIntervalBatches: 0), so every
+    // new bucket stays 0 — present and numeric, never absent.
+    expect(attrs['backfill.upstream_unavailable_skipped']).toBe(0);
+    expect(attrs['backfill.self_heal_upstream_unavailable_skipped']).toBe(0);
+    expect(attrs['backfill.breaker_probes']).toBe(0);
+    expect(attrs['backfill.breaker_pauses']).toBe(0);
     for (const key of TOTALS_KEYS) {
       expect(typeof attrs[key]).toBe('number');
     }

@@ -114,6 +114,14 @@ import { LmlAuthError, lmlApiKeyFingerprint, type LookupResponse } from '@wxyc/l
 import type { EnrichRow, EnrichOutcome } from './enrich.js';
 import { applyEnrichment as defaultApplyEnrichment, stampDeadLetter as defaultStampDeadLetter } from './enrich.js';
 import type { LookupResult } from './lml-fetch.js';
+import {
+  probeDiscogsBreaker as defaultProbeDiscogsBreaker,
+  resolveBreakerPauseMs,
+  resolveBreakerProbeIntervalBatches,
+  shouldPauseForBreaker,
+  type BreakerProbeResult,
+  type CheckDiscogsBreakerFn,
+} from './lml-health.js';
 import { captureError, log } from './logger.js';
 import {
   buildWorkList as defaultBuildWorkList,
@@ -503,6 +511,24 @@ export type Totals = {
   self_heal_no_match: number;
   self_heal_lml_error: number;
   self_heal_enrich_error: number;
+  // BS#1995 Arm 3: rows where `applyEnrichment` refused to write a verdict
+  // because LML's Discogs breaker was open (`degraded_reason:
+  // 'upstream_unavailable'`) — see enrich.ts. The row stays `pending` and
+  // is retried on a later sweep; it is deliberately NOT folded into
+  // `lml_error` (LML answered; it just couldn't ask Discogs) or
+  // `enriched_no_match` (that would be exactly the 2026-08-03/04 incident).
+  upstream_unavailable_skipped: number;
+  // Same classification, but for a row the W4 self-heal pass re-attempted
+  // (`fromStatus: 'enriched_no_match'`). Kept in its own bucket for the
+  // same reason every other `self_heal_*` counter is separate from the
+  // main sweep's — see the self_heal_scanned doc above.
+  self_heal_upstream_unavailable_skipped: number;
+  // BS#1995 Arm 2: how many times the drain probed LML's `/health`
+  // Discogs-breaker signal, and how many of those probes found a
+  // non-`closed` breaker and paused the batch. Probed once per batch (not
+  // per row) — see `orchestrate.ts`'s `waitForClosedBreaker`.
+  breaker_probes: number;
+  breaker_pauses: number;
 };
 
 export type ProcessOutcome = EnrichOutcome | 'lml_error' | 'enrich_error';
@@ -802,14 +828,17 @@ const formatTotals = (totals: Totals): string =>
   `enriched_match_raced=${totals.enriched_match_raced} ` +
   `enriched_no_match=${totals.enriched_no_match} ` +
   `enriched_no_match_raced=${totals.enriched_no_match_raced} lml_error=${totals.lml_error} ` +
-  `enrich_error=${totals.enrich_error} below_floor_skipped=${totals.below_floor_skipped} ` +
+  `enrich_error=${totals.enrich_error} upstream_unavailable_skipped=${totals.upstream_unavailable_skipped} ` +
+  `below_floor_skipped=${totals.below_floor_skipped} ` +
   `stale_skipped=${totals.stale_skipped} worker_reconciled=${totals.worker_reconciled} ` +
   `worker_inflight_skipped=${totals.worker_inflight_skipped} ` +
   `stranded_past_recovery_window=${totals.stranded_past_recovery_window} ` +
   `self_heal_candidates=${totals.self_heal_candidates} self_heal_skipped=${totals.self_heal_skipped} ` +
   `self_heal_scanned=${totals.self_heal_scanned} self_heal_resolved=${totals.self_heal_resolved} ` +
   `self_heal_no_match=${totals.self_heal_no_match} self_heal_lml_error=${totals.self_heal_lml_error} ` +
-  `self_heal_enrich_error=${totals.self_heal_enrich_error}`;
+  `self_heal_enrich_error=${totals.self_heal_enrich_error} ` +
+  `self_heal_upstream_unavailable_skipped=${totals.self_heal_upstream_unavailable_skipped} ` +
+  `breaker_probes=${totals.breaker_probes} breaker_pauses=${totals.breaker_pauses}`;
 
 /**
  * Project the run totals onto a Sentry span with numeric attributes set at
@@ -844,6 +873,7 @@ const projectTotalsSpan = (totals: Totals): void => {
         'backfill.enriched_no_match_raced': totals.enriched_no_match_raced,
         'backfill.lml_error': totals.lml_error,
         'backfill.enrich_error': totals.enrich_error,
+        'backfill.upstream_unavailable_skipped': totals.upstream_unavailable_skipped,
         // BS#1591: the deliberate below-floor residual (dashboards subtract
         // it from the pending cohort — approximate, see Totals doc), the
         // vanished-mid-run count (deletes / out-of-band stamps), and the two
@@ -872,6 +902,12 @@ const projectTotalsSpan = (totals: Totals): void => {
         'backfill.self_heal_no_match': totals.self_heal_no_match,
         'backfill.self_heal_lml_error': totals.self_heal_lml_error,
         'backfill.self_heal_enrich_error': totals.self_heal_enrich_error,
+        'backfill.self_heal_upstream_unavailable_skipped': totals.self_heal_upstream_unavailable_skipped,
+        // BS#1995 Arm 2: breaker-gate activity this run — how many times
+        // the drain checked LML's `/health` Discogs breaker and how many
+        // of those checks found it non-`closed` and paused.
+        'backfill.breaker_probes': totals.breaker_probes,
+        'backfill.breaker_pauses': totals.breaker_pauses,
       },
     },
     () => {
@@ -889,6 +925,19 @@ export const runBackfill = async (opts: {
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
+  /**
+   * BS#1995 Arm 2. Low-duty-cycle gate on LML's `/health` Discogs breaker
+   * (`lml-health.ts`): probed once per batch (never per row — see
+   * `waitForClosedBreaker` below), a non-`closed` breaker pauses the drain
+   * for `breakerPauseMs` and re-probes rather than continuing to write
+   * verdicts. `job.ts` always wires the real `probeDiscogsBreaker` in
+   * production; tests inject a stub or omit it to exercise the default.
+   */
+  checkDiscogsBreaker?: CheckDiscogsBreakerFn;
+  /** How many batches elapse between breaker probes. `0` disables the gate entirely. */
+  breakerProbeIntervalBatches?: number;
+  /** Sleep between re-probes while the breaker stays non-`closed`. */
+  breakerPauseMs?: number;
   cacheStats?: CacheStatsFn;
   playFloor?: number;
   floorRecencyDays?: number;
@@ -932,6 +981,9 @@ export const runBackfill = async (opts: {
   const liveActivityLookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
   const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
+  const probeBreaker = opts.checkDiscogsBreaker ?? defaultProbeDiscogsBreaker;
+  const breakerProbeIntervalBatches = opts.breakerProbeIntervalBatches ?? resolveBreakerProbeIntervalBatches();
+  const breakerPauseMs = opts.breakerPauseMs ?? resolveBreakerPauseMs();
   const playFloor = opts.playFloor ?? resolvePlayFloor();
   const floorRecencyDays = opts.floorRecencyDays ?? resolveFloorRecencyDays();
   const graceMinutes = opts.graceMinutes ?? resolveGraceMinutes();
@@ -944,6 +996,8 @@ export const runBackfill = async (opts: {
     partition: partition.description,
     live_activity_lookback_seconds: liveActivityLookbackSeconds,
     live_activity_pause_ms: liveActivityPauseMs,
+    breaker_probe_interval_batches: breakerProbeIntervalBatches,
+    breaker_pause_ms: breakerPauseMs,
     play_floor: playFloor,
     floor_recency_days: floorRecencyDays,
     grace_minutes: graceMinutes,
@@ -958,6 +1012,7 @@ export const runBackfill = async (opts: {
     enriched_no_match_raced: 0,
     lml_error: 0,
     enrich_error: 0,
+    upstream_unavailable_skipped: 0,
     below_floor_skipped: 0,
     stale_skipped: 0,
     worker_reconciled: 0,
@@ -970,7 +1025,90 @@ export const runBackfill = async (opts: {
     self_heal_no_match: 0,
     self_heal_lml_error: 0,
     self_heal_enrich_error: 0,
+    self_heal_upstream_unavailable_skipped: 0,
+    breaker_probes: 0,
+    breaker_pauses: 0,
   };
+
+  // BS#1995 Arm 2. Run-scoped breaker-gate state: how many batches have
+  // elapsed since the last probe (`breakerProbeIntervalBatches` gates how
+  // often `waitForClosedBreaker` actually calls `probeBreaker`), and the
+  // latest reading for the `batch_done` / `finished` log lines. `Date.now()`
+  // deltas against `discogs_live_requests_total` give a genuine measured
+  // req/min figure the process-local token bucket can't see (BS#1995's
+  // whole point — see `lml-health.ts`'s module docstring).
+  let breakerBatchesSinceProbe = 0;
+  let breakerLastLiveRequestsTotal: number | null = null;
+  let breakerLastProbeAtMs: number | null = null;
+  let breakerLatestOutcome: BreakerProbeResult['outcome'] | null = null;
+  let breakerLatestReqPerMin: number | null = null;
+
+  const probeBreakerAndMeasure = async (): Promise<BreakerProbeResult> => {
+    const result = await probeBreaker();
+    totals.breaker_probes += 1;
+    const now = Date.now();
+    if (
+      result.liveRequestsTotal !== null &&
+      breakerLastLiveRequestsTotal !== null &&
+      breakerLastProbeAtMs !== null &&
+      now > breakerLastProbeAtMs
+    ) {
+      const deltaRequests = result.liveRequestsTotal - breakerLastLiveRequestsTotal;
+      const deltaMinutes = (now - breakerLastProbeAtMs) / 60_000;
+      // A negative delta means the counter reset (LML process restarted
+      // between probes) — that isn't a measurement, so report unknown
+      // rather than a nonsensical negative rate.
+      breakerLatestReqPerMin = deltaRequests >= 0 ? deltaRequests / deltaMinutes : null;
+    } else {
+      breakerLatestReqPerMin = null;
+    }
+    if (result.liveRequestsTotal !== null) breakerLastLiveRequestsTotal = result.liveRequestsTotal;
+    breakerLastProbeAtMs = now;
+    breakerLatestOutcome = result.outcome;
+    if (result.outcome === 'probe_error') {
+      log('warn', 'breaker_probe_failed', 'LML /health breaker probe failed; failing open (drain continues)', {
+        error_message: result.error,
+      });
+    }
+    return result;
+  };
+
+  // Cooperative pause's sibling for BS#1995 Arm 2: yield whenever LML's
+  // Discogs breaker is open/half_open, so this drain (plus every other
+  // heavy LML cron sharing the same Discogs ceiling) gets a chance to
+  // recover instead of continuing to hammer a struggling upstream. Probed
+  // once per `breakerProbeIntervalBatches` batches (default every batch),
+  // never per row — the ticket's explicit constraint that the back-pressure
+  // signal must not itself hammer LML. `breakerProbeIntervalBatches <= 0`
+  // disables the gate outright (no probes, always fails open).
+  const waitForClosedBreaker = async (): Promise<void> => {
+    if (breakerProbeIntervalBatches <= 0) return;
+    breakerBatchesSinceProbe += 1;
+    if (breakerBatchesSinceProbe < breakerProbeIntervalBatches) {
+      return;
+    }
+    breakerBatchesSinceProbe = 0;
+    let result = await probeBreakerAndMeasure();
+    while (shouldPauseForBreaker(result)) {
+      totals.breaker_pauses += 1;
+      log('warn', 'breaker_pause', `LML Discogs breaker is ${result.outcome}; pausing drain ${breakerPauseMs}ms`, {
+        breaker_state: result.outcome,
+        pause_ms: breakerPauseMs,
+      });
+      if (breakerPauseMs > 0) await sleep(breakerPauseMs);
+      result = await probeBreakerAndMeasure();
+    }
+  };
+
+  const readBreakerFields = (): {
+    discogs_breaker_state: BreakerProbeResult['outcome'] | null;
+    discogs_live_requests_total: number | null;
+    discogs_req_per_min_measured: number | null;
+  } => ({
+    discogs_breaker_state: breakerLatestOutcome,
+    discogs_live_requests_total: breakerLastLiveRequestsTotal,
+    discogs_req_per_min_measured: breakerLatestReqPerMin,
+  });
 
   // BS#895 review follow-up (finding #4): report the stranded-past-ceiling
   // count once at run start, before the self-heal pass or the main drain —
@@ -1056,6 +1194,7 @@ export const runBackfill = async (opts: {
       let selfHealCursor = 0;
       while (selfHealCursor < selfHealIds.length) {
         await waitForQuietBooth();
+        await waitForClosedBreaker();
         const sliceEnd = Math.min(selfHealCursor + batchSize, selfHealIds.length);
         const sliceIds = selfHealIds.slice(selfHealCursor, sliceEnd);
         selfHealCursor = sliceEnd;
@@ -1095,6 +1234,11 @@ export const runBackfill = async (opts: {
             totals.self_heal_no_match += 1;
           } else if (outcome === 'lml_error') {
             totals.self_heal_lml_error += 1;
+          } else if (outcome === 'upstream_unavailable_skipped') {
+            // BS#1995 Arm 3: same refusal-to-write classification as the
+            // main sweep, its own bucket for the same reason every other
+            // self_heal_* counter is separate — see the doc above.
+            totals.self_heal_upstream_unavailable_skipped += 1;
           } else {
             totals.self_heal_enrich_error += 1;
           }
@@ -1114,6 +1258,7 @@ export const runBackfill = async (opts: {
           self_heal_no_match: totals.self_heal_no_match,
           self_heal_lml_error: totals.self_heal_lml_error,
           self_heal_enrich_error: totals.self_heal_enrich_error,
+          self_heal_upstream_unavailable_skipped: totals.self_heal_upstream_unavailable_skipped,
         }
       );
     }
@@ -1151,6 +1296,7 @@ export const runBackfill = async (opts: {
 
   while (cursor < workListSize) {
     await waitForQuietBooth();
+    await waitForClosedBreaker();
 
     const sliceEnd = Math.min(cursor + batchSize, workListSize);
     const sliceIds = workList.ids.slice(cursor, sliceEnd);
@@ -1201,6 +1347,7 @@ export const runBackfill = async (opts: {
     }
 
     const cacheFields = readCacheFields(opts.cacheStats);
+    const breakerFields = readBreakerFields();
 
     log('info', 'batch_done', `batch ${batchIndex} done`, {
       batch_index: batchIndex,
@@ -1209,11 +1356,17 @@ export const runBackfill = async (opts: {
       batch_plays_min: batchPlaysMin,
       ...totals,
       ...cacheFields,
+      ...breakerFields,
     });
   }
 
   const finalCacheFields = readCacheFields(opts.cacheStats);
-  log('info', 'finished', `${JOB_NAME} done. ${formatTotals(totals)}`, { ...totals, ...finalCacheFields });
+  const finalBreakerFields = readBreakerFields();
+  log('info', 'finished', `${JOB_NAME} done. ${formatTotals(totals)}`, {
+    ...totals,
+    ...finalCacheFields,
+    ...finalBreakerFields,
+  });
 
   // Emit the run-level totals span carrying every bucket (incl. enrich_error)
   // as a numeric attribute, so the drain's health is queryable/alertable in

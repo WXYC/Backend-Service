@@ -332,6 +332,36 @@ describe('jobs/flowsheet-metadata-backfill/lml-fetch (run-scoped (artist, album)
     expect(cache.stats()).toEqual({ size: 0, hits: 0, misses: 0, overwrites: 0 });
   });
 
+  it('does NOT cache responses signaling an upstream (Discogs breaker) shed (degraded_reason: upstream_unavailable) (BS#1995 Arm 3)', async () => {
+    // BS#1995: a breaker-open LML response is a 200 with empty results and
+    // degraded_reason: 'upstream_unavailable' on the tail legs — the exact
+    // shape the 2026-08-03/04 incident showed is transient LML/Discogs
+    // degradation, not a confirmed answer about (artist, album). Caching one
+    // would poison every sibling row of the same pair for the rest of the
+    // run, on top of applyEnrichment's separate refusal to write a verdict
+    // for the originating row.
+    const upstreamUnavailableResponse = {
+      ...emptyResponse,
+      degraded: true,
+      degraded_reason: 'upstream_unavailable' as const,
+    };
+    const mockLookup = jest.fn().mockResolvedValue(upstreamUnavailableResponse);
+    const fetchMod = await loadModule(mockLookup);
+    const cache = await freshCache(fetchMod);
+
+    const first = await fetchMod.lookupMetadata('Breaker', 'Open', 'a');
+    expect(first.cacheHit).toBe(false);
+    expect(first.response.degraded_reason).toBe('upstream_unavailable');
+    // Cache size + counters all zero — the response never entered the store.
+    expect(cache.stats()).toEqual({ size: 0, hits: 0, misses: 0, overwrites: 0 });
+
+    // A second call on the same key still goes to LML.
+    const second = await fetchMod.lookupMetadata('Breaker', 'Open', 'b');
+    expect(mockLookup).toHaveBeenCalledTimes(2);
+    expect(second.cacheHit).toBe(false);
+    expect(cache.stats()).toEqual({ size: 0, hits: 0, misses: 0, overwrites: 0 });
+  });
+
   it('a real no-match on the same key as a prior timeout response gets cached (the timeout did not block future caching)', async () => {
     // Sanity check: after a transient timeout we should still be able to
     // cache the next non-timeout response, including a legitimate no-match.
