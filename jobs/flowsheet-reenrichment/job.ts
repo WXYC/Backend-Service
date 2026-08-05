@@ -41,7 +41,7 @@
  */
 
 import { closeDatabaseConnection } from '@wxyc/database';
-import { runReenrichment, requestStop } from './orchestrate.js';
+import { runReenrichment, requestStop, TIME_WINDOW_ENV_VARS } from './orchestrate.js';
 import { lookupMetadata } from './lml-fetch.js';
 import { reenrichRow } from './enrich.js';
 import { initLogger, log, captureError, closeLogger, errorMessage } from './logger.js';
@@ -56,20 +56,16 @@ const requireLmlConfigured = (): void => {
 
 // BS#1823: the drain now accepts either boundary env var (or both).
 // BS#1998 added the `updated_at` pair, so this guard covers four. It is an
-// existence-only pre-flight — format/calendar/future-timestamp validation
-// for whichever is set stays solely in orchestrate.ts's resolveTimeWindow,
-// so the strictness can't drift between the two layers. Keep this list in
-// sync with resolveTimeWindow's: a bound accepted there but missing here is
-// rejected before the drain ever reaches it (the BS#1998 run shape, which
-// sets only the updated_at pair, is exactly that case).
-const TIME_WINDOW_ENV_VARS = [
-  'BACKFILL_CUTOFF_TS',
-  'BACKFILL_WINDOW_START_TS',
-  'BACKFILL_UPDATED_AFTER_TS',
-  'BACKFILL_UPDATED_BEFORE_TS',
-] as const;
-
-const requireTimeWindowConfigured = (): void => {
+// existence-only pre-flight — format/calendar/ordering/future-timestamp
+// validation for whichever is set stays solely in orchestrate.ts's
+// resolveTimeWindow, so the strictness can't drift between the two layers.
+//
+// The list itself is IMPORTED from orchestrate.ts rather than restated
+// (review round 1). A local copy is what caused the bug BS#1998 fixed: this
+// guard listed only the two add_time bounds and rejected the updated_at run
+// shape before the drain ever reached resolveTimeWindow. One list, two
+// readers, no comment asking a future editor to keep them in sync.
+export const requireTimeWindowConfigured = (): void => {
   if (!TIME_WINDOW_ENV_VARS.some((name) => process.env[name])) {
     throw new Error(`At least one of ${TIME_WINDOW_ENV_VARS.join(', ')} is required; none is configured.`);
   }

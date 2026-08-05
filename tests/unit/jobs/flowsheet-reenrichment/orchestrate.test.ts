@@ -29,6 +29,9 @@ import {
   resolveCutoffTs,
   resolveWindowStartTs,
   resolveTimeWindow,
+  resolveDryRun,
+  resolveMaxConsecutiveSheds,
+  MAX_CONSECUTIVE_SHEDS,
   resolveLiveActivityLookback,
   resolveLiveActivityPauseMs,
   requestStop,
@@ -504,6 +507,179 @@ describe('runReenrichment — updated_at window (BS#1998)', () => {
       runReenrichment({ lookup, enrich, batchSize: 100, liveActivityLookbackSeconds: 0, ...override })
     ).rejects.toThrow(/strict ISO 8601|out-of-range field/);
     expect(db.execute).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * BS#1998 review round 1. Each of these closes an operator-typo path that
+ * silently produced a wrong run rather than an error.
+ */
+describe('updated_at window shape guards (BS#1998 review)', () => {
+  it('rejects an upper bound standing alone — it selects the whole backlog, not a window', () => {
+    expect(() => resolveTimeWindow(undefined, undefined, undefined, INCIDENT_END)).toThrow(
+      /BACKFILL_UPDATED_BEFORE_TS was set without BACKFILL_UPDATED_AFTER_TS/
+    );
+  });
+
+  it('rejects a transposed window rather than silently reporting scanned: 0', () => {
+    expect(() => resolveTimeWindow(undefined, undefined, INCIDENT_END, INCIDENT_START)).toThrow(
+      /must be strictly before/
+    );
+  });
+
+  it('rejects an empty window (equal bounds)', () => {
+    expect(() => resolveTimeWindow(undefined, undefined, INCIDENT_START, INCIDENT_START)).toThrow(
+      /must be strictly before/
+    );
+  });
+
+  it('accepts a lower bound alone (open-ended "everything since X" is a real run shape)', () => {
+    expect(resolveTimeWindow(undefined, undefined, INCIDENT_START, undefined)).toMatchObject({
+      updatedAfterTs: INCIDENT_START,
+      updatedBeforeTs: undefined,
+    });
+  });
+
+  it('does not constrain the add_time axis, where an upper bound alone IS the original cohort', () => {
+    expect(() => resolveTimeWindow(CUTOFF, undefined, undefined, undefined)).not.toThrow();
+  });
+
+  it('the at-least-one-bound error names all four accepted vars', () => {
+    for (const name of [
+      'BACKFILL_CUTOFF_TS',
+      'BACKFILL_WINDOW_START_TS',
+      'BACKFILL_UPDATED_AFTER_TS',
+      'BACKFILL_UPDATED_BEFORE_TS',
+    ]) {
+      expect(() => resolveTimeWindow(undefined, undefined, undefined, undefined)).toThrow(new RegExp(name));
+    }
+  });
+});
+
+describe('resolveDryRun (BS#1998 review)', () => {
+  it.each([
+    ['true', true],
+    ['TRUE', true],
+    ['  true  ', true],
+    // Repo-wide locked truthy set per docs/env-vars.md — `1` must not abort.
+    ['1', true],
+    ['false', false],
+    ['0', false],
+    ['', false],
+    [undefined, false],
+  ])('parses %p as %p', (raw, expected) => {
+    expect(resolveDryRun(raw as string | undefined)).toBe(expected);
+  });
+
+  it.each(['yes', 'no', 'on', '2', 'ture'])(
+    'throws on %p rather than silently falling back to a live write run',
+    (raw) => {
+      expect(() => resolveDryRun(raw)).toThrow(/is not a boolean/);
+    }
+  );
+});
+
+describe('resolveMaxConsecutiveSheds (BS#1998 review)', () => {
+  it('defaults when unset', () => {
+    expect(resolveMaxConsecutiveSheds(undefined)).toBe(MAX_CONSECUTIVE_SHEDS);
+  });
+
+  it('accepts 0 as "disabled"', () => {
+    expect(resolveMaxConsecutiveSheds('0')).toBe(0);
+  });
+
+  it('accepts an explicit threshold', () => {
+    expect(resolveMaxConsecutiveSheds('5')).toBe(5);
+  });
+});
+
+describe('runReenrichment — consecutive-shed abort (BS#1998 review)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  // These tests deliberately queue MORE `mockResolvedValueOnce` batches than a
+  // working abort consumes — that surplus is what makes a regression show up
+  // as a call-count failure instead of an infinite loop. `jest.clearAllMocks()`
+  // clears recorded calls but NOT the pending once-queue, so the unconsumed
+  // entries would otherwise leak into unrelated later describes and fail them.
+  afterEach(() => {
+    (db.execute as jest.Mock).mockReset();
+  });
+
+  it('aborts the run once LML sheds N consecutive lookups instead of burning the cohort', async () => {
+    // Two batches queued, then empty. A working abort never reaches batch 2;
+    // a broken one (break leaving only the row loop) would, and the
+    // `db.execute` call-count assertion below catches exactly that.
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([makeRow(1), makeRow(2), makeRow(3), makeRow(4)])
+      .mockResolvedValueOnce([makeRow(5), makeRow(6)])
+      .mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('upstream_unavailable_skipped');
+
+    const result = await runReenrichment({
+      lookup,
+      enrich,
+      updatedAfterTs: INCIDENT_START,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+      maxConsecutiveSheds: 3,
+    });
+
+    expect(result.failed).toBe(true);
+    // The abort must leave the BATCH loop too, not just the row loop.
+    expect((db.execute as jest.Mock).mock.calls.length).toBe(1);
+    // Stopped ON the third shed — the fourth row is never looked up.
+    expect(result.totals.upstream_unavailable_skipped).toBe(3);
+    expect(lookup).toHaveBeenCalledTimes(3);
+  });
+
+  it('resets the streak on any non-shed outcome — a flapping breaker still lets real work through', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([makeRow(1), makeRow(2), makeRow(3), makeRow(4)])
+      .mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult());
+    const enrich = jest
+      .fn<EnrichFn>()
+      .mockResolvedValueOnce('upstream_unavailable_skipped')
+      .mockResolvedValueOnce('upstream_unavailable_skipped')
+      .mockResolvedValueOnce('match')
+      .mockResolvedValueOnce('upstream_unavailable_skipped');
+
+    const result = await runReenrichment({
+      lookup,
+      enrich,
+      updatedAfterTs: INCIDENT_START,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+      maxConsecutiveSheds: 3,
+    });
+
+    expect(result.failed).toBe(false);
+    expect(result.totals.scanned).toBe(4);
+    expect(result.totals.upstream_unavailable_skipped).toBe(3);
+  });
+
+  it('maxConsecutiveSheds=0 disables the abort', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([makeRow(1), makeRow(2), makeRow(3)]).mockResolvedValueOnce([]);
+
+    const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult());
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('upstream_unavailable_skipped');
+
+    const result = await runReenrichment({
+      lookup,
+      enrich,
+      updatedAfterTs: INCIDENT_START,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 0,
+      maxConsecutiveSheds: 0,
+    });
+
+    expect(result.failed).toBe(false);
+    expect(result.totals.upstream_unavailable_skipped).toBe(3);
   });
 });
 

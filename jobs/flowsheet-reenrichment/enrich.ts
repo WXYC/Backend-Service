@@ -76,11 +76,25 @@ const synthesizeSearchUrls = (
   };
 };
 
+/**
+ * BS#1998 review round 1: scan EVERY result for artwork, not just
+ * `results[0]`. This matches the sibling drain
+ * (`jobs/flowsheet-metadata-backfill/enrich.ts`), which has always iterated;
+ * this job's first-only form was the outlier.
+ *
+ * LML can return a leading result without artwork followed by one that has
+ * it. Before the shed guard below, first-only cost at most a wrong
+ * `still_no_match` on a no-op. It costs more now: a degraded response whose
+ * usable match sits at `results[1]` would read as `artwork === null`, and
+ * the guard would report an answered row as an un-asked shed — inverting
+ * its own stated rule that a degraded response CAN carry a complete match
+ * and must not be discarded.
+ */
 export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | null => {
-  const first = response.results?.[0];
-  if (!first) return null;
-  if (!first.artwork) return null;
-  return first.artwork;
+  for (const result of response.results ?? []) {
+    if (result.artwork) return result.artwork;
+  }
+  return null;
 };
 
 /**
@@ -136,6 +150,13 @@ export const reenrichRow = async (row: ReenrichRow, response: LookupResponse): P
   // `degraded_reason: 'deadline_exceeded'` / `timeout: true`, which are
   // deliberate terminal outcomes for this offline-drain caller (BS#1914 /
   // BS#1064 / BS#1180).
+  // The cast is required, not decorative. `shedReasonOf`'s docstring claims a
+  // plain `LookupResponse` "can be passed without a cast", but that is only
+  // true for a type that HAS an `outcome` property; `LookupResponse` has none,
+  // so TS's weak-type detection rejects the call outright ("no properties in
+  // common"). It is also honest: `lookupMetadata` really does resolve a
+  // `GatedLookupResponse`, and `lml-fetch.ts` merely narrows the declared type
+  // to the base. Same reasoning and same shape as the sibling drain.
   const shedReason = shedReasonOf(response as GatedLookupResponse);
   if ((response.degraded_reason === 'upstream_unavailable' || shedReason !== undefined) && !artwork) {
     return 'upstream_unavailable_skipped';
