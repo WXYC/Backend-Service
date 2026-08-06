@@ -276,12 +276,14 @@ const buildWaitForQuietPeriod = (opts: {
   return async (): Promise<boolean> => {
     // Both knobs disable the pause. lookbackSeconds<=0 means "never detect
     // activity" (checkLiveActivity's own short-circuit). pauseMs<=0 is
-    // legal per `requireNonNegativeInt` (LIVE_ACTIVITY_PAUSE_MS=0 is a
-    // documented way to disable the pause the same as lookbackSeconds=0)
-    // but stopAwareSleep(0) returns immediately without awaiting a timer,
-    // so without this check a detected-active read degenerates into
+    // legal per `requireNonNegativeInt` — nothing rejects it — but
+    // stopAwareSleep(0) returns immediately without awaiting a timer, so
+    // without this check a detected-active read degenerates into
     // `while (active) { probe(); }` — an unthrottled hot loop against RDS
-    // for the run's entire duration instead of a cooperative pause.
+    // for the run's entire duration instead of a cooperative pause. See
+    // docs/env-vars.md's `V/A Apple-URL remediation` section and this
+    // job's README for the disable semantics (specific to this job — the
+    // shared LIVE_ACTIVITY_PAUSE_MS entry itself documents none).
     if (opts.lookbackSeconds <= 0 || opts.pauseMs <= 0) return false;
     let active = await safeProbe();
     while (active) {
