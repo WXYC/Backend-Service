@@ -104,6 +104,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import {
   db,
   checkLiveActivity as defaultCheckLiveActivity,
+  intArrayLiteral,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
   LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
   requireNonNegativeInt,
@@ -712,17 +713,6 @@ const WORKER_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
  * enum values (they fall to the leave-untouched arm, fail-safe).
  */
 export type BatchRow = EnrichRow & { metadata_status: string };
-
-/**
- * Render a numeric id array as a single PG-array-literal string param
- * (`'{1,2,3}'::int[]` at the call site) — drizzle/postgres-js splats a bare
- * JS array into N positional placeholders, which PG rejects (BS#1068 /
- * BS#1071; see `jobs/album-level-backfill/job.ts` for the incident
- * lineage). Safe by construction: callers pass numbers from our own
- * work-list. (Fifth site of this idiom in the jobs fleet — promotion to
- * `@wxyc/database` is tracked as a review follow-up.)
- */
-const intArrayLiteral = (ids: readonly number[]): string => `{${ids.join(',')}}`;
 
 /**
  * Load one work-list slice's rows by id (BS#1591; predicate cut over to

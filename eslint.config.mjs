@@ -2,7 +2,18 @@ import eslint from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import security from 'eslint-plugin-security';
 import prettierConfig from 'eslint-config-prettier';
-import wxycLocalRules from './eslint-rules/source-tagged-constraint.cjs';
+import wxycSourceTaggedConstraint from './eslint-rules/source-tagged-constraint.cjs';
+import wxycNoBareArrayInSqlTemplate from './eslint-rules/no-bare-array-in-sql-template.cjs';
+
+// Both rule modules export `{ rules: { <name>: <rule> } }`; merge them into
+// one `wxyc` plugin object so `files`-scoped blocks below can mix and match
+// which rules apply where without re-importing per block.
+const wxycLocalRules = {
+  rules: {
+    ...wxycSourceTaggedConstraint.rules,
+    ...wxycNoBareArrayInSqlTemplate.rules,
+  },
+};
 
 export default tseslint.config(
   // Global ignores
@@ -67,6 +78,25 @@ export default tseslint.config(
       // once the constraint has been confirmed consistent with the upstream's
       // data shape.
       'wxyc/source-tagged-constraint-confirmed': 'warn',
+    },
+  },
+
+  // WXYC custom rules — bare-array-in-Drizzle-sql-template (BS#2010)
+  //
+  // Scoped everywhere a Drizzle `sql` template can appear: apps/, shared/,
+  // jobs/ (the six historical call sites are all under these three), and
+  // tests/ (defense in depth — a test fixture can copy the same bad shape).
+  // Deliberately an ERROR, not a warn: this exact defect has shipped to
+  // production three times (BS#1068, BS#1071, #2007); a warning that CI
+  // doesn't fail on is exactly the "stayed writable" failure mode the
+  // originating issue describes.
+  {
+    files: ['apps/**/*.ts', 'shared/**/*.ts', 'jobs/**/*.ts', 'tests/**/*.ts'],
+    plugins: {
+      wxyc: wxycLocalRules,
+    },
+    rules: {
+      'wxyc/no-bare-array-in-sql-template': 'error',
     },
   },
 

@@ -508,6 +508,11 @@ export type { IntParserOptions } from '../../shared/database/src/env-parsers.js'
 // candidate net and the TS arbiter can't drift.
 export { foldArtistName } from '../../shared/database/src/fold-artist-name.js';
 
+// Same pure-module-path rationale: `intArrayLiteral` (BS#2010) has no
+// runtime deps either, so the unit tests for its six call sites see the
+// REAL validating implementation, not a jest.fn() stub.
+export { intArrayLiteral } from '../../shared/database/src/int-array-literal.js';
+
 // Re-export the pure `RawPair` TYPE from source (type-only — erased at
 // compile time, no runtime import, so it can't pull in the module's `db`
 // dependency below).

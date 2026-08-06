@@ -64,6 +64,22 @@ When `u.dj_name`, `s.legacy_dj_name`, `u.name` are _all_ NULL (which happens whe
 
 **Value-ordered drains — the work-list-cursor variant (BS#1591)**: the id-cursor recipe (`id > lastId`) is what makes a drain wedge-proof, but it only works when the drain order is id order. If a drain must process rows in some _value_ order (e.g. play-count-descending), a naive "re-SELECT the head of the cohort each batch" re-selects the same failing row at the top forever — failing rows deliberately stay in the cohort for cross-run retry. The recipe: materialize the run's work-list ONCE (ordered ids, in memory or a scratch table) and advance a monotonic cursor over it; a failed row waits for the next run's work-list, and within the run each id is selected at most once. See `jobs/flowsheet-metadata-backfill/worklist.ts` + `orchestrate.ts` for the reference implementation.
 
+## Batching a bulk operation by id: bind the array, don't interpolate it
+
+A batched UPDATE/DELETE almost always scopes itself with `WHERE id = ANY(...)` over the current page's id list. Under **Drizzle**'s `sql` tagged template, interpolating that list as a bare JS array does not bind a PG array — Drizzle splats it across N positional placeholders, turning `ANY(${ids})` into `ANY(($1, $2, … $N))`, a row constructor Postgres rejects at parse time (SQLSTATE 42809). This exact defect has shipped to production three times under three different jobs (BS#1068, BS#1071, #2007).
+
+Use `intArrayLiteral(ids)` from `@wxyc/database` (BS#2010) and cast in SQL:
+
+```ts
+import { sql } from 'drizzle-orm';
+import { intArrayLiteral } from '@wxyc/database';
+
+const idArrayLiteral = intArrayLiteral(ids); // '{1,2,3}' — validated, not spliced raw
+await db.execute(sql`DELETE FROM ${table} WHERE "id" = ANY(${idArrayLiteral}::int[])`);
+```
+
+The identical `ANY(${ids})` syntax IS correct under a raw **postgres-js** tagged template (e.g. `getTestDb()` in this repo's integration tests) — postgres-js binds a JS array as a genuine PG array. Both clients are used in this codebase, so the same source line is right in one file and wrong in another with no visible difference in the text; that's why a lint rule enforces this instead of a code-review habit. `eslint-rules/no-bare-array-in-sql-template.cjs` (wired in `eslint.config.mjs`) fails the build on a bare array interpolated into a **Drizzle** `sql` template specifically — it keys on the `sql` import's origin via scope analysis and is type-aware (it has to distinguish `ids: number[]` from `idArrayLiteral: string`), so it does not fire on postgres-js call sites.
+
 ## Sync-gap remediation
 
 For 24 of the 25 stuck rows from the 2026-04-27 incident, the `dj_name` was actually present in tubafrenzy (`FLOWSHEET_RADIO_SHOW_PROD.DJ_NAME`) — Backend-Service's `shows.legacy_dj_name` just hadn't synced. The fix path:
@@ -82,10 +98,12 @@ Before kicking off a bulk UPDATE on `flowsheet` (or any heavily-indexed live tab
 2. Set `DB_SYNCHRONOUS_COMMIT=off` and a 5+ minute `DB_STATEMENT_TIMEOUT_MS` in the backfill container.
 3. If the SET expression can resolve to NULL, guard it. Don't trust `WHERE col IS NULL` alone to terminate the loop.
 4. Add `ANALYZE <table>;` for every UPDATEd table at the bottom of the script (or in a paired post-script step if the UPDATEs run inside a transaction).
-5. After the run completes: drop temporary indexes, leave the production-grade ones, and confirm no NULL rows remain.
+5. Scoping the batch by id via a Drizzle `sql` template? Bind the page's id list with `intArrayLiteral(...)` from `@wxyc/database`, never a bare interpolated array — see "Batching a bulk operation by id" above.
+6. After the run completes: drop temporary indexes, leave the production-grade ones, and confirm no NULL rows remain.
 
 ## Related
 
 - [BS#934](https://github.com/WXYC/Backend-Service/issues/934) — Suggest endpoints regress to 5s timeouts after the mojibake migration; missed `ANALYZE` on touched tables.
 - [BS#605](https://github.com/WXYC/Backend-Service/issues/605) — `shows.legacy_dj_name` ETL sync gap.
+- [BS#2010](https://github.com/WXYC/Backend-Service/issues/2010) — the bare-array-in-`ANY()` trap (BS#1068, BS#1071, #2007): `intArrayLiteral(...)` (`shared/database/src/int-array-literal.ts`) is the shared, validating helper, and `eslint-rules/no-bare-array-in-sql-template.cjs` fails the build on a bare array interpolated into a Drizzle `sql` template.
 - [`docs/migrations.md`](migrations.md) — DDL-only rule (`@rule id=ddl-only`) and post-bulk-UPDATE ANALYZE rule (`@rule id=post-bulk-update-analyze`).

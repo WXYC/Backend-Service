@@ -99,6 +99,7 @@ import { sql } from 'drizzle-orm';
 import {
   db,
   checkLiveActivity as defaultCheckLiveActivity,
+  intArrayLiteral,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
   LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
   requireNonNegativeInt,
@@ -177,8 +178,6 @@ interface CandidateRow {
   id: number;
   legacy_id: number;
 }
-
-const intArrayLiteral = (ids: readonly number[]): string => `{${ids.join(',')}}`;
 
 const loadBatchOnce = async (target: SweepTarget, afterId: number, batchSize: number): Promise<CandidateRow[]> => {
   const { table, pkColumn, legacyColumn } = TARGET_META[target];

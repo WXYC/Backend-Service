@@ -37,7 +37,7 @@
  */
 
 import { sql, type SQL } from 'drizzle-orm';
-import { db, closeDatabaseConnection, MirrorSQL } from '@wxyc/database';
+import { db, closeDatabaseConnection, intArrayLiteral, MirrorSQL } from '@wxyc/database';
 
 export const DRY_RUN = process.argv.includes('--dry-run');
 export const BATCH_SIZE = 5000;
@@ -256,20 +256,6 @@ export const runScrubBatch = async (batch: HandleMapping[]): Promise<BatchResult
 };
 
 // ---- Re-resolve flowsheet.dj_name on marker rows ----
-
-/**
- * Build the PG array literal `'{1,2,3}'` form for an int[] parameter. Drizzle
- * + postgres-js splat JS arrays in `${...}` positions across N positional
- * placeholders (`($1, $2, ..., $n)`), which PG rejects with `op ANY/ALL
- * (array) requires array on right side` (the BS#1071 / BS#1068 family of
- * incidents). Binding a single string parameter that PG can cast to `int[]`
- * sidesteps the splat. Safe by construction: the input is typed `number[]`,
- * so the join produces only numeric literals — no injection surface.
- *
- * See `jobs/album-level-backfill/job.ts` (BS#1071, 2026-05-24 prod canary)
- * for the original codebase reference.
- */
-const intArrayLiteral = (ids: readonly number[]): string => `{${ids.join(',')}}`;
 
 /**
  * Re-resolve `flowsheet.dj_name` on marker rows whose value is NULL on any
