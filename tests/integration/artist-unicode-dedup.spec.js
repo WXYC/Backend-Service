@@ -108,8 +108,29 @@ describe('Unicode-form artist matcher + dedup (real PG, BS#1897)', () => {
   let sql;
   const artistIds = [];
 
-  beforeAll(() => {
+  beforeAll(async () => {
     sql = getTestDb();
+    // Recovery path (BS#2011): `afterAll` below only knows about the
+    // in-memory `artistIds`, lost if the process dies before it runs —
+    // routine under `jest.config.json`'s `forceExit: true`. A crashed prior
+    // run of this file leaves genuinely fold-duplicate `artists` rows (that's
+    // the fixture shape under test), which `jobs/artist-unicode-dedup`'s
+    // `--dry-run` sizing would then silently count as real merge candidates
+    // on a persistent dev DB. Delete by the stable `ZZDEDUP ` marker every
+    // seeded name here carries, with no prior knowledge required.
+    // `library.artist_id` has no `onDelete: 'cascade'` in this schema (the
+    // upstream tubafrenzy-derived NOT NULL FK — see the `library` table
+    // comment), so children go first — same order as the `afterAll` below.
+    const marker = 'ZZDEDUP %';
+    await sql`
+      DELETE FROM ${sql(SCHEMA)}.library
+       WHERE artist_id IN (SELECT id FROM ${sql(SCHEMA)}.artists WHERE artist_name LIKE ${marker})
+    `;
+    await sql`
+      DELETE FROM ${sql(SCHEMA)}.genre_artist_crossreference
+       WHERE artist_id IN (SELECT id FROM ${sql(SCHEMA)}.artists WHERE artist_name LIKE ${marker})
+    `;
+    await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE artist_name LIKE ${marker}`;
   });
 
   afterAll(async () => {
