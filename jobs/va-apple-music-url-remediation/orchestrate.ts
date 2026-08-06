@@ -369,13 +369,21 @@ export const applyFlowsheetBatch = async (fixes: FlowsheetFix[], updateTimeoutMs
  */
 export const invalidateAlbumBatch = async (albumIds: number[], updateTimeoutMs: number): Promise<number> => {
   if (albumIds.length === 0) return 0;
+  // Bind as a single PG-array-literal string param, not a bare interpolated JS
+  // array — the BS#1068/BS#1071 trap (see `jobs/album-critic-reviews-etl/antijoin.ts`).
+  // Drizzle expands a JS array into a comma-separated parameter list, so
+  // `ANY(${albumIds})` reaches Postgres as `ANY(($1, $2, … $202))` — a row
+  // constructor, which `ANY` rejects at parse time (42809). Safe by
+  // construction: TypeScript types `albumIds: number[]`, so the join contains
+  // only numeric literals.
+  const idArrayLiteral = `{${albumIds.join(',')}}`;
   const updateSql = sql`
     UPDATE ${ALBUM_METADATA_TABLE}
     SET "apple_music_url" = NULL,
         "apple_music_status" = 'unresolved',
         "streaming_reask_attempts" = 0,
         "updated_at" = NOW()
-    WHERE "album_id" = ANY(${albumIds})
+    WHERE "album_id" = ANY(${idArrayLiteral}::int[])
       AND "apple_music_url" IS NOT NULL
   `;
   const result = await db.transaction(async (tx) => {

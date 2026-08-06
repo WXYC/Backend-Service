@@ -35,6 +35,13 @@ import {
   type FlowsheetFix,
 } from '../../../../jobs/va-apple-music-url-remediation/orchestrate';
 
+/**
+ * Renders a drizzle SQL object for *text* assertions (column names, guards,
+ * ordering). It splices bound values inline, so it is deliberately BLIND to how
+ * a value is actually PARAMETERIZED — `ANY(${[7, 8]})` and `ANY(${'{7,8}'}::int[])`
+ * both render as plausible-looking text here. Anything about the wire shape of a
+ * bound parameter must go through `findExecuteQuery` below instead.
+ */
 type SqlLike = { sql?: string | string[]; values?: unknown[]; raw?: string; join?: unknown[]; sep?: unknown };
 const renderSql = (value: unknown): string => {
   if (value === null || value === undefined) return '';
@@ -57,6 +64,17 @@ const queueExecute = (...results: unknown[]): void => {
 
 const findExecuteCall = (pattern: RegExp): string =>
   (db.execute as jest.Mock).mock.calls.map((c) => renderSql(c?.[0])).find((s) => pattern.test(s)) ?? '';
+
+/**
+ * The raw values bound into the first captured statement whose rendered text
+ * matches. `tests/__mocks__/drizzle-orm.ts` stubs the `sql` tag as
+ * `{ sql: strings, values }`, so it cannot serialize a statement — but it does
+ * preserve each bound value verbatim, which is enough to tell a PG array
+ * LITERAL apart from a bare JS array. That distinction is invisible to
+ * `renderSql`, and it is the whole bug.
+ */
+const findExecuteValues = (pattern: RegExp): unknown[] =>
+  (db.execute as jest.Mock).mock.calls.find((c) => pattern.test(renderSql(c?.[0])))?.[0]?.values ?? [];
 
 const APPLE_URL = 'https://music.apple.com/us/song/im-on-my-way/777';
 const NEW_URL = 'https://music.apple.com/us/song/im-on-my-way/999';
@@ -345,6 +363,34 @@ describe('invalidateAlbumBatch SQL', () => {
     expect(updateSql).toMatch(/apple_music_url" = NULL/);
     // Guarded so a concurrent write can't be clobbered.
     expect(updateSql).toMatch(/apple_music_url" IS NOT NULL/);
+  });
+
+  it('binds the id list as a PG array literal, never as a bare JS array', async () => {
+    // The shipped defect: `ANY(${albumIds})` with a bare `number[]`. Drizzle
+    // expands a JS array inside a `sql` template into a comma-separated
+    // PARAMETER LIST, so Postgres received `ANY(($1, $2, … $202))` — a row
+    // constructor, which `ANY` will not accept — and every page of the
+    // album_metadata phase failed at runtime. The repo idiom (BS#1068/BS#1071;
+    // see `jobs/album-critic-reviews-etl/antijoin.ts`) is to bind a `{1,2,3}`
+    // array-literal STRING with an explicit `::int[]` cast.
+    //
+    // This assertion is only as strong as the mock allows: the stub `sql` tag
+    // does not parse SQL, so what is pinned here is the bound VALUE and the
+    // cast, not the wire-level statement. The statement itself is executed
+    // against real Postgres in
+    // `tests/integration/va-apple-music-url-remediation-invalidate.spec.js`.
+    (db.transaction as jest.Mock).mockImplementation((cb: (tx: unknown) => unknown) =>
+      Promise.resolve(cb({ execute: db.execute }))
+    );
+    queueExecute({ count: 1 }, { count: 1 });
+
+    await invalidateAlbumBatch([7, 8], 1000);
+
+    expect(findExecuteCall(/UPDATE/)).toMatch(/= ANY\(\{7,8\}::int\[\]\)/);
+    const bound = findExecuteValues(/UPDATE/);
+    expect(bound).toContain('{7,8}');
+    // A bare array reaching the driver is the defect itself.
+    expect(bound.some((v) => Array.isArray(v))).toBe(false);
   });
 });
 
