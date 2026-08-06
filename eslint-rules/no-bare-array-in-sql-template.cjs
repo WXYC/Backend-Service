@@ -16,10 +16,14 @@
  *
  * The fix is `intArrayLiteral(...)` from `@wxyc/database` (BS#2010): it
  * builds a single PG-array-literal string (`'{1,2,3}'`), which the SQL text
- * casts explicitly (`::int[]`). For a text array, the honest fix is a
- * `sql.join(...)`-built VALUES list (see `jobs/album-reviews-etl/link.ts`)
- * — a hand-rolled text array literal needs real PG string escaping that
- * `intArrayLiteral` deliberately does not attempt (see its docblock).
+ * casts explicitly (`::int[]`). For a text array there is no equivalent
+ * shared helper (a hand-rolled literal needs real PG string escaping that
+ * `intArrayLiteral` deliberately does not attempt — see its docblock); use
+ * `jobs/album-reviews-etl/link.ts`'s `textArrayLiteral`, which does that
+ * escaping, or join bound per-element parameters with `sql.join(...)` (see
+ * `jobs/library-etl/job.ts`'s `buildLegacySourcedSetWhere` for a live
+ * example of the API in this codebase) — never a naive unescaped
+ * `.join(',')`.
  *
  * ## Why this must key on the Drizzle import specifically
  *
@@ -41,11 +45,20 @@
  *
  * The rule flags ANY interpolation in a confirmed Drizzle `sql` template
  * whose statically-known type is an array (or a union of array types) — not
- * just the ones textually inside `ANY(...)`. A bare array is never valid
- * ANYWHERE in a Drizzle `sql` template (there is no drizzle-orm API that
- * treats a raw interpolated array as anything other than a positional
- * splat), so this check has no legitimate exception to carve out — unlike a
- * plain AST/position check, it needs none.
+ * just the ones textually inside `ANY(...)`. That is broader than "always
+ * broken": Drizzle's positional splat is exactly what makes a splat-reliant
+ * `` sql`… WHERE x IN ${ids}` `` legitimately work (it renders `IN ($1, $2,
+ * $3)`, valid SQL, no cast needed) — `ANY(${ids})` is the one shape that
+ * breaks (`ANY(($1, $2, $3))`, a row constructor `ANY` rejects). This rule
+ * does not try to tell the two shapes apart; it enforces one POLICY
+ * instead — every array bound into a Drizzle `sql` template goes through an
+ * explicit literal-plus-cast helper and the `= ANY(...)` predicate form,
+ * `IN`-lists included, rather than assert (falsely) that the splat is
+ * always broken. That costs nothing to enforce today — there are zero live
+ * `IN ${array}`-shaped call sites in this codebase (verified by grep before
+ * shipping this rule) — but if a legitimate one shows up, the fix is the
+ * same one this rule already points every author to: rewrite it to
+ * `= ANY(${idArrayLiteral}::int[])`.
  *
  * A pure "is this `${}` textually right after `ANY(`" check (no type
  * information) was considered and rejected: it cannot tell the BROKEN shape
@@ -68,6 +81,32 @@
  * failing open is the correct default for a rule whose false-positive cost
  * (training authors to reflexively suppress) is worse than an occasional
  * false negative.
+ *
+ * ## Known gaps (documented, not closed)
+ *
+ * Four ways a Drizzle `sql` tag can escape `isDrizzleSqlTag`'s scope-analysis
+ * check, none exercised by any call site in this codebase today (verified by
+ * grep before shipping this rule) — silent misses, listed here so a future
+ * author who introduces one of these shapes knows the rule won't catch it:
+ *
+ *   1. **Re-exported through an intermediate module** — `export { sql } from
+ *      'drizzle-orm'` in a barrel, then `import { sql } from
+ *      '@some/other/module'` elsewhere. `isDrizzleSqlTag` resolves one
+ *      import hop; it doesn't trace a re-export chain back through a second
+ *      module to find the original `drizzle-orm` source.
+ *   2. **Passed as a function parameter** — `` const build = (tag: typeof
+ *      sql, ids: number[]) => tag`… ANY(${ids})` ``. The parameter's
+ *      binding is a `Parameter` definition, not an `ImportBinding`, so the
+ *      check never resolves it back to the `drizzle-orm` import.
+ *   3. **A subpath import** — `import { sql } from 'drizzle-orm/pg-core'`
+ *      (hypothetical; `sql` is exported from the package root today, not a
+ *      subpath). `DRIZZLE_MODULE_SPECIFIER` is an exact string compare
+ *      against `'drizzle-orm'`, not a prefix match.
+ *   4. **A namespace import used as a member-expression tag** — `import *
+ *      as drizzle from 'drizzle-orm'; drizzle.sql\`… ANY(${ids})\``.
+ *      `isDrizzleSqlTag` only handles a bare `Identifier` tag; `drizzle.sql`
+ *      is a `MemberExpression` and is rejected before scope resolution even
+ *      runs.
  */
 
 'use strict';
@@ -78,7 +117,7 @@ const DRIZZLE_MODULE_SPECIFIER = 'drizzle-orm';
 const DRIZZLE_SQL_IMPORTED_NAME = 'sql';
 
 const MESSAGE =
-  'Bare array interpolated into a Drizzle `sql` template. Drizzle splats a JS array across N positional placeholders here — `ANY(${arr})` becomes `ANY(($1, $2, … $N))`, a row constructor — which Postgres rejects at parse time (42809, "op ANY/ALL (array) requires array on right side"; the BS#1068/BS#1071/#2007 family). Fix: build a PG array-literal string first and interpolate THAT instead. For an integer array, use `intArrayLiteral(...)` from `@wxyc/database` and cast in SQL (`::int[]`); for a text array, use a `sql.join(...)`-built VALUES list (see `jobs/album-reviews-etl/link.ts`), not a hand-rolled literal. This exact syntax IS correct under a raw postgres-js tagged template (e.g. `getTestDb()` in this repo\'s integration tests) — only Drizzle\'s `sql` import is affected; do not "fix" a postgres-js call site with this.';
+  "Bare array interpolated into a Drizzle `sql` template. Drizzle splats a JS array across N positional placeholders here. Inside `ANY(...)` that breaks the query — `ANY(${arr})` becomes `ANY(($1, $2, … $N))`, a row constructor Postgres rejects at parse time (42809, \"op ANY/ALL (array) requires array on right side\"; the BS#1068/BS#1071/#2007 family); inside `IN ...` the splat happens to still produce valid SQL, but this rule enforces one predicate shape everywhere regardless. Fix: build a PG array-literal string first and interpolate THAT, using `= ANY(...)` (rewrite a working `IN ${arr}` the same way). For an integer array, use `intArrayLiteral(...)` from `@wxyc/database` and cast in SQL (`= ANY(${arr}::int[])`); for a text array, use `jobs/album-reviews-etl/link.ts`'s `textArrayLiteral` (real PG quoting) or join bound per-element parameters with `sql.join(...)` (see `jobs/library-etl/job.ts`'s `buildLegacySourcedSetWhere` for the API) — never a naive unescaped `.join(',')`. This exact syntax IS correct under a raw postgres-js tagged template (e.g. `getTestDb()` in this repo's integration tests) — only Drizzle's `sql` import is affected; do not \"fix\" a postgres-js call site with this.";
 
 /**
  * True if `tagNode` (a `TaggedTemplateExpression`'s `.tag`) is a bare

@@ -83,10 +83,19 @@ export default tseslint.config(
 
   // WXYC custom rules — bare-array-in-Drizzle-sql-template (BS#2010)
   //
-  // Scoped everywhere a Drizzle `sql` template can appear: apps/, shared/,
-  // jobs/ (the six historical call sites are all under these three), and
-  // tests/ (defense in depth — a test fixture can copy the same bad shape).
-  // Deliberately an ERROR, not a warn: this exact defect has shipped to
+  // Scoped everywhere a Drizzle `sql` template can appear in `.ts` source:
+  // apps/, shared/, jobs/ (the six historical call sites are all under
+  // these three), and tests/ (defense in depth for the `.ts` unit-test
+  // tier, which uses drizzle-orm's mocked `sql` tag — a test fixture there
+  // can copy the same bad shape). This does NOT cover the
+  // `tests/integration/*.spec.js` postgres-js tier or `scripts/**`
+  // (several of which import a real Drizzle `sql` and run against prod) —
+  // both are `.js`/`.cjs`/`.mjs` or under the `scripts/**` global ignore
+  // above, unlinted for reasons unrelated to this rule. No live instance of
+  // this bug exists in either today (verified by grep before shipping this
+  // rule); widening the global ignores to reach them is a separate,
+  // larger change than this issue's scope. Deliberately an ERROR, not a
+  // warn, for what this block DOES cover: this exact defect has shipped to
   // production three times (BS#1068, BS#1071, #2007); a warning that CI
   // doesn't fail on is exactly the "stayed writable" failure mode the
   // originating issue describes.
