@@ -180,6 +180,20 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      # BS#2009: `npm run typecheck` above covers apps/**, shared/**, and
+      # @wxyc/database only — jobs/** is out of scope (repo convention; ~20
+      # other jobs would surface an unknown pile of errors if typecheck's
+      # coverage were widened wholesale, see the CLAUDE.md testing-scope
+      # note). This job shipped with two TS2554s neither `npm run
+      # typecheck` nor its `tsup --minify` build (esbuild, transpile-only)
+      # ever caught, so CI stayed green on a non-compiling job. Narrow,
+      # per-job coverage instead of a fleet-wide typecheck expansion; the
+      # `@wxyc/database` + `@wxyc/lml-client` deps this job needs are
+      # already built by the `Type check` step above (its `lint:prebuild`
+      # dependency).
+      - name: 'Type check: va-apple-music-url-remediation (BS#2009)'
+        run: npm run typecheck --workspace=jobs/va-apple-music-url-remediation
+
       - name: Lint
         run: npm run lint
 

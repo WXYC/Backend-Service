@@ -10,7 +10,8 @@
     "build": "tsup --minify",
     "clean": "rm -rf dist",
     "docker:build": "docker build -t wxyc_va_apple_music_url_remediation:ci -f ../../Dockerfile.va-apple-music-url-remediation ../../",
-    "dev": "tsup --watch"
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
   },
   "license": "MIT",
   "dependencies": {
