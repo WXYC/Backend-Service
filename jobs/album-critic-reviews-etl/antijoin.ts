@@ -7,15 +7,19 @@
  * Only genuinely new pairs reach the LLM.
  *
  * Read via `db.execute(sql\`...\`)` (raw SQL, schema-qualified,
- * `int[]`-literal-bound `ANY(...)`), mirroring `jobs/album-reviews-etl/
- * link.ts` and `shared/database/src/library-tiebreak.ts` — NOT drizzle's
- * `inArray()` query-builder helper. `inArray()` is real-drizzle-safe (its
- * query builder is itself thenable), but the shared unit-test mock
+ * `int[]`-literal-bound `ANY(...)` via the shared `intArrayLiteral` helper,
+ * BS#2010), mirroring `jobs/album-reviews-etl/link.ts` and
+ * `shared/database/src/library-tiebreak.ts` — NOT drizzle's `inArray()`
+ * query-builder helper. `inArray()` is real-drizzle-safe (its query builder
+ * is itself thenable), but the shared unit-test mock
  * (`tests/mocks/database.mock.ts`) only resolves `.execute()`/`.returning()`
  * terminals; a bare `.where(inArray(...))` chain call is unusable there. See
  * jobs/album-reviews-etl/link.ts's `loadCandidates` for the same `int[]`
- * literal idiom on a text[] column via `textArrayLiteral` — this is the
- * integer-array analog, safe by construction since `albumIds: number[]`.
+ * literal idiom on a text[] column via its job-local `textArrayLiteral`
+ * (real PG quoting for text elements — deliberately not promoted alongside
+ * `intArrayLiteral`; see that helper's docblock for why) — this is the
+ * integer-array analog, validated by `intArrayLiteral` rather than trusted
+ * by construction.
  *
  * Note (issue step 4): dedup never DELETES a losing row, so if an album
  * already carries a lower-preference card and a later corpus adds a
@@ -26,7 +30,7 @@
  * `filterNew`'s test for this exact scenario.
  */
 import { sql } from 'drizzle-orm';
-import { db } from '@wxyc/database';
+import { db, intArrayLiteral } from '@wxyc/database';
 import type { MatchedItem } from './dedup.js';
 
 const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
@@ -50,10 +54,9 @@ export const loadExistingPairs = async (albumIds: number[]): Promise<Set<string>
   if (albumIds.length === 0) return new Set();
 
   // Bind as a single PG-array-literal string param, not a bare interpolated
-  // JS array — see the module docstring + library-tiebreak.ts for the
-  // BS#1068/BS#1071 trap this avoids. Safe by construction: TypeScript types
-  // `albumIds: number[]`, so the join contains only numeric literals.
-  const idArrayLiteral = `{${albumIds.join(',')}}`;
+  // JS array — see the module docstring + `intArrayLiteral`'s own docblock
+  // for the BS#1068/BS#1071/#2007 trap this avoids.
+  const idArrayLiteral = intArrayLiteral(albumIds);
 
   const result: unknown = await db.execute(sql`
     SELECT "album_id", "source_url"

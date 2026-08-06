@@ -17,7 +17,7 @@
  */
 
 import { sql, type SQL } from 'drizzle-orm';
-import { db, foldArtistName } from '@wxyc/database';
+import { db, foldArtistName, intArrayLiteral } from '@wxyc/database';
 
 /** The transaction handle Drizzle passes to a `db.transaction` callback. */
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -303,14 +303,6 @@ export const analyzeTables = async (): Promise<void> => {
     await db.execute(sql`ANALYZE ${qualified(table)}`);
   }
 };
-
-/**
- * Build the PG array literal `'{1,2,3}'` form. Drizzle + postgres-js splat JS
- * arrays across N placeholders, which PG rejects for `= ANY(...)` (the
- * BS#1071 family). Binding one castable string sidesteps the splat; safe by
- * construction (numeric input → numeric literals only). Empty array → `'{}'`.
- */
-export const intArrayLiteral = (ids: readonly number[]): string => `{${ids.join(',')}}`;
 
 export const runDedup = async (): Promise<void> => {
   console.log(`[artist-dedup] Mode: ${EXECUTE ? 'EXECUTE (writing)' : 'DRY-RUN (no writes)'}`);

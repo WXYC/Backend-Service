@@ -4,9 +4,9 @@
  *
  * Unlike `artist-unicode-dedup.spec.js` (which tests the fold function + the
  * matcher predicate with pure SQL), this spec `require`s and RUNS the actual
- * `mergeGroup` / `findDuplicateGroups` / `intArrayLiteral` from the compiled
- * `dist/merge.cjs` — no reimplementation — so the dangerous, non-obvious
- * branches of the destructive merge have direct coverage:
+ * `mergeGroup` / `findDuplicateGroups` from the compiled `dist/merge.cjs` —
+ * no reimplementation — so the dangerous, non-obvious branches of the
+ * destructive merge have direct coverage:
  *   (a) `artist_crossreference` two-endpoint repoint (a row with BOTH source and
  *       target in the merge group) + the 2-column-key collision-delete + the
  *       post-loop `(surv, surv)` self-reference DELETE.
@@ -38,6 +38,7 @@ jest.unmock('drizzle-orm');
 
 const path = require('path');
 const { getTestDb } = require('../utils/db');
+const { intArrayLiteral } = require('@wxyc/database');
 
 // The REAL compiled merge core (MED-1: no reimplementation). `dist/merge.cjs`
 // is produced by the workspace `build` (tsup dual-format esm+cjs); CI's Build
@@ -147,9 +148,14 @@ describe('artist-unicode-dedup mergeGroup — REAL functions (real PG, BS#1897 M
     return groups.find((g) => [g.survivorId, ...g.duplicateIds].includes(id)) ?? null;
   }
 
-  test('intArrayLiteral builds the PG array-literal form', () => {
-    expect(merge.intArrayLiteral([1, 2, 3])).toBe('{1,2,3}');
-    expect(merge.intArrayLiteral([])).toBe('{}');
+  test('merge.ts uses the shared @wxyc/database intArrayLiteral (BS#2010 promotion)', () => {
+    // The dedicated unit tests for intArrayLiteral's behavior — including
+    // the validation this promotion added — live at
+    // tests/unit/database/int-array-literal.test.ts. This assertion just
+    // pins that merge.ts's compiled output imports the shared helper rather
+    // than carrying its own private copy again.
+    expect(intArrayLiteral([1, 2, 3])).toBe('{1,2,3}');
+    expect(intArrayLiteral([])).toBe('{}');
   });
 
   test('(a) artist_crossreference: two-endpoint repoint, 2-col collision, self-ref cleanup', async () => {

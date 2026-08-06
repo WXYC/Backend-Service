@@ -58,6 +58,13 @@ jest.mock('@wxyc/database', () => ({
   // through `raw.trim()` on undefined.
   MirrorSQL: { instance: () => ({ send: jest.fn().mockResolvedValue(''), close: jest.fn() }) },
   closeDatabaseConnection: jest.fn().mockResolvedValue(undefined),
+  // The REAL `intArrayLiteral` (BS#2010) — it has no drizzle-orm dependency
+  // (unlike `db`/`MirrorSQL` above, it's a pure string-building function),
+  // so re-exporting it from source here is safe and keeps this suite
+  // exercising the actual validation instead of a hand-rolled duplicate.
+  intArrayLiteral: jest.requireActual('../../../../shared/database/src/int-array-literal').intArrayLiteral as (
+    ids: readonly number[]
+  ) => string,
 }));
 
 import {
