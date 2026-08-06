@@ -404,6 +404,8 @@ The naming convention is asymmetric on purpose: `*_USE_NEW_HOOK_*` (LML, semanti
 
 One-shot. Reuses the `BACKFILL_LML_*` family above (and therefore its standing pre-flight rule: **verify the sibling cron containers are Exited** before running, since they share LML's Discogs budget) plus the shared `LIVE_ACTIVITY_*` cooperative-pause knobs. Dry-run is the default and makes **zero** LML calls, so sizing the run is free.
 
+**Disable semantics differ from the shared entries above (BS#2009):** here, either `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` **or** `LIVE_ACTIVITY_PAUSE_MS=0` disables the pause entirely — the probe is never called. The `LIVE_ACTIVITY_PAUSE_MS` entry above documents no disable value because `flowsheet-metadata-backfill` and the other jobs reusing it have no such gate; there, `0` legally sleeps zero milliseconds between re-probes and can hot-loop against RDS while activity is detected. This job gates on both because `stopAwareSleep(0)` is a no-op sleep, and a probe that keeps reporting activity would otherwise spin unthrottled for the run's entire duration instead of pausing.
+
 **Cross-service dependency, not optional:** this job must run only after LML's `LML_APPLE_MUSIC_RATE_PER_MIN` has been rolled up (60 → 300 → 600) **and confirmed live**. At the default, LML#904 measured ~56% of `find_track_url` probes timing out on LML's own self-throttle and returning null — which is indistinguishable at the call site from a genuine no-match, and would make this job NULL correct URLs. See the `LML_APPLE_MUSIC_RATE_PER_MIN` entry above.
 
 - `VA_REMEDIATION_BATCH_SIZE` (default `2000`) — page size for both phases' candidate SELECT and the VALUES-join UPDATE.

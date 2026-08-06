@@ -556,7 +556,17 @@ describe('cooperative live-DJ pause (BS#2009)', () => {
 
   it('skips the probe entirely when the lookback is 0 (pause disabled)', async () => {
     process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS = '0';
-    const checkLive = jest.fn(() => Promise.resolve(true));
+    // Bounded, not unconditionally true: this block's beforeEach sets
+    // PAUSE_MS='10', so a regression in the lookbackSeconds<=0 gate would
+    // loop indefinitely at 10ms a turn against an always-active probe,
+    // burning the runner to its job ceiling instead of failing in a
+    // second (the exact asymmetry the 'does not spin' test below was
+    // deliberately capped to avoid).
+    let calls = 0;
+    const checkLive = jest.fn(() => {
+      calls += 1;
+      return Promise.resolve(calls <= 50);
+    });
     queueSinglePageRun([vaRow(1)]);
 
     await runRemediation(
