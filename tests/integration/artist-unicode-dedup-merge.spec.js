@@ -60,8 +60,37 @@ describe('artist-unicode-dedup mergeGroup — REAL functions (real PG, BS#1897 M
   let sql;
   const artistIds = [];
 
-  beforeAll(() => {
+  beforeAll(async () => {
     sql = getTestDb();
+    // Recovery path (BS#2011): `afterEach` below narrows the crash window to
+    // one in-flight test, but a process death still skips it — routine under
+    // `jest.config.json`'s `forceExit: true`. A crashed prior run leaves
+    // genuinely fold-duplicate `artists` rows (the fixture shape under test),
+    // which `jobs/artist-unicode-dedup`'s `--dry-run` sizing would then
+    // silently count as real merge candidates on a persistent dev DB. Delete
+    // by the stable `ZZMERGE` marker every seeded name in this file carries
+    // (`forms()` always prefixes with a `ZZMERGE...` test id), with no prior
+    // knowledge required. Same child-then-parent order as `afterEach`.
+    const marker = 'ZZMERGE%';
+    await sql`
+      DELETE FROM ${sql(SCHEMA)}.artist_crossreference
+       WHERE source_artist_id IN (SELECT id FROM ${sql(SCHEMA)}.artists WHERE artist_name LIKE ${marker})
+          OR target_artist_id IN (SELECT id FROM ${sql(SCHEMA)}.artists WHERE artist_name LIKE ${marker})
+    `;
+    await sql`
+      DELETE FROM ${sql(SCHEMA)}.artist_search_alias
+       WHERE artist_id IN (SELECT id FROM ${sql(SCHEMA)}.artists WHERE artist_name LIKE ${marker})
+          OR related_artist_id IN (SELECT id FROM ${sql(SCHEMA)}.artists WHERE artist_name LIKE ${marker})
+    `;
+    await sql`
+      DELETE FROM ${sql(SCHEMA)}.genre_artist_crossreference
+       WHERE artist_id IN (SELECT id FROM ${sql(SCHEMA)}.artists WHERE artist_name LIKE ${marker})
+    `;
+    await sql`
+      DELETE FROM ${sql(SCHEMA)}.library
+       WHERE artist_id IN (SELECT id FROM ${sql(SCHEMA)}.artists WHERE artist_name LIKE ${marker})
+    `;
+    await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE artist_name LIKE ${marker}`;
   });
 
   afterEach(async () => {

@@ -143,8 +143,16 @@ describe('enrichment-worker streaming self-heal — BS#1915 candidate query + wr
   let sql;
   const insertedAlbumIds = [];
 
-  beforeAll(() => {
+  beforeAll(async () => {
     sql = getTestDb();
+    // Recovery path (BS#2011): `afterAll` below only knows about
+    // `insertedAlbumIds`, an in-memory array lost if the process dies before
+    // it runs — routine under `jest.config.json`'s `forceExit: true`. Delete
+    // by the stable `bs1915-reask-test-` marker `insertLibraryAlbum` stamps
+    // into `library.album_title` instead, so a prior crashed run's orphans
+    // are found with no prior knowledge. Cascades to `album_metadata` via its
+    // `album_id` FK (`onDelete: 'cascade'`, `shared/database/src/schema.ts`).
+    await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE album_title LIKE ${'bs1915-reask-test-%'}`;
   });
 
   afterAll(async () => {
@@ -321,8 +329,12 @@ describe('enrichment-worker streaming self-heal — Bandcamp de-freeze candidate
   const insertedAlbumIds = [];
   const priorFlag = process.env.ENRICHMENT_BANDCAMP_REASK;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     sql = getTestDb();
+    // Same recovery path as the describe block above — `insertFrozenBandcampRow`
+    // routes through the same `insertLibraryAlbum` helper and marker prefix.
+    // Pre-cleaning here too keeps this block self-sufficient (e.g. `.only`).
+    await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE album_title LIKE ${'bs1915-reask-test-%'}`;
   });
 
   afterAll(async () => {
