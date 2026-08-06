@@ -113,9 +113,19 @@ Set the ceiling from a live `max(id)` read, not from the previous run's `last_id
 
 Every row this job NULLs on `flowsheet` becomes a candidate for `jobs/apple-music-url-backfill` (BS#1631), whose net is `apple_music_url IS NULL AND (discogs_url IS NOT NULL OR l.on_streaming = true)`. That job is a completed one-shot, not a cron, so nothing fires automatically — but **do not re-run BS#1631 against the V/A cohort after this job runs**, or it will re-spend the budget and re-open the surface if the guard ever regresses.
 
+## Cooperative live-DJ pause
+
+The job pauses when a DJ is actively adding tracks. Both phases probe `flowsheet` for recent track activity **once per page, before that page loads** (never once per row — a full `VA_REMEDIATION_BATCH_SIZE` page probing per row would cost up to `BATCH_SIZE` extra round-trips ahead of every LML lookup); while activity is detected, the run sleeps `LIVE_ACTIVITY_PAUSE_MS` and re-probes, logging `live_activity_pause` on every wait. A probe that throws (a transient RDS blip) is treated as **fail-open** — logged, captured, and read as "no activity" — rather than escaping the phase's `try`/`catch`: an unavailable probe must not kill the run and lose both `last_id` resume cursors. `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` disables the pause entirely (no probe calls at all).
+
+**Why a real pause (BS#2009), not deleted plumbing.** The issue that introduced this mechanism (BS#2000 / #2009) considered dropping `checkLive`/`lookbackSeconds`/`pauseMs` entirely on the grounds that this is a manually-invoked one-shot inside an operator-chosen maintenance window, not a cron. Rejected:
+
+- Both sibling one-shot jobs, `jobs/streaming-url-remediation` and `jobs/flowsheet-ghost-row-sweep`, already implement a real cooperative pause (`waitForQuietPeriod` + a fail-open `safeProbe`, the donors this job's implementation is ported from verbatim). Diverging here would be gratuitous inconsistency for no benefit.
+- This README and the `CLAUDE.md` workspace-table row already promised the behavior — the code just didn't implement it (`CheckLiveActivityFn` is a detector, not a sleeper; the two call sites awaited it and discarded the result).
+- The job's next production run issues roughly 206 UPDATEs against `album_metadata` during hours when DJs may be live. An operator-chosen window is a courtesy, not a guarantee — the pause is the mechanism that actually protects a DJ's session from write contention if the window assumption is wrong.
+
 ## Environment
 
-Reuses the `BACKFILL_LML_*` family (`docs/env-vars.md`) and inherits its pre-flight rule: **verify the sibling cron containers are Exited** before running. Job-specific knobs: `VA_REMEDIATION_BATCH_SIZE`, `_FLOWSHEET_AFTER_ID`, `_ALBUM_AFTER_ID`, `_UPDATE_TIMEOUT_MS`, `_ANALYZE_TIMEOUT_MS`, `_SECOND_PASS_DELAY_MS`, `_MAX_RESCUE_RATE`, `_MIN_RESCUE_SAMPLE`, `_MAX_INDETERMINATE`. Cooperative pause via the shared `LIVE_ACTIVITY_*`.
+Reuses the `BACKFILL_LML_*` family (`docs/env-vars.md`) and inherits its pre-flight rule: **verify the sibling cron containers are Exited** before running. Job-specific knobs: `VA_REMEDIATION_BATCH_SIZE`, `_FLOWSHEET_AFTER_ID`, `_ALBUM_AFTER_ID`, `_UPDATE_TIMEOUT_MS`, `_ANALYZE_TIMEOUT_MS`, `_SECOND_PASS_DELAY_MS`, `_MAX_RESCUE_RATE`, `_MIN_RESCUE_SAMPLE`, `_MAX_INDETERMINATE`. Cooperative pause via the shared `LIVE_ACTIVITY_*` — see "Cooperative live-DJ pause" above.
 
 ## Run procedure
 

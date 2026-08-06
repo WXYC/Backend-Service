@@ -243,6 +243,52 @@ const stopAwareSleep = async (ms: number): Promise<void> => {
   }
 };
 
+/**
+ * Builds the cooperative live-DJ pause shared by both phases (BS#2009).
+ *
+ * `checkLive` is a DETECTOR — `(lookbackSeconds) => Promise<boolean>` — not a
+ * sleeper; sleeping is this function's job. Ported from the
+ * `streaming-url-remediation` / `flowsheet-ghost-row-sweep` donors verbatim:
+ * a probe throw is fail-open ("assume no activity") rather than escaping to
+ * the caller, so a transient RDS blip on the probe SELECT can't kill the run
+ * and lose both resume cursors. Built ONCE in `runRemediation` and shared by
+ * both phases so the probe is issued once per page in each — never once per
+ * row.
+ */
+const buildWaitForQuietPeriod = (opts: {
+  checkLive: CheckLiveActivityFn;
+  lookbackSeconds: number;
+  pauseMs: number;
+}): (() => Promise<boolean>) => {
+  const safeProbe = async (): Promise<boolean> => {
+    try {
+      return await opts.checkLive(opts.lookbackSeconds);
+    } catch (error) {
+      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
+        error_message: errorMessage(error),
+      });
+      captureError(error, 'probe_error');
+      return false;
+    }
+  };
+
+  // Returns true iff the run should stop (SIGTERM observed during the wait).
+  return async (): Promise<boolean> => {
+    if (opts.lookbackSeconds <= 0) return false;
+    let active = await safeProbe();
+    while (active) {
+      if (stopRequested) return true;
+      log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${opts.pauseMs}ms`, {
+        lookback_seconds: opts.lookbackSeconds,
+        pause_ms: opts.pauseMs,
+      });
+      await stopAwareSleep(opts.pauseMs);
+      active = await safeProbe();
+    }
+    return stopRequested;
+  };
+};
+
 /** Cache key per BS#1192: Apple URLs are track-aware, so all three axes. */
 export const tripleKey = (artist: string | null, album: string | null, track: string | null): string =>
   `${(artist ?? '').toLowerCase()} ${(album ?? '').toLowerCase()} ${(track ?? '').toLowerCase()}`;
@@ -541,7 +587,7 @@ const emptyFlowsheetTotals = (): FlowsheetTotals => ({
 const runFlowsheetPhase = async (
   opts: Required<Pick<RunOptions, 'dryRun'>> & {
     lookup: LookupFn;
-    checkLive: CheckLiveActivityFn;
+    waitForQuietPeriod: () => Promise<boolean>;
     applyBatch: (fixes: FlowsheetFix[], timeoutMs: number) => Promise<number>;
     batchSize: number;
     afterId: number;
@@ -550,8 +596,6 @@ const runFlowsheetPhase = async (
     maxRescueRate: number;
     minRescueSample: number;
     maxIndeterminate: number;
-    lookbackSeconds: number;
-    pauseMs: number;
   }
 ): Promise<{ totals: FlowsheetTotals; failed: boolean }> => {
   const totals = emptyFlowsheetTotals();
@@ -569,6 +613,11 @@ const runFlowsheetPhase = async (
   });
 
   while (!stopRequested) {
+    // Once per page, before the page loads — not once per row (BS#2009
+    // defect 3): a full batch would otherwise cost up to BATCH_SIZE extra
+    // probe round-trips ahead of every LML lookup.
+    if (await opts.waitForQuietPeriod()) break;
+
     const rows = await loadFlowsheetBatch(cursor, opts.batchSize);
     if (rows.length === 0) break;
     totals.batches += 1;
@@ -581,7 +630,6 @@ const runFlowsheetPhase = async (
     const fixes: FlowsheetFix[] = [];
     for (const row of arbitrated) {
       if (stopRequested) break;
-      if (opts.pauseMs > 0) await opts.checkLive(opts.lookbackSeconds, opts.pauseMs);
 
       const key = tripleKey(row.artist_name, row.album_title, row.track_title);
       let verdict = urlCache.get(key);
@@ -682,13 +730,11 @@ const runFlowsheetPhase = async (
 /** Phase 2 — album_metadata, the pure-SQL arm. Runs AFTER flowsheet. */
 const runAlbumPhase = async (opts: {
   dryRun: boolean;
-  checkLive: CheckLiveActivityFn;
+  waitForQuietPeriod: () => Promise<boolean>;
   invalidate: (targets: AlbumInvalidation[], timeoutMs: number) => Promise<number>;
   batchSize: number;
   afterId: number;
   updateTimeoutMs: number;
-  lookbackSeconds: number;
-  pauseMs: number;
 }): Promise<{ totals: AlbumTotals; failed: boolean }> => {
   const totals: AlbumTotals = { candidates: 0, invalidated: 0, batches: 0, last_id: opts.afterId };
   let cursor = opts.afterId;
@@ -707,6 +753,9 @@ const runAlbumPhase = async (opts: {
   });
 
   while (!stopRequested) {
+    // Once per page, before the page loads (mirrors the flowsheet phase).
+    if (await opts.waitForQuietPeriod()) break;
+
     // `apple_music_url` rides along so the UPDATE can compare-and-set against
     // the exact value this SELECT observed.
     const rows = (await db.execute(sql`
@@ -720,8 +769,6 @@ const runAlbumPhase = async (opts: {
     `)) as unknown as Array<{ album_id: number; apple_music_url: string | null; artist_name: string | null }>;
     if (!rows || rows.length === 0) break;
     totals.batches += 1;
-
-    if (opts.pauseMs > 0) await opts.checkLive(opts.lookbackSeconds, opts.pauseMs);
 
     const targets: AlbumInvalidation[] = rows
       .filter((r) => isVariousArtistsCredit(r.artist_name))
@@ -762,11 +809,15 @@ export const runRemediation = async (options: RunOptions): Promise<RunResult> =>
   const analyzeTimeoutMs = resolveAnalyzeTimeoutMs();
   const lookbackSeconds = resolveLiveActivityLookback();
   const pauseMs = resolveLiveActivityPauseMs();
+  // Shared by both phases so the probe is issued once per page in each, and
+  // a probe throw is fail-open rather than escaping the phase's try/catch
+  // and losing the run's summary (BS#2009 defects 2 and 3).
+  const waitForQuietPeriod = buildWaitForQuietPeriod({ checkLive, lookbackSeconds, pauseMs });
 
   const flowsheet = await runFlowsheetPhase({
     dryRun,
     lookup,
-    checkLive,
+    waitForQuietPeriod,
     applyBatch,
     batchSize,
     afterId: resolveAfterId('VA_REMEDIATION_FLOWSHEET_AFTER_ID', process.env.VA_REMEDIATION_FLOWSHEET_AFTER_ID),
@@ -775,8 +826,6 @@ export const runRemediation = async (options: RunOptions): Promise<RunResult> =>
     maxRescueRate: resolveMaxRescueRate(),
     minRescueSample: resolveMinRescueSample(),
     maxIndeterminate: resolveMaxIndeterminate(),
-    lookbackSeconds,
-    pauseMs,
   });
 
   if (!dryRun && (flowsheet.totals.written_url > 0 || flowsheet.totals.written_null > 0)) {
@@ -793,13 +842,11 @@ export const runRemediation = async (options: RunOptions): Promise<RunResult> =>
   if (!flowsheet.failed && !stopRequested) {
     album = await runAlbumPhase({
       dryRun,
-      checkLive,
+      waitForQuietPeriod,
       invalidate,
       batchSize,
       afterId: resolveAfterId('VA_REMEDIATION_ALBUM_AFTER_ID', process.env.VA_REMEDIATION_ALBUM_AFTER_ID),
       updateTimeoutMs,
-      lookbackSeconds,
-      pauseMs,
     });
     if (!dryRun && album.totals.invalidated > 0) {
       await analyze('album_metadata', analyzeTimeoutMs);

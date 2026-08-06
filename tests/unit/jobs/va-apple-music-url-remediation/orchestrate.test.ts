@@ -139,6 +139,10 @@ const baseOpts = (overrides: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   jest.clearAllMocks();
   __resetStopForTesting();
+  // Disabled by default (matches the sibling jobs' test convention): the
+  // 'cooperative live-DJ pause' describe block below opts individual tests
+  // back in by setting this to a nonzero value themselves.
+  process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS = '0';
   process.env.LIVE_ACTIVITY_PAUSE_MS = '0';
   process.env.VA_REMEDIATION_SECOND_PASS_DELAY_MS = '0';
   delete process.env.VA_REMEDIATION_FLOWSHEET_AFTER_ID;
@@ -448,6 +452,89 @@ describe('invalidateAlbumBatch SQL', () => {
     const bound = findExecuteValues(/UPDATE/);
     expect(bound.length).toBeGreaterThan(0);
     expect(bound.some((v) => Array.isArray(v))).toBe(false);
+  });
+});
+
+describe('cooperative live-DJ pause (BS#2009)', () => {
+  afterEach(() => {
+    delete process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS;
+  });
+
+  it('sleeps while the probe reports activity and proceeds once it reports quiet', async () => {
+    process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS = '60';
+    const checkLive = jest.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
+    queueSinglePageRun([vaRow(1)]);
+
+    const result = await runRemediation(
+      baseOpts({
+        lookup: () => Promise.resolve(withUrl(NEW_URL)),
+        checkLiveActivityFn: checkLive,
+      })
+    );
+
+    // The probe reported activity at least once, and the run still reached
+    // a quiet reading and proceeded to write — a stubbed detector alone
+    // can't prove this; only a caller that actually loops on the result and
+    // sleeps between checks does.
+    expect(checkLive.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(checkLive).toHaveBeenCalledWith(60);
+    expect(result.flowsheet.written_url).toBe(1);
+  });
+
+  it('probes once per page, not once per row', async () => {
+    process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS = '60';
+    const checkLive = jest.fn(() => Promise.resolve(false));
+    // Three arbitrated rows on a SINGLE page. A per-row probe (the old
+    // defect) would call checkLive at least 3 times for flowsheet alone; a
+    // per-page probe calls it once per while-loop iteration regardless of
+    // how many rows the page holds — 2 for flowsheet (the data page plus
+    // the terminal empty page) + 1 for album_metadata (its terminal empty
+    // page) = 3, identical to the single-row case pinned in the test above.
+    queueSinglePageRun([vaRow(1), vaRow(2, { track_title: 'Another' }), vaRow(3, { track_title: 'A Third' })]);
+
+    await runRemediation(
+      baseOpts({
+        lookup: () => Promise.resolve(withUrl(NEW_URL)),
+        checkLiveActivityFn: checkLive,
+      })
+    );
+
+    expect(checkLive).toHaveBeenCalledTimes(3);
+  });
+
+  it('a throwing probe does not abort the run: it is treated as no-activity and the summary still carries both last_id cursors', async () => {
+    process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS = '60';
+    const checkLive = jest.fn(() => Promise.reject(new Error('transient RDS blip')));
+    queueExecute([{ count: 1 }], [vaRow(1)], [], [{ count: 1 }], [{ album_id: 7, artist_name: 'Various Artists' }], []);
+
+    const result = await runRemediation(
+      baseOpts({
+        lookup: () => Promise.resolve(withUrl(NEW_URL)),
+        checkLiveActivityFn: checkLive,
+      })
+    );
+
+    // The run must not reject even though every probe call threw.
+    expect(result.flowsheet.last_id).toBe(1);
+    expect(result.album_metadata.last_id).toBe(7);
+    expect(result.flowsheet.written_url).toBe(1);
+    expect(result.album_metadata.invalidated).toBe(1);
+    expect(result.failed).toBe(false);
+  });
+
+  it('skips the probe entirely when the lookback is 0 (pause disabled)', async () => {
+    process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS = '0';
+    const checkLive = jest.fn(() => Promise.resolve(true));
+    queueSinglePageRun([vaRow(1)]);
+
+    await runRemediation(
+      baseOpts({
+        lookup: () => Promise.resolve(withUrl(NEW_URL)),
+        checkLiveActivityFn: checkLive,
+      })
+    );
+
+    expect(checkLive).not.toHaveBeenCalled();
   });
 });
 
