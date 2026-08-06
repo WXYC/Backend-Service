@@ -274,7 +274,15 @@ const buildWaitForQuietPeriod = (opts: {
 
   // Returns true iff the run should stop (SIGTERM observed during the wait).
   return async (): Promise<boolean> => {
-    if (opts.lookbackSeconds <= 0) return false;
+    // Both knobs disable the pause. lookbackSeconds<=0 means "never detect
+    // activity" (checkLiveActivity's own short-circuit). pauseMs<=0 is
+    // legal per `requireNonNegativeInt` (LIVE_ACTIVITY_PAUSE_MS=0 is a
+    // documented way to disable the pause the same as lookbackSeconds=0)
+    // but stopAwareSleep(0) returns immediately without awaiting a timer,
+    // so without this check a detected-active read degenerates into
+    // `while (active) { probe(); }` — an unthrottled hot loop against RDS
+    // for the run's entire duration instead of a cooperative pause.
+    if (opts.lookbackSeconds <= 0 || opts.pauseMs <= 0) return false;
     let active = await safeProbe();
     while (active) {
       if (stopRequested) return true;
