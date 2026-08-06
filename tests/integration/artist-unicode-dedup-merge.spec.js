@@ -148,12 +148,24 @@ describe('artist-unicode-dedup mergeGroup — REAL functions (real PG, BS#1897 M
     return groups.find((g) => [g.survivorId, ...g.duplicateIds].includes(id)) ?? null;
   }
 
-  test('merge.ts uses the shared @wxyc/database intArrayLiteral (BS#2010 promotion)', () => {
-    // The dedicated unit tests for intArrayLiteral's behavior — including
-    // the validation this promotion added — live at
-    // tests/unit/database/int-array-literal.test.ts. This assertion just
-    // pins that merge.ts's compiled output imports the shared helper rather
-    // than carrying its own private copy again.
+  test('merge.ts uses the shared @wxyc/database intArrayLiteral, not a re-introduced private copy (BS#2010 promotion)', () => {
+    // Two real assertions about the COMPILED merge.cjs, not just about
+    // @wxyc/database in isolation (the dedicated behavior/validation tests
+    // for intArrayLiteral itself live at
+    // tests/unit/database/int-array-literal.test.ts, which this does not
+    // duplicate):
+    //
+    //   1. merge.cjs no longer exports `intArrayLiteral` — the local export
+    //      this promotion removed hasn't quietly come back (e.g. from a
+    //      future edit re-adding `export const intArrayLiteral = ...` to
+    //      merge.ts, recreating the exact six-private-copies problem this
+    //      issue closed).
+    expect(merge.intArrayLiteral).toBeUndefined();
+    //   2. The shared helper is genuinely importable from @wxyc/database in
+    //      THIS integration test's module resolution environment (not just
+    //      the unit-test one, which maps @wxyc/database differently — see
+    //      tests/mocks/database.mock.ts) and produces the expected literal
+    //      form merge.ts's real queries depend on.
     expect(intArrayLiteral([1, 2, 3])).toBe('{1,2,3}');
     expect(intArrayLiteral([])).toBe('{}');
   });

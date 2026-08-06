@@ -44,8 +44,25 @@ describe('intArrayLiteral', () => {
     // driver output straight through (`as unknown as Array<{ id: number }>`
     // over what's actually a bigint column) can hand this function a numeric
     // string. `Number(...)` normalizes it to the same literal a genuine
-    // number would have produced.
+    // number would have produced, as long as the value fits within the JS
+    // safe-integer range — see the next test for what happens outside it.
     expect(intArrayLiteral(['7' as unknown as number, 8, 9])).toBe('{7,8,9}');
+  });
+
+  it('throws on a numeric string one past Number.MAX_SAFE_INTEGER rather than silently splicing the wrong id', () => {
+    // Number('9007199254740993') loses precision and evaluates to
+    // 9007199254740992 — a DIFFERENT integer, silently. Number.isInteger
+    // would accept that (it's still an integer, just the wrong one);
+    // Number.isSafeInteger is what turns a would-be wrong-row UPDATE/DELETE
+    // into a loud throw instead. No bigint/bigserial column exists in this
+    // schema today, so this is a latent-but-real correctness edge, not a
+    // hypothetical one.
+    const oneOverMaxSafe = '9007199254740993';
+    // Sanity: precision is genuinely lost by the round-trip, not just
+    // hypothetically — Number(...).toString() comes back as a DIFFERENT
+    // digit string than what went in.
+    expect(Number(oneOverMaxSafe).toString()).not.toBe(oneOverMaxSafe);
+    expect(() => intArrayLiteral([oneOverMaxSafe as unknown as number])).toThrow(/integer/i);
   });
 
   it('throws rather than splicing a non-integer element as raw SQL text', () => {

@@ -29,7 +29,7 @@
  * tsconfig.json entry for it.
  */
 import path from 'path';
-import { RuleTester } from 'eslint';
+import { Linter, RuleTester } from 'eslint';
 
 // Both required (not import-default'd) for the same reason: avoid any
 // ESM/CJS interop ambiguity over whether the default export resolves to the
@@ -125,16 +125,6 @@ ruleTester.run('no-bare-array-in-sql-template', rule, {
       `,
       filename: 'valid-postgres-js-not-flagged.ts',
     },
-    // A namespace/default import of drizzle-orm doesn't resolve to the
-    // named `sql` export the rule keys on.
-    {
-      code: `
-        import * as drizzle from 'drizzle-orm';
-        declare const ids: number[];
-        const q = drizzle.sql\`SELECT * FROM t WHERE id = ANY(\${ids})\`;
-      `,
-      filename: 'valid-namespace-import.ts',
-    },
   ],
 
   invalid: [
@@ -221,4 +211,62 @@ ruleTester.run('no-bare-array-in-sql-template', rule, {
       errors: [{ messageId: 'bareArrayInSqlTemplate' }, { messageId: 'bareArrayInSqlTemplate' }],
     },
   ],
+});
+
+/**
+ * Known gaps (see the rule's own docblock, "## Known gaps"): shapes that
+ * escape `isDrizzleSqlTag`'s scope-analysis check today, with zero live
+ * call sites in this codebase. These do NOT belong in `RuleTester`'s
+ * `valid` array above — a `valid` case reads as "this is intentionally
+ * fine," and a real bug shape that the rule happens to miss is the
+ * opposite of fine. This block exercises gap #4 (a namespace import used
+ * as a member-expression tag) directly against `eslint.Linter` so the
+ * miss is asserted AND labeled as a miss, not asserted as correct
+ * behavior. Gaps #1-3 (re-export through an intermediate module, `sql`
+ * passed as a function parameter, and a hypothetical `drizzle-orm`
+ * subpath import) are documented in the rule's docblock but have no
+ * dedicated fixture here — none has ever appeared in this codebase either,
+ * and constructing a realistic one for each is lower value than fixing the
+ * gaps outright would be, which is out of scope for this change.
+ */
+describe('no-bare-array-in-sql-template — known gaps (documented misses, not intended behavior)', () => {
+  it('gap #4: does NOT catch a bare array in ANY(...) tagged via a namespace-import member expression (drizzle.sql`...`)', () => {
+    const linter = new Linter({ configType: 'flat' });
+    const messages = linter.verify(
+      `
+        import * as drizzle from 'drizzle-orm';
+        declare const ids: number[];
+        const q = drizzle.sql\`SELECT * FROM t WHERE id = ANY(\${ids})\`;
+      `,
+      [
+        {
+          files: ['**/*.ts'],
+          languageOptions: {
+            parser: tsParser,
+            parserOptions: {
+              projectService: {
+                allowDefaultProject: ['*.ts'],
+                maximumDefaultProjectFileMatchCount_THIS_WILL_SLOW_DOWN_LINTING: 30,
+              },
+              tsconfigRootDir: path.resolve(__dirname, '../../..'),
+            },
+            sourceType: 'module',
+          },
+          plugins: { wxyc: wxycLocalRules },
+          rules: { 'wxyc/no-bare-array-in-sql-template': 'error' },
+        },
+      ],
+      { filename: 'known-gap-namespace-import.ts' }
+    );
+
+    // This IS the actual historical bug shape (BS#1068/BS#1071/#2007
+    // family) — it would 42809 in production exactly like the other
+    // `invalid` cases above. The rule currently can't see it because
+    // `isDrizzleSqlTag` only handles a bare Identifier tag, not a
+    // MemberExpression. Asserting `toHaveLength(0)` here documents the gap
+    // as a gap: if a future change to `isDrizzleSqlTag` starts catching
+    // this shape, this assertion breaks and should be updated to `invalid`
+    // — a welcome failure, not a regression.
+    expect(messages).toHaveLength(0);
+  });
 });

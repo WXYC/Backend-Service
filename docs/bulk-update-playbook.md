@@ -80,6 +80,8 @@ await db.execute(sql`DELETE FROM ${table} WHERE "id" = ANY(${idArrayLiteral}::in
 
 The identical `ANY(${ids})` syntax IS correct under a raw **postgres-js** tagged template (e.g. `getTestDb()` in this repo's integration tests) — postgres-js binds a JS array as a genuine PG array. Both clients are used in this codebase, so the same source line is right in one file and wrong in another with no visible difference in the text; that's why a lint rule enforces this instead of a code-review habit. `eslint-rules/no-bare-array-in-sql-template.cjs` (wired in `eslint.config.mjs`) fails the build on a bare array interpolated into a **Drizzle** `sql` template specifically — it keys on the `sql` import's origin via scope analysis and is type-aware (it has to distinguish `ids: number[]` from `idArrayLiteral: string`), so it does not fire on postgres-js call sites.
 
+The rule's `.ts`-source coverage is `apps/**`, `shared/**`, `jobs/**`, `tests/**` — it does not reach `tests/integration/*.spec.js` (the postgres-js tier, where the syntax is correct anyway) or `scripts/**` (several of which import a real Drizzle `sql` and run against prod); both are outside ESLint's configured scope for reasons unrelated to this rule (`.js`/`.cjs`/`.mjs` files and `scripts/**` are globally ignored). No live instance of the bug exists in either as of this writing.
+
 ## Sync-gap remediation
 
 For 24 of the 25 stuck rows from the 2026-04-27 incident, the `dj_name` was actually present in tubafrenzy (`FLOWSHEET_RADIO_SHOW_PROD.DJ_NAME`) — Backend-Service's `shows.legacy_dj_name` just hadn't synced. The fix path:
