@@ -25,6 +25,7 @@ import {
   analyzeTable,
   applyFlowsheetBatch,
   invalidateAlbumBatch,
+  type AlbumInvalidation,
   resolveAfterId,
   resolveBatchSize,
   resolveDryRun,
@@ -66,15 +67,38 @@ const findExecuteCall = (pattern: RegExp): string =>
   (db.execute as jest.Mock).mock.calls.map((c) => renderSql(c?.[0])).find((s) => pattern.test(s)) ?? '';
 
 /**
- * The raw values bound into the first captured statement whose rendered text
- * matches. `tests/__mocks__/drizzle-orm.ts` stubs the `sql` tag as
+ * Every leaf value bound into the first captured statement whose rendered text
+ * matches, flattened across nested `sql.join(...)` fragments.
+ * `tests/__mocks__/drizzle-orm.ts` stubs the `sql` tag as
  * `{ sql: strings, values }`, so it cannot serialize a statement — but it does
- * preserve each bound value verbatim, which is enough to tell a PG array
- * LITERAL apart from a bare JS array. That distinction is invisible to
- * `renderSql`, and it is the whole bug.
+ * preserve each bound value verbatim, which is enough to tell a scalar bind
+ * apart from a bare JS array. That distinction is invisible to `renderSql`
+ * (which splices values inline), and it is the whole bug.
  */
-const findExecuteValues = (pattern: RegExp): unknown[] =>
-  (db.execute as jest.Mock).mock.calls.find((c) => pattern.test(renderSql(c?.[0])))?.[0]?.values ?? [];
+const collectValues = (node: unknown, out: unknown[]): void => {
+  if (node === null || typeof node !== 'object') {
+    if (node !== undefined) out.push(node);
+    return;
+  }
+  const obj = node as SqlLike;
+  if (Array.isArray(obj.join)) {
+    obj.join.forEach((fragment) => collectValues(fragment, out));
+    return;
+  }
+  if (Array.isArray(obj.values)) {
+    obj.values.forEach((value) => collectValues(value, out));
+    return;
+  }
+  if (typeof obj.raw === 'string') return;
+  out.push(node);
+};
+
+const findExecuteValues = (pattern: RegExp): unknown[] => {
+  const chunk = (db.execute as jest.Mock).mock.calls.find((c) => pattern.test(renderSql(c?.[0])))?.[0];
+  const out: unknown[] = [];
+  collectValues(chunk, out);
+  return out;
+};
 
 const APPLE_URL = 'https://music.apple.com/us/song/im-on-my-way/777';
 const NEW_URL = 'https://music.apple.com/us/song/im-on-my-way/999';
@@ -96,7 +120,12 @@ const queueSinglePageRun = (rows: unknown[]) => queueExecute([{ count: rows.leng
 
 const noopAnalyze = jest.fn(async () => {});
 const passThroughApply = jest.fn((fixes: FlowsheetFix[]) => Promise.resolve(fixes.length));
-const noopInvalidate = jest.fn((ids: number[]) => Promise.resolve(ids.length));
+const noopInvalidate = jest.fn((targets: AlbumInvalidation[]) => Promise.resolve(targets.length));
+
+const albumTargets: AlbumInvalidation[] = [
+  { albumId: 7, oldUrl: APPLE_URL },
+  { albumId: 8, oldUrl: APPLE_URL },
+];
 
 const baseOpts = (overrides: Record<string, unknown> = {}) => ({
   dryRun: false,
@@ -291,9 +320,9 @@ describe('phase order', () => {
       order.push('flowsheet');
       return Promise.resolve(f.length);
     });
-    const invalidate = jest.fn((ids: number[]) => {
+    const invalidate = jest.fn((targets: AlbumInvalidation[]) => {
       order.push('album');
-      return Promise.resolve(ids.length);
+      return Promise.resolve(targets.length);
     });
 
     await runRemediation(
@@ -352,7 +381,7 @@ describe('invalidateAlbumBatch SQL', () => {
     );
     queueExecute({ count: 1 }, { count: 1 });
 
-    await invalidateAlbumBatch([7, 8], 1000);
+    await invalidateAlbumBatch(albumTargets, 1000);
 
     const updateSql = findExecuteCall(/UPDATE/);
     // Handing the row to the BS#1915 hourly re-ask sweep rather than
@@ -361,35 +390,63 @@ describe('invalidateAlbumBatch SQL', () => {
     expect(updateSql).toMatch(/apple_music_status" = 'unresolved'/);
     expect(updateSql).toMatch(/streaming_reask_attempts" = 0/);
     expect(updateSql).toMatch(/apple_music_url" = NULL/);
-    // Guarded so a concurrent write can't be clobbered.
-    expect(updateSql).toMatch(/apple_music_url" IS NOT NULL/);
   });
 
-  it('binds the id list as a PG array literal, never as a bare JS array', async () => {
-    // The shipped defect: `ANY(${albumIds})` with a bare `number[]`. Drizzle
+  it('is a compare-and-set on the observed url', async () => {
+    // The album arm overwrites a NON-NULL value while the enrichment worker and
+    // the BS#1915 sweep touch the same column, so a bare `IS NOT NULL` is not
+    // enough: it would null a url the worker had just re-verified through the
+    // post-#1139 guarded matcher. Mirrors applyFlowsheetBatch's guard.
+    (db.transaction as jest.Mock).mockImplementation((cb: (tx: unknown) => unknown) =>
+      Promise.resolve(cb({ execute: db.execute }))
+    );
+    queueExecute({ count: 1 }, { count: 1 });
+
+    await invalidateAlbumBatch(albumTargets, 1000);
+
+    const updateSql = findExecuteCall(/UPDATE/);
+    expect(updateSql).toMatch(/IS NOT DISTINCT FROM v\."old_url"/);
+    expect(updateSql).toMatch(/t\."album_id" = v\."album_id"/);
+    // The old predicate would silently re-admit the race this guard closes.
+    expect(updateSql).not.toMatch(/apple_music_url" IS NOT NULL/);
+  });
+
+  it('stamps updated_at, which no trigger does for album_metadata', async () => {
+    // Migration 0084's bump_flowsheet_updated_at is flowsheet-ONLY (the mirror
+    // image of applyFlowsheetBatch's `not.toMatch(/updated_at/)` assertion).
+    // Drop this SET and the row's freshness signal — which the BS#1915 re-ask
+    // sweep and the CDC consumers read — freezes at its pre-remediation value.
+    (db.transaction as jest.Mock).mockImplementation((cb: (tx: unknown) => unknown) =>
+      Promise.resolve(cb({ execute: db.execute }))
+    );
+    queueExecute({ count: 1 }, { count: 1 });
+
+    await invalidateAlbumBatch(albumTargets, 1000);
+
+    expect(findExecuteCall(/UPDATE/)).toMatch(/"updated_at" = NOW\(\)/);
+  });
+
+  it('never binds a bare JS array', async () => {
+    // The shipped defect was `ANY(${albumIds})` with a bare `number[]`: drizzle
     // expands a JS array inside a `sql` template into a comma-separated
     // PARAMETER LIST, so Postgres received `ANY(($1, $2, … $202))` — a row
-    // constructor, which `ANY` will not accept — and every page of the
-    // album_metadata phase failed at runtime. The repo idiom (BS#1068/BS#1071;
-    // see `jobs/album-critic-reviews-etl/antijoin.ts`) is to bind a `{1,2,3}`
-    // array-literal STRING with an explicit `::int[]` cast.
+    // constructor, which `ANY` rejects at parse time (42809) — and every page
+    // of the album_metadata phase failed. The VALUES join binds each id and url
+    // as its own parameter, so no array is bound at all; this pins that.
     //
-    // This assertion is only as strong as the mock allows: the stub `sql` tag
-    // does not parse SQL, so what is pinned here is the bound VALUE and the
-    // cast, not the wire-level statement. The statement itself is executed
-    // against real Postgres in
+    // Only as strong as the mock allows: `tests/__mocks__/drizzle-orm.ts` stubs
+    // the `sql` tag, so nothing here parses SQL. The statement is executed for
+    // real — by requiring the compiled function — in
     // `tests/integration/va-apple-music-url-remediation-invalidate.spec.js`.
     (db.transaction as jest.Mock).mockImplementation((cb: (tx: unknown) => unknown) =>
       Promise.resolve(cb({ execute: db.execute }))
     );
     queueExecute({ count: 1 }, { count: 1 });
 
-    await invalidateAlbumBatch([7, 8], 1000);
+    await invalidateAlbumBatch(albumTargets, 1000);
 
-    expect(findExecuteCall(/UPDATE/)).toMatch(/= ANY\(\{7,8\}::int\[\]\)/);
     const bound = findExecuteValues(/UPDATE/);
-    expect(bound).toContain('{7,8}');
-    // A bare array reaching the driver is the defect itself.
+    expect(bound.length).toBeGreaterThan(0);
     expect(bound.some((v) => Array.isArray(v))).toBe(false);
   });
 });

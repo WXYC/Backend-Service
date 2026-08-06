@@ -1,68 +1,66 @@
 /**
- * Integration test for BS#2000's `album_metadata` invalidation UPDATE — the
- * statement `invalidateAlbumBatch` (orchestrate.ts) sends for every page of
- * phase 2.
+ * Integration tests for the REAL shipped `invalidateAlbumBatch` of
+ * `jobs/va-apple-music-url-remediation` — phase 2 of the BS#2000 remediation.
  *
- * WHY THIS EXISTS. The job shipped with the id list bound as a bare JS array:
+ * WHY THIS RUNS THE REAL FUNCTION. The job shipped with its id list bound as a
+ * bare JS array:
  *
  *     WHERE "album_id" = ANY(${albumIds})        // albumIds: number[]
  *
  * Drizzle expands a JS array inside a `sql` template into a comma-separated
  * PARAMETER LIST, so Postgres received `ANY(($1, $2, … $202))` — a row
- * constructor, not an array. `ANY` requires an array, so the statement failed on
- * every page and the phase reported `{"candidates":206,"invalidated":0}`. The
- * repo idiom (the BS#1068/BS#1071 trap, documented in
- * `jobs/album-critic-reviews-etl/antijoin.ts`) is to bind a `{1,2,3}`
- * array-literal STRING with an explicit `::int[]` cast.
+ * constructor, not an array — and rejected it at parse time (42809,
+ * `op ANY/ALL (array) requires array on right side`). Being a parse error, it
+ * was dataset-independent: the statement could never have written a row, on any
+ * page, for any input. Production reported
+ * `album_metadata: {"candidates":206,"invalidated":0,"batches":1}`.
+ *
+ * A hand-mirrored copy of the statement in this file would NOT have caught
+ * that, and would not catch its return: the mirror passes no matter what
+ * `orchestrate.ts` actually sends. So this spec `require`s the compiled
+ * `dist/orchestrate.cjs` and calls the real exported function — the same
+ * arrangement `artist-unicode-dedup-merge.spec.js` uses for `dist/merge.cjs`
+ * (BS#1897 review MED-1). Revert the fix and these tests fail.
  *
  * WHY NO EXISTING TEST CAUGHT IT. `jest.unit.config.ts` maps `@wxyc/database`
  * to `tests/mocks/database.mock.ts` and `tests/__mocks__/drizzle-orm.ts` stubs
- * the `sql` tag as `{ sql: strings, values }` — nothing parses SQL, and the
- * suite's `renderSql` helper splices bound values inline, so the two bindings
- * are indistinguishable there. Only a real server can reject the bad one.
+ * the `sql` tag as `{ sql: strings, values }` — nothing in the unit tier parses
+ * SQL, and the suite's `renderSql` helper splices bound values inline, so a
+ * mis-parameterized bind is invisible there. Only a real server can reject it.
  *
- * Pure SQL — does NOT import the TS job. Same constraint as the sibling
- * `va-apple-music-url-remediation-net.spec.js` (read its header): the
- * integration runner is babel-jest with no TypeScript support. `UPDATE_SET` and
- * `UPDATE_TAIL` below mirror `invalidateAlbumBatch`; when that function is
- * hand-edited, the SQL here must follow.
+ * `dist/orchestrate.cjs` is produced by the workspace `build` (tsup dual-format
+ * esm+cjs); CI's Build step runs `npm run build` — which covers `jobs/**` —
+ * before the integration tier. Rebuild after editing `orchestrate.ts`
+ * (`npm run build --workspace=@wxyc/va-apple-music-url-remediation`).
  *
- * `sql.unsafe` rather than a postgres-js tagged template on purpose: postgres-js
- * binds a JS array as a genuine PG array and would paper over the very
- * distinction under test. The text here is what the driver actually receives.
+ * The real function uses the `@wxyc/database` `db` singleton (its own pool,
+ * DB_* env); this spec seeds and asserts via `getTestDb()`, a separate pool on
+ * the same database. All writes commit, so the two pools see each other's rows.
  *
  * Needs CI to run: requires the Docker integration DB (the `pg` marker tier).
  *
  * @see WXYC/Backend-Service#2000
  */
 
+// The repo-wide `tests/__mocks__/drizzle-orm.ts` manual mock (written for the
+// ts-jest unit tier) is AUTOMATICALLY applied to every `drizzle-orm` require —
+// no `jest.mock(...)` needed — including here in the integration tier. Our
+// compiled `dist/orchestrate.cjs` requires the REAL drizzle-orm (its `sql`
+// template builds the UPDATE that `@wxyc/database`'s postgres-js driver runs),
+// so unmock it (same pattern as `artist-unicode-dedup-merge.spec.js`). Hoisted
+// above the requires below by babel-plugin-jest-hoist.
+jest.unmock('drizzle-orm');
+
+const path = require('path');
 const { getTestDb } = require('../utils/db');
 
+// The REAL compiled statement — no reimplementation.
+const { invalidateAlbumBatch } = require(
+  path.join(__dirname, '..', '..', 'jobs', 'va-apple-music-url-remediation', 'dist', 'orchestrate.cjs')
+);
+
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
-
-/** Mirrors `invalidateAlbumBatch`'s SET clause in orchestrate.ts. */
-const UPDATE_SET = `
-  UPDATE "${SCHEMA}"."album_metadata"
-  SET "apple_music_url" = NULL,
-      "apple_music_status" = 'unresolved',
-      "streaming_reask_attempts" = 0,
-      "updated_at" = NOW()
-`;
-
-/** Mirrors the guard that keeps a concurrent write from being clobbered. */
-const UPDATE_TAIL = `AND "apple_music_url" IS NOT NULL`;
-
-/** The FIXED predicate: one param, a PG array literal, explicitly cast. */
-const arrayLiteralStatement = () => `${UPDATE_SET} WHERE "album_id" = ANY($1::int[]) ${UPDATE_TAIL}`;
-
-/** The SHIPPED predicate: what drizzle emits for a bare `number[]`. */
-const rowConstructorStatement = (count) => {
-  const placeholders = Array.from({ length: count }, (_, i) => `$${i + 1}`).join(', ');
-  return `${UPDATE_SET} WHERE "album_id" = ANY((${placeholders})) ${UPDATE_TAIL}`;
-};
-
-/** Mirrors `intArrayLiteral` in the sibling jobs (ghost-row-sweep, metadata-backfill). */
-const intArrayLiteral = (ids) => `{${ids.join(',')}}`;
+const UPDATE_TIMEOUT_MS = 30_000;
 
 const APPLE_URL = 'https://music.apple.com/us/song/bs2000-invalidate-fixture/777';
 
@@ -81,20 +79,23 @@ async function insertAlbumMetadata(sql, albumId, appleUrl) {
   await sql`
     INSERT INTO ${sql(SCHEMA)}.album_metadata
       (album_id, artwork_url, apple_music_url, apple_music_status, streaming_reask_attempts, updated_at)
-    VALUES (${albumId}, 'https://i.discogs.com/x.jpg', ${appleUrl}, ${appleUrl ? 'verified' : 'unresolved'}, 3, NOW())
+    VALUES (
+      ${albumId}, 'https://i.discogs.com/x.jpg', ${appleUrl},
+      ${appleUrl ? 'verified' : 'unresolved'}, 3, NOW() - INTERVAL '7 days'
+    )
   `;
 }
 
 async function readRow(sql, albumId) {
   const [row] = await sql`
-    SELECT apple_music_url, apple_music_status, streaming_reask_attempts
+    SELECT apple_music_url, apple_music_status, streaming_reask_attempts, updated_at
       FROM ${sql(SCHEMA)}.album_metadata
      WHERE album_id = ${albumId}
   `;
   return row;
 }
 
-describe('BS#2000 album_metadata invalidation UPDATE (real Postgres)', () => {
+describe('va-apple-music-url-remediation invalidateAlbumBatch — REAL function (real PG, BS#2000)', () => {
   let sql;
   const insertedAlbumIds = [];
 
@@ -116,29 +117,14 @@ describe('BS#2000 album_metadata invalidation UPDATE (real Postgres)', () => {
     }
   });
 
-  it('REGRESSION: the row-constructor predicate is rejected outright by Postgres', async () => {
-    const target = await seed('row-constructor');
+  it('REGRESSION: the statement executes and actually invalidates its targets', async () => {
+    // This is the test the shipped defect failed: the UPDATE threw 42809 and
+    // wrote nothing. Restore `ANY(${albumIds})` and this goes red again.
+    const target = await seed('executes');
+    const untargeted = await seed('untargeted');
 
-    // Parse-time failure (make_scalar_array_op), so it is dataset-independent:
-    // the shipped statement could never have invalidated a row, on any page,
-    // for any input. That is the whole content of the production log line
-    // `album_metadata: {"candidates":206,"invalidated":0,"batches":1}`.
-    await expect(sql.unsafe(rowConstructorStatement(2), [target, target + 1])).rejects.toMatchObject({
-      code: '42809',
-    });
-
-    // …and the row it was supposed to clean is untouched.
-    const row = await readRow(sql, target);
-    expect(row.apple_music_url).toBe(APPLE_URL);
-    expect(row.streaming_reask_attempts).toBe(3);
-  });
-
-  it('the array-literal predicate invalidates exactly the targeted rows', async () => {
-    const target = await seed('literal-target');
-    const untargeted = await seed('literal-untargeted');
-
-    const result = await sql.unsafe(arrayLiteralStatement(), [intArrayLiteral([target])]);
-    expect(result.count).toBe(1);
+    const written = await invalidateAlbumBatch([{ albumId: target, oldUrl: APPLE_URL }], UPDATE_TIMEOUT_MS);
+    expect(written).toBe(1);
 
     // Handed to the BS#1915 hourly re-ask sweep: url cleared, status flipped to
     // 'unresolved', and the exhausted attempt budget reset so the sweep will
@@ -154,26 +140,82 @@ describe('BS#2000 album_metadata invalidation UPDATE (real Postgres)', () => {
     expect(spared.streaming_reask_attempts).toBe(3);
   });
 
-  it('the IS NOT NULL guard skips an already-null row inside the id list', async () => {
-    const alreadyNull = await seed('literal-already-null', null);
-    const withUrl = await seed('literal-with-url');
+  it('stamps updated_at — no trigger does it for album_metadata', async () => {
+    // Migration 0084's bump_flowsheet_updated_at is flowsheet-only. Without the
+    // explicit SET, the freshness signal the BS#1915 sweep and the CDC
+    // consumers read would stay frozen at its pre-remediation value (seeded
+    // here 7 days in the past).
+    const target = await seed('updated-at');
+    const before = (await readRow(sql, target)).updated_at;
 
-    const result = await sql.unsafe(arrayLiteralStatement(), [intArrayLiteral([alreadyNull, withUrl])]);
-    // Both ids are in the list; only the one carrying a URL is written.
-    expect(result.count).toBe(1);
+    await invalidateAlbumBatch([{ albumId: target, oldUrl: APPLE_URL }], UPDATE_TIMEOUT_MS);
 
-    const untouched = await readRow(sql, alreadyNull);
-    expect(untouched.streaming_reask_attempts).toBe(3);
+    const after = (await readRow(sql, target)).updated_at;
+    expect(after.getTime()).toBeGreaterThan(before.getTime());
   });
 
-  it('the array literal carries a full production-width page', async () => {
-    const target = await seed('literal-wide-page');
+  it('COMPARE-AND-SET: a url that changed under us is left alone', async () => {
+    // The race this guard closes: between phase 2's page SELECT and this
+    // UPDATE, `apps/enrichment-worker/enrich.ts` re-verifies the album through
+    // LML's post-#1139 guarded matcher and writes the CORRECT url as
+    // 'verified'. Nulling that would open a DJ-visible window through
+    // `flowsheet.service.ts`'s coalesce until the BS#1915 sweep re-healed it.
+    const target = await seed('cas-changed');
+    const REVERIFIED = 'https://music.apple.com/us/song/correct-after-lml-1139/999';
+    await sql`
+      UPDATE ${sql(SCHEMA)}.album_metadata
+         SET apple_music_url = ${REVERIFIED}, apple_music_status = 'verified'
+       WHERE album_id = ${target}
+    `;
 
+    // We still hold the STALE url we observed at SELECT time.
+    const written = await invalidateAlbumBatch([{ albumId: target, oldUrl: APPLE_URL }], UPDATE_TIMEOUT_MS);
+    expect(written).toBe(0);
+
+    const row = await readRow(sql, target);
+    expect(row.apple_music_url).toBe(REVERIFIED);
+    expect(row.apple_music_status).toBe('verified');
+    expect(row.streaming_reask_attempts).toBe(3);
+  });
+
+  it('COMPARE-AND-SET: a mixed page writes only the rows that still match', async () => {
+    const stable = await seed('cas-mixed-stable');
+    const raced = await seed('cas-mixed-raced');
+    const MOVED = 'https://music.apple.com/us/song/moved/1';
+    await sql`
+      UPDATE ${sql(SCHEMA)}.album_metadata
+         SET apple_music_url = ${MOVED}
+       WHERE album_id = ${raced}
+    `;
+
+    const written = await invalidateAlbumBatch(
+      [
+        { albumId: stable, oldUrl: APPLE_URL },
+        { albumId: raced, oldUrl: APPLE_URL },
+      ],
+      UPDATE_TIMEOUT_MS
+    );
+    expect(written).toBe(1);
+
+    expect((await readRow(sql, stable)).apple_music_url).toBeNull();
+    expect((await readRow(sql, raced)).apple_music_url).toBe(MOVED);
+  });
+
+  it('carries a full production-width page', async () => {
     // The failing run paged 202 ids at once — the width at which the row
     // constructor became `ANY(($1, $2, … $202))` in the production log.
-    const ids = Array.from({ length: 201 }, (_, i) => -1 - i).concat(target);
-    const result = await sql.unsafe(arrayLiteralStatement(), [intArrayLiteral(ids)]);
-    expect(result.count).toBe(1);
+    const target = await seed('wide-page');
+    const filler = Array.from({ length: 201 }, (_, i) => ({ albumId: -1 - i, oldUrl: APPLE_URL }));
+
+    const written = await invalidateAlbumBatch(
+      filler.concat([{ albumId: target, oldUrl: APPLE_URL }]),
+      UPDATE_TIMEOUT_MS
+    );
+    expect(written).toBe(1);
     expect((await readRow(sql, target)).apple_music_url).toBeNull();
+  });
+
+  it('is a no-op on an empty page', async () => {
+    await expect(invalidateAlbumBatch([], UPDATE_TIMEOUT_MS)).resolves.toBe(0);
   });
 });

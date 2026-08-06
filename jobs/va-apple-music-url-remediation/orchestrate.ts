@@ -356,6 +356,15 @@ export const applyFlowsheetBatch = async (fixes: FlowsheetFix[], updateTimeoutMs
 };
 
 /**
+ * One album_metadata row to invalidate: its id plus the polluted url observed
+ * for it in this page's SELECT, which the UPDATE requires to still be there.
+ */
+export interface AlbumInvalidation {
+  albumId: number;
+  oldUrl: string | null;
+}
+
+/**
  * Invalidate one page of `album_metadata` V/A rows.
  *
  * Sets the URL null, flips `apple_music_status` to `'unresolved'`, and RESETS
@@ -367,24 +376,46 @@ export const applyFlowsheetBatch = async (fixes: FlowsheetFix[], updateTimeoutMs
  *
  * No LML here — the sweep owns the re-ask, through the now-guarded matcher.
  */
-export const invalidateAlbumBatch = async (albumIds: number[], updateTimeoutMs: number): Promise<number> => {
-  if (albumIds.length === 0) return 0;
-  // Bind as a single PG-array-literal string param, not a bare interpolated JS
-  // array — the BS#1068/BS#1071 trap (see `jobs/album-critic-reviews-etl/antijoin.ts`).
-  // Drizzle expands a JS array into a comma-separated parameter list, so
-  // `ANY(${albumIds})` reaches Postgres as `ANY(($1, $2, … $202))` — a row
-  // constructor, which `ANY` rejects at parse time (42809). Safe by
-  // construction: TypeScript types `albumIds: number[]`, so the join contains
-  // only numeric literals.
-  const idArrayLiteral = `{${albumIds.join(',')}}`;
+export const invalidateAlbumBatch = async (targets: AlbumInvalidation[], updateTimeoutMs: number): Promise<number> => {
+  if (targets.length === 0) return 0;
+  // A VALUES join, not `ANY(<id list>)`, for two reasons.
+  //
+  // 1. It carries the compare-and-set. `IS NOT DISTINCT FROM v."old_url"` is the
+  //    same guard `applyFlowsheetBatch` uses above, for the same reason: this
+  //    job overwrites a NON-NULL value while two other writers touch this
+  //    column. Between this page's SELECT and this UPDATE, the enrichment
+  //    worker can re-verify the album through LML's post-#1139 guarded matcher
+  //    and write the CORRECT url with `apple_music_status='verified'`. A bare
+  //    `apple_music_url IS NOT NULL` predicate would null that fresh, correct
+  //    value and reset its re-ask budget — self-healing via the BS#1915 sweep,
+  //    but only after a DJ-visible null window through `flowsheet.service.ts`'s
+  //    coalesce.
+  //
+  // 2. It binds each id and url as its own parameter, so nothing here has to
+  //    hand-roll a PG array literal. That matters: the original defect was
+  //    `ANY(${albumIds})` with a bare `number[]`, which drizzle expands into a
+  //    comma-separated parameter list — Postgres receives
+  //    `ANY(($1, $2, … $202))`, a row constructor, and rejects it at parse time
+  //    (42809). The array-literal-plus-cast idiom fixes that for ints (see
+  //    `jobs/album-critic-reviews-etl/antijoin.ts`, the BS#1068/BS#1071 trap),
+  //    but urls are text and would need real array-literal escaping.
+  //
+  // `updated_at` is set explicitly: migration 0084's BEFORE UPDATE trigger is
+  // flowsheet-only, so nothing stamps `album_metadata` for us, and the BS#1915
+  // re-ask sweep reads that freshness signal.
+  const values = sql.join(
+    targets.map((t) => sql`(${t.albumId}::int, ${t.oldUrl}::varchar)`),
+    sql`, `
+  );
   const updateSql = sql`
-    UPDATE ${ALBUM_METADATA_TABLE}
+    UPDATE ${ALBUM_METADATA_TABLE} AS t
     SET "apple_music_url" = NULL,
         "apple_music_status" = 'unresolved',
         "streaming_reask_attempts" = 0,
         "updated_at" = NOW()
-    WHERE "album_id" = ANY(${idArrayLiteral}::int[])
-      AND "apple_music_url" IS NOT NULL
+    FROM (VALUES ${values}) AS v("album_id", "old_url")
+    WHERE t."album_id" = v."album_id"
+      AND t."apple_music_url" IS NOT DISTINCT FROM v."old_url"
   `;
   const result = await db.transaction(async (tx) => {
     await tx.execute(sql`SET LOCAL statement_timeout = ${sql.raw(String(updateTimeoutMs))}`);
@@ -480,7 +511,7 @@ export interface RunOptions {
   lookup?: LookupFn;
   checkLiveActivityFn?: CheckLiveActivityFn;
   applyBatchFn?: (fixes: FlowsheetFix[], timeoutMs: number) => Promise<number>;
-  invalidateAlbumFn?: (ids: number[], timeoutMs: number) => Promise<number>;
+  invalidateAlbumFn?: (targets: AlbumInvalidation[], timeoutMs: number) => Promise<number>;
   analyzeFn?: (table: 'flowsheet' | 'album_metadata', timeoutMs: number) => Promise<void>;
 }
 
@@ -652,7 +683,7 @@ const runFlowsheetPhase = async (
 const runAlbumPhase = async (opts: {
   dryRun: boolean;
   checkLive: CheckLiveActivityFn;
-  invalidate: (ids: number[], timeoutMs: number) => Promise<number>;
+  invalidate: (targets: AlbumInvalidation[], timeoutMs: number) => Promise<number>;
   batchSize: number;
   afterId: number;
   updateTimeoutMs: number;
@@ -676,23 +707,28 @@ const runAlbumPhase = async (opts: {
   });
 
   while (!stopRequested) {
+    // `apple_music_url` rides along so the UPDATE can compare-and-set against
+    // the exact value this SELECT observed.
     const rows = (await db.execute(sql`
       SELECT am."album_id" AS "album_id",
+             am."apple_music_url" AS "apple_music_url",
              COALESCE(l."artist_name", ar."artist_name") AS "artist_name"
       ${albumMetadataFrom}
       WHERE ${albumMetadataNet} AND am."album_id" > ${cursor}
       ORDER BY am."album_id" ASC
       LIMIT ${opts.batchSize}
-    `)) as unknown as Array<{ album_id: number; artist_name: string | null }>;
+    `)) as unknown as Array<{ album_id: number; apple_music_url: string | null; artist_name: string | null }>;
     if (!rows || rows.length === 0) break;
     totals.batches += 1;
 
     if (opts.pauseMs > 0) await opts.checkLive(opts.lookbackSeconds, opts.pauseMs);
 
-    const ids = rows.filter((r) => isVariousArtistsCredit(r.artist_name)).map((r) => r.album_id);
-    if (!opts.dryRun && ids.length > 0) {
+    const targets: AlbumInvalidation[] = rows
+      .filter((r) => isVariousArtistsCredit(r.artist_name))
+      .map((r) => ({ albumId: r.album_id, oldUrl: r.apple_music_url }));
+    if (!opts.dryRun && targets.length > 0) {
       try {
-        totals.invalidated += await opts.invalidate(ids, opts.updateTimeoutMs);
+        totals.invalidated += await opts.invalidate(targets, opts.updateTimeoutMs);
       } catch (error) {
         log('error', 'write_failed', 'album_metadata invalidation failed', {
           after_id: cursor,
@@ -703,7 +739,7 @@ const runAlbumPhase = async (opts: {
         break;
       }
     } else if (opts.dryRun) {
-      totals.invalidated += ids.length;
+      totals.invalidated += targets.length;
     }
 
     cursor = rows[rows.length - 1].album_id;

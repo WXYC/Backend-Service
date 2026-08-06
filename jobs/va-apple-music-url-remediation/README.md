@@ -84,12 +84,30 @@ A control cohort of _non-V/A_ rows was considered and rejected: LML#1139's purge
 ## Write mechanics
 
 - Batched VALUES-join UPDATE per page + `ANALYZE` after the write pass (`docs/bulk-update-playbook.md`). **No CI check covers this for a TS job** — `scripts/check-bulk-update-analyze.mjs` scans `.sql` only — so the pairing is pinned by a unit test.
-- `flowsheet` UPDATE **omits `updated_at`**: trigger `bump_flowsheet_updated_at` (migration 0084) owns it. `album_metadata` sets it (writer convention).
-- **Compare-and-set:** `AND t.apple_music_url IS NOT DISTINCT FROM v.old_url`. Unlike the fill-only siblings (which guard on `IS NULL`), this job overwrites a non-null value, and under cooperative pause a page can sit unwritten a long time. Two other writers touch the column — the hourly `flowsheet-metadata-backfill` and the long-running `apps/enrichment-worker`, the latter _not_ covered by the "sibling crons Exited" pre-flight. Rejects are reported as `skipped_changed_under_us`.
+- `flowsheet` UPDATE **omits `updated_at`**: trigger `bump_flowsheet_updated_at` (migration 0084) owns it. That trigger is flowsheet-only, so the `album_metadata` UPDATE sets `updated_at` explicitly — nothing else would, and the BS#1915 re-ask sweep reads that freshness signal.
+- **Compare-and-set, on both arms:** `AND t.apple_music_url IS NOT DISTINCT FROM v.old_url`. Unlike the fill-only siblings (which guard on `IS NULL`), this job overwrites a non-null value, and under cooperative pause a page can sit unwritten a long time. Two other writers touch the column — the hourly `flowsheet-metadata-backfill` and the long-running `apps/enrichment-worker`, the latter _not_ covered by the "sibling crons Exited" pre-flight. On `flowsheet`, rejects are reported as `skipped_changed_under_us`. On `album_metadata` the reject is silent (it simply lowers `invalidated`), and the race it closes is specifically the worker re-verifying an album through LML's post-#1139 guarded matcher and writing the CORRECT url as `'verified'` — a bare `IS NOT NULL` predicate would null that fresh value and reset its re-ask budget, opening a DJ-visible window through `flowsheet.service.ts`'s coalesce until the sweep re-healed it.
 - Not `DB_SYNCHRONOUS_COMMIT=off`, unlike the BS#1715 donor: a re-verified row stays in the candidate net whether or not its write landed, so a lost write is invisible to any re-scan while the cursor has advanced past it. Durable commits are the cheaper side of that trade.
 - Id-cursor resume: `VA_REMEDIATION_FLOWSHEET_AFTER_ID` / `VA_REMEDIATION_ALBUM_AFTER_ID`, advancing only after a page's write commits.
 
 **Re-running is a full re-adjudication, not a cheap no-op.** A remediated row stays net-matched (still V/A, still non-null), so "adjudicated" is not recorded at rest. That is precisely why the cursors exist. Verification is run-internal: `scanned == written_url + written_null + skipped_changed_under_us` with `indeterminate == 0`.
+
+### Running phase 2 alone
+
+`runRemediation` always runs the flowsheet phase first, and gates phase 2 on `!flowsheet.failed` (nulling `album_metadata` unmasks flowsheet's value, so phase 2 must not run while flowsheet is still known-polluted). There is no `--album-only` flag. **When the flowsheet arm has already completed and only `album_metadata` needs a run — the exact situation after the 2026-08-06 run below — the supported way to skip phase 1 is to park its cursor past the end of the table:**
+
+```bash
+# The id ceiling: SELECT max(id) FROM wxyc_schema.flowsheet;
+VA_REMEDIATION_FLOWSHEET_AFTER_ID=<max_flowsheet_id> ... --execute
+```
+
+Phase 1 then selects zero candidates, finishes clean, and phase 2 runs against its own `VA_REMEDIATION_ALBUM_AFTER_ID` cursor.
+
+Do this rather than re-running both phases, for two reasons:
+
+1. **Cost.** Phase 1 re-adjudicates every surviving triple from scratch — up to `NULL_CONFIRMATION_PASSES` (3) LML lookups each, separated by `VA_REMEDIATION_SECOND_PASS_DELAY_MS` (15 s). The 56 triples the 2026-08-06 run verified and kept would all be re-spent.
+2. **Risk.** Phase 2 is skipped entirely if phase 1 fails — including on a rescue-rate abort or a write error. A re-run that trips either leaves `album_metadata` untouched for a second time, which is the failure mode that kept the 206 rows polluted in the first place.
+
+Set the ceiling from a live `max(id)` read, not from the previous run's `last_id`: `last_id` is the last row the phase _scanned_, which is only the table max if that run reached the end.
 
 ## Downstream interaction
 
@@ -118,4 +136,9 @@ docker run --rm --name va-apple-music-url-remediation --env-file .env \
 
 ## Run result
 
-_Not yet run — pending LML#1139 deploy + purge. Record counts here._
+**2026-08-06 09:33 PDT — `run_id 47dfff79-44d7-4768-8a18-3dd49278dc67`. Flowsheet arm complete; album arm did not run.**
+
+- `flowsheet`: 52 rows nulled, 56 triples re-verified and kept, 10 indeterminate.
+- `album_metadata`: `{"candidates":206,"invalidated":0,"batches":1}` — **failed**. Every page threw `42809 op ANY/ALL (array) requires array on right side`: the id list was bound as a bare JS array, which drizzle expands into a parameter list, so Postgres received `ANY(($1, $2, … $202))`, a row constructor. Fixed in #2007; the statement is now covered by `tests/integration/va-apple-music-url-remediation-invalidate.spec.js`, which runs the real compiled function against Postgres.
+
+The corrective re-run needs **phase 2 only** — see "Running phase 2 alone" above. Record its counts here.
