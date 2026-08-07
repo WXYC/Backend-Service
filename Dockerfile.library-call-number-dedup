@@ -1,0 +1,39 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+WORKDIR /library-call-number-dedup-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/library-call-number-dedup ./jobs/library-call-number-dedup
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/library-call-number-dedup
+
+#Production stage
+FROM node:24-alpine AS prod
+
+WORKDIR /library-call-number-dedup
+
+COPY ./package* ./
+COPY ./jobs/library-call-number-dedup/package* ./jobs/library-call-number-dedup/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./library-call-number-dedup-builder/jobs/library-call-number-dedup/dist ./jobs/library-call-number-dedup/dist
+COPY --from=builder ./library-call-number-dedup-builder/shared/database/dist ./shared/database/dist
+
+# Bulk repoint workload. Async commit is safe: the job is idempotent (a merged
+# slot drops out of the `HAVING count(*) > 1` set) and each slot's writes are
+# one transaction. High statement timeout so a slot under live load does not
+# abort mid-merge.
+ENV DB_APPLICATION_NAME=wxyc-library-call-number-dedup
+ENV DB_STATEMENT_TIMEOUT_MS=900000
+ENV DB_SYNCHRONOUS_COMMIT=off
+
+# ENTRYPOINT + empty CMD so docker-level args (e.g. `--execute`) pass through to
+# the job rather than replacing the launcher. node resolves `@wxyc/database` via
+# the standard walk up to /library-call-number-dedup/node_modules.
+ENTRYPOINT ["node", "/library-call-number-dedup/jobs/library-call-number-dedup/dist/job.js"]
+CMD []
