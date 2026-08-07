@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { artist_search_alias } from '@wxyc/database';
+import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 
 /**
  * Build the `alias_hits` CTE used by the UNION ALL alias-aware search paths
@@ -15,16 +16,27 @@ import { artist_search_alias } from '@wxyc/database';
  * touching the GIN trigram index. The CTE form lets the planner pick the
  * trigram bitmap scan once and hash-join into the outer query.
  *
+ * BS#2018 adds the `similarity(...) >= minSimilarity` floor. It is a FILTER
+ * layered on top of `%`, deliberately not a replacement: `%` is the operator
+ * the GIN trigram index (`artist_search_alias_variant_trgm_idx`) answers, so
+ * dropping it would cost the bitmap scan BS#1318 exists to preserve. pg_trgm's
+ * own 0.30 threshold is too loose for short variants — because callers join
+ * this CTE on `artist_id`, ONE colliding variant admits an artist's entire
+ * discography — so the floor re-tightens it. See
+ * `apps/backend/config/catalogSearchAlias.ts` for how 0.40 was calibrated.
+ *
  * This lives in `utils/` rather than beside any one caller because all three
  * alias-aware read paths use it (`/library/query` in
  * `library-search.service.ts`, plus Both-mode trigram and request-line
- * `searchByArtist` in `library.service.ts`). One definition is what keeps the
- * match semantics from drifting between them.
+ * `searchByArtist` in `library.service.ts`). Keeping one definition is what
+ * stops the floor and the match semantics from drifting between them — which
+ * is exactly the class of bug BS#2018 was.
  *
  * @param query Raw user query text, matched against `variant` as a single
  *   string (never tokenized).
  */
 export function buildAliasHitsCte(query: string) {
+  const { minSimilarity } = getCatalogSearchAliasConfig();
   return sql`WITH alias_hits AS (
     SELECT
       asa.artist_id,
@@ -32,7 +44,7 @@ export function buildAliasHitsCte(query: string) {
       (array_agg(asa.variant ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_variant,
       (array_agg(asa.source ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_source
     FROM ${artist_search_alias} asa
-    WHERE asa.variant % ${query}
+    WHERE asa.variant % ${query} AND similarity(asa.variant, ${query}) >= ${minSimilarity}
     GROUP BY asa.artist_id
   )`;
 }
