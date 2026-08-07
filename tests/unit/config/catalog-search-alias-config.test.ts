@@ -61,11 +61,17 @@ const MEASURED_TRUE_POSITIVES = [
 describe('catalogSearchAlias config', () => {
   const originalEnabled = process.env.CATALOG_SEARCH_ALIAS_ENABLED;
   const originalFloor = process.env.CATALOG_SEARCH_ALIAS_MIN_SIMILARITY;
+  let warnSpy: jest.SpyInstance;
 
   beforeEach(() => {
     delete process.env.CATALOG_SEARCH_ALIAS_ENABLED;
     delete process.env.CATALOG_SEARCH_ALIAS_MIN_SIMILARITY;
     resetConfig();
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
   });
 
   afterAll(() => {
@@ -128,6 +134,32 @@ describe('catalogSearchAlias config', () => {
         expect(loadConfig().minSimilarity).toBe(DEFAULT_ALIAS_MIN_SIMILARITY);
       }
     );
+
+    // The knob's whole purpose is a mid-incident backout. A typo that leaves
+    // the shipped default silently in place reads to the operator as "the
+    // floor wasn't the cause" — so every rejected override says so out loud.
+    it.each(['abc', '40', '-0.1', '1.5'])('warns that the override %p was rejected', (value) => {
+      process.env.CATALOG_SEARCH_ALIAS_MIN_SIMILARITY = value;
+      loadConfig();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toContain('CATALOG_SEARCH_ALIAS_MIN_SIMILARITY');
+      expect(warnSpy.mock.calls[0][0]).toContain('not a percentage');
+    });
+
+    it('warns that a below-pg_trgm-threshold override is a no-op', () => {
+      process.env.CATALOG_SEARCH_ALIAS_MIN_SIMILARITY = '0.1';
+      // Parsed and honored — it just cannot do anything, because `%` still
+      // rejects everything under pg_trgm's own threshold.
+      expect(loadConfig().minSimilarity).toBe(0.1);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toContain('no effect');
+    });
+
+    it('does not warn on a usable override', () => {
+      process.env.CATALOG_SEARCH_ALIAS_MIN_SIMILARITY = '0.45';
+      expect(loadConfig().minSimilarity).toBe(0.45);
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
 
     it('caches minSimilarity on the same singleton as enabled', () => {
       process.env.CATALOG_SEARCH_ALIAS_MIN_SIMILARITY = '0.5';

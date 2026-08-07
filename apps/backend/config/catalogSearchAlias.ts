@@ -62,14 +62,33 @@ export interface CatalogSearchAliasConfig {
  * shipped default rather than clamping: clamping a plausible "percent" typo
  * (`40`) to 1.0 would match nothing and silently disable the alias feature
  * outright, which is a far worse failure than ignoring the override.
+ *
+ * Both the fallback and the below-`%`-threshold no-op are logged. This knob
+ * exists so an operator can back the calibration out mid-incident; a typo
+ * that silently leaves the shipped default in place would read to them as
+ * "the floor wasn't the cause," which is the worst possible wrong conclusion
+ * to hand someone at that moment.
  */
 function parseMinSimilarity(raw: string | undefined): number {
   if (raw === undefined) return DEFAULT_ALIAS_MIN_SIMILARITY;
-  const parsed = Number(raw.trim());
-  // `Number('')` is 0, which is a legal-looking but meaningless floor, so the
-  // empty-string case is caught by the blank guard rather than the range one.
-  if (raw.trim() === '' || !Number.isFinite(parsed)) return DEFAULT_ALIAS_MIN_SIMILARITY;
-  if (parsed < 0 || parsed > 1) return DEFAULT_ALIAS_MIN_SIMILARITY;
+  const trimmed = raw.trim();
+  const parsed = Number(trimmed);
+  if (trimmed === '' || !Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    console.warn(
+      `[catalogSearchAlias] CATALOG_SEARCH_ALIAS_MIN_SIMILARITY=${JSON.stringify(raw)} is not a number in [0, 1]; ` +
+        `falling back to ${DEFAULT_ALIAS_MIN_SIMILARITY}. The floor is a similarity ratio, not a percentage — ` +
+        `use 0.4, not 40.`
+    );
+    return DEFAULT_ALIAS_MIN_SIMILARITY;
+  }
+  if (parsed < PG_TRGM_DEFAULT_THRESHOLD) {
+    console.warn(
+      `[catalogSearchAlias] CATALOG_SEARCH_ALIAS_MIN_SIMILARITY=${parsed} is below pg_trgm's own ` +
+        `similarity_threshold (${PG_TRGM_DEFAULT_THRESHOLD}) and therefore has no effect: the indexable \`%\` ` +
+        `predicate still rejects everything under ${PG_TRGM_DEFAULT_THRESHOLD}. This knob can only tighten alias ` +
+        `matching, never loosen it.`
+    );
+  }
   return parsed;
 }
 

@@ -169,7 +169,8 @@ export async function searchLibrary(
   // scoped against. Preserves pre-#1318 behavior for those paths; opening
   // alias expansion to field-specific queries is a future product call.
   const hasAllFieldCondition = conditions.some((c) => c.field === 'all');
-  const aliasActive = getCatalogSearchAliasConfig().enabled && params.q.trim().length > 0 && hasAllFieldCondition;
+  const aliasConfig = getCatalogSearchAliasConfig();
+  const aliasActive = aliasConfig.enabled && params.q.trim().length > 0 && hasAllFieldCondition;
   const filterWhere = buildFilterClause(params);
 
   const orderDirection = params.order === 'asc' ? sql`ASC` : sql`DESC`;
@@ -221,7 +222,7 @@ export async function searchLibrary(
     // BS#2018 Fix 2 (the `similarity(...) >= floor` post-filter) lives inside
     // the shared builder in `utils/alias-hits.ts`, so this path and the two in
     // `library.service.ts` can't drift on what counts as an alias match.
-    const cte = buildAliasHitsCte(params.q);
+    const cte = buildAliasHitsCte(params.q, aliasConfig.minSimilarity);
 
     const branchAProjection = sql`
       ${library_artist_view.id} AS id,
@@ -412,10 +413,16 @@ export async function searchLibrary(
     return dup?.matched_via_alias ? { ...r, matched_via_alias: dup.matched_via_alias } : r;
   });
   const cascadeIds = new Set(cascadeResults.map((r) => r.id));
-  const merged = sortAlbumRows([...enrichedCascade, ...results.filter((r) => !cascadeIds.has(r.id))], params).slice(
-    0,
-    params.limit
-  );
+  // BS#2018 Fix 1, merge half. We reach here only when `totalNonAlias === 0`,
+  // so every row in `results` matched via alias and nothing else — which makes
+  // "not in `cascadeIds`" an exact statement of alias-only over this row set,
+  // with no dependence on which optional hint fields a cascade row happens to
+  // carry.
+  const merged = sortAlbumRows(
+    [...enrichedCascade, ...results.filter((r) => !cascadeIds.has(r.id))],
+    params,
+    (row) => !cascadeIds.has(row.id)
+  ).slice(0, params.limit);
   const added = cascadeResults.filter((r) => !aliasById.has(r.id)).length;
   // Known imprecision, acceptable: this merge only runs on page 0 (the
   // `page !== 0` guard above returns first), so both a count skew and a
@@ -466,33 +473,27 @@ async function runCascade(params: LibraryQueryParams, q: string): Promise<AlbumS
 }
 
 /**
- * In-memory mirror of the SQL `ORDER BY`'s alias tier (BS#2018 Fix 1).
- *
- * A row is alias-only when the ALIAS branch is the ONLY reason it is here:
- * it carries an alias hint and nothing matched it for real. The `matched_via`
- * check is load-bearing — the BS#1885 merge copies `matched_via_alias` onto a
- * cascade row when the two collide on `id`, and that row matched for real, so
- * demoting it would bury the cascade's own answer.
- *
- * Keep this predicate equivalent to the SQL tier `alias_max_sim IS NOT NULL`:
- * SQL rows never carry `matched_via` (only the cascade sets it), and branch
- * (b)'s dedupe guarantees an `alias_max_sim`-bearing row didn't match branch
- * (a). The two agree row-for-row.
- */
-function isAliasOnlyMatch(row: AlbumSearchResultRow): boolean {
-  return row.matched_via_alias !== undefined && row.matched_via === undefined;
-}
-
-/**
  * Sort album rows by the caller's `sort`/`order`, with the same alias tier,
  * secondary tiebreak, and id tiebreak the catalog's primary SQL query uses.
  * Shared by the cascade (whose rows never touch SQL `ORDER BY`) and the
  * alias/cascade merge (BS#1885), which re-sorts a combined row set after
  * `runCascade` and the primary alias rows are spliced together.
+ *
+ * `isAliasOnly` is the in-memory mirror of the SQL tier `alias_max_sim IS NOT
+ * NULL` (BS#2018 Fix 1), and callers pass it explicitly rather than letting
+ * this function infer it from the row's fields. Inference was tried and is
+ * wrong: `matched_via` is set on a Track-2 cascade row only when LML returned
+ * a non-empty hint list, so a real cascade answer can arrive bare, and if it
+ * also collides on `id` with an alias row the BS#1885 merge copies
+ * `matched_via_alias` onto it — making it indistinguishable from noise by
+ * shape alone. Both call sites know exactly which rows came from where, so
+ * they say so. Defaults to "nothing is alias-only", which is correct for the
+ * pure-cascade path.
  */
 function sortAlbumRows(
   rows: AlbumSearchResultRow[],
-  params: Pick<LibraryQueryParams, 'sort' | 'order'>
+  params: Pick<LibraryQueryParams, 'sort' | 'order'>,
+  isAliasOnly: (row: AlbumSearchResultRow) => boolean = () => false
 ): AlbumSearchResultRow[] {
   const direction = params.order === 'asc' ? 1 : -1;
   const primaryKey = SORT_KEYS[params.sort];
@@ -502,7 +503,7 @@ function sortAlbumRows(
     // Tier first, and independent of `order` — `desc` reverses the ranking
     // within each tier, never the tiers themselves. Fuzzy alias noise stays
     // below real matches in both directions.
-    const tier = Number(isAliasOnlyMatch(a)) - Number(isAliasOnlyMatch(b));
+    const tier = Number(isAliasOnly(a)) - Number(isAliasOnly(b));
     if (tier !== 0) return tier;
     const primary = compareSortable(a[primaryKey], b[primaryKey]) * direction;
     if (primary !== 0) return primary;

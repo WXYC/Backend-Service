@@ -1,6 +1,5 @@
 import { sql } from 'drizzle-orm';
 import { artist_search_alias } from '@wxyc/database';
-import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 
 /**
  * Build the `alias_hits` CTE used by the UNION ALL alias-aware search paths
@@ -32,11 +31,21 @@ import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearc
  * stops the floor and the match semantics from drifting between them — which
  * is exactly the class of bug BS#2018 was.
  *
+ * Note this reads only `variant`. The substrate also carries `active` and
+ * `confidence` per row, and neither has ever gated catalog search — BS#1383
+ * pins that `discogs_member` rows must surface here even though the concerts
+ * resolver filters them. Narrowing on those columns is a product call about
+ * which alias sources the catalog trusts, not a calibration, so it is out of
+ * scope for the BS#2018 floor and left as-is deliberately.
+ *
  * @param query Raw user query text, matched against `variant` as a single
  *   string (never tokenized).
+ * @param minSimilarity The BS#2018 floor. Passed in rather than read from
+ *   config here so this stays pure, and so `searchLibrary`'s documented
+ *   read-the-config-once-per-request invariant is not quietly broken by a
+ *   helper in another file.
  */
-export function buildAliasHitsCte(query: string) {
-  const { minSimilarity } = getCatalogSearchAliasConfig();
+export function buildAliasHitsCte(query: string, minSimilarity: number) {
   return sql`WITH alias_hits AS (
     SELECT
       asa.artist_id,

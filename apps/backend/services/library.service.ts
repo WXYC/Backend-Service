@@ -1485,7 +1485,7 @@ async function searchLibraryByTrigramBoth(
   n: number,
   on_streaming?: boolean
 ): Promise<TaggedLibraryViewEntry[]> {
-  const aliasEnabled = getCatalogSearchAliasConfig().enabled;
+  const { enabled: aliasEnabled, minSimilarity: aliasMinSimilarity } = getCatalogSearchAliasConfig();
 
   if (!aliasEnabled) {
     // Byte-identical legacy path. The alias-off branch must stay on the
@@ -1520,7 +1520,7 @@ async function searchLibraryByTrigramBoth(
   const streamingClause = on_streaming !== undefined ? sql`AND ${library.on_streaming} = ${on_streaming}` : sql``;
   const trigramPredicate = sql`(${library.artist_name} % ${query} OR ${library.album_title} % ${query})`;
   const rows = (await db.execute(sql`
-    ${buildAliasHitsCte(query)}
+    ${buildAliasHitsCte(query, aliasMinSimilarity)}
     SELECT * FROM (
       (
         SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}
@@ -2704,7 +2704,7 @@ export async function searchLibraryByTrack(query: string, limit: number): Promis
 export async function searchByArtist(artistName: string, limit = 5): Promise<EnrichedLibraryResult[]> {
   await checkLibraryArtistNameHealth();
 
-  const aliasEnabled = getCatalogSearchAliasConfig().enabled;
+  const { enabled: aliasEnabled, minSimilarity: aliasMinSimilarity } = getCatalogSearchAliasConfig();
 
   if (!aliasEnabled) {
     const rows = (await libraryViewQuery(false)
@@ -2725,7 +2725,7 @@ export async function searchByArtist(artistName: string, limit = 5): Promise<Enr
   // expression ORDER BY directly on a UNION result.
   const trigramPredicate = sql`${library.artist_name} % ${artistName}`;
   const rows = (await db.execute(sql`
-    ${buildAliasHitsCte(artistName)}
+    ${buildAliasHitsCte(artistName, aliasMinSimilarity)}
     SELECT * FROM (
       (
         SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}

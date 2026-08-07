@@ -844,8 +844,14 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         resetCatalogSearchAliasConfig();
       });
 
+      const originalFloor = process.env.CATALOG_SEARCH_ALIAS_MIN_SIMILARITY;
       afterAll(() => {
-        delete process.env.CATALOG_SEARCH_ALIAS_MIN_SIMILARITY;
+        // Restore rather than delete, matching the outer describe's handling of
+        // CATALOG_SEARCH_ALIAS_ENABLED: a developer with the floor exported in
+        // their shell should get their environment back, not a silently unset
+        // var for the rest of the Jest worker.
+        if (originalFloor === undefined) delete process.env.CATALOG_SEARCH_ALIAS_MIN_SIMILARITY;
+        else process.env.CATALOG_SEARCH_ALIAS_MIN_SIMILARITY = originalFloor;
         resetCatalogSearchAliasConfig();
       });
 

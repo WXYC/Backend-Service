@@ -288,6 +288,19 @@ Feature flags for the fallback cascade in `searchLibrary` (`apps/backend/service
 
 Strict-`true` gating: only the literal string `'true'` enables a layer. Any other value (including `1`, `TRUE`, missing) reads as `false`.
 
+### Alias-aware catalog search
+
+Widens the three trigram read paths (`/library/query`, Both-mode trigram, request-line `searchByArtist`) with a CTE over `artist_search_alias`, so a query for a Discogs name variation, alias, or group member finds the canonical artist. Loaded by `apps/backend/config/catalogSearchAlias.ts`; the shared CTE builder is `apps/backend/utils/alias-hits.ts`. Plan: `Backend-Service/plans/artist-search-alias.md` §PR 5.
+
+- `CATALOG_SEARCH_ALIAS_ENABLED` (default `false`) — the gate. Strict-`true`, same as the cascade flags above. **ON in production** and in `dev_env/docker-compose.yml`.
+- `CATALOG_SEARCH_ALIAS_MIN_SIMILARITY` (default `0.4`) — minimum `similarity(variant, q)` for an alias row to count as a match (BS#2018).
+
+The floor is applied as a filter **on top of** pg_trgm's `%` operator, which stays because it is what the GIN index answers. Consequence: this knob can only tighten alias matching, never loosen it — a value at or below pg_trgm's own `similarity_threshold` (0.30) is accepted but has no effect, and logs a warning saying so.
+
+It exists as an env var so the calibration can be backed out mid-incident without a deploy. Anything that is not a number in `[0, 1]` falls back to `0.4` and warns — including `40`, which reads like a percentage but is not one.
+
+Why 0.4: pg_trgm's 0.30 is far too permissive for short variants. The misprint `Monore` (one of Bill Monroe's 42 Discogs name variations) scores 0.333 against `monolake`, and because the alias branch joins on `artist_id`, that one row put all 14 Bill Monroe albums into a Monolake search. 0.4 was measured to exclude every known collision while keeping every known real match — the tightest of which (`oh sees` → `Osees`) sits at _exactly_ 0.400, so do not round it up. The full measurement table is pinned in `tests/unit/config/catalog-search-alias-config.test.ts`, which fails if the default moves out from between the two groups.
+
 ## Slack
 
 - `SLACK_WXYC_REQUESTS_APP_ID`, `SLACK_WXYC_REQUESTS_CLIENT_ID`
