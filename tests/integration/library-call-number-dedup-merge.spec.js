@@ -409,10 +409,28 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
           if (!idx.cols.includes(target.column)) continue;
           const declared = target.uniqueKey ?? [];
           const covers = idx.cols.every((c) => declared.includes(c));
-          const partialHandled = !idx.is_partial || Boolean(target.uniqueWhenNull);
+
+          // A partial index is handled either by `uniqueWhenNull` — the scope is
+          // applied to the collision-delete — or, when its predicate column is
+          // itself part of the declared key, by the NULL-safe comparison the
+          // repoint already uses. `compilation_track_artist` is the second case:
+          // its `WHERE track_title IS NULL` index is subsumed by the 3-column
+          // key, because `IS NOT DISTINCT FROM` makes NULL match NULL.
+          //
+          // Deliberately NOT "partial indexes are fine" — that would stop this
+          // catching `rotation`, which is the omission it exists for.
+          // Identifiers out of the predicate rather than a shape match on it:
+          // `pg_get_expr` renders parens, spacing, and qualification in ways
+          // that vary, and a guard that silently stops matching is worse than
+          // one that is slightly loose. Keywords in the extract are harmless —
+          // `IS`/`NULL` appear in neither the declared key nor uniqueWhenNull.
+          const predIdentifiers = (idx.pred ?? '').match(/[a-z_][a-z0-9_]*/gi) ?? [];
+          const partialHandled =
+            !idx.is_partial || predIdentifiers.some((c) => c === target.uniqueWhenNull || declared.includes(c));
+
           if (!covers || !partialHandled) {
             undeclared.push(
-              `${target.table}.${target.column} vs [${idx.cols.join(',')}]${idx.is_partial ? ' (partial)' : ''}`
+              `${target.table}.${target.column} vs [${idx.cols.join(',')}]${idx.is_partial ? ` (partial: ${idx.pred})` : ''}`
             );
           }
         }
