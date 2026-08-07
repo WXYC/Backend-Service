@@ -32,10 +32,27 @@
  *     rather than colliding if a librarian took it since the plan was built.
  *   - `ANALYZE` on the rewritten tables after an `--execute` run (BS#934).
  *
- * SEQUENCING: run this AFTER the tubafrenzy ETL stops. `jobs/library-etl`
- * upserts on `legacy_release_id` and carries `code_number` in its refresh set,
- * so while that ETL is live it will overwrite a renumber and reinstate a
- * deleted row from the upstream MySQL catalog on its next pass.
+ * SEQUENCING: run this AFTER the tubafrenzy ETL stops (turndown Phase 5,
+ * BS#1543). `jobs/library-etl` upserts on `legacy_release_id` and carries
+ * `code_number` + `code_volume_letters` in its refresh set, so while that ETL
+ * is live it will overwrite a renumber and reinstate a deleted row from the
+ * upstream MySQL catalog.
+ *
+ * The revert is triggered by an UPSTREAM EDIT, not by the clock — and pausing
+ * the ETL is therefore not a workaround. `library-etl` is incremental
+ * (`WHERE lr.TIME_LAST_MODIFIED > <last run>`), so it fetches only releases
+ * whose MySQL timestamp advanced. This job writes Postgres only, so a deduped
+ * release is absent from the next fetch and the next pass does NOT revert it.
+ * What reverts it is a librarian editing that release in tubafrenzy, at any
+ * point afterward. A pause window covers a ~20s run that was never at risk.
+ *
+ * The uniqueness constraint this job exists to enable has its own hard gate on
+ * the same event, for a different reason (BS#2033): upstream MySQL enforces no
+ * uniqueness and hosts the unlocked MAX+1 allocator, so it can mint a new
+ * duplicate at any time. That INSERT would violate the constraint, and
+ * ON CONFLICT (legacy_release_id) does not absorb a violation of a different
+ * index — the release loop is one transaction, so it aborts the WHOLE ETL run
+ * (same failure library-etl documents for library_legacy_release_id_idx, #752).
  *
  * Run procedure: Manual Build & Deploy with `target=library-call-number-dedup`,
  * then SSH to EC2 and:
