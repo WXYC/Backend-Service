@@ -50,7 +50,7 @@ import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrack
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
-import { buildAliasHitsCte, buildFuzzyAliasTier } from '../utils/alias-hits.js';
+import { buildAliasHitsCte, buildFuzzyAliasTier, buildDirectMatchTieBreak } from '../utils/alias-hits.js';
 import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from './observability/cache-stats.js';
 
 // Schema-qualified reference to the `fold_artist_name(text)` SQL function
@@ -1537,8 +1537,15 @@ async function searchLibraryByTrigramBoth(
   // pair that BS#1092's drift check exists precisely because it can diverge.
   // `GREATEST` stays correct either way; a hand-collapsed form would not.
   //
-  // `id ASC` breaks ties: every row of one artist shares an identical
-  // `alias_max_sim`, so without it their order is whatever the plan emits.
+  // `buildDirectMatchTieBreak` sits AFTER the score, not before it: at equal
+  // relevance a row that matched the query text outranks one that matched a
+  // variant. The guard above removed the only signal that distinguished them
+  // once both reach 1.0, which would otherwise leave `id ASC` — catalog age —
+  // to decide between an artist and a band that lists them as a member.
+  //
+  // `id ASC` breaks the remaining ties: every row of one artist shares an
+  // identical `alias_max_sim`, so without it their order is whatever the plan
+  // emits.
   const streamingClause = on_streaming !== undefined ? sql`AND ${library.on_streaming} = ${on_streaming}` : sql``;
   const trigramPredicate = sql`(${library.artist_name} % ${query} OR ${library.album_title} % ${query})`;
   const rows = (await db.execute(sql`
@@ -1565,7 +1572,7 @@ async function searchLibraryByTrigramBoth(
       similarity(artist_name, ${query}),
       similarity(album_title, ${query}),
       COALESCE(alias_max_sim, 0)
-    ) DESC, id ASC
+    ) DESC, ${buildDirectMatchTieBreak()}, id ASC
     LIMIT ${n}
   `)) as unknown as (LibraryArtistViewEntry & AliasHitFields)[];
 
@@ -2774,7 +2781,7 @@ export async function searchByArtist(artistName: string, limit = 5): Promise<Enr
     ORDER BY ${buildFuzzyAliasTier()}, GREATEST(
       similarity(artist_name, ${artistName}),
       COALESCE(alias_max_sim, 0)
-    ) DESC, id ASC
+    ) DESC, ${buildDirectMatchTieBreak()}, id ASC
     LIMIT ${limit}
   `)) as unknown as (LibraryArtistViewEntry & AliasHitFields)[];
 

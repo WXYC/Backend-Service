@@ -306,8 +306,9 @@ describe('GET /library/query — alias-only primary no longer suppresses the cas
  *   - CONTROL ('Gerhard Behles'), a `discogs_member` variant of exactly the
  *     query string. Similarity 1.0, so it clears any floor, and its canonical
  *     name doesn't ILIKE-match, so it can ONLY arrive via branch (b). BS#2020
- *     later made it the exemption case as well: an exact variant is not the
- *     fuzzy collision the tier was aimed at, so it is no longer demoted.
+ *     exempted rows like this one from the tier on the two relevance-ranked
+ *     paths in `library.service.ts`, but NOT here — this endpoint has no
+ *     relevance term to rank an exempted row by. See `buildAliasOnlyTier`.
  *
  * The CONTROL row is what makes these assertions mean anything. `Monolake`
  * ILIKE-matches `monolake` on the plain legacy path, so keying a skip-guard on
@@ -441,14 +442,13 @@ describe('GET /library/query — fuzzy alias hits no longer flood results (BS#20
     expect(res.body.results.filter((r) => NOISE_LIBRARY_IDS.includes(r.id))).toEqual([]);
   });
 
-  test('Fix 1 (as narrowed by BS#2020): the EXACT variant is not demoted', async () => {
-    // Sort explicitly, and DESC, because the tier is only observable when it
-    // disagrees with the caller's sort. The default is album ASC, under which
-    // REAL ('Gravity') precedes CONTROL ('Layering Buddha') either way — a
-    // tiered CONTROL and an untiered one look identical. Reversing the sort
-    // separates them: the tier is hardcoded ASC and is NOT reversed by
-    // `order`, so a tiered CONTROL still trails REAL, while an untiered one
-    // leads it on album title alone.
+  test('Fix 1: an alias-only row that clears the floor still sorts after every real match', async () => {
+    // Sort explicitly, and DESC, so the tier has to disagree with the caller's
+    // sort for this to pass. Under the default (album ASC) REAL ('Gravity')
+    // precedes CONTROL ('Layering Buddha') on title alone, and the assertion
+    // would hold with no tier at all — a vacuous guard. Reversed, only the
+    // tier can produce this order, because the tier is hardcoded ASC and is
+    // NOT reversed by `order`.
     const res = await auth
       .get('/library/query')
       .query({ q: QUERY, limit: 50, sort: 'album', order: 'desc' })
@@ -458,50 +458,41 @@ describe('GET /library/query — fuzzy alias hits no longer flood results (BS#20
     const realIndex = res.body.results.findIndex((r) => r.id === REAL_LIBRARY_ID);
     const controlIndex = res.body.results.findIndex((r) => r.id === CONTROL_LIBRARY_ID);
     expect(realIndex).toBeGreaterThanOrEqual(0);
-    expect(controlIndex).toBeGreaterThanOrEqual(0);
+    expect(controlIndex).toBeGreaterThan(realIndex);
 
-    // This assertion is inverted from what BS#2018 originally shipped, and
-    // deliberately so. CONTROL's variant IS the query string (similarity 1.0),
-    // so demoting it was never what Fix 1 was aimed at — the complaint was a
-    // 0.333 typo collision ranking like an exact hit, and the unconditional
-    // tier swept up the exact hit as collateral. BS#2020 found that collateral
-    // fatal on the two `library.service.ts` paths, which emit a bare LIMIT: a
-    // demoted row there is deleted, not paginated. The tier is shared, so it
-    // is narrowed here too.
-    expect(controlIndex).toBeLessThan(realIndex);
-
-    // The demotion half of Fix 1 is NOT tested by this fixture, because this
-    // fixture has no fuzzy-but-above-floor alias row: NOISE sits at 0.333,
-    // deliberately under the floor, so it contributes nothing to order. The
-    // BS#2020 suite below carries a 0.6429 variant and asserts the demotion
-    // against this same endpoint.
+    // BS#2020 narrowed the equivalent tier on the two relevance-ranked paths
+    // in `library.service.ts` so an exact variant like CONTROL is NOT demoted
+    // there. It did not narrow this one — see `buildAliasOnlyTier` — so the
+    // assertion above still reads as it did when Fix 1 shipped. The two paths
+    // now deliberately disagree about CONTROL, which is why they use
+    // separately-named builders rather than one shared expression.
   });
 });
 
 /**
  * BS#2020 fixture — alias-only rows displacing REAL trigram matches on the
- * two `library.service.ts` alias paths (`GET /library/` Both-mode and
- * `GET /library/search`), plus the exact-variant exemption that the same
- * ticket's first cut got wrong.
+ * two relevance-ranked `library.service.ts` alias paths (`GET /library/`
+ * Both-mode and `GET /library/search`), plus the exact-variant exemption that
+ * the same ticket's first cut got wrong in the other direction.
  *
- * Four artists, all reachable on one query (`deerhoof`):
+ * Four artists, all reachable on one query (`skarnvold`):
  *
- *   - NOISE ('Wolf Eyes'), 4 albums, alias variant 'Deerhoof Live'.
- *     Similarity 0.6429 — an utterly ordinary name variation, comfortably
+ *   - NOISE ('Havnrot'), 4 albums, alias variant 'Skarnvold Live'.
+ *     Similarity 0.6667 — an utterly ordinary name variation, comfortably
  *     ABOVE BS#2018's 0.40 floor, which is why that floor cannot reach this
  *     defect. Neither its canonical name nor any album title trigram-matches,
  *     so all 4 rows arrive only via branch (b), which INNER JOINs on
  *     `artist_id` and admits the whole discography at that one score.
- *   - REAL ('Deerhunter'), 1 album, matches on branch (a) at 0.3333 — a
+ *   - REAL ('Skarnholt'), 1 album, matches on branch (a) at 0.3333 — a
  *     genuine match that scores BELOW the alias hit. That gap is the defect.
- *   - CONTROL ('Black Dice'), 1 album, alias variant EXACTLY the query.
- *     Similarity 1.0, canonical name unmatched (0.053), so it too can only
- *     arrive via branch (b) — but the query string IS a registered name for
- *     this artist, so it is a better answer than REAL, not a worse one.
+ *   - CONTROL ('Tidal Ossuary'), 1 album, alias variant EXACTLY the query.
+ *     Similarity 1.0, canonical name unmatched, so it too can only arrive via
+ *     branch (b) — but the query string IS a registered name for this artist,
+ *     so it is a better answer than REAL, not a worse one.
  *
  * The two failure modes are opposites and this fixture holds both at once:
  *
- *   - No tier at all → NOISE (0.6429) outranks REAL (0.3333) wholesale.
+ *   - No tier at all → NOISE (0.6667) outranks REAL (0.3333) wholesale.
  *   - An unconditional tier → CONTROL (1.0) is demoted with NOISE, and since
  *     neither of these paths emits an OFFSET, demoted means deleted.
  *
@@ -510,12 +501,25 @@ describe('GET /library/query — fuzzy alias hits no longer flood results (BS#20
  * misordered row falls off the page entirely rather than merely sorting late
  * — the reported symptom rather than a proxy for it.
  *
- * The query is deliberately disjoint from BS#2018's (`monolake`). That suite
- * seeds an artist whose canonical name IS its query, which tsvector-matches
- * and short-circuits Both-mode before the trigram tier ever runs; sharing the
- * string left this suite's outcome depending on describe execution order.
+ * ## Why the strings are invented
  *
- * `searchByArtist` carries the same fix but has no HTTP route, so its
+ * Every name here is synthetic, which departs from the repo convention of
+ * using WXYC-representative artists in fixtures. It has to: this suite needs
+ * a query that matches NOTHING in the catalog except its own seeds, and the
+ * convention's whole point is that its names are real WXYC artists — exactly
+ * the ones a real catalog contains.
+ *
+ * That is not hypothetical. `dev_env/seed-clone.sql` is a ~14 MB snapshot of
+ * prod's artists/library, loaded whenever `LOAD_CLONE_FIXTURE=true` (the dev
+ * profile; CI skips it), and BS#1728 exists specifically so `test:integration`
+ * can run against it. A query colliding with a clone row is not merely noisy
+ * here — `library.search_doc` covers artist_name and album_title, so one
+ * colliding row makes the tsvector tier non-empty and `searchLibraryBothMode`
+ * short-circuits before the trigram tier this suite is entirely about. Every
+ * string below is verified absent from that clone. (`monolake`, used by the
+ * BS#2018 suite above, is not — 7 occurrences. Pre-existing, not fixed here.)
+ *
+ * `searchByArtist` carries the same ordering but has no HTTP route, so its
  * coverage is the unit suite (`tests/unit/services/library-search-alias.test.ts`).
  */
 const BS2020 = {
@@ -525,14 +529,14 @@ const BS2020 = {
   REAL_LIBRARY_ID: 9305,
   CONTROL_ARTIST_ID: 9306,
   CONTROL_LIBRARY_ID: 9306,
-  // similarity('Deerhoof Live', 'deerhoof') = 0.6429 — over the 0.40 floor.
-  ALIAS_VARIANT: 'Deerhoof Live',
-  // similarity('Deerhunter', 'deerhoof') = 0.3333 — over pg_trgm's 0.30, so
+  // similarity('Skarnvold Live', 'skarnvold') = 0.6667 — over the 0.40 floor.
+  ALIAS_VARIANT: 'Skarnvold Live',
+  // similarity('Skarnholt', 'skarnvold') = 0.3333 — over pg_trgm's 0.30, so
   // it is a real branch-(a) match, but under the alias hit's score.
-  REAL_ARTIST_NAME: 'Deerhunter',
-  NOISE_ARTIST_NAME: 'Wolf Eyes',
-  CONTROL_ARTIST_NAME: 'Black Dice',
-  QUERY: 'deerhoof',
+  REAL_ARTIST_NAME: 'Skarnholt',
+  NOISE_ARTIST_NAME: 'Havnrot',
+  CONTROL_ARTIST_NAME: 'Tidal Ossuary',
+  QUERY: 'skarnvold',
 };
 
 describe('alias-only rows no longer displace real trigram matches (BS#2020)', () => {
@@ -561,9 +565,11 @@ describe('alias-only rows no longer displace real trigram matches (BS#2020)', ()
     throw new Error(
       `[BS#2020] Expected all ${aliasOnlyIds.length} alias-only rows (library ids ${aliasOnlyIds.join(', ')}) on an ` +
         `n=50 page, got ${seen.length}. These rows are unreachable without the alias branch, so the ordering ` +
-        'assertions in this suite would not be exercising anything. Almost certainly the backend is running ' +
+        'assertions in this suite would not be exercising anything. Two likely causes: (1) the backend is running ' +
         'without CATALOG_SEARCH_ALIAS_ENABLED=true — set it on the backend service in ' +
-        'dev_env/docker-compose.yml, or in .env for local `npm run dev`.'
+        'dev_env/docker-compose.yml, or in .env for local `npm run dev`; (2) the database contains a row matching ' +
+        `"${QUERY}" on artist_name or album_title, which makes the tsvector tier non-empty and short-circuits ` +
+        'Both-mode before the trigram tier ever runs.'
     );
   }
 
@@ -574,9 +580,9 @@ describe('alias-only rows no longer displace real trigram matches (BS#2020)', ()
 
     await sql.unsafe(
       `INSERT INTO ${wxycSchema}.artists (id, artist_name, alphabetical_name, code_letters)
-       VALUES ($1, $4, $4, 'WO'),
-              ($2, $5, $5, 'DE'),
-              ($3, $6, $6, 'BL')
+       VALUES ($1, $4, $4, 'HA'),
+              ($2, $5, $5, 'SK'),
+              ($3, $6, $6, 'TI')
        ON CONFLICT (id) DO NOTHING`,
       [NOISE_ARTIST_ID, REAL_ARTIST_ID, CONTROL_ARTIST_ID, NOISE_ARTIST_NAME, REAL_ARTIST_NAME, CONTROL_ARTIST_NAME]
     );
@@ -589,11 +595,16 @@ describe('alias-only rows no longer displace real trigram matches (BS#2020)', ()
     // No album title may trigram-match the query, or the row would arrive on
     // branch (a) and stop being an alias-only row. Pinned by the first test.
     //
+    // Titles are also chosen so REAL's ('Marrowfield') sorts LAST among the
+    // six alphabetically. `/library/query` defaults to album ASC, so under a
+    // missing tier REAL would land at position 5; the tier is what puts it
+    // first, and the test below would pass for the wrong reason otherwise.
+    //
     // REAL's label is the one deliberate oddity. The three alias paths do not
     // agree on what a branch-(a) match IS: `library.service.ts` uses trigram
     // over artist_name/album_title, while `/library/query` uses ILIKE-contains
     // over artist_name/album_title/**label**. So REAL is a real match on the
-    // first two via 'Deerhunter', and needs the label to be one on the third.
+    // first two via 'Skarnholt', and needs the label to be one on the third.
     // Label is the only column that can do this without side effects: it is
     // absent from `library.search_doc` (see `buildAllFieldMatch`'s note), so
     // it cannot make Both-mode short-circuit on the tsvector tier before the
@@ -603,17 +614,17 @@ describe('alias-only rows no longer displace real trigram matches (BS#2020)', ()
     // Without it, `/library/query` sees a result set that is 100% alias-only,
     // which triggers the BS#1885 cascade and hands final ordering to
     // `sortAlbumRows`'s in-memory tier — a different predicate (cascade-vs-
-    // alias, not fuzzy-vs-exact) that would mask the SQL tier entirely.
+    // alias) that would mask the SQL tier entirely.
     await sql.unsafe(
       `INSERT INTO ${wxycSchema}.library
          (id, artist_id, genre_id, format_id, album_title, code_number, artist_name, label, label_id, legacy_release_id)
        VALUES
-         ($1, $5, $9, $10, 'Burned Mind', 1, $12, 'Sub Pop', NULL, 65930),
-         ($2, $5, $9, $10, 'Human Animal', 2, $12, 'Sub Pop', NULL, 65931),
-         ($3, $5, $9, $10, 'Dread', 3, $12, 'Bulb', NULL, 65932),
-         ($4, $5, $9, $10, 'No Answer Lower Floors', 4, $12, 'De Stijl', NULL, 65933),
-         ($6, $7, $9, $10, 'Microcastle', 1, $11, 'Deerhoof Recordings', NULL, 65934),
-         ($8, $13, $9, $10, 'Beaches and Canyons', 1, $14, 'DFA', NULL, 65935)
+         ($1, $5, $9, $10, 'Blackthorn Ledger', 1, $12, 'Ferrous Tapes', NULL, 65930),
+         ($2, $5, $9, $10, 'Cinder Verses', 2, $12, 'Ferrous Tapes', NULL, 65931),
+         ($3, $5, $9, $10, 'Drownings', 3, $12, 'Ferrous Tapes', NULL, 65932),
+         ($4, $5, $9, $10, 'Erlking', 4, $12, 'Ferrous Tapes', NULL, 65933),
+         ($6, $7, $9, $10, 'Marrowfield', 1, $11, 'Skarnvold Recordings', NULL, 65934),
+         ($8, $13, $9, $10, 'Ambergris', 1, $14, 'Pale Harvest', NULL, 65935)
        ON CONFLICT (id) DO NOTHING`,
       [
         NOISE_LIBRARY_IDS[0],
@@ -671,7 +682,7 @@ describe('alias-only rows no longer displace real trigram matches (BS#2020)', ()
     // is what makes `assertAliasBranchLive` a valid liveness check.
     expect(row.noise_matches_directly).toBe(false);
     expect(row.control_matches_directly).toBe(false);
-    // And the CONTROL variant is exact — a `< 1` guard is a guard on this
+    // And the CONTROL variant is exact — the `< 1` guard is a guard on this
     // number, so pin it rather than inferring it from the variant string.
     const [exact] = await sql.unsafe(`SELECT similarity($1::text, $2::text) AS sim`, [QUERY, QUERY]);
     expect(Number(exact.sim)).toBe(1);
@@ -695,8 +706,12 @@ describe('alias-only rows no longer displace real trigram matches (BS#2020)', ()
   });
 
   test('GET /library/search: the fuzzy fan-out no longer pushes real matches off the page', async () => {
-    // limit 4 = exactly the fuzzy fan-out size. Pre-tier the page is all Wolf
-    // Eyes and both better answers are simply gone — the reported symptom.
+    // limit 4 = exactly the fuzzy fan-out size, so the page cannot hold both
+    // better answers AND the noise. The assertion discriminates against both
+    // wrong orderings:
+    //   - no tier (rank on GREATEST alone) -> [CONTROL, 3x Havnrot]; REAL gone
+    //   - unconditional tier               -> [REAL, CONTROL, 2x Havnrot]
+    //   - as shipped                       -> [CONTROL, REAL, 2x Havnrot]
     const res = await auth.get('/library/search').query({ query: QUERY, limit: 4 }).expect(200);
 
     const ids = res.body.results.map((r) => r.id);
@@ -706,28 +721,29 @@ describe('alias-only rows no longer displace real trigram matches (BS#2020)', ()
   test('GET /library/search: an exact variant survives even a single-row page', async () => {
     // The inverse regression, at its sharpest. This path emits a bare LIMIT
     // with no OFFSET, so an unconditionally-tiered exact hit is not demoted
-    // to page 2 — there is no page 2, and it is simply absent.
+    // to page 2 — there is no page 2, and it is simply absent. (This one does
+    // not discriminate against the no-tier state, which also puts CONTROL
+    // first on score; the test above is what covers that.)
     const res = await auth.get('/library/search').query({ query: QUERY, limit: 1 }).expect(200);
 
     expect(res.body.results.map((r) => r.id)).toEqual([CONTROL_LIBRARY_ID]);
   });
 
-  test('GET /library/query: the same tier, on the paginated catalog surface', async () => {
-    // The third alias-aware path, and the reason the tier is built by one
-    // shared helper: the same query must not rank differently on two
-    // endpoints that answer the same question.
+  test('GET /library/query: the tier there is unconditional, and stays that way', async () => {
+    // The third alias-aware path, and the one BS#2020 deliberately did NOT
+    // narrow. It orders by the caller's sort column, so an exempted row would
+    // not be "ranked on its merits" — it would just be alphabetized among the
+    // real matches. Default sort is album ASC and REAL's 'Marrowfield' sorts
+    // LAST of the six, so only the tier can put it first.
     //
-    // The default sort here is album title ASC ('Beaches and Canyons' <
-    // 'Burned Mind' < 'Dread' < 'Human Animal' < 'Microcastle' < 'No Answer
-    // Lower Floors'), so post-fix CONTROL leads on the caller's sort as well
-    // as the tier and the assertion can look tautological. It isn't: pre-fix
-    // the tier overrode that sort entirely and put 'Microcastle' — the only
-    // tier-0 row — first, which is what this caught before the guard existed.
+    // This is the assertion BS#2018's own suite cannot make: its noise variant
+    // sits at 0.333, under the floor, so it contributes no rows at all. This
+    // fixture's 0.6667 variant is what actually exercises the demotion.
     const res = await auth.get('/library/query').query({ q: QUERY, limit: 50 }).expect(200);
 
     const ids = res.body.results.map((r) => r.id);
-    expect(ids.indexOf(CONTROL_LIBRARY_ID)).toBeGreaterThanOrEqual(0);
-    expect(ids.indexOf(CONTROL_LIBRARY_ID)).toBeLessThan(ids.indexOf(REAL_LIBRARY_ID));
+    expect(ids.indexOf(REAL_LIBRARY_ID)).toBe(0);
+    expect(ids.indexOf(REAL_LIBRARY_ID)).toBeLessThan(ids.indexOf(CONTROL_LIBRARY_ID));
     expect(ids.indexOf(REAL_LIBRARY_ID)).toBeLessThan(ids.indexOf(NOISE_LIBRARY_IDS[0]));
   });
 
