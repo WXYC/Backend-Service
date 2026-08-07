@@ -59,42 +59,99 @@ export function buildAliasHitsCte(query: string, minSimilarity: number) {
 }
 
 /**
- * Leading ORDER BY term for every alias-aware read path: sort rows that
- * matched ONLY through a *fuzzy* alias variant after everything else.
+ * Leading ORDER BY term for alias-aware paths that sort by a caller-chosen
+ * column: sort every alias-only row after every row that matched the query
+ * text itself (BS#2018 Fix 1).
  *
- * `FALSE < TRUE` in Postgres, so ASC puts the non-demoted rows first. Branch
- * (a) rows have a NULL `alias_max_sim`, and `FALSE AND NULL` short-circuits to
- * FALSE, so they land in the leading tier without a COALESCE.
+ * `FALSE < TRUE` in Postgres, so ASC puts the non-alias rows first. Branch (a)
+ * rows have a NULL `alias_max_sim`, so the predicate is FALSE for them.
  *
- * ## Why the `< 1` guard
+ * Used by `/library/query` only. See `buildFuzzyAliasTier` for the narrowed
+ * form the two relevance-ranked paths use, and why the two deliberately differ
+ * rather than being unified.
+ */
+export function buildAliasOnlyTier() {
+  return sql`(alias_max_sim IS NOT NULL) ASC`;
+}
+
+/**
+ * Leading ORDER BY term for alias-aware paths that sort by RELEVANCE: demote
+ * rows that matched only through a *fuzzy* alias variant, and leave exact ones
+ * where their score puts them.
  *
- * BS#2018 introduced this tier unconditionally, against a 0.333 typo collision
+ * Same shape as `buildAliasOnlyTier` plus a `< 1` guard, and `FALSE AND NULL`
+ * short-circuits to FALSE so branch (a) still needs no COALESCE.
+ *
+ * ## Why the guard
+ *
+ * BS#2018 introduced the tier unconditionally, against a 0.333 typo collision
  * ("Monore" for a `monolake` query) that sorted identically to an exact hit.
  * The complaint was always about *fuzzy* variants; demoting exact ones was
- * collateral. `similarity()` returns exactly 1 only when the query string and
- * the variant are the same string modulo case and trigram padding — i.e. the
- * query IS a registered name for that artist. That is a stronger claim than a
- * 0.31 trigram smear across some unrelated canonical name, so tiering it below
- * one inverts the ranking the alias substrate exists to provide.
+ * collateral. On `/library/query` that collateral is survivable — it
+ * paginates, so a demoted row is on a later page. These two paths emit a bare
+ * `LIMIT` with no OFFSET, so demoted means *deleted*: measured on a
+ * prod-shaped clone, a `monolake` query has 13 real rows scoring <= 0.40 ahead
+ * of the tier, which pushes a 1.0 alias hit past position 13 on a surface
+ * whose default limit is 5. BS#1383's `discogs_member` fixture — an exact
+ * variant on a different artist — is exactly that case.
  *
- * On `/library/query` the collateral was survivable: it paginates, so a
- * demoted row is on a later page. The two `library.service.ts` paths emit a
- * bare `LIMIT` with no OFFSET, so for them demoted means *deleted* — measured
- * on a prod-shaped clone, a `monolake` query has 13 real rows scoring <= 0.40
- * ahead of the tier, which pushes a 1.0 alias hit past position 13 on a
- * surface whose default limit is 5. BS#1383's `discogs_member` fixture (an
- * exact variant on a different artist) is exactly that case.
+ * ## Why NOT on `/library/query`
  *
- * ## Why one shared builder
+ * An exemption is only meaningful if something ranks the exempted row
+ * afterwards. That path orders by the caller's `sort` column, so an exempt row
+ * is not "ranked on its merits", it is alphabetized among the real matches —
+ * one exact-variant artist with 30 early-alphabet albums would fill page 0.
+ * The two forms are separate builders, not one parameterized builder, so that
+ * asymmetry is visible at both call sites instead of hiding behind a boolean.
  *
- * All three alias-aware paths lead their sort with this term, and the tier
- * has to mean the same thing in all three or the same query ranks differently
- * on two endpoints that are supposed to agree. Hand-copying the literal is
- * how BS#2018 shipped with the floor applied to one path and not the others.
+ * ## What `alias_max_sim = 1` actually means
  *
- * Returns a fresh `SQL` per call rather than a module-level constant so
- * callers can never share mutable builder state.
+ * Less than it looks. pg_trgm splits on non-alphanumerics, pads each word, and
+ * unions the trigrams into a DEDUPLICATED set, so equality of trigram sets is
+ * not equality of strings: `similarity('Duke Ellington', 'Ellington Duke')`
+ * and `similarity('The The', 'the')` are both exactly 1. A query that merely
+ * permutes a registered variant, or that is one repeated word of it, is
+ * therefore treated as exact here.
+ *
+ * That is wider than the argument above, and accepted rather than overlooked.
+ * Tightening it would mean comparing normalized strings instead of scores,
+ * which is a different match semantics than the `%` operator the GIN index
+ * answers (BS#1318) and would not survive the `MAX(...)` aggregation in the
+ * CTE. The failure mode is bounded: a permuted variant is still a variant of
+ * that artist, so the row is relevant — it is only the *confidence* that is
+ * overstated, and `buildDirectMatchTieBreak` keeps it behind a genuine
+ * text match at equal score.
  */
 export function buildFuzzyAliasTier() {
   return sql`(alias_max_sim IS NOT NULL AND alias_max_sim < 1) ASC`;
+}
+
+/**
+ * Trailing ORDER BY term for the relevance-ranked paths: at EQUAL relevance,
+ * prefer the row that matched the query text over one that matched a variant.
+ *
+ * Belongs after the `GREATEST(...)` term, never before it — ahead of the score
+ * it would be a second unconditional tier and undo `buildFuzzyAliasTier`.
+ *
+ * `buildFuzzyAliasTier` removed the only signal separating a direct match from
+ * an alias match once both reach 1.0 (real: `similarity(artist_name, q) = 1`;
+ * alias: `alias_max_sim = 1`). Without this term every preceding term ties and
+ * `id ASC` decides — that is, catalog age decides. The concrete shape is a
+ * `discogs_member` variant naming a band member who also has solo records:
+ * query the member's name and the band's whole discography ties with the
+ * member's own, resolved by whichever ids are lower.
+ *
+ * On both current callers this is unreachable, and deliberately kept anyway.
+ * `searchLibraryByTrigramBoth` runs only after the tsvector tier returns zero
+ * rows, and any real row scoring 1.0 on trigram necessarily matches
+ * `websearch_to_tsquery` too (identical trigram sets imply the same word set),
+ * so the tsvector tier short-circuits before this SQL is ever reached.
+ * `searchByArtist` has no tsvector tier and no callers (BS#2022). The guard
+ * costs one ORDER BY term and holds the invariant locally, rather than
+ * borrowing it from a different subsystem's short-circuit — which is the kind
+ * of load-bearing coupling that breaks silently when the other subsystem
+ * changes.
+ */
+export function buildDirectMatchTieBreak() {
+  return sql`(alias_max_sim IS NOT NULL) ASC`;
 }

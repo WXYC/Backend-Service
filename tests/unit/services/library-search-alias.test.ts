@@ -823,15 +823,17 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
     // Fix 1 tiers the sort (alias-only rows always after non-alias rows).
     // Fix 2 raises the alias match floor to 0.40.
     //
-    // BS#2020 narrowed Fix 1's tier here to FUZZY alias-only rows. The
-    // complaint above is about a 0.333 typo collision sorting like an exact
-    // hit; demoting the exact hit too was collateral, not the goal. This path
-    // paginates, so the collateral was survivable here and fatal on the two
-    // `library.service.ts` paths — but the tier means one thing in all three
-    // places, which is why it is built by one shared helper.
+    // This tier stays UNCONDITIONAL, unlike the two relevance-ranked paths in
+    // `library.service.ts` that BS#2020 narrowed to fuzzy hits only. The
+    // narrowing buys nothing here and costs something: this endpoint orders by
+    // the caller's chosen column, so an exempted row is not "ranked on its
+    // merits", it is merely alphabetized among the real matches — one
+    // exact-variant artist with 30 early-alphabet albums would fill page 0.
+    // And the argument that justifies exempting elsewhere (no OFFSET, so
+    // demoted means deleted) does not apply to a paginated surface.
     // ---------------------------------------------------------------------
     describe('BS#2018 alias-noise floor + rank tiering', () => {
-      const FUZZY_ALIAS_TIER = '(alias_max_sim IS NOT NULL AND alias_max_sim < 1) ASC';
+      const ALIAS_ONLY_TIER = '(alias_max_sim IS NOT NULL) ASC';
 
       function runAliasQuery(
         params: { sort?: CatalogSort; order?: CatalogOrder } = {}
@@ -891,7 +893,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         // The tier key must lead the ORDER BY, and the caller's own sort must
         // still follow it intact. `FALSE < TRUE` in Postgres, so ASC puts the
         // non-alias rows first.
-        expect(data).toContain(`ORDER BY ${FUZZY_ALIAS_TIER}, artist_name ASC, album_title ASC, id ASC`);
+        expect(data).toContain(`ORDER BY ${ALIAS_ONLY_TIER}, artist_name ASC, album_title ASC, id ASC`);
       });
 
       const SORT_EXPECTATIONS: [CatalogSort, string, string][] = [
@@ -908,7 +910,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       )('Fix 1: tier leads the ORDER BY for sort=$sort order=$order', async ({ sort, order, primary, secondary }) => {
         const { data } = await runAliasQuery({ sort, order });
 
-        const expected = `ORDER BY ${FUZZY_ALIAS_TIER}, ${primary} ${order.toUpperCase()}, ${secondary} ASC, id ASC`;
+        const expected = `ORDER BY ${ALIAS_ONLY_TIER}, ${primary} ${order.toUpperCase()}, ${secondary} ASC, id ASC`;
         expect(data).toContain(expected);
       });
 
@@ -919,7 +921,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         // survives; perturbing it changes the surfaced rotation bin. The
         // tier belongs on the OUTER sort only.
         expect(data).toContain('ORDER BY id ASC, CASE rotation_bin');
-        expect(data.slice(0, data.indexOf('ORDER BY id ASC, CASE rotation_bin'))).not.toContain(FUZZY_ALIAS_TIER);
+        expect(data.slice(0, data.indexOf('ORDER BY id ASC, CASE rotation_bin'))).not.toContain(ALIAS_ONLY_TIER);
       });
 
       it('alias OFF: neither the floor nor the tier appears (legacy path unchanged)', async () => {
@@ -929,7 +931,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         const { data, count } = await runAliasQuery();
 
         expect(data).not.toContain('similarity(asa.variant');
-        expect(data).not.toContain(FUZZY_ALIAS_TIER);
+        expect(data).not.toContain(ALIAS_ONLY_TIER);
         expect(data).not.toContain('alias_max_sim');
         expect(count).not.toContain('similarity(asa.variant');
         expect(data).toContain('ORDER BY artist_name ASC, album_title ASC, id ASC');
@@ -1042,20 +1044,27 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
   //
   // Distinct from BS#2018, which fixed `/library/query` — a path whose
   // ORDER BY had no relevance term at all. Here relevance ordering already
-  // exists and must be PRESERVED inside each tier, not replaced.
+  // exists and must be PRESERVED inside each tier, not replaced. That
+  // difference is also why only these two paths narrow the tier to fuzzy
+  // hits: an exemption is only meaningful where something ranks the exempted
+  // row afterwards. See `buildFuzzyAliasTier` for the full argument.
   //
-  // The tier demotes FUZZY alias hits only. An `alias_max_sim` of 1 means the
-  // query string IS a registered name for that artist, which is at least as
-  // strong a claim as a 0.31 trigram smear on a canonical name; demoting it
-  // on these two paths would delete it, not reorder it, because neither emits
-  // an OFFSET. See `buildFuzzyAliasTier` for the full argument.
+  // The full ORDER BY is four terms, and each earns its place:
   //
-  // `id ASC` is new on both sites: neither had any tie-break, and within the
-  // alias tier every row of one artist shares an identical `alias_max_sim`,
-  // so their relative order was whatever the plan happened to emit.
+  //   1. fuzzy-alias tier   — a 0.64 variant must not outrank a 0.40 real hit
+  //   2. GREATEST(...) DESC — relevance, preserved from before the fix
+  //   3. direct-match tie   — at EQUAL relevance, prefer the row that matched
+  //                           the query text over one that matched a variant
+  //   4. id ASC             — determinism
+  //
+  // Term 3 exists because term 1's guard removed the only signal separating a
+  // direct match from an alias match once both score 1.0, which would have
+  // left `id ASC` — catalog age — to decide. See the builder for why that is
+  // currently unreachable on this path and kept anyway.
   // -----------------------------------------------------------------------
   describe('BS#2020 alias-only rows tier after real trigram matches', () => {
     const FUZZY_ALIAS_TIER = '(alias_max_sim IS NOT NULL AND alias_max_sim < 1) ASC';
+    const DIRECT_MATCH_TIE_BREAK = '(alias_max_sim IS NOT NULL) ASC';
     const flat = (text: string) => text.replace(/\s+/g, ' ');
 
     beforeEach(() => {
@@ -1102,7 +1111,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(rendered).toContain('similarity(artist_name, monolake)');
       expect(rendered).toContain('similarity(album_title, monolake)');
       expect(rendered).toContain('COALESCE(alias_max_sim, 0)');
-      expect(rendered).toContain(') DESC, id ASC');
+      expect(rendered).toContain(`) DESC, ${DIRECT_MATCH_TIE_BREAK}, id ASC`);
     });
 
     it('request-line: the tier leads the ORDER BY (single-column relevance)', async () => {
@@ -1111,7 +1120,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(rendered).toContain(`ORDER BY ${FUZZY_ALIAS_TIER}, GREATEST(`);
       expect(rendered).toContain('similarity(artist_name, monolake)');
       expect(rendered).toContain('COALESCE(alias_max_sim, 0)');
-      expect(rendered).toContain(') DESC, id ASC');
+      expect(rendered).toContain(`) DESC, ${DIRECT_MATCH_TIE_BREAK}, id ASC`);
       // No album_title predicate on this path, so none in the ranking either.
       expect(rendered).not.toContain('similarity(album_title');
     });
@@ -1134,17 +1143,18 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
     it.each([
       ['Both-mode', renderBothModeSql],
       ['request-line', renderByArtistSql],
-    ])('%s: an exact-variant hit is exempt from the tier, not merely ranked high', async (_label, render) => {
+    ])('%s: the exemption and the tie-break appear in that order, not swapped', async (_label, render) => {
       const rendered = await render();
 
-      // The exemption has to live in the TIER, not in the relevance term.
-      // `GREATEST` already promotes a 1.0 alias hit to the top of its tier —
-      // and that is exactly what is not enough: an unconditional tier puts
-      // the whole alias group behind every real match, and on these two
-      // paths (bare LIMIT, no OFFSET) behind means gone. So assert the
-      // score guard is part of the tier predicate itself.
-      expect(rendered).toContain('alias_max_sim < 1');
-      expect(rendered).not.toContain('ORDER BY (alias_max_sim IS NOT NULL) ASC');
+      // Both terms are the same substring apart from the guard, so the thing
+      // worth pinning is their POSITIONS: the guarded form must lead and the
+      // bare form must trail. Swapped, the bare form becomes the tier and the
+      // fix silently reverts to demoting exact variants — which the string
+      // assertions above would not catch, since both strings are still there.
+      const tierAt = rendered.indexOf(`ORDER BY ${FUZZY_ALIAS_TIER}`);
+      const tieBreakAt = rendered.indexOf(`) DESC, ${DIRECT_MATCH_TIE_BREAK}`);
+      expect(tierAt).toBeGreaterThanOrEqual(0);
+      expect(tieBreakAt).toBeGreaterThan(tierAt);
     });
 
     it('Both-mode alias OFF: the legacy chained-builder ordering is untouched', async () => {
