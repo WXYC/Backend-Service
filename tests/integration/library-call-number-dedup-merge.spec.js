@@ -392,7 +392,8 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       const rows = await sql`
         SELECT t.relname AS table_name,
                array_agg(a.attname ORDER BY a.attnum) AS cols,
-               (i.indpred IS NOT NULL) AS is_partial
+               (i.indpred IS NOT NULL) AS is_partial,
+               pg_get_expr(i.indpred, i.indrelid) AS pred
           FROM pg_index i
           JOIN pg_class t ON t.oid = i.indrelid
           JOIN pg_namespace n ON n.oid = t.relnamespace
