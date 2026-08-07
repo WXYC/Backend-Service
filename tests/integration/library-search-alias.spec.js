@@ -450,6 +450,197 @@ describe('GET /library/query — fuzzy alias hits no longer flood results (BS#20
   });
 });
 
+/**
+ * BS#2020 fixture — alias-only rows displacing REAL trigram matches on the
+ * two `library.service.ts` alias paths (`GET /library/` Both-mode and
+ * `GET /library/search`). Distinct from BS#2018, which fixed `/library/query`.
+ *
+ * The inversion needs a score gap, not a bad score, which is why BS#2018's
+ * 0.40 floor doesn't reach it:
+ *
+ *   - NOISE ('Bill Monroe'), 4 albums, alias variant 'Monolake Live'.
+ *     Similarity 0.6429 against `monolake` — an utterly ordinary name
+ *     variation, comfortably ABOVE the floor. Its canonical name and album
+ *     titles do NOT trigram-match, so all 4 rows can arrive only via branch
+ *     (b), which INNER JOINs on `artist_id` and so admits the whole
+ *     discography at that one score.
+ *   - REAL ('Monolord'), 1 album, matches on branch (a) at 0.3846 — a
+ *     genuine match that scores BELOW the alias hit.
+ *
+ * Pre-fix, both rank on one `GREATEST(...)` scale, so all 4 wrong rows sort
+ * ahead of the right one. The `n`/`limit` values below are deliberately tight
+ * enough that the real match falls off the page entirely, which is the
+ * reported symptom rather than a proxy for it.
+ *
+ * `searchByArtist` carries the same fix but has no HTTP route, so its
+ * coverage is the unit suite (`tests/unit/services/library-search-alias.ts`).
+ */
+const BS2020 = {
+  NOISE_ARTIST_ID: 9301,
+  NOISE_LIBRARY_IDS: [9301, 9302, 9303, 9304],
+  REAL_ARTIST_ID: 9305,
+  REAL_LIBRARY_ID: 9305,
+  // similarity('Monolake Live', 'monolake') = 0.6429.
+  ALIAS_VARIANT: 'Monolake Live',
+  // similarity('Monolord', 'monolake') = 0.3846 — over pg_trgm's 0.30, so it
+  // is a real branch-(a) match, but under the alias hit's score.
+  REAL_ARTIST_NAME: 'Monolord',
+  QUERY: 'monolake',
+};
+
+describe('alias-only rows no longer displace real trigram matches (BS#2020)', () => {
+  let auth;
+  let sql;
+  const wxycSchema = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+  const { NOISE_ARTIST_ID, NOISE_LIBRARY_IDS, REAL_ARTIST_ID, REAL_LIBRARY_ID } = BS2020;
+  const { ALIAS_VARIANT, REAL_ARTIST_NAME, QUERY } = BS2020;
+
+  /**
+   * Assert the alias branch ran. The NOISE rows are unreachable without it
+   * (pinned by the first test below), so their absence means the feature is
+   * off and every ordering assertion here would pass vacuously. Throws rather
+   * than warn-skipping, matching the BS#2018 suite above.
+   */
+  function requireAliasActive(results) {
+    if (results.some((r) => NOISE_LIBRARY_IDS.includes(r.id))) return;
+    throw new Error(
+      `[BS#2020] No alias-only rows (library ids ${NOISE_LIBRARY_IDS.join(', ')}) came back, so the ordering ` +
+        'assertions in this suite are not exercising anything. Almost certainly the backend is running ' +
+        'without CATALOG_SEARCH_ALIAS_ENABLED=true — set it on the backend service in ' +
+        'dev_env/docker-compose.yml, or in .env for local `npm run dev`.'
+    );
+  }
+
+  beforeAll(async () => {
+    auth = createAuthRequest(request, global.access_token);
+    sql = getTestDb();
+    await cleanupBs2020Rows(sql, wxycSchema);
+
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.artists (id, artist_name, alphabetical_name, code_letters)
+       VALUES ($1, 'Bill Monroe', 'Monroe, Bill', 'MO'),
+              ($2, $3, $3, 'MO')
+       ON CONFLICT (id) DO NOTHING`,
+      [NOISE_ARTIST_ID, REAL_ARTIST_ID, REAL_ARTIST_NAME]
+    );
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+       VALUES ($1, $3, 9301), ($2, $3, 9305)
+       ON CONFLICT (artist_id, genre_id) DO NOTHING`,
+      [NOISE_ARTIST_ID, REAL_ARTIST_ID, TEST_GENRE_ID]
+    );
+    // No album title may trigram-match the query, or the row would arrive on
+    // branch (a) and stop being an alias-only row.
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.library
+         (id, artist_id, genre_id, format_id, album_title, code_number, artist_name, label, label_id, legacy_release_id)
+       VALUES
+         ($1, $5, $7, $8, 'Bluegrass Ramble', 1, 'Bill Monroe', 'Decca', NULL, 65930),
+         ($2, $5, $7, $8, 'Blue Moon of Kentucky', 2, 'Bill Monroe', 'Decca', NULL, 65931),
+         ($3, $5, $7, $8, 'Master of Bluegrass', 3, 'Bill Monroe', 'MCA', NULL, 65932),
+         ($4, $5, $7, $8, 'Bean Blossom', 4, 'Bill Monroe', 'MCA', NULL, 65933),
+         ($6, $9, $7, $8, 'Empress Rising', 1, $10, 'Easy Rider', NULL, 65934)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        NOISE_LIBRARY_IDS[0],
+        NOISE_LIBRARY_IDS[1],
+        NOISE_LIBRARY_IDS[2],
+        NOISE_LIBRARY_IDS[3],
+        NOISE_ARTIST_ID,
+        REAL_LIBRARY_ID,
+        TEST_GENRE_ID,
+        TEST_FORMAT_ID,
+        REAL_ARTIST_ID,
+        REAL_ARTIST_NAME,
+      ]
+    );
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.artist_search_alias
+         (artist_id, source, variant, related_artist_id, external_subject_id,
+          external_object_id, active, method, confidence, last_verified_at)
+       VALUES ($1, 'discogs_name_variation', $2, NULL, NULL, NULL, NULL, 'name_variation', 0.95, NOW())
+       ON CONFLICT (artist_id, source, variant) DO UPDATE SET last_verified_at = NOW()`,
+      [NOISE_ARTIST_ID, ALIAS_VARIANT]
+    );
+  });
+
+  afterAll(async () => {
+    await cleanupBs2020Rows(sql, wxycSchema);
+  });
+
+  test('the inversion setup is real: alias hit clears the floor and outscores a genuine match', async () => {
+    // Pins every number the fixture depends on. If pg_trgm's scoring shifts,
+    // this fails FIRST and explains why the ordering tests did.
+    const [row] = await sql.unsafe(
+      `SELECT similarity($1::text, $3::text)  AS alias_sim,
+              similarity($2::text, $3::text)  AS real_sim,
+              ($2::text % $3::text)           AS real_matches_directly,
+              ($4::text % $3::text)           AS noise_matches_directly`,
+      [ALIAS_VARIANT, REAL_ARTIST_NAME, QUERY, 'Bill Monroe']
+    );
+    // BS#2018's floor cannot help here — the alias hit is well over it.
+    expect(Number(row.alias_sim)).toBeGreaterThanOrEqual(0.4);
+    // The real match is genuine (branch a) but scores lower. That gap is the
+    // whole defect.
+    expect(row.real_matches_directly).toBe(true);
+    expect(Number(row.real_sim)).toBeLessThan(Number(row.alias_sim));
+    // And the noise artist is reachable ONLY through the alias branch, which
+    // is what makes `requireAliasActive` a valid liveness check.
+    expect(row.noise_matches_directly).toBe(false);
+  });
+
+  test('GET /library/ (Both-mode): the real match outranks every alias-only row', async () => {
+    // dj-site Classic sends the same string as artist_name and album_title,
+    // which is what routes this through the Both-mode alias path.
+    const res = await auth.get('/library/').query({ artist_name: QUERY, album_title: QUERY, n: 10 }).expect(200);
+    requireAliasActive(res.body);
+
+    const realIndex = res.body.findIndex((r) => r.id === REAL_LIBRARY_ID);
+    const firstNoiseIndex = res.body.findIndex((r) => NOISE_LIBRARY_IDS.includes(r.id));
+    expect(realIndex).toBeGreaterThanOrEqual(0);
+    expect(realIndex).toBeLessThan(firstNoiseIndex);
+  });
+
+  test('GET /library/search: alias fan-out no longer pushes the real match off the page', async () => {
+    // limit 4 = exactly the alias fan-out size. Pre-fix the page is all Bill
+    // Monroe and the real match is simply gone — the reported symptom.
+    const res = await auth.get('/library/search').query({ query: QUERY, limit: 4 }).expect(200);
+    requireAliasActive(res.body.results);
+
+    expect(res.body.results[0].id).toBe(REAL_LIBRARY_ID);
+  });
+
+  test('alias-only rows still carry matched_via_alias, and tie-break on id (BS#1318 wire contract)', async () => {
+    const res = await auth.get('/library/').query({ artist_name: QUERY, album_title: QUERY, n: 10 }).expect(200);
+    requireAliasActive(res.body);
+
+    // Demoted, not dropped: the alias feature still surfaces them, still
+    // labelled, and dj-site/iOS still read the hint.
+    const noiseRows = res.body.filter((r) => NOISE_LIBRARY_IDS.includes(r.id));
+    expect(noiseRows).toHaveLength(NOISE_LIBRARY_IDS.length);
+    expect(noiseRows[0].matched_via_alias).toEqual([
+      { matched_variant: ALIAS_VARIANT, source: 'discogs_name_variation' },
+    ]);
+    // Pins the intra-tier order. Note this assertion does NOT prove the
+    // `id ASC` tie-break is load-bearing — it passes against a build without
+    // it, because an unordered plan may still emit id order by luck. Nothing
+    // observable can prove determinism; what this catches is a future change
+    // that perturbs the order on purpose.
+    expect(noiseRows.map((r) => r.id)).toEqual([...NOISE_LIBRARY_IDS].sort((a, b) => a - b));
+  });
+});
+
+async function cleanupBs2020Rows(sql, wxycSchema) {
+  const artistIds = [BS2020.NOISE_ARTIST_ID, BS2020.REAL_ARTIST_ID];
+  const libraryIds = [...BS2020.NOISE_LIBRARY_IDS, BS2020.REAL_LIBRARY_ID];
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.artist_search_alias WHERE artist_id = ANY($1::int[])`, [artistIds]);
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.library WHERE id = ANY($1::int[])`, [libraryIds]);
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.genre_artist_crossreference WHERE artist_id = ANY($1::int[])`, [
+    artistIds,
+  ]);
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.artists WHERE id = ANY($1::int[])`, [artistIds]);
+}
+
 async function cleanupBs2018Rows(sql, wxycSchema) {
   const artistIds = [BS2018.NOISE_ARTIST_ID, BS2018.REAL_ARTIST_ID, BS2018.CONTROL_ARTIST_ID];
   const libraryIds = [...BS2018.NOISE_LIBRARY_IDS, BS2018.REAL_LIBRARY_ID, BS2018.CONTROL_LIBRARY_ID];

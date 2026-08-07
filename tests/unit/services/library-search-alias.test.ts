@@ -1019,4 +1019,132 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(rendered).not.toContain('LEFT JOIN LATERAL');
     });
   });
+
+  // -----------------------------------------------------------------------
+  // BS#2020 — alias-only rows could displace real trigram matches.
+  //
+  // Both alias-aware paths in `library.service.ts` ranked alias-only rows and
+  // real matches on a single `GREATEST(...)` scale. Branch (b) INNER JOINs on
+  // `artist_id`, so ONE mid-scoring variant admits its artist's entire
+  // discography at that score, and every one of those rows outranks any real
+  // match scoring below it. Measured against a prod-shaped clone: the variant
+  // "Monolake Live" (similarity 0.6429 vs `monolake` — an ordinary name
+  // variation, comfortably over BS#2018's 0.40 floor) put 6 Bill Monroe
+  // albums on the page and pushed Mono (0.400), Monolord (0.385), Monos
+  // (0.364), Midlake / Monokle / Monopot (0.308) off it entirely.
+  //
+  // Distinct from BS#2018, which fixed `/library/query` — a path whose
+  // ORDER BY had no relevance term at all. Here relevance ordering already
+  // exists and must be PRESERVED inside each tier, not replaced.
+  //
+  // `id ASC` is new on both sites: neither had any tie-break, and within the
+  // alias tier every row of one artist shares an identical `alias_max_sim`,
+  // so their relative order was whatever the plan happened to emit.
+  // -----------------------------------------------------------------------
+  describe('BS#2020 alias-only rows tier after real trigram matches', () => {
+    const ALIAS_ONLY_TIER = '(alias_max_sim IS NOT NULL) ASC';
+    const flat = (text: string) => text.replace(/\s+/g, ' ');
+
+    beforeEach(() => {
+      process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      resetCatalogSearchAliasConfig();
+    });
+
+    /** Render the alias-aware SQL emitted by the Both-mode trigram tier. */
+    async function renderBothModeSql(query = 'monolake'): Promise<string> {
+      // tsvector tier must return 0 rows so the trigram tier fires.
+      const tsvectorChain = createMockQueryChain([]);
+      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
+      db.select.mockReset();
+      db.select.mockReturnValue(tsvectorChain);
+      db.execute.mockReset();
+      db.execute.mockResolvedValue([]);
+
+      await searchLibrary(query);
+
+      const aliasCall = db.execute.mock.calls.find((call) => JSON.stringify(call[0] ?? '').includes('alias_hits'));
+      expect(aliasCall).toBeDefined();
+      return flat(renderSqlWithParams(aliasCall?.[0]));
+    }
+
+    /** Render the alias-aware SQL emitted by the request-line artist path. */
+    async function renderByArtistSql(query = 'monolake'): Promise<string> {
+      db.select.mockReset();
+      db.execute.mockReset();
+      db.execute.mockResolvedValue([]);
+
+      await searchByArtist(query);
+
+      const aliasCall = db.execute.mock.calls.find((call) => JSON.stringify(call[0] ?? '').includes('alias_hits'));
+      expect(aliasCall).toBeDefined();
+      return flat(renderSqlWithParams(aliasCall?.[0]));
+    }
+
+    it('Both-mode: the tier leads the ORDER BY, relevance still ranks inside it', async () => {
+      const rendered = await renderBothModeSql();
+
+      // Tier FIRST, or a 0.64 alias row still outranks a 0.40 real one.
+      expect(rendered).toContain(`ORDER BY ${ALIAS_ONLY_TIER}, GREATEST(`);
+      // GREATEST must survive intact: within a tier the strongest hit leads.
+      expect(rendered).toContain('similarity(artist_name, monolake)');
+      expect(rendered).toContain('similarity(album_title, monolake)');
+      expect(rendered).toContain('COALESCE(alias_max_sim, 0)');
+      expect(rendered).toContain(') DESC, id ASC');
+    });
+
+    it('request-line: the tier leads the ORDER BY (single-column relevance)', async () => {
+      const rendered = await renderByArtistSql();
+
+      expect(rendered).toContain(`ORDER BY ${ALIAS_ONLY_TIER}, GREATEST(`);
+      expect(rendered).toContain('similarity(artist_name, monolake)');
+      expect(rendered).toContain('COALESCE(alias_max_sim, 0)');
+      expect(rendered).toContain(') DESC, id ASC');
+      // No album_title predicate on this path, so none in the ranking either.
+      expect(rendered).not.toContain('similarity(album_title');
+    });
+
+    it.each([
+      ['Both-mode', renderBothModeSql],
+      ['request-line', renderByArtistSql],
+    ])('%s: the tier sorts ASC so real matches come first (FALSE < TRUE)', async (_label, render) => {
+      const rendered = await render();
+
+      // Assert presence before absence. A bare `not.toContain` here would
+      // pass against a build with no tier at all — the vacuous-guard trap
+      // BS#2019 shipped and had to fix.
+      expect(rendered).toContain(ALIAS_ONLY_TIER);
+      // The single most reversible mistake: DESC inverts the fix and
+      // promotes every alias row above every real match.
+      expect(rendered).not.toContain('(alias_max_sim IS NOT NULL) DESC');
+    });
+
+    it('Both-mode alias OFF: the legacy chained-builder ordering is untouched', async () => {
+      delete process.env.CATALOG_SEARCH_ALIAS_ENABLED;
+      resetCatalogSearchAliasConfig();
+
+      const tsvectorChain = createMockQueryChain([]);
+      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
+      const trigramChain = createMockQueryChain([]);
+      trigramChain.limit = jest.fn().mockResolvedValue([]);
+      let callIndex = 0;
+      db.select.mockReset();
+      db.select.mockImplementation(() => {
+        const chain = callIndex === 0 ? tsvectorChain : trigramChain;
+        callIndex += 1;
+        return chain;
+      });
+      db.execute.mockReset();
+      db.execute.mockResolvedValue([]);
+
+      await searchLibrary('monolake');
+
+      // BS#1318 requires the alias-OFF path stay byte-identical so the
+      // planner keeps reaching the per-column GIN trigram indexes. The tier
+      // references a column that branch (a) alone does not project.
+      const ordering = trigramChain.orderBy.mock.calls.flat().map(renderSqlWithParams).join(' | ');
+      expect(ordering).not.toContain('alias_max_sim');
+      const aliasCall = db.execute.mock.calls.find((call) => JSON.stringify(call[0] ?? '').includes('alias_hits'));
+      expect(aliasCall).toBeUndefined();
+    });
+  });
 });
