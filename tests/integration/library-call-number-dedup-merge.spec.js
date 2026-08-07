@@ -5,8 +5,8 @@
  * The headline invariant is an ORDERING one that no unit test can prove,
  * because it only exists in the database's own constraint behaviour: every FK
  * referencing `library.id` must be repointed to the survivor BEFORE the losing
- * row is deleted. Six of the reference sites declare `onDelete: 'cascade'` and
- * two declare `set null`, so a merge that deleted first would silently destroy
+ * row is deleted. Five of the reference sites cascade and two null the
+ * reference out, so a merge that deleted first would silently destroy
  * rotation history, album metadata, and reviews — no error, no exception, just
  * missing rows. These tests seed exactly that shape and assert the data
  * survives the merge attached to the survivor.
@@ -194,6 +194,58 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       expect(rows).toHaveLength(1);
     });
 
+    it('drops the loser’s review rather than violating reviews_album_id_unique', async () => {
+      const a = await seedAlbum({ title: 'Sueño Salvaje', codeNumber: 12 });
+      const b = await seedAlbum({ title: 'Sueño Salvaje', codeNumber: 12 });
+      for (const id of [a, b]) {
+        await sql`INSERT INTO ${sql(SCHEMA)}.reviews (album_id, review) VALUES (${id}, 'a review')`;
+      }
+
+      const plan = (await merge.planSlots([await slotFor(12)]))[0];
+      // `reviews.album_id` carries a plain UNIQUE, so a repoint into a survivor
+      // that already has a review raises and aborts the entire run.
+      await expect(merge.mergeSlot(plan)).resolves.toBeDefined();
+
+      const rows = await sql`SELECT album_id FROM ${sql(SCHEMA)}.reviews WHERE album_id IN (${a}, ${b})`;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].album_id).toBe(plan.survivorId);
+    });
+
+    it('resolves an active rotation collision without destroying killed history', async () => {
+      const a = await seedAlbum({ title: 'Sonido Cosmico', codeNumber: 13 });
+      const b = await seedAlbum({ title: 'Sonido Cosmico', codeNumber: 13 });
+      // Both active in the same bin — the partial unique index applies here.
+      for (const id of [a, b]) {
+        await sql`
+          INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, add_date)
+          VALUES (${id}, 'H', now())
+        `;
+      }
+      // Killed rows in the SAME bin are outside the index's predicate and must
+      // survive: they are the rotation history the job promises to preserve.
+      await sql`
+        INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, add_date, kill_date)
+        VALUES (${b}, 'H', now() - interval '90 days', now() - interval '60 days')
+      `;
+
+      const plan = (await merge.planSlots([await slotFor(13)]))[0];
+      await expect(merge.mergeSlot(plan)).resolves.toBeDefined();
+
+      const active = await sql`
+        SELECT album_id FROM ${sql(SCHEMA)}.rotation
+         WHERE album_id IN (${a}, ${b}) AND kill_date IS NULL
+      `;
+      expect(active).toHaveLength(1);
+      expect(active[0].album_id).toBe(plan.survivorId);
+
+      const killed = await sql`
+        SELECT album_id FROM ${sql(SCHEMA)}.rotation
+         WHERE album_id IN (${a}, ${b}) AND kill_date IS NOT NULL
+      `;
+      expect(killed).toHaveLength(1);
+      expect(killed[0].album_id).toBe(plan.survivorId);
+    });
+
     it('repoints library_identity, the site that would otherwise BLOCK the delete', async () => {
       await seedAlbum({ title: 'Amaru', codeNumber: 8 });
       const lose = await seedAlbum({ title: 'Amaru', codeNumber: 8 });
@@ -311,18 +363,60 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       }
     });
 
-    it('covers every FK_TARGETS entry that the database actually constrains', async () => {
-      const constrained = new Set(Object.keys(EXPECTED));
+    // Runs FROM the catalog TO the code, which is the only direction that can
+    // catch an omission. The previous shape iterated the hardcoded map, so an
+    // FK the database has and FK_TARGETS lacks passed green.
+    it('finds no FK on library.id that FK_TARGETS does not repoint', async () => {
+      const rows = await sql`
+        SELECT tc.table_name
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.constraint_column_usage ccu
+            ON ccu.constraint_name = tc.constraint_name
+           AND ccu.constraint_schema = tc.table_schema
+         WHERE tc.constraint_type = 'FOREIGN KEY'
+           AND tc.table_schema = ${SCHEMA}
+           AND ccu.table_name = 'library'
+           AND ccu.column_name = 'id'
+      `;
       const targets = new Set(merge.FK_TARGETS.map((t) => t.table));
-      // Every constrained table must be a repoint target, or a delete would
-      // cascade/null/block through a site the job never touches.
-      for (const table of constrained) {
-        expect(targets.has(table)).toBe(true);
+      const missing = [...new Set(rows.map((r) => r.table_name))].filter((t) => !targets.has(t)).sort();
+      expect(missing).toEqual([]);
+    });
+
+    // The ordering invariant was pinned; the COLLISION invariant was not, which
+    // is exactly how `reviews` (plain UNIQUE) and `rotation` (PARTIAL unique)
+    // shipped with `uniqueKey: null`. A repoint into a taken key raises and
+    // aborts the whole run, so every uniqueness constraint touching a target
+    // column has to be declared.
+    it('declares a uniqueKey for every uniqueness constraint on a target column', async () => {
+      const rows = await sql`
+        SELECT t.relname AS table_name,
+               array_agg(a.attname ORDER BY a.attnum) AS cols,
+               (i.indpred IS NOT NULL) AS is_partial
+          FROM pg_index i
+          JOIN pg_class t ON t.oid = i.indrelid
+          JOIN pg_namespace n ON n.oid = t.relnamespace
+          JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (i.indkey)
+         WHERE i.indisunique
+           AND n.nspname = ${SCHEMA}
+         GROUP BY t.relname, i.indexrelid, i.indpred
+      `;
+      const undeclared = [];
+      for (const target of merge.FK_TARGETS) {
+        for (const idx of rows) {
+          if (idx.table_name !== target.table) continue;
+          if (!idx.cols.includes(target.column)) continue;
+          const declared = target.uniqueKey ?? [];
+          const covers = idx.cols.every((c) => declared.includes(c));
+          const partialHandled = !idx.is_partial || Boolean(target.uniqueWhenNull);
+          if (!covers || !partialHandled) {
+            undeclared.push(
+              `${target.table}.${target.column} vs [${idx.cols.join(',')}]${idx.is_partial ? ' (partial)' : ''}`
+            );
+          }
+        }
       }
-      // The remainder carry no FK, so they orphan silently rather than cascade —
-      // repointed anyway, and named here so the asymmetry stays deliberate.
-      const unconstrained = [...targets].filter((t) => !constrained.has(t));
-      expect(unconstrained.sort()).toEqual(['album_popularity', 'library_identity_history']);
+      expect(undeclared.sort()).toEqual([]);
     });
   });
 
