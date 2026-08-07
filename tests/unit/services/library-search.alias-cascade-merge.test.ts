@@ -329,6 +329,33 @@ describe('searchLibrary — alias-only rows sort after real matches in the merge
     expect(results.map((r) => r.id)).toEqual([99, 42]);
   });
 
+  it('a colliding cascade row with NO matched_via is still not demoted', async () => {
+    enableAlias();
+    // `searchLibraryByTrackUncachedOrThrow` only sets `matched_via` when LML
+    // returned a non-empty hint list (library.service.ts), so a genuine
+    // Track-2 row can arrive bare. Inferring "alias-only" from the absence of
+    // `matched_via` therefore misreads a real cascade answer as noise — the
+    // tier has to be told which rows came from the cascade, not guess.
+    db.execute
+      .mockResolvedValueOnce([
+        aliasRow({ id: 42, artist_name: 'Zither Ensemble' }, 'Monore'),
+        aliasRow({ id: 43, artist_name: 'Bill Monroe' }, 'Monore'),
+      ])
+      .mockResolvedValueOnce([{ total: 2, total_non_alias: 0 }]);
+    mockRunCatalogTrackSearchCascade.mockResolvedValue([
+      cascadeRow({ id: 42, artist_name: 'Zither Ensemble', matched_via: undefined }),
+    ]);
+
+    const { results } = await searchLibrary(PARAMS);
+
+    // Row 42 is the cascade's real answer (it just carries no hint list) and
+    // must lead, even though 'Bill Monroe' sorts first by name. Demoting it
+    // would put the alias noise above the answer the cascade exists to find.
+    expect(results.map((r) => r.id)).toEqual([42, 43]);
+    expect(results[0].matched_via).toBeUndefined();
+    expect(results[0].matched_via_alias).toBeDefined();
+  });
+
   it('pure-cascade page (no alias rows at all) is unaffected by the tier', async () => {
     enableAlias();
     db.execute.mockResolvedValueOnce([]).mockResolvedValueOnce([{ total: 0, total_non_alias: 0 }]);
