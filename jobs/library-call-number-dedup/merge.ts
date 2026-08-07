@@ -39,7 +39,7 @@
  */
 
 import { sql, type SQL } from 'drizzle-orm';
-import { db, intArrayLiteral } from '@wxyc/database';
+import { checkLiveActivity, db, intArrayLiteral } from '@wxyc/database';
 import { classifySlot, hasTwinElsewhere, type SlotMember, type SlotVerdict } from './classify';
 import { formatWorklist } from './report';
 
@@ -70,13 +70,31 @@ export interface FkTarget {
   table: string;
   column: string;
   uniqueKey: string[] | null;
+  /**
+   * Column that must be NULL for a PARTIAL unique key to apply. Load-bearing
+   * rather than cosmetic: without it the collision-delete drops rows the index
+   * never constrained. `rotation`'s key covers only ACTIVE rows
+   * (`WHERE kill_date IS NULL`), so a killed rotation record may duplicate an
+   * active one freely — deleting it would destroy exactly the history that
+   * repointing-before-deleting exists to preserve.
+   *
+   * Modelled as a column name rather than a predicate string so it can be
+   * parameterized and table-aliased safely; a partial index needing anything
+   * richer should extend this deliberately rather than smuggle in raw SQL.
+   */
+  uniqueWhenNull?: string;
 }
 
 export const FK_TARGETS: readonly FkTarget[] = [
-  { table: 'rotation', column: 'album_id', uniqueKey: null },
+  {
+    table: 'rotation',
+    column: 'album_id',
+    uniqueKey: ['album_id', 'rotation_bin'],
+    uniqueWhenNull: 'kill_date',
+  },
   { table: 'flowsheet', column: 'album_id', uniqueKey: null },
   { table: 'album_metadata', column: 'album_id', uniqueKey: ['album_id'] },
-  { table: 'reviews', column: 'album_id', uniqueKey: null },
+  { table: 'reviews', column: 'album_id', uniqueKey: ['album_id'] },
   { table: 'album_review_submissions', column: 'album_id', uniqueKey: null },
   { table: 'album_critic_reviews', column: 'album_id', uniqueKey: ['album_id', 'source_url'] },
   {
@@ -194,22 +212,36 @@ export const countReferences = async (ids: readonly number[]): Promise<Map<numbe
   return totals;
 };
 
-/** Every row on a slot's shelf, for the twin check that gates a renumber. */
+/**
+ * Every row on a slot's shelf, for the twin check and the next-free number.
+ * Cached per shelf: an unlocked MAX+1 allocator produces CLUSTERS of collisions
+ * on one shelf, so the uncached form re-reads identical rows once per slot.
+ */
+const shelfCache = new Map<string, Array<{ code_number: number; album_title: string; id: number }>>();
+
 export const loadShelf = async (
   artist_id: number,
   genre_id: number
-): Promise<Array<{ code_number: number; album_title: string }>> => {
+): Promise<Array<{ code_number: number; album_title: string; id: number }>> => {
+  const key = `${artist_id}|${genre_id}`;
+  const hit = shelfCache.get(key);
+  if (hit) return hit;
   const library = qualified('library');
-  return (await db.execute(sql`
-    SELECT code_number, album_title FROM ${library}
+  const rows = (await db.execute(sql`
+    SELECT id, code_number, album_title FROM ${library}
      WHERE artist_id = ${artist_id} AND genre_id = ${genre_id}
-  `)) as unknown as Array<{ code_number: number; album_title: string }>;
+  `)) as unknown as Array<{ code_number: number; album_title: string; id: number }>;
+  shelfCache.set(key, rows);
+  return rows;
 };
+
+/** Test seam: drop memoized shelves so a second run re-reads the catalog. */
+export const resetShelfCache = (): void => shelfCache.clear();
 
 export type SlotPlan =
   | { kind: 'merge'; slot: CollisionSlot; survivorId: number; loserIds: number[] }
   | { kind: 'renumber'; slot: CollisionSlot; keepId: number; moveId: number; newNumber: number }
-  /** Renumber withheld: the disc that would move has a twin at another number. */
+  /** Withheld for the librarian — the database cannot settle it. */
   | { kind: 'held'; slot: CollisionSlot; moveId: number; reason: string };
 
 /**
@@ -221,23 +253,45 @@ export const planSlots = async (slots: readonly CollisionSlot[]): Promise<SlotPl
   const nextFree = new Map<string, number>();
   const plans: SlotPlan[] = [];
 
+  // Rows a merge is already going to delete must not count as twins: otherwise
+  // a duplicate this very run is about to remove withholds a renumber, and the
+  // slot lands on the librarian's list for a question the job just answered.
+  const doomed = new Set<number>();
+  for (const slot of slots) {
+    const v = classifySlot(slot.members);
+    if (v.kind === 'merge') v.loserIds.forEach((id) => doomed.add(id));
+  }
+
   for (const slot of slots) {
     const verdict: SlotVerdict = classifySlot(slot.members);
+    const shelfKey = `${slot.artist_id}|${slot.genre_id}`;
+
     if (verdict.kind === 'merge') {
       plans.push({ kind: 'merge', slot, survivorId: verdict.survivorId, loserIds: verdict.loserIds });
+      // Three or more rows where only some are re-entries: the merge resolves
+      // the duplicates but the slot still holds two different releases, and
+      // which one moves is a shelf question rather than something to guess at.
+      if (verdict.unresolvedIds.length > 0) {
+        plans.push({
+          kind: 'held',
+          slot,
+          moveId: verdict.unresolvedIds[0],
+          reason: 'slot still holds two different releases after the duplicates merge',
+        });
+      }
       continue;
     }
 
-    const shelfKey = `${slot.artist_id}|${slot.genre_id}`;
     const shelf = await loadShelf(slot.artist_id, slot.genre_id);
+    const live = shelf.filter((r) => !doomed.has(r.id));
     const move = slot.members.find((m) => m.id === verdict.moveId);
 
-    if (move && hasTwinElsewhere(move.album_title, slot.code_number, shelf)) {
+    if (move && hasTwinElsewhere(move.album_title, slot.code_number, live)) {
       plans.push({
         kind: 'held',
         slot,
         moveId: verdict.moveId,
-        reason: `"${move.album_title}" already sits at another number on this shelf; which copy is real is a shelf question`,
+        reason: `"${move.album_title}" already sits at another number on this shelf`,
       });
       continue;
     }
@@ -250,6 +304,60 @@ export const planSlots = async (slots: readonly CollisionSlot[]): Promise<SlotPl
     plans.push({ kind: 'renumber', slot, keepId: verdict.keepId, moveId: verdict.moveId, newNumber });
   }
   return plans;
+};
+
+/**
+ * Columns on the losing `library` row that are expensive to re-collect and are
+ * NOT re-derivable from the surviving row: an LML identity resolution, curated
+ * artwork, and the music director's deliberate "not on Discogs" note. The
+ * survivor is chosen by inbound reference count, which says nothing about how
+ * complete its data is, so without this pass a merge can delete the only row
+ * that carried them. Survivor's own non-null value always wins.
+ */
+const PRESERVED_LIBRARY_COLUMNS = [
+  'canonical_entity_id',
+  'artwork_url',
+  'discogs_unavailable_note',
+  'alternate_artist_name',
+  'album_artist',
+  'label',
+  'label_id',
+] as const;
+
+/** Same idea for the one child table whose contents are costly to rebuild. */
+const PRESERVED_ALBUM_METADATA_COLUMNS = [
+  'artwork_url',
+  'discogs_url',
+  'release_year',
+  'spotify_url',
+  'apple_music_url',
+  'youtube_music_url',
+] as const;
+
+const fillNullsFromLoser = async (tx: Tx, survivor: number, loser: number): Promise<void> => {
+  const library = qualified('library');
+  const libSet = sql.join(
+    PRESERVED_LIBRARY_COLUMNS.map((c) => sql`${ident(c)} = COALESCE(s.${ident(c)}, d.${ident(c)})`),
+    sql`, `
+  );
+  await tx.execute(sql`
+    UPDATE ${library} s SET ${libSet}
+      FROM ${library} d
+     WHERE s.id = ${survivor} AND d.id = ${loser}
+  `);
+
+  // Only meaningful when BOTH rows have album_metadata; when only the loser
+  // does, the plain repoint moves it across untouched.
+  const am = qualified('album_metadata');
+  const amSet = sql.join(
+    PRESERVED_ALBUM_METADATA_COLUMNS.map((c) => sql`${ident(c)} = COALESCE(s.${ident(c)}, d.${ident(c)})`),
+    sql`, `
+  );
+  await tx.execute(sql`
+    UPDATE ${am} s SET ${amSet}
+      FROM ${am} d
+     WHERE s.album_id = ${survivor} AND d.album_id = ${loser}
+  `);
 };
 
 /**
@@ -270,10 +378,17 @@ const repointTarget = async (tx: Tx, target: FkTarget, loser: number, survivor: 
             sql` AND `
           )
         : sql`TRUE`;
+    // A partial index constrains only the rows satisfying its predicate, so the
+    // collision-delete has to be scoped to those on BOTH sides. Rows outside it
+    // cannot collide and are left to repoint normally — that is what keeps
+    // killed rotation history intact while active duplicates are resolved.
+    const partial = target.uniqueWhenNull;
+    const dScope = partial ? sql` AND d.${ident(partial)} IS NULL` : sql``;
+    const kScope = partial ? sql` AND k.${ident(partial)} IS NULL` : sql``;
     await tx.execute(sql`
       DELETE FROM ${t} d
-       WHERE d.${col} = ${loser}
-         AND EXISTS (SELECT 1 FROM ${t} k WHERE k.${col} = ${survivor} AND ${matchClause})
+       WHERE d.${col} = ${loser}${dScope}
+         AND EXISTS (SELECT 1 FROM ${t} k WHERE k.${col} = ${survivor}${kScope} AND ${matchClause})
     `);
   }
 
@@ -296,6 +411,11 @@ export const mergeSlot = async (plan: Extract<SlotPlan, { kind: 'merge' }>): Pro
   let fkRowsRepointed = 0;
   await db.transaction(async (tx) => {
     for (const loser of plan.loserIds) {
+      // Preserve first: repointing can DELETE a loser's unique-keyed child row
+      // when the survivor already has one, and the delete below removes the
+      // loser's own row outright. Anything worth keeping has to move across
+      // before either happens.
+      await fillNullsFromLoser(tx, plan.survivorId, loser);
       for (const target of FK_TARGETS) {
         fkRowsRepointed += await repointTarget(tx, target, loser, plan.survivorId);
       }
@@ -346,33 +466,47 @@ export const analyzeTouchedTables = async (): Promise<void> => {
   }
 };
 
-/** Display names for the worklist: who the shelf belongs to and what it's called. */
+/**
+ * Display context for the worklist. Joined through `genre_artist_crossreference`
+ * rather than crossing `artists` with `genres`, for two reasons: that table is
+ * where `artist_genre_code` lives — the middle component of a call number,
+ * without which the printed address does not identify a shelf slot, since two
+ * artists in one genre routinely share code letters — and joining through it
+ * cannot fabricate a label for an (artist, genre) pair that does not exist.
+ */
 const loadShelfLabels = async (
   plans: readonly SlotPlan[]
-): Promise<Map<string, { artist: string; codeLetters: string; genre: string }>> => {
-  const labels = new Map<string, { artist: string; codeLetters: string; genre: string }>();
+): Promise<Map<string, { artist: string; codeLetters: string; artistGenreCode: number | null; genre: string }>> => {
+  const labels = new Map<
+    string,
+    { artist: string; codeLetters: string; artistGenreCode: number | null; genre: string }
+  >();
   const needed = plans.filter((p) => p.kind !== 'merge');
   if (needed.length === 0) return labels;
 
   const artistIds = intArrayLiteral([...new Set(needed.map((p) => p.slot.artist_id))]);
   const genreIds = intArrayLiteral([...new Set(needed.map((p) => p.slot.genre_id))]);
   const rows = (await db.execute(sql`
-    SELECT a.id AS artist_id, a.artist_name, a.code_letters, g.id AS genre_id, g.genre_name
-      FROM ${qualified('artists')} a
-      CROSS JOIN ${qualified('genres')} g
-     WHERE a.id = ANY(${artistIds}::int[])
-       AND g.id = ANY(${genreIds}::int[])
+    SELECT a.id AS artist_id, a.artist_name, a.code_letters,
+           g.id AS genre_id, g.genre_name, x.artist_genre_code
+      FROM ${qualified('genre_artist_crossreference')} x
+      JOIN ${qualified('artists')} a ON a.id = x.artist_id
+      JOIN ${qualified('genres')} g ON g.id = x.genre_id
+     WHERE x.artist_id = ANY(${artistIds}::int[])
+       AND x.genre_id = ANY(${genreIds}::int[])
   `)) as unknown as Array<{
     artist_id: number;
     artist_name: string;
     code_letters: string;
     genre_id: number;
     genre_name: string;
+    artist_genre_code: number | null;
   }>;
   for (const r of rows) {
     labels.set(`${r.artist_id}|${r.genre_id}`, {
       artist: r.artist_name,
       codeLetters: r.code_letters,
+      artistGenreCode: r.artist_genre_code,
       genre: r.genre_name,
     });
   }
@@ -388,17 +522,68 @@ export interface DedupSummary {
   renumbers: number;
   held: number;
   fkRowsRepointed: number;
+  childRowsDeleted: number;
   rowsDeleted: number;
   renumbersSkipped: number;
   worklist: string;
 }
 
 /**
+ * Rows a merge would DELETE rather than repoint, per unique-keyed FK site.
+ *
+ * The dry run exists so an operator can approve the plan, and "would repoint N
+ * rows" hides the destructive half: where the survivor already holds the
+ * equivalent unique-keyed row, the loser's is dropped. Counting it separately
+ * is what makes the dry run an honest preview.
+ */
+export const previewCollisionDeletes = async (
+  plan: Extract<SlotPlan, { kind: 'merge' }>
+): Promise<Record<string, number>> => {
+  const counts: Record<string, number> = {};
+  const loserList = intArrayLiteral(plan.loserIds);
+  for (const target of FK_TARGETS) {
+    if (!target.uniqueKey) continue;
+    const t = qualified(target.table);
+    const col = ident(target.column);
+    const otherCols = target.uniqueKey.filter((c) => c !== target.column);
+    const matchClause =
+      otherCols.length > 0
+        ? sql.join(
+            otherCols.map((c) => sql`k.${ident(c)} IS NOT DISTINCT FROM d.${ident(c)}`),
+            sql` AND `
+          )
+        : sql`TRUE`;
+    const partial = target.uniqueWhenNull;
+    const dScope = partial ? sql` AND d.${ident(partial)} IS NULL` : sql``;
+    const kScope = partial ? sql` AND k.${ident(partial)} IS NULL` : sql``;
+    const res = (await db.execute(sql`
+      SELECT count(*)::int AS n FROM ${t} d
+       WHERE d.${col} = ANY(${loserList}::int[])${dScope}
+         AND EXISTS (SELECT 1 FROM ${t} k WHERE k.${col} = ${plan.survivorId}${kScope} AND ${matchClause})
+    `)) as unknown as Array<{ n: number }>;
+    const n = Number(res[0]?.n ?? 0);
+    if (n > 0) counts[`${target.table}.${target.column}`] = n;
+  }
+  return counts;
+};
+
+/**
+ * Dry-run counterpart to `mergeSlot`: how many FK rows it would touch. Read
+ * straight off the counts `findCollisionSlots` already attached to each member
+ * — re-querying here would reintroduce the per-row shape that batching exists
+ * to avoid, for a number already in hand.
+ */
+export const previewSlot = (plan: Extract<SlotPlan, { kind: 'merge' }>): number =>
+  plan.slot.members.filter((m) => plan.loserIds.includes(m.id)).reduce((a, m) => a + m.refs, 0);
+
+/**
  * Whole run: find every colliding slot, decide what each one is, and — only
  * under `--execute` — merge the duplicates and move the genuine collisions.
  *
- * Dry-run reports exactly what an execute run would do, including the finished
- * worklist, so the librarian's list can be reviewed before anything is written.
+ * The worklist is rendered AFTER the writes, from the renumbers that actually
+ * landed. Rendering it from the plan would tell the librarian to relabel a disc
+ * whose catalog row never moved (a destination taken since planning), creating
+ * the shelf/catalog disagreement the job exists to remove, in reverse.
  */
 export const runDedup = async (): Promise<DedupSummary> => {
   const tag = '[library-call-number-dedup]';
@@ -406,45 +591,97 @@ export const runDedup = async (): Promise<DedupSummary> => {
 
   const slots = await findCollisionSlots();
   console.log(`${tag} colliding call-number slots: ${slots.length}`);
-  if (slots.length === 0) {
-    return {
-      slots: 0,
-      merges: 0,
-      renumbers: 0,
-      held: 0,
-      fkRowsRepointed: 0,
-      rowsDeleted: 0,
-      renumbersSkipped: 0,
-      worklist: formatWorklist([], []),
-    };
-  }
 
-  const plans = await planSlots(slots);
+  const plans = slots.length > 0 ? await planSlots(slots) : [];
   const merges = plans.filter((p): p is Extract<SlotPlan, { kind: 'merge' }> => p.kind === 'merge');
   const renumbers = plans.filter((p): p is Extract<SlotPlan, { kind: 'renumber' }> => p.kind === 'renumber');
   const heldPlans = plans.filter((p): p is Extract<SlotPlan, { kind: 'held' }> => p.kind === 'held');
 
   const plannedDeletions = merges.reduce((n, p) => n + p.loserIds.length, 0);
+  const fkRowsRepointed0 = merges.reduce((n, p) => n + previewSlot(p), 0);
+
+  const childDeletes: Record<string, number> = {};
+  for (const plan of merges) {
+    for (const [site, n] of Object.entries(await previewCollisionDeletes(plan))) {
+      childDeletes[site] = (childDeletes[site] ?? 0) + n;
+    }
+  }
+  const childRowsDeleted = Object.values(childDeletes).reduce((a, b) => a + b, 0);
+
   console.log(
-    `${tag} plan: ${merges.length} merges (${plannedDeletions} rows deleted), ` +
+    `${tag} plan: ${merges.length} merges (${plannedDeletions} library rows deleted), ` +
       `${renumbers.length} renumbers, ${heldPlans.length} held for the librarian`
   );
+  console.log(`${tag} ~${fkRowsRepointed0} FK rows repoint; ${childRowsDeleted} child rows dropped as duplicates`);
+  for (const [site, n] of Object.entries(childDeletes)) console.log(`${tag}   drop ${n} from ${site}`);
 
   const labels = await loadShelfLabels(plans);
   const label = (p: SlotPlan) =>
     labels.get(`${p.slot.artist_id}|${p.slot.genre_id}`) ?? {
       artist: `artist ${p.slot.artist_id}`,
       codeLetters: '??',
+      artistGenreCode: null,
       genre: `genre ${p.slot.genre_id}`,
     };
 
+  let fkRowsRepointed = fkRowsRepointed0;
+  let rowsDeleted = plannedDeletions;
+  let renumbersSkipped = 0;
+  let landed = renumbers;
+
+  if (EXECUTE) {
+    // This job writes `flowsheet`, which dj-site polls every 60s. Refuse to
+    // start while a DJ is on air rather than pause mid-run: it is a one-shot
+    // run in a chosen window, so declining is cheaper than a partial pass.
+    const live = await checkLiveActivity(600).catch(() => false);
+    if (live) {
+      console.warn(`${tag} a show is on air — refusing to start. Re-run in a quiet window.`);
+      return {
+        slots: slots.length,
+        merges: merges.length,
+        renumbers: renumbers.length,
+        held: heldPlans.length,
+        fkRowsRepointed: 0,
+        childRowsDeleted: 0,
+        rowsDeleted: 0,
+        renumbersSkipped: 0,
+        worklist: formatWorklist([], []),
+      };
+    }
+
+    fkRowsRepointed = 0;
+    rowsDeleted = 0;
+    for (const plan of merges) {
+      const res = await mergeSlot(plan);
+      fkRowsRepointed += res.fkRowsRepointed;
+      rowsDeleted += res.losersMerged;
+    }
+    const moved: typeof renumbers = [];
+    for (const plan of renumbers) {
+      if (await renumberRow(plan)) {
+        moved.push(plan);
+      } else {
+        renumbersSkipped += 1;
+        const l = label(plan);
+        console.warn(
+          `${tag} skipped renumber: ${l.codeLetters} ${plan.slot.code_number} -> ${plan.newNumber} ` +
+            `(destination taken since the plan was built; re-run to re-plan). NOT on the worklist.`
+        );
+      }
+    }
+    landed = moved;
+    await analyzeTouchedTables();
+    console.log(`${tag} repointed ${fkRowsRepointed} FK rows, deleted ${rowsDeleted} library rows`);
+  }
+
   const worklist = formatWorklist(
-    renumbers.map((p) => {
+    landed.map((p) => {
       const l = label(p);
       return {
         genre: l.genre,
         artist: l.artist,
         codeLetters: l.codeLetters,
+        artistGenreCode: l.artistGenreCode,
         moveTitle: titleOf(p.slot, p.moveId),
         keepTitle: titleOf(p.slot, p.keepId),
         oldNumber: p.slot.code_number,
@@ -458,60 +695,29 @@ export const runDedup = async (): Promise<DedupSummary> => {
         genre: l.genre,
         artist: l.artist,
         codeLetters: l.codeLetters,
+        artistGenreCode: l.artistGenreCode,
         title: titleOf(p.slot, p.moveId),
         atNumber: p.slot.code_number,
+        vol: p.slot.vol,
         reason: p.reason,
       };
     })
   );
 
-  let fkRowsRepointed = 0;
-  let rowsDeleted = 0;
-  let renumbersSkipped = 0;
-
-  if (EXECUTE) {
-    for (const plan of merges) {
-      const res = await mergeSlot(plan);
-      fkRowsRepointed += res.fkRowsRepointed;
-      rowsDeleted += res.losersMerged;
-    }
-    for (const plan of renumbers) {
-      const moved = await renumberRow(plan);
-      if (!moved) {
-        renumbersSkipped += 1;
-        const l = label(plan);
-        console.warn(
-          `${tag} skipped renumber: ${l.codeLetters} ${plan.slot.code_number} -> ${plan.newNumber} ` +
-            `(destination taken since the plan was built; re-run to re-plan)`
-        );
-      }
-    }
-    await analyzeTouchedTables();
-    console.log(`${tag} repointed ${fkRowsRepointed} FK rows, deleted ${rowsDeleted} library rows`);
-  } else {
-    for (const plan of merges) {
-      const counts = await previewSlot(plan);
-      fkRowsRepointed += counts;
-    }
-    console.log(`${tag} dry run: would repoint ${fkRowsRepointed} FK rows and delete ${plannedDeletions} library rows`);
-  }
-
   console.log(`\n${worklist}`);
+  if (renumbersSkipped > 0) {
+    console.warn(`${tag} ${renumbersSkipped} renumber(s) skipped — re-run to re-plan them.`);
+  }
 
   return {
     slots: slots.length,
     merges: merges.length,
-    renumbers: renumbers.length,
+    renumbers: landed.length,
     held: heldPlans.length,
     fkRowsRepointed,
-    rowsDeleted: EXECUTE ? rowsDeleted : plannedDeletions,
+    childRowsDeleted,
+    rowsDeleted,
     renumbersSkipped,
     worklist,
   };
-};
-
-/** Dry-run counterpart to `mergeSlot`: how many FK rows it would repoint. */
-export const previewSlot = async (plan: Extract<SlotPlan, { kind: 'merge' }>): Promise<number> => {
-  const refs = await countReferences(plan.loserIds);
-  return [...refs.values()].reduce((a, b) => a + b, 0);
 };

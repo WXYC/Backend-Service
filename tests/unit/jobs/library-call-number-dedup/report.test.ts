@@ -13,6 +13,7 @@ const item = (over: Partial<RelabelItem> = {}): RelabelItem => ({
   genre: 'Rock',
   artist: 'Guided by Voices',
   codeLetters: 'GU',
+  artistGenreCode: 12,
   moveTitle: 'Bee Thousand',
   keepTitle: 'Alien Lanes',
   oldNumber: 6,
@@ -24,8 +25,8 @@ const item = (over: Partial<RelabelItem> = {}): RelabelItem => ({
 describe('formatWorklist', () => {
   it('renders both call numbers so the shelf work is unambiguous', () => {
     const out = formatWorklist([item()], []);
-    expect(out).toContain('`GU 6`');
-    expect(out).toContain('`GU 31`');
+    expect(out).toContain('`GU 12 6`');
+    expect(out).toContain('`GU 12 31`');
   });
 
   it('names the disc that moves and the one that stays', () => {
@@ -37,8 +38,8 @@ describe('formatWorklist', () => {
 
   it('includes the volume letter when the slot has one', () => {
     const out = formatWorklist([item({ vol: 'B', oldNumber: 3, newNumber: 12 })], []);
-    expect(out).toContain('`GU 3 B`');
-    expect(out).toContain('`GU 12 B`');
+    expect(out).toContain('`GU 12 3 B`');
+    expect(out).toContain('`GU 12 12 B`');
   });
 
   it('counts the discs and genres in the header', () => {
@@ -61,8 +62,10 @@ describe('formatWorklist', () => {
         genre: 'Africa',
         artist: 'King Sunny Ade',
         codeLetters: 'AD',
+        artistGenreCode: 4,
         title: 'Juju Music',
         atNumber: 1,
+        vol: '',
         reason: 'already sits at another number on this shelf',
       },
     ];
@@ -71,6 +74,33 @@ describe('formatWorklist', () => {
     expect(out).toContain('Juju Music');
     expect(out).toContain('already sits at another number');
     expect(out).toContain('**1 that need your judgement**');
+  });
+
+  it('renders a held item on a lettered shelf at its real address', () => {
+    const out = formatWorklist(
+      [],
+      [
+        {
+          genre: 'Rock',
+          artist: 'Guided by Voices',
+          codeLetters: 'GU',
+          artistGenreCode: 12,
+          title: 'Bee Thousand',
+          atNumber: 3,
+          vol: 'B',
+          reason: 'twin elsewhere',
+        },
+      ]
+    );
+    // `GU 12 3` and `GU 12 3 B` are different physical slots; sending the
+    // librarian to the unlettered one points at the wrong disc.
+    expect(out).toContain('`GU 12 3 B`');
+  });
+
+  it('drops the artist number cleanly when the shelf has none', () => {
+    const out = formatWorklist([item({ artistGenreCode: null })], []);
+    expect(out).toContain('`GU 6`');
+    expect(out).toContain('`GU 31`');
   });
 
   it('omits the judgement section entirely when nothing was withheld', () => {

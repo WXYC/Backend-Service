@@ -37,6 +37,24 @@ describe('titleKey', () => {
     expect(titleKey('UP&down Club Sessions Vol. 1')).not.toBe(titleKey('UP&down Club Sessions Vol. 2'));
   });
 
+  // A format marker is `12"`, not the number 12. Stripping the bare digit
+  // instead of the measurement folds volume numbers away — and 7 and 12 are
+  // ordinary volume numbers, so this destroys real records.
+  it.each([
+    ['Ethiopiques vol. 7', 'Ethiopiques vol. 12'],
+    ['Volume 7', 'Volume 12'],
+    ['Volume Seven', 'Volume 12'],
+    ['Dancehall 101 Vol. 7', 'Dancehall 101 Vol. 12'],
+  ])('keeps %s distinct from %s — 7 and 12 are volume numbers, not formats', (a, b) => {
+    expect(titleKey(a)).not.toBe(titleKey(b));
+  });
+
+  it('still folds a genuine inch marking, which carries the quote', () => {
+    expect(titleKey('It\'s a Party 12"')).toBe(titleKey("It's a Party cd-single"));
+    expect(titleKey('Let the Rhythm Hit Em 12"')).toBe(titleKey('Let the Rhythm Hit Em CD'));
+    expect(titleKey('Illadelph Half-Life 12"x2')).toBe(titleKey('Illadelph Half-Life'));
+  });
+
   it('returns empty for a title that is nothing but decoration', () => {
     expect(titleKey('[EP]')).toBe('');
     expect(titleKey('the')).toBe('');
@@ -63,12 +81,12 @@ describe('similarity', () => {
 describe('classifySlot', () => {
   it('merges a slot holding one release entered twice', () => {
     const v = classifySlot([member(1, "People's Instinctive Travels"), member(2, "People's Instinctive Travels")]);
-    expect(v).toEqual({ kind: 'merge', survivorId: 1, loserIds: [2] });
+    expect(v).toEqual({ kind: 'merge', survivorId: 1, loserIds: [2], unresolvedIds: [] });
   });
 
   it('merges across a format difference — one record, two pressings', () => {
     const v = classifySlot([member(10, 'It\'s a Party 12"', 3), member(11, "It's a Party cd-single", 1)]);
-    expect(v).toEqual({ kind: 'merge', survivorId: 10, loserIds: [11] });
+    expect(v).toEqual({ kind: 'merge', survivorId: 10, loserIds: [11], unresolvedIds: [] });
   });
 
   it('renumbers a slot holding two genuinely different releases', () => {
@@ -95,6 +113,35 @@ describe('classifySlot', () => {
     it('breaks a full tie on the lower id, for determinism across runs', () => {
       const v = classifySlot([member(61, 'Cypress Hill', 2), member(60, 'Cypress Hill', 2)]);
       expect(v).toMatchObject({ kind: 'merge', survivorId: 60 });
+    });
+  });
+
+  // One title being a prefix of another is not evidence of the same release:
+  // it is equally the signature of a twofer, a sequel, or an unrelated longer
+  // name. Merging on it deletes a different album and reattaches its plays.
+  it.each([
+    ['Home', 'Homework'],
+    ['Kid A', 'Kid Ambulance'],
+    ['Songs of Love', 'Songs of Love and Hate'],
+    ['Fire', 'Fireworks'],
+    ['#1 Record', '#1 Record & Radio City'],
+  ])('does not merge %s with %s on a bare prefix match', (a, b) => {
+    expect(classifySlot([member(1, a, 5), member(2, b, 1)]).kind).toBe('renumber');
+  });
+
+  describe('a slot holding three rows', () => {
+    it('merges the duplicates and reports the row that still collides', () => {
+      const v = classifySlot([member(1, 'Bee Thousand', 9), member(2, 'Bee Thousand', 1), member(3, 'Alien Lanes', 4)]);
+      expect(v).toEqual({ kind: 'merge', survivorId: 1, loserIds: [2], unresolvedIds: [3] });
+    });
+
+    it('reports nothing unresolved when all three are the same release', () => {
+      const v = classifySlot([
+        member(1, 'Bee Thousand', 9),
+        member(2, 'Bee Thousand', 1),
+        member(3, 'Bee Thousand', 4),
+      ]);
+      expect(v).toMatchObject({ kind: 'merge', unresolvedIds: [] });
     });
   });
 

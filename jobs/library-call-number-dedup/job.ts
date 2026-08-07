@@ -50,7 +50,11 @@ import { runDedup } from './merge.js';
 
 const main = async () => {
   try {
-    await runDedup();
+    const summary = await runDedup();
+    // A skipped renumber leaves a slot still colliding, so the run did not
+    // finish its job even though nothing failed. Surface it in the exit code
+    // rather than only in a warning line buried in the log.
+    if (summary.renumbersSkipped > 0) process.exitCode = 1;
   } finally {
     await closeDatabaseConnection();
   }

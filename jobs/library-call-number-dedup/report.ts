@@ -17,6 +17,8 @@ export interface RelabelItem {
   genre: string;
   artist: string;
   codeLetters: string;
+  /** `genre_artist_crossreference.artist_genre_code` — the middle component. */
+  artistGenreCode: number | null;
   moveTitle: string;
   keepTitle: string;
   oldNumber: number;
@@ -29,13 +31,26 @@ export interface HeldItem {
   genre: string;
   artist: string;
   codeLetters: string;
+  artistGenreCode: number | null;
   title: string;
   atNumber: number;
+  /** Volume letter of the slot, or '' — a held item can sit on a lettered shelf. */
+  vol: string;
   reason: string;
 }
 
-const callNumber = (letters: string, n: number, vol: string): string =>
-  vol ? `${letters} ${n} ${vol}` : `${letters} ${n}`;
+/**
+ * A WXYC call number has three components — code letters, the artist's number
+ * within the genre, and the release's number on that shelf — plus a volume
+ * letter for a multi-disc set. Two artists in one genre routinely share code
+ * letters, so dropping the middle component yields an address that does not
+ * identify a slot. Rendered space-separated, matching the three fields the
+ * catalog API returns rather than inventing a punctuation convention.
+ */
+const callNumber = (letters: string, artistGenreCode: number | null, n: number, vol: string): string => {
+  const parts = [letters, artistGenreCode === null ? null : String(artistGenreCode), String(n), vol || null];
+  return parts.filter((p) => p !== null && p !== '').join(' ');
+};
 
 /** Render the worklist as Markdown, grouped by genre then shelf. */
 export const formatWorklist = (items: readonly RelabelItem[], held: readonly HeldItem[]): string => {
@@ -66,8 +81,8 @@ export const formatWorklist = (items: readonly RelabelItem[], held: readonly Hel
       .sort((a, b) => a.codeLetters.localeCompare(b.codeLetters) || a.oldNumber - b.oldNumber);
     for (const i of rows) {
       out.push(
-        `| ☐ | ${genre} | ${i.artist} | ${i.moveTitle} | \`${callNumber(i.codeLetters, i.oldNumber, i.vol)}\` | ` +
-          `\`${callNumber(i.codeLetters, i.newNumber, i.vol)}\` | ${i.keepTitle} |`
+        `| ☐ | ${genre} | ${i.artist} | ${i.moveTitle} | \`${callNumber(i.codeLetters, i.artistGenreCode, i.oldNumber, i.vol)}\` | ` +
+          `\`${callNumber(i.codeLetters, i.artistGenreCode, i.newNumber, i.vol)}\` | ${i.keepTitle} |`
       );
     }
   }
@@ -77,14 +92,14 @@ export const formatWorklist = (items: readonly RelabelItem[], held: readonly Hel
     out.push('## Needs your judgement');
     out.push('');
     out.push(
-      'In these, the disc that would have moved **already has a same-titled copy elsewhere on the same shelf.** Giving it a new number would leave one title at three addresses. Whether the other copy is a genuine duplicate, a different pressing, or a mis-filing is a question the shelf can answer and the database cannot, so nothing was changed.'
+      'These slots were left alone because the database cannot settle them. Either the disc that would have moved already has a same-titled copy elsewhere on the shelf — so a new number would leave one title at three addresses — or the slot still holds two different releases after its duplicates merged. Which copy is real, and which should move, is a question the shelf can answer and the catalog cannot. Nothing was changed.'
     );
     out.push('');
     out.push('| Genre | Shelf | Title | Currently at | Why it was held |');
     out.push('|---|---|---|---|---|');
     for (const h of held) {
       out.push(
-        `| ${h.genre} | ${h.artist} | ${h.title} | \`${callNumber(h.codeLetters, h.atNumber, '')}\` | ${h.reason} |`
+        `| ${h.genre} | ${h.artist} | ${h.title} | \`${callNumber(h.codeLetters, h.artistGenreCode, h.atNumber, h.vol)}\` | ${h.reason} |`
       );
     }
     out.push('');

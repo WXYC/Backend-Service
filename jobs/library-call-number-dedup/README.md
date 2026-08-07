@@ -54,11 +54,15 @@ Two tables are deliberately **not** targets: `album_plays` is a materialized vie
 
 ## Safety
 
-- **Dry-run by default.** A dry run SELECTs and reports the whole plan, including the finished relabel worklist, with zero writes.
+- **Dry-run by default.** A dry run SELECTs and reports the whole plan with zero writes, including the child rows a merge would DROP as duplicates — counted separately from the ones it would repoint, so the destructive half of the plan is visible before approval.
 - **Idempotent.** A completed merge drops that slot out of the `HAVING count(*) > 1` set, so a re-run finds nothing to do.
 - **Per-slot atomic.** Each slot's repoints and delete run in one transaction, so a mid-run abort leaves each slot either fully merged or untouched.
 - **Renumbers re-check their destination** inside the transaction and decline rather than collide, since the plan is built from a snapshot and a librarian may file concurrently. Declined renumbers are logged and left for a re-run.
 - **Withheld renumbers.** When the disc that would move already has a same-titled copy elsewhere on the same shelf, giving it a new number would leave one title at three addresses. Which copy is real is a shelf question, so those are reported in the worklist and nothing is changed.
+- **Data is moved before it can be dropped.** The survivor is chosen by inbound reference count, which says nothing about how complete its data is, so a fill-null pass COALESCEs the loser's expensive-to-recollect columns onto the survivor before anything is deleted — the LML identity resolution, curated artwork, and the music director's deliberate "not on Discogs" note, plus the same treatment for `album_metadata`. Without it a merge can delete the only row that carried them.
+- **Refuses to start while a show is on air.** The job writes `flowsheet`, which dj-site polls every 60s. It is a one-shot run in a chosen window, so declining outright is cheaper than pausing mid-pass.
+- **A skipped renumber sets a non-zero exit code** and is kept off the worklist. The catalog row never moved, so telling the librarian to relabel that disc would create the shelf/catalog disagreement this job exists to remove, in reverse.
+- **A slot holding three rows** merges its duplicates and reports the remainder for the librarian, rather than guessing which of two different releases should move.
 - `ANALYZE` on the rewritten tables after an `--execute` run, per `docs/bulk-update-playbook.md`.
 
 ## Sequencing

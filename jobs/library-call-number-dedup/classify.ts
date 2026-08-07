@@ -26,17 +26,28 @@
  */
 
 /**
- * Decoration that names a *pressing* rather than a *work*: format, edition,
- * pressing status, and the articles/conjunctions that come and go when the same
- * title is retyped. Stripped before comparison.
+ * A format marking is a measurement — `12"`, `7 inch` — not the bare number.
+ * Stripped from the raw title BEFORE tokenizing, because the quote is the only
+ * thing distinguishing the marking from an ordinary number, and punctuation
+ * removal destroys it. Stripping the bare digit instead folds `vol. 7` into
+ * `vol. 12`, merging two real records; 7, 10 and 12 are all ordinary volume
+ * numbers as well as disc sizes.
+ */
+const FORMAT_MARKING = /\b(?:7|10|12)\s*(?:"|''|”|″|-?\s*inch(?:es)?)\s*(?:x\s*\d+)?/gi;
+
+/**
+ * Word decoration that names a *pressing* rather than a *work*: format,
+ * edition, pressing status, and the articles/conjunctions that come and go when
+ * the same title is retyped.
  *
- * Deliberately NOT stripped: volume and part numbers. `Ethiopiques vol. 21` and
- * `Ethiopiques vol. 22` are different records, and folding them together would
- * merge two real releases into one and delete a catalog row that has plays.
+ * Deliberately absent: any bare number. Volume and part numbers are part of the
+ * work's name — `Ethiopiques vol. 21` and `vol. 22` are different records, and
+ * folding them together would delete a catalog row that has plays.
  */
 const DECORATION =
-  /^(?:12|7)(?:inch|x2)?$|^(?:cd|lp|ep|single|singles|maxi|remix|rmx|clean|dirty|lyric|version|reissue|remastered|extended|live|vinyl|bonus|tracks?|disc|promo|missing|double|fulllength)$|^(?:the|a|an|of|with|w|and)$/;
+  /^(?:cd|lp|ep|single|singles|maxi|remix|rmx|clean|dirty|lyric|version|reissue|remastered|extended|live|vinyl|bonus|tracks?|disc|promo|missing|double|fulllength)$|^(?:the|a|an|of|with|w|and)$/;
 
+/** `Volume One` and `Volume 1` are the same record typed two ways. */
 const NUMBER_WORDS: Readonly<Record<string, string>> = {
   one: '1',
   two: '2',
@@ -51,14 +62,15 @@ const NUMBER_WORDS: Readonly<Record<string, string>> = {
 };
 
 /**
- * Fold a title to the work it names: lower-case, drop punctuation, spell
- * numbers as digits (`Volume One` -> `volume1`), then drop decoration tokens.
- * Returns '' when a title is nothing but decoration, which callers must treat
- * as "no evidence" rather than as a match.
+ * Fold a title to the work it names: drop format markings, lower-case, drop
+ * punctuation, spell numbers as digits, then drop word decoration. Returns ''
+ * when a title is nothing but decoration, which callers must treat as "no
+ * evidence" rather than as a match.
  */
 export const titleKey = (title: string): string =>
   title
     .toLowerCase()
+    .replace(FORMAT_MARKING, ' ')
     .replace(/[^a-z0-9]+/g, ' ')
     .trim()
     .split(/\s+/)
@@ -97,8 +109,14 @@ export interface SlotMember {
 }
 
 export type SlotVerdict =
-  /** One release entered twice. Merge into `survivorId`. */
-  | { kind: 'merge'; survivorId: number; loserIds: number[] }
+  /**
+   * At least one row is a re-entry of `survivorId` and merges into it.
+   * `unresolvedIds` lists rows in the same slot that are NOT the same release —
+   * empty for the ordinary two-row case. When it is non-empty the slot still
+   * collides after the merge, and the remainder is a shelf question rather than
+   * something to guess at.
+   */
+  | { kind: 'merge'; survivorId: number; loserIds: number[]; unresolvedIds: number[] }
   /** Genuinely different releases. One must move, and its disc relabelled. */
   | { kind: 'renumber'; keepId: number; moveId: number };
 
@@ -129,15 +147,27 @@ export const classifySlot = (members: readonly SlotMember[]): SlotVerdict => {
     const key = titleKey(m.album_title);
     // A title that folds to nothing carries no evidence either way; treat it as
     // distinct so a bare "[EP]" is never silently merged into a real title.
-    if (!key || !survivorKey) return key === survivorKey && key.length > 0;
+    if (!key || !survivorKey) return false;
     if (key === survivorKey) return true;
-    if (key.startsWith(survivorKey) || survivorKey.startsWith(key)) return true;
+    // Deliberately NOT a prefix test. One title being a prefix of another is
+    // equally the signature of a twofer (`#1 Record` / `#1 Record & Radio
+    // City`), a sequel, or an unrelated longer name, and merging on it deletes
+    // a different album and reattaches its plays. Decoration is already gone by
+    // this point, so a genuine re-entry folds to an EQUAL key; similarity only
+    // has to cover typos (`Starlight` / `Starlite`). A truncated-title
+    // duplicate that misses the threshold falls through to a renumber, which
+    // costs a shelf visit but never destroys a row.
     return similarity(key, survivorKey) >= SIMILARITY_THRESHOLD;
   };
 
   const losers = rest.filter(sameRelease);
-  if (losers.length === rest.length) {
-    return { kind: 'merge', survivorId: survivor.id, loserIds: losers.map((m) => m.id) };
+  if (losers.length > 0) {
+    return {
+      kind: 'merge',
+      survivorId: survivor.id,
+      loserIds: losers.map((m) => m.id),
+      unresolvedIds: rest.filter((m) => !sameRelease(m)).map((m) => m.id),
+    };
   }
 
   // At least one row in the slot is a different release. The row that moves is
