@@ -265,6 +265,67 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
     });
   });
 
+  // The job's central safety claim is that repointing must precede deletion,
+  // and the force of that claim rests entirely on which sites cascade. That
+  // fact cannot be read off `schema.ts`: it declares
+  // `artist_library_crossreference.library_id` as `cascade` while the database
+  // enforces `no action` (BS#2015, one of four such drifts). Nor can it be read
+  // off the migration that first created a constraint — `album_metadata` was
+  // created `no action`, dropped with its table, then recreated `cascade` three
+  // migrations later. So the delete actions are pinned here against the live
+  // catalog, which is the only authority, and this test fails if either the
+  // database or the FK_TARGETS list moves out from under the README's table.
+  describe('enforced-fk-actions', () => {
+    const EXPECTED = {
+      rotation: 'CASCADE',
+      album_metadata: 'CASCADE',
+      reviews: 'CASCADE',
+      album_critic_reviews: 'CASCADE',
+      compilation_track_artist: 'CASCADE',
+      flowsheet: 'SET NULL',
+      album_review_submissions: 'SET NULL',
+      artist_library_crossreference: 'NO ACTION',
+      bins: 'NO ACTION',
+      library_identity: 'NO ACTION',
+      library_identity_source: 'NO ACTION',
+    };
+
+    it('matches the delete actions the database actually enforces', async () => {
+      const rows = await sql`
+        SELECT tc.table_name, rc.delete_rule
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.referential_constraints rc
+            ON rc.constraint_name = tc.constraint_name
+           AND rc.constraint_schema = tc.table_schema
+          JOIN information_schema.constraint_column_usage ccu
+            ON ccu.constraint_name = tc.constraint_name
+           AND ccu.constraint_schema = tc.table_schema
+         WHERE tc.constraint_type = 'FOREIGN KEY'
+           AND tc.table_schema = ${SCHEMA}
+           AND ccu.table_name = 'library'
+           AND ccu.column_name = 'id'
+      `;
+      const actual = Object.fromEntries(rows.map((r) => [r.table_name, r.delete_rule]));
+      for (const [table, rule] of Object.entries(EXPECTED)) {
+        expect({ table, rule: actual[table] }).toEqual({ table, rule });
+      }
+    });
+
+    it('covers every FK_TARGETS entry that the database actually constrains', async () => {
+      const constrained = new Set(Object.keys(EXPECTED));
+      const targets = new Set(merge.FK_TARGETS.map((t) => t.table));
+      // Every constrained table must be a repoint target, or a delete would
+      // cascade/null/block through a site the job never touches.
+      for (const table of constrained) {
+        expect(targets.has(table)).toBe(true);
+      }
+      // The remainder carry no FK, so they orphan silently rather than cascade —
+      // repointed anyway, and named here so the asymmetry stays deliberate.
+      const unconstrained = [...targets].filter((t) => !constrained.has(t));
+      expect(unconstrained.sort()).toEqual(['album_popularity', 'library_identity_history']);
+    });
+  });
+
   it('is idempotent — a merged slot drops out of the collision scan', async () => {
     await seedAlbum({ title: 'DOGA', codeNumber: 11 });
     await seedAlbum({ title: 'DOGA', codeNumber: 11 });

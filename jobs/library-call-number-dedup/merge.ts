@@ -24,10 +24,18 @@
  *     let straight through.
  *
  * Every FK referencing `library.id` is repointed to the survivor BEFORE the
- * losing row is deleted. That ordering is not stylistic: six of the sites
- * declare `onDelete: 'cascade'` and two declare `set null`, so deleting first
- * would silently destroy rotation history, album metadata, and reviews, and
- * silently unlink plays, with no error raised.
+ * losing row is deleted. That ordering is not stylistic: five of the sites
+ * cascade and two null the reference out, so deleting first would silently
+ * destroy rotation history, album metadata, and reviews, and silently unlink
+ * plays, with no error raised.
+ *
+ * Those actions are what the DATABASE enforces, which is not what `schema.ts`
+ * declares — it marks `artist_library_crossreference.library_id` as `cascade`
+ * while migration 0022 created it `no action` and nothing since altered it (one
+ * of the four drifted constraints in BS#2015). The integration spec's
+ * `enforced-fk-actions` block pins every entry below against
+ * `information_schema` so this list tracks the database rather than the
+ * declaration.
  */
 
 import { sql, type SQL } from 'drizzle-orm';
