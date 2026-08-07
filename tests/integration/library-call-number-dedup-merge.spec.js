@@ -86,12 +86,29 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
     artistId = a.id;
   });
 
+  // Teardown has to observe the SAME ordering the job does: `bins`,
+  // `library_identity`, and `library_identity_source` declare no cascade, so
+  // Postgres refuses to delete a `library` row they still reference. Deleting
+  // the parent first raises `library_identity_library_id_library_id_fk` — which
+  // is exactly the loud failure that makes those three the safe sites.
+  //
+  // The reset is in a `finally` so a teardown that does throw takes down only
+  // its own test: without it, `libraryIds` keeps the already-attempted ids and
+  // every subsequent test re-runs the same failing delete and inherits the
+  // error, turning one broken test into a broken file.
   afterEach(async () => {
-    if (libraryIds.length > 0) {
-      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${libraryIds})`;
+    try {
+      if (libraryIds.length > 0) {
+        await sql`DELETE FROM ${sql(SCHEMA)}.library_identity_source WHERE library_id = ANY(${libraryIds})`;
+        await sql`DELETE FROM ${sql(SCHEMA)}.library_identity WHERE library_id = ANY(${libraryIds})`;
+        await sql`DELETE FROM ${sql(SCHEMA)}.bins WHERE album_id = ANY(${libraryIds})`;
+        await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${libraryIds})`;
+      }
+      if (artistId) await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id = ${artistId}`;
+    } finally {
       libraryIds.length = 0;
+      artistId = null;
     }
-    if (artistId) await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id = ${artistId}`;
   });
 
   describe('repoint-before-delete (the cascade invariant)', () => {
