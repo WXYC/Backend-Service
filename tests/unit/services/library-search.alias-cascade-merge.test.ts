@@ -222,3 +222,123 @@ describe('searchLibrary — alias-only primary no longer suppresses the cascade 
     expect(total).toBe(1);
   });
 });
+
+/**
+ * BS#2018 Fix 1, merge-path half. The SQL `ORDER BY` tier (pinned in
+ * `library-search-alias.test.ts`) only orders rows the primary query returns.
+ * When the cascade fires, `sortAlbumRows` re-sorts cascade rows spliced
+ * together with the alias rows in memory — and that sort has to apply the
+ * SAME tier, or a fuzzy alias-noise row whose artist name happens to sort
+ * first lands above the cascade's real answer on page 0.
+ *
+ * The two sorts agree on a tier key both can compute: "alias-only", i.e.
+ * `matched_via_alias` present AND `matched_via` absent. `alias_max_sim` is
+ * deliberately NOT part of the ordering — it never reaches the wire shape, so
+ * the in-memory sort could not reproduce it and the two halves would drift.
+ */
+describe('searchLibrary — alias-only rows sort after real matches in the merge (BS#2018)', () => {
+  const originalFlag = process.env.CATALOG_SEARCH_ALIAS_ENABLED;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockRunCatalogTrackSearchCascade.mockReset().mockResolvedValue([]);
+    delete process.env.CATALOG_SEARCH_ALIAS_ENABLED;
+    resetCatalogSearchAliasConfig();
+    db.execute.mockReset();
+  });
+
+  afterAll(() => {
+    if (originalFlag === undefined) delete process.env.CATALOG_SEARCH_ALIAS_ENABLED;
+    else process.env.CATALOG_SEARCH_ALIAS_ENABLED = originalFlag;
+    resetCatalogSearchAliasConfig();
+  });
+
+  it('demotes an alias-only row that would otherwise sort ahead of the cascade hit', async () => {
+    enableAlias();
+    // 'Bill Monroe' sorts before 'Chiastic Slide Artist' on artist ASC, so
+    // pre-fix the noise row led the page. Two of them, to prove the tier
+    // moves the whole group rather than just the first row.
+    db.execute
+      .mockResolvedValueOnce([
+        aliasRow({ id: 43, artist_name: 'Bill Monroe', album_title: 'Bluegrass Ramble' }, 'Monore'),
+        aliasRow({ id: 44, artist_name: 'Bill Monroe', album_title: "Can't You Hear Me Callin'" }, 'Monore'),
+      ])
+      .mockResolvedValueOnce([{ total: 2, total_non_alias: 0 }]);
+    mockRunCatalogTrackSearchCascade.mockResolvedValue([cascadeRow({ id: 99 })]);
+
+    const { results } = await searchLibrary(PARAMS);
+
+    expect(results.map((r) => r.id)).toEqual([99, 43, 44]);
+    expect(results[0].matched_via).toBeDefined();
+    expect(results[0].matched_via_alias).toBeUndefined();
+  });
+
+  it('keeps the caller sort intact WITHIN the alias tier', async () => {
+    enableAlias();
+    db.execute
+      .mockResolvedValueOnce([
+        aliasRow({ id: 43, artist_name: 'Zither Ensemble' }, 'Monore'),
+        aliasRow({ id: 44, artist_name: 'Bill Monroe' }, 'Monore'),
+      ])
+      .mockResolvedValueOnce([{ total: 2, total_non_alias: 0 }]);
+    mockRunCatalogTrackSearchCascade.mockResolvedValue([cascadeRow({ id: 99 })]);
+
+    const { results } = await searchLibrary({ ...PARAMS, sort: 'artist', order: 'asc' });
+
+    // Cascade first (tier), then the alias rows in artist_name order.
+    expect(results.map((r) => r.id)).toEqual([99, 44, 43]);
+  });
+
+  it('order=desc flips the sort inside each tier but not the tier itself', async () => {
+    enableAlias();
+    db.execute
+      .mockResolvedValueOnce([
+        aliasRow({ id: 43, artist_name: 'Zither Ensemble' }, 'Monore'),
+        aliasRow({ id: 44, artist_name: 'Bill Monroe' }, 'Monore'),
+      ])
+      .mockResolvedValueOnce([{ total: 2, total_non_alias: 0 }]);
+    mockRunCatalogTrackSearchCascade.mockResolvedValue([cascadeRow({ id: 99 })]);
+
+    const { results } = await searchLibrary({ ...PARAMS, sort: 'artist', order: 'desc' });
+
+    // 'Chiastic Slide Artist' sorts below both alias artists on desc, so this
+    // case only passes if the tier — not the name — decides the leader.
+    expect(results.map((r) => r.id)).toEqual([99, 43, 44]);
+  });
+
+  it('a cascade row carrying an alias hint is NOT demoted (it matched for real)', async () => {
+    enableAlias();
+    // Id collision: the cascade resolved id 42 for real, and the alias branch
+    // also hit it. `matched_via_alias` gets carried onto the cascade row for
+    // the UI — that must not read as "alias-only" to the sort.
+    db.execute
+      .mockResolvedValueOnce([aliasRow({ id: 42, artist_name: 'Zither Ensemble' }, 'Monore')])
+      .mockResolvedValueOnce([{ total: 2, total_non_alias: 0 }]);
+    mockRunCatalogTrackSearchCascade.mockResolvedValue([
+      cascadeRow({ id: 42, artist_name: 'Zither Ensemble' }),
+      cascadeRow({ id: 99 }),
+    ]);
+
+    const { results } = await searchLibrary(PARAMS);
+
+    const merged = results.find((r) => r.id === 42);
+    expect(merged?.matched_via).toBeDefined();
+    expect(merged?.matched_via_alias).toBeDefined();
+    // Both rows matched for real, so ordinary artist_name ASC applies:
+    // 'Chiastic Slide Artist' (99) before 'Zither Ensemble' (42).
+    expect(results.map((r) => r.id)).toEqual([99, 42]);
+  });
+
+  it('pure-cascade page (no alias rows at all) is unaffected by the tier', async () => {
+    enableAlias();
+    db.execute.mockResolvedValueOnce([]).mockResolvedValueOnce([{ total: 0, total_non_alias: 0 }]);
+    mockRunCatalogTrackSearchCascade.mockResolvedValue([
+      cascadeRow({ id: 99, artist_name: 'Zither Ensemble' }),
+      cascadeRow({ id: 98, artist_name: 'Bill Monroe' }),
+    ]);
+
+    const { results } = await searchLibrary(PARAMS);
+
+    expect(results.map((r) => r.id)).toEqual([98, 99]);
+  });
+});

@@ -44,7 +44,11 @@ import {
   searchByArtist,
   __resetTrackSearchCacheForTests,
 } from '../../../apps/backend/services/library.service';
-import { searchLibrary as searchCatalogQuery } from '../../../apps/backend/services/library-search.service';
+import {
+  searchLibrary as searchCatalogQuery,
+  type CatalogSort,
+  type CatalogOrder,
+} from '../../../apps/backend/services/library-search.service';
 import { resetConfig as resetCatalogSearchAliasConfig } from '../../../apps/backend/config/catalogSearchAlias';
 import { resetConfig as resetCatalogTrackSearchConfig } from '../../../apps/backend/config/catalogTrackSearch';
 
@@ -74,6 +78,34 @@ const baseViewRow = {
   apple_music_artist_id: null,
   bandcamp_id: null,
 };
+
+/**
+ * Flatten the `tests/__mocks__/drizzle-orm.ts` stand-in for a Drizzle `SQL`
+ * object into readable text with its interpolated values inlined, so an
+ * assertion can read like the SQL it pins (`similarity(asa.variant, monolake)
+ * >= 0.4`) instead of like a JSON blob.
+ *
+ * The mocked `sql` tag returns `{ sql: TemplateStringsArray, values }`, and a
+ * nested `sql` fragment shows up as one of those `values` — so rendering is
+ * "interleave the literals with the recursively-rendered values". Columns come
+ * from the mocked `@wxyc/database`, whose tables are plain string maps, so an
+ * unmapped column renders as `undefined`; that's harmless here because every
+ * assertion below targets literal SQL text or an unqualified sort alias.
+ */
+function renderSqlWithParams(node: unknown): string {
+  if (node === null || node === undefined) return '';
+  if (typeof node === 'string' || typeof node === 'number' || typeof node === 'boolean') return String(node);
+  const literals = (node as { sql?: unknown }).sql;
+  if (Array.isArray(literals)) {
+    const values = (node as { values?: unknown[] }).values ?? [];
+    return literals
+      .map((text, i) => `${String(text)}${i < values.length ? renderSqlWithParams(values[i]) : ''}`)
+      .join('');
+  }
+  const raw = (node as { raw?: unknown }).raw;
+  if (typeof raw === 'string') return raw;
+  return JSON.stringify(node) ?? '';
+}
 
 describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
   const originalFlag = process.env.CATALOG_SEARCH_ALIAS_ENABLED;
@@ -777,6 +809,118 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(renderedCount).not.toContain('alias_hit ON true');
       expect(renderedData).not.toContain('LEFT JOIN LATERAL');
       expect(renderedCount).not.toContain('LEFT JOIN LATERAL');
+    });
+
+    // ---------------------------------------------------------------------
+    // BS#2018 — alias-branch fuzzy hits flooded the result set.
+    //
+    // `q=monolake` returned all 14 Bill Monroe albums ahead of the 6 Monolake
+    // ones, because (1) Discogs artist 450691 carries the misprint variant
+    // "Monore", which clears pg_trgm's 0.30 `%` threshold against "monolake"
+    // by 0.03, and (2) `alias_max_sim` was projected but never used in ORDER
+    // BY, so a 0.333 typo-collision sorted identically to an exact hit.
+    //
+    // Fix 1 tiers the sort (alias-only rows always after non-alias rows).
+    // Fix 2 raises the alias match floor to 0.40.
+    // ---------------------------------------------------------------------
+    describe('BS#2018 alias-noise floor + rank tiering', () => {
+      const ALIAS_ONLY_TIER = '(alias_max_sim IS NOT NULL) ASC';
+
+      function runAliasQuery(
+        params: { sort?: CatalogSort; order?: CatalogOrder } = {}
+      ): Promise<{ data: string; count: string }> {
+        stubGenreFormatLookups();
+        db.execute.mockReset();
+        db.execute.mockResolvedValueOnce([baseQueryRow]).mockResolvedValueOnce([{ total: 1, total_non_alias: 1 }]);
+        return searchCatalogQuery({ ...baseQueryParams, ...params }).then(() => ({
+          data: renderSqlWithParams(db.execute.mock.calls[0]?.[0]),
+          count: renderSqlWithParams(db.execute.mock.calls[1]?.[0]),
+        }));
+      }
+
+      beforeEach(() => {
+        process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+        delete process.env.CATALOG_SEARCH_ALIAS_MIN_SIMILARITY;
+        resetCatalogSearchAliasConfig();
+      });
+
+      afterAll(() => {
+        delete process.env.CATALOG_SEARCH_ALIAS_MIN_SIMILARITY;
+        resetCatalogSearchAliasConfig();
+      });
+
+      it('Fix 2: the alias CTE post-filters on similarity >= the configured floor', async () => {
+        const { data, count } = await runAliasQuery();
+
+        // The `%` predicate stays — it is what drives the GIN trigram index
+        // (`artist_search_alias_variant_trgm_idx`). The floor rides on top of
+        // it as a filter, so the index scan is unchanged (BS#1318).
+        expect(data).toContain('asa.variant % Thee Oh Sees');
+        expect(data).toContain('similarity(asa.variant, Thee Oh Sees) >= 0.4');
+        expect(count).toContain('asa.variant % Thee Oh Sees');
+        expect(count).toContain('similarity(asa.variant, Thee Oh Sees) >= 0.4');
+      });
+
+      it('Fix 2: the floor is operator-tunable via CATALOG_SEARCH_ALIAS_MIN_SIMILARITY', async () => {
+        // The AC for Fix 1 depends on this knob: with the floor back at 0.30
+        // the noise rows return, which is the only way to observe the tiering.
+        process.env.CATALOG_SEARCH_ALIAS_MIN_SIMILARITY = '0.3';
+        resetCatalogSearchAliasConfig();
+
+        const { data } = await runAliasQuery();
+
+        expect(data).toContain('similarity(asa.variant, Thee Oh Sees) >= 0.3');
+      });
+
+      it('Fix 1: alias-only rows are tiered last, ahead of the caller sort', async () => {
+        const { data } = await runAliasQuery();
+
+        // The tier key must lead the ORDER BY, and the caller's own sort must
+        // still follow it intact. `FALSE < TRUE` in Postgres, so ASC puts the
+        // non-alias rows first.
+        expect(data).toContain(`ORDER BY ${ALIAS_ONLY_TIER}, artist_name ASC, album_title ASC, id ASC`);
+      });
+
+      const SORT_EXPECTATIONS: [CatalogSort, string, string][] = [
+        ['artist', 'artist_name', 'album_title'],
+        ['album', 'album_title', 'artist_name'],
+        ['plays', 'plays', 'artist_name'],
+        ['date', 'add_date', 'artist_name'],
+      ];
+
+      it.each(
+        SORT_EXPECTATIONS.flatMap(([sort, primary, secondary]) =>
+          (['asc', 'desc'] as const).map((order) => ({ sort, order, primary, secondary }))
+        )
+      )('Fix 1: tier leads the ORDER BY for sort=$sort order=$order', async ({ sort, order, primary, secondary }) => {
+        const { data } = await runAliasQuery({ sort, order });
+
+        const expected = `ORDER BY ${ALIAS_ONLY_TIER}, ${primary} ${order.toUpperCase()}, ${secondary} ASC, id ASC`;
+        expect(data).toContain(expected);
+      });
+
+      it('leaves the inner DISTINCT ON dedupe ordering untouched (BS#1554)', async () => {
+        const { data } = await runAliasQuery();
+
+        // The rotation-bin dedupe ordinal decides WHICH duplicate row
+        // survives; perturbing it changes the surfaced rotation bin. The
+        // tier belongs on the OUTER sort only.
+        expect(data).toContain('ORDER BY id ASC, CASE rotation_bin');
+        expect(data.slice(0, data.indexOf('ORDER BY id ASC, CASE rotation_bin'))).not.toContain(ALIAS_ONLY_TIER);
+      });
+
+      it('alias OFF: neither the floor nor the tier appears (legacy path unchanged)', async () => {
+        delete process.env.CATALOG_SEARCH_ALIAS_ENABLED;
+        resetCatalogSearchAliasConfig();
+
+        const { data, count } = await runAliasQuery();
+
+        expect(data).not.toContain('similarity(asa.variant');
+        expect(data).not.toContain(ALIAS_ONLY_TIER);
+        expect(data).not.toContain('alias_max_sim');
+        expect(count).not.toContain('similarity(asa.variant');
+        expect(data).toContain('ORDER BY artist_name ASC, album_title ASC, id ASC');
+      });
     });
   });
 

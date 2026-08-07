@@ -1,14 +1,6 @@
 import * as Sentry from '@sentry/node';
 import { inArray, sql, type SQL } from 'drizzle-orm';
-import {
-  db,
-  library,
-  library_artist_view,
-  genres,
-  format as formatTable,
-  artist_search_alias,
-  album_plays,
-} from '@wxyc/database';
+import { db, library, library_artist_view, genres, format as formatTable, album_plays } from '@wxyc/database';
 import type { TrackMatchHint } from '@wxyc/shared/dtos';
 import {
   parseSearchQuery,
@@ -21,6 +13,7 @@ import type { ArtistMatchHint, ArtistSearchAliasSource } from './requestLine/typ
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import WxycError from '../utils/error.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
+import { buildAliasHitsCte } from '../utils/alias-hits.js';
 
 export type CatalogSort = 'artist' | 'album' | 'plays' | 'date';
 export type CatalogOrder = 'asc' | 'desc';
@@ -210,18 +203,25 @@ export async function searchLibrary(
     const dedupeWhere = queryWhereAliasOff ? sql`(${queryWhereAliasOff}) IS NOT TRUE` : sql`FALSE`;
     const branchBWhere = combineWhere(dedupeWhere, filterWhere);
 
-    const orderBy = sql`${SORT_COLUMNS_UNQUALIFIED[params.sort]} ${orderDirection}, ${SECONDARY_SORT_UNQUALIFIED[params.sort]} ASC, id ASC`;
+    // BS#2018 Fix 1: tier the sort so branch-(b) rows — matched only through
+    // a fuzzy alias variant — always land after branch-(a) rows, which matched
+    // the query text itself. `alias_max_sim` was computed and projected from
+    // day one but never ordered on, so a 0.333 typo collision ("Monore" for a
+    // "monolake" query) sorted identically to an exact hit and, via the
+    // `artist_id` INNER JOIN, put an entire unrelated discography at the top
+    // of the page. `FALSE < TRUE` in Postgres, so ASC puts the real matches
+    // first; the caller's own sort follows, unchanged, within each tier.
+    //
+    // The tier is deliberately "is it alias-only", NOT `alias_max_sim DESC`:
+    // the score never reaches the wire shape, so `sortAlbumRows` (which
+    // re-sorts this same row set in memory when the cascade fires) could not
+    // reproduce a score-based order and the two would drift.
+    const orderBy = sql`(alias_max_sim IS NOT NULL) ASC, ${SORT_COLUMNS_UNQUALIFIED[params.sort]} ${orderDirection}, ${SECONDARY_SORT_UNQUALIFIED[params.sort]} ASC, id ASC`;
 
-    const cte = sql`WITH alias_hits AS (
-      SELECT
-        asa.artist_id,
-        MAX(similarity(asa.variant, ${params.q})) AS max_sim,
-        (array_agg(asa.variant ORDER BY similarity(asa.variant, ${params.q}) DESC))[1] AS matched_variant,
-        (array_agg(asa.source ORDER BY similarity(asa.variant, ${params.q}) DESC))[1] AS matched_source
-      FROM ${artist_search_alias} asa
-      WHERE asa.variant % ${params.q}
-      GROUP BY asa.artist_id
-    )`;
+    // BS#2018 Fix 2 (the `similarity(...) >= floor` post-filter) lives inside
+    // the shared builder in `utils/alias-hits.ts`, so this path and the two in
+    // `library.service.ts` can't drift on what counts as an alias match.
+    const cte = buildAliasHitsCte(params.q);
 
     const branchAProjection = sql`
       ${library_artist_view.id} AS id,
@@ -466,11 +466,29 @@ async function runCascade(params: LibraryQueryParams, q: string): Promise<AlbumS
 }
 
 /**
- * Sort album rows by the caller's `sort`/`order`, with the same secondary
- * tiebreak + id tiebreak the catalog's primary SQL query uses. Shared by the
- * cascade (whose rows never touch SQL `ORDER BY`) and the alias/cascade merge
- * (BS#1885), which re-sorts a combined row set after `runCascade` and the
- * primary alias rows are spliced together.
+ * In-memory mirror of the SQL `ORDER BY`'s alias tier (BS#2018 Fix 1).
+ *
+ * A row is alias-only when the ALIAS branch is the ONLY reason it is here:
+ * it carries an alias hint and nothing matched it for real. The `matched_via`
+ * check is load-bearing — the BS#1885 merge copies `matched_via_alias` onto a
+ * cascade row when the two collide on `id`, and that row matched for real, so
+ * demoting it would bury the cascade's own answer.
+ *
+ * Keep this predicate equivalent to the SQL tier `alias_max_sim IS NOT NULL`:
+ * SQL rows never carry `matched_via` (only the cascade sets it), and branch
+ * (b)'s dedupe guarantees an `alias_max_sim`-bearing row didn't match branch
+ * (a). The two agree row-for-row.
+ */
+function isAliasOnlyMatch(row: AlbumSearchResultRow): boolean {
+  return row.matched_via_alias !== undefined && row.matched_via === undefined;
+}
+
+/**
+ * Sort album rows by the caller's `sort`/`order`, with the same alias tier,
+ * secondary tiebreak, and id tiebreak the catalog's primary SQL query uses.
+ * Shared by the cascade (whose rows never touch SQL `ORDER BY`) and the
+ * alias/cascade merge (BS#1885), which re-sorts a combined row set after
+ * `runCascade` and the primary alias rows are spliced together.
  */
 function sortAlbumRows(
   rows: AlbumSearchResultRow[],
@@ -481,6 +499,11 @@ function sortAlbumRows(
   const secondaryKey = SECONDARY_SORT_KEYS[params.sort];
   const sorted = [...rows];
   sorted.sort((a, b) => {
+    // Tier first, and independent of `order` — `desc` reverses the ranking
+    // within each tier, never the tiers themselves. Fuzzy alias noise stays
+    // below real matches in both directions.
+    const tier = Number(isAliasOnlyMatch(a)) - Number(isAliasOnlyMatch(b));
+    if (tier !== 0) return tier;
     const primary = compareSortable(a[primaryKey], b[primaryKey]) * direction;
     if (primary !== 0) return primary;
     const secondary = compareSortable(a[secondaryKey], b[secondaryKey]);
