@@ -1517,6 +1517,20 @@ async function searchLibraryByTrigramBoth(
   // `alias_max_sim`. Postgres forbids expression-shaped ORDER BY directly on
   // a UNION result (column names only); the subquery lifts the union's
   // columns into a scope where `similarity(...)` is a legal ORDER BY term.
+  //
+  // BS#2020: alias-only rows are tiered LAST, ahead of the relevance sort.
+  // Ranking both branches on one `GREATEST(...)` scale let a single
+  // mid-scoring variant displace real matches wholesale — branch (b) INNER
+  // JOINs on `artist_id`, so one hit admits an artist's entire discography at
+  // that score. Branch (b) rows are selected under `NOT (trigramPredicate)`,
+  // so their own similarity is by construction sub-threshold and `GREATEST`
+  // always collapses to `alias_max_sim` for them; there was no signal
+  // separating "matched the query text" from "matched a fuzzy variant".
+  // `FALSE < TRUE` in Postgres, so ASC puts real matches first, and the
+  // strongest alias hit still leads within the alias tier.
+  //
+  // `id ASC` breaks ties: every row of one artist shares an identical
+  // `alias_max_sim`, so without it their order is whatever the plan emits.
   const streamingClause = on_streaming !== undefined ? sql`AND ${library.on_streaming} = ${on_streaming}` : sql``;
   const trigramPredicate = sql`(${library.artist_name} % ${query} OR ${library.album_title} % ${query})`;
   const rows = (await db.execute(sql`
@@ -1539,11 +1553,11 @@ async function searchLibraryByTrigramBoth(
         ${streamingClause}
       )
     ) alias_search
-    ORDER BY GREATEST(
+    ORDER BY (alias_max_sim IS NOT NULL) ASC, GREATEST(
       similarity(artist_name, ${query}),
       similarity(album_title, ${query}),
       COALESCE(alias_max_sim, 0)
-    ) DESC
+    ) DESC, id ASC
     LIMIT ${n}
   `)) as unknown as (LibraryArtistViewEntry & AliasHitFields)[];
 
@@ -2723,6 +2737,11 @@ export async function searchByArtist(artistName: string, limit = 5): Promise<Enr
   // Wrap the UNION ALL in a subquery so the outer ORDER BY can use
   // expression-shaped terms (`similarity(...)`); Postgres forbids
   // expression ORDER BY directly on a UNION result.
+  //
+  // BS#2020: same alias-last tier as `searchLibraryByTrigramBoth`, and it
+  // bites harder here — this path has no `album_title` term to rank on and
+  // its default `limit` is 5, so one artist's alias fan-out can exceed the
+  // whole response. See that function for the full rationale.
   const trigramPredicate = sql`${library.artist_name} % ${artistName}`;
   const rows = (await db.execute(sql`
     ${buildAliasHitsCte(artistName, aliasMinSimilarity)}
@@ -2742,10 +2761,10 @@ export async function searchByArtist(artistName: string, limit = 5): Promise<Enr
         WHERE NOT ${trigramPredicate}
       )
     ) alias_search
-    ORDER BY GREATEST(
+    ORDER BY (alias_max_sim IS NOT NULL) ASC, GREATEST(
       similarity(artist_name, ${artistName}),
       COALESCE(alias_max_sim, 0)
-    ) DESC
+    ) DESC, id ASC
     LIMIT ${limit}
   `)) as unknown as (LibraryArtistViewEntry & AliasHitFields)[];
 
