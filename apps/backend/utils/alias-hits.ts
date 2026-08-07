@@ -57,3 +57,44 @@ export function buildAliasHitsCte(query: string, minSimilarity: number) {
     GROUP BY asa.artist_id
   )`;
 }
+
+/**
+ * Leading ORDER BY term for every alias-aware read path: sort rows that
+ * matched ONLY through a *fuzzy* alias variant after everything else.
+ *
+ * `FALSE < TRUE` in Postgres, so ASC puts the non-demoted rows first. Branch
+ * (a) rows have a NULL `alias_max_sim`, and `FALSE AND NULL` short-circuits to
+ * FALSE, so they land in the leading tier without a COALESCE.
+ *
+ * ## Why the `< 1` guard
+ *
+ * BS#2018 introduced this tier unconditionally, against a 0.333 typo collision
+ * ("Monore" for a `monolake` query) that sorted identically to an exact hit.
+ * The complaint was always about *fuzzy* variants; demoting exact ones was
+ * collateral. `similarity()` returns exactly 1 only when the query string and
+ * the variant are the same string modulo case and trigram padding — i.e. the
+ * query IS a registered name for that artist. That is a stronger claim than a
+ * 0.31 trigram smear across some unrelated canonical name, so tiering it below
+ * one inverts the ranking the alias substrate exists to provide.
+ *
+ * On `/library/query` the collateral was survivable: it paginates, so a
+ * demoted row is on a later page. The two `library.service.ts` paths emit a
+ * bare `LIMIT` with no OFFSET, so for them demoted means *deleted* — measured
+ * on a prod-shaped clone, a `monolake` query has 13 real rows scoring <= 0.40
+ * ahead of the tier, which pushes a 1.0 alias hit past position 13 on a
+ * surface whose default limit is 5. BS#1383's `discogs_member` fixture (an
+ * exact variant on a different artist) is exactly that case.
+ *
+ * ## Why one shared builder
+ *
+ * All three alias-aware paths lead their sort with this term, and the tier
+ * has to mean the same thing in all three or the same query ranks differently
+ * on two endpoints that are supposed to agree. Hand-copying the literal is
+ * how BS#2018 shipped with the floor applied to one path and not the others.
+ *
+ * Returns a fresh `SQL` per call rather than a module-level constant so
+ * callers can never share mutable builder state.
+ */
+export function buildFuzzyAliasTier() {
+  return sql`(alias_max_sim IS NOT NULL AND alias_max_sim < 1) ASC`;
+}

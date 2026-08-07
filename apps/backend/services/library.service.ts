@@ -50,7 +50,7 @@ import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrack
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
-import { buildAliasHitsCte } from '../utils/alias-hits.js';
+import { buildAliasHitsCte, buildFuzzyAliasTier } from '../utils/alias-hits.js';
 import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from './observability/cache-stats.js';
 
 // Schema-qualified reference to the `fold_artist_name(text)` SQL function
@@ -1518,16 +1518,24 @@ async function searchLibraryByTrigramBoth(
   // a UNION result (column names only); the subquery lifts the union's
   // columns into a scope where `similarity(...)` is a legal ORDER BY term.
   //
-  // BS#2020: alias-only rows are tiered LAST, ahead of the relevance sort.
-  // Ranking both branches on one `GREATEST(...)` scale let a single
+  // BS#2020: fuzzy alias-only rows are tiered LAST, ahead of the relevance
+  // sort. Ranking both branches on one `GREATEST(...)` scale let a single
   // mid-scoring variant displace real matches wholesale — branch (b) INNER
   // JOINs on `artist_id`, so one hit admits an artist's entire discography at
-  // that score. Branch (b) rows are selected under `NOT (trigramPredicate)`,
-  // so their own similarity is by construction sub-threshold and `GREATEST`
-  // always collapses to `alias_max_sim` for them; there was no signal
-  // separating "matched the query text" from "matched a fuzzy variant".
-  // `FALSE < TRUE` in Postgres, so ASC puts real matches first, and the
-  // strongest alias hit still leads within the alias tier.
+  // that score, and nothing in the sort separated "matched the query text"
+  // from "matched a fuzzy variant". `FALSE < TRUE` in Postgres, so ASC puts
+  // the non-demoted rows first; `GREATEST` is untouched, so the strongest hit
+  // still leads within each tier. Exact variants are exempt from the demotion
+  // — see `buildFuzzyAliasTier` for why, and why the guard belongs in the
+  // tier rather than in `GREATEST`.
+  //
+  // `GREATEST` deliberately keeps all three terms rather than collapsing to
+  // `alias_max_sim` for branch (b). It is tempting to argue the branch-(b)
+  // similarity is sub-threshold by construction (the rows are selected under
+  // `NOT (trigramPredicate)`), but that predicate reads `library.artist_name`
+  // while the projection below emits `artists.artist_name` — a denormalized
+  // pair that BS#1092's drift check exists precisely because it can diverge.
+  // `GREATEST` stays correct either way; a hand-collapsed form would not.
   //
   // `id ASC` breaks ties: every row of one artist shares an identical
   // `alias_max_sim`, so without it their order is whatever the plan emits.
@@ -1553,7 +1561,7 @@ async function searchLibraryByTrigramBoth(
         ${streamingClause}
       )
     ) alias_search
-    ORDER BY (alias_max_sim IS NOT NULL) ASC, GREATEST(
+    ORDER BY ${buildFuzzyAliasTier()}, GREATEST(
       similarity(artist_name, ${query}),
       similarity(album_title, ${query}),
       COALESCE(alias_max_sim, 0)
@@ -2738,10 +2746,12 @@ export async function searchByArtist(artistName: string, limit = 5): Promise<Enr
   // expression-shaped terms (`similarity(...)`); Postgres forbids
   // expression ORDER BY directly on a UNION result.
   //
-  // BS#2020: same alias-last tier as `searchLibraryByTrigramBoth`, and it
-  // bites harder here — this path has no `album_title` term to rank on and
+  // BS#2020: same fuzzy-alias-last tier as `searchLibraryByTrigramBoth`, and
+  // it bites harder here — this path has no `album_title` term to rank on and
   // its default `limit` is 5, so one artist's alias fan-out can exceed the
-  // whole response. See that function for the full rationale.
+  // whole response. That cuts both ways, which is why the tier exempts exact
+  // variants: with no OFFSET on this path, demoting one deletes it. See that
+  // function and `buildFuzzyAliasTier` for the full rationale.
   const trigramPredicate = sql`${library.artist_name} % ${artistName}`;
   const rows = (await db.execute(sql`
     ${buildAliasHitsCte(artistName, aliasMinSimilarity)}
@@ -2761,7 +2771,7 @@ export async function searchByArtist(artistName: string, limit = 5): Promise<Enr
         WHERE NOT ${trigramPredicate}
       )
     ) alias_search
-    ORDER BY (alias_max_sim IS NOT NULL) ASC, GREATEST(
+    ORDER BY ${buildFuzzyAliasTier()}, GREATEST(
       similarity(artist_name, ${artistName}),
       COALESCE(alias_max_sim, 0)
     ) DESC, id ASC

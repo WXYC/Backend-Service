@@ -13,7 +13,7 @@ import type { ArtistMatchHint, ArtistSearchAliasSource } from './requestLine/typ
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import WxycError from '../utils/error.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
-import { buildAliasHitsCte } from '../utils/alias-hits.js';
+import { buildAliasHitsCte, buildFuzzyAliasTier } from '../utils/alias-hits.js';
 
 export type CatalogSort = 'artist' | 'album' | 'plays' | 'date';
 export type CatalogOrder = 'asc' | 'desc';
@@ -213,11 +213,18 @@ export async function searchLibrary(
     // of the page. `FALSE < TRUE` in Postgres, so ASC puts the real matches
     // first; the caller's own sort follows, unchanged, within each tier.
     //
-    // The tier is deliberately "is it alias-only", NOT `alias_max_sim DESC`:
-    // the score never reaches the wire shape, so `sortAlbumRows` (which
-    // re-sorts this same row set in memory when the cascade fires) could not
-    // reproduce a score-based order and the two would drift.
-    const orderBy = sql`(alias_max_sim IS NOT NULL) ASC, ${SORT_COLUMNS_UNQUALIFIED[params.sort]} ${orderDirection}, ${SECONDARY_SORT_UNQUALIFIED[params.sort]} ASC, id ASC`;
+    // The tier is deliberately "is it a fuzzy alias-only hit", NOT
+    // `alias_max_sim DESC`: the score never reaches the wire shape, so
+    // `sortAlbumRows` (which re-sorts this same row set in memory when the
+    // cascade fires) could not reproduce a score-based order and the two
+    // would drift. The boolean survives that round trip; a score does not.
+    //
+    // BS#2020 narrowed it to *fuzzy* hits — an exact variant is not the typo
+    // collision this was aimed at. That mattered urgently on the two
+    // non-paginated paths in `library.service.ts` and only mildly here, but
+    // the tier is built by one shared helper so it cannot come to mean
+    // different things on endpoints that answer the same question.
+    const orderBy = sql`${buildFuzzyAliasTier()}, ${SORT_COLUMNS_UNQUALIFIED[params.sort]} ${orderDirection}, ${SECONDARY_SORT_UNQUALIFIED[params.sort]} ASC, id ASC`;
 
     // BS#2018 Fix 2 (the `similarity(...) >= floor` post-filter) lives inside
     // the shared builder in `utils/alias-hits.ts`, so this path and the two in
