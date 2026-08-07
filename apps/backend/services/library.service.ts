@@ -14,7 +14,6 @@ import {
   NewGenre,
   RotationRelease,
   album_plays,
-  artist_search_alias,
   artists,
   compilation_track_artist,
   genre_artist_crossreference,
@@ -51,6 +50,7 @@ import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrack
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
+import { buildAliasHitsCte } from '../utils/alias-hits.js';
 import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from './observability/cache-stats.js';
 
 // Schema-qualified reference to the `fold_artist_name(text)` SQL function
@@ -1403,33 +1403,6 @@ const LIBRARY_VIEW_PROJECTION_RAW = sql`
   ${library.discogs_unavailable_note} AS discogs_unavailable_note,
   ${library.last_discogs_recheck_at} AS last_discogs_recheck_at
 `;
-
-/**
- * Build the `alias_hits` CTE used by the UNION ALL alias-aware search paths
- * (BS#1318). The CTE runs the trigram bitmap scan over `artist_search_alias`
- * exactly once and groups by `artist_id`, yielding (artist_id, max_sim,
- * matched_variant, matched_source) for every artist whose alias substrate
- * matches `query`. Callers join this CTE on `artist_id` rather than running
- * a correlated LATERAL per candidate row.
- *
- * Replacement for the previous `LEFT JOIN LATERAL` design: the LATERAL was
- * correlated on `asa.artist_id = library.artist_id`, which steered the
- * planner onto the PK btree and filtered `variant % q` row-by-row, never
- * touching the GIN trigram index. The CTE form lets the planner pick the
- * trigram bitmap scan once and hash-join into the outer query.
- */
-function buildAliasHitsCte(query: string) {
-  return sql`WITH alias_hits AS (
-    SELECT
-      asa.artist_id,
-      MAX(similarity(asa.variant, ${query})) AS max_sim,
-      (array_agg(asa.variant ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_variant,
-      (array_agg(asa.source ORDER BY similarity(asa.variant, ${query}) DESC))[1] AS matched_source
-    FROM ${artist_search_alias} asa
-    WHERE asa.variant % ${query}
-    GROUP BY asa.artist_id
-  )`;
-}
 
 /** Projection columns emitted by the alias branch of a UNION ALL search query. */
 const ALIAS_HITS_PROJECTION = sql`,
