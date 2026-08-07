@@ -67,7 +67,11 @@ Two tables are deliberately **not** targets: `album_plays` is a materialized vie
 
 ## Sequencing
 
-**Run this after the tubafrenzy ETL stops.** `jobs/library-etl` upserts on `legacy_release_id` and carries `code_number` in its refresh set, so while that ETL is live it will overwrite a renumber and reinstate a deleted row from the upstream MySQL catalog on its next pass.
+**Run this after the tubafrenzy ETL stops** — that is, after Phase 5 of the turndown ([#1543](https://github.com/WXYC/Backend-Service/issues/1543), org Project #36). `jobs/library-etl` upserts on `legacy_release_id` and carries both `code_number` and `code_volume_letters` in its refresh set, so while that ETL is live it will overwrite a renumber and reinstate a deleted row from the upstream MySQL catalog.
+
+**The revert is triggered by an upstream edit, not by the clock, and pausing the ETL is not a workaround.** `library-etl` is incremental — `buildReleaseQuery` filters `WHERE lr.TIME_LAST_MODIFIED > <last run>` — so it fetches only releases whose _upstream_ timestamp advanced. This job writes Postgres and leaves MySQL untouched, so a deduped release is absent from the next fetch and the next pass does not revert it. What reverts it is a librarian editing that release in tubafrenzy, at any point afterward: the re-fetch refreshes `code_number` from `excluded.*`, and a merged-away row whose `legacy_release_id` no longer resolves is INSERTed fresh, resurrecting the slot. A pause window covers a ~20-second run that was never at risk and restores the open-ended exposure the moment it lifts.
+
+Running before the ETL stops is therefore not catastrophic but decays, and the decay is worse than it looks: the relabelling in step 3 is _physical_, so a later revert leaves a disc mislabelled in the opposite direction — the shelf/catalog disagreement this job exists to remove.
 
 Then, in order:
 
@@ -75,6 +79,8 @@ Then, in order:
 2. `--execute`.
 3. Give the worklist to the librarian. Until the discs are relabelled, the shelf and the catalog disagree.
 4. Add the uniqueness constraint, keyed as above.
+
+**Step 4 has its own hard gate on the same event, for a different reason** ([#2033](https://github.com/WXYC/Backend-Service/issues/2033)). Upstream MySQL enforces no uniqueness on the call-number tuple and hosts the unlocked `MAX+1` allocator, so it can mint a new duplicate at any time. Once the constraint exists, that release's INSERT violates it — and `ON CONFLICT (legacy_release_id)` does not absorb a violation of a different index. The release loop is one transaction, so it aborts the entire ETL run, exactly as `job.ts` documents for `library_legacy_release_id_idx` and #752. Do not merge the constraint migration while `library-etl` is live.
 
 ## Running
 
