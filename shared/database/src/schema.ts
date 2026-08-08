@@ -631,12 +631,22 @@ export const compilation_track_artist = wxyc_schema.table(
     // so a 66-performer track legitimately shares one position. No key
     // change ships here or ever; do not touch this index.
     uniqueIndex('cta_unique_idx').on(table.library_id, table.artist_name, table.track_title),
-    // cta_unique_null_track_idx (BS#1135 / migration 0099) is DROPPED by
-    // migration 0139 (BS#1990 / #801 D15): the S0/#1989 prod audit measured
-    // ZERO rows with NULL track_title, so the partial index was pure
-    // write-tax protecting an empty slice. See 0139_cta-track-artist-link.sql
-    // for the DROP INDEX and tests/integration/cta-unique-null-track-partial.spec.js
-    // for the updated runtime-behavior assertion.
+    // BS#1135 / 0099_cta-unique-null-track-partial.sql: complement to
+    // `cta_unique_idx` that closes the NULL-track-title duplicate loophole
+    // on PG 14 (prod runtime — `NULLS NOT DISTINCT` is PG15+ and
+    // unavailable). `library.controller.ts`'s `validateCompilationTracksBody`
+    // deliberately coerces blank/whitespace `track_title` to NULL so this
+    // index — and the write path's untargeted `ON CONFLICT DO NOTHING` —
+    // still dedupes titleless compilation credits. #801 D15 proposed
+    // dropping this (S0/#1989 measured zero NULL-track duplicate rows in
+    // prod), but that measurement can't distinguish "this scenario never
+    // happens" from "this index is successfully preventing it" — 0099's own
+    // precondition guard measured the same zero two months earlier, before
+    // this index existed to suppress anything. BS#1990 (#801 S1) keeps this
+    // index in place pending that follow-up; see the migration comment.
+    uniqueIndex('cta_unique_null_track_idx')
+      .on(table.library_id, table.artist_name)
+      .where(sql`${table.track_title} IS NULL`),
     index('cta_track_artist_id_idx').on(table.track_artist_id),
     // #801 D15 — trgm over tsvector, on BOTH columns: the CTA suggest query
     // (`suggest.service.ts`) is exact-ILIKE artist_name + prefix-ILIKE
