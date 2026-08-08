@@ -974,6 +974,13 @@
       "when": 1786163333188,
       "tag": "0141_slack-ban-moderators",
       "breakpoints": true
+    },
+    {
+      "idx": 142,
+      "version": "7",
+      "when": 1786220835222,
+      "tag": "0142_narrow-library-watermark-trigger",
+      "breakpoints": true
     }
   ]
 }
