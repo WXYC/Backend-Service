@@ -47,6 +47,23 @@ updates:
       # compatibility and we are on it as of #2043, so the pin has nothing left to
       # hold back -- dependabot only ever proposes forward, never down to 1.6.25.
 
+  # The CI mock API server carries its own package-lock.json, and the root `/`
+  # entry above does NOT cover it -- dependabot scopes an npm entry to the
+  # directory's own manifest tree, and this one is outside the root workspaces
+  # globs (apps/*, jobs/*, shared/*). Without this entry GitHub still *files*
+  # alerts against dev_env/mock-api-server/package-lock.json but no PR is ever
+  # raised to clear them, so they accrue silently regardless of severity. That
+  # is how the body-parser alert sat open (BS#2043).
+  - package-ecosystem: 'npm'
+    directory: '/dev_env/mock-api-server'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+    groups:
+      mock-api-server:
+        patterns:
+          - '*'
+
   - package-ecosystem: 'github-actions'
     directory: '/'
     schedule:
