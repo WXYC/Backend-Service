@@ -43,6 +43,16 @@
  * `UPDATE OF col` is target-list-based, not value-change-based — nothing
  * below claims the trigger only fires on real changes.
  *
+ * CROSS-TIER: the complementary half of the BS#1991 guarantee — that an
+ * unchanged page issues NO UPDATE statement at all — is pinned at the unit
+ * tier ('issues NO UPDATE statement when every matched row is already
+ * unchanged', tests/unit/jobs/library-identity-consumer/writer.test.ts),
+ * because it is an assertion about what SQL the writer emits, not about what
+ * the database does with it. Together: the unit test proves the statement
+ * isn't issued; the BS#1991 block below proves why a statement-level trigger
+ * makes that worth doing. Neither tier subsumes the other, and 0143 did not
+ * retire either — don't delete one on the grounds that the other covers it.
+ *
  * Pure SQL, same harness as cta-track-artist-link-cdc.spec.js.
  */
 

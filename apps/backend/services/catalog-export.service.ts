@@ -343,8 +343,9 @@ export const serializeCompilationTracksNdjson = (rows: CompilationTrackExportRow
  *
  * One scan per watermark (cached below). CTA freshness rides `library_watermark`
  * and migration 0138 attaches `touch_library_watermark()` to
- * `compilation_track_artist`, so a CTA INSERT (the `POST .../compilation-tracks`
- * write path — the only writer of new rows) advances the watermark on its own.
+ * `compilation_track_artist`, so a CTA INSERT advances the watermark on its own
+ * — from either writer of new rows: the `POST .../compilation-tracks` path and
+ * `importCompilationTrackArtists` in `jobs/library-etl/job.ts`.
  * That trigger is load-bearing, not belt-and-suspenders: the CTA POST always
  * FOLLOWS the library add it would otherwise ride, so without it the cached body
  * for the library-add watermark never contains the tracks and this endpoint 304s

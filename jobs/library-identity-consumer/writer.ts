@@ -540,10 +540,13 @@ export const buildWriteRow = (
   }
 
   // App-side unchanged check (belt) ahead of the SQL `IS DISTINCT FROM`
-  // (braces): the 0138 watermark trigger is FOR EACH STATEMENT and fires
-  // even on `UPDATE 0`, so an unchanged row must not even be queued — a
-  // fully-unchanged page then issues no UPDATE statement at all and a
-  // no-op re-drain genuinely never advances `library_watermark`.
+  // (braces): an unchanged row must not even be queued, so a fully-unchanged
+  // page issues no UPDATE statement at all. Pre-BS#2054 that was what kept a
+  // no-op re-drain from advancing `library_watermark`; as of migration 0143
+  // the trigger's `UPDATE OF` list excludes every column this function
+  // writes, so the check now earns its place on the two grounds that survive
+  // 0143 — no wasted round-trip/lock, and cover for a future write to a
+  // column the export reads. See this function's docstring.
   // Confidence compares through Math.fround because the column is float4:
   // the stored value read back through a float8 lens differs from the wire
   // float8 in digits float4 cannot represent.

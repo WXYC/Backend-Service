@@ -21,8 +21,8 @@
 -- surfaces.
 --
 -- COLUMN-SET DERIVATION — read the export query, not the table definition.
--- The sole HTTP surface reading `compilation_track_artist` is
--- `GET /library/catalog/compilation-tracks`
+-- The sole HTTP surface gated on `library_watermark` that reads
+-- `compilation_track_artist` is `GET /library/catalog/compilation-tracks`
 -- (`apps/backend/routes/library.route.ts`, gated on `library_watermark` via
 -- `conditionalGet(getCatalogLastModifiedAt)`, same watermark `library` uses),
 -- served by `getCompilationTrackExportRows()` in
@@ -90,7 +90,7 @@
 -- export has never served.
 --
 -- SCOPE: this migration touches ONLY the `compilation_track_artist` trigger.
--- Migration 0138 created a second trigger in the same statement, on
+-- Migration 0138 created a second trigger in the same migration, on
 -- `artist_crossreference`; that trigger is deliberately left unqualified
 -- here — see the PR description for the assessment (its only writer,
 -- `job.ts:672`, is an `INSERT ... ON CONFLICT`, which fires the trigger's
