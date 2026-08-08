@@ -1,0 +1,61 @@
+-- BS#2032. Swap migration 0080's `flowsheet_album_id_enriched_idx` for a
+-- composite partial B-tree over every linked row.
+--
+-- 0080 indexed (album_id) WHERE album_id IS NOT NULL AND metadata_attempt_at
+-- IS NOT NULL. A bare `album_id = <id>` equality implies the first conjunct but
+-- says nothing about the second, so the planner could not prove the partial
+-- predicate held and seq-scanned the ~1.7 GB heap instead. Measured on prod
+-- 2026-08-07, before this change:
+--
+--   EXPLAIN UPDATE wxyc_schema.flowsheet SET album_id = 1 WHERE album_id = 58273;
+--    Update on flowsheet  (cost=0.00..245697.16 rows=0 width=0)
+--      ->  Seq Scan on flowsheet  (cost=0.00..245697.16 rows=71 width=10)
+--
+-- and after:
+--
+--    Update on flowsheet  (cost=0.43..292.79 rows=0 width=0)
+--      ->  Index Scan using flowsheet_album_id_linked_idx  (cost=0.43..292.79 rows=72)
+--            Index Cond: (album_id = 58273)
+--
+-- `metadata_attempt_at` is retained as a key column rather than dropped along
+-- with the predicate conjunct, and that is load-bearing. 0080 exists to keep
+-- album-metadata-backfill's `verifyComplete` (jobs/album-metadata-backfill/job.ts)
+--
+--   SELECT count(DISTINCT album_id) FROM wxyc_schema.flowsheet
+--    WHERE album_id IS NOT NULL AND metadata_attempt_at IS NOT NULL
+--
+-- off a 2.6M-row heap walk that trips the 5s DB_STATEMENT_TIMEOUT_MS. Widening
+-- the predicate alone would have removed that column from the index, leaving the
+-- surviving `metadata_attempt_at IS NOT NULL` filter to be evaluated against the
+-- heap; at ~46% selectivity (1,204,095 linked rows of 2,633,568) the planner
+-- would fall back to exactly the Seq Scan 0080 was built to avoid. Carrying the
+-- column keeps every referenced column available from the index, so that query
+-- stays on an Index Only Scan while the leading key serves the equality.
+--
+-- Index count is unchanged — this replaces 0080's index rather than adding an
+-- eighth one, because flowsheet's index bloat is an open concern (BS#1058).
+-- Sizes measured on prod: the freshly built composite is 10 MB against the
+-- 12 MB it replaces, since 0080's index had accumulated bloat. (0080's own
+-- "~50-100k entries" estimate was low by ~12x; it has always been ~1.2M.)
+--
+-- Predicate carries no `entry_type='track'` guard — non-track entries always
+-- have `album_id IS NULL`, so it restricts to track rows on its own.
+--
+-- Production ops:
+--   - These are NOT the CONCURRENTLY forms because Drizzle wraps each migration
+--     file in a transaction and `CREATE INDEX CONCURRENTLY cannot run inside a
+--     transaction block` — same constraint as 0057, 0068, 0070, 0074, 0078, 0080.
+--   - Run out-of-band on prod first, in this order:
+--       CREATE INDEX CONCURRENTLY IF NOT EXISTS "flowsheet_album_id_linked_idx"
+--         ON "wxyc_schema"."flowsheet" USING btree ("album_id", "metadata_attempt_at")
+--         WHERE "album_id" IS NOT NULL;
+--       DROP INDEX CONCURRENTLY IF EXISTS "wxyc_schema"."flowsheet_album_id_enriched_idx";
+--     Neither takes an AccessExclusiveLock; no INSERT pause. The build measured
+--     ~27s. Create before dropping so the column is never uncovered.
+--   - Then merge this PR. `IF NOT EXISTS` / `IF EXISTS` make the migration a
+--     no-op against the prod DB where the swap already happened, while fresh dev
+--     and CI databases pick it up on first migrate. Same shape as 0068, 0070,
+--     0074, 0080.
+
+CREATE INDEX IF NOT EXISTS "flowsheet_album_id_linked_idx" ON "wxyc_schema"."flowsheet" USING btree ("album_id","metadata_attempt_at") WHERE "wxyc_schema"."flowsheet"."album_id" IS NOT NULL;--> statement-breakpoint
+DROP INDEX IF EXISTS "wxyc_schema"."flowsheet_album_id_enriched_idx";
