@@ -111,15 +111,15 @@ describe('renderSql — unrecognized shapes throw loudly instead of rendering em
   });
 
   it('throws for a null top-level chunk rather than returning an empty string', () => {
-    expect(() => renderSql(null)).toThrow();
+    expect(() => renderSql(null)).toThrow(/unrecognized SQL mock shape/);
   });
 
   it('throws for an undefined top-level chunk rather than returning an empty string', () => {
-    expect(() => renderSql(undefined)).toThrow();
+    expect(() => renderSql(undefined)).toThrow(/unrecognized SQL mock shape/);
   });
 
   it('throws for a bare primitive where a SQL chunk object was expected', () => {
-    expect(() => renderSql(42)).toThrow();
+    expect(() => renderSql(42)).toThrow(/unrecognized SQL mock shape/);
   });
 
   it('throws for an unrecognized separator shape nested inside an otherwise-valid {join, sep} chunk', () => {
