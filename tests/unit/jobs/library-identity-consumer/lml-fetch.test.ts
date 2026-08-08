@@ -55,7 +55,7 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
   describe('URL construction', () => {
     it('appends /api/v1/identity/bulk-resolve-libraries to a plain base URL', async () => {
       mockFetch.mockResolvedValue(okResponse({ results: [] }));
-      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]);
+      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]);
       const url = mockFetch.mock.calls[0][0];
       expect(url).toBe('http://lml.test:8000/api/v1/identity/bulk-resolve-libraries');
     });
@@ -63,7 +63,7 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
     it('strips a trailing /api/v1 from the base URL (idempotent with the legacy convention)', async () => {
       process.env.LIBRARY_METADATA_URL = 'http://lml.test:8000/api/v1';
       mockFetch.mockResolvedValue(okResponse({ results: [] }));
-      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]);
+      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]);
       const url = mockFetch.mock.calls[0][0];
       expect(url).toBe('http://lml.test:8000/api/v1/identity/bulk-resolve-libraries');
     });
@@ -71,16 +71,16 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
     it('strips a trailing slash before appending the suffix (no double slash)', async () => {
       process.env.LIBRARY_METADATA_URL = 'http://lml.test:8000/';
       mockFetch.mockResolvedValue(okResponse({ results: [] }));
-      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]);
+      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]);
       const url = mockFetch.mock.calls[0][0];
       expect(url).toBe('http://lml.test:8000/api/v1/identity/bulk-resolve-libraries');
     });
 
     it('throws when LIBRARY_METADATA_URL is unset', async () => {
       delete process.env.LIBRARY_METADATA_URL;
-      await expect(bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }])).rejects.toThrow(
-        /LIBRARY_METADATA_URL/
-      );
+      await expect(
+        bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }])
+      ).rejects.toThrow(/LIBRARY_METADATA_URL/);
     });
   });
 
@@ -88,7 +88,7 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
     it('omits Authorization when LML_API_KEY is unset', async () => {
       delete process.env.LML_API_KEY;
       mockFetch.mockResolvedValue(okResponse({ results: [] }));
-      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]);
+      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]);
       const init = mockFetch.mock.calls[0][1];
       const headers = init?.headers as Record<string, string>;
       expect(headers).not.toHaveProperty('Authorization');
@@ -98,7 +98,7 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
     it('sends Authorization: Bearer <LML_API_KEY> when set', async () => {
       process.env.LML_API_KEY = 'secret-token';
       mockFetch.mockResolvedValue(okResponse({ results: [] }));
-      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]);
+      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]);
       const init = mockFetch.mock.calls[0][1];
       const headers = init?.headers as Record<string, string>;
       expect(headers.Authorization).toBe('Bearer secret-token');
@@ -106,24 +106,37 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
   });
 
   describe('Request body shape', () => {
-    it('POSTs `{ inputs }` with the verbatim batch payload', async () => {
+    it('POSTs `{ inputs, include_tracks: true }` with the verbatim batch payload', async () => {
       mockFetch.mockResolvedValue(okResponse({ results: [] }));
       const inputs = [
-        { library_id: 1, artist_name: 'Juana Molina', album_title: 'DOGA' },
-        { library_id: 2, artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again' },
+        { library_id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', legacy_release_id: 1000001 },
+        {
+          library_id: 2,
+          artist_name: 'Jessica Pratt',
+          album_title: 'On Your Own Love Again',
+          legacy_release_id: 1000002,
+        },
       ];
       await bulkResolveLibraries(inputs);
       const init = mockFetch.mock.calls[0][1];
       expect(init?.method).toBe('POST');
-      const body = JSON.parse(init?.body as string) as { inputs: unknown };
-      expect(body).toEqual({ inputs });
+      const body = JSON.parse(init?.body as string) as { inputs: unknown; include_tracks: boolean };
+      expect(body).toEqual({ inputs, include_tracks: true });
+    });
+
+    it('BS#1991: always sends include_tracks: true, regardless of cohort (both va and non_va drains request tracks)', async () => {
+      mockFetch.mockResolvedValue(okResponse({ results: [] }));
+      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]);
+      const init = mockFetch.mock.calls[0][1];
+      const body = JSON.parse(init?.body as string) as { include_tracks: boolean };
+      expect(body.include_tracks).toBe(true);
     });
   });
 
   describe('Sentry instrumentation', () => {
     it('wraps the call in a Sentry span (name=lml.bulk_resolve_libraries, op=http.client)', async () => {
       mockFetch.mockResolvedValue(okResponse({ results: [] }));
-      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]);
+      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]);
       expect(mockStartSpan).toHaveBeenCalledTimes(1);
       expect(mockStartSpan.mock.calls[0][0]).toEqual({
         name: 'lml.bulk_resolve_libraries',
@@ -134,9 +147,9 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
     it('sets the batch size as a span attribute', async () => {
       mockFetch.mockResolvedValue(okResponse({ results: [] }));
       await bulkResolveLibraries([
-        { library_id: 1, artist_name: 'A', album_title: 'a' },
-        { library_id: 2, artist_name: 'B', album_title: 'b' },
-        { library_id: 3, artist_name: 'C', album_title: 'c' },
+        { library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 },
+        { library_id: 2, artist_name: 'B', album_title: 'b', legacy_release_id: 2 },
+        { library_id: 3, artist_name: 'C', album_title: 'c', legacy_release_id: 3 },
       ]);
       expect(mockSpanSetAttribute).toHaveBeenCalledWith('lml.batch_size', 3);
     });
@@ -148,7 +161,7 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
         api_calls: 3,
       };
       mockFetch.mockResolvedValue(okResponse({ results: [], cache_stats }));
-      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]);
+      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]);
       expect(mockSpanSetAttributes).toHaveBeenCalledWith({
         'lml.cache.memory_hits': 1,
         'lml.cache.pg_hits': 4,
@@ -158,7 +171,7 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
 
     it('does not project cache_stats when it is an array (defensive narrowing)', async () => {
       mockFetch.mockResolvedValue(okResponse({ results: [], cache_stats: [1, 2, 3] }));
-      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]);
+      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]);
       expect(mockSpanSetAttributes).not.toHaveBeenCalled();
     });
 
@@ -168,7 +181,9 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
       mockSpanSetAttributes.mockImplementation(() => {
         throw new Error('sentry boom');
       });
-      const result = await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]);
+      const result = await bulkResolveLibraries([
+        { library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 },
+      ]);
       expect(result).toEqual(body);
     });
   });
@@ -197,11 +212,14 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
         statusText: 'Internal Server Error',
         json: () => Promise.resolve({}),
       } as unknown as globalThis.Response);
-      await expectLmlError(bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]), {
-        status: 500,
-        retryable: true,
-        messageMatch: /500 Internal Server Error/,
-      });
+      await expectLmlError(
+        bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]),
+        {
+          status: 500,
+          retryable: true,
+          messageMatch: /500 Internal Server Error/,
+        }
+      );
     });
 
     it('throws LmlFetchError(status=400, retryable=false) on 4xx (non-retryable)', async () => {
@@ -211,31 +229,40 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
         statusText: 'Bad Request',
         json: () => Promise.resolve({}),
       } as unknown as globalThis.Response);
-      await expectLmlError(bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]), {
-        status: 400,
-        retryable: false,
-        messageMatch: /400 Bad Request/,
-      });
+      await expectLmlError(
+        bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]),
+        {
+          status: 400,
+          retryable: false,
+          messageMatch: /400 Bad Request/,
+        }
+      );
     });
 
     it('translates AbortError into LmlFetchError(status=null, retryable=true) with a timeout message', async () => {
       const abortError = new Error('aborted');
       abortError.name = 'AbortError';
       mockFetch.mockRejectedValue(abortError);
-      await expectLmlError(bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]), {
-        status: null,
-        retryable: true,
-        messageMatch: /timed out/,
-      });
+      await expectLmlError(
+        bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]),
+        {
+          status: null,
+          retryable: true,
+          messageMatch: /timed out/,
+        }
+      );
     });
 
     it('wraps non-abort network errors as LmlFetchError(status=null, retryable=true)', async () => {
       mockFetch.mockRejectedValue(new Error('ECONNREFUSED'));
-      await expectLmlError(bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a' }]), {
-        status: null,
-        retryable: true,
-        messageMatch: /network error.*ECONNREFUSED/,
-      });
+      await expectLmlError(
+        bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]),
+        {
+          status: null,
+          retryable: true,
+          messageMatch: /network error.*ECONNREFUSED/,
+        }
+      );
     });
   });
 });

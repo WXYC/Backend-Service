@@ -20,6 +20,7 @@ import type { Totals } from '../../../../jobs/library-identity-consumer/orchestr
 const totals: Totals = {
   scanned: 500,
   rows_resolved: 300,
+  rows_resolved_compilation: 12,
   rows_unresolved: 50,
   rows_skipped: {
     compilation: 40,
@@ -29,6 +30,8 @@ const totals: Totals = {
     lml_untrusted_library_id: 7,
   },
   source_rows_skipped_null_confidence: 2,
+  compilation_track_rows_written: 84,
+  compilation_track_rows_skipped_librarian: 6,
   lml_total_calls: 25,
   lml_total_latency_ms: 123456,
 };
@@ -47,6 +50,7 @@ describe('buildSpanAttributes (BS#1086)', () => {
     expect(attrs).toEqual({
       'consumer.scanned': 500,
       'consumer.rows_resolved': 300,
+      'consumer.rows_resolved_compilation': 12,
       'consumer.rows_unresolved': 50,
       'consumer.rows_skipped.compilation': 40,
       'consumer.rows_skipped.lml_error': 20,
@@ -54,6 +58,8 @@ describe('buildSpanAttributes (BS#1086)', () => {
       'consumer.rows_skipped.lml_cardinality_mismatch': 3,
       'consumer.rows_skipped.lml_untrusted_library_id': 7,
       'consumer.source_rows_skipped_null_confidence': 2,
+      'consumer.compilation_track_rows_written': 84,
+      'consumer.compilation_track_rows_skipped_librarian': 6,
       'consumer.lml_total_calls': 25,
       'consumer.lml_total_latency_ms': 123456,
     });
@@ -65,5 +71,14 @@ describe('buildSpanAttributes (BS#1086)', () => {
     for (const value of Object.values(attrs)) {
       expect(typeof value).toBe('number');
     }
+  });
+
+  it('BS#1991: namespaces attributes under a custom prefix so the va/non_va drains land as distinct span attributes', () => {
+    const attrs = buildSpanAttributes(totals, 'consumer.va');
+
+    expect(attrs['consumer.va.scanned']).toBe(500);
+    expect(attrs['consumer.va.rows_resolved_compilation']).toBe(12);
+    expect(attrs['consumer.va.compilation_track_rows_written']).toBe(84);
+    expect(Object.keys(attrs).every((k) => k.startsWith('consumer.va.'))).toBe(true);
   });
 });

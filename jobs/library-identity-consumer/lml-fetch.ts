@@ -73,7 +73,12 @@ export const bulkResolveLibraries = async (inputs: BulkResolveInput[]): Promise<
       const response = await fetch(`${baseUrl()}/api/v1/identity/bulk-resolve-libraries`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ inputs }),
+        // BS#1991: always request tracks. `include_tracks` is a per-batch
+        // caller flag, not per-input (WXYC/wxyc-shared#297) — this job
+        // classifies va/non_va cohorts locally (select.ts's
+        // VA_COHORT_CONDITION) and pages the va cohort small, rather than
+        // asking LML to gate the payload per input.
+        body: JSON.stringify({ inputs, include_tracks: true }),
         signal: controller.signal,
       });
 
