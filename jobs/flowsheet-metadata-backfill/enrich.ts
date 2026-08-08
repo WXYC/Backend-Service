@@ -53,9 +53,9 @@
  * `metadata_attempt_at` is still stamped alongside the status flip on every
  * responded outcome (match or no-match) — it is no longer the control-flow
  * gate, but stays as the historical/audit marker several other jobs still
- * read (`jobs/album-metadata-backfill`'s `verifyComplete`,
- * `flowsheet_album_id_enriched_idx`). See `docs/migrations.md` "Attempt-at
- * markers".
+ * read (`jobs/album-metadata-backfill`'s `verifyComplete`, and
+ * `flowsheet_album_id_linked_idx`, which carries the column as a key so that
+ * query stays index-only). See `docs/migrations.md` "Attempt-at markers".
  *
  * BS#1336 NOTE: the worker now writes 8 additional LML-only columns
  * (discogs_artist_id, label, full_release_date, genres, styles, tracklist,

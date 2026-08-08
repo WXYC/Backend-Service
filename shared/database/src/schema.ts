@@ -1167,30 +1167,49 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_metadata_status_enriching_stale_idx')
       .on(table.enriching_since)
       .where(sql`${table.metadata_status} = 'enriching'`),
-    // BS#1022. Complementary partial B-tree on (album_id) covering the
-    // `metadata_attempt_at IS NOT NULL` slice — the OPPOSITE partition from
-    // the `_pending_` indexes above. Required by album-metadata-backfill's
-    // `verifyComplete` (jobs/album-metadata-backfill/job.ts), which counts
-    // `count(DISTINCT album_id) FROM flowsheet WHERE album_id IS NOT NULL
-    // AND metadata_attempt_at IS NOT NULL`. Without it the planner falls
-    // back to a 2.6M-row heap walk and trips the 5s `DB_STATEMENT_TIMEOUT_MS`
-    // even after PR #1020 traded the LEFT JOIN for a dual-count. The same
-    // INSERT … SELECT statement higher in the job shares this WHERE clause,
-    // so the index also accelerates re-runs of the bulk move.
+    // BS#2032 (migration 0139), widening BS#1022's `flowsheet_album_id_enriched_idx`
+    // (migration 0080). Partial B-tree on (album_id) over every linked row.
     //
-    // Predicate matches the verify query verbatim — no `entry_type='track'`
-    // guard so the planner can pick this index up from the literal WHERE
-    // shape without requiring the verify query to be rewritten. (Non-track
-    // entries always have `album_id IS NULL`, so the predicate naturally
-    // restricts to track rows anyway.)
+    // 0080 predicated on `album_id IS NOT NULL AND metadata_attempt_at IS NOT NULL`
+    // to serve album-metadata-backfill's `verifyComplete`
+    // (jobs/album-metadata-backfill/job.ts), which counts `count(DISTINCT album_id)
+    // FROM flowsheet WHERE album_id IS NOT NULL AND metadata_attempt_at IS NOT NULL`.
+    // Without an index there the planner falls back to a 2.6M-row heap walk and
+    // trips the 5s `DB_STATEMENT_TIMEOUT_MS`. That consumer is still served: its
+    // WHERE clause implies this wider predicate, so the planner uses this index
+    // and rechecks `metadata_attempt_at` against the heap.
     //
-    // Built CONCURRENTLY out-of-band on prod first; migration carries
-    // `IF NOT EXISTS` per the docs/migrations.md `if-not-exists-index`
-    // pattern. Expected size: ~50-100k entries (per BS#898's enriched-row
-    // count), well under a megabyte. Build window: a few seconds.
-    index('flowsheet_album_id_enriched_idx')
-      .on(table.album_id)
-      .where(sql`${table.album_id} IS NOT NULL AND ${table.metadata_attempt_at} IS NOT NULL`),
+    // Dropping the second conjunct is what lets a bare `album_id = <id>` equality
+    // use the index at all — `= <const>` implies `IS NOT NULL`, but says nothing
+    // about `metadata_attempt_at`, so 0080's narrower predicate could not be
+    // proven to hold and the planner seq-scanned the ~1.7 GB heap instead.
+    //
+    // `metadata_attempt_at` is a KEY column, not dropped, and that is load-bearing.
+    // Widening the predicate alone would have taken `verifyComplete` off its
+    // Index Only Scan: with the column absent from the index, the surviving
+    // `metadata_attempt_at IS NOT NULL` filter needs the heap, and at ~46%
+    // selectivity (1.2M of 2.6M rows) the planner picks a Seq Scan — precisely the
+    // 2.6M-row heap walk 0080 exists to prevent. Carrying the column keeps every
+    // referenced column in the index, so that query stays index-only while a bare
+    // `album_id = <id>` uses the leading key.
+    //
+    // The swap is close to free. Measured on prod 2026-08-07: 1,204,095 rows have
+    // `album_id IS NOT NULL`, of which 1,198,233 also have `metadata_attempt_at
+    // IS NOT NULL` — a delta of 5,862 entries (0.5%). Freshly built, the composite
+    // came out at 10 MB against the 12 MB it replaces, because 0080's index had
+    // accumulated bloat. (0080's own "~50-100k entries" estimate was low by ~12x;
+    // it has always been ~1.2M entries.) Index count stays flat, which matters
+    // because flowsheet's index bloat is an open concern under BS#1058.
+    //
+    // Built CONCURRENTLY out-of-band on prod first, under a new name so both can
+    // coexist during the changeover; the migration then carries `IF NOT EXISTS` on
+    // the create and `IF EXISTS` on the drop, per the docs/migrations.md
+    // `if-not-exists-index` pattern. Predicate carries no `entry_type='track'`
+    // guard — non-track entries always have `album_id IS NULL`, so it restricts to
+    // track rows on its own.
+    index('flowsheet_album_id_linked_idx')
+      .on(table.album_id, table.metadata_attempt_at)
+      .where(sql`${table.album_id} IS NOT NULL`),
     // BS#895 (Epic C C6 / epic #1810 W4). Partial B-tree on `rotation_id`
     // covering the W4 self-heal candidate query: rotation-linked rows stuck
     // at `metadata_status = 'enriched_no_match'`. `jobs/flowsheet-metadata-backfill`
