@@ -13,8 +13,15 @@
  * and invalidates the catalog export's conditional-GET cache — ~12 CTA
  * statements per 100-release page over a full `RECHECK=true` V/A sweep with
  * nothing changed. (The per-batch `unresolved_attempted_at` stamp on
- * `library` is a separate, deliberate watermark touch that remains — the
- * prefilter eliminates the CTA leg's bumps, not the stamp's.)
+ * `library` used to be a separate, deliberate watermark touch that survived
+ * this prefilter — `NOW()` is a genuine row change, so no app-side guard
+ * could no-op it away. [BS#2052](https://github.com/WXYC/Backend-Service/issues/2052)
+ * (migration 0141) closed that gap from the other side: the `library`
+ * watermark trigger is now `UPDATE OF <exported columns>`, and
+ * `unresolved_attempted_at` isn't exported, so the stamp no longer advances
+ * `library_watermark` either. A fully-unchanged `--recheck` sweep is zero
+ * watermark churn end to end — this spec's own CTA leg via the prefilter,
+ * the `library` leg via 0141.)
  *
  * The complementary behavior — an unchanged page issues NO UPDATE statement
  * at all — lives at the unit tier ("issues NO UPDATE statement when every
