@@ -1,20 +1,27 @@
 /**
- * BS#1135 — `cta_unique_null_track_idx` partial unique closes the
- * NULL-track-title duplicate loophole.
+ * BS#1135 (superseded by BS#1990 / #801 S1 — read to the end before editing).
  *
  * Postgres treats NULLs as distinct in unique B-tree comparisons by default,
  * which let `(library_id, artist_name, NULL track_title)` duplicates slip
  * past the original 0037 `cta_unique_idx`. Prod RDS runs PostgreSQL 14.22,
  * so the PG15+ `NULLS NOT DISTINCT` modifier isn't available; migration
- * 0099 adds a complementary partial unique index restricted to the
- * `track_title IS NULL` slice. The base index continues to enforce
- * uniqueness on the non-NULL slice.
+ * 0099 added a complementary partial unique index (`cta_unique_null_track_idx`)
+ * restricted to the `track_title IS NULL` slice.
+ *
+ * BS#1990's S0/#1989 prod audit re-ran 0099's own precondition count —
+ * duplicate `(library_id, artist_name)` groups with a NULL `track_title` —
+ * and measured ZERO rows. The partial index was protecting an empty slice,
+ * pure write-tax on every CTA insert with a NULL track_title, so migration
+ * 0139 DROPs it. This spec now asserts the post-drop behavior: duplicate
+ * `(library_id, artist_name, NULL track_title)` rows are ALLOWED again. The
+ * base `cta_unique_idx` (0037) is untouched and still enforces uniqueness on
+ * the non-NULL `track_title` slice — see the second test below.
  *
  * The schema-source drift guard lives at
- * `tests/unit/database/schema.cta-unique-null-track-partial.test.ts`. This spec is the
- * runtime behavior assertion: a second insert with the same
- * `(library_id, artist_name)` and a NULL `track_title` must be rejected by
- * the partial unique index.
+ * `tests/unit/database/schema.cta-unique-null-track-partial.test.ts` (the
+ * "schema.ts no longer declares it" assertion) and
+ * `tests/unit/database/schema.cta-track-artist-link.test.ts` (the 0139
+ * migration-source assertions).
  */
 
 const postgres = require('postgres');
@@ -46,7 +53,7 @@ function makeSql() {
   });
 }
 
-describe('cta_unique_idx NULLS NOT DISTINCT (BS#1135)', () => {
+describe('cta_unique_null_track_idx dropped (BS#1990 / #801 S1, was BS#1135)', () => {
   let sql;
 
   beforeAll(() => {
@@ -67,20 +74,17 @@ describe('cta_unique_idx NULLS NOT DISTINCT (BS#1135)', () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".compilation_track_artist WHERE artist_name = $1`, [TEST_ARTIST]);
   });
 
-  test('two rows with the same (library_id, artist_name) and NULL track_title are rejected', async () => {
-    // First insert succeeds — the row defines the (library_id, artist_name,
-    // NULL track_title) tuple the constraint should treat as taken.
+  test('two rows with the same (library_id, artist_name) and NULL track_title are now ALLOWED (0099 index dropped by 0139)', async () => {
+    // Before migration 0139, the second insert below would violate
+    // cta_unique_null_track_idx (BS#1135 / 0099). The S0/#1989 prod audit
+    // measured zero rows in the slice that index protected, so BS#1990's
+    // migration 0139 drops it — both inserts must now succeed.
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".compilation_track_artist (library_id, artist_name, track_title)
        VALUES ($1, $2, NULL)`,
       [SHAPE_FIXTURE_LIBRARY_ID, TEST_ARTIST]
     );
 
-    // Second insert with the same tuple must violate
-    // cta_unique_null_track_idx. Before 0099 this would succeed because PG
-    // treats NULLs as distinct in unique B-tree comparisons by default.
-    // After 0099 the partial unique index over `track_title IS NULL`
-    // rejects the duplicate.
     let err;
     try {
       await sql.unsafe(
@@ -92,26 +96,24 @@ describe('cta_unique_idx NULLS NOT DISTINCT (BS#1135)', () => {
       err = e;
     }
 
-    expect(err).toBeDefined();
-    // Postgres SQLSTATE 23505 = unique_violation.
-    expect(err.code).toBe('23505');
-    expect(err.constraint_name || err.constraint || '').toMatch(/cta_unique_null_track_idx/);
+    expect(err).toBeUndefined();
 
-    // And only the first row landed.
+    // Both rows landed — the base cta_unique_idx (0037) doesn't block this
+    // either, since it treats NULL track_title values as distinct (the
+    // exact loophole 0099 used to close and 0139 re-opens on purpose).
     const rows = await sql.unsafe(
       `SELECT COUNT(*)::int AS n FROM "${SCHEMA}".compilation_track_artist
         WHERE library_id = $1 AND artist_name = $2 AND track_title IS NULL`,
       [SHAPE_FIXTURE_LIBRARY_ID, TEST_ARTIST]
     );
-    expect(rows[0].n).toBe(1);
+    expect(rows[0].n).toBe(2);
   });
 
   test('a NULL-track row coexists with a non-NULL-track row for the same (library_id, artist_name)', async () => {
-    // The new partial unique covers only `track_title IS NULL`, so a row
-    // with a non-NULL title sits outside the partial's slice and the base
-    // 0037 `cta_unique_idx` handles it via standard non-NULL uniqueness.
-    // This is exactly the loophole the migration closes for the NULL case
-    // while preserving the original semantics for populated titles.
+    // Regression guard for cta_unique_idx (0037), unaffected by the 0139
+    // drop: a populated track_title is a distinct tuple from a NULL one, so
+    // both rows are legitimate under the base unique index regardless of
+    // whether the (now-dropped) NULL-track partial index exists.
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".compilation_track_artist (library_id, artist_name, track_title)
        VALUES ($1, $2, NULL)`,
