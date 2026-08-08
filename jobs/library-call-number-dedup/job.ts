@@ -21,6 +21,9 @@
  * DATA SAFETY / ops (docs/bulk-update-playbook.md):
  *   - **Dry-run by default; pass `--execute` to write.** Dry-run SELECTs and
  *     reports the full plan, including the finished worklist, with zero writes.
+ *     That worklist is marked PREVIEW throughout — title, banners above and
+ *     below the table, and every row — and must not go to the librarian: it
+ *     describes relabelling against a catalog no run has moved.
  *   - Idempotent: a completed merge drops that slot out of the
  *     `HAVING count(*) > 1` set, so a re-run finds nothing to do.
  *   - Each slot's repoints + delete run in a single transaction — a mid-run

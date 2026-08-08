@@ -63,6 +63,7 @@ Two tables are deliberately **not** targets: `album_plays` is a materialized vie
 - **Refuses to start while a show is on air.** The job writes `flowsheet`, which dj-site polls every 60s. It is a one-shot run in a chosen window, so declining outright is cheaper than pausing mid-pass.
 - **A skipped renumber sets a non-zero exit code** and is kept off the worklist. The catalog row never moved, so telling the librarian to relabel that disc would create the shelf/catalog disagreement this job exists to remove, in reverse.
 - **A slot holding three rows** merges its duplicates and reports the remainder for the librarian, rather than guessing which of two different releases should move.
+- **A dry-run worklist must never reach the librarian.** It describes physical relabelling against a catalog that has not moved, so acting on it produces the shelf/catalog disagreement this job exists to remove, in reverse — and because `--execute` is gated open-endedly on Phase 3.5 (below), a preview can sit around for months before a real worklist exists to displace it. A dry run therefore titles its worklist `PREVIEW, DO NOT DISTRIBUTE`, banners it above and below the table, and stamps `PREVIEW` in place of the check-off box on every row, so the warning survives being forwarded, pasted without its first paragraph, or printed. Only the `--execute` worklist carries the clean title.
 - `ANALYZE` on the rewritten tables after an `--execute` run, per `docs/bulk-update-playbook.md`.
 
 ## Sequencing
@@ -79,9 +80,9 @@ Running before the ETL stops is therefore not catastrophic but decays, and the d
 
 Then, in order:
 
-1. Dry run. Review the plan and the worklist. (The plan drifts — re-derive it rather than trusting an earlier run's numbers.)
+1. Dry run. Review the plan and the worklist yourself; it is a preview, and it goes to nobody. (The plan drifts — re-derive it rather than trusting an earlier run's numbers.)
 2. `--execute`.
-3. Give the worklist to the librarian. Until the discs are relabelled, the shelf and the catalog disagree.
+3. Give **that run's** worklist to the librarian. Until the discs are relabelled, the shelf and the catalog disagree.
 4. Add the uniqueness constraint, keyed as above.
 
 **Step 4 has its own hard gate on the same event, for a different reason** ([#2033](https://github.com/WXYC/Backend-Service/issues/2033)). Upstream MySQL enforces no uniqueness on the call-number tuple and hosts the unlocked `MAX+1` allocator, so it can mint a new duplicate at any time. Once the constraint exists, that release's INSERT violates it — and `ON CONFLICT (legacy_release_id)` does not absorb a violation of a different index. The release loop is one transaction, so it aborts the entire ETL run, exactly as `job.ts` documents for `library_legacy_release_id_idx` and #752. Do not merge the constraint migration while `library-etl` is live.
@@ -96,6 +97,8 @@ docker run --rm --env-file .env <image> --execute  2>&1 | tee log-exec
 ```
 
 Environment: standard `DB_*` connection vars, same as the other one-shots.
+
+The job writes no files — the worklist is Markdown on stdout, so it is lifted out of the log by hand. If you save one, let the filename repeat what the title already says: a dry run's copy is `call-number-worklist-PREVIEW-DO-NOT-DISTRIBUTE.md`, and only the `--execute` run's copy gets the plain `call-number-worklist.md` that a librarian may be sent.
 
 ## Tests
 
