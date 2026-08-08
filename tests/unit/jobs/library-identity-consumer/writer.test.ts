@@ -558,7 +558,15 @@ describe('writeCompilationTracks — review-gate fixes (BS#1991 bounce 1)', () =
     (db.execute as jest.Mock).mockReset();
   });
 
-  it('issues NO UPDATE statement when every matched row is already unchanged — the watermark trigger is FOR EACH STATEMENT and fires even on UPDATE 0', async () => {
+  // This is the only pin of the BS#1991 prefilter's emit-side guarantee (no
+  // UPDATE statement is issued at all). Its original justification — that the
+  // statement-level watermark trigger fires even on `UPDATE 0` — was narrowed
+  // away from this writer's four columns by migration 0143, but the assertion
+  // survives on its own terms: it is what protects a future write to a column
+  // the catalog export reads. The database-side half lives at
+  // tests/integration/cta-noop-redrain-watermark.spec.js; see that file's
+  // CROSS-TIER note. Don't retire this on the grounds that 0143 covers it.
+  it("issues NO UPDATE statement when every matched row is already unchanged — the BS#1991 app-side prefilter, still load-bearing after migration 0143 narrowed the watermark trigger off this writer's columns", async () => {
     (db.execute as jest.Mock)
       .mockResolvedValueOnce([
         ctaRow({
