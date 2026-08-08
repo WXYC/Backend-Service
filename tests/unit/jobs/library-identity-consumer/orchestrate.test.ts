@@ -14,9 +14,11 @@ import { db } from '@wxyc/database';
 import type { BulkResolveResponse, BulkResolveResult } from '../../../../jobs/library-identity-consumer/lml-types';
 import {
   runConsumer,
+  isCompilationTracksAttempted,
   type BulkResolveFn,
   type DryRunReport,
   type StampUnresolvedFn,
+  type WriteCompilationTracksFn,
   type WriteSingleArtistFn,
 } from '../../../../jobs/library-identity-consumer/orchestrate';
 
@@ -522,6 +524,7 @@ describe('runConsumer — DRY_RUN', () => {
         'scanned',
         'source_rows_skipped_null_confidence',
         'would_resolve',
+        'would_resolve_compilation',
         'would_skip',
         'would_unresolved',
       ].sort()
@@ -694,5 +697,255 @@ describe('runConsumer — BS#974 unresolved-marker stamping', () => {
     expect(result.totals.rows_resolved).toBe(2);
     expect(result.totals.rows_unresolved).toBe(1);
     expect(result.totals.rows_skipped.compilation).toBe(1);
+  });
+});
+
+describe('isCompilationTracksAttempted (BS#1991 / #801 S2)', () => {
+  const compilation = (
+    overrides: Partial<Extract<BulkResolveResult, { kind: 'compilation' }>> = {}
+  ): Extract<BulkResolveResult, { kind: 'compilation' }> => ({
+    kind: 'compilation',
+    library_id: 1,
+    provenance: [],
+    ...overrides,
+  });
+
+  it('is false when the response lacks tracks_contract_version (producer predates the contract) even if tracks_attempted is true', () => {
+    const response: BulkResolveResponse = { results: [] };
+    expect(isCompilationTracksAttempted(compilation({ tracks_attempted: true, tracks: [] }), response)).toBe(false);
+  });
+
+  it('is false when tracks_contract_version is present but not 1', () => {
+    const response: BulkResolveResponse = { results: [], tracks_contract_version: 2 };
+    expect(isCompilationTracksAttempted(compilation({ tracks_attempted: true }), response)).toBe(false);
+  });
+
+  it('is false for (tracks_attempted: false, tracks: []) — matcher has not reached this row', () => {
+    const response: BulkResolveResponse = { results: [], tracks_contract_version: 1 };
+    expect(isCompilationTracksAttempted(compilation({ tracks_attempted: false, tracks: [] }), response)).toBe(false);
+  });
+
+  it('is false for (tracks_attempted: absent, tracks: absent)', () => {
+    const response: BulkResolveResponse = { results: [], tracks_contract_version: 1 };
+    expect(isCompilationTracksAttempted(compilation({}), response)).toBe(false);
+  });
+
+  it('is true for (tracks_attempted: true, tracks: []) — matcher ran, resolved nothing', () => {
+    const response: BulkResolveResponse = { results: [], tracks_contract_version: 1 };
+    expect(isCompilationTracksAttempted(compilation({ tracks_attempted: true, tracks: [] }), response)).toBe(true);
+  });
+
+  it('is true for (tracks_attempted: true, tracks: [...]) — matcher ran, produced entries', () => {
+    const response: BulkResolveResponse = { results: [], tracks_contract_version: 1 };
+    const tracks = [
+      { artist_name: 'A', track_title: 'T', track_position: null, resolved_artist_name: 'A', confidence: 0.9 },
+    ];
+    expect(isCompilationTracksAttempted(compilation({ tracks_attempted: true, tracks }), response)).toBe(true);
+  });
+
+  it('a producer-bug pairing (tracks_attempted: false, tracks: [...] non-empty) MUST be read as true (api.yaml 1.31.0 Q2 mitigation)', () => {
+    const response: BulkResolveResponse = { results: [], tracks_contract_version: 1 };
+    const tracks = [
+      { artist_name: 'A', track_title: 'T', track_position: null, resolved_artist_name: 'A', confidence: 0.9 },
+    ];
+    expect(isCompilationTracksAttempted(compilation({ tracks_attempted: false, tracks }), response)).toBe(true);
+  });
+});
+
+describe('runConsumer — BS#1991 kind:compilation per-track resolution', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const trackEntry = () => ({
+    artist_name: 'Various Artists',
+    track_title: 'Some Track',
+    track_position: null,
+    resolved_artist_name: 'Some Artist',
+    confidence: 0.8,
+  });
+
+  const wireOneCompilationBatch = (): {
+    bulkResolve: BulkResolveFn;
+    writeSingleArtist: WriteSingleArtistFn;
+    lmlResponse: BulkResolveResponse;
+  } => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        { id: 200, artist_name: 'Various Artists', album_title: 'A Compilation', legacy_release_id: 5000200 },
+        { id: 201, artist_name: 'Various Artists', album_title: 'Another Comp', legacy_release_id: 5000201 },
+      ])
+      .mockResolvedValue([]);
+
+    const lmlResponse: BulkResolveResponse = {
+      results: [
+        { kind: 'compilation', library_id: 200, provenance: [], tracks_attempted: true, tracks: [trackEntry()] },
+        { kind: 'compilation', library_id: 201, provenance: [], tracks_attempted: false, tracks: [] },
+      ],
+      tracks_contract_version: 1,
+    };
+    const bulkResolve = jest.fn<BulkResolveFn>().mockResolvedValue(lmlResponse);
+    const writeSingleArtist = jest.fn<WriteSingleArtistFn>().mockResolvedValue({
+      source_rows_written: 0,
+      source_rows_skipped_null_confidence: 0,
+    });
+    return { bulkResolve, writeSingleArtist, lmlResponse };
+  };
+
+  it('a resolved compilation (tracks_attempted=true) is written via writeCompilationTracks and counted as rows_resolved_compilation, not rows_skipped.compilation', async () => {
+    const { bulkResolve, writeSingleArtist } = wireOneCompilationBatch();
+    const writeCompilationTracks = jest.fn<WriteCompilationTracksFn>().mockResolvedValue({
+      rows_written: 3,
+      rows_skipped_librarian: 1,
+      rows_skipped_no_cta_match: 0,
+      rows_skipped_no_catalog_artist: 0,
+      position_rows_written: 0,
+      position_rows_skipped_ambiguous: 0,
+    });
+
+    const result = await runConsumer({
+      bulkResolve,
+      writeSingleArtist,
+      writeCompilationTracks,
+      batchSize: 500,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { sqlFragment: null, description: 'partition=none' },
+      dryRun: false,
+    });
+
+    // library_id 200 (attempted) is written; 201 (not yet askable) stays in
+    // the pre-existing skip bucket unchanged.
+    expect(writeCompilationTracks).toHaveBeenCalledTimes(1);
+    expect(writeCompilationTracks.mock.calls[0][0]).toHaveLength(1);
+    expect(writeCompilationTracks.mock.calls[0][0][0].library_id).toBe(200);
+
+    expect(result.totals.rows_resolved_compilation).toBe(1);
+    expect(result.totals.compilation_track_rows_written).toBe(3);
+    expect(result.totals.compilation_track_rows_skipped_librarian).toBe(1);
+    expect(result.totals.rows_skipped.compilation).toBe(1);
+    expect(result.totals.scanned).toBe(2);
+  });
+
+  it('dry-run counts a resolved compilation without calling writeCompilationTracks', async () => {
+    const { bulkResolve, writeSingleArtist } = wireOneCompilationBatch();
+    const writeCompilationTracks = jest.fn<WriteCompilationTracksFn>();
+
+    const result = await runConsumer({
+      bulkResolve,
+      writeSingleArtist,
+      writeCompilationTracks,
+      batchSize: 500,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { sqlFragment: null, description: 'partition=none' },
+      dryRun: true,
+    });
+
+    expect(writeCompilationTracks).not.toHaveBeenCalled();
+    expect(result.totals.rows_resolved_compilation).toBe(1);
+    expect(result.dryRunReport?.would_resolve_compilation).toBe(1);
+  });
+
+  it('throws a clear error when a resolved compilation appears but no writeCompilationTracks was configured', async () => {
+    const { bulkResolve, writeSingleArtist } = wireOneCompilationBatch();
+
+    await expect(
+      runConsumer({
+        bulkResolve,
+        writeSingleArtist,
+        batchSize: 500,
+        throttleMs: 0,
+        staleDays: 7,
+        partition: { sqlFragment: null, description: 'partition=none' },
+        dryRun: false,
+      })
+    ).rejects.toThrow(/writeCompilationTracks/);
+  });
+
+  it('a writeCompilationTracks failure counts writer_error and leaves the row retryable (not stamped)', async () => {
+    const { bulkResolve, writeSingleArtist } = wireOneCompilationBatch();
+    const writeCompilationTracks = jest.fn<WriteCompilationTracksFn>().mockRejectedValue(new Error('db boom'));
+    const stampUnresolvedAttemptedAt = jest.fn<StampUnresolvedFn>().mockResolvedValue(undefined);
+
+    const result = await runConsumer({
+      bulkResolve,
+      writeSingleArtist,
+      writeCompilationTracks,
+      stampUnresolvedAttemptedAt,
+      batchSize: 500,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { sqlFragment: null, description: 'partition=none' },
+      dryRun: false,
+      includeNullCanonical: true,
+    });
+
+    expect(result.totals.rows_skipped.writer_error).toBe(1);
+    expect(result.totals.rows_resolved_compilation).toBe(0);
+    // 201 (not-yet-askable) is stamped; 200 (write failed) is NOT — a local
+    // write failure is retryable, not a definitive LML verdict.
+    expect(stampUnresolvedAttemptedAt).toHaveBeenCalledWith([201]);
+  });
+
+  it('BS#1991 D10 interplay: a resolved compilation is kept OUT of the not-yet-askable skip bucket, but IS included in the stampUnresolvedAttemptedAt call so a later manual re-run does not re-burn LML on it', async () => {
+    const { bulkResolve, writeSingleArtist } = wireOneCompilationBatch();
+    const writeCompilationTracks = jest.fn<WriteCompilationTracksFn>().mockResolvedValue({
+      rows_written: 1,
+      rows_skipped_librarian: 0,
+      rows_skipped_no_cta_match: 0,
+      rows_skipped_no_catalog_artist: 0,
+      position_rows_written: 0,
+      position_rows_skipped_ambiguous: 0,
+    });
+    const stampUnresolvedAttemptedAt = jest.fn<StampUnresolvedFn>().mockResolvedValue(undefined);
+
+    const result = await runConsumer({
+      bulkResolve,
+      writeSingleArtist,
+      writeCompilationTracks,
+      stampUnresolvedAttemptedAt,
+      batchSize: 500,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { sqlFragment: null, description: 'partition=none' },
+      dryRun: false,
+      includeNullCanonical: true,
+    });
+
+    // Both ids get stamped (200 resolved, 201 not-yet-askable) — but 200 is
+    // NOT counted under rows_skipped.compilation, only 201 is.
+    expect(stampUnresolvedAttemptedAt).toHaveBeenCalledWith([201, 200]);
+    expect(result.totals.rows_skipped.compilation).toBe(1);
+    expect(result.totals.rows_resolved_compilation).toBe(1);
+  });
+
+  it('cohort="va" and recheck thread through to loadBatch (SQL carries the va-cohort condition)', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([]).mockResolvedValue([]);
+    const bulkResolve = jest.fn<BulkResolveFn>().mockResolvedValue({ results: [] });
+    const writeSingleArtist = jest.fn<WriteSingleArtistFn>().mockResolvedValue({
+      source_rows_written: 0,
+      source_rows_skipped_null_confidence: 0,
+    });
+
+    await runConsumer({
+      bulkResolve,
+      writeSingleArtist,
+      batchSize: 100,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { sqlFragment: null, description: 'partition=none' },
+      dryRun: false,
+      cohort: 'va',
+    });
+
+    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    expect(serialized).toMatch(/code_volume_letters/);
   });
 });

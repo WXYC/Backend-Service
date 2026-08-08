@@ -19,8 +19,12 @@
  * concrete external id — Backend has nowhere to store that today.
  *
  * The `kind: 'unresolved'` case writes nothing (the orchestrator counts it
- * separately). The `kind: 'compilation'` case is deferred to BS#801; the
- * orchestrator counts it as `rows_skipped` before reaching the writer.
+ * separately). `kind: 'compilation'` results whose per-track matcher has not
+ * yet run are still counted as `rows_skipped` before reaching the writer;
+ * results whose matcher DID run this batch are written by
+ * `writeCompilationTracks` below (BS#1991 / #801 S2) — a page-level function,
+ * not a per-result one, so it can fetch the page's `compilation_track_artist`
+ * rows and resolve artist names in one query each.
  *
  * MAIN-ROW COLUMN GAP
  * ===================
@@ -41,12 +45,16 @@
 import { sql } from 'drizzle-orm';
 import { db } from '@wxyc/database';
 
-import type { BulkResolveResult, ReconciledIdentity } from './lml-types.js';
+import type { BulkResolveResult, BulkResolveTrackEntry, ReconciledIdentity } from './lml-types.js';
+import { log } from './logger.js';
 
 const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
 const LIBRARY_TABLE = sql.raw(`"${SCHEMA}"."library"`);
 const LIBRARY_IDENTITY_TABLE = sql.raw(`"${SCHEMA}"."library_identity"`);
 const LIBRARY_IDENTITY_SOURCE_TABLE = sql.raw(`"${SCHEMA}"."library_identity_source"`);
+const COMPILATION_TRACK_ARTIST_TABLE = sql.raw(`"${SCHEMA}"."compilation_track_artist"`);
+const ARTISTS_TABLE = sql.raw(`"${SCHEMA}"."artists"`);
+const FOLD_ARTIST_NAME_FN = sql.raw(`"${SCHEMA}"."fold_artist_name"`);
 
 /**
  * Write categories the orchestrator counts. `unresolved` and `compilation`
@@ -218,4 +226,196 @@ export const stampUnresolvedAttemptedAt = async (libraryIds: number[]): Promise<
     SET "unresolved_attempted_at" = NOW()
     WHERE "id" = ANY(${idArrayLiteral}::int[])
   `);
+};
+
+/**
+ * Per-track writer for `kind: 'compilation'` results whose per-track matcher
+ * ran this batch (BS#1991 / #801 S2). Operates on a whole page's worth of
+ * results at once — not per-result — so the CTA fetch and the artist-name
+ * resolution are each ONE query for the page (no N+1), per the AC.
+ */
+export type CompilationWriteOutcome = {
+  /** CTA rows UPDATEd (identity write attempted, guard passed or no-op). */
+  rows_written: number;
+  /** CTA row already carries `track_artist_link_method = 'librarian'` — never overwritten. */
+  rows_skipped_librarian: number;
+  /** Track entry's (artist_name, track_title) echo matched no CTA row for that library_id. */
+  rows_skipped_no_cta_match: number;
+  /** `resolved_artist_name` present but zero or 2+ `artists` rows share its fold key. */
+  rows_skipped_no_catalog_artist: number;
+  /** CTA row's `track_position` was NULL and exactly one distinct position was offered. */
+  position_rows_written: number;
+  /** Two+ track entries shared the same (artist_name, track_title) key with differing positions. */
+  position_rows_skipped_ambiguous: number;
+};
+
+type CtaRow = {
+  id: number;
+  library_id: number;
+  artist_name: string;
+  track_title: string | null;
+  track_position: string | null;
+  track_artist_link_method: string | null;
+};
+
+const emptyCompilationWriteOutcome = (): CompilationWriteOutcome => ({
+  rows_written: 0,
+  rows_skipped_librarian: 0,
+  rows_skipped_no_cta_match: 0,
+  rows_skipped_no_catalog_artist: 0,
+  position_rows_written: 0,
+  position_rows_skipped_ambiguous: 0,
+});
+
+/** `(library_id, artist_name, track_title)` — CTA's own unique key (migration 0037/0099). */
+const ctaKey = (libraryId: number, artistName: string, trackTitle: string | null): string =>
+  JSON.stringify([libraryId, artistName, trackTitle]);
+
+const fetchCtaRowsForLibraries = async (libraryIds: number[]): Promise<CtaRow[]> => {
+  if (libraryIds.length === 0) return [];
+  const idArrayLiteral = `{${libraryIds.join(',')}}`;
+  const rows = (await db.execute(sql`
+    SELECT "id", "library_id", "artist_name", "track_title", "track_position", "track_artist_link_method"
+    FROM ${COMPILATION_TRACK_ARTIST_TABLE}
+    WHERE "library_id" = ANY(${idArrayLiteral}::int[])
+  `)) as unknown as CtaRow[];
+  return rows ?? [];
+};
+
+/**
+ * Batched local artist-name resolution (mirrors the fold_artist_name
+ * singleton-match convention in `jobs/library-etl/job.ts` /
+ * `jobs/concerts-artist-resolver/query.ts`, without genre/code-letters
+ * scoping — a track credit carries neither). One query for every distinct
+ * `resolved_artist_name` in the page rather than one per entry. A name that
+ * matches zero or 2+ `artists` rows under the fold resolves to `null` —
+ * conservative singleton-only writes, same convention as the concerts
+ * resolver's `ambiguous` outcome.
+ */
+const resolveArtistIdsByNames = async (names: string[]): Promise<Map<string, number | null>> => {
+  const result = new Map<string, number | null>(names.map((n) => [n, null]));
+  if (names.length === 0) return result;
+
+  const nameValues = names.map((n) => sql`(${n}::text)`);
+  const matches = (await db.execute(sql`
+    SELECT v."input_name" AS input_name, a."id" AS artist_id
+    FROM (VALUES ${sql.join(nameValues, sql`, `)}) AS v("input_name")
+    JOIN ${ARTISTS_TABLE} a ON ${FOLD_ARTIST_NAME_FN}(a."artist_name") = ${FOLD_ARTIST_NAME_FN}(v."input_name")
+  `)) as unknown as { input_name: string; artist_id: number }[];
+
+  const idsByName = new Map<string, number[]>();
+  for (const row of matches ?? []) {
+    const ids = idsByName.get(row.input_name) ?? [];
+    ids.push(row.artist_id);
+    idsByName.set(row.input_name, ids);
+  }
+  for (const [name, ids] of idsByName) {
+    result.set(name, ids.length === 1 ? ids[0] : null);
+  }
+  return result;
+};
+
+export const writeCompilationTracks = async (
+  results: Extract<BulkResolveResult, { kind: 'compilation' }>[]
+): Promise<CompilationWriteOutcome> => {
+  const outcome = emptyCompilationWriteOutcome();
+  if (results.length === 0) return outcome;
+
+  const ctaRows = await fetchCtaRowsForLibraries(results.map((r) => r.library_id));
+  const ctaByKey = new Map<string, CtaRow>();
+  for (const row of ctaRows) {
+    ctaByKey.set(ctaKey(row.library_id, row.artist_name, row.track_title), row);
+  }
+
+  // Group track entries by their CTA join key. Two+ entries at the same key
+  // is the position-ambiguity case (#801 D7): CTA has one row per (library,
+  // artist_name, track_title), so distinct positions offered for the same
+  // key cannot all be written.
+  const entriesByKey = new Map<string, BulkResolveTrackEntry[]>();
+  for (const result of results) {
+    for (const entry of result.tracks ?? []) {
+      // A "miss" — LML's matcher could not identify who performed this
+      // track. No BS write; NULL track_artist_id already means this.
+      if (entry.resolved_artist_name === null) continue;
+      const key = ctaKey(result.library_id, entry.artist_name, entry.track_title);
+      const bucket = entriesByKey.get(key) ?? [];
+      bucket.push(entry);
+      entriesByKey.set(key, bucket);
+    }
+  }
+
+  const distinctNames = [...new Set([...entriesByKey.values()].flat().map((e) => e.resolved_artist_name as string))];
+  const artistIdByName = await resolveArtistIdsByNames(distinctNames);
+
+  for (const [key, entries] of entriesByKey) {
+    const ctaRow = ctaByKey.get(key);
+    if (!ctaRow) {
+      outcome.rows_skipped_no_cta_match += 1;
+      continue;
+    }
+    // Librarian precedence: a librarian-entered link is never overwritten by
+    // a backfill pass, regardless of what LML now thinks.
+    if (ctaRow.track_artist_link_method === 'librarian') {
+      outcome.rows_skipped_librarian += 1;
+      continue;
+    }
+
+    // Multiple entries at the same key: identity write uses the last one
+    // (an LML echo duplicate at this key is a data-quality edge case, not
+    // something this job can fully disambiguate) — the position write is
+    // what's genuinely ambiguous, and is handled separately below.
+    const entry = entries[entries.length - 1];
+    const trackArtistId = artistIdByName.get(entry.resolved_artist_name as string) ?? null;
+    if (trackArtistId === null) outcome.rows_skipped_no_catalog_artist += 1;
+    const confidence = entry.confidence;
+    const method = 'lml_backfill';
+
+    let newPosition: string | null = null;
+    if (ctaRow.track_position === null) {
+      const distinctPositions = [...new Set(entries.map((e) => e.track_position).filter((p) => p !== null))];
+      if (distinctPositions.length === 1) {
+        newPosition = distinctPositions[0];
+      } else if (distinctPositions.length > 1) {
+        outcome.position_rows_skipped_ambiguous += 1;
+        log(
+          'warn',
+          'compilation_position_ambiguous',
+          `CTA row ${ctaRow.id} (library_id=${ctaRow.library_id}) has ${distinctPositions.length} distinct track_position values offered at the same (artist_name, track_title) key; position left unset`,
+          { cta_id: ctaRow.id, library_id: ctaRow.library_id, distinct_positions: distinctPositions.length }
+        );
+      }
+    }
+
+    const setClause =
+      newPosition !== null
+        ? sql`"track_artist_id" = ${trackArtistId}, "track_artist_link_confidence" = ${confidence}, "track_artist_link_method" = ${method}, "track_position" = ${newPosition}`
+        : sql`"track_artist_id" = ${trackArtistId}, "track_artist_link_confidence" = ${confidence}, "track_artist_link_method" = ${method}`;
+
+    // IS DISTINCT FROM guard (BS#1991 AC): an unchanged verdict is zero
+    // writes, so a no-op re-drain fires neither `cdc_compilation_track_artist`
+    // nor `touch_library_watermark_from_compilation_track_artist`.
+    const distinctGuard =
+      newPosition !== null
+        ? sql`(
+            "track_artist_id" IS DISTINCT FROM ${trackArtistId}
+            OR "track_artist_link_confidence" IS DISTINCT FROM ${confidence}
+            OR "track_artist_link_method" IS DISTINCT FROM ${method}
+            OR "track_position" IS DISTINCT FROM ${newPosition}
+          )`
+        : sql`(
+            "track_artist_id" IS DISTINCT FROM ${trackArtistId}
+            OR "track_artist_link_confidence" IS DISTINCT FROM ${confidence}
+            OR "track_artist_link_method" IS DISTINCT FROM ${method}
+          )`;
+
+    await db.execute(sql`
+      UPDATE ${COMPILATION_TRACK_ARTIST_TABLE}
+      SET ${setClause}
+      WHERE "id" = ${ctaRow.id} AND ${distinctGuard}
+    `);
+    outcome.rows_written += 1;
+    if (newPosition !== null) outcome.position_rows_written += 1;
+  }
+
+  return outcome;
 };

@@ -13,9 +13,11 @@ import {
   resolveDryRun,
   resolveIncludeNullCanonical,
   resolvePartitionFilter,
+  resolveRecheck,
   resolveStaleThreshold,
   resolveThrottleMs,
   resolveUnresolvedRetryDays,
+  resolveVaBatchSize,
 } from '../../../../jobs/library-identity-consumer/select';
 
 describe('resolveBatchSize', () => {
@@ -124,6 +126,37 @@ describe('resolveIncludeNullCanonical', () => {
   });
 });
 
+describe('resolveVaBatchSize', () => {
+  it('defaults to 100 (BS#1991, S0/#1989 payload measurement)', () => {
+    expect(resolveVaBatchSize(undefined)).toBe(100);
+  });
+
+  it('accepts a positive integer up to the LML cap', () => {
+    expect(resolveVaBatchSize('50')).toBe(50);
+    expect(resolveVaBatchSize('1000')).toBe(1000);
+  });
+
+  it('rejects > 1000 (LML cap) or non-positive/non-integer', () => {
+    expect(() => resolveVaBatchSize('1001')).toThrow(/LML cap/);
+    expect(() => resolveVaBatchSize('0')).toThrow();
+    expect(() => resolveVaBatchSize('abc')).toThrow();
+  });
+});
+
+describe('resolveRecheck', () => {
+  it('defaults OFF (undefined / empty / other strings)', () => {
+    expect(resolveRecheck(undefined)).toBe(false);
+    expect(resolveRecheck('')).toBe(false);
+    expect(resolveRecheck('false')).toBe(false);
+  });
+
+  it('treats "true" / "1" / "TRUE" as enabled', () => {
+    expect(resolveRecheck('true')).toBe(true);
+    expect(resolveRecheck('1')).toBe(true);
+    expect(resolveRecheck('TRUE')).toBe(true);
+  });
+});
+
 describe('resolveUnresolvedRetryDays', () => {
   it('defaults to 30 (separate from the 7-day identity-freshness window)', () => {
     expect(resolveUnresolvedRetryDays(undefined)).toBe(30);
@@ -156,6 +189,49 @@ describe('loadBatch', () => {
     expect(serialized).toMatch(/library_identity/);
     expect(serialized).toMatch(/last_verified_at/);
     expect(serialized).toMatch(/artist_name/);
+  });
+
+  it("BS#1991: projects legacy_release_id (the id-space bridge to LML's per-track store)", async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await loadBatch(0, 500, null, 7);
+    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    expect(serialized).toMatch(/legacy_release_id/);
+  });
+
+  it('BS#1991: cohort="va" ANDs the code_volume_letters/EXISTS(compilation_track_artist) condition onto the predicate', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await loadBatch(0, 100, null, 7, false, 30, 'va');
+    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    expect(serialized).toMatch(/code_volume_letters/);
+    expect(serialized).toMatch(/compilation_track_artist/);
+    expect(serialized).not.toMatch(/NOT \(/);
+  });
+
+  it('BS#1991: cohort="non_va" negates the same va condition', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await loadBatch(0, 500, null, 7, false, 30, 'non_va');
+    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    expect(serialized).toMatch(/code_volume_letters/);
+    expect(serialized).toMatch(/NOT \(/);
+  });
+
+  it('BS#1991: cohort=null (the pre-existing single-drain shape) omits the va condition entirely', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await loadBatch(0, 500, null, 7);
+    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    expect(serialized).not.toMatch(/code_volume_letters/);
+  });
+
+  it('BS#1991: recheck=true replaces the eligibility predicate with va-cohort rows that have a prior attempted-at stamp, ignoring the retry-day TTL', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await loadBatch(0, 100, null, 7, false, 30, 'va', true);
+    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    expect(serialized).toMatch(/code_volume_letters/);
+    expect(serialized).toMatch(/unresolved_attempted_at/);
+    expect(serialized).toMatch(/IS NOT NULL/);
+    // recheck ignores the normal freshness/no-match predicate entirely.
+    expect(serialized).not.toMatch(/canonical_entity_id/);
+    expect(serialized).not.toMatch(/last_verified_at/);
   });
 
   it('flag-off (default) keeps the canonical filter and does NOT read the unresolved marker (BS#974 no-change guarantee)', async () => {
@@ -202,8 +278,13 @@ describe('loadBatch', () => {
 
   it('returns the rows surfaced by db.execute', async () => {
     const fixture = [
-      { id: 1, artist_name: 'Juana Molina', album_title: 'DOGA' },
-      { id: 2, artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again' },
+      { id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', legacy_release_id: 1000001 },
+      {
+        id: 2,
+        artist_name: 'Jessica Pratt',
+        album_title: 'On Your Own Love Again',
+        legacy_release_id: 1000002,
+      },
     ];
     (db.execute as jest.Mock).mockResolvedValueOnce(fixture);
     const rows = await loadBatch(0, 500, null, 7);
