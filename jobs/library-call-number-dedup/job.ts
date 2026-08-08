@@ -32,11 +32,25 @@
  *     rather than colliding if a librarian took it since the plan was built.
  *   - `ANALYZE` on the rewritten tables after an `--execute` run (BS#934).
  *
- * SEQUENCING: run this AFTER the tubafrenzy ETL stops (turndown Phase 5,
- * BS#1543). `jobs/library-etl` upserts on `legacy_release_id` and carries
- * `code_number` + `code_volume_letters` in its refresh set, so while that ETL
- * is live it will overwrite a renumber and reinstate a deleted row from the
- * upstream MySQL catalog.
+ * SEQUENCING: run this AFTER `jobs/library-etl` stops — turndown Phase 3.5
+ * (WXYC/wiki#89), which has NO CALENDAR DATE. `library-etl` upserts on
+ * `legacy_release_id` and carries `code_number` + `code_volume_letters` in its
+ * refresh set, so while that ETL is live it will overwrite a renumber and
+ * reinstate a deleted row from the upstream MySQL catalog.
+ *
+ * Do NOT read the 2026-08-31 turndown date as this job's start date. That date
+ * binds Surface 1 only (the flowsheet/playlist UI, Phase 3 / wiki#88), where
+ * flowsheet-etl and rotation-etl stop — BS#1858 flips those two and
+ * deliberately leaves library-etl alone. Surface 2 (/wxycdb catalog edit) is
+ * chain-ready-gated; MySQL + library-etl survive frozen-scope past 8/31 if the
+ * chain isn't ready. Critical path is the MD catalog-edit UI (dj-site#1071).
+ *
+ * Also wait for PARITY SIGN-OFF, not just for the ETL to stop: Phase 3.5 ends
+ * with 7 consecutive clean parity days (Backend-sourced library.db vs the prod
+ * MySQL build, 0 unmatched after the residue ledger). This job deliberately
+ * diverges the two — ~149 deletes of rows that still exist upstream, ~116
+ * renumbers — so running it inside that window reads as a parity failure
+ * rather than as the intended change.
  *
  * The revert is triggered by an UPSTREAM EDIT, not by the clock — and pausing
  * the ETL is therefore not a workaround. `library-etl` is incremental

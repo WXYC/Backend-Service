@@ -67,15 +67,19 @@ Two tables are deliberately **not** targets: `album_plays` is a materialized vie
 
 ## Sequencing
 
-**Run this after the tubafrenzy ETL stops** — that is, after Phase 5 of the turndown ([#1543](https://github.com/WXYC/Backend-Service/issues/1543), org Project #36). `jobs/library-etl` upserts on `legacy_release_id` and carries both `code_number` and `code_volume_letters` in its refresh set, so while that ETL is live it will overwrite a renumber and reinstate a deleted row from the upstream MySQL catalog.
+**Run this after `jobs/library-etl` stops — turndown Phase 3.5 ([WXYC/wiki#89](https://github.com/WXYC/wiki/issues/89)), which has no calendar date.** `library-etl` upserts on `legacy_release_id` and carries both `code_number` and `code_volume_letters` in its refresh set, so while that ETL is live it will overwrite a renumber and reinstate a deleted row from the upstream MySQL catalog.
+
+Do not read the 2026-08-31 turndown date as this job's start date. That date binds Surface 1 only — the flowsheet/playlist UI, Phase 3 ([wiki#88](https://github.com/WXYC/wiki/issues/88)), which is where `flowsheet-etl` and `rotation-etl` stop (BS#1858 flips those two to `job-type: one-shot` and **deliberately leaves `library-etl` alone**). Surface 2 (`/wxycdb` catalog edit) is chain-ready-gated, not calendar-gated: `/wxycdb` + MySQL + `library-etl` + the MySQL-sourced daily `library.db` sync survive frozen-scope past 8/31 at zero hosting penalty if the chain isn't ready. The critical path is the MD catalog-edit UI rebuild ([WXYC/dj-site#1071](https://github.com/WXYC/dj-site/issues/1071)).
 
 **The revert is triggered by an upstream edit, not by the clock, and pausing the ETL is not a workaround.** `library-etl` is incremental — `buildReleaseQuery` filters `WHERE lr.TIME_LAST_MODIFIED > <last run>` — so it fetches only releases whose _upstream_ timestamp advanced. This job writes Postgres and leaves MySQL untouched, so a deduped release is absent from the next fetch and the next pass does not revert it. What reverts it is a librarian editing that release in tubafrenzy, at any point afterward: the re-fetch refreshes `code_number` from `excluded.*`, and a merged-away row whose `legacy_release_id` no longer resolves is INSERTed fresh, resurrecting the slot. A pause window covers a ~20-second run that was never at risk and restores the open-ended exposure the moment it lifts.
 
 Running before the ETL stops is therefore not catastrophic but decays, and the decay is worse than it looks: the relabelling in step 3 is _physical_, so a later revert leaves a disc mislabelled in the opposite direction — the shelf/catalog disagreement this job exists to remove.
 
+**Wait for parity sign-off, not just for the ETL to stop.** Phase 3.5's cutover ends with seven consecutive clean parity days comparing the Backend-sourced `library.db` build against the still-running prod MySQL build, where clean means zero unmatched after the documented residue ledger. This job _deliberately_ diverges the two: it deletes ~149 rows that still exist upstream and renumbers ~116 more. Running it inside that window injects intentional drift into the exact check trying to prove the two agree, and it reads as a parity failure rather than as the intended change. Run after the parity gate closes, or get the divergence written into the residue ledger first.
+
 Then, in order:
 
-1. Dry run. Review the plan and the worklist.
+1. Dry run. Review the plan and the worklist. (The plan drifts — re-derive it rather than trusting an earlier run's numbers.)
 2. `--execute`.
 3. Give the worklist to the librarian. Until the discs are relabelled, the shelf and the catalog disagree.
 4. Add the uniqueness constraint, keyed as above.
