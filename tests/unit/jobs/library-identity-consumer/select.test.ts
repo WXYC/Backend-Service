@@ -207,6 +207,17 @@ describe('loadBatch', () => {
     expect(serialized).not.toMatch(/NOT \(/);
   });
 
+  it('BS#1991: the va-cohort condition is NULL-safe (COALESCEs code_volume_letters before LIKE), so the two cohorts partition every row exactly — including NULL code_volume_letters', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await loadBatch(0, 100, null, 7, false, 30, 'va');
+    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    // A NULL code_volume_letters row with no CTA row must resolve to a real
+    // FALSE in the va branch (excluded) and a real TRUE in NOT(...) for
+    // non_va (included) — three-valued NULL-LIKE-NULL logic would silently
+    // drop it from both. COALESCE pins the comparand to a non-null default.
+    expect(serialized).toMatch(/COALESCE/);
+  });
+
   it('BS#1991: cohort="non_va" negates the same va condition', async () => {
     (db.execute as jest.Mock).mockResolvedValue([]);
     await loadBatch(0, 500, null, 7, false, 30, 'non_va');

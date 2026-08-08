@@ -113,8 +113,16 @@ export type LibraryRow = {
  */
 export type Cohort = 'va' | 'non_va';
 
+// `code_volume_letters` is nullable (schema.ts documents NULL as a genuine
+// library-metadata gap). `NULL LIKE 'Z%'` evaluates to NULL, not FALSE, so
+// without the COALESCE a NULL-`code_volume_letters` row with no CTA row
+// would make the whole OR-expression NULL: `AND (NULL)` excludes it from
+// `va`, and `AND NOT (NULL)` is ALSO NULL (three-valued logic), excluding it
+// from `non_va` too — silently dropping the row from both drains. COALESCE
+// pins the expression to a real boolean so the two cohorts stay an exact
+// partition of every row the pre-BS#1991 single drain used to scan.
 const VA_COHORT_CONDITION = sql`(
-  ${LIBRARY_TABLE}."code_volume_letters" LIKE 'Z%'
+  COALESCE(${LIBRARY_TABLE}."code_volume_letters", '') LIKE 'Z%'
   OR EXISTS (
     SELECT 1 FROM ${COMPILATION_TRACK_ARTIST_TABLE} cta
     WHERE cta."library_id" = ${LIBRARY_TABLE}."id"

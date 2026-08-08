@@ -30,6 +30,10 @@ type SqlLike = {
   values?: unknown[];
   queryChunks?: Array<string | SqlChunk>;
   raw?: string;
+  // The manual drizzle mock's `sql.join` shape (tests/__mocks__/drizzle-orm.ts)
+  // — same handling as flowsheet-ghost-row-sweep's renderer.
+  join?: unknown[];
+  sep?: unknown;
 };
 const renderValue = (v: unknown): string => {
   if (v == null) return '';
@@ -37,7 +41,7 @@ const renderValue = (v: unknown): string => {
   if (typeof v === 'object') {
     const o = v as SqlChunk & SqlLike;
     if (typeof o.raw === 'string') return o.raw;
-    if (Array.isArray(o.queryChunks) || Array.isArray(o.sql)) return renderSql(o);
+    if (Array.isArray(o.queryChunks) || Array.isArray(o.sql) || Array.isArray(o.join)) return renderSql(o);
     if (Array.isArray(o.value)) return o.value.join('');
     if (typeof o.value === 'string') return o.value;
   }
@@ -57,6 +61,7 @@ const renderSql = (value: unknown): string => {
     return out;
   }
   if (typeof obj.sql === 'string') return obj.sql;
+  if (Array.isArray(obj.join)) return obj.join.map(renderSql).join(renderSql(obj.sep));
   if (obj.queryChunks) {
     return obj.queryChunks
       .map((chunk) => {
@@ -345,7 +350,7 @@ describe('writeCompilationTracks (BS#1991 / #801 S2)', () => {
         },
       ])
       .mockResolvedValueOnce([{ input_name: 'Juana Molina', artist_id: 7 }])
-      .mockResolvedValueOnce([]);
+      .mockResolvedValueOnce([{ id: 42 }]); // batched UPDATE's RETURNING — rows the guard let through
 
     const outcome = await writeCompilationTracks([compilation()]);
 
@@ -380,7 +385,7 @@ describe('writeCompilationTracks (BS#1991 / #801 S2)', () => {
         },
       ])
       .mockResolvedValueOnce([]) // zero artist matches
-      .mockResolvedValueOnce([]);
+      .mockResolvedValueOnce([{ id: 42 }]); // RETURNING: the NULL-artist write still lands
 
     const outcome = await writeCompilationTracks([
       compilation({ tracks: [track({ resolved_artist_name: 'Nobody In Catalog' })] }),
@@ -450,7 +455,7 @@ describe('writeCompilationTracks (BS#1991 / #801 S2)', () => {
         },
       ])
       .mockResolvedValueOnce([{ input_name: 'Some Artist', artist_id: 9 }])
-      .mockResolvedValueOnce([]);
+      .mockResolvedValueOnce([{ id: 42 }]); // RETURNING: identity write unaffected by position ambiguity
 
     const outcome = await writeCompilationTracks([
       compilation({

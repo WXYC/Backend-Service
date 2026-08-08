@@ -14,7 +14,7 @@
  * bucket added to `Totals` without a matching span-attribute entry is
  * caught without needing to drive the whole job through Sentry/DB mocks.
  */
-import { buildSpanAttributes } from '../../../../jobs/library-identity-consumer/job';
+import { buildSpanAttributes, shouldAnalyzeCompilationTracks } from '../../../../jobs/library-identity-consumer/job';
 import type { Totals } from '../../../../jobs/library-identity-consumer/orchestrate';
 
 const totals: Totals = {
@@ -80,5 +80,25 @@ describe('buildSpanAttributes (BS#1086)', () => {
     expect(attrs['consumer.va.rows_resolved_compilation']).toBe(12);
     expect(attrs['consumer.va.compilation_track_rows_written']).toBe(84);
     expect(Object.keys(attrs).every((k) => k.startsWith('consumer.va.'))).toBe(true);
+  });
+});
+
+describe('shouldAnalyzeCompilationTracks (BS#1991)', () => {
+  // The bulk-update playbook pairs a bulk write with ANALYZE on the touched
+  // table, once per run (not per page) — but only when something was
+  // actually written: a dry-run makes no writes, and a no-op re-drain's
+  // IS DISTINCT FROM guard can leave every drain at 0, where ANALYZE would
+  // be wasted work on an unchanged table.
+  it('is false on a dry run regardless of write counts', () => {
+    expect(shouldAnalyzeCompilationTracks(true, 84, 12)).toBe(false);
+  });
+
+  it('is false when no drain wrote any compilation-track rows', () => {
+    expect(shouldAnalyzeCompilationTracks(false, 0, 0)).toBe(false);
+  });
+
+  it('is true when any drain wrote at least one row', () => {
+    expect(shouldAnalyzeCompilationTracks(false, 0, 1)).toBe(true);
+    expect(shouldAnalyzeCompilationTracks(false, 84)).toBe(true);
   });
 });
