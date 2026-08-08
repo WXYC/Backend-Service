@@ -225,6 +225,12 @@ describe('writeCompilationTracks (BS#1991 / #801 S2)', () => {
     // one test would otherwise be consumed by the next test's first
     // db.execute call. mockReset() drains the queue (and any lingering
     // default resolved value) along with the call history.
+    // This also permanently strips the module-load default
+    // `.mockResolvedValue([])` set at tests/mocks/database.mock.ts:51 — it
+    // never comes back for the rest of this file. Harmless today because
+    // every writer.ts call site coalesces (`rows ?? []` etc.), but a
+    // describe block added later that calls db.execute without queuing its
+    // own value would silently get `undefined` instead of `[]`.
     (db.execute as jest.Mock).mockReset();
   });
 
@@ -472,6 +478,38 @@ describe('writeCompilationTracks (BS#1991 / #801 S2)', () => {
     );
     expect(renderSql(updateCall?.[0])).not.toContain('B9');
   });
+
+  // Regression pair for the beforeEach's mockReset() above (BS#2051). These
+  // two tests must run in this exact declared order — Jest's default
+  // sequencer preserves declaration order (this repo's test scripts and CI
+  // never pass --randomize), so that's a safe assumption here even though
+  // it wouldn't be for tests that assert independent behavior. If the
+  // beforeEach is ever reverted to clearAllMocks() (which clears call
+  // history but leaves queued mockResolvedValueOnce values in place — see
+  // that comment for the full mechanism), the second test below starts
+  // receiving the first test's undrained surplus instead of a clean mock,
+  // and fails loudly.
+  it('leaves a deliberate surplus mockResolvedValueOnce queued and unconsumed — paired with the next test (BS#2051)', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([]) // CTA fetch: no rows, so writeCompilationTracks issues no further query
+      .mockResolvedValueOnce('BS#2051-UNDRAINED-SURPLUS'); // deliberately left unconsumed
+
+    const outcome = await writeCompilationTracks([compilation()]);
+
+    expect(outcome.rows_skipped_no_cta_match).toBe(1);
+  });
+
+  it("does not receive the previous test's undrained surplus — pins the beforeEach's mockReset() (BS#2051)", async () => {
+    // No mockResolvedValueOnce queued in this test at all. A correctly
+    // mockReset() mock has no queued value and no leftover implementation
+    // (mockReset() also drops the database.mock.ts:51 module-load default —
+    // see the beforeEach comment), so a raw call resolves to undefined. If
+    // the previous test's surplus had leaked through instead (the
+    // clearAllMocks() regression this pair guards against), this would
+    // resolve to 'BS#2051-UNDRAINED-SURPLUS' instead.
+    const result = await (db.execute as jest.Mock)();
+    expect(result).toBeUndefined();
+  });
 });
 
 describe('writeCompilationTracks — review-gate fixes (BS#1991 bounce 1)', () => {
@@ -511,7 +549,10 @@ describe('writeCompilationTracks — review-gate fixes (BS#1991 bounce 1)', () =
   beforeEach(() => {
     // See the matching comment in the "writeCompilationTracks (BS#1991 /
     // #801 S2)" describe above (BS#2051): mockReset() drains unconsumed
-    // mockResolvedValueOnce queues, not just call history.
+    // mockResolvedValueOnce queues, not just call history — and, same as
+    // that block, permanently strips the module-load default
+    // `.mockResolvedValue([])` at tests/mocks/database.mock.ts:51 for the
+    // rest of this file.
     (db.execute as jest.Mock).mockReset();
   });
 
