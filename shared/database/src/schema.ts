@@ -606,26 +606,50 @@ export const compilation_track_artist = wxyc_schema.table(
     artist_name: varchar('artist_name', { length: 255 }).notNull(),
     track_title: varchar('track_title', { length: 255 }),
     track_position: varchar('track_position', { length: 20 }),
+    // BS#1990 (#801 S1) — per-track artist canonicalization link. Nullable:
+    // most rows will never resolve. Naming mirrors
+    // `library_identity_source.method`/`.confidence`. ON DELETE set null
+    // (not cascade) follows the `concerts.headlining_artist_id` precedent —
+    // deleting an artist row shouldn't take a compilation-track credit with
+    // it.
+    track_artist_id: integer('track_artist_id').references(() => artists.id, {
+      onDelete: 'set null',
+    }),
+    track_artist_link_confidence: real('track_artist_link_confidence'),
+    // Provenance for track_artist_id. Open vocabulary (TEXT, not pgEnum —
+    // the 0109 saga showed each enum-value addition costs its own
+    // migration). Values so far: 'lml_backfill', 'librarian'.
+    track_artist_link_method: text('track_artist_link_method'),
   },
   (table) => [
     index('cta_library_id_idx').on(table.library_id),
     index('cta_artist_name_idx').on(table.artist_name),
+    // #801 D7 (S0/#1989's prod measurement) — this key is PERMANENT.
+    // (library_id, track_position) is not viable: 78.31% of rows have a
+    // NULL track_position, and 61.5% of the positioned rows are duplicate
+    // groups — the table's grain is one row per credited artist per track,
+    // so a 66-performer track legitimately shares one position. No key
+    // change ships here or ever; do not touch this index.
     uniqueIndex('cta_unique_idx').on(table.library_id, table.artist_name, table.track_title),
-    // BS#1135 / 0099_cta-unique-null-track-partial.sql: complement to
-    // `cta_unique_idx` that closes the NULL-track-title duplicate
-    // loophole on PG 14 (prod runtime — `NULLS NOT DISTINCT` is PG15+
-    // and unavailable). The base index above covers the non-NULL
-    // slice (Postgres includes non-NULL rows in unique comparisons
-    // normally); this partial unique covers `track_title IS NULL` on
-    // `(library_id, artist_name)`. Together they enforce the full
-    // intended "no duplicate compilation tracks per (library, artist,
-    // title)" semantics. Tests:
-    // `tests/unit/database/schema.cta-unique-null-track-partial.test.ts`
-    // (schema drift), `tests/integration/cta-unique-null-track-partial.spec.js`
-    // (runtime behavior).
-    uniqueIndex('cta_unique_null_track_idx')
-      .on(table.library_id, table.artist_name)
-      .where(sql`${table.track_title} IS NULL`),
+    // cta_unique_null_track_idx (BS#1135 / migration 0099) is DROPPED by
+    // migration 0139 (BS#1990 / #801 D15): the S0/#1989 prod audit measured
+    // ZERO rows with NULL track_title, so the partial index was pure
+    // write-tax protecting an empty slice. See 0139_cta-track-artist-link.sql
+    // for the DROP INDEX and tests/integration/cta-unique-null-track-partial.spec.js
+    // for the updated runtime-behavior assertion.
+    index('cta_track_artist_id_idx').on(table.track_artist_id),
+    // #801 D15 — trgm over tsvector, on BOTH columns: the CTA suggest query
+    // (`suggest.service.ts`) is exact-ILIKE artist_name + prefix-ILIKE
+    // track_title, a literal sibling of the flowsheet suggest query that
+    // migration 0042 indexes the same way. `pg_trgm` is already installed
+    // and used by five shipped migrations; LML#269 measured trgm at 97x for
+    // this shape. The pre-existing `cta_artist_name_idx` btree above cannot
+    // serve exact-ILIKE (seq-scans today); this GIN pair closes that gap for
+    // both predicate legs. Drop-and-rebuild candidates during S5's bulk
+    // load — that call belongs to S5's trigger-strategy decision.
+    index('cta_artist_name_trgm_idx').using('gin', sql`${table.artist_name} gin_trgm_ops`),
+    index('cta_track_title_trgm_idx').using('gin', sql`${table.track_title} gin_trgm_ops`),
+    check('cta_track_artist_link_confidence_range', sql`${table.track_artist_link_confidence} BETWEEN 0 AND 1`),
   ]
 );
 

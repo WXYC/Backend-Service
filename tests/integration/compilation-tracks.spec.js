@@ -114,17 +114,24 @@ describe('Compilation-track (CTA) write path (BS#1964)', () => {
       expect(res.body.tracks.filter((t) => t.artist_name === 'CTA Dup Guest').length).toBe(1);
     });
 
-    test('dedupes intra-batch NULL-track duplicates via the partial unique index', async () => {
+    // BS#1990 (#801 S1) migration 0139 drops `cta_unique_null_track_idx`
+    // (BS#1135 / 0099) — the S0/#1989 prod audit measured zero rows in the
+    // slice it protected, so `writeCompilationTracks`'s untargeted
+    // `ON CONFLICT DO NOTHING` no longer has a NULL-track-title constraint to
+    // arbiter on. Both rows now land, matching
+    // tests/integration/cta-unique-null-track-partial.spec.js's "now ALLOWED"
+    // assertion for the same underlying DB behavior.
+    test('intra-batch NULL-track duplicates are no longer deduped (0099 index dropped by 0139)', async () => {
       const dup = { artist_name: 'CTA Null-Track Guest' };
       const res = await auth
         .post(`/library/${WRITE_LIBRARY_ID}/compilation-tracks`)
         .send({ tracks: [dup, dup] })
         .expect(200);
-      expect(res.body.inserted).toBe(1);
-      expect(res.body.skipped).toBe(1);
+      expect(res.body.inserted).toBe(2);
+      expect(res.body.skipped).toBe(0);
       const stored = res.body.tracks.filter((t) => t.artist_name === 'CTA Null-Track Guest');
-      expect(stored.length).toBe(1);
-      expect(stored[0].track_title).toBeNull();
+      expect(stored.length).toBe(2);
+      stored.forEach((t) => expect(t.track_title).toBeNull());
     });
 
     test('returns 400 for an empty track list', async () => {
