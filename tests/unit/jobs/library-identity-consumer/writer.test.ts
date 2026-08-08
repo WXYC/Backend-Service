@@ -520,9 +520,7 @@ describe('writeCompilationTracks (BS#1991 / #801 S2)', () => {
 });
 
 describe('writeCompilationTracks — review-gate fixes (BS#1991 bounce 1)', () => {
-  const track = (
-    overrides: Partial<BulkResolveTrackEntry> = {}
-  ): BulkResolveTrackEntry => ({
+  const track = (overrides: Partial<BulkResolveTrackEntry> = {}): BulkResolveTrackEntry => ({
     artist_name: 'Juana Molina',
     track_title: 'la paradoja',
     track_position: null,
@@ -552,11 +550,8 @@ describe('writeCompilationTracks — review-gate fixes (BS#1991 bounce 1)', () =
     ...overrides,
   });
   const updateCalls = () =>
-    (db.execute as jest.Mock).mock.calls.filter((c) =>
-      /UPDATE[\s\S]*compilation_track_artist/i.test(renderSql(c[0]))
-    );
-  const foldCalls = () =>
-    (db.execute as jest.Mock).mock.calls.filter((c) => /fold_artist_name/i.test(renderSql(c[0])));
+    (db.execute as jest.Mock).mock.calls.filter((c) => /UPDATE[\s\S]*compilation_track_artist/i.test(renderSql(c[0])));
+  const foldCalls = () => (db.execute as jest.Mock).mock.calls.filter((c) => /fold_artist_name/i.test(renderSql(c[0])));
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -574,9 +569,7 @@ describe('writeCompilationTracks — review-gate fixes (BS#1991 bounce 1)', () =
       ])
       .mockResolvedValueOnce([{ input_name: 'Juana Molina', artist_id: 7 }]);
 
-    const outcome = await writeCompilationTracks([
-      compilation({ tracks: [track({ track_position: 'A1' })] }),
-    ]);
+    const outcome = await writeCompilationTracks([compilation({ tracks: [track({ track_position: 'A1' })] })]);
 
     expect(updateCalls().length).toBe(0);
     expect(outcome.rows_written).toBe(0);
@@ -609,9 +602,7 @@ describe('writeCompilationTracks — review-gate fixes (BS#1991 bounce 1)', () =
       .mockResolvedValueOnce([{ input_name: 'Juana Molina', artist_id: 7 }])
       .mockResolvedValueOnce([{ id: 42 }]);
 
-    const outcome = await writeCompilationTracks([
-      compilation({ tracks: [track({ track_position: longPosition })] }),
-    ]);
+    const outcome = await writeCompilationTracks([compilation({ tracks: [track({ track_position: longPosition })] })]);
 
     const update = updateCalls();
     expect(update.length).toBe(1);
@@ -630,7 +621,12 @@ describe('writeCompilationTracks — review-gate fixes (BS#1991 bounce 1)', () =
     (db.execute as jest.Mock)
       .mockResolvedValueOnce([
         ctaRow(),
-        ctaRow({ id: 43, artist_name: 'Kept By Librarian', track_title: 'Locked', track_artist_link_method: 'librarian' }),
+        ctaRow({
+          id: 43,
+          artist_name: 'Kept By Librarian',
+          track_title: 'Locked',
+          track_artist_link_method: 'librarian',
+        }),
       ])
       .mockResolvedValue([]);
 
@@ -673,9 +669,7 @@ describe('writeCompilationTracks — review-gate fixes (BS#1991 bounce 1)', () =
       .mockResolvedValueOnce([{ input_name: 'Juana Molina', artist_id: 7 }])
       .mockResolvedValueOnce([]); // guard filtered the row server-side: nothing RETURNING
 
-    const outcome = await writeCompilationTracks([
-      compilation({ tracks: [track({ track_position: 'A1' })] }),
-    ]);
+    const outcome = await writeCompilationTracks([compilation({ tracks: [track({ track_position: 'A1' })] })]);
 
     expect(outcome.rows_written).toBe(0);
     expect(outcome.position_rows_written).toBe(0);
