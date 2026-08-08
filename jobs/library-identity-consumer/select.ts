@@ -307,6 +307,11 @@ export const loadBatch = async (
   // simplification below -- its NOT-EXISTS arm is further gated by the
   // no-match-marker AND clause, so it isn't the pure `NOT P OR NOT F` shape
   // the PK equivalence applies to.)
+  // BS#1991 bounce-1: the flag-OFF `va` arm ALSO honors the no-match marker
+  // TTL. A resolved compilation writes no `library_identity` row, so without
+  // this clause the flag-off predicate re-selects it on every run forever —
+  // the exact re-ask pathology this issue closes. Scoped to the va cohort:
+  // the non-va arm stays byte-identical to the pre-BS#1991 predicate.
   // BS#1991: `recheck` mode replaces the normal freshness/no-match-marker
   // eligibility entirely — it deliberately IGNORES `unresolvedRetryDays` and
   // re-drives every va-cohort row this job has previously visited
@@ -335,7 +340,19 @@ export const loadBatch = async (
           )
         )
       )`
-      : sql`
+      : cohort === 'va'
+        ? sql`
+      AND "canonical_entity_id" IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li
+        WHERE li."library_id" = ${LIBRARY_TABLE}."id"
+          AND li."last_verified_at" >= NOW() - (interval '1 day' * ${staleDays})
+      )
+      AND (
+        "unresolved_attempted_at" IS NULL
+        OR "unresolved_attempted_at" < NOW() - (interval '1 day' * ${unresolvedRetryDays})
+      )`
+        : sql`
       AND "canonical_entity_id" IS NOT NULL
       AND NOT EXISTS (
         SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li

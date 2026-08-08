@@ -96,7 +96,12 @@ export const buildSpanAttributes = (totals: Totals, prefix = 'consumer'): Record
   [`${prefix}.rows_skipped.lml_untrusted_library_id`]: totals.rows_skipped.lml_untrusted_library_id,
   [`${prefix}.source_rows_skipped_null_confidence`]: totals.source_rows_skipped_null_confidence,
   [`${prefix}.compilation_track_rows_written`]: totals.compilation_track_rows_written,
+  [`${prefix}.compilation_track_rows_skipped_unchanged`]: totals.compilation_track_rows_skipped_unchanged,
   [`${prefix}.compilation_track_rows_skipped_librarian`]: totals.compilation_track_rows_skipped_librarian,
+  [`${prefix}.compilation_track_rows_skipped_no_cta_match`]: totals.compilation_track_rows_skipped_no_cta_match,
+  [`${prefix}.compilation_track_rows_skipped_no_catalog_artist`]: totals.compilation_track_rows_skipped_no_catalog_artist,
+  [`${prefix}.compilation_track_position_rows_written`]: totals.compilation_track_position_rows_written,
+  [`${prefix}.compilation_track_position_rows_skipped_ambiguous`]: totals.compilation_track_position_rows_skipped_ambiguous,
   [`${prefix}.lml_total_calls`]: totals.lml_total_calls,
   [`${prefix}.lml_total_latency_ms`]: totals.lml_total_latency_ms,
 });
