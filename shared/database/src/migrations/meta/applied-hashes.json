@@ -137,5 +137,5 @@
   "0138_catalog-export-watermark-triggers": "eac1674c4b42d7473a147a9c02a0caa7d2d7946a069c79aa5f7f2e71323a6090",
   "0139_flowsheet-album-id-linked-idx": "c39265873ac4244460a0bc5e492c605a5e1af0429d0520d874cf16d1735892c2",
   "0140_cta-track-artist-link": "c1b1c62a5e4977eede90194974cd18f8caacf8a5cf5de9e7ece1f030cea49eb1",
-  "0141_slack-ban-moderators": "f16bac66f60ead8ccb30e668bce73cce23fd26a469bdb2552f34def53c8cfca1"
+  "0141_slack-ban-moderators": "3312d34a2e6447fb00033f52ede6a38d397bb9c6b7ae5618764ecd510d36fef2"
 }

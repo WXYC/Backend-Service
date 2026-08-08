@@ -111,8 +111,19 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, idx) => value === b[idx]);
 }
 
-const orderedModerators = () =>
-  db
+/**
+ * The one ordered read of the roster, parameterized on the connection so the
+ * pooled `db` and a transaction both use it.
+ *
+ * Single-sourced deliberately: the `slack_user_id` tiebreak is load-bearing
+ * (see the GET comment below), and three hand-copied `ORDER BY`s would mean a
+ * future change to it has to land in three places — two of them buried inside
+ * the PUT transaction where a reader is least likely to look.
+ */
+type ModeratorReader = Pick<typeof db, 'select'>;
+
+const orderedModerators = (conn: ModeratorReader) =>
+  conn
     .select()
     .from(slack_ban_moderators)
     .orderBy(asc(slack_ban_moderators.added_at), asc(slack_ban_moderators.slack_user_id));
@@ -136,7 +147,7 @@ internalSlackModeratorsRoute.get('/', async (req, res) => {
   }
 
   try {
-    const items = await orderedModerators();
+    const items = await orderedModerators(db);
     return res.status(200).json({ items });
   } catch (error) {
     console.error('[SLACK MODERATORS] GET error:', error);
@@ -215,10 +226,7 @@ internalSlackModeratorsRoute.put('/', async (req, res) => {
       // shared/database/src/client.ts:109 that the session-scoped variant can.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(${SLACK_MODERATORS_ADVISORY_LOCK_KEY}::bigint)`);
 
-      const currentRows = await tx
-        .select()
-        .from(slack_ban_moderators)
-        .orderBy(asc(slack_ban_moderators.added_at), asc(slack_ban_moderators.slack_user_id));
+      const currentRows = await orderedModerators(tx);
       const current = [...new Set(currentRows.map((r) => r.slack_user_id.toUpperCase()))].sort();
 
       if (!sameSet(current, expected)) {
@@ -253,10 +261,7 @@ internalSlackModeratorsRoute.put('/', async (req, res) => {
           .onConflictDoNothing();
       }
 
-      const items = await tx
-        .select()
-        .from(slack_ban_moderators)
-        .orderBy(asc(slack_ban_moderators.added_at), asc(slack_ban_moderators.slack_user_id));
+      const items = await orderedModerators(tx);
 
       return { conflict: false as const, items, added, removed };
     });

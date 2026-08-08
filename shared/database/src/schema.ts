@@ -361,13 +361,36 @@ export const banned_fingerprints = wxyc_schema.table(
 // Grid identifiers run longer. No display-name column: Slack display names
 // change and Slack is the authority on them, so the modal resolves them at
 // render time from the ID.
+// The CHECK constraints are load-bearing, not decoration. The route's
+// differential replace reads the live set case-INSENSITIVELY (folding to
+// uppercase before comparing against `expectedCurrent`) but deletes
+// case-SENSITIVELY (`slack_user_id <> ALL(:desired)`, which is plain varchar
+// equality). A single stored row in any other case would therefore be folded
+// into a match on read, then miss the DELETE's exclusion list and be
+// deleted-and-reinserted — silently rewriting the very audit columns the
+// differential replace exists to preserve, while the diff log reported no
+// removal. The route is the only writer today, so the invariant holds by
+// construction; these constraints make it hold by ENFORCEMENT, so a manual
+// SQL fix-up, an import, or a future second writer cannot introduce the row
+// that breaks it. The pattern is the same one the route validates on the
+// wire, pinned at the substrate.
 export type NewSlackBanModerator = InferInsertModel<typeof slack_ban_moderators>;
 export type SlackBanModerator = InferSelectModel<typeof slack_ban_moderators>;
-export const slack_ban_moderators = wxyc_schema.table('slack_ban_moderators', {
-  slack_user_id: varchar('slack_user_id', { length: 64 }).primaryKey(),
-  added_at: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
-  added_by_slack_user_id: varchar('added_by_slack_user_id', { length: 64 }),
-});
+export const slack_ban_moderators = wxyc_schema.table(
+  'slack_ban_moderators',
+  {
+    slack_user_id: varchar('slack_user_id', { length: 64 }).primaryKey(),
+    added_at: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
+    added_by_slack_user_id: varchar('added_by_slack_user_id', { length: 64 }),
+  },
+  (table) => [
+    check('slack_ban_moderators_slack_user_id_upper_ck', sql`${table.slack_user_id} ~ '^[A-Z0-9]+$'`),
+    check(
+      'slack_ban_moderators_added_by_upper_ck',
+      sql`${table.added_by_slack_user_id} IS NULL OR ${table.added_by_slack_user_id} ~ '^[A-Z0-9]+$'`
+    ),
+  ]
+);
 
 export type NewShift = InferInsertModel<typeof schedule>;
 export type Shift = InferSelectModel<typeof schedule>;

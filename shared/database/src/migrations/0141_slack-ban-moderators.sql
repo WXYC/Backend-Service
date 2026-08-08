@@ -13,12 +13,23 @@
 -- user has no `auth_user` row, the same reason `banned_fingerprints.banned_by_user_id`
 -- is NULL on every Slack-originated ban.
 --
+-- The two CHECK constraints pin the uppercase-alphanumeric Slack-ID shape the route's
+-- differential replace DEPENDS on: it folds the live set to uppercase when comparing
+-- against `expectedCurrent`, but deletes with plain varchar equality, so a row stored
+-- in any other case would be folded into a match on read and then miss the DELETE's
+-- exclusion list — deleted and reinserted, silently rewriting the audit columns the
+-- differential replace exists to preserve, with the diff log reporting no removal.
+-- Enforcing the shape here means no manual fix-up, import, or future second writer can
+-- create that row.
+--
 -- No precondition guard: Check 8 (scripts/validate-migrations.mjs) scopes constraint
--- preconditions to constraints ADDED to an existing table. The PRIMARY KEY here is
--- evaluated against zero rows by construction.
+-- preconditions to constraints ADDED to an existing table. Both CHECKs and the PRIMARY
+-- KEY here are evaluated against zero rows by construction.
 
 CREATE TABLE "wxyc_schema"."slack_ban_moderators" (
 	"slack_user_id" varchar(64) PRIMARY KEY NOT NULL,
 	"added_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"added_by_slack_user_id" varchar(64)
+	"added_by_slack_user_id" varchar(64),
+	CONSTRAINT "slack_ban_moderators_slack_user_id_upper_ck" CHECK ("wxyc_schema"."slack_ban_moderators"."slack_user_id" ~ '^[A-Z0-9]+$'),
+	CONSTRAINT "slack_ban_moderators_added_by_upper_ck" CHECK ("wxyc_schema"."slack_ban_moderators"."added_by_slack_user_id" IS NULL OR "wxyc_schema"."slack_ban_moderators"."added_by_slack_user_id" ~ '^[A-Z0-9]+$')
 );
