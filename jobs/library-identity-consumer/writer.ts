@@ -220,11 +220,10 @@ export const writeSingleArtist = async (
  */
 export const stampUnresolvedAttemptedAt = async (libraryIds: number[]): Promise<void> => {
   if (libraryIds.length === 0) return;
-  const idArrayLiteral = `{${libraryIds.join(',')}}`;
   await db.execute(sql`
     UPDATE ${LIBRARY_TABLE}
     SET "unresolved_attempted_at" = NOW()
-    WHERE "id" = ANY(${idArrayLiteral}::int[])
+    WHERE "id" = ANY(${intArrayLiteral(libraryIds)}::int[])
   `);
 };
 
@@ -418,6 +417,118 @@ export const analyzeCompilationTrackArtist = async (): Promise<void> => {
   await db.execute(sql`ANALYZE ${COMPILATION_TRACK_ARTIST_TABLE}`);
 };
 
+/**
+ * `compilation_track_artist.track_artist_link_confidence` is `float4`
+ * (Postgres `real`). A value round-tripped through that column and read back
+ * through postgres-js's float8 lens differs in the digits float4 cannot
+ * represent, so `buildWriteRow`'s unchanged-row prefilter must compare both
+ * sides through the same float32 quantization or a genuinely-unchanged row
+ * reads as changed.
+ */
+const float4 = (x: number | null): number | null => (x === null ? null : Math.fround(x));
+
+/**
+ * Per-row decision logic for a single CTA-matched, librarian-cleared
+ * survivor (#2050, extracted from `writeCompilationTracks`): the last-entry
+ * pick, the confidence range guard, the track-position rider, and the
+ * app-side unchanged-row prefilter. Mutates `outcome`'s skip/ambiguous
+ * counters for whichever disposition it reaches along the way.
+ *
+ * Returns the row to queue for the batched UPDATE, or `null` when the row is
+ * unchanged from what `compilation_track_artist` already carries.
+ *
+ * **Load-bearing:** the `null` return is not an optimization. The `0138`
+ * watermark trigger on `compilation_track_artist` is `FOR EACH STATEMENT`
+ * and fires even on `UPDATE 0`, so an unchanged row must never reach the
+ * batched UPDATE at all — that's what stops a no-op re-drain from advancing
+ * `library_watermark`. See `applyCompilationWrites`'s docstring for the
+ * SQL-level `IS DISTINCT FROM` guard this prefilter backstops (and cannot
+ * be replaced by, since that guard alone doesn't prevent the statement from
+ * being issued in the first place).
+ */
+export const buildWriteRow = (
+  ctaRow: CtaRow,
+  entries: BulkResolveTrackEntry[],
+  artistIdByName: Map<string, number | null>,
+  outcome: CompilationWriteOutcome
+): CompilationWriteRow | null => {
+  // Multiple entries at the same key: identity write uses the last one
+  // (an LML echo duplicate at this key is a data-quality edge case, not
+  // something this job can fully disambiguate) — the position write is
+  // what's genuinely ambiguous, and is handled separately below.
+  const entry = entries[entries.length - 1];
+  const trackArtistId = artistIdByName.get(entry.resolved_artist_name as string) ?? null;
+  if (trackArtistId === null) outcome.rows_skipped_no_catalog_artist += 1;
+
+  // `track_artist_link_confidence` carries `CHECK (BETWEEN 0 AND 1)`
+  // (migration 0140). A single out-of-range value from LML must not abort
+  // the whole page's batched UPDATE — null it out (a legal value; the
+  // constraint is nullable) and log, mirroring `writeSingleArtist`'s own
+  // defense against its sibling `library_identity_source` constraint.
+  let confidence = entry.confidence;
+  if (confidence !== null && (confidence < 0 || confidence > 1)) {
+    log(
+      'warn',
+      'compilation_confidence_out_of_range',
+      `CTA row ${ctaRow.id} (library_id=${ctaRow.library_id}) got an out-of-range confidence ${confidence} from LML; writing NULL instead`,
+      { cta_id: ctaRow.id, library_id: ctaRow.library_id, confidence }
+    );
+    confidence = null;
+  }
+
+  let newPosition: string | null = null;
+  if (ctaRow.track_position === null) {
+    const distinctPositions = [...new Set(entries.map((e) => e.track_position).filter((p) => p !== null))];
+    if (distinctPositions.length === 1) {
+      const offered = distinctPositions[0];
+      // `track_position` is varchar(20) (schema.ts) but the wire field is
+      // an unbounded string (LML's store is TEXT) — an over-long value
+      // sent verbatim raises 22001 and aborts the whole chunk, turning
+      // the page into a permanent retry loop. Same defense as the
+      // confidence guard above: null it and log; the identity write is
+      // unaffected.
+      if (offered.length > CTA_TRACK_POSITION_MAX_LENGTH) {
+        log(
+          'warn',
+          'compilation_position_too_long',
+          `CTA row ${ctaRow.id} (library_id=${ctaRow.library_id}) got a ${offered.length}-char track_position from LML (varchar(${CTA_TRACK_POSITION_MAX_LENGTH}) column); position left unset`,
+          { cta_id: ctaRow.id, library_id: ctaRow.library_id, position_length: offered.length }
+        );
+      } else {
+        newPosition = offered;
+      }
+    } else if (distinctPositions.length > 1) {
+      outcome.position_rows_skipped_ambiguous += 1;
+      log(
+        'warn',
+        'compilation_position_ambiguous',
+        `CTA row ${ctaRow.id} (library_id=${ctaRow.library_id}) has ${distinctPositions.length} distinct track_position values offered at the same (artist_name, track_title) key; position left unset`,
+        { cta_id: ctaRow.id, library_id: ctaRow.library_id, distinct_positions: distinctPositions.length }
+      );
+    }
+  }
+
+  // App-side unchanged check (belt) ahead of the SQL `IS DISTINCT FROM`
+  // (braces): the 0138 watermark trigger is FOR EACH STATEMENT and fires
+  // even on `UPDATE 0`, so an unchanged row must not even be queued — a
+  // fully-unchanged page then issues no UPDATE statement at all and a
+  // no-op re-drain genuinely never advances `library_watermark`.
+  // Confidence compares through Math.fround because the column is float4:
+  // the stored value read back through a float8 lens differs from the wire
+  // float8 in digits float4 cannot represent.
+  const unchanged =
+    (ctaRow.track_artist_id ?? null) === trackArtistId &&
+    float4(ctaRow.track_artist_link_confidence ?? null) === float4(confidence) &&
+    (ctaRow.track_artist_link_method ?? null) === 'lml_backfill' &&
+    newPosition === null;
+  if (unchanged) {
+    outcome.rows_skipped_unchanged += 1;
+    return null;
+  }
+
+  return { ctaId: ctaRow.id, trackArtistId, confidence, position: newPosition };
+};
+
 export const writeCompilationTracks = async (
   results: Extract<BulkResolveResult, { kind: 'compilation' }>[]
 ): Promise<CompilationWriteOutcome> => {
@@ -494,82 +605,8 @@ export const writeCompilationTracks = async (
   const writeRows: CompilationWriteRow[] = [];
 
   for (const { ctaRow, entries } of survivors) {
-    // Multiple entries at the same key: identity write uses the last one
-    // (an LML echo duplicate at this key is a data-quality edge case, not
-    // something this job can fully disambiguate) — the position write is
-    // what's genuinely ambiguous, and is handled separately below.
-    const entry = entries[entries.length - 1];
-    const trackArtistId = artistIdByName.get(entry.resolved_artist_name as string) ?? null;
-    if (trackArtistId === null) outcome.rows_skipped_no_catalog_artist += 1;
-
-    // `track_artist_link_confidence` carries `CHECK (BETWEEN 0 AND 1)`
-    // (migration 0140). A single out-of-range value from LML must not abort
-    // the whole page's batched UPDATE — null it out (a legal value; the
-    // constraint is nullable) and log, mirroring `writeSingleArtist`'s own
-    // defense against its sibling `library_identity_source` constraint.
-    let confidence = entry.confidence;
-    if (confidence !== null && (confidence < 0 || confidence > 1)) {
-      log(
-        'warn',
-        'compilation_confidence_out_of_range',
-        `CTA row ${ctaRow.id} (library_id=${ctaRow.library_id}) got an out-of-range confidence ${confidence} from LML; writing NULL instead`,
-        { cta_id: ctaRow.id, library_id: ctaRow.library_id, confidence }
-      );
-      confidence = null;
-    }
-
-    let newPosition: string | null = null;
-    if (ctaRow.track_position === null) {
-      const distinctPositions = [...new Set(entries.map((e) => e.track_position).filter((p) => p !== null))];
-      if (distinctPositions.length === 1) {
-        const offered = distinctPositions[0];
-        // `track_position` is varchar(20) (schema.ts) but the wire field is
-        // an unbounded string (LML's store is TEXT) — an over-long value
-        // sent verbatim raises 22001 and aborts the whole chunk, turning
-        // the page into a permanent retry loop. Same defense as the
-        // confidence guard above: null it and log; the identity write is
-        // unaffected.
-        if (offered.length > CTA_TRACK_POSITION_MAX_LENGTH) {
-          log(
-            'warn',
-            'compilation_position_too_long',
-            `CTA row ${ctaRow.id} (library_id=${ctaRow.library_id}) got a ${offered.length}-char track_position from LML (varchar(${CTA_TRACK_POSITION_MAX_LENGTH}) column); position left unset`,
-            { cta_id: ctaRow.id, library_id: ctaRow.library_id, position_length: offered.length }
-          );
-        } else {
-          newPosition = offered;
-        }
-      } else if (distinctPositions.length > 1) {
-        outcome.position_rows_skipped_ambiguous += 1;
-        log(
-          'warn',
-          'compilation_position_ambiguous',
-          `CTA row ${ctaRow.id} (library_id=${ctaRow.library_id}) has ${distinctPositions.length} distinct track_position values offered at the same (artist_name, track_title) key; position left unset`,
-          { cta_id: ctaRow.id, library_id: ctaRow.library_id, distinct_positions: distinctPositions.length }
-        );
-      }
-    }
-
-    // App-side unchanged check (belt) ahead of the SQL `IS DISTINCT FROM`
-    // (braces): the 0138 watermark trigger is FOR EACH STATEMENT and fires
-    // even on `UPDATE 0`, so an unchanged row must not even be queued — a
-    // fully-unchanged page then issues no UPDATE statement at all and a
-    // no-op re-drain genuinely never advances `library_watermark`.
-    // Confidence compares through Math.fround because the column is float4:
-    // the stored value read back through a float8 lens differs from the wire
-    // float8 in digits float4 cannot represent.
-    const float4 = (x: number | null): number | null => (x === null ? null : Math.fround(x));
-    const unchanged =
-      (ctaRow.track_artist_id ?? null) === trackArtistId &&
-      float4(ctaRow.track_artist_link_confidence ?? null) === float4(confidence) &&
-      (ctaRow.track_artist_link_method ?? null) === 'lml_backfill' &&
-      newPosition === null;
-    if (unchanged) {
-      outcome.rows_skipped_unchanged += 1;
-      continue;
-    }
-
-    writeRows.push({ ctaId: ctaRow.id, trackArtistId, confidence, position: newPosition });
+    const writeRow = buildWriteRow(ctaRow, entries, artistIdByName, outcome);
+    if (writeRow) writeRows.push(writeRow);
   }
 
   const { written, returnedIds } = await applyCompilationWrites(writeRows);

@@ -260,6 +260,35 @@ export const resolveRecheck = (raw: string | undefined = process.env.RECHECK): b
 };
 
 /**
+ * BS#1800 freshness guard: "canonicalized, and no `library_identity` row has
+ * been verified within the last `staleDays` days." This is the entire
+ * flag-off, non-recheck eligibility test for the non-`va` cohort, and the
+ * shared prefix for the `va` cohort below — see `markerTtlClause` for the
+ * one clause that distinguishes them.
+ */
+const freshnessGuard = (staleDays: number): SQL => sql`
+      AND "canonical_entity_id" IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li
+        WHERE li."library_id" = ${LIBRARY_TABLE}."id"
+          AND li."last_verified_at" >= NOW() - (interval '1 day' * ${staleDays})
+      )`;
+
+/**
+ * BS#1991 bounce-1: the no-match marker TTL clause, ANDed onto
+ * `freshnessGuard` for the `va` cohort only. A resolved compilation writes no
+ * `library_identity` row, so without this clause the flag-off `va` predicate
+ * would re-select it on every run forever — the re-ask pathology bounce-1
+ * closed. This clause, present for `va` and absent for non-`va`, is the
+ * entire delta between the two flag-off eligibility arms.
+ */
+const markerTtlClause = (unresolvedRetryDays: number): SQL => sql`
+      AND (
+        "unresolved_attempted_at" IS NULL
+        OR "unresolved_attempted_at" < NOW() - (interval '1 day' * ${unresolvedRetryDays})
+      )`;
+
+/**
  * Load the next batch of libraries needing identity refresh.
  *
  * The predicate is the canonicalized-and-fresh gate described above. Rows are skipped when
@@ -314,7 +343,9 @@ export const loadBatch = async (
   // TTL. A resolved compilation writes no `library_identity` row, so without
   // this clause the flag-off predicate re-selects it on every run forever —
   // the exact re-ask pathology this issue closes. Scoped to the va cohort:
-  // the non-va arm stays byte-identical to the pre-BS#1991 predicate.
+  // the non-va arm stays byte-identical to the pre-BS#1991 predicate. The two
+  // arms below share `freshnessGuard` verbatim; `markerTtlClause` is the
+  // entire va-vs-non-va delta (#2050).
   // BS#1991: `recheck` mode replaces the normal freshness/no-match-marker
   // eligibility entirely — it deliberately IGNORES `unresolvedRetryDays` and
   // re-drives every va-cohort row this job has previously visited
@@ -344,24 +375,8 @@ export const loadBatch = async (
         )
       )`
       : cohort === 'va'
-        ? sql`
-      AND "canonical_entity_id" IS NOT NULL
-      AND NOT EXISTS (
-        SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li
-        WHERE li."library_id" = ${LIBRARY_TABLE}."id"
-          AND li."last_verified_at" >= NOW() - (interval '1 day' * ${staleDays})
-      )
-      AND (
-        "unresolved_attempted_at" IS NULL
-        OR "unresolved_attempted_at" < NOW() - (interval '1 day' * ${unresolvedRetryDays})
-      )`
-        : sql`
-      AND "canonical_entity_id" IS NOT NULL
-      AND NOT EXISTS (
-        SELECT 1 FROM ${LIBRARY_IDENTITY_TABLE} li
-        WHERE li."library_id" = ${LIBRARY_TABLE}."id"
-          AND li."last_verified_at" >= NOW() - (interval '1 day' * ${staleDays})
-      )`;
+        ? sql`${freshnessGuard(staleDays)}${markerTtlClause(unresolvedRetryDays)}`
+        : freshnessGuard(staleDays);
 
   const rows = (await db.execute(sql`
     SELECT
