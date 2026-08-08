@@ -916,4 +916,26 @@ describe('buildWriteRow (#2050 per-row decision logic, extracted from writeCompi
     expect(row).toEqual({ ctaId: 42, trackArtistId: 7, confidence: 0.9, position: null });
     expect(outcome.rows_skipped_unchanged).toBe(0);
   });
+
+  it('non-disjoint counters: a row with no catalog artist match can ALSO be unchanged, incrementing both', () => {
+    // Pins the ordering documented on CompilationWriteOutcome.rows_skipped_no_catalog_artist:
+    // the no_catalog_artist increment must happen before the unchanged early
+    // return, or a row that is simultaneously "no match" and "already NULL in
+    // the CTA row" would only ever count once.
+    const outcome = makeOutcome();
+    const row = buildWriteRow(
+      ctaRow({
+        track_artist_id: null,
+        track_artist_link_confidence: null,
+        track_artist_link_method: 'lml_backfill',
+      }),
+      [track({ confidence: null })],
+      new Map([['Juana Molina', null]]),
+      outcome
+    );
+
+    expect(row).toBeNull();
+    expect(outcome.rows_skipped_no_catalog_artist).toBe(1);
+    expect(outcome.rows_skipped_unchanged).toBe(1);
+  });
 });
