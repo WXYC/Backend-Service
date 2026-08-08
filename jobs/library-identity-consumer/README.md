@@ -93,24 +93,24 @@ docker run --rm --env-file .env -e RECHECK=true <ecr-image-uri>:<tag>
 
 ## Environment variables
 
-| Variable                    | Default       | Purpose                                                                                                                              |
-| --------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `DATABASE_URL`              | —             | Backend PostgreSQL connection string (required)                                                                                      |
-| `LIBRARY_METADATA_URL`      | —             | LML base URL (required); trailing `/api/v1` is stripped                                                                              |
-| `LML_API_KEY`               | unset         | Bearer token; sent as `Authorization: Bearer …` when set (LML enforces auth in prod)                                                 |
-| `BATCH_SIZE`                | `500`         | Inputs per `bulk-resolve-libraries` call for the `non_va` drain; LML caps at 1000                                                    |
-| `VA_BATCH_SIZE`             | `100`         | BS#1991: inputs per call for the `va` drain — small, since `include_tracks` payloads can be large (S0/#1989 p99 483 credits/release) |
-| `THROTTLE_MS`               | `100`         | Inter-batch sleep, ms (DB + LML pacing)                                                                                              |
-| `STALE_THRESHOLD_DAYS`      | `7`           | Days before a `library_identity` row is re-fetched                                                                                   |
-| `INCLUDE_NULL_CANONICAL`    | unset (off)   | BS#974 staged-rollout flag: `true`/`1` brings NULL-`canonical_entity_id` rows into scope (see below)                                 |
+| Variable                    | Default       | Purpose                                                                                                                                                                                           |
+| --------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`              | —             | Backend PostgreSQL connection string (required)                                                                                                                                                   |
+| `LIBRARY_METADATA_URL`      | —             | LML base URL (required); trailing `/api/v1` is stripped                                                                                                                                           |
+| `LML_API_KEY`               | unset         | Bearer token; sent as `Authorization: Bearer …` when set (LML enforces auth in prod)                                                                                                              |
+| `BATCH_SIZE`                | `500`         | Inputs per `bulk-resolve-libraries` call for the `non_va` drain; LML caps at 1000                                                                                                                 |
+| `VA_BATCH_SIZE`             | `100`         | BS#1991: inputs per call for the `va` drain — small, since `include_tracks` payloads can be large (S0/#1989 p99 483 credits/release)                                                              |
+| `THROTTLE_MS`               | `100`         | Inter-batch sleep, ms (DB + LML pacing)                                                                                                                                                           |
+| `STALE_THRESHOLD_DAYS`      | `7`           | Days before a `library_identity` row is re-fetched                                                                                                                                                |
+| `INCLUDE_NULL_CANONICAL`    | unset (off)   | BS#974 staged-rollout flag: `true`/`1` brings NULL-`canonical_entity_id` rows into scope (see below)                                                                                              |
 | `UNRESOLVED_RETRY_DAYS`     | `30`          | BS#974 no-match retry window for `unresolved_attempted_at` (separate from `STALE_THRESHOLD_DAYS`; flag-on everywhere, and always for the `va` drain — a resolved compilation's only durable exit) |
-| `RECHECK`                   | unset (off)   | BS#1991: `true`/`1` runs the on-demand resolved-compilation re-drain instead of the normal two-cohort drain (see above)              |
-| `PARTITION_INDEX`           | `0`           | Index of this partition (0-based)                                                                                                    |
-| `PARTITION_COUNT`           | `1`           | Total partition count; `1` = single-container run                                                                                    |
-| `DRY_RUN`                   | unset         | Locked truthy `true`/`1`/`TRUE`: call LML, suppress writes, emit JSON                                                                |
-| `SENTRY_DSN`                | unset         | Optional; Sentry no-ops when unset                                                                                                   |
-| `SENTRY_TRACES_SAMPLE_RATE` | `0`           | Sampling rate for the run span (0–1)                                                                                                 |
-| `WXYC_SCHEMA_NAME`          | `wxyc_schema` | Override only for parallel Jest workers / integration harnesses                                                                      |
+| `RECHECK`                   | unset (off)   | BS#1991: `true`/`1` runs the on-demand resolved-compilation re-drain instead of the normal two-cohort drain (see above)                                                                           |
+| `PARTITION_INDEX`           | `0`           | Index of this partition (0-based)                                                                                                                                                                 |
+| `PARTITION_COUNT`           | `1`           | Total partition count; `1` = single-container run                                                                                                                                                 |
+| `DRY_RUN`                   | unset         | Locked truthy `true`/`1`/`TRUE`: call LML, suppress writes, emit JSON                                                                                                                             |
+| `SENTRY_DSN`                | unset         | Optional; Sentry no-ops when unset                                                                                                                                                                |
+| `SENTRY_TRACES_SAMPLE_RATE` | `0`           | Sampling rate for the run span (0–1)                                                                                                                                                              |
+| `WXYC_SCHEMA_NAME`          | `wxyc_schema` | Override only for parallel Jest workers / integration harnesses                                                                                                                                   |
 
 ## Idempotency & rerun safety
 
