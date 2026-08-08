@@ -583,7 +583,9 @@ export const previewSlot = (plan: Extract<SlotPlan, { kind: 'merge' }>): number 
  * The worklist is rendered AFTER the writes, from the renumbers that actually
  * landed. Rendering it from the plan would tell the librarian to relabel a disc
  * whose catalog row never moved (a destination taken since planning), creating
- * the shelf/catalog disagreement the job exists to remove, in reverse.
+ * the shelf/catalog disagreement the job exists to remove, in reverse. A dry run
+ * renders the whole plan for review, and is marked PREVIEW throughout for the
+ * same reason: there, no catalog row moved at all.
  */
 export const runDedup = async (): Promise<DedupSummary> => {
   const tag = '[library-call-number-dedup]';
@@ -645,7 +647,9 @@ export const runDedup = async (): Promise<DedupSummary> => {
         childRowsDeleted: 0,
         rowsDeleted: 0,
         renumbersSkipped: 0,
-        worklist: formatWorklist([], []),
+        // 'dry-run' even though `--execute` was passed: the run declined before
+        // writing anything, so nothing on a worklist from here could be acted on.
+        worklist: formatWorklist([], [], 'dry-run'),
       };
     }
 
@@ -701,7 +705,8 @@ export const runDedup = async (): Promise<DedupSummary> => {
         vol: p.slot.vol,
         reason: p.reason,
       };
-    })
+    }),
+    EXECUTE ? 'execute' : 'dry-run'
   );
 
   console.log(`\n${worklist}`);
