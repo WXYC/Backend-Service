@@ -65,7 +65,11 @@ const JOB_NAME = 'legacy-mirror-reconcile';
  * `max:1` client (below) for the whole run so a second reconcile invocation —
  * a manual run beside the cron, or a long run spilling past the next schedule
  * — bails immediately instead of double-POSTing the same NULL-legacy rows.
- * Arbitrary but stable; no other job takes an advisory lock today.
+ * Arbitrary but stable. This is not the only advisory lock in the codebase:
+ * `apps/backend/routes/internal-slack-moderators.route.ts` takes
+ * `SLACK_MODERATORS_ADVISORY_LOCK_KEY` (BS#2045). Single-bigint
+ * `pg_try_advisory_lock` and `pg_advisory_xact_lock` share one lock space
+ * database-wide, so any new key must be checked against both.
  */
 export const ADVISORY_LOCK_KEY = 17071707;
 

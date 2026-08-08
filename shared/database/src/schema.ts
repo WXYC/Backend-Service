@@ -344,6 +344,31 @@ export const banned_fingerprints = wxyc_schema.table(
   ]
 );
 
+// BS#2045. Durable roster of Slack users authorized to ban request-line
+// abusers, replacing request-o-matic's `SLACK_BAN_AUTHORIZED_USERS` env var
+// (edited only via a Railway redeploy). Backend owns the storage for the same
+// reason it owns `banned_fingerprints` above: ROM is a thin proxy with no
+// database, and this puts the roster in the same Postgres as the bans those
+// moderators create. Read/replaced through the key-gated
+// `/internal/slack-ban-moderators` surface; edited from Slack via ROM's
+// `/request-mods` modal (WXYC/request-o-matic#240).
+//
+// `added_by_slack_user_id` is an AUDIT TRAIL, NOT a foreign key. A Slack user
+// has no `auth_user` row — the same reason `banned_fingerprints
+// .banned_by_user_id` is NULL on every Slack-originated ban.
+//
+// `varchar(64)` because Slack IDs are 9-11 characters today but Enterprise
+// Grid identifiers run longer. No display-name column: Slack display names
+// change and Slack is the authority on them, so the modal resolves them at
+// render time from the ID.
+export type NewSlackBanModerator = InferInsertModel<typeof slack_ban_moderators>;
+export type SlackBanModerator = InferSelectModel<typeof slack_ban_moderators>;
+export const slack_ban_moderators = wxyc_schema.table('slack_ban_moderators', {
+  slack_user_id: varchar('slack_user_id', { length: 64 }).primaryKey(),
+  added_at: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
+  added_by_slack_user_id: varchar('added_by_slack_user_id', { length: 64 }),
+});
+
 export type NewShift = InferInsertModel<typeof schedule>;
 export type Shift = InferSelectModel<typeof schedule>;
 // days {0: mon, 1: tue, ... , 6: sun}
