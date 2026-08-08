@@ -135,5 +135,6 @@
   "0136_flowsheet-album-link-lookup-stats": "cb520c875456af28a5e54fe080f8b3364b211b7c560f4e8f9bf6e92e28d2899c",
   "0137_mint-legacy-release-id": "f3718406cf1e32ffe2ccba30d286434eac8c139abbeb5a0e2a7e109d6345d85f",
   "0138_catalog-export-watermark-triggers": "eac1674c4b42d7473a147a9c02a0caa7d2d7946a069c79aa5f7f2e71323a6090",
-  "0139_flowsheet-album-id-linked-idx": "c39265873ac4244460a0bc5e492c605a5e1af0429d0520d874cf16d1735892c2"
+  "0139_flowsheet-album-id-linked-idx": "c39265873ac4244460a0bc5e492c605a5e1af0429d0520d874cf16d1735892c2",
+  "0140_cta-track-artist-link": "c1b1c62a5e4977eede90194974cd18f8caacf8a5cf5de9e7ece1f030cea49eb1"
 }

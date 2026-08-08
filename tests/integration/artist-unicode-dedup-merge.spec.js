@@ -320,7 +320,7 @@ describe('artist-unicode-dedup mergeGroup — REAL functions (real PG, BS#1897 M
   // `artists` rows, so an unregistered FK is resolved by whatever delete rule
   // the constraint declares — `ON DELETE SET NULL` (e.g.
   // `compilation_track_artist.track_artist_id`, added by BS#1990/migration
-  // 0139) blanks the reference with no error at all, and `CASCADE` would
+  // 0140) blanks the reference with no error at all, and `CASCADE` would
   // delete the referencing row outright. Only a `NO ACTION` site fails loudly.
   //
   // Deliberate deviation from the library-side shape: this asserts on

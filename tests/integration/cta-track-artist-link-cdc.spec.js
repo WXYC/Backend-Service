@@ -1,6 +1,6 @@
 /**
  * BS#1990 (#801 S1) — proves `cdc_compilation_track_artist` (migration
- * 0046) still fires after migration 0139 widens
+ * 0046) still fires after migration 0140 widens
  * `wxyc_schema.compilation_track_artist` with the three new nullable
  * columns (`track_artist_id`, `track_artist_link_confidence`,
  * `track_artist_link_method`), a btree on `track_artist_id`, and two GIN

@@ -1,6 +1,6 @@
 /**
  * Schema-shape sanity check for the compilation_track_artist per-track
- * artist link (migration 0139, BS#1990 / #801 S1). Mirrors
+ * artist link (migration 0140, BS#1990 / #801 S1). Mirrors
  * schema.artist-similar-artists.test.ts: read the schema source + the
  * migration SQL as text and assert the columns / FK / CHECK / indexes are
  * declared as the migration expects.
@@ -26,7 +26,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-describe('schema: compilation_track_artist per-track artist link (migration 0139, BS#1990)', () => {
+describe('schema: compilation_track_artist per-track artist link (migration 0140, BS#1990)', () => {
   const schemaPath = path.resolve(__dirname, '../../../shared/database/src/schema.ts');
   const schemaSource = fs.readFileSync(schemaPath, 'utf-8');
 
@@ -35,7 +35,7 @@ describe('schema: compilation_track_artist per-track artist link (migration 0139
   const journal: { entries: Array<{ idx: number; when: number; tag: string }> } = JSON.parse(
     fs.readFileSync(journalPath, 'utf-8')
   );
-  const entry = journal.entries.find((e) => e.tag.startsWith('0139_'));
+  const entry = journal.entries.find((e) => e.tag.startsWith('0140_'));
   const sqlPath = entry ? path.join(migrationsDir, `${entry.tag}.sql`) : null;
   const sql = sqlPath && fs.existsSync(sqlPath) ? fs.readFileSync(sqlPath, 'utf-8') : '';
 
@@ -47,7 +47,7 @@ describe('schema: compilation_track_artist per-track artist link (migration 0139
   };
 
   describe('journal + migration file', () => {
-    it('registers the 0139 migration in the journal', () => {
+    it('registers the 0140 migration in the journal', () => {
       expect(entry).toBeDefined();
     });
 
