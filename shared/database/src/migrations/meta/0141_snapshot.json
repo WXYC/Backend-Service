@@ -1,5 +1,5 @@
 {
-  "id": "6a90e59d-9294-4e61-baa7-bb3b142764ed",
+  "id": "26bd0292-2a28-4957-8927-250c5eebca35",
   "prevId": "9edef30e-3e05-4903-820d-48400ba9f241",
   "version": "7",
   "dialect": "postgresql",
@@ -5617,7 +5617,16 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "slack_ban_moderators_slack_user_id_upper_ck": {
+          "name": "slack_ban_moderators_slack_user_id_upper_ck",
+          "value": "\"wxyc_schema\".\"slack_ban_moderators\".\"slack_user_id\" ~ '^[A-Z0-9]+$'"
+        },
+        "slack_ban_moderators_added_by_upper_ck": {
+          "name": "slack_ban_moderators_added_by_upper_ck",
+          "value": "\"wxyc_schema\".\"slack_ban_moderators\".\"added_by_slack_user_id\" IS NULL OR \"wxyc_schema\".\"slack_ban_moderators\".\"added_by_slack_user_id\" ~ '^[A-Z0-9]+$'"
+        }
+      },
       "isRLSEnabled": false
     },
     "wxyc_schema.specialty_shows": {

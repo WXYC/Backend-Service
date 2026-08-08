@@ -86,6 +86,79 @@ describe('/internal/slack-ban-moderators (BS#2045)', () => {
       expect(res.status).toBe(200);
       expect(res.body.items).toEqual([]);
     });
+
+    // Guards the `slack_user_id` tiebreak on the ORDER BY. `added_at` defaults
+    // to now() = transaction-start time, so every member added in ONE save
+    // shares a single timestamp and the sort is decided entirely by the
+    // tiebreak. Without it Postgres returns whatever order it likes, and the
+    // modal's `initial_users` flaps between renders of an unchanged roster.
+    //
+    // The rows are seeded by direct SQL in DESCENDING id order rather than
+    // through a PUT, and that is the whole point: the route normalizes its
+    // desired set to sorted order before inserting, so a save always writes
+    // rows whose physical order already matches the correct sort. A test that
+    // goes through PUT therefore passes with the tiebreak REMOVED — the
+    // sequential scan agrees by construction. Only an arrangement where heap
+    // order and sort order disagree can observe the tiebreak at all.
+    test('orders by slack_user_id when added_at ties, independent of physical row order', async () => {
+      const sharedTs = '2026-01-01T00:00:00Z';
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.slack_ban_moderators (slack_user_id, added_at)
+         VALUES ($1, $4::timestamptz), ($2, $4::timestamptz), ($3, $4::timestamptz)`,
+        [U3, U2, U1, sharedTs]
+      );
+
+      // Precondition: the tiebreak only matters because the timestamps collide.
+      const distinct = await sql.unsafe(
+        `SELECT COUNT(DISTINCT added_at)::int AS c FROM ${SCHEMA}.slack_ban_moderators`
+      );
+      expect(distinct[0].c).toBe(1);
+
+      // Repeated because a single call can agree with an unordered scan by luck.
+      for (let i = 0; i < 3; i++) {
+        const res = await get();
+        expect(res.status).toBe(200);
+        expect(res.body.items.map((r) => r.slack_user_id)).toEqual([U1, U2, U3]);
+      }
+    });
+  });
+
+  describe('stored-shape invariant', () => {
+    // The route's differential replace reads case-insensitively (folding to
+    // uppercase before the expectedCurrent comparison) but deletes with plain
+    // varchar equality. A row stored in any other case would be folded into a
+    // match on read, then miss the DELETE's exclusion list — deleted and
+    // reinserted, silently rewriting the audit columns the differential
+    // replace exists to preserve. Migration 0141's CHECK makes that row
+    // impossible to create rather than merely unlikely.
+    test('the database rejects a non-uppercase slack_user_id written outside the route', async () => {
+      await expect(
+        sql.unsafe(`INSERT INTO ${SCHEMA}.slack_ban_moderators (slack_user_id) VALUES ($1)`, ['u01lowercase'])
+      ).rejects.toThrow(/slack_ban_moderators_slack_user_id_upper_ck|violates check constraint/i);
+
+      const rows = await sql.unsafe(`SELECT COUNT(*)::int AS c FROM ${SCHEMA}.slack_ban_moderators`);
+      expect(rows[0].c).toBe(0);
+    });
+
+    test('the database rejects a non-uppercase added_by_slack_user_id', async () => {
+      await expect(
+        sql.unsafe(
+          `INSERT INTO ${SCHEMA}.slack_ban_moderators (slack_user_id, added_by_slack_user_id) VALUES ($1, $2)`,
+          [U1, 'uactor']
+        )
+      ).rejects.toThrow(/slack_ban_moderators_added_by_upper_ck|violates check constraint/i);
+    });
+
+    test('a NULL added_by_slack_user_id is still allowed', async () => {
+      const res = await put({ slackUserIds: [U1], expectedCurrent: [] });
+      expect(res.status).toBe(200);
+
+      const rows = await sql.unsafe(
+        `SELECT added_by_slack_user_id FROM ${SCHEMA}.slack_ban_moderators WHERE slack_user_id = $1`,
+        [U1]
+      );
+      expect(rows[0].added_by_slack_user_id).toBeNull();
+    });
   });
 
   describe('PUT', () => {
