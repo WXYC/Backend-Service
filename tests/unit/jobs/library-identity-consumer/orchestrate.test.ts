@@ -949,3 +949,113 @@ describe('runConsumer — BS#1991 kind:compilation per-track resolution', () => 
     expect(serialized).toMatch(/code_volume_letters/);
   });
 });
+
+describe('runConsumer — BS#1991 bounce-1 fixes (stamp split + counter projection)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const fullOutcome = {
+    rows_written: 3,
+    rows_skipped_unchanged: 5,
+    rows_skipped_librarian: 1,
+    rows_skipped_no_cta_match: 2,
+    rows_skipped_no_catalog_artist: 4,
+    position_rows_written: 6,
+    position_rows_skipped_ambiguous: 7,
+  };
+
+  const wire = () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        { id: 200, artist_name: 'Various Artists', album_title: 'A Compilation', legacy_release_id: 5000200 },
+        { id: 201, artist_name: 'Various Artists', album_title: 'Another Comp', legacy_release_id: 5000201 },
+        { id: 203, artist_name: 'Csillagrablók', album_title: 'Nem Comp', legacy_release_id: 5000203 },
+      ])
+      .mockResolvedValue([]);
+    const lmlResponse: BulkResolveResponse = {
+      results: [
+        {
+          kind: 'compilation',
+          library_id: 200,
+          provenance: [],
+          tracks_attempted: true,
+          tracks: [
+            {
+              artist_name: 'Various Artists',
+              track_title: 'Some Track',
+              track_position: null,
+              resolved_artist_name: 'Some Artist',
+              confidence: 0.8,
+            },
+          ],
+        },
+        { kind: 'compilation', library_id: 201, provenance: [], tracks_attempted: false, tracks: [] },
+        { kind: 'unresolved', library_id: 203, provenance: [] },
+      ],
+      tracks_contract_version: 1,
+    };
+    const bulkResolve = jest.fn<BulkResolveFn>().mockResolvedValue(lmlResponse);
+    const writeSingleArtist = jest.fn<WriteSingleArtistFn>().mockResolvedValue({
+      source_rows_written: 0,
+      source_rows_skipped_null_confidence: 0,
+    });
+    const writeCompilationTracks = jest.fn<WriteCompilationTracksFn>().mockResolvedValue(fullOutcome);
+    const stampUnresolvedAttemptedAt = jest.fn<StampUnresolvedFn>().mockResolvedValue(undefined);
+    return { bulkResolve, writeSingleArtist, writeCompilationTracks, stampUnresolvedAttemptedAt };
+  };
+
+  const baseOpts = () => ({
+    batchSize: 500,
+    throttleMs: 0,
+    staleDays: 7,
+    partition: { sqlFragment: null, description: 'partition=none' },
+  });
+
+  it('flag-off (default) still stamps a RESOLVED compilation — its resolved-exit has no other durable marker — while not-yet-askable and unresolved ids stay unstamped', async () => {
+    const w = wire();
+
+    await runConsumer({ ...baseOpts(), ...w, dryRun: false, includeNullCanonical: false });
+
+    expect(w.stampUnresolvedAttemptedAt).toHaveBeenCalledTimes(1);
+    expect(w.stampUnresolvedAttemptedAt).toHaveBeenCalledWith([200]);
+  });
+
+  it('flag-on stamps the union: resolved compilations + not-yet-askable compilations + unresolved', async () => {
+    const w = wire();
+
+    await runConsumer({ ...baseOpts(), ...w, dryRun: false, includeNullCanonical: true });
+
+    expect(w.stampUnresolvedAttemptedAt).toHaveBeenCalledTimes(1);
+    const stamped = w.stampUnresolvedAttemptedAt.mock.calls[0][0];
+    expect([...stamped].sort()).toEqual([200, 201, 203]);
+  });
+
+  it('dry-run never stamps a resolved compilation either', async () => {
+    const w = wire();
+
+    await runConsumer({ ...baseOpts(), ...w, dryRun: true, includeNullCanonical: false });
+
+    expect(w.stampUnresolvedAttemptedAt).not.toHaveBeenCalled();
+  });
+
+  it('projects every CompilationWriteOutcome counter into Totals — a systematic echo-match gap must be visible', async () => {
+    const w = wire();
+
+    const result = await runConsumer({ ...baseOpts(), ...w, dryRun: false, includeNullCanonical: false });
+
+    expect(result.totals.compilation_track_rows_written).toBe(3);
+    expect(result.totals.compilation_track_rows_skipped_unchanged).toBe(5);
+    expect(result.totals.compilation_track_rows_skipped_librarian).toBe(1);
+    expect(result.totals.compilation_track_rows_skipped_no_cta_match).toBe(2);
+    expect(result.totals.compilation_track_rows_skipped_no_catalog_artist).toBe(4);
+    expect(result.totals.compilation_track_position_rows_written).toBe(6);
+    expect(result.totals.compilation_track_position_rows_skipped_ambiguous).toBe(7);
+  });
+});

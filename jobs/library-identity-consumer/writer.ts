@@ -237,6 +237,8 @@ export const stampUnresolvedAttemptedAt = async (libraryIds: number[]): Promise<
 export type CompilationWriteOutcome = {
   /** CTA rows the batched UPDATE actually changed (via `RETURNING`) — the `IS DISTINCT FROM` guard means a no-op re-drain reports 0 here, not the attempted count. */
   rows_written: number;
+  /** Matched, non-librarian rows already carrying this exact verdict — never queued, so a fully-unchanged page issues NO UPDATE statement (the 0138 watermark trigger is FOR EACH STATEMENT and fires even on `UPDATE 0`). */
+  rows_skipped_unchanged: number;
   /** CTA row already carries `track_artist_link_method = 'librarian'` — never overwritten. */
   rows_skipped_librarian: number;
   /** Track entry's (artist_name, track_title) echo matched no CTA row for that library_id. */
@@ -256,10 +258,13 @@ type CtaRow = {
   track_title: string | null;
   track_position: string | null;
   track_artist_link_method: string | null;
+  track_artist_id: number | null;
+  track_artist_link_confidence: number | null;
 };
 
 const emptyCompilationWriteOutcome = (): CompilationWriteOutcome => ({
   rows_written: 0,
+  rows_skipped_unchanged: 0,
   rows_skipped_librarian: 0,
   rows_skipped_no_cta_match: 0,
   rows_skipped_no_catalog_artist: 0,
@@ -274,7 +279,8 @@ const ctaKey = (libraryId: number, artistName: string, trackTitle: string | null
 const fetchCtaRowsForLibraries = async (libraryIds: number[]): Promise<CtaRow[]> => {
   if (libraryIds.length === 0) return [];
   const rows = (await db.execute(sql`
-    SELECT "id", "library_id", "artist_name", "track_title", "track_position", "track_artist_link_method"
+    SELECT "id", "library_id", "artist_name", "track_title", "track_position",
+           "track_artist_link_method", "track_artist_id", "track_artist_link_confidence"
     FROM ${COMPILATION_TRACK_ARTIST_TABLE}
     WHERE "library_id" = ANY(${intArrayLiteral(libraryIds)}::int[])
   `)) as unknown as CtaRow[];
@@ -291,10 +297,23 @@ const fetchCtaRowsForLibraries = async (libraryIds: number[]): Promise<CtaRow[]>
  * conservative singleton-only writes, same convention as the concerts
  * resolver's `ambiguous` outcome.
  */
+/**
+ * Same bind-parameter budget as `WRITE_CHUNK_SIZE` below, one parameter per
+ * name: 1,000 names/statement stays far under Postgres's 65,535-parameter
+ * ceiling even if an operator raises `VA_BATCH_SIZE` to the LML cap.
+ */
+const NAME_CHUNK_SIZE = 1000;
+
 const resolveArtistIdsByNames = async (names: string[]): Promise<Map<string, number | null>> => {
   const result = new Map<string, number | null>(names.map((n) => [n, null]));
   if (names.length === 0) return result;
+  for (let i = 0; i < names.length; i += NAME_CHUNK_SIZE) {
+    await resolveArtistIdChunk(names.slice(i, i + NAME_CHUNK_SIZE), result);
+  }
+  return result;
+};
 
+const resolveArtistIdChunk = async (names: string[], result: Map<string, number | null>): Promise<void> => {
   const nameValues = names.map((n) => sql`(${n}::text)`);
   const matches = (await db.execute(sql`
     SELECT v."input_name" AS input_name, a."id" AS artist_id
@@ -311,7 +330,6 @@ const resolveArtistIdsByNames = async (names: string[]): Promise<Map<string, num
   for (const [name, ids] of idsByName) {
     result.set(name, ids.length === 1 ? ids[0] : null);
   }
-  return result;
 };
 
 /**
@@ -337,6 +355,12 @@ type CompilationWriteRow = {
  */
 const WRITE_CHUNK_SIZE = 500;
 
+/** `compilation_track_artist.track_position` is varchar(20) — see schema.ts. */
+const CTA_TRACK_POSITION_MAX_LENGTH = 20;
+
+/** Echo-gap warn floor: below this many misses a page is ordinary noise, not a divergence signal. */
+const CTA_MATCH_GAP_WARN_MIN = 10;
+
 /**
  * One page-level, chunked UPDATE via a `VALUES` join (the house pattern for
  * a batched write — see `streaming-url-remediation`/`artist-unicode-dedup`)
@@ -346,8 +370,11 @@ const WRITE_CHUNK_SIZE = 500;
  * `IS DISTINCT FROM` guard let through, not just rows attempted — so a
  * no-op re-drain's `rows_written` is honestly 0, not the queued count.
  */
-const applyCompilationWrites = async (rows: CompilationWriteRow[]): Promise<number> => {
+const applyCompilationWrites = async (
+  rows: CompilationWriteRow[]
+): Promise<{ written: number; returnedIds: Set<number> }> => {
   let written = 0;
+  const returnedIds = new Set<number>();
   for (let i = 0; i < rows.length; i += WRITE_CHUNK_SIZE) {
     const chunk = rows.slice(i, i + WRITE_CHUNK_SIZE);
     const values = chunk.map(
@@ -370,9 +397,10 @@ const applyCompilationWrites = async (rows: CompilationWriteRow[]): Promise<numb
         )
       RETURNING cta."id"
     `)) as unknown as { id: number }[];
+    for (const row of returned ?? []) returnedIds.add(row.id);
     written += (returned ?? []).length;
   }
-  return written;
+  return { written, returnedIds };
 };
 
 /**
@@ -405,6 +433,11 @@ export const writeCompilationTracks = async (
     for (const entry of result.tracks ?? []) {
       // A "miss" — LML's matcher could not identify who performed this
       // track. No BS write; NULL track_artist_id already means this.
+      // Deliberately excluded from the #801 D7 position rider too: a
+      // position-only write under the single-statement shape below would
+      // also stamp `track_artist_link_method = 'lml_backfill'` on a row
+      // with no artist verdict, misrepresenting provenance. Recoverable
+      // positions on missed tracks wait for a verdict on a later re-drain.
       if (entry.resolved_artist_name === null) continue;
       const key = ctaKey(result.library_id, entry.artist_name, entry.track_title);
       const bucket = entriesByKey.get(key) ?? [];
@@ -413,11 +446,10 @@ export const writeCompilationTracks = async (
     }
   }
 
-  const distinctNames = [...new Set([...entriesByKey.values()].flat().map((e) => e.resolved_artist_name as string))];
-  const artistIdByName = await resolveArtistIdsByNames(distinctNames);
-
-  const writeRows: CompilationWriteRow[] = [];
-
+  // Pass 1 — survivors: CTA-matched and past librarian precedence. Artist
+  // names resolve only for these, so a page dominated by echo misses (the
+  // non_va steady state) doesn't resolve names it will discard.
+  const survivors: { ctaRow: CtaRow; entries: BulkResolveTrackEntry[] }[] = [];
   for (const [key, entries] of entriesByKey) {
     const ctaRow = ctaByKey.get(key);
     if (!ctaRow) {
@@ -430,7 +462,32 @@ export const writeCompilationTracks = async (
       outcome.rows_skipped_librarian += 1;
       continue;
     }
+    survivors.push({ ctaRow, entries });
+  }
 
+  // A page-dominating echo-match gap is a join-key divergence signal
+  // (library.db's CTA export vs this table drifting on trimming/case/
+  // mojibake), not ordinary misses — without this warn it is
+  // indistinguishable from "LML matched nothing" and can silently no-op the
+  // whole cohort.
+  if (
+    outcome.rows_skipped_no_cta_match >= CTA_MATCH_GAP_WARN_MIN &&
+    outcome.rows_skipped_no_cta_match * 2 >= entriesByKey.size
+  ) {
+    log(
+      'warn',
+      'compilation_cta_match_gap',
+      `${outcome.rows_skipped_no_cta_match} of ${entriesByKey.size} track-entry keys matched no compilation_track_artist row — possible (artist_name, track_title) echo divergence`,
+      { rows_skipped_no_cta_match: outcome.rows_skipped_no_cta_match, entry_keys: entriesByKey.size }
+    );
+  }
+
+  const distinctNames = [...new Set(survivors.flatMap((s) => s.entries.map((e) => e.resolved_artist_name as string)))];
+  const artistIdByName = await resolveArtistIdsByNames(distinctNames);
+
+  const writeRows: CompilationWriteRow[] = [];
+
+  for (const { ctaRow, entries } of survivors) {
     // Multiple entries at the same key: identity write uses the last one
     // (an LML echo duplicate at this key is a data-quality edge case, not
     // something this job can fully disambiguate) — the position write is
@@ -459,8 +516,23 @@ export const writeCompilationTracks = async (
     if (ctaRow.track_position === null) {
       const distinctPositions = [...new Set(entries.map((e) => e.track_position).filter((p) => p !== null))];
       if (distinctPositions.length === 1) {
-        newPosition = distinctPositions[0];
-        outcome.position_rows_written += 1;
+        const offered = distinctPositions[0];
+        // `track_position` is varchar(20) (schema.ts) but the wire field is
+        // an unbounded string (LML's store is TEXT) — an over-long value
+        // sent verbatim raises 22001 and aborts the whole chunk, turning
+        // the page into a permanent retry loop. Same defense as the
+        // confidence guard above: null it and log; the identity write is
+        // unaffected.
+        if (offered.length > CTA_TRACK_POSITION_MAX_LENGTH) {
+          log(
+            'warn',
+            'compilation_position_too_long',
+            `CTA row ${ctaRow.id} (library_id=${ctaRow.library_id}) got a ${offered.length}-char track_position from LML (varchar(${CTA_TRACK_POSITION_MAX_LENGTH}) column); position left unset`,
+            { cta_id: ctaRow.id, library_id: ctaRow.library_id, position_length: offered.length }
+          );
+        } else {
+          newPosition = offered;
+        }
       } else if (distinctPositions.length > 1) {
         outcome.position_rows_skipped_ambiguous += 1;
         log(
@@ -472,10 +544,33 @@ export const writeCompilationTracks = async (
       }
     }
 
+    // App-side unchanged check (belt) ahead of the SQL `IS DISTINCT FROM`
+    // (braces): the 0138 watermark trigger is FOR EACH STATEMENT and fires
+    // even on `UPDATE 0`, so an unchanged row must not even be queued — a
+    // fully-unchanged page then issues no UPDATE statement at all and a
+    // no-op re-drain genuinely never advances `library_watermark`.
+    // Confidence compares through Math.fround because the column is float4:
+    // the stored value read back through a float8 lens differs from the wire
+    // float8 in digits float4 cannot represent.
+    const float4 = (x: number | null): number | null => (x === null ? null : Math.fround(x));
+    const unchanged =
+      (ctaRow.track_artist_id ?? null) === trackArtistId &&
+      float4(ctaRow.track_artist_link_confidence ?? null) === float4(confidence) &&
+      (ctaRow.track_artist_link_method ?? null) === 'lml_backfill' &&
+      newPosition === null;
+    if (unchanged) {
+      outcome.rows_skipped_unchanged += 1;
+      continue;
+    }
+
     writeRows.push({ ctaId: ctaRow.id, trackArtistId, confidence, position: newPosition });
   }
 
-  outcome.rows_written = await applyCompilationWrites(writeRows);
+  const { written, returnedIds } = await applyCompilationWrites(writeRows);
+  outcome.rows_written = written;
+  // Positions count only where the UPDATE actually landed (RETURNING), so a
+  // guard-filtered row doesn't over-report.
+  outcome.position_rows_written = writeRows.filter((r) => r.position !== null && returnedIds.has(r.ctaId)).length;
 
   return outcome;
 };

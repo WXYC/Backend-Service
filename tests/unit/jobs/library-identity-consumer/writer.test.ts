@@ -16,6 +16,14 @@
  */
 import { db } from '@wxyc/database';
 
+jest.mock('../../../../jobs/library-identity-consumer/logger', () => ({
+  initLogger: jest.fn(),
+  closeLogger: jest.fn(),
+  log: jest.fn(),
+  captureError: jest.fn(),
+}));
+import { log } from '../../../../jobs/library-identity-consumer/logger';
+
 import type { BulkResolveResult, BulkResolveTrackEntry } from '../../../../jobs/library-identity-consumer/lml-types';
 import {
   projectMainRow,
@@ -274,7 +282,7 @@ describe('writeCompilationTracks (BS#1991 / #801 S2)', () => {
   it("fetches the page's compilation_track_artist rows in ONE query keyed by library_id", async () => {
     (db.execute as jest.Mock)
       .mockResolvedValueOnce([]) // CTA fetch
-      .mockResolvedValueOnce([]); // artist resolution (no tracks matched, so this may not even fire)
+      .mockResolvedValue([]); // artist resolution — with zero CTA matches it doesn't fire at all, so no Once (it would leak into the next test's queue)
 
     await writeCompilationTracks([compilation({ library_id: 200 }), compilation({ library_id: 201 })]);
 
@@ -431,7 +439,7 @@ describe('writeCompilationTracks (BS#1991 / #801 S2)', () => {
         },
       ])
       .mockResolvedValueOnce([{ input_name: 'Juana Molina', artist_id: 7 }])
-      .mockResolvedValueOnce([]);
+      .mockResolvedValueOnce([{ id: 42 }]); // RETURNING — position_rows_written derives from landed rows
 
     const outcome = await writeCompilationTracks([compilation({ tracks: [track({ track_position: 'A1' })] })]);
 
@@ -508,5 +516,201 @@ describe('writeCompilationTracks (BS#1991 / #801 S2)', () => {
       /UPDATE[\s\S]*compilation_track_artist/i.test(renderSql(c[0]))
     );
     expect(renderSql(updateCall?.[0])).not.toContain('B9');
+  });
+});
+
+describe('writeCompilationTracks — review-gate fixes (BS#1991 bounce 1)', () => {
+  const track = (
+    overrides: Partial<BulkResolveTrackEntry> = {}
+  ): BulkResolveTrackEntry => ({
+    artist_name: 'Juana Molina',
+    track_title: 'la paradoja',
+    track_position: null,
+    resolved_artist_name: 'Juana Molina',
+    confidence: 0.93,
+    ...overrides,
+  });
+  const compilation = (
+    overrides: Partial<Extract<BulkResolveResult, { kind: 'compilation' }>> = {}
+  ): Extract<BulkResolveResult, { kind: 'compilation' }> => ({
+    kind: 'compilation',
+    library_id: 200,
+    provenance: [],
+    tracks_attempted: true,
+    tracks: [track()],
+    ...overrides,
+  });
+  const ctaRow = (overrides: Record<string, unknown> = {}) => ({
+    id: 42,
+    library_id: 200,
+    artist_name: 'Juana Molina',
+    track_title: 'la paradoja',
+    track_position: null,
+    track_artist_link_method: null,
+    track_artist_id: null,
+    track_artist_link_confidence: null,
+    ...overrides,
+  });
+  const updateCalls = () =>
+    (db.execute as jest.Mock).mock.calls.filter((c) =>
+      /UPDATE[\s\S]*compilation_track_artist/i.test(renderSql(c[0]))
+    );
+  const foldCalls = () =>
+    (db.execute as jest.Mock).mock.calls.filter((c) => /fold_artist_name/i.test(renderSql(c[0])));
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('issues NO UPDATE statement when every matched row is already unchanged — the watermark trigger is FOR EACH STATEMENT and fires even on UPDATE 0', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        ctaRow({
+          track_position: 'A1',
+          track_artist_link_method: 'lml_backfill',
+          track_artist_id: 7,
+          track_artist_link_confidence: 0.93,
+        }),
+      ])
+      .mockResolvedValueOnce([{ input_name: 'Juana Molina', artist_id: 7 }]);
+
+    const outcome = await writeCompilationTracks([
+      compilation({ tracks: [track({ track_position: 'A1' })] }),
+    ]);
+
+    expect(updateCalls().length).toBe(0);
+    expect(outcome.rows_written).toBe(0);
+    expect(outcome.rows_skipped_unchanged).toBe(1);
+  });
+
+  it('treats a float4-quantized stored confidence as unchanged against the float8 wire value', async () => {
+    // 0.2 stored as Postgres `real` surfaces as 0.20000000298023224 through a
+    // float8 lens; Math.fround maps both to the same float32.
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        ctaRow({
+          track_artist_link_method: 'lml_backfill',
+          track_artist_id: 7,
+          track_artist_link_confidence: 0.20000000298023224,
+        }),
+      ])
+      .mockResolvedValueOnce([{ input_name: 'Juana Molina', artist_id: 7 }]);
+
+    const outcome = await writeCompilationTracks([compilation({ tracks: [track({ confidence: 0.2 })] })]);
+
+    expect(updateCalls().length).toBe(0);
+    expect(outcome.rows_skipped_unchanged).toBe(1);
+  });
+
+  it('nulls (and warns on) a track_position longer than varchar(20) instead of aborting the whole chunk', async () => {
+    const longPosition = 'A'.repeat(25);
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([ctaRow()])
+      .mockResolvedValueOnce([{ input_name: 'Juana Molina', artist_id: 7 }])
+      .mockResolvedValueOnce([{ id: 42 }]);
+
+    const outcome = await writeCompilationTracks([
+      compilation({ tracks: [track({ track_position: longPosition })] }),
+    ]);
+
+    const update = updateCalls();
+    expect(update.length).toBe(1);
+    expect(renderSql(update[0][0])).not.toContain(longPosition);
+    expect(outcome.rows_written).toBe(1);
+    expect(outcome.position_rows_written).toBe(0);
+    expect(log).toHaveBeenCalledWith(
+      'warn',
+      'compilation_position_too_long',
+      expect.any(String),
+      expect.objectContaining({ cta_id: 42 })
+    );
+  });
+
+  it('resolves only the names of entries that matched a CTA row and survived librarian precedence', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        ctaRow(),
+        ctaRow({ id: 43, artist_name: 'Kept By Librarian', track_title: 'Locked', track_artist_link_method: 'librarian' }),
+      ])
+      .mockResolvedValue([]);
+
+    await writeCompilationTracks([
+      compilation({
+        tracks: [
+          track(),
+          track({ artist_name: 'Ghost', track_title: 'No CTA Row', resolved_artist_name: 'Ghost Resolved' }),
+          track({ artist_name: 'Kept By Librarian', track_title: 'Locked', resolved_artist_name: 'Lib Resolved' }),
+        ],
+      }),
+    ]);
+
+    const fold = foldCalls();
+    expect(fold.length).toBe(1);
+    const sqlText = renderSql(fold[0][0]);
+    expect(sqlText).toContain('Juana Molina');
+    expect(sqlText).not.toContain('Ghost Resolved');
+    expect(sqlText).not.toContain('Lib Resolved');
+  });
+
+  it('chunks the artist-name resolution VALUES list (bind-parameter budget), not just the UPDATE', async () => {
+    const n = 1001;
+    const rows = Array.from({ length: n }, (_, i) =>
+      ctaRow({ id: i + 1, artist_name: `Artist ${i}`, track_title: `T${i}` })
+    );
+    const tracks = Array.from({ length: n }, (_, i) =>
+      track({ artist_name: `Artist ${i}`, track_title: `T${i}`, resolved_artist_name: `Resolved ${i}` })
+    );
+    (db.execute as jest.Mock).mockResolvedValueOnce(rows).mockResolvedValue([]);
+
+    await writeCompilationTracks([compilation({ tracks })]);
+
+    expect(foldCalls().length).toBe(2);
+  });
+
+  it('derives position_rows_written from RETURNING, not from queue time', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([ctaRow()])
+      .mockResolvedValueOnce([{ input_name: 'Juana Molina', artist_id: 7 }])
+      .mockResolvedValueOnce([]); // guard filtered the row server-side: nothing RETURNING
+
+    const outcome = await writeCompilationTracks([
+      compilation({ tracks: [track({ track_position: 'A1' })] }),
+    ]);
+
+    expect(outcome.rows_written).toBe(0);
+    expect(outcome.position_rows_written).toBe(0);
+  });
+
+  it('warns on a page-level CTA echo-match gap (systematic join-back divergence must not be silent)', async () => {
+    const tracks = Array.from({ length: 12 }, (_, i) =>
+      track({ artist_name: `Ghost ${i}`, track_title: `G${i}`, resolved_artist_name: `R${i}` })
+    );
+    (db.execute as jest.Mock).mockResolvedValueOnce([]).mockResolvedValue([]);
+
+    const outcome = await writeCompilationTracks([compilation({ tracks })]);
+
+    expect(outcome.rows_skipped_no_cta_match).toBe(12);
+    expect(log).toHaveBeenCalledWith(
+      'warn',
+      'compilation_cta_match_gap',
+      expect.any(String),
+      expect.objectContaining({ rows_skipped_no_cta_match: 12 })
+    );
+  });
+
+  it('does not fire the echo-gap warn for an isolated miss', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([ctaRow()])
+      .mockResolvedValueOnce([{ input_name: 'Juana Molina', artist_id: 7 }])
+      .mockResolvedValueOnce([{ id: 42 }]);
+
+    await writeCompilationTracks([
+      compilation({
+        tracks: [track(), track({ artist_name: 'Ghost', track_title: 'X', resolved_artist_name: 'R' })],
+      }),
+    ]);
+
+    const gapWarns = (log as jest.Mock).mock.calls.filter((c) => c[1] === 'compilation_cta_match_gap');
+    expect(gapWarns.length).toBe(0);
   });
 });

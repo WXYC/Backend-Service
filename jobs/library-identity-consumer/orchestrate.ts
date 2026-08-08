@@ -134,7 +134,12 @@ export type Totals = {
   };
   source_rows_skipped_null_confidence: number;
   compilation_track_rows_written: number;
+  compilation_track_rows_skipped_unchanged: number;
   compilation_track_rows_skipped_librarian: number;
+  compilation_track_rows_skipped_no_cta_match: number;
+  compilation_track_rows_skipped_no_catalog_artist: number;
+  compilation_track_position_rows_written: number;
+  compilation_track_position_rows_skipped_ambiguous: number;
   lml_total_calls: number;
   lml_total_latency_ms: number;
 };
@@ -176,7 +181,12 @@ const emptyTotals = (): Totals => ({
   },
   source_rows_skipped_null_confidence: 0,
   compilation_track_rows_written: 0,
+  compilation_track_rows_skipped_unchanged: 0,
   compilation_track_rows_skipped_librarian: 0,
+  compilation_track_rows_skipped_no_cta_match: 0,
+  compilation_track_rows_skipped_no_catalog_artist: 0,
+  compilation_track_position_rows_written: 0,
+  compilation_track_position_rows_skipped_ambiguous: 0,
   lml_total_calls: 0,
   lml_total_latency_ms: 0,
 });
@@ -190,7 +200,12 @@ const formatTotals = (t: Totals): string =>
   `skipped.lml_untrusted_library_id=${t.rows_skipped.lml_untrusted_library_id} ` +
   `source_rows_skipped_null_confidence=${t.source_rows_skipped_null_confidence} ` +
   `compilation_track_rows_written=${t.compilation_track_rows_written} ` +
+  `compilation_track_rows_skipped_unchanged=${t.compilation_track_rows_skipped_unchanged} ` +
   `compilation_track_rows_skipped_librarian=${t.compilation_track_rows_skipped_librarian} ` +
+  `compilation_track_rows_skipped_no_cta_match=${t.compilation_track_rows_skipped_no_cta_match} ` +
+  `compilation_track_rows_skipped_no_catalog_artist=${t.compilation_track_rows_skipped_no_catalog_artist} ` +
+  `compilation_track_position_rows_written=${t.compilation_track_position_rows_written} ` +
+  `compilation_track_position_rows_skipped_ambiguous=${t.compilation_track_position_rows_skipped_ambiguous} ` +
   `lml_calls=${t.lml_total_calls} lml_latency_ms=${t.lml_total_latency_ms}`;
 
 export const runConsumer = async (opts: {
@@ -415,7 +430,12 @@ export const runConsumer = async (opts: {
           const outcome = await opts.writeCompilationTracks(resolvedCompilationResults);
           totals.rows_resolved_compilation += resolvedCompilationResults.length;
           totals.compilation_track_rows_written += outcome.rows_written;
+          totals.compilation_track_rows_skipped_unchanged += outcome.rows_skipped_unchanged;
           totals.compilation_track_rows_skipped_librarian += outcome.rows_skipped_librarian;
+          totals.compilation_track_rows_skipped_no_cta_match += outcome.rows_skipped_no_cta_match;
+          totals.compilation_track_rows_skipped_no_catalog_artist += outcome.rows_skipped_no_catalog_artist;
+          totals.compilation_track_position_rows_written += outcome.position_rows_written;
+          totals.compilation_track_position_rows_skipped_ambiguous += outcome.position_rows_skipped_ambiguous;
           resolvedCompilationLibraryIds.push(...resolvedCompilationResults.map((r) => r.library_id));
         } catch (error) {
           log('warn', 'writer_error', `writeCompilationTracks failed for batch ${batchIndex}`, {
@@ -451,8 +471,17 @@ export const runConsumer = async (opts: {
     // — a `--recheck` drain targets NULL-canonical (va-cohort) rows by
     // construction (select.ts), so a freshly reconfirmed row's stamp should
     // refresh even when the caller didn't separately set the flag.
-    const idsToStamp = [...noMatchLibraryIds, ...resolvedCompilationLibraryIds];
-    if ((includeNullCanonical || recheck) && !opts.dryRun && opts.stampUnresolvedAttemptedAt && idsToStamp.length > 0) {
+    // BS#1991 bounce-1: a RESOLVED compilation stamps in EVERY flag state —
+    // it writes no `library_identity` row, so the marker is its only durable
+    // exit from the sweep (the flag-off va predicate in select.ts reads it).
+    // The no-match bucket keeps the #974 flag gate: flag-off, the non-va
+    // predicate never reads the marker, so stamping those would be dead
+    // writes on `library` (each one a watermark-adjacent row touch).
+    const idsToStamp =
+      includeNullCanonical || recheck
+        ? [...noMatchLibraryIds, ...resolvedCompilationLibraryIds]
+        : [...resolvedCompilationLibraryIds];
+    if (!opts.dryRun && opts.stampUnresolvedAttemptedAt && idsToStamp.length > 0) {
       try {
         await opts.stampUnresolvedAttemptedAt(idsToStamp);
       } catch (error) {

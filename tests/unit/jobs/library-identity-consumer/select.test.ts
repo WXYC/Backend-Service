@@ -302,3 +302,23 @@ describe('loadBatch', () => {
     expect(rows).toEqual(fixture);
   });
 });
+
+describe('loadBatch — BS#1991 bounce-1: flag-off va cohort honors the no-match marker TTL', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('flag-off cohort="va" gates on unresolved_attempted_at (a resolved compilation writes no library_identity row, so the marker is its only durable exit)', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await loadBatch(0, 100, null, 7, false, 30, 'va');
+    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    expect(serialized).toMatch(/unresolved_attempted_at/);
+  });
+
+  it('flag-off cohort="non_va" keeps the pre-BS#1991 predicate (no marker clause)', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+    await loadBatch(0, 500, null, 7, false, 30, 'non_va');
+    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    expect(serialized).not.toMatch(/unresolved_attempted_at/);
+  });
+});
