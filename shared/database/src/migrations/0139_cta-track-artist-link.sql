@@ -1,7 +1,7 @@
 -- precondition-guard: not-required (this migration does not touch library_identity / library_identity_source / library_identity_history — those names appear below only in prose comparing track_artist_link_method's naming convention to library_identity_source.method, and noting that the #792 library_track_identity_source sidecar is cancelled; no DDL here references the cross-cache-identity substrate)
 -- BS#1990 (#801 S1) — widen wxyc_schema.compilation_track_artist (CTA) with
--- a per-track artist canonicalization link, plus the index strategy and key
--- decision the parent ticket's S0 measurement + owner sign-off settled.
+-- a per-track artist canonicalization link, plus the index strategy the
+-- parent ticket's S0 measurement + owner sign-off settled.
 --
 -- (a) NEW COLUMNS: `track_artist_id integer NULL REFERENCES artists(id)`,
 --     `track_artist_link_confidence real NULL CHECK (BETWEEN 0 AND 1)`,
@@ -23,16 +23,28 @@
 --     (migration 0037, `(library_id, artist_name, track_title)`) stays
 --     exactly as-is; this migration does not touch it.
 --
--- (c) DROP `cta_unique_null_track_idx` (migration 0099 / BS#1135). Its
---     precondition guard counted `(library_id, artist_name)` groups with a
---     NULL `track_title`; the S0/#1989 prod audit re-ran that same count
---     and measured ZERO such rows. The partial index was protecting an
---     empty slice — pure write-tax on every CTA insert with a NULL
---     track_title. `IF EXISTS` so a hypothetical fresh DB without it is a
---     no-op, matching the 0095 catch-up precedent. Runtime-behavior test
---     updated at tests/integration/cta-unique-null-track-partial.spec.js;
---     schema-drift test at
---     tests/unit/database/schema.cta-unique-null-track-partial.test.ts.
+-- (c) `cta_unique_null_track_idx` (migration 0099 / BS#1135) is KEPT, not
+--     dropped. #801 D15 proposed dropping it — S0/#1989's prod audit
+--     re-ran 0099's own precondition count (duplicate `(library_id,
+--     artist_name)` groups with a NULL `track_title`) and measured ZERO
+--     rows, reasoned as "protecting an empty slice, pure write-tax." That
+--     reasoning doesn't hold up: 0099's OWN precondition guard measured the
+--     same zero two months earlier (2026-06-13), *before* this index
+--     existed to suppress anything — so "zero duplicates" is at least as
+--     consistent with "the index is successfully preventing them" as with
+--     "this never happens." `apps/backend/controllers/library.controller.ts`
+--     (`validateCompilationTracksBody` / `normalizeOptionalCtaText`)
+--     deliberately coerces blank/whitespace `track_title` input to NULL
+--     specifically so this index — and `writeCompilationTracks`'s
+--     untargeted `ON CONFLICT DO NOTHING` — still dedupes titleless
+--     compilation credits submitted through the live write path; 0099's own
+--     commit message calls a NULL track title "legitimate domain state, not
+--     a sentinel-empty." Dropping it would silently change the
+--     `CompilationTracksWriteResponse` dedupe contract (api.yaml v1.28.0)
+--     for that slice with no contract update. Kept pending a follow-up
+--     decision; see tests/integration/cta-unique-null-track-partial.spec.js
+--     and tests/unit/database/schema.cta-unique-null-track-partial.test.ts,
+--     both unchanged by this migration.
 --
 -- (d) INDEX STRATEGY — trgm on BOTH `track_title` and `artist_name` (#801
 --     D15, on codebase evidence, not the tsvector alternative). The CTA
@@ -47,8 +59,8 @@
 --     ILIKE path. `cta_track_artist_id_idx` is a plain btree — without it
 --     the "all tracks by this artist across releases" query (S4) seq-scans
 --     CTA (144,778 rows today, projected 500K-1M once non-V/A lands at S5).
---     All three new indexes are drop-and-rebuild candidates during S5's
---     bulk load; that call belongs to S5's trigger-strategy decision.
+--     All new indexes are drop-and-rebuild candidates during S5's bulk
+--     load; that call belongs to S5's trigger-strategy decision.
 --
 -- PG-version constraint: prod RDS runs PostgreSQL 14.22 (see docs/migrations.md
 -- "Dev/CI Postgres version vs. prod RDS"). Every statement below is PG14
@@ -58,8 +70,8 @@
 -- `touch_library_watermark_from_compilation_track_artist` (migration 0138)
 -- are both `AFTER ... FOR EACH ROW` / `FOR EACH STATEMENT` triggers with no
 -- column list — they fire on any INSERT/UPDATE/DELETE regardless of which
--- columns are touched, so adding nullable columns and swapping indexes
--- doesn't require re-creating either. Verified by
+-- columns are touched, so adding nullable columns doesn't require
+-- re-creating either. Verified by
 -- tests/integration/library-catalog-producer-export.spec.js (watermark,
 -- pre-existing, continues to pass unmodified) and the new
 -- tests/integration/cta-track-artist-link-cdc.spec.js (CDC).
@@ -71,10 +83,9 @@
 -- vacuously satisfied by NULL (three-valued logic: an unknown comparison
 -- never fails a constraint). No existing row can violate either.
 --
--- Additive + index-swap only. No data migration, no backfill, no row
--- deletion (the DROP INDEX removes a constraint object, not rows).
+-- Additive + index-add only. No data migration, no backfill, no row
+-- deletion, no index drop.
 
-DROP INDEX IF EXISTS "wxyc_schema"."cta_unique_null_track_idx";--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."compilation_track_artist" ADD COLUMN "track_artist_id" integer;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."compilation_track_artist" ADD COLUMN "track_artist_link_confidence" real;--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."compilation_track_artist" ADD COLUMN "track_artist_link_method" text;--> statement-breakpoint

@@ -5,13 +5,19 @@
  * migration SQL as text and assert the columns / FK / CHECK / indexes are
  * declared as the migration expects.
  *
- * Scope, per the issue's 2026-08-06 amendment: additive columns only
- * (track_artist_id, track_artist_link_confidence, track_artist_link_method),
- * a drop of the now-dead cta_unique_null_track_idx (0099 measured zero rows
- * at the S0/#1989 prod audit), and two GIN trgm indexes matching the CTA
- * suggest query's exact-ILIKE artist_name + prefix-ILIKE track_title shape.
- * The (library_id, artist_name, track_title) unique key (0037's
- * cta_unique_idx) is PERMANENT per #801 D7 and must not change.
+ * Scope: additive columns only (track_artist_id, track_artist_link_confidence,
+ * track_artist_link_method), a btree on track_artist_id, and two GIN trgm
+ * indexes matching the CTA suggest query's exact-ILIKE artist_name +
+ * prefix-ILIKE track_title shape. The (library_id, artist_name, track_title)
+ * unique key (0037's cta_unique_idx) is PERMANENT per #801 D7 and must not
+ * change. The issue's 2026-08-06 amendment also proposed dropping
+ * cta_unique_null_track_idx (0099 / BS#1135); this migration deliberately
+ * does NOT do that — `library.controller.ts`'s `validateCompilationTracksBody`
+ * coerces blank track_title to NULL specifically so that index still dedupes
+ * titleless compilation credits submitted through the live write path, and
+ * the "zero rows" audit that motivated the drop can't distinguish "never
+ * happens" from "this index is preventing it." See the migration file's own
+ * comment for the full reasoning; kept pending a follow-up decision.
  *
  * If you rename a column or change a constraint, this test fails — read the
  * assertion before "fixing" it; usually the right fix is the companion
@@ -71,13 +77,17 @@ describe('schema: compilation_track_artist per-track artist link (migration 0139
       expect(sql).toMatch(/track_artist_link_confidence.*BETWEEN 0 AND 1/);
     });
 
-    it('drops the now-dead cta_unique_null_track_idx (0099 measured zero NULL-track rows at S0)', () => {
-      expect(sql).toMatch(/DROP INDEX IF EXISTS "wxyc_schema"\."cta_unique_null_track_idx"/);
+    it('does NOT drop cta_unique_null_track_idx — kept pending a follow-up decision (see file header)', () => {
+      expect(sql).not.toMatch(/DROP INDEX[^;]*"cta_unique_null_track_idx"/i);
     });
 
     it('does NOT touch or drop cta_unique_idx — the permanent key per #801 D7', () => {
       expect(sql).not.toMatch(/DROP INDEX[^;]*"cta_unique_idx"/i);
       expect(sql).not.toMatch(/ALTER INDEX[^;]*"cta_unique_idx"/i);
+    });
+
+    it('contains no DROP INDEX statement at all', () => {
+      expect(sql).not.toMatch(/DROP INDEX/i);
     });
 
     it('creates a btree index on track_artist_id', () => {
@@ -149,8 +159,10 @@ describe('schema: compilation_track_artist per-track artist link (migration 0139
       );
     });
 
-    it('no longer declares cta_unique_null_track_idx (dropped by 0139)', () => {
-      expect(schemaSource).not.toMatch(/uniqueIndex\(\s*'cta_unique_null_track_idx'\s*\)/);
+    it('still declares cta_unique_null_track_idx (kept, not dropped — see file header)', () => {
+      expect(tableDef).toMatch(/uniqueIndex\('cta_unique_null_track_idx'\)/);
+      expect(tableDef).toMatch(/\.on\(table\.library_id,\s*table\.artist_name\)/);
+      expect(tableDef).toMatch(/\$\{table\.track_title\}\s+IS\s+NULL/);
     });
 
     it('exports the select + insert models unchanged', () => {

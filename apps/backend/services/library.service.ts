@@ -1096,22 +1096,16 @@ export async function getCompilationTracks(libraryId: number): Promise<Compilati
 
 /**
  * Additive CTA write. Every input row is inserted with an untargeted
- * `ON CONFLICT DO NOTHING`, which arbiters on `cta_unique_idx`
- * (`library_id, artist_name, track_title`) — the only unique constraint on
- * this table since migration 0139 (BS#1990 / #801 S1) dropped the
- * complementary `cta_unique_null_track_idx` partial index (S0/#1989 prod
- * audit measured zero rows in the NULL-`track_title` slice it protected). A
- * row that duplicates one already stored — or one earlier in the same batch
- * — on the non-NULL-`track_title` key is absorbed by the conflict clause and
- * never lands, so `RETURNING` yields exactly the newly-inserted rows.
- * `skipped` is therefore `input − inserted`, and the identity
- * `inserted + skipped == input.length` holds even when the batch carries
- * intra-request duplicates (api.yaml v1.28.0 `CompilationTracksWriteResponse`
- * semantics). Postgres unique B-tree comparisons treat NULL as distinct from
- * NULL, so `cta_unique_idx` alone never catches a NULL-`track_title`
- * duplicate — see tests/integration/cta-unique-null-track-partial.spec.js.
- * Existing rows are never mutated — this path cannot replace or delete (the
- * D6 boundary).
+ * `ON CONFLICT DO NOTHING`, which arbiters on *both* CTA unique indexes
+ * (`cta_unique_idx` on `(library_id, artist_name, track_title)` and the
+ * `cta_unique_null_track_idx` partial covering `track_title IS NULL`). A row
+ * that duplicates one already stored — or one earlier in the same batch — is
+ * absorbed by the conflict clause and never lands, so `RETURNING` yields
+ * exactly the newly-inserted rows. `skipped` is therefore `input − inserted`,
+ * and the identity `inserted + skipped == input.length` holds even when the
+ * batch carries intra-request duplicates (api.yaml v1.28.0
+ * `CompilationTracksWriteResponse` semantics). Existing rows are never mutated
+ * — this path cannot replace or delete (the D6 boundary).
  */
 export async function writeCompilationTracks(
   libraryId: number,

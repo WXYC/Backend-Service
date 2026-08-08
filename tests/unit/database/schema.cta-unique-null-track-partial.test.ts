@@ -14,13 +14,6 @@
  * uniqueness on the non-NULL slice.
  *
  * Mirrors the shape of `schema.flowsheet-album-id-enriched-idx.test.ts`.
- *
- * Superseded in part by BS#1990 (#801 S1): migration 0139 DROPs
- * `cta_unique_null_track_idx` after the S0/#1989 prod audit measured zero
- * rows in the slice it protected. The migration-0099-file assertions below
- * still hold (0099 itself is untouched — migrations are never rewritten
- * after the fact); only the final "schema.ts declares it" assertion changed
- * to "schema.ts no longer declares it".
  */
 
 import * as fs from 'fs';
@@ -98,24 +91,16 @@ describe('schema: cta_unique_null_track_idx partial unique (BS#1135)', () => {
     expect(ddlOnly).not.toMatch(/NULLS\s+NOT\s+DISTINCT/i);
   });
 
-  it('schema.ts still declares the base cta_unique_idx unchanged (BS#1990 / #801 D7: permanent key)', () => {
+  it('schema.ts declares both indexes so drizzle-kit drift detection sees them', () => {
     const schemaSource = fs.readFileSync(schemaPath, 'utf-8');
+    // Base index unchanged.
     expect(schemaSource).toMatch(
       /uniqueIndex\(\s*'cta_unique_idx'\s*\)\.on\(\s*table\.library_id\s*,\s*table\.artist_name\s*,\s*table\.track_title\s*\)/
     );
-  });
-
-  // BS#1990 (#801 S1 / D15) — this partial unique is DROPPED by migration
-  // 0139. The S0/#1989 prod audit re-ran this migration's own precondition
-  // count (duplicate (library_id, artist_name) groups with a NULL
-  // track_title) and measured ZERO rows: the index was pure write-tax
-  // protecting an empty slice. schema.ts no longer declares it; see
-  // tests/unit/database/schema.cta-track-artist-link.test.ts for the 0139
-  // migration-source assertions and
-  // tests/integration/cta-unique-null-track-partial.spec.js for the updated
-  // runtime-behavior spec (duplicate NULL-track rows are now ALLOWED).
-  it('schema.ts no longer declares cta_unique_null_track_idx (dropped by migration 0139 / BS#1990)', () => {
-    const schemaSource = fs.readFileSync(schemaPath, 'utf-8');
-    expect(schemaSource).not.toMatch(/uniqueIndex\(\s*'cta_unique_null_track_idx'\s*\)/);
+    // New partial unique. Loose match on whitespace and template-literal
+    // quoting; the structure is what matters.
+    expect(schemaSource).toMatch(/uniqueIndex\(\s*'cta_unique_null_track_idx'\s*\)/);
+    expect(schemaSource).toMatch(/\.on\(\s*table\.library_id\s*,\s*table\.artist_name\s*\)/);
+    expect(schemaSource).toMatch(/\$\{table\.track_title\}\s+IS\s+NULL/);
   });
 });

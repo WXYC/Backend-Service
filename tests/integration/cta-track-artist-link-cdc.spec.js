@@ -3,8 +3,8 @@
  * 0046) still fires after migration 0139 widens
  * `wxyc_schema.compilation_track_artist` with the three new nullable
  * columns (`track_artist_id`, `track_artist_link_confidence`,
- * `track_artist_link_method`) and swaps the NULL-track-title partial unique
- * index for two GIN trgm indexes.
+ * `track_artist_link_method`), a btree on `track_artist_id`, and two GIN
+ * trgm indexes on `artist_name` / `track_title`.
  *
  * `cdc_compilation_track_artist` is a plain `AFTER INSERT OR UPDATE OR
  * DELETE ... FOR EACH ROW EXECUTE FUNCTION cdc_notify()` trigger with no
