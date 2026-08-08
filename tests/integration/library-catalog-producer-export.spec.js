@@ -375,7 +375,7 @@ describe('GET /library/catalog + /compilation-tracks — library.db producer pat
     const first = await getCta(auth);
     const lastModified = first.headers['last-modified'];
     await sleep(1100);
-    await sql.unsafe(`UPDATE "${SCHEMA}".library SET plays = COALESCE(plays, 0) WHERE id = $1`, [LIB_CTA]);
+    await sql.unsafe(`UPDATE "${SCHEMA}".library SET album_title = album_title WHERE id = $1`, [LIB_CTA]);
     const after = await auth
       .get('/library/catalog/compilation-tracks')
       .set('If-Modified-Since', lastModified)

@@ -424,7 +424,7 @@ describe('GET /library/catalog (BS#1468)', () => {
     // Ensure the next watermark lands in a strictly later whole second than the
     // captured Last-Modified (HTTP Date precision is whole seconds).
     await sleep(1100);
-    await sql.unsafe(`UPDATE "${SCHEMA}".library SET plays = COALESCE(plays, 0) WHERE id = $1`, [PROBE_ACTIVE]);
+    await sql.unsafe(`UPDATE "${SCHEMA}".library SET album_title = album_title WHERE id = $1`, [PROBE_ACTIVE]);
 
     const after = await auth
       .get('/library/catalog')
