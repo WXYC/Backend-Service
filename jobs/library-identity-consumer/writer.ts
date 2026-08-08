@@ -248,7 +248,7 @@ export const stampUnresolvedAttemptedAt = async (libraryIds: number[]): Promise<
 export type CompilationWriteOutcome = {
   /** CTA rows the batched UPDATE actually changed (via `RETURNING`) — the `IS DISTINCT FROM` guard means a no-op re-drain reports 0 here, not the attempted count. */
   rows_written: number;
-  /** Matched, non-librarian rows already carrying this exact verdict — never queued, so a fully-unchanged page issues NO UPDATE statement (the 0138 watermark trigger is FOR EACH STATEMENT and fires even on `UPDATE 0`). */
+  /** Matched, non-librarian rows already carrying this exact verdict — never queued, so a fully-unchanged page issues NO UPDATE statement (the 0138 watermark trigger is FOR EACH STATEMENT and fires even on `UPDATE 0` for whatever it watches — as of BS#2054/migration 0143 that no longer includes any column this writer sets, see `buildWriteRow`'s docstring). */
   rows_skipped_unchanged: number;
   /** CTA row already carries `track_artist_link_method = 'librarian'` — never overwritten. */
   rows_skipped_librarian: number;
@@ -449,13 +449,22 @@ const float4 = (x: number | null): number | null => (x === null ? null : Math.fr
  * Returns the row to queue for the batched UPDATE, or `null` when the row is
  * unchanged from what `compilation_track_artist` already carries.
  *
- * **Load-bearing:** the `null` return is not an optimization. The `0138`
- * watermark trigger on `compilation_track_artist` is `FOR EACH STATEMENT`
- * and fires even on `UPDATE 0`, so an unchanged row must never reach the
- * batched UPDATE at all — that's what stops a no-op re-drain from advancing
- * `library_watermark`. See `applyCompilationWrites`'s docstring for the
- * SQL-level `IS DISTINCT FROM` guard this prefilter backstops (and cannot
- * be replaced by, since that guard alone doesn't prevent the statement from
+ * **Load-bearing:** the `null` return is not an optimization. Before BS#2054
+ * (migration 0143), the `0138` watermark trigger on `compilation_track_artist`
+ * was `FOR EACH STATEMENT` and fired on `UPDATE 0` regardless of which column
+ * the statement named, so an unchanged row reaching the batched UPDATE
+ * advanced `library_watermark` for a change no export surfaces. As of 0143
+ * the trigger's `UPDATE OF` list excludes all four columns this function
+ * writes (`track_artist_id`, `track_artist_link_confidence`,
+ * `track_artist_link_method`, `track_position`), so that specific hazard is
+ * now structurally closed independent of this prefilter — see migration
+ * 0143's header for the column-set derivation. The `null` return stays
+ * load-bearing for two reasons that survive 0143: it avoids issuing a wasted
+ * round-trip/lock for a row that changes nothing, and it is the only thing
+ * that would protect a FUTURE write this function starts making to a column
+ * the export does read. See `applyCompilationWrites`'s docstring for the
+ * SQL-level `IS DISTINCT FROM` guard this prefilter backstops (and cannot be
+ * replaced by, since that guard alone doesn't prevent the statement from
  * being issued in the first place).
  *
  * **Preconditions (unchecked — caller's responsibility):** `entries` must be

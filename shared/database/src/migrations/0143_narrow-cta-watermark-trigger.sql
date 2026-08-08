@@ -1,0 +1,145 @@
+-- BS#2054 — narrow `touch_library_watermark_from_compilation_track_artist`'s
+-- `UPDATE` leg from unqualified to `UPDATE OF <exported columns>`. Deferred
+-- sibling of BS#2052 (migration 0142), which did the same narrowing on
+-- `library`; see that migration's header for the shared background on
+-- `touch_library_watermark()` and the `UPDATE OF` mechanism.
+--
+-- Migration 0138 (#1965) attached `touch_library_watermark()` to
+-- `wxyc_schema.compilation_track_artist` (CTA) as `AFTER INSERT OR UPDATE OR
+-- DELETE OR TRUNCATE ... FOR EACH STATEMENT`, with an unqualified `UPDATE`.
+-- That means the catalog-export watermark advances on ANY statement naming a
+-- CTA column in its SET clause, including columns no catalog export ever
+-- reads. The observed consequence: `jobs/library-identity-consumer`'s
+-- `writeCompilationTracks` (migration 0140 / BS#1990-1991) UPSERTs
+-- `track_artist_id` / `track_artist_link_confidence` /
+-- `track_artist_link_method` / `track_position` on every per-track identity
+-- resolution. #1991's app-side unchanged-row prefilter stops a NO-OP
+-- re-drain from even issuing the UPDATE, but a first-time resolution
+-- (`track_artist_id` NULL -> resolved) is a genuine value change, so the
+-- prefilter does not — and structurally cannot — suppress it: that UPDATE
+-- lands and, pre-0143, advanced `library_watermark` for a change no export
+-- surfaces.
+--
+-- COLUMN-SET DERIVATION — read the export query, not the table definition.
+-- The sole HTTP surface reading `compilation_track_artist` is
+-- `GET /library/catalog/compilation-tracks`
+-- (`apps/backend/routes/library.route.ts`, gated on `library_watermark` via
+-- `conditionalGet(getCatalogLastModifiedAt)`, same watermark `library` uses),
+-- served by `getCompilationTrackExportRows()` in
+-- `apps/backend/services/catalog-export.service.ts`:
+--
+--   SELECT
+--     library.legacy_release_id             AS legacy_release_id,
+--     compilation_track_artist.artist_name  AS artist_name,
+--     compilation_track_artist.track_title  AS track_title
+--   FROM compilation_track_artist
+--     INNER JOIN library ON library.id = compilation_track_artist.library_id
+--     INNER JOIN artists ON artists.id = library.artist_id
+--     INNER JOIN format ON format.id = library.format_id
+--     INNER JOIN genres ON genres.id = library.genre_id
+--     INNER JOIN genre_artist_crossreference
+--       ON genre_artist_crossreference.artist_id = library.artist_id
+--      AND genre_artist_crossreference.genre_id = library.genre_id
+--   ORDER BY library.legacy_release_id ASC, compilation_track_artist.id ASC
+--
+-- Every `compilation_track_artist.<column>` token in that query text was
+-- enumerated — projected columns AND join keys, because a join-key change
+-- alters what the row is attributed to even though the key itself is never
+-- serialized (the same rule 0142 applied to `library.artist_id` /
+-- `genre_id` / `format_id`). That gives FOUR columns, not the three a
+-- surface reading of the projection alone would suggest:
+--
+--   id           -- the ORDER BY ... compilation_track_artist.id ASC tiebreak
+--   library_id   -- join key back to `library`; determines which
+--                   legacy_release_id this artist_name/track_title pair is
+--                   attributed to in the export AND which row the four
+--                   eligibility INNER JOINs (artists/format/genres/
+--                   genre_artist_crossreference) evaluate against. Never
+--                   projected directly, but an UPDATE that re-points a CTA
+--                   row's library_id changes the export's output exactly
+--                   like a `library.artist_id` UPDATE does for the sibling
+--                   `library` export — the same reasoning 0142 already
+--                   established. No current writer mutates it (the only
+--                   write path, the POST .../compilation-tracks handler in
+--                   `library.controller.ts`, is INSERT-only), so this is a
+--                   correctness/future-proofing inclusion, not a fix for an
+--                   observed bug.
+--   artist_name  -- CompilationTrackExportRow.artist_name (projected)
+--   track_title  -- CompilationTrackExportRow.track_title (projected)
+--
+-- Columns that exist on `compilation_track_artist` but are deliberately
+-- EXCLUDED because the export query never reads them: `track_position`,
+-- `track_artist_id`, `track_artist_link_confidence`,
+-- `track_artist_link_method` — the four columns `writeCompilationTracks`
+-- actually writes, which is exactly why this migration exists.
+--
+-- OBLIGATION: this list is a snapshot of the export query's read set, not a
+-- derived view of it. Any future column `CompilationTrackExportRow` starts
+-- projecting, or any new join key `getCompilationTrackExportRows` starts
+-- using, MUST be added to the `UPDATE OF` list below in the same PR, or a
+-- write to it joins the same silent-and-unbounded failure mode 0138's header
+-- warned about for a table missing the trigger entirely: the write lands,
+-- changes what the next export would show, but never advances the watermark
+-- to make that export happen.
+--
+-- INSERT / DELETE / TRUNCATE stay unqualified — Postgres does not support an
+-- `OF <columns>` qualifier on those event types, and 0104's header (reused by
+-- 0138, reused here) already established why they must all advance the
+-- watermark unconditionally: a deleted or truncated row can retreat what a
+-- naive MAX-read would show, and an INSERT is definitionally a new row the
+-- export has never served.
+--
+-- SCOPE: this migration touches ONLY the `compilation_track_artist` trigger.
+-- Migration 0138 created a second trigger in the same statement, on
+-- `artist_crossreference`; that trigger is deliberately left unqualified
+-- here — see the PR description for the assessment (its only writer,
+-- `job.ts:672`, is an `INSERT ... ON CONFLICT`, which fires the trigger's
+-- unqualified INSERT leg regardless of any `UPDATE OF` narrowing, so
+-- narrowing it would not change its firing behavior).
+--
+-- CDC INDEPENDENCE: `cdc_compilation_track_artist` (migration 0046) is a
+-- separate trigger on this same table — different function (`cdc_notify()`,
+-- not `touch_library_watermark()`), different granularity (`FOR EACH ROW`,
+-- not `FOR EACH STATEMENT`), and structurally unqualified (`AFTER INSERT OR
+-- UPDATE OR DELETE`, no column list, and Postgres does not narrow ROW-level
+-- triggers with `OF <columns>` the way this migration narrows the
+-- STATEMENT-level one). This migration's DDL does not reference or alter
+-- that trigger in any way; it continues to fire on every INSERT/UPDATE/
+-- DELETE exactly as before, feeding the `/cdc` WebSocket channel the
+-- reconciliation monitor (`scripts/sync/reconcile.ts`) consumes. See the PR
+-- description for the full audit.
+--
+-- Reuses `wxyc_schema.touch_library_watermark()` VERBATIM (defined in
+-- 0104, reused by 0138) — same single-row `library_watermark` UPDATE, same
+-- monotonic `GREATEST(now(), last_modified_at)` advance, same O(1)
+-- per-statement cost. Do NOT redefine the function here. No schema objects
+-- change, so `drizzle:generate` produces no diff and this is a `--custom`
+-- migration whose snapshot is byte-identical to 0142's apart from the
+-- id/prevId chain link (mirrors 0142 / 0114 / 0105's precedent for a
+-- trigger-only migration).
+--
+-- Idempotent: `DROP TRIGGER IF EXISTS` before `CREATE TRIGGER` (`CREATE
+-- TRIGGER` itself is not idempotent) so a re-apply, or a fresh dev DB that
+-- already has 0138 applied, is a no-op followed by the narrowed definition
+-- landing cleanly.
+--
+-- `UPDATE OF col` is target-list-based, not value-change-based: it fires
+-- because a statement's SET clause NAMES a watched column, whether or not
+-- the value actually changes, and it fires even on a statement that matches
+-- zero rows. Nothing in this migration (or its tests) claims the watermark
+-- now advances "only on real changes."
+--
+-- @no-analyze-needed: no UPDATE on a stats-bearing table — the only write is
+-- the one-row `library_watermark` UPDATE inside the reused trigger function.
+-- @no-precondition-needed: trigger DDL only; no constraint, no data invariant.
+
+DROP TRIGGER IF EXISTS touch_library_watermark_from_compilation_track_artist ON wxyc_schema.compilation_track_artist;--> statement-breakpoint
+CREATE TRIGGER touch_library_watermark_from_compilation_track_artist
+AFTER INSERT OR UPDATE OF
+  id,
+  library_id,
+  artist_name,
+  track_title
+  OR DELETE OR TRUNCATE ON wxyc_schema.compilation_track_artist
+FOR EACH STATEMENT
+EXECUTE FUNCTION wxyc_schema.touch_library_watermark();

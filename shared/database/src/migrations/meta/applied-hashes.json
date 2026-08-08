@@ -138,5 +138,6 @@
   "0139_flowsheet-album-id-linked-idx": "c39265873ac4244460a0bc5e492c605a5e1af0429d0520d874cf16d1735892c2",
   "0140_cta-track-artist-link": "c1b1c62a5e4977eede90194974cd18f8caacf8a5cf5de9e7ece1f030cea49eb1",
   "0141_slack-ban-moderators": "3312d34a2e6447fb00033f52ede6a38d397bb9c6b7ae5618764ecd510d36fef2",
-  "0142_narrow-library-watermark-trigger": "462abe5dbbaab29f1f0e901cf244deeabe604760cbc28627cbf07fc7c52ff9d0"
+  "0142_narrow-library-watermark-trigger": "462abe5dbbaab29f1f0e901cf244deeabe604760cbc28627cbf07fc7c52ff9d0",
+  "0143_narrow-cta-watermark-trigger": "7af5bbdf0bfaeb796a46f724667a4e9c909f35bf9710c232aa3e36b8d4b082e0"
 }

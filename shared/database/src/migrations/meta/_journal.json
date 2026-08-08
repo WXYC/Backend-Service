@@ -981,6 +981,13 @@
       "when": 1786220835222,
       "tag": "0142_narrow-library-watermark-trigger",
       "breakpoints": true
+    },
+    {
+      "idx": 143,
+      "version": "7",
+      "when": 1786226539744,
+      "tag": "0143_narrow-cta-watermark-trigger",
+      "breakpoints": true
     }
   ]
 }

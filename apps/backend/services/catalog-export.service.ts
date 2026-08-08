@@ -343,12 +343,18 @@ export const serializeCompilationTracksNdjson = (rows: CompilationTrackExportRow
  *
  * One scan per watermark (cached below). CTA freshness rides `library_watermark`
  * and migration 0138 attaches `touch_library_watermark()` to
- * `compilation_track_artist`, so a CTA write advances the watermark on its own.
+ * `compilation_track_artist`, so a CTA INSERT (the `POST .../compilation-tracks`
+ * write path — the only writer of new rows) advances the watermark on its own.
  * That trigger is load-bearing, not belt-and-suspenders: the CTA POST always
  * FOLLOWS the library add it would otherwise ride, so without it the cached body
  * for the library-add watermark never contains the tracks and this endpoint 304s
  * until some unrelated write moves the watermark. Post-tubafrenzy-turndown there
- * is no daily library sync to eventually supply that write.
+ * is no daily library sync to eventually supply that write. As of BS#2054
+ * (migration 0143) the trigger's UPDATE leg is narrowed to
+ * `UPDATE OF id, library_id, artist_name, track_title` — the columns THIS
+ * query actually reads — so an UPDATE to any other column (the four
+ * `jobs/library-identity-consumer` identity-resolution columns) does NOT
+ * advance the watermark; INSERT stays unqualified and is unaffected.
  */
 export const getCompilationTrackExportRows = async (): Promise<CompilationTrackExportRow[]> => {
   const rows = await db.execute(sql`
