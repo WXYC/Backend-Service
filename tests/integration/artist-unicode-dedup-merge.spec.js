@@ -15,7 +15,10 @@
  *   (c) reconciled-identity `COALESCE` determinism when two duplicates both
  *       carry a non-null column: the lowest-id duplicate's value wins (ascending
  *       processing order), and a survivor's own non-null value always wins.
- * Plus an idempotency re-scan (a merged group drops out of findDuplicateGroups).
+ * Plus an idempotency re-scan (a merged group drops out of findDuplicateGroups)
+ * and a catalog→code completeness guard: every FK the database declares against
+ * `artists.id` must appear in `FK_TARGETS`, so a newly-added reference site
+ * cannot silently go unrepointed on the next `--execute`.
  *
  * The merge functions use the `@wxyc/database` `db` singleton (its own pool,
  * DB_* env); this spec seeds + asserts via `getTestDb()` (a separate pool on the
@@ -303,6 +306,54 @@ describe('artist-unicode-dedup mergeGroup — REAL functions (real PG, BS#1897 M
       expect(risk.formOnly).toBe(false); // differs beyond Unicode form (accent)
       expect(risk.multiGenre).toBe(true);
       expect(risk.genreIds).toEqual([GENRE_ID, TEMP_GENRE].sort((a, b) => a - b));
+    });
+  });
+
+  // The artists-side twin of `library-call-number-dedup-merge.spec.js`'s
+  // "finds no FK on library.id that FK_TARGETS does not repoint" (BS#2015).
+  // Runs FROM the catalog TO the code, which is the only direction that can
+  // catch an omission: a test that iterated FK_TARGETS would pass green on a
+  // brand-new FK the job has never heard of.
+  //
+  // The cost of that omission is silent here rather than loud. `mergeGroup`
+  // repoints only its registered sites and then DELETEs the duplicate
+  // `artists` rows, so an unregistered FK is resolved by whatever delete rule
+  // the constraint declares — `ON DELETE SET NULL` (e.g.
+  // `compilation_track_artist.track_artist_id`, added by BS#1990/migration
+  // 0139) blanks the reference with no error at all, and `CASCADE` would
+  // delete the referencing row outright. Only a `NO ACTION` site fails loudly.
+  //
+  // Deliberate deviation from the library-side shape: this asserts on
+  // `table.column` pairs, not table names alone. Two tables here already carry
+  // TWO FK columns to `artists.id` (`artist_crossreference` source+target,
+  // `artist_search_alias` artist+related), so a table-name-only comparison
+  // would let a third column on an already-registered table land unnoticed.
+  describe('FK_TARGETS completeness (catalog → code)', () => {
+    it('finds no FK on artists.id that FK_TARGETS does not repoint', async () => {
+      const rows = await sql`
+        SELECT tc.table_name, kcu.column_name
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.key_column_usage kcu
+            ON kcu.constraint_name = tc.constraint_name
+           AND kcu.constraint_schema = tc.table_schema
+          JOIN information_schema.constraint_column_usage ccu
+            ON ccu.constraint_name = tc.constraint_name
+           AND ccu.constraint_schema = tc.table_schema
+         WHERE tc.constraint_type = 'FOREIGN KEY'
+           AND tc.table_schema = ${SCHEMA}
+           AND ccu.table_name = 'artists'
+           AND ccu.column_name = 'id'
+      `;
+      // Sanity floor: an empty catalog read would make the assertion below
+      // vacuously green, which is the failure mode a schema-introspection
+      // guard is most likely to rot into.
+      expect(rows.length).toBeGreaterThan(0);
+
+      const registered = new Set(merge.FK_TARGETS.map((t) => `${t.table}.${t.column}`));
+      const missing = [...new Set(rows.map((r) => `${r.table_name}.${r.column_name}`))]
+        .filter((site) => !registered.has(site))
+        .sort();
+      expect(missing).toEqual([]);
     });
   });
 
