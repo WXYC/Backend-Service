@@ -61,6 +61,14 @@ export const FK_TARGETS: readonly FkTarget[] = [
   { table: 'artist_station_plays', column: 'artist_id', uniqueKey: ['artist_id'] },
   { table: 'concerts', column: 'headlining_artist_id', uniqueKey: null },
   { table: 'concert_performers', column: 'artist_id', uniqueKey: null },
+  // BS#1990 (#801 S1): the per-track artist canonicalization link. It is
+  // `ON DELETE SET NULL`, so an unregistered site would not raise — the delete
+  // below would silently blank the link on every credit pointing at a
+  // merged-away duplicate. `uniqueKey: null` because no uniqueness constraint
+  // involves this column (`cta_unique_idx` is
+  // `(library_id, artist_name, track_title)`, `cta_unique_null_track_idx` is
+  // `(library_id, artist_name)`), so a plain repoint can never collide.
+  { table: 'compilation_track_artist', column: 'track_artist_id', uniqueKey: null },
 ];
 
 /** The 6 nullable reconciled-identity columns carried ON the artists row. */

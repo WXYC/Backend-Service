@@ -62,6 +62,19 @@
 --     All new indexes are drop-and-rebuild candidates during S5's bulk
 --     load; that call belongs to S5's trigger-strategy decision.
 --
+-- LOCK BEHAVIOR / EXPECTED DURATION (docs/migrations.md `sql-comment-block`):
+-- Drizzle wraps the whole file in one transaction, so every statement below
+-- holds its lock until commit — ACCESS EXCLUSIVE on `compilation_track_artist`
+-- from the first ALTER through both GIN builds, plus a SHARE ROW EXCLUSIVE on
+-- `artists` taken by the FK's validation scan and held for the same span. At
+-- 144,778 CTA rows the whole file is seconds; the ALTERs are metadata-only
+-- (all three columns are nullable with no DEFAULT, so no table rewrite), and
+-- the two GIN trgm builds dominate. That is short enough to take the plain
+-- in-transaction form here. It will not stay short: revisit the
+-- `CREATE INDEX CONCURRENTLY` + `IF NOT EXISTS` runbook (docs/migrations.md
+-- `if-not-exists-index`, references 0057/0068/0070) before any index ships
+-- against this table at S5's projected 500K-1M rows.
+--
 -- PG-version constraint: prod RDS runs PostgreSQL 14.22 (see docs/migrations.md
 -- "Dev/CI Postgres version vs. prod RDS"). Every statement below is PG14
 -- syntax — no `NULLS NOT DISTINCT`, no `MERGE`.
