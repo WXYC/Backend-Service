@@ -215,8 +215,20 @@ export const writeSingleArtist = async (
  *
  * Binds the ids as a single Postgres array literal (`= ANY('{...}'::int[])`)
  * rather than an `IN (...)` splat, per BS#1071/#1072. Empty input is a no-op
- * (no query). The `id` values are numbers (LibraryRow.id), so the literal is
- * injection-safe.
+ * (no query). The literal is built via `@wxyc/database`'s `intArrayLiteral`,
+ * which round-trips every id through `Number(...)` and a real
+ * `Number.isSafeInteger` check rather than trusting the `number[]` parameter
+ * type — see that helper's docblock for why "the caller's type says so" isn't
+ * a runtime guarantee.
+ *
+ * One harmless behavior delta from the hand-rolled join this replaced: a
+ * malformed id now throws inside `intArrayLiteral` instead of being spliced
+ * into a bad literal for Postgres to reject. Both outcomes land in the same
+ * `try`/`catch` at `orchestrate.ts` (around the `stampUnresolvedAttemptedAt`
+ * call site) and produce the same `stamp_error` warn-and-continue, so the
+ * drain behaves identically either way — and the path is unreachable in
+ * practice absent an unchecked cast upstream, since this parameter is typed
+ * `number[]`.
  */
 export const stampUnresolvedAttemptedAt = async (libraryIds: number[]): Promise<void> => {
   if (libraryIds.length === 0) return;
@@ -445,6 +457,16 @@ const float4 = (x: number | null): number | null => (x === null ? null : Math.fr
  * SQL-level `IS DISTINCT FROM` guard this prefilter backstops (and cannot
  * be replaced by, since that guard alone doesn't prevent the statement from
  * being issued in the first place).
+ *
+ * **Preconditions (unchecked — caller's responsibility):** `entries` must be
+ * non-empty (`entries[entries.length - 1]` is read unconditionally) and
+ * every entry's `resolved_artist_name` must be non-null (it's looked up
+ * directly in `artistIdByName`). Both hold structurally for `writeCompilationTracks`'s
+ * `survivors` list — entries with a null `resolved_artist_name` are filtered
+ * out before grouping, and a key only reaches `entriesByKey` via a `push`, so
+ * the bucket is never empty — but neither is enforced here, since this
+ * function was extracted from an inline loop where both were already
+ * guaranteed by the caller; see #2050.
  */
 export const buildWriteRow = (
   ctaRow: CtaRow,
