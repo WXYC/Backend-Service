@@ -35,7 +35,12 @@ import { closeDatabaseConnection } from '@wxyc/database';
 
 import { runConsumer, type Totals } from './orchestrate.js';
 import { bulkResolveLibraries } from './lml-fetch.js';
-import { writeSingleArtist, stampUnresolvedAttemptedAt, writeCompilationTracks } from './writer.js';
+import {
+  writeSingleArtist,
+  stampUnresolvedAttemptedAt,
+  writeCompilationTracks,
+  analyzeCompilationTrackArtist,
+} from './writer.js';
 import {
   resolveBatchSize,
   resolveDryRun,
@@ -50,6 +55,15 @@ import {
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 
 const JOB_NAME = 'library-identity-consumer';
+
+/**
+ * Bulk-update-playbook gate for the post-run `ANALYZE compilation_track_artist`
+ * (BS#1991): once per run, only when a drain actually changed rows — a
+ * dry run writes nothing, and a no-op re-drain's `IS DISTINCT FROM` guard
+ * can leave every drain at 0, where ANALYZE would re-stat an unchanged table.
+ */
+export const shouldAnalyzeCompilationTracks = (dryRun: boolean, ...writtenCounts: number[]): boolean =>
+  !dryRun && writtenCounts.some((n) => n > 0);
 
 const requireLmlConfigured = (): void => {
   if (!process.env.LIBRARY_METADATA_URL) {
@@ -114,6 +128,9 @@ const main = async (): Promise<void> => {
           recheck: true,
         });
         span.setAttributes(buildSpanAttributes(result.totals, 'consumer.recheck'));
+        if (shouldAnalyzeCompilationTracks(dryRun, result.totals.compilation_track_rows_written)) {
+          await analyzeCompilationTrackArtist();
+        }
         return;
       }
 
@@ -154,6 +171,16 @@ const main = async (): Promise<void> => {
         cohort: 'non_va',
       });
       span.setAttributes(buildSpanAttributes(nonVaResult.totals, 'consumer.non_va'));
+
+      if (
+        shouldAnalyzeCompilationTracks(
+          dryRun,
+          vaResult.totals.compilation_track_rows_written,
+          nonVaResult.totals.compilation_track_rows_written
+        )
+      ) {
+        await analyzeCompilationTrackArtist();
+      }
     } catch (error) {
       log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });
       captureError(error, 'failed');

@@ -43,7 +43,7 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { db } from '@wxyc/database';
+import { db, intArrayLiteral } from '@wxyc/database';
 
 import type { BulkResolveResult, BulkResolveTrackEntry, ReconciledIdentity } from './lml-types.js';
 import { log } from './logger.js';
@@ -235,7 +235,7 @@ export const stampUnresolvedAttemptedAt = async (libraryIds: number[]): Promise<
  * resolution are each ONE query for the page (no N+1), per the AC.
  */
 export type CompilationWriteOutcome = {
-  /** CTA rows UPDATEd (identity write attempted, guard passed or no-op). */
+  /** CTA rows the batched UPDATE actually changed (via `RETURNING`) — the `IS DISTINCT FROM` guard means a no-op re-drain reports 0 here, not the attempted count. */
   rows_written: number;
   /** CTA row already carries `track_artist_link_method = 'librarian'` — never overwritten. */
   rows_skipped_librarian: number;
@@ -273,11 +273,10 @@ const ctaKey = (libraryId: number, artistName: string, trackTitle: string | null
 
 const fetchCtaRowsForLibraries = async (libraryIds: number[]): Promise<CtaRow[]> => {
   if (libraryIds.length === 0) return [];
-  const idArrayLiteral = `{${libraryIds.join(',')}}`;
   const rows = (await db.execute(sql`
     SELECT "id", "library_id", "artist_name", "track_title", "track_position", "track_artist_link_method"
     FROM ${COMPILATION_TRACK_ARTIST_TABLE}
-    WHERE "library_id" = ANY(${idArrayLiteral}::int[])
+    WHERE "library_id" = ANY(${intArrayLiteral(libraryIds)}::int[])
   `)) as unknown as CtaRow[];
   return rows ?? [];
 };
@@ -315,6 +314,76 @@ const resolveArtistIdsByNames = async (names: string[]): Promise<Map<string, num
   return result;
 };
 
+/**
+ * Rows queued for the batched UPDATE below. `position` is `null` when the
+ * position rider doesn't apply (CTA already has one, or the offer was
+ * ambiguous) — the UPDATE's `COALESCE(v.position, cta."track_position")`
+ * treats that as "leave the existing position alone."
+ */
+type CompilationWriteRow = {
+  ctaId: number;
+  trackArtistId: number | null;
+  confidence: number | null;
+  position: string | null;
+};
+
+/**
+ * Bulk-update-playbook batch cap (`docs/bulk-update-playbook.md`): each row
+ * in the VALUES join binds 4 parameters, and Postgres caps a single
+ * statement at 65535 bind parameters. S0/#1989 measured a max of 2,364
+ * credits on a single V/A release, so a pathological page could otherwise
+ * approach that ceiling — 500 rows/statement (2,000 params) keeps every
+ * chunk far under it regardless of page composition.
+ */
+const WRITE_CHUNK_SIZE = 500;
+
+/**
+ * One page-level, chunked UPDATE via a `VALUES` join (the house pattern for
+ * a batched write — see `streaming-url-remediation`/`artist-unicode-dedup`)
+ * rather than one `UPDATE` per CTA row: at S0's measured mean of 56
+ * credits/release, a 100-release `va` page is ~5,600 sequential round-trips
+ * without this. `RETURNING "id"` reports the ACTUAL row count the
+ * `IS DISTINCT FROM` guard let through, not just rows attempted — so a
+ * no-op re-drain's `rows_written` is honestly 0, not the queued count.
+ */
+const applyCompilationWrites = async (rows: CompilationWriteRow[]): Promise<number> => {
+  let written = 0;
+  for (let i = 0; i < rows.length; i += WRITE_CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + WRITE_CHUNK_SIZE);
+    const values = chunk.map(
+      (r) => sql`(${r.ctaId}::int, ${r.trackArtistId}::int, ${r.confidence}::real, ${r.position}::text)`
+    );
+    const returned = (await db.execute(sql`
+      UPDATE ${COMPILATION_TRACK_ARTIST_TABLE} AS cta
+      SET
+        "track_artist_id" = v.track_artist_id,
+        "track_artist_link_confidence" = v.confidence,
+        "track_artist_link_method" = 'lml_backfill',
+        "track_position" = COALESCE(v.position, cta."track_position")
+      FROM (VALUES ${sql.join(values, sql`, `)}) AS v(id, track_artist_id, confidence, position)
+      WHERE cta."id" = v.id
+        AND (
+          cta."track_artist_id" IS DISTINCT FROM v.track_artist_id
+          OR cta."track_artist_link_confidence" IS DISTINCT FROM v.confidence
+          OR cta."track_artist_link_method" IS DISTINCT FROM 'lml_backfill'
+          OR cta."track_position" IS DISTINCT FROM COALESCE(v.position, cta."track_position")
+        )
+      RETURNING cta."id"
+    `)) as unknown as { id: number }[];
+    written += (returned ?? []).length;
+  }
+  return written;
+};
+
+/**
+ * BS#1991: pair the batched write with an `ANALYZE` per the bulk-update
+ * playbook, called once per drain (not per page) from `job.ts` — `ANALYZE`
+ * cannot run inside a transaction and is wasted work to repeat every batch.
+ */
+export const analyzeCompilationTrackArtist = async (): Promise<void> => {
+  await db.execute(sql`ANALYZE ${COMPILATION_TRACK_ARTIST_TABLE}`);
+};
+
 export const writeCompilationTracks = async (
   results: Extract<BulkResolveResult, { kind: 'compilation' }>[]
 ): Promise<CompilationWriteOutcome> => {
@@ -347,6 +416,8 @@ export const writeCompilationTracks = async (
   const distinctNames = [...new Set([...entriesByKey.values()].flat().map((e) => e.resolved_artist_name as string))];
   const artistIdByName = await resolveArtistIdsByNames(distinctNames);
 
+  const writeRows: CompilationWriteRow[] = [];
+
   for (const [key, entries] of entriesByKey) {
     const ctaRow = ctaByKey.get(key);
     if (!ctaRow) {
@@ -367,14 +438,29 @@ export const writeCompilationTracks = async (
     const entry = entries[entries.length - 1];
     const trackArtistId = artistIdByName.get(entry.resolved_artist_name as string) ?? null;
     if (trackArtistId === null) outcome.rows_skipped_no_catalog_artist += 1;
-    const confidence = entry.confidence;
-    const method = 'lml_backfill';
+
+    // `track_artist_link_confidence` carries `CHECK (BETWEEN 0 AND 1)`
+    // (migration 0140). A single out-of-range value from LML must not abort
+    // the whole page's batched UPDATE — null it out (a legal value; the
+    // constraint is nullable) and log, mirroring `writeSingleArtist`'s own
+    // defense against its sibling `library_identity_source` constraint.
+    let confidence = entry.confidence;
+    if (confidence !== null && (confidence < 0 || confidence > 1)) {
+      log(
+        'warn',
+        'compilation_confidence_out_of_range',
+        `CTA row ${ctaRow.id} (library_id=${ctaRow.library_id}) got an out-of-range confidence ${confidence} from LML; writing NULL instead`,
+        { cta_id: ctaRow.id, library_id: ctaRow.library_id, confidence }
+      );
+      confidence = null;
+    }
 
     let newPosition: string | null = null;
     if (ctaRow.track_position === null) {
       const distinctPositions = [...new Set(entries.map((e) => e.track_position).filter((p) => p !== null))];
       if (distinctPositions.length === 1) {
         newPosition = distinctPositions[0];
+        outcome.position_rows_written += 1;
       } else if (distinctPositions.length > 1) {
         outcome.position_rows_skipped_ambiguous += 1;
         log(
@@ -386,36 +472,10 @@ export const writeCompilationTracks = async (
       }
     }
 
-    const setClause =
-      newPosition !== null
-        ? sql`"track_artist_id" = ${trackArtistId}, "track_artist_link_confidence" = ${confidence}, "track_artist_link_method" = ${method}, "track_position" = ${newPosition}`
-        : sql`"track_artist_id" = ${trackArtistId}, "track_artist_link_confidence" = ${confidence}, "track_artist_link_method" = ${method}`;
-
-    // IS DISTINCT FROM guard (BS#1991 AC): an unchanged verdict is zero
-    // writes, so a no-op re-drain fires neither `cdc_compilation_track_artist`
-    // nor `touch_library_watermark_from_compilation_track_artist`.
-    const distinctGuard =
-      newPosition !== null
-        ? sql`(
-            "track_artist_id" IS DISTINCT FROM ${trackArtistId}
-            OR "track_artist_link_confidence" IS DISTINCT FROM ${confidence}
-            OR "track_artist_link_method" IS DISTINCT FROM ${method}
-            OR "track_position" IS DISTINCT FROM ${newPosition}
-          )`
-        : sql`(
-            "track_artist_id" IS DISTINCT FROM ${trackArtistId}
-            OR "track_artist_link_confidence" IS DISTINCT FROM ${confidence}
-            OR "track_artist_link_method" IS DISTINCT FROM ${method}
-          )`;
-
-    await db.execute(sql`
-      UPDATE ${COMPILATION_TRACK_ARTIST_TABLE}
-      SET ${setClause}
-      WHERE "id" = ${ctaRow.id} AND ${distinctGuard}
-    `);
-    outcome.rows_written += 1;
-    if (newPosition !== null) outcome.position_rows_written += 1;
+    writeRows.push({ ctaId: ctaRow.id, trackArtistId, confidence, position: newPosition });
   }
+
+  outcome.rows_written = await applyCompilationWrites(writeRows);
 
   return outcome;
 };
