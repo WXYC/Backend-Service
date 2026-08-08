@@ -167,9 +167,9 @@ describe('library_watermark trigger (BS#1467)', () => {
     await ageWm('1 hour');
     // Mirrors the ETL writing straight to Postgres: a multi-row UPDATE that
     // never passes through library.service. Probes `album_artist`, not
-    // `plays`: BS#2052 (migration 0141) narrowed the trigger to
+    // `plays`: BS#2052 (migration 0142) narrowed the trigger to
     // `UPDATE OF <exported columns>`, and `plays` is a dead counter the
-    // catalog export never reads (see 0141's header) — it stopped firing the
+    // catalog export never reads (see 0142's header) — it stopped firing the
     // trigger on purpose. `album_artist` IS exported, so it stays a valid
     // probe for the bypass guard this test protects.
     await sql.unsafe(`UPDATE "${SCHEMA}".library SET album_artist = album_artist WHERE album_title LIKE $1`, [

@@ -1,18 +1,18 @@
 /**
  * BS#2052 — narrow `touch_library_watermark`'s `library` trigger from an
- * unqualified `UPDATE` to `UPDATE OF <exported columns>` (migration 0141).
+ * unqualified `UPDATE` to `UPDATE OF <exported columns>` (migration 0142).
  *
  * Companion to `library-watermark.spec.js` (#1467, the original trigger) and
  * `library-watermark-parents.spec.js` (#1468, the parent-table fan-out).
  * Those specs pin that INSERT/UPDATE/DELETE all advance the watermark; this
- * one pins the NEW invariant 0141 adds on top: an UPDATE that touches only a
+ * one pins the NEW invariant 0142 adds on top: an UPDATE that touches only a
  * non-exported column must NOT advance it, while an UPDATE that touches an
  * exported column still must.
  *
  * The motivating case is `library.unresolved_attempted_at`
  * (`jobs/library-identity-consumer`'s per-batch drain marker, migration
  * 0130/BS#974): a genuine row change, but one no catalog export ever reads.
- * Before 0141, every `--recheck` sweep bumped `library_watermark` once per
+ * Before 0142, every `--recheck` sweep bumped `library_watermark` once per
  * batch and busted every client's conditional GET for a change nobody could
  * observe. This spec exercises that exact column plus one true positive
  * (`album_artist`, part of `CatalogExportRow` per
