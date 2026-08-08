@@ -391,6 +391,11 @@ export const banned_fingerprints = {
   ban_expires_at: 'ban_expires_at',
   banned_by_user_id: 'banned_by_user_id',
 };
+export const slack_ban_moderators = {
+  slack_user_id: 'slack_user_id',
+  added_at: 'added_at',
+  added_by_slack_user_id: 'added_by_slack_user_id',
+};
 export const specialty_shows = {};
 export const schedule = {};
 export const artist_crossreference = {};

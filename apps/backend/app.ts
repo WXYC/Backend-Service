@@ -18,6 +18,7 @@ import { request_line_route } from './routes/requestLine.route.js';
 import { config_route } from './routes/config.route.js';
 import { internal_route } from './routes/internal.route.js';
 import { internalBansRoute } from './routes/internal-bans.route.js';
+import { internalSlackModeratorsRoute } from './routes/internal-slack-moderators.route.js';
 import { ses_events_route } from './routes/ses-events.route.js';
 import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
@@ -177,6 +178,12 @@ app.use('/internal', internal_route);
 // pattern composes cleanly. Distinct router because the auth key differs:
 // ROM_INTERNAL_KEY (this router) vs ETL_NOTIFY_KEY (the sibling).
 app.use('/internal/banned-fingerprints', internalBansRoute);
+
+// BS#2045 — Slack moderator roster read/replaced by request-o-matic's
+// /request-mods modal. Same X-Internal-Key + ROM_INTERNAL_KEY gate and the
+// same caller as the ban CRUD above, so it mounts as a sibling rather than
+// carrying its own key.
+app.use('/internal/slack-ban-moderators', internalSlackModeratorsRoute);
 
 Sentry.setupExpressErrorHandler(app, { shouldHandleError: shouldCaptureExpressError });
 app.use(errorHandler);
