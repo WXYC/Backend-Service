@@ -31,58 +31,7 @@ import {
   stampUnresolvedAttemptedAt,
   writeCompilationTracks,
 } from '../../../../jobs/library-identity-consumer/writer';
-
-type SqlChunk = { value?: string | string[]; queryChunks?: SqlChunk[]; raw?: string };
-type SqlLike = {
-  sql?: string | string[];
-  values?: unknown[];
-  queryChunks?: Array<string | SqlChunk>;
-  raw?: string;
-  // The manual drizzle mock's `sql.join` shape (tests/__mocks__/drizzle-orm.ts)
-  // — same handling as flowsheet-ghost-row-sweep's renderer.
-  join?: unknown[];
-  sep?: unknown;
-};
-const renderValue = (v: unknown): string => {
-  if (v == null) return '';
-  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v);
-  if (typeof v === 'object') {
-    const o = v as SqlChunk & SqlLike;
-    if (typeof o.raw === 'string') return o.raw;
-    if (Array.isArray(o.queryChunks) || Array.isArray(o.sql) || Array.isArray(o.join)) return renderSql(o);
-    if (Array.isArray(o.value)) return o.value.join('');
-    if (typeof o.value === 'string') return o.value;
-  }
-  return '';
-};
-const renderSql = (value: unknown): string => {
-  const obj = value as SqlLike | null | undefined;
-  if (!obj) return '';
-  if (Array.isArray(obj.sql)) {
-    let out = '';
-    const fragments = obj.sql;
-    const values = obj.values ?? [];
-    for (let i = 0; i < fragments.length; i++) {
-      out += fragments[i];
-      if (i < values.length) out += renderValue(values[i]);
-    }
-    return out;
-  }
-  if (typeof obj.sql === 'string') return obj.sql;
-  if (Array.isArray(obj.join)) return obj.join.map(renderSql).join(renderSql(obj.sep));
-  if (obj.queryChunks) {
-    return obj.queryChunks
-      .map((chunk) => {
-        if (typeof chunk === 'string') return chunk;
-        if (Array.isArray(chunk.queryChunks)) return renderSql(chunk);
-        if (Array.isArray(chunk.value)) return chunk.value.join('');
-        if (typeof chunk.value === 'string') return chunk.value;
-        return '';
-      })
-      .join('');
-  }
-  return '';
-};
+import { renderSql } from '../../../utils/render-sql';
 
 const findCallMatching = (pattern: RegExp): unknown[] | undefined => {
   const calls = (db.execute as jest.Mock).mock.calls;
@@ -270,7 +219,13 @@ describe('writeCompilationTracks (BS#1991 / #801 S2)', () => {
   });
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    // clearMocks (jest.unit.config.ts) clears call history automatically
+    // before every test, but it does NOT drain unconsumed
+    // mockResolvedValueOnce queues (BS#2051) — a surplus Once left over from
+    // one test would otherwise be consumed by the next test's first
+    // db.execute call. mockReset() drains the queue (and any lingering
+    // default resolved value) along with the call history.
+    (db.execute as jest.Mock).mockReset();
   });
 
   it('is a no-op (no query) for an empty results array', async () => {
@@ -554,7 +509,10 @@ describe('writeCompilationTracks — review-gate fixes (BS#1991 bounce 1)', () =
   const foldCalls = () => (db.execute as jest.Mock).mock.calls.filter((c) => /fold_artist_name/i.test(renderSql(c[0])));
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    // See the matching comment in the "writeCompilationTracks (BS#1991 /
+    // #801 S2)" describe above (BS#2051): mockReset() drains unconsumed
+    // mockResolvedValueOnce queues, not just call history.
+    (db.execute as jest.Mock).mockReset();
   });
 
   it('issues NO UPDATE statement when every matched row is already unchanged — the watermark trigger is FOR EACH STATEMENT and fires even on UPDATE 0', async () => {
