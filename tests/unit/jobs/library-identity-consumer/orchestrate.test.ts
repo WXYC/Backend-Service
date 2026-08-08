@@ -1018,13 +1018,21 @@ describe('runConsumer — BS#1991 bounce-1 fixes (stamp split + counter projecti
     partition: { sqlFragment: null, description: 'partition=none' },
   });
 
-  it('flag-off (default) still stamps a RESOLVED compilation — its resolved-exit has no other durable marker — while not-yet-askable and unresolved ids stay unstamped', async () => {
+  it('flag-off va drain still stamps a RESOLVED compilation — its resolved-exit has no other durable marker — while not-yet-askable and unresolved ids stay unstamped', async () => {
     const w = wire();
 
-    await runConsumer({ ...baseOpts(), ...w, dryRun: false, includeNullCanonical: false });
+    await runConsumer({ ...baseOpts(), ...w, dryRun: false, includeNullCanonical: false, cohort: 'va' });
 
     expect(w.stampUnresolvedAttemptedAt).toHaveBeenCalledTimes(1);
     expect(w.stampUnresolvedAttemptedAt).toHaveBeenCalledWith([200]);
+  });
+
+  it('flag-off non_va drain does NOT stamp a resolved compilation — no flag-off non_va predicate reads the marker, and the stamp UPDATE on library fires the FOR EACH STATEMENT watermark trigger', async () => {
+    const w = wire();
+
+    await runConsumer({ ...baseOpts(), ...w, dryRun: false, includeNullCanonical: false, cohort: 'non_va' });
+
+    expect(w.stampUnresolvedAttemptedAt).not.toHaveBeenCalled();
   });
 
   it('flag-on stamps the union: resolved compilations + not-yet-askable compilations + unresolved', async () => {

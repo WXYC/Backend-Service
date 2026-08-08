@@ -675,6 +675,20 @@ describe('writeCompilationTracks — review-gate fixes (BS#1991 bounce 1)', () =
     expect(outcome.position_rows_written).toBe(0);
   });
 
+  it('an unchanged NULL-verdict row counts in BOTH rows_skipped_no_catalog_artist and rows_skipped_unchanged (documented overlap — skip buckets are not a partition)', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([
+        ctaRow({ track_artist_link_method: 'lml_backfill', track_artist_id: null, track_artist_link_confidence: 0.5 }),
+      ])
+      .mockResolvedValueOnce([]); // name resolves to nothing in the catalog
+
+    const outcome = await writeCompilationTracks([compilation({ tracks: [track({ confidence: 0.5 })] })]);
+
+    expect(updateCalls().length).toBe(0);
+    expect(outcome.rows_skipped_no_catalog_artist).toBe(1);
+    expect(outcome.rows_skipped_unchanged).toBe(1);
+  });
+
   it('warns on a page-level CTA echo-match gap (systematic join-back divergence must not be silent)', async () => {
     const tracks = Array.from({ length: 12 }, (_, i) =>
       track({ artist_name: `Ghost ${i}`, track_title: `G${i}`, resolved_artist_name: `R${i}` })

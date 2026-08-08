@@ -243,7 +243,13 @@ export type CompilationWriteOutcome = {
   rows_skipped_librarian: number;
   /** Track entry's (artist_name, track_title) echo matched no CTA row for that library_id. */
   rows_skipped_no_cta_match: number;
-  /** `resolved_artist_name` present but zero or 2+ `artists` rows share its fold key. */
+  /**
+   * `resolved_artist_name` present but zero or 2+ `artists` rows share its
+   * fold key. NOT disjoint from `rows_skipped_unchanged`: a row whose NULL
+   * verdict is already stored counts in both on a re-drain (this bucket
+   * answers "why NULL", that one answers "why no write"), so the skip
+   * counters don't sum against `rows_written`.
+   */
   rows_skipped_no_catalog_artist: number;
   /** CTA row's `track_position` was NULL and exactly one distinct position was offered. */
   position_rows_written: number;

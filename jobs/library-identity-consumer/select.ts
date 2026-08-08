@@ -57,7 +57,9 @@
  * can't resolve never lands in `library_identity`, so `NOT EXISTS(li)` stays
  * true forever) is prevented by the `library.unresolved_attempted_at` no-match
  * marker + the `UNRESOLVED_RETRY_DAYS` window (see `loadBatch`). Flag off is
- * byte-identical to the #1144 predicate. This is a one-shot job with no cron
+ * byte-identical to the #1144 predicate for the `non_va`/legacy arms (the
+ * `va` arm additionally honors the no-match marker TTL — BS#1991, see
+ * `eligibilityCore` below). This is a one-shot job with no cron
  * backstop; re-attempt of the marked/stale set happens only on a manual
  * re-run.
  *
@@ -296,7 +298,8 @@ export const loadBatch = async (
   // The eligibility core. Flag OFF is byte-identical (post-BS#1800
   // simplification -- see the module docstring for the equivalence proof) to
   // the post-#1144 predicate (canonicalized rows only: never-resolved OR
-  // stale). Flag ON (BS#974) drops the `canonical_entity_id IS NOT NULL`
+  // stale) for the non-va arm; the va arm adds the marker-TTL clause (see
+  // the BS#1991 bounce-1 note below). Flag ON (BS#974) drops the `canonical_entity_id IS NOT NULL`
   // filter and gates every first-time candidate on the
   // `unresolved_attempted_at` no-match marker, so the ~34K NULL-canonical
   // rows come into scope without the unresolved-row hot-loop (a row LML
