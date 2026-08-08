@@ -401,7 +401,7 @@ export const compilation_track_artist = {
   artist_name: 'artist_name',
   track_title: 'track_title',
   track_position: 'track_position',
-  // BS#1990 (#801 S1) / migration 0139 — the per-track artist
+  // BS#1990 (#801 S1) / migration 0140 — the per-track artist
   // canonicalization link. Mirrored here so the S2 consumer arm's unit tests
   // can't assert against a row shape the real table could never produce.
   track_artist_id: 'track_artist_id',
