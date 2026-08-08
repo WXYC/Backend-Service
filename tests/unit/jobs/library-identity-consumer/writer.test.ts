@@ -30,8 +30,10 @@ import {
   writeSingleArtist,
   stampUnresolvedAttemptedAt,
   writeCompilationTracks,
+  buildWriteRow,
 } from '../../../../jobs/library-identity-consumer/writer';
 import { renderSql } from '../../../utils/render-sql';
+import type { CompilationWriteOutcome } from '../../../../jobs/library-identity-consumer/writer';
 
 const findCallMatching = (pattern: RegExp): unknown[] | undefined => {
   const calls = (db.execute as jest.Mock).mock.calls;
@@ -719,5 +721,199 @@ describe('writeCompilationTracks — review-gate fixes (BS#1991 bounce 1)', () =
 
     const gapWarns = (log as jest.Mock).mock.calls.filter((c) => c[1] === 'compilation_cta_match_gap');
     expect(gapWarns.length).toBe(0);
+  });
+});
+
+describe('buildWriteRow (#2050 per-row decision logic, extracted from writeCompilationTracks)', () => {
+  const track = (overrides: Partial<BulkResolveTrackEntry> = {}): BulkResolveTrackEntry => ({
+    artist_name: 'Juana Molina',
+    track_title: 'la paradoja',
+    track_position: null,
+    resolved_artist_name: 'Juana Molina',
+    confidence: 0.9,
+    ...overrides,
+  });
+  const ctaRow = (overrides: Record<string, unknown> = {}) => ({
+    id: 42,
+    library_id: 200,
+    artist_name: 'Juana Molina',
+    track_title: 'la paradoja',
+    track_position: null,
+    track_artist_link_method: null,
+    track_artist_id: null,
+    track_artist_link_confidence: null,
+    ...overrides,
+  });
+  const makeOutcome = (): CompilationWriteOutcome => ({
+    rows_written: 0,
+    rows_skipped_unchanged: 0,
+    rows_skipped_librarian: 0,
+    rows_skipped_no_cta_match: 0,
+    rows_skipped_no_catalog_artist: 0,
+    position_rows_written: 0,
+    position_rows_skipped_ambiguous: 0,
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('last-entry pick: the identity write uses the LAST entry at a shared key, not the first', () => {
+    const outcome = makeOutcome();
+    const entries = [
+      track({ resolved_artist_name: 'First Artist', confidence: 0.1 }),
+      track({ resolved_artist_name: 'Second Artist', confidence: 0.9 }),
+    ];
+    const artistIdByName = new Map<string, number | null>([
+      ['First Artist', 1],
+      ['Second Artist', 2],
+    ]);
+
+    const row = buildWriteRow(ctaRow(), entries, artistIdByName, outcome);
+
+    expect(row?.trackArtistId).toBe(2);
+    expect(row?.confidence).toBe(0.9);
+  });
+
+  it('confidence guard: nulls an out-of-range (>1) confidence and logs it', () => {
+    const outcome = makeOutcome();
+    const row = buildWriteRow(ctaRow(), [track({ confidence: 1.5 })], new Map([['Juana Molina', 7]]), outcome);
+
+    expect(row?.confidence).toBeNull();
+    expect(log).toHaveBeenCalledWith(
+      'warn',
+      'compilation_confidence_out_of_range',
+      expect.any(String),
+      expect.objectContaining({ cta_id: 42, confidence: 1.5 })
+    );
+  });
+
+  it('confidence guard: nulls an out-of-range (<0) confidence too', () => {
+    const outcome = makeOutcome();
+    const row = buildWriteRow(ctaRow(), [track({ confidence: -0.1 })], new Map([['Juana Molina', 7]]), outcome);
+
+    expect(row?.confidence).toBeNull();
+  });
+
+  it('confidence guard: a null confidence passes through untouched (not "out of range")', () => {
+    const outcome = makeOutcome();
+    const row = buildWriteRow(ctaRow(), [track({ confidence: null })], new Map([['Juana Molina', 7]]), outcome);
+
+    expect(row?.confidence).toBeNull();
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('position rider: writes the offered position when the CTA row has none and exactly one is offered', () => {
+    const outcome = makeOutcome();
+    const row = buildWriteRow(ctaRow(), [track({ track_position: 'A1' })], new Map([['Juana Molina', 7]]), outcome);
+
+    expect(row?.position).toBe('A1');
+  });
+
+  it('position rider: leaves the position unset (and counts ambiguous) when entries disagree', () => {
+    const outcome = makeOutcome();
+    const entries = [track({ track_position: 'A1' }), track({ track_position: 'B3' })];
+
+    const row = buildWriteRow(ctaRow(), entries, new Map([['Juana Molina', 7]]), outcome);
+
+    expect(row?.position).toBeNull();
+    expect(outcome.position_rows_skipped_ambiguous).toBe(1);
+    expect(log).toHaveBeenCalledWith(
+      'warn',
+      'compilation_position_ambiguous',
+      expect.any(String),
+      expect.objectContaining({ cta_id: 42, distinct_positions: 2 })
+    );
+  });
+
+  it('position rider: nulls (and warns on) a position longer than varchar(20) instead of aborting', () => {
+    const outcome = makeOutcome();
+    const longPosition = 'A'.repeat(25);
+
+    const row = buildWriteRow(
+      ctaRow(),
+      [track({ track_position: longPosition })],
+      new Map([['Juana Molina', 7]]),
+      outcome
+    );
+
+    expect(row?.position).toBeNull();
+    expect(log).toHaveBeenCalledWith(
+      'warn',
+      'compilation_position_too_long',
+      expect.any(String),
+      expect.objectContaining({ cta_id: 42, position_length: 25 })
+    );
+  });
+
+  it('position rider: does not fire when the CTA row already carries a position', () => {
+    const outcome = makeOutcome();
+    const row = buildWriteRow(
+      ctaRow({ track_position: 'A1' }),
+      [track({ track_position: 'B9' })],
+      new Map([['Juana Molina', 7]]),
+      outcome
+    );
+
+    expect(row?.position).toBeNull();
+  });
+
+  it('counts rows_skipped_no_catalog_artist when the resolved name has no (or an ambiguous) artists match', () => {
+    const outcome = makeOutcome();
+    const row = buildWriteRow(ctaRow(), [track()], new Map([['Juana Molina', null]]), outcome);
+
+    expect(row?.trackArtistId).toBeNull();
+    expect(outcome.rows_skipped_no_catalog_artist).toBe(1);
+  });
+
+  it('unchanged-row prefilter: returns null and counts rows_skipped_unchanged when nothing would change', () => {
+    const outcome = makeOutcome();
+    const row = buildWriteRow(
+      ctaRow({
+        track_position: 'A1',
+        track_artist_link_method: 'lml_backfill',
+        track_artist_id: 7,
+        track_artist_link_confidence: 0.9,
+      }),
+      [track({ track_position: 'A1', confidence: 0.9 })],
+      new Map([['Juana Molina', 7]]),
+      outcome
+    );
+
+    expect(row).toBeNull();
+    expect(outcome.rows_skipped_unchanged).toBe(1);
+  });
+
+  it('unchanged-row prefilter: quantizes confidence through Math.fround (float4 column) before comparing', () => {
+    const outcome = makeOutcome();
+    // 0.2 stored as Postgres `real` (float4) surfaces as 0.20000000298023224
+    // through a float8 lens; Math.fround must map both to the same float32
+    // or a genuinely-unchanged row would read as changed.
+    const row = buildWriteRow(
+      ctaRow({
+        track_artist_link_method: 'lml_backfill',
+        track_artist_id: 7,
+        track_artist_link_confidence: 0.20000000298023224,
+      }),
+      [track({ confidence: 0.2 })],
+      new Map([['Juana Molina', 7]]),
+      outcome
+    );
+
+    expect(row).toBeNull();
+    expect(outcome.rows_skipped_unchanged).toBe(1);
+  });
+
+  it('returns a write row (not null) when the verdict genuinely changed', () => {
+    const outcome = makeOutcome();
+    const row = buildWriteRow(
+      ctaRow({ track_artist_link_method: 'lml_backfill', track_artist_id: 7, track_artist_link_confidence: 0.5 }),
+      [track({ confidence: 0.9 })],
+      new Map([['Juana Molina', 7]]),
+      outcome
+    );
+
+    expect(row).toEqual({ ctaId: 42, trackArtistId: 7, confidence: 0.9, position: null });
+    expect(outcome.rows_skipped_unchanged).toBe(0);
   });
 });
