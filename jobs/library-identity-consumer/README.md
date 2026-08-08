@@ -23,7 +23,7 @@ each drain batches inputs into `POST /api/v1/identity/bulk-resolve-libraries` ca
 
 1. `kind: 'single_artist'` — open `db.transaction()`, write one row per provenance entry into `library_identity_source` (`ON CONFLICT (library_id, source) DO UPDATE`), then UPSERT the denormalised main row into `library_identity` (`ON CONFLICT (library_id) DO UPDATE`). The `(method, confidence)` on the main row come straight from LML.
 2. `kind: 'unresolved'` — count, no write.
-3. `kind: 'compilation'` whose per-track matcher ran this batch (`tracks_attempted === true`, response carries `tracks_contract_version === 1`) — a **resolved exit**, counted as `rows_resolved_compilation`. `writeCompilationTracks` (page-level, not per-result) fetches the page's `compilation_track_artist` rows in one query, resolves each track entry's `resolved_artist_name` to a local `artists.id` via a batched `fold_artist_name` join, and UPSERTs `track_artist_id` / `track_artist_link_confidence` / `track_artist_link_method = 'lml_backfill'` — never overwriting a row already linked by a librarian (`track_artist_link_method = 'librarian'`), and never touching an unchanged row — unchanged rows are filtered app-side before the UPDATE is even issued (the `library_watermark` trigger is `FOR EACH STATEMENT` and fires even on `UPDATE 0`, so the SQL-level `IS DISTINCT FROM` guard alone would not keep a no-op re-drain from advancing the watermark; it remains as a server-side backstop). A fully-unchanged page issues no UPDATE statement, so a no-op re-drain fires neither the CDC nor the watermark trigger. A CTA row with a NULL `track_position` gets the entry's position written verbatim when exactly one distinct position was offered at that `(artist_name, track_title)` key; two+ conflicting positions skip the position write (logged) without affecting the identity write.
+3. `kind: 'compilation'` whose per-track matcher ran this batch (`tracks_attempted === true`, response carries `tracks_contract_version === 1`) — a **resolved exit**, counted as `rows_resolved_compilation`. `writeCompilationTracks` (page-level, not per-result) fetches the page's `compilation_track_artist` rows in one query, resolves each track entry's `resolved_artist_name` to a local `artists.id` via a batched `fold_artist_name` join, and UPSERTs `track_artist_id` / `track_artist_link_confidence` / `track_artist_link_method = 'lml_backfill'` — never overwriting a row already linked by a librarian (`track_artist_link_method = 'librarian'`), and never touching an unchanged row — unchanged rows are filtered app-side before the UPDATE is even issued (the `library_watermark` trigger is `FOR EACH STATEMENT` and fires even on `UPDATE 0`, so the SQL-level `IS DISTINCT FROM` guard alone would not keep a no-op re-drain from advancing the watermark; it remains as a server-side backstop). A fully-unchanged page issues no UPDATE statement on `compilation_track_artist`, so the CTA write path fires neither the CDC nor the watermark trigger on a no-op re-drain. (The per-batch `unresolved_attempted_at` stamp on `library` is a separate, deliberate watermark touch — `NOW()` is a genuine row change — so a `--recheck` sweep still advances the watermark once per batch, down from ~13 statements per page pre-fix.) A CTA row with a NULL `track_position` gets the entry's position written verbatim when exactly one distinct position was offered at that `(artist_name, track_title)` key; two+ conflicting positions skip the position write (logged) without affecting the identity write.
 4. `kind: 'compilation'` not yet visited by LML's matcher (no `tracks_contract_version`, or `tracks_attempted` not `true`) — counted as `rows_skipped { compilation }`, same as pre-BS#1991.
 
 On a batch-level LML error, every input is counted as `rows_skipped { lml_error: <count> }` and the loop continues; the next run re-picks the failed rows via the SELECT predicate (idempotent).
@@ -116,7 +116,7 @@ docker run --rm --env-file .env -e RECHECK=true <ecr-image-uri>:<tag>
 
 Every write is an UPSERT; the SELECT predicate moves freshly-written rows out of the staleness bucket. Rerunning is safe.
 
-On a batch-level LML failure, every input is counted as `rows_skipped { lml_error }` and the loop continues to the next batch. The next run re-picks those rows via the SELECT predicate. In the default (flag-off) mode no attempt-marker column is used — the predicate itself is the resumability mechanism. Under `INCLUDE_NULL_CANONICAL` (below), the `library.unresolved_attempted_at` marker additionally dedups a manual re-run of the no-match rows.
+On a batch-level LML failure, every input is counted as `rows_skipped { lml_error }` and the loop continues to the next batch. The next run re-picks those rows via the SELECT predicate. In the default (flag-off) mode the `non_va` drain uses no attempt-marker column — its predicate is the resumability mechanism; the `va` drain reads (and its resolved compilations stamp) `library.unresolved_attempted_at` in every flag state — see the retry-marker section above. Under `INCLUDE_NULL_CANONICAL` (below), the marker additionally dedups a manual re-run of the no-match rows.
 
 ## BS#974 — covering NULL-`canonical_entity_id` rows (`INCLUDE_NULL_CANONICAL`)
 
@@ -124,7 +124,7 @@ By default the SELECT only considers `canonical_entity_id IS NOT NULL` rows, so 
 
 A row LML can't resolve never lands in `library_identity`, so it would be re-attempted on every run (LML quota burn). The `library.unresolved_attempted_at` marker (migration 0130) prevents that: a `kind: unresolved` row, a not-yet-askable `kind: compilation` row, AND (BS#1991) a **resolved** `kind: compilation` row are all stamped so a subsequent run skips them until `UNRESOLVED_RETRY_DAYS` (default 30) elapse — see "Compilation resolved semantics" above for why a genuine resolution still uses the no-match marker. `single_artist` resolutions are NOT stamped — their `library_identity` row is the success marker.
 
-**This is a one-shot job with no cron backstop** — a stamped row is only re-attempted when an operator re-runs the job past the window. Flag off is byte-identical to the prior behavior.
+**This is a one-shot job with no cron backstop** — a stamped row is only re-attempted when an operator re-runs the job past the window. Flag off, the `non_va` arm is byte-identical to the prior behavior; the `va` arm additionally honors the marker TTL (BS#1991 — see the retry-marker section).
 
 **Staged rollout** (all manual `docker run` invocations):
 
@@ -148,7 +148,12 @@ The job emits a top-level `library-identity-consumer.run` span. Each drain's tot
 - `<prefix>.rows_skipped.lml_untrusted_library_id`
 - `<prefix>.source_rows_skipped_null_confidence`
 - `<prefix>.compilation_track_rows_written`
+- `<prefix>.compilation_track_rows_skipped_unchanged` — the operator's no-op signal: matched rows already carrying this exact verdict, never queued
 - `<prefix>.compilation_track_rows_skipped_librarian`
+- `<prefix>.compilation_track_rows_skipped_no_cta_match`
+- `<prefix>.compilation_track_rows_skipped_no_catalog_artist`
+- `<prefix>.compilation_track_position_rows_written`
+- `<prefix>.compilation_track_position_rows_skipped_ambiguous`
 - `<prefix>.lml_total_calls`
 - `<prefix>.lml_total_latency_ms`
 

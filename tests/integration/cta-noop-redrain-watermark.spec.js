@@ -10,8 +10,11 @@
  * watermark ADVANCED. That is the regression trap: if a future refactor
  * drops the app-side prefilter (writer.ts, `unchanged` check) believing the
  * SQL-level guard suffices, every no-op re-drain page bumps the watermark
- * and invalidates the catalog export's conditional-GET cache — ~750 bumps
- * over a full `RECHECK=true` V/A sweep with nothing changed.
+ * and invalidates the catalog export's conditional-GET cache — ~12 CTA
+ * statements per 100-release page over a full `RECHECK=true` V/A sweep with
+ * nothing changed. (The per-batch `unresolved_attempted_at` stamp on
+ * `library` is a separate, deliberate watermark touch that remains — the
+ * prefilter eliminates the CTA leg's bumps, not the stamp's.)
  *
  * The complementary behavior — an unchanged page issues NO UPDATE statement
  * at all — lives at the unit tier ("issues NO UPDATE statement when every

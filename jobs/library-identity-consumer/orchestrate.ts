@@ -471,16 +471,21 @@ export const runConsumer = async (opts: {
     // — a `--recheck` drain targets NULL-canonical (va-cohort) rows by
     // construction (select.ts), so a freshly reconfirmed row's stamp should
     // refresh even when the caller didn't separately set the flag.
-    // BS#1991 bounce-1: a RESOLVED compilation stamps in EVERY flag state —
-    // it writes no `library_identity` row, so the marker is its only durable
-    // exit from the sweep (the flag-off va predicate in select.ts reads it).
-    // The no-match bucket keeps the #974 flag gate: flag-off, the non-va
-    // predicate never reads the marker, so stamping those would be dead
-    // writes on `library` (each one a watermark-adjacent row touch).
-    const idsToStamp =
-      includeNullCanonical || recheck
-        ? [...noMatchLibraryIds, ...resolvedCompilationLibraryIds]
-        : [...resolvedCompilationLibraryIds];
+    // BS#1991 bounce-1: a RESOLVED compilation stamps wherever a predicate
+    // actually reads the marker — flag-on, recheck, or the flag-off `va`
+    // drain (select.ts's va arm honors the TTL; a resolved compilation
+    // writes no `library_identity` row, so the marker is its only durable
+    // exit). It does NOT stamp on a flag-off `non_va` drain: no flag-off
+    // non_va predicate reads the marker, and `stampUnresolvedAttemptedAt`'s
+    // UPDATE on `library` fires the 0104 FOR EACH STATEMENT watermark
+    // trigger — a dead write that would spuriously invalidate the
+    // catalog-export cache once per batch. The no-match bucket keeps the
+    // #974 flag gate for the same reason.
+    const stampResolved = includeNullCanonical || recheck || cohort === 'va';
+    const idsToStamp = [
+      ...(includeNullCanonical || recheck ? noMatchLibraryIds : []),
+      ...(stampResolved ? resolvedCompilationLibraryIds : []),
+    ];
     if (!opts.dryRun && opts.stampUnresolvedAttemptedAt && idsToStamp.length > 0) {
       try {
         await opts.stampUnresolvedAttemptedAt(idsToStamp);
