@@ -71,10 +71,14 @@ describe('scripts/resolve-cron-schedule.sh', () => {
 
   it('ignores BACKFILL_CRON_SCHEDULE for other jobs (narrow override scope)', () => {
     // Override scope is narrow so a stale env var can't fan out across
-    // the whole matrix. flowsheet-etl reads only its own package.json.
-    const otherJobPkg = path.join(repoRoot, 'jobs/flowsheet-etl/package.json');
+    // the whole matrix. library-etl reads only its own package.json.
+    //
+    // This was flowsheet-etl until Phase 3 of the tubafrenzy decommission
+    // (WXYC/wiki#88) made it `job-type: one-shot` and dropped its now-inert
+    // `cron-schedule`. library-etl is the sibling that stays on `*/30`.
+    const otherJobPkg = path.join(repoRoot, 'jobs/library-etl/package.json');
     const otherDefault = JSON.parse(fs.readFileSync(otherJobPkg, 'utf-8'))['cron-schedule'];
-    const { stdout, status } = run('flowsheet-etl', { BACKFILL_CRON_SCHEDULE: '*/15 * * * *' });
+    const { stdout, status } = run('library-etl', { BACKFILL_CRON_SCHEDULE: '*/15 * * * *' });
     expect(status).toBe(0);
     expect(stdout.trim()).toBe(otherDefault);
   });

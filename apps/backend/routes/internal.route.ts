@@ -111,9 +111,10 @@ interface ResolvedShow {
    * (degraded `Start of show: ${time}` instead of leaking a real name).
    *
    * Null when the show has no resolvable name from either source
-   * (stub shows created before the payload carried `djHandle` (BS#1723)
-   * and not yet ETL-filled; legacy rows with no primary_dj_id and no
-   * legacy_dj_name).
+   * (stub shows created before the payload carried `djHandle` (BS#1723) —
+   * once ETL-fillable, now permanent until a later handle-bearing delivery
+   * heals them, since WXYC/wiki#88 Phase 3 unscheduled the ETL; legacy rows
+   * with no primary_dj_id and no legacy_dj_name).
    */
   dj_name: string | null;
 }
@@ -135,12 +136,21 @@ interface ResolvedShow {
  * whose name resolves to null — the sign-on race where the BREAKPOINT
  * delivery creates the stub before the START_OF_SHOW delivery carries the
  * handle. Without it, `on_air` reports null (= confirmed automation,
- * "AUTO DJ" on iOS) until the flowsheet ETL's next half-hourly tick (BS#1723).
- * Normalized with the same `truncate(_, 128)` the ETL applies, so the next
- * ETL `IS DISTINCT FROM` pass sees an identical byte sequence. A non-null
- * resolved name always wins — the heal never overwrites (BS#1371/#1449
- * convention), and `legacy_dj_name IS NULL` in the WHERE guards against a
- * concurrent ETL write between the probe and the UPDATE.
+ * "AUTO DJ" on iOS) — a live human DJ rendered as "AUTO DJ" (BS#1723).
+ *
+ * That used to be bounded by the flowsheet ETL's next half-hourly tick. Since
+ * Phase 3 of the tubafrenzy decommission (WXYC/wiki#88) unscheduled that job,
+ * nothing else backfills `shows.legacy_dj_name`, so this handle is the ONLY
+ * thing standing between a classic-UI show and a permanent "AUTO DJ"
+ * misrender. Treat it as load-bearing, not as an optimization ahead of a
+ * repair that is coming anyway.
+ *
+ * Still normalized with `truncate(_, 128)` — the retained one-shot ETL applies
+ * the same truncation, so if it is ever run in the Phase 6a window its
+ * `IS DISTINCT FROM` pass sees an identical byte sequence. A non-null resolved
+ * name always wins — the heal never overwrites (BS#1371/#1449 convention), and
+ * `legacy_dj_name IS NULL` in the WHERE guards the probe/UPDATE gap against
+ * any concurrent writer.
  */
 async function resolveShow(legacyShowId: number, legacyDjHandle: string | null): Promise<ResolvedShow | null> {
   if (!legacyShowId) return null;
@@ -170,12 +180,20 @@ async function resolveShow(legacyShowId: number, legacyDjHandle: string | null):
     return { id: existing[0].id, dj_name: existing[0].dj_name };
   }
 
-  // Create a stub show — the ETL will fill in details (end_time, show_name) later.
+  // Create a stub show.
+  //
+  // `start_time` is NOW() — the webhook-delivery instant, not the show's real
+  // start — and `show_name` / `end_time` are left NULL. The half-hourly ETL
+  // used to overwrite all three from tubafrenzy's authoritative copy on its
+  // next tick (BS#1084). Phase 3 of the tubafrenzy decommission (WXYC/wiki#88)
+  // unscheduled that job, so these placeholder values now PERSIST until Phase
+  // 6a retires this webhook. The `shows` docblock in schema.ts records the
+  // resulting shape; don't reintroduce a "the ETL will fix it" assumption.
   //
   // Conflict arm: the two sign-on deliveries can interleave so tightly that
   // BOTH probes above see no row; if the handle-bearing delivery then loses
   // the INSERT race to the nameless one, a bare DO NOTHING would discard the
-  // handle and re-open the BS#1723 window until the next ETL tick. When we
+  // handle and re-open the BS#1723 window permanently. When we
   // carry a handle, fill legacy_dj_name atomically instead — same
   // never-overwrite `IS NULL` guard as the heal above, same
   // onConflictDoUpdate-on-legacy_show_id shape as the flowsheet ETL's shows
@@ -262,9 +280,9 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // Resolve linkage at INSERT so the CDC consumer worker sees
       // `album_id` already set and takes the linked enrichment branch;
       // without this, the worker takes the unlinked branch and writes
-      // inline metadata that never reaches album_metadata until the next
-      // flowsheet-etl cycle (#1028). Post-#894 inline enrichment no longer
-      // fires from this route — CDC drives the consumer.
+      // inline metadata that never reaches album_metadata (#1028). Post-#894
+      // inline enrichment no longer fires from this route — CDC drives the
+      // consumer.
       const rawLibraryId = entry.libraryReleaseId ?? 0;
       const rawRotationId = entry.rotationReleaseId ?? 0;
       const [show, albumId, rotationId] = await Promise.all([
@@ -325,6 +343,15 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // ON CONFLICT updates. Tubafrenzy is the source of truth for the
       // linkage; if the operator re-binds a flowsheet entry to a different
       // rotation row, that's a new legacy_entry_id, not an UPDATE.
+      //
+      // `album_id` anchoring has one failure mode this route cannot fix: the
+      // `library` row may not exist yet at first delivery (library-etl lag, or
+      // the librarian filing after the MD bins the release), and the anchor
+      // then pins NULL forever. `jobs/legacy-linkage-resolve/` re-runs that
+      // join on a schedule and is the only thing that repairs it — it was a
+      // tail pass inside flowsheet-etl until WXYC/wiki#88 Phase 3 unscheduled
+      // that job. Don't "fix" this by refreshing album_id on conflict; the
+      // anchoring is deliberate.
       const inserted = await db
         .insert(flowsheet)
         .values({
@@ -371,7 +398,10 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
         // produced a non-null value (defense-in-depth for the stub-then-
         // fill race: webhook may have inserted with dj_name=NULL when the
         // stub `shows` row had no resolvable name yet; a later redelivery
-        // after the ETL fills shows.legacy_dj_name will heal the row).
+        // that carries the handle heals the row via `resolveShow`. This used
+        // to say "after the ETL fills shows.legacy_dj_name" — since Phase 3
+        // (WXYC/wiki#88) unscheduled that job, the handle-bearing delivery is
+        // the only filler).
         // We never overwrite a non-NULL stored value with NULL — that
         // would regress a row the live path or a prior delivery already
         // resolved.
@@ -396,30 +426,36 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
 
       // show_end → shows.end_time fast-path (BS#1861, option (a)).
       //
-      // The stub-show flow above ("Create a stub show" in resolveShow)
-      // deliberately leaves a webhook-created show's metadata — including
-      // `end_time` — to the next flowsheet-etl incremental tick. That's fine
-      // for a show that's still being DJed, but a `show_end` marker means
-      // tubafrenzy just signed the show off — until the ETL's next tick
-      // (today, up to half-hourly) runs, `shows.end_time` stays NULL and the
-      // show reads as still open. `POST /flowsheet/join`'s start-vs-join
-      // decision keys on exactly that column (see BS#1861 (b) for the second,
-      // independent guard), so a DJ going live in that window would be
-      // silently guest-joined into the just-ended show instead of starting a
-      // new one.
+      // The stub-show flow above ("Create a stub show" in resolveShow) leaves a
+      // webhook-created show's `end_time` NULL. That's fine for a show that's
+      // still being DJed, but a `show_end` marker means tubafrenzy just signed
+      // the show off — while `shows.end_time` stays NULL the show reads as
+      // still open. `POST /flowsheet/join`'s start-vs-join decision keys on
+      // exactly that column (see BS#1861 (b) for the second, independent
+      // guard), so a DJ going live would be silently guest-joined into the
+      // just-ended show instead of starting a new one.
       //
       // Fix: set `shows.end_time` here too, from the same timestamp the
-      // marker row itself gets. This is a fast-path, not a takeover — the
-      // ETL's shows UPSERT (jobs/flowsheet-etl/job.ts) remains authoritative
-      // for refinement and unconditionally overwrites `end_time` from
-      // tubafrenzy's own value on its next tick (value-aware `setWhere`, BS
-      // #1059/#1956), so a discrepancy between this webhook guess and
-      // tubafrenzy's real sign-off timestamp self-heals within one ETL cycle.
+      // marker row itself gets.
+      //
+      // This was originally a fast-path in front of the flowsheet ETL's shows
+      // UPSERT, which unconditionally overwrote `end_time` from tubafrenzy's
+      // own value on its next tick (value-aware `setWhere`, BS#1059/#1956) —
+      // so a discrepancy between this webhook guess and tubafrenzy's real
+      // sign-off timestamp self-healed within one ETL cycle. Phase 3 of the
+      // tubafrenzy decommission (WXYC/wiki#88) unscheduled that job, so this
+      // write is now the ONLY thing that ever closes a webhook-originated
+      // show. Two consequences worth keeping in mind before touching it:
+      //   - The guess is load-bearing, not provisional. Nothing refines it.
+      //   - If this `show_end` delivery is dropped (tubafrenzy restart, 500,
+      //     network), `end_time` stays NULL indefinitely rather than for at
+      //     most one ETL cycle. BS#1861 (b)'s independent guard is what keeps
+      //     that from silently mis-joining the next DJ.
       //
       // `WHERE end_time IS NULL` is the data-safety guard (mirrors #1371's
       // dj_name-at-write-time precedent on these same marker rows): never
-      // rewrite a value the ETL — or an earlier delivery of this same
-      // `show_end` — already repaired.
+      // rewrite a value an earlier delivery of this same `show_end` — or a
+      // deliberate one-shot ETL run — already repaired.
       if (entryType === 'show_end' && showId !== null) {
         await db
           .update(shows)
@@ -434,20 +470,22 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // `resolveShow` has only just created the stub `shows` row — no
       // `legacy_dj_name` yet — and the marker lands with dj_name=NULL (see the
       // `ResolvedShow.dj_name` docstring). Tubafrenzy never re-delivers that
-      // create event, the periodic ETL's resolveDjNames only re-resolves ids
-      // it bulk-fetched, and `flowsheet-dj-name-backfill` is one-shot — so
-      // nothing ever fills the show_start once `shows.legacy_dj_name` lands.
+      // create event, the flowsheet ETL's resolveDjNames only re-resolves ids
+      // it bulk-fetched (and since WXYC/wiki#88 Phase 3 it is not scheduled at
+      // all), and `flowsheet-dj-name-backfill` is one-shot — so nothing ever
+      // fills the show_start once `shows.legacy_dj_name` lands.
       // Net effect: every new tubafrenzy show renders a nameless "signed on"
       // on the v2 wire until sign-off.
       //
       // Fix: whenever a delivery for the show resolves a non-null name, backfill
       // the show's still-NULL marker rows. A live show's show_start heals at the
-      // next entry for the show — track add, edit, or sign-off — after the ETL
-      // fills the name. Healing on ANY delivery (not just fresh inserts) matters
-      // for the short-show case: a show whose start AND end both land before the
-      // ETL fill would otherwise never heal, since the ETL's resolveDjNames
-      // skips webhook-inserted rows (they arrive as updates, not inserts) — a
-      // later edit is then the only delivery that can fill them. Scoped to
+      // next entry for the show — track add, edit, or sign-off — once the name
+      // lands. Healing on ANY delivery (not just fresh inserts) matters for the
+      // short-show case: a show whose start AND end both land before the name
+      // does would otherwise never heal, since the ETL's resolveDjNames skips
+      // webhook-inserted rows (they arrive as updates, not inserts) and no
+      // longer runs on a schedule anyway — a later edit is then the only
+      // delivery that can fill them. Scoped to
       // `MARKER_ENTRY_TYPES` + `dj_name IS NULL`, so track rows (own population
       // path) and already-resolved markers are never touched.
       //
@@ -616,6 +654,13 @@ internal_route.post('/rotation-webhook', async (req, res) => {
 
       const rotationType = VALID_ROTATION_BINS.has(release.rotationType) ? release.rotationType : 'N';
       const rawLibraryId = release.libraryReleaseId ?? 0;
+      // Resolved once, here, against whatever `library` holds at delivery time.
+      // The librarian routinely files the physical release AFTER the MD bins
+      // it, so this frequently returns null and the row keeps its denormalized
+      // artist/album/label instead. `jobs/legacy-linkage-resolve/` re-runs the
+      // join on a schedule and is the only thing that later links such a row
+      // (and clears the denormalized columns) — it was a tail pass inside
+      // rotation-etl until WXYC/wiki#88 Phase 3 unscheduled that job.
       const albumId = await resolveAlbumId(rawLibraryId);
       const addDate =
         release.addDate && release.addDate !== 0

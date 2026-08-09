@@ -25,6 +25,7 @@ import {
 } from '@wxyc/database';
 import { mapRotationType, epochMsToDateString } from './transform.js';
 import { fetchLegacyRotation, closeLegacyConnection } from './fetch-legacy.js';
+import { isBackwardsWriteAllowed, backwardsWriteRefusalMessage } from './backwards-write-guard.js';
 
 const JOB_NAME = 'rotation-etl';
 
@@ -219,6 +220,18 @@ const runIncremental = async (): Promise<SyncResult> => {
 // ---- Main ----
 
 const run = async () => {
+  // Retained-code guard (WXYC/wiki#88 Phase 3). This job is no longer
+  // scheduled, and importing FROM tubafrenzy now reverts Backend-side edits on
+  // every row that ever came from there. Refuse unless the operator opted in
+  // explicitly. Checked before the try so no DB or tubafrenzy connection is
+  // opened — the mechanics differ from the flowsheet sibling's, so see
+  // ./backwards-write-guard.ts rather than reasoning by analogy.
+  if (!isBackwardsWriteAllowed()) {
+    console.error(backwardsWriteRefusalMessage(JOB_NAME));
+    process.exitCode = 1;
+    return;
+  }
+
   try {
     const args = process.argv.slice(2);
     if (args.includes('--poll')) {

@@ -1,16 +1,15 @@
 {
-  "name": "@wxyc/flowsheet-etl",
-  "job-type": "one-shot",
+  "name": "@wxyc/legacy-linkage-resolve",
+  "cron-schedule": "*/30 * * * *",
   "version": "1.0.0",
-  "description": "WXYC Flowsheet ETL: Import and sync flowsheet data from tubafrenzy",
+  "description": "WXYC legacy linkage resolve: link flowsheet/rotation rows to library albums whose library row landed after the row was written",
   "type": "module",
   "main": "./dist/job.js",
   "scripts": {
     "start": "node dist/job.js",
-    "start:poll": "node dist/job.js --poll",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
-    "docker:build": "docker build -t wxyc_flowsheet_etl:ci -f ../../Dockerfile.flowsheet-etl ../../",
+    "docker:build": "docker build -t wxyc_legacy_linkage_resolve:ci -f ../../Dockerfile.legacy-linkage-resolve ../../",
     "dev": "tsup --watch"
   },
   "license": "MIT",

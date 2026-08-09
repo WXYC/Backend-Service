@@ -32,6 +32,7 @@ import { parseInsertLine } from './parse-dump.js';
 import { mapProdEntryType, resolveEntryTimestamp, resolveRadioHour } from './transform.js';
 import { fetchLegacyShows, fetchLegacyEntries, closeLegacyConnection } from './fetch-legacy.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
+import { isBackwardsWriteAllowed, backwardsWriteRefusalMessage } from './backwards-write-guard.js';
 
 const JOB_NAME = 'flowsheet-etl';
 const BATCH_SIZE = 5000;
@@ -541,6 +542,20 @@ const run = async () => {
   const dumpPath = args.find((a) => !a.startsWith('--'));
   const subcommand = dumpPath ? 'bulk-load' : args.includes('--poll') ? 'poll' : 'incremental';
   initLogger({ repo: 'Backend-Service', tool: `${JOB_NAME} ${subcommand}` });
+
+  // Retained-code guard (WXYC/wiki#88 Phase 3). This job is no longer
+  // scheduled, and every mode it offers imports FROM tubafrenzy onto tables
+  // Backend now owns. Refuse unless the operator opted in explicitly. Checked
+  // before any DB or tubafrenzy connection is opened, and deliberately not
+  // routed through captureError — a refusal is operator error, not a fault.
+  // See ./backwards-write-guard.ts for the two distinct clobber mechanics.
+  if (!isBackwardsWriteAllowed()) {
+    log('warn', 'refused', `${JOB_NAME} refused: unscheduled retained code, and running it writes backwards.`);
+    process.stderr.write(backwardsWriteRefusalMessage(JOB_NAME) + '\n');
+    process.exitCode = 1;
+    return; // run()'s trailing .finally() closes the logger.
+  }
+
   log('info', 'started', `${JOB_NAME} ${subcommand} started`);
 
   try {
