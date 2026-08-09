@@ -147,6 +147,22 @@ describe('renderValue — bound SQL parameter values', () => {
     expect(renderValue({ join: [{ raw: 'a' }], sep: undefined })).toBe('a');
   });
 
+  it('renders an interpolated mock schema table as an empty string', () => {
+    // `tests/mocks/database.mock.ts` models every table as `{ column:
+    // 'column' }` (or `{}`), so `` sql`FROM ${flowsheet} f` `` carries a table
+    // *reference* with no name to render. Jobs that interpolate tables rather
+    // than naming them via `sql.raw` (e.g. jobs/legacy-linkage-resolve) hit
+    // this on every statement.
+    expect(renderValue({ id: 'id', album_id: 'album_id' })).toBe('');
+    expect(renderValue({})).toBe('');
+  });
+
+  it('still throws on a bound object that is not a mock table', () => {
+    // The key-equals-value test is what separates the two: a JSONB param or
+    // any other genuine object value must not be silently swallowed.
+    expect(() => renderValue({ id: 'not-the-key' })).toThrow(/not-the-key/);
+  });
+
   it('throws with the offending value serialized for an unrecognized shape', () => {
     const bogus = { mystery: true };
     expect(() => renderValue(bogus)).toThrow(/mystery/);

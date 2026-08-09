@@ -68,6 +68,26 @@ export const captureError = (error: unknown, step: string, extra: Record<string,
 };
 
 /**
+ * Warning-level Sentry message (no exception object) for the BS#2064 liveness
+ * signals — a run gap or an undrained candidate cohort is a *condition*, not a
+ * thrown error, so `captureMessage` is the right shape (same call the
+ * `triangle-shows-etl` staleness signal and `legacy-mirror-reconcile`'s
+ * partial-mirror report use).
+ *
+ * Fingerprinted per `step` so each distinct condition rolls up into one stable
+ * issue rather than fanning out per run; the run-specific numbers travel as
+ * `extra`, outside the group hash.
+ */
+export const captureWarning = (message: string, step: string, extra: Record<string, unknown> = {}): void => {
+  Sentry.captureMessage(message, {
+    level: 'warning',
+    fingerprint: ['legacy-linkage-resolve', step],
+    tags: { step },
+    extra,
+  });
+};
+
+/**
  * Defend against non-Error throws (`throw 'string'`, `throw { code: x }`) —
  * `(err as Error).message` would emit `undefined` and the JSON logger would
  * drop the key. The canonical safe pattern from
