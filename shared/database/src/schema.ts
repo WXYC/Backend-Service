@@ -1209,6 +1209,32 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_track_add_time_idx')
       .on(sql`${table.add_time} DESC`)
       .where(sql`${table.entry_type} = 'track'`),
+    // BS#2062. Unpartitioned ASC companion to the partial index above, for the
+    // public `GET /flowsheet/range?start=&end=` window read (the successor to
+    // tubafrenzy's `/playlists/dailyEntries`, which dies at the turndown).
+    //
+    // That endpoint returns EVERY entry type in the window — the show_start /
+    // show_end markers and breakpoints are what let a consumer segment a day
+    // into shows — so `flowsheet_track_add_time_idx` cannot serve it: its
+    // `entry_type = 'track'` predicate is not implied by a bare `add_time`
+    // range, and the planner falls back to a full heap scan of the ~1.7 GB
+    // table (see 0139's measurement of that same heap). On a public,
+    // unauthenticated route against prod's db.t3.micro that is a table scan
+    // per request, and it would exceed the 5s DB_STATEMENT_TIMEOUT_MS outright.
+    //
+    // ASC, not DESC: the endpoint's contract orders the window ascending
+    // (api.yaml `/flowsheet/range`), the opposite of the recency-first reads
+    // the DESC partial index serves.
+    //
+    // Single-column, deliberately. A composite `(add_time, id)` would also
+    // satisfy the contract's `id` tie-break from the index and skip the sort
+    // entirely, but it measured 78 MB against this one's 56 MB on a 2.6M-row
+    // stand-in, and the sort it avoids is an Incremental Sort over groups of
+    // rows sharing a timestamp — 0.86ms vs 0.33ms for a full 8-day window.
+    // The 8-day ceiling in the contract is what makes that trade safe: it
+    // bounds the sorted set to ~3k rows, so the cheaper index wins on a table
+    // whose index bloat is a tracked concern (epic #1058).
+    index('flowsheet_add_time_idx').on(table.add_time),
     index('flowsheet_search_doc_idx').using('gin', sql`${table.search_doc}`),
     // BS#1012 (Epic D / D5). Functional partial index that supports the
     // post-D5 playlist-proxy artwork lookup. Same expression as
