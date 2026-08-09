@@ -3,7 +3,6 @@
 // runs before `express` is loaded into the module graph.
 import * as Sentry from '@sentry/node';
 import express from 'express';
-import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
 import { parse as parse_yaml } from 'yaml';
 import swaggerContent from './app.yaml';
@@ -23,6 +22,7 @@ import { ses_events_route } from './routes/ses-events.route.js';
 import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
 import { concerts_route } from './routes/concerts.route.js';
+import { buildCorsMiddleware } from './middleware/cors.js';
 import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
 import {
   startAlbumPopularityRefresh,
@@ -48,7 +48,7 @@ import errorHandler from './middleware/errorHandler.js';
 import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
 import { requestIdMiddleware } from './middleware/requestId.js';
 import { responseMetricsMiddleware } from './middleware/responseMetrics.js';
-import { requirePermissions, resolveCorsOrigin } from '@wxyc/authentication';
+import { requirePermissions } from '@wxyc/authentication';
 import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 
@@ -70,21 +70,14 @@ app.use(requestIdMiddleware);
 // filter inside the listener keeps emission scoped to mutation routes only.
 app.use(responseMetricsMiddleware);
 
-// CORS. Fail closed when FRONTEND_SOURCE is unset (BS#1107): the old
-// `|| '*'` fallback combined with `credentials: true` reflected any request
-// origin with Access-Control-Allow-Credentials, so a deploy that forgot the
-// env var silently allowed credentialed cross-origin calls from the open web.
-// `resolveCorsOrigin` returns `false` (cors middleware disabled, no CORS
-// headers served) and logs at error level instead.
-app.use(
-  cors({
-    origin: resolveCorsOrigin(process.env),
-    methods: ['GET', 'POST', 'DELETE', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'X-Internal-Key'],
-    exposedHeaders: ['X-Request-Id'],
-    credentials: true,
-  })
-);
+// CORS. Two contracts on one mount — see apps/backend/middleware/cors.ts.
+// Fails closed when FRONTEND_SOURCE is unset (BS#1107): the old `|| '*'`
+// fallback combined with `credentials: true` reflected any request origin with
+// Access-Control-Allow-Credentials, so a deploy that forgot the env var
+// silently allowed credentialed cross-origin calls from the open web.
+// PUBLIC_READ_ORIGINS (BS#2061) additionally grants the public wxyc.org pages
+// a credential-LESS read of the three anonymous flowsheet routes.
+app.use(buildCorsMiddleware());
 
 // Serve documentation
 const swaggerDoc = parse_yaml(swaggerContent);

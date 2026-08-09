@@ -1,4 +1,9 @@
-import { resolveCorsOrigin } from '../../../shared/authentication/src/cors-origin';
+import {
+  PUBLIC_READ_CORS_ROUTES,
+  resolveCorsMode,
+  resolveCorsOrigin,
+  resolvePublicCorsOrigins,
+} from '../../../shared/authentication/src/cors-origin';
 
 // BS#1107: the Express-level CORS config in apps/backend/app.ts and
 // apps/auth/app.ts used `origin: process.env.FRONTEND_SOURCE || '*'` next to
@@ -118,6 +123,128 @@ describe('resolveCorsOrigin', () => {
       const message = String(errorSpy.mock.calls[0][0]);
       expect(message).toContain('FRONTEND_SOURCE');
       expect(message).toContain('BETTER_AUTH_TRUSTED_ORIGINS');
+    });
+  });
+});
+
+// BS#2061. `website` is a static export, so the three Phase 4 listener pages on
+// wxyc.org fetch api.wxyc.org straight from the browser. They need ACAO for
+// wxyc.org — but NOT credentialed access to the whole API, which is what simply
+// appending them to FRONTEND_SOURCE would grant (`credentials: true` sits beside
+// `origin` on the single cors() mount). These helpers carve out a
+// credential-less grant on the three public flowsheet reads and leave the
+// credentialed dj.wxyc.org whitelist exactly as it is.
+describe('public read-route CORS (BS#2061)', () => {
+  const PUBLIC = ['https://wxyc.org', 'https://www.wxyc.org'];
+  const DJ = 'https://dj.wxyc.org';
+
+  function get(path: string, origin?: string) {
+    return { method: 'GET', path, headers: origin ? { origin } : {} };
+  }
+
+  describe('resolvePublicCorsOrigins', () => {
+    it('parses a comma-separated list', () => {
+      expect(resolvePublicCorsOrigins({ PUBLIC_READ_ORIGINS: 'https://wxyc.org,https://www.wxyc.org' })).toEqual(
+        PUBLIC
+      );
+    });
+
+    it('trims entries and drops empty segments', () => {
+      expect(resolvePublicCorsOrigins({ PUBLIC_READ_ORIGINS: ' https://wxyc.org , , https://www.wxyc.org ' })).toEqual(
+        PUBLIC
+      );
+    });
+
+    it('returns an empty list when unset, without logging', () => {
+      // Unlike FRONTEND_SOURCE, an unset value here is a legitimate steady
+      // state (local dev, and prod until the D3 pages ship), so it must not
+      // emit the noisy misconfiguration error resolveCorsOrigin does.
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      expect(resolvePublicCorsOrigins({})).toEqual([]);
+      expect(resolvePublicCorsOrigins({ PUBLIC_READ_ORIGINS: '' })).toEqual([]);
+      expect(errorSpy).not.toHaveBeenCalled();
+      errorSpy.mockRestore();
+    });
+
+    it('never honors a wildcard (BS#1107)', () => {
+      expect(resolvePublicCorsOrigins({ PUBLIC_READ_ORIGINS: '*' })).toEqual([]);
+      expect(resolvePublicCorsOrigins({ PUBLIC_READ_ORIGINS: 'https://wxyc.org,*' })).toEqual(['https://wxyc.org']);
+    });
+  });
+
+  describe('resolveCorsMode', () => {
+    it('grants a listed public origin a credential-less read on each public route', () => {
+      for (const path of PUBLIC_READ_CORS_ROUTES) {
+        const mode = resolveCorsMode(get(path, 'https://wxyc.org'), PUBLIC, DJ);
+        expect(mode).toEqual({ origin: PUBLIC, credentials: false });
+      }
+    });
+
+    it('covers the three Phase 4 consumer routes and nothing else', () => {
+      expect([...PUBLIC_READ_CORS_ROUTES].sort()).toEqual(['/flowsheet', '/flowsheet/range', '/flowsheet/search']);
+    });
+
+    it('tolerates a trailing slash', () => {
+      expect(resolveCorsMode(get('/flowsheet/', 'https://wxyc.org'), PUBLIC, DJ).credentials).toBe(false);
+    });
+
+    it('leaves dj.wxyc.org credentialed on the same routes', () => {
+      const mode = resolveCorsMode(get('/flowsheet/search', DJ), PUBLIC, DJ);
+      expect(mode).toEqual({ origin: DJ, credentials: true });
+    });
+
+    it('leaves a request with no Origin header untouched — non-browser clients are unaffected', () => {
+      expect(resolveCorsMode(get('/flowsheet'), PUBLIC, DJ)).toEqual({ origin: DJ, credentials: true });
+    });
+
+    it('never echoes an unlisted origin', () => {
+      const mode = resolveCorsMode(get('/flowsheet', 'https://evil.example'), PUBLIC, DJ);
+      expect(mode).toEqual({ origin: DJ, credentials: true });
+      expect(mode.origin).not.toBe('https://evil.example');
+    });
+
+    it('does not extend the public grant beyond the three routes', () => {
+      for (const path of ['/library', '/flowsheet/latest', '/flowsheet/playlist', '/concerts']) {
+        expect(resolveCorsMode(get(path, 'https://wxyc.org'), PUBLIC, DJ)).toEqual({ origin: DJ, credentials: true });
+      }
+    });
+
+    it('does not let a public-route prefix match a deeper or longer path', () => {
+      for (const path of ['/flowsheet/search/extra', '/flowsheetXYZ', '/flowsheet/rangeXYZ']) {
+        expect(resolveCorsMode(get(path, 'https://wxyc.org'), PUBLIC, DJ).credentials).toBe(true);
+      }
+    });
+
+    it('is read-only — a mutation from a public origin stays on the credentialed branch', () => {
+      for (const method of ['POST', 'PATCH', 'DELETE']) {
+        const req = { method, path: '/flowsheet', headers: { origin: 'https://wxyc.org' } };
+        expect(resolveCorsMode(req, PUBLIC, DJ)).toEqual({ origin: DJ, credentials: true });
+      }
+    });
+
+    it('grants a GET preflight but not a mutation preflight', () => {
+      const preflight = (requested: string) => ({
+        method: 'OPTIONS',
+        path: '/flowsheet/range',
+        headers: { origin: 'https://wxyc.org', 'access-control-request-method': requested },
+      });
+      expect(resolveCorsMode(preflight('GET'), PUBLIC, DJ).credentials).toBe(false);
+      expect(resolveCorsMode(preflight('POST'), PUBLIC, DJ).credentials).toBe(true);
+    });
+
+    it('falls back to the credentialed branch when no public origins are configured', () => {
+      expect(resolveCorsMode(get('/flowsheet', 'https://wxyc.org'), [], DJ)).toEqual({ origin: DJ, credentials: true });
+    });
+
+    it('still serves the public pages when FRONTEND_SOURCE itself is unset', () => {
+      // The two configs are independent: a deploy that fails closed on the
+      // credentialed origin must not also take down the anonymous listener
+      // pages, and vice versa.
+      expect(resolveCorsMode(get('/flowsheet', 'https://wxyc.org'), PUBLIC, false)).toEqual({
+        origin: PUBLIC,
+        credentials: false,
+      });
+      expect(resolveCorsMode(get('/flowsheet', DJ), PUBLIC, false)).toEqual({ origin: false, credentials: true });
     });
   });
 });
