@@ -29,6 +29,7 @@ import {
   RECONCILE_ALERT_THRESHOLD_ENV,
   LIVE_ACTIVITY_LOOKBACK_ENV,
   LIVE_ACTIVITY_PAUSE_MS_ENV,
+  STALE_OPEN_SHOW_HOURS_ENV,
   type AdvisoryLockClient,
 } from '../../../../jobs/legacy-mirror-reconcile/job';
 import type { PostHog } from 'posthog-node';
@@ -41,6 +42,7 @@ describe('resolveOptions', () => {
       windowHours: 48,
       settleMinutes: 15,
       alertThreshold: 0,
+      staleAfterHours: 12,
       liveActivityLookbackSeconds: 60,
       liveActivityPauseMs: 30_000,
     });
@@ -53,14 +55,21 @@ describe('resolveOptions', () => {
       [RECONCILE_ALERT_THRESHOLD_ENV]: '5',
       [LIVE_ACTIVITY_LOOKBACK_ENV]: '120',
       [LIVE_ACTIVITY_PAUSE_MS_ENV]: '15000',
+      [STALE_OPEN_SHOW_HOURS_ENV]: '18',
     });
     expect(opts).toEqual({
       windowHours: 72,
       settleMinutes: 30,
       alertThreshold: 5,
+      staleAfterHours: 18,
       liveActivityLookbackSeconds: 120,
       liveActivityPauseMs: 15_000,
     });
+  });
+
+  it('rejects a zero or negative stale-open-show threshold (BS#2065)', () => {
+    expect(() => resolveOptions({ [STALE_OPEN_SHOW_HOURS_ENV]: '0' })).toThrow(/STALE_OPEN_SHOW_HOURS/);
+    expect(() => resolveOptions({ [STALE_OPEN_SHOW_HOURS_ENV]: '-4' })).toThrow(/STALE_OPEN_SHOW_HOURS/);
   });
 
   it('accepts settle=0 (disables the settle bound) but rejects a negative window', () => {

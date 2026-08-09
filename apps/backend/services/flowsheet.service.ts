@@ -1,4 +1,4 @@
-import { sql, desc, eq, and, lte, gte, inArray } from 'drizzle-orm';
+import { sql, desc, eq, and, isNull, lte, gte, inArray } from 'drizzle-orm';
 import * as Sentry from '@sentry/node';
 import WxycError from '../utils/error.js';
 import {
@@ -972,6 +972,69 @@ export const isLatestEntryShowEnd = async (showId: number): Promise<boolean> => 
     .orderBy(desc(flowsheet.id))
     .limit(1);
   return latest?.entry_type === 'show_end';
+};
+
+/**
+ * Opportunistic `shows.end_time` backfill for a show whose terminal flowsheet
+ * entry is a `show_end` marker but whose `end_time` never got stamped
+ * (BS#2065). Returns the number of rows closed (0 or 1).
+ *
+ * Why this exists: the tubafrenzy webhook's `show_end` fast-path
+ * (`internal.route.ts`, BS#1861 option (a)) writes the marker row and
+ * `shows.end_time` from one clock reading per delivery. Since WXYC/wiki#88
+ * Phase 3 unscheduled `flowsheet-etl`, that write is the ONLY thing that ever
+ * closes a webhook-originated show — a delivery lost to a tubafrenzy restart,
+ * a 500, or a network blip leaves the marker present and the column NULL, and
+ * nothing repairs it. `addEntry` and `leaveShow` gate on the column, so the
+ * departed DJ's show reads as live until the next show starts.
+ *
+ * The `WHERE end_time IS NULL` guard is carried over verbatim from that
+ * fast-path and is load-bearing for the same reason: a later delivery of the
+ * same `show_end`, or the deliberate authoritative pass in the Phase 6a window
+ * (#1543 item 3, which repairs `end_time` alongside `start_time` from the
+ * final tubafrenzy dump), must never be overwritten by a worse value.
+ *
+ * The written value is the marker row's own `add_time`, re-read inside the
+ * statement rather than passed in — so the column stays consistent with the
+ * marker's timestamp exactly as the fast-path leaves it, and the marker-type
+ * check is re-evaluated atomically with the write (no TOCTOU against the
+ * caller's separate `isLatestEntryShowEnd` read).
+ *
+ * Complement, never a substitute, for the BS#2065 detector in
+ * `jobs/legacy-mirror-reconcile`: this only fires when someone next goes live.
+ * A show nobody joins after stays open until that job reports it.
+ *
+ * BEST-EFFORT BY CONSTRUCTION. A DB error is reported to Sentry and swallowed,
+ * returning 0. Its caller is `joinShow`, sitting between the BS#1861 option
+ * (b) guard's read and the start-vs-join decision that guard drives: letting a
+ * failed cosmetic backfill throw would 500 a go-live that (b) was about to
+ * route correctly, turning the acute hazard (b) exists to prevent back on. The
+ * detector still reports the show, so nothing is lost by failing quietly here.
+ */
+export const closeShowFromTerminalShowEndMarker = async (showId: number): Promise<number> => {
+  // Newest flowsheet row of this show, by insertion order — `id DESC`, not
+  // `play_order DESC`, matching `isLatestEntryShowEnd` above (changeOrder
+  // renumbers play_order; marker rows are never reordered).
+  const newestAddTime = sql`(SELECT ${flowsheet.add_time} FROM ${flowsheet}
+      WHERE ${flowsheet.show_id} = ${showId} ORDER BY ${flowsheet.id} DESC LIMIT 1)`;
+  const newestEntryType = sql`(SELECT ${flowsheet.entry_type} FROM ${flowsheet}
+      WHERE ${flowsheet.show_id} = ${showId} ORDER BY ${flowsheet.id} DESC LIMIT 1)`;
+
+  try {
+    const closed = await db
+      .update(shows)
+      .set({ end_time: newestAddTime })
+      .where(and(eq(shows.id, showId), isNull(shows.end_time), sql`${newestEntryType} = 'show_end'`))
+      .returning({ id: shows.id });
+
+    return closed.length;
+  } catch (err) {
+    Sentry.captureException(err, {
+      tags: { subsystem: 'close-show-from-show-end-marker' },
+      extra: { show_id: showId },
+    });
+    return 0;
+  }
 };
 
 /**

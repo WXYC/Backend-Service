@@ -12,7 +12,9 @@
  *   - signoff fires only for finalized shows (and is deferred on entry failure),
  *   - partial-mirror shows are reported (log + Sentry warning), never appended,
  *   - the cooperative pause runs before each sweep and between shows,
- *   - the detection signal escalates above the alert threshold.
+ *   - the detection signal escalates above the alert threshold,
+ *   - the BS#2065 stale-open-show detector reports (never repairs), runs
+ *     before any cooperative pause, and bounds its Sentry payload.
  *
  * The all-or-nothing SELECT SQL itself (the NOT EXISTS predicates + window/
  * settle bounds) is a hand-written SQL twin exercised against a real Postgres
@@ -23,13 +25,24 @@ import { jest } from '@jest/globals';
 
 import {
   runReconcile,
+  STALE_OPEN_SHOW_SENTRY_SAMPLE,
   type PartialShow,
   type ReconcileOptions,
   type ReconcilePorts,
+  type StaleOpenShow,
 } from '../../../../jobs/legacy-mirror-reconcile/orchestrate';
 import type { FSEntry, Show, User } from '@wxyc/database';
 
-const OPTIONS: ReconcileOptions = { windowHours: 48, settleMinutes: 15, alertThreshold: 0 };
+const OPTIONS: ReconcileOptions = { windowHours: 48, settleMinutes: 15, alertThreshold: 0, staleAfterHours: 12 };
+
+const makeStaleOpenShow = (over: Partial<StaleOpenShow> = {}): StaleOpenShow => ({
+  show_id: 1950704,
+  start_time: new Date('2026-08-07T16:00:00Z'),
+  legacy_show_id: 771234,
+  last_entry_type: 'show_end',
+  last_entry_at: new Date('2026-08-07T20:30:20Z'),
+  ...over,
+});
 
 const makeShow = (over: Partial<Show> = {}): Show => ({
   id: 1,
@@ -93,6 +106,8 @@ const makePorts = (over: Partial<ReconcilePorts> = {}) => {
     })),
     isActiveRotationMatch: mockAsync(false),
     isMirrorEnabledForDj: mockAsync(true),
+    selectStaleOpenShows: mockAsync([] as StaleOpenShow[]),
+    countHistoricalOpenShows: mockAsync(0),
     awaitQuiet: mockAsync(undefined),
     log: jest.fn(),
     captureWarning: jest.fn(),
@@ -383,5 +398,109 @@ describe('runReconcile — detection signal', () => {
     // No detection-level warning (partial_mirror warnings would have a
     // different step, but there are no partials here either).
     expect(ports.captureWarning).not.toHaveBeenCalled();
+  });
+});
+
+describe('runReconcile — stale-open-show detector (BS#2065)', () => {
+  it('reports each stale show with its id and last marker type/time', async () => {
+    const stale = makeStaleOpenShow({ show_id: 1950704, last_entry_type: 'show_end' });
+    const ports = makePorts({ selectStaleOpenShows: mockAsync([stale]) });
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    expect(totals.stale_open_shows).toBe(1);
+    expect(ports.log).toHaveBeenCalledWith(
+      'warn',
+      'stale_open_show',
+      expect.stringContaining('1950704'),
+      expect.objectContaining({
+        show_id: 1950704,
+        legacy_show_id: 771234,
+        last_entry_type: 'show_end',
+        last_entry_at: '2026-08-07T20:30:20.000Z',
+        stale_after_hours: 12,
+      })
+    );
+    expect(ports.captureWarning).toHaveBeenCalledWith(
+      expect.stringContaining('left open past the plausible-duration threshold'),
+      'stale_open_show',
+      expect.objectContaining({ stale_open_shows: 1, stale_after_hours: 12 })
+    );
+  });
+
+  it('stays silent when the detector finds nothing — the healthy steady state', async () => {
+    const ports = makePorts();
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    expect(totals.stale_open_shows).toBe(0);
+    expect(ports.captureWarning).not.toHaveBeenCalled();
+    expect(ports.log).not.toHaveBeenCalledWith('warn', 'stale_open_show', expect.any(String), expect.any(Object));
+  });
+
+  it('never repairs — no mirror call and no persist on the detector path', async () => {
+    const ports = makePorts({ selectStaleOpenShows: mockAsync([makeStaleOpenShow()]) });
+
+    await runReconcile(ports, OPTIONS);
+
+    expect(ports.mirrorSignoffShow).not.toHaveBeenCalled();
+    expect(ports.persistLegacyShowId).not.toHaveBeenCalled();
+    expect(ports.persistLegacyEntryId).not.toHaveBeenCalled();
+  });
+
+  it('runs before the sweeps take the cooperative pause, so a live DJ cannot defer the signal', async () => {
+    const order: string[] = [];
+    const ports = makePorts({
+      selectStaleOpenShows: jest.fn(() => {
+        order.push('detector');
+        return Promise.resolve([makeStaleOpenShow()]);
+      }),
+      awaitQuiet: jest.fn(() => {
+        order.push('pause');
+        return Promise.resolve(undefined);
+      }),
+    });
+
+    await runReconcile(ports, OPTIONS);
+
+    expect(order[0]).toBe('detector');
+    expect(order).toContain('pause');
+  });
+
+  it('counts the out-of-window historical cohort without listing it (#1543 owns the repair)', async () => {
+    const ports = makePorts({
+      selectStaleOpenShows: mockAsync([makeStaleOpenShow()]),
+      countHistoricalOpenShows: mockAsync(2813),
+    });
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    expect(totals.historical_open_shows).toBe(2813);
+    // One warn line for the in-window show, none for the 2,813 historical rows.
+    const staleWarnings = ports.log.mock.calls.filter((c) => c[1] === 'stale_open_show');
+    expect(staleWarnings).toHaveLength(1);
+    expect(ports.captureWarning).toHaveBeenCalledWith(
+      expect.any(String),
+      'stale_open_show',
+      expect.objectContaining({ historical_open_shows: 2813 })
+    );
+  });
+
+  it('bounds the Sentry sample while logging every stale show in full', async () => {
+    const many = Array.from({ length: STALE_OPEN_SHOW_SENTRY_SAMPLE + 5 }, (_, i) =>
+      makeStaleOpenShow({ show_id: 2000 + i })
+    );
+    const ports = makePorts({ selectStaleOpenShows: mockAsync(many) });
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    expect(totals.stale_open_shows).toBe(many.length);
+    expect(ports.log.mock.calls.filter((c) => c[1] === 'stale_open_show')).toHaveLength(many.length);
+    const captured = ports.captureWarning.mock.calls.find((c) => c[1] === 'stale_open_show')?.[2] as {
+      sample: unknown[];
+      stale_open_shows: number;
+    };
+    expect(captured.stale_open_shows).toBe(many.length);
+    expect(captured.sample).toHaveLength(STALE_OPEN_SHOW_SENTRY_SAMPLE);
   });
 });

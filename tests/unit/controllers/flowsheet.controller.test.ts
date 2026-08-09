@@ -43,6 +43,9 @@ const mockServiceLeaveShow = jest.fn<() => Promise<Record<string, unknown>>>();
 // every joinShow test not specifically about these guards is unaffected.
 const mockIsLatestEntryShowEnd = jest.fn<() => Promise<boolean>>().mockResolvedValue(false);
 const mockIsDjAlreadyActiveOnShow = jest.fn<() => Promise<boolean>>().mockResolvedValue(false);
+// BS#2065: opportunistic end_time backfill under the (b) guard. Defaults to
+// "closed nothing" so unrelated joinShow tests are unaffected.
+const mockCloseShowFromTerminalShowEndMarker = jest.fn<() => Promise<number>>().mockResolvedValue(0);
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getEntriesByPage: mockGetEntriesByPage,
@@ -69,6 +72,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   leaveShow: mockServiceLeaveShow,
   isLatestEntryShowEnd: mockIsLatestEntryShowEnd,
   isDjAlreadyActiveOnShow: mockIsDjAlreadyActiveOnShow,
+  closeShowFromTerminalShowEndMarker: mockCloseShowFromTerminalShowEndMarker,
 }));
 
 // flowsheet-projection is intentionally NOT mocked — the controller boundary
@@ -1634,6 +1638,47 @@ describe('flowsheet.controller', () => {
       expect(mockStartShow).toHaveBeenCalled();
       expect(mockAddDJToShow).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('(BS#2065) backfills the missing end_time from the show_end marker before routing to a new show', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 5, end_time: null });
+      mockIsLatestEntryShowEnd.mockResolvedValueOnce(true);
+      mockStartShow.mockResolvedValue({ id: 6, primary_dj_id: 'caller-dj' });
+
+      const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockCloseShowFromTerminalShowEndMarker).toHaveBeenCalledWith(5);
+      // The (b) guard's routing is unchanged by the backfill.
+      expect(mockStartShow).toHaveBeenCalled();
+      expect(mockAddDJToShow).not.toHaveBeenCalled();
+    });
+
+    it('(BS#2065) does NOT backfill when the show is open and its latest entry is not a show_end marker', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 8, end_time: null, primary_dj_id: 'someone-else' });
+      mockAddDJToShow.mockResolvedValue({ show_id: 8, dj_id: 'caller-dj', active: true });
+
+      const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockCloseShowFromTerminalShowEndMarker).not.toHaveBeenCalled();
+      expect(mockAddDJToShow).toHaveBeenCalled();
+    });
+
+    it('(BS#2065) does NOT backfill an already-closed show (end_time non-null)', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+
+      const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expect(mockCloseShowFromTerminalShowEndMarker).not.toHaveBeenCalled();
     });
 
     it('(c) no-ops when the DJ is already active on the current show, instead of writing a duplicate dj_join (BS#1861)', async () => {
