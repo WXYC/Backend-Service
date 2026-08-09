@@ -491,10 +491,12 @@ export type Album = InferSelectModel<typeof library>;
 // 1,000,000 so Backend-authored catalog adds (POST /library → insertAlbum)
 // never collide with the tubafrenzy legacy id space (legacy max ~72,276 <
 // this floor). This lets the Backend-sourced library.db producer emit a
-// stored `legacy_release_id AS id`. The column default below draws from this
-// sequence, so the mint fires ONLY on the addAlbum path — the ETL insert
-// (jobs/library-etl/job.ts) and every seed/fixture set legacy_release_id
-// explicitly, so the default is inert there.
+// stored `legacy_release_id AS id`. The floor is a convention, not a
+// constraint — nothing rejects an upstream id at or above it. The column
+// default below draws from this sequence and fires wherever the column is
+// omitted: `jobs/library-etl` sets it explicitly and so bypasses the default,
+// but `dev_env/seed_db.sql` does not, so every dev library row mints from
+// this sequence. See the `legacy_release_id` column comment for the full shape.
 export const libraryLegacyReleaseIdSeq = wxyc_schema.sequence('library_legacy_release_id_seq', {
   startWith: 1000000,
   minValue: 1000000,
@@ -515,9 +517,13 @@ export const libraryLegacyReleaseIdSeq = wxyc_schema.sequence('library_legacy_re
  *     and an LP issue of the same album are distinct rows.
  *   - NULL `canonical_entity_id` / `canonical_entity_confidence` /
  *     `canonical_entity_resolved_at` until LML resolves them (Epic B-1).
- *   - `legacy_release_id` is unique per row when present, but a small
- *     residual of rows have NULL `legacy_release_id` (orphaned from the
- *     ETL's link pass).
+ *   - `legacy_release_id` is no longer nullable: migration 0137 (BS#1963)
+ *     backfilled the NULL rows and set the column NOT NULL. It is not,
+ *     however, always the upstream `LIBRARY_RELEASE.ID` — a Backend-authored
+ *     add carries a sequence mint instead, and the ETL does not restamp one
+ *     when a matching upstream release later arrives (BS#2073). Nothing
+ *     bounds upstream ids below the 1,000,000 mint floor, so a constraint
+ *     here must not assume the two id ranges stay disjoint.
  *
  * Constraints added here must accept the full upstream shape, or they will
  * block the next library-etl pass. See WXYC/Backend-Service#702.
@@ -550,11 +556,21 @@ export const library = wxyc_schema.table(
     disc_quantity: smallint('disc_quantity').default(1).notNull(),
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     plays: integer('plays').default(0).notNull(),
-    // BS#1963: Backend-minted surrogate key. NOT NULL + a nextval default off
-    // `library_legacy_release_id_seq` (floor 1,000,000) mints an id on catalog
-    // adds that omit the column (insertAlbum), while the ETL/seeds/fixtures set
-    // it explicitly and so bypass the default. Backend mints are authoritative
-    // for the rows they create, so the source-tagged constraint is confirmed.
+    // Canonical description of this column — the sequence, SOURCE-block, and
+    // unique-index comments all defer here.
+    //
+    // A surrogate key present on every row, from one of two sources kept apart
+    // by convention rather than by constraint: the upstream `LIBRARY_RELEASE.ID`
+    // (set explicitly by `jobs/library-etl`; observed legacy max ~72,276) and a
+    // mint from `library_legacy_release_id_seq` (floor 1,000,000) for
+    // Backend-authored adds. The nextval default fires wherever the column is
+    // omitted — `insertAlbum`, and also the dev_env seeds, which do not set it.
+    // Unique since migration 0034; NOT NULL since 0137 (BS#1963), which
+    // backfilled the rows still NULL at that point. A row that starts as a
+    // Backend mint keeps that id even if the same release is later filed
+    // upstream — the ETL's restamp branch has been unreachable since 0137
+    // (BS#2073). Backend mints are authoritative for the rows they create, so
+    // the source-tagged constraint is confirmed.
     legacy_release_id: integer('legacy_release_id')
       .default(sql`nextval('"wxyc_schema"."library_legacy_release_id_seq"'::regclass)`)
       .notNull(), // eslint-disable-line wxyc/source-tagged-constraint-confirmed
@@ -615,9 +631,11 @@ export const library = wxyc_schema.table(
       genreIdIdx: index('genre_id_idx').on(table.genre_id),
       formatIdIdx: index('format_id_idx').on(table.format_id),
       artistIdIdx: index('artist_id_idx').on(table.artist_id),
-      // legacy_release_id is the surrogate key the legacy MySQL library
-      // assigns each release; one row per legacy_release_id by the upstream
-      // invariant (NULLs allowed for never-imported rows).
+      // Created in migration 0034. This index is what actually enforces one
+      // row per legacy_release_id across both id sources; the 1,000,000 mint
+      // floor is only a convention keeping them from meeting. Non-partial from
+      // the start — Postgres treats NULLs as distinct, so the rows that were
+      // NULL before 0137 needed no carve-out. See the column comment above.
       // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
       legacyReleaseIdIdx: uniqueIndex('library_legacy_release_id_idx').on(table.legacy_release_id),
       albumArtistTrgmIdx: index('album_artist_trgm_idx').using(`gin`, sql`${table.album_artist} gin_trgm_ops`),
