@@ -13,6 +13,16 @@
  * heals regardless of *why* the live attempt was skipped and survives
  * restarts. See `orchestrate.ts` for the two-sweep mechanism.
  *
+ * The run also carries a read-only third arm (BS#2065): the stale-open-show
+ * detector, which reports shows still holding `end_time IS NULL` past a
+ * plausible show duration — the residue of a dropped INBOUND tubafrenzy
+ * `show_end` webhook delivery. It rides this job rather than a new cron
+ * because both mechanisms are tubafrenzy-lifetime: they are retired together
+ * at Phase 6a, so neither leaves standing machinery behind. See
+ * `STALE_OPEN_SHOW_HOURS_DEFAULT` below for the threshold's derivation and
+ * `runStaleOpenShowReport` in `orchestrate.ts` for what it does NOT do (it
+ * never repairs — #1543's final-dump pass owns that).
+ *
  * This entrypoint layers two net-new steps onto the standard job skeleton
  * (init logger → try/catch/finally): a `pg_try_advisory_lock` single-flight
  * acquire on a dedicated `max:1` client, and a `posthog-node` `shutdown()` in
@@ -45,6 +55,7 @@ import {
 } from '@wxyc/legacy-mirror';
 import { PostHog } from 'posthog-node';
 import {
+  countHistoricalOpenShows,
   persistLegacyEntryId,
   persistLegacyShowId,
   runReconcile,
@@ -53,6 +64,7 @@ import {
   selectOrphanEntries,
   selectPartialShows,
   selectShowsToCreate,
+  selectStaleOpenShows,
   type ReconcileOptions,
   type ReconcilePorts,
 } from './orchestrate.js';
@@ -91,6 +103,37 @@ export const RECONCILE_SETTLE_MINUTES_DEFAULT = 15;
 export const RECONCILE_ALERT_THRESHOLD_ENV = 'RECONCILE_ALERT_THRESHOLD';
 export const RECONCILE_ALERT_THRESHOLD_DEFAULT = 0;
 
+/**
+ * BS#2065 stale-open-show detector: hours a show may hold `end_time IS NULL`
+ * before the run reports it.
+ *
+ * DERIVED, NOT GUESSED. Measured on prod `wxyc_schema.shows` on 2026-08-09
+ * over the 3,477 shows completed in the trailing 365 days
+ * (`end_time IS NOT NULL AND end_time > start_time`):
+ *
+ *   p50 2.02h · p95 3.10h · p99 5.93h · p99.9 14.12h · max 19.03h
+ *   >6h: 33 (0.95%) · >8h: 19 · >10h: 10 · >12h: 5 (0.14%) · >24h: 0
+ *
+ * 12h sits at ~2x p99 and above 99.86% of real completed shows, so a show
+ * still open at 12h is far outside the normal duration envelope — while
+ * staying under the 19h observed maximum matters less than it looks, because
+ * the threshold is not the only guard: `selectStaleOpenShows` also excludes
+ * the show `getLatestShow()` calls current AND any show with flowsheet
+ * activity since the same cutoff. An overnight or special-programming block
+ * that genuinely runs past 12h is still logging tracks and is still the newest
+ * show, so it is excluded twice over. The threshold's real job is to let the
+ * routine sign-off/go-live handoff settle before a non-current open show is
+ * called stale.
+ *
+ * The same query found the current open-show population: 2,814 rows with
+ * `end_time IS NULL`, of which exactly 1 was under 6h old (the live show) and
+ * 2,813 were over 30 days old — the #1543 repair cohort, held out of the
+ * report by `RECONCILE_WINDOW_HOURS` and counted instead. Nothing sat between
+ * 6h and 30 days, so the detector starts from a clean in-window baseline.
+ */
+export const STALE_OPEN_SHOW_HOURS_ENV = 'STALE_OPEN_SHOW_HOURS';
+export const STALE_OPEN_SHOW_HOURS_DEFAULT = 12;
+
 /** Cooperative-pause lookback window (seconds); `0` disables the probe.
  * Reuses the shared env name rather than a RECONCILE_-prefixed fork. */
 export const LIVE_ACTIVITY_LOOKBACK_ENV = 'LIVE_ACTIVITY_LOOKBACK_SECONDS';
@@ -121,6 +164,12 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env): JobOptions
       env[RECONCILE_ALERT_THRESHOLD_ENV],
       RECONCILE_ALERT_THRESHOLD_ENV,
       RECONCILE_ALERT_THRESHOLD_DEFAULT,
+      ctx
+    ),
+    staleAfterHours: requirePositiveInt(
+      env[STALE_OPEN_SHOW_HOURS_ENV],
+      STALE_OPEN_SHOW_HOURS_ENV,
+      STALE_OPEN_SHOW_HOURS_DEFAULT,
       ctx
     ),
     liveActivityLookbackSeconds: requireNonNegativeInt(
@@ -206,6 +255,8 @@ export const buildPorts = (client: PostHog | null, options: JobOptions): Reconci
   selectPartialShows,
   selectDj,
   selectOrphanEntries,
+  selectStaleOpenShows,
+  countHistoricalOpenShows,
   persistLegacyShowId,
   persistLegacyEntryId,
   mirrorCreateShow,
@@ -271,6 +322,7 @@ const main = async (): Promise<void> => {
       window_hours: options.windowHours,
       settle_minutes: options.settleMinutes,
       alert_threshold: options.alertThreshold,
+      stale_after_hours: options.staleAfterHours,
       live_activity_lookback_seconds: options.liveActivityLookbackSeconds,
       posthog_configured: posthog != null,
     });

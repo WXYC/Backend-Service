@@ -666,6 +666,22 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     current_show.end_time === null &&
     (await flowsheet_service.isLatestEntryShowEnd(current_show.id));
 
+  // BS#2065: the (b) guard above has just proven this show is closed (its
+  // newest entry is a `show_end` marker) while `end_time` still reads NULL —
+  // the signature of a dropped tubafrenzy `show_end` delivery, which since
+  // WXYC/wiki#88 Phase 3 nothing repairs. Close the column opportunistically
+  // from the marker's own timestamp so `addEntry` / `leaveShow` / every
+  // show-scoped read stop seeing the departed DJ's show as live. Guarded
+  // `WHERE end_time IS NULL` inside the service, same as the webhook
+  // fast-path, so a later delivery or #1543's authoritative dump pass still
+  // wins. Purely additive to the routing below — the start-vs-join decision is
+  // unchanged, and a failed/no-op backfill cannot weaken it. Only a
+  // complement to the `jobs/legacy-mirror-reconcile` detector: this fires
+  // solely when someone next goes live.
+  if (latestEntryIsShowEnd && current_show !== undefined) {
+    await flowsheet_service.closeShowFromTerminalShowEndMarker(current_show.id);
+  }
+
   if (current_show?.end_time !== null || latestEntryIsShowEnd) {
     const show_session: Show = await flowsheet_service.startShow(
       req.body.dj_id,

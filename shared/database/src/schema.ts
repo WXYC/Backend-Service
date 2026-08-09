@@ -2053,6 +2053,14 @@ export type Show = InferSelectModel<typeof shows>;
  *   - NULL `specialty_id` (regular shows).
  *   - NULL `show_name` (most shows; only specialty shows carry a name).
  *   - NULL `end_time` (the active show — set when the DJ closes the show).
+ *     Post-Phase-3 it can ALSO be a webhook-originated show whose `show_end`
+ *     delivery was dropped: the fast-path stamp in `internal.route.ts` is the
+ *     only writer that closes such a show, so a lost delivery leaves the
+ *     column NULL permanently rather than for one ETL cycle. Do not read
+ *     "NULL end_time" as "this show is on the air" — the `show_end` marker
+ *     row is the second, independent signal (BS#1861 (b) / BS#2065), and the
+ *     accumulated NULLs are repaired from the final tubafrenzy dump under
+ *     #1543, not by any scheduled job.
  *   - NULL `legacy_show_id`, `legacy_dj_id`, `legacy_dj_name` for shows
  *     that originated in dj-site and have not been mirrored to tubafrenzy.
  *     `legacy_show_id` is persisted by `startShow` in

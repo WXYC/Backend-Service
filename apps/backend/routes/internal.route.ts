@@ -452,6 +452,17 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       //     most one ETL cycle. BS#1861 (b)'s independent guard is what keeps
       //     that from silently mis-joining the next DJ.
       //
+      // BS#2065 closes the loop on that second consequence without weakening
+      // anything here. A dropped delivery is now (1) detected — the daily
+      // stale-open-show report in `jobs/legacy-mirror-reconcile` lists shows
+      // held open past a plausible duration; (2) opportunistically closed on
+      // the next go-live, by `closeShowFromTerminalShowEndMarker` under the
+      // (b) guard, from the marker row's own `add_time` so the value matches
+      // what this fast-path would have written; and (3) repaired in bulk from
+      // the final tubafrenzy `mysqldump` under #1543 item 3. None of those is
+      // a scheduled job re-deriving the value from tubafrenzy — there is no
+      // such job any more, and there will not be one before Phase 6a.
+      //
       // `WHERE end_time IS NULL` is the data-safety guard (mirrors #1371's
       // dj_name-at-write-time precedent on these same marker rows): never
       // rewrite a value an earlier delivery of this same `show_end` — or a

@@ -32,6 +32,13 @@
  * server-side (review High #2). They are detected and reported (structured
  * log + Sentry warning) for manual remediation.
  *
+ * A third, read-only arm (BS#2065) rides this job's daily slot: the
+ * stale-open-show detector. It reports shows left with `end_time` NULL past a
+ * plausible show duration — the residue of a dropped tubafrenzy `show_end`
+ * webhook delivery, which since WXYC/wiki#88 Phase 3 nothing repairs. It runs
+ * FIRST, before the sweeps' cooperative pause, because it writes nothing and
+ * must not be deferred behind a live DJ. See `runStaleOpenShowReport`.
+ *
  * All mirror payloads come from `@wxyc/legacy-mirror` so they are
  * byte-identical to the live path (a re-implementation would drift). The
  * orchestrator is dependency-injected via `ReconcilePorts` so the ordering
@@ -52,7 +59,7 @@ export interface WindowOptions {
   settleMinutes: number;
 }
 
-export interface ReconcileOptions extends WindowOptions {
+export interface ReconcileOptions extends WindowOptions, StaleOpenShowOptions {
   /**
    * Emit a Sentry warning when `orphan_shows + orphan_entries + partial_shows`
    * exceeds this value. Default 0 → warn whenever the sweep found anything to
@@ -62,9 +69,34 @@ export interface ReconcileOptions extends WindowOptions {
   alertThreshold: number;
 }
 
+/** Selection bounds for the BS#2065 stale-open-show detector. */
+export interface StaleOpenShowOptions extends WindowOptions {
+  /**
+   * Hours a show may sit with `end_time` NULL before it is reported. See
+   * `STALE_OPEN_SHOW_HOURS_DEFAULT` in `job.ts` for the derivation from real
+   * WXYC show durations.
+   */
+  staleAfterHours: number;
+}
+
 export interface PartialShow {
   show_id: number;
   orphan_entry_count: number;
+}
+
+/**
+ * A show still holding `end_time IS NULL` long after any plausible show would
+ * have ended (BS#2065). `last_entry_type` / `last_entry_at` describe its
+ * newest flowsheet row — a `show_end` there means the sign-off marker landed
+ * but the paired `shows.end_time` write did not, which is the exact residue a
+ * dropped webhook delivery leaves.
+ */
+export interface StaleOpenShow {
+  show_id: number;
+  start_time: Date;
+  legacy_show_id: number | null;
+  last_entry_type: string | null;
+  last_entry_at: Date | null;
 }
 
 /**
@@ -79,6 +111,10 @@ export interface ReconcilePorts {
   selectPartialShows(o: WindowOptions): Promise<PartialShow[]>;
   selectDj(djId: string): Promise<User | null>;
   selectOrphanEntries(showId: number): Promise<FSEntry[]>;
+  /** BS#2065 detector: in-window shows still open past `staleAfterHours`. */
+  selectStaleOpenShows(o: StaleOpenShowOptions): Promise<StaleOpenShow[]>;
+  /** BS#2065 detector: count of open shows OLDER than the reporting window. */
+  countHistoricalOpenShows(o: WindowOptions): Promise<number>;
 
   // -- data writes --
   persistLegacyShowId(showId: number, legacyShowId: number): Promise<void>;
@@ -113,6 +149,14 @@ export interface ReconcileTotals {
   partial_shows: number;
   skipped_flag_off: number;
   skipped_no_dj: number;
+  /** BS#2065: in-window shows reported as stale-open this run. */
+  stale_open_shows: number;
+  /**
+   * BS#2065: open shows older than `windowHours` — the pre-existing residue
+   * #1543's final-dump pass repairs, counted (never listed) so the backlog is
+   * observable and its shrink after that pass is verifiable.
+   */
+  historical_open_shows: number;
 }
 
 const emptyTotals = (): ReconcileTotals => ({
@@ -127,6 +171,8 @@ const emptyTotals = (): ReconcileTotals => ({
   partial_shows: 0,
   skipped_flag_off: 0,
   skipped_no_dj: 0,
+  stale_open_shows: 0,
+  historical_open_shows: 0,
 });
 
 /** Milliseconds for a finalized show's tubafrenzy signoff. */
@@ -324,12 +370,94 @@ const runPartialReport = async (
 };
 
 /**
- * Run the full reconciliation: create-show sweep → entry+signoff sweep →
- * partial-mirror report → detection signal. Returns the run totals.
+ * How many stale-open shows travel inside the single aggregate Sentry warning.
+ *
+ * Full per-show detail always goes to the structured log (CloudWatch), which
+ * is the durable sink; Sentry carries a bounded sample plus the count. One
+ * aggregate event per run rather than `runPartialReport`'s per-show capture
+ * because a detector that fires on a backlog would burn error-quota
+ * proportional to the backlog — and the WXYC Sentry org has exhausted its
+ * org-wide quota before (BS#1291, 2026-06-03), taking every project's error
+ * ingest down for days. A detector must not be the thing that does that.
+ */
+export const STALE_OPEN_SHOW_SENTRY_SAMPLE = 10;
+
+/**
+ * Stale-open-show detector (BS#2065) — READ-ONLY, no writes, no mirror calls.
+ *
+ * A tubafrenzy sign-off arrives as a `show_end` delivery on
+ * `/internal/flowsheet-webhook`, which writes the marker row AND stamps
+ * `shows.end_time` from the same clock reading (BS#1861 option (a)). Since
+ * WXYC/wiki#88 Phase 3 unscheduled `flowsheet-etl`, that stamp is the only
+ * thing that ever closes a webhook-originated show: a delivery lost to a
+ * tubafrenzy restart, a 500, or a network blip leaves `end_time` NULL with
+ * nothing to repair it. `addEntry` and `leaveShow` gate on that column, so the
+ * departed DJ's show reads as live until the next show starts.
+ *
+ * Reported, never repaired here. The accumulated residue is repaired from the
+ * final tubafrenzy `mysqldump` under #1543's item 3 (which covers `end_time`
+ * alongside `start_time` on these same rows) — the dump is the only
+ * authoritative source for these timestamps once MySQL is gone. This arm
+ * exists because that pass cannot happen until turndown and the condition
+ * accrues in the meantime.
+ *
+ * Runs before the sweeps and takes no cooperative pause: it writes nothing, so
+ * deferring it behind a live DJ would only delay the signal.
+ */
+const runStaleOpenShowReport = async (
+  ports: ReconcilePorts,
+  options: ReconcileOptions,
+  totals: ReconcileTotals
+): Promise<void> => {
+  const stale = await ports.selectStaleOpenShows(options);
+  totals.stale_open_shows = stale.length;
+  totals.historical_open_shows = await ports.countHistoricalOpenShows(options);
+
+  for (const s of stale) {
+    ports.log(
+      'warn',
+      'stale_open_show',
+      `show ${s.show_id} has been open for more than ${options.staleAfterHours}h; likely a dropped tubafrenzy show_end delivery`,
+      {
+        show_id: s.show_id,
+        legacy_show_id: s.legacy_show_id,
+        start_time: s.start_time.toISOString(),
+        last_entry_type: s.last_entry_type,
+        last_entry_at: s.last_entry_at?.toISOString() ?? null,
+        stale_after_hours: options.staleAfterHours,
+      }
+    );
+  }
+
+  if (stale.length > 0) {
+    ports.captureWarning(
+      'legacy-mirror-reconcile: show(s) left open past the plausible-duration threshold',
+      'stale_open_show',
+      {
+        stale_open_shows: stale.length,
+        stale_after_hours: options.staleAfterHours,
+        window_hours: options.windowHours,
+        historical_open_shows: totals.historical_open_shows,
+        sample: stale.slice(0, STALE_OPEN_SHOW_SENTRY_SAMPLE).map((s) => ({
+          show_id: s.show_id,
+          start_time: s.start_time.toISOString(),
+          last_entry_type: s.last_entry_type,
+          last_entry_at: s.last_entry_at?.toISOString() ?? null,
+        })),
+      }
+    );
+  }
+};
+
+/**
+ * Run the full reconciliation: stale-open-show detector → create-show sweep →
+ * entry+signoff sweep → partial-mirror report → detection signal. Returns the
+ * run totals.
  */
 export const runReconcile = async (ports: ReconcilePorts, options: ReconcileOptions): Promise<ReconcileTotals> => {
   const totals = emptyTotals();
 
+  await runStaleOpenShowReport(ports, options, totals);
   await runShowCreateSweep(ports, options, totals);
   await runEntrySweep(ports, options, totals);
   await runPartialReport(ports, options, totals);
@@ -464,6 +592,106 @@ export const selectPartialShows = async ({ windowHours, settleMinutes }: WindowO
         exists(entryExists(false))
       )
     );
+
+// ── BS#2065 stale-open-show detector SQL ────────────────────────────────────
+
+const staleCeiling = (staleAfterHours: number) => sql`now() - (interval '1 hour' * ${staleAfterHours})`;
+
+/**
+ * The show `flowsheet_service.getLatestShow()` returns — `ORDER BY id DESC
+ * LIMIT 1` over the whole table, which is what `addEntry` / `leaveShow` /
+ * `joinShow` treat as "the current show". Excluding exactly that row is the
+ * hard guarantee behind the acceptance criterion "the genuinely-active show
+ * never trips the detector": whatever the threshold, the row the API calls
+ * live is never reported. Kept as `max(id)` rather than `max(start_time)`
+ * deliberately — it must track `getLatestShow`'s ordering, not a plausible
+ * substitute for it.
+ */
+const latestShowId = sql`(SELECT max(s2.id) FROM ${shows} s2)`;
+
+/**
+ * Newest flowsheet row of the outer `shows` row, by insertion order.
+ *
+ * `ORDER BY id DESC`, not `play_order DESC` — matching
+ * `flowsheet_service.isLatestEntryShowEnd`: `changeOrder` renumbers
+ * `play_order` for track reordering, but marker rows are never reordered and
+ * the serial PK is an unambiguous "newest".
+ *
+ * Written with an explicit `fe` alias and an explicitly table-qualified outer
+ * reference (`${shows}.id`) rather than the bare `${flowsheet.col}` /
+ * `${shows.id}` interpolations `selectPartialShows` uses. Those render
+ * FULLY-QUALIFIED inside a `where(...)` but BARE inside a `select({...})`
+ * projection — so `WHERE ${flowsheet.show_id} = ${shows.id}` in a projection
+ * subquery renders `WHERE "show_id" = "id"`, and Postgres resolves BOTH names
+ * against the subquery's own `flowsheet` scope: a silent
+ * `flowsheet.show_id = flowsheet.id` self-correlation that returns arbitrary
+ * rows instead of the show's own. Aliasing the inner table and qualifying the
+ * outer column makes the correlation unambiguous in either context.
+ */
+const newestEntryType = sql<string | null>`(SELECT fe.entry_type FROM ${flowsheet} fe
+    WHERE fe.show_id = ${shows}.id ORDER BY fe.id DESC LIMIT 1)`;
+
+const newestEntryAt = sql<Date | null>`(SELECT fe.add_time FROM ${flowsheet} fe
+    WHERE fe.show_id = ${shows}.id ORDER BY fe.id DESC LIMIT 1)`;
+
+/**
+ * Detector selection: `end_time IS NULL`, no activity since the cutoff, inside
+ * the recurring window, and never the current show.
+ *
+ * Three independent bounds, each load-bearing:
+ *   - `start_time < now() - staleAfterHours` — the plausible-duration
+ *     threshold (derivation in `job.ts`).
+ *   - NOT EXISTS a flowsheet row newer than the same cutoff — a genuinely-live
+ *     marathon show is still logging tracks, so it is excluded on activity
+ *     even in the impossible case that it is somehow not the latest show id.
+ *   - `id <> max(id)` — the current show, per `getLatestShow`'s own ordering.
+ *
+ * And an outer bound: `start_time > now() - windowHours`. Older open shows are
+ * the historical-remediation class — 2,813 rows as of 2026-08-09, all >30 days
+ * old, repaired by #1543's final-dump pass — deliberately out of scope for a
+ * recurring report, exactly as the two mirror sweeps scope theirs. They are
+ * counted by `countHistoricalOpenShows` instead of listed. The in-window band
+ * (`windowHours - staleAfterHours`, 36h at the defaults) is wider than this
+ * job's 24h period, so a show that goes stale is always seen by at least one
+ * run before it ages out.
+ */
+export const selectStaleOpenShows = async ({
+  windowHours,
+  staleAfterHours,
+}: StaleOpenShowOptions): Promise<StaleOpenShow[]> =>
+  db
+    .select({
+      show_id: shows.id,
+      start_time: shows.start_time,
+      legacy_show_id: shows.legacy_show_id,
+      last_entry_type: newestEntryType,
+      last_entry_at: newestEntryAt,
+    })
+    .from(shows)
+    .where(
+      and(
+        isNull(shows.end_time),
+        lt(shows.start_time, staleCeiling(staleAfterHours)),
+        gt(shows.start_time, windowFloor(windowHours)),
+        sql`NOT EXISTS (SELECT 1 FROM ${flowsheet} WHERE ${flowsheet.show_id} = ${shows.id} AND ${flowsheet.add_time} >= ${staleCeiling(staleAfterHours)})`,
+        sql`${shows.id} IS DISTINCT FROM ${latestShowId}`
+      )
+    )
+    .orderBy(asc(shows.start_time));
+
+/**
+ * Count of open shows older than the reporting window — the #1543 repair
+ * cohort. Count-only on purpose: this job does not repair them and must not
+ * imply it will, and listing thousands of rows every night would bury the
+ * handful that are actionable now.
+ */
+export const countHistoricalOpenShows = async ({ windowHours }: WindowOptions): Promise<number> => {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(shows)
+    .where(and(isNull(shows.end_time), lt(shows.start_time, windowFloor(windowHours))));
+  return row?.n ?? 0;
+};
 
 export const selectDj = async (djId: string): Promise<User | null> => {
   const rows = await db.select().from(user).where(eq(user.id, djId)).limit(1);
