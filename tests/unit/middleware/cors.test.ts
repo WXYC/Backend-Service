@@ -24,12 +24,23 @@ function appWith(env: NodeJS.ProcessEnv) {
 
 describe('buildCorsMiddleware (BS#2061)', () => {
   let logSpy: jest.SpyInstance;
+  let errorSpy: jest.SpyInstance;
 
+  // Both spies are installed for every block, and restored in afterEach rather
+  // than at the end of an `it`. A per-test `mockRestore()` never runs when an
+  // assertion throws, which would leave console mocked for the rest of the
+  // file; and the FRONTEND_SOURCE-unset block legitimately triggers
+  // resolveCorsOrigin's `[cors] None of ...` error, which would otherwise read
+  // as a real failure in the CI log.
   beforeEach(() => {
     logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
   });
 
-  afterEach(() => logSpy.mockRestore());
+  afterEach(() => {
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
 
   describe('with both configs set (the production shape after this ships)', () => {
     const env = { FRONTEND_SOURCE: DJ, PUBLIC_READ_ORIGINS: `${PUBLIC},https://www.wxyc.org` };
@@ -82,6 +93,32 @@ describe('buildCorsMiddleware (BS#2061)', () => {
       expect(res.headers['access-control-allow-credentials']).toBeUndefined();
     });
 
+    // The preflight response is where the grant advertises its surface. Reusing
+    // the credentialed method/header lists here would tell a wxyc.org page it
+    // may attempt writes and send an internal key — on an allow-list that
+    // exists purely for anonymous reads.
+    it('advertises GET only, and no Authorization or X-Internal-Key, on a public preflight', async () => {
+      const res = await request(appWith(env))
+        .options('/flowsheet/range')
+        .set('Origin', PUBLIC)
+        .set('Access-Control-Request-Method', 'GET');
+      expect(res.headers['access-control-allow-methods']).toBe('GET');
+      const allowed = String(res.headers['access-control-allow-headers']);
+      expect(allowed).not.toMatch(/Authorization/i);
+      expect(allowed).not.toMatch(/X-Internal-Key/i);
+      expect(allowed).toMatch(/Content-Type/i);
+    });
+
+    it('leaves the credentialed preflight advertising the full mutating surface', async () => {
+      const res = await request(appWith(env))
+        .options('/flowsheet')
+        .set('Origin', DJ)
+        .set('Access-Control-Request-Method', 'POST');
+      expect(res.headers['access-control-allow-methods']).toBe('GET,POST,DELETE,PATCH');
+      expect(String(res.headers['access-control-allow-headers'])).toMatch(/Authorization/);
+      expect(res.headers['access-control-allow-credentials']).toBe('true');
+    });
+
     it('never echoes an unlisted origin', async () => {
       const res = await request(appWith(env)).get('/flowsheet').set('Origin', 'https://evil.example');
       expect(res.headers['access-control-allow-origin']).not.toBe('https://evil.example');
@@ -115,22 +152,19 @@ describe('buildCorsMiddleware (BS#2061)', () => {
 
   describe('with FRONTEND_SOURCE unset (BS#1107 fail-closed, preserved)', () => {
     it('serves no CORS headers to dj.wxyc.org', async () => {
-      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
       const res = await request(appWith({ PUBLIC_READ_ORIGINS: PUBLIC }))
         .get('/flowsheet')
         .set('Origin', DJ);
       expect(res.headers['access-control-allow-origin']).toBeUndefined();
-      errorSpy.mockRestore();
+      expect(res.headers['access-control-allow-credentials']).toBeUndefined();
     });
 
     it('still serves the public pages — the two configs are independent', async () => {
-      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
       const res = await request(appWith({ PUBLIC_READ_ORIGINS: PUBLIC }))
         .get('/flowsheet')
         .set('Origin', PUBLIC);
       expect(res.headers['access-control-allow-origin']).toBe(PUBLIC);
       expect(res.headers['access-control-allow-credentials']).toBeUndefined();
-      errorSpy.mockRestore();
     });
   });
 });

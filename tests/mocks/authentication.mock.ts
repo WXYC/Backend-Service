@@ -25,8 +25,8 @@ export function requirePermissions(_required: Record<string, string[]>) {
 // production behavior (BS#1107).
 export {
   PUBLIC_READ_CORS_ROUTES,
-  resolveCorsMode,
+  isPublicReadGrant,
   resolveCorsOrigin,
   resolvePublicCorsOrigins,
 } from '../../shared/authentication/src/cors-origin';
-export type { CorsMode, CorsModeRequest, ResolvedCorsOrigin } from '../../shared/authentication/src/cors-origin';
+export type { CorsModeRequest, ResolvedCorsOrigin } from '../../shared/authentication/src/cors-origin';
