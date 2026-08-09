@@ -88,6 +88,91 @@ describe('resolveCorsOrigin', () => {
     });
   });
 
+  describe('wildcard preview origins (dj-site Cloudflare Pages previews)', () => {
+    // dj-site deploys to the `wxyc-dj` Cloudflare Pages project; every branch /
+    // commit gets a fresh `https://<hash>.wxyc-dj.pages.dev` host that can't be
+    // enumerated ahead of time. A wildcard entry lets both trust layers accept
+    // the whole subdomain so the frontend can live-preview against the real
+    // backend. The `cors` package treats a RegExp entry as a matcher.
+    const previewOf = (env: NodeJS.ProcessEnv) => {
+      const resolved = resolveCorsOrigin(env);
+      if (!(resolved instanceof RegExp)) throw new Error(`expected a RegExp, got ${JSON.stringify(resolved)}`);
+      return resolved;
+    };
+
+    it('compiles a single wildcard entry to a RegExp', () => {
+      expect(resolveCorsOrigin({ FRONTEND_SOURCE: 'https://*.wxyc-dj.pages.dev' })).toBeInstanceOf(RegExp);
+    });
+
+    it('matches a preview deployment host', () => {
+      const pattern = previewOf({ FRONTEND_SOURCE: 'https://*.wxyc-dj.pages.dev' });
+      expect(pattern.test('https://abc123.wxyc-dj.pages.dev')).toBe(true);
+      expect(pattern.test('https://feat-color-system.wxyc-dj.pages.dev')).toBe(true);
+    });
+
+    it('does not match an unrelated origin', () => {
+      const pattern = previewOf({ FRONTEND_SOURCE: 'https://*.wxyc-dj.pages.dev' });
+      expect(pattern.test('https://evil.com')).toBe(false);
+      expect(pattern.test('http://abc123.wxyc-dj.pages.dev')).toBe(false); // scheme differs
+    });
+
+    it('anchors the pattern so a matching prefix or suffix cannot smuggle through', () => {
+      const pattern = previewOf({ FRONTEND_SOURCE: 'https://*.wxyc-dj.pages.dev' });
+      expect(pattern.test('https://abc.wxyc-dj.pages.dev.evil.com')).toBe(false);
+      expect(pattern.test('https://abc.wxyc-dj.pages.dev/../evil')).toBe(false);
+    });
+
+    it('does not let `*` cross an origin separator', () => {
+      const pattern = previewOf({ FRONTEND_SOURCE: 'https://*.wxyc-dj.pages.dev' });
+      // `*` matches `[^/\\]*`, so a path segment cannot satisfy the subdomain.
+      expect(pattern.test('https://x/y.wxyc-dj.pages.dev')).toBe(false);
+    });
+
+    it('lets `*` span dots, so deeper subdomains under the named zone match', () => {
+      // `/` and `\` are the only separators, so `*` DOES cross dots: a
+      // multi-label host under the wildcard zone is trusted. This is the
+      // intended breadth — safe only because WXYC owns the whole
+      // `wxyc-dj.pages.dev` zone (see `toCorsPattern`'s breadth caveat). Pin it
+      // so a future tightening of the wildcard class can't silently narrow the
+      // trust scope without a failing test.
+      const pattern = previewOf({ FRONTEND_SOURCE: 'https://*.wxyc-dj.pages.dev' });
+      expect(pattern.test('https://a.b.wxyc-dj.pages.dev')).toBe(true);
+      expect(pattern.test('https://deploy.preview.wxyc-dj.pages.dev')).toBe(true);
+    });
+
+    it('lets `*` match an empty label (zero-width), still bounded to the named zone', () => {
+      // `*` compiles to `[^/\\]*` (zero-or-more), so an empty subdomain label
+      // matches. Unreachable from a real browser Origin, but pinned so the
+      // zero-width behavior is documented rather than incidental. Crucially,
+      // the apex without the leading `.` still does NOT match — the literal
+      // separator dot is required.
+      const pattern = previewOf({ FRONTEND_SOURCE: 'https://*.wxyc-dj.pages.dev' });
+      expect(pattern.test('https://.wxyc-dj.pages.dev')).toBe(true);
+      expect(pattern.test('https://wxyc-dj.pages.dev')).toBe(false);
+    });
+
+    it('treats the regex metacharacters in the literal portion literally', () => {
+      // The dots must be literal dots, not "any character".
+      const pattern = previewOf({ FRONTEND_SOURCE: 'https://*.wxyc-dj.pages.dev' });
+      expect(pattern.test('https://abc.wxyc-djXpages.dev')).toBe(false);
+    });
+
+    it('mixes literal and wildcard entries in a whitelist', () => {
+      const resolved = resolveCorsOrigin({
+        FRONTEND_SOURCE: 'https://dj.wxyc.org,https://*.wxyc-dj.pages.dev',
+      });
+      expect(Array.isArray(resolved)).toBe(true);
+      const [prod, preview] = resolved as Array<string | RegExp>;
+      expect(prod).toBe('https://dj.wxyc.org');
+      expect(preview).toBeInstanceOf(RegExp);
+      expect((preview as RegExp).test('https://abc123.wxyc-dj.pages.dev')).toBe(true);
+    });
+
+    it('leaves a literal single origin as a plain string (no RegExp)', () => {
+      expect(resolveCorsOrigin({ FRONTEND_SOURCE: 'https://dj.wxyc.org' })).toBe('https://dj.wxyc.org');
+    });
+  });
+
   describe('fallback env vars (auth service consults BETTER_AUTH_TRUSTED_ORIGINS)', () => {
     const AUTH_VARS = ['FRONTEND_SOURCE', 'BETTER_AUTH_TRUSTED_ORIGINS'];
 
