@@ -61,7 +61,7 @@ const resolveFlowsheetAlbumIds = async (dryRun: boolean): Promise<PassResult> =>
     JOIN ${library} l ON f.legacy_release_id = l.legacy_release_id
     WHERE f.legacy_release_id IS NOT NULL
       AND f.album_id IS NULL
-  `)) as unknown as Array<{ count: number }>;
+  `)) as unknown as Array<{ count: number | string }>;
   const candidates = Number(row?.count ?? 0);
 
   if (dryRun || candidates === 0) {
@@ -97,7 +97,7 @@ const resolveRotationAlbumIds = async (dryRun: boolean): Promise<PassResult> => 
     JOIN ${library} l ON r.legacy_library_release_id = l.legacy_release_id
     WHERE r.legacy_library_release_id IS NOT NULL
       AND r.album_id IS NULL
-  `)) as unknown as Array<{ count: number }>;
+  `)) as unknown as Array<{ count: number | string }>;
   const candidates = Number(row?.count ?? 0);
 
   if (dryRun || candidates === 0) {
