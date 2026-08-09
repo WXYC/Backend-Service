@@ -64,12 +64,34 @@ function unrecognizedShapeError(fnName: string, value: unknown): Error {
 }
 
 /**
+ * A schema table as `tests/mocks/database.mock.ts` models it: a plain object
+ * whose every own key maps to a string equal to that key (`{ id: 'id',
+ * album_id: 'album_id' }`), or the empty object used for tables no test reads
+ * columns off. Interpolating one — `` sql`FROM ${flowsheet} f` `` — is a table
+ * *reference*, not a bound value, and the mock carries no table name to
+ * render, so it contributes nothing to the rendered text.
+ *
+ * Recognized explicitly rather than left to fall through to the throw, for the
+ * same reason `null` is: it is a legitimate chunk shape, not an unhandled one.
+ * The key-equals-value test keeps this from swallowing a genuine bound object
+ * (a JSONB param, say), which should still throw.
+ */
+function isMockTableShape(value: object): boolean {
+  const entries = Object.entries(value);
+  return (
+    Object.getPrototypeOf(value) === Object.prototype &&
+    entries.every(([key, columnName]) => typeof columnName === 'string' && columnName === key)
+  );
+}
+
+/**
  * Renders a single bound value (an entry of a `{ sql, values }` chunk's
  * `values` array, or a `queryChunks` entry that isn't a raw string).
  *
  * `null`/`undefined` are legitimate bound-SQL-NULL values, not an
- * unrecognized shape, and render as `''`. Anything else that isn't a
- * primitive or one of the four recognized chunk shapes throws.
+ * unrecognized shape, and render as `''`; so is an interpolated mock table
+ * (see `isMockTableShape`). Anything else that isn't a primitive or one of
+ * the four recognized chunk shapes throws.
  */
 export function renderValue(value: unknown): string {
   if (value === null || typeof value === 'undefined') return '';
@@ -92,6 +114,7 @@ export function renderValue(value: unknown): string {
     // four shapes above.
     if (Array.isArray(obj.value)) return obj.value.join('');
     if (typeof obj.value === 'string') return obj.value;
+    if (isMockTableShape(value)) return '';
   }
   throw unrecognizedShapeError('renderValue', value);
 }

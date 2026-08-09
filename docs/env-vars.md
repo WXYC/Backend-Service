@@ -349,6 +349,12 @@ The album-critic-reviews ETL (`jobs/album-critic-reviews-etl/`) mirrors the `man
 - `ANTHROPIC_API_KEY` — Required for a non-`DRY_RUN` run (Haiku snippet extraction, `claude-haiku-4-5-20251001`). Not required under `DRY_RUN`, which makes zero LLM calls by design (the anti-join + dry-run short-circuit both precede extraction).
 - `DRY_RUN` — Locked truthy values: `true`, `1` (case-insensitive). Runs fetch + parse + match + dedup + anti-join and evaluates the run guards, but skips every Haiku call and every UPSERT, emitting a single locked-schema JSON report line on stdout (see `jobs/album-critic-reviews-etl/README.md`). Harmless to forget — the UPSERT is idempotent across reruns, and the anti-join means a repeated real run makes zero LLM calls for already-seeded pairs anyway.
 
+### Legacy linkage resolve liveness (`jobs/legacy-linkage-resolve`, BS#2064)
+
+The `*/30` linkage repair is DB-only and needs no service credentials, but its liveness signals do need Sentry. `SENTRY_DSN` (see the Sentry section above) is what carries both the cron-monitor check-in and the warning-level gap/drain messages — without a DSN the SDK no-ops and the job is back to being silently un-monitorable, exactly as the existing `captureError` already was.
+
+- `LINKAGE_RESOLVE_MAX_GAP_HOURS` — Hours between two successful runs before the `cronjob_runs` heartbeat gap is reported as a Sentry warning (default `4`, i.e. eight consecutive missed runs at the `*/30` cadence). Positive integer; a non-positive value throws at resolve time rather than silently disabling the signal. Deliberately much looser than the Sentry monitor's ~40-minute missed-check-in detection — this is the Sentry-independent backstop, not a second copy of the same alert. The heartbeat row it reads is a **liveness signal only and must never become a query predicate on the repair SELECTs**; see the job's README.
+
 ### One-shot backfill jobs
 
 One-shot backfill jobs under `jobs/*-backfill/` run via `Manual Build & Deploy` and `docker run`. They share a small set of operator knobs:
