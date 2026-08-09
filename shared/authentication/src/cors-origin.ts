@@ -80,6 +80,16 @@ export const PUBLIC_READ_CORS_ROUTES: readonly string[] = ['/flowsheet', '/flows
  * Origins allowed to read {@link PUBLIC_READ_CORS_ROUTES} cross-origin without
  * credentials, from `PUBLIC_READ_ORIGINS` (comma-separated).
  *
+ * Values are normalized to a bare origin via `URL`, matching what a browser
+ * actually puts in the `Origin` header. Without that, the natural
+ * paste-from-browser forms — a trailing slash, a path, mixed case in the host —
+ * would survive as entries that can never equal any real `Origin`, and the
+ * failure would be invisible: the startup log would happily list the typo, and
+ * every page load would silently fall through to the credentialed branch and be
+ * blocked by the browser. Since setting this variable is a manual deploy step,
+ * a value that *looks* configured but matches nothing is the likeliest way this
+ * feature breaks. Anything unparseable is dropped with a warning naming it.
+ *
  * Unset returns `[]` and logs nothing — unlike `FRONTEND_SOURCE`, an absent
  * value here is a legitimate steady state (local dev, and production until the
  * D3 pages ship), so it must not emit a misconfiguration error. `[]` means no
@@ -90,14 +100,39 @@ export const PUBLIC_READ_CORS_ROUTES: readonly string[] = ['/flowsheet', '/flows
  * no-wildcard rule true by construction rather than by accident.
  */
 export function resolvePublicCorsOrigins(env: NodeJS.ProcessEnv, envVarName = 'PUBLIC_READ_ORIGINS'): string[] {
-  return (env[envVarName] ?? '')
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter((origin) => origin.length > 0 && origin !== '*');
+  const normalized: string[] = [];
+  for (const raw of (env[envVarName] ?? '').split(',')) {
+    const entry = raw.trim();
+    if (entry.length === 0) continue;
+    if (entry === '*') {
+      console.warn(`[cors] Ignoring '*' in ${envVarName} — the public read grant is an exact-origin allow-list.`);
+      continue;
+    }
+    let origin: string;
+    try {
+      origin = new URL(entry).origin;
+    } catch {
+      console.warn(
+        `[cors] Ignoring unparseable ${envVarName} entry "${entry}" — expected an origin like https://wxyc.org.`
+      );
+      continue;
+    }
+    // `new URL('mailto:x').origin` is the string "null"; only http(s) origins
+    // can appear in a browser's Origin header for our purposes.
+    if (!/^https?:\/\//.test(origin)) {
+      console.warn(`[cors] Ignoring non-http(s) ${envVarName} entry "${entry}".`);
+      continue;
+    }
+    if (origin !== entry) {
+      console.warn(`[cors] Normalized ${envVarName} entry "${entry}" to "${origin}" — configure the bare origin.`);
+    }
+    if (!normalized.includes(origin)) normalized.push(origin);
+  }
+  return normalized;
 }
 
 /**
- * The subset of an Express request {@link resolveCorsMode} reads. Headers are
+ * The subset of an Express request {@link isPublicReadGrant} reads. Headers are
  * typed as Node delivers them — an unrecognized header name is
  * `string | string[]`, so `access-control-request-method` needs narrowing.
  */
@@ -107,51 +142,43 @@ export interface CorsModeRequest {
   headers: { origin?: string; 'access-control-request-method'?: string | string[] };
 }
 
-/** Resolved per-request `cors()` options. */
-export interface CorsMode {
-  origin: ResolvedCorsOrigin;
-  credentials: boolean;
-}
+/**
+ * Whether this request gets the credential-less public-read grant rather than
+ * the existing credentialed contract (BS#2061).
+ *
+ * One predicate consulted by one `cors()` delegate, rather than two stacked
+ * `cors()` layers. In production `FRONTEND_SOURCE` holds a single origin, so
+ * `resolveCorsOrigin` returns a bare string and the `cors` package emits it as
+ * ACAO *unconditionally* — a second, earlier layer's `https://wxyc.org` header
+ * would simply be overwritten by `https://dj.wxyc.org` on the way out. Deciding
+ * once makes that impossible.
+ *
+ * Three conditions, each of which is the whole guard against a different
+ * over-grant:
+ *
+ *   - **Origin is on the allow-list.** Exact match against the normalized
+ *     `PUBLIC_READ_ORIGINS`; nothing is ever echoed back.
+ *   - **Method is GET**, read from `Access-Control-Request-Method` on a
+ *     preflight so a GET preflight is granted and a mutation preflight is not.
+ *   - **Path is an exact member of {@link PUBLIC_READ_CORS_ROUTES}.** A prefix
+ *     match would extend the grant to every route beneath `/flowsheet/`,
+ *     including the authenticated mutations.
+ *
+ * Path comparison is case-insensitive because Express's router is: `case
+ * sensitive routing` is off by default and the app never enables it, so
+ * `/Flowsheet/Search` reaches the same handler. Matching case-sensitively here
+ * would serve a 200 the browser then discards — safe, but an asymmetry between
+ * the allow-list and the router that resolves the same strings.
+ */
+export function isPublicReadGrant(req: CorsModeRequest, publicOrigins: string[]): boolean {
+  const origin = req.headers.origin;
+  if (origin === undefined || !publicOrigins.includes(origin)) return false;
 
-/** True when this request is an anonymous GET (or GET preflight) of a public read route. */
-function isPublicReadRequest(req: CorsModeRequest): boolean {
-  // A GET preflight arrives as OPTIONS; the method actually being asked about
-  // is in Access-Control-Request-Method. Anything else — including a preflight
-  // for a mutation — is not a public read.
   const requested = req.headers['access-control-request-method'];
   const method = req.method === 'OPTIONS' ? (Array.isArray(requested) ? requested[0] : requested) : req.method;
   if (method?.toUpperCase() !== 'GET') return false;
 
   // Express's req.path excludes the query string but keeps a trailing slash.
-  const path = req.path.length > 1 ? req.path.replace(/\/+$/, '') : req.path;
+  const path = (req.path.length > 1 ? req.path.replace(/\/+$/, '') : req.path).toLowerCase();
   return PUBLIC_READ_CORS_ROUTES.includes(path);
-}
-
-/**
- * Decide which CORS contract a request gets: the credential-less public-read
- * grant, or the existing credentialed one.
- *
- * This is one decision rather than two stacked `cors()` layers on purpose. In
- * production `FRONTEND_SOURCE` holds a single origin, so `resolveCorsOrigin`
- * returns a bare string and the `cors` package emits it as ACAO
- * *unconditionally* — a second, earlier layer's `https://wxyc.org` header would
- * simply be overwritten by `https://dj.wxyc.org` on the way out. Resolving both
- * branches in one place makes that impossible.
- *
- * The public branch returns the whitelist as an array so the `cors` package
- * matches the request's Origin against it rather than echoing anything. The
- * credentialed branch is returned byte-identically to today's config, including
- * for requests with no `Origin` header at all — non-browser clients (iOS,
- * Android, curl, supertest) see no change whatsoever.
- */
-export function resolveCorsMode(
-  req: CorsModeRequest,
-  publicOrigins: string[],
-  credentialedOrigin: ResolvedCorsOrigin
-): CorsMode {
-  const origin = req.headers.origin;
-  if (origin !== undefined && publicOrigins.includes(origin) && isPublicReadRequest(req)) {
-    return { origin: publicOrigins, credentials: false };
-  }
-  return { origin: credentialedOrigin, credentials: true };
 }

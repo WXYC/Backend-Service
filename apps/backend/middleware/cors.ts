@@ -3,20 +3,43 @@ import type { CorsOptions } from 'cors';
 import type { Request, RequestHandler } from 'express';
 import {
   PUBLIC_READ_CORS_ROUTES,
-  resolveCorsMode,
+  isPublicReadGrant,
   resolveCorsOrigin,
   resolvePublicCorsOrigins,
 } from '@wxyc/authentication';
 
 /**
- * Everything about the CORS contract except which origins get it and whether
- * credentials ride along — those two are decided per request by
- * `resolveCorsMode` (BS#2061).
+ * The credentialed contract `dj.wxyc.org` has had since BS#1107, unchanged.
  */
-const SHARED_CORS_OPTIONS = {
+const CREDENTIALED_CORS_OPTIONS = {
   methods: ['GET', 'POST', 'DELETE', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'X-Internal-Key'],
   exposedHeaders: ['X-Request-Id'],
+  credentials: true,
+} satisfies CorsOptions;
+
+/**
+ * The public contract, deliberately NOT a copy of the credentialed one.
+ *
+ * `methods` and `allowedHeaders` are what a preflight advertises back, so
+ * reusing the credentialed values would answer a `wxyc.org` GET preflight with
+ * `Access-Control-Allow-Methods: GET,POST,DELETE,PATCH` and an
+ * `Access-Control-Allow-Headers` naming `Authorization` and `X-Internal-Key` —
+ * telling the browser it may attempt writes and send an internal key on a
+ * grant that exists solely for anonymous reads. Nothing downstream would honor
+ * those (the routes are read-only and the credentialed branch owns everything
+ * else), but a CORS grant should advertise exactly the surface it means to
+ * open, and `PUBLIC_READ_CORS_ROUTES` is a GET-only allow-list.
+ *
+ * `Content-Type` stays because a browser sends it on a plain `fetch`;
+ * `exposedHeaders` stays so a public page can still read `X-Request-Id` off a
+ * response it is debugging.
+ */
+const PUBLIC_READ_CORS_OPTIONS = {
+  methods: ['GET'],
+  allowedHeaders: ['Content-Type', 'X-Request-Id'],
+  exposedHeaders: ['X-Request-Id'],
+  credentials: false,
 } satisfies CorsOptions;
 
 /**
@@ -55,7 +78,13 @@ export function buildCorsMiddleware(env: NodeJS.ProcessEnv = process.env): Reque
     );
   }
 
+  // Both payloads are fully determined once the env is resolved, so they are
+  // built once here rather than re-spread on every request — this delegate runs
+  // on every call to the whole API, not just the three public routes.
+  const publicOptions: CorsOptions = { ...PUBLIC_READ_CORS_OPTIONS, origin: publicOrigins };
+  const credentialedOptions: CorsOptions = { ...CREDENTIALED_CORS_OPTIONS, origin: credentialedOrigin };
+
   return cors<Request>((req, callback) => {
-    callback(null, { ...SHARED_CORS_OPTIONS, ...resolveCorsMode(req, publicOrigins, credentialedOrigin) });
+    callback(null, isPublicReadGrant(req, publicOrigins) ? publicOptions : credentialedOptions);
   });
 }

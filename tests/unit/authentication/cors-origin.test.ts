@@ -1,6 +1,6 @@
 import {
   PUBLIC_READ_CORS_ROUTES,
-  resolveCorsMode,
+  isPublicReadGrant,
   resolveCorsOrigin,
   resolvePublicCorsOrigins,
 } from '../../../shared/authentication/src/cors-origin';
@@ -143,6 +143,14 @@ describe('public read-route CORS (BS#2061)', () => {
   }
 
   describe('resolvePublicCorsOrigins', () => {
+    let warnSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    });
+
+    afterEach(() => warnSpy.mockRestore());
+
     it('parses a comma-separated list', () => {
       expect(resolvePublicCorsOrigins({ PUBLIC_READ_ORIGINS: 'https://wxyc.org,https://www.wxyc.org' })).toEqual(
         PUBLIC
@@ -170,13 +178,48 @@ describe('public read-route CORS (BS#2061)', () => {
       expect(resolvePublicCorsOrigins({ PUBLIC_READ_ORIGINS: '*' })).toEqual([]);
       expect(resolvePublicCorsOrigins({ PUBLIC_READ_ORIGINS: 'https://wxyc.org,*' })).toEqual(['https://wxyc.org']);
     });
+
+    // Setting this variable is a manual deploy step, so the likeliest failure
+    // is a value that looks configured and matches nothing: an Origin header
+    // is always a bare origin, and comparison is exact.
+    it.each([
+      ['https://wxyc.org/', 'trailing slash — the paste-from-browser form'],
+      ['https://wxyc.org/playlists', 'a path'],
+      ['https://WXYC.org', 'mixed-case host'],
+      ['https://wxyc.org?x=1', 'a query string'],
+    ])('normalizes %s (%s) to the bare origin', (value) => {
+      expect(resolvePublicCorsOrigins({ PUBLIC_READ_ORIGINS: value })).toEqual(['https://wxyc.org']);
+    });
+
+    it('warns when it had to normalize, naming the value', () => {
+      resolvePublicCorsOrigins({ PUBLIC_READ_ORIGINS: 'https://wxyc.org/' });
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(String(warnSpy.mock.calls[0][0])).toContain('https://wxyc.org/');
+    });
+
+    it('does not warn when every entry is already a bare origin', () => {
+      resolvePublicCorsOrigins({ PUBLIC_READ_ORIGINS: 'https://wxyc.org,https://www.wxyc.org' });
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it('drops unparseable and non-http(s) entries, keeping the good ones', () => {
+      expect(resolvePublicCorsOrigins({ PUBLIC_READ_ORIGINS: 'wxyc.org,mailto:dj@wxyc.org,https://wxyc.org' })).toEqual(
+        ['https://wxyc.org']
+      );
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('de-duplicates entries that normalize to the same origin', () => {
+      expect(resolvePublicCorsOrigins({ PUBLIC_READ_ORIGINS: 'https://wxyc.org,https://wxyc.org/' })).toEqual([
+        'https://wxyc.org',
+      ]);
+    });
   });
 
-  describe('resolveCorsMode', () => {
-    it('grants a listed public origin a credential-less read on each public route', () => {
+  describe('isPublicReadGrant', () => {
+    it('grants a listed public origin on each public route', () => {
       for (const path of PUBLIC_READ_CORS_ROUTES) {
-        const mode = resolveCorsMode(get(path, 'https://wxyc.org'), PUBLIC, DJ);
-        expect(mode).toEqual({ origin: PUBLIC, credentials: false });
+        expect(isPublicReadGrant(get(path, 'https://wxyc.org'), PUBLIC)).toBe(true);
       }
     });
 
@@ -185,40 +228,44 @@ describe('public read-route CORS (BS#2061)', () => {
     });
 
     it('tolerates a trailing slash', () => {
-      expect(resolveCorsMode(get('/flowsheet/', 'https://wxyc.org'), PUBLIC, DJ).credentials).toBe(false);
+      expect(isPublicReadGrant(get('/flowsheet/', 'https://wxyc.org'), PUBLIC)).toBe(true);
     });
 
-    it('leaves dj.wxyc.org credentialed on the same routes', () => {
-      const mode = resolveCorsMode(get('/flowsheet/search', DJ), PUBLIC, DJ);
-      expect(mode).toEqual({ origin: DJ, credentials: true });
+    it('matches case-insensitively, because the Express router does', () => {
+      // `case sensitive routing` is off by default and app.ts never enables
+      // it, so /Flowsheet/Search reaches the same handler. Matching
+      // case-sensitively here would serve a 200 the browser discards.
+      expect(isPublicReadGrant(get('/Flowsheet/Search', 'https://wxyc.org'), PUBLIC)).toBe(true);
     });
 
-    it('leaves a request with no Origin header untouched — non-browser clients are unaffected', () => {
-      expect(resolveCorsMode(get('/flowsheet'), PUBLIC, DJ)).toEqual({ origin: DJ, credentials: true });
+    it('does not grant dj.wxyc.org — it keeps the credentialed contract', () => {
+      expect(isPublicReadGrant(get('/flowsheet/search', DJ), PUBLIC)).toBe(false);
     });
 
-    it('never echoes an unlisted origin', () => {
-      const mode = resolveCorsMode(get('/flowsheet', 'https://evil.example'), PUBLIC, DJ);
-      expect(mode).toEqual({ origin: DJ, credentials: true });
-      expect(mode.origin).not.toBe('https://evil.example');
+    it('does not grant a request with no Origin header — non-browser clients are unaffected', () => {
+      expect(isPublicReadGrant(get('/flowsheet'), PUBLIC)).toBe(false);
     });
 
-    it('does not extend the public grant beyond the three routes', () => {
+    it('does not grant an unlisted origin', () => {
+      expect(isPublicReadGrant(get('/flowsheet', 'https://evil.example'), PUBLIC)).toBe(false);
+    });
+
+    it('does not extend beyond the three routes', () => {
       for (const path of ['/library', '/flowsheet/latest', '/flowsheet/playlist', '/concerts']) {
-        expect(resolveCorsMode(get(path, 'https://wxyc.org'), PUBLIC, DJ)).toEqual({ origin: DJ, credentials: true });
+        expect(isPublicReadGrant(get(path, 'https://wxyc.org'), PUBLIC)).toBe(false);
       }
     });
 
     it('does not let a public-route prefix match a deeper or longer path', () => {
       for (const path of ['/flowsheet/search/extra', '/flowsheetXYZ', '/flowsheet/rangeXYZ']) {
-        expect(resolveCorsMode(get(path, 'https://wxyc.org'), PUBLIC, DJ).credentials).toBe(true);
+        expect(isPublicReadGrant(get(path, 'https://wxyc.org'), PUBLIC)).toBe(false);
       }
     });
 
-    it('is read-only — a mutation from a public origin stays on the credentialed branch', () => {
+    it('is read-only — a mutation from a public origin is not granted', () => {
       for (const method of ['POST', 'PATCH', 'DELETE']) {
         const req = { method, path: '/flowsheet', headers: { origin: 'https://wxyc.org' } };
-        expect(resolveCorsMode(req, PUBLIC, DJ)).toEqual({ origin: DJ, credentials: true });
+        expect(isPublicReadGrant(req, PUBLIC)).toBe(false);
       }
     });
 
@@ -228,23 +275,12 @@ describe('public read-route CORS (BS#2061)', () => {
         path: '/flowsheet/range',
         headers: { origin: 'https://wxyc.org', 'access-control-request-method': requested },
       });
-      expect(resolveCorsMode(preflight('GET'), PUBLIC, DJ).credentials).toBe(false);
-      expect(resolveCorsMode(preflight('POST'), PUBLIC, DJ).credentials).toBe(true);
+      expect(isPublicReadGrant(preflight('GET'), PUBLIC)).toBe(true);
+      expect(isPublicReadGrant(preflight('POST'), PUBLIC)).toBe(false);
     });
 
-    it('falls back to the credentialed branch when no public origins are configured', () => {
-      expect(resolveCorsMode(get('/flowsheet', 'https://wxyc.org'), [], DJ)).toEqual({ origin: DJ, credentials: true });
-    });
-
-    it('still serves the public pages when FRONTEND_SOURCE itself is unset', () => {
-      // The two configs are independent: a deploy that fails closed on the
-      // credentialed origin must not also take down the anonymous listener
-      // pages, and vice versa.
-      expect(resolveCorsMode(get('/flowsheet', 'https://wxyc.org'), PUBLIC, false)).toEqual({
-        origin: PUBLIC,
-        credentials: false,
-      });
-      expect(resolveCorsMode(get('/flowsheet', DJ), PUBLIC, false)).toEqual({ origin: false, credentials: true });
+    it('grants nothing when no public origins are configured', () => {
+      expect(isPublicReadGrant(get('/flowsheet', 'https://wxyc.org'), [])).toBe(false);
     });
   });
 });
