@@ -1,0 +1,67 @@
+-- BS#2062. An unpartitioned B-tree on `flowsheet.add_time`, ASC, so the public
+-- `GET /flowsheet/range?start=&end=` window read has index support. That
+-- endpoint is Phase 4 of the tubafrenzy decommission (WXYC/wiki#91): the
+-- successor to tubafrenzy's `GET /playlists/dailyEntries`, which the `archive`
+-- app reads today and which dies at the cutover.
+--
+-- Why the existing index cannot serve it. `flowsheet_track_add_time_idx`
+-- (migration 0056) is `(add_time DESC) WHERE entry_type = 'track'`. The range
+-- endpoint returns EVERY entry type in the window — the show_start / show_end
+-- markers and the breakpoints are precisely what let a consumer segment a day
+-- into shows — and a bare `add_time BETWEEN` predicate does not imply
+-- `entry_type = 'track'`, so the planner cannot prove the partial predicate
+-- holds and falls back to a full heap scan. Migration 0139 measured that heap
+-- at ~1.7 GB on prod (2,633,568 rows), against a `db.t3.micro` with 1 GiB of
+-- RAM and a 5s `DB_STATEMENT_TIMEOUT_MS`. On a public, unauthenticated route
+-- that is a full table scan per request — the denial-of-service the endpoint's
+-- 8-day window ceiling exists to bound, arriving by the other door.
+--
+-- Measured on a 2.6M-row local stand-in (NOT prod — this migration ships ahead
+-- of the endpoint, so there is no prod query to EXPLAIN yet; the shape of the
+-- win is what these numbers establish, not its exact magnitude on RDS):
+--
+--   24h window, no index:  Parallel Seq Scan, 65,352 buffers,  55.07 ms
+--   24h window, with:      Index Scan,             15 buffers,   0.09 ms
+--    8d window, no index:  Parallel Seq Scan, 65,352 buffers,  52.45 ms
+--    8d window, with:      Index Scan,             86 buffers,   0.86 ms
+--
+-- The buffer counts are the durable part: the scan reads the whole heap
+-- regardless of window width (hence "constant in n"), and prod's heap is ~3x
+-- the stand-in's and does not fit in the instance's page cache.
+--
+-- Single-column, deliberately. A composite `(add_time, id)` would additionally
+-- satisfy the endpoint's `id` tie-break from the index and skip the sort
+-- entirely, but it measured 78 MB against this index's 56 MB on the same
+-- stand-in, while the sort it avoids is an Incremental Sort over groups of
+-- rows sharing a timestamp — 0.86 ms vs 0.33 ms on a full 8-day window. The
+-- contract's 8-day ceiling is what makes that trade safe: it bounds the sorted
+-- set to ~3k rows. On a table whose index bloat is a tracked concern (epic
+-- #1058), 22 MB is worth more than 0.5 ms on a bounded set.
+--
+-- This ADDS an eighth index to `flowsheet` rather than replacing one (contrast
+-- 0139, which swapped). No existing index covers unpartitioned `add_time`, so
+-- there is nothing to retire; `flowsheet_track_add_time_idx` keeps serving the
+-- recency-first track reads its DESC ordering and partial predicate are built
+-- for. Write amplification is one more B-tree per INSERT on a table that takes
+-- a few hundred rows a day.
+--
+-- Production ops:
+--   - This is NOT the CONCURRENTLY form, because Drizzle wraps each migration
+--     file in a transaction and `CREATE INDEX CONCURRENTLY cannot run inside a
+--     transaction block` — same constraint as 0057, 0068, 0070, 0074, 0078,
+--     0080, 0139.
+--   - Run out-of-band on prod FIRST:
+--       CREATE INDEX CONCURRENTLY IF NOT EXISTS "flowsheet_add_time_idx"
+--         ON "wxyc_schema"."flowsheet" USING btree ("add_time");
+--     No AccessExclusiveLock, so no INSERT pause and no wedged flowsheet
+--     mid-show. Expect a build on the order of 0139's ~27s for a comparable
+--     index on this table, plus ~60 MB of volume.
+--   - Then merge this PR. `IF NOT EXISTS` makes the migration a no-op against
+--     the prod DB where the index already exists, while fresh dev and CI
+--     databases pick it up on first migrate. Same shape as 0068, 0070, 0074,
+--     0080, 0139.
+--   - Safe to run before the endpoint ships: an unused index costs disk and a
+--     little write amplification, nothing else. Building it first is what
+--     keeps `GET /flowsheet/range` from ever meeting production without it.
+
+CREATE INDEX IF NOT EXISTS "flowsheet_add_time_idx" ON "wxyc_schema"."flowsheet" USING btree ("add_time");
