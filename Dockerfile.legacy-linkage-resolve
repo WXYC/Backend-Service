@@ -1,0 +1,31 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+WORKDIR /legacy-linkage-resolve-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/legacy-linkage-resolve ./jobs/legacy-linkage-resolve
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/legacy-linkage-resolve
+
+#Production stage
+FROM node:24-alpine AS prod
+
+WORKDIR /legacy-linkage-resolve
+
+COPY ./package* ./
+COPY ./jobs/legacy-linkage-resolve/package* ./jobs/legacy-linkage-resolve/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./legacy-linkage-resolve-builder/jobs/legacy-linkage-resolve/dist ./jobs/legacy-linkage-resolve/dist
+COPY --from=builder ./legacy-linkage-resolve-builder/shared/database/dist ./shared/database/dist
+
+# Override the @wxyc/database default of 5s. See shared/database/src/client.ts.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+ENV DB_APPLICATION_NAME=wxyc-legacy-linkage-resolve
+
+CMD ["npm", "start", "--workspace=@wxyc/legacy-linkage-resolve"]

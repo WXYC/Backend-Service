@@ -1,7 +1,6 @@
 {
   "name": "@wxyc/rotation-etl",
   "job-type": "one-shot",
-  "cron-schedule": "*/30 * * * *",
   "version": "1.0.0",
   "description": "WXYC Rotation ETL: Import and sync rotation data from tubafrenzy",
   "type": "module",
