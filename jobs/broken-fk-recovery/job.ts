@@ -40,9 +40,12 @@ export type ClassificationCounts = {
 /**
  * Re-run the legacy-FK album_id resolver against any flowsheet rows that
  * still have album_id IS NULL but a non-null legacy_release_id. Mirrors the
- * resolver in jobs/flowsheet-etl/job.ts — duplicated rather than imported
- * because the ETL package is a separate workspace and importing across job
- * packages would couple their build graphs.
+ * resolver in jobs/legacy-linkage-resolve/job.ts — the current canonical
+ * repair pass (flowsheet-etl's own copy of the resolver was retired when
+ * Phase 3 of the tubafrenzy decommission, WXYC/wiki#88, unscheduled that
+ * job) — duplicated rather than imported because the ETL package is a
+ * separate workspace and importing across job packages would couple their
+ * build graphs.
  */
 export const reresolveAlbumIds = async (): Promise<number> => {
   const result = await db.execute(sql`
