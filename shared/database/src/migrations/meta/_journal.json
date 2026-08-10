@@ -995,6 +995,13 @@
       "when": 1786313097779,
       "tag": "0144_flowsheet-add-time-idx",
       "breakpoints": true
+    },
+    {
+      "idx": 145,
+      "version": "7",
+      "when": 1786339686965,
+      "tag": "0145_rotation-bin-fallback-indexes",
+      "breakpoints": true
     }
   ]
 }

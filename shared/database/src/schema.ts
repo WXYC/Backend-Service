@@ -471,6 +471,15 @@ export const artists = wxyc_schema.table(
     return {
       artistNameTrgmIdx: index('artist_name_trgm_idx').using(`gin`, sql`${table.artist_name} gin_trgm_ops`),
       codeLettersIdx: index('code_letters_idx').on(table.code_letters),
+      // BS#2080. Serves arm 3 of the `rotation_bin` fallback in
+      // `FSEntryFieldsRaw` — the library-linked match, where the rotation row's
+      // own denormalized fields are NULL and the artist name has to come from
+      // the `library -> artists` join. Distinct from `artist_name_trgm_idx`
+      // above: that one is a GIN trigram index for fuzzy search, this is a
+      // B-tree on an exact normalized equality. Also distinct from migration
+      // 0134's `fold_artist_name()` (NFC/ASCII folding, BS#1897) — this is
+      // plain `lower(trim(...))`, matching the query verbatim.
+      normNameIdx: index('artists_norm_name_idx').on(sql`lower(trim(coalesce(${table.artist_name}, '')))`),
     };
   }
 );
@@ -628,6 +637,12 @@ export const library = wxyc_schema.table(
   (table) => {
     return {
       titleTrgmIdx: index('title_trgm_idx').using(`gin`, sql`${table.album_title} gin_trgm_ops`),
+      // BS#2080. The entry point for arm 3 of the `rotation_bin` fallback in
+      // `FSEntryFieldsRaw`: the planner drives from this index (~1.75 rows per
+      // probe) into the existing `album_id_idx` on `rotation`, then applies
+      // `artists_norm_name_idx` as a filter on the survivors. B-tree exact
+      // equality, as against `title_trgm_idx` above (GIN, fuzzy search).
+      normAlbumTitleIdx: index('library_norm_album_title_idx').on(sql`lower(trim(coalesce(${table.album_title}, '')))`),
       genreIdIdx: index('genre_id_idx').on(table.genre_id),
       formatIdIdx: index('format_id_idx').on(table.format_id),
       artistIdIdx: index('artist_id_idx').on(table.artist_id),
@@ -967,6 +982,15 @@ export const rotation = wxyc_schema.table(
   (table) => {
     return {
       albumIdIdx: index('album_id_idx').on(table.album_id),
+      // BS#2080. Serves arm 2 of the `rotation_bin` fallback in
+      // `FSEntryFieldsRaw` — the denormalized (artist, album) snapshot match
+      // for library-unlinked rotation rows. The expression must stay
+      // character-for-character identical to the one in the query or the
+      // planner silently ignores the index and reverts to a seq scan.
+      normArtistAlbumIdx: index('rotation_norm_artist_album_idx').on(
+        sql`lower(trim(coalesce(${table.artist_name}, '')))`,
+        sql`lower(trim(coalesce(${table.album_title}, '')))`
+      ),
       // legacy_rotation_id is the surrogate key tubafrenzy assigns each
       // rotation row; one row per legacy_rotation_id by tubafrenzy's invariant.
       // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
