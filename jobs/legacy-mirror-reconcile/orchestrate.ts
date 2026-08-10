@@ -37,7 +37,11 @@
  * plausible show duration — the residue of a dropped tubafrenzy `show_end`
  * webhook delivery, which since WXYC/wiki#88 Phase 3 nothing repairs. It runs
  * FIRST, before the sweeps' cooperative pause, because it writes nothing and
- * must not be deferred behind a live DJ. See `runStaleOpenShowReport`.
+ * must not be deferred behind a live DJ. It is isolated in its own try/catch
+ * (BS#2069) so a failure there — this arm shares the cron slot for retirement
+ * convenience, not because it is load-bearing — is logged and captured to
+ * Sentry rather than aborting the two sweeps below it, which are this job's
+ * actual purpose. See `runStaleOpenShowReport`.
  *
  * All mirror payloads come from `@wxyc/legacy-mirror` so they are
  * byte-identical to the live path (a re-implementation would drift). The
@@ -133,6 +137,8 @@ export interface ReconcilePorts {
   awaitQuiet(): Promise<void>;
   log(level: LogLevel, step: string, message: string, fields?: Record<string, unknown>): void;
   captureWarning(message: string, step: string, extra?: Record<string, unknown>): void;
+  /** Capture an exception to Sentry (BS#2069 detector isolation). */
+  captureError(error: unknown, step: string, extra?: Record<string, unknown>): void;
 }
 
 export interface ReconcileTotals {
@@ -157,6 +163,15 @@ export interface ReconcileTotals {
    * observable and its shrink after that pass is verifiable.
    */
   historical_open_shows: number;
+  /**
+   * BS#2069: true when the read-only detector arm (`selectStaleOpenShows` or
+   * `countHistoricalOpenShows`) threw this run. The exception is caught,
+   * logged, and captured to Sentry at the point of failure — this flag exists
+   * so the same fact is visible on the "finished" summary line without
+   * grepping Sentry, since a detector-only failure deliberately does NOT flip
+   * this job's exit code (see `job.ts`, the call site of `runReconcile`).
+   */
+  stale_open_show_detector_failed: boolean;
 }
 
 const emptyTotals = (): ReconcileTotals => ({
@@ -173,6 +188,7 @@ const emptyTotals = (): ReconcileTotals => ({
   skipped_no_dj: 0,
   stale_open_shows: 0,
   historical_open_shows: 0,
+  stale_open_show_detector_failed: false,
 });
 
 /** Milliseconds for a finalized show's tubafrenzy signoff. */
@@ -403,49 +419,80 @@ export const STALE_OPEN_SHOW_SENTRY_SAMPLE = 10;
  *
  * Runs before the sweeps and takes no cooperative pause: it writes nothing, so
  * deferring it behind a live DJ would only delay the signal.
+ *
+ * ISOLATED (BS#2069): the whole body is one try/catch. This detector rides
+ * the same run as the two repair sweeps (BS#1707) purely for scheduling
+ * convenience — both mechanisms are retired together at Phase 6a — but it is
+ * not the reason the job exists. Before this fix, an unguarded exception here
+ * (a statement timeout on the `shows` scan + `flowsheet` anti-join, a
+ * transient connection reset) propagated out of `runReconcile`, and `job.ts`'s
+ * single outer catch treated that identically to a failed sweep: log 'failed',
+ * exit 1, skip everything after. That let a read-only observability arm take
+ * down the mirror self-heal it merely shares a cron slot with — the same
+ * asymmetry `closeShowFromTerminalShowEndMarker`
+ * (`apps/backend/services/flowsheet.service.ts`) already reasons about
+ * correctly for its own best-effort backfill. A failure here is logged at
+ * 'error' and captured to Sentry with its own fingerprinted step
+ * (`stale_open_show_detector`, distinct from `stale_open_show`'s per-show
+ * warnings and from the generic `detection` signal below), and recorded on
+ * `totals.stale_open_show_detector_failed` — then execution falls through to
+ * the sweeps exactly as if the detector had found nothing to report.
  */
 const runStaleOpenShowReport = async (
   ports: ReconcilePorts,
   options: ReconcileOptions,
   totals: ReconcileTotals
 ): Promise<void> => {
-  const stale = await ports.selectStaleOpenShows(options);
-  totals.stale_open_shows = stale.length;
-  totals.historical_open_shows = await ports.countHistoricalOpenShows(options);
+  try {
+    const stale = await ports.selectStaleOpenShows(options);
+    totals.stale_open_shows = stale.length;
+    totals.historical_open_shows = await ports.countHistoricalOpenShows(options);
 
-  for (const s of stale) {
-    ports.log(
-      'warn',
-      'stale_open_show',
-      `show ${s.show_id} has been open for more than ${options.staleAfterHours}h; likely a dropped tubafrenzy show_end delivery`,
-      {
-        show_id: s.show_id,
-        legacy_show_id: s.legacy_show_id,
-        start_time: s.start_time.toISOString(),
-        last_entry_type: s.last_entry_type,
-        last_entry_at: s.last_entry_at?.toISOString() ?? null,
-        stale_after_hours: options.staleAfterHours,
-      }
-    );
-  }
-
-  if (stale.length > 0) {
-    ports.captureWarning(
-      'legacy-mirror-reconcile: show(s) left open past the plausible-duration threshold',
-      'stale_open_show',
-      {
-        stale_open_shows: stale.length,
-        stale_after_hours: options.staleAfterHours,
-        window_hours: options.windowHours,
-        historical_open_shows: totals.historical_open_shows,
-        sample: stale.slice(0, STALE_OPEN_SHOW_SENTRY_SAMPLE).map((s) => ({
+    for (const s of stale) {
+      ports.log(
+        'warn',
+        'stale_open_show',
+        `show ${s.show_id} has been open for more than ${options.staleAfterHours}h; likely a dropped tubafrenzy show_end delivery`,
+        {
           show_id: s.show_id,
+          legacy_show_id: s.legacy_show_id,
           start_time: s.start_time.toISOString(),
           last_entry_type: s.last_entry_type,
           last_entry_at: s.last_entry_at?.toISOString() ?? null,
-        })),
-      }
-    );
+          stale_after_hours: options.staleAfterHours,
+        }
+      );
+    }
+
+    if (stale.length > 0) {
+      ports.captureWarning(
+        'legacy-mirror-reconcile: show(s) left open past the plausible-duration threshold',
+        'stale_open_show',
+        {
+          stale_open_shows: stale.length,
+          stale_after_hours: options.staleAfterHours,
+          window_hours: options.windowHours,
+          historical_open_shows: totals.historical_open_shows,
+          sample: stale.slice(0, STALE_OPEN_SHOW_SENTRY_SAMPLE).map((s) => ({
+            show_id: s.show_id,
+            start_time: s.start_time.toISOString(),
+            last_entry_type: s.last_entry_type,
+            last_entry_at: s.last_entry_at?.toISOString() ?? null,
+          })),
+        }
+      );
+    }
+  } catch (err) {
+    totals.stale_open_show_detector_failed = true;
+    const message = err instanceof Error ? err.message : String(err);
+    ports.log('error', 'stale_open_show_detector_failed', `stale-open-show detector failed: ${message}`, {
+      error_message: message,
+      error_name: err instanceof Error ? err.name : null,
+    });
+    ports.captureError(err, 'stale_open_show_detector', {
+      stale_after_hours: options.staleAfterHours,
+      window_hours: options.windowHours,
+    });
   }
 };
 
