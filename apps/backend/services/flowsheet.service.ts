@@ -152,7 +152,7 @@ const FSEntryFieldsRaw = {
   rotation_id: flowsheet.rotation_id,
   // Primary source is the FK join (`leftJoin(rotation, rotation.id = flowsheet.rotation_id)`).
   // Fallback fires only when that join misses (rotation.rotation_bin IS NULL) and the entry
-  // looks like a real track with non-blank artist+album. Three match cohorts:
+  // looks like a real track with non-empty artist+album. Three match cohorts:
   //   (a) flowsheet.album_id matches an active rotation.album_id (library-linked rotation rows);
   //   (b) (artist, album) snapshot matches active rotation row's denormalized fields
   //       (library-unlinked rotation rows hold the snapshot directly);
@@ -198,21 +198,42 @@ const FSEntryFieldsRaw = {
   // result. A row matching two arms appears twice in the union, which the
   // LIMIT 1 makes harmless.
   //
-  // GUARD: `trim(coalesce(...)) <> ''`, tightened from `coalesce(...) <> ''`.
-  // This is the one deliberate behaviour change. Under the old guard an entry
-  // whose artist AND album were whitespace-only ('   ') passed, then trimmed to
-  // '' inside the subquery and matched the LEFT-JOINed NULL side of every
-  // active rotation row without a library link — returning the lowest-id one as
-  // a badge. That is a garbage badge on a garbage entry, and it is the only
-  // case where arm 3's original LEFT JOIN differed from the inner JOIN used
-  // here. Zero such rows exist in a 7-day prod sample; the tightened guard both
-  // fixes the bug and makes the inner join exactly equivalent.
+  // GUARD: unchanged — still `coalesce(col, '') <> ''`, NOT a trimmed variant.
+  //
+  // An earlier revision of BS#2080 tightened it to `trim(coalesce(col, ''))
+  // <> ''` to make arm 3's inner JOIN provably equivalent to the LEFT JOIN it
+  // replaced. That was wrong, and the way it was wrong is worth recording: the
+  // guard gates ALL THREE arms, but the whitespace argument only ever applied
+  // to arm 3. An entry with a real artist, a blank-but-non-empty album title
+  // ('   ') and a populated `album_id` matches arm 1 on `album_id` alone —
+  // arm 1 never looks at the text — so tightening a TEXT guard silently
+  // dropped a legitimate badge. Verified against the clone: album_id 36962
+  // returned 'M' under the original guard and nothing under the tightened one.
+  //
+  // Two further reasons to leave it alone. `shared/legacy-mirror`'s
+  // `isActiveRotationMatch` — the write-path twin, kept in sync at the
+  // cohort/predicate level — guards on the raw value specifically so neither
+  // side normalizes more aggressively than the other; trimming here forks that
+  // key. And PG's `trim()` strips only ASCII space, so it would not have
+  // caught the NBSP/tab cases the word "whitespace" implies anyway.
+  //
+  // What remains is one narrow difference, and it is very hard to observe. For
+  // an entry whose artist AND album both trim to '', arm 3's original LEFT JOIN
+  // matched the NULL side of every active rotation row lacking a library link;
+  // the inner JOIN below does not. But arm 2 usually reaches the same rows
+  // first: a library-LINKED rotation row carries NULL denormalized names, which
+  // `coalesce(..., '')` turns into '', so arm 2 already matches any blank entry
+  // whenever such a row is active — the common case. The divergence therefore
+  // needs a window containing a library-LESS active row with non-blank names
+  // and NO blank-named row at all. Zero such cases in a 7-day prod diff over
+  // 1,030 rows; the integration spec pins the shadowing rather than the
+  // divergence, because its fixtures cannot produce the latter either.
   rotation_bin: sql<string | null>`
     COALESCE(
       ${rotation.rotation_bin},
       CASE WHEN ${flowsheet.rotation_id} IS NULL
-        AND trim(coalesce(${flowsheet.artist_name}, '')) <> ''
-        AND trim(coalesce(${flowsheet.album_title}, '')) <> ''
+        AND coalesce(${flowsheet.artist_name}, '') <> ''
+        AND coalesce(${flowsheet.album_title}, '') <> ''
       THEN (
         SELECT t.rotation_bin FROM (
           -- (a) library-linked rotation rows, matched on album_id (album_id_idx)

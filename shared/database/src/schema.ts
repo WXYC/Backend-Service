@@ -471,15 +471,22 @@ export const artists = wxyc_schema.table(
     return {
       artistNameTrgmIdx: index('artist_name_trgm_idx').using(`gin`, sql`${table.artist_name} gin_trgm_ops`),
       codeLettersIdx: index('code_letters_idx').on(table.code_letters),
-      // BS#2080. Serves arm 3 of the `rotation_bin` fallback in
-      // `FSEntryFieldsRaw` — the library-linked match, where the rotation row's
-      // own denormalized fields are NULL and the artist name has to come from
-      // the `library -> artists` join. Distinct from `artist_name_trgm_idx`
-      // above: that one is a GIN trigram index for fuzzy search, this is a
-      // B-tree on an exact normalized equality. Also distinct from migration
-      // 0134's `fold_artist_name()` (NFC/ASCII folding, BS#1897) — this is
-      // plain `lower(trim(...))`, matching the query verbatim.
-      normNameIdx: index('artists_norm_name_idx').on(sql`lower(trim(coalesce(${table.artist_name}, '')))`),
+      // BS#2080 deliberately did NOT add a `lower(trim(coalesce(artist_name,
+      // '')))` index here, though arm 3 of the `rotation_bin` fallback in
+      // `FSEntryFieldsRaw` tests exactly that expression. Measured over 1,030
+      // real fallback rows: the planner drives arm 3 from
+      // `library_norm_album_title_idx` into `album_id_idx`, so by the time it
+      // reaches `artists` it already has `l2.artist_id` and probes
+      // `artists_pkey`, applying the name as a filter on ~10 surviving rows.
+      // Adding the expression index made it slightly WORSE (8.88ms vs 7.02ms;
+      // buffers unchanged) while costing write amplification on a table
+      // bulk-written by artist-identity-etl and artist-unicode-dedup. It would
+      // also have been the FOURTH artist-name index and named one character
+      // class away from `artists_normalized_name_idx` (0092,
+      // `normalize_artist_name`) and `artists_fold_name_idx` (0134,
+      // `fold_artist_name`) — three near-identical names for three different
+      // normalizations. If a future plan change makes arm 3 drive from the
+      // artist side, re-measure before adding it.
     };
   }
 );
@@ -639,9 +646,20 @@ export const library = wxyc_schema.table(
       titleTrgmIdx: index('title_trgm_idx').using(`gin`, sql`${table.album_title} gin_trgm_ops`),
       // BS#2080. The entry point for arm 3 of the `rotation_bin` fallback in
       // `FSEntryFieldsRaw`: the planner drives from this index (~1.75 rows per
-      // probe) into the existing `album_id_idx` on `rotation`, then applies
-      // `artists_norm_name_idx` as a filter on the survivors. B-tree exact
-      // equality, as against `title_trgm_idx` above (GIN, fuzzy search).
+      // probe) into the existing `album_id_idx` on `rotation`, then filters on
+      // the artist name via `artists_pkey`. B-tree exact equality, as against
+      // `title_trgm_idx` above (GIN, fuzzy search).
+      //
+      // The `coalesce(..., '')` is VESTIGIAL — `album_title` is `.notNull()`,
+      // so it can never fire — but it is deliberately kept, because the query
+      // it must match carries it (arm 3 was written when both sides were
+      // LEFT-JOINed and the column could arrive NULL from the join, not from
+      // the table). An expression index only serves an expression written
+      // character-for-character the same way, so "cleaning up" the redundant
+      // coalesce on either side alone silently unindexes the arm. Change both
+      // together or neither. Contrast `rotation.artist_name` /
+      // `rotation.album_title`, which ARE nullable — arm 2's coalesce is
+      // load-bearing.
       normAlbumTitleIdx: index('library_norm_album_title_idx').on(sql`lower(trim(coalesce(${table.album_title}, '')))`),
       genreIdIdx: index('genre_id_idx').on(table.genre_id),
       formatIdIdx: index('format_id_idx').on(table.format_id),

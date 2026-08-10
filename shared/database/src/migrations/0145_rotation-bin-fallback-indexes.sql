@@ -1,9 +1,9 @@
--- BS#2080. Three expression indexes that make the `rotation_bin` fallback
+-- BS#2080. Two expression indexes that make the `rotation_bin` fallback
 -- subquery in `FSEntryFieldsRaw` (apps/backend/services/flowsheet.service.ts)
 -- indexable. Ships together with the rewrite of that subquery from a
 -- three-armed `OR` into a `UNION ALL` of three separately-indexable probes —
--- the indexes are useless without the rewrite, and the rewrite is pointless
--- without the indexes.
+-- the indexes are useless without the rewrite, and the rewrite is a
+-- PESSIMISATION without the indexes (see "Deploy order" below).
 --
 -- The problem. That fallback fires once per flowsheet row whose `rotation_id`
 -- is NULL and whose artist+album are non-empty, and its predicate ORs three
@@ -16,18 +16,15 @@
 --
 -- What it cost. `GET /flowsheet/range` (BS#2062) reads a whole window rather
 -- than a page, so the per-row cost multiplies. Measured on prod across seven
--- consecutive 24h windows, response time is almost perfectly linear in the
--- number of rows that take the fallback and only loosely related to the number
--- of entries returned:
+-- consecutive 24h windows:
 --
---     time = 1.125s + 19.0ms * n_fallback     (R^2 = 0.957)
---     (fit against total entry count instead: R^2 = 0.877)
+--     time = 1.080s + 17.43ms * n_fallback + 0.86ms * n_entries   (R^2 = 0.958)
 --
 -- A 24h window runs 91-191 fallbacks (3.0-4.8 s observed). The 7-day window
--- that wxyc.org's historical-archive page needs runs 1,030 — a predicted
--- ~20.7 s against a 5 s `DB_STATEMENT_TIMEOUT_MS`, which is exactly the HTTP
--- 500 that endpoint answers today. Seven separate daily calls covering the same
--- span summed to 27.5 s of real work, corroborating the fit.
+-- that wxyc.org's historical-archive page needs runs 1,030 over 2,243 entries
+-- — ~21 s predicted against a 5 s `DB_STATEMENT_TIMEOUT_MS`, which is exactly
+-- the HTTP 500 that endpoint answers today. Seven separate daily calls
+-- covering the same span summed to 27.5 s of real work, corroborating the fit.
 --
 -- The yield of all that work is small: over those seven days, 1,030 fallback
 -- executions produced 19 badges.
@@ -35,52 +32,75 @@
 -- Measured over all 1,030 real prod fallback rows against the clone fixture:
 --
 --   three-armed OR, no indexes:   224,554 buffers,  1,317.8 ms
---   UNION ALL + these indexes:     12,509 buffers,      4.6 ms
+--   UNION ALL + these indexes:     12,514 buffers,      7.0 ms
 --
 -- Every arm becomes an index scan and the `rotation` seq scan disappears. The
 -- buffer count is the durable part — prod is a `db.t3.micro` with 1 GiB of RAM,
 -- so 224,554 buffers (~1.75 GB of touches) cannot stay resident and pays close
--- to the cold cost on every row, which is why prod's 19.0 ms/row tracks the
+-- to the cold cost on every row, which is why prod's ~17-19 ms/row tracks the
 -- measured cold 11.7 ms rather than the warm 0.79 ms.
+--
+-- NOTE the residual: the `0.86ms * n_entries` term is untouched by this change
+-- (three outer LEFT JOINs, transform, projection, serialization, transfer). At
+-- 2,243 entries that is ~1.9 s, so the fixed 7-day window is expected around
+-- 3 s wall-clock, not ~1 s. It clears the timeout — which bounds SQL time, not
+-- transfer — but the margin is smaller than the buffer numbers alone suggest.
+-- Re-measure the seven windows after deploy rather than assuming.
 --
 -- Equivalence was verified, not assumed: both forms were run over all 1,030
 -- rows and the results diffed. Zero disagreements, and identical badge
--- distributions (1,011 null / 7 H / 6 M / 3 L / 3 S). See the subquery's own
--- comment for the one deliberate behaviour change that accompanies this (the
--- whitespace-only artist/album guard).
+-- distributions (1,011 null / 7 H / 6 M / 3 L / 3 S). Arm 3's LEFT JOINs become
+-- inner JOINs, which is what makes it indexable; the only entries that can tell
+-- the difference are those whose artist AND album both trim to '', and arm 2
+-- already matches those through any library-linked rotation row (NULL denorm
+-- names coalesce to ''). See the subquery's own comment.
 --
--- Why single-column rather than composite. This is the shape that was
--- benchmarked: the planner drives arm 3 from `library_norm_album_title_idx`
--- (~1.75 rows per probe) into the existing `album_id_idx` on `rotation`, and
--- applies `artists_norm_name_idx` last as a filter on the few survivors. All
--- three tables are small (21k-64k rows) so each index is a couple of MB, and
--- none of them takes meaningful write traffic — `rotation` changes when the MD
--- re-bins, `library` when the librarian files a release.
+-- Why only TWO indexes for three arms. Arm 1 is already served by the existing
+-- `album_id_idx` on `rotation`. Arm 3 tests `lower(trim(coalesce(a2.artist_name,
+-- '')))` but gets NO index for it: the planner drives arm 3 from
+-- `library_norm_album_title_idx` into `album_id_idx`, so it reaches `artists`
+-- already holding `l2.artist_id` and probes `artists_pkey`, applying the name
+-- as a filter on ~10 surviving rows. Adding the matching expression index
+-- measured slightly WORSE (8.88 ms vs 7.02 ms, buffers unchanged) and would
+-- have been a fourth artist-name index named one character class away from
+-- `artists_normalized_name_idx` (0092) and `artists_fold_name_idx` (0134).
+--
+-- Write cost, stated honestly. `library` is bulk-written every 30 minutes by
+-- library-etl's import, plus `library-artist-name-backfill` and
+-- `library-artwork-url-backfill`; each row already recomputes a STORED
+-- GENERATED `search_doc` tsvector, and this adds one more btree to maintain.
+-- `rotation` is written by the MD's re-bins and by rotation-etl. Both indexes
+-- are small (21k / 64k rows, a couple of MB each), but "no meaningful write
+-- traffic" would be wrong.
 --
 -- Production ops:
 --   - These are NOT the CONCURRENTLY form, because Drizzle wraps each migration
 --     file in a transaction and `CREATE INDEX CONCURRENTLY cannot run inside a
 --     transaction block` — same constraint as 0144, 0139, 0080, 0078, 0074,
---     0070, 0068, 0057.
+--     0070, 0068, 0057. The plain `CREATE INDEX` below takes a SHARE lock that
+--     BLOCKS INSERT/UPDATE/DELETE on each table for the duration of its build.
+--     Brief at 21k-64k rows, but it is what runs in CI, on fresh dev databases,
+--     and on prod if the out-of-band pre-build is skipped.
 --   - Run out-of-band on prod FIRST. These are the generated statements below,
 --     verbatim, with CONCURRENTLY added — the index expression must match the
 --     query character-for-character, so do not reformat them:
---       CREATE INDEX CONCURRENTLY IF NOT EXISTS "artists_norm_name_idx" ON "wxyc_schema"."artists" USING btree (lower(trim(coalesce("artist_name", ''))));
 --       CREATE INDEX CONCURRENTLY IF NOT EXISTS "library_norm_album_title_idx" ON "wxyc_schema"."library" USING btree (lower(trim(coalesce("album_title", ''))));
 --       CREATE INDEX CONCURRENTLY IF NOT EXISTS "rotation_norm_artist_album_idx" ON "wxyc_schema"."rotation" USING btree (lower(trim(coalesce("artist_name", ''))),lower(trim(coalesce("album_title", ''))));
---     No AccessExclusiveLock, so no write pause on any of the three. All are
---     small tables; expect seconds, not minutes. Then ANALYZE each — a fresh
---     expression index has no stats until then, and the planner will not choose
---     an arm it cannot cost:
---       ANALYZE "wxyc_schema"."artists"; ANALYZE "wxyc_schema"."library"; ANALYZE "wxyc_schema"."rotation";
---   - Then merge this PR. `IF NOT EXISTS` makes the migration a no-op against
---     the prod DB where the indexes already exist, while fresh dev and CI
---     databases pick them up on first migrate.
---   - Order matters in the other direction too: merging the service rewrite
---     WITHOUT these indexes present is a pessimisation, not a no-op — the
---     UNION ALL form without index support seq-scans `rotation` three times per
---     row instead of once. Build the indexes first.
+--     No AccessExclusiveLock and no SHARE lock, so no write pause on either.
+--   - THEN ANALYZE. This step is not optional and nothing in the deploy
+--     pipeline does it for you: a fresh expression index carries NO statistics
+--     for its expression until ANALYZE runs, and the header above is only true
+--     of a planner that can cost these arms. `ANALYZE` cannot live in this file
+--     (Drizzle wraps migrations in a transaction; see the DDL-only and
+--     post-bulk-update-analyze rules in docs/migrations.md), so it is a
+--     deploy-checklist item:
+--       ANALYZE "wxyc_schema"."library"; ANALYZE "wxyc_schema"."rotation";
+--     Autovacuum will eventually do it, but "eventually" here means the window
+--     in which the rewrite runs three index-less probes per row instead of one
+--     seq scan — strictly worse than before this PR.
+--   - Then merge. `IF NOT EXISTS` makes the migration a no-op against the prod
+--     DB where the indexes already exist, while fresh dev and CI databases pick
+--     them up on first migrate.
 
-CREATE INDEX IF NOT EXISTS "artists_norm_name_idx" ON "wxyc_schema"."artists" USING btree (lower(trim(coalesce("artist_name", ''))));--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "library_norm_album_title_idx" ON "wxyc_schema"."library" USING btree (lower(trim(coalesce("album_title", ''))));--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "rotation_norm_artist_album_idx" ON "wxyc_schema"."rotation" USING btree (lower(trim(coalesce("artist_name", ''))),lower(trim(coalesce("album_title", ''))));
