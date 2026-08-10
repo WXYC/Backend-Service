@@ -64,6 +64,36 @@ Even with a fresh token, a pull can still fail if Docker GC'd the locally cached
 
 Two adjacent observability gaps were explicitly split out of BS#1183 rather than folded in here: BS#1200 (route every cron container's stdout/stderr to a per-cron log file, host-wide) and BS#1201 (heartbeat counter + CloudWatch alarm so a missed cron run pages instead of waiting on a human reading logs).
 
+## Edge compression (nginx gzip)
+
+<!-- @rule id=gzip-types-excludes-sse enforced-by=none added=2026-08-09 incidents=#2076 -->
+
+**`text/event-stream` must never be added to `gzip_types`.** It is the _sole_ guard on `/events/stream`, not one of two — `apps/backend/utils/serverEvents.ts` writes SSE frames with bare `res.write` and never calls `res.flush()`, and marks the response `X-Accel-Buffering: no`, which suppresses nginx's proxy buffering and leaves the response with no upstream `Content-Length`. `gzip_min_length` has nothing to evaluate and cannot act as a backstop. Adding the type — the obvious move for anyone doing a routine "let's compress more types" pass — wedges every SSE consumer behind a compression buffer. `enforced-by=none` is literal: nothing in CI can inspect a config file that isn't in the repo, which is the argument for the version-control follow-up below.
+
+Applied 2026-08-09 (BS#2076). Six directives live in the `api.wxyc.org` **443** server block of `/etc/nginx/nginx.conf` on the prod host, plus a `gzip off` opt-out on each of the two `/auth` locations:
+
+```nginx
+gzip              on;
+gzip_vary         on;
+gzip_proxied      any;
+gzip_comp_level   5;
+gzip_min_length   1024;
+gzip_types        application/json application/javascript text/javascript text/css text/plain;
+```
+
+Measured on `/playlists/recentEntries`: 50,697 → 9,128 bytes on the wire (5.6x, 82% off), decoded body byte-identical.
+
+Four things about that block are load-bearing and non-obvious:
+
+- **`gzip_types` is an opt-in allowlist**, which is why the SSE guard works at all — and why `text/html` is absent (nginx always compresses it and it cannot be removed from the list).
+- **Both `application/javascript` and `text/javascript` are listed, and only the second one matches.** `swagger-ui-express` (`apps/backend/app.ts`) serves its 1.5 MB `swagger-ui-bundle.js` through `express.static` → `send@1.2.1` → send's **nested** `mime-types@3.0.2`, which resolves `.js` to `text/javascript`. The hoisted root `mime-types@2.1.35` still says `application/javascript` — checking that one instead is how the largest compressible asset on the host was nearly excluded. Verify against the resolving package, not the hoisted one.
+- **`gzip off` goes on `location /auth/healthcheck` _and_ `location /auth/`.** nginx locations inherit from the enclosing `server`/`http` scope, never from a sibling whose prefix happens to be shorter, so the dedicated healthcheck location would otherwise run under the server-level `gzip on`. The exclusion itself is a BREACH-class precaution — those responses carry session tokens and JWTs — and it costs nothing: `/auth/*` averages ~262 bytes per response, already under `gzip_min_length`.
+- **Scope is the api block on purpose.** Hoisting to `http { }` would also compress `explore.wxyc.org` (semantic-index) and `wiki.wxyc.org` (Wiki.js), which share this nginx and belong to other repos. That's a real egress win but not Backend-Service's unilateral call.
+
+Apply procedure: `sudo cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak-$(date +%Y%m%d)` → edit → `sudo nginx -t` (**must pass** — a syntax error takes down api, explore, and wiki together) → `sudo systemctl reload nginx` (graceful; in-flight connections survive, main PID unchanged). **The `.bak` is the rollback** — this config is not in version control, so there is no `git revert` for it. Restore it, `nginx -t`, reload.
+
+That last point is the standing weakness: an edge config with no history, no review, and no CI visibility, one hand-edit away from an outage. The path out is known rather than hypothetical — check the config into `deploy/nginx/` and install it from `deploy-base.yml` over `appleboy/ssh-action`, exactly as the `ecr-refresh-cron` job above already installs host-level state idempotently. Until then, treat any change here as unreviewed production surgery and back it up first.
+
 ## CI workflow pin maintenance
 
 Three classes of pin in `.github/workflows/*.yml` exist for supply-chain reasons (mirrors WXYC/request-o-matic#124's free-tier hardening; see WXYC/wiki#67 for the org-wide rollout). They will bit-rot and need occasional bumps:
