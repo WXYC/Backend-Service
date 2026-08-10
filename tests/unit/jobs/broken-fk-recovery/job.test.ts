@@ -58,9 +58,10 @@ describe('broken-fk-recovery: reresolveAlbumIds', () => {
   });
 
   it('issues an UPDATE that joins flowsheet to library on legacy_release_id', async () => {
-    // Mirrors the resolver in jobs/flowsheet-etl/job.ts. Re-running it is
-    // the easy-win first pass in B-0.5: any library rows that landed after
-    // the original ETL get linked here without LML.
+    // Mirrors the resolver in jobs/legacy-linkage-resolve/job.ts (the current
+    // canonical repair pass since Phase 3 unscheduled flowsheet-etl). Re-
+    // running it is the easy-win first pass in B-0.5: any library rows that
+    // landed after the original ETL get linked here without LML.
     (db.execute as jest.Mock).mockResolvedValueOnce({ count: 0 });
 
     await reresolveAlbumIds();
