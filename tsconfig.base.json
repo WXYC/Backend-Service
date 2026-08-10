@@ -25,7 +25,8 @@
       "@wxyc/authentication": ["shared/authentication/src"],
       "@wxyc/database": ["shared/database/src"],
       "@wxyc/lml-client": ["shared/lml-client/src"],
-      "@wxyc/metadata": ["shared/metadata/src"]
+      "@wxyc/metadata": ["shared/metadata/src"],
+      "@wxyc/observability": ["shared/observability/src"]
     }
   }
 }
