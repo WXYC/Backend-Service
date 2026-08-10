@@ -14,7 +14,9 @@
  *   - the cooperative pause runs before each sweep and between shows,
  *   - the detection signal escalates above the alert threshold,
  *   - the BS#2065 stale-open-show detector reports (never repairs), runs
- *     before any cooperative pause, and bounds its Sentry payload.
+ *     before any cooperative pause, and bounds its Sentry payload,
+ *   - a detector failure (BS#2069) is isolated: logged + captured, and cannot
+ *     abort the repair sweeps.
  *
  * The all-or-nothing SELECT SQL itself (the NOT EXISTS predicates + window/
  * settle bounds) is a hand-written SQL twin exercised against a real Postgres
@@ -111,6 +113,7 @@ const makePorts = (over: Partial<ReconcilePorts> = {}) => {
     awaitQuiet: mockAsync(undefined),
     log: jest.fn(),
     captureWarning: jest.fn(),
+    captureError: jest.fn(),
     ...over,
   };
   return ports as unknown as ReconcilePorts & typeof ports;
@@ -502,5 +505,109 @@ describe('runReconcile — stale-open-show detector (BS#2065)', () => {
     };
     expect(captured.stale_open_shows).toBe(many.length);
     expect(captured.sample).toHaveLength(STALE_OPEN_SHOW_SENTRY_SAMPLE);
+  });
+});
+
+describe('runReconcile — stale-open-show detector failure isolation (BS#2069)', () => {
+  it('isolates a rejecting selectStaleOpenShows so both repair sweeps still run', async () => {
+    const detectorError = new Error('statement timeout');
+    const createShow = makeShow({ id: 1, primary_dj_id: 'dj-1' });
+    const entryShow = makeShow({ id: 2, legacy_show_id: 8080 });
+    const ports = makePorts({
+      selectStaleOpenShows: jest.fn(() => Promise.reject(detectorError)),
+      selectShowsToCreate: mockAsync([createShow]),
+      selectEntrySweepShows: mockAsync([entryShow]),
+      selectOrphanEntries: mockAsync([makeEntry({ id: 9, show_id: 2 })]),
+    });
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    // The two repair sweeps are this job's actual purpose; a broken read-only
+    // detector must not take them down with it.
+    expect(ports.mirrorCreateShow).toHaveBeenCalledTimes(1);
+    expect(ports.mirrorCreateEntry).toHaveBeenCalledTimes(1);
+    expect(totals.shows_created).toBe(1);
+    expect(totals.entries_created).toBe(1);
+  });
+
+  it('isolates a rejecting countHistoricalOpenShows so both repair sweeps still run', async () => {
+    const detectorError = new Error('connection reset');
+    const createShow = makeShow({ id: 1, primary_dj_id: 'dj-1' });
+    const ports = makePorts({
+      selectStaleOpenShows: mockAsync([]),
+      countHistoricalOpenShows: jest.fn(() => Promise.reject(detectorError)),
+      selectShowsToCreate: mockAsync([createShow]),
+    });
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    expect(ports.mirrorCreateShow).toHaveBeenCalledTimes(1);
+    expect(totals.shows_created).toBe(1);
+  });
+
+  it('logs an error step and captures the exception, distinct from the generic detection signal', async () => {
+    const detectorError = new Error('statement timeout');
+    const ports = makePorts({ selectStaleOpenShows: jest.fn(() => Promise.reject(detectorError)) });
+
+    await runReconcile(ports, OPTIONS);
+
+    expect(ports.log).toHaveBeenCalledWith(
+      'error',
+      'stale_open_show_detector_failed',
+      expect.any(String),
+      expect.objectContaining({ error_message: 'statement timeout' })
+    );
+    expect(ports.captureError).toHaveBeenCalledWith(detectorError, 'stale_open_show_detector', expect.any(Object));
+  });
+
+  it('surfaces the detector failure on totals so a "finished" run is not indistinguishable from a clean one', async () => {
+    const ports = makePorts({ selectStaleOpenShows: jest.fn(() => Promise.reject(new Error('boom'))) });
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    expect(totals.stale_open_show_detector_failed).toBe(true);
+  });
+
+  it('does not mark the detector failed when it succeeds', async () => {
+    const ports = makePorts();
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    expect(totals.stale_open_show_detector_failed).toBe(false);
+    expect(ports.captureError).not.toHaveBeenCalled();
+  });
+
+  it('still runs the detector before the sweeps even though it goes on to fail', async () => {
+    const order: string[] = [];
+    const ports = makePorts({
+      selectStaleOpenShows: jest.fn(() => {
+        order.push('detector');
+        return Promise.reject(new Error('boom'));
+      }),
+      selectShowsToCreate: jest.fn(() => {
+        order.push('show-sweep');
+        return Promise.resolve([]);
+      }),
+    });
+
+    await runReconcile(ports, OPTIONS);
+
+    expect(order).toEqual(['detector', 'show-sweep']);
+  });
+
+  it('does NOT escalate the generic detection-signal Sentry warning solely because the detector failed', async () => {
+    // An idle, otherwise-healthy run (no orphan shows/entries/partials) stays
+    // under the alert threshold even when the detector itself errored — the
+    // detector's own failure is reported through its own captureError/log
+    // call, not by inflating the unrelated orphan-count signal.
+    const ports = makePorts({ selectStaleOpenShows: jest.fn(() => Promise.reject(new Error('boom'))) });
+
+    await runReconcile(ports, OPTIONS);
+
+    expect(ports.captureWarning).not.toHaveBeenCalledWith(
+      expect.stringContaining('orphaned tubafrenzy mirror rows detected'),
+      'detection',
+      expect.any(Object)
+    );
   });
 });

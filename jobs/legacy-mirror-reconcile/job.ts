@@ -285,6 +285,7 @@ export const buildPorts = (client: PostHog | null, options: JobOptions): Reconci
   awaitQuiet: () => awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs),
   log,
   captureWarning,
+  captureError,
 });
 
 // ── Entrypoint ────────────────────────────────────────────────────────────────
@@ -344,6 +345,21 @@ const main = async (): Promise<void> => {
 
     const totals = await runReconcile(buildPorts(posthog, options), options);
     log('info', 'finished', `${JOB_NAME} done`, { ...totals });
+
+    // Exit-code decision (BS#2069): a detector-only failure
+    // (`totals.stale_open_show_detector_failed`) deliberately does NOT set
+    // `process.exitCode`. `runStaleOpenShowReport` isolates that failure
+    // inside `runReconcile` precisely so it cannot abort the two repair
+    // sweeps; letting it flip this job's exit code anyway would re-couple the
+    // same failure at the reporting layer that isolation just decoupled at
+    // the execution layer. The failure is not silent — it is logged at
+    // 'error' with its own step name and captured to Sentry with its own
+    // fingerprint (see `runStaleOpenShowReport`), so it alerts distinctly
+    // from this job's generic 'failed' path. Reserving exit 1 for "the sweeps
+    // didn't run" keeps the nightly cron-failure alert meaning what it says:
+    // if this job starts exiting 1 every night because a persistently-broken
+    // detector never affects the sweeps, the alert becomes noise an operator
+    // learns to ignore — exactly the failure mode BS#2069 exists to prevent.
   } catch (err) {
     captureError(err, 'main');
     log('error', 'failed', `${JOB_NAME} failed: ${err instanceof Error ? err.message : String(err)}`, {
