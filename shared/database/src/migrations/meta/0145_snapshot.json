@@ -1,5 +1,5 @@
 {
-  "id": "2f5f3256-092d-4ef6-853a-f8135a6586a7",
+  "id": "07b10ddd-5e19-4890-b6f8-919911f3e5de",
   "prevId": "7ba1c120-f5b6-462b-bb76-37cdc7282266",
   "version": "7",
   "dialect": "postgresql",
@@ -1328,21 +1328,6 @@
               "expression": "code_letters",
               "isExpression": false,
               "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "artists_norm_name_idx": {
-          "name": "artists_norm_name_idx",
-          "columns": [
-            {
-              "expression": "lower(trim(coalesce(\"artist_name\", '')))",
-              "asc": true,
-              "isExpression": true,
               "nulls": "last"
             }
           ],

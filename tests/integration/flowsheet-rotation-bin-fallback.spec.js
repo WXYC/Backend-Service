@@ -93,11 +93,17 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
       artistName = null,
       albumTitle = null,
       bin,
+      addDate = ROT_ADD,
       killDate = ROT_KILL,
     }) => {
+      // Always RETURNING id — never recover the id with a SELECT on
+      // artist_name. A run that crashed between beforeAll and afterAll leaves
+      // a probe row behind; a name-based SELECT would then return rows in
+      // unspecified order, teardown would record the stale id, and the new row
+      // would leak and compound on every subsequent run.
       const r = await sql`
         INSERT INTO ${sql(SCHEMA)}.rotation (album_id, artist_name, album_title, rotation_bin, add_date, kill_date)
-        VALUES (${albumId}, ${artistName}, ${albumTitle}, ${bin}, ${ROT_ADD}::date, ${killDate === null ? null : sql`${killDate}::date`})
+        VALUES (${albumId}, ${artistName}, ${albumTitle}, ${bin}, ${addDate}::date, ${killDate === null ? null : sql`${killDate}::date`})
         RETURNING id`;
       rotationIds.push(r[0].id);
       return r[0].id;
@@ -117,21 +123,33 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
     };
 
     // --- cohort (a): flowsheet.album_id matches an active rotation.album_id ---
+    // Every name in this spec carries the MARKER prefix, including these. The
+    // un-prefixed `@wxyc/shared` example names would be separated from the
+    // dev/CI seed only by the 1997 window, so a future seed row for the same
+    // artist/album with an early enough add_date would silently start matching
+    // through arm (b) or (c) and look like a fallback regression.
     const artistA = await insertArtist(`${MARKER} Chuquimamani-Condori`);
     const albumA = await insertLibrary(artistA, `${MARKER} Edits`);
     await insertRotation({ albumId: albumA, bin: 'H' });
     await insertEntry('cohortA', 10 * MIN, {
       albumId: albumA,
-      artistName: 'Chuquimamani-Condori',
-      albumTitle: 'Edits',
+      artistName: `${MARKER} Chuquimamani-Condori`,
+      albumTitle: `${MARKER} Edits`,
     });
 
     // --- cohort (b): rotation row's own denormalized (artist, album) snapshot ---
     // No library link at all; the rotation row carries the names directly.
     // Case and surrounding whitespace differ from the entry on purpose — the
     // match is lower(trim(...)) on both sides.
-    await insertRotation({ artistName: '  jUANA molina  ', albumTitle: '  dOGA  ', bin: 'M' });
-    await insertEntry('cohortB', 20 * MIN, { artistName: 'Juana Molina', albumTitle: 'DOGA' });
+    await insertRotation({
+      artistName: `  ${MARKER.toUpperCase()} jUANA molina  `,
+      albumTitle: '  dOGA  ',
+      bin: 'M',
+    });
+    await insertEntry('cohortB', 20 * MIN, {
+      artistName: `${MARKER} Juana Molina`,
+      albumTitle: 'DOGA',
+    });
 
     // --- cohort (c): names come from the library -> artists join ---
     // The rotation row is library-linked but its own denorm fields are NULL,
@@ -159,12 +177,13 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
 
     // --- add_date is an inclusive lower bound: a play that aired before the
     //     release entered rotation is not badged (BS#1526) ---
-    await sql`
-      INSERT INTO ${sql(SCHEMA)}.rotation (artist_name, album_title, rotation_bin, add_date, kill_date)
-      VALUES (${`${MARKER} Cat Power`}, ${`${MARKER} Moon Pix`}, 'H', '1997-06-20'::date, NULL)`;
-    const lateRot = await sql`
-      SELECT id FROM ${sql(SCHEMA)}.rotation WHERE artist_name = ${`${MARKER} Cat Power`}`;
-    rotationIds.push(lateRot[0].id);
+    await insertRotation({
+      artistName: `${MARKER} Cat Power`,
+      albumTitle: `${MARKER} Moon Pix`,
+      bin: 'H',
+      addDate: '1997-06-20', // entered rotation AFTER the window
+      killDate: null,
+    });
     await insertEntry('addedLater', 50 * MIN, {
       artistName: `${MARKER} Cat Power`,
       albumTitle: `${MARKER} Moon Pix`,
@@ -187,12 +206,74 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
       albumTitle: `${MARKER} Sentimental Mood`,
     });
 
-    // --- whitespace-only artist+album must NOT badge (the BS#2080 guard) ---
-    // Under the pre-BS#2080 guard (`coalesce(col,'') <> ''`) this passed, then
-    // trimmed to '' inside the subquery and matched the LEFT-JOINed NULL side
-    // of every library-less active rotation row — handing back the lowest-id
-    // one as a badge. cohortB's row above is exactly such a row, so if the
-    // guard ever loosens again this entry lights up and this test fails.
+    // --- CROSS-ARM tie-break: lowest id wins ACROSS arms, not within one ---
+    // The pre-BS#2080 form ORed the arms into a single scan, so one `ORDER BY
+    // r2.id LIMIT 1` covered everything. The UNION ALL form has to sort the
+    // union, and a future edit that pushed ORDER BY/LIMIT down into an arm, or
+    // dropped `r2.id` from an arm's SELECT list, would still satisfy every
+    // single-arm assertion above. Here the LOW id is reachable only by arm (b)
+    // and the HIGH id only by arm (a), so the lowest-across-arms invariant is
+    // the only thing that produces 'S'.
+    const crossArtist = await insertArtist(`${MARKER} Stereolab Cross`);
+    const crossAlbum = await insertLibrary(crossArtist, `${MARKER} Cross Album`);
+    const lowIdArmB = await insertRotation({
+      artistName: `${MARKER} Cross Artist`,
+      albumTitle: `${MARKER} Cross Title`,
+      bin: 'S',
+    });
+    const highIdArmA = await insertRotation({ albumId: crossAlbum, bin: 'H' });
+    expect(lowIdArmB).toBeLessThan(highIdArmA);
+    await insertEntry('crossArm', 80 * MIN, {
+      albumId: crossAlbum, // arm (a) -> highIdArmA ('H')
+      artistName: `${MARKER} Cross Artist`, // arm (b) -> lowIdArmB ('S')
+      albumTitle: `${MARKER} Cross Title`,
+    });
+
+    // --- one rotation row reachable by TWO arms appears twice in the union ---
+    // A library-linked row whose denormalized fields ALSO match the entry is
+    // emitted by both arm (a) and arm (b). The comment at the subquery says
+    // `LIMIT 1` makes the duplicate harmless; nothing tested it.
+    const dupArtist = await insertArtist(`${MARKER} Dup Artist`);
+    const dupAlbum = await insertLibrary(dupArtist, `${MARKER} Dup Album`);
+    await insertRotation({
+      albumId: dupAlbum,
+      artistName: `${MARKER} Dup Artist`,
+      albumTitle: `${MARKER} Dup Album`,
+      bin: 'L',
+    });
+    await insertEntry('doubleMatch', 90 * MIN, {
+      albumId: dupAlbum,
+      artistName: `${MARKER} Dup Artist`,
+      albumTitle: `${MARKER} Dup Album`,
+    });
+
+    // --- REGRESSION GUARD (the bug this PR's first revision shipped) ---
+    // Real artist, BLANK album title, album_id SET. Arm (a) matches on
+    // album_id and never reads the text, so this MUST still badge. An earlier
+    // revision tightened the outer guard to `trim(coalesce(col,'')) <> ''` to
+    // justify arm 3's inner JOIN — but that guard gates all three arms, so it
+    // silently dropped this badge. Verified against the clone before the
+    // revert: album_id 36962 returned 'M' under the original guard and nothing
+    // under the tightened one.
+    const guardArtist = await insertArtist(`${MARKER} Guard Artist`);
+    const guardAlbum = await insertLibrary(guardArtist, `${MARKER} Guard Album`);
+    await insertRotation({ albumId: guardAlbum, bin: 'H' });
+    await insertEntry('blankAlbumWithAlbumId', 100 * MIN, {
+      albumId: guardAlbum,
+      artistName: `${MARKER} Guard Artist`,
+      albumTitle: '   ', // blank but non-empty: passes the guard, ignored by arm (a)
+    });
+
+    // --- blank artist AND album: the one intended behaviour change ---
+    // This entry passes the (deliberately untrimmed) outer guard, trims to ''
+    // inside the subquery, and under the OLD arm-3 LEFT JOIN matched the
+    // NULL side of every library-less active rotation row — cohortB's row is
+    // exactly one — handing back its bin as a badge. Arm 3's inner JOIN drops
+    // those rows, so the correct answer is no badge.
+    //
+    // Deterministic because the 1997 window is rotation-quiet: 0 active
+    // rotation rows exist there in the dev clone or the CI seed, so the only
+    // candidates are this spec's own fixtures, none of which are blank-named.
     await insertEntry('whitespace', 70 * MIN, { artistName: '   ', albumTitle: '   ' });
 
     const res = await request.get('/flowsheet/range').query({ start: WINDOW_START, end: WINDOW_END });
@@ -228,9 +309,32 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
   it.each([
     ['killedBefore', 'kill_date is an exclusive upper bound'],
     ['addedLater', 'add_date is an inclusive lower bound (BS#1526)'],
-    ['whitespace', 'a whitespace-only artist+album never reaches the fallback'],
   ])('leaves %s unbadged — %s', (key) => {
     expect(binOf(key)).toBeNull();
+  });
+
+  it('badges a blank artist+album via arm (b), which shadows the arm (c) join change', () => {
+    // Worth stating plainly, because it is the reason this PR is observationally
+    // equivalent rather than "equivalent except for one edge case".
+    //
+    // A blank entry trims to '' on both sides. Arm (b) compares against
+    // `lower(trim(coalesce(r2.artist_name, '')))`, and a LIBRARY-LINKED rotation
+    // row carries NULL denormalized names — which coalesce to ''. So arm (b)
+    // matches, and returns the lowest-id such row: cohortA's ('H').
+    //
+    // That happens identically before and after BS#2080, because arm (b) is
+    // untouched. The arm (c) LEFT JOIN -> inner JOIN change can therefore only
+    // be observed in a window that has a library-LESS active rotation row with
+    // non-blank names AND no blank-named row at all — cohortB's shape, alone.
+    // No such window exists in this fixture set, and none was found in 7 days
+    // of prod (the 1,030-row equivalence diff returned zero disagreements).
+    expect(binOf('whitespace')).toBe('H');
+  });
+
+  it('still badges a blank album_title when album_id matches (arm (a) ignores the text)', () => {
+    // The regression guard. If the outer guard is ever tightened to
+    // `trim(coalesce(col,'')) <> ''` again, this is the test that fails.
+    expect(binOf('blankAlbumWithAlbumId')).toBe('H');
   });
 
   it('breaks a tie on the lowest rotation id, not the newest bin', () => {
@@ -238,5 +342,19 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
     // original cohort rather than flipping retroactively is the deliberate
     // choice documented at the subquery.
     expect(binOf('tieBreak')).toBe('L');
+  });
+
+  it('breaks a tie on the lowest id ACROSS arms, not within a single arm', () => {
+    // arm (b) holds the low id ('S'), arm (a) the high id ('H'). Only a sort
+    // over the whole union produces 'S'; pushing ORDER BY/LIMIT into an arm,
+    // or dropping r2.id from an arm's SELECT, yields 'H' here while every
+    // single-arm test above still passes.
+    expect(binOf('crossArm')).toBe('S');
+  });
+
+  it('handles one rotation row matched by two arms (duplicate row in the union)', () => {
+    // Emitted by both arm (a) and arm (b); ORDER BY … LIMIT 1 makes the
+    // duplicate harmless rather than a cardinality error.
+    expect(binOf('doubleMatch')).toBe('L');
   });
 });
