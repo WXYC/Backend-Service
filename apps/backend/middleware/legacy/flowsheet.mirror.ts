@@ -33,9 +33,38 @@ const getEntries = createBackendMirrorMiddleware<any>(async (req, data) => {
   return [`SELECT * FROM ${FLOWSHEET_ENTRY_TABLE} LIMIT ${limit} OFFSET ${offset};`];
 });
 
+/**
+ * Positive Show discriminant for the /flowsheet/join and /flowsheet/end
+ * responses, which serve join/leave semantics through the same registration:
+ * a co-host join or a guest-DJ leave (or the Auto-DJ orchestrator's restart
+ * recovery) answers with a ShowDJ instead of a Show (BS#1119). Discriminate
+ * on Show's OWN keys — `primary_dj_id` is present on every Show payload even
+ * when its value is null, because the response is a JSON round-trip of the
+ * full row — rather than duck-typing on fields the OTHER shape happens to
+ * lack (the old `show.id == null` form would silently re-open BS#1119 the day
+ * show_djs gains a serial id, exactly the trap the issue body named). An
+ * unrecognized shape (neither Show keys nor the ShowDJ `dj_id`) is skipped
+ * LOUDLY: if a future projection change strips Show's keys from the response,
+ * the mirror must not go quiet without a trace (BS#1119 follow-up review).
+ */
+const isShowPayload = (data: unknown): data is Show => {
+  if (typeof data !== 'object' || data == null) return false;
+  if ('primary_dj_id' in data && 'id' in data) return true;
+  if (!('dj_id' in data)) {
+    console.warn('[mirror] Unrecognized show-route payload shape; skipping mirror. keys=', Object.keys(data));
+  }
+  return false;
+};
+
 const startShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
+  // Mirroring a show creation needs a resolvable primary DJ; a Show with a
+  // NULL primary_dj_id (legacy/shadow shows, onDelete 'set null') stays
+  // unmirrored here — the reconcile cron's sweep 1 applies the same
+  // primary_dj_id IS NOT NULL predicate. ShowDJ co-host joins never reach
+  // this handler (isShowPayload below); whether their dj_join markers should
+  // mirror at all is BS#2094.
   const djId = show.primary_dj_id;
-  if (!djId || !show) return;
+  if (!djId) return;
 
   const dj = (await db.select().from(user).where(eq(user.id, djId)).limit(1))?.[0];
 
@@ -67,8 +96,9 @@ const startShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
   // START_OF_SHOW (type 9) entry (prod: BS shows.id 1949437 / tubafrenzy
   // 172277). `isNull(legacy_entry_id)` keeps a re-fire idempotent: once the
   // marker has been mirrored we never re-POST it (mirrors addEntry's BS#908
-  // loop guard). `endShow` deliberately keeps the DESC query — there `show_end`
-  // genuinely is the newest row.
+  // loop guard). `endShow` targets its `show_end` marker the same way — the
+  // "there show_end genuinely is the newest row" assumption this comment used
+  // to record was false under the co-host race (see endShow below).
   const announcementEntry = await db
     .select()
     .from(flowsheet)
@@ -90,15 +120,12 @@ const startShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
       }
     }
   }
-});
+}, isShowPayload);
 
 export const endShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
-  // BS#1119: /flowsheet/end serves leave semantics too — a guest-DJ leave (or
-  // the Auto-DJ orchestrator's restart recovery) responds with a ShowDJ, which
-  // has no `id`. Only a finalized Show carries the serial PK; discriminate on
-  // it rather than primary_dj_id, which is nullable on a real Show.
-  if (show.id == null) return;
-
+  // BS#1119's ShowDJ-vs-Show discrimination lives in `isShowPayload`, passed
+  // as this registration's shouldMirror gate — a guest leave never reaches
+  // this handler (and never pays the PostHog flag round-trip).
   const endMs = toMs(show.end_time ?? Date.now());
 
   // Resolve tubafrenzy show ID: in-memory cache → persisted legacy_show_id
@@ -108,11 +135,20 @@ export const endShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
     await mirrorSignoffShow(tubafrenzyShowId, endMs);
   }
 
-  // Mirror the show_end announcement entry
+  // Mirror the show_end announcement entry. Target the `show_end` marker
+  // explicitly — the same BS#1705 form as startShow's `show_start` query
+  // above. The old bare `ORDER BY play_order DESC LIMIT 1` assumed the marker
+  // is always the newest row, but the service writes the show_end marker
+  // BEFORE it commits end_time, so a co-host POST /flowsheet that squeaks
+  // past the active-show check lands with a higher play_order: the DESC query
+  // then re-mirrored that track (already mirrored by its own addEntry, with
+  // two racing legacy_entry_id persists) and the END_OF_SHOW marker never
+  // reached tubafrenzy. `isNull(legacy_entry_id)` keeps a re-fire idempotent,
+  // exactly like startShow's. BS#1119 follow-up review.
   const announcementEntry = await db
     .select()
     .from(flowsheet)
-    .where(eq(flowsheet.show_id, show.id))
+    .where(and(eq(flowsheet.show_id, show.id), eq(flowsheet.entry_type, 'show_end'), isNull(flowsheet.legacy_entry_id)))
     .orderBy(desc(flowsheet.play_order))
     .limit(1);
 
@@ -129,7 +165,7 @@ export const endShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
       }
     }
   }
-});
+}, isShowPayload);
 
 const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
   const startMs = entry?.add_time ? new Date(entry.add_time).getTime() : Date.now();

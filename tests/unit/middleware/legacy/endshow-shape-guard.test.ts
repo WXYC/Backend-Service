@@ -8,6 +8,14 @@
  * must not execute any endShow logic (signoff or the show_end announcement
  * re-query) on a ShowDJ payload.
  *
+ * Since the BS#1119 follow-up, the discrimination is the positive
+ * `isShowPayload` predicate passed as the registration's shouldMirror gate
+ * (mirror.middleware.ts), not an in-handler `show.id == null` check — these
+ * tests pin the gate's semantics: ShowDJ skips silently, an unrecognized
+ * shape skips LOUDLY (console.warn), and a real Show proceeds regardless of
+ * primary_dj_id nullability, resolving its tubafrenzy id through either the
+ * legacy_show_id column or the in-memory cache lane.
+ *
  * Harness follows mirror.loop-prevention.test.ts: real middleware, mocks only
  * at process boundaries (tubafrenzy HTTP client, database, PostHog, Sentry).
  */
@@ -17,6 +25,7 @@
 const mockMirrorSignoffShow = jest.fn().mockResolvedValue(undefined);
 const mockMirrorCreateEntry = jest.fn().mockResolvedValue(null);
 const mockGetCachedShowId = jest.fn().mockReturnValue(undefined);
+const mockCacheEntryId = jest.fn();
 const mockMapEntryToTubafrenzy = jest.fn().mockReturnValue({ artistName: 'test' });
 
 jest.mock('../../../../apps/backend/middleware/legacy/http.mirror', () => ({
@@ -24,7 +33,7 @@ jest.mock('../../../../apps/backend/middleware/legacy/http.mirror', () => ({
   mirrorCreateShow: jest.fn(),
   mirrorSignoffShow: mockMirrorSignoffShow,
   mirrorUpdateEntry: jest.fn(),
-  cacheEntryId: jest.fn(),
+  cacheEntryId: mockCacheEntryId,
   cacheShowId: jest.fn(),
   getCachedEntryId: jest.fn(),
   getCachedShowId: mockGetCachedShowId,
@@ -35,9 +44,10 @@ jest.mock('../../../../apps/backend/middleware/legacy/http.mirror', () => ({
   mapUpdateToTubafrenzy: jest.fn(),
 }));
 
+const mockDbUpdateWhere = jest.fn().mockResolvedValue(undefined);
 const mockDbUpdate = jest.fn().mockReturnValue({
   set: jest.fn().mockReturnValue({
-    where: jest.fn().mockResolvedValue(undefined),
+    where: mockDbUpdateWhere,
   }),
 });
 
@@ -61,25 +71,19 @@ jest.mock('@wxyc/database', () => ({
     update: mockDbUpdate,
   },
   user: {},
-  flowsheet: { id: 'id', legacy_entry_id: 'legacy_entry_id', show_id: 'show_id' },
+  flowsheet: { id: 'id', legacy_entry_id: 'legacy_entry_id', show_id: 'show_id', entry_type: 'entry_type' },
   shows: { id: 'id', legacy_show_id: 'legacy_show_id' },
 }));
 
+// Passthrough builders, mirroring mirror.loop-prevention.test.ts. Only the
+// operators flowsheet.mirror.ts actually imports are mocked (and/desc/eq/
+// isNull) so a drift between this list and the module's import surface fails
+// loudly as `undefined is not a function` instead of silently no-oping.
 jest.mock('drizzle-orm', () => ({
-  // Faithfully simulate postgres-js rejecting an `undefined` bind. The BS#1119
-  // prod symptom is the show_end announcement re-query binding
-  // `eq(flowsheet.show_id, undefined)` — a ShowDJ has no `id` — which throws in
-  // the driver and lands in Sentry once per guest leave. Making eq() throw on an
-  // undefined operand lets the ShowDJ test pin that exact symptom (the mirror
-  // catching into Sentry) rather than only the proxy "db.select was reached".
-  eq: jest.fn((column: unknown, value: unknown) => {
-    if (value === undefined) {
-      throw new Error('cannot bind undefined to a query parameter (simulated postgres-js undefined bind)');
-    }
-    return [column, value];
-  }),
+  eq: jest.fn((...args: unknown[]) => args),
+  and: jest.fn((...args: unknown[]) => args),
+  isNull: jest.fn((column: unknown) => ['isNull', column]),
   desc: jest.fn(),
-  asc: jest.fn(),
 }));
 
 jest.mock('posthog-node', () => ({
@@ -108,6 +112,7 @@ describe('endShow mirror payload shape guard (BS#1119)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetCachedShowId.mockReturnValue(undefined);
+    mockMirrorCreateEntry.mockResolvedValue(null);
     mockSelectLimitResult = [];
   });
 
@@ -120,21 +125,42 @@ describe('endShow mirror payload shape guard (BS#1119)', () => {
   };
 
   it('executes no endShow logic when a guest-DJ leave returns a ShowDJ payload', async () => {
-    await runMiddleware(flowsheetMirror.endShow, showDJPayload);
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await runMiddleware(flowsheetMirror.endShow, showDJPayload);
 
-    // Two independent regression pins — both flip red if the `show.id == null`
-    // guard is removed. Without the guard the show_end announcement re-query
-    // runs (mockDbSelect) and binds `show_id = undefined`, which the eq() mock
-    // rejects exactly as postgres-js does in prod — the mirror catches that
-    // throw into Sentry once per guest leave (mockCaptureException). The signoff
-    // is a secondary check: it stays silent either way because it is separately
-    // gated on a resolved tubafrenzy show id.
-    expect(mockDbSelect).not.toHaveBeenCalled();
-    expect(mockCaptureException).not.toHaveBeenCalled();
-    expect(mockMirrorSignoffShow).not.toHaveBeenCalled();
+      // The shouldMirror gate (isShowPayload) skips the handler entirely:
+      // nothing reaches Sentry, no announcement re-query runs, no signoff
+      // fires — and a recognized ShowDJ is a SILENT skip (the loud lane is
+      // reserved for unrecognized shapes, next test).
+      expect(mockCaptureException).not.toHaveBeenCalled();
+      expect(mockDbSelect).not.toHaveBeenCalled();
+      expect(mockMirrorSignoffShow).not.toHaveBeenCalled();
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
-  it('still signs off and mirrors the announcement when the primary DJ ends the show', async () => {
+  it('skips an unrecognized payload shape LOUDLY (console.warn) without running any mirror logic', async () => {
+    // Neither Show keys (id + primary_dj_id) nor the ShowDJ discriminant
+    // (dj_id): the shape a future projection change could produce if it
+    // strips Show's keys from the /flowsheet/end response. The mirror must
+    // not go quiet without a trace.
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await runMiddleware(flowsheetMirror.endShow, { unexpected: true });
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Unrecognized show-route payload'), ['unexpected']);
+      expect(mockDbSelect).not.toHaveBeenCalled();
+      expect(mockMirrorSignoffShow).not.toHaveBeenCalled();
+      expect(mockCaptureException).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('signs off, mirrors the show_end announcement, and persists its legacy_entry_id when the primary DJ ends the show', async () => {
     const endedShowPayload = {
       id: 200,
       primary_dj_id: 'primary-dj-user-id',
@@ -142,19 +168,31 @@ describe('endShow mirror payload shape guard (BS#1119)', () => {
       start_time: '2026-07-06T14:00:00.000Z',
       end_time: '2026-07-06T16:00:00.000Z',
     };
+    // The show_end marker row the announcement re-query finds.
+    const announcementRow = { id: 7, show_id: 200, entry_type: 'show_end', play_order: 3, legacy_entry_id: null };
+    mockSelectLimitResult = [announcementRow];
+    mockMirrorCreateEntry.mockResolvedValue(999001);
 
     await runMiddleware(flowsheetMirror.endShow, endedShowPayload);
 
     expect(mockMirrorSignoffShow).toHaveBeenCalledWith(171500, new Date('2026-07-06T16:00:00.000Z').getTime());
-    // The show_end announcement re-query ran against the finalized show
-    expect(mockDbSelect).toHaveBeenCalled();
+    // The announcement arm actually ran end-to-end: mapped against the
+    // resolved tubafrenzy show, POSTed, cached by flowsheet row id (BS#1103),
+    // and persisted back to legacy_entry_id.
+    expect(mockMapEntryToTubafrenzy).toHaveBeenCalledWith(announcementRow, 171500);
+    expect(mockMirrorCreateEntry).toHaveBeenCalledTimes(1);
+    expect(mockCacheEntryId).toHaveBeenCalledWith(7, 999001);
+    expect(mockDbUpdate).toHaveBeenCalled();
     expect(mockCaptureException).not.toHaveBeenCalled();
   });
 
-  it('still signs off a show whose primary DJ account was deleted mid-show', async () => {
-    // shows.primary_dj_id is nullable (onDelete: 'set null'). The guard must
-    // discriminate on `id`, not primary_dj_id truthiness — startShow's guard
-    // style would silently drop this signoff.
+  it('proceeds on a Show whose primary_dj_id is null (gate discriminates on Show keys, not primary_dj_id truthiness)', async () => {
+    // Guard-semantics pin ONLY: shows.primary_dj_id is nullable
+    // (onDelete: 'set null') and the payload still discriminates as a Show,
+    // so the mirror signs off. NOTE a real deleted-primary show cannot
+    // currently reach this mirror at all — the controller routes every
+    // caller to the guest-leave branch when primary_dj_id is NULL, which is
+    // its own defect: BS#2093.
     const orphanedShowPayload = {
       id: 201,
       primary_dj_id: null,
@@ -166,6 +204,28 @@ describe('endShow mirror payload shape guard (BS#1119)', () => {
     await runMiddleware(flowsheetMirror.endShow, orphanedShowPayload);
 
     expect(mockMirrorSignoffShow).toHaveBeenCalledWith(171501, new Date('2026-07-06T16:00:00.000Z').getTime());
+    expect(mockCaptureException).not.toHaveBeenCalled();
+  });
+
+  it('signs off through the in-memory cache lane when legacy_show_id is null (restart-resilience fallback order)', async () => {
+    // Pins the `getCachedShowId(show.id) ?? show.legacy_show_id` resolution:
+    // a show whose legacy_show_id persist failed but whose id is in the
+    // showIdMap must still sign off. Without this case, a wrong-discriminant
+    // mutant (e.g. gating on legacy_show_id instead of the Show shape) passes
+    // every other test in this file (BS#1119 follow-up review).
+    mockGetCachedShowId.mockReturnValue(171502);
+    const cacheOnlyShowPayload = {
+      id: 202,
+      primary_dj_id: 'primary-dj-user-id',
+      legacy_show_id: null,
+      start_time: '2026-07-06T14:00:00.000Z',
+      end_time: '2026-07-06T16:00:00.000Z',
+    };
+
+    await runMiddleware(flowsheetMirror.endShow, cacheOnlyShowPayload);
+
+    expect(mockGetCachedShowId).toHaveBeenCalledWith(202);
+    expect(mockMirrorSignoffShow).toHaveBeenCalledWith(171502, new Date('2026-07-06T16:00:00.000Z').getTime());
     expect(mockCaptureException).not.toHaveBeenCalled();
   });
 });

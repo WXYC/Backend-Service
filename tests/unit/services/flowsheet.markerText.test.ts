@@ -64,13 +64,9 @@ const setUpForEndShow = (djName: string | null, name: string | null) => {
   const flowsheetInsert = createMockQueryChain([{ id: 999 }]);
   db.insert.mockReturnValueOnce(flowsheetInsert);
 
-  // shows update
-  db.update.mockReturnValueOnce(createMockQueryChain([{}]));
-
-  // getLatestShow
-  const latestShowSelect = createMockQueryChain();
-  latestShowSelect.limit.mockResolvedValue([{ id: 42, end_time: new Date() }]);
-  db.select.mockReturnValueOnce(latestShowSelect);
+  // shows update — endShow returns this UPDATE's .returning() row directly
+  // (no getLatestShow re-read; that raced a concurrent join, BS#1119 follow-up)
+  db.update.mockReturnValueOnce(createMockQueryChain([{ id: 42, end_time: new Date() }]));
 
   return flowsheetInsert;
 };

@@ -15,7 +15,13 @@ async function isMirrorEnabled(req: Request): Promise<boolean> {
   }
 
   const client = getPostHogClient();
-  const distinctId = (req as any).user?.id ?? req.ip ?? 'anonymous';
+  // req.auth is what the auth middleware sets (shared/authentication
+  // auth.middleware.ts) — nothing in this codebase ever assigns req.user, so
+  // reading it here meant every flag evaluation fell back to req.ip (one
+  // EC2-local value) and per-DJ targeting of `backend-mirror` silently could
+  // not work on the live path, diverging from jobs/legacy-mirror-reconcile
+  // which keys the same flag on primary_dj_id. BS#1119 follow-up review.
+  const distinctId = req.auth?.id ?? req.ip ?? 'anonymous';
   const enabled = await client.isFeatureEnabled('backend-mirror', distinctId);
   if (enabled === undefined) {
     // PostHog couldn't resolve the flag (client error/timeout/unknown flag):
@@ -72,9 +78,16 @@ export const createBackendMirrorMiddleware =
  * HTTP mirror middleware factory. Same response-tapping and PostHog feature flag
  * check as createBackendMirrorMiddleware, but calls an async callback that makes
  * HTTP calls instead of returning SQL strings for the command queue.
+ *
+ * `shouldMirror` (optional) gates the payload SHAPE before any other work: a
+ * route that serves two response shapes through one registration (BS#1119 —
+ * /flowsheet/end answers a ShowDJ for guest leaves, /flowsheet/join a ShowDJ
+ * for co-host joins) passes a type-guard predicate so non-mirrorable payloads
+ * skip out here, before the PostHog round-trip `isMirrorEnabled` pays in prod,
+ * and so the `as T` cast below is backed by a runtime check instead of hope.
  */
 export const createHttpMirrorMiddleware =
-  <T>(execute: (req: Request, data: T) => Promise<void>) =>
+  <T>(execute: (req: Request, data: T) => Promise<void>, shouldMirror?: (data: unknown) => data is T) =>
   async (req: Request, res: Response, next: NextFunction) => {
     tapJsonResponse(res);
 
@@ -85,6 +98,7 @@ export const createHttpMirrorMiddleware =
           const data = (res.locals as any).mirrorData as T | undefined;
 
           if (!ok || data == null) return;
+          if (shouldMirror && !shouldMirror(data)) return;
 
           const mirrorOn = await isMirrorEnabled(req);
           if (!mirrorOn) return;

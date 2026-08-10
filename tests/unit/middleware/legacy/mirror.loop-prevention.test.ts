@@ -64,10 +64,15 @@ jest.mock('@wxyc/database', () => ({
   shows: { id: 'id', legacy_show_id: 'legacy_show_id' },
 }));
 
+// Mirrors flowsheet.mirror.ts's actual drizzle-orm import surface
+// (and/desc/eq/isNull) — a mocked operator the module doesn't import is dead
+// weight, and an imported operator missing here fails as `undefined is not a
+// function` the first time a test exercises the path that calls it.
 jest.mock('drizzle-orm', () => ({
   eq: jest.fn((...args: unknown[]) => args),
+  and: jest.fn((...args: unknown[]) => args),
+  isNull: jest.fn((column: unknown) => ['isNull', column]),
   desc: jest.fn(),
-  asc: jest.fn(),
 }));
 
 jest.mock('posthog-node', () => ({

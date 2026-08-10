@@ -1136,10 +1136,21 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
     message,
   });
 
-  await db.update(shows).set({ end_time: new Date() }).where(eq(shows.id, currentShow.id));
+  // Return the row this UPDATE finalized — never a re-read. The previous
+  // `return (await getLatestShow())!` raced a concurrent POST /flowsheet/join:
+  // a show N+1 created between the UPDATE and the re-read is what got
+  // returned, and the mirror middleware then signed off the WRONG, still-live
+  // show in tubafrenzy while show N's signoff was silently dropped (BS#1119
+  // follow-up review). The non-null assertion is safe: the WHERE keys on the
+  // currentShow.id the controller just fetched, and no code path deletes
+  // `shows` rows mid-request.
+  const finalized = await db
+    .update(shows)
+    .set({ end_time: new Date() })
+    .where(eq(shows.id, currentShow.id))
+    .returning();
 
-  // We just ended this show, so a latest show always exists here
-  return (await getLatestShow())!;
+  return finalized[0]!;
 };
 
 export const leaveShow = async (dj_id: string, currentShow: Show): Promise<ShowDJ> => {
