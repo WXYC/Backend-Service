@@ -1,0 +1,58 @@
+-- BS#2082 (paired with the arm-(c) drop in the same PR from
+-- apps/backend/services/flowsheet.service.ts's FSEntryFieldsRaw.rotation_bin
+-- fallback subquery). Composite expression B-tree on `rotation` covering the
+-- fallback's cohort (b): a flowsheet entry's own (artist, album) snapshot
+-- matched against a rotation row's denormalized fields, both sides folded
+-- through `lower(trim(coalesce(col, '')))` for case/whitespace-insensitive
+-- equality.
+--
+-- Why this is needed now, not before: with cohort (c) (a library+artists
+-- LEFT JOIN match) still in the subquery, prod EXPLAIN (ANALYZE, BUFFERS)
+-- showed the whole fallback costing 527.2ms / 42,965 buffers on a
+-- page-0/limit-30 read — cohort (c)'s two extra joins dominated that
+-- (42,733 of the 42,965 buffer hits). Dropping cohort (c) (never the sole
+-- matcher for any row per a 20,000-row prod sample) took the same read to
+-- 77ms, with the residual cost being an unindexed Seq Scan of `rotation`
+-- (21,625 rows) once per firing row for cohort (b). This index removes that
+-- scan: the planner can BitmapOr it against `album_id_idx` (cohort (a))
+-- instead of walking the whole table.
+--
+-- Expression must match the fallback's cohort-(b) predicate exactly
+-- (apps/backend/services/flowsheet.service.ts):
+--   lower(trim(coalesce(r2.artist_name, ''))) = lower(trim(flowsheet.artist_name))
+--   AND lower(trim(coalesce(r2.album_title, ''))) = lower(trim(flowsheet.album_title))
+-- A mismatched expression would build an index the planner can never use
+-- for this query — Postgres only matches an expression index against a
+-- textually/semantically equivalent expression in the query, not a value-
+-- equivalent one.
+--
+-- Not partial: cohort (b)'s WHERE also bounds `add_date`/`kill_date`
+-- against the flowsheet entry's own `add_time`, which is a per-row
+-- parameter, not a fixed predicate a partial index's WHERE clause can
+-- express (unlike `flowsheet_album_link_lookup_idx`'s `album_id IS NOT
+-- NULL`, which is a fixed structural condition — see migration 0081).
+--
+-- Production ops:
+--   - This is NOT `CREATE INDEX CONCURRENTLY` because Drizzle wraps each
+--     migration file in a transaction and `CREATE INDEX CONCURRENTLY
+--     cannot run inside a transaction block` — same constraint as 0057,
+--     0061, 0068, 0070, 0074, 0078, 0080, 0081, 0139, 0144.
+--   - Build out-of-band on prod FIRST, before the arm-(c) drop in this same
+--     PR is deployed (the #2032 / #2077 procedure):
+--       CREATE INDEX CONCURRENTLY IF NOT EXISTS "rotation_artist_album_match_idx"
+--         ON "wxyc_schema"."rotation"
+--         USING btree (lower(trim(coalesce("artist_name", ''))), lower(trim(coalesce("album_title", ''))));
+--     No AccessExclusiveLock, so no write pause on a table the music
+--     director's rotation-form writes hit interactively.
+--   - Then merge this PR. `IF NOT EXISTS` makes the migration a no-op
+--     against the prod DB where the index already exists, while fresh dev
+--     and CI databases pick it up on first migrate. Same shape as 0068,
+--     0070, 0074, 0080, 0081, 0139, 0144.
+--   - Re-measure EXPLAIN (ANALYZE, BUFFERS) after the build (and after
+--     dropping any scratch/interim index used to test the shape first) —
+--     a shadowing index changes plan shape, per the #2032 lesson.
+--   - `rotation` is a small table (21,625 rows per the BS#2082 EXPLAIN);
+--     expect a build on the order of seconds, not the ~27s the much larger
+--     `flowsheet` composite in 0139 took.
+
+CREATE INDEX IF NOT EXISTS "rotation_artist_album_match_idx" ON "wxyc_schema"."rotation" USING btree (lower(trim(coalesce("artist_name", ''))),lower(trim(coalesce("album_title", ''))));

@@ -152,12 +152,23 @@ const FSEntryFieldsRaw = {
   rotation_id: flowsheet.rotation_id,
   // Primary source is the FK join (`leftJoin(rotation, rotation.id = flowsheet.rotation_id)`).
   // Fallback fires only when that join misses (rotation.rotation_bin IS NULL) and the entry
-  // looks like a real track with non-empty artist+album. Three match cohorts:
+  // looks like a real track with non-empty artist+album. Two match cohorts:
   //   (a) flowsheet.album_id matches an active rotation.album_id (library-linked rotation rows);
   //   (b) (artist, album) snapshot matches active rotation row's denormalized fields
-  //       (library-unlinked rotation rows hold the snapshot directly);
-  //   (c) (artist, album) matches the library+artists join on an active rotation row's
-  //       album_id (library-linked rows whose denorm fields are NULL).
+  //       (library-unlinked rotation rows hold the snapshot directly).
+  // BS#2082 dropped a third cohort that used to live here: (c) (artist, album) matched via a
+  // library+artists LEFT JOIN on an active rotation row's album_id, for library-linked rows
+  // whose own denorm fields were NULL. Prod EXPLAIN (ANALYZE, BUFFERS) attributed 42,733 of
+  // 42,965 buffer hits (527ms of a 527.2ms page-0/limit-30 read) to that subplan's Seq Scans
+  // of `library` + `rotation` + a hash of `artists`; a 20,000-row arm-contribution sample
+  // measured cohort (c) never the SOLE matcher for any row — everything it badged, (a) or (b)
+  // already badged. Dropping it (and its `l2`/`a2` joins) took the same page read to 77ms
+  // measured on prod, with the residual cost being an unindexed `rotation` scan per firing row
+  // that the paired migration's expression index on
+  // (lower(trim(coalesce(artist_name,''))), lower(trim(coalesce(album_title,'')))) targets.
+  // Equivalence was verified value-identical (not just hit-identical) over a 3,000-row recent
+  // sample and extended to full history by `scripts/audit/bs_2082_rotation_bin_arm_c_sweep.sql`
+  // — see BS#2082 for the sweep result recorded before this drop was allowed to merge.
   // The rotation window is bounded on BOTH sides against the flowsheet entry's add_time so
   // historical rotation status is preserved: add_date <= add_time (inclusive lower bound —
   // a play that aired before the release entered rotation is not badged; BS#1526) and
@@ -182,8 +193,6 @@ const FSEntryFieldsRaw = {
       THEN (
         SELECT r2.rotation_bin
         FROM ${rotation} r2
-        LEFT JOIN ${library} l2 ON l2.id = r2.album_id
-        LEFT JOIN ${artists} a2 ON a2.id = l2.artist_id
         WHERE r2.add_date <= ${flowsheet.add_time}::date
           AND (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
           AND (
@@ -191,10 +200,6 @@ const FSEntryFieldsRaw = {
             OR (
               lower(trim(coalesce(r2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
               AND lower(trim(coalesce(r2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
-            )
-            OR (
-              lower(trim(coalesce(a2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
-              AND lower(trim(coalesce(l2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
             )
           )
         ORDER BY r2.id

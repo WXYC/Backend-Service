@@ -849,11 +849,16 @@ describe('rotation_bin read-path fallback (dj-site#750)', () => {
   // When the picker emit path doesn't persist flowsheet.rotation_id (the
   // 2026-06-04 regression cohort), the primary FK join leaves rotation_bin
   // NULL and dj-site's badge disappears. The read path's COALESCE fallback
-  // recovers the bin via (a) album_id match, (b) denorm artist/album match
-  // on the rotation row itself (NULL album_id, library-unlinked snapshot),
-  // or (c) library+artists JOIN match via the rotation row's album_id.
-  // Seed has rotation row 1 = album_id 1 (Built to Spill — Keep it Like a
-  // Secret) in bin 'L'. The cohort-(b) test below provisions an extra
+  // recovers the bin via (a) album_id match or (b) denorm artist/album
+  // match on the rotation row itself (NULL album_id, library-unlinked
+  // snapshot). BS#2082 dropped a former cohort (c) — a library+artists
+  // JOIN match via the rotation row's album_id — after a prod
+  // arm-contribution sample found it never the sole matcher for any row;
+  // the "stays NULL now that cohort (c) is gone" test below pins that
+  // removal. Seed has rotation row 1 = album_id 1 (Built to Spill — Keep
+  // it Like a Secret) in bin 'L', with NULL denorm artist_name/album_title
+  // columns (library-linked, no snapshot) — matchable only through the
+  // dropped cohort (c). The cohort-(b) test below provisions an extra
   // library-unlinked rotation row inline; the kill_date test provisions a
   // killed rotation row. Both are torn down in afterAll.
 
@@ -917,9 +922,15 @@ describe('rotation_bin read-path fallback (dj-site#750)', () => {
     expect(track.rotation_bin).toEqual('L');
   });
 
-  test('rotation_bin populated via library+artists denorm fallback when album_id and rotation_id are both NULL', async () => {
-    // Simulates the worst case: snapshot branch wrote no album_id and no rotation_id,
-    // only the typed/picker-seeded artist+album strings.
+  test('rotation_bin stays NULL now that cohort (c) is gone: (artist, album) matches library+artists join only, not rotation denorm columns (BS#2082)', async () => {
+    // Former cohort (c) coverage. Rotation row 1 has album_id 1 (Built to
+    // Spill — Keep it Like a Secret) but NULL denorm artist_name/
+    // album_title (see dev_env/seed_db.sql), so the (artist, album) string
+    // pair below could only ever match via the dropped library+artists
+    // JOIN arm — never via cohort (b), which reads rotation's own denorm
+    // columns. Post-BS#2082 this is exactly a no-match case: the fallback
+    // fires (rotation_id NULL, non-empty artist+album) but nothing in the
+    // surviving (a)/(b) cohorts matches it, so rotation_bin stays NULL.
     await request
       .post('/flowsheet')
       .set('Authorization', global.access_token)
@@ -936,7 +947,7 @@ describe('rotation_bin read-path fallback (dj-site#750)', () => {
     expect(track).toBeDefined();
     expect(track.album_id).toBeNull();
     expect(track.rotation_id).toBeNull();
-    expect(track.rotation_bin).toEqual('L');
+    expect(track.rotation_bin).toBeNull();
   });
 
   test('rotation_bin stays NULL when (artist, album) does not match any active rotation row', async () => {

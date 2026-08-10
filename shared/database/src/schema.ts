@@ -967,6 +967,23 @@ export const rotation = wxyc_schema.table(
   (table) => {
     return {
       albumIdIdx: index('album_id_idx').on(table.album_id),
+      // BS#2082. Composite expression B-tree backing cohort (b) of the
+      // `rotation_bin` COALESCE fallback (apps/backend/services/
+      // flowsheet.service.ts): `lower(trim(coalesce(artist_name, '')))` /
+      // `lower(trim(coalesce(album_title, '')))` equality against a
+      // flowsheet entry's own (artist, album) snapshot. The same PR dropped
+      // cohort (c) (a library+artists LEFT JOIN match) from that fallback —
+      // never the sole matcher per prod measurement — leaving cohort (b)'s
+      // unindexed `rotation` Seq Scan (21,625 rows) as the residual cost
+      // per firing row. This index lets the planner BitmapOr cohort (b)
+      // against `album_id_idx` (cohort (a)) instead of scanning. Built
+      // CONCURRENTLY on prod first (see the migration file's header);
+      // `IF NOT EXISTS` makes the migration a no-op there while fresh
+      // dev/CI databases pick the index up on first migrate.
+      rotationArtistAlbumMatchIdx: index('rotation_artist_album_match_idx').on(
+        sql`lower(trim(coalesce(${table.artist_name}, '')))`,
+        sql`lower(trim(coalesce(${table.album_title}, '')))`
+      ),
       // legacy_rotation_id is the surrogate key tubafrenzy assigns each
       // rotation row; one row per legacy_rotation_id by tubafrenzy's invariant.
       // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
