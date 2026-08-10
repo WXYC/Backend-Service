@@ -236,10 +236,17 @@ const FSEntryFieldsRaw = {
         AND coalesce(${flowsheet.album_title}, '') <> ''
       THEN (
         SELECT t.rotation_bin FROM (
-          -- (a) library-linked rotation rows, matched on album_id (album_id_idx)
+          -- (a) library-linked rotation rows, matched on album_id (album_id_idx).
+          --     There is deliberately no "album_id IS NOT NULL" guard here:
+          --     SQL equality against NULL is NULL, never true, so a free-form
+          --     entry already matches nothing. That guard was inherited from
+          --     the OR form, where it was equally redundant. Removing it was
+          --     verified equivalent over 1,030 real rows plus a synthetic
+          --     NULL-album_id row: 0 disagreements, identical buffers.
+          --     (No backticks in this template -- they close the sql tag.)
           SELECT r2.id, r2.rotation_bin
           FROM ${rotation} r2
-          WHERE ${flowsheet.album_id} IS NOT NULL AND r2.album_id = ${flowsheet.album_id}
+          WHERE r2.album_id = ${flowsheet.album_id}
             AND r2.add_date <= ${flowsheet.add_time}::date
             AND (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
           UNION ALL

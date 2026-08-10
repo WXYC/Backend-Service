@@ -26,14 +26,19 @@
  *     read, so it never hit the multiplier that made the read path time out.
  *     It does still pay the full 239-buffer / ~11.7 ms cold seq scan of
  *     `rotation` per call, and the two new indexes cannot help it while it
- *     stays an OR. Converting it is tracked separately; if you do, keep the
- *     cohort semantics identical to the read path and re-check this list.
+ *     stays an OR. Tracked in BS#2088, which expects to close WONTFIX at the
+ *     tubafrenzy turndown; if you do convert it, keep the cohort semantics
+ *     identical to the read path and re-check this list.
  *   - Arm (c) join type (BS#2080): the read path's third cohort now uses inner
  *     JOINs where this helper still uses LEFT JOINs. They agree except when
  *     the entry's artist AND album both trim to '', where the LEFT JOIN form
  *     matches the NULL side of every library-less active rotation row and
  *     returns a badge. The read path deliberately no longer does; this helper
- *     still would.
+ *     still would. In practice arm (b) shadows this on BOTH surfaces — a
+ *     library-linked rotation row carries NULL denormalized names, which
+ *     coalesce to '' and so match any blank entry — leaving the divergence to
+ *     a window holding a library-LESS active row with non-blank names and no
+ *     blank-named row at all. None in a 7-day prod sample. Also BS#2088.
  *   - Gate: read-path's outer CASE uses `${flowsheet.rotation_id} IS NULL`;
  *     this helper's JS guard matches via `entry.rotation_id == null` so
  *     non-NULL values (including 0 and negatives, theoretical but
