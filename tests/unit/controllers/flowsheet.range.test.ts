@@ -48,7 +48,7 @@ const makeRes = () => {
   return res;
 };
 
-const invoke = async (query: Record<string, string | undefined>) => {
+const invoke = async (query: Record<string, string | string[] | undefined>) => {
   const req = { query } as unknown as Request;
   const res = makeRes();
   const next = jest.fn();
@@ -115,6 +115,70 @@ describe('getEntriesInRange — parameter validation', () => {
   it('every 400 carries a message body', async () => {
     const { res } = await invoke({ start: 'nope', end: 'nope' });
     expect(res._body).toEqual(expect.objectContaining({ message: expect.any(String) }));
+  });
+
+  // Express 5's default ('simple') query parser yields an ARRAY for a repeated
+  // key, so `req.query.start` is not always a string despite the handler's
+  // declared type. Calling a string method on it throws synchronously, and an
+  // async handler's throw becomes a rejected promise that Express forwards to
+  // `errorHandler` — a 500 plus one Sentry capture, on an unauthenticated and
+  // unratelimited route. `searchFlowsheetEndpoint`, the sibling public read,
+  // escapes this only because `parseInt` coerces an array instead of throwing.
+  it.each([
+    ['a repeated start', { start: ['1', '2'], end: String(MIDNIGHT_ET + DAY_MS) }],
+    ['a repeated end', { start: String(MIDNIGHT_ET), end: ['1', '2'] }],
+    ['both repeated', { start: ['1', '2'], end: ['3', '4'] }],
+  ])('400s rather than throwing on %s', async (_label, query) => {
+    const { res, next } = await invoke(query);
+    expect(res._status).toBe(400);
+    expect(next).not.toHaveBeenCalled();
+    expect(getEntriesInTimeWindow).not.toHaveBeenCalled();
+  });
+
+  // The guard has to bound the POSTGRES timestamptz range, not the JS Date
+  // range: `new Date(8.64e15).toISOString()` is '+275760-09-13T00:00:00.000Z',
+  // an expanded-year form Postgres cannot parse. Drizzle's timestamp mapper is
+  // `value.toISOString()`, so such a value reaches the driver verbatim and the
+  // query throws — another 500 on a public route. Year 9999 ends at 2.53e14.
+  it.each([
+    ['just past the far future', 253402300800000],
+    ['the JS Date maximum', 8640000000000000],
+    ['the JS Date minimum', -8640000000000000],
+    ['before year 1', -62167219200000 - 86400000],
+  ])('400s on an epoch outside the storable range (%s)', async (_label, start) => {
+    const { res, next } = await invoke({ start: String(start), end: String(start + 1000) });
+    expect(res._status).toBe(400);
+    expect(next).not.toHaveBeenCalled();
+    expect(getEntriesInTimeWindow).not.toHaveBeenCalled();
+  });
+
+  it('accepts an epoch at the edges of the storable range', async () => {
+    const { res } = await invoke({ start: String(MIDNIGHT_ET), end: String(MIDNIGHT_ET + DAY_MS) });
+    expect(res._status).toBe(200);
+  });
+
+  // `Number()` is deliberately used over `parseInt` (the docstring explains
+  // why), but it accepts more than the docstring's "plain integer": radix
+  // prefixes and surrounding whitespace both parse to a finite integer and
+  // would be served as a plausible-looking window instead of rejected.
+  it.each([
+    ['hex', '0x1E240'],
+    ['binary', '0b101'],
+    ['octal', '0o17'],
+    ['leading/trailing whitespace', '  1780000000000  '],
+    ['a positive sign', '+1780000000000'],
+    ['integral scientific notation', '1e12'],
+    ['Infinity', 'Infinity'],
+  ])('400s on a %s start', async (_label, start) => {
+    const { res } = await invoke({ start, end: String(MIDNIGHT_ET + DAY_MS) });
+    expect(res._status).toBe(400);
+    expect(getEntriesInTimeWindow).not.toHaveBeenCalled();
+  });
+
+  it('still accepts a negative epoch (pre-1970 flowsheet history is in range)', async () => {
+    const start = Date.UTC(1969, 0, 1);
+    const { res } = await invoke({ start: String(start), end: String(start + DAY_MS) });
+    expect(res._status).toBe(200);
   });
 });
 

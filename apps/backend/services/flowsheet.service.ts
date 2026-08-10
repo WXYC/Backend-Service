@@ -454,14 +454,27 @@ export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
  * which is distinct from a row whose `djName` is unusable — see the
  * asymmetric legacy handling below, preserved verbatim from the original.
  */
+/**
+ * The first link of the chain, on its own: a usable per-show override, or null.
+ *
+ * Shared with `resolveDjNameForShow` below, which needs to know whether the
+ * override wins BEFORE deciding to spend a query on the user row. Exported as
+ * one function rather than re-tested there, so the rule that decides what
+ * reaches a public wire has exactly one definition.
+ */
+const showDjNameOverride = (dj_name_override: string | null): string | null => {
+  const override = (dj_name_override ?? '').trim();
+  return override.length > 0 ? override : null;
+};
+
 export const resolveShowDjName = (input: {
   dj_name_override: string | null;
   legacy_dj_name: string | null;
   primary_dj_id: string | null;
   user: { djName: string | null } | null;
 }): string | null => {
-  const override = (input.dj_name_override ?? '').trim();
-  if (override.length > 0) return override;
+  const override = showDjNameOverride(input.dj_name_override);
+  if (override !== null) return override;
 
   const legacy = input.legacy_dj_name;
   if (input.primary_dj_id == null) return legacy;
@@ -485,9 +498,10 @@ export const resolveDjNameForShow = async (show: Show): Promise<string | null> =
   };
 
   // Skip the lookup entirely when the chain can't reach it — an override wins
-  // outright, and a show with no linked DJ has no row to fetch.
-  const override = (base.dj_name_override ?? '').trim();
-  if (override.length > 0 || primaryDjId == null) {
+  // outright, and a show with no linked DJ has no row to fetch. Both tests
+  // defer to the shared definitions rather than restating them: a copy of the
+  // override rule here is exactly the drift the extraction exists to prevent.
+  if (showDjNameOverride(base.dj_name_override) !== null || primaryDjId == null) {
     return resolveShowDjName({ ...base, user: null });
   }
 
@@ -642,9 +656,22 @@ export const getEntriesInTimeWindow = async (start: Date, end: Date): Promise<IF
  * delivery was dropped and the column stayed NULL permanently (nothing
  * re-closes it on a schedule — BS#2065). Reading NULL as open-ended would make
  * every one of those orphaned historical shows intersect every window forever,
- * so an open-ended show is included only when its `start_time` falls inside the
- * window. A genuinely live show satisfies that on the windows a listener
- * actually asks for.
+ * so an open-ended show is included on its timestamps only when `start_time`
+ * falls inside the window.
+ *
+ * That timestamp rule alone is not sufficient, which is what the third arm is
+ * for. An overnight show that signed on at 22:00 and is still live at 01:00
+ * fails both timestamp arms for today's window — `end_time` is NULL and
+ * `start_time` is in yesterday — yet `getEntriesInTimeWindow` still returns
+ * its post-midnight entries, each carrying that `show_id`. api.yaml promises
+ * the opposite ("Matches `FlowsheetRangeEntry.show_id` for every entry
+ * belonging to this show"; "Segment on `show_id`"), so dropping the show hands
+ * `archive` an unresolvable id. The same gap swallows every dropped-`show_end`
+ * show that still has entries in the asked-for window. Including any show an
+ * in-window entry references closes it, and does so without re-admitting the
+ * orphaned shows the NULL rule exists to exclude: an orphan with no entries
+ * here is still absent. The subquery windows on `add_time`, so it is served by
+ * the same `flowsheet_add_time_idx` (migration 0144) the entries read uses.
  *
  * The DJ handle is resolved through the shared `resolveShowDjName` chain with
  * the user row LEFT JOINed in — one query for the whole window, not one per
@@ -674,7 +701,20 @@ export const getShowsInTimeWindow = async (start: Date, end: Date): Promise<Flow
         // a < d AND c < b, so a show that ended exactly at the window's
         // first instant does not overlap it.
         and(isNotNull(shows.end_time), lt(shows.start_time, end), gt(shows.end_time, start)),
-        and(isNull(shows.end_time), gte(shows.start_time, start), lt(shows.start_time, end))
+        and(isNull(shows.end_time), gte(shows.start_time, start), lt(shows.start_time, end)),
+        // Referenced by an entry in this window (see the docstring): the arm
+        // that keeps `entries[].show_id` resolvable when the timestamps alone
+        // would drop the show. Built with the typed query builder rather than
+        // a raw `sql` template on purpose — the postgres-js driver's
+        // timestamptz serializer override mangles a JS Date passed through
+        // `${...}`, and the column-aware encoder is what sidesteps it.
+        inArray(
+          shows.id,
+          db
+            .selectDistinct({ id: flowsheet.show_id })
+            .from(flowsheet)
+            .where(and(isNotNull(flowsheet.show_id), gte(flowsheet.add_time, start), lt(flowsheet.add_time, end)))
+        )
       )
     )
     // `id` is a deterministic tie-break for shows sharing a start_time; the
