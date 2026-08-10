@@ -83,7 +83,24 @@ gzip_types        application/json application/javascript text/javascript text/c
 
 Measured on `/playlists/recentEntries`: 50,697 → 9,128 bytes on the wire (5.6x, 82% off), decoded body byte-identical.
 
-Four things about that block are load-bearing and non-obvious:
+### What it buys, in time
+
+Measured 2026-08-09 from a single residential vantage point at ~67 ms RTT, randomized arm order, medians of n=10–14. "Response time" excludes DNS/TCP/TLS setup, so it is what a client with connection reuse (iOS `URLSession`, dj-site) actually experiences:
+
+| Endpoint                   | Bytes          | Response time | Saving         |
+| -------------------------- | -------------- | ------------- | -------------- |
+| `/playlists/recentEntries` | 50,704 → 9,105 | 210 → 105 ms  | ~105 ms (−50%) |
+| `/flowsheet`               | 26,948 → 6,852 | 624 → 570 ms  | ~54 ms (−9%)   |
+
+**The win is round trips, not bandwidth**, and that determines how the number generalizes. The compressed body's transfer time is ~0.1 ms — it lands in a single burst — while the uncompressed one takes ~70 ms, almost exactly one extra RTT. That is the congestion window: ~9 KB fits inside the initial cwnd (10 MSS ≈ 14.6 KB), 27–50 KB does not and has to wait for it to grow. So the saving scales with a client's **RTT**, not its throughput: a phone on cellular at 150 ms RTT should save more than the table shows, and a fatter pipe will not shrink it. That is the opposite of the usual intuition that compression is a slow-connection optimization.
+
+Read the two rows as different things. `/flowsheet` spends ~570 ms in the backend before nginx sees a byte, so compression takes 9% off a number dominated by query time — real, but not the lever on that endpoint. `/playlists/recentEntries` is the honest measure of what compression alone does.
+
+Server-side cost is not observable at this volume: nginx workers at 0.0% CPU, load average 0.28 on 2 cores, at ~23K requests/day. `gzip_comp_level 5` (rather than 9) was chosen on a measured 1.3% size delta for materially more CPU — don't raise it without a reason.
+
+Caveats worth keeping attached to these numbers: one network path, one client, small n. The uncompressed arm has a fat tail (one sample at 782 ms against a 210 ms median), so the mean saving is larger and noisier than the medians above. No cellular measurement was taken, which is the iOS app's real case. And anything under `gzip_min_length` saves nothing by design.
+
+Four things about the directive block are load-bearing and non-obvious:
 
 - **`gzip_types` is an opt-in allowlist**, which is why the SSE guard works at all — and why `text/html` is absent (nginx always compresses it and it cannot be removed from the list).
 - **Both `application/javascript` and `text/javascript` are listed, and only the second one matches.** `swagger-ui-express` (`apps/backend/app.ts`) serves its 1.5 MB `swagger-ui-bundle.js` through `express.static` → `send@1.2.1` → send's **nested** `mime-types@3.0.2`, which resolves `.js` to `text/javascript`. The hoisted root `mime-types@2.1.35` still says `application/javascript` — checking that one instead is how the largest compressible asset on the host was nearly excluded. Verify against the resolving package, not the hoisted one.
