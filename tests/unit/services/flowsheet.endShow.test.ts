@@ -30,13 +30,9 @@ describe('endShow', () => {
     const flowsheetInsert = createMockQueryChain([{ id: 999 }]);
     db.insert.mockReturnValueOnce(flowsheetInsert);
 
-    // shows update (end_time)
-    db.update.mockReturnValueOnce(createMockQueryChain([{}]));
-
-    // getLatestShow() select chain — returns the show we just ended
-    const latestShowSelect = createMockQueryChain();
-    latestShowSelect.limit.mockResolvedValue([{ id: 42, end_time: new Date() }]);
-    db.select.mockReturnValueOnce(latestShowSelect);
+    // shows update (end_time) — endShow returns this UPDATE's .returning()
+    // row directly (no getLatestShow re-read; BS#1119 follow-up)
+    db.update.mockReturnValueOnce(createMockQueryChain([{ id: 42, end_time: new Date() }]));
 
     await endShow({ id: 42, primary_dj_id: 'user-1' } as unknown as Parameters<typeof endShow>[0]);
 
@@ -62,11 +58,7 @@ describe('endShow', () => {
 
     const flowsheetInsert = createMockQueryChain([{ id: 999 }]);
     db.insert.mockReturnValueOnce(flowsheetInsert);
-    db.update.mockReturnValueOnce(createMockQueryChain([{}]));
-
-    const latestShowSelect = createMockQueryChain();
-    latestShowSelect.limit.mockResolvedValue([{ id: 42, end_time: new Date() }]);
-    db.select.mockReturnValueOnce(latestShowSelect);
+    db.update.mockReturnValueOnce(createMockQueryChain([{ id: 42, end_time: new Date() }]));
 
     await endShow({ id: 42, primary_dj_id: 'user-1' } as unknown as Parameters<typeof endShow>[0]);
 

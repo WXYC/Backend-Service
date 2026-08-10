@@ -59,10 +59,14 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
     const entryPosts = tubafrenzyRequests.filter((r) => r.method === 'POST' && r.path.includes('/api/flowsheetEntry'));
     expect(entryPosts.length).toBeGreaterThanOrEqual(1);
 
-    const body = entryPosts[entryPosts.length - 1].body;
-    expect(body.artistName).toBe('Autechre');
-    expect(body.songTitle).toBe('VI Scose Poise');
-    expect(body.releaseTitle).toBe('Confield');
+    // Select the track's POST explicitly rather than assuming it arrived
+    // last: the beforeEach join's show_start announcement mirror is
+    // fire-and-forget and can land after this entry's POST under load —
+    // cross-request mirror ordering is not part of this test's contract.
+    const trackPost = entryPosts.find((r) => r.body.artistName === 'Autechre');
+    expect(trackPost).toBeDefined();
+    expect(trackPost.body.songTitle).toBe('VI Scose Poise');
+    expect(trackPost.body.releaseTitle).toBe('Confield');
   });
 
   test('mirror includes correct entry type for track entries', async () => {
@@ -154,31 +158,81 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
  * end-to-end signoff CONTRACT: a guest leave signs off zero times and leaves
  * the show live, while the primary's end signs off exactly once.
  *
- * The guard's unit-level regression pin lives in endshow-shape-guard.test.ts.
- * These black-box assertions hold with or without the `show.id == null` guard —
- * signoff is separately gated on a resolved tubafrenzy show id, so it stays
- * silent for a ShowDJ either way — so their value here is contract coverage
- * plus the primary-plus-guest fixture BS#1533's dj-scoping tests reuse.
+ * The shape discrimination's unit-level regression pins live in
+ * endshow-shape-guard.test.ts (the `isShowPayload` shouldMirror gate). These
+ * black-box assertions are contract coverage plus the primary-plus-guest
+ * fixture BS#1533's dj-scoping tests reuse — the fixture identity is asserted
+ * rather than assumed, and synchronization with the fire-and-forget mirror is
+ * poll-based (the CDC specs' waitForEvent precedent) except where the
+ * contract is "nothing arrives", which honestly needs a fixed settle window.
  */
 describe('endShow mirror shape guard on guest-DJ leave (BS#1119)', () => {
   const isSignoff = (r) => r.method === 'POST' && r.path.includes('/api/radioShow/signoff');
 
+  // Poll the mock request log until predicate(requests) is truthy or the
+  // timeout lapses (returns the last snapshot either way; the caller's
+  // assertion produces the failure).
+  const waitForMockRequests = async (predicate, timeoutMs = 4000, intervalMs = 50) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const requests = await getMockRequests('tubafrenzy');
+      if (predicate(requests) || Date.now() > deadline) return requests;
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  };
+
+  // Drain barrier: wait until no new tubafrenzy requests arrive for one
+  // settle interval, so an EARLIER test's in-flight fire-and-forget mirror
+  // POST (the HTTP response resolves before the mirror does) cannot land
+  // inside this test's observation window after resetMockApi.
+  const waitForMirrorQuiescence = async (settleMs = 250, timeoutMs = 3000) => {
+    const deadline = Date.now() + timeoutMs;
+    let last = (await getMockRequests('tubafrenzy')).length;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, settleMs));
+      const now = (await getMockRequests('tubafrenzy')).length;
+      if (now === last || Date.now() > deadline) return;
+      last = now;
+    }
+  };
+
   afterEach(async () => {
     if (!mockApiAvailable) return;
     // Best-effort cleanup so a mid-test failure can't leak an open show into
-    // later specs (suite runs --runInBand against shared show state).
-    await fls_util.leave_show(global.secondary_dj_id, global.secondary_access_token);
-    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+    // later specs (suite runs --runInBand against shared show state). 200
+    // (left/ended) and 400 (wasn't a member) are both expected; anything else
+    // gets a trace line pointing here instead of failing a later suite.
+    for (const [djId, token] of [
+      [global.secondary_dj_id, global.secondary_access_token],
+      [global.primary_dj_id, global.access_token],
+    ]) {
+      const r = await fls_util.leave_show(djId, token);
+      if (![200, 400].includes(r.status)) {
+        console.warn(`[mirror-http cleanup] unexpected leave_show status ${r.status} for dj ${djId}`);
+      }
+    }
   });
 
   test('guest-DJ leave does not sign off the show; primary end signs off once', async () => {
     if (!mockApiAvailable) return;
 
+    // Drain the previous describe's in-flight mirror traffic before taking
+    // the baseline reset.
+    await waitForMirrorQuiescence();
     await resetMockApi();
 
-    // Primary A starts the show, guest B joins as co-host
-    await fls_util.join_show(global.primary_dj_id, global.access_token);
-    await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token);
+    // Primary A starts the show, guest B joins as co-host. Assert the fixture
+    // identity rather than assuming it: if an earlier spec leaked an open
+    // show, A's join would be a guest-join (ShowDJ response, no
+    // primary_dj_id) and every assertion below would pass or fail vacuously,
+    // misattributed to the BS#1119 contract.
+    const joinARes = await fls_util.join_show(global.primary_dj_id, global.access_token);
+    expect(joinARes.status).toBe(200);
+    const joinABody = await joinARes.json();
+    expect(joinABody.primary_dj_id).toBe(global.primary_dj_id);
+
+    const joinBRes = await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token);
+    expect(joinBRes.status).toBe(200);
 
     const addRes = await request
       .post('/flowsheet')
@@ -192,22 +246,28 @@ describe('endShow mirror shape guard on guest-DJ leave (BS#1119)', () => {
     const entryId = addRes.body.id;
 
     // Let join/add mirror traffic flush, then observe only the leave
-    await new Promise((r) => setTimeout(r, 300));
+    await waitForMirrorQuiescence();
     await resetMockApi();
 
     // Guest B calls /flowsheet/end — leave semantics, controller returns ShowDJ
     const leaveRes = await fls_util.leave_show(global.secondary_dj_id, global.secondary_access_token);
     expect(leaveRes.status).toBe(200);
 
+    // Negative window: fixed settle is the honest form when the contract is
+    // that NOTHING arrives — there is no positive event to poll for.
     await new Promise((r) => setTimeout(r, 300));
 
     // (a) No signoff reached tubafrenzy
     const afterLeave = await getMockRequests('tubafrenzy');
     expect(afterLeave.filter(isSignoff)).toHaveLength(0);
 
-    // (b) The show is still live for primary A
+    // (b) The show is still live for primary A, and B is off-air post-leave
+    // (distinguishes "gate correctly suppressed endShow" from "the leave was
+    // a no-op")
     const onAirRes = await request.get('/flowsheet/on-air').query({ dj_id: global.primary_dj_id }).expect(200);
     expect(onAirRes.body.is_live).toBe(true);
+    const onAirBRes = await request.get('/flowsheet/on-air').query({ dj_id: global.secondary_dj_id }).expect(200);
+    expect(onAirBRes.body.is_live).toBe(false);
 
     // (c) The prior flowsheet entry is untouched
     const entriesRes = await request.get('/flowsheet').query({ limit: 10 }).expect(200);
@@ -216,13 +276,16 @@ describe('endShow mirror shape guard on guest-DJ leave (BS#1119)', () => {
     expect(entry.track_title).toBe('la paradoja');
     expect(entry.artist_name).toBe('Juana Molina');
 
-    // Positive control: primary A ends the show → exactly one signoff
+    // Positive control: primary A ends the show → exactly one signoff. Poll
+    // until the first signoff lands (fixed sleeps flake when the mirror chain
+    // exceeds them under CI load), then hold one settle window so a duplicate
+    // would still be caught by the exact-count assertion.
     await resetMockApi();
     const endRes = await fls_util.leave_show(global.primary_dj_id, global.access_token);
     expect(endRes.status).toBe(200);
 
-    await new Promise((r) => setTimeout(r, 300));
-
+    await waitForMockRequests((rs) => rs.filter(isSignoff).length >= 1);
+    await new Promise((r) => setTimeout(r, 250));
     const afterEnd = await getMockRequests('tubafrenzy');
     expect(afterEnd.filter(isSignoff)).toHaveLength(1);
   });
