@@ -26,10 +26,15 @@ const flowsheetConditionalGet = [conditionalGet(flowsheet_service.getLastModifie
 flowsheet_route.get('/search', searchController.searchFlowsheetEndpoint);
 
 // Public date-windowed read (BS#2062) — successor to tubafrenzy's
-// /playlists/dailyEntries. Registered here, above `get('/')`, for the same
-// reason `/search` is: a literal path must be matched before the bare-root
-// handler. It carries no `requirePermissions` (the contract is `security: []`)
-// and no `flowsheetMirror` (read-only; the mirror is a write-path concern).
+// /playlists/dailyEntries. Grouped with `/search` above `get('/')` to keep the
+// two public reads together; the placement is convention, NOT a shadowing fix.
+// `get('/')` matches only the exact path `/flowsheet`, and this router has no
+// parameterized route that could swallow `/flowsheet/range`, so moving this
+// line below it would change nothing. (Said plainly because the opposite claim
+// is easy to assume and would send a future reader hunting a hazard that
+// cannot occur.) It carries no `requirePermissions` (the contract is
+// `security: []`) and no `flowsheetMirror` (read-only; the mirror is a
+// write-path concern).
 // Deliberately outside `flowsheetConditionalGet`: that middleware's watermark
 // is the whole-table `flowsheet_watermark`, which any live write advances, so
 // it would invalidate a historical window that cannot have changed — a

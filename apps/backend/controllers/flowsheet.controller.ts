@@ -126,11 +126,19 @@ const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual 
  */
 export const MAX_RANGE_MS = 8 * 24 * 60 * 60 * 1000;
 
-// Largest absolute epoch-ms a JS Date can represent. A value past this parses
-// as a finite number but yields an Invalid Date, which would reach Postgres as
-// a malformed timestamp; reject it at the edge instead (same class of guard as
-// INT4_MAX above, for a different overflow).
-const MAX_EPOCH_MS = 8.64e15;
+// The epoch-ms window whose `Date` renders as a four-digit-year ISO string.
+//
+// The bound that matters is NOT the JS Date range (±8.64e15): Drizzle maps a
+// timestamp param to the driver with `value.toISOString()`, which switches to
+// the expanded-year form outside years 0000–9999 — `new Date(8.64e15)` is
+// `'+275760-09-13T00:00:00.000Z'`. Postgres cannot parse that literal, so the
+// query throws and this public read answers 500. These two constants are the
+// exact instants where `toISOString()` flips form (verified: MIN-1 renders
+// `-000001-…`, MAX+1 renders `+010000-…`), which is ~34x tighter than the Date
+// range and still far wider than any flowsheet window. Same class of guard as
+// INT4_MAX below, for a different overflow.
+const MIN_EPOCH_MS = -62167219200000; // 0000-01-01T00:00:00.000Z
+const MAX_EPOCH_MS = 253402300799999; // 9999-12-31T23:59:59.999Z
 // flowsheet.id is a Postgres int4 column; a value outside this range parses
 // fine as a JS integer (passing Number.isInteger) but blows up downstream as
 // an unhandled "value out of range for type integer" Postgres error (BS#1800).
@@ -176,18 +184,39 @@ const projectEntriesV2 = (entries: IFSEntry[]): Record<string, unknown>[] => {
 };
 
 /**
+ * A plain, optionally-negative run of decimal digits and nothing else.
+ *
+ * `Number()` alone is too permissive to implement "is this an epoch": it
+ * accepts radix prefixes (`Number('0x1E240') === 123456`), surrounding
+ * whitespace, a leading `+`, and exponent notation, every one of which would
+ * be served as a plausible-looking window rather than rejected. Testing the
+ * raw string first makes the accepted set exactly the documented one.
+ */
+const EPOCH_MS_PATTERN = /^-?\d+$/;
+
+/**
  * Parse an epoch-milliseconds query param strictly.
  *
- * Returns `null` for anything that is not a plain integer inside the Date
- * range — including a float, a trailing-garbage string, and an empty value.
- * `Number()` (not `parseInt`) on purpose: `parseInt('1.5e0')` silently yields
- * 1, and `parseInt('2026-06-01')` yields 2026, both of which would coerce a
- * malformed window into a plausible-looking one rather than a 400.
+ * Returns `null` for anything that is not a plain decimal integer inside the
+ * storable range — a float, a radix prefix, surrounding whitespace, trailing
+ * garbage, an empty value, or (per Express's query parser, below) a repeated
+ * key. `Number()` rather than `parseInt` for the final conversion: `parseInt`
+ * silently truncates, yielding 1 from `'1.5e0'` and 2026 from `'2026-06-01'`,
+ * which would coerce a malformed window into a plausible one instead of a 400.
+ *
+ * `raw` is typed `unknown` deliberately. Express 5's default ('simple') query
+ * parser returns an ARRAY when a key is repeated — `?start=1&start=2` yields
+ * `['1','2']` — so the handler's declared `string | undefined` is a lie the
+ * type system cannot catch at the boundary. Calling a string method on that
+ * array throws, and inside an async handler the rejection reaches
+ * `errorHandler` as a 500 plus a Sentry capture, on a route that is both
+ * unauthenticated and unratelimited. Narrowing here turns that into the 400
+ * the contract already specifies.
  */
-const parseEpochMillis = (raw: string | undefined): number | null => {
-  if (raw === undefined || raw.trim() === '') return null;
+const parseEpochMillis = (raw: unknown): number | null => {
+  if (typeof raw !== 'string' || !EPOCH_MS_PATTERN.test(raw)) return null;
   const value = Number(raw);
-  if (!Number.isInteger(value) || Math.abs(value) > MAX_EPOCH_MS) return null;
+  if (!Number.isInteger(value) || value < MIN_EPOCH_MS || value > MAX_EPOCH_MS) return null;
   return value;
 };
 

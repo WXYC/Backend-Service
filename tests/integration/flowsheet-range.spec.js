@@ -63,15 +63,21 @@ describe('GET /flowsheet/range (BS#2062)', () => {
     // endsAtStart: ends exactly at the window's first instant — [a,b) does NOT
     //              contain b, so this must be EXCLUDED
     // openInside:  NULL end_time, starts inside  — included
-    // openBefore:  NULL end_time, starts before  — EXCLUDED (a dropped show_end
-    //              leaves end_time NULL forever; treating NULL as open-ended
-    //              would make every such show intersect every window)
+    // openBefore:  NULL end_time, starts before, NO entries in window —
+    //              EXCLUDED (a dropped show_end leaves end_time NULL forever;
+    //              treating NULL as open-ended alone would make every such
+    //              orphaned show intersect every window from then on)
+    // openOvernight: NULL end_time, starts before, HAS entries in window —
+    //              INCLUDED. The overnight show still on the air past midnight.
+    //              Neither end_time nor start_time can tell it apart from
+    //              openBefore; the entries it owns in this window can.
     // after:       starts after the window ends  — excluded
     await insertShow('spansStart', -2 * 60 * 60 * 1000, 2 * 60 * 60 * 1000, `${MARKER} spansStart`);
     await insertShow('inside', 5 * 60 * 60 * 1000, 8 * 60 * 60 * 1000, `${MARKER} inside`);
     await insertShow('endsAtStart', -3 * 60 * 60 * 1000, 0, `${MARKER} endsAtStart`);
     await insertShow('openInside', 10 * 60 * 60 * 1000, null, `${MARKER} openInside`);
     await insertShow('openBefore', -5 * 60 * 60 * 1000, null, `${MARKER} openBefore`);
+    await insertShow('openOvernight', -2 * 60 * 60 * 1000, null, `${MARKER} openOvernight`);
     await insertShow('after', DAY_MS + 60 * 60 * 1000, DAY_MS + 2 * 60 * 60 * 1000, `${MARKER} after`);
 
     const insertEntry = async (key, offsetMs, entryType, showKey, extra = {}) => {
@@ -116,6 +122,16 @@ describe('GET /flowsheet/range (BS#2062)', () => {
     // Two rows sharing an add_time, to pin the `id` ASC tie-break.
     await insertEntry('tieA', 6 * 60 * 60 * 1000, 'track', 'inside', { artist_name: 'Tie A' });
     await insertEntry('tieB', 6 * 60 * 60 * 1000, 'track', 'inside', { artist_name: 'Tie B' });
+
+    // The overnight show's post-midnight track. This row is what makes
+    // `openOvernight` distinguishable from `openBefore`, and it is why the
+    // shows query cannot be a pure start_time/end_time predicate: the entry is
+    // in the window regardless, so dropping its show breaks `show_id`.
+    await insertEntry('overnight', 30 * 60 * 1000, 'track', 'openOvernight', {
+      artist_name: 'Jessica Pratt',
+      album_title: 'On Your Own Love Again',
+      track_title: 'Back, Baby',
+    });
   });
 
   afterAll(async () => {
@@ -190,8 +206,46 @@ describe('GET /flowsheet/range (BS#2062)', () => {
     expect(ids).toContain(showIds.inside);
     expect(ids).toContain(showIds.openInside); // NULL end_time, starts inside
     expect(ids).not.toContain(showIds.endsAtStart); // ends exactly at window start
-    expect(ids).not.toContain(showIds.openBefore); // NULL end_time, starts before
+    expect(ids).not.toContain(showIds.openBefore); // NULL end_time, starts before, no entries here
     expect(ids).not.toContain(showIds.after);
+  });
+
+  it('includes an open-ended show that started before the window but has entries inside it', async () => {
+    // The overnight show, live past midnight. `start_time` places it in
+    // yesterday's window and `end_time` is NULL, so neither arm of the
+    // start/end overlap predicate reaches it — but its post-midnight entries
+    // ARE in this window and carry its show_id.
+    const res = await fetchWindow();
+    expect(res.body.shows.map((s) => s.id)).toContain(showIds.openOvernight);
+    expect(res.body.entries.map((e) => e.id)).toContain(entryIds.overnight);
+  });
+
+  it('never returns an entry whose show_id is absent from shows', async () => {
+    // The contract api.yaml states outright: FlowsheetRangeShow.id "matches
+    // FlowsheetRangeEntry.show_id for every entry belonging to this show", and
+    // consumers are told to "segment on show_id". An entry pointing at a show
+    // that isn't in the payload is an unresolvable id in `archive`'s grouping.
+    // Asserted over the WHOLE window, not just this spec's fixtures, so any
+    // seeded row that violates it fails here too.
+    const res = await fetchWindow();
+    const present = new Set(res.body.shows.map((s) => s.id));
+    const dangling = res.body.entries
+      .map((e) => e.show_id)
+      .filter((id) => id !== null && id !== undefined && !present.has(id));
+
+    expect([...new Set(dangling)]).toEqual([]);
+  });
+
+  it('holds the no-dangling-show_id invariant across a week-wide window too', async () => {
+    // A wider window sweeps in more shows and more dropped-show_end rows
+    // (BS#2065), which is where a start/end-only predicate fails most often.
+    const res = await fetchWindow(WINDOW_START - 3 * DAY_MS, WINDOW_START + 4 * DAY_MS);
+    const present = new Set(res.body.shows.map((s) => s.id));
+    const dangling = res.body.entries
+      .map((e) => e.show_id)
+      .filter((id) => id !== null && id !== undefined && !present.has(id));
+
+    expect([...new Set(dangling)]).toEqual([]);
   });
 
   it('orders shows by start_time ascending', async () => {
@@ -244,12 +298,15 @@ describe('GET /flowsheet/range (BS#2062)', () => {
     }
   });
 
-  it('is not shadowed by the templated routes on this router', async () => {
-    // `/range` is registered above `get('/')`; a regression that moved it
-    // below would send this to the paginated handler and 200 with the wrong
-    // shape rather than fail loudly.
+  it('answers with the range shape, not the paginated GET /flowsheet shape', async () => {
+    // NOT a shadowing test: `get('/')` matches only the exact path, so no
+    // ordering change on this router could route /range to the paginated
+    // handler. What this does pin is that the route is registered and its own
+    // handler answered — a deleted or renamed registration 404s here.
     const res = await fetchWindow();
+    expect(res.status).toBe(200);
     expect(Array.isArray(res.body.entries)).toBe(true);
+    expect(Array.isArray(res.body.shows)).toBe(true);
     expect(res.body).not.toHaveProperty('totalPages');
   });
 });
