@@ -152,7 +152,7 @@ const FSEntryFieldsRaw = {
   rotation_id: flowsheet.rotation_id,
   // Primary source is the FK join (`leftJoin(rotation, rotation.id = flowsheet.rotation_id)`).
   // Fallback fires only when that join misses (rotation.rotation_bin IS NULL) and the entry
-  // looks like a real track with non-empty artist+album. Three match cohorts:
+  // looks like a real track with non-blank artist+album. Three match cohorts:
   //   (a) flowsheet.album_id matches an active rotation.album_id (library-linked rotation rows);
   //   (b) (artist, album) snapshot matches active rotation row's denormalized fields
   //       (library-unlinked rotation rows hold the snapshot directly);
@@ -166,38 +166,84 @@ const FSEntryFieldsRaw = {
   // Subquery only fires per-row on a missed FK join; on rows with a populated rotation_id
   // COALESCE short-circuits and the subquery is not evaluated.
   //
-  // Tie-break (`ORDER BY r2.id`): the schema source comment at `rotation` explicitly
+  // Tie-break (`ORDER BY t.id` over the union): the schema source comment at `rotation` explicitly
   // permits multiple active rows per (album_id, rotation_bin) over an album's lifecycle
   // (re-bins, re-adds, label-driven re-promotes). Picking the lowest `id` (oldest active
   // row) is a deliberate, stable choice for the badge UX — when an album has been re-binned
   // L → M, the badge reports its original cohort rather than flipping retroactively. This
   // matches the historical-correctness story above (add_date/kill_date window filtered against add_time).
   // The primary FK join via flowsheet.rotation_id remains canonical when present.
+  //
+  // SHAPE (BS#2080): the three match cohorts are a UNION ALL of three
+  // separately-indexable probes, NOT an OR over one joined set. They were an
+  // OR until the range read (BS#2062) made the per-row cost visible. Because
+  // the OR spanned three tables, no index on any one of them could serve it —
+  // the planner had to materialize the whole rotation-library-artists join and
+  // filter afterwards, at 239 buffers and ~11.7ms cold per row. Prod response
+  // time on `GET /flowsheet/range` fit `1.125s + 19.0ms * n_fallback`
+  // (R^2=0.957) and the 7-day window (1,030 fallbacks, ~20.7s predicted) blew
+  // the 5s statement timeout outright. Over those same 1,030 rows:
+  // 224,554 buffers / 1,317.8ms -> 12,509 buffers / 4.6ms. Every arm is now an
+  // index scan. Verified equivalent, not assumed: both forms run over all
+  // 1,030 rows produced zero disagreements.
+  //
+  // Do not fold these arms back into an OR for readability. The three indexes
+  // (migration 0145) only apply per-arm, and the OR form cannot use them.
+  // Likewise, keep each arm's expression character-for-character identical to
+  // its index — `lower(trim(coalesce(col, '')))` — or the planner silently
+  // reverts to the seq scan this shape exists to avoid.
+  //
+  // ORDER BY over the union is `t.id`, preserving the original's `ORDER BY
+  // r2.id LIMIT 1`: lowest matching rotation id wins, same tie-break, same
+  // result. A row matching two arms appears twice in the union, which the
+  // LIMIT 1 makes harmless.
+  //
+  // GUARD: `trim(coalesce(...)) <> ''`, tightened from `coalesce(...) <> ''`.
+  // This is the one deliberate behaviour change. Under the old guard an entry
+  // whose artist AND album were whitespace-only ('   ') passed, then trimmed to
+  // '' inside the subquery and matched the LEFT-JOINed NULL side of every
+  // active rotation row without a library link — returning the lowest-id one as
+  // a badge. That is a garbage badge on a garbage entry, and it is the only
+  // case where arm 3's original LEFT JOIN differed from the inner JOIN used
+  // here. Zero such rows exist in a 7-day prod sample; the tightened guard both
+  // fixes the bug and makes the inner join exactly equivalent.
   rotation_bin: sql<string | null>`
     COALESCE(
       ${rotation.rotation_bin},
       CASE WHEN ${flowsheet.rotation_id} IS NULL
-        AND coalesce(${flowsheet.artist_name}, '') <> ''
-        AND coalesce(${flowsheet.album_title}, '') <> ''
+        AND trim(coalesce(${flowsheet.artist_name}, '')) <> ''
+        AND trim(coalesce(${flowsheet.album_title}, '')) <> ''
       THEN (
-        SELECT r2.rotation_bin
-        FROM ${rotation} r2
-        LEFT JOIN ${library} l2 ON l2.id = r2.album_id
-        LEFT JOIN ${artists} a2 ON a2.id = l2.artist_id
-        WHERE r2.add_date <= ${flowsheet.add_time}::date
-          AND (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
-          AND (
-            (${flowsheet.album_id} IS NOT NULL AND r2.album_id = ${flowsheet.album_id})
-            OR (
-              lower(trim(coalesce(r2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
-              AND lower(trim(coalesce(r2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
-            )
-            OR (
-              lower(trim(coalesce(a2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
-              AND lower(trim(coalesce(l2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
-            )
-          )
-        ORDER BY r2.id
+        SELECT t.rotation_bin FROM (
+          -- (a) library-linked rotation rows, matched on album_id (album_id_idx)
+          SELECT r2.id, r2.rotation_bin
+          FROM ${rotation} r2
+          WHERE ${flowsheet.album_id} IS NOT NULL AND r2.album_id = ${flowsheet.album_id}
+            AND r2.add_date <= ${flowsheet.add_time}::date
+            AND (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
+          UNION ALL
+          -- (b) library-unlinked rotation rows holding the (artist, album)
+          --     snapshot directly (rotation_norm_artist_album_idx)
+          SELECT r2.id, r2.rotation_bin
+          FROM ${rotation} r2
+          WHERE lower(trim(coalesce(r2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
+            AND lower(trim(coalesce(r2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
+            AND r2.add_date <= ${flowsheet.add_time}::date
+            AND (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
+          UNION ALL
+          -- (c) library-linked rotation rows whose denorm fields are NULL, so
+          --     the names come from the library+artists join
+          --     (library_norm_album_title_idx -> album_id_idx -> artists_norm_name_idx)
+          SELECT r2.id, r2.rotation_bin
+          FROM ${rotation} r2
+          JOIN ${library} l2 ON l2.id = r2.album_id
+          JOIN ${artists} a2 ON a2.id = l2.artist_id
+          WHERE lower(trim(coalesce(a2.artist_name, ''))) = lower(trim(${flowsheet.artist_name}))
+            AND lower(trim(coalesce(l2.album_title, ''))) = lower(trim(${flowsheet.album_title}))
+            AND r2.add_date <= ${flowsheet.add_time}::date
+            AND (r2.kill_date IS NULL OR r2.kill_date > ${flowsheet.add_time}::date)
+        ) t
+        ORDER BY t.id
         LIMIT 1
       )
       END

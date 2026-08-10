@@ -1,0 +1,86 @@
+-- BS#2080. Three expression indexes that make the `rotation_bin` fallback
+-- subquery in `FSEntryFieldsRaw` (apps/backend/services/flowsheet.service.ts)
+-- indexable. Ships together with the rewrite of that subquery from a
+-- three-armed `OR` into a `UNION ALL` of three separately-indexable probes —
+-- the indexes are useless without the rewrite, and the rewrite is pointless
+-- without the indexes.
+--
+-- The problem. That fallback fires once per flowsheet row whose `rotation_id`
+-- is NULL and whose artist+album are non-empty, and its predicate ORs three
+-- arms together across THREE tables (`rotation`, `library`, `artists`). Because
+-- the OR spans tables, no index on any one of them can serve it: the planner
+-- has to materialize the whole rotation-library-artists join and filter it
+-- afterwards. Measured against the prod-shaped clone fixture (rotation=21,563,
+-- library=64,193, artists=24,078) that is 239 buffers and ~11.7 ms cold PER
+-- ROW, with a 21,563-row seq scan of `rotation` inside it.
+--
+-- What it cost. `GET /flowsheet/range` (BS#2062) reads a whole window rather
+-- than a page, so the per-row cost multiplies. Measured on prod across seven
+-- consecutive 24h windows, response time is almost perfectly linear in the
+-- number of rows that take the fallback and only loosely related to the number
+-- of entries returned:
+--
+--     time = 1.125s + 19.0ms * n_fallback     (R^2 = 0.957)
+--     (fit against total entry count instead: R^2 = 0.877)
+--
+-- A 24h window runs 91-191 fallbacks (3.0-4.8 s observed). The 7-day window
+-- that wxyc.org's historical-archive page needs runs 1,030 — a predicted
+-- ~20.7 s against a 5 s `DB_STATEMENT_TIMEOUT_MS`, which is exactly the HTTP
+-- 500 that endpoint answers today. Seven separate daily calls covering the same
+-- span summed to 27.5 s of real work, corroborating the fit.
+--
+-- The yield of all that work is small: over those seven days, 1,030 fallback
+-- executions produced 19 badges.
+--
+-- Measured over all 1,030 real prod fallback rows against the clone fixture:
+--
+--   three-armed OR, no indexes:   224,554 buffers,  1,317.8 ms
+--   UNION ALL + these indexes:     12,509 buffers,      4.6 ms
+--
+-- Every arm becomes an index scan and the `rotation` seq scan disappears. The
+-- buffer count is the durable part — prod is a `db.t3.micro` with 1 GiB of RAM,
+-- so 224,554 buffers (~1.75 GB of touches) cannot stay resident and pays close
+-- to the cold cost on every row, which is why prod's 19.0 ms/row tracks the
+-- measured cold 11.7 ms rather than the warm 0.79 ms.
+--
+-- Equivalence was verified, not assumed: both forms were run over all 1,030
+-- rows and the results diffed. Zero disagreements, and identical badge
+-- distributions (1,011 null / 7 H / 6 M / 3 L / 3 S). See the subquery's own
+-- comment for the one deliberate behaviour change that accompanies this (the
+-- whitespace-only artist/album guard).
+--
+-- Why single-column rather than composite. This is the shape that was
+-- benchmarked: the planner drives arm 3 from `library_norm_album_title_idx`
+-- (~1.75 rows per probe) into the existing `album_id_idx` on `rotation`, and
+-- applies `artists_norm_name_idx` last as a filter on the few survivors. All
+-- three tables are small (21k-64k rows) so each index is a couple of MB, and
+-- none of them takes meaningful write traffic — `rotation` changes when the MD
+-- re-bins, `library` when the librarian files a release.
+--
+-- Production ops:
+--   - These are NOT the CONCURRENTLY form, because Drizzle wraps each migration
+--     file in a transaction and `CREATE INDEX CONCURRENTLY cannot run inside a
+--     transaction block` — same constraint as 0144, 0139, 0080, 0078, 0074,
+--     0070, 0068, 0057.
+--   - Run out-of-band on prod FIRST. These are the generated statements below,
+--     verbatim, with CONCURRENTLY added — the index expression must match the
+--     query character-for-character, so do not reformat them:
+--       CREATE INDEX CONCURRENTLY IF NOT EXISTS "artists_norm_name_idx" ON "wxyc_schema"."artists" USING btree (lower(trim(coalesce("artist_name", ''))));
+--       CREATE INDEX CONCURRENTLY IF NOT EXISTS "library_norm_album_title_idx" ON "wxyc_schema"."library" USING btree (lower(trim(coalesce("album_title", ''))));
+--       CREATE INDEX CONCURRENTLY IF NOT EXISTS "rotation_norm_artist_album_idx" ON "wxyc_schema"."rotation" USING btree (lower(trim(coalesce("artist_name", ''))),lower(trim(coalesce("album_title", ''))));
+--     No AccessExclusiveLock, so no write pause on any of the three. All are
+--     small tables; expect seconds, not minutes. Then ANALYZE each — a fresh
+--     expression index has no stats until then, and the planner will not choose
+--     an arm it cannot cost:
+--       ANALYZE "wxyc_schema"."artists"; ANALYZE "wxyc_schema"."library"; ANALYZE "wxyc_schema"."rotation";
+--   - Then merge this PR. `IF NOT EXISTS` makes the migration a no-op against
+--     the prod DB where the indexes already exist, while fresh dev and CI
+--     databases pick them up on first migrate.
+--   - Order matters in the other direction too: merging the service rewrite
+--     WITHOUT these indexes present is a pessimisation, not a no-op — the
+--     UNION ALL form without index support seq-scans `rotation` three times per
+--     row instead of once. Build the indexes first.
+
+CREATE INDEX IF NOT EXISTS "artists_norm_name_idx" ON "wxyc_schema"."artists" USING btree (lower(trim(coalesce("artist_name", ''))));--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "library_norm_album_title_idx" ON "wxyc_schema"."library" USING btree (lower(trim(coalesce("album_title", ''))));--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "rotation_norm_artist_album_idx" ON "wxyc_schema"."rotation" USING btree (lower(trim(coalesce("artist_name", ''))),lower(trim(coalesce("album_title", ''))));
