@@ -23,12 +23,14 @@ COPY ./package* ./
 COPY ./apps/auth/package* ./apps/auth/
 COPY ./shared/database/package* ./shared/database/
 COPY ./shared/authentication/package* ./shared/authentication/
+COPY ./shared/observability/package* ./shared/observability/
 
 RUN npm install --omit=dev && rm -f .npmrc
 
 COPY --from=builder ./auth-builder/apps/auth/dist ./apps/auth/dist
 COPY --from=builder ./auth-builder/shared/database/dist ./shared/database/dist
 COPY --from=builder ./auth-builder/shared/authentication/dist ./shared/authentication/dist
+COPY --from=builder ./auth-builder/shared/observability/dist ./shared/observability/dist
 
 # Inherit the @wxyc/database 5s default. Auth handlers finish in
 # milliseconds (better-auth's queries are JWKS lookups, session reads,

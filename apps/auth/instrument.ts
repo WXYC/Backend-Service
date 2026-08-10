@@ -12,8 +12,10 @@ Sentry.init({
   release: process.env.SENTRY_RELEASE,
   environment: process.env.NODE_ENV || 'development',
   tracesSampleRate: resolveTracesSampleRate(),
-  // Drops /ok and /healthcheck liveness transactions and strips Express
-  // middleware bookkeeping spans from every other transaction (BS#2089).
+  // Drops the /auth/ok and /healthcheck liveness probes — matched on request
+  // path, since better-auth's mount makes /auth/ok's transaction "GET /auth" —
+  // and strips Express middleware bookkeeping spans from every surviving
+  // transaction (BS#2089).
   // Error reporting (beforeSend / setupExpressErrorHandler) is untouched —
   // wxyc-canary depends on /healthcheck errors surfacing there.
   beforeSendTransaction: filterSentryTransactionEvent,
