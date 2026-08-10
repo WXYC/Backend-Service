@@ -143,7 +143,12 @@ export class ServerEventsManager {
       Connection: 'keep-alive',
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Headers': 'Cache-Control',
-      'X-Accel-Buffering': 'no', // Header that makes nginx behave with sse
+      // Suppresses nginx proxy buffering so frames reach the client as written.
+      // Side effect worth knowing before you touch the edge config: an unbuffered
+      // response has no Content-Length, so nginx's gzip_min_length cannot gate it.
+      // The ONLY thing keeping this stream uncompressed is text/event-stream being
+      // absent from gzip_types. See docs/deploy.md, "Edge compression" (BS#2076).
+      'X-Accel-Buffering': 'no',
     });
 
     // Send initial connection event with client ID
