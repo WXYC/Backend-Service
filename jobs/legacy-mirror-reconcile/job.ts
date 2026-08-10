@@ -130,6 +130,21 @@ export const RECONCILE_ALERT_THRESHOLD_DEFAULT = 0;
  * 2,813 were over 30 days old — the #1543 repair cohort, held out of the
  * report by `RECONCILE_WINDOW_HOURS` and counted instead. Nothing sat between
  * 6h and 30 days, so the detector starts from a clean in-window baseline.
+ *
+ * BS#2068 correction: the "excluded twice over" reasoning two paragraphs up is
+ * about a GENUINELY live show (still logging tracks, so its newest entry is a
+ * track, not a marker) and remains true after that fix. But do not read "is
+ * still the newest show" there as implying the id-based exclusion in
+ * `selectStaleOpenShows` is unconditional — it no longer is. That bound used
+ * to veto reporting for ANY show holding `max(id)`, including one whose
+ * sign-off marker had already landed with `end_time` never stamped — the
+ * exact dropped-webhook residue this detector exists to catch — so a show
+ * that never stopped being `max(id)` could sit in the reportable band for its
+ * entire life and never be reported, aging silently into the historical
+ * cohort instead. The bound is now conditioned on the newest flowsheet entry
+ * NOT being a `show_end` marker (see `orchestrate.ts`), which is why a
+ * genuinely-live show is still excluded (its newest entry is never a marker)
+ * while the dropped-delivery case is not.
  */
 export const STALE_OPEN_SHOW_HOURS_ENV = 'STALE_OPEN_SHOW_HOURS';
 export const STALE_OPEN_SHOW_HOURS_DEFAULT = 12;

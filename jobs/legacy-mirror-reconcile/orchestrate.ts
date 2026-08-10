@@ -600,12 +600,18 @@ const staleCeiling = (staleAfterHours: number) => sql`now() - (interval '1 hour'
 /**
  * The show `flowsheet_service.getLatestShow()` returns — `ORDER BY id DESC
  * LIMIT 1` over the whole table, which is what `addEntry` / `leaveShow` /
- * `joinShow` treat as "the current show". Excluding exactly that row is the
- * hard guarantee behind the acceptance criterion "the genuinely-active show
- * never trips the detector": whatever the threshold, the row the API calls
- * live is never reported. Kept as `max(id)` rather than `max(start_time)`
- * deliberately — it must track `getLatestShow`'s ordering, not a plausible
- * substitute for it.
+ * `joinShow` treat as "the current show". Kept as `max(id)` rather than
+ * `max(start_time)` deliberately — it must track `getLatestShow`'s ordering,
+ * not a plausible substitute for it.
+ *
+ * Holding this id is now only a CONDITIONAL exclusion (BS#2068), not an
+ * absolute one — see `selectStaleOpenShows`'s second bullet. Excluding it
+ * unconditionally, as this bound originally did, meant the detector could
+ * never report the exact state a dropped tubafrenzy `show_end` delivery
+ * leaves a show in: `max(id)`, sign-off marker present, `end_time` still
+ * NULL. `addEntry` / `leaveShow` / `joinShow` gate on `getLatestShow()`, so
+ * that state is precisely when "who's on air" reads wrong — the harm the
+ * detector exists to surface, per #2065's own residual-harm list.
  */
 const latestShowId = sql`(SELECT max(s2.id) FROM ${shows} s2)`;
 
@@ -636,7 +642,8 @@ const newestEntryAt = sql<Date | null>`(SELECT fe.add_time FROM ${flowsheet} fe
 
 /**
  * Detector selection: `end_time IS NULL`, no activity since the cutoff, inside
- * the recurring window, and never the current show.
+ * the recurring window, and — unless its own sign-off marker already landed —
+ * never the current show.
  *
  * Three independent bounds, each load-bearing:
  *   - `start_time < now() - staleAfterHours` — the plausible-duration
@@ -644,16 +651,38 @@ const newestEntryAt = sql<Date | null>`(SELECT fe.add_time FROM ${flowsheet} fe
  *   - NOT EXISTS a flowsheet row newer than the same cutoff — a genuinely-live
  *     marathon show is still logging tracks, so it is excluded on activity
  *     even in the impossible case that it is somehow not the latest show id.
- *   - `id <> max(id)` — the current show, per `getLatestShow`'s own ordering.
+ *   - `id <> max(id) OR newestEntryType = 'show_end'` (BS#2068) — excludes the
+ *     current show, UNLESS its newest flowsheet entry is a `show_end` marker.
+ *     A show whose latest row is a sign-off marker cannot be genuinely live —
+ *     no DJ is on it (BS#1861 option (b), which `joinShow`'s opportunistic
+ *     `closeShowFromTerminalShowEndMarker` backfill already relies on) — so
+ *     gating the id exclusion on that marker preserves the "genuinely-active
+ *     show never reported" acceptance criterion (the activity bound above
+ *     still excludes it independently) while letting the detector see the one
+ *     state it exists to catch: a dropped `show_end` webhook leaves a show
+ *     BOTH `max(id)` AND signed off, and that combination must be reportable,
+ *     not permanently vetoed. Before this fix the bound was the unconditional
+ *     `id <> max(id)`, which vetoed exactly that combination.
  *
  * And an outer bound: `start_time > now() - windowHours`. Older open shows are
  * the historical-remediation class — 2,813 rows as of 2026-08-09, all >30 days
  * old, repaired by #1543's final-dump pass — deliberately out of scope for a
  * recurring report, exactly as the two mirror sweeps scope theirs. They are
- * counted by `countHistoricalOpenShows` instead of listed. The in-window band
- * (`windowHours - staleAfterHours`, 36h at the defaults) is wider than this
- * job's 24h period, so a show that goes stale is always seen by at least one
- * run before it ages out.
+ * counted by `countHistoricalOpenShows` instead of listed.
+ *
+ * The in-window band (`windowHours - staleAfterHours`, 36h at the defaults)
+ * being wider than this job's 24h period is NOT by itself a guarantee that a
+ * show which goes stale is seen by at least one run — that was the pre-fix
+ * docblock's claim, and it did not survive the unconditional id bound vetoing
+ * every run across the whole band whenever the show never stopped being
+ * `max(id)` (it silently aged into the historical cohort instead; see
+ * BS#2068's concrete timeline). With the marker-conditioned bound above, a
+ * show whose sign-off marker landed IS reportable regardless of whether a
+ * newer show has since started, so the band-width arithmetic does its
+ * intended job for that case. A show whose `show_end` marker itself never
+ * arrived is a different, out-of-scope failure — indistinguishable here from
+ * a quiet live show — and is left to the #1543 dump-based repair, same as
+ * before this fix.
  */
 export const selectStaleOpenShows = async ({
   windowHours,
@@ -674,7 +703,7 @@ export const selectStaleOpenShows = async ({
         lt(shows.start_time, staleCeiling(staleAfterHours)),
         gt(shows.start_time, windowFloor(windowHours)),
         sql`NOT EXISTS (SELECT 1 FROM ${flowsheet} WHERE ${flowsheet.show_id} = ${shows.id} AND ${flowsheet.add_time} >= ${staleCeiling(staleAfterHours)})`,
-        sql`${shows.id} IS DISTINCT FROM ${latestShowId}`
+        sql`(${shows.id} IS DISTINCT FROM ${latestShowId}) OR (${newestEntryType} = 'show_end')`
       )
     )
     .orderBy(asc(shows.start_time));
