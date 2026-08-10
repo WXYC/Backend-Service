@@ -1,4 +1,4 @@
-import { sql, desc, eq, and, isNull, lte, gte, inArray } from 'drizzle-orm';
+import { sql, asc, desc, eq, and, or, isNull, isNotNull, gt, lt, lte, gte, inArray } from 'drizzle-orm';
 import * as Sentry from '@sentry/node';
 import WxycError from '../utils/error.js';
 import {
@@ -438,22 +438,61 @@ export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
  * and must not leak onto the public on-air playlist. See
  * `resolveDjDisplayName`'s docstring.
  */
-export const resolveDjNameForShow = async (show: Show): Promise<string | null> => {
-  const override = ((show.dj_name_override as string | null | undefined) ?? '').trim();
+/**
+ * The PII-safe show-DJ resolution chain (BS#1371), as a pure decision:
+ * per-show override -> the linked user's public handle -> the legacy
+ * tubafrenzy handle -> null. Never the real-name column, which is
+ * structurally impossible here — it is not an input.
+ *
+ * Extracted from `resolveDjNameForShow` (below) so the windowed read
+ * (`getShowsInTimeWindow`, BS#2062) can apply the identical chain to a user
+ * row it JOINed in, instead of re-deriving it or paying one query per show.
+ * Two callers, one decision — the alternative is a copy that drifts, on a
+ * chain whose whole purpose is keeping a real name off a public wire.
+ *
+ * `user: null` means the show's `primary_dj_id` resolved to no row at all,
+ * which is distinct from a row whose `djName` is unusable — see the
+ * asymmetric legacy handling below, preserved verbatim from the original.
+ */
+export const resolveShowDjName = (input: {
+  dj_name_override: string | null;
+  legacy_dj_name: string | null;
+  primary_dj_id: string | null;
+  user: { djName: string | null } | null;
+}): string | null => {
+  const override = (input.dj_name_override ?? '').trim();
   if (override.length > 0) return override;
 
-  const legacy = (show.legacy_dj_name as string | null | undefined) ?? null;
-  const primaryDjId = (show.primary_dj_id as string | null | undefined) ?? null;
+  const legacy = input.legacy_dj_name;
+  if (input.primary_dj_id == null) return legacy;
+  // No user row: return the legacy handle as-is. Deliberately NOT trimmed,
+  // unlike the branch below — preserved from the pre-extraction behaviour so
+  // this refactor cannot change a single byte on the existing wire.
+  if (input.user == null) return legacy;
 
-  if (primaryDjId == null) return legacy;
-
-  const rows = await db.select({ djName: user.djName }).from(user).where(eq(user.id, primaryDjId)).limit(1);
-  const dj = rows[0];
-  if (!dj) return legacy;
-  const filteredDjName = resolveDjDisplayName(dj.djName ?? null);
+  const filteredDjName = resolveDjDisplayName(input.user.djName ?? null);
   if (filteredDjName) return filteredDjName;
   if (legacy && legacy.trim().length > 0) return legacy.trim();
   return null;
+};
+
+export const resolveDjNameForShow = async (show: Show): Promise<string | null> => {
+  const primaryDjId = (show.primary_dj_id as string | null | undefined) ?? null;
+  const base = {
+    dj_name_override: (show.dj_name_override as string | null | undefined) ?? null,
+    legacy_dj_name: (show.legacy_dj_name as string | null | undefined) ?? null,
+    primary_dj_id: primaryDjId,
+  };
+
+  // Skip the lookup entirely when the chain can't reach it — an override wins
+  // outright, and a show with no linked DJ has no row to fetch.
+  const override = (base.dj_name_override ?? '').trim();
+  if (override.length > 0 || primaryDjId == null) {
+    return resolveShowDjName({ ...base, user: null });
+  }
+
+  const rows = await db.select({ djName: user.djName }).from(user).where(eq(user.id, primaryDjId)).limit(1);
+  return resolveShowDjName({ ...base, user: rows[0] ?? null });
 };
 
 /**
@@ -548,6 +587,114 @@ export const getEntriesByRange = async (startId: number, endId: number): Promise
     .orderBy(desc(flowsheet.id));
 
   return raw.map(transformToIFSEntry);
+};
+
+/** One show overlapping a `GET /flowsheet/range` window — the public-safe projection. */
+export type FlowsheetRangeShow = {
+  id: number;
+  show_name: string | null;
+  dj_name: string | null;
+  specialty_id: number | null;
+  start_time: Date;
+  end_time: Date | null;
+};
+
+/**
+ * Every flowsheet entry logged in the half-open window `[start, end)` (BS#2062).
+ *
+ * Distinct from `getEntriesByRange` above, which windows on `flowsheet.id`.
+ * This one windows on `add_time` and returns EVERY entry type — the
+ * show_start / show_end markers and breakpoints are exactly what let a
+ * consumer segment a day into shows, so the `entry_type = 'track'` partial
+ * index cannot serve it. Migration 0144 adds the unpartitioned
+ * `flowsheet_add_time_idx` this relies on; without it the planner falls back
+ * to a full scan of the ~1.7 GB heap.
+ *
+ * Ordered by `add_time` ASC, tie-broken on `id` ASC — NOT `play_order`, which
+ * is assigned per-show by two independent writers and therefore repeats
+ * across the many shows a window spans (ordering by it interleaves them).
+ * `id` is globally monotonic, the same reason `getEntriesByShow` ties on it
+ * after the 2026-05-01 reordering incident.
+ */
+export const getEntriesInTimeWindow = async (start: Date, end: Date): Promise<IFSEntry[]> => {
+  const raw = await db
+    .select(FSEntryFieldsRaw)
+    .from(flowsheet)
+    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+    .leftJoin(library, eq(library.id, flowsheet.album_id))
+    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+    .where(and(gte(flowsheet.add_time, start), lt(flowsheet.add_time, end)))
+    .orderBy(asc(flowsheet.add_time), asc(flowsheet.id));
+
+  return raw.map(transformToIFSEntry);
+};
+
+/**
+ * Every show overlapping the window `[start, end)` (BS#2062), ordered by
+ * `start_time` ASC.
+ *
+ * Overlap, not containment: a show that spans midnight belongs to both days.
+ * A closed show `[start_time, end_time)` intersects when it starts before the
+ * window ends and ends after the window starts.
+ *
+ * **A NULL `end_time` is not "still on the air."** It has two causes that this
+ * column cannot distinguish: the show is genuinely live, or its `show_end`
+ * delivery was dropped and the column stayed NULL permanently (nothing
+ * re-closes it on a schedule — BS#2065). Reading NULL as open-ended would make
+ * every one of those orphaned historical shows intersect every window forever,
+ * so an open-ended show is included only when its `start_time` falls inside the
+ * window. A genuinely live show satisfies that on the windows a listener
+ * actually asks for.
+ *
+ * The DJ handle is resolved through the shared `resolveShowDjName` chain with
+ * the user row LEFT JOINed in — one query for the whole window, not one per
+ * show. `user.id` is selected alongside `djName` specifically to tell "no user
+ * row" from "user row with an unusable djName"; the chain treats them
+ * differently.
+ */
+export const getShowsInTimeWindow = async (start: Date, end: Date): Promise<FlowsheetRangeShow[]> => {
+  const rows = await db
+    .select({
+      id: shows.id,
+      show_name: shows.show_name,
+      specialty_id: shows.specialty_id,
+      start_time: shows.start_time,
+      end_time: shows.end_time,
+      dj_name_override: shows.dj_name_override,
+      legacy_dj_name: shows.legacy_dj_name,
+      primary_dj_id: shows.primary_dj_id,
+      user_id: user.id,
+      user_dj_name: user.djName,
+    })
+    .from(shows)
+    .leftJoin(user, eq(user.id, shows.primary_dj_id))
+    .where(
+      or(
+        // Strict `>`: two half-open intervals [a,b) and [c,d) intersect iff
+        // a < d AND c < b, so a show that ended exactly at the window's
+        // first instant does not overlap it.
+        and(isNotNull(shows.end_time), lt(shows.start_time, end), gt(shows.end_time, start)),
+        and(isNull(shows.end_time), gte(shows.start_time, start), lt(shows.start_time, end))
+      )
+    )
+    // `id` is a deterministic tie-break for shows sharing a start_time; the
+    // contract only specifies start_time ordering, and an unstable secondary
+    // order would reshuffle between identical requests.
+    .orderBy(asc(shows.start_time), asc(shows.id));
+
+  return rows.map((row) => ({
+    id: row.id,
+    show_name: row.show_name ?? null,
+    dj_name: resolveShowDjName({
+      dj_name_override: row.dj_name_override ?? null,
+      legacy_dj_name: row.legacy_dj_name ?? null,
+      primary_dj_id: row.primary_dj_id ?? null,
+      user: row.user_id == null ? null : { djName: row.user_dj_name ?? null },
+    }),
+    specialty_id: row.specialty_id ?? null,
+    start_time: row.start_time,
+    end_time: row.end_time ?? null,
+  }));
 };
 
 export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[]> => {

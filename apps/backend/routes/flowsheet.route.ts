@@ -25,6 +25,17 @@ const flowsheetConditionalGet = [conditionalGet(flowsheet_service.getLastModifie
 // Public playlist archive search
 flowsheet_route.get('/search', searchController.searchFlowsheetEndpoint);
 
+// Public date-windowed read (BS#2062) — successor to tubafrenzy's
+// /playlists/dailyEntries. Registered here, above `get('/')`, for the same
+// reason `/search` is: a literal path must be matched before the bare-root
+// handler. It carries no `requirePermissions` (the contract is `security: []`)
+// and no `flowsheetMirror` (read-only; the mirror is a write-path concern).
+// Deliberately outside `flowsheetConditionalGet`: that middleware's watermark
+// is the whole-table `flowsheet_watermark`, which any live write advances, so
+// it would invalidate a historical window that cannot have changed — a
+// misleading validator rather than a useful one.
+flowsheet_route.get('/range', flowsheetController.getEntriesInRange);
+
 flowsheet_route.get('/', flowsheetConditionalGet, flowsheetMirror.getEntries, flowsheetController.getEntries);
 
 flowsheet_route.post(

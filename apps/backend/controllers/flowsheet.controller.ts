@@ -109,6 +109,28 @@ export interface IFSEntry extends Omit<
 
 const MAX_ITEMS = 200;
 const DELETION_OFFSET = 10; //This offsets the ID's not representing the actual number of tracks due to deletions
+
+/**
+ * Widest window `GET /flowsheet/range` will serve (BS#2062).
+ *
+ * The route is public and unauthenticated over a 2.6M-row table, and the
+ * response is UNPAGINATED, so this bounds the row count — and therefore the
+ * response size — not merely the time span. Month- and year-scale analytical
+ * reads are explicitly not this endpoint's job.
+ *
+ * 8 days rather than exactly 7 covers both real consumers (24h for the
+ * `archive` daily playlist, 7d for the wxyc.org historical-archive page) with
+ * a day of slack. The slack is load-bearing, not padding: a calendar week
+ * spanning the autumn DST transition is 7d + 1h, and an exact-7d ceiling
+ * would 400 it.
+ */
+export const MAX_RANGE_MS = 8 * 24 * 60 * 60 * 1000;
+
+// Largest absolute epoch-ms a JS Date can represent. A value past this parses
+// as a finite number but yields an Invalid Date, which would reach Postgres as
+// a malformed timestamp; reject it at the edge instead (same class of guard as
+// INT4_MAX above, for a different overflow).
+const MAX_EPOCH_MS = 8.64e15;
 // flowsheet.id is a Postgres int4 column; a value outside this range parses
 // fine as a JS integer (passing Number.isInteger) but blows up downstream as
 // an unhandled "value out of range for type integer" Postgres error (BS#1800).
@@ -151,6 +173,101 @@ const projectEntriesV2 = (entries: IFSEntry[]): Record<string, unknown>[] => {
     );
   }
   return dense.map(flowsheet_service.transformToV2);
+};
+
+/**
+ * Parse an epoch-milliseconds query param strictly.
+ *
+ * Returns `null` for anything that is not a plain integer inside the Date
+ * range — including a float, a trailing-garbage string, and an empty value.
+ * `Number()` (not `parseInt`) on purpose: `parseInt('1.5e0')` silently yields
+ * 1, and `parseInt('2026-06-01')` yields 2026, both of which would coerce a
+ * malformed window into a plausible-looking one rather than a 400.
+ */
+const parseEpochMillis = (raw: string | undefined): number | null => {
+  if (raw === undefined || raw.trim() === '') return null;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || Math.abs(value) > MAX_EPOCH_MS) return null;
+  return value;
+};
+
+/**
+ * GET /flowsheet/range?start=&end= — public, date-windowed flowsheet read.
+ *
+ * The successor to tubafrenzy's `GET /playlists/dailyEntries`, which the
+ * `archive` app reads today and which dies at the 2026-08-31 cutover
+ * (WXYC/wiki#91 Phase 4). Contract: `wxyc-shared/api.yaml` `/flowsheet/range`.
+ *
+ * `start` / `end` are epoch **milliseconds**, matching the `dayStart`
+ * convention `archive` already computes, and the window is half-open
+ * `[start, end)` on each entry's `add_time` so adjacent windows never
+ * double-count a row.
+ *
+ * One consequence worth knowing rather than discovering: `add_time` is when a
+ * row was *logged*, and a breakpoint row is logged ~a minute BEFORE the hour
+ * it marks (its true hour is `radio_hour`). An hour-aligned window therefore
+ * reports each hour's breakpoint in the previous window. That is the
+ * off-by-one-hour class BS#1448 / BS#1449 fixed at the rendering layer;
+ * consumers drawing hour markers key on `radio_hour`, not on arrival window.
+ *
+ * Validation returns 400 with `{ message }` directly rather than throwing
+ * `WxycError` — matching `searchFlowsheetEndpoint`, the other public
+ * unauthenticated read on this router, so the two public surfaces answer a bad
+ * query the same way.
+ *
+ * No `attachUpcomingShows` / `attachCriticReviews`: those enrich the live
+ * flowsheet UI, are absent from this endpoint's contract, and would add two
+ * batched queries per request to a historical read that does not display them.
+ */
+export const getEntriesInRange: RequestHandler<object, unknown, unknown, { start?: string; end?: string }> = async (
+  req,
+  res,
+  next
+) => {
+  const start = parseEpochMillis(req.query.start);
+  if (start === null) {
+    res.status(400).json({ message: 'start must be an integer number of epoch milliseconds' });
+    return;
+  }
+
+  const end = parseEpochMillis(req.query.end);
+  if (end === null) {
+    res.status(400).json({ message: 'end must be an integer number of epoch milliseconds' });
+    return;
+  }
+
+  // Strictly greater: the window is half-open, so end === start is empty by
+  // construction and far more likely a caller bug than a real request.
+  if (end <= start) {
+    res.status(400).json({ message: 'end must be strictly greater than start' });
+    return;
+  }
+
+  if (end - start > MAX_RANGE_MS) {
+    res.status(400).json({
+      message: `window must not exceed ${MAX_RANGE_MS / (24 * 60 * 60 * 1000)} days`,
+    });
+    return;
+  }
+
+  const startDate = new Date(start);
+  const endDate = new Date(end);
+
+  try {
+    // Independent reads over the same window; no ordering dependency between
+    // them, so pay one round trip instead of two.
+    const [entries, shows] = await Promise.all([
+      flowsheet_service.getEntriesInTimeWindow(startDate, endDate),
+      flowsheet_service.getShowsInTimeWindow(startDate, endDate),
+    ]);
+
+    // An empty window is a normal result, never a 404 — the contract says so
+    // explicitly, and the two consumers render "no shows that day" rather than
+    // treating it as an error (contrast getEntries' legacy 404 branches).
+    res.status(200).json({ shows, entries: projectEntriesV2(entries) });
+  } catch (error) {
+    next(error);
+  }
 };
 
 export const getEntries: RequestHandler<object, unknown, object, QueryParams> = async (req, res) => {
