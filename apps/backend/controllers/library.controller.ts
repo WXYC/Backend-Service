@@ -328,13 +328,16 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
   // The code-triple check runs first and wins a collision on both axes: a
   // taken code blocks the write outright no matter what name accompanies it,
   // so it is reported over a name conflict the caller could otherwise route
-  // around by picking a free code. Keeping it first (unmodified from before
-  // this pre-check existed) makes that precedence a byproduct of ordering
-  // rather than a runtime branch, so it can't drift out of sync.
+  // around by picking a free code. Keeping it first makes that precedence a
+  // byproduct of ordering rather than a runtime branch, so it can't drift out
+  // of sync. `reason` gives this 409 the same positive discriminant as the
+  // name-conflict branch below, so a client never has to infer "code
+  // conflict" from the absence of a field.
   const existingArtist = await libraryService.getArtistByCode(body.code_letters, body.genre_id, body.code_number);
   if (existingArtist) {
     res.status(409).json({
       message: 'Artist code already exists for that genre and code letters.',
+      reason: 'artist_code_conflict',
       artist: existingArtist,
     });
     return;
