@@ -8,6 +8,13 @@
  * coercion, playcut slicing vs. unsliced talksets/breakpoints, and artwork
  * enrichment (including the BS#1105 split-format tie-break, rewritten from
  * an `array_agg(...)[1]` to a `DISTINCT ON` by BS#1800).
+ *
+ * BS#2103 added the v=2 metadata enrichment — streaming links, bio,
+ * genres/styles, release year, artist id, critic reviews, upcoming show —
+ * under the camelCase key names shipped iOS 3.2 decodes. Its coverage lives in
+ * the "v=2 metadata enrichment (BS#2103)" block below and is deliberately
+ * key-name-exact: a wrong name fails SILENTLY on the client (JSONDecoder drops
+ * the key), so the wire names are asserted literally and as a closed set.
  */
 import { jest } from '@jest/globals';
 
@@ -73,6 +80,29 @@ mockArtworkInnerJoin.mockReturnValue(artworkChain);
 mockArtworkWhere.mockReturnValue(artworkChain);
 mockArtworkOrderBy.mockResolvedValue([]); // artwork query default: no matches
 
+// Third chain: the BS#2103 batched metadata lookup, which shares `db.select`
+// with the main entries query but terminates on `.where()`:
+//   select().from(flowsheet).leftJoin(library, ...).leftJoin(album_metadata, ...).where(...)
+// `mockSelect` therefore dispatches on the projection's shape — only the main
+// entries query selects `entry_type`.
+const mockMetadataFrom = jest.fn();
+const mockMetadataLeftJoin = jest.fn();
+const mockMetadataWhere = jest.fn();
+
+const metadataChain = {
+  from: mockMetadataFrom,
+  leftJoin: mockMetadataLeftJoin,
+  where: mockMetadataWhere,
+};
+mockMetadataFrom.mockReturnValue(metadataChain);
+mockMetadataLeftJoin.mockReturnValue(metadataChain);
+mockMetadataWhere.mockResolvedValue([]); // metadata query default: no rows
+
+function selectDispatch(fields: unknown) {
+  return fields && typeof fields === 'object' && 'entry_type' in fields ? mockDbChain : metadataChain;
+}
+mockSelect.mockImplementation(selectDispatch);
+
 jest.mock('@wxyc/database', () => ({
   db: {
     select: (...args: unknown[]) => mockSelect(...args),
@@ -99,10 +129,34 @@ jest.mock('@wxyc/database', () => ({
     message: 'message',
     rotation_id: 'rotation_id',
     album_id: 'album_id',
+    metadata_status: 'metadata_status',
+    // Inline metadata columns — only ever referenced inside the shared
+    // COALESCE projection (`utils/album-metadata-projection.ts`), whose `sql`
+    // tag is mocked below, so their values are inert here.
+    discogs_url: 'flowsheet.discogs_url',
+    release_year: 'flowsheet.release_year',
+    spotify_url: 'flowsheet.spotify_url',
+    apple_music_url: 'flowsheet.apple_music_url',
+    youtube_music_url: 'flowsheet.youtube_music_url',
+    bandcamp_url: 'flowsheet.bandcamp_url',
+    soundcloud_url: 'flowsheet.soundcloud_url',
+    artist_bio: 'flowsheet.artist_bio',
+    artist_wikipedia_url: 'flowsheet.artist_wikipedia_url',
   },
   album_metadata: {
     album_id: 'album_metadata.album_id',
     artwork_url: 'album_metadata.artwork_url',
+    discogs_url: 'album_metadata.discogs_url',
+    release_year: 'album_metadata.release_year',
+    spotify_url: 'album_metadata.spotify_url',
+    apple_music_url: 'album_metadata.apple_music_url',
+    youtube_music_url: 'album_metadata.youtube_music_url',
+    bandcamp_url: 'album_metadata.bandcamp_url',
+    soundcloud_url: 'album_metadata.soundcloud_url',
+    artist_bio: 'album_metadata.artist_bio',
+    artist_wikipedia_url: 'album_metadata.artist_wikipedia_url',
+    genres: 'album_metadata.genres',
+    styles: 'album_metadata.styles',
   },
   rotation: {
     id: 'rotation.id',
@@ -117,6 +171,8 @@ jest.mock('@wxyc/database', () => ({
     id: 'library.id',
     artist_id: 'library.artist_id',
     album_title: 'library.album_title',
+    discogs_unavailable: 'library.discogs_unavailable',
+    discogs_unavailable_note: 'library.discogs_unavailable_note',
   },
   artists: {
     id: 'artists.id',
@@ -132,6 +188,25 @@ jest.mock('drizzle-orm', () => ({
   eq: jest.fn(),
   desc: jest.fn(),
   asc: jest.fn(),
+}));
+
+// BS#2103: the v=2 grouped path reuses `/flowsheet`'s feed-assembly attaches
+// for `upcoming_show` / `critic_reviews` rather than re-deriving the match
+// rules. Their own behavior is covered by
+// tests/unit/services/flowsheet.attachUpcomingShows.test.ts and
+// flowsheet.attachCriticReviews.test.ts; here they are no-op passthroughs
+// (individual tests override them to plant an enrichment), which also keeps
+// the heavyweight flowsheet.service import graph out of this unit test.
+type AttachTarget = {
+  upcoming_show?: unknown;
+  critic_reviews?: unknown;
+};
+const mockAttachUpcomingShows = jest.fn((entries: AttachTarget[]) => Promise.resolve(entries));
+const mockAttachCriticReviews = jest.fn((entries: AttachTarget[]) => Promise.resolve(entries));
+
+jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
+  attachUpcomingShows: (entries: AttachTarget[]) => mockAttachUpcomingShows(entries),
+  attachCriticReviews: (entries: AttachTarget[]) => mockAttachCriticReviews(entries),
 }));
 
 // Suppress console output in tests
@@ -286,7 +361,7 @@ const showEndRow = {
 describe('playlist-proxy.service', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockSelect.mockReturnValue(mockDbChain);
+    mockSelect.mockImplementation(selectDispatch);
     mockFrom.mockReturnValue(mockDbChain);
     mockLeftJoin.mockReturnValue(mockDbChain);
     mockInnerJoin.mockReturnValue(mockDbChain);
@@ -299,6 +374,11 @@ describe('playlist-proxy.service', () => {
     mockArtworkInnerJoin.mockReturnValue(artworkChain);
     mockArtworkWhere.mockReturnValue(artworkChain);
     mockArtworkOrderBy.mockResolvedValue([]); // artwork query default: no matches
+    mockMetadataFrom.mockReturnValue(metadataChain);
+    mockMetadataLeftJoin.mockReturnValue(metadataChain);
+    mockMetadataWhere.mockResolvedValue([]); // metadata query default: no rows
+    mockAttachUpcomingShows.mockImplementation((entries) => Promise.resolve(entries));
+    mockAttachCriticReviews.mockImplementation((entries) => Promise.resolve(entries));
   });
 
   describe('getRecentEntries — grouping and entry_type mapping', () => {
@@ -710,6 +790,370 @@ describe('playlist-proxy.service', () => {
       const result = await getRecentEntries(50);
 
       expect(result.playcuts[0].artworkURL).toBe('https://i.discogs.com/lowest-album-id.jpg');
+    });
+  });
+
+  describe('getRecentEntries — v=2 metadata enrichment (BS#2103)', () => {
+    // Ground truth for every key below: the `CodingKeys` block of `Playcut` in
+    // wxyc-ios-64 @ v3.2-AppStoreSubmission4
+    // (Shared/Playlist/Sources/Playlist/PlaylistEntry.swift, commit 068a51e7).
+    // The legacy v=1 wire is camelCase, unlike /flowsheet's snake_case, EXCEPT
+    // `upcoming_show` / `critic_reviews`, which round-trip through nested Swift
+    // types that carry their own snake_case Codable. A wrong name fails
+    // SILENTLY — JSONDecoder drops the key and the feature just doesn't appear.
+    const IOS_32_METADATA_KEYS = [
+      'artworkURL',
+      'discogsURL',
+      'releaseYear',
+      'spotifyURL',
+      'appleMusicURL',
+      'youtubeMusicURL',
+      'bandcampURL',
+      'soundcloudURL',
+      'artistBio',
+      'artistWikipediaURL',
+      'genres',
+      'styles',
+      'artistId',
+      'metadataStatus',
+      'discogsUnavailable',
+      'discogsUnavailableNote',
+      'upcoming_show',
+      'critic_reviews',
+    ] as const;
+
+    /** A fully-enriched metadata row, as the batched lookup returns it. */
+    const fullMetadata = {
+      id: jessicaPrattRow.id,
+      discogs_url: 'https://www.discogs.com/release/6621186',
+      release_year: 2015,
+      spotify_url: 'https://open.spotify.com/album/1PDb0PDzWnLnKfSCEOWvvS',
+      apple_music_url: 'https://music.apple.com/us/album/912345678',
+      youtube_music_url: 'https://music.youtube.com/playlist?list=OLAK5uy_abc',
+      bandcamp_url: 'https://jessicapratt.bandcamp.com/album/on-your-own-love-again',
+      soundcloud_url: 'https://soundcloud.com/jessicapratt/back-baby',
+      artist_bio: 'Jessica Pratt is a singer-songwriter from Los Angeles.',
+      artist_wikipedia_url: 'https://en.wikipedia.org/wiki/Jessica_Pratt_(musician)',
+      genres: ['Rock'],
+      styles: ['Folk', 'Psychedelic Rock'],
+      artist_id: 44321,
+      discogs_unavailable: false,
+      discogs_unavailable_note: null,
+      metadata_status: 'enriched_match',
+    };
+
+    /** An unenriched row: every metadata column NULL (no album_metadata, no inline value). */
+    const emptyMetadata = {
+      id: jessicaPrattRow.id,
+      discogs_url: null,
+      release_year: null,
+      spotify_url: null,
+      apple_music_url: null,
+      youtube_music_url: null,
+      bandcamp_url: null,
+      soundcloud_url: null,
+      artist_bio: null,
+      artist_wikipedia_url: null,
+      genres: null,
+      styles: null,
+      artist_id: null,
+      discogs_unavailable: null,
+      discogs_unavailable_note: null,
+      metadata_status: 'pending',
+    };
+
+    it('emits every enrichment field under the exact iOS 3.2 camelCase key', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockArtworkOrderBy.mockResolvedValue([
+        { key: 'jessica pratt-on your own love again', artwork_url: 'https://i.discogs.com/jessica.jpg' },
+      ]);
+      mockMetadataWhere.mockResolvedValue([fullMetadata]);
+      mockAttachUpcomingShows.mockImplementation((entries) => {
+        for (const entry of entries) entry.upcoming_show = { id: 991, headlining_artist: 'Jessica Pratt' };
+        return Promise.resolve(entries);
+      });
+      mockAttachCriticReviews.mockImplementation((entries) => {
+        for (const entry of entries)
+          entry.critic_reviews = [{ publication: 'Pitchfork', url: 'https://p4k.example/1' }];
+        return Promise.resolve(entries);
+      });
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      expect(pc.artworkURL).toBe('https://i.discogs.com/jessica.jpg');
+      expect(pc.discogsURL).toBe(fullMetadata.discogs_url);
+      expect(pc.releaseYear).toBe(2015);
+      expect(pc.spotifyURL).toBe(fullMetadata.spotify_url);
+      expect(pc.appleMusicURL).toBe(fullMetadata.apple_music_url);
+      expect(pc.youtubeMusicURL).toBe(fullMetadata.youtube_music_url);
+      expect(pc.bandcampURL).toBe(fullMetadata.bandcamp_url);
+      expect(pc.soundcloudURL).toBe(fullMetadata.soundcloud_url);
+      expect(pc.artistBio).toBe(fullMetadata.artist_bio);
+      expect(pc.artistWikipediaURL).toBe(fullMetadata.artist_wikipedia_url);
+      expect(pc.genres).toEqual(['Rock']);
+      expect(pc.styles).toEqual(['Folk', 'Psychedelic Rock']);
+      expect(pc.artistId).toBe(44321);
+      // Key camelCase, VALUE snake_case (the MetadataStatus raw value).
+      expect(pc.metadataStatus).toBe('enriched_match');
+      expect(pc.discogsUnavailable).toBe(false);
+      // The two deliberate snake_case exceptions.
+      expect(pc.upcoming_show).toEqual({ id: 991, headlining_artist: 'Jessica Pratt' });
+      expect(pc.critic_reviews).toEqual([{ publication: 'Pitchfork', url: 'https://p4k.example/1' }]);
+    });
+
+    it('emits no key outside the iOS 3.2 Playcut CodingKeys set', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockArtworkOrderBy.mockResolvedValue([
+        { key: 'jessica pratt-on your own love again', artwork_url: 'https://i.discogs.com/jessica.jpg' },
+      ]);
+      mockMetadataWhere.mockResolvedValue([{ ...fullMetadata, discogs_unavailable_note: 'promo only' }]);
+      mockAttachUpcomingShows.mockImplementation((entries) => {
+        for (const entry of entries) entry.upcoming_show = { id: 991 };
+        return Promise.resolve(entries);
+      });
+      mockAttachCriticReviews.mockImplementation((entries) => {
+        for (const entry of entries) entry.critic_reviews = [{ publication: 'Pitchfork' }];
+        return Promise.resolve(entries);
+      });
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      // The pre-existing legacy playcut fields, plus exactly the enrichment set.
+      const legacyKeys = [
+        'id',
+        'chronOrderID',
+        'hour',
+        'timeCreated',
+        'songTitle',
+        'artistName',
+        'releaseTitle',
+        'labelName',
+        'rotation',
+        'request',
+      ];
+      expect(Object.keys(pc).sort()).toEqual([...legacyKeys, ...IOS_32_METADATA_KEYS].sort());
+    });
+
+    it('omits every URL field — never emits "" — for a row with no enrichment', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockMetadataWhere.mockResolvedValue([emptyMetadata]);
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      for (const key of [
+        'artworkURL',
+        'discogsURL',
+        'spotifyURL',
+        'appleMusicURL',
+        'youtubeMusicURL',
+        'bandcampURL',
+        'soundcloudURL',
+        'artistWikipediaURL',
+      ] as const) {
+        expect(pc[key]).toBeUndefined();
+        expect(Object.prototype.hasOwnProperty.call(pc, key)).toBe(false);
+      }
+      expect(pc.releaseYear).toBeUndefined();
+      expect(pc.artistBio).toBeUndefined();
+      expect(pc.genres).toBeUndefined();
+      expect(pc.styles).toBeUndefined();
+      expect(pc.artistId).toBeUndefined();
+      expect(pc.discogsUnavailable).toBeUndefined();
+      expect(pc.discogsUnavailableNote).toBeUndefined();
+      expect(pc.upcoming_show).toBeUndefined();
+      expect(pc.critic_reviews).toBeUndefined();
+      // metadata_status is NOT NULL on the table, so it always rides.
+      expect(pc.metadataStatus).toBe('pending');
+    });
+
+    it.each([
+      ['empty string', ''],
+      ['whitespace only', '   '],
+      ['relative path', '/release/12345'],
+      ['bare hostname', 'www.discogs.com/release/12345'],
+      ['scheme-relative', '//www.discogs.com/release/12345'],
+      ['non-web scheme', 'javascript:alert(1)'],
+    ])(
+      'drops a %s discogs URL rather than emitting it (iOS decodeIfPresent(URL.self) THROWS and blanks the whole playlist)',
+      async (_label, value) => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        mockMetadataWhere.mockResolvedValue([{ ...emptyMetadata, discogs_url: value }]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        expect(pc.discogsURL).toBeUndefined();
+        expect(Object.prototype.hasOwnProperty.call(pc, 'discogsURL')).toBe(false);
+      }
+    );
+
+    it('suppresses a persisted spotify_url/apple_music_url whose host is wrong (BS#1714 regression guard)', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockMetadataWhere.mockResolvedValue([
+        {
+          ...fullMetadata,
+          // Mislabeled at the LML boundary before #1712 — a Bandcamp URL filed
+          // under spotify_url, a YouTube URL filed under apple_music_url.
+          spotify_url: 'https://jessicapratt.bandcamp.com/album/on-your-own-love-again',
+          apple_music_url: 'https://music.youtube.com/watch?v=abc',
+        },
+      ]);
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      expect(pc.spotifyURL).toBeUndefined();
+      expect(pc.appleMusicURL).toBeUndefined();
+      // The un-mislabeled siblings are untouched.
+      expect(pc.bandcampURL).toBe(fullMetadata.bandcamp_url);
+      expect(pc.youtubeMusicURL).toBe(fullMetadata.youtube_music_url);
+    });
+
+    it('keeps a correctly-hosted spotify_url/apple_music_url', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockMetadataWhere.mockResolvedValue([fullMetadata]);
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      expect(pc.spotifyURL).toBe(fullMetadata.spotify_url);
+      expect(pc.appleMusicURL).toBe(fullMetadata.apple_music_url);
+    });
+
+    it('collapses empty genres/styles arrays to an omitted key (mirrors transformToV2, BS#1441)', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockMetadataWhere.mockResolvedValue([{ ...emptyMetadata, genres: [], styles: [] }]);
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      expect(pc.genres).toBeUndefined();
+      expect(pc.styles).toBeUndefined();
+    });
+
+    it('omits discogsUnavailable entirely for a row with no library link (BS#1908 present-or-absent)', async () => {
+      mockLimit.mockResolvedValue([handTypedRotationRow]);
+      mockMetadataWhere.mockResolvedValue([
+        { ...emptyMetadata, id: handTypedRotationRow.id, discogs_unavailable: null, discogs_unavailable_note: null },
+      ]);
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      expect(Object.prototype.hasOwnProperty.call(pc, 'discogsUnavailable')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(pc, 'discogsUnavailableNote')).toBe(false);
+    });
+
+    it('emits discogsUnavailable/Note when the library row carries the flag', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockMetadataWhere.mockResolvedValue([
+        { ...emptyMetadata, discogs_unavailable: true, discogs_unavailable_note: 'embargoed promo' },
+      ]);
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      expect(pc.discogsUnavailable).toBe(true);
+      expect(pc.discogsUnavailableNote).toBe('embargoed promo');
+    });
+
+    it('survives a diacritic-bearing artist byte-for-byte, enrichment included', async () => {
+      // Nilüfer Yanya, from wxyc-shared/src/test-utils/wxyc-example-data.json.
+      const niluferRow = {
+        ...jessicaPrattRow,
+        id: 2602261,
+        track_title: 'Midnight Sun',
+        artist_name: 'Nilüfer Yanya',
+        album_title: 'PAINLESS',
+        record_label: 'ATO Records',
+      };
+      mockLimit.mockResolvedValue([niluferRow]);
+      mockMetadataWhere.mockResolvedValue([
+        {
+          ...emptyMetadata,
+          id: niluferRow.id,
+          artist_bio: 'Nilüfer Yanya is a London-born singer-songwriter.',
+          genres: ['Rock'],
+          discogs_url: 'https://www.discogs.com/release/22012345',
+        },
+      ]);
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      expect(pc.artistName).toBe('Nilüfer Yanya');
+      expect(pc.artistBio).toBe('Nilüfer Yanya is a London-born singer-songwriter.');
+      expect(pc.discogsURL).toBe('https://www.discogs.com/release/22012345');
+      // JSON.stringify is the actual serialization path; assert it round-trips.
+      expect(JSON.parse(JSON.stringify(pc)).artistBio).toBe('Nilüfer Yanya is a London-born singer-songwriter.');
+    });
+
+    it('runs exactly ONE batched metadata query for the whole page (no N+1)', async () => {
+      const manyPlaycuts = Array.from({ length: 10 }, (_, i) => ({ ...jessicaPrattRow, id: 4100 + i }));
+      mockLimit.mockResolvedValue(manyPlaycuts);
+
+      await getRecentEntries(10);
+
+      expect(mockMetadataWhere).toHaveBeenCalledTimes(1);
+      expect(mockAttachUpcomingShows).toHaveBeenCalledTimes(1);
+      expect(mockAttachCriticReviews).toHaveBeenCalledTimes(1);
+    });
+
+    it('enriches only the sliced playcuts, not the full 200-row window', async () => {
+      const manyPlaycuts = Array.from({ length: 10 }, (_, i) => ({ ...jessicaPrattRow, id: 4200 + i }));
+      mockLimit.mockResolvedValue(manyPlaycuts);
+
+      await getRecentEntries(3);
+
+      const [targets] = mockAttachUpcomingShows.mock.calls[0];
+      expect(targets).toHaveLength(3);
+    });
+
+    it('does not query metadata at all when there are no playcuts', async () => {
+      mockLimit.mockResolvedValue([talksetRow, breakpointRow]);
+
+      await getRecentEntries(50);
+
+      expect(mockMetadataWhere).not.toHaveBeenCalled();
+      expect(mockAttachUpcomingShows).not.toHaveBeenCalled();
+      expect(mockAttachCriticReviews).not.toHaveBeenCalled();
+    });
+
+    it('degrades to the bare legacy playcut (rather than throwing) when the metadata query fails', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockMetadataWhere.mockRejectedValue(new Error('DB connection lost'));
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      expect(pc.songTitle).toBe('Back, Baby');
+      expect(pc.discogsURL).toBeUndefined();
+      expect(pc.metadataStatus).toBeUndefined();
+    });
+
+    it('degrades (rather than throwing) when the upcoming-show / critic-review attach fails', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockMetadataWhere.mockResolvedValue([fullMetadata]);
+      mockAttachUpcomingShows.mockRejectedValue(new Error('concerts unavailable'));
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      expect(pc.upcoming_show).toBeUndefined();
+      // The rest of the enrichment still rides.
+      expect(pc.discogsURL).toBe(fullMetadata.discogs_url);
+    });
+
+    it('leaves the v=1 flat payload untouched — no metadata query, no enrichment keys (Android contract)', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockMetadataWhere.mockResolvedValue([fullMetadata]);
+
+      const [entry] = await getRecentEntriesFlat(50);
+
+      expect(mockMetadataWhere).not.toHaveBeenCalled();
+      expect(mockAttachUpcomingShows).not.toHaveBeenCalled();
+      expect(mockAttachCriticReviews).not.toHaveBeenCalled();
+      expect(Object.keys(entry).sort()).toEqual(['chronOrderID', 'entryType', 'hour', 'id', 'playcut', 'timeCreated']);
+      expect(Object.keys(entry.playcut ?? {}).sort()).toEqual([
+        'artistName',
+        'labelName',
+        'releaseTitle',
+        'request',
+        'rotation',
+        'segue',
+        'songTitle',
+      ]);
     });
   });
 
