@@ -10,3 +10,10 @@ audit
 # skips .py silently, but glob-form invocations error on them (BS#1522).
 *.py
 
+# Byte-exact wire golden (BS#2103): the file IS `JSON.stringify(payload, null, 2)`
+# from playlist-proxy-wire-golden.test.ts, and wxyc-ios-64 holds a copy pinned by
+# SHA-256. Prettier collapses short arrays onto one line, which would rewrite the
+# bytes the test exists to pin and break the cross-repo hash. Formatting here is
+# the serializer's to define, not the formatter's.
+tests/fixtures/recent-entries-v2-wire-golden.json
+
