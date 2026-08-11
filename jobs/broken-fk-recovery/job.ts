@@ -51,12 +51,14 @@ export type ClassificationCounts = {
  * jobs/flowsheet-etl/job.ts) was **unscheduled**, not removed, when Phase 3
  * of the tubafrenzy decommission (WXYC/wiki#88) flipped `flowsheet` to
  * Backend-canonical — it's still defined and still invocable by hand for the
- * Phase 6a maintenance window, and rotation-etl carries the same standing
- * one-shot. That makes the set of writers capable of concurrently issuing
- * this UPDATE **three**, not one: this job, flowsheet-etl's manual run, and
+ * Phase 6a maintenance window (behind `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`),
+ * and rotation-etl carries the same standing one-shot, same env-var gate.
+ * That makes the set of writers capable of concurrently issuing this UPDATE
+ * **three**, not one: this job, flowsheet-etl's manual run, and
  * rotation-etl's manual run (rotation-etl only touches `rotation`, so it
  * doesn't race this specific flowsheet statement, but does race
- * legacy-linkage-resolve's rotation pass the same way).
+ * legacy-linkage-resolve's rotation pass the same way) — though the latter
+ * two require an operator to deliberately set that env var, unlike this job.
  */
 export const reresolveAlbumIds = async (): Promise<number> => {
   const result = await db.execute(sql`
