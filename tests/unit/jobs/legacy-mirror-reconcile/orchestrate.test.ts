@@ -545,6 +545,39 @@ describe('runReconcile — stale-open-show detector failure isolation (BS#2069)'
     expect(totals.shows_created).toBe(1);
   });
 
+  it('guards a captureError that itself throws in the outer catch, so a cascading Sentry outage cannot abort the sweeps (BS#2098 review item 3)', async () => {
+    // Failure scenario from the review: ports.captureWarning throws (a
+    // Sentry transport error / quota exhaustion — a recurring failure mode
+    // in this org, BS#1291) while reporting the aggregate stale_open_show
+    // signal. Control lands in the outer catch, which — before this fix —
+    // called ports.captureError unguarded; if THAT also throws for the same
+    // underlying reason, the exception used to escape runStaleOpenShowReport
+    // entirely and abort the two repair sweeps below it in runReconcile,
+    // reintroducing the exact coupling BS#2069 exists to remove, one level
+    // deeper.
+    const transportError = new Error('Sentry quota exhausted');
+    const stale = makeStaleOpenShow();
+    const createShow = makeShow({ id: 1, primary_dj_id: 'dj-1' });
+    const ports = makePorts({
+      selectStaleOpenShows: mockAsync([stale]),
+      countHistoricalOpenShows: mockAsync(2813),
+      captureWarning: jest.fn((_message: string, step: string) => {
+        if (step === 'stale_open_show') throw transportError;
+      }),
+      captureError: jest.fn(() => {
+        throw transportError;
+      }),
+      selectShowsToCreate: mockAsync([createShow]),
+    });
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    // The sweeps ran despite the cascading Sentry failure inside the
+    // detector's own reporting path.
+    expect(ports.mirrorCreateShow).toHaveBeenCalledTimes(1);
+    expect(totals.shows_created).toBe(1);
+  });
+
   it('logs an error step and captures the exception, distinct from the generic detection signal', async () => {
     const detectorError = new Error('statement timeout');
     const ports = makePorts({ selectStaleOpenShows: jest.fn(() => Promise.reject(detectorError)) });
@@ -595,18 +628,39 @@ describe('runReconcile — stale-open-show detector failure isolation (BS#2069)'
     expect(order).toEqual(['detector', 'show-sweep']);
   });
 
-  it('does NOT escalate the generic detection-signal Sentry warning solely because the detector failed', async () => {
-    // An idle, otherwise-healthy run (no orphan shows/entries/partials) stays
-    // under the alert threshold even when the detector itself errored — the
-    // detector's own failure is reported through its own captureError/log
-    // call, not by inflating the unrelated orphan-count signal.
-    const ports = makePorts({ selectStaleOpenShows: jest.fn(() => Promise.reject(new Error('boom'))) });
+  it('still escalates the generic detection-signal Sentry warning from genuine orphans, unaffected by (and not conflated with) a failed detector (BS#2098 review item 5)', async () => {
+    // BS#2098 review item 5: the prior version of this test used
+    // OPTIONS.alertThreshold=0 with the default makePorts() (empty orphan
+    // arrays), so orphanTotal was ALWAYS 0 regardless of the detector —
+    // `0 > 0` is false no matter what, making the assertion incapable of
+    // ever failing. It passed identically against pre-BS#2069-isolation code
+    // too. This version seeds a genuine orphan (a show-create candidate) so
+    // the detection escalation actually has something to fire on, and a
+    // failing detector alongside it.
+    const createShow = makeShow({ id: 1, primary_dj_id: 'dj-1' });
+    const ports = makePorts({
+      selectStaleOpenShows: jest.fn(() => Promise.reject(new Error('boom'))),
+      selectShowsToCreate: mockAsync([createShow]),
+    });
 
-    await runReconcile(ports, OPTIONS);
+    const totals = await runReconcile(ports, { ...OPTIONS, alertThreshold: 0 });
 
-    expect(ports.captureWarning).not.toHaveBeenCalledWith(
+    // This alone is a genuine pin: against the pre-BS#2069 unguarded
+    // detector, `selectStaleOpenShows` rejecting would propagate straight
+    // out of `runReconcile`, so `await runReconcile(...)` above would throw
+    // and the test would fail before reaching any assertion.
+    expect(totals.stale_open_show_detector_failed).toBe(true);
+    expect(ports.captureWarning).toHaveBeenCalledWith(
       expect.stringContaining('orphaned tubafrenzy mirror rows detected'),
       'detection',
+      expect.objectContaining({ orphan_shows: 1 })
+    );
+    // The detector's own failure is reported through its own captureError
+    // call (step 'stale_open_show_detector'), never folded into this Sentry
+    // warning's step/payload.
+    expect(ports.captureWarning).not.toHaveBeenCalledWith(
+      expect.any(String),
+      'stale_open_show_detector',
       expect.any(Object)
     );
   });
@@ -693,5 +747,47 @@ describe('runReconcile — historical-count failure does not discard successful 
 
     expect(totals.historical_open_shows_count_failed).toBe(false);
     expect(totals.historical_open_shows).toBe(2813);
+  });
+
+  it('also flags historical_open_shows_count_failed when selectStaleOpenShows itself fails, since the count was never attempted (BS#2098 review item 2)', async () => {
+    // Before this fix: when selectStaleOpenShows rejected, the nested
+    // countHistoricalOpenShows try/catch was never reached at all, so
+    // historical_open_shows_count_failed stayed at its `false` default
+    // alongside historical_open_shows at its `0` default — indistinguishable
+    // from a run that genuinely counted zero historical open shows. A
+    // monitor keyed on the flag would misread the #1543 backlog as fully
+    // drained when it was never measured this run.
+    const ports = makePorts({ selectStaleOpenShows: jest.fn(() => Promise.reject(new Error('statement timeout'))) });
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    expect(totals.stale_open_show_detector_failed).toBe(true);
+    expect(totals.historical_open_shows_count_failed).toBe(true);
+    expect(totals.historical_open_shows).toBe(0);
+    expect(ports.countHistoricalOpenShows).not.toHaveBeenCalled();
+  });
+
+  it('does NOT clobber an already-successful historical count when a LATER step in the try body fails (BS#2098 review item 2)', async () => {
+    // The outer catch only backfills historical_open_shows_count_failed when
+    // the nested count was never attempted. Here selectStaleOpenShows and
+    // countHistoricalOpenShows both succeed, but the aggregate captureWarning
+    // call after them throws (see the item-3 guard test below for the full
+    // scenario) — the count's genuine success must survive that later
+    // failure, not be overwritten as "unknown".
+    const ports = makePorts({
+      selectStaleOpenShows: mockAsync([makeStaleOpenShow()]),
+      countHistoricalOpenShows: mockAsync(2813),
+      captureWarning: jest.fn((_message: string, step: string) => {
+        if (step === 'stale_open_show') throw new Error('Sentry quota exhausted');
+      }),
+    });
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    expect(totals.historical_open_shows).toBe(2813);
+    expect(totals.historical_open_shows_count_failed).toBe(false);
+    // The later captureWarning failure still lands in the outer catch and is
+    // recorded there — it just must not relabel the already-successful count.
+    expect(totals.stale_open_show_detector_failed).toBe(true);
   });
 });

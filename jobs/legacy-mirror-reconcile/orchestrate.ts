@@ -161,23 +161,34 @@ export interface ReconcileTotals {
    * BS#2065: open shows older than `windowHours` — the pre-existing residue
    * #1543's final-dump pass repairs, counted (never listed) so the backlog is
    * observable and its shrink after that pass is verifiable. Stays at its
-   * zero default when `countHistoricalOpenShows` itself failed this run —
-   * see `historical_open_shows_count_failed`, which is the field that
-   * actually distinguishes "counted zero" from "count unknown."
+   * zero default whenever `historical_open_shows_count_failed` is true —
+   * that flag is what actually distinguishes "counted zero" from "count
+   * unknown," whether the count itself threw or was never attempted at all
+   * (see that field's own comment, BS#2098 review item 2).
    */
   historical_open_shows: number;
   /**
-   * BS#2069 review finding 3: true when `countHistoricalOpenShows` (only —
-   * see `stale_open_show_detector_failed` for `selectStaleOpenShows`) threw
-   * this run. Isolated in its own nested try inside `runStaleOpenShowReport`
-   * so this strictly-less-important count's failure cannot discard the
-   * per-show `stale_open_show` warn lines and aggregate Sentry warning that
-   * `selectStaleOpenShows` already earned by succeeding in the same run.
-   * Before this fix there was no nested try: a `countHistoricalOpenShows`
-   * timeout after a successful `selectStaleOpenShows` fell into the SAME
-   * outer catch as a genuine detector failure, discarding real findings —
-   * `totals.stale_open_shows` stayed populated on the `finished` line with
-   * zero warn lines or Sentry capture behind it.
+   * BS#2069 review finding 3 (widened by BS#2098 review item 2): true when
+   * the #1543 backlog count is not trustworthy this run — either because
+   * `countHistoricalOpenShows` itself threw, or because it was never
+   * attempted at all (`selectStaleOpenShows` failed first, so execution
+   * never reached the nested try that calls it). Isolated in its own nested
+   * try inside `runStaleOpenShowReport` so this strictly-less-important
+   * count's failure cannot discard the per-show `stale_open_show` warn lines
+   * and aggregate Sentry warning that `selectStaleOpenShows` already earned
+   * by succeeding in the same run. Before the BS#2069 fix there was no
+   * nested try: a `countHistoricalOpenShows` timeout after a successful
+   * `selectStaleOpenShows` fell into the SAME outer catch as a genuine
+   * detector failure, discarding real findings — `totals.stale_open_shows`
+   * stayed populated on the `finished` line with zero warn lines or Sentry
+   * capture behind it. Before the BS#2098 fix, the OUTER catch (reached when
+   * `selectStaleOpenShows` itself throws, before the count is ever attempted)
+   * left this flag at its `false` default alongside `historical_open_shows`
+   * at its `0` default — indistinguishable from a genuine zero count. The
+   * outer catch now sets it too, but only when the nested count was never
+   * attempted (`runStaleOpenShowReport` tracks that locally), so it does not
+   * clobber a count that had already genuinely succeeded before some LATER
+   * step in the try body failed (see BS#2098 review item 3).
    */
   historical_open_shows_count_failed: boolean;
   /**
@@ -475,12 +486,48 @@ export const STALE_OPEN_SHOW_SENTRY_SAMPLE = 10;
  * and its own fingerprinted `stale_open_show_historical_count` Sentry capture,
  * and the per-show warn loop now runs BEFORE the count so it can never be
  * skipped by the count's failure.
+ *
+ * "COUNTED ZERO" VS. "COUNT UNKNOWN" (BS#2098 review item 2): the nested try
+ * above only runs when `selectStaleOpenShows` itself succeeds. Before this
+ * fix, when `selectStaleOpenShows` threw, the nested try/catch was never
+ * reached at all — `historical_open_shows` stayed at its `0` default AND
+ * `historical_open_shows_count_failed` stayed at its `false` default, which
+ * together read as "the count genuinely came back zero," identical to the
+ * healthy steady state. The `finished`/`detection` log line and any monitor
+ * keyed on the flag would then misreport the #1543 backlog as fully drained
+ * when it was never measured this run. `historicalCountAttempted` below
+ * tracks whether the nested try ran (success OR its own caught failure) so
+ * the outer catch can set `historical_open_shows_count_failed = true` for
+ * exactly the case the nested try never covers — `selectStaleOpenShows`
+ * failing before the count is ever attempted — without clobbering a count
+ * that had already genuinely succeeded before a LATER step (e.g. the
+ * aggregate `captureWarning` below) throws and lands here too.
+ *
+ * AN UNGUARDED CAPTURE IN THE OUTER CATCH (BS#2098 review item 3): if
+ * `ports.captureWarning` above throws — a Sentry transport error or quota
+ * exhaustion, a recurring failure mode in this org (BS#1291) — control lands
+ * in this outer catch. Before this fix, `ports.captureError` here was itself
+ * unguarded: if it threw for the same underlying reason (the same outage),
+ * that second exception would escape this catch block entirely, propagate
+ * out of `runStaleOpenShowReport`, and abort the `runShowCreateSweep` /
+ * `runEntrySweep` awaits in `runReconcile` below it — reintroducing, one
+ * level deeper, exactly the coupling BS#2069 exists to remove. (This path
+ * also mislabels what was actually a reporting-transport failure as
+ * `stale_open_show_detector_failed` — the detector itself may have
+ * succeeded; a real but accepted simplification, not fixed here.) The
+ * `ports.captureError` call is now wrapped in its own try/catch: if it also
+ * throws, that's logged and swallowed rather than re-thrown. The detector
+ * failure is already durable via the `ports.log('error', ...)` call above it
+ * (CloudWatch, independent of Sentry's availability), so losing the Sentry
+ * capture on top of an already-Sentry-impaired run is an acceptable
+ * degradation — taking down the mirror self-heal on top of it is not.
  */
 const runStaleOpenShowReport = async (
   ports: ReconcilePorts,
   options: ReconcileOptions,
   totals: ReconcileTotals
 ): Promise<void> => {
+  let historicalCountAttempted = false;
   try {
     const stale = await ports.selectStaleOpenShows(options);
     totals.stale_open_shows = stale.length;
@@ -516,6 +563,12 @@ const runStaleOpenShowReport = async (
       ports.captureError(err, 'stale_open_show_historical_count', {
         window_hours: options.windowHours,
       });
+    } finally {
+      // Attempted either way (success or the caught failure just above) —
+      // see the "COUNTED ZERO VS COUNT UNKNOWN" docblock paragraph. This is
+      // what lets the outer catch below tell "the count never ran" apart
+      // from "the count ran and either outcome already happened."
+      historicalCountAttempted = true;
     }
 
     if (stale.length > 0) {
@@ -539,15 +592,37 @@ const runStaleOpenShowReport = async (
     }
   } catch (err) {
     totals.stale_open_show_detector_failed = true;
+    // Only when the nested count was never attempted — see the "COUNTED ZERO
+    // VS COUNT UNKNOWN" docblock paragraph. A count that already genuinely
+    // succeeded (or already recorded its own failure) before some later step
+    // threw must not be overwritten here.
+    if (!historicalCountAttempted) {
+      totals.historical_open_shows_count_failed = true;
+    }
     const message = err instanceof Error ? err.message : String(err);
     ports.log('error', 'stale_open_show_detector_failed', `stale-open-show detector failed: ${message}`, {
       error_message: message,
       error_name: err instanceof Error ? err.name : null,
     });
-    ports.captureError(err, 'stale_open_show_detector', {
-      stale_after_hours: options.staleAfterHours,
-      window_hours: options.windowHours,
-    });
+    // See the "AN UNGUARDED CAPTURE IN THE OUTER CATCH" docblock paragraph:
+    // this must not be allowed to throw past this point.
+    try {
+      ports.captureError(err, 'stale_open_show_detector', {
+        stale_after_hours: options.staleAfterHours,
+        window_hours: options.windowHours,
+      });
+    } catch (captureErr) {
+      const captureMessage = captureErr instanceof Error ? captureErr.message : String(captureErr);
+      ports.log(
+        'error',
+        'stale_open_show_detector_capture_failed',
+        `Sentry capture of the detector failure itself failed: ${captureMessage}`,
+        {
+          error_message: captureMessage,
+          error_name: captureErr instanceof Error ? captureErr.name : null,
+        }
+      );
+    }
   }
 };
 
