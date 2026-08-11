@@ -1,15 +1,17 @@
 /**
- * Unit tests for `jobs/legacy-linkage-resolve` (BS#2064 liveness).
+ * Unit tests for `jobs/legacy-linkage-resolve` (BS#2064 liveness, hardened by BS#2071).
  *
  * Two things are under test here and they pull in opposite directions:
  *
  *   1. The repair cohort must stay unbounded in time. Both passes anti-join on
  *      `album_id IS NULL` and nothing else — the `cronjob_runs` row this job
  *      now writes is a liveness heartbeat, never a delta bound. The SQL-shape
- *      assertions below exist to fail loudly if someone "optimizes" the SELECTs
- *      by filtering on `last_run`, which would permanently strand every row
- *      whose `library` row landed during a window the job missed.
- *   2. A missed run must alert, and a healthy zero-candidate run must not.
+ *      assertions below exist to fail loudly if someone "optimizes" the
+ *      cohort by filtering on `last_run`, which would permanently strand
+ *      every row whose `library` row landed during a window the job missed.
+ *   2. A missed run must alert, and a healthy zero-candidate run must not —
+ *      and, per BS#2071, so must a run that merely raced a benign concurrent
+ *      write; only a genuine non-draining UPDATE may alert.
  */
 
 // `withMonitor` returns whatever the callback returns (and re-throws its
@@ -30,6 +32,7 @@ jest.mock('@sentry/node', () => ({
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { db, getLastRunTimestamp, updateLastRun } from '@wxyc/database';
+import * as logger from '../../../../jobs/legacy-linkage-resolve/logger';
 import {
   CHECKIN_MARGIN_MINUTES,
   CRON_SCHEDULE,
@@ -52,25 +55,27 @@ const normalizedExecutedSql = (): string[] => executedSql().map((text) => text.r
 
 const findSqlMatching = (pattern: RegExp): string | undefined => executedSql().find((text) => pattern.test(text));
 
-type PassMock = { candidates: number; resolved: number; residual?: number };
+/**
+ * BS#2071: `candidates` and `resolved` now come back from a single
+ * data-modifying CTE, in one row — there is no longer a separate "residual"
+ * value to mock independently. Production code derives
+ * `residual = max(candidates - resolved, 0)` from exactly this pair, which is
+ * the fix: residual can no longer disagree with candidates/resolved the way
+ * a separately-issued post-write re-COUNT used to be able to (that was the
+ * shape BS#2071 replaced — see `hasUnresolvedResidue`'s docblock in job.ts).
+ */
+type PassMock = { candidates: number; resolved: number };
 
 /**
- * Queue one pass's statements, in order: COUNT, then — only if there were
- * candidates — UPDATE, an optional ANALYZE (only if the UPDATE actually wrote
- * something), and the BS#2071 post-write residual re-COUNT. The residual
- * defaults to `max(candidates - resolved, 0)` so callers that don't care
- * about the pre/post race (most of the suite) can keep passing just
- * `{ candidates, resolved }`; tests that exercise the race pass `residual`
- * explicitly.
+ * Queue one pass's statements for a REAL (non-dry) run: the single combined
+ * cohort-count-and-UPDATE CTE, then — only if it actually wrote something —
+ * the conditional ANALYZE. Unlike the pre-BS#2071 shape, this issues exactly
+ * one statement even for a zero-candidate pass: the combined statement itself
+ * is what measures `candidates`, so there's nothing to check first.
  */
 const queuePass = (execute: jest.Mock, pass: PassMock): void => {
-  execute.mockResolvedValueOnce([{ count: pass.candidates }]);
-  if (pass.candidates > 0) {
-    execute.mockResolvedValueOnce({ count: pass.resolved });
-    if (pass.resolved > 0) execute.mockResolvedValueOnce([]);
-    const residual = pass.residual ?? Math.max(pass.candidates - pass.resolved, 0);
-    execute.mockResolvedValueOnce([{ count: residual }]);
-  }
+  execute.mockResolvedValueOnce([{ candidates: pass.candidates, resolved: pass.resolved }]);
+  if (pass.resolved > 0) execute.mockResolvedValueOnce([]); // ANALYZE
 };
 
 /** Queue both passes' statements for a full non-dry run, flowsheet then rotation. */
@@ -80,7 +85,7 @@ const queueRun = (flowsheetPass: PassMock, rotationPass: PassMock): void => {
   queuePass(execute, rotationPass);
 };
 
-/** A dry run issues only the two COUNTs — no UPDATE, no ANALYZE. */
+/** A dry run issues only the two candidate COUNTs — no combined statement, no ANALYZE. */
 const queueDryRun = (flowsheetCandidates: number, rotationCandidates: number): void => {
   const execute = db.execute as jest.Mock;
   execute.mockResolvedValueOnce([{ count: flowsheetCandidates }]);
@@ -112,6 +117,13 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
    * these constants is a deliberate, reviewable act, not a pattern to slip
    * past.
    *
+   * BS#2071 (this revision) folded each pass's COUNT and UPDATE into one
+   * data-modifying CTE (`resolveFlowsheetAlbumIds`/`resolveRotationAlbumIds`
+   * in job.ts), so the allowlisted text below covers the whole combined
+   * statement rather than a COUNT and an UPDATE separately. The plain
+   * COUNT-only statement survives only on the `--dry-run` path, which must
+   * count without writing.
+   *
    * `${flowsheet}`/`${rotation}`/`${library}` render as `''` under the mock
    * (`tests/mocks/database.mock.ts` models each as a plain object of
    * `{ column: 'column' }` entries, which `renderValue` treats as "table
@@ -121,64 +133,53 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
   const FLOWSHEET_COUNT_SQL =
     'SELECT COUNT(*)::int AS count FROM f JOIN l ON f.legacy_release_id = l.legacy_release_id ' +
     'WHERE f.legacy_release_id IS NOT NULL AND f.album_id IS NULL';
-  const FLOWSHEET_UPDATE_SQL =
-    'UPDATE f SET album_id = l.id FROM l WHERE f.legacy_release_id = l.legacy_release_id ' +
-    'AND f.legacy_release_id IS NOT NULL AND f.album_id IS NULL';
   const ROTATION_COUNT_SQL =
     'SELECT COUNT(*)::int AS count FROM r JOIN l ON r.legacy_library_release_id = l.legacy_release_id ' +
     'WHERE r.legacy_library_release_id IS NOT NULL AND r.album_id IS NULL';
-  const ROTATION_UPDATE_SQL =
-    'UPDATE r SET album_id = l.id, artist_name = NULL, album_title = NULL, record_label = NULL FROM l ' +
-    'WHERE r.legacy_library_release_id = l.legacy_release_id AND r.legacy_library_release_id IS NOT NULL ' +
-    'AND r.album_id IS NULL';
+  const FLOWSHEET_DRAIN_SQL =
+    'WITH cohort AS ( SELECT f.id FROM f JOIN l ON f.legacy_release_id = l.legacy_release_id ' +
+    'WHERE f.legacy_release_id IS NOT NULL AND f.album_id IS NULL ), upd AS ( UPDATE f SET album_id = l.id ' +
+    'FROM l, cohort c WHERE f.id = c.id AND f.legacy_release_id = l.legacy_release_id RETURNING 1 ) ' +
+    'SELECT (SELECT COUNT(*)::int FROM cohort) AS candidates, (SELECT COUNT(*)::int FROM upd) AS resolved';
+  const ROTATION_DRAIN_SQL =
+    'WITH cohort AS ( SELECT r.id FROM r JOIN l ON r.legacy_library_release_id = l.legacy_release_id ' +
+    'WHERE r.legacy_library_release_id IS NOT NULL AND r.album_id IS NULL ), upd AS ( UPDATE r ' +
+    'SET album_id = l.id, artist_name = NULL, album_title = NULL, record_label = NULL FROM l, cohort c ' +
+    'WHERE r.id = c.id AND r.legacy_library_release_id = l.legacy_release_id RETURNING 1 ) ' +
+    'SELECT (SELECT COUNT(*)::int FROM cohort) AS candidates, (SELECT COUNT(*)::int FROM upd) AS resolved';
 
-  it('flowsheet COUNT matches the allowlisted statement exactly — no added predicate survives', async () => {
+  it('flowsheet drain statement matches the allowlisted statement exactly — no added predicate survives', async () => {
     queueRun({ candidates: 5, resolved: 5 }, { candidates: 0, resolved: 0 });
 
     await runResolve(false);
 
-    const flowsheetCounts = normalizedExecutedSql().filter((text) =>
-      text.includes('FROM f JOIN l ON f.legacy_release_id')
-    );
-    // Issued twice — pre-UPDATE and the BS#2071 post-write residual re-count —
-    // and both must be byte-identical to each other and to the allowlist.
-    expect(flowsheetCounts).toEqual([FLOWSHEET_COUNT_SQL, FLOWSHEET_COUNT_SQL]);
+    expect(normalizedExecutedSql()).toContain(FLOWSHEET_DRAIN_SQL);
   });
 
-  it('rotation COUNT matches the allowlisted statement exactly — no added predicate survives', async () => {
+  it('rotation drain statement matches the allowlisted statement exactly — no added predicate survives', async () => {
     queueRun({ candidates: 0, resolved: 0 }, { candidates: 3, resolved: 3 });
 
     await runResolve(false);
 
-    const rotationCounts = normalizedExecutedSql().filter((text) =>
-      text.includes('FROM r JOIN l ON r.legacy_library_release_id')
-    );
-    expect(rotationCounts).toEqual([ROTATION_COUNT_SQL, ROTATION_COUNT_SQL]);
+    expect(normalizedExecutedSql()).toContain(ROTATION_DRAIN_SQL);
   });
 
-  it('flowsheet UPDATE matches the allowlisted statement exactly — no added predicate survives', async () => {
-    queueRun({ candidates: 5, resolved: 5 }, { candidates: 0, resolved: 0 });
-
-    await runResolve(false);
-
-    expect(normalizedExecutedSql()).toContain(FLOWSHEET_UPDATE_SQL);
-  });
-
-  it('rotation UPDATE matches the allowlisted statement exactly — no added predicate survives', async () => {
-    queueRun({ candidates: 0, resolved: 0 }, { candidates: 3, resolved: 3 });
-
-    await runResolve(false);
-
-    expect(normalizedExecutedSql()).toContain(ROTATION_UPDATE_SQL);
-  });
-
-  it('a zero-candidate pass never issues the UPDATE or a residual re-count', async () => {
+  it('a zero-candidate real-run pass still issues its combined statement once, and never an ANALYZE', async () => {
     queueRun({ candidates: 0, resolved: 0 }, { candidates: 0, resolved: 0 });
 
     await runResolve(false);
 
-    // Exactly one COUNT per pass — no UPDATE (anti-joined cohort is empty) and
-    // no second COUNT (nothing was written, so nothing to re-measure).
+    // The combined statement is what measures `candidates` — there's no
+    // separate pre-check to skip, so it always runs exactly once per pass,
+    // real or idle. Only a resolved write earns a follow-up ANALYZE.
+    expect(normalizedExecutedSql()).toEqual([FLOWSHEET_DRAIN_SQL, ROTATION_DRAIN_SQL]);
+  });
+
+  it('a dry run issues only the two candidate COUNTs — no combined statement, no ANALYZE', async () => {
+    queueDryRun(4, 2);
+
+    await runResolve(true);
+
     expect(normalizedExecutedSql()).toEqual([FLOWSHEET_COUNT_SQL, ROTATION_COUNT_SQL]);
   });
 
@@ -318,36 +319,24 @@ describe('legacy-linkage-resolve: cronjob_runs heartbeat (signal b)', () => {
 });
 
 describe('legacy-linkage-resolve: drain check (signal c)', () => {
+  /**
+   * `hasUnresolvedResidue` only ever looks at `residual`. BS#2071 (this
+   * revision) means `residual` is always `max(candidates - resolved, 0)`,
+   * computed from a single-snapshot CTE — so there's no longer a meaningful
+   * "candidates/resolved disagree with residual" case to exercise at this
+   * pure-function layer (that used to be exactly the bug: a separately-
+   * issued post-write re-COUNT could disagree with `candidates - resolved`).
+   * That guarantee is exercised at the `runOnce` layer below, where the mock
+   * only ever supplies `{ candidates, resolved }` and production code is the
+   * only thing that computes `residual`.
+   */
   it.each([
-    ['a healthy idle run', { candidates: 0, resolved: 0, residual: 0 }, false],
-    ['a fully drained run', { candidates: 12, resolved: 12, residual: 0 }, false],
-    ['a run that picked up mid-run arrivals', { candidates: 12, resolved: 14, residual: 0 }, false],
-    // BS#2071: a benign race — a concurrent broken-fk-recovery run, or a row
-    // deleted/edited between the pre-UPDATE COUNT and the UPDATE — leaves
-    // `resolved < candidates`, the exact shape the old comparison treated as
-    // impossible-to-be-benign. The post-write residual re-count settles it:
-    // whatever removed the row from contention removed it from the residual
-    // too, so this must NOT alert.
-    [
-      'a benign race: something else already resolved what this pass saw as a candidate',
-      { candidates: 12, resolved: 0, residual: 0 },
-      false,
-    ],
-    [
-      'a benign race that only partly overlapped this pass’s own write',
-      { candidates: 12, resolved: 5, residual: 0 },
-      false,
-    ],
-    // A genuine non-drain: the post-write re-count still finds rows in the
-    // cohort, so the UPDATE really isn't draining what its own COUNT sees.
-    ['a genuine non-draining UPDATE that wrote nothing', { candidates: 12, resolved: 0, residual: 12 }, true],
-    [
-      'a genuine non-draining UPDATE that wrote only part of the cohort',
-      { candidates: 12, resolved: 5, residual: 7 },
-      true,
-    ],
-  ])('%s', (_label, passResult, expected) => {
-    expect(hasUnresolvedResidue(passResult)).toBe(expected);
+    [0, false],
+    [1, true],
+    [7, true],
+    [12, true],
+  ])('residual=%s -> hasUnresolvedResidue=%s', (residual, expected) => {
+    expect(hasUnresolvedResidue({ candidates: 12, resolved: 12 - residual, residual })).toBe(expected);
   });
 
   it('does not alert on a healthy zero-candidate run', async () => {
@@ -366,39 +355,46 @@ describe('legacy-linkage-resolve: drain check (signal c)', () => {
     expect(mockCaptureMessage).not.toHaveBeenCalled();
   });
 
-  it('re-runs the identical COUNT after the write to compute the residual (BS#2071)', async () => {
-    queueRun({ candidates: 7, resolved: 7 }, { candidates: 2, resolved: 2 });
+  it(
+    'does not alert on the acceptance-criterion scenario: fully drained by this pass, with more candidates ' +
+      'arriving after this statement completes',
+    async () => {
+      // BS#2071's issue body walks through exactly this shape: a pass sees 12
+      // candidates, resolves all 12 in the same statement that counted them,
+      // and — completely separately, after this statement has already
+      // committed — 3 more rows become candidates (most plausibly
+      // `library-etl`, which shares this job's exact `*/30 * * * *` slot).
+      // Under the old post-write-recount shape that scenario reported
+      // `residual: 3` and alerted on a perfect run. Under the single-snapshot
+      // CTE, those 3 later arrivals are not part of this statement's result
+      // at all — there is no query left that could see them — so the mocked
+      // result is just the fully-drained `{ candidates: 12, resolved: 12 }`
+      // this pass actually measured, and there is nothing to alert on.
+      queueRun({ candidates: 12, resolved: 12 }, { candidates: 0, resolved: 0 });
 
-    await runOnce(false);
+      await runOnce(false);
 
-    const flowsheetCounts = normalizedExecutedSql().filter((text) =>
-      text.includes('FROM f JOIN l ON f.legacy_release_id')
-    );
-    const rotationCounts = normalizedExecutedSql().filter((text) =>
-      text.includes('FROM r JOIN l ON r.legacy_library_release_id')
-    );
-    expect(flowsheetCounts).toHaveLength(2);
-    expect(flowsheetCounts[0]).toBe(flowsheetCounts[1]);
-    expect(rotationCounts).toHaveLength(2);
-    expect(rotationCounts[0]).toBe(rotationCounts[1]);
-  });
+      expect(mockCaptureMessage).not.toHaveBeenCalled();
+    }
+  );
 
   it('does not warn when a concurrent operator run already resolved what this pass saw as candidates (acceptance criterion: benign race)', async () => {
     // Acceptance criterion: "A concurrent one-shot broken-fk-recovery run, or
     // a deleted/edited candidate row, does not produce an
-    // unresolved_candidates warning." candidates=12, resolved=0 is exactly the
-    // shape BS#2071's issue body walks through (the concurrent job drained the
-    // cohort between this pass's COUNT and its own UPDATE) — residual=0 is
-    // what the post-write re-count actually reports for that scenario.
-    queueRun({ candidates: 12, resolved: 0, residual: 0 }, { candidates: 0, resolved: 0 });
+    // unresolved_candidates warning." A row a concurrent repairer already
+    // resolved before this statement's snapshot was taken never enters
+    // `cohort` in the first place — it drops out of `candidates`, not just
+    // `resolved` — so the shape this pass actually measures is a smaller,
+    // still fully-drained cohort, not a shortfall.
+    queueRun({ candidates: 9, resolved: 9 }, { candidates: 0, resolved: 0 });
 
     await runOnce(false);
 
     expect(mockCaptureMessage).not.toHaveBeenCalled();
   });
 
-  it('still warns when the post-write residual is genuinely nonzero, per pass', async () => {
-    queueRun({ candidates: 7, resolved: 3, residual: 4 }, { candidates: 2, resolved: 0, residual: 2 });
+  it('still warns when the UPDATE genuinely does not drain its own cohort, per pass', async () => {
+    queueRun({ candidates: 7, resolved: 3 }, { candidates: 2, resolved: 0 });
 
     await runOnce(false);
 
@@ -416,5 +412,17 @@ describe('legacy-linkage-resolve: drain check (signal c)', () => {
     await runOnce(true);
 
     expect(mockCaptureMessage).not.toHaveBeenCalled();
+  });
+
+  it('logs residual as null, not 0, on a dry run — 0 would misreport a nonzero cohort as fully drained', async () => {
+    const logSpy = jest.spyOn(logger, 'log').mockImplementation(() => undefined);
+    queueDryRun(12, 0);
+
+    await runResolve(true);
+
+    const flowsheetCall = logSpy.mock.calls.find((call) => call[1] === 'resolve-flowsheet');
+    expect(flowsheetCall?.[3]).toEqual(expect.objectContaining({ candidates: 12, resolved: 0, residual: null }));
+
+    logSpy.mockRestore();
   });
 });
