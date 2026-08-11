@@ -325,11 +325,35 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
     throw new WxycError('Missing Request Parameters: artist_name, code_letters, genre_id, or code_number', 400);
   }
 
+  // The code-triple check runs first and wins a collision on both axes: a
+  // taken code blocks the write outright no matter what name accompanies it,
+  // so it is reported over a name conflict the caller could otherwise route
+  // around by picking a free code. Keeping it first (unmodified from before
+  // this pre-check existed) makes that precedence a byproduct of ordering
+  // rather than a runtime branch, so it can't drift out of sync.
   const existingArtist = await libraryService.getArtistByCode(body.code_letters, body.genre_id, body.code_number);
   if (existingArtist) {
     res.status(409).json({
       message: 'Artist code already exists for that genre and code letters.',
       artist: existingArtist,
+    });
+    return;
+  }
+
+  // Genre-scoped name pre-check, reusing the code-triple check's matcher
+  // semantics (Unicode-form + diacritic + case fold, backed by
+  // `artists_fold_name_idx`) so a name that only differs by composition form
+  // still collides. `reason` is the discriminant a client uses to tell this
+  // conflict apart from the code-triple one above -- the two call for
+  // different remedies (use the named artist vs. pick another code), so
+  // collapsing them into one shape would leave a client unable to choose.
+  const conflictingArtistId = await libraryService.artistIdFromName(body.artist_name, body.genre_id);
+  if (conflictingArtistId) {
+    const conflictingArtist = await libraryService.getArtistById(conflictingArtistId);
+    res.status(409).json({
+      message: 'Artist name already exists in that genre.',
+      reason: 'artist_name_conflict',
+      artist: conflictingArtist,
     });
     return;
   }

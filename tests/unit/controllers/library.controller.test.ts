@@ -9,6 +9,13 @@ const mockFuzzySearchLibrary = jest.fn<() => Promise<unknown[]>>();
 const mockEnrichWithArtwork = jest.fn<(results: unknown[]) => Promise<unknown[]>>();
 const mockArtistIdFromName = jest.fn<(name: string, genreId: number) => Promise<number>>();
 const mockGetArtistNameById = jest.fn<(id: number) => Promise<string | null>>();
+type ArtistConflictRow = { artist_id: number; artist_name: string; code_letters: string };
+const mockGetArtistByCode =
+  jest.fn<(codeLetters: string, genreId: number, codeNumber: number) => Promise<ArtistConflictRow | null>>();
+const mockGetArtistById = jest.fn<(artistId: number) => Promise<ArtistConflictRow | null>>();
+const mockInsertArtist = jest.fn<(artist: Record<string, unknown>) => Promise<Record<string, unknown>>>();
+const mockInsertArtistGenreCrossreference =
+  jest.fn<(artistId: number, genreId: number, codeNumber: number) => Promise<unknown>>();
 const mockInsertAlbum = jest.fn<(album: Record<string, unknown>) => Promise<Record<string, unknown>>>();
 const mockGenerateAlbumCodeNumber = jest.fn<(artistId: number) => Promise<number>>();
 const mockCreateLabel = jest.fn<(label: string) => Promise<{ id: number }>>();
@@ -71,9 +78,10 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   mapLookupToCanonicalEntity: mockMapLookupToCanonicalEntity,
   artistIdFromName: mockArtistIdFromName,
   getArtistNameById: mockGetArtistNameById,
-  insertArtist: jest.fn(),
-  insertArtistGenreCrossreference: jest.fn(),
-  getArtistByCode: jest.fn(),
+  insertArtist: mockInsertArtist,
+  insertArtistGenreCrossreference: mockInsertArtistGenreCrossreference,
+  getArtistByCode: mockGetArtistByCode,
+  getArtistById: mockGetArtistById,
   generateAlbumCodeNumber: mockGenerateAlbumCodeNumber,
   generateArtistNumber: jest.fn(),
   getGenresFromDB: jest.fn(),
@@ -152,6 +160,7 @@ import {
   markFound,
   searchForAlbum,
   addAlbum,
+  addArtist,
   getAlbum,
   getRotationTracks,
   updateAlbum,
@@ -675,6 +684,95 @@ describe('library.controller', () => {
 
         consoleWarnSpy.mockRestore();
       });
+    });
+  });
+
+  describe('addArtist', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockGetArtistByCode.mockResolvedValue(null);
+      mockArtistIdFromName.mockResolvedValue(0);
+    });
+
+    const req = (overrides: Record<string, unknown> = {}) =>
+      ({
+        body: {
+          artist_name: 'Chuquimamani-Condori',
+          code_letters: 'CH',
+          genre_id: 15,
+          code_number: 12,
+          ...overrides,
+        },
+      }) as unknown as Request;
+
+    it('creates a new artist when neither the code triple nor the name conflicts in that genre', async () => {
+      mockInsertArtist.mockResolvedValue({
+        id: 55,
+        artist_name: 'Chuquimamani-Condori',
+        alphabetical_name: 'Chuquimamani-Condori',
+        code_letters: 'CH',
+      });
+
+      const res = mockResponse();
+      await addArtist(req(), res, next);
+
+      expect(mockGetArtistByCode).toHaveBeenCalledWith('CH', 15, 12);
+      expect(mockArtistIdFromName).toHaveBeenCalledWith('Chuquimamani-Condori', 15);
+      expect(mockInsertArtist).toHaveBeenCalledWith(
+        expect.objectContaining({ artist_name: 'Chuquimamani-Condori', code_letters: 'CH' })
+      );
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('returns 409 with the existing artist when the code triple already exists, in the pre-existing shape', async () => {
+      mockGetArtistByCode.mockResolvedValue({ artist_id: 3, artist_name: 'Jockstrap', code_letters: 'CH' });
+
+      const res = mockResponse();
+      await addArtist(req(), res, next);
+
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith({
+        message: 'Artist code already exists for that genre and code letters.',
+        artist: { artist_id: 3, artist_name: 'Jockstrap', code_letters: 'CH' },
+      });
+      expect(mockInsertArtist).not.toHaveBeenCalled();
+    });
+
+    it('returns a distinguishable 409 when only the artist name conflicts in that genre', async () => {
+      mockArtistIdFromName.mockResolvedValue(7);
+      mockGetArtistById.mockResolvedValue({ artist_id: 7, artist_name: 'Nilüfer Yanya', code_letters: 'NI' });
+
+      const res = mockResponse();
+      await addArtist(req({ artist_name: 'Nilüfer Yanya', code_letters: 'ZZ' }), res, next);
+
+      expect(mockGetArtistById).toHaveBeenCalledWith(7);
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reason: 'artist_name_conflict',
+          artist: { artist_id: 7, artist_name: 'Nilüfer Yanya', code_letters: 'NI' },
+        })
+      );
+      // Distinguishable from the code-triple 409: different reason and message text.
+      const [payload] = (res.json as jest.Mock).mock.calls[0] as [{ message: string }];
+      expect(payload.message).not.toBe('Artist code already exists for that genre and code letters.');
+      expect(mockInsertArtist).not.toHaveBeenCalled();
+    });
+
+    it('prefers the code-triple conflict over a simultaneous name conflict, deterministically', async () => {
+      mockGetArtistByCode.mockResolvedValue({ artist_id: 3, artist_name: 'Jockstrap', code_letters: 'CH' });
+      mockArtistIdFromName.mockResolvedValue(7);
+
+      const res = mockResponse();
+      await addArtist(req(), res, next);
+
+      expect(res.json).toHaveBeenCalledWith({
+        message: 'Artist code already exists for that genre and code letters.',
+        artist: { artist_id: 3, artist_name: 'Jockstrap', code_letters: 'CH' },
+      });
+      // Short-circuits before the name pre-check even runs.
+      expect(mockArtistIdFromName).not.toHaveBeenCalled();
+      expect(mockInsertArtist).not.toHaveBeenCalled();
     });
   });
 
