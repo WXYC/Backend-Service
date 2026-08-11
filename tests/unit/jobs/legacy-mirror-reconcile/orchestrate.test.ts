@@ -611,3 +611,87 @@ describe('runReconcile — stale-open-show detector failure isolation (BS#2069)'
     );
   });
 });
+
+describe('runReconcile — historical-count failure does not discard successful per-show findings (BS#2069 review finding 3)', () => {
+  it('still logs every per-show stale_open_show warning when countHistoricalOpenShows rejects afterward', async () => {
+    // Before this fix, countHistoricalOpenShows shared selectStaleOpenShows's
+    // try block: a rejection here fell into the SAME outer catch as a
+    // genuine detector failure, so the per-show warn loop below it never ran
+    // even though `stale` had already been found successfully.
+    const staleShows = [
+      makeStaleOpenShow({ show_id: 1 }),
+      makeStaleOpenShow({ show_id: 2 }),
+      makeStaleOpenShow({ show_id: 3 }),
+    ];
+    const ports = makePorts({
+      selectStaleOpenShows: mockAsync(staleShows),
+      countHistoricalOpenShows: jest.fn(() => Promise.reject(new Error('statement timeout'))),
+    });
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    expect(totals.stale_open_shows).toBe(3);
+    const staleWarnings = ports.log.mock.calls.filter((c) => c[1] === 'stale_open_show');
+    expect(staleWarnings).toHaveLength(3);
+    expect(ports.captureWarning).toHaveBeenCalledWith(
+      expect.stringContaining('left open past the plausible-duration threshold'),
+      'stale_open_show',
+      expect.objectContaining({ stale_open_shows: 3 })
+    );
+  });
+
+  it('flags historical_open_shows_count_failed without flagging the broader stale_open_show_detector_failed', async () => {
+    const ports = makePorts({
+      selectStaleOpenShows: mockAsync([makeStaleOpenShow()]),
+      countHistoricalOpenShows: jest.fn(() => Promise.reject(new Error('connection reset'))),
+    });
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    expect(totals.historical_open_shows_count_failed).toBe(true);
+    // The narrower flag exists precisely so this failure isn't confused with
+    // a full detector failure (which would also suppress the sweeps'
+    // upstream ordering guarantees the other BS#2069 tests pin).
+    expect(totals.stale_open_show_detector_failed).toBe(false);
+    // historical_open_shows stays at its zero default — never a stale
+    // leftover value from a previous run — when the count itself failed.
+    expect(totals.historical_open_shows).toBe(0);
+  });
+
+  it('logs a distinct historical_open_show_count_failed step and captures the exception separately from the detector-failed path', async () => {
+    const countError = new Error('statement timeout');
+    const ports = makePorts({
+      selectStaleOpenShows: mockAsync([makeStaleOpenShow()]),
+      countHistoricalOpenShows: jest.fn(() => Promise.reject(countError)),
+    });
+
+    await runReconcile(ports, OPTIONS);
+
+    expect(ports.log).toHaveBeenCalledWith(
+      'warn',
+      'historical_open_show_count_failed',
+      expect.any(String),
+      expect.objectContaining({ error_message: 'statement timeout' })
+    );
+    expect(ports.captureError).toHaveBeenCalledWith(countError, 'stale_open_show_historical_count', expect.any(Object));
+    // Never routed through the generic detector-failed step/fingerprint.
+    expect(ports.log).not.toHaveBeenCalledWith(
+      'error',
+      'stale_open_show_detector_failed',
+      expect.any(String),
+      expect.any(Object)
+    );
+  });
+
+  it('does not report historical_open_shows_count_failed on a clean run', async () => {
+    const ports = makePorts({
+      selectStaleOpenShows: mockAsync([makeStaleOpenShow()]),
+      countHistoricalOpenShows: mockAsync(2813),
+    });
+
+    const totals = await runReconcile(ports, OPTIONS);
+
+    expect(totals.historical_open_shows_count_failed).toBe(false);
+    expect(totals.historical_open_shows).toBe(2813);
+  });
+});

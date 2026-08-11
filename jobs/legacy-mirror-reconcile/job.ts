@@ -352,14 +352,30 @@ const main = async (): Promise<void> => {
     // inside `runReconcile` precisely so it cannot abort the two repair
     // sweeps; letting it flip this job's exit code anyway would re-couple the
     // same failure at the reporting layer that isolation just decoupled at
-    // the execution layer. The failure is not silent — it is logged at
-    // 'error' with its own step name and captured to Sentry with its own
-    // fingerprint (see `runStaleOpenShowReport`), so it alerts distinctly
-    // from this job's generic 'failed' path. Reserving exit 1 for "the sweeps
-    // didn't run" keeps the nightly cron-failure alert meaning what it says:
-    // if this job starts exiting 1 every night because a persistently-broken
-    // detector never affects the sweeps, the alert becomes noise an operator
-    // learns to ignore — exactly the failure mode BS#2069 exists to prevent.
+    // the execution layer.
+    //
+    // What the failure actually alerts through (BS#2069 review finding 5 —
+    // checked against the real deploy path, not assumed): the installed
+    // crontab (`.github/workflows/deploy-base.yml`'s `CRON_CMD`) is
+    // `docker rm -f <app>-cron ...; docker run --name <app>-cron --env-file
+    // .env <image>` — no `--log-driver awslogs`, no output redirection, no
+    // exit-code wrapper. There is no nightly cron-failure alert in this repo
+    // for a non-zero exit code to become noise in, so the "reserve exit 1 so
+    // the cron alert stays meaningful" framing this comment used to have was
+    // wrong — that alert doesn't exist. The `log('error', ...)` line goes to
+    // the named container's stderr, which the NEXT night's `docker rm -f`
+    // destroys — one-run retention, shipped nowhere durable. Same problem for
+    // `totals.stale_open_show_detector_failed` on the `finished` line: it's
+    // real, but only as durable as that one run's container.
+    //
+    // So the actual, durable observability of a detector-only failure is ONE
+    // channel: the Sentry `captureException` in `runStaleOpenShowReport`,
+    // fingerprinted per-step (BS#2069 review finding 4, `captureError` in
+    // `logger.ts`) so a persistently-failing detector rolls up into a single
+    // stable Sentry issue across runs instead of a fresh issue per distinct
+    // error message. Keeping the exit code sweeps-only means that Sentry
+    // signal stays the one place this failure mode is visible, rather than
+    // being duplicated (or replaced) by a job-level exit-1 that nothing reads.
   } catch (err) {
     captureError(err, 'main');
     log('error', 'failed', `${JOB_NAME} failed: ${err instanceof Error ? err.message : String(err)}`, {

@@ -53,7 +53,7 @@
  * at the bottom of this module.
  */
 
-import { and, asc, eq, exists, gt, isNotNull, isNull, lt, notExists, notInArray, sql } from 'drizzle-orm';
+import { and, asc, eq, exists, gt, isNotNull, isNull, lt, notExists, notInArray, or, sql } from 'drizzle-orm';
 import { db, flowsheet, shows, user, type FSEntry, type Show, type User } from '@wxyc/database';
 
 export type LogLevel = 'info' | 'warn' | 'error';
@@ -160,16 +160,36 @@ export interface ReconcileTotals {
   /**
    * BS#2065: open shows older than `windowHours` — the pre-existing residue
    * #1543's final-dump pass repairs, counted (never listed) so the backlog is
-   * observable and its shrink after that pass is verifiable.
+   * observable and its shrink after that pass is verifiable. Stays at its
+   * zero default when `countHistoricalOpenShows` itself failed this run —
+   * see `historical_open_shows_count_failed`, which is the field that
+   * actually distinguishes "counted zero" from "count unknown."
    */
   historical_open_shows: number;
   /**
-   * BS#2069: true when the read-only detector arm (`selectStaleOpenShows` or
-   * `countHistoricalOpenShows`) threw this run. The exception is caught,
-   * logged, and captured to Sentry at the point of failure — this flag exists
-   * so the same fact is visible on the "finished" summary line without
-   * grepping Sentry, since a detector-only failure deliberately does NOT flip
-   * this job's exit code (see `job.ts`, the call site of `runReconcile`).
+   * BS#2069 review finding 3: true when `countHistoricalOpenShows` (only —
+   * see `stale_open_show_detector_failed` for `selectStaleOpenShows`) threw
+   * this run. Isolated in its own nested try inside `runStaleOpenShowReport`
+   * so this strictly-less-important count's failure cannot discard the
+   * per-show `stale_open_show` warn lines and aggregate Sentry warning that
+   * `selectStaleOpenShows` already earned by succeeding in the same run.
+   * Before this fix there was no nested try: a `countHistoricalOpenShows`
+   * timeout after a successful `selectStaleOpenShows` fell into the SAME
+   * outer catch as a genuine detector failure, discarding real findings —
+   * `totals.stale_open_shows` stayed populated on the `finished` line with
+   * zero warn lines or Sentry capture behind it.
+   */
+  historical_open_shows_count_failed: boolean;
+  /**
+   * BS#2069: true when `selectStaleOpenShows` threw this run (see
+   * `historical_open_shows_count_failed` for the narrower `
+   * countHistoricalOpenShows` failure, isolated separately since BS#2069
+   * review finding 3 so it no longer sets this flag). The exception is
+   * caught, logged, and captured to Sentry at the point of failure — this
+   * flag exists so the same fact is visible on the "finished" summary line
+   * without grepping Sentry, since a detector-only failure deliberately does
+   * NOT flip this job's exit code (see `job.ts`, the call site of
+   * `runReconcile`).
    */
   stale_open_show_detector_failed: boolean;
 }
@@ -188,6 +208,7 @@ const emptyTotals = (): ReconcileTotals => ({
   skipped_no_dj: 0,
   stale_open_shows: 0,
   historical_open_shows: 0,
+  historical_open_shows_count_failed: false,
   stale_open_show_detector_failed: false,
 });
 
@@ -420,8 +441,9 @@ export const STALE_OPEN_SHOW_SENTRY_SAMPLE = 10;
  * Runs before the sweeps and takes no cooperative pause: it writes nothing, so
  * deferring it behind a live DJ would only delay the signal.
  *
- * ISOLATED (BS#2069): the whole body is one try/catch. This detector rides
- * the same run as the two repair sweeps (BS#1707) purely for scheduling
+ * ISOLATED (BS#2069): the outer body is one try/catch around
+ * `selectStaleOpenShows` and the per-show reporting it feeds. This detector
+ * rides the same run as the two repair sweeps (BS#1707) purely for scheduling
  * convenience — both mechanisms are retired together at Phase 6a — but it is
  * not the reason the job exists. Before this fix, an unguarded exception here
  * (a statement timeout on the `shows` scan + `flowsheet` anti-join, a
@@ -437,6 +459,22 @@ export const STALE_OPEN_SHOW_SENTRY_SAMPLE = 10;
  * warnings and from the generic `detection` signal below), and recorded on
  * `totals.stale_open_show_detector_failed` — then execution falls through to
  * the sweeps exactly as if the detector had found nothing to report.
+ *
+ * ISOLATED AGAIN, ONE LEVEL DEEPER (BS#2069 review finding 3):
+ * `countHistoricalOpenShows` — the #1543 backlog count, strictly less
+ * important than the per-show findings above it — gets its OWN nested
+ * try/catch rather than sharing the outer one. Before this fix it sat inside
+ * the same try as `selectStaleOpenShows`, so a `countHistoricalOpenShows`
+ * timeout AFTER a successful `selectStaleOpenShows` fell into the outer catch
+ * and discarded real findings: the per-show warn loop and the aggregate
+ * Sentry warning never ran, even though `stale.length` genuinely stale shows
+ * had already been found. `totals.stale_open_shows` stayed populated on the
+ * `finished` line with zero warn lines or Sentry capture behind it — a
+ * partial success silently degraded to a null report. The nested try isolates
+ * that count's failure into its own `historical_open_shows_count_failed` flag
+ * and its own fingerprinted `stale_open_show_historical_count` Sentry capture,
+ * and the per-show warn loop now runs BEFORE the count so it can never be
+ * skipped by the count's failure.
  */
 const runStaleOpenShowReport = async (
   ports: ReconcilePorts,
@@ -446,7 +484,6 @@ const runStaleOpenShowReport = async (
   try {
     const stale = await ports.selectStaleOpenShows(options);
     totals.stale_open_shows = stale.length;
-    totals.historical_open_shows = await ports.countHistoricalOpenShows(options);
 
     for (const s of stale) {
       ports.log(
@@ -464,6 +501,23 @@ const runStaleOpenShowReport = async (
       );
     }
 
+    // See the "ISOLATED AGAIN, ONE LEVEL DEEPER" docblock paragraph above: a
+    // failure counting the #1543 backlog must not discard the per-show
+    // findings above (already logged) or the aggregate Sentry warning below.
+    try {
+      totals.historical_open_shows = await ports.countHistoricalOpenShows(options);
+    } catch (err) {
+      totals.historical_open_shows_count_failed = true;
+      const message = err instanceof Error ? err.message : String(err);
+      ports.log('warn', 'historical_open_show_count_failed', `historical open-show count failed: ${message}`, {
+        error_message: message,
+        error_name: err instanceof Error ? err.name : null,
+      });
+      ports.captureError(err, 'stale_open_show_historical_count', {
+        window_hours: options.windowHours,
+      });
+    }
+
     if (stale.length > 0) {
       ports.captureWarning(
         'legacy-mirror-reconcile: show(s) left open past the plausible-duration threshold',
@@ -473,6 +527,7 @@ const runStaleOpenShowReport = async (
           stale_after_hours: options.staleAfterHours,
           window_hours: options.windowHours,
           historical_open_shows: totals.historical_open_shows,
+          historical_open_shows_count_failed: totals.historical_open_shows_count_failed,
           sample: stale.slice(0, STALE_OPEN_SHOW_SENTRY_SAMPLE).map((s) => ({
             show_id: s.show_id,
             start_time: s.start_time.toISOString(),
@@ -730,11 +785,29 @@ const newestEntryAt = sql<Date | null>`(SELECT fe.add_time FROM ${flowsheet} fe
  * arrived is a different, out-of-scope failure — indistinguishable here from
  * a quiet live show — and is left to the #1543 dump-based repair, same as
  * before this fix.
+ *
+ * The `id <> max(id) OR newestEntryType = 'show_end'` bullet above MUST be
+ * built with drizzle's `or()` helper, not a raw `sql` fragment containing a
+ * literal ` OR `. `and(...)` wraps its own children in exactly one pair of
+ * parentheses — it does not parenthesize each child individually — so a raw
+ * `sql\`(...) OR (...)\`` passed as one of `and`'s arguments renders as a bare
+ * disjunct INSIDE that single AND-group's parens, not as a parenthesized
+ * sub-term. Since SQL's `AND` binds tighter than `OR`, the whole WHERE clause
+ * then parses as `(bound1 AND bound2 AND bound3 AND bound4 AND idBoundArm1)
+ * OR showEndArm2` — the `show_end` arm stands alone as a full-table predicate
+ * with none of the other bounds applied. That shipped bug (caught in review,
+ * fixed before merge) would have reported essentially every show that ever
+ * ended: no `end_time IS NULL` filter, no threshold, no window, over a seq
+ * scan with correlated `LIMIT 1` subqueries per row. `or()` renders its own
+ * group in its own parens nested correctly inside `and()`'s — see
+ * `apps/enrichment-worker/precheck.ts`'s `hasLoadBearingAlbumMetadata` for the
+ * established precedent (`and(..., or(isNotNull(a), isNotNull(b)), ...)`).
+ * The `buildStaleOpenShowsQuery`/rendered-SQL parenthesization unit test in
+ * `tests/unit/jobs/legacy-mirror-reconcile/stale-open-shows-sql.test.ts` pins
+ * this against the real query builder so a future regression here fails a
+ * unit test, not just a live-Postgres integration run.
  */
-export const selectStaleOpenShows = async ({
-  windowHours,
-  staleAfterHours,
-}: StaleOpenShowOptions): Promise<StaleOpenShow[]> =>
+export const buildStaleOpenShowsQuery = ({ windowHours, staleAfterHours }: StaleOpenShowOptions) =>
   db
     .select({
       show_id: shows.id,
@@ -750,10 +823,13 @@ export const selectStaleOpenShows = async ({
         lt(shows.start_time, staleCeiling(staleAfterHours)),
         gt(shows.start_time, windowFloor(windowHours)),
         sql`NOT EXISTS (SELECT 1 FROM ${flowsheet} WHERE ${flowsheet.show_id} = ${shows.id} AND ${flowsheet.add_time} >= ${staleCeiling(staleAfterHours)})`,
-        sql`(${shows.id} IS DISTINCT FROM ${latestShowId}) OR (${newestEntryType} = 'show_end')`
+        or(sql`${shows.id} IS DISTINCT FROM ${latestShowId}`, eq(newestEntryType, 'show_end'))
       )
     )
     .orderBy(asc(shows.start_time));
+
+export const selectStaleOpenShows = async (o: StaleOpenShowOptions): Promise<StaleOpenShow[]> =>
+  buildStaleOpenShowsQuery(o);
 
 /**
  * Count of open shows older than the reporting window — the #1543 repair
