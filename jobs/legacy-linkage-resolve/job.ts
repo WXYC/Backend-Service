@@ -40,11 +40,15 @@
  *       precisely the failure mode a try/catch cannot see (crontab entry
  *       dropped, image pull denied, docker wedged, host rebooted).
  *   (b) A `cronjob_runs` heartbeat row written after a successful run.
- *   (c) A drain check: after the write, the same COUNT is re-run. A nonzero
- *       residual means the UPDATE didn't drain what its own COUNT sees — a run
- *       that reports OK while silently not repairing (BS#2071: measuring the
- *       invariant after the fact, rather than comparing against the pre-UPDATE
- *       COUNT, is what keeps a benign concurrent repair from reading as this).
+ *   (c) A drain check: the cohort count and the UPDATE are measured inside one
+ *       data-modifying CTE, so both numbers come from the same snapshot. A
+ *       nonzero residual means the UPDATE didn't drain what its own count
+ *       saw — a run that reports OK while silently not repairing (BS#2071:
+ *       two separate `db.execute` calls, whether pre-UPDATE-vs-resolved or
+ *       resolved-vs-post-UPDATE-recount, straddle two snapshots and both
+ *       directions of that gap are a benign concurrent write somewhere else —
+ *       `library-etl` runs on this job's own half-hourly slot. One statement means
+ *       one snapshot, which is what actually closes the gap).
  *
  * Usage:
  *   node dist/job.js              # resolve (default)
@@ -94,11 +98,13 @@ export const CHECKIN_MARGIN_MINUTES = 10;
  * Minutes a run may stay `in_progress` before Sentry marks it timed out.
  * Under the 30-minute cadence so a wedged run is flagged before the next one
  * fires. Not derived by summing per-statement timeouts — the monitored
- * callback issues up to nine statements in the current worst case (COUNT,
- * UPDATE, a post-write re-COUNT, and a conditional ANALYZE per pass — BS#2071
- * added the re-COUNT — plus the heartbeat upsert), and nine statements against
- * a pool whose image sets `DB_STATEMENT_TIMEOUT_MS=300000` (5 min each) would
- * clear 25 minutes on its own. The real ceiling is the deploy:
+ * callback issues up to five statements in the current worst case (one
+ * combined cohort-count-and-UPDATE CTE per pass — BS#2071 folded the COUNT
+ * and the UPDATE into a single statement so they share one snapshot — plus a
+ * conditional ANALYZE per pass, plus the heartbeat upsert), and five
+ * statements against a pool whose image sets `DB_STATEMENT_TIMEOUT_MS=300000`
+ * (5 min each) land at exactly 25 minutes — no margin to spare on that
+ * arithmetic alone. The real ceiling is the deploy:
  * `deploy-base.yml`'s cron install runs `docker rm -f <target>-cron` ahead of
  * every `docker run`, so the next half-hourly slot SIGKILLs any run still
  * alive from the previous one. No run can legitimately outlive the cadence,
@@ -140,11 +146,10 @@ export type PassResult = { candidates: number; resolved: number; residual: numbe
 export type RunResult = { flowsheet: PassResult; rotation: PassResult };
 
 /**
- * The flowsheet candidate COUNT, factored out so it can be issued twice —
- * once before the UPDATE, once after — with guaranteed byte-identical SQL.
- * See the no-time-bound note on `resolveFlowsheetAlbumIds` below: this is the
- * one and only cohort query, and the second call exists to re-measure it, not
- * to narrow it.
+ * The flowsheet candidate COUNT, standalone. Used only for `--dry-run`
+ * reporting, which must count without writing. The real (non-dry) pass below
+ * does not call this — it measures the cohort and the UPDATE together inside
+ * one statement, so the two numbers can never straddle a snapshot boundary.
  */
 const countUnresolvedFlowsheetCandidates = async (): Promise<number> => {
   const [row] = (await db.execute(sql`
@@ -160,51 +165,84 @@ const countUnresolvedFlowsheetCandidates = async (): Promise<number> => {
 /**
  * Link `flowsheet.album_id` by joining `legacy_release_id` to
  * `library.legacy_release_id`. Lifted verbatim from `jobs/flowsheet-etl/`'s
- * `resolveAlbumIds`.
+ * `resolveAlbumIds`, then reshaped by BS#2071 (see below).
  *
  * `updated_at` is deliberately not set — migration 0084's trigger owns that
  * column on `flowsheet`.
  *
- * NEVER add a time bound to this SELECT (or the rotation one below). The
- * `cronjob_runs` row BS#2064 introduced is a liveness **heartbeat**, not a
- * delta watermark: filtering the cohort on `last_run` would permanently strand
- * every row whose `library` row landed during a window the job missed, which is
- * the exact bug this job exists to prevent. The cohort is defined by
- * `album_id IS NULL` and nothing else.
+ * NEVER add a time bound to the `cohort` CTE below (or the rotation one
+ * further down). The `cronjob_runs` row BS#2064 introduced is a liveness
+ * **heartbeat**, not a delta watermark: filtering the cohort on `last_run`
+ * would permanently strand every row whose `library` row landed during a
+ * window the job missed, which is the exact bug this job exists to prevent.
+ * The cohort is defined by `album_id IS NULL` and nothing else.
+ *
+ * BS#2071: `candidates` and `resolved` used to come from two separate
+ * `db.execute` calls (a COUNT, then an UPDATE, optionally followed by a
+ * second COUNT) with no wrapping transaction, so each pair straddled its own
+ * snapshot boundary and a concurrent write landing in that gap — most often
+ * `library-etl`, which shares this job's exact half-hourly cron slot — read as
+ * either a false `resolved < candidates` or a false `resolved > candidates`
+ * depending on which pair you compared. A single data-modifying CTE measures
+ * both numbers from one snapshot: `cohort` is the candidate set, `upd` is the
+ * UPDATE restricted to exactly `cohort`'s rows, and the trailing SELECT counts
+ * each. Under `library.legacy_release_id`'s unique index this makes
+ * `resolved === candidates` true by construction — no other session's write
+ * can add to or remove from a snapshot already taken — so a shortfall is a
+ * genuine non-drain, not a race. One statement also means one round trip
+ * where the old shape needed two (or three): this is a net reduction in
+ * per-pass statement count, not the increase the post-write re-COUNT
+ * shape briefly was.
+ *
+ * A plain `BEGIN … COMMIT` around separate COUNT/UPDATE statements does NOT
+ * fix this. Postgres defaults to READ COMMITTED, where each statement inside
+ * a transaction takes its own fresh snapshot — the race survives a
+ * transaction wrapper unchanged. `REPEATABLE READ` would pin one snapshot for
+ * the whole transaction, but then risks the UPDATE failing with a
+ * serialization error under concurrent writers, which is a worse failure mode
+ * than the one being fixed. A single statement is the only shape where "one
+ * snapshot" is guaranteed without opting into that risk.
  */
 const resolveFlowsheetAlbumIds = async (dryRun: boolean): Promise<PassResult> => {
-  const candidates = await countUnresolvedFlowsheetCandidates();
-
-  if (dryRun || candidates === 0) {
+  if (dryRun) {
+    const candidates = await countUnresolvedFlowsheetCandidates();
     return { candidates, resolved: 0, residual: 0 };
   }
 
-  const result = await db.execute(sql`
-    UPDATE ${flowsheet} f
-    SET album_id = l.id
-    FROM ${library} l
-    WHERE f.legacy_release_id = l.legacy_release_id
-      AND f.legacy_release_id IS NOT NULL
-      AND f.album_id IS NULL
-  `);
-  const resolved = Number(result.count ?? 0);
+  const [row] = (await db.execute(sql`
+    WITH cohort AS (
+      SELECT f.id
+      FROM ${flowsheet} f
+      JOIN ${library} l ON f.legacy_release_id = l.legacy_release_id
+      WHERE f.legacy_release_id IS NOT NULL
+        AND f.album_id IS NULL
+    ),
+    upd AS (
+      UPDATE ${flowsheet} f
+      SET album_id = l.id
+      FROM ${library} l, cohort c
+      WHERE f.id = c.id
+        AND f.legacy_release_id = l.legacy_release_id
+      RETURNING 1
+    )
+    SELECT
+      (SELECT COUNT(*)::int FROM cohort) AS candidates,
+      (SELECT COUNT(*)::int FROM upd) AS resolved
+  `)) as unknown as Array<{ candidates: number | string; resolved: number | string }>;
+
+  const candidates = Number(row?.candidates ?? 0);
+  const resolved = Number(row?.resolved ?? 0);
 
   if (resolved > 0) {
     await db.execute(sql.raw(`ANALYZE "${SCHEMA}"."flowsheet"`));
   }
 
-  // BS#2071: re-measure the same invariant after the write instead of trusting
-  // the pre-UPDATE snapshot compared against `resolved`. See the
-  // `hasUnresolvedResidue` docblock for why the pre/post comparison was wrong.
-  const residual = await countUnresolvedFlowsheetCandidates();
-
-  return { candidates, resolved, residual };
+  return { candidates, resolved, residual: Math.max(candidates - resolved, 0) };
 };
 
 /**
- * The rotation candidate COUNT, factored out for the same reason as
- * `countUnresolvedFlowsheetCandidates` above: one query, issued twice,
- * guaranteed byte-identical.
+ * The rotation candidate COUNT, standalone — same role as
+ * `countUnresolvedFlowsheetCandidates` above: `--dry-run` reporting only.
  */
 const countUnresolvedRotationCandidates = async (): Promise<number> => {
   const [row] = (await db.execute(sql`
@@ -221,38 +259,49 @@ const countUnresolvedRotationCandidates = async (): Promise<number> => {
  * Link `rotation.album_id` by joining `legacy_library_release_id` to
  * `library.legacy_release_id`, clearing the denormalized display columns the
  * row carried while it was unlinked. Lifted verbatim from
- * `jobs/rotation-etl/`'s `resolveAlbumIds`.
+ * `jobs/rotation-etl/`'s `resolveAlbumIds`, then reshaped by BS#2071.
  *
- * Same no-time-bound rule as the flowsheet pass above.
+ * Same no-time-bound rule, same single-snapshot CTE shape, and the same
+ * `BEGIN … COMMIT` trap as the flowsheet pass above — see that docblock.
  */
 const resolveRotationAlbumIds = async (dryRun: boolean): Promise<PassResult> => {
-  const candidates = await countUnresolvedRotationCandidates();
-
-  if (dryRun || candidates === 0) {
+  if (dryRun) {
+    const candidates = await countUnresolvedRotationCandidates();
     return { candidates, resolved: 0, residual: 0 };
   }
 
-  const result = await db.execute(sql`
-    UPDATE ${rotation} r
-    SET album_id = l.id,
-        artist_name = NULL,
-        album_title = NULL,
-        record_label = NULL
-    FROM ${library} l
-    WHERE r.legacy_library_release_id = l.legacy_release_id
-      AND r.legacy_library_release_id IS NOT NULL
-      AND r.album_id IS NULL
-  `);
-  const resolved = Number(result.count ?? 0);
+  const [row] = (await db.execute(sql`
+    WITH cohort AS (
+      SELECT r.id
+      FROM ${rotation} r
+      JOIN ${library} l ON r.legacy_library_release_id = l.legacy_release_id
+      WHERE r.legacy_library_release_id IS NOT NULL
+        AND r.album_id IS NULL
+    ),
+    upd AS (
+      UPDATE ${rotation} r
+      SET album_id = l.id,
+          artist_name = NULL,
+          album_title = NULL,
+          record_label = NULL
+      FROM ${library} l, cohort c
+      WHERE r.id = c.id
+        AND r.legacy_library_release_id = l.legacy_release_id
+      RETURNING 1
+    )
+    SELECT
+      (SELECT COUNT(*)::int FROM cohort) AS candidates,
+      (SELECT COUNT(*)::int FROM upd) AS resolved
+  `)) as unknown as Array<{ candidates: number | string; resolved: number | string }>;
+
+  const candidates = Number(row?.candidates ?? 0);
+  const resolved = Number(row?.resolved ?? 0);
 
   if (resolved > 0) {
     await db.execute(sql.raw(`ANALYZE "${SCHEMA}"."rotation"`));
   }
 
-  // BS#2071: same post-write re-measure as the flowsheet pass.
-  const residual = await countUnresolvedRotationCandidates();
-
-  return { candidates, resolved, residual };
+  return { candidates, resolved, residual: Math.max(candidates - resolved, 0) };
 };
 
 export const runResolve = async (dryRun: boolean): Promise<RunResult> => {
@@ -261,7 +310,10 @@ export const runResolve = async (dryRun: boolean): Promise<RunResult> => {
     dry_run: dryRun,
     candidates: flowsheetResult.candidates,
     resolved: flowsheetResult.resolved,
-    residual: flowsheetResult.residual,
+    // A dry run never reaches the UPDATE, so `residual` on the returned
+    // PassResult is a meaningless 0, not "cohort is clear" — log `null`
+    // rather than a number an operator could misread as a real measurement.
+    residual: dryRun ? null : flowsheetResult.residual,
   });
 
   const rotationResult = await resolveRotationAlbumIds(dryRun);
@@ -269,7 +321,7 @@ export const runResolve = async (dryRun: boolean): Promise<RunResult> => {
     dry_run: dryRun,
     candidates: rotationResult.candidates,
     resolved: rotationResult.resolved,
-    residual: rotationResult.residual,
+    residual: dryRun ? null : rotationResult.residual,
   });
 
   return { flowsheet: flowsheetResult, rotation: rotationResult };
@@ -282,39 +334,53 @@ export const gapHours = (lastRunMs: number, startedAtMs: number): number =>
   (startedAtMs - lastRunMs) / (60 * 60 * 1000);
 
 /**
- * A pass whose post-write residual is nonzero. Signal (c): the job ran,
- * checked in green, and — per this re-check — did not repair what it found.
+ * A pass whose `resolved` count fell short of its `candidates` count. Signal
+ * (c): the job ran, checked in green, and — per this check — did not repair
+ * everything it found.
  *
- * BS#2071: this used to compare the pre-UPDATE `candidates` COUNT against
- * `resolved` and treat `resolved < candidates` as impossible to hit benignly,
- * reasoning that `library.legacy_release_id`'s unique index makes the COUNT
- * and the UPDATE agree. That reasoning only holds under a single snapshot —
- * the COUNT and the UPDATE are two separate `db.execute` calls with no
- * wrapping transaction, so anything that removes a row from the cohort
- * between them (a concurrent `broken-fk-recovery` one-shot run issuing the
- * byte-identical UPDATE, a DJ deleting the flowsheet entry, an MD editing it
- * and picking an album, an MD deleting the `library` row a candidate joins
- * to) used to read as `resolved < candidates`: a warning asserting the job
- * "did not repair what it found," on a run where everything worked.
+ * BS#2071, first pass: this used to compare a pre-UPDATE `candidates` COUNT
+ * against `resolved` and treat `resolved < candidates` as impossible to hit
+ * benignly, reasoning that `library.legacy_release_id`'s unique index makes
+ * the COUNT and the UPDATE agree. That reasoning only holds under a single
+ * snapshot — the COUNT and the UPDATE were two separate `db.execute` calls
+ * with no wrapping transaction, so anything that removed a row from the
+ * cohort between them (a concurrent `broken-fk-recovery` one-shot run, or a
+ * hand-run `flowsheet-etl`/`rotation-etl` repair pass — Phase 3 unscheduled
+ * their crontab entries but left `resolveAlbumIds` invocable for Phase 6a, so
+ * the set of things that can issue this semantically identical UPDATE
+ * concurrently is three, not one — issuing it, a DJ deleting the flowsheet
+ * entry, an MD editing it and picking an album, an MD deleting the `library`
+ * row a candidate joins to) read as `resolved < candidates`: a warning asserting
+ * the job "did not repair what it found," on a run where everything worked.
  *
- * The fix is to measure the invariant after the fact instead of across the
- * race: `resolveFlowsheetAlbumIds`/`resolveRotationAlbumIds` re-run the exact
- * same COUNT after the UPDATE (and any follow-up ANALYZE) and report that as
- * `residual`. Every one of the benign paths above removes the row from the
- * residual exactly as it removed it from contention — a repair concurrent
- * with this job's own UPDATE is repair either way — while a genuine "the
- * UPDATE isn't draining what its own COUNT sees" still leaves rows behind and
- * still fires.
+ * BS#2071's first commit tried to close that by re-running the same COUNT
+ * *after* the UPDATE and comparing `resolved` against that post-write
+ * recount instead. That traded one false positive for a more common one: the
+ * pre-UPDATE COUNT and the post-write recount are still two separate
+ * `db.execute` calls, still two snapshots, and a `library` row landing in
+ * *that* gap — again most plausibly `library-etl`, which runs on this job's
+ * own exact half-hourly cron slot, not a rare event — now shows up in the recount as
+ * an unresolved candidate this pass never got a chance to touch. Fixing the
+ * "before" half of the race by moving the comparison later did not fix the
+ * "after" half; it relocated it.
  *
- * `resolved > candidates` stays normal and not a residue on its own —
- * `library-etl` shares the same half-hourly slot, so a matching `library` row
- * can land between this pass's pre-UPDATE COUNT and its UPDATE — but it no
- * longer needs special-casing here: the residual re-count settles it either
- * way.
+ * The actual fix (this revision) is to stop taking two snapshots at all.
+ * `resolveFlowsheetAlbumIds`/`resolveRotationAlbumIds` compute `candidates`
+ * and `resolved` inside one data-modifying CTE: `cohort` is selected once,
+ * and `upd` updates exactly `cohort`'s rows, so both counts are read off the
+ * same snapshot in the same statement. Every benign path above — a
+ * concurrent repair draining a row out of contention, a row landing in
+ * *after* the snapshot the way `library-etl` does on this slot — is
+ * genuinely invisible to that statement rather than something the residual
+ * has to absorb after the fact: a concurrent write either committed before
+ * this statement's snapshot (already a `cohort` member, gets updated) or
+ * after it (not part of this run at all, picked up next slot). Under the
+ * unique index, `resolved === candidates` is now true by construction, not by
+ * luck of timing — a shortfall is a genuine "the UPDATE isn't draining what
+ * its own count sees," never a race with another writer.
  *
- * A zero-candidate run (or a dry run, which never reaches the UPDATE or the
- * residual re-count) reports `residual: 0` — a healthy idle run must never
- * alert.
+ * A zero-candidate run (or a dry run, which never reaches the UPDATE) reports
+ * `residual: 0` — a healthy idle run must never alert.
  */
 export const hasUnresolvedResidue = ({ residual }: PassResult): boolean => residual > 0;
 
@@ -357,7 +423,7 @@ const reportDrain = (result: RunResult): void => {
 
   for (const [pass, passResult] of passes) {
     if (!hasUnresolvedResidue(passResult)) continue;
-    log('warn', `drain-${pass}`, 'Post-write re-check still finds unresolved candidates.', {
+    log('warn', `drain-${pass}`, 'Drain check found candidates the UPDATE did not resolve.', {
       candidates: passResult.candidates,
       resolved: passResult.resolved,
       residual: passResult.residual,
