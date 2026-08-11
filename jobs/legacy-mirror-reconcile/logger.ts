@@ -87,17 +87,69 @@ export const log = (level: LogLevel, step: string, message: string, fields: Reco
 };
 
 /**
+ * Steps where a fingerprint OVERRIDE is warranted for `captureError` — i.e.
+ * where different error SHAPES at the same call site (a statement timeout
+ * one night, a connection reset the next) should still roll up into one
+ * stable Sentry issue across runs, because the call site's identity — not
+ * the specific exception — is what an on-call reader needs grouped. Today
+ * that's exactly the BS#2065/#2069 stale-open-show detector's two narrow
+ * arms (`orchestrate.ts`'s `runStaleOpenShowReport`).
+ *
+ * Every OTHER `captureError` call site — most importantly the catch-all
+ * `'main'` step in `job.ts` — must NOT get this treatment (BS#2098 review
+ * finding 1): folding every top-level failure into one fingerprinted group
+ * meant a tubafrenzy-outage week could archive/ignore that one Sentry issue,
+ * and a LATER, unrelated failure (a DB connection loss, an advisory-lock
+ * error, a mirror 401 after token rotation) would silently append to the
+ * same archived issue instead of alerting on its own. Sentry's DEFAULT
+ * (exception-shape-based) grouping is what those call sites want, so
+ * `captureError` leaves `fingerprint` unset for any step not in this set —
+ * two genuinely different exceptions at `'main'` land in two different
+ * issues, while repeated identical failures still collapse the way Sentry
+ * always collapses identical stack traces.
+ *
+ * An alternative considered: keep every `captureError` call fingerprinted,
+ * but prefix `['{{ default }}', 'legacy-mirror-reconcile', step]` so Sentry
+ * mixes its own exception-shape grouping back in. Rejected: that would ALSO
+ * apply to the two detector steps below, defeating the reason they're
+ * fingerprinted in the first place — a statement timeout and a connection
+ * reset at the SAME detector call site have different default shapes, so
+ * `{{ default }}` would split them right back into separate issues, exactly
+ * what this file's original docblock (see `captureError` below) built the
+ * per-step fingerprint to prevent. Scoping the override to the two call
+ * sites that actually want cross-shape rollup, and leaving every other step
+ * (including `'main'`) on Sentry's default grouping, gets both properties at
+ * once without a signature change to `captureError` or its `ReconcilePorts`
+ * call sites.
+ */
+const ROLLUP_ERROR_STEPS = new Set<string>(['stale_open_show_detector', 'stale_open_show_historical_count']);
+
+/**
  * Capture an exception to Sentry with the current run's tags + an extra
- * `step`, fingerprinted per `step` (same convention as `captureWarning` below)
- * so a persistently-failing call site rolls up into one stable Sentry issue
- * across runs instead of fanning out into a fresh issue per distinct error
- * message/stack — Sentry's default grouping is exception-shape-based, not
- * step-based, so two different DB errors from the same call site (e.g. a
- * statement timeout one night, a connection reset the next) would otherwise
- * group separately.
+ * `step`. For the two steps in `ROLLUP_ERROR_STEPS` (see that constant),
+ * fingerprinted per `step` so a persistently-failing call site rolls up into
+ * one stable Sentry issue across runs instead of fanning out into a fresh
+ * issue per distinct error message/stack — Sentry's default grouping is
+ * exception-shape-based, not step-based, so two different DB errors from the
+ * same call site (e.g. a statement timeout one night, a connection reset the
+ * next) would otherwise group separately. Every other step (including the
+ * `job.ts` catch-all `'main'`) gets no fingerprint override, so Sentry's
+ * default exception-shape grouping applies instead — see the constant's
+ * comment for why that split is deliberate.
+ *
+ * The fingerprint's second element is the literal `'error'`, disambiguating
+ * this namespace from `captureWarning`'s (below): both used to fingerprint
+ * as bare `['legacy-mirror-reconcile', step]`, so a future step string
+ * shared between an error and a warning call site would have merged them
+ * into one Sentry issue despite one being a hard failure and the other a
+ * detection signal. No such collision exists today (error steps are
+ * `main`/`stale_open_show_detector`/`stale_open_show_historical_count`;
+ * warning steps are `stale_open_show`/`partial_mirror`/`detection`), but
+ * nothing enforced that the two sets stay disjoint.
  */
 export const captureError = (error: unknown, step: string, extra: Record<string, unknown> = {}): void => {
-  Sentry.captureException(error, { tags: { step }, fingerprint: ['legacy-mirror-reconcile', step], extra });
+  const fingerprint = ROLLUP_ERROR_STEPS.has(step) ? ['legacy-mirror-reconcile', 'error', step] : undefined;
+  Sentry.captureException(error, { tags: { step }, fingerprint, extra });
 };
 
 /**
@@ -106,11 +158,15 @@ export const captureError = (error: unknown, step: string, extra: Record<string,
  * threshold and the per-show partial-mirror report — each roll up into a
  * single, stable issue rather than fanning out per run or per show_id. The
  * `show_id` travels as `extra`, not part of the group hash.
+ *
+ * The fingerprint's second element is the literal `'warning'` — see
+ * `captureError`'s doc comment for why the two capture functions no longer
+ * share a bare `['legacy-mirror-reconcile', step]` namespace.
  */
 export const captureWarning = (message: string, step: string, extra: Record<string, unknown> = {}): void => {
   Sentry.captureMessage(message, {
     level: 'warning',
-    fingerprint: ['legacy-mirror-reconcile', step],
+    fingerprint: ['legacy-mirror-reconcile', 'warning', step],
     tags: { subsystem: 'legacy-mirror', step },
     extra,
   });
