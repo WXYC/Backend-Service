@@ -377,6 +377,13 @@ const main = async (): Promise<void> => {
     // signal stays the one place this failure mode is visible, rather than
     // being duplicated (or replaced) by a job-level exit-1 that nothing reads.
   } catch (err) {
+    // Deliberately no custom fingerprint here (BS#2098 review finding 1):
+    // `captureError`'s per-step rollup is scoped to the two detector call
+    // sites in `orchestrate.ts` only. A `'main'` catch-all fingerprint would
+    // collapse every unrelated top-level failure (a tubafrenzy outage, a DB
+    // connection loss, an advisory-lock error, a mirror 401 after token
+    // rotation) into one Sentry issue — see `ROLLUP_ERROR_STEPS` in
+    // `logger.ts` for the full reasoning.
     captureError(err, 'main');
     log('error', 'failed', `${JOB_NAME} failed: ${err instanceof Error ? err.message : String(err)}`, {
       error_message: err instanceof Error ? err.message : String(err),
