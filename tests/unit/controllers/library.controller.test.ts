@@ -724,7 +724,7 @@ describe('library.controller', () => {
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
-    it('returns 409 with the existing artist when the code triple already exists, in the pre-existing shape', async () => {
+    it('returns 409 with the existing artist and an explicit code-conflict discriminant when the code triple already exists', async () => {
       mockGetArtistByCode.mockResolvedValue({ artist_id: 3, artist_name: 'Jockstrap', code_letters: 'CH' });
 
       const res = mockResponse();
@@ -733,6 +733,7 @@ describe('library.controller', () => {
       expect(res.status).toHaveBeenCalledWith(409);
       expect(res.json).toHaveBeenCalledWith({
         message: 'Artist code already exists for that genre and code letters.',
+        reason: 'artist_code_conflict',
         artist: { artist_id: 3, artist_name: 'Jockstrap', code_letters: 'CH' },
       });
       expect(mockInsertArtist).not.toHaveBeenCalled();
@@ -768,6 +769,7 @@ describe('library.controller', () => {
 
       expect(res.json).toHaveBeenCalledWith({
         message: 'Artist code already exists for that genre and code letters.',
+        reason: 'artist_code_conflict',
         artist: { artist_id: 3, artist_name: 'Jockstrap', code_letters: 'CH' },
       });
       // Short-circuits before the name pre-check even runs.

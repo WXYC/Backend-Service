@@ -696,7 +696,7 @@ describe('Library Artists', () => {
         expect(second.body.artist.artist_id).toBe(first.body.id);
       });
 
-      test('prefers the code-triple conflict over a simultaneous name conflict, with the unchanged code-conflict shape', async () => {
+      test('prefers the code-triple conflict over a simultaneous name conflict, tagged with its own discriminant', async () => {
         const uniqueSuffix = Date.now().toString(36).toUpperCase().slice(-3);
         const artistName = `ZZName Both ${uniqueSuffix}`;
         const codeLetters = `W${uniqueSuffix.slice(0, 2)}`;
@@ -715,9 +715,9 @@ describe('Library Artists', () => {
 
         expect(second.body).toEqual({
           message: 'Artist code already exists for that genre and code letters.',
+          reason: 'artist_code_conflict',
           artist: { artist_id: first.body.id, artist_name: artistName, code_letters: codeLetters },
         });
-        expect(second.body).not.toHaveProperty('reason');
       });
     });
   });
