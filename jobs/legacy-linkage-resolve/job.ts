@@ -41,14 +41,19 @@
  *       dropped, image pull denied, docker wedged, host rebooted).
  *   (b) A `cronjob_runs` heartbeat row written after a successful run.
  *   (c) A drain check: the cohort count and the UPDATE are measured inside one
- *       data-modifying CTE, so both numbers come from the same snapshot. A
- *       nonzero residual means the UPDATE didn't drain what its own count
- *       saw — a run that reports OK while silently not repairing (BS#2071:
- *       two separate `db.execute` calls, whether pre-UPDATE-vs-resolved or
- *       resolved-vs-post-UPDATE-recount, straddle two snapshots and both
- *       directions of that gap are a benign concurrent write somewhere else —
- *       `library-etl` runs on this job's own half-hourly slot. One statement means
- *       one snapshot, which is what actually closes the gap).
+ *       data-modifying CTE, so both numbers come from the same snapshot
+ *       (BS#2071: two separate `db.execute` calls, whether
+ *       pre-UPDATE-vs-resolved or resolved-vs-post-UPDATE-recount, straddled
+ *       two snapshots and both directions of that gap were a benign
+ *       concurrent write somewhere else — `library-etl` runs on this job's
+ *       own half-hourly slot. One statement means one snapshot, which closes
+ *       that gap). A nonzero residual is evidence worth a warning, not proof
+ *       of a stuck UPDATE: one snapshot guarantees `candidates` and
+ *       `resolved` are read together, not that no other session can touch a
+ *       cohort row while the statement runs — a concurrent UPDATE or DELETE
+ *       on a row already in `cohort` can still make it drop out of `upd` via
+ *       Postgres's EvalPlanQual re-check (see `hasUnresolvedResidue`'s
+ *       docblock for the mechanics).
  *
  * Usage:
  *   node dist/job.js              # resolve (default)
@@ -142,7 +147,13 @@ export const MAX_RUN_GAP_HOURS_DEFAULT = 4;
 export const resolveMaxRunGapHours = (raw: string | undefined = process.env.LINKAGE_RESOLVE_MAX_GAP_HOURS): number =>
   requirePositiveInt(raw, 'LINKAGE_RESOLVE_MAX_GAP_HOURS', MAX_RUN_GAP_HOURS_DEFAULT, { unit: 'hours' });
 
-export type PassResult = { candidates: number; resolved: number; residual: number };
+/**
+ * `residual` is `null` on a dry-run `PassResult` — a dry run never reaches
+ * the UPDATE, so there is no drain measurement to report, and `0` would be
+ * misread as "cohort is clear" rather than "not measured." Only a real
+ * (non-dry) pass produces a numeric residual.
+ */
+export type PassResult = { candidates: number; resolved: number; residual: number | null };
 export type RunResult = { flowsheet: PassResult; rotation: PassResult };
 
 /**
@@ -177,6 +188,20 @@ const countUnresolvedFlowsheetCandidates = async (): Promise<number> => {
  * window the job missed, which is the exact bug this job exists to prevent.
  * The cohort is defined by `album_id IS NULL` and nothing else.
  *
+ * `cohort` selects `DISTINCT f.id`. Under today's unique index on
+ * `library.legacy_release_id` the join can't fan out — each `f.id` matches
+ * at most one `l` row — so `DISTINCT` changes nothing right now and the
+ * `candidates` count would be exactly the same without it. It is cheap
+ * insurance, not a correctness fix for the current schema: if that index
+ * were ever dropped (accidentally, or by a future migration that doesn't
+ * know this job depends on it), a plain `SELECT f.id` would count one row
+ * per matching `library` join partner instead of one per flowsheet row,
+ * inflating `candidates` above the true cohort size and tripping the drain
+ * check's warning on every run from then on — every 30 minutes, forever,
+ * on a job that isn't actually broken. `DISTINCT` costs nothing measurable
+ * against this job's small unresolved-row cohort and removes that failure
+ * mode outright, so it stays even though the index makes it redundant today.
+ *
  * BS#2071: `candidates` and `resolved` used to come from two separate
  * `db.execute` calls (a COUNT, then an UPDATE, optionally followed by a
  * second COUNT) with no wrapping transaction, so each pair straddled its own
@@ -185,14 +210,36 @@ const countUnresolvedFlowsheetCandidates = async (): Promise<number> => {
  * either a false `resolved < candidates` or a false `resolved > candidates`
  * depending on which pair you compared. A single data-modifying CTE measures
  * both numbers from one snapshot: `cohort` is the candidate set, `upd` is the
- * UPDATE restricted to exactly `cohort`'s rows, and the trailing SELECT counts
- * each. Under `library.legacy_release_id`'s unique index this makes
- * `resolved === candidates` true by construction — no other session's write
- * can add to or remove from a snapshot already taken — so a shortfall is a
- * genuine non-drain, not a race. One statement also means one round trip
- * where the old shape needed two (or three): this is a net reduction in
- * per-pass statement count, not the increase the post-write re-COUNT
- * shape briefly was.
+ * UPDATE restricted to exactly `cohort`'s rows (note the `f.album_id IS NULL`
+ * conjunct inside `upd` — see the note below), and the trailing SELECT counts
+ * each. This closes the two-snapshot gap the old shape had, but it does not
+ * make `resolved === candidates` guaranteed: a row already inside `cohort`
+ * can still be concurrently UPDATEd or DELETEd while this statement is
+ * running, and Postgres's own concurrency control (EvalPlanQual, under
+ * READ COMMITTED) re-checks `upd`'s WHERE clause against that row's
+ * just-committed new version — which can legitimately no longer match. A
+ * shortfall (`resolved < candidates`) is real evidence to surface, not proof
+ * of a stuck UPDATE; see `hasUnresolvedResidue`'s docblock below for what
+ * this statement's single snapshot does and does not guarantee. One
+ * statement also means one round trip where the old shape needed two (or
+ * three): this is a net reduction in per-pass statement count, not the
+ * increase the post-write re-COUNT shape briefly was.
+ *
+ * `upd`'s `f.album_id IS NULL` conjunct (mirrored in the rotation pass as
+ * `r.album_id IS NULL`) is load-bearing, not redundant with `cohort`'s
+ * identical filter. Under READ COMMITTED, if another session updates a
+ * `cohort` row and commits while this UPDATE is waiting on that row's lock,
+ * EvalPlanQual re-evaluates the UPDATE's *own* WHERE clause against the new
+ * row version before writing it. Without this conjunct, the re-checked qual
+ * (`f.id = c.id AND f.legacy_release_id = l.legacy_release_id`) still
+ * matches regardless of what the concurrent writer just set `album_id` to —
+ * so this job silently overwrites it. `updateEntry`
+ * (`apps/backend/services/flowsheet.service.ts`) writes `album_id` without
+ * touching `legacy_release_id` — an MD picking an album for a flowsheet
+ * entry mid-run is exactly this shape. With the conjunct present, the
+ * re-checked qual fails once `album_id` is no longer NULL, so the row drops
+ * out of `upd` (not out of `cohort`, which was already fixed by the earlier
+ * snapshot) and the concurrent writer's value survives untouched.
  *
  * A plain `BEGIN … COMMIT` around separate COUNT/UPDATE statements does NOT
  * fix this. Postgres defaults to READ COMMITTED, where each statement inside
@@ -206,12 +253,14 @@ const countUnresolvedFlowsheetCandidates = async (): Promise<number> => {
 const resolveFlowsheetAlbumIds = async (dryRun: boolean): Promise<PassResult> => {
   if (dryRun) {
     const candidates = await countUnresolvedFlowsheetCandidates();
-    return { candidates, resolved: 0, residual: 0 };
+    // residual: null, not 0 — a dry run never reaches the UPDATE, so there is
+    // nothing to report a drain measurement for (see PassResult's docblock).
+    return { candidates, resolved: 0, residual: null };
   }
 
   const [row] = (await db.execute(sql`
     WITH cohort AS (
-      SELECT f.id
+      SELECT DISTINCT f.id
       FROM ${flowsheet} f
       JOIN ${library} l ON f.legacy_release_id = l.legacy_release_id
       WHERE f.legacy_release_id IS NOT NULL
@@ -223,6 +272,7 @@ const resolveFlowsheetAlbumIds = async (dryRun: boolean): Promise<PassResult> =>
       FROM ${library} l, cohort c
       WHERE f.id = c.id
         AND f.legacy_release_id = l.legacy_release_id
+        AND f.album_id IS NULL
       RETURNING 1
     )
     SELECT
@@ -267,12 +317,14 @@ const countUnresolvedRotationCandidates = async (): Promise<number> => {
 const resolveRotationAlbumIds = async (dryRun: boolean): Promise<PassResult> => {
   if (dryRun) {
     const candidates = await countUnresolvedRotationCandidates();
-    return { candidates, resolved: 0, residual: 0 };
+    // residual: null, not 0 — a dry run never reaches the UPDATE, so there is
+    // nothing to report a drain measurement for (see PassResult's docblock).
+    return { candidates, resolved: 0, residual: null };
   }
 
   const [row] = (await db.execute(sql`
     WITH cohort AS (
-      SELECT r.id
+      SELECT DISTINCT r.id
       FROM ${rotation} r
       JOIN ${library} l ON r.legacy_library_release_id = l.legacy_release_id
       WHERE r.legacy_library_release_id IS NOT NULL
@@ -287,6 +339,7 @@ const resolveRotationAlbumIds = async (dryRun: boolean): Promise<PassResult> => 
       FROM ${library} l, cohort c
       WHERE r.id = c.id
         AND r.legacy_library_release_id = l.legacy_release_id
+        AND r.album_id IS NULL
       RETURNING 1
     )
     SELECT
@@ -310,10 +363,11 @@ export const runResolve = async (dryRun: boolean): Promise<RunResult> => {
     dry_run: dryRun,
     candidates: flowsheetResult.candidates,
     resolved: flowsheetResult.resolved,
-    // A dry run never reaches the UPDATE, so `residual` on the returned
-    // PassResult is a meaningless 0, not "cohort is clear" — log `null`
-    // rather than a number an operator could misread as a real measurement.
-    residual: dryRun ? null : flowsheetResult.residual,
+    // A dry run never reaches the UPDATE, so `resolveFlowsheetAlbumIds`
+    // already returns `residual: null` rather than a `0` an operator could
+    // misread as "cohort is clear" — logged straight through, not
+    // re-derived here.
+    residual: flowsheetResult.residual,
   });
 
   const rotationResult = await resolveRotationAlbumIds(dryRun);
@@ -321,7 +375,7 @@ export const runResolve = async (dryRun: boolean): Promise<RunResult> => {
     dry_run: dryRun,
     candidates: rotationResult.candidates,
     resolved: rotationResult.resolved,
-    residual: dryRun ? null : rotationResult.residual,
+    residual: rotationResult.residual,
   });
 
   return { flowsheet: flowsheetResult, rotation: rotationResult };
@@ -346,12 +400,14 @@ export const gapHours = (lastRunMs: number, startedAtMs: number): number =>
  * with no wrapping transaction, so anything that removed a row from the
  * cohort between them (a concurrent `broken-fk-recovery` one-shot run, or a
  * hand-run `flowsheet-etl`/`rotation-etl` repair pass — Phase 3 unscheduled
- * their crontab entries but left `resolveAlbumIds` invocable for Phase 6a, so
- * the set of things that can issue this semantically identical UPDATE
- * concurrently is three, not one — issuing it, a DJ deleting the flowsheet
- * entry, an MD editing it and picking an album, an MD deleting the `library`
- * row a candidate joins to) read as `resolved < candidates`: a warning asserting
- * the job "did not repair what it found," on a run where everything worked.
+ * their crontab entries but left `resolveAlbumIds` invocable for Phase 6a
+ * ONLY behind `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`, so the set of things
+ * that can issue this semantically identical UPDATE concurrently is three,
+ * not one, but two of those three need that env var deliberately set —
+ * issuing it, a DJ deleting the flowsheet entry, an MD editing it and
+ * picking an album, an MD deleting the `library` row a candidate joins to)
+ * read as `resolved < candidates`: a warning asserting the job "did not
+ * repair what it found," on a run where everything worked.
  *
  * BS#2071's first commit tried to close that by re-running the same COUNT
  * *after* the UPDATE and comparing `resolved` against that post-write
@@ -368,21 +424,37 @@ export const gapHours = (lastRunMs: number, startedAtMs: number): number =>
  * `resolveFlowsheetAlbumIds`/`resolveRotationAlbumIds` compute `candidates`
  * and `resolved` inside one data-modifying CTE: `cohort` is selected once,
  * and `upd` updates exactly `cohort`'s rows, so both counts are read off the
- * same snapshot in the same statement. Every benign path above — a
- * concurrent repair draining a row out of contention, a row landing in
- * *after* the snapshot the way `library-etl` does on this slot — is
- * genuinely invisible to that statement rather than something the residual
- * has to absorb after the fact: a concurrent write either committed before
- * this statement's snapshot (already a `cohort` member, gets updated) or
- * after it (not part of this run at all, picked up next slot). Under the
- * unique index, `resolved === candidates` is now true by construction, not by
- * luck of timing — a shortfall is a genuine "the UPDATE isn't draining what
- * its own count sees," never a race with another writer.
+ * same snapshot in the same statement. A concurrent write that *commits
+ * before* this statement's snapshot is taken is already reflected in
+ * `cohort` and gets updated; a concurrent write that commits *after* the
+ * statement finishes is invisible to this run and picked up next slot. Both
+ * of those are genuinely benign, and neither shows up as a shortfall.
  *
- * A zero-candidate run (or a dry run, which never reaches the UPDATE) reports
- * `residual: 0` — a healthy idle run must never alert.
+ * What one snapshot does NOT do is make this statement immune to writers
+ * that commit WHILE it is running. A row already inside `cohort` can still
+ * be concurrently UPDATEd or DELETEd mid-statement; Postgres's own
+ * concurrency control (EvalPlanQual, READ COMMITTED) re-checks the `upd`
+ * CTE's WHERE clause against that row's newly-committed version before
+ * writing it. A concurrent DELETE makes the row vanish from underneath the
+ * UPDATE — nothing left to re-check, so `upd` silently skips it — and a
+ * concurrent UPDATE that changes a column the WHERE clause tests (this is
+ * exactly why `f.album_id IS NULL AND r.album_id IS NULL` must stay in the
+ * `upd` arm, not just `cohort` — see BS#2071's second pass, `git log` on this
+ * file) can make the re-checked qual fail too. Either way `upd` returns one
+ * fewer row than `cohort` counted, so `resolved < candidates` for a run that
+ * did everything right: it drained every row it could still legitimately
+ * touch, and something else took the rest out of contention in the same
+ * instant. One statement guarantees one *snapshot* for both counts — it does
+ * not guarantee `resolved === candidates`, and nothing here should claim it
+ * does. A shortfall is evidence to log, not proof of a stuck UPDATE; signal
+ * (c) exists to make that evidence visible, not to declare it impossible.
+ *
+ * A zero-candidate real run reports `residual: 0` — a healthy idle run must
+ * never alert. A dry run never reaches the UPDATE at all, so its
+ * `PassResult.residual` is `null`, not `0` (see `PassResult`'s docblock);
+ * `hasUnresolvedResidue` treats `null` the same as "nothing to report."
  */
-export const hasUnresolvedResidue = ({ residual }: PassResult): boolean => residual > 0;
+export const hasUnresolvedResidue = ({ residual }: PassResult): boolean => residual !== null && residual > 0;
 
 /**
  * Signal (b), read side. `getLastRunTimestamp` is called here **only** to
