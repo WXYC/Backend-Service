@@ -86,9 +86,18 @@ export const log = (level: LogLevel, step: string, message: string, fields: Reco
   }
 };
 
-/** Capture an exception to Sentry with the current run's tags + an extra `step`. */
+/**
+ * Capture an exception to Sentry with the current run's tags + an extra
+ * `step`, fingerprinted per `step` (same convention as `captureWarning` below)
+ * so a persistently-failing call site rolls up into one stable Sentry issue
+ * across runs instead of fanning out into a fresh issue per distinct error
+ * message/stack — Sentry's default grouping is exception-shape-based, not
+ * step-based, so two different DB errors from the same call site (e.g. a
+ * statement timeout one night, a connection reset the next) would otherwise
+ * group separately.
+ */
 export const captureError = (error: unknown, step: string, extra: Record<string, unknown> = {}): void => {
-  Sentry.captureException(error, { tags: { step }, extra });
+  Sentry.captureException(error, { tags: { step }, fingerprint: ['legacy-mirror-reconcile', step], extra });
 };
 
 /**
