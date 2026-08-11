@@ -39,13 +39,24 @@ export type ClassificationCounts = {
 
 /**
  * Re-run the legacy-FK album_id resolver against any flowsheet rows that
- * still have album_id IS NULL but a non-null legacy_release_id. Mirrors the
- * resolver in jobs/legacy-linkage-resolve/job.ts — the current canonical
- * repair pass (flowsheet-etl's own copy of the resolver was retired when
- * Phase 3 of the tubafrenzy decommission, WXYC/wiki#88, unscheduled that
- * job) — duplicated rather than imported because the ETL package is a
- * separate workspace and importing across job packages would couple their
- * build graphs.
+ * still have album_id IS NULL but a non-null legacy_release_id. Semantically
+ * identical to the resolver in jobs/legacy-linkage-resolve/job.ts — the
+ * current canonical repair pass — duplicated rather than imported because
+ * the ETL package is a separate workspace and importing across job packages
+ * would couple their build graphs. Not byte-identical: this statement uses
+ * quoted, schema-qualified identifiers, while legacy-linkage-resolve's uses
+ * drizzle's own interpolation.
+ *
+ * flowsheet-etl's own copy of this resolver (`resolveAlbumIds`,
+ * jobs/flowsheet-etl/job.ts) was **unscheduled**, not removed, when Phase 3
+ * of the tubafrenzy decommission (WXYC/wiki#88) flipped `flowsheet` to
+ * Backend-canonical — it's still defined and still invocable by hand for the
+ * Phase 6a maintenance window, and rotation-etl carries the same standing
+ * one-shot. That makes the set of writers capable of concurrently issuing
+ * this UPDATE **three**, not one: this job, flowsheet-etl's manual run, and
+ * rotation-etl's manual run (rotation-etl only touches `rotation`, so it
+ * doesn't race this specific flowsheet statement, but does race
+ * legacy-linkage-resolve's rotation pass the same way).
  */
 export const reresolveAlbumIds = async (): Promise<number> => {
   const result = await db.execute(sql`
