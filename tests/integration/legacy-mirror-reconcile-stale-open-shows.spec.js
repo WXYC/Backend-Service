@@ -18,6 +18,27 @@
  * `jobs/legacy-mirror-reconcile/orchestrate.ts`. When that file changes, this
  * SQL must follow — same contract as the BS#1707 sibling spec.
  *
+ * THIS CONTRACT IS PROSE, NOT MECHANICAL (BS#2098 review item 4 "also worth
+ * closing" — and the reason that matters: a divergence between this twin and
+ * the real predicate is exactly what let the BS#2068/#2069 precedence bug
+ * ship through green tests — the twin was hand-written correctly parenthesized
+ * from the start, so it never exercised the drizzle `and()`/`or()` composition
+ * bug production actually had). `tests/unit/jobs/legacy-mirror-reconcile/stale-open-shows-sql.test.ts`
+ * now renders `buildStaleOpenShowsQuery` — the REAL, unmodified production
+ * function — through drizzle's own `PgDialect`, and asserts on the genuinely
+ * rendered SQL text and bound params (not a hand-written twin, not a
+ * call-shape mock). Mechanically asserting the two files' SQL against a
+ * single shared string is impractical: this spec runs via babel-jest against
+ * a live Docker Postgres, the unit test runs via ts-jest fully offline, and
+ * ts-jest project's compiled output isn't reachable from this file's runner —
+ * there's no single process or module system both can execute against
+ * without introducing a generated-fixture build step, which is
+ * disproportionate for what's currently a two-file, occasionally-touched
+ * WHERE clause. So: when you change the WHERE clause in `buildStaleOpenShowsQuery`,
+ * ALWAYS re-run `stale-open-shows-sql.test.ts` first, copy its newly-rendered
+ * predicate text by hand into the twin below, and re-run BOTH suites before
+ * committing. Skipping that is exactly how this bug shipped once already.
+ *
  * Two describe blocks, run in this file's declaration order:
  *
  *   1. The original BS#2065 fixture set, pinning the three exclusion bounds
@@ -78,6 +99,13 @@ function makeSql() {
  * evidence the show is over (BS#1861 option (b)) and is exactly the residue a
  * dropped tubafrenzy `show_end` webhook delivery leaves. Before BS#2068 this
  * was the unconditional `s.id IS DISTINCT FROM (SELECT max(s2.id) ...)`.
+ *
+ * KEEP THIS IN LOCKSTEP WITH `buildStaleOpenShowsQuery` IN
+ * `jobs/legacy-mirror-reconcile/orchestrate.ts` BY HAND — see the file-level
+ * docblock above for why that can't be automated, and
+ * `tests/unit/jobs/legacy-mirror-reconcile/stale-open-shows-sql.test.ts` for
+ * the genuinely-rendered production predicate to copy from whenever the WHERE
+ * clause changes.
  */
 const selectStaleOpenShows = async (sql) =>
   (
