@@ -54,6 +54,7 @@
  *                         sync pre-Phase-3, since there is no more
  *                         in-memory buffer to read synchronously).
  */
+import * as Sentry from '@sentry/node';
 import { db, flowsheet, album_metadata, rotation, library, artists } from '@wxyc/database';
 import { sql, inArray, and, isNotNull, eq, desc, asc } from 'drizzle-orm';
 import type { CriticReviewItem } from '@wxyc/shared/dtos';
@@ -77,6 +78,36 @@ function lookupKey(artist: string, album: string): string {
 const flowsheetLookupKey = sql<string>`lower(trim(${flowsheet.artist_name})) || '-' || lower(trim(coalesce(${flowsheet.album_title}, '')))`;
 
 /**
+ * True iff `value` contains a character that makes `new URL()`'s verdict a
+ * statement about a DIFFERENT string than the one we are about to emit.
+ *
+ * `wireUrl` validates with the WHATWG parser but emits the original text, so
+ * every place the two disagree is a parser differential the wire inherits:
+ *
+ *   - **Backslash.** For the http(s) special schemes WHATWG folds `\` to `/`,
+ *     so `new URL('https://www.discogs.com\\@evil.example/release/1')` reports
+ *     hostname `www.discogs.com`. Foundation/RFC 3986 do NOT fold it, so the
+ *     same bytes resolve to host `evil.example` on iOS. This is the identical
+ *     differential `shared/lml-client/src/streaming-url-guard.ts`'s
+ *     `safeHostname` opens with `if (url.includes('\\')) return null` (BS#1710);
+ *     same reasoning, same verdict, at this seam.
+ *   - **ASCII whitespace and control characters.** WHATWG *strips* raw tab, LF
+ *     and CR anywhere in the input and percent-encodes other C0 characters and
+ *     the space before parsing, so `'https://e.com/a\tb'` validates as
+ *     `https://e.com/ab` — a URL that is not what we would emit. `.trim()`
+ *     only reaches the ends. Foundation rejects the raw form, which is the
+ *     throwing decode this whole helper exists to avoid.
+ */
+function hasWireUrlParserDifferential(value: string): boolean {
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    // C0 controls + space (<= 0x20), DEL (0x7f), backslash (0x5c).
+    if (code <= 0x20 || code === 0x7f || code === 0x5c) return true;
+  }
+  return false;
+}
+
+/**
  * Normalize a persisted URL for the wire, or `undefined` to omit the key.
  *
  * iOS decodes every URL-typed playcut field with
@@ -90,11 +121,23 @@ const flowsheetLookupKey = sql<string>`lower(trim(${flowsheet.artist_name})) || 
  * whitespace, a relative path, a bare hostname, a scheme-relative `//host/...`,
  * a non-web scheme — is dropped rather than risked. Dropping a field costs one
  * missing button; emitting a bad one costs the whole playlist.
+ *
+ * REJECT, don't normalize. The emitted value is the trimmed ORIGINAL, never
+ * `parsed.href`, so anything `new URL()` silently rewrites while parsing is a
+ * differential between what was validated and what ships — see
+ * {@link hasWireUrlParserDifferential}, which rejects those inputs outright.
+ * Emitting `parsed.href` instead would close the same differentials, but it
+ * would also percent-encode the ~21 production values carrying raw non-ASCII in
+ * the path (`https://en.wikipedia.org/wiki/Nilüfer_Yanya` -> `…/Nil%C3%BCfer_…`),
+ * which ship verbatim today and decode fine on iOS. Rejecting touches only the
+ * hazardous inputs, leaves every good byte alone, and matches the repo's
+ * existing precedent at the LML boundary (BS#1710).
  */
 function wireUrl(value: string | null | undefined): string | undefined {
   if (!value) return undefined;
   const trimmed = value.trim();
   if (trimmed === '') return undefined;
+  if (hasWireUrlParserDifferential(trimmed)) return undefined;
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
@@ -104,6 +147,46 @@ function wireUrl(value: string | null | undefined): string | undefined {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
   if (parsed.hostname === '') return undefined;
   return trimmed;
+}
+
+/**
+ * Normalize a free-text wire field: the trimmed value, or `undefined` to omit
+ * the key when it is null, empty, or whitespace-only.
+ *
+ * Same normalization {@link wireUrl} applies, for the same reason one step
+ * further down: a `'   '` bio is not a bio, and an emitted whitespace string
+ * renders as an empty, unexplained section on the shipped 3.2 UI. These fields
+ * decode as `String` (non-throwing), so the stake is a blank section rather
+ * than a blank playlist — but the rule should not differ per field type.
+ */
+function wireText(value: string | null | undefined): string | undefined {
+  if (value == null) return undefined;
+  const trimmed = value.trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
+/**
+ * Normalize a nullable `text[]` metadata column for the wire, or `undefined`
+ * to omit the key when nothing usable survives.
+ *
+ * `album_metadata.genres` / `.styles` are `text[]` whose ELEMENTS are nullable,
+ * so a row written with a NULL member comes back as `[null]` — and `[null]`
+ * has a truthy `.length`. iOS 3.2 decodes both with
+ * `try container.decodeIfPresent([String].self, forKey:)`, which THROWS on a
+ * null member and fails the whole `Playcut` decode, blanking the playlist for
+ * that listener: the exact catastrophe {@link wireUrl} exists to prevent, on
+ * the one remaining throwing decode that had no guard. Non-strings and
+ * blank/whitespace-only members are dropped on the same "a value that carries
+ * no information is not worth a decode risk" rule.
+ */
+function wireStringArray(values: ReadonlyArray<string | null> | null | undefined): string[] | undefined {
+  if (!values?.length) return undefined;
+  const kept: string[] = [];
+  for (const value of values) {
+    const text = typeof value === 'string' ? value.trim() : '';
+    if (text !== '') kept.push(text);
+  }
+  return kept.length > 0 ? kept : undefined;
 }
 
 /** Set a URL-typed wire field iff the persisted value survives {@link wireUrl}. */
@@ -352,14 +435,17 @@ export async function getRecentEntries(n: number): Promise<GroupedResponse> {
   }
 
   const slicedPlaycuts = playcutRows.slice(0, n);
-  const [artworkMap, fallbackRotationMap, metadataMap] = await Promise.all([
+  const [artworkMap, fallbackRotationMap, metadataMap, criticReviewMap] = await Promise.all([
     enrichPlaycuts(slicedPlaycuts),
     resolveFallbackRotation(slicedPlaycuts),
     enrichPlaycutMetadata(slicedPlaycuts),
+    // Keys off `album_id`, which is already on the window row — no dependency
+    // on the metadata batch, so it belongs in this wave, not behind it.
+    resolveCriticReviews(slicedPlaycuts),
   ]);
-  // Second (and last) round trip: the concerts / critic-review attaches key
-  // off `artist_id`, which the metadata batch above resolves.
-  const feedEnrichmentMap = await resolveFeedEnrichment(slicedPlaycuts, metadataMap);
+  // Second (and last) round trip: the concerts attach's id arm keys off
+  // `artist_id`, which only the metadata batch above resolves.
+  const upcomingShowMap = await resolveUpcomingShows(slicedPlaycuts, metadataMap);
 
   const playcuts: GroupedPlaycut[] = slicedPlaycuts.map((row) => {
     // COALESCE(FK rotation_bin, fallback rotation_bin) — the exact semantics
@@ -383,12 +469,15 @@ export async function getRecentEntries(n: number): Promise<GroupedResponse> {
     if (meta) {
       applyPlaycutMetadata(grouped, meta);
     }
-    const enrichment = feedEnrichmentMap.get(row.id);
-    if (enrichment?.upcoming_show) {
-      grouped.upcoming_show = enrichment.upcoming_show;
+    // Key order is wire-visible (JSON.stringify emits insertion order, and the
+    // cross-repo golden pins the bytes): upcoming_show before critic_reviews.
+    const upcomingShow = upcomingShowMap.get(row.id);
+    if (upcomingShow) {
+      grouped.upcoming_show = upcomingShow;
     }
-    if (enrichment?.critic_reviews?.length) {
-      grouped.critic_reviews = enrichment.critic_reviews;
+    const criticReviews = criticReviewMap.get(row.id);
+    if (criticReviews?.length) {
+      grouped.critic_reviews = criticReviews;
     }
     return grouped;
   });
@@ -691,8 +780,14 @@ async function enrichPlaycutMetadata(candidates: Array<{ id: number }>): Promise
         )
       );
 
+    // No cast: `rows` keeps drizzle's inferred shape, so this insert is what
+    // ties {@link PlaycutMetadataRow} to the projection. If
+    // ALBUM_METADATA_PROJECTION_WITHOUT_ARTWORK ever loses a field, the
+    // inferred row stops satisfying the map's value type and THIS line fails
+    // to compile — instead of typechecking clean and silently assigning
+    // `undefined` to a live wire field, which a cast would have allowed.
     const map = new Map<number, PlaycutMetadataRow>();
-    for (const row of rows as PlaycutMetadataRow[]) {
+    for (const row of rows) {
       map.set(row.id, row);
     }
     return map;
@@ -703,63 +798,115 @@ async function enrichPlaycutMetadata(candidates: Array<{ id: number }>): Promise
 }
 
 /**
- * The minimal row shape `/flowsheet`'s feed-assembly attaches read and write.
- * Structurally compatible with `IFSEntry`, which is what those helpers are
- * normally handed.
+ * The minimal row shape `attachUpcomingShows` reads and writes — the same
+ * `Pick`-of-`IFSEntry` fields its own `UpcomingShowAttachable` bound declares.
  */
-type FeedEnrichmentTarget = {
+type UpcomingShowTarget = {
   id: number;
   entry_type: 'track';
   artist_id: number | null;
   artist_name: string | null;
-  album_id: number | null;
   upcoming_show?: ConcertDTO | null;
+};
+
+/** The minimal row shape `attachCriticReviews` reads and writes. */
+type CriticReviewTarget = {
+  id: number;
+  entry_type: 'track';
+  album_id: number | null;
   critic_reviews?: CriticReviewItem[];
 };
 
 /**
- * Attach the two feed-assembly enrichments — `upcoming_show` (BS#1607/#1613)
- * and `critic_reviews` (BS#1870) — by calling `/flowsheet`'s own helpers
- * rather than re-deriving their match rules (the id-arm/name-arm hybrid and
- * the id-arm-only exact album match respectively, each with its own
- * regression suite).
+ * Attach `upcoming_show` (BS#1607/#1613) by calling `/flowsheet`'s own helper
+ * rather than re-deriving its id-arm/name-arm hybrid match, which has its own
+ * regression suite.
  *
- * Both are batched and page-scoped: `attachUpcomingShows` reads a per-ET-day
- * memoized concerts map (`getUpcomingShowsMapsCached`, BS#1616 — usually zero
- * queries on the hot poll), and `attachCriticReviews` is flag-gated behind
- * `CRITIC_REVIEWS_ENABLED` and issues one indexed lookup. They run
- * concurrently with each other, after the metadata batch that supplies
- * `artist_id`.
+ * Batched and page-scoped: `attachUpcomingShows` reads a per-ET-day memoized
+ * concerts map (`getUpcomingShowsMapsCached`, BS#1616 — usually zero queries on
+ * the hot poll). This is the one enrichment that CANNOT join the first
+ * `Promise.all`: its id arm keys off `artist_id`, which only the metadata batch
+ * resolves.
  *
  * Wrapped in a try/catch the `/flowsheet` call sites don't need: this endpoint
  * is polled on a fixed interval by every legacy mobile client through a proxy
  * that fails soft at 2s, so a concerts-table blip must cost the CTA, not the
- * playlist.
+ * playlist. The catch reports to Sentry — matching the helper it wraps, which
+ * reports its own internal failures there — because a `console.error` on a
+ * fleet-wide outage is a signal nobody receives. It does NOT discard the map:
+ * the attach mutates `targets` in place, so anything already written stays
+ * valid and is harvested below.
  */
-async function resolveFeedEnrichment(
+async function resolveUpcomingShows(
   candidates: RecentRow[],
   metadataMap: Map<number, PlaycutMetadataRow>
-): Promise<Map<number, FeedEnrichmentTarget>> {
-  const resolved = new Map<number, FeedEnrichmentTarget>();
+): Promise<Map<number, ConcertDTO>> {
+  const resolved = new Map<number, ConcertDTO>();
   if (candidates.length === 0) return resolved;
 
-  const targets: FeedEnrichmentTarget[] = candidates.map((row) => ({
+  const targets: UpcomingShowTarget[] = candidates.map((row) => ({
     id: row.id,
     entry_type: 'track',
     artist_id: metadataMap.get(row.id)?.artist_id ?? null,
     artist_name: row.artist_name,
+  }));
+
+  try {
+    await attachUpcomingShows(targets);
+  } catch (err) {
+    Sentry.captureException(err, {
+      tags: { subsystem: 'playlist-proxy-upcoming-shows' },
+      extra: { candidate_count: candidates.length },
+    });
+  }
+
+  for (const target of targets) {
+    if (target.upcoming_show) {
+      resolved.set(target.id, target.upcoming_show);
+    }
+  }
+  return resolved;
+}
+
+/**
+ * Attach `critic_reviews` (BS#1870) by calling `/flowsheet`'s own helper rather
+ * than re-deriving its id-arm-only exact album match.
+ *
+ * Runs in `getRecentEntries`'s FIRST `Promise.all`, not after the metadata
+ * batch: `attachCriticReviews` reads only `entry_type` and `album_id`, and
+ * `album_id` comes straight off the window row (`RecentRow.album_id`) — it has
+ * no `artist_id` dependency, unlike {@link resolveUpcomingShows}. Serializing
+ * it behind the metadata batch bought nothing and cost a whole round trip on an
+ * endpoint that is polled on a fixed interval behind a 2s fail-soft proxy which
+ * 503s the entire legacy mobile fleet on timeout.
+ *
+ * Flag-gated behind `CRITIC_REVIEWS_ENABLED` inside the helper (zero queries
+ * when off), one indexed lookup when on. Same Sentry-reporting, keep-what-
+ * landed catch as {@link resolveUpcomingShows}.
+ */
+async function resolveCriticReviews(candidates: RecentRow[]): Promise<Map<number, CriticReviewItem[]>> {
+  const resolved = new Map<number, CriticReviewItem[]>();
+  if (candidates.length === 0) return resolved;
+
+  const targets: CriticReviewTarget[] = candidates.map((row) => ({
+    id: row.id,
+    entry_type: 'track',
     album_id: row.album_id,
   }));
 
   try {
-    await Promise.all([attachUpcomingShows(targets), attachCriticReviews(targets)]);
+    await attachCriticReviews(targets);
   } catch (err) {
-    console.error('[playlist-proxy] feed enrichment attach failed:', err);
-    return resolved;
+    Sentry.captureException(err, {
+      tags: { subsystem: 'playlist-proxy-critic-reviews' },
+      extra: { candidate_count: candidates.length },
+    });
   }
 
   for (const target of targets) {
-    resolved.set(target.id, target);
+    if (target.critic_reviews?.length) {
+      resolved.set(target.id, target.critic_reviews);
+    }
   }
   return resolved;
 }
@@ -768,10 +915,72 @@ async function resolveFeedEnrichment(
  * Project one metadata row onto the v=2 playcut under the iOS 3.2 key names.
  *
  * Present-or-absent throughout: a null column omits its key entirely rather
- * than emitting `null`, which keeps the no-enrichment payload byte-identical
- * to its pre-BS#2103 shape and keeps every URL field structurally incapable of
- * carrying `""`.
+ * than emitting `null`, which keeps every URL field structurally incapable of
+ * carrying `""`. Strings are trimmed and dropped when blank ({@link wireText}),
+ * URL fields additionally survive only as absolute http(s) with no parser
+ * differential ({@link wireUrl}), and `genres` / `styles` are filtered to their
+ * non-empty string members ({@link wireStringArray}).
+ *
+ * `metadataStatus` is deliberately CONDITIONAL — see
+ * {@link hasRenderableInlineMetadata} for the rule and the measurement behind
+ * it. `flowsheet.metadata_status` is `NOT NULL DEFAULT 'pending'`, so the
+ * column always has a value; the WIRE key rides only when this function (plus
+ * the caller's artwork assignment) actually put renderable metadata on the
+ * playcut. A fully-unenriched playcut therefore IS byte-identical to its
+ * pre-BS#2103 shape.
  */
+/**
+ * True iff the playcut carries at least one of the 12 inline metadata fields
+ * iOS 3.2's `Playcut.hasV2Metadata` ORs together — the fields
+ * `PlaycutDetailView.loadMetadata()` can actually render.
+ *
+ * This predicate exists because on shipped 3.2, `metadataStatus` is a CONTROL
+ * field, not data: a terminal value (`enriched_match` / `enriched_no_match` /
+ * `failed_no_retry`) makes the detail view render straight from the inline
+ * fields and never call `/proxy/metadata/album`
+ * (v3.2-AppStoreSubmission4, `PlaycutDetailView.swift:289`). For a
+ * terminal-but-EMPTY row that short-circuit produces a blank card where
+ * today's status-less payload gets a live lookup — measured 2026-08-11 at 579
+ * of 37,054 production playcuts (1.56%), landing in roughly 40% of n=50
+ * responses. So `applyPlaycutMetadata` emits `metadataStatus` exactly when
+ * this predicate holds and withholds it otherwise, keeping the fallback fetch
+ * for rows the payload gives the client nothing to render. The cost is nil in
+ * practice: rows WITH inline fields (≈98.4% of terminal rows) keep the
+ * round-trip-free inline render this endpoint's enrichment exists for.
+ *
+ * The honest tradeoff, stated plainly: on this endpoint the field stops being
+ * a faithful lifecycle report and becomes "terminal AND useful". That is
+ * acceptable ONLY because this wire's consumers are shipped 3.2 (which reads
+ * it purely as the control signal above) and 3.1 (which ignores it). Do not
+ * copy this rule to `/flowsheet` v2, whose consumers treat the status as data
+ * (Spotlight re-donation keys off terminal transitions, issue #443).
+ *
+ * Field list is hand-synced with THREE iOS enumerations of the same 12 fields
+ * (see `Playcut.hasV2Metadata`'s doc comment in
+ * `Shared/Playlist/Sources/Playlist/PlaylistEntry.swift`, which names the
+ * other two); this is the server-side fourth. `artistId`, `upcoming_show`,
+ * `critic_reviews`, `discogsUnavailable` and `discogsUnavailableNote` are
+ * deliberately excluded, mirroring their exclusion from the iOS predicate —
+ * none of them is playcut-detail metadata, so none of them can prevent the
+ * empty render this guard exists to stop.
+ */
+function hasRenderableInlineMetadata(grouped: GroupedPlaycut): boolean {
+  return (
+    grouped.artworkURL !== undefined ||
+    grouped.discogsURL !== undefined ||
+    grouped.releaseYear !== undefined ||
+    grouped.spotifyURL !== undefined ||
+    grouped.appleMusicURL !== undefined ||
+    grouped.youtubeMusicURL !== undefined ||
+    grouped.bandcampURL !== undefined ||
+    grouped.soundcloudURL !== undefined ||
+    grouped.artistBio !== undefined ||
+    grouped.artistWikipediaURL !== undefined ||
+    grouped.genres !== undefined ||
+    grouped.styles !== undefined
+  );
+}
+
 function applyPlaycutMetadata(grouped: GroupedPlaycut, meta: PlaycutMetadataRow): void {
   // BS#1714: a persisted spotify_url/apple_music_url whose host isn't
   // Spotify/Apple was mislabeled at the LML boundary before #1712 shipped and
@@ -790,22 +999,33 @@ function applyPlaycutMetadata(grouped: GroupedPlaycut, meta: PlaycutMetadataRow)
   if (meta.release_year !== null) {
     grouped.releaseYear = meta.release_year;
   }
-  if (meta.artist_bio !== null && meta.artist_bio !== '') {
-    grouped.artistBio = meta.artist_bio;
+  const artistBio = wireText(meta.artist_bio);
+  if (artistBio !== undefined) {
+    grouped.artistBio = artistBio;
   }
   // Empty arrays collapse to an omitted key, mirroring transformToV2's
   // `?.length ? … : null` (BS#1441): a '{}' album_metadata row carries no
-  // information.
-  if (meta.genres?.length) {
-    grouped.genres = meta.genres;
+  // information. `[null]` and `['']` collapse the same way — see
+  // wireStringArray for why `.length` alone is not a safe test here.
+  const genres = wireStringArray(meta.genres);
+  if (genres !== undefined) {
+    grouped.genres = genres;
   }
-  if (meta.styles?.length) {
-    grouped.styles = meta.styles;
+  const styles = wireStringArray(meta.styles);
+  if (styles !== undefined) {
+    grouped.styles = styles;
   }
   if (meta.artist_id !== null) {
     grouped.artistId = meta.artist_id;
   }
-  if (meta.metadata_status !== null) {
+  // Option-3 serve rule (BS#2103 review): the status accompanies renderable
+  // metadata or stays home. Evaluated HERE — after every one of the 12
+  // predicate fields above (and the caller's earlier artworkURL assignment)
+  // has run — so the check reads the post-guard WIRE payload, not the DB row:
+  // a row whose only persisted values were guarded off the wire counts as
+  // empty. Position in the key order is unchanged from the unconditional
+  // version; only presence is conditional.
+  if (meta.metadata_status !== null && hasRenderableInlineMetadata(grouped)) {
     grouped.metadataStatus = meta.metadata_status;
   }
   // BS#1908 present-or-absent: null means "no library row", which is not the
@@ -813,8 +1033,9 @@ function applyPlaycutMetadata(grouped: GroupedPlaycut, meta: PlaycutMetadataRow)
   if (meta.discogs_unavailable !== null) {
     grouped.discogsUnavailable = meta.discogs_unavailable;
   }
-  if (meta.discogs_unavailable_note !== null) {
-    grouped.discogsUnavailableNote = meta.discogs_unavailable_note;
+  const discogsUnavailableNote = wireText(meta.discogs_unavailable_note);
+  if (discogsUnavailableNote !== undefined) {
+    grouped.discogsUnavailableNote = discogsUnavailableNote;
   }
 }
 

@@ -962,8 +962,94 @@ describe('playlist-proxy.service', () => {
       expect(pc.discogsUnavailableNote).toBeUndefined();
       expect(pc.upcoming_show).toBeUndefined();
       expect(pc.critic_reviews).toBeUndefined();
-      // metadata_status is NOT NULL on the table, so it always rides.
-      expect(pc.metadataStatus).toBe('pending');
+      // `metadata_status` is NOT NULL on the table, but the wire key is
+      // conditional: with zero renderable inline fields it is withheld, so the
+      // shipped 3.2 client keeps its live `/proxy/metadata/album` fallback
+      // instead of short-circuiting to an empty card.
+      expect(Object.prototype.hasOwnProperty.call(pc, 'metadataStatus')).toBe(false);
+    });
+
+    // On shipped iOS 3.2, `metadataStatus` is a CONTROL field, not data: a
+    // terminal value makes `PlaycutDetailView.loadMetadata()` render straight
+    // from the inline fields and never call `/proxy/metadata/album`
+    // (v3.2-AppStoreSubmission4, PlaycutDetailView.swift:289). For a
+    // terminal-but-empty row that means an empty card where today's client
+    // fetches live metadata — measured at 579 of 37,054 production playcuts
+    // (1.56%), reaching roughly 40% of n=50 responses. So the key is emitted
+    // exactly when the payload carries >=1 of the 12 renderable inline fields
+    // (the ones `Playcut.hasV2Metadata` ORs together), and withheld otherwise
+    // so those rows keep today's fallback. `/flowsheet` v2 is NOT narrowed —
+    // this is a legacy-endpoint-only serve rule.
+    describe('conditional metadataStatus (terminal-but-empty guard)', () => {
+      it('withholds a terminal status when every inline field is empty', async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        // Terminal in the DB, but nothing usable: LML finished and persisted
+        // nothing. Without the guard this renders an empty detail card on 3.2.
+        // `artist_id` present on purpose — it is excluded from the predicate
+        // (mirroring its exclusion from iOS `hasV2Metadata`), so it must
+        // neither satisfy it nor get suppressed by it.
+        mockMetadataWhere.mockResolvedValue([
+          { ...emptyMetadata, metadata_status: 'enriched_match', artist_id: 44321 },
+        ]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        expect(Object.prototype.hasOwnProperty.call(pc, 'metadataStatus')).toBe(false);
+        expect(pc.artistId).toBe(44321);
+      });
+
+      it('withholds a terminal status when the only persisted values were guarded off the wire', async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        // Every field is present in the DB but hazardous: the URL guard drops
+        // them all, so the WIRE carries nothing renderable. The predicate must
+        // read the post-guard payload, not the DB row — status rides only when
+        // something actually shipped.
+        mockMetadataWhere.mockResolvedValue([
+          {
+            ...emptyMetadata,
+            metadata_status: 'enriched_match',
+            discogs_url: 'Wiki - https://en.wikipedia.org/wiki/Weezer',
+            artist_wikipedia_url: '   ',
+            artist_bio: '   ',
+            genres: [null],
+          },
+        ]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        expect(Object.prototype.hasOwnProperty.call(pc, 'metadataStatus')).toBe(false);
+        expect(pc.discogsURL).toBeUndefined();
+        expect(pc.genres).toBeUndefined();
+      });
+
+      it('emits a terminal status when artwork alone survives (set before applyPlaycutMetadata)', async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        mockArtworkOrderBy.mockResolvedValue([
+          { key: 'jessica pratt-on your own love again', artwork_url: 'https://i.discogs.com/jessica.jpg' },
+        ]);
+        mockMetadataWhere.mockResolvedValue([{ ...emptyMetadata, metadata_status: 'enriched_match' }]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        // artworkURL is assigned by the caller BEFORE applyPlaycutMetadata
+        // runs; the predicate reads `grouped`, so artwork-only rows count as
+        // renderable and keep the inline short-circuit.
+        expect(pc.artworkURL).toBe('https://i.discogs.com/jessica.jpg');
+        expect(pc.metadataStatus).toBe('enriched_match');
+      });
+
+      it('emits a non-terminal status whenever any inline field rides', async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        // `pending` + a field is harmless on 3.2 (non-terminal statuses take
+        // the same fetch arm as nil) — the rule stays uniform anyway: the key
+        // accompanies renderable metadata, full stop.
+        mockMetadataWhere.mockResolvedValue([{ ...emptyMetadata, metadata_status: 'pending', release_year: 2015 }]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        expect(pc.releaseYear).toBe(2015);
+        expect(pc.metadataStatus).toBe('pending');
+      });
     });
 
     it.each([
@@ -973,6 +1059,17 @@ describe('playlist-proxy.service', () => {
       ['bare hostname', 'www.discogs.com/release/12345'],
       ['scheme-relative', '//www.discogs.com/release/12345'],
       ['non-web scheme', 'javascript:alert(1)'],
+      // Parser differentials: `new URL()` validates a DIFFERENT string than the
+      // one the serializer emits, because it folds `\` to `/` for the http(s)
+      // special schemes and strips raw tab/LF/CR before parsing. The emitted
+      // bytes keep those characters, and Foundation neither folds nor strips —
+      // so the host `new URL()` blessed is not the host iOS would resolve.
+      ['backslash host confusion', 'https://www.discogs.com\\@evil.example/release/1'],
+      ['embedded tab', 'https://www.discogs.com/rele\tase/12345'],
+      ['embedded newline', 'https://www.discogs.com/rele\nase/12345'],
+      ['embedded carriage return', 'https://www.discogs.com/rele\rase/12345'],
+      ['embedded space', 'https://www.discogs.com/rele ase/12345'],
+      ['embedded NUL', 'https://www.discogs.com/rele\u0000ase/12345'],
     ])(
       'drops a %s discogs URL rather than emitting it (iOS decodeIfPresent(URL.self) THROWS and blanks the whole playlist)',
       async (_label, value) => {
@@ -1025,6 +1122,65 @@ describe('playlist-proxy.service', () => {
 
       expect(pc.genres).toBeUndefined();
       expect(pc.styles).toBeUndefined();
+    });
+
+    // `album_metadata.genres` / `.styles` are nullable `text[]` — the ELEMENTS
+    // can be NULL, so a row written with one comes back as `[null]`, whose
+    // `.length` is truthy. iOS 3.2 decodes both with a THROWING
+    // `decodeIfPresent([String].self)`, so shipping `[null]` fails the whole
+    // Playcut decode and blanks the playlist — the same catastrophe wireUrl
+    // exists to prevent, on the last throwing decode that had no guard.
+    it.each([
+      ['a null member', [null], undefined],
+      ['only null members', [null, null], undefined],
+      ['an empty-string member', [''], undefined],
+      ['a whitespace-only member', ['   '], undefined],
+      ['a mix of good and null members', ['Rock', null, '', 'Jazz'], ['Rock', 'Jazz']],
+      ['padded members', ['  Rock  '], ['Rock']],
+    ])('handles genres/styles with %s', async (_label, value, expected) => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockMetadataWhere.mockResolvedValue([{ ...emptyMetadata, genres: value, styles: value }]);
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      expect(pc.genres).toEqual(expected);
+      expect(pc.styles).toEqual(expected);
+      if (expected === undefined) {
+        expect(Object.prototype.hasOwnProperty.call(pc, 'genres')).toBe(false);
+        expect(Object.prototype.hasOwnProperty.call(pc, 'styles')).toBe(false);
+      }
+    });
+
+    // The string fields are normalized on the same rule as the URL fields: a
+    // '   ' bio is not a bio, and '' is not a note. Emitting either renders an
+    // empty, unexplained section on the shipped 3.2 UI.
+    it.each([
+      ['whitespace-only', '   '],
+      ['empty', ''],
+    ])('drops a %s artist_bio and discogs_unavailable_note rather than emitting it', async (_label, value) => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockMetadataWhere.mockResolvedValue([{ ...emptyMetadata, artist_bio: value, discogs_unavailable_note: value }]);
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      expect(Object.prototype.hasOwnProperty.call(pc, 'artistBio')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(pc, 'discogsUnavailableNote')).toBe(false);
+    });
+
+    it('trims a padded artist_bio / discogs_unavailable_note, matching the URL fields', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockMetadataWhere.mockResolvedValue([
+        {
+          ...emptyMetadata,
+          artist_bio: '  Jessica Pratt is a singer-songwriter from Los Angeles.  ',
+          discogs_unavailable_note: '  embargoed promo\n',
+        },
+      ]);
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      expect(pc.artistBio).toBe('Jessica Pratt is a singer-songwriter from Los Angeles.');
+      expect(pc.discogsUnavailableNote).toBe('embargoed promo');
     });
 
     it('omits discogsUnavailable entirely for a row with no library link (BS#1908 present-or-absent)', async () => {
@@ -1092,6 +1248,34 @@ describe('playlist-proxy.service', () => {
       expect(mockAttachCriticReviews).toHaveBeenCalledTimes(1);
     });
 
+    // `attachCriticReviews` reads only `entry_type` and `album_id`, and
+    // `album_id` is already on the window row — unlike `attachUpcomingShows`,
+    // whose id arm needs the `artist_id` the metadata batch resolves. So it
+    // belongs in the first wave. This endpoint is polled on a fixed interval
+    // behind a 2s fail-soft proxy that 503s the whole legacy mobile fleet on
+    // timeout, so an unnecessary serial hop is not free.
+    it('dispatches the critic-review attach in the first wave, not behind the metadata batch', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      let releaseMetadata: (rows: unknown) => void = () => {};
+      mockMetadataWhere.mockReturnValue(
+        new Promise((resolve) => {
+          releaseMetadata = resolve;
+        })
+      );
+
+      const pending = getRecentEntries(50);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // Metadata is still in flight...
+      expect(mockAttachCriticReviews).toHaveBeenCalledTimes(1);
+      expect(mockAttachUpcomingShows).not.toHaveBeenCalled();
+
+      releaseMetadata([fullMetadata]);
+      await pending;
+
+      expect(mockAttachUpcomingShows).toHaveBeenCalledTimes(1);
+    });
+
     it('enriches only the sliced playcuts, not the full 200-row window', async () => {
       const manyPlaycuts = Array.from({ length: 10 }, (_, i) => ({ ...jessicaPrattRow, id: 4200 + i }));
       mockLimit.mockResolvedValue(manyPlaycuts);
@@ -1123,15 +1307,38 @@ describe('playlist-proxy.service', () => {
       expect(pc.metadataStatus).toBeUndefined();
     });
 
-    it('degrades (rather than throwing) when the upcoming-show / critic-review attach fails', async () => {
+    it('degrades (rather than throwing) when the upcoming-show attach fails, and keeps critic_reviews', async () => {
       mockLimit.mockResolvedValue([jessicaPrattRow]);
       mockMetadataWhere.mockResolvedValue([fullMetadata]);
       mockAttachUpcomingShows.mockRejectedValue(new Error('concerts unavailable'));
+      mockAttachCriticReviews.mockImplementation((entries) => {
+        for (const entry of entries) entry.critic_reviews = [{ publication: 'Pitchfork' }];
+        return Promise.resolve(entries);
+      });
 
       const [pc] = (await getRecentEntries(50)).playcuts;
 
       expect(pc.upcoming_show).toBeUndefined();
-      // The rest of the enrichment still rides.
+      // ONLY the feature that failed degrades: the critic reviews the other
+      // attach already produced must not be discarded with it, and the rest of
+      // the enrichment still rides.
+      expect(pc.critic_reviews).toEqual([{ publication: 'Pitchfork' }]);
+      expect(pc.discogsURL).toBe(fullMetadata.discogs_url);
+    });
+
+    it('degrades (rather than throwing) when the critic-review attach fails, and keeps upcoming_show', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockMetadataWhere.mockResolvedValue([fullMetadata]);
+      mockAttachCriticReviews.mockRejectedValue(new Error('album_critic_reviews unavailable'));
+      mockAttachUpcomingShows.mockImplementation((entries) => {
+        for (const entry of entries) entry.upcoming_show = { id: 991 };
+        return Promise.resolve(entries);
+      });
+
+      const [pc] = (await getRecentEntries(50)).playcuts;
+
+      expect(pc.critic_reviews).toBeUndefined();
+      expect(pc.upcoming_show).toEqual({ id: 991 });
       expect(pc.discogsURL).toBe(fullMetadata.discogs_url);
     });
 

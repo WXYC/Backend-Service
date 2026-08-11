@@ -555,8 +555,11 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
     expect(entry.artistId).toBeUndefined();
     // No library row -> the discogs-unavailable flag is omitted, not `false`.
     expect(Object.prototype.hasOwnProperty.call(entry, 'discogsUnavailable')).toBe(false);
-    // metadata_status is NOT NULL on the table, so it always rides.
-    expect(entry.metadataStatus).toBe('pending');
+    // `metadata_status` is NOT NULL on the table, but the wire key is
+    // conditional (option-3 serve rule): with zero renderable inline fields it
+    // is withheld, so shipped 3.2 keeps its live `/proxy/metadata/album`
+    // fallback instead of short-circuiting a terminal status to an empty card.
+    expect(Object.prototype.hasOwnProperty.call(entry, 'metadataStatus')).toBe(false);
   });
 
   test('metadata keys off the play’s own album_id, matching /flowsheet (artwork keeps its own lookup-key tie-break)', async () => {
