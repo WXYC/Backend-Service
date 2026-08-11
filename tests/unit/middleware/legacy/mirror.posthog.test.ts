@@ -22,7 +22,11 @@ import { Request, Response } from 'express';
 import { EventEmitter } from 'events';
 
 function createMockReqRes() {
-  const req = { user: { id: 'user-1' }, ip: '127.0.0.1' } as unknown as Request;
+  // req.auth is what the auth middleware sets — req.user is never assigned by
+  // anything in this codebase. Building the dead shape here is what let the
+  // `req.user?.id` read survive: every assertion silently ran against the
+  // req.ip fallback instead of a real DJ identity (BS#1119 follow-up review).
+  const req = { auth: { id: 'user-1' }, ip: '127.0.0.1' } as unknown as Request;
 
   const res = new EventEmitter() as Response & EventEmitter;
   res.statusCode = 200;
@@ -77,6 +81,56 @@ describe('PostHog client usage', () => {
     // getPostHogClient is called per-request, but it returns the same singleton
     expect(mockGetPostHogClient).toHaveBeenCalled();
     expect(mockPostHogInstance.isFeatureEnabled).toHaveBeenCalledTimes(2);
+  });
+
+  it('evaluates the flag against the authenticated user, not the request IP', async () => {
+    // The regression pin for the identity itself: without asserting the
+    // distinctId, reverting to `req.user?.id` keeps this whole file green
+    // while every evaluation silently degrades to one EC2-local req.ip.
+    // Registrations that can name a show pass a resolveFlagIdentity instead
+    // (the show's primary DJ); this bare one falls back to the caller.
+    const middleware = createBackendMirrorMiddleware(jest.fn().mockResolvedValue(['SQL1']));
+    const { req, res } = createMockReqRes();
+
+    await middleware(req, res, jest.fn());
+    res.send(JSON.stringify({ ok: true }));
+    res.emit('finish');
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(mockPostHogInstance.isFeatureEnabled).toHaveBeenCalledWith('backend-mirror', 'user-1');
+  });
+
+  it('prefers a registration-supplied show identity over the caller', async () => {
+    // The per-SHOW decision: every payload in one show must resolve the same
+    // flag value, or a mixed-DJ show reaches tubafrenzy half-mirrored — the
+    // one state legacy-mirror-reconcile refuses to auto-heal.
+    const middleware = createBackendMirrorMiddleware<{ ok: boolean }>(jest.fn().mockResolvedValue(['SQL1']), {
+      resolveFlagIdentity: () => Promise.resolve('primary-dj-of-the-show'),
+    });
+    const { req, res } = createMockReqRes();
+
+    await middleware(req, res, jest.fn());
+    res.send(JSON.stringify({ ok: true }));
+    res.emit('finish');
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(mockPostHogInstance.isFeatureEnabled).toHaveBeenCalledWith('backend-mirror', 'primary-dj-of-the-show');
+  });
+
+  it('falls back to the caller when the show-identity lookup throws', async () => {
+    const middleware = createBackendMirrorMiddleware<{ ok: boolean }>(jest.fn().mockResolvedValue(['SQL1']), {
+      resolveFlagIdentity: () => Promise.reject(new Error('db down')),
+    });
+    const { req, res } = createMockReqRes();
+
+    await middleware(req, res, jest.fn());
+    res.send(JSON.stringify({ ok: true }));
+    res.emit('finish');
+    await new Promise((r) => setTimeout(r, 50));
+
+    // A failed identity lookup must not fail the flag check closed, and must
+    // not throw into the mirror's Sentry path either.
+    expect(mockPostHogInstance.isFeatureEnabled).toHaveBeenCalledWith('backend-mirror', 'user-1');
   });
 });
 

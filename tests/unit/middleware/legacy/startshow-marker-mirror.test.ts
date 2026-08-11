@@ -11,10 +11,12 @@
  * tubafrenzy 172277).
  *
  * These tests drive the REAL middleware through a faithful mini query engine:
- * the `@wxyc/database` mock actually interprets the drizzle predicate/order so
- * the fixture `[show_start(play_order 1), track(play_order 2)]` resolves the
- * way postgres-js would. The old DESC query would resolve the track (red); the
- * entry_type-filtered query resolves the marker (green).
+ * the `@wxyc/database` mock actually interprets the drizzle predicate, so the
+ * fixture `[show_start(play_order 1), track(play_order 2)]` resolves the way
+ * postgres-js would. The old DESC query would resolve the track (red); the
+ * entry_type-filtered query resolves the marker (green). Both lifecycle
+ * handlers share one `mirrorAnnouncementEntry` helper, so the endShow describe
+ * below pins the same query through its own entry_type.
  *
  * Harness follows endshow-shape-guard.test.ts: real middleware, mocks only at
  * process boundaries (tubafrenzy HTTP client, database, PostHog, Sentry).
@@ -34,16 +36,6 @@ function matchPred(row: Record<string, unknown>, pred: any): boolean {
     default:
       return true;
   }
-}
-
-function applyOrder(rows: Record<string, unknown>[], order: any): Record<string, unknown>[] {
-  if (order?.kind === 'desc') {
-    return [...rows].sort((a, b) => Number(b[order.col] ?? 0) - Number(a[order.col] ?? 0));
-  }
-  if (order?.kind === 'asc') {
-    return [...rows].sort((a, b) => Number(a[order.col] ?? 0) - Number(b[order.col] ?? 0));
-  }
-  return rows;
 }
 
 // Per-test fixtures, keyed by table.
@@ -79,8 +71,12 @@ jest.mock('../../../../apps/backend/middleware/legacy/http.mirror', () => ({
   mapUpdateToTubafrenzy: jest.fn(),
 }));
 
+// No `orderBy` rung: the announcement query is predicate-only since both
+// call sites moved to the shared `mirrorAnnouncementEntry` helper. Leaving it
+// out is deliberate — re-adding an ORDER BY in production fails here loudly
+// ("orderBy is not a function") instead of being silently swallowed.
 const mockDbSelect = jest.fn(() => {
-  const state: { table: string | null; pred: unknown; order: unknown } = { table: null, pred: null, order: null };
+  const state: { table: string | null; pred: unknown } = { table: null, pred: null };
   const builder: Record<string, unknown> = {
     from: (table: { __table?: string }) => {
       state.table = table?.__table ?? null;
@@ -90,13 +86,8 @@ const mockDbSelect = jest.fn(() => {
       state.pred = pred;
       return builder;
     },
-    orderBy: (order: unknown) => {
-      state.order = order;
-      return builder;
-    },
     limit: (n: number) => {
-      let out = rowsFor(state.table).filter((r) => matchPred(r, state.pred));
-      if (state.order) out = applyOrder(out, state.order);
+      const out = rowsFor(state.table).filter((r) => matchPred(r, state.pred));
       return Promise.resolve(out.slice(0, n));
     },
   };
@@ -126,15 +117,16 @@ jest.mock('@wxyc/database', () => ({
     play_order: 'play_order',
     legacy_entry_id: 'legacy_entry_id',
   },
-  shows: { __table: 'shows', id: 'id', legacy_show_id: 'legacy_show_id' },
+  shows: { __table: 'shows', id: 'id', legacy_show_id: 'legacy_show_id', primary_dj_id: 'primary_dj_id' },
 }));
 
+// Exactly flowsheet.mirror.ts's import surface (and/eq/isNull) — a drift
+// between this list and the module's imports must fail loudly as "undefined
+// is not a function", never silently no-op.
 jest.mock('drizzle-orm', () => ({
   eq: (col: unknown, val: unknown) => ({ kind: 'eq', col, val }),
   and: (...clauses: unknown[]) => ({ kind: 'and', clauses }),
   isNull: (col: unknown) => ({ kind: 'isNull', col }),
-  desc: (col: unknown) => ({ kind: 'desc', col }),
-  asc: (col: unknown) => ({ kind: 'asc', col }),
 }));
 
 jest.mock('posthog-node', () => ({
@@ -145,8 +137,10 @@ jest.mock('posthog-node', () => ({
 }));
 
 const mockCaptureException = jest.fn();
+const mockCaptureMessage = jest.fn();
 jest.mock('@sentry/node', () => ({
   captureException: mockCaptureException,
+  captureMessage: mockCaptureMessage,
 }));
 
 jest.mock('../../../../apps/backend/middleware/legacy/rotation-match.mirror', () => ({
@@ -216,6 +210,20 @@ describe('startShow mirror announces the show_start marker (BS#1705)', () => {
     expect(mockCaptureException).not.toHaveBeenCalled();
   });
 
+  it('POSTs no announcement when the tubafrenzy show-create failed (no orphan entry, no poisoned marker)', async () => {
+    // mirrorCreateShow returning null means there is no parent radio show to
+    // hang the entry off. Mirroring it anyway would POST an orphan
+    // START_OF_SHOW *and* stamp legacy_entry_id on the marker, hiding it from
+    // legacy-mirror-reconcile's `legacy_entry_id IS NULL` sweep forever.
+    mockMirrorCreateShow.mockResolvedValueOnce(null);
+
+    await runMiddleware(flowsheetMirror.startShow, showPayload);
+
+    expect(mockMirrorCreateEntry).not.toHaveBeenCalled();
+    expect(updateCalls).toHaveLength(0);
+    expect(mockCaptureException).not.toHaveBeenCalled();
+  });
+
   it('does not re-POST the marker once it has already been mirrored (idempotent re-fire)', async () => {
     // Simulate a second startShow-mirror run after the marker was mirrored.
     marker.legacy_entry_id = 2632174;
@@ -230,7 +238,7 @@ describe('startShow mirror announces the show_start marker (BS#1705)', () => {
   });
 });
 
-describe('endShow mirror still announces the newest row — the show_end marker (BS#1705 regression)', () => {
+describe('endShow mirror announces the show_end MARKER under the co-host race (BS#1119 follow-up)', () => {
   const endedShowPayload = {
     id: SHOW_ID,
     primary_dj_id: DJ_ID,
@@ -239,25 +247,50 @@ describe('endShow mirror still announces the newest row — the show_end marker 
     end_time: '2026-06-20T20:00:00.000Z',
   };
 
-  // show_end is genuinely the newest row (highest play_order): endShow keeps
-  // the DESC-by-play_order query and must still resolve it.
-  const endTrack = { id: 6000, show_id: SHOW_ID, entry_type: 'track', play_order: 4, legacy_entry_id: null };
+  // The fixture that makes this suite a real regression pin: a co-host track
+  // that squeaked past the active-show check sits ABOVE the marker by
+  // play_order, and comes first in row order. Both mutants therefore resolve
+  // the TRACK — the pre-fix `ORDER BY play_order DESC LIMIT 1`, and a bare
+  // `WHERE show_id LIMIT 1` with the entry_type predicate deleted. Only the
+  // entry_type-filtered query resolves the marker.
+  const coHostTrack = { id: 6000, show_id: SHOW_ID, entry_type: 'track', play_order: 6, legacy_entry_id: null };
   const endMarker = { id: 6001, show_id: SHOW_ID, entry_type: 'show_end', play_order: 5, legacy_entry_id: null };
 
   beforeEach(() => {
     jest.clearAllMocks();
     updateCalls.length = 0;
     userRows = [{ id: DJ_ID, dj_name: 'dj hydra' }];
-    flowsheetRows = [endTrack, endMarker];
+    coHostTrack.legacy_entry_id = null;
+    endMarker.legacy_entry_id = null;
+    flowsheetRows = [coHostTrack, endMarker];
   });
 
-  it('mirrors the show_end marker as the announcement', async () => {
+  it('mirrors the show_end marker, not the higher-play_order co-host track', async () => {
     await runMiddleware(flowsheetMirror.endShow, endedShowPayload);
 
     expect(mockMapEntryToTubafrenzy).toHaveBeenCalledTimes(1);
     const announced = mockMapEntryToTubafrenzy.mock.calls[0][0] as typeof endMarker;
     expect(announced.entry_type).toBe('show_end');
     expect(announced.id).toBe(endMarker.id);
+
+    // legacy_entry_id is stamped on the MARKER, not the co-host track — a
+    // stamp on the track would both duplicate it in tubafrenzy (its own
+    // addEntry already mirrored it) and race that mirror's own persist.
+    const stamp = updateCalls.find((c) => c.setArg && 'legacy_entry_id' in c.setArg);
+    expect(stamp?.pred).toMatchObject({ kind: 'eq', col: 'id', val: endMarker.id });
+
+    expect(mockCaptureException).not.toHaveBeenCalled();
+  });
+
+  it('does not re-POST the show_end marker once it has already been mirrored (idempotent re-fire)', async () => {
+    endMarker.legacy_entry_id = 2632180;
+    flowsheetRows = [coHostTrack, endMarker];
+
+    await runMiddleware(flowsheetMirror.endShow, endedShowPayload);
+
+    // The isNull(legacy_entry_id) guard filters the mirrored marker out — and
+    // must NOT fall through to the unmirrored co-host track instead.
+    expect(mockMirrorCreateEntry).not.toHaveBeenCalled();
     expect(mockCaptureException).not.toHaveBeenCalled();
   });
 });

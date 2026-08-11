@@ -25,8 +25,8 @@ jest.mock('@wxyc/database', () => ({
 
 jest.mock('drizzle-orm', () => ({
   eq: jest.fn(),
-  desc: jest.fn(),
-  asc: jest.fn(),
+  and: jest.fn(),
+  isNull: jest.fn(),
 }));
 
 jest.mock('posthog-node', () => ({

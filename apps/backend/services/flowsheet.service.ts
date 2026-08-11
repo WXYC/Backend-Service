@@ -1105,6 +1105,36 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   const primary_dj_id = currentShow.primary_dj_id;
   if (!primary_dj_id) throw new Error('Primary DJ not found');
 
+  // Claim the show FIRST, before any other write.
+  //
+  // Two things follow from the ordering, both of which were broken when the
+  // end_time UPDATE ran last (BS#1119 follow-up review):
+  //
+  //   1. `end_time IS NULL` makes this a compare-and-set. The controller's own
+  //      `currentShow.end_time !== null` guard only rejects a second end after
+  //      the first COMMITS; a double-click has both requests reading a live
+  //      show, and without the CAS both wrote a `show_end` marker and both
+  //      returned 200, so the mirror signed off tubafrenzy twice. The loser
+  //      now gets an empty `.returning()` and the same 400 the controller
+  //      raises — a non-2xx response, which the mirror middleware skips.
+  //   2. Committing end_time before the marker closes the co-host write
+  //      window. Writing the marker first left the show ACTIVE while the
+  //      marker existed, so a racing `POST /flowsheet` passed the active-show
+  //      check and landed after it — appearing in tubafrenzy after
+  //      END_OF_SHOW, since tubafrenzy assigns SEQUENCE server-side. Ending
+  //      the show first makes that add fail its own guard.
+  const finalized = await db
+    .update(shows)
+    .set({ end_time: new Date() })
+    .where(and(eq(shows.id, currentShow.id), isNull(shows.end_time)))
+    .returning();
+
+  const finalizedShow = finalized[0];
+  if (!finalizedShow) {
+    // Someone else ended this show between the controller's read and here.
+    throw new WxycError('Bad Request: No active show session found.', 400);
+  }
+
   const remaining_djs = await db
     .select()
     .from(show_djs)
@@ -1136,21 +1166,13 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
     message,
   });
 
-  // Return the row this UPDATE finalized — never a re-read. The previous
+  // Return the row the UPDATE above finalized — never a re-read. The previous
   // `return (await getLatestShow())!` raced a concurrent POST /flowsheet/join:
   // a show N+1 created between the UPDATE and the re-read is what got
   // returned, and the mirror middleware then signed off the WRONG, still-live
   // show in tubafrenzy while show N's signoff was silently dropped (BS#1119
-  // follow-up review). The non-null assertion is safe: the WHERE keys on the
-  // currentShow.id the controller just fetched, and no code path deletes
-  // `shows` rows mid-request.
-  const finalized = await db
-    .update(shows)
-    .set({ end_time: new Date() })
-    .where(eq(shows.id, currentShow.id))
-    .returning();
-
-  return finalized[0]!;
+  // follow-up review).
+  return finalizedShow;
 };
 
 export const leaveShow = async (dj_id: string, currentShow: Show): Promise<ShowDJ> => {

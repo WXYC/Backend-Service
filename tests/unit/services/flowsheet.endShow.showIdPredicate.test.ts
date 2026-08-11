@@ -25,6 +25,11 @@ describe('endShow show_djs UPDATE predicate (#1100)', () => {
     const CURRENT_SHOW_ID = 2;
     const DJ_ID = 'dj-A';
 
+    // shows UPDATE (end_time) — the compare-and-set that claims the show. It
+    // is the FIRST write endShow makes (BS#1119 follow-up), so it heads the
+    // db.update queue; a non-empty .returning() means this caller won the CAS.
+    db.update.mockReturnValueOnce(createMockQueryChain([{ id: CURRENT_SHOW_ID, end_time: new Date() }]));
+
     // remaining_djs SELECT — DJ A is the only active member of show 2. The
     // prior-show row (show 1) is not returned because the SELECT already
     // filters by show_id, and isn't needed for the assertion either: the
@@ -49,12 +54,6 @@ describe('endShow show_djs UPDATE predicate (#1100)', () => {
     db.select.mockReturnValueOnce(makeAwaitablePlayOrderChain(0));
     // flowsheet insert (show_end)
     db.insert.mockReturnValueOnce(createMockQueryChain([{ id: 999 }]));
-    // shows update (end_time)
-    db.update.mockReturnValueOnce(createMockQueryChain([{}]));
-    // getLatestShow()
-    const latestShowSelect = createMockQueryChain();
-    latestShowSelect.limit.mockResolvedValue([{ id: CURRENT_SHOW_ID, end_time: new Date() }]);
-    db.select.mockReturnValueOnce(latestShowSelect);
 
     await endShow({ id: CURRENT_SHOW_ID, primary_dj_id: DJ_ID } as unknown as Parameters<typeof endShow>[0]);
 

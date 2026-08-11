@@ -7,21 +7,38 @@ import { getPostHogClient } from '../../utils/posthog.js';
  * Check the PostHog `backend-mirror` feature flag. If PostHog is not
  * configured (no API key), the mirror is enabled by default so that
  * local development and E2E tests work without external dependencies.
+ *
+ * `resolveShowIdentity` (optional) supplies the SHOW's primary DJ as the flag
+ * identity. That — not the caller — is the correct unit of decision: the flag
+ * has to answer the same way for every payload belonging to one show, or a
+ * mixed-DJ show mirrors in half. It is resolved lazily, so the lookup it may
+ * cost is only paid on the PostHog-configured path.
+ *
+ * The `req.auth?.id` fallback covers registrations with no show in the payload.
+ * req.auth is what the auth middleware sets (shared/authentication
+ * auth.middleware.ts) — nothing in this codebase ever assigns req.user, so the
+ * pre-BS#1119-follow-up `req.user?.id` read meant every evaluation fell back to
+ * req.ip, one EC2-local value.
  */
-async function isMirrorEnabled(req: Request): Promise<boolean> {
+async function isMirrorEnabled(req: Request, resolveShowIdentity?: () => Promise<string | null>): Promise<boolean> {
   if (!process.env.POSTHOG_API_KEY) {
     console.log('[mirror] enabled=true source=env-default');
     return true;
   }
 
+  let showIdentity: string | null = null;
+  if (resolveShowIdentity) {
+    try {
+      showIdentity = await resolveShowIdentity();
+    } catch (e) {
+      // Never fail the flag check on an identity lookup: fall back to the
+      // caller, the same identity every registration without a resolver uses.
+      console.warn('[mirror] Failed to resolve the show flag identity; falling back to the caller:', e);
+    }
+  }
+
   const client = getPostHogClient();
-  // req.auth is what the auth middleware sets (shared/authentication
-  // auth.middleware.ts) — nothing in this codebase ever assigns req.user, so
-  // reading it here meant every flag evaluation fell back to req.ip (one
-  // EC2-local value) and per-DJ targeting of `backend-mirror` silently could
-  // not work on the live path, diverging from jobs/legacy-mirror-reconcile
-  // which keys the same flag on primary_dj_id. BS#1119 follow-up review.
-  const distinctId = req.auth?.id ?? req.ip ?? 'anonymous';
+  const distinctId = showIdentity ?? req.auth?.id ?? req.ip ?? 'anonymous';
   const enabled = await client.isFeatureEnabled('backend-mirror', distinctId);
   if (enabled === undefined) {
     // PostHog couldn't resolve the flag (client error/timeout/unknown flag):
@@ -34,8 +51,32 @@ async function isMirrorEnabled(req: Request): Promise<boolean> {
   return enabled;
 }
 
+/**
+ * Optional per-registration behavior shared by both mirror factories.
+ *
+ * `shouldMirror` gates the payload SHAPE before any other work: a route that
+ * serves two response shapes through one registration (BS#1119 —
+ * /flowsheet/end answers a ShowDJ for guest leaves, /flowsheet/join a ShowDJ
+ * for co-host joins) passes a type-guard predicate so non-mirrorable payloads
+ * skip out here, before the PostHog round-trip `isMirrorEnabled` pays in prod,
+ * and so the `as T` cast in the handler is backed by a runtime check instead
+ * of hope.
+ *
+ * `resolveFlagIdentity` supplies the show's primary DJ as the `backend-mirror`
+ * flag identity (see `isMirrorEnabled`). Every registration that can name a
+ * show should pass one: it keeps the live mirror's decision per-SHOW, matching
+ * `jobs/legacy-mirror-reconcile`, which keys the same flag on `primary_dj_id`.
+ * Without it, a show whose co-host resolves the flag differently from its
+ * primary reaches tubafrenzy half-mirrored — the one state the reconcile cron
+ * refuses to auto-heal (re-driving would append out of order).
+ */
+type MirrorOptions<T> = {
+  shouldMirror?: (data: unknown) => data is T;
+  resolveFlagIdentity?: (data: T) => Promise<string | null> | string | null;
+};
+
 export const createBackendMirrorMiddleware =
-  <T>(createCommand: (req: Request, data: T) => Promise<string[]>) =>
+  <T>(createCommand: (req: Request, data: T) => Promise<string[]>, options: MirrorOptions<T> = {}) =>
   async (req: Request, res: Response, next: NextFunction) => {
     tapJsonResponse(res);
 
@@ -50,8 +91,9 @@ export const createBackendMirrorMiddleware =
           console.log('Response status:', res.statusCode, 'ok?', ok);
 
           if (!ok || data == null) return;
+          if (options.shouldMirror && !options.shouldMirror(data)) return;
 
-          const mirrorOn = await isMirrorEnabled(req);
+          const mirrorOn = await isMirrorEnabled(req, identityResolver(options, data));
           if (!mirrorOn) return;
 
           const statements = await createCommand(req, data);
@@ -74,20 +116,21 @@ export const createBackendMirrorMiddleware =
     next();
   };
 
+/** Bind a registration's optional identity resolver to this request's payload. */
+function identityResolver<T>(options: MirrorOptions<T>, data: T): (() => Promise<string | null>) | undefined {
+  const resolve = options.resolveFlagIdentity;
+  return resolve ? () => Promise.resolve(resolve(data)) : undefined;
+}
+
 /**
  * HTTP mirror middleware factory. Same response-tapping and PostHog feature flag
  * check as createBackendMirrorMiddleware, but calls an async callback that makes
  * HTTP calls instead of returning SQL strings for the command queue.
  *
- * `shouldMirror` (optional) gates the payload SHAPE before any other work: a
- * route that serves two response shapes through one registration (BS#1119 —
- * /flowsheet/end answers a ShowDJ for guest leaves, /flowsheet/join a ShowDJ
- * for co-host joins) passes a type-guard predicate so non-mirrorable payloads
- * skip out here, before the PostHog round-trip `isMirrorEnabled` pays in prod,
- * and so the `as T` cast below is backed by a runtime check instead of hope.
+ * See `MirrorOptions` for `shouldMirror` and `resolveFlagIdentity`.
  */
 export const createHttpMirrorMiddleware =
-  <T>(execute: (req: Request, data: T) => Promise<void>, shouldMirror?: (data: unknown) => data is T) =>
+  <T>(execute: (req: Request, data: T) => Promise<void>, options: MirrorOptions<T> = {}) =>
   async (req: Request, res: Response, next: NextFunction) => {
     tapJsonResponse(res);
 
@@ -98,9 +141,9 @@ export const createHttpMirrorMiddleware =
           const data = (res.locals as any).mirrorData as T | undefined;
 
           if (!ok || data == null) return;
-          if (shouldMirror && !shouldMirror(data)) return;
+          if (options.shouldMirror && !options.shouldMirror(data)) return;
 
-          const mirrorOn = await isMirrorEnabled(req);
+          const mirrorOn = await isMirrorEnabled(req, identityResolver(options, data));
           if (!mirrorOn) return;
 
           await execute(req, data);

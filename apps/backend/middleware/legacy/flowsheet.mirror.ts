@@ -1,7 +1,8 @@
 import { QueryParams } from '../../controllers/flowsheet.controller';
 import { db } from '@wxyc/database';
 import { user, flowsheet, shows, FSEntry, Show } from '@wxyc/database';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
+import * as Sentry from '@sentry/node';
 import { Request } from 'express';
 import { createBackendMirrorMiddleware, createHttpMirrorMiddleware } from './mirror.middleware.js';
 import { safeSql, safeSqlNum, toMs } from './utilities.mirror.js';
@@ -44,37 +45,135 @@ const getEntries = createBackendMirrorMiddleware<any>(async (req, data) => {
  * lack (the old `show.id == null` form would silently re-open BS#1119 the day
  * show_djs gains a serial id, exactly the trap the issue body named). An
  * unrecognized shape (neither Show keys nor the ShowDJ `dj_id`) is skipped
- * LOUDLY: if a future projection change strips Show's keys from the response,
- * the mirror must not go quiet without a trace (BS#1119 follow-up review).
+ * LOUDLY — console.warn AND Sentry: if a future projection change strips
+ * Show's keys from the response, the mirror must not go quiet without a trace
+ * (BS#1119 follow-up review).
  */
 const isShowPayload = (data: unknown): data is Show => {
   if (typeof data !== 'object' || data == null) return false;
-  if ('primary_dj_id' in data && 'id' in data) return true;
+  // `id` is tested by VALUE, not just presence: every downstream read keys on
+  // it (getCachedShowId(show.id), eq(flowsheet.show_id, show.id)), and a null
+  // id binds NULL into the announcement re-query — matching nothing, dropping
+  // the marker silently. That is the BS#1119 failure mode itself, so a
+  // Show-shaped payload with a null id belongs in the loud lane below, not
+  // past the gate. `primary_dj_id` stays a PRESENCE test: null is a legitimate
+  // value for it (onDelete 'set null') and its key is what identifies the shape.
+  if ('primary_dj_id' in data && (data as { id?: unknown }).id != null) return true;
   if (!('dj_id' in data)) {
-    console.warn('[mirror] Unrecognized show-route payload shape; skipping mirror. keys=', Object.keys(data));
+    const keys = Object.keys(data);
+    console.warn('[mirror] Unrecognized show-route payload shape; skipping mirror. keys=', keys);
+    // console.warn alone is invisible in prod — nothing alerts on the EC2
+    // container's stdout. This is the silent-stop lane (a projection change
+    // that strips Show's keys stops every sign-off mirroring), so it has to
+    // reach the channel the team actually watches.
+    Sentry.captureMessage('[mirror] Unrecognized show-route payload shape; skipping mirror', {
+      level: 'warning',
+      tags: { subsystem: 'legacy-mirror', variant: 'http' },
+      extra: { keys },
+    });
   }
   return false;
 };
 
-const startShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
-  // Mirroring a show creation needs a resolvable primary DJ; a Show with a
-  // NULL primary_dj_id (legacy/shadow shows, onDelete 'set null') stays
-  // unmirrored here — the reconcile cron's sweep 1 applies the same
-  // primary_dj_id IS NOT NULL predicate. ShowDJ co-host joins never reach
-  // this handler (isShowPayload below); whether their dj_join markers should
-  // mirror at all is BS#2094.
-  const djId = show.primary_dj_id;
-  if (!djId) return;
+/**
+ * PostHog `backend-mirror` identity for a show-lifecycle payload: the show's
+ * own primary DJ. See `MirrorOptions.resolveFlagIdentity` (mirror.middleware.ts)
+ * for why the decision must be per-show rather than per-caller.
+ */
+const showFlagIdentity = (show: Show): string | null => show.primary_dj_id ?? null;
 
-  const dj = (await db.select().from(user).where(eq(user.id, djId)).limit(1))?.[0];
+/**
+ * The same identity for an entry payload, which names its show by id rather
+ * than carrying the primary DJ. One PK lookup, paid only when PostHog is
+ * configured (`isMirrorEnabled` resolves this lazily) and only on mutations
+ * that already POST to tubafrenzy.
+ */
+const entryFlagIdentity = async (entry: FSEntry): Promise<string | null> => {
+  if (entry.show_id == null) return null;
+  const showRow = await db
+    .select({ primary_dj_id: shows.primary_dj_id })
+    .from(shows)
+    .where(eq(shows.id, entry.show_id))
+    .limit(1);
+  return showRow?.[0]?.primary_dj_id ?? null;
+};
 
-  if (!dj) return;
+/**
+ * Mirror a show-lifecycle announcement marker (`show_start` / `show_end`) to
+ * tubafrenzy, then persist its surrogate key.
+ *
+ * BS#1705: target the marker by `entry_type` rather than the newest row by
+ * play_order. In normal operation the marker is the only (and newest) entry
+ * when this fires, so the old `ORDER BY play_order DESC LIMIT 1` happened to
+ * return it — but when a track already exists for the show, the DESC query
+ * returns the TRACK: the marker is never mirrored (prod: BS shows.id 1949437 /
+ * tubafrenzy 172277 has no START_OF_SHOW), and on the endShow side the
+ * already-mirrored track was re-POSTed as a duplicate with two racing
+ * legacy_entry_id persists. `isNull(legacy_entry_id)` keeps a re-fire
+ * idempotent (mirrors addEntry's BS#908 loop guard).
+ *
+ * Both call sites had drifted apart as near-identical copies — endShow kept the
+ * bare DESC query for months after startShow was hardened, which is what the
+ * BS#1119 follow-up review had to fix. One function, one query, no drift.
+ *
+ * `tubafrenzyShowId` is non-nullable BY TYPE: mapEntryToTubafrenzy accepts a
+ * null radio-show id, so a caller that skipped its show-create failure check
+ * would POST an orphan entry with no parent show AND stamp legacy_entry_id on
+ * the marker, poisoning it against legacy-mirror-reconcile's
+ * `legacy_entry_id IS NULL` sweep — permanently unrecoverable. Callers guard.
+ */
+const mirrorAnnouncementEntry = async (
+  showId: number,
+  entryType: 'show_start' | 'show_end',
+  tubafrenzyShowId: number
+): Promise<void> => {
+  const announcementEntry = await db
+    .select()
+    .from(flowsheet)
+    .where(and(eq(flowsheet.show_id, showId), eq(flowsheet.entry_type, entryType), isNull(flowsheet.legacy_entry_id)))
+    .limit(1);
 
-  // 1. Create show in tubafrenzy via REST API
-  const body = mapShowToTubafrenzy(show, dj);
-  const tubafrenzyShowId = await mirrorCreateShow(body);
+  const marker = announcementEntry?.[0];
+  if (!marker) return;
 
-  if (tubafrenzyShowId != null) {
+  const entryBody = mapEntryToTubafrenzy(marker, tubafrenzyShowId);
+  const entryId = await mirrorCreateEntry(entryBody);
+  if (entryId == null) return;
+
+  // BS#1103: key by the flowsheet row id, not play_order (only unique per-show).
+  cacheEntryId(marker.id, entryId);
+  try {
+    await db.update(flowsheet).set({ legacy_entry_id: entryId }).where(eq(flowsheet.id, marker.id));
+  } catch (e) {
+    console.error('[mirror] Failed to persist legacy_entry_id for announcement:', e);
+  }
+};
+
+const startShow = createHttpMirrorMiddleware<Show>(
+  async (_req, show) => {
+    // Mirroring a show creation needs a resolvable primary DJ; a Show with a
+    // NULL primary_dj_id (legacy/shadow shows, onDelete 'set null') stays
+    // unmirrored here — the reconcile cron's sweep 1 applies the same
+    // primary_dj_id IS NOT NULL predicate. ShowDJ co-host joins never reach
+    // this handler (isShowPayload below); whether their dj_join markers should
+    // mirror at all is BS#2094.
+    const djId = show.primary_dj_id;
+    if (!djId) return;
+
+    const dj = (await db.select().from(user).where(eq(user.id, djId)).limit(1))?.[0];
+
+    if (!dj) return;
+
+    // 1. Create show in tubafrenzy via REST API
+    const body = mapShowToTubafrenzy(show, dj);
+    const tubafrenzyShowId = await mirrorCreateShow(body);
+
+    // A failed show-create leaves nothing to hang entries off. Skip the whole
+    // tail rather than POST an orphan announcement — legacy-mirror-reconcile's
+    // sweep 1 recreates the show and drives its entries from the durable
+    // `legacy_show_id IS NULL` signal, but only if this run stamped nothing.
+    if (tubafrenzyShowId == null) return;
+
     // Cache for subsequent addEntry calls in this process lifetime
     cacheShowId(show.id, tubafrenzyShowId);
     // Persist for ETL dedup and restart resilience
@@ -83,89 +182,33 @@ const startShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
     } catch (e) {
       console.error('[mirror] Failed to persist legacy_show_id:', e);
     }
-  }
 
-  // 2. Mirror the show_start announcement entry.
-  //
-  // BS#1705: target the `show_start` marker explicitly rather than the newest
-  // row by play_order. In normal operation the marker is the only (and newest)
-  // entry when this fires, so the old `ORDER BY play_order DESC LIMIT 1`
-  // happened to return it — but if the announcement mirror ever runs after a
-  // track already exists for the show, the DESC query returns the track and the
-  // actual marker is never mirrored, leaving the tubafrenzy show with no
-  // START_OF_SHOW (type 9) entry (prod: BS shows.id 1949437 / tubafrenzy
-  // 172277). `isNull(legacy_entry_id)` keeps a re-fire idempotent: once the
-  // marker has been mirrored we never re-POST it (mirrors addEntry's BS#908
-  // loop guard). `endShow` targets its `show_end` marker the same way — the
-  // "there show_end genuinely is the newest row" assumption this comment used
-  // to record was false under the co-host race (see endShow below).
-  const announcementEntry = await db
-    .select()
-    .from(flowsheet)
-    .where(
-      and(eq(flowsheet.show_id, show.id), eq(flowsheet.entry_type, 'show_start'), isNull(flowsheet.legacy_entry_id))
-    )
-    .limit(1);
+    // 2. Mirror the show_start announcement entry.
+    await mirrorAnnouncementEntry(show.id, 'show_start', tubafrenzyShowId);
+  },
+  { shouldMirror: isShowPayload, resolveFlagIdentity: showFlagIdentity }
+);
 
-  if (announcementEntry?.[0]) {
-    const entryBody = mapEntryToTubafrenzy(announcementEntry[0], tubafrenzyShowId);
-    const entryId = await mirrorCreateEntry(entryBody);
-    if (entryId != null) {
-      // BS#1103: key by the flowsheet row id, not play_order (only unique per-show).
-      cacheEntryId(announcementEntry[0].id, entryId);
-      try {
-        await db.update(flowsheet).set({ legacy_entry_id: entryId }).where(eq(flowsheet.id, announcementEntry[0].id));
-      } catch (e) {
-        console.error('[mirror] Failed to persist legacy_entry_id for announcement:', e);
-      }
-    }
-  }
-}, isShowPayload);
+export const endShow = createHttpMirrorMiddleware<Show>(
+  async (_req, show) => {
+    // BS#1119's ShowDJ-vs-Show discrimination lives in `isShowPayload`, passed
+    // as this registration's shouldMirror gate — a guest leave never reaches
+    // this handler (and never pays the PostHog flag round-trip).
+    const endMs = toMs(show.end_time ?? Date.now());
 
-export const endShow = createHttpMirrorMiddleware<Show>(async (_req, show) => {
-  // BS#1119's ShowDJ-vs-Show discrimination lives in `isShowPayload`, passed
-  // as this registration's shouldMirror gate — a guest leave never reaches
-  // this handler (and never pays the PostHog flag round-trip).
-  const endMs = toMs(show.end_time ?? Date.now());
+    // Resolve tubafrenzy show ID: in-memory cache → persisted legacy_show_id
+    const tubafrenzyShowId = getCachedShowId(show.id) ?? show.legacy_show_id;
 
-  // Resolve tubafrenzy show ID: in-memory cache → persisted legacy_show_id
-  const tubafrenzyShowId = getCachedShowId(show.id) ?? show.legacy_show_id;
+    // No tubafrenzy show to sign off or hang the END_OF_SHOW entry off (the
+    // startShow mirror failed, or this process never saw it and the persist
+    // failed too). Both arms skip together; legacy-mirror-reconcile heals it.
+    if (tubafrenzyShowId == null) return;
 
-  if (tubafrenzyShowId != null) {
     await mirrorSignoffShow(tubafrenzyShowId, endMs);
-  }
-
-  // Mirror the show_end announcement entry. Target the `show_end` marker
-  // explicitly — the same BS#1705 form as startShow's `show_start` query
-  // above. The old bare `ORDER BY play_order DESC LIMIT 1` assumed the marker
-  // is always the newest row, but the service writes the show_end marker
-  // BEFORE it commits end_time, so a co-host POST /flowsheet that squeaks
-  // past the active-show check lands with a higher play_order: the DESC query
-  // then re-mirrored that track (already mirrored by its own addEntry, with
-  // two racing legacy_entry_id persists) and the END_OF_SHOW marker never
-  // reached tubafrenzy. `isNull(legacy_entry_id)` keeps a re-fire idempotent,
-  // exactly like startShow's. BS#1119 follow-up review.
-  const announcementEntry = await db
-    .select()
-    .from(flowsheet)
-    .where(and(eq(flowsheet.show_id, show.id), eq(flowsheet.entry_type, 'show_end'), isNull(flowsheet.legacy_entry_id)))
-    .orderBy(desc(flowsheet.play_order))
-    .limit(1);
-
-  if (announcementEntry?.[0]) {
-    const entryBody = mapEntryToTubafrenzy(announcementEntry[0], tubafrenzyShowId);
-    const entryId = await mirrorCreateEntry(entryBody);
-    if (entryId != null) {
-      // BS#1103: key by the flowsheet row id, not play_order (only unique per-show).
-      cacheEntryId(announcementEntry[0].id, entryId);
-      try {
-        await db.update(flowsheet).set({ legacy_entry_id: entryId }).where(eq(flowsheet.id, announcementEntry[0].id));
-      } catch (e) {
-        console.error('[mirror] Failed to persist legacy_entry_id for announcement:', e);
-      }
-    }
-  }
-}, isShowPayload);
+    await mirrorAnnouncementEntry(show.id, 'show_end', tubafrenzyShowId);
+  },
+  { shouldMirror: isShowPayload, resolveFlagIdentity: showFlagIdentity }
+);
 
 const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
   const startMs = entry?.add_time ? new Date(entry.add_time).getTime() : Date.now();
@@ -329,104 +372,113 @@ const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
   return statements;
 };
 
-export const addEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entry) => {
-  // Loop guard (use #2 of the legacy_entry_id three-use invariant, BS#908):
-  // `legacy_entry_id != null` is read as a boolean meaning "this row came
-  // from tubafrenzy via ETL or webhook, do not mirror back." Together with
-  // the matching guard in updateEntry below (line ~317) this prevents an
-  // infinite ETL → mirror → webhook → ETL cycle. The three orthogonal uses
-  // and their constraints are documented at `shared/database/src/schema.ts`
-  // on the column declaration; CI enforces no new write site appears
-  // without registering at `scripts/check-legacy-entry-id-writes.mjs`.
-  if (entry.legacy_entry_id != null) return;
+export const addEntry = createHttpMirrorMiddleware<FSEntry>(
+  async (_req, entry) => {
+    // Loop guard (use #2 of the legacy_entry_id three-use invariant, BS#908):
+    // `legacy_entry_id != null` is read as a boolean meaning "this row came
+    // from tubafrenzy via ETL or webhook, do not mirror back." Together with
+    // the matching guard in updateEntry below (line ~317) this prevents an
+    // infinite ETL → mirror → webhook → ETL cycle. The three orthogonal uses
+    // and their constraints are documented at `shared/database/src/schema.ts`
+    // on the column declaration; CI enforces no new write site appears
+    // without registering at `scripts/check-legacy-entry-id-writes.mjs`.
+    if (entry.legacy_entry_id != null) return;
 
-  // Resolve tubafrenzy show ID: (1) in-memory cache, (2) DB, (3) null (auto-resolve)
-  let radioShowID: number | null | undefined = entry.show_id != null ? getCachedShowId(entry.show_id) : undefined;
-  if (radioShowID == null && entry.show_id != null) {
-    try {
-      const showRow = await db
-        .select({ legacy_show_id: shows.legacy_show_id })
-        .from(shows)
-        .where(eq(shows.id, entry.show_id))
-        .limit(1);
-      radioShowID = showRow?.[0]?.legacy_show_id ?? null;
-      if (radioShowID != null) {
-        cacheShowId(entry.show_id, radioShowID);
+    // Resolve tubafrenzy show ID: (1) in-memory cache, (2) DB, (3) null (auto-resolve)
+    let radioShowID: number | null | undefined = entry.show_id != null ? getCachedShowId(entry.show_id) : undefined;
+    if (radioShowID == null && entry.show_id != null) {
+      try {
+        const showRow = await db
+          .select({ legacy_show_id: shows.legacy_show_id })
+          .from(shows)
+          .where(eq(shows.id, entry.show_id))
+          .limit(1);
+        radioShowID = showRow?.[0]?.legacy_show_id ?? null;
+        if (radioShowID != null) {
+          cacheShowId(entry.show_id, radioShowID);
+        }
+      } catch {
+        // DB lookup failed; fall back to tubafrenzy auto-resolution
       }
-    } catch {
-      // DB lookup failed; fall back to tubafrenzy auto-resolution
     }
-  }
 
-  const isRotationMatch = await isActiveRotationMatch(entry);
-  const body = mapEntryToTubafrenzy(entry, radioShowID, isRotationMatch);
-  const tubafrenzyId = await mirrorCreateEntry(body);
-  if (tubafrenzyId != null) {
-    // BS#1103: key by the flowsheet row id, not play_order — play_order
-    // resets per show, so two shows in the same process lifetime can
-    // collide on the same slot and evict each other's cached entry.
-    cacheEntryId(entry.id, tubafrenzyId);
-    // Persist the mapping so the ETL can deduplicate
-    try {
-      await db.update(flowsheet).set({ legacy_entry_id: tubafrenzyId }).where(eq(flowsheet.id, entry.id));
-    } catch (e) {
-      console.error('[mirror] Failed to persist legacy_entry_id:', e);
+    const isRotationMatch = await isActiveRotationMatch(entry);
+    const body = mapEntryToTubafrenzy(entry, radioShowID, isRotationMatch);
+    const tubafrenzyId = await mirrorCreateEntry(body);
+    if (tubafrenzyId != null) {
+      // BS#1103: key by the flowsheet row id, not play_order — play_order
+      // resets per show, so two shows in the same process lifetime can
+      // collide on the same slot and evict each other's cached entry.
+      cacheEntryId(entry.id, tubafrenzyId);
+      // Persist the mapping so the ETL can deduplicate
+      try {
+        await db.update(flowsheet).set({ legacy_entry_id: tubafrenzyId }).where(eq(flowsheet.id, entry.id));
+      } catch (e) {
+        console.error('[mirror] Failed to persist legacy_entry_id:', e);
+      }
     }
-  }
-});
+  },
+  { resolveFlagIdentity: entryFlagIdentity }
+);
 
-export const updateEntry = createHttpMirrorMiddleware<FSEntry>(async (_req, entry) => {
-  // Message-only rows aren't updateable
-  if (entry?.message && entry.message.trim() !== '') return;
+export const updateEntry = createHttpMirrorMiddleware<FSEntry>(
+  async (_req, entry) => {
+    // Message-only rows aren't updateable
+    if (entry?.message && entry.message.trim() !== '') return;
 
-  // BS#1103: key by the flowsheet row id, not play_order — see cacheEntryId call in addEntry above.
-  const cachedId = getCachedEntryId(entry.id);
+    // BS#1103: key by the flowsheet row id, not play_order — see cacheEntryId call in addEntry above.
+    const cachedId = getCachedEntryId(entry.id);
 
-  // Loop guard: entry has a legacy ID but we didn't cache it this lifecycle —
-  // it was imported by the ETL, not created by our mirror. Don't mirror back.
-  if (cachedId == null && entry.legacy_entry_id != null) return;
+    // Loop guard: entry has a legacy ID but we didn't cache it this lifecycle —
+    // it was imported by the ETL, not created by our mirror. Don't mirror back.
+    if (cachedId == null && entry.legacy_entry_id != null) return;
 
-  // Use cache (fast path) or fall back to persisted legacy_entry_id (after restart)
-  const tubafrenzyId = cachedId ?? entry.legacy_entry_id;
-  if (tubafrenzyId == null) {
-    console.warn('[mirror] No tubafrenzy ID for flowsheet row', entry.id);
-    return;
-  }
+    // Use cache (fast path) or fall back to persisted legacy_entry_id (after restart)
+    const tubafrenzyId = cachedId ?? entry.legacy_entry_id;
+    if (tubafrenzyId == null) {
+      console.warn('[mirror] No tubafrenzy ID for flowsheet row', entry.id);
+      return;
+    }
 
-  const isRotationMatch = await isActiveRotationMatch(entry);
-  const body = mapUpdateToTubafrenzy(entry, isRotationMatch);
-  await mirrorUpdateEntry(tubafrenzyId, body);
-});
+    const isRotationMatch = await isActiveRotationMatch(entry);
+    const body = mapUpdateToTubafrenzy(entry, isRotationMatch);
+    await mirrorUpdateEntry(tubafrenzyId, body);
+  },
+  { resolveFlagIdentity: entryFlagIdentity }
+);
 
-export const deleteEntry = createBackendMirrorMiddleware<FSEntry>(async (_req, removed) => {
-  // Delete by the tubafrenzy surrogate key persisted on the row at insert
-  // (`legacy_entry_id` — the same identity uses #1/#3 key their `ON CONFLICT`
-  // on; see addEntry's persist above and `shared/database/src/schema.ts`).
-  // BS#1101.
-  //
-  // The prior implementation resolved the show via `MAX(ID)` and matched the
-  // row positionally by `SEQUENCE_WITHIN_SHOW = play_order`. Both predicates
-  // are wrong:
-  //   - `MAX(ID)` is the newest tubafrenzy show, not the deleted entry's, so
-  //     correcting an older show deletes from the wrong show.
-  //   - Even for the right show, tubafrenzy's `SEQUENCE_WITHIN_SHOW` (assigned
-  //     at insert as `MAX(SEQUENCE_WITHIN_SHOW)+1` into `@SEQ_NUM`; see addEntry
-  //     above) and BS `play_order` are assigned independently and diverge — BS
-  //     `play_order` counts lifecycle markers tubafrenzy never materializes as
-  //     entry rows — so the positional predicate misses even in the happy path.
-  //
-  // When `legacy_entry_id` is null — a residual pre-mirror row, or a row whose
-  // mirror POST failed — there is no safe target, so no-op (return no
-  // statements) rather than guess. The middleware skips the enqueue on empty.
-  // Log the skip: a failed insert-mirror leaves a tubafrenzy row this delete
-  // can never reach, so the residual is at least countable in the logs.
-  if (removed.legacy_entry_id == null) {
-    console.warn('[mirror] Skipping tubafrenzy delete: no legacy_entry_id on removed row', removed.id);
-    return [];
-  }
+export const deleteEntry = createBackendMirrorMiddleware<FSEntry>(
+  async (_req, removed) => {
+    // Delete by the tubafrenzy surrogate key persisted on the row at insert
+    // (`legacy_entry_id` — the same identity uses #1/#3 key their `ON CONFLICT`
+    // on; see addEntry's persist above and `shared/database/src/schema.ts`).
+    // BS#1101.
+    //
+    // The prior implementation resolved the show via `MAX(ID)` and matched the
+    // row positionally by `SEQUENCE_WITHIN_SHOW = play_order`. Both predicates
+    // are wrong:
+    //   - `MAX(ID)` is the newest tubafrenzy show, not the deleted entry's, so
+    //     correcting an older show deletes from the wrong show.
+    //   - Even for the right show, tubafrenzy's `SEQUENCE_WITHIN_SHOW` (assigned
+    //     at insert as `MAX(SEQUENCE_WITHIN_SHOW)+1` into `@SEQ_NUM`; see addEntry
+    //     above) and BS `play_order` are assigned independently and diverge — BS
+    //     `play_order` counts lifecycle markers tubafrenzy never materializes as
+    //     entry rows — so the positional predicate misses even in the happy path.
+    //
+    // When `legacy_entry_id` is null — a residual pre-mirror row, or a row whose
+    // mirror POST failed — there is no safe target, so no-op (return no
+    // statements) rather than guess. The middleware skips the enqueue on empty.
+    // Log the skip: a failed insert-mirror leaves a tubafrenzy row this delete
+    // can never reach, so the residual is at least countable in the logs.
+    if (removed.legacy_entry_id == null) {
+      console.warn('[mirror] Skipping tubafrenzy delete: no legacy_entry_id on removed row', removed.id);
+      return [];
+    }
 
-  return [`DELETE FROM ${FLOWSHEET_ENTRY_TABLE} WHERE ID = ${safeSqlNum(removed.legacy_entry_id)} LIMIT 1;`];
-});
+    return [`DELETE FROM ${FLOWSHEET_ENTRY_TABLE} WHERE ID = ${safeSqlNum(removed.legacy_entry_id)} LIMIT 1;`];
+  },
+  { resolveFlagIdentity: entryFlagIdentity }
+);
 
 /*
 export const changeOrder = createBackendMirrorMiddleware<FSEntry>(

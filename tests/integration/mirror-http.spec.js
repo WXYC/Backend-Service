@@ -88,8 +88,16 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
     const entryPosts = tubafrenzyRequests.filter((r) => r.method === 'POST' && r.path.includes('/api/flowsheetEntry'));
     expect(entryPosts.length).toBeGreaterThanOrEqual(1);
 
+    // Select this track's POST explicitly, same as the test above: the
+    // beforeEach join's show_start announcement mirror is fire-and-forget and
+    // can land after it under load, and that marker POST carries
+    // flowsheetEntryType 9 — cross-request mirror ordering is not this test's
+    // contract.
+    const trackPost = entryPosts.find((r) => r.body.artistName === 'Jessica Pratt');
+    expect(trackPost).toBeDefined();
+
     // Non-library, non-rotation track should be type 0
-    expect(entryPosts[entryPosts.length - 1].body.flowsheetEntryType).toBe(0);
+    expect(trackPost.body.flowsheetEntryType).toBe(0);
   });
 
   test('mirror failure does not block primary response', async () => {
@@ -169,6 +177,12 @@ describe('Mirror HTTP to Tubafrenzy (Mock API)', () => {
 describe('endShow mirror shape guard on guest-DJ leave (BS#1119)', () => {
   const isSignoff = (r) => r.method === 'POST' && r.path.includes('/api/radioShow/signoff');
 
+  // The mock server records its own control endpoints in the per-service log,
+  // so `/_admin/requests/tubafrenzy` is itself appended to the log it returns.
+  // Any count that includes them can never stop growing — polling is what
+  // grows it. Count only real mirror traffic.
+  const countMirrorTraffic = (requests) => requests.filter((r) => !r.path.startsWith('/_admin')).length;
+
   // Poll the mock request log until predicate(requests) is truthy or the
   // timeout lapses (returns the last snapshot either way; the caller's
   // assertion produces the failure).
@@ -185,13 +199,26 @@ describe('endShow mirror shape guard on guest-DJ leave (BS#1119)', () => {
   // settle interval, so an EARLIER test's in-flight fire-and-forget mirror
   // POST (the HTTP response resolves before the mirror does) cannot land
   // inside this test's observation window after resetMockApi.
+  //
+  // Returns whether it actually went quiet. Timing out is NOT the same
+  // outcome: traffic still arriving when the caller resets means the negative
+  // window below is measuring the previous show's tail, which can flake red on
+  // a stale signoff or — worse — pass while observing the wrong window. Report
+  // it rather than returning as if quiet.
   const waitForMirrorQuiescence = async (settleMs = 250, timeoutMs = 3000) => {
     const deadline = Date.now() + timeoutMs;
-    let last = (await getMockRequests('tubafrenzy')).length;
+    let last = countMirrorTraffic(await getMockRequests('tubafrenzy'));
     for (;;) {
       await new Promise((r) => setTimeout(r, settleMs));
-      const now = (await getMockRequests('tubafrenzy')).length;
-      if (now === last || Date.now() > deadline) return;
+      const now = countMirrorTraffic(await getMockRequests('tubafrenzy'));
+      if (now === last) return true;
+      if (Date.now() > deadline) {
+        console.warn(
+          `[mirror-http] mirror traffic never quiesced within ${timeoutMs}ms (${last} -> ${now} requests); ` +
+            'the following observation window may include earlier traffic'
+        );
+        return false;
+      }
       last = now;
     }
   };
@@ -218,7 +245,7 @@ describe('endShow mirror shape guard on guest-DJ leave (BS#1119)', () => {
 
     // Drain the previous describe's in-flight mirror traffic before taking
     // the baseline reset.
-    await waitForMirrorQuiescence();
+    expect(await waitForMirrorQuiescence()).toBe(true);
     await resetMockApi();
 
     // Primary A starts the show, guest B joins as co-host. Assert the fixture
@@ -245,8 +272,11 @@ describe('endShow mirror shape guard on guest-DJ leave (BS#1119)', () => {
       .expect(201);
     const entryId = addRes.body.id;
 
-    // Let join/add mirror traffic flush, then observe only the leave
-    await waitForMirrorQuiescence();
+    // Let join/add mirror traffic flush, then observe only the leave. Assert
+    // the drain actually completed: the assertions below are negative
+    // ("nothing arrives"), so leaked in-flight traffic would silently
+    // invalidate the window rather than fail on its own.
+    expect(await waitForMirrorQuiescence()).toBe(true);
     await resetMockApi();
 
     // Guest B calls /flowsheet/end — leave semantics, controller returns ShowDJ

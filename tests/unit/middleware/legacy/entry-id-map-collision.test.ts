@@ -71,13 +71,13 @@ jest.mock('@wxyc/database', () => ({
   },
   user: {},
   flowsheet: { id: 'id', legacy_entry_id: 'legacy_entry_id', show_id: 'show_id' },
-  shows: { id: 'id', legacy_show_id: 'legacy_show_id' },
+  shows: { id: 'id', legacy_show_id: 'legacy_show_id', primary_dj_id: 'primary_dj_id' },
 }));
 
 jest.mock('drizzle-orm', () => ({
   eq: jest.fn((...args: unknown[]) => args),
-  desc: jest.fn(),
-  asc: jest.fn(),
+  and: jest.fn((...args: unknown[]) => args),
+  isNull: jest.fn((column: unknown) => ['isNull', column]),
 }));
 
 jest.mock('posthog-node', () => ({
