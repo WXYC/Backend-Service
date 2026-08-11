@@ -24,7 +24,7 @@
  *   UPDATE_GOLDEN=1 npx jest --config jest.unit.config.ts playlist-proxy-wire-golden
  * then copy the file to wxyc-ios-64 and update GOLDEN_SHA256 in both suites.
  *
- * Every hazard in the matrix is drawn from a 2026-08-11 audit of production
+ * Most of the matrix is drawn from a 2026-08-11 audit of production
  * `GET /flowsheet` — 50,200 entries, 37,054 playcut rows, ~206k URL values.
  * Notably the label-prefixed `artist_wikipedia_url` values are real (12 rows,
  * most recently played 2026-08-11) and each one THROWS
@@ -32,6 +32,14 @@
  * whole `Playlist` decode because `playcuts` is a non-optional array. The guard
  * that drops them is the only thing preventing a blank playlist: the v2 path
  * converts the same field with a non-throwing `URL(string:)`, but v1 does not.
+ *
+ * Two probes (9013 / 9014) are NOT from that audit — they are constructed
+ * hazards the audit's corpus happens not to contain but the columns permit:
+ * parser differentials (`\` folding, embedded tab/LF/space — values `new URL()`
+ * blesses while describing a different string than the serializer emits) and
+ * degenerate `text[]` members (`[null]`, which has a truthy `.length` and
+ * throws on `decodeIfPresent([String].self)`). They are pinned here so the
+ * guards that close them cannot be removed silently by a future refactor.
  */
 /* eslint-disable security/detect-non-literal-fs-filename --
  * Every path here is GOLDEN_PATH, a module constant built from __dirname. There
@@ -150,7 +158,7 @@ const GOLDEN_PATH = join(__dirname, '../../fixtures/recent-entries-v2-wire-golde
  * file from the fixture, so regenerating one without acknowledging the other is
  * a red test rather than a silent change.
  */
-const GOLDEN_SHA256 = '27be66ec764d332b8b5cd82889e9e140b367124269dcfe5f0077a1ddcafc7f3f';
+const GOLDEN_SHA256 = 'a789b99b863374b44ba2c8ca0c3393d9659987ff1e403e1be90834c500a49313';
 
 /** Fixed ids and add_times — the payload must be byte-reproducible. */
 function row(id: number, albumId: number | null, artist: string, album: string, track: string, seconds: number) {
@@ -208,6 +216,8 @@ const ROWS = [
   row(9010, 990010, 'Juana Molina', 'DOGA', 'la paradoja', 10),
   row(9011, 990011, 'Stereolab', 'Dots and Loops', 'Brakhage', 11),
   row(9012, null, 'BS2103 Unenriched Artist', 'BS2103 Unenriched Album', 'Probe Track (no metadata)', 12),
+  row(9013, 990013, 'Hermanos Gutiérrez', 'El Bueno Y El Malo', 'Tres Hermanos', 13),
+  row(9014, 990014, 'Cat Power', 'Moon Pix', 'Cross Bones Style', 14),
 ];
 
 const METADATA = [
@@ -259,6 +269,38 @@ const METADATA = [
   // serializer omits the key entirely rather than asserting "is on Discogs"
   // (BS#1908), which is what the golden pins.
   meta(9012, { artist_id: null, discogs_unavailable: null, metadata_status: 'pending' }),
+  // Parser differentials — values `new URL()` BLESSES while describing a
+  // different string than the one that would ship. WHATWG folds `\` to `/` for
+  // the http(s) special schemes (so the first two "validate" with hostname
+  // `www.discogs.com` / `en.wikipedia.org` and would resolve to `evil.example`
+  // under Foundation, which does not fold) and strips raw tab/LF/CR and encodes
+  // the space before parsing (so the rest "validate" as a URL missing those
+  // characters, while Foundation throws on the raw form). Every one is dropped:
+  // the serializer emits the trimmed ORIGINAL, never `parsed.href`, so anything
+  // the parse rewrote is a lie about the bytes. Same reasoning as
+  // `shared/lml-client/src/streaming-url-guard.ts` (BS#1710).
+  meta(9013, {
+    discogs_url: 'https://www.discogs.com\\@evil.example/release/1',
+    artist_wikipedia_url: 'https://en.wikipedia.org\\@evil.example/wiki/Hermanos_Gutiérrez',
+    youtube_music_url: 'https://music.youtube.com/playlist?list=OLAK5uy_\tbs2103',
+    bandcamp_url: 'https://hermanosgutierrez.bandcamp.com/album/el-bueno\ny-el-malo',
+    soundcloud_url: 'https://soundcloud.com/hermanos gutierrez/tres-hermanos',
+    genres: ['Rock'],
+  }),
+  // Degenerate non-URL values. `genres`/`styles` are nullable `text[]`, so a
+  // NULL member comes back as `[null]` — truthy `.length`, and a THROWING
+  // `decodeIfPresent([String].self)` on the shipped 3.2 decoder, which fails the
+  // whole Playcut decode exactly as a bad URL does. A whitespace-only bio and an
+  // empty note are dropped on the same rule the URL fields use: a value that
+  // carries no information is not worth a wire key (it renders as an empty,
+  // unexplained section).
+  meta(9014, {
+    genres: ['Rock', null, '', '  Folk Rock  '],
+    styles: [null],
+    artist_bio: '   ',
+    discogs_unavailable: true,
+    discogs_unavailable_note: '',
+  }),
 ];
 
 describe('BS#2103 v=2 wire golden (cross-repo contract with iOS 3.2)', () => {
@@ -424,14 +466,62 @@ describe('BS#2103 v=2 wire golden (cross-repo contract with iOS 3.2)', () => {
     expect(byArtist('Stereolab')).not.toHaveProperty('discogsURL');
     expect(byArtist('Stereolab')).not.toHaveProperty('spotifyURL');
     expect(byArtist('Stereolab')).not.toHaveProperty('bandcampURL');
-    // Raw non-ASCII is NOT a hazard and must survive untouched.
+    // Raw non-ASCII is NOT a hazard and must survive untouched. This is also
+    // why the serializer rejects rather than emitting `parsed.href`: href would
+    // percent-encode these ~21 real production values for no gain.
     expect(byArtist('João Gilberto').artistWikipediaURL).toBe('http://en.wikipedia.org/wiki/João_Gilberto');
     expect(byArtist('Konono Nº1').artistWikipediaURL).toBe('https://en.wikipedia.org/wiki/Konono_Nº1');
+    // Parser differentials: `new URL()` blesses a different string than the one
+    // that would ship, so none of these reach the wire.
+    const differential = byArtist('Hermanos Gutiérrez');
+    for (const key of ['discogsURL', 'artistWikipediaURL', 'youtubeMusicURL', 'bandcampURL', 'soundcloudURL']) {
+      expect(differential).not.toHaveProperty(key);
+    }
+    // …and the clean sibling on the same row still rides, so the guard is
+    // proven narrow rather than a blanket drop.
+    expect(differential.genres).toEqual(['Rock']);
+    // `[null]` genres/styles: a truthy `.length` that throws on the 3.2
+    // `decodeIfPresent([String].self)`. Null/blank members are filtered; a
+    // field with nothing left is omitted.
+    const degenerate = byArtist('Cat Power');
+    expect(degenerate.genres).toEqual(['Rock', 'Folk Rock']);
+    expect(degenerate).not.toHaveProperty('styles');
+    // Blank free text is dropped on the same rule, but the sibling flag it
+    // annotates is present-or-absent on its own (BS#1908).
+    expect(degenerate).not.toHaveProperty('artistBio');
+    expect(degenerate).not.toHaveProperty('discogsUnavailableNote');
+    expect(degenerate.discogsUnavailable).toBe(true);
     // A free-text play carries no URL key at all.
     const bare = byArtist('BS2103 Unenriched Artist');
     for (const key of ['artworkURL', 'discogsURL', 'spotifyURL', 'artistWikipediaURL']) {
       expect(bare).not.toHaveProperty(key);
     }
-    expect(bare.metadataStatus).toBe('pending');
+    expect(bare).not.toHaveProperty('metadataStatus');
+  });
+
+  // Option-3 serve rule: on shipped 3.2 a terminal `metadataStatus` is a
+  // CONTROL field — it makes `PlaycutDetailView.loadMetadata()` render inline
+  // and never call `/proxy/metadata/album` — so the key rides exactly when the
+  // payload carries >=1 renderable inline field and is withheld otherwise,
+  // keeping today's live-fetch fallback for terminal-but-empty rows (579 of
+  // 37,054 production playcuts). See `hasRenderableInlineMetadata`.
+  it('pins the conditional metadataStatus rule: the key accompanies renderable metadata or stays home', () => {
+    const golden = JSON.parse(readFileSync(GOLDEN_PATH, 'utf8'));
+    const byArtist = (name) => golden.playcuts.find((p) => p.artistName === name);
+
+    // Terminal in the DB, but every persisted value was guarded off the wire
+    // (label-prefixed wikipedia URL / non-web schemes) — the predicate reads
+    // the POST-GUARD payload, so these ship status-less and 3.2 falls back to
+    // its live fetch exactly as it does today.
+    for (const artist of ['Hole', 'Art Garfunkel', 'Stereolab']) {
+      expect(byArtist(artist)).not.toHaveProperty('metadataStatus');
+    }
+    // The excluded-from-predicate fields ride regardless — they are not
+    // renderable metadata, so they neither satisfy nor trip the guard.
+    expect(byArtist('Stereolab').artistId).toBe(7000);
+    // One surviving field is enough: Juana Molina's whitespace-padded (then
+    // trimmed) discogs URL carries her status with it.
+    expect(byArtist('Juana Molina').metadataStatus).toBe('enriched_match');
+    expect(byArtist('Nilüfer Yanya').metadataStatus).toBe('enriched_match');
   });
 });
