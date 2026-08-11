@@ -31,7 +31,7 @@ jest.mock('@sentry/node', () => ({
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { db, getLastRunTimestamp, updateLastRun } from '@wxyc/database';
+import { db, flowsheet, library, rotation, getLastRunTimestamp, updateLastRun } from '@wxyc/database';
 import * as logger from '../../../../jobs/legacy-linkage-resolve/logger';
 import {
   CHECKIN_MARGIN_MINUTES,
@@ -136,17 +136,22 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
   const ROTATION_COUNT_SQL =
     'SELECT COUNT(*)::int AS count FROM r JOIN l ON r.legacy_library_release_id = l.legacy_release_id ' +
     'WHERE r.legacy_library_release_id IS NOT NULL AND r.album_id IS NULL';
+  // BS#2071 (predicate-drop fix): `upd` repeats `f.album_id IS NULL` /
+  // `r.album_id IS NULL` in its own WHERE clause, not just `cohort`'s — see
+  // job.ts's docblock on `resolveFlowsheetAlbumIds` for why the re-check
+  // matters under EvalPlanQual. `cohort` also selects `DISTINCT` id, cheap
+  // insurance against a future index change (see the same docblock).
   const FLOWSHEET_DRAIN_SQL =
-    'WITH cohort AS ( SELECT f.id FROM f JOIN l ON f.legacy_release_id = l.legacy_release_id ' +
+    'WITH cohort AS ( SELECT DISTINCT f.id FROM f JOIN l ON f.legacy_release_id = l.legacy_release_id ' +
     'WHERE f.legacy_release_id IS NOT NULL AND f.album_id IS NULL ), upd AS ( UPDATE f SET album_id = l.id ' +
-    'FROM l, cohort c WHERE f.id = c.id AND f.legacy_release_id = l.legacy_release_id RETURNING 1 ) ' +
-    'SELECT (SELECT COUNT(*)::int FROM cohort) AS candidates, (SELECT COUNT(*)::int FROM upd) AS resolved';
+    'FROM l, cohort c WHERE f.id = c.id AND f.legacy_release_id = l.legacy_release_id AND f.album_id IS NULL ' +
+    'RETURNING 1 ) SELECT (SELECT COUNT(*)::int FROM cohort) AS candidates, (SELECT COUNT(*)::int FROM upd) AS resolved';
   const ROTATION_DRAIN_SQL =
-    'WITH cohort AS ( SELECT r.id FROM r JOIN l ON r.legacy_library_release_id = l.legacy_release_id ' +
+    'WITH cohort AS ( SELECT DISTINCT r.id FROM r JOIN l ON r.legacy_library_release_id = l.legacy_release_id ' +
     'WHERE r.legacy_library_release_id IS NOT NULL AND r.album_id IS NULL ), upd AS ( UPDATE r ' +
     'SET album_id = l.id, artist_name = NULL, album_title = NULL, record_label = NULL FROM l, cohort c ' +
-    'WHERE r.id = c.id AND r.legacy_library_release_id = l.legacy_release_id RETURNING 1 ) ' +
-    'SELECT (SELECT COUNT(*)::int FROM cohort) AS candidates, (SELECT COUNT(*)::int FROM upd) AS resolved';
+    'WHERE r.id = c.id AND r.legacy_library_release_id = l.legacy_release_id AND r.album_id IS NULL ' +
+    'RETURNING 1 ) SELECT (SELECT COUNT(*)::int FROM cohort) AS candidates, (SELECT COUNT(*)::int FROM upd) AS resolved';
 
   it('flowsheet drain statement matches the allowlisted statement exactly — no added predicate survives', async () => {
     queueRun({ candidates: 5, resolved: 5 }, { candidates: 0, resolved: 0 });
@@ -162,6 +167,39 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
     await runResolve(false);
 
     expect(normalizedExecutedSql()).toContain(ROTATION_DRAIN_SQL);
+  });
+
+  /**
+   * The allowlist above pins predicates, not table identity: every
+   * interpolated `${flowsheet}`/`${rotation}`/`${library}` renders as `''`
+   * under `renderSql` (see `tests/utils/render-sql.ts`'s `isMockTableShape`),
+   * so swapping which table object gets interpolated at a given `${...}`
+   * site — e.g. joining `${rotation}` where `${library}` belongs — leaves the
+   * whitespace-normalized text, and therefore the FLOWSHEET_DRAIN_SQL /
+   * ROTATION_DRAIN_SQL assertions above, unchanged. This checks the
+   * PRE-render call args directly instead: `db.execute`'s raw `{ values }`
+   * array holds the actual interpolated objects in template order, and
+   * `flowsheet`/`library`/`rotation` (imported from the same `@wxyc/database`
+   * mock job.ts resolves to) are distinct objects with non-overlapping key
+   * sets, so `toEqual` here fails on a table-identity swap that the
+   * text-only allowlist cannot see.
+   */
+  it('flowsheet drain statement interpolates flowsheet/library, not a swapped table, at each ${...} site', async () => {
+    queueRun({ candidates: 5, resolved: 5 }, { candidates: 0, resolved: 0 });
+
+    await runResolve(false);
+
+    const drainCall = (db.execute as jest.Mock).mock.calls[0][0] as { values: unknown[] };
+    expect(drainCall.values).toEqual([flowsheet, library, flowsheet, library]);
+  });
+
+  it('rotation drain statement interpolates rotation/library, not a swapped table, at each ${...} site', async () => {
+    queueRun({ candidates: 0, resolved: 0 }, { candidates: 3, resolved: 3 });
+
+    await runResolve(false);
+
+    const drainCall = (db.execute as jest.Mock).mock.calls[1][0] as { values: unknown[] };
+    expect(drainCall.values).toEqual([rotation, library, rotation, library]);
   });
 
   it('a zero-candidate real-run pass still issues its combined statement once, and never an ANALYZE', async () => {
@@ -189,6 +227,60 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
     await runResolve(false);
 
     expect(findSqlMatching(/cronjob_runs/i)).toBeUndefined();
+  });
+});
+
+describe('legacy-linkage-resolve: UPDATE re-checks album_id IS NULL against a concurrent writer (BS#2071 predicate-drop regression)', () => {
+  /**
+   * Regression pin for the exact defect this revision fixes: folding the
+   * COUNT-then-UPDATE pair into one data-modifying CTE dropped
+   * `AND f.album_id IS NULL` (and, on rotation, `AND r.album_id IS NULL`)
+   * from the `upd` arm's own WHERE clause — `cohort`'s identical filter is
+   * NOT a substitute for it.
+   *
+   * Under READ COMMITTED, if a concurrent writer (e.g. an MD calling
+   * `updateEntry`, `apps/backend/services/flowsheet.service.ts`, to pick an
+   * album for a flowsheet entry) commits a write to a `cohort` row while
+   * this statement is still executing, Postgres's EvalPlanQual re-checks the
+   * UPDATE's OWN WHERE clause — not `cohort`'s — against that row's
+   * just-committed new version before writing it. Without this predicate on
+   * `upd` itself, the re-checked qual (`f.id = c.id AND f.legacy_release_id
+   * = l.legacy_release_id`) still matches no matter what the concurrent
+   * writer just set `album_id` to, so this job silently overwrites it and
+   * reports a perfectly healthy `resolved === candidates`. With the
+   * predicate restored, the re-check fails once `album_id` is no longer
+   * NULL, the row drops out of `upd`, and the concurrent writer's value
+   * survives.
+   *
+   * A live-Postgres demonstration of exactly this clobber (before this fix)
+   * and its prevention (after) is in the BS#2071 PR body. This test is the
+   * fast, DB-free CI pin: it fails immediately if the predicate is ever
+   * dropped from `upd`'s WHERE clause again, on either pass, without needing
+   * a real database to prove why that matters.
+   */
+  it('flowsheet UPDATE carries album_id IS NULL on its own WHERE clause, immediately before RETURNING', async () => {
+    queueRun({ candidates: 3, resolved: 3 }, { candidates: 0, resolved: 0 });
+
+    await runResolve(false);
+
+    const [flowsheetSql] = normalizedExecutedSql();
+    // Distinguishes the UPDATE's own predicate (right before `RETURNING 1`)
+    // from `cohort`'s otherwise-identical `AND f.album_id IS NULL` earlier in
+    // the same statement (which is followed by `),`, not `RETURNING 1`).
+    expect(flowsheetSql).toContain(
+      'WHERE f.id = c.id AND f.legacy_release_id = l.legacy_release_id AND f.album_id IS NULL RETURNING 1'
+    );
+  });
+
+  it('rotation UPDATE carries album_id IS NULL on its own WHERE clause, immediately before RETURNING', async () => {
+    queueRun({ candidates: 0, resolved: 0 }, { candidates: 3, resolved: 3 });
+
+    await runResolve(false);
+
+    const [, rotationSql] = normalizedExecutedSql();
+    expect(rotationSql).toContain(
+      'WHERE r.id = c.id AND r.legacy_library_release_id = l.legacy_release_id AND r.album_id IS NULL RETURNING 1'
+    );
   });
 });
 
@@ -415,14 +507,19 @@ describe('legacy-linkage-resolve: drain check (signal c)', () => {
   });
 
   it('logs residual as null, not 0, on a dry run — 0 would misreport a nonzero cohort as fully drained', async () => {
+    // try/finally: a failing assertion between spyOn and mockRestore must not
+    // leak the spy into later tests (BS#2071 review) — jest.clearAllMocks()
+    // in beforeEach clears call history but does not undo an active spyOn.
     const logSpy = jest.spyOn(logger, 'log').mockImplementation(() => undefined);
-    queueDryRun(12, 0);
+    try {
+      queueDryRun(12, 0);
 
-    await runResolve(true);
+      await runResolve(true);
 
-    const flowsheetCall = logSpy.mock.calls.find((call) => call[1] === 'resolve-flowsheet');
-    expect(flowsheetCall?.[3]).toEqual(expect.objectContaining({ candidates: 12, resolved: 0, residual: null }));
-
-    logSpy.mockRestore();
+      const flowsheetCall = logSpy.mock.calls.find((call) => call[1] === 'resolve-flowsheet');
+      expect(flowsheetCall?.[3]).toEqual(expect.objectContaining({ candidates: 12, resolved: 0, residual: null }));
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });
