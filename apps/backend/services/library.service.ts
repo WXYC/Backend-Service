@@ -1893,6 +1893,27 @@ export const getArtistByCode = async (
   return response[0] ?? null;
 };
 
+/**
+ * Look up an artist by id in the same `{ artist_id, artist_name, code_letters }`
+ * shape `getArtistByCode` returns, so a 409 conflict payload can carry either
+ * lookup's result through one consistent wire shape.
+ */
+export const getArtistById = async (
+  artist_id: number
+): Promise<{ artist_id: number; artist_name: string; code_letters: string } | null> => {
+  const response = await db
+    .select({
+      artist_id: artists.id,
+      artist_name: artists.artist_name,
+      code_letters: artists.code_letters,
+    })
+    .from(artists)
+    .where(eq(artists.id, artist_id))
+    .limit(1);
+
+  return response[0] ?? null;
+};
+
 export const generateAlbumCodeNumber = async (artist_id: number): Promise<number> => {
   const response = await db
     .select({ code_number: library.code_number })

@@ -605,6 +605,121 @@ describe('Library Artists', () => {
 
       expect(res.body.alphabetical_name).toBe(`Band ${uniqueSuffix}, The`);
     });
+
+    describe('genre-scoped artist-name pre-check', () => {
+      test('returns a distinguishable 409 when the artist name already exists in the target genre', async () => {
+        const uniqueSuffix = Date.now().toString(36).toUpperCase().slice(-3);
+        const artistName = `ZZName Dup ${uniqueSuffix}`;
+
+        const first = await auth
+          .post('/library/artists')
+          .send({
+            artist_name: artistName,
+            code_letters: `Z${uniqueSuffix.slice(0, 1)}A`,
+            genre_id: 11,
+            code_number: 501,
+          })
+          .expect(201);
+
+        const second = await auth
+          .post('/library/artists')
+          .send({
+            artist_name: artistName,
+            code_letters: `Z${uniqueSuffix.slice(0, 1)}B`,
+            genre_id: 11,
+            code_number: 502,
+          })
+          .expect(409);
+
+        expect(second.body).toEqual({
+          message: 'Artist name already exists in that genre.',
+          reason: 'artist_name_conflict',
+          artist: { artist_id: first.body.id, artist_name: artistName, code_letters: `Z${uniqueSuffix.slice(0, 1)}A` },
+        });
+
+        // No second row was inserted for the conflicting name.
+        const search = await auth
+          .get('/library/artists/search')
+          .query({ genre_id: 11, q: artistName, limit: 10 })
+          .expect(200);
+        expect(search.body.artists).toHaveLength(1);
+        expect(search.body.artists[0].id).toBe(first.body.id);
+      });
+
+      test('creates successfully when the same name exists only in a different genre', async () => {
+        const uniqueSuffix = Date.now().toString(36).toUpperCase().slice(-3);
+        const artistName = `ZZName Genre ${uniqueSuffix}`;
+
+        await auth
+          .post('/library/artists')
+          .send({
+            artist_name: artistName,
+            code_letters: `Y${uniqueSuffix.slice(0, 1)}A`,
+            genre_id: 11,
+            code_number: 503,
+          })
+          .expect(201);
+
+        const res = await auth
+          .post('/library/artists')
+          .send({
+            artist_name: artistName,
+            code_letters: `Y${uniqueSuffix.slice(0, 1)}B`,
+            genre_id: 6,
+            code_number: 504,
+          })
+          .expect(201);
+
+        expect(res.body.artist_name).toBe(artistName);
+        expect(res.body.genre_id).toBe(6);
+      });
+
+      test('catches a Unicode-form duplicate (NFD input against an NFC-stored name) in the same genre', async () => {
+        const uniqueSuffix = Date.now().toString(36).toUpperCase().slice(-3);
+        // ü = U+00FC (precomposed) vs u + U+0308 (combining diaeresis) — same
+        // rendered text, byte-distinct until fold_artist_name normalizes both.
+        const nameNfc = `ZZName Nilüfer ${uniqueSuffix}`.normalize('NFC');
+        const nameNfd = `ZZName Nilüfer ${uniqueSuffix}`.normalize('NFD');
+        expect(nameNfc).not.toBe(nameNfd);
+
+        const first = await auth
+          .post('/library/artists')
+          .send({ artist_name: nameNfc, code_letters: `X${uniqueSuffix.slice(0, 1)}A`, genre_id: 11, code_number: 505 })
+          .expect(201);
+
+        const second = await auth
+          .post('/library/artists')
+          .send({ artist_name: nameNfd, code_letters: `X${uniqueSuffix.slice(0, 1)}B`, genre_id: 11, code_number: 506 })
+          .expect(409);
+
+        expect(second.body.reason).toBe('artist_name_conflict');
+        expect(second.body.artist.artist_id).toBe(first.body.id);
+      });
+
+      test('prefers the code-triple conflict over a simultaneous name conflict, with the unchanged code-conflict shape', async () => {
+        const uniqueSuffix = Date.now().toString(36).toUpperCase().slice(-3);
+        const artistName = `ZZName Both ${uniqueSuffix}`;
+        const codeLetters = `W${uniqueSuffix.slice(0, 2)}`;
+
+        const first = await auth
+          .post('/library/artists')
+          .send({ artist_name: artistName, code_letters: codeLetters, genre_id: 11, code_number: 507 })
+          .expect(201);
+
+        // Same name AND same code triple as the artist above -- both checks
+        // would fire independently; the code-triple 409 must win.
+        const second = await auth
+          .post('/library/artists')
+          .send({ artist_name: artistName, code_letters: codeLetters, genre_id: 11, code_number: 507 })
+          .expect(409);
+
+        expect(second.body).toEqual({
+          message: 'Artist code already exists for that genre and code letters.',
+          artist: { artist_id: first.body.id, artist_name: artistName, code_letters: codeLetters },
+        });
+        expect(second.body).not.toHaveProperty('reason');
+      });
+    });
   });
 });
 
