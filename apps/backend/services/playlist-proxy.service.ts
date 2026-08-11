@@ -39,6 +39,15 @@
  * server-side regardless of `n` (BS#1862); batching it drops the cost to
  * ~10-30ms while preserving the exact COALESCE(FK, fallback) semantics.
  *
+ * Metadata enrichment (BS#2103). The v=2 grouped playcut additionally carries
+ * the same per-play metadata `GET /flowsheet` serves — streaming links, bio,
+ * genres/styles, release year, artist id, critic reviews, upcoming show — under
+ * the camelCase key names shipped iOS 3.2 already decodes. Those clients resolve
+ * `PlaylistAPIVersion.v1` and cannot be moved onto `/flowsheet` (the
+ * `playlist_api_version` flag is global and would break 3.1 outright), so the
+ * data has to come to them on this endpoint. See `enrichPlaycutMetadata`.
+ * v=1 (Android) is deliberately untouched.
+ *
  * Exported API:
  *   getRecentEntries(n) — query Postgres for the current playlist grouped
  *                         by entry type, sliced to n playcuts. Async (was
@@ -47,6 +56,13 @@
  */
 import { db, flowsheet, album_metadata, rotation, library, artists } from '@wxyc/database';
 import { sql, inArray, and, isNotNull, eq, desc, asc } from 'drizzle-orm';
+import type { CriticReviewItem } from '@wxyc/shared/dtos';
+import {
+  ALBUM_METADATA_PROJECTION_WITHOUT_ARTWORK,
+  suppressMislabeledStreamingUrls,
+} from '../utils/album-metadata-projection.js';
+import type { ConcertDTO } from './concerts.service.js';
+import { attachUpcomingShows, attachCriticReviews } from './flowsheet.service.js';
 
 const MAX_ENTRIES = 200;
 const HOUR_MS = 3_600_000;
@@ -60,8 +76,68 @@ function lookupKey(artist: string, album: string): string {
 /** SQL expression that computes the same lookup key from flowsheet columns. */
 const flowsheetLookupKey = sql<string>`lower(trim(${flowsheet.artist_name})) || '-' || lower(trim(coalesce(${flowsheet.album_title}, '')))`;
 
+/**
+ * Normalize a persisted URL for the wire, or `undefined` to omit the key.
+ *
+ * iOS decodes every URL-typed playcut field with
+ * `try container.decodeIfPresent(URL.self, forKey:)`. That is *throwing*, not
+ * tolerant: a present-but-unparseable value raises `DecodingError` and fails
+ * the whole `Playcut` decode, which empties the playlist for that listener.
+ * `/flowsheet` can pass these through raw because its consumer decodes them as
+ * strings; this endpoint cannot.
+ *
+ * Only an absolute `http`/`https` URL survives. Everything else — `''`,
+ * whitespace, a relative path, a bare hostname, a scheme-relative `//host/...`,
+ * a non-web scheme — is dropped rather than risked. Dropping a field costs one
+ * missing button; emitting a bad one costs the whole playlist.
+ */
+function wireUrl(value: string | null | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (trimmed === '') return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
+  if (parsed.hostname === '') return undefined;
+  return trimmed;
+}
+
+/** Set a URL-typed wire field iff the persisted value survives {@link wireUrl}. */
+function setUrlField(target: GroupedPlaycut, key: UrlWireKey, value: string | null | undefined): void {
+  const url = wireUrl(value);
+  if (url !== undefined) {
+    target[key] = url;
+  }
+}
+
 // --- Types ---
 
+/**
+ * One v=2 grouped playcut.
+ *
+ * The legacy fields (`songTitle` … `request`) are tubafrenzy's original wire
+ * shape and must not change — iOS 3.1 still reads them, and its safety rests
+ * entirely on unknown keys being ignorable.
+ *
+ * Everything from `artworkURL` down is optional enrichment, keyed to match the
+ * `CodingKeys` block of `Playcut` in wxyc-ios-64 @ v3.2-AppStoreSubmission4
+ * (`Shared/Playlist/Sources/Playlist/PlaylistEntry.swift`). That block is the
+ * SSOT: the legacy wire is camelCase, unlike `/flowsheet`'s snake_case, with
+ * two deliberate exceptions — `upcoming_show` and `critic_reviews` stay
+ * snake_case because they round-trip through nested Swift types that carry
+ * their own snake_case `Codable`. A wrong key name fails SILENTLY: JSONDecoder
+ * drops it and the feature simply never appears.
+ *
+ * Every URL-typed field is emitted only when it parses as an absolute http(s)
+ * URL — see {@link wireUrl}. iOS decodes these with
+ * `try container.decodeIfPresent(URL.self, …)`, which THROWS on a
+ * present-but-invalid value and fails the entire `Playcut` decode, blanking
+ * the playlist for that listener. Absent or `null` is always safe; `""` is not.
+ */
 interface GroupedPlaycut {
   id: number;
   chronOrderID: number;
@@ -74,7 +150,38 @@ interface GroupedPlaycut {
   rotation: string;
   request: string;
   artworkURL?: string;
+  discogsURL?: string;
+  releaseYear?: number;
+  spotifyURL?: string;
+  appleMusicURL?: string;
+  youtubeMusicURL?: string;
+  bandcampURL?: string;
+  soundcloudURL?: string;
+  artistBio?: string;
+  artistWikipediaURL?: string;
+  genres?: string[];
+  styles?: string[];
+  artistId?: number;
+  /** Key camelCase, VALUE snake_case (`enriched_match`, …) — the raw enum. */
+  metadataStatus?: string;
+  discogsUnavailable?: boolean;
+  discogsUnavailableNote?: string;
+  /** snake_case on purpose: nested `Concert` with its own snake_case Codable. */
+  upcoming_show?: ConcertDTO;
+  /** snake_case on purpose: nested `CriticReviewItem[]`, same rationale. */
+  critic_reviews?: CriticReviewItem[];
 }
+
+/** The URL-typed wire fields — every one of them a throwing decode on iOS. */
+type UrlWireKey =
+  | 'artworkURL'
+  | 'discogsURL'
+  | 'spotifyURL'
+  | 'appleMusicURL'
+  | 'youtubeMusicURL'
+  | 'bandcampURL'
+  | 'soundcloudURL'
+  | 'artistWikipediaURL';
 
 interface BaseEntry {
   id: number;
@@ -245,10 +352,14 @@ export async function getRecentEntries(n: number): Promise<GroupedResponse> {
   }
 
   const slicedPlaycuts = playcutRows.slice(0, n);
-  const [artworkMap, fallbackRotationMap] = await Promise.all([
+  const [artworkMap, fallbackRotationMap, metadataMap] = await Promise.all([
     enrichPlaycuts(slicedPlaycuts),
     resolveFallbackRotation(slicedPlaycuts),
+    enrichPlaycutMetadata(slicedPlaycuts),
   ]);
+  // Second (and last) round trip: the concerts / critic-review attaches key
+  // off `artist_id`, which the metadata batch above resolves.
+  const feedEnrichmentMap = await resolveFeedEnrichment(slicedPlaycuts, metadataMap);
 
   const playcuts: GroupedPlaycut[] = slicedPlaycuts.map((row) => {
     // COALESCE(FK rotation_bin, fallback rotation_bin) — the exact semantics
@@ -267,9 +378,17 @@ export async function getRecentEntries(n: number): Promise<GroupedResponse> {
       rotation: rotationBin !== null ? 'true' : 'false',
       request: row.request_flag ? 'true' : 'false',
     };
-    const artwork = artworkMap.get(row.id);
-    if (artwork) {
-      grouped.artworkURL = artwork;
+    setUrlField(grouped, 'artworkURL', artworkMap.get(row.id));
+    const meta = metadataMap.get(row.id);
+    if (meta) {
+      applyPlaycutMetadata(grouped, meta);
+    }
+    const enrichment = feedEnrichmentMap.get(row.id);
+    if (enrichment?.upcoming_show) {
+      grouped.upcoming_show = enrichment.upcoming_show;
+    }
+    if (enrichment?.critic_reviews?.length) {
+      grouped.critic_reviews = enrichment.critic_reviews;
     }
     return grouped;
   });
@@ -488,6 +607,214 @@ async function enrichPlaycuts(candidates: PlaycutCandidate[]): Promise<Map<numbe
   } catch (err) {
     console.error('[playlist-proxy] artwork enrichment failed:', err);
     return new Map();
+  }
+}
+
+/**
+ * One row of the batched metadata lookup — `/flowsheet`'s own projection,
+ * restricted to the fields iOS 3.2's `Playcut` declares a `CodingKey` for.
+ */
+type PlaycutMetadataRow = {
+  id: number;
+  discogs_url: string | null;
+  release_year: number | null;
+  spotify_url: string | null;
+  apple_music_url: string | null;
+  youtube_music_url: string | null;
+  bandcamp_url: string | null;
+  soundcloud_url: string | null;
+  artist_bio: string | null;
+  artist_wikipedia_url: string | null;
+  genres: string[] | null;
+  styles: string[] | null;
+  artist_id: number | null;
+  discogs_unavailable: boolean | null;
+  discogs_unavailable_note: string | null;
+  metadata_status: string | null;
+};
+
+/**
+ * Batch-fetch the `/flowsheet` metadata projection for the sliced playcuts
+ * (BS#2103).
+ *
+ * ONE query for the whole page, joined and projected exactly as
+ * `flowsheet.service.ts`'s read paths do — same two LEFT JOINs, same shared
+ * `ALBUM_METADATA_PROJECTION_WITHOUT_ARTWORK` COALESCE expressions
+ * (`utils/album-metadata-projection.ts`). Reusing that definition rather than
+ * re-deriving it is the point: the two-source `coalesce(album_metadata.X,
+ * flowsheet.X)` fallback keeps free-form plays (no `album_id`, metadata held
+ * inline) enriched, and it cannot drift from `/flowsheet` as Epic D advances.
+ *
+ * `artwork_url` is deliberately NOT in this projection. Artwork keeps its own
+ * resolution (`enrichPlaycuts`, the BS#1105 split-format lookup-key tie-break,
+ * unchanged by this ticket), which also keeps this path off the inline
+ * artwork column on `flowsheet` so Epic D's D4 column drop (#900) stays
+ * unblocked here — a property the unit suite pins by source-grep, hence the
+ * circumlocution.
+ *
+ * The predicate is `flowsheet.id IN (…)` over at most `n` (<= 100) primary
+ * keys, so this is an index lookup, not a scan. It runs inside
+ * `getRecentEntries`'s existing `Promise.all` alongside the artwork and
+ * rotation-fallback batches, so it costs no extra serial round trip. The
+ * endpoint is reverse-proxied by wxyc.info under a 2s fail-soft timeout, which
+ * is why "one batched query, in parallel" is a hard requirement and not a
+ * preference.
+ *
+ * Degrades to an empty map on query failure — the playcut goes out with its
+ * legacy fields only, rather than 503-ing the entire legacy mobile fleet.
+ * Same posture as `enrichPlaycuts` / `resolveFallbackRotation`.
+ */
+async function enrichPlaycutMetadata(candidates: Array<{ id: number }>): Promise<Map<number, PlaycutMetadataRow>> {
+  if (candidates.length === 0) return new Map();
+
+  try {
+    const rows = await db
+      .select({
+        id: flowsheet.id,
+        ...ALBUM_METADATA_PROJECTION_WITHOUT_ARTWORK,
+        // Sourced off `library` directly, exactly as FSEntryFieldsRaw does:
+        // the resolved catalog artist (BS#1625) and the MD-set
+        // discogs-unavailable flag + note (BS#1908). NULL here means "no
+        // library row", which the serializer reads as "omit the field".
+        artist_id: library.artist_id,
+        discogs_unavailable: library.discogs_unavailable,
+        discogs_unavailable_note: library.discogs_unavailable_note,
+        metadata_status: flowsheet.metadata_status,
+      })
+      .from(flowsheet)
+      .leftJoin(library, eq(library.id, flowsheet.album_id))
+      .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+      .where(
+        inArray(
+          flowsheet.id,
+          candidates.map((candidate) => candidate.id)
+        )
+      );
+
+    const map = new Map<number, PlaycutMetadataRow>();
+    for (const row of rows as PlaycutMetadataRow[]) {
+      map.set(row.id, row);
+    }
+    return map;
+  } catch (err) {
+    console.error('[playlist-proxy] metadata enrichment failed:', err);
+    return new Map();
+  }
+}
+
+/**
+ * The minimal row shape `/flowsheet`'s feed-assembly attaches read and write.
+ * Structurally compatible with `IFSEntry`, which is what those helpers are
+ * normally handed.
+ */
+type FeedEnrichmentTarget = {
+  id: number;
+  entry_type: 'track';
+  artist_id: number | null;
+  artist_name: string | null;
+  album_id: number | null;
+  upcoming_show?: ConcertDTO | null;
+  critic_reviews?: CriticReviewItem[];
+};
+
+/**
+ * Attach the two feed-assembly enrichments — `upcoming_show` (BS#1607/#1613)
+ * and `critic_reviews` (BS#1870) — by calling `/flowsheet`'s own helpers
+ * rather than re-deriving their match rules (the id-arm/name-arm hybrid and
+ * the id-arm-only exact album match respectively, each with its own
+ * regression suite).
+ *
+ * Both are batched and page-scoped: `attachUpcomingShows` reads a per-ET-day
+ * memoized concerts map (`getUpcomingShowsMapsCached`, BS#1616 — usually zero
+ * queries on the hot poll), and `attachCriticReviews` is flag-gated behind
+ * `CRITIC_REVIEWS_ENABLED` and issues one indexed lookup. They run
+ * concurrently with each other, after the metadata batch that supplies
+ * `artist_id`.
+ *
+ * Wrapped in a try/catch the `/flowsheet` call sites don't need: this endpoint
+ * is polled on a fixed interval by every legacy mobile client through a proxy
+ * that fails soft at 2s, so a concerts-table blip must cost the CTA, not the
+ * playlist.
+ */
+async function resolveFeedEnrichment(
+  candidates: RecentRow[],
+  metadataMap: Map<number, PlaycutMetadataRow>
+): Promise<Map<number, FeedEnrichmentTarget>> {
+  const resolved = new Map<number, FeedEnrichmentTarget>();
+  if (candidates.length === 0) return resolved;
+
+  const targets: FeedEnrichmentTarget[] = candidates.map((row) => ({
+    id: row.id,
+    entry_type: 'track',
+    artist_id: metadataMap.get(row.id)?.artist_id ?? null,
+    artist_name: row.artist_name,
+    album_id: row.album_id,
+  }));
+
+  try {
+    await Promise.all([attachUpcomingShows(targets), attachCriticReviews(targets)]);
+  } catch (err) {
+    console.error('[playlist-proxy] feed enrichment attach failed:', err);
+    return resolved;
+  }
+
+  for (const target of targets) {
+    resolved.set(target.id, target);
+  }
+  return resolved;
+}
+
+/**
+ * Project one metadata row onto the v=2 playcut under the iOS 3.2 key names.
+ *
+ * Present-or-absent throughout: a null column omits its key entirely rather
+ * than emitting `null`, which keeps the no-enrichment payload byte-identical
+ * to its pre-BS#2103 shape and keeps every URL field structurally incapable of
+ * carrying `""`.
+ */
+function applyPlaycutMetadata(grouped: GroupedPlaycut, meta: PlaycutMetadataRow): void {
+  // BS#1714: a persisted spotify_url/apple_music_url whose host isn't
+  // Spotify/Apple was mislabeled at the LML boundary before #1712 shipped and
+  // must not reach the hardwired iOS "Spotify"/"Apple Music" button. Same
+  // guard, same helper, as the /flowsheet serve seam.
+  const { spotify_url, apple_music_url } = suppressMislabeledStreamingUrls(meta);
+
+  setUrlField(grouped, 'discogsURL', meta.discogs_url);
+  setUrlField(grouped, 'spotifyURL', spotify_url);
+  setUrlField(grouped, 'appleMusicURL', apple_music_url);
+  setUrlField(grouped, 'youtubeMusicURL', meta.youtube_music_url);
+  setUrlField(grouped, 'bandcampURL', meta.bandcamp_url);
+  setUrlField(grouped, 'soundcloudURL', meta.soundcloud_url);
+  setUrlField(grouped, 'artistWikipediaURL', meta.artist_wikipedia_url);
+
+  if (meta.release_year !== null) {
+    grouped.releaseYear = meta.release_year;
+  }
+  if (meta.artist_bio !== null && meta.artist_bio !== '') {
+    grouped.artistBio = meta.artist_bio;
+  }
+  // Empty arrays collapse to an omitted key, mirroring transformToV2's
+  // `?.length ? … : null` (BS#1441): a '{}' album_metadata row carries no
+  // information.
+  if (meta.genres?.length) {
+    grouped.genres = meta.genres;
+  }
+  if (meta.styles?.length) {
+    grouped.styles = meta.styles;
+  }
+  if (meta.artist_id !== null) {
+    grouped.artistId = meta.artist_id;
+  }
+  if (meta.metadata_status !== null) {
+    grouped.metadataStatus = meta.metadata_status;
+  }
+  // BS#1908 present-or-absent: null means "no library row", which is not the
+  // same claim as `false`. Same projection rule transformToV2 applies.
+  if (meta.discogs_unavailable !== null) {
+    grouped.discogsUnavailable = meta.discogs_unavailable;
+  }
+  if (meta.discogs_unavailable_note !== null) {
+    grouped.discogsUnavailableNote = meta.discogs_unavailable_note;
   }
 }
 

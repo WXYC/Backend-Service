@@ -23,7 +23,7 @@ import {
   nyCalendarDate,
   nyStartOfDay,
 } from '@wxyc/database';
-import { isSpotifyUrl, isAppleMusicUrl } from '@wxyc/lml-client';
+import { ALBUM_METADATA_PROJECTION, suppressMislabeledStreamingUrls } from '../utils/album-metadata-projection.js';
 import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { lookupCriticReviewsByAlbumIds } from './album-metadata-lookup.service.js';
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
@@ -304,28 +304,12 @@ const FSEntryFieldsRaw = {
   // them, the COALESCE collapses to the album_metadata side. Free-form
   // entries (album_id IS NULL) miss the join and fall through to the
   // inline flowsheet values.
-  artwork_url: sql<string | null>`coalesce(${album_metadata.artwork_url}, ${flowsheet.artwork_url})`,
-  // discogs_url additionally NULLIFs the '' synthetic-match sentinel LML
-  // persists for streaming-only/artist-only matches (LML#401/#487) so it
-  // never reaches the wire (BS#1628). NULLIF wraps the COALESCE — an ''
-  // verdict in album_metadata stays authoritative over a stale inline URL
-  // rather than falling through to it. The persisted '' is deliberate
-  // (BS#1185 keys off it); only the projection normalizes.
-  discogs_url: sql<string | null>`nullif(coalesce(${album_metadata.discogs_url}, ${flowsheet.discogs_url}), '')`,
-  release_year: sql<number | null>`coalesce(${album_metadata.release_year}, ${flowsheet.release_year})`,
-  spotify_url: sql<string | null>`coalesce(${album_metadata.spotify_url}, ${flowsheet.spotify_url})`,
-  apple_music_url: sql<string | null>`coalesce(${album_metadata.apple_music_url}, ${flowsheet.apple_music_url})`,
-  youtube_music_url: sql<string | null>`coalesce(${album_metadata.youtube_music_url}, ${flowsheet.youtube_music_url})`,
-  bandcamp_url: sql<string | null>`coalesce(${album_metadata.bandcamp_url}, ${flowsheet.bandcamp_url})`,
-  soundcloud_url: sql<string | null>`coalesce(${album_metadata.soundcloud_url}, ${flowsheet.soundcloud_url})`,
-  artist_bio: sql<string | null>`coalesce(${album_metadata.artist_bio}, ${flowsheet.artist_bio})`,
-  artist_wikipedia_url: sql<
-    string | null
-  >`coalesce(${album_metadata.artist_wikipedia_url}, ${flowsheet.artist_wikipedia_url})`,
-  // genres/styles live ONLY on album_metadata (no inline flowsheet column to
-  // COALESCE over), so these are plain column reads. BS#1441.
-  genres: album_metadata.genres,
-  styles: album_metadata.styles,
+  //
+  // Lifted verbatim into `../utils/album-metadata-projection.ts` (BS#2103) so
+  // the legacy `GET /playlists/recentEntries?v=2` payload derives the same
+  // values from the same SQL instead of re-deriving them. Field order is
+  // unchanged (artwork_url first). Edit it there, not here.
+  ...ALBUM_METADATA_PROJECTION,
   on_streaming: library.on_streaming,
   // BS#1908 (Not-on-Discogs epic #1280): the MD-set discogs-unavailable flag,
   // mirroring BS#1895's other read surfaces onto the V2 flowsheet album embed.
@@ -405,14 +389,11 @@ export type FSEntryRaw = {
  * read paths, so guarding the two hardwired streaming URLs here covers both.
  */
 export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
-  // BS#1714: suppress a persisted `spotify_url`/`apple_music_url` whose host
-  // isn't Spotify/Apple (mislabeled at the LML boundary before #1712 shipped)
-  // so it never reaches the hardwired iOS "Spotify"/"Apple Music" button. No
-  // synthesized fallback exists at this seam, so a mislabeled value drops to
-  // null. Applied once and reused for both the top-level field and the nested
-  // `metadata` object below.
-  const spotify_url = isSpotifyUrl(raw.spotify_url) ? raw.spotify_url : null;
-  const apple_music_url = isAppleMusicUrl(raw.apple_music_url) ? raw.apple_music_url : null;
+  // BS#1714 host guard, shared with the legacy recentEntries serializer
+  // (BS#2103) — see `suppressMislabeledStreamingUrls`. Applied once and
+  // reused for both the top-level field and the nested `metadata` object
+  // below.
+  const { spotify_url, apple_music_url } = suppressMislabeledStreamingUrls(raw);
   return {
     id: raw.id,
     show_id: raw.show_id,
@@ -1624,6 +1605,18 @@ export const getShowMetadata = async (show_id: number): Promise<ShowMetadata | u
  * Removes irrelevant fields based on entry_type for cleaner API responses.
  */
 /**
+ * The minimal row shape {@link attachUpcomingShows} reads and writes — a
+ * structural subset of `IFSEntry`, so the `/flowsheet` read paths satisfy it
+ * unchanged. Stated as a `Pick` (not a hand-written literal) so a rename on
+ * `IFSEntry` is a compile error here rather than a silent fork.
+ *
+ * It exists because BS#2103 attaches the same enrichment to the legacy
+ * `recentEntries?v=2` payload, whose rows are not `IFSEntry`s. Widening the
+ * parameter is a type-level change only: the runtime body is untouched.
+ */
+export type UpcomingShowAttachable = Pick<IFSEntry, 'entry_type' | 'artist_id' | 'artist_name' | 'upcoming_show'>;
+
+/**
  * Attach the per-playcut `upcoming_show` enrichment to a feed page of entries
  * (BS#1607, widened to a hybrid id-arm ∪ name-arm match in BS#1613; touring-
  * events Phase 3).
@@ -1658,7 +1651,7 @@ export const getShowMetadata = async (show_id: number): Promise<ShowMetadata | u
  * the caller maps the result through `transformToV2`, which reads
  * `entry.upcoming_show`.
  */
-export const attachUpcomingShows = async (entries: IFSEntry[]): Promise<IFSEntry[]> => {
+export const attachUpcomingShows = async <T extends UpcomingShowAttachable>(entries: T[]): Promise<T[]> => {
   // Skip the DB only when NO track row could match either arm: a track matches
   // the id arm with a non-null artist_id, or the name arm with a non-empty
   // artist_name. (Almost every track carries a name, so this mainly short-
@@ -1693,6 +1686,12 @@ export const attachUpcomingShows = async (entries: IFSEntry[]): Promise<IFSEntry
   }
   return entries;
 };
+
+/**
+ * The minimal row shape {@link attachCriticReviews} reads and writes. Same
+ * `Pick`-of-`IFSEntry` rationale as {@link UpcomingShowAttachable} above.
+ */
+export type CriticReviewAttachable = Pick<IFSEntry, 'entry_type' | 'album_id' | 'critic_reviews'>;
 
 /**
  * Attach batched critic-review snippets to a feed page of entries
@@ -1746,7 +1745,7 @@ export const attachUpcomingShows = async (entries: IFSEntry[]): Promise<IFSEntry
  * the caller maps the result through `transformToV2`, which reads
  * `entry.critic_reviews`.
  */
-export const attachCriticReviews = async (entries: IFSEntry[]): Promise<IFSEntry[]> => {
+export const attachCriticReviews = async <T extends CriticReviewAttachable>(entries: T[]): Promise<T[]> => {
   if (!getCriticReviewsConfig().enabled) {
     return entries;
   }
@@ -1762,7 +1761,7 @@ export const attachCriticReviews = async (entries: IFSEntry[]): Promise<IFSEntry
   const albumIds = [
     ...new Set(
       entries
-        .filter((entry): entry is IFSEntry & { album_id: number } => {
+        .filter((entry): entry is T & { album_id: number } => {
           return !!entry && entry.entry_type === 'track' && entry.album_id !== null;
         })
         .map((entry) => entry.album_id)

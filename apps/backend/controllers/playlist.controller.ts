@@ -40,8 +40,12 @@ function parseN(raw: unknown, def: number, max: number): number {
  *       v=1: total entries returned (default 200, clamped [1, 200]).
  *
  * Queried live from Postgres (Phase 3 of the tubafrenzy decommission,
- * WXYC/wiki#88). v=2 playcuts are enriched with `artworkURL`; v=1 is not
- * (tubafrenzy's v=1 never carried artwork — Android resolves its own).
+ * WXYC/wiki#88). v=2 playcuts are enriched with `artworkURL` plus, since
+ * BS#2103, the full `/flowsheet` metadata set (streaming links, bio,
+ * genres/styles, release year, artist id, upcoming show, critic reviews)
+ * under the camelCase keys shipped iOS 3.2 decodes — see
+ * playlist-proxy.service.ts. v=1 carries none of it (tubafrenzy's v=1 never
+ * carried artwork either — Android resolves its own).
  *
  * Headers:
  *   Cache-Control: public, max-age=30

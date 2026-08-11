@@ -72,6 +72,30 @@ const BRANCHC_LIB_ID = 7301;
 const BRANCHC_ARTIST = 'BS88 BranchC Artist';
 const BRANCHC_ALBUM = 'BS88 BranchC Album';
 
+// BS#2103 metadata-enrichment probe: a diacritic-bearing artist (Nilüfer Yanya,
+// from wxyc-shared/src/test-utils/wxyc-example-data.json) with a fully
+// populated album_metadata row, plus two deliberate hazards the serializer has
+// to defuse:
+//   - `spotify_url` holding a NON-Spotify host (mislabeled at the LML boundary
+//     before #1712 — the BS#1714 guard must null it);
+//   - `discogs_url` holding the '' synthetic-match sentinel LML persists
+//     (LML#401/#487 — the projection NULLIFs it, BS#1628).
+// The wire keys are camelCase here, unlike /flowsheet's snake_case: iOS 3.2's
+// `Playcut` CodingKeys are the SSOT (wxyc-ios-64 @ v3.2-AppStoreSubmission4).
+const ENRICHED_LIB_ID = 7163;
+const ENRICHED_ARTIST = 'Nilüfer Yanya';
+const ENRICHED_ALBUM = 'PAINLESS';
+const ENRICHED_ARTWORK = 'https://i.discogs.com/bs2103-painless.jpg';
+const ENRICHED_DISCOGS = 'https://www.discogs.com/release/22012345';
+const ENRICHED_APPLE = 'https://music.apple.com/us/album/painless/1609094304';
+const ENRICHED_YOUTUBE = 'https://music.youtube.com/playlist?list=OLAK5uy_bs2103';
+const ENRICHED_BANDCAMP = 'https://niluferyanya.bandcamp.com/album/painless';
+const ENRICHED_SOUNDCLOUD = 'https://soundcloud.com/niluferyanya/stabilise';
+const ENRICHED_WIKIPEDIA = 'https://en.wikipedia.org/wiki/Nil%C3%BCfer_Yanya';
+const ENRICHED_BIO = 'Nilüfer Yanya is a London-born singer-songwriter.';
+// A Bandcamp URL filed under spotify_url — must be suppressed, not emitted.
+const MISLABELED_SPOTIFY = 'https://niluferyanya.bandcamp.com/album/painless';
+
 function makeSql() {
   return postgres({
     host: process.env.DB_HOST || 'localhost',
@@ -87,7 +111,7 @@ function makeSql() {
 describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#88)', () => {
   let sql;
   const flowsheetIds = [];
-  const libraryIds = [PRESS_CD, PRESS_LP, BRANCHA_LIB_ID, BRANCHC_LIB_ID];
+  const libraryIds = [PRESS_CD, PRESS_LP, BRANCHA_LIB_ID, BRANCHC_LIB_ID, ENRICHED_LIB_ID];
   const rotationIds = [];
 
   beforeAll(async () => {
@@ -115,6 +139,36 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
       INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, artwork_url)
       VALUES (${PRESS_LP}, ${LP_ARTWORK})
       ON CONFLICT (album_id) DO UPDATE SET artwork_url = EXCLUDED.artwork_url
+    `;
+
+    // BS#2103 enrichment probe: library row + a fully populated album_metadata
+    // row, including the two hazards described at the constants above.
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.library
+        (id, artist_id, genre_id, format_id, album_title, code_number, artist_name, discogs_unavailable)
+      VALUES (${ENRICHED_LIB_ID}, ${ART}, ${GEN}, ${FMT}, ${ENRICHED_ALBUM}, 1163, ${ENRICHED_ARTIST}, false)
+      ON CONFLICT (id) DO NOTHING
+    `;
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, artwork_url, discogs_url, release_year, spotify_url, apple_music_url, youtube_music_url,
+         bandcamp_url, soundcloud_url, artist_bio, artist_wikipedia_url, genres, styles)
+      VALUES (${ENRICHED_LIB_ID}, ${ENRICHED_ARTWORK}, '', 2022, ${MISLABELED_SPOTIFY}, ${ENRICHED_APPLE},
+              ${ENRICHED_YOUTUBE}, ${ENRICHED_BANDCAMP}, ${ENRICHED_SOUNDCLOUD}, ${ENRICHED_BIO},
+              ${ENRICHED_WIKIPEDIA}, ${sql.array(['Rock'])}, ${sql.array(['Indie Rock', 'Art Rock'])})
+      ON CONFLICT (album_id) DO UPDATE SET
+        artwork_url = EXCLUDED.artwork_url,
+        discogs_url = EXCLUDED.discogs_url,
+        release_year = EXCLUDED.release_year,
+        spotify_url = EXCLUDED.spotify_url,
+        apple_music_url = EXCLUDED.apple_music_url,
+        youtube_music_url = EXCLUDED.youtube_music_url,
+        bandcamp_url = EXCLUDED.bandcamp_url,
+        soundcloud_url = EXCLUDED.soundcloud_url,
+        artist_bio = EXCLUDED.artist_bio,
+        artist_wikipedia_url = EXCLUDED.artist_wikipedia_url,
+        genres = EXCLUDED.genres,
+        styles = EXCLUDED.styles
     `;
 
     // Library-unlinked rotation row (denormalized artist/album snapshot) —
@@ -243,6 +297,24 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
       RETURNING id
     `;
 
+    // BS#2103: the enrichment probe play, linked to ENRICHED_LIB_ID.
+    const enrichedPlay = await sql`
+      INSERT INTO ${sql(SCHEMA)}.flowsheet
+        (entry_type, play_order, artist_name, album_title, track_title, record_label, album_id, request_flag, metadata_status)
+      VALUES ('track', 91611, ${ENRICHED_ARTIST}, ${ENRICHED_ALBUM}, 'stabilise', 'ATO Records', ${ENRICHED_LIB_ID}, false, 'enriched_match')
+      RETURNING id
+    `;
+
+    // BS#2103: an unenriched free-text play — no album_id, so no library and no
+    // album_metadata row, and every inline metadata column NULL. Proves the
+    // no-enrichment payload carries no URL key at all (never `""`).
+    const unenrichedPlay = await sql`
+      INSERT INTO ${sql(SCHEMA)}.flowsheet
+        (entry_type, play_order, artist_name, album_title, track_title, request_flag)
+      VALUES ('track', 91612, 'BS2103 Unenriched Artist', 'BS2103 Unenriched Album', 'Probe Track (no metadata)', false)
+      RETURNING id
+    `;
+
     const talksetRow = await sql`
       INSERT INTO ${sql(SCHEMA)}.flowsheet (entry_type, play_order, message)
       VALUES ('talkset', 91603, 'BS88 probe talkset')
@@ -284,7 +356,9 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
       showEndRow[0].id, // [7]
       albumIdRotationPlay[0].id, // [8]
       libraryLinkedRotationPlay[0].id, // [9]
-      newlineArtistPlay[0].id // [10]
+      newlineArtistPlay[0].id, // [10]
+      enrichedPlay[0].id, // [11] BS#2103 fully-enriched probe
+      unenrichedPlay[0].id // [12] BS#2103 no-metadata probe
     );
   });
 
@@ -407,6 +481,98 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
     expect(res.body.playcuts.length).toBeLessThanOrEqual(50);
   });
 
+  // --- v=2 metadata enrichment (BS#2103) ---
+  //
+  // Shipped iOS 3.2 reads THIS endpoint (via the wxyc.info proxy) and already
+  // decodes the full metadata set; the server just never sent it. These tests
+  // are key-name-exact on purpose: a wrong name fails silently on the client
+  // (JSONDecoder drops the key), so the camelCase names — and the two
+  // deliberate snake_case exceptions — are asserted literally.
+
+  test('a fully-enriched playcut carries the metadata under the iOS 3.2 camelCase keys', async () => {
+    const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
+
+    const entry = res.body.playcuts.find((p) => p.id === flowsheetIds[11]);
+    expect(entry).toBeDefined();
+    // Diacritic survives the round trip byte-for-byte.
+    expect(entry.artistName).toBe(ENRICHED_ARTIST);
+    expect(entry.artworkURL).toBe(ENRICHED_ARTWORK);
+    expect(entry.releaseYear).toBe(2022);
+    expect(entry.appleMusicURL).toBe(ENRICHED_APPLE);
+    expect(entry.youtubeMusicURL).toBe(ENRICHED_YOUTUBE);
+    expect(entry.bandcampURL).toBe(ENRICHED_BANDCAMP);
+    expect(entry.soundcloudURL).toBe(ENRICHED_SOUNDCLOUD);
+    expect(entry.artistBio).toBe(ENRICHED_BIO);
+    expect(entry.artistWikipediaURL).toBe(ENRICHED_WIKIPEDIA);
+    expect(entry.genres).toEqual(['Rock']);
+    expect(entry.styles).toEqual(['Indie Rock', 'Art Rock']);
+    expect(entry.artistId).toBe(ART);
+    // Key camelCase, VALUE snake_case — the raw MetadataStatus enum.
+    expect(entry.metadataStatus).toBe('enriched_match');
+    expect(entry.discogsUnavailable).toBe(false);
+  });
+
+  test("suppresses a spotify_url whose host isn't Spotify (BS#1714, end to end)", async () => {
+    const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
+
+    const entry = res.body.playcuts.find((p) => p.id === flowsheetIds[11]);
+    // The persisted value is a Bandcamp URL mislabeled as Spotify; it must not
+    // reach the hardwired iOS "Spotify" button.
+    expect(entry.spotifyURL).toBeUndefined();
+    // The correctly-hosted Bandcamp sibling is unaffected.
+    expect(entry.bandcampURL).toBe(ENRICHED_BANDCAMP);
+  });
+
+  test("never emits the '' discogs synthetic-match sentinel as a URL (BS#1628 + the throwing iOS URL decode)", async () => {
+    const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
+
+    const entry = res.body.playcuts.find((p) => p.id === flowsheetIds[11]);
+    // `decodeIfPresent(URL.self, …)` THROWS on '' and would fail the whole
+    // Playcut decode, blanking the playlist. The key must be absent entirely.
+    expect(Object.prototype.hasOwnProperty.call(entry, 'discogsURL')).toBe(false);
+  });
+
+  test('a play with no metadata emits no URL keys at all — never ""', async () => {
+    const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
+
+    const entry = res.body.playcuts.find((p) => p.id === flowsheetIds[12]);
+    expect(entry).toBeDefined();
+    for (const key of [
+      'artworkURL',
+      'discogsURL',
+      'spotifyURL',
+      'appleMusicURL',
+      'youtubeMusicURL',
+      'bandcampURL',
+      'soundcloudURL',
+      'artistWikipediaURL',
+    ]) {
+      expect(Object.prototype.hasOwnProperty.call(entry, key)).toBe(false);
+    }
+    expect(entry.releaseYear).toBeUndefined();
+    expect(entry.artistBio).toBeUndefined();
+    expect(entry.genres).toBeUndefined();
+    expect(entry.artistId).toBeUndefined();
+    // No library row -> the discogs-unavailable flag is omitted, not `false`.
+    expect(Object.prototype.hasOwnProperty.call(entry, 'discogsUnavailable')).toBe(false);
+    // metadata_status is NOT NULL on the table, so it always rides.
+    expect(entry.metadataStatus).toBe('pending');
+  });
+
+  test('metadata keys off the play’s own album_id, matching /flowsheet (artwork keeps its own lookup-key tie-break)', async () => {
+    const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
+
+    const lpEntry = res.body.playcuts.find((p) => p.id === flowsheetIds[1]);
+    // PRESS_LP's album_metadata row holds artwork ONLY, so the LP play gets no
+    // streaming links even though its artwork resolves (via the BS#1105
+    // lookup-key tie-break) to the CD press's row. The two resolutions are
+    // deliberately independent: artwork keeps its historical semantics,
+    // everything else uses /flowsheet's own-album_id projection.
+    expect(lpEntry.artworkURL).toBe(CD_ARTWORK);
+    expect(Object.prototype.hasOwnProperty.call(lpEntry, 'spotifyURL')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(lpEntry, 'discogsURL')).toBe(false);
+  });
+
   // --- v=1 flat wire format (Android; BS#1866) ---
 
   test('v absent -> flat ARRAY (Android contract), with X-Last-Modified exposed', async () => {
@@ -463,5 +629,23 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
     const rotationMatch = res.body.find((e) => e.id === flowsheetIds[2]);
     expect(rotationMatch.entryType).toBe('playcut');
     expect(rotationMatch.playcut.rotation).toBe('true');
+  });
+
+  test('flat: carries NONE of the BS#2103 enrichment — the Android contract is untouched', async () => {
+    const res = await request.get('/playlists/recentEntries').query({ v: 1, n: 100 }).expect(200);
+
+    // The fully-enriched probe: rich on v=2, bare here.
+    const enriched = res.body.find((e) => e.id === flowsheetIds[11]);
+    expect(enriched).toBeDefined();
+    expect(Object.keys(enriched).sort()).toEqual(['chronOrderID', 'entryType', 'hour', 'id', 'playcut', 'timeCreated']);
+    expect(Object.keys(enriched.playcut).sort()).toEqual([
+      'artistName',
+      'labelName',
+      'releaseTitle',
+      'request',
+      'rotation',
+      'segue',
+      'songTitle',
+    ]);
   });
 });
