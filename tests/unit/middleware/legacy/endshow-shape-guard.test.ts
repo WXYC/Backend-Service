@@ -54,12 +54,12 @@ const mockDbUpdate = jest.fn().mockReturnValue({
 // Configurable per-test: default resolves to [] (no announcement entry found)
 let mockSelectLimitResult: unknown[] = [];
 
+// where -> limit only. The announcement query lost its ORDER BY when both
+// lifecycle handlers moved to the shared `mirrorAnnouncementEntry` helper, so
+// an orderBy rung here would be dead scaffolding that hides a re-added sort.
 const mockDbSelect = jest.fn().mockReturnValue({
   from: jest.fn().mockReturnValue({
     where: jest.fn().mockReturnValue({
-      orderBy: jest.fn().mockReturnValue({
-        limit: jest.fn().mockImplementation(() => Promise.resolve(mockSelectLimitResult)),
-      }),
       limit: jest.fn().mockImplementation(() => Promise.resolve(mockSelectLimitResult)),
     }),
   }),
@@ -72,7 +72,7 @@ jest.mock('@wxyc/database', () => ({
   },
   user: {},
   flowsheet: { id: 'id', legacy_entry_id: 'legacy_entry_id', show_id: 'show_id', entry_type: 'entry_type' },
-  shows: { id: 'id', legacy_show_id: 'legacy_show_id' },
+  shows: { id: 'id', legacy_show_id: 'legacy_show_id', primary_dj_id: 'primary_dj_id' },
 }));
 
 // Passthrough builders, mirroring mirror.loop-prevention.test.ts. Only the
@@ -83,7 +83,6 @@ jest.mock('drizzle-orm', () => ({
   eq: jest.fn((...args: unknown[]) => args),
   and: jest.fn((...args: unknown[]) => args),
   isNull: jest.fn((column: unknown) => ['isNull', column]),
-  desc: jest.fn(),
 }));
 
 jest.mock('posthog-node', () => ({
@@ -94,8 +93,10 @@ jest.mock('posthog-node', () => ({
 }));
 
 const mockCaptureException = jest.fn();
+const mockCaptureMessage = jest.fn();
 jest.mock('@sentry/node', () => ({
   captureException: mockCaptureException,
+  captureMessage: mockCaptureMessage,
 }));
 
 const mockIsActiveRotationMatch = jest.fn().mockResolvedValue(false);
@@ -152,8 +153,42 @@ describe('endShow mirror payload shape guard (BS#1119)', () => {
       await runMiddleware(flowsheetMirror.endShow, { unexpected: true });
 
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Unrecognized show-route payload'), ['unexpected']);
+      // console.warn goes to container stdout, which nothing alerts on — the
+      // silent-stop lane has to reach Sentry to be a real signal.
+      expect(mockCaptureMessage).toHaveBeenCalledWith(
+        expect.stringContaining('Unrecognized show-route payload'),
+        expect.objectContaining({ level: 'warning', extra: { keys: ['unexpected'] } })
+      );
       expect(mockDbSelect).not.toHaveBeenCalled();
       expect(mockMirrorSignoffShow).not.toHaveBeenCalled();
+      expect(mockCaptureException).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('skips a Show-SHAPED payload whose id is null, loudly (id is tested by value, not presence)', async () => {
+    // `'id' in data` would pass this: the key is there, the value is not. Every
+    // downstream read keys on it — getCachedShowId(null), and an
+    // eq(flowsheet.show_id, null) that binds NULL and matches nothing, silently
+    // dropping the marker. That is BS#1119's own failure mode, so it belongs in
+    // the loud lane rather than past the gate.
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await runMiddleware(flowsheetMirror.endShow, {
+        id: null,
+        primary_dj_id: 'primary-dj-user-id',
+        end_time: '2026-07-06T16:00:00.000Z',
+      });
+
+      expect(mockDbSelect).not.toHaveBeenCalled();
+      expect(mockMirrorSignoffShow).not.toHaveBeenCalled();
+      expect(mockMirrorCreateEntry).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Unrecognized show-route payload'),
+        expect.any(Array)
+      );
+      expect(mockCaptureMessage).toHaveBeenCalled();
       expect(mockCaptureException).not.toHaveBeenCalled();
     } finally {
       warnSpy.mockRestore();
@@ -226,6 +261,31 @@ describe('endShow mirror payload shape guard (BS#1119)', () => {
 
     expect(mockGetCachedShowId).toHaveBeenCalledWith(202);
     expect(mockMirrorSignoffShow).toHaveBeenCalledWith(171502, new Date('2026-07-06T16:00:00.000Z').getTime());
+    expect(mockCaptureException).not.toHaveBeenCalled();
+  });
+
+  it('mirrors NEITHER arm when the show has no resolvable tubafrenzy id', async () => {
+    // Both lanes are exhausted: nothing cached, legacy_show_id NULL (the
+    // startShow mirror failed). The signoff was already guarded; the
+    // announcement arm used to fall through and POST an END_OF_SHOW with a
+    // null radio-show id — an orphan entry — and then stamp legacy_entry_id on
+    // the marker, hiding it from legacy-mirror-reconcile's
+    // `legacy_entry_id IS NULL` sweep permanently. One guard, both arms.
+    mockGetCachedShowId.mockReturnValue(undefined);
+    mockSelectLimitResult = [{ id: 8, show_id: 203, entry_type: 'show_end', legacy_entry_id: null }];
+    mockMirrorCreateEntry.mockResolvedValue(999002);
+
+    await runMiddleware(flowsheetMirror.endShow, {
+      id: 203,
+      primary_dj_id: 'primary-dj-user-id',
+      legacy_show_id: null,
+      start_time: '2026-07-06T14:00:00.000Z',
+      end_time: '2026-07-06T16:00:00.000Z',
+    });
+
+    expect(mockMirrorSignoffShow).not.toHaveBeenCalled();
+    expect(mockMirrorCreateEntry).not.toHaveBeenCalled();
+    expect(mockDbUpdate).not.toHaveBeenCalled();
     expect(mockCaptureException).not.toHaveBeenCalled();
   });
 });

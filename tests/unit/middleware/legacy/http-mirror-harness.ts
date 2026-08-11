@@ -83,9 +83,10 @@ export async function runMiddleware(
   // res.locals.mirrorData, then the mock emits finish.
   res.send(JSON.stringify(payload));
 
-  // Drain: one loop turn delivers the setTimeout(0) finish emit; the rest
-  // cover the awaits inside the handler chain (flag check → execute →
-  // per-handler db/http mock awaits).
+  // Drain: the first turn delivers createMockRes's setImmediate finish emit
+  // (deliberately NOT a setTimeout — see the note there); the rest cover the
+  // awaits inside the handler chain (flag check → execute → per-handler
+  // db/http mock awaits).
   for (let i = 0; i < 8; i++) {
     await new Promise((resolve) => setImmediate(resolve));
   }
