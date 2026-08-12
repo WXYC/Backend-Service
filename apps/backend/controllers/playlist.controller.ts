@@ -34,8 +34,8 @@ function parseN(raw: unknown, def: number, max: number): number {
  *
  * Query params:
  *   v — wire-format version. `v=2` → grouped `{playcuts, talksets,
- *       breakpoints}` (iOS). Absent or any other value → v=1 flat array
- *       (Android's contract — Android sends no `v`). BS#1866.
+ *       breakpoints[, onAir]}` (iOS). Absent or any other value → v=1 flat
+ *       array (Android's contract — Android sends no `v`). BS#1866.
  *   n — entry count. v=2: playcuts returned (default 50, clamped [1, 100]).
  *       v=1: total entries returned (default 200, clamped [1, 200]).
  *
@@ -44,14 +44,20 @@ function parseN(raw: unknown, def: number, max: number): number {
  * BS#2103, the full `/flowsheet` metadata set (streaming links, bio,
  * genres/styles, release year, artist id, upcoming show, critic reviews)
  * under the camelCase keys shipped iOS 3.2 decodes — see
- * playlist-proxy.service.ts. v=1 carries none of it (tubafrenzy's v=1 never
- * carried artwork either — Android resolves its own).
+ * playlist-proxy.service.ts. Since BS#2105, the v=2 envelope also carries a
+ * top-level `onAir` field (a sibling of `playcuts`, not a per-playcut field)
+ * so the on-air banner renders on this legacy path too — see
+ * playlist-proxy.service.ts's `WireOnAir`/`encodeOnAir` for its (hazardous,
+ * Swift-synthesized) wire shape. v=1 carries neither enrichment nor `onAir`
+ * (tubafrenzy's v=1 never carried artwork either — Android resolves its own).
  *
  * Headers:
- *   Cache-Control: public, max-age=30
+ *   Cache-Control: public, max-age=30 — also the effective staleness bound on
+ *     `onAir`, since this route has no separate on-air-specific cache policy.
  *   X-Last-Modified: max entry `timeCreated` in the served window (BS#1866),
  *     exposed via Access-Control-Expose-Headers for the browser page's
- *     conditional-fetch parity.
+ *     conditional-fetch parity. NOT a valid change-detector for `onAir` — see
+ *     `lastModifiedFromTimestamps`'s doc comment in playlist-proxy.service.ts.
  *
  * A DB failure is caught here and written as a DIRECT 503 response — it must
  * not be thrown into the error pipeline, because `sentryErrorFilter` captures
