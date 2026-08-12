@@ -12,7 +12,7 @@
     "docker:build": "docker build -t wxyc_legacy_dj_name_remediation:ci -f ../../Dockerfile.legacy-dj-name-remediation ../../",
     "dev": "tsup --watch"
   },
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
     "@wxyc/database": "^1.0.0"
   },

@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit"
   },
   "author": "AyBruno",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "^3.1106.0",
     "@sentry/node": "^10.69.0",

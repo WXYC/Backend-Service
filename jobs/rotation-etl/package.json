@@ -13,7 +13,7 @@
     "docker:build": "docker build -t wxyc_rotation_etl:ci -f ../../Dockerfile.rotation-etl ../../",
     "dev": "tsup --watch"
   },
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
     "@wxyc/database": "^1.0.0"
   },

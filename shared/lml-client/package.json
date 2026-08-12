@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Shared HTTP client for the library-metadata-lookup (LML) service. One chokepoint for every WXYC backend caller (Express app + cron jobs).",
   "author": "WXYC",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "exports": {
     ".": {
       "source": "./src/index.ts",

@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Types and Middleware for Authentication in WXYC Services",
   "author": "Jackson Meade",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "exports": {
     ".": {
       "source": "./src/index.ts",

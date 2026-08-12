@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Shared Sentry transaction/span filter predicates (BS#2089). Single source of truth for dropping liveness-route transactions (/ok, /healthcheck) and Express middleware bookkeeping spans, consumed by apps/backend/instrument.ts and apps/auth/instrument.ts so both containers apply byte-identical filtering.",
   "author": "WXYC",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "exports": {
     ".": {
       "source": "./src/index.ts",

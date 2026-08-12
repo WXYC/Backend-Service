@@ -14,7 +14,7 @@
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit"
   },
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
     "@wxyc/database": "^1.0.0",
     "postgres": "^3.4.9"

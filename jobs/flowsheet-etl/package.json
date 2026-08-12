@@ -13,7 +13,7 @@
     "docker:build": "docker build -t wxyc_flowsheet_etl:ci -f ../../Dockerfile.flowsheet-etl ../../",
     "dev": "tsup --watch"
   },
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
     "@sentry/node": "^10.69.0",
     "@wxyc/database": "^1.0.0"

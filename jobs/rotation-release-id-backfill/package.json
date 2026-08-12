@@ -12,7 +12,7 @@
     "docker:build": "docker build -t wxyc_rotation_release_id_backfill:ci -f ../../Dockerfile.rotation-release-id-backfill ../../",
     "dev": "tsup --watch"
   },
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
     "@sentry/node": "^10.69.0",
     "@wxyc/database": "^1.0.0",

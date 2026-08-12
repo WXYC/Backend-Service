@@ -1,6 +1,7 @@
 {
   "name": "@wxyc/rotation-release-id-pollution-check",
   "version": "1.0.0",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "private": true,
   "description": "Weekly recurring rotation release-id pollution check (BS#1522): re-runs the #1517 audit scoring against prod and alerts per-rotation_id on mismatch + provenance anomalies",
   "job-type": "cron",
