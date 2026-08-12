@@ -760,6 +760,25 @@ describe('library.controller', () => {
       expect(mockInsertArtist).not.toHaveBeenCalled();
     });
 
+    it('creates the artist when the name match disappears between the two lookups', async () => {
+      mockArtistIdFromName.mockResolvedValue(7);
+      mockGetArtistById.mockResolvedValue(null);
+      mockInsertArtist.mockResolvedValue({
+        id: 55,
+        artist_name: 'Chuquimamani-Condori',
+        alphabetical_name: 'Chuquimamani-Condori',
+        code_letters: 'CH',
+      });
+
+      const res = mockResponse();
+      await addArtist(req(), res, next);
+
+      expect(res.status).toHaveBeenCalledWith(201);
+      expect(mockInsertArtist).toHaveBeenCalled();
+      // Never a 409 that asserts a conflicting artist it cannot name.
+      expect(res.json).not.toHaveBeenCalledWith(expect.objectContaining({ artist: null }));
+    });
+
     it('prefers the code-triple conflict over a simultaneous name conflict, deterministically', async () => {
       mockGetArtistByCode.mockResolvedValue({ artist_id: 3, artist_name: 'Jockstrap', code_letters: 'CH' });
       mockArtistIdFromName.mockResolvedValue(7);
