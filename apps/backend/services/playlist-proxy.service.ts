@@ -48,6 +48,17 @@
  * data has to come to them on this endpoint. See `enrichPlaycutMetadata`.
  * v=1 (Android) is deliberately untouched.
  *
+ * On-air status (BS#2105). The v=2 grouped envelope additionally carries a
+ * top-level `onAir` field, a sibling of `playcuts`/`talksets`/`breakpoints`,
+ * so a 3.2 client on this legacy path renders the on-air banner with the live
+ * DJ's handle instead of hiding it. Unlike every other field on this
+ * endpoint, `onAir`'s wire shape is NOT a plain object — it is whatever
+ * Swift's SYNTHESIZED `Codable` produces for the shipped `OnAir` enum
+ * (`{"dj":{"_0":name}}` / `{"automation":{}}`), which is why it goes through
+ * a dedicated `WireOnAir` union and `encodeOnAir` helper rather than the
+ * ad-hoc object literals the rest of this file builds. See `encodeOnAir`.
+ * v=1 (Android) is untouched here too.
+ *
  * Exported API:
  *   getRecentEntries(n) — query Postgres for the current playlist grouped
  *                         by entry type, sliced to n playcuts. Async (was
@@ -63,7 +74,7 @@ import {
   suppressMislabeledStreamingUrls,
 } from '../utils/album-metadata-projection.js';
 import type { ConcertDTO } from './concerts.service.js';
-import { attachUpcomingShows, attachCriticReviews } from './flowsheet.service.js';
+import { attachUpcomingShows, attachCriticReviews, getOnAirDJName } from './flowsheet.service.js';
 
 const MAX_ENTRIES = 200;
 const HOUR_MS = 3_600_000;
@@ -197,6 +208,47 @@ function setUrlField(target: GroupedPlaycut, key: UrlWireKey, value: string | nu
   }
 }
 
+/**
+ * The wire shape iOS 3.2's `OnAir` enum's SYNTHESIZED Codable expects
+ * (BS#2105) — not something anyone would guess from the JSON alone.
+ *
+ * `OnAir` (`Shared/Playlist/Sources/Playlist/OnAir.swift`) is `enum OnAir {
+ * case dj(String); case automation; case unknown }` with no custom
+ * `init(from:)`, so it decodes/encodes via Swift's default synthesized
+ * `Codable`. Measured by executing the real encoder against the shipped enum,
+ * not inferred:
+ *   `JSONEncoder().encode(OnAir.dj("bill b"))` -> `{"dj":{"_0":"bill b"}}`
+ *   `JSONEncoder().encode(OnAir.automation)`   -> `{"automation":{}}`
+ * `_0` is the synthesized label Swift gives an unlabeled single associated
+ * value. The `_0` literal exists in exactly this ONE place in the codebase —
+ * {@link encodeOnAir} is the only function permitted to construct it.
+ *
+ * `.unknown` has no wire form here: the caller omits the `onAir` key entirely
+ * rather than emit `{"unknown":{}}` — both decode to `OnAir.unknown` (an
+ * absent key falls through `?? .unknown` in `Playlist.init(from:)`), but the
+ * explicit form costs bytes for nothing.
+ */
+export type WireOnAir = { dj: { _0: string } } | { automation: Record<string, never> };
+
+/**
+ * Encode `getOnAirDJName()`'s two DEFINITIVE outcomes into {@link WireOnAir}.
+ *
+ * `getOnAirDJName`'s own contract: a non-null name means a human is on air
+ * (including the `ANONYMOUS_ON_AIR_NAME` = `"WXYC"` fallback for a legacy
+ * sign-on with no resolvable handle); `null` is reserved EXCLUSIVELY for
+ * confirmed automation. This mirrors that exactly, just re-keyed for this
+ * endpoint's hazardous Swift-synthesized shape instead of `/flowsheet`'s
+ * plain `{dj_name}` projection (`flowsheet.controller.ts`).
+ *
+ * The THIRD outcome — the resolver rejected — never reaches this function.
+ * It is handled at the call site by omitting the `onAir` key entirely (see
+ * `getRecentEntries`), which is also why this signature takes `string |
+ * null` rather than `string | null | undefined`.
+ */
+function encodeOnAir(name: string | null): WireOnAir {
+  return name !== null ? { dj: { _0: name } } : { automation: {} };
+}
+
 // --- Types ---
 
 /**
@@ -277,6 +329,21 @@ export interface GroupedResponse {
   playcuts: GroupedPlaycut[];
   talksets: BaseEntry[];
   breakpoints: BaseEntry[];
+  /**
+   * On-air status (BS#2105), a sibling of `playcuts`/`talksets`/`breakpoints`
+   * rather than a per-playcut field. Present as {@link WireOnAir} when
+   * `getOnAirDJName()` resolved (either a named DJ or confirmed automation);
+   * OMITTED entirely when the resolver rejected — never `{"unknown":{}}`.
+   *
+   * Declared LAST deliberately: `JSON.stringify` emits insertion order, and
+   * the cross-repo golden (`tests/fixtures/recent-entries-v2-wire-golden.json`)
+   * pins the resulting bytes. `getRecentEntries` below sets it last via a
+   * trailing conditional spread for the same reason. This differs from
+   * `Playlist`'s Swift `CodingKeys` order (`playcuts, breakpoints, talksets,
+   * showMarkers, onAir`) — irrelevant to the decoder, load-bearing only for
+   * the golden diff.
+   */
+  onAir?: WireOnAir;
 }
 
 type RecentRow = {
@@ -413,7 +480,23 @@ async function fetchRecentRows(limit: number): Promise<RecentRow[]> {
  * the playcuts sub-array at read time.
  */
 export async function getRecentEntries(n: number): Promise<GroupedResponse> {
-  const rows = await fetchRecentRows(MAX_ENTRIES);
+  // BS#2105: resolve on-air status concurrently with the window query, not
+  // behind it. getOnAirDJName has no dependency on `rows`, and it is itself
+  // two SEQUENTIAL queries (getNShows(1) + at most one user PK lookup) —
+  // parking it in the enrichment Promise.all below (round trip 2 of 3) could
+  // make it that wave's critical path. Starting it here instead hides it
+  // entirely behind the 200-row window query.
+  //
+  // `.catch(() => undefined)` is attached to THIS promise, not wrapped around
+  // the whole Promise.all. getRecentEntries has no other try/catch: a
+  // rejection here would otherwise propagate to playlist.controller.ts, which
+  // fail-softs to a 503 for the ENTIRE legacy mobile fleet. An on-air blip
+  // must cost only the banner (the `onAir` key is omitted below when this
+  // resolves `undefined`), never the playlist.
+  const [rows, onAirDjName] = await Promise.all([
+    fetchRecentRows(MAX_ENTRIES),
+    getOnAirDJName().catch(() => undefined),
+  ]);
 
   const playcutRows: RecentRow[] = [];
   const talksetRows: RecentRow[] = [];
@@ -486,6 +569,9 @@ export async function getRecentEntries(n: number): Promise<GroupedResponse> {
     playcuts,
     talksets: talksetRows.map(toBaseEntry),
     breakpoints: breakpointRows.map(toBaseEntry),
+    // Last key deliberately — see the GroupedResponse.onAir doc comment.
+    // Omitted (not `{"unknown":{}}`) when the resolver rejected above.
+    ...(onAirDjName !== undefined && { onAir: encodeOnAir(onAirDjName) }),
   };
 }
 
@@ -611,6 +697,14 @@ export async function getRecentEntriesFlat(n: number): Promise<FlatEntry[]> {
  * appears. Computed from the served payload, so the v=2 value can miss a
  * showDelimiter that the grouped shape drops — inconsequential, since v=2
  * (iOS) never sends `?since`, and the bridge's `?since` path stays on legacy.
+ *
+ * The same gap makes `X-Last-Modified` NOT a valid change-detector for
+ * `onAir` (BS#2105): a sign-on/sign-off writes no playcut/talkset/breakpoint
+ * of its own, so this header does not move the moment the banner would.
+ * Freshness for `onAir` is bounded instead by the endpoint's own
+ * `Cache-Control: public, max-age=30` (set in playlist.controller.ts) — up to
+ * 30s of staleness at any caching intermediary, on top of the client's poll
+ * interval, is accepted here as a documented tradeoff, not a bug to reopen.
  */
 export function lastModifiedFromTimestamps(timestamps: number[]): number {
   return timestamps.length > 0 ? Math.max(...timestamps) : 0;

@@ -40,6 +40,14 @@
  * degenerate `text[]` members (`[null]`, which has a truthy `.length` and
  * throws on `decodeIfPresent([String].self)`). They are pinned here so the
  * guards that close them cannot be removed silently by a future refactor.
+ *
+ * BS#2105 added the top-level `onAir` field (a sibling of `playcuts`, not a
+ * per-playcut field) to this same golden — see the "onAir wire encoding"
+ * block below. Its wire shape is Swift's SYNTHESIZED Codable encoding for the
+ * shipped `OnAir` enum, unrelated to and much stranger than anything in the
+ * per-playcut matrix above; `getOnAirDJName` must be mocked explicitly here
+ * for the same reason the two flowsheet.service attaches already are (see
+ * the module mock below).
  */
 /* eslint-disable security/detect-non-literal-fs-filename --
  * Every path here is GOLDEN_PATH, a module constant built from __dirname. There
@@ -134,10 +142,16 @@ jest.mock('drizzle-orm', () => ({
 type AttachTarget = { upcoming_show?: unknown; critic_reviews?: unknown };
 const mockAttachUpcomingShows = jest.fn((entries: AttachTarget[]) => Promise.resolve(entries));
 const mockAttachCriticReviews = jest.fn((entries: AttachTarget[]) => Promise.resolve(entries));
+// BS#2105: must be mocked explicitly — an unmocked jest.fn() returns
+// `undefined`, not a Promise, and `getOnAirDJName().catch(...)` would throw
+// synchronously on the missing `.catch`, silently pinning garbage into the
+// golden. See playlist-proxy.service.test.ts for the same trap.
+const mockGetOnAirDJName = jest.fn<() => Promise<string | null>>();
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   attachUpcomingShows: (entries: AttachTarget[]) => mockAttachUpcomingShows(entries),
   attachCriticReviews: (entries: AttachTarget[]) => mockAttachCriticReviews(entries),
+  getOnAirDJName: () => mockGetOnAirDJName(),
 }));
 
 jest.spyOn(console, 'log').mockImplementation(() => {});
@@ -158,7 +172,7 @@ const GOLDEN_PATH = join(__dirname, '../../fixtures/recent-entries-v2-wire-golde
  * file from the fixture, so regenerating one without acknowledging the other is
  * a red test rather than a silent change.
  */
-const GOLDEN_SHA256 = 'a789b99b863374b44ba2c8ca0c3393d9659987ff1e403e1be90834c500a49313';
+const GOLDEN_SHA256 = '46a1064409f65356e076390bd209c198d0a8748ccb23bd51b5fb7ae1409c8f70';
 
 /** Fixed ids and add_times — the payload must be byte-reproducible. */
 function row(id: number, albumId: number | null, artist: string, album: string, track: string, seconds: number) {
@@ -319,6 +333,11 @@ describe('BS#2103 v=2 wire golden (cross-repo contract with iOS 3.2)', () => {
     mockArtworkInnerJoin.mockReturnValue(artworkChain);
     mockArtworkWhere.mockReturnValue(artworkChain);
     mockExecute.mockResolvedValue([]);
+
+    // BS#2105: the golden pins a human DJ on air. The other two states
+    // ({automation} and the key omitted on a rejection) are pinned by the
+    // dedicated tests below, which override this per-test.
+    mockGetOnAirDJName.mockResolvedValue('BS2105 Probe DJ');
 
     mockLimit.mockResolvedValue(ROWS);
     mockMetadataWhere.mockResolvedValue(METADATA);
@@ -523,5 +542,45 @@ describe('BS#2103 v=2 wire golden (cross-repo contract with iOS 3.2)', () => {
     // trimmed) discogs URL carries her status with it.
     expect(byArtist('Juana Molina').metadataStatus).toBe('enriched_match');
     expect(byArtist('Nilüfer Yanya').metadataStatus).toBe('enriched_match');
+  });
+
+  // BS#2105: onAir's wire shape is Swift's SYNTHESIZED Codable encoding for
+  // the shipped `OnAir` enum, not a plain object anyone would guess. The
+  // golden above pins one state (a human DJ) byte-for-byte; these three pin
+  // the full tri-state matrix deliberately, since `getOnAirDJName` must be
+  // mocked explicitly here (see the module-mock comment above) and a missed
+  // mock would otherwise silently pin garbage rather than fail loud.
+  describe('onAir wire encoding (BS#2105)', () => {
+    it('emits {dj:{_0:name}} for a resolved DJ handle — the golden state', () => {
+      const golden = JSON.parse(readFileSync(GOLDEN_PATH, 'utf8'));
+      expect(golden.onAir).toEqual({ dj: { _0: 'BS2105 Probe DJ' } });
+    });
+
+    it('emits {automation:{}} when getOnAirDJName resolves null', async () => {
+      mockGetOnAirDJName.mockResolvedValue(null);
+
+      const payload = await getRecentEntries(50);
+
+      expect(payload.onAir).toEqual({ automation: {} });
+    });
+
+    it('omits the onAir key — never {"unknown":{}} — when getOnAirDJName rejects', async () => {
+      mockGetOnAirDJName.mockRejectedValue(new Error('DB connection reset'));
+
+      const payload = await getRecentEntries(50);
+
+      expect(Object.prototype.hasOwnProperty.call(payload, 'onAir')).toBe(false);
+      // The blip cost only the banner — the rest of the golden payload is
+      // still fully populated.
+      expect(payload.playcuts).toHaveLength(14);
+    });
+
+    it('is the last key in the envelope', async () => {
+      mockGetOnAirDJName.mockResolvedValue('BS2105 Probe DJ');
+
+      const payload = await getRecentEntries(50);
+
+      expect(Object.keys(payload)).toEqual(['playcuts', 'talksets', 'breakpoints', 'onAir']);
+    });
   });
 });

@@ -203,10 +203,18 @@ type AttachTarget = {
 };
 const mockAttachUpcomingShows = jest.fn((entries: AttachTarget[]) => Promise.resolve(entries));
 const mockAttachCriticReviews = jest.fn((entries: AttachTarget[]) => Promise.resolve(entries));
+// BS#2105: must be mocked explicitly, same reason as the two attaches above —
+// an unmocked `jest.fn()` returns `undefined`, not a Promise, and
+// `getOnAirDJName().catch(...)` would throw synchronously on the missing
+// `.catch`. Default resolves `null` (confirmed automation) in beforeEach so
+// every pre-existing test in this file gets a defined, non-crashing value
+// without having to know this field exists.
+const mockGetOnAirDJName = jest.fn<() => Promise<string | null>>();
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   attachUpcomingShows: (entries: AttachTarget[]) => mockAttachUpcomingShows(entries),
   attachCriticReviews: (entries: AttachTarget[]) => mockAttachCriticReviews(entries),
+  getOnAirDJName: () => mockGetOnAirDJName(),
 }));
 
 // Suppress console output in tests
@@ -379,6 +387,10 @@ describe('playlist-proxy.service', () => {
     mockMetadataWhere.mockResolvedValue([]); // metadata query default: no rows
     mockAttachUpcomingShows.mockImplementation((entries) => Promise.resolve(entries));
     mockAttachCriticReviews.mockImplementation((entries) => Promise.resolve(entries));
+    // BS#2105 default: confirmed automation. Tests that care about the on-air
+    // state override this explicitly; everything else gets a defined,
+    // non-crashing value.
+    mockGetOnAirDJName.mockResolvedValue(null);
   });
 
   describe('getRecentEntries — grouping and entry_type mapping', () => {
@@ -1361,6 +1373,104 @@ describe('playlist-proxy.service', () => {
         'segue',
         'songTitle',
       ]);
+    });
+  });
+
+  // BS#2105: on-air status as a top-level `onAir` sibling of `playcuts`, so a
+  // 3.2 client on the legacy v=1 path renders the on-air banner. `onAir`'s
+  // wire shape is not `/flowsheet`'s `{dj_name}` — it is whatever Swift's
+  // SYNTHESIZED Codable produces for the shipped `enum OnAir { case
+  // dj(String); case automation; case unknown }`, which is why the encoder is
+  // a dedicated `WireOnAir` union + `encodeOnAir` helper rather than a literal
+  // object built inline.
+  describe('getRecentEntries — on-air status (BS#2105)', () => {
+    it('emits {dj:{_0:name}} when a human DJ is on air', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockGetOnAirDJName.mockResolvedValue('bill b');
+
+      const result = await getRecentEntries(50);
+
+      expect(result.onAir).toEqual({ dj: { _0: 'bill b' } });
+    });
+
+    it('emits {automation:{}} when getOnAirDJName resolves null (confirmed automation)', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockGetOnAirDJName.mockResolvedValue(null);
+
+      const result = await getRecentEntries(50);
+
+      expect(result.onAir).toEqual({ automation: {} });
+    });
+
+    it('omits the onAir key entirely — never {"unknown":{}} — when getOnAirDJName rejects', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow, talksetRow, breakpointRow]);
+      mockGetOnAirDJName.mockRejectedValue(new Error('DB connection reset'));
+
+      const result = await getRecentEntries(50);
+
+      expect(Object.prototype.hasOwnProperty.call(result, 'onAir')).toBe(false);
+    });
+
+    // The highest-risk slip the issue calls out: getRecentEntries has no
+    // internal try/catch, and any rejection propagates to
+    // playlist.controller.ts, which 503s the ENTIRE legacy mobile fleet. A
+    // rejecting getOnAirDJName must cost only the banner (previous test),
+    // never turn into a 503 for everyone else's playlist.
+    it('still resolves (never rejects) with a full playlist when getOnAirDJName rejects', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow, talksetRow, breakpointRow]);
+      mockGetOnAirDJName.mockRejectedValue(new Error('DB connection reset'));
+
+      await expect(getRecentEntries(50)).resolves.toEqual(
+        expect.objectContaining({
+          playcuts: expect.arrayContaining([expect.objectContaining({ artistName: 'Jessica Pratt' })]),
+          talksets: expect.arrayContaining([expect.objectContaining({ id: talksetRow.id })]),
+          breakpoints: expect.arrayContaining([expect.objectContaining({ id: breakpointRow.id })]),
+        })
+      );
+    });
+
+    it('places onAir as the LAST key in the envelope (wire-visible insertion order)', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockGetOnAirDJName.mockResolvedValue('bill b');
+
+      const result = await getRecentEntries(50);
+
+      expect(Object.keys(result)).toEqual(['playcuts', 'talksets', 'breakpoints', 'onAir']);
+    });
+
+    it('resolves getOnAirDJName concurrently with the window query, before the metadata batch', async () => {
+      const callOrder: string[] = [];
+      mockLimit.mockImplementation(() => {
+        callOrder.push('rows');
+        return Promise.resolve([jessicaPrattRow]);
+      });
+      mockMetadataWhere.mockImplementation(() => {
+        callOrder.push('metadata');
+        return Promise.resolve([]);
+      });
+      mockGetOnAirDJName.mockImplementation(() => {
+        callOrder.push('onair');
+        return Promise.resolve('bill b');
+      });
+
+      await getRecentEntries(50);
+
+      // getOnAirDJName is invoked in the SAME wave as fetchRecentRows — not
+      // parked behind it in the existing enrichment Promise.all, which would
+      // make its two sequential queries that wave's critical path.
+      expect(callOrder[0]).toBe('rows');
+      expect(callOrder[1]).toBe('onair');
+      expect(callOrder.indexOf('onair')).toBeLessThan(callOrder.indexOf('metadata'));
+    });
+
+    it('does not call getOnAirDJName or emit onAir on the v=1 flat path (Android contract)', async () => {
+      mockLimit.mockResolvedValue([jessicaPrattRow]);
+      mockGetOnAirDJName.mockResolvedValue('bill b');
+
+      const [entry] = await getRecentEntriesFlat(50);
+
+      expect(mockGetOnAirDJName).not.toHaveBeenCalled();
+      expect(Object.prototype.hasOwnProperty.call(entry, 'onAir')).toBe(false);
     });
   });
 
