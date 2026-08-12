@@ -12,7 +12,7 @@
     "docker:build": "docker build -t wxyc_rotation_lml_identity_backfill:ci -f ../../Dockerfile.rotation-lml-identity-backfill ../../",
     "dev": "tsup --watch"
   },
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
     "@sentry/node": "^10.69.0",
     "@wxyc/database": "^1.0.0",

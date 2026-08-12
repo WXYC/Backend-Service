@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Database Types and Drizzle Integration for DTOs on the WXYC Flowsheet backend",
   "author": "AyBruno",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "exports": {
     ".": {
       "source": "./src/index.ts",

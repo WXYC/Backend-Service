@@ -62,7 +62,7 @@
     "prepare": "husky || true"
   },
   "author": "AyBruno",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "workspaces": [
     "apps/*",
     "jobs/*",

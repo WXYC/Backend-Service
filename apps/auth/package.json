@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit"
   },
   "author": "Jackson Meade",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
     "@sentry/node": "^10.69.0",
     "@wxyc/authentication": "^1.0.0",

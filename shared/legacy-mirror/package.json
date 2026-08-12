@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Shared tubafrenzy legacy-mirror client: HTTP show/entry create + map helpers and the rotation-match probe. One source of truth for the mirror payload shape, consumed by the Express app's live mirror middleware and the jobs/legacy-mirror-reconcile cron (BS#1707).",
   "author": "WXYC",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "exports": {
     ".": {
       "source": "./src/index.ts",

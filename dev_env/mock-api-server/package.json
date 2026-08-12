@@ -1,6 +1,7 @@
 {
   "name": "wxyc-mock-api-server",
   "version": "1.0.0",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "description": "Mock API server for CI integration tests (LML, Slack, tubafrenzy)",
   "type": "module",
   "main": "dist/server.js",

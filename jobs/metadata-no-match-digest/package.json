@@ -12,7 +12,7 @@
     "docker:build": "docker build -t wxyc_metadata_no_match_digest:ci -f ../../Dockerfile.metadata-no-match-digest ../../",
     "dev": "tsup --watch"
   },
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
     "@aws-sdk/client-ses": "^3.1106.0",
     "@sentry/node": "^10.69.0",

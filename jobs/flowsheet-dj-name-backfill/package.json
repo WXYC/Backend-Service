@@ -12,7 +12,7 @@
     "docker:build": "docker build -t wxyc_flowsheet_dj_name_backfill:ci -f ../../Dockerfile.flowsheet-dj-name-backfill ../../",
     "dev": "tsup --watch"
   },
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
     "@wxyc/database": "^1.0.0"
   },

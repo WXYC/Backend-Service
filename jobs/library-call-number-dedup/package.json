@@ -12,7 +12,7 @@
     "docker:build": "docker build -t wxyc_library_call_number_dedup:ci -f ../../Dockerfile.library-call-number-dedup ../../",
     "dev": "tsup --watch"
   },
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
     "@wxyc/database": "^1.0.0"
   },
