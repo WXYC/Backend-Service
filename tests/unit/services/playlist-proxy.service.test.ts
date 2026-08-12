@@ -1377,7 +1377,14 @@ describe('playlist-proxy.service', () => {
   });
 
   // BS#2105: on-air status as a top-level `onAir` sibling of `playcuts`, so a
-  // 3.2 client on the legacy v=1 path renders the on-air banner. `onAir`'s
+  // 3.2 client reading this endpoint renders the on-air banner. Note the two
+  // unrelated "v1/v2" axes this feature sits between: iOS calls the whole
+  // legacy `/playlists/recentEntries` endpoint its "v1" API (vs `/flowsheet`,
+  // its v2) — but WITHIN this endpoint, `v` selects the wire format, and
+  // `onAir` ships only on the `?v=2` GROUPED shape that `getRecentEntries`
+  // serves. The `?v=1` flat shape is Android's contract and is untouched; the
+  // last test in this block pins that. Everywhere in this file, bare "v=1" and
+  // "v=2" mean the wire format, never the API generation. `onAir`'s
   // wire shape is not `/flowsheet`'s `{dj_name}` — it is whatever Swift's
   // SYNTHESIZED Codable produces for the shipped `enum OnAir { case
   // dj(String); case automation; case unknown }`, which is why the encoder is
@@ -1439,10 +1446,27 @@ describe('playlist-proxy.service', () => {
     });
 
     it('resolves getOnAirDJName concurrently with the window query, before the metadata batch', async () => {
+      // The pin is STRUCTURAL, not order-based: the window query does not
+      // settle until getOnAirDJName has been invoked. A sequential rewrite —
+      // `const rows = await fetchRecentRows(...)` followed by `await
+      // getOnAirDJName()` — can never reach the second call, so it deadlocks
+      // and this test times out instead of passing.
+      //
+      // An invocation-order assertion (`callOrder[0] === 'rows'`, then
+      // `'onair'`) does NOT pin this: a sequential rewrite produces that exact
+      // same order and stays green. Since parking getOnAirDJName behind the
+      // window query — making its two sequential round trips the critical path
+      // — is precisely the regression BS#2105 exists to prevent, the test has
+      // to be able to fail on it.
+      let releaseWindowQuery!: () => void;
+      const windowQueryReleased = new Promise<void>((resolve) => {
+        releaseWindowQuery = resolve;
+      });
+
       const callOrder: string[] = [];
       mockLimit.mockImplementation(() => {
         callOrder.push('rows');
-        return Promise.resolve([jessicaPrattRow]);
+        return windowQueryReleased.then(() => [jessicaPrattRow]);
       });
       mockMetadataWhere.mockImplementation(() => {
         callOrder.push('metadata');
@@ -1450,16 +1474,15 @@ describe('playlist-proxy.service', () => {
       });
       mockGetOnAirDJName.mockImplementation(() => {
         callOrder.push('onair');
+        releaseWindowQuery();
         return Promise.resolve('bill b');
       });
 
-      await getRecentEntries(50);
+      const result = await getRecentEntries(50);
 
-      // getOnAirDJName is invoked in the SAME wave as fetchRecentRows — not
-      // parked behind it in the existing enrichment Promise.all, which would
-      // make its two sequential queries that wave's critical path.
-      expect(callOrder[0]).toBe('rows');
-      expect(callOrder[1]).toBe('onair');
+      expect(mockGetOnAirDJName).toHaveBeenCalledTimes(1);
+      expect(result.onAir).toEqual({ dj: { _0: 'bill b' } });
+      // And still ahead of the enrichment wave (round trip 2 of 3).
       expect(callOrder.indexOf('onair')).toBeLessThan(callOrder.indexOf('metadata'));
     });
 

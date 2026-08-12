@@ -487,15 +487,29 @@ export async function getRecentEntries(n: number): Promise<GroupedResponse> {
   // make it that wave's critical path. Starting it here instead hides it
   // entirely behind the 200-row window query.
   //
-  // `.catch(() => undefined)` is attached to THIS promise, not wrapped around
-  // the whole Promise.all. getRecentEntries has no other try/catch: a
-  // rejection here would otherwise propagate to playlist.controller.ts, which
-  // fail-softs to a 503 for the ENTIRE legacy mobile fleet. An on-air blip
-  // must cost only the banner (the `onAir` key is omitted below when this
-  // resolves `undefined`), never the playlist.
+  // The catch is attached to THIS promise, not wrapped around the whole
+  // Promise.all. getRecentEntries has no other try/catch: a rejection here
+  // would otherwise propagate to playlist.controller.ts, which fail-softs to
+  // a 503 for the ENTIRE legacy mobile fleet. An on-air blip must cost only
+  // the banner (the `onAir` key is omitted below when this resolves
+  // `undefined`), never the playlist.
+  //
+  // Logged to stderr, NOT Sentry — deliberately diverging from the otherwise
+  // identical catch in flowsheet.controller.ts's `getOnAirDJName().catch()`,
+  // which does `Sentry.captureException`. This endpoint is unauthenticated and
+  // polled on a fixed interval by every legacy mobile client, so a persistent
+  // failure here would emit one Sentry event per poll per device — the
+  // catalog-search 503 flood that playlist.controller.ts's own DB-failure path
+  // was written to avoid (see its `console.error` and the comment above it).
+  // A silent swallow would be worse still: the banner would vanish fleet-wide
+  // with an absent JSON key as the only symptom, so the error does get
+  // recorded, just on the channel this endpoint can afford.
   const [rows, onAirDjName] = await Promise.all([
     fetchRecentRows(MAX_ENTRIES),
-    getOnAirDJName().catch(() => undefined),
+    getOnAirDJName().catch((err: unknown) => {
+      console.error('[playlist] Failed to resolve on-air status; omitting the banner:', err);
+      return undefined;
+    }),
   ]);
 
   const playcutRows: RecentRow[] = [];
