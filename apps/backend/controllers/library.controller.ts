@@ -343,16 +343,22 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
     return;
   }
 
-  // Genre-scoped name pre-check, reusing the code-triple check's matcher
-  // semantics (Unicode-form + diacritic + case fold, backed by
-  // `artists_fold_name_idx`) so a name that only differs by composition form
-  // still collides. `reason` is the discriminant a client uses to tell this
-  // conflict apart from the code-triple one above -- the two call for
-  // different remedies (use the named artist vs. pick another code), so
-  // collapsing them into one shape would leave a client unable to choose.
+  // Genre-scoped name pre-check via `artistIdFromName`, whose matcher folds
+  // Unicode form, diacritics and case onto one key (backed by
+  // `artists_fold_name_idx`) so a name differing only by composition form
+  // still collides. That fold is this check's alone -- the code-triple check
+  // above compares `code_letters` byte-for-byte -- so do not describe the two
+  // as sharing matcher semantics. `reason` is the discriminant a client uses
+  // to tell the two conflicts apart: they call for different remedies (use the
+  // named artist vs. pick another code), so one shape would leave a client
+  // unable to choose.
   const conflictingArtistId = await libraryService.artistIdFromName(body.artist_name, body.genre_id);
-  if (conflictingArtistId) {
-    const conflictingArtist = await libraryService.getArtistById(conflictingArtistId);
+  const conflictingArtist = conflictingArtistId ? await libraryService.getArtistById(conflictingArtistId) : null;
+  // A miss on the second lookup means the row was deleted between the two
+  // queries, so the name is free again: proceed rather than answer 409 with an
+  // `artist` the client cannot act on. Neither lookup is backed by a database
+  // constraint, so a concurrent writer can still win this race either way.
+  if (conflictingArtist) {
     res.status(409).json({
       message: 'Artist name already exists in that genre.',
       reason: 'artist_name_conflict',
