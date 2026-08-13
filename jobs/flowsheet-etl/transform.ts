@@ -6,7 +6,7 @@
  */
 
 // Import shared utilities for local use and re-export so existing imports continue to work
-import { epochMsToDate as _epochMsToDate, truncate as _truncate } from '@wxyc/database';
+import { epochMsToDate as _epochMsToDate, truncate as _truncate, isBeyondFutureTolerance } from '@wxyc/database';
 export const epochMsToDate = _epochMsToDate;
 export const truncate = _truncate;
 
@@ -123,13 +123,49 @@ export const parseMySQLDatetime = (datetime: string | null): Date | null => {
  * Resolve the best available timestamp for a FLOWSHEET_ENTRY_PROD row.
  * Prefers START_TIME (epoch ms), falls back to TIME_CREATED, then TIME_LAST_MODIFIED.
  * Most track entries have START_TIME = 0, so the fallback is essential.
+ *
+ * BS#2143: a candidate that resolves to a Date more than
+ * `FUTURE_TIMESTAMP_TOLERANCE_MS` ahead of `now` is treated exactly like a
+ * null/0 candidate — skipped in favour of the next one in the preference
+ * chain. If every candidate is beyond tolerance (or absent), this returns
+ * `null`, same as it always has for an unresolvable row; every caller
+ * (`jobs/flowsheet-etl/job.ts` `importEntries`/`runIncremental`,
+ * `jobs/flowsheet-april-gap-import/build-row.ts` `buildInsertRow`,
+ * `jobs/flowsheet-april-gap-import/orchestrate.ts` `discoverCandidates`)
+ * already `continue`s or returns `null` on a null result, so this introduces
+ * no new failure mode at any call site — a future-dated candidate just joins
+ * the existing "couldn't resolve a timestamp" bucket.
+ *
+ * Deliberately FALLS THROUGH rather than CLAMPING (contrast with the webhook
+ * receiver's `markerTimestamp` in apps/backend/routes/internal.route.ts,
+ * which clamps to the delivery clock — see that assignment's doc comment for
+ * the full webhook-side reasoning and the cross-reference back to here).
+ * This function feeds two importers
+ * (`jobs/flowsheet-etl`, `jobs/flowsheet-april-gap-import`) that legitimately
+ * write HISTORICAL rows, sometimes months old. Clamping a bad `startTime` to
+ * the import's wall clock would stamp a months-old row with `now()` and land
+ * it at the head of exactly the three `add_time DESC`-sorted windows BS#2143
+ * exists to protect (`fetchRecentRows`, `X-Last-Modified`,
+ * `getEntriesByPage`/`GET /flowsheet/latest`) — converting a rare upstream
+ * defect into a guaranteed self-inflicted one on every import. Falling
+ * through to the next real (non-future) candidate timestamp avoids that
+ * entirely, at the cost of occasionally landing on a slightly-stale
+ * TIME_CREATED/TIME_LAST_MODIFIED instead of a bogus START_TIME — an
+ * acceptable trade for an importer, unacceptable for a live write.
  */
 export const resolveEntryTimestamp = (
   startTime: number | null,
   timeCreated: number | null,
-  timeLastModified: number | null
+  timeLastModified: number | null,
+  now: Date = new Date()
 ): Date | null => {
-  return epochMsToDate(startTime) ?? epochMsToDate(timeCreated) ?? epochMsToDate(timeLastModified);
+  const candidates = [epochMsToDate(startTime), epochMsToDate(timeCreated), epochMsToDate(timeLastModified)];
+  for (const candidate of candidates) {
+    if (candidate !== null && !isBeyondFutureTolerance(candidate, now)) {
+      return candidate;
+    }
+  }
+  return null;
 };
 
 /**

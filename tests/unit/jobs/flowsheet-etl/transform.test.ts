@@ -129,6 +129,35 @@ describe('flowsheet-etl transform', () => {
     it('returns null when all timestamps are null', () => {
       expect(resolveEntryTimestamp(null, null, null)).toBeNull();
     });
+
+    // BS#2143: a future-dated candidate is treated like a null/0 one — the
+    // function falls through to the next candidate in the preference chain
+    // rather than clamping (an importer back-fills historical rows; clamping
+    // would stamp a months-old row with the import's wall clock — see the
+    // function's doc comment). `now` is injected for determinism.
+    describe('future-tolerance fall-through (BS#2143)', () => {
+      const now = new Date('2026-08-13T18:00:00.000Z');
+      const FAR_FUTURE_MS = now.getTime() + 60 * 60 * 1000; // 1h ahead — well beyond tolerance
+
+      it('falls through to TIME_CREATED when START_TIME is beyond the future tolerance', () => {
+        const result = resolveEntryTimestamp(FAR_FUTURE_MS, CREATED_MS, MODIFIED_MS, now);
+        expect(result?.getTime()).toBe(CREATED_MS);
+      });
+
+      it('falls through to TIME_LAST_MODIFIED when START_TIME and TIME_CREATED are both beyond the future tolerance', () => {
+        const result = resolveEntryTimestamp(FAR_FUTURE_MS, FAR_FUTURE_MS, MODIFIED_MS, now);
+        expect(result?.getTime()).toBe(MODIFIED_MS);
+      });
+
+      it('returns null when all three candidates are beyond the future tolerance', () => {
+        expect(resolveEntryTimestamp(FAR_FUTURE_MS, FAR_FUTURE_MS, FAR_FUTURE_MS, now)).toBeNull();
+      });
+
+      it('leaves an ordinary historical START_TIME untouched (regression: the bound never fires on real data)', () => {
+        const result = resolveEntryTimestamp(VALID_MS, CREATED_MS, MODIFIED_MS, now);
+        expect(result?.getTime()).toBe(VALID_MS);
+      });
+    });
   });
 
   describe('parseMySQLDatetime', () => {

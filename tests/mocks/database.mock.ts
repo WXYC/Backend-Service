@@ -427,6 +427,17 @@ export const epochMsToDate = (epochMs: number | null): Date | null => {
   return Number.isNaN(date.getTime()) ? null : date;
 };
 
+// BS#2143 future-timestamp bound. Mirrors
+// shared/database/src/legacy/etl-utils.ts verbatim — kept in sync by hand
+// like the rest of this file's "pure ETL utility functions" section; see
+// tests/unit/database/etl-utils.test.ts for the real-module test that pins
+// the actual implementation these callers depend on at runtime.
+export const FUTURE_TIMESTAMP_TOLERANCE_MS = 5 * 60 * 1000;
+export const isBeyondFutureTolerance = (date: Date | null, now: Date = new Date()): boolean => {
+  if (date === null) return false;
+  return date.getTime() - now.getTime() > FUTURE_TIMESTAMP_TOLERANCE_MS;
+};
+
 // BS#1090: truncate on codepoint boundaries (Array.from), not UTF-16 code
 // units (String.prototype.slice) — mirrors the real fix in
 // shared/database/src/legacy/etl-utils.ts so this mock doesn't drift back

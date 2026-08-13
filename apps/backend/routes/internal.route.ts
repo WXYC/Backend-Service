@@ -1,7 +1,17 @@
 import { Router } from 'express';
 import * as Sentry from '@sentry/node';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { db, flowsheet, shows, rotation, library, truncate, user } from '@wxyc/database';
+import {
+  db,
+  flowsheet,
+  shows,
+  rotation,
+  library,
+  truncate,
+  user,
+  epochMsToDate,
+  isBeyondFutureTolerance,
+} from '@wxyc/database';
 import { getAlbumIdByLegacyId } from '../services/library.service.js';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
 import {
@@ -34,6 +44,19 @@ const MARKER_ENTRY_TYPES: ReadonlySet<BackendEntryType> = new Set<BackendEntryTy
 // Materialized once for `inArray(...)` in the sibling-marker heal below — avoids
 // re-spreading the Set into an array on every webhook delivery.
 const MARKER_ENTRY_TYPE_LIST: BackendEntryType[] = [...MARKER_ENTRY_TYPES];
+
+// Stable Sentry grouping key for the BS#2143 future-`startTime` clamp below.
+// One issue for the whole class of event, not one per legacy_entry_id or per
+// delivery — a persistently-fast tubafrenzy clock would otherwise fire this
+// on every webhook delivery and, without a shared fingerprint, mint a fresh
+// issue (or at least a noisy one) per entry. Mirrors the CDC dispatcher's
+// `OVERSIZED_FINGERPRINT`/`ERROR_FINGERPRINT` convention
+// (apps/backend/services/cdc/dispatcher.ts): the per-occurrence detail
+// (legacy_entry_id, rejected value, how far ahead) still goes out on every
+// event via `tags`/`extra`, so nothing is lost — only the issue count is
+// capped, which is what keeps an alert threshold meaningful under sustained
+// skew instead of paging on issue-count churn.
+const FUTURE_START_TIME_FINGERPRINT = ['webhook-future-add-time'];
 
 export const internal_route = Router();
 
@@ -323,10 +346,97 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       const breakpointRadioHour = resolveRadioHour(entryType, entry.radioHour ?? null);
 
       // Shared by the row's `add_time` and, for `show_end` markers, the
-      // `shows.end_time` fast-path below — one clock reading per delivery
-      // so the two never drift apart by the few ms between two `new Date()`
-      // calls when `entry.startTime` is absent.
-      const markerTimestamp = entry.startTime ? new Date(entry.startTime) : new Date();
+      // `shows.end_time` fast-path below (and, transitively, by
+      // `closeShowFromTerminalShowEndMarker` in flowsheet.service.ts, which
+      // re-reads THIS row's own `add_time` later) — one clock reading per
+      // delivery so all of those never drift apart by the few ms between two
+      // separate `new Date()` calls. `now` is read exactly once, below,
+      // whether or not it ends up being used.
+      //
+      // BS#2143: two defects fixed in the same expression that used to be
+      // `entry.startTime ? new Date(entry.startTime) : new Date()`.
+      //
+      // (a) No finite/NaN guard. The webhook body is untyped
+      //     (`req.body ?? {}`, validated only on `action`/`entry.id`), so a
+      //     non-numeric truthy `entry.startTime` (a string, an object) made
+      //     `new Date(...)` an Invalid Date and the Drizzle insert below
+      //     threw, 500-ing the whole delivery. `resolveRadioHour` six lines
+      //     up already routes through `epochMsToDate` "so a garbage payload
+      //     can't write an Invalid Date" — `markerTimestamp` was the one
+      //     timestamp in this handler that never got that treatment. Fixed
+      //     by routing `entry.startTime` through the same `epochMsToDate`
+      //     (null/0/NaN/non-finite → null; 0 is tubafrenzy's "not set"
+      //     sentinel, which the old bare-falsy check already depended on).
+      //
+      // (b) No upper bound. A tubafrenzy host with a fast clock (or a bad
+      //     manual entry) could pin `add_time` in the future. Before #2132
+      //     that was self-healing — `fetchRecentRows` sorted `ORDER BY id
+      //     DESC` and the row aged out after ~200 more inserts. Since #2132
+      //     switched to `ORDER BY add_time DESC, id DESC`
+      //     (playlist-proxy.service.ts `fetchRecentRows`), a future row
+      //     sorts first and NEVER ages out — it permanently pins the head of
+      //     `/playlists/recentEntries` (the whole legacy iOS/Android fleet)
+      //     and permanently freezes `X-Last-Modified`
+      //     (`lastModifiedFromTimestamps` is `Math.max(...add_time)`,
+      //     playlist.controller.ts). It also permanently pins the ONE-row
+      //     `GET /flowsheet/latest` read (`getEntriesByPage(0, 1)`,
+      //     flowsheet.service.ts / flowsheet.controller.ts), which sorts the
+      //     same way — not named in BS#2143's issue body, but the same root
+      //     cause and in scope for this fix.
+      //
+      //     Decision, made explicitly per the BS#2143 acceptance criterion:
+      //     CLAMP a beyond-tolerance `startTime` to the delivery clock,
+      //     don't reject it. This is a live flowsheet; dropping or 500-ing a
+      //     DJ's entry over a clock-skew problem on tubafrenzy's end is worse
+      //     than storing a slightly-wrong `add_time`. Contrast with
+      //     `resolveEntryTimestamp` (jobs/flowsheet-etl/transform.ts), the
+      //     ETL twin that reads the same upstream fields: that job
+      //     back-fills HISTORICAL rows, so clamping there would stamp a
+      //     months-old row with the import's wall clock and pin it exactly
+      //     where this fix exists to prevent pinning — it falls through to
+      //     the next candidate timestamp instead. Same bound
+      //     (`FUTURE_TIMESTAMP_TOLERANCE_MS`), deliberately different
+      //     handling per site; see that function's doc comment for the
+      //     reverse cross-reference.
+      //
+      //     Deliberately NOT a read-side `add_time <= now()` predicate on
+      //     `fetchRecentRows`/`getEntriesByPage` — that would make a
+      //     legitimately-live entry invisible for as long as an upstream
+      //     clock runs fast, and a live flowsheet silently lagging the DJ is
+      //     a worse failure than the one being fixed (BS#2143 acceptance
+      //     criterion).
+      //
+      //     No env var for the tolerance — see `FUTURE_TIMESTAMP_TOLERANCE_MS`'s
+      //     doc comment in `shared/database/src/legacy/etl-utils.ts` for why.
+      //
+      //     A clamp is surfaced to Sentry (grouped under one stable
+      //     fingerprint — see `FUTURE_START_TIME_FINGERPRINT` above) so a
+      //     genuinely misconfigured tubafrenzy clock gets diagnosed instead
+      //     of silently absorbed.
+      const parsedStartTime = epochMsToDate(entry.startTime ?? null);
+      const now = new Date();
+      let markerTimestamp: Date;
+      if (parsedStartTime === null) {
+        markerTimestamp = now;
+      } else if (isBeyondFutureTolerance(parsedStartTime, now)) {
+        Sentry.captureMessage(
+          '[webhook] flowsheet entry startTime beyond future tolerance — clamped to delivery clock',
+          {
+            level: 'warning',
+            tags: { subsystem: 'flowsheet-webhook' },
+            extra: {
+              legacy_entry_id: entry.id,
+              rejected_start_time_raw: entry.startTime,
+              rejected_start_time_iso: parsedStartTime.toISOString(),
+              ahead_ms: parsedStartTime.getTime() - now.getTime(),
+            },
+            fingerprint: FUTURE_START_TIME_FINGERPRINT,
+          }
+        );
+        markerTimestamp = now;
+      } else {
+        markerTimestamp = parsedStartTime;
+      }
 
       // INSERT ... ON CONFLICT DO NOTHING RETURNING { id }: either we win
       // the insert and PG hands back exactly one row, or a concurrent
@@ -405,6 +515,11 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
         // We never overwrite a non-NULL stored value with NULL — that
         // would regress a row the live path or a prior delivery already
         // resolved.
+        //
+        // BS#2143: `add_time` is confirmed absent from this refresh set (see
+        // the anchoring note above) — the conflict-UPDATE path never rewrites
+        // it, so it can't inherit a bad `markerTimestamp` from a redelivery
+        // either. Nothing to bound here.
         const refresh: Record<string, unknown> = {
           artist_name: artistName,
           album_title: albumTitle,
@@ -467,6 +582,14 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       // dj_name-at-write-time precedent on these same marker rows): never
       // rewrite a value an earlier delivery of this same `show_end` — or a
       // deliberate one-shot ETL run — already repaired.
+      //
+      // BS#2143: `markerTimestamp` is bounded (see its computation above)
+      // before it ever reaches here, so this fast-path's `end_time` inherits
+      // the same future-timestamp clamp as `add_time` for free — a future
+      // `shows.end_time` would otherwise be a SECOND permanently-poisoned
+      // column, since both this write and `closeShowFromTerminalShowEndMarker`
+      // (flowsheet.service.ts) only ever fire under `WHERE end_time IS NULL`,
+      // so nothing downstream ever corrects a bad value once it lands.
       if (entryType === 'show_end' && showId !== null) {
         await db
           .update(shows)
