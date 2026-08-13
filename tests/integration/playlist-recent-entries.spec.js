@@ -18,9 +18,12 @@
  *
  * Fresh rows only (no fixed-id assumptions — local dev DB volumes persist
  * and drift; see flowsheet-upcoming-show-support.spec.js for the same
- * rationale). flowsheet.id is a serial PK, so freshly-inserted probe rows
- * always sort first under `ORDER BY id DESC`, independent of whatever else
- * is in the table.
+ * rationale). fetchRecentRows orders by `add_time DESC, id DESC` (BS#2132 —
+ * previously `id DESC` alone, which let a historical `add_time` silently
+ * ride in on the id PK), so every fixture row below either takes the
+ * `add_time` DEFAULT (`now()`, sorting first same as before) or, if it sets
+ * `add_time` explicitly (the breakpoint row), computes it relative to "now"
+ * rather than a hard-coded date — see that fixture's own comment.
  */
 
 const postgres = require('postgres');
@@ -113,6 +116,10 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
   const flowsheetIds = [];
   const libraryIds = [PRESS_CD, PRESS_LP, BRANCHA_LIB_ID, BRANCHC_LIB_ID, ENRICHED_LIB_ID];
   const rotationIds = [];
+  // Set by beforeAll and read by the breakpoint-hour assertion below — see
+  // the breakpointRow fixture comment for why this must be computed relative
+  // to "now" rather than hard-coded (BS#2132).
+  let breakpointHourMs;
 
   beforeAll(async () => {
     sql = makeSql();
@@ -328,9 +335,35 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
 
     // Breakpoint logged ~1 minute before the top of the hour: radio_hour
     // must win over flooring add_time (BS#1448/#1449).
+    //
+    // BS#2132: fetchRecentRows now orders by add_time DESC (not the
+    // flowsheet.id PK), so this row MUST stay recent — an absolute
+    // backdated add_time (this used to be a hard-coded 2026-07-28 literal)
+    // silently falls out of the top-N window as soon as it ages past
+    // whatever else lands in the table, exactly the id-DESC-reliance bug
+    // BS#2132 fixed. Compute it relative to "now" instead — and NOT floored
+    // to a real calendar hour boundary: an earlier version of this fixture
+    // did that (current/previous hour, floored) and a real `ci:testmock`
+    // --runInBand run proved it insufficiently fresh — many sibling
+    // integration specs insert their own flowsheet rows on the `add_time`
+    // DEFAULT (`now()`) during the SAME run, so a row backdated by tens of
+    // minutes routinely loses to 200 fresher ones and the breakpoint drops
+    // out of the window entirely. radio_hour here is instead just a few
+    // seconds in the past (comfortably inside the window, and never
+    // future — see BS#2118 for why a future add_time is its own hazard);
+    // add_time sits ~48s before that, mirroring the original
+    // 19:59:12-vs-20:00:00 relationship this fixture exists to exercise.
+    // This still validates "radio_hour wins over floor(add_time)": since
+    // radio_hour is (virtually) never exactly on an hour boundary,
+    // floor(add_time) always lands an hour (or more) earlier than the raw
+    // radio_hour value, so the two remain distinguishable regardless of
+    // calendar alignment.
+    breakpointHourMs = Date.now() - 10_000;
+    const breakpointHour = new Date(breakpointHourMs);
+    const breakpointAddTime = new Date(breakpointHourMs - 48_000);
     const breakpointRow = await sql`
       INSERT INTO ${sql(SCHEMA)}.flowsheet (entry_type, play_order, add_time, radio_hour, message)
-      VALUES ('breakpoint', 91605, '2026-07-28 19:59:12+00', '2026-07-28 20:00:00+00', 'BREAKPOINT')
+      VALUES ('breakpoint', 91605, ${breakpointAddTime}, ${breakpointHour}, 'BREAKPOINT')
       RETURNING id
     `;
 
@@ -472,7 +505,7 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
 
     const breakpointEntry = res.body.breakpoints.find((b) => b.id === flowsheetIds[5]);
     expect(breakpointEntry).toBeDefined();
-    expect(breakpointEntry.hour).toBe(new Date('2026-07-28T20:00:00.000Z').getTime());
+    expect(breakpointEntry.hour).toBe(breakpointHourMs);
   });
 
   test('v=2 defaults to <=50 playcuts and returns the grouped object', async () => {

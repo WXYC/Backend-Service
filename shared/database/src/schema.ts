@@ -1276,6 +1276,16 @@ export const flowsheet = wxyc_schema.table(
     // The 8-day ceiling in the contract is what makes that trade safe: it
     // bounds the sorted set to ~3k rows, so the cheaper index wins on a table
     // whose index bloat is a tracked concern (epic #1058).
+    //
+    // Second consumer, BS#2132: `fetchRecentRows` (playlist-proxy.service.ts)
+    // also orders `desc(add_time), desc(id)`, serving `GET
+    // /playlists/recentEntries`. Different bound than the range read above —
+    // LIMIT 200, no WHERE clause at all — so the single-column-vs-composite
+    // trade-off has to be re-weighed against this workload too, not just the
+    // 8-day range one. Re-validated against prod on 2026-08-13 at that LIMIT:
+    // `Index Scan Backward` on this index plus an `Incremental Sort` of 7
+    // full-sort groups / 29 kB, 0.9 ms warm — single-column still wins here.
+    // A future change to this index's shape should check both consumers.
     index('flowsheet_add_time_idx').on(table.add_time),
     index('flowsheet_search_doc_idx').using('gin', sql`${table.search_doc}`),
     // BS#1012 (Epic D / D5). Functional partial index that supports the

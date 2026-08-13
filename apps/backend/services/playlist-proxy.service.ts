@@ -438,6 +438,12 @@ function toBaseEntry(row: RecentRow): BaseEntry {
     // tubafrenzy's own GLOBAL_ORDER_ID numbering (show*1000+seq), which no
     // longer exists once tubafrenzy is decommissioned; consumers only rely
     // on chronOrderID for ordering/dedup, not on its numeric scheme.
+    //
+    // BS#2132 caveat: "globally monotonic" above means insert-order
+    // monotonic, not chronological — the file-header comment explains why
+    // those diverge for a historical insert. chronOrderID stays id-derived
+    // here deliberately; whether to change it is a decision tracked on the
+    // parent, #2118, not made by this comment or this PR.
     chronOrderID: row.id,
     hour: computeHourMs(row),
     timeCreated: row.add_time.getTime(),
@@ -459,11 +465,20 @@ function toBaseEntry(row: RecentRow): BaseEntry {
  * on the v=2 path, no offset), so reordering is a bounded backward scan
  * served by the existing single-column `flowsheet_add_time_idx`
  * (`schema.ts`) plus an incremental sort over timestamp ties — no new index.
- * Note `add_time` defaults to `now()` (`transaction_timestamp()`) and the
- * tubafrenzy webhook writes it from tubafrenzy's own clock
- * (`apps/backend/routes/internal.route.ts`), so cross-host clock skew is a
- * (sub-second, in practice) source of ordering difference from the old
- * id-only order even for purely live traffic.
+ * Two `add_time` semantics worth knowing when reasoning about ordering here.
+ * The primary one: the tubafrenzy webhook (`apps/backend/routes/internal.route.ts`)
+ * writes `add_time` from `entry.startTime` — tubafrenzy's own EVENT time for
+ * the entry, not a clock reading taken at delivery — so a first delivery
+ * tubafrenzy logged late (a missed track from earlier in the show, a
+ * corrected past show) lands with an `add_time` that diverges from its id
+ * rank by however late it was logged, unbounded, not sub-second. That
+ * divergence is exactly the historical-insert case this reorder exists to
+ * handle. The `ON CONFLICT` path anchors `add_time` to the first INSERT, so
+ * later webhook redeliveries never move it. Secondary and genuinely
+ * sub-second: `add_time` defaults to `now()` (`transaction_timestamp()`) for
+ * BS-originated rows, so cross-host clock skew between BS and a webhook
+ * sender is a minor additional source of ordering difference from the old
+ * id-only order, distinct from the webhook case above.
  */
 async function fetchRecentRows(limit: number): Promise<RecentRow[]> {
   return db
