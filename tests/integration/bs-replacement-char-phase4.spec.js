@@ -15,6 +15,14 @@
  *  - a row that merely shares bytes with the corrupt strings (same 0xEA byte as the
  *    corrupt "La B�te", or the same "-Ziq [mu-Ziq]" suffix under a different artist)
  *    is left untouched -- the match is on the full corrupt string, not a substring;
+ *  - a row holding the EXACT corrupt string at a `legacy_release_id` the ticket does
+ *    NOT name is left untouched. This is the pin that makes "and only those" mean
+ *    something: with only near-miss decoys, the exact-string predicate alone spares
+ *    them and the `legacy_release_id IN (...)` scoping is never exercised -- dropping
+ *    that scoping entirely (widening either UPDATE into a table-wide rewrite) still
+ *    passed every assertion. An exact-string, out-of-scope row is the only decoy that
+ *    fails when the scoping is removed, so it is what actually bounds the blast
+ *    radius of the operator script against a future well-meaning edit;
  *  - a second run is a genuine no-op (0 rows affected) once the first has landed,
  *    proving the self-correcting / idempotent design the script's header claims;
  *  - the `artists` UPDATE and the `library` safety-net UPDATE don't double-count or
@@ -159,6 +167,13 @@ describe('bs_replacement_char_phase4 mojibake repair (BS#2114)', () => {
       INSERT INTO ${sql(TEST_SCHEMA)}.library (legacy_release_id, artist_name, album_title)
       VALUES (999999, ${'�ther-Ziq [mu-Ziq]'}, 'unrelated')
     `;
+    // The scoping decoy: the EXACT corrupt string, at an id BS#2114 does not name.
+    // Only `legacy_release_id IN (...)` keeps the UPDATE off this row, so this is the
+    // assertion that fails if that scoping is ever widened or dropped.
+    await sql`
+      INSERT INTO ${sql(TEST_SCHEMA)}.library (legacy_release_id, artist_name, album_title)
+      VALUES (900001, ${CORRUPT_ARTIST}, 'out of ticket scope')
+    `;
 
     await runScript();
 
@@ -168,6 +183,8 @@ describe('bs_replacement_char_phase4 mojibake repair (BS#2114)', () => {
     }
     const untouched = await libraryRow(999999);
     expect(untouched.artist_name).toBe('�ther-Ziq [mu-Ziq]');
+    const outOfScope = await libraryRow(900001);
+    expect(outOfScope.artist_name).toBe(CORRUPT_ARTIST);
   });
 
   test('fixes library.album_title for catalog id 50340, and only that id', async () => {
@@ -179,6 +196,11 @@ describe('bs_replacement_char_phase4 mojibake repair (BS#2114)', () => {
       INSERT INTO ${sql(TEST_SCHEMA)}.library (legacy_release_id, artist_name, album_title)
       VALUES (888888, 'Some Artist', ${'La Forêt'})
     `;
+    // The scoping decoy, as above: the EXACT corrupt title at an unnamed id.
+    await sql`
+      INSERT INTO ${sql(TEST_SCHEMA)}.library (legacy_release_id, artist_name, album_title)
+      VALUES (900002, 'Some Other Artist', ${CORRUPT_TITLE})
+    `;
 
     await runScript();
 
@@ -186,6 +208,8 @@ describe('bs_replacement_char_phase4 mojibake repair (BS#2114)', () => {
     expect(fixed.album_title).toBe(CORRECT_TITLE);
     const untouched = await libraryRow(888888);
     expect(untouched.album_title).toBe('La Forêt');
+    const outOfScope = await libraryRow(900002);
+    expect(outOfScope.album_title).toBe(CORRUPT_TITLE);
   });
 
   test('the U+FFFD predicate returns 0 across artist_name/album_title after the run', async () => {
