@@ -2356,6 +2356,10 @@ export type LibraryArtistViewEntry = {
   apple_music_artist_id: string | null;
   bandcamp_id: string | null;
   artist_id: number;
+  // Optional (not on `library_artist_view` until #2129 adds the column to
+  // the view itself); every base-table projection that populates this type
+  // today (BS#2128) always supplies it, since each inner-joins `library`.
+  legacy_release_id?: number | null;
   discogs_unavailable: boolean;
   discogs_unavailable_note: string | null;
   last_discogs_recheck_at: Date | null;

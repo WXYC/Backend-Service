@@ -44,6 +44,9 @@ export const getBinFromDB = async (dj_id: string) => {
       code_number: library.code_number,
       format_name: format.format_name,
       genre_name: genres.genre_name,
+      // BS#2128: `library` is inner-joined below, so every bin row resolves
+      // to a real library row — this is never a synthetic/absent id.
+      legacy_release_id: library.legacy_release_id,
     })
     .from(bins)
     .innerJoin(library, eq(bins.album_id, library.id))

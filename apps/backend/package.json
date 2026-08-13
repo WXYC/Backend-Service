@@ -25,7 +25,7 @@
     "@wxyc/lml-client": "^1.0.0",
     "@wxyc/metadata": "^1.0.0",
     "@wxyc/observability": "^1.0.0",
-    "@wxyc/shared": "^3.3.0",
+    "@wxyc/shared": "^3.5.0",
     "async-mutex": "^0.5.0",
     "aws-jwt-verify": "^5.2.1",
     "axios": "^1.19.0",

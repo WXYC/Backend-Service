@@ -300,6 +300,10 @@ export interface Rotation {
   rotation_bin: 'S' | 'L' | 'M' | 'H' | 'N';
   rotation_kill_date: string | null;
   plays: number | null;
+  // Nullable (unlike AlbumSearchResult/BinLibraryDetails/AlbumInfoResponse,
+  // all of which guarantee a real library row): a library-unlinked rotation
+  // row has no library row at all, hence no legacy id (BS#2128).
+  legacy_release_id: number | null;
   reconciled_identity: ReconciledIdentity | null;
 }
 
@@ -397,6 +401,7 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
       ${rotation.rotation_bin} AS rotation_bin,
       ${rotation.kill_date} AS rotation_kill_date,
       ${library.plays} AS plays,
+      ${library.legacy_release_id} AS legacy_release_id,
       ${artists.discogs_artist_id} AS discogs_artist_id,
       ${artists.musicbrainz_artist_id} AS musicbrainz_artist_id,
       ${artists.wikidata_qid} AS wikidata_qid,
@@ -1345,6 +1350,9 @@ const LIBRARY_VIEW_PROJECTION = {
   apple_music_artist_id: artists.apple_music_artist_id,
   bandcamp_id: artists.bandcamp_id,
   artist_id: library.artist_id,
+  // BS#2128: the library row's surrogate key. `library` is INNER JOINed at
+  // the top of this projection's join chain, so it's always populated here.
+  legacy_release_id: library.legacy_release_id,
   // BS#1895 (Not-on-Discogs epic #1280 sub-issue 5): serialize the MD-set
   // flag onto every catalog read surface. `serializeLibraryArtistViewEntry`
   // renames these to camelCase at the wire boundary, matching the
@@ -1399,6 +1407,7 @@ const LIBRARY_VIEW_PROJECTION_RAW = sql`
   ${artists.apple_music_artist_id} AS apple_music_artist_id,
   ${artists.bandcamp_id} AS bandcamp_id,
   ${library.artist_id} AS artist_id,
+  ${library.legacy_release_id} AS legacy_release_id,
   ${library.discogs_unavailable} AS discogs_unavailable,
   ${library.discogs_unavailable_note} AS discogs_unavailable_note,
   ${library.last_discogs_recheck_at} AS last_discogs_recheck_at
@@ -2203,6 +2212,9 @@ export const getAlbumFromDB = async (album_id: number) => {
       spotify_artist_id: artists.spotify_artist_id,
       apple_music_artist_id: artists.apple_music_artist_id,
       bandcamp_id: artists.bandcamp_id,
+      // BS#2128: `library` is inner-joined below and this reads by
+      // `library.id` directly, so the row (and its legacy id) always exists.
+      legacy_release_id: library.legacy_release_id,
       // BS#1895: album-detail read surface (GET /library/info?album_id= —
       // the "GET /library/:id" surface in the issue's terms).
       discogs_unavailable: library.discogs_unavailable,
@@ -2521,11 +2533,10 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Tagge
   const legacyIds = items.map((item) => item.library_item?.id).filter((id): id is number => typeof id === 'number');
   if (legacyIds.length === 0) return [];
 
-  // Read the view shape plus legacy_release_id so we can re-order BS rows in
-  // LML's response order below. legacy_release_id is not in
-  // LIBRARY_VIEW_PROJECTION because the public view doesn't expose it.
+  // Read the view shape, which carries legacy_release_id (BS#2128), so we
+  // can re-order BS rows in LML's response order below.
   const rows = (await db
-    .select({ ...LIBRARY_VIEW_PROJECTION, legacy_release_id: library.legacy_release_id })
+    .select(LIBRARY_VIEW_PROJECTION)
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
     .innerJoin(format, eq(format.id, library.format_id))
@@ -2545,7 +2556,7 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Tagge
     // Bound by the LML response size (already capped server-side). The
     // wrapper trims to caller's `limit` post-cache so the cached entry can
     // serve any smaller caller-`limit` from a single LML + JOIN round-trip.
-    .limit(legacyIds.length)) as unknown as Array<LibraryArtistViewEntry & { legacy_release_id: number | null }>;
+    .limit(legacyIds.length)) as unknown as Array<LibraryArtistViewEntry & { legacy_release_id: number }>;
 
   // CTA-covered library rows are Track 1's responsibility; filter them out so
   // the read layer doesn't double-surface compilations alongside curated CTA
@@ -2568,7 +2579,7 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Tagge
   const ctaCovered = new Set(ctaRows.map((r) => r.library_id));
 
   // Index BS rows by legacy_release_id so we can emit them in LML's order.
-  const rowsByLegacyId = new Map<number, LibraryArtistViewEntry & { legacy_release_id: number | null }>();
+  const rowsByLegacyId = new Map<number, LibraryArtistViewEntry & { legacy_release_id: number }>();
   for (const row of rows) {
     if (row.legacy_release_id != null) {
       rowsByLegacyId.set(row.legacy_release_id, row);
@@ -2582,8 +2593,7 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Tagge
     const row = rowsByLegacyId.get(legacyId);
     if (!row) continue;
     if (ctaCovered.has(row.id)) continue;
-    const { legacy_release_id: _legacy, ...viewRow } = row;
-    const tagged: TaggedLibraryViewEntry = { ...viewRow };
+    const tagged: TaggedLibraryViewEntry = { ...row };
     if (item.matched_via && item.matched_via.length > 0) {
       tagged.matched_via = item.matched_via;
     }
@@ -2888,6 +2898,7 @@ export async function searchLibraryByCTARaw(
         ${artists.spotify_artist_id} AS spotify_artist_id,
         ${artists.apple_music_artist_id} AS apple_music_artist_id,
         ${artists.bandcamp_id} AS bandcamp_id,
+        ${library.legacy_release_id} AS legacy_release_id,
         ${compilation_track_artist.track_title} AS cta_track_title,
         ${compilation_track_artist.artist_name} AS cta_artist_name,
         DENSE_RANK() OVER (ORDER BY ${library.id}) AS library_rank
