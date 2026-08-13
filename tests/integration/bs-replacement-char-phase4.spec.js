@@ -42,10 +42,15 @@ const { getTestDb } = require('../utils/db');
 const TEST_SCHEMA = 'bs2114_mojibake_test';
 const SCRIPT_PATH = path.join(__dirname, '..', '..', 'scripts', 'audit', 'bs_replacement_char_phase4.sql');
 
+// Written as escapes, not raw literals, so the expectations cannot drift with the
+// script under a transform that rewrites both files at once (a repo-wide NFKC pass,
+// a paste through a normalizing editor). A raw 'µ' on both sides would keep the
+// suite green while prod wrote U+03BC. `scriptUsesTheRightCodepoints` below closes
+// the other half by asserting the bytes actually present in the script text.
 const CORRUPT_ARTIST = '�-Ziq [mu-Ziq]';
-const CORRECT_ARTIST = 'µ-Ziq [mu-Ziq]'; // µ-Ziq [mu-Ziq]
+const CORRECT_ARTIST = 'µ-Ziq [mu-Ziq]'; // µ-Ziq [mu-Ziq], U+00B5 MICRO SIGN
 const CORRUPT_TITLE = 'La B�te';
-const CORRECT_TITLE = 'La Bête'; // La Bête
+const CORRECT_TITLE = 'La Bête'; // La Bête, U+00EA E WITH CIRCUMFLEX
 
 const TARGET_ARTIST_IDS = [1977, 1978, 1979, 1980, 1981, 1982, 1983, 37529, 63110, 69776];
 const TARGET_TITLE_ID = 50340;
@@ -148,6 +153,26 @@ describe('bs_replacement_char_phase4 mojibake repair (BS#2114)', () => {
     `;
     return rows[0];
   }
+
+  test('the script writes U+00B5 MICRO SIGN and U+00EA, not their lookalikes', () => {
+    // The one fact this whole repair rests on: the bytes the script SETs have to be
+    // the bytes tubafrenzy holds, because BS#2114's acceptance criterion is a
+    // byte-exact parity comparison. U+00B5 MICRO SIGN and U+03BC GREEK SMALL LETTER
+    // MU are visually identical in most fonts, and NFKC/NFKD fold the former onto
+    // the latter -- so this is exactly the kind of difference that survives review
+    // and dies in prod. Asserted against the script TEXT rather than the extracted
+    // statements so it holds regardless of how the UPDATEs are shaped.
+    const scriptText = fs.readFileSync(SCRIPT_PATH, 'utf8');
+    const artistSet = scriptText.match(/SET artist_name = '(.+?)'/);
+    const titleSet = scriptText.match(/SET album_title = '(.+?)'/);
+    expect(artistSet).not.toBeNull();
+    expect(titleSet).not.toBeNull();
+    expect(Buffer.from(artistSet[1], 'utf8').toString('hex')).toBe('c2b52d5a6971205b6d752d5a69715d');
+    expect(Buffer.from(titleSet[1], 'utf8').toString('hex')).toBe('4c612042c3aa7465');
+    // And the replacement must not itself contain a replacement character.
+    expect(artistSet[1]).not.toContain('�');
+    expect(titleSet[1]).not.toContain('�');
+  });
 
   test('fixes the artists source-of-truth row', async () => {
     await seedTargetRows();
