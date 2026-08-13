@@ -161,13 +161,41 @@ const BASE_ENTRY_COLUMNS = `
  * by jobs/flowsheet-april-gap-import, BS#2119) so both stay byte-identical
  * on the column list and the SEGUE_FLAG fallback.
  */
+/**
+ * Is this the one error the 14-column fallback is for — SEGUE_FLAG genuinely
+ * absent upstream (MySQL 1054 / ER_BAD_FIELD_ERROR)?
+ *
+ * The fallback used to be a blanket `catch {}`. That is safe for the
+ * incremental ETL, whose upserts re-read the same rows every 30 minutes, so a
+ * transient blip that produced a 14-column read self-heals on the next pass.
+ * It is NOT safe for jobs/flowsheet-april-gap-import (BS#2119): that job is
+ * insert-only under `ON CONFLICT (legacy_entry_id) DO NOTHING` and is never
+ * revisited, so one transient SSH/MySQL failure on the first `send` would
+ * write `segue = false` on the entire cohort permanently, signalled only by a
+ * `console.warn` its JSON logger never emits and Sentry never sees.
+ *
+ * So the fallback is narrowed to the condition it was written for, and every
+ * other failure propagates to the caller — where the gap import's `runImport`
+ * turns it into a `failed` result with a Sentry event, and the ETL's own
+ * error handling takes over. A loud failure beats a quietly wrong value.
+ *
+ * Matched on the message rather than a driver error code because MirrorSQL
+ * ships raw text over SSH and does not surface `errno`.
+ */
+const isMissingSegueFlagColumnError = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unknown column/i.test(message) && /segue_flag/i.test(message);
+};
+
 const runEntryQuery = async (filter: string): Promise<LegacyEntryRow[]> => {
-  // Try with SEGUE_FLAG first; fall back without it if the column doesn't exist
+  // Try with SEGUE_FLAG first; fall back without it only if the column
+  // genuinely doesn't exist upstream (see isMissingSegueFlagColumnError).
   try {
     const queryWithSegue = `SELECT ${BASE_ENTRY_COLUMNS}, fe.SEGUE_FLAG FROM FLOWSHEET_ENTRY_PROD fe ${filter} ORDER BY fe.ID ASC;`;
     const raw = await legacyDB.send(queryWithSegue);
     return parseEntryRows(raw, 15);
-  } catch {
+  } catch (error) {
+    if (!isMissingSegueFlagColumnError(error)) throw error;
     console.warn('[flowsheet-etl] SEGUE_FLAG not available, defaulting to 0.');
     const queryWithout = `SELECT ${BASE_ENTRY_COLUMNS} FROM FLOWSHEET_ENTRY_PROD fe ${filter} ORDER BY fe.ID ASC;`;
     const raw = await legacyDB.send(queryWithout);

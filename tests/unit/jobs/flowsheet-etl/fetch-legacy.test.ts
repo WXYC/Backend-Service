@@ -307,6 +307,48 @@ describe('fetch-legacy parsing', () => {
       expect(rows[0].segueFlag).toBe(0);
     });
 
+    /**
+     * The fallback must fire ONLY for a genuinely absent column. A blanket
+     * catch would turn a transient SSH/MySQL blip into a silent 14-column
+     * read, defaulting every row's segueFlag to 0 — self-healing for the
+     * incremental ETL (the next upsert re-reads with the column) but
+     * PERMANENT for jobs/flowsheet-april-gap-import, whose insert-only
+     * `ON CONFLICT DO NOTHING` write is never revisited. Loud failure beats a
+     * quietly wrong value.
+     */
+    it('propagates a transient failure instead of silently falling back to 14 columns', async () => {
+      const { MirrorSQL } = jest.requireMock('@wxyc/database');
+      const sendMock: jest.Mock = MirrorSQL.instance().send;
+      sendMock.mockReset().mockRejectedValueOnce(new Error('connect ETIMEDOUT 10.0.0.1:3306'));
+
+      await expect(fetchLegacyEntriesInWindow(1000, 2000)).rejects.toThrow(/ETIMEDOUT/);
+      expect(sendMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('propagates an unrelated SQL error rather than retrying without SEGUE_FLAG', async () => {
+      const { MirrorSQL } = jest.requireMock('@wxyc/database');
+      const sendMock: jest.Mock = MirrorSQL.instance().send;
+      sendMock.mockReset().mockRejectedValueOnce(new Error("Unknown column 'fe.RADIO_HOUR' in 'field list'"));
+
+      await expect(fetchLegacyEntriesInWindow(1000, 2000)).rejects.toThrow(/RADIO_HOUR/);
+      expect(sendMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('still falls back on the real MySQL 1054 text for SEGUE_FLAG', async () => {
+      const { MirrorSQL } = jest.requireMock('@wxyc/database');
+      const sendMock: jest.Mock = MirrorSQL.instance().send;
+      const raw = '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t0\t1\t0\t1500\t1600\t101\t0';
+      sendMock
+        .mockReset()
+        .mockRejectedValueOnce(new Error("ER_BAD_FIELD_ERROR: Unknown column 'fe.SEGUE_FLAG' in 'field list'"))
+        .mockResolvedValueOnce(raw);
+
+      const rows = await fetchLegacyEntriesInWindow(1000, 2000);
+
+      expect(sendMock).toHaveBeenCalledTimes(2);
+      expect(rows[0].segueFlag).toBe(0);
+    });
+
     it('throws for a non-integer startMs (raw-SQL-literal injection guard)', async () => {
       await expect(fetchLegacyEntriesInWindow(1.5, 2000)).rejects.toThrow(/startMs must be a finite integer/);
     });
