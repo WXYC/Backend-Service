@@ -546,17 +546,37 @@ export const getEntryCount = async (): Promise<number> => {
  * airtime order — so a historical insert (backfill, gap import, repair)
  * receives the highest ids in the table and previously sorted as the newest
  * content on this, the default page of the public unauthenticated
- * `GET /flowsheet`. `id` stays as an explicit tie-break because `add_time`
- * is not unique: it defaults to `now()`, which is `transaction_timestamp()`
- * — every row written by the same statement (e.g. a bulk `INSERT ... SELECT`)
- * shares one `add_time`, so without the tie-break those rows would have no
- * defined relative order. This means `(add_time DESC, id DESC)` is NOT
- * identical to `(id DESC)` even for purely live traffic (a live row's
- * `add_time` and `id` can theoretically diverge in ordering across a
- * transaction boundary), and the tubafrenzy webhook writes `add_time` from
- * tubafrenzy's own clock (`apps/backend/routes/internal.route.ts:329`), so
- * cross-host clock skew becomes visible in ordering where it previously
- * wasn't. Both are sub-second effects in practice.
+ * `GET /flowsheet` — and on `getLatest` (`flowsheet.controller.ts`,
+ * `GET /flowsheet/latest`), the OTHER caller of this function
+ * (`getEntriesByPage(0, 1)`). This function now serves two different
+ * contracts under one query: "page N of the flowsheet" and "the single
+ * latest entry." Both move from "most recently inserted" to "most recently
+ * aired" with this change — an improvement for `getLatest` specifically,
+ * since "latest" reads naturally as airtime, not insertion order.
+ *
+ * `id` stays as an explicit tie-break because `add_time` is not unique: it
+ * defaults to `now()`, which is `transaction_timestamp()` — every row
+ * written by the same statement (e.g. a bulk `INSERT ... SELECT`) shares one
+ * `add_time`, so without the tie-break those rows would have no defined
+ * relative order.
+ *
+ * TWO DIFFERENT CLOCKS FEED `add_time`, AND THIS SORT KEY NOW MIXES THEM.
+ * The tubafrenzy webhook (`apps/backend/routes/internal.route.ts:329`) sets
+ * `add_time` to `entry.startTime ? new Date(entry.startTime) : new Date()`
+ * for EVERY entry type it inserts — but per the BS#351 gap-import findings,
+ * only `show_start`/`show_end` marker rows carry a non-zero `startTime` in
+ * tubafrenzy; ordinary track rows have `startTime = 0` (falsy) and fall
+ * through to `new Date()`. So MARKER rows get tubafrenzy's EVENT clock and
+ * TRACK rows get Backend's DELIVERY clock — two different clocks landing in
+ * the same column, and now the same sort key. Consequence: on a webhook
+ * delivery lag, a show's `show_end` marker can carry an `add_time` EARLIER
+ * than the delivery timestamp of that same show's own final track, so the
+ * marker now sorts BELOW the track on page 0 (and `getLatest` /
+ * `GET /flowsheet/latest` would return the track instead of the sign-off).
+ * Under plain `id DESC` this was structurally impossible — insertion order
+ * always put the marker last. This is a known, accepted consequence of the
+ * new key, not something this change fixes; the divergence between the two
+ * clocks is unbounded (tubafrenzy delivery lag), not sub-second.
  *
  * Measured 2026-08-13 (see BS#2133): below the `MAX_OFFSET` cache cliff
  * (`flowsheet.controller.ts`) this ordering costs the same order of
@@ -1184,22 +1204,33 @@ export const getLatestShow = async (): Promise<Show | undefined> => {
  * `changeOrder` can renumber `play_order` for track reordering within a
  * show, but marker rows are never reordered.
  *
- * SCOPED TO LIVE-SHOW TRAFFIC — `id DESC` is insertion order, NOT airtime
- * order, so this is not a general "newest entry in this show" query (BS#2118
- * site 5). A historical insert (backfill, gap import, repair) into an
- * ALREADY-CLOSED show receives an id higher than that show's real terminal
- * `show_end` marker, so this then answers `false` for a show that is, in
- * fact, closed. #2119's April gap-import cohort is exactly this case: 403
- * rows land in 18 shows that already hold `show_end` markers, and post-
- * import this function returns `false` for all 18. That is safe here
- * ONLY because `joinShow` is this function's one caller, and it only ever
- * asks about the show a DJ is trying to go live on RIGHT NOW — nobody joins
- * an April show months later, and BS#1861 option (a) independently stamps
- * `shows.end_time` at write time, so `joinShow` has a second signal even
- * once this one goes stale for an old show. Do not repurpose this as a
- * general recency check for anything a historical import could touch; for
- * that, order by `add_time` instead (see `getEntriesByPage`'s comment for
- * why `add_time` needs an explicit `id` tie-break too).
+ * ITS OWN PREMISE IS FALSE FOR A HISTORICALLY-INSERTED SHOW — `id DESC` is
+ * insertion order, NOT airtime order, so this is not a general "newest entry
+ * in this show" query (BS#2118 site 5). A historical insert (backfill, gap
+ * import, repair) into an ALREADY-CLOSED show receives an id higher than
+ * that show's real terminal `show_end` marker, so this then answers `false`
+ * for a show that is, in fact, closed. #2119's April gap-import cohort is
+ * exactly this case: 403 rows land in 18 shows that already hold `show_end`
+ * markers, and post-import this function would return `false` for all 18 if
+ * it were ever called on them.
+ *
+ * It never is, and that — not caller intent — is what makes the cohort
+ * inert. `joinShow` (`flowsheet.controller.ts`) only calls this function
+ * inside its own `current_show.end_time === null &&` short-circuit, gating
+ * on the SAME `end_time` fast-path this function's header comment describes
+ * as independent of it; `current_show` itself comes from `getLatestShow` ->
+ * `ORDER BY shows.id DESC LIMIT 1`, so `joinShow` always evaluates the
+ * newest-by-insertion show, not a caller-chosen one. Measured 2026-08-12
+ * (`plans/bs351-april-flowsheet-gap-import.md`): all 18 of #2119's affected
+ * shows already carry a non-null `shows.end_time`, so `joinShow` never
+ * reaches this function for any of them — the short-circuit short-circuits
+ * before the stale answer would matter. Safety today lives entirely in that
+ * caller-side `end_time` check, not in this function. A future caller of
+ * `isLatestEntryShowEnd` without an equivalent `end_time` guard would be
+ * exposed to the false-premise failure mode above; do not assume this
+ * function is self-safe. For a general recency check on a row a historical
+ * import could touch, order by `add_time` instead (see `getEntriesByPage`'s
+ * comment for why `add_time` needs an explicit `id` tie-break too).
  */
 export const isLatestEntryShowEnd = async (showId: number): Promise<boolean> => {
   const [latest] = await db

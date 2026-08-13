@@ -98,17 +98,38 @@ export interface LinkedFlowsheetRow {
  * candidate every time. That said, a historical insert (backfill, gap
  * import, repair) DOES change which row wins here once it acquires an
  * `album_id` — `jobs/legacy-linkage-resolve` links `flowsheet.album_id` on
- * its own 30-minute cron, independent of when the row was inserted — and
- * the winning row's `record_label` / `label_id` / `metadata_status` then
- * come from that historical row instead of whichever live row previously
- * won. Accepted as-is: those three columns are DJ-entered or ETL-written
- * free text, not derived from *when* the row aired, so a historical row's
- * values are not wrong in the way a recency claim would be — just a
- * different, equally legitimate, source row for the same key. If a future
- * caller needs "the row that actually aired most recently" instead of "a
- * stable pick," that is a different query (order by `add_time`, with `id` as
- * its own tie-break — see `getEntriesByPage`'s comment for why `add_time`
- * alone is not unique), not a change to this one.
+ * its own 30-minute cron, independent of when the row was inserted — and the
+ * winning row's `record_label` / `label_id` / `metadata_status` then come
+ * from that historical row instead of whichever live row previously won.
+ *
+ * `record_label` and `label_id` are accepted as-is: DJ-entered or
+ * ETL-written free text, not derived from *when* the row aired, so a
+ * historical row's values are not wrong in the way a recency claim would
+ * be — just a different, equally legitimate, source row for the same key.
+ *
+ * `metadata_status` is NOT the same kind of column and is NOT covered by
+ * that argument — it is a `pgEnum` (`schema.ts`) written only by the
+ * enrichment pipeline (`apps/enrichment-worker`), and it inherently makes a
+ * temporal claim about the row (a `pending`/`enriching` value asserts
+ * enrichment hasn't landed *yet* — see `proxy.controller.ts`'s
+ * `NON_TERMINAL_METADATA_STATUSES` comment). Whether a replayed/stale value
+ * here is acceptable is the terminal-semantics question iOS#685 already
+ * owns and this function already declines to answer (see the base-field
+ * paragraph above) — that pre-existing carve-out stands; this comment does
+ * not relitigate it. What IS new here: a historical insert can make a
+ * non-terminal (`pending`/`enriching`) row win the pick for a key whose
+ * live row had already reached a terminal status. On the
+ * `GET /proxy/metadata/album` hot path, the proxy controller treats a
+ * non-terminal `metadataStatus` as uncacheable and skips
+ * `albumMetadataCache.set` (`proxy.controller.ts`) — so for as long as that
+ * historical row keeps winning and stays non-terminal, this key's 1-hour
+ * album-metadata memo is suppressed. Reachable by the #2119 cohort.
+ *
+ * If a future caller needs "the row that actually aired most recently"
+ * instead of "a stable pick," that is a different query (order by
+ * `add_time`, with `id` as its own tie-break — see `getEntriesByPage`'s
+ * comment for why `add_time` alone is not unique), not a change to this
+ * one.
  *
  * An empty/whitespace-only `artistName` or `releaseTitle` short-circuits to
  * `null`: the key `'<artist>-'` (blank release) would otherwise match any
