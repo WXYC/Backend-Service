@@ -9,10 +9,21 @@
 -- Modeled on scripts/audit/bs_replacement_char_recovery.sql (V_BS_FFFD) --
 -- a HAND-APPLIED script, NOT a Drizzle-tracked migration. docs/migrations.md
 -- ("Migrations are DDL-only") puts bulk DML rewrites outside the migration
--- chain; this script contains no DDL at all (it needed none -- see the
--- "why no vocabulary extension" section below), so it never had a Drizzle
--- alternative to weigh against. The operator runs it via `psql -f` against
--- prod RDS, same pattern as bs_replacement_char_recovery.sql.
+-- chain; this script contains no DDL at all (it needed none -- see
+-- "Recorded decisions" below), so it never had a Drizzle
+-- alternative to weigh against.
+--
+-- ===========================================================================
+-- HOW TO RUN IT -- the flag is not optional
+-- ===========================================================================
+--
+--   psql -v ON_ERROR_STOP=1 -f scripts/audit/bs_format_qualifier_recovery.sql
+--
+-- `psql -f` WITHOUT `ON_ERROR_STOP=1` continues after an error, which
+-- defeats the guards below: they `RAISE EXCEPTION`, psql prints the message
+-- and then runs the UPDATE anyway. The post-amble verify is LEFT JOINed
+-- specifically so that case still surfaces as a non-zero residual instead
+-- of a clean-looking finish -- but belt and braces, pass the flag.
 --
 -- ===========================================================================
 -- What the ticket's 395 actually is: 5 broken rows + ~390 harness artifacts
@@ -5521,21 +5532,32 @@ INSERT INTO format_qualifier_map_2116 (tubafrenzy_format, target_format_name, ta
 SELECT '=== BS#2116 pre-amble: live wxyc_schema.format vocabulary ===' AS section;
 SELECT id, format_name FROM wxyc_schema.format ORDER BY format_name;
 
--- Guard 1: every name this run needs to target must already exist in the
--- live vocabulary. Fails loudly instead of quietly mapping a release to the
--- wrong format_id (or NULL) if the live table has drifted from the three
--- sources above.
+-- Guard 1: every name this run needs to target must resolve to EXACTLY ONE
+-- live format row. Derived from format_qualifier_map_2116 rather than a
+-- hardcoded list, so widening the map can never outrun the guard.
+--
+-- Two failure modes, both of which would otherwise be silent because the
+-- UPDATE below inner-joins `format`:
+--   * missing name -> the join drops every candidate targeting it, and no
+--     row is repaired;
+--   * duplicate name -> `format.format_name` carries no unique constraint
+--     (schema.ts:499) and the dev seeds' `ON CONFLICT DO NOTHING` has no
+--     arbiter, so a prod table with two rows named `cd` would fan the join
+--     out and let the UPDATE pick an id arbitrarily.
 DO $$
-DECLARE missing_names text[];
+DECLARE bad_names text;
 BEGIN
-  SELECT array_agg(needed.name ORDER BY needed.name)
-  INTO missing_names
-  FROM (VALUES ('cd'), ('vinyl 7"'), ('vinyl 10"'), ('vinyl 12"')) AS needed(name)
-  WHERE NOT EXISTS (
-    SELECT 1 FROM wxyc_schema.format f WHERE f.format_name = needed.name
-  );
-  IF missing_names IS NOT NULL THEN
-    RAISE EXCEPTION 'BS#2116: wxyc_schema.format is missing target name(s) %. Live vocabulary has drifted from the dev_env/seed-clone.sql prod-clone baseline this script was authored against -- reconcile before re-running.', missing_names;
+  SELECT string_agg(format('%s (%s live row(s))', needed.name, needed.n), ', ' ORDER BY needed.name)
+  INTO bad_names
+  FROM (
+    SELECT
+      m.target_format_name AS name,
+      (SELECT COUNT(*) FROM wxyc_schema.format f WHERE f.format_name = m.target_format_name) AS n
+    FROM (SELECT DISTINCT target_format_name FROM format_qualifier_map_2116) m
+  ) needed
+  WHERE needed.n <> 1;
+  IF bad_names IS NOT NULL THEN
+    RAISE EXCEPTION 'BS#2116: wxyc_schema.format does not resolve each target name to exactly one row: %. Live vocabulary has drifted from the dev_env/seed-clone.sql prod-clone baseline this script was authored against -- reconcile before re-running.', bad_names;
   END IF;
 END $$;
 
@@ -5561,17 +5583,36 @@ FROM tf_format_qualified_2116
 GROUP BY tubafrenzy_format
 ORDER BY staged_rows DESC;
 
+-- Staged ids with no library row at all. These are silently skipped by the
+-- join below (tubafrenzy has releases Backend never imported), which is
+-- correct but invisible -- so count them explicitly. 20 in the dev
+-- prod-clone snapshot. A sharp jump here is a missing-rows parity problem,
+-- not a format problem, and belongs in its own ticket.
+SELECT '=== BS#2116 pre-amble: staged ids with no matching library row ===' AS section;
+SELECT COUNT(*) AS staged_without_library_row
+FROM tf_format_qualified_2116 s
+WHERE NOT EXISTS (
+  SELECT 1 FROM wxyc_schema.library l WHERE l.legacy_release_id = s.legacy_release_id
+);
+
 -- The number that matters: how many library rows actually differ from
 -- their derived target today. Against the dev prod-clone snapshot this is
 -- 5. If it comes back anywhere near 395, STOP -- that would mean the
 -- multi-disc rows have lost their disc_quantity too, which is a different
 -- (and much larger) defect than the one this script was written for.
+--
+-- LEFT JOIN to `format` on purpose (here and in the post-amble): the UPDATE
+-- inner-joins it, so a target name missing from the live vocabulary makes
+-- rows vanish from an inner-joined count rather than show up as unrepaired.
+-- With the LEFT JOIN, tf.id comes back NULL, `format_id IS DISTINCT FROM
+-- NULL` is true, and the row is counted -- which is what makes the
+-- post-amble a real verify rather than a tautology.
 SELECT '=== BS#2116 pre-amble: rows that will actually change (real count) ===' AS section;
 SELECT COUNT(*) AS rows_to_update
 FROM wxyc_schema.library l
 JOIN tf_format_qualified_2116 s ON s.legacy_release_id = l.legacy_release_id
 JOIN format_qualifier_map_2116 m ON m.tubafrenzy_format = s.tubafrenzy_format
-JOIN wxyc_schema.format tf ON tf.format_name = m.target_format_name
+LEFT JOIN wxyc_schema.format tf ON tf.format_name = m.target_format_name
 WHERE l.format_id IS DISTINCT FROM tf.id
    OR l.disc_quantity IS DISTINCT FROM m.target_disc_quantity;
 
@@ -5590,7 +5631,7 @@ SELECT
 FROM wxyc_schema.library l
 JOIN tf_format_qualified_2116 s ON s.legacy_release_id = l.legacy_release_id
 JOIN format_qualifier_map_2116 m ON m.tubafrenzy_format = s.tubafrenzy_format
-JOIN wxyc_schema.format tf ON tf.format_name = m.target_format_name
+LEFT JOIN wxyc_schema.format tf ON tf.format_name = m.target_format_name
 JOIN wxyc_schema.format cur ON cur.id = l.format_id
 WHERE l.format_id IS DISTINCT FROM tf.id
    OR l.disc_quantity IS DISTINCT FROM m.target_disc_quantity
@@ -5617,14 +5658,16 @@ COMMIT;
 
 -- ===========================================================================
 -- Post-amble verify: no staged row should still mismatch its derived
--- target. Any non-zero count below is a regression.
+-- target. Any non-zero count below is a regression. LEFT JOIN to `format`
+-- for the reason given above the pre-amble count -- an inner join here
+-- would report 0 precisely in the case where nothing was repaired.
 -- ===========================================================================
 SELECT '=== BS#2116 post-amble: rows still mismatched after COMMIT (expect 0) ===' AS section;
 SELECT COUNT(*) AS residual_mismatch
 FROM wxyc_schema.library l
 JOIN tf_format_qualified_2116 s ON s.legacy_release_id = l.legacy_release_id
 JOIN format_qualifier_map_2116 m ON m.tubafrenzy_format = s.tubafrenzy_format
-JOIN wxyc_schema.format tf ON tf.format_name = m.target_format_name
+LEFT JOIN wxyc_schema.format tf ON tf.format_name = m.target_format_name
 WHERE l.format_id IS DISTINCT FROM tf.id
    OR l.disc_quantity IS DISTINCT FROM m.target_disc_quantity;
 
