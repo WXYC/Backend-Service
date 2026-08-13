@@ -5,9 +5,21 @@
 -- HAND-APPLIED operator script, NOT a Drizzle migration — docs/migrations.md
 -- says migrations are DDL-only, and this is DML over a curated table. There
 -- is no entry in shared/database/src/migrations/; version history is just
--- `git log -- scripts/audit/bs_2117_crossref_backfill.sql`. Run via
--- `psql -f` against prod (see scripts/query-flowsheet.sh for the EC2-docker
--- connection pattern).
+-- `git log -- scripts/audit/bs_2117_crossref_backfill.sql`. Run against prod as
+--
+--     psql -v ON_ERROR_STOP=1 -f scripts/audit/bs_2117_crossref_backfill.sql
+--
+-- (see scripts/query-flowsheet.sh for the EC2-docker connection pattern).
+-- ON_ERROR_STOP=1 is REQUIRED, matching scripts/relabel-rotation-direct-backfill.sql.
+-- Without it a failure in the pair load does not stop psql: it runs on through
+-- the transaction block (whose COMMIT then degrades to a rollback), the
+-- post-amble and ANALYZE, and prints `resolved_pairs 0 / present_in_backend 0`
+-- — which is indistinguishable from a successful idempotent re-run.
+--
+-- Note also that `psql -f` is non-interactive and the COMMIT is unconditional:
+-- the pre-amble is a record to READ, not a gate that pauses. If you want to
+-- inspect before writing, run the file down to the `BEGIN;` first, or run it
+-- inside a transaction you roll back yourself.
 --
 -- ## Problem (#2117)
 --
@@ -81,28 +93,83 @@
 -- against it exercises real WXYC artist names rather than synthetic ones.
 -- Measured there:
 --
---   * 110 pairs -> 79 resolve on both sides, 31 do not. Every one of the 31
---     fails on the REFERENCING side, and every one of the 31 has an empty
+--   * 110 pairs -> 15 excluded as provenance conflicts (above), 31 do not
+--     resolve, 64 resolve on both sides and are eligible to insert. Every one
+--     of the 31 fails on the REFERENCING side, and every one has an empty
 --     tubafrenzy CALL_LETTERS (the converse does not hold: 4 of the 35
 --     empty-CALL_LETTERS pairs do resolve).
 --   * 0 pairs come out AMBIGUOUS. Five endpoint tuples match more than one
 --     Backend artist by folded name — DAT Politics, Exene Cervenka, Sankofa,
 --     and the two Oliver Lakes — and stages 2 and 3 narrow every one of them
 --     to a single artist.
---   * 75 of the 79 resolved pairs would ALSO satisfy the deployed importer's
+--   * 60 of the 64 eligible pairs would ALSO satisfy the deployed importer's
 --     strict `code_letters` equality on both sides. Only 4 need this script's
 --     more lenient name-first resolution — those 4 pairs are the entire
 --     population this script recovers that the ETL could not.
---   * 79 resolved pairs collapse to 77 distinct unordered pairs, inserted as
---     77 rows against the clone's empty table.
---   * The 155 resolvable endpoint artists own 915 `library` rows between them.
+--   * 64 eligible pairs collapse to 62 distinct unordered pairs, inserted as
+--     62 rows against the clone's empty table.
+--   * Their 108 endpoint artists own 630 `library` rows between them — the
+--     upper bound on how many catalog rows change value.
 --
 -- Because prod's table is populated and the clone's is empty by construction,
--- **the row count this inserts against prod will be far lower than 77** —
--- most of those 75 strict-matchable pairs should already be present, and the
+-- **the row count this inserts against prod will be far lower than 62** —
+-- most of those 60 strict-matchable pairs should already be present, and the
 -- guards below will skip them. Read the pre-amble and the `INSERT 0 n` line
 -- before accepting the COMMIT; the counts will legitimately differ from every
 -- clone-measured figure in this header.
+--
+-- ## Provenance conflicts: 15 pairs EXCLUDED because tubafrenzy's own FK is wrong
+--
+-- `LIBRARY_CODE_CROSS_REFERENCE.CROSS_REFERENCING_ARTIST_ID` is, despite its
+-- name, a `LIBRARY_CODE.ID` (the referenced side is a LIBRARY_CODE id too).
+-- The 110 pairs embedded below resolve it that way and match tubafrenzy
+-- exactly — verified row-by-row against the live database, 0 mismatches.
+--
+-- But on 15 of them the FK is CORRUPT UPSTREAM, and each row's own COMMENT
+-- proves it. Many comments carry a machine-generated provenance prefix,
+-- `[from <Genre>-<LETTERS>-<NUM> to <target>]`. Where the referencing row is a
+-- real filing (CALL_NUMBERS <> 0) and that prefix names a different non-zero
+-- code, the two disagree — and the prefix is the one telling the truth:
+--
+--   id  FK resolves to              provenance note names        target
+--   26  Cactus World News CA 46     Rock DO 66 = Tonya Donelly   The Breeders
+--   27  Cactus World News CA 46     Rock DO 66 = Tonya Donelly   Belly
+--   29  Capping Day CA 74           Rock CO 184 = Graham Coxon   Blur
+--   31  Chris Cacavas CA 66         Rock CA 37 = Camper Van B.   Eugene Chadbourne
+--   32  Cactus CA 153               Rock DE 80 = The Dentists    Coax
+--   33  Gloria Loring LO 24         Rock DE 90 = Amy Denio       Danubians
+--   34  Cabal CA 72                 Rock CA 8 = Caravan          Delivery
+--   36  Gloria Loring LO 24         Rock DO 73 = Julie Doiron    Eric's Trip
+--   38  Papa John Creach CR 59      Rock DE 39 = Dead Can Dance  Lisa Gerrard
+--   41  Capping Day CA 74           Rock DA 7 = Dave Davies      The Kinks
+--   43  Cabaret Voltaire CA 42      Rock DR 7 = Dream Syndicate  Last Days of May
+--   44  Cabaret Voltaire CA 42      Rock CH 11 = Sheila Chandra  Monsoon
+--   45  Cabaret Voltaire CA 42      Rock DR 7 = Dream Syndicate  Opal
+--   46  Cabal CA 72                 Rock CL 55 = Allen Clapp     The Orange Peels
+--   48  Cactus World News CA 46     Rock CA 69 = Lori Carson     Golden Palominos
+--
+-- Every note names a real, well-known musical relationship (Donelly was in the
+-- Breeders and founded Belly; Coxon is in Blur; Davies is a Kink; Gerrard is
+-- half of Dead Can Dance; Chandra fronted Monsoon; Clapp is the Orange Peels;
+-- Carson sang with the Golden Palominos). Every FK reading is nonsense
+-- (Cabaret Voltaire did not spawn Monsoon; Papa John Creach is not Lisa
+-- Gerrard). Note too that one FK value collapses several distinct true sources
+-- onto one arbitrary name — Cabaret Voltaire CA 42 stands in for three
+-- different referencing codes.
+--
+-- These 15 are EXCLUDED from the INSERT (see `bs2117_provenance_conflicts`
+-- below) and reported as `provenance_conflict_skip` in the pre-amble. The
+-- reason is asymmetric risk: unlike the missing pairs, these are associations
+-- prod does NOT hold, so no guard below would skip them — they would land as
+-- brand-new FALSE aliases on real catalog rows, and this script has no delete
+-- path to walk them back. A wrong alias on a live catalog row is worse than a
+-- missing one.
+--
+-- Repairing them by re-resolving the referencing side from the provenance
+-- prefix is mechanically easy and probably correct, but it is a data-quality
+-- judgement about tubafrenzy's own corruption, made from free-text prose, and
+-- it belongs to a cataloger and a follow-up ticket — not to a backfill whose
+-- stated contract is to move cataloger data across unchanged.
 --
 -- ## Hard ceiling: 31 of the 110 pairs are NOT recoverable by this script
 --
@@ -230,6 +297,50 @@
 -- than one artist after all three stages is AMBIGUOUS. Both are reported in
 -- the pre-amble and excluded from the INSERT — never guessed.
 --
+-- `wxyc_schema.fold_artist_name` is present in prod, on two independent
+-- counts: migration 0134 (`0134_fold-artist-name`, merged 2026-07-31) created
+-- it and now sits nine entries behind the journal tip, and `jobs/library-etl`
+-- calls it on every ETL run, which would fail outright if it were missing.
+-- There is also an `artists_fold_name_idx` btree on the expression, so stage 1
+-- is index-backed rather than a per-row seq scan — the whole 110-pair resolve
+-- measures ~25ms against 24k artists, well inside the 30s statement_timeout.
+--
+-- The fold's STRENGTH is deliberate and correct for this repair: NFD-normalize,
+-- strip combining marks, lowercase. Nothing else. It does not strip
+-- punctuation, articles, or bracketed qualifiers, so it cannot merge distinct
+-- artists — "Paris [rock band]" and "Paris [hiphop mc]" stay separate, which
+-- matters because pairs 54/55 reference both. The cost of that conservatism is
+-- that it misses tubafrenzy name VARIANTS, which is a real but small effect
+-- here: of the 28 unresolvable names, 24 have no plausible Backend
+-- counterpart at all, and only 4 are variants a looser rule would reach (see
+-- the hard-ceiling section). Loosening the fold to catch those 4 would risk
+-- the many-to-one collapses this table has no way to detect after the fact, so
+-- it is not done.
+--
+-- Two properties of the resolution were checked against the clone rather than
+-- assumed, because both would be silent if wrong:
+--   * Stage 2 falls THROUGH when `code_letters` narrows the candidate set to
+--     zero — it restores the stage-1 set rather than failing, so stage 3 still
+--     gets a chance. That path never engages here: no name with more than one
+--     candidate has zero code_letters matches among them. If it ever did, the
+--     worst case is still bounded — stage 3 either narrows to one, or the pair
+--     is reported AMBIGUOUS and skipped.
+--   * No single-candidate resolution CONTRADICTS tubafrenzy. Every endpoint
+--     that resolves to exactly one Backend artist and carries a non-empty
+--     CALL_LETTERS has that artist's `code_letters` agreeing with it. The
+--     lenient name-first rule is therefore never overriding a letters
+--     disagreement; it only fires where tubafrenzy recorded no letters to
+--     check against.
+--
+-- ## Concurrency
+--
+-- Run exactly one copy. The either-direction `NOT EXISTS` guard below reads a
+-- snapshot, so under READ COMMITTED two simultaneous runs could each see a
+-- pair as absent and insert it in OPPOSITE directions — which the ordered
+-- unique index cannot reject, and which is precisely the duplicate the guard
+-- exists to prevent. This is a hand-run operator script, so serializing it is
+-- a matter of not starting it twice, not of adding a lock.
+--
 -- ## Direction, idempotency, and the reversed-duplicate guard
 --
 -- `artist_crossreference`'s unique index is on the ORDERED pair
@@ -276,12 +387,18 @@
 --
 -- ## Cataloger comments
 --
--- 34 of the 110 pairs carry a tubafrenzy COMMENT (free-text cataloger
+-- 51 of the 110 pairs carry a tubafrenzy COMMENT (free-text cataloger
 -- rationale — "which one?", "RH records as Cyanosis", "shared member Adrian
 -- Finch", etc.). These are cataloger judgements the same way the
 -- cross-references themselves are (per the tracking issue's framing) and
 -- are lost forever after tubafrenzy turndown, so this script carries them
 -- into `artist_crossreference.comment` verbatim rather than discarding them.
+-- "Verbatim" is exact, not approximate: tubafrenzy's own
+-- `LIBRARY_CODE_CROSS_REFERENCE.COMMENT` is `varchar(100)`, so the 100-char
+-- values here (e.g. row 31, which ends mid-word at "for Camper Va") are
+-- already the full stored value — the truncation happened in tubafrenzy years
+-- ago and nothing is being clipped on the way out. The Backend column is
+-- `varchar(255)`, so there is headroom, not a lossy fit.
 --
 -- ## Trigger costs (expected, not bugs)
 --
@@ -475,6 +592,43 @@ INSERT INTO bs2117_pairs (row_id, src_name, src_letters, src_number, tgt_name, t
     (134, 'Thom Yorke', 'YO', 57, 'Radiohead', 'RA', 27, NULL),
     (135, 'Upsetters', 'Up', 2, 'Lee ''Scratch'' Perry', 'Pe', 1, NULL);
 
+-- ===========================================================
+-- Provenance conflicts: 15 pairs whose referencing side is contradicted by
+-- their own COMMENT, and which are therefore EXCLUDED from the INSERT.
+-- See the "Provenance conflicts" section in the header for the evidence.
+--
+-- Rule (mechanical, not hand-picked): the referencing LIBRARY_CODE is a real
+-- filing (CALL_NUMBERS <> 0), its COMMENT carries a machine-generated
+-- `[from <Genre>-<LETTERS>-<NUM> to <target>]` provenance note whose NUM is
+-- also non-zero, and the note's (LETTERS, NUM) differs from the referencing
+-- row's own. On every one of the 15, the note names a musically-correct
+-- artist and the FK names an unrelated one, so the FK is what is wrong.
+-- ===========================================================
+DROP TABLE IF EXISTS pg_temp.bs2117_provenance_conflicts;
+CREATE TEMP TABLE bs2117_provenance_conflicts (
+  row_id     int PRIMARY KEY,  -- LIBRARY_CODE_CROSS_REFERENCE.ID
+  fk_says    text NOT NULL,    -- what CROSS_REFERENCING_ARTIST_ID resolves to
+  note_says  text NOT NULL,    -- what the COMMENT's provenance prefix names
+  target     text NOT NULL
+) ON COMMIT PRESERVE ROWS;
+
+INSERT INTO bs2117_provenance_conflicts (row_id, fk_says, note_says, target) VALUES
+    (26, 'Cactus World News [CA 46]', 'Rock DO 66 = Tonya Donelly',      'The Breeders'),
+    (27, 'Cactus World News [CA 46]', 'Rock DO 66 = Tonya Donelly',      'Belly'),
+    (29, 'Capping Day [CA 74]',       'Rock CO 184 = Graham Coxon',      'Blur'),
+    (31, 'Chris Cacavas [CA 66]',     'Rock CA 37 = Camper Van Beethoven','Eugene Chadbourne'),
+    (32, 'Cactus [CA 153]',           'Rock DE 80 = The Dentists',       'Coax'),
+    (33, 'Gloria Loring [LO 24]',     'Rock DE 90 = Amy Denio',          'Danubians'),
+    (34, 'Cabal [CA 72]',             'Rock CA 8 = Caravan',             'Delivery'),
+    (36, 'Gloria Loring [LO 24]',     'Rock DO 73 = Julie Doiron',       'Eric''s Trip'),
+    (38, 'Papa John Creach [CR 59]',  'Rock DE 39 = Dead Can Dance',     'Lisa Gerrard'),
+    (41, 'Capping Day [CA 74]',       'Rock DA 7 = Dave Davies',         'The Kinks'),
+    (43, 'Cabaret Voltaire [CA 42]',  'Rock DR 7 = Dream Syndicate',     'Last Days of May'),
+    (44, 'Cabaret Voltaire [CA 42]',  'Rock CH 11 = Sheila Chandra',     'Monsoon'),
+    (45, 'Cabaret Voltaire [CA 42]',  'Rock DR 7 = Dream Syndicate',     'Opal'),
+    (46, 'Cabal [CA 72]',             'Rock CL 55 = Allen Clapp',        'The Orange Peels'),
+    (48, 'Cactus World News [CA 46]', 'Rock CA 69 = Lori Carson',        'Golden Palominos');
+
 -- Three-stage resolver: fold_artist_name -> code_letters -> genre code.
 -- Session-local (pg_temp), so it never touches the shared wxyc_schema
 -- namespace and needs no cleanup migration.
@@ -555,6 +709,7 @@ SELECT '=== BS2117 pre-amble: resolution outcome per pair ===' AS section;
 WITH resolved AS (
   SELECT
     p.row_id, p.src_name, p.tgt_name, p.xref_comment,
+    EXISTS (SELECT 1 FROM bs2117_provenance_conflicts pc WHERE pc.row_id = p.row_id) AS provenance_conflict,
     src.artist_id AS source_artist_id, src.match_count AS source_match_count, src.ambiguous AS source_ambiguous,
     tgt.artist_id AS target_artist_id, tgt.match_count AS target_match_count, tgt.ambiguous AS target_ambiguous
   FROM bs2117_pairs p
@@ -564,6 +719,7 @@ WITH resolved AS (
 SELECT
   row_id, src_name, tgt_name,
   CASE
+    WHEN provenance_conflict THEN 'provenance_conflict_skip'
     WHEN source_artist_id IS NULL AND NOT source_ambiguous THEN 'source_unresolved'
     WHEN source_ambiguous THEN 'source_ambiguous'
     WHEN target_artist_id IS NULL AND NOT target_ambiguous THEN 'target_unresolved'
@@ -573,19 +729,23 @@ SELECT
   END AS outcome,
   source_artist_id, source_match_count, target_artist_id, target_match_count
 FROM resolved
+-- Anomalies FIRST: these are the rows the operator must inspect before
+-- committing, and burying them under ~79 successful rows defeats the point.
 ORDER BY (CASE
+    WHEN provenance_conflict THEN 'provenance_conflict_skip'
     WHEN source_artist_id IS NULL AND NOT source_ambiguous THEN 'source_unresolved'
     WHEN source_ambiguous THEN 'source_ambiguous'
     WHEN target_artist_id IS NULL AND NOT target_ambiguous THEN 'target_unresolved'
     WHEN target_ambiguous THEN 'target_ambiguous'
     WHEN source_artist_id = target_artist_id THEN 'self_pair_skip'
     ELSE 'resolved'
-  END) <> 'resolved', row_id;
+  END) = 'resolved', row_id;
 
 SELECT '=== BS2117 pre-amble: outcome counts ===' AS section;
 WITH resolved AS (
   SELECT
     p.row_id,
+    EXISTS (SELECT 1 FROM bs2117_provenance_conflicts pc WHERE pc.row_id = p.row_id) AS provenance_conflict,
     src.artist_id AS source_artist_id, src.ambiguous AS source_ambiguous,
     tgt.artist_id AS target_artist_id, tgt.ambiguous AS target_ambiguous
   FROM bs2117_pairs p
@@ -595,6 +755,7 @@ WITH resolved AS (
 classified AS (
   SELECT
     CASE
+      WHEN provenance_conflict THEN 'provenance_conflict_skip'
       WHEN source_artist_id IS NULL AND NOT source_ambiguous THEN 'source_unresolved'
       WHEN source_ambiguous THEN 'source_ambiguous'
       WHEN target_artist_id IS NULL AND NOT target_ambiguous THEN 'target_unresolved'
@@ -623,6 +784,14 @@ WITH resolved AS (
   WHERE src.artist_id IS NOT NULL
     AND tgt.artist_id IS NOT NULL
     AND src.artist_id <> tgt.artist_id -- self-pair guard (row 128 "Oliver Lake"/"Oliver Lake")
+    -- Provenance guard: drop the 15 pairs whose referencing side is
+    -- contradicted by their own COMMENT. Without this the script inserts
+    -- brand-new FALSE aliases (Cactus World News <-> The Breeders, Capping Day
+    -- <-> Blur, ...) that prod does not hold, so nothing below would skip them
+    -- and there is no delete path to walk them back.
+    AND NOT EXISTS (
+      SELECT 1 FROM bs2117_provenance_conflicts pc WHERE pc.row_id = p.row_id
+    )
 ),
 canon AS (
   -- Canonicalize direction so a reversed duplicate (rows 74/75:
@@ -679,6 +848,9 @@ WITH resolved AS (
   WHERE src.artist_id IS NOT NULL
     AND tgt.artist_id IS NOT NULL
     AND src.artist_id <> tgt.artist_id
+    AND NOT EXISTS (
+      SELECT 1 FROM bs2117_provenance_conflicts pc WHERE pc.row_id = p.row_id
+    )
 )
 SELECT
   count(*) AS resolved_pairs,
@@ -700,4 +872,5 @@ SELECT count(*) FROM wxyc_schema.artist_crossreference;
 -- cannot run inside a transaction, so it lives here, after COMMIT.
 ANALYZE wxyc_schema.artist_crossreference;
 
-DROP TABLE IF EXISTS bs2117_pairs;
+DROP TABLE IF EXISTS pg_temp.bs2117_pairs;
+DROP TABLE IF EXISTS pg_temp.bs2117_provenance_conflicts;
