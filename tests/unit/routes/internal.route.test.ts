@@ -348,6 +348,92 @@ describe('POST /internal/flowsheet-webhook', () => {
     expect(lastInsertValues()).toEqual(expect.objectContaining({ entry_type: 'track', radio_hour: null }));
   });
 
+  // -- add_time / markerTimestamp future-bound (BS#2143). A future or
+  // malformed `entry.startTime` must never reach `add_time` verbatim — see
+  // the doc comment on `markerTimestamp`'s computation in
+  // apps/backend/routes/internal.route.ts for the full clamp-vs-reject
+  // reasoning and why a read-side predicate was rejected instead.
+
+  it('writes add_time verbatim from an ordinary (historical) startTime', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: validEntry });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ add_time: new Date(validEntry.startTime) }));
+    expect(mockCaptureMessage).not.toHaveBeenCalled();
+  });
+
+  it('clamps a startTime beyond the future tolerance to the delivery clock instead of writing it verbatim, and alerts Sentry', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+    const beforeRequest = Date.now();
+    const farFutureStartTime = beforeRequest + 60 * 60 * 1000; // 1h ahead — well beyond the 5-minute tolerance
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, startTime: farFutureStartTime } });
+    const afterRequest = Date.now();
+
+    expect(res.status).toBe(200);
+    const written = lastInsertValues().add_time as Date;
+    expect(written).toBeInstanceOf(Date);
+    // Clamped to "now" at handling time, not to the far-future input value.
+    expect(written.getTime()).toBeGreaterThanOrEqual(beforeRequest);
+    expect(written.getTime()).toBeLessThanOrEqual(afterRequest);
+    expect(written.getTime()).not.toBe(farFutureStartTime);
+
+    expect(mockCaptureMessage).toHaveBeenCalledWith(
+      expect.stringMatching(/startTime beyond future tolerance/),
+      expect.objectContaining({
+        level: 'warning',
+        tags: expect.objectContaining({ subsystem: 'flowsheet-webhook' }),
+        extra: expect.objectContaining({
+          legacy_entry_id: validEntry.id,
+          rejected_start_time_raw: farFutureStartTime,
+        }),
+        fingerprint: ['webhook-future-add-time'],
+      })
+    );
+  });
+
+  it('does not clamp a startTime just inside the future tolerance', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+    const justInsideStartTime = Date.now() + 60 * 1000; // 1 minute ahead, well under the 5-minute tolerance
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, startTime: justInsideStartTime } });
+
+    expect(res.status).toBe(200);
+    expect(lastInsertValues()).toEqual(expect.objectContaining({ add_time: new Date(justInsideStartTime) }));
+    expect(mockCaptureMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not throw and does not write an Invalid Date when startTime is malformed (non-numeric)', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+    const beforeRequest = Date.now();
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, startTime: 'not-a-number' } });
+    const afterRequest = Date.now();
+
+    expect(res.status).toBe(200);
+    const written = lastInsertValues().add_time as Date;
+    expect(written).toBeInstanceOf(Date);
+    expect(Number.isNaN(written.getTime())).toBe(false);
+    // Falls back to the delivery clock, same as an absent startTime.
+    expect(written.getTime()).toBeGreaterThanOrEqual(beforeRequest);
+    expect(written.getTime()).toBeLessThanOrEqual(afterRequest);
+    expect(mockCaptureMessage).not.toHaveBeenCalled();
+  });
+
   it('forwards the resolved rotation_id when rotationReleaseId matches a rotation row', async () => {
     // resolveShow → 9999, resolveAlbumId → unlinked, resolveRotationId → 4242.
     mockLimit.mockReset();

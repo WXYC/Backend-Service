@@ -14,7 +14,11 @@ import { epochMsToDate, truncate, parseTabRow, toNullable } from '@wxyc/database
 jest.mock('../../../shared/database/src/client.js', () => jest.requireActual('../../mocks/database.mock'), {
   virtual: true,
 });
-import { truncate as truncateReal } from '../../../shared/database/src/legacy/etl-utils';
+import {
+  truncate as truncateReal,
+  isBeyondFutureTolerance as isBeyondFutureToleranceReal,
+  FUTURE_TIMESTAMP_TOLERANCE_MS as FUTURE_TIMESTAMP_TOLERANCE_MS_REAL,
+} from '../../../shared/database/src/legacy/etl-utils';
 
 describe('epochMsToDate', () => {
   it('converts valid epoch ms to Date', () => {
@@ -37,6 +41,68 @@ describe('epochMsToDate', () => {
 
   it('returns null for Infinity', () => {
     expect(epochMsToDate(Infinity)).toBeNull();
+  });
+
+  // BS#2143: pins the guard that keeps `radio_hour` correct. A breakpoint's
+  // `radio_hour` is legitimately up to ~a minute in the future (BS#1449), so
+  // `epochMsToDate` — the converter `radio_hour` goes through — must NEVER
+  // clamp a future date. The future-tolerance bound lives in the separate
+  // `isBeyondFutureTolerance` predicate instead; this test fails if someone
+  // "simplifies" by folding that clamp into this converter.
+  it('returns a far-future date unchanged (no future clamp in the converter itself)', () => {
+    const farFutureMs = Date.now() + 365 * 24 * 60 * 60 * 1000; // ~1 year ahead
+    const date = epochMsToDate(farFutureMs);
+    expect(date).toBeInstanceOf(Date);
+    expect(date?.getTime()).toBe(farFutureMs);
+  });
+});
+
+/**
+ * BS#2143. `isBeyondFutureTolerance` is the shared predicate bounding
+ * `flowsheet.add_time` at write time (the webhook's `markerTimestamp` in
+ * apps/backend/routes/internal.route.ts and `resolveEntryTimestamp` in
+ * jobs/flowsheet-etl/transform.ts). Imported from the real module (not the
+ * `@wxyc/database` top-of-file import, which resolves to
+ * tests/mocks/database.mock.ts's hand-maintained copy) so this test pins the
+ * actual production implementation, mirroring the `truncate`/`truncateReal`
+ * split above.
+ */
+describe('isBeyondFutureTolerance (real implementation)', () => {
+  const now = new Date('2026-08-13T18:00:00.000Z');
+
+  it('is false for a date exactly at the tolerance boundary', () => {
+    const atBoundary = new Date(now.getTime() + FUTURE_TIMESTAMP_TOLERANCE_MS_REAL);
+    expect(isBeyondFutureToleranceReal(atBoundary, now)).toBe(false);
+  });
+
+  it('is false for a date 1ms inside the tolerance boundary', () => {
+    const justInside = new Date(now.getTime() + FUTURE_TIMESTAMP_TOLERANCE_MS_REAL - 1);
+    expect(isBeyondFutureToleranceReal(justInside, now)).toBe(false);
+  });
+
+  it('is true for a date 1ms beyond the tolerance boundary', () => {
+    const justOutside = new Date(now.getTime() + FUTURE_TIMESTAMP_TOLERANCE_MS_REAL + 1);
+    expect(isBeyondFutureToleranceReal(justOutside, now)).toBe(true);
+  });
+
+  it('is false for a date in the past', () => {
+    const past = new Date(now.getTime() - 1000);
+    expect(isBeyondFutureToleranceReal(past, now)).toBe(false);
+  });
+
+  it('is false for a date equal to now', () => {
+    expect(isBeyondFutureToleranceReal(new Date(now.getTime()), now)).toBe(false);
+  });
+
+  it('is false for null', () => {
+    expect(isBeyondFutureToleranceReal(null, now)).toBe(false);
+  });
+
+  it('defaults `now` to the wall clock when not injected', () => {
+    // Deterministic without fake timers: a date far enough in the past can
+    // never be "beyond" whatever `now` actually resolves to.
+    const wayInThePast = new Date('2000-01-01T00:00:00.000Z');
+    expect(isBeyondFutureToleranceReal(wayInThePast)).toBe(false);
   });
 });
 

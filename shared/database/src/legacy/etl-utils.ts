@@ -43,6 +43,47 @@ export const epochMsToDate = (epochMs: number | null): Date | null => {
 };
 
 /**
+ * How far into the future an upstream (tubafrenzy) timestamp may legitimately
+ * drift before it's treated as bad data rather than ordinary clock skew
+ * (BS#2143). 5 minutes comfortably covers NTP-class drift between the
+ * tubafrenzy host and this service without being wide enough to mask a
+ * genuinely misconfigured clock.
+ *
+ * A plain constant, not an env var. The past-side sibling,
+ * `LIVE_FS_INSERT_MAX_AGE_HOURS`
+ * (apps/backend/services/metadata-broadcast/metadata-broadcast.ts), is
+ * env-gated because it's a kill switch — an operator may need to widen or
+ * disable that broadcast filter in production without a deploy. This bound
+ * has no analogous "turn it off" case (clamping a future timestamp to now is
+ * always the right call), so an env var would buy nothing but a
+ * docs/env-vars.md entry.
+ */
+export const FUTURE_TIMESTAMP_TOLERANCE_MS = 5 * 60 * 1000;
+
+/**
+ * True when `date` is more than `FUTURE_TIMESTAMP_TOLERANCE_MS` ahead of
+ * `now`. Pure predicate — `now` is injectable so callers (and their tests)
+ * don't depend on wall-clock timing. `date === null` is never "beyond
+ * tolerance" (there's nothing to flag).
+ *
+ * Deliberately NOT folded into `epochMsToDate` above (BS#2143). That
+ * converter also produces `radio_hour`, and a breakpoint's `radio_hour` is
+ * LEGITIMATELY in the near future — tubafrenzy logs a breakpoint marker
+ * roughly a minute before the top-of-hour it marks (see `resolveRadioHour`'s
+ * doc comment in jobs/flowsheet-etl/transform.ts, BS#1449). Clamping inside
+ * the shared converter would silently shift every breakpoint hour backward
+ * and reintroduce the exact bug BS#1449 fixed. Callers that need a future
+ * bound (the webhook's `markerTimestamp` / `add_time`, and
+ * `resolveEntryTimestamp` in jobs/flowsheet-etl/transform.ts) apply this
+ * predicate themselves, after conversion, only to the fields that actually
+ * need it — never inside `epochMsToDate` itself.
+ */
+export const isBeyondFutureTolerance = (date: Date | null, now: Date = new Date()): boolean => {
+  if (date === null) return false;
+  return date.getTime() - now.getTime() > FUTURE_TIMESTAMP_TOLERANCE_MS;
+};
+
+/**
  * Truncate a string to a max length, returning null if empty.
  * Matches the VARCHAR limits in the schema (128 for names, 250 for messages).
  *
