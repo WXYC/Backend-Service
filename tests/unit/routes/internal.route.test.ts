@@ -25,7 +25,13 @@ jest.mock('@sentry/node', () => ({
   captureException: jest.fn(),
 }));
 
-import { db, shows } from '@wxyc/database';
+// Resolves to tests/mocks/database.mock.ts under the unit-test moduleNameMapper.
+// `FUTURE_TIMESTAMP_TOLERANCE_MS` is the BS#2143 bound the assertions below
+// straddle — derived from the constant rather than hard-coded so tightening the
+// tolerance can't leave a test asserting the wrong side of the boundary while
+// still passing. tests/unit/database/etl-utils.test.ts pins the mock's copy to
+// the real module's, so this value tracks production.
+import { db, shows, FUTURE_TIMESTAMP_TOLERANCE_MS } from '@wxyc/database';
 import { and, eq, isNull } from 'drizzle-orm';
 import express from 'express';
 import request from 'supertest';
@@ -370,7 +376,9 @@ describe('POST /internal/flowsheet-webhook', () => {
   it('clamps a startTime beyond the future tolerance to the delivery clock instead of writing it verbatim, and alerts Sentry', async () => {
     mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
     const beforeRequest = Date.now();
-    const farFutureStartTime = beforeRequest + 60 * 60 * 1000; // 1h ahead — well beyond the 5-minute tolerance
+    // 12x the tolerance ahead — unambiguously beyond it, and stays beyond it
+    // however the tolerance is retuned.
+    const farFutureStartTime = beforeRequest + FUTURE_TIMESTAMP_TOLERANCE_MS * 12;
 
     const res = await request(app)
       .post('/internal/flowsheet-webhook')
@@ -402,7 +410,12 @@ describe('POST /internal/flowsheet-webhook', () => {
 
   it('does not clamp a startTime just inside the future tolerance', async () => {
     mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
-    const justInsideStartTime = Date.now() + 60 * 1000; // 1 minute ahead, well under the 5-minute tolerance
+    // A fifth of the tolerance ahead — inside it by construction, whatever the
+    // tolerance is tuned to. (Not the exact boundary: the handler measures
+    // `now` itself, a few ms after this line, so an exact-boundary offset would
+    // land on the wrong side. `etl-utils.test.ts` covers the exact boundary
+    // with an injected `now`.)
+    const justInsideStartTime = Date.now() + Math.floor(FUTURE_TIMESTAMP_TOLERANCE_MS / 5);
 
     const res = await request(app)
       .post('/internal/flowsheet-webhook')
@@ -414,7 +427,7 @@ describe('POST /internal/flowsheet-webhook', () => {
     expect(mockCaptureMessage).not.toHaveBeenCalled();
   });
 
-  it('does not throw and does not write an Invalid Date when startTime is malformed (non-numeric)', async () => {
+  it('does not throw and does not write an Invalid Date when startTime is malformed (non-numeric), and alerts Sentry', async () => {
     mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
     const beforeRequest = Date.now();
 
@@ -429,6 +442,44 @@ describe('POST /internal/flowsheet-webhook', () => {
     expect(written).toBeInstanceOf(Date);
     expect(Number.isNaN(written.getTime())).toBe(false);
     // Falls back to the delivery clock, same as an absent startTime.
+    expect(written.getTime()).toBeGreaterThanOrEqual(beforeRequest);
+    expect(written.getTime()).toBeLessThanOrEqual(afterRequest);
+    // But unlike an absent startTime this is an upstream defect, so it must
+    // NOT be silent — before BS#2143 this class 500'd, which was wrong but
+    // loud; the fix must not trade that for a silent wrong timestamp.
+    expect(mockCaptureMessage).toHaveBeenCalledWith(
+      expect.stringMatching(/startTime present but unparseable/),
+      expect.objectContaining({
+        level: 'warning',
+        tags: expect.objectContaining({ subsystem: 'flowsheet-webhook' }),
+        extra: expect.objectContaining({
+          legacy_entry_id: validEntry.id,
+          unparseable_start_time_raw: 'not-a-number',
+          unparseable_start_time_type: 'string',
+        }),
+        fingerprint: ['webhook-unparseable-start-time'],
+      })
+    );
+  });
+
+  // The other half of the split: the common "absent" cases must stay silent,
+  // or a station-normal track row would alert on every single delivery.
+  it.each([
+    ['absent', undefined],
+    ['zero (tubafrenzy "not set" sentinel)', 0],
+    ['null', null],
+  ])('falls back to the delivery clock silently when startTime is %s', async (_label, startTime) => {
+    mockReturning.mockResolvedValueOnce([{ id: 5555 }]);
+    const beforeRequest = Date.now();
+
+    const res = await request(app)
+      .post('/internal/flowsheet-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', entry: { ...validEntry, startTime } });
+    const afterRequest = Date.now();
+
+    expect(res.status).toBe(200);
+    const written = lastInsertValues().add_time as Date;
     expect(written.getTime()).toBeGreaterThanOrEqual(beforeRequest);
     expect(written.getTime()).toBeLessThanOrEqual(afterRequest);
     expect(mockCaptureMessage).not.toHaveBeenCalled();
