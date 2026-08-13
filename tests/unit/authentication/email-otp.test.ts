@@ -156,5 +156,22 @@ describe('Email OTP', () => {
 
       delete process.env.EMAIL_ENABLED;
     });
+
+    it('resolves as a clean no-op when EMAIL_ENABLED=false and SES is entirely unconfigured (BS#1999)', async () => {
+      // The disable switch must short-circuit BEFORE the SES_FROM_EMAIL
+      // validation — a deliberately email-less environment sets
+      // EMAIL_ENABLED=false without any SES vars and must get the documented
+      // no-op, not a config throw.
+      process.env.EMAIL_ENABLED = 'false';
+      const originalFrom = process.env.SES_FROM_EMAIL;
+      delete process.env.SES_FROM_EMAIL;
+
+      await expect(sendOTPEmail({ to: 'dj@wxyc.org', otp: '123456', type: 'sign-in' })).resolves.toBeUndefined();
+
+      expect(mockSend).not.toHaveBeenCalled();
+
+      process.env.SES_FROM_EMAIL = originalFrom;
+      delete process.env.EMAIL_ENABLED;
+    });
   });
 });
