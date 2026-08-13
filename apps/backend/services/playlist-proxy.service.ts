@@ -9,13 +9,23 @@
  * Backend-Service's own Postgres `flowsheet` table.
  *
  * Query shape: the most recent MAX_ENTRIES (200) flowsheet rows (any
- * entry_type, ordered by flowsheet.id DESC — the same "most recent"
- * convention `flowsheet.service.ts`'s `getEntriesByPage` uses, since
- * flowsheet.id is globally monotonic across shows) are grouped into
+ * entry_type, ordered by flowsheet.add_time DESC with flowsheet.id DESC as
+ * the tie-break for rows sharing a timestamp) are grouped into
  * playcuts/talksets/breakpoints exactly as the old SSE-fed in-memory store
  * was. Playcuts are then sliced to the caller's requested `n`; talksets and
  * breakpoints are returned in full (unsliced) — matching the pre-Phase-3
  * behavior byte-for-byte at the GroupedResponse shape level.
+ *
+ * BS#2132: this used to order by flowsheet.id DESC alone, on the theory that
+ * flowsheet.id is globally monotonic across shows (the same convention
+ * `flowsheet.service.ts`'s `getEntriesByPage` still uses — see BS#2118/#2133
+ * for that sibling site). That theory only holds while every insert is a
+ * live one; a historical insert (backfill, import, repair) receives the
+ * highest ids in the table and would sort as the newest content. Ordering by
+ * add_time first fixes that for this endpoint. This does not change
+ * `chronOrderID` (see `toBaseEntry` below) — the wire-level ordering key
+ * consumers re-sort by is a separate, deliberately-deferred decision tracked
+ * on BS#2118.
  *
  * entry_type -> tubafrenzy wire vocabulary mapping (see PR description for
  * the full rationale): 'track' -> playcut; 'talkset' | 'dj_join' |
@@ -436,10 +446,24 @@ function toBaseEntry(row: RecentRow): BaseEntry {
 
 /**
  * Fetch the most recent `limit` flowsheet rows (any entry_type, ordered by
- * flowsheet.id DESC), with the FK-lane rotation_bin joined in. Shared by both
- * the v=2 grouped path (`getRecentEntries`, limit = MAX_ENTRIES) and the v=1
- * flat path (`getRecentEntriesFlat`, limit = the caller's n). The fallback
- * rotation lane runs separately, post-classification (BS#1862).
+ * flowsheet.add_time DESC with flowsheet.id DESC as the tie-break), with the
+ * FK-lane rotation_bin joined in. Shared by both the v=2 grouped path
+ * (`getRecentEntries`, limit = MAX_ENTRIES) and the v=1 flat path
+ * (`getRecentEntriesFlat`, limit = the caller's n). The fallback rotation
+ * lane runs separately, post-classification (BS#1862).
+ *
+ * BS#2132: previously ordered by flowsheet.id DESC alone. flowsheet.id is a
+ * serial PK, not a chronological key, so a historical insert (backfill,
+ * import, repair) would receive the highest ids in the table and sort as the
+ * newest content. This is a top-N query (`.limit(limit)`, MAX_ENTRIES = 200
+ * on the v=2 path, no offset), so reordering is a bounded backward scan
+ * served by the existing single-column `flowsheet_add_time_idx`
+ * (`schema.ts`) plus an incremental sort over timestamp ties — no new index.
+ * Note `add_time` defaults to `now()` (`transaction_timestamp()`) and the
+ * tubafrenzy webhook writes it from tubafrenzy's own clock
+ * (`apps/backend/routes/internal.route.ts`), so cross-host clock skew is a
+ * (sub-second, in practice) source of ordering difference from the old
+ * id-only order even for purely live traffic.
  */
 async function fetchRecentRows(limit: number): Promise<RecentRow[]> {
   return db
@@ -465,7 +489,7 @@ async function fetchRecentRows(limit: number): Promise<RecentRow[]> {
     })
     .from(flowsheet)
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
-    .orderBy(desc(flowsheet.id))
+    .orderBy(desc(flowsheet.add_time), desc(flowsheet.id))
     .limit(limit);
 }
 

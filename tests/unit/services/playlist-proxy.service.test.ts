@@ -180,15 +180,26 @@ jest.mock('@wxyc/database', () => ({
   },
 }));
 
-jest.mock('drizzle-orm', () => ({
-  sql: Object.assign(jest.fn(), { raw: jest.fn(), join: jest.fn() }),
-  inArray: jest.fn(),
-  isNotNull: jest.fn(),
-  and: jest.fn(),
-  eq: jest.fn(),
-  desc: jest.fn(),
-  asc: jest.fn(),
-}));
+// `desc` is the real drizzle-orm implementation, not a bare jest.fn() like its
+// siblings below — the ordering test at "queries the most recent MAX_ENTRIES
+// (200) rows ordered by ..." needs to assert the actual orderBy() column
+// arguments (BS#2132), and the real desc() applied to the mocked `flowsheet`
+// column stand-ins (plain strings — see the '@wxyc/database' mock below)
+// produces a deep-equal-comparable SQL wrapper each call, the same pattern
+// `flowsheet.getEntriesByShow.ordering.test.ts` uses for its own
+// `desc(flowsheet.play_order)` / `desc(flowsheet.id)` assertions.
+jest.mock('drizzle-orm', () => {
+  const actual = jest.requireActual<typeof import('drizzle-orm')>('drizzle-orm');
+  return {
+    sql: Object.assign(jest.fn(), { raw: jest.fn(), join: jest.fn() }),
+    inArray: jest.fn(),
+    isNotNull: jest.fn(),
+    and: jest.fn(),
+    eq: jest.fn(),
+    desc: actual.desc,
+    asc: jest.fn(),
+  };
+});
 
 // BS#2103: the v=2 grouped path reuses `/flowsheet`'s feed-assembly attaches
 // for `upcoming_show` / `critic_reviews` rather than re-deriving the match
@@ -227,6 +238,8 @@ import {
   getRecentEntriesFlat,
   lastModifiedFromTimestamps,
 } from '../../../apps/backend/services/playlist-proxy.service';
+import { desc } from 'drizzle-orm';
+import { flowsheet } from '@wxyc/database';
 
 // --- Fixtures: representative WXYC data ---
 // (see the org CLAUDE.md "Example Music Data" section for the canonical pool)
@@ -450,10 +463,15 @@ describe('playlist-proxy.service', () => {
       expect(result.breakpoints).toHaveLength(1);
     });
 
-    it('queries the most recent MAX_ENTRIES (200) rows ordered by flowsheet.id DESC', async () => {
+    it('queries the most recent MAX_ENTRIES (200) rows ordered by flowsheet.add_time DESC, flowsheet.id DESC', async () => {
       await getRecentEntries(50);
 
-      expect(mockOrderBy).toHaveBeenCalled();
+      // BS#2132: flowsheet.id is a serial PK, not a chronological key — any
+      // historical insert (backfill, import, repair) receives the highest
+      // ids in the table and would sort as newest under an id-only order.
+      // add_time is the primary sort key, with id retained only as the
+      // tie-break for rows sharing a timestamp.
+      expect(mockOrderBy).toHaveBeenCalledWith(desc(flowsheet.add_time), desc(flowsheet.id));
       expect(mockLimit).toHaveBeenCalledWith(200);
     });
   });
@@ -473,7 +491,7 @@ describe('playlist-proxy.service', () => {
       expect(result.breakpoints).toHaveLength(1);
     });
 
-    it('keeps the most recent playcuts first (rows already arrive DESC by id)', async () => {
+    it('keeps the most recent playcuts first (rows already arrive DESC by add_time, id)', async () => {
       mockLimit.mockResolvedValue([jessicaPrattRow, juanaMolinaRow]);
 
       const result = await getRecentEntries(1);
