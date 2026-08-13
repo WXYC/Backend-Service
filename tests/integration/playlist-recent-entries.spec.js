@@ -20,10 +20,11 @@
  * and drift; see flowsheet-upcoming-show-support.spec.js for the same
  * rationale). fetchRecentRows orders by `add_time DESC, id DESC` (BS#2132 —
  * previously `id DESC` alone, which let a historical `add_time` silently
- * ride in on the id PK), so every fixture row below either takes the
- * `add_time` DEFAULT (`now()`, sorting first same as before) or, if it sets
- * `add_time` explicitly (the breakpoint row), computes it relative to "now"
- * rather than a hard-coded date — see that fixture's own comment.
+ * ride in on the id PK), so EVERY fixture row below — including the
+ * breakpoint, which used to set `add_time` explicitly to a hard-coded past
+ * date — takes the `add_time` DEFAULT (`now()`). See the breakpoint
+ * fixture's own comment for why even a small, JS-computed backdating
+ * still isn't safe here.
  */
 
 const postgres = require('postgres');
@@ -116,9 +117,9 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
   const flowsheetIds = [];
   const libraryIds = [PRESS_CD, PRESS_LP, BRANCHA_LIB_ID, BRANCHC_LIB_ID, ENRICHED_LIB_ID];
   const rotationIds = [];
-  // Set by beforeAll and read by the breakpoint-hour assertion below — see
-  // the breakpointRow fixture comment for why this must be computed relative
-  // to "now" rather than hard-coded (BS#2132).
+  // Set by beforeAll from the INSERT's own RETURNING radio_hour (never
+  // recomputed in JS) and read by the breakpoint-hour assertion below —
+  // see the breakpointRow fixture comment for why (BS#2132).
   let breakpointHourMs;
 
   beforeAll(async () => {
@@ -341,31 +342,45 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
     // backdated add_time (this used to be a hard-coded 2026-07-28 literal)
     // silently falls out of the top-N window as soon as it ages past
     // whatever else lands in the table, exactly the id-DESC-reliance bug
-    // BS#2132 fixed. Compute it relative to "now" instead — and NOT floored
-    // to a real calendar hour boundary: an earlier version of this fixture
-    // did that (current/previous hour, floored) and a real `ci:testmock`
-    // --runInBand run proved it insufficiently fresh — many sibling
-    // integration specs insert their own flowsheet rows on the `add_time`
-    // DEFAULT (`now()`) during the SAME run, so a row backdated by tens of
-    // minutes routinely loses to 200 fresher ones and the breakpoint drops
-    // out of the window entirely. radio_hour here is instead just a few
-    // seconds in the past (comfortably inside the window, and never
-    // future — see BS#2118 for why a future add_time is its own hazard);
-    // add_time sits ~48s before that, mirroring the original
-    // 19:59:12-vs-20:00:00 relationship this fixture exists to exercise.
-    // This still validates "radio_hour wins over floor(add_time)": since
-    // radio_hour is (virtually) never exactly on an hour boundary,
-    // floor(add_time) always lands an hour (or more) earlier than the raw
-    // radio_hour value, so the two remain distinguishable regardless of
-    // calendar alignment.
-    breakpointHourMs = Date.now() - 10_000;
-    const breakpointHour = new Date(breakpointHourMs);
-    const breakpointAddTime = new Date(breakpointHourMs - 48_000);
+    // BS#2132 fixed. Sibling integration specs insert their own flowsheet
+    // rows on the add_time DEFAULT (now()) throughout the same --runInBand
+    // run, so this row has to compete with a genuinely large, run-to-run-
+    // variable population for a place in the 200-row window.
+    //
+    // Two earlier attempts tried to out-run that population by backdating
+    // add_time by a shrinking margin (first to a real calendar hour
+    // boundary — up to an hour stale — then to ~58s stale, computed in
+    // JS). Both were proven flaky against real CI, not just locally: any
+    // nonzero backdating is a race against however many sibling rows
+    // land in that window during the run, which is nondeterministic run
+    // to run. Worse, both computed the margin from the TEST RUNNER's
+    // clock (`Date.now()`) while every sibling row's `now()` DEFAULT is
+    // timestamped by the DATABASE container's clock — a second, compounding
+    // source of drift on top of the shrinking margin itself.
+    //
+    // The actual fix: don't set add_time at all. Omitted from the INSERT,
+    // it takes the DEFAULT `now()` — the same column, the same DATABASE
+    // clock, the same freshness as every sibling row in this file. It
+    // cannot lose the window on its own; if it ever does, every other row
+    // in this fixture loses it too, which fails for an honest reason
+    // instead of a timing coincidence. radio_hour is computed in the same
+    // SQL statement, on the same clock, as the literal next hour boundary:
+    // `date_trunc('hour', now()) + interval '1 hour'` — the "upcoming top
+    // of hour" a breakpoint logged ~1 minute early carries in production.
+    // A future radio_hour is harmless here: the SQL ordering only ever
+    // reads add_time, never radio_hour (a pure display value —
+    // computeHourMs — not a sort/filter key). floor(add_time) is
+    // necessarily the CURRENT top of hour while radio_hour is the NEXT
+    // one, so they always differ by exactly one hour and remain
+    // distinguishable regardless of exactly when in the hour this runs.
+    // RETURNING radio_hour makes the row itself the source of truth for
+    // the assertion below, rather than recomputing it a second time.
     const breakpointRow = await sql`
-      INSERT INTO ${sql(SCHEMA)}.flowsheet (entry_type, play_order, add_time, radio_hour, message)
-      VALUES ('breakpoint', 91605, ${breakpointAddTime}, ${breakpointHour}, 'BREAKPOINT')
-      RETURNING id
+      INSERT INTO ${sql(SCHEMA)}.flowsheet (entry_type, play_order, radio_hour, message)
+      VALUES ('breakpoint', 91605, date_trunc('hour', now()) + interval '1 hour', 'BREAKPOINT')
+      RETURNING id, radio_hour
     `;
+    breakpointHourMs = breakpointRow[0].radio_hour.getTime();
 
     const showStartRow = await sql`
       INSERT INTO ${sql(SCHEMA)}.flowsheet (entry_type, play_order, dj_name)
