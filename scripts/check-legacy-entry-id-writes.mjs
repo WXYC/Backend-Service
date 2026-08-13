@@ -80,6 +80,14 @@ export const ALLOWLIST = new Map([
     'jobs/legacy-mirror-reconcile/orchestrate.ts',
     'use #2 sibling (BS#1707): records the just-allocated tubafrenzy ID via `.set({ legacy_entry_id })` AFTER a successful mirrorCreateEntry, exactly like the live mirror path in flowsheet.mirror.ts. Never a placeholder for a non-tubafrenzy row, so the loop-guard read stays sound.',
   ],
+  [
+    'jobs/flowsheet-april-gap-import/build-row.ts',
+    'use #4 (BS#2119): insert-only backfill of the closed BS#351 residue. Pure row builder — produces the `GapImportRow` shape (type declaration + object literal) that orchestrate.ts inserts with `ON CONFLICT (legacy_entry_id) DO NOTHING`, never `DO UPDATE`. A real tubafrenzy-assigned id on every row (the discovery pass only ever selects ids confirmed present upstream and absent in Backend), so the loop-guard invariant (use #2) is unaffected.',
+  ],
+  [
+    'jobs/flowsheet-april-gap-import/orchestrate.ts',
+    "use #4 sibling (BS#2119): READS only here — a `db.execute` result-row type annotation (`Array<{ legacy_entry_id: number }>`) for the Backend-side existing-id check. The actual INSERT (`.onConflictDoNothing({ target: flowsheet.legacy_entry_id })` / `.returning({ legacyEntryId: flowsheet.legacy_entry_id })`) does not match this script's literal `legacy_entry_id:` pattern, since drizzle's column reference is aliased.",
+  ],
   ['shared/database/src/schema.ts', 'column declaration.'],
   ['apps/backend/services/flowsheet.service.ts', 'READS only: selection + result mapping. No writes.'],
 ]);
