@@ -25,6 +25,8 @@ import {
   resolveDjDisplayName,
   resolveShowDjName,
   showDjNameOverride,
+  lastLoggedShowEntryOrderBy,
+  lastLoggedShowEntryOrderBySql,
 } from '@wxyc/database';
 import { ALBUM_METADATA_PROJECTION, suppressMislabeledStreamingUrls } from '../utils/album-metadata-projection.js';
 import { getUpcomingShowsMapsCached } from './concerts.service.js';
@@ -610,8 +612,34 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
   return raw.map(transformToIFSEntry);
 };
 
+/**
+ * Entries whose `flowsheet.id` falls in `[startId, endId]`, newest id first.
+ *
+ * AN ID WINDOW IS NOT A TIME WINDOW, AND STOPPED APPROXIMATING ONE (BS#2118,
+ * explicitly accepted). The `start_id`/`end_id` contract is literally an id
+ * range — that is the wire shape, not an implementation detail — so unlike
+ * `getEntriesByPage` above this function is NOT re-scoped to `add_time`;
+ * doing so would answer a different question than the one it was asked.
+ *
+ * What changed is the informal reading a caller could previously get away
+ * with. While every insert was a live one, ids advanced with wall-clock time,
+ * so an id window was a usable stand-in for a time window and the controller
+ * markets this as the "genuine deep-history pull" path. A historical insert
+ * (backfill, gap import, repair) breaks that correspondence permanently and
+ * in both directions: the imported rows take head-era ids, so they are
+ * unreachable through any id window covering the era they actually aired in,
+ * and they interleave into head-era windows where they did not air. #2119's
+ * April cohort is exactly this — those 403 rows answer to head-era ids, not
+ * April ones.
+ *
+ * For a genuine time window, use `GET /flowsheet/range` /
+ * `getEntriesInTimeWindow` below, which windows on `add_time` and was built
+ * (BS#2062) for that question. This function stays id-shaped for the callers
+ * that genuinely want ids.
+ */
 export const getEntriesByRange = async (startId: number, endId: number): Promise<IFSEntry[]> => {
-  // play_order is per-show after #693; id is globally monotonic across shows.
+  // play_order is per-show after #693; id is globally monotonic across shows
+  // in INSERTION order (see the header — not airtime order).
   const raw = await db
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
@@ -1237,7 +1265,10 @@ export const isLatestEntryShowEnd = async (showId: number): Promise<boolean> => 
     .select({ entry_type: flowsheet.entry_type })
     .from(flowsheet)
     .where(eq(flowsheet.show_id, showId))
-    .orderBy(desc(flowsheet.id))
+    // `id DESC` — see `lastLoggedShowEntryOrderBy` (@wxyc/database) for the
+    // shared rationale this and its two siblings (site 7 below, site 8 in
+    // jobs/legacy-mirror-reconcile) now hold in one place.
+    .orderBy(...lastLoggedShowEntryOrderBy())
     .limit(1);
   return latest?.entry_type === 'show_end';
 };
@@ -1280,13 +1311,22 @@ export const isLatestEntryShowEnd = async (showId: number): Promise<boolean> => 
  * detector still reports the show, so nothing is lost by failing quietly here.
  */
 export const closeShowFromTerminalShowEndMarker = async (showId: number): Promise<number> => {
-  // Newest flowsheet row of this show, by insertion order — `id DESC`, not
-  // `play_order DESC`, matching `isLatestEntryShowEnd` above (changeOrder
-  // renumbers play_order; marker rows are never reordered).
+  // Last row LOGGED for this show — `id DESC`, in lockstep with
+  // `isLatestEntryShowEnd` above (BS#2118 sites 5 and 7). The shared
+  // rationale for the key, and what accepting it exposes, lives once in
+  // `lastLoggedShowEntryOrderBy` (@wxyc/database) rather than in four
+  // near-identical copies.
+  //
+  // THE LOCKSTEP IS LOAD-BEARING HERE SPECIFICALLY. This statement re-reads
+  // the marker-type check atomically with its own write precisely so there is
+  // no TOCTOU against the caller's separate `isLatestEntryShowEnd` read (see
+  // the header above), and that guarantee holds only while both sides sort by
+  // the same key. Change one and you must change the other in the same
+  // commit — which is what the shared helper now makes hard to get wrong.
   const newestAddTime = sql`(SELECT ${flowsheet.add_time} FROM ${flowsheet}
-      WHERE ${flowsheet.show_id} = ${showId} ORDER BY ${flowsheet.id} DESC LIMIT 1)`;
+      WHERE ${flowsheet.show_id} = ${showId} ORDER BY ${lastLoggedShowEntryOrderBySql()} LIMIT 1)`;
   const newestEntryType = sql`(SELECT ${flowsheet.entry_type} FROM ${flowsheet}
-      WHERE ${flowsheet.show_id} = ${showId} ORDER BY ${flowsheet.id} DESC LIMIT 1)`;
+      WHERE ${flowsheet.show_id} = ${showId} ORDER BY ${lastLoggedShowEntryOrderBySql()} LIMIT 1)`;
 
   try {
     const closed = await db

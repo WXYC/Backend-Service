@@ -87,11 +87,16 @@ jest.unmock('drizzle-orm');
 
 jest.mock('@wxyc/database', () => {
   const realSchema = jest.requireActual('../../../../shared/database/src/schema');
+  // The REAL last-logged-show-entry helper (BS#2118 site 8), not a stub: this
+  // file exists to render genuine SQL text, so the ORDER BY fragment under
+  // test must be the one production emits. It is a pure module over the same
+  // real schema object above, so it composes here without pulling in `db`.
+  const realOrderBy = jest.requireActual('../../../../shared/database/src/last-logged-show-entry');
   const chain: Record<string, jest.Mock> = {};
   for (const method of ['select', 'from', 'where', 'orderBy']) {
     chain[method] = jest.fn().mockReturnValue(chain);
   }
-  return { ...realSchema, db: chain };
+  return { ...realSchema, ...realOrderBy, db: chain };
 });
 
 import { PgDialect } from 'drizzle-orm/pg-core';

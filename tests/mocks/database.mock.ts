@@ -1,4 +1,5 @@
 import { jest } from '@jest/globals';
+import { desc, sql } from 'drizzle-orm';
 
 type MockQueryChain = {
   select: jest.Mock;
@@ -530,6 +531,23 @@ export { intArrayLiteral } from '../../shared/database/src/int-array-literal.js'
 // precisely the drift the extraction exists to prevent. The job tests assert
 // their resolver AGAINST `resolveShowDjName`, so it must be the real one.
 export { resolveDjDisplayName, showDjNameOverride, resolveShowDjName } from '../../shared/database/src/dj-name.js';
+
+// Stubs of shared/database/src/last-logged-show-entry.ts (BS#2118 sites
+// 5/7/8). NOT re-exported from source, unlike the pure dj-name chain above:
+// the real module closes over the REAL `flowsheet` schema object, while
+// consumers' assertions here compare against the MOCK `flowsheet` defined in
+// this file, so a source re-export would make every shape-pin compare two
+// different column objects. These stubs mirror the real implementations
+// exactly, over the mock's own table object.
+//
+// The real module's behavior — including that it renders byte-identically to
+// the hand-written fragments it replaced, and that it rejects an unsafe
+// alias — is covered against SOURCE in
+// tests/unit/database/last-logged-show-entry.test.ts, which unmocks
+// drizzle-orm and imports the module directly.
+export const lastLoggedShowEntryOrderBy = (): readonly [unknown] => [desc(flowsheet.id)];
+export const lastLoggedShowEntryOrderBySql = (alias?: string): unknown =>
+  alias ? sql`${sql.raw(alias)}.id DESC` : sql`${flowsheet.id} DESC`;
 
 // Re-export the pure `RawPair` TYPE from source (type-only — erased at
 // compile time, no runtime import, so it can't pull in the module's `db`

@@ -18,3 +18,4 @@ export * from './album-resolve.js';
 export * from './freetext-enumerate.js';
 export * from './int-array-literal.js';
 export * from './dj-name.js';
+export * from './last-logged-show-entry.js';
