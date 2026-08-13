@@ -20,13 +20,15 @@ A review of the original BS#2119 issue found the cohort is not homogeneous:
 ## Mechanism
 
 1. **Discover** (`discoverCandidates`): fetch `FLOWSHEET_ENTRY_PROD` rows from tubafrenzy via a live MySQL query bounded to `[GAP_IMPORT_WINDOW_START, GAP_IMPORT_WINDOW_END)` (`jobs/flowsheet-etl/fetch-legacy.ts`'s `fetchLegacyEntriesInWindow`), then re-apply `resolveEntryTimestamp` and an exact window check to every row — the SQL side casts deliberately wide (an `OR` across `START_TIME`/`TIME_CREATED`/`TIME_LAST_MODIFIED`, mirroring `fetchLegacyEntries`'s existing `sinceMs` filter shape), so this is the precise filter.
-2. **Backend-side floor**: refuse unless `COUNT(flowsheet.legacy_entry_id) IS NOT NULL` is at least `GAP_IMPORT_MIN_BACKEND_ID_COUNT` (default 2.5M, against a measured ~2.63M). An undersized count means the read failed, not that Backend is empty.
-3. **Diff**: check which candidate ids already exist in `flowsheet.legacy_entry_id`; the remainder is the missing cohort.
-4. **Cohort ceiling**: refuse if the missing cohort exceeds `GAP_IMPORT_MAX_COHORT_SIZE` (default 2000, against today's measured 403). Larger is a comparison bug, not a discovery. A per-show breakdown is logged either way (including on refusal) for diagnostics.
-5. **Resolve `show_id`**: map each row's `legacy_show_id` to a Backend `shows.id` via the extracted `buildShowIdMap`. A row whose `legacy_show_id` has no Backend mapping is **excluded from insertion** (not inserted with a null `show_id`) and counted separately — every show in this cohort is expected to already exist in Backend (see the issue's measurements), so an unmapped row is a signal something's off, not a normal case.
-6. **Resolve `dj_name` and `album_id`**: pre-insert read-only SELECTs (see "Column mapping" below).
-7. **Dry-run**: log the full report (candidate/missing counts, per-show breakdown, the exact `legacy_entry_id` list that would be inserted) and stop. **No writes in this mode, ever.**
-8. **`--execute`**: batch the insert rows (`GAP_IMPORT_BATCH_SIZE`, default 25) with a cooperative live-DJ pause (`waitForQuietPeriod`, shared `checkLiveActivity`) before each batch and a fixed gap (`GAP_IMPORT_BATCH_GAP_MS`, default 30s) between batches, pacing the CDC enrichment worker's shared LML rate limiter (BS#1748's `TokenBucket` is process-wide, not per-caller — a burst of ~25 simultaneous track inserts mid-show could shed live rows). `ANALYZE flowsheet` runs once after any batch that wrote.
+2. **Upstream floor**: refuse unless discovery returned at least `GAP_IMPORT_MIN_CANDIDATE_COUNT` rows (default 1). Candidates come from tubafrenzy and do not depend on Backend state, so even a re-run of a completed import finds the same cohort — zero means the window bounds are wrong or the read failed, and without this the run would print "finished" and exit 0. `0` allows a deliberate empty-window run.
+3. **Backend-side floor**: refuse unless `COUNT(flowsheet.legacy_entry_id) IS NOT NULL` is at least `GAP_IMPORT_MIN_BACKEND_ID_COUNT` (default 2.5M, against a measured ~2.63M). An undersized count means the read failed, not that Backend is empty.
+4. **Diff**: check which candidate ids already exist in `flowsheet.legacy_entry_id`; the remainder is the missing cohort.
+5. **Cohort ceiling**: refuse if the missing cohort exceeds `GAP_IMPORT_MAX_COHORT_SIZE` (default 2000, against today's measured 403). Larger is a comparison bug, not a discovery. A per-show breakdown is logged either way (including on refusal) for diagnostics.
+6. **Resolve `show_id`**: map each row's `legacy_show_id` to a Backend `shows.id` via the extracted `buildShowIdMap`. A row whose `legacy_show_id` has no Backend mapping is **excluded from insertion** (not inserted with a null `show_id`) and counted separately — every show in this cohort is expected to already exist in Backend (see the issue's measurements), so an unmapped row is a signal something's off, not a normal case.
+7. **NULL-key orphan guard**: count the **non-marker** rows the target shows already hold with `legacy_entry_id IS NULL`, and refuse above `GAP_IMPORT_MAX_NULL_KEY_ROWS` (default 0) — **including in dry-run**, so the report can't advertise a safe import that isn't one. Both the diff in step 4 and the `ON CONFLICT (legacy_entry_id)` target key on that column, and a unique index does not constrain NULLs, so such a row is invisible to both and would be inserted a second time. Lifecycle markers are excluded (Backend-generated, never mirrored as entry rows, legitimately NULL-keyed on these shows). The per-show breakdown carries the count.
+8. **Resolve `dj_name` and `album_id`**: pre-insert read-only SELECTs (see "Column mapping" below).
+9. **Dry-run**: log the full report (candidate/missing counts, per-show breakdown, the exact `legacy_entry_id` list that would be inserted) and stop. **No writes in this mode, ever.**
+10. **`--execute`**: batch the insert rows (`GAP_IMPORT_BATCH_SIZE`, default 25) with a cooperative live-DJ pause (`waitForQuietPeriod`, shared `checkLiveActivity`) before each batch and a fixed gap (`GAP_IMPORT_BATCH_GAP_MS`, default 30s) between batches, pacing the CDC enrichment worker's shared LML rate limiter (BS#1748's `TokenBucket` is process-wide, not per-caller — a burst of ~25 simultaneous track inserts mid-show could shed live rows). `ANALYZE flowsheet` runs once after any batch that wrote.
 
 ## Column mapping
 
@@ -61,12 +63,14 @@ Cross-job source reuse mirrors the `jobs/concerts-artist-lml-resolver` → `jobs
 
 1. **Backend-side floor** (`GAP_IMPORT_MIN_BACKEND_ID_COUNT`, default 2.5M) — refuses on an undersized read.
 2. **Cohort ceiling** (`GAP_IMPORT_MAX_COHORT_SIZE`, default 2000) — refuses on an oversized missing-set.
-3. **Dry-run by default**, `--execute` to write.
-4. **`RETURNING legacy_entry_id`** on every insert batch — the operator's rollback record is what actually landed, not what was attempted.
-5. **Unmapped-show exclusion** — a candidate whose `legacy_show_id` has no Backend `shows.id` mapping is skipped and counted (`excludedUnmappedShowCount`), never inserted with a null `show_id`.
-6. **`ANALYZE flowsheet`** after any batch that wrote, per [`docs/bulk-update-playbook.md`](../../docs/bulk-update-playbook.md).
-7. **`closeLegacyConnection()`** in `job.ts`'s `finally` — `fetch-legacy.ts` instantiates `MirrorSQL.instance()` at module scope; a job that doesn't close it hangs on exit (SSH keepalive).
-8. **Cooperative live-DJ pause + SIGTERM graceful stop** — mirrors `flowsheet-ghost-row-sweep` / `streaming-url-remediation`.
+3. **Upstream floor** (`GAP_IMPORT_MIN_CANDIDATE_COUNT`, default 1) — refuses on an empty window rather than exiting 0.
+4. **NULL-key orphan guard** (`GAP_IMPORT_MAX_NULL_KEY_ROWS`, default 0) — refuses when a target show already holds Backend-originated rows the `ON CONFLICT` target cannot dedup against.
+5. **Dry-run by default**, `--execute` to write.
+6. **`RETURNING legacy_entry_id`** on every insert batch — the operator's rollback record is what actually landed, not what was attempted.
+7. **Unmapped-show exclusion** — a candidate whose `legacy_show_id` has no Backend `shows.id` mapping is skipped and counted (`excludedUnmappedShowCount`), never inserted with a null `show_id`.
+8. **`ANALYZE flowsheet`** after any batch that wrote, per [`docs/bulk-update-playbook.md`](../../docs/bulk-update-playbook.md).
+9. **`closeLegacyConnection()`** in `job.ts`'s `finally` — `fetch-legacy.ts` instantiates `MirrorSQL.instance()` at module scope; a job that doesn't close it hangs on exit (SSH keepalive).
+10. **Cooperative live-DJ pause + SIGTERM graceful stop** — mirrors `flowsheet-ghost-row-sweep` / `streaming-url-remediation`. A stopped run exits non-zero (`shouldExitNonZero`), like a refusal or failure — a SIGTERM'd partial import must not read as success to a wrapping script.
 
 A 403-row (or even 2000-row) window fetch never produces a MySQL `IN (...)` predicate with a raw-text-length problem — the date-window query is a fixed handful of `BETWEEN` clauses regardless of match count — so this job does not need to chunk an id list against tubafrenzy the way an id-list-based fetch would.
 
@@ -106,7 +110,7 @@ Blocked on [BS#2118](https://github.com/WXYC/Backend-Service/issues/2118) (`flow
 
 ## Environment variables
 
-See [`docs/env-vars.md`](../../docs/env-vars.md#flowsheet-april-gap-import-jobsflowsheet-april-gap-import-bs2119) for the full reference (`GAP_IMPORT_WINDOW_START`/`END`, `GAP_IMPORT_BATCH_SIZE`, `GAP_IMPORT_BATCH_GAP_MS`, `GAP_IMPORT_MIN_BACKEND_ID_COUNT`, `GAP_IMPORT_MAX_COHORT_SIZE`, the shared `LIVE_ACTIVITY_*` cooperative-pause vars) plus the shared SSH/MySQL tunnel vars (`SSH_HOST`/`SSH_USERNAME`/`SSH_PASSWORD`/`REMOTE_DB_*`) already present in the shared host `.env`.
+See [`docs/env-vars.md`](../../docs/env-vars.md#flowsheet-april-gap-import-jobsflowsheet-april-gap-import-bs2119) for the full reference (`GAP_IMPORT_WINDOW_START`/`END`, `GAP_IMPORT_BATCH_SIZE`, `GAP_IMPORT_BATCH_GAP_MS`, `GAP_IMPORT_MIN_BACKEND_ID_COUNT`, `GAP_IMPORT_MAX_COHORT_SIZE`, `GAP_IMPORT_MIN_CANDIDATE_COUNT`, `GAP_IMPORT_MAX_NULL_KEY_ROWS`, the shared `LIVE_ACTIVITY_*` cooperative-pause vars) plus the shared SSH/MySQL tunnel vars (`SSH_HOST`/`SSH_USERNAME`/`SSH_PASSWORD`/`REMOTE_DB_*`) already present in the shared host `.env`.
 
 ## Testing
 

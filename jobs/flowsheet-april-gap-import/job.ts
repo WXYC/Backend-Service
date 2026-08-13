@@ -23,7 +23,7 @@
 
 import { closeDatabaseConnection } from '@wxyc/database';
 import { closeLegacyConnection } from '../flowsheet-etl/fetch-legacy.js';
-import { requestStop, resolveDryRun, runImport } from './orchestrate.js';
+import { requestStop, resolveDryRun, runImport, shouldExitNonZero } from './orchestrate.js';
 import { initLogger, log, captureError, closeLogger, errorMessage } from './logger.js';
 
 const JOB_NAME = 'flowsheet-april-gap-import';
@@ -45,9 +45,11 @@ const main = async () => {
     log('info', 'init', `${JOB_NAME} initialized`, { dry_run: dryRun });
     const result = await runImport({ dryRun });
     // runImport catches its own errors to preserve the summary log + span;
-    // propagate a refusal or failure through the exit code so a wrapping
-    // script's `$?` check doesn't believe a refused/failed run succeeded.
-    if (result.failed || result.refused) {
+    // propagate a refusal, failure, or SIGTERM stop through the exit code so
+    // a wrapping script's `$?` check doesn't believe an incomplete run
+    // succeeded. The predicate lives in orchestrate.ts so it is testable —
+    // importing THIS module would invoke `main()`.
+    if (shouldExitNonZero(result)) {
       process.exitCode = 1;
     }
   } catch (error) {

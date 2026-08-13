@@ -17,3 +17,4 @@ export * from './concerts-recompute.js';
 export * from './album-resolve.js';
 export * from './freetext-enumerate.js';
 export * from './int-array-literal.js';
+export * from './dj-name.js';

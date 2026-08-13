@@ -23,14 +23,18 @@ jest.mock('../../../../jobs/flowsheet-etl/fetch-legacy', () => ({
   closeLegacyConnection: jest.fn(),
 }));
 
-import { db } from '@wxyc/database';
+import { db, resolveShowDjName } from '@wxyc/database';
 import type { LegacyEntryRow } from '../../../../jobs/flowsheet-etl/fetch-legacy';
 import {
   resolveDryRun,
   resolveBatchSize,
   resolveBatchGapMs,
   resolveMinBackendIdCount,
+  resolveMinCandidateCount,
   resolveMaxCohortSize,
+  resolveMaxNullKeyRows,
+  countNullKeyRowsForShows,
+  shouldExitNonZero,
   discoverCandidates,
   buildShowBreakdown,
   findExistingLegacyEntryIds,
@@ -46,7 +50,10 @@ import {
   __resetStopForTesting,
   BATCH_SIZE_DEFAULT,
   MIN_BACKEND_ID_COUNT_DEFAULT,
+  MIN_CANDIDATE_COUNT_DEFAULT,
   MAX_COHORT_SIZE_DEFAULT,
+  MAX_NULL_KEY_ROWS_DEFAULT,
+  type RunResult,
 } from '../../../../jobs/flowsheet-april-gap-import/orchestrate';
 import type { GapImportRow } from '../../../../jobs/flowsheet-april-gap-import/build-row';
 
@@ -108,6 +115,19 @@ describe('env resolvers', () => {
   it('resolveMinBackendIdCount defaults and allows 0 override', () => {
     expect(resolveMinBackendIdCount(undefined)).toBe(MIN_BACKEND_ID_COUNT_DEFAULT);
     expect(resolveMinBackendIdCount('0')).toBe(0);
+  });
+
+  it('resolveMinCandidateCount defaults to 1 and allows 0 override', () => {
+    expect(resolveMinCandidateCount(undefined)).toBe(MIN_CANDIDATE_COUNT_DEFAULT);
+    expect(MIN_CANDIDATE_COUNT_DEFAULT).toBe(1);
+    expect(resolveMinCandidateCount('0')).toBe(0);
+    expect(resolveMinCandidateCount('50')).toBe(50);
+  });
+
+  it('resolveMaxNullKeyRows defaults to 0 (refuse on any orphan) and honors override', () => {
+    expect(resolveMaxNullKeyRows(undefined)).toBe(MAX_NULL_KEY_ROWS_DEFAULT);
+    expect(MAX_NULL_KEY_ROWS_DEFAULT).toBe(0);
+    expect(resolveMaxNullKeyRows('5')).toBe(5);
   });
 
   it('resolveMaxCohortSize defaults and honors override', () => {
@@ -173,13 +193,83 @@ describe('buildShowBreakdown', () => {
     const breakdown = buildShowBreakdown(missing, showIdMap);
 
     expect(breakdown).toEqual([
-      { legacyShowId: 1001, backendShowId: 10, missing: 2 },
-      { legacyShowId: 1002, backendShowId: null, missing: 1 },
+      { legacyShowId: 1001, backendShowId: 10, missing: 2, nullKeyRows: null },
+      { legacyShowId: 1002, backendShowId: null, missing: 1, nullKeyRows: null },
     ]);
   });
 
   it('returns an empty breakdown for an empty missing set', () => {
     expect(buildShowBreakdown([], new Map())).toEqual([]);
+  });
+
+  it('attaches per-show null-key counts when the probe ran', () => {
+    const missing = [makeEntry({ id: 1, showId: 1001 }), makeEntry({ id: 3, showId: 1002 })];
+    const showIdMap = new Map([
+      [1001, 10],
+      [1002, 11],
+    ]);
+
+    // Zero-filling is countNullKeyRowsForShows's job, not this function's —
+    // a probed show with no orphans arrives here as an explicit 0, so an
+    // absent key can keep meaning "not probed".
+    const breakdown = buildShowBreakdown(
+      missing,
+      showIdMap,
+      new Map([
+        [10, 4],
+        [11, 0],
+      ])
+    );
+
+    expect(breakdown).toEqual([
+      { legacyShowId: 1001, backendShowId: 10, missing: 1, nullKeyRows: 4 },
+      { legacyShowId: 1002, backendShowId: 11, missing: 1, nullKeyRows: 0 },
+    ]);
+  });
+
+  it('leaves nullKeyRows null for an unmapped show even when the probe ran', () => {
+    const breakdown = buildShowBreakdown([makeEntry({ id: 1, showId: 1002 })], new Map(), new Map([[10, 4]]));
+
+    expect(breakdown).toEqual([{ legacyShowId: 1002, backendShowId: null, missing: 1, nullKeyRows: null }]);
+  });
+});
+
+/**
+ * Finding 1 of the BS#2119 review. The cohort diff keys on
+ * `legacy_entry_id`, and `ON CONFLICT (legacy_entry_id) DO NOTHING` cannot
+ * dedup against a NULL key — so a dj-site-originated row whose back-stamp was
+ * skipped (the orphan class `jobs/legacy-mirror-reconcile` Sweep 2 heals) is
+ * invisible to the diff AND unprotected by the conflict target. The README's
+ * "these shows hold only lifecycle markers" was a prior measurement; this
+ * turns it into a run-time check.
+ */
+describe('countNullKeyRowsForShows', () => {
+  it('returns an empty map without querying for an empty id list', async () => {
+    const result = await countNullKeyRowsForShows([]);
+    expect(result.size).toBe(0);
+    expect(chain.execute).not.toHaveBeenCalled();
+  });
+
+  it('maps show_id -> count and zero-fills a probed show with no orphans', async () => {
+    chain.execute.mockResolvedValueOnce([{ show_id: 10, null_key_rows: 4 }]);
+
+    const result = await countNullKeyRowsForShows([10, 11]);
+
+    expect(result.get(10)).toBe(4);
+    expect(result.get(11)).toBe(0);
+  });
+
+  it('excludes lifecycle markers — those are expected on an all-legacy show', async () => {
+    chain.execute.mockResolvedValueOnce([]);
+    await countNullKeyRowsForShows([10]);
+
+    const query = chain.execute.mock.calls[0][0] as { queryChunks?: unknown[] };
+    const text = JSON.stringify(query.queryChunks ?? query);
+    expect(text).toContain('show_start');
+    expect(text).toContain('show_end');
+    expect(text).toContain('dj_join');
+    expect(text).toContain('dj_leave');
+    expect(text).toContain('legacy_entry_id');
   });
 });
 
@@ -222,11 +312,17 @@ describe('resolveDjNamesForShows', () => {
     expect(chain.execute).not.toHaveBeenCalled();
   });
 
-  it('prefers auth_dj_name over legacy_dj_name (the PII-safe COALESCE chain)', async () => {
+  it('prefers the linked user handle over legacy_dj_name (the PII-safe chain)', async () => {
     chain.execute.mockResolvedValueOnce([
-      { show_id: 10, auth_dj_name: 'DJ Aubrey Hearst', legacy_dj_name: 'stale handle' },
-      { show_id: 11, auth_dj_name: null, legacy_dj_name: 'DJ Bluejay' },
-      { show_id: 12, auth_dj_name: null, legacy_dj_name: null },
+      {
+        show_id: 10,
+        dj_name_override: null,
+        primary_dj_id: 'user-10',
+        auth_dj_name: 'DJ Aubrey Hearst',
+        legacy_dj_name: 'stale handle',
+      },
+      { show_id: 11, dj_name_override: null, primary_dj_id: null, auth_dj_name: null, legacy_dj_name: 'DJ Bluejay' },
+      { show_id: 12, dj_name_override: null, primary_dj_id: null, auth_dj_name: null, legacy_dj_name: null },
     ]);
 
     const result = await resolveDjNamesForShows([10, 11, 12]);
@@ -234,6 +330,89 @@ describe('resolveDjNamesForShows', () => {
     expect(result.get(10)).toBe('DJ Aubrey Hearst');
     expect(result.get(11)).toBe('DJ Bluejay');
     expect(result.get(12)).toBeNull();
+  });
+
+  /**
+   * The two links the pre-#2119-review COALESCE copy was missing. Both are
+   * asserted against the canonical `resolveShowDjName` rather than a restated
+   * expectation, so this test cannot drift from the chain it is pinning.
+   */
+  it('lets a per-show dj_name_override win over the user handle (BS#1321)', async () => {
+    chain.execute.mockResolvedValueOnce([
+      {
+        show_id: 20,
+        dj_name_override: 'The Wednesday Slot',
+        primary_dj_id: 'user-20',
+        auth_dj_name: 'DJ Nilüfer',
+        legacy_dj_name: 'legacy handle',
+      },
+    ]);
+
+    const result = await resolveDjNamesForShows([20]);
+
+    expect(result.get(20)).toBe('The Wednesday Slot');
+  });
+
+  it('filters the literal "Anonymous" handle and falls through to legacy (BS#1286)', async () => {
+    chain.execute.mockResolvedValueOnce([
+      {
+        show_id: 30,
+        dj_name_override: null,
+        primary_dj_id: 'user-30',
+        auth_dj_name: '  Anonymous ',
+        legacy_dj_name: 'DJ Csillagrablók',
+      },
+      {
+        show_id: 31,
+        dj_name_override: null,
+        primary_dj_id: 'user-31',
+        auth_dj_name: 'anonymous',
+        legacy_dj_name: null,
+      },
+    ]);
+
+    const result = await resolveDjNamesForShows([30, 31]);
+
+    expect(result.get(30)).toBe('DJ Csillagrablók');
+    expect(result.get(31)).toBeNull();
+  });
+
+  it('agrees with resolveShowDjName on every row it maps', async () => {
+    const rows = [
+      {
+        show_id: 40,
+        dj_name_override: '  ',
+        primary_dj_id: 'user-40',
+        auth_dj_name: 'DJ Hermanos',
+        legacy_dj_name: 'legacy',
+      },
+      { show_id: 41, dj_name_override: 'Override', primary_dj_id: null, auth_dj_name: null, legacy_dj_name: 'legacy' },
+      { show_id: 42, dj_name_override: null, primary_dj_id: 'user-42', auth_dj_name: '', legacy_dj_name: '  padded  ' },
+    ];
+    chain.execute.mockResolvedValueOnce(rows);
+
+    const result = await resolveDjNamesForShows([40, 41, 42]);
+
+    for (const row of rows) {
+      expect(result.get(row.show_id)).toBe(
+        resolveShowDjName({
+          dj_name_override: row.dj_name_override,
+          legacy_dj_name: row.legacy_dj_name,
+          primary_dj_id: row.primary_dj_id,
+          user: row.primary_dj_id == null ? null : { djName: row.auth_dj_name },
+        })
+      );
+    }
+  });
+
+  it('selects the override and primary_dj_id columns the chain needs', async () => {
+    chain.execute.mockResolvedValueOnce([]);
+    await resolveDjNamesForShows([50]);
+
+    const query = chain.execute.mock.calls[0][0] as { queryChunks?: unknown[] };
+    const text = JSON.stringify(query.queryChunks ?? query);
+    expect(text).toContain('dj_name_override');
+    expect(text).toContain('primary_dj_id');
   });
 });
 
@@ -329,6 +508,47 @@ describe('insertBatch', () => {
   });
 });
 
+/**
+ * The exit-code predicate lives here rather than in job.ts because job.ts
+ * calls `void main()` at module scope — importing it to test would run the
+ * job. Same reason the flowsheet-etl mappers were extracted in the first
+ * place.
+ */
+describe('shouldExitNonZero', () => {
+  const base: RunResult = {
+    dryRun: true,
+    window: { startMs: 0, endMs: 1 },
+    candidateCount: 0,
+    missingCount: 0,
+    excludedUnmappedShowCount: 0,
+    insertedCount: 0,
+    insertedIds: [],
+    perShowBreakdown: [],
+    metadataStatusSnapshot: {},
+    refused: false,
+    refusalReason: null,
+    stopped: false,
+    failed: false,
+  };
+
+  it('is false for a clean run', () => {
+    expect(shouldExitNonZero(base)).toBe(false);
+  });
+
+  it.each([['failed'], ['refused'], ['stopped']] as const)('is true when %s', (flag) => {
+    expect(shouldExitNonZero({ ...base, [flag]: true })).toBe(true);
+  });
+
+  /**
+   * `stopped` is the one a wrapping script is most likely to get wrong: a
+   * SIGTERM'd run inserted SOME of its cohort and left the rest, which is
+   * exactly the state that must not read as success.
+   */
+  it('is true for a partially-completed stopped run that inserted rows', () => {
+    expect(shouldExitNonZero({ ...base, stopped: true, insertedCount: 120, insertedIds: [1, 2, 3] })).toBe(true);
+  });
+});
+
 // ---- runImport control flow (injected seams) ----
 
 describe('runImport', () => {
@@ -342,14 +562,38 @@ describe('runImport', () => {
     buildShowIdMapFn: jest.fn().mockResolvedValue(new Map<number, number>()),
     resolveDjNamesForShowsFn: jest.fn().mockResolvedValue(new Map<number, string | null>()),
     resolveAlbumIdsForReleasesFn: jest.fn().mockResolvedValue(new Map<number, number>()),
+    // Mirrors the real probe's zero-fill: every id asked about comes back
+    // with an explicit count, so `nullKeyRows: 0` (not null) is what a clean
+    // run's breakdown carries.
+    countNullKeyRowsForShowsFn: jest
+      .fn<(ids: number[]) => Promise<Map<number, number>>>()
+      .mockImplementation((ids) => Promise.resolve(new Map(ids.map((id) => [id, 0])))),
     insertBatchFn: jest.fn().mockResolvedValue([]),
     analyzeFlowsheetFn: jest.fn().mockResolvedValue(undefined),
     metadataStatusDistributionFn: jest.fn().mockResolvedValue({}),
   });
 
-  it('is a clean no-op when there are no candidates in the window', async () => {
+  /**
+   * Zero candidates is never a legitimate outcome: discovery reads tubafrenzy,
+   * whose rows do not depend on Backend state, so a re-run of a completed
+   * import still finds the same cohort (it just finds it already present).
+   * Nothing upstream means the window is wrong or the fetch failed — a
+   * typo'd year would otherwise print "finished" and exit 0.
+   */
+  it('refuses when discovery returns nothing — an empty window is a bad window, not a no-op', async () => {
     const seams = baseSeams();
     const result = await runImport({ dryRun: true, ...seams });
+
+    expect(result.candidateCount).toBe(0);
+    expect(result.refused).toBe(true);
+    expect(result.refusalReason).toMatch(/GAP_IMPORT_MIN_CANDIDATE_COUNT/);
+    expect(result.failed).toBe(false);
+    expect(seams.countBackendLegacyEntryIdsFn).not.toHaveBeenCalled();
+  });
+
+  it('allows a deliberate empty-window run when the candidate floor is set to 0', async () => {
+    const seams = baseSeams();
+    const result = await runImport({ dryRun: true, ...seams, minCandidateCount: 0 });
 
     expect(result.candidateCount).toBe(0);
     expect(result.refused).toBe(false);
@@ -382,9 +626,81 @@ describe('runImport', () => {
     expect(result.refused).toBe(true);
     expect(result.refusalReason).toMatch(/exceeds GAP_IMPORT_MAX_COHORT_SIZE/);
     expect(result.missingCount).toBe(3);
-    // Diagnostic breakdown is still populated on a ceiling refusal, without a Backend id lookup.
-    expect(result.perShowBreakdown).toEqual([{ legacyShowId: 1001, backendShowId: null, missing: 3 }]);
+    // Diagnostic breakdown is still populated on a ceiling refusal, without a
+    // Backend id lookup — so the null-key probe hasn't run either.
+    expect(result.perShowBreakdown).toEqual([
+      { legacyShowId: 1001, backendShowId: null, missing: 3, nullKeyRows: null },
+    ]);
+    expect(seams.countNullKeyRowsForShowsFn).not.toHaveBeenCalled();
     expect(seams.buildShowIdMapFn).not.toHaveBeenCalled();
+  });
+
+  it('refuses when a target show already holds non-marker rows with a NULL legacy_entry_id', async () => {
+    const seams = baseSeams();
+    seams.discoverCandidatesFn.mockResolvedValue([makeEntry({ id: 2001, showId: 1001 })]);
+    seams.buildShowIdMapFn.mockResolvedValue(new Map([[1001, 10]]));
+    seams.countNullKeyRowsForShowsFn.mockResolvedValue(new Map([[10, 3]]));
+
+    const result = await runImport({ dryRun: false, ...seams });
+
+    expect(result.refused).toBe(true);
+    expect(result.refusalReason).toMatch(/GAP_IMPORT_MAX_NULL_KEY_ROWS/);
+    expect(result.insertedCount).toBe(0);
+    expect(seams.insertBatchFn).not.toHaveBeenCalled();
+    // The operator needs to know WHICH show, so the breakdown carries it.
+    expect(result.perShowBreakdown).toEqual([{ legacyShowId: 1001, backendShowId: 10, missing: 1, nullKeyRows: 3 }]);
+  });
+
+  it('refuses on the NULL-key guard in dry-run too — the report must not claim a safe import', async () => {
+    const seams = baseSeams();
+    seams.discoverCandidatesFn.mockResolvedValue([makeEntry({ id: 2001, showId: 1001 })]);
+    seams.buildShowIdMapFn.mockResolvedValue(new Map([[1001, 10]]));
+    seams.countNullKeyRowsForShowsFn.mockResolvedValue(new Map([[10, 1]]));
+
+    const result = await runImport({ dryRun: true, ...seams });
+
+    expect(result.refused).toBe(true);
+  });
+
+  it('proceeds when the probed shows hold no orphan rows', async () => {
+    const seams = baseSeams();
+    seams.discoverCandidatesFn.mockResolvedValue([makeEntry({ id: 2001, showId: 1001 })]);
+    seams.buildShowIdMapFn.mockResolvedValue(new Map([[1001, 10]]));
+    seams.countNullKeyRowsForShowsFn.mockResolvedValue(new Map([[10, 0]]));
+    seams.insertBatchFn.mockResolvedValue([2001]);
+
+    const result = await runImport({ dryRun: false, ...seams });
+
+    expect(result.refused).toBe(false);
+    expect(result.insertedCount).toBe(1);
+    expect(seams.countNullKeyRowsForShowsFn).toHaveBeenCalledWith([10]);
+  });
+
+  it('honors a raised GAP_IMPORT_MAX_NULL_KEY_ROWS ceiling', async () => {
+    const seams = baseSeams();
+    seams.discoverCandidatesFn.mockResolvedValue([makeEntry({ id: 2001, showId: 1001 })]);
+    seams.buildShowIdMapFn.mockResolvedValue(new Map([[1001, 10]]));
+    seams.countNullKeyRowsForShowsFn.mockResolvedValue(new Map([[10, 2]]));
+    seams.insertBatchFn.mockResolvedValue([2001]);
+
+    const result = await runImport({ dryRun: false, ...seams, maxNullKeyRows: 5 });
+
+    expect(result.refused).toBe(false);
+    expect(result.insertedCount).toBe(1);
+  });
+
+  it('probes only the shows it is about to write to, not every unmapped one', async () => {
+    const seams = baseSeams();
+    seams.discoverCandidatesFn.mockResolvedValue([
+      makeEntry({ id: 2001, showId: 1001 }),
+      makeEntry({ id: 2002, showId: 1002 }), // unmapped -> excluded, never written to
+    ]);
+    seams.buildShowIdMapFn.mockResolvedValue(new Map([[1001, 10]]));
+    seams.insertBatchFn.mockResolvedValue([2001]);
+
+    await runImport({ dryRun: false, ...seams });
+
+    expect(seams.countNullKeyRowsForShowsFn).toHaveBeenCalledWith([10]);
   });
 
   it('is a clean no-op when every candidate is already present in Backend', async () => {
@@ -412,7 +728,7 @@ describe('runImport', () => {
     expect(result.insertedCount).toBe(0);
     expect(seams.insertBatchFn).not.toHaveBeenCalled();
     expect(seams.analyzeFlowsheetFn).not.toHaveBeenCalled();
-    expect(result.perShowBreakdown).toEqual([{ legacyShowId: 1001, backendShowId: 10, missing: 1 }]);
+    expect(result.perShowBreakdown).toEqual([{ legacyShowId: 1001, backendShowId: 10, missing: 1, nullKeyRows: 0 }]);
   });
 
   it('excludes a row whose legacy_show_id has no Backend mapping, rather than inserting a null show_id', async () => {

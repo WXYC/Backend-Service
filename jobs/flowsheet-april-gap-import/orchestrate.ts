@@ -44,6 +44,7 @@ import {
   library,
   shows,
   user,
+  resolveShowDjName,
   intArrayLiteral,
   checkLiveActivity as defaultCheckLiveActivity,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
@@ -67,6 +68,13 @@ export const BATCH_GAP_MS_DEFAULT = 30_000;
 export const MIN_BACKEND_ID_COUNT_DEFAULT = 2_500_000;
 /** Larger than this is a comparison bug, not a discovery — today's cohort is 403. */
 export const MAX_COHORT_SIZE_DEFAULT = 2_000;
+/** Fewer upstream candidates than this is a bad window, not an empty one. */
+export const MIN_CANDIDATE_COUNT_DEFAULT = 1;
+/**
+ * Any non-marker NULL-`legacy_entry_id` row in a target show is an
+ * insert-only hazard the conflict target cannot cover — refuse by default.
+ */
+export const MAX_NULL_KEY_ROWS_DEFAULT = 0;
 
 // ---- CLI / env resolution ----
 
@@ -93,6 +101,30 @@ export const resolveMinBackendIdCount = (
 ): number =>
   requireNonNegativeInt(raw, 'GAP_IMPORT_MIN_BACKEND_ID_COUNT', MIN_BACKEND_ID_COUNT_DEFAULT, {
     note: 'Refuses the run if the Backend-side legacy_entry_id count is below this. Use 0 to disable (tests only).',
+  });
+
+/**
+ * Upstream floor, mirroring `resolveMinBackendIdCount`'s Backend-side one.
+ * Zero candidates cannot be a legitimate outcome — discovery reads
+ * tubafrenzy, whose rows do not depend on Backend state, so even a re-run of
+ * a fully-completed import finds the same cohort (and reports it all already
+ * present). An empty result therefore means the window is wrong or the fetch
+ * failed. Set to 0 to permit a deliberate empty-window run.
+ */
+export const resolveMinCandidateCount = (
+  raw: string | undefined = process.env.GAP_IMPORT_MIN_CANDIDATE_COUNT
+): number =>
+  requireNonNegativeInt(raw, 'GAP_IMPORT_MIN_CANDIDATE_COUNT', MIN_CANDIDATE_COUNT_DEFAULT, {
+    note: 'Refuses the run if tubafrenzy returns fewer candidates than this. Use 0 to allow an empty window.',
+  });
+
+/**
+ * Ceiling on non-marker NULL-`legacy_entry_id` rows across the target shows.
+ * Default 0: refuse on the first one. See `countNullKeyRowsForShows`.
+ */
+export const resolveMaxNullKeyRows = (raw: string | undefined = process.env.GAP_IMPORT_MAX_NULL_KEY_ROWS): number =>
+  requireNonNegativeInt(raw, 'GAP_IMPORT_MAX_NULL_KEY_ROWS', MAX_NULL_KEY_ROWS_DEFAULT, {
+    note: 'Refuses the run if a target show already holds Backend-originated rows the ON CONFLICT target cannot dedup against.',
   });
 
 export const resolveMaxCohortSize = (raw: string | undefined = process.env.GAP_IMPORT_MAX_COHORT_SIZE): number =>
@@ -181,28 +213,108 @@ export const findExistingLegacyEntryIds = async (ids: number[]): Promise<Set<num
 };
 
 /**
- * `COALESCE(auth_user.dj_name, shows.legacy_dj_name)` per Backend `shows.id`
- * — the PII-safe chain (BS#1393 / BS#1371), never `auth_user.name` or
- * `DJ_NAME`. Pre-insert read-only SELECT; NOT the post-insert
- * `resolveDjNames` UPDATE in jobs/flowsheet-etl/job.ts (see module
- * docstring). Raw SQL for the same `db.execute` testability reason as
- * `findExistingLegacyEntryIds` above, and because it mirrors job.ts's own
- * raw-SQL `auth_user` LEFT JOIN exactly (a cross-schema join — `shows` is
- * `wxyc_schema`-qualified, `auth_user` is the default/public schema).
+ * The PII-safe DJ-name chain per Backend `shows.id` — never `auth_user.name`
+ * or tubafrenzy's `DJ_NAME` (BS#1393 / BS#1371). Pre-insert read-only SELECT;
+ * NOT the post-insert `resolveDjNames` UPDATE in jobs/flowsheet-etl/job.ts
+ * (see module docstring).
+ *
+ * The DECISION is `resolveShowDjName` from `@wxyc/database` — this function
+ * only fetches its four inputs. It originally inlined
+ * `COALESCE(auth_user.dj_name, shows.legacy_dj_name)`, copied from
+ * `flowsheet-etl`'s `resolveDjNames`; BS#2119's review caught that the copy
+ * predates `dj_name_override` (BS#1321) and omits the literal-"Anonymous"
+ * filter (BS#1286). An imported row would then disagree with every sibling
+ * row in the same show, which is the inconsistency BS#1321 exists to prevent,
+ * and could put a bare "Anonymous" on the public wire. Matching the donor was
+ * matching a stale convention — the donor is what needs updating, not this.
+ *
+ * Raw SQL for the same `db.execute` testability reason as
+ * `findExistingLegacyEntryIds` above, and because it is a cross-schema join
+ * (`shows` is `wxyc_schema`-qualified, `auth_user` is default/public).
  */
 export const resolveDjNamesForShows = async (showIds: number[]): Promise<Map<number, string | null>> => {
   const map = new Map<number, string | null>();
   if (showIds.length === 0) return map;
   const idArrayLiteral = intArrayLiteral(showIds);
   const result = (await db.execute(sql`
-    SELECT s.id AS show_id, u.dj_name AS auth_dj_name, s.legacy_dj_name AS legacy_dj_name
+    SELECT
+      s.id AS show_id,
+      s.dj_name_override AS dj_name_override,
+      s.primary_dj_id AS primary_dj_id,
+      u.dj_name AS auth_dj_name,
+      s.legacy_dj_name AS legacy_dj_name
     FROM ${shows} s
     LEFT JOIN ${user} u ON u.id = s.primary_dj_id
     WHERE s.id = ANY(${idArrayLiteral}::int[])
-  `)) as unknown as Array<{ show_id: number; auth_dj_name: string | null; legacy_dj_name: string | null }>;
+  `)) as unknown as Array<{
+    show_id: number;
+    dj_name_override: string | null;
+    primary_dj_id: string | null;
+    auth_dj_name: string | null;
+    legacy_dj_name: string | null;
+  }>;
   for (const row of result) {
-    map.set(Number(row.show_id), row.auth_dj_name ?? row.legacy_dj_name ?? null);
+    const primaryDjId = row.primary_dj_id ?? null;
+    map.set(
+      Number(row.show_id),
+      resolveShowDjName({
+        dj_name_override: row.dj_name_override ?? null,
+        legacy_dj_name: row.legacy_dj_name ?? null,
+        primary_dj_id: primaryDjId,
+        // The LEFT JOIN yields a NULL `auth_dj_name` both when there is no
+        // user row and when the row's handle is NULL. `resolveShowDjName`
+        // distinguishes those, so reconstruct the distinction from
+        // `primary_dj_id`: no linked DJ means no user row at all.
+        user: primaryDjId == null ? null : { djName: row.auth_dj_name ?? null },
+      })
+    );
   }
+  return map;
+};
+
+/**
+ * Per Backend `shows.id`, how many flowsheet rows it already holds that this
+ * import's safety model cannot see: `legacy_entry_id IS NULL` and not a
+ * lifecycle marker.
+ *
+ * Why it matters (BS#2119 review finding 1). The cohort diff in `runImport`
+ * asks "which upstream ids are absent from `flowsheet.legacy_entry_id`?", and
+ * the write is guarded by `ON CONFLICT (legacy_entry_id) DO NOTHING`. Both
+ * are keyed on that column, so BOTH are blind to a row whose value is NULL —
+ * and a unique index does not constrain NULLs, so the conflict target cannot
+ * fire against one either. A dj-site-originated April row that reached
+ * tubafrenzy but never got its `legacy_entry_id` back-stamped (the live
+ * mirror's one-shot `res.finish` attempt was skipped — precisely the orphan
+ * class `jobs/legacy-mirror-reconcile` Sweep 2 exists to heal) therefore
+ * reads as "missing from Backend" and gets inserted a SECOND time.
+ *
+ * The README's mitigation — the 15 April shows hold only lifecycle markers —
+ * is a measurement taken once, not an invariant the job re-establishes, and
+ * the window is operator-widenable via `GAP_IMPORT_WINDOW_START`/`END`. This
+ * probe converts it into a run-time precondition.
+ *
+ * Lifecycle markers (`show_start`/`show_end`/`dj_join`/`dj_leave`) are
+ * excluded deliberately: they are Backend-generated, never mirrored as
+ * tubafrenzy entry rows, and so legitimately carry a NULL key on exactly the
+ * all-legacy shows this job targets. Counting them would refuse every run.
+ */
+export const countNullKeyRowsForShows = async (backendShowIds: number[]): Promise<Map<number, number>> => {
+  const map = new Map<number, number>();
+  if (backendShowIds.length === 0) return map;
+  const idArrayLiteral = intArrayLiteral(backendShowIds);
+  const result = (await db.execute(sql`
+    SELECT show_id, COUNT(*)::int AS null_key_rows
+    FROM ${flowsheet}
+    WHERE show_id = ANY(${idArrayLiteral}::int[])
+      AND legacy_entry_id IS NULL
+      AND entry_type NOT IN ('show_start', 'show_end', 'dj_join', 'dj_leave')
+    GROUP BY show_id
+  `)) as unknown as Array<{ show_id: number; null_key_rows: number }>;
+  // Zero-fill every probed show: a show absent from the GROUP BY holds no
+  // orphans, which must be distinguishable from "not probed" (null) in the
+  // per-show breakdown.
+  for (const id of backendShowIds) map.set(id, 0);
+  for (const row of result) map.set(Number(row.show_id), Number(row.null_key_rows));
   return map;
 };
 
@@ -282,19 +394,34 @@ export type ShowBreakdownRow = {
   legacyShowId: number;
   backendShowId: number | null;
   missing: number;
+  /**
+   * Non-marker rows the show already holds with a NULL `legacy_entry_id` —
+   * see `countNullKeyRowsForShows`. `null` means not probed: either the
+   * breakdown was built before the probe (the cohort-ceiling refusal path) or
+   * the show has no Backend mapping and so is never written to.
+   */
+  nullKeyRows: number | null;
 };
 
-export const buildShowBreakdown = (missing: LegacyEntryRow[], showIdMap: Map<number, number>): ShowBreakdownRow[] => {
+export const buildShowBreakdown = (
+  missing: LegacyEntryRow[],
+  showIdMap: Map<number, number>,
+  nullKeyByBackendShowId?: Map<number, number>
+): ShowBreakdownRow[] => {
   const counts = new Map<number, number>();
   for (const entry of missing) {
     counts.set(entry.showId, (counts.get(entry.showId) ?? 0) + 1);
   }
   return Array.from(counts.entries())
-    .map(([legacyShowId, missingCount]) => ({
-      legacyShowId,
-      backendShowId: showIdMap.get(legacyShowId) ?? null,
-      missing: missingCount,
-    }))
+    .map(([legacyShowId, missingCount]) => {
+      const backendShowId = showIdMap.get(legacyShowId) ?? null;
+      return {
+        legacyShowId,
+        backendShowId,
+        missing: missingCount,
+        nullKeyRows: backendShowId == null ? null : (nullKeyByBackendShowId?.get(backendShowId) ?? null),
+      };
+    })
     .sort((a, b) => a.legacyShowId - b.legacyShowId);
 };
 
@@ -316,13 +443,26 @@ export type RunResult = {
   failed: boolean;
 };
 
+/**
+ * Whether a wrapping script's `$?` should read this run as unsuccessful.
+ *
+ * `stopped` counts: a SIGTERM'd run inserted some of its cohort and left the
+ * rest, and an operator's `&& echo done` must not fire on that. It lives here
+ * rather than inline in job.ts because job.ts calls `void main()` at module
+ * scope, so importing it to test would run the job — the same constraint that
+ * forced the flowsheet-etl mapper extraction.
+ */
+export const shouldExitNonZero = (result: RunResult): boolean => result.failed || result.refused || result.stopped;
+
 export type RunImportOptions = {
   dryRun: boolean;
   window?: Window;
   batchSize?: number;
   batchGapMs?: number;
   minBackendIdCount?: number;
+  minCandidateCount?: number;
   maxCohortSize?: number;
+  maxNullKeyRows?: number;
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
@@ -331,6 +471,7 @@ export type RunImportOptions = {
   countBackendLegacyEntryIdsFn?: () => Promise<number>;
   findExistingLegacyEntryIdsFn?: (ids: number[]) => Promise<Set<number>>;
   buildShowIdMapFn?: () => Promise<Map<number, number>>;
+  countNullKeyRowsForShowsFn?: (backendShowIds: number[]) => Promise<Map<number, number>>;
   resolveDjNamesForShowsFn?: (showIds: number[]) => Promise<Map<number, string | null>>;
   resolveAlbumIdsForReleasesFn?: (legacyReleaseIds: number[]) => Promise<Map<number, number>>;
   insertBatchFn?: InsertBatchFn;
@@ -360,7 +501,9 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
   const batchSize = opts.batchSize ?? resolveBatchSize();
   const batchGapMs = opts.batchGapMs ?? resolveBatchGapMs();
   const minBackendIdCount = opts.minBackendIdCount ?? resolveMinBackendIdCount();
+  const minCandidateCount = opts.minCandidateCount ?? resolveMinCandidateCount();
   const maxCohortSize = opts.maxCohortSize ?? resolveMaxCohortSize();
+  const maxNullKeyRows = opts.maxNullKeyRows ?? resolveMaxNullKeyRows();
   const liveActivityLookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
   const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
@@ -369,6 +512,7 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
   const countBackendLegacyEntryIdsFn = opts.countBackendLegacyEntryIdsFn ?? countBackendLegacyEntryIds;
   const findExistingLegacyEntryIdsFn = opts.findExistingLegacyEntryIdsFn ?? findExistingLegacyEntryIds;
   const buildShowIdMapFn = opts.buildShowIdMapFn ?? (() => defaultBuildShowIdMap(db));
+  const countNullKeyRowsForShowsFn = opts.countNullKeyRowsForShowsFn ?? countNullKeyRowsForShows;
   const resolveDjNamesForShowsFn = opts.resolveDjNamesForShowsFn ?? resolveDjNamesForShows;
   const resolveAlbumIdsForReleasesFn = opts.resolveAlbumIdsForReleasesFn ?? resolveAlbumIdsForReleases;
   const insertBatchFn = opts.insertBatchFn ?? insertBatch;
@@ -412,6 +556,8 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
     batch_gap_ms: batchGapMs,
     min_backend_id_count: minBackendIdCount,
     max_cohort_size: maxCohortSize,
+    min_candidate_count: minCandidateCount,
+    max_null_key_rows: maxNullKeyRows,
   });
 
   let failure: unknown = null;
@@ -432,6 +578,25 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
       log('info', 'discovered', `${candidates.length} candidate row(s) in window`, {
         candidate_count: candidates.length,
       });
+
+      if (candidates.length < minCandidateCount) {
+        result.refused = true;
+        result.refusalReason =
+          `Discovery returned ${candidates.length} candidate row(s), below GAP_IMPORT_MIN_CANDIDATE_COUNT ` +
+          `(${minCandidateCount}). Candidates come from tubafrenzy and do not depend on Backend state, so ` +
+          `even a re-run of a completed import finds the same cohort — an empty window almost always means ` +
+          `the window bounds are wrong or the tubafrenzy read failed. Set GAP_IMPORT_MIN_CANDIDATE_COUNT=0 ` +
+          `to allow a deliberate empty-window run.`;
+        log('error', 'refused_candidate_floor', result.refusalReason, {
+          candidate_count: candidates.length,
+          window_start_ms: window.startMs,
+          window_end_ms: window.endMs,
+        });
+        captureError(new Error(result.refusalReason), 'refused_candidate_floor', {
+          candidate_count: candidates.length,
+        });
+        break mainFlow;
+      }
 
       if (candidates.length === 0) {
         break mainFlow;
@@ -489,6 +654,8 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
       // unmapped rather than insert with a null show_id — every show in this
       // cohort is expected to already exist in Backend (see the issue).
       const showIdMap = await buildShowIdMapFn();
+      // Provisional — re-built with the null-key counts at step 4b, once the
+      // set of shows actually being written to is known.
       result.perShowBreakdown = buildShowBreakdown(missing, showIdMap);
 
       const resolvable: Array<{ entry: LegacyEntryRow; showId: number }> = [];
@@ -511,9 +678,43 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
         );
       }
 
+      const distinctShowIds = Array.from(new Set(resolvable.map((r) => r.showId)));
+
+      // 4b. NULL-key orphan guard. `ON CONFLICT (legacy_entry_id) DO NOTHING`
+      // cannot dedup against a NULL key, and the cohort diff above is keyed
+      // on the same column, so a Backend-originated row that never got its
+      // back-stamp is invisible to both and would be inserted a second time.
+      // Probe only the shows about to be written to, and refuse before any
+      // write — including in dry-run, so the report can't advertise a safe
+      // import that isn't one. See countNullKeyRowsForShows.
+      const nullKeyByShow = await countNullKeyRowsForShowsFn(distinctShowIds);
+      result.perShowBreakdown = buildShowBreakdown(missing, showIdMap, nullKeyByShow);
+      const totalNullKeyRows = Array.from(nullKeyByShow.values()).reduce((sum, n) => sum + n, 0);
+      if (totalNullKeyRows > maxNullKeyRows) {
+        const offenders = Array.from(nullKeyByShow.entries())
+          .filter(([, n]) => n > 0)
+          .map(([showId, n]) => `${showId}:${n}`)
+          .join(', ');
+        result.refused = true;
+        result.refusalReason =
+          `${totalNullKeyRows} non-marker row(s) with a NULL legacy_entry_id already exist in the target ` +
+          `show(s) [backend_show_id:count — ${offenders}], above GAP_IMPORT_MAX_NULL_KEY_ROWS ` +
+          `(${maxNullKeyRows}). Those rows are invisible to this job's existence check AND to its ` +
+          `ON CONFLICT (legacy_entry_id) target, so importing could duplicate a row a DJ already entered. ` +
+          `Reconcile them first (jobs/legacy-mirror-reconcile heals the missing back-stamp), or raise the ` +
+          `ceiling once you have confirmed by hand that no candidate id corresponds to one of them.`;
+        log('error', 'refused_null_key_rows', result.refusalReason, {
+          total_null_key_rows: totalNullKeyRows,
+          per_show_breakdown: result.perShowBreakdown,
+        });
+        captureError(new Error(result.refusalReason), 'refused_null_key_rows', {
+          total_null_key_rows: totalNullKeyRows,
+        });
+        break mainFlow;
+      }
+
       // 5. Pre-resolve dj_name (read-only SELECT, never the post-insert
       // resolveDjNames UPDATE) and album_id (opportunistic, optimization only).
-      const distinctShowIds = Array.from(new Set(resolvable.map((r) => r.showId)));
       const djNameMap = await resolveDjNamesForShowsFn(distinctShowIds);
       const distinctReleaseIds = Array.from(
         new Set(resolvable.map((r) => r.entry.legacyReleaseId).filter((v): v is number => v != null))

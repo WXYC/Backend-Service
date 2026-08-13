@@ -524,6 +524,13 @@ export { foldArtistName } from '../../shared/database/src/fold-artist-name.js';
 // REAL validating implementation, not a jest.fn() stub.
 export { intArrayLiteral } from '../../shared/database/src/int-array-literal.js';
 
+// Same pure-module-path rationale for the PII-safe DJ-name chain (BS#2119
+// review). It matters more here than for the other pure re-exports: a stub
+// would let a consumer's test pass while the real chain disagrees, which is
+// precisely the drift the extraction exists to prevent. The job tests assert
+// their resolver AGAINST `resolveShowDjName`, so it must be the real one.
+export { resolveDjDisplayName, showDjNameOverride, resolveShowDjName } from '../../shared/database/src/dj-name.js';
+
 // Re-export the pure `RawPair` TYPE from source (type-only — erased at
 // compile time, no runtime import, so it can't pull in the module's `db`
 // dependency below).
