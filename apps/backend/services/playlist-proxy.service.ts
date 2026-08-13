@@ -17,15 +17,18 @@
  * behavior byte-for-byte at the GroupedResponse shape level.
  *
  * BS#2132: this used to order by flowsheet.id DESC alone, on the theory that
- * flowsheet.id is globally monotonic across shows (the same convention
- * `flowsheet.service.ts`'s `getEntriesByPage` still uses — see BS#2118/#2133
- * for that sibling site). That theory only holds while every insert is a
- * live one; a historical insert (backfill, import, repair) receives the
- * highest ids in the table and would sort as the newest content. Ordering by
- * add_time first fixes that for this endpoint. This does not change
- * `chronOrderID` (see `toBaseEntry` below) — the wire-level ordering key
- * consumers re-sort by is a separate, deliberately-deferred decision tracked
- * on BS#2118.
+ * flowsheet.id is globally monotonic across shows. That theory only holds
+ * while every insert is a live one; a historical insert (backfill, import,
+ * repair) receives the highest ids in the table and would sort as the newest
+ * content. Ordering by add_time first fixes that for this endpoint.
+ * `flowsheet.service.ts`'s `getEntriesByPage` moved off the same convention
+ * for the same reason (BS#2133) — both now sort `add_time DESC, id DESC`.
+ *
+ * This does not change `chronOrderID` (see `toBaseEntry` below). BS#2132
+ * deferred that call to the parent issue; BS#2118 has since MADE it —
+ * `chronOrderID` stays id-derived, and the decision record above
+ * `toBaseEntry` carries the reasoning plus the operator constraint it
+ * assumes in exchange. It is no longer an open question.
  *
  * entry_type -> tubafrenzy wire vocabulary mapping (see PR description for
  * the full rationale): 'track' -> playcut; 'talkset' | 'dj_join' |
@@ -428,22 +431,95 @@ function computeHourMs(row: RecentRow): number {
   return Math.floor(startMs / HOUR_MS) * HOUR_MS;
 }
 
+/**
+ * `chronOrderID` decision record (BS#2118 site 3) — the decision BS#2132
+ * deferred to the parent issue.
+ *
+ * DECISION: LEFT `id`-DERIVED. `chronOrderID: row.id` below, and its two
+ * siblings at the v=2 grouped `GroupedPlaycut.chronOrderID` and the v=1 flat
+ * `FlatEntry.chronOrderID`, are unchanged. This is the conservative option
+ * — no wire-contract change, no coordinated iOS/Android release — but it is
+ * defensible ONLY together with the operator constraint at the bottom of
+ * this comment. Read that constraint as the actual mitigation.
+ *
+ * WHY THE BLAST RADIUS IS SMALLER THAN IT LOOKS. iOS already derives its own
+ * chronological order on the v2 path and never consults this field there:
+ * `FlowsheetConverter.chronOrderID(showID:playOrder:id:)` (`wxyc-ios-64`,
+ * `Shared/Playlist/Sources/Playlist/V2/FlowsheetConverter.swift`) computes
+ * `(show_id << 32) | play_order`, falling back to `id` only when `show_id`
+ * is nil. An imported row carries its real (chronological) `show_id`, so
+ * `/v2/flowsheet` sorts it correctly with no backend change at all. That
+ * leaves `/playlists/recentEntries` — this file — as the only surface where
+ * `chronOrderID` is both `id`-derived AND consumed for client-side
+ * re-sorting (`PlaylistService.swift`, `PlaycutHistoryStore.swift`).
+ *
+ * WHY BS#2132's REORDER ALREADY COVERS THE COHORT THAT PROMPTED THIS.
+ * `fetchRecentRows` now orders by `add_time DESC, id DESC`, so a months-old
+ * historical row never enters the 200-row payload — 200 entries is roughly
+ * 15 hours of airplay at ~325 entries/day. A row that never ships cannot be
+ * mis-sorted by this field.
+ *
+ * THE RESIDUAL THAT REORDER DOES NOT COVER, and the case this decision is
+ * actually answered against: a row inserted out of order but RECENT ENOUGH
+ * to fall inside that window. Such a row is simultaneously (a) inside the
+ * chronologically-ordered top-200, so the payload contains it, and (b) still
+ * highest-id, so `chronOrderID = id` sorts it to the HEAD of the client's
+ * re-sorted timeline — defeating BS#2132's reorder for this endpoint
+ * specifically. It is also inside BS#2131's 24 h SSE age guard, so the same
+ * row broadcasts on `liveFs`.
+ *
+ * THAT RESIDUAL IS REACHABLE IN ROUTINE OPERATION, NOT ONLY BY A PLANNED
+ * IMPORT — which is what makes this decision load-bearing rather than
+ * theoretical. The tubafrenzy webhook (`apps/backend/routes/internal.route.ts`)
+ * writes `add_time` from `entry.startTime`, tubafrenzy's EVENT clock, for
+ * rows that carry a non-zero one. So an ordinary late-logged delivery — a DJ
+ * entering a track well after it played, a delivery the webhook retried —
+ * lands with the highest `id` in the table and an `add_time` still inside the
+ * ~15 h window. It survives BS#2132's filter and iOS sorts it to the head as
+ * now-playing. This is true on `main` today, with no import running. The
+ * divergence is bounded only by tubafrenzy delivery lag (minutes to days),
+ * not by anything sub-second.
+ *
+ * #1543's tubafrenzy-turndown "re-run this job at last-write" plan is the
+ * planned instance of the same shape, importing rows that aired HOURS rather
+ * than months earlier. Answering against these cases rather than against the
+ * since-cold April cohort is what makes "leave it id-derived" a decision
+ * instead of a default: against April alone, changing it and leaving it look
+ * equally safe, which is exactly what made this read as lower-stakes than it
+ * is.
+ *
+ * See also #2143, which tracks the related hazard that a FUTURE `add_time`
+ * pins this endpoint's window and freezes `X-Last-Modified` — the same
+ * event-clock mechanism, in the opposite temporal direction.
+ *
+ * OPERATOR CONSTRAINT (the mitigation this decision buys instead of a code
+ * change): any historical import, backfill, repair, or last-write re-run
+ * that writes `flowsheet` MUST run outside this endpoint's live window — or
+ * be paced so its rows are older than ~15 h by the time the 200-row window
+ * would otherwise include them. `LIVE_FS_INSERT_MAX_AGE_HOURS`
+ * (`metadata-broadcast.ts`, BS#2131) is the nearest existing knob for the
+ * analogous SSE-side residual, but it does NOT govern this endpoint.
+ * Nothing in this codebase enforces the constraint for
+ * `/playlists/recentEntries`; a future implementer of the #1543 re-run must
+ * honor it independently. If that proves hard to honor operationally, the
+ * next step is to make `chronOrderID` `add_time`-derived here — a
+ * coordinated iOS/Android change — not to relitigate this silently.
+ */
 function toBaseEntry(row: RecentRow): BaseEntry {
   return {
     id: row.id,
     // flowsheet.id is globally monotonic across shows (see
     // flowsheet.service.ts's getEntriesByRange / getEntriesByShow comments),
     // making it the natural analog of tubafrenzy's chronOrderID — a stable,
-    // strictly-increasing chronological order key. Not a reconstruction of
-    // tubafrenzy's own GLOBAL_ORDER_ID numbering (show*1000+seq), which no
-    // longer exists once tubafrenzy is decommissioned; consumers only rely
-    // on chronOrderID for ordering/dedup, not on its numeric scheme.
+    // strictly-increasing INSERTION-order key. It is NOT a chronological
+    // key: a historical insert takes the highest id while carrying an old
+    // `add_time` (BS#2118). Not a reconstruction of tubafrenzy's own
+    // GLOBAL_ORDER_ID numbering (show*1000+seq), which no longer exists once
+    // tubafrenzy is decommissioned; consumers only rely on chronOrderID for
+    // ordering/dedup, not on its numeric scheme.
     //
-    // BS#2132 caveat: "globally monotonic" above means insert-order
-    // monotonic, not chronological — the file-header comment explains why
-    // those diverge for a historical insert. chronOrderID stays id-derived
-    // here deliberately; whether to change it is a decision tracked on the
-    // parent, #2118, not made by this comment or this PR.
+    // Stays id-derived deliberately — see the decision record above this
+    // function for the reasoning and the operator constraint it assumes.
     chronOrderID: row.id,
     hour: computeHourMs(row),
     timeCreated: row.add_time.getTime(),

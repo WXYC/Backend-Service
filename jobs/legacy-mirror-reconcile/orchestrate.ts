@@ -54,7 +54,16 @@
  */
 
 import { and, asc, eq, exists, gt, isNotNull, isNull, lt, notExists, notInArray, or, sql } from 'drizzle-orm';
-import { db, flowsheet, shows, user, type FSEntry, type Show, type User } from '@wxyc/database';
+import {
+  db,
+  flowsheet,
+  lastLoggedShowEntryOrderBySql,
+  shows,
+  user,
+  type FSEntry,
+  type Show,
+  type User,
+} from '@wxyc/database';
 
 export type LogLevel = 'info' | 'warn' | 'error';
 
@@ -793,12 +802,30 @@ const staleCeiling = (staleAfterHours: number) => sql`now() - (interval '1 hour'
 const latestShowId = sql`(SELECT max(s2.id) FROM ${shows} s2)`;
 
 /**
- * Newest flowsheet row of the outer `shows` row, by insertion order.
+ * Last row LOGGED for the outer `shows` row (BS#2118 site 8).
  *
- * `ORDER BY id DESC`, not `play_order DESC` — matching
- * `flowsheet_service.isLatestEntryShowEnd`: `changeOrder` renumbers
- * `play_order` for track reordering, but marker rows are never reordered and
- * the serial PK is an unambiguous "newest".
+ * `id DESC`, via the shared `lastLoggedShowEntryOrderBySql` helper
+ * (@wxyc/database) that also serves `flowsheet_service`'s
+ * `isLatestEntryShowEnd` (site 5) and `closeShowFromTerminalShowEndMarker`
+ * (site 7). The rationale for the key — why not `play_order`, why not
+ * `add_time` even though the page reads moved, and what accepting `id DESC`
+ * exposes — lives once in that helper's doc comment. This comment previously
+ * asserted "the serial PK is an unambiguous 'newest'", which was the exact
+ * claim BS#2118 disproved.
+ *
+ * WHAT THAT ACCEPTANCE COSTS THIS DETECTOR SPECIFICALLY: a historical insert
+ * (backfill, gap import, repair) into a still-open show takes the highest id
+ * and flips `newestEntryType` away from `'show_end'` — disabling the
+ * sign-off escape hatch in `selectStaleOpenShows` below, so this job can no
+ * longer report the exact state it exists to catch (a dropped `show_end`
+ * delivery with `end_time` still NULL). `newestEntryAt` degrades the same
+ * way: it reports the import's row rather than the show's real last
+ * activity, and that is the value an operator reads as `last_entry_at`.
+ *
+ * Not reached by #2119's April cohort — those 18 shows are closed, and this
+ * detector selects only `end_time IS NULL`. Reachable by any import landing
+ * while a show is open; the #1543 last-write re-run is the concrete
+ * candidate, and the operator constraint is to run it outside a live window.
  *
  * Written with an explicit `fe` alias and an explicitly table-qualified outer
  * reference (`${shows}.id`) rather than the bare `${flowsheet.col}` /
@@ -812,10 +839,10 @@ const latestShowId = sql`(SELECT max(s2.id) FROM ${shows} s2)`;
  * outer column makes the correlation unambiguous in either context.
  */
 const newestEntryType = sql<string | null>`(SELECT fe.entry_type FROM ${flowsheet} fe
-    WHERE fe.show_id = ${shows}.id ORDER BY fe.id DESC LIMIT 1)`;
+    WHERE fe.show_id = ${shows}.id ORDER BY ${lastLoggedShowEntryOrderBySql('fe')} LIMIT 1)`;
 
 const newestEntryAt = sql<Date | null>`(SELECT fe.add_time FROM ${flowsheet} fe
-    WHERE fe.show_id = ${shows}.id ORDER BY fe.id DESC LIMIT 1)`;
+    WHERE fe.show_id = ${shows}.id ORDER BY ${lastLoggedShowEntryOrderBySql('fe')} LIMIT 1)`;
 
 /**
  * Detector selection: `end_time IS NULL`, no activity since the cutoff, inside
