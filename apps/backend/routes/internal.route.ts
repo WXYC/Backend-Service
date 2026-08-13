@@ -58,6 +58,13 @@ const MARKER_ENTRY_TYPE_LIST: BackendEntryType[] = [...MARKER_ENTRY_TYPES];
 // skew instead of paging on issue-count churn.
 const FUTURE_START_TIME_FINGERPRINT = ['webhook-future-add-time'];
 
+// Sibling grouping key for the "startTime present but unparseable" arm below.
+// Separate from the clamp's fingerprint because the two are different upstream
+// defects with different fixes — a fast clock vs. a payload/serializer change —
+// and collapsing them into one issue would let a serializer regression hide
+// inside an ongoing clock-skew issue.
+const UNPARSEABLE_START_TIME_FINGERPRINT = ['webhook-unparseable-start-time'];
+
 export const internal_route = Router();
 
 /**
@@ -413,10 +420,39 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       //     fingerprint — see `FUTURE_START_TIME_FINGERPRINT` above) so a
       //     genuinely misconfigured tubafrenzy clock gets diagnosed instead
       //     of silently absorbed.
+      //
+      // The `null` arm splits in two, because (a)'s fix would otherwise trade
+      // a loud failure for a silent one. `epochMsToDate` returns null for BOTH
+      // "absent" (`null`/`undefined`/`0` — the overwhelmingly common case,
+      // every ordinary track row) and "present but unparseable" (a string, an
+      // object, a non-finite number — always an upstream defect). Before this
+      // change the second class produced an Invalid Date and a 500: wrong, but
+      // impossible to miss. Collapsing both into a silent fall-back to `now`
+      // would mean that if tubafrenzy ever changed its JSON serializer to ship
+      // `startTime` as a string (Jackson's long-as-string is a common config),
+      // EVERY `show_start`/`show_end` marker would quietly lose its event
+      // timestamp — and `shows.end_time`, which nothing downstream corrects
+      // (both writers gate on `WHERE end_time IS NULL`), would silently become
+      // the delivery time with zero telemetry. So: "absent" stays silent,
+      // "present but unparseable" alerts. The truthiness test is deliberately
+      // the same one the pre-BS#2143 expression used to define "absent", so
+      // the set of values that stay silent is unchanged.
       const parsedStartTime = epochMsToDate(entry.startTime ?? null);
       const now = new Date();
       let markerTimestamp: Date;
       if (parsedStartTime === null) {
+        if (entry.startTime) {
+          Sentry.captureMessage('[webhook] flowsheet entry startTime present but unparseable — using delivery clock', {
+            level: 'warning',
+            tags: { subsystem: 'flowsheet-webhook' },
+            extra: {
+              legacy_entry_id: entry.id,
+              unparseable_start_time_raw: entry.startTime,
+              unparseable_start_time_type: typeof entry.startTime,
+            },
+            fingerprint: UNPARSEABLE_START_TIME_FINGERPRINT,
+          });
+        }
         markerTimestamp = now;
       } else if (isBeyondFutureTolerance(parsedStartTime, now)) {
         Sentry.captureMessage(

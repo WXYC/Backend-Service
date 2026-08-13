@@ -1,4 +1,11 @@
-import { epochMsToDate, truncate, parseTabRow, toNullable } from '@wxyc/database';
+import {
+  epochMsToDate,
+  truncate,
+  parseTabRow,
+  toNullable,
+  FUTURE_TIMESTAMP_TOLERANCE_MS as FUTURE_TIMESTAMP_TOLERANCE_MS_MOCK,
+  isBeyondFutureTolerance as isBeyondFutureToleranceMock,
+} from '@wxyc/database';
 // jest.unit.config.ts maps the `@wxyc/database` specifier to
 // tests/mocks/database.mock.ts for every unit test, so the `truncate` above
 // exercises that mock's copy, not the real `shared/database/src/legacy/etl-utils.ts`
@@ -103,6 +110,41 @@ describe('isBeyondFutureTolerance (real implementation)', () => {
     // never be "beyond" whatever `now` actually resolves to.
     const wayInThePast = new Date('2000-01-01T00:00:00.000Z');
     expect(isBeyondFutureToleranceReal(wayInThePast)).toBe(false);
+  });
+
+  // tests/mocks/database.mock.ts hand-copies both symbols (it can't import
+  // the real module: etl-utils.ts imports the `db` client at module scope,
+  // which is the very thing the mock exists to stand in for, so a re-export
+  // would be circular). This file is the one place that holds BOTH copies, so
+  // it's the only place that can pin them together.
+  //
+  // Without this, a hand-copy is free to drift, and the drift is invisible:
+  // the consumer tests that actually exercise the bound
+  // (tests/unit/routes/internal.route.test.ts,
+  // tests/unit/jobs/flowsheet-etl/transform.test.ts) resolve `@wxyc/database`
+  // to the mock, so they'd keep asserting against the STALE tolerance and stay
+  // green while production clamped at a different threshold. Tighten the real
+  // constant to 30s without touching the mock and this test — not those —
+  // is what fails.
+  describe('mock parity (tests/mocks/database.mock.ts must not drift)', () => {
+    it('mirrors FUTURE_TIMESTAMP_TOLERANCE_MS exactly', () => {
+      expect(FUTURE_TIMESTAMP_TOLERANCE_MS_MOCK).toBe(FUTURE_TIMESTAMP_TOLERANCE_MS_REAL);
+    });
+
+    it.each([
+      ['1ms inside the boundary', FUTURE_TIMESTAMP_TOLERANCE_MS_REAL - 1],
+      ['exactly at the boundary', FUTURE_TIMESTAMP_TOLERANCE_MS_REAL],
+      ['1ms beyond the boundary', FUTURE_TIMESTAMP_TOLERANCE_MS_REAL + 1],
+      ['far in the future', 60 * 60 * 1000],
+      ['in the past', -1000],
+    ])('agrees with the real predicate for a date %s', (_label, offsetMs) => {
+      const date = new Date(now.getTime() + offsetMs);
+      expect(isBeyondFutureToleranceMock(date, now)).toBe(isBeyondFutureToleranceReal(date, now));
+    });
+
+    it('agrees with the real predicate for null', () => {
+      expect(isBeyondFutureToleranceMock(null, now)).toBe(isBeyondFutureToleranceReal(null, now));
+    });
   });
 });
 

@@ -77,6 +77,19 @@ export const FUTURE_TIMESTAMP_TOLERANCE_MS = 5 * 60 * 1000;
  * `resolveEntryTimestamp` in jobs/flowsheet-etl/transform.ts) apply this
  * predicate themselves, after conversion, only to the fields that actually
  * need it — never inside `epochMsToDate` itself.
+ *
+ * Note the precise scope of that argument: it rules out the bound living in
+ * the SHARED CONVERTER, not the bound ever being applied to `radio_hour`. The
+ * 5-minute tolerance comfortably exceeds the ~1-minute legitimate lead
+ * BS#1449 relies on, so a per-call-site bound on `radio_hour` would be
+ * coherent — it is simply out of scope for BS#2143, which is about the
+ * `add_time` sort key. `radio_hour` is left unbounded here as a known,
+ * deliberate gap: a skewed upstream clock can still write a breakpoint hour
+ * that hasn't happened, which `computeHourMs`
+ * (apps/backend/services/playlist-proxy.service.ts) passes through verbatim
+ * to the mobile clients. That's cosmetic (it pins no window and freezes no
+ * header), and the 2026-08-13 production sweep found zero
+ * `radio_hour > now()` rows — but it is unfixed, not disproven.
  */
 export const isBeyondFutureTolerance = (date: Date | null, now: Date = new Date()): boolean => {
   if (date === null) return false;

@@ -563,12 +563,16 @@ export const getEntryCount = async (): Promise<number> => {
  * relative order.
  *
  * TWO DIFFERENT CLOCKS FEED `add_time`, AND THIS SORT KEY NOW MIXES THEM.
- * The tubafrenzy webhook (`apps/backend/routes/internal.route.ts:329`) sets
- * `add_time` to `entry.startTime ? new Date(entry.startTime) : new Date()`
- * for EVERY entry type it inserts — but per the BS#351 gap-import findings,
- * only `show_start`/`show_end` marker rows carry a non-zero `startTime` in
- * tubafrenzy; ordinary track rows have `startTime = 0` (falsy) and fall
- * through to `new Date()`. So MARKER rows get tubafrenzy's EVENT clock and
+ * The tubafrenzy webhook (`markerTimestamp` in
+ * `apps/backend/routes/internal.route.ts` — see that assignment's own doc
+ * comment) sets `add_time` from `entry.startTime` when that field parses to
+ * a usable timestamp no more than `FUTURE_TIMESTAMP_TOLERANCE_MS` ahead of
+ * the delivery clock (BS#2143), and from the delivery clock itself
+ * otherwise, for EVERY entry type it inserts — but per the BS#351
+ * gap-import findings, only `show_start`/`show_end` marker rows carry a
+ * non-zero `startTime` in tubafrenzy; ordinary track rows have
+ * `startTime = 0` (tubafrenzy's "not set" sentinel) and fall through to the
+ * delivery clock. So MARKER rows get tubafrenzy's EVENT clock and
  * TRACK rows get Backend's DELIVERY clock — two different clocks landing in
  * the same column, and now the same sort key. Consequence: on a webhook
  * delivery lag, a show's `show_end` marker can carry an `add_time` EARLIER
