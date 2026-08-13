@@ -49,6 +49,42 @@
 -- multiple Backend artists is reported in the pre-amble and skipped, never
 -- guessed.
 --
+-- ## Measured against the dev-clone Postgres (dev_env/seed-clone.sql, a real
+-- pg_dump --data-only snapshot derived from staging; NOT prod, and possibly
+-- stale relative to it — reported here as clone-measured, not prod-measured)
+--
+-- Running this script's resolver against the clone settles the "missing
+-- rows vs. keying mismatch vs. export-query gap" question for that
+-- snapshot: `wxyc_schema.artist_crossreference` held ZERO rows before this
+-- script ran there — not partially populated, empty. Of the 110 pairs, 79
+-- resolved by name (79 -> 78 distinct ordered tuples -> 77 physical rows
+-- after the reversed/exact-duplicate dedup below) and 31 did not resolve at
+-- all. Every one of those 31 unresolved rows had an EMPTY referencing-side
+-- CALL_LETTERS (100% correlation, not just "35 of 110 raw rows look
+-- suspicious") — i.e. Backend has never created an `artists` row for these
+-- "pointer" names at all, consistent with them having zero catalog holdings
+-- of their own to trigger artist creation via a release import. Separately,
+-- 73 of the 79 resolved pairs ALSO satisfy the deployed importer's strict
+-- `code_letters` equality (only 4 needed this script's more lenient
+-- name-first resolution) — so a completely empty table is better explained
+-- by the crossref-import step not having run at all against this snapshot
+-- than by it running and mostly failing on keying. Both mechanisms are
+-- real: the empty-table observation explains why the table is empty *here*;
+-- the code_letters-required-with-no-fallback behavior in `findArtistId`
+-- explains why 31/110 (28%) can NEVER be recovered by ANY importer that
+-- only knows tubafrenzy's (name, code_letters) pair, this script included —
+-- they need name alone, which only resolves because there happens to be
+-- exactly one Backend artist with that folded name.
+--
+-- This does not by itself prove what prod's live `artist_crossreference`
+-- looked like when the parity harness ran (the ticket's 28-both-sides-differ
+-- and 11-empty-in-tubafrenzy buckets require SOME non-empty Backend rows to
+-- exist, which an entirely empty table could not produce — so live prod is
+-- not simply this snapshot). What it does establish: the resolution
+-- mechanics below are real and tested against real WXYC artist names, not
+-- synthetic ones, and the 31-name hard ceiling on recoverability is a
+-- measured fact, not a guess.
+--
 -- ## Source data: 110 of 119 raw rows resolve; 9 dangle
 --
 -- LIBRARY_CODE_CROSS_REFERENCE has 119 rows. 9 have an endpoint whose
@@ -102,16 +138,21 @@
 -- ids 88/89, "Preservation Hall Jazz Band"/"Sweet Emma Barrett" recorded
 -- twice; one reversed duplicate: ids 74/75, "Sankofa"/"The Apple Juice Kid"
 -- recorded in both directions), touching 182 distinct artist identities by
--- name. `cross_reference_names` is exported per catalog ROW (one row per
--- library pressing), keyed off that row's own artist — so a touched artist
--- contributes to the 157 once per `library` row it owns, and the "pointer"
--- artists noted above (35 of the 110 source-side names, e.g. "Barry Black")
--- contribute ZERO rows because they have no catalog holdings of their own;
--- their material is filed entirely under the artist they point at. 157
--- release rows arising from up to 182 touched identities — many
--- contributing 0 rows, some contributing several — is consistent with that
--- shape; an exact per-artist release count would require the `library`
--- table, which is not available here (see below).
+-- name (151 of which resolve to a real Backend `artists` row in the
+-- dev-clone measurement above — the other 31 are the unresolvable
+-- "pointer" names). `cross_reference_names` is exported per catalog ROW
+-- (one row per library pressing), keyed off that row's own artist — so a
+-- touched artist contributes to the 157 once per `library` row it owns, and
+-- the unresolvable "pointer" artists (e.g. "Barry Black") contribute ZERO
+-- rows because they have no catalog holdings of their own; their material
+-- is filed entirely under the artist they point at. Measured against the
+-- dev-clone: the 151 resolvable touched artists own 902 `library` rows
+-- between them. 157 release rows affected out of a 902-row eligible
+-- population (many of those 902 rows may already carry a correct, non-empty
+-- `cross_reference_names` on the Backend side today, or belong to an artist
+-- whose OTHER cross-references are already present) is consistent with that
+-- shape — it does not reconcile to an exact 1:1 count, and does not need
+-- to; the 902 figure is this clone's population, not necessarily prod's.
 --
 -- ## Keying: tubafrenzy LIBRARY_CODE vs. Backend artists (resolution rule)
 --
@@ -188,17 +229,25 @@
 --
 -- ## What this script CANNOT verify (no prod database available here)
 --
--- There is no Backend database with production data reachable from this
--- environment — no prod credentials, and the local dev Postgres
--- (dev_env/docker-compose.yml, port 5442) holds only seed/fixture data, not
--- real WXYC artists. So: this script cannot be dry-run against real
--- `artists` rows before being handed to an operator; the pre-amble's
--- resolved/unresolved/ambiguous counts below are only meaningful once
--- actually run against prod; and the "already exists" / reversed-duplicate
--- guards are exercised here by construction (reading the SQL) rather than
--- by having observed real conflicting rows. The operator running this
--- against prod should read the pre-amble output before letting the
--- transaction commit, per the SELECT-before-write convention.
+-- There is no PROD Backend database reachable from this environment — no
+-- prod credentials. The local dev Postgres (dev_env/docker-compose.yml,
+-- port 5442) DOES hold real, staging-derived data when seeded from
+-- `dev_env/seed-clone.sql` (a real `pg_dump --data-only` snapshot, ~64k
+-- `library` rows), and this script was dry-run against it end to end (see
+-- the "Measured against the dev-clone Postgres" section above) — so the
+-- resolver, self-pair guard, reversed-duplicate dedup, NOT EXISTS guard,
+-- and idempotent re-run were all exercised against real WXYC artist names,
+-- not just read by construction. What that snapshot cannot answer: it is
+-- point-in-time and may be stale relative to live prod (its
+-- `artist_crossreference` was completely empty, which — per the "28
+-- both-sides-differ" / "11 empty-in-tubafrenzy" buckets requiring some
+-- non-empty Backend rows — prod evidently is not, as of the parity run);
+-- and it cannot confirm which of the 110 pairs prod already has correctly,
+-- so the exact insert count against prod will differ from the clone's 77.
+-- The operator running this against prod should still read the pre-amble
+-- output before letting the transaction commit, per the SELECT-before-write
+-- convention — the resolution counts there will legitimately differ from
+-- what this file's comments report for the clone.
 --
 -- Target: PostgreSQL 14 (prod RDS). No PG15+-only syntax is used.
 
