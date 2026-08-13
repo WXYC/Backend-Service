@@ -29,10 +29,17 @@ import {
   truncate,
 } from '@wxyc/database';
 import { parseInsertLine } from './parse-dump.js';
-import { mapProdEntryType, resolveEntryTimestamp, resolveRadioHour } from './transform.js';
+import {
+  mapProdEntryType,
+  resolveEntryTimestamp,
+  resolveRadioHour,
+  resolveArtistName,
+  resolveMessage,
+} from './transform.js';
 import { fetchLegacyShows, fetchLegacyEntries, closeLegacyConnection } from './fetch-legacy.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 import { isBackwardsWriteAllowed, backwardsWriteRefusalMessage } from './backwards-write-guard.js';
+import { buildShowIdMap, type DbClient } from './show-id-map.js';
 
 const JOB_NAME = 'flowsheet-etl';
 const BATCH_SIZE = 5000;
@@ -125,41 +132,6 @@ const resolveDjNames = async (legacyEntryIds: number[]) => {
   });
 };
 
-/** Entry types whose legacy ARTIST_NAME text is display content, not a real artist. */
-const isMessageEntryType = (entryType: string): boolean =>
-  entryType === 'breakpoint' || entryType === 'talkset' || entryType === 'message';
-
-/**
- * Resolve the artist_name for a flowsheet entry.
- *
- * For message-bearing types (breakpoint, talkset, message), the text belongs in
- * the message field instead — return null here.
- *
- * For show_start / show_end markers, the ARTIST_NAME column in tubafrenzy holds
- * the full marker text (e.g. "START OF SHOW: DJ Aubrey Hearst SIGNED ON at
- * 7:43 PM (6/2/26)"). Preserve it verbatim — V1 surfaces (dj-site flowsheet,
- * wxyc.info) render `artist_name` directly, and reducing it to the bare DJ
- * name strips information the writer put there on purpose. The ETL stays
- * shape-agnostic about marker templates; whatever TF holds is what BS persists,
- * truncated to the 128-char column limit. See #1287 and epic #1288.
- *
- * Exported for unit testing.
- */
-export const resolveArtistName = (rawArtistName: string | null, entryType: string): string | null => {
-  if (!rawArtistName) return null;
-  if (isMessageEntryType(entryType)) return null;
-  return truncate(rawArtistName, 128);
-};
-
-/**
- * Resolve the message field for a flowsheet entry. For breakpoint, talkset, and
- * message entries, the legacy ARTIST_NAME column contains the display text.
- */
-const resolveMessage = (rawArtistName: string | null, entryType: string): string | null => {
-  if (!rawArtistName || !isMessageEntryType(entryType)) return null;
-  return truncate(rawArtistName, 250);
-};
-
 // ---- Bulk Load Mode ----
 
 /**
@@ -195,8 +167,6 @@ type BulkEntryRow = {
   radio_hour: Date | null;
 };
 
-type DbClient = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
-
 const importShows = async (dbClient: DbClient, lines: string[]) => {
   let showCount = 0;
   for (const line of lines) {
@@ -227,17 +197,6 @@ const importShows = async (dbClient: DbClient, lines: string[]) => {
     }
   }
   return showCount;
-};
-
-const buildShowIdMap = async (dbClient: DbClient) => {
-  const showRows = await dbClient.select({ id: shows.id, legacyId: shows.legacy_show_id }).from(shows);
-  const map = new Map<number, number>();
-  for (const row of showRows) {
-    if (row.legacyId != null) {
-      map.set(row.legacyId, row.id);
-    }
-  }
-  return map;
 };
 
 /**
@@ -416,13 +375,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
   }
 
   // Build show mapping
-  const showRows = await db.select({ id: shows.id, legacyId: shows.legacy_show_id }).from(shows);
-  const showIdMap = new Map<number, number>();
-  for (const row of showRows) {
-    if (row.legacyId != null) {
-      showIdMap.set(row.legacyId, row.id);
-    }
-  }
+  const showIdMap = await buildShowIdMap(db);
 
   // Sync entries (upsert: insert new, update display fields on conflict)
   const legacyEntries = await fetchLegacyEntries(lastRunMs);

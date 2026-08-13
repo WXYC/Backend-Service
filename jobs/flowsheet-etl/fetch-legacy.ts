@@ -151,12 +151,17 @@ const BASE_ENTRY_COLUMNS = `
       fe.LIBRARY_RELEASE_ID,
       fe.RADIO_HOUR`;
 
-export const fetchLegacyEntries = async (sinceMs: number | null): Promise<LegacyEntryRow[]> => {
-  const filter =
-    sinceMs != null
-      ? `WHERE fe.START_TIME > ${sinceMs} OR fe.TIME_CREATED > ${sinceMs} OR fe.TIME_LAST_MODIFIED > ${sinceMs}`
-      : '';
-
+/**
+ * Run a FLOWSHEET_ENTRY_PROD SELECT with the given WHERE-clause filter
+ * (already including the `WHERE` keyword, or the empty string for no
+ * filter). Tries SEGUE_FLAG first, falling back to the 14-column shape if
+ * the column doesn't exist upstream. Shared by `fetchLegacyEntries` (the
+ * open-ended `sinceMs` floor used by the incremental sync) and
+ * `fetchLegacyEntriesInWindow` (the bounded date-window candidate net used
+ * by jobs/flowsheet-april-gap-import, BS#2119) so both stay byte-identical
+ * on the column list and the SEGUE_FLAG fallback.
+ */
+const runEntryQuery = async (filter: string): Promise<LegacyEntryRow[]> => {
   // Try with SEGUE_FLAG first; fall back without it if the column doesn't exist
   try {
     const queryWithSegue = `SELECT ${BASE_ENTRY_COLUMNS}, fe.SEGUE_FLAG FROM FLOWSHEET_ENTRY_PROD fe ${filter} ORDER BY fe.ID ASC;`;
@@ -168,6 +173,56 @@ export const fetchLegacyEntries = async (sinceMs: number | null): Promise<Legacy
     const raw = await legacyDB.send(queryWithout);
     return parseEntryRows(raw, 14);
   }
+};
+
+export const fetchLegacyEntries = async (sinceMs: number | null): Promise<LegacyEntryRow[]> => {
+  const filter =
+    sinceMs != null
+      ? `WHERE fe.START_TIME > ${sinceMs} OR fe.TIME_CREATED > ${sinceMs} OR fe.TIME_LAST_MODIFIED > ${sinceMs}`
+      : '';
+  return runEntryQuery(filter);
+};
+
+/**
+ * Fetch FLOWSHEET_ENTRY_PROD rows whose START_TIME, TIME_CREATED, or
+ * TIME_LAST_MODIFIED falls within `[startMs, endMs)` — a bounded-on-both-ends
+ * sibling of `fetchLegacyEntries`'s open-ended `sinceMs` floor. Added for
+ * jobs/flowsheet-april-gap-import (BS#2119): the fetch-by-explicit-id-set
+ * alternative the extraction plan allows for isn't needed here, since a
+ * window this narrow never produces a MySQL `IN (...)` predicate long enough
+ * to worry about shipping as raw text over the MirrorSQL SSH channel.
+ *
+ * Cast deliberately wide — this is the SQL-side candidate net, not the final
+ * filter. Most tubafrenzy track entries have `START_TIME = 0` (the #351 root
+ * cause this job backfills), so a naive per-column BETWEEN can admit a row
+ * whose TRUE resolved timestamp (`resolveEntryTimestamp`'s
+ * START_TIME -> TIME_CREATED -> TIME_LAST_MODIFIED fallback) falls outside
+ * the window — e.g. a non-zero START_TIME outside the window on a row whose
+ * TIME_LAST_MODIFIED happens to land inside it (tubafrenzy bumps
+ * TIME_LAST_MODIFIED on adjacent rows during normal operation, per
+ * `fetchLegacyEntries`'s own re-emit comment). Callers MUST re-apply
+ * `resolveEntryTimestamp` plus an exact `[startMs, endMs)` check to every
+ * returned row before treating it as in-window — see
+ * jobs/flowsheet-april-gap-import/orchestrate.ts.
+ *
+ * `startMs`/`endMs` are interpolated as raw SQL literals (MirrorSQL has no
+ * parameterized-query path), so both are validated as finite integers here
+ * rather than trusting the caller.
+ */
+export const fetchLegacyEntriesInWindow = async (startMs: number, endMs: number): Promise<LegacyEntryRow[]> => {
+  if (!Number.isFinite(startMs) || !Number.isInteger(startMs)) {
+    throw new Error(`fetchLegacyEntriesInWindow: startMs must be a finite integer, got ${JSON.stringify(startMs)}`);
+  }
+  if (!Number.isFinite(endMs) || !Number.isInteger(endMs)) {
+    throw new Error(`fetchLegacyEntriesInWindow: endMs must be a finite integer, got ${JSON.stringify(endMs)}`);
+  }
+  if (endMs <= startMs) {
+    throw new Error(`fetchLegacyEntriesInWindow: endMs (${endMs}) must be greater than startMs (${startMs})`);
+  }
+  const filter = `WHERE (fe.START_TIME BETWEEN ${startMs} AND ${endMs})
+       OR (fe.TIME_CREATED BETWEEN ${startMs} AND ${endMs})
+       OR (fe.TIME_LAST_MODIFIED BETWEEN ${startMs} AND ${endMs})`;
+  return runEntryQuery(filter);
 };
 
 export const closeLegacyConnection = () => {
