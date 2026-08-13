@@ -21,6 +21,18 @@
  * did under the old one — the assertions below hold, but for that reason,
  * not because `add_time` distinguishes these rows at all.
  *
+ * WHAT GUARANTEES THIS BATCH IS THE HEAD OF THE TABLE changed kind, not just
+ * mechanism. Under plain `id DESC`, a freshly-inserted batch was
+ * STRUCTURALLY guaranteed to be the top BATCH_SIZE rows — the serial PK
+ * cannot be beaten by an earlier row. Under `add_time DESC, id DESC`, that
+ * guarantee is additionally conditional on no row ANYWHERE in the schema
+ * carrying a later `add_time` than this batch's — true in CI/dev today, but
+ * now an ENVIRONMENTAL fact about the fixture data, not a structural one.
+ * The `beforeAll` below asserts that condition explicitly right after the
+ * insert, so a future future-dated fixture (or a clock skewed forward) fails
+ * loudly there with a clear count, instead of surfacing here as a confusing
+ * off-by-N content mismatch.
+ *
  * This spec bulk-inserts a large, uniquely-tagged batch of track rows so a
  * deep page (page=50, limit=100 — offset 5,000, the acceptance floor from
  * the issue) has real, predictable content to assert on regardless of
@@ -80,6 +92,32 @@ describe('GET /flowsheet deep OFFSET pagination (BS#1960)', () => {
       [MARKER, BATCH_SIZE]
     );
     insertedIds = rows.map((r) => r.id);
+
+    // Head-of-table guarantee check (BS#2133 — see the header comment). All
+    // rows in this batch share one add_time (single INSERT ... SELECT), so
+    // the batch's own MAX(add_time), computed inside this one statement, is
+    // representative. If any OTHER row in the schema has a strictly later
+    // add_time, this batch is no longer guaranteed to sort as the top
+    // BATCH_SIZE under `add_time DESC, id DESC`, and the deterministic
+    // content assertions below would fail for a reason unrelated to the code
+    // under test. Fail here, loudly and specifically, rather than there.
+    //
+    // The batch's add_time is compared entirely IN SQL via the subquery
+    // below, never round-tripped through a JS Date: postgres `timestamptz`
+    // carries microsecond precision but a JS `Date` only carries
+    // milliseconds, so materializing the batch's add_time into JS and
+    // passing it back as a query parameter would silently truncate it —
+    // every row (including the batch's own) would then compare as "later"
+    // than its own truncated timestamp, a false positive that isn't the
+    // real invariant this check exists to guard. Keeping both sides of the
+    // comparison in Postgres avoids that trap entirely.
+    const [{ count: laterRowCount }] = await sql.unsafe(
+      `SELECT count(*)::int AS count
+       FROM "${SCHEMA}".flowsheet
+       WHERE add_time > (SELECT max(add_time) FROM "${SCHEMA}".flowsheet WHERE id = ANY($1::int[]))`,
+      [insertedIds]
+    );
+    expect(laterRowCount).toBe(0);
   });
 
   afterAll(async () => {

@@ -163,20 +163,37 @@ const INT4_MAX = 2147483647;
 //   offset 30,000:  3,570.9 ms  (188x)
 //   offset 50,000: 11,739.2 ms  (472x — past DB_STATEMENT_TIMEOUT_MS's 5s)
 //
-// 20,000 sits below the cliff with margin (still 4x the page=50/limit=100 =
-// 5,000 acceptance floor pinned by flowsheet-deep-pagination.spec.js) and
-// costs nothing over the floor (17.8ms vs 7.7ms) — the previous "10x the
+// 20,000 is the LAST GOOD SAMPLE, not a point measured to sit comfortably
+// inside the good region — the next sample, 30,000, is already 188x. Nothing
+// between the two was measured, so this bound is EMPIRICAL AND
+// CACHE-STATE-DEPENDENT, not a derived constant: re-measure before ever
+// moving it in either direction, do not interpolate or extrapolate from this
+// comment. 20,000 does clear the page=50/limit=100 = 5,000 acceptance floor
+// pinned by flowsheet-deep-pagination.spec.js with real headroom (4x) at
+// negligible extra cost (17.8ms vs 7.7ms warm) — the previous "10x the
 // acceptance floor" justification for 50,000 is superseded by this
 // measurement and must not be used to raise the cap back. 5,000 (the floor
-// itself) was considered and rejected: it would leave zero headroom and put
-// that spec's own acceptance case exactly on the offset > MAX_OFFSET
-// boundary.
+// itself) was considered and rejected as the cap: it would leave zero
+// headroom and put that spec's own acceptance case exactly on the
+// offset > MAX_OFFSET boundary.
 //
-// Incidentally, but worth recording: the OLD `id DESC` shape, at the OLD
-// 50,000 cap, measured 4,447 ms COLD (vs. warm's 24.9 ms) against that same
-// 5s timeout — on a public, unauthenticated route. The old cap was already
-// marginal before this change; lowering it to 20,000 (784 ms cold there)
-// closes that latent exposure too.
+// The number that actually bounds what ships is COLD, not warm — full
+// three-pass cold->warm sequences (ms), prod, posted in full on #2133:
+//
+//   offset 20,000 (new cap): current 784, 8, 11   | proposed  852, 22, 18
+//   offset 50,000 (old cap): current 4447, 31, 25 | proposed 10261, 14708, 11739
+//
+// Proposed-shape COLD at the NEW 20,000 cap is 852 ms against the 5s
+// DB_STATEMENT_TIMEOUT_MS — worse than the current shape's 784 ms cold at
+// that same offset, but this PR also lowers the cap: what actually SHIPS
+// (proposed ordering, new 20,000 cap, 852 ms cold) beats what shipped before
+// (current ordering, old 50,000 cap, 4,447 ms cold) by a wide margin. This
+// change is a net improvement on the worst case being shipped, not merely a
+// neutral one. At and below 20,000 the proposed shape also converges on
+// repetition (852 -> 22 -> 18, a healthy cache warm-up); at 30,000+ it
+// diverges instead (e.g. 40,000: 6446 -> 8604 -> 11120, getting WORSE with
+// repetition) — the cliff shows up in the shape of the sequence, not only
+// in the magnitude.
 //
 // A composite `(add_time DESC, id DESC)` index would restore an index-only
 // scan at any depth (~78 MB measured on a 2.6M-row stand-in) and was
