@@ -7,11 +7,15 @@
  */
 import { RequestHandler } from 'express';
 
+import { getConfig as getDonateConfig } from '../config/donate.js';
+
 export interface AppConfig {
   posthogApiKey: string;
   posthogHost: string;
   requestOMaticUrl: string;
   apiBaseUrl: string;
+  donateUrl: string;
+  donateEnabled: boolean;
 }
 
 export interface AppSecrets {
@@ -31,6 +35,8 @@ export const getConfig: RequestHandler = (_req, res) => {
     posthogHost: process.env.POSTHOG_HOST || 'https://us.i.posthog.com',
     requestOMaticUrl: process.env.REQUEST_O_MATIC_URL || '',
     apiBaseUrl: process.env.API_BASE_URL || 'https://api.wxyc.org',
+    donateUrl: process.env.DONATE_URL || '',
+    donateEnabled: getDonateConfig().enabled,
   };
 
   res.set('Cache-Control', 'public, max-age=3600');

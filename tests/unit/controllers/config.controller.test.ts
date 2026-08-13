@@ -4,6 +4,7 @@
 import type { Request, Response } from 'express';
 
 import { getConfig, getSecrets } from '../../../apps/backend/controllers/config.controller';
+import { resetConfig as resetDonateConfig } from '../../../apps/backend/config/donate';
 
 const createMockRes = () => {
   const res: Partial<Response> = {};
@@ -18,6 +19,10 @@ describe('config.controller', () => {
 
   beforeEach(() => {
     process.env = { ...originalEnv };
+    // The donate flag factory caches on first read (module-scoped), so a test
+    // that mutates process.env.DONATE_ENABLED needs the cache dropped or the
+    // next getConfig() call serves a stale verdict from an earlier test.
+    resetDonateConfig();
   });
 
   afterAll(() => {
@@ -30,6 +35,8 @@ describe('config.controller', () => {
       process.env.POSTHOG_HOST = 'https://custom.posthog.com';
       process.env.REQUEST_O_MATIC_URL = 'https://rom.example.com/request';
       process.env.API_BASE_URL = 'https://api.example.com';
+      process.env.DONATE_URL = 'https://donate.example.com/wxyc';
+      process.env.DONATE_ENABLED = 'true';
 
       const req = {} as Request;
       const res = createMockRes();
@@ -42,7 +49,45 @@ describe('config.controller', () => {
         posthogHost: 'https://custom.posthog.com',
         requestOMaticUrl: 'https://rom.example.com/request',
         apiBaseUrl: 'https://api.example.com',
+        donateUrl: 'https://donate.example.com/wxyc',
+        donateEnabled: true,
       });
+    });
+
+    it('donateEnabled: unset DONATE_ENABLED evaluates to false', () => {
+      delete process.env.DONATE_ENABLED;
+
+      const req = {} as Request;
+      const res = createMockRes();
+
+      getConfig(req, res as Response, jest.fn());
+
+      const responseBody = (res.json as jest.Mock).mock.calls[0][0];
+      expect(responseBody.donateEnabled).toBe(false);
+    });
+
+    it('donateEnabled: "true" evaluates to true', () => {
+      process.env.DONATE_ENABLED = 'true';
+
+      const req = {} as Request;
+      const res = createMockRes();
+
+      getConfig(req, res as Response, jest.fn());
+
+      const responseBody = (res.json as jest.Mock).mock.calls[0][0];
+      expect(responseBody.donateEnabled).toBe(true);
+    });
+
+    it('donateEnabled: "TRUE" evaluates to false (strict === \'true\' comparison, not case-insensitive)', () => {
+      process.env.DONATE_ENABLED = 'TRUE';
+
+      const req = {} as Request;
+      const res = createMockRes();
+
+      getConfig(req, res as Response, jest.fn());
+
+      const responseBody = (res.json as jest.Mock).mock.calls[0][0];
+      expect(responseBody.donateEnabled).toBe(false);
     });
 
     it('returns defaults when environment variables are not set', () => {
@@ -50,6 +95,8 @@ describe('config.controller', () => {
       delete process.env.POSTHOG_HOST;
       delete process.env.REQUEST_O_MATIC_URL;
       delete process.env.API_BASE_URL;
+      delete process.env.DONATE_URL;
+      delete process.env.DONATE_ENABLED;
 
       const req = {} as Request;
       const res = createMockRes();
@@ -62,6 +109,8 @@ describe('config.controller', () => {
         posthogHost: 'https://us.i.posthog.com',
         requestOMaticUrl: '',
         apiBaseUrl: 'https://api.wxyc.org',
+        donateUrl: '',
+        donateEnabled: false,
       });
     });
 
