@@ -7,8 +7,19 @@
  * it could discard them. Latency grew ~11ms per discarded row and the
  * endpoint 500'd once `offset` passed roughly 450-500, hitting this RDS
  * instance's 5s statement_timeout. The fix (deferred-join / late-row-lookup)
- * resolves the page of `flowsheet.id`s first, against the bare PK index, and
- * joins only the already-bounded page.
+ * resolves the page of `flowsheet.id`s first, against a bare-table subquery,
+ * and joins only the already-bounded page.
+ *
+ * BS#2133 (parent #2118): the ordering that subquery resolves against
+ * changed from `id DESC` to `add_time DESC, id DESC`, so a historical insert
+ * (backfill, gap import, repair) can no longer sort as the newest content —
+ * see `getEntriesByPage`'s comment in `flowsheet.service.ts`. This spec's
+ * batch below lands as a single `INSERT ... SELECT`, so every row in it
+ * shares one `add_time` (`now()` = `transaction_timestamp()`, constant for
+ * the whole statement); the `id` tie-break is therefore what actually
+ * determines this batch's relative order under the new ordering, same as it
+ * did under the old one — the assertions below hold, but for that reason,
+ * not because `add_time` distinguishes these rows at all.
  *
  * This spec bulk-inserts a large, uniquely-tagged batch of track rows so a
  * deep page (page=50, limit=100 — offset 5,000, the acceptance floor from
@@ -86,11 +97,14 @@ describe('GET /flowsheet deep OFFSET pagination (BS#1960)', () => {
     expect(res.body.page).toBe(50);
     expect(res.body.limit).toBe(100);
 
-    // Deterministic content check. Ordered by flowsheet.id DESC (most recent
-    // first), skipping the top 5,000 rows (offset) and taking the next 100
-    // (limit) lands entirely inside this batch: the first row on the page is
-    // n = BATCH_SIZE - 5000 = 200 (counting from the top: rank 5001 overall
-    // == the 5001st-most-recent row == n=200), descending to n=101.
+    // Deterministic content check. Ordered by add_time DESC, id DESC
+    // (BS#2133) — this batch's rows all share one add_time (single
+    // INSERT ... SELECT statement, see the header comment), so id DESC is
+    // what actually orders them, same as it did pre-BS#2133. Skipping the
+    // top 5,000 rows (offset) and taking the next 100 (limit) lands entirely
+    // inside this batch: the first row on the page is n = BATCH_SIZE - 5000
+    // = 200 (counting from the top: rank 5001 overall == the 5001st-most-
+    // recent row == n=200), descending to n=101.
     const firstN = BATCH_SIZE - 5000;
     expect(res.body.entries[0].track_title).toBe(`${MARKER} #${firstN}`);
     expect(res.body.entries[99].track_title).toBe(`${MARKER} #${firstN - 99}`);
@@ -106,8 +120,10 @@ describe('GET /flowsheet deep OFFSET pagination (BS#1960)', () => {
   }, 30000);
 
   test('a page depth beyond MAX_OFFSET is rejected with 400, not a 500 or a hang', async () => {
-    // page 501 * limit 100 = offset 50,100 > MAX_OFFSET (50,000).
-    const res = await request.get('/flowsheet').query({ page: 501, limit: 100 }).send();
+    // page 201 * limit 100 = offset 20,100 > MAX_OFFSET (20,000 — BS#2133
+    // lowered it from 50,000; see flowsheet.controller.ts's MAX_OFFSET
+    // comment for the measured cache-cliff rationale).
+    const res = await request.get('/flowsheet').query({ page: 201, limit: 100 }).send();
 
     expect(res.status).toBe(400);
   });

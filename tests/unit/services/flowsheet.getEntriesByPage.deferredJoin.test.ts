@@ -82,7 +82,7 @@ describe('flowsheet.service', () => {
       // carries the offset/limit — this is the load-bearing fix: pre-#1960
       // these landed on the fully-joined query instead.
       expect(subFromMock).toHaveBeenCalledWith(flowsheet);
-      expect(subOrderByMock).toHaveBeenCalledWith(desc(flowsheet.id));
+      expect(subOrderByMock).toHaveBeenCalledWith(desc(flowsheet.add_time), desc(flowsheet.id));
       expect(subOffsetMock).toHaveBeenCalledWith(5000);
       expect(subLimitMock).toHaveBeenCalledWith(100);
       expect(asMock).toHaveBeenCalledWith('page');
@@ -98,12 +98,16 @@ describe('flowsheet.service', () => {
       expect(leftJoin3Mock).toHaveBeenCalledWith(album_metadata, eq(album_metadata.album_id, flowsheet.album_id));
     });
 
-    it('re-establishes descending order on the outer query after the join', async () => {
+    it('re-establishes the same add_time/id order on the outer query after the join', async () => {
       await getEntriesByPage(5000, 100);
 
-      expect(outerOrderByMock).toHaveBeenCalledWith(desc(flowsheet.id));
-      // Never desc(play_order) — flowsheet.id is globally monotonic and
-      // unique, unlike play_order (see getEntriesByShow's tie-break).
+      // Must match the inner subquery's ORDER BY exactly (BS#2133) — the join
+      // doesn't guarantee it preserves the subquery's row order, so a
+      // mismatched outer ORDER BY silently breaks pagination.
+      expect(outerOrderByMock).toHaveBeenCalledWith(desc(flowsheet.add_time), desc(flowsheet.id));
+      // Never desc(play_order) — id is the tie-break, not play_order (see
+      // getEntriesByShow's tie-break, which is per-show and not applicable
+      // here).
       expect(outerOrderByMock).not.toHaveBeenCalledWith(desc(flowsheet.play_order));
     });
 

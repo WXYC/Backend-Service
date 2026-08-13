@@ -594,11 +594,14 @@ describe('flowsheet.controller', () => {
     // ~11ms/row, hitting the 5s statement_timeout past an offset of ~450-500).
     // This guard is a separate cost/DoS ceiling on top of that fix — see
     // MAX_OFFSET in flowsheet.controller.ts — so an absurd page*limit fails
-    // fast with a 400 instead of ever reaching the query.
+    // fast with a 400 instead of ever reaching the query. BS#2133 lowered
+    // MAX_OFFSET from 50,000 to 20,000 (measured cache cliff between 20,000
+    // and 30,000 once getEntriesByPage's ORDER BY changed to
+    // `add_time DESC, id DESC` — see that constant's comment).
     describe('deep-offset guard (BS#1960)', () => {
       it('rejects an offset (page * limit) exceeding MAX_OFFSET with 400', async () => {
-        // page 501 * limit 100 = offset 50,100 > MAX_OFFSET (50,000).
-        const req = createMockReq({ page: '501', limit: '100' });
+        // page 201 * limit 100 = offset 20,100 > MAX_OFFSET (20,000).
+        const req = createMockReq({ page: '201', limit: '100' });
         const res = createMockRes();
 
         await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toThrow(
@@ -608,24 +611,24 @@ describe('flowsheet.controller', () => {
       });
 
       it('rejects with a WxycError (400), not an unhandled error', async () => {
-        const req = createMockReq({ page: '501', limit: '100' });
+        const req = createMockReq({ page: '201', limit: '100' });
         const res = createMockRes();
 
         await expect(getEntries(req as Request, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
       });
 
-      it('accepts an offset exactly at MAX_OFFSET (page 500 * limit 100 = 50,000)', async () => {
+      it('accepts an offset exactly at MAX_OFFSET (page 200 * limit 100 = 20,000)', async () => {
         mockGetEntriesByPage.mockResolvedValue([]);
         mockGetEntryCount.mockResolvedValue(0);
         mockGetOnAirDJName.mockResolvedValue(null);
 
-        const req = createMockReq({ page: '500', limit: '100' });
+        const req = createMockReq({ page: '200', limit: '100' });
         const res = createMockRes();
 
         await getEntries(req as Request, res as Response, mockNext);
 
         expect(res.status).toHaveBeenCalledWith(200);
-        expect(mockGetEntriesByPage).toHaveBeenCalledWith(50000, 100);
+        expect(mockGetEntriesByPage).toHaveBeenCalledWith(20000, 100);
       });
 
       // The acceptance floor this cap must clear: a UI paginator walking to

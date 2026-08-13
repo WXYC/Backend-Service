@@ -91,6 +91,25 @@ export interface LinkedFlowsheetRow {
  * most-popular key has hundreds of matches, not thousands; the post-filter
  * `id DESC` sort on the small match set is sub-ms in practice.
  *
+ * `id DESC` HERE MEANS "PICK A CONSISTENT WINNER," NOT "PICK THE NEWEST
+ * PLAY" (BS#2118 site 6) — do not read this as a recency query. `id` is
+ * insertion order, not airtime order, and this function does not care which
+ * candidate row actually aired most recently; it only needs the same
+ * candidate every time. That said, a historical insert (backfill, gap
+ * import, repair) DOES change which row wins here once it acquires an
+ * `album_id` — `jobs/legacy-linkage-resolve` links `flowsheet.album_id` on
+ * its own 30-minute cron, independent of when the row was inserted — and
+ * the winning row's `record_label` / `label_id` / `metadata_status` then
+ * come from that historical row instead of whichever live row previously
+ * won. Accepted as-is: those three columns are DJ-entered or ETL-written
+ * free text, not derived from *when* the row aired, so a historical row's
+ * values are not wrong in the way a recency claim would be — just a
+ * different, equally legitimate, source row for the same key. If a future
+ * caller needs "the row that actually aired most recently" instead of "a
+ * stable pick," that is a different query (order by `add_time`, with `id` as
+ * its own tie-break — see `getEntriesByPage`'s comment for why `add_time`
+ * alone is not unique), not a change to this one.
+ *
  * An empty/whitespace-only `artistName` or `releaseTitle` short-circuits to
  * `null`: the key `'<artist>-'` (blank release) would otherwise match any
  * linked flowsheet row whose DJ left `album_title` blank and return an
