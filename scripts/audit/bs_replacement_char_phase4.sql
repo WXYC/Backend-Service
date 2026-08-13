@@ -81,14 +81,24 @@
 --   - `artists.artist_name` LIKE E'%�%' returned 3 in the clone, not 1:
 --     alongside the µ-Ziq row, `Beyonc<U+FFFD>` (id 22025) and
 --     `Damian Nisenson / Jean F<U+FFFD>lix Mailloux / Pierre Tanguay` (id
---     23162) are also still corrupt. The #863 recovery
---     (bs_replacement_char_recovery.sql) fixed both of those names on
---     `library.artist_name` only -- it never touched the `artists` source of
---     truth, so those two rows are a standing hazard: if `artists.artist_name`
---     is ever written again for either row for an unrelated reason, migration
---     0060's cascade trigger will push the still-corrupt value back onto
---     every linked `library` row and silently UNDO the #863 fix. Worth its
---     own follow-up ticket.
+--     23162) are also still corrupt -- and id 22025's `alphabetical_name` is
+--     corrupt too (`Beyonc<U+FFFD>`), so it is 3 corrupt values across 2 rows,
+--     not 2. The #863 recovery (bs_replacement_char_recovery.sql, lines
+--     126-127) fixed both of those names on `library.artist_name` only -- it
+--     never touched the `artists` source of truth, so those two rows are a
+--     standing hazard: if `artists.artist_name` is ever written again for
+--     either row for an unrelated reason, migration 0060's cascade trigger
+--     will push the still-corrupt value back onto every linked `library` row
+--     and silently UNDO the #863 fix. (`alphabetical_name` has no cascade --
+--     0060 fires only on `artist_name` -- so that third value is inert, but
+--     it is still what sorts and displays.) Worth its own follow-up ticket,
+--     which INHERITS THIS TICKET'S 2026-08-31 DEADLINE: tubafrenzy is the
+--     ground truth for those `artists` rows as much as for these, and #863's
+--     values for them came from curated fuzzy matching, not from tubafrenzy.
+--     They are deliberately not folded in here because BS#2114 names exactly
+--     11 rows and this script's whole warrant is "direct substitution from
+--     tubafrenzy, no judgement call" -- repairing them would need their own
+--     ground-truth pull.
 --   - The rotation/flowsheet re-check the next section runs (BS#2114
 --     acceptance criterion 5) found 5 rows in the clone, all pre-existing
 --     residue from #863 Phase 3.5's deliberately-unrecovered bucket (no
@@ -96,10 +106,16 @@
 --     (Justice, album_title mangled to 3 replacement chars), 13703
 --     (`Acc<U+FFFD>sed`), 21149 (`N<U+FFFD>dia & Valentina`), 21335
 --     (`Civilistj<U+FFFD>vel! & Mayssa Jallad`), and 16683 (artist_name
---     already fixed to "Amara Toure", but album_title still reads
---     `Amare Tour<U+FFFD> 1973-1980` -- the #863 fix only matched the exact
---     artist_name value, not this separate album_title occurrence). None of
---     the 5 map to a `legacy_release_id` this ticket names.
+--     already fixed to "Amara Toure" by Phase 2, but album_title still reads
+--     `Amare Tour<U+FFFD> 1973-1980`). All five appear in
+--     audit/bs_replacement_char_phase35.csv with an EMPTY curated-canonical
+--     column, which is what "deliberately unrecovered" means there: the two
+--     rotation rows that DID get a curated value in that CSV (Midnight Zone,
+--     GER<U+FFFD>USCHMANUFAKTUR) are the two Phase 3.5 actually repaired.
+--     16683's album_title was not an oversight either -- it was curated and
+--     dropped, its auto-proposal ("Used Songs (1973-1980)", confidence 0.38)
+--     being plainly wrong. None of the 5 map to a `legacy_release_id` this
+--     ticket names.
 --
 -- Design is self-correcting / idempotent by construction: every UPDATE's
 -- WHERE clause matches on the corrupt value AND (for `library`) the specific
@@ -111,6 +127,38 @@
 -- UTF-8 encoding of U+FFFD itself; the original byte was already destroyed
 -- upstream. This script substitutes the tubafrenzy-verified exact original,
 -- not a fuzzy/plausible reconstruction.
+--
+-- Unicode normalization: DELIBERATELY NOT APPLIED, unlike Phase 2/3.5, which
+-- NFC-normalised and stripped zero-width chars before write. That step was
+-- right there and wrong here, because the provenance is different. Phase 2/3.5
+-- injected strings assembled by a matcher from LML/Discogs/MusicBrainz, which
+-- can arrive in arbitrary Unicode form; NFC gave those a canonical shape for
+-- Lucene/trgm tokenization. Phase 4's two strings are copied from tubafrenzy,
+-- and BS#2114's acceptance criterion is that the catalog-parity harness
+-- reports 0 mismatches -- and that harness compares BYTE-EXACT
+-- (scripts/catalog_parity_diff.py::_normalize strips surrounding whitespace
+-- and collapses NULL/''/'NULL', and explicitly applies "no case folding, no
+-- accent folding"). Normalizing on write would therefore be the one thing
+-- that could REINTRODUCE a parity mismatch, if tubafrenzy ever held a
+-- non-NFC form. It is moot for these two values in any case -- both are
+-- already NFC-stable and carry no zero-width characters:
+--   µ-Ziq [mu-Ziq]  = c2 b5 2d 5a 69 71 20 5b 6d 75 2d 5a 69 71 5d
+--   La Bête         = 4c 61 20 42 c3 aa 74 65
+-- Both byte sequences were read back out of a tubafrenzy-sourced library.db
+-- and match these literals exactly, for all 10 ids and for 50340.
+--
+-- The `µ` is U+00B5 MICRO SIGN (c2 b5), NOT U+03BC GREEK SMALL LETTER MU
+-- (ce bc). This distinction is load-bearing and easy to lose in an editor.
+-- NFC and NFD both leave U+00B5 alone (it has only a COMPATIBILITY
+-- decomposition), so every normalization this codebase actually performs is
+-- a no-op on it: `normalize(..., NFD)` inside migration 0134's
+-- `fold_artist_name`, migration 0092's `normalize_artist_name`, and the
+-- `.normalize('NFC')` on the artist create path all preserve it. NFKC/NFKD
+-- WOULD fold it to U+03BC and break parity -- the two NFKC call sites in this
+-- repo (jobs/flowsheet-metadata-backfill/lookup-cache.ts and
+-- jobs/streaming-url-upgrade/orchestrate.ts) are in-memory lookup keys only
+-- and never write a folded string back to any column, so no live write path
+-- can convert this value. If one is ever added, this row breaks first.
 --
 -- BS#2114 also asks to re-check wxyc_schema.rotation and wxyc_schema.flowsheet
 -- with the same U+FFFD predicate #863 used (this ticket only measured the
@@ -194,8 +242,12 @@ SELECT (SELECT COUNT(*) FROM wxyc_schema.library WHERE artist_name LIKE E'%�%'
 -- same predicate #863 used. INFORMATIONAL ONLY -- this script fixes nothing
 -- here, it only reports. A non-zero count needs a follow-up ticket (name the
 -- counts) or a future phase once ground truth for those rows is available.
--- `artists.alphabetical_name` is included per the "check it" ask above; see
--- the header comment for why it's expected to stay at 0 structurally.
+-- `artists.alphabetical_name` is included per the "check it" ask above. Do NOT
+-- expect 0 here: the µ-Ziq row's own `alphabetical_name` is the plain-ASCII
+-- `mu-Ziq` and cannot carry this corruption class (see header), but the table
+-- as a whole is not clean -- id 22025's `alphabetical_name` is `Beyonc<U+FFFD>`,
+-- the third corrupt value in the out-of-scope group described in the header.
+-- Expected against the 2026-08-12 clone: artist_name 2, alphabetical_name 1.
 SELECT 'AFTER — informational residual U+FFFD, other tables/columns (not fixed by this script)' AS section;
 SELECT 'artists' AS tbl, 'artist_name' AS col, (SELECT COUNT(*) FROM wxyc_schema.artists WHERE artist_name LIKE E'%�%') AS remaining
 UNION ALL
