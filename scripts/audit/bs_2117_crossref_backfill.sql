@@ -17,7 +17,7 @@
 -- field is `LIBRARY_CODE_CROSS_REFERENCE`; Backend's is `artist_crossreference`
 -- (see the `artist_aliases` CTE in apps/backend/services/catalog-export.service.ts).
 --
--- ## Root cause (confirmed, not just hypothesized)
+-- ## Root cause: a keying mismatch in the deployed importer
 --
 -- jobs/library-etl/job.ts already imports this exact table on every run
 -- (`fetchLegacyArtistCrossRefs` / `importArtistCrossRefs`, unconditional full
@@ -35,12 +35,18 @@
 -- is NOT NULL, so `lower('') = lower(artists.code_letters)` can only ever
 -- match a Backend row that itself has an empty code_letters, which a real
 -- catalogued artist never has. The ETL's `skipped++` counter absorbs every
--- one of these with no operator-visible signal. This is a keying mismatch in
--- the existing importer, not an incomplete migration or an export-query gap
--- — and it plausibly explains a large share of the 157, though we cannot
--- attribute an exact count without prod visibility into which of the 110
--- pairs Backend already has correctly (see "What this script cannot verify"
--- in the tracking issue).
+-- one of these with no operator-visible signal.
+--
+-- That blind spot is the right SIZE for the defect. `cross_reference_names`
+-- is exported per catalog ROW of the artist the row hangs off, so a pointer
+-- pair that fails to import leaves the artist it points AT short an alias on
+-- every one of that artist's rows. In the dev clone the 35 empty-CALL_LETTERS
+-- pairs point at 30 distinct Backend artists owning **166 `library` rows** —
+-- against the harness's 157 empty-in-Backend catalog rows. That is a fit, not
+-- a proof (the clone is not prod), but it is a materially better fit than any
+-- competing explanation, and it is consistent with prod's
+-- `artist_crossreference` being otherwise well populated — which the
+-- harness's other buckets independently require (next section).
 --
 -- This script's resolver (below) does NOT require code_letters equality: it
 -- matches by folded name first, and uses code_letters, then
@@ -49,41 +55,85 @@
 -- multiple Backend artists is reported in the pre-amble and skipped, never
 -- guessed.
 --
--- ## Measured against the dev-clone Postgres (dev_env/seed-clone.sql, a real
--- pg_dump --data-only snapshot derived from staging; NOT prod, and possibly
--- stale relative to it — reported here as clone-measured, not prod-measured)
+-- ## What the dev clone can and cannot tell us
 --
--- Running this script's resolver against the clone settles the "missing
--- rows vs. keying mismatch vs. export-query gap" question for that
--- snapshot: `wxyc_schema.artist_crossreference` held ZERO rows before this
--- script ran there — not partially populated, empty. Of the 110 pairs, 79
--- resolved by name (79 -> 78 distinct ordered tuples -> 77 physical rows
--- after the reversed/exact-duplicate dedup below) and 31 did not resolve at
--- all. Every one of those 31 unresolved rows had an EMPTY referencing-side
--- CALL_LETTERS (100% correlation, not just "35 of 110 raw rows look
--- suspicious") — i.e. Backend has never created an `artists` row for these
--- "pointer" names at all, consistent with them having zero catalog holdings
--- of their own to trigger artist creation via a release import. Separately,
--- 73 of the 79 resolved pairs ALSO satisfy the deployed importer's strict
--- `code_letters` equality (only 4 needed this script's more lenient
--- name-first resolution) — so a completely empty table is better explained
--- by the crossref-import step not having run at all against this snapshot
--- than by it running and mostly failing on keying. Both mechanisms are
--- real: the empty-table observation explains why the table is empty *here*;
--- the code_letters-required-with-no-fallback behavior in `findArtistId`
--- explains why 31/110 (28%) can NEVER be recovered by ANY importer that
--- only knows tubafrenzy's (name, code_letters) pair, this script included —
--- they need name alone, which only resolves because there happens to be
--- exactly one Backend artist with that folded name.
+-- The dev clone (dev_env/seed-clone.sql) reports `artist_crossreference` as
+-- completely EMPTY. **That measurement carries no information about prod and
+-- must not be read as "the import step never ran."** The fixture's leading
+-- TRUNCATE block lists `wxyc_schema.artist_crossreference`, and its
+-- `pg_dump --data-only` body restores only five tables — `format`, `artists`,
+-- `genre_artist_crossreference`, `library`, `rotation`. The cross-reference
+-- table is truncated and never repopulated, so it reads as empty in every
+-- environment that loads this fixture, whatever staging or prod actually
+-- holds. Its emptiness here is an artifact of the fixture's table list.
 --
--- This does not by itself prove what prod's live `artist_crossreference`
--- looked like when the parity harness ran (the ticket's 28-both-sides-differ
--- and 11-empty-in-tubafrenzy buckets require SOME non-empty Backend rows to
--- exist, which an entirely empty table could not produce — so live prod is
--- not simply this snapshot). What it does establish: the resolution
--- mechanics below are real and tested against real WXYC artist names, not
--- synthetic ones, and the 31-name hard ceiling on recoverability is a
--- measured fact, not a guess.
+-- The parity harness settles the question in the other direction. Its
+-- 11-empty-in-tubafrenzy and 28-differ-on-both-sides buckets each require
+-- Backend to be emitting cross-reference values that tubafrenzy does not
+-- match; an empty table cannot produce either bucket. **Prod's
+-- `artist_crossreference` is populated**, the deployed importer has been
+-- running and mostly succeeding, and what it has never been able to import is
+-- the pointer pairs above.
+--
+-- What the clone IS good for is the resolver: it carries real,
+-- staging-derived `artists` / `genre_artist_crossreference` / `library` data
+-- (~24k artists, ~64k library rows), so running the three-stage resolver
+-- against it exercises real WXYC artist names rather than synthetic ones.
+-- Measured there:
+--
+--   * 110 pairs -> 79 resolve on both sides, 31 do not. Every one of the 31
+--     fails on the REFERENCING side, and every one of the 31 has an empty
+--     tubafrenzy CALL_LETTERS (the converse does not hold: 4 of the 35
+--     empty-CALL_LETTERS pairs do resolve).
+--   * 0 pairs come out AMBIGUOUS. Five endpoint tuples match more than one
+--     Backend artist by folded name — DAT Politics, Exene Cervenka, Sankofa,
+--     and the two Oliver Lakes — and stages 2 and 3 narrow every one of them
+--     to a single artist.
+--   * 75 of the 79 resolved pairs would ALSO satisfy the deployed importer's
+--     strict `code_letters` equality on both sides. Only 4 need this script's
+--     more lenient name-first resolution — those 4 pairs are the entire
+--     population this script recovers that the ETL could not.
+--   * 79 resolved pairs collapse to 77 distinct unordered pairs, inserted as
+--     77 rows against the clone's empty table.
+--   * The 155 resolvable endpoint artists own 915 `library` rows between them.
+--
+-- Because prod's table is populated and the clone's is empty by construction,
+-- **the row count this inserts against prod will be far lower than 77** —
+-- most of those 75 strict-matchable pairs should already be present, and the
+-- guards below will skip them. Read the pre-amble and the `INSERT 0 n` line
+-- before accepting the COMMIT; the counts will legitimately differ from every
+-- clone-measured figure in this header.
+--
+-- ## Hard ceiling: 31 of the 110 pairs are NOT recoverable by this script
+--
+-- Do not read a later "0 remaining empty-in-Backend mismatches" as this
+-- script's success, and do not expect that number at all. 31 of the 110
+-- pairs name a referencing artist — 28 distinct names — for which Backend has
+-- NO `artists` row whatsoever. That is an absence, not a name-match failure a
+-- looser fold could solve. These are tubafrenzy "pointer" LIBRARY_CODEs: no
+-- catalog holdings, so no release import ever created a Backend artist for
+-- them.
+--
+-- They are not a zero-impact residue. The pointer artist contributes no
+-- catalog rows of its own, but the artist it points AT does, and those are
+-- the rows missing the alias. In the clone the 31 pairs point at 26 Backend
+-- artists owning 150 `library` rows — i.e. the large majority of the ticket's
+-- 157 survives this backfill untouched. This script closes the 4 pairs the
+-- ETL could not; it does not close the bucket.
+--
+-- Closing the rest is a different repair, deliberately NOT attempted here
+-- because it CREATES catalog identities rather than linking existing ones:
+-- insert an `artists` row for each pointer name (`code_letters` is
+-- varchar(4) NOT NULL, so '' is representable) and link that. Whether WXYC
+-- wants 28 holdings-free artist rows in its catalog is a cataloger's call,
+-- not this script's. A handful of the 28 are name VARIANTS rather than true
+-- absences and would need an alias rule instead of a new row: "Wedding
+-- Present" vs Backend's "The Wedding Present", tubafrenzy's bare "X" vs
+-- Backend's "X [US]", "Return to Forever" vs "Chick Corea (Return to
+-- Forever)". "Cash, Larry Jr." is a fourth case and not a lost association at
+-- all — it is the alphabetical inversion of Backend's own "Larry Cash, Jr.",
+-- so both sides of that pair are one artist. None of these are safe to
+-- automate blind.
 --
 -- ## Source data: 110 of 119 raw rows resolve; 9 dangle
 --
@@ -137,22 +187,27 @@
 -- unordered artist pairs (one exact duplicate: LIBRARY_CODE_CROSS_REFERENCE
 -- ids 88/89, "Preservation Hall Jazz Band"/"Sweet Emma Barrett" recorded
 -- twice; one reversed duplicate: ids 74/75, "Sankofa"/"The Apple Juice Kid"
--- recorded in both directions), touching 182 distinct artist identities by
--- name (151 of which resolve to a real Backend `artists` row in the
--- dev-clone measurement above — the other 31 are the unresolvable
--- "pointer" names). `cross_reference_names` is exported per catalog ROW
--- (one row per library pressing), keyed off that row's own artist — so a
--- touched artist contributes to the 157 once per `library` row it owns, and
--- the unresolvable "pointer" artists (e.g. "Barry Black") contribute ZERO
--- rows because they have no catalog holdings of their own; their material
--- is filed entirely under the artist they point at. Measured against the
--- dev-clone: the 151 resolvable touched artists own 902 `library` rows
--- between them. 157 release rows affected out of a 902-row eligible
--- population (many of those 902 rows may already carry a correct, non-empty
--- `cross_reference_names` on the Backend side today, or belong to an artist
--- whose OTHER cross-references are already present) is consistent with that
--- shape — it does not reconcile to an exact 1:1 count, and does not need
--- to; the 902 figure is this clone's population, not necessarily prod's.
+-- recorded in both directions), touching 182 distinct artist names across 183
+-- distinct (name, CALL_LETTERS, CALL_NUMBERS) tuples — "Oliver Lake" appears
+-- as two tuples. 28 of those names resolve to no Backend `artists` row at all
+-- (the 31 unresolvable pairs share them); the other 154 resolve, to 155
+-- distinct Backend artist ids.
+--
+-- `cross_reference_names` is exported per catalog ROW (one row per library
+-- pressing), keyed off that row's own artist, so a touched artist contributes
+-- to the 157 once per `library` row it owns. Note that an unresolvable
+-- "pointer" artist (e.g. "Barry Black") does NOT drop out of the 157 just
+-- because it owns no catalog rows itself: the alias it supplies is missing
+-- from the rows of the artist it points at ("Eric Bachmann"), and those rows
+-- are counted. That is why the 31 leave ~150 clone rows permanently short
+-- rather than costing nothing — see the hard-ceiling section above.
+--
+-- Measured against the clone: the 155 resolvable endpoint artists own 915
+-- `library` rows between them, of which the 130 artists that are an endpoint
+-- of an actually-inserted pair own 766. Neither number reconciles 1:1 with
+-- the harness's 157 and neither needs to — most of those rows already carry a
+-- correct, non-empty `cross_reference_names` on the prod Backend side today.
+-- They bound the blast radius of the watermark rebuild, not the defect.
 --
 -- ## Keying: tubafrenzy LIBRARY_CODE vs. Backend artists (resolution rule)
 --
@@ -183,15 +238,27 @@
 -- direction, for the alias to appear on both artists' catalog rows. Two
 -- distinct hazards follow, both guarded explicitly below rather than left to
 -- ON CONFLICT alone:
---   - SELF-PAIRS: LIBRARY_CODE_CROSS_REFERENCE row 128 links "Oliver Lake"
---     to "Oliver Lake" (comment: "same Oliver Lake") — two DIFFERENT
---     tubafrenzy LIBRARY_CODEs (CALL_NUMBERS 17 vs. 2) sharing one
---     PRESENTATION_NAME, cross-referenced to point catalogers at the correct
---     one. Backend's artist identity is name-scoped, so both resolve to the
---     SAME `artists.id`; inserting that would create a
---     source_artist_id = target_artist_id row, which nothing downstream can
---     interpret as a real alias. Excluded explicitly (`source <> target`)
---     and reported in the pre-amble rather than silently dropped.
+--   - SELF-PAIRS: a defensive guard, not a guard against a known row. The
+--     only candidate in the source data is LIBRARY_CODE_CROSS_REFERENCE row
+--     128, which links "Oliver Lake" to "Oliver Lake" (comment: "same Oliver
+--     Lake") — two DIFFERENT tubafrenzy LIBRARY_CODEs (CALL_NUMBERS 17 vs. 2)
+--     sharing one PRESENTATION_NAME, cross-referenced to point catalogers at
+--     the correct one. Backend's artist identity is NOT name-unique, and in
+--     the clone it mirrors tubafrenzy exactly: artist 1829 ("Oliver Lake",
+--     LA, genre code 17) and artist 15780 ("Oliver Lake", LA, genre code 2)
+--     are two separate rows. Stage 2 cannot separate them (both are `LA`),
+--     but stage 3 can, on the genre code — so row 128 resolves to 1829 ->
+--     15780, is classified `resolved` (NOT `self_pair_skip`) in the pre-amble,
+--     and IS inserted. That is the correct outcome: it reproduces exactly the
+--     alias tubafrenzy's own export emits for both Oliver Lake catalog rows,
+--     which is the parity this ticket is chasing. The `source <> target`
+--     filter therefore matches zero rows against the clone. It stays because
+--     prod may hold only ONE "Oliver Lake" (or the two may not carry
+--     distinguishing genre codes), in which case both sides collapse to one
+--     id and the guard is what stops an uninterpretable self-referential row.
+--     The pre-amble reports that case as `self_pair_skip`, so an operator can
+--     tell the two outcomes apart before committing — the resolution is
+--     surfaced either way, never silently picked.
 --   - REVERSED DUPLICATES: rows 74/75 record "Sankofa" -> "The Apple Juice
 --     Kid" AND "The Apple Juice Kid" -> "Sankofa" — the same unordered pair,
 --     opposite direction. `ON CONFLICT (source_artist_id, target_artist_id)
@@ -216,40 +283,63 @@
 -- are lost forever after tubafrenzy turndown, so this script carries them
 -- into `artist_crossreference.comment` verbatim rather than discarding them.
 --
--- ## Watermark cost (expected, not a bug)
+-- ## Trigger costs (expected, not bugs)
 --
--- Migration 0138 attaches `touch_library_watermark_from_artist_crossreference`
--- AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE (confirmed: fires on INSERT,
--- not just UPDATE) FOR EACH STATEMENT to `artist_crossreference`. This
--- script's INSERT will advance `library_watermark` and force the next
--- `GET /library/catalog` request to rebuild the full gzip export cache. This
--- is correct, intended behavior (the whole point of 0138 was to make
--- `cross_reference_names` edits visible), just worth budgeting for — it is
--- the same one-time cost any `library` add already pays.
+-- Two triggers fire on this INSERT; both are intended, neither is free.
+--
+--   1. Migration 0138's `touch_library_watermark_from_artist_crossreference`
+--      is AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE FOR EACH STATEMENT
+--      (verified against the live table definition: it does fire on INSERT,
+--      not only on UPDATE). It advances `library_watermark` exactly once for
+--      this script's single INSERT statement, which forces the next
+--      `GET /library/catalog` request to rebuild the full gzip export cache.
+--      Correct behavior — making `cross_reference_names` edits visible is the
+--      whole point of 0138 — and the same one-time cost any `library` add
+--      already pays.
+--   2. `cdc_artist_xref` is AFTER INSERT OR UPDATE OR DELETE FOR EACH **ROW**,
+--      calling `cdc_notify()`. So this INSERT also emits one `pg_notify('cdc')`
+--      per inserted row. The payload is a single narrow three-column row, far
+--      under the 7800-byte guard in `cdc_notify`, and the count is bounded by
+--      the number of rows actually inserted (77 against an empty table, fewer
+--      against prod). Any LISTENer on the `cdc` channel sees that burst in one
+--      transaction; nothing downstream needs to be quiesced for it, but do not
+--      run this at the same moment as another bulk catalog mutation.
 --
 -- ## What this script CANNOT verify (no prod database available here)
 --
 -- There is no PROD Backend database reachable from this environment — no
--- prod credentials. The local dev Postgres (dev_env/docker-compose.yml,
--- port 5442) DOES hold real, staging-derived data when seeded from
--- `dev_env/seed-clone.sql` (a real `pg_dump --data-only` snapshot, ~64k
--- `library` rows), and this script was dry-run against it end to end (see
--- the "Measured against the dev-clone Postgres" section above) — so the
--- resolver, self-pair guard, reversed-duplicate dedup, NOT EXISTS guard,
--- and idempotent re-run were all exercised against real WXYC artist names,
--- not just read by construction. What that snapshot cannot answer: it is
--- point-in-time and may be stale relative to live prod (its
--- `artist_crossreference` was completely empty, which — per the "28
--- both-sides-differ" / "11 empty-in-tubafrenzy" buckets requiring some
--- non-empty Backend rows — prod evidently is not, as of the parity run);
--- and it cannot confirm which of the 110 pairs prod already has correctly,
--- so the exact insert count against prod will differ from the clone's 77.
--- The operator running this against prod should still read the pre-amble
--- output before letting the transaction commit, per the SELECT-before-write
--- convention — the resolution counts there will legitimately differ from
--- what this file's comments report for the clone.
+-- prod credentials. Everything measured above comes from the dev clone, whose
+-- `artists` / `genre_artist_crossreference` / `library` data is real and
+-- staging-derived but whose `artist_crossreference` is empty by fixture
+-- construction (see above) and therefore tells us nothing about what prod
+-- already holds. Consequences the operator must keep in mind:
 --
--- Target: PostgreSQL 14 (prod RDS). No PG15+-only syntax is used.
+--   * The insert count will differ from 77, and should be much smaller.
+--   * Which of the 110 pairs prod already has correctly is unknown; the
+--     NOT EXISTS + ON CONFLICT guards are what make that safe to not know.
+--   * The 157 / 11 / 28 / 1 harness buckets cannot be re-derived here. Re-run
+--     `catalog_parity_diff.py` after this lands to measure what actually moved.
+--
+-- Read the pre-amble output before letting the transaction commit, per the
+-- SELECT-before-write convention. Its counts are authoritative for the
+-- database you are pointed at; this header's are not.
+--
+-- ## Compatibility
+--
+-- Target: PostgreSQL 14 (prod RDS 14.22). No PG15+-only syntax is used, and
+-- this is not assumed — the file was executed end to end on PostgreSQL 14.23
+-- against a minimal schema stub (clean run, idempotent re-run inserting 0,
+-- and a re-run against a table pre-seeded with the REVERSED direction, which
+-- correctly inserted nothing for that pair). Do not validate this file only
+-- against the dev container: it runs PostgreSQL 18 and accepts syntax prod
+-- would reject.
+--
+-- The pair table and resolver are session-temp objects created OUTSIDE the
+-- transaction block, so they survive the COMMIT and are still visible to the
+-- post-amble and to `ANALYZE`. That holds under `psql -f`, which runs the
+-- whole file in one session — verified on 14.23. It does NOT hold if the file
+-- is split across sessions, and `psql -1 -f` is wrong here (ANALYZE cannot run
+-- inside a transaction block).
 
 -- ===========================================================
 -- Setup: load the 110 resolvable tubafrenzy pairs into a session-temp
@@ -257,7 +347,11 @@
 -- function. Both are read by the pre-amble AND the transactional INSERT
 -- below, so the pair data is written exactly once in this file.
 -- ===========================================================
-DROP TABLE IF EXISTS bs2117_pairs;
+-- pg_temp-qualified so a re-run in a dirty session drops only THIS session's
+-- scratch table. Unqualified, the name would resolve through search_path and
+-- could drop a same-named permanent table; on a fresh session pg_temp does not
+-- exist yet and IF EXISTS turns that into a NOTICE (verified on PG 14.23).
+DROP TABLE IF EXISTS pg_temp.bs2117_pairs;
 CREATE TEMP TABLE bs2117_pairs (
   row_id       int PRIMARY KEY,   -- LIBRARY_CODE_CROSS_REFERENCE.ID, for traceability
   src_name     text NOT NULL,     -- referencing LIBRARY_CODE.PRESENTATION_NAME
@@ -542,10 +636,17 @@ canon AS (
   FROM resolved
 ),
 deduped AS (
+  -- The ORDER BY must carry a tiebreaker past the DISTINCT ON key: two source
+  -- rows that canonicalize to the same pair can hold DIFFERENT comments (the
+  -- reversed pair 74/75 happens to be NULL on both sides, but nothing in
+  -- tubafrenzy enforces that), and without it Postgres is free to keep either
+  -- one, making the committed comment non-deterministic across runs. Prefer a
+  -- real comment over a NULL one, then the lowest text, so re-running against
+  -- a different plan cannot produce a different row.
   SELECT DISTINCT ON (source_artist_id, target_artist_id)
     source_artist_id, target_artist_id, xref_comment
   FROM canon
-  ORDER BY source_artist_id, target_artist_id
+  ORDER BY source_artist_id, target_artist_id, xref_comment ASC NULLS LAST
 )
 INSERT INTO wxyc_schema.artist_crossreference (source_artist_id, target_artist_id, comment)
 SELECT d.source_artist_id, d.target_artist_id, d.xref_comment

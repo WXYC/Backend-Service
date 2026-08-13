@@ -1,235 +1,368 @@
 /**
  * BS#2117 — artist_crossreference backfill script.
  *
- * Postgres-backed (the BS analogue of the org `pg` marker): direct SQL,
- * no HTTP surface needed since this exercises a hand-run SQL script, not an
- * API route. All seeded rows live in the 900300+ range this spec owns
- * end-to-end (created + reaped here), above the prod-clone fixture's id
- * space (dev_env/seed-clone.sql occupies artists 1-27050 — see the
- * `library-catalog-producer-export.spec.js` header for why that collision
- * is real, not theoretical: the actual tubafrenzy names this ticket backfills
- * (e.g. "Sankofa", "Oliver Lake") are themselves real rows in that clone).
+ * Postgres-backed (the BS analogue of the org `pg` marker): direct SQL, no
+ * HTTP surface, since this exercises a hand-run operator script rather than
+ * an API route.
  *
- * This spec does NOT execute `scripts/audit/bs_2117_crossref_backfill.sql`
- * verbatim with its embedded 110-pair production dataset. That dataset is
- * real tubafrenzy artist names, several of which (verified against
- * dev_env/seed-clone.sql while building this script) already exist as real
- * rows in the clone fixture some local dev databases load — running the
- * literal file would make this spec's outcome depend on whether
- * LOAD_CLONE_FIXTURE is set, which is exactly the non-determinism the shape
- * fixture / 900000+ id convention exists to avoid. Instead, this spec
- * exercises the SAME resolve -> canonicalize -> guard -> insert SQL shape
- * the script uses (three-stage resolver, self-pair guard, reversed-pair
- * dedup via LEAST/GREATEST, NOT EXISTS either-direction guard, ON CONFLICT
- * DO NOTHING), applied to synthetic BS2117-prefixed fixtures that cannot
- * collide with any real catalog data. The literal file's syntax and
- * end-to-end behavior were verified separately, by hand, against the
- * dev-clone Postgres (see the file-level comment at the bottom of this
- * spec for what that verification covered and why it isn't automated here).
+ * ZERO DRIFT. This spec does not re-type the script's SQL — it READS
+ * scripts/audit/bs_2117_crossref_backfill.sql and executes the two parts that
+ * carry the logic verbatim:
+ *
+ *   1. `pg_temp.bs2117_resolve_artist()`, the three-stage resolver
+ *      (folded name -> code_letters -> genre_artist_crossreference code).
+ *   2. The transactional INSERT: resolve -> self-pair guard -> LEAST/GREATEST
+ *      canonicalization -> DISTINCT ON dedup -> either-direction NOT EXISTS ->
+ *      ON CONFLICT DO NOTHING.
+ *
+ * Editing either one changes what this spec runs. That is the same convention
+ * tests/integration/relabel-rotation-direct-backfill.spec.js uses, including
+ * its `wxyc_schema.` -> throwaway-schema rewrite.
+ *
+ * That rewrite is also what makes running the real SQL safe here. The script's
+ * embedded 110-pair dataset is real tubafrenzy artist names, several of which
+ * ("Sankofa", "Oliver Lake", ...) exist as real rows in the prod-clone fixture
+ * some local databases load (dev_env/seed-clone.sql). Redirecting every table
+ * reference into `bs2117_backfill_test` means the resolver can only ever see
+ * the synthetic artists this spec creates and reaps, so the outcome does not
+ * depend on LOAD_CLONE_FIXTURE and no real catalog row is touched. The pairs
+ * this spec feeds in are chosen shapes, not the file's 110-row payload — that
+ * payload is data, and the operator's pre-amble is what audits it.
+ *
+ * Temp objects (`bs2117_pairs`, the resolver function) are session-scoped, so
+ * everything runs on ONE reserved connection. The shared pool is `max: 5`;
+ * without the reservation a later statement can land on a different backend
+ * and fail with `relation "bs2117_pairs" does not exist`.
  */
 
+const fs = require('fs');
+const path = require('path');
 const { getTestDb } = require('../utils/db');
 
-const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+const SCRIPT_PATH = path.join(__dirname, '..', '..', 'scripts', 'audit', 'bs_2117_crossref_backfill.sql');
+const TEST_SCHEMA = 'bs2117_backfill_test';
 
-const ART_ALPHA = 900300; // 'BS2117 Xref Alpha'
-const ART_BETA = 900301; // 'BS2117 Xref Beta'
-const ART_GAMMA = 900302; // 'BS2117 Xref Gamma' (unrelated third artist)
-const ART_SELF = 900303; // 'BS2117 Xref Self' (self-pair guard probe)
+// Synthetic artists. Ids are arbitrary — they live in a throwaway schema that
+// is dropped wholesale in afterAll, so they cannot collide with anything.
+const ART_ALPHA = 1;
+const ART_BETA = 2;
+const ART_GAMMA = 3; // unrelated third artist
+const ART_SELF = 4; // single artist both sides of a pair resolve to
+const ART_LAKE_JAZZ = 5; // 'BS2117 Lake', code ZL, genre code 17
+const ART_LAKE_ROCK = 6; // 'BS2117 Lake', code ZL, genre code 2  (row-128 shape)
+const ART_TWIN_A = 7; // 'BS2117 Twin', code ZT, genre code 50
+const ART_TWIN_B = 8; // 'BS2117 Twin', code ZT, genre code 50  (ambiguous shape)
 
 const ALPHA_NAME = 'BS2117 Xref Alpha';
 const BETA_NAME = 'BS2117 Xref Beta';
 const GAMMA_NAME = 'BS2117 Xref Gamma';
 const SELF_NAME = 'BS2117 Xref Self';
+const LAKE_NAME = 'BS2117 Lake';
+const TWIN_NAME = 'BS2117 Twin';
 
 /**
- * Mirrors the resolve/canonicalize/guard/insert shape in
- * scripts/audit/bs_2117_crossref_backfill.sql. Rows are (src_name,
- * src_letters, tgt_name, tgt_letters, comment) tuples resolved by
- * fold_artist_name + code_letters, deduplicated on the unordered pair, and
- * inserted idempotently.
+ * Pull the resolver function definition out of the operator script.
+ * Spans `CREATE OR REPLACE FUNCTION pg_temp.bs2117_resolve_artist` through the
+ * `$$ LANGUAGE plpgsql STABLE;` that closes it.
  */
-async function runBackfillPattern(sql, rows) {
-  await sql`
-    CREATE TEMP TABLE IF NOT EXISTS bs2117_test_pairs (
-      src_name text, src_letters text, tgt_name text, tgt_letters text, xref_comment text
-    ) ON COMMIT PRESERVE ROWS
-  `;
-  await sql`TRUNCATE bs2117_test_pairs`;
-  for (const [srcName, srcLetters, tgtName, tgtLetters, comment] of rows) {
-    await sql`
-      INSERT INTO bs2117_test_pairs (src_name, src_letters, tgt_name, tgt_letters, xref_comment)
-      VALUES (${srcName}, ${srcLetters}, ${tgtName}, ${tgtLetters}, ${comment})
-    `;
+function extractResolver(scriptText) {
+  const start = scriptText.indexOf('CREATE OR REPLACE FUNCTION pg_temp.bs2117_resolve_artist');
+  if (start === -1) {
+    throw new Error('bs2117_resolve_artist definition not found in the backfill script');
   }
-
-  await sql.begin(async (tx) => {
-    await tx.unsafe(`
-      WITH resolved AS (
-        SELECT
-          p.xref_comment,
-          src.id AS source_artist_id,
-          tgt.id AS target_artist_id
-        FROM bs2117_test_pairs p
-        JOIN "${SCHEMA}".artists src
-          ON "${SCHEMA}".fold_artist_name(src.artist_name) = "${SCHEMA}".fold_artist_name(p.src_name)
-         AND lower(src.code_letters) = lower(p.src_letters)
-        JOIN "${SCHEMA}".artists tgt
-          ON "${SCHEMA}".fold_artist_name(tgt.artist_name) = "${SCHEMA}".fold_artist_name(p.tgt_name)
-         AND lower(tgt.code_letters) = lower(p.tgt_letters)
-        WHERE src.id <> tgt.id
-      ),
-      canon AS (
-        SELECT LEAST(source_artist_id, target_artist_id) AS source_artist_id,
-               GREATEST(source_artist_id, target_artist_id) AS target_artist_id,
-               xref_comment
-        FROM resolved
-      ),
-      deduped AS (
-        SELECT DISTINCT ON (source_artist_id, target_artist_id)
-          source_artist_id, target_artist_id, xref_comment
-        FROM canon
-        ORDER BY source_artist_id, target_artist_id
-      )
-      INSERT INTO "${SCHEMA}".artist_crossreference (source_artist_id, target_artist_id, comment)
-      SELECT d.source_artist_id, d.target_artist_id, d.xref_comment
-      FROM deduped d
-      WHERE NOT EXISTS (
-        SELECT 1 FROM "${SCHEMA}".artist_crossreference existing
-        WHERE (existing.source_artist_id = d.source_artist_id AND existing.target_artist_id = d.target_artist_id)
-           OR (existing.source_artist_id = d.target_artist_id AND existing.target_artist_id = d.source_artist_id)
-      )
-      ON CONFLICT (source_artist_id, target_artist_id) DO NOTHING
-    `);
-  });
+  const endMarker = '$$ LANGUAGE plpgsql STABLE;';
+  const end = scriptText.indexOf(endMarker, start);
+  if (end === -1) {
+    throw new Error('bs2117_resolve_artist definition is not terminated by "$$ LANGUAGE plpgsql STABLE;"');
+  }
+  return scriptText.slice(start, end + endMarker.length);
 }
 
-describe('BS#2117 artist_crossreference backfill (real PG)', () => {
-  let sql;
+/**
+ * Pull the `CREATE TEMP TABLE bs2117_pairs (...)` definition, so the pair
+ * table this spec feeds has exactly the column shape the INSERT reads.
+ */
+function extractPairTableDdl(scriptText) {
+  const start = scriptText.indexOf('CREATE TEMP TABLE bs2117_pairs');
+  if (start === -1) {
+    throw new Error('bs2117_pairs table definition not found in the backfill script');
+  }
+  const end = scriptText.indexOf(';', scriptText.indexOf('ON COMMIT PRESERVE ROWS', start));
+  if (end === -1) {
+    throw new Error('bs2117_pairs table definition is not terminated');
+  }
+  return scriptText.slice(start, end + 1);
+}
+
+/**
+ * Pull the single transactional INSERT. Located by its target table, then
+ * walked back to the `WITH resolved AS (` that opens it — the file contains
+ * three other CTEs by that name (two pre-amble, one post-amble) and only this
+ * one writes.
+ */
+function extractInsert(scriptText) {
+  const insertAt = scriptText.indexOf('INSERT INTO wxyc_schema.artist_crossreference');
+  if (insertAt === -1) {
+    throw new Error('the artist_crossreference INSERT was not found in the backfill script');
+  }
+  const start = scriptText.lastIndexOf('WITH resolved AS (', insertAt);
+  if (start === -1) {
+    throw new Error('the INSERT is not preceded by its `WITH resolved AS (` CTE');
+  }
+  const endMarker = 'ON CONFLICT (source_artist_id, target_artist_id) DO NOTHING;';
+  const end = scriptText.indexOf(endMarker, insertAt);
+  if (end === -1) {
+    throw new Error('the INSERT does not end in the expected ON CONFLICT clause');
+  }
+  return scriptText.slice(start, end + endMarker.length);
+}
+
+/** Redirect every `wxyc_schema.` reference at the throwaway test schema. */
+function retarget(sqlText) {
+  return sqlText.replace(/wxyc_schema\./g, `${TEST_SCHEMA}.`);
+}
+
+describe('BS#2117 artist_crossreference backfill (real PG, real script SQL)', () => {
+  let pool;
+  let sql; // reserved single connection — temp objects live here
+  let backfillInsert;
 
   beforeAll(async () => {
-    sql = getTestDb();
-    await sql`
-      INSERT INTO ${sql(SCHEMA)}.artists (id, artist_name, alphabetical_name, code_letters)
-      VALUES
-        (${ART_ALPHA}, ${ALPHA_NAME}, ${ALPHA_NAME}, 'ZA'),
-        (${ART_BETA}, ${BETA_NAME}, ${BETA_NAME}, 'ZB'),
-        (${ART_GAMMA}, ${GAMMA_NAME}, ${GAMMA_NAME}, 'ZC'),
-        (${ART_SELF}, ${SELF_NAME}, ${SELF_NAME}, 'ZD')
-      ON CONFLICT (id) DO NOTHING
-    `;
+    pool = getTestDb();
+    sql = await pool.reserve();
+
+    const scriptText = fs.readFileSync(SCRIPT_PATH, 'utf8');
+    const resolverDdl = retarget(extractResolver(scriptText));
+    const pairTableDdl = extractPairTableDdl(scriptText);
+    backfillInsert = retarget(extractInsert(scriptText));
+
+    await sql.unsafe(`DROP SCHEMA IF EXISTS ${TEST_SCHEMA} CASCADE`);
+    await sql.unsafe(`CREATE SCHEMA ${TEST_SCHEMA}`);
+
+    // The resolver calls `<schema>.fold_artist_name`. Delegate to the real one
+    // rather than copying its body, so the spec cannot drift from migration
+    // 0134's actual folding rule.
+    await sql.unsafe(`
+      CREATE FUNCTION ${TEST_SCHEMA}.fold_artist_name(input text) RETURNS text
+      LANGUAGE sql IMMUTABLE PARALLEL SAFE
+      AS $fold$ SELECT wxyc_schema.fold_artist_name(input) $fold$
+    `);
+
+    // Mirror the real column shapes the script depends on: code_letters
+    // NOT NULL (why an empty CALL_LETTERS can never match), and the ORDERED
+    // unique index that makes ON CONFLICT's conflict target valid while
+    // leaving the reversed pair for the NOT EXISTS guard to catch.
+    await sql.unsafe(`
+      CREATE TABLE ${TEST_SCHEMA}.artists (
+        id integer PRIMARY KEY,
+        artist_name varchar(128) NOT NULL,
+        code_letters varchar(4) NOT NULL
+      )
+    `);
+    await sql.unsafe(`
+      CREATE TABLE ${TEST_SCHEMA}.genre_artist_crossreference (
+        artist_id integer NOT NULL REFERENCES ${TEST_SCHEMA}.artists(id),
+        genre_id integer NOT NULL,
+        artist_genre_code integer NOT NULL
+      )
+    `);
+    await sql.unsafe(`
+      CREATE TABLE ${TEST_SCHEMA}.artist_crossreference (
+        source_artist_id integer NOT NULL REFERENCES ${TEST_SCHEMA}.artists(id),
+        target_artist_id integer NOT NULL REFERENCES ${TEST_SCHEMA}.artists(id),
+        comment varchar(255)
+      )
+    `);
+    await sql.unsafe(`
+      CREATE UNIQUE INDEX artist_crossref_source_target
+        ON ${TEST_SCHEMA}.artist_crossreference (source_artist_id, target_artist_id)
+    `);
+
+    await sql.unsafe(`
+      INSERT INTO ${TEST_SCHEMA}.artists (id, artist_name, code_letters) VALUES
+        (${ART_ALPHA}, '${ALPHA_NAME}', 'ZA'),
+        (${ART_BETA}, '${BETA_NAME}', 'ZB'),
+        (${ART_GAMMA}, '${GAMMA_NAME}', 'ZC'),
+        (${ART_SELF}, '${SELF_NAME}', 'ZD'),
+        (${ART_LAKE_JAZZ}, '${LAKE_NAME}', 'ZL'),
+        (${ART_LAKE_ROCK}, '${LAKE_NAME}', 'ZL'),
+        (${ART_TWIN_A}, '${TWIN_NAME}', 'ZT'),
+        (${ART_TWIN_B}, '${TWIN_NAME}', 'ZT')
+    `);
+    await sql.unsafe(`
+      INSERT INTO ${TEST_SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code) VALUES
+        (${ART_LAKE_JAZZ}, 7, 17),
+        (${ART_LAKE_ROCK}, 13, 2),
+        (${ART_TWIN_A}, 6, 50),
+        (${ART_TWIN_B}, 6, 50)
+    `);
+
+    await sql.unsafe(resolverDdl);
+    await sql.unsafe(pairTableDdl);
   });
 
   afterEach(async () => {
-    await sql`
-      DELETE FROM ${sql(SCHEMA)}.artist_crossreference
-      WHERE source_artist_id IN (${ART_ALPHA}, ${ART_BETA}, ${ART_GAMMA}, ${ART_SELF})
-         OR target_artist_id IN (${ART_ALPHA}, ${ART_BETA}, ${ART_GAMMA}, ${ART_SELF})
-    `;
+    await sql.unsafe(`DELETE FROM ${TEST_SCHEMA}.artist_crossreference`);
+    await sql.unsafe('TRUNCATE bs2117_pairs');
   });
 
   afterAll(async () => {
-    await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id IN (${ART_ALPHA}, ${ART_BETA}, ${ART_GAMMA}, ${ART_SELF})`;
-    await sql`DROP TABLE IF EXISTS bs2117_test_pairs`;
+    if (sql) {
+      await sql.unsafe(`DROP SCHEMA IF EXISTS ${TEST_SCHEMA} CASCADE`);
+      // Temp objects die with the session; releasing returns the backend to
+      // the shared pool, which the rest of the suite still needs open.
+      sql.release();
+    }
   });
 
-  test('inserts exactly one row for a resolvable pair', async () => {
-    await runBackfillPattern(sql, [[ALPHA_NAME, 'ZA', BETA_NAME, 'ZB', 'shared member (test)']]);
+  /** Load pairs into the script's own temp table, then run the script's INSERT. */
+  async function runBackfill(pairs) {
+    let rowId = 1;
+    for (const p of pairs) {
+      await sql.unsafe(
+        `INSERT INTO bs2117_pairs
+           (row_id, src_name, src_letters, src_number, tgt_name, tgt_letters, tgt_number, xref_comment)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          rowId++,
+          p.srcName,
+          p.srcLetters,
+          p.srcNumber ?? 0,
+          p.tgtName,
+          p.tgtLetters,
+          p.tgtNumber ?? 0,
+          p.comment ?? null,
+        ]
+      );
+    }
+    await sql.unsafe(backfillInsert);
+  }
 
-    const rows = await sql`
-      SELECT source_artist_id, target_artist_id, comment FROM ${sql(SCHEMA)}.artist_crossreference
-      WHERE (source_artist_id = ${ART_ALPHA} AND target_artist_id = ${ART_BETA})
-         OR (source_artist_id = ${ART_BETA} AND target_artist_id = ${ART_ALPHA})
-    `;
+  const pair = (srcName, srcLetters, tgtName, tgtLetters, extra = {}) => ({
+    srcName,
+    srcLetters,
+    tgtName,
+    tgtLetters,
+    ...extra,
+  });
+
+  async function crossRefsBetween(a, b) {
+    return sql.unsafe(
+      `SELECT source_artist_id, target_artist_id, comment
+         FROM ${TEST_SCHEMA}.artist_crossreference
+        WHERE (source_artist_id = $1 AND target_artist_id = $2)
+           OR (source_artist_id = $2 AND target_artist_id = $1)`,
+      [a, b]
+    );
+  }
+
+  test('inserts exactly one row for a resolvable pair, carrying the cataloger comment', async () => {
+    await runBackfill([pair(ALPHA_NAME, 'ZA', BETA_NAME, 'ZB', { comment: 'shared member (test)' })]);
+
+    const rows = await crossRefsBetween(ART_ALPHA, ART_BETA);
     expect(rows).toHaveLength(1);
     expect(rows[0].comment).toBe('shared member (test)');
   });
 
   test('re-running the same pair is a no-op (idempotent)', async () => {
-    await runBackfillPattern(sql, [[ALPHA_NAME, 'ZA', BETA_NAME, 'ZB', 'shared member (test)']]);
-    await runBackfillPattern(sql, [[ALPHA_NAME, 'ZA', BETA_NAME, 'ZB', 'shared member (test)']]);
+    await runBackfill([pair(ALPHA_NAME, 'ZA', BETA_NAME, 'ZB', { comment: 'shared member (test)' })]);
+    await sql.unsafe(backfillInsert); // second run, same loaded pairs
 
-    const rows = await sql`
-      SELECT * FROM ${sql(SCHEMA)}.artist_crossreference
-      WHERE (source_artist_id = ${ART_ALPHA} AND target_artist_id = ${ART_BETA})
-         OR (source_artist_id = ${ART_BETA} AND target_artist_id = ${ART_ALPHA})
-    `;
-    expect(rows).toHaveLength(1);
+    expect(await crossRefsBetween(ART_ALPHA, ART_BETA)).toHaveLength(1);
   });
 
   test('the reversed-direction duplicate collapses to one row, not two', async () => {
     // Mirrors LIBRARY_CODE_CROSS_REFERENCE ids 74/75 (Sankofa <-> The Apple
     // Juice Kid), recorded in both directions in the real tubafrenzy source.
-    await runBackfillPattern(sql, [
-      [ALPHA_NAME, 'ZA', BETA_NAME, 'ZB', null],
-      [BETA_NAME, 'ZB', ALPHA_NAME, 'ZA', null],
+    // The ordered unique index cannot catch this; LEAST/GREATEST is what does.
+    await runBackfill([pair(ALPHA_NAME, 'ZA', BETA_NAME, 'ZB'), pair(BETA_NAME, 'ZB', ALPHA_NAME, 'ZA')]);
+
+    expect(await crossRefsBetween(ART_ALPHA, ART_BETA)).toHaveLength(1);
+  });
+
+  test('a pair Backend already holds in the OPPOSITE direction is not duplicated', async () => {
+    // The prod case: a non-empty starting table. ON CONFLICT on the ordered
+    // pair would miss this; the either-direction NOT EXISTS is what catches it.
+    await sql.unsafe(
+      `INSERT INTO ${TEST_SCHEMA}.artist_crossreference (source_artist_id, target_artist_id, comment)
+       VALUES ($1, $2, 'pre-existing')`,
+      [ART_BETA, ART_ALPHA]
+    );
+
+    await runBackfill([pair(ALPHA_NAME, 'ZA', BETA_NAME, 'ZB', { comment: 'would-be-new' })]);
+
+    const rows = await crossRefsBetween(ART_ALPHA, ART_BETA);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].comment).toBe('pre-existing'); // untouched, not overwritten
+  });
+
+  test('a true self-pair (both sides resolve to one artist) is never inserted', async () => {
+    await runBackfill([pair(SELF_NAME, 'ZD', SELF_NAME, 'ZD', { comment: 'same artist (test)' })]);
+
+    const rows = await sql.unsafe(
+      `SELECT * FROM ${TEST_SCHEMA}.artist_crossreference
+        WHERE source_artist_id = $1 OR target_artist_id = $1`,
+      [ART_SELF]
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  test('two same-named artists split by genre code resolve to DIFFERENT ids and are linked', async () => {
+    // The real row 128 shape ("Oliver Lake" -> "Oliver Lake", CALL_NUMBERS 17
+    // vs 2). Both sides share a name AND code_letters, so only stage 3 can
+    // separate them. This must NOT be swallowed by the self-pair guard: the
+    // two tubafrenzy LIBRARY_CODEs are two real Backend artists, and the
+    // cross-reference between them is exactly the alias parity expects.
+    await runBackfill([
+      pair(LAKE_NAME, 'ZL', LAKE_NAME, 'ZL', { srcNumber: 17, tgtNumber: 2, comment: 'same artist, two filings' }),
     ]);
 
-    const rows = await sql`
-      SELECT * FROM ${sql(SCHEMA)}.artist_crossreference
-      WHERE (source_artist_id = ${ART_ALPHA} AND target_artist_id = ${ART_BETA})
-         OR (source_artist_id = ${ART_BETA} AND target_artist_id = ${ART_ALPHA})
-    `;
+    const rows = await crossRefsBetween(ART_LAKE_JAZZ, ART_LAKE_ROCK);
     expect(rows).toHaveLength(1);
+    expect(rows[0].source_artist_id).toBe(Math.min(ART_LAKE_JAZZ, ART_LAKE_ROCK));
+    expect(rows[0].target_artist_id).toBe(Math.max(ART_LAKE_JAZZ, ART_LAKE_ROCK));
   });
 
-  test('a pair already present in the opposite direction is not duplicated', async () => {
-    // Seed the "existing" row in one direction directly, then run the
-    // backfill pattern requesting the OPPOSITE direction — the NOT EXISTS
-    // guard (not just ON CONFLICT on the exact ordered pair) must catch it.
-    await sql`
-      INSERT INTO ${sql(SCHEMA)}.artist_crossreference (source_artist_id, target_artist_id, comment)
-      VALUES (${ART_BETA}, ${ART_ALPHA}, 'pre-existing')
-    `;
+  test('a name that stays ambiguous after all three stages is skipped, not guessed', async () => {
+    // Two artists, same folded name, same code_letters, same genre code —
+    // nothing left to disambiguate on. The resolver must report rather than
+    // pick one, so nothing is inserted for either candidate.
+    await runBackfill([pair(TWIN_NAME, 'ZT', ALPHA_NAME, 'ZA', { srcNumber: 50 })]);
 
-    await runBackfillPattern(sql, [[ALPHA_NAME, 'ZA', BETA_NAME, 'ZB', 'would-be-new']]);
-
-    const rows = await sql`
-      SELECT comment FROM ${sql(SCHEMA)}.artist_crossreference
-      WHERE (source_artist_id = ${ART_ALPHA} AND target_artist_id = ${ART_BETA})
-         OR (source_artist_id = ${ART_BETA} AND target_artist_id = ${ART_ALPHA})
-    `;
-    expect(rows).toHaveLength(1);
-    expect(rows[0].comment).toBe('pre-existing');
-  });
-
-  test('a self-pair (both sides resolve to the same artist) is never inserted', async () => {
-    // Mirrors LIBRARY_CODE_CROSS_REFERENCE row 128 ("Oliver Lake" -> "Oliver
-    // Lake"): two tubafrenzy LIBRARY_CODEs sharing one PRESENTATION_NAME.
-    await runBackfillPattern(sql, [[SELF_NAME, 'ZD', SELF_NAME, 'ZD', 'same artist (test)']]);
-
-    const rows = await sql`
-      SELECT * FROM ${sql(SCHEMA)}.artist_crossreference
-      WHERE source_artist_id = ${ART_SELF} OR target_artist_id = ${ART_SELF}
-    `;
+    const rows = await sql.unsafe(
+      `SELECT * FROM ${TEST_SCHEMA}.artist_crossreference
+        WHERE source_artist_id IN ($1, $2) OR target_artist_id IN ($1, $2)`,
+      [ART_TWIN_A, ART_TWIN_B]
+    );
     expect(rows).toHaveLength(0);
   });
 
   test('an unresolvable name (no matching artist) inserts nothing and does not throw', async () => {
-    await expect(
-      runBackfillPattern(sql, [['BS2117 Nonexistent Pointer Artist', '', BETA_NAME, 'ZB', null]])
-    ).resolves.not.toThrow();
+    // The 31-pair ceiling: a tubafrenzy "pointer" name with no Backend artist.
+    await expect(runBackfill([pair('BS2117 Nonexistent Pointer Artist', '', BETA_NAME, 'ZB')])).resolves.not.toThrow();
 
-    const rows = await sql`
-      SELECT * FROM ${sql(SCHEMA)}.artist_crossreference WHERE target_artist_id = ${ART_BETA}
-    `;
+    const rows = await sql.unsafe(`SELECT * FROM ${TEST_SCHEMA}.artist_crossreference WHERE target_artist_id = $1`, [
+      ART_BETA,
+    ]);
     expect(rows).toHaveLength(0);
   });
 
   test('an unrelated third artist is unaffected', async () => {
-    await runBackfillPattern(sql, [[ALPHA_NAME, 'ZA', BETA_NAME, 'ZB', null]]);
+    await runBackfill([pair(ALPHA_NAME, 'ZA', BETA_NAME, 'ZB')]);
 
-    const rows = await sql`
-      SELECT * FROM ${sql(SCHEMA)}.artist_crossreference
-      WHERE source_artist_id = ${ART_GAMMA} OR target_artist_id = ${ART_GAMMA}
-    `;
+    const rows = await sql.unsafe(
+      `SELECT * FROM ${TEST_SCHEMA}.artist_crossreference
+        WHERE source_artist_id = $1 OR target_artist_id = $1`,
+      [ART_GAMMA]
+    );
     expect(rows).toHaveLength(0);
   });
 
   test('the catalog export artist_aliases CTE emits the alias in both directions once inserted', async () => {
     // Mirrors the artist_aliases CTE in apps/backend/services/catalog-export.service.ts:
-    // UNION both FK directions so a row filed under either endpoint surfaces the other.
-    await runBackfillPattern(sql, [[ALPHA_NAME, 'ZA', BETA_NAME, 'ZB', null]]);
+    // UNION both FK directions so a row filed under either endpoint surfaces the
+    // other — which is why one row in one direction is enough.
+    await runBackfill([pair(ALPHA_NAME, 'ZA', BETA_NAME, 'ZB')]);
 
     const aliasRows = await sql.unsafe(
       `
@@ -237,12 +370,12 @@ describe('BS#2117 artist_crossreference backfill (real PG)', () => {
         SELECT cp.artist_id, array_agg(DISTINCT a.artist_name) AS cross_reference_names
         FROM (
           SELECT source_artist_id AS artist_id, target_artist_id AS other_id
-          FROM "${SCHEMA}".artist_crossreference
+          FROM ${TEST_SCHEMA}.artist_crossreference
           UNION
           SELECT target_artist_id AS artist_id, source_artist_id AS other_id
-          FROM "${SCHEMA}".artist_crossreference
+          FROM ${TEST_SCHEMA}.artist_crossreference
         ) cp
-        JOIN "${SCHEMA}".artists a ON a.id = cp.other_id
+        JOIN ${TEST_SCHEMA}.artists a ON a.id = cp.other_id
         WHERE cp.other_id <> cp.artist_id
         GROUP BY cp.artist_id
       )
@@ -258,20 +391,3 @@ describe('BS#2117 artist_crossreference backfill (real PG)', () => {
     expect(byId.get(ART_BETA)).toEqual([ALPHA_NAME]);
   });
 });
-
-// The literal scripts/audit/bs_2117_crossref_backfill.sql file (with its
-// embedded 110-pair real tubafrenzy dataset) is deliberately NOT executed
-// here. It was validated directly against the dev-clone Postgres
-// (dev_env/seed-clone.sql, real staging-derived data) via `psql -f` during
-// development: a clean first run (79 pairs resolved by name, 77 rows
-// inserted after dedup), a no-op second run (0 rows inserted, confirming
-// idempotency), and the 77 test-inserted rows were then deleted to restore
-// the table to its pre-run empty state. That verification is not
-// reproducible as an automated spec here — the file's INSERT touches
-// whichever real `artists` rows happen to match its embedded names, which
-// depends on whether the environment loaded the prod-clone fixture
-// (LOAD_CLONE_FIXTURE), and an automated spec cannot safely guarantee
-// cleanup for side effects on rows it did not seed itself. The
-// resolve/canonicalize/guard/insert SHAPE the file uses is exactly what
-// `runBackfillPattern` above exercises against synthetic, self-cleaning
-// fixtures instead.

@@ -75,6 +75,9 @@ jobs:
               - 'scripts/relabel-rotation-direct-backfill.sql'
               # tests/integration/format-qualifier-recovery.spec.js reads:
               - 'scripts/audit/bs_format_qualifier_recovery.sql'
+              # tests/integration/bs-2117-crossreference-backfill.spec.js reads
+              # (BS#2117 — its resolver + INSERT are executed verbatim):
+              - 'scripts/audit/bs_2117_crossref_backfill.sql'
             db-init:
               - 'dev_env/Dockerfile.init'
               - 'dev_env/init-db.mjs'
