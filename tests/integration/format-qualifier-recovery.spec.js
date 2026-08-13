@@ -43,6 +43,16 @@ const { getTestDb } = require('../utils/db');
  * candidate set is captured before and after, so the blast radius is
  * asserted directly rather than inferred from the WHERE clause.
  *
+ * What this spec does NOT cover: postgres.js `unsafe()` with no parameters
+ * uses the simple query protocol, so the whole file goes to the server as
+ * one multi-statement Query and PostgreSQL wraps it in an implicit
+ * transaction that the script's own `BEGIN` merely promotes. The operator's
+ * `psql -f` run instead sends statements one at a time, with real
+ * boundaries around the BEGIN/COMMIT and a genuinely separate `ANALYZE`.
+ * That path was exercised by hand against PostgreSQL 14.23 (prod RDS is
+ * 14.22) when the script landed; re-run it there if the transaction
+ * structure ever changes.
+ *
  * Caveat for dev runs: against the prod-clone fixture the script also
  * repairs whatever genuinely-broken clone rows are still outstanding (5 in
  * the snapshot as committed). That is the script doing its job on a
@@ -149,16 +159,36 @@ async function getLibraryState(sql, legacyReleaseId) {
 
 /**
  * md5 of every (legacy_release_id, format_id, disc_quantity) triple for
- * rows the script's staging table cannot reach. Any change here means the
- * UPDATE escaped its candidate set.
+ * tubafrenzy-sourced rows the script's staging table cannot reach. Any
+ * change here means the UPDATE escaped its candidate set.
+ *
+ * Scoped to `legacy_release_id < LEGACY_RELEASE_ID_MINT_FLOOR` so the digest
+ * is stable under `jest.parallel.config.json` (maxWorkers 2), where another
+ * worker's spec may be inserting and deleting `library` rows concurrently —
+ * e.g. tests/integration/album-metadata-upsert.spec.js. Those rows never
+ * specify `legacy_release_id`, so they draw it from
+ * `library_legacy_release_id_seq` and land above the floor, outside this
+ * digest. Below the floor is the tubafrenzy-imported catalog: ~59k rows
+ * against the dev prod-clone, and precisely the population a runaway join
+ * could damage.
+ *
+ * The shape fixture's explicitly-numbered rows (tests/fixtures/shape.sql,
+ * id range 7000-7199) are excluded for the same reason — they are shared
+ * with every other integration spec.
  */
+const LEGACY_RELEASE_ID_MINT_FLOOR = 1000000;
+const SHAPE_FIXTURE_ID_MIN = 7000;
+const SHAPE_FIXTURE_ID_MAX = 7199;
+
 async function checksumRowsOutsideCandidateSet(sql, stagedIds) {
   const rows = await sql`
     SELECT md5(
       COALESCE(string_agg(legacy_release_id || ':' || format_id || ':' || disc_quantity, ',' ORDER BY legacy_release_id), '')
     ) AS digest
     FROM ${sql(SCHEMA)}.library
-    WHERE NOT (legacy_release_id = ANY(${stagedIds}))
+    WHERE legacy_release_id < ${LEGACY_RELEASE_ID_MINT_FLOOR}
+      AND id NOT BETWEEN ${SHAPE_FIXTURE_ID_MIN} AND ${SHAPE_FIXTURE_ID_MAX}
+      AND NOT (legacy_release_id = ANY(${stagedIds}))
   `;
   return rows[0].digest;
 }
@@ -192,11 +222,17 @@ describe('BS#2116 format-qualifier recovery script', () => {
       throw new Error('No seeded artist/genre to hang the fixture library rows off -- seed_db.sql drift?');
     }
 
-    // Idempotent re-seed: these ids are spec-owned (absent from both
-    // seed_db.sql and seed-clone.sql), so clearing them first makes a
-    // re-run after an aborted one behave like a fresh run.
+    // Idempotent re-seed. The DELETE is scoped to this spec's own title
+    // prefix, never a bare legacy_release_id: if a future seed-clone.sql
+    // refresh ever imports one of these ids for real, the INSERT below
+    // trips the unique index and the maintainer picks a new id, rather
+    // than this spec quietly deleting a genuine catalog row.
     for (const testCase of CASES) {
-      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE legacy_release_id = ${testCase.legacyReleaseId}`;
+      await sql`
+        DELETE FROM ${sql(SCHEMA)}.library
+        WHERE legacy_release_id = ${testCase.legacyReleaseId}
+          AND album_title LIKE ${`${FIXTURE_TITLE_PREFIX}%`}
+      `;
       const [formatName, discQuantity] = testCase.seed;
       await sql`
         INSERT INTO ${sql(SCHEMA)}.library

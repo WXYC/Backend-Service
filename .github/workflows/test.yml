@@ -73,6 +73,8 @@ jobs:
               # the drift guard is silently bypassed on a script-only PR.
               # tests/integration/relabel-rotation-direct-backfill.spec.js reads:
               - 'scripts/relabel-rotation-direct-backfill.sql'
+              # tests/integration/format-qualifier-recovery.spec.js reads:
+              - 'scripts/audit/bs_format_qualifier_recovery.sql'
             db-init:
               - 'dev_env/Dockerfile.init'
               - 'dev_env/init-db.mjs'
