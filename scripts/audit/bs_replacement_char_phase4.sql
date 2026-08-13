@@ -211,10 +211,16 @@ SET client_encoding TO 'UTF8';
 -- Pre-amble: targeted rows + their BEFORE counts (1 / 10 / 1 against the
 -- 2026-08-12 dev clone, see header).
 --
--- To eyeball prod's real counts before anything is written, run ONLY this
--- section first -- e.g. `sed -n '/Pre-amble/,/Transactional/p'` -- since the
--- whole file executes non-interactively under `psql -f` and offers no pause
--- between the pre-amble and COMMIT at which an operator could abort.
+-- To eyeball prod's real counts before anything is written, run everything
+-- ahead of the transaction on its own first:
+--
+--   awk '/^BEGIN;/{exit} {print}' scripts/audit/bs_replacement_char_phase4.sql \
+--     | psql "$DATABASE_URL"
+--
+-- That is read-only (session guards + the two audit SELECTs) and stops before
+-- the first write. Worth doing, because the whole file executes
+-- non-interactively under `psql -f` and offers no pause between the pre-amble
+-- and COMMIT at which an operator could inspect and abort.
 -- ===========================================================
 SELECT '=== V_BS_FFFD_P4 pre-amble: rows targeted per (table, column) ===' AS section;
 
