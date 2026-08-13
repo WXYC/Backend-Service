@@ -1,10 +1,11 @@
 -- BS#2116: restore the size/count format qualifier that library rows lost
 -- against tubafrenzy's FORMAT.REFERENCE_NAME.
 --
--- Read the next section before running this: the ticket's headline "395
--- rows" is ~390 harness false positives plus 5 genuinely broken rows, and
--- this script repairs only the 5 (plus whatever else has broken since the
--- snapshot it was measured against).
+-- Read the next section before running this. The ticket's headline "395
+-- rows" is an overcount: 394 of them are the multi-disc CD class, which is
+-- NOT broken (the count lives in `library.disc_quantity`). Five rows
+-- genuinely lost information. This script repairs those, plus whatever else
+-- has broken since the snapshot it was measured against.
 --
 -- Modeled on scripts/audit/bs_replacement_char_recovery.sql (V_BS_FFFD) --
 -- a HAND-APPLIED script, NOT a Drizzle-tracked migration. docs/migrations.md
@@ -37,31 +38,42 @@
 -- WXYC/wiki#89), which buckets a `format` mismatch as "qualifier dropped"
 -- when Backend's `format_name` is a string prefix of tubafrenzy's.
 --
--- Replaying that bucketing against dev_env/seed-clone.sql -- a
--- `pg_dump --data-only` snapshot of staging, which itself clones prod, with
--- all 64,193 library rows and 5,241 of the 5,261 candidates present --
--- reproduces the ticket almost exactly, and decomposes it:
+-- Comparing every release present on both sides -- dev_env/seed-clone.sql (a
+-- `pg_dump --data-only` snapshot of staging, which itself clones prod)
+-- against tubafrenzy's per-release FORMAT.REFERENCE_NAME -- gives 64,067
+-- common releases, 5,238 of which carry a different `format_name` string.
+-- Decomposed by what the difference MEANS:
 --
---   qualifier-dropped bucket .......... 399   (ticket: ~395)
---     `cd x 2`   -> `cd` ............... 294
---     `cd x 3`   -> `cd` ................ 51
---     `cd x 4`   -> `cd` ................ 34
---     `cd x 2 box` -> `cd` .............. 15
---     `vinyl - 12"` -> `vinyl` ........... 5
---   restyle bucket .................. 4,842   (ticket: ~4,854)
+--   pure separator restyle (`vinyl - 12"` -> `vinyl 12"`) ...... 4,279
+--   multi-disc `x N` (count preserved in disc_quantity) ........... 660
+--   `vinyl - LP` -> `vinyl 12"` (recorded fold, below) ............ 297
+--   genuinely wrong MEDIA TYPE (out of scope, below) ............... 2
+--   qualifier dropped (`vinyl - 12"` -> `vinyl`) ................... 5  <-- this script
 --
--- All 394 multi-disc rows ALREADY carry the count correctly, in
--- `library.disc_quantity` (`cd x 2` -> format `cd`, disc_quantity 2). They
--- are false positives of a harness that can only compare `format_name`,
--- because `disc_quantity` is not part of `CatalogExportRow`
--- (apps/backend/services/catalog-export.service.ts). Nothing about them is
--- broken and this script correctly leaves every one of them alone.
+-- The decisive measurement: `disc_quantity` disagrees with tubafrenzy's
+-- `x N` on ZERO of all 64,067 common releases. The multi-disc class is
+-- completely intact -- it is invisible to the harness only because
+-- `disc_quantity` is not part of `CatalogExportRow`
+-- (apps/backend/services/catalog-export.service.ts).
 --
--- Only 5 rows lost information, all of one shape (`vinyl - 12"` collapsed to
--- `vinyl`) -- and one of them is the ticket's own first example, catalog id
--- 2151, "Elevators 12"". The ticket's second example, catalog id 3346
--- ("The Sugar Hill Records Story - Disc 4 & 5", `cd x 2`), is a member of
--- the 394: the clone already stores it as (`cd`, disc_quantity 2).
+-- Where 395 came from: under the prefix rule the `cd x N` -> `cd` family
+-- alone is 394 here (`cd x 2` 294, `cd x 3` 51, `cd x 4` 34, `cd x 2 box`
+-- 15). That IS the ticket's 395 -- almost entirely the one class that is
+-- demonstrably not broken. `vinyl 12"` is not a prefix of `vinyl - LP`, so
+-- the 297 LP rows never entered that bucket; `cd` is a prefix of `cd x 2`,
+-- so all 394 did.
+--
+-- The ticket's own examples land on opposite sides: catalog id 2151
+-- ("Elevators 12"") is one of the 5 real ones; catalog id 3346 ("The Sugar
+-- Hill Records Story - Disc 4 & 5", `cd x 2`) is a false positive, already
+-- stored as (`cd`, disc_quantity 2).
+--
+-- Two rows disagree on media type rather than on a qualifier (a CD-family
+-- release recorded as vinyl, and a vinyl release recorded as something
+-- else). Both tubafrenzy values are UNQUALIFIED, so they fall outside this
+-- script's candidate set by construction and it does not touch them. They
+-- need per-row adjudication -- possibly against the physical record -- not
+-- a bulk UPDATE. Separate ticket.
 --
 -- CONSEQUENCE FOR THE TICKET'S LAST ACCEPTANCE CRITERION: the next parity
 -- run will NOT report 0 qualifier-dropping mismatches after this script is
@@ -178,10 +190,17 @@
 -- and then `continue`s. format_id and disc_quantity are not in that
 -- updates map at all.
 --
--- So a row whose format was set incorrectly by whatever populated it before
--- the current parser existed stays wrong forever: the nightly ETL will
--- never revisit it. This script patches the data; it does not close that
--- gap. The gap is a standing bug in the ETL's repair path and deserves its
+-- So a row's format never gets revisited once the release exists. The 5
+-- rows this script repairs show exactly what that costs: in a 2026-04-04
+-- tubafrenzy snapshot all five read `vinyl`, and by the 2026-08-12
+-- extraction all five read `vinyl - 12"`. Every one of the five titles
+-- contains `12"` ("Elevators 12"", "Bad Boy remix 12"", ...) -- someone at
+-- the station went through and corrected the format upstream. Backend never
+-- re-imported the correction.
+--
+-- So this is not stale pre-parser data. It is a repair path that silently
+-- drops upstream corrections, and it will strand the next batch too. This
+-- script patches the data; it does not close that gap. The gap deserves its
 -- own ticket -- deliberately not filed from here.
 --
 -- One deliberate widening: this script writes `disc_quantity` alongside
