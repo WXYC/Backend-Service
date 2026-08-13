@@ -1,0 +1,57 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /flowsheet-april-gap-import-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+# Column-mapping and timestamp-resolution reuse (BS#2119): resolveArtistName,
+# resolveMessage, resolveEntryTimestamp, resolveRadioHour, mapProdEntryType,
+# fetchLegacyEntriesInWindow, buildShowIdMap. tsup bundles the donor tree's
+# source into dist at build time, so it must be present here (never in prod).
+# Precedent: Dockerfile.concerts-artist-lml-resolver:16 does the same for its
+# own jobs/triangle-shows-etl donor.
+COPY ./jobs/flowsheet-etl ./jobs/flowsheet-etl
+COPY ./jobs/flowsheet-april-gap-import ./jobs/flowsheet-april-gap-import
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-april-gap-import
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /flowsheet-april-gap-import
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/flowsheet-april-gap-import/package* ./jobs/flowsheet-april-gap-import/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./flowsheet-april-gap-import-builder/jobs/flowsheet-april-gap-import/dist ./jobs/flowsheet-april-gap-import/dist
+COPY --from=builder ./flowsheet-april-gap-import-builder/shared/database/dist ./shared/database/dist
+
+# The date-window candidate scan and the Backend-side floor COUNT both walk
+# a meaningful slice of the 2.6M-row flowsheet table; the API's tight 5s
+# default statement timeout is too aggressive here.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+
+# Async commit for the batched inserts, mirroring the bulk-update playbook.
+# Safe because the job is idempotent (ON CONFLICT DO NOTHING; a lost-durability
+# row from a crash mid-run is simply re-selected as still-missing next run).
+ENV DB_SYNCHRONOUS_COMMIT=off
+
+# Identifies the connection in pg_stat_activity during incident triage.
+ENV DB_APPLICATION_NAME=wxyc-flowsheet-april-gap-import
+
+# ENTRYPOINT + empty CMD so docker-level args (`--execute`, `--dry-run`)
+# pass through to the job rather than replacing the launcher — the
+# Dockerfile.streaming-url-remediation / Dockerfile.flowsheet-ghost-row-sweep
+# pattern. With `CMD ["npm", "start"]`, `docker run <image> --execute` would
+# REPLACE the CMD and npm would never run.
+ENTRYPOINT ["node", "/flowsheet-april-gap-import/jobs/flowsheet-april-gap-import/dist/job.js"]
+CMD []
