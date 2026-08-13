@@ -53,6 +53,53 @@ import { getCachedDiscogsUnavailableFlags, invalidateDiscogsUnavailableFlags } f
 
 const TERMINAL_STATUSES = new Set(['enriched_match', 'enriched_no_match', 'failed_no_retry']);
 
+const LOG_PREFIX = '[metadata-broadcast]';
+
+/**
+ * Default `liveFs:insert` age-guard threshold (BS#2131, parent #2118 site 4):
+ * a track INSERT whose `add_time` is older than this is treated as a
+ * historical/bulk-import row rather than a live play, and is not broadcast.
+ * Overridable via `LIVE_FS_INSERT_MAX_AGE_HOURS` — see `docs/env-vars.md`.
+ */
+const LIVE_FS_INSERT_MAX_AGE_HOURS_DEFAULT = 24;
+
+/**
+ * Resolves the `liveFs:insert` age-guard threshold in milliseconds.
+ * Warn-and-default on misconfig (never throw): this runs on every flowsheet
+ * INSERT's CDC callback, so a bad env var must degrade to the safe default
+ * rather than take down the broadcast path for every live play.
+ */
+export function resolveLiveFsInsertMaxAgeMs(
+  raw: string | undefined = process.env.LIVE_FS_INSERT_MAX_AGE_HOURS
+): number {
+  const defaultMs = LIVE_FS_INSERT_MAX_AGE_HOURS_DEFAULT * 60 * 60 * 1000;
+  if (raw === undefined || raw.trim() === '') return defaultMs;
+  const parsedHours = Number(raw);
+  if (!Number.isFinite(parsedHours) || parsedHours < 0) {
+    console.warn(
+      `${LOG_PREFIX} invalid LIVE_FS_INSERT_MAX_AGE_HOURS=${JSON.stringify(raw)}; using default ${LIVE_FS_INSERT_MAX_AGE_HOURS_DEFAULT}`
+    );
+    return defaultMs;
+  }
+  return parsedHours * 60 * 60 * 1000;
+}
+
+/**
+ * True when `rawAddTime` parses to an instant strictly older than
+ * `thresholdMs` before `nowMs`. Fails open (returns false — "not
+ * historical", i.e. broadcast proceeds) on anything that isn't a parseable
+ * string: `to_jsonb(NEW)` always ships `add_time` as an offset-bearing ISO
+ * string in production (the column is `.notNull()`), so a non-string or
+ * unparseable value here only happens in a test fixture or a schema-drift
+ * edge case — never a reason to silently drop a live insert.
+ */
+function isHistoricalAddTime(rawAddTime: unknown, thresholdMs: number, nowMs: number): boolean {
+  if (typeof rawAddTime !== 'string') return false;
+  const parsedMs = Date.parse(rawAddTime);
+  if (Number.isNaN(parsedMs)) return false;
+  return nowMs - parsedMs > thresholdMs;
+}
+
 /**
  * Wire shape of the `liveFs:update` payload. Mirrors `LiveFsUpdateEvent` in
  * `wxyc-shared/api.yaml`. The two required fields (`id`, `metadata_status`)
@@ -108,16 +155,41 @@ export function filterMetadataUpdate(event: CdcEvent): LiveFsUpdatePayload | nul
  * `dj_join`, breakpoints, talksets) are excluded: they aren't the "new track"
  * signal the iOS consumer ([wxyc-ios-64#269]) appends, and excluding them keeps
  * a bulk historical flowsheet import from flooding live subscribers with
- * non-track rows. A steady-state insert is always a live/recent row, so a
- * normal play still broadcasts.
+ * non-track rows.
+ *
+ * `add_time` age guard (BS#2131, parent #2118 site 4): track rows are exactly
+ * what a bulk historical/backfill import is mostly made of, and
+ * `flowsheet.id` is not a chronological key — an import lands at the head of
+ * the serial PK, not the head of the timeline (see #2118's six-site
+ * analysis). A row whose `add_time` is older than `LIVE_FS_INSERT_MAX_AGE_HOURS`
+ * (default 24h, `resolveLiveFsInsertMaxAgeMs`) is treated as historical and
+ * does not broadcast; a normal live play (`add_time` recent) still does.
+ * Fails OPEN on a missing or unparseable `add_time` — see
+ * `isHistoricalAddTime`'s doc — and parses defensively via
+ * `Number.isNaN(Date.parse(...))` rather than pattern-matching the format,
+ * since `to_jsonb` renders a `timestamptz` as an offset-bearing ISO string
+ * (e.g. `-04:00`), not a guaranteed `Z` suffix.
+ *
+ * **Residual the age guard does NOT cover**: a *recent* re-import — e.g. a
+ * last-write tubafrenzy re-run (#1543) done hours after the plays it carries
+ * actually aired — has an `add_time` inside the threshold window and still
+ * broadcasts as if it were live. There is no purely local signal in this CDC
+ * row that distinguishes "just played" from "just imported, but recently
+ * aired," so the mitigation for that case is procedural, not code: run such
+ * re-imports outside the live listening window, or narrow the threshold
+ * (`LIVE_FS_INSERT_MAX_AGE_HOURS`) for the duration of the run. See #2118's
+ * "chronOrderID" discussion for the full shape of this residual.
  *
  * Same `CLIENT_FACING_FLOWSHEET_COLUMNS` projection as the update broadcast
  * (BS#1534) — internal CDC columns never ride the anonymous stream. The payload
  * is the generated `LiveFsInsertEvent['payload']` (`FlowsheetEntryResponse`)
  * from `@wxyc/shared` (#273), whose enrichment fields are nullable so a
  * pre-enrichment row is valid.
+ *
+ * @param now - Injectable clock for deterministic boundary tests. Defaults to
+ *   `Date.now()`; every production call site omits it.
  */
-export function filterMetadataInsert(event: CdcEvent): LiveFsInsertEvent['payload'] | null {
+export function filterMetadataInsert(event: CdcEvent, now: number = Date.now()): LiveFsInsertEvent['payload'] | null {
   if (event.table !== 'flowsheet') return null;
   if (event.action !== 'INSERT') return null;
   if (!event.data) return null;
@@ -127,6 +199,8 @@ export function filterMetadataInsert(event: CdcEvent): LiveFsInsertEvent['payloa
 
   const id = data.id;
   if (typeof id !== 'number') return null;
+
+  if (isHistoricalAddTime(data.add_time, resolveLiveFsInsertMaxAgeMs(), now)) return null;
 
   return {
     ...pickClientFacingColumns(data),
