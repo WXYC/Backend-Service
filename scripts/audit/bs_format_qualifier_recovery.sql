@@ -1,5 +1,10 @@
--- BS#2116: restore the size/count qualifier that 395 library rows lost
+-- BS#2116: restore the size/count format qualifier that library rows lost
 -- against tubafrenzy's FORMAT.REFERENCE_NAME.
+--
+-- Read the next section before running this: the ticket's headline "395
+-- rows" is ~390 harness false positives plus 5 genuinely broken rows, and
+-- this script repairs only the 5 (plus whatever else has broken since the
+-- snapshot it was measured against).
 --
 -- Modeled on scripts/audit/bs_replacement_char_recovery.sql (V_BS_FFFD) --
 -- a HAND-APPLIED script, NOT a Drizzle-tracked migration. docs/migrations.md
@@ -10,33 +15,68 @@
 -- prod RDS, same pattern as bs_replacement_char_recovery.sql.
 --
 -- ===========================================================================
--- Where the row counts come from (not measured by this script)
+-- What the ticket's 395 actually is: 5 broken rows + ~390 harness artifacts
 -- ===========================================================================
 --
--- BS#2116 reports: of 5,261 tubafrenzy releases whose format carries a
+-- BS#2116 reports that of 5,261 tubafrenzy releases whose format carries a
 -- size/count qualifier, ~4,854 are already correct in Backend under a
--- restyled spelling (`vinyl - 12"` -> `vinyl 12"`; leave alone) and ~395
--- silently dropped the qualifier (`vinyl - 12"` -> `vinyl`, `cd x 2` -> `cd`;
--- the bug). Both figures came from the first full catalog-parity run
--- (discogs-etl#365, baseline recorded at WXYC/wiki#89) bucketing `format`
--- mismatches by string-prefix -- not from any query in this file, and this
--- script does not re-derive or re-assert them.
+-- restyled spelling (`vinyl - 12"` -> `vinyl 12"`) and ~395 dropped the
+-- qualifier (`vinyl - 12"` -> `vinyl`, `cd x 2` -> `cd`). Those figures come
+-- from the first full catalog-parity run (discogs-etl#365, baseline at
+-- WXYC/wiki#89), which buckets a `format` mismatch as "qualifier dropped"
+-- when Backend's `format_name` is a string prefix of tubafrenzy's.
 --
--- No Backend database with production data is available in this environment
--- (no prod credentials; the local dev Postgres in dev_env/docker-compose.yml
--- is seed data only), so the exact 395 legacy_release_ids cannot be
--- enumerated or hardcoded here. Instead this script embeds the FULL
--- candidate set -- every one of the 5,261 (legacy_release_id,
--- tubafrenzy_format) pairs, verbatim from tf_format_qualified.tsv (extracted
--- 2026-08-12 PT from tubafrenzy MySQL LIBRARY_RELEASE/FORMAT, filtered to
--- formats outside {cd, cdr, vinyl, unknown}; see the discogs-etl scratch
--- DATASETS.md this was pulled from for the exact extraction) -- and
--- self-corrects with `IS DISTINCT FROM`: the ~4,854 already-correct rows are
--- no-ops, and whichever legacy_release_ids turn out to be the ~395 (a
--- superset containment this script cannot narrow further without prod data)
--- get repaired. Re-running after a successful apply is also a no-op, so this
--- script is safe to run more than once and safe to run before the exact 395
--- are independently confirmed.
+-- Replaying that bucketing against dev_env/seed-clone.sql -- a
+-- `pg_dump --data-only` snapshot of staging, which itself clones prod, with
+-- all 64,193 library rows and 5,241 of the 5,261 candidates present --
+-- reproduces the ticket almost exactly, and decomposes it:
+--
+--   qualifier-dropped bucket .......... 399   (ticket: ~395)
+--     `cd x 2`   -> `cd` ............... 294
+--     `cd x 3`   -> `cd` ................ 51
+--     `cd x 4`   -> `cd` ................ 34
+--     `cd x 2 box` -> `cd` .............. 15
+--     `vinyl - 12"` -> `vinyl` ........... 5
+--   restyle bucket .................. 4,842   (ticket: ~4,854)
+--
+-- All 394 multi-disc rows ALREADY carry the count correctly, in
+-- `library.disc_quantity` (`cd x 2` -> format `cd`, disc_quantity 2). They
+-- are false positives of a harness that can only compare `format_name`,
+-- because `disc_quantity` is not part of `CatalogExportRow`
+-- (apps/backend/services/catalog-export.service.ts). Nothing about them is
+-- broken and this script correctly leaves every one of them alone.
+--
+-- Only 5 rows lost information, all of one shape (`vinyl - 12"` collapsed to
+-- `vinyl`) -- and one of them is the ticket's own first example, catalog id
+-- 2151, "Elevators 12"". The ticket's second example, catalog id 3346
+-- ("The Sugar Hill Records Story - Disc 4 & 5", `cd x 2`), is a member of
+-- the 394: the clone already stores it as (`cd`, disc_quantity 2).
+--
+-- CONSEQUENCE FOR THE TICKET'S LAST ACCEPTANCE CRITERION: the next parity
+-- run will NOT report 0 qualifier-dropping mismatches after this script is
+-- applied. It will report ~394 -- the multi-disc class, unchanged, because
+-- the harness still cannot see `disc_quantity`. Closing that gap is a
+-- harness/export change (teach the comparison that tubafrenzy `cd x N`
+-- equals Backend (`cd`, N), or add `disc_quantity` to the export), not a
+-- data repair, and it is out of scope here.
+--
+-- The clone is a snapshot, not prod, so this script does not hardcode those
+-- 5 ids. It embeds the FULL candidate set -- every one of the 5,261
+-- (legacy_release_id, tubafrenzy_format) pairs, verbatim from
+-- tf_format_qualified.tsv (extracted 2026-08-12 PT from tubafrenzy MySQL
+-- LIBRARY_RELEASE/FORMAT, filtered to formats outside
+-- {cd, cdr, vinyl, unknown}; see the discogs-etl scratch DATASETS.md this
+-- was pulled from for the exact extraction) -- and self-corrects with
+-- `IS DISTINCT FROM`, so it repairs whatever is actually wrong in the
+-- database it runs against and no-ops on everything else. Re-running after
+-- a successful apply is a no-op too. The pre-amble prints the real
+-- to-be-changed count for THAT database before anything is committed;
+-- expect a small number, not 395.
+--
+-- Blast radius: `wxyc_schema.library.legacy_release_id` is UNIQUE and NOT
+-- NULL (`library_legacy_release_id_idx`, schema.ts:673), so the join can
+-- reach at most one row per staged id -- 5,261 rows maximum, 5,241 in the
+-- clone, of which 5 changed.
 --
 -- ===========================================================================
 -- Live wxyc_schema.format vocabulary: where it actually comes from
@@ -72,8 +112,27 @@
 -- instead of silently mis-mapping a release to the wrong format_id.
 --
 -- ===========================================================================
--- The multi-disc decision: no vocabulary extension, and why
+-- Recorded decisions for the two qualifiers with no `format` row of their own
 -- ===========================================================================
+--
+-- (1) `vinyl - LP` -> `vinyl 12"`. There is no `vinyl LP` in the live
+-- vocabulary and there will not be one. This is not a new judgement call:
+-- `parseFormatAndDiscs` has folded LP into `vinyl 12"` since it was written
+-- (`normalized.includes('12"') || normalized.includes('lp')`,
+-- jobs/library-etl/job.ts:141), so every LP release the ETL has inserted is
+-- already stored that way, and the clone bears that out -- 297 of the 304
+-- `vinyl - LP` candidates present are at `vinyl 12"` today, and NONE of the
+-- LP-family rows are among the rows this script changes. Adopting the same
+-- fold here keeps one convention instead of two. The residual information
+-- loss is real but small and pre-existing: a 10" LP (rare; the parser's 10"
+-- branch is tested first, so `vinyl - 10"` spellings are unaffected) would
+-- be recorded as 12". Revisiting it means adding a vocabulary row AND
+-- changing `parseFormatAndDiscs`, and would leave the ~500 rows already
+-- folded needing a second migration -- deliberately not done under a
+-- 2026-08-31 turndown deadline.
+--
+-- (2) The multi-disc count (`cd x 2`, `vinyl - LP x 3`, ...) -> the base
+-- format name plus `library.disc_quantity`. No vocabulary extension.
 --
 -- BS#2116 asks for an explicit, recorded decision on cases like `cd x 2`
 -- that "may have no Backend representation at all." They do have one --
@@ -93,27 +152,34 @@
 -- together, matching what the live ETL already does for newly-inserted
 -- rows. No DDL, no vocabulary extension.
 --
--- Why these 395 rows are wrong despite the ETL "already doing this
--- correctly": job.ts's per-release upsert only refreshes format_id /
--- disc_quantity via the ON CONFLICT DO UPDATE path when a NEW canonical
--- (artist_id, genre_id, album_title, code_number, code_volume_letters)
--- tuple is inserted. The "an existing row already matches this canonical
--- tuple" branch (job.ts ~line 1031) never touches format_id or
--- disc_quantity at all -- so a row whose format was set incorrectly by
--- whatever process populated it before the current parser existed (a
--- pre-parser bulk import, most likely) stays wrong indefinitely. That's a
--- standing gap in the ETL's own repair path, separate from this one-time
--- fix; worth a follow-up issue, out of scope here.
+-- ===========================================================================
+-- Why a one-time script and not a fix in the ETL: the ETL never re-reads
+-- format for a row it has already seen
+-- ===========================================================================
 --
--- One consequence worth flagging: this script also repairs `disc_quantity`
--- for the full 5,261-row candidate set (not just the ~395), because a
--- format_id fix without a matching disc_quantity fix would be a half
--- repair. The catalog-parity harness that produced the 395/4,854 split
--- only compares the exported `format_name` string (`disc_quantity` isn't
--- part of `CatalogExportRow` in catalog-export.service.ts), so it cannot
--- see disc_quantity drift either way -- this is real hardening the next
--- parity run's `format` bucket won't reflect, not something claimed as
--- "measured."
+-- job.ts refreshes format_id / disc_quantity only on the ON CONFLICT DO
+-- UPDATE path (LEGACY_SOURCED_LIBRARY_COLUMNS, job.ts:882-898), and that
+-- path is reached only when `findExistingRelease` returns null -- i.e. the
+-- canonical (artist_id, genre_id, album_title, code_number,
+-- code_volume_letters) tuple is NEW. When an existing row already matches
+-- that tuple, the branch at job.ts:1030-1056 writes at most
+-- legacy_release_id / date_lost / date_found / album_artist / on_streaming
+-- and then `continue`s. format_id and disc_quantity are not in that
+-- updates map at all.
+--
+-- So a row whose format was set incorrectly by whatever populated it before
+-- the current parser existed stays wrong forever: the nightly ETL will
+-- never revisit it. This script patches the data; it does not close that
+-- gap. The gap is a standing bug in the ETL's repair path and deserves its
+-- own ticket -- deliberately not filed from here.
+--
+-- One deliberate widening: this script writes `disc_quantity` alongside
+-- format_id for the whole candidate set, not just the rows whose format_id
+-- is wrong, because a format fix without the matching count would be a half
+-- repair. In the clone snapshot that widening changes nothing (all 5,241
+-- matched rows already carry the right disc_quantity) and the parity
+-- harness cannot see the column either way, so treat it as belt-and-braces
+-- hardening, not as a measured improvement.
 --
 -- ===========================================================================
 -- Pattern: pre-amble (guards + counts) -> BEGIN; UPDATE; COMMIT; ->
@@ -123,6 +189,20 @@
 -- Idempotent: a successful run leaves the residual-mismatch count at 0, and
 -- re-running is then a no-op (the pre-amble's "rows that will change" count
 -- drops to 0 on the second run -- expected, not a regression).
+--
+-- Verified end-to-end on PostgreSQL 14.23 -- prod RDS is 14.22 while
+-- dev_env's container is 18, so the dev container would happily accept
+-- syntax prod rejects. Nothing here is newer than PostgreSQL 9.x.
+--
+-- Two triggers on `wxyc_schema.library` fire as a side effect, both benign
+-- but worth knowing before you run it twice:
+--   * `cdc_library` (FOR EACH ROW) emits one CDC notification per row
+--     actually updated -- a handful, and downstream consumers want them.
+--   * `touch_library_watermark` (FOR EACH STATEMENT) bumps
+--     `library_watermark.last_modified_at`. Statement-level triggers in
+--     PostgreSQL fire even when the UPDATE matches zero rows, so a
+--     no-op re-run still advances the watermark and invalidates catalog
+--     client caches once. Harmless; just don't loop the script.
 -- ===========================================================================
 
 -- ===========================================================================
@@ -5482,9 +5562,10 @@ GROUP BY tubafrenzy_format
 ORDER BY staged_rows DESC;
 
 -- The number that matters: how many library rows actually differ from
--- their derived target today. Expected to land near (but not necessarily
--- exactly) the harness's ~395 estimate -- this is the real count for
--- *this* database, not a re-assertion of the harness's figure.
+-- their derived target today. Against the dev prod-clone snapshot this is
+-- 5. If it comes back anywhere near 395, STOP -- that would mean the
+-- multi-disc rows have lost their disc_quantity too, which is a different
+-- (and much larger) defect than the one this script was written for.
 SELECT '=== BS#2116 pre-amble: rows that will actually change (real count) ===' AS section;
 SELECT COUNT(*) AS rows_to_update
 FROM wxyc_schema.library l
@@ -5549,8 +5630,11 @@ WHERE l.format_id IS DISTINCT FROM tf.id
 
 -- Refresh planner stats on the touched table so the trigram / btree indexes
 -- covering wxyc_schema.library (title_trgm_idx, format_id_idx, etc.) stay on
--- the indexed path after the bulk rewrite -- the BS#934 lesson. ANALYZE
--- cannot run inside a transaction, so it lives here, outside BEGIN/COMMIT.
+-- the indexed path after the bulk rewrite -- the BS#934 lesson. Deliberately
+-- placed after COMMIT: unlike VACUUM, ANALYZE *is* legal inside a
+-- transaction block, but running it there would extend the write
+-- transaction's lock hold and throw the fresh stats away if the operator
+-- aborted rather than committed.
 ANALYZE wxyc_schema.library;
 
 -- ===========================================================================
