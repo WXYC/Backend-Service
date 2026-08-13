@@ -6,14 +6,20 @@
  * an API route.
  *
  * ZERO DRIFT. This spec does not re-type the script's SQL — it READS
- * scripts/audit/bs_2117_crossref_backfill.sql and executes the two parts that
+ * scripts/audit/bs_2117_crossref_backfill.sql and executes the parts that
  * carry the logic verbatim:
  *
  *   1. `pg_temp.bs2117_resolve_artist()`, the three-stage resolver
  *      (folded name -> code_letters -> genre_artist_crossreference code).
- *   2. The transactional INSERT: resolve -> self-pair guard -> LEAST/GREATEST
- *      canonicalization -> DISTINCT ON dedup -> either-direction NOT EXISTS ->
+ *   2. `bs2117_provenance_conflicts`, the 15-row exclusion list.
+ *   3. The transactional INSERT: resolve -> self-pair guard ->
+ *      provenance-conflict guard -> LEAST/GREATEST canonicalization ->
+ *      DISTINCT ON dedup -> either-direction NOT EXISTS ->
  *      ON CONFLICT DO NOTHING.
+ *
+ * `extractInsert` additionally asserts each of those guards is PRESENT in what
+ * it sliced out, so deleting one from the script fails this spec loudly rather
+ * than quietly shrinking its coverage.
  *
  * Editing either one changes what this spec runs. That is the same convention
  * tests/integration/relabel-rotation-direct-backfill.spec.js uses, including
@@ -114,7 +120,51 @@ function extractInsert(scriptText) {
   if (end === -1) {
     throw new Error('the INSERT does not end in the expected ON CONFLICT clause');
   }
-  return scriptText.slice(start, end + endMarker.length);
+  const extracted = scriptText.slice(start, end + endMarker.length);
+
+  // The slicing above is by string index, so a reformat of the script could
+  // silently hand back a fragment that still parses but has lost a guard —
+  // and every assertion below would keep passing against the weaker SQL.
+  // Assert the invariants are present in what we actually extracted, so a
+  // mis-slice (or a guard deleted from the script outright) fails loudly here
+  // rather than quietly reducing this spec's coverage.
+  const required = [
+    ['self-pair guard', 'src.artist_id <> tgt.artist_id'],
+    ['LEAST canonicalization', 'LEAST(source_artist_id, target_artist_id)'],
+    ['GREATEST canonicalization', 'GREATEST(source_artist_id, target_artist_id)'],
+    ['dedup', 'DISTINCT ON (source_artist_id, target_artist_id)'],
+    ['either-direction guard', 'NOT EXISTS'],
+    ['provenance-conflict guard', 'bs2117_provenance_conflicts'],
+  ];
+  for (const [label, needle] of required) {
+    if (!extracted.includes(needle)) {
+      throw new Error(
+        `extracted INSERT is missing its ${label} (${needle}) — the script changed shape, or the extraction mis-sliced`
+      );
+    }
+  }
+  return extracted;
+}
+
+/**
+ * Pull the `bs2117_provenance_conflicts` scratch table (DDL + its VALUES), the
+ * exclusion list the INSERT joins against. Extracted rather than re-typed so
+ * the spec exercises the real 15 excluded row_ids.
+ */
+function extractConflictsSetup(scriptText) {
+  const start = scriptText.indexOf('CREATE TEMP TABLE bs2117_provenance_conflicts');
+  if (start === -1) {
+    throw new Error('bs2117_provenance_conflicts table definition not found in the backfill script');
+  }
+  const insertAt = scriptText.indexOf('INSERT INTO bs2117_provenance_conflicts', start);
+  if (insertAt === -1) {
+    throw new Error('bs2117_provenance_conflicts is declared but never populated');
+  }
+  const end = scriptText.indexOf(';', scriptText.indexOf("'Golden Palominos')", insertAt));
+  if (end === -1) {
+    throw new Error('the bs2117_provenance_conflicts VALUES list is not terminated');
+  }
+  return scriptText.slice(start, end + 1);
 }
 
 /** Redirect every `wxyc_schema.` reference at the throwaway test schema. */
@@ -134,6 +184,7 @@ describe('BS#2117 artist_crossreference backfill (real PG, real script SQL)', ()
     const scriptText = fs.readFileSync(SCRIPT_PATH, 'utf8');
     const resolverDdl = retarget(extractResolver(scriptText));
     const pairTableDdl = extractPairTableDdl(scriptText);
+    const conflictsSetup = extractConflictsSetup(scriptText);
     backfillInsert = retarget(extractInsert(scriptText));
 
     await sql.unsafe(`DROP SCHEMA IF EXISTS ${TEST_SCHEMA} CASCADE`);
@@ -199,6 +250,7 @@ describe('BS#2117 artist_crossreference backfill (real PG, real script SQL)', ()
 
     await sql.unsafe(resolverDdl);
     await sql.unsafe(pairTableDdl);
+    await sql.unsafe(conflictsSetup);
   });
 
   afterEach(async () => {
@@ -216,8 +268,11 @@ describe('BS#2117 artist_crossreference backfill (real PG, real script SQL)', ()
   });
 
   /** Load pairs into the script's own temp table, then run the script's INSERT. */
-  async function runBackfill(pairs) {
-    let rowId = 1;
+  async function runBackfill(pairs, firstRowId = 900) {
+    // Default row ids start well clear of the real LIBRARY_CODE_CROSS_REFERENCE
+    // ids, so a fixture pair never collides with the excluded-conflict list
+    // unless a test asks for it explicitly.
+    let rowId = firstRowId;
     for (const p of pairs) {
       await sql.unsafe(
         `INSERT INTO bs2117_pairs
@@ -335,6 +390,16 @@ describe('BS#2117 artist_crossreference backfill (real PG, real script SQL)', ()
       [ART_TWIN_A, ART_TWIN_B]
     );
     expect(rows).toHaveLength(0);
+  });
+
+  test('a pair on the provenance-conflict list is excluded even when fully resolvable', async () => {
+    // row_id 26 is one of the 15 whose referencing side tubafrenzy's own
+    // COMMENT contradicts ("Cactus World News" where the note says Tonya
+    // Donelly). Both endpoints resolve here, so ONLY the exclusion list can
+    // keep it out — if that guard regresses, this inserts a false alias.
+    await runBackfill([pair(ALPHA_NAME, 'ZA', BETA_NAME, 'ZB', { comment: 'would-be-false-alias' })], 26);
+
+    expect(await crossRefsBetween(ART_ALPHA, ART_BETA)).toHaveLength(0);
   });
 
   test('an unresolvable name (no matching artist) inserts nothing and does not throw', async () => {
