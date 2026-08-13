@@ -23,7 +23,13 @@ jest.mock('@wxyc/database', () => ({
   },
 }));
 
-import { parseTabRow, toNullable, parseEntryRows, parseShowRows } from '../../../../jobs/flowsheet-etl/fetch-legacy';
+import {
+  parseTabRow,
+  toNullable,
+  parseEntryRows,
+  parseShowRows,
+  fetchLegacyEntriesInWindow,
+} from '../../../../jobs/flowsheet-etl/fetch-legacy';
 
 describe('fetch-legacy parsing', () => {
   describe('parseTabRow', () => {
@@ -244,6 +250,74 @@ describe('fetch-legacy parsing', () => {
 
     it('returns empty array for empty input', () => {
       expect(parseShowRows('')).toEqual([]);
+    });
+  });
+
+  describe('fetchLegacyEntriesInWindow (BS#2119)', () => {
+    // Bounded-both-ends sibling of fetchLegacyEntries's open-ended sinceMs
+    // floor, added for jobs/flowsheet-april-gap-import's date-window
+    // candidate net.
+
+    it('sends a BETWEEN filter over START_TIME, TIME_CREATED, and TIME_LAST_MODIFIED', async () => {
+      const { MirrorSQL } = jest.requireMock('@wxyc/database');
+      const sendMock: jest.Mock = MirrorSQL.instance().send;
+      sendMock.mockReset().mockResolvedValue('');
+
+      await fetchLegacyEntriesInWindow(1000, 2000);
+
+      expect(sendMock).toHaveBeenCalledTimes(1);
+      const query: string = sendMock.mock.calls[0][0];
+      expect(query).toMatch(/fe\.START_TIME BETWEEN 1000 AND 2000/);
+      expect(query).toMatch(/fe\.TIME_CREATED BETWEEN 1000 AND 2000/);
+      expect(query).toMatch(/fe\.TIME_LAST_MODIFIED BETWEEN 1000 AND 2000/);
+    });
+
+    it('parses rows returned inside the window, mirroring fetchLegacyEntries', async () => {
+      const { MirrorSQL } = jest.requireMock('@wxyc/database');
+      const sendMock: jest.Mock = MirrorSQL.instance().send;
+      const raw = '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t0\t1\t0\t1500\t1600\t101\t0\t0';
+      sendMock.mockReset().mockResolvedValueOnce(raw);
+
+      const rows = await fetchLegacyEntriesInWindow(1000, 2000);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual(
+        expect.objectContaining({
+          id: 100,
+          showId: 200,
+          artistName: 'Autechre',
+          startTime: 0,
+          timeCreated: 1500,
+          timeLastModified: 1600,
+          legacyReleaseId: 101,
+        })
+      );
+    });
+
+    it('falls back to the 14-column shape when SEGUE_FLAG is unavailable', async () => {
+      const { MirrorSQL } = jest.requireMock('@wxyc/database');
+      const sendMock: jest.Mock = MirrorSQL.instance().send;
+      const raw = '100\t200\t0\tAutechre\tConfield\tVI Scose Poise\tWarp\t0\t1\t0\t1500\t1600\t101\t0';
+      sendMock.mockReset().mockRejectedValueOnce(new Error('Unknown column SEGUE_FLAG')).mockResolvedValueOnce(raw);
+
+      const rows = await fetchLegacyEntriesInWindow(1000, 2000);
+
+      expect(sendMock).toHaveBeenCalledTimes(2);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].segueFlag).toBe(0);
+    });
+
+    it('throws for a non-integer startMs (raw-SQL-literal injection guard)', async () => {
+      await expect(fetchLegacyEntriesInWindow(1.5, 2000)).rejects.toThrow(/startMs must be a finite integer/);
+    });
+
+    it('throws for a non-integer endMs', async () => {
+      await expect(fetchLegacyEntriesInWindow(1000, NaN)).rejects.toThrow(/endMs must be a finite integer/);
+    });
+
+    it('throws when endMs is not after startMs', async () => {
+      await expect(fetchLegacyEntriesInWindow(2000, 1000)).rejects.toThrow(/must be greater than startMs/);
+      await expect(fetchLegacyEntriesInWindow(1000, 1000)).rejects.toThrow(/must be greater than startMs/);
     });
   });
 
