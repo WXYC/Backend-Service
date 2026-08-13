@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/flowsheet-april-gap-import",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "One-shot dry-run-by-default import (BS#2119): backfill the closed BS#351 residue — flowsheet entries tubafrenzy holds that Backend never received because the pre-fix incremental sync silently dropped every track entry with START_TIME=0. Default scope is the unambiguous 2026-04-16 -> 2026-04-20 window (399 rows / 15 shows); GAP_IMPORT_WINDOW_START/END widen it. Insert-only, ON CONFLICT (legacy_entry_id) DO NOTHING, batched with cooperative live-DJ pause and an inter-batch gap.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_flowsheet_april_gap_import:ci -f ../../Dockerfile.flowsheet-april-gap-import ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.69.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

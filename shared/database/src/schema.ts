@@ -1081,9 +1081,10 @@ export const flowsheet = wxyc_schema.table(
     show_id: integer('show_id').references(() => shows.id, { onDelete: 'set null' }),
     album_id: integer('album_id').references(() => library.id, { onDelete: 'set null' }),
     rotation_id: integer('rotation_id').references(() => rotation.id, { onDelete: 'set null' }),
-    // Overloaded across three orthogonal uses with different correctness
-    // requirements (BS#908). Any new write site must register in
-    // scripts/check-legacy-entry-id-writes.mjs ALLOWLIST with a rationale:
+    // Overloaded across four orthogonal uses with different correctness
+    // requirements (BS#908; use #4 added by BS#2119). Any new write site
+    // must register in scripts/check-legacy-entry-id-writes.mjs ALLOWLIST
+    // with a rationale:
     //   1. Webhook upsert target — apps/backend/routes/internal.route.ts
     //      uses `ON CONFLICT (legacy_entry_id) DO UPDATE` keyed on the
     //      tubafrenzy-assigned entry ID.
@@ -1096,6 +1097,13 @@ export const flowsheet = wxyc_schema.table(
     //      successful re-driven mirrorCreateEntry, same as the live path.
     //   3. ETL incremental sync key — jobs/flowsheet-etl/job.ts uses the
     //      same `ON CONFLICT (legacy_entry_id)` shape as #1.
+    //   4. Insert-only historical backfill — jobs/flowsheet-april-gap-import
+    //      (BS#2119) imports the closed BS#351 residue via
+    //      `ON CONFLICT (legacy_entry_id) DO NOTHING`, never `DO UPDATE`.
+    //      Every id it writes is a real tubafrenzy-assigned entry ID the
+    //      discovery pass confirmed present upstream and absent in Backend,
+    //      so use #2's loop-guard invariant holds for these rows exactly as
+    //      it does for uses #1/#3.
     // A future change that populates legacy_entry_id to a placeholder for
     // non-tubafrenzy rows would silently break use #2; the CI check at
     // scripts/check-legacy-entry-id-writes.mjs is the guardrail.
