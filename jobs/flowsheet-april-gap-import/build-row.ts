@@ -49,7 +49,14 @@ export type GapImportRow = {
 export type BuildRowContext = {
   /** Backend shows.id, resolved from the legacy_show_id via jobs/flowsheet-etl/show-id-map.ts. */
   showId: number;
-  /** Pre-resolved via a read-only SELECT: COALESCE(user.djName, shows.legacy_dj_name). Never DJ_NAME/auth_user.name (PII). */
+  /**
+   * Pre-resolved via a read-only SELECT through the canonical
+   * `resolveShowDjName` chain (`@wxyc/database` dj-name.ts): dj_name_override
+   * -> the linked user's filtered handle -> shows.legacy_dj_name -> null.
+   * Never DJ_NAME/auth_user.name (PII), and never a re-derived COALESCE —
+   * that copy predates dj_name_override (BS#1321) and the "Anonymous" filter
+   * (BS#1286). See orchestrate.ts's `resolveDjNamesForShows`.
+   */
   djName: string | null;
   /**
    * Pre-resolved via a read-only SELECT on library.legacy_release_id; null

@@ -20,16 +20,23 @@
  * not what was attempted.
  *
  * Column mapping and `dj_name`/`album_id` pre-resolution live in
- * build-row.ts (pure) and the read-only SELECTs below. `dj_name` is
- * deliberately NOT resolved via jobs/flowsheet-etl/job.ts's `resolveDjNames`
- * — that helper is a post-insert `UPDATE ... WHERE dj_name IS NULL`, which
- * would violate insert-only and, under `ON CONFLICT DO NOTHING`, could touch
- * a pre-existing Backend row whose `legacy_entry_id` happens to collide.
+ * build-row.ts (pure) and the read-only SELECTs below. `dj_name` goes through
+ * the canonical `resolveShowDjName` (`@wxyc/database` dj-name.ts), never a
+ * re-derived COALESCE. It is deliberately NOT resolved via
+ * jobs/flowsheet-etl/job.ts's `resolveDjNames` — that helper is a post-insert
+ * `UPDATE ... WHERE dj_name IS NULL`, which would violate insert-only and,
+ * under `ON CONFLICT DO NOTHING`, could touch a pre-existing Backend row
+ * whose `legacy_entry_id` happens to collide.
  *
- * Safety rails (all before any write): a Backend-side floor on
- * `COUNT(legacy_entry_id)` (an undersized read means the read failed, not
- * that Backend is empty) and a cohort ceiling (a missing-set larger than
- * expected is a comparison bug, not a discovery). Dry-run is the default;
+ * Four refusals, all before any write and all active in dry-run too: an
+ * upstream candidate floor (zero candidates is a bad window, not an empty
+ * one — tubafrenzy rows don't depend on Backend state), a Backend-side floor
+ * on `COUNT(legacy_entry_id)` (an undersized read means the read failed, not
+ * that Backend is empty), a cohort ceiling (a missing-set larger than
+ * expected is a comparison bug, not a discovery), and a NULL-key orphan guard
+ * (a target show already holding non-marker rows with `legacy_entry_id IS
+ * NULL` — invisible to both the diff and the conflict target, so importing
+ * could duplicate a row a DJ already entered). Dry-run is the default;
  * `--execute` writes. Batched inserts (~25/batch) with cooperative live-DJ
  * pause and an inter-batch gap, sized to keep the CDC enrichment worker's
  * shared LML rate limiter from bursting mid-show (BS#1748's TokenBucket is
