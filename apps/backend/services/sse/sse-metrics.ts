@@ -1,7 +1,7 @@
 /**
  * CloudWatch metrics for the SSE server.
  *
- * Three metrics in the `WXYC/BackendService` namespace under the `SSE/`
+ * Four metrics in the `WXYC/BackendService` namespace under the `SSE/`
  * prefix:
  *
  *   - `SSE/ClientCount` (gauge): live count of connected SSE clients, sampled
@@ -20,6 +20,19 @@
  *     alarm can subscribe via the plain `Namespace`/`MetricName` form (the
  *     wxyc-canary post-mortem #13 pattern).
  *
+ *   - `SSE/InsertSuppressed` (counter, BS#2131 review follow-up): one
+ *     increment per flowsheet track INSERT that `filterMetadataInsert`
+ *     (`../metadata-broadcast/metadata-broadcast.ts`) drops because its
+ *     `add_time` is older than the age-guard threshold. Dimensioned by
+ *     `Topic` (always `Topics.liveFs` today) plus a dimensionless companion —
+ *     an unexpected spike is alarm-worthy: either the age-guard threshold is
+ *     misconfigured (e.g. the `LIVE_FS_INSERT_MAX_AGE_HOURS=0` kill-switch
+ *     hazard) or a large historical import is running. A silent *drop* in
+ *     this metric during a known bulk import is the complementary failure
+ *     mode (the guard stopped firing, e.g. on a schema change to `add_time`)
+ *     but isn't something a single metric can distinguish from "no import is
+ *     running" — see that file's docstring for the full caveat.
+ *
  * Bounded sampling. Counters live in an in-memory `Map<topic, count>` and
  * flush on whichever comes first: the periodic timer (default 60 s) or when
  * the total buffered count exceeds `FLUSH_AT_BUFFER_SIZE`. ClientCount is a
@@ -27,8 +40,8 @@
  *
  * Opt-out. `SSE_METRICS_DISABLED=true` short-circuits the module: no client
  * is created, no timer fires, and the `recordBroadcast` / `recordBroadcastFailure`
- * entry points become no-ops. Required so CI and local dev don't try to talk
- * to CloudWatch.
+ * / `recordInsertSuppressed` entry points become no-ops. Required so CI and
+ * local dev don't try to talk to CloudWatch.
  *
  * Failure handling. `PutMetricData` rejections are logged and swallowed; the
  * caller path (broadcast, gauge sample) is never blocked and the next tick
@@ -41,6 +54,7 @@ const NAMESPACE = 'WXYC/BackendService';
 const METRIC_CLIENT_COUNT = 'SSE/ClientCount';
 const METRIC_EVENTS_BROADCAST = 'SSE/EventsBroadcast';
 const METRIC_BROADCAST_FAILURES = 'SSE/BroadcastFailures';
+const METRIC_INSERT_SUPPRESSED = 'SSE/InsertSuppressed';
 
 const DEFAULT_INTERVAL_MS = 60_000;
 const FLUSH_AT_BUFFER_SIZE = 100;
@@ -49,6 +63,7 @@ type TopicCount = Map<string, number>;
 
 let broadcastBuffer: TopicCount = new Map();
 let failureBuffer: TopicCount = new Map();
+let suppressedBuffer: TopicCount = new Map();
 let bufferedTotal = 0;
 let flushTimer: NodeJS.Timeout | null = null;
 let cloudwatchClient: CloudWatchClient | null = null;
@@ -91,6 +106,16 @@ export function recordBroadcastFailure(topic: string): void {
   }
 }
 
+/** Record one age-guard-suppressed flowsheet track INSERT for the given topic. */
+export function recordInsertSuppressed(topic: string): void {
+  if (isDisabled()) return;
+  incrementTopic(suppressedBuffer, topic);
+  bufferedTotal += 1;
+  if (bufferedTotal >= FLUSH_AT_BUFFER_SIZE) {
+    void flushCounters();
+  }
+}
+
 function buildCounterData(timestamp: Date): MetricDatum[] {
   const data: MetricDatum[] = [];
 
@@ -121,6 +146,28 @@ function buildCounterData(timestamp: Date): MetricDatum[] {
     for (const count of failureBuffer.values()) total += count;
     data.push({
       MetricName: METRIC_BROADCAST_FAILURES,
+      Timestamp: timestamp,
+      Unit: 'Count',
+      Value: total,
+      Dimensions: [],
+    });
+  }
+
+  for (const [topic, count] of suppressedBuffer) {
+    data.push({
+      MetricName: METRIC_INSERT_SUPPRESSED,
+      Timestamp: timestamp,
+      Unit: 'Count',
+      Value: count,
+      Dimensions: [{ Name: 'Topic', Value: topic }],
+    });
+  }
+  // Same alarm-input rationale as BroadcastFailures above.
+  if (suppressedBuffer.size > 0) {
+    let total = 0;
+    for (const count of suppressedBuffer.values()) total += count;
+    data.push({
+      MetricName: METRIC_INSERT_SUPPRESSED,
       Timestamp: timestamp,
       Unit: 'Count',
       Value: total,
@@ -173,13 +220,14 @@ function buildGaugeData(timestamp: Date): MetricDatum[] {
 }
 
 async function flushCounters(): Promise<void> {
-  if (broadcastBuffer.size === 0 && failureBuffer.size === 0) return;
+  if (broadcastBuffer.size === 0 && failureBuffer.size === 0 && suppressedBuffer.size === 0) return;
 
   const timestamp = new Date();
   const data = buildCounterData(timestamp);
 
   broadcastBuffer = new Map();
   failureBuffer = new Map();
+  suppressedBuffer = new Map();
   bufferedTotal = 0;
 
   try {
@@ -240,6 +288,7 @@ export function __resetForTests(): void {
   stopSseMetrics();
   broadcastBuffer = new Map();
   failureBuffer = new Map();
+  suppressedBuffer = new Map();
   bufferedTotal = 0;
   cloudwatchClient = null;
   snapshotFn = null;
