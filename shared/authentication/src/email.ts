@@ -136,16 +136,19 @@ function getConfigurationSetName(): string | undefined {
 }
 
 /**
- * SES has a 200-message/month quota. `EMAIL_ENABLED` gates the actual
- * `client.send()` call so test/CI runs (which repeatedly exercise the
+ * SES has a 200-message/month quota. `EMAIL_ENABLED` gates the entire send
+ * path — a disabled environment needs NO SES configuration at all (no
+ * `SES_FROM_EMAIL`, no AWS credentials); the senders no-op before any config
+ * validation runs — so test/CI runs (which repeatedly exercise the
  * password-reset / verification / OTP flows) never burn that quota.
  * Defaults to enabled (production behavior) when unset. `scripts/ci-env.sh`
  * does NOT set this var -- test/CI environments set `EMAIL_ENABLED=false`
- * explicitly in two other places: `tests/setup/unit.setup.ts` (the jest
- * unit-test-runner process itself) and, for the separately-spawned auth/
+ * explicitly in these places: `tests/setup/unit.setup.ts` (the jest
+ * unit-test-runner process itself); for the separately-spawned auth/
  * backend servers the integration suite talks to over HTTP, on
  * `dev_env/docker-compose.yml`'s `auth` service (CI profile, hardcoded) and
- * `.github/workflows/test.yml`'s Integration-Tests "Start services" step.
+ * `.github/workflows/test.yml`'s Integration-Tests "Start services" step;
+ * and dj-site's E2E workflow Backend `.env` (BS#1999).
  */
 export function isEmailSendingEnabled(): boolean {
   const raw = process.env.EMAIL_ENABLED;
@@ -160,6 +163,17 @@ export function isEmailSendingEnabled(): boolean {
  * Send a transactional email using the unified email system
  */
 export async function sendEmail(email: WXYCEmail): Promise<void> {
+  // The disable switch must run before any SES config validation: an
+  // environment that deliberately disables email (E2E, local dev) sets
+  // EMAIL_ENABLED=false without SES vars, and must get a clean no-op rather
+  // than a config throw. With the checks in the other order, BS#1969's
+  // awaited invite send surfaced the throw as emailSent:false on every
+  // provision, failing dj-site's admin E2E suite (BS#1999). Enabled but
+  // misconfigured still throws below — that misconfiguration must stay loud.
+  if (!isEmailSendingEnabled()) {
+    return;
+  }
+
   const from = process.env.SES_FROM_EMAIL;
   if (!from) {
     throw new Error('Missing AWS SES configuration: SES_FROM_EMAIL');
@@ -183,10 +197,6 @@ export async function sendEmail(email: WXYCEmail): Promise<void> {
     },
     ConfigurationSetName: getConfigurationSetName(),
   });
-
-  if (!isEmailSendingEnabled()) {
-    return;
-  }
 
   const client = getSesClient();
   await client.send(command);
@@ -252,6 +262,12 @@ export const buildOTPEmailHtml = ({ title, intro, otp, footer }: OTPEmailTemplat
 `.trim();
 
 export const sendOTPEmail = async ({ to, otp, type }: OTPEmailInput) => {
+  // Same ordering constraint as sendEmail: the disable switch short-circuits
+  // before SES config validation so email-less environments no-op cleanly.
+  if (!isEmailSendingEnabled()) {
+    return;
+  }
+
   const from = process.env.SES_FROM_EMAIL;
   if (!from) {
     throw new Error('Missing AWS SES configuration: SES_FROM_EMAIL');
@@ -292,10 +308,6 @@ export const sendOTPEmail = async ({ to, otp, type }: OTPEmailInput) => {
     },
     ConfigurationSetName: getConfigurationSetName(),
   });
-
-  if (!isEmailSendingEnabled()) {
-    return;
-  }
 
   const client = getSesClient();
   await client.send(command);

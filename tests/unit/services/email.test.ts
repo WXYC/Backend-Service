@@ -251,6 +251,30 @@ describe('EMAIL_ENABLED gating', () => {
     const emailModule = await import('../../../shared/authentication/src/email');
     expect(emailModule.isEmailSendingEnabled()).toBe(false);
   });
+
+  it('resolves as a clean no-op when EMAIL_ENABLED=false and SES is entirely unconfigured (BS#1999)', async () => {
+    // The disable switch must short-circuit BEFORE any SES config validation:
+    // a deliberately email-less environment (dj-site E2E, local dev) sets
+    // EMAIL_ENABLED=false without SES vars, and a config throw there is what
+    // turned BS#1969's awaited invite send into emailSent:false on every
+    // provision — failing dj-site's entire admin E2E suite.
+    process.env.EMAIL_ENABLED = 'false';
+    delete process.env.SES_FROM_EMAIL;
+    delete process.env.AWS_ACCESS_KEY_ID;
+    delete process.env.AWS_SECRET_ACCESS_KEY;
+    delete process.env.AWS_REGION;
+    const emailModule = await import('../../../shared/authentication/src/email');
+
+    await expect(
+      emailModule.sendEmail({
+        type: 'accountSetup',
+        to: 'newdj@test.wxyc.org',
+        url: 'https://example.com/setup',
+      })
+    ).resolves.toBeUndefined();
+
+    expect(mockSend).not.toHaveBeenCalled();
+  });
 });
 
 // Test cases for new user detection logic (to be used in auth.definition)
