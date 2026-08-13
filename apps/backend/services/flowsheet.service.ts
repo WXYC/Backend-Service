@@ -22,6 +22,9 @@ import {
   normalizeFreetextArtist,
   nyCalendarDate,
   nyStartOfDay,
+  resolveDjDisplayName,
+  resolveShowDjName,
+  showDjNameOverride,
 } from '@wxyc/database';
 import { ALBUM_METADATA_PROJECTION, suppressMislabeledStreamingUrls } from '../utils/album-metadata-projection.js';
 import { getUpcomingShowsMapsCached } from './concerts.service.js';
@@ -31,40 +34,13 @@ import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsh
 import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
 
 /**
- * Resolve the DJ display name shown to listeners on the public flowsheet.
- *
- * Rules:
- *   1. Use `djName` (the user's stage handle on `auth_user.dj_name`).
- *   2. Treat the literal string "Anonymous" (case- and whitespace-insensitive)
- *      as if `djName` were absent. The better-auth anonymous plugin and a
- *      since-corrected onboarding default were both observed writing the
- *      literal "Anonymous" into `auth_user.dj_name`; rendering that string
- *      to the public on-air playlist confused listeners and the wxyc.info
- *      playlist (BS#1286, epic #1288, 2026-06-02 Aubrey Hearst on-air
- *      incident).
- *   3. Trim the returned value; return `null` if blank or Anonymous.
- *
- * Why this no longer falls back to `auth_user.name`: dj-site's admin
- * provisioning flow writes the user's real name into `auth_user.name`
- * (`name: newAccount.realName || newAccount.username` in roster UI), so
- * surfacing `name` on the public v2 flowsheet wire would leak PII —
- * exactly the same class of incident BS#1286 fixed for the 'Anonymous'
- * literal. Real names are appropriate for DJ-to-DJ internal views; they
- * are not appropriate for the public on-air playlist.
- *
- * Callers should treat `null` as "name is unresolvable" and either degrade
- * the marker template (show_start / show_end keep a row but drop the name)
- * or suppress the row entirely and log to Sentry (dj_join / dj_leave) —
- * see `startShow`, `endShow`, `createJoinNotification`,
- * `createLeaveNotification`.
+ * The PII-safe DJ-name chain now lives in `@wxyc/database` (`dj-name.ts`), so
+ * `jobs/` writers can apply the identical decision instead of re-deriving it
+ * in SQL — the drift BS#2119's review caught in `flowsheet-april-gap-import`.
+ * Re-exported here so every existing import site (and its tests) keeps
+ * resolving against this module. See the shared module for the full rules.
  */
-export const resolveDjDisplayName = (djName: string | null): string | null => {
-  const trimmedDjName = djName?.trim() ?? '';
-  if (trimmedDjName.length > 0 && trimmedDjName.toLowerCase() !== 'anonymous') {
-    return trimmedDjName;
-  }
-  return null;
-};
+export { resolveDjDisplayName, resolveShowDjName };
 
 /**
  * Compute the next play_order value for a new flowsheet entry within a given
@@ -493,57 +469,6 @@ export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
  * and must not leak onto the public on-air playlist. See
  * `resolveDjDisplayName`'s docstring.
  */
-/**
- * The PII-safe show-DJ resolution chain (BS#1371), as a pure decision:
- * per-show override -> the linked user's public handle -> the legacy
- * tubafrenzy handle -> null. Never the real-name column, which is
- * structurally impossible here — it is not an input.
- *
- * Extracted from `resolveDjNameForShow` (below) so the windowed read
- * (`getShowsInTimeWindow`, BS#2062) can apply the identical chain to a user
- * row it JOINed in, instead of re-deriving it or paying one query per show.
- * Two callers, one decision — the alternative is a copy that drifts, on a
- * chain whose whole purpose is keeping a real name off a public wire.
- *
- * `user: null` means the show's `primary_dj_id` resolved to no row at all,
- * which is distinct from a row whose `djName` is unusable — see the
- * asymmetric legacy handling below, preserved verbatim from the original.
- */
-/**
- * The first link of the chain, on its own: a usable per-show override, or null.
- *
- * Shared with `resolveDjNameForShow` below, which needs to know whether the
- * override wins BEFORE deciding to spend a query on the user row. Exported as
- * one function rather than re-tested there, so the rule that decides what
- * reaches a public wire has exactly one definition.
- */
-const showDjNameOverride = (dj_name_override: string | null): string | null => {
-  const override = (dj_name_override ?? '').trim();
-  return override.length > 0 ? override : null;
-};
-
-export const resolveShowDjName = (input: {
-  dj_name_override: string | null;
-  legacy_dj_name: string | null;
-  primary_dj_id: string | null;
-  user: { djName: string | null } | null;
-}): string | null => {
-  const override = showDjNameOverride(input.dj_name_override);
-  if (override !== null) return override;
-
-  const legacy = input.legacy_dj_name;
-  if (input.primary_dj_id == null) return legacy;
-  // No user row: return the legacy handle as-is. Deliberately NOT trimmed,
-  // unlike the branch below — preserved from the pre-extraction behaviour so
-  // this refactor cannot change a single byte on the existing wire.
-  if (input.user == null) return legacy;
-
-  const filteredDjName = resolveDjDisplayName(input.user.djName ?? null);
-  if (filteredDjName) return filteredDjName;
-  if (legacy && legacy.trim().length > 0) return legacy.trim();
-  return null;
-};
-
 export const resolveDjNameForShow = async (show: Show): Promise<string | null> => {
   const primaryDjId = (show.primary_dj_id as string | null | undefined) ?? null;
   const base = {
