@@ -83,6 +83,22 @@ jobs:
           # Rollback is the same invocation with the secret set to 'FALSE'
           # (not cleared — the resolve step hard-fails on an empty value).
           ENRICHMENT_SUPPRESS_LML_BUDGET: ${{ secrets.ENRICHMENT_SUPPRESS_LML_BUDGET }}
+          # Donate entry point served via GET /config (WXYC/Backend-Service#2111).
+          # Neither is sensitive; both are carried through the allowlist for the
+          # same reason as CREATE_AUTO_DJ_USER above — light-up is meant to be a
+          # variable-only change with no code PR, and the resolve step hard-fails
+          # on any key it can't index. Pass restart_target=backend (the default);
+          # only apps/backend reads them.
+          #
+          # Unlike ENRICHMENT_SUPPRESS_LML_BUDGET, DONATE_ENABLED cannot use the
+          # uppercase-'TRUE' log-safety workaround: its reader is a strict
+          # `=== 'true'` comparison (apps/backend/config/donate.ts), so 'TRUE'
+          # reads as false. Set it to lowercase 'true' and expect the
+          # ::add-mask:: to redact the word "true" elsewhere in the run's logs.
+          # Rollback is 'false', not an empty value — the resolve step below
+          # hard-fails on empty.
+          DONATE_URL: ${{ secrets.DONATE_URL }}
+          DONATE_ENABLED: ${{ secrets.DONATE_ENABLED }}
         run: |
           set -euo pipefail
           KEY="${{ inputs.key }}"
@@ -95,6 +111,8 @@ jobs:
             CREATE_AUTO_DJ_USER) VALUE="$CREATE_AUTO_DJ_USER" ;;
             AUTO_DJ_EMAIL) VALUE="$AUTO_DJ_EMAIL" ;;
             ENRICHMENT_SUPPRESS_LML_BUDGET) VALUE="$ENRICHMENT_SUPPRESS_LML_BUDGET" ;;
+            DONATE_URL) VALUE="$DONATE_URL" ;;
+            DONATE_ENABLED) VALUE="$DONATE_ENABLED" ;;
             *)
               echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
               exit 1
