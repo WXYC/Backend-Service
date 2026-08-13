@@ -91,7 +91,25 @@
 --     will push the still-corrupt value back onto every linked `library` row
 --     and silently UNDO the #863 fix. (`alphabetical_name` has no cascade --
 --     0060 fires only on `artist_name` -- so that third value is inert, but
---     it is still what sorts and displays.) Worth its own follow-up ticket,
+--     it is still what sorts and displays.)
+--
+--     Two further arming conditions, neither of which needs a write to
+--     `artists` at all, because catalog-export.service.ts reads
+--     `artists.artist_name` on two paths of its own: (a) its
+--     `cross_reference_names` aggregate reads that column DIRECTLY with no
+--     `library` fallback, so merely inserting an `artist_crossreference` row
+--     touching 22025 or 23162 would publish the corrupt name into another
+--     release's export; (b) its `artist_name` is
+--     `COALESCE(library.artist_name, artists.artist_name)`, so any `library`
+--     row that ever holds a NULL `artist_name` (the column is nullable --
+--     schema.ts "Nullable until A.2") falls through to the corrupt value.
+--     BOTH ARE UNARMED IN THE 2026-08-12 CLONE, measured not assumed:
+--     `artist_crossreference` has 0 rows referencing either artist, and
+--     `library.artist_name IS NULL` is 0 across the whole table. So the
+--     export is clean TODAY and this stays a latent hazard rather than a
+--     live parity failure -- but the surface is wider than "someone writes
+--     to `artists`", and any of the three triggers fires it silently.
+--     Worth its own follow-up ticket,
 --     which INHERITS THIS TICKET'S 2026-08-31 DEADLINE: tubafrenzy is the
 --     ground truth for those `artists` rows as much as for these, and #863's
 --     values for them came from curated fuzzy matching, not from tubafrenzy.
@@ -170,9 +188,33 @@
 -- established.
 
 -- ===========================================================
+-- Session guards. Both matter more here than in a typical script because
+-- EVERY predicate below is exact-byte string equality.
+--
+-- client_encoding: if the operator's psql session resolves to a non-UTF8
+-- client encoding (it is locale-derived, so this is environmental, not a
+-- typo), the server reinterprets this file's UTF-8 bytes, every predicate
+-- matches zero rows, and the pre-amble reports 0 / 0 / 0 -- which reads as
+-- "already repaired" rather than "matched nothing". Declaring it makes that
+-- failure impossible instead of silent.
+--
+-- ON_ERROR_STOP: without it, an error inside the transaction leaves psql
+-- issuing the remaining commands into an aborted transaction, COMMIT
+-- degrades to ROLLBACK, and psql still exits 0 -- a repair that reports
+-- success and changed nothing. (`\` lines are dropped by the test's
+-- statement extractor, so this does not affect what the spec verifies.)
+-- ===========================================================
+\set ON_ERROR_STOP on
+SET client_encoding TO 'UTF8';
+
+-- ===========================================================
 -- Pre-amble: targeted rows + their BEFORE counts (1 / 10 / 1 against the
--- 2026-08-12 dev clone, see header -- re-run this against prod to get the
--- real prod counts before COMMIT).
+-- 2026-08-12 dev clone, see header).
+--
+-- To eyeball prod's real counts before anything is written, run ONLY this
+-- section first -- e.g. `sed -n '/Pre-amble/,/Transactional/p'` -- since the
+-- whole file executes non-interactively under `psql -f` and offers no pause
+-- between the pre-amble and COMMIT at which an operator could abort.
 -- ===========================================================
 SELECT '=== V_BS_FFFD_P4 pre-amble: rows targeted per (table, column) ===' AS section;
 
@@ -195,6 +237,27 @@ SELECT legacy_release_id, artist_name, album_title
 -- ===========================================================
 BEGIN;
 SET LOCAL statement_timeout = '30s';
+
+-- Blast-radius guard. The `artists` write below is bounded by the corrupt
+-- string, not by `id = 656`, and its 0060 cascade then rewrites every
+-- `library` row under whatever `artists` rows it hit. That is safe only while
+-- the corrupt string identifies exactly one `artists` row -- true of the
+-- 2026-08-12 clone, but a fact about the data, not a property of the
+-- statement. If prod has since gained a second row carrying the identical
+-- corrupt name (a duplicate from a DJ pasting the mojibake, say), the
+-- unguarded form would rename it too and cascade across its library rows,
+-- well outside the 11 BS#2114 names. Abort loudly instead.
+--
+-- The threshold is "> 1", not "<> 1", so a re-run -- where the count is
+-- legitimately 0 -- stays the genuine no-op the header promises.
+DO $$
+DECLARE n integer;
+BEGIN
+  SELECT COUNT(*) INTO n FROM wxyc_schema.artists WHERE artist_name = '�-Ziq [mu-Ziq]';
+  IF n > 1 THEN
+    RAISE EXCEPTION 'BS#2114 guard: expected at most 1 corrupt artists row, found %. Resolve the duplicates before proceeding.', n;
+  END IF;
+END $$;
 
 -- Source-of-truth fix: cascades to `library.artist_name` for every row with
 -- a matching `artist_id` via the 0060 trigger.
@@ -268,6 +331,20 @@ UNION ALL
 SELECT 'flowsheet' AS tbl, 'album_title' AS col, (SELECT COUNT(*) FROM wxyc_schema.flowsheet WHERE album_title LIKE E'%�%') AS remaining
 UNION ALL
 SELECT 'flowsheet' AS tbl, 'record_label' AS col, (SELECT COUNT(*) FROM wxyc_schema.flowsheet WHERE record_label LIKE E'%�%') AS remaining
+UNION ALL
+-- `compilation_track_artist` is NOT part of #863's scan set, but it belongs
+-- in this sweep: the parity harness compares CTA as its own multiset
+-- (catalog_parity_diff.py CTA_COLUMNS = library_release_id, artist_name,
+-- track_title), and CTA is populated by jobs/library-etl and
+-- jobs/library-identity-consumer -- the same lossy legacy path that produced
+-- everything else here. Omitting it would let this script report "clean"
+-- while the harness kept failing on rows it never looked at. 0 in the
+-- 2026-08-12 clone; included so that stays true by measurement, not
+-- assumption. (Distinct from BS#1996, which tracks a different corruption
+-- class in this table: double-encoded CP1252, not U+FFFD.)
+SELECT 'compilation_track_artist' AS tbl, 'artist_name' AS col, (SELECT COUNT(*) FROM wxyc_schema.compilation_track_artist WHERE artist_name LIKE E'%�%') AS remaining
+UNION ALL
+SELECT 'compilation_track_artist' AS tbl, 'track_title' AS col, (SELECT COUNT(*) FROM wxyc_schema.compilation_track_artist WHERE track_title LIKE E'%�%') AS remaining
 ORDER BY remaining DESC;
 
 -- Refresh planner stats on every UPDATEd table (BS#934). ANALYZE cannot run
