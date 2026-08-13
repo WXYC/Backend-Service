@@ -40,18 +40,43 @@ jest.mock('../../../../../apps/backend/services/metadata-broadcast/discogs-unava
   invalidateDiscogsUnavailableFlags: mockInvalidateDiscogsUnavailableFlags,
 }));
 
+// BS#2131 review follow-up: the insert handler's suppression metric.
+const mockRecordInsertSuppressed = jest.fn();
+jest.mock('../../../../../apps/backend/services/sse/sse-metrics.js', () => ({
+  recordInsertSuppressed: mockRecordInsertSuppressed,
+}));
+
 import * as Sentry from '@sentry/node';
 import {
   filterMetadataUpdate,
   filterMetadataInsert,
+  isAgeSuppressedInsert,
   setupMetadataBroadcast,
   resolveLiveFsInsertMaxAgeMs,
+  __resetLiveFsInsertMaxAgeWarnLatchForTests,
 } from '../../../../../apps/backend/services/metadata-broadcast/metadata-broadcast';
 import { onCdcEvent } from '@wxyc/database';
 import { serverEventsMgr } from '../../../../../apps/backend/utils/serverEvents.js';
 
 /** Flushes pending microtasks (the cache-await + Object.assign + broadcast chain). */
 const flushAsync = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+// File-wide: the warn-once latch inside resolveLiveFsInsertMaxAgeMs is
+// module-level state (deliberately, to bound log volume during a real bulk
+// import — see the source's docstring). Reset it after every test so a
+// warn-count assertion in one describe block can't be silently starved by
+// an earlier test that happened to warm the latch with the same raw value.
+afterEach(() => {
+  __resetLiveFsInsertMaxAgeWarnLatchForTests();
+});
+
+/**
+ * Fixed reference instant shared by every fixture's `CdcEvent.timestamp`
+ * (BS#2131 review follow-up: filterMetadataInsert reads the age-guard "now"
+ * from the event's own timestamp, not `Date.now()` — see
+ * `resolveEventNowMs`'s doc in the source file).
+ */
+const NOW = 1779856000000;
 
 const flowsheetUpdate = (overrides: Partial<Record<string, unknown>> = {}): CdcEvent => ({
   table: 'flowsheet',
@@ -62,7 +87,7 @@ const flowsheetUpdate = (overrides: Partial<Record<string, unknown>> = {}): CdcE
     metadata_status: 'enriched_match',
     ...overrides,
   },
-  timestamp: 1779856000000,
+  timestamp: NOW,
 });
 
 describe('filterMetadataUpdate (BS#892 PR-2)', () => {
@@ -217,7 +242,10 @@ describe('setupMetadataBroadcast Sentry path (BS-2)', () => {
   });
 });
 
-const flowsheetInsert = (overrides: Partial<Record<string, unknown>> = {}): CdcEvent => ({
+const flowsheetInsert = (
+  overrides: Partial<Record<string, unknown>> = {},
+  eventOverrides: Partial<CdcEvent> = {}
+): CdcEvent => ({
   table: 'flowsheet',
   schema: 'wxyc_schema',
   action: 'INSERT',
@@ -227,7 +255,8 @@ const flowsheetInsert = (overrides: Partial<Record<string, unknown>> = {}): CdcE
     metadata_status: 'pending',
     ...overrides,
   },
-  timestamp: 1779856000000,
+  timestamp: NOW,
+  ...eventOverrides,
 });
 
 describe('filterMetadataInsert (BS#1888)', () => {
@@ -267,7 +296,25 @@ describe('filterMetadataInsert (BS#1888)', () => {
   it('strips every internal column and keeps client columns from a full CDC row', () => {
     // makeFullFlowsheetRow() supplies its own id (42) + entry_type ('track'),
     // which win over flowsheetInsert's defaults via the spread.
-    const payload = filterMetadataInsert(flowsheetInsert(makeFullFlowsheetRow()));
+    //
+    // Round-tripped through JSON.parse(JSON.stringify(...)) — the
+    // flowsheet-projection.test.ts convention for "emulate the parsed-JSON
+    // shape: dates arrive as ISO strings, not Dates" — with a FRESH add_time
+    // (the fixture's own default is 2024-01-01, and a Date object at that).
+    // Both details matter here: makeFullFlowsheetRow()'s raw add_time is a
+    // Date OBJECT, which the age guard's parseAddTimeMs fails open on by
+    // TYPE alone (never reaching Date.parse), so a bare
+    // `filterMetadataInsert(flowsheetInsert(makeFullFlowsheetRow()))` call
+    // would pass this test without ever exercising the guard — exactly the
+    // gap a review caught (BS#2131). Stamping a recent add_time and
+    // round-tripping through JSON makes this the most production-faithful
+    // fixture in the file actually exercise the guard's real pass-through
+    // path, not its fail-open path.
+    const freshRow = JSON.parse(JSON.stringify(makeFullFlowsheetRow({ add_time: new Date(NOW - 60_000) }))) as Record<
+      string,
+      unknown
+    >;
+    const payload = filterMetadataInsert(flowsheetInsert(freshRow));
     expect(payload).not.toBeNull();
     for (const internalKey of INTERNAL_FLOWSHEET_COLUMNS) {
       expect(payload).not.toHaveProperty(internalKey);
@@ -315,9 +362,14 @@ describe('filterMetadataInsert add_time age guard (BS#2131, parent #2118 site 4)
   // add_time entirely, and production guarantees the column via NOT NULL +
   // to_jsonb(NEW), so "missing" only happens in tests / a schema drift —
   // never silently drop a live insert because of that.
+  //
+  // "now" comes from the fixture's own CdcEvent.timestamp (via
+  // resolveEventNowMs in the source), not a second function argument or a
+  // faked Date.now() — every flowsheetInsert() call below defaults to
+  // `timestamp: NOW`, so add_time offsets are computed against that same
+  // module-level NOW constant.
 
   const REAL_THRESHOLD_MS = 24 * 60 * 60 * 1000; // default LIVE_FS_INSERT_MAX_AGE_HOURS = 24
-  const NOW = 1779856000000; // fixed reference instant, matches the fixtures' CdcEvent.timestamp
 
   /**
    * Renders `ms` as an ISO string carrying an explicit fixed UTC offset
@@ -341,24 +393,24 @@ describe('filterMetadataInsert add_time age guard (BS#2131, parent #2118 site 4)
 
   it('broadcasts a track INSERT whose add_time is well within the threshold', () => {
     const addTime = new Date(NOW - 60_000).toISOString(); // 1 minute old
-    const payload = filterMetadataInsert(flowsheetInsert({ add_time: addTime }), NOW);
+    const payload = filterMetadataInsert(flowsheetInsert({ add_time: addTime }));
     expect(payload).not.toBeNull();
     expect(payload).toMatchObject({ id: 77 });
   });
 
   it('does not broadcast a track INSERT whose add_time is well outside the threshold', () => {
     const addTime = new Date(NOW - 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days old
-    expect(filterMetadataInsert(flowsheetInsert({ add_time: addTime }), NOW)).toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: addTime }))).toBeNull();
   });
 
   it('still broadcasts exactly at the threshold boundary (age === threshold is not "older")', () => {
     const addTime = new Date(NOW - REAL_THRESHOLD_MS).toISOString();
-    expect(filterMetadataInsert(flowsheetInsert({ add_time: addTime }), NOW)).not.toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: addTime }))).not.toBeNull();
   });
 
   it('does not broadcast one millisecond past the threshold boundary', () => {
     const addTime = new Date(NOW - REAL_THRESHOLD_MS - 1).toISOString();
-    expect(filterMetadataInsert(flowsheetInsert({ add_time: addTime }), NOW)).toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: addTime }))).toBeNull();
   });
 
   it('parses an offset-bearing (non-Z) ISO string the way to_jsonb(timestamptz) renders it', () => {
@@ -366,42 +418,112 @@ describe('filterMetadataInsert add_time age guard (BS#2131, parent #2118 site 4)
     // offset, not a guaranteed Z suffix — e.g. "-04:00" rather than "Z".
     // Parsing must not pattern-match on a trailing "Z".
     const recentOffsetAddTime = toOffsetIso(NOW - 60_000, -4); // 1 minute old
-    expect(filterMetadataInsert(flowsheetInsert({ add_time: recentOffsetAddTime }), NOW)).not.toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: recentOffsetAddTime }))).not.toBeNull();
 
     const staleOffsetAddTime = toOffsetIso(NOW - 30 * 24 * 60 * 60 * 1000, -4); // 30 days old
-    expect(filterMetadataInsert(flowsheetInsert({ add_time: staleOffsetAddTime }), NOW)).toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: staleOffsetAddTime }))).toBeNull();
   });
 
   it('fails open (still broadcasts) when add_time is entirely absent, matching every existing fixture', () => {
     const event = flowsheetInsert(); // no add_time key at all
-    expect(filterMetadataInsert(event, NOW)).not.toBeNull();
+    expect(filterMetadataInsert(event)).not.toBeNull();
   });
 
   it('fails open when add_time is null', () => {
-    expect(filterMetadataInsert(flowsheetInsert({ add_time: null }), NOW)).not.toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: null }))).not.toBeNull();
   });
 
   it('fails open when add_time is an unparseable string (Date.parse -> NaN)', () => {
-    expect(filterMetadataInsert(flowsheetInsert({ add_time: 'not-a-real-timestamp' }), NOW)).not.toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: 'not-a-real-timestamp' }))).not.toBeNull();
   });
 
   it('fails open when add_time is not a string at all (defensive against schema drift)', () => {
-    expect(filterMetadataInsert(flowsheetInsert({ add_time: 12345 }), NOW)).not.toBeNull();
-    expect(filterMetadataInsert(flowsheetInsert({ add_time: {} }), NOW)).not.toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: 12345 }))).not.toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: {} }))).not.toBeNull();
   });
 
   it('honors LIVE_FS_INSERT_MAX_AGE_HOURS to shrink the threshold', () => {
     process.env.LIVE_FS_INSERT_MAX_AGE_HOURS = '1';
     const twoHoursOld = new Date(NOW - 2 * 60 * 60 * 1000).toISOString();
     const thirtyMinutesOld = new Date(NOW - 30 * 60 * 1000).toISOString();
-    expect(filterMetadataInsert(flowsheetInsert({ add_time: twoHoursOld }), NOW)).toBeNull();
-    expect(filterMetadataInsert(flowsheetInsert({ add_time: thirtyMinutesOld }), NOW)).not.toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: twoHoursOld }))).toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: thirtyMinutesOld }))).not.toBeNull();
   });
 
   it('honors LIVE_FS_INSERT_MAX_AGE_HOURS to widen the threshold', () => {
     process.env.LIVE_FS_INSERT_MAX_AGE_HOURS = '720'; // 30 days
     const twentyDaysOld = new Date(NOW - 20 * 24 * 60 * 60 * 1000).toISOString();
-    expect(filterMetadataInsert(flowsheetInsert({ add_time: twentyDaysOld }), NOW)).not.toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: twentyDaysOld }))).not.toBeNull();
+  });
+
+  it('LIVE_FS_INSERT_MAX_AGE_HOURS=0 is NOT a kill switch — a fresh insert still broadcasts', () => {
+    // The regression this test pins (review finding, BS#2131 follow-up):
+    // resolveLiveFsInsertMaxAgeMs('0') used to return 0ms verbatim, and
+    // isOlderThanThreshold's `nowMs - parsedAddTimeMs > 0` is true for every
+    // real insert (a row is always at least a few ms old by the time this
+    // callback runs) — so `0` silently classified every live play as
+    // historical and took the whole liveFs:insert feed dark station-wide.
+    // `0` must now be rejected (warn-and-default to 24h), so a one-second-old
+    // insert still broadcasts even with the misconfigured value set.
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    process.env.LIVE_FS_INSERT_MAX_AGE_HOURS = '0';
+    const oneSecondOld = new Date(NOW - 1000).toISOString();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: oneSecondOld }))).not.toBeNull();
+    warnSpy.mockRestore();
+  });
+
+  it("falls back to Date.now() when the CDC event's own timestamp is missing or non-numeric", () => {
+    // cdc-listener.ts's onCdcEvent dispatch does a bare `JSON.parse(payload)
+    // as CdcEvent` with no runtime validation, so `timestamp` isn't
+    // guaranteed present or numeric. resolveEventNowMs falls back to the
+    // real wall clock in that case — exercised here against REAL current
+    // time (not the fixed NOW constant) since that's exactly what
+    // production would do.
+    const recentRealAddTime = new Date(Date.now() - 1000).toISOString(); // 1 second old
+    const staleRealAddTime = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days old
+
+    expect(
+      filterMetadataInsert(flowsheetInsert({ add_time: recentRealAddTime }, { timestamp: undefined }))
+    ).not.toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: staleRealAddTime }, { timestamp: undefined }))).toBeNull();
+
+    // Non-numeric timestamp (e.g. a parse artifact) falls back the same way.
+    expect(
+      filterMetadataInsert(
+        flowsheetInsert({ add_time: recentRealAddTime }, { timestamp: 'not-a-number' as unknown as number })
+      )
+    ).not.toBeNull();
+  });
+});
+
+describe('isAgeSuppressedInsert (BS#2131 review follow-up)', () => {
+  afterEach(() => {
+    delete process.env.LIVE_FS_INSERT_MAX_AGE_HOURS;
+  });
+
+  it('is true for a track INSERT the age guard would suppress', () => {
+    const staleAddTime = new Date(NOW - 30 * 24 * 60 * 60 * 1000).toISOString();
+    expect(isAgeSuppressedInsert(flowsheetInsert({ add_time: staleAddTime }))).toBe(true);
+  });
+
+  it('is false for a track INSERT within the threshold', () => {
+    const recentAddTime = new Date(NOW - 60_000).toISOString();
+    expect(isAgeSuppressedInsert(flowsheetInsert({ add_time: recentAddTime }))).toBe(false);
+  });
+
+  it('is false for an ordinary non-applicable CDC event (not a track insert at all)', () => {
+    // These are NOT "suppressed by the age guard" — they're simply not the
+    // shape the guard applies to. isAgeSuppressedInsert must not conflate
+    // routine onCdcEvent traffic with an intentional historical-row drop.
+    expect(isAgeSuppressedInsert({ ...flowsheetInsert(), action: 'UPDATE' })).toBe(false);
+    expect(isAgeSuppressedInsert({ ...flowsheetInsert(), table: 'rotation' })).toBe(false);
+    expect(isAgeSuppressedInsert(flowsheetInsert({ entry_type: 'show_start' }))).toBe(false);
+    expect(isAgeSuppressedInsert(flowsheetInsert({ id: undefined }))).toBe(false);
+  });
+
+  it('is false (fails open, matches filterMetadataInsert) when add_time is missing or unparseable', () => {
+    expect(isAgeSuppressedInsert(flowsheetInsert())).toBe(false);
+    expect(isAgeSuppressedInsert(flowsheetInsert({ add_time: 'garbage' }))).toBe(false);
   });
 });
 
@@ -424,8 +546,15 @@ describe('resolveLiveFsInsertMaxAgeMs', () => {
     expect(resolveLiveFsInsertMaxAgeMs('0.5')).toBe(30 * 60 * 1000);
   });
 
-  it('accepts 0 (disables the guard — every insert is treated as within threshold)', () => {
-    expect(resolveLiveFsInsertMaxAgeMs('0')).toBe(0);
+  it('rejects 0 and warns-and-defaults to 24h — 0 is a station-wide kill switch, not "disabled"', () => {
+    // nowMs - parsedAddTimeMs > 0 is true for every real insert, so a 0ms
+    // threshold would classify every live play as historical. Same hazard,
+    // same handling as DIGEST_MAX_PLAY_AGE_HOURS's requirePositiveInt.
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(resolveLiveFsInsertMaxAgeMs('0')).toBe(24 * 60 * 60 * 1000);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toMatch(/LIVE_FS_INSERT_MAX_AGE_HOURS/);
+    warnSpy.mockRestore();
   });
 
   it('warns and falls back to the default on a negative or non-numeric value', () => {
@@ -434,6 +563,21 @@ describe('resolveLiveFsInsertMaxAgeMs', () => {
     expect(resolveLiveFsInsertMaxAgeMs('abc')).toBe(24 * 60 * 60 * 1000);
     expect(warnSpy).toHaveBeenCalledTimes(2);
     expect(warnSpy.mock.calls[0][0]).toMatch(/LIVE_FS_INSERT_MAX_AGE_HOURS/);
+    warnSpy.mockRestore();
+  });
+
+  it('warn-once latch: repeating the SAME invalid raw value warns only once, but a DIFFERENT invalid value warns again', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    resolveLiveFsInsertMaxAgeMs('bogus-repeat-value');
+    resolveLiveFsInsertMaxAgeMs('bogus-repeat-value');
+    resolveLiveFsInsertMaxAgeMs('bogus-repeat-value');
+    const callsForRepeat = warnSpy.mock.calls.filter((c) => String(c[0]).includes('bogus-repeat-value')).length;
+    expect(callsForRepeat).toBe(1);
+
+    resolveLiveFsInsertMaxAgeMs('bogus-different-value');
+    const callsForDifferent = warnSpy.mock.calls.filter((c) => String(c[0]).includes('bogus-different-value')).length;
+    expect(callsForDifferent).toBe(1);
+
     warnSpy.mockRestore();
   });
 });
@@ -461,9 +605,11 @@ describe('setupMetadataBroadcast liveFs:insert registration (BS#1888)', () => {
       type: 'insert',
       payload: expect.objectContaining({ id: 77, entry_type: 'track', metadata_status: 'pending' }),
     });
+    // A normal live broadcast is NOT a suppression (BS#2131 review follow-up).
+    expect(mockRecordInsertSuppressed).not.toHaveBeenCalled();
   });
 
-  it('does not broadcast on a non-track INSERT', () => {
+  it('does not broadcast on a non-track INSERT, and does not record it as a suppression', () => {
     (serverEventsMgr.broadcast as jest.Mock).mockImplementation(() => undefined);
 
     setupMetadataBroadcast();
@@ -472,6 +618,23 @@ describe('setupMetadataBroadcast liveFs:insert registration (BS#1888)', () => {
     insertCb(flowsheetInsert({ entry_type: 'show_start' }));
 
     expect(serverEventsMgr.broadcast).not.toHaveBeenCalled();
+    // A marker row isn't "a track insert the age guard suppressed" — it was
+    // never a candidate in the first place, so it must not inflate the metric.
+    expect(mockRecordInsertSuppressed).not.toHaveBeenCalled();
+  });
+
+  it('records SSE/InsertSuppressed (not a broadcast) when the age guard drops a historical track INSERT', () => {
+    (serverEventsMgr.broadcast as jest.Mock).mockImplementation(() => undefined);
+
+    setupMetadataBroadcast();
+
+    const insertCb = (onCdcEvent as jest.Mock).mock.calls[1][0] as (event: CdcEvent) => void;
+    const staleAddTime = new Date(NOW - 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days old
+    insertCb(flowsheetInsert({ add_time: staleAddTime }));
+
+    expect(serverEventsMgr.broadcast).not.toHaveBeenCalled();
+    expect(mockRecordInsertSuppressed).toHaveBeenCalledTimes(1);
+    expect(mockRecordInsertSuppressed).toHaveBeenCalledWith('live-fs-topic');
   });
 
   it('captures an insert-broadcast exception to Sentry with module tag', () => {

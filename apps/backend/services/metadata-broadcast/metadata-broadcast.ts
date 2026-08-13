@@ -50,6 +50,7 @@ import type { LiveFsInsertEvent } from '@wxyc/shared/dtos';
 import { serverEventsMgr, Topics, FsEvents } from '../../utils/serverEvents.js';
 import { pickClientFacingColumns, toDiscogsUnavailableWireFields } from '../../utils/flowsheet-projection.js';
 import { getCachedDiscogsUnavailableFlags, invalidateDiscogsUnavailableFlags } from './discogs-unavailable-cache.js';
+import { recordInsertSuppressed } from '../sse/sse-metrics.js';
 
 const TERMINAL_STATUSES = new Set(['enriched_match', 'enriched_no_match', 'failed_no_retry']);
 
@@ -64,10 +65,31 @@ const LOG_PREFIX = '[metadata-broadcast]';
 const LIVE_FS_INSERT_MAX_AGE_HOURS_DEFAULT = 24;
 
 /**
+ * Warn-once latch for `resolveLiveFsInsertMaxAgeMs`, keyed on the raw env-var
+ * string rather than a boolean. The resolver runs once per flowsheet INSERT
+ * callback — during exactly the bulk import this feature targets, a
+ * persistently-misconfigured env var would otherwise log one warning per row.
+ * Keying on the raw string (not just "have we ever warned") means a mid-run
+ * env change to a DIFFERENT bad value still gets its own warning, rather than
+ * going silent because *something* was already warned about once.
+ */
+let lastWarnedRawLiveFsInsertMaxAge: string | undefined;
+
+/**
  * Resolves the `liveFs:insert` age-guard threshold in milliseconds.
  * Warn-and-default on misconfig (never throw): this runs on every flowsheet
  * INSERT's CDC callback, so a bad env var must degrade to the safe default
  * rather than take down the broadcast path for every live play.
+ *
+ * `0` is rejected alongside negative and non-numeric values — it is NOT
+ * "disable the guard." `isOlderThanThreshold` evaluates `nowMs -
+ * parsedAddTimeMs > thresholdMs`; that difference is positive for every real
+ * insert (the row is always at least a few milliseconds old by the time this
+ * callback runs), so a `0` threshold classifies every live play as
+ * historical and silently takes the whole `liveFs:insert` feed dark
+ * station-wide — the exact inverse of what an operator reaching for `0` as
+ * "no ceiling" would expect. Same hazard, same handling as
+ * `DIGEST_MAX_PLAY_AGE_HOURS`'s `requirePositiveInt` (see `docs/env-vars.md`).
  */
 export function resolveLiveFsInsertMaxAgeMs(
   raw: string | undefined = process.env.LIVE_FS_INSERT_MAX_AGE_HOURS
@@ -75,29 +97,93 @@ export function resolveLiveFsInsertMaxAgeMs(
   const defaultMs = LIVE_FS_INSERT_MAX_AGE_HOURS_DEFAULT * 60 * 60 * 1000;
   if (raw === undefined || raw.trim() === '') return defaultMs;
   const parsedHours = Number(raw);
-  if (!Number.isFinite(parsedHours) || parsedHours < 0) {
-    console.warn(
-      `${LOG_PREFIX} invalid LIVE_FS_INSERT_MAX_AGE_HOURS=${JSON.stringify(raw)}; using default ${LIVE_FS_INSERT_MAX_AGE_HOURS_DEFAULT}`
-    );
+  if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
+    if (lastWarnedRawLiveFsInsertMaxAge !== raw) {
+      console.warn(
+        `${LOG_PREFIX} invalid LIVE_FS_INSERT_MAX_AGE_HOURS=${JSON.stringify(raw)} (must be a positive number of hours; 0 is rejected, not "disabled" — see docs/env-vars.md); using default ${LIVE_FS_INSERT_MAX_AGE_HOURS_DEFAULT}`
+      );
+      lastWarnedRawLiveFsInsertMaxAge = raw;
+    }
     return defaultMs;
   }
   return parsedHours * 60 * 60 * 1000;
 }
 
 /**
- * True when `rawAddTime` parses to an instant strictly older than
- * `thresholdMs` before `nowMs`. Fails open (returns false — "not
- * historical", i.e. broadcast proceeds) on anything that isn't a parseable
- * string: `to_jsonb(NEW)` always ships `add_time` as an offset-bearing ISO
- * string in production (the column is `.notNull()`), so a non-string or
- * unparseable value here only happens in a test fixture or a schema-drift
- * edge case — never a reason to silently drop a live insert.
+ * Test hook: clear the warn-once latch. Only consumed by
+ * tests/unit/apps/backend/services/metadata-broadcast.test.ts, so tests that
+ * exercise the same invalid raw value (e.g. `'0'`) from different describe
+ * blocks don't see each other's latched state — mirrors the
+ * `__resetForTests` convention in `../sse/sse-metrics.ts`.
  */
-function isHistoricalAddTime(rawAddTime: unknown, thresholdMs: number, nowMs: number): boolean {
-  if (typeof rawAddTime !== 'string') return false;
+export function __resetLiveFsInsertMaxAgeWarnLatchForTests(): void {
+  lastWarnedRawLiveFsInsertMaxAge = undefined;
+}
+
+/**
+ * Parses `rawAddTime` to epoch milliseconds, or `null` when it isn't a
+ * parseable string. `to_jsonb(NEW)` always ships `add_time` as an
+ * offset-bearing ISO string in production (the column is `.notNull()`), so a
+ * non-string or unparseable value here only happens in a test fixture or a
+ * schema-drift edge case. Callers treat `null` as "fail open" (not
+ * historical) — never a reason to silently drop a live insert.
+ */
+function parseAddTimeMs(rawAddTime: unknown): number | null {
+  if (typeof rawAddTime !== 'string') return null;
   const parsedMs = Date.parse(rawAddTime);
-  if (Number.isNaN(parsedMs)) return false;
-  return nowMs - parsedMs > thresholdMs;
+  return Number.isNaN(parsedMs) ? null : parsedMs;
+}
+
+/**
+ * True when an already-parsed `add_time` (epoch ms) is older than the
+ * age-guard threshold relative to `nowMs`. Split out from `parseAddTimeMs` so
+ * callers only pay for `resolveLiveFsInsertMaxAgeMs()`'s env read when there
+ * is a parseable value to compare against — a marker row or a fixture
+ * without `add_time` never reaches this function.
+ */
+function isOlderThanThreshold(parsedAddTimeMs: number, nowMs: number): boolean {
+  return nowMs - parsedAddTimeMs > resolveLiveFsInsertMaxAgeMs();
+}
+
+/**
+ * The instant to compare `add_time` against: `CdcEvent.timestamp`, populated
+ * by `(extract(epoch from clock_timestamp()) * 1000)::bigint` in the SAME
+ * trigger invocation that produced `to_jsonb(NEW)` — the same database clock
+ * `add_time` itself came from, at essentially the same instant. Deliberately
+ * NOT `Date.now()`: that would compare a database-clock `add_time` against
+ * an app-server clock, a needless cross-clock comparison that's harmless at
+ * a 24h threshold but not harmless under the narrow-the-threshold mitigation
+ * this file's `filterMetadataInsert` docstring recommends for the
+ * recent-re-import residual. Falls back to `Date.now()` only because
+ * `cdc-listener.ts`'s `onCdcEvent` dispatch does a bare `JSON.parse(payload)
+ * as CdcEvent` with no runtime validation, so `timestamp` isn't guaranteed
+ * present or numeric.
+ */
+function resolveEventNowMs(event: CdcEvent): number {
+  return typeof event.timestamp === 'number' ? event.timestamp : Date.now();
+}
+
+type TrackInsertMatch = { data: Record<string, unknown>; id: number };
+
+/**
+ * Structural match for a flowsheet track INSERT — `table`/`action`/`data`
+ * present/`entry_type === 'track'`/numeric `id` — WITHOUT the add_time age
+ * guard. Shared by `filterMetadataInsert` and `isAgeSuppressedInsert` so the
+ * two can never disagree about what counts as "a track insert" the age guard
+ * applies to.
+ */
+function matchTrackInsert(event: CdcEvent): TrackInsertMatch | null {
+  if (event.table !== 'flowsheet') return null;
+  if (event.action !== 'INSERT') return null;
+  if (!event.data) return null;
+
+  const data = event.data as Record<string, unknown>;
+  if (data.entry_type !== 'track') return null;
+
+  const id = data.id;
+  if (typeof id !== 'number') return null;
+
+  return { data, id };
 }
 
 /**
@@ -140,8 +226,15 @@ export function filterMetadataUpdate(event: CdcEvent): LiveFsUpdatePayload | nul
 }
 
 /**
- * Pure filter for the `liveFs:insert` broadcast (BS#1888) — returns the
- * client-facing row payload on a match, null on skip.
+ * Filter for the `liveFs:insert` broadcast (BS#1888) — returns the
+ * client-facing row payload on a match, null on skip. Synchronous and
+ * DB-free (no I/O), preserving the deliberate testability seam — but as of
+ * the add_time age guard below, NOT a strict pure function of `event` alone:
+ * `resolveLiveFsInsertMaxAgeMs()` reads `process.env.LIVE_FS_INSERT_MAX_AGE_HOURS`
+ * as ambient config. Tests still control that deterministically by setting
+ * the env var before the call; only genuine non-determinism (a DB read, wall
+ * clock) is disallowed here — see `resolveEventNowMs`'s doc for why the
+ * clock itself comes from `event.timestamp`, not `Date.now()`.
  *
  * Fires on a flowsheet INSERT of a `track` row: the Epic C ([#877]) "a new
  * track was played" event. The CDC trigger captures every insert source (a
@@ -164,11 +257,15 @@ export function filterMetadataUpdate(event: CdcEvent): LiveFsUpdatePayload | nul
  * analysis). A row whose `add_time` is older than `LIVE_FS_INSERT_MAX_AGE_HOURS`
  * (default 24h, `resolveLiveFsInsertMaxAgeMs`) is treated as historical and
  * does not broadcast; a normal live play (`add_time` recent) still does.
- * Fails OPEN on a missing or unparseable `add_time` — see
- * `isHistoricalAddTime`'s doc — and parses defensively via
- * `Number.isNaN(Date.parse(...))` rather than pattern-matching the format,
- * since `to_jsonb` renders a `timestamptz` as an offset-bearing ISO string
- * (e.g. `-04:00`), not a guaranteed `Z` suffix.
+ * Fails OPEN on a missing or unparseable `add_time` — see `parseAddTimeMs`'s
+ * doc — and parses defensively via `Number.isNaN(Date.parse(...))` rather
+ * than pattern-matching the format, since `to_jsonb` renders a `timestamptz`
+ * as an offset-bearing ISO string (e.g. `-04:00`), not a guaranteed `Z`
+ * suffix. A suppressed insert is silent from this function's own
+ * perspective (it stays a pure predicate) — `setupMetadataBroadcast` below
+ * is the one that turns a suppression into a `SSE/InsertSuppressed`
+ * CloudWatch signal via `isAgeSuppressedInsert`, so the drop is observable
+ * without the filter itself taking on a side effect.
  *
  * **Residual the age guard does NOT cover**: a *recent* re-import — e.g. a
  * last-write tubafrenzy re-run (#1543) done hours after the plays it carries
@@ -177,7 +274,8 @@ export function filterMetadataUpdate(event: CdcEvent): LiveFsUpdatePayload | nul
  * row that distinguishes "just played" from "just imported, but recently
  * aired," so the mitigation for that case is procedural, not code: run such
  * re-imports outside the live listening window, or narrow the threshold
- * (`LIVE_FS_INSERT_MAX_AGE_HOURS`) for the duration of the run. See #2118's
+ * (`LIVE_FS_INSERT_MAX_AGE_HOURS`) for the duration of the run — never `0`,
+ * which is rejected (see `resolveLiveFsInsertMaxAgeMs`'s doc). See #2118's
  * "chronOrderID" discussion for the full shape of this residual.
  *
  * Same `CLIENT_FACING_FLOWSHEET_COLUMNS` projection as the update broadcast
@@ -185,27 +283,43 @@ export function filterMetadataUpdate(event: CdcEvent): LiveFsUpdatePayload | nul
  * is the generated `LiveFsInsertEvent['payload']` (`FlowsheetEntryResponse`)
  * from `@wxyc/shared` (#273), whose enrichment fields are nullable so a
  * pre-enrichment row is valid.
- *
- * @param now - Injectable clock for deterministic boundary tests. Defaults to
- *   `Date.now()`; every production call site omits it.
  */
-export function filterMetadataInsert(event: CdcEvent, now: number = Date.now()): LiveFsInsertEvent['payload'] | null {
-  if (event.table !== 'flowsheet') return null;
-  if (event.action !== 'INSERT') return null;
-  if (!event.data) return null;
+export function filterMetadataInsert(event: CdcEvent): LiveFsInsertEvent['payload'] | null {
+  const match = matchTrackInsert(event);
+  if (!match) return null;
 
-  const data = event.data as Record<string, unknown>;
-  if (data.entry_type !== 'track') return null;
-
-  const id = data.id;
-  if (typeof id !== 'number') return null;
-
-  if (isHistoricalAddTime(data.add_time, resolveLiveFsInsertMaxAgeMs(), now)) return null;
+  const parsedAddTimeMs = parseAddTimeMs(match.data.add_time);
+  if (parsedAddTimeMs !== null && isOlderThanThreshold(parsedAddTimeMs, resolveEventNowMs(event))) {
+    return null;
+  }
 
   return {
-    ...pickClientFacingColumns(data),
-    id,
+    ...pickClientFacingColumns(match.data),
+    id: match.id,
   } as LiveFsInsertEvent['payload'];
+}
+
+/**
+ * True when `event` structurally matches a flowsheet track INSERT (the same
+ * match `filterMetadataInsert` requires, via the shared `matchTrackInsert`)
+ * but its `add_time` is older than the age-guard threshold — i.e. exactly
+ * the branch inside `filterMetadataInsert` that returns `null` for that
+ * reason. Distinguishes an intentional historical-row drop (signal worth a
+ * metric) from the ordinary "this CDC event isn't a track insert at all"
+ * nulls (wrong table/action, non-track `entry_type`, missing `id`) that make
+ * up the bulk of `onCdcEvent` traffic — the latter would swamp a naive
+ * "count every null" metric with routing noise. Consumed by
+ * `setupMetadataBroadcast` to drive the `SSE/InsertSuppressed` CloudWatch
+ * counter; `filterMetadataInsert` itself stays free of side effects.
+ */
+export function isAgeSuppressedInsert(event: CdcEvent): boolean {
+  const match = matchTrackInsert(event);
+  if (!match) return false;
+
+  const parsedAddTimeMs = parseAddTimeMs(match.data.add_time);
+  if (parsedAddTimeMs === null) return false;
+
+  return isOlderThanThreshold(parsedAddTimeMs, resolveEventNowMs(event));
 }
 
 /**
@@ -220,14 +334,21 @@ export function filterMetadataInsert(event: CdcEvent, now: number = Date.now()):
  * BS#1962: both handlers additionally enrich a library-linked payload with
  * `discogsUnavailable` / `discogsUnavailableNote` before broadcasting, for
  * parity with the paginated read path's `transformToV2` (#1908). The filters
- * (`filterMetadataUpdate` / `filterMetadataInsert`) stay pure and synchronous
- * — their "no DB" testability seam is load-bearing for the existing filter
- * unit tests — so the enrichment lives here, gated behind a non-null
+ * (`filterMetadataUpdate` / `filterMetadataInsert`) stay synchronous and
+ * DB-free — their "no DB" testability seam is load-bearing for the existing
+ * filter unit tests — so the enrichment lives here, gated behind a non-null
  * `album_id`: a non-library row (`album_id === null`) takes the ORIGINAL
  * fully-synchronous path unchanged (the `await` on an already-resolved
  * value would still defer the broadcast to a later microtask and break the
  * "broadcast fired synchronously" assertions those fixtures pin). Only a
  * library-linked row pays the extra (cached, coalesced) read.
+ *
+ * BS#2131 review follow-up: the insert handler also records a
+ * `SSE/InsertSuppressed` CloudWatch signal (`recordInsertSuppressed`, see
+ * `../sse/sse-metrics.ts`) whenever `isAgeSuppressedInsert` says the age
+ * guard dropped an otherwise-valid track insert. Counting lives here, not
+ * inside `filterMetadataInsert`, so the filter itself stays a side-effect-free
+ * predicate.
  *
  * The cache read is fire-and-forget from the CDC dispatcher's perspective:
  * `startCdcDispatcher` invokes every registered callback synchronously and
@@ -319,7 +440,16 @@ export function setupMetadataBroadcast(): void {
   // terminal state. Same per-process LISTEN + own-clients-only fan-out.
   onCdcEvent((event) => {
     const payload = filterMetadataInsert(event);
-    if (!payload) return;
+    if (!payload) {
+      // BS#2131 review follow-up: distinguish "the age guard intentionally
+      // dropped a historical track insert" (signal) from every other reason
+      // filterMetadataInsert returned null (an unrelated CDC event — most of
+      // onCdcEvent's traffic). Only the former increments the metric.
+      if (isAgeSuppressedInsert(event)) {
+        recordInsertSuppressed(Topics.liveFs);
+      }
+      return;
+    }
     const albumId = typeof payload.album_id === 'number' ? payload.album_id : null;
     if (albumId === null) {
       broadcastInsert(payload);

@@ -13,6 +13,7 @@ jest.mock('@aws-sdk/client-cloudwatch', () => ({
 import {
   recordBroadcast,
   recordBroadcastFailure,
+  recordInsertSuppressed,
   startSseMetrics,
   stopSseMetrics,
   __resetForTests,
@@ -132,6 +133,42 @@ describe('sse-metrics', () => {
 
       const failures = allData().filter((d) => d.MetricName === 'SSE/BroadcastFailures');
       expect(failures).toHaveLength(0);
+    });
+  });
+
+  describe('InsertSuppressed counter (BS#2131 review follow-up)', () => {
+    it('emits dimensioned per-topic series AND a dimensionless companion (alarm input)', async () => {
+      recordInsertSuppressed('live-fs-topic');
+      recordInsertSuppressed('live-fs-topic');
+      recordInsertSuppressed('test-topic');
+      await __flushForTests();
+
+      const suppressed = allData().filter((d) => d.MetricName === 'SSE/InsertSuppressed');
+      // 2 dimensioned + 1 companion = 3.
+      expect(suppressed).toHaveLength(3);
+
+      const dimensioned = suppressed.filter((d) => d.Dimensions.length > 0);
+      expect(dimensioned).toHaveLength(2);
+
+      const companion = suppressed.find((d) => d.Dimensions.length === 0);
+      expect(companion).toBeDefined();
+      expect(companion?.Value).toBe(3);
+    });
+
+    it('does not emit the companion when there are zero suppressions', async () => {
+      recordBroadcast('live-fs-topic');
+      await __flushForTests();
+
+      const suppressed = allData().filter((d) => d.MetricName === 'SSE/InsertSuppressed');
+      expect(suppressed).toHaveLength(0);
+    });
+
+    it('SSE_METRICS_DISABLED=true short-circuits recordInsertSuppressed', async () => {
+      process.env.SSE_METRICS_DISABLED = 'true';
+      recordInsertSuppressed('live-fs-topic');
+      await __flushForTests();
+
+      expect(mockSend).not.toHaveBeenCalled();
     });
   });
 
