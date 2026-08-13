@@ -184,10 +184,14 @@ jest.mock('@wxyc/database', () => ({
 // siblings below — the ordering test at "queries the most recent MAX_ENTRIES
 // (200) rows ordered by ..." needs to assert the actual orderBy() column
 // arguments (BS#2132), and the real desc() applied to the mocked `flowsheet`
-// column stand-ins (plain strings — see the '@wxyc/database' mock below)
-// produces a deep-equal-comparable SQL wrapper each call, the same pattern
-// `flowsheet.getEntriesByShow.ordering.test.ts` uses for its own
-// `desc(flowsheet.play_order)` / `desc(flowsheet.id)` assertions.
+// column stand-ins (plain strings — see the '@wxyc/database' mock above)
+// produces a deep-equal-comparable SQL wrapper each call. That's the same
+// assertion trick `flowsheet.getEntriesByShow.ordering.test.ts` relies on
+// for its own `desc(flowsheet.play_order)` / `desc(flowsheet.id)`
+// assertions — though that file doesn't mock drizzle-orm at all; it imports
+// the real `desc` directly. This file already mocks the rest of
+// drizzle-orm's exports for other tests, so it uses `jest.requireActual`
+// here to pull in only the real `desc`, leaving those other mocks alone.
 jest.mock('drizzle-orm', () => {
   const actual = jest.requireActual<typeof import('drizzle-orm')>('drizzle-orm');
   return {
