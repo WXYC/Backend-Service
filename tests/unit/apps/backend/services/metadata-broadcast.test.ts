@@ -45,6 +45,7 @@ import {
   filterMetadataUpdate,
   filterMetadataInsert,
   setupMetadataBroadcast,
+  resolveLiveFsInsertMaxAgeMs,
 } from '../../../../../apps/backend/services/metadata-broadcast/metadata-broadcast';
 import { onCdcEvent } from '@wxyc/database';
 import { serverEventsMgr } from '../../../../../apps/backend/utils/serverEvents.js';
@@ -299,6 +300,141 @@ describe('filterMetadataInsert (BS#1888)', () => {
   it('skips when id is missing or not a number', () => {
     expect(filterMetadataInsert(flowsheetInsert({ id: undefined }))).toBeNull();
     expect(filterMetadataInsert(flowsheetInsert({ id: 'seventy-seven' }))).toBeNull();
+  });
+});
+
+describe('filterMetadataInsert add_time age guard (BS#2131, parent #2118 site 4)', () => {
+  // #2118 site 4: flowsheet.id is not a chronological key, so a bulk
+  // historical/backfill INSERT lands at the head of the serial PK but not
+  // at the head of the timeline. Without an age guard, filterMetadataInsert
+  // would broadcast every row of such an import on the anonymous liveFs
+  // topic — #1888's stated invariant ("a steady-state insert is always a
+  // live/recent row") enforced for the first time here.
+  //
+  // Fail-open is the load-bearing policy: every fixture above omits
+  // add_time entirely, and production guarantees the column via NOT NULL +
+  // to_jsonb(NEW), so "missing" only happens in tests / a schema drift —
+  // never silently drop a live insert because of that.
+
+  const REAL_THRESHOLD_MS = 24 * 60 * 60 * 1000; // default LIVE_FS_INSERT_MAX_AGE_HOURS = 24
+  const NOW = 1779856000000; // fixed reference instant, matches the fixtures' CdcEvent.timestamp
+
+  /**
+   * Renders `ms` as an ISO string carrying an explicit fixed UTC offset
+   * (e.g. "-04:00") instead of a "Z" suffix — mirroring how Postgres's
+   * to_jsonb(timestamptz) renders the session-timezone offset, never a
+   * guaranteed "Z". Round-trips through Date.parse to the same instant.
+   */
+  const toOffsetIso = (ms: number, offsetHours: number): string => {
+    const shifted = new Date(ms + offsetHours * 60 * 60 * 1000);
+    const isoLocal = shifted.toISOString().replace('Z', '');
+    const sign = offsetHours >= 0 ? '+' : '-';
+    const abs = Math.abs(offsetHours);
+    const hh = String(Math.trunc(abs)).padStart(2, '0');
+    const mm = String(Math.round((abs % 1) * 60)).padStart(2, '0');
+    return `${isoLocal}${sign}${hh}:${mm}`;
+  };
+
+  afterEach(() => {
+    delete process.env.LIVE_FS_INSERT_MAX_AGE_HOURS;
+  });
+
+  it('broadcasts a track INSERT whose add_time is well within the threshold', () => {
+    const addTime = new Date(NOW - 60_000).toISOString(); // 1 minute old
+    const payload = filterMetadataInsert(flowsheetInsert({ add_time: addTime }), NOW);
+    expect(payload).not.toBeNull();
+    expect(payload).toMatchObject({ id: 77 });
+  });
+
+  it('does not broadcast a track INSERT whose add_time is well outside the threshold', () => {
+    const addTime = new Date(NOW - 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days old
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: addTime }), NOW)).toBeNull();
+  });
+
+  it('still broadcasts exactly at the threshold boundary (age === threshold is not "older")', () => {
+    const addTime = new Date(NOW - REAL_THRESHOLD_MS).toISOString();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: addTime }), NOW)).not.toBeNull();
+  });
+
+  it('does not broadcast one millisecond past the threshold boundary', () => {
+    const addTime = new Date(NOW - REAL_THRESHOLD_MS - 1).toISOString();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: addTime }), NOW)).toBeNull();
+  });
+
+  it('parses an offset-bearing (non-Z) ISO string the way to_jsonb(timestamptz) renders it', () => {
+    // Postgres's to_jsonb on a timestamptz renders the session-timezone
+    // offset, not a guaranteed Z suffix — e.g. "-04:00" rather than "Z".
+    // Parsing must not pattern-match on a trailing "Z".
+    const recentOffsetAddTime = toOffsetIso(NOW - 60_000, -4); // 1 minute old
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: recentOffsetAddTime }), NOW)).not.toBeNull();
+
+    const staleOffsetAddTime = toOffsetIso(NOW - 30 * 24 * 60 * 60 * 1000, -4); // 30 days old
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: staleOffsetAddTime }), NOW)).toBeNull();
+  });
+
+  it('fails open (still broadcasts) when add_time is entirely absent, matching every existing fixture', () => {
+    const event = flowsheetInsert(); // no add_time key at all
+    expect(filterMetadataInsert(event, NOW)).not.toBeNull();
+  });
+
+  it('fails open when add_time is null', () => {
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: null }), NOW)).not.toBeNull();
+  });
+
+  it('fails open when add_time is an unparseable string (Date.parse -> NaN)', () => {
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: 'not-a-real-timestamp' }), NOW)).not.toBeNull();
+  });
+
+  it('fails open when add_time is not a string at all (defensive against schema drift)', () => {
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: 12345 }), NOW)).not.toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: {} }), NOW)).not.toBeNull();
+  });
+
+  it('honors LIVE_FS_INSERT_MAX_AGE_HOURS to shrink the threshold', () => {
+    process.env.LIVE_FS_INSERT_MAX_AGE_HOURS = '1';
+    const twoHoursOld = new Date(NOW - 2 * 60 * 60 * 1000).toISOString();
+    const thirtyMinutesOld = new Date(NOW - 30 * 60 * 1000).toISOString();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: twoHoursOld }), NOW)).toBeNull();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: thirtyMinutesOld }), NOW)).not.toBeNull();
+  });
+
+  it('honors LIVE_FS_INSERT_MAX_AGE_HOURS to widen the threshold', () => {
+    process.env.LIVE_FS_INSERT_MAX_AGE_HOURS = '720'; // 30 days
+    const twentyDaysOld = new Date(NOW - 20 * 24 * 60 * 60 * 1000).toISOString();
+    expect(filterMetadataInsert(flowsheetInsert({ add_time: twentyDaysOld }), NOW)).not.toBeNull();
+  });
+});
+
+describe('resolveLiveFsInsertMaxAgeMs', () => {
+  afterEach(() => {
+    delete process.env.LIVE_FS_INSERT_MAX_AGE_HOURS;
+  });
+
+  it('defaults to 24 hours when unset', () => {
+    expect(resolveLiveFsInsertMaxAgeMs(undefined)).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it('defaults to 24 hours on an empty/whitespace value', () => {
+    expect(resolveLiveFsInsertMaxAgeMs('')).toBe(24 * 60 * 60 * 1000);
+    expect(resolveLiveFsInsertMaxAgeMs('   ')).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it('accepts a positive override', () => {
+    expect(resolveLiveFsInsertMaxAgeMs('1')).toBe(60 * 60 * 1000);
+    expect(resolveLiveFsInsertMaxAgeMs('0.5')).toBe(30 * 60 * 1000);
+  });
+
+  it('accepts 0 (disables the guard — every insert is treated as within threshold)', () => {
+    expect(resolveLiveFsInsertMaxAgeMs('0')).toBe(0);
+  });
+
+  it('warns and falls back to the default on a negative or non-numeric value', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(resolveLiveFsInsertMaxAgeMs('-1')).toBe(24 * 60 * 60 * 1000);
+    expect(resolveLiveFsInsertMaxAgeMs('abc')).toBe(24 * 60 * 60 * 1000);
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+    expect(warnSpy.mock.calls[0][0]).toMatch(/LIVE_FS_INSERT_MAX_AGE_HOURS/);
+    warnSpy.mockRestore();
   });
 });
 
