@@ -144,16 +144,49 @@ const MAX_EPOCH_MS = 253402300799999; // 9999-12-31T23:59:59.999Z
 // an unhandled "value out of range for type integer" Postgres error (BS#1800).
 const INT4_MAX = 2147483647;
 // BS#1960 cost/DoS guard on `page * limit` (the OFFSET passed to
-// getEntriesByPage). The BS#1960 deferred-join rewrite of getEntriesByPage
-// made deep offsets cheap (a bare flowsheet.id PK index scan, no joins on
-// the discarded rows), so this is not a correctness bound — it's a ceiling
-// on how much index-scanning a single request can ask for. Set well above
-// any realistic UI paging depth: the acceptance floor is page=50 at
-// limit=100 (offset 5,000), and this allows offset up to page 500 at
-// limit=100 — 10x that. A genuine deep-history pull (further back than a UI
-// paginator would ever click) should use the start_id/end_id range path
-// above, which is a true index range scan regardless of depth.
-const MAX_OFFSET = 50_000;
+// getEntriesByPage). This is not a correctness bound — it's a ceiling on how
+// much index-scanning a single request can ask for. A genuine deep-history
+// pull (further back than a UI paginator would ever click) should use the
+// start_id/end_id range path above, which is a true index range scan
+// regardless of depth.
+//
+// BS#2133 (parent #2118): lowered from 50,000 to 20,000. getEntriesByPage's
+// ORDER BY changed from `id DESC` to `add_time DESC, id DESC` (see that
+// function's comment) so a historical insert can't sort as the newest
+// content — but the new ordering can no longer use an index-ONLY scan
+// (there is no composite `(add_time DESC, id DESC)` index; see below), so it
+// pays a heap fetch per scanned row instead of a bare PK scan. That shape
+// falls off a measured CACHE CLIFF, not a curve, between offset 20,000 and
+// 30,000 — prod EXPLAIN (ANALYZE, BUFFERS), warm, three passes:
+//
+//   offset 20,000:     17.8 ms
+//   offset 30,000:  3,570.9 ms  (188x)
+//   offset 50,000: 11,739.2 ms  (472x — past DB_STATEMENT_TIMEOUT_MS's 5s)
+//
+// 20,000 sits below the cliff with margin (still 4x the page=50/limit=100 =
+// 5,000 acceptance floor pinned by flowsheet-deep-pagination.spec.js) and
+// costs nothing over the floor (17.8ms vs 7.7ms) — the previous "10x the
+// acceptance floor" justification for 50,000 is superseded by this
+// measurement and must not be used to raise the cap back. 5,000 (the floor
+// itself) was considered and rejected: it would leave zero headroom and put
+// that spec's own acceptance case exactly on the offset > MAX_OFFSET
+// boundary.
+//
+// Incidentally, but worth recording: the OLD `id DESC` shape, at the OLD
+// 50,000 cap, measured 4,447 ms COLD (vs. warm's 24.9 ms) against that same
+// 5s timeout — on a public, unauthenticated route. The old cap was already
+// marginal before this change; lowering it to 20,000 (784 ms cold there)
+// closes that latent exposure too.
+//
+// A composite `(add_time DESC, id DESC)` index would restore an index-only
+// scan at any depth (~78 MB measured on a 2.6M-row stand-in) and was
+// considered and REJECTED in favor of lowering this cap: lowering the cap is
+// one line and zero storage, against a table epic #1058 is actively trying
+// to slim, and this cap is explicitly a cost ceiling rather than a
+// correctness bound in the first place. Do not add that index on the
+// strength of this comment alone — if the cap ever needs to go back up,
+// that trade needs to be re-measured, not assumed.
+const MAX_OFFSET = 20_000;
 
 /**
  * Project a page of flowsheet entries to their V2 wire shape, tolerating — but
@@ -402,11 +435,12 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
 
   // BS#1960 note: totalPages is derived from the full row estimate, so it can
   // advertise more pages than MAX_OFFSET actually permits (e.g. ~26k pages at
-  // limit=100 against a ~2.6M-row table, while offset is capped at 50k / page
-  // 500). A client that lets a user jump past the cap gets an explicit 400
-  // rather than the old timeout-500; genuine deep-history reads belong on the
-  // start_id/end_id range path. Left unclamped deliberately — totalPages stays
-  // an honest "how many pages of data exist" for the "Page X of N" display.
+  // limit=100 against a ~2.6M-row table, while offset is capped at 20k / page
+  // 200 — BS#2133). A client that lets a user jump past the cap gets an
+  // explicit 400 rather than the old timeout-500; genuine deep-history reads
+  // belong on the start_id/end_id range path. Left unclamped deliberately —
+  // totalPages stays an honest "how many pages of data exist" for the
+  // "Page X of N" display.
   const totalPages = Math.ceil(total / limit);
 
   // `on_air` lets clients render the on-air banner without scanning the fetched

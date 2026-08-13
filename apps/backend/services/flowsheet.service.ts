@@ -537,22 +537,43 @@ export const getEntryCount = async (): Promise<number> => {
  * passed ~450-500, hitting this RDS instance's 5s statement_timeout — plain
  * OFFSET-with-joins pagination pathology.
  *
- * The fix: resolve the page of `flowsheet.id`s FIRST, against the bare PK
- * index (no joins touched), then join only that already-bounded `limit`-row
- * set. `page` is a subquery-in-FROM (`.as('page')`) so it plans as an index
- * range scan over `flowsheet.id DESC` — the same cheap shape
- * `getEntriesByRange` already gets from its `WHERE id BETWEEN` predicate.
+ * The fix: resolve the page of `flowsheet.id`s FIRST, against a bare-table
+ * subquery (no joins touched), then join only that already-bounded `limit`-
+ * row set. `page` is a subquery-in-FROM (`.as('page')`).
+ *
+ * BS#2133 (parent #2118 site 1): ordered by `add_time DESC, id DESC`, not
+ * `id DESC` alone. `flowsheet.id` is a serial PK — insertion order, not
+ * airtime order — so a historical insert (backfill, gap import, repair)
+ * receives the highest ids in the table and previously sorted as the newest
+ * content on this, the default page of the public unauthenticated
+ * `GET /flowsheet`. `id` stays as an explicit tie-break because `add_time`
+ * is not unique: it defaults to `now()`, which is `transaction_timestamp()`
+ * — every row written by the same statement (e.g. a bulk `INSERT ... SELECT`)
+ * shares one `add_time`, so without the tie-break those rows would have no
+ * defined relative order. This means `(add_time DESC, id DESC)` is NOT
+ * identical to `(id DESC)` even for purely live traffic (a live row's
+ * `add_time` and `id` can theoretically diverge in ordering across a
+ * transaction boundary), and the tubafrenzy webhook writes `add_time` from
+ * tubafrenzy's own clock (`apps/backend/routes/internal.route.ts:329`), so
+ * cross-host clock skew becomes visible in ordering where it previously
+ * wasn't. Both are sub-second effects in practice.
+ *
+ * Measured 2026-08-13 (see BS#2133): below the `MAX_OFFSET` cache cliff
+ * (`flowsheet.controller.ts`) this ordering costs the same order of
+ * magnitude as the old `id DESC` shape (single-digit-to-teens ms warm); no
+ * composite index was added — see `MAX_OFFSET`'s comment for why.
+ *
  * The inner `ORDER BY ... OFFSET ... LIMIT` picks the page; the outer
- * `ORDER BY flowsheet.id DESC` re-establishes descending order after the
- * join (a join doesn't guarantee it preserves the subquery's row order).
- * flowsheet.id is a unique, monotonic PK, so no tie-break column is needed
- * here (contrast `getEntriesByShow`, which ties on `play_order`).
+ * `ORDER BY` re-establishes the SAME order after the join (a join doesn't
+ * guarantee it preserves the subquery's row order). The inner and outer
+ * clauses must always change together — changing only one silently breaks
+ * pagination.
  */
 export const getEntriesByPage = async (offset: number, limit: number): Promise<IFSEntry[]> => {
   const page = db
     .select({ id: flowsheet.id })
     .from(flowsheet)
-    .orderBy(desc(flowsheet.id))
+    .orderBy(desc(flowsheet.add_time), desc(flowsheet.id))
     .offset(offset)
     .limit(limit)
     .as('page');
@@ -564,7 +585,7 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
-    .orderBy(desc(flowsheet.id));
+    .orderBy(desc(flowsheet.add_time), desc(flowsheet.id));
 
   return raw.map(transformToIFSEntry);
 };
@@ -1146,8 +1167,8 @@ export const getLatestShow = async (): Promise<Show | undefined> => {
 };
 
 /**
- * True when the newest flowsheet entry belonging to `showId` is a
- * `show_end` marker.
+ * True when the most-recently-INSERTED flowsheet entry belonging to `showId`
+ * is a `show_end` marker.
  *
  * Belt-and-braces guard for `joinShow` (BS#1861 option (b)). The tubafrenzy
  * webhook's stub-show flow can leave `shows.end_time` NULL for a window
@@ -1161,8 +1182,24 @@ export const getLatestShow = async (): Promise<Show | undefined> => {
  *
  * Ordered by `id DESC` (insertion order), not `play_order DESC` —
  * `changeOrder` can renumber `play_order` for track reordering within a
- * show, but marker rows are never reordered and the serial PK is an
- * unambiguous "newest".
+ * show, but marker rows are never reordered.
+ *
+ * SCOPED TO LIVE-SHOW TRAFFIC — `id DESC` is insertion order, NOT airtime
+ * order, so this is not a general "newest entry in this show" query (BS#2118
+ * site 5). A historical insert (backfill, gap import, repair) into an
+ * ALREADY-CLOSED show receives an id higher than that show's real terminal
+ * `show_end` marker, so this then answers `false` for a show that is, in
+ * fact, closed. #2119's April gap-import cohort is exactly this case: 403
+ * rows land in 18 shows that already hold `show_end` markers, and post-
+ * import this function returns `false` for all 18. That is safe here
+ * ONLY because `joinShow` is this function's one caller, and it only ever
+ * asks about the show a DJ is trying to go live on RIGHT NOW — nobody joins
+ * an April show months later, and BS#1861 option (a) independently stamps
+ * `shows.end_time` at write time, so `joinShow` has a second signal even
+ * once this one goes stale for an old show. Do not repurpose this as a
+ * general recency check for anything a historical import could touch; for
+ * that, order by `add_time` instead (see `getEntriesByPage`'s comment for
+ * why `add_time` needs an explicit `id` tie-break too).
  */
 export const isLatestEntryShowEnd = async (showId: number): Promise<boolean> => {
   const [latest] = await db
