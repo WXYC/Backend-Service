@@ -146,6 +146,46 @@ export const resolveRadioHour = (entryType: BackendEntryType, radioHourMs: numbe
 
 // truncate is re-exported from @wxyc/database above
 
+/**
+ * Entry types whose legacy ARTIST_NAME text is display content, not a real
+ * artist (BS#2119 PR 0: moved out of jobs/flowsheet-etl/job.ts, which
+ * self-invokes its ETL `run()` at module scope — importing anything from it,
+ * including this pure predicate, opens a MirrorSQL connection and trips the
+ * backwards-write refusal. Extracting the pure mappers here lets
+ * jobs/flowsheet-april-gap-import reuse them without executing the ETL).
+ */
+export const isMessageEntryType = (entryType: string): boolean =>
+  entryType === 'breakpoint' || entryType === 'talkset' || entryType === 'message';
+
+/**
+ * Resolve the artist_name for a flowsheet entry.
+ *
+ * For message-bearing types (breakpoint, talkset, message), the text belongs in
+ * the message field instead — return null here.
+ *
+ * For show_start / show_end markers, the ARTIST_NAME column in tubafrenzy holds
+ * the full marker text (e.g. "START OF SHOW: DJ Aubrey Hearst SIGNED ON at
+ * 7:43 PM (6/2/26)"). Preserve it verbatim — V1 surfaces (dj-site flowsheet,
+ * wxyc.info) render `artist_name` directly, and reducing it to the bare DJ
+ * name strips information the writer put there on purpose. The ETL stays
+ * shape-agnostic about marker templates; whatever TF holds is what BS persists,
+ * truncated to the 128-char column limit. See #1287 and epic #1288.
+ */
+export const resolveArtistName = (rawArtistName: string | null, entryType: string): string | null => {
+  if (!rawArtistName) return null;
+  if (isMessageEntryType(entryType)) return null;
+  return truncate(rawArtistName, 128);
+};
+
+/**
+ * Resolve the message field for a flowsheet entry. For breakpoint, talkset, and
+ * message entries, the legacy ARTIST_NAME column contains the display text.
+ */
+export const resolveMessage = (rawArtistName: string | null, entryType: string): string | null => {
+  if (!rawArtistName || !isMessageEntryType(entryType)) return null;
+  return truncate(rawArtistName, 250);
+};
+
 export type TransformedShow = {
   legacy_show_id: number;
   start_time: Date;
