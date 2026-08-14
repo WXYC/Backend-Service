@@ -63,7 +63,11 @@
  *     (default 60). If found, the batch is deferred for
  *     `LIVE_ACTIVITY_PAUSE_MS` (default 30000) and re-probed. The loop
  *     yields whenever a DJ is actively touching the playout — exactly the
- *     window where any incremental p95 hit is most user-visible. The probe
+ *     window where any incremental p95 hit is most user-visible — but only
+ *     up to a cumulative `LIVE_ACTIVITY_MAX_PAUSE_MS` budget (default
+ *     30 min, BS#2147 review round 2); once that budget is exhausted the
+ *     run aborts (a thrown `LiveActivityPauseCeilingExceededError`) rather
+ *     than yielding indefinitely through an unusually long show. The probe
  *     uses migration 0050's partial index on (add_time DESC) WHERE
  *     entry_type='track', so the per-batch cost is one buffer read.
  *     Set `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` to disable for catch-up runs.
@@ -106,7 +110,9 @@ import {
   checkLiveActivity as defaultCheckLiveActivity,
   intArrayLiteral,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
+  LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
   resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  resolveLiveActivityMaxPauseMs as resolveLiveActivityMaxPauseMsShared,
   buildWaitForQuietPeriod,
   requireNonNegativeInt,
   requirePositiveInt,
@@ -231,6 +237,17 @@ export const resolveLiveActivityLookback = (
  */
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
   resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
+
+/**
+ * BS#2147 review round 2, finding 5: wires `LIVE_ACTIVITY_MAX_PAUSE_MS` at
+ * this job's own call site. Before this, `buildWaitForQuietPeriod`'s
+ * `maxTotalPauseMs` always took its hardcoded 30-minute default — the env
+ * var read like a tunable knob but no TypeScript job ever read it, the
+ * exact failure shape BS#2147 exists to close. `0` = uncapped.
+ */
+export const resolveLiveActivityMaxPauseMs = (
+  raw: string | undefined = process.env.LIVE_ACTIVITY_MAX_PAUSE_MS
+): number => resolveLiveActivityMaxPauseMsShared(raw, LIVE_ACTIVITY_MAX_PAUSE_MS_ENV);
 
 /**
  * Resolve `BACKFILL_NONLIBRARY_PLAY_FLOOR` (BS#1591). `0` disables the
@@ -924,6 +941,8 @@ export const runBackfill = async (opts: {
   partition?: { sqlFragment: SQL | null; description: string };
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
+  /** Cumulative cooperative-pause budget ceiling; 0 = uncapped. */
+  liveActivityMaxPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
   /**
    * BS#1995 Arm 2. Low-duty-cycle gate on LML's `/health` Discogs breaker
@@ -999,6 +1018,7 @@ export const runBackfill = async (opts: {
   const partition = opts.partition ?? resolvePartitionFilter();
   const liveActivityLookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
+  const liveActivityMaxPauseMs = opts.liveActivityMaxPauseMs ?? resolveLiveActivityMaxPauseMs();
   const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
   const probeBreaker = opts.checkDiscogsBreaker ?? defaultProbeDiscogsBreaker;
   const breakerProbeIntervalMs = opts.breakerProbeIntervalMs ?? resolveBreakerProbeIntervalMs();
@@ -1017,6 +1037,7 @@ export const runBackfill = async (opts: {
     partition: partition.description,
     live_activity_lookback_seconds: liveActivityLookbackSeconds,
     live_activity_pause_ms: liveActivityPauseMs,
+    live_activity_max_pause_ms: liveActivityMaxPauseMs,
     breaker_probe_interval_ms: breakerProbeIntervalMs,
     breaker_pause_ms: breakerPauseMs,
     breaker_max_pause_ms: breakerMaxPauseMs,
@@ -1277,9 +1298,15 @@ export const runBackfill = async (opts: {
   // handling existed here before and none is added (`shouldStop` defaults
   // to `() => false`) — out of scope for BS#2147. Call sites are unchanged
   // (`await waitForQuietBooth();`, discarding the now-boolean return value).
+  // `liveActivityMaxPauseMs` (review round 2, finding 5) is wired so
+  // `LIVE_ACTIVITY_MAX_PAUSE_MS` actually reaches `maxTotalPauseMs`; on
+  // exhaustion the closure throws (findings 1+2) and — since `runBackfill`
+  // has no wrapping try/catch of its own — that error propagates straight
+  // out as a rejection to `job.ts`'s top-level catch.
   const waitForQuietBooth = buildWaitForQuietPeriod({
     lookbackSeconds: liveActivityLookbackSeconds,
     pauseMs: liveActivityPauseMs,
+    maxTotalPauseMs: liveActivityMaxPauseMs,
     probe,
     onPause: () => {
       log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
@@ -1292,6 +1319,14 @@ export const runBackfill = async (opts: {
         error_message: error instanceof Error ? error.message : String(error),
       });
       captureError(error, 'probe_error');
+    },
+    onBudgetExhausted: (pausedMs) => {
+      log(
+        'error',
+        'live_activity_pause_ceiling_exceeded',
+        `cooperative-pause budget exceeded (${pausedMs}ms >= LIVE_ACTIVITY_MAX_PAUSE_MS=${liveActivityMaxPauseMs}ms); aborting instead of pausing indefinitely`,
+        { paused_ms: pausedMs, live_activity_max_pause_ms: liveActivityMaxPauseMs }
+      );
     },
   });
 
