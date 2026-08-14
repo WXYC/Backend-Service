@@ -106,7 +106,8 @@ import {
   checkLiveActivity as defaultCheckLiveActivity,
   intArrayLiteral,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
-  LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+  resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  buildWaitForQuietPeriod,
   requireNonNegativeInt,
   requirePositiveInt,
   type CheckLiveActivityFn,
@@ -222,8 +223,14 @@ export const resolveLiveActivityLookback = (
     note: 'Use 0 to disable the cooperative pause.',
   });
 
+/**
+ * BS#2147: delegates to the shared floored resolver so `LIVE_ACTIVITY_PAUSE_MS`
+ * below `LIVE_ACTIVITY_MIN_PAUSE_MS` (including `0`) is rejected at init
+ * instead of degrading the cooperative-pause loop into a hot loop against
+ * RDS. `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` remains the sole disable knob.
+ */
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
-  requireNonNegativeInt(raw, 'LIVE_ACTIVITY_PAUSE_MS', LIVE_ACTIVITY_PAUSE_MS_DEFAULT, { unit: 'ms' });
+  resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
 
 /**
  * Resolve `BACKFILL_NONLIBRARY_PLAY_FLOOR` (BS#1591). `0` disables the
@@ -1259,16 +1266,34 @@ export const runBackfill = async (opts: {
   // Cooperative pause (#735): yield whenever a DJ is actively touching the
   // playout. Gates the self-heal pass, the work-list build (itself a heavy
   // read), and every batch slice.
-  const waitForQuietBooth = async (): Promise<void> => {
-    if (liveActivityLookbackSeconds <= 0) return;
-    while (await probe(liveActivityLookbackSeconds)) {
+  //
+  // BS#2147: the loop itself (probe + elapsed-time cap) now lives in the
+  // shared `buildWaitForQuietPeriod`. `onPause` reproduces this job's exact
+  // prior `live_activity_pause` log line/fields so ops greps don't drift.
+  // This job gains fail-open probe-error handling here for the first time —
+  // a probe throw used to propagate out of `runBackfill` and abort the
+  // whole run; it is now logged/captured and treated as "no activity" for
+  // that iteration, matching six of the ten sibling jobs. No SIGTERM/stop
+  // handling existed here before and none is added (`shouldStop` defaults
+  // to `() => false`) — out of scope for BS#2147. Call sites are unchanged
+  // (`await waitForQuietBooth();`, discarding the now-boolean return value).
+  const waitForQuietBooth = buildWaitForQuietPeriod({
+    lookbackSeconds: liveActivityLookbackSeconds,
+    pauseMs: liveActivityPauseMs,
+    probe,
+    onPause: () => {
       log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
         lookback_seconds: liveActivityLookbackSeconds,
         pause_ms: liveActivityPauseMs,
       });
-      if (liveActivityPauseMs > 0) await sleep(liveActivityPauseMs);
-    }
-  };
+    },
+    onProbeError: (error) => {
+      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
+        error_message: error instanceof Error ? error.message : String(error),
+      });
+      captureError(error, 'probe_error');
+    },
+  });
 
   // W4 self-heal (BS#895 / epic #1810), gated on `opts.buildSelfHealCandidates`
   // being provided. Runs BEFORE the main pending drain: it's a tiny,

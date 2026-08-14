@@ -41,18 +41,18 @@ docker run --rm --env-file .env $AWS_ECR_URI/rotation-lml-identity-backfill:late
 
 ## Env
 
-| Var                               | Default    | Purpose                                                                                                  |
-| --------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------- |
-| `LIBRARY_METADATA_URL`            | (required) | LML service URL                                                                                          |
-| `LML_API_KEY`                     | (required) | Bearer for LML auth (rotation safe — see [BS#1094](https://github.com/WXYC/Backend-Service/issues/1094)) |
-| `DB_*`                            | (required) | Standard postgres connection (host/port/name/username/password)                                          |
-| `DRY_RUN`                         | `false`    | Skip all UPDATEs; log planned writes only                                                                |
-| `BACKFILL_LML_MAX_CONCURRENT`     | `1`        | Concurrency cap on LML calls (semaphore permits)                                                         |
-| `BACKFILL_LML_RATE_PER_MIN`       | `20`       | Token-bucket rate limit on LML calls                                                                     |
-| `BACKFILL_LML_RESOLVE_TIMEOUT_MS` | `8000`     | Per-call abort budget on `resolveIdentity`                                                               |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`  | `60`       | Cooperative-pause window; 0 disables                                                                     |
-| `LIVE_ACTIVITY_PAUSE_MS`          | `30000`    | How long to pause between probes when activity is detected                                               |
-| `SENTRY_DSN`                      | —          | Optional; Sentry stays inactive without it                                                               |
+| Var                               | Default    | Purpose                                                                                                                                                                               |
+| --------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LIBRARY_METADATA_URL`            | (required) | LML service URL                                                                                                                                                                       |
+| `LML_API_KEY`                     | (required) | Bearer for LML auth (rotation safe — see [BS#1094](https://github.com/WXYC/Backend-Service/issues/1094))                                                                              |
+| `DB_*`                            | (required) | Standard postgres connection (host/port/name/username/password)                                                                                                                       |
+| `DRY_RUN`                         | `false`    | Skip all UPDATEs; log planned writes only                                                                                                                                             |
+| `BACKFILL_LML_MAX_CONCURRENT`     | `1`        | Concurrency cap on LML calls (semaphore permits)                                                                                                                                      |
+| `BACKFILL_LML_RATE_PER_MIN`       | `20`       | Token-bucket rate limit on LML calls                                                                                                                                                  |
+| `BACKFILL_LML_RESOLVE_TIMEOUT_MS` | `8000`     | Per-call abort budget on `resolveIdentity`                                                                                                                                            |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`  | `60`       | Cooperative-pause window; 0 disables                                                                                                                                                  |
+| `LIVE_ACTIVITY_PAUSE_MS`          | `30000`    | How long to pause between probes when activity is detected. Must be >= 1000 (BS#2147) — a sub-floor value, including 0, is rejected at init rather than silently disabling the pause. |
+| `SENTRY_DSN`                      | —          | Optional; Sentry stays inactive without it                                                                                                                                            |
 
 The `BACKFILL_LML_*` triple is the safety story BS#995 established for the `flowsheet-metadata-backfill` cron. Defaults pin LML calls to one in-flight / 20 per minute / 8 s per call — for the few-hundred-row active rotation set that's bounded by ~15 min wall time and is provably non-disruptive to runtime LML traffic.
 

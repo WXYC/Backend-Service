@@ -225,11 +225,8 @@ describe('resolveLiveActivityPauseMs', () => {
     expect(resolveLiveActivityPauseMs('   ')).toBe(30_000);
   });
 
-  it('accepts 0 (tests may want no pause)', () => {
-    expect(resolveLiveActivityPauseMs('0')).toBe(0);
-  });
-
-  it('returns the parsed value for a positive integer', () => {
+  it('returns the parsed value for a positive integer at or above the floor', () => {
+    expect(resolveLiveActivityPauseMs('1000')).toBe(1000);
     expect(resolveLiveActivityPauseMs('15000')).toBe(15000);
   });
 
@@ -237,6 +234,16 @@ describe('resolveLiveActivityPauseMs', () => {
     expect(() => resolveLiveActivityPauseMs('-1')).toThrow(/LIVE_ACTIVITY_PAUSE_MS/);
     expect(() => resolveLiveActivityPauseMs('1.5')).toThrow(/LIVE_ACTIVITY_PAUSE_MS/);
     expect(() => resolveLiveActivityPauseMs('abc')).toThrow(/LIVE_ACTIVITY_PAUSE_MS/);
+  });
+
+  // BS#2147: `0` used to sleep for that literal duration between re-probes —
+  // a hot loop against RDS, not "no pause". The resolver now rejects the
+  // whole sub-floor interval at init; `LIVE_ACTIVITY_LOOKBACK_SECONDS=0`
+  // remains the sole disable knob. Tests that want no pause now inject
+  // `liveActivityPauseMs: 0` directly (bypassing this resolver) instead of
+  // setting the env var.
+  it.each(['0', '1', '999'])('rejects a sub-floor value (%s)', (raw) => {
+    expect(() => resolveLiveActivityPauseMs(raw)).toThrow(/LIVE_ACTIVITY_PAUSE_MS/);
   });
 });
 
