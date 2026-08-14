@@ -835,4 +835,38 @@ describe('runImport', () => {
     expect(checkLiveActivity).toHaveBeenCalledTimes(2);
     expect(result.insertedCount).toBe(1);
   });
+
+  describe('cooperative-pause budget ceiling (BS#2147 findings 1+2, 5)', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('marks the run failed when the injected liveActivityMaxPauseMs is exhausted', async () => {
+      // runImport wraps its whole body in a try/catch that already preserves
+      // the summary log + span, so the shared module's
+      // LiveActivityPauseCeilingExceededError doesn't reject this promise —
+      // it's caught here and surfaces as `result.failed`, which shouldExitNonZero
+      // turns into a non-zero exit code.
+      const seams = baseSeams();
+      seams.discoverCandidatesFn.mockResolvedValue([makeEntry()]);
+      seams.buildShowIdMapFn.mockResolvedValue(new Map([[1001, 10]]));
+      const checkLiveActivity = jest.fn().mockResolvedValue(true);
+
+      const resultPromise = runImport({
+        dryRun: false,
+        ...seams,
+        liveActivityLookbackSeconds: 60,
+        liveActivityPauseMs: 1000,
+        liveActivityMaxPauseMs: 2000,
+        checkLiveActivity,
+        batchGapMs: 0,
+      });
+
+      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(1000);
+
+      const result = await resultPromise;
+      expect(result.failed).toBe(true);
+      expect(seams.insertBatchFn).not.toHaveBeenCalled();
+    });
+  });
 });
