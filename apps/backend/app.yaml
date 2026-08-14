@@ -173,6 +173,13 @@ components:
       properties:
         id:
           type: integer
+        legacy_release_id:
+          type: integer
+          description: >-
+            BS#2128. The library.db-producer surrogate key dj-site's track picker
+            resolves against; NOT NULL since migration 0137. Sourced from
+            getAlbumFromDB, so it is present on both consumers of this schema —
+            GET /library/info and the PATCH /library/{id} 200.
         code_letters:
           type: string
         code_artist_number:
@@ -220,6 +227,13 @@ components:
       properties:
         id:
           type: integer
+        legacy_release_id:
+          type: integer
+          description: >-
+            BS#2128. Present on GET /library only. GET /library/query shares this
+            schema but builds its rows through an explicit projection
+            (taggedRowToAlbumSearchResultRow) over library_artist_view, which does
+            not carry the column until the BS#2129 migration adds it.
         code_letters:
           type: string
         code_artist_number:
@@ -419,6 +433,14 @@ components:
       properties:
         id:
           type: integer
+        legacy_release_id:
+          type: integer
+          nullable: true
+          description: >-
+            BS#2128. Null for a library-unlinked rotation row — getRotationFromDB
+            LEFT JOINs library, so there is no library row to source the id from.
+            The only one of the four flowsheet-consumed reads that can be null;
+            the others inner-join library and always carry a value.
         code_letters:
           type: string
         code_artist_number:
@@ -468,6 +490,9 @@ components:
       properties:
         album_id:
           type: integer
+        legacy_release_id:
+          type: integer
+          description: BS#2128. Non-null — getBinFromDB inner-joins library.
         album_title:
           type: string
         artist_name:
