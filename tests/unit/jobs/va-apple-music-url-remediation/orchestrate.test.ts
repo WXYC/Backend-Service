@@ -671,6 +671,33 @@ describe('cooperative live-DJ pause (BS#2009 / BS#2147)', () => {
       await expect(resultPromise).rejects.toThrow(LiveActivityPauseCeilingExceededError);
       expect(passThroughApply).not.toHaveBeenCalled();
     });
+
+    it('still ANALYZEs and logs the summary for rows already written before the ceiling throw escapes (BS#2147 review round 2, LOW finding 4)', async () => {
+      // Page 1 loads and writes while the probe reports quiet; only the
+      // SECOND waitForQuietPeriod() call (ahead of page 2) sees sustained
+      // activity and trips the ceiling. Before the fix, runFlowsheetPhase
+      // rethrew directly out of runRemediation, so the write from page 1 —
+      // already durable — never reached the phase-1 ANALYZE or the final
+      // 'summary' log; both were silently skipped even though rows landed.
+      let probeCalls = 0;
+      const checkLive = jest.fn(() => Promise.resolve(probeCalls++ > 0));
+      queueExecute([{ count: 1 }], [vaRow(1)]);
+
+      const resultPromise = runRemediation(
+        baseOpts({
+          lookup: () => Promise.resolve(withUrl(NEW_URL)),
+          checkLiveActivityFn: checkLive,
+        })
+      );
+      resultPromise.catch(() => {});
+
+      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(1000);
+
+      await expect(resultPromise).rejects.toThrow(LiveActivityPauseCeilingExceededError);
+      expect(passThroughApply).toHaveBeenCalledTimes(1);
+      expect(noopAnalyze).toHaveBeenCalledWith('flowsheet', expect.any(Number));
+    });
   });
 });
 

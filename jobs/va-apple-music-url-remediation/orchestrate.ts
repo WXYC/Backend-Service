@@ -573,7 +573,7 @@ const runFlowsheetPhase = async (
     minRescueSample: number;
     maxIndeterminate: number;
   }
-): Promise<{ totals: FlowsheetTotals; failed: boolean }> => {
+): Promise<{ totals: FlowsheetTotals; failed: boolean; ceilingError?: Error }> => {
   const totals = emptyFlowsheetTotals();
   const tracker = newRescueTracker();
   const urlCache = new Map<string, Verdict>();
@@ -599,9 +599,20 @@ const runFlowsheetPhase = async (
       // cooperative-pause budget ceiling throws on exhaustion, and unlike
       // most sibling jobs' outer try/catch, nothing between here and
       // `runRemediation`'s promise rejecting would otherwise carry this
-      // phase's OWN resume cursor — log + capture it here, before rethrow,
+      // phase's OWN resume cursor — log + capture it here before returning,
       // so an operator can tell exactly which VA_REMEDIATION_FLOWSHEET_AFTER_ID
       // to resume from.
+      //
+      // Review round 2, LOW finding 4: this used to `throw error` directly,
+      // which escaped `runRemediation` uncaught — skipping its phase-1
+      // ANALYZE and the final 'summary' log even though rows already written
+      // in earlier iterations were durable. Returning (rather than throwing)
+      // lets `totals` — mutated in place through every completed iteration
+      // above — flow back through the normal return path so the caller can
+      // still ANALYZE/log against it; `ceilingError` carries the original
+      // error so `runRemediation` can rethrow it AFTER doing that accounting,
+      // preserving the existing reject-with-LiveActivityPauseCeilingExceededError
+      // contract.
       log(
         'error',
         'live_activity_pause_ceiling_exceeded',
@@ -612,7 +623,9 @@ const runFlowsheetPhase = async (
         }
       );
       captureError(error, 'live_activity_pause_ceiling_exceeded', { after_id: cursor });
-      throw error;
+      totals.rescued = tracker.rescued;
+      totals.first_pass_nulls = tracker.firstPassNulls;
+      return { totals, failed: true, ceilingError: error instanceof Error ? error : new Error(errorMessage(error)) };
     }
 
     const rows = await loadFlowsheetBatch(cursor, opts.batchSize);
@@ -732,7 +745,7 @@ const runAlbumPhase = async (opts: {
   batchSize: number;
   afterId: number;
   updateTimeoutMs: number;
-}): Promise<{ totals: AlbumTotals; failed: boolean }> => {
+}): Promise<{ totals: AlbumTotals; failed: boolean; ceilingError?: Error }> => {
   const totals: AlbumTotals = { candidates: 0, invalidated: 0, batches: 0, last_id: opts.afterId };
   let cursor = opts.afterId;
   let failed = false;
@@ -756,8 +769,14 @@ const runAlbumPhase = async (opts: {
     } catch (error) {
       // BS#2147 review round 2, findings 1+2: mirrors the flowsheet phase's
       // own try/catch above — log + capture this phase's resume cursor
-      // before the shared module's ceiling throw propagates, so an operator
-      // can tell exactly which VA_REMEDIATION_ALBUM_AFTER_ID to resume from.
+      // before returning, so an operator can tell exactly which
+      // VA_REMEDIATION_ALBUM_AFTER_ID to resume from.
+      //
+      // Review round 2, LOW finding 4: returns (rather than throws) so
+      // `totals` — already mutated through every completed iteration —
+      // flows back to `runRemediation` for its ANALYZE/summary accounting;
+      // `ceilingError` lets the caller rethrow the original error AFTER
+      // that accounting, preserving the existing reject contract.
       log(
         'error',
         'live_activity_pause_ceiling_exceeded',
@@ -768,7 +787,7 @@ const runAlbumPhase = async (opts: {
         }
       );
       captureError(error, 'live_activity_pause_ceiling_exceeded', { after_id: cursor });
-      throw error;
+      return { totals, failed: true, ceilingError: error instanceof Error ? error : new Error(errorMessage(error)) };
     }
 
     // `apple_music_url` rides along so the UPDATE can compare-and-set against
@@ -878,7 +897,7 @@ export const runRemediation = async (options: RunOptions): Promise<RunResult> =>
   // Phase 2 only runs when phase 1 finished cleanly: nulling album_metadata
   // unmasks flowsheet's value, so it must not happen while flowsheet is still
   // known-polluted.
-  let album: { totals: AlbumTotals; failed: boolean } = {
+  let album: { totals: AlbumTotals; failed: boolean; ceilingError?: Error } = {
     totals: { candidates: 0, invalidated: 0, batches: 0, last_id: 0 },
     failed: false,
   };
@@ -913,6 +932,17 @@ export const runRemediation = async (options: RunOptions): Promise<RunResult> =>
     album_metadata: album.totals,
     indeterminate_sample: flowsheet.totals.indeterminateTriples.slice(0, 20),
   });
+
+  // BS#2147 review round 2, LOW finding 4: a phase's cooperative-pause
+  // ceiling abort no longer throws directly out of `runFlowsheetPhase` /
+  // `runAlbumPhase` (see their own catch blocks) — it returns normally with
+  // `ceilingError` set, so the ANALYZE calls and the 'summary' log above
+  // still run against whatever was durably written before the abort. Once
+  // that accounting is done, rethrow here so `runRemediation` still rejects
+  // with the original `LiveActivityPauseCeilingExceededError`, matching the
+  // pre-existing contract callers/tests depend on.
+  const ceilingError = flowsheet.ceilingError ?? album.ceilingError;
+  if (ceilingError) throw ceilingError;
 
   return {
     flowsheet: flowsheet.totals,
