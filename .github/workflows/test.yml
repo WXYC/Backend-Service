@@ -476,6 +476,17 @@ jobs:
           # closes the GHA-vs-compose drift that surfaced when BS#1383
           # promoted its case from warn-skip to fail-fast.
           CATALOG_SEARCH_ALIAS_ENABLED: 'true'
+          # Catalog track-search cascade: same GHA-vs-compose drift as the alias
+          # flag above (dev_env/docker-compose.yml:261-262 default both to true,
+          # and both have been on in prod since 2026-05-21). Both are strict-'true'
+          # gated in apps/backend/config/catalogTrackSearch.ts and default false,
+          # so without these the cascade cases in
+          # tests/integration/library-legacy-release-id-exposure.spec.js take
+          # their warn-and-return branch and pass vacuously — leaving
+          # searchLibraryByTrackUncachedOrThrow, the one BS#2128 site where the
+          # column was previously destructured away, with no gating coverage.
+          CATALOG_TRACK_SEARCH_CTA_ENABLED: 'true'
+          CATALOG_TRACK_SEARCH_DISCOGS_ENABLED: 'true'
           # SES has a 200-message/month quota. The auth service (host process
           # here) is the only sendEmail/sendOTPEmail caller; keep real sends
           # off regardless of whether AWS_ACCESS_KEY_ID etc. are ever set on

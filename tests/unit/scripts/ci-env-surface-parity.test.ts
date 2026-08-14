@@ -52,13 +52,12 @@ const workflowPath = path.join(repoRoot, '.github/workflows/test.yml');
  * step). Each entry must be justified.
  */
 const EXPECTED_ONLY_IN_COMPOSE = [
-  // Why: backend-side feature flags that activate the full track-search
-  // fallback cascade in `tests/integration/library.spec.js` (Track 1 = CTA,
-  // Track 2 = LML cross-ref). The workflow path doesn't set these; whether
-  // that's a coverage gap on the workflow path is tracked separately and
-  // out of scope for this guard.
-  'CATALOG_TRACK_SEARCH_CTA_ENABLED',
-  'CATALOG_TRACK_SEARCH_DISCOGS_ENABLED',
+  // BS#2128 closed the CATALOG_TRACK_SEARCH_{CTA,DISCOGS}_ENABLED divergence
+  // that used to sit here — the workflow now mirrors both, per this guard's
+  // "preferred: mirror the var into the other surface" remedy. The coverage
+  // gap the old `Why:` deferred was real: with the flags unset, the cascade
+  // cases in library-legacy-release-id-exposure.spec.js warn-skipped and
+  // passed vacuously on GHA while passing for real under `ci:testmock`.
 
   // Why: AWS Cognito identifiers from the legacy auth flow. Compose sets
   // them via `.env` substitution; backend defaults work in the workflow's
