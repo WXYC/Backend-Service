@@ -1,5 +1,9 @@
 import { jest } from '@jest/globals';
 import { desc, sql } from 'drizzle-orm';
+// Local binding for use within this file (the `export { ... } from '...'`
+// re-export further down forwards the same names to consumers but does not
+// itself introduce a usable local identifier).
+import { requireNonNegativeInt } from '../../shared/database/src/env-parsers.js';
 
 type MockQueryChain = {
   select: jest.Mock;
@@ -481,6 +485,128 @@ export const LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT = 60;
 export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
 export type CheckLiveActivityFn = (lookbackSeconds: number) => Promise<boolean>;
 export const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(false);
+
+// Mirrors of shared/database/src/live-activity.ts's BS#2147 additions
+// (`resolveLiveActivityPauseMs`, `resolveLiveActivityMaxPauseMs`,
+// `buildWaitForQuietPeriod`, and the new constants). NOT re-exported from
+// source: that module's `checkLiveActivity` import pulls in `./client.js`,
+// which throws synchronously on missing DB env vars for every suite that
+// resolves `@wxyc/database` to this mock (the same reason `truncate` /
+// `isBeyondFutureTolerance` / `epochMsToDate` below are hand-duplicated
+// rather than re-exported). The real contract — including the exact
+// interval-vs-single-value floor semantics and the elapsed-time cap's
+// loop-top accrual — is pinned against the actual module by
+// `tests/unit/database/live-activity.test.ts`, which imports it directly by
+// relative path and bypasses this mock entirely.
+export const LIVE_ACTIVITY_MIN_PAUSE_MS = 1_000;
+export const LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT = 1_800_000;
+export const LIVE_ACTIVITY_MAX_PAUSE_MS_ENV = 'LIVE_ACTIVITY_MAX_PAUSE_MS';
+
+export const resolveLiveActivityPauseMs = (
+  raw: string | undefined,
+  envName: string = 'LIVE_ACTIVITY_PAUSE_MS'
+): number => {
+  const resolved = requireNonNegativeInt(raw, envName, LIVE_ACTIVITY_PAUSE_MS_DEFAULT, { unit: 'ms' });
+  if (resolved < LIVE_ACTIVITY_MIN_PAUSE_MS) {
+    throw new Error(
+      `Invalid ${envName}=${JSON.stringify(raw)}: must be >= ${LIVE_ACTIVITY_MIN_PAUSE_MS} (ms), or unset for the ` +
+        `${LIVE_ACTIVITY_PAUSE_MS_DEFAULT}ms default. A value below the floor turns the cooperative-pause re-probe ` +
+        'loop into a hot loop against the database instead of disabling it — use LIVE_ACTIVITY_LOOKBACK_SECONDS=0 ' +
+        'to disable the pause.'
+    );
+  }
+  return resolved;
+};
+
+export const resolveLiveActivityMaxPauseMs = (
+  raw: string | undefined,
+  envName: string = LIVE_ACTIVITY_MAX_PAUSE_MS_ENV
+): number =>
+  requireNonNegativeInt(raw, envName, LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT, {
+    unit: 'ms',
+    note: 'Cumulative pause budget for one waitForQuietPeriod call chain. 0 = uncapped; keep non-zero in production.',
+  });
+
+export interface WaitForQuietPeriodPauseInfo {
+  lookbackSeconds: number;
+  pauseMs: number;
+  pausedMs: number;
+}
+
+export interface WaitForQuietPeriodOptions {
+  lookbackSeconds: number;
+  pauseMs: number;
+  probe?: CheckLiveActivityFn;
+  shouldStop?: () => boolean;
+  onPause?: (info: WaitForQuietPeriodPauseInfo) => void;
+  onProbeError?: (err: unknown) => void;
+  onBudgetExhausted?: (pausedMs: number) => void;
+  maxTotalPauseMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+const buildDefaultSleep = (shouldStop: () => boolean): ((ms: number) => Promise<void>) => {
+  return async (ms: number): Promise<void> => {
+    if (ms <= 0) return;
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (shouldStop()) return;
+      const remaining = deadline - Date.now();
+      const tick = Math.min(500, remaining);
+      await new Promise<void>((resolve) => setTimeout(resolve, tick));
+    }
+  };
+};
+
+export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() => Promise<boolean>) => {
+  const {
+    lookbackSeconds,
+    pauseMs,
+    probe = checkLiveActivity,
+    shouldStop = () => false,
+    onPause,
+    onProbeError,
+    onBudgetExhausted,
+    maxTotalPauseMs = LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT,
+    sleep = buildDefaultSleep(shouldStop),
+    now = Date.now,
+  } = opts;
+
+  let pausedMs = 0;
+  let exhausted = false;
+
+  const safeProbe = async (): Promise<boolean> => {
+    try {
+      return await probe(lookbackSeconds);
+    } catch (err) {
+      onProbeError?.(err);
+      return false;
+    }
+  };
+
+  return async (): Promise<boolean> => {
+    if (lookbackSeconds <= 0) return false;
+    if (exhausted) return shouldStop();
+
+    while (true) {
+      const loopStart = now();
+      const active = await safeProbe();
+      if (!active) return shouldStop();
+      if (shouldStop()) return true;
+
+      if (maxTotalPauseMs > 0 && pausedMs >= maxTotalPauseMs) {
+        exhausted = true;
+        onBudgetExhausted?.(pausedMs);
+        return shouldStop();
+      }
+
+      onPause?.({ lookbackSeconds, pauseMs, pausedMs });
+      await sleep(pauseMs);
+      pausedMs += now() - loopStart;
+    }
+  };
+};
 
 // Stub of shared/database/src/concerts-recompute.ts's `recomputeHasResolvedSupport`
 // (BS#1763). Consumers (jobs/concerts-artist-resolver's job.ts via its thin
