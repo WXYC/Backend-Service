@@ -18,7 +18,7 @@
  */
 import { jest } from '@jest/globals';
 
-import { db, checkLiveActivity as mockCheckLiveActivity } from '@wxyc/database';
+import { db, checkLiveActivity as mockCheckLiveActivity, LiveActivityPauseCeilingExceededError } from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
 import {
   runReenrichment,
@@ -882,6 +882,39 @@ describe('runReenrichment — cooperative pause', () => {
     });
 
     expect(mockCheckLiveActivity).not.toHaveBeenCalled();
+  });
+
+  describe('cooperative-pause budget ceiling (BS#2147 findings 1+2, 5)', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('rejects with LiveActivityPauseCeilingExceededError when the injected liveActivityMaxPauseMs is exhausted', async () => {
+      // runReenrichment's outer block is try { ... } finally { ... } with no
+      // catch of its own, so the shared module's ceiling throw propagates
+      // straight out as a rejection (after the finally arm still emits the
+      // summary log/span with the resume cursor).
+      (mockCheckLiveActivity as jest.Mock).mockResolvedValue(true);
+      const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult());
+      const enrich = jest.fn<EnrichFn>().mockResolvedValue('still_no_match');
+
+      const resultPromise = runReenrichment({
+        lookup,
+        enrich,
+        cutoffTs: CUTOFF,
+        batchSize: 100,
+        liveActivityLookbackSeconds: 60,
+        liveActivityPauseMs: 1000,
+        liveActivityMaxPauseMs: 2000,
+        checkLiveActivity: mockCheckLiveActivity,
+      });
+      resultPromise.catch(() => {});
+
+      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(1000);
+
+      await expect(resultPromise).rejects.toThrow(LiveActivityPauseCeilingExceededError);
+      expect(db.execute).not.toHaveBeenCalled();
+    });
   });
 });
 

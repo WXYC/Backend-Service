@@ -62,7 +62,9 @@ import {
   db,
   checkLiveActivity as defaultCheckLiveActivity,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
+  LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
   resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  resolveLiveActivityMaxPauseMs as resolveLiveActivityMaxPauseMsShared,
   buildWaitForQuietPeriod,
   requireNonNegativeInt,
   requirePositiveInt,
@@ -381,6 +383,17 @@ export const resolveLiveActivityLookback = (
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
   resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
 
+/**
+ * BS#2147 review round 2, finding 5: wires `LIVE_ACTIVITY_MAX_PAUSE_MS` at
+ * this job's own call site. Before this, `buildWaitForQuietPeriod`'s
+ * `maxTotalPauseMs` always took its hardcoded 30-minute default — the env
+ * var read like a tunable knob but no TypeScript job ever read it, the
+ * exact failure shape BS#2147 exists to close. `0` = uncapped.
+ */
+export const resolveLiveActivityMaxPauseMs = (
+  raw: string | undefined = process.env.LIVE_ACTIVITY_MAX_PAUSE_MS
+): number => resolveLiveActivityMaxPauseMsShared(raw, LIVE_ACTIVITY_MAX_PAUSE_MS_ENV);
+
 export type LookupResult = { response: LookupResponse; cacheHit: boolean };
 export type LookupFn = (artist: string, album?: string, track?: string) => Promise<LookupResult>;
 export type EnrichFn = (row: ReenrichRow, response: LookupResponse) => Promise<ReenrichOutcome>;
@@ -585,6 +598,8 @@ export const runReenrichment = async (opts: {
   batchSize?: number;
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
+  /** Cumulative cooperative-pause budget ceiling; 0 = uncapped. */
+  liveActivityMaxPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
 }): Promise<RunResult> => {
   // BS#1823: resolveTimeWindow enforces "at least one bound" and applies
@@ -599,6 +614,7 @@ export const runReenrichment = async (opts: {
   const batchSize = opts.batchSize ?? resolveBatchSize();
   const liveActivityLookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
+  const liveActivityMaxPauseMs = opts.liveActivityMaxPauseMs ?? resolveLiveActivityMaxPauseMs();
   const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
   // Hoist deps outside the per-row loop — one object reused for ~12k rows.
   const deps = { lookup: opts.lookup, enrich: opts.enrich };
@@ -607,9 +623,16 @@ export const runReenrichment = async (opts: {
   // time cap) now lives in the shared `buildWaitForQuietPeriod`. `onPause`
   // and `onProbeError` reproduce this job's exact prior log lines/fields so
   // ops greps against `live_activity_pause`/`probe_error` don't drift.
+  // `liveActivityMaxPauseMs` (finding 5) is wired so
+  // `LIVE_ACTIVITY_MAX_PAUSE_MS` actually reaches `maxTotalPauseMs`; on
+  // exhaustion the closure throws (findings 1+2) and — since this job's
+  // outer block is try/finally with no catch of its own — that error
+  // propagates out of `runReenrichment` as a rejection after the finally
+  // arm still emits the summary log/span with the resume cursor.
   const waitForQuietPeriodImpl = buildWaitForQuietPeriod({
     lookbackSeconds: liveActivityLookbackSeconds,
     pauseMs: liveActivityPauseMs,
+    maxTotalPauseMs: liveActivityMaxPauseMs,
     probe,
     shouldStop: () => stopRequested,
     onPause: () => {
@@ -623,6 +646,14 @@ export const runReenrichment = async (opts: {
         error_message: errorMessage(error),
       });
       captureError(error, 'probe_error');
+    },
+    onBudgetExhausted: (pausedMs) => {
+      log(
+        'error',
+        'live_activity_pause_ceiling_exceeded',
+        `cooperative-pause budget exceeded (${pausedMs}ms >= LIVE_ACTIVITY_MAX_PAUSE_MS=${liveActivityMaxPauseMs}ms); aborting instead of pausing indefinitely`,
+        { paused_ms: pausedMs, live_activity_max_pause_ms: liveActivityMaxPauseMs, last_id: lastId }
+      );
     },
   });
 
@@ -647,6 +678,7 @@ export const runReenrichment = async (opts: {
     batch_size: batchSize,
     live_activity_lookback_seconds: liveActivityLookbackSeconds,
     live_activity_pause_ms: liveActivityPauseMs,
+    live_activity_max_pause_ms: liveActivityMaxPauseMs,
   });
 
   const totals: Totals = {
