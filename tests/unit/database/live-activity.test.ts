@@ -27,8 +27,11 @@ import {
   LIVE_ACTIVITY_PAUSE_MS_DEFAULT as MOCK_PAUSE,
   LIVE_ACTIVITY_MIN_PAUSE_MS as MOCK_MIN_PAUSE_MS,
   LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT as MOCK_MAX_PAUSE_MS_DEFAULT,
+  resolveLiveActivityPauseMs as mockResolveLiveActivityPauseMs,
+  resolveLiveActivityMaxPauseMs as mockResolveLiveActivityMaxPauseMs,
   buildWaitForQuietPeriod as mockBuildWaitForQuietPeriod,
   buildDefaultSleep as mockBuildDefaultSleep,
+  LiveActivityPauseCeilingExceededError as MockLiveActivityPauseCeilingExceededError,
 } from '../../mocks/database.mock';
 
 /**
@@ -40,6 +43,15 @@ import {
  * The mock's own comment overstated the protection: it claimed the contract
  * "is pinned against the actual module by this file", but the constant-only
  * checks below it never covered the loop body at all.
+ *
+ * BS#2147 review round 2, LOW finding 5: finding 7's fix above still pinned
+ * only the loop (`buildWaitForQuietPeriod`/`buildDefaultSleep`) and two of
+ * the four constants — `resolveLiveActivityPauseMs`, `resolveLiveActivityMaxPauseMs`,
+ * and `LiveActivityPauseCeilingExceededError` were hand-copied into the mock
+ * but never compared against the real module, so a future floor/ceiling
+ * resolver change (or a rename of the thrown error) could diverge silently
+ * while every job suite kept testing the mock's stale copy. Extended to
+ * cover all three with the same `Function.prototype.toString()` approach.
  */
 describe('live-activity defaults', () => {
   it('shared/database default matches database mock', () => {
@@ -59,6 +71,18 @@ describe('live-activity defaults', () => {
 
   it('mock buildDefaultSleep is byte-identical to the real implementation', () => {
     expect(mockBuildDefaultSleep.toString()).toBe(buildDefaultSleep.toString());
+  });
+
+  it('mock resolveLiveActivityPauseMs is byte-identical to the real implementation', () => {
+    expect(mockResolveLiveActivityPauseMs.toString()).toBe(resolveLiveActivityPauseMs.toString());
+  });
+
+  it('mock resolveLiveActivityMaxPauseMs is byte-identical to the real implementation', () => {
+    expect(mockResolveLiveActivityMaxPauseMs.toString()).toBe(resolveLiveActivityMaxPauseMs.toString());
+  });
+
+  it('mock LiveActivityPauseCeilingExceededError is byte-identical to the real implementation', () => {
+    expect(MockLiveActivityPauseCeilingExceededError.toString()).toBe(LiveActivityPauseCeilingExceededError.toString());
   });
 });
 

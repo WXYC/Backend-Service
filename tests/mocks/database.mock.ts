@@ -497,17 +497,23 @@ export const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValu
 // hand-duplicated rather than re-exported).
 //
 // This copy must stay BYTE-IDENTICAL to the real module — the four
-// constants below and the `buildWaitForQuietPeriod` / `buildDefaultSleep`
-// function bodies (via `Function.prototype.toString()`) are pinned against
-// the real ones by `tests/unit/database/live-activity.test.ts`, which
-// imports both directly by relative path. Prior to BS#2147 review round 2
-// (finding 7), that drift test pinned only two of the four constants and
-// never touched the loop bodies at all, so the real module's throw-on-
-// exhaustion fix (findings 1+2) would have shipped invisible to every job
-// suite that resolves `@wxyc/database` to this mock — this comment
-// previously (and wrongly) claimed the loop itself was covered. Any edit to
-// the real module's `buildWaitForQuietPeriod`/`buildDefaultSleep` MUST be
-// copied here verbatim, comments included, or the drift test fails.
+// constants below, the `buildWaitForQuietPeriod` / `buildDefaultSleep`
+// function bodies, the `resolveLiveActivityPauseMs` / `resolveLiveActivityMaxPauseMs`
+// resolvers, and the `LiveActivityPauseCeilingExceededError` class (all via
+// `Function.prototype.toString()`) are pinned against the real ones by
+// `tests/unit/database/live-activity.test.ts`, which imports both directly
+// by relative path. Prior to BS#2147 review round 2 (finding 7), that drift
+// test pinned only two of the four constants and never touched the loop
+// bodies at all, so the real module's throw-on-exhaustion fix (findings 1+2)
+// would have shipped invisible to every job suite that resolves
+// `@wxyc/database` to this mock. Prior to review round 2, LOW finding 5, the
+// resolvers and the error class were ALSO unpinned despite this comment's
+// blanket "must stay BYTE-IDENTICAL" claim — this comment previously (and
+// wrongly) implied full coverage on both occasions. Any edit to the real
+// module's `buildWaitForQuietPeriod`/`buildDefaultSleep`/
+// `resolveLiveActivityPauseMs`/`resolveLiveActivityMaxPauseMs`/
+// `LiveActivityPauseCeilingExceededError` MUST be copied here verbatim,
+// comments included, or the drift test fails.
 export const LIVE_ACTIVITY_MIN_PAUSE_MS = 1_000;
 export const LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT = 1_800_000;
 export const LIVE_ACTIVITY_MAX_PAUSE_MS_ENV = 'LIVE_ACTIVITY_MAX_PAUSE_MS';
