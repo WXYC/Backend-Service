@@ -18,6 +18,7 @@ import {
   resolveLiveActivityPauseMs,
   resolveLiveActivityMaxPauseMs,
   buildWaitForQuietPeriod,
+  LiveActivityPauseCeilingExceededError,
   type CheckLiveActivityFn,
 } from '../../../shared/database/src/live-activity';
 import {
@@ -174,21 +175,34 @@ describe('buildWaitForQuietPeriod', () => {
   });
 
   /**
-   * BS#2147 AC #1, part 2: with activity permanently detected and an
-   * injected sub-floor `pauseMs` (the only way to reach one now that the
-   * resolver floors the env path), the probe is still called a BOUNDED
-   * number of times — the elapsed-time cap, not the sleep, is what bounds
-   * it. Ported semantics from `jobs/rotation-release-id-pollution-check/job.py`'s
-   * `make_pause_probe`: cumulative wall-clock is measured from the TOP of
-   * each iteration (probe time included), so a `pauseMs=0` misconfiguration
-   * still accrues "query time" (here, the injected clock step) and stays
-   * bounded. A naive/unbounded implementation would hang this test rather
-   * than fail it, so the clock is deterministic (a fixed step per call) —
-   * no real waiting, no reliance on wall-clock flake.
+   * BS#2147 AC #1, part 2 (review round 2, findings 1+2): with activity
+   * permanently detected and an injected sub-floor `pauseMs` (the only way
+   * to reach one now that the resolver floors the env path), the probe is
+   * still called a BOUNDED number of times — the elapsed-time cap, not the
+   * sleep, is what bounds it — and exhaustion THROWS rather than silently
+   * disabling the pause. The first cut of this cap made exhaustion a sticky
+   * "give up and proceed" flag: a long show would exhaust the budget mid-run
+   * and the pause would switch off permanently while a DJ was still live —
+   * the exact hazard the cap exists to prevent. `onBudgetExhausted` fires
+   * with the accrued `pausedMs` FIRST (so a caller can log context), then a
+   * named `LiveActivityPauseCeilingExceededError` is thrown, uncaught, out
+   * of the closure — mirroring `BreakerPauseCeilingExceededError` in
+   * `jobs/flowsheet-metadata-backfill/lml-health.ts`, the repo's existing
+   * answer for this exact ceiling shape. Ported accrual semantics from
+   * `jobs/rotation-release-id-pollution-check/job.py`'s `make_pause_probe`:
+   * cumulative wall-clock is measured from the TOP of each iteration (probe
+   * time included), so a `pauseMs=0` misconfiguration still accrues "query
+   * time" (here, the injected clock step) and stays bounded. A naive/
+   * unbounded implementation would hang this test rather than fail it, so
+   * the clock is deterministic (a fixed step per call) — no real waiting, no
+   * reliance on wall-clock flake.
    */
-  it('bounds the probe call count via the elapsed-time cap even with a sub-floor pauseMs and permanent activity', async () => {
+  it('throws LiveActivityPauseCeilingExceededError on budget exhaustion, firing onBudgetExhausted first', async () => {
     const probe = jest.fn<CheckLiveActivityFn>().mockResolvedValue(true); // permanently "active"
-    const onBudgetExhausted = jest.fn();
+    const calls: string[] = [];
+    const onBudgetExhausted = jest.fn((pausedMs: number) => {
+      calls.push(`onBudgetExhausted:${pausedMs}`);
+    });
     const now = buildStepClock(500); // each now() call advances the fake clock by 500ms
     const waitForQuietPeriod = buildWaitForQuietPeriod({
       lookbackSeconds: 60,
@@ -200,20 +214,45 @@ describe('buildWaitForQuietPeriod', () => {
       now,
     });
 
-    const stopped = await waitForQuietPeriod();
+    await expect(waitForQuietPeriod()).rejects.toThrow(LiveActivityPauseCeilingExceededError);
 
-    expect(stopped).toBe(false);
     // Each iteration's loopStart/accrual now() pair advances pausedMs by
     // exactly 500ms (two now() calls per iteration, one intervening step):
     // iter1 checks pausedMs=0 (<1000) -> pauses -> pausedMs becomes 500.
     // iter2 checks pausedMs=500 (<1000) -> pauses -> pausedMs becomes 1000.
-    // iter3 checks pausedMs=1000 (>=1000) -> exhausted.
+    // iter3 checks pausedMs=1000 (>=1000) -> exhausted -> throws.
     expect(probe).toHaveBeenCalledTimes(3);
     expect(onBudgetExhausted).toHaveBeenCalledTimes(1);
     expect(onBudgetExhausted).toHaveBeenCalledWith(1000);
+    // onBudgetExhausted must fire BEFORE the throw, so a caller's log line
+    // carries context that predates the abort, not a line racing it.
+    expect(calls).toEqual(['onBudgetExhausted:1000']);
   });
 
-  it('is sticky: once the budget is exhausted, a later call returns immediately without probing again', async () => {
+  it('the thrown error names the ceiling and the accrued pause time', async () => {
+    const probe = jest.fn<CheckLiveActivityFn>().mockResolvedValue(true);
+    const now = buildStepClock(500);
+    const waitForQuietPeriod = buildWaitForQuietPeriod({
+      lookbackSeconds: 60,
+      pauseMs: 0,
+      probe,
+      maxTotalPauseMs: 1000,
+      sleep: instantSleep,
+      now,
+    });
+
+    await expect(waitForQuietPeriod()).rejects.toMatchObject({
+      name: 'LiveActivityPauseCeilingExceededError',
+      message: expect.stringMatching(/1000/),
+    });
+  });
+
+  it('is NOT sticky: a later call re-evaluates and throws again rather than silently proceeding', async () => {
+    // Deleting the sticky `exhausted` flag was deliberate (review findings
+    // 1+2): its only purpose was to make the old silent-proceed path
+    // idempotent, and a throw already makes that path unreachable. A caller
+    // that (incorrectly) keeps invoking the closure after it threw gets the
+    // SAME loud failure every time, never a quiet fallback to full-speed.
     const probe = jest.fn<CheckLiveActivityFn>().mockResolvedValue(true);
     const now = buildStepClock(1000);
     const waitForQuietPeriod = buildWaitForQuietPeriod({
@@ -225,15 +264,15 @@ describe('buildWaitForQuietPeriod', () => {
       now,
     });
 
-    await waitForQuietPeriod(); // exhausts within this call once cumulative pausedMs reaches maxTotalPauseMs
+    await expect(waitForQuietPeriod()).rejects.toThrow(LiveActivityPauseCeilingExceededError);
     const callsAfterFirstInvocation = probe.mock.calls.length;
     expect(callsAfterFirstInvocation).toBeGreaterThan(0);
 
-    await waitForQuietPeriod();
-    await waitForQuietPeriod();
+    await expect(waitForQuietPeriod()).rejects.toThrow(LiveActivityPauseCeilingExceededError);
 
-    // No additional probe calls on subsequent invocations.
-    expect(probe).toHaveBeenCalledTimes(callsAfterFirstInvocation);
+    // A second invocation probes again (pausedMs never resets, so the very
+    // next check is already >= the ceiling) rather than returning silently.
+    expect(probe.mock.calls.length).toBeGreaterThan(callsAfterFirstInvocation);
   });
 
   it('maxTotalPauseMs=0 means uncapped: budget exhaustion never fires', async () => {
@@ -280,13 +319,44 @@ describe('buildWaitForQuietPeriod', () => {
       now,
     });
 
-    await waitForQuietPeriod();
+    await expect(waitForQuietPeriod()).rejects.toThrow(LiveActivityPauseCeilingExceededError);
 
     expect(onBudgetExhausted).toHaveBeenCalledTimes(1);
     // iter1: pausedMs 0 (<1000) -> pause; probe adds 600 -> pausedMs=600
     // iter2: pausedMs 600 (<1000) -> pause; probe adds 600 -> pausedMs=1200
-    // iter3: pausedMs 1200 (>=1000) -> exhausted
+    // iter3: pausedMs 1200 (>=1000) -> exhausted -> throws
     expect(probe).toHaveBeenCalledTimes(3);
+  });
+
+  /**
+   * BS#2147 review finding 8: the ported Python reference
+   * (`jobs/rotation-release-id-pollution-check/job.py`'s `make_pause_probe`)
+   * uses `time.monotonic()`; the first TS cut used `Date.now()` for the same
+   * budget accounting. A wall-clock backward NTP step during a pause makes
+   * `now() - loopStart` negative and DECREMENTS `pausedMs`; a forward step
+   * exhausts the budget early. `performance.now()` is Node's monotonic
+   * clock — immune to both. `buildDefaultSleep`'s own `Date.now()` is
+   * deliberately untouched (matches the pre-existing `stopAwareSleep`; not a
+   * regression to fix here).
+   */
+  it('uses performance.now, not Date.now, as the default budget clock', async () => {
+    const perfSpy = jest.spyOn(performance, 'now');
+    const dateSpy = jest.spyOn(Date, 'now');
+    try {
+      const probe = jest.fn<CheckLiveActivityFn>().mockResolvedValue(false);
+      const waitForQuietPeriod = buildWaitForQuietPeriod({ lookbackSeconds: 60, pauseMs: 5000, probe });
+
+      await waitForQuietPeriod();
+
+      expect(perfSpy).toHaveBeenCalled();
+      // A quiet-on-first-probe run never sleeps and never re-checks the
+      // budget, so nothing in THIS call chain has a reason to read
+      // Date.now() — the loop's own clock reads are exclusively performance.now.
+      expect(dateSpy).not.toHaveBeenCalled();
+    } finally {
+      perfSpy.mockRestore();
+      dateSpy.mockRestore();
+    }
   });
 
   describe('default sleep (real timers)', () => {
