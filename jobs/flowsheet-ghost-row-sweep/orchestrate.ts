@@ -101,7 +101,9 @@ import {
   checkLiveActivity as defaultCheckLiveActivity,
   intArrayLiteral,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
+  LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
   resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  resolveLiveActivityMaxPauseMs as resolveLiveActivityMaxPauseMsShared,
   buildWaitForQuietPeriod,
   requireNonNegativeInt,
   requirePositiveInt,
@@ -331,6 +333,17 @@ export const resolveLiveActivityLookback = (
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
   resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
 
+/**
+ * BS#2147 review round 2, finding 5: wires `LIVE_ACTIVITY_MAX_PAUSE_MS` at
+ * this job's own call site. Before this, `buildWaitForQuietPeriod`'s
+ * `maxTotalPauseMs` always took its hardcoded 30-minute default — the env
+ * var read like a tunable knob but no TypeScript job ever read it, the
+ * exact failure shape BS#2147 exists to close. `0` = uncapped.
+ */
+export const resolveLiveActivityMaxPauseMs = (
+  raw: string | undefined = process.env.LIVE_ACTIVITY_MAX_PAUSE_MS
+): number => resolveLiveActivityMaxPauseMsShared(raw, LIVE_ACTIVITY_MAX_PAUSE_MS_ENV);
+
 /** Cooperative cancellation flag for graceful shutdown on SIGTERM. */
 let stopRequested = false;
 export const requestStop = (): void => {
@@ -431,6 +444,8 @@ export const runSweep = async (opts: {
   rotationAfterId?: number;
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
+  /** Cumulative cooperative-pause budget ceiling; 0 = uncapped. */
+  liveActivityMaxPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
   /** Injected write path (tests only); defaults to the module `deleteBatch`. */
   deleteBatch?: DeleteBatchFn;
@@ -453,15 +468,21 @@ export const runSweep = async (opts: {
     opts.rotationAfterId ?? resolveAfterId('GHOST_SWEEP_ROTATION_AFTER_ID', process.env.GHOST_SWEEP_ROTATION_AFTER_ID);
   const liveActivityLookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
+  const liveActivityMaxPauseMs = opts.liveActivityMaxPauseMs ?? resolveLiveActivityMaxPauseMs();
   const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
 
   // BS#2147: the loop itself (probe + fail-open + stop-awareness + elapsed-
   // time cap) now lives in the shared `buildWaitForQuietPeriod`. `onPause`
   // and `onProbeError` reproduce this job's exact prior log lines/fields so
   // ops greps against `live_activity_pause`/`probe_error` don't drift.
+  // `liveActivityMaxPauseMs` (finding 5) is wired so
+  // `LIVE_ACTIVITY_MAX_PAUSE_MS` actually reaches `maxTotalPauseMs`; on
+  // exhaustion the closure throws (findings 1+2) and that error propagates
+  // into this run's own `failure`/Sentry capture path (cursors included).
   const waitForQuietPeriod = buildWaitForQuietPeriod({
     lookbackSeconds: liveActivityLookbackSeconds,
     pauseMs: liveActivityPauseMs,
+    maxTotalPauseMs: liveActivityMaxPauseMs,
     probe,
     shouldStop: () => stopRequested,
     onPause: () => {
@@ -476,6 +497,14 @@ export const runSweep = async (opts: {
       });
       captureError(error, 'probe_error');
     },
+    onBudgetExhausted: (pausedMs) => {
+      log(
+        'error',
+        'live_activity_pause_ceiling_exceeded',
+        `cooperative-pause budget exceeded (${pausedMs}ms >= LIVE_ACTIVITY_MAX_PAUSE_MS=${liveActivityMaxPauseMs}ms); aborting instead of pausing indefinitely`,
+        { paused_ms: pausedMs, live_activity_max_pause_ms: liveActivityMaxPauseMs }
+      );
+    },
   });
 
   log('info', 'started', `${JOB_NAME} starting`, {
@@ -489,6 +518,7 @@ export const runSweep = async (opts: {
     rotation_after_id: rotationAfterId,
     live_activity_lookback_seconds: liveActivityLookbackSeconds,
     live_activity_pause_ms: liveActivityPauseMs,
+    live_activity_max_pause_ms: liveActivityMaxPauseMs,
   });
 
   const result: RunResult = {
