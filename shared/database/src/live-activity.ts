@@ -101,6 +101,31 @@ export const resolveLiveActivityMaxPauseMs = (
     note: 'Cumulative pause budget for one waitForQuietPeriod call chain. 0 = uncapped; keep non-zero in production.',
   });
 
+/**
+ * Thrown by `buildWaitForQuietPeriod`'s returned closure (BS#2147 review
+ * round 2, findings 1+2) once cumulative pause time reaches
+ * `maxTotalPauseMs`. The first cut of this ceiling made exhaustion a
+ * sticky, silent "give up and proceed at full speed" flag: a long show
+ * exhausted the 30-minute default mid-run and the pause switched off
+ * permanently — for the rest of that run — while DJs were still live,
+ * which is the exact outcome `maxTotalPauseMs` exists to prevent. This
+ * module already has the correct outcome for a ceiling of this shape, in
+ * `jobs/flowsheet-metadata-backfill/lml-health.ts`'s
+ * `BreakerPauseCeilingExceededError`: a wedged pause must be loud, not a
+ * silent throughput cliff. `onBudgetExhausted` fires with the accrued
+ * `pausedMs` FIRST — so a caller can log/capture its own context (resume
+ * cursors, batch state) before the stack unwinds — and only then does this
+ * throw, uncaught, out of the closure. Every existing caller already has a
+ * top-level catch for programming errors (structured log + Sentry capture +
+ * non-zero exit); this reuses that path rather than inventing a second one.
+ */
+export class LiveActivityPauseCeilingExceededError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LiveActivityPauseCeilingExceededError';
+  }
+}
+
 export interface WaitForQuietPeriodPauseInfo {
   lookbackSeconds: number;
   pauseMs: number;
@@ -160,9 +185,12 @@ const buildDefaultSleep = (shouldStop: () => boolean): ((ms: number) => Promise<
  *      measured from the TOP of each iteration (probe round-trip
  *      included), ported from
  *      `jobs/rotation-release-id-pollution-check/job.py`'s
- *      `make_pause_probe`. On exhaustion, `onBudgetExhausted` fires once
- *      and every later call to the returned closure returns immediately
- *      without probing again (exhaustion is sticky in the closure).
+ *      `make_pause_probe`. On exhaustion, `onBudgetExhausted` fires with
+ *      the accrued `pausedMs`, then the closure throws
+ *      `LiveActivityPauseCeilingExceededError` (review round 2, findings
+ *      1+2) — there is no sticky "give up and proceed" state; a caller that
+ *      invokes the closure again after it threw gets the same loud failure,
+ *      not a quiet fallback to full-speed.
  *
  * Returns `true` iff the caller should stop (per `shouldStop`), matching
  * the existing shape-A jobs' `Promise<boolean>` contract — callers that
@@ -187,11 +215,19 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
     onBudgetExhausted,
     maxTotalPauseMs = LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT,
     sleep = buildDefaultSleep(shouldStop),
-    now = Date.now,
+    // BS#2147 review round 2, finding 8: `performance.now()` is Node's
+    // monotonic clock. `Date.now()` can step backward (NTP correction) or
+    // forward (clock slew) mid-run; either one corrupts `pausedMs` accrual
+    // below. `buildDefaultSleep` deliberately keeps `Date.now()` — it only
+    // computes a real-timer deadline, which is wall-clock by nature and
+    // pre-existing behavior this fix doesn't touch. Wrapped in an arrow
+    // (not `now = performance.now` directly) because destructuring the
+    // bare method off its object loses the `this` binding `Performance`'s
+    // native implementation requires.
+    now = () => performance.now(),
   } = opts;
 
   let pausedMs = 0;
-  let exhausted = false;
 
   const safeProbe = async (): Promise<boolean> => {
     try {
@@ -204,7 +240,6 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
 
   return async (): Promise<boolean> => {
     if (lookbackSeconds <= 0) return false;
-    if (exhausted) return shouldStop();
 
     while (true) {
       const loopStart = now();
@@ -213,9 +248,14 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
       if (shouldStop()) return true;
 
       if (maxTotalPauseMs > 0 && pausedMs >= maxTotalPauseMs) {
-        exhausted = true;
+        // BS#2147 review round 2, findings 1+2: fire the context hook FIRST,
+        // then throw. There is no sticky "exhausted" flag to swallow later
+        // calls into silent full-speed proceeding — see the class doc above.
         onBudgetExhausted?.(pausedMs);
-        return shouldStop();
+        throw new LiveActivityPauseCeilingExceededError(
+          `Cooperative-pause budget exceeded: paused ${pausedMs}ms against a ${maxTotalPauseMs}ms ceiling ` +
+            '(LIVE_ACTIVITY_MAX_PAUSE_MS); aborting instead of pausing indefinitely while DJs remain active.'
+        );
       }
 
       onPause?.({ lookbackSeconds, pauseMs, pausedMs });
