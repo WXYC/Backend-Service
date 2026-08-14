@@ -27,4 +27,7 @@ RUN npm install --omit=dev
 COPY --from=builder ./uncovered-release-list-builder/jobs/uncovered-release-list/dist ./jobs/uncovered-release-list/dist
 COPY --from=builder ./uncovered-release-list-builder/shared/database/dist ./shared/database/dist
 
-CMD ["npm", "start", "--workspace=@wxyc/uncovered-release-list"]
+# ENTRYPOINT + empty CMD so docker-level args (e.g. `--backfill`, `--dry-run`)
+# pass through to the job rather than replacing the launcher.
+ENTRYPOINT ["node", "/uncovered-release-list/jobs/uncovered-release-list/dist/job.js"]
+CMD []
