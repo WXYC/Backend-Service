@@ -778,7 +778,21 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
       }
 
       // 7. Batched insert with cooperative pause + inter-batch gap.
+      //
+      // BS#2147 review round 2, finding "flowsheet-april-gap-import reports
+      // inserted_count: 0 for rows it actually inserted": `result.insertedIds`
+      // is the SAME array `insertedIds` points at (assigned once, before the
+      // loop), so pushing into `insertedIds` is visible through `result`
+      // immediately — no separate reassignment needed. `result.insertedCount`
+      // is updated after every batch commits, not just after the loop, so a
+      // ceiling throw from `waitForQuietPeriod()` on a LATER iteration (a
+      // newly reachable exit — see the shared module's
+      // LiveActivityPauseCeilingExceededError) can no longer strand the
+      // summary/Sentry span at their zero defaults while rows already landed
+      // durably. Re-running is safe either way (`ON CONFLICT DO NOTHING`);
+      // this only fixes what the run REPORTS.
       const insertedIds: number[] = [];
+      result.insertedIds = insertedIds;
       for (let i = 0; i < rows.length; i += batchSize) {
         if (stopRequested || (await waitForQuietPeriod())) {
           result.stopped = true;
@@ -787,6 +801,7 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
         const batch = rows.slice(i, i + batchSize);
         const batchIds = await insertBatchFn(batch);
         insertedIds.push(...batchIds);
+        result.insertedCount = insertedIds.length;
         log('info', 'batch_done', `inserted ${batchIds.length}/${batch.length} row(s) in this batch`, {
           batch_index: Math.floor(i / batchSize) + 1,
           batch_attempted: batch.length,
@@ -799,8 +814,6 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
           await stopAwareSleep(batchGapMs);
         }
       }
-      result.insertedIds = insertedIds;
-      result.insertedCount = insertedIds.length;
 
       if (insertedIds.length > 0) {
         try {
