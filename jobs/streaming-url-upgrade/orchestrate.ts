@@ -46,7 +46,9 @@ import {
   db,
   checkLiveActivity as defaultCheckLiveActivity,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
+  LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
   resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  resolveLiveActivityMaxPauseMs as resolveLiveActivityMaxPauseMsShared,
   buildWaitForQuietPeriod,
   requireNonNegativeInt,
   requirePositiveInt,
@@ -161,6 +163,17 @@ export const resolveLiveActivityLookback = (
  */
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
   resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
+
+/**
+ * BS#2147 review round 2, finding 5: wires `LIVE_ACTIVITY_MAX_PAUSE_MS` at
+ * this job's own call site. Before this, `buildWaitForQuietPeriod`'s
+ * `maxTotalPauseMs` always took its hardcoded 30-minute default — the env
+ * var read like a tunable knob but no TypeScript job ever read it, the
+ * exact failure shape BS#2147 exists to close. `0` = uncapped.
+ */
+export const resolveLiveActivityMaxPauseMs = (
+  raw: string | undefined = process.env.LIVE_ACTIVITY_MAX_PAUSE_MS
+): number => resolveLiveActivityMaxPauseMsShared(raw, LIVE_ACTIVITY_MAX_PAUSE_MS_ENV);
 
 export type LookupFn = (artist: string, album?: string, track?: string) => Promise<LookupResponse>;
 export type ApplyFn = (target: ApplyTarget, id: number, service: UpgradeService, url: string) => Promise<ApplyOutcome>;
@@ -497,6 +510,8 @@ export const runUpgrade = async (opts: {
   flowsheetSince?: string;
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
+  /** Cumulative cooperative-pause budget ceiling; 0 = uncapped. */
+  liveActivityMaxPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
 }): Promise<RunResult> => {
   const dryRun = opts.dryRun;
@@ -510,6 +525,7 @@ export const runUpgrade = async (opts: {
   const flowsheetSince = opts.flowsheetSince ?? resolveFlowsheetSince();
   const liveActivityLookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
+  const liveActivityMaxPauseMs = opts.liveActivityMaxPauseMs ?? resolveLiveActivityMaxPauseMs();
   const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
 
   const deps: PhaseDeps = {
@@ -524,9 +540,14 @@ export const runUpgrade = async (opts: {
   // time cap) now lives in the shared `buildWaitForQuietPeriod`. `onPause`
   // and `onProbeError` reproduce this job's exact prior log lines/fields so
   // ops greps against `live_activity_pause`/`probe_error` don't drift.
+  // `liveActivityMaxPauseMs` (finding 5) is wired so
+  // `LIVE_ACTIVITY_MAX_PAUSE_MS` actually reaches `maxTotalPauseMs`; on
+  // exhaustion the closure throws (findings 1+2) and that error propagates
+  // into this run's own `failure`/Sentry capture path (cursors included).
   const waitForQuietPeriod = buildWaitForQuietPeriod({
     lookbackSeconds: liveActivityLookbackSeconds,
     pauseMs: liveActivityPauseMs,
+    maxTotalPauseMs: liveActivityMaxPauseMs,
     probe,
     shouldStop: () => stopRequested,
     onPause: () => {
@@ -541,6 +562,14 @@ export const runUpgrade = async (opts: {
       });
       captureError(error, 'probe_error');
     },
+    onBudgetExhausted: (pausedMs) => {
+      log(
+        'error',
+        'live_activity_pause_ceiling_exceeded',
+        `cooperative-pause budget exceeded (${pausedMs}ms >= LIVE_ACTIVITY_MAX_PAUSE_MS=${liveActivityMaxPauseMs}ms); aborting instead of pausing indefinitely`,
+        { paused_ms: pausedMs, live_activity_max_pause_ms: liveActivityMaxPauseMs }
+      );
+    },
   });
 
   log('info', 'started', `${JOB_NAME} starting`, {
@@ -553,6 +582,7 @@ export const runUpgrade = async (opts: {
     flowsheet_since: flowsheetSince,
     live_activity_lookback_seconds: liveActivityLookbackSeconds,
     live_activity_pause_ms: liveActivityPauseMs,
+    live_activity_max_pause_ms: liveActivityMaxPauseMs,
   });
 
   const result: RunResult = {

@@ -644,6 +644,37 @@ describe('runUpgrade — cooperative pause', () => {
 
     expect(mockCheckLiveActivity).not.toHaveBeenCalled();
   });
+
+  describe('cooperative-pause budget ceiling (BS#2147 findings 1+2, 5)', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('marks the run failed when the injected liveActivityMaxPauseMs is exhausted', async () => {
+      // runUpgrade wraps both phases in its own try/catch that already
+      // preserves the summary log + span, so the shared module's
+      // LiveActivityPauseCeilingExceededError doesn't reject this promise —
+      // it's caught here and surfaces as `result.failed`.
+      queueExecute([{ count: 1 }]);
+      (mockCheckLiveActivity as jest.Mock).mockResolvedValue(true as never);
+      const lookup = jest.fn<LookupFn>().mockResolvedValue(withBoth);
+      const apply = jest.fn<ApplyFn>().mockResolvedValue('upgraded');
+
+      const resultPromise = runUpgrade({
+        ...baseOpts(lookup, apply),
+        liveActivityLookbackSeconds: 60,
+        liveActivityPauseMs: 1000,
+        liveActivityMaxPauseMs: 2000,
+        checkLiveActivity: mockCheckLiveActivity,
+      });
+
+      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(1000);
+
+      const result = await resultPromise;
+      expect(result.failed).toBe(true);
+      expect(lookup).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('runUpgrade — cooperative stop (SIGTERM)', () => {
