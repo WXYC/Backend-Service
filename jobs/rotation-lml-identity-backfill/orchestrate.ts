@@ -31,12 +31,15 @@
 import * as Sentry from '@sentry/node';
 import {
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
+  LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
   resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  resolveLiveActivityMaxPauseMs as resolveLiveActivityMaxPauseMsShared,
   buildWaitForQuietPeriod,
   checkLiveActivity as defaultCheckLiveActivity,
   type CheckLiveActivityFn,
 } from '@wxyc/database';
 
+import { log, captureError } from './logger.js';
 import type { Candidate } from './query.js';
 
 export type LoadCandidatesFn = () => Promise<Candidate[]>;
@@ -90,6 +93,17 @@ export const resolveLiveActivityLookback = (
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
   resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
 
+/**
+ * BS#2147 review round 2, finding 5: wires `LIVE_ACTIVITY_MAX_PAUSE_MS` at
+ * this job's own call site. Before this, `buildWaitForQuietPeriod`'s
+ * `maxTotalPauseMs` always took its hardcoded 30-minute default — the env
+ * var read like a tunable knob but no TypeScript job ever read it, the
+ * exact failure shape BS#2147 exists to close. `0` = uncapped.
+ */
+export const resolveLiveActivityMaxPauseMs = (
+  raw: string | undefined = process.env.LIVE_ACTIVITY_MAX_PAUSE_MS
+): number => resolveLiveActivityMaxPauseMsShared(raw, LIVE_ACTIVITY_MAX_PAUSE_MS_ENV);
+
 export const runBackfill = async (deps: {
   loadCandidates: LoadCandidatesFn;
   lookup: LookupFn;
@@ -97,6 +111,8 @@ export const runBackfill = async (deps: {
   dryRun?: boolean;
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
+  /** Cumulative cooperative-pause budget ceiling; 0 = uncapped. */
+  liveActivityMaxPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
   onLivePause?: () => void;
 }): Promise<RunResult> => {
@@ -111,6 +127,7 @@ export const runBackfill = async (deps: {
 
   const liveActivityLookbackSeconds = deps.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const liveActivityPauseMs = deps.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
+  const liveActivityMaxPauseMs = deps.liveActivityMaxPauseMs ?? resolveLiveActivityMaxPauseMs();
   const probe = deps.checkLiveActivity ?? defaultCheckLiveActivity;
 
   // BS#2147: the loop itself (probe + elapsed-time cap) now lives in the
@@ -118,16 +135,37 @@ export const runBackfill = async (deps: {
   // `onPause` so existing unit tests asserting on it keep working
   // unchanged. This job gains fail-open probe-error handling here for the
   // first time — a probe throw used to propagate out of `runBackfill` and
-  // abort the whole run; it is now treated as "no activity" for that
-  // iteration, matching six of the ten sibling jobs (no `log`/`captureError`
-  // available at this layer to report it through, unlike the TS-orchestrator
-  // siblings — the throw is simply swallowed). No SIGTERM/stop handling
-  // existed here before and none is added.
+  // abort the whole run; it is now logged + captured to Sentry via this
+  // file's own `logger.ts` (imported below) and treated as "no activity"
+  // for that iteration, matching every sibling job. Review round 2 finding
+  // 3 corrected an earlier version of this comment, which claimed no
+  // logger was available at this layer — this file already imports Sentry
+  // for `Sentry.startSpan` below, and its own `logger.ts` simply went
+  // unimported. `liveActivityMaxPauseMs` (finding 5) is wired so
+  // `LIVE_ACTIVITY_MAX_PAUSE_MS` actually reaches `maxTotalPauseMs`; on
+  // exhaustion the closure throws (findings 1+2) and this job's own
+  // top-level `catch` in `job.ts` already logs + captures + exits non-zero.
+  // No SIGTERM/stop handling existed here before and none is added.
   const waitForQuietPeriod = buildWaitForQuietPeriod({
     lookbackSeconds: liveActivityLookbackSeconds,
     pauseMs: liveActivityPauseMs,
+    maxTotalPauseMs: liveActivityMaxPauseMs,
     probe,
     onPause: () => deps.onLivePause?.(),
+    onProbeError: (error) => {
+      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
+        error_message: error instanceof Error ? error.message : String(error),
+      });
+      captureError(error, 'probe_error');
+    },
+    onBudgetExhausted: (pausedMs) => {
+      log(
+        'error',
+        'live_activity_pause_ceiling_exceeded',
+        `cooperative-pause budget exceeded (${pausedMs}ms >= LIVE_ACTIVITY_MAX_PAUSE_MS=${liveActivityMaxPauseMs}ms); aborting instead of pausing indefinitely`,
+        { paused_ms: pausedMs, live_activity_max_pause_ms: liveActivityMaxPauseMs }
+      );
+    },
   });
 
   // BS#1081: numeric attributes are projected at span creation so they
@@ -140,6 +178,7 @@ export const runBackfill = async (deps: {
         'wxyc.backfill.dry_run': Boolean(deps.dryRun),
         'wxyc.backfill.live_activity_lookback_seconds': liveActivityLookbackSeconds,
         'wxyc.backfill.live_activity_pause_ms': liveActivityPauseMs,
+        'wxyc.backfill.live_activity_max_pause_ms': liveActivityMaxPauseMs,
       },
     },
     async () => {
