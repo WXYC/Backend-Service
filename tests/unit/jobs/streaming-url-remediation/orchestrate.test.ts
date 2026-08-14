@@ -517,6 +517,36 @@ describe('runRemediation — cooperative pause', () => {
 
     expect(mockCheckLiveActivity).not.toHaveBeenCalled();
   });
+
+  describe('cooperative-pause budget ceiling (BS#2147 findings 1+2, 5)', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('marks the run failed when the injected liveActivityMaxPauseMs is exhausted', async () => {
+      // runRemediation wraps both phases in its own try/catch that already
+      // preserves the summary log + span, so the shared module's
+      // LiveActivityPauseCeilingExceededError doesn't reject this promise —
+      // it's caught here and surfaces as `result.failed`.
+      queueExecute([{ count: 1 }]);
+      (mockCheckLiveActivity as jest.Mock).mockResolvedValue(true as never);
+
+      const resultPromise = runRemediation(
+        baseOpts({
+          liveActivityLookbackSeconds: 60,
+          liveActivityPauseMs: 1000,
+          liveActivityMaxPauseMs: 2000,
+          checkLiveActivity: mockCheckLiveActivity,
+        })
+      );
+
+      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(1000);
+
+      const result = await resultPromise;
+      expect(result.failed).toBe(true);
+      expect(passThroughApply).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('runRemediation — cooperative stop (SIGTERM)', () => {
