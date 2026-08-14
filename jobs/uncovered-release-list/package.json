@@ -2,7 +2,7 @@
   "name": "@wxyc/uncovered-release-list",
   "cron-schedule": "40 7 * * 0",
   "version": "1.0.0",
-  "description": "WXYC weekly job (BS#1877, ADR 0013): compute the rotation x album_critic_reviews anti-join (further anti-joined against uncovered_release_search_markers, the 'searched, found nothing' marker), write uncovered-releases.jsonl, and commit it to WXYC/research-data for the search crawl mode to consume.",
+  "description": "WXYC weekly job (BS#1877, ADR 0013): compute the (active rotation ∪ recently played) x album_critic_reviews anti-join (further anti-joined against uncovered_release_search_markers, the 'searched, found nothing' marker), write uncovered-releases.jsonl, and commit it to WXYC/research-data for the search crawl mode to consume. --backfill drains every linked album ever played via the album_plays MV.",
   "type": "module",
   "main": "./dist/job.js",
   "scripts": {
