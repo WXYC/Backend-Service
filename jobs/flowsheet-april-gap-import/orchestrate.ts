@@ -55,7 +55,9 @@ import {
   intArrayLiteral,
   checkLiveActivity as defaultCheckLiveActivity,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
+  LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
   resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  resolveLiveActivityMaxPauseMs as resolveLiveActivityMaxPauseMsShared,
   buildWaitForQuietPeriod,
   requireNonNegativeInt,
   requirePositiveInt,
@@ -154,6 +156,17 @@ export const resolveLiveActivityLookback = (
  */
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
   resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
+
+/**
+ * BS#2147 review round 2, finding 5: wires `LIVE_ACTIVITY_MAX_PAUSE_MS` at
+ * this job's own call site. Before this, `buildWaitForQuietPeriod`'s
+ * `maxTotalPauseMs` always took its hardcoded 30-minute default — the env
+ * var read like a tunable knob but no TypeScript job ever read it, the
+ * exact failure shape BS#2147 exists to close. `0` = uncapped.
+ */
+export const resolveLiveActivityMaxPauseMs = (
+  raw: string | undefined = process.env.LIVE_ACTIVITY_MAX_PAUSE_MS
+): number => resolveLiveActivityMaxPauseMsShared(raw, LIVE_ACTIVITY_MAX_PAUSE_MS_ENV);
 
 // ---- Cooperative stop (SIGTERM/SIGINT) ----
 
@@ -479,6 +492,8 @@ export type RunImportOptions = {
   maxNullKeyRows?: number;
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
+  /** Cumulative cooperative-pause budget ceiling; 0 = uncapped. */
+  liveActivityMaxPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
   // Injectable seams — tests only; default to the real implementations above.
   discoverCandidatesFn?: (window: Window) => Promise<LegacyEntryRow[]>;
@@ -520,6 +535,7 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
   const maxNullKeyRows = opts.maxNullKeyRows ?? resolveMaxNullKeyRows();
   const liveActivityLookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const liveActivityPauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
+  const liveActivityMaxPauseMs = opts.liveActivityMaxPauseMs ?? resolveLiveActivityMaxPauseMs();
   const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
 
   const discoverCandidatesFn = opts.discoverCandidatesFn ?? discoverCandidates;
@@ -542,6 +558,7 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
   const waitForQuietPeriod = buildWaitForQuietPeriod({
     lookbackSeconds: liveActivityLookbackSeconds,
     pauseMs: liveActivityPauseMs,
+    maxTotalPauseMs: liveActivityMaxPauseMs,
     probe,
     shouldStop: () => stopRequested,
     onPause: () => {
@@ -556,6 +573,14 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
       });
       captureError(error, 'probe_error');
     },
+    onBudgetExhausted: (pausedMs) => {
+      log(
+        'error',
+        'live_activity_pause_ceiling_exceeded',
+        `cooperative-pause budget exceeded (${pausedMs}ms >= LIVE_ACTIVITY_MAX_PAUSE_MS=${liveActivityMaxPauseMs}ms); aborting instead of pausing indefinitely`,
+        { paused_ms: pausedMs, live_activity_max_pause_ms: liveActivityMaxPauseMs }
+      );
+    },
   });
 
   log('info', 'started', `${JOB_NAME} starting`, {
@@ -568,6 +593,7 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
     max_cohort_size: maxCohortSize,
     min_candidate_count: minCandidateCount,
     max_null_key_rows: maxNullKeyRows,
+    live_activity_max_pause_ms: liveActivityMaxPauseMs,
   });
 
   let failure: unknown = null;
