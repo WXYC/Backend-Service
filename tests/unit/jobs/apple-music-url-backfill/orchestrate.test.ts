@@ -553,6 +553,38 @@ describe('runBackfill — cooperative pause', () => {
 
     expect(mockCheckLiveActivity).not.toHaveBeenCalled();
   });
+
+  describe('cooperative-pause budget ceiling (BS#2147 findings 1+2, 5)', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('marks the run failed when the injected liveActivityMaxPauseMs is exhausted', async () => {
+      // runBackfill wraps both phases in its own try/catch (preserving the
+      // summary log + span), so the shared module's
+      // LiveActivityPauseCeilingExceededError doesn't reject this promise —
+      // it is caught here and surfaces as `result.failed`, which job.ts
+      // turns into a non-zero exit code.
+      queueExecute([{ count: 1 }]);
+      (mockCheckLiveActivity as jest.Mock).mockResolvedValue(true);
+      const lookup = jest.fn<LookupFn>().mockResolvedValue(withUrl);
+      const apply = jest.fn<ApplyFn>().mockResolvedValue('resolved');
+
+      const resultPromise = runBackfill({
+        ...baseOpts(lookup, apply),
+        liveActivityLookbackSeconds: 60,
+        liveActivityPauseMs: 1000,
+        liveActivityMaxPauseMs: 2000,
+        checkLiveActivity: mockCheckLiveActivity,
+      });
+
+      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(1000);
+
+      const result = await resultPromise;
+      expect(result.failed).toBe(true);
+      expect(lookup).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('runBackfill — cooperative stop (SIGTERM)', () => {
