@@ -868,5 +868,46 @@ describe('runImport', () => {
       expect(result.failed).toBe(true);
       expect(seams.insertBatchFn).not.toHaveBeenCalled();
     });
+
+    it('preserves the counts already committed when the ceiling throws mid-loop (BS#2147 review round 2 finding 2)', async () => {
+      // Before the fix: result.insertedIds/insertedCount were assigned ONLY
+      // after the batch `for` loop completed, so a ceiling throw from inside
+      // the loop (a newly reachable exit) left both at their zero defaults
+      // even though the first batch had already committed durably — the
+      // summary log/span would report inserted_count: 0 for a run that
+      // actually landed one row. The probe is quiet for the FIRST batch
+      // (letting it commit) and active from the second call onward, so the
+      // ceiling trips ahead of batch 2, never batch 1.
+      const seams = baseSeams();
+      const entries = [makeEntry({ id: 1 }), makeEntry({ id: 2 }), makeEntry({ id: 3 })];
+      seams.discoverCandidatesFn.mockResolvedValue(entries);
+      seams.buildShowIdMapFn.mockResolvedValue(new Map([[1001, 10]]));
+      seams.insertBatchFn.mockImplementation((rows: GapImportRow[]) =>
+        Promise.resolve(rows.map((r) => r.legacy_entry_id))
+      );
+      let probeCalls = 0;
+      const checkLiveActivity = jest.fn(() => Promise.resolve(probeCalls++ > 0));
+
+      const resultPromise = runImport({
+        dryRun: false,
+        ...seams,
+        liveActivityLookbackSeconds: 60,
+        liveActivityPauseMs: 1000,
+        liveActivityMaxPauseMs: 2000,
+        checkLiveActivity,
+        batchSize: 1,
+        batchGapMs: 0,
+      });
+
+      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(1000);
+
+      const result = await resultPromise;
+
+      expect(seams.insertBatchFn).toHaveBeenCalledTimes(1);
+      expect(result.failed).toBe(true);
+      expect(result.insertedCount).toBe(1);
+      expect(result.insertedIds).toEqual([1]);
+    });
   });
 });
