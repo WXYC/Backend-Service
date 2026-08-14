@@ -50,12 +50,12 @@
 -- ============================================================================
 -- OPERATOR-ERROR GUARDS (PR #2154 review)
 -- ============================================================================
--- Nine DO-block guards (five from round 1, two from round 2, two from
--- round 3) run before the corresponding mistake can do damage -- or, for the
--- last one, before a damaged outcome can be COMMITted -- each aborting loudly
--- (`\set ON_ERROR_STOP on`, so a RAISE EXCEPTION here stops the whole psql
--- run with a nonzero exit and no partial write). Listed in the order they
--- actually run:
+-- Ten DO-block guards (five from round 1, two from round 2, two from
+-- round 3, one from round 4) run before the corresponding mistake can do
+-- damage -- or, for the last two, before a damaged outcome can be COMMITted --
+-- each aborting loudly (`\set ON_ERROR_STOP on`, so a RAISE EXCEPTION here
+-- stops the whole psql run with a nonzero exit and no partial write). Listed
+-- in the order they actually run:
 --
 --   guard-placeholder-scrub      -- a captured row with a blank
 --                                    legacy_release_id survived the
@@ -213,6 +213,24 @@
 --                                    most one live row can hold that tuple,
 --                                    so this cannot be tripped by an
 --                                    unrelated row.
+--   guard-post-write-nfc-duplicate -- (round 4; runs AFTER guard-repair-complete,
+--                                    still inside the transaction) no two rows
+--                                    within a library_id this run touched are
+--                                    NFC-equal but byte-distinct on
+--                                    (artist_name, track_title). This is the
+--                                    belt-and-braces half of the round 4 fix
+--                                    below: build-targets' twin join now folds
+--                                    to NFC specifically to stop THIS class of
+--                                    duplicate from being created, but this
+--                                    guard checks the outcome directly rather
+--                                    than trusting that the join is the only
+--                                    place such a duplicate could arise --
+--                                    including one that predates this run
+--                                    entirely and simply happened to sit in a
+--                                    library_id this run also touched. See
+--                                    "Unicode normalization" and build-targets'
+--                                    own comment below for the failure mode
+--                                    this closes.
 --
 -- ============================================================================
 -- WHY THIS SCRIPT IS DATA-DRIVEN, NOT LITERAL LIKE ITS PREDECESSORS
@@ -480,11 +498,39 @@
 -- upstream. This script substitutes the tubafrenzy-verified exact original,
 -- not a fuzzy/plausible reconstruction.
 --
--- Unicode normalization: deliberately NOT applied, matching Phase 4's
--- posture (not Phase 2/3.5's). The true values here are copied byte-for-byte
--- out of tubafrenzy, and the catalog-parity harness that surfaced this issue
--- compares byte-exact with no accent/case folding -- normalizing on write is
--- the one thing that could reintroduce a parity mismatch.
+-- Unicode normalization: deliberately NOT applied to writes, matching Phase
+-- 4's posture (not Phase 2/3.5's). The true values here are copied
+-- byte-for-byte out of tubafrenzy, and the catalog-parity harness that
+-- surfaced this issue compares byte-exact with no accent/case folding, so
+-- normalizing what gets WRITTEN is the one thing that could reintroduce a
+-- parity mismatch.
+--
+-- Round 4 adds a narrow exception on the READ side only: twin DETECTION in
+-- build-targets, and the matching re-checks in delete-twins and
+-- repoint-twin-identity, compare `normalize(x, NFC)` rather than raw bytes.
+-- guard-nfc-form pins every captured true_* replacement to NFC, but this
+-- table carries no such invariant on its LIVE rows the way `artists` does
+-- (fold_artist_name, migration 0134) -- a genuinely NFD-stored live twin is
+-- possible, and byte-exact comparison silently missed it: an NFD clean twin
+-- against an NFC capture failed to match, the row classified no-twin,
+-- update-no-twins wrote the NFC value in place, and the table ended up
+-- holding two rows for one credit differing only in composition form --
+-- cta_unique_idx never fired (the bytes genuinely differ) and the postlude's
+-- U+FFFD residual read 0/0, because the corruption really was gone; what was
+-- left behind was a duplicate, not a U+FFFD. See build-targets' own comment
+-- below for the full account, and guard-post-write-nfc-duplicate above for
+-- the belt-and-braces check on the outcome.
+--
+-- Detection widens; writes do not. The three write statements still write
+-- the captured byte-exact true_*/cta.* values verbatim, never a normalized
+-- form -- COALESCE(p.true_artist_name, cta.artist_name) and its track_title
+-- counterpart are untouched by this change. `normalize()` runs only over
+-- this script's small, pending-row-scoped temp tables (`cta_repair_targets`
+-- and guard-post-write-nfc-duplicate's touched-library_id scan) -- never the
+-- two full-table BEFORE/AFTER residual scans, which stay a plain
+-- `LIKE E'%�%'` so they remain servable without a functional index (see
+-- their own comments on why that 1-character leading wildcard is already an
+-- unavoidable sequential scan).
 --
 -- Sequencing vs #1996: both rewrite CTA rows. #1996 is large and blocked on
 -- `library-etl` stopping; this repair is small, frozen residue, and
@@ -864,6 +910,44 @@ SET LOCAL statement_timeout = '30s';
 -- Resolve every pending row against the live table and classify twin/no-twin
 -- by resolving the twin's own row id (not just its existence), carrying over
 -- its identity-link columns for the DELETE branch and the BEFORE print.
+--
+-- Twin detection folds to NFC (round 4 finding). guard-nfc-form pins every
+-- captured true_* value to NFC, but current_*/cta.artist_name/cta.track_title
+-- have no such invariant -- deliberately: this table has no fold trigger the
+-- way `artists` does (fold_artist_name, migration 0134), so a genuinely
+-- NFD-stored LIVE row is possible, and it is exactly the twin this join has
+-- to find. Byte-exact comparison here missed it: an NFD clean twin against an
+-- NFC capture failed to match, the row classified no-twin, update-no-twins
+-- wrote the NFC value in place, and the table ended up holding two rows for
+-- one credit -- differing only in composition form, so cta_unique_idx never
+-- fired (the bytes genuinely differ) and the postlude's U+FFFD residual read
+-- 0/0, because the corruption really was gone; what was left behind was a
+-- duplicate, not a U+FFFD.
+--
+-- `normalize(x, NFC)` (PG13+; prod is PG14 and migration 0134 already depends
+-- on it) folds ONLY this twin comparison -- the cta-side join two lines above
+-- (matching the CORRUPT row against its captured current_*) is deliberately
+-- untouched. The two joins fail differently on a form mismatch, and that
+-- asymmetry is intentional: a miss on the cta-side join drops the row into
+-- the unmatched listing in pending-match-preview above -- visible,
+-- informational, and already covered by that listing's current_is_non_nfc
+-- column -- while a miss on the twin-side join was silent AND wrote. Writes
+-- stay byte-exact: new_artist_name/new_track_title below still COALESCE onto
+-- the captured true_*/cta.* values verbatim, never a normalized form -- see
+-- "Unicode normalization" further down for the full posture.
+--
+-- Classification-semantics widening, called out rather than left for a
+-- reader to discover: a pending row whose NFC-folded post-fix tuple now
+-- matches an existing NFD twin takes the DELETE branch where, pre-fix, it
+-- would have taken UPDATE and produced a duplicate. That is the correct
+-- branch, not an incidental side effect -- deleting the corrupt row leaves
+-- the NFD clean twin as the sole surviving copy of the credit, its identity
+-- link is repointed onto that twin by repoint-twin-identity below, the
+-- U+FFFD is gone, and no byte-distinct duplicate is created. delete-twins and
+-- repoint-twin-identity's own re-checks below fold to NFC the same way, so
+-- they cannot disagree with this classification the way a byte-exact
+-- re-check against an NFC-folded match would (see each statement's own
+-- comment for what disagreeing would have looked like).
 DROP TABLE IF EXISTS pg_temp.cta_repair_targets;
 CREATE TEMP TABLE cta_repair_targets AS
 SELECT
@@ -894,8 +978,8 @@ JOIN wxyc_schema.compilation_track_artist cta
 LEFT JOIN wxyc_schema.compilation_track_artist twin
   ON twin.library_id = cta.library_id
  AND twin.id <> cta.id
- AND twin.artist_name = COALESCE(p.true_artist_name, cta.artist_name)
- AND twin.track_title IS NOT DISTINCT FROM COALESCE(p.true_track_title, cta.track_title);
+ AND normalize(twin.artist_name, NFC) = normalize(COALESCE(p.true_artist_name, cta.artist_name), NFC)
+ AND normalize(twin.track_title, NFC) IS NOT DISTINCT FROM normalize(COALESCE(p.true_track_title, cta.track_title), NFC);
 -- === END STMT ===
 
 -- === STMT: lock-targets ===
@@ -1030,18 +1114,37 @@ END $$;
 -- documented-precedence merge of the two links) would trade a loud guard
 -- abort for a silent identity-link loss -- worse, not better. Narrow this
 -- guard and fix the repoint together, or leave both as they are.
+--
+-- Groups on `normalize(new_artist_name/new_track_title, NFC)` rather than the
+-- raw columns (round 4). Chosen deliberately, not the alternative of leaving
+-- this byte-exact: `new_artist_name`/`new_track_title` COALESCE onto
+-- `cta.artist_name`/`cta.track_title` for whichever column a pending row
+-- doesn't fix, and THAT column carries no NFC invariant (see "Unicode
+-- normalization" above) -- so two pending rows can converge on the same
+-- credit in a form-mismatched way with no true_* value involved at all. Two
+-- pending rows that converge only after NFC folding are the exact hazard this
+-- guard exists for -- differently-corrupted copies of one credit that would
+-- otherwise collide -- so leaving the grouping byte-exact would silently let
+-- that shape through to update-no-twins, where a real cta_unique_idx
+-- collision is no longer guaranteed (the two rows are NFC-equal, not
+-- byte-equal) and the failure mode reverts to the pre-fix duplicate this
+-- whole round exists to close, just reached from the converging-pending side
+-- instead of the twin-join side.
 DO $$
 DECLARE bad RECORD;
 BEGIN
   FOR bad IN
-    SELECT library_id, new_artist_name, new_track_title, COUNT(*) AS n,
+    SELECT library_id,
+           normalize(new_artist_name, NFC) AS new_artist_name_nfc,
+           normalize(new_track_title, NFC) AS new_track_title_nfc,
+           COUNT(*) AS n,
            array_agg(legacy_release_id ORDER BY legacy_release_id) AS release_ids,
            array_agg(track_position ORDER BY legacy_release_id) AS track_positions
       FROM cta_repair_targets
-     GROUP BY library_id, new_artist_name, new_track_title
+     GROUP BY library_id, normalize(new_artist_name, NFC), normalize(new_track_title, NFC)
     HAVING COUNT(*) > 1
   LOOP
-    RAISE EXCEPTION 'BS#2152 guard: % pending row(s) converge on the same post-fix library_id=% artist_name=% track_title=% (legacy_release_id/track_position pairs: %/%) -- two differently-corrupted copies of one credit would collide under cta_unique_idx on a single UPDATE; resolve which capture is correct (or whether one is a distinct real credit) before re-running', bad.n, bad.library_id, bad.new_artist_name, bad.new_track_title, bad.release_ids, bad.track_positions;
+    RAISE EXCEPTION 'BS#2152 guard: % pending row(s) converge on the same post-fix (NFC-folded) library_id=% artist_name=% track_title=% (legacy_release_id/track_position pairs: %/%) -- two differently-corrupted copies of one credit would collide under cta_unique_idx on a single UPDATE (or leave a form-mismatched duplicate behind, see the NFC folding note above); resolve which capture is correct (or whether one is a distinct real credit) before re-running', bad.n, bad.library_id, bad.new_artist_name_nfc, bad.new_track_title_nfc, bad.release_ids, bad.track_positions;
   END LOOP;
 END $$;
 -- === END STMT ===
@@ -1114,6 +1217,16 @@ SELECT legacy_release_id, track_position, id AS cta_id, old_artist_name, old_tra
 -- their own terms rather than relying on a downstream abort to clean up
 -- after them, which is what would matter to whoever next changes either the
 -- guard or the ordering.
+--
+-- The twin re-check folds to NFC (round 4), propagated from build-targets'
+-- own NFC-folded join above. Left byte-exact, an NFD twin would match
+-- build-targets' join, classify has_twin=true, and then fail THIS re-check
+-- (which requires the twin to still hold `new_artist_name`/`new_track_title`
+-- byte-for-byte) -- silently skipping the repoint. delete-twins' matching
+-- re-check below folds the same way, so both statements keep agreeing on
+-- whether the twin is still the row build-targets found; letting only one of
+-- them fold would reopen the exact "statements disagree" hazard the round 3
+-- lock-targets comment above describes for a different cause.
 UPDATE wxyc_schema.compilation_track_artist twin
    SET track_artist_id = COALESCE(twin.track_artist_id, t.old_track_artist_id),
        track_artist_link_confidence = COALESCE(twin.track_artist_link_confidence, t.old_track_artist_link_confidence),
@@ -1122,8 +1235,8 @@ UPDATE wxyc_schema.compilation_track_artist twin
   FROM cta_repair_targets t
  WHERE t.has_twin
    AND twin.id = t.twin_id
-   AND twin.artist_name = t.new_artist_name
-   AND twin.track_title IS NOT DISTINCT FROM t.new_track_title
+   AND normalize(twin.artist_name, NFC) = normalize(t.new_artist_name, NFC)
+   AND normalize(twin.track_title, NFC) IS NOT DISTINCT FROM normalize(t.new_track_title, NFC)
    AND EXISTS (
      SELECT 1 FROM wxyc_schema.compilation_track_artist cta
       WHERE cta.id = t.id
@@ -1154,6 +1267,17 @@ UPDATE wxyc_schema.compilation_track_artist twin
 -- it; this EXISTS covers the residual build-targets -> lock-targets window,
 -- where the honest answer is to skip the delete and let
 -- `guard-repair-complete` abort the whole transaction rather than guess.
+--
+-- The twin re-check folds to NFC (round 4), matching build-targets' own
+-- NFC-folded join and repoint-twin-identity's identical re-check above. This
+-- is load-bearing, not cosmetic: build-targets now classifies an NFD twin as
+-- has_twin=true, so if this re-check stayed byte-exact it would fail against
+-- that same NFD twin -- the DELETE would silently skip, and
+-- `guard-repair-complete` would then abort the whole run on a row that was
+-- actually classified correctly. Folding this predicate the same way the
+-- join folds is what converts "closed the join, reopened it here" back into
+-- a real fix; see build-targets' own comment for the full account of the
+-- defect this closes.
 DELETE FROM wxyc_schema.compilation_track_artist cta
 USING cta_repair_targets t
 WHERE cta.id = t.id
@@ -1163,8 +1287,8 @@ WHERE cta.id = t.id
   AND EXISTS (
     SELECT 1 FROM wxyc_schema.compilation_track_artist twin
      WHERE twin.id = t.twin_id
-       AND twin.artist_name = t.new_artist_name
-       AND twin.track_title IS NOT DISTINCT FROM t.new_track_title
+       AND normalize(twin.artist_name, NFC) = normalize(t.new_artist_name, NFC)
+       AND normalize(twin.track_title, NFC) IS NOT DISTINCT FROM normalize(t.new_track_title, NFC)
   );
 -- === END STMT ===
 
@@ -1226,6 +1350,56 @@ BEGIN
      )
   LOOP
     RAISE EXCEPTION 'BS#2152 guard: legacy_release_id=% track_position=% (cta_id=% has_twin=% twin_id=%) still holds its corrupt tuple (artist_name=% track_title=%) after the write statements ran -- the repair for this row was SKIPPED, not applied; the usual cause is that its twin was deleted or renamed between build-targets and lock-targets, so delete-twins correctly declined rather than destroy the last copy of the credit. Rolling back; re-run the script to reclassify this row against current live state', bad.legacy_release_id, bad.track_position, bad.cta_id, bad.has_twin, bad.twin_id, bad.old_artist_name, bad.old_track_title;
+  END LOOP;
+END $$;
+-- === END STMT ===
+
+-- === STMT: guard-post-write-nfc-duplicate ===
+-- Round 4: the belt-and-braces half of the NFC-folding fix. build-targets'
+-- twin join now folds to NFC specifically so an NFD clean twin is FOUND
+-- instead of missed, which is what stops update-no-twins from writing a
+-- byte-distinct duplicate of it. This guard does not trust that the join is
+-- the only place such a duplicate could arise -- it checks the outcome
+-- directly: after all three write statements have run, no two LIVE rows
+-- sharing a library_id this run touched may be NFC-equal but byte-distinct on
+-- (artist_name, track_title).
+--
+-- Scope is "any library_id in cta_repair_targets", not "only rows this run
+-- wrote" -- deliberately broader, matching guard-repair-complete's own
+-- posture of checking the outcome rather than the mechanism. A pre-existing
+-- NFC/NFD duplicate pair that this run never touched, sitting in a
+-- compilation this run otherwise repaired, is exactly the kind of thing an
+-- operator should see before trusting this run's postlude -- the U+FFFD
+-- residual reads 0/0 either way, and that was the whole failure mode the
+-- round 4 finding started from. Aborting here rolls back this run's own
+-- writes (the same recovery shape as every other guard in this script) but
+-- cannot undo a duplicate that predates this run; the exception message says
+-- so explicitly rather than implying a clean rollback fixes everything it
+-- flags.
+--
+-- `normalize()` here runs only over rows in library_ids from
+-- `cta_repair_targets` -- a handful of compilations per run, not a full-table
+-- scan (see "Unicode normalization" in the header and item 5 of the round 4
+-- review notes: normalize() must never land in the BEFORE/AFTER residual
+-- scans, which stay indexable-scan-shaped LIKE predicates over the whole
+-- table).
+DO $$
+DECLARE bad RECORD;
+BEGIN
+  FOR bad IN
+    SELECT cta.library_id,
+           normalize(cta.artist_name, NFC) AS artist_name_nfc,
+           normalize(cta.track_title, NFC) AS track_title_nfc,
+           COUNT(*) AS n,
+           array_agg(cta.id ORDER BY cta.id) AS cta_ids,
+           array_agg(cta.artist_name ORDER BY cta.id) AS artist_names,
+           array_agg(cta.track_title ORDER BY cta.id) AS track_titles
+      FROM wxyc_schema.compilation_track_artist cta
+     WHERE cta.library_id IN (SELECT DISTINCT library_id FROM cta_repair_targets)
+     GROUP BY cta.library_id, normalize(cta.artist_name, NFC), normalize(cta.track_title, NFC)
+    HAVING COUNT(*) > 1
+  LOOP
+    RAISE EXCEPTION 'BS#2152 guard: library_id=% has % rows that are NFC-equal but byte-distinct on (artist_name, track_title) after this run''s writes (cta_ids=%, artist_names=%, track_titles=%) -- this is the exact duplicate class the NFC-folded twin join exists to prevent. Rolling back undoes this run''s own writes but may NOT undo this specific duplicate if it predates this run; investigate the listed rows directly (do they need a manual merge? does an earlier run of this or a sibling script need review?) before re-running', bad.library_id, bad.n, bad.cta_ids, bad.artist_names, bad.track_titles;
   END LOOP;
 END $$;
 -- === END STMT ===
