@@ -46,7 +46,9 @@ const EXPECTED_BLOCKS = [
   'guard-placeholder-scrub',
   'guard-replacement-specified',
   'guard-capture-sanity',
+  'guard-nfc-form',
   'build-targets',
+  'guard-post-fix-fffd',
   'guard-ambiguous-match',
   'guard-converging-pending',
   'repoint-twin-identity',
@@ -239,11 +241,13 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
       await reservedSql.unsafe(blocks['guard-placeholder-scrub']);
       await reservedSql.unsafe(blocks['guard-replacement-specified']);
       await reservedSql.unsafe(blocks['guard-capture-sanity']);
+      await reservedSql.unsafe(blocks['guard-nfc-form']);
 
       await reservedSql.unsafe('BEGIN');
       inTransaction = true;
       await reservedSql.unsafe("SET LOCAL statement_timeout = '30s'");
       await reservedSql.unsafe(blocks['build-targets']);
+      await reservedSql.unsafe(blocks['guard-post-fix-fffd']);
       await reservedSql.unsafe(blocks['guard-ambiguous-match']);
       await reservedSql.unsafe(blocks['guard-converging-pending']);
       await reservedSql.unsafe(blocks['repoint-twin-identity']);
@@ -307,16 +311,65 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
     return rows[0].n;
   }
 
-  test('extracts exactly the 12 expected STMT blocks, in order', () => {
+  test('extracts exactly the 14 expected STMT blocks, in order', () => {
     expect(Object.keys(blocks)).toEqual(EXPECTED_BLOCKS);
     for (const name of EXPECTED_BLOCKS) {
       expect(blocks[name].trim().length).toBeGreaterThan(0);
     }
   });
 
-  test('the file carries a literal BEGIN; and COMMIT; outside any STMT block (pinned so the runner above stays honest)', () => {
-    expect(scriptText).toMatch(/^BEGIN;$/m);
-    expect(scriptText).toMatch(/^COMMIT;$/m);
+  test('the transaction boundary is positioned correctly: BEGIN; precedes build-targets, COMMIT; precedes the final ANALYZE (MEDIUM finding, PR #2154 review round 2 -- a prior version of this test only asserted BEGIN;/COMMIT; existed SOMEWHERE in the file, which cannot detect either boundary moving to the wrong side of a STMT block; verified against the review-cited regression: a verbatim revert of round 1\'s "classify inside the transaction" fix, or moving ANALYZE inside the transaction, both left the old assertion-only-existence version of this test green)', () => {
+    const beginIdx = scriptText.indexOf('\nBEGIN;\n');
+    const buildTargetsIdx = scriptText.indexOf('-- === STMT: build-targets ===');
+    const commitIdx = scriptText.indexOf('\nCOMMIT;\n');
+    const analyzeStmtIdx = scriptText.indexOf('-- === STMT: analyze ===');
+    const analyzeSqlIdx = scriptText.indexOf('ANALYZE wxyc_schema.compilation_track_artist;');
+
+    expect(beginIdx).toBeGreaterThan(-1);
+    expect(buildTargetsIdx).toBeGreaterThan(-1);
+    expect(commitIdx).toBeGreaterThan(-1);
+    expect(analyzeStmtIdx).toBeGreaterThan(-1);
+    expect(analyzeSqlIdx).toBeGreaterThan(-1);
+
+    expect(beginIdx).toBeLessThan(buildTargetsIdx);
+    expect(commitIdx).toBeGreaterThan(buildTargetsIdx);
+    expect(commitIdx).toBeLessThan(analyzeStmtIdx);
+    expect(commitIdx).toBeLessThan(analyzeSqlIdx);
+  });
+
+  test('the post-amble residual-count reads sit BEFORE COMMIT;, not after (MEDIUM finding, PR #2154 review round 2 -- pins the fix for the broken "swap COMMIT; for ROLLBACK;" dry-run recipe the header documents: with these reads after COMMIT;, a ROLLBACK undoes the CREATE TEMP TABLE cta_repair_targets they depend on and the whole script aborts)', () => {
+    const updateNoTwinsEndIdx = scriptText.indexOf(
+      '-- === END STMT ===',
+      scriptText.indexOf('-- === STMT: update-no-twins ===')
+    );
+    const postAmbleIdx = scriptText.indexOf('post-amble: residual count per targeted row');
+    const commitIdx = scriptText.indexOf('\nCOMMIT;\n');
+
+    expect(updateNoTwinsEndIdx).toBeGreaterThan(-1);
+    expect(postAmbleIdx).toBeGreaterThan(-1);
+    expect(commitIdx).toBeGreaterThan(-1);
+
+    expect(postAmbleIdx).toBeGreaterThan(updateNoTwinsEndIdx);
+    expect(postAmbleIdx).toBeLessThan(commitIdx);
+  });
+
+  test('the shipped insert-pending-rows block carries no quoted string literals in its SQL -- i.e. it is still just the all-NULL placeholder (the missing enforcement gate, PR #2154 review round 2)', () => {
+    // The deferred byte-exact codepoint assertion (Phase 4's
+    // scriptUsesTheRightCodepoints analogue, see the header's "Known gap,
+    // deliberately deferred" note) can't be written until an operator has
+    // actually captured and pasted the 14 real rows. The INVERSE is
+    // checkable today: as long as the shipped VALUES list is still just the
+    // placeholder, that gap is inert. Every real captured row has at least
+    // one single-quoted string (an artist_name or track_title); the
+    // placeholder and its scrub DELETE have none. This goes red the moment
+    // real data lands, forcing whoever adds it to add the codepoint
+    // assertion in the SAME change (see the header note this test is
+    // pointed at).
+    const sqlOnly = blocks['insert-pending-rows']
+      .split('\n')
+      .map((line) => line.replace(/--.*$/, ''))
+      .join('\n');
+    expect(sqlOnly).not.toMatch(/'/);
   });
 
   test('the shipped insert-pending-rows block (as committed) is a genuine no-op', async () => {
@@ -589,7 +642,12 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
           },
         ])
       )
-    ).rejects.toThrow(/BS#2152 guard/);
+      // Guard-specific fragment (LOW/MEDIUM finding, PR #2154 review round 2
+      // -- every guard test previously asserted only the shared /BS#2152
+      // guard/ prefix, which any OTHER guard's exception also satisfies; see
+      // the mutation-test table in the PR description for which tests this
+      // silently under-covered).
+    ).rejects.toThrow('specify no replacement');
   });
 
   test('the guard-ambiguous-match block rejects a duplicate entry in the pending block', async () => {
@@ -613,8 +671,12 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
       true_artist_name: 'Csillagrablók',
     };
 
+    // Guard-specific fragment (PR #2154 review round 2, finding 4): the
+    // generic /BS#2152 guard/ prefix a prior version of this test asserted
+    // is shared by all seven guards, so it cannot tell this apart from
+    // guard-converging-pending, guard-capture-sanity, etc. firing instead.
     await expect(runRepairScript(withSyntheticPendingRows([dupPendingRow, { ...dupPendingRow }]))).rejects.toThrow(
-      /BS#2152 guard/
+      'live compilation_track_artist rows'
     );
   });
 
@@ -646,7 +708,8 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
           },
         ])
       )
-    ).rejects.toThrow(/BS#2152 guard/);
+      // Guard-specific fragment (PR #2154 review round 2, finding 4).
+    ).rejects.toThrow('looks transposed or uncorrupted');
 
     // Nothing was written -- the guard fires before BEGIN, and even if it
     // had fired inside the transaction, the ROLLBACK in runRepairScript's
@@ -694,7 +757,8 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
       // The named guard message, NOT a raw postgres 23505 unique-violation
       // error -- proves guard-converging-pending caught this before either
       // write statement ran, rather than the write failing safe by accident.
-    ).rejects.toThrow(/BS#2152 guard/);
+      // Guard-specific fragment (PR #2154 review round 2, finding 4).
+    ).rejects.toThrow('converge on the same post-fix');
 
     // Both original corrupt rows survive untouched -- the transaction rolled
     // back before delete-twins/update-no-twins ever executed.
@@ -739,7 +803,8 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
           },
         ])
       )
-    ).rejects.toThrow(/BS#2152 guard/);
+      // Guard-specific fragment (PR #2154 review round 2, finding 4).
+    ).rejects.toThrow('already been scrubbed');
   });
 
   test("MEDIUM: the DELETE branch repoints the corrupt row's identity link + track_position onto the surviving twin before deleting it", async () => {
@@ -819,5 +884,215 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
     expect(twin.track_artist_link_confidence).toBeCloseTo(0.99);
     expect(twin.track_artist_link_method).toBe('librarian');
     expect(twin.track_position).toBe('2');
+  });
+
+  // ==========================================================================
+  // Round 2 review findings (PR #2154 review, second pass against a live
+  // Postgres via `psql -f`).
+  // ==========================================================================
+
+  test('HIGH: silent row destruction (round 2 repro) -- a row corrupt in BOTH columns but captured with only ONE true_* replacement aborts via guard-post-fix-fffd, BOTH rows survive intact', async () => {
+    // Exact reviewer reproduction: two live rows share the SAME corrupt
+    // artist_name ('Hermanos Guti<U+FFFD>rrez') -- row 1 is corrupt ONLY in
+    // artist_name (its track_title is already clean), row 2 is corrupt in
+    // BOTH columns. The pending capture fixes row 2's track_title but
+    // (the operator slip) leaves true_artist_name NULL even though row 2's
+    // artist_name is ALSO corrupt. Unguarded: new_artist_name stays
+    // 'Hermanos Guti<U+FFFD>rrez' (untouched), new_track_title becomes the
+    // fixed 'Sonido Cósmico' -- which is now BYTE-IDENTICAL to row 1's
+    // existing (artist_name, track_title) tuple, so row 1 resolves as row
+    // 2's "twin" and gets DELETEd, destroying the row that was actually
+    // targeted for repair while row 1's corruption survives untouched.
+    const libraryId = await seedLibrary(90022);
+    const row1Id = await seedCta(libraryId, 'Hermanos Guti�rrez', 'Sonido Cósmico', '2');
+    const row2Id = await seedCta(libraryId, 'Hermanos Guti�rrez', 'Sonido C�smico', '7');
+
+    await expect(
+      runRepairScript(
+        withSyntheticPendingRows([
+          {
+            legacy_release_id: 90022,
+            track_position: '7',
+            current_artist_name: 'Hermanos Guti�rrez',
+            current_track_title: 'Sonido C�smico',
+            true_track_title: 'Sonido Cósmico',
+            // true_artist_name deliberately omitted, even though row 2's
+            // artist_name is ALSO corrupt -- the exact capture slip finding
+            // 1 (round 2) reproduced.
+          },
+        ])
+      )
+      // Guard-specific fragment.
+    ).rejects.toThrow('still carries U+FFFD in its post-fix tuple');
+
+    // Both rows survive, byte for byte -- the guard fires before BEGIN's
+    // writes run (and even if it fired later, the ROLLBACK in
+    // runRepairScript's catch block would undo it).
+    const row1 = await ctaRow(row1Id);
+    expect(row1.artist_name).toBe('Hermanos Guti�rrez');
+    expect(row1.track_title).toBe('Sonido Cósmico');
+    const row2 = await ctaRow(row2Id);
+    expect(row2.artist_name).toBe('Hermanos Guti�rrez');
+    expect(row2.track_title).toBe('Sonido C�smico');
+    expect(await ctaCount(libraryId)).toBe(2);
+  });
+
+  test('HIGH: silent partial repair (round 2 repro) -- a row corrupt in BOTH columns, no twin, captured with only ONE true_* replacement aborts via guard-post-fix-fffd instead of half-writing', async () => {
+    // Exact reviewer reproduction: no twin exists anywhere for this credit,
+    // so unguarded the UPDATE branch would run and write only the supplied
+    // column -- exit 0, the per-row postlude residual would read 0 against
+    // this row's OLD tuple (which no longer exists), but the overall
+    // residual counter would still show 1 with no row-level indication of
+    // which row is still wrong.
+    const libraryId = await seedLibrary(90023);
+    const corruptId = await seedCta(libraryId, 'Csillagrabl�k', 'Rem�nytelen T�nc', '4');
+
+    await expect(
+      runRepairScript(
+        withSyntheticPendingRows([
+          {
+            legacy_release_id: 90023,
+            track_position: '4',
+            current_artist_name: 'Csillagrabl�k',
+            current_track_title: 'Rem�nytelen T�nc',
+            true_track_title: 'Reménytelen Tánc',
+            // true_artist_name omitted, even though artist_name is ALSO corrupt.
+          },
+        ])
+      )
+    ).rejects.toThrow('still carries U+FFFD in its post-fix tuple');
+
+    const row = await ctaRow(corruptId);
+    expect(row.artist_name).toBe('Csillagrabl�k'); // untouched -- not half-written
+    expect(row.track_title).toBe('Rem�nytelen T�nc');
+  });
+
+  test('a row corrupt in BOTH columns, captured CORRECTLY as one pending row with BOTH true_* values, repairs cleanly (the shape step 4 of the header now documents)', async () => {
+    const libraryId = await seedLibrary(90024);
+    const corruptId = await seedCta(libraryId, 'Csillagrabl�k', 'Rem�nytelen T�nc', '4');
+
+    const result = await runRepairScript(
+      withSyntheticPendingRows([
+        {
+          legacy_release_id: 90024,
+          track_position: '4',
+          current_artist_name: 'Csillagrabl�k',
+          current_track_title: 'Rem�nytelen T�nc',
+          true_artist_name: 'Csillagrablók',
+          true_track_title: 'Reménytelen Tánc',
+        },
+      ])
+    );
+
+    expect(result.deleted).toBe(0);
+    expect(result.updated).toBe(1);
+    const row = await ctaRow(corruptId);
+    expect(row.artist_name).toBe('Csillagrablók');
+    expect(row.track_title).toBe('Reménytelen Tánc');
+  });
+
+  test('MEDIUM: guard-nfc-form rejects a true_* replacement pasted in a non-NFC Unicode normalization form', async () => {
+    await seedLibrary(90025);
+    // NFD: a bare 'o' followed by a standalone COMBINING ACUTE ACCENT
+    // (U+0301), rather than the precomposed 'ó' (U+00F3) every other test in
+    // this file uses -- exactly the shape a MySQL client or a different OS
+    // clipboard normalization can hand an operator without either of them
+    // noticing, since both render identically.
+    const nfdTrackTitle = 'Sonido Cósmico';
+    expect(nfdTrackTitle.normalize('NFC')).not.toBe(nfdTrackTitle);
+    expect(nfdTrackTitle.normalize('NFC')).toBe('Sonido Cósmico');
+
+    await expect(
+      runRepairScript(
+        withSyntheticPendingRows([
+          {
+            legacy_release_id: 90025,
+            track_position: '1',
+            current_artist_name: 'Hermanos Gutiérrez',
+            current_track_title: 'Sonido C�smico',
+            true_track_title: nfdTrackTitle,
+          },
+        ])
+      )
+      // Guard-specific fragment.
+    ).rejects.toThrow('not NFC-normalized');
+  });
+
+  test("MEDIUM: repoint-twin-identity re-checks the corrupt row is unchanged before repointing, mirroring delete-twins' own re-check", async () => {
+    // A concurrent edit to the corrupt row's artist_name landing AFTER
+    // build-targets but BEFORE repoint-twin-identity -- e.g. a same-cycle
+    // library-etl write, or a librarian hand-edit -- means the corrupt row
+    // no longer matches its captured old_artist_name/old_track_title.
+    // delete-twins' own re-check already skips deleting it in that case;
+    // before this fix, repoint-twin-identity had no equivalent re-check, so
+    // it would still repoint the twin's identity link even though the
+    // corrupt row it came from was never actually deleted -- silently
+    // duplicating the identity link across two live rows.
+    const libraryId = await seedLibrary(90026);
+    const twinId = await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido Cósmico', null, {
+      track_artist_id: null,
+      track_artist_link_confidence: null,
+      track_artist_link_method: null,
+    });
+    const corruptId = await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido C�smico', '4', {
+      track_artist_id: 4242,
+      track_artist_link_confidence: 0.93,
+      track_artist_link_method: 'lml_backfill',
+    });
+
+    const reservedSql = await sql.reserve();
+    try {
+      await reservedSql.unsafe(blocks['create-pending-table']);
+      await insertSyntheticPendingRows(reservedSql, [
+        {
+          legacy_release_id: 90026,
+          track_position: '4',
+          current_artist_name: 'Hermanos Gutiérrez',
+          current_track_title: 'Sonido C�smico',
+          true_track_title: 'Sonido Cósmico',
+        },
+      ]);
+      await reservedSql.unsafe(blocks['guard-placeholder-scrub']);
+      await reservedSql.unsafe(blocks['guard-replacement-specified']);
+      await reservedSql.unsafe(blocks['guard-capture-sanity']);
+      await reservedSql.unsafe(blocks['guard-nfc-form']);
+
+      await reservedSql.unsafe('BEGIN');
+      await reservedSql.unsafe("SET LOCAL statement_timeout = '30s'");
+      await reservedSql.unsafe(blocks['build-targets']);
+      await reservedSql.unsafe(blocks['guard-post-fix-fffd']);
+      await reservedSql.unsafe(blocks['guard-ambiguous-match']);
+      await reservedSql.unsafe(blocks['guard-converging-pending']);
+
+      // Simulate the concurrent edit from a SECOND session. READ COMMITTED
+      // means this ordinary UPDATE is not blocked by the open transaction
+      // above -- build-targets' CREATE TEMP TABLE ... AS SELECT took no row
+      // lock.
+      await sql`
+        UPDATE ${sql(TEST_SCHEMA)}.compilation_track_artist
+           SET artist_name = 'Somebody Else Entirely'
+         WHERE id = ${corruptId}
+      `;
+
+      await reservedSql.unsafe(blocks['repoint-twin-identity']);
+      await reservedSql.unsafe(blocks['delete-twins']);
+      await reservedSql.unsafe(blocks['update-no-twins']);
+      await reservedSql.unsafe('COMMIT');
+    } finally {
+      reservedSql.release();
+    }
+
+    // The twin's identity link was NOT repointed -- the re-check in
+    // repoint-twin-identity found the corrupt row no longer matched its
+    // captured old_artist_name and skipped.
+    const twin = await ctaRow(twinId);
+    expect(twin.track_artist_id).toBeNull();
+    expect(twin.track_artist_link_confidence).toBeNull();
+    expect(twin.track_artist_link_method).toBeNull();
+
+    // The concurrently-edited row survives untouched by this run (delete-
+    // twins' own pre-existing re-check already covered this half).
+    const corrupt = await ctaRow(corruptId);
+    expect(corrupt.artist_name).toBe('Somebody Else Entirely');
   });
 });
