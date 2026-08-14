@@ -822,6 +822,19 @@ export const runReenrichment = async (opts: {
       // the next batch, which is the opposite of aborting.
       if (stopped || failed) break;
     }
+  } catch (error) {
+    // BS#2147 review round 2, finding "flowsheet-reenrichment logs a success
+    // summary on a ceiling abort": the cooperative-pause budget ceiling
+    // throws LiveActivityPauseCeilingExceededError out of waitForQuietPeriod()
+    // above — a new escape path this loop didn't have before. Without this
+    // catch, `failed` stays at its null default and the finally arm below
+    // logs step='finished' / failed:false, contradicting its own contract
+    // comment ("'failed' — uncaught exception"). Set `failed` before
+    // rethrowing so the finally arm's step/level/captureError all read the
+    // abort correctly; the rethrow preserves the existing
+    // rejects-with-LiveActivityPauseCeilingExceededError contract.
+    failed = { error };
+    throw error;
   } finally {
     // Summary span carrying numeric attributes (BS#1081 typing-trap workaround).
     // Always emitted — even on stop/fail — so partial-run telemetry is
