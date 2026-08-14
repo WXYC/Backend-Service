@@ -158,8 +158,13 @@ export interface WaitForQuietPeriodOptions {
  * guard rather than an artifact of the loop condition happening to be
  * false on first check, so the behavior doesn't depend on the floor making
  * that value unreachable via env.
+ *
+ * Exported (BS#2147 review round 2, finding 7) solely so
+ * `tests/unit/database/live-activity.test.ts` can pin `tests/mocks/database.mock.ts`'s
+ * hand-duplicated copy against this one via `Function.prototype.toString()` —
+ * not intended as a standalone public API.
  */
-const buildDefaultSleep = (shouldStop: () => boolean): ((ms: number) => Promise<void>) => {
+export const buildDefaultSleep = (shouldStop: () => boolean): ((ms: number) => Promise<void>) => {
   return async (ms: number): Promise<void> => {
     if (ms <= 0) return;
     const deadline = Date.now() + ms;
@@ -203,6 +208,14 @@ const buildDefaultSleep = (shouldStop: () => boolean): ((ms: number) => Promise<
  * activity" for that iteration (reported via `onProbeError`, if provided).
  * This is a deliberate behavior change for the callers that previously let
  * a probe throw escape and abort the run — see the BS#2147 PR description.
+ *
+ * The `now` clock defaults to `performance.now` (review round 2, finding
+ * 8), Node's monotonic clock — `Date.now()` can step backward on an NTP
+ * correction (decrementing `pausedMs`) or forward on clock slew (exhausting
+ * the budget early); either corrupts the accrual math below.
+ * `buildDefaultSleep`'s own `Date.now()` is untouched: it only computes a
+ * real-timer deadline, which is wall-clock by nature and pre-existing
+ * behavior this fix doesn't change.
  */
 export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() => Promise<boolean>) => {
   const {
@@ -215,15 +228,6 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
     onBudgetExhausted,
     maxTotalPauseMs = LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT,
     sleep = buildDefaultSleep(shouldStop),
-    // BS#2147 review round 2, finding 8: `performance.now()` is Node's
-    // monotonic clock. `Date.now()` can step backward (NTP correction) or
-    // forward (clock slew) mid-run; either one corrupts `pausedMs` accrual
-    // below. `buildDefaultSleep` deliberately keeps `Date.now()` — it only
-    // computes a real-timer deadline, which is wall-clock by nature and
-    // pre-existing behavior this fix doesn't touch. Wrapped in an arrow
-    // (not `now = performance.now` directly) because destructuring the
-    // bare method off its object loses the `this` binding `Performance`'s
-    // native implementation requires.
     now = () => performance.now(),
   } = opts;
 
@@ -248,9 +252,6 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
       if (shouldStop()) return true;
 
       if (maxTotalPauseMs > 0 && pausedMs >= maxTotalPauseMs) {
-        // BS#2147 review round 2, findings 1+2: fire the context hook FIRST,
-        // then throw. There is no sticky "exhausted" flag to swallow later
-        // calls into silent full-speed proceeding — see the class doc above.
         onBudgetExhausted?.(pausedMs);
         throw new LiveActivityPauseCeilingExceededError(
           `Cooperative-pause budget exceeded: paused ${pausedMs}ms against a ${maxTotalPauseMs}ms ceiling ` +
