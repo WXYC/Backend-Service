@@ -50,9 +50,11 @@
 -- ============================================================================
 -- OPERATOR-ERROR GUARDS (PR #2154 review)
 -- ============================================================================
--- Five DO-block guards run before the corresponding mistake can do damage,
--- each aborting loudly (`\set ON_ERROR_STOP on`, so a RAISE EXCEPTION here
--- stops the whole psql run with a nonzero exit and no partial write):
+-- Seven DO-block guards (five from round 1, two added in round 2's review)
+-- run before the corresponding mistake can do damage, each aborting loudly
+-- (`\set ON_ERROR_STOP on`, so a RAISE EXCEPTION here stops the whole psql
+-- run with a nonzero exit and no partial write). Listed in the order they
+-- actually run:
 --
 --   guard-placeholder-scrub      -- a captured row with a blank
 --                                    legacy_release_id survived the
@@ -82,6 +84,38 @@
 --                                    misdecoded session turns every U+FFFD
 --                                    predicate into a false negative the
 --                                    same way a transposed pair does.
+--   guard-nfc-form                -- a declared true_* replacement is not in
+--                                    NFC Unicode normalization form (round 2
+--                                    MEDIUM finding). Twin detection below
+--                                    joins on exact byte equality, so a
+--                                    true_* value pasted out of a source that
+--                                    yields a different normalization form
+--                                    (e.g. NFD) can silently miss a live twin
+--                                    already stored in NFC -- the row
+--                                    classifies no-twin, the UPDATE writes a
+--                                    byte-distinct duplicate, and
+--                                    cta_unique_idx does not fire because the
+--                                    two rows are not byte-identical. A
+--                                    capture-time rejection, not a write-time
+--                                    normalization -- preserves the byte-exact
+--                                    write posture documented under
+--                                    "Unicode normalization" below.
+--   guard-post-fix-fffd           -- (runs after build-targets, inside the
+--                                    transaction) a row's post-fix tuple
+--                                    (new_artist_name / new_track_title)
+--                                    still contains U+FFFD (round 2 HIGH
+--                                    finding). new_* is
+--                                    COALESCE(true_*, cta.*), so a row
+--                                    corrupt in BOTH columns but captured
+--                                    with only one true_* replacement leaves
+--                                    the untouched column's U+FFFD in the
+--                                    write -- silently destroying data if a
+--                                    twin happens to match on the fixed
+--                                    column alone, or silently leaving a
+--                                    corrupt column behind if not. See step 4
+--                                    of the capture procedure below for the
+--                                    correct one-row-carries-both-values
+--                                    shape this guard enforces.
 --   guard-ambiguous-match         -- a pending row resolves to more than one
 --                                    LIVE row (structurally impossible under
 --                                    cta_unique_idx / cta_unique_null_track_idx,
@@ -111,7 +145,12 @@
 --                                    update-no-twins UPDATE, which raises a
 --                                    raw 23505 instead of a named guard
 --                                    message identifying which rows
---                                    collided.
+--                                    collided. Deliberately over-broad: it
+--                                    aborts even when both converging rows
+--                                    classify has_twin=true, where the two
+--                                    DELETEs would actually be collision-free
+--                                    -- see the guard's own comment below for
+--                                    why that's left alone in this PR.
 --
 -- ============================================================================
 -- WHY THIS SCRIPT IS DATA-DRIVEN, NOT LITERAL LIKE ITS PREDECESSORS
@@ -193,14 +232,31 @@
 --    actually captured and pasted the 14 real values (see "WHY THIS SCRIPT
 --    IS DATA-DRIVEN" above). Whoever fills in the PENDING CAPTURE block
 --    should add that same byte-assertion test as part of that follow-up --
---    this is a known, named gap, not a silent omission.
+--    this is a known, named gap, not a silent omission. The INVERSE is
+--    enforced today (PR #2154 review round 2): the paired integration
+--    spec's "still just the all-NULL placeholder" test asserts the shipped
+--    `insert-pending-rows` block carries no quoted string literals, so it
+--    goes red the moment real rows land -- whoever fills in this block
+--    cannot do so without also updating that test, which is exactly where
+--    the deferred byte-assertion belongs.
 --
--- 4. Fill in the PENDING CAPTURE block below: one row per corrupt value,
---    using the enumeration query's own columns for `legacy_release_id` /
---    `track_position` / `current_artist_name` / `current_track_title`, and
---    the resolved true string in whichever of `true_artist_name` /
---    `true_track_title` corresponds to the corrupt column. Leave the other
---    `true_*` column NULL -- it means "this column is not being touched".
+-- 4. Fill in the PENDING CAPTURE block below: ONE ROW PER CORRUPT LIVE ROW
+--    (not one row per corrupt VALUE), using the enumeration query's own
+--    columns for `legacy_release_id` / `track_position` /
+--    `current_artist_name` / `current_track_title`. If the row is corrupt in
+--    only ONE column, put the resolved true string in that column's
+--    `true_*` slot and leave the OTHER `true_*` column NULL -- it means
+--    "this column is not being touched". If the row is corrupt in BOTH
+--    columns (the enumeration query's own `artist_name` AND `track_title`
+--    both match the U+FFFD pattern), that SAME single row must carry BOTH
+--    `true_artist_name` AND `true_track_title` -- do NOT split one corrupt
+--    row into two separate pending rows, one per column. A split capture
+--    leaves each row's untouched column still corrupt in its computed
+--    post-fix tuple; `guard-post-fix-fffd` now catches that directly (round
+--    2 HIGH finding -- see the guard list above), and in the twin-existing
+--    case a split capture can also converge onto `guard-ambiguous-match`
+--    with a message that, for this specific cause, misleadingly blames
+--    `cta_unique_idx` rather than the split itself.
 --
 -- 5. Human-review the filled-in block, then run this whole script.
 --
@@ -209,21 +265,27 @@
 --   awk '/^BEGIN;/{exit} {print}' scripts/audit/bs_replacement_char_cta.sql \
 --     | psql "$DATABASE_URL"
 --
--- This shows the declared-row count and the two full-table informational
--- checks (unmatched pending rows, overall residual count) -- it does NOT
--- show the twin/no-twin classification, because that classification
--- (`build-targets`) now runs INSIDE the transaction (see "Mechanism" below,
--- PR #2154 review). To preview the FULL classification and writes without
--- persisting anything, run the script with its `COMMIT;` swapped for
--- `ROLLBACK;` -- this executes the real guards and the real DELETE/UPDATE
--- inside a real transaction (so a would-be `cta_unique_idx` violation
--- surfaces exactly as it would for real), then discards everything:
+-- This shows the declared-row count (plus the matched/unmatched split, PR
+-- #2154 review round 2) and the two full-table informational checks
+-- (unmatched pending rows, overall residual count) -- it does NOT show the
+-- twin/no-twin classification, because that classification (`build-targets`)
+-- now runs INSIDE the transaction (see "Mechanism" below, PR #2154 review
+-- round 1). To preview the FULL classification and writes without persisting
+-- anything, run the script with its `COMMIT;` swapped for `ROLLBACK;` --
+-- this executes the real guards and the real DELETE/UPDATE inside a real
+-- transaction (so a would-be `cta_unique_idx` violation surfaces exactly as
+-- it would for real), including the post-amble's residual counts (moved to
+-- run BEFORE `COMMIT;`/`ROLLBACK;` in round 2 -- see the comment above the
+-- post-amble further down for why that move was necessary, not optional),
+-- then discards everything:
 --
 --   sed 's/^COMMIT;$/ROLLBACK;/' scripts/audit/bs_replacement_char_cta.sql \
 --     | psql "$DATABASE_URL"
 --
--- (`ANALYZE` still runs after -- harmless, it only refreshes planner stats,
--- never data.)
+-- `ANALYZE` still runs after the ROLLBACK -- harmless, it only refreshes
+-- planner stats, never data. It also runs perfectly well INSIDE a
+-- transaction (see the `analyze` STMT block's own comment near the bottom
+-- for why it stays outside this one anyway).
 --
 -- ============================================================================
 -- Mechanism
@@ -243,7 +305,7 @@
 -- print can show both sides.
 --
 -- Classification now runs INSIDE the transaction -- `BEGIN` precedes
--- `build-targets`, not the reverse (PR #2154 review). `library-etl`'s
+-- `build-targets`, not the reverse (PR #2154 review round 1). `library-etl`'s
 -- `importCompilationTracks` writes this table every 30 minutes; classifying
 -- before `BEGIN` left a window where a concurrent insert of a clean twin
 -- between classification and the write could flip a no-twin row's UPDATE
@@ -251,8 +313,22 @@
 -- the two write statements now all read the SAME `cta_repair_targets`,
 -- materialized inside the SAME transaction -- so they are the *same*
 -- predicate by construction (org data-safety convention), not independently
--- typed-out copies that could drift apart, and there is no window between
--- classifying a row and acting on that classification.
+-- typed-out copies that could drift apart.
+--
+-- What this buys is atomicity, NOT elimination of the race window (round 2
+-- correction -- the round 1 text overclaimed "no window between classifying
+-- a row and acting on that classification"). `CREATE TEMP TABLE ... AS
+-- SELECT` under READ COMMITTED takes no row lock, and every later statement
+-- in this script takes its own fresh snapshot, so `library-etl` can still
+-- commit a clean twin (or a librarian can still hand-edit the row) between
+-- `build-targets` and `update-no-twins`/`delete-twins`/`repoint-twin-identity`
+-- -- and the re-check re-checks each of those three statements carry (see
+-- their own comments; `repoint-twin-identity`'s was added in round 2) exist
+-- precisely because that window is real. The narrowing is real too: what
+-- used to be a live, unguarded write racing a live table is now a
+-- transaction that either commits a fully self-consistent set of writes or
+-- rolls back the whole thing cleanly on any surprise -- narrowed and made
+-- fail-safe, not race-free.
 --
 -- Idempotency: `cta_repair_targets`'s join to the live table requires the
 -- row's `artist_name`/`track_title` to still equal the captured (corrupt)
@@ -320,8 +396,16 @@ CREATE TEMP TABLE pending_cta_repair (
 -- for whichever column on that row was NOT corrupt -- never fill in a value
 -- you did not read from ground truth.
 --
--- Example shape (NOT REAL DATA -- do not copy verbatim):
---   (50340, '3', 'Some Artist', 'La B?te', NULL, 'La Bete'),
+-- Example shape (NOT REAL DATA -- do not copy verbatim; corrected in PR
+-- #2154 review round 2 -- the prior example modeled the exact accent-
+-- stripping approximation step 3 above forbids, `?` -> `e`, not a genuine
+-- U+FFFD substitution, and would have been rejected by guard-capture-sanity
+-- outright). This shows the track_title-only-corrupt case: current_*
+-- carries the real U+FFFD REPLACEMENT CHARACTER (not a `?`), true_track_title
+-- carries the resolved accented string read from ground truth, and
+-- true_artist_name is left NULL because artist_name on this row was never
+-- corrupted:
+--   (50340, '3', 'Csillagrablók', 'Rem�nytelen T�nc', NULL, 'Reménytelen Tánc'),
 -- ############################################################################
 INSERT INTO pending_cta_repair
   (legacy_release_id, track_position, current_artist_name, current_track_title, true_artist_name, true_track_title)
@@ -412,18 +496,75 @@ BEGIN
 END $$;
 -- === END STMT ===
 
-SELECT '=== V_BS_FFFD_CTA pre-amble: declared pending rows (0 = capture step not yet run) ===' AS section;
-SELECT COUNT(*) AS pending_declared FROM pending_cta_repair;
+-- === STMT: guard-nfc-form ===
+-- MEDIUM finding (PR #2154 review round 2): twin detection below joins on
+-- exact byte equality (`IS NOT DISTINCT FROM` over `varchar`), so a true_*
+-- value captured in a non-NFC Unicode normalization form (e.g. pasted out of
+-- a MySQL client that yields NFD) can silently miss a genuinely clean live
+-- twin already stored in NFC -- the row classifies no-twin, the UPDATE
+-- writes a byte-distinct duplicate, and cta_unique_idx does not fire because
+-- the two rows are not byte-identical, leaving TWO rows for one credit while
+-- the postlude still reports the desired 0 / 0. This is exactly the
+-- normalization-mismatch failure mode `fold_artist_name` (migration 0134)
+-- and `jobs/artist-unicode-dedup` exist to correct on `artists`; this table
+-- has neither.
+--
+-- Capture-time rejection, not write-time normalization: this guard REJECTS
+-- a non-NFC true_* value rather than silently normalizing it, preserving the
+-- deliberate byte-exact write posture documented under "Unicode
+-- normalization" further down. If this guard fires, re-copy the true value
+-- from a source that yields NFC -- do not hand-normalize it, per the same
+-- "READ it, never reconstruct it" rule the capture procedure already states
+-- for accents above.
+DO $$
+DECLARE bad RECORD;
+BEGIN
+  FOR bad IN
+    SELECT legacy_release_id, track_position, true_artist_name, true_track_title
+      FROM pending_cta_repair
+     WHERE (true_artist_name IS NOT NULL AND true_artist_name IS NOT NFC NORMALIZED)
+        OR (true_track_title IS NOT NULL AND true_track_title IS NOT NFC NORMALIZED)
+  LOOP
+    RAISE EXCEPTION 'BS#2152 guard: legacy_release_id=% track_position=% has a true_* replacement that is not NFC-normalized (true_artist_name=% true_track_title=%) -- twin detection is byte-exact, so a non-NFC paste can miss a live NFC twin and leave a duplicate row behind instead of repairing in place; re-copy the true value from a source that yields NFC rather than hand-normalizing it', bad.legacy_release_id, bad.track_position, bad.true_artist_name, bad.true_track_title;
+  END LOOP;
+END $$;
+-- === END STMT ===
 
-SELECT 'INFO — declared pending rows that did NOT match a live row (already-fixed re-run, or a capture mismatch)' AS section;
-SELECT p.legacy_release_id, p.track_position, p.current_artist_name, p.current_track_title
+-- INFO: one shared join, read by both the count below and the unmatched-row
+-- listing below it, so the two cannot drift the way two hand-duplicated
+-- copies of the same predicate could (LOW finding, PR #2154 review round 2
+-- -- this predicate is still a separate hand-typed copy of build-targets'
+-- own join further down, which is unavoidable: this runs before BEGIN and
+-- build-targets deliberately runs inside the transaction, so they cannot
+-- physically share one temp table -- but the two reads THIS side of that
+-- boundary no longer duplicate each other).
+DROP TABLE IF EXISTS pg_temp.pending_match_preview;
+CREATE TEMP TABLE pending_match_preview AS
+SELECT p.legacy_release_id, p.track_position, p.current_artist_name, p.current_track_title,
+       cta.id AS matched_cta_id
   FROM pending_cta_repair p
   LEFT JOIN wxyc_schema.library l ON l.legacy_release_id = p.legacy_release_id
   LEFT JOIN wxyc_schema.compilation_track_artist cta
     ON cta.library_id = l.id
    AND cta.artist_name = p.current_artist_name
-   AND cta.track_title IS NOT DISTINCT FROM p.current_track_title
- WHERE cta.id IS NULL;
+   AND cta.track_title IS NOT DISTINCT FROM p.current_track_title;
+
+SELECT '=== V_BS_FFFD_CTA pre-amble: declared pending rows (0 = capture step not yet run) ===' AS section;
+-- `pending_matched` alongside `pending_declared` (LOW finding, PR #2154
+-- review round 2): a pending row matching no live row cannot be a hard
+-- error (an idempotent re-run legitimately matches nothing once a prior run
+-- already fixed it), so this stays informational -- but previously it was
+-- visible only via the unmatched-row SELECT below, and every OTHER operator
+-- slip in this script aborts loudly. This surfaces the count at a glance.
+SELECT COUNT(*) AS pending_declared,
+       COUNT(*) FILTER (WHERE matched_cta_id IS NOT NULL) AS pending_matched,
+       COUNT(*) FILTER (WHERE matched_cta_id IS NULL) AS pending_unmatched
+  FROM pending_match_preview;
+
+SELECT 'INFO — declared pending rows that did NOT match a live row (already-fixed re-run, or a capture mismatch)' AS section;
+SELECT legacy_release_id, track_position, current_artist_name, current_track_title
+  FROM pending_match_preview
+ WHERE matched_cta_id IS NULL;
 
 SELECT 'BEFORE — overall residual U+FFFD, wxyc_schema.compilation_track_artist (desired end state: 0 / 0)' AS section;
 SELECT (SELECT COUNT(*) FROM wxyc_schema.compilation_track_artist WHERE artist_name LIKE E'%�%') AS artist_name_residual,
@@ -474,6 +615,45 @@ LEFT JOIN wxyc_schema.compilation_track_artist twin
  AND twin.track_title IS NOT DISTINCT FROM COALESCE(p.true_track_title, cta.track_title);
 -- === END STMT ===
 
+-- === STMT: guard-post-fix-fffd ===
+-- HIGH finding (PR #2154 review round 2): nothing upstream of this guard
+-- asserts that the POST-FIX tuple is actually U+FFFD-free. new_artist_name /
+-- new_track_title above are COALESCE(true_*, cta.*), so a row corrupt in
+-- BOTH columns but captured with only one true_* replacement leaves the
+-- untouched column's U+FFFD sitting in the write. Two reproduced
+-- consequences this guard closes:
+--   * Silent row destruction: a genuinely clean twin exists for the FIXED
+--     column alone (e.g. two rows share the same still-corrupt
+--     artist_name, and only one of them also has a corrupt track_title,
+--     fixed without also fixing the artist_name) -- the post-fix tuple
+--     still carries the corrupt artist_name, matches the OTHER
+--     still-corrupt row as its twin, and DELETEs the row that was actually
+--     being repaired while the corruption survives on the "twin" left
+--     behind.
+--   * Silent partial repair: no twin exists, so the UPDATE runs and writes
+--     the one column that was fixed, leaving the other silently corrupt --
+--     exit 0, per-row residual 0 for this row's OLD tuple, but the U+FFFD
+--     is still live under its NEW tuple, and the overall residual counter
+--     stays non-zero with no row-level indication of which row is still
+--     wrong.
+-- See step 4 of the capture procedure above: a row corrupt in both columns
+-- needs ONE pending row carrying BOTH true_artist_name and true_track_title,
+-- never two separate pending rows.
+DO $$
+DECLARE bad RECORD;
+BEGIN
+  FOR bad IN
+    SELECT legacy_release_id, track_position, old_artist_name, old_track_title,
+           new_artist_name, new_track_title
+      FROM cta_repair_targets
+     WHERE new_artist_name LIKE '%' || chr(65533) || '%'
+        OR new_track_title LIKE '%' || chr(65533) || '%'
+  LOOP
+    RAISE EXCEPTION 'BS#2152 guard: legacy_release_id=% track_position=% still carries U+FFFD in its post-fix tuple (new_artist_name=% new_track_title=%) -- this row is corrupt in a column the pending capture did not supply a true_* replacement for; a row corrupt in BOTH artist_name and track_title needs ONE pending row with BOTH true_artist_name and true_track_title filled in (see the header capture procedure, step 4), not a row that only fixes one column', bad.legacy_release_id, bad.track_position, bad.new_artist_name, bad.new_track_title;
+  END LOOP;
+END $$;
+-- === END STMT ===
+
 -- === STMT: guard-ambiguous-match ===
 -- A pending row resolving to more than one live row should be impossible --
 -- (library_id, artist_name, track_title) is exactly cta_unique_idx's key
@@ -508,6 +688,25 @@ END $$;
 -- guard-ambiguous-match cannot catch this -- it groups on the OLD (corrupt)
 -- tuple, which differs between the two rows; this groups on the resolved
 -- NEW (post-fix) tuple instead.
+--
+-- Deliberately over-broad (LOW finding, PR #2154 review round 2): this
+-- aborts regardless of `has_twin`, including the case where BOTH converging
+-- rows classify has_twin=true -- two corrupt copies converging on a THIRD,
+-- already-clean live row (the 98.5% double-ingest shape this comment's own
+-- measurement cites, just with a clean twin also present). There, DELETE +
+-- DELETE would actually be collision-free and correct, and this guard's
+-- "resolve which capture is correct" message is wrong for that specific
+-- shape -- both captures are correct, they just both point at the same
+-- surviving twin. It is left broad on purpose: neutering it for that one
+-- case exposes a second, coupled bug in `repoint-twin-identity` below --
+-- `UPDATE ... FROM` with two matching source rows is non-deterministic in
+-- PostgreSQL, so `repoint-twin-identity` would report `UPDATE 1` and
+-- arbitrarily keep only one of the two source rows' identity links,
+-- silently discarding the other. Narrowing this guard without also making
+-- that repoint deterministic (`DISTINCT ON`, or an aggregated,
+-- documented-precedence merge of the two links) would trade a loud guard
+-- abort for a silent identity-link loss -- worse, not better. Narrow this
+-- guard and fix the repoint together, or leave both as they are.
 DO $$
 DECLARE bad RECORD;
 BEGIN
@@ -534,7 +733,7 @@ SELECT legacy_release_id, track_position, id AS cta_id, old_artist_name, old_tra
  ORDER BY legacy_release_id, track_position;
 
 -- === STMT: repoint-twin-identity ===
--- MEDIUM finding (PR #2154 review): before dropping the corrupt row,
+-- MEDIUM finding (PR #2154 review round 1): before dropping the corrupt row,
 -- repoint its per-track identity link (BS#1990 / #801 S1 -- track_artist_id
 -- + track_artist_link_confidence + track_artist_link_method) and
 -- track_position onto the surviving twin, COALESCE-preserving the twin's own
@@ -544,10 +743,29 @@ SELECT legacy_release_id, track_position, id AS cta_id, old_artist_name, old_tra
 -- lacks. Same COALESCE-preserve-then-delete shape as
 -- `jobs/artist-unicode-dedup/merge.ts`'s survivor repoint. The BEFORE print
 -- above projects all four columns for both rows so an operator reviewing the
--- output can see exactly what this carries over before it runs. A separate
--- statement (not fused into delete-twins below) so each STMT block keeps the
--- one-statement-per-block shape the paired integration spec's extractor
--- relies on.
+-- output can see exactly what this carries over before it runs.
+--
+-- Kept as a separate statement from delete-twins below -- NOT because the
+-- integration spec's extractor requires one-statement-per-block (LOW finding
+-- correction, PR #2154 review round 2: it doesn't -- create-pending-table,
+-- insert-pending-rows, and build-targets each already carry 2-3 statements
+-- and `sql.unsafe()` runs a multi-statement block fine). The real reason is
+-- operator legibility: `psql -f` echoes each statement's own row count
+-- (`UPDATE N` / `DELETE N`) as it runs, so keeping the identity-link repoint
+-- and the corrupt-row removal as two statements lets an operator watching
+-- the run confirm both counts independently instead of reading one opaque
+-- combined number.
+--
+-- Re-checks that the SOURCE (corrupt) row is still in its captured state
+-- before repointing (LOW finding, PR #2154 review round 2) -- mirrors
+-- delete-twins' own re-check below, which this statement previously lacked.
+-- Without it, a concurrent edit to the corrupt row landing between
+-- build-targets and here (real: see "Mechanism" above on why classifying
+-- inside the transaction narrows, but does not close, that window) would
+-- still repoint the twin's identity link even though delete-twins' own
+-- re-check would then correctly skip deleting the now-changed corrupt row --
+-- repointing without deleting, silently duplicating the identity link across
+-- two live rows.
 UPDATE wxyc_schema.compilation_track_artist twin
    SET track_artist_id = COALESCE(twin.track_artist_id, t.old_track_artist_id),
        track_artist_link_confidence = COALESCE(twin.track_artist_link_confidence, t.old_track_artist_link_confidence),
@@ -555,7 +773,13 @@ UPDATE wxyc_schema.compilation_track_artist twin
        track_position = COALESCE(twin.track_position, t.old_track_position)
   FROM cta_repair_targets t
  WHERE t.has_twin
-   AND twin.id = t.twin_id;
+   AND twin.id = t.twin_id
+   AND EXISTS (
+     SELECT 1 FROM wxyc_schema.compilation_track_artist cta
+      WHERE cta.id = t.id
+        AND cta.artist_name = t.old_artist_name
+        AND cta.track_title IS NOT DISTINCT FROM t.old_track_title
+   );
 -- === END STMT ===
 
 -- === STMT: delete-twins ===
@@ -583,22 +807,44 @@ UPDATE wxyc_schema.compilation_track_artist cta
    AND cta.track_title IS NOT DISTINCT FROM t.old_track_title;
 -- === END STMT ===
 
-COMMIT;
-
 -- ===========================================================
 -- Post-amble verify: every targeted row should show residual=0, and the
 -- overall predicate should return 0/0 -- the desired end state per #2152.
--- `cta_repair_targets` is a TEMP TABLE without ON COMMIT DROP, so it is
--- still readable here, after COMMIT, in this same session.
+--
+-- Runs INSIDE the transaction, BEFORE `COMMIT;` (MEDIUM finding, PR #2154
+-- review round 2 -- this used to run after COMMIT). `cta_repair_targets` and
+-- the write statements' effects are visible here via ordinary
+-- read-your-own-writes regardless of whether this run goes on to COMMIT or
+-- (dry-run) ROLLBACK. Running it after COMMIT broke the documented dry-run
+-- "swap COMMIT; for ROLLBACK;" preview outright: once build-targets moved
+-- inside the transaction (round 1), a ROLLBACK undoes the
+-- `CREATE TEMP TABLE cta_repair_targets AS SELECT` along with everything
+-- else in the transaction, so a post-COMMIT-position read against a table
+-- that no longer exists aborted the whole script
+-- (`ERROR: relation "cta_repair_targets" does not exist`, psql exit 3)
+-- before ever reaching ANALYZE. Moving these reads to before the
+-- `COMMIT;`/`ROLLBACK;` line makes them visible on both the real run and the
+-- dry-run preview alike.
 -- ===========================================================
 SELECT '=== V_BS_FFFD_CTA post-amble: residual count per targeted row (expect 0) ===' AS section;
-SELECT t.legacy_release_id, t.track_position,
+-- Prints the LIVE `track_position` (NIT, PR #2154 review round 2 -- this
+-- used to print the CAPTURED value from cta_repair_targets, which is not
+-- what #2152's acceptance criteria mean by "the permanent record" once this
+-- output gets pasted onto the issue). `track_position` participates in no
+-- matching predicate anywhere in this script, so the captured value can
+-- differ from the live one; joins to the row that actually survived the run
+-- -- the twin for a DELETE branch (post-repoint), or the same row for an
+-- UPDATE branch.
+SELECT t.legacy_release_id,
+       live.track_position AS live_track_position,
        (SELECT COUNT(*) FROM wxyc_schema.compilation_track_artist cta
          WHERE cta.library_id = t.library_id
            AND cta.artist_name = t.old_artist_name
            AND cta.track_title IS NOT DISTINCT FROM t.old_track_title) AS residual
   FROM cta_repair_targets t
- ORDER BY t.legacy_release_id, t.track_position;
+  LEFT JOIN wxyc_schema.compilation_track_artist live
+    ON live.id = COALESCE(t.twin_id, t.id)
+ ORDER BY t.legacy_release_id, live.track_position;
 
 SELECT 'AFTER — overall residual U+FFFD, wxyc_schema.compilation_track_artist (desired end state: 0 / 0)' AS section;
 SELECT (SELECT COUNT(*) FROM wxyc_schema.compilation_track_artist WHERE artist_name LIKE E'%�%') AS artist_name_residual,
@@ -608,10 +854,22 @@ SELECT (SELECT COUNT(*) FROM wxyc_schema.compilation_track_artist WHERE artist_n
 -- already lives in bs_replacement_char_phase4.sql's postlude -- not repeated
 -- here, this script is scoped to compilation_track_artist only.
 
+COMMIT;
+
 -- === STMT: analyze ===
 -- Refresh planner stats (BS#934 -- omitting this after #863's migration
--- regressed /flowsheet/suggest/* to 5s timeouts). ANALYZE cannot run inside
--- a transaction, so it lives here, outside any BEGIN/COMMIT. See
--- docs/bulk-update-playbook.md for the full pattern.
+-- regressed /flowsheet/suggest/* to 5s timeouts). ANALYZE CAN run inside a
+-- transaction (LOW finding, PR #2154 review round 2 -- verified:
+-- `BEGIN; ANALYZE ...; COMMIT;` succeeds; it is VACUUM, not ANALYZE, that
+-- Postgres refuses inside a transaction block. This corrected claim was
+-- inherited from bs_replacement_char_phase4.sql's own analyze comment;
+-- fixed here only -- that file is out of scope for this PR). It stays
+-- outside this script's BEGIN/COMMIT anyway, matching the bulk-update
+-- playbook's "paired post-script step" convention
+-- (docs/bulk-update-playbook.md checklist item 4): a stats refresh isn't
+-- part of the data change being committed or rolled back, and running it
+-- unconditionally here means it still executes after the dry-run preview's
+-- ROLLBACK too -- itself harmless, since ANALYZE only touches planner
+-- statistics, never table data.
 ANALYZE wxyc_schema.compilation_track_artist;
 -- === END STMT ===
