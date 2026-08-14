@@ -135,10 +135,10 @@ describe('resolveLiveActivityLookback / resolveLiveActivityPauseMs', () => {
     expect(resolveLiveActivityPauseMs('   ')).toBe(30_000);
   });
 
-  it('accepts valid non-negative integers (0 disables)', () => {
+  it('accepts valid non-negative lookback integers (0 disables) and pause values at/above the floor', () => {
     expect(resolveLiveActivityLookback('0')).toBe(0);
     expect(resolveLiveActivityLookback('120')).toBe(120);
-    expect(resolveLiveActivityPauseMs('0')).toBe(0);
+    expect(resolveLiveActivityPauseMs('1000')).toBe(1000);
     expect(resolveLiveActivityPauseMs('5000')).toBe(5000);
   });
 
@@ -146,6 +146,14 @@ describe('resolveLiveActivityLookback / resolveLiveActivityPauseMs', () => {
     expect(() => resolveLiveActivityLookback('-1')).toThrow(/LIVE_ACTIVITY_LOOKBACK_SECONDS/);
     expect(() => resolveLiveActivityLookback('abc')).toThrow(/LIVE_ACTIVITY_LOOKBACK_SECONDS/);
     expect(() => resolveLiveActivityPauseMs('-1')).toThrow(/LIVE_ACTIVITY_PAUSE_MS/);
+  });
+
+  // BS#2147: `0` used to sleep for that literal duration between re-probes —
+  // a hot loop against RDS, not a disable. The resolver now rejects the
+  // whole sub-floor interval at init; `LIVE_ACTIVITY_LOOKBACK_SECONDS=0`
+  // remains the sole disable knob.
+  it.each(['0', '1', '999'])('rejects a sub-floor LIVE_ACTIVITY_PAUSE_MS (%s)', (raw) => {
+    expect(() => resolveLiveActivityPauseMs(raw)).toThrow(/LIVE_ACTIVITY_PAUSE_MS/);
   });
 });
 
