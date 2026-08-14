@@ -42,7 +42,8 @@ import {
   db,
   checkLiveActivity as defaultCheckLiveActivity,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
-  LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+  resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  buildWaitForQuietPeriod,
   requireNonNegativeInt,
   type CheckLiveActivityFn,
 } from '@wxyc/database';
@@ -64,8 +65,6 @@ const ARTISTS_TABLE = sql.raw(`"${SCHEMA}"."artists"`);
  * runtime with comfortable margin. Mirrors `album-metadata-backfill#verifyComplete`. */
 export const ENUMERATE_TIMEOUT_MS = 5 * 60 * 1000;
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 export const resolveLiveActivityLookback = (
   raw: string | undefined = process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS
 ): number =>
@@ -74,8 +73,14 @@ export const resolveLiveActivityLookback = (
     note: 'Use 0 to disable.',
   });
 
+/**
+ * BS#2147: delegates to the shared floored resolver so `LIVE_ACTIVITY_PAUSE_MS`
+ * below `LIVE_ACTIVITY_MIN_PAUSE_MS` (including `0`) is rejected at init
+ * instead of degrading the cooperative-pause loop into a hot loop against
+ * RDS. `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` remains the sole disable knob.
+ */
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
-  requireNonNegativeInt(raw, 'LIVE_ACTIVITY_PAUSE_MS', LIVE_ACTIVITY_PAUSE_MS_DEFAULT, { unit: 'ms' });
+  resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
 
 /**
  * SELECT every flowsheet row stranded by the LML#408 bug in the free-form
@@ -166,21 +171,6 @@ const emptyTotals = (): Totals => ({
   error: 0,
 });
 
-const awaitQuietWindow = async (
-  lookbackSeconds: number,
-  pauseMs: number,
-  probe: CheckLiveActivityFn
-): Promise<void> => {
-  if (lookbackSeconds <= 0) return;
-  while (await probe(lookbackSeconds)) {
-    log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${pauseMs}ms`, {
-      lookback_seconds: lookbackSeconds,
-      pause_ms: pauseMs,
-    });
-    if (pauseMs > 0) await sleep(pauseMs);
-  }
-};
-
 export type RunRepairOptions = {
   lookup: LookupFn;
   repairFreeForm: FreeFormRepairFn;
@@ -210,6 +200,33 @@ export const runRepair = async (opts: RunRepairOptions): Promise<RunResult> => {
   const pauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
   const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
 
+  // BS#2147: the loop itself (probe + elapsed-time cap) now lives in the
+  // shared `buildWaitForQuietPeriod`. `onPause` reproduces this job's exact
+  // prior `live_activity_pause` log line/fields so ops greps don't drift.
+  // This job gains fail-open probe-error handling here for the first time —
+  // a probe throw used to propagate out of `runRepair` and abort the whole
+  // drain; it is now logged/captured and treated as "no activity" for that
+  // iteration, matching six of the ten sibling jobs. No SIGTERM/stop
+  // handling existed here before and none is added (`shouldStop` defaults
+  // to `() => false`) — out of scope for BS#2147.
+  const waitForQuietPeriod = buildWaitForQuietPeriod({
+    lookbackSeconds,
+    pauseMs,
+    probe,
+    onPause: () => {
+      log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${pauseMs}ms`, {
+        lookback_seconds: lookbackSeconds,
+        pause_ms: pauseMs,
+      });
+    },
+    onProbeError: (error) => {
+      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
+        error_message: (error as Error).message,
+      });
+      captureError(error, 'probe_error');
+    },
+  });
+
   const freeFormRows = opts.freeFormRows ?? (await enumerateFreeFormResidue());
   const linkedAlbums = opts.linkedAlbums ?? (await enumerateLinkedResidue());
 
@@ -224,7 +241,7 @@ export const runRepair = async (opts: RunRepairOptions): Promise<RunResult> => {
 
   // Phase 1: free-form residue
   for (const row of freeFormRows) {
-    await awaitQuietWindow(lookbackSeconds, pauseMs, probe);
+    await waitForQuietPeriod();
     totals.free_form_scanned += 1;
 
     let response: LookupResponse;
@@ -254,7 +271,7 @@ export const runRepair = async (opts: RunRepairOptions): Promise<RunResult> => {
 
   // Phase 2: linked residue
   for (const album of linkedAlbums) {
-    await awaitQuietWindow(lookbackSeconds, pauseMs, probe);
+    await waitForQuietPeriod();
     totals.linked_scanned += 1;
 
     let response: LookupResponse;
