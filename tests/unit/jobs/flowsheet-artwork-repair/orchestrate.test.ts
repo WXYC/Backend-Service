@@ -16,12 +16,13 @@
  */
 import { jest } from '@jest/globals';
 
-import { db, type CheckLiveActivityFn } from '@wxyc/database';
+import { db, LiveActivityPauseCeilingExceededError, type CheckLiveActivityFn } from '@wxyc/database';
 import {
   enumerateFreeFormResidue,
   enumerateLinkedResidue,
   resolveLiveActivityLookback,
   resolveLiveActivityPauseMs,
+  resolveLiveActivityMaxPauseMs,
   runRepair,
   type FreeFormRepairFn,
   type LinkedRepairFn,
@@ -306,6 +307,71 @@ describe('runRepair', () => {
     expect(probe.mock.calls.length).toBeGreaterThanOrEqual(3);
     // Probe windows are 60s
     probe.mock.calls.forEach((call) => expect(call[0]).toBe(60));
+  });
+
+  /**
+   * BS#2147 review round 2, finding 6: `onProbeError`'s `(error as Error).message`
+   * throws a TypeError when the probe rejects with a non-Error value (`null`,
+   * `undefined`, a thrown string) -- escaping `safeProbe`'s try/catch inside
+   * `buildWaitForQuietPeriod` and aborting the whole run, defeating the
+   * fail-open this handler exists to provide. This test fails against the
+   * unguarded cast: `runRepair` rejects instead of completing.
+   */
+  it('does not throw when the probe rejects with a non-Error value (fail-open holds)', async () => {
+    const probe = jest.fn<CheckLiveActivityFn>().mockRejectedValueOnce(null).mockResolvedValue(false);
+
+    await expect(
+      runRepair({
+        lookup,
+        repairFreeForm: freeFormFn,
+        repairLinked: linkedFn,
+        checkLiveActivity: probe,
+        liveActivityLookbackSeconds: 60,
+        liveActivityPauseMs: 0,
+        freeFormRows: [{ id: 1, artist_name: 'a', album_title: null, track_title: null }],
+        linkedAlbums: [],
+      })
+    ).resolves.toMatchObject({ totals: { free_form_scanned: 1 } });
+  });
+
+  describe('cooperative-pause budget ceiling (BS#2147 findings 1+2, 5)', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('throws LiveActivityPauseCeilingExceededError when the injected liveActivityMaxPauseMs is exhausted', async () => {
+      const probe = jest.fn<CheckLiveActivityFn>().mockResolvedValue(true);
+
+      const resultPromise = runRepair({
+        lookup,
+        repairFreeForm: freeFormFn,
+        repairLinked: linkedFn,
+        checkLiveActivity: probe,
+        liveActivityLookbackSeconds: 60,
+        liveActivityPauseMs: 1000,
+        liveActivityMaxPauseMs: 2000,
+        freeFormRows: [{ id: 1, artist_name: 'a', album_title: null, track_title: null }],
+        linkedAlbums: [],
+      });
+      resultPromise.catch(() => {});
+
+      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(1000);
+
+      await expect(resultPromise).rejects.toThrow(LiveActivityPauseCeilingExceededError);
+      expect(freeFormFn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('resolveLiveActivityMaxPauseMs (BS#2147 finding 5)', () => {
+    it('delegates to the shared resolver and honors 0 = uncapped', () => {
+      expect(resolveLiveActivityMaxPauseMs('0')).toBe(0);
+      expect(resolveLiveActivityMaxPauseMs('60000')).toBe(60_000);
+      expect(resolveLiveActivityMaxPauseMs(undefined)).toBeGreaterThan(0);
+    });
+
+    it('names LIVE_ACTIVITY_MAX_PAUSE_MS in a resolution error', () => {
+      expect(() => resolveLiveActivityMaxPauseMs('-1')).toThrow(/LIVE_ACTIVITY_MAX_PAUSE_MS/);
+    });
   });
 
   it('skips probe entirely when liveActivityLookbackSeconds is 0', async () => {

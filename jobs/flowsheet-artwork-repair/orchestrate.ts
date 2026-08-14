@@ -42,7 +42,9 @@ import {
   db,
   checkLiveActivity as defaultCheckLiveActivity,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
+  LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
   resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  resolveLiveActivityMaxPauseMs as resolveLiveActivityMaxPauseMsShared,
   buildWaitForQuietPeriod,
   requireNonNegativeInt,
   type CheckLiveActivityFn,
@@ -81,6 +83,17 @@ export const resolveLiveActivityLookback = (
  */
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
   resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
+
+/**
+ * BS#2147 review round 2, finding 5: wires `LIVE_ACTIVITY_MAX_PAUSE_MS` at
+ * this job's own call site. Before this, `buildWaitForQuietPeriod`'s
+ * `maxTotalPauseMs` always took its hardcoded 30-minute default — the env
+ * var read like a tunable knob but no TypeScript job ever read it, the
+ * exact failure shape BS#2147 exists to close. `0` = uncapped.
+ */
+export const resolveLiveActivityMaxPauseMs = (
+  raw: string | undefined = process.env.LIVE_ACTIVITY_MAX_PAUSE_MS
+): number => resolveLiveActivityMaxPauseMsShared(raw, LIVE_ACTIVITY_MAX_PAUSE_MS_ENV);
 
 /**
  * SELECT every flowsheet row stranded by the LML#408 bug in the free-form
@@ -181,6 +194,8 @@ export type RunRepairOptions = {
   linkedAlbums?: LinkedAlbum[];
   liveActivityLookbackSeconds?: number;
   liveActivityPauseMs?: number;
+  /** Cumulative cooperative-pause budget ceiling; 0 = uncapped. */
+  liveActivityMaxPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
 };
 
@@ -198,6 +213,7 @@ export type RunRepairOptions = {
 export const runRepair = async (opts: RunRepairOptions): Promise<RunResult> => {
   const lookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const pauseMs = opts.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
+  const maxTotalPauseMs = opts.liveActivityMaxPauseMs ?? resolveLiveActivityMaxPauseMs();
   const probe = opts.checkLiveActivity ?? defaultCheckLiveActivity;
 
   // BS#2147: the loop itself (probe + elapsed-time cap) now lives in the
@@ -208,10 +224,15 @@ export const runRepair = async (opts: RunRepairOptions): Promise<RunResult> => {
   // drain; it is now logged/captured and treated as "no activity" for that
   // iteration, matching six of the ten sibling jobs. No SIGTERM/stop
   // handling existed here before and none is added (`shouldStop` defaults
-  // to `() => false`) — out of scope for BS#2147.
+  // to `() => false`) — out of scope for BS#2147. `maxTotalPauseMs`
+  // (finding 5) is wired so `LIVE_ACTIVITY_MAX_PAUSE_MS` actually reaches
+  // the shared ceiling; on exhaustion the closure throws (findings 1+2) and
+  // this job's own top-level `catch` in `job.ts` already logs + captures +
+  // exits non-zero.
   const waitForQuietPeriod = buildWaitForQuietPeriod({
     lookbackSeconds,
     pauseMs,
+    maxTotalPauseMs,
     probe,
     onPause: () => {
       log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${pauseMs}ms`, {
@@ -220,10 +241,24 @@ export const runRepair = async (opts: RunRepairOptions): Promise<RunResult> => {
       });
     },
     onProbeError: (error) => {
+      // BS#2147 review round 2, finding 6: `(error as Error).message` throws
+      // a TypeError when the probe rejects with a non-Error value (`null`,
+      // `undefined`, a thrown string) — a throw from inside this callback
+      // escapes `safeProbe`'s try/catch in the shared `buildWaitForQuietPeriod`
+      // and aborts the whole run, defeating the fail-open this handler exists
+      // to provide. Guard with `instanceof Error`, as the sibling jobs do.
       log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
-        error_message: (error as Error).message,
+        error_message: error instanceof Error ? error.message : String(error),
       });
       captureError(error, 'probe_error');
+    },
+    onBudgetExhausted: (pausedMs) => {
+      log(
+        'error',
+        'live_activity_pause_ceiling_exceeded',
+        `cooperative-pause budget exceeded (${pausedMs}ms >= LIVE_ACTIVITY_MAX_PAUSE_MS=${maxTotalPauseMs}ms); aborting instead of pausing indefinitely`,
+        { paused_ms: pausedMs, live_activity_max_pause_ms: maxTotalPauseMs }
+      );
     },
   });
 
@@ -235,6 +270,7 @@ export const runRepair = async (opts: RunRepairOptions): Promise<RunResult> => {
     linked_residue: linkedAlbums.length,
     live_activity_lookback_seconds: lookbackSeconds,
     live_activity_pause_ms: pauseMs,
+    live_activity_max_pause_ms: maxTotalPauseMs,
   });
 
   const totals = emptyTotals();
