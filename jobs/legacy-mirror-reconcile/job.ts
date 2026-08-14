@@ -42,8 +42,9 @@ import {
   createPostgresClient,
   requireNonNegativeInt,
   requirePositiveInt,
+  resolveLiveActivityPauseMs,
+  buildWaitForQuietPeriod,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
-  LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
 } from '@wxyc/database';
 import {
   isActiveRotationMatch,
@@ -193,12 +194,13 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env): JobOptions
       LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
       { ...ctx, note: 'Use 0 to disable the live-activity probe.' }
     ),
-    liveActivityPauseMs: requirePositiveInt(
-      env[LIVE_ACTIVITY_PAUSE_MS_ENV],
-      LIVE_ACTIVITY_PAUSE_MS_ENV,
-      LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
-      ctx
-    ),
+    // BS#2147: switched from a bare `requirePositiveInt` (which already
+    // rejected `0` but let `1` through — the same hot loop, just one step
+    // over the line) to the shared floored resolver, which rejects the
+    // whole sub-floor interval. This job was one of the two pre-existing
+    // designs the issue reconciles; adopting the shared resolver here
+    // closes that gap rather than leaving a second, narrower gate standing.
+    liveActivityPauseMs: resolveLiveActivityPauseMs(env[LIVE_ACTIVITY_PAUSE_MS_ENV], LIVE_ACTIVITY_PAUSE_MS_ENV),
   };
 };
 
@@ -245,21 +247,43 @@ export const makeFlagEvaluator =
 
 // ── Cooperative pause ────────────────────────────────────────────────────────
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 /**
  * Loop: probe the shared schema-aware `checkLiveActivity` → if a DJ is live,
  * sleep `pauseMs` → re-probe. Returns when quiet. Reuses the shared probe
  * (honors `WXYC_SCHEMA_NAME`) rather than a job-local copy.
+ *
+ * BS#2147: delegates the loop itself to the shared `buildWaitForQuietPeriod`,
+ * built fresh on each call (`ports.awaitQuiet()` is invoked at discrete
+ * checkpoints — show-create sweep, entry sweep — not in a tight per-row
+ * loop, so the elapsed-time cap bounding each individual call is the
+ * property that matters here; it does not need to accumulate across calls
+ * the way it does for the per-row backfill jobs). `onPause` reproduces this
+ * job's exact prior `live_activity_pause` log line/fields. This job gains
+ * fail-open probe-error handling here for the first time — a probe throw
+ * used to propagate out of `awaitQuietWindow` and abort the run; it is now
+ * logged/captured and treated as "no activity" for that iteration, matching
+ * six of the ten sibling jobs. No SIGTERM/stop handling existed here before
+ * and none is added.
  */
 export const awaitQuietWindow = async (lookbackSeconds: number, pauseMs: number): Promise<void> => {
-  while (await checkLiveActivity(lookbackSeconds)) {
-    log('info', 'live_activity_pause', `live DJ activity within ${lookbackSeconds}s; deferring ${pauseMs}ms`, {
-      lookback_seconds: lookbackSeconds,
-      pause_ms: pauseMs,
-    });
-    await sleep(pauseMs);
-  }
+  const waitForQuietPeriod = buildWaitForQuietPeriod({
+    lookbackSeconds,
+    pauseMs,
+    probe: checkLiveActivity,
+    onPause: () => {
+      log('info', 'live_activity_pause', `live DJ activity within ${lookbackSeconds}s; deferring ${pauseMs}ms`, {
+        lookback_seconds: lookbackSeconds,
+        pause_ms: pauseMs,
+      });
+    },
+    onProbeError: (error) => {
+      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
+        error_message: error instanceof Error ? error.message : String(error),
+      });
+      captureError(error, 'probe_error');
+    },
+  });
+  await waitForQuietPeriod();
 };
 
 // ── Port wiring ──────────────────────────────────────────────────────────────

@@ -61,7 +61,8 @@ import {
   db,
   checkLiveActivity as defaultCheckLiveActivity,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
-  LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+  resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  buildWaitForQuietPeriod,
   requireNonNegativeInt,
   requirePositiveInt,
   type CheckLiveActivityFn,
@@ -223,8 +224,16 @@ export const resolveLiveActivityLookback = (
     note: 'Use 0 to disable the cooperative pause.',
   });
 
+/**
+ * BS#2147: delegates to the shared floored resolver, retiring this job's
+ * second disable knob (BS#2009's `pauseMs<=0` gate, removed below) in favor
+ * of the fleet-wide rule: `LIVE_ACTIVITY_PAUSE_MS` below
+ * `LIVE_ACTIVITY_MIN_PAUSE_MS` (including `0`) is rejected at init instead
+ * of silently disabling or hot-looping. `LIVE_ACTIVITY_LOOKBACK_SECONDS=0`
+ * is now the sole disable knob, same as every other job in the fleet.
+ */
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
-  requireNonNegativeInt(raw, 'LIVE_ACTIVITY_PAUSE_MS', LIVE_ACTIVITY_PAUSE_MS_DEFAULT, { unit: 'ms' });
+  resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
 
 let stopRequested = false;
 export const requestStop = (): void => {
@@ -243,65 +252,9 @@ const stopAwareSleep = async (ms: number): Promise<void> => {
   }
 };
 
-/**
- * Builds the cooperative live-DJ pause shared by both phases (BS#2009).
- *
- * `checkLive` is a DETECTOR — `(lookbackSeconds) => Promise<boolean>` — not a
- * sleeper; sleeping is this function's job. Ported from the
- * `streaming-url-remediation` / `flowsheet-ghost-row-sweep` donors verbatim:
- * a probe throw is fail-open ("assume no activity") rather than escaping to
- * the caller, so a transient RDS blip on the probe SELECT can't kill the run
- * and lose both resume cursors. Built ONCE in `runRemediation` and shared by
- * both phases so the probe is issued once per page in each — never once per
- * row.
- */
-const buildWaitForQuietPeriod = (opts: {
-  checkLive: CheckLiveActivityFn;
-  lookbackSeconds: number;
-  pauseMs: number;
-}): (() => Promise<boolean>) => {
-  const safeProbe = async (): Promise<boolean> => {
-    try {
-      return await opts.checkLive(opts.lookbackSeconds);
-    } catch (error) {
-      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
-        error_message: errorMessage(error),
-      });
-      captureError(error, 'probe_error');
-      return false;
-    }
-  };
-
-  // Returns true iff the run should stop (SIGTERM observed during the wait).
-  return async (): Promise<boolean> => {
-    // Both knobs disable the pause. lookbackSeconds<=0 means "never detect
-    // activity" (checkLiveActivity's own short-circuit). pauseMs<=0 is
-    // legal per `requireNonNegativeInt` — nothing rejects it — but
-    // stopAwareSleep(0) returns immediately without awaiting a timer, so
-    // without this check a detected-active read degenerates into
-    // `while (active) { probe(); }` — an unthrottled hot loop against RDS
-    // for the run's entire duration instead of a cooperative pause. See
-    // docs/env-vars.md's `V/A Apple-URL remediation` section and this
-    // job's README for the disable semantics (specific to this job — the
-    // shared LIVE_ACTIVITY_PAUSE_MS entry itself documents none).
-    if (opts.lookbackSeconds <= 0 || opts.pauseMs <= 0) return false;
-    let active = await safeProbe();
-    while (active) {
-      if (stopRequested) return true;
-      log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${opts.pauseMs}ms`, {
-        lookback_seconds: opts.lookbackSeconds,
-        pause_ms: opts.pauseMs,
-      });
-      await stopAwareSleep(opts.pauseMs);
-      active = await safeProbe();
-    }
-    return stopRequested;
-  };
-};
-
 /** Cache key per BS#1192: Apple URLs are track-aware, so all three axes. */
 export const tripleKey = (artist: string | null, album: string | null, track: string | null): string =>
-  `${(artist ?? '').toLowerCase()} ${(album ?? '').toLowerCase()} ${(track ?? '').toLowerCase()}`;
+  `${(artist ?? '').toLowerCase()}\u0000${(album ?? '').toLowerCase()}\u0000${(track ?? '').toLowerCase()}`;
 
 /** Shared coarse net, so the COUNT, the paged SELECT and the UPDATE can't drift. */
 const flowsheetNet = sql`(
@@ -821,8 +774,27 @@ export const runRemediation = async (options: RunOptions): Promise<RunResult> =>
   const pauseMs = resolveLiveActivityPauseMs();
   // Shared by both phases so the probe is issued once per page in each, and
   // a probe throw is fail-open rather than escaping the phase's try/catch
-  // and losing the run's summary (BS#2009 defects 2 and 3).
-  const waitForQuietPeriod = buildWaitForQuietPeriod({ checkLive, lookbackSeconds, pauseMs });
+  // and losing the run's summary (BS#2009 defects 2 and 3). BS#2147: the
+  // loop itself now lives in the shared `buildWaitForQuietPeriod`; `onPause`
+  // and `onProbeError` reproduce this job's exact prior log lines/fields.
+  const waitForQuietPeriod = buildWaitForQuietPeriod({
+    lookbackSeconds,
+    pauseMs,
+    probe: checkLive,
+    shouldStop: () => stopRequested,
+    onPause: () => {
+      log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${pauseMs}ms`, {
+        lookback_seconds: lookbackSeconds,
+        pause_ms: pauseMs,
+      });
+    },
+    onProbeError: (error) => {
+      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
+        error_message: errorMessage(error),
+      });
+      captureError(error, 'probe_error');
+    },
+  });
 
   const flowsheet = await runFlowsheetPhase({
     dryRun,
