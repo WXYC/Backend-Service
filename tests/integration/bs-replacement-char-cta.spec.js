@@ -17,6 +17,16 @@
  * DDL/DML the operator will run -- only the pending DATA differs between
  * this spec and prod.
  *
+ * "The actual DDL/DML" is meant literally as of round 3. Through round 2 the
+ * script's read-only pre-amble and its post-amble residual reads carried no
+ * STMT tags, so this spec only pinned their POSITION in the file with
+ * `indexOf` and never executed a line of them -- a typo in the post-amble
+ * would have passed the whole suite and then aborted the real prod run under
+ * ON_ERROR_STOP after the writes and before COMMIT, rolling back a repair
+ * that had succeeded. They are tagged blocks now and `runRepairScript` runs
+ * them, along with the `SET LOCAL statement_timeout` lines and the
+ * `lock-targets` row locks, in the exact order `psql -f` would.
+ *
  * The throwaway `compilation_track_artist` table replicates BOTH production
  * unique indexes (`cta_unique_idx` and its NULL-track_title complement) --
  * unlike bs-replacement-char-phase4.spec.js's plain `text` columns, that
@@ -47,13 +57,19 @@ const EXPECTED_BLOCKS = [
   'guard-replacement-specified',
   'guard-capture-sanity',
   'guard-nfc-form',
+  'pending-match-preview',
+  'guard-unknown-release',
+  'before-residual',
   'build-targets',
+  'lock-targets',
   'guard-post-fix-fffd',
   'guard-ambiguous-match',
   'guard-converging-pending',
   'repoint-twin-identity',
   'delete-twins',
   'update-no-twins',
+  'guard-repair-complete',
+  'post-amble-residual',
   'analyze',
 ];
 
@@ -105,7 +121,27 @@ function extractStmtBlocks(scriptText, targetSchema) {
     if (!endMatch) {
       throw new Error(`STMT block "${name}" has no matching "-- === END STMT ===" marker`);
     }
-    blocks[name] = scriptText.slice(contentStart, endMatch.index).replace(/wxyc_schema\./g, `${targetSchema}.`);
+    const body = scriptText.slice(contentStart, endMatch.index);
+    // A MISSING end marker throws loudly above; a TYPO'd one used to be
+    // silent, and silently much worse (PR #2154 review round 3). `endRe.exec`
+    // simply scans on to the NEXT end marker in the file, so block N absorbs
+    // block N+1's SQL -- the intervening `-- === STMT: ... ===` line is an
+    // inert SQL comment, so it executes without complaint. Block N+1 still
+    // extracts separately from its own start marker, so its statements then
+    // run TWICE per pass, and `.count` on a now multi-statement `unsafe()` no
+    // longer means "rows this statement affected". Neither the non-empty
+    // check nor the indexOf-based ordering tests notice: the block names and
+    // their order are still exactly right. The spec would be validating a
+    // different execution shape than the operator's `psql -f` run, which is
+    // the one thing this whole extractor exists to prevent.
+    if (startRe.test(body)) {
+      startRe.lastIndex = 0;
+      throw new Error(
+        `STMT block "${name}" swallowed a nested "-- === STMT: ... ===" start marker -- its own "-- === END STMT ===" is missing or misspelled, so it absorbed the following block`
+      );
+    }
+    startRe.lastIndex = 0;
+    blocks[name] = body.replace(/wxyc_schema\./g, `${targetSchema}.`);
   }
   return blocks;
 }
@@ -232,7 +268,7 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
    * real `BEGIN`/`COMMIT` here is safe: this is a dedicated reserved
    * connection, not the shared pool the extractor's own comment warns about.
    */
-  async function runRepairScript(insertPhase) {
+  async function runRepairScript(insertPhase, hooks = {}) {
     const reservedSql = await sql.reserve();
     let inTransaction = false;
     try {
@@ -242,17 +278,40 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
       await reservedSql.unsafe(blocks['guard-replacement-specified']);
       await reservedSql.unsafe(blocks['guard-capture-sanity']);
       await reservedSql.unsafe(blocks['guard-nfc-form']);
+      await reservedSql.unsafe(blocks['pending-match-preview']);
+      await reservedSql.unsafe(blocks['guard-unknown-release']);
+      await reservedSql.unsafe(blocks['before-residual']);
 
       await reservedSql.unsafe('BEGIN');
       inTransaction = true;
       await reservedSql.unsafe("SET LOCAL statement_timeout = '30s'");
       await reservedSql.unsafe(blocks['build-targets']);
+      // The one window `lock-targets` cannot close is the one in front of
+      // it. Tests that need to land a concurrent write inside that window
+      // inject it here rather than hand-copying this sequence (PR #2154
+      // review round 3) -- a copy drifts from the real 20-block order, and
+      // more importantly a copy that lacks this function's catch/ROLLBACK
+      // hands an aborted-transaction connection back to the shared max:5
+      // pool, where postgres-js's `release()` issues no ROLLBACK or DISCARD
+      // of its own. The next query to draw that connection -- including
+      // afterAll's DROP SCHEMA, under --runInBand -- then fails with
+      // "current transaction is aborted", masking whatever actually broke.
+      if (hooks.afterBuildTargets) {
+        await hooks.afterBuildTargets(reservedSql);
+      }
+      await reservedSql.unsafe(blocks['lock-targets']);
       await reservedSql.unsafe(blocks['guard-post-fix-fffd']);
       await reservedSql.unsafe(blocks['guard-ambiguous-match']);
       await reservedSql.unsafe(blocks['guard-converging-pending']);
+      if (hooks.afterGuards) {
+        await hooks.afterGuards(reservedSql);
+      }
       await reservedSql.unsafe(blocks['repoint-twin-identity']);
       const deleteResult = await reservedSql.unsafe(blocks['delete-twins']);
       const updateResult = await reservedSql.unsafe(blocks['update-no-twins']);
+      await reservedSql.unsafe(blocks['guard-repair-complete']);
+      await reservedSql.unsafe("SET LOCAL statement_timeout = '5min'");
+      await reservedSql.unsafe(blocks['post-amble-residual']);
       await reservedSql.unsafe('COMMIT');
       inTransaction = false;
 
@@ -311,11 +370,17 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
     return rows[0].n;
   }
 
-  test('extracts exactly the 14 expected STMT blocks, in order', () => {
+  test('extracts exactly the 20 expected STMT blocks, in order', () => {
     expect(Object.keys(blocks)).toEqual(EXPECTED_BLOCKS);
     for (const name of EXPECTED_BLOCKS) {
       expect(blocks[name].trim().length).toBeGreaterThan(0);
     }
+  });
+
+  test("extractStmtBlocks refuses a block that swallowed the next one (round 3: a TYPO'd END marker, unlike a missing one, used to be silent -- the block absorbs its successor's SQL and that successor then executes twice per run, with every name/order assertion still green)", () => {
+    const sabotaged = scriptText.replace('-- === END STMT ===', '-- === END STMTT ===');
+    expect(sabotaged).not.toBe(scriptText);
+    expect(() => extractStmtBlocks(sabotaged, TEST_SCHEMA)).toThrow('swallowed a nested');
   });
 
   test('the transaction boundary is positioned correctly: BEGIN; precedes build-targets, COMMIT; precedes the final ANALYZE (MEDIUM finding, PR #2154 review round 2 -- a prior version of this test only asserted BEGIN;/COMMIT; existed SOMEWHERE in the file, which cannot detect either boundary moving to the wrong side of a STMT block; verified against the review-cited regression: a verbatim revert of round 1\'s "classify inside the transaction" fix, or moving ANALYZE inside the transaction, both left the old assertion-only-existence version of this test green)', () => {
@@ -353,6 +418,42 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
     expect(postAmbleIdx).toBeLessThan(commitIdx);
   });
 
+  test('the statement_timeout is raised ONLY after the last write, so a slow residual scan cannot roll back a repair that already succeeded -- and the 30s cap still covers every writing statement (round 3 finding)', () => {
+    // The AFTER residual counts are two unindexable full-table scans by
+    // construction (1-character leading-wildcard LIKE; the pg_trgm GIN indexes
+    // extract zero trigrams from one character), and they run INSIDE the write
+    // transaction because the dry-run recipe requires it. Under the flat 30s
+    // cap, a cold cache or I/O contention from the concurrent 30-minute
+    // library-etl cycle times the scan out, ON_ERROR_STOP aborts, COMMIT is
+    // never reached -- and a fully correct 14-row repair is destroyed to fail
+    // a verification read.
+    //
+    // `SET LOCAL` is last-write-wins within the transaction, so the ORDER is
+    // the entire fix: raised after the writes, the 30s bound still governs
+    // every statement that writes (including the lock wait in lock-targets,
+    // where timing out is the DESIRED behavior -- abort rather than park
+    // behind a concurrent writer). Raised any earlier and that bound is gone.
+    const beginIdx = scriptText.indexOf('\nBEGIN;\n');
+    const writeCapIdx = scriptText.indexOf("SET LOCAL statement_timeout = '30s';");
+    const lastWriteEndIdx = scriptText.indexOf(
+      '-- === END STMT ===',
+      scriptText.indexOf('-- === STMT: update-no-twins ===')
+    );
+    const raisedCapIdx = scriptText.indexOf("SET LOCAL statement_timeout = '5min';");
+    const postAmbleIdx = scriptText.indexOf('-- === STMT: post-amble-residual ===');
+    const commitIdx = scriptText.indexOf('\nCOMMIT;\n');
+
+    expect(writeCapIdx).toBeGreaterThan(-1);
+    expect(raisedCapIdx).toBeGreaterThan(-1);
+    expect(postAmbleIdx).toBeGreaterThan(-1);
+
+    expect(writeCapIdx).toBeGreaterThan(beginIdx);
+    expect(writeCapIdx).toBeLessThan(lastWriteEndIdx);
+    expect(raisedCapIdx).toBeGreaterThan(lastWriteEndIdx);
+    expect(raisedCapIdx).toBeLessThan(postAmbleIdx);
+    expect(postAmbleIdx).toBeLessThan(commitIdx);
+  });
+
   test('the shipped insert-pending-rows block carries no quoted string literals in its SQL -- i.e. it is still just the all-NULL placeholder (the missing enforcement gate, PR #2154 review round 2)', () => {
     // The deferred byte-exact codepoint assertion (Phase 4's
     // scriptUsesTheRightCodepoints analogue, see the header's "Known gap,
@@ -370,6 +471,17 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
       .map((line) => line.replace(/--.*$/, ''))
       .join('\n');
     expect(sqlOnly).not.toMatch(/'/);
+    // Dollar quoting is the hole the single-quote check alone leaves open
+    // (round 3 finding). `$$Csillagrablók$$` and `$t$Reménytelen Tánc$t$` are
+    // both valid PostgreSQL string literals containing zero apostrophes, and
+    // they are exactly what an operator (or an agent) reaches for to avoid
+    // escaping the apostrophes real track titles contain. Traced end to end:
+    // with real dollar-quoted rows pasted in, every guard passes, the
+    // synthetic-fixture tests match nothing against their own libraries, and
+    // the whole suite stays green -- so the header's "goes red the moment
+    // real rows land" contract, and the byte-assertion gate it defers to,
+    // would both be bypassable without this second assertion.
+    expect(sqlOnly).not.toMatch(/\$[A-Za-z_]*\$/);
   });
 
   test('the shipped insert-pending-rows block (as committed) is a genuine no-op', async () => {
@@ -1040,10 +1152,15 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
       track_artist_link_method: 'lml_backfill',
     });
 
-    const reservedSql = await sql.reserve();
-    try {
-      await reservedSql.unsafe(blocks['create-pending-table']);
-      await insertSyntheticPendingRows(reservedSql, [
+    // Injected through runRepairScript's own hook rather than hand-copying
+    // the block sequence (PR #2154 review round 3). The inlined copy this
+    // replaces both drifted from the real order and, lacking the helper's
+    // catch/ROLLBACK, could hand an aborted-transaction connection back to
+    // the shared pool. The hook fires between build-targets and lock-targets,
+    // which after round 3 is the ONLY window in which a concurrent edit to a
+    // classified row is still possible at all.
+    await runRepairScript(
+      withSyntheticPendingRows([
         {
           legacy_release_id: 90026,
           track_position: '4',
@@ -1051,36 +1168,20 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
           current_track_title: 'Sonido C�smico',
           true_track_title: 'Sonido Cósmico',
         },
-      ]);
-      await reservedSql.unsafe(blocks['guard-placeholder-scrub']);
-      await reservedSql.unsafe(blocks['guard-replacement-specified']);
-      await reservedSql.unsafe(blocks['guard-capture-sanity']);
-      await reservedSql.unsafe(blocks['guard-nfc-form']);
-
-      await reservedSql.unsafe('BEGIN');
-      await reservedSql.unsafe("SET LOCAL statement_timeout = '30s'");
-      await reservedSql.unsafe(blocks['build-targets']);
-      await reservedSql.unsafe(blocks['guard-post-fix-fffd']);
-      await reservedSql.unsafe(blocks['guard-ambiguous-match']);
-      await reservedSql.unsafe(blocks['guard-converging-pending']);
-
-      // Simulate the concurrent edit from a SECOND session. READ COMMITTED
-      // means this ordinary UPDATE is not blocked by the open transaction
-      // above -- build-targets' CREATE TEMP TABLE ... AS SELECT took no row
-      // lock.
-      await sql`
-        UPDATE ${sql(TEST_SCHEMA)}.compilation_track_artist
-           SET artist_name = 'Somebody Else Entirely'
-         WHERE id = ${corruptId}
-      `;
-
-      await reservedSql.unsafe(blocks['repoint-twin-identity']);
-      await reservedSql.unsafe(blocks['delete-twins']);
-      await reservedSql.unsafe(blocks['update-no-twins']);
-      await reservedSql.unsafe('COMMIT');
-    } finally {
-      reservedSql.release();
-    }
+      ]),
+      {
+        afterBuildTargets: async () => {
+          // A SECOND session. READ COMMITTED means this ordinary UPDATE is
+          // not blocked here -- build-targets' CREATE TEMP TABLE ... AS
+          // SELECT took no row lock, and lock-targets has not run yet.
+          await sql`
+            UPDATE ${sql(TEST_SCHEMA)}.compilation_track_artist
+               SET artist_name = 'Somebody Else Entirely'
+             WHERE id = ${corruptId}
+          `;
+        },
+      }
+    );
 
     // The twin's identity link was NOT repointed -- the re-check in
     // repoint-twin-identity found the corrupt row no longer matched its
@@ -1094,5 +1195,224 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
     // twins' own pre-existing re-check already covered this half).
     const corrupt = await ctaRow(corruptId);
     expect(corrupt.artist_name).toBe('Somebody Else Entirely');
+
+    // guard-repair-complete does NOT fire here, and that is the intended
+    // asymmetry: nothing live still holds the captured corrupt tuple (the
+    // concurrent editor rewrote it), so this run legitimately wrote nothing
+    // and committed. Contrast the vanished-twin test below, where the corrupt
+    // tuple IS still live after the writes and the guard aborts.
+  });
+
+  // ==========================================================================
+  // Round 3 review findings (PR #2154 review, third pass).
+  // ==========================================================================
+
+  test('HIGH: a twin deleted between build-targets and lock-targets makes delete-twins decline, and guard-repair-complete refuses to COMMIT the un-repaired run -- the corrupt row is the last copy of the credit and survives', async () => {
+    // Through round 2 both write statements re-checked only the row they were
+    // about to touch, never the twin that was supposed to carry the credit
+    // forward. `twin.id = t.twin_id` is a snapshot from build-targets, so a
+    // twin deleted (or renamed) in the window let delete-twins remove what had
+    // by then become the ONLY remaining copy -- committing at exit 0, with a
+    // per-row residual of 0 because the residual counts the OLD tuple, which
+    // the delete genuinely did remove. The UPDATE branch never had this
+    // exposure (it fails safe into a 23505); the DELETE branch had no tripwire.
+    const libraryId = await seedLibrary(90030);
+    const twinId = await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido Cósmico', '2');
+    const corruptId = await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido C�smico', '7');
+
+    await expect(
+      runRepairScript(
+        withSyntheticPendingRows([
+          {
+            legacy_release_id: 90030,
+            track_position: '7',
+            current_artist_name: 'Hermanos Gutiérrez',
+            current_track_title: 'Sonido C�smico',
+            true_track_title: 'Sonido Cósmico',
+          },
+        ]),
+        {
+          afterBuildTargets: async () => {
+            await sql`
+              DELETE FROM ${sql(TEST_SCHEMA)}.compilation_track_artist WHERE id = ${twinId}
+            `;
+          },
+        }
+      )
+    ).rejects.toThrow('still holds its corrupt tuple');
+
+    // The credit survives. This is the assertion the whole finding is about:
+    // without delete-twins' twin re-check the corrupt row is gone here and the
+    // compilation has lost the credit entirely, with the script reporting
+    // success. Corrupt-but-present is recoverable; absent is not.
+    const corrupt = await ctaRow(corruptId);
+    expect(corrupt.artist_name).toBe('Hermanos Gutiérrez');
+    expect(corrupt.track_title).toBe('Sonido C�smico');
+    // Only the concurrently-deleted twin is gone -- that delete belongs to
+    // another committed transaction and is not ours to roll back.
+    expect(await ctaCount(libraryId)).toBe(1);
+  });
+
+  test('HIGH: lock-targets takes real row locks on BOTH the corrupt row and its twin, so no concurrent writer can reach them between classification and the writes', async () => {
+    // The mechanism the round 3 concurrency fixes rest on. Through round 2 the
+    // script narrowed the classify-then-write window with re-checks but never
+    // closed it, which is what let repoint-twin-identity and delete-twins
+    // disagree with each other (repoint fires, edit lands, delete correctly
+    // declines -- identity link duplicated across two live rows, committed).
+    // Both are locked: the twin matters as much as the corrupt row, since the
+    // write statements read and mutate both.
+    const libraryId = await seedLibrary(90031);
+    const twinId = await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido Cósmico', '2');
+    const corruptId = await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido C�smico', '7');
+
+    // Bounded with lock_timeout so a genuinely-held lock surfaces as an error
+    // rather than hanging the suite forever if this assertion ever regresses.
+    async function tryConcurrentUpdate(id) {
+      const other = await sql.reserve();
+      try {
+        await other.unsafe('BEGIN');
+        await other.unsafe("SET LOCAL lock_timeout = '250ms'");
+        try {
+          await other.unsafe(
+            `UPDATE ${TEST_SCHEMA}.compilation_track_artist SET track_position = '99' WHERE id = ${id}`
+          );
+          await other.unsafe('ROLLBACK');
+          return null;
+        } catch (err) {
+          await other.unsafe('ROLLBACK');
+          return err;
+        }
+      } finally {
+        other.release();
+      }
+    }
+
+    const blocked = {};
+    const result = await runRepairScript(
+      withSyntheticPendingRows([
+        {
+          legacy_release_id: 90031,
+          track_position: '7',
+          current_artist_name: 'Hermanos Gutiérrez',
+          current_track_title: 'Sonido C�smico',
+          true_track_title: 'Sonido Cósmico',
+        },
+      ]),
+      {
+        // AFTER lock-targets (afterGuards runs later in the sequence), so the
+        // locks are held. The same writes succeed from the afterBuildTargets
+        // hook the two tests above use, which is precisely the difference the
+        // lock makes.
+        afterGuards: async () => {
+          blocked.corrupt = await tryConcurrentUpdate(corruptId);
+          blocked.twin = await tryConcurrentUpdate(twinId);
+        },
+      }
+    );
+
+    expect(blocked.corrupt).not.toBeNull();
+    expect(blocked.corrupt.code).toBe('55P03'); // lock_not_available
+    expect(blocked.twin).not.toBeNull();
+    expect(blocked.twin.code).toBe('55P03');
+
+    // The repair itself still completed normally with the locks held.
+    expect(result.deleted).toBe(1);
+    expect(result.updated).toBe(0);
+    const twin = await ctaRow(twinId);
+    expect(twin.track_title).toBe('Sonido Cósmico');
+    expect(await ctaCount(libraryId)).toBe(1);
+  });
+
+  test('MEDIUM: the shipped scrub DELETE is conditional on the FULL all-NULL placeholder shape -- reverting it to the unconditional `WHERE legacy_release_id IS NULL` form is caught', async () => {
+    // Round 3 finding: no test previously ran the SHIPPED scrub against any
+    // row but its own placeholder. The synthetic path skips
+    // `insert-pending-rows` entirely, and the one test that does execute it
+    // carries zero other pending rows -- where the conditional and
+    // unconditional DELETEs are indistinguishable. So the round 2 fix for this
+    // exact bug was pinned only by the guard's existence, not by the scrub's
+    // conditionality, and reverting the scrub left the whole suite green.
+    //
+    // The paste-slip row has to exist BEFORE the shipped block runs, or its
+    // scrub never sees it -- which is why this cannot be expressed through
+    // withSyntheticPendingRows.
+    await seedLibrary(90027);
+    await expect(
+      runRepairScript(async (reservedSql) => {
+        await insertSyntheticPendingRows(reservedSql, [
+          {
+            legacy_release_id: null,
+            track_position: '2',
+            current_artist_name: 'Some Other Artist',
+            current_track_title: 'Some Other Title',
+            true_artist_name: 'Fixed Other Artist',
+          },
+        ]);
+        await reservedSql.unsafe(blocks['insert-pending-rows']);
+      })
+    ).rejects.toThrow('already been scrubbed');
+  });
+
+  test('MEDIUM: a NULL current_artist_name on a track_title-only repair aborts via guard-capture-sanity instead of silently matching nothing', async () => {
+    // Round 3 finding: guard-capture-sanity's NULL test sat inside the
+    // `true_artist_name IS NOT NULL` branch, so it never applied to the 11
+    // track_title-only rows -- where a NULLed current_artist_name passed every
+    // guard, matched no live row (build-targets joins on
+    // `cta.artist_name = p.current_artist_name`), and committed as a silent
+    // no-op with the corruption intact. prod's artist_name column is NOT NULL
+    // and the enumeration query cannot emit a NULL there, so this is always a
+    // paste slip and is now always fatal.
+    const libraryId = await seedLibrary(90028);
+    const corruptId = await seedCta(libraryId, 'Csillagrablók', 'Rem�nytelen T�nc', '4');
+
+    await expect(
+      runRepairScript(
+        withSyntheticPendingRows([
+          {
+            legacy_release_id: 90028,
+            track_position: '4',
+            current_artist_name: null, // paste slip -- one column short
+            current_track_title: 'Rem�nytelen T�nc',
+            true_track_title: 'Reménytelen Tánc',
+          },
+        ])
+      )
+      // The guard names the ACTUAL fault rather than ORing both of its
+      // diagnoses into one message -- a short paste and a transposed paste
+      // have different fixes, and this fragment would match the transposed
+      // wording too if it didn't.
+    ).rejects.toThrow('current_artist_name is NULL');
+
+    const row = await ctaRow(corruptId);
+    expect(row.artist_name).toBe('Csillagrablók');
+    expect(row.track_title).toBe('Rem�nytelen T�nc');
+  });
+
+  test('MEDIUM: a legacy_release_id resolving to no library row aborts via guard-unknown-release, not the merely-informational unmatched listing', async () => {
+    // The one unmatched shape that can never be an idempotent re-run:
+    // repairing a CTA row does not delete or re-key its `library` parent, so a
+    // release id that resolves to nothing is a transcription error in the
+    // paste. Before round 3 it was swept into the same INFO listing as the
+    // benign already-fixed case and the run exited 0.
+    const libraryId = await seedLibrary(90029);
+    const corruptId = await seedCta(libraryId, 'Csillagrablók', 'Rem�nytelen T�nc', '4');
+
+    await expect(
+      runRepairScript(
+        withSyntheticPendingRows([
+          {
+            legacy_release_id: 90999, // no library row carries this id
+            track_position: '4',
+            current_artist_name: 'Csillagrablók',
+            current_track_title: 'Rem�nytelen T�nc',
+            true_track_title: 'Reménytelen Tánc',
+          },
+        ])
+      )
+      // Schema-free fragment: the message names wxyc_schema.library, which the
+      // extractor rewrites to the throwaway schema.
+    ).rejects.toThrow('matches no row in');
+
+    const row = await ctaRow(corruptId);
+    expect(row.track_title).toBe('Rem�nytelen T�nc');
   });
 });

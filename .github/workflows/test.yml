@@ -78,6 +78,16 @@ jobs:
               # tests/integration/bs-2117-crossreference-backfill.spec.js reads
               # (BS#2117 — its resolver + INSERT are executed verbatim):
               - 'scripts/audit/bs_2117_crossref_backfill.sql'
+              # tests/integration/bs-replacement-char-cta.spec.js reads
+              # (BS#2152 — every STMT block is executed verbatim). This one is
+              # load-bearing beyond the usual drift guard: the script ships
+              # with an empty PENDING CAPTURE block, and the spec's
+              # "no quoted string literals" test is the gate that forces
+              # whoever pastes the 14 real rows to add the deferred
+              # byte-exact codepoint assertion in the same change. That gate
+              # only fires if editing the .sql runs the integration suite —
+              # and the paste PR touches nothing but scripts/audit/:
+              - 'scripts/audit/bs_replacement_char_cta.sql'
             db-init:
               - 'dev_env/Dockerfile.init'
               - 'dev_env/init-db.mjs'
