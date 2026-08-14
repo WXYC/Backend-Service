@@ -38,6 +38,15 @@
  * varchar(255)/varchar(20) lengths as prod (PR #2154 review NIT) -- plain
  * `text` would silently accept a captured value too long for the real
  * column.
+ *
+ * Round 4 adds coverage for the Unicode-composition-form defect: the twin
+ * join, and the delete-twins/repoint-twin-identity re-checks that mirror it,
+ * now compare `normalize(x, NFC)` rather than raw bytes, so a genuinely
+ * NFD-stored live twin is FOUND instead of silently missed (see the script's
+ * own header and build-targets' own comment for the full failure mode). The
+ * "round 4" tests below pin the specific scenario that motivated the fix
+ * (an NFD twin now takes the DELETE branch and leaves exactly one row) plus
+ * the new `guard-post-write-nfc-duplicate` belt-and-braces check.
  */
 
 const fs = require('fs');
@@ -69,6 +78,7 @@ const EXPECTED_BLOCKS = [
   'delete-twins',
   'update-no-twins',
   'guard-repair-complete',
+  'guard-post-write-nfc-duplicate',
   'post-amble-residual',
   'analyze',
 ];
@@ -310,6 +320,7 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
       const deleteResult = await reservedSql.unsafe(blocks['delete-twins']);
       const updateResult = await reservedSql.unsafe(blocks['update-no-twins']);
       await reservedSql.unsafe(blocks['guard-repair-complete']);
+      await reservedSql.unsafe(blocks['guard-post-write-nfc-duplicate']);
       await reservedSql.unsafe("SET LOCAL statement_timeout = '5min'");
       await reservedSql.unsafe(blocks['post-amble-residual']);
       await reservedSql.unsafe('COMMIT');
@@ -370,7 +381,7 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
     return rows[0].n;
   }
 
-  test('extracts exactly the 20 expected STMT blocks, in order', () => {
+  test('extracts exactly the 21 expected STMT blocks, in order', () => {
     expect(Object.keys(blocks)).toEqual(EXPECTED_BLOCKS);
     for (const name of EXPECTED_BLOCKS) {
       expect(blocks[name].trim().length).toBeGreaterThan(0);
@@ -1414,5 +1425,203 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
 
     const row = await ctaRow(corruptId);
     expect(row.track_title).toBe('Rem�nytelen T�nc');
+  });
+
+  // ==========================================================================
+  // Round 4 review findings (Unicode composition-form mismatch, BS#2152).
+  // ==========================================================================
+
+  test('BS#2152 round 4: an NFD-stored clean twin against an NFC true_* capture now classifies as a twin, takes the DELETE branch, and leaves exactly one (NFD) row with the U+FFFD gone', async () => {
+    // The defect this round closes: build-targets' twin join used to compare
+    // twin.artist_name/twin.track_title to the post-fix tuple byte-exactly.
+    // guard-nfc-form pins every captured true_* value to NFC, but a LIVE row
+    // carries no such invariant -- this table has no fold trigger the way
+    // `artists` does -- so a genuinely NFD-stored clean twin is possible, and
+    // it is exactly what the byte-exact join missed. Before this fix, the
+    // run below would classify no-twin, UPDATE the corrupt row onto the NFC
+    // value, and leave TWO rows (one NFD, one NFC) for the same credit --
+    // with the postlude still reading 0/0, because the U+FFFD really was
+    // gone; what was left behind was a duplicate, not a U+FFFD.
+    const libraryId = await seedLibrary(90040);
+    const nfdTrackTitle = 'Sonido Cósmico'.normalize('NFD');
+    expect(nfdTrackTitle).not.toBe('Sonido Cósmico');
+    expect(nfdTrackTitle.normalize('NFC')).toBe('Sonido Cósmico');
+
+    // The corrupt row carries an identity link the clean twin lacks (the
+    // usual shape -- the corrupt row is the OLDER ingestion, see
+    // repoint-twin-identity's own comment). This is deliberate, not just
+    // fixture texture: repoint-twin-identity has its OWN NFC-folded
+    // twin-match re-check (coupling 2 in the round 4 review), separate from
+    // delete-twins'. A mutation that reverted ONLY repoint's fold would
+    // still let delete-twins remove the corrupt row correctly -- same row
+    // counts, same surviving id, same bytes -- but the identity link would
+    // silently fail to carry over, since repoint's own WHERE would then
+    // match zero rows against this NFD twin. Asserting on the identity
+    // columns below is what makes that failure mode visible instead of
+    // masked by delete-twins' independent fix.
+    const twinId = await seedCta(libraryId, 'Hermanos Gutiérrez', nfdTrackTitle, '2');
+    const corruptId = await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido C�smico', '7', {
+      track_artist_id: 4242,
+      track_artist_link_confidence: 0.93,
+      track_artist_link_method: 'lml_backfill',
+    });
+
+    const result = await runRepairScript(
+      withSyntheticPendingRows([
+        {
+          legacy_release_id: 90040,
+          track_position: '7',
+          current_artist_name: 'Hermanos Gutiérrez',
+          current_track_title: 'Sonido C�smico',
+          true_track_title: 'Sonido Cósmico', // NFC, as guard-nfc-form requires
+        },
+      ])
+    );
+
+    expect(result.deleted).toBe(1);
+    expect(result.updated).toBe(0);
+
+    // Exactly one row survives -- the corrupt row is gone, not duplicated.
+    expect(await ctaCount(libraryId)).toBe(1);
+    const remaining = await sql`
+      SELECT id, artist_name, track_title FROM ${sql(TEST_SCHEMA)}.compilation_track_artist WHERE library_id = ${libraryId}
+    `;
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].id).toBe(twinId);
+
+    // The surviving row is the ORIGINAL NFD twin, byte for byte -- detection
+    // folds to NFC, writes never do. The corrupt row was DELETEd, not
+    // rewritten, so nothing here was ever written in a normalized form.
+    expect(remaining[0].track_title).toBe(nfdTrackTitle);
+    expect(remaining[0].track_title.normalize('NFC')).toBe('Sonido Cósmico');
+
+    // The corrupt row's identity link carried over onto the NFD twin --
+    // this only happens if repoint-twin-identity's OWN NFC-folded
+    // twin-match re-check actually fired against the NFD twin (see the
+    // seeding comment above for why this is load-bearing, not incidental).
+    const twin = await ctaRow(twinId);
+    expect(twin.track_artist_id).toBe(4242);
+    expect(twin.track_artist_link_confidence).toBeCloseTo(0.93);
+    expect(twin.track_artist_link_method).toBe('lml_backfill');
+
+    const corruptGone = await sql`
+      SELECT id FROM ${sql(TEST_SCHEMA)}.compilation_track_artist WHERE id = ${corruptId}
+    `;
+    expect(corruptGone).toHaveLength(0);
+
+    // The U+FFFD predicate is 0 across both columns -- the same postlude
+    // read the pre-fix defect also passed, which is why this scenario needs
+    // its own row-count/identity assertions rather than trusting the
+    // residual count alone.
+    const [{ remainingFffd }] = await sql`
+      SELECT COUNT(*)::int AS "remainingFffd"
+      FROM ${sql(TEST_SCHEMA)}.compilation_track_artist
+      WHERE library_id = ${libraryId}
+        AND (artist_name LIKE '%' || chr(65533) || '%' OR track_title LIKE '%' || chr(65533) || '%')
+    `;
+    expect(remainingFffd).toBe(0);
+  });
+
+  test('BS#2152 round 4: two pending rows converging only AFTER NFC folding (via the untouched COALESCE column) abort via guard-converging-pending', async () => {
+    // Coupling 3 from the round 4 review: guard-converging-pending groups on
+    // the post-fix tuple, but `new_artist_name`/`new_track_title` COALESCE
+    // onto whichever column a pending row does NOT fix -- and that untouched
+    // column carries no NFC invariant (see "Unicode normalization" above).
+    // So two pending rows can converge on the same real credit via a form
+    // mismatch alone, with no true_* value even involved in the mismatch
+    // that causes the convergence. Byte-exact grouping would miss this and
+    // let BOTH rows reach update-no-twins, which -- being NFC-equal but
+    // byte-DISTINCT -- does NOT trip cta_unique_idx, so the run would exit 0
+    // having created exactly the round-4 duplicate class this whole fix
+    // exists to prevent.
+    const libraryId = await seedLibrary(90042);
+    const nfdTrackTitle = 'Sonido Cósmico'.normalize('NFD');
+
+    // Row A: corrupt artist_name; track_title untouched and stored NFD.
+    await seedCta(libraryId, 'Hermanos Guti�rrez', nfdTrackTitle, '1');
+    // Row B: artist_name already clean NFC; corrupt track_title.
+    await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido C�smico', '2');
+
+    await expect(
+      runRepairScript(
+        withSyntheticPendingRows([
+          {
+            legacy_release_id: 90042,
+            track_position: '1',
+            current_artist_name: 'Hermanos Guti�rrez',
+            current_track_title: nfdTrackTitle,
+            true_artist_name: 'Hermanos Gutiérrez', // NFC
+            // true_track_title omitted -- new_track_title COALESCEs onto
+            // this row's own (NFD) live track_title.
+          },
+          {
+            legacy_release_id: 90042,
+            track_position: '2',
+            current_artist_name: 'Hermanos Gutiérrez',
+            current_track_title: 'Sonido C�smico',
+            true_track_title: 'Sonido Cósmico', // NFC
+            // true_artist_name omitted -- new_artist_name COALESCEs onto
+            // this row's own (already-NFC) live artist_name.
+          },
+        ])
+      )
+      // Guard-specific fragment -- distinguishes a genuine
+      // guard-converging-pending catch from guard-post-write-nfc-duplicate,
+      // which would ALSO fire on this exact scenario if THIS guard's own
+      // fold were reverted (see the round 4 mutation table): the two guards
+      // overlap on this input, so only the message text tells them apart.
+    ).rejects.toThrow('converge on the same post-fix');
+
+    // Both rows survive untouched -- the transaction rolled back before
+    // either write statement ran.
+    const rows = await sql`
+      SELECT artist_name, track_title FROM ${sql(TEST_SCHEMA)}.compilation_track_artist
+      WHERE library_id = ${libraryId} ORDER BY track_position
+    `;
+    expect(rows).toHaveLength(2);
+    expect(rows[0].artist_name).toBe('Hermanos Guti�rrez');
+    expect(rows[0].track_title).toBe(nfdTrackTitle);
+    expect(rows[1].artist_name).toBe('Hermanos Gutiérrez');
+    expect(rows[1].track_title).toBe('Sonido C�smico');
+  });
+
+  test('BS#2152 round 4: guard-post-write-nfc-duplicate fires when a touched library_id holds two NFC-equal, byte-distinct rows', async () => {
+    // The belt-and-braces half of the round 4 fix: this guard checks the
+    // OUTCOME (no two live rows in a touched library_id are NFC-equal but
+    // byte-distinct), not just the twin-join mechanism that is supposed to
+    // prevent it. Reproduced here via a pre-existing NFC/NFD pair the run
+    // never touches directly, sitting in a compilation this run otherwise
+    // repairs -- scope is "library_id in cta_repair_targets", deliberately
+    // broader than "rows this run wrote", per the guard's own comment.
+    const libraryId = await seedLibrary(90041);
+    const nfdTitle = 'Sonido Cósmico'.normalize('NFD');
+    await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido Cósmico', '1'); // NFC
+    await seedCta(libraryId, 'Hermanos Gutiérrez', nfdTitle, '2'); // NFD -- same credit, pre-existing duplicate
+
+    const corruptId = await seedCta(libraryId, 'Csillagrablók', 'Rem�nytelen T�nc', '4');
+
+    await expect(
+      runRepairScript(
+        withSyntheticPendingRows([
+          {
+            legacy_release_id: 90041,
+            track_position: '4',
+            current_artist_name: 'Csillagrablók',
+            current_track_title: 'Rem�nytelen T�nc',
+            true_track_title: 'Reménytelen Tánc',
+          },
+        ])
+      )
+      // Guard-specific fragment.
+    ).rejects.toThrow('NFC-equal but byte-distinct');
+
+    // Rolled back -- this run's own UPDATE to the unrelated corrupt row is
+    // undone (the recovery shape every guard in this script uses), even
+    // though the duplicate it flagged predates this run and is NOT undone by
+    // the rollback -- the guard's own message says as much.
+    const row = await ctaRow(corruptId);
+    expect(row.artist_name).toBe('Csillagrablók');
+    expect(row.track_title).toBe('Rem�nytelen T�nc');
+    expect(await ctaCount(libraryId)).toBe(3);
   });
 });
