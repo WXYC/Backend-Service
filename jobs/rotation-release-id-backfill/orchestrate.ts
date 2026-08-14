@@ -22,7 +22,8 @@
 
 import {
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
-  LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+  resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  buildWaitForQuietPeriod,
   checkLiveActivity as defaultCheckLiveActivity,
   requireNonNegativeInt,
   type CheckLiveActivityFn,
@@ -70,8 +71,6 @@ export type Totals = {
 
 export type RunResult = { totals: Totals };
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 export const resolveLiveActivityLookback = (
   raw: string | undefined = process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS
 ): number =>
@@ -79,8 +78,14 @@ export const resolveLiveActivityLookback = (
     note: 'Use 0 to disable the cooperative pause.',
   });
 
+/**
+ * BS#2147: delegates to the shared floored resolver so `LIVE_ACTIVITY_PAUSE_MS`
+ * below `LIVE_ACTIVITY_MIN_PAUSE_MS` (including `0`) is rejected at init
+ * instead of degrading the cooperative-pause loop into a hot loop against
+ * RDS. `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` remains the sole disable knob.
+ */
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
-  requireNonNegativeInt(raw, 'LIVE_ACTIVITY_PAUSE_MS', LIVE_ACTIVITY_PAUSE_MS_DEFAULT, { unit: 'ms' });
+  resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
 
 type AttemptBucket = 'unresolved' | 'sentinel_rejected' | 'trust_rejected';
 
@@ -125,6 +130,23 @@ export const runBackfill = async (deps: {
   const liveActivityPauseMs = deps.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
   const probe = deps.checkLiveActivity ?? defaultCheckLiveActivity;
 
+  // BS#2147: the loop itself (probe + elapsed-time cap) now lives in the
+  // shared `buildWaitForQuietPeriod`; `deps.onLivePause` is wired through
+  // `onPause` so existing unit tests asserting on it keep working
+  // unchanged. This job gains fail-open probe-error handling here for the
+  // first time — a probe throw used to propagate out of `runBackfill` and
+  // abort the whole run; it is now treated as "no activity" for that
+  // iteration, matching six of the ten sibling jobs (no `log`/`captureError`
+  // available at this layer to report it through, unlike the TS-orchestrator
+  // siblings — the throw is simply swallowed). No SIGTERM/stop handling
+  // existed here before and none is added.
+  const waitForQuietPeriod = buildWaitForQuietPeriod({
+    lookbackSeconds: liveActivityLookbackSeconds,
+    pauseMs: liveActivityPauseMs,
+    probe,
+    onPause: () => deps.onLivePause?.(),
+  });
+
   const recordAttemptedOutcome = async (rotationId: number, bucket: AttemptBucket): Promise<void> => {
     if (deps.dryRun) {
       incrementAttemptBucket(totals, bucket);
@@ -153,12 +175,7 @@ export const runBackfill = async (deps: {
 
   const candidates = await deps.loadCandidates();
   for (const candidate of candidates) {
-    if (liveActivityLookbackSeconds > 0) {
-      while (await probe(liveActivityLookbackSeconds)) {
-        deps.onLivePause?.();
-        if (liveActivityPauseMs > 0) await sleep(liveActivityPauseMs);
-      }
-    }
+    await waitForQuietPeriod();
 
     totals.scanned += 1;
     let outcome: LookupOutcome;
