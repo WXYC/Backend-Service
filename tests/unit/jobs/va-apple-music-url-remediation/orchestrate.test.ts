@@ -29,6 +29,7 @@ import {
   resolveAfterId,
   resolveBatchSize,
   resolveDryRun,
+  resolveLiveActivityPauseMs,
   resolveMaxRescueRate,
   runRemediation,
   tripleKey,
@@ -142,8 +143,17 @@ beforeEach(() => {
   // Disabled by default (matches the sibling jobs' test convention): the
   // 'cooperative live-DJ pause' describe block below opts individual tests
   // back in by setting this to a nonzero value themselves.
+  //
+  // BS#2147: LIVE_ACTIVITY_PAUSE_MS is no longer set here at all (it used
+  // to be '0' as this job's OWN test-convention disable — BS#2009's
+  // `pauseMs<=0` gate, since retired). `resolveLiveActivityPauseMs` is now
+  // called unconditionally by `runRemediation` even when the lookback
+  // disables the probe entirely, and it throws on any sub-floor value
+  // (including '0'), so leaving the var unset (falling back to the shared
+  // 30000ms default) is the only option that doesn't also require
+  // `--execute`-shaped rewrites of every test below.
   process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS = '0';
-  process.env.LIVE_ACTIVITY_PAUSE_MS = '0';
+  delete process.env.LIVE_ACTIVITY_PAUSE_MS;
   process.env.VA_REMEDIATION_SECOND_PASS_DELAY_MS = '0';
   delete process.env.VA_REMEDIATION_FLOWSHEET_AFTER_ID;
   delete process.env.VA_REMEDIATION_ALBUM_AFTER_ID;
@@ -460,47 +470,57 @@ describe('invalidateAlbumBatch SQL', () => {
   });
 });
 
-describe('cooperative live-DJ pause (BS#2009)', () => {
+describe('cooperative live-DJ pause (BS#2009 / BS#2147)', () => {
   beforeEach(() => {
-    // Nonzero by default within this block: LIVE_ACTIVITY_PAUSE_MS=0 is its
-    // OWN disable gate now (see the 'does not spin' test below), so a test
-    // in here that wants the probe to actually fire needs a real value —
-    // the outer beforeEach's '0' would otherwise short-circuit every test
-    // before checkLive is ever called. Tests that care about the exact
-    // pause duration override this locally.
-    process.env.LIVE_ACTIVITY_PAUSE_MS = '10';
+    // Nonzero by default within this block, and — since BS#2147 — at or
+    // above LIVE_ACTIVITY_MIN_PAUSE_MS: `resolveLiveActivityPauseMs` now
+    // THROWS on a sub-floor value instead of silently accepting it, and
+    // `runRemediation` calls it unconditionally, so any value below the
+    // floor aborts the whole run before `checkLive` is ever reached. The
+    // outer beforeEach leaves the var unset (30000ms default) specifically
+    // so the LOOKBACK_SECONDS='0' default there is what disables the probe;
+    // this block instead needs the probe to actually fire, so it sets an
+    // explicit above-floor value. Tests that care about the exact pause
+    // duration override this locally.
+    process.env.LIVE_ACTIVITY_PAUSE_MS = '1200';
   });
   afterEach(() => {
     delete process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS;
+    jest.useRealTimers();
   });
 
   it('sleeps while the probe reports activity and proceeds once it reports quiet', async () => {
+    jest.useFakeTimers();
     process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS = '60';
-    // Nonzero on purpose (the outer beforeEach's default is '0', which would
-    // make stopAwareSleep(0) a no-op and let this test pass without any real
-    // sleep ever happening). A real wait is asserted below via elapsed time.
-    process.env.LIVE_ACTIVITY_PAUSE_MS = '120';
+    // Nonzero (and, since BS#2147, at or above the floor) on purpose: a real
+    // wait is asserted below via fake-timer advancement, not wall-clock
+    // elapsed time (the floor makes anything fast enough to sleep for real
+    // in a unit test unreachable via env).
+    process.env.LIVE_ACTIVITY_PAUSE_MS = '1200';
     const checkLive = jest.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
     queueSinglePageRun([vaRow(1)]);
 
-    const startedAt = Date.now();
-    const result = await runRemediation(
+    const resultPromise = runRemediation(
       baseOpts({
         lookup: () => Promise.resolve(withUrl(NEW_URL)),
         checkLiveActivityFn: checkLive,
       })
     );
-    const elapsedMs = Date.now() - startedAt;
 
-    // The probe reported activity on its first call for the page, which
-    // must trigger a REAL sleep of (at least) LIVE_ACTIVITY_PAUSE_MS before
-    // the next probe — not a discarded read. A call-count assertion alone
-    // cannot distinguish "looped and slept" from "read the answer once and
-    // moved on regardless" (BS#2009 defect 1's exact shape), so this is the
-    // one assertion in the suite a mutation that deletes the sleep/loop
-    // (keeping only `await safeProbe()`) cannot pass without also being
-    // slower than a genuine no-op — verified by mutation below.
-    expect(elapsedMs).toBeGreaterThanOrEqual(100);
+    // Let every microtask up to the first real timer settle. The probe
+    // reported activity on its first call for the page, which must trigger
+    // a REAL sleep of LIVE_ACTIVITY_PAUSE_MS before the next probe — not a
+    // discarded read. A call-count assertion alone cannot distinguish
+    // "looped and slept" from "read the answer once and moved on
+    // regardless" (BS#2009 defect 1's exact shape), so checking that the
+    // run has NOT progressed past the first probe before the pause elapses
+    // is the assertion a mutation that deletes the sleep/loop cannot pass.
+    await jest.advanceTimersByTimeAsync(0);
+    expect(checkLive).toHaveBeenCalledTimes(1);
+
+    await jest.advanceTimersByTimeAsync(1200);
+    const result = await resultPromise;
+
     // Exact count, verified by running the fixture rather than inferred:
     // 3 waitForQuietPeriod() calls total (one per while-loop page iteration
     // — 2 flowsheet [the data page + the terminal empty page] + 1 album
@@ -557,11 +577,11 @@ describe('cooperative live-DJ pause (BS#2009)', () => {
   it('skips the probe entirely when the lookback is 0 (pause disabled)', async () => {
     process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS = '0';
     // Bounded, not unconditionally true: this block's beforeEach sets
-    // PAUSE_MS='10', so a regression in the lookbackSeconds<=0 gate would
-    // loop indefinitely at 10ms a turn against an always-active probe,
-    // burning the runner to its job ceiling instead of failing in a
-    // second (the exact asymmetry the 'does not spin' test below was
-    // deliberately capped to avoid).
+    // PAUSE_MS='1200', so a regression in the lookbackSeconds<=0 gate would
+    // loop for a long time against an always-active probe, burning the
+    // runner to its job ceiling instead of failing in a second (the exact
+    // asymmetry the retired 'does not spin via pauseMs<=0' test used to
+    // guard — see the resolver-floor tests below for its BS#2147 successor).
     let calls = 0;
     const checkLive = jest.fn(() => {
       calls += 1;
@@ -579,32 +599,37 @@ describe('cooperative live-DJ pause (BS#2009)', () => {
     expect(checkLive).not.toHaveBeenCalled();
   });
 
-  it('does not spin when the pause is disabled via pauseMs<=0, even while the probe reports activity', async () => {
+  /**
+   * BS#2147: this job's own `pauseMs<=0` disable gate (BS#2009) is retired.
+   * `LIVE_ACTIVITY_PAUSE_MS=0` no longer disables the pause — it used to
+   * hot-loop against RDS in every OTHER job in the fleet, and this job's
+   * second, disagreeing "0 means off" reading was the second half of the
+   * two-designs problem BS#2147 reconciles. The shared resolver now rejects
+   * the entire sub-floor interval (not just 0) at init, matching every
+   * other job. `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` (pinned above) is the
+   * sole remaining disable knob.
+   */
+  it.each(['0', '1', '999'])(
+    'rejects a sub-floor LIVE_ACTIVITY_PAUSE_MS (%s) at init instead of silently disabling the pause',
+    (raw) => {
+      expect(() => resolveLiveActivityPauseMs(raw)).toThrow(/LIVE_ACTIVITY_PAUSE_MS/);
+    }
+  );
+
+  it('runRemediation itself rejects a sub-floor LIVE_ACTIVITY_PAUSE_MS before any probe or write', async () => {
     process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS = '60';
     process.env.LIVE_ACTIVITY_PAUSE_MS = '0';
-    // stopAwareSleep(0) returns without awaiting a real timer, so a probe
-    // that never reports quiet would otherwise degenerate into an
-    // unthrottled `while (active) { probe() }` hot loop against RDS for the
-    // run's entire duration. Bounded (not literally always-true) so that IF
-    // this regresses, the mock terminates the loop after a bounded number
-    // of calls instead of hanging the test run indefinitely — the
-    // assertion below is what actually catches the regression.
-    let calls = 0;
-    const checkLive = jest.fn(() => {
-      calls += 1;
-      return Promise.resolve(calls <= 50);
-    });
-    queueSinglePageRun([vaRow(1)]);
+    const checkLive = jest.fn(() => Promise.resolve(true));
 
-    await runRemediation(
-      baseOpts({
-        lookup: () => Promise.resolve(withUrl(NEW_URL)),
-        checkLiveActivityFn: checkLive,
-      })
-    );
+    await expect(
+      runRemediation(
+        baseOpts({
+          lookup: () => Promise.resolve(withUrl(NEW_URL)),
+          checkLiveActivityFn: checkLive,
+        })
+      )
+    ).rejects.toThrow(/LIVE_ACTIVITY_PAUSE_MS/);
 
-    // pauseMs<=0 disables the pause the same way lookbackSeconds<=0 does:
-    // the probe is never called at all, regardless of what it would report.
     expect(checkLive).not.toHaveBeenCalled();
   });
 });
