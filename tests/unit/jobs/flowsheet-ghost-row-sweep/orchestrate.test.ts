@@ -30,7 +30,7 @@
  */
 import { jest } from '@jest/globals';
 
-import { db } from '@wxyc/database';
+import { db, type CheckLiveActivityFn } from '@wxyc/database';
 import {
   runSweep,
   resolveDryRun,
@@ -471,5 +471,35 @@ describe('analyzeTable (real write path)', () => {
     const calls = renderedExecuteCalls();
     expect(calls.some((s) => /SET LOCAL statement_timeout\s*=\s*300000/.test(s))).toBe(true);
     expect(calls.some((s) => /ANALYZE\s+"[^"]*"\."rotation"/.test(s))).toBe(true);
+  });
+});
+
+describe('runSweep — cooperative-pause budget ceiling (BS#2147 findings 1+2, 5)', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it('marks the run failed when the injected liveActivityMaxPauseMs is exhausted', async () => {
+    // runSweep wraps runTarget in its own try/catch that already preserves
+    // the summary log + span, so the shared module's
+    // LiveActivityPauseCeilingExceededError doesn't reject this promise —
+    // it's caught here and surfaces as `result.failed`.
+    const probe = jest.fn<CheckLiveActivityFn>().mockResolvedValue(true);
+
+    const resultPromise = runSweep({
+      dryRun: true,
+      keyspaceSource: keyspaceSource([], []),
+      checkLiveActivity: probe,
+      liveActivityLookbackSeconds: 60,
+      liveActivityPauseMs: 1000,
+      liveActivityMaxPauseMs: 2000,
+      minKeyspaceSize: 0,
+    });
+
+    await jest.advanceTimersByTimeAsync(1000);
+    await jest.advanceTimersByTimeAsync(1000);
+
+    const result = await resultPromise;
+    expect(result.failed).toBe(true);
+    expect(db.execute).not.toHaveBeenCalled();
   });
 });
