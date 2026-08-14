@@ -72,21 +72,21 @@ Pass `--execute` to write (guard it against a test schema — see Constraints be
 
 ## Environment variables
 
-| Variable                              | Default    | Notes                                                                                                                  |
-| ------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `GHOST_SWEEP_FLOWSHEET_KEYSPACE_FILE` | (required) | Path to the newline-delimited flowsheet id file                                                                        |
-| `GHOST_SWEEP_ROTATION_KEYSPACE_FILE`  | (required) | Path to the newline-delimited rotation id file                                                                         |
-| `GHOST_SWEEP_BATCH_SIZE`              | 5000       | Rows per SELECT page / DELETE statement (bulk-update playbook default)                                                 |
-| `GHOST_SWEEP_DELETE_TIMEOUT_MS`       | 300000     | `SET LOCAL statement_timeout` around each batch DELETE                                                                 |
-| `GHOST_SWEEP_ANALYZE_TIMEOUT_MS`      | 300000     | `SET LOCAL statement_timeout` around each post-pass `ANALYZE`                                                          |
-| `GHOST_SWEEP_SAMPLE_SIZE`             | 20         | Orphan ids carried in each target's summary; 0 to omit                                                                 |
-| `GHOST_SWEEP_MIN_KEYSPACE_SIZE`       | 1          | Refuses the run if either loaded keyspace is smaller than this; 0 to disable (deliberate tiny/empty-fixture runs only) |
-| `GHOST_SWEEP_MAX_GHOST_RATIO`         | 0.5        | Aborts a target once its running ghost fraction exceeds this (after the first full page); 1 to disable                 |
-| `GHOST_SWEEP_FLOWSHEET_AFTER_ID`      | 0          | Resume cursor for the flowsheet target                                                                                 |
-| `GHOST_SWEEP_ROTATION_AFTER_ID`       | 0          | Resume cursor for the rotation target                                                                                  |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`      | 60         | Set 0 to disable the cooperative pause                                                                                 |
-| `LIVE_ACTIVITY_PAUSE_MS`              | 30000      | Pause duration when DJ activity detected (ms)                                                                          |
-| `SENTRY_DSN`                          | (optional) | Sentry error reporting                                                                                                 |
+| Variable                              | Default    | Notes                                                                                                                                                                    |
+| ------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GHOST_SWEEP_FLOWSHEET_KEYSPACE_FILE` | (required) | Path to the newline-delimited flowsheet id file                                                                                                                          |
+| `GHOST_SWEEP_ROTATION_KEYSPACE_FILE`  | (required) | Path to the newline-delimited rotation id file                                                                                                                           |
+| `GHOST_SWEEP_BATCH_SIZE`              | 5000       | Rows per SELECT page / DELETE statement (bulk-update playbook default)                                                                                                   |
+| `GHOST_SWEEP_DELETE_TIMEOUT_MS`       | 300000     | `SET LOCAL statement_timeout` around each batch DELETE                                                                                                                   |
+| `GHOST_SWEEP_ANALYZE_TIMEOUT_MS`      | 300000     | `SET LOCAL statement_timeout` around each post-pass `ANALYZE`                                                                                                            |
+| `GHOST_SWEEP_SAMPLE_SIZE`             | 20         | Orphan ids carried in each target's summary; 0 to omit                                                                                                                   |
+| `GHOST_SWEEP_MIN_KEYSPACE_SIZE`       | 1          | Refuses the run if either loaded keyspace is smaller than this; 0 to disable (deliberate tiny/empty-fixture runs only)                                                   |
+| `GHOST_SWEEP_MAX_GHOST_RATIO`         | 0.5        | Aborts a target once its running ghost fraction exceeds this (after the first full page); 1 to disable                                                                   |
+| `GHOST_SWEEP_FLOWSHEET_AFTER_ID`      | 0          | Resume cursor for the flowsheet target                                                                                                                                   |
+| `GHOST_SWEEP_ROTATION_AFTER_ID`       | 0          | Resume cursor for the rotation target                                                                                                                                    |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`      | 60         | Set 0 to disable the cooperative pause                                                                                                                                   |
+| `LIVE_ACTIVITY_PAUSE_MS`              | 30000      | Pause duration when DJ activity detected (ms). Must be >= 1000 (BS#2147) — a sub-floor value, including 0, is rejected at init rather than silently disabling the pause. |
+| `SENTRY_DSN`                          | (optional) | Sentry error reporting                                                                                                                                                   |
 
 CLI flags: `--execute` (write mode), `--dry-run` (explicit no-op, the default; passing both fails fast).
 

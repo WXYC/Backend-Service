@@ -62,7 +62,8 @@ import {
   db,
   checkLiveActivity as defaultCheckLiveActivity,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
-  LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+  resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  buildWaitForQuietPeriod,
   requireNonNegativeInt,
   requirePositiveInt,
   type CheckLiveActivityFn,
@@ -371,8 +372,14 @@ export const resolveLiveActivityLookback = (
     note: 'Use 0 to disable the cooperative pause.',
   });
 
+/**
+ * BS#2147: delegates to the shared floored resolver so `LIVE_ACTIVITY_PAUSE_MS`
+ * below `LIVE_ACTIVITY_MIN_PAUSE_MS` (including `0`) is rejected at init
+ * instead of degrading the cooperative-pause loop into a hot loop against
+ * RDS. `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` remains the sole disable knob.
+ */
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
-  requireNonNegativeInt(raw, 'LIVE_ACTIVITY_PAUSE_MS', LIVE_ACTIVITY_PAUSE_MS_DEFAULT, { unit: 'ms' });
+  resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
 
 export type LookupResult = { response: LookupResponse; cacheHit: boolean };
 export type LookupFn = (artist: string, album?: string, track?: string) => Promise<LookupResult>;
@@ -596,41 +603,38 @@ export const runReenrichment = async (opts: {
   // Hoist deps outside the per-row loop — one object reused for ~12k rows.
   const deps = { lookup: opts.lookup, enrich: opts.enrich };
 
-  // On probe error: log + Sentry capture + assume no activity (defer to
-  // next batch). A transient RDS error in the probe SELECT shouldn't abort
-  // the whole drain — same posture as loadBatch's retry.
-  const safeProbe = async (): Promise<boolean> => {
-    try {
-      return await probe(liveActivityLookbackSeconds);
-    } catch (error) {
-      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
-        error_message: errorMessage(error),
-      });
-      captureError(error, 'probe_error');
-      return false;
-    }
-  };
-
-  // Returns true iff the run should stop (SIGTERM observed during the wait).
-  // Disabled (returns false immediately) when lookback==0.
-  const waitForQuietPeriod = async (): Promise<boolean> => {
-    // BS#1998 review round 1: a dry run reads nothing a DJ contends with and
-    // writes nothing at all, so deferring it to a quiet period buys no safety
-    // and can strand a scope preview in `live_activity_pause` for the length
-    // of a show — right when the operator is trying to size the run.
-    if (dryRun) return stopRequested;
-    if (liveActivityLookbackSeconds <= 0) return false;
-    let active = await safeProbe();
-    while (active) {
-      if (stopRequested) return true;
+  // BS#2147: the loop itself (probe + fail-open + stop-awareness + elapsed-
+  // time cap) now lives in the shared `buildWaitForQuietPeriod`. `onPause`
+  // and `onProbeError` reproduce this job's exact prior log lines/fields so
+  // ops greps against `live_activity_pause`/`probe_error` don't drift.
+  const waitForQuietPeriodImpl = buildWaitForQuietPeriod({
+    lookbackSeconds: liveActivityLookbackSeconds,
+    pauseMs: liveActivityPauseMs,
+    probe,
+    shouldStop: () => stopRequested,
+    onPause: () => {
       log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
         lookback_seconds: liveActivityLookbackSeconds,
         pause_ms: liveActivityPauseMs,
       });
-      await stopAwareSleep(liveActivityPauseMs);
-      active = await safeProbe();
-    }
-    return stopRequested;
+    },
+    onProbeError: (error) => {
+      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
+        error_message: errorMessage(error),
+      });
+      captureError(error, 'probe_error');
+    },
+  });
+
+  // BS#1998 review round 1: a dry run reads nothing a DJ contends with and
+  // writes nothing at all, so deferring it to a quiet period buys no safety
+  // and can strand a scope preview in `live_activity_pause` for the length
+  // of a show — right when the operator is trying to size the run. Kept at
+  // the call site (not inside the shared helper) since it's specific to
+  // this job's dry-run semantics.
+  const waitForQuietPeriod = async (): Promise<boolean> => {
+    if (dryRun) return stopRequested;
+    return waitForQuietPeriodImpl();
   };
 
   log('info', 'started', `${JOB_NAME} starting`, {

@@ -55,7 +55,8 @@ import {
   intArrayLiteral,
   checkLiveActivity as defaultCheckLiveActivity,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
-  LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+  resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  buildWaitForQuietPeriod,
   requireNonNegativeInt,
   requirePositiveInt,
   type CheckLiveActivityFn,
@@ -145,8 +146,14 @@ export const resolveLiveActivityLookback = (
     note: 'Use 0 to disable the cooperative pause.',
   });
 
+/**
+ * BS#2147: delegates to the shared floored resolver so `LIVE_ACTIVITY_PAUSE_MS`
+ * below `LIVE_ACTIVITY_MIN_PAUSE_MS` (including `0`) is rejected at init
+ * instead of degrading the cooperative-pause loop into a hot loop against
+ * RDS. `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` remains the sole disable knob.
+ */
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
-  requireNonNegativeInt(raw, 'LIVE_ACTIVITY_PAUSE_MS', LIVE_ACTIVITY_PAUSE_MS_DEFAULT, { unit: 'ms' });
+  resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
 
 // ---- Cooperative stop (SIGTERM/SIGINT) ----
 
@@ -528,32 +535,28 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
 
   const result = emptyRunResult(dryRun, window);
 
-  const safeProbe = async (): Promise<boolean> => {
-    try {
-      return await probe(liveActivityLookbackSeconds);
-    } catch (error) {
-      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
-        error_message: errorMessage(error),
-      });
-      captureError(error, 'probe_error');
-      return false;
-    }
-  };
-
-  const waitForQuietPeriod = async (): Promise<boolean> => {
-    if (liveActivityLookbackSeconds <= 0) return false;
-    let active = await safeProbe();
-    while (active) {
-      if (stopRequested) return true;
+  // BS#2147: the loop itself (probe + fail-open + stop-awareness + elapsed-
+  // time cap) now lives in the shared `buildWaitForQuietPeriod`. `onPause`
+  // and `onProbeError` reproduce this job's exact prior log lines/fields so
+  // ops greps against `live_activity_pause`/`probe_error` don't drift.
+  const waitForQuietPeriod = buildWaitForQuietPeriod({
+    lookbackSeconds: liveActivityLookbackSeconds,
+    pauseMs: liveActivityPauseMs,
+    probe,
+    shouldStop: () => stopRequested,
+    onPause: () => {
       log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
         lookback_seconds: liveActivityLookbackSeconds,
         pause_ms: liveActivityPauseMs,
       });
-      await stopAwareSleep(liveActivityPauseMs);
-      active = await safeProbe();
-    }
-    return stopRequested;
-  };
+    },
+    onProbeError: (error) => {
+      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
+        error_message: errorMessage(error),
+      });
+      captureError(error, 'probe_error');
+    },
+  });
 
   log('info', 'started', `${JOB_NAME} starting`, {
     dry_run: dryRun,
