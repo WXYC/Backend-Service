@@ -186,20 +186,20 @@ The SIGTERM handler flips a cooperative-stop flag checked between rows (and insi
 
 ## Environment variables
 
-| Variable                          | Default      | Notes                                                                     |
-| --------------------------------- | ------------ | ------------------------------------------------------------------------- |
-| `LIBRARY_METADATA_URL`            | (required)   | LML endpoint                                                              |
-| `UPGRADE_BATCH_SIZE`              | 100          | Rows per SELECT                                                           |
-| `UPGRADE_MAX_ROWS_PER_TABLE`      | 0            | 0 = unlimited; positive cap bounds a pilot run per phase                  |
-| `UPGRADE_SECOND_PASS_DELAY_MS`    | 15000        | Delay before the second lookup (eventual-consistency fill); 0 = immediate |
-| `UPGRADE_FLOWSHEET_SINCE`         | `2026-05-01` | `YYYY-MM-DD` floor on flowsheet `add_time`; the deep tail is deferred     |
-| `UPGRADE_ALBUM_AFTER_ID`          | 0            | Resume cursor for the album_metadata phase                                |
-| `UPGRADE_FLOWSHEET_AFTER_ID`      | 0            | Resume cursor for the flowsheet phase                                     |
-| `UPGRADE_LML_MAX_CONCURRENT`      | 1            | Semaphore permit count (shared knob across the backfill/upgrade family)   |
-| `UPGRADE_LML_RATE_PER_MIN`        | 20           | Token bucket rate                                                         |
-| `UPGRADE_LML_PER_CALL_TIMEOUT_MS` | 35000        | Per-LML-call timeout (ms)                                                 |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`  | 60           | Set 0 to disable the cooperative pause                                    |
-| `LIVE_ACTIVITY_PAUSE_MS`          | 30000        | Pause duration when DJ activity detected (ms)                             |
-| `SENTRY_DSN`                      | (optional)   | Sentry error reporting                                                    |
+| Variable                          | Default      | Notes                                                                                                                                                                    |
+| --------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `LIBRARY_METADATA_URL`            | (required)   | LML endpoint                                                                                                                                                             |
+| `UPGRADE_BATCH_SIZE`              | 100          | Rows per SELECT                                                                                                                                                          |
+| `UPGRADE_MAX_ROWS_PER_TABLE`      | 0            | 0 = unlimited; positive cap bounds a pilot run per phase                                                                                                                 |
+| `UPGRADE_SECOND_PASS_DELAY_MS`    | 15000        | Delay before the second lookup (eventual-consistency fill); 0 = immediate                                                                                                |
+| `UPGRADE_FLOWSHEET_SINCE`         | `2026-05-01` | `YYYY-MM-DD` floor on flowsheet `add_time`; the deep tail is deferred                                                                                                    |
+| `UPGRADE_ALBUM_AFTER_ID`          | 0            | Resume cursor for the album_metadata phase                                                                                                                               |
+| `UPGRADE_FLOWSHEET_AFTER_ID`      | 0            | Resume cursor for the flowsheet phase                                                                                                                                    |
+| `UPGRADE_LML_MAX_CONCURRENT`      | 1            | Semaphore permit count (shared knob across the backfill/upgrade family)                                                                                                  |
+| `UPGRADE_LML_RATE_PER_MIN`        | 20           | Token bucket rate                                                                                                                                                        |
+| `UPGRADE_LML_PER_CALL_TIMEOUT_MS` | 35000        | Per-LML-call timeout (ms)                                                                                                                                                |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`  | 60           | Set 0 to disable the cooperative pause                                                                                                                                   |
+| `LIVE_ACTIVITY_PAUSE_MS`          | 30000        | Pause duration when DJ activity detected (ms). Must be >= 1000 (BS#2147) — a sub-floor value, including 0, is rejected at init rather than silently disabling the pause. |
+| `SENTRY_DSN`                      | (optional)   | Sentry error reporting                                                                                                                                                   |
 
 CLI flags: `--execute` (write mode), `--dry-run` (explicit no-op, the default; passing both fails fast).

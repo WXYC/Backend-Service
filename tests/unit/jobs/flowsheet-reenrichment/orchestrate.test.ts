@@ -258,8 +258,17 @@ describe('resolveLiveActivityPauseMs', () => {
     expect(resolveLiveActivityPauseMs(undefined)).toBe(30_000);
   });
 
-  it('accepts 0', () => {
-    expect(resolveLiveActivityPauseMs('0')).toBe(0);
+  // BS#2147: `0` (and every value below the 1000ms floor) used to sleep for
+  // that literal duration between re-probes — `0` degrades the cooperative
+  // pause into an unthrottled hot loop against RDS rather than disabling it.
+  // The resolver now rejects the whole sub-floor interval at init;
+  // `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` remains the sole disable knob.
+  it.each(['0', '1', '999'])('rejects a sub-floor value (%s)', (raw) => {
+    expect(() => resolveLiveActivityPauseMs(raw)).toThrow(/LIVE_ACTIVITY_PAUSE_MS/);
+  });
+
+  it('accepts the floor value', () => {
+    expect(resolveLiveActivityPauseMs('1000')).toBe(1000);
   });
 });
 

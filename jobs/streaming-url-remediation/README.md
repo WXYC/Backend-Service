@@ -186,19 +186,19 @@ The SIGTERM handler flips a cooperative-stop flag checked between batches (and i
 
 ## Environment variables
 
-| Variable                         | Default    | Notes                                                                               |
-| -------------------------------- | ---------- | ----------------------------------------------------------------------------------- |
-| `REMEDIATION_BATCH_SIZE`         | 5000       | Rows per SELECT / VALUES-join UPDATE (bulk-update playbook default)                 |
-| `REMEDIATION_MAX_ROWS_PER_TABLE` | 0          | 0 = full table; a positive cap bounds a pilot run per phase and skips verification  |
-| `REMEDIATION_UPDATE_TIMEOUT_MS`  | 300000     | `SET LOCAL statement_timeout` around each batch UPDATE                              |
-| `REMEDIATION_ANALYZE_TIMEOUT_MS` | 300000     | `SET LOCAL statement_timeout` around each post-pass `ANALYZE`                       |
-| `REMEDIATION_SAMPLE_SIZE`        | 20         | Before→after rows carried in each phase summary; 0 to omit                          |
-| `REMEDIATION_ALBUM_AFTER_ID`     | 0          | Resume cursor for the album_metadata phase                                          |
-| `REMEDIATION_FLOWSHEET_AFTER_ID` | 0          | Resume cursor for the flowsheet phase                                               |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS` | 60         | Set 0 to disable the cooperative pause                                              |
-| `LIVE_ACTIVITY_PAUSE_MS`         | 30000      | Pause duration when DJ activity detected (ms)                                       |
-| `DB_STATEMENT_TIMEOUT_MS`        | 300000     | Connection-level timeout (Dockerfile); the batch scans need more than the API's 5 s |
-| `DB_SYNCHRONOUS_COMMIT`          | off        | Async commit (Dockerfile); safe because an unwritten row still matches the net      |
-| `SENTRY_DSN`                     | (optional) | Sentry error reporting                                                              |
+| Variable                         | Default    | Notes                                                                                                                                                                    |
+| -------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `REMEDIATION_BATCH_SIZE`         | 5000       | Rows per SELECT / VALUES-join UPDATE (bulk-update playbook default)                                                                                                      |
+| `REMEDIATION_MAX_ROWS_PER_TABLE` | 0          | 0 = full table; a positive cap bounds a pilot run per phase and skips verification                                                                                       |
+| `REMEDIATION_UPDATE_TIMEOUT_MS`  | 300000     | `SET LOCAL statement_timeout` around each batch UPDATE                                                                                                                   |
+| `REMEDIATION_ANALYZE_TIMEOUT_MS` | 300000     | `SET LOCAL statement_timeout` around each post-pass `ANALYZE`                                                                                                            |
+| `REMEDIATION_SAMPLE_SIZE`        | 20         | Before→after rows carried in each phase summary; 0 to omit                                                                                                               |
+| `REMEDIATION_ALBUM_AFTER_ID`     | 0          | Resume cursor for the album_metadata phase                                                                                                                               |
+| `REMEDIATION_FLOWSHEET_AFTER_ID` | 0          | Resume cursor for the flowsheet phase                                                                                                                                    |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS` | 60         | Set 0 to disable the cooperative pause                                                                                                                                   |
+| `LIVE_ACTIVITY_PAUSE_MS`         | 30000      | Pause duration when DJ activity detected (ms). Must be >= 1000 (BS#2147) — a sub-floor value, including 0, is rejected at init rather than silently disabling the pause. |
+| `DB_STATEMENT_TIMEOUT_MS`        | 300000     | Connection-level timeout (Dockerfile); the batch scans need more than the API's 5 s                                                                                      |
+| `DB_SYNCHRONOUS_COMMIT`          | off        | Async commit (Dockerfile); safe because an unwritten row still matches the net                                                                                           |
+| `SENTRY_DSN`                     | (optional) | Sentry error reporting                                                                                                                                                   |
 
 CLI flags: `--execute` (write mode), `--dry-run` (explicit no-op, the default; passing both fails fast).
