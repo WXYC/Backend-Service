@@ -43,6 +43,7 @@ import {
   requireNonNegativeInt,
   requirePositiveInt,
   resolveLiveActivityPauseMs,
+  resolveLiveActivityMaxPauseMs,
   buildWaitForQuietPeriod,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
 } from '@wxyc/database';
@@ -155,10 +156,14 @@ export const STALE_OPEN_SHOW_HOURS_DEFAULT = 12;
 export const LIVE_ACTIVITY_LOOKBACK_ENV = 'LIVE_ACTIVITY_LOOKBACK_SECONDS';
 /** Sleep between re-probes when DJ activity is detected. Shared env name. */
 export const LIVE_ACTIVITY_PAUSE_MS_ENV = 'LIVE_ACTIVITY_PAUSE_MS';
+/** Cumulative cooperative-pause budget ceiling. Shared env name. `0` = uncapped. */
+export const LIVE_ACTIVITY_MAX_PAUSE_MS_ENV = 'LIVE_ACTIVITY_MAX_PAUSE_MS';
 
 export interface JobOptions extends ReconcileOptions {
   liveActivityLookbackSeconds: number;
   liveActivityPauseMs: number;
+  /** Cumulative cooperative-pause budget ceiling for the whole run; 0 = uncapped. */
+  liveActivityMaxPauseMs: number;
 }
 
 export const resolveOptions = (env: NodeJS.ProcessEnv = process.env): JobOptions => {
@@ -201,6 +206,13 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env): JobOptions
     // designs the issue reconciles; adopting the shared resolver here
     // closes that gap rather than leaving a second, narrower gate standing.
     liveActivityPauseMs: resolveLiveActivityPauseMs(env[LIVE_ACTIVITY_PAUSE_MS_ENV], LIVE_ACTIVITY_PAUSE_MS_ENV),
+    // BS#2147 review round 2, finding 5: wires LIVE_ACTIVITY_MAX_PAUSE_MS at
+    // this job's own call site rather than leaving `buildWaitForQuietPeriod`'s
+    // hardcoded 30-minute default as the only option.
+    liveActivityMaxPauseMs: resolveLiveActivityMaxPauseMs(
+      env[LIVE_ACTIVITY_MAX_PAUSE_MS_ENV],
+      LIVE_ACTIVITY_MAX_PAUSE_MS_ENV
+    ),
   };
 };
 
@@ -248,27 +260,41 @@ export const makeFlagEvaluator =
 // ── Cooperative pause ────────────────────────────────────────────────────────
 
 /**
- * Loop: probe the shared schema-aware `checkLiveActivity` → if a DJ is live,
- * sleep `pauseMs` → re-probe. Returns when quiet. Reuses the shared probe
- * (honors `WXYC_SCHEMA_NAME`) rather than a job-local copy.
+ * Build the cooperative-pause closure ONCE per run (BS#2147 review round 2,
+ * finding 4). `ports.awaitQuiet()` is invoked at FOUR sites in
+ * `orchestrate.ts` — two run checkpoints (before each sweep's candidate
+ * query) AND two per-row sites (inside each sweep's
+ * `for (const show of candidates)` loop) — not, as an earlier version of
+ * this docstring claimed, only at "discrete checkpoints". Building a fresh
+ * `buildWaitForQuietPeriod` closure on every call reset `pausedMs` to 0
+ * each time, so the cumulative-pause ceiling never actually accumulated:
+ * total pause across a run was bounded by N-candidate-shows x
+ * `maxTotalPauseMs`, not by `maxTotalPauseMs` itself — the exact
+ * two-designs problem BS#2147 exists to end, reproduced one level deeper.
+ * `buildPorts` below now calls this exactly once per run and reuses the
+ * same closure across all four call sites, matching every other converted
+ * job.
  *
- * BS#2147: delegates the loop itself to the shared `buildWaitForQuietPeriod`,
- * built fresh on each call (`ports.awaitQuiet()` is invoked at discrete
- * checkpoints — show-create sweep, entry sweep — not in a tight per-row
- * loop, so the elapsed-time cap bounding each individual call is the
- * property that matters here; it does not need to accumulate across calls
- * the way it does for the per-row backfill jobs). `onPause` reproduces this
- * job's exact prior `live_activity_pause` log line/fields. This job gains
- * fail-open probe-error handling here for the first time — a probe throw
- * used to propagate out of `awaitQuietWindow` and abort the run; it is now
- * logged/captured and treated as "no activity" for that iteration, matching
- * six of the ten sibling jobs. No SIGTERM/stop handling existed here before
- * and none is added.
+ * Reuses the shared probe (`checkLiveActivity`, honors `WXYC_SCHEMA_NAME`)
+ * rather than a job-local copy. `onPause` reproduces this job's exact prior
+ * `live_activity_pause` log line/fields. Fail-open probe-error handling: a
+ * probe throw used to propagate out of the old `awaitQuietWindow` and abort
+ * the run; it is now logged/captured and treated as "no activity" for that
+ * iteration, matching every sibling job. `maxTotalPauseMs` (finding 5) is
+ * wired so `LIVE_ACTIVITY_MAX_PAUSE_MS` actually reaches the shared
+ * ceiling; on exhaustion the closure throws (findings 1+2) and this job's
+ * own top-level `catch` in `main()` below already logs + captures + exits
+ * non-zero. No SIGTERM/stop handling existed here before and none is added.
  */
-export const awaitQuietWindow = async (lookbackSeconds: number, pauseMs: number): Promise<void> => {
+export const buildAwaitQuietWindow = (
+  lookbackSeconds: number,
+  pauseMs: number,
+  maxTotalPauseMs: number
+): (() => Promise<void>) => {
   const waitForQuietPeriod = buildWaitForQuietPeriod({
     lookbackSeconds,
     pauseMs,
+    maxTotalPauseMs,
     probe: checkLiveActivity,
     onPause: () => {
       log('info', 'live_activity_pause', `live DJ activity within ${lookbackSeconds}s; deferring ${pauseMs}ms`, {
@@ -282,35 +308,55 @@ export const awaitQuietWindow = async (lookbackSeconds: number, pauseMs: number)
       });
       captureError(error, 'probe_error');
     },
+    onBudgetExhausted: (pausedMs) => {
+      log(
+        'error',
+        'live_activity_pause_ceiling_exceeded',
+        `cooperative-pause budget exceeded (${pausedMs}ms >= LIVE_ACTIVITY_MAX_PAUSE_MS=${maxTotalPauseMs}ms); aborting instead of pausing indefinitely`,
+        { paused_ms: pausedMs, live_activity_max_pause_ms: maxTotalPauseMs }
+      );
+    },
   });
-  await waitForQuietPeriod();
+  return async (): Promise<void> => {
+    await waitForQuietPeriod();
+  };
 };
 
 // ── Port wiring ──────────────────────────────────────────────────────────────
 
-export const buildPorts = (client: PostHog | null, options: JobOptions): ReconcilePorts => ({
-  selectShowsToCreate,
-  selectEntrySweepShows,
-  selectPartialShows,
-  selectDj,
-  selectOrphanEntries,
-  selectStaleOpenShows,
-  countHistoricalOpenShows,
-  persistLegacyShowId,
-  persistLegacyEntryId,
-  mirrorCreateShow,
-  mirrorCreateEntry,
-  mirrorSignoffShow,
-  mapShowToTubafrenzy: (show, dj) => mapShowToTubafrenzy(show, dj),
-  mapEntryToTubafrenzy: (entry, radioShowID, isRotationMatch) =>
-    mapEntryToTubafrenzy(entry, radioShowID, isRotationMatch),
-  isActiveRotationMatch: (entry) => isActiveRotationMatch(entry),
-  isMirrorEnabledForDj: makeFlagEvaluator(client),
-  awaitQuiet: () => awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs),
-  log,
-  captureWarning,
-  captureError,
-});
+export const buildPorts = (client: PostHog | null, options: JobOptions): ReconcilePorts => {
+  // Built once per run — see `buildAwaitQuietWindow`'s docstring above for
+  // why a per-call rebuild silently defeated the pause-budget ceiling.
+  const awaitQuiet = buildAwaitQuietWindow(
+    options.liveActivityLookbackSeconds,
+    options.liveActivityPauseMs,
+    options.liveActivityMaxPauseMs
+  );
+
+  return {
+    selectShowsToCreate,
+    selectEntrySweepShows,
+    selectPartialShows,
+    selectDj,
+    selectOrphanEntries,
+    selectStaleOpenShows,
+    countHistoricalOpenShows,
+    persistLegacyShowId,
+    persistLegacyEntryId,
+    mirrorCreateShow,
+    mirrorCreateEntry,
+    mirrorSignoffShow,
+    mapShowToTubafrenzy: (show, dj) => mapShowToTubafrenzy(show, dj),
+    mapEntryToTubafrenzy: (entry, radioShowID, isRotationMatch) =>
+      mapEntryToTubafrenzy(entry, radioShowID, isRotationMatch),
+    isActiveRotationMatch: (entry) => isActiveRotationMatch(entry),
+    isMirrorEnabledForDj: makeFlagEvaluator(client),
+    awaitQuiet,
+    log,
+    captureWarning,
+    captureError,
+  };
+};
 
 // ── Entrypoint ────────────────────────────────────────────────────────────────
 
@@ -364,6 +410,8 @@ const main = async (): Promise<void> => {
       alert_threshold: options.alertThreshold,
       stale_after_hours: options.staleAfterHours,
       live_activity_lookback_seconds: options.liveActivityLookbackSeconds,
+      live_activity_pause_ms: options.liveActivityPauseMs,
+      live_activity_max_pause_ms: options.liveActivityMaxPauseMs,
       posthog_configured: posthog != null,
     });
 
