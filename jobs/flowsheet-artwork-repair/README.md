@@ -60,14 +60,15 @@ After one full run, both counts should drop to the LML-true-no-match floor.
 
 ## Env knobs
 
-| Variable                             | Default | Meaning                                                                                                                                                                         |
-| ------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `BACKFILL_LML_RATE_PER_MIN`          | `20`    | Token-bucket cap on LML lookups per minute. Shared with `flowsheet-metadata-backfill` so concurrent drains pace cooperatively against LML's Discogs ceiling.                    |
-| `BACKFILL_LML_MAX_CONCURRENT`        | `1`     | Semaphore permit count. Belt-and-suspenders defense against future orchestrator concurrency.                                                                                    |
-| `BACKFILL_ARTWORK_REPAIR_TIMEOUT_MS` | `35000` | Per-call abort budget. Sized to clear LML#370's 25.25 s per-item cascade-exhaustion cap plus ~10 s of queue-contention headroom.                                                |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`     | `60`    | Cooperative-pause window. Defer before each row when a track was inserted into `flowsheet` within this many seconds. Set `0` to disable (catch-up runs).                        |
-| `LIVE_ACTIVITY_PAUSE_MS`             | `30000` | Sleep between re-probes when DJ activity is detected. Must be >= 1000 (BS#2147) — a sub-floor value, including 0, is rejected at init rather than silently disabling the pause. |
-| `LIBRARY_METADATA_URL`               | _(req)_ | LML base URL. The job fails fast if unset.                                                                                                                                      |
+| Variable                             | Default   | Meaning                                                                                                                                                                                                                                            |
+| ------------------------------------ | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BACKFILL_LML_RATE_PER_MIN`          | `20`      | Token-bucket cap on LML lookups per minute. Shared with `flowsheet-metadata-backfill` so concurrent drains pace cooperatively against LML's Discogs ceiling.                                                                                       |
+| `BACKFILL_LML_MAX_CONCURRENT`        | `1`       | Semaphore permit count. Belt-and-suspenders defense against future orchestrator concurrency.                                                                                                                                                       |
+| `BACKFILL_ARTWORK_REPAIR_TIMEOUT_MS` | `35000`   | Per-call abort budget. Sized to clear LML#370's 25.25 s per-item cascade-exhaustion cap plus ~10 s of queue-contention headroom.                                                                                                                   |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`     | `60`      | Cooperative-pause window. Defer before each row when a track was inserted into `flowsheet` within this many seconds. Set `0` to disable (catch-up runs).                                                                                           |
+| `LIVE_ACTIVITY_PAUSE_MS`             | `30000`   | Sleep between re-probes when DJ activity is detected. Must be >= 1000 (BS#2147) — a sub-floor value, including 0, is rejected at init rather than silently disabling the pause.                                                                    |
+| `LIVE_ACTIVITY_MAX_PAUSE_MS`         | `1800000` | Cumulative cooperative-pause budget for the whole run; 0 = uncapped. On exhaustion the run **aborts** (`LiveActivityPauseCeilingExceededError`, non-zero exit) rather than pausing indefinitely (BS#2147 review round 2) — see `docs/env-vars.md`. |
+| `LIBRARY_METADATA_URL`               | _(req)_   | LML base URL. The job fails fast if unset.                                                                                                                                                                                                         |
 
 ## Counters
 
