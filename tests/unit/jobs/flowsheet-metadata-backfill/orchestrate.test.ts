@@ -50,7 +50,7 @@ jest.mock('@sentry/node', () => {
   return { ...actual, captureMessage: jest.fn(), addBreadcrumb: jest.fn() };
 });
 
-import { db, type CheckLiveActivityFn } from '@wxyc/database';
+import { db, LiveActivityPauseCeilingExceededError, type CheckLiveActivityFn } from '@wxyc/database';
 import {
   BATCH_SIZE,
   FLOOR_RECENCY_DAYS_DEFAULT,
@@ -1294,6 +1294,40 @@ describe('runBackfill (BS#1591 work-list drain)', () => {
     // With lookback=0 the probe is bypassed entirely; no calls even though
     // the stub would have returned true.
     expect(checkLiveActivity).not.toHaveBeenCalled();
+  });
+
+  describe('cooperative-pause budget ceiling (BS#2147 findings 1+2, 5)', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('rejects with LiveActivityPauseCeilingExceededError when the injected liveActivityMaxPauseMs is exhausted', async () => {
+      // runBackfill has no wrapping try/catch of its own, so the shared
+      // module's ceiling throw propagates straight out as a rejection to
+      // job.ts's top-level catch.
+      const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(true);
+      const buildWorkList = injectWorkList([[99, 4]]);
+
+      const resultPromise = runBackfill({
+        lookup,
+        enrich,
+        throttleMs: 0,
+        liveActivityLookbackSeconds: 60,
+        breakerProbeIntervalMs: 0,
+        liveActivityPauseMs: 1000,
+        liveActivityMaxPauseMs: 2000,
+        checkLiveActivity,
+        playFloor: 5,
+        floorRecencyDays: 7,
+        buildWorkList,
+      });
+      resultPromise.catch(() => {});
+
+      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(1000);
+
+      await expect(resultPromise).rejects.toThrow(LiveActivityPauseCeilingExceededError);
+      expect(buildWorkList).not.toHaveBeenCalled();
+    });
   });
 
   it('forwards liveActivityLookbackSeconds to checkLiveActivity so the probe window is tunable', async () => {
