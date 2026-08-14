@@ -61,7 +61,9 @@ import {
   db,
   checkLiveActivity as defaultCheckLiveActivity,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
+  LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
   resolveLiveActivityPauseMs as resolveLiveActivityPauseMsShared,
+  resolveLiveActivityMaxPauseMs as resolveLiveActivityMaxPauseMsShared,
   buildWaitForQuietPeriod,
   requireNonNegativeInt,
   requirePositiveInt,
@@ -234,6 +236,17 @@ export const resolveLiveActivityLookback = (
  */
 export const resolveLiveActivityPauseMs = (raw: string | undefined = process.env.LIVE_ACTIVITY_PAUSE_MS): number =>
   resolveLiveActivityPauseMsShared(raw, 'LIVE_ACTIVITY_PAUSE_MS');
+
+/**
+ * BS#2147 review round 2, finding 5: wires `LIVE_ACTIVITY_MAX_PAUSE_MS` at
+ * this job's own call site. Before this, `buildWaitForQuietPeriod`'s
+ * `maxTotalPauseMs` always took its hardcoded 30-minute default — the env
+ * var read like a tunable knob but no TypeScript job ever read it, the
+ * exact failure shape BS#2147 exists to close. `0` = uncapped.
+ */
+export const resolveLiveActivityMaxPauseMs = (
+  raw: string | undefined = process.env.LIVE_ACTIVITY_MAX_PAUSE_MS
+): number => resolveLiveActivityMaxPauseMsShared(raw, LIVE_ACTIVITY_MAX_PAUSE_MS_ENV);
 
 let stopRequested = false;
 export const requestStop = (): void => {
@@ -579,7 +592,28 @@ const runFlowsheetPhase = async (
     // Once per page, before the page loads — not once per row (BS#2009
     // defect 3): a full batch would otherwise cost up to BATCH_SIZE extra
     // probe round-trips ahead of every LML lookup.
-    if (await opts.waitForQuietPeriod()) break;
+    try {
+      if (await opts.waitForQuietPeriod()) break;
+    } catch (error) {
+      // BS#2147 review round 2, findings 1+2: the shared module's
+      // cooperative-pause budget ceiling throws on exhaustion, and unlike
+      // most sibling jobs' outer try/catch, nothing between here and
+      // `runRemediation`'s promise rejecting would otherwise carry this
+      // phase's OWN resume cursor — log + capture it here, before rethrow,
+      // so an operator can tell exactly which VA_REMEDIATION_FLOWSHEET_AFTER_ID
+      // to resume from.
+      log(
+        'error',
+        'live_activity_pause_ceiling_exceeded',
+        'flowsheet phase aborted: cooperative-pause budget exceeded',
+        {
+          after_id: cursor,
+          error_message: errorMessage(error),
+        }
+      );
+      captureError(error, 'live_activity_pause_ceiling_exceeded', { after_id: cursor });
+      throw error;
+    }
 
     const rows = await loadFlowsheetBatch(cursor, opts.batchSize);
     if (rows.length === 0) break;
@@ -717,7 +751,25 @@ const runAlbumPhase = async (opts: {
 
   while (!stopRequested) {
     // Once per page, before the page loads (mirrors the flowsheet phase).
-    if (await opts.waitForQuietPeriod()) break;
+    try {
+      if (await opts.waitForQuietPeriod()) break;
+    } catch (error) {
+      // BS#2147 review round 2, findings 1+2: mirrors the flowsheet phase's
+      // own try/catch above — log + capture this phase's resume cursor
+      // before the shared module's ceiling throw propagates, so an operator
+      // can tell exactly which VA_REMEDIATION_ALBUM_AFTER_ID to resume from.
+      log(
+        'error',
+        'live_activity_pause_ceiling_exceeded',
+        'album_metadata phase aborted: cooperative-pause budget exceeded',
+        {
+          after_id: cursor,
+          error_message: errorMessage(error),
+        }
+      );
+      captureError(error, 'live_activity_pause_ceiling_exceeded', { after_id: cursor });
+      throw error;
+    }
 
     // `apple_music_url` rides along so the UPDATE can compare-and-set against
     // the exact value this SELECT observed.
@@ -772,14 +824,23 @@ export const runRemediation = async (options: RunOptions): Promise<RunResult> =>
   const analyzeTimeoutMs = resolveAnalyzeTimeoutMs();
   const lookbackSeconds = resolveLiveActivityLookback();
   const pauseMs = resolveLiveActivityPauseMs();
+  const maxTotalPauseMs = resolveLiveActivityMaxPauseMs();
   // Shared by both phases so the probe is issued once per page in each, and
   // a probe throw is fail-open rather than escaping the phase's try/catch
   // and losing the run's summary (BS#2009 defects 2 and 3). BS#2147: the
   // loop itself now lives in the shared `buildWaitForQuietPeriod`; `onPause`
   // and `onProbeError` reproduce this job's exact prior log lines/fields.
+  // `maxTotalPauseMs` (review round 2, finding 5) is wired so
+  // `LIVE_ACTIVITY_MAX_PAUSE_MS` actually reaches the shared ceiling. No
+  // `onBudgetExhausted` here — this closure is shared across both phases and
+  // has no cursor of its own to report; `runFlowsheetPhase` /
+  // `runAlbumPhase` each catch the resulting throw locally and log their
+  // OWN `after_id` before rethrowing (findings 1+2), which is strictly more
+  // useful than a cursor-less message from this shared level.
   const waitForQuietPeriod = buildWaitForQuietPeriod({
     lookbackSeconds,
     pauseMs,
+    maxTotalPauseMs,
     probe: checkLive,
     shouldStop: () => stopRequested,
     onPause: () => {

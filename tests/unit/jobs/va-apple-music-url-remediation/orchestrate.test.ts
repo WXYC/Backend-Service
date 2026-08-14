@@ -19,7 +19,7 @@
  */
 import { jest } from '@jest/globals';
 
-import { db } from '@wxyc/database';
+import { db, LiveActivityPauseCeilingExceededError } from '@wxyc/database';
 import {
   VA_NET_REGEX,
   analyzeTable,
@@ -631,6 +631,46 @@ describe('cooperative live-DJ pause (BS#2009 / BS#2147)', () => {
     ).rejects.toThrow(/LIVE_ACTIVITY_PAUSE_MS/);
 
     expect(checkLive).not.toHaveBeenCalled();
+  });
+
+  describe('cooperative-pause budget ceiling (BS#2147 findings 1+2, 5)', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS = '60';
+      process.env.LIVE_ACTIVITY_PAUSE_MS = '1000';
+      process.env.LIVE_ACTIVITY_MAX_PAUSE_MS = '2000';
+    });
+    afterEach(() => {
+      delete process.env.LIVE_ACTIVITY_MAX_PAUSE_MS;
+      jest.useRealTimers();
+    });
+
+    it('rejects with LiveActivityPauseCeilingExceededError when LIVE_ACTIVITY_MAX_PAUSE_MS is exhausted', async () => {
+      // runRemediation has no wrapping try/catch of its own — neither phase
+      // catches a waitForQuietPeriod() throw — so the shared module's
+      // ceiling throw propagates straight out as a rejection.
+      const checkLive = jest.fn(() => Promise.resolve(true));
+      // Only the flowsheet phase's candidate COUNT is ever consumed: the
+      // ceiling trips on the FIRST waitForQuietPeriod() call, before any
+      // page loads. Queuing a full queueSinglePageRun() page here would
+      // leave its unconsumed mockResolvedValueOnce entries to leak into
+      // (and break) whichever test runs next.
+      queueExecute([{ count: 1 }]);
+
+      const resultPromise = runRemediation(
+        baseOpts({
+          lookup: () => Promise.resolve(withUrl(NEW_URL)),
+          checkLiveActivityFn: checkLive,
+        })
+      );
+      resultPromise.catch(() => {});
+
+      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(1000);
+
+      await expect(resultPromise).rejects.toThrow(LiveActivityPauseCeilingExceededError);
+      expect(passThroughApply).not.toHaveBeenCalled();
+    });
   });
 });
 
