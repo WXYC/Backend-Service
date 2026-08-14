@@ -488,16 +488,26 @@ export const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValu
 
 // Mirrors of shared/database/src/live-activity.ts's BS#2147 additions
 // (`resolveLiveActivityPauseMs`, `resolveLiveActivityMaxPauseMs`,
-// `buildWaitForQuietPeriod`, and the new constants). NOT re-exported from
-// source: that module's `checkLiveActivity` import pulls in `./client.js`,
-// which throws synchronously on missing DB env vars for every suite that
-// resolves `@wxyc/database` to this mock (the same reason `truncate` /
-// `isBeyondFutureTolerance` / `epochMsToDate` below are hand-duplicated
-// rather than re-exported). The real contract — including the exact
-// interval-vs-single-value floor semantics and the elapsed-time cap's
-// loop-top accrual — is pinned against the actual module by
-// `tests/unit/database/live-activity.test.ts`, which imports it directly by
-// relative path and bypasses this mock entirely.
+// `buildWaitForQuietPeriod`, `buildDefaultSleep`,
+// `LiveActivityPauseCeilingExceededError`, and the constants). NOT
+// re-exported from source: that module's `checkLiveActivity` import pulls in
+// `./client.js`, which throws synchronously on missing DB env vars for every
+// suite that resolves `@wxyc/database` to this mock (the same reason
+// `truncate` / `isBeyondFutureTolerance` / `epochMsToDate` below are
+// hand-duplicated rather than re-exported).
+//
+// This copy must stay BYTE-IDENTICAL to the real module — the four
+// constants below and the `buildWaitForQuietPeriod` / `buildDefaultSleep`
+// function bodies (via `Function.prototype.toString()`) are pinned against
+// the real ones by `tests/unit/database/live-activity.test.ts`, which
+// imports both directly by relative path. Prior to BS#2147 review round 2
+// (finding 7), that drift test pinned only two of the four constants and
+// never touched the loop bodies at all, so the real module's throw-on-
+// exhaustion fix (findings 1+2) would have shipped invisible to every job
+// suite that resolves `@wxyc/database` to this mock — this comment
+// previously (and wrongly) claimed the loop itself was covered. Any edit to
+// the real module's `buildWaitForQuietPeriod`/`buildDefaultSleep` MUST be
+// copied here verbatim, comments included, or the drift test fails.
 export const LIVE_ACTIVITY_MIN_PAUSE_MS = 1_000;
 export const LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT = 1_800_000;
 export const LIVE_ACTIVITY_MAX_PAUSE_MS_ENV = 'LIVE_ACTIVITY_MAX_PAUSE_MS';
@@ -527,6 +537,13 @@ export const resolveLiveActivityMaxPauseMs = (
     note: 'Cumulative pause budget for one waitForQuietPeriod call chain. 0 = uncapped; keep non-zero in production.',
   });
 
+export class LiveActivityPauseCeilingExceededError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LiveActivityPauseCeilingExceededError';
+  }
+}
+
 export interface WaitForQuietPeriodPauseInfo {
   lookbackSeconds: number;
   pauseMs: number;
@@ -546,7 +563,7 @@ export interface WaitForQuietPeriodOptions {
   now?: () => number;
 }
 
-const buildDefaultSleep = (shouldStop: () => boolean): ((ms: number) => Promise<void>) => {
+export const buildDefaultSleep = (shouldStop: () => boolean): ((ms: number) => Promise<void>) => {
   return async (ms: number): Promise<void> => {
     if (ms <= 0) return;
     const deadline = Date.now() + ms;
@@ -570,11 +587,10 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
     onBudgetExhausted,
     maxTotalPauseMs = LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT,
     sleep = buildDefaultSleep(shouldStop),
-    now = Date.now,
+    now = () => performance.now(),
   } = opts;
 
   let pausedMs = 0;
-  let exhausted = false;
 
   const safeProbe = async (): Promise<boolean> => {
     try {
@@ -587,7 +603,6 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
 
   return async (): Promise<boolean> => {
     if (lookbackSeconds <= 0) return false;
-    if (exhausted) return shouldStop();
 
     while (true) {
       const loopStart = now();
@@ -596,9 +611,11 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
       if (shouldStop()) return true;
 
       if (maxTotalPauseMs > 0 && pausedMs >= maxTotalPauseMs) {
-        exhausted = true;
         onBudgetExhausted?.(pausedMs);
-        return shouldStop();
+        throw new LiveActivityPauseCeilingExceededError(
+          `Cooperative-pause budget exceeded: paused ${pausedMs}ms against a ${maxTotalPauseMs}ms ceiling ` +
+            '(LIVE_ACTIVITY_MAX_PAUSE_MS); aborting instead of pausing indefinitely while DJs remain active.'
+        );
       }
 
       onPause?.({ lookbackSeconds, pauseMs, pausedMs });

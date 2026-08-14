@@ -18,18 +18,47 @@ import {
   resolveLiveActivityPauseMs,
   resolveLiveActivityMaxPauseMs,
   buildWaitForQuietPeriod,
+  buildDefaultSleep,
   LiveActivityPauseCeilingExceededError,
   type CheckLiveActivityFn,
 } from '../../../shared/database/src/live-activity';
 import {
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT as MOCK_LOOKBACK,
   LIVE_ACTIVITY_PAUSE_MS_DEFAULT as MOCK_PAUSE,
+  LIVE_ACTIVITY_MIN_PAUSE_MS as MOCK_MIN_PAUSE_MS,
+  LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT as MOCK_MAX_PAUSE_MS_DEFAULT,
+  buildWaitForQuietPeriod as mockBuildWaitForQuietPeriod,
+  buildDefaultSleep as mockBuildDefaultSleep,
 } from '../../mocks/database.mock';
 
+/**
+ * BS#2147 review round 2, finding 7: the prior version of this suite pinned
+ * only two of the four cooperative-pause constants and never touched the
+ * mock's copy of the loop itself, so a real-module fix (like the throw this
+ * same review round adds — findings 1+2) was invisible to every one of the
+ * 12 job suites that resolve `@wxyc/database` to `tests/mocks/database.mock.ts`.
+ * The mock's own comment overstated the protection: it claimed the contract
+ * "is pinned against the actual module by this file", but the constant-only
+ * checks below it never covered the loop body at all.
+ */
 describe('live-activity defaults', () => {
   it('shared/database default matches database mock', () => {
     expect(MOCK_LOOKBACK).toBe(LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT);
     expect(MOCK_PAUSE).toBe(LIVE_ACTIVITY_PAUSE_MS_DEFAULT);
+    expect(MOCK_MIN_PAUSE_MS).toBe(LIVE_ACTIVITY_MIN_PAUSE_MS);
+    expect(MOCK_MAX_PAUSE_MS_DEFAULT).toBe(LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT);
+  });
+
+  // Byte-for-byte source comparison: a mock that computes the same answer via
+  // different code would pass a behavioral test suite and still miss the
+  // NEXT real-module fix, which is exactly how the throw this review round
+  // adds would have gone unnoticed by the mock without this check.
+  it('mock buildWaitForQuietPeriod is byte-identical to the real implementation', () => {
+    expect(mockBuildWaitForQuietPeriod.toString()).toBe(buildWaitForQuietPeriod.toString());
+  });
+
+  it('mock buildDefaultSleep is byte-identical to the real implementation', () => {
+    expect(mockBuildDefaultSleep.toString()).toBe(buildDefaultSleep.toString());
   });
 });
 
