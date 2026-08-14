@@ -889,10 +889,13 @@ describe('runReenrichment — cooperative pause', () => {
     afterEach(() => jest.useRealTimers());
 
     it('rejects with LiveActivityPauseCeilingExceededError when the injected liveActivityMaxPauseMs is exhausted', async () => {
-      // runReenrichment's outer block is try { ... } finally { ... } with no
-      // catch of its own, so the shared module's ceiling throw propagates
-      // straight out as a rejection (after the finally arm still emits the
-      // summary log/span with the resume cursor).
+      // runReenrichment's run body now catches this specific throw (BS#2147
+      // review round 2 finding 1) to mark `failed` before its finally arm
+      // emits the summary log/span with the resume cursor, then rethrows —
+      // so the shared module's ceiling throw still propagates out as a
+      // rejection here, but the finally arm's step/level/captureError now
+      // correctly read the abort. See runbook-log-contract.test.ts for the
+      // step='failed' pin.
       (mockCheckLiveActivity as jest.Mock).mockResolvedValue(true);
       const lookup = jest.fn<LookupFn>().mockResolvedValue(noMatchResult());
       const enrich = jest.fn<EnrichFn>().mockResolvedValue('still_no_match');

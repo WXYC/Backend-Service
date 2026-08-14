@@ -182,6 +182,53 @@ describe('runbook log contract — failed step (round 4)', () => {
   }, 30_000);
 });
 
+describe('runbook log contract — failed step on cooperative-pause budget ceiling (BS#2147 review round 2 finding 1)', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it('emits step=failed (not finished) when the pause-budget ceiling throws', async () => {
+    // Before the fix: the run body was try { ... } finally { ... } with no
+    // catch, so the ceiling throw left `failed` at its null default and the
+    // finally block logged step='finished' / failed:false — an operator's
+    // `jq 'select(.step=="finished")'` would report a clean drain during a
+    // live-DJ abort. The probe always reports activity, so the ceiling trips
+    // on the very first waitForQuietPeriod() call — no batch ever loads.
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ response: noMatchResponse, cacheHit: false });
+    const enrich = jest.fn<EnrichFn>().mockResolvedValue('still_no_match');
+    const checkLive = jest.fn(() => Promise.resolve(true));
+
+    const stdoutLines = captureJson('stdout');
+    const stderrLines = captureJson('stderr');
+
+    const resultPromise = runReenrichment({
+      lookup,
+      enrich,
+      cutoffTs: CUTOFF,
+      batchSize: 100,
+      liveActivityLookbackSeconds: 60,
+      liveActivityPauseMs: 1000,
+      liveActivityMaxPauseMs: 2000,
+      checkLiveActivity: checkLive,
+    });
+    resultPromise.catch(() => {});
+
+    await jest.advanceTimersByTimeAsync(1000);
+    await jest.advanceTimersByTimeAsync(1000);
+
+    await expect(resultPromise).rejects.toThrow(/Cooperative-pause budget exceeded/);
+    expect(db.execute).not.toHaveBeenCalled();
+
+    const allLines = [...stdoutLines, ...stderrLines];
+    const finished = allLines.find((l) => l.step === 'finished');
+    const failed = allLines.find((l) => l.step === 'failed');
+    expect(finished).toBeUndefined();
+    expect(failed).toBeDefined();
+    expect(failed?.failed).toBe(true);
+    expect(failed?.error_message).toMatch(/Cooperative-pause budget exceeded/);
+    expect(typeof failed?.last_id).toBe('number');
+  });
+});
+
 describe('runbook log contract — stopped step (round 3)', () => {
   it('emits step=stopped (not finished) on SIGTERM-induced early break', async () => {
     const { requestStop, __resetStopForTesting } = await import('../../../../jobs/flowsheet-reenrichment/orchestrate');
