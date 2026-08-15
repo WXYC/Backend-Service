@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/uncovered-release-list",
+  "cron-schedule": "40 7 * * 0",
+  "version": "1.0.0",
+  "description": "WXYC weekly job (BS#1877, ADR 0013): compute the rotation x album_critic_reviews anti-join (further anti-joined against uncovered_release_search_markers, the 'searched, found nothing' marker), write uncovered-releases.jsonl, and commit it to WXYC/research-data for the search crawl mode to consume.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_uncovered_release_list:ci -f ../../Dockerfile.uncovered-release-list ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@sentry/node": "^10.67.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
