@@ -2062,6 +2062,46 @@ export const artistIdFromName = async (artist_name: string, genre_id: number): P
   }
 };
 
+/**
+ * Genre-scoped `fold_artist_name` conflict probe for a RENAME (BS#2156).
+ *
+ * `artistIdFromName` above answers "which artist is this name?" with a bare
+ * `.limit(1)` and NO `orderBy`, so when a genre already holds two fold-equal
+ * rows it returns an ARBITRARY one of them. A rename guard built on
+ * "fetch one, compare it to the row being renamed" is therefore unsound: the
+ * production clone holds 46 same-genre fold-equal groups (93 artist rows —
+ * e.g. genre 11's two `The Trees`, ids 11362/11363), and renaming one of a
+ * pair can have the probe hand back the row being renamed itself, whereupon a
+ * self-exclusion check concludes "collides only with itself" and lets the
+ * rename through — recreating exactly the duplicate state
+ * `jobs/artist-unicode-dedup` exists to clean up.
+ *
+ * The exclusion belongs INSIDE the query: ask for any fold-equal row in the
+ * genre that is NOT this artist. Ordered by id so the reported conflict is
+ * deterministic when several exist.
+ */
+export const conflictingArtistIdInGenre = async (
+  artist_name: string,
+  genre_id: number,
+  exclude_artist_id: number
+): Promise<number | null> => {
+  const response = await db
+    .select({ id: artists.id })
+    .from(artists)
+    .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
+    .where(
+      and(
+        sql`${FOLD_ARTIST_NAME_FN}(${artists.artist_name}) = ${FOLD_ARTIST_NAME_FN}(${artist_name})`,
+        eq(genre_artist_crossreference.genre_id, genre_id),
+        ne(artists.id, exclude_artist_id)
+      )
+    )
+    .orderBy(asc(artists.id))
+    .limit(1);
+
+  return response[0]?.id ?? null;
+};
+
 export const insertArtist = async (new_artist: NewArtist) => {
   // Store names NFC-canonical (BS#1897). The matcher folds NFC/NFD/ASCII-fold
   // together for *lookup*, but the *stored* form must be a single canonical
@@ -2288,7 +2328,9 @@ export type ArtistReleaseRow = {
   id: number;
   last_modified: Date;
   format_name: string;
+  genre_id: number;
   code_letters: string;
+  code_artist_number: number;
   code_number: number;
   code_volume_letters: string | null;
   album_title: string;
@@ -2296,22 +2338,31 @@ export type ArtistReleaseRow = {
 };
 
 /**
- * BS#2156: the release table on `/wxycdb`'s artist card
- * (`LibraryReleaseAccessor.getLibraryReleasesForArtist`) -- last-modified,
- * format, the call-number fields (`code_letters` off `artists`, `code_number`
- * + `code_volume_letters` off `library`), title, and alternate artist name.
- * Not sourced from `library_artist_view`: that view omits `last_modified` and
- * `alternate_artist_name`, so this joins the same underlying tables directly,
- * scoped to one artist instead of one album. Ordered by `code_number`
- * ascending -- shelf order, matching how the physical card catalog is filed.
+ * Join chain for one artist's release table (BS#2156). Shared verbatim by the
+ * page query and its `total` count so the two can never disagree about which
+ * rows are in scope.
+ *
+ * The `genre_artist_crossreference` join keys on BOTH `artist_id` AND
+ * `library.genre_id`, matching `library_artist_view` (schema.ts),
+ * `LIBRARY_VIEW_PROJECTION` above, and `getBinFromDB` (djs.service.ts). That
+ * pair is not decoration: `artist_genre_code` (the `code_artist_number` half of
+ * the call number) is GENRE-SCOPED, so an artist filed under several genres has
+ * a different one per genre. Dropping the genre dimension makes the projected
+ * call number incomplete and its rows mutually indistinguishable — artist 1087
+ * ('Various Artists') spans 14 genres across 3,107 library rows, 2,961 of which
+ * share a `code_number` with a sibling. `getArtistCardById` cannot supply the
+ * missing piece either: it deliberately collapses to the lowest-`genre_id`
+ * crossreference row.
  */
-export const getReleasesForArtist = async (artist_id: number): Promise<ArtistReleaseRow[]> => {
-  return db
+const artistReleasesQuery = (artist_id: number) =>
+  db
     .select({
       id: library.id,
       last_modified: library.last_modified,
       format_name: format.format_name,
+      genre_id: library.genre_id,
       code_letters: artists.code_letters,
+      code_artist_number: genre_artist_crossreference.artist_genre_code,
       code_number: library.code_number,
       code_volume_letters: library.code_volume_letters,
       album_title: library.album_title,
@@ -2320,8 +2371,54 @@ export const getReleasesForArtist = async (artist_id: number): Promise<ArtistRel
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
     .innerJoin(format, eq(format.id, library.format_id))
-    .where(eq(library.artist_id, artist_id))
-    .orderBy(asc(library.code_number));
+    .innerJoin(
+      genre_artist_crossreference,
+      and(
+        eq(genre_artist_crossreference.artist_id, library.artist_id),
+        eq(genre_artist_crossreference.genre_id, library.genre_id)
+      )
+    )
+    .where(eq(library.artist_id, artist_id));
+
+/**
+ * BS#2156: the release table on `/wxycdb`'s artist card
+ * (`LibraryReleaseAccessor.getLibraryReleasesForArtist`) -- last-modified,
+ * format, the full call number (`code_letters` off `artists`,
+ * `code_artist_number` off the genre crossreference, `code_number` +
+ * `code_volume_letters` off `library`), title, and alternate artist name.
+ * Not sourced from `library_artist_view`: that view omits `last_modified` and
+ * `alternate_artist_name`, so this joins the same underlying tables directly,
+ * scoped to one artist instead of one album.
+ *
+ * Ordered by shelf order -- the physical filing order of the card catalog.
+ * `code_number` ALONE is not that order and is not even deterministic: 4,179 of
+ * 64,193 library rows share a `code_number` with a sibling under the same
+ * artist, so the tiebreak carries `code_volume_letters` (the other half of the
+ * physical call number, already projected here) and finally `id` as a total
+ * order.
+ *
+ * Offset-paginated, matching `GET /library/query`'s `page`/`limit` convention:
+ * an unbounded projection hands any `catalog:read` DJ ~3,107 rows (~0.5-1 MB
+ * of JSON) for artist 1087 on a freely repeatable request.
+ */
+export const getReleasesForArtist = async (
+  artist_id: number,
+  page: number,
+  limit: number
+): Promise<ArtistReleaseRow[]> => {
+  return artistReleasesQuery(artist_id)
+    .orderBy(asc(library.code_number), asc(library.code_volume_letters), asc(library.id))
+    .limit(limit)
+    .offset(page * limit);
+};
+
+/** Total release count for `getReleasesForArtist`'s page envelope (same join scope). */
+export const countReleasesForArtist = async (artist_id: number): Promise<number> => {
+  const response = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(artistReleasesQuery(artist_id).as('artist_releases'));
+
+  return Number(response[0]?.count ?? 0);
 };
 
 export const generateAlbumCodeNumber = async (artist_id: number): Promise<number> => {

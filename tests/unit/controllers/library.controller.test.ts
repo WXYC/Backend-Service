@@ -76,17 +76,23 @@ const mockUpdateArtistInDB =
       updates: Record<string, unknown>
     ) => Promise<{ id: number; artist_name: string; alphabetical_name: string } | undefined>
   >();
+const mockConflictingArtistIdInGenre =
+  jest.fn<(name: string, genreId: number, excludeArtistId: number) => Promise<number | null>>();
 type ArtistReleaseRowMock = {
   id: number;
   last_modified: Date;
   format_name: string;
+  genre_id: number;
   code_letters: string;
+  code_artist_number: number;
   code_number: number;
   code_volume_letters: string | null;
   album_title: string;
   alternate_artist_name: string | null;
 };
-const mockGetReleasesForArtist = jest.fn<(artistId: number) => Promise<ArtistReleaseRowMock[]>>();
+const mockGetReleasesForArtist =
+  jest.fn<(artistId: number, page: number, limit: number) => Promise<ArtistReleaseRowMock[]>>();
+const mockCountReleasesForArtist = jest.fn<(artistId: number) => Promise<number>>();
 
 // POST /library/:id/discogs-recheck (BS#1283).
 const mockRecheckDiscogsAvailability =
@@ -174,7 +180,9 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   deleteAlbumFromDB: mockDeleteAlbumFromDB,
   getArtistCardById: mockGetArtistCardById,
   updateArtistInDB: mockUpdateArtistInDB,
+  conflictingArtistIdInGenre: mockConflictingArtistIdInGenre,
   getReleasesForArtist: mockGetReleasesForArtist,
+  countReleasesForArtist: mockCountReleasesForArtist,
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
@@ -2593,12 +2601,61 @@ describe('library.controller', () => {
     });
   });
 
-  describe('getArtistCard (BS#2156)', () => {
-    it('returns 400 for a non-numeric id parameter', async () => {
-      const req = { params: { id: 'abc' } } as unknown as Request;
-      const res = mockResponse();
+  // The three BS#2156 routes share one path-id parser with PATCH /library/:id
+  // and friends (`parseResourceId`). `artists.id` is a `serial` (int4), so an
+  // id above INT4_MAX parses as a JS integer, reaches Postgres, and answers
+  // 500 + a Sentry event where 404 is the honest answer (BS#1800); the
+  // non-canonical spellings below each alias a distinct URL onto one resource
+  // because `Number()` accepts them.
+  describe('artist path-id parsing (BS#2156)', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
 
-      await expect(getArtistCard(req, res, next)).rejects.toThrow('Invalid artist ID');
+    const rejected: Array<[string, string]> = [
+      ['non-numeric', 'abc'],
+      ['above INT4_MAX', '2147483648'],
+      ['exponent notation', '1e21'],
+      ['hex notation', '0x2a'],
+      ['surrounded by whitespace', ' 42 '],
+      ['a trailing fraction', '42.0'],
+      ['explicitly signed', '+42'],
+      ['negative', '-42'],
+      ['zero', '0'],
+      ['leading-zero padded', '007'],
+      ['empty', ''],
+    ];
+
+    it.each(rejected)('rejects an id that is %s with 400 on getArtistCard', async (_label, rawId) => {
+      const req = { params: { id: rawId } } as unknown as Request;
+      await expect(getArtistCard(req, mockResponse(), next)).rejects.toThrow('Invalid artist ID');
+      expect(mockGetArtistCardById).not.toHaveBeenCalled();
+    });
+
+    it.each(rejected)('rejects an id that is %s with 400 on updateArtistCard', async (_label, rawId) => {
+      const req = { params: { id: rawId }, body: { artist_name: 'Anohni' } } as unknown as Request;
+      await expect(updateArtistCard(req, mockResponse(), next)).rejects.toThrow('Invalid artist ID');
+      expect(mockGetArtistCardById).not.toHaveBeenCalled();
+    });
+
+    it.each(rejected)('rejects an id that is %s with 400 on getArtistReleases', async (_label, rawId) => {
+      const req = { params: { id: rawId }, query: {} } as unknown as Request;
+      await expect(getArtistReleases(req, mockResponse(), next)).rejects.toThrow('Invalid artist ID');
+      expect(mockGetArtistNameById).not.toHaveBeenCalled();
+    });
+
+    it('accepts an id exactly at INT4_MAX', async () => {
+      mockGetArtistCardById.mockReset().mockResolvedValue(null);
+      const req = { params: { id: '2147483647' } } as unknown as Request;
+
+      await expect(getArtistCard(req, mockResponse(), next)).rejects.toThrow('Artist not found');
+      expect(mockGetArtistCardById).toHaveBeenCalledWith(2147483647);
+    });
+  });
+
+  describe('getArtistCard (BS#2156)', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
     });
 
     it('returns 404 when the artist does not exist', async () => {
@@ -2640,12 +2697,9 @@ describe('library.controller', () => {
       code_artist_number: 3,
     };
 
-    it('returns 400 for a non-numeric id parameter', async () => {
-      const req = { params: { id: 'abc' }, body: { artist_name: 'Anohni and the Johnsons' } } as unknown as Request;
-      const res = mockResponse();
-
-      await expect(updateArtistCard(req, res, next)).rejects.toThrow('Invalid artist ID');
-      expect(mockGetArtistCardById).not.toHaveBeenCalled();
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockConflictingArtistIdInGenre.mockResolvedValue(null);
     });
 
     it('returns 404 when the artist does not exist', async () => {
@@ -2668,17 +2722,108 @@ describe('library.controller', () => {
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
     });
 
-    it('returns 400 when artist_name is an empty string', async () => {
+    // `app.ts` mounts a bare `express.json()`; body-parser 2.x leaves
+    // `req.body` undefined for a body-less or non-JSON request and Express 5
+    // no longer defaults it to `{}`. Dereferencing it was a TypeError -> 500,
+    // and because it happened AFTER the existence lookup, a nonexistent
+    // artist 404'd (hiding the bug from exactly the smoke test that would
+    // find it) while a real one 500'd.
+    it.each([
+      ['undefined (no body sent at all)', undefined],
+      ['null', null],
+      ['a bare JSON string', 'artist_name'],
+      ['a JSON array', ['artist_name']],
+      ['a JSON number', 3],
+    ])('returns 400 rather than 500 when the body is %s', async (_label, body) => {
       mockGetArtistCardById.mockResolvedValue(existingCard);
-      const req = { params: { id: '42' }, body: { artist_name: '   ' } } as unknown as Request;
+      const req = { params: { id: '42' }, body } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow(
+        'Bad Request: provide at least one of artist_name, alphabetical_name'
+      );
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+    });
+
+    it('rejects a malformed body before the existence lookup, so an unknown artist still 400s', async () => {
+      mockGetArtistCardById.mockResolvedValue(null);
+      const req = { params: { id: '999' }, body: undefined } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow(
+        'Bad Request: provide at least one of artist_name, alphabetical_name'
+      );
+      expect(mockGetArtistCardById).not.toHaveBeenCalled();
+    });
+
+    // TypeScript's `UpdateArtistRequest` is erased at runtime, so these
+    // `typeof !== 'string'` guards are the ENTIRE runtime defense behind the
+    // allowlist against a non-string reaching `.trim()` (TypeError -> 500) or
+    // the UPDATE.
+    it.each([
+      ['a number', 123],
+      ['an array', ['a']],
+      ['an object', { toString: 'nope' }],
+      ['a boolean', true],
+    ])('returns 400 when artist_name is %s', async (_label, value) => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      const req = { params: { id: '42' }, body: { artist_name: value } } as unknown as Request;
       const res = mockResponse();
 
       await expect(updateArtistCard(req, res, next)).rejects.toThrow('artist_name must be a non-empty string');
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a number', 123],
+      ['an array', ['a']],
+      ['an object', { toString: 'nope' }],
+      ['a boolean', true],
+    ])('returns 400 when alphabetical_name is %s', async (_label, value) => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      const req = { params: { id: '42' }, body: { alphabetical_name: value } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow('alphabetical_name must be a non-empty string');
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+    });
+
+    // Both fields are `varchar(128)`; over-length input must 400 rather than
+    // reach the UPDATE and trip PG 22001 ("value too long") -> 500 (#1551).
+    it.each(['artist_name', 'alphabetical_name'])('returns 400 when %s exceeds 128 characters', async (field) => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      const req = { params: { id: '42' }, body: { [field]: 'x'.repeat(129) } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow(`${field} must be 128 characters or fewer`);
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+    });
+
+    it.each(['artist_name', 'alphabetical_name'])('accepts %s at exactly 128 characters', async (field) => {
+      const atLimit = 'x'.repeat(128);
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: atLimit, alphabetical_name: atLimit });
+      const req = { params: { id: '42' }, body: { [field]: atLimit } } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { [field]: atLimit });
+    });
+
+    // The two fields validate symmetrically — `alphabetical_name` gets the
+    // same empty-string rejection `artist_name` does.
+    it.each(['artist_name', 'alphabetical_name'])('returns 400 when %s is whitespace-only', async (field) => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      const req = { params: { id: '42' }, body: { [field]: '   ' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow(`${field} must be a non-empty string`);
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
     });
 
     it('trims surrounding whitespace before validating and storing', async () => {
       mockGetArtistCardById.mockResolvedValue(existingCard);
-      mockArtistIdFromName.mockResolvedValue(0);
       mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni Hegarty', alphabetical_name: 'Anohni' });
       const req = { params: { id: '42' }, body: { artist_name: '  Anohni Hegarty  ' } } as unknown as Request;
       const res = mockResponse();
@@ -2690,7 +2835,6 @@ describe('library.controller', () => {
 
     it('drops any field outside the allowlist rather than rejecting the request', async () => {
       mockGetArtistCardById.mockResolvedValue(existingCard);
-      mockArtistIdFromName.mockResolvedValue(0);
       mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni Renamed', alphabetical_name: 'Anohni' });
       const req = {
         params: { id: '42' },
@@ -2711,20 +2855,20 @@ describe('library.controller', () => {
 
       await updateArtistCard(req, res, next);
 
-      expect(mockArtistIdFromName).not.toHaveBeenCalled();
+      expect(mockConflictingArtistIdInGenre).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
     });
 
     it('returns 409 when the new artist_name collides with a different artist in the same genre', async () => {
       mockGetArtistCardById.mockResolvedValue(existingCard);
-      mockArtistIdFromName.mockResolvedValue(77);
+      mockConflictingArtistIdInGenre.mockResolvedValue(77);
       mockGetArtistById.mockResolvedValue({ artist_id: 77, artist_name: 'Perfume Genius', code_letters: 'PE' });
       const req = { params: { id: '42' }, body: { artist_name: 'Perfume Genius' } } as unknown as Request;
       const res = mockResponse();
 
       await updateArtistCard(req, res, next);
 
-      expect(mockArtistIdFromName).toHaveBeenCalledWith('Perfume Genius', 11);
+      expect(mockConflictingArtistIdInGenre).toHaveBeenCalledWith('Perfume Genius', 11, 42);
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(409);
       expect(res.json).toHaveBeenCalledWith({
@@ -2734,26 +2878,40 @@ describe('library.controller', () => {
       });
     });
 
-    it('proceeds when the fold-matched name only collides with itself', async () => {
+    // The self-exclusion is pushed into the query rather than compared against
+    // whatever an unordered `.limit(1)` probe returned: a genre holding two
+    // fold-equal rows can hand back the row being renamed, and a `!== artistId`
+    // comparison would then wave the duplicate-creating rename through. This
+    // pins that the controller never asks a question it has to post-filter.
+    it('asks the service to exclude the row being renamed rather than post-filtering', async () => {
       mockGetArtistCardById.mockResolvedValue(existingCard);
-      mockArtistIdFromName.mockResolvedValue(42);
-      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni', alphabetical_name: 'Renamed Alpha' });
-      const req = {
-        params: { id: '42' },
-        body: { artist_name: 'Anohni', alphabetical_name: 'Renamed Alpha' },
-      } as unknown as Request;
+      mockConflictingArtistIdInGenre.mockResolvedValue(null);
+      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'the trees', alphabetical_name: 'Anohni' });
+      const req = { params: { id: '42' }, body: { artist_name: 'the trees' } } as unknown as Request;
       const res = mockResponse();
 
       await updateArtistCard(req, res, next);
 
+      expect(mockArtistIdFromName).not.toHaveBeenCalled();
+      expect(mockConflictingArtistIdInGenre).toHaveBeenCalledWith('the trees', 11, 42);
       expect(res.status).toHaveBeenCalledWith(200);
     });
 
-    it('returns 200 with the updated row on success', async () => {
-      mockGetArtistCardById.mockResolvedValue(existingCard);
-      mockArtistIdFromName.mockResolvedValue(0);
-      const updated = { id: 42, artist_name: 'Anohni Renamed', alphabetical_name: 'Anohni Renamed' };
-      mockUpdateArtistInDB.mockResolvedValue(updated);
+    it('returns 200 with the refreshed card shape (not the bare artists row) on success', async () => {
+      const refreshed: ArtistCardMock = {
+        artist_id: 42,
+        artist_name: 'Anohni Renamed',
+        alphabetical_name: 'Anohni Renamed',
+        genre_id: 11,
+        code_letters: 'AN',
+        code_artist_number: 3,
+      };
+      mockGetArtistCardById.mockResolvedValueOnce(existingCard).mockResolvedValueOnce(refreshed);
+      mockUpdateArtistInDB.mockResolvedValue({
+        id: 42,
+        artist_name: 'Anohni Renamed',
+        alphabetical_name: 'Anohni Renamed',
+      });
       const req = {
         params: { id: '42' },
         body: { artist_name: 'Anohni Renamed', alphabetical_name: 'Anohni Renamed' },
@@ -2767,50 +2925,100 @@ describe('library.controller', () => {
         alphabetical_name: 'Anohni Renamed',
       });
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith(updated);
+      // Same field set GET /library/artists/:id serves — `artist_id`, not `id`.
+      expect(res.json).toHaveBeenCalledWith(refreshed);
     });
   });
 
   describe('getArtistReleases (BS#2156)', () => {
-    it('returns 400 for a non-numeric id parameter', async () => {
-      const req = { params: { id: 'abc' } } as unknown as Request;
-      const res = mockResponse();
+    const releases = [
+      {
+        id: 7000,
+        last_modified: new Date('2026-06-01'),
+        format_name: 'vinyl - LP',
+        genre_id: 11,
+        code_letters: 'CH',
+        code_artist_number: 4,
+        code_number: 3,
+        code_volume_letters: null,
+        album_title: 'Edits',
+        alternate_artist_name: null,
+      },
+    ];
 
-      await expect(getArtistReleases(req, res, next)).rejects.toThrow('Invalid artist ID');
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockCountReleasesForArtist.mockResolvedValue(1);
     });
 
     it('returns 404 when the artist does not exist', async () => {
       mockGetArtistNameById.mockResolvedValue(null);
-      const req = { params: { id: '999' } } as unknown as Request;
+      const req = { params: { id: '999' }, query: {} } as unknown as Request;
       const res = mockResponse();
 
       await expect(getArtistReleases(req, res, next)).rejects.toThrow('Artist not found');
       expect(mockGetReleasesForArtist).not.toHaveBeenCalled();
     });
 
-    it('returns 200 with the release list on success', async () => {
+    it('returns 200 with a default-paginated release page on success', async () => {
       mockGetArtistNameById.mockResolvedValue('Chuquimamani-Condori');
-      const releases = [
-        {
-          id: 7000,
-          last_modified: new Date('2026-06-01'),
-          format_name: 'vinyl - LP',
-          code_letters: 'CH',
-          code_number: 3,
-          code_volume_letters: null,
-          album_title: 'Edits',
-          alternate_artist_name: null,
-        },
-      ];
       mockGetReleasesForArtist.mockResolvedValue(releases);
-      const req = { params: { id: '42' } } as unknown as Request;
+      mockCountReleasesForArtist.mockResolvedValue(1);
+      const req = { params: { id: '42' }, query: {} } as unknown as Request;
       const res = mockResponse();
 
       await getArtistReleases(req, res, next);
 
-      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(42);
+      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(42, 0, 50);
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({ artist_id: 42, releases });
+      expect(res.json).toHaveBeenCalledWith({ artist_id: 42, releases, total: 1, page: 0, totalPages: 1 });
+    });
+
+    it('passes an explicit page/limit through and reports totalPages', async () => {
+      mockGetArtistNameById.mockResolvedValue('Various Artists');
+      mockGetReleasesForArtist.mockResolvedValue(releases);
+      mockCountReleasesForArtist.mockResolvedValue(3107);
+      const req = { params: { id: '1087' }, query: { page: '2', limit: '100' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getArtistReleases(req, res, next);
+
+      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(1087, 2, 100);
+      expect(res.json).toHaveBeenCalledWith({
+        artist_id: 1087,
+        releases,
+        total: 3107,
+        page: 2,
+        totalPages: 32,
+      });
+    });
+
+    // Unbounded, this endpoint hands any catalog:read DJ every row an artist
+    // has — 3,107 of them for artist 1087, freely repeatable.
+    it.each([
+      ['limit above the maximum', { limit: '101' }, 'limit must not exceed 100'],
+      ['a zero limit', { limit: '0' }, 'limit must be a positive integer'],
+      ['a negative page', { page: '-1' }, 'page must be a non-negative integer'],
+      ['a non-numeric limit', { limit: 'all' }, 'limit must be a positive integer'],
+      ['a non-numeric page', { page: 'first' }, 'page must be a non-negative integer'],
+    ])('rejects %s with 400', async (_label, query, message) => {
+      mockGetArtistNameById.mockResolvedValue('Various Artists');
+      const req = { params: { id: '1087' }, query } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getArtistReleases(req, res, next)).rejects.toThrow(message);
+      expect(mockGetReleasesForArtist).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['page', { page: ['1', '2'] }, 'page must be a single string value'],
+      ['limit', { limit: ['1', '2'] }, 'limit must be a single string value'],
+    ])('rejects a repeated %s query key with 400', async (_label, query, message) => {
+      const req = { params: { id: '1087' }, query } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getArtistReleases(req, res, next)).rejects.toThrow(message);
+      expect(mockGetReleasesForArtist).not.toHaveBeenCalled();
     });
   });
 });
