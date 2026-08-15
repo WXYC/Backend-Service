@@ -1631,57 +1631,180 @@ describe('Library Artists Peek Code', () => {
     expect(res.body.next_code_number).toBe(61);
   });
 
-  test('does not change with an unrelated third query parameter present (BS#2149)', async () => {
-    // peek-code's two-parameter behavior must survive the addition of the
-    // sibling by-code resolution endpoint -- a stray code_number must not be
-    // interpreted as "resolve" mode by this handler.
+  // BS#2149 regression. `peekArtistNumber` reads exactly two query parameters,
+  // so this compares the responses to the two call shapes dj-site sends rather
+  // than re-asserting a constant: an implementation that started consuming
+  // `code_number` would make these two bodies differ.
+  test('answers identically with and without a stray code_number (BS#2149)', async () => {
+    const twoParam = await auth
+      .get('/library/artists/peek-code')
+      .query({ code_letters: 'BU', genre_id: 11 })
+      .expect(200);
+
+    const withStrayCodeNumber = await auth
+      .get('/library/artists/peek-code')
+      .query({ code_letters: 'BU', genre_id: 11, code_number: 60 })
+      .expect(200);
+
+    expect(withStrayCodeNumber.body).toEqual(twoParam.body);
+    // And the value is still the next FREE number, not the code that was passed.
+    expect(withStrayCodeNumber.body.next_code_number).toBe(61);
+  });
+
+  // peek-code answers "next free number" even for a code that IS assigned --
+  // the question by-code exists to answer instead. If peek-code ever started
+  // resolving the triple, this would return 60 (or an artist) rather than 61.
+  test('still reports the next free number for an already-assigned code (BS#2149)', async () => {
     const res = await auth
       .get('/library/artists/peek-code')
       .query({ code_letters: 'BU', genre_id: 11, code_number: 60 })
       .expect(200);
 
-    expect(res.body.next_code_number).toBe(61);
+    expect(res.body).toEqual({ next_code_number: 61 });
+    expect(res.body.artists).toBeUndefined();
   });
 });
 
 describe('Library Artists By Code', () => {
   let auth;
+  let sql;
 
-  beforeAll(() => {
+  // A code triple deliberately given TWO owners, mirroring the production V/A
+  // shape: `code_letters = 'V/A'` with `artist_genre_code = 0`, several distinct
+  // shelf buckets filed under it. Seeded directly because the write path
+  // (POST /library/artists) refuses a duplicate code triple by design, so the
+  // collision it cannot create is one only SQL can set up.
+  const CONTESTED = { genre_id: 11, code_letters: 'V/A', code_number: 0 };
+  const SEEDED_NAMES = ['BS2149 Various - B', 'BS2149 Various - A'];
+  const seededArtistIds = [];
+
+  beforeAll(async () => {
     auth = createAuthRequest(request, global.access_token);
+    sql = getTestDb();
+
+    // Inserted in reverse alphabetical order on purpose: the endpoint's ordering
+    // must come from its ORDER BY, not from insertion/physical row order.
+    for (const name of SEEDED_NAMES) {
+      const [row] = await sql`
+        INSERT INTO ${sql(SCHEMA)}.artists (artist_name, alphabetical_name, code_letters)
+        VALUES (${name}, ${name}, ${CONTESTED.code_letters})
+        RETURNING id`;
+      seededArtistIds.push(row.id);
+      await sql`
+        INSERT INTO ${sql(SCHEMA)}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+        VALUES (${row.id}, ${CONTESTED.genre_id}, ${CONTESTED.code_number})`;
+    }
   });
 
-  test('resolves a fully-specified code to its owning artist', async () => {
+  afterAll(async () => {
+    if (seededArtistIds.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.genre_artist_crossreference WHERE artist_id IN ${sql(seededArtistIds)}`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id IN ${sql(seededArtistIds)}`;
+    }
+  });
+
+  test('resolves a fully-specified code to a one-element list when it has a single owner', async () => {
     // BU/11/60 is Built to Spill's seeded code triple.
     const res = await auth
       .get('/library/artists/by-code')
       .query({ genre_id: 11, code_letters: 'BU', code_number: 60 })
       .expect(200);
 
-    expect(res.body.artist).toBeDefined();
-    expectFields(res.body.artist, 'id', 'artist_name', 'code_letters', 'code_number', 'genre_id');
-    expect(res.body.artist.artist_name).toBe('Built to Spill');
-    expect(res.body.artist.code_letters).toBe('BU');
-    expect(res.body.artist.code_number).toBe(60);
-    expect(res.body.artist.genre_id).toBe(11);
+    expect(Array.isArray(res.body.artists)).toBe(true);
+    expect(res.body.artists).toHaveLength(1);
+    expectFields(res.body.artists[0], 'id', 'artist_name', 'code_letters', 'code_number', 'genre_id');
+    expect(res.body.artists[0].artist_name).toBe('Built to Spill');
+    expect(res.body.artists[0].code_letters).toBe('BU');
+    expect(res.body.artists[0].code_number).toBe(60);
+    expect(res.body.artists[0].genre_id).toBe(11);
   });
 
-  test('returns 404 for an unassigned code in a known genre', async () => {
+  // The V/A librarian invariant: each `Various Artists - <LETTER>` / `Soundtracks
+  // - <LETTER>` bucket sharing one code is a distinct shelf location, so all of
+  // them must stay reachable. An unordered LIMIT 1 answered one arbitrary owner.
+  test('returns EVERY owner of a contested code, not one arbitrary row', async () => {
+    const res = await auth.get('/library/artists/by-code').query(CONTESTED).expect(200);
+
+    // Compare against the database's own count for this triple, so the assertion
+    // holds whether or not the environment's fixture already carries V/A rows.
+    const [{ count }] = await sql`
+      SELECT COUNT(*)::int AS count
+      FROM ${sql(SCHEMA)}.genre_artist_crossreference gac
+      JOIN ${sql(SCHEMA)}.artists a ON a.id = gac.artist_id
+      WHERE a.code_letters = ${CONTESTED.code_letters}
+        AND gac.genre_id = ${CONTESTED.genre_id}
+        AND gac.artist_genre_code = ${CONTESTED.code_number}`;
+
+    expect(count).toBeGreaterThanOrEqual(2);
+    expect(res.body.artists).toHaveLength(count);
+
+    const returnedNames = res.body.artists.map((a) => a.artist_name);
+    for (const name of SEEDED_NAMES) {
+      expect(returnedNames).toContain(name);
+    }
+    // Every owner carries a distinct id -- no row is duplicated to pad the list.
+    expect(new Set(res.body.artists.map((a) => a.id)).size).toBe(res.body.artists.length);
+  });
+
+  test('orders the owners deterministically by artist_name, then id', async () => {
+    const first = await auth.get('/library/artists/by-code').query(CONTESTED).expect(200);
+    const second = await auth.get('/library/artists/by-code').query(CONTESTED).expect(200);
+
+    // Repeated calls agree.
+    expect(second.body.artists).toEqual(first.body.artists);
+
+    // The two seeded buckets come back in alphabetical order, the reverse of the
+    // order they were inserted in.
+    const seededOrder = first.body.artists.map((a) => a.artist_name).filter((n) => SEEDED_NAMES.includes(n));
+    expect(seededOrder).toEqual(['BS2149 Various - A', 'BS2149 Various - B']);
+  });
+
+  // The whole Various-Artists surface is filed at artist_genre_code 0; a `< 1`
+  // floor made compilations -- the class with no artist name to search by, and
+  // so the class that most needs code-first resolution -- unanswerable.
+  test('accepts code_number 0 (the Various-Artists filing)', async () => {
+    const res = await auth.get('/library/artists/by-code').query(CONTESTED).expect(200);
+
+    expect(res.body.artists.length).toBeGreaterThan(0);
+    for (const artist of res.body.artists) {
+      expect(artist.code_number).toBe(0);
+      expect(artist.code_letters).toBe('V/A');
+    }
+  });
+
+  test('returns 404 with reason code_not_assigned for an unassigned code in a known genre', async () => {
     const res = await auth
       .get('/library/artists/by-code')
       .query({ genre_id: 11, code_letters: 'BU', code_number: 999999 })
       .expect(404);
 
+    expect(res.body.reason).toBe('code_not_assigned');
     expectErrorContains(res, 'not assigned');
   });
 
-  test('returns 404 for an unknown genre_id, distinct from an unassigned code', async () => {
+  test('returns 404 with reason genre_not_found for an unknown genre_id', async () => {
     const res = await auth
       .get('/library/artists/by-code')
       .query({ genre_id: 999999, code_letters: 'BU', code_number: 60 })
       .expect(404);
 
+    expect(res.body.reason).toBe('genre_not_found');
     expectErrorContains(res, 'Genre not found');
+  });
+
+  // The acceptance criterion is a *documented distinct outcome*, which means a
+  // machine-readable discriminant -- not two prose messages a client must parse.
+  test('gives the two 404s different reasons', async () => {
+    const unknownGenre = await auth
+      .get('/library/artists/by-code')
+      .query({ genre_id: 999999, code_letters: 'BU', code_number: 60 })
+      .expect(404);
+    const freeCode = await auth
+      .get('/library/artists/by-code')
+      .query({ genre_id: 11, code_letters: 'BU', code_number: 999999 })
+      .expect(404);
+
+    expect(unknownGenre.body.reason).not.toBe(freeCode.body.reason);
   });
 
   test('returns 400 for a malformed code_number', async () => {
@@ -1693,18 +1816,70 @@ describe('Library Artists By Code', () => {
     expectErrorContains(res, 'code_number');
   });
 
-  test('returns 400 when a required parameter is missing', async () => {
-    const res = await auth.get('/library/artists/by-code').query({ genre_id: 11, code_letters: 'BU' }).expect(400);
+  test('returns 400 for a negative code_number', async () => {
+    const res = await auth
+      .get('/library/artists/by-code')
+      .query({ genre_id: 11, code_letters: 'BU', code_number: -1 })
+      .expect(400);
 
     expectErrorContains(res, 'code_number');
   });
 
-  test('returns 400 when code_letters is repeated (Express string[] parsing)', async () => {
-    const res = await auth
-      .get('/library/artists/by-code?genre_id=11&code_letters=B&code_letters=U&code_number=60')
-      .expect(400);
+  // BS#1800 class: both bind to int4 columns, so a value that passes
+  // Number.isInteger but overflows int4 used to reach Postgres and answer a
+  // generic 500 (SQLSTATE 22003) plus a Sentry capture.
+  test.each([
+    ['genre_id', { genre_id: 2147483648, code_letters: 'BU', code_number: 60 }],
+    ['code_number', { genre_id: 11, code_letters: 'BU', code_number: 2147483648 }],
+  ])('returns 400, not 500, for a %s above INT4_MAX', async (param, query) => {
+    const res = await auth.get('/library/artists/by-code').query(query).expect(400);
 
-    expectErrorContains(res, 'code_letters');
+    expectErrorContains(res, param);
+  });
+
+  // Without normalization, ` BU ` and `bu` answer the "this code is free" 404 and
+  // invite the librarian to mint a duplicate shelf code.
+  test.each([
+    ['lower-cased', 'bu'],
+    ['whitespace-padded', ' BU '],
+  ])('resolves a %s code_letters to the same artist', async (_label, codeLetters) => {
+    const res = await auth
+      .get('/library/artists/by-code')
+      .query({ genre_id: 11, code_letters: codeLetters, code_number: 60 })
+      .expect(200);
+
+    expect(res.body.artists).toHaveLength(1);
+    expect(res.body.artists[0].artist_name).toBe('Built to Spill');
+    // The response echoes the stored value, not the caller's spelling.
+    expect(res.body.artists[0].code_letters).toBe('BU');
+  });
+
+  // Each case omits exactly one parameter and asserts the message names THAT one
+  // and not the others -- a message listing all three would pass no matter which
+  // parameter the handler actually refused on.
+  test.each([['genre_id'], ['code_letters'], ['code_number']])(
+    'returns 400 naming %s, and only %s, when it is the one missing',
+    async (param) => {
+      const query = { genre_id: 11, code_letters: 'BU', code_number: 60 };
+      delete query[param];
+
+      const res = await auth.get('/library/artists/by-code').query(query).expect(400);
+
+      expectErrorContains(res, param);
+      for (const other of ['genre_id', 'code_letters', 'code_number'].filter((p) => p !== param)) {
+        expect(res.body.message).not.toContain(other);
+      }
+    }
+  );
+
+  test.each([
+    ['code_letters', '/library/artists/by-code?genre_id=11&code_letters=B&code_letters=U&code_number=60'],
+    ['genre_id', '/library/artists/by-code?genre_id=11&genre_id=12&code_letters=BU&code_number=60'],
+    ['code_number', '/library/artists/by-code?genre_id=11&code_letters=BU&code_number=60&code_number=61'],
+  ])('returns 400 when %s is repeated (Express string[] parsing)', async (param, path) => {
+    const res = await auth.get(path).expect(400);
+
+    expectErrorContains(res, param);
   });
 });
 

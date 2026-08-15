@@ -25,6 +25,15 @@ import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import { getPostHogClient } from '../utils/posthog.js';
 import WxycError from '../utils/error.js';
 
+// `genres.id` and `genre_artist_crossreference.artist_genre_code` are Postgres
+// int4 columns. A query value outside that range parses fine as a JS integer
+// (passing `Number.isInteger`) but blows up downstream as an unhandled
+// "value out of range for type integer" Postgres error — SQLSTATE 22003, which
+// is not a `WxycError` and so answers a generic 500 plus a Sentry capture.
+// Same constant and same guard as `flowsheet.controller.ts` (BS#1800), which
+// hit this first on `start_id`/`end_id`.
+const INT4_MAX = 2147483647;
+
 // BS#1826 PR 2: `LIBRARY_LML_BUDGET_MS` retired. Budget for the add-album
 // insert + fire-and-forget canonical-entity paths now comes from the
 // per-caller policy layer (`@wxyc/lml-client` `policy.ts`) — `library-add-
@@ -452,61 +461,124 @@ type ArtistByCodeQuery = {
 };
 
 /**
- * BS#2149: resolves a fully-specified library code to its owning artist --
+ * Parses one required integer query parameter for `resolveArtistByCode`,
+ * bounded on both ends. The upper bound is the int4 guard described at
+ * `INT4_MAX`; the lower bound differs per parameter, so it is passed in.
+ *
+ * `Number('')` is 0 and `Number(' ')` is 0, so a present-but-empty parameter
+ * (`?code_number=`) would sail through `Number.isInteger` as a legitimate
+ * zero — which matters now that 0 is a valid `code_number`. Hence the explicit
+ * blank check before the numeric one.
+ */
+const parseCodeQueryInt = (raw: string | undefined, name: string, min: number): number => {
+  // Express's `simple` query parser yields string[] for repeated keys
+  // (`?genre_id=1&genre_id=2`), which `Number()` would collapse to NaN with a
+  // misleading message; name the real problem instead.
+  if (typeof raw !== 'string') {
+    throw new WxycError(`Invalid ${name}: must be a single value`, 400);
+  }
+  if (raw.trim() === '') {
+    throw new WxycError(`Invalid ${name}: must be an integer between ${min} and ${INT4_MAX}`, 400);
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > INT4_MAX) {
+    throw new WxycError(`Invalid ${name}: must be an integer between ${min} and ${INT4_MAX}`, 400);
+  }
+  return value;
+};
+
+/**
+ * BS#2149: resolves a fully-specified library code to the artists that own it --
  * the `/wxycdb` "does this code already exist, and whose is it" question
  * `peek-code` (next-free-number) and `search` (name query) cannot answer.
- * `getArtistByCode` already backs `addArtist`'s code-conflict pre-check
- * (BS#792-era), so this reuses that lookup rather than duplicating the query.
  *
- * An unknown `genre_id` and an unassigned code are distinct 404s (mirrors
- * `searchArtistsInGenre`'s precedent below): the former means the client's
- * genre dropdown is stale, the latter means the code is free to create.
+ * Answers a LIST, not a single artist. The `(code_letters, genre_id,
+ * code_number)` triple is not unique — see `getArtistsByCode` for the schema
+ * reason and the measured V/A collisions — so a librarian holding a compilation
+ * card gets every bucket that shares the code and picks, rather than being handed
+ * one arbitrary row out of 27. A single owner is simply a one-element array.
+ *
+ * `code_number` accepts **0**: the whole Various-Artists surface is filed at
+ * `artist_genre_code = 0` (68 rows in the production clone, all `code_letters =
+ * 'V/A'`), and neither sibling route imposes a floor — `addArtist` passes the
+ * value straight through and `peekArtistNumber` uses `Number.isFinite`. A `< 1`
+ * floor here would have made the one filing class that most needs code-first
+ * resolution (compilations have no artist name to search by) the one class this
+ * route could not answer.
+ *
+ * Two 404s, discriminated by `reason` rather than by prose the way `addArtist`
+ * above discriminates its two 409s: `genre_not_found` means the client's genre
+ * dropdown is stale, `code_not_assigned` means the code is free to create. A
+ * client that has to string-match `message` to tell those apart cannot act on
+ * either.
  */
 export const resolveArtistByCode: RequestHandler = async (
   req: Request<object, object, object, ArtistByCodeQuery>,
   res
 ) => {
   const { query } = req;
-  if (!query.genre_id || !query.code_letters || !query.code_number) {
-    throw new WxycError('Missing query parameters: genre_id, code_letters, and code_number', 400);
+  // Name only the parameters actually missing. A fixed string listing all three
+  // would satisfy any "the error mentions code_number" assertion even when the
+  // handler refused on a different parameter, which is exactly the blind spot
+  // the BS#2149 review found in this route's first test.
+  const missing = (['genre_id', 'code_letters', 'code_number'] as const).filter((name) => query[name] === undefined);
+  if (missing.length > 0) {
+    throw new WxycError(`Missing query parameters: ${missing.join(', ')}`, 400);
   }
 
-  // Express's `simple` query parser yields string[] for repeated keys
-  // (`?code_letters=B&code_letters=U`); reject before it reaches Drizzle's
-  // `eq(artists.code_letters, ...)`, which would otherwise bind a text[]
-  // against a text column and surface as a driver-level 500 instead of a 400
-  // (mirrors the same guard on `q` in searchArtistsInGenre above).
+  // The `string[]` guard here is the one `searchArtistsInGenre` applies to `q`:
+  // without it, `?code_letters=B&code_letters=U` binds a text[] against Drizzle's
+  // `eq(artists.code_letters, ...)` text column and surfaces as a driver-level
+  // 500 instead of a 400.
   if (typeof query.code_letters !== 'string') {
     throw new WxycError('Invalid code_letters: must be a single string value', 400);
   }
 
-  const genreId = Number(query.genre_id);
-  if (!Number.isInteger(genreId) || genreId < 1) {
-    throw new WxycError('Invalid genre_id: must be a positive integer', 400);
+  const genreId = parseCodeQueryInt(query.genre_id, 'genre_id', 1);
+  // Lower bound 0, not 1 — see the V/A note in this function's doc comment.
+  const codeNumber = parseCodeQueryInt(query.code_number, 'code_number', 0);
+
+  // Trim + upper-case before matching. `artists.code_letters` is matched
+  // byte-for-byte by the query below, and every one of the 24,078 artist rows in
+  // the production clone stores a trimmed, upper-case value — so normalizing can
+  // never turn a real hit into a miss, while NOT normalizing lets ` BU ` or `bu`
+  // answer the "this code is free" 404 and invite the librarian to mint a
+  // duplicate shelf code. (The sibling write path, `addArtist`, still compares
+  // raw; widening its pre-check is a separate change, deliberately not made here
+  // because it alters an existing route's 409 behavior.)
+  const codeLetters = query.code_letters.trim().toUpperCase();
+  if (codeLetters === '') {
+    throw new WxycError('Invalid code_letters: must be a non-empty string', 400);
   }
 
-  const codeNumber = Number(query.code_number);
-  if (!Number.isInteger(codeNumber) || codeNumber < 1) {
-    throw new WxycError('Invalid code_number: must be a positive integer', 400);
-  }
+  // Code lookup FIRST, genre check only to explain a miss: a hit proves the genre
+  // exists (the lookup inner-joins `genre_artist_crossreference.genre_id`), so
+  // probing `genreExists` up front would double the round-trips on every happy
+  // path to discriminate a 404 that isn't happening.
+  const owners = await libraryService.getArtistsByCode(codeLetters, genreId, codeNumber);
 
-  if (!(await libraryService.genreExists(genreId))) {
-    throw new WxycError('Genre not found', 404);
-  }
-
-  const artist = await libraryService.getArtistByCode(query.code_letters, genreId, codeNumber);
-  if (!artist) {
-    throw new WxycError('Artist code not assigned in that genre', 404);
+  if (owners.length === 0) {
+    if (!(await libraryService.genreExists(genreId))) {
+      res.status(404).json({ message: 'Genre not found', reason: 'genre_not_found' });
+      return;
+    }
+    res.status(404).json({
+      message: 'Artist code not assigned in that genre',
+      reason: 'code_not_assigned',
+    });
+    return;
   }
 
   res.status(200).json({
-    artist: {
-      id: artist.artist_id,
-      artist_name: artist.artist_name,
-      code_letters: artist.code_letters,
+    artists: owners.map((owner) => ({
+      id: owner.artist_id,
+      artist_name: owner.artist_name,
+      // The stored `code_letters`, not the normalized input: the row is the
+      // truth about how this code is filed.
+      code_letters: owner.code_letters,
       code_number: codeNumber,
       genre_id: genreId,
-    },
+    })),
   });
 };
 

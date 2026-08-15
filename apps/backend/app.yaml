@@ -1959,7 +1959,13 @@ paths:
 
   /library/artists/by-code:
     get:
-      summary: Resolve a fully-specified library code to its owning artist
+      summary: Resolve a fully-specified library code to the artists that own it
+      description: >-
+        Resolves `genre_id` + `code_letters` + `code_number` to every artist filed under that
+        code. The triple is not unique — the Various-Artists shelf files many distinct buckets
+        (`Soundtracks - A`, `Soundtracks - B`, …) under one `V/A` code — so the response is
+        always a list, ordered by `artist_name` then `id`. A code with a single owner returns a
+        one-element array. `code_letters` is trimmed and upper-cased before matching.
       security:
         - BearerAuth: ['station-management']
       parameters:
@@ -1968,6 +1974,8 @@ paths:
           required: true
           schema:
             type: integer
+            minimum: 1
+            maximum: 2147483647
         - in: query
           name: code_letters
           required: true
@@ -1976,33 +1984,64 @@ paths:
         - in: query
           name: code_number
           required: true
+          description: >-
+            Accepts 0 — the Various-Artists filings are stored with an artist genre code of 0.
           schema:
             type: integer
+            minimum: 0
+            maximum: 2147483647
       responses:
         '200':
-          description: The artist that owns this code
+          description: The artists that own this code, ordered by artist_name then id
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  artist:
-                    type: object
-                    properties:
-                      id:
-                        type: integer
-                      artist_name:
-                        type: string
-                      code_letters:
-                        type: string
-                      code_number:
-                        type: integer
-                      genre_id:
-                        type: integer
+                  artists:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        artist_name:
+                          type: string
+                        code_letters:
+                          type: string
+                        code_number:
+                          type: integer
+                        genre_id:
+                          type: integer
         '400':
           description: Invalid or missing genre_id, code_letters, or code_number
         '404':
-          description: Genre not found, or the code is not assigned in that genre
+          description: >-
+            Two distinct outcomes, told apart by `reason`, never by the message text.
+            `genre_not_found` — no genre has that `genre_id`, so the client's genre list is
+            stale and the code was never evaluated. `code_not_assigned` — the genre exists and
+            the code is free within it, so it is safe to create an artist under it.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  reason:
+                    type: string
+                    enum: [genre_not_found, code_not_assigned]
+              examples:
+                genre_not_found:
+                  summary: Unknown genre_id
+                  value:
+                    message: Genre not found
+                    reason: genre_not_found
+                code_not_assigned:
+                  summary: Known genre, unassigned code
+                  value:
+                    message: Artist code not assigned in that genre
+                    reason: code_not_assigned
 
   /library/formats:
     get:

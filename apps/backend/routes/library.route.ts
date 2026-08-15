@@ -137,9 +137,10 @@ library_route.get(
 library_route.get('/artists/peek-code', requirePermissions({ catalog: ['write'] }), libraryController.peekArtistNumber);
 
 // BS#2149: resolves a fully-specified code (genre_id + code_letters +
-// code_number) to its owning artist -- the /wxycdb "find" half of the JSP
+// code_number) to the artists that own it -- the /wxycdb "find" half of the JSP
 // code-lookup flow that `peek-code` (a "next free number" create helper)
-// cannot answer. Same `catalog: ['write']` tier as the two routes above:
+// cannot answer. Answers a list because the code triple is not unique; see
+// `getArtistsByCode`. Same `catalog: ['write']` tier as the two routes above:
 // though this is a pure read, it serves the same librarian-only surface, and
 // widening the tier for one of three siblings would be an inconsistency, not
 // a simplification. Registered in this same `/artists/*` block, ahead of
