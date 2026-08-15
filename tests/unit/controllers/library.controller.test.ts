@@ -889,6 +889,25 @@ describe('library.controller', () => {
       });
     });
 
+    // Contested codes are NOT a V/A-only phenomenon: 11 of the 13 collisions in
+    // the production clone are ordinary artist codes (`KU`/11/7 has 3 owners).
+    // A V/A-gated special case would answer one arbitrary row for those, so the
+    // list treatment has to be unconditional.
+    it('returns every owner of a contested ORDINARY code, not only V/A codes', async () => {
+      mockGetArtistsByCode.mockResolvedValue([
+        owner(301, 'Kudzu', 'KU'),
+        owner(302, 'Kudzu Ranch', 'KU'),
+        owner(303, 'Kukuruza', 'KU'),
+      ]);
+
+      const res = mockResponse();
+      await resolveArtistByCode(req({ genre_id: '11', code_letters: 'KU', code_number: '7' }), res, next);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      const [payload] = (res.json as jest.Mock).mock.calls[0] as [{ artists: Array<{ id: number }> }];
+      expect(payload.artists.map((a) => a.id)).toEqual([301, 302, 303]);
+    });
+
     // The V/A invariant: `V/A`/12/0 has 27 owners in the production clone and
     // each is a distinct shelf bucket. Collapsing or arbitrarily picking one
     // would be stably wrong for the other 26.
