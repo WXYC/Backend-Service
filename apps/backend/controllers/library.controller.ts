@@ -450,21 +450,47 @@ export const getRotation: RequestHandler = async (req, res) => {
   res.status(200).json(rotation);
 };
 
+/**
+ * `GET /library/rotation/uncatalogued` (BS#2109).
+ *
+ * The cataloging-backlog queue: rotation rows with no linked library
+ * release, deliberately WITHOUT the `DISTINCT ON` collapse `getRotation`
+ * uses for its dropdown shape — two physically distinct promos that share
+ * an artist and title are two separate rows a librarian has to catalogue,
+ * and collapsing them would silently hide one. See `getUncataloguedRotationFromDB`
+ * for the `COALESCE(album_id, 0) = 0` predicate this reads through.
+ *
+ * ROUTE REGISTRATION ORDER IS LOAD-BEARING — must be registered ahead of any
+ * `/rotation/:id`-style parameterized route (see `library.route.ts`), the
+ * same trap already documented there for `/catalog` vs
+ * `/:id/compilation-tracks`.
+ */
+export const getUncataloguedRotation: RequestHandler = async (req, res) => {
+  const rotation = await libraryService.getUncataloguedRotationFromDB();
+  res.status(200).json(rotation);
+};
+
 export type RotationAddRequest = Omit<NewRotationRelease, 'id'>;
 
 /**
  * Pick only the fields the client is allowed to write through the public
- * `POST /library/rotation` endpoint (BS#1380). Mirrors
- * `pickUpdateEntryFields()` in flowsheet.controller.ts (BS#1099).
+ * `POST /library/rotation` endpoint (BS#1380; relaxed by BS#2109).
+ * Mirrors `pickUpdateEntryFields()` in flowsheet.controller.ts (BS#1099).
  *
  * Server-derived columns (`legacy_rotation_id`, `legacy_library_release_id`,
  * `discogs_release_id`, `discogs_release_id_source`, `lml_identity_id`,
- * `tracklist_lookup_attempted_at`, `kill_date`) and tubafrenzy-ETL-only
- * snapshot columns (`add_date`, `artist_name`, `album_title`,
- * `record_label`) must never be client-supplied through this endpoint —
- * `addToRotation` derives the LML-handle columns from `library_identity`
- * and the synchronous `resolveIdentity` hop, and tubafrenzy is the only
- * legitimate source for the snapshot columns.
+ * `tracklist_lookup_attempted_at`, `kill_date`) must never be
+ * client-supplied through this endpoint — `addToRotation` derives the
+ * LML-handle columns from `library_identity` and the synchronous
+ * `resolveIdentity` hop.
+ *
+ * `artist_name`/`album_title`/`record_label` are normally tubafrenzy-ETL-only
+ * snapshot columns, but BS#2109 relaxed `addRotation` to accept a rotation
+ * release with no catalogued `album_id` — the free-text trio is then the
+ * only way to represent it. So they are picked ONLY when the client did not
+ * supply an `album_id`: a catalogued row (`album_id` present) still has its
+ * display sourced from the `library` join, and a client-supplied snapshot on
+ * a catalogued row would leave stale free text nothing ever clears.
  *
  * Phrased as an allowlist (signature-typed accept list) so a future column
  * addition to `rotation` is implicitly rejected by typecheck until
@@ -472,17 +498,35 @@ export type RotationAddRequest = Omit<NewRotationRelease, 'id'>;
  * (`{ album_id, rotation_bin }`); widen the signature here when a future
  * caller legitimately needs another field.
  */
-type AddRotationAllowlist = Pick<NewRotationRelease, 'album_id' | 'rotation_bin'>;
+type AddRotationAllowlist = Pick<
+  NewRotationRelease,
+  'album_id' | 'rotation_bin' | 'artist_name' | 'album_title' | 'record_label'
+>;
 
 export function pickAddRotationFields(body: Partial<NewRotationRelease>): AddRotationAllowlist {
   const picked = {} as AddRotationAllowlist;
   if (body.album_id !== undefined) picked.album_id = body.album_id;
   if (body.rotation_bin !== undefined) picked.rotation_bin = body.rotation_bin;
+  if (body.album_id === undefined) {
+    if (body.artist_name !== undefined) picked.artist_name = body.artist_name;
+    if (body.album_title !== undefined) picked.album_title = body.album_title;
+    if (body.record_label !== undefined) picked.record_label = body.record_label;
+  }
   return picked;
 }
 
+/**
+ * `POST /library/rotation` (BS#1380; relaxed by BS#2109 for uncatalogued
+ * releases). `rotation_bin` is always required. `album_id` may be absent
+ * when `artist_name` and `album_title` are both supplied — the free-text
+ * pair that represents a rotation release the station hasn't catalogued
+ * yet. 400s when neither an `album_id` nor the artist/title pair is given;
+ * an anonymous rotation row helps nobody.
+ */
 export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = async (req, res) => {
-  if (req.body.album_id === undefined || req.body.rotation_bin === undefined) {
+  const { body } = req;
+
+  if (body.rotation_bin === undefined) {
     throw new WxycError('Missing Parameters: album_id or rotation_bin', 400);
   }
   // BS#2173: this checked PRESENCE but never VALUE, so an unrecognized bin
@@ -497,9 +541,54 @@ export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = 
     );
   }
 
-  const picked = pickAddRotationFields(req.body);
+  if (body.album_id === undefined && (body.artist_name === undefined || body.album_title === undefined)) {
+    throw new WxycError('Missing Parameters: album_id, or artist_name and album_title', 400);
+  }
+
+  const picked = pickAddRotationFields(body);
   const rotationRelease: RotationRelease = await libraryService.addToRotation(picked);
   res.status(201).json(rotationRelease);
+};
+
+export type LinkRotationRequest = {
+  album_id: number;
+};
+
+/**
+ * `PATCH /library/rotation/:rotation_id/link` (BS#2109) — links an
+ * uncatalogued rotation row to a library release after the fact (the
+ * "Import to Library" step of the tubafrenzy `/wxycdb` workflow). Rejects
+ * double-linking; clears the free-text snapshot columns in the same
+ * transaction as the link, matching `jobs/legacy-linkage-resolve`. See
+ * `libraryService.linkRotationToAlbum` for the transactional details.
+ */
+export const linkRotationToAlbum: RequestHandler<{ rotation_id: string }, unknown, LinkRotationRequest> = async (
+  req,
+  res
+) => {
+  const rotationId = parseInt(req.params.rotation_id, 10);
+  if (!Number.isInteger(rotationId) || rotationId <= 0) {
+    throw new WxycError('rotation_id must be a positive integer', 400);
+  }
+
+  const { album_id } = req.body;
+  if (typeof album_id !== 'number' || !Number.isInteger(album_id) || album_id <= 0) {
+    throw new WxycError('Missing Parameters: album_id', 400);
+  }
+
+  const result = await libraryService.linkRotationToAlbum(rotationId, album_id);
+
+  switch (result.outcome) {
+    case 'rotation_not_found':
+      throw new WxycError('Rotation entry not found', 404);
+    case 'album_not_found':
+      throw new WxycError('Album not found', 404);
+    case 'already_linked':
+      throw new WxycError('Rotation entry is already linked to a library release', 409);
+    case 'linked':
+      res.status(200).json(result.rotation);
+      break;
+  }
 };
 
 export type KillRotationRelease = {

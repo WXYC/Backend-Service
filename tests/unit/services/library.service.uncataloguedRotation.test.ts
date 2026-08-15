@@ -1,0 +1,205 @@
+/**
+ * Unit tests for the BS#2109 uncatalogued-rotation surfaces:
+ *
+ *   - `getUncataloguedRotationFromDB` — read-side query for
+ *     `GET /library/rotation/uncatalogued`. Asserts the `COALESCE(album_id,
+ *     0) = 0` predicate and the absence of any `DISTINCT ON` (the query
+ *     builder used here has no `selectDistinctOn` call at all, unlike
+ *     `getRotationFromDB`'s raw-SQL `DISTINCT ON`).
+ *   - `linkRotationToAlbum` — the `PATCH /rotation/:id/link` transaction:
+ *     album-exists check, rotation-exists check, already-linked rejection,
+ *     and the same-transaction snapshot-column clear.
+ *
+ * Follows the established `db._chain` / `createMockQueryChain` override
+ * conventions from `library.service.addToRotation.test.ts` and
+ * `library.service.discogsRecheck.test.ts` — the mock chain only resolves
+ * on `.returning()`/`.execute()` by default, so a plain `select().limit()`
+ * read gets its terminal method's resolved value overridden per test.
+ */
+import { jest } from '@jest/globals';
+import { db, createMockQueryChain, rotation, library } from '../../mocks/database.mock';
+
+const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
+const mockIsLmlConfigured = jest.fn<() => boolean>();
+
+jest.mock('@wxyc/lml-client', () => ({
+  lookupMetadata: mockLookupMetadata,
+  isLmlConfigured: mockIsLmlConfigured,
+  envInt: (_name: string, fallback: number) => fallback,
+}));
+
+import { getUncataloguedRotationFromDB, linkRotationToAlbum } from '../../../apps/backend/services/library.service';
+
+type SqlLike = {
+  sql?: string | string[];
+  raw?: string;
+  queryChunks?: Array<string | { value?: unknown; raw?: string }>;
+};
+
+const renderSql = (value: unknown): string => {
+  const obj = value as SqlLike | null | undefined;
+  if (!obj) return '';
+  if (typeof obj.raw === 'string') return obj.raw;
+  if (Array.isArray(obj.sql)) return obj.sql.join('');
+  if (typeof obj.sql === 'string') return obj.sql;
+  if (obj.queryChunks) {
+    return obj.queryChunks
+      .map((chunk) => {
+        if (typeof chunk === 'string') return chunk;
+        if (typeof chunk.raw === 'string') return chunk.raw;
+        if (chunk.value !== undefined) return JSON.stringify(chunk.value);
+        return '';
+      })
+      .join(' ');
+  }
+  return JSON.stringify(obj);
+};
+
+describe('getUncataloguedRotationFromDB (BS#2109)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('queries rotation with a COALESCE(album_id, 0) = 0 predicate, no DISTINCT ON', async () => {
+    const rows = [
+      { id: 10, album_id: null, artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' },
+      { id: 11, album_id: null, artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' },
+    ];
+    const selectChain = createMockQueryChain(rows);
+    selectChain.orderBy = jest.fn().mockResolvedValue(rows);
+    db.select.mockReturnValue(selectChain);
+
+    const result = await getUncataloguedRotationFromDB();
+
+    expect(result).toBe(rows);
+    expect(selectChain.from).toHaveBeenCalledWith(rotation);
+    expect(renderSql(selectChain.where.mock.calls[0]?.[0])).toContain('COALESCE');
+    expect(renderSql(selectChain.where.mock.calls[0]?.[0])).toContain('= 0');
+    // The query builder never calls selectDistinctOn — no dedup collapse.
+    expect(db.selectDistinctOn).not.toHaveBeenCalled();
+  });
+
+  it('surfaces two same-artist/same-title unlinked rows both (no collapse)', async () => {
+    // Pins the acceptance criterion directly: two distinct physical promos
+    // sharing (artist, title) must both appear, unlike getRotationFromDB's
+    // DISTINCT ON dropdown collapse (#862).
+    const rows = [
+      { id: 20, album_id: null, artist_name: 'Duplicate Artist', album_title: 'Duplicate Title' },
+      { id: 21, album_id: null, artist_name: 'Duplicate Artist', album_title: 'Duplicate Title' },
+    ];
+    const selectChain = createMockQueryChain(rows);
+    selectChain.orderBy = jest.fn().mockResolvedValue(rows);
+    db.select.mockReturnValue(selectChain);
+
+    const result = await getUncataloguedRotationFromDB();
+
+    expect(result).toHaveLength(2);
+    expect(result.map((r) => (r as { id: number }).id).sort()).toEqual([20, 21]);
+  });
+});
+
+describe('linkRotationToAlbum (BS#2109)', () => {
+  const ROTATION_ID = 42;
+  const ALBUM_ID = 5;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('links: sets album_id and clears artist_name/album_title/record_label in one UPDATE', async () => {
+    const albumChain = createMockQueryChain();
+    albumChain.limit = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
+
+    const rotationSelectChain = createMockQueryChain();
+    rotationSelectChain.limit = jest.fn().mockResolvedValue([{ album_id: null }]);
+
+    const updatedRow = {
+      id: ROTATION_ID,
+      album_id: ALBUM_ID,
+      artist_name: null,
+      album_title: null,
+      record_label: null,
+    };
+    const updateChain = createMockQueryChain([updatedRow]);
+
+    db.select.mockReturnValueOnce(albumChain).mockReturnValueOnce(rotationSelectChain);
+    db.update.mockReturnValue(updateChain);
+
+    const result = await linkRotationToAlbum(ROTATION_ID, ALBUM_ID);
+
+    expect(result).toEqual({ outcome: 'linked', rotation: updatedRow });
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(albumChain.from).toHaveBeenCalledWith(library);
+    expect(updateChain.set).toHaveBeenCalledWith({
+      album_id: ALBUM_ID,
+      artist_name: null,
+      album_title: null,
+      record_label: null,
+    });
+    // The UPDATE's own WHERE re-guards album_id IS NULL, not just the earlier
+    // SELECT. drizzle-orm is automocked project-wide (`tests/__mocks__/
+    // drizzle-orm.ts`), so `isNull(rotation.album_id)` renders as a plain
+    // `{ isNull: 'album_id' }` object rather than real SQL text.
+    expect(renderSql(updateChain.where.mock.calls[0]?.[0])).toContain('isNull');
+    expect(renderSql(updateChain.where.mock.calls[0]?.[0])).toContain('album_id');
+  });
+
+  it('rejects double-linking when the rotation row already has an album_id', async () => {
+    const albumChain = createMockQueryChain();
+    albumChain.limit = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
+
+    const rotationSelectChain = createMockQueryChain();
+    rotationSelectChain.limit = jest.fn().mockResolvedValue([{ album_id: 999 }]);
+
+    db.select.mockReturnValueOnce(albumChain).mockReturnValueOnce(rotationSelectChain);
+
+    const result = await linkRotationToAlbum(ROTATION_ID, ALBUM_ID);
+
+    expect(result).toEqual({ outcome: 'already_linked' });
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it('returns rotation_not_found when the rotation row does not exist', async () => {
+    const albumChain = createMockQueryChain();
+    albumChain.limit = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
+
+    const rotationSelectChain = createMockQueryChain();
+    rotationSelectChain.limit = jest.fn().mockResolvedValue([]);
+
+    db.select.mockReturnValueOnce(albumChain).mockReturnValueOnce(rotationSelectChain);
+
+    const result = await linkRotationToAlbum(ROTATION_ID, ALBUM_ID);
+
+    expect(result).toEqual({ outcome: 'rotation_not_found' });
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it('returns album_not_found when the album does not exist, without touching rotation', async () => {
+    const albumChain = createMockQueryChain();
+    albumChain.limit = jest.fn().mockResolvedValue([]);
+
+    db.select.mockReturnValueOnce(albumChain);
+
+    const result = await linkRotationToAlbum(ROTATION_ID, 999999);
+
+    expect(result).toEqual({ outcome: 'album_not_found' });
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it('returns already_linked when the guarded UPDATE affects no row (race between check and write)', async () => {
+    const albumChain = createMockQueryChain();
+    albumChain.limit = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
+
+    const rotationSelectChain = createMockQueryChain();
+    rotationSelectChain.limit = jest.fn().mockResolvedValue([{ album_id: null }]);
+
+    const updateChain = createMockQueryChain([]);
+
+    db.select.mockReturnValueOnce(albumChain).mockReturnValueOnce(rotationSelectChain);
+    db.update.mockReturnValue(updateChain);
+
+    const result = await linkRotationToAlbum(ROTATION_ID, ALBUM_ID);
+
+    expect(result).toEqual({ outcome: 'already_linked' });
+  });
+});
