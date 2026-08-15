@@ -623,13 +623,33 @@ export const resolveArtistByCode: RequestHandler = async (
   });
 };
 
-const parseArtistId = (rawId: string): number => {
-  const artistId = Number(rawId);
-  if (!Number.isInteger(artistId) || artistId <= 0) {
-    throw new WxycError('Invalid artist ID', 400);
+// The only spelling of a path id we accept: bare decimal digits, no sign, no
+// leading zero, no whitespace, no exponent, no radix prefix, no fraction.
+// `Number()` happily accepts '1e21', '0x2a', ' 42 ', '42.0', '+42' and '007',
+// each of which would alias a distinct URL onto one resource (and, for the
+// first two, onto ids no `serial` column can hold).
+const CANONICAL_ID_PATTERN = /^[1-9][0-9]*$/;
+
+/**
+ * Parse a positive int4 surrogate key out of a path parameter, or throw the
+ * 400 that keeps a malformed URL from reaching Postgres.
+ *
+ * ONE implementation deliberately shared by `parseArtistId`/`parseAlbumId`:
+ * the two were verbatim clones, and a hardening fix applied to one copy is a
+ * hole left open in the other.
+ */
+const parseResourceId = (rawId: string, resource: string): number => {
+  if (typeof rawId !== 'string' || !CANONICAL_ID_PATTERN.test(rawId)) {
+    throw new WxycError(`Invalid ${resource} ID`, 400);
   }
-  return artistId;
+  const id = Number(rawId);
+  if (id > INT4_MAX) {
+    throw new WxycError(`Invalid ${resource} ID`, 400);
+  }
+  return id;
 };
+
+const parseArtistId = (rawId: string): number => parseResourceId(rawId, 'artist');
 
 /**
  * GET /library/artists/:id -- BS#2156 artist-card lookup: the field set
@@ -653,6 +673,10 @@ type UpdateArtistRequest = {
 
 const MAX_ARTIST_TEXT_LENGTH = 128;
 
+const UPDATABLE_ARTIST_FIELDS = ['artist_name', 'alphabetical_name'] as const;
+
+const NO_ARTIST_FIELDS_MESSAGE = `Bad Request: provide at least one of ${UPDATABLE_ARTIST_FIELDS.join(', ')}`;
+
 /**
  * PATCH /library/artists/:id -- allowlists exactly the two fields
  * `/wxycdb`'s `modifyArtist` form edits (BS#2156). Any other field on the
@@ -661,7 +685,24 @@ const MAX_ARTIST_TEXT_LENGTH = 128;
  */
 export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArtistRequest> = async (req, res) => {
   const artistId = parseArtistId(req.params.id);
-  const { body } = req;
+
+  // `app.ts` mounts a bare `express.json()`, and body-parser 2.x leaves
+  // `req.body` UNDEFINED for a body-less or non-JSON-typed request — Express 5
+  // no longer defaults it to `{}`. Dereferencing it below would be a
+  // TypeError, i.e. a 500 on the single most likely smoke-test request
+  // (`curl -X PATCH` with no body). Normalize to `{}` and reject a non-object
+  // JSON document (`"x"`, `[]`, `3`) so the shape checks that follow hold.
+  const body: UpdateArtistRequest = req.body ?? {};
+  if (typeof body !== 'object' || Array.isArray(body)) {
+    throw new WxycError(NO_ARTIST_FIELDS_MESSAGE, 400);
+  }
+
+  // Request-shape 400s precede the existence 404, matching updateAlbum. The
+  // reverse order answers 404 for an unknown artist and 500 for a real one on
+  // the very same malformed request.
+  if (!UPDATABLE_ARTIST_FIELDS.some((field) => field in body)) {
+    throw new WxycError(NO_ARTIST_FIELDS_MESSAGE, 400);
+  }
 
   // Resolve the artist (and its genre, needed for the name-conflict check
   // below) before any side effects -- same ordering rationale as
@@ -694,18 +735,28 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
   }
 
   if (Object.keys(updates).length === 0) {
-    throw new WxycError('Bad Request: provide at least one of artist_name, alphabetical_name', 400);
+    throw new WxycError(NO_ARTIST_FIELDS_MESSAGE, 400);
   }
 
-  // Same genre-scoped name-conflict guard `addArtist` enforces (BS#980):
-  // `artistIdFromName`'s `fold_artist_name` matcher (migration 0134) is the
-  // one thing standing between a rename and recreating exactly the
-  // NFC/NFD/case duplicate state `jobs/artist-unicode-dedup` exists to
-  // clean up. Only runs when the name is actually changing, so a PATCH that
-  // re-sends the current name (a no-op "Save") never 409s against itself.
+  // Same genre-scoped name-conflict guard `addArtist` enforces (BS#980): the
+  // `fold_artist_name` matcher (migration 0134) is the one thing standing
+  // between a rename and recreating exactly the NFC/NFD/case duplicate state
+  // `jobs/artist-unicode-dedup` exists to clean up. Only runs when the name is
+  // actually changing, so a PATCH that re-sends the current name (a no-op
+  // "Save") never 409s against itself.
+  //
+  // The self-exclusion lives INSIDE the query (`conflictingArtistIdInGenre`),
+  // not as a `!== artistId` comparison on whatever `artistIdFromName` happened
+  // to return: that probe is `.limit(1)` with no `orderBy`, so on a genre that
+  // already holds two fold-equal rows it can hand back the row being renamed
+  // and the comparison would wave the rename through.
   if (updates.artist_name !== undefined && updates.artist_name !== existing.artist_name) {
-    const conflictingArtistId = await libraryService.artistIdFromName(updates.artist_name, existing.genre_id);
-    if (conflictingArtistId && conflictingArtistId !== artistId) {
+    const conflictingArtistId = await libraryService.conflictingArtistIdInGenre(
+      updates.artist_name,
+      existing.genre_id,
+      artistId
+    );
+    if (conflictingArtistId) {
       const conflictingArtist = await libraryService.getArtistById(conflictingArtistId);
       res.status(409).json({
         message: 'Artist name already exists in that genre.',
@@ -720,20 +771,69 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
   if (!updated) {
     throw new WxycError('Artist not found', 404);
   }
-  res.status(200).json(updated);
+  // Answer with the same card shape `GET /library/artists/:id` serves rather
+  // than the bare `artists` RETURNING row, so a client that PATCHes and a
+  // client that re-GETs the same URL see one field set (`artist_id`, not `id`).
+  const refreshed = await libraryService.getArtistCardById(artistId);
+  if (!refreshed) {
+    throw new WxycError('Artist not found', 404);
+  }
+  res.status(200).json(refreshed);
 };
+
+// Same page-size convention as `GET /library/query` (see DEFAULT_LIMIT /
+// MAX_LIMIT there); a smaller default because one artist's shelf is a much
+// shorter list than a catalog search.
+const DEFAULT_RELEASES_LIMIT = 50;
+const MAX_RELEASES_LIMIT = 100;
 
 /**
  * GET /library/artists/:id/releases -- BS#2156: the release table on
  * `/wxycdb`'s artist card (`getLibraryReleasesForArtist`).
+ *
+ * Offset-paginated (`page`/`limit`) in the shape `GET /library/query` uses.
+ * Unbounded, this hands any `catalog:read` DJ every row an artist has — 3,107
+ * of them for artist 1087 ('Various Artists'), ~0.5-1 MB of JSON per
+ * repeatable request.
  */
-export const getArtistReleases: RequestHandler<{ id: string }> = async (req, res) => {
+export const getArtistReleases: RequestHandler<
+  { id: string },
+  unknown,
+  unknown,
+  { page?: string; limit?: string }
+> = async (req, res) => {
   const artistId = parseArtistId(req.params.id);
+
+  // Express's `simple` query parser yields string[] for a repeated key, and
+  // parseInt(['1','2']) stringifies to '1,2' → 1, silently coercing rather
+  // than erroring (#1553).
+  if (req.query.page !== undefined && typeof req.query.page !== 'string') {
+    throw new WxycError('page must be a single string value', 400);
+  }
+  const page = parseInt(req.query.page ?? '0');
+  if (isNaN(page) || page < 0) {
+    throw new WxycError('page must be a non-negative integer', 400);
+  }
+
+  if (req.query.limit !== undefined && typeof req.query.limit !== 'string') {
+    throw new WxycError('limit must be a single string value', 400);
+  }
+  const limit = parseInt(req.query.limit ?? String(DEFAULT_RELEASES_LIMIT));
+  if (isNaN(limit) || limit < 1) {
+    throw new WxycError('limit must be a positive integer', 400);
+  }
+  if (limit > MAX_RELEASES_LIMIT) {
+    throw new WxycError(`limit must not exceed ${MAX_RELEASES_LIMIT}`, 400);
+  }
+
   if (!(await libraryService.getArtistNameById(artistId))) {
     throw new WxycError('Artist not found', 404);
   }
-  const releases = await libraryService.getReleasesForArtist(artistId);
-  res.status(200).json({ artist_id: artistId, releases });
+  const [releases, total] = await Promise.all([
+    libraryService.getReleasesForArtist(artistId, page, limit),
+    libraryService.countReleasesForArtist(artistId),
+  ]);
+  res.status(200).json({ artist_id: artistId, releases, total, page, totalPages: Math.ceil(total / limit) });
 };
 
 export const getRotation: RequestHandler = async (req, res) => {
@@ -1204,13 +1304,7 @@ export const getAlbum: RequestHandler<
   res.status(200).json(album);
 };
 
-const parseAlbumId = (rawId: string): number => {
-  const albumId = Number(rawId);
-  if (!Number.isInteger(albumId) || albumId <= 0) {
-    throw new WxycError('Invalid album ID', 400);
-  }
-  return albumId;
-};
+const parseAlbumId = (rawId: string): number => parseResourceId(rawId, 'album');
 
 type UpdateAlbumRequest = {
   album_title?: string;

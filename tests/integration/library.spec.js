@@ -1934,14 +1934,48 @@ describe('Library Artist Card (BS#2156)', () => {
       expect(res.body.code_letters).toBe(artist.code_letters);
     });
 
+    // `artist_genre_key` is unique on (artist_id, genre_id), not on artist_id
+    // alone: a legacy-imported artist filed under several genres has several
+    // crossreference rows, each with its own genre-scoped
+    // `artist_genre_code`. `getArtistCardById`'s `.orderBy(asc(genre_id))` is
+    // what makes the card a stable answer instead of whichever row the
+    // planner happened to emit first.
+    test('collapses a multi-genre artist to the lowest-genre_id crossreference deterministically', async () => {
+      const artist = await createTestArtist();
+      const sql = getTestDb();
+      // Genre 6 sorts below the genre 11 the artist was created in.
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${artist.id}, 6, 9911)`
+      );
+
+      try {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const res = await auth.get(`/library/artists/${artist.id}`).expect(200);
+          expect(res.body.genre_id).toBe(6);
+          expect(res.body.code_artist_number).toBe(9911);
+        }
+      } finally {
+        await sql.unsafe(
+          `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${artist.id} AND genre_id = 6`
+        );
+      }
+    });
+
     test('404s on an unknown artist id', async () => {
       const res = await auth.get('/library/artists/99999999').expect(404);
       expectErrorContains(res, 'not found');
     });
 
-    test('400s on a non-numeric artist id', async () => {
-      await auth.get('/library/artists/not-a-number').expect(400);
-    });
+    // `artists.id` is a `serial` (int4). Every one of these parses as a JS
+    // number, so without a strict spelling + INT4_MAX check they reach
+    // Postgres (500 + a Sentry event) or alias distinct URLs onto one row.
+    test.each([['not-a-number'], ['2147483648'], ['1e21'], ['0x2a'], ['%2042%20'], ['42.0'], ['-1'], ['0'], ['007']])(
+      '400s on the malformed artist id %s',
+      async (rawId) => {
+        await auth.get(`/library/artists/${rawId}`).expect(400);
+      }
+    );
 
     // Route-ordering pin (BS#2156 constraint): `/artists/search` and
     // `/artists/peek-code` are literal routes registered before this
@@ -1961,7 +1995,7 @@ describe('Library Artist Card (BS#2156)', () => {
   });
 
   describe('PATCH /library/artists/:id', () => {
-    test('updates artist_name and alphabetical_name', async () => {
+    test('updates artist_name and alphabetical_name, answering in the GET card shape', async () => {
       const artist = await createTestArtist();
       const renamed = `Renamed ${artist.artist_name}`;
 
@@ -1970,12 +2004,75 @@ describe('Library Artist Card (BS#2156)', () => {
         .send({ artist_name: renamed, alphabetical_name: `${artist.alphabetical_name}, Renamed` })
         .expect(200);
 
+      // Same field set the sibling GET on this URL serves -- `artist_id`, not
+      // the bare `artists` RETURNING row's `id`.
+      expectFields(
+        res.body,
+        'artist_id',
+        'artist_name',
+        'alphabetical_name',
+        'genre_id',
+        'code_letters',
+        'code_artist_number'
+      );
+      expect(res.body.artist_id).toBe(artist.id);
+      expect(res.body.id).toBeUndefined();
       expect(res.body.artist_name).toBe(renamed);
       expect(res.body.alphabetical_name).toBe(`${artist.alphabetical_name}, Renamed`);
 
       const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
-      expect(card.body.artist_name).toBe(renamed);
-      expect(card.body.alphabetical_name).toBe(`${artist.alphabetical_name}, Renamed`);
+      expect(card.body).toEqual(res.body);
+    });
+
+    // `req.body` is undefined for a body-less request under body-parser 2.x +
+    // Express 5 (no `{}` default), so the guard is what keeps a bare
+    // `curl -X PATCH` from dereferencing undefined -> 500.
+    test('returns 400, not 500, when no body is sent at all', async () => {
+      const artist = await createTestArtist();
+
+      const res = await auth.patch(`/library/artists/${artist.id}`).expect(400);
+      expectErrorContains(res, 'artist_name');
+    });
+
+    test('returns 400 on a body-less PATCH even for an unknown artist id', async () => {
+      await auth.patch('/library/artists/99999999').expect(400);
+    });
+
+    test.each([
+      ['artist_name', 123],
+      ['artist_name', ['a']],
+      ['artist_name', {}],
+      ['alphabetical_name', 123],
+      ['alphabetical_name', ['a']],
+      ['alphabetical_name', {}],
+    ])('returns 400 when %s is sent as a non-string (%p)', async (field, value) => {
+      const artist = await createTestArtist();
+
+      const res = await auth
+        .patch(`/library/artists/${artist.id}`)
+        .send({ [field]: value })
+        .expect(400);
+      expectErrorContains(res, field);
+    });
+
+    test.each(['artist_name', 'alphabetical_name'])('returns 400 when %s exceeds 128 characters', async (field) => {
+      const artist = await createTestArtist();
+
+      const res = await auth
+        .patch(`/library/artists/${artist.id}`)
+        .send({ [field]: 'x'.repeat(129) })
+        .expect(400);
+      expectErrorContains(res, '128');
+    });
+
+    test.each(['artist_name', 'alphabetical_name'])('returns 400 when %s is whitespace-only', async (field) => {
+      const artist = await createTestArtist();
+
+      const res = await auth
+        .patch(`/library/artists/${artist.id}`)
+        .send({ [field]: '   ' })
+        .expect(400);
+      expectErrorContains(res, field);
     });
 
     test('drops fields outside the allowlist rather than applying them', async () => {
@@ -2023,6 +2120,46 @@ describe('Library Artist Card (BS#2156)', () => {
       expect(card.body.artist_name).toBe(second.artist_name);
     });
 
+    // The soundness half of the conflict guard. `artistIdFromName` is
+    // `.limit(1)` with no `orderBy`, so on a genre that ALREADY holds two
+    // fold-equal rows (46 such groups / 93 rows exist in the production
+    // clone) it returns an arbitrary one of them -- possibly the row being
+    // renamed, whereupon a "fetch one, compare to self" guard concludes it
+    // collides only with itself and lets the rename through. The duplicate
+    // below is seeded straight into SQL because `POST /library/artists`
+    // refuses to create it; the rename then targets the LOWER-id row, the
+    // one an unordered probe is most likely to hand back.
+    test('409s on a fold-equal rename even when the genre already holds a fold-equal duplicate', async () => {
+      const artist = await createTestArtist();
+      const sql = getTestDb();
+      const [duplicate] = await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artists (artist_name, alphabetical_name, code_letters)
+         VALUES ('${artist.artist_name}', '${artist.alphabetical_name}', '${artist.code_letters}')
+         RETURNING id`
+      );
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${duplicate.id}, 11, 9912)`
+      );
+
+      try {
+        const res = await auth
+          .patch(`/library/artists/${artist.id}`)
+          .send({ artist_name: artist.artist_name.toLowerCase() })
+          .expect(409);
+        expect(res.body.reason).toBe('artist_name_conflict');
+        expect(res.body.artist.artist_id).toBe(duplicate.id);
+
+        // The rename did not take effect -- the genre still holds exactly the
+        // two fold-equal rows it started with, not a third spelling.
+        const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
+        expect(card.body.artist_name).toBe(artist.artist_name);
+      } finally {
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${duplicate.id}`);
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.artists WHERE id = ${duplicate.id}`);
+      }
+    });
+
     test('allows re-saving the same artist_name (no-op rename does not 409 against itself)', async () => {
       const artist = await createTestArtist();
 
@@ -2042,57 +2179,129 @@ describe('Library Artist Card (BS#2156)', () => {
   });
 
   describe('GET /library/artists/:id/releases', () => {
-    test('returns the release-table columns for that artist, ordered by call number', async () => {
-      const artist = await createTestArtist();
+    async function addRelease(artistId, title) {
+      const res = await auth
+        .post('/library')
+        .send({
+          album_title: title,
+          artist_id: artistId,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+      return res.body;
+    }
 
-      const first = await auth
-        .post('/library')
-        .send({
-          album_title: `Release B ${Date.now()}`,
-          artist_id: artist.id,
-          label: 'Test Label',
-          genre_id: 11,
-          format_id: 1,
-        })
-        .expect(201);
-      const second = await auth
-        .post('/library')
-        .send({
-          album_title: `Release A ${Date.now()}`,
-          artist_id: artist.id,
-          label: 'Test Label',
-          genre_id: 11,
-          format_id: 1,
-        })
-        .expect(201);
+    test('returns the release-table columns for that artist, including the genre dimension', async () => {
+      const artist = await createTestArtist();
+      await addRelease(artist.id, `Release Fields ${Date.now()}`);
 
       const res = await auth.get(`/library/artists/${artist.id}/releases`).expect(200);
 
       expect(res.body.artist_id).toBe(artist.id);
       expect(Array.isArray(res.body.releases)).toBe(true);
-      expect(res.body.releases).toHaveLength(2);
+      expect(res.body.releases).toHaveLength(1);
+      expect(res.body.total).toBe(1);
+      expect(res.body.page).toBe(0);
+      expect(res.body.totalPages).toBe(1);
       res.body.releases.forEach((release) =>
         expectFields(
           release,
           'id',
           'last_modified',
           'format_name',
+          // The call number is code_letters + code_artist_number +
+          // code_number (+ code_volume_letters), and code_artist_number is
+          // GENRE-scoped -- without genre_id + code_artist_number the
+          // projected call number is incomplete and rows sharing a
+          // code_number are mutually indistinguishable.
+          'genre_id',
           'code_letters',
+          'code_artist_number',
           'code_number',
           'code_volume_letters',
           'album_title',
           'alternate_artist_name'
         )
       );
-      // Ordered by code_number ascending (shelf order): the first-added
-      // album mints the lower code_number via generateAlbumCodeNumber.
-      expect(res.body.releases[0].id).toBe(first.body.id);
-      expect(res.body.releases[1].id).toBe(second.body.id);
+      expect(res.body.releases[0].genre_id).toBe(11);
+      expect(res.body.releases[0].code_letters).toBe(artist.code_letters);
+      expect(typeof res.body.releases[0].code_artist_number).toBe('number');
+    });
+
+    // Shelf order must come from the call number, not from insertion order.
+    // `generateAlbumCodeNumber` is max+1, so albums added through the API get
+    // code_numbers that agree with insertion order, id order, and add_date
+    // order all at once -- an ordering assertion over API-created rows would
+    // pass with NO `orderBy` at all. These rows are therefore renumbered out
+    // of insertion order first, and two of them are put on the same
+    // code_number so the `code_volume_letters` tiebreak is exercised too.
+    test('orders by the full call number, not by insertion/id order', async () => {
+      const artist = await createTestArtist();
+      const first = await addRelease(artist.id, `Shelf One ${Date.now()}`);
+      const second = await addRelease(artist.id, `Shelf Two ${Date.now()}`);
+      const third = await addRelease(artist.id, `Shelf Three ${Date.now()}`);
+
+      const sql = getTestDb();
+      // Expected shelf order after this renumbering: third (7, 'A'),
+      // second (7, 'B'), first (9) -- the exact reverse of insertion order.
+      await sql.unsafe(
+        `UPDATE ${SCHEMA}.library SET code_number = 9, code_volume_letters = NULL WHERE id = ${first.id}`
+      );
+      await sql.unsafe(
+        `UPDATE ${SCHEMA}.library SET code_number = 7, code_volume_letters = 'B' WHERE id = ${second.id}`
+      );
+      await sql.unsafe(
+        `UPDATE ${SCHEMA}.library SET code_number = 7, code_volume_letters = 'A' WHERE id = ${third.id}`
+      );
+
+      const res = await auth.get(`/library/artists/${artist.id}/releases`).expect(200);
+
+      expect(res.body.releases.map((release) => release.id)).toEqual([third.id, second.id, first.id]);
+    });
+
+    test('paginates with page/limit and reports total/totalPages', async () => {
+      const artist = await createTestArtist();
+      const created = [
+        await addRelease(artist.id, `Page One ${Date.now()}`),
+        await addRelease(artist.id, `Page Two ${Date.now()}`),
+        await addRelease(artist.id, `Page Three ${Date.now()}`),
+      ];
+      const shelfOrder = created.map((release) => release.id);
+
+      const firstPage = await auth.get(`/library/artists/${artist.id}/releases`).query({ limit: 2 }).expect(200);
+      expect(firstPage.body.releases.map((release) => release.id)).toEqual(shelfOrder.slice(0, 2));
+      expect(firstPage.body.total).toBe(3);
+      expect(firstPage.body.page).toBe(0);
+      expect(firstPage.body.totalPages).toBe(2);
+
+      const secondPage = await auth
+        .get(`/library/artists/${artist.id}/releases`)
+        .query({ page: 1, limit: 2 })
+        .expect(200);
+      expect(secondPage.body.releases.map((release) => release.id)).toEqual(shelfOrder.slice(2));
+      expect(secondPage.body.total).toBe(3);
+      expect(secondPage.body.page).toBe(1);
+    });
+
+    test.each([
+      ['limit above the maximum', { limit: 101 }],
+      ['a zero limit', { limit: 0 }],
+      ['a negative page', { page: -1 }],
+      ['a non-numeric limit', { limit: 'all' }],
+    ])('400s on %s', async (_label, query) => {
+      const artist = await createTestArtist();
+      await auth.get(`/library/artists/${artist.id}/releases`).query(query).expect(400);
     });
 
     test('404s on an unknown artist id', async () => {
       const res = await auth.get('/library/artists/99999999/releases').expect(404);
       expectErrorContains(res, 'not found');
+    });
+
+    test('400s on a malformed artist id', async () => {
+      await auth.get('/library/artists/2147483648/releases').expect(400);
     });
   });
 });

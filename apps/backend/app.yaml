@@ -2058,8 +2058,12 @@ paths:
   /library/artists/{id}:
     get:
       summary: Get an artist's card (BS#2156)
+      description: >
+        Enforced by `requirePermissions({ catalog: ['read'] })` — DJ role or
+        above, the same tier as the other catalog reads documented with the
+        `catalog-read` scope.
       security:
-        - BearerAuth: ['dj']
+        - BearerAuth: ['catalog-read']
       parameters:
         - in: path
           name: id
@@ -2093,8 +2097,13 @@ paths:
 
     patch:
       summary: Update an artist's name fields (BS#2156)
+      description: >
+        Enforced by `requirePermissions({ catalog: ['write'] })` — musicDirector
+        or above, the same tier as `POST`/`PATCH /library`. Both fields are
+        capped at 128 characters (the `varchar(128)` column width) and must be
+        non-empty strings; any other field on the body is silently dropped.
       security:
-        - BearerAuth: ['station-management']
+        - BearerAuth: ['catalog-write']
       parameters:
         - in: path
           name: id
@@ -2109,13 +2118,36 @@ paths:
               properties:
                 artist_name:
                   type: string
+                  maxLength: 128
                 alphabetical_name:
                   type: string
+                  maxLength: 128
       responses:
         '200':
-          description: Successfully updated artist
+          description: >
+            The refreshed artist card — the same field set `GET
+            /library/artists/{id}` returns.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artist_id:
+                    type: integer
+                  artist_name:
+                    type: string
+                  alphabetical_name:
+                    type: string
+                  genre_id:
+                    type: integer
+                  code_letters:
+                    type: string
+                  code_artist_number:
+                    type: integer
         '400':
-          description: Invalid artist id, or no updatable fields provided
+          description: >
+            Invalid artist id, missing/non-object body, no updatable fields
+            provided, or a field that is empty or over 128 characters
         '404':
           description: Artist not found
         '409':
@@ -2124,17 +2156,41 @@ paths:
   /library/artists/{id}/releases:
     get:
       summary: List an artist's releases (BS#2156)
+      description: >
+        Enforced by `requirePermissions({ catalog: ['read'] })` — DJ role or
+        above. Offset-paginated in the same `page`/`limit` shape as `GET
+        /library/query`. Rows carry the full physical call number
+        (`code_letters` + `code_artist_number` + `code_number` +
+        `code_volume_letters`); `code_artist_number` is genre-scoped, hence the
+        per-row `genre_id`. Ordered by shelf order — `code_number`, then
+        `code_volume_letters`, then `id` as a total order.
       security:
-        - BearerAuth: ['dj']
+        - BearerAuth: ['catalog-read']
       parameters:
         - in: path
           name: id
           required: true
           schema:
             type: integer
+        - in: query
+          name: page
+          required: false
+          description: Zero-based page index.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
       responses:
         '200':
-          description: The artist's releases, ordered by call number
+          description: One page of the artist's releases, in shelf order
           content:
             application/json:
               schema:
@@ -2154,8 +2210,12 @@ paths:
                           format: date-time
                         format_name:
                           type: string
+                        genre_id:
+                          type: integer
                         code_letters:
                           type: string
+                        code_artist_number:
+                          type: integer
                         code_number:
                           type: integer
                         code_volume_letters:
@@ -2166,8 +2226,14 @@ paths:
                         alternate_artist_name:
                           type: string
                           nullable: true
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  totalPages:
+                    type: integer
         '400':
-          description: Invalid artist id
+          description: Invalid artist id, page, or limit
         '404':
           description: Artist not found
 
