@@ -8,7 +8,7 @@
  *      manifest pipeline, it means "has a review" and must never be
  *      re-included.
  *   2. `loadHandedOffLibraryIds` — releases already recorded in
- *      `uncovered_release_search_markers` (migration 0133): the "searched,
+ *      `uncovered_release_search_markers` (migration 0156): the "searched,
  *      found nothing" marker, in the sense of "already handed off for
  *      search at least once" (see that table's schema.ts doc comment for
  *      why publish-once, not retried). Distinct from (1) by construction —

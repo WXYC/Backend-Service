@@ -3,7 +3,7 @@
  * "searched, found nothing" marker writer. `db` is mocked via
  * `tests/mocks/database.mock.ts` (same `_chain` inspection idiom as
  * `album-critic-reviews-etl/writer.test.ts`) — pins that the UPSERT
- * conflicts on `album_id` (the table's real unique index, migration 0133)
+ * conflicts on `album_id` (the table's real unique index, migration 0156)
  * and that a repeat handoff bumps `handoff_count` / refreshes
  * `last_handed_off_at` rather than silently no-op'ing.
  */
@@ -44,7 +44,7 @@ describe('recordHandoffs', () => {
     expect(mockDb._chain.values).toHaveBeenCalledWith([{ album_id: 10 }, { album_id: 20 }, { album_id: 30 }]);
   });
 
-  it('conflicts on album_id (the migration-0133 unique index)', async () => {
+  it('conflicts on album_id (the migration-0156 unique index)', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 1 }]);
     await recordHandoffs([10]);
     expect(upsertConfig().target).toBe('album_id'); // the mock table maps columns to their names
