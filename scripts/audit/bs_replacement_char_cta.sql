@@ -266,7 +266,9 @@
 -- verified no-op. It becomes the actual repair only once an operator fills
 -- in the 14 real rows and re-runs it.
 --
--- "Every statement" is meant literally, and round 3 is what made it true.
+-- "Every statement" is meant literally -- round 3 made it nearly true and
+-- round 5 finished it (the `before-matched-rows` print was still untagged
+-- after round 3, so the claim below was overstated until round 5 tagged it).
 -- Through round 2 the read-only pre-amble (`pending_match_preview` and its
 -- three SELECTs) and the post-amble residual reads carried no
 -- `-- === STMT: ... ===` tags, so the spec's extractor never saw them and
@@ -733,7 +735,17 @@ BEGIN
            CASE
              WHEN current_artist_name IS NULL
                THEN 'current_artist_name is NULL -- the live column is NOT NULL and the enumeration query cannot emit a NULL there, so this row is short a column (did the paste drop one, or include the query''s leading library_id?)'
-             ELSE 'looks transposed or uncorrupted -- every current_* column being fixed must contain U+FFFD and every true_* replacement must not; verify the capture was not pasted backwards (or check client_encoding)'
+             WHEN (true_artist_name IS NOT NULL AND (
+                     current_artist_name NOT LIKE '%' || chr(65533) || '%'
+                     OR true_artist_name LIKE '%' || chr(65533) || '%'
+                   ))
+               OR (true_track_title IS NOT NULL AND (
+                     current_track_title IS NULL
+                     OR current_track_title NOT LIKE '%' || chr(65533) || '%'
+                     OR true_track_title LIKE '%' || chr(65533) || '%'
+                   ))
+               THEN 'looks transposed or uncorrupted -- every current_* column being fixed must contain U+FFFD and every true_* replacement must not; verify the capture was not pasted backwards (or check client_encoding)'
+             ELSE 'a true_* replacement has leading/trailing whitespace or is empty -- it would be written verbatim, and a repaired row that differs from the ETL''s trimmed insert by whitespace is no longer suppressed by importCompilationTracks'' ON CONFLICT DO NOTHING, so the next 30-minute cycle re-creates the duplicate this script exists to avoid. Trim it (or use NULL for a genuinely absent track_title)'
            END AS reason
       FROM pending_cta_repair
      -- UNCONDITIONAL, not gated on which column is being fixed (round 3
@@ -758,6 +770,24 @@ BEGIN
              current_track_title IS NULL
              OR current_track_title NOT LIKE '%' || chr(65533) || '%'
              OR true_track_title LIKE '%' || chr(65533) || '%'
+           ))
+     -- Round 5 finding: a true_* value with leading/trailing whitespace (or an
+     -- empty string) passed every guard and was written verbatim. Capture
+     -- channel (a) in the procedure above trims and maps empty to NULL, but
+     -- channel (c) -- raw Kattare MySQL, which this script's header explicitly
+     -- offers -- does not. The consequence is not cosmetic: `library-etl`'s
+     -- importCompilationTracks inserts the TRIMMED string, its
+     -- `ON CONFLICT DO NOTHING` is keyed on cta_unique_idx, and a repaired row
+     -- that differs by whitespace no longer conflicts with it -- so the next
+     -- 30-minute cycle inserts the ETL's copy alongside the repaired one and
+     -- re-creates exactly the duplicate this whole script is built to avoid.
+        OR (true_artist_name IS NOT NULL AND (
+             btrim(true_artist_name) <> true_artist_name
+             OR true_artist_name = ''
+           ))
+        OR (true_track_title IS NOT NULL AND (
+             btrim(true_track_title) <> true_track_title
+             OR true_track_title = ''
            ))
   LOOP
     RAISE EXCEPTION 'BS#2152 guard: legacy_release_id=% track_position=% %  (current_artist_name=% current_track_title=% true_artist_name=% true_track_title=%)', bad.legacy_release_id, bad.track_position, bad.reason, bad.current_artist_name, bad.current_track_title, bad.true_artist_name, bad.true_track_title;
@@ -948,6 +978,19 @@ SET LOCAL statement_timeout = '30s';
 -- they cannot disagree with this classification the way a byte-exact
 -- re-check against an NFC-folded match would (see each statement's own
 -- comment for what disagreeing would have looked like).
+--
+-- Residual limitation of that widening, stated rather than left implicit
+-- (round 5 finding): on this path the surviving row is the NFD twin,
+-- byte-for-byte, so the NFC bytes the operator captured from tubafrenzy are
+-- DISCARDED -- `artist_name = <captured true value>` is false afterwards even
+-- though the credit is correct and the U+FFFD is gone. This is accepted, not
+-- fixed: normalizing the twin would mean writing a row that was never
+-- corrupt, widening this script's blast radius past the 14 rows it declares.
+-- It is bounded (canonically-equivalent text, same glyphs) but it is NOT
+-- byte-exactness, and the catalog-parity harness this script's header cites
+-- (discogs-etl#346) compares bytes. The BEFORE print projects
+-- twin_artist_name/twin_track_title alongside new_artist_name/new_track_title
+-- precisely so an operator can SEE the two differ before committing.
 DROP TABLE IF EXISTS pg_temp.cta_repair_targets;
 CREATE TEMP TABLE cta_repair_targets AS
 SELECT
@@ -965,6 +1008,16 @@ SELECT
   COALESCE(p.true_track_title, cta.track_title) AS new_track_title,
   twin.id AS twin_id,
   twin.track_position AS twin_track_position,
+  -- Carried for the BEFORE print only (round 5 finding). On the widened
+  -- DELETE branch below, the row that SURVIVES is the twin, byte-for-byte --
+  -- so when the twin is NFD and the capture is NFC, what remains is NOT the
+  -- value the operator read out of Kattare. Projecting the twin's own
+  -- name/title next to new_artist_name/new_track_title is the only way that
+  -- divergence is visible in the run output; without it the postlude reads
+  -- 0/0 residual, no duplicate, exit 0, and the discarded ground-truth bytes
+  -- leave no trace at all.
+  twin.artist_name AS twin_artist_name,
+  twin.track_title AS twin_track_title,
   twin.track_artist_id AS twin_track_artist_id,
   twin.track_artist_link_confidence AS twin_track_artist_link_confidence,
   twin.track_artist_link_method AS twin_track_artist_link_method,
@@ -1062,12 +1115,32 @@ END $$;
 -- === END STMT ===
 
 -- === STMT: guard-ambiguous-match ===
--- A pending row resolving to more than one live row should be impossible --
--- (library_id, artist_name, track_title) is exactly cta_unique_idx's key
--- (cta_unique_null_track_idx for the NULL-track_title case) -- but this is
--- asserted defensively rather than assumed. Also catches an accidental
--- duplicate entry in the pending block itself (both pending copies would
--- resolve to the same live row, tripping this the same way).
+-- Three distinct causes reach this guard, and round 5 corrected the message,
+-- which named only the first and called the others impossible:
+--
+-- (1) Two live rows matching one pending row's CORRUPT tuple. That really is
+--     structurally impossible -- (library_id, artist_name, track_title) is
+--     exactly cta_unique_idx's key (cta_unique_null_track_idx for the
+--     NULL-track_title case) and the cta-side join is byte-exact. Asserted
+--     defensively rather than assumed.
+--
+-- (2) The NFC-FOLDED twin join matching more than one live twin. This is NOT
+--     impossible and is new as of round 4: the twin join compares
+--     `normalize(..., NFC)`, and NO unique index backs the folded key.
+--     cta_unique_null_track_idx in particular is precisely the index that
+--     cannot constrain two NFC-equal, byte-distinct names. A pre-existing
+--     NFD/NFC clean pair in the same compilation therefore fans one pending
+--     row out to two target rows, which group here on their shared (identical)
+--     old_* tuple and trip this guard. Reproduced on both the non-NULL and the
+--     NULL-track_title paths.
+--
+--     Aborting is the RIGHT outcome for (2) -- the run genuinely cannot tell
+--     which of the two live rows should survive as the twin -- but an operator
+--     told "cta_unique_idx should make this impossible" will go looking for a
+--     violated index and find none.
+--
+-- (3) An accidental duplicate entry in the pending block itself (both pending
+--     copies resolve to the same live row, tripping this the same way).
 DO $$
 DECLARE bad RECORD;
 BEGIN
@@ -1077,7 +1150,7 @@ BEGIN
      GROUP BY legacy_release_id, old_artist_name, old_track_title
     HAVING COUNT(*) > 1
   LOOP
-    RAISE EXCEPTION 'BS#2152 guard: legacy_release_id=% artist_name=% track_title=% matched % live compilation_track_artist rows (or the pending block has a duplicate entry) -- cta_unique_idx / cta_unique_null_track_idx should make this impossible; investigate before proceeding', bad.legacy_release_id, bad.old_artist_name, bad.old_track_title, bad.n;
+    RAISE EXCEPTION 'BS#2152 guard: legacy_release_id=% artist_name=% track_title=% resolved to % target rows, expected 1 -- most likely the NFC-folded twin join matched MORE THAN ONE live twin (two live rows that are canonically equal but byte-distinct; no unique index constrains that -- cta_unique_idx and cta_unique_null_track_idx are byte-exact, so neither is violated and neither would have prevented it). Other causes: a duplicate entry in the pending block, or -- structurally impossible under cta_unique_idx, so check it last -- two live rows matching the corrupt tuple. Inspect the live rows for this compilation and decide which should survive before re-running', bad.legacy_release_id, bad.old_artist_name, bad.old_track_title, bad.n;
   END LOOP;
 END $$;
 -- === END STMT ===
@@ -1144,19 +1217,44 @@ BEGIN
      GROUP BY library_id, normalize(new_artist_name, NFC), normalize(new_track_title, NFC)
     HAVING COUNT(*) > 1
   LOOP
-    RAISE EXCEPTION 'BS#2152 guard: % pending row(s) converge on the same post-fix (NFC-folded) library_id=% artist_name=% track_title=% (legacy_release_id/track_position pairs: %/%) -- two differently-corrupted copies of one credit would collide under cta_unique_idx on a single UPDATE (or leave a form-mismatched duplicate behind, see the NFC folding note above); resolve which capture is correct (or whether one is a distinct real credit) before re-running', bad.n, bad.library_id, bad.new_artist_name_nfc, bad.new_track_title_nfc, bad.release_ids, bad.track_positions;
+    RAISE EXCEPTION 'BS#2152 guard: % pending row(s) converge on the same post-fix (NFC-folded) library_id=% artist_name=% track_title=% (legacy_release_id/track_position pairs: %/%) -- two differently-corrupted copies of one credit would collide under cta_unique_idx on a single UPDATE (or leave a form-mismatched duplicate behind, see the NFC folding note above). Two shapes reach this, with different fixes: (a) the captures disagree or one is a distinct real credit -- resolve which is correct before re-running; (b) BOTH captures are correct and both copies are genuinely the same credit (the 98.5%% double-ingest shape) -- this guard is deliberately over-broad and fires on that too, and the fix is NOT to edit the captures: split the converging rows across two sequential invocations of this script, so each run repairs one copy and the second run sees the first''s result as an ordinary twin', bad.n, bad.library_id, bad.new_artist_name_nfc, bad.new_track_title_nfc, bad.release_ids, bad.track_positions;
   END LOOP;
 END $$;
 -- === END STMT ===
 
+-- === STMT: before-matched-rows ===
+-- Round 5 finding: this block carried no `-- === STMT: ... ===` tags, so the
+-- spec's extractor never saw it and nothing executed it -- the single
+-- statement in this file that reverting broke no test. That is precisely the
+-- gap the "Every statement is meant literally" note above claims round 3
+-- closed; the claim was false for this one statement. Mutation-checked:
+-- renaming a column here left Jest 36/36 green while a real `psql -f` run
+-- with a live pending row exited 3 (`column ... does not exist`), aborting
+-- the transaction in front of the operator. It fails SAFE -- it precedes
+-- every write -- but it kills the run, and it is the only operator-facing
+-- output of the twin/no-twin decision.
+--
+-- twin_artist_name/twin_track_title (round 5) make the DELETE branch's
+-- byte-divergence visible: compare them against new_artist_name/
+-- new_track_title. `twin_is_byte_exact` does the comparison for the operator
+-- -- FALSE on a DELETE row means the surviving twin does NOT hold the
+-- captured bytes (canonically equal, different composition form; see
+-- build-targets' residual-limitation note).
 SELECT 'BEFORE — matched rows + twin classification' AS section;
 SELECT legacy_release_id, track_position, id AS cta_id, old_artist_name, old_track_title,
        new_artist_name, new_track_title,
        CASE WHEN has_twin THEN 'DELETE (twin exists)' ELSE 'UPDATE (no twin)' END AS action,
        old_track_position, old_track_artist_id, old_track_artist_link_confidence, old_track_artist_link_method,
-       twin_id, twin_track_position, twin_track_artist_id, twin_track_artist_link_confidence, twin_track_artist_link_method
+       twin_id, twin_track_position, twin_artist_name, twin_track_title,
+       CASE
+         WHEN NOT has_twin THEN NULL
+         ELSE (twin_artist_name = new_artist_name
+               AND twin_track_title IS NOT DISTINCT FROM new_track_title)
+       END AS twin_is_byte_exact,
+       twin_track_artist_id, twin_track_artist_link_confidence, twin_track_artist_link_method
   FROM cta_repair_targets
  ORDER BY legacy_release_id, track_position;
+-- === END STMT ===
 
 -- === STMT: repoint-twin-identity ===
 -- MEDIUM finding (PR #2154 review round 1): before dropping the corrupt row,
@@ -1227,10 +1325,38 @@ SELECT legacy_release_id, track_position, id AS cta_id, old_artist_name, old_tra
 -- whether the twin is still the row build-targets found; letting only one of
 -- them fold would reopen the exact "statements disagree" hazard the round 3
 -- lock-targets comment above describes for a different cause.
+-- Round 5 finding: the three identity columns move as ONE TUPLE, not
+-- column-by-column. `track_artist_id` + `track_artist_link_confidence` +
+-- `track_artist_link_method` are a single logical fact plus its provenance --
+-- migration 0140 says so in as many words ("per #801 D6, provenance lives on
+-- these three columns only", no sidecar table). COALESCEing them
+-- independently merges two DIFFERENT links into one incoherent row: a twin
+-- holding (id=1111, confidence=NULL, method='librarian') against a corrupt
+-- row holding (id=4242, confidence=0.50, method='lml_backfill') produced
+-- (id=1111, confidence=0.5, method='librarian') -- a machine confidence
+-- computed for artist 4242, attached to artist 1111, labelled human-entered.
+-- Exit 0, every guard green, nothing in the postlude showing it. And
+-- `jobs/library-identity-consumer/writer.ts` treats method='librarian' as
+-- permanent precedence, so a row mislabelled that way is skipped by that job
+-- forever.
+--
+-- The partial shape is reachable today without the (unshipped) librarian
+-- writer: `track_artist_id` is ON DELETE SET NULL on artists.id (migration
+-- 0140), so any artist deletion leaves (id=NULL, confidence=0.93,
+-- method='lml_backfill') behind.
+--
+-- The per-column shape was inherited from `jobs/artist-unicode-dedup/
+-- merge.ts`, cited as the donor in this block's header -- but that donor's
+-- IDENTITY_COLUMNS are six MUTUALLY INDEPENDENT external ids
+-- (discogs/musicbrainz/wikidata/spotify/apple/bandcamp), where per-column
+-- COALESCE is exactly right. The shape was correct there and wrong here.
+--
+-- `track_position` stays independent: it is an ordinary scalar with no
+-- provenance columns bound to it, so COALESCE-preserve remains correct.
 UPDATE wxyc_schema.compilation_track_artist twin
-   SET track_artist_id = COALESCE(twin.track_artist_id, t.old_track_artist_id),
-       track_artist_link_confidence = COALESCE(twin.track_artist_link_confidence, t.old_track_artist_link_confidence),
-       track_artist_link_method = COALESCE(twin.track_artist_link_method, t.old_track_artist_link_method),
+   SET track_artist_id = CASE WHEN twin.track_artist_id IS NULL THEN t.old_track_artist_id ELSE twin.track_artist_id END,
+       track_artist_link_confidence = CASE WHEN twin.track_artist_id IS NULL THEN t.old_track_artist_link_confidence ELSE twin.track_artist_link_confidence END,
+       track_artist_link_method = CASE WHEN twin.track_artist_id IS NULL THEN t.old_track_artist_link_method ELSE twin.track_artist_link_method END,
        track_position = COALESCE(twin.track_position, t.old_track_position)
   FROM cta_repair_targets t
  WHERE t.has_twin
@@ -1364,18 +1490,30 @@ END $$;
 -- sharing a library_id this run touched may be NFC-equal but byte-distinct on
 -- (artist_name, track_title).
 --
--- Scope is "any library_id in cta_repair_targets", not "only rows this run
--- wrote" -- deliberately broader, matching guard-repair-complete's own
--- posture of checking the outcome rather than the mechanism. A pre-existing
--- NFC/NFD duplicate pair that this run never touched, sitting in a
--- compilation this run otherwise repaired, is exactly the kind of thing an
--- operator should see before trusting this run's postlude -- the U+FFFD
--- residual reads 0/0 either way, and that was the whole failure mode the
--- round 4 finding started from. Aborting here rolls back this run's own
--- writes (the same recovery shape as every other guard in this script) but
--- cannot undo a duplicate that predates this run; the exception message says
--- so explicitly rather than implying a clean rollback fixes everything it
--- flags.
+-- Scope: candidate GROUPS are drawn from every library_id this run touched,
+-- but a group only ABORTS if at least one of its rows was actually WRITTEN by
+-- this run (round 5 finding). Through round 4 the guard aborted on any
+-- NFC-duplicate pair in a touched library_id, including one it never wrote --
+-- so a single legitimate no-twin UPDATE in a compilation that happened to
+-- already contain an unrelated `Björk` NFC / `Björk` NFD pair rolled back the
+-- entire 14-row repair, and the repair could not complete until a human
+-- merged a duplicate that had nothing to do with it. Reproduced end to end:
+-- `update-no-twins` reported `UPDATE 1`, this guard fired, everything rolled
+-- back, the corrupt row survived. That is a false abort, not a safety net --
+-- and it is invisible to the read-only `awk` prelude, which stops at `BEGIN;`
+-- while every one of these statements runs after it.
+--
+-- Narrowing to written rows preserves exactly what the guard is for -- a
+-- duplicate this run CREATED or contributed to -- and makes its rollback
+-- advice honest: undoing this run's writes genuinely removes this run's half
+-- of the pair. Pre-existing duplicates the run never touched are a real thing
+-- an operator may want to know about, but they are #1996's territory, not a
+-- reason to refuse a U+FFFD repair; the post-amble residual reads are where
+-- that belongs.
+--
+-- "Written by this run" = the no-twin rows update-no-twins UPDATEd, plus the
+-- surviving twins repoint-twin-identity wrote to (the DELETE branch's
+-- survivor). The deleted rows themselves are gone and cannot be in a group.
 --
 -- `normalize()` here runs only over rows in library_ids from
 -- `cta_repair_targets` -- a handful of compilations per run, not a full-table
@@ -1398,8 +1536,13 @@ BEGIN
      WHERE cta.library_id IN (SELECT DISTINCT library_id FROM cta_repair_targets)
      GROUP BY cta.library_id, normalize(cta.artist_name, NFC), normalize(cta.track_title, NFC)
     HAVING COUNT(*) > 1
+       AND bool_or(cta.id IN (
+             SELECT t.id FROM cta_repair_targets t WHERE NOT t.has_twin
+             UNION
+             SELECT t.twin_id FROM cta_repair_targets t WHERE t.has_twin
+           ))
   LOOP
-    RAISE EXCEPTION 'BS#2152 guard: library_id=% has % rows that are NFC-equal but byte-distinct on (artist_name, track_title) after this run''s writes (cta_ids=%, artist_names=%, track_titles=%) -- this is the exact duplicate class the NFC-folded twin join exists to prevent. Rolling back undoes this run''s own writes but may NOT undo this specific duplicate if it predates this run; investigate the listed rows directly (do they need a manual merge? does an earlier run of this or a sibling script need review?) before re-running', bad.library_id, bad.n, bad.cta_ids, bad.artist_names, bad.track_titles;
+    RAISE EXCEPTION 'BS#2152 guard: library_id=% has % rows that are NFC-equal but byte-distinct on (artist_name, track_title) after this run''s writes, and at least one of them was written by THIS run (cta_ids=%, artist_names=%, track_titles=%) -- this is the exact duplicate class the NFC-folded twin join exists to prevent. Rolling back removes this run''s half of the pair; investigate the listed rows before re-running (is the captured true_* value in a different composition form than the live row it should have matched?)', bad.library_id, bad.n, bad.cta_ids, bad.artist_names, bad.track_titles;
   END LOOP;
 END $$;
 -- === END STMT ===

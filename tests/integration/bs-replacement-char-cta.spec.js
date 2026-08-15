@@ -53,6 +53,12 @@ const fs = require('fs');
 const path = require('path');
 const { getTestDb } = require('../utils/db');
 
+// PostgreSQL dollar-quote delimiters: `$$` or `$tag$`, where tag follows
+// identifier rules -- leading letter/underscore, then letters, DIGITS, or
+// underscores. The digits are the part round 5 found missing: the previous
+// `/\$[A-Za-z_]*\$/` could not match `$q1$` or `$tag1$`.
+const DOLLAR_QUOTE_PATTERN = /\$\$|\$[A-Za-z_][A-Za-z0-9_]*\$/;
+
 const TEST_SCHEMA = 'bs2152_cta_mojibake_test';
 const SCRIPT_PATH = path.join(__dirname, '..', '..', 'scripts', 'audit', 'bs_replacement_char_cta.sql');
 
@@ -74,6 +80,7 @@ const EXPECTED_BLOCKS = [
   'guard-post-fix-fffd',
   'guard-ambiguous-match',
   'guard-converging-pending',
+  'before-matched-rows',
   'repoint-twin-identity',
   'delete-twins',
   'update-no-twins',
@@ -278,9 +285,16 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
    * real `BEGIN`/`COMMIT` here is safe: this is a dedicated reserved
    * connection, not the shared pool the extractor's own comment warns about.
    */
+  // Rows the `before-matched-rows` operator print emitted on the most recent
+  // run, so a test can assert on what the OPERATOR actually sees rather than
+  // re-deriving it from cta_repair_targets (which outlives neither the
+  // transaction nor a guard abort).
+  let lastBeforeMatchedRows = [];
+
   async function runRepairScript(insertPhase, hooks = {}) {
     const reservedSql = await sql.reserve();
     let inTransaction = false;
+    lastBeforeMatchedRows = [];
     try {
       await reservedSql.unsafe(blocks['create-pending-table']);
       await insertPhase(reservedSql);
@@ -316,6 +330,16 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
       if (hooks.afterGuards) {
         await hooks.afterGuards(reservedSql);
       }
+      // The operator-facing BEFORE print. Executed here, in its real
+      // position, because through round 4 it was untagged and therefore
+      // unexecuted -- a column typo in it passed the whole suite and then
+      // aborted the real prod run under ON_ERROR_STOP (round 5 finding).
+      // Two statements (the section label, then the projection), so
+      // postgres-js returns one result array per statement -- the rows are
+      // the SECOND. Verified against the driver rather than assumed:
+      // `[[{section}], [ ...rows ]]`.
+      const beforeMatched = await reservedSql.unsafe(blocks['before-matched-rows']);
+      lastBeforeMatchedRows = beforeMatched.length === 2 ? beforeMatched[1] : beforeMatched;
       await reservedSql.unsafe(blocks['repoint-twin-identity']);
       const deleteResult = await reservedSql.unsafe(blocks['delete-twins']);
       const updateResult = await reservedSql.unsafe(blocks['update-no-twins']);
@@ -327,7 +351,7 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
       inTransaction = false;
 
       await reservedSql.unsafe(blocks['analyze']);
-      return { deleted: deleteResult.count, updated: updateResult.count };
+      return { deleted: deleteResult.count, updated: updateResult.count, beforeMatched: lastBeforeMatchedRows };
     } catch (err) {
       // A guard RAISE EXCEPTION (or a real constraint violation) inside the
       // transaction aborts it server-side; roll back explicitly so this
@@ -381,7 +405,7 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
     return rows[0].n;
   }
 
-  test('extracts exactly the 21 expected STMT blocks, in order', () => {
+  test('extracts exactly the 22 expected STMT blocks, in order', () => {
     expect(Object.keys(blocks)).toEqual(EXPECTED_BLOCKS);
     for (const name of EXPECTED_BLOCKS) {
       expect(blocks[name].trim().length).toBeGreaterThan(0);
@@ -492,7 +516,31 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
     // the whole suite stays green -- so the header's "goes red the moment
     // real rows land" contract, and the byte-assertion gate it defers to,
     // would both be bypassable without this second assertion.
-    expect(sqlOnly).not.toMatch(/\$[A-Za-z_]*\$/);
+    expect(sqlOnly).not.toMatch(DOLLAR_QUOTE_PATTERN);
+  });
+
+  test('the dollar-quote paste gate catches tags containing digits', () => {
+    // Round 5 finding: the pattern was /\$[A-Za-z_]*\$/, which cannot match
+    // `$q1$` or `$tag1$` -- the character class excludes digits and there is
+    // no second class for the tail. A real 14-row paste using such a tag
+    // carries no apostrophe, so it slipped BOTH assertions and the header's
+    // "goes red the moment real rows land" contract (and the byte-exact
+    // codepoint assertion it defers to) was bypassable.
+    //
+    // Asserted against a realistic ACCENTED payload on purpose. With an
+    // ASCII-only value the old pattern matched by ACCIDENT -- in
+    // `$q1$Csillagrablok$q1$` the substring `$Csillagrablok$` is itself a
+    // valid `\$[A-Za-z_]*\$` match -- so an ASCII fixture reports the hole as
+    // already closed. The accent is what breaks that coincidence.
+    const realPastes = [
+      "(50340, 3, 'Csillagrablók', NULL)",
+      '(50340, 3, $$Csillagrablók$$, NULL)',
+      '(50340, 3, $q1$Csillagrablók$q1$, NULL)',
+      '(50340, 3, $tag1$Csillagrablók$tag1$, NULL)',
+    ];
+    for (const paste of realPastes) {
+      expect(paste.includes("'") || DOLLAR_QUOTE_PATTERN.test(paste)).toBe(true);
+    }
   });
 
   test('the shipped insert-pending-rows block (as committed) is a genuine no-op', async () => {
@@ -798,8 +846,13 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
     // generic /BS#2152 guard/ prefix a prior version of this test asserted
     // is shared by all seven guards, so it cannot tell this apart from
     // guard-converging-pending, guard-capture-sanity, etc. firing instead.
+    // Round 5 re-pointed this fragment when the guard's message was corrected
+    // (it named a violated index that post-round-4 is not the likeliest
+    // cause). This test exercises cause (3) -- a duplicate entry in the
+    // PENDING block -- so it asserts on that clause specifically; the
+    // NFC-fan-out cause (2) has its own test below.
     await expect(runRepairScript(withSyntheticPendingRows([dupPendingRow, { ...dupPendingRow }]))).rejects.toThrow(
-      'live compilation_track_artist rows'
+      'a duplicate entry in the pending block'
     );
   });
 
@@ -1585,14 +1638,20 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
     expect(rows[1].track_title).toBe('Sonido C�smico');
   });
 
-  test('BS#2152 round 4: guard-post-write-nfc-duplicate fires when a touched library_id holds two NFC-equal, byte-distinct rows', async () => {
-    // The belt-and-braces half of the round 4 fix: this guard checks the
-    // OUTCOME (no two live rows in a touched library_id are NFC-equal but
-    // byte-distinct), not just the twin-join mechanism that is supposed to
-    // prevent it. Reproduced here via a pre-existing NFC/NFD pair the run
-    // never touches directly, sitting in a compilation this run otherwise
-    // repairs -- scope is "library_id in cta_repair_targets", deliberately
-    // broader than "rows this run wrote", per the guard's own comment.
+  // ==========================================================================
+  // Round 5 review findings.
+  // ==========================================================================
+
+  test('BS#2152 round 5: a pre-existing NFC/NFD duplicate this run never wrote does NOT block an unrelated repair in the same compilation', async () => {
+    // Round 4 shipped guard-post-write-nfc-duplicate scoped to "any
+    // library_id in cta_repair_targets", which made any pre-existing
+    // duplicate pair a hard blocker for the ENTIRE 14-row repair: the
+    // legitimate no-twin UPDATE below succeeded, the guard then fired on a
+    // pair it never touched, and the whole transaction rolled back. The
+    // repair could not complete until a human merged a duplicate that had
+    // nothing to do with it -- in the same table #1996 is separately blocked
+    // on. This test is the round-4 test inverted: same fixture, opposite
+    // expectation.
     const libraryId = await seedLibrary(90041);
     const nfdTitle = 'Sonido Cósmico'.normalize('NFD');
     await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido Cósmico', '1'); // NFC
@@ -1600,28 +1659,270 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
 
     const corruptId = await seedCta(libraryId, 'Csillagrablók', 'Rem�nytelen T�nc', '4');
 
+    const result = await runRepairScript(
+      withSyntheticPendingRows([
+        {
+          legacy_release_id: 90041,
+          track_position: '4',
+          current_artist_name: 'Csillagrablók',
+          current_track_title: 'Rem�nytelen T�nc',
+          true_track_title: 'Reménytelen Tánc',
+        },
+      ])
+    );
+
+    expect(result.updated).toBe(1);
+    const row = await ctaRow(corruptId);
+    expect(row.track_title).toBe('Reménytelen Tánc');
+
+    // The pre-existing pair is still there, untouched. That is #1996's
+    // territory, not this script's -- what matters is that it no longer
+    // vetoes a U+FFFD repair.
+    expect(await ctaCount(libraryId)).toBe(3);
+  });
+
+  test('BS#2152 round 5: guard-post-write-nfc-duplicate still fires when a row THIS run wrote is half of the duplicate', async () => {
+    // The narrowing must not neuter the guard. A concurrent INSERT is the one
+    // shape lock-targets structurally cannot prevent -- it takes row locks on
+    // rows that EXIST at classification time, and a brand-new row has none to
+    // take. Injected through the afterGuards hook so it lands in the real
+    // window: after the twin join has already concluded "no twin", before
+    // update-no-twins writes.
+    const libraryId = await seedLibrary(90042);
+    const corruptId = await seedCta(libraryId, 'Csillagrablók', 'Rem�nytelen T�nc', '4');
+
     await expect(
       runRepairScript(
         withSyntheticPendingRows([
           {
-            legacy_release_id: 90041,
+            legacy_release_id: 90042,
             track_position: '4',
             current_artist_name: 'Csillagrablók',
             current_track_title: 'Rem�nytelen T�nc',
             true_track_title: 'Reménytelen Tánc',
           },
-        ])
+        ]),
+        {
+          afterGuards: async (reservedSql) => {
+            await reservedSql.unsafe(
+              `INSERT INTO ${TEST_SCHEMA}.compilation_track_artist (library_id, artist_name, track_title, track_position)
+               VALUES (${libraryId}, 'Csillagrablók', normalize('Reménytelen Tánc', NFD), '9')`
+            );
+          },
+        }
       )
-      // Guard-specific fragment.
     ).rejects.toThrow('NFC-equal but byte-distinct');
 
-    // Rolled back -- this run's own UPDATE to the unrelated corrupt row is
-    // undone (the recovery shape every guard in this script uses), even
-    // though the duplicate it flagged predates this run and is NOT undone by
-    // the rollback -- the guard's own message says as much.
+    // And now the message's rollback advice is honest: undoing this run's
+    // write genuinely removes this run's half of the pair.
     const row = await ctaRow(corruptId);
-    expect(row.artist_name).toBe('Csillagrablók');
     expect(row.track_title).toBe('Rem�nytelen T�nc');
+  });
+
+  test('BS#2152 round 5: an NFC-folded twin join that fans out to TWO live twins aborts via guard-ambiguous-match, naming the fold rather than a violated index', async () => {
+    // Pre-round-4 the twin join was byte-exact on exactly cta_unique_idx's
+    // key, so it could structurally match at most one row and the guard's
+    // "cta_unique_idx should make this impossible" message was true. Folded
+    // to NFC, no unique index backs the compared key -- cta_unique_null_track_idx
+    // is precisely the index that cannot constrain two NFC-equal,
+    // byte-distinct names -- so a pre-existing NFD/NFC clean pair fans one
+    // pending row out to two target rows. Aborting is right; blaming an index
+    // that was never violated sends the operator looking for the wrong thing.
+    const libraryId = await seedLibrary(90043);
+    await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido Cósmico', '1'); // NFC twin candidate
+    await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido Cósmico'.normalize('NFD'), '2'); // NFD twin candidate
+    const corruptId = await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido C�smico', '4');
+
+    await expect(
+      runRepairScript(
+        withSyntheticPendingRows([
+          {
+            legacy_release_id: 90043,
+            track_position: '4',
+            current_artist_name: 'Hermanos Gutiérrez',
+            current_track_title: 'Sonido C�smico',
+            true_track_title: 'Sonido Cósmico',
+          },
+        ])
+      )
+    ).rejects.toThrow('NFC-folded twin join matched MORE THAN ONE live twin');
+
+    const row = await ctaRow(corruptId);
+    expect(row.track_title).toBe('Sonido C�smico');
     expect(await ctaCount(libraryId)).toBe(3);
   });
+
+  test.each([
+    {
+      shape: 'twin linked, corrupt row carries a different link',
+      legacyReleaseId: 90044,
+      twin: { track_artist_id: 1111, track_artist_link_confidence: null, track_artist_link_method: 'librarian' },
+      corrupt: { track_artist_id: 4242, track_artist_link_confidence: 0.5, track_artist_link_method: 'lml_backfill' },
+      expected: { track_artist_id: 1111, track_artist_link_confidence: null, track_artist_link_method: 'librarian' },
+    },
+    {
+      shape: 'twin orphaned by ON DELETE SET NULL, corrupt row carries a whole link',
+      legacyReleaseId: 90045,
+      twin: { track_artist_id: null, track_artist_link_confidence: 0.93, track_artist_link_method: 'lml_backfill' },
+      corrupt: { track_artist_id: 4242, track_artist_link_confidence: 0.5, track_artist_link_method: 'lml_backfill' },
+      expected: { track_artist_id: 4242, track_artist_link_confidence: 0.5, track_artist_link_method: 'lml_backfill' },
+    },
+  ])(
+    'BS#2152 round 5: repoint-twin-identity moves the identity link as one TUPLE, not column-by-column ($shape)',
+    async ({ legacyReleaseId, twin, corrupt, expected }) => {
+      // Per-column COALESCE merges two DIFFERENT links into one incoherent
+      // row. Shape 1 previously produced (id=1111, confidence=0.5,
+      // method='librarian') -- a machine confidence computed for artist 4242,
+      // attached to artist 1111, labelled human-entered, which
+      // library-identity-consumer's librarian precedence then skips forever.
+      // Shape 2 previously produced (id=4242, confidence=0.93,
+      // method='lml_backfill') -- the corrupt row's artist under the twin's
+      // stale orphaned confidence. Both are reachable today: track_artist_id
+      // is ON DELETE SET NULL on artists.id (migration 0140), so any artist
+      // deletion leaves the partial shape behind.
+      //
+      // Neither existing repoint test covers this -- both seed the twin with
+      // all three columns NULL or all three set, the two shapes where
+      // per-column and per-tuple COALESCE agree.
+      const libraryId = await seedLibrary(legacyReleaseId);
+      const twinId = await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido Cósmico', '2', twin);
+      await seedCta(libraryId, 'Hermanos Gutiérrez', 'Sonido C�smico', '4', corrupt);
+
+      await runRepairScript(
+        withSyntheticPendingRows([
+          {
+            legacy_release_id: legacyReleaseId,
+            track_position: '4',
+            current_artist_name: 'Hermanos Gutiérrez',
+            current_track_title: 'Sonido C�smico',
+            true_track_title: 'Sonido Cósmico',
+          },
+        ])
+      );
+
+      const survivor = await ctaRow(twinId);
+      expect(survivor.track_artist_id).toBe(expected.track_artist_id);
+      expect(survivor.track_artist_link_method).toBe(expected.track_artist_link_method);
+      if (expected.track_artist_link_confidence === null) {
+        expect(survivor.track_artist_link_confidence).toBeNull();
+      } else {
+        expect(survivor.track_artist_link_confidence).toBeCloseTo(expected.track_artist_link_confidence);
+      }
+    }
+  );
+
+  test('BS#2152 round 5: the BEFORE print surfaces the twin bytes the DELETE branch keeps, so a discarded NFC capture is visible', async () => {
+    // On the widened DELETE branch the row that SURVIVES is the twin,
+    // byte-for-byte -- so an NFD twin against an NFC capture means the bytes
+    // the operator read out of Kattare are discarded. Exit 0, residual 0/0,
+    // no duplicate, and (through round 4) no signal of any kind: the print
+    // projected twin_id and the three twin_track_artist_* columns but not the
+    // twin's own name/title.
+    //
+    // This test also covers the mechanism half of the same finding: the block
+    // is EXECUTED here (it was untagged and therefore unexecuted through
+    // round 4 -- the one statement in the file whose reversion broke no test,
+    // while a real psql -f run exited 3 on a column typo).
+    const libraryId = await seedLibrary(90046);
+    const nfdTitle = 'Reménytelen Tánc'.normalize('NFD');
+    const twinId = await seedCta(libraryId, 'Csillagrablók', nfdTitle, '2');
+    await seedCta(libraryId, 'Csillagrablók', 'Rem�nytelen T�nc', '4');
+
+    const result = await runRepairScript(
+      withSyntheticPendingRows([
+        {
+          legacy_release_id: 90046,
+          track_position: '4',
+          current_artist_name: 'Csillagrablók',
+          current_track_title: 'Rem�nytelen T�nc',
+          true_track_title: 'Reménytelen Tánc', // NFC
+        },
+      ])
+    );
+
+    expect(result.deleted).toBe(1);
+
+    const printed = result.beforeMatched;
+    expect(printed).toHaveLength(1);
+    expect(printed[0].action).toBe('DELETE (twin exists)');
+    expect(printed[0].twin_track_title).toBe(nfdTitle);
+    expect(printed[0].new_track_title).toBe('Reménytelen Tánc');
+    // The whole point: the operator can see these differ before committing.
+    expect(printed[0].twin_is_byte_exact).toBe(false);
+
+    // And the survivor really does hold the NFD bytes, not the capture.
+    const survivor = await ctaRow(twinId);
+    expect(survivor.track_title).toBe(nfdTitle);
+    expect(survivor.track_title).not.toBe('Reménytelen Tánc');
+  });
+
+  test('BS#2152 round 5: guard-converging-pending tells the operator the both-captures-correct remedy, not just "resolve which is correct"', async () => {
+    // The guard is deliberately over-broad and fires on the shape the script
+    // itself calls the 98.5% case -- two differently-corrupted copies of ONE
+    // credit, both captures correct, neither a distinct real credit. The
+    // over-breadth is justified in the comment; the MESSAGE was not, and the
+    // workable remedy (split across two sequential invocations) appeared
+    // nowhere in the message, the comment, or the capture procedure.
+    const libraryId = await seedLibrary(90047);
+    await seedCta(libraryId, 'Csillagrablók', 'Reménytelen Tánc', '1'); // clean third row
+    await seedCta(libraryId, 'Csillagrablók', 'Rem�nytelen T�nc', '4');
+    await seedCta(libraryId, 'Csillagrablók', 'Reménytelen T�nc', '5');
+
+    const pending = [
+      {
+        legacy_release_id: 90047,
+        track_position: '4',
+        current_artist_name: 'Csillagrablók',
+        current_track_title: 'Rem�nytelen T�nc',
+        true_track_title: 'Reménytelen Tánc',
+      },
+      {
+        legacy_release_id: 90047,
+        track_position: '5',
+        current_artist_name: 'Csillagrablók',
+        current_track_title: 'Reménytelen T�nc',
+        true_track_title: 'Reménytelen Tánc',
+      },
+    ];
+
+    await expect(runRepairScript(withSyntheticPendingRows(pending))).rejects.toThrow(
+      'split the converging rows across two sequential invocations'
+    );
+  });
+
+  test.each([
+    { legacyReleaseId: 90048, value: 'Reménytelen Tánc   ', label: 'trailing whitespace' },
+    { legacyReleaseId: 90049, value: '   Reménytelen Tánc', label: 'leading whitespace' },
+    { legacyReleaseId: 90050, value: '', label: 'empty string' },
+  ])(
+    'BS#2152 round 5: guard-capture-sanity rejects a true_* capture with $label',
+    async ({ legacyReleaseId, value }) => {
+      // Capture channel (a) trims and maps empty to NULL; channel (c) -- raw
+      // Kattare MySQL, which the header explicitly offers -- does not. The
+      // consequence is not cosmetic: library-etl's importCompilationTracks
+      // inserts the TRIMMED string and its ON CONFLICT DO NOTHING is keyed on
+      // cta_unique_idx, so a repaired row differing by whitespace no longer
+      // conflicts with it and the next 30-minute cycle re-creates the exact
+      // duplicate this script exists to avoid.
+      const libraryId = await seedLibrary(legacyReleaseId);
+      const corruptId = await seedCta(libraryId, 'Csillagrablók', 'Rem�nytelen T�nc', '4');
+
+      await expect(
+        runRepairScript(
+          withSyntheticPendingRows([
+            {
+              legacy_release_id: legacyReleaseId,
+              track_position: '4',
+              current_artist_name: 'Csillagrablók',
+              current_track_title: 'Rem�nytelen T�nc',
+              true_track_title: value,
+            },
+          ])
+        )
+      ).rejects.toThrow('leading/trailing whitespace or is empty');
+
+      const row = await ctaRow(corruptId);
+      expect(row.track_title).toBe('Rem�nytelen T�nc');
+    }
+  );
 });
