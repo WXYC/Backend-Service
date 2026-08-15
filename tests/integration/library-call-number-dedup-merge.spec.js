@@ -333,6 +333,7 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       album_metadata: 'CASCADE',
       reviews: 'CASCADE',
       album_critic_reviews: 'CASCADE',
+      uncovered_release_search_markers: 'CASCADE',
       compilation_track_artist: 'CASCADE',
       flowsheet: 'SET NULL',
       album_review_submissions: 'SET NULL',
