@@ -136,6 +136,22 @@ library_route.get(
 
 library_route.get('/artists/peek-code', requirePermissions({ catalog: ['write'] }), libraryController.peekArtistNumber);
 
+// BS#2149: resolves a fully-specified code (genre_id + code_letters +
+// code_number) to its owning artist -- the /wxycdb "find" half of the JSP
+// code-lookup flow that `peek-code` (a "next free number" create helper)
+// cannot answer. Same `catalog: ['write']` tier as the two routes above:
+// though this is a pure read, it serves the same librarian-only surface, and
+// widening the tier for one of three siblings would be an inconsistency, not
+// a simplification. Registered in this same `/artists/*` block, ahead of
+// where WXYC/Backend-Service#2156 adds a parameterized `/artists/:id` route,
+// so Express's path matching can't swallow it -- keep it here if that route
+// is ever reordered.
+library_route.get(
+  '/artists/by-code',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.resolveArtistByCode
+);
+
 library_route.get('/formats', requirePermissions({ catalog: ['read'] }), libraryController.getFormats);
 
 library_route.post('/formats', requirePermissions({ catalog: ['write'] }), libraryController.addFormat);

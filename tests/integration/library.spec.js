@@ -1630,6 +1630,74 @@ describe('Library Artists Peek Code', () => {
     // BU is the code for Built to Spill and has artist_genre_code 60
     expect(res.body.next_code_number).toBe(61);
   });
+
+  test('does not change with an unrelated third query parameter present (BS#2149)', async () => {
+    // peek-code's two-parameter behavior must survive the addition of the
+    // sibling by-code resolution endpoint -- a stray code_number must not be
+    // interpreted as "resolve" mode by this handler.
+    const res = await auth
+      .get('/library/artists/peek-code')
+      .query({ code_letters: 'BU', genre_id: 11, code_number: 60 })
+      .expect(200);
+
+    expect(res.body.next_code_number).toBe(61);
+  });
+});
+
+describe('Library Artists By Code', () => {
+  let auth;
+
+  beforeAll(() => {
+    auth = createAuthRequest(request, global.access_token);
+  });
+
+  test('resolves a fully-specified code to its owning artist', async () => {
+    // BU/11/60 is Built to Spill's seeded code triple.
+    const res = await auth
+      .get('/library/artists/by-code')
+      .query({ genre_id: 11, code_letters: 'BU', code_number: 60 })
+      .expect(200);
+
+    expect(res.body.artist).toBeDefined();
+    expectFields(res.body.artist, 'id', 'artist_name', 'code_letters', 'code_number', 'genre_id');
+    expect(res.body.artist.artist_name).toBe('Built to Spill');
+    expect(res.body.artist.code_letters).toBe('BU');
+    expect(res.body.artist.code_number).toBe(60);
+    expect(res.body.artist.genre_id).toBe(11);
+  });
+
+  test('returns 404 for an unassigned code in a known genre', async () => {
+    const res = await auth
+      .get('/library/artists/by-code')
+      .query({ genre_id: 11, code_letters: 'BU', code_number: 999999 })
+      .expect(404);
+
+    expectErrorContains(res, 'not assigned');
+  });
+
+  test('returns 404 for an unknown genre_id, distinct from an unassigned code', async () => {
+    const res = await auth
+      .get('/library/artists/by-code')
+      .query({ genre_id: 999999, code_letters: 'BU', code_number: 60 })
+      .expect(404);
+
+    expectErrorContains(res, 'Genre not found');
+  });
+
+  test('returns 400 for a malformed code_number', async () => {
+    const res = await auth
+      .get('/library/artists/by-code')
+      .query({ genre_id: 11, code_letters: 'BU', code_number: 'not-a-number' })
+      .expect(400);
+
+    expectErrorContains(res, 'code_number');
+  });
+
+  test('returns 400 when a required parameter is missing', async () => {
+    const res = await auth.get('/library/artists/by-code').query({ genre_id: 11, code_letters: 'BU' }).expect(400);
+
+    expectErrorContains(res, 'code_number');
+  });
 });
 
 describe('Library Formats', () => {
