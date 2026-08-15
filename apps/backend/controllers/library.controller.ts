@@ -623,6 +623,90 @@ export const resolveArtistByCode: RequestHandler = async (
   });
 };
 
+const parseArtistId = (rawId: string): number => {
+  const artistId = Number(rawId);
+  if (!Number.isInteger(artistId) || artistId <= 0) {
+    throw new WxycError('Invalid artist ID', 400);
+  }
+  return artistId;
+};
+
+/**
+ * GET /library/artists/:id -- BS#2156 artist-card lookup: the field set
+ * `/wxycdb`'s `artistCardModify.jsp` displays. Registered after the literal
+ * `/artists/search` and `/artists/peek-code` routes -- see the route-ordering
+ * comment in library.route.ts.
+ */
+export const getArtistCard: RequestHandler<{ id: string }> = async (req, res) => {
+  const artistId = parseArtistId(req.params.id);
+  const artist = await libraryService.getArtistCardById(artistId);
+  if (!artist) {
+    throw new WxycError('Artist not found', 404);
+  }
+  res.status(200).json(artist);
+};
+
+type UpdateArtistRequest = {
+  artist_name?: string;
+  alphabetical_name?: string;
+};
+
+const MAX_ARTIST_TEXT_LENGTH = 128;
+
+/**
+ * PATCH /library/artists/:id -- allowlists exactly the two fields
+ * `/wxycdb`'s `modifyArtist` form edits (BS#2156). Any other field on the
+ * body is silently dropped, matching the `pickAddRotationFields` /
+ * `pickUpdateEntryFields` allowlist convention elsewhere in this repo.
+ */
+export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArtistRequest> = async (req, res) => {
+  const artistId = parseArtistId(req.params.id);
+  const { body } = req;
+
+  const updates: libraryService.UpdateArtistRow = {};
+  if (body.artist_name !== undefined) {
+    if (typeof body.artist_name !== 'string' || body.artist_name.trim() === '') {
+      throw new WxycError('artist_name must be a non-empty string', 400);
+    }
+    if (body.artist_name.length > MAX_ARTIST_TEXT_LENGTH) {
+      throw new WxycError(`artist_name must be ${MAX_ARTIST_TEXT_LENGTH} characters or fewer`, 400);
+    }
+    updates.artist_name = body.artist_name;
+  }
+  if (body.alphabetical_name !== undefined) {
+    if (typeof body.alphabetical_name !== 'string' || body.alphabetical_name.trim() === '') {
+      throw new WxycError('alphabetical_name must be a non-empty string', 400);
+    }
+    if (body.alphabetical_name.length > MAX_ARTIST_TEXT_LENGTH) {
+      throw new WxycError(`alphabetical_name must be ${MAX_ARTIST_TEXT_LENGTH} characters or fewer`, 400);
+    }
+    updates.alphabetical_name = body.alphabetical_name;
+  }
+
+  if (Object.keys(updates).length === 0) {
+    throw new WxycError('Bad Request: provide at least one of artist_name, alphabetical_name', 400);
+  }
+
+  const updated = await libraryService.updateArtistInDB(artistId, updates);
+  if (!updated) {
+    throw new WxycError('Artist not found', 404);
+  }
+  res.status(200).json(updated);
+};
+
+/**
+ * GET /library/artists/:id/releases -- BS#2156: the release table on
+ * `/wxycdb`'s artist card (`getLibraryReleasesForArtist`).
+ */
+export const getArtistReleases: RequestHandler<{ id: string }> = async (req, res) => {
+  const artistId = parseArtistId(req.params.id);
+  if (!(await libraryService.getArtistNameById(artistId))) {
+    throw new WxycError('Artist not found', 404);
+  }
+  const releases = await libraryService.getReleasesForArtist(artistId);
+  res.status(200).json({ artist_id: artistId, releases });
+};
+
 export const getRotation: RequestHandler = async (req, res) => {
   const rotation = await libraryService.getRotationFromDB();
   res.status(200).json(rotation);

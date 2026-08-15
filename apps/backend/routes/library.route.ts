@@ -163,6 +163,25 @@ library_route.get('/artists/peek-code', requirePermissions({ catalog: ['write'] 
 // ever reordered.
 library_route.get('/artists/by-code', requirePermissions({ catalog: ['read'] }), libraryController.resolveArtistByCode);
 
+// BS#2156 artist-card routes. REGISTRATION ORDER IS LOAD-BEARING: these are
+// the first parameterized `/artists/:id`-style routes on this router, and
+// must be registered AFTER every literal `/artists/*` route above (`search`,
+// `peek-code`, and WXYC/Backend-Service#2149's future `by-code`) or Express
+// hands e.g. `GET /artists/search` to this `:id` handler instead, with
+// `Number('search')` becoming NaN -- the same `/catalog` vs
+// `/:id/compilation-tracks` trap documented above. `/artists/search` and
+// `/artists/peek-code` staying on their own handlers is pinned by the
+// integration spec.
+library_route.get('/artists/:id', requirePermissions({ catalog: ['read'] }), libraryController.getArtistCard);
+
+library_route.patch('/artists/:id', requirePermissions({ catalog: ['write'] }), libraryController.updateArtistCard);
+
+library_route.get(
+  '/artists/:id/releases',
+  requirePermissions({ catalog: ['read'] }),
+  libraryController.getArtistReleases
+);
+
 library_route.get('/formats', requirePermissions({ catalog: ['read'] }), libraryController.getFormats);
 
 library_route.post('/formats', requirePermissions({ catalog: ['write'] }), libraryController.addFormat);

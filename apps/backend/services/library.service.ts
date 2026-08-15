@@ -2208,6 +2208,112 @@ export const getArtistById = async (artist_id: number): Promise<ArtistCodeOwner 
   return response[0] ?? null;
 };
 
+export type ArtistCardRow = {
+  artist_id: number;
+  artist_name: string;
+  alphabetical_name: string;
+  genre_id: number;
+  code_letters: string;
+  code_artist_number: number;
+};
+
+/**
+ * BS#2156 artist-card lookup: the full editable field set `/wxycdb`'s
+ * `artistCardModify.jsp` displays for `GET /library/artists/:id`. Inner-joined
+ * to `genre_artist_crossreference` for `genre_id` / `code_artist_number`, same
+ * as `getArtistByCode`'s join shape -- every artist that exists via `addArtist`
+ * gets exactly one crossreference row at creation time (BS#980's
+ * `artist_genre_key` unique index scopes it to one row per genre, and the
+ * card's write path never adds a second genre), so an inner join is a plain
+ * existence-implies-a-genre lookup, not a filter that could hide a real
+ * artist. Returns null on an unknown `artist_id`.
+ */
+export const getArtistCardById = async (artist_id: number): Promise<ArtistCardRow | null> => {
+  const response = await db
+    .select({
+      artist_id: artists.id,
+      artist_name: artists.artist_name,
+      alphabetical_name: artists.alphabetical_name,
+      genre_id: genre_artist_crossreference.genre_id,
+      code_letters: artists.code_letters,
+      code_artist_number: genre_artist_crossreference.artist_genre_code,
+    })
+    .from(artists)
+    .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
+    .where(eq(artists.id, artist_id))
+    .limit(1);
+
+  return response[0] ?? null;
+};
+
+/** Partial-update payload for PATCH /library/artists/:id -- the two `modifyArtist` form fields. */
+export type UpdateArtistRow = {
+  artist_name?: string;
+  alphabetical_name?: string;
+};
+
+/**
+ * Applies the `modifyArtist` form's edit to `artists`. Normalizes both fields
+ * to NFC on write, matching `insertArtist` (BS#1897) -- the stored form must
+ * stay a single canonical composition or the `fold_artist_name` matcher's
+ * exact-equality consumers see spurious NFC/NFD splits.
+ */
+export const updateArtistInDB = async (
+  artist_id: number,
+  updates: UpdateArtistRow
+): Promise<{ id: number; artist_name: string; alphabetical_name: string } | undefined> => {
+  const set: Record<string, unknown> = { last_modified: sql`NOW()` };
+  if (updates.artist_name !== undefined) set.artist_name = updates.artist_name.normalize('NFC');
+  if (updates.alphabetical_name !== undefined) set.alphabetical_name = updates.alphabetical_name.normalize('NFC');
+
+  const response = await db
+    .update(artists)
+    .set(set)
+    .where(eq(artists.id, artist_id))
+    .returning({ id: artists.id, artist_name: artists.artist_name, alphabetical_name: artists.alphabetical_name });
+  return response[0];
+};
+
+export type ArtistReleaseRow = {
+  id: number;
+  last_modified: Date;
+  format_name: string;
+  code_letters: string;
+  code_number: number;
+  code_volume_letters: string | null;
+  album_title: string;
+  alternate_artist_name: string | null;
+};
+
+/**
+ * BS#2156: the release table on `/wxycdb`'s artist card
+ * (`LibraryReleaseAccessor.getLibraryReleasesForArtist`) -- last-modified,
+ * format, the call-number fields (`code_letters` off `artists`, `code_number`
+ * + `code_volume_letters` off `library`), title, and alternate artist name.
+ * Not sourced from `library_artist_view`: that view omits `last_modified` and
+ * `alternate_artist_name`, so this joins the same underlying tables directly,
+ * scoped to one artist instead of one album. Ordered by `code_number`
+ * ascending -- shelf order, matching how the physical card catalog is filed.
+ */
+export const getReleasesForArtist = async (artist_id: number): Promise<ArtistReleaseRow[]> => {
+  return db
+    .select({
+      id: library.id,
+      last_modified: library.last_modified,
+      format_name: format.format_name,
+      code_letters: artists.code_letters,
+      code_number: library.code_number,
+      code_volume_letters: library.code_volume_letters,
+      album_title: library.album_title,
+      alternate_artist_name: library.alternate_artist_name,
+    })
+    .from(library)
+    .innerJoin(artists, eq(artists.id, library.artist_id))
+    .innerJoin(format, eq(format.id, library.format_id))
+    .where(eq(library.artist_id, artist_id))
+    .orderBy(asc(library.code_number));
+};
+
 export const generateAlbumCodeNumber = async (artist_id: number): Promise<number> => {
   const response = await db
     .select({ code_number: library.code_number })
