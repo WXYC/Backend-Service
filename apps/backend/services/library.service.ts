@@ -2133,12 +2133,17 @@ export const getArtistByCode = async (
  * The triple is not unique and nothing in the schema makes it so: the only
  * unique index on `genre_artist_crossreference` is `artist_genre_key
  * (artist_id, genre_id)`, and `code_letters` lives on `artists`, one join away.
- * The production clone holds 13 collisions, every one a Various-Artists filing —
- * `V/A`/12/0 with 27 owners (`Soundtracks - <LETTER>`) and `V/A`/11/0 with 26
- * (`Various Artists - Rock - <LETTER>`) among them. Those are distinct shelf
- * buckets a librarian relies on staying separately reachable, so this returns
- * all of them and lets the caller present a chooser; collapsing to one row would
- * be stably wrong for the other 26.
+ * The production clone holds 13 collisions. The two largest are Various-Artists
+ * filings — `V/A`/12/0 with 27 owners (`Soundtracks - <LETTER>`) and `V/A`/11/0
+ * with 26 (`Various Artists - Rock - <LETTER>`) — and those are distinct shelf
+ * buckets a librarian relies on staying separately reachable, so collapsing to
+ * one row would be stably wrong for the other 26.
+ *
+ * But this is NOT a V/A-only phenomenon, and a V/A-only special case would not
+ * cover it: the remaining **11 of 13** are ordinary artist codes with 2–3 owners
+ * (`KU`/11/7 with 3; `WI`/7/31, `BL`/9/16, `PO`/15/22, `JE`/9/2, `AP`/11/24,
+ * `OR`/11/39, `WH`/11/75, `SA`/4/4, `NO`/8/3, `SI`/15/20 with 2 each). Any code
+ * can be contested, so every code gets the list treatment.
  *
  * Ordered `artist_name` then `id`: name first because the collision case is a
  * lettered V/A run whose alphabetical order IS its shelf order, and `id` as a

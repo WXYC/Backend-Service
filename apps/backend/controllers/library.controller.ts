@@ -499,12 +499,13 @@ const parseCodeQueryInt = (raw: string | undefined, name: string, min: number): 
  * one arbitrary row out of 27. A single owner is simply a one-element array.
  *
  * `code_number` accepts **0**: the whole Various-Artists surface is filed at
- * `artist_genre_code = 0` (68 rows in the production clone, all `code_letters =
- * 'V/A'`), and neither sibling route imposes a floor — `addArtist` passes the
- * value straight through and `peekArtistNumber` uses `Number.isFinite`. A `< 1`
- * floor here would have made the one filing class that most needs code-first
- * resolution (compilations have no artist name to search by) the one class this
- * route could not answer.
+ * `artist_genre_code = 0` — 68 such rows in the production clone, 66 of them
+ * `code_letters = 'V/A'` and the other two a `VA`-spelled "V/A" and an `UNK`
+ * "Unknown", both in genre 6. Neither sibling route imposes a floor: `addArtist`
+ * passes the value straight through and `peekArtistNumber` uses
+ * `Number.isFinite`. A `< 1` floor here made the one filing class that most
+ * needs code-first resolution (compilations have no artist name to search by)
+ * the one class this route could not answer.
  *
  * Two 404s, discriminated by `reason` rather than by prose the way `addArtist`
  * above discriminates its two 409s: `genre_not_found` means the client's genre
