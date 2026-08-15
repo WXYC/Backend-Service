@@ -112,6 +112,7 @@ export const FK_TARGETS: readonly FkTarget[] = [
   { table: 'reviews', column: 'album_id', uniqueKey: ['album_id'] },
   { table: 'album_review_submissions', column: 'album_id', uniqueKey: null },
   { table: 'album_critic_reviews', column: 'album_id', uniqueKey: ['album_id', 'source_url'] },
+  { table: 'uncovered_release_search_markers', column: 'album_id', uniqueKey: ['album_id'] },
   {
     table: 'compilation_track_artist',
     column: 'library_id',
@@ -153,7 +154,7 @@ type RawRow = {
  * Every `library` row sharing a slot with at least one other row, grouped.
  *
  * Reference counts are gathered with one query PER FK SITE over the whole
- * candidate id set (13 queries), not one per candidate row (13 × ~1,500) — the
+ * candidate id set (14 queries), not one per candidate row (14 × ~1,500) — the
  * counts only exist to rank survivors, and the per-row shape would turn a
  * seconds-long read into a minutes-long one for the same answer.
  */

@@ -151,5 +151,6 @@
   "0152_flowsheet-no-match-recheck-cursor": "890d692b4e754635550016387070026d6f6aed5533a823c6bb75c50bcc21be65",
   "0153_flowsheet-no-match-recheck-id-desc-idx": "869145cc65342d30c6ff8defb22184817f1e4a15aabc13369a263d74243c2844",
   "0154_shows-open-start-time-idx": "8a2925defd3f84f0326ad4a5d36903577316b2e55a9cba433b1624a8b33e3d2d",
-  "0155_fk-ondelete-snapshot-resync": "9777d64f9e76fb78b1057008aff411b065efce05217e768bd85bf672cc638be7"
+  "0155_fk-ondelete-snapshot-resync": "9777d64f9e76fb78b1057008aff411b065efce05217e768bd85bf672cc638be7",
+  "0156_uncovered-release-search-markers": "642ad24c9e51344c7f3f219f81881c6787bf681f2da4cdfdb1c3bbd3b58f0fa5"
 }
