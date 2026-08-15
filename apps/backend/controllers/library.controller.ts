@@ -445,6 +445,62 @@ export const peekArtistNumber: RequestHandler = async (
   res.status(200).json({ next_code_number: nextCode });
 };
 
+type ArtistByCodeQuery = {
+  genre_id?: string;
+  code_letters?: string;
+  code_number?: string;
+};
+
+/**
+ * BS#2149: resolves a fully-specified library code to its owning artist --
+ * the `/wxycdb` "does this code already exist, and whose is it" question
+ * `peek-code` (next-free-number) and `search` (name query) cannot answer.
+ * `getArtistByCode` already backs `addArtist`'s code-conflict pre-check
+ * (BS#792-era), so this reuses that lookup rather than duplicating the query.
+ *
+ * An unknown `genre_id` and an unassigned code are distinct 404s (mirrors
+ * `searchArtistsInGenre`'s precedent below): the former means the client's
+ * genre dropdown is stale, the latter means the code is free to create.
+ */
+export const resolveArtistByCode: RequestHandler = async (
+  req: Request<object, object, object, ArtistByCodeQuery>,
+  res
+) => {
+  const { query } = req;
+  if (!query.genre_id || !query.code_letters || !query.code_number) {
+    throw new WxycError('Missing query parameters: genre_id, code_letters, and code_number', 400);
+  }
+
+  const genreId = Number(query.genre_id);
+  if (!Number.isInteger(genreId) || genreId < 1) {
+    throw new WxycError('Invalid genre_id: must be a positive integer', 400);
+  }
+
+  const codeNumber = Number(query.code_number);
+  if (!Number.isInteger(codeNumber) || codeNumber < 1) {
+    throw new WxycError('Invalid code_number: must be a positive integer', 400);
+  }
+
+  if (!(await libraryService.genreExists(genreId))) {
+    throw new WxycError('Genre not found', 404);
+  }
+
+  const artist = await libraryService.getArtistByCode(query.code_letters, genreId, codeNumber);
+  if (!artist) {
+    throw new WxycError('Artist code not assigned in that genre', 404);
+  }
+
+  res.status(200).json({
+    artist: {
+      id: artist.artist_id,
+      artist_name: artist.artist_name,
+      code_letters: artist.code_letters,
+      code_number: codeNumber,
+      genre_id: genreId,
+    },
+  });
+};
+
 export const getRotation: RequestHandler = async (req, res) => {
   const rotation = await libraryService.getRotationFromDB();
   res.status(200).json(rotation);
