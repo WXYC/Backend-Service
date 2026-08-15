@@ -55,6 +55,16 @@ const mockRecheckDiscogsAvailability =
     >
   >();
 
+// DELETE /library/:id (BS#2112).
+const mockDeleteAlbumFromDB =
+  jest.fn<
+    (
+      id: number
+    ) => Promise<
+      { outcome: 'deleted' } | { outcome: 'not_found' } | { outcome: 'has_flowsheet_plays'; playCount: number }
+    >
+  >();
+
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
   getAlbumByLegacyId: mockGetAlbumByLegacyId,
@@ -96,6 +106,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   artistExistsInGenre: mockArtistExistsInGenre,
   albumCodeNumberTaken: mockAlbumCodeNumberTaken,
   recheckDiscogsAvailability: mockRecheckDiscogsAvailability,
+  deleteAlbumFromDB: mockDeleteAlbumFromDB,
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
@@ -166,6 +177,7 @@ import {
   updateAlbum,
   searchLibraryQueryEndpoint,
   manualDiscogsRecheck,
+  deleteAlbum,
 } from '../../../apps/backend/controllers/library.controller';
 
 function mockResponse(): Response {
@@ -1383,6 +1395,73 @@ describe('library.controller', () => {
 
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({ outcome: 'no_match' });
+    });
+  });
+
+  describe('deleteAlbum (BS#2112)', () => {
+    it('returns 400 for a non-numeric id', async () => {
+      const req = { params: { id: 'abc' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(deleteAlbum(req, res, next)).rejects.toThrow('Invalid album ID');
+      expect(mockDeleteAlbumFromDB).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 for a non-positive id', async () => {
+      const req = { params: { id: '0' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(deleteAlbum(req, res, next)).rejects.toThrow('Invalid album ID');
+      expect(mockDeleteAlbumFromDB).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 when the album does not exist', async () => {
+      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'not_found' });
+      const req = { params: { id: '999' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(deleteAlbum(req, res, next)).rejects.toThrow('Album not found');
+      expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(999);
+    });
+
+    it('refuses with 409 and names the play count when the release carries flowsheet plays', async () => {
+      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'has_flowsheet_plays', playCount: 59 });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await deleteAlbum(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith({
+        message: expect.stringContaining('59'),
+        reason: 'flowsheet_references',
+        play_count: 59,
+      });
+    });
+
+    it('uses singular phrasing for exactly one flowsheet play', async () => {
+      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'has_flowsheet_plays', playCount: 1 });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await deleteAlbum(req, res, next);
+
+      const body = (res.json as jest.Mock).mock.calls[0][0] as { message: string };
+      expect(body.message).not.toContain('1 plays');
+    });
+
+    it('returns 204 with no body on success', async () => {
+      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'deleted' });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+      res.end = jest.fn().mockReturnValue(res) as unknown as Response['end'];
+
+      await deleteAlbum(req, res, next);
+
+      expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(42);
+      expect(res.status).toHaveBeenCalledWith(204);
+      expect(res.end).toHaveBeenCalled();
+      expect(res.json).not.toHaveBeenCalled();
     });
   });
 });

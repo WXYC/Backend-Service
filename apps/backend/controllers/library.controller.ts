@@ -1061,6 +1061,41 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
   res.status(200).json(result);
 };
 
+/**
+ * DELETE /library/:id (BS#2112). Hard delete — no soft-delete tombstone; see
+ * the issue's decision record for why. Refuses with 409 when the release
+ * carries `flowsheet` plays (D10 policy): the `flowsheet.album_id` FK is
+ * `onDelete: 'set null'`, so an unguarded delete would silently blank
+ * historical play data. `bins`, `library_identity`,
+ * `library_identity_source`, and `artist_library_crossreference` are
+ * resolved explicitly inside the same transaction as the delete (see
+ * `libraryService.deleteAlbumFromDB` for why the fourth one is there —
+ * schema.ts and the live constraint disagree); every other dependent is
+ * left to its own FK. Gated to `catalog:['write']`, the same bar as
+ * `updateAlbum`/`addAlbum` — not the lighter `catalog:read` bar
+ * `markMissing`/`markFound` use, since this is irreversible.
+ */
+export const deleteAlbum: RequestHandler<{ id: string }> = async (req, res) => {
+  const albumId = parseAlbumId(req.params.id);
+
+  const result = await libraryService.deleteAlbumFromDB(albumId);
+
+  if (result.outcome === 'not_found') {
+    throw new WxycError('Album not found', 404);
+  }
+
+  if (result.outcome === 'has_flowsheet_plays') {
+    res.status(409).json({
+      message: `Cannot delete: release has ${result.playCount} flowsheet play${result.playCount === 1 ? '' : 's'} on record`,
+      reason: 'flowsheet_references',
+      play_count: result.playCount,
+    });
+    return;
+  }
+
+  res.status(204).end();
+};
+
 // ---------------------------------------------------------------------------
 // Compilation-track (CTA) write path — BS#1964 / Phase 3.5 `/wxycdb` cutover.
 //

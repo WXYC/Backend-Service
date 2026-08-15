@@ -128,6 +128,11 @@ library_route.get('/info', requirePermissions({ catalog: ['read'] }), libraryCon
 
 library_route.patch('/:id', requirePermissions({ catalog: ['write'] }), libraryController.updateAlbum);
 
+// BS#2112: hard delete, gated to catalog:write (same bar as updateAlbum/
+// addAlbum) — irreversible, so it does not get the lighter catalog:read bar
+// missing/found use below.
+library_route.delete('/:id', requirePermissions({ catalog: ['write'] }), libraryController.deleteAlbum);
+
 // Missing/found stack-marking (BS#393): gated to catalog:read rather than
 // catalog:write so DJs (who only hold catalog:read per shared/authentication/
 // src/auth.roles.ts) can flag a stack missing/found while pulling records.
