@@ -1883,6 +1883,186 @@ describe('Library Artists By Code', () => {
   });
 });
 
+describe('Library Artist Card (BS#2156)', () => {
+  let auth;
+
+  beforeAll(() => {
+    auth = createAuthRequest(request, global.access_token);
+  });
+
+  // A monotonic counter, not Date.now()/Math.random() alone, so back-to-back
+  // calls within the same test file can't collide on the genre-scoped
+  // artist_name pre-check or the (code_letters, genre_id, code_number) triple
+  // check -- both of which answer 409, not the account-for-in-this-block 201.
+  let artistCounter = 0;
+
+  async function createTestArtist(overrides = {}) {
+    artistCounter += 1;
+    const uniqueSuffix = `${Date.now().toString(36)}${artistCounter}`.toUpperCase().slice(-4);
+    const res = await auth
+      .post('/library/artists')
+      .send({
+        artist_name: `Card Test Artist ${uniqueSuffix}`,
+        code_letters: uniqueSuffix.slice(-2),
+        genre_id: 11,
+        code_number: 8000 + artistCounter,
+        ...overrides,
+      })
+      .expect(201);
+    return res.body;
+  }
+
+  describe('GET /library/artists/:id', () => {
+    test('returns the full card field set', async () => {
+      const artist = await createTestArtist();
+
+      const res = await auth.get(`/library/artists/${artist.id}`).expect(200);
+
+      expectFields(
+        res.body,
+        'artist_id',
+        'artist_name',
+        'alphabetical_name',
+        'genre_id',
+        'code_letters',
+        'code_artist_number'
+      );
+      expect(res.body.artist_id).toBe(artist.id);
+      expect(res.body.artist_name).toBe(artist.artist_name);
+      expect(res.body.alphabetical_name).toBe(artist.alphabetical_name);
+      expect(res.body.genre_id).toBe(11);
+      expect(res.body.code_letters).toBe(artist.code_letters);
+    });
+
+    test('404s on an unknown artist id', async () => {
+      const res = await auth.get('/library/artists/99999999').expect(404);
+      expectErrorContains(res, 'not found');
+    });
+
+    test('400s on a non-numeric artist id', async () => {
+      await auth.get('/library/artists/not-a-number').expect(400);
+    });
+
+    // Route-ordering pin (BS#2156 constraint): `/artists/search` and
+    // `/artists/peek-code` are literal routes registered before this
+    // `/artists/:id` route. If that ordering ever regressed, Express would
+    // hand these requests to getArtistCard instead, and `Number('search')` /
+    // `Number('peek-code')` would produce a 400 "Invalid artist ID" rather
+    // than the shapes asserted below.
+    test('does not swallow the literal /artists/search route', async () => {
+      const res = await auth.get('/library/artists/search').query({ genre_id: 11, q: 'Bu', limit: 10 }).expect(200);
+      expect(res.body.artists).toBeDefined();
+    });
+
+    test('does not swallow the literal /artists/peek-code route', async () => {
+      const res = await auth.get('/library/artists/peek-code').query({ code_letters: 'BU', genre_id: 11 }).expect(200);
+      expect(res.body.next_code_number).toBeDefined();
+    });
+  });
+
+  describe('PATCH /library/artists/:id', () => {
+    test('updates artist_name and alphabetical_name', async () => {
+      const artist = await createTestArtist();
+
+      const res = await auth
+        .patch(`/library/artists/${artist.id}`)
+        .send({ artist_name: 'Renamed Test Artist', alphabetical_name: 'Test Artist, Renamed' })
+        .expect(200);
+
+      expect(res.body.artist_name).toBe('Renamed Test Artist');
+      expect(res.body.alphabetical_name).toBe('Test Artist, Renamed');
+
+      const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
+      expect(card.body.artist_name).toBe('Renamed Test Artist');
+      expect(card.body.alphabetical_name).toBe('Test Artist, Renamed');
+    });
+
+    test('drops fields outside the allowlist rather than applying them', async () => {
+      const artist = await createTestArtist();
+
+      const res = await auth
+        .patch(`/library/artists/${artist.id}`)
+        .send({ artist_name: 'Still Allowlisted', code_letters: 'ZZ', genre_id: 999 })
+        .expect(200);
+
+      expect(res.body.artist_name).toBe('Still Allowlisted');
+
+      const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
+      // code_letters and genre_id are unchanged -- the PATCH allowlist
+      // dropped both rather than writing them.
+      expect(card.body.code_letters).toBe(artist.code_letters);
+      expect(card.body.genre_id).toBe(11);
+    });
+
+    test('returns 400 when the body has no updatable fields', async () => {
+      const artist = await createTestArtist();
+
+      const res = await auth.patch(`/library/artists/${artist.id}`).send({}).expect(400);
+      expectErrorContains(res, 'artist_name');
+    });
+
+    test('404s on an unknown artist id', async () => {
+      const res = await auth.patch('/library/artists/99999999').send({ artist_name: 'Nobody' }).expect(404);
+      expectErrorContains(res, 'not found');
+    });
+  });
+
+  describe('GET /library/artists/:id/releases', () => {
+    test('returns the release-table columns for that artist, ordered by call number', async () => {
+      const artist = await createTestArtist();
+
+      const first = await auth
+        .post('/library')
+        .send({
+          album_title: `Release B ${Date.now()}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+      const second = await auth
+        .post('/library')
+        .send({
+          album_title: `Release A ${Date.now()}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+
+      const res = await auth.get(`/library/artists/${artist.id}/releases`).expect(200);
+
+      expect(res.body.artist_id).toBe(artist.id);
+      expect(Array.isArray(res.body.releases)).toBe(true);
+      expect(res.body.releases).toHaveLength(2);
+      res.body.releases.forEach((release) =>
+        expectFields(
+          release,
+          'id',
+          'last_modified',
+          'format_name',
+          'code_letters',
+          'code_number',
+          'code_volume_letters',
+          'album_title',
+          'alternate_artist_name'
+        )
+      );
+      // Ordered by code_number ascending (shelf order): the first-added
+      // album mints the lower code_number via generateAlbumCodeNumber.
+      expect(res.body.releases[0].id).toBe(first.body.id);
+      expect(res.body.releases[1].id).toBe(second.body.id);
+    });
+
+    test('404s on an unknown artist id', async () => {
+      const res = await auth.get('/library/artists/99999999/releases').expect(404);
+      expectErrorContains(res, 'not found');
+    });
+  });
+});
+
 describe('Library Formats', () => {
   let auth;
 

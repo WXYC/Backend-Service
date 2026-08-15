@@ -59,6 +59,35 @@ const mockUpdateArtworkUrl = jest.fn<() => Promise<unknown>>();
 const mockGetLabelById = jest.fn<(id: number) => Promise<{ id: number; label_name: string } | undefined>>();
 const mockSearchLibrary = jest.fn<() => Promise<{ results: unknown[]; total: number }>>();
 
+// GET/PATCH /library/artists/:id + GET /library/artists/:id/releases (BS#2156).
+type ArtistCardMock = {
+  artist_id: number;
+  artist_name: string;
+  alphabetical_name: string;
+  genre_id: number;
+  code_letters: string;
+  code_artist_number: number;
+};
+const mockGetArtistCardById = jest.fn<(artistId: number) => Promise<ArtistCardMock | null>>();
+const mockUpdateArtistInDB =
+  jest.fn<
+    (
+      artistId: number,
+      updates: Record<string, unknown>
+    ) => Promise<{ id: number; artist_name: string; alphabetical_name: string } | undefined>
+  >();
+type ArtistReleaseRowMock = {
+  id: number;
+  last_modified: Date;
+  format_name: string;
+  code_letters: string;
+  code_number: number;
+  code_volume_letters: string | null;
+  album_title: string;
+  alternate_artist_name: string | null;
+};
+const mockGetReleasesForArtist = jest.fn<(artistId: number) => Promise<ArtistReleaseRowMock[]>>();
+
 // POST /library/:id/discogs-recheck (BS#1283).
 const mockRecheckDiscogsAvailability =
   jest.fn<
@@ -143,6 +172,9 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   albumCodeNumberTaken: mockAlbumCodeNumberTaken,
   recheckDiscogsAvailability: mockRecheckDiscogsAvailability,
   deleteAlbumFromDB: mockDeleteAlbumFromDB,
+  getArtistCardById: mockGetArtistCardById,
+  updateArtistInDB: mockUpdateArtistInDB,
+  getReleasesForArtist: mockGetReleasesForArtist,
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
@@ -220,6 +252,9 @@ import {
   getUncataloguedRotation,
   linkRotationToAlbum,
   pickAddRotationFields,
+  getArtistCard,
+  updateArtistCard,
+  getArtistReleases,
 } from '../../../apps/backend/controllers/library.controller';
 import WxycError from '../../../apps/backend/utils/error';
 
@@ -2555,6 +2590,152 @@ describe('library.controller', () => {
 
       expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(42, { userId: null, email: null, role: null });
       expect(res.status).toHaveBeenCalledWith(204);
+    });
+  });
+
+  describe('getArtistCard (BS#2156)', () => {
+    it('returns 400 for a non-numeric id parameter', async () => {
+      const req = { params: { id: 'abc' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getArtistCard(req, res, next)).rejects.toThrow('Invalid artist ID');
+    });
+
+    it('returns 404 when the artist does not exist', async () => {
+      mockGetArtistCardById.mockResolvedValue(null);
+      const req = { params: { id: '999' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getArtistCard(req, res, next)).rejects.toThrow('Artist not found');
+    });
+
+    it('returns 200 with the card field set on success', async () => {
+      const card = {
+        artist_id: 42,
+        artist_name: 'Chuquimamani-Condori',
+        alphabetical_name: 'Chuquimamani-Condori',
+        genre_id: 11,
+        code_letters: 'CH',
+        code_artist_number: 3,
+      };
+      mockGetArtistCardById.mockResolvedValue(card);
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getArtistCard(req, res, next);
+
+      expect(mockGetArtistCardById).toHaveBeenCalledWith(42);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(card);
+    });
+  });
+
+  describe('updateArtistCard (BS#2156)', () => {
+    it('returns 400 for a non-numeric id parameter', async () => {
+      const req = { params: { id: 'abc' }, body: { artist_name: 'Anohni' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow('Invalid artist ID');
+    });
+
+    it('returns 400 when the body has no updatable fields', async () => {
+      const req = { params: { id: '42' }, body: {} } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow(
+        'Bad Request: provide at least one of artist_name, alphabetical_name'
+      );
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 when artist_name is an empty string', async () => {
+      const req = { params: { id: '42' }, body: { artist_name: '   ' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow('artist_name must be a non-empty string');
+    });
+
+    it('drops any field outside the allowlist rather than rejecting the request', async () => {
+      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni', alphabetical_name: 'Anohni' });
+      const req = {
+        params: { id: '42' },
+        body: { artist_name: 'Anohni', code_letters: 'ZZ', genre_id: 999 },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { artist_name: 'Anohni' });
+    });
+
+    it('returns 404 when the artist does not exist', async () => {
+      mockUpdateArtistInDB.mockResolvedValue(undefined);
+      const req = { params: { id: '999' }, body: { artist_name: 'Anohni' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow('Artist not found');
+    });
+
+    it('returns 200 with the updated row on success', async () => {
+      const updated = { id: 42, artist_name: 'Anohni', alphabetical_name: 'Anohni' };
+      mockUpdateArtistInDB.mockResolvedValue(updated);
+      const req = {
+        params: { id: '42' },
+        body: { artist_name: 'Anohni', alphabetical_name: 'Anohni' },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, {
+        artist_name: 'Anohni',
+        alphabetical_name: 'Anohni',
+      });
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(updated);
+    });
+  });
+
+  describe('getArtistReleases (BS#2156)', () => {
+    it('returns 400 for a non-numeric id parameter', async () => {
+      const req = { params: { id: 'abc' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getArtistReleases(req, res, next)).rejects.toThrow('Invalid artist ID');
+    });
+
+    it('returns 404 when the artist does not exist', async () => {
+      mockGetArtistNameById.mockResolvedValue(null);
+      const req = { params: { id: '999' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getArtistReleases(req, res, next)).rejects.toThrow('Artist not found');
+      expect(mockGetReleasesForArtist).not.toHaveBeenCalled();
+    });
+
+    it('returns 200 with the release list on success', async () => {
+      mockGetArtistNameById.mockResolvedValue('Chuquimamani-Condori');
+      const releases = [
+        {
+          id: 7000,
+          last_modified: new Date('2026-06-01'),
+          format_name: 'vinyl - LP',
+          code_letters: 'CH',
+          code_number: 3,
+          code_volume_letters: null,
+          album_title: 'Edits',
+          alternate_artist_name: null,
+        },
+      ];
+      mockGetReleasesForArtist.mockResolvedValue(releases);
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getArtistReleases(req, res, next);
+
+      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(42);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({ artist_id: 42, releases });
     });
   });
 });
