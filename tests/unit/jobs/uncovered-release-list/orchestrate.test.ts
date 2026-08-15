@@ -185,15 +185,27 @@ describe('runJob — real run: write, publish, and the publish-gated marker writ
     expect(opts.writeCalls).toHaveLength(1); // still wrote the local file before publish was attempted
   });
 
-  it('still writes + attempts publish even when the uncovered set is empty (a meaningful empty snapshot)', async () => {
+  it('still writes the empty snapshot LOCALLY when the uncovered set is empty (a meaningful empty artifact)', async () => {
     const opts = makeOpts({ loadCovered: () => Promise.resolve(new Set([42])) });
     const totals = await runJob(opts);
 
     expect(totals.uncovered).toBe(0);
     expect(opts.writeCalls).toHaveLength(1);
     expect(opts.writeCalls[0].content).toBe('');
-    expect(opts.publishCalls).toHaveLength(1);
-    expect(opts.recordHandoffsCalls).toEqual([[]]); // called with an empty list, not skipped
+  });
+
+  it('does NOT publish an empty snapshot — an empty whole-file replace would destroy a previous, already-marked snapshot', async () => {
+    const opts = makeOpts({ loadCovered: () => Promise.resolve(new Set([42])) });
+    const totals = await runJob(opts);
+
+    expect(totals.uncovered).toBe(0);
+    // Publishing is a whole-file replace of one fixed path and markers are
+    // publish-once, so an empty publish hands off nothing while wiping a
+    // snapshot whose releases can never be re-offered. Hold the old file.
+    expect(opts.publishCalls).toHaveLength(0);
+    expect(totals.published).toBe(false);
+    // No commit means no new markers — nothing was handed off.
+    expect(opts.recordHandoffsCalls).toEqual([]);
   });
 });
 

@@ -16,7 +16,7 @@
  *      uncovered_release_search_markers row is excluded by
  *      loadHandedOffLibraryIds's query shape.
  *   3. uncovered_release_search_markers' UPSERT conflict target
- *      (migration 0133): re-recording a handoff for the same album_id
+ *      (migration 0146): re-recording a handoff for the same album_id
  *      updates in place (bumps handoff_count, refreshes
  *      last_handed_off_at) rather than duplicating.
  *   4. ON DELETE CASCADE: dropping the library album evaporates its

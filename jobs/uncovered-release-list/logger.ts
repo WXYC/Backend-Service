@@ -4,10 +4,15 @@
  * Copied from `jobs/album-critic-reviews-etl/logger.ts` (itself copied from
  * `jobs/album-reviews-etl/logger.ts`, from `jobs/triangle-shows-etl/logger.ts`,
  * the issue-#538 contract; per-job duplication keeps this job's build graph
- * independent of the long-running services), INCLUDING `captureWarning` —
- * the message-level Sentry signal this job's `publish_error`/`nothing_new`
- * warnings use. When propagating logger fixes across the job fleet, do NOT
- * "restore verbatim" by deleting it.
+ * independent of the long-running services), INCLUDING `captureWarning`.
+ *
+ * `captureWarning` has NO caller in this job today: `publish_error` escalates
+ * through `captureError` (`orchestrate.ts`), and the `nothing_new` /
+ * `publish_skipped_empty` paths are benign steady-state outcomes that log to
+ * stdout with no Sentry signal at all. It is kept anyway so this file stays
+ * byte-comparable with its donors — when propagating a logger fix across the
+ * job fleet, do NOT "restore verbatim" by deleting it, and do not read its
+ * presence as evidence that some condition here is wired to Sentry.
  */
 
 import * as Sentry from '@sentry/node';

@@ -1,5 +1,5 @@
 /**
- * Writer for `uncovered_release_search_markers` (migration 0133,
+ * Writer for `uncovered_release_search_markers` (migration 0146,
  * jobs/uncovered-release-list, BS#1877). Called ONLY after a publish
  * actually commits (see orchestrate.ts) — marking a release "handed off"
  * before its snapshot line ever reached `WXYC/research-data` would let a

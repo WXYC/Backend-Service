@@ -5,7 +5,7 @@
  * Weekly: computes the `rotation × album_critic_reviews` anti-join (current
  * active rotation releases with zero critic reviews), further anti-joined
  * against releases already handed off for search at least once
- * (`uncovered_release_search_markers`, migration 0133 — the "searched,
+ * (`uncovered_release_search_markers`, migration 0146 — the "searched,
  * found nothing" marker), writes the result as `uncovered-releases.jsonl`,
  * and commits it to `WXYC/research-data` where the `search` crawl mode
  * (RD#16) reads it. See `orchestrate.ts` for the full pipeline shape and
