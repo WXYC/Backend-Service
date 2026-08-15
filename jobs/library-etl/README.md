@@ -9,6 +9,7 @@ Incremental synchronization of the music library from the legacy tubafrenzy MySQ
 3. Parses the tab-delimited MySQL output into structured rows.
 4. Within a single database transaction:
    - Syncs genres and formats from the legacy database into PostgreSQL (insert-only — existing records are unchanged).
+   - Loads the delete-denylist (`library_delete_denylist`) and skips every release listed there — see [Delete denylist](#delete-denylist).
    - Normalizes artist names (e.g., "Various Artists" variants are collapsed, "The Beatles" becomes "Beatles, The" for alphabetical sorting).
    - Normalizes code letters (2-3 character uppercase identifiers; `Z-*` codes map to `V/A`).
    - Parses format strings into canonical names (`cd`, `cdr`, `vinyl`, `vinyl 7"`, `vinyl 10"`, `vinyl 12"`) and disc quantities.
@@ -18,6 +19,25 @@ Incremental synchronization of the music library from the legacy tubafrenzy MySQ
 5. Updates the `cronjob_runs` timestamp on success.
 
 Rows with `db_only` genre, missing genre/format mappings, empty artist names, or empty album titles are skipped with a warning.
+
+## Delete denylist
+
+This job is the **only** consumer of `wxyc_schema.library_delete_denylist` (migration 0146, BS#2112). One row is written there, inside the delete's own transaction, for every release a librarian hard-deletes through `DELETE /library/:id`.
+
+It exists because a Backend-side delete does not reach tubafrenzy. The upstream `LIBRARY_RELEASE` row survives, this job's delta pass re-selects it, finds no `library` row carrying its `legacy_release_id`, and takes the INSERT branch of `ON CONFLICT (legacy_release_id) DO UPDATE` — so the release comes back within 30 minutes under a **new** `library.id`, stripped of the `rotation` (binning history, `kill_date`, LML-resolved `discogs_release_id`), `album_metadata`, `reviews` and `album_critic_reviews` rows that cascade-deleted against the old id and that this job never imports. `legacy_release_id` is ~99.88% populated, so effectively the whole catalog is resurrection-eligible without the denylist.
+
+Two properties are load-bearing:
+
+- **The denylist load has no delta predicate**, and must never grow one. The full-re-sync recipe below deletes this job's `cronjob_runs` watermark, which drops the `TIME_LAST_MODIFIED >` filter and re-selects the entire upstream catalog in one pass; a windowed denylist would let that single run resurrect every release ever deleted.
+- **The check runs first in the per-release loop**, ahead of `findExistingRelease`. A deleted release must be able neither to be re-inserted nor to have its `legacy_release_id` back-stamped onto some other row by the canonical-tuple backfill.
+
+Denylisted releases are counted separately in the completion log (`skipped as deleted N`), not folded into the ordinary `skipped` counter.
+
+To restore a release that was deleted by mistake, delete its denylist row and let the next run re-import it (under a fresh `library.id`, without the cascade-destroyed dependents):
+
+```sql
+DELETE FROM wxyc_schema.library_delete_denylist WHERE legacy_release_id = <id>;
+```
 
 ## Environment Variables
 
@@ -128,10 +148,10 @@ npm run test:unit -- --testPathPatterns=library-etl
 
 ## Troubleshooting
 
-| Symptom                                       | Likely Cause                                                                                                                                                                                                  |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Error executing remote SQL command over SSH` | SSH credentials are wrong, the legacy server is unreachable, or MySQL credentials are invalid. Check `SSH_HOST`, `SSH_USERNAME`, `SSH_PASSWORD`, and the `REMOTE_DB_*` variables.                             |
-| `Missing genre "X" for release Y`             | The legacy database has a referential integrity issue — a release references a genre that doesn't exist in the legacy `GENRE` table. This is a data quality issue in tubafrenzy, not a configuration problem. |
-| `Missing format "X" for release Y`            | The legacy format string could not be parsed into a canonical format name (e.g., unsupported media type like cassette).                                                                                       |
-| `No new legacy releases found`                | Normal when nothing has changed since the last run.                                                                                                                                                           |
-| Job runs but inserts nothing                  | Check the `cronjob_runs` table — the `last_run` timestamp may already be ahead of all legacy data. To force a full re-sync, delete the row: `DELETE FROM cronjob_runs WHERE job_name = 'library-etl';`        |
+| Symptom                                       | Likely Cause                                                                                                                                                                                                                                                                                                                          |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Error executing remote SQL command over SSH` | SSH credentials are wrong, the legacy server is unreachable, or MySQL credentials are invalid. Check `SSH_HOST`, `SSH_USERNAME`, `SSH_PASSWORD`, and the `REMOTE_DB_*` variables.                                                                                                                                                     |
+| `Missing genre "X" for release Y`             | The legacy database has a referential integrity issue — a release references a genre that doesn't exist in the legacy `GENRE` table. This is a data quality issue in tubafrenzy, not a configuration problem.                                                                                                                         |
+| `Missing format "X" for release Y`            | The legacy format string could not be parsed into a canonical format name (e.g., unsupported media type like cassette).                                                                                                                                                                                                               |
+| `No new legacy releases found`                | Normal when nothing has changed since the last run.                                                                                                                                                                                                                                                                                   |
+| Job runs but inserts nothing                  | Check the `cronjob_runs` table — the `last_run` timestamp may already be ahead of all legacy data. To force a full re-sync, delete the row: `DELETE FROM cronjob_runs WHERE job_name = 'library-etl';`. Releases in `library_delete_denylist` stay skipped across a full re-sync by design (see [Delete denylist](#delete-denylist)). |

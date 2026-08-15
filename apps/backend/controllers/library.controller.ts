@@ -1064,16 +1064,26 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
 /**
  * DELETE /library/:id (BS#2112). Hard delete — no soft-delete tombstone; see
  * the issue's decision record for why. Refuses with 409 when the release
- * carries `flowsheet` plays (D10 policy): the `flowsheet.album_id` FK is
- * `onDelete: 'set null'`, so an unguarded delete would silently blank
- * historical play data. `bins`, `library_identity`,
- * `library_identity_source`, and `artist_library_crossreference` are
- * resolved explicitly inside the same transaction as the delete (see
- * `libraryService.deleteAlbumFromDB` for why the fourth one is there —
- * schema.ts and the live constraint disagree); every other dependent is
- * left to its own FK. Gated to `catalog:['write']`, the same bar as
- * `updateAlbum`/`addAlbum` — not the lighter `catalog:read` bar
+ * carries `flowsheet` plays (D10 policy) by EITHER path: linked directly via
+ * `flowsheet.album_id` (`onDelete: 'set null'`) or transitively via
+ * `flowsheet.rotation_id` → `rotation.album_id` (`set null` behind a
+ * `cascade`). Both would silently blank historical play provenance.
+ * `bins`, `library_identity`, `library_identity_source`, and
+ * `artist_library_crossreference` are resolved explicitly inside the same
+ * transaction as the delete (see `libraryService.deleteAlbumFromDB` for why
+ * the fourth one is there — schema.ts and the live constraint disagree),
+ * `album_popularity.representative_library_id` is nulled there for want of
+ * any FK, and the release's `legacy_release_id` is recorded in
+ * `library_delete_denylist` so `jobs/library-etl` cannot resurrect it; every
+ * other dependent is left to its own FK. Gated to `catalog:['write']`, the
+ * same bar as `updateAlbum`/`addAlbum` — not the lighter `catalog:read` bar
  * `markMissing`/`markFound` use, since this is irreversible.
+ *
+ * The 409 body is non-standard for this service (`{message, reason,
+ * play_count, direct_play_count, rotation_linked_play_count}` rather than the
+ * error handler's shape) because the count is the whole point of the
+ * refusal: the librarian needs to know how much history the delete would
+ * have damaged, and by which path. Documented in `apps/backend/app.yaml`.
  */
 export const deleteAlbum: RequestHandler<{ id: string }> = async (req, res) => {
   const albumId = parseAlbumId(req.params.id);
@@ -1085,10 +1095,21 @@ export const deleteAlbum: RequestHandler<{ id: string }> = async (req, res) => {
   }
 
   if (result.outcome === 'has_flowsheet_plays') {
+    const { playCount, directPlayCount, rotationLinkedPlayCount } = result;
+    // Only spell out the split when the transitive path contributed — the
+    // common refusal reads as a plain play count, and the breakdown appears
+    // exactly when it explains something the librarian can't otherwise see
+    // (plays that name the rotation entry but not the release).
+    const breakdown =
+      rotationLinkedPlayCount > 0
+        ? ` (${directPlayCount} linked to the release, ${rotationLinkedPlayCount} via its rotation entry)`
+        : '';
     res.status(409).json({
-      message: `Cannot delete: release has ${result.playCount} flowsheet play${result.playCount === 1 ? '' : 's'} on record`,
+      message: `Cannot delete: release has ${playCount} flowsheet play${playCount === 1 ? '' : 's'} on record${breakdown}`,
       reason: 'flowsheet_references',
-      play_count: result.playCount,
+      play_count: playCount,
+      direct_play_count: directPlayCount,
+      rotation_linked_play_count: rotationLinkedPlayCount,
     });
     return;
   }

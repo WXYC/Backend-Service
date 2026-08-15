@@ -14,6 +14,7 @@ import {
   NewGenre,
   RotationRelease,
   album_plays,
+  album_popularity,
   artist_library_crossreference,
   artists,
   bins,
@@ -23,6 +24,7 @@ import {
   format,
   genres,
   library,
+  library_delete_denylist,
   library_identity,
   library_identity_source,
   library_watermark,
@@ -2157,7 +2159,17 @@ export const recheckDiscogsAvailability = async (
 };
 
 export type DeleteAlbumOutcome =
-  { outcome: 'deleted' } | { outcome: 'not_found' } | { outcome: 'has_flowsheet_plays'; playCount: number };
+  | { outcome: 'deleted' }
+  | { outcome: 'not_found' }
+  | {
+      outcome: 'has_flowsheet_plays';
+      /** Total distinct plays the delete would damage — the sum of the two below. */
+      playCount: number;
+      /** Plays linked to the release itself (`flowsheet.album_id`). */
+      directPlayCount: number;
+      /** Plays linked only to the release's rotation entry (`flowsheet.rotation_id`). */
+      rotationLinkedPlayCount: number;
+    };
 
 /**
  * Hard-deletes a library release (BS#2112, D10 policy). Refuses when the
@@ -2165,6 +2177,37 @@ export type DeleteAlbumOutcome =
  * `onDelete: 'set null'`, so an unguarded delete would silently blank
  * historical plays — the exact hazard the WXYC/Backend-Service#2108 orphan
  * audit exists to prevent.
+ *
+ * **The refusal counts TWO paths to a play, not one.** `rotation.album_id` is
+ * `onDelete: 'cascade'` and `flowsheet.rotation_id` is `onDelete: 'set null'`,
+ * so deleting a release also blanks `rotation_id` on every play that reached
+ * it through the rotation entry. That is not an edge case: the tubafrenzy
+ * webhook resolves `album_id` and `rotation_id` independently
+ * (`internal.route.ts:318-322`), so a play routinely carries a `rotation_id`
+ * with a NULL `album_id` — invisible to a direct-FK-only count, and its
+ * provenance destroyed just as silently. The SET NULL is an UPDATE on
+ * `flowsheet`, so it would also fire `bump_flowsheet_updated_at` and
+ * `touch_flowsheet_watermark`, republishing untouched history to every
+ * polling client.
+ *
+ * **Concurrency.** `db.transaction()` runs at READ COMMITTED, so a bare
+ * existence check followed by a count is check-then-act: a writer attaching
+ * `flowsheet.album_id` (`flowsheet.service.ts:848`, `internal.route.ts:502`,
+ * `jobs/legacy-linkage-resolve/job.ts:271`) between the count and the DELETE
+ * would get its play blanked by the RI action — exactly what the 409 exists
+ * to prevent. Both lock-taking SELECTs below use `FOR UPDATE`, not
+ * `FOR NO KEY UPDATE`: only `FOR UPDATE` conflicts with the `FOR KEY SHARE`
+ * an inserting writer's FK check takes on the parent row. Locking the
+ * `library` row closes the `album_id` path; locking the release's `rotation`
+ * rows closes the `rotation_id` path, whose writers never touch the library
+ * row at all.
+ *
+ * **Durability.** The delete records the release's `legacy_release_id` in
+ * `library_delete_denylist` in the same transaction. Without that,
+ * `jobs/library-etl` — still cron-registered every 30 minutes — re-selects
+ * the still-present upstream row on its next delta pass and re-inserts it
+ * under a NEW `library.id`, stripped of every cascade-destroyed dependent.
+ * See the table's docstring in `schema.ts` for the full mechanism.
  *
  * Four FKs are resolved explicitly inside the same transaction rather than
  * left to the schema, because each would otherwise fail the DELETE below
@@ -2174,33 +2217,99 @@ export type DeleteAlbumOutcome =
  * declares this last one `onDelete: 'cascade'`, but the live constraint
  * (migration 0022) was created `ON DELETE no action` and never migrated to
  * match; verified directly against `pg_constraint.confdeltype` on the dev
- * DB (BS#2112 review). Every other dependent (`rotation`, `album_metadata`,
- * `album_critic_reviews`, `reviews`, `compilation_track_artist`: real
- * `onDelete: 'cascade'`; `album_review_submissions`: `onDelete: 'set
- * null'`) is left to its own FK. `library_watermark` advances via the
- * `touch_library_watermark` trigger (migration 0104/0142, unqualified on
- * DELETE) — no app-level bump needed.
+ * DB (BS#2112 review). Migration 0147 repairs the constraint; the explicit
+ * delete stays so the endpoint is correct on any environment that has not
+ * applied it yet. `album_popularity.representative_library_id` is nulled
+ * explicitly too — it names a library row but carries no FK at all, so
+ * nothing would otherwise stop it dangling. Every other dependent
+ * (`rotation`, `album_metadata`, `album_critic_reviews`, `reviews`,
+ * `compilation_track_artist`: real `onDelete: 'cascade'`;
+ * `album_review_submissions`: `onDelete: 'set null'`) is left to its own FK.
+ * `library_watermark` advances via the `touch_library_watermark` trigger
+ * (migration 0104/0142, unqualified on DELETE) — no app-level bump needed.
  */
 export const deleteAlbumFromDB = async (album_id: number): Promise<DeleteAlbumOutcome> => {
   return db.transaction(async (tx) => {
-    const existing = await tx.select({ id: library.id }).from(library).where(eq(library.id, album_id)).limit(1);
+    // FOR UPDATE, not FOR NO KEY UPDATE — see the docstring. This is the lock
+    // that makes the play-count guard below an atomic check-and-act rather
+    // than a check-then-act race.
+    const existing = await tx
+      .select({ id: library.id, legacy_release_id: library.legacy_release_id })
+      .from(library)
+      .where(eq(library.id, album_id))
+      .limit(1)
+      .for('update');
     if (existing.length === 0) {
       return { outcome: 'not_found' };
     }
+    const { legacy_release_id } = existing[0];
 
-    const playCountRows = await tx
+    // Lock the release's rotation rows for the same reason: a writer setting
+    // `flowsheet.rotation_id` takes FOR KEY SHARE on the ROTATION row, never
+    // on the library row, so the lock above does not cover the transitive
+    // path. Doubles as the id list the transitive count needs.
+    const rotationRows = await tx
+      .select({ id: rotation.id })
+      .from(rotation)
+      .where(eq(rotation.album_id, album_id))
+      .for('update');
+    const rotationIds = rotationRows.map((row) => row.id);
+
+    const directRows = await tx
       .select({ count: sql<number>`count(*)::int` })
       .from(flowsheet)
       .where(eq(flowsheet.album_id, album_id));
-    const playCount = Number(playCountRows[0]?.count ?? 0);
-    if (playCount > 0) {
-      return { outcome: 'has_flowsheet_plays', playCount };
+    const directPlayCount = Number(directRows[0]?.count ?? 0);
+
+    // Transitive plays, de-duplicated against the direct count: a play that
+    // carries BOTH this album_id and one of its rotation ids is one damaged
+    // play, not two. `IS DISTINCT FROM` rather than `<>` because the shape
+    // this arm exists to catch is precisely `album_id IS NULL` (the webhook
+    // resolves the two columns independently), and `<>` would drop every one
+    // of those rows to NULL.
+    let rotationLinkedPlayCount = 0;
+    if (rotationIds.length > 0) {
+      const transitiveRows = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(flowsheet)
+        .where(
+          and(inArray(flowsheet.rotation_id, rotationIds), sql`${flowsheet.album_id} IS DISTINCT FROM ${album_id}::int`)
+        );
+      rotationLinkedPlayCount = Number(transitiveRows[0]?.count ?? 0);
     }
+
+    const playCount = directPlayCount + rotationLinkedPlayCount;
+    if (playCount > 0) {
+      return { outcome: 'has_flowsheet_plays', playCount, directPlayCount, rotationLinkedPlayCount };
+    }
+
+    // Tombstone BEFORE the delete, so the denylist row and the delete commit
+    // or roll back together. Unconditional: `library.legacy_release_id` is
+    // total and NOT NULL since migration 0137 (BS#1963 mints one from a
+    // sequence for Backend-authored adds), so there is no id-less release to
+    // branch on. `onConflictDoUpdate` rather than a bare insert because the
+    // delete must never fail on a stale tombstone — a release deleted, then
+    // un-deleted by clearing its denylist row and re-imported, then deleted
+    // again would otherwise collide on the primary key.
+    await tx
+      .insert(library_delete_denylist)
+      .values({ legacy_release_id, library_id: album_id })
+      .onConflictDoUpdate({
+        target: library_delete_denylist.legacy_release_id,
+        set: { library_id: album_id, deleted_at: sql`now()` },
+      });
 
     await tx.delete(bins).where(eq(bins.album_id, album_id));
     await tx.delete(library_identity_source).where(eq(library_identity_source.library_id, album_id));
     await tx.delete(library_identity).where(eq(library_identity.library_id, album_id));
     await tx.delete(artist_library_crossreference).where(eq(artist_library_crossreference.library_id, album_id));
+    // No FK backs this column, so nothing else would stop it dangling at a
+    // deleted id. At most one row per delete (`logical_album_key` is the PK
+    // and a release is representative for at most one key), so no ANALYZE.
+    await tx
+      .update(album_popularity)
+      .set({ representative_library_id: null })
+      .where(eq(album_popularity.representative_library_id, album_id));
     await tx.delete(library).where(eq(library.id, album_id));
 
     return { outcome: 'deleted' };
