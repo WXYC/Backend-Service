@@ -14,13 +14,17 @@ import {
   NewGenre,
   RotationRelease,
   album_plays,
+  artist_library_crossreference,
   artists,
+  bins,
   compilation_track_artist,
+  flowsheet,
   genre_artist_crossreference,
   format,
   genres,
   library,
   library_identity,
+  library_identity_source,
   library_watermark,
   rotation,
   LibraryArtistViewEntry,
@@ -2150,6 +2154,57 @@ export const recheckDiscogsAvailability = async (
   }
 
   return { outcome: 'matched', discogsReleaseId: releaseId, confidence };
+};
+
+export type DeleteAlbumOutcome =
+  { outcome: 'deleted' } | { outcome: 'not_found' } | { outcome: 'has_flowsheet_plays'; playCount: number };
+
+/**
+ * Hard-deletes a library release (BS#2112, D10 policy). Refuses when the
+ * release carries `flowsheet` references: `flowsheet.album_id` is
+ * `onDelete: 'set null'`, so an unguarded delete would silently blank
+ * historical plays — the exact hazard the WXYC/Backend-Service#2108 orphan
+ * audit exists to prevent.
+ *
+ * Four FKs are resolved explicitly inside the same transaction rather than
+ * left to the schema, because each would otherwise fail the DELETE below
+ * with a raw FK-violation error: `bins.album_id` (NOT NULL, no `onDelete`),
+ * `library_identity` / `library_identity_source` (`library_id`, no
+ * `onDelete`), and `artist_library_crossreference.library_id` — schema.ts
+ * declares this last one `onDelete: 'cascade'`, but the live constraint
+ * (migration 0022) was created `ON DELETE no action` and never migrated to
+ * match; verified directly against `pg_constraint.confdeltype` on the dev
+ * DB (BS#2112 review). Every other dependent (`rotation`, `album_metadata`,
+ * `album_critic_reviews`, `reviews`, `compilation_track_artist`: real
+ * `onDelete: 'cascade'`; `album_review_submissions`: `onDelete: 'set
+ * null'`) is left to its own FK. `library_watermark` advances via the
+ * `touch_library_watermark` trigger (migration 0104/0142, unqualified on
+ * DELETE) — no app-level bump needed.
+ */
+export const deleteAlbumFromDB = async (album_id: number): Promise<DeleteAlbumOutcome> => {
+  return db.transaction(async (tx) => {
+    const existing = await tx.select({ id: library.id }).from(library).where(eq(library.id, album_id)).limit(1);
+    if (existing.length === 0) {
+      return { outcome: 'not_found' };
+    }
+
+    const playCountRows = await tx
+      .select({ count: sql<number>`count(*)::int` })
+      .from(flowsheet)
+      .where(eq(flowsheet.album_id, album_id));
+    const playCount = Number(playCountRows[0]?.count ?? 0);
+    if (playCount > 0) {
+      return { outcome: 'has_flowsheet_plays', playCount };
+    }
+
+    await tx.delete(bins).where(eq(bins.album_id, album_id));
+    await tx.delete(library_identity_source).where(eq(library_identity_source.library_id, album_id));
+    await tx.delete(library_identity).where(eq(library_identity.library_id, album_id));
+    await tx.delete(artist_library_crossreference).where(eq(artist_library_crossreference.library_id, album_id));
+    await tx.delete(library).where(eq(library.id, album_id));
+
+    return { outcome: 'deleted' };
+  });
 };
 
 /** True when `artist_id` already owns an album with this `code_number` (excluding `exclude_album_id`). */
