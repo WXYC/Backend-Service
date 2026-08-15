@@ -663,28 +663,57 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
   const artistId = parseArtistId(req.params.id);
   const { body } = req;
 
+  // Resolve the artist (and its genre, needed for the name-conflict check
+  // below) before any side effects -- same ordering rationale as
+  // updateAlbum's existence-before-write fix (issue 10 there).
+  const existing = await libraryService.getArtistCardById(artistId);
+  if (!existing) {
+    throw new WxycError('Artist not found', 404);
+  }
+
   const updates: libraryService.UpdateArtistRow = {};
   if (body.artist_name !== undefined) {
     if (typeof body.artist_name !== 'string' || body.artist_name.trim() === '') {
       throw new WxycError('artist_name must be a non-empty string', 400);
     }
-    if (body.artist_name.length > MAX_ARTIST_TEXT_LENGTH) {
+    const trimmed = body.artist_name.trim();
+    if (trimmed.length > MAX_ARTIST_TEXT_LENGTH) {
       throw new WxycError(`artist_name must be ${MAX_ARTIST_TEXT_LENGTH} characters or fewer`, 400);
     }
-    updates.artist_name = body.artist_name;
+    updates.artist_name = trimmed;
   }
   if (body.alphabetical_name !== undefined) {
     if (typeof body.alphabetical_name !== 'string' || body.alphabetical_name.trim() === '') {
       throw new WxycError('alphabetical_name must be a non-empty string', 400);
     }
-    if (body.alphabetical_name.length > MAX_ARTIST_TEXT_LENGTH) {
+    const trimmed = body.alphabetical_name.trim();
+    if (trimmed.length > MAX_ARTIST_TEXT_LENGTH) {
       throw new WxycError(`alphabetical_name must be ${MAX_ARTIST_TEXT_LENGTH} characters or fewer`, 400);
     }
-    updates.alphabetical_name = body.alphabetical_name;
+    updates.alphabetical_name = trimmed;
   }
 
   if (Object.keys(updates).length === 0) {
     throw new WxycError('Bad Request: provide at least one of artist_name, alphabetical_name', 400);
+  }
+
+  // Same genre-scoped name-conflict guard `addArtist` enforces (BS#980):
+  // `artistIdFromName`'s `fold_artist_name` matcher (migration 0134) is the
+  // one thing standing between a rename and recreating exactly the
+  // NFC/NFD/case duplicate state `jobs/artist-unicode-dedup` exists to
+  // clean up. Only runs when the name is actually changing, so a PATCH that
+  // re-sends the current name (a no-op "Save") never 409s against itself.
+  if (updates.artist_name !== undefined && updates.artist_name !== existing.artist_name) {
+    const conflictingArtistId = await libraryService.artistIdFromName(updates.artist_name, existing.genre_id);
+    if (conflictingArtistId && conflictingArtistId !== artistId) {
+      const conflictingArtist = await libraryService.getArtistById(conflictingArtistId);
+      res.status(409).json({
+        message: 'Artist name already exists in that genre.',
+        reason: 'artist_name_conflict',
+        artist: conflictingArtist,
+      });
+      return;
+    }
   }
 
   const updated = await libraryService.updateArtistInDB(artistId, updates);

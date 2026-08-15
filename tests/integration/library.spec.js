@@ -1963,29 +1963,31 @@ describe('Library Artist Card (BS#2156)', () => {
   describe('PATCH /library/artists/:id', () => {
     test('updates artist_name and alphabetical_name', async () => {
       const artist = await createTestArtist();
+      const renamed = `Renamed ${artist.artist_name}`;
 
       const res = await auth
         .patch(`/library/artists/${artist.id}`)
-        .send({ artist_name: 'Renamed Test Artist', alphabetical_name: 'Test Artist, Renamed' })
+        .send({ artist_name: renamed, alphabetical_name: `${artist.alphabetical_name}, Renamed` })
         .expect(200);
 
-      expect(res.body.artist_name).toBe('Renamed Test Artist');
-      expect(res.body.alphabetical_name).toBe('Test Artist, Renamed');
+      expect(res.body.artist_name).toBe(renamed);
+      expect(res.body.alphabetical_name).toBe(`${artist.alphabetical_name}, Renamed`);
 
       const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
-      expect(card.body.artist_name).toBe('Renamed Test Artist');
-      expect(card.body.alphabetical_name).toBe('Test Artist, Renamed');
+      expect(card.body.artist_name).toBe(renamed);
+      expect(card.body.alphabetical_name).toBe(`${artist.alphabetical_name}, Renamed`);
     });
 
     test('drops fields outside the allowlist rather than applying them', async () => {
       const artist = await createTestArtist();
+      const renamed = `Still Allowlisted ${artist.artist_name}`;
 
       const res = await auth
         .patch(`/library/artists/${artist.id}`)
-        .send({ artist_name: 'Still Allowlisted', code_letters: 'ZZ', genre_id: 999 })
+        .send({ artist_name: renamed, code_letters: 'ZZ', genre_id: 999 })
         .expect(200);
 
-      expect(res.body.artist_name).toBe('Still Allowlisted');
+      expect(res.body.artist_name).toBe(renamed);
 
       const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
       // code_letters and genre_id are unchanged -- the PATCH allowlist
@@ -1999,6 +2001,38 @@ describe('Library Artist Card (BS#2156)', () => {
 
       const res = await auth.patch(`/library/artists/${artist.id}`).send({}).expect(400);
       expectErrorContains(res, 'artist_name');
+    });
+
+    test('returns 409 when renamed to a name already used by another artist in the same genre', async () => {
+      const first = await createTestArtist();
+      const second = await createTestArtist();
+
+      const res = await auth
+        .patch(`/library/artists/${second.id}`)
+        .send({ artist_name: first.artist_name })
+        .expect(409);
+
+      expect(res.body).toEqual({
+        message: 'Artist name already exists in that genre.',
+        reason: 'artist_name_conflict',
+        artist: { artist_id: first.id, artist_name: first.artist_name, code_letters: first.code_letters },
+      });
+
+      // The rename did not take effect.
+      const card = await auth.get(`/library/artists/${second.id}`).expect(200);
+      expect(card.body.artist_name).toBe(second.artist_name);
+    });
+
+    test('allows re-saving the same artist_name (no-op rename does not 409 against itself)', async () => {
+      const artist = await createTestArtist();
+
+      const res = await auth
+        .patch(`/library/artists/${artist.id}`)
+        .send({ artist_name: artist.artist_name, alphabetical_name: `${artist.alphabetical_name} Updated` })
+        .expect(200);
+
+      expect(res.body.artist_name).toBe(artist.artist_name);
+      expect(res.body.alphabetical_name).toBe(`${artist.alphabetical_name} Updated`);
     });
 
     test('404s on an unknown artist id', async () => {

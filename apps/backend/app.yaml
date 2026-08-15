@@ -2055,6 +2055,122 @@ paths:
                     message: Artist code not assigned in that genre
                     reason: code_not_assigned
 
+  /library/artists/{id}:
+    get:
+      summary: Get an artist's card (BS#2156)
+      security:
+        - BearerAuth: ['dj']
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: The artist-card field set
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artist_id:
+                    type: integer
+                  artist_name:
+                    type: string
+                  alphabetical_name:
+                    type: string
+                  genre_id:
+                    type: integer
+                  code_letters:
+                    type: string
+                  code_artist_number:
+                    type: integer
+        '400':
+          description: Invalid artist id
+        '404':
+          description: Artist not found
+
+    patch:
+      summary: Update an artist's name fields (BS#2156)
+      security:
+        - BearerAuth: ['station-management']
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                artist_name:
+                  type: string
+                alphabetical_name:
+                  type: string
+      responses:
+        '200':
+          description: Successfully updated artist
+        '400':
+          description: Invalid artist id, or no updatable fields provided
+        '404':
+          description: Artist not found
+        '409':
+          description: artist_name already exists for another artist in that genre
+
+  /library/artists/{id}/releases:
+    get:
+      summary: List an artist's releases (BS#2156)
+      security:
+        - BearerAuth: ['dj']
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: The artist's releases, ordered by call number
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artist_id:
+                    type: integer
+                  releases:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        last_modified:
+                          type: string
+                          format: date-time
+                        format_name:
+                          type: string
+                        code_letters:
+                          type: string
+                        code_number:
+                          type: integer
+                        code_volume_letters:
+                          type: string
+                          nullable: true
+                        album_title:
+                          type: string
+                        alternate_artist_name:
+                          type: string
+                          nullable: true
+        '400':
+          description: Invalid artist id
+        '404':
+          description: Artist not found
+
   /library/formats:
     get:
       summary: Get format list

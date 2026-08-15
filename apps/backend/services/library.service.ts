@@ -2221,12 +2221,15 @@ export type ArtistCardRow = {
  * BS#2156 artist-card lookup: the full editable field set `/wxycdb`'s
  * `artistCardModify.jsp` displays for `GET /library/artists/:id`. Inner-joined
  * to `genre_artist_crossreference` for `genre_id` / `code_artist_number`, same
- * as `getArtistByCode`'s join shape -- every artist that exists via `addArtist`
- * gets exactly one crossreference row at creation time (BS#980's
- * `artist_genre_key` unique index scopes it to one row per genre, and the
- * card's write path never adds a second genre), so an inner join is a plain
- * existence-implies-a-genre lookup, not a filter that could hide a real
- * artist. Returns null on an unknown `artist_id`.
+ * as `getArtistByCode`'s join shape. Returns null on an unknown `artist_id`.
+ *
+ * `artist_genre_key` is unique on `(artist_id, genre_id)`, not on `artist_id`
+ * alone -- a legacy-imported artist filed under more than one genre has more
+ * than one crossreference row, and this picks the lowest `genre_id`
+ * deterministically rather than whichever the planner returns first. Every
+ * artist created via `addArtist` only ever gets one row (there is no
+ * multi-genre write path today), so this is dormant for new data, but it
+ * cannot be assumed true of the legacy-imported catalog.
  */
 export const getArtistCardById = async (artist_id: number): Promise<ArtistCardRow | null> => {
   const response = await db
@@ -2241,6 +2244,7 @@ export const getArtistCardById = async (artist_id: number): Promise<ArtistCardRo
     .from(artists)
     .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
     .where(eq(artists.id, artist_id))
+    .orderBy(asc(genre_artist_crossreference.genre_id))
     .limit(1);
 
   return response[0] ?? null;
@@ -2262,9 +2266,15 @@ export const updateArtistInDB = async (
   artist_id: number,
   updates: UpdateArtistRow
 ): Promise<{ id: number; artist_name: string; alphabetical_name: string } | undefined> => {
-  const set: Record<string, unknown> = { last_modified: sql`NOW()` };
-  if (updates.artist_name !== undefined) set.artist_name = updates.artist_name.normalize('NFC');
-  if (updates.alphabetical_name !== undefined) set.alphabetical_name = updates.alphabetical_name.normalize('NFC');
+  // Column-checked (unlike a `Record<string, unknown>` accumulator) since
+  // there are only ever these two optional columns to SET.
+  const set = {
+    last_modified: sql`NOW()`,
+    ...(updates.artist_name !== undefined ? { artist_name: updates.artist_name.normalize('NFC') } : {}),
+    ...(updates.alphabetical_name !== undefined
+      ? { alphabetical_name: updates.alphabetical_name.normalize('NFC') }
+      : {}),
+  };
 
   const response = await db
     .update(artists)

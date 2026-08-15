@@ -2631,14 +2631,34 @@ describe('library.controller', () => {
   });
 
   describe('updateArtistCard (BS#2156)', () => {
+    const existingCard: ArtistCardMock = {
+      artist_id: 42,
+      artist_name: 'Anohni',
+      alphabetical_name: 'Anohni',
+      genre_id: 11,
+      code_letters: 'AN',
+      code_artist_number: 3,
+    };
+
     it('returns 400 for a non-numeric id parameter', async () => {
-      const req = { params: { id: 'abc' }, body: { artist_name: 'Anohni' } } as unknown as Request;
+      const req = { params: { id: 'abc' }, body: { artist_name: 'Anohni and the Johnsons' } } as unknown as Request;
       const res = mockResponse();
 
       await expect(updateArtistCard(req, res, next)).rejects.toThrow('Invalid artist ID');
+      expect(mockGetArtistCardById).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 when the artist does not exist', async () => {
+      mockGetArtistCardById.mockResolvedValue(null);
+      const req = { params: { id: '999' }, body: { artist_name: 'Anohni' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow('Artist not found');
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
     });
 
     it('returns 400 when the body has no updatable fields', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
       const req = { params: { id: '42' }, body: {} } as unknown as Request;
       const res = mockResponse();
 
@@ -2649,47 +2669,102 @@ describe('library.controller', () => {
     });
 
     it('returns 400 when artist_name is an empty string', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
       const req = { params: { id: '42' }, body: { artist_name: '   ' } } as unknown as Request;
       const res = mockResponse();
 
       await expect(updateArtistCard(req, res, next)).rejects.toThrow('artist_name must be a non-empty string');
     });
 
+    it('trims surrounding whitespace before validating and storing', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockArtistIdFromName.mockResolvedValue(0);
+      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni Hegarty', alphabetical_name: 'Anohni' });
+      const req = { params: { id: '42' }, body: { artist_name: '  Anohni Hegarty  ' } } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { artist_name: 'Anohni Hegarty' });
+    });
+
     it('drops any field outside the allowlist rather than rejecting the request', async () => {
-      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni', alphabetical_name: 'Anohni' });
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockArtistIdFromName.mockResolvedValue(0);
+      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni Renamed', alphabetical_name: 'Anohni' });
       const req = {
         params: { id: '42' },
-        body: { artist_name: 'Anohni', code_letters: 'ZZ', genre_id: 999 },
+        body: { artist_name: 'Anohni Renamed', code_letters: 'ZZ', genre_id: 999 },
       } as unknown as Request;
       const res = mockResponse();
 
       await updateArtistCard(req, res, next);
 
-      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { artist_name: 'Anohni' });
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { artist_name: 'Anohni Renamed' });
     });
 
-    it('returns 404 when the artist does not exist', async () => {
-      mockUpdateArtistInDB.mockResolvedValue(undefined);
-      const req = { params: { id: '999' }, body: { artist_name: 'Anohni' } } as unknown as Request;
+    it('skips the name-conflict check when artist_name is unchanged (no-op re-save)', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni', alphabetical_name: 'Anohni' });
+      const req = { params: { id: '42' }, body: { artist_name: 'Anohni' } } as unknown as Request;
       const res = mockResponse();
 
-      await expect(updateArtistCard(req, res, next)).rejects.toThrow('Artist not found');
+      await updateArtistCard(req, res, next);
+
+      expect(mockArtistIdFromName).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('returns 409 when the new artist_name collides with a different artist in the same genre', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockArtistIdFromName.mockResolvedValue(77);
+      mockGetArtistById.mockResolvedValue({ artist_id: 77, artist_name: 'Perfume Genius', code_letters: 'PE' });
+      const req = { params: { id: '42' }, body: { artist_name: 'Perfume Genius' } } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockArtistIdFromName).toHaveBeenCalledWith('Perfume Genius', 11);
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith({
+        message: 'Artist name already exists in that genre.',
+        reason: 'artist_name_conflict',
+        artist: { artist_id: 77, artist_name: 'Perfume Genius', code_letters: 'PE' },
+      });
+    });
+
+    it('proceeds when the fold-matched name only collides with itself', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockArtistIdFromName.mockResolvedValue(42);
+      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni', alphabetical_name: 'Renamed Alpha' });
+      const req = {
+        params: { id: '42' },
+        body: { artist_name: 'Anohni', alphabetical_name: 'Renamed Alpha' },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(200);
     });
 
     it('returns 200 with the updated row on success', async () => {
-      const updated = { id: 42, artist_name: 'Anohni', alphabetical_name: 'Anohni' };
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockArtistIdFromName.mockResolvedValue(0);
+      const updated = { id: 42, artist_name: 'Anohni Renamed', alphabetical_name: 'Anohni Renamed' };
       mockUpdateArtistInDB.mockResolvedValue(updated);
       const req = {
         params: { id: '42' },
-        body: { artist_name: 'Anohni', alphabetical_name: 'Anohni' },
+        body: { artist_name: 'Anohni Renamed', alphabetical_name: 'Anohni Renamed' },
       } as unknown as Request;
       const res = mockResponse();
 
       await updateArtistCard(req, res, next);
 
       expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, {
-        artist_name: 'Anohni',
-        alphabetical_name: 'Anohni',
+        artist_name: 'Anohni Renamed',
+        alphabetical_name: 'Anohni Renamed',
       });
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith(updated);
