@@ -1578,6 +1578,55 @@ export const library_watermark = wxyc_schema.table(
   ]
 );
 
+/**
+ * Deleted-release denylist (BS#2112). One row per `library.legacy_release_id`
+ * hard-deleted through `DELETE /library/:id`, written inside the delete's own
+ * transaction.
+ *
+ * This exists because the delete is otherwise **not durable**.
+ * `jobs/library-etl` is still cron-registered every 30 minutes by the
+ * `cron-schedule` field in its `package.json` — it was not flipped to
+ * `job-type: one-shot` alongside `flowsheet-etl`/`rotation-etl` at the
+ * wiki#88 Phase 3 decommission — and
+ * the upstream `LIBRARY_RELEASE` row a librarian deleted in Backend still
+ * exists in tubafrenzy's MySQL. The delta filter re-selects it on the next
+ * `TIME_LAST_MODIFIED >` pass, finds no row carrying its
+ * `legacy_release_id`, and takes the INSERT branch of `ON CONFLICT
+ * (legacy_release_id) DO UPDATE` — so the release returns within 30 minutes
+ * under a NEW `library.id`, stripped of the `rotation` (binning history,
+ * `kill_date`, LML-resolved `discogs_release_id`), `album_metadata`,
+ * `reviews` and `album_critic_reviews` rows that CASCADE-destroyed against
+ * the old id and are not re-imported. `legacy_release_id` is 99.88%
+ * populated, so effectively the whole catalog is resurrection-eligible.
+ *
+ * **This table has exactly ONE consumer: `jobs/library-etl`'s import loop**,
+ * which skips any upstream release whose id is listed here. It is
+ * deliberately NOT a `library.deleted_at` soft-delete column — that shape
+ * was rejected on read-path fan-out (32 non-test files touch `library`,
+ * including `GET /library/catalog`, whose conditional GET `304`s past any
+ * server-side filter and would strand the tombstoned release on already-
+ * cloned DJ devices). **No read path filters on this table, and none should
+ * start.**
+ *
+ * The whole table is loaded on every ETL run with no predicate, so it also
+ * holds under the documented full-resync recipe (`DELETE FROM cronjob_runs
+ * WHERE job_name = 'library-etl'`), which drops the delta filter and would
+ * otherwise return every deleted release in a single pass.
+ *
+ * `library_id` records the `library.id` the row carried at delete time and is
+ * informational only — it deliberately carries **no FK**, since the row it
+ * names is deleted in the same transaction. Un-deleting a release is a
+ * `DELETE FROM library_delete_denylist WHERE legacy_release_id = ?` followed
+ * by the next ETL pass, which re-imports it under a fresh `library.id`.
+ */
+export type NewLibraryDeleteDenylist = InferInsertModel<typeof library_delete_denylist>;
+export type LibraryDeleteDenylist = InferSelectModel<typeof library_delete_denylist>;
+export const library_delete_denylist = wxyc_schema.table('library_delete_denylist', {
+  legacy_release_id: integer('legacy_release_id').primaryKey().notNull(),
+  library_id: integer('library_id').notNull(),
+  deleted_at: timestamp('deleted_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
 export const album_metadata = wxyc_schema.table('album_metadata', {
   // `.notNull()` is redundant with `.primaryKey()` at the SQL level (PK
   // implies NOT NULL), but Drizzle's `InferInsertModel` type derivation

@@ -22,7 +22,25 @@
  *     to their own `onDelete: 'cascade'` FK, plus
  *     `album_review_submissions`'s `onDelete: 'set null'` divergence (the
  *     row survives, unlinked).
+ *   - the TRANSITIVE refusal: plays reachable only via `flowsheet.rotation_id`
+ *     -> `rotation.album_id` (`set null` behind a `cascade`), the routine
+ *     shape the tubafrenzy webhook produces when it resolves the two columns
+ *     independently. A direct-FK-only guard blanks these silently.
+ *   - the delete-denylist row, without which `jobs/library-etl` re-imports
+ *     the still-present upstream release within 30 minutes under a new
+ *     `library.id`.
+ *   - `album_popularity.representative_library_id` nulled — it names a
+ *     library row and carries no FK, so nothing else stops it dangling.
+ *   - migration 0147's repair of the drifted
+ *     `artist_library_crossreference.library_id` ON DELETE action, asserted
+ *     against `pg_constraint.confdeltype` rather than the Drizzle model
+ *     (which claimed cascade all along).
  *   - 404 on an unknown id.
+ *
+ * TEARDOWN: this spec shares a database with the rest of the integration
+ * suite, and its 409 cases deliberately create rows the endpoint under test
+ * refuses to remove. Everything it creates is tracked and cleaned in
+ * `afterAll` — see the comment there.
  */
 
 const postgres = require('postgres');
@@ -52,14 +70,82 @@ describe('DELETE /library/:id (BS#2112)', () => {
   let auth;
   let sql;
   const uniq = Date.now();
+  // Every library row this spec creates, and every out-of-band row it inserts
+  // that the endpoint can't reach. Tracked for teardown.
+  const createdAlbumIds = [];
+  const createdSubmissionKeys = [];
 
   beforeAll(async () => {
     auth = createAuthRequest(request, global.access_token);
     sql = makeSql();
   });
 
+  /**
+   * The 409 cases are the reason this teardown exists. They create a release,
+   * attach flowsheet plays, and then assert the endpoint REFUSES to delete it
+   * — so the endpoint under test cannot clean up after itself by design, and
+   * each run would otherwise leak a library row plus its plays into the
+   * shared integration database indefinitely.
+   *
+   * Order matters and mirrors the endpoint's own: children that block or
+   * dangle first, then the library row (whose FKs cascade the rest).
+   * `library_delete_denylist` is keyed on `legacy_release_id`, not
+   * `library.id`, so it's cleared by joining through the rows we created —
+   * before they're deleted.
+   */
   afterAll(async () => {
-    if (sql) await sql.end();
+    if (sql) {
+      try {
+        if (createdSubmissionKeys.length > 0) {
+          // Explicit `::text[]` / `::int[]` casts throughout — postgres-js
+          // won't infer the array type for a bare `ANY($1)` on an `unsafe`
+          // call, the same reason the sibling cleanup blocks in
+          // artist-unicode-dedup-merge.spec.js and
+          // admin-create-user-email-verify.spec.js spell theirs out.
+          await sql.unsafe(`DELETE FROM "${SCHEMA}".album_review_submissions WHERE source_key = ANY($1::text[])`, [
+            createdSubmissionKeys,
+          ]);
+        }
+        if (createdAlbumIds.length > 0) {
+          // Denylist first: it is keyed on `legacy_release_id`, so the
+          // subquery arm has to run while the library rows still exist. The
+          // `library_id` arm covers the rows the happy-path tests already
+          // deleted, whose library row is long gone.
+          await sql.unsafe(
+            `DELETE FROM "${SCHEMA}".library_delete_denylist
+              WHERE legacy_release_id IN (SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = ANY($1::int[]))
+                 OR library_id = ANY($1::int[])`,
+            [createdAlbumIds]
+          );
+          await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE album_id = ANY($1::int[])`, [createdAlbumIds]);
+          await sql.unsafe(
+            `DELETE FROM "${SCHEMA}".flowsheet
+              WHERE rotation_id IN (SELECT id FROM "${SCHEMA}".rotation WHERE album_id = ANY($1::int[]))`,
+            [createdAlbumIds]
+          );
+          await sql.unsafe(`DELETE FROM "${SCHEMA}".bins WHERE album_id = ANY($1::int[])`, [createdAlbumIds]);
+          await sql.unsafe(`DELETE FROM "${SCHEMA}".library_identity_source WHERE library_id = ANY($1::int[])`, [
+            createdAlbumIds,
+          ]);
+          await sql.unsafe(`DELETE FROM "${SCHEMA}".library_identity WHERE library_id = ANY($1::int[])`, [
+            createdAlbumIds,
+          ]);
+          await sql.unsafe(`DELETE FROM "${SCHEMA}".artist_library_crossreference WHERE library_id = ANY($1::int[])`, [
+            createdAlbumIds,
+          ]);
+          await sql.unsafe(
+            `UPDATE "${SCHEMA}".album_popularity SET representative_library_id = NULL
+              WHERE representative_library_id = ANY($1::int[])`,
+            [createdAlbumIds]
+          );
+          // Last: its FKs cascade rotation, album_metadata, reviews,
+          // album_critic_reviews and compilation_track_artist away with it.
+          await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id = ANY($1::int[])`, [createdAlbumIds]);
+        }
+      } finally {
+        await sql.end();
+      }
+    }
   });
 
   const createAlbum = async (title) => {
@@ -73,6 +159,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
         format_id: FMT,
       })
       .expect(201);
+    createdAlbumIds.push(res.body.id);
     return res.body;
   };
 
@@ -114,6 +201,8 @@ describe('DELETE /library/:id (BS#2112)', () => {
     const res = await auth.delete(`/library/${album.id}`).expect(409);
     expect(res.body.reason).toBe('flowsheet_references');
     expect(res.body.play_count).toBe(2);
+    expect(res.body.direct_play_count).toBe(2);
+    expect(res.body.rotation_linked_play_count).toBe(0);
     expect(res.body.message).toContain('2');
 
     // Refused, not partially applied: the release and its plays both survive.
@@ -173,6 +262,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
   test('leaves the real cascading dependents to their own FK', async () => {
     const album = await createAlbum(`BS#2112 Cascade ${uniq}`);
     const sourceKey = `probe-source-key-${album.id}`;
+    createdSubmissionKeys.push(sourceKey);
 
     await sql.unsafe(`INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin) VALUES ($1, 'H')`, [album.id]);
     await sql.unsafe(`INSERT INTO "${SCHEMA}".album_metadata (album_id) VALUES ($1)`, [album.id]);
@@ -219,5 +309,162 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [sourceKey]
     );
     expect(submission[0].album_id).toBeNull();
+  });
+
+  /**
+   * The transitive refusal. `rotation.album_id` is `cascade` and
+   * `flowsheet.rotation_id` is `set null`, so deleting a release blanks
+   * `rotation_id` on plays that reached it only through the rotation entry.
+   * That is the routine shape, not an edge case: the tubafrenzy webhook
+   * resolves `album_id` and `rotation_id` independently, so a play regularly
+   * carries a `rotation_id` with a NULL `album_id`. A guard that counted only
+   * `flowsheet.album_id` would return 204 here and silently destroy the
+   * provenance of every one of those plays.
+   */
+  test('refuses with 409 when plays reach the release only through its rotation entry', async () => {
+    const album = await createAlbum(`BS#2112 Rotation Transitive ${uniq}`);
+
+    const rotationRows = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin) VALUES ($1, 'H') RETURNING id`,
+      [album.id]
+    );
+    const rotationId = rotationRows[0].id;
+
+    // album_id deliberately NULL — the whole point of the transitive path.
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".flowsheet (rotation_id, entry_type, play_order, artist_name, album_title, track_title)
+       VALUES ($1, 'track', 9600, 'Built to Spill', $2, 'rotation-only probe')`,
+      [rotationId, `BS#2112 Rotation Transitive ${uniq}`]
+    );
+
+    const res = await auth.delete(`/library/${album.id}`).expect(409);
+    expect(res.body.reason).toBe('flowsheet_references');
+    expect(res.body.play_count).toBe(1);
+    expect(res.body.direct_play_count).toBe(0);
+    expect(res.body.rotation_linked_play_count).toBe(1);
+    expect(res.body.message).toContain('rotation entry');
+
+    // Refused, not partially applied: the rotation row and the play's link
+    // to it both survive.
+    const surviving = await sql.unsafe(`SELECT count(*)::int AS n FROM "${SCHEMA}".flowsheet WHERE rotation_id = $1`, [
+      rotationId,
+    ]);
+    expect(surviving[0].n).toBe(1);
+  });
+
+  test('counts a play linked by both paths once, not twice', async () => {
+    const album = await createAlbum(`BS#2112 Both Paths ${uniq}`);
+
+    const rotationRows = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin) VALUES ($1, 'H') RETURNING id`,
+      [album.id]
+    );
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".flowsheet (album_id, rotation_id, entry_type, play_order, artist_name, album_title, track_title)
+       VALUES ($1, $2, 'track', 9700, 'Built to Spill', $3, 'both-paths probe')`,
+      [album.id, rotationRows[0].id, `BS#2112 Both Paths ${uniq}`]
+    );
+
+    const res = await auth.delete(`/library/${album.id}`).expect(409);
+    expect(res.body.play_count).toBe(1);
+    expect(res.body.direct_play_count).toBe(1);
+    expect(res.body.rotation_linked_play_count).toBe(0);
+  });
+
+  /**
+   * Durability against `jobs/library-etl`. A Backend-side delete does not
+   * reach tubafrenzy, so the upstream `LIBRARY_RELEASE` row survives; the
+   * ETL is still cron-registered every 30 minutes, and its next delta pass
+   * would find no `library` row carrying this `legacy_release_id` and
+   * re-insert the release under a new `library.id` — without the rotation,
+   * metadata, and review rows that cascaded away. The denylist row is what
+   * the ETL consults to skip it.
+   */
+  test('records the deleted release in the ETL delete-denylist', async () => {
+    const album = await createAlbum(`BS#2112 Denylist ${uniq}`);
+
+    const before = await sql.unsafe(`SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
+    const legacyReleaseId = before[0].legacy_release_id;
+    expect(legacyReleaseId).not.toBeNull();
+
+    await auth.delete(`/library/${album.id}`).expect(204);
+
+    const denylisted = await sql.unsafe(
+      `SELECT library_id, deleted_at FROM "${SCHEMA}".library_delete_denylist WHERE legacy_release_id = $1`,
+      [legacyReleaseId]
+    );
+    expect(denylisted).toHaveLength(1);
+    expect(denylisted[0].library_id).toBe(album.id);
+    expect(denylisted[0].deleted_at).not.toBeNull();
+  });
+
+  test('writes no denylist row when the delete is refused', async () => {
+    const album = await createAlbum(`BS#2112 Denylist Refusal ${uniq}`);
+    const before = await sql.unsafe(`SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
+    const legacyReleaseId = before[0].legacy_release_id;
+
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".flowsheet (album_id, entry_type, play_order, artist_name, album_title, track_title)
+       VALUES ($1, 'track', 9800, 'Built to Spill', $2, 'refusal probe')`,
+      [album.id, `BS#2112 Denylist Refusal ${uniq}`]
+    );
+
+    await auth.delete(`/library/${album.id}`).expect(409);
+
+    const denylisted = await sql.unsafe(
+      `SELECT 1 FROM "${SCHEMA}".library_delete_denylist WHERE legacy_release_id = $1`,
+      [legacyReleaseId]
+    );
+    expect(denylisted).toHaveLength(0);
+  });
+
+  /**
+   * `album_popularity.representative_library_id` names a library row but
+   * carries no foreign key at all, so neither a cascade nor a set-null
+   * reaches it — an unguarded delete leaves it pointing at an id that no
+   * longer exists, which the Track 3 export then joins against.
+   */
+  test('nulls album_popularity.representative_library_id rather than leaving it dangling', async () => {
+    const album = await createAlbum(`BS#2112 Popularity ${uniq}`);
+    const popularityKey = `bs2112-popularity-${album.id}`;
+
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".album_popularity (logical_album_key, plays, linked_plays, freetext_plays, representative_library_id)
+       VALUES ($1, 0, 0, 0, $2)`,
+      [popularityKey, album.id]
+    );
+
+    await auth.delete(`/library/${album.id}`).expect(204);
+
+    const rows = await sql.unsafe(
+      `SELECT representative_library_id FROM "${SCHEMA}".album_popularity WHERE logical_album_key = $1`,
+      [popularityKey]
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].representative_library_id).toBeNull();
+
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".album_popularity WHERE logical_album_key = $1`, [popularityKey]);
+  });
+
+  /**
+   * Migration 0147. schema.ts and every meta snapshot from 0022 forward
+   * declared this FK `onDelete: 'cascade'`; the live constraint was created
+   * `ON DELETE no action` and never migrated to match. drizzle-kit diffs
+   * schema.ts against the SNAPSHOT, never the database, so it could not
+   * detect the drift and would never emit a corrective diff on its own.
+   * Asserted against the catalog rather than the Drizzle model, because the
+   * Drizzle model is the thing that was wrong.
+   */
+  test('artist_library_crossreference.library_id really is ON DELETE CASCADE (migration 0147)', async () => {
+    const rows = await sql.unsafe(
+      `SELECT confdeltype
+         FROM pg_constraint
+        WHERE conname = 'artist_library_crossreference_library_id_library_id_fk'
+          AND conrelid = to_regclass($1)`,
+      [`${SCHEMA}.artist_library_crossreference`]
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].confdeltype).toBe('c');
   });
 });

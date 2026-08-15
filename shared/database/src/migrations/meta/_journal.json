@@ -1002,6 +1002,20 @@
       "when": 1786372066223,
       "tag": "0145_rotation-bin-fallback-indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 146,
+      "version": "7",
+      "when": 1786767892200,
+      "tag": "0146_library-delete-denylist",
+      "breakpoints": true
+    },
+    {
+      "idx": 147,
+      "version": "7",
+      "when": 1786767905031,
+      "tag": "0147_artist-library-crossref-fk-repair",
+      "breakpoints": true
     }
   ]
 }

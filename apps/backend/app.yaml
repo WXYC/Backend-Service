@@ -1336,6 +1336,63 @@ paths:
         '404':
           description: Album or artist not found
 
+    delete:
+      summary: Hard-delete a library release (BS#2112)
+      description: >-
+        Irreversible. Refused with 409 when the release carries flowsheet plays
+        by either path — linked directly (`flowsheet.album_id`) or via its
+        rotation entry (`flowsheet.rotation_id` -> `rotation.album_id`) —
+        since deleting it would silently blank that play provenance.
+        Dependent rows are resolved in the same transaction as the delete, and
+        the release's `legacy_release_id` is recorded in a delete-denylist so
+        the library ETL cannot re-import it from tubafrenzy.
+      security:
+        - BearerAuth: ['station-management']
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '204':
+          description: Deleted; no body
+        '400':
+          description: Invalid album ID
+        '404':
+          description: Album not found
+        '409':
+          description: >-
+            Refused — the release carries flowsheet plays. The body is
+            deliberately NOT this service's standard error shape: the counts
+            are the substance of the refusal, telling the librarian how much
+            history the delete would have damaged and by which path.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: ['message', 'reason', 'play_count', 'direct_play_count', 'rotation_linked_play_count']
+                properties:
+                  message:
+                    type: string
+                    description: Human-readable refusal naming the play count
+                    example: 'Cannot delete: release has 59 flowsheet plays on record'
+                  reason:
+                    type: string
+                    enum: ['flowsheet_references']
+                  play_count:
+                    type: integer
+                    description: Total distinct plays the delete would damage (the sum of the two below)
+                  direct_play_count:
+                    type: integer
+                    description: Plays linked to the release itself via `flowsheet.album_id`
+                  rotation_linked_play_count:
+                    type: integer
+                    description: >-
+                      Plays linked only to the release's rotation entry via
+                      `flowsheet.rotation_id`, whose `album_id` is NULL or
+                      names a different release
+
   /library/{id}/missing:
     patch:
       summary: Mark an album as missing

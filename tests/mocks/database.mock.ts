@@ -95,6 +95,21 @@ export const library = {
   discogs_unavailable_note: 'discogs_unavailable_note',
   last_discogs_recheck_at: 'last_discogs_recheck_at',
 };
+// BS#2112. Written by `deleteAlbumFromDB` in the same transaction as the
+// delete; read by `jobs/library-etl`. Its only consumer is the ETL — no read
+// path filters on it.
+export const library_delete_denylist = {
+  legacy_release_id: 'legacy_release_id',
+  library_id: 'library_id',
+  deleted_at: 'deleted_at',
+};
+export const album_popularity = {
+  logical_album_key: 'logical_album_key',
+  plays: 'plays',
+  linked_plays: 'linked_plays',
+  freetext_plays: 'freetext_plays',
+  representative_library_id: 'representative_library_id',
+};
 export const artists = {
   id: 'id',
   artist_name: 'artist_name',
@@ -120,6 +135,11 @@ export const rotation = {
 export const library_identity = {
   library_id: 'library_id',
   discogs_release_id: 'discogs_release_id',
+};
+export const library_identity_source = {
+  library_id: 'library_id',
+  source: 'source',
+  external_id: 'external_id',
 };
 export const library_artist_view = {
   on_streaming: 'on_streaming',
@@ -351,7 +371,12 @@ export const flowsheet_linkage_review = {
   reviewed_at: 'reviewed_at',
   reviewed_decision: 'reviewed_decision',
 };
-export const bins = {};
+export const bins = {
+  id: 'id',
+  dj_id: 'dj_id',
+  album_id: 'album_id',
+  track_title: 'track_title',
+};
 export const shows = {
   id: 'id',
   primary_dj_id: 'primary_dj_id',
@@ -404,7 +429,10 @@ export const slack_ban_moderators = {
 export const specialty_shows = {};
 export const schedule = {};
 export const artist_crossreference = {};
-export const artist_library_crossreference = {};
+export const artist_library_crossreference = {
+  artist_id: 'artist_id',
+  library_id: 'library_id',
+};
 export const compilation_track_artist = {
   id: 'id',
   library_id: 'library_id',

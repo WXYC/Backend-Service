@@ -56,14 +56,18 @@ const mockRecheckDiscogsAvailability =
   >();
 
 // DELETE /library/:id (BS#2112).
-const mockDeleteAlbumFromDB =
-  jest.fn<
-    (
-      id: number
-    ) => Promise<
-      { outcome: 'deleted' } | { outcome: 'not_found' } | { outcome: 'has_flowsheet_plays'; playCount: number }
-    >
-  >();
+const mockDeleteAlbumFromDB = jest.fn<
+  (id: number) => Promise<
+    | { outcome: 'deleted' }
+    | { outcome: 'not_found' }
+    | {
+        outcome: 'has_flowsheet_plays';
+        playCount: number;
+        directPlayCount: number;
+        rotationLinkedPlayCount: number;
+      }
+  >
+>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
@@ -1425,7 +1429,12 @@ describe('library.controller', () => {
     });
 
     it('refuses with 409 and names the play count when the release carries flowsheet plays', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'has_flowsheet_plays', playCount: 59 });
+      mockDeleteAlbumFromDB.mockResolvedValue({
+        outcome: 'has_flowsheet_plays',
+        playCount: 59,
+        directPlayCount: 59,
+        rotationLinkedPlayCount: 0,
+      });
       const req = { params: { id: '42' } } as unknown as Request;
       const res = mockResponse();
 
@@ -1436,11 +1445,18 @@ describe('library.controller', () => {
         message: expect.stringContaining('59'),
         reason: 'flowsheet_references',
         play_count: 59,
+        direct_play_count: 59,
+        rotation_linked_play_count: 0,
       });
     });
 
     it('uses singular phrasing for exactly one flowsheet play', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'has_flowsheet_plays', playCount: 1 });
+      mockDeleteAlbumFromDB.mockResolvedValue({
+        outcome: 'has_flowsheet_plays',
+        playCount: 1,
+        directPlayCount: 1,
+        rotationLinkedPlayCount: 0,
+      });
       const req = { params: { id: '42' } } as unknown as Request;
       const res = mockResponse();
 
@@ -1448,6 +1464,51 @@ describe('library.controller', () => {
 
       const body = (res.json as jest.Mock).mock.calls[0][0] as { message: string };
       expect(body.message).not.toContain('1 plays');
+    });
+
+    // The transitive path (BS#2112 review finding 3): plays that reach the
+    // release only through `flowsheet.rotation_id` -> `rotation.album_id`.
+    // A librarian looking at a release with zero directly-linked plays would
+    // otherwise have no way to understand the refusal.
+    it('spells out the split when plays arrive via the rotation entry', async () => {
+      mockDeleteAlbumFromDB.mockResolvedValue({
+        outcome: 'has_flowsheet_plays',
+        playCount: 12,
+        directPlayCount: 0,
+        rotationLinkedPlayCount: 12,
+      });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await deleteAlbum(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(409);
+      const body = (res.json as jest.Mock).mock.calls[0][0] as {
+        message: string;
+        play_count: number;
+        direct_play_count: number;
+        rotation_linked_play_count: number;
+      };
+      expect(body.play_count).toBe(12);
+      expect(body.direct_play_count).toBe(0);
+      expect(body.rotation_linked_play_count).toBe(12);
+      expect(body.message).toContain('rotation entry');
+    });
+
+    it('omits the split when every play is linked directly', async () => {
+      mockDeleteAlbumFromDB.mockResolvedValue({
+        outcome: 'has_flowsheet_plays',
+        playCount: 4,
+        directPlayCount: 4,
+        rotationLinkedPlayCount: 0,
+      });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await deleteAlbum(req, res, next);
+
+      const body = (res.json as jest.Mock).mock.calls[0][0] as { message: string };
+      expect(body.message).not.toContain('rotation entry');
     });
 
     it('returns 204 with no body on success', async () => {

@@ -55,6 +55,7 @@ jest.mock('@wxyc/database', () => {
     genres: {},
     format: {},
     library: {},
+    library_delete_denylist: { legacy_release_id: 'legacy_release_id' },
     cronjob_runs: {},
     genre_artist_crossreference: {},
     artist_crossreference: {},
@@ -76,6 +77,8 @@ jest.mock('drizzle-orm', () => {
   };
 });
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { sql } from 'drizzle-orm';
 import {
   parseTabRow,
@@ -98,6 +101,7 @@ import {
   buildAlbumCacheKey,
   ensureArtist,
   findArtistId,
+  loadDeleteDenylist,
 } from '../../../jobs/library-etl/job';
 
 describe('library-etl job helpers', () => {
@@ -774,5 +778,84 @@ describe('library-etl job helpers', () => {
       const codeLettersCalls = sqlMock.mock.calls.filter((args) => args.includes('ny'));
       expect(codeLettersCalls.length).toBeGreaterThan(0);
     });
+  });
+});
+
+/**
+ * Delete-denylist consumption (BS#2112).
+ *
+ * A Backend-side `DELETE /library/:id` does not reach tubafrenzy, so the
+ * upstream `LIBRARY_RELEASE` row survives. This job is still cron-registered
+ * every 30 minutes, so without the denylist its delta pass re-selects that
+ * row, finds no `library` row carrying its `legacy_release_id`, and takes the
+ * INSERT branch of `ON CONFLICT (legacy_release_id) DO UPDATE` — resurrecting
+ * the release under a new `library.id` stripped of every cascade-destroyed
+ * dependent. This job is the denylist's only consumer.
+ */
+describe('library-etl delete denylist (BS#2112)', () => {
+  const makeDenylistTx = (rows: { legacy_release_id: number }[]) => {
+    const where = jest.fn();
+    const from = jest.fn().mockReturnValue({
+      where,
+      then: (resolve: (value: unknown) => void) => resolve(rows),
+    });
+    const select = jest.fn().mockReturnValue({ from });
+    return { tx: { select } as never, select, from, where };
+  };
+
+  it('returns every denylisted legacy_release_id as a set', async () => {
+    const { tx } = makeDenylistTx([{ legacy_release_id: 101 }, { legacy_release_id: 202 }]);
+
+    const denylist = await loadDeleteDenylist(tx);
+
+    expect(denylist).toBeInstanceOf(Set);
+    expect(denylist.has(101)).toBe(true);
+    expect(denylist.has(202)).toBe(true);
+    expect(denylist.has(303)).toBe(false);
+    expect(denylist.size).toBe(2);
+  });
+
+  it('returns an empty set when nothing has been deleted', async () => {
+    const { tx } = makeDenylistTx([]);
+
+    expect((await loadDeleteDenylist(tx)).size).toBe(0);
+  });
+
+  /**
+   * The load must stay UNFILTERED. The documented full-re-sync recipe
+   * (`DELETE FROM cronjob_runs WHERE job_name = 'library-etl'`) drops this
+   * job's own `TIME_LAST_MODIFIED >` delta filter and re-selects the entire
+   * upstream catalog in one pass — so a denylist that were itself windowed by
+   * `last_run`, or by a recency bound on `deleted_at`, would let that single
+   * run resurrect every release ever deleted.
+   */
+  it('applies no predicate, so the denylist still holds on a full re-sync', async () => {
+    const { tx, where } = makeDenylistTx([{ legacy_release_id: 101 }]);
+
+    await loadDeleteDenylist(tx);
+
+    expect(where).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Ordering matters as much as the check itself: `findExistingRelease` can
+   * back-stamp a deleted release's `legacy_release_id` onto a different
+   * `library` row via the canonical-tuple match, so the denylist has to be
+   * consulted before it, not merely before the INSERT.
+   */
+  it('consults the denylist before any other per-release work', () => {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const jobSource = fs.readFileSync(path.resolve(__dirname, '../../../jobs/library-etl/job.ts'), 'utf-8');
+
+    const loopStart = jobSource.indexOf('for (const release of legacyReleases)');
+    expect(loopStart).toBeGreaterThan(-1);
+
+    const denylistCheck = jobSource.indexOf('deleteDenylist.has(release.release_id)', loopStart);
+    const existingLookup = jobSource.indexOf('findExistingRelease(', loopStart);
+    const upsert = jobSource.indexOf('onConflictDoUpdate', loopStart);
+
+    expect(denylistCheck).toBeGreaterThan(loopStart);
+    expect(denylistCheck).toBeLessThan(existingLookup);
+    expect(denylistCheck).toBeLessThan(upsert);
   });
 });

@@ -9,6 +9,7 @@ import {
   genre_artist_crossreference,
   genres,
   library,
+  library_delete_denylist,
   cronjob_runs,
   artist_crossreference,
   artist_library_crossreference,
@@ -919,6 +920,36 @@ const buildLegacySourcedSetWhere = () =>
 const LEGACY_SOURCED_SET_MAP = buildLegacySourcedSetMap();
 const LEGACY_SOURCED_SET_WHERE = buildLegacySourcedSetWhere();
 
+/**
+ * Loads every `legacy_release_id` a librarian has hard-deleted through
+ * `DELETE /library/:id` (BS#2112). This job is the denylist's ONLY consumer.
+ *
+ * Why it exists: a Backend-side delete does not reach tubafrenzy, so the
+ * upstream `LIBRARY_RELEASE` row survives. This job still runs every 30
+ * minutes (`cron-schedule` in `package.json`; it was NOT flipped to
+ * `job-type: one-shot` alongside `flowsheet-etl`/`rotation-etl` at the
+ * wiki#88 Phase 3 decommission), so the delta pass re-selects that row, finds
+ * no `library` row carrying its `legacy_release_id`, and takes the INSERT
+ * branch of `ON CONFLICT (legacy_release_id) DO UPDATE` — resurrecting the
+ * release under a NEW `library.id` with its `rotation`, `album_metadata`,
+ * `reviews`, and `album_critic_reviews` rows gone for good (they cascaded
+ * against the OLD id, and this job does not import them).
+ *
+ * **Deliberately unfiltered.** There is no `last_run` / delta predicate here
+ * and there must never be one: the ETL's own delta filter is dropped
+ * entirely by the documented full-resync recipe (`DELETE FROM cronjob_runs
+ * WHERE job_name = 'library-etl'`), which re-selects the whole upstream
+ * catalog in one pass. A denylist that were itself windowed would let that
+ * single run resurrect every release ever deleted. The table holds one small
+ * row per deletion, so loading all of it per run is cheap.
+ */
+export const loadDeleteDenylist = async (tx: DbTransaction): Promise<Set<number>> => {
+  const rows = await tx
+    .select({ legacy_release_id: library_delete_denylist.legacy_release_id })
+    .from(library_delete_denylist);
+  return new Set(rows.map((row) => row.legacy_release_id));
+};
+
 const run = async () => {
   try {
     const runStartedAt = new Date();
@@ -934,6 +965,7 @@ const run = async () => {
     let insertedCount = 0;
     let updatedFromLegacyConflictCount = 0;
     let skippedCount = 0;
+    let denylistedCount = 0;
 
     await db.transaction(async (tx) => {
       // Sync genres and formats from legacy database before processing releases
@@ -955,7 +987,18 @@ const run = async () => {
 
       const artistCache = new Map<string, EnsuredArtist>();
 
+      // BS#2112. Loaded once per run, ahead of the loop, and consulted first
+      // for every release — before `findExistingRelease`, so a deleted
+      // release can neither be re-inserted nor have its `legacy_release_id`
+      // back-stamped onto some other row by the canonical-tuple backfill.
+      const deleteDenylist = await loadDeleteDenylist(tx);
+
       for (const release of legacyReleases) {
+        if (deleteDenylist.has(release.release_id)) {
+          denylistedCount += 1;
+          continue;
+        }
+
         if (isDbOnlyGenre(release.genre_ref_name)) {
           skippedCount += 1;
           continue;
@@ -1174,7 +1217,7 @@ const run = async () => {
     });
 
     console.log(
-      `[library-etl] Completed. Inserted ${insertedCount}, updated via legacy-id conflict ${updatedFromLegacyConflictCount}, skipped ${skippedCount}.`
+      `[library-etl] Completed. Inserted ${insertedCount}, updated via legacy-id conflict ${updatedFromLegacyConflictCount}, skipped ${skippedCount}, skipped as deleted ${denylistedCount}.`
     );
   } finally {
     await closeDatabaseConnection();
