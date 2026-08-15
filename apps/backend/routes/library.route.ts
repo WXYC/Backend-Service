@@ -98,7 +98,9 @@ library_route.get('/rotation', requirePermissions({ catalog: ['read'] }), librar
 // same '/catalog' vs '/:id/compilation-tracks' trap documented above). At
 // the time of writing there is no single-segment `/rotation/:id` route to
 // collide with, but WXYC/Backend-Service#2113 adds one to this same block;
-// this GET must stay registered before it.
+// this GET must stay registered before it. Pinned by
+// `tests/unit/routes/library-rotation-uncatalogued.route.test.ts`, which
+// fails if a parameterized `/rotation/:x` GET is ever registered ahead of it.
 library_route.get(
   '/rotation/uncatalogued',
   requirePermissions({ catalog: ['read'] }),

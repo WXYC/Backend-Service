@@ -584,6 +584,39 @@ export const killRotationInDB = async (rotationId: number, updatedKillDate?: str
 };
 
 /**
+ * Explicit SELECT list for `GET /library/rotation/uncatalogued` (BS#2109).
+ *
+ * Deliberately a projection, not `select()`. `rotation` also carries
+ * `legacy_rotation_id`, `legacy_library_release_id`, `discogs_release_id`,
+ * `discogs_release_id_source`, `lml_identity_id`,
+ * `tracklist_lookup_attempted_at` and
+ * `discogs_release_id_resolve_attempted_at` — server-derived plumbing that
+ * `getRotationFromDB`'s SELECT list does not publish either, and that
+ * `tests/integration/library.spec.js` pins the rotation surface against
+ * exposing flat. A bare `select()` would also auto-publish every column a
+ * future migration adds, and WXYC/wxyc-shared#354 transcribes whatever this
+ * returns into a published contract.
+ */
+const UNCATALOGUED_ROTATION_PROJECTION = {
+  id: rotation.id,
+  album_id: rotation.album_id,
+  rotation_bin: rotation.rotation_bin,
+  add_date: rotation.add_date,
+  kill_date: rotation.kill_date,
+  artist_name: rotation.artist_name,
+  album_title: rotation.album_title,
+  record_label: rotation.record_label,
+} as const;
+
+export type UncataloguedRotationRow = Pick<
+  RotationRelease,
+  'id' | 'album_id' | 'rotation_bin' | 'add_date' | 'kill_date' | 'artist_name' | 'album_title' | 'record_label'
+>;
+
+/** Optional window over the queue. Both absent ⇒ the full backlog. */
+export type UncataloguedRotationPage = { limit?: number; offset?: number };
+
+/**
  * Read-side query for `GET /library/rotation/uncatalogued` (BS#2109).
  *
  * The cataloging-backlog queue. Unlike `getRotationFromDB`, this is
@@ -601,15 +634,33 @@ export const killRotationInDB = async (rotationId: number, updatedKillDate?: str
  *     full cataloging backlog (killed/historical releases still need
  *     cataloguing, or a record of never having been), not a live dropdown.
  *
- * `COALESCE(album_id, 0) = 0` covers both unlinked sentinels: tubafrenzy
- * writes `0`, Backend writes `NULL` (see `rotation.album_id`'s column doc).
+ * **`album_id IS NULL` is the whole unlinked predicate.** An earlier draft
+ * used `COALESCE(album_id, 0) = 0` on the belief that tubafrenzy writes a
+ * `0` sentinel here. It does not: `rotation.album_id` carries
+ * `rotation_album_id_library_id_fk → library.id`, `library.id` is a `serial`
+ * starting at 1, so a stored `0` would violate the FK; the webhook writer
+ * normalizes its raw upstream id with `rawLibraryId || null`
+ * (`internal.route.ts`) before `resolveAlbumId`; and the seed clone holds
+ * zero `album_id = 0` rows out of 21,625. The 0/NULL duality is real but
+ * lives on `legacy_library_release_id`, a different column. `IS NULL` is
+ * also sargable against `album_id_idx`, which `COALESCE(...)` was not.
+ * `addRotation` (400 on `album_id: 0`) and `linkRotationToAlbum`
+ * (`isNull(rotation.album_id)`) agree with this reading.
  */
-export const getUncataloguedRotationFromDB = async (): Promise<RotationRelease[]> => {
-  return db
-    .select()
+export const getUncataloguedRotationFromDB = async (
+  page: UncataloguedRotationPage = {}
+): Promise<UncataloguedRotationRow[]> => {
+  const { limit, offset } = page;
+  const base = db
+    .select(UNCATALOGUED_ROTATION_PROJECTION)
     .from(rotation)
-    .where(sql`COALESCE(${rotation.album_id}, 0) = 0`)
+    .where(isNull(rotation.album_id))
     .orderBy(desc(rotation.add_date), asc(rotation.id));
+
+  if (limit == null && offset == null) return base;
+  if (limit == null) return base.offset(offset as number);
+  if (offset == null) return base.limit(limit);
+  return base.limit(limit).offset(offset);
 };
 
 export type LinkRotationOutcome =
@@ -633,6 +684,11 @@ export type LinkRotationOutcome =
  * the earlier SELECT) so a concurrent link between the check and the write
  * can't silently double-link the row — mirrors the `f.album_id IS NULL` /
  * `r.album_id IS NULL` re-check discipline in `legacy-linkage-resolve`.
+ *
+ * "Unlinked" is NULL and only NULL here, matching
+ * `getUncataloguedRotationFromDB`'s read predicate and `addRotation`'s
+ * rejection of `album_id: 0` — see that function's doc for why no `0`
+ * sentinel exists on this column.
  */
 export const linkRotationToAlbum = async (rotationId: number, albumId: number): Promise<LinkRotationOutcome> => {
   return db.transaction(async (tx) => {

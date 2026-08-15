@@ -31,7 +31,7 @@ jest.mock('@sentry/node', () => ({
 // tolerance can't leave a test asserting the wrong side of the boundary while
 // still passing. tests/unit/database/etl-utils.test.ts pins the mock's copy to
 // the real module's, so this value tracks production.
-import { db, shows, FUTURE_TIMESTAMP_TOLERANCE_MS } from '@wxyc/database';
+import { db, rotation, shows, FUTURE_TIMESTAMP_TOLERANCE_MS } from '@wxyc/database';
 import { and, eq, isNull } from 'drizzle-orm';
 import express from 'express';
 import request from 'supertest';
@@ -1479,6 +1479,51 @@ describe('POST /internal/rotation-webhook', () => {
     expect(setClause).toHaveProperty('artist_name');
     expect(setClause).toHaveProperty('album_title');
     expect(setClause).toHaveProperty('record_label');
+  });
+
+  // BS#2109: `album_id` is COALESCEd, not overwritten, so a webhook `update`
+  // carrying `libraryReleaseId: 0` (i.e. `excluded.album_id IS NULL`) cannot
+  // revert a Backend-made link from `PATCH /library/rotation/:id/link`.
+  // Before this, the next /wxycdb edit on a release the librarian had
+  // catalogued in dj-site reset album_id to NULL, restored the free text,
+  // and dropped the row back into the cataloging queue.
+  it('update with libraryReleaseId: 0 COALESCEs album_id so a Backend-made link is never downgraded to NULL', async () => {
+    const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
+    onConflictSpy.mockClear();
+
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', release: { id: 500, libraryReleaseId: 0 } });
+
+    expect(res.status).toBe(200);
+    const setClause = (onConflictSpy.mock.calls[0][0] as { set: Record<string, unknown> }).set;
+    // drizzle-orm is automocked project-wide, so `sql\`...\`` renders as
+    // `{ sql: TemplateStringsArray, values: [...] }`. Assert on the literal
+    // chunks: a bare `excluded.album_id` assignment would have no COALESCE.
+    const rendered = ((setClause.album_id as { sql?: string[] })?.sql ?? []).join('?');
+    expect(rendered).toContain('COALESCE(excluded.album_id');
+    // The existing row is the COALESCE fallback, so tubafrenzy's NULL loses.
+    expect((setClause.album_id as { values?: unknown[] })?.values).toEqual([rotation.album_id]);
+  });
+
+  // The COALESCE must not leak into the presence-gated columns: BS#1082 +
+  // BS#1312's gate is a different mechanism (was the field in the payload at
+  // all?) and is load-bearing for partial payloads.
+  it('leaves the other SET entries as plain excluded.* assignments', async () => {
+    const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
+    onConflictSpy.mockClear();
+
+    await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', release: validRelease });
+
+    const setClause = (onConflictSpy.mock.calls[0][0] as { set: Record<string, unknown> }).set;
+    for (const column of ['legacy_library_release_id', 'rotation_bin', 'kill_date', 'artist_name', 'album_title']) {
+      const rendered = ((setClause[column] as { sql?: string[] })?.sql ?? []).join('?');
+      expect(rendered).not.toContain('COALESCE');
+    }
   });
 
   // -- Kill --
