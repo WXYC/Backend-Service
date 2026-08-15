@@ -374,6 +374,17 @@ export const album_critic_reviews = {
   created_at: 'created_at',
   last_modified: 'last_modified',
 };
+// jobs/uncovered-release-list's "searched, found nothing" marker (BS#1877,
+// ADR 0013). See schema.ts's doc comment on uncovered_release_search_markers
+// for why this is a dedicated table rather than a source_key convention on
+// album_critic_reviews.
+export const uncovered_release_search_markers = {
+  id: 'id',
+  album_id: 'album_id',
+  first_handed_off_at: 'first_handed_off_at',
+  last_handed_off_at: 'last_handed_off_at',
+  handoff_count: 'handoff_count',
+};
 export const flowsheet_linkage_review = {
   id: 'id',
   flowsheet_id: 'flowsheet_id',
