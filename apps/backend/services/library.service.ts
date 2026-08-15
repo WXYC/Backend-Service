@@ -2093,6 +2093,13 @@ export const insertArtistGenreCrossreference = async (
   return response[0];
 };
 
+/**
+ * Boolean-grade "is this code triple taken" probe backing `addArtist`'s
+ * code-conflict pre-check. The triple is NOT unique (see `getArtistsByCode`
+ * below), so the row this returns for a contested code is arbitrary — which is
+ * fine here, because the caller only needs *an* owner to name in its 409. A
+ * route whose contract is "who owns this code" must use the plural instead.
+ */
 export const getArtistByCode = async (
   code_letters: string,
   genre_id: number,
@@ -2117,6 +2124,53 @@ export const getArtistByCode = async (
 
   // return null if no artist found
   return response[0] ?? null;
+};
+
+/**
+ * BS#2149: EVERY artist that owns `(code_letters, genre_id, artist_genre_code)`,
+ * in a deterministic order.
+ *
+ * The triple is not unique and nothing in the schema makes it so: the only
+ * unique index on `genre_artist_crossreference` is `artist_genre_key
+ * (artist_id, genre_id)`, and `code_letters` lives on `artists`, one join away.
+ * The production clone holds 13 collisions, every one a Various-Artists filing —
+ * `V/A`/12/0 with 27 owners (`Soundtracks - <LETTER>`) and `V/A`/11/0 with 26
+ * (`Various Artists - Rock - <LETTER>`) among them. Those are distinct shelf
+ * buckets a librarian relies on staying separately reachable, so this returns
+ * all of them and lets the caller present a chooser; collapsing to one row would
+ * be stably wrong for the other 26.
+ *
+ * Ordered `artist_name` then `id`: name first because the collision case is a
+ * lettered V/A run whose alphabetical order IS its shelf order, and `id` as a
+ * tiebreaker so the order is total (two artists can share a name) and repeated
+ * calls agree.
+ *
+ * Deliberately a sibling of the singular `getArtistByCode` rather than a
+ * widening of it: that one is `addArtist`'s conflict pre-check, where an
+ * unordered LIMIT 1 is correct and cheaper, and re-pointing it would change the
+ * `artist` payload of an existing 409.
+ */
+export const getArtistsByCode = async (
+  code_letters: string,
+  genre_id: number,
+  artist_genre_code: number
+): Promise<Array<{ artist_id: number; artist_name: string; code_letters: string }>> => {
+  return db
+    .select({
+      artist_id: genre_artist_crossreference.artist_id,
+      artist_name: artists.artist_name,
+      code_letters: artists.code_letters,
+    })
+    .from(genre_artist_crossreference)
+    .innerJoin(artists, eq(genre_artist_crossreference.artist_id, artists.id))
+    .where(
+      and(
+        eq(artists.code_letters, code_letters),
+        eq(genre_artist_crossreference.genre_id, genre_id),
+        eq(genre_artist_crossreference.artist_genre_code, artist_genre_code)
+      )
+    )
+    .orderBy(asc(artists.artist_name), asc(artists.id));
 };
 
 /**

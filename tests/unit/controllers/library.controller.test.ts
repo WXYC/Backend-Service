@@ -13,6 +13,11 @@ type ArtistConflictRow = { artist_id: number; artist_name: string; code_letters:
 const mockGetArtistByCode =
   jest.fn<(codeLetters: string, genreId: number, codeNumber: number) => Promise<ArtistConflictRow | null>>();
 const mockGetArtistById = jest.fn<(artistId: number) => Promise<ArtistConflictRow | null>>();
+// GET /library/artists/by-code (BS#2149).
+const mockGetArtistsByCode =
+  jest.fn<(codeLetters: string, genreId: number, codeNumber: number) => Promise<ArtistConflictRow[]>>();
+const mockGenreExists = jest.fn<(genreId: number) => Promise<boolean>>();
+const mockGenerateArtistNumber = jest.fn<(codeLetters: string, genreId: number) => Promise<number>>();
 const mockInsertArtist = jest.fn<(artist: Record<string, unknown>) => Promise<Record<string, unknown>>>();
 const mockInsertArtistGenreCrossreference =
   jest.fn<(artistId: number, genreId: number, codeNumber: number) => Promise<unknown>>();
@@ -120,9 +125,11 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   insertArtist: mockInsertArtist,
   insertArtistGenreCrossreference: mockInsertArtistGenreCrossreference,
   getArtistByCode: mockGetArtistByCode,
+  getArtistsByCode: mockGetArtistsByCode,
+  genreExists: mockGenreExists,
   getArtistById: mockGetArtistById,
   generateAlbumCodeNumber: mockGenerateAlbumCodeNumber,
-  generateArtistNumber: jest.fn(),
+  generateArtistNumber: mockGenerateArtistNumber,
   getGenresFromDB: jest.fn(),
   insertGenre: jest.fn(),
   insertFormat: jest.fn(),
@@ -201,6 +208,8 @@ import {
   searchForAlbum,
   addAlbum,
   addArtist,
+  resolveArtistByCode,
+  peekArtistNumber,
   getAlbum,
   getRotationTracks,
   updateAlbum,
@@ -212,6 +221,7 @@ import {
   linkRotationToAlbum,
   pickAddRotationFields,
 } from '../../../apps/backend/controllers/library.controller';
+import WxycError from '../../../apps/backend/utils/error';
 
 function mockResponse(): Response {
   const res = {} as Response;
@@ -839,6 +849,347 @@ describe('library.controller', () => {
       // Short-circuits before the name pre-check even runs.
       expect(mockArtistIdFromName).not.toHaveBeenCalled();
       expect(mockInsertArtist).not.toHaveBeenCalled();
+    });
+  });
+
+  // GET /library/artists/by-code (BS#2149).
+  describe('resolveArtistByCode', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockGetArtistsByCode.mockResolvedValue([]);
+      mockGenreExists.mockResolvedValue(true);
+    });
+
+    const req = (query: Record<string, unknown> = {}) =>
+      ({
+        query: {
+          genre_id: '11',
+          code_letters: 'BU',
+          code_number: '60',
+          ...query,
+        },
+      }) as unknown as Request;
+
+    const owner = (id: number, artist_name: string, code_letters = 'BU') => ({
+      artist_id: id,
+      artist_name,
+      code_letters,
+    });
+
+    it('returns the sole owner of an uncontested code as a one-element list', async () => {
+      mockGetArtistsByCode.mockResolvedValue([owner(9, 'Built to Spill')]);
+
+      const res = mockResponse();
+      await resolveArtistByCode(req(), res, next);
+
+      expect(mockGetArtistsByCode).toHaveBeenCalledWith('BU', 11, 60);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({
+        artists: [{ id: 9, artist_name: 'Built to Spill', code_letters: 'BU', code_number: 60, genre_id: 11 }],
+      });
+    });
+
+    // The V/A invariant: `V/A`/12/0 has 27 owners in the production clone and
+    // each is a distinct shelf bucket. Collapsing or arbitrarily picking one
+    // would be stably wrong for the other 26.
+    it('returns EVERY owner of a contested code, not just the first', async () => {
+      const buckets = [
+        owner(101, 'Soundtracks - A', 'V/A'),
+        owner(102, 'Soundtracks - B', 'V/A'),
+        owner(103, 'Soundtracks - C', 'V/A'),
+      ];
+      mockGetArtistsByCode.mockResolvedValue(buckets);
+
+      const res = mockResponse();
+      await resolveArtistByCode(req({ genre_id: '12', code_letters: 'V/A', code_number: '0' }), res, next);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      const [payload] = (res.json as jest.Mock).mock.calls[0] as [{ artists: Array<{ id: number }> }];
+      expect(payload.artists).toHaveLength(3);
+      expect(payload.artists.map((a) => a.id)).toEqual([101, 102, 103]);
+      expect(payload.artists.map((a) => a.artist_name)).toEqual([
+        'Soundtracks - A',
+        'Soundtracks - B',
+        'Soundtracks - C',
+      ]);
+    });
+
+    // The entire Various-Artists surface is filed at artist_genre_code 0 (68
+    // rows in the production clone). A `< 1` floor made the one filing class
+    // that most needs code-first resolution unanswerable.
+    it('accepts code_number 0 (the Various-Artists filing) and passes it through unchanged', async () => {
+      mockGetArtistsByCode.mockResolvedValue([owner(200, 'Various Artists', 'V/A')]);
+
+      const res = mockResponse();
+      await resolveArtistByCode(req({ genre_id: '11', code_letters: 'V/A', code_number: '0' }), res, next);
+
+      expect(mockGetArtistsByCode).toHaveBeenCalledWith('V/A', 11, 0);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({
+        artists: [{ id: 200, artist_name: 'Various Artists', code_letters: 'V/A', code_number: 0, genre_id: 11 }],
+      });
+    });
+
+    it('rejects a negative code_number', async () => {
+      const res = mockResponse();
+
+      await expect(resolveArtistByCode(req({ code_number: '-1' }), res, next)).rejects.toThrow('code_number');
+      expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-integer code_number', async () => {
+      const res = mockResponse();
+
+      await expect(resolveArtistByCode(req({ code_number: '3.5' }), res, next)).rejects.toThrow('code_number');
+      expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+    });
+
+    // `Number('')` is 0, which now passes Number.isInteger and the >= 0 floor,
+    // so a present-but-blank parameter would silently resolve as a V/A lookup.
+    it('rejects a present-but-blank code_number rather than reading it as 0', async () => {
+      const res = mockResponse();
+
+      await expect(resolveArtistByCode(req({ code_number: '' }), res, next)).rejects.toThrow('code_number');
+      expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+    });
+
+    it('rejects genre_id 0 (genre ids start at 1)', async () => {
+      const res = mockResponse();
+
+      await expect(resolveArtistByCode(req({ genre_id: '0' }), res, next)).rejects.toThrow('genre_id');
+      expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+    });
+
+    // BS#1800 class: parses as a JS integer, overflows the int4 column, and
+    // used to reach Postgres as SQLSTATE 22003 -> unhandled 500 + Sentry noise.
+    describe('int4-bounds validation (BS#1800 class)', () => {
+      it('rejects a genre_id above INT4_MAX with a 400 naming genre_id', async () => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(req({ genre_id: '2147483648' }), res, next)).rejects.toThrow('genre_id');
+        expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+      });
+
+      it('rejects a code_number above INT4_MAX with a 400 naming code_number', async () => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(req({ code_number: '2147483648' }), res, next)).rejects.toThrow('code_number');
+        expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+      });
+
+      it('rejects an overflowing parameter with a WxycError (400), never an unhandled error', async () => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(req({ code_number: '9999999999' }), res, next)).rejects.toBeInstanceOf(
+          WxycError
+        );
+      });
+
+      it('still accepts values exactly at the INT4_MAX boundary', async () => {
+        mockGetArtistsByCode.mockResolvedValue([owner(1, 'Edge Case')]);
+        const res = mockResponse();
+
+        await resolveArtistByCode(req({ genre_id: '2147483647', code_number: '2147483647' }), res, next);
+
+        expect(mockGetArtistsByCode).toHaveBeenCalledWith('BU', 2147483647, 2147483647);
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+    });
+
+    describe('404 discrimination', () => {
+      it('answers reason: genre_not_found when the genre does not exist', async () => {
+        mockGetArtistsByCode.mockResolvedValue([]);
+        mockGenreExists.mockResolvedValue(false);
+
+        const res = mockResponse();
+        await resolveArtistByCode(req({ genre_id: '999999' }), res, next);
+
+        expect(res.status).toHaveBeenCalledWith(404);
+        expect(res.json).toHaveBeenCalledWith({ message: 'Genre not found', reason: 'genre_not_found' });
+      });
+
+      it('answers reason: code_not_assigned when the genre exists but the code is free', async () => {
+        mockGetArtistsByCode.mockResolvedValue([]);
+        mockGenreExists.mockResolvedValue(true);
+
+        const res = mockResponse();
+        await resolveArtistByCode(req({ code_number: '999999' }), res, next);
+
+        expect(res.status).toHaveBeenCalledWith(404);
+        expect(res.json).toHaveBeenCalledWith({
+          message: 'Artist code not assigned in that genre',
+          reason: 'code_not_assigned',
+        });
+      });
+
+      it('gives the two 404s different reasons, so a client never has to parse the message', async () => {
+        const missReasons: string[] = [];
+        for (const genreKnown of [false, true]) {
+          jest.clearAllMocks();
+          mockGetArtistsByCode.mockResolvedValue([]);
+          mockGenreExists.mockResolvedValue(genreKnown);
+          const res = mockResponse();
+          await resolveArtistByCode(req(), res, next);
+          const [payload] = (res.json as jest.Mock).mock.calls[0] as [{ reason: string }];
+          missReasons.push(payload.reason);
+        }
+
+        expect(new Set(missReasons).size).toBe(2);
+      });
+    });
+
+    describe('code_letters normalization', () => {
+      it.each([
+        ['lower-cased', 'bu'],
+        ['whitespace-padded', ' BU '],
+        ['both', ' bu '],
+      ])('trims and upper-cases a %s code_letters before matching', async (_label, raw) => {
+        mockGetArtistsByCode.mockResolvedValue([owner(9, 'Built to Spill')]);
+
+        const res = mockResponse();
+        await resolveArtistByCode(req({ code_letters: raw }), res, next);
+
+        expect(mockGetArtistsByCode).toHaveBeenCalledWith('BU', 11, 60);
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('rejects code_letters that is empty once trimmed', async () => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(req({ code_letters: '   ' }), res, next)).rejects.toThrow('code_letters');
+        expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+      });
+
+      it('echoes the stored code_letters, not the normalized input', async () => {
+        mockGetArtistsByCode.mockResolvedValue([owner(9, 'Built to Spill', 'BU')]);
+
+        const res = mockResponse();
+        await resolveArtistByCode(req({ code_letters: 'bu' }), res, next);
+
+        const [payload] = (res.json as jest.Mock).mock.calls[0] as [{ artists: Array<{ code_letters: string }> }];
+        expect(payload.artists[0].code_letters).toBe('BU');
+      });
+    });
+
+    describe('repeated-key (Express string[]) parsing', () => {
+      it('rejects a repeated code_letters before it can bind a text[] against a text column', async () => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(req({ code_letters: ['B', 'U'] }), res, next)).rejects.toThrow('code_letters');
+        expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+      });
+
+      it.each([['genre_id'], ['code_number']])('rejects a repeated %s by name', async (param) => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(req({ [param]: ['1', '2'] }), res, next)).rejects.toThrow(param);
+        expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('missing parameters', () => {
+      const ALL_PARAMS = ['genre_id', 'code_letters', 'code_number'] as const;
+
+      // Each case omits exactly one parameter and asserts the message names THAT
+      // one and none of the others. A message listing all three would satisfy a
+      // `toContain('code_number')` assertion no matter which parameter the
+      // handler actually refused on -- the blind spot this suite had before.
+      it.each(ALL_PARAMS.map((p) => [p]))('names %s, and only %s, when it is the missing one', async (param) => {
+        const full: Array<[string, string]> = [
+          ['genre_id', '11'],
+          ['code_letters', 'BU'],
+          ['code_number', '60'],
+        ];
+        const query = Object.fromEntries(full.filter(([name]) => name !== param));
+        const res = mockResponse();
+
+        const thrown = await resolveArtistByCode({ query } as unknown as Request, res, next).then(
+          () => null,
+          (err: unknown) => err
+        );
+
+        expect(thrown).toBeInstanceOf(WxycError);
+        expect((thrown as WxycError).statusCode).toBe(400);
+        expect((thrown as WxycError).message).toContain(param);
+        for (const other of ALL_PARAMS.filter((p) => p !== param)) {
+          expect((thrown as WxycError).message).not.toContain(other);
+        }
+        expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+      });
+    });
+
+    // Finding 6: genreExists is only needed to explain a miss. A hit proves the
+    // genre exists, because the lookup inner-joins on genre_artist_crossreference
+    // .genre_id -- so probing it up front doubles the round-trips on the path
+    // that is taken every time a librarian types a real code.
+    describe('round-trip discipline', () => {
+      it('does not probe genreExists on a hit', async () => {
+        mockGetArtistsByCode.mockResolvedValue([owner(9, 'Built to Spill')]);
+
+        const res = mockResponse();
+        await resolveArtistByCode(req(), res, next);
+
+        expect(mockGenreExists).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('probes genreExists exactly once on a miss', async () => {
+        mockGetArtistsByCode.mockResolvedValue([]);
+
+        const res = mockResponse();
+        await resolveArtistByCode(req(), res, next);
+
+        expect(mockGenreExists).toHaveBeenCalledTimes(1);
+        expect(mockGenreExists).toHaveBeenCalledWith(11);
+      });
+    });
+  });
+
+  // The sibling this endpoint was NOT folded into. `peekArtistNumber` reads
+  // exactly two query parameters, and these pin that: it must call the service
+  // with (code_letters, genre_id) and nothing else, for every call shape
+  // dj-site sends -- including one carrying a stray `code_number`.
+  describe('peekArtistNumber two-parameter contract (BS#2149 regression)', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockGenerateArtistNumber.mockResolvedValue(61);
+    });
+
+    it('calls generateArtistNumber with exactly (code_letters, genre_id)', async () => {
+      const res = mockResponse();
+      await peekArtistNumber({ query: { code_letters: 'BU', genre_id: '11' } } as unknown as Request, res, next);
+
+      expect(mockGenerateArtistNumber).toHaveBeenCalledTimes(1);
+      expect(mockGenerateArtistNumber.mock.calls[0]).toEqual(['BU', 11]);
+      expect(res.json).toHaveBeenCalledWith({ next_code_number: 61 });
+    });
+
+    it('ignores a code_number the by-code sibling would consume — same service call, same response', async () => {
+      const res = mockResponse();
+      await peekArtistNumber(
+        { query: { code_letters: 'BU', genre_id: '11', code_number: '60' } } as unknown as Request,
+        res,
+        next
+      );
+
+      // Byte-identical to the two-parameter call above: the third parameter
+      // reaches neither the service nor the response.
+      expect(mockGenerateArtistNumber.mock.calls[0]).toEqual(['BU', 11]);
+      expect(res.json).toHaveBeenCalledWith({ next_code_number: 61 });
+      expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+    });
+
+    it('does not route to the by-code resolver even when all three parameters are present', async () => {
+      const res = mockResponse();
+      await peekArtistNumber(
+        { query: { code_letters: 'V/A', genre_id: '12', code_number: '0' } } as unknown as Request,
+        res,
+        next
+      );
+
+      expect(mockGenerateArtistNumber).toHaveBeenCalledTimes(1);
+      expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+      expect(mockGenreExists).not.toHaveBeenCalled();
     });
   });
 
