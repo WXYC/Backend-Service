@@ -1,0 +1,30 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+WORKDIR /uncovered-release-list-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/uncovered-release-list ./jobs/uncovered-release-list
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/uncovered-release-list
+
+#Production stage
+FROM node:24-alpine AS prod
+
+WORKDIR /uncovered-release-list
+
+ENV DB_STATEMENT_TIMEOUT_MS=60000
+ENV DB_APPLICATION_NAME=wxyc-uncovered-release-list
+
+COPY ./package* ./
+COPY ./jobs/uncovered-release-list/package* ./jobs/uncovered-release-list/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./uncovered-release-list-builder/jobs/uncovered-release-list/dist ./jobs/uncovered-release-list/dist
+COPY --from=builder ./uncovered-release-list-builder/shared/database/dist ./shared/database/dist
+
+CMD ["npm", "start", "--workspace=@wxyc/uncovered-release-list"]
