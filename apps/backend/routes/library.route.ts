@@ -93,6 +93,18 @@ library_route.post('/', requirePermissions({ catalog: ['write'] }), libraryContr
 
 library_route.get('/rotation', requirePermissions({ catalog: ['read'] }), libraryController.getRotation);
 
+// BS#2109: the cataloging-backlog queue. REGISTRATION ORDER IS LOAD-BEARING —
+// keep this literal ahead of any templated `/rotation/:id`-style route (the
+// same '/catalog' vs '/:id/compilation-tracks' trap documented above). At
+// the time of writing there is no single-segment `/rotation/:id` route to
+// collide with, but WXYC/Backend-Service#2113 adds one to this same block;
+// this GET must stay registered before it.
+library_route.get(
+  '/rotation/uncatalogued',
+  requirePermissions({ catalog: ['read'] }),
+  libraryController.getUncataloguedRotation
+);
+
 library_route.post('/rotation', requirePermissions({ catalog: ['write'] }), libraryController.addRotation);
 
 library_route.patch('/rotation', requirePermissions({ catalog: ['write'] }), libraryController.killRotation);
@@ -101,6 +113,15 @@ library_route.get(
   '/rotation/:rotation_id/tracks',
   requirePermissions({ catalog: ['read'] }),
   libraryController.getRotationTracks
+);
+
+// BS#2109: links an uncatalogued rotation row to a library release (the
+// "Import to Library" step). Two-segment route, so it does not collide with
+// `/rotation/uncatalogued` (one segment) or a future `/rotation/:id`.
+library_route.patch(
+  '/rotation/:rotation_id/link',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.linkRotationToAlbum
 );
 
 library_route.post('/artists', requirePermissions({ catalog: ['write'] }), libraryController.addArtist);

@@ -504,6 +504,185 @@ describe('Library Rotation', () => {
       expectErrorContains(res, 'Incorrect Date Format');
     });
   });
+
+  // BS#2109: an uncatalogued rotation release — no album_id, represented by
+  // the free-text artist_name/album_title pair (record_label optional).
+  describe('POST /library/rotation (uncatalogued release, BS#2109)', () => {
+    test('accepts a rotation release with no album_id when artist_name + album_title are supplied', async () => {
+      const res = await auth
+        .post('/library/rotation')
+        .send({
+          rotation_bin: 'L',
+          artist_name: 'Uncatalogued Test Artist',
+          album_title: 'Uncatalogued Test Album',
+          record_label: 'Uncatalogued Test Label',
+        })
+        .expect(201);
+
+      expect(res.body.album_id).toBeNull();
+      expect(res.body.rotation_bin).toBe('L');
+      expect(res.body.artist_name).toBe('Uncatalogued Test Artist');
+      expect(res.body.album_title).toBe('Uncatalogued Test Album');
+      expect(res.body.record_label).toBe('Uncatalogued Test Label');
+
+      // Clean up.
+      if (res.body.id) {
+        await auth.patch('/library/rotation').send({ rotation_id: res.body.id });
+      }
+    });
+
+    test('still 400s when neither album_id nor an artist_name/album_title pair is given', async () => {
+      const res = await auth
+        .post('/library/rotation')
+        .send({
+          rotation_bin: 'M',
+        })
+        .expect(400);
+
+      expectErrorContains(res, 'Missing Parameters');
+    });
+
+    test('400s when only artist_name is given without album_title', async () => {
+      const res = await auth
+        .post('/library/rotation')
+        .send({
+          rotation_bin: 'M',
+          artist_name: 'Uncatalogued Test Artist',
+        })
+        .expect(400);
+
+      expectErrorContains(res, 'Missing Parameters');
+    });
+
+    test('does not synchronously call LML / resolveIdentity when album_id is absent (no library_identity row to resolve)', async () => {
+      // No library_identity hop is possible without an album_id — the
+      // server-derived Discogs columns must stay at their defaults rather
+      // than erroring.
+      const res = await auth
+        .post('/library/rotation')
+        .send({
+          rotation_bin: 'S',
+          artist_name: 'Uncatalogued Test Artist Two',
+          album_title: 'Uncatalogued Test Album Two',
+        })
+        .expect(201);
+
+      expect(res.body.discogs_release_id).toBeNull();
+      expect(res.body.lml_identity_id).toBeNull();
+
+      if (res.body.id) {
+        await auth.patch('/library/rotation').send({ rotation_id: res.body.id });
+      }
+    });
+  });
+
+  // BS#2109: the cataloging-backlog queue.
+  describe('GET /library/rotation/uncatalogued', () => {
+    test('returns an array of unlinked rows', async () => {
+      const res = await auth.get('/library/rotation/uncatalogued').expect(200);
+
+      expectArray(res);
+      expect(res.body.length).toBeGreaterThan(0);
+      for (const row of res.body) {
+        expect(row.album_id === null || row.album_id === 0).toBe(true);
+      }
+    });
+
+    test('surfaces two same-artist/same-title unlinked rows BOTH — no DISTINCT ON collapse', async () => {
+      // The shape fixture (tests/fixtures/shape.sql) seeds two NULL-album_id
+      // rotation rows (ids 7007 and 7015) with identical artist/album/bin —
+      // the exact pair getRotationFromDB's dropdown collapses to one (#862).
+      // The uncatalogued queue must surface both: they're two distinct
+      // physical promos a librarian has to catalogue separately.
+      const res = await auth.get('/library/rotation/uncatalogued').expect(200);
+
+      const orphanRows = res.body.filter(
+        (r) => r.artist_name === 'Shape Fixture Orphan One' && r.album_title === 'Shape Fixture Orphan Album One'
+      );
+      expect(orphanRows.map((r) => r.id).sort((a, b) => a - b)).toEqual([7007, 7015]);
+    });
+
+    test('GET /library/rotation is untouched: response shape and dedup behavior are unaffected', async () => {
+      // Pins the constraint from the issue: GET /library/rotation is not
+      // modified by BS#2109. Re-asserts the pre-existing #862 collapse
+      // behavior still holds on the dropdown endpoint.
+      const res = await auth.get('/library/rotation').expect(200);
+
+      const orphanOneRows = res.body.filter(
+        (r) => r.id === null && r.artist_name === 'Shape Fixture Orphan One' && r.rotation_bin === 'L'
+      );
+      expect(orphanOneRows).toHaveLength(1);
+      expect(orphanOneRows[0].rotation_add_date).toBe('2024-09-12');
+    });
+  });
+
+  // BS#2109: links an uncatalogued rotation row to a library release after
+  // the fact (the "Import to Library" step of the tubafrenzy /wxycdb flow).
+  describe('PATCH /library/rotation/:rotation_id/link', () => {
+    async function createUncataloguedRotation(overrides = {}) {
+      const res = await auth
+        .post('/library/rotation')
+        .send({
+          rotation_bin: 'L',
+          artist_name: 'Link Test Artist',
+          album_title: 'Link Test Album',
+          ...overrides,
+        })
+        .expect(201);
+      return res.body;
+    }
+
+    test('links album_id and clears artist_name/album_title/record_label in the same transaction', async () => {
+      const created = await createUncataloguedRotation({ record_label: 'Link Test Label' });
+
+      const res = await auth.patch(`/library/rotation/${created.id}/link`).send({ album_id: 1 }).expect(200);
+
+      expect(res.body.album_id).toBe(1);
+      expect(res.body.artist_name).toBeNull();
+      expect(res.body.album_title).toBeNull();
+      expect(res.body.record_label).toBeNull();
+
+      // No window where the row carries both album_id and stale free text —
+      // read the row back and re-assert (guards against a partial write).
+      const reread = await auth.get('/library/rotation/uncatalogued').expect(200);
+      expect(reread.body.find((r) => r.id === created.id)).toBeUndefined();
+
+      await auth.patch('/library/rotation').send({ rotation_id: created.id });
+    });
+
+    test('rejects double-linking', async () => {
+      const created = await createUncataloguedRotation();
+      await auth.patch(`/library/rotation/${created.id}/link`).send({ album_id: 1 }).expect(200);
+
+      const res = await auth.patch(`/library/rotation/${created.id}/link`).send({ album_id: 2 }).expect(409);
+      expectErrorContains(res, 'already linked');
+
+      await auth.patch('/library/rotation').send({ rotation_id: created.id });
+    });
+
+    test('404s when the rotation row does not exist', async () => {
+      const res = await auth.patch('/library/rotation/9999999/link').send({ album_id: 1 }).expect(404);
+      expectErrorContains(res, 'Rotation entry not found');
+    });
+
+    test('404s when the album does not exist', async () => {
+      const created = await createUncataloguedRotation();
+
+      const res = await auth.patch(`/library/rotation/${created.id}/link`).send({ album_id: 9999999 }).expect(404);
+      expectErrorContains(res, 'Album not found');
+
+      await auth.patch('/library/rotation').send({ rotation_id: created.id });
+    });
+
+    test('400s when album_id is missing', async () => {
+      const created = await createUncataloguedRotation();
+
+      const res = await auth.patch(`/library/rotation/${created.id}/link`).send({}).expect(400);
+      expectErrorContains(res, 'Missing Parameters');
+
+      await auth.patch('/library/rotation').send({ rotation_id: created.id });
+    });
+  });
 });
 
 describe('Library Artists', () => {

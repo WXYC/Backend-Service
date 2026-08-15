@@ -583,6 +583,92 @@ export const killRotationInDB = async (rotationId: number, updatedKillDate?: str
   return updatedRotation[0];
 };
 
+/**
+ * Read-side query for `GET /library/rotation/uncatalogued` (BS#2109).
+ *
+ * The cataloging-backlog queue. Unlike `getRotationFromDB`, this is
+ * deliberately:
+ *
+ *   - **NOT `DISTINCT ON`-collapsed.** Two physically distinct promos
+ *     sharing an artist and title are two separate rows a librarian has to
+ *     catalogue; `getRotationFromDB`'s dedup exists for its dropdown shape
+ *     and would silently hide one of them here.
+ *   - **Not `LEFT JOIN`ed to `library`/`artists`/`format`/`genres`.** Every
+ *     row this predicate selects is unlinked by definition, so those joins
+ *     would return NULL for every column on every row. Returns the raw
+ *     `rotation` snapshot columns instead.
+ *   - **Not restricted to active (`kill_date`) rows.** The queue is the
+ *     full cataloging backlog (killed/historical releases still need
+ *     cataloguing, or a record of never having been), not a live dropdown.
+ *
+ * `COALESCE(album_id, 0) = 0` covers both unlinked sentinels: tubafrenzy
+ * writes `0`, Backend writes `NULL` (see `rotation.album_id`'s column doc).
+ */
+export const getUncataloguedRotationFromDB = async (): Promise<RotationRelease[]> => {
+  return db
+    .select()
+    .from(rotation)
+    .where(sql`COALESCE(${rotation.album_id}, 0) = 0`)
+    .orderBy(desc(rotation.add_date), asc(rotation.id));
+};
+
+export type LinkRotationOutcome =
+  | { outcome: 'linked'; rotation: RotationRelease }
+  | { outcome: 'rotation_not_found' }
+  | { outcome: 'already_linked' }
+  | { outcome: 'album_not_found' };
+
+/**
+ * Links an uncatalogued rotation row to a library release (BS#2109's
+ * `PATCH /library/rotation/:rotation_id/link` — the "Import to Library"
+ * step of the tubafrenzy `/wxycdb` workflow).
+ *
+ * Clears `artist_name` / `album_title` / `record_label` in the same
+ * transaction as the `album_id` write, matching `jobs/legacy-linkage-resolve`
+ * (`resolveRotationLinks`) — display reads through the `library` join once
+ * linked, so a link that doesn't clear the snapshot leaves stale free text
+ * visible until the next cron tick.
+ *
+ * The final UPDATE re-guards `album_id IS NULL` in its own WHERE (not just
+ * the earlier SELECT) so a concurrent link between the check and the write
+ * can't silently double-link the row — mirrors the `f.album_id IS NULL` /
+ * `r.album_id IS NULL` re-check discipline in `legacy-linkage-resolve`.
+ */
+export const linkRotationToAlbum = async (rotationId: number, albumId: number): Promise<LinkRotationOutcome> => {
+  return db.transaction(async (tx) => {
+    const [albumRow] = await tx.select({ id: library.id }).from(library).where(eq(library.id, albumId)).limit(1);
+    if (!albumRow) {
+      return { outcome: 'album_not_found' as const };
+    }
+
+    const [existingRotation] = await tx
+      .select({ album_id: rotation.album_id })
+      .from(rotation)
+      .where(eq(rotation.id, rotationId))
+      .limit(1);
+    if (!existingRotation) {
+      return { outcome: 'rotation_not_found' as const };
+    }
+    if (existingRotation.album_id != null) {
+      return { outcome: 'already_linked' as const };
+    }
+
+    const [updated] = await tx
+      .update(rotation)
+      .set({ album_id: albumId, artist_name: null, album_title: null, record_label: null })
+      .where(and(eq(rotation.id, rotationId), isNull(rotation.album_id)))
+      .returning();
+
+    if (!updated) {
+      // Race: another request linked this row between the check above and
+      // this UPDATE's own re-guarded WHERE.
+      return { outcome: 'already_linked' as const };
+    }
+
+    return { outcome: 'linked' as const, rotation: updated };
+  });
+};
+
 export const insertAlbum = async (newAlbum: NewAlbum) => {
   const response = await db.insert(library).values(newAlbum).returning();
   return response[0];

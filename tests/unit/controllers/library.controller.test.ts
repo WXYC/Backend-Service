@@ -29,6 +29,19 @@ const mockResolveRotationPickerSource = jest.fn<(rotationId: number) => Promise<
 type RotationTrackMock = { position: string; title: string; duration: string | null; artists: string[] };
 const mockGetRotationTracksFromRelease = jest.fn<(releaseId: number) => Promise<RotationTrackMock[] | null>>();
 
+// GET /library/rotation, POST /library/rotation, PATCH /library/rotation,
+// GET /library/rotation/uncatalogued, PATCH /library/rotation/:id/link (BS#2109).
+const mockGetRotationFromDB = jest.fn<() => Promise<unknown[]>>();
+const mockAddToRotation = jest.fn<(fields: Record<string, unknown>) => Promise<Record<string, unknown>>>();
+const mockKillRotationInDB = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
+const mockGetUncataloguedRotationFromDB = jest.fn<() => Promise<unknown[]>>();
+type LinkRotationOutcomeMock =
+  | { outcome: 'linked'; rotation: Record<string, unknown> }
+  | { outcome: 'rotation_not_found' }
+  | { outcome: 'already_linked' }
+  | { outcome: 'album_not_found' };
+const mockLinkRotationToAlbum = jest.fn<(rotationId: number, albumId: number) => Promise<LinkRotationOutcomeMock>>();
+
 // PATCH /library/:id (updateAlbum) surface.
 const mockGetLibraryRowById = jest.fn<(id: number) => Promise<Record<string, unknown> | undefined>>();
 const mockUpdateAlbumInDB =
@@ -87,9 +100,11 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   serializeArtist: (row: unknown) => row,
   // Stub out other exports that may be referenced at import time
   getFormatsFromDB: jest.fn(),
-  getRotationFromDB: jest.fn(),
-  addToRotation: jest.fn(),
-  killRotationInDB: jest.fn(),
+  getRotationFromDB: mockGetRotationFromDB,
+  addToRotation: mockAddToRotation,
+  killRotationInDB: mockKillRotationInDB,
+  getUncataloguedRotationFromDB: mockGetUncataloguedRotationFromDB,
+  linkRotationToAlbum: mockLinkRotationToAlbum,
   insertAlbum: mockInsertAlbum,
   updateArtworkUrl: mockUpdateArtworkUrl,
   updateOnStreaming: mockUpdateOnStreaming,
@@ -187,6 +202,10 @@ import {
   searchLibraryQueryEndpoint,
   manualDiscogsRecheck,
   deleteAlbum,
+  addRotation,
+  getUncataloguedRotation,
+  linkRotationToAlbum,
+  pickAddRotationFields,
 } from '../../../apps/backend/controllers/library.controller';
 
 function mockResponse(): Response {
@@ -909,6 +928,198 @@ describe('library.controller', () => {
       const res = mockResponse();
 
       await expect(getRotationTracks(req, res, next)).rejects.toThrow('upstream timeout');
+    });
+  });
+
+  describe('pickAddRotationFields (BS#2109)', () => {
+    it('picks album_id and rotation_bin, dropping the snapshot trio, when album_id is present', () => {
+      const picked = pickAddRotationFields({
+        album_id: 5,
+        rotation_bin: 'M',
+        artist_name: 'Forged Artist',
+        album_title: 'Forged Album',
+        record_label: 'Forged Label',
+      });
+
+      expect(picked).toEqual({ album_id: 5, rotation_bin: 'M' });
+    });
+
+    it('picks the snapshot trio when album_id is absent', () => {
+      const picked = pickAddRotationFields({
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+        record_label: 'Rough Trade',
+      });
+
+      expect(picked).toEqual({
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+        record_label: 'Rough Trade',
+      });
+    });
+
+    it('omits record_label from the picked fields when not supplied (album_id absent)', () => {
+      const picked = pickAddRotationFields({
+        rotation_bin: 'S',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+      });
+
+      expect(picked).toEqual({ rotation_bin: 'S', artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' });
+    });
+  });
+
+  describe('addRotation (BS#2109)', () => {
+    beforeEach(() => {
+      mockAddToRotation.mockReset();
+    });
+
+    it('returns 400 when rotation_bin is missing', async () => {
+      const req = { body: { album_id: 5 } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(addRotation(req, res, next)).rejects.toThrow('Missing Parameters');
+      expect(mockAddToRotation).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 when neither album_id nor the artist_name/album_title pair is given', async () => {
+      const req = { body: { rotation_bin: 'M' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(addRotation(req, res, next)).rejects.toThrow('Missing Parameters');
+      expect(mockAddToRotation).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 when only artist_name is given (album_title also required)', async () => {
+      const req = { body: { rotation_bin: 'M', artist_name: 'Jockstrap' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(addRotation(req, res, next)).rejects.toThrow('Missing Parameters');
+      expect(mockAddToRotation).not.toHaveBeenCalled();
+    });
+
+    it('accepts a catalogued rotation add (album_id present, no free text needed)', async () => {
+      mockAddToRotation.mockResolvedValue({ id: 1, album_id: 5, rotation_bin: 'M' });
+      const req = { body: { album_id: 5, rotation_bin: 'M' } } as unknown as Request;
+      const res = mockResponse();
+
+      await addRotation(req, res, next);
+
+      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M' });
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('accepts an uncatalogued rotation add (no album_id, artist_name + album_title supplied)', async () => {
+      mockAddToRotation.mockResolvedValue({
+        id: 2,
+        album_id: null,
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+      });
+      const req = {
+        body: { rotation_bin: 'L', artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await addRotation(req, res, next);
+
+      expect(mockAddToRotation).toHaveBeenCalledWith({
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+      });
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+  });
+
+  describe('getUncataloguedRotation (BS#2109)', () => {
+    it('delegates to getUncataloguedRotationFromDB and returns 200', async () => {
+      const rows = [{ id: 10, album_id: null, artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' }];
+      mockGetUncataloguedRotationFromDB.mockResolvedValue(rows);
+      const req = {} as unknown as Request;
+      const res = mockResponse();
+
+      await getUncataloguedRotation(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(rows);
+    });
+  });
+
+  describe('linkRotationToAlbum (BS#2109)', () => {
+    beforeEach(() => {
+      mockLinkRotationToAlbum.mockReset();
+    });
+
+    it('returns 400 for a non-numeric rotation_id', async () => {
+      const req = { params: { rotation_id: 'abc' }, body: { album_id: 5 } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('positive integer');
+      expect(mockLinkRotationToAlbum).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 for a non-positive rotation_id', async () => {
+      const req = { params: { rotation_id: '0' }, body: { album_id: 5 } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('positive integer');
+    });
+
+    it('returns 400 when album_id is missing', async () => {
+      const req = { params: { rotation_id: '42' }, body: {} } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('Missing Parameters');
+      expect(mockLinkRotationToAlbum).not.toHaveBeenCalled();
+    });
+
+    it('returns 200 with the updated row on success', async () => {
+      mockLinkRotationToAlbum.mockResolvedValue({
+        outcome: 'linked',
+        rotation: { id: 42, album_id: 5, artist_name: null, album_title: null, record_label: null },
+      });
+      const req = { params: { rotation_id: '42' }, body: { album_id: 5 } } as unknown as Request;
+      const res = mockResponse();
+
+      await linkRotationToAlbum(req, res, next);
+
+      expect(mockLinkRotationToAlbum).toHaveBeenCalledWith(42, 5);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({
+        id: 42,
+        album_id: 5,
+        artist_name: null,
+        album_title: null,
+        record_label: null,
+      });
+    });
+
+    it('returns 404 when the rotation row does not exist', async () => {
+      mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'rotation_not_found' });
+      const req = { params: { rotation_id: '42' }, body: { album_id: 5 } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('Rotation entry not found');
+    });
+
+    it('returns 404 when the album does not exist', async () => {
+      mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'album_not_found' });
+      const req = { params: { rotation_id: '42' }, body: { album_id: 999999 } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('Album not found');
+    });
+
+    it('returns 409 when the rotation row is already linked (rejects double-linking)', async () => {
+      mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'already_linked' });
+      const req = { params: { rotation_id: '42' }, body: { album_id: 5 } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('already linked');
     });
   });
 
