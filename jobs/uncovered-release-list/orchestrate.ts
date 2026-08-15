@@ -27,11 +27,15 @@
  *      the read-only DB queries above.
  *   6. Render the snapshot (`writer.renderSnapshot`) ONCE and write it to
  *      disk (`writer.writeSnapshotFile`) — happens even when the uncovered
- *      set is empty; an empty `uncovered-releases.jsonl` is itself a
- *      meaningful, idempotent "nothing new to search this cycle" snapshot,
+ *      set is empty; an empty LOCAL `uncovered-releases.jsonl` is itself a
+ *      meaningful, idempotent "nothing new to search this cycle" artifact,
  *      not a skipped step (unlike the sibling ETL's `nothing_new` early
- *      return, which has no file to write either way).
- *   7. Publish (`publish.ts`) the SAME rendered content to research-data.
+ *      return, which has no file to write either way). The empty case is
+ *      local-only: step 7 declines to PUBLISH it.
+ *   7. Publish (`publish.ts`) the SAME rendered content to research-data,
+ *      UNLESS the set is empty — publishing is a whole-file replace of one
+ *      fixed path, so an empty publish hands off nothing while destroying a
+ *      previous snapshot whose releases are already permanently marked.
  *      A publish failure (thrown) is caught and counted (`publish_error`),
  *      never aborts the run — the local file already succeeded and is this
  *      run's durable artifact regardless of whether the cross-repo push
@@ -187,14 +191,33 @@ export const runJob = async (opts: RunOptions): Promise<Totals> => {
   totals.written = uncovered.length;
   log('info', 'wrote_snapshot', `${JOB_NAME}: wrote ${totals.written} row(s)`, { path: writeResult.path });
 
-  // 7. Publish, isolated.
+  // 7. Publish, isolated — but NEVER publish an empty snapshot.
+  //
+  // Publishing is a whole-file replace of one fixed path, and markers are
+  // publish-once. An empty publish therefore buys nothing (there is no
+  // release to hand off) while destroying the previous snapshot at
+  // research-data HEAD — whose releases are already permanently marked. If
+  // the consumer had not yet read that snapshot, those releases become
+  // marked-but-never-searched with no recovery path: exactly the failure
+  // the publish-gated marker design exists to prevent. Holding the previous
+  // file costs at most a redundant re-read by the consumer, which is
+  // harmless (its releases are already marked, so they cannot be re-offered).
+  //
+  // The LOCAL write above still happens unconditionally — an empty local
+  // `uncovered-releases.jsonl` is a meaningful "nothing new this cycle"
+  // artifact, and nothing downstream reads it.
   let publishOutcome: PublishOutcome;
-  try {
-    publishOutcome = await opts.publish(content);
-  } catch (error) {
-    log('warn', 'publish_error', `${JOB_NAME}: publish failed`, { error_message: (error as Error).message });
-    captureError(error, 'publish_error');
-    publishOutcome = { attempted: true, committed: false, reason: (error as Error).message };
+  if (uncovered.length === 0) {
+    publishOutcome = { attempted: false, committed: false, reason: 'empty snapshot: nothing to hand off' };
+    log('info', 'publish_skipped_empty', `${JOB_NAME}: nothing to publish; leaving the previous snapshot in place`);
+  } else {
+    try {
+      publishOutcome = await opts.publish(content);
+    } catch (error) {
+      log('warn', 'publish_error', `${JOB_NAME}: publish failed`, { error_message: (error as Error).message });
+      captureError(error, 'publish_error');
+      publishOutcome = { attempted: true, committed: false, reason: (error as Error).message };
+    }
   }
   totals.published = publishOutcome.committed;
 
