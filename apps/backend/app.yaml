@@ -1957,6 +1957,53 @@ paths:
         '200':
           description: Next available artist code number
 
+  /library/artists/by-code:
+    get:
+      summary: Resolve a fully-specified library code to its owning artist
+      security:
+        - BearerAuth: ['station-management']
+      parameters:
+        - in: query
+          name: genre_id
+          required: true
+          schema:
+            type: integer
+        - in: query
+          name: code_letters
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: code_number
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: The artist that owns this code
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artist:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      artist_name:
+                        type: string
+                      code_letters:
+                        type: string
+                      code_number:
+                        type: integer
+                      genre_id:
+                        type: integer
+        '400':
+          description: Invalid or missing genre_id, code_letters, or code_number
+        '404':
+          description: Genre not found, or the code is not assigned in that genre
+
   /library/formats:
     get:
       summary: Get format list
