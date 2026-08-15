@@ -7,8 +7,9 @@
  *
  *   {"artist": <canonical artist str>, "album": <canonical album str>, "library_id": <int>}
  *
- * `artist`/`album` are the library-canonical pair `rotation.ts` resolves
- * (never the raw rotation/tubafrenzy snapshot text) — this is the whole
+ * `artist`/`album` are the library-canonical pair, from `rotation.ts`'s
+ * resolve loop or `plays.ts`'s joins (never the raw rotation/tubafrenzy
+ * snapshot text or a DJ-typed play string) — this is the whole
  * point of ADR 0013's design: a search-sourced review row can be written
  * with the SAME canonical pair from the start, so
  * `album-critic-reviews-etl`'s exact-match resolver hits trivially,

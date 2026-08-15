@@ -58,6 +58,7 @@ const makeOpts = (overrides: Partial<RunOptions> = {}): TestOpts => {
   const opts: TestOpts = {
     fetchActiveRotation: () => Promise.resolve([row()]),
     resolveCanonical: (r) => Promise.resolve(releaseFor(r)),
+    fetchPlayCandidates: () => Promise.resolve([]),
     loadCovered: () => Promise.resolve(new Set<number>()),
     loadHandedOff: () => Promise.resolve(new Set<number>()),
     writeSnapshot: (content, path) => {
@@ -73,6 +74,7 @@ const makeOpts = (overrides: Partial<RunOptions> = {}): TestOpts => {
       return Promise.resolve(committedPublish);
     },
     outputPath: './output/uncovered-releases.jsonl',
+    maxReleasesPerRun: 400,
     writeCalls,
     publishCalls,
     recordHandoffsCalls,
@@ -228,23 +230,227 @@ describe('runJob — DRY_RUN', () => {
       expect(opts.recordHandoffsCalls).toHaveLength(0);
       expect(totals).toMatchObject({ deduped: 2, already_covered: 1, uncovered: 1, written: 0, published: false });
 
-      const reportLine = stdoutSpy.mock.calls.map((c) => String(c[0])).find((line) => line.includes('"uncovered"'));
+      // The report literal is the only stdout line starting with `{"job":` —
+      // logger lines start with `{"timestamp":` and the cap-fired warn line
+      // also carries an `"uncovered"` field, so an .includes() match would
+      // find the wrong line and pass vacuously.
+      const reportLine = stdoutSpy.mock.calls.map((c) => String(c[0])).find((line) => line.startsWith('{"job":'));
       if (reportLine === undefined) throw new Error('no dry-run report line written to stdout');
       const report = JSON.parse(reportLine.trim());
       expect(report).toEqual({
         job: 'uncovered-release-list',
         dry_run: true,
+        backfill: false,
         active_rotation_rows: 2,
         resolved: 2,
         unresolved_dropped: 0,
+        recent_play_rows: 0,
+        candidate_rows: 2,
         deduped: 2,
         already_covered: 1,
         already_handed_off: 0,
         uncovered: 1,
+        capped_out: 0,
       });
     } finally {
       stdoutSpy.mockRestore();
     }
+  });
+
+  it('capped_out is non-zero under DRY_RUN when the cap fires — the exact mode an operator uses to check it', async () => {
+    const stdoutSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      const rows = [1, 2, 3].map((id) => row({ rotationId: id, libraryId: id }));
+      const opts = makeOpts({
+        fetchActiveRotation: () => Promise.resolve(rows),
+        resolveCanonical: (r) => Promise.resolve(releaseFor(r)),
+        maxReleasesPerRun: 1,
+        dryRun: true,
+      });
+
+      const totals = await runJob(opts);
+
+      expect(totals.uncovered).toBe(3);
+      expect(totals.capped_out).toBe(2);
+      expect(opts.writeCalls).toHaveLength(0);
+
+      // The report literal is the only stdout line starting with `{"job":` —
+      // logger lines start with `{"timestamp":` and the cap-fired warn line
+      // also carries an `"uncovered"` field, so an .includes() match would
+      // find the wrong line and pass vacuously.
+      const reportLine = stdoutSpy.mock.calls.map((c) => String(c[0])).find((line) => line.startsWith('{"job":'));
+      if (reportLine === undefined) throw new Error('no dry-run report line written to stdout');
+      expect(JSON.parse(reportLine.trim()).capped_out).toBe(2);
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  });
+});
+
+describe('runJob — play arm: concat + dedup precedence', () => {
+  it('an album in both arms keeps its rotation-arm canonical fields (rotation-first, first-wins dedup)', async () => {
+    const rotationRelease: CanonicalRelease = { libraryId: 7, artist: 'Rotation Artist', album: 'Rotation Album' };
+    const playRelease: CanonicalRelease = {
+      libraryId: 7,
+      artist: 'Play Artist (must lose)',
+      album: 'Play Album (must lose)',
+    };
+    const opts = makeOpts({
+      fetchActiveRotation: () => Promise.resolve([row({ rotationId: 1, libraryId: 7 })]),
+      resolveCanonical: () => Promise.resolve(rotationRelease),
+      fetchPlayCandidates: () => Promise.resolve([playRelease]),
+    });
+
+    const totals = await runJob(opts);
+
+    expect(totals.recent_play_rows).toBe(1);
+    expect(totals.candidate_rows).toBe(2); // 1 resolved + 1 play, post-concat/pre-dedup
+    expect(totals.deduped).toBe(1);
+    expect(JSON.parse(opts.writeCalls[0].content.trim())).toEqual({
+      artist: 'Rotation Artist',
+      album: 'Rotation Album',
+      library_id: 7,
+    });
+  });
+
+  it('includes a play-arm-only release (no rotation counterpart) in the candidate set', async () => {
+    const playOnly: CanonicalRelease = { libraryId: 55, artist: 'Play Only Artist', album: 'Play Only Album' };
+    const opts = makeOpts({ fetchPlayCandidates: () => Promise.resolve([playOnly]) });
+
+    const totals = await runJob(opts);
+
+    expect(totals.recent_play_rows).toBe(1);
+    expect(totals.deduped).toBe(2); // default rotation row (library.id 42) + play-only (55)
+    const ids = opts.writeCalls[0].content
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line).library_id)
+      .sort((a, b) => a - b);
+    expect(ids).toEqual([42, 55]);
+  });
+});
+
+describe('runJob — cap', () => {
+  it('truncates the uncovered set at maxReleasesPerRun and reports capped_out at the cap site', async () => {
+    const rows = [1, 2, 3, 4, 5].map((id) => row({ rotationId: id, libraryId: id }));
+    const opts = makeOpts({
+      fetchActiveRotation: () => Promise.resolve(rows),
+      resolveCanonical: (r) => Promise.resolve(releaseFor(r)),
+      maxReleasesPerRun: 2,
+    });
+
+    const totals = await runJob(opts);
+
+    expect(totals.uncovered).toBe(5);
+    expect(totals.capped_out).toBe(3);
+    expect(totals.written).toBe(2);
+    expect(opts.writeCalls[0].content.trim().split('\n')).toHaveLength(2);
+  });
+
+  it('capped_out is 0 when the cap does not fire', async () => {
+    const totals = await runJob(makeOpts({ maxReleasesPerRun: 400 }));
+    expect(totals.capped_out).toBe(0);
+  });
+
+  it('the capped list — not the uncovered list — is the single input to render/write/publish/recordHandoffs', async () => {
+    const rows = [1, 2, 3].map((id) => row({ rotationId: id, libraryId: id }));
+    const opts = makeOpts({
+      fetchActiveRotation: () => Promise.resolve(rows),
+      resolveCanonical: (r) => Promise.resolve(releaseFor(r)),
+      maxReleasesPerRun: 1,
+    });
+
+    const totals = await runJob(opts);
+
+    expect(totals.uncovered).toBe(3);
+    expect(totals.capped_out).toBe(2);
+    const writtenIds = opts.writeCalls[0].content
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line).library_id);
+    const publishedIds = opts.publishCalls[0]
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line).library_id);
+    expect(writtenIds).toEqual([1]); // first release in dedup order (rotationId 1)
+    expect(publishedIds).toEqual(writtenIds); // write + publish share the identical rendered content
+    expect(opts.recordHandoffsCalls).toEqual([writtenIds]); // markers written for the capped set only
+  });
+});
+
+describe('runJob — zero play rows (non-throwing escalation)', () => {
+  it('does not throw; logs a loud error-level plays_empty step and the run still completes', async () => {
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const opts = makeOpts({ fetchPlayCandidates: () => Promise.resolve([]) });
+
+      const totals = await runJob(opts);
+
+      expect(totals.recent_play_rows).toBe(0);
+      expect(totals.published).toBe(true); // run completed normally, exit stays 0
+
+      const lines = stderrSpy.mock.calls.map((c) => String(c[0]));
+      expect(lines.some((line) => line.includes('"step":"plays_empty"'))).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+});
+
+describe('runJob — rotation-lane guard demotion under --backfill', () => {
+  it('demotes the zero-active-rotation guard to log+Sentry and continues the drain on the play arm alone', async () => {
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const playOnly: CanonicalRelease = { libraryId: 9, artist: 'Play Only', album: 'Play Only Album' };
+      const opts = makeOpts({
+        fetchActiveRotation: () => Promise.resolve([]),
+        fetchPlayCandidates: () => Promise.resolve([playOnly]),
+        backfill: true,
+      });
+
+      const totals = await runJob(opts);
+
+      expect(totals.active_rotation_rows).toBe(0);
+      expect(totals.resolved).toBe(0);
+      expect(totals.recent_play_rows).toBe(1);
+      expect(totals.uncovered).toBe(1);
+      expect(totals.published).toBe(true); // did not throw; the run completed on the play arm alone
+
+      const lines = stderrSpy.mock.calls.map((c) => String(c[0]));
+      expect(lines.some((line) => line.includes('"step":"rotation_empty_backfill"'))).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('demotes the zero-resolved guard to log+Sentry and continues the drain on the play arm alone', async () => {
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const playOnly: CanonicalRelease = { libraryId: 11, artist: 'Play Only', album: 'Play Only Album' };
+      const opts = makeOpts({
+        resolveCanonical: () => Promise.resolve(null),
+        fetchPlayCandidates: () => Promise.resolve([playOnly]),
+        backfill: true,
+      });
+
+      const totals = await runJob(opts);
+
+      expect(totals.resolved).toBe(0);
+      expect(totals.unresolved_dropped).toBe(1);
+      expect(totals.recent_play_rows).toBe(1);
+      expect(totals.uncovered).toBe(1);
+      expect(totals.published).toBe(true); // did not throw
+
+      const lines = stderrSpy.mock.calls.map((c) => String(c[0]));
+      expect(lines.some((line) => line.includes('"step":"resolve_empty_backfill"'))).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('does NOT demote in steady state (backfill unset) — both rotation-lane guards still hard-throw', async () => {
+    await expect(runJob(makeOpts({ fetchActiveRotation: () => Promise.resolve([]) }))).rejects.toThrow(/0 rows/i);
+    await expect(runJob(makeOpts({ resolveCanonical: () => Promise.resolve(null) }))).rejects.toThrow(/resolved/i);
   });
 });
 
