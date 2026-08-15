@@ -2,9 +2,10 @@
  * Unit tests for the BS#2109 uncatalogued-rotation surfaces:
  *
  *   - `getUncataloguedRotationFromDB` — read-side query for
- *     `GET /library/rotation/uncatalogued`. Asserts the `COALESCE(album_id,
- *     0) = 0` predicate and the absence of any `DISTINCT ON` (the query
- *     builder used here has no `selectDistinctOn` call at all, unlike
+ *     `GET /library/rotation/uncatalogued`. Asserts the `album_id IS NULL`
+ *     predicate, the explicit column projection, the optional limit/offset
+ *     window, and the absence of any `DISTINCT ON` (the query builder used
+ *     here has no `selectDistinctOn` call at all, unlike
  *     `getRotationFromDB`'s raw-SQL `DISTINCT ON`).
  *   - `linkRotationToAlbum` — the `PATCH /rotation/:id/link` transaction:
  *     album-exists check, rotation-exists check, already-linked rejection,
@@ -60,7 +61,11 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
     jest.clearAllMocks();
   });
 
-  it('queries rotation with a COALESCE(album_id, 0) = 0 predicate, no DISTINCT ON', async () => {
+  it('queries rotation with an album_id IS NULL predicate, no COALESCE-0 and no DISTINCT ON', async () => {
+    // The `0` sentinel the first draft also matched does not exist on
+    // `rotation.album_id`: the column FKs `library.id`, a `serial` starting
+    // at 1. `IS NULL` is also sargable against `album_id_idx`, which
+    // `COALESCE(album_id, 0) = 0` was not.
     const rows = [
       { id: 10, album_id: null, artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' },
       { id: 11, album_id: null, artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' },
@@ -73,10 +78,57 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
 
     expect(result).toBe(rows);
     expect(selectChain.from).toHaveBeenCalledWith(rotation);
-    expect(renderSql(selectChain.where.mock.calls[0]?.[0])).toContain('COALESCE');
-    expect(renderSql(selectChain.where.mock.calls[0]?.[0])).toContain('= 0');
+    expect(selectChain.where).toHaveBeenCalledWith({ isNull: rotation.album_id });
+    expect(renderSql(selectChain.where.mock.calls[0]?.[0])).not.toContain('COALESCE');
     // The query builder never calls selectDistinctOn — no dedup collapse.
     expect(db.selectDistinctOn).not.toHaveBeenCalled();
+  });
+
+  it('projects an explicit column list — no server-derived or external-ID columns', async () => {
+    // A bare `select()` would publish legacy_rotation_id,
+    // legacy_library_release_id, discogs_release_id,
+    // discogs_release_id_source, lml_identity_id, the two attempt-at markers,
+    // and every column a future migration adds — none of which
+    // `getRotationFromDB` publishes, and WXYC/wxyc-shared#354 would
+    // transcribe the leak into a published contract.
+    const selectChain = createMockQueryChain([]);
+    selectChain.orderBy = jest.fn().mockResolvedValue([]);
+    db.select.mockReturnValue(selectChain);
+
+    await getUncataloguedRotationFromDB();
+
+    const projection = db.select.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
+    expect(projection).toBeDefined();
+    expect(Object.keys(projection ?? {}).sort()).toEqual([
+      'add_date',
+      'album_id',
+      'album_title',
+      'artist_name',
+      'id',
+      'kill_date',
+      'record_label',
+      'rotation_bin',
+    ]);
+  });
+
+  it('applies limit/offset only when supplied, leaving the queue unbounded by default', async () => {
+    const unboundedChain = createMockQueryChain([]);
+    unboundedChain.orderBy = jest.fn().mockResolvedValue([]);
+    db.select.mockReturnValue(unboundedChain);
+
+    await getUncataloguedRotationFromDB();
+    expect(unboundedChain.limit).not.toHaveBeenCalled();
+    expect(unboundedChain.offset).not.toHaveBeenCalled();
+
+    const pagedChain = createMockQueryChain([]);
+    pagedChain.orderBy = jest.fn().mockReturnValue(pagedChain);
+    pagedChain.limit = jest.fn().mockReturnValue(pagedChain);
+    pagedChain.offset = jest.fn().mockResolvedValue([]);
+    db.select.mockReturnValue(pagedChain);
+
+    await getUncataloguedRotationFromDB({ limit: 50, offset: 100 });
+    expect(pagedChain.limit).toHaveBeenCalledWith(50);
+    expect(pagedChain.offset).toHaveBeenCalledWith(100);
   });
 
   it('surfaces two same-artist/same-title unlinked rows both (no collapse)', async () => {

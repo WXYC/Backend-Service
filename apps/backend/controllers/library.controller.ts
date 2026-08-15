@@ -450,6 +450,23 @@ export const getRotation: RequestHandler = async (req, res) => {
   res.status(200).json(rotation);
 };
 
+/** Upper bound on `?limit=` for the uncatalogued queue. */
+const UNCATALOGUED_ROTATION_MAX_LIMIT = 500;
+
+/**
+ * Parse an optional non-negative-integer query parameter or path segment.
+ * Returns `undefined` when absent, `null` when present but not a well-formed
+ * non-negative integer (the caller turns that into a 400). Strict — unlike
+ * `parseInt`, `'42abc'` and `'4.5'` are rejected rather than silently
+ * truncated to `42` and `4`.
+ */
+function parseNonNegativeInt(raw: unknown): number | null | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return null;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
 /**
  * `GET /library/rotation/uncatalogued` (BS#2109).
  *
@@ -457,16 +474,39 @@ export const getRotation: RequestHandler = async (req, res) => {
  * release, deliberately WITHOUT the `DISTINCT ON` collapse `getRotation`
  * uses for its dropdown shape — two physically distinct promos that share
  * an artist and title are two separate rows a librarian has to catalogue,
- * and collapsing them would silently hide one. See `getUncataloguedRotationFromDB`
- * for the `COALESCE(album_id, 0) = 0` predicate this reads through.
+ * and collapsing them would silently hide one. See
+ * `getUncataloguedRotationFromDB` for the `album_id IS NULL` predicate this
+ * reads through and why the `0` sentinel it once also matched does not
+ * exist on this column.
+ *
+ * Optional `?limit=` (1…500) and `?offset=` window the queue. Both are
+ * OPT-IN: absent means the full backlog, so this PR does not silently
+ * truncate any existing caller's result. The backlog is ~3.8k rows today,
+ * which is servable in one response; dj-site#1161's queue UI is the caller
+ * that should start passing them, and a default cap is worth revisiting
+ * once a paginating client exists to notice it.
  *
  * ROUTE REGISTRATION ORDER IS LOAD-BEARING — must be registered ahead of any
  * `/rotation/:id`-style parameterized route (see `library.route.ts`), the
  * same trap already documented there for `/catalog` vs
- * `/:id/compilation-tracks`.
+ * `/:id/compilation-tracks`. Pinned by
+ * `tests/unit/routes/library-rotation-uncatalogued.route.test.ts`.
  */
 export const getUncataloguedRotation: RequestHandler = async (req, res) => {
-  const rotation = await libraryService.getUncataloguedRotationFromDB();
+  const limit = parseNonNegativeInt(req.query.limit);
+  if (limit === null || (limit !== undefined && (limit < 1 || limit > UNCATALOGUED_ROTATION_MAX_LIMIT))) {
+    throw new WxycError(
+      `Invalid Parameter: limit must be an integer between 1 and ${UNCATALOGUED_ROTATION_MAX_LIMIT}`,
+      400
+    );
+  }
+
+  const offset = parseNonNegativeInt(req.query.offset);
+  if (offset === null) {
+    throw new WxycError('Invalid Parameter: offset must be a non-negative integer', 400);
+  }
+
+  const rotation = await libraryService.getUncataloguedRotationFromDB({ limit, offset });
   res.status(200).json(rotation);
 };
 
@@ -492,6 +532,12 @@ export type RotationAddRequest = Omit<NewRotationRelease, 'id'>;
  * display sourced from the `library` join, and a client-supplied snapshot on
  * a catalogued row would leave stale free text nothing ever clears.
  *
+ * **`null` and `undefined` mean the same thing in every test here.**
+ * `{ album_id: selected?.id ?? null, ... }` is the idiomatic client shape,
+ * and an `=== undefined` test would take the has-an-album_id branch on it —
+ * dropping the free text into a row that is then permanently
+ * un-catalogueable and indistinguishable from every other blank row.
+ *
  * Phrased as an allowlist (signature-typed accept list) so a future column
  * addition to `rotation` is implicitly rejected by typecheck until
  * explicitly added to the signature. Matches dj-site's `RotationParams`
@@ -505,14 +551,32 @@ type AddRotationAllowlist = Pick<
 
 export function pickAddRotationFields(body: Partial<NewRotationRelease>): AddRotationAllowlist {
   const picked = {} as AddRotationAllowlist;
-  if (body.album_id !== undefined) picked.album_id = body.album_id;
-  if (body.rotation_bin !== undefined) picked.rotation_bin = body.rotation_bin;
-  if (body.album_id === undefined) {
-    if (body.artist_name !== undefined) picked.artist_name = body.artist_name;
-    if (body.album_title !== undefined) picked.album_title = body.album_title;
-    if (body.record_label !== undefined) picked.record_label = body.record_label;
+  if (body.album_id != null) picked.album_id = body.album_id;
+  if (body.rotation_bin != null) picked.rotation_bin = body.rotation_bin;
+  if (body.album_id == null) {
+    if (body.artist_name != null) picked.artist_name = body.artist_name;
+    if (body.album_title != null) picked.album_title = body.album_title;
+    if (body.record_label != null) picked.record_label = body.record_label;
   }
   return picked;
+}
+
+/**
+ * The three free-text snapshot columns are `varchar(128)`. The only other
+ * writer (`internal.route.ts`) `truncate(_, 128)`s them because tubafrenzy
+ * free text routinely overruns and a webhook has nobody to report a 400 to.
+ * This endpoint has a human on the other end, so it **rejects rather than
+ * truncates**: silently amputating a long compilation or classical title
+ * would leave the librarian a corrupted record with no signal, whereas
+ * without a guard PostgreSQL raises 22001 and the request becomes an opaque
+ * 500 + Sentry event that names no field.
+ */
+const ROTATION_SNAPSHOT_MAX_LENGTH = 128;
+const ROTATION_SNAPSHOT_FIELDS = ['artist_name', 'album_title', 'record_label'] as const;
+
+/** `true` only for a string with at least one non-whitespace character. */
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 /**
@@ -521,13 +585,23 @@ export function pickAddRotationFields(body: Partial<NewRotationRelease>): AddRot
  * when `artist_name` and `album_title` are both supplied — the free-text
  * pair that represents a rotation release the station hasn't catalogued
  * yet. 400s when neither an `album_id` nor the artist/title pair is given;
- * an anonymous rotation row helps nobody.
+ * an anonymous rotation row helps nobody, and it is un-catalogueable
+ * afterwards because `PATCH /rotation/:id/link` is the only repair and a
+ * blank row gives the librarian nothing to identify it by.
+ *
+ * `null` is treated exactly as absent throughout (`selected?.id ?? null` is
+ * the shape clients actually send), a blank/whitespace-only artist or title
+ * does not count as supplied, and `album_id: 0` is rejected: there is no `0`
+ * sentinel on this column — `library.id` is a `serial` starting at 1 and
+ * `rotation.album_id` FKs it, so a `0` would drop the free text and then
+ * violate the FK into an opaque 500. It is the literal payload the classic
+ * `/wxycdb` rotation form posts, so it gets a named 400.
  */
 export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = async (req, res) => {
   const { body } = req;
 
-  if (body.rotation_bin === undefined) {
-    throw new WxycError('Missing Parameters: album_id or rotation_bin', 400);
+  if (body.rotation_bin == null) {
+    throw new WxycError('Missing Parameters: rotation_bin', 400);
   }
   // BS#2173: this checked PRESENCE but never VALUE, so an unrecognized bin
   // reached the INSERT and surfaced as a Postgres 22P02 — a 500 for what is
@@ -541,8 +615,35 @@ export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = 
     );
   }
 
-  if (body.album_id === undefined && (body.artist_name === undefined || body.album_title === undefined)) {
-    throw new WxycError('Missing Parameters: album_id, or artist_name and album_title', 400);
+  const hasAlbumId = body.album_id != null;
+  if (hasAlbumId && !(Number.isInteger(body.album_id) && (body.album_id as number) > 0)) {
+    throw new WxycError(
+      'Invalid Parameter: album_id must be a positive integer, or omitted for an uncatalogued release',
+      400
+    );
+  }
+
+  if (!hasAlbumId) {
+    // Only guarded on the uncatalogued path: with an `album_id` present the
+    // trio is deliberately dropped by `pickAddRotationFields`, so a long
+    // value there is never written and must not fail an otherwise-valid add.
+    for (const field of ROTATION_SNAPSHOT_FIELDS) {
+      const value = body[field];
+      if (value == null) continue;
+      if (typeof value !== 'string') {
+        throw new WxycError(`Invalid Parameter: ${field} must be a string`, 400);
+      }
+      if (value.length > ROTATION_SNAPSHOT_MAX_LENGTH) {
+        throw new WxycError(
+          `Invalid Parameter: ${field} exceeds the ${ROTATION_SNAPSHOT_MAX_LENGTH}-character limit`,
+          400
+        );
+      }
+    }
+
+    if (!isNonBlankString(body.artist_name) || !isNonBlankString(body.album_title)) {
+      throw new WxycError('Missing Parameters: album_id, or artist_name and album_title', 400);
+    }
   }
 
   const picked = pickAddRotationFields(body);
@@ -566,8 +667,10 @@ export const linkRotationToAlbum: RequestHandler<{ rotation_id: string }, unknow
   req,
   res
 ) => {
-  const rotationId = parseInt(req.params.rotation_id, 10);
-  if (!Number.isInteger(rotationId) || rotationId <= 0) {
+  // Strict, not `parseInt`: `parseInt('42abc', 10)` is 42, which would let
+  // `/library/rotation/42abc/link` mutate rotation 42.
+  const rotationId = parseNonNegativeInt(req.params.rotation_id);
+  if (rotationId == null || rotationId <= 0) {
     throw new WxycError('rotation_id must be a positive integer', 400);
   }
 
@@ -588,6 +691,14 @@ export const linkRotationToAlbum: RequestHandler<{ rotation_id: string }, unknow
     case 'linked':
       res.status(200).json(result.rotation);
       break;
+    default: {
+      // Exhaustiveness guard. Without it, a `LinkRotationOutcome` variant
+      // added later falls through every case and the handler returns having
+      // written no response — the request hangs until the 35 s server
+      // timeout. `never` makes that a typecheck failure instead.
+      const unhandled: never = result;
+      throw new WxycError(`Unhandled rotation link outcome: ${JSON.stringify(unhandled)}`, 500);
+    }
   }
 };
 

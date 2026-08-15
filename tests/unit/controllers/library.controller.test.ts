@@ -34,7 +34,7 @@ const mockGetRotationTracksFromRelease = jest.fn<(releaseId: number) => Promise<
 const mockGetRotationFromDB = jest.fn<() => Promise<unknown[]>>();
 const mockAddToRotation = jest.fn<(fields: Record<string, unknown>) => Promise<Record<string, unknown>>>();
 const mockKillRotationInDB = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
-const mockGetUncataloguedRotationFromDB = jest.fn<() => Promise<unknown[]>>();
+const mockGetUncataloguedRotationFromDB = jest.fn<(page?: { limit?: number; offset?: number }) => Promise<unknown[]>>();
 type LinkRotationOutcomeMock =
   | { outcome: 'linked'; rotation: Record<string, unknown> }
   | { outcome: 'rotation_not_found' }
@@ -969,6 +969,39 @@ describe('library.controller', () => {
 
       expect(picked).toEqual({ rotation_bin: 'S', artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' });
     });
+
+    // `album_id: null` is what `selected?.id ?? null` produces, and it must
+    // behave identically to omitting the key. An `=== undefined` test took
+    // the has-an-album_id branch and dropped the free text on the floor.
+    it('treats an explicit album_id: null exactly as absent and still picks the snapshot trio', () => {
+      const picked = pickAddRotationFields({
+        album_id: null,
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+        record_label: 'Rough Trade',
+      });
+
+      expect(picked).toEqual({
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+        record_label: 'Rough Trade',
+      });
+      expect(picked).not.toHaveProperty('album_id');
+    });
+
+    it('drops explicitly-null snapshot fields rather than writing NULL over them', () => {
+      const picked = pickAddRotationFields({
+        album_id: null,
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+        record_label: null,
+      });
+
+      expect(picked).toEqual({ rotation_bin: 'L', artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' });
+    });
   });
 
   describe('addRotation (BS#2109)', () => {
@@ -1033,19 +1066,186 @@ describe('library.controller', () => {
       });
       expect(res.status).toHaveBeenCalledWith(201);
     });
+
+    // The `selected?.id ?? null` client shape. Before the fix this returned
+    // 201 having silently discarded artist_name/album_title, leaving a row
+    // that no longer identifies anything and that `PATCH .../link` cannot
+    // usefully repair.
+    it('accepts an uncatalogued add sent as album_id: null, keeping the free text', async () => {
+      mockAddToRotation.mockResolvedValue({ id: 3, album_id: null, rotation_bin: 'L' });
+      const req = {
+        body: { album_id: null, rotation_bin: 'L', artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await addRotation(req, res, next);
+
+      expect(mockAddToRotation).toHaveBeenCalledWith({
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+      });
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('returns 400 for album_id: null with no artist_name/album_title pair (does not slip past the guard)', async () => {
+      const req = { body: { album_id: null, rotation_bin: 'L' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(addRotation(req, res, next)).rejects.toThrow('Missing Parameters');
+      expect(mockAddToRotation).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 when rotation_bin is explicitly null', async () => {
+      const req = { body: { rotation_bin: null, album_id: 5 } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(addRotation(req, res, next)).rejects.toThrow('Missing Parameters: rotation_bin');
+      expect(mockAddToRotation).not.toHaveBeenCalled();
+    });
+
+    // There is no `0` sentinel on rotation.album_id — it FKs library.id,
+    // a serial starting at 1. `0` is the literal payload the classic
+    // /wxycdb rotation form posts; unguarded it dropped the free text and
+    // then 23503'd into an opaque 500.
+    it('returns 400 for album_id: 0 rather than dropping the free text into an FK violation', async () => {
+      const req = {
+        body: { album_id: 0, rotation_bin: 'L', artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(addRotation(req, res, next)).rejects.toThrow('album_id must be a positive integer');
+      expect(mockAddToRotation).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 for a negative or non-integer album_id', async () => {
+      const res = mockResponse();
+
+      await expect(
+        addRotation({ body: { album_id: -1, rotation_bin: 'L' } } as unknown as Request, res, next)
+      ).rejects.toThrow('album_id must be a positive integer');
+      await expect(
+        addRotation({ body: { album_id: 1.5, rotation_bin: 'L' } } as unknown as Request, res, next)
+      ).rejects.toThrow('album_id must be a positive integer');
+      expect(mockAddToRotation).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 when a blank/whitespace-only artist_name or album_title is supplied', async () => {
+      const res = mockResponse();
+
+      await expect(
+        addRotation(
+          { body: { rotation_bin: 'L', artist_name: '   ', album_title: 'Real Title' } } as unknown as Request,
+          res,
+          next
+        )
+      ).rejects.toThrow('Missing Parameters');
+      await expect(
+        addRotation(
+          { body: { rotation_bin: 'L', artist_name: 'Real Artist', album_title: '' } } as unknown as Request,
+          res,
+          next
+        )
+      ).rejects.toThrow('Missing Parameters');
+      expect(mockAddToRotation).not.toHaveBeenCalled();
+    });
+
+    // The three snapshot columns are varchar(128). Without a guard, PG
+    // raises 22001 and the librarian gets a 500 naming no field.
+    it.each(['artist_name', 'album_title', 'record_label'])(
+      'returns a field-naming 400 when %s exceeds 128 characters',
+      async (field) => {
+        const body: Record<string, unknown> = {
+          rotation_bin: 'L',
+          artist_name: 'Jockstrap',
+          album_title: 'I Love You Jennifer B',
+        };
+        body[field] = 'x'.repeat(129);
+        const res = mockResponse();
+
+        await expect(addRotation({ body } as unknown as Request, res, next)).rejects.toThrow(
+          `${field} exceeds the 128-character limit`
+        );
+        expect(mockAddToRotation).not.toHaveBeenCalled();
+      }
+    );
+
+    it('accepts a snapshot field at exactly 128 characters', async () => {
+      mockAddToRotation.mockResolvedValue({ id: 4, album_id: null, rotation_bin: 'L' });
+      const title = 'y'.repeat(128);
+      const res = mockResponse();
+
+      await addRotation(
+        { body: { rotation_bin: 'L', artist_name: 'Jockstrap', album_title: title } } as unknown as Request,
+        res,
+        next
+      );
+
+      expect(mockAddToRotation).toHaveBeenCalledWith({
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: title,
+      });
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('does not length-guard the snapshot trio when album_id is present (the trio is dropped anyway)', async () => {
+      mockAddToRotation.mockResolvedValue({ id: 5, album_id: 7, rotation_bin: 'M' });
+      const res = mockResponse();
+
+      await addRotation(
+        { body: { album_id: 7, rotation_bin: 'M', artist_name: 'z'.repeat(500) } } as unknown as Request,
+        res,
+        next
+      );
+
+      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 7, rotation_bin: 'M' });
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
   });
 
   describe('getUncataloguedRotation (BS#2109)', () => {
+    beforeEach(() => {
+      mockGetUncataloguedRotationFromDB.mockReset();
+    });
+
     it('delegates to getUncataloguedRotationFromDB and returns 200', async () => {
       const rows = [{ id: 10, album_id: null, artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' }];
       mockGetUncataloguedRotationFromDB.mockResolvedValue(rows);
-      const req = {} as unknown as Request;
+      const req = { query: {} } as unknown as Request;
       const res = mockResponse();
 
       await getUncataloguedRotation(req, res, next);
 
+      expect(mockGetUncataloguedRotationFromDB).toHaveBeenCalledWith({ limit: undefined, offset: undefined });
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith(rows);
+    });
+
+    it('passes through a valid limit/offset window', async () => {
+      mockGetUncataloguedRotationFromDB.mockResolvedValue([]);
+      const req = { query: { limit: '50', offset: '100' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getUncataloguedRotation(req, res, next);
+
+      expect(mockGetUncataloguedRotationFromDB).toHaveBeenCalledWith({ limit: 50, offset: 100 });
+    });
+
+    it.each(['0', '501', 'abc', '10abc', '1.5', '-1'])('returns 400 for limit=%s', async (limit) => {
+      const req = { query: { limit } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getUncataloguedRotation(req, res, next)).rejects.toThrow('limit must be an integer');
+      expect(mockGetUncataloguedRotationFromDB).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 for a malformed offset', async () => {
+      const req = { query: { offset: '10abc' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getUncataloguedRotation(req, res, next)).rejects.toThrow('offset must be a non-negative integer');
+      expect(mockGetUncataloguedRotationFromDB).not.toHaveBeenCalled();
     });
   });
 
@@ -1068,6 +1268,19 @@ describe('library.controller', () => {
 
       await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('positive integer');
     });
+
+    // `parseInt('42abc', 10)` is 42, so the pre-fix parse let
+    // `/library/rotation/42abc/link` mutate rotation 42.
+    it.each(['42abc', ' 42', '4.5', '+42', '0x2a', '1e3'])(
+      'returns 400 for the malformed rotation_id %s rather than coercing it',
+      async (rotation_id) => {
+        const req = { params: { rotation_id }, body: { album_id: 5 } } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('positive integer');
+        expect(mockLinkRotationToAlbum).not.toHaveBeenCalled();
+      }
+    );
 
     it('returns 400 when album_id is missing', async () => {
       const req = { params: { rotation_id: '42' }, body: {} } as unknown as Request;

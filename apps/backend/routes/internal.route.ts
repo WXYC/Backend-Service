@@ -934,8 +934,26 @@ internal_route.post('/rotation-webhook', async (req, res) => {
         // presence-gated for the same reason as above — a full-shape update
         // overwrites these, a sparser one leaves them alone — while the INSERT
         // arm populates every column on first delivery.
+        //
+        // BS#2109: `album_id` is COALESCEd rather than overwritten, so an
+        // incoming NULL cannot un-link a row. Before BS#2109 every `album_id`
+        // in this table originated upstream (`jobs/legacy-linkage-resolve`
+        // only links rows tubafrenzy has already linked), so
+        // `excluded.album_id` always agreed with what was there and
+        // overwriting was a no-op. `PATCH /library/rotation/:id/link` created
+        // the first Backend-canonical link tubafrenzy does not know about:
+        // `excluded.album_id` is `resolveAlbumId(release.libraryReleaseId ?? 0)`,
+        // which is NULL whenever tubafrenzy has not itself linked the release,
+        // so the next `/wxycdb` edit on that release would reset `album_id` to
+        // NULL, restore the free text, and drop the row back into the
+        // cataloging queue. Accepted trade-off: tubafrenzy can no longer
+        // *unlink* a rotation row — releases are not un-catalogued, so that is
+        // not a real librarian operation. Deliberately NOT the same mechanism
+        // as the presence gates below (BS#1082 + BS#1312): those key on
+        // whether the payload carried the field at all, and `libraryReleaseId`
+        // is present-and-`0` on exactly the linkage event that matters.
         const setClause: Record<string, unknown> = {
-          album_id: sql`excluded.album_id`,
+          album_id: sql`COALESCE(excluded.album_id, ${rotation.album_id})`,
           legacy_library_release_id: sql`excluded.legacy_library_release_id`,
           rotation_bin: sql`excluded.rotation_bin`,
         };

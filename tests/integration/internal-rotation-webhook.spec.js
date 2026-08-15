@@ -118,4 +118,69 @@ describe('POST /internal/rotation-webhook — partial update preserves denorm fi
     expect(row.album_title).toBe('DOGA');
     expect(row.record_label).toBe('Sonamos');
   });
+
+  // BS#2109: `PATCH /library/rotation/:id/link` creates the first
+  // Backend-canonical `album_id` tubafrenzy does not know about. The
+  // webhook's `album_id` SET is COALESCEd (`COALESCE(excluded.album_id,
+  // rotation.album_id)`) so the next `/wxycdb` edit — which arrives with
+  // `libraryReleaseId: 0`, i.e. `excluded.album_id IS NULL` — cannot revert
+  // the link and drop the row back into the cataloging queue.
+  //
+  // Also the end-to-end proof that the COALESCE SQL is valid inside
+  // `ON CONFLICT DO UPDATE`, which the mocked-db unit test cannot show.
+  test('a Backend-made album_id link survives an update carrying libraryReleaseId: 0', async () => {
+    const [libraryRow] = await sql.unsafe(`SELECT id FROM ${SCHEMA}.library ORDER BY id LIMIT 1`);
+    expect(libraryRow).toBeDefined();
+
+    await sql.unsafe(
+      `INSERT INTO ${SCHEMA}.rotation
+         (legacy_rotation_id, album_id, rotation_bin, add_date, artist_name, album_title, record_label)
+       VALUES ($1, $2, 'H', '2026-01-01', NULL, NULL, NULL)`,
+      [LEGACY_ROTATION_ID, libraryRow.id]
+    );
+
+    const res = await request
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', INTERNAL_KEY)
+      .send({ action: 'update', release: { id: LEGACY_ROTATION_ID, libraryReleaseId: 0 } });
+    expect(res.status).toBe(200);
+
+    const [row] = await sql.unsafe(
+      `SELECT album_id, artist_name, album_title, record_label
+         FROM ${SCHEMA}.rotation WHERE legacy_rotation_id = $1`,
+      [LEGACY_ROTATION_ID]
+    );
+    expect(row.album_id).toBe(libraryRow.id);
+    // The free text was cleared by the link and must stay cleared.
+    expect(row.artist_name).toBeNull();
+    expect(row.album_title).toBeNull();
+    expect(row.record_label).toBeNull();
+  });
+
+  // The COALESCE is non-downgrading, not write-blocking: an update that
+  // DOES carry a resolvable upstream linkage still lands.
+  test('an update carrying a resolvable libraryReleaseId still writes album_id', async () => {
+    const [libraryRow] = await sql.unsafe(
+      `SELECT id, legacy_release_id FROM ${SCHEMA}.library WHERE legacy_release_id IS NOT NULL ORDER BY id LIMIT 1`
+    );
+    expect(libraryRow).toBeDefined();
+
+    await sql.unsafe(
+      `INSERT INTO ${SCHEMA}.rotation
+         (legacy_rotation_id, album_id, rotation_bin, add_date, artist_name, album_title, record_label)
+       VALUES ($1, NULL, 'H', '2026-01-01', 'Stale Artist', 'Stale Album', 'Stale Label')`,
+      [LEGACY_ROTATION_ID]
+    );
+
+    const res = await request
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', INTERNAL_KEY)
+      .send({ action: 'update', release: { id: LEGACY_ROTATION_ID, libraryReleaseId: libraryRow.legacy_release_id } });
+    expect(res.status).toBe(200);
+
+    const [row] = await sql.unsafe(`SELECT album_id FROM ${SCHEMA}.rotation WHERE legacy_rotation_id = $1`, [
+      LEGACY_ROTATION_ID,
+    ]);
+    expect(row.album_id).toBe(libraryRow.id);
+  });
 });
