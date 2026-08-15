@@ -37,14 +37,14 @@ Any uniqueness constraint added afterward must use this same key, including the 
 
 ## Order of operations is a data-safety property
 
-Every FK referencing `library.id` is repointed to the survivor **before** the losing row is deleted. That is not stylistic. Of the 13 reference sites, five cascade and two null out the reference:
+Every FK referencing `library.id` is repointed to the survivor **before** the losing row is deleted. That is not stylistic. Of the 14 reference sites, six cascade and two null out the reference:
 
-| On delete  | Sites                                                                                       |
-| ---------- | ------------------------------------------------------------------------------------------- |
-| `cascade`  | `rotation`, `album_metadata`, `reviews`, `album_critic_reviews`, `compilation_track_artist` |
-| `set null` | `flowsheet.album_id`, `album_review_submissions.album_id`                                   |
-| no action  | `artist_library_crossreference`, `bins`, `library_identity`, `library_identity_source`      |
-| no FK      | `library_identity_history`, `album_popularity.representative_library_id`                    |
+| On delete  | Sites                                                                                                                           |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `cascade`  | `rotation`, `album_metadata`, `reviews`, `album_critic_reviews`, `compilation_track_artist`, `uncovered_release_search_markers` |
+| `set null` | `flowsheet.album_id`, `album_review_submissions.album_id`                                                                       |
+| no action  | `artist_library_crossreference`, `bins`, `library_identity`, `library_identity_source`                                          |
+| no FK      | `library_identity_history`, `album_popularity.representative_library_id`                                                        |
 
 Deleting first would silently destroy rotation history, album metadata, and reviews, and silently unlink plays — no error raised. The no-action sites are the only ones that would fail loudly.
 
