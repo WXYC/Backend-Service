@@ -1698,6 +1698,14 @@ describe('Library Artists By Code', () => {
 
     expectErrorContains(res, 'code_number');
   });
+
+  test('returns 400 when code_letters is repeated (Express string[] parsing)', async () => {
+    const res = await auth
+      .get('/library/artists/by-code?genre_id=11&code_letters=B&code_letters=U&code_number=60')
+      .expect(400);
+
+    expectErrorContains(res, 'code_letters');
+  });
 });
 
 describe('Library Formats', () => {

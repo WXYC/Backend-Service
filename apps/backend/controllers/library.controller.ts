@@ -471,6 +471,15 @@ export const resolveArtistByCode: RequestHandler = async (
     throw new WxycError('Missing query parameters: genre_id, code_letters, and code_number', 400);
   }
 
+  // Express's `simple` query parser yields string[] for repeated keys
+  // (`?code_letters=B&code_letters=U`); reject before it reaches Drizzle's
+  // `eq(artists.code_letters, ...)`, which would otherwise bind a text[]
+  // against a text column and surface as a driver-level 500 instead of a 400
+  // (mirrors the same guard on `q` in searchArtistsInGenre above).
+  if (typeof query.code_letters !== 'string') {
+    throw new WxycError('Invalid code_letters: must be a single string value', 400);
+  }
+
   const genreId = Number(query.genre_id);
   if (!Number.isInteger(genreId) || genreId < 1) {
     throw new WxycError('Invalid genre_id: must be a positive integer', 400);
