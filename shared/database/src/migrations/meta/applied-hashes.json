@@ -143,5 +143,7 @@
   "0144_flowsheet-add-time-idx": "5805f393f402dc3ad9c9d5090d43fa4a5b7c76a4a55ab00be76cb4fe555559a0",
   "0145_rotation-bin-fallback-indexes": "c8ba65bc316f0629119be1b740ba6a896de5db2b243f61b9b32ea102d62e140d",
   "0146_library-delete-denylist": "019020b1244e5c5b3fc1baf6d9ba48ee818cfa83aa269f6a9696fc652bcc415d",
-  "0147_artist-library-crossref-fk-repair": "52e93d8f0ac0a69caa920a0570cd467872b4064712ec62cb2b1a38484cebc1d5"
+  "0147_artist-library-crossref-fk-repair": "52e93d8f0ac0a69caa920a0570cd467872b4064712ec62cb2b1a38484cebc1d5",
+  "0148_flowsheet-rotation-id-idx": "5c148551178f4828e9d4a17a6832a12803c58f1384fbd96935986f35fd4c2048",
+  "0149_library-delete-denylist-actor": "fdca72208de524f4edd40d882a1ca6f8b06fefe309757e1d08c74f3a4fdf454d"
 }

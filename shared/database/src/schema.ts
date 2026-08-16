@@ -1449,6 +1449,48 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_rotation_no_match_idx')
       .on(table.rotation_id)
       .where(sql`${table.metadata_status} = 'enriched_no_match' AND ${table.rotation_id} IS NOT NULL`),
+    // BS#2112. The GENERAL partial index on `rotation_id`. Its sibling above
+    // is the only other index touching this column and it does NOT serve an
+    // unqualified `rotation_id` predicate: a query saying
+    // `rotation_id IN (...) AND album_id IS DISTINCT FROM $1` does not imply
+    // `metadata_status = 'enriched_no_match'`, so the planner cannot use the
+    // partial index and falls back to a Seq Scan of the ~2.6M-row / ~1.7 GB
+    // heap — past the 5 s `DB_STATEMENT_TIMEOUT_MS`.
+    //
+    // Two consumers make that a correctness problem rather than a slow page.
+    // (1) `DELETE /library/:id`'s transitive play-count guard
+    // (`deleteAlbumFromDB`) runs exactly that predicate while holding
+    // `FOR UPDATE` on the release's `library` row and all of its `rotation`
+    // rows, so a statement timeout there aborts the delete AND blocks live
+    // flowsheet writers for the duration. (2) The `ON DELETE SET NULL` RI
+    // action on `flowsheet.rotation_id` (migration 0097) does its own lookup
+    // per cascaded `rotation` row — an unindexed scan each. Postgres never
+    // auto-indexes the referencing side of an FK, which is why both paths
+    // were exposed.
+    //
+    // `rotation_id IS NOT NULL` keeps this to linked rows only — the
+    // overwhelming majority of `flowsheet` never sets the column — so it is a
+    // small index despite the table's size, and it strictly contains the
+    // no-match index's entry set. The narrower sibling is kept anyway: it is
+    // an order of magnitude smaller (low hundreds of entries vs. tens of
+    // thousands) and the W4 self-heal query is on a cron path where its
+    // selectivity is worth the second index.
+    //
+    // Built CONCURRENTLY out-of-band on prod BEFORE the deploy that applies
+    // migration 0148, via:
+    //   CREATE INDEX CONCURRENTLY IF NOT EXISTS flowsheet_rotation_id_idx
+    //     ON wxyc_schema.flowsheet (rotation_id)
+    //     WHERE rotation_id IS NOT NULL;
+    // Migration SQL carries `IF NOT EXISTS` and is NOT `CONCURRENTLY` —
+    // Drizzle wraps each migration in a transaction and `CREATE INDEX
+    // CONCURRENTLY cannot run inside a transaction block` — so the apply is a
+    // no-op against a prod DB where the index is already present, and a fresh
+    // dev/CI database picks it up on first migrate. Skipping the out-of-band
+    // build means the migration takes an AccessExclusiveLock on `flowsheet`
+    // for the duration of the build, which pauses every live flowsheet write.
+    index('flowsheet_rotation_id_idx')
+      .on(table.rotation_id)
+      .where(sql`${table.rotation_id} IS NOT NULL`),
   ]
 );
 
@@ -1589,15 +1631,27 @@ export const library_watermark = wxyc_schema.table(
  * `job-type: one-shot` alongside `flowsheet-etl`/`rotation-etl` at the
  * wiki#88 Phase 3 decommission — and
  * the upstream `LIBRARY_RELEASE` row a librarian deleted in Backend still
- * exists in tubafrenzy's MySQL. The delta filter re-selects it on the next
- * `TIME_LAST_MODIFIED >` pass, finds no row carrying its
- * `legacy_release_id`, and takes the INSERT branch of `ON CONFLICT
- * (legacy_release_id) DO UPDATE` — so the release returns within 30 minutes
- * under a NEW `library.id`, stripped of the `rotation` (binning history,
- * `kill_date`, LML-resolved `discogs_release_id`), `album_metadata`,
- * `reviews` and `album_critic_reviews` rows that CASCADE-destroyed against
- * the old id and are not re-imported. `legacy_release_id` is 99.88%
- * populated, so effectively the whole catalog is resurrection-eligible.
+ * exists in tubafrenzy's MySQL. Whenever a pass re-selects that row it finds
+ * no `library` row carrying its `legacy_release_id` and takes the INSERT
+ * branch of `ON CONFLICT (legacy_release_id) DO UPDATE`, resurrecting the
+ * release under a NEW `library.id` — stripped of the `rotation` (binning
+ * history, `kill_date`, LML-resolved `discogs_release_id`),
+ * `album_metadata`, `reviews` and `album_critic_reviews` rows that
+ * CASCADE-destroyed against the old id and are not re-imported.
+ * `legacy_release_id` is 99.88% populated, so effectively the whole catalog
+ * is resurrection-eligible.
+ *
+ * **The trigger is an upstream edit or a full re-sync, not the clock.**
+ * `fetchLegacyReleases` filters `WHERE lr.TIME_LAST_MODIFIED > <last run>`
+ * and a Backend-side delete never touches tubafrenzy, so a release nobody
+ * edits upstream is not re-selected by the next half-hourly pass, nor by any
+ * number of them. What re-selects it is a librarian saving that release in
+ * `/wxycdb` (which bumps `TIME_LAST_MODIFIED` — a routine thing to do to a
+ * release someone just asked to have removed), or the documented full-resync
+ * recipe, which drops the delta filter entirely. So the exposure is
+ * open-ended rather than 30 minutes wide: the release does not come back on
+ * a timer, it comes back the first time anything touches it upstream. Do not
+ * read the ETL's schedule as a deadline in either direction.
  *
  * **This table has exactly ONE consumer: `jobs/library-etl`'s import loop**,
  * which skips any upstream release whose id is listed here. It is
@@ -1615,9 +1669,37 @@ export const library_watermark = wxyc_schema.table(
  *
  * `library_id` records the `library.id` the row carried at delete time and is
  * informational only — it deliberately carries **no FK**, since the row it
- * names is deleted in the same transaction. Un-deleting a release is a
- * `DELETE FROM library_delete_denylist WHERE legacy_release_id = ?` followed
- * by the next ETL pass, which re-imports it under a fresh `library.id`.
+ * names is deleted in the same transaction.
+ *
+ * **Un-deleting.** Clearing the denylist row is necessary but NOT sufficient,
+ * and the earlier version of this note got that wrong. The ETL only ever
+ * looks at releases whose upstream `TIME_LAST_MODIFIED` is greater than its
+ * `cronjob_runs` watermark, and a Backend-side delete leaves that timestamp
+ * where it was — older than every subsequent watermark — so a release whose
+ * denylist row is simply removed is never re-selected and never comes back.
+ * The release has to be pushed back into the candidate set as well:
+ *
+ * ```sql
+ * DELETE FROM wxyc_schema.library_delete_denylist WHERE legacy_release_id = <id>;
+ * -- then EITHER have a librarian re-save that release in tubafrenzy's
+ * -- /wxycdb (bumps TIME_LAST_MODIFIED; the next half-hourly pass re-imports
+ * -- it), OR force one full re-sync:
+ * DELETE FROM wxyc_schema.cronjob_runs WHERE job_name = 'library-etl';
+ * ```
+ *
+ * Either way the release returns under a FRESH `library.id`, without the
+ * dependents that cascade-destroyed against the old one. See
+ * `jobs/library-etl/README.md` for the full procedure and its caveats.
+ *
+ * **Who deleted it.** `deleted_by_*` records the authenticated subject at
+ * delete time — this is the most destructive operation in the service and
+ * `catalog:write` is held by two roles, so "what and when" without "who"
+ * leaves incident response unable to tell a legitimate deletion from an
+ * abusive one. All three columns are nullable: a delete performed under
+ * `AUTH_BYPASS`, or by a token whose payload carried no `id`, records what it
+ * has and NULLs the rest rather than refusing. They are audit columns and
+ * nothing reads them programmatically — `jobs/library-etl` looks only at
+ * `legacy_release_id`.
  */
 export type NewLibraryDeleteDenylist = InferInsertModel<typeof library_delete_denylist>;
 export type LibraryDeleteDenylist = InferSelectModel<typeof library_delete_denylist>;
@@ -1625,6 +1707,12 @@ export const library_delete_denylist = wxyc_schema.table('library_delete_denylis
   legacy_release_id: integer('legacy_release_id').primaryKey().notNull(),
   library_id: integer('library_id').notNull(),
   deleted_at: timestamp('deleted_at', { withTimezone: true }).defaultNow().notNull(),
+  /** better-auth user id (`req.auth.id`) of the librarian who issued the delete. */
+  deleted_by_user_id: text('deleted_by_user_id'),
+  /** Email claim from the same token, kept so the row stays legible after a user row is removed. */
+  deleted_by_email: text('deleted_by_email'),
+  /** Normalized `WXYCRole` at delete time — which of the two `catalog:write` roles acted. */
+  deleted_by_role: text('deleted_by_role'),
 });
 
 export const album_metadata = wxyc_schema.table('album_metadata', {
@@ -2595,6 +2683,32 @@ export const library_identity_source = wxyc_schema.table(
 export type LibraryIdentitySource = InferSelectModel<typeof library_identity_source>;
 export type NewLibraryIdentitySource = InferInsertModel<typeof library_identity_source>;
 
+/**
+ * Supersedure audit log for `library_identity`. One row per superseded
+ * identity resolution, snapshotting the state that was replaced.
+ *
+ * **`library_id` is deliberately dangling-tolerant, and as of BS#2112 it does
+ * dangle in practice.** It is `integer().notNull()` with no `.references()`,
+ * because a history row has to be able to outlive the `library` row it
+ * describes — that is the point of an audit log, and a cascade or set-null
+ * would destroy or anonymize exactly the record someone is auditing.
+ * `DELETE /library/:id` (BS#2112) therefore leaves these rows alone: it
+ * deletes `bins`, `library_identity`, and `library_identity_source` for the
+ * release explicitly and lets the real FKs cascade, but the history rows stay
+ * behind with a `library_id` that no longer resolves.
+ *
+ * So a reader joining this table to `library` should expect a LEFT JOIN to
+ * miss, and should read a miss as "that release was hard-deleted", not as
+ * corruption. Two other signals make that reading checkable rather than
+ * inferred: `wxyc_schema.library_delete_denylist` carries a row for every
+ * release the endpoint deleted (with the `library.id` it held at the time, in
+ * `library_id`, plus who deleted it and when), and `jobs/library-call-number-
+ * dedup`'s `FK_TARGETS` repoints this column to the survivor on a merge — so
+ * a merge is not a source of dangling ids, only a delete is. There is no
+ * cleanup job for the orphans and none is wanted; an orphan-scan over
+ * `library.id` must exclude this table (and `album_popularity`, the other
+ * FK-less reference) rather than treat its rows as findings.
+ */
 export const library_identity_history = wxyc_schema.table('library_identity_history', {
   history_id: serial('history_id').primaryKey(),
   library_id: integer('library_id').notNull(),

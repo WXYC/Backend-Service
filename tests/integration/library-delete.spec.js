@@ -27,8 +27,23 @@
  *     shape the tubafrenzy webhook produces when it resolves the two columns
  *     independently. A direct-FK-only guard blanks these silently.
  *   - the delete-denylist row, without which `jobs/library-etl` re-imports
- *     the still-present upstream release within 30 minutes under a new
- *     `library.id`.
+ *     the still-present upstream release under a new `library.id` the next
+ *     time anything re-selects it upstream (an edit in /wxycdb, or a full
+ *     re-sync — NOT on a 30-minute timer; the ETL's delta filter is
+ *     `TIME_LAST_MODIFIED >` and this delete never touches tubafrenzy).
+ *   - the actor recorded on that denylist row: `catalog:write` is held by two
+ *     roles, so what-and-when without who leaves incident response unable to
+ *     tell a legitimate deletion from an abusive one.
+ *   - the LEGACY-ID refusal: plays that name the release only via
+ *     `flowsheet.legacy_release_id`, which `jobs/legacy-linkage-resolve` has
+ *     not yet resolved to an `album_id`. Deleting in that window is worse
+ *     than blanking — the denylist guarantees no future library row carries
+ *     that legacy id, so the resolver can never link them.
+ *   - `library_identity_history` deliberately RETAINED and left dangling: a
+ *     supersedure audit log has to outlive the row it describes.
+ *   - migration 0148's `flowsheet_rotation_id_idx`, without which the
+ *     transitive count seq-scans a ~2.6M-row heap past the 5s statement
+ *     timeout while holding FOR UPDATE on live rows.
  *   - `album_popularity.representative_library_id` nulled — it names a
  *     library row and carries no FK, so nothing else stops it dangling.
  *   - migration 0147's repair of the drifted
@@ -117,7 +132,21 @@ describe('DELETE /library/:id (BS#2112)', () => {
                  OR library_id = ANY($1::int[])`,
             [createdAlbumIds]
           );
+          // Same ordering constraint as the denylist above: this joins through
+          // `library.legacy_release_id`, so it has to run while the library
+          // rows are still present.
+          await sql.unsafe(
+            `DELETE FROM "${SCHEMA}".flowsheet
+              WHERE legacy_release_id IN (SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = ANY($1::int[]))`,
+            [createdAlbumIds]
+          );
           await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE album_id = ANY($1::int[])`, [createdAlbumIds]);
+          // No FK, so nothing removes these with the library row — that is the
+          // retention property the spec asserts, and the reason teardown has
+          // to clear them by hand.
+          await sql.unsafe(`DELETE FROM "${SCHEMA}".library_identity_history WHERE library_id = ANY($1::int[])`, [
+            createdAlbumIds,
+          ]);
           await sql.unsafe(
             `DELETE FROM "${SCHEMA}".flowsheet
               WHERE rotation_id IN (SELECT id FROM "${SCHEMA}".rotation WHERE album_id = ANY($1::int[]))`,
@@ -466,5 +495,127 @@ describe('DELETE /library/:id (BS#2112)', () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0].confdeltype).toBe('c');
+  });
+
+  /**
+   * Migration 0148. The only index that touched `flowsheet.rotation_id` was
+   * `flowsheet_rotation_no_match_idx`, partial on `metadata_status =
+   * 'enriched_no_match'`. The transitive play-count query's predicate does not
+   * imply that, so the planner could not use it and fell back to a sequential
+   * scan of the ~2.6M-row / ~1.7 GB heap — past the 5s `DB_STATEMENT_TIMEOUT_MS`,
+   * while this transaction holds FOR UPDATE on the library row and every one of
+   * its rotation rows. Every binned release would have 500'd.
+   *
+   * Asserted against `pg_indexes` rather than the Drizzle model for the same
+   * reason the 0147 assertion above is: what matters is what the database has.
+   */
+  test('flowsheet.rotation_id has a general partial index (migration 0148)', async () => {
+    const rows = await sql.unsafe(
+      `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = 'flowsheet_rotation_id_idx'`,
+      [SCHEMA]
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].indexdef).toMatch(/rotation_id/);
+    // Partial on the linked rows only — the overwhelming majority of
+    // `flowsheet` never sets the column, so the predicate is what keeps this
+    // small on a multi-million-row table.
+    expect(rows[0].indexdef).toMatch(/WHERE \(rotation_id IS NOT NULL\)/);
+  });
+
+  /**
+   * BS#2112 review finding 8. The tubafrenzy webhook writes
+   * `flowsheet.legacy_release_id` on every entry and resolves `album_id`
+   * separately; `jobs/legacy-linkage-resolve` closes the gap on a half-hourly
+   * cron. A play sitting in that window has a NULL `album_id` and no
+   * `rotation_id`, so a guard counting only the two FK paths reads zero.
+   * Deleting then is worse than blanking: the denylist means no future
+   * `library` row ever carries that `legacy_release_id`, so the resolver can
+   * never link the play and its provenance is stranded permanently.
+   */
+  test('refuses with 409 when plays name the release only by its legacy release id', async () => {
+    const album = await createAlbum(`BS#2112 Legacy Linked ${uniq}`);
+    const before = await sql.unsafe(`SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
+    const legacyReleaseId = before[0].legacy_release_id;
+
+    // Exactly the shape the webhook leaves behind: legacy id present,
+    // album_id and rotation_id both NULL.
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".flowsheet (legacy_release_id, entry_type, play_order, artist_name, album_title, track_title)
+       VALUES ($1, 'track', 9900, 'Built to Spill', $2, 'unlinked probe')`,
+      [legacyReleaseId, `BS#2112 Legacy Linked ${uniq}`]
+    );
+
+    const res = await auth.delete(`/library/${album.id}`).expect(409);
+    expect(res.body.reason).toBe('flowsheet_references');
+    expect(res.body.play_count).toBe(1);
+    expect(res.body.direct_play_count).toBe(0);
+    expect(res.body.rotation_linked_play_count).toBe(0);
+    expect(res.body.legacy_linked_play_count).toBe(1);
+
+    // Refused means untouched: the release and the play both survive.
+    const stillThere = await sql.unsafe(`SELECT id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
+    expect(stillThere).toHaveLength(1);
+
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE legacy_release_id = $1`, [legacyReleaseId]);
+  });
+
+  /**
+   * `catalog:write` is held by two roles (musicDirector, stationManager), so a
+   * denylist row naming only the release and the timestamp leaves incident
+   * response with no way to separate a legitimate deletion from an abusive
+   * one. Migration 0149 adds the three attribution columns.
+   */
+  test('records who issued the delete on the denylist row', async () => {
+    const album = await createAlbum(`BS#2112 Actor ${uniq}`);
+    const before = await sql.unsafe(`SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
+    const legacyReleaseId = before[0].legacy_release_id;
+
+    await auth.delete(`/library/${album.id}`).expect(204);
+
+    const rows = await sql.unsafe(
+      `SELECT deleted_by_user_id, deleted_by_email, deleted_by_role
+         FROM "${SCHEMA}".library_delete_denylist WHERE legacy_release_id = $1`,
+      [legacyReleaseId]
+    );
+    expect(rows).toHaveLength(1);
+    // The suite's token carries a subject; assert a non-empty id rather than a
+    // specific one, since the fixture user's id is allocated at setup time.
+    expect(typeof rows[0].deleted_by_user_id).toBe('string');
+    expect(rows[0].deleted_by_user_id.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * `library_identity_history` is the OTHER FK-less reference to `library.id`,
+   * and unlike `album_popularity` it is deliberately left dangling: a
+   * supersedure audit log has to outlive the row it describes, or cascading it
+   * destroys exactly the record an auditor came for. Pinned so a later "tidy up
+   * the orphans" change has to argue with this test — and so a reader who finds
+   * an unresolvable `library_id` knows it is intended.
+   */
+  test('retains library_identity_history rows, deliberately dangling', async () => {
+    const album = await createAlbum(`BS#2112 Identity History ${uniq}`);
+
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".library_identity_history (library_id, superseded_reason)
+       VALUES ($1, 'BS#2112 retention probe')`,
+      [album.id]
+    );
+
+    await auth.delete(`/library/${album.id}`).expect(204);
+
+    const rows = await sql.unsafe(
+      `SELECT h.library_id, l.id AS library_row
+         FROM "${SCHEMA}".library_identity_history h
+         LEFT JOIN "${SCHEMA}".library l ON l.id = h.library_id
+        WHERE h.library_id = $1`,
+      [album.id]
+    );
+    expect(rows).toHaveLength(1);
+    // The audit row survives; the release it names does not. That is the
+    // intended end state, not corruption.
+    expect(rows[0].library_row).toBeNull();
+
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".library_identity_history WHERE library_id = $1`, [album.id]);
   });
 });

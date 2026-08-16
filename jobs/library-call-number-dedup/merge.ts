@@ -24,18 +24,33 @@
  *     let straight through.
  *
  * Every FK referencing `library.id` is repointed to the survivor BEFORE the
- * losing row is deleted. That ordering is not stylistic: five of the sites
+ * losing row is deleted. That ordering is not stylistic: six of the sites
  * cascade and two null the reference out, so deleting first would silently
- * destroy rotation history, album metadata, and reviews, and silently unlink
- * plays, with no error raised.
+ * destroy rotation history, album metadata, reviews, and artist
+ * cross-references, and silently unlink plays, with no error raised.
  *
- * Those actions are what the DATABASE enforces, which is not what `schema.ts`
- * declares — it marks `artist_library_crossreference.library_id` as `cascade`
- * while migration 0022 created it `no action` and nothing since altered it (one
- * of the four drifted constraints in BS#2015). The integration spec's
- * `enforced-fk-actions` block pins every entry below against
- * `information_schema` so this list tracks the database rather than the
- * declaration.
+ * Those actions are what the DATABASE enforces, which is not always what
+ * `schema.ts` declares. `artist_library_crossreference.library_id` was the
+ * standing example: declared `cascade`, created `no action` by migration 0022
+ * (one of the four drifted constraints in BS#2015). Migration 0147 (BS#2112)
+ * repaired it to the declared `cascade`, so it is no longer drifted — but the
+ * sibling `artist_id` FK on the same table still is, and the general lesson
+ * stands. The integration spec's `enforced-fk-actions` block pins every entry
+ * below against `information_schema` so this list tracks the database rather
+ * than the declaration; that is what caught 0147's change.
+ *
+ * **0147 changed the failure mode of a bug in this file, and the delete
+ * ordering above now carries weight it did not have to before.** While
+ * `artist_library_crossreference` was `no action`, an incomplete repoint of
+ * that table failed LOUDLY: the survivor's DELETE raised a foreign-key
+ * violation and the per-slot transaction rolled back with nothing lost. Under
+ * `cascade` the same bug fails SILENTLY — any crossreference row the repoint
+ * missed is deleted along with the loser and the merge reports success. Three
+ * of the thirteen sites (`bins`, `library_identity`,
+ * `library_identity_source`) still raise, so the class of bug is not
+ * undetectable, but this particular table has stopped being one of the
+ * canaries. Treat a change to the repoint logic here as unguarded by the
+ * database.
  */
 
 import { sql, type SQL } from 'drizzle-orm';

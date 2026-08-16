@@ -37,18 +37,22 @@ Any uniqueness constraint added afterward must use this same key, including the 
 
 ## Order of operations is a data-safety property
 
-Every FK referencing `library.id` is repointed to the survivor **before** the losing row is deleted. That is not stylistic. Of the 13 reference sites, five cascade and two null out the reference:
+Every FK referencing `library.id` is repointed to the survivor **before** the losing row is deleted. That is not stylistic. Of the 13 reference sites, six cascade and two null out the reference:
 
-| On delete  | Sites                                                                                       |
-| ---------- | ------------------------------------------------------------------------------------------- |
-| `cascade`  | `rotation`, `album_metadata`, `reviews`, `album_critic_reviews`, `compilation_track_artist` |
-| `set null` | `flowsheet.album_id`, `album_review_submissions.album_id`                                   |
-| no action  | `artist_library_crossreference`, `bins`, `library_identity`, `library_identity_source`      |
-| no FK      | `library_identity_history`, `album_popularity.representative_library_id`                    |
+| On delete  | Sites                                                                                                                        |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `cascade`  | `rotation`, `album_metadata`, `reviews`, `album_critic_reviews`, `compilation_track_artist`, `artist_library_crossreference` |
+| `set null` | `flowsheet.album_id`, `album_review_submissions.album_id`                                                                    |
+| no action  | `bins`, `library_identity`, `library_identity_source`                                                                        |
+| no FK      | `library_identity_history`, `album_popularity.representative_library_id`                                                     |
 
-Deleting first would silently destroy rotation history, album metadata, and reviews, and silently unlink plays — no error raised. The no-action sites are the only ones that would fail loudly.
+Deleting first would silently destroy rotation history, album metadata, reviews, and now the artist cross-references too, and silently unlink plays — no error raised. The three no-action sites are the only ones that would fail loudly.
 
-**These actions are the ones the database enforces, not the ones `schema.ts` declares.** The two disagree: `schema.ts` marks `artist_library_crossreference.library_id` as `cascade`, but migration `0022` created it `no action` and nothing since has altered it — one of the four drifted constraints catalogued in [#2015](https://github.com/WXYC/Backend-Service/issues/2015). Reading the schema file alone would put it in the wrong row of that table. Reading only the migration that first _created_ a constraint is also insufficient: `album_metadata.album_id` was created `no action` in `0023`, dropped with its table in `0035`, and recreated `cascade` in `0079`. The live catalog is the authority, which is why `enforced-fk-actions` in the integration spec asserts every row of the table above against `information_schema` rather than against either file.
+**These actions are the ones the database enforces, not the ones `schema.ts` declares.** They used to disagree on `artist_library_crossreference.library_id`: `schema.ts` has always marked it `cascade`, while migration `0022` created it `no action` — one of the four drifted constraints catalogued in [#2015](https://github.com/WXYC/Backend-Service/issues/2015). **Migration `0147` ([BS#2112](https://github.com/WXYC/Backend-Service/issues/2112)) repaired exactly that constraint to the declared `cascade`, which is why it has moved rows in the table above.** On a database that has not yet applied `0147` it is still `no action`; the table describes a database that has. The sibling `artist_id` FK on the same table carries the same 0022 drift and was deliberately left alone.
+
+That repair costs this job a safety net, and it is worth being explicit about the direction of the trade. Under `no action`, an incomplete repoint of `artist_library_crossreference` failed **loudly** — the survivor's `DELETE` raised a foreign-key violation and the per-slot transaction rolled back. Under `cascade` the same bug now fails **silently**: the stragglers are deleted along with the loser and the merge reports success. The delete-ordering argument above is what has to carry that weight now, so the ordering is a correctness property here rather than a defensive habit.
+
+Reading only the migration that first _created_ a constraint is also insufficient: `album_metadata.album_id` was created `no action` in `0023`, dropped with its table in `0035`, and recreated `cascade` in `0079`. The live catalog is the authority, which is why `enforced-fk-actions` in the integration spec asserts every row of the table above against `information_schema` rather than against either file — and it is what caught the `0147` change.
 
 Two tables are deliberately **not** targets: `album_plays` is a materialized view (refreshed, not repointed), and `specialty_shows` carries no library reference despite the name.
 

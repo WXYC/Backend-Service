@@ -57,14 +57,19 @@ const mockRecheckDiscogsAvailability =
 
 // DELETE /library/:id (BS#2112).
 const mockDeleteAlbumFromDB = jest.fn<
-  (id: number) => Promise<
+  (
+    id: number,
+    actor?: { userId?: string | null; email?: string | null; role?: string | null }
+  ) => Promise<
     | { outcome: 'deleted' }
     | { outcome: 'not_found' }
+    | { outcome: 'lock_unavailable' }
     | {
         outcome: 'has_flowsheet_plays';
         playCount: number;
         directPlayCount: number;
         rotationLinkedPlayCount: number;
+        legacyLinkedPlayCount: number;
       }
   >
 >();
@@ -1425,7 +1430,7 @@ describe('library.controller', () => {
       const res = mockResponse();
 
       await expect(deleteAlbum(req, res, next)).rejects.toThrow('Album not found');
-      expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(999);
+      expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(999, expect.any(Object));
     });
 
     it('refuses with 409 and names the play count when the release carries flowsheet plays', async () => {
@@ -1434,6 +1439,7 @@ describe('library.controller', () => {
         playCount: 59,
         directPlayCount: 59,
         rotationLinkedPlayCount: 0,
+        legacyLinkedPlayCount: 0,
       });
       const req = { params: { id: '42' } } as unknown as Request;
       const res = mockResponse();
@@ -1447,6 +1453,7 @@ describe('library.controller', () => {
         play_count: 59,
         direct_play_count: 59,
         rotation_linked_play_count: 0,
+        legacy_linked_play_count: 0,
       });
     });
 
@@ -1456,6 +1463,7 @@ describe('library.controller', () => {
         playCount: 1,
         directPlayCount: 1,
         rotationLinkedPlayCount: 0,
+        legacyLinkedPlayCount: 0,
       });
       const req = { params: { id: '42' } } as unknown as Request;
       const res = mockResponse();
@@ -1476,6 +1484,7 @@ describe('library.controller', () => {
         playCount: 12,
         directPlayCount: 0,
         rotationLinkedPlayCount: 12,
+        legacyLinkedPlayCount: 0,
       });
       const req = { params: { id: '42' } } as unknown as Request;
       const res = mockResponse();
@@ -1501,6 +1510,7 @@ describe('library.controller', () => {
         playCount: 4,
         directPlayCount: 4,
         rotationLinkedPlayCount: 0,
+        legacyLinkedPlayCount: 0,
       });
       const req = { params: { id: '42' } } as unknown as Request;
       const res = mockResponse();
@@ -1519,10 +1529,103 @@ describe('library.controller', () => {
 
       await deleteAlbum(req, res, next);
 
-      expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(42);
       expect(res.status).toHaveBeenCalledWith(204);
       expect(res.end).toHaveBeenCalled();
       expect(res.json).not.toHaveBeenCalled();
+    });
+
+    // BS#2112 review finding 8: plays the tubafrenzy webhook wrote carrying
+    // only `legacy_release_id`, which `jobs/legacy-linkage-resolve` has not yet
+    // turned into an `album_id`. Deleting in that window strands them for
+    // good, because the denylist means no future library row ever carries that
+    // legacy id for the resolver to join to.
+    it('spells out the split when plays are awaiting legacy-id linkage', async () => {
+      mockDeleteAlbumFromDB.mockResolvedValue({
+        outcome: 'has_flowsheet_plays',
+        playCount: 3,
+        directPlayCount: 0,
+        rotationLinkedPlayCount: 0,
+        legacyLinkedPlayCount: 3,
+      });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await deleteAlbum(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(409);
+      const body = (res.json as jest.Mock).mock.calls[0][0] as {
+        message: string;
+        legacy_linked_play_count: number;
+      };
+      expect(body.legacy_linked_play_count).toBe(3);
+      expect(body.message).toContain('legacy release id');
+      expect(body.message).not.toContain('rotation entry');
+    });
+
+    // BS#2112 review finding 7: the delete stands down rather than block a
+    // live writer. 503, not 409 — 409 on this endpoint means "refused on the
+    // merits", and this refusal says nothing about the release.
+    it('returns a retryable 503 when the delete stood down on lock contention', async () => {
+      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'lock_unavailable' });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await deleteAlbum(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(503);
+      expect(res.json).toHaveBeenCalledWith({
+        message: expect.stringContaining('Try again'),
+        reason: 'lock_unavailable',
+      });
+    });
+
+    // BS#2112 review finding 5: `catalog:write` is held by two roles, so
+    // without an actor incident response cannot tell a legitimate deletion
+    // from an abusive one.
+    it('threads the authenticated subject through to the service', async () => {
+      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'deleted' });
+      const req = {
+        params: { id: '42' },
+        auth: { id: 'user-abc', email: 'md@wxyc.org', role: 'musicDirector' },
+      } as unknown as Request;
+      const res = mockResponse();
+      res.end = jest.fn().mockReturnValue(res) as unknown as Response['end'];
+
+      await deleteAlbum(req, res, next);
+
+      expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(42, {
+        userId: 'user-abc',
+        email: 'md@wxyc.org',
+        role: 'musicDirector',
+      });
+    });
+
+    it('falls back to the JWT `sub` claim when `id` is absent', async () => {
+      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'deleted' });
+      const req = {
+        params: { id: '42' },
+        auth: { sub: 'subject-xyz', email: 'sm@wxyc.org', role: 'stationManager' },
+      } as unknown as Request;
+      const res = mockResponse();
+      res.end = jest.fn().mockReturnValue(res) as unknown as Response['end'];
+
+      await deleteAlbum(req, res, next);
+
+      expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(42, expect.objectContaining({ userId: 'subject-xyz' }));
+    });
+
+    // A thin token (AUTH_BYPASS, or a payload with no claims) must cost the
+    // audit trail, never the delete.
+    it('still deletes when no auth payload is present, recording nulls', async () => {
+      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'deleted' });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+      res.end = jest.fn().mockReturnValue(res) as unknown as Response['end'];
+
+      await deleteAlbum(req, res, next);
+
+      expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(42, { userId: null, email: null, role: null });
+      expect(res.status).toHaveBeenCalledWith(204);
     });
   });
 });

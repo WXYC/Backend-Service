@@ -1064,10 +1064,14 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
 /**
  * DELETE /library/:id (BS#2112). Hard delete — no soft-delete tombstone; see
  * the issue's decision record for why. Refuses with 409 when the release
- * carries `flowsheet` plays (D10 policy) by EITHER path: linked directly via
- * `flowsheet.album_id` (`onDelete: 'set null'`) or transitively via
- * `flowsheet.rotation_id` → `rotation.album_id` (`set null` behind a
- * `cascade`). Both would silently blank historical play provenance.
+ * carries `flowsheet` plays (D10 policy) by ANY of three paths: linked
+ * directly via `flowsheet.album_id` (`onDelete: 'set null'`), transitively
+ * via `flowsheet.rotation_id` → `rotation.album_id` (`set null` behind a
+ * `cascade`), or by bare `flowsheet.legacy_release_id` — plays the tubafrenzy
+ * webhook wrote that `jobs/legacy-linkage-resolve` has not yet turned into an
+ * `album_id`. The first two would silently blank historical play provenance;
+ * the third would strand it, since the denylist means no future `library` row
+ * ever carries that `legacy_release_id` for the resolver to join to.
  * `bins`, `library_identity`, `library_identity_source`, and
  * `artist_library_crossreference` are resolved explicitly inside the same
  * transaction as the delete (see `libraryService.deleteAlbumFromDB` for why
@@ -1080,36 +1084,64 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
  * `markMissing`/`markFound` use, since this is irreversible.
  *
  * The 409 body is non-standard for this service (`{message, reason,
- * play_count, direct_play_count, rotation_linked_play_count}` rather than the
- * error handler's shape) because the count is the whole point of the
- * refusal: the librarian needs to know how much history the delete would
- * have damaged, and by which path. Documented in `apps/backend/app.yaml`.
+ * play_count, direct_play_count, rotation_linked_play_count,
+ * legacy_linked_play_count}` rather than the error handler's shape) because
+ * the count is the whole point of the refusal: the librarian needs to know
+ * how much history the delete would have damaged, and by which path.
+ * Documented in `apps/backend/app.yaml`.
+ *
+ * A `503` with `reason: 'lock_unavailable'` means the delete stood down
+ * rather than wait on a row a live writer holds — see
+ * `libraryService.deleteAlbumFromDB`'s lock-order paragraph. It is retryable
+ * and says nothing about whether the release is deletable; deliberately NOT a
+ * 409, which in this endpoint's contract means "refused on the merits".
  */
 export const deleteAlbum: RequestHandler<{ id: string }> = async (req, res) => {
   const albumId = parseAlbumId(req.params.id);
 
-  const result = await libraryService.deleteAlbumFromDB(albumId);
+  // Attribution for the denylist row. Everything here is best-effort: under
+  // AUTH_BYPASS `req.auth` may be absent or thin, and a missing actor must
+  // never block a librarian's delete (see `DeleteAlbumActor`).
+  const result = await libraryService.deleteAlbumFromDB(albumId, {
+    userId: req.auth?.id ?? req.auth?.sub ?? null,
+    email: req.auth?.email ?? null,
+    role: req.auth?.role ?? null,
+  });
 
   if (result.outcome === 'not_found') {
     throw new WxycError('Album not found', 404);
   }
 
+  if (result.outcome === 'lock_unavailable') {
+    res.status(503).json({
+      message: 'Could not delete: the release is being written to right now. Try again in a moment.',
+      reason: 'lock_unavailable',
+    });
+    return;
+  }
+
   if (result.outcome === 'has_flowsheet_plays') {
-    const { playCount, directPlayCount, rotationLinkedPlayCount } = result;
-    // Only spell out the split when the transitive path contributed — the
-    // common refusal reads as a plain play count, and the breakdown appears
-    // exactly when it explains something the librarian can't otherwise see
-    // (plays that name the rotation entry but not the release).
-    const breakdown =
-      rotationLinkedPlayCount > 0
-        ? ` (${directPlayCount} linked to the release, ${rotationLinkedPlayCount} via its rotation entry)`
-        : '';
+    const { playCount, directPlayCount, rotationLinkedPlayCount, legacyLinkedPlayCount } = result;
+    // Only spell out the split when an indirect path contributed — the common
+    // refusal reads as a plain play count, and the breakdown appears exactly
+    // when it explains something the librarian can't otherwise see (plays that
+    // name the rotation entry, or only the legacy release id, but not the
+    // release).
+    const parts = [`${directPlayCount} linked to the release`];
+    if (rotationLinkedPlayCount > 0) {
+      parts.push(`${rotationLinkedPlayCount} via its rotation entry`);
+    }
+    if (legacyLinkedPlayCount > 0) {
+      parts.push(`${legacyLinkedPlayCount} awaiting linkage from the legacy release id`);
+    }
+    const breakdown = parts.length > 1 ? ` (${parts.join(', ')})` : '';
     res.status(409).json({
       message: `Cannot delete: release has ${playCount} flowsheet play${playCount === 1 ? '' : 's'} on record${breakdown}`,
       reason: 'flowsheet_references',
       play_count: playCount,
       direct_play_count: directPlayCount,
       rotation_linked_play_count: rotationLinkedPlayCount,
+      legacy_linked_play_count: legacyLinkedPlayCount,
     });
     return;
   }
