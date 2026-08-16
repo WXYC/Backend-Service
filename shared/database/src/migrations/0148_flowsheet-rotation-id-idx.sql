@@ -1,0 +1,64 @@
+-- BS#2112. A general partial B-tree on `flowsheet.rotation_id`, restricted to
+-- linked rows (`WHERE rotation_id IS NOT NULL`).
+--
+-- Why the existing index cannot serve it. `flowsheet_rotation_no_match_idx`
+-- (migration 0132) is the ONLY index touching this column, and it is partial on
+-- `metadata_status = 'enriched_no_match' AND rotation_id IS NOT NULL`. A
+-- predicate of the form `rotation_id IN (...) AND album_id IS DISTINCT FROM $1`
+-- does not imply `metadata_status = 'enriched_no_match'`, so the planner cannot
+-- prove the partial predicate holds and falls back to a full heap scan.
+-- Migration 0139 measured that heap at ~1.7 GB on prod (2,633,568 rows) against
+-- a `db.t3.micro` with 1 GiB of RAM and a 5 s `DB_STATEMENT_TIMEOUT_MS`.
+--
+-- Two consumers, and for both of them the missing index is a correctness
+-- problem rather than a slow page:
+--
+--   1. `DELETE /library/:id`'s transitive play-count guard
+--      (`deleteAlbumFromDB`, `apps/backend/services/library.service.ts`) runs
+--      exactly that predicate to find plays that reach the release through its
+--      rotation entry rather than through `flowsheet.album_id`. It runs it
+--      while holding `FOR UPDATE` on the release's `library` row and on every
+--      one of its `rotation` rows — so a statement timeout there does not just
+--      500 the delete, it holds those locks against live flowsheet writers for
+--      the whole 5 s. Every binned release would hit this.
+--
+--   2. The `ON DELETE SET NULL` referential action on `flowsheet.rotation_id`
+--      (migration 0097) does its own lookup per cascaded `rotation` row when a
+--      release is actually deleted — an unindexed scan each. Postgres never
+--      auto-indexes the referencing side of a foreign key (same story as
+--      `flowsheet_show_id_idx` and `flowsheet_rotation_no_match_idx`), which is
+--      why both paths were exposed at once.
+--
+-- Sized by the partial predicate, not by the table. `rotation_id` is set only
+-- by the tubafrenzy webhook's rotation-linkage resolve (BS#1268) and by
+-- `jobs/legacy-linkage-resolve`, so the overwhelming majority of `flowsheet`
+-- never carries one; the index covers that minority. Its entry set strictly
+-- CONTAINS `flowsheet_rotation_no_match_idx`'s. The narrower sibling is kept
+-- anyway rather than dropped here: it is an order of magnitude smaller (low
+-- hundreds of entries against tens of thousands) and the epic #1810 W4
+-- self-heal query that reads it is on a cron path where that selectivity is
+-- worth a second index. Retiring it is a separate decision with its own
+-- measurement, and this PR is not the place to make it — `flowsheet`'s index
+-- bloat is a tracked concern under epic #1058.
+--
+-- Production ops:
+--   - This is NOT the CONCURRENTLY form, because Drizzle wraps each migration
+--     file in a transaction and `CREATE INDEX CONCURRENTLY cannot run inside a
+--     transaction block` — same constraint as 0057, 0068, 0070, 0074, 0078,
+--     0080, 0139, 0144.
+--   - Run out-of-band on prod FIRST, before the deploy that applies this
+--     migration:
+--       CREATE INDEX CONCURRENTLY IF NOT EXISTS "flowsheet_rotation_id_idx"
+--         ON "wxyc_schema"."flowsheet" USING btree ("rotation_id")
+--         WHERE "rotation_id" IS NOT NULL;
+--     No AccessExclusiveLock, so no INSERT pause and no wedged flowsheet
+--     mid-show. Skipping this step is the failure mode to avoid: the
+--     in-migration form below takes an AccessExclusiveLock on `flowsheet` for
+--     the duration of the build, pausing every live flowsheet write.
+--   - Then deploy. `IF NOT EXISTS` makes the migration a no-op against the prod
+--     DB where the index already exists, while fresh dev and CI databases pick
+--     it up on first migrate. Same shape as 0068, 0070, 0074, 0080, 0139, 0144.
+--   - `DELETE /library/:id` must not reach production before this index does.
+--     The endpoint is unusable on any binned release without it.
+
+CREATE INDEX IF NOT EXISTS "flowsheet_rotation_id_idx" ON "wxyc_schema"."flowsheet" USING btree ("rotation_id") WHERE "wxyc_schema"."flowsheet"."rotation_id" IS NOT NULL;

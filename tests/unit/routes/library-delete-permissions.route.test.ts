@@ -135,18 +135,26 @@ describe('DELETE /library/:id — permission tier (BS#2112)', () => {
     mockDeleteAlbumFromDB.mockReset().mockResolvedValue({ outcome: 'deleted' });
   });
 
+  /**
+   * The actor assertions ride along here rather than only in the controller
+   * test because this is the one place the REAL `requirePermissions` populates
+   * `req.auth` — so it pins that the attribution the denylist row records is
+   * the subject the gate actually authorized, not a value the controller test
+   * hand-fed itself. `catalog:write` is held by two roles, and telling them
+   * apart after the fact is the whole point.
+   */
   test('a musicDirector-role token is authorized', async () => {
     mockRole('musicDirector');
     const res = await request(app).delete('/library/1').set('Authorization', 'Bearer test-token');
     expect(res.status).toBe(204);
-    expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(1);
+    expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(1, expect.objectContaining({ role: 'musicDirector' }));
   });
 
   test('a stationManager-role token is authorized', async () => {
     mockRole('stationManager');
     const res = await request(app).delete('/library/1').set('Authorization', 'Bearer test-token');
     expect(res.status).toBe(204);
-    expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(1);
+    expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(1, expect.objectContaining({ role: 'stationManager' }));
   });
 
   test('a dj-role token (catalog:read only) is rejected', async () => {

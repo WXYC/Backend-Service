@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { isNull } from 'drizzle-orm';
 import { sql } from 'drizzle-orm';
 import {
@@ -950,6 +950,119 @@ export const loadDeleteDenylist = async (tx: DbTransaction): Promise<Set<number>
   return new Set(rows.map((row) => row.legacy_release_id));
 };
 
+/**
+ * Fresh, single-release denylist read taken at the point of write.
+ *
+ * `loadDeleteDenylist` above snapshots the whole table ONCE, at the top of a
+ * transaction that then runs for the length of the import — minutes on a delta
+ * pass, much longer on a full re-sync. `db.transaction()` is READ COMMITTED, so
+ * that Set is fixed at its statement's snapshot while every LATER statement in
+ * the same transaction takes a fresh one. A delete committing after the load
+ * but before the loop reaches its release is therefore invisible to the Set;
+ * `findExistingRelease` then takes its own fresh snapshot, sees the deleted
+ * row gone, and hands the release to the INSERT branch — resurrecting it under
+ * a new `library.id` stripped of its cascaded dependents.
+ *
+ * That state is terminal and self-concealing without this check: every
+ * subsequent run consults the denylist, finds the id, and `continue`s, so the
+ * resurrected row is never updated and never removed, and the log line says
+ * "skipped as deleted" while the release sits in the catalog.
+ *
+ * This narrows the exposure from the whole run to a single statement. It does
+ * not close it outright — a delete can still commit between this read and the
+ * upsert — which is what `reconcileDenylistedInserts` (below) is for. The
+ * in-memory pre-filter is kept ahead of this call: it costs nothing and keeps
+ * the common case (a denylisted release re-selected on every full re-sync) from
+ * paying a round trip.
+ */
+export const isDeniedAtWriteTime = async (tx: DbTransaction, legacyReleaseId: number): Promise<boolean> => {
+  const rows = await tx
+    .select({ legacy_release_id: library_delete_denylist.legacy_release_id })
+    .from(library_delete_denylist)
+    .where(eq(library_delete_denylist.legacy_release_id, legacyReleaseId))
+    .limit(1);
+  return rows.length > 0;
+};
+
+/**
+ * Last line of defence against a resurrection, run once at the end of the
+ * import transaction: join `library` to `library_delete_denylist` and see
+ * whether any denylisted release is present in the catalog after all.
+ *
+ * Two populations, treated differently on purpose.
+ *
+ *   - **Inserted by THIS run** (`insertedLegacyIds`). The delete committed in
+ *     the gap between `isDeniedAtWriteTime` and the upsert. These rows are
+ *     deleted here. That is safe in a way a general cleanup would not be:
+ *     they were created by this same uncommitted transaction, so nothing
+ *     outside it has ever seen them, no dependent row can have accrued
+ *     against them, and removing them restores exactly the state the
+ *     librarian asked for. Because this runs in the same transaction as the
+ *     insert, the whole thing is atomic — an aborted run leaves no
+ *     resurrection either.
+ *
+ *   - **Present but NOT inserted by this run.** A resurrection that slipped
+ *     through before this check existed, or a row an operator restored by
+ *     hand without clearing the denylist. It is NOT deleted: dependents may
+ *     have accrued against it (enrichment writes `album_metadata`, an MD may
+ *     have binned it), and an ETL silently deleting catalog rows that predate
+ *     its own run is a worse failure mode than the one it is fixing. It is
+ *     reported loudly instead, and the caller exits non-zero — the point is
+ *     that the state stops being invisible.
+ *
+ * Driven from the denylist side, which is small (one row per hard delete
+ * ever), so this is a bounded lookup regardless of catalog size.
+ */
+export const reconcileDenylistedInserts = async (
+  tx: DbTransaction,
+  insertedLegacyIds: Set<number>
+): Promise<{ removed: number[]; stranded: Array<{ id: number; legacy_release_id: number }> }> => {
+  const present = await tx
+    .select({ id: library.id, legacy_release_id: library.legacy_release_id })
+    .from(library_delete_denylist)
+    .innerJoin(library, eq(library.legacy_release_id, library_delete_denylist.legacy_release_id));
+
+  const removedIds: number[] = [];
+  const stranded: Array<{ id: number; legacy_release_id: number }> = [];
+  for (const row of present) {
+    if (insertedLegacyIds.has(row.legacy_release_id)) {
+      removedIds.push(row.id);
+    } else {
+      stranded.push(row);
+    }
+  }
+
+  if (removedIds.length > 0) {
+    await tx.delete(library).where(inArray(library.id, removedIds));
+  }
+
+  return { removed: removedIds, stranded };
+};
+
+/**
+ * Reports denylisted releases found present in the catalog that this run did
+ * not create.
+ *
+ * Reported, never auto-repaired: these rows predate the current run, so
+ * dependents may have accrued against them (enrichment writes
+ * `album_metadata`, an MD may have binned it), and an ETL silently deleting
+ * catalog rows it did not create is a worse failure mode than the one being
+ * reported. Non-zero exit code so a denylisted release sitting in the catalog
+ * is a loud run outcome rather than a silent one — the whole failure this
+ * guards against was that it concealed itself, with every later run happily
+ * logging "skipped as deleted" for a release that was right there.
+ */
+export const reportStrandedResurrections = (stranded: Array<{ id: number; legacy_release_id: number }>): void => {
+  if (stranded.length === 0) {
+    return;
+  }
+  console.error(
+    `[library-etl] ${stranded.length} denylisted release(s) are PRESENT in the library and were not inserted by this run — a resurrection predating this pass, or a row restored by hand whose denylist entry was never cleared. Not auto-removed. Resolve by hand: either DELETE the library row through DELETE /library/:id, or clear the denylist row if the release is meant to be back. ` +
+      stranded.map((row) => `library.id=${row.id} legacy_release_id=${row.legacy_release_id}`).join('; ')
+  );
+  process.exitCode = 1;
+};
+
 const run = async () => {
   try {
     const runStartedAt = new Date();
@@ -958,6 +1071,13 @@ const run = async () => {
 
     if (legacyReleases.length === 0) {
       console.log('[library-etl] No new legacy releases found.');
+      // Still sweep for denylisted releases sitting in the catalog (BS#2112).
+      // An idle delta pass is the COMMON case, so skipping the check here
+      // would leave detection dependent on the next run that happens to have
+      // work — and the state being detected is one that hides itself. The
+      // empty inserted-set makes this strictly read-only; nothing is deleted.
+      const idleReconcile = await db.transaction((tx) => reconcileDenylistedInserts(tx, new Set<number>()));
+      reportStrandedResurrections(idleReconcile.stranded);
       await updateLastRun(db, JOB_NAME, runStartedAt);
       return;
     }
@@ -966,6 +1086,9 @@ const run = async () => {
     let updatedFromLegacyConflictCount = 0;
     let skippedCount = 0;
     let denylistedCount = 0;
+    let denylistedAtWriteTimeCount = 0;
+    let resurrectionsUndone = 0;
+    let strandedResurrections: Array<{ id: number; legacy_release_id: number }> = [];
 
     await db.transaction(async (tx) => {
       // Sync genres and formats from legacy database before processing releases
@@ -991,7 +1114,16 @@ const run = async () => {
       // for every release — before `findExistingRelease`, so a deleted
       // release can neither be re-inserted nor have its `legacy_release_id`
       // back-stamped onto some other row by the canonical-tuple backfill.
+      //
+      // This is a PRE-FILTER, not the only check. It is a snapshot taken once
+      // at the top of a transaction that runs for the length of the import, so
+      // a delete committing mid-run is invisible to it; `isDeniedAtWriteTime`
+      // re-reads per release at the point of write and
+      // `reconcileDenylistedInserts` sweeps up after the loop. See those two
+      // for the mechanism.
       const deleteDenylist = await loadDeleteDenylist(tx);
+      /** Legacy ids this run took the INSERT branch for — the reconcile pass's safe-to-undo set. */
+      const insertedLegacyIds = new Set<number>();
 
       for (const release of legacyReleases) {
         if (deleteDenylist.has(release.release_id)) {
@@ -1056,6 +1188,18 @@ const run = async () => {
         const albumTitle = release.release_title.trim();
         if (albumTitle.length === 0) {
           skippedCount += 1;
+          continue;
+        }
+
+        // BS#2112. Re-read the denylist at the point of write, on a fresh
+        // statement snapshot. The Set above was taken once for the whole run
+        // and cannot see a delete that committed since; this can, and it runs
+        // ahead of `findExistingRelease` because that call's canonical-tuple
+        // match can back-stamp a deleted release's `legacy_release_id` onto a
+        // different `library` row — a resurrection by a second door, which
+        // checking only at the INSERT would miss. See `isDeniedAtWriteTime`.
+        if (await isDeniedAtWriteTime(tx, release.release_id)) {
+          denylistedAtWriteTimeCount += 1;
           continue;
         }
 
@@ -1160,7 +1304,23 @@ const run = async () => {
           updatedFromLegacyConflictCount += 1;
         } else {
           insertedCount += 1;
+          insertedLegacyIds.add(release.release_id);
         }
+      }
+
+      // BS#2112. Sweep for anything the two checks above still let through —
+      // a delete that committed inside the one-statement gap between
+      // `isDeniedAtWriteTime` and the upsert. Runs here, right after the loop
+      // that could have created a resurrection and before the cross-reference
+      // imports, so an undone row is gone before anything can reference it.
+      const reconciled = await reconcileDenylistedInserts(tx, insertedLegacyIds);
+      resurrectionsUndone = reconciled.removed.length;
+      strandedResurrections = reconciled.stranded;
+      if (resurrectionsUndone > 0) {
+        insertedCount -= resurrectionsUndone;
+        console.warn(
+          `[library-etl] Undid ${resurrectionsUndone} resurrection(s) of denylisted release(s) inserted by this run: library ids ${reconciled.removed.join(', ')}.`
+        );
       }
 
       // --- Cross-reference imports ---
@@ -1217,8 +1377,10 @@ const run = async () => {
     });
 
     console.log(
-      `[library-etl] Completed. Inserted ${insertedCount}, updated via legacy-id conflict ${updatedFromLegacyConflictCount}, skipped ${skippedCount}, skipped as deleted ${denylistedCount}.`
+      `[library-etl] Completed. Inserted ${insertedCount}, updated via legacy-id conflict ${updatedFromLegacyConflictCount}, skipped ${skippedCount}, skipped as deleted ${denylistedCount} (+${denylistedAtWriteTimeCount} caught at write time), resurrections undone ${resurrectionsUndone}.`
     );
+
+    reportStrandedResurrections(strandedResurrections);
   } finally {
     await closeDatabaseConnection();
     legacyDB.close();

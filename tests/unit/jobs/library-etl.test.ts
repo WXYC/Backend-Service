@@ -73,6 +73,7 @@ jest.mock('drizzle-orm', () => {
     eq: jest.fn((a: unknown, b: unknown) => ({ eq: [a, b] })),
     and: jest.fn((...args: unknown[]) => ({ and: args })),
     isNull: jest.fn((col: unknown) => ({ isNull: col })),
+    inArray: jest.fn((col: unknown, values: unknown) => ({ inArray: [col, values] })),
     sql: sqlFn,
   };
 });
@@ -102,6 +103,9 @@ import {
   ensureArtist,
   findArtistId,
   loadDeleteDenylist,
+  isDeniedAtWriteTime,
+  reconcileDenylistedInserts,
+  reportStrandedResurrections,
 } from '../../../jobs/library-etl/job';
 
 describe('library-etl job helpers', () => {
@@ -857,5 +861,217 @@ describe('library-etl delete denylist (BS#2112)', () => {
     expect(denylistCheck).toBeGreaterThan(loopStart);
     expect(denylistCheck).toBeLessThan(existingLookup);
     expect(denylistCheck).toBeLessThan(upsert);
+  });
+});
+
+/**
+ * The denylist TOCTOU (BS#2112 review finding 2), and the two checks that
+ * close it.
+ *
+ * `loadDeleteDenylist` snapshots the whole table ONCE at the top of a
+ * transaction that then runs for the length of the import. `db.transaction()`
+ * is READ COMMITTED, so that Set is frozen at its statement's snapshot while
+ * every later statement takes a fresh one: a delete committing after the load
+ * but before the loop reaches that release is invisible to the Set,
+ * `findExistingRelease` then sees the deleted row gone, and the INSERT branch
+ * resurrects the release under a new `library.id` stripped of its cascaded
+ * dependents.
+ *
+ * What made that terminal rather than transient is that it hides itself —
+ * every LATER run consults the denylist, finds the id, and `continue`s, so the
+ * resurrected row is never updated and never removed while the log cheerfully
+ * reports "skipped as deleted".
+ */
+describe('library-etl denylist race (BS#2112 review finding 2)', () => {
+  /** Tx double whose denylist reads can CHANGE between statements, which is the whole point. */
+  const makeRaceTx = () => {
+    const denylisted = new Set<number>();
+    const deletedIds: number[][] = [];
+    let libraryJoinRows: Array<{ id: number; legacy_release_id: number }> = [];
+
+    const tx = {
+      select: () => {
+        const chain: Record<string, unknown> = {};
+        let scope: 'denylist' | 'join' = 'denylist';
+        let filterId: number | null = null;
+        chain.from = () => chain;
+        chain.innerJoin = () => {
+          scope = 'join';
+          return chain;
+        };
+        // The @wxyc/database test double renders drizzle conditions as plain
+        // objects: `eq(col, v)` becomes `{ eq: [col, v] }`.
+        chain.where = (predicate: unknown) => {
+          filterId = (predicate as { eq?: [string, number] } | null)?.eq?.[1] ?? null;
+          return chain;
+        };
+        chain.limit = () => chain;
+        chain.then = (resolve: (value: unknown) => void) => {
+          if (scope === 'join') {
+            resolve(libraryJoinRows.filter((row) => denylisted.has(row.legacy_release_id)));
+            return;
+          }
+          const rows = [...denylisted].map((legacy_release_id) => ({ legacy_release_id }));
+          resolve(filterId == null ? rows : rows.filter((row) => row.legacy_release_id === filterId));
+        };
+        return chain;
+      },
+      delete: () => ({
+        // `inArray(col, ids)` renders as `{ inArray: [col, ids] }`.
+        where: (predicate: unknown) => {
+          deletedIds.push((predicate as { inArray?: [string, number[]] } | null)?.inArray?.[1] ?? []);
+          return Promise.resolve([]);
+        },
+      }),
+    };
+
+    return {
+      tx: tx as never,
+      denylisted,
+      deletedIds,
+      setLibraryJoinRows: (rows: Array<{ id: number; legacy_release_id: number }>) => {
+        libraryJoinRows = rows;
+      },
+    };
+  };
+
+  describe('isDeniedAtWriteTime', () => {
+    it('sees a delete that committed AFTER the run-start snapshot was taken', async () => {
+      const { tx, denylisted } = makeRaceTx();
+
+      // Run start: the release is importable, so the in-memory pre-filter
+      // built here will let it straight through for the rest of the run.
+      const runStartSnapshot = await loadDeleteDenylist(tx);
+      expect(runStartSnapshot.has(4242)).toBe(false);
+
+      // Mid-run: a librarian hard-deletes it. The Set above cannot know.
+      denylisted.add(4242);
+      expect(runStartSnapshot.has(4242)).toBe(false);
+
+      // The write-time re-check takes a fresh snapshot and does.
+      await expect(isDeniedAtWriteTime(tx, 4242)).resolves.toBe(true);
+    });
+
+    it('lets a release that was never deleted through', async () => {
+      const { tx, denylisted } = makeRaceTx();
+      denylisted.add(999);
+
+      await expect(isDeniedAtWriteTime(tx, 4242)).resolves.toBe(false);
+    });
+  });
+
+  /**
+   * The re-check narrows the window to a single statement but does not erase
+   * it — a delete can still commit between the re-check and the upsert. The
+   * reconcile pass is what makes the run's outcome correct regardless.
+   */
+  describe('reconcileDenylistedInserts', () => {
+    it('undoes a resurrection this run inserted', async () => {
+      const { tx, denylisted, deletedIds, setLibraryJoinRows } = makeRaceTx();
+      denylisted.add(4242);
+      setLibraryJoinRows([{ id: 77, legacy_release_id: 4242 }]);
+
+      const result = await reconcileDenylistedInserts(tx, new Set([4242]));
+
+      expect(result.removed).toEqual([77]);
+      expect(result.stranded).toEqual([]);
+      expect(deletedIds).toEqual([[77]]);
+    });
+
+    /**
+     * A row that predates this run may have accrued dependents (enrichment
+     * writes `album_metadata`; an MD may have binned it), and an ETL silently
+     * deleting catalog rows it did not create is a worse failure than the one
+     * it is reporting. Report, never repair.
+     */
+    it('reports but does NOT delete a resurrection it did not create', async () => {
+      const { tx, denylisted, deletedIds, setLibraryJoinRows } = makeRaceTx();
+      denylisted.add(4242);
+      setLibraryJoinRows([{ id: 77, legacy_release_id: 4242 }]);
+
+      const result = await reconcileDenylistedInserts(tx, new Set<number>());
+
+      expect(result.removed).toEqual([]);
+      expect(result.stranded).toEqual([{ id: 77, legacy_release_id: 4242 }]);
+      expect(deletedIds).toEqual([]);
+    });
+
+    it('is a no-op when no denylisted release is present in the catalog', async () => {
+      const { tx, denylisted, deletedIds, setLibraryJoinRows } = makeRaceTx();
+      denylisted.add(4242);
+      setLibraryJoinRows([]);
+
+      const result = await reconcileDenylistedInserts(tx, new Set([4242]));
+
+      expect(result).toEqual({ removed: [], stranded: [] });
+      expect(deletedIds).toEqual([]);
+    });
+  });
+
+  describe('reportStrandedResurrections', () => {
+    afterEach(() => {
+      process.exitCode = undefined;
+    });
+
+    it('fails the run so the state cannot conceal itself', () => {
+      const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+      reportStrandedResurrections([{ id: 77, legacy_release_id: 4242 }]);
+
+      expect(process.exitCode).toBe(1);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('legacy_release_id=4242'));
+      error.mockRestore();
+    });
+
+    it('says nothing and leaves the exit code alone when there is nothing to report', () => {
+      const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+      reportStrandedResurrections([]);
+
+      expect(process.exitCode).toBeUndefined();
+      expect(error).not.toHaveBeenCalled();
+      error.mockRestore();
+    });
+  });
+
+  /**
+   * Ordering: the write-time re-check must precede `findExistingRelease`, not
+   * merely the INSERT. That call's canonical-tuple match can back-stamp a
+   * deleted release's `legacy_release_id` onto a DIFFERENT library row — a
+   * resurrection by a second door.
+   */
+  it('re-checks at write time ahead of findExistingRelease, and reconciles after the loop', () => {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const jobSource = fs.readFileSync(path.resolve(__dirname, '../../../jobs/library-etl/job.ts'), 'utf-8');
+
+    const loopStart = jobSource.indexOf('for (const release of legacyReleases)');
+    const writeTimeCheck = jobSource.indexOf('isDeniedAtWriteTime(tx, release.release_id)', loopStart);
+    const existingLookup = jobSource.indexOf('findExistingRelease(', loopStart);
+    const reconcile = jobSource.indexOf('reconcileDenylistedInserts(tx, insertedLegacyIds)', loopStart);
+    const crossrefImport = jobSource.indexOf('importArtistCrossRefs(', loopStart);
+
+    expect(writeTimeCheck).toBeGreaterThan(loopStart);
+    expect(writeTimeCheck).toBeLessThan(existingLookup);
+    // After the loop that can create a resurrection, and before anything can
+    // reference the row it undoes.
+    expect(reconcile).toBeGreaterThan(existingLookup);
+    expect(reconcile).toBeLessThan(crossrefImport);
+  });
+
+  /**
+   * An idle delta pass is the COMMON case, so a sweep that only ran when there
+   * was work would leave detection dependent on the next run that happened to
+   * have some — for a state whose defining property is that it hides.
+   */
+  it('sweeps on idle runs too', () => {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const jobSource = fs.readFileSync(path.resolve(__dirname, '../../../jobs/library-etl/job.ts'), 'utf-8');
+
+    const idleBranch = jobSource.indexOf('No new legacy releases found');
+    const returnAfter = jobSource.indexOf('return;', idleBranch);
+    const idleSweep = jobSource.indexOf('reconcileDenylistedInserts', idleBranch);
+
+    expect(idleSweep).toBeGreaterThan(idleBranch);
+    expect(idleSweep).toBeLessThan(returnAfter);
   });
 });

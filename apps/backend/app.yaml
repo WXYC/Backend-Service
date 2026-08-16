@@ -1340,12 +1340,16 @@ paths:
       summary: Hard-delete a library release (BS#2112)
       description: >-
         Irreversible. Refused with 409 when the release carries flowsheet plays
-        by either path — linked directly (`flowsheet.album_id`) or via its
-        rotation entry (`flowsheet.rotation_id` -> `rotation.album_id`) —
-        since deleting it would silently blank that play provenance.
+        by any of three paths — linked directly (`flowsheet.album_id`), via its
+        rotation entry (`flowsheet.rotation_id` -> `rotation.album_id`), or by
+        bare `flowsheet.legacy_release_id` awaiting the linkage-resolve cron.
+        The first two would silently blank that play provenance; the third
+        would strand it permanently, since the delete-denylist means no future
+        library row will ever carry that legacy id for the resolver to join to.
         Dependent rows are resolved in the same transaction as the delete, and
         the release's `legacy_release_id` is recorded in a delete-denylist so
-        the library ETL cannot re-import it from tubafrenzy.
+        the library ETL cannot re-import it from tubafrenzy. The denylist row
+        also records the authenticated subject that issued the delete.
       security:
         - BearerAuth: ['station-management']
       parameters:
@@ -1371,7 +1375,15 @@ paths:
             application/json:
               schema:
                 type: object
-                required: ['message', 'reason', 'play_count', 'direct_play_count', 'rotation_linked_play_count']
+                required:
+                  [
+                    'message',
+                    'reason',
+                    'play_count',
+                    'direct_play_count',
+                    'rotation_linked_play_count',
+                    'legacy_linked_play_count',
+                  ]
                 properties:
                   message:
                     type: string
@@ -1382,7 +1394,7 @@ paths:
                     enum: ['flowsheet_references']
                   play_count:
                     type: integer
-                    description: Total distinct plays the delete would damage (the sum of the two below)
+                    description: Total distinct plays the delete would damage (the sum of the three below)
                   direct_play_count:
                     type: integer
                     description: Plays linked to the release itself via `flowsheet.album_id`
@@ -1392,6 +1404,36 @@ paths:
                       Plays linked only to the release's rotation entry via
                       `flowsheet.rotation_id`, whose `album_id` is NULL or
                       names a different release
+                  legacy_linked_play_count:
+                    type: integer
+                    description: >-
+                      Plays that name the release only by
+                      `flowsheet.legacy_release_id`, not yet resolved to an
+                      `album_id` by the linkage-resolve cron. Counted on a
+                      best-effort basis: the column carries no foreign key, so
+                      unlike the other two paths there is no referential lock
+                      to hold a concurrent webhook insert behind this check.
+        '503':
+          description: >-
+            The delete stood down rather than wait on rows a live writer holds.
+            Retryable, and says nothing about whether the release is deletable
+            — deliberately not a 409, which on this endpoint means "refused on
+            the merits". The transaction sets a `lock_timeout` below Postgres's
+            deadlock-detection threshold on purpose, so that when a librarian's
+            delete contends with a DJ's play insert it is the delete that
+            yields.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: ['message', 'reason']
+                properties:
+                  message:
+                    type: string
+                    example: 'Could not delete: the release is being written to right now. Try again in a moment.'
+                  reason:
+                    type: string
+                    enum: ['lock_unavailable']
 
   /library/{id}/missing:
     patch:

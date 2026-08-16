@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
@@ -2161,15 +2161,50 @@ export const recheckDiscogsAvailability = async (
 export type DeleteAlbumOutcome =
   | { outcome: 'deleted' }
   | { outcome: 'not_found' }
+  | { outcome: 'lock_unavailable' }
   | {
       outcome: 'has_flowsheet_plays';
-      /** Total distinct plays the delete would damage — the sum of the two below. */
+      /** Total distinct plays the delete would damage — the sum of the three below. */
       playCount: number;
       /** Plays linked to the release itself (`flowsheet.album_id`). */
       directPlayCount: number;
       /** Plays linked only to the release's rotation entry (`flowsheet.rotation_id`). */
       rotationLinkedPlayCount: number;
+      /** Plays linked only by `flowsheet.legacy_release_id`, awaiting `jobs/legacy-linkage-resolve`. */
+      legacyLinkedPlayCount: number;
     };
+
+/**
+ * The authenticated subject that issued a delete, recorded on the denylist
+ * row. Every field is optional: `AUTH_BYPASS` and malformed-but-accepted
+ * tokens produce a partial (or empty) actor, and a missing attribution must
+ * never be a reason to refuse the delete.
+ */
+export type DeleteAlbumActor = {
+  userId?: string | null;
+  email?: string | null;
+  role?: string | null;
+};
+
+/**
+ * Bounds how long the delete will wait for the row locks it takes. Chosen
+ * BELOW Postgres's default `deadlock_timeout` (1 s) on purpose — see the
+ * lock-order discussion in `deleteAlbumFromDB`'s docstring. A librarian's
+ * delete is a rare, retryable administrative action; a live DJ's play insert
+ * is not, so when the two contend this side is the one that gives up.
+ */
+export const DELETE_ALBUM_LOCK_TIMEOUT_MS = 750;
+
+/** Postgres SQLSTATEs the delete converts into `lock_unavailable` rather than a 500. */
+const LOCK_CONTENTION_SQLSTATES = new Set([
+  '55P03', // lock_not_available — our own lock_timeout fired
+  '40P01', // deadlock_detected — we were chosen as the victim
+]);
+
+const isLockContentionError = (error: unknown): boolean => {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && LOCK_CONTENTION_SQLSTATES.has(code);
+};
 
 /**
  * Hard-deletes a library release (BS#2112, D10 policy). Refuses when the
@@ -2190,6 +2225,23 @@ export type DeleteAlbumOutcome =
  * `touch_flowsheet_watermark`, republishing untouched history to every
  * polling client.
  *
+ * **A third path is counted but cannot be locked.** `flowsheet` also carries
+ * a bare `legacy_release_id` (no FK, `flowsheet_legacy_release_id_idx` only):
+ * the tubafrenzy webhook writes it on every entry, and `album_id` is resolved
+ * from it later, on a half-hourly cron, by `jobs/legacy-linkage-resolve`. A
+ * play sitting in that window has a NULL `album_id` and no `rotation_id`, so
+ * the two counts above see zero — and deleting the release makes the state
+ * permanent, because the denylist guarantees no future `library` row will
+ * ever carry that `legacy_release_id` for the resolver to join to. Those
+ * plays are counted too. They cannot be *locked*, though: with no FK there is
+ * no RI check to conflict with, so a webhook INSERT landing between this
+ * count and the DELETE is invisible. The residual window is one statement
+ * wide and one-sided (it can only mean a refusal that should have fired
+ * didn't), and closing it would require a lock on a column no writer takes
+ * one on. The resolver's own UPDATE *is* covered: setting `album_id` fires
+ * the FK check, which takes `FOR KEY SHARE` on the library row this
+ * transaction holds `FOR UPDATE`.
+ *
  * **Concurrency.** `db.transaction()` runs at READ COMMITTED, so a bare
  * existence check followed by a count is check-then-act: a writer attaching
  * `flowsheet.album_id` (`flowsheet.service.ts:848`, `internal.route.ts:502`,
@@ -2202,12 +2254,46 @@ export type DeleteAlbumOutcome =
  * rows closes the `rotation_id` path, whose writers never touch the library
  * row at all.
  *
+ * **Lock order, and why it is bounded rather than reasoned about.** This
+ * transaction takes library-then-rotation. A single `flowsheet` INSERT
+ * carrying BOTH `album_id` and `rotation_id` (`internal.route.ts:502`,
+ * `flowsheet.service.ts:846`) takes the same two locks via its two RI checks,
+ * in Postgres's trigger firing order — which is by trigger name, and RI
+ * triggers are named `RI_ConstraintTrigger_c_<oid>`, so the order is really
+ * constraint-creation order. Today that favours us: `flowsheet.album_id`'s FK
+ * predates `flowsheet.rotation_id`'s (migration 0097), so the writer also
+ * goes library-then-rotation and the two orders agree. But that is an
+ * accident of OIDs, not an invariant — migration 0147 in this very PR drops
+ * and re-adds a constraint, which is exactly the operation that reorders
+ * them, and OIDs can wrap. If the order ever inverts, one side deadlocks, and
+ * the side that loses might be a DJ's play insert mid-show.
+ *
+ * So the transaction does not rely on the order at all. It sets
+ * `lock_timeout` to {@link DELETE_ALBUM_LOCK_TIMEOUT_MS}, deliberately BELOW
+ * the default 1 s `deadlock_timeout`, which makes this transaction give up
+ * before the deadlock detector even runs — the librarian gets a clean,
+ * retryable `lock_unavailable` (503) instead of the DJ getting an aborted
+ * insert or a 35 s hang against the server timeout. `40P01` is mapped the
+ * same way for the case where a non-default `deadlock_timeout` gets there
+ * first. `SET LOCAL` only scopes inside an explicit transaction under the
+ * postgres-js driver (see `shared/database/src/freetext-enumerate.ts`), which
+ * is where this runs.
+ *
  * **Durability.** The delete records the release's `legacy_release_id` in
  * `library_delete_denylist` in the same transaction. Without that,
- * `jobs/library-etl` — still cron-registered every 30 minutes — re-selects
- * the still-present upstream row on its next delta pass and re-inserts it
- * under a NEW `library.id`, stripped of every cascade-destroyed dependent.
- * See the table's docstring in `schema.ts` for the full mechanism.
+ * `jobs/library-etl` — still cron-registered every 30 minutes — re-inserts
+ * the release under a NEW `library.id`, stripped of every cascade-destroyed
+ * dependent, the next time anything re-selects the still-present upstream
+ * row. That is NOT on a 30-minute timer: the ETL's delta filter is
+ * `TIME_LAST_MODIFIED > <last run>` and this delete never touches tubafrenzy,
+ * so the trigger is a librarian editing the release upstream or an operator
+ * forcing a full re-sync — open-ended rather than imminent. See the table's
+ * docstring in `schema.ts` for the full mechanism and the un-delete recipe.
+ *
+ * **Attribution.** `actor` is recorded on the denylist row. It is optional at
+ * every field: a delete under `AUTH_BYPASS` records what it has. Losing the
+ * audit trail is bad; refusing the librarian's delete because the token was
+ * thin would be worse.
  *
  * Four FKs are resolved explicitly inside the same transaction rather than
  * left to the schema, because each would otherwise fail the DELETE below
@@ -2227,9 +2313,52 @@ export type DeleteAlbumOutcome =
  * `album_review_submissions`: `onDelete: 'set null'`) is left to its own FK.
  * `library_watermark` advances via the `touch_library_watermark` trigger
  * (migration 0104/0142, unqualified on DELETE) — no app-level bump needed.
+ *
+ * `library_identity_history` is the one reference deliberately LEFT dangling.
+ * It is the other FK-less pointer at `library.id` (`schema.ts`,
+ * `integer().notNull()` with no `.references()`), and it is a supersedure
+ * audit log: the whole reason it carries no FK is that a history row has to
+ * outlive the row it describes, so cascading or nulling it here would destroy
+ * exactly the record an auditor came for. After a delete its `library_id`
+ * resolves to nothing; a reader should treat that as "hard-deleted" — the
+ * matching `library_delete_denylist` row (with the same id in `library_id`,
+ * plus who and when) is the corroborating evidence — not as corruption, and
+ * an orphan scan over `library.id` must exclude it. Same reasoning is written
+ * up on the table itself in `schema.ts` and in
+ * `jobs/library-call-number-dedup/README.md`'s reference-site table, whose
+ * `FK_TARGETS` repoints (rather than orphans) the column on a merge.
  */
-export const deleteAlbumFromDB = async (album_id: number): Promise<DeleteAlbumOutcome> => {
+export const deleteAlbumFromDB = async (
+  album_id: number,
+  actor: DeleteAlbumActor = {}
+): Promise<DeleteAlbumOutcome> => {
+  try {
+    return await runDeleteAlbumTransaction(album_id, actor);
+  } catch (error) {
+    if (isLockContentionError(error)) {
+      // Not an error condition worth a Sentry issue: it means a live writer
+      // held the row and this transaction stood down on purpose. Breadcrumb
+      // only, so it shows up as context if something else fails later.
+      Sentry.addBreadcrumb({
+        category: 'library.delete',
+        level: 'warning',
+        message: 'DELETE /library/:id stood down on lock contention',
+        data: { album_id, code: (error as { code?: string }).code },
+      });
+      return { outcome: 'lock_unavailable' };
+    }
+    throw error;
+  }
+};
+
+const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumActor): Promise<DeleteAlbumOutcome> => {
   return db.transaction(async (tx) => {
+    // Bound every lock wait below. Deliberately under the default 1s
+    // `deadlock_timeout` so this transaction is always the one that gives
+    // up — see the lock-order paragraph in the docstring. `SET LOCAL` scopes
+    // to this transaction only.
+    await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${DELETE_ALBUM_LOCK_TIMEOUT_MS}ms'`));
+
     // FOR UPDATE, not FOR NO KEY UPDATE — see the docstring. This is the lock
     // that makes the play-count guard below an atomic check-and-act rather
     // than a check-then-act race.
@@ -2278,9 +2407,40 @@ export const deleteAlbumFromDB = async (album_id: number): Promise<DeleteAlbumOu
       rotationLinkedPlayCount = Number(transitiveRows[0]?.count ?? 0);
     }
 
-    const playCount = directPlayCount + rotationLinkedPlayCount;
+    // Plays that name the release ONLY by its tubafrenzy id, waiting for
+    // `jobs/legacy-linkage-resolve` to turn that into an `album_id`. Disjoint
+    // from both counts above by construction, so the three sum to a true
+    // total: `album_id IS DISTINCT FROM` excludes the direct arm (and, as
+    // there, `IS DISTINCT FROM` rather than `<>` because the shape being
+    // caught is precisely a NULL `album_id`), and the rotation clause
+    // excludes the transitive arm. Deleting while any of these exist strands
+    // them forever — the denylist means no future `library` row will carry
+    // this `legacy_release_id` for the resolver to join to.
+    const legacyLinkedRows = await tx
+      .select({ count: sql<number>`count(*)::int` })
+      .from(flowsheet)
+      .where(
+        and(
+          eq(flowsheet.legacy_release_id, legacy_release_id),
+          sql`${flowsheet.album_id} IS DISTINCT FROM ${album_id}::int`,
+          // `NOT IN` alone would drop every NULL `rotation_id` row to NULL and
+          // silently exclude the exact population this arm exists to count.
+          rotationIds.length > 0
+            ? or(isNull(flowsheet.rotation_id), notInArray(flowsheet.rotation_id, rotationIds))
+            : undefined
+        )
+      );
+    const legacyLinkedPlayCount = Number(legacyLinkedRows[0]?.count ?? 0);
+
+    const playCount = directPlayCount + rotationLinkedPlayCount + legacyLinkedPlayCount;
     if (playCount > 0) {
-      return { outcome: 'has_flowsheet_plays', playCount, directPlayCount, rotationLinkedPlayCount };
+      return {
+        outcome: 'has_flowsheet_plays',
+        playCount,
+        directPlayCount,
+        rotationLinkedPlayCount,
+        legacyLinkedPlayCount,
+      };
     }
 
     // Tombstone BEFORE the delete, so the denylist row and the delete commit
@@ -2291,12 +2451,20 @@ export const deleteAlbumFromDB = async (album_id: number): Promise<DeleteAlbumOu
     // delete must never fail on a stale tombstone — a release deleted, then
     // un-deleted by clearing its denylist row and re-imported, then deleted
     // again would otherwise collide on the primary key.
+    const attribution = {
+      deleted_by_user_id: actor.userId ?? null,
+      deleted_by_email: actor.email ?? null,
+      deleted_by_role: actor.role ?? null,
+    };
     await tx
       .insert(library_delete_denylist)
-      .values({ legacy_release_id, library_id: album_id })
+      .values({ legacy_release_id, library_id: album_id, ...attribution })
       .onConflictDoUpdate({
         target: library_delete_denylist.legacy_release_id,
-        set: { library_id: album_id, deleted_at: sql`now()` },
+        // A re-delete overwrites the attribution rather than keeping the
+        // first one: the row describes the deletion currently in force, and
+        // the librarian who re-deleted is the one accountable for it.
+        set: { library_id: album_id, deleted_at: sql`now()`, ...attribution },
       });
 
     await tx.delete(bins).where(eq(bins.album_id, album_id));
@@ -2311,6 +2479,29 @@ export const deleteAlbumFromDB = async (album_id: number): Promise<DeleteAlbumOu
       .set({ representative_library_id: null })
       .where(eq(album_popularity.representative_library_id, album_id));
     await tx.delete(library).where(eq(library.id, album_id));
+
+    // Second, independent record of the same fact. The denylist row is the
+    // durable one, but it is a side table nobody is watching; this line puts
+    // the deletion in the request log, where an incident responder looking at
+    // a time window rather than at a release id will actually meet it. Emitted
+    // inside the transaction, so a rollback can leave a log line with no
+    // deletion behind it — the wrong way round for an audit trail to fail.
+    console.warn(
+      '[Library] hard delete',
+      JSON.stringify({
+        album_id,
+        legacy_release_id,
+        actor_user_id: attribution.deleted_by_user_id,
+        actor_email: attribution.deleted_by_email,
+        actor_role: attribution.deleted_by_role,
+      })
+    );
+    Sentry.addBreadcrumb({
+      category: 'library.delete',
+      level: 'warning',
+      message: 'DELETE /library/:id hard-deleted a release',
+      data: { album_id, legacy_release_id, actor_user_id: attribution.deleted_by_user_id },
+    });
 
     return { outcome: 'deleted' };
   });
