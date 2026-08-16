@@ -336,7 +336,14 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       compilation_track_artist: 'CASCADE',
       flowsheet: 'SET NULL',
       album_review_submissions: 'SET NULL',
-      artist_library_crossreference: 'NO ACTION',
+      // Repaired by migration 0147. schema.ts and every snapshot from 0022
+      // forward declared this FK `onDelete: 'cascade'`, but 0022 created it
+      // ON DELETE NO ACTION — and because drizzle-kit diffs schema.ts against
+      // the snapshot rather than the database, it could never emit a
+      // corrective diff, so the drift was self-perpetuating. This assertion
+      // is what makes the repair observable; it reads the enforced action out
+      // of information_schema, not the declaration.
+      artist_library_crossreference: 'CASCADE',
       bins: 'NO ACTION',
       library_identity: 'NO ACTION',
       library_identity_source: 'NO ACTION',
