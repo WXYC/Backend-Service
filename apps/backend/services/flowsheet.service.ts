@@ -136,11 +136,30 @@ const FSEntryFieldsRaw = {
   //       (library-unlinked rotation rows hold the snapshot directly);
   //   (c) (artist, album) matches the library+artists join on an active rotation row's
   //       album_id (library-linked rows whose denorm fields are NULL).
-  // The rotation window is bounded on BOTH sides against the flowsheet entry's add_time so
+  // This fallback's window is bounded on BOTH sides against the flowsheet entry's add_time so
   // historical rotation status is preserved: add_date <= add_time (inclusive lower bound —
   // a play that aired before the release entered rotation is not badged; BS#1526) and
   // kill_date IS NULL OR kill_date > add_time (exclusive upper bound). Mirrors how tubafrenzy
   // classifies at mirror time (WXYC/dj-site#750).
+  //
+  // That window governs the FALLBACK SUBQUERY ONLY. The primary FK join above has no date
+  // window at all — an entry carrying rotation_id gets that rotation record's CURRENT
+  // rotation_bin regardless of when the entry aired, even past the record's own kill_date.
+  // This is deliberate (BS#2183): an explicit rotation_id is a first-class assertion by the
+  // writer (BS#1268 stamps it from the tubafrenzy webhook; the dj-site rotation picker emits
+  // it), and a writer's assertion outranks date arithmetic. The fallback is windowed precisely
+  // because it is an inference, not an assertion. Measured prod blast radius (2026-08-17,
+  // 6,290 FK-joined entries): 0 played before add_date, 9 played on/after kill_date — and all
+  // 9 are same-day artifacts (add_time::date == kill_date, played in the morning and killed
+  // that afternoon) that a half-open bound would flip the wrong way.
+  //
+  // FIVE call sites carry this decision. Four are the `.leftJoin(rotation, ...)` sites below
+  // (getEntriesByPage, getEntriesByRange, getEntriesInTimeWindow, getEntriesByShow). The fifth
+  // is outside this file: `playlist-proxy.service.ts`'s window query runs the same unwindowed
+  // FK lane against a windowed post-slice fallback (`resolveFallbackRotation`), so the decision
+  // governs it identically. Keep all five in step — changing one and not its twins is the
+  // BS#2088 failure mode, and the cross-file fifth is the one most easily missed.
+  //
   // Subquery only fires per-row on a missed FK join; on rows with a populated rotation_id
   // COALESCE short-circuits and the subquery is not evaluated.
   //
@@ -608,6 +627,8 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
     .select(FSEntryFieldsRaw)
     .from(page)
     .innerJoin(flowsheet, eq(flowsheet.id, page.id))
+    // Deliberately unwindowed (BS#2183) — rotation_id is the writer's assertion and
+    // outranks date arithmetic; see FSEntryFieldsRaw.rotation_bin's fallback-window note above.
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
@@ -647,6 +668,8 @@ export const getEntriesByRange = async (startId: number, endId: number): Promise
   const raw = await db
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
+    // Deliberately unwindowed (BS#2183) — rotation_id is the writer's assertion and
+    // outranks date arithmetic; see FSEntryFieldsRaw.rotation_bin's fallback-window note above.
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
@@ -687,6 +710,8 @@ export const getEntriesInTimeWindow = async (start: Date, end: Date): Promise<IF
   const raw = await db
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
+    // Deliberately unwindowed (BS#2183) — rotation_id is the writer's assertion and
+    // outranks date arithmetic; see FSEntryFieldsRaw.rotation_bin's fallback-window note above.
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
@@ -796,6 +821,8 @@ export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[
   const raw = await db
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
+    // Deliberately unwindowed (BS#2183) — rotation_id is the writer's assertion and
+    // outranks date arithmetic; see FSEntryFieldsRaw.rotation_bin's fallback-window note above.
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
