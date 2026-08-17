@@ -190,6 +190,15 @@ export const runNoMatchRecheck = async (deps: {
   };
 
   const candidates = await deps.loadCandidates();
+  // BS#2176 acceptance criterion: report the candidate count / projected LML
+  // call volume as soon as candidates are loaded — before any lookup or
+  // write, in both dry-run and live runs. This job is single-row (never
+  // bulk), so the projection is exact: one candidate is at most one LML call.
+  log('info', 'candidates_loaded', `${candidates.length} candidate row(s) loaded`, {
+    candidates: candidates.length,
+    projected_lml_calls: candidates.length,
+    dry_run: deps.dryRun ?? false,
+  });
   for (const candidate of candidates) {
     await waitForQuietPeriod();
 
