@@ -1,5 +1,6 @@
 import type { Request } from 'express';
 import { createHash } from 'crypto';
+import { parseBearerToken } from '@wxyc/authentication';
 
 // Key on the nginx-set `X-Real-IP` (the same header better-auth's getIp
 // consumes via `ipAddressHeaders: ['x-real-ip']` in
@@ -52,15 +53,14 @@ function extractSessionCookieValue(cookieHeader: string | undefined): string | u
   return undefined;
 }
 
+// Express types `authorization` as `string | string[]`; `parseBearerToken`
+// (the shared parser, which owns the scheme match and the trailing-whitespace
+// trim that keeps `Bearer abc ` and `Bearer abc` on one bucket) takes a single
+// header value, so flattening is all this adds.
 function extractBearerToken(authorizationHeader: string | string[] | undefined): string | undefined {
   const raw = Array.isArray(authorizationHeader) ? authorizationHeader[0] : authorizationHeader;
   if (typeof raw !== 'string') return undefined;
-  // Trailing whitespace is trimmed off the capture: `.+` is greedy and would
-  // otherwise let `Bearer abc ` and `Bearer abc` hash to two different buckets
-  // for the same token.
-  const match = /^Bearer\s+(.+)$/i.exec(raw);
-  const token = match?.[1]?.trim();
-  return token ? token : undefined;
+  return parseBearerToken(raw) ?? undefined;
 }
 
 // BS#2169. Identity-keyed fairness generator for GET /auth/get-session — see
@@ -83,13 +83,25 @@ function extractBearerToken(authorizationHeader: string | string[] | undefined):
 // unified with it. That one keys on the verified `req.auth.id`; this one has
 // no equivalent verified identity at keyGenerator time (see the mounted
 // abuse-ceiling limiter in app.ts, which exists precisely because of that).
-export const sessionRateLimitKeyFromRequest = (req: Pick<Request, 'headers' | 'socket'>): string => {
+export type SessionRateLimitIdentity =
+  { kind: 'bearer'; hash: string } | { kind: 'session'; hash: string } | { kind: 'ip'; value: string };
+
+// Resolves the identity signal itself. Separate from the key formatting below
+// so an observability caller can read `.kind` directly instead of re-parsing a
+// prefix back out of the formatted key — one three-way branch, not one that
+// builds a string and a second that takes it apart.
+export const sessionRateLimitIdentity = (req: Pick<Request, 'headers' | 'socket'>): SessionRateLimitIdentity => {
   const bearerToken = extractBearerToken(req.headers['authorization']);
-  if (bearerToken) return `bearer:${hashCredential(bearerToken)}`;
+  if (bearerToken) return { kind: 'bearer', hash: hashCredential(bearerToken) };
 
   const cookieHeader = req.headers['cookie'];
   const sessionCookieValue = extractSessionCookieValue(typeof cookieHeader === 'string' ? cookieHeader : undefined);
-  if (sessionCookieValue) return `session:${hashCredential(sessionCookieValue)}`;
+  if (sessionCookieValue) return { kind: 'session', hash: hashCredential(sessionCookieValue) };
 
-  return `ip:${rateLimitKeyFromRequest(req)}`;
+  return { kind: 'ip', value: rateLimitKeyFromRequest(req) };
+};
+
+export const sessionRateLimitKeyFromRequest = (req: Pick<Request, 'headers' | 'socket'>): string => {
+  const identity = sessionRateLimitIdentity(req);
+  return identity.kind === 'ip' ? `ip:${identity.value}` : `${identity.kind}:${identity.hash}`;
 };

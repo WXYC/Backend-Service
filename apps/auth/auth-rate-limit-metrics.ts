@@ -2,7 +2,7 @@ import * as Sentry from '@sentry/node';
 import type { NextFunction, Request, Response } from 'express';
 import type { Options, RateLimitExceededEventHandler } from 'express-rate-limit';
 import { createBufferedMetricEmitter } from '@wxyc/observability/metrics';
-import { sessionRateLimitKeyFromRequest } from './rate-limit-key';
+import { sessionRateLimitIdentity } from './rate-limit-key';
 
 /**
  * Observability for the two rate limiters mounted on GET /auth/get-session
@@ -40,10 +40,9 @@ const emitter = createBufferedMetricEmitter({
 });
 
 /**
- * Classifies which identity signal a rejected request carried, by reading
- * the `<kind>:<hash>` prefix `sessionRateLimitKeyFromRequest` already
- * computes — not re-derived, so this can't drift out of sync with that
- * function's bearer-beats-cookie-beats-ip precedence.
+ * Classifies which identity signal a rejected request carried, off the same
+ * resolver the identity limiter keys on, so this can't drift out of sync with
+ * its bearer-beats-cookie-beats-ip precedence.
  *
  * Applies to BOTH limiters' rejections, including the IP-keyed abuse
  * ceiling. A caller minting a fresh bearer token on every request is
@@ -52,9 +51,7 @@ const emitter = createBufferedMetricEmitter({
  * `ip`-limiter rejection is a meaningful signal, not a mislabel.
  */
 function classifyKeyKind(req: Pick<Request, 'headers' | 'socket'>): KeyKind {
-  const key = sessionRateLimitKeyFromRequest(req);
-  const prefix = key.slice(0, key.indexOf(':'));
-  return prefix === 'bearer' || prefix === 'session' ? prefix : 'ip';
+  return sessionRateLimitIdentity(req).kind;
 }
 
 function recordRateLimited(limiter: LimiterName, keyKind: KeyKind): void {

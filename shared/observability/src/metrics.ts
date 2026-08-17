@@ -65,8 +65,6 @@ export interface BufferedMetricEmitterOptions {
   flushAtBufferSize?: number;
   /** Checked on every `record()` call; when true, the call is a no-op. Defaults to `() => false`. */
   isDisabled?: () => boolean;
-  /** Called (instead of `console.error`) when a flush's `PutMetricData` rejects. */
-  onFlushError?: (error: unknown) => void;
 }
 
 export interface BufferedMetricEmitter {
@@ -85,19 +83,13 @@ export interface BufferedMetricEmitter {
 const DEFAULT_FLUSH_INTERVAL_MS = 30_000;
 const DEFAULT_FLUSH_AT_BUFFER_SIZE = 10;
 
-interface BufferedDatum {
+// One shape for both the raw buffer and the coalesced map: coalescing sums
+// values within a key, it doesn't change what a point carries.
+interface MetricPoint {
   metricName: string;
   dimensions: MetricDimension[];
   value: number;
   unit: StandardUnit;
-  emitDimensionlessCompanion: boolean;
-}
-
-interface CoalescedEntry {
-  metricName: string;
-  dimensions: MetricDimension[];
-  unit: StandardUnit;
-  value: number;
   emitDimensionlessCompanion: boolean;
 }
 
@@ -122,10 +114,9 @@ export function createBufferedMetricEmitter(options: BufferedMetricEmitterOption
     flushIntervalMs = DEFAULT_FLUSH_INTERVAL_MS,
     flushAtBufferSize = DEFAULT_FLUSH_AT_BUFFER_SIZE,
     isDisabled = () => false,
-    onFlushError,
   } = options;
 
-  let buffer: BufferedDatum[] = [];
+  let buffer: MetricPoint[] = [];
   let flushTimer: NodeJS.Timeout | null = null;
   let cloudwatchClient: CloudWatchClient | null = null;
   // The PutMetricData round-trip currently in flight, if any. `record()` and
@@ -178,7 +169,7 @@ export function createBufferedMetricEmitter(options: BufferedMetricEmitterOption
     const drained = buffer;
     buffer = [];
 
-    const coalesced = new Map<string, CoalescedEntry>();
+    const coalesced = new Map<string, MetricPoint>();
     for (const datum of drained) {
       const key = coalesceKey(datum.metricName, datum.dimensions, datum.unit);
       const existing = coalesced.get(key);
@@ -229,11 +220,7 @@ export function createBufferedMetricEmitter(options: BufferedMetricEmitterOption
         })
       );
     } catch (err) {
-      if (onFlushError) {
-        onFlushError(err);
-      } else {
-        console.error(`[metrics:${namespace}] PutMetricData failed; dropping batch:`, err);
-      }
+      console.error(`[metrics:${namespace}] PutMetricData failed; dropping batch:`, err);
     }
   }
 
