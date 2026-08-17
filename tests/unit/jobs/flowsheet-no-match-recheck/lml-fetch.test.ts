@@ -11,7 +11,25 @@
  *     (thrown), never as a definitive no-match;
  *   - a breaker-open/shed degraded response with no usable answer (BS#1995
  *     Arm 3) is also treated as transient — this job must not manufacture a
- *     NEW false-terminal no-match while it exists to fix old ones.
+ *     NEW false-terminal no-match while it exists to fix old ones;
+ *   - a `degraded_reason: 'deadline_exceeded'` response with no usable
+ *     answer is ALSO transient (BS#2179 review HIGH 2 / BS#1977) — the
+ *     budget-cutoff shed shape `shared/lml-client/src/policy.ts`'s module
+ *     docstring documents, distinct from the shed-limiter/breaker shape
+ *     `shedReasonOf` detects;
+ *   - `isUnansweredDegraded`'s classification is exhaustive over every
+ *     `degraded_reason` `@wxyc/shared`'s `LookupResponse` DTO documents
+ *     today, so a newly-added reason can't silently regress into
+ *     "definitive" — see the dedicated describe block below.
+ *
+ * This job stays registered at LML class 5 sending the `X-Caller-Budget-Ms`
+ * header unconditionally (BS#2179 review HIGH 3, withdrawn on further
+ * review) — it is a batch drain with per-item error isolation, the same
+ * shape `apps/enrichment-worker/lookup-batcher.ts`'s BS#1978 doc comment
+ * names as correctly keeping the header (`flowsheet-linked-reenrichment`,
+ * every `*-backfill` job); the "4s cutoff is wrong" finding applies only to
+ * `enrichment-worker`'s live CDC lane, not to class 5 generally. No
+ * `budgetMs: null` override belongs here.
  */
 
 beforeEach(() => {
@@ -62,6 +80,34 @@ describe('lookupNoMatchRecheck', () => {
       'Entain',
       'Kohde',
       expect.objectContaining({ caller: 'flowsheet-no-match-recheck' })
+    );
+  });
+
+  it('decodes HTML entities in artist/album/track before the LML hop (LOW finding: tubafrenzy paste data lands entity-encoded)', async () => {
+    const mockLookup = jest.fn().mockResolvedValue({ search_type: 'none', results: [] });
+    // Decimal numeric entities only, mirroring
+    // `rotation-release-id-backfill/lml-fetch.ts`'s donor exactly: ́ is
+    // a combining acute accent — the motivating case where LML's NFKD strip
+    // never sees the encoded combining mark and the row stays a no-match
+    // (entity `&#769;`, decimal for 0x301). Built via `String.fromCharCode`
+    // rather than a literal combining character in source, per this repo's
+    // mojibake-prevention convention.
+    const combiningAcute = String.fromCharCode(0x301);
+
+    const { lookupNoMatchRecheck } = await loadModule(mockLookup);
+    await lookupNoMatchRecheck({
+      id: 1,
+      artist_name: `Rome&#769;o Poirier`,
+      album_title: 'Caf&#233; &amp; Bar', // &#233; = 'é'; &amp; = '&'
+      track_title: 'Under 1&#48;0&#37;', // &#48; = '0'; &#37; = '%'
+      album_id: null,
+    });
+
+    expect(mockLookup).toHaveBeenCalledWith(
+      `Rome${combiningAcute}o Poirier`,
+      'Café & Bar',
+      'Under 100%',
+      expect.anything()
     );
   });
 
@@ -184,6 +230,67 @@ describe('lookupNoMatchRecheck', () => {
     const { lookupNoMatchRecheck } = await loadModule(mockLookup);
 
     await expect(lookupNoMatchRecheck(candidate)).rejects.toThrow();
+  });
+
+  it('a deadline_exceeded degraded response with no usable answer is transient (BS#2179 review HIGH 2 / BS#1977)', async () => {
+    const mockLookup = jest
+      .fn()
+      .mockResolvedValue({ degraded: true, degraded_reason: 'deadline_exceeded', results: [], search_type: 'none' });
+
+    const { lookupNoMatchRecheck } = await loadModule(mockLookup);
+
+    await expect(lookupNoMatchRecheck(candidate)).rejects.toThrow(/degraded|deadline/i);
+  });
+
+  it('a deadline_exceeded degraded response that still carries a trusted match is resolved, not treated as transient', async () => {
+    const artwork = { release_id: 444, release_url: 'https://www.discogs.com/release/444' };
+    const mockLookup = jest.fn().mockResolvedValue({
+      degraded: true,
+      degraded_reason: 'deadline_exceeded',
+      search_type: 'direct',
+      results: [{ artwork }],
+    });
+
+    const { lookupNoMatchRecheck } = await loadModule(mockLookup);
+    const outcome = await lookupNoMatchRecheck(candidate);
+
+    expect(outcome).toEqual({ kind: 'resolved', artwork });
+  });
+});
+
+describe('isUnansweredDegraded classification — exhaustive over every documented degraded_reason (BS#2179 review HIGH 2 / BS#1977)', () => {
+  /**
+   * `@wxyc/shared`'s `LookupResponse.degraded_reason` is a 3-member union
+   * today (`deadline_exceeded` / `cache_only` / `upstream_unavailable` —
+   * pinned independently at
+   * `tests/unit/shared/lml-client/degraded-discriminator.test.ts`).
+   * `upstream_unavailable` and `deadline_exceeded` are both "LML never
+   * produced a usable verdict" shapes and must stay transient.
+   * `cache_only` is a genuine (if degraded-confidence) answer from cache,
+   * not an unanswered call, and is NOT part of this fix's scope — pinned
+   * here as a deliberate negative case so a future widening is a conscious
+   * choice, not a silent one. `lml-fetch.ts`'s `UNANSWERED_DEGRADED_REASON`
+   * table is typed `satisfies Record<DegradedReason, boolean>`, so a 4th
+   * `degraded_reason` added to the shared DTO fails typecheck there until
+   * explicitly classified — this test only pins the three reasons that
+   * exist today.
+   */
+  it.each([
+    ['upstream_unavailable', true],
+    ['deadline_exceeded', true],
+    ['cache_only', false],
+  ] as const)('degraded_reason=%s with no usable answer classifies as unanswered=%s', async (reason, isUnanswered) => {
+    const mockLookup = jest
+      .fn()
+      .mockResolvedValue({ degraded: true, degraded_reason: reason, results: [], search_type: 'none' });
+    const { lookupNoMatchRecheck } = await loadModule(mockLookup);
+
+    if (isUnanswered) {
+      await expect(lookupNoMatchRecheck(candidate)).rejects.toThrow();
+    } else {
+      const outcome = await lookupNoMatchRecheck(candidate);
+      expect(outcome).toEqual({ kind: 'no_match' });
+    }
   });
 });
 

@@ -54,6 +54,14 @@ const requireLmlConfigured = (): void => {
   if (!process.env.LIBRARY_METADATA_URL) {
     throw new Error('LIBRARY_METADATA_URL is not configured; aborting before any rows are scanned.');
   }
+  // BS#2179 review LOW finding: without this, a URL-set/key-missing
+  // misconfiguration proceeds and burns ~10 minutes of rate-limited calls
+  // failing every row as `lml_error` (silently retryable, so it exits 0
+  // with a quiet-looking `resolved: 0`) before anyone notices — the run
+  // is indistinguishable from a healthy but empty cohort. Fail fast instead.
+  if (!process.env.LML_API_KEY) {
+    throw new Error('LML_API_KEY is not configured; aborting before any rows are scanned.');
+  }
 };
 
 const resolveDryRun = (): boolean => {
