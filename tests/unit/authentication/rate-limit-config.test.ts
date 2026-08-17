@@ -24,6 +24,7 @@ describe('auth.definition.ts rate-limit customRules', () => {
   let customRulesBlock: string;
 
   beforeAll(() => {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
     source = fs.readFileSync(authDefPath, 'utf-8');
     // Scoped to the customRules object literal itself, not the whole file:
     // /auth/token, sign-in, and /device/token all appear elsewhere in

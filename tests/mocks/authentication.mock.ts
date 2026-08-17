@@ -29,4 +29,10 @@ export {
   resolveCorsOrigin,
   resolvePublicCorsOrigins,
 } from '../../shared/authentication/src/cors-origin';
+
+// Real implementation for the same reason as `resolveCorsOrigin` above:
+// `parseBearerToken` is pure string parsing with no auth/database dependency,
+// and a stub here would let the rate-limit key generator's bearer arm pass
+// tests against behavior the production parser doesn't have.
+export { parseBearerToken } from '../../shared/authentication/src/auth.middleware';
 export type { CorsModeRequest, ResolvedCorsOrigin } from '../../shared/authentication/src/cors-origin';

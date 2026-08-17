@@ -424,9 +424,8 @@ if (!isTestEnv) {
   // RateLimit-*/RateLimit-Policy unconditionally per limiter, and both
   // default requestPropertyName to 'rateLimit', so whichever limiter ran
   // last would silently win both).
-  // Retry-After is NOT suppressed along with the RateLimit-* headers: the
-  // custom handler sets it explicitly (see auth-rate-limit-metrics.ts), so a
-  // client doing Retry-After backoff behaves the same against either limiter.
+  // Retry-After is NOT suppressed along with them — the custom handler sets it
+  // explicitly; auth-rate-limit-metrics.ts has the why.
   // NOTE: rateLimitKeyFromRequest returns a BARE ip with no namespace
   // prefix, unlike sessionRateLimitKeyFromRequest's `ip:` fallback arm.
   // Separate express-rate-limit stores, so no poisoning between them — but
@@ -495,27 +494,14 @@ app.get('/healthcheck', async (req, res) => {
   try {
     // Make an internal HTTP request to the better-auth /ok endpoint.
     // X-Real-IP is set to 127.0.0.1 because the loopback fetch has no real
-    // client. Without it, better-auth's getIp returns null and latches a
-    // one-shot "Rate limiting skipped: could not determine client IP"
-    // warning.
-    //
-    // CORRECTION (BS#2169): an earlier version of this comment said that
-    // warning meant the IP-less caller "silently disables its internal
-    // rate limiter for the rest of the process lifetime." That was true
-    // when #765 was written; it is NOT true at the installed
-    // better-auth@1.6.26. The current behavior is that every IP-less
-    // caller — this loopback healthcheck included — falls into a single
-    // shared "no-trusted-ip" bucket for the path (keyed on the literal
-    // string `no-trusted-ip|<path>`); only the warning LOG latches to
-    // one-shot, not the limiter itself. That is strictly worse than
-    // "disabled" for our purposes: without X-Real-IP here, the healthcheck
-    // would share a rate-limit bucket with every other caller that
-    // (legitimately or not) reaches better-auth with no resolvable IP.
-    // Setting X-Real-IP: 127.0.0.1 keeps the healthcheck in its own bucket
-    // instead. We pass X-Real-IP rather than XFF because
+    // client. At better-auth@1.6.26, every caller it can't resolve an IP for
+    // shares ONE bucket keyed on the literal string `no-trusted-ip|<path>`
+    // (only the "Rate limiting skipped" warning latches to one-shot, not the
+    // limiter). So without this header the healthcheck would share a
+    // rate-limit bucket with every other IP-less caller; with it, it gets its
+    // own. We pass X-Real-IP rather than XFF because
     // `auth.definition.ts` configures `ipAddressHeaders: ['x-real-ip']` to
-    // ignore client-controlled XFF spoofing. See #765 (latch fix), #774
-    // (XFF -> X-Real-IP swap), and BS#2169 (this correction).
+    // ignore client-controlled XFF spoofing. See #765, #774, BS#2169.
     const response = await fetch(`${authServiceUrl}/auth/ok`, {
       headers: { 'X-Real-IP': '127.0.0.1' },
     });

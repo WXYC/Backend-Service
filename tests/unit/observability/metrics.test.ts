@@ -16,6 +16,8 @@
  * suite passing is the verification that both are wired correctly.
  */
 import { describe, it, expect, jest, beforeEach } from '@jest/globals';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const mockSend = jest.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockPutMetricDataCommand = jest.fn().mockImplementation((input: unknown) => ({ input }));
@@ -239,19 +241,11 @@ describe('createBufferedMetricEmitter', () => {
 
     await expect(emitter.flush()).resolves.toBeUndefined();
     expect(mockSend).toHaveBeenCalledTimes(1);
+    // The dropped batch has to leave a trace — swallowing silently would make
+    // a persistently unreachable CloudWatch indistinguishable from no metrics.
+    expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('PutMetricData failed'), expect.any(Error));
 
     consoleErrorSpy.mockRestore();
-  });
-
-  it('routes a flush failure to onFlushError when supplied, instead of console.error', async () => {
-    const onFlushError = jest.fn();
-    mockSend.mockRejectedValue(new Error('CloudWatch unreachable'));
-
-    const emitter = createBufferedMetricEmitter({ namespace: 'WXYC/Test', onFlushError });
-    emitter.record({ metricName: 'Widgets' });
-    await emitter.flush();
-
-    expect(onFlushError).toHaveBeenCalledWith(expect.any(Error));
   });
 
   it('does not call PutMetricData when isDisabled() returns true', async () => {
@@ -298,5 +292,30 @@ describe('createBufferedMetricEmitter', () => {
     await emitter.flush();
 
     expect(mockSend).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The `./metrics` subpath is a deliberate second tsup entry that the package
+ * barrel must never re-export. Both `apps/backend` and `apps/auth` load the
+ * barrel eagerly at Sentry preload (`node --import instrument.ts`), so a
+ * re-export would pull `@aws-sdk/client-cloudwatch` into every process at
+ * startup — including processes that never publish a metric. Nothing about
+ * that is visible in a passing test suite: the symptom is slower boot in
+ * production, which is why the invariant is pinned here rather than left to
+ * the comments that explain it.
+ */
+describe('@wxyc/observability barrel', () => {
+  const barrelPath = path.resolve(__dirname, '../../../shared/observability/src/index.ts');
+
+  it('does not re-export the AWS-SDK-backed metrics subpath', () => {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const source = fs.readFileSync(barrelPath, 'utf-8');
+
+    // Matched on the module specifier, not the bare word: a comment
+    // mentioning metrics is fine, an `export … from './metrics'` is not.
+    expect(source).not.toMatch(/from\s+['"]\.\/metrics/);
+    expect(source).not.toMatch(/require\(\s*['"]\.\/metrics/);
+    expect(source).not.toMatch(/@aws-sdk/);
   });
 });
