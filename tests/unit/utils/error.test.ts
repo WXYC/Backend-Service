@@ -25,27 +25,36 @@ describe('WxycError', () => {
     expect(error.name).toBe('WxycError');
   });
 
-  it('leaves reason and details undefined when no opts are passed', () => {
+  it('leaves code and details undefined when no opts are passed', () => {
     const error = new WxycError('Not found', 404);
 
-    expect(error.reason).toBeUndefined();
+    expect(error.code).toBeUndefined();
     expect(error.details).toBeUndefined();
   });
 
-  it('carries a reason when opts.reason is passed', () => {
-    const error = new WxycError('Artist code already in use', 409, { reason: 'artist_code_conflict' });
+  it('carries a code when opts.code is passed', () => {
+    const error = new WxycError('Artist code already in use', 409, { code: 'artist_code_conflict' });
 
-    expect(error.reason).toBe('artist_code_conflict');
+    expect(error.code).toBe('artist_code_conflict');
     expect(error.details).toBeUndefined();
   });
 
-  it('carries details alongside a reason when both are passed', () => {
+  it('carries details alongside a code when both are passed', () => {
     const error = new WxycError('Artist code already in use', 409, {
-      reason: 'artist_code_conflict',
+      code: 'artist_code_conflict',
       details: { code_letters: 'ABC', code_number: 12 },
     });
 
-    expect(error.reason).toBe('artist_code_conflict');
+    expect(error.code).toBe('artist_code_conflict');
+    expect(error.details).toEqual({ code_letters: 'ABC', code_number: 12 });
+  });
+
+  it('carries details with no code when only opts.details is passed', () => {
+    const error = new WxycError('Artist code already in use', 409, {
+      details: { code_letters: 'ABC', code_number: 12 },
+    });
+
+    expect(error.code).toBeUndefined();
     expect(error.details).toEqual({ code_letters: 'ABC', code_number: 12 });
   });
 
