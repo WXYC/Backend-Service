@@ -18,7 +18,11 @@
  * It also pins the BS#2183 decision sitting right next to the window it
  * contrasts with: the fallback subquery above is windowed against add_time,
  * but the primary `rotation_id` FK join is deliberately NOT — see the
- * "primary FK join is deliberately unwindowed" describe block below.
+ * "primary FK join is deliberately unwindowed" describe block below. That
+ * decision spans FIVE join sites: four in flowsheet.service.ts and one in
+ * playlist-proxy.service.ts (`fetchRecentRows`, the legacy
+ * /playlists/recentEntries?v=2 path). This spec only executes against the
+ * flowsheet.service.ts lane.
  *
  * The window is placed in 1997 — outside anything the shared dev/CI schema
  * seeds and outside the BS#2062 spec's 1998 window, so the two can run in the
@@ -206,7 +210,9 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
     // the dj-site rotation picker emits it) and outranks date arithmetic. These
     // two fixtures reuse the exact `killedBefore`/`addedLater` bounds above,
     // but set rotation_id, to prove the FK path badges through the very window
-    // the fallback enforces.
+    // the fallback enforces. Offsets 52/54 min keep play_order monotonic with
+    // add_time at this insertion point (play_order is assigned in insert
+    // order), so the fixture show stays in a state a real writer could produce.
     const fkKilledArtist = await insertArtist(`${MARKER} Nilüfer Yanya`);
     const fkKilledAlbum = await insertLibrary(fkKilledArtist, `${MARKER} Painless`);
     const fkKilledRotation = await insertRotation({
@@ -214,7 +220,7 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
       bin: 'H',
       killDate: '1997-06-05', // killed BEFORE the window, same bound as `killedBefore` above
     });
-    await insertEntry('fkKilledBeforeKillDate', 110 * MIN, {
+    await insertEntry('fkKilledBeforeKillDate', 52 * MIN, {
       albumId: fkKilledAlbum,
       artistName: `${MARKER} Nilüfer Yanya`,
       albumTitle: `${MARKER} Painless`,
@@ -229,7 +235,7 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
       addDate: '1997-06-20', // entered rotation AFTER the window, same bound as `addedLater` above
       killDate: null,
     });
-    await insertEntry('fkAiredBeforeAddDate', 115 * MIN, {
+    await insertEntry('fkAiredBeforeAddDate', 54 * MIN, {
       albumId: fkEarlyAlbum,
       artistName: `${MARKER} Hermanos Gutiérrez`,
       albumTitle: `${MARKER} El Bueno y El Malo`,
@@ -367,8 +373,15 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
     // pin the BS#2183 decision so it fails loudly if someone later "fixes"
     // the primary FK join by bolting the fallback's add_date/kill_date window
     // onto it without reading that decision first. See the
-    // FSEntryFieldsRaw.rotation_bin comment and the four
-    // `.leftJoin(rotation, ...)` call sites in flowsheet.service.ts.
+    // FSEntryFieldsRaw.rotation_bin comment and the five annotated
+    // `.leftJoin(rotation, ...)` call sites — four in flowsheet.service.ts,
+    // one in playlist-proxy.service.ts.
+    //
+    // Note what a windowed FK join would actually do, because it is not what
+    // it looks like: the fallback would NOT pick these rows up. Its CASE is
+    // gated on flowsheet.rotation_id IS NULL, so a row that still carries the
+    // FK is refused by the fallback and would end up with NO badge, not a
+    // windowed one. These two tests would go red on exactly that.
 
     it('badges via the FK even when the linked rotation record was killed before the entry aired', () => {
       // Same kill_date/window shape as the fallback's `killedBefore` case

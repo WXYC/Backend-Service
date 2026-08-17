@@ -153,6 +153,13 @@ const FSEntryFieldsRaw = {
   // 9 are same-day artifacts (add_time::date == kill_date, played in the morning and killed
   // that afternoon) that a half-open bound would flip the wrong way.
   //
+  // If you window the FK join anyway, note what actually happens: the fallback does NOT take
+  // over. Its CASE is gated on flowsheet.rotation_id IS NULL, not on rotation.rotation_bin
+  // IS NULL — so an out-of-window row whose rotation_id is still populated falls out of the
+  // primary lane AND is refused by the fallback, and COALESCE yields no badge at all rather
+  // than the windowed badge you were reaching for. Windowing the join therefore means
+  // re-gating the CASE too, which is a different and larger change than it looks.
+  //
   // FIVE call sites carry this decision. Four are the `.leftJoin(rotation, ...)` sites below
   // (getEntriesByPage, getEntriesByRange, getEntriesInTimeWindow, getEntriesByShow). The fifth
   // is outside this file: `playlist-proxy.service.ts`'s window query runs the same unwindowed
