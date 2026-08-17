@@ -113,10 +113,13 @@ describe('parseRotationRows', () => {
     expect(rows[1].discogsReleaseId).toBeNull();
   });
 
-  it('defaults empty rotationType to N', () => {
+  // BS#2173: a NULL upstream ROTATION_TYPE used to become 'N' here. It now
+  // stays blank, and `mapRotationType` turns blank into null so the release is
+  // skipped rather than imported under a bin that does not exist.
+  it('leaves an empty rotationType empty rather than inventing a bin', () => {
     const raw = '42\tAutechre\tConfield\t\tWarp\t1706788800000\t0\t0\t1706800000000\t0';
     const rows = parseRotationRows(raw);
 
-    expect(rows[0].rotationType).toBe('N');
+    expect(rows[0].rotationType).toBe('');
   });
 });

@@ -65,6 +65,13 @@ const mockLimit = jest.fn();
 (mockChain as Record<string, jest.Mock>).limit = mockLimit;
 const mockReturning = jest.fn();
 (mockChain as Record<string, jest.Mock>).returning = mockReturning;
+// Terminal handles the rotation-webhook tests assert on. `db.insert` and
+// `mockChain.insert` are the same jest.Mock (createMockDb aliases them), so
+// these are the short form of the same object — no new mocking, just a name.
+const mockInsert = mockDb.insert;
+const mockSet = (mockChain as Record<string, jest.Mock>).set;
+const mockValues = (mockChain as Record<string, jest.Mock>).values;
+const mockOnConflict = (mockChain as Record<string, jest.Mock>).onConflictDoUpdate;
 
 const app = express();
 app.use(express.json());
@@ -1341,9 +1348,15 @@ describe('POST /internal/rotation-webhook', () => {
   // cron tick repaired them. BS#1312 extends the gate symmetrically to the
   // three denorm fields (artist_name / album_title / record_label) used by
   // tubafrenzy + dj-site catalog views when `album_id IS NULL`.
-  it('update with partial payload omits gated fields (rotation_bin, kill_date, artist_name, album_title, record_label) from SET clause', async () => {
-    const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
-    onConflictSpy.mockClear();
+  //
+  // BS#2173 replaces the presence-gated upsert with an outright UPDATE for
+  // this shape. Gating the SET clause protected an EXISTING row, but the
+  // INSERT arm still had to supply the NOT NULL `rotation_bin` and did so with
+  // the fictional 'N' — so a linkage event for a release BS had never seen
+  // materialized a phantom in-rotation row. A payload with no bin now updates
+  // only, and can never create.
+  it('update with partial payload updates in place and never inserts', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 42 }]);
 
     const res = await request(app)
       .post('/internal/rotation-webhook')
@@ -1351,20 +1364,106 @@ describe('POST /internal/rotation-webhook', () => {
       .send({ action: 'update', release: { id: 500, libraryReleaseId: 0 } });
 
     expect(res.status).toBe(200);
-    expect(onConflictSpy).toHaveBeenCalledTimes(1);
-    const setClause = (onConflictSpy.mock.calls[0][0] as { set: Record<string, unknown> }).set;
+    expect(mockInsert).not.toHaveBeenCalled();
+    expect(mockOnConflict).not.toHaveBeenCalled();
+
+    const setClause = mockSet.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    // The gated fields stay out...
     expect(setClause).not.toHaveProperty('rotation_bin');
     expect(setClause).not.toHaveProperty('kill_date');
     expect(setClause).not.toHaveProperty('artist_name');
     expect(setClause).not.toHaveProperty('album_title');
     expect(setClause).not.toHaveProperty('record_label');
+    // ...but the two ungated ones must still be written, or the linkage this
+    // whole payload shape exists to deliver (BS#1082/#1312) silently no-ops.
+    // Without these, an empty `partialSet` would satisfy every assertion above.
+    expect(setClause).toHaveProperty('album_id');
+    expect(setClause).toHaveProperty('legacy_library_release_id');
+  });
+
+  // BS#2173: tubafrenzy's BackendServiceWebhookClient serializes a null
+  // ROTATION_TYPE as "" rather than omitting the key, so "" is a THIRD spelling
+  // of "no bin" alongside absent and null — not bad data. Treating it as bad
+  // data would 400 the whole event and silently drop an MD's kill-date edit on
+  // any of the 15 blank-bin releases. Whitespace is normalized the same way.
+  it.each([[''], ['   '], [null]])('treats rotationType %p as "no bin", updating in place', async (rotationType) => {
+    mockReturning.mockResolvedValueOnce([{ id: 42 }]);
+
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', release: { id: 500, libraryReleaseId: 0, rotationType, killDate: 1706799600000 } });
+
+    expect(res.status).toBe(200);
+    expect(mockInsert).not.toHaveBeenCalled();
+    const setClause = mockSet.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(setClause).not.toHaveProperty('rotation_bin');
+    // The rest of the payload still applies — this is the arm that must NOT
+    // drop the edit.
+    expect(setClause).toHaveProperty('kill_date');
+  });
+
+  // The other half of the same rule: with no bin in the payload and no row to
+  // update, there is nothing this handler can legally write. It must report
+  // that rather than invent a bin to satisfy the NOT NULL column.
+  it('returns 404 for a bin-less payload naming a rotation release BS has never seen', async () => {
+    mockReturning.mockResolvedValueOnce([]);
+
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', release: { id: 999_999, libraryReleaseId: 0 } });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/unknown rotation release/i);
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  // 'N' is the specific value BS#2173 unwinds. Migration 0041 added it to
+  // `freq_enum` for "tubafrenzy's New rotation type" — a category error, not an
+  // invention: tubafrenzy's "New" is flowsheet entry-type code 5 ("new vinyl,
+  // NOT yet in rotation"), explicitly not a rotation bin. A present, non-blank
+  // value that isn't one of the four bins is bad data. Pinned explicitly so a
+  // future re-add has to delete a named case.
+  it.each([['N'], ['X'], [7], ['New']])(
+    'returns 400 for a present-but-unrecognized rotationType %p',
+    async (rotationType) => {
+      const res = await request(app)
+        .post('/internal/rotation-webhook')
+        .set('X-Internal-Key', 'test-secret-key')
+        .send({ action: 'create', release: { ...validRelease, rotationType } });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/rotationType/i);
+      expect(mockInsert).not.toHaveBeenCalled();
+    }
+  );
+
+  // Asserting the VALUE reaches the insert, not merely a 200 — a handler that
+  // hardcoded one bin would pass a status-only check on all four cases, and the
+  // bin being correct is the entire subject of BS#2173.
+  it.each([
+    ['H', 'H'],
+    ['M', 'M'],
+    ['L', 'L'],
+    ['S', 'S'],
+    [' h ', 'H'],
+  ])('accepts the real rotation bin %p and inserts it as %p', async (rotationType, expected) => {
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'create', release: { ...validRelease, rotationType } });
+
+    expect(res.status).toBe(200);
+    const values = mockValues.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(values.rotation_bin).toBe(expected);
   });
 
   // Companion to the above: when the payload DOES carry the gated fields (the
   // create path, or a full-shape update), all five must still appear in SET
   // so the update overwrites them.
   it('update with full payload keeps gated fields (rotation_bin, kill_date, artist_name, album_title, record_label) in SET clause', async () => {
-    const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
+    const onConflictSpy = mockOnConflict;
     onConflictSpy.mockClear();
 
     const res = await request(app)
@@ -1525,7 +1624,6 @@ describe('POST /internal/streaming-status-webhook', () => {
   // pin the *shape* of the fix — no shared transaction, and the real error
   // surfaced. The poisoning behaviour itself is covered at the integration tier.
 
-  const chain = (db as unknown as { _chain: Record<string, jest.Mock> })._chain;
   const dbTransaction = (db as unknown as { transaction: jest.Mock }).transaction;
 
   it('does not wrap the batch in a single shared transaction', async () => {
@@ -1549,6 +1647,7 @@ describe('POST /internal/streaming-status-webhook', () => {
     // Row index 1 fails; rows 0 and 2 must still commit and the failure must be
     // reported with the actual error keyed by its library_release_id — not lost
     // behind a bare `errors` count.
+    const chain = mockChain as Record<string, jest.Mock>;
     chain.where
       .mockReturnValueOnce(chain) // row 0 commits
       .mockRejectedValueOnce(new Error('null value violates not-null constraint')) // row 1 fails
@@ -1577,6 +1676,7 @@ describe('POST /internal/streaming-status-webhook', () => {
   });
 
   it('alerts Sentry once for a batch that had at least one failing row', async () => {
+    const chain = mockChain as Record<string, jest.Mock>;
     chain.where
       .mockReturnValueOnce(chain)
       .mockRejectedValueOnce(new Error('deadlock detected'))

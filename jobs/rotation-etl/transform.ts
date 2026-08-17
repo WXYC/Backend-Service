@@ -7,16 +7,18 @@
 
 import { epochMsToDate } from '@wxyc/database';
 
-const VALID_ROTATION_BINS = new Set(['S', 'L', 'M', 'H', 'N']);
-
 /**
- * Validate and normalize a tubafrenzy ROTATION_TYPE value.
- * Returns the value if valid, or 'N' (New) as a fallback for unknown types.
+ * Classify a tubafrenzy ROTATION_TYPE. Re-exported from `@wxyc/database` so
+ * this job, the rotation webhook, and `POST /library/rotation` share one
+ * normalization rule.
+ *
+ * BS#2173: this used to fall back to `'N'` for anything unrecognized, which is
+ * not a rotation bin — see `freqEnum` in shared/database/src/schema.ts. It also
+ * collapsed blank and unrecognized into one outcome, which silently swallowed
+ * genuine bad data under a "no bin upstream" log line. The caller now tells
+ * them apart.
  */
-export const mapRotationType = (rotationType: string): 'S' | 'L' | 'M' | 'H' | 'N' => {
-  const normalized = rotationType.trim().toUpperCase();
-  return VALID_ROTATION_BINS.has(normalized) ? (normalized as 'S' | 'L' | 'M' | 'H' | 'N') : 'N';
-};
+export { parseRotationBin } from '@wxyc/database';
 
 /**
  * Convert an epoch milliseconds value to a YYYY-MM-DD date string.

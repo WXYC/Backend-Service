@@ -44,7 +44,10 @@ export const parseRotationRows = (raw: string): LegacyRotationRow[] => {
       id: Number(cols[0]),
       artistName: toNullable(cols[1]),
       albumTitle: toNullable(cols[2]),
-      rotationType: (toNullable(cols[3]) ?? 'N').trim(),
+      // BS#2173: was `?? 'N'`. A NULL upstream ROTATION_TYPE is *absence of a
+      // bin*, not a bin called "New" — `mapRotationType` turns both blank and
+      // unrecognized into null and the caller skips the release.
+      rotationType: (toNullable(cols[3]) ?? '').trim(),
       labelName: toNullable(cols[4]),
       addDate: Number(cols[5]) || 0,
       killDate: Number(cols[6]) || 0,

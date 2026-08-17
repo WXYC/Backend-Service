@@ -4,7 +4,7 @@ import * as Sentry from '@sentry/node';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import WxycError from '../utils/error.js';
-import { db } from '@wxyc/database';
+import { db, type RotationBin } from '@wxyc/database';
 import {
   AlbumFormat,
   Artist,
@@ -303,7 +303,7 @@ export interface Rotation {
   rotation_id: number;
   add_date: Date | null;
   rotation_add_date: string;
-  rotation_bin: 'S' | 'L' | 'M' | 'H' | 'N';
+  rotation_bin: RotationBin;
   rotation_kill_date: string | null;
   plays: number | null;
   // Nullable (unlike AlbumSearchResult/BinLibraryDetails/AlbumInfoResponse,

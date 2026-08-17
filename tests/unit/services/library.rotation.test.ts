@@ -55,7 +55,7 @@ type RawRotationRow = {
   rotation_id: number;
   add_date: Date | null;
   rotation_add_date: string;
-  rotation_bin: 'S' | 'L' | 'M' | 'H' | 'N';
+  rotation_bin: 'S' | 'L' | 'M' | 'H';
   rotation_kill_date: string | null;
   plays: number | null;
   discogs_artist_id: number | null;
