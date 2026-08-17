@@ -41,6 +41,7 @@ import {
   buildWorkList,
   buildRotationSelfHealCandidates,
   countStrandedPastRecoveryWindow,
+  pendingPredicate,
   SELF_HEAL_MAX_CANDIDATES,
 } from '../../../../jobs/flowsheet-metadata-backfill/worklist';
 import { resolvePartitionFilter } from '../../../../jobs/flowsheet-metadata-backfill/orchestrate';
@@ -370,6 +371,31 @@ describe('buildWorkList (BS#1591 play-priority work-list)', () => {
 
     expect(renderDeep(execCall(0))).not.toMatch(/interval\s*'1 hour'/i);
     expect(renderDeep(execCall(1))).not.toMatch(/interval\s*'1 hour'/i);
+  });
+
+  // BS#2176 acceptance criterion: "add a test pinning the C6 sweep's
+  // candidate predicate against an exact-match allowlist (the
+  // legacy-linkage-resolve precedent)". `jobs/flowsheet-no-match-recheck`
+  // introduces a disjoint retry marker (`no_match_recheck_attempted_at`) for
+  // a disjoint cohort (`metadata_status = 'enriched_no_match'`) precisely so
+  // it never has to touch this predicate — this pins that boundary. Full
+  // literal text, whitespace-normalized, asserted equal to a fixed constant
+  // (not a denylist regex): any added conjunct, regardless of spelling,
+  // changes the normalized text and fails the assertion.
+  const PENDING_PREDICATE_SQL =
+    'f."entry_type" = \'track\' AND f."artist_name" IS NOT NULL AND f."metadata_status" = \'pending\' ' +
+    'AND f."add_time" < now() - ( * interval \'1 minute\') AND f."add_time" > now() - ( * interval \'1 hour\')';
+
+  it('BS#2176: pendingPredicate text matches the allowlisted predicate exactly — no added clause survives', () => {
+    const text = renderDeep(pendingPredicate(null, 15, 6))
+      .replace(/\s+/g, ' ')
+      .trim();
+    expect(text).toBe(PENDING_PREDICATE_SQL);
+  });
+
+  it('BS#2176: pendingPredicate never references the disjoint no-match-recheck retry marker', () => {
+    const text = renderDeep(pendingPredicate(null, 15, 6));
+    expect(text).not.toMatch(/no_match_recheck_attempted_at/i);
   });
 });
 

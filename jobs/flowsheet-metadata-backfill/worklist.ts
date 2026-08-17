@@ -148,8 +148,20 @@ export type BuildWorkListFn = (args: BuildWorkListArgs) => Promise<WorkList>;
  * implicit marker (`metadata_attempt_at IS NULL`) as the control-flow gate —
  * see the module docstring and `docs/migrations.md` "Attempt-at markers".
  * The grace-window clause replaces the old 60-second race guard.
+ *
+ * Exported (BS#2176) so `tests/unit/jobs/flowsheet-metadata-backfill/worklist.test.ts`
+ * can pin this exact predicate against an exact-match allowlist (the
+ * `legacy-linkage-resolve` precedent) — the C6 sweep's candidate set must
+ * never grow a clause referencing the new, unrelated
+ * `flowsheet.no_match_recheck_attempted_at` marker `jobs/flowsheet-no-match-recheck`
+ * introduces, which targets a disjoint `metadata_status = 'enriched_no_match'`
+ * cohort.
  */
-const pendingPredicate = (partitionFilter: SQL | null, graceMinutes: number, recoveryWindowHours: number): SQL => sql`
+export const pendingPredicate = (
+  partitionFilter: SQL | null,
+  graceMinutes: number,
+  recoveryWindowHours: number
+): SQL => sql`
   f."entry_type" = 'track'
       AND f."artist_name" IS NOT NULL
       AND f."metadata_status" = 'pending'
