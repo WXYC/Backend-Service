@@ -230,6 +230,15 @@ Recurring cron for BS#1813 / BS#1029. Reuses `BACKFILL_LML_*` (above), `LIVE_ACT
 - `ROTATION_RELEASE_ID_NO_MATCH_TTL_DAYS` (default `30`) — Rows with NULL `discogs_release_id` and a stamped `discogs_release_id_resolve_attempted_at` are skipped until this window expires. Rows whose LML call threw keep the marker NULL and retry on the next cron tick.
 - `DRY_RUN` (default unset / `false`) — when case-insensitively `'true'` or `'1'` (leading/trailing whitespace trimmed), the orchestrator skips every UPDATE, including marker-only attempts, and increments `rows_resolved_dry` instead of `rows_resolved` for trusted matches. Useful for confirming the candidate set before a real run; harmless to forget — the `discogs_release_id IS NULL` SELECT/WHERE predicate is idempotent across reruns.
 
+### Flowsheet no-match recheck (`jobs/flowsheet-no-match-recheck`, BS#2176)
+
+Recurring cron generalizing the one-shot `enriched_no_match` rescue drains into a standing mechanism. Reuses `BACKFILL_LML_MAX_CONCURRENT` / `BACKFILL_LML_RATE_PER_MIN` (above — its own `defaultLmlLimiter` singleton, independent of every other job's), `LIVE_ACTIVITY_LOOKBACK_SECONDS`, and `LIVE_ACTIVITY_PAUSE_MS` / `LIVE_ACTIVITY_MAX_PAUSE_MS`, and adds:
+
+- `FLOWSHEET_NO_MATCH_RECHECK_TTL_DAYS` (default `14`) — Rows stamped `no_match_recheck_attempted_at` (a genuine no-match or a trust-gate rejection) are skipped until this window expires. Shorter than `rotation-release-id-backfill`'s 30-day default because the cohort here is orders of magnitude larger and includes rows whose upstream cause (a discogs-etl rebuild, an LML matcher fix) resolves on a shorter cadence than rotation's curated, MD-reviewed cohort.
+- `FLOWSHEET_NO_MATCH_RECHECK_BATCH_SIZE` (default `200`) — Candidate query `LIMIT`. The bounded-drip ceiling: caps LML call volume per run independent of how large the total `enriched_no_match` cohort is. Candidates are ordered oldest-recheck-attempted-first (`NULLS FIRST`), so a cohort larger than one batch drains fairly across runs instead of starving any one slice.
+- `FLOWSHEET_NO_MATCH_RECHECK_LML_PER_CALL_TIMEOUT_MS` (default `35000`) — Per-call abort budget. Deliberately mirrors `flowsheet-metadata-backfill`'s generous default (not `rotation-release-id-backfill`'s stricter `8000`) — this job's whole premise is giving a cold, previously-unresolvable release LML's full cascade on retry.
+- `DRY_RUN` (default unset / `false`) — same locked-value parsing as the other jobs (case-insensitive `true`/`1`, trimmed): skips every write, including marker-only attempts, and increments `resolved_dry` instead of `resolved` for trusted matches.
+
 ### Library discogs_unavailable recheck (`jobs/library-discogs-unavailable-recheck`)
 
 Daily cron for BS#1283 / epic #1280 sub-issue 3. Job-scoped limiter (not `BACKFILL_LML_*`) so this surface's accounting is independent of the other backfills'; read at module load by `lml-limiter.ts:createLmlLimiter` (first two) and `lml-fetch.ts` (third):

@@ -25,6 +25,14 @@ Backend-Service enriches a flowsheet playcut asynchronously: the row is inserted
 - Footer: the window bounds and a one-line reply-to-follow-up note.
 - Discogs search URLs are synthesized inline: `https://www.discogs.com/search/?q={urlencode(artist + ' ' + track)}&type=release`.
 
+## Reader calibration: the cache self-heals, the row does not (BS#2176)
+
+`enriched_no_match` is a terminal `flowsheet.metadata_status`, and until BS#2176 nothing ever revisited a row once it landed there. It is tempting to read a row in this digest as low-priority because "a new add against the same (artist, album) will self-heal on the next discogs-etl rebuild" -- that is true of the **cache** (discogs-etl's next rebuild, or an LML matcher fix, can make the SAME lookup succeed for a brand-new playcut) but was, until BS#2176, false of the **row already sitting in this digest**: nothing re-asked LML for it, so a row this digest reported last month could still be silently wrong today even though the identical (artist, album, track) tuple would now resolve.
+
+`jobs/flowsheet-no-match-recheck` (BS#2176) closes that gap: a recurring, bounded, TTL-gated sweep re-asks LML for the whole `enriched_no_match` cohort, not just newly-inserted rows, so a row this digest already reported does eventually get revisited and, if now resolvable, flips to `enriched_match` on its own. Concretely: `flowsheet` row **#5308981** (`Vladislav Delay -- Kohde / Entain`), the case that motivated this correction, appeared in the 2026-08-16 digest, was still `enriched_no_match` when checked the next day, and matches when replayed against prod LML -- exactly the row/cache distinction above.
+
+This does **not** make Section A/B stale reading -- a row appearing here is still real signal at the moment of the digest (LML did not match it _then_) -- but a reader should not assume a row's presence here implies anything about whether it is STILL unmatched days or weeks later. Check `flowsheet.metadata_status` directly (or wait for the recheck sweep's own TTL cadence, `docs/ops-cron-scheduling.md`) rather than assuming self-heal from a new add alone.
+
 ## Watermark semantics
 
 `runStart = new Date()` is captured **before** the query runs. The watermark (`cronjob_runs.last_run`) advances to `runStart` on a successful send **or** a 0-row run. It is **not** advanced on a send failure (the next run retries the exact same window, and `orchestrate.ts`'s `run()` rethrows so `job.ts` exits non-zero and captures the failure to Sentry exactly once) **or** on a disabled observe-only run (so a later real run still sees the misses).
