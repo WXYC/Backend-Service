@@ -79,7 +79,7 @@ describe('markRecheckAttempted', () => {
 });
 
 describe('writeMatch — unlinked (album_id null)', () => {
-  test('fill-null COALESCEs the 10 inline flowsheet columns and flips metadata_status, guarded on enriched_no_match', async () => {
+  test('fill-null COALESCEs the 6 non-streaming inline flowsheet columns and flips metadata_status, guarded on enriched_no_match', async () => {
     chain.returning.mockResolvedValueOnce([{ id: 5308981 }]);
 
     const result = await writeMatch(
@@ -91,20 +91,26 @@ describe('writeMatch — unlinked (album_id null)', () => {
     expect(db.update as jest.Mock).toHaveBeenCalledWith(flowsheet);
     const setArg = chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
 
+    // Plain fill-null COALESCE: no BS#2179 review HIGH 1 upgrade concern —
+    // `enrich.ts`'s unlinked no-match arm never pre-populates these.
     for (const col of [
       'artwork_url',
       'discogs_url',
       'release_year',
-      'spotify_url',
       'apple_music_url',
-      'youtube_music_url',
-      'bandcamp_url',
-      'soundcloud_url',
       'artist_bio',
       'artist_wikipedia_url',
     ]) {
       const rendered = renderSql(setArg[col]);
       expect(rendered).toMatch(/COALESCE/i);
+    }
+    // The 4 streaming-search columns (BS#2179 review HIGH 1): NOT plain
+    // COALESCE — see the dedicated describe block below. Pinned here only as
+    // a negative check so a regression back to plain COALESCE fails loudly.
+    for (const col of ['spotify_url', 'youtube_music_url', 'bandcamp_url', 'soundcloud_url']) {
+      const rendered = renderSql(setArg[col]);
+      expect(rendered).not.toMatch(/COALESCE/i);
+      expect(rendered).toMatch(/CASE WHEN/i);
     }
     expect(setArg.metadata_status).toBe('enriched_match');
     expect(renderSql(setArg.no_match_recheck_attempted_at)).toMatch(/now\(\)/i);
@@ -141,6 +147,63 @@ describe('writeMatch — unlinked (album_id null)', () => {
     );
 
     expect(result).toEqual({ written: false });
+  });
+});
+
+describe('writeMatch — unlinked search-URL upgrade (BS#2179 review HIGH 1)', () => {
+  /**
+   * `apps/enrichment-worker/enrich.ts`'s unlinked `enriched_no_match` write
+   * (the arm that puts a row in THIS job's candidate set to begin with)
+   * unconditionally fills these four columns with a synthesized search URL
+   * before this job ever sees the row — so a plain `COALESCE(column,
+   * incoming)` here is a guaranteed no-op: `column` is never NULL. The fix
+   * is a CASE that also overwrites when the STORED value is itself one of
+   * these exact placeholder prefixes (never a genuinely verified link, which
+   * never starts with them), so a real Discogs-sourced URL can land.
+   */
+  const searchUrlCases: Array<{ column: string; prefix: string }> = [
+    { column: 'spotify_url', prefix: 'https://open.spotify.com/search/' },
+    { column: 'youtube_music_url', prefix: 'https://music.youtube.com/search?q=' },
+    { column: 'bandcamp_url', prefix: 'https://bandcamp.com/search?q=' },
+    { column: 'soundcloud_url', prefix: 'https://soundcloud.com/search?q=' },
+  ];
+
+  test.each(searchUrlCases)(
+    '$column: CASE upgrades a stored search-shaped placeholder to the incoming Discogs value, never plain COALESCE',
+    async ({ column, prefix }) => {
+      chain.returning.mockResolvedValueOnce([{ id: 1 }]);
+
+      await writeMatch({ id: 1, artist_name: 'X', album_title: 'Y', track_title: 'Z', album_id: null }, fullArtwork());
+
+      const setArg = chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+      const rendered = renderSql(setArg[column]);
+
+      expect(rendered).toMatch(/CASE WHEN/i);
+      expect(rendered).toMatch(/IS NOT NULL/i);
+      // The LIKE guard is the never-downgrade property: it only ever matches
+      // the exact synthesized-placeholder prefix, never a verified link.
+      expect(rendered).toContain(`LIKE`);
+      expect(rendered).toContain(`${prefix}%`);
+      // Column referenced for both the NULL/placeholder test and the ELSE
+      // fallback — same column the mock renders as its own name.
+      expect(rendered.match(new RegExp(column, 'g'))?.length).toBeGreaterThanOrEqual(2);
+    }
+  );
+
+  test('leaves a stored value untouched when the incoming artwork value is null (never downgrades to null)', async () => {
+    chain.returning.mockResolvedValueOnce([{ id: 1 }]);
+
+    await writeMatch(
+      { id: 1, artist_name: 'X', album_title: 'Y', track_title: 'Z', album_id: null },
+      fullArtwork({ spotify_url: undefined })
+    );
+
+    const setArg = chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    const rendered = renderSql(setArg.spotify_url);
+    // incoming IS NOT NULL guards the THEN branch — a null incoming always
+    // falls through to ELSE <column>, exactly like COALESCE(column, null).
+    expect(rendered).toMatch(/CASE WHEN/i);
+    expect(rendered).toMatch(/ELSE\s+spotify_url\s+END/i);
   });
 });
 

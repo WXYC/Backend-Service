@@ -18,8 +18,14 @@
  * mirroring `apps/enrichment-worker/enrich.ts`'s linked-match arm.
  *
  * Unlinked (`album_id == null`, free-form entries): the same fill-null
- * COALESCE shape applied directly to flowsheet's own 10 inline metadata
- * columns in one UPDATE, since there is no album_metadata row to UPSERT.
+ * shape applied directly to flowsheet's own 10 inline metadata columns in
+ * one UPDATE, since there is no album_metadata row to UPSERT. Six of those
+ * ten (artwork/discogs/year/apple/bio/wikipedia) are plain COALESCE. The
+ * other four — spotify/youtube/bandcamp/soundcloud — are NOT plain COALESCE
+ * (BS#2179 review HIGH 1): `apps/enrichment-worker/enrich.ts`'s unlinked
+ * no-match write pre-populates those four with a synthesized search URL
+ * unconditionally, so a plain COALESCE against them is a guaranteed no-op.
+ * See `fillOrUpgradeSearchUrl` below.
  *
  * `markRecheckAttempted` stamps `no_match_recheck_attempted_at` alone (no
  * status change) for a no-match / trust-rejected outcome, under the same
@@ -27,11 +33,51 @@
  */
 
 import { and, eq, sql } from 'drizzle-orm';
+import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
 import type { DiscogsMatchResult } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
 
 import type { Candidate } from './orchestrate.js';
+
+/**
+ * BS#2179 review HIGH 1. The exact search-URL prefixes
+ * `apps/enrichment-worker/enrich.ts`'s local `synthesizeSearchUrls` writes
+ * UNCONDITIONALLY onto every unlinked `enriched_no_match` row — the very
+ * write that puts a row in this job's candidate set. Byte-identical to that
+ * function, and to `jobs/streaming-url-upgrade/resolve.ts`'s narrower
+ * `SERVICE_CONFIGS` (which covers only spotify/bandcamp, confirmed against
+ * prod for its own one-shot scope); this arm needs all four columns the
+ * unlinked no-match write touches. `@wxyc/metadata`'s shared
+ * `synthesizeSearchUrls` is a DIFFERENT function scoped to 3 of these 4
+ * columns (deliberately omits spotify — BS#1184/#1192) and is not the one
+ * that landed on these rows, so it is not reused here.
+ */
+const SEARCH_URL_PREFIX = {
+  spotify_url: 'https://open.spotify.com/search/',
+  youtube_music_url: 'https://music.youtube.com/search?q=',
+  bandcamp_url: 'https://bandcamp.com/search?q=',
+  soundcloud_url: 'https://soundcloud.com/search?q=',
+} as const;
+
+/**
+ * Fill-null PLUS upgrade-if-placeholder, for the four streaming-search
+ * columns only (BS#2179 review HIGH 1). A plain `COALESCE(column, incoming)`
+ * is a guaranteed no-op here: every unlinked candidate this job selects
+ * already has these four columns populated with a synthesized search URL
+ * (never NULL — see `SEARCH_URL_PREFIX`'s doc comment), so a real
+ * Discogs-sourced link could never land. This CASE generalizes COALESCE:
+ * it fills a NULL exactly like COALESCE does, AND additionally prefers
+ * `incoming` when the STORED value is itself one of the exact synthesized
+ * placeholders (detected by prefix) — which a genuinely verified URL never
+ * is. A `null` incoming always falls through to the stored value, so a
+ * verified link already in the column is never downgraded. Mirrors
+ * `jobs/streaming-url-upgrade/resolve.ts`'s `isSearchShaped` never-downgrade
+ * guard, generalized to a fill-null write instead of that job's
+ * search-shaped-only write.
+ */
+const fillOrUpgradeSearchUrl = (column: AnyPgColumn, incoming: string | null, prefix: string) =>
+  sql`CASE WHEN ${incoming} IS NOT NULL AND (${column} IS NULL OR ${column} LIKE ${prefix + '%'}) THEN ${incoming} ELSE ${column} END`;
 
 export const markRecheckAttempted = async (rowId: number): Promise<{ written: boolean }> => {
   const updated = await db
@@ -105,8 +151,10 @@ const flipLinkedStatus = async (rowId: number): Promise<{ written: boolean }> =>
   return { written: updated.length === 1 };
 };
 
-/** Fill-null COALESCE UPDATE of flowsheet's own 10 inline metadata columns
- * for a free-form (unlinked) row, plus the status flip, in one statement. */
+/** Fill-null UPDATE of flowsheet's own 10 inline metadata columns for a
+ * free-form (unlinked) row, plus the status flip, in one statement. Six
+ * columns are plain COALESCE; the four streaming-search columns use
+ * `fillOrUpgradeSearchUrl` instead (BS#2179 review HIGH 1). */
 const writeUnlinkedMatch = async (rowId: number, artwork: DiscogsMatchResult): Promise<{ written: boolean }> => {
   const updated = await db
     .update(flowsheet)
@@ -114,11 +162,29 @@ const writeUnlinkedMatch = async (rowId: number, artwork: DiscogsMatchResult): P
       artwork_url: sql`COALESCE(${flowsheet.artwork_url}, ${filterSpacerGif(artwork.artwork_url)})`,
       discogs_url: sql`COALESCE(${flowsheet.discogs_url}, ${artwork.release_url ?? null})`,
       release_year: sql`COALESCE(${flowsheet.release_year}, ${artwork.release_year || null})`,
-      spotify_url: sql`COALESCE(${flowsheet.spotify_url}, ${artwork.spotify_url ?? null})`,
+      // BS#2179 review HIGH 1: fill-or-upgrade, not plain COALESCE — see
+      // `fillOrUpgradeSearchUrl`'s doc comment above.
+      spotify_url: fillOrUpgradeSearchUrl(
+        flowsheet.spotify_url,
+        artwork.spotify_url ?? null,
+        SEARCH_URL_PREFIX.spotify_url
+      ),
       apple_music_url: sql`COALESCE(${flowsheet.apple_music_url}, ${artwork.apple_music_url ?? null})`,
-      youtube_music_url: sql`COALESCE(${flowsheet.youtube_music_url}, ${artwork.youtube_music_url ?? null})`,
-      bandcamp_url: sql`COALESCE(${flowsheet.bandcamp_url}, ${artwork.bandcamp_url ?? null})`,
-      soundcloud_url: sql`COALESCE(${flowsheet.soundcloud_url}, ${artwork.soundcloud_url ?? null})`,
+      youtube_music_url: fillOrUpgradeSearchUrl(
+        flowsheet.youtube_music_url,
+        artwork.youtube_music_url ?? null,
+        SEARCH_URL_PREFIX.youtube_music_url
+      ),
+      bandcamp_url: fillOrUpgradeSearchUrl(
+        flowsheet.bandcamp_url,
+        artwork.bandcamp_url ?? null,
+        SEARCH_URL_PREFIX.bandcamp_url
+      ),
+      soundcloud_url: fillOrUpgradeSearchUrl(
+        flowsheet.soundcloud_url,
+        artwork.soundcloud_url ?? null,
+        SEARCH_URL_PREFIX.soundcloud_url
+      ),
       artist_bio: sql`COALESCE(${flowsheet.artist_bio}, ${artwork.artist_bio ? cleanDiscogsBio(artwork.artist_bio) : null})`,
       artist_wikipedia_url: sql`COALESCE(${flowsheet.artist_wikipedia_url}, ${artwork.wikipedia_url ?? null})`,
       metadata_status: 'enriched_match',
