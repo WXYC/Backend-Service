@@ -1,0 +1,62 @@
+-- 0150 add `flowsheet.no_match_recheck_attempted_at` + its partial index (BS#2176).
+--
+-- Retry marker for the new recurring `jobs/flowsheet-no-match-recheck` sweep:
+-- a cause-agnostic re-ask of `metadata_status = 'enriched_no_match'` rows, so a
+-- row that was a correct no-match at write time and becomes resolvable later
+-- (a discogs-etl rebuild caches the release, an LML matcher fix ships, the
+-- librarian files the album) is eventually revisited instead of staying wrong
+-- forever. Stamped on a definitive response (fresh no-match or a trust-gate
+-- rejection); left NULL on a transient LML error so the row stays immediately
+-- retryable — the same shared "attempt-at marker" shape documented in
+-- docs/migrations.md, alongside `rotation.discogs_release_id_resolve_attempted_at`
+-- (its closest sibling: attempt marker + no-match TTL, BS#1813/BS#1029).
+--
+-- Deliberately a NEW column, not a reuse of `flowsheet.metadata_attempt_at`.
+-- That column's NULL-vs-stamped split is a load-bearing writer discriminator
+-- depended on by BS#1011 / BS#895 (the live CDC worker leaves it NULL on
+-- no-match rows; only `flowsheet-metadata-backfill` stamps it), and the C6
+-- gap-recovery sweep's candidate predicate reads it. Overloading it here would
+-- break that discriminator for every future no-match row this new sweep
+-- touches — see docs/migrations.md's "Attempt-at markers" section and the
+-- BS#2176 ticket body for the full reasoning.
+--
+-- DDL-only, additive, nullable column -> no table rewrite, no backfill.
+--
+-- The companion index is a partial B-tree keyed on `(no_match_recheck_attempted_at,
+-- id)`, scoped to the exact cohort the sweep scans: terminal no-match track
+-- rows with a real artist name. The sweep's candidate query orders by
+-- `no_match_recheck_attempted_at ASC NULLS FIRST, id ASC` (oldest-attempted,
+-- then never-attempted rows first, id as tiebreak) — the index's own column
+-- order and `NULLS FIRST` direction (BS#2179 review MEDIUM 4: a plain `ASC`
+-- B-tree defaults to `NULLS LAST` and cannot serve a `NULLS FIRST` query, so
+-- an index missing this direction still forces a full sort of every matching
+-- row before the `LIMIT`) is exactly what the query needs to avoid that sort.
+-- Without the index (predicate match) at all the candidate query would
+-- seq-scan the ~2.6M-row / ~1.7 GB `flowsheet` heap on every run, past the 5s
+-- `DB_STATEMENT_TIMEOUT_MS` — the same story `flowsheet_metadata_status_pending_idx`
+-- (0132) and `flowsheet_rotation_no_match_idx` (0132) already tell for this table.
+--
+-- Production ops:
+--   - NOT the CONCURRENTLY form — Drizzle wraps each migration file in a
+--     transaction and `CREATE INDEX CONCURRENTLY cannot run inside a
+--     transaction block` (same constraint as 0057, 0068, 0070, 0074, 0078,
+--     0080, 0139, 0144, 0148).
+--   - Run out-of-band on prod FIRST, before the deploy that applies this
+--     migration:
+--       CREATE INDEX CONCURRENTLY IF NOT EXISTS "flowsheet_no_match_recheck_idx"
+--         ON "wxyc_schema"."flowsheet" USING btree ("no_match_recheck_attempted_at" NULLS FIRST, "id")
+--         WHERE "wxyc_schema"."flowsheet"."metadata_status" = 'enriched_no_match'
+--           AND "wxyc_schema"."flowsheet"."entry_type" = 'track'
+--           AND "wxyc_schema"."flowsheet"."artist_name" IS NOT NULL;
+--     No AccessExclusiveLock, so no INSERT pause and no wedged flowsheet
+--     mid-show. Skipping this step means the in-migration form below takes an
+--     AccessExclusiveLock on `flowsheet` for the duration of the build,
+--     pausing every live flowsheet write.
+--   - Then deploy. `IF NOT EXISTS` makes the migration a no-op against the
+--     prod DB where the index already exists, while fresh dev and CI
+--     databases pick it up on first migrate. `jobs/flowsheet-no-match-recheck`
+--     must not reach production before this index does — its candidate query
+--     depends on it the same way `flowsheet-metadata-backfill`'s C6 sweep
+--     depends on `flowsheet_metadata_status_pending_idx`.
+ALTER TABLE "wxyc_schema"."flowsheet" ADD COLUMN "no_match_recheck_attempted_at" timestamp with time zone;--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "flowsheet_no_match_recheck_idx" ON "wxyc_schema"."flowsheet" USING btree ("no_match_recheck_attempted_at" NULLS FIRST,"id") WHERE "wxyc_schema"."flowsheet"."metadata_status" = 'enriched_no_match' AND "wxyc_schema"."flowsheet"."entry_type" = 'track' AND "wxyc_schema"."flowsheet"."artist_name" IS NOT NULL;

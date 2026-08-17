@@ -1,5 +1,5 @@
 {
-  "id": "5e2ca414-3a42-45df-b917-4d41c2815f77",
+  "id": "60f4f365-2063-4b57-ac4a-bd3467e61830",
   "prevId": "d5149098-2d6d-40ed-abb4-c25cd3860036",
   "version": "7",
   "dialect": "postgresql",
@@ -2944,6 +2944,12 @@
           "columns": [
             {
               "expression": "no_match_recheck_attempted_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "first"
+            },
+            {
+              "expression": "id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
