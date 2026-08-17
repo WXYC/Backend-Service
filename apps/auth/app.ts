@@ -12,7 +12,8 @@ import cors from 'cors';
 import express from 'express';
 import type { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
-import { rateLimitKeyFromRequest } from './rate-limit-key';
+import { rateLimitKeyFromRequest, sessionRateLimitKeyFromRequest } from './rate-limit-key';
+import { makeHandler as makeRateLimitMetricsHandler } from './auth-rate-limit-metrics';
 import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { checkRequestBanHandler } from './check-request-ban-handler';
@@ -390,6 +391,63 @@ if (!isTestEnv) {
     keyGenerator: rateLimitKeyFromRequest,
   });
   app.use('/auth/check-request-ban', checkRequestBanRateLimit);
+
+  // BS#2169 — GET /auth/get-session. auth.definition.ts's `customRules`
+  // block disables better-auth's own IP-keyed limiter for this path (it
+  // buckets by Cloudflare egress IP and never resets while continuously
+  // busy — see the plan for the full mechanism); these two Express limiters
+  // replace it.
+  //
+  // Two limiters, mounted in this exact order, not one. The IP-keyed
+  // ceiling is a SECURITY REQUIREMENT, not an optimization — do not
+  // "simplify" it away. Neither the session cookie nor the bearer token is
+  // verified at keyGenerator time (that happens later, inside better-auth
+  // itself), so a caller sending a fresh random `Authorization: Bearer
+  // <nonce>` on every request mints a brand-new identity-keyed bucket every
+  // request and is never throttled by the identity limiter alone — while
+  // each request still costs a DB session lookup. See
+  // plans/bs2169-get-session-limiter-key.md's "Why the second limiter is
+  // not optional" for the full argument, and tests/unit/auth/rate-limiting.test.ts
+  // for the test that pins both limiters staying mounted.
+  const getSessionSharedOpts = {
+    windowMs: 60_000,
+    legacyHeaders: false,
+    // Preserve the body shape both existing auth limiters above use so
+    // dj-site sees one 429 shape across every auth route.
+    message: { error: 'Too many requests, please try again later.' },
+  };
+
+  // Abuse ceiling: bounds fabricated-credential floods, which the identity
+  // key below cannot. standardHeaders is off — this is an invisible
+  // backstop, not a client contract, and two co-mounted limiters would
+  // otherwise fight over the draft-7 headers (express-rate-limit writes
+  // RateLimit-*/RateLimit-Policy unconditionally per limiter, and both
+  // default requestPropertyName to 'rateLimit', so whichever limiter ran
+  // last would silently win both).
+  // NOTE: rateLimitKeyFromRequest returns a BARE ip with no namespace
+  // prefix, unlike sessionRateLimitKeyFromRequest's `ip:` fallback arm.
+  // Separate express-rate-limit stores, so no poisoning between them — but
+  // the two `ip`-shaped key spaces are NOT the same one.
+  const getSessionIpRateLimit = rateLimit({
+    ...getSessionSharedOpts,
+    limit: 600,
+    standardHeaders: false,
+    keyGenerator: rateLimitKeyFromRequest,
+    handler: makeRateLimitMetricsHandler('ip'),
+  });
+
+  // Fairness: each DJ gets their own budget. This is the fix for the
+  // reported bug (a shared per-Cloudflare-edge bucket silently logging DJs
+  // out). This limiter owns the client-facing RateLimit headers.
+  const getSessionIdentityRateLimit = rateLimit({
+    ...getSessionSharedOpts,
+    limit: 120,
+    standardHeaders: 'draft-7',
+    keyGenerator: sessionRateLimitKeyFromRequest,
+    handler: makeRateLimitMetricsHandler('identity'),
+  });
+
+  app.use('/auth/get-session', getSessionIpRateLimit, getSessionIdentityRateLimit);
 }
 
 app.post('/auth/wxyc/lookup-email', lookupEmailHandler);
@@ -422,11 +480,25 @@ app.get('/healthcheck', async (req, res) => {
     // X-Real-IP is set to 127.0.0.1 because the loopback fetch has no real
     // client. Without it, better-auth's getIp returns null and latches a
     // one-shot "Rate limiting skipped: could not determine client IP"
-    // warning, which silently disables its internal rate limiter for the
-    // rest of the process lifetime. We pass X-Real-IP rather than XFF
-    // because `auth.definition.ts` configures `ipAddressHeaders: ['x-real-ip']`
-    // to ignore client-controlled XFF spoofing. See #765 (latch fix) and
-    // #774 (XFF -> X-Real-IP swap).
+    // warning.
+    //
+    // CORRECTION (BS#2169): an earlier version of this comment said that
+    // warning meant the IP-less caller "silently disables its internal
+    // rate limiter for the rest of the process lifetime." That was true
+    // when #765 was written; it is NOT true at the installed
+    // better-auth@1.6.26. The current behavior is that every IP-less
+    // caller — this loopback healthcheck included — falls into a single
+    // shared "no-trusted-ip" bucket for the path (keyed on the literal
+    // string `no-trusted-ip|<path>`); only the warning LOG latches to
+    // one-shot, not the limiter itself. That is strictly worse than
+    // "disabled" for our purposes: without X-Real-IP here, the healthcheck
+    // would share a rate-limit bucket with every other caller that
+    // (legitimately or not) reaches better-auth with no resolvable IP.
+    // Setting X-Real-IP: 127.0.0.1 keeps the healthcheck in its own bucket
+    // instead. We pass X-Real-IP rather than XFF because
+    // `auth.definition.ts` configures `ipAddressHeaders: ['x-real-ip']` to
+    // ignore client-controlled XFF spoofing. See #765 (latch fix), #774
+    // (XFF -> X-Real-IP swap), and BS#2169 (this correction).
     const response = await fetch(`${authServiceUrl}/auth/ok`, {
       headers: { 'X-Real-IP': '127.0.0.1' },
     });

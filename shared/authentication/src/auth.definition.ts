@@ -246,6 +246,26 @@ export const auth = betterAuth({
     },
   },
 
+  // BS#2169. better-auth keys its internal limiter on `${ip}|${path}`, and
+  // 100% of /auth/get-session traffic reaches us from Cloudflare egress IPs
+  // (dj-site's SSR arm is an edge-side fetch carrying only a cookie), so the
+  // entire DJ population shares ~10 buckets. Worse, the limiter resets on time
+  // since the last ALLOWED request, so a continuously-active key accumulates to
+  // `max` and 429s regardless of rate. Express owns this path instead, keyed on
+  // the session cookie — see apps/auth/rate-limit-key.ts.
+  //
+  // The key is `/get-session`, not `/auth/get-session`: normalizePathname
+  // strips the basePath before matching. `false` short-circuits
+  // resolveRateLimitConfig before storage is touched.
+  //
+  // This block does NOT enable rate limiting or change window/max — those keep
+  // their create-context defaults (`enabled: ?? isProduction`, 10s/100).
+  rateLimit: {
+    customRules: {
+      '/get-session': false,
+    },
+  },
+
   plugins: [
     admin(),
     username({ minUsernameLength: 2 }),

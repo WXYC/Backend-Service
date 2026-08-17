@@ -15,7 +15,8 @@
     "baseUrl": "..",
     "paths": {
       "@/*": ["apps/backend/*"],
-      "@wxyc/database": ["shared/database/src/index.ts"]
+      "@wxyc/database": ["shared/database/src/index.ts"],
+      "@wxyc/observability/metrics": ["shared/observability/src/metrics.ts"]
     },
     "types": ["jest", "node"]
   },
