@@ -1078,15 +1078,74 @@ describe('library.controller', () => {
         await expect(resolveArtistByCode(req({ code_letters: '   ' }), res, next)).rejects.toThrow('code_letters');
         expect(mockGetArtistsByCode).not.toHaveBeenCalled();
       });
+    });
 
-      it('echoes the stored code_letters, not the normalized input', async () => {
-        mockGetArtistsByCode.mockResolvedValue([owner(9, 'Built to Spill', 'BU')]);
-
+    // BS#2149 review findings 1 + 2: `artists.code_letters` is a Postgres
+    // varchar(4) column and neither writer (insertArtist, the tubafrenzy
+    // library-etl job) guarantees a trimmed/upper-case/ASCII-only value, so a
+    // bare `.trim().toUpperCase()` isn't a safe read-side repair -- it can
+    // fold a non-canonical input onto a DIFFERENT real artist's code (`ß` ->
+    // `SS`, `ı` -> `I`) with no precondition that the input was canonical.
+    // These pin the domain check that replaced the naive normalization.
+    describe('code_letters domain validation (BS#2149 review findings 1 + 2)', () => {
+      it('rejects a code_letters longer than 4 characters (varchar(4) domain)', async () => {
         const res = mockResponse();
-        await resolveArtistByCode(req({ code_letters: 'bu' }), res, next);
 
-        const [payload] = (res.json as jest.Mock).mock.calls[0] as [{ artists: Array<{ code_letters: string }> }];
-        expect(payload.artists[0].code_letters).toBe('BU');
+        await expect(resolveArtistByCode(req({ code_letters: 'ABCDE' }), res, next)).rejects.toThrow('code_letters');
+        expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+      });
+
+      it('rejects a code_letters that is exactly 5 characters after trimming', async () => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(req({ code_letters: ' ABCDE ' }), res, next)).rejects.toThrow('code_letters');
+        expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+      });
+
+      it('accepts a code_letters at the 4-character boundary', async () => {
+        mockGetArtistsByCode.mockResolvedValue([owner(9, 'Built to Spill', 'ABCD')]);
+        const res = mockResponse();
+
+        await resolveArtistByCode(req({ code_letters: 'ABCD' }), res, next);
+
+        expect(mockGetArtistsByCode).toHaveBeenCalledWith('ABCD', 11, 60);
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      // `'ß'.toUpperCase() === 'SS'` -- not length-preserving. Left
+      // unvalidated, this would silently query for 'SS' instead of rejecting
+      // an input the column's real (ASCII) domain never contains.
+      it('rejects a code_letters containing ß rather than silently folding it to SS', async () => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(req({ code_letters: 'ß' }), res, next)).rejects.toThrow('code_letters');
+        expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+      });
+
+      // `'ı'.toUpperCase() === 'I'` (the Turkish dotless i) -- length-preserving
+      // but charset-changing, so a length check alone would miss this case.
+      it('rejects a code_letters containing the dotless-i (ı) rather than folding it to I', async () => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(req({ code_letters: 'ı' }), res, next)).rejects.toThrow('code_letters');
+        expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+      });
+
+      it('accepts the V/A code, whose "/" is the one non-alphanumeric character in production use', async () => {
+        mockGetArtistsByCode.mockResolvedValue([owner(200, 'Various Artists', 'V/A')]);
+        const res = mockResponse();
+
+        await resolveArtistByCode(req({ code_letters: 'V/A' }), res, next);
+
+        expect(mockGetArtistsByCode).toHaveBeenCalledWith('V/A', 11, 60);
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('rejects a code_letters containing a character outside A-Z, 0-9, and /', async () => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(req({ code_letters: 'B-U' }), res, next)).rejects.toThrow('code_letters');
+        expect(mockGetArtistsByCode).not.toHaveBeenCalled();
       });
     });
 
