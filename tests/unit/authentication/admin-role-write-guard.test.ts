@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { describe, it, expect } from '@jest/globals';
 
 // better-auth/api is stubbed at the jest.unit.config.ts moduleNameMapper
@@ -9,81 +11,89 @@ import {
   assertScalarRoleWrite,
 } from '../../../shared/authentication/src/admin-role-write-guard';
 
+/**
+ * Derive the routes that can write `auth_user.role` from better-auth's own
+ * dist rather than restating the allowlist — asserting the constant equals a
+ * copy of itself would only detect edits to the constant, and the risk here
+ * is the opposite one: an upstream release adding a fourth role-writing route
+ * that silently falls outside the guard.
+ *
+ * Every role write funnels through `parseRoles` (the comma-join), so its call
+ * sites are the complete set. Same source-scan technique as
+ * `oidc-provider-public-client-jwt.test.ts`.
+ */
+const routesThatWriteRole = (): string[] => {
+  const routesPath = path.resolve(__dirname, '../../../node_modules/better-auth/dist/plugins/admin/routes.mjs');
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  const lines = fs.readFileSync(routesPath, 'utf-8').split('\n');
+
+  const found = new Set<string>();
+  let currentRoute: string | null = null;
+  for (const line of lines) {
+    const route = line.match(/createAuthEndpoint\("([^"]+)"/);
+    if (route) currentRoute = route[1];
+    // Skip `function parseRoles(` — the definition, not a call site.
+    if (/[^n] parseRoles\(|=\s*parseRoles\(|:\s*parseRoles\(/.test(line) && currentRoute) {
+      found.add(currentRoute);
+    }
+  }
+  return [...found].sort();
+};
+
+describe('GUARDED_ROLE_WRITE_PATHS', () => {
+  it('covers every better-auth route that reaches parseRoles', () => {
+    const upstream = routesThatWriteRole();
+
+    // Sanity-check the scan itself: if the dist layout changes so that nothing
+    // matches, an empty set would make the assertion below vacuously true.
+    expect(upstream.length).toBeGreaterThan(0);
+    expect([...GUARDED_ROLE_WRITE_PATHS].sort()).toEqual(upstream);
+  });
+});
+
 describe('assertScalarRoleWrite', () => {
-  it('guards exactly the three admin role-write paths', () => {
-    expect([...GUARDED_ROLE_WRITE_PATHS].sort()).toEqual([
-      '/admin/create-user',
-      '/admin/set-role',
-      '/admin/update-user',
-    ]);
-  });
+  const rejected: Array<[string, unknown]> = [
+    ['an array of two roles — passes the plugin allowlist element-wise, then joins', ['admin', 'user']],
+    ['a single-element array — joins to a scalar, but uses the multi-role API', ['admin']],
+    ['a comma-bearing string', 'admin,user'],
+    ['a number, which parseRoles returns verbatim', 42],
+    ['an object, which parseRoles returns verbatim', { admin: true }],
+  ];
 
-  describe.each(GUARDED_ROLE_WRITE_PATHS)('on %s', (path) => {
-    it('rejects an array-valued role', () => {
-      expect(() => assertScalarRoleWrite(path, { role: ['admin', 'user'] })).toThrow(
-        expect.objectContaining({ statusCode: 400 })
-      );
+  const accepted: Array<[string, unknown]> = [
+    ['the scalar admin', 'admin'],
+    ['the scalar user', 'user'],
+    // The plugin's own pinned `roles` allowlist owns unknown-value rejection.
+    // Duplicating the alphabet here would drift from it on upgrade; this guard
+    // owns exactly one property — that nothing reaching parseRoles can join.
+    ['an unknown scalar role', 'musicDirector'],
+    ['an omitted role, which create-user and update-user both allow', undefined],
+  ];
+
+  describe.each(GUARDED_ROLE_WRITE_PATHS)('on %s', (guardedPath) => {
+    it.each(rejected)('rejects %s', (_label, role) => {
+      expect(() => assertScalarRoleWrite(guardedPath, { role })).toThrow(expect.objectContaining({ statusCode: 400 }));
     });
 
-    it('rejects a single-element array — it still joins to a scalar, but the caller is using the multi-role API', () => {
-      expect(() => assertScalarRoleWrite(path, { role: ['admin'] })).toThrow(
-        expect.objectContaining({ statusCode: 400 })
-      );
-    });
-
-    it('rejects a comma-bearing string role', () => {
-      expect(() => assertScalarRoleWrite(path, { role: 'admin,user' })).toThrow(
-        expect.objectContaining({ statusCode: 400 })
-      );
-    });
-
-    it.each(['admin', 'user'])('lets the scalar %s through', (role) => {
-      expect(() => assertScalarRoleWrite(path, { role })).not.toThrow();
-    });
-
-    it('lets a body with no role through — /admin/create-user and /admin/update-user both allow omitting it', () => {
-      expect(() => assertScalarRoleWrite(path, {})).not.toThrow();
-      expect(() => assertScalarRoleWrite(path, { role: undefined })).not.toThrow();
-    });
-
-    it("lets an unknown scalar role through — the plugin's own `roles` allowlist owns that 400, not this guard", () => {
-      // Narrowing the alphabet here would duplicate the plugin's validation
-      // and drift from it on upgrade. This guard owns exactly one property:
-      // that whatever reaches `parseRoles` cannot become a comma list.
-      expect(() => assertScalarRoleWrite(path, { role: 'musicDirector' })).not.toThrow();
+    it.each(accepted)('accepts %s', (_label, role) => {
+      expect(() => assertScalarRoleWrite(guardedPath, { role })).not.toThrow();
     });
   });
 
-  it('ignores unrelated paths entirely', () => {
+  it('reports a machine-readable code so the caller can distinguish this rejection', () => {
+    expect(() => assertScalarRoleWrite('/admin/set-role', { role: ['admin', 'user'] })).toThrow(
+      expect.objectContaining({ body: expect.objectContaining({ code: 'ROLE_MUST_BE_SCALAR' }) })
+    );
+  });
+
+  it('ignores paths outside the allowlist', () => {
     expect(() => assertScalarRoleWrite('/device/approve', { role: ['admin', 'user'] })).not.toThrow();
     expect(() => assertScalarRoleWrite('/sign-in/email', { role: 'admin,user' })).not.toThrow();
   });
 
-  it('reports the offending path and value in the error body', () => {
-    let caught: unknown;
-    try {
-      assertScalarRoleWrite('/admin/set-role', { role: ['admin', 'user'] });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toMatchObject({
-      body: { code: 'ROLE_MUST_BE_SCALAR' },
-    });
-  });
-
-  it('rejects a non-string, non-array role rather than passing it to parseRoles', () => {
-    // `parseRoles` returns a non-array value verbatim, so an object or number
-    // would reach the adapter untouched and land in the column as-is.
-    expect(() => assertScalarRoleWrite('/admin/set-role', { role: 42 })).toThrow(
-      expect.objectContaining({ statusCode: 400 })
-    );
-    expect(() => assertScalarRoleWrite('/admin/set-role', { role: { admin: true } })).toThrow(
-      expect.objectContaining({ statusCode: 400 })
-    );
-  });
-
-  it('tolerates a null or undefined body', () => {
+  it('tolerates a missing body', () => {
     expect(() => assertScalarRoleWrite('/admin/set-role', undefined)).not.toThrow();
     expect(() => assertScalarRoleWrite('/admin/set-role', null)).not.toThrow();
+    expect(() => assertScalarRoleWrite('/admin/set-role', {})).not.toThrow();
   });
 });
