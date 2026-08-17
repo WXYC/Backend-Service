@@ -2063,7 +2063,8 @@ export const artistIdFromName = async (artist_name: string, genre_id: number): P
 };
 
 /**
- * Genre-scoped `fold_artist_name` conflict probe for a RENAME (BS#2156).
+ * `fold_artist_name` conflict probe for a RENAME (BS#2156), scoped to EVERY
+ * genre `exclude_artist_id` is crossreferenced in -- not just one.
  *
  * `artistIdFromName` above answers "which artist is this name?" with a bare
  * `.limit(1)` and NO `orderBy`, so when a genre already holds two fold-equal
@@ -2076,15 +2077,30 @@ export const artistIdFromName = async (artist_name: string, genre_id: number): P
  * rename through — recreating exactly the duplicate state
  * `jobs/artist-unicode-dedup` exists to clean up.
  *
- * The exclusion belongs INSIDE the query: ask for any fold-equal row in the
- * genre that is NOT this artist. Ordered by id so the reported conflict is
- * deterministic when several exist.
+ * The exclusion belongs INSIDE the query: ask for any fold-equal row NOT this
+ * artist, crossreferenced in any genre this artist is ALSO crossreferenced
+ * in. A single fixed `genre_id` parameter first probed only the caller's
+ * lowest-`genre_id` crossreference (`getArtistCardById`'s deliberate
+ * `.orderBy(asc(genre_id)).limit(1)` collapse) -- multi-genre artists are a
+ * designed state (`jobs/artist-unicode-dedup/merge.ts` repoints every
+ * crossreference onto a survivor precisely so the matcher reaches it from
+ * every genre), so a probe confined to one genre missed a fold-equal
+ * duplicate sitting in any of the artist's other genres. Ordered by id so
+ * the reported conflict is deterministic when several exist.
  */
 export const conflictingArtistIdInGenre = async (
   artist_name: string,
-  genre_id: number,
   exclude_artist_id: number
 ): Promise<number | null> => {
+  const excludedArtistGenres = await db
+    .select({ genre_id: genre_artist_crossreference.genre_id })
+    .from(genre_artist_crossreference)
+    .where(eq(genre_artist_crossreference.artist_id, exclude_artist_id));
+  const genreIds = excludedArtistGenres.map((row) => row.genre_id);
+  if (genreIds.length === 0) {
+    return null;
+  }
+
   const response = await db
     .select({ id: artists.id })
     .from(artists)
@@ -2092,7 +2108,7 @@ export const conflictingArtistIdInGenre = async (
     .where(
       and(
         sql`${FOLD_ARTIST_NAME_FN}(${artists.artist_name}) = ${FOLD_ARTIST_NAME_FN}(${artist_name})`,
-        eq(genre_artist_crossreference.genre_id, genre_id),
+        inArray(genre_artist_crossreference.genre_id, genreIds),
         ne(artists.id, exclude_artist_id)
       )
     )
@@ -2397,6 +2413,13 @@ const artistReleasesQuery = (artist_id: number) =>
  * physical call number, already projected here) and finally `id` as a total
  * order.
  *
+ * `code_volume_letters` sorts `ASC NULLS FIRST` explicitly. Postgres's `ASC`
+ * default is NULLS LAST, but the legacy query this mirrors
+ * (`LibraryCatalogServlet.java:130-133`, `ORDER BY LR.CALL_NUMBERS ASC,
+ * LR.CALL_LETTERS ASC`) runs on MySQL, where `ASC` is NULLS FIRST -- a bare
+ * `asc()` here would put a lettered volume (`R 7A`, `R 7B`) ahead of its own
+ * unlettered `R 7` within the same `code_number`, the reverse of the shelf.
+ *
  * Offset-paginated, matching `GET /library/query`'s `page`/`limit` convention:
  * an unbounded projection hands any `catalog:read` DJ ~3,107 rows (~0.5-1 MB
  * of JSON) for artist 1087 on a freely repeatable request.
@@ -2407,7 +2430,7 @@ export const getReleasesForArtist = async (
   limit: number
 ): Promise<ArtistReleaseRow[]> => {
   return artistReleasesQuery(artist_id)
-    .orderBy(asc(library.code_number), asc(library.code_volume_letters), asc(library.id))
+    .orderBy(asc(library.code_number), sql`${library.code_volume_letters} ASC NULLS FIRST`, asc(library.id))
     .limit(limit)
     .offset(page * limit);
 };

@@ -2075,22 +2075,42 @@ describe('Library Artist Card (BS#2156)', () => {
       expectErrorContains(res, field);
     });
 
-    test('drops fields outside the allowlist rather than applying them', async () => {
+    // BS#2156 review: the AC says the endpoint "allowlists the two name
+    // fields and rejects anything else." These three real `artistCardModify.
+    // jsp` fields (`ArtistAdminServlet.java:196-206` applies all five) have
+    // no write path today, so a client sending one gets a 400 naming why --
+    // not a 200 that looks like the edit took effect but silently didn't.
+    test.each(['code_letters', 'genre_id', 'code_artist_number'])(
+      'returns 400 rather than silently dropping %s',
+      async (field) => {
+        const artist = await createTestArtist();
+        const value = field === 'code_letters' ? 'ZZ' : 999;
+
+        const res = await auth
+          .patch(`/library/artists/${artist.id}`)
+          .send({ artist_name: `Rejected ${artist.artist_name}`, [field]: value })
+          .expect(400);
+        expectErrorContains(res, field);
+        expectErrorContains(res, 'no write path');
+
+        // The rejected PATCH did not take effect.
+        const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
+        expect(card.body.artist_name).toBe(artist.artist_name);
+        expect(card.body.code_letters).toBe(artist.code_letters);
+        expect(card.body.genre_id).toBe(11);
+      }
+    );
+
+    test('rejects multiple no-write-path fields together, naming all of them', async () => {
       const artist = await createTestArtist();
-      const renamed = `Still Allowlisted ${artist.artist_name}`;
 
       const res = await auth
         .patch(`/library/artists/${artist.id}`)
-        .send({ artist_name: renamed, code_letters: 'ZZ', genre_id: 999 })
-        .expect(200);
-
-      expect(res.body.artist_name).toBe(renamed);
-
-      const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
-      // code_letters and genre_id are unchanged -- the PATCH allowlist
-      // dropped both rather than writing them.
-      expect(card.body.code_letters).toBe(artist.code_letters);
-      expect(card.body.genre_id).toBe(11);
+        .send({ code_letters: 'ZZ', genre_id: 999, code_artist_number: 7 })
+        .expect(400);
+      expectErrorContains(res, 'code_letters');
+      expectErrorContains(res, 'genre_id');
+      expectErrorContains(res, 'code_artist_number');
     });
 
     test('returns 400 when the body has no updatable fields', async () => {
@@ -2157,6 +2177,59 @@ describe('Library Artist Card (BS#2156)', () => {
       } finally {
         await sql.unsafe(`DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${duplicate.id}`);
         await sql.unsafe(`DELETE FROM ${SCHEMA}.artists WHERE id = ${duplicate.id}`);
+      }
+    });
+
+    // BS#2156 review: `existing.genre_id` off `getArtistCardById` is
+    // deliberately the LOWEST genre_id a multi-genre artist is
+    // crossreferenced in. A conflict probe fixed to that one genre never sees
+    // a fold-equal duplicate filed under a DIFFERENT genre of the same
+    // artist -- and multi-genre artists are a designed state
+    // (`jobs/artist-unicode-dedup/merge.ts` repoints every crossreference
+    // onto a survivor precisely so the matcher reaches it from every genre).
+    // Genre 6 sorts below the genre 11 `createTestArtist` uses, so the
+    // artist's OWN lowest crossreference is genre 6 -- and the fold-equal
+    // duplicate is seeded into genre 11, the one `getArtistCardById` does
+    // NOT surface as `existing.genre_id`.
+    test('409s on a fold-equal rename found in a DIFFERENT genre than the card surfaces', async () => {
+      const artist = await createTestArtist();
+      const sql = getTestDb();
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${artist.id}, 6, 9913)`
+      );
+      const [duplicate] = await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artists (artist_name, alphabetical_name, code_letters)
+         VALUES ('${artist.artist_name}', '${artist.alphabetical_name}', '${artist.code_letters}')
+         RETURNING id`
+      );
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${duplicate.id}, 11, 9914)`
+      );
+
+      try {
+        // The card now surfaces genre 6 (the artist's lowest), while the
+        // fold-equal duplicate lives in genre 11 -- a probe scoped to
+        // `existing.genre_id` alone would miss it entirely.
+        const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
+        expect(card.body.genre_id).toBe(6);
+
+        const res = await auth
+          .patch(`/library/artists/${artist.id}`)
+          .send({ artist_name: artist.artist_name.toLowerCase() })
+          .expect(409);
+        expect(res.body.reason).toBe('artist_name_conflict');
+        expect(res.body.artist.artist_id).toBe(duplicate.id);
+
+        const unchanged = await auth.get(`/library/artists/${artist.id}`).expect(200);
+        expect(unchanged.body.artist_name).toBe(artist.artist_name);
+      } finally {
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${duplicate.id}`);
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.artists WHERE id = ${duplicate.id}`);
+        await sql.unsafe(
+          `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${artist.id} AND genre_id = 6`
+        );
       }
     });
 
@@ -2261,6 +2334,40 @@ describe('Library Artist Card (BS#2156)', () => {
       expect(res.body.releases.map((release) => release.id)).toEqual([third.id, second.id, first.id]);
     });
 
+    // BS#2156 review: `code_volume_letters` must sort `ASC NULLS FIRST` to
+    // match the legacy MySQL shelf order (`LibraryCatalogServlet.java:130-
+    // 133`), where a bare, unlettered volume (`R 7`) files AHEAD of its own
+    // lettered siblings (`R 7A`, `R 7B`) under the same `code_number`.
+    // Postgres's bare `ASC` default is NULLS LAST, so the previous test's
+    // fixture -- whose NULL row sits at a DIFFERENT code_number -- can't
+    // catch a regression back to that default. This one ties a NULL directly
+    // against a lettered row under the SAME code_number.
+    test('sorts a bare (NULL) volume ahead of its lettered siblings under the same code_number', async () => {
+      const artist = await createTestArtist();
+      const bare = await addRelease(artist.id, `Shelf Bare ${Date.now()}`);
+      const letterB = await addRelease(artist.id, `Shelf Letter B ${Date.now()}`);
+      const letterA = await addRelease(artist.id, `Shelf Letter A ${Date.now()}`);
+      const otherNumber = await addRelease(artist.id, `Shelf Other Number ${Date.now()}`);
+
+      const sql = getTestDb();
+      await sql.unsafe(
+        `UPDATE ${SCHEMA}.library SET code_number = 7, code_volume_letters = NULL WHERE id = ${bare.id}`
+      );
+      await sql.unsafe(
+        `UPDATE ${SCHEMA}.library SET code_number = 7, code_volume_letters = 'A' WHERE id = ${letterA.id}`
+      );
+      await sql.unsafe(
+        `UPDATE ${SCHEMA}.library SET code_number = 7, code_volume_letters = 'B' WHERE id = ${letterB.id}`
+      );
+      await sql.unsafe(
+        `UPDATE ${SCHEMA}.library SET code_number = 9, code_volume_letters = NULL WHERE id = ${otherNumber.id}`
+      );
+
+      const res = await auth.get(`/library/artists/${artist.id}/releases`).expect(200);
+
+      expect(res.body.releases.map((release) => release.id)).toEqual([bare.id, letterA.id, letterB.id, otherNumber.id]);
+    });
+
     test('paginates with page/limit and reports total/totalPages', async () => {
       const artist = await createTestArtist();
       const created = [
@@ -2302,6 +2409,36 @@ describe('Library Artist Card (BS#2156)', () => {
 
     test('400s on a malformed artist id', async () => {
       await auth.get('/library/artists/2147483648/releases').expect(400);
+    });
+
+    // BS#2156 review: this endpoint used to resolve existence through
+    // `getArtistNameById` (a plain `artists` lookup), while GET/PATCH
+    // resolve it through `getArtistCardById` (INNER JOIN to
+    // `genre_artist_crossreference`) -- so an artist row with no
+    // crossreference 404'd on the card and the PATCH but 200'd here with an
+    // empty release page. `POST /library/artists` always inserts both rows
+    // atomically, so the only way to construct one is straight SQL.
+    test('404s, matching GET/PATCH, on an artist row with no genre crossreference', async () => {
+      const sql = getTestDb();
+      const [orphan] = await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artists (artist_name, alphabetical_name, code_letters)
+         VALUES ('Crossref Orphan ${Date.now()}', 'Crossref Orphan', 'CO')
+         RETURNING id`
+      );
+
+      try {
+        const releasesRes = await auth.get(`/library/artists/${orphan.id}/releases`).expect(404);
+        expectErrorContains(releasesRes, 'not found');
+        const cardRes = await auth.get(`/library/artists/${orphan.id}`).expect(404);
+        expectErrorContains(cardRes, 'not found');
+        const patchRes = await auth
+          .patch(`/library/artists/${orphan.id}`)
+          .send({ artist_name: 'Should Not Apply' })
+          .expect(404);
+        expectErrorContains(patchRes, 'not found');
+      } finally {
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.artists WHERE id = ${orphan.id}`);
+      }
     });
   });
 });
