@@ -17,13 +17,18 @@
  *
  * BS#2109 review round 3 additionally covers: `album_id` no longer un-links
  * a Backend-made link on a `libraryReleaseId: 0` delivery but still accepts
- * a genuinely resolvable one (finding 2's "better form"), and the snapshot
- * trio is forced to NULL rather than written whenever the row resolves
- * linked — regardless of whether the link came from
- * `PATCH /library/rotation/:id/link` or from this same webhook call
- * (finding 2), reconciled against `PATCH .../link`'s decision to leave a
- * fresh link's own snapshot populated for the tracklist picker's self-heal
- * (finding 1).
+ * a genuinely resolvable one (finding 2's "better form"). An earlier
+ * revision also forced the snapshot trio to NULL whenever the row resolved
+ * linked; that CASE was itself a bug (it starved `linkRotationToAlbum`'s
+ * self-heal path and `jobs/rotation-release-id-backfill`'s candidate query
+ * of the columns they need — see `apps/backend/routes/internal.route.ts`)
+ * and has been removed. The trio now always writes `excluded.*` when
+ * present in the payload, same as every other gated column — a linked row
+ * is allowed to keep carrying tubafrenzy's free text, which
+ * `PATCH /library/rotation/:id/link` (finding 1) already leaves populated
+ * for exactly this reason, and which `getRotationFromDB`'s
+ * `COALESCE(artists.artist_name, rotation.artist_name)` read makes
+ * display-invisible regardless.
  */
 
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
@@ -178,18 +183,17 @@ describe('POST /internal/rotation-webhook — partial update preserves denorm fi
     expect(row.record_label).toBe('Link Test Label');
   });
 
-  // Review round 3 finding 3: the prior version of this test sent the
-  // `sendRotationLinked` shape (`{id, libraryReleaseId: 0}`), which carries
-  // no `artistName` — so the presence gate excludes the snapshot columns
-  // from SET entirely and the assertion below never exercised finding 2's
-  // CASE branch at all, regardless of what it asserted. The scenario this
-  // test's name describes — "the next /wxycdb edit" — is the
-  // `sendRotationUpdated` shape, which DOES carry the trio. Sent against
-  // that shape, a linked row must end up with the trio NULLed (finding 2),
-  // not carrying whatever free text tubafrenzy's classic form still has for
-  // it — tubafrenzy has no idea the row is linked, so its own free-text
-  // fields are unconditionally treated as stale once `album_id` resolves.
-  test('a full /wxycdb edit on an already-linked row nulls the free-text snapshot instead of writing it back', async () => {
+  // A linked row is allowed to keep carrying tubafrenzy's free text. An
+  // earlier revision nulled the snapshot trio here whenever the row resolved
+  // linked, on the theory that tubafrenzy's classic form is unconditionally
+  // stale once `album_id` resolves — but that starved `linkRotationToAlbum`'s
+  // tracklist-picker self-heal and `jobs/rotation-release-id-backfill`'s
+  // candidate query (both need `artist_name`/`album_title` non-NULL) of the
+  // columns they depend on, with no path back for a killed row. The trio now
+  // writes `excluded.*` unconditionally, same as every other gated column —
+  // this is purely a presence-gate question (BS#1082 + BS#1312), independent
+  // of whether the row resolves linked.
+  test('a full /wxycdb edit on an already-linked row still writes the trio from the payload', async () => {
     const [libraryRow] = await sql.unsafe(`SELECT id FROM ${SCHEMA}.library ORDER BY id LIMIT 1`);
     expect(libraryRow).toBeDefined();
 
@@ -208,14 +212,15 @@ describe('POST /internal/rotation-webhook — partial update preserves denorm fi
         release: {
           id: LEGACY_ROTATION_ID,
           // tubafrenzy does not know about the Backend-made link, so its own
-          // classic-form fields are the stale free text — 0 is what it
-          // sends when it believes the row is still uncatalogued.
+          // classic-form fields are what it currently believes is current —
+          // 0 is what it sends when it believes the row is still
+          // uncatalogued.
           libraryReleaseId: 0,
           rotationType: 'M',
           killDate: 0,
-          artistName: 'Stale Tubafrenzy Artist',
-          albumTitle: 'Stale Tubafrenzy Album',
-          labelName: 'Stale Tubafrenzy Label',
+          artistName: 'Updated Tubafrenzy Artist',
+          albumTitle: 'Updated Tubafrenzy Album',
+          labelName: 'Updated Tubafrenzy Label',
           addDate: 1706799600000,
         },
       });
@@ -226,15 +231,14 @@ describe('POST /internal/rotation-webhook — partial update preserves denorm fi
          FROM ${SCHEMA}.rotation WHERE legacy_rotation_id = $1`,
       [LEGACY_ROTATION_ID]
     );
-    // The link survives (COALESCE fallback, libraryReleaseId: 0) and the
-    // presence-gated, non-linkage column (rotation_bin) still refreshes...
+    // The link survives (COALESCE fallback, libraryReleaseId: 0) and every
+    // presence-gated column — including the snapshot trio — refreshes from
+    // the payload, same as an unlinked row.
     expect(row.album_id).toBe(libraryRow.id);
     expect(row.rotation_bin).toBe('M');
-    // ...but the snapshot trio is forced to NULL rather than overwritten
-    // with tubafrenzy's stale free text, since the row resolves linked.
-    expect(row.artist_name).toBeNull();
-    expect(row.album_title).toBeNull();
-    expect(row.record_label).toBeNull();
+    expect(row.artist_name).toBe('Updated Tubafrenzy Artist');
+    expect(row.album_title).toBe('Updated Tubafrenzy Album');
+    expect(row.record_label).toBe('Updated Tubafrenzy Label');
   });
 
   // The COALESCE fallback only applies when the payload's own

@@ -710,13 +710,18 @@ export type LinkRotationOutcome =
  * librarian-facing, otherwise-instant endpoint's transaction for no benefit
  * on the other 76%.
  *
- * This does temporarily reintroduce the "`album_id` set AND snapshot set"
- * shape `POST /internal/rotation-webhook`'s linkage-aware SET clause
- * (review round 3 finding 2) exists to collapse — but only until whichever
- * comes first: the picker mints a real `discogs_release_id` (tier 1 no
- * longer needs the snapshot) or a `/wxycdb` edit lands on the row, whose
- * gated SET clause nulls the trio out anyway. Never permanent, unlike the
- * bug this replaces.
+ * This produces the "`album_id` set AND snapshot set" shape — and, unlike an
+ * earlier revision, it now simply persists. That earlier revision paired
+ * this function with a `POST /internal/rotation-webhook` SET clause that
+ * nulled the trio out on the row's next `/wxycdb` edit; that CASE-based
+ * gating was itself the bug (it starved both self-heal paths above of the
+ * columns they need) and has been removed — the webhook's UPDATE path now
+ * writes `excluded.*` unconditionally for the trio, same as this function.
+ * So the shape lasts until `jobs/rotation-release-id-backfill` mints a
+ * `discogs_release_id` for the row (its candidate query has no `album_id`
+ * predicate, so a linked row with a populated snapshot is picked up the same
+ * as an unlinked one) — the self-heal path this function exists to keep
+ * open by leaving the trio in place.
  *
  * The final UPDATE re-guards `album_id IS NULL` in its own WHERE (not just
  * the earlier SELECT) so a concurrent link between the check and the write
