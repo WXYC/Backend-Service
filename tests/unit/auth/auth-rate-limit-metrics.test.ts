@@ -38,10 +38,17 @@ function makeReq(overrides: {
   } as unknown as Request;
 }
 
-function makeRes() {
+function makeRes(init: { headersSent?: boolean; writableEnded?: boolean } = {}) {
   const res = {
     statusCode: 0,
     body: undefined as unknown,
+    headers: {} as Record<string, string>,
+    headersSent: init.headersSent ?? false,
+    writableEnded: init.writableEnded ?? false,
+    setHeader(name: string, value: string) {
+      res.headers[name] = value;
+      return res;
+    },
     status(code: number) {
       res.statusCode = code;
       return res;
@@ -51,11 +58,16 @@ function makeRes() {
       return res;
     },
   };
-  return res as unknown as Response & { statusCode: number; body: unknown };
+  return res as unknown as Response & {
+    statusCode: number;
+    body: unknown;
+    headers: Record<string, string>;
+  };
 }
 
 const rateLimitOptions = {
   statusCode: 429,
+  windowMs: 60_000,
   message: { error: 'Too many requests, please try again later.' },
 } as Options;
 
@@ -169,6 +181,43 @@ describe('auth-rate-limit-metrics', () => {
 
     expect(res.statusCode).toBe(429);
     expect(res.body).toEqual({ error: 'Too many requests, please try again later.' });
+  });
+
+  it.each([['ip'], ['identity']] as const)(
+    'sets Retry-After from windowMs on a %s-limiter rejection, so both limiters back off identically',
+    (limiter) => {
+      // The abuse ceiling runs with standardHeaders:false, which also
+      // suppresses express-rate-limit's own Retry-After. Without setting it
+      // here, a client doing Retry-After backoff would back off correctly on a
+      // fairness rejection and hot-loop against the ceiling.
+      const handler = makeHandler(limiter);
+      const res = makeRes();
+
+      handler(makeReq({ headers: {} }), res, jest.fn(), rateLimitOptions);
+
+      expect(res.headers['Retry-After']).toBe('60');
+    }
+  );
+
+  it('does not set Retry-After once headers are already sent', () => {
+    const handler = makeHandler('ip');
+    const res = makeRes({ headersSent: true });
+
+    handler(makeReq({ headers: {} }), res, jest.fn(), rateLimitOptions);
+
+    expect(res.headers['Retry-After']).toBeUndefined();
+  });
+
+  it('does not write a body when the response has already ended', () => {
+    // Mirrors express-rate-limit's own default-handler guard; without it this
+    // becomes ERR_HTTP_HEADERS_SENT rather than a silent no-op.
+    const handler = makeHandler('identity');
+    const res = makeRes({ writableEnded: true });
+
+    handler(makeReq({ headers: {} }), res, jest.fn(), rateLimitOptions);
+
+    expect(res.body).toBeUndefined();
+    expect(res.statusCode).toBe(0);
   });
 
   it('does not call PutMetricData when AUTH_RATE_LIMIT_METRICS_DISABLED=true', async () => {

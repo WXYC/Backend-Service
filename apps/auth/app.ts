@@ -13,7 +13,7 @@ import express from 'express';
 import type { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { rateLimitKeyFromRequest, sessionRateLimitKeyFromRequest } from './rate-limit-key';
-import { makeHandler as makeRateLimitMetricsHandler } from './auth-rate-limit-metrics';
+import { makeHandler as makeRateLimitMetricsHandler, flushRateLimitMetrics } from './auth-rate-limit-metrics';
 import { closeDatabaseConnection } from '@wxyc/database';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { checkRequestBanHandler } from './check-request-ban-handler';
@@ -424,10 +424,27 @@ if (!isTestEnv) {
   // RateLimit-*/RateLimit-Policy unconditionally per limiter, and both
   // default requestPropertyName to 'rateLimit', so whichever limiter ran
   // last would silently win both).
+  // Retry-After is NOT suppressed along with the RateLimit-* headers: the
+  // custom handler sets it explicitly (see auth-rate-limit-metrics.ts), so a
+  // client doing Retry-After backoff behaves the same against either limiter.
   // NOTE: rateLimitKeyFromRequest returns a BARE ip with no namespace
   // prefix, unlike sessionRateLimitKeyFromRequest's `ip:` fallback arm.
   // Separate express-rate-limit stores, so no poisoning between them — but
   // the two `ip`-shaped key spaces are NOT the same one.
+  //
+  // OPEN ASSUMPTION (BS#2193, sibling of BS#2190 on the same generator):
+  // this keys on the FULL X-Real-IP, not on the /56 prefix
+  // express-rate-limit's own `ipKeyGenerator` would use. A single IPv6 client
+  // typically holds a /64, so if nginx can ever hand us an IPv6 X-Real-IP,
+  // one client can mint effectively unlimited ceiling buckets and this
+  // "SECURITY REQUIREMENT" is weaker than it reads. Whether that is reachable
+  // depends on the host's nginx `listen`/`real_ip` configuration, which lives
+  // at /etc/nginx/nginx.conf on the EC2 box and NOT in this repo — so it was
+  // not settled here. It is unchanged from the pre-BS#2169 behavior of the two
+  // older auth limiters that share this generator, but it is newly
+  // load-bearing now that this ceiling is the only IP-based bound on
+  // /get-session. Rekeying it also silently rekeys those two brute-force
+  // limiters, which is why it is a follow-up and not a drive-by here.
   const getSessionIpRateLimit = rateLimit({
     ...getSessionSharedOpts,
     limit: 600,
@@ -624,7 +641,13 @@ void (async () => {
   function shutdown(signal: string): void {
     console.log(`[auth-shutdown] Received ${signal}, shutting down...`);
     server.close(() => {
-      closeDatabaseConnection()
+      // Flush buffered rate-limit metrics before closing the DB (BS#2169).
+      // The emitter's flush timer is unref'd on a 30 s interval, so without
+      // this a deploy drops up to a full window of RateLimited points. The
+      // call is internally bounded and never rejects, so it cannot delay or
+      // wedge shutdown — see flushRateLimitMetrics.
+      flushRateLimitMetrics()
+        .then(() => closeDatabaseConnection())
         .then(() => process.exit(0))
         .catch(() => process.exit(1));
     });

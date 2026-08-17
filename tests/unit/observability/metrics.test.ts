@@ -122,11 +122,104 @@ describe('createBufferedMetricEmitter', () => {
     emitter.record({ metricName: 'Widgets' });
     emitter.record({ metricName: 'Widgets' });
 
-    // Yield once for the synchronous flush kicked off inside record().
-    await new Promise((resolve) => setImmediate(resolve));
+    // No yield needed: flush() joins the send record() already kicked off,
+    // rather than resolving early against the drained buffer.
+    await emitter.flush();
 
     expect(mockSend).toHaveBeenCalledTimes(1);
     expect(lastCommand().MetricData[0].Value).toBe(3);
+  });
+
+  it('flush() awaits a size-triggered send that is still in flight', async () => {
+    // The contract a shutdown hook depends on: record() drains the buffer
+    // synchronously, so a flush() that only looked at buffer.length would
+    // resolve while PutMetricData was still pending and let the process exit
+    // before the batch landed.
+    let releaseSend: () => void = () => {};
+    let sendStarted = false;
+    mockSend.mockImplementation(() => {
+      sendStarted = true;
+      return new Promise((resolve) => {
+        releaseSend = () => resolve({});
+      });
+    });
+
+    const emitter = createBufferedMetricEmitter({ namespace: 'WXYC/Test', flushAtBufferSize: 2 });
+    emitter.record({ metricName: 'Widgets' });
+    emitter.record({ metricName: 'Widgets' });
+
+    let flushResolved = false;
+    const flushPromise = emitter.flush().then(() => {
+      flushResolved = true;
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sendStarted).toBe(true);
+    expect(flushResolved).toBe(false);
+
+    releaseSend();
+    await flushPromise;
+    expect(flushResolved).toBe(true);
+  });
+
+  it('does not coalesce same-name, same-dimension records that carry different units', async () => {
+    // Regression guard: with `unit` outside the coalesce key these two would
+    // publish ONE datum of Value 251 stamped Milliseconds — summing a duration
+    // and a count, under whichever unit happened to arrive first. Inert for a
+    // single-unit call site; a real defect for the next consumer of this
+    // shared package.
+    const emitter = createBufferedMetricEmitter({ namespace: 'WXYC/Test' });
+    emitter.record({ metricName: 'Latency', unit: 'Milliseconds', value: 250 });
+    emitter.record({ metricName: 'Latency', value: 1 });
+    await emitter.flush();
+
+    const { MetricData } = lastCommand();
+    expect(MetricData).toHaveLength(2);
+    expect(MetricData.find((d) => d.Unit === 'Milliseconds')?.Value).toBe(250);
+    expect(MetricData.find((d) => d.Unit === 'Count')?.Value).toBe(1);
+  });
+
+  it('emits the dimensionless companion if ANY record in a coalesced group asked for it', async () => {
+    // First-wins would drop the alarm-input series whenever an opted-out
+    // record happened to land first.
+    const emitter = createBufferedMetricEmitter({ namespace: 'WXYC/Test' });
+    emitter.record({ metricName: 'Widgets', dimensions: [{ name: 'Kind', value: 'a' }] });
+    emitter.record({
+      metricName: 'Widgets',
+      dimensions: [{ name: 'Kind', value: 'a' }],
+      emitDimensionlessCompanion: true,
+    });
+    await emitter.flush();
+
+    const { MetricData } = lastCommand();
+    expect(MetricData).toHaveLength(2);
+    expect(MetricData.filter((d) => d.Dimensions.length === 0)).toHaveLength(1);
+    expect(MetricData.every((d) => d.Value === 2)).toBe(true);
+  });
+
+  it('flushes on the interval when the buffer never reaches the size threshold', async () => {
+    // The primary path for the BS#2169 call site: at single-digit rejections
+    // per minute the buffer never reaches flushAtBufferSize, so every real
+    // metric ships through this branch.
+    jest.useFakeTimers();
+    try {
+      const emitter = createBufferedMetricEmitter({
+        namespace: 'WXYC/Test',
+        flushIntervalMs: 30_000,
+        flushAtBufferSize: 10,
+      });
+      emitter.record({ metricName: 'Widgets' });
+
+      expect(mockSend).not.toHaveBeenCalled();
+
+      jest.advanceTimersByTime(30_000);
+      await emitter.flush();
+
+      expect(mockSend).toHaveBeenCalledTimes(1);
+      expect(lastCommand().MetricData[0].Value).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('does not flush before the size threshold or a forced flush', async () => {
