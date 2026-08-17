@@ -900,9 +900,28 @@ internal_route.post('/rotation-webhook', async (req, res) => {
         // every client; a missing linkage is recoverable by hand, a fabricated
         // bin is invisible. If these start appearing, the fix is upstream: give
         // the release a real bin in tubafrenzy.
+        //
+        // `album_id` is deliberately ungated (unlike the fields below) — it is
+        // written on every delivery through this arm, or the linkage event
+        // BS#1082/#1312 exists to deliver would silently no-op.
+        //
+        // BS#2109 review round 3 finding 2, re-derived for this arm: it is a
+        // plain UPDATE, not the sibling INSERT...ON CONFLICT below, so there
+        // is no `excluded` row to read — the delivery's own resolved
+        // `albumId` stands in for it. `rawLibraryId` truthy means tubafrenzy
+        // is asserting a real link this delivery, so `albumId` (even null,
+        // if the id didn't resolve) is written outright — same unconditional
+        // overwrite as the sibling arm's `albumIdExpr`. `rawLibraryId` falsy
+        // (0/absent — tubafrenzy doesn't know) must not downgrade a
+        // Backend-made link (`PATCH /library/rotation/:id/link`) to NULL, so
+        // it COALESCEs against the row's current value instead — `albumId` is
+        // guaranteed null whenever `rawLibraryId` is falsy (`getAlbumIdByLegacyId`
+        // short-circuits on a falsy id), so this is the plain-UPDATE
+        // equivalent of the sibling arm's
+        // `COALESCE(excluded.album_id, rotation.album_id)`.
         const partialSet: Record<string, unknown> = {
-          album_id: albumId,
           legacy_library_release_id: rawLibraryId || null,
+          album_id: rawLibraryId ? albumId : sql`COALESCE(${albumId}, ${rotation.album_id})`,
         };
         if (release.killDate !== undefined) {
           partialSet.kill_date = killDate;
