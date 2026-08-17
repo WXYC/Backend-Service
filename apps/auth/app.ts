@@ -22,6 +22,7 @@ import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
 import { createAutoDjUser } from './create-auto-dj-user';
 import { createDefaultUser } from './create-default-user';
+import { syncAdminRoles } from './sync-admin-roles';
 import { resolveOrganization } from './resolve-organization';
 import { shouldCaptureAuthExpressError } from './sentry-error-filter';
 import { E2E_INCOMPLETE_USER_ID, E2E_INCOMPLETE_USER_PASSWORD } from './e2e-test-constants';
@@ -460,49 +461,47 @@ Sentry.setupExpressErrorHandler(app, { shouldHandleError: shouldCaptureAuthExpre
 // Sentry. See `./fallback-error-handler.ts` for rationale (BS#1109).
 app.use(fallbackErrorHandler);
 
-// Create default user if needed
-// Fix admin roles for existing stationManagers (one-time migration)
-const syncAdminRoles = async () => {
+const onAdminSyncError = (error: unknown) => {
+  console.error('[ADMIN PERMISSIONS] Error fixing admin roles:', error);
+  Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'admin-sync' } });
+};
+
+// Reconcile the admin flag for existing stationManagers. Runs on every boot,
+// not once: it is the retry path for a membership hook that failed.
+const runSyncAdminRoles = async () => {
+  // The dynamic imports sit inside the same catch as the sync itself: a
+  // failure to resolve either module is as survivable as a failed query, and
+  // must not take the server's startup path down.
   try {
     const { db, user, member, organization } = await import('@wxyc/database');
     const { eq, sql } = await import('drizzle-orm');
 
-    const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
-    if (!defaultOrgSlug) {
-      console.log('[ADMIN PERMISSIONS] DEFAULT_ORG_SLUG not set, skipping admin role fix');
-      return;
-    }
-
-    // Find all users who are stationManager/admin/owner in default org but don't have admin role
-    const usersNeedingFix = await db
-      .select({
-        userId: user.id,
-        userEmail: user.email,
-        userRole: user.role,
-        memberRole: member.role,
-      })
-      .from(user)
-      .innerJoin(member, sql`${member.userId} = ${user.id}`)
-      .innerJoin(organization, sql`${member.organizationId} = ${organization.id}`)
-      .where(
-        sql`${organization.slug} = ${defaultOrgSlug}
+    await syncAdminRoles({
+      defaultOrgSlug: process.env.DEFAULT_ORG_SLUG,
+      // Find all users who are stationManager/admin/owner in default org but don't have admin role
+      findUsersMissingAdminFlag: (defaultOrgSlug) =>
+        db
+          .select({
+            userId: user.id,
+            userEmail: user.email,
+            userRole: user.role,
+            memberRole: member.role,
+          })
+          .from(user)
+          .innerJoin(member, sql`${member.userId} = ${user.id}`)
+          .innerJoin(organization, sql`${member.organizationId} = ${organization.id}`)
+          .where(
+            sql`${organization.slug} = ${defaultOrgSlug}
         AND ${member.role} IN ('admin', 'owner', 'stationManager')
         AND (${user.role} IS NULL OR ${user.role} != 'admin')`
-      );
-
-    if (usersNeedingFix.length > 0) {
-      console.log(`[ADMIN PERMISSIONS] Found ${usersNeedingFix.length} users needing admin role fix: `);
-      for (const u of usersNeedingFix) {
-        console.log(`[ADMIN PERMISSIONS] - ${u.userEmail} (${u.memberRole}) - current role: ${u.userRole || 'null'}`);
-        await db.update(user).set({ role: 'admin' }).where(eq(user.id, u.userId));
-        console.log(`[ADMIN PERMISSIONS] - Fixed: ${u.userEmail} now has admin role`);
-      }
-    } else {
-      console.log('[ADMIN PERMISSIONS] All stationManagers already have admin role');
-    }
+          ),
+      setUserRole: async (userId, role) => {
+        await db.update(user).set({ role }).where(eq(user.id, userId));
+      },
+      onError: onAdminSyncError,
+    });
   } catch (error) {
-    console.error('[ADMIN PERMISSIONS] Error fixing admin roles:', error);
-    Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'admin-sync' } });
+    onAdminSyncError(error);
   }
 };
 
@@ -512,7 +511,7 @@ void (async () => {
   // Runs after createDefaultUser so the default org already exists. Gated by
   // CREATE_AUTO_DJ_USER (default off); idempotent skip-if-exists. See #1644.
   await createAutoDjUser();
-  await syncAdminRoles();
+  await runSyncAdminRoles();
 
   // Bootstrap oauthApplication rows for every trustedClient. See
   // `bootstrap-trusted-clients.ts` for why this exists. warn-and-continue to
