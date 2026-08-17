@@ -213,6 +213,11 @@ export const ALL_LML_CALLERS = [
   // caller-bearing call site — it only calls `refreshForIdentities`, which
   // takes no `caller` parameter — so it needs no entry here.
   'rotation-release-id-backfill',
+  // BS#2176: the recurring cause-agnostic re-ask of `enriched_no_match`
+  // flowsheet rows. Class 5 — the same "small bounded batch, per-row
+  // lookupMetadata, dedicated per-job limiter" shape as
+  // rotation-release-id-backfill above.
+  'flowsheet-no-match-recheck',
   // BS#1283 (epic #1280 sub-issue 3): the daily discogs_unavailable recheck
   // cron. Class 5 — batch/backfill enrichment, dedicated per-job limiter
   // (`jobs/library-discogs-unavailable-recheck/lml-limiter.ts`), never the
@@ -272,6 +277,7 @@ const CALLER_CLASS: Record<LmlCaller, LmlCallerClass> = {
   'concerts-genre-enrichment': 5,
   'concerts-artist-lml-resolver': 5,
   'rotation-release-id-backfill': 5,
+  'flowsheet-no-match-recheck': 5,
   'library-discogs-unavailable-recheck': 5,
   'library-artwork-url-backfill': 5,
   'library-canonical-entity-backfill': 5,

@@ -1,0 +1,28 @@
+{
+  "name": "@wxyc/flowsheet-no-match-recheck",
+  "cron-schedule": "47 */6 * * *",
+  "version": "1.0.0",
+  "description": "WXYC recurring cron (BS#2176): cause-agnostic re-ask of flowsheet.metadata_status='enriched_no_match' rows via LML, with an attempt-marker + no-match TTL bounded drip, cooperative live-DJ pause, and the track-context trust gate.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_flowsheet_no_match_recheck:ci -f ../../Dockerfile.flowsheet-no-match-recheck ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@sentry/node": "^10.69.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0",
+    "@wxyc/metadata": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

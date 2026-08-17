@@ -1,0 +1,48 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /flowsheet-no-match-recheck-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./shared/lml-client ./shared/lml-client
+COPY ./shared/metadata ./shared/metadata
+COPY ./jobs/flowsheet-no-match-recheck ./jobs/flowsheet-no-match-recheck
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/metadata --workspace=@wxyc/flowsheet-no-match-recheck
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /flowsheet-no-match-recheck
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/flowsheet-no-match-recheck/package* ./jobs/flowsheet-no-match-recheck/
+COPY ./shared/database/package* ./shared/database/
+COPY ./shared/lml-client/package* ./shared/lml-client/
+COPY ./shared/metadata/package* ./shared/metadata/
+
+# `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
+# (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
+# .npmrc the prod stage's npm install 401s on @wxyc/shared. Mirrors the
+# pattern in Dockerfile.rotation-release-id-backfill / Dockerfile.backend.
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./flowsheet-no-match-recheck-builder/jobs/flowsheet-no-match-recheck/dist ./jobs/flowsheet-no-match-recheck/dist
+COPY --from=builder ./flowsheet-no-match-recheck-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./flowsheet-no-match-recheck-builder/shared/lml-client/dist ./shared/lml-client/dist
+COPY --from=builder ./flowsheet-no-match-recheck-builder/shared/metadata/dist ./shared/metadata/dist
+
+# Per-statement timeout: the writer does single-row UPDATEs and one UPSERT
+# per matched row; 60 s is more than enough headroom.
+ENV DB_STATEMENT_TIMEOUT_MS=60000
+
+# Identifies the connection in pg_stat_activity during incident triage.
+ENV DB_APPLICATION_NAME=wxyc-flowsheet-no-match-recheck
+
+CMD ["npm", "start", "--workspace=@wxyc/flowsheet-no-match-recheck"]
