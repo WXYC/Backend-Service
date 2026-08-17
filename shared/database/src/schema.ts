@@ -1533,25 +1533,31 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_rotation_id_idx')
       .on(table.rotation_id)
       .where(sql`${table.rotation_id} IS NOT NULL`),
-    // BS#2176. Partial B-tree on `no_match_recheck_attempted_at`, scoped to
-    // the exact cohort `jobs/flowsheet-no-match-recheck` scans: terminal
-    // no-match track rows with a real artist name. Same shape as
+    // BS#2176. Partial B-tree on `(no_match_recheck_attempted_at, id)`,
+    // scoped to the exact cohort `jobs/flowsheet-no-match-recheck` scans:
+    // terminal no-match track rows with a real artist name. Same shape as
     // `flowsheet_metadata_status_pending_idx` above (a partial predicate
-    // matching the sweep's own WHERE), but keyed on the marker column
-    // itself rather than `id` — the sweep's candidate query orders by
-    // `no_match_recheck_attempted_at ASC NULLS FIRST, id ASC` so every
-    // run drains the longest-waiting rows first, and this ordering is
-    // exactly what a B-tree on that column serves for free.
+    // matching the sweep's own WHERE). The sweep's candidate query orders
+    // by `no_match_recheck_attempted_at ASC NULLS FIRST, id ASC` so every
+    // run drains the longest-waiting rows first; this index matches that
+    // ordering exactly — including the `NULLS FIRST` direction (a plain
+    // `ASC` B-tree defaults to `NULLS LAST` and cannot serve a `NULLS
+    // FIRST` query, forcing a full sort of the matching rows before the
+    // `LIMIT`, BS#2179 review MEDIUM 4) — and the `id` tiebreak, so the
+    // ORDER BY + LIMIT is satisfied by walking the index directly, with no
+    // separate sort node (the query still visits the heap for
+    // `artist_name`/`album_title`/`track_title`/`album_id`, not covered by
+    // this index — this is a no-sort scan, not an index-only scan).
     //
     // Built CONCURRENTLY out-of-band on prod first via:
     //   CREATE INDEX CONCURRENTLY IF NOT EXISTS flowsheet_no_match_recheck_idx
-    //     ON wxyc_schema.flowsheet (no_match_recheck_attempted_at)
+    //     ON wxyc_schema.flowsheet (no_match_recheck_attempted_at NULLS FIRST, id)
     //     WHERE metadata_status = 'enriched_no_match' AND entry_type = 'track'
     //       AND artist_name IS NOT NULL;
     // Migration SQL carries IF NOT EXISTS so the apply is a no-op against
     // the prod DB where the index is already present.
     index('flowsheet_no_match_recheck_idx')
-      .on(table.no_match_recheck_attempted_at)
+      .on(table.no_match_recheck_attempted_at.asc().nullsFirst(), table.id.asc())
       .where(
         sql`${table.metadata_status} = 'enriched_no_match' AND ${table.entry_type} = 'track' AND ${table.artist_name} IS NOT NULL`
       ),
