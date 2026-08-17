@@ -753,20 +753,46 @@ describe('Library Rotation', () => {
       await deleteRotationRows(createdRotationIds);
     });
 
-    test('links album_id and clears artist_name/album_title/record_label in the same transaction', async () => {
+    // Review round 3 finding 1: linking deliberately does NOT clear the
+    // free-text snapshot — see `linkRotationToAlbum`'s doc for why
+    // (clearing it stranded the tracklist picker with no self-heal path).
+    test('links album_id and leaves artist_name/album_title/record_label untouched', async () => {
       const created = await createUncataloguedRotation({ record_label: 'Link Test Label' });
 
       const res = await auth.patch(`/library/rotation/${created.id}/link`).send({ album_id: 1 }).expect(200);
 
       expect(res.body.album_id).toBe(1);
-      expect(res.body.artist_name).toBeNull();
-      expect(res.body.album_title).toBeNull();
-      expect(res.body.record_label).toBeNull();
+      expect(res.body.artist_name).toBe('Link Test Artist');
+      expect(res.body.album_title).toBe('Link Test Album');
+      expect(res.body.record_label).toBe('Link Test Label');
 
-      // No window where the row carries both album_id and stale free text —
-      // read the row back and re-assert (guards against a partial write).
+      // Once album_id resolves, the row drops out of the uncatalogued queue
+      // regardless of whether the snapshot columns are also populated — the
+      // queue's predicate is `album_id IS NULL` alone.
       const reread = await auth.get('/library/rotation/uncatalogued').expect(200);
       expect(reread.body.find((r) => r.id === created.id)).toBeUndefined();
+    });
+
+    // Review round 3 finding 4: the link response is projected the same way
+    // `GET /library/rotation/uncatalogued` is — not the raw `.returning()`
+    // row, which would leak legacy_rotation_id, legacy_library_release_id,
+    // discogs_release_id, discogs_release_id_source, lml_identity_id, and
+    // the two attempt-at markers.
+    test('link response is projected — no server-derived or external-ID columns', async () => {
+      const created = await createUncataloguedRotation();
+
+      const res = await auth.patch(`/library/rotation/${created.id}/link`).send({ album_id: 1 }).expect(200);
+
+      expect(Object.keys(res.body).sort()).toEqual([
+        'add_date',
+        'album_id',
+        'album_title',
+        'artist_name',
+        'id',
+        'kill_date',
+        'record_label',
+        'rotation_bin',
+      ]);
     });
 
     test('rejects double-linking', async () => {

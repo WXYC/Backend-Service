@@ -664,7 +664,7 @@ export const getUncataloguedRotationFromDB = async (
 };
 
 export type LinkRotationOutcome =
-  | { outcome: 'linked'; rotation: RotationRelease }
+  | { outcome: 'linked'; rotation: UncataloguedRotationRow }
   | { outcome: 'rotation_not_found' }
   | { outcome: 'already_linked' }
   | { outcome: 'album_not_found' };
@@ -674,11 +674,49 @@ export type LinkRotationOutcome =
  * `PATCH /library/rotation/:rotation_id/link` — the "Import to Library"
  * step of the tubafrenzy `/wxycdb` workflow).
  *
- * Clears `artist_name` / `album_title` / `record_label` in the same
- * transaction as the `album_id` write, matching `jobs/legacy-linkage-resolve`
- * (`resolveRotationLinks`) — display reads through the `library` join once
- * linked, so a link that doesn't clear the snapshot leaves stale free text
- * visible until the next cron tick.
+ * **Review round 3 finding 1: deliberately does NOT clear `artist_name` /
+ * `album_title` / `record_label`.** The first revision cleared the trio in
+ * the same transaction, matching `jobs/legacy-linkage-resolve` — reasoning
+ * that display reads through the `library` join once linked, so stale free
+ * text would never surface. True for `getRotationFromDB`
+ * (`COALESCE(artists.artist_name, rotation.artist_name)` always prefers the
+ * joined canonical value once `album_id` resolves; clearing the snapshot is
+ * display-invisible there) but wrong for `resolveRotationPickerSource`'s
+ * three-tier tracklist resolution: tier 1 (`rotation.discogs_release_id`)
+ * and tier 2 (`library_identity.discogs_release_id` via the `album_id`
+ * bridge, ~24% coverage) are both very likely still NULL immediately after a
+ * link — `addToRotation`'s synchronous `library_identity` → `resolveIdentity`
+ * hop only runs on `POST /library/rotation`, never here — and clearing the
+ * snapshot also removed tier 3's only input:
+ * `resolveRotationDiscogsReleaseViaLml(rotationId, artist_name, album_title)`
+ * short-circuits on `if (!artistName || !albumTitle) return null`. The
+ * picker ended up strictly worse than before the link, with no self-heal:
+ * `jobs/rotation-release-id-backfill`'s candidate query requires
+ * `artist_name IS NOT NULL AND album_title IS NOT NULL`, and
+ * `jobs/rotation-lml-identity-backfill`'s requires
+ * `discogs_release_id IS NOT NULL` — each needs what only the other could
+ * have produced.
+ *
+ * Leaving the trio in place costs nothing display-side and re-opens both
+ * self-heal paths: tier 3 keeps working immediately after the link, and
+ * `rotation-release-id-backfill`'s 6-hourly cron (17 minutes past the hour,
+ * every sixth hour, UTC) can now pick the row up
+ * (its candidate query has no `album_id` predicate) and mint
+ * `discogs_release_id`, which unblocks `rotation-lml-identity-backfill` in
+ * turn. The alternative fix — replicate `addToRotation`'s synchronous
+ * `library_identity` → `resolveIdentity` hop inside this transaction — was
+ * rejected: it only helps the ~24% of albums `library_identity` already has
+ * a resolved handle for, and it would add an LML round-trip inside a
+ * librarian-facing, otherwise-instant endpoint's transaction for no benefit
+ * on the other 76%.
+ *
+ * This does temporarily reintroduce the "`album_id` set AND snapshot set"
+ * shape `POST /internal/rotation-webhook`'s linkage-aware SET clause
+ * (review round 3 finding 2) exists to collapse — but only until whichever
+ * comes first: the picker mints a real `discogs_release_id` (tier 1 no
+ * longer needs the snapshot) or a `/wxycdb` edit lands on the row, whose
+ * gated SET clause nulls the trio out anyway. Never permanent, unlike the
+ * bug this replaces.
  *
  * The final UPDATE re-guards `album_id IS NULL` in its own WHERE (not just
  * the earlier SELECT) so a concurrent link between the check and the write
@@ -689,6 +727,17 @@ export type LinkRotationOutcome =
  * `getUncataloguedRotationFromDB`'s read predicate and `addRotation`'s
  * rejection of `album_id: 0` — see that function's doc for why no `0`
  * sentinel exists on this column.
+ *
+ * **Review round 3 finding 4:** `.returning()` is projected through the same
+ * `UNCATALOGUED_ROTATION_PROJECTION` the queue read uses, rather than a bare
+ * `.returning()` — the raw row publishes the same seven server-derived
+ * columns (`legacy_rotation_id`, `legacy_library_release_id`,
+ * `discogs_release_id`, `discogs_release_id_source`, `lml_identity_id`, and
+ * the two attempt-at markers) that projection exists to keep off the wire,
+ * and `tests/integration/library.spec.js` pins the rotation surface against
+ * exposing them. `addRotation`'s unprojected `.returning()` is pre-existing
+ * and out of scope here — it publishes onto a freshly-inserted row this
+ * client just supplied every field of, not a read of someone else's data.
  */
 export const linkRotationToAlbum = async (rotationId: number, albumId: number): Promise<LinkRotationOutcome> => {
   return db.transaction(async (tx) => {
@@ -711,9 +760,9 @@ export const linkRotationToAlbum = async (rotationId: number, albumId: number): 
 
     const [updated] = await tx
       .update(rotation)
-      .set({ album_id: albumId, artist_name: null, album_title: null, record_label: null })
+      .set({ album_id: albumId })
       .where(and(eq(rotation.id, rotationId), isNull(rotation.album_id)))
-      .returning();
+      .returning(UNCATALOGUED_ROTATION_PROJECTION);
 
     if (!updated) {
       // Race: another request linked this row between the check above and

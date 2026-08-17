@@ -1507,10 +1507,12 @@ describe('POST /internal/rotation-webhook', () => {
     expect((setClause.album_id as { values?: unknown[] })?.values).toEqual([rotation.album_id]);
   });
 
-  // The COALESCE must not leak into the presence-gated columns: BS#1082 +
-  // BS#1312's gate is a different mechanism (was the field in the payload at
-  // all?) and is load-bearing for partial payloads.
-  it('leaves the other SET entries as plain excluded.* assignments', async () => {
+  // Review round 3 finding 2 narrowed this: only `legacy_library_release_id`
+  // / `rotation_bin` / `kill_date` are still plain `excluded.*` assignments.
+  // `artist_name` / `album_title` / `record_label` are covered by the two
+  // tests below instead — they're no longer plain assignments even when
+  // present, because they're now gated on the row's resolved linkage.
+  it('leaves legacy_library_release_id, rotation_bin, and kill_date as plain excluded.* assignments', async () => {
     const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
     onConflictSpy.mockClear();
 
@@ -1520,10 +1522,70 @@ describe('POST /internal/rotation-webhook', () => {
       .send({ action: 'update', release: validRelease });
 
     const setClause = (onConflictSpy.mock.calls[0][0] as { set: Record<string, unknown> }).set;
-    for (const column of ['legacy_library_release_id', 'rotation_bin', 'kill_date', 'artist_name', 'album_title']) {
+    for (const column of ['legacy_library_release_id', 'rotation_bin', 'kill_date']) {
       const rendered = ((setClause[column] as { sql?: string[] })?.sql ?? []).join('?');
       expect(rendered).not.toContain('COALESCE');
+      expect(rendered).not.toContain('CASE');
     }
+  });
+
+  // BS#2109 review round 3 finding 2: a `/wxycdb` edit's incoming free text
+  // must not land on an already-linked row — that recreates the "album_id
+  // set AND snapshot set" shape `PATCH /library/rotation/:id/link`'s 409
+  // and sibling PR #2165 both exist to prevent, and that the BS#2080
+  // arm-(b)/(c) rotation-badge match doesn't filter `album_id IS NULL`
+  // against. `artist_name` / `album_title` / `record_label` are still
+  // presence-gated (BS#1082 + BS#1312, unchanged — see the previous two
+  // tests) but a present column is now a CASE, not a plain `excluded.*`
+  // assignment, gated on the exact same expression assigned to `album_id`.
+  it('gates artist_name/album_title/record_label on the resolved album_id rather than writing excluded.* unconditionally', async () => {
+    const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
+    onConflictSpy.mockClear();
+
+    await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', release: validRelease });
+
+    const setClause = (onConflictSpy.mock.calls[0][0] as { set: Record<string, unknown> }).set;
+    for (const column of ['artist_name', 'album_title', 'record_label']) {
+      const entry = setClause[column] as { sql?: string[]; values?: unknown[] };
+      const rendered = (entry?.sql ?? []).join('?');
+      expect(rendered).toContain('CASE WHEN');
+      expect(rendered).toContain('IS NULL THEN');
+      expect(rendered).toContain(`excluded.${column}`);
+      expect(rendered).toContain('ELSE NULL END');
+      // The CASE condition embeds the identical SQL fragment assigned to
+      // `album_id` — checked by object identity rather than re-rendering
+      // the nested SQL, since drizzle-orm's mock nests an interpolated
+      // `SQL` fragment as an opaque object inside `.values` rather than
+      // splicing its text into the outer `.sql` chunks.
+      expect(entry?.values?.[0]).toBe(setClause.album_id);
+    }
+  });
+
+  // Review round 3 finding 2's "better form": a genuinely resolvable
+  // `libraryReleaseId` takes `excluded.album_id` unconditionally — not
+  // COALESCEd — restoring tubafrenzy's ability to relink a row, which the
+  // interim blanket-COALESCE shape had silently revoked (its own docblock's
+  // claim that tubafrenzy could no longer *unlink* a row understated the
+  // change: it could no longer change album_id at all).
+  it('writes album_id from excluded.album_id (not COALESCEd) when the payload carries a genuine libraryReleaseId', async () => {
+    const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
+    onConflictSpy.mockClear();
+    mockLimit.mockReset();
+    mockLimit.mockResolvedValueOnce([{ id: 42 }]);
+
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', release: { id: 500, libraryReleaseId: 777 } });
+
+    expect(res.status).toBe(200);
+    const setClause = (onConflictSpy.mock.calls[0][0] as { set: Record<string, unknown> }).set;
+    const rendered = ((setClause.album_id as { sql?: string[] })?.sql ?? []).join('?');
+    expect(rendered).not.toContain('COALESCE');
+    expect(rendered).toBe('excluded.album_id');
   });
 
   // -- Kill --
