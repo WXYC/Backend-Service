@@ -23,8 +23,17 @@
  *      rather than persisting a same-artist substitution.
  *   7. BS#1294-style discogs_unavailable forwarding to the lookup call.
  *   8. Cooperative live-DJ pause + db_error isolation, mirroring the donor.
+ *   9. Candidate count / projected LML call volume is logged as soon as the
+ *      candidates are loaded — before any lookup or write — satisfying the
+ *      BS#2176 dry-run acceptance criterion for both dry-run and live runs.
  */
 import { jest } from '@jest/globals';
+
+const mockLog = jest.fn();
+jest.mock('../../../../jobs/flowsheet-no-match-recheck/logger.js', () => ({
+  log: mockLog,
+  captureError: jest.fn(),
+}));
 
 import { type CheckLiveActivityFn } from '@wxyc/database';
 import type { DiscogsMatchResult } from '@wxyc/lml-client';
@@ -51,6 +60,35 @@ const makeMarkAttempted = (): jest.MockedFunction<MarkAttemptedFn> =>
   jest.fn<MarkAttemptedFn>().mockResolvedValue({ written: true });
 
 describe('runNoMatchRecheck', () => {
+  beforeEach(() => {
+    mockLog.mockClear();
+  });
+
+  test('BS#2176: logs the candidate count / projected LML call volume as soon as candidates load, before any lookup or write', async () => {
+    const loadCandidates = makeLoadCandidates([
+      { id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', track_title: 'la paradoja', album_id: null },
+      {
+        id: 2,
+        artist_name: 'Jessica Pratt',
+        album_title: 'On Your Own Love Again',
+        track_title: 'Back, Baby',
+        album_id: null,
+      },
+    ]);
+    const lookup = jest.fn<LookupFn>().mockResolvedValue({ kind: 'no_match' });
+    const write = jest.fn<WriteFn>().mockResolvedValue({ written: true });
+    const markAttempted = makeMarkAttempted();
+
+    await runNoMatchRecheck({ loadCandidates, lookup, write, markAttempted, dryRun: true });
+
+    const candidatesLoadedCall = mockLog.mock.calls.find((call) => call[1] === 'candidates_loaded');
+    expect(candidatesLoadedCall).toBeDefined();
+    expect(candidatesLoadedCall?.[3]).toMatchObject({ candidates: 2, projected_lml_calls: 2, dry_run: true });
+    // Reported as the very first log line — before the loop touches lookup
+    // or write for any row.
+    expect(mockLog.mock.calls.indexOf(candidatesLoadedCall)).toBe(0);
+  });
+
   test('one resolvable row produces one resolved write and bumps the counter', async () => {
     const loadCandidates = makeLoadCandidates([
       { id: 5308981, artist_name: 'Vladislav Delay', album_title: 'Entain', track_title: 'Kohde', album_id: null },
