@@ -532,7 +532,7 @@ components:
           nullable: true
         rotation_bin:
           type: string
-          enum: ['S', 'L', 'M', 'H', 'N']
+          enum: ['S', 'L', 'M', 'H']
         add_date:
           type: string
           format: date
