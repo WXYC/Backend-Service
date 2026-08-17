@@ -669,19 +669,52 @@ export const getArtistCard: RequestHandler<{ id: string }> = async (req, res) =>
 type UpdateArtistRequest = {
   artist_name?: string;
   alphabetical_name?: string;
+  // `/wxycdb`'s `artistCardModify.jsp:41-64` posts five fields --
+  // `ArtistAdminServlet.java:196-206` applies all five -- but only the two
+  // above have a write path here. Declared (not just left unread) so
+  // `ARTIST_NO_COLUMN_FIELDS` below can reject a client that sends one of
+  // these three with a precise 400 instead of silently dropping it.
+  genre_id?: unknown;
+  code_letters?: unknown;
+  code_artist_number?: unknown;
 };
 
 const MAX_ARTIST_TEXT_LENGTH = 128;
 
 const UPDATABLE_ARTIST_FIELDS = ['artist_name', 'alphabetical_name'] as const;
 
+const ARTIST_NO_COLUMN_FIELDS = ['genre_id', 'code_letters', 'code_artist_number'] as const;
+
+// Why each field has no write path today -- verified against the FULL write
+// surface, not asserted: `updateArtistInDB` is the only `.update(artists)`
+// call in the codebase and only ever SETs `artist_name`/`alphabetical_name`,
+// and `genre_artist_crossreference` (the row that carries `genre_id` and
+// `code_artist_number`, i.e. `artist_genre_code`) is only ever `.insert()`ed
+// -- by `POST /library/artists` -- never `.update()`d anywhere. So a 409/404
+// pointing at "the endpoint that owns this field" would be dishonest: no
+// such endpoint exists yet.
+const ARTIST_NO_COLUMN_FIELD_OWNERS: Record<(typeof ARTIST_NO_COLUMN_FIELDS)[number], string> = {
+  genre_id:
+    'no write path: genre_artist_crossreference.genre_id is set once by POST /library/artists and is never UPDATEd by any endpoint',
+  code_letters:
+    'no write path: artists.code_letters is set once by POST /library/artists and is never UPDATEd by any endpoint',
+  code_artist_number:
+    'no write path: genre_artist_crossreference.artist_genre_code is set once by POST /library/artists and is never UPDATEd by any endpoint',
+};
+
 const NO_ARTIST_FIELDS_MESSAGE = `Bad Request: provide at least one of ${UPDATABLE_ARTIST_FIELDS.join(', ')}`;
 
 /**
  * PATCH /library/artists/:id -- allowlists exactly the two fields
- * `/wxycdb`'s `modifyArtist` form edits (BS#2156). Any other field on the
- * body is silently dropped, matching the `pickAddRotationFields` /
- * `pickUpdateEntryFields` allowlist convention elsewhere in this repo.
+ * `/wxycdb`'s `modifyArtist` form edits (BS#2156). The other three JSP
+ * fields (`genre_id`, `code_letters`, `code_artist_number`) are REJECTED
+ * with a 400 naming why (`ARTIST_NO_COLUMN_FIELD_OWNERS`), not silently
+ * dropped -- unlike the `pickAddRotationFields` / `pickUpdateEntryFields`
+ * allowlist convention elsewhere in this repo, which does drop silently.
+ * The difference: those allowlists drop server-derived columns a client
+ * should never control; these three are real edits a librarian can make on
+ * the legacy JSP that this endpoint simply cannot perform yet, so silently
+ * accepting-and-ignoring them would look like a successful edit that wasn't.
  */
 export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArtistRequest> = async (req, res) => {
   const artistId = parseArtistId(req.params.id);
@@ -695,6 +728,16 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
   const body: UpdateArtistRequest = req.body ?? {};
   if (typeof body !== 'object' || Array.isArray(body)) {
     throw new WxycError(NO_ARTIST_FIELDS_MESSAGE, 400);
+  }
+
+  // Reject a client that sends a field this endpoint cannot write, rather
+  // than silently dropping it (BS#2156 review). Precedes the has-any-field
+  // check below, matching the ROTATION_NO_COLUMN_FIELDS ordering PATCH
+  // /library/rotation/:id uses (WXYC/Backend-Service#2165).
+  const rejectedFields = ARTIST_NO_COLUMN_FIELDS.filter((field) => field in body);
+  if (rejectedFields.length > 0) {
+    const detail = rejectedFields.map((field) => `${field} (${ARTIST_NO_COLUMN_FIELD_OWNERS[field]})`).join(', ');
+    throw new WxycError(`Bad Request: no write path exists for ${detail}`, 400);
   }
 
   // Request-shape 400s precede the existence 404, matching updateAlbum. The
@@ -738,7 +781,7 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
     throw new WxycError(NO_ARTIST_FIELDS_MESSAGE, 400);
   }
 
-  // Same genre-scoped name-conflict guard `addArtist` enforces (BS#980): the
+  // Same name-conflict guard `addArtist` enforces (BS#980): the
   // `fold_artist_name` matcher (migration 0134) is the one thing standing
   // between a rename and recreating exactly the NFC/NFD/case duplicate state
   // `jobs/artist-unicode-dedup` exists to clean up. Only runs when the name is
@@ -750,14 +793,23 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
   // to return: that probe is `.limit(1)` with no `orderBy`, so on a genre that
   // already holds two fold-equal rows it can hand back the row being renamed
   // and the comparison would wave the rename through.
+  //
+  // NOT scoped to `existing.genre_id` -- `getArtistCardById` deliberately
+  // collapses a multi-genre artist to its LOWEST `genre_id` crossreference,
+  // so a probe fixed to that one genre would never see a fold-equal
+  // duplicate sitting in any of the artist's OTHER genres. Multi-genre
+  // artists are a designed state (`jobs/artist-unicode-dedup/merge.ts`
+  // repoints every crossreference onto a survivor precisely so the matcher
+  // reaches it from every genre), so `conflictingArtistIdInGenre` checks
+  // every genre `artistId` is crossreferenced in.
   if (updates.artist_name !== undefined && updates.artist_name !== existing.artist_name) {
-    const conflictingArtistId = await libraryService.conflictingArtistIdInGenre(
-      updates.artist_name,
-      existing.genre_id,
-      artistId
-    );
-    if (conflictingArtistId) {
-      const conflictingArtist = await libraryService.getArtistById(conflictingArtistId);
+    const conflictingArtistId = await libraryService.conflictingArtistIdInGenre(updates.artist_name, artistId);
+    // A miss on the second lookup means the row was deleted between the two
+    // queries, so the name is free again: proceed rather than answer 409
+    // with an `artist` the client cannot act on. Mirrors `addArtist`'s
+    // identical race handling above.
+    const conflictingArtist = conflictingArtistId ? await libraryService.getArtistById(conflictingArtistId) : null;
+    if (conflictingArtist) {
       res.status(409).json({
         message: 'Artist name already exists in that genre.',
         reason: 'artist_name_conflict',
@@ -781,20 +833,17 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
   res.status(200).json(refreshed);
 };
 
-// Same page-size convention as `GET /library/query` (see DEFAULT_LIMIT /
-// MAX_LIMIT there); a smaller default because one artist's shelf is a much
-// shorter list than a catalog search.
-const DEFAULT_RELEASES_LIMIT = 50;
-const MAX_RELEASES_LIMIT = 100;
-
 /**
  * GET /library/artists/:id/releases -- BS#2156: the release table on
  * `/wxycdb`'s artist card (`getLibraryReleasesForArtist`).
  *
- * Offset-paginated (`page`/`limit`) in the shape `GET /library/query` uses.
- * Unbounded, this hands any `catalog:read` DJ every row an artist has — 3,107
- * of them for artist 1087 ('Various Artists'), ~0.5-1 MB of JSON per
- * repeatable request.
+ * Offset-paginated (`page`/`limit`) in the shape `GET /library/query` uses --
+ * reuses that endpoint's `DEFAULT_LIMIT`/`MAX_LIMIT` (50/100, declared below;
+ * module-level consts are in scope regardless of declaration order) rather
+ * than a second pair of identical constants under a new name. Unbounded,
+ * this hands any `catalog:read` DJ every row an artist has — 3,107 of them
+ * for artist 1087 ('Various Artists'), ~0.5-1 MB of JSON per repeatable
+ * request.
  */
 export const getArtistReleases: RequestHandler<
   { id: string },
@@ -818,15 +867,23 @@ export const getArtistReleases: RequestHandler<
   if (req.query.limit !== undefined && typeof req.query.limit !== 'string') {
     throw new WxycError('limit must be a single string value', 400);
   }
-  const limit = parseInt(req.query.limit ?? String(DEFAULT_RELEASES_LIMIT));
+  const limit = parseInt(req.query.limit ?? String(DEFAULT_LIMIT));
   if (isNaN(limit) || limit < 1) {
     throw new WxycError('limit must be a positive integer', 400);
   }
-  if (limit > MAX_RELEASES_LIMIT) {
-    throw new WxycError(`limit must not exceed ${MAX_RELEASES_LIMIT}`, 400);
+  if (limit > MAX_LIMIT) {
+    throw new WxycError(`limit must not exceed ${MAX_LIMIT}`, 400);
   }
 
-  if (!(await libraryService.getArtistNameById(artistId))) {
+  // Same existence predicate GET/PATCH /library/artists/:id use
+  // (`getArtistCardById`'s INNER JOIN to `genre_artist_crossreference`), not
+  // the plain `artists` lookup `getArtistNameById` did before -- an artist
+  // row with no crossreference must 404 the same way here it already does on
+  // the card and the PATCH, not silently 200 with an empty release page. Also
+  // sidesteps the `!name` falsy-check trap: a legacy empty-string
+  // `artist_name` would read as "missing" under that check even though the
+  // row exists.
+  if (!(await libraryService.getArtistCardById(artistId))) {
     throw new WxycError('Artist not found', 404);
   }
   const [releases, total] = await Promise.all([
@@ -1948,6 +2005,9 @@ type LibraryQueryParams = {
 
 const VALID_CATALOG_SORTS: CatalogSort[] = ['artist', 'album', 'plays', 'date'];
 const VALID_CATALOG_ORDERS: CatalogOrder[] = ['asc', 'desc'];
+// Also reused by `getArtistReleases` (BS#2156) above -- module-level consts
+// are in scope regardless of declaration order, and the two endpoints share
+// this exact page-size convention rather than needing their own.
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 

@@ -2101,7 +2101,10 @@ paths:
         Enforced by `requirePermissions({ catalog: ['write'] })` — musicDirector
         or above, the same tier as `POST`/`PATCH /library`. Both fields are
         capped at 128 characters (the `varchar(128)` column width) and must be
-        non-empty strings; any other field on the body is silently dropped.
+        non-empty strings. `genre_id`, `code_letters`, and `code_artist_number`
+        are real fields on `/wxycdb`'s artist-card form but have no write path
+        here yet — sending one is rejected with a 400 naming why, not silently
+        dropped.
       security:
         - BearerAuth: ['catalog-write']
       parameters:
@@ -2146,8 +2149,10 @@ paths:
                     type: integer
         '400':
           description: >
-            Invalid artist id, missing/non-object body, no updatable fields
-            provided, or a field that is empty or over 128 characters
+            Invalid artist id, missing/non-object body, a `genre_id` /
+            `code_letters` / `code_artist_number` field with no write path,
+            no updatable fields provided, or a field that is empty or over
+            128 characters
         '404':
           description: Artist not found
         '409':

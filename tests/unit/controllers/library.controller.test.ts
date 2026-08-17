@@ -76,8 +76,7 @@ const mockUpdateArtistInDB =
       updates: Record<string, unknown>
     ) => Promise<{ id: number; artist_name: string; alphabetical_name: string } | undefined>
   >();
-const mockConflictingArtistIdInGenre =
-  jest.fn<(name: string, genreId: number, excludeArtistId: number) => Promise<number | null>>();
+const mockConflictingArtistIdInGenre = jest.fn<(name: string, excludeArtistId: number) => Promise<number | null>>();
 type ArtistReleaseRowMock = {
   id: number;
   last_modified: Date;
@@ -2641,7 +2640,7 @@ describe('library.controller', () => {
     it.each(rejected)('rejects an id that is %s with 400 on getArtistReleases', async (_label, rawId) => {
       const req = { params: { id: rawId }, query: {} } as unknown as Request;
       await expect(getArtistReleases(req, mockResponse(), next)).rejects.toThrow('Invalid artist ID');
-      expect(mockGetArtistNameById).not.toHaveBeenCalled();
+      expect(mockGetArtistCardById).not.toHaveBeenCalled();
     });
 
     it('accepts an id exactly at INT4_MAX', async () => {
@@ -2833,18 +2832,44 @@ describe('library.controller', () => {
       expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { artist_name: 'Anohni Hegarty' });
     });
 
-    it('drops any field outside the allowlist rather than rejecting the request', async () => {
-      mockGetArtistCardById.mockResolvedValue(existingCard);
-      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni Renamed', alphabetical_name: 'Anohni' });
+    // BS#2156 review: the AC says the endpoint "allowlists the two name
+    // fields and rejects anything else" -- these three real JSP fields must
+    // 400 with a precise reason, not be accepted-and-silently-dropped as if
+    // the edit had taken effect.
+    it.each(['code_letters', 'genre_id', 'code_artist_number'])(
+      'returns 400 rather than silently dropping %s, before the existence lookup',
+      async (field) => {
+        const req = {
+          params: { id: '42' },
+          body: { artist_name: 'Anohni Renamed', [field]: field === 'code_letters' ? 'ZZ' : 999 },
+        } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(updateArtistCard(req, res, next)).rejects.toThrow(`no write path exists for ${field}`);
+        expect(mockGetArtistCardById).not.toHaveBeenCalled();
+        expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+      }
+    );
+
+    it('names every rejected field when several no-write-path fields are sent together', async () => {
       const req = {
         params: { id: '42' },
-        body: { artist_name: 'Anohni Renamed', code_letters: 'ZZ', genre_id: 999 },
+        body: { artist_name: 'Anohni Renamed', code_letters: 'ZZ', genre_id: 999, code_artist_number: 7 },
       } as unknown as Request;
       const res = mockResponse();
 
-      await updateArtistCard(req, res, next);
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow(
+        'no write path exists for genre_id (no write path: genre_artist_crossreference.genre_id is set once by POST /library/artists and is never UPDATEd by any endpoint), code_letters (no write path: artists.code_letters is set once by POST /library/artists and is never UPDATEd by any endpoint), code_artist_number (no write path: genre_artist_crossreference.artist_genre_code is set once by POST /library/artists and is never UPDATEd by any endpoint)'
+      );
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+    });
 
-      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { artist_name: 'Anohni Renamed' });
+    it('rejects a no-write-path field even when it is the only field on the body', async () => {
+      const req = { params: { id: '42' }, body: { genre_id: 999 } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow('no write path exists for genre_id');
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
     });
 
     it('skips the name-conflict check when artist_name is unchanged (no-op re-save)', async () => {
@@ -2868,7 +2893,7 @@ describe('library.controller', () => {
 
       await updateArtistCard(req, res, next);
 
-      expect(mockConflictingArtistIdInGenre).toHaveBeenCalledWith('Perfume Genius', 11, 42);
+      expect(mockConflictingArtistIdInGenre).toHaveBeenCalledWith('Perfume Genius', 42);
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(409);
       expect(res.json).toHaveBeenCalledWith({
@@ -2876,6 +2901,28 @@ describe('library.controller', () => {
         reason: 'artist_name_conflict',
         artist: { artist_id: 77, artist_name: 'Perfume Genius', code_letters: 'PE' },
       });
+    });
+
+    // BS#2156 review: `addArtist`'s identical race gets an identical fix here
+    // -- a miss on the second lookup means the conflicting row was deleted
+    // between the probe and the fetch, so the name is free again. Proceeding
+    // is the only honest option; a 409 with `artist: null` hands the client a
+    // payload it cannot act on, and `addAlbum`'s documented policy for this
+    // exact race is "proceed."
+    it('proceeds with the rename when the conflicting artist disappears between the two lookups', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockConflictingArtistIdInGenre.mockResolvedValue(77);
+      mockGetArtistById.mockResolvedValue(null);
+      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Perfume Genius', alphabetical_name: 'Anohni' });
+      const req = { params: { id: '42' }, body: { artist_name: 'Perfume Genius' } } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { artist_name: 'Perfume Genius' });
+      expect(res.status).toHaveBeenCalledWith(200);
+      // Never a 409 that asserts a conflicting artist it cannot name.
+      expect(res.json).not.toHaveBeenCalledWith(expect.objectContaining({ artist: null }));
     });
 
     // The self-exclusion is pushed into the query rather than compared against
@@ -2893,8 +2940,29 @@ describe('library.controller', () => {
       await updateArtistCard(req, res, next);
 
       expect(mockArtistIdFromName).not.toHaveBeenCalled();
-      expect(mockConflictingArtistIdInGenre).toHaveBeenCalledWith('the trees', 11, 42);
+      expect(mockConflictingArtistIdInGenre).toHaveBeenCalledWith('the trees', 42);
       expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    // BS#2156 review: `conflictingArtistIdInGenre` is scoped to EVERY genre
+    // the artist under edit is crossreferenced in, not just
+    // `getArtistCardById`'s deliberately-collapsed lowest-genre_id row --
+    // multi-genre artists are a designed state
+    // (`jobs/artist-unicode-dedup/merge.ts` repoints crossreferences onto a
+    // survivor precisely so the matcher reaches it from every genre). This
+    // pins that the controller passes only `(name, artistId)`, never a fixed
+    // `genre_id`, so the service is free to probe them all.
+    it('does not pass a fixed genre_id to the conflict probe', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockConflictingArtistIdInGenre.mockResolvedValue(null);
+      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Björk', alphabetical_name: 'Anohni' });
+      const req = { params: { id: '42' }, body: { artist_name: 'Björk' } } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockConflictingArtistIdInGenre).toHaveBeenCalledWith('Björk', 42);
+      expect((mockConflictingArtistIdInGenre.mock.calls[0] as unknown[]).length).toBe(2);
     });
 
     it('returns 200 with the refreshed card shape (not the bare artists row) on success', async () => {
@@ -2946,13 +3014,24 @@ describe('library.controller', () => {
       },
     ];
 
+    // Only used to prove existence -- the response never echoes the card
+    // fields, so the exact content is irrelevant, only that it's non-null.
+    const anyCard: ArtistCardMock = {
+      artist_id: 42,
+      artist_name: 'Chuquimamani-Condori',
+      alphabetical_name: 'Chuquimamani-Condori',
+      genre_id: 11,
+      code_letters: 'CH',
+      code_artist_number: 4,
+    };
+
     beforeEach(() => {
       jest.clearAllMocks();
       mockCountReleasesForArtist.mockResolvedValue(1);
     });
 
     it('returns 404 when the artist does not exist', async () => {
-      mockGetArtistNameById.mockResolvedValue(null);
+      mockGetArtistCardById.mockResolvedValue(null);
       const req = { params: { id: '999' }, query: {} } as unknown as Request;
       const res = mockResponse();
 
@@ -2960,8 +3039,23 @@ describe('library.controller', () => {
       expect(mockGetReleasesForArtist).not.toHaveBeenCalled();
     });
 
+    // BS#2156 review: an artist row with no genre_artist_crossreference must
+    // 404 here the same way it already does on GET/PATCH
+    // /library/artists/:id (both resolve existence through
+    // `getArtistCardById`'s INNER JOIN) -- a plain `artists` lookup like
+    // `getArtistNameById` would 200 with an empty release page instead.
+    it('returns 404 when the artist has no genre crossreference, matching GET/PATCH', async () => {
+      mockGetArtistCardById.mockResolvedValue(null);
+      const req = { params: { id: '42' }, query: {} } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getArtistReleases(req, res, next)).rejects.toThrow('Artist not found');
+      expect(mockGetArtistCardById).toHaveBeenCalledWith(42);
+      expect(mockGetReleasesForArtist).not.toHaveBeenCalled();
+    });
+
     it('returns 200 with a default-paginated release page on success', async () => {
-      mockGetArtistNameById.mockResolvedValue('Chuquimamani-Condori');
+      mockGetArtistCardById.mockResolvedValue(anyCard);
       mockGetReleasesForArtist.mockResolvedValue(releases);
       mockCountReleasesForArtist.mockResolvedValue(1);
       const req = { params: { id: '42' }, query: {} } as unknown as Request;
@@ -2975,7 +3069,7 @@ describe('library.controller', () => {
     });
 
     it('passes an explicit page/limit through and reports totalPages', async () => {
-      mockGetArtistNameById.mockResolvedValue('Various Artists');
+      mockGetArtistCardById.mockResolvedValue(anyCard);
       mockGetReleasesForArtist.mockResolvedValue(releases);
       mockCountReleasesForArtist.mockResolvedValue(3107);
       const req = { params: { id: '1087' }, query: { page: '2', limit: '100' } } as unknown as Request;
@@ -3002,7 +3096,7 @@ describe('library.controller', () => {
       ['a non-numeric limit', { limit: 'all' }, 'limit must be a positive integer'],
       ['a non-numeric page', { page: 'first' }, 'page must be a non-negative integer'],
     ])('rejects %s with 400', async (_label, query, message) => {
-      mockGetArtistNameById.mockResolvedValue('Various Artists');
+      mockGetArtistCardById.mockResolvedValue(anyCard);
       const req = { params: { id: '1087' }, query } as unknown as Request;
       const res = mockResponse();
 
