@@ -576,6 +576,14 @@ async function fetchRecentRows(limit: number): Promise<RecentRow[]> {
       // to COALESCE with was removed (BS#1862) — it seq-scanned `library`
       // for every window row and cost ~2.4s. The fallback runs post-slice in
       // resolveFallbackRotation over the track rows that survive classification.
+      //
+      // That FK lane — the `.leftJoin(rotation, ...)` below — is deliberately
+      // UNWINDOWED (BS#2183), while resolveFallbackRotation's arm is bounded on
+      // both sides against the play date. The asymmetry is the decision, not an
+      // oversight: an explicit rotation_id is the writer's assertion and outranks
+      // date arithmetic. This is the fifth twin of the four join sites in
+      // flowsheet.service.ts — see FSEntryFieldsRaw.rotation_bin there for the
+      // full rationale and the measured blast radius, and keep the two in step.
       rotation_bin: rotation.rotation_bin,
     })
     .from(flowsheet)

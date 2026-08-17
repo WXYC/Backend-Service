@@ -15,6 +15,11 @@
  * whitespace guard. It deliberately asserts through `GET /flowsheet/range`
  * rather than calling the service directly, so the projection is covered too.
  *
+ * It also pins the BS#2183 decision sitting right next to the window it
+ * contrasts with: the fallback subquery above is windowed against add_time,
+ * but the primary `rotation_id` FK join is deliberately NOT — see the
+ * "primary FK join is deliberately unwindowed" describe block below.
+ *
  * The window is placed in 1997 — outside anything the shared dev/CI schema
  * seeds and outside the BS#2062 spec's 1998 window, so the two can run in the
  * same band without interfering. Everything written here is torn down in
@@ -109,13 +114,17 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
       return r[0].id;
     };
 
-    const insertEntry = async (key, offsetMs, { albumId = null, artistName = null, albumTitle = null }) => {
+    const insertEntry = async (
+      key,
+      offsetMs,
+      { albumId = null, artistName = null, albumTitle = null, rotationId = null }
+    ) => {
       const r = await sql`
         INSERT INTO ${sql(SCHEMA)}.flowsheet
           (show_id, entry_type, add_time, play_order, album_id, artist_name, album_title, track_title, rotation_id)
         VALUES (
           ${showId}, 'track', ${at(offsetMs)}::timestamptz, ${Object.keys(entryIds).length + 1},
-          ${albumId}, ${artistName}, ${albumTitle}, ${`${MARKER} ${key}`}, NULL
+          ${albumId}, ${artistName}, ${albumTitle}, ${`${MARKER} ${key}`}, ${rotationId}
         )
         RETURNING id`;
       entryIds[key] = r[0].id;
@@ -187,6 +196,44 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
     await insertEntry('addedLater', 50 * MIN, {
       artistName: `${MARKER} Cat Power`,
       albumTitle: `${MARKER} Moon Pix`,
+    });
+
+    // --- PRIMARY FK JOIN IS DELIBERATELY UNWINDOWED (BS#2183) ---
+    // Everything above windows the FALLBACK subquery against add_time. The
+    // primary `leftJoin(rotation, rotation.id = flowsheet.rotation_id)` in
+    // flowsheet.service.ts has no window at all: an explicit rotation_id is
+    // the writer's assertion (BS#1268 stamps it from the tubafrenzy webhook;
+    // the dj-site rotation picker emits it) and outranks date arithmetic. These
+    // two fixtures reuse the exact `killedBefore`/`addedLater` bounds above,
+    // but set rotation_id, to prove the FK path badges through the very window
+    // the fallback enforces.
+    const fkKilledArtist = await insertArtist(`${MARKER} Nilüfer Yanya`);
+    const fkKilledAlbum = await insertLibrary(fkKilledArtist, `${MARKER} Painless`);
+    const fkKilledRotation = await insertRotation({
+      albumId: fkKilledAlbum,
+      bin: 'H',
+      killDate: '1997-06-05', // killed BEFORE the window, same bound as `killedBefore` above
+    });
+    await insertEntry('fkKilledBeforeKillDate', 110 * MIN, {
+      albumId: fkKilledAlbum,
+      artistName: `${MARKER} Nilüfer Yanya`,
+      albumTitle: `${MARKER} Painless`,
+      rotationId: fkKilledRotation,
+    });
+
+    const fkEarlyArtist = await insertArtist(`${MARKER} Hermanos Gutiérrez`);
+    const fkEarlyAlbum = await insertLibrary(fkEarlyArtist, `${MARKER} El Bueno y El Malo`);
+    const fkEarlyRotation = await insertRotation({
+      albumId: fkEarlyAlbum,
+      bin: 'M',
+      addDate: '1997-06-20', // entered rotation AFTER the window, same bound as `addedLater` above
+      killDate: null,
+    });
+    await insertEntry('fkAiredBeforeAddDate', 115 * MIN, {
+      albumId: fkEarlyAlbum,
+      artistName: `${MARKER} Hermanos Gutiérrez`,
+      albumTitle: `${MARKER} El Bueno y El Malo`,
+      rotationId: fkEarlyRotation,
     });
 
     // --- tie-break: two active rows for the same (artist, album), lowest id wins ---
@@ -311,6 +358,34 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
     ['addedLater', 'add_date is an inclusive lower bound (BS#1526)'],
   ])('leaves %s unbadged — %s', (key) => {
     expect(binOf(key)).toBeNull();
+  });
+
+  describe('primary FK join is deliberately unwindowed (BS#2183)', () => {
+    // CHARACTERIZATION TESTS, not TDD red-then-green: this behavior already
+    // exists today and both assertions below pass on first run. That is
+    // correct and expected — the point isn't to drive new behavior, it's to
+    // pin the BS#2183 decision so it fails loudly if someone later "fixes"
+    // the primary FK join by bolting the fallback's add_date/kill_date window
+    // onto it without reading that decision first. See the
+    // FSEntryFieldsRaw.rotation_bin comment and the four
+    // `.leftJoin(rotation, ...)` call sites in flowsheet.service.ts.
+
+    it('badges via the FK even when the linked rotation record was killed before the entry aired', () => {
+      // Same kill_date/window shape as the fallback's `killedBefore` case
+      // above — but here rotation_id is SET. Absent the FK, the fallback
+      // would exclude this row (kill_date is not > add_time) and the badge
+      // would be null, exactly as `killedBefore` proves above. With the FK
+      // set, the primary join wins and the badge survives.
+      expect(binOf('fkKilledBeforeKillDate')).toBe('H');
+    });
+
+    it("badges via the FK even when the entry aired before the rotation record's add_date", () => {
+      // Same add_date/window shape as the fallback's `addedLater` case
+      // above — but here rotation_id is SET. Absent the FK, the fallback
+      // would exclude this row (add_date > add_time) and the badge would be
+      // null, exactly as `addedLater` proves above.
+      expect(binOf('fkAiredBeforeAddDate')).toBe('M');
+    });
   });
 
   it('badges a blank artist+album via arm (b), which shadows the arm (c) join change', () => {
