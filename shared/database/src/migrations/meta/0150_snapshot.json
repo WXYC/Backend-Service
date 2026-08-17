@@ -1,5 +1,5 @@
 {
-  "id": "3ab4a63d-ed9c-4243-86dd-2184136d12d3",
+  "id": "5e2ca414-3a42-45df-b917-4d41c2815f77",
   "prevId": "d5149098-2d6d-40ed-abb4-c25cd3860036",
   "version": "7",
   "dialect": "postgresql",
@@ -2632,6 +2632,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "no_match_recheck_attempted_at": {
+          "name": "no_match_recheck_attempted_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "search_doc": {
           "name": "search_doc",
           "type": "tsvector",
@@ -2929,6 +2935,22 @@
           ],
           "isUnique": false,
           "where": "\"wxyc_schema\".\"flowsheet\".\"rotation_id\" IS NOT NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "flowsheet_no_match_recheck_idx": {
+          "name": "flowsheet_no_match_recheck_idx",
+          "columns": [
+            {
+              "expression": "no_match_recheck_attempted_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"wxyc_schema\".\"flowsheet\".\"metadata_status\" = 'enriched_no_match' AND \"wxyc_schema\".\"flowsheet\".\"entry_type\" = 'track' AND \"wxyc_schema\".\"flowsheet\".\"artist_name\" IS NOT NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -6202,7 +6224,8 @@
         "S",
         "L",
         "M",
-        "H"
+        "H",
+        "N"
       ]
     },
     "wxyc_schema.metadata_status_enum": {

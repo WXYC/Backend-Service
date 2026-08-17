@@ -1251,6 +1251,28 @@ export const flowsheet = wxyc_schema.table(
     // The `flowsheet_metadata_status_enriching_stale_idx` partial covers
     // that query.
     enriching_since: timestamp('enriching_since', { withTimezone: true }),
+    // BS#2176: retry marker for `jobs/flowsheet-no-match-recheck`, the
+    // recurring cause-agnostic re-ask sweep over `enriched_no_match` rows.
+    // Deliberately a NEW column rather than reusing `metadata_attempt_at`
+    // above — that column's NULL-vs-stamped split is a load-bearing
+    // writer discriminator depended on by BS#1011 / BS#895 (the live CDC
+    // worker leaves it NULL on no-match rows, only the backfill stamps
+    // it), and the C6 gap-recovery sweep's candidate predicate reads it.
+    // Overloading it would break that discriminator for every future
+    // no-match row this sweep re-attempts.
+    //
+    // Stamped whenever the sweep receives a definitive response for the
+    // row (a fresh no-match, or a trust-gate rejection) — same shared
+    // shape as the other attempt-at markers in `docs/migrations.md`
+    // ("Attempt-at markers"): left NULL on a transient LML error so the
+    // row stays immediately retryable, stamped on every other outcome so
+    // a permanent miss backs off behind `FLOWSHEET_NO_MATCH_RECHECK_TTL_DAYS`
+    // instead of being re-asked every run. A row that resolves to a real
+    // match leaves this column behind entirely — `metadata_status` moving
+    // off `enriched_no_match` is what drops it out of the sweep's
+    // candidate set, so no further write to this column is needed once
+    // that happens.
+    no_match_recheck_attempted_at: timestamp('no_match_recheck_attempted_at', { withTimezone: true }),
     // STORED GENERATED tsvector covering the searchable text fields with
     // weight bands (artist=A, track+dj=B, album=C, label=D). Managed by
     // migration 0054 (which extended the original 0052 expression to include
@@ -1511,6 +1533,28 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_rotation_id_idx')
       .on(table.rotation_id)
       .where(sql`${table.rotation_id} IS NOT NULL`),
+    // BS#2176. Partial B-tree on `no_match_recheck_attempted_at`, scoped to
+    // the exact cohort `jobs/flowsheet-no-match-recheck` scans: terminal
+    // no-match track rows with a real artist name. Same shape as
+    // `flowsheet_metadata_status_pending_idx` above (a partial predicate
+    // matching the sweep's own WHERE), but keyed on the marker column
+    // itself rather than `id` — the sweep's candidate query orders by
+    // `no_match_recheck_attempted_at ASC NULLS FIRST, id ASC` so every
+    // run drains the longest-waiting rows first, and this ordering is
+    // exactly what a B-tree on that column serves for free.
+    //
+    // Built CONCURRENTLY out-of-band on prod first via:
+    //   CREATE INDEX CONCURRENTLY IF NOT EXISTS flowsheet_no_match_recheck_idx
+    //     ON wxyc_schema.flowsheet (no_match_recheck_attempted_at)
+    //     WHERE metadata_status = 'enriched_no_match' AND entry_type = 'track'
+    //       AND artist_name IS NOT NULL;
+    // Migration SQL carries IF NOT EXISTS so the apply is a no-op against
+    // the prod DB where the index is already present.
+    index('flowsheet_no_match_recheck_idx')
+      .on(table.no_match_recheck_attempted_at)
+      .where(
+        sql`${table.metadata_status} = 'enriched_no_match' AND ${table.entry_type} = 'track' AND ${table.artist_name} IS NOT NULL`
+      ),
   ]
 );
 
