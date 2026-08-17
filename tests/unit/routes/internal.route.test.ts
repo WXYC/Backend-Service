@@ -1482,14 +1482,20 @@ describe('POST /internal/rotation-webhook', () => {
   });
 
   // BS#2109: `album_id` is COALESCEd, not overwritten, so a webhook `update`
-  // carrying `libraryReleaseId: 0` (i.e. `excluded.album_id IS NULL`) cannot
-  // revert a Backend-made link from `PATCH /library/rotation/:id/link`.
-  // Before this, the next /wxycdb edit on a release the librarian had
-  // catalogued in dj-site reset album_id to NULL, restored the free text,
-  // and dropped the row back into the cataloging queue.
+  // carrying `libraryReleaseId: 0` cannot revert a Backend-made link from
+  // `PATCH /library/rotation/:id/link`. Before this, the next /wxycdb edit on
+  // a release the librarian had catalogued in dj-site reset album_id to NULL,
+  // restored the free text, and dropped the row back into the cataloging
+  // queue.
+  //
+  // BS#2173 moved a bin-less payload like this one off the INSERT...ON
+  // CONFLICT statement entirely (a plain UPDATE, asserted via `mockSet`
+  // below) — re-derived here rather than against `excluded.album_id`, which
+  // this arm has no `excluded` row to reference. `resolveAlbumId` is
+  // guaranteed to return null for `libraryReleaseId: 0`, so the COALESCE's
+  // first argument is the JS `null` that resolved to, not a SQL column ref.
   it('update with libraryReleaseId: 0 COALESCEs album_id so a Backend-made link is never downgraded to NULL', async () => {
-    const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
-    onConflictSpy.mockClear();
+    mockReturning.mockResolvedValueOnce([{ id: 42 }]);
 
     const res = await request(app)
       .post('/internal/rotation-webhook')
@@ -1497,14 +1503,16 @@ describe('POST /internal/rotation-webhook', () => {
       .send({ action: 'update', release: { id: 500, libraryReleaseId: 0 } });
 
     expect(res.status).toBe(200);
-    const setClause = (onConflictSpy.mock.calls[0][0] as { set: Record<string, unknown> }).set;
+    expect(mockOnConflict).not.toHaveBeenCalled();
+    const setClause = mockSet.mock.calls.at(-1)?.[0] as Record<string, unknown>;
     // drizzle-orm is automocked project-wide, so `sql\`...\`` renders as
     // `{ sql: TemplateStringsArray, values: [...] }`. Assert on the literal
-    // chunks: a bare `excluded.album_id` assignment would have no COALESCE.
+    // chunks: a bare value assignment would have no COALESCE.
     const rendered = ((setClause.album_id as { sql?: string[] })?.sql ?? []).join('?');
-    expect(rendered).toContain('COALESCE(excluded.album_id');
-    // The existing row is the COALESCE fallback, so tubafrenzy's NULL loses.
-    expect((setClause.album_id as { values?: unknown[] })?.values).toEqual([rotation.album_id]);
+    expect(rendered).toContain('COALESCE(');
+    // First param is the resolved (null) albumId, second is the existing
+    // row's column — the fallback that wins, so tubafrenzy's NULL loses.
+    expect((setClause.album_id as { values?: unknown[] })?.values).toEqual([null, rotation.album_id]);
   });
 
   // Review round 3 finding 2 narrowed this: only `legacy_library_release_id`
@@ -1565,16 +1573,20 @@ describe('POST /internal/rotation-webhook', () => {
   });
 
   // Review round 3 finding 2's "better form": a genuinely resolvable
-  // `libraryReleaseId` takes `excluded.album_id` unconditionally — not
+  // `libraryReleaseId` takes the resolved `album_id` unconditionally — not
   // COALESCEd — restoring tubafrenzy's ability to relink a row, which the
   // interim blanket-COALESCE shape had silently revoked (its own docblock's
   // claim that tubafrenzy could no longer *unlink* a row understated the
   // change: it could no longer change album_id at all).
-  it('writes album_id from excluded.album_id (not COALESCEd) when the payload carries a genuine libraryReleaseId', async () => {
-    const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
-    onConflictSpy.mockClear();
+  //
+  // No `rotationType` in this payload, so — per BS#2173 — this is the plain
+  // UPDATE arm (`mockSet`), not the sibling INSERT...ON CONFLICT statement:
+  // there is no `excluded` row here, so the unconditional write is a bare JS
+  // value rather than an `excluded.album_id` SQL reference.
+  it('writes the resolved album_id outright (not COALESCEd) when the payload carries a genuine libraryReleaseId', async () => {
     mockLimit.mockReset();
     mockLimit.mockResolvedValueOnce([{ id: 42 }]);
+    mockReturning.mockResolvedValueOnce([{ id: 42 }]);
 
     const res = await request(app)
       .post('/internal/rotation-webhook')
@@ -1582,10 +1594,9 @@ describe('POST /internal/rotation-webhook', () => {
       .send({ action: 'update', release: { id: 500, libraryReleaseId: 777 } });
 
     expect(res.status).toBe(200);
-    const setClause = (onConflictSpy.mock.calls[0][0] as { set: Record<string, unknown> }).set;
-    const rendered = ((setClause.album_id as { sql?: string[] })?.sql ?? []).join('?');
-    expect(rendered).not.toContain('COALESCE');
-    expect(rendered).toBe('excluded.album_id');
+    expect(mockOnConflict).not.toHaveBeenCalled();
+    const setClause = mockSet.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(setClause.album_id).toBe(42);
   });
 
   // -- Kill --
