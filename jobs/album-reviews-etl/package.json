@@ -14,9 +14,9 @@
   },
   "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
-    "@sentry/node": "^10.69.0",
+    "@sentry/node": "^10.70.0",
     "@wxyc/database": "^1.0.0",
-    "google-auth-library": "^11.0.0"
+    "google-auth-library": "^11.0.2"
   },
   "peerDependencies": {
     "drizzle-orm": "^0.45.0"
