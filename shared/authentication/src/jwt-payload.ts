@@ -20,6 +20,10 @@ export type MemberRoleRow = { role: string } | undefined;
 
 export type FetchMemberRole = (userId: string) => Promise<MemberRoleRow>;
 
+/**
+ * Declared on the parameters rather than cast onto them: `capabilities` is a
+ * WXYC column better-auth's own `User` type does not know about.
+ */
 type WithCapabilities = { capabilities?: string[] | null };
 
 /**
@@ -29,12 +33,12 @@ type WithCapabilities = { capabilities?: string[] | null };
  * A membership row supplies `role`. Absent membership — or a failed lookup —
  * falls through to the caller's own fields.
  */
-export async function buildJwtPayload<TUser extends { id?: string }>(
+export async function buildJwtPayload<TUser extends { id?: string } & WithCapabilities>(
   user: TUser,
   fetchMemberRole: FetchMemberRole,
   onError: (error: unknown) => void
 ): Promise<TUser & { role?: string; capabilities: string[] }> {
-  const capabilities = (user as TUser & WithCapabilities)?.capabilities ?? [];
+  const capabilities = user?.capabilities ?? [];
 
   if (user?.id) {
     try {
@@ -59,14 +63,14 @@ export async function buildJwtPayload<TUser extends { id?: string }>(
  * mint a token claiming more authority than the user holds.
  */
 export async function buildOidcUserInfoClaim(
-  userRecord: { id: string },
+  userRecord: { id: string } & WithCapabilities,
   fetchMemberRole: FetchMemberRole
 ): Promise<{ role: string; capabilities: string[] }> {
   try {
     const memberRow = await fetchMemberRole(userRecord.id);
     return {
       role: memberRow?.role ?? 'member',
-      capabilities: (userRecord as typeof userRecord & WithCapabilities).capabilities ?? [],
+      capabilities: userRecord.capabilities ?? [],
     };
   } catch {
     return { role: 'member', capabilities: [] };

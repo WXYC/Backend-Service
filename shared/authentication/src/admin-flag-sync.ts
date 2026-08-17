@@ -14,16 +14,19 @@
  * `@wxyc/database` would re-engage the mock at `jest.unit.config.ts` and
  * defeat the injection.
  */
+import { normalizeRole } from './auth.roles';
 
 /**
- * Membership roles that justify the admin flag.
+ * Does this membership role justify the admin flag?
  *
- * `stationManager` is the WXYC station role; `admin` and `owner` are
- * better-auth's own organization roles, which a member row can also carry.
+ * The flag means "holds stationManager authority", which is the one question
+ * `normalizeRole` exists to answer: it resolves `stationManager` to itself and
+ * better-auth's own `admin`/`owner` organization roles to `stationManager`,
+ * leaving `dj`/`musicDirector`/`member` as themselves. Asking it here rather
+ * than restating the role set keeps this in step with `auth.roles.ts`, which
+ * already declares that mapping canonical.
  */
-export const ADMIN_GRANTING_MEMBER_ROLES: readonly string[] = ['stationManager', 'admin', 'owner'];
-
-export const grantsAdminFlag = (memberRole: string): boolean => ADMIN_GRANTING_MEMBER_ROLES.includes(memberRole);
+const grantsAdminFlag = (memberRole: string): boolean => normalizeRole(memberRole) === 'stationManager';
 
 export interface AdminFlagSyncDeps {
   /**
@@ -34,6 +37,11 @@ export interface AdminFlagSyncDeps {
   defaultOrgSlug: string | undefined;
   setUserRole: (userId: string, role: 'admin' | null) => Promise<void>;
   onError: (error: unknown) => void;
+}
+
+/** Removal additionally needs to know whether a second membership still justifies the flag. */
+export interface RemoveMemberDeps extends AdminFlagSyncDeps {
+  hasOtherAdminMembership: (userId: string, defaultOrgSlug: string) => Promise<boolean>;
 }
 
 type MemberIdentity = { id: string; email: string };
@@ -112,17 +120,14 @@ export async function syncAdminFlagOnUpdateMemberRole(
  */
 export async function syncAdminFlagOnRemoveMember(
   args: { user: MemberIdentity; organization: { slug: string } },
-  deps: AdminFlagSyncDeps & {
-    hasOtherAdminMembership: (userId: string, defaultOrgSlug: string) => Promise<boolean>;
-  }
+  deps: RemoveMemberDeps
 ): Promise<void> {
   try {
     if (!appliesToDefaultOrganization(args.organization.slug, deps.defaultOrgSlug)) return;
 
-    // Narrowed by the guard above, which returns false when unset.
-    const defaultOrgSlug = deps.defaultOrgSlug as string;
-
-    if (!(await deps.hasOtherAdminMembership(args.user.id, defaultOrgSlug))) {
+    // The guard above passed, so this slug equals deps.defaultOrgSlug — and it
+    // is already a string, which deps.defaultOrgSlug is not.
+    if (!(await deps.hasOtherAdminMembership(args.user.id, args.organization.slug))) {
       const userId = args.user.id;
       await deps.setUserRole(userId, null);
       console.log(

@@ -293,25 +293,15 @@ export const auth = betterAuth({
       // Role information is included via custom JWT definePayload function above
       organizationHooks: {
         // Sync global user.role when members are added to default organization
-        afterAddMember: async ({ member, user: userData, organization: orgData }) =>
-          syncAdminFlagOnAddMember(
-            { member, user: userData, organization: orgData },
-            adminFlagSyncDeps('afterAddMember')
-          ),
+        afterAddMember: async (data) => syncAdminFlagOnAddMember(data, adminFlagSyncDeps('afterAddMember')),
 
         // Sync global user.role when member roles are updated
-        afterUpdateMemberRole: async ({ member, previousRole, user: userData, organization: orgData }) =>
-          syncAdminFlagOnUpdateMemberRole(
-            { member, previousRole, user: userData, organization: orgData },
-            adminFlagSyncDeps('afterUpdateMemberRole')
-          ),
+        afterUpdateMemberRole: async (data) =>
+          syncAdminFlagOnUpdateMemberRole(data, adminFlagSyncDeps('afterUpdateMemberRole')),
 
         // Sync global user.role when members are removed from default organization
-        afterRemoveMember: async ({ user: userData, organization: orgData }) =>
-          syncAdminFlagOnRemoveMember(
-            { user: userData, organization: orgData },
-            { ...adminFlagSyncDeps('afterRemoveMember'), hasOtherAdminMembership }
-          ),
+        afterRemoveMember: async (data) =>
+          syncAdminFlagOnRemoveMember(data, { ...adminFlagSyncDeps('afterRemoveMember'), hasOtherAdminMembership }),
       },
     }),
     // ADR 0008 — QR sign-in for the shared control-room computer (RFC 8628).
@@ -373,24 +363,17 @@ export const auth = betterAuth({
       if (ctx.path !== '/device/approve') return;
       const session = await getSessionFromCtx(ctx);
       if (!session?.user?.id) return; // let the plugin's own UNAUTHORIZED fire
-      await applyDeviceApproveRoleGate(
-        session.user.id,
-        async (uid) => {
-          const rows = await db.select({ role: member.role }).from(member).where(eq(member.userId, uid)).limit(1);
-          return rows[0];
-        },
-        async (uid) => {
-          // S1 (#1494 review): reset any *pending* device-code row the
-          // rejected user claimed via GET /auth/device?user_code=… so the
-          // plugin's `deviceCodeRecord.userId === session.user.id` check
-          // stops treating them as the approver. Scoped by (userId + pending)
-          // so we don't disturb an in-flight approval elsewhere.
-          await db
-            .update(deviceCode)
-            .set({ userId: null })
-            .where(and(eq(deviceCode.userId, uid), eq(deviceCode.status, 'pending')));
-        }
-      );
+      await applyDeviceApproveRoleGate(session.user.id, selectMemberRole, async (uid) => {
+        // S1 (#1494 review): reset any *pending* device-code row the
+        // rejected user claimed via GET /auth/device?user_code=… so the
+        // plugin's `deviceCodeRecord.userId === session.user.id` check
+        // stops treating them as the approver. Scoped by (userId + pending)
+        // so we don't disturb an in-flight approval elsewhere.
+        await db
+          .update(deviceCode)
+          .set({ userId: null })
+          .where(and(eq(deviceCode.userId, uid), eq(deviceCode.status, 'pending')));
+      });
     }),
     after: createAuthMiddleware(async (ctx) => {
       if (ctx.path === '/admin/create-user') {

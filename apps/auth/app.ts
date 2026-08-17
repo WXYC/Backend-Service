@@ -469,9 +469,6 @@ const onAdminSyncError = (error: unknown) => {
 // Reconcile the admin flag for existing stationManagers. Runs on every boot,
 // not once: it is the retry path for a membership hook that failed.
 const runSyncAdminRoles = async () => {
-  // The dynamic imports sit inside the same catch as the sync itself: a
-  // failure to resolve either module is as survivable as a failed query, and
-  // must not take the server's startup path down.
   try {
     const { db, user, member, organization } = await import('@wxyc/database');
     const { eq, sql } = await import('drizzle-orm');
@@ -498,7 +495,6 @@ const runSyncAdminRoles = async () => {
       setUserRole: async (userId, role) => {
         await db.update(user).set({ role }).where(eq(user.id, userId));
       },
-      onError: onAdminSyncError,
     });
   } catch (error) {
     onAdminSyncError(error);

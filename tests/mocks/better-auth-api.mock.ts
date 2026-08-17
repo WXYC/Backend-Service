@@ -6,16 +6,14 @@
 // numeric code the client actually receives lets a spec assert the status a
 // guard produces — the difference between a 400 and a 500 is frequently the
 // entire point of the guard under test.
-const STATUS_CODES = new Map<string, number>([
-  ['BAD_REQUEST', 400],
-  ['UNAUTHORIZED', 401],
-  ['FORBIDDEN', 403],
-  ['NOT_FOUND', 404],
-  ['CONFLICT', 409],
-  ['UNPROCESSABLE_ENTITY', 422],
-  ['TOO_MANY_REQUESTS', 429],
-  ['INTERNAL_SERVER_ERROR', 500],
-]);
+//
+// This is the same table the real APIError consults, imported rather than
+// copied: a hand-copied subset resolves every status outside it to 500, which
+// is indistinguishable in an assertion from a genuine 500 and so reintroduces
+// exactly the false confidence this mapping exists to remove.
+import { statusCodes } from 'better-call/error';
+
+const STATUS_CODES = new Map<string, number>(Object.entries(statusCodes));
 
 export class APIError extends Error {
   statusCode: number;
