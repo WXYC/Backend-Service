@@ -1403,6 +1403,71 @@ describe('POST /internal/rotation-webhook', () => {
     expect(setClause).toHaveProperty('kill_date');
   });
 
+  // N4 coverage gap: nothing previously sent the snapshot trio together with
+  // a blank bin, so this arm's three `!== undefined` branches
+  // (`partialSet.artist_name`/`album_title`/`record_label`) were entirely
+  // unexercised. Unlike the sibling INSERT...ON CONFLICT arm above, this is a
+  // plain UPDATE with no `excluded` row — the gate is `albumId ? null :
+  // truncate(...)` against this delivery's own resolved value, pre-existing
+  // and unrelated to the CASE removal there. `libraryReleaseId: 0`
+  // short-circuits `resolveAlbumId` to null (unlinked), so the trio should
+  // pass the payload's free text straight through.
+  it('missing-bin arm: an unlinked row writes the payload trio rather than nulling it', async () => {
+    mockReturning.mockResolvedValueOnce([{ id: 42 }]);
+
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({
+        action: 'update',
+        release: {
+          id: 500,
+          libraryReleaseId: 0,
+          rotationType: '',
+          artistName: 'Autechre',
+          albumTitle: 'Confield',
+          labelName: 'Warp',
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockInsert).not.toHaveBeenCalled();
+    const setClause = mockSet.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(setClause.artist_name).toBe('Autechre');
+    expect(setClause.album_title).toBe('Confield');
+    expect(setClause.record_label).toBe('Warp');
+  });
+
+  // The other half of the same gap: a `libraryReleaseId` that resolves to a
+  // real `album_id` nulls the trio instead of writing the delivery's free
+  // text over a (potentially stale) linked row.
+  it('missing-bin arm: a resolving libraryReleaseId nulls the trio instead of writing the payload free text', async () => {
+    mockLimit.mockReset();
+    mockLimit.mockResolvedValueOnce([{ id: 42 }]); // resolveAlbumId
+    mockReturning.mockResolvedValueOnce([{ id: 42 }]);
+
+    const res = await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({
+        action: 'update',
+        release: {
+          id: 500,
+          libraryReleaseId: 777,
+          rotationType: '',
+          artistName: 'Autechre',
+          albumTitle: 'Confield',
+          labelName: 'Warp',
+        },
+      });
+
+    expect(res.status).toBe(200);
+    const setClause = mockSet.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(setClause.artist_name).toBeNull();
+    expect(setClause.album_title).toBeNull();
+    expect(setClause.record_label).toBeNull();
+  });
+
   // The other half of the same rule: with no bin in the payload and no row to
   // update, there is nothing this handler can legally write. It must report
   // that rather than invent a bin to satisfy the NOT NULL column.
@@ -1515,11 +1580,11 @@ describe('POST /internal/rotation-webhook', () => {
     expect((setClause.album_id as { values?: unknown[] })?.values).toEqual([null, rotation.album_id]);
   });
 
-  // Review round 3 finding 2 narrowed this: only `legacy_library_release_id`
-  // / `rotation_bin` / `kill_date` are still plain `excluded.*` assignments.
-  // `artist_name` / `album_title` / `record_label` are covered by the two
-  // tests below instead — they're no longer plain assignments even when
-  // present, because they're now gated on the row's resolved linkage.
+  // All five gated columns — not just these three — render as plain
+  // `excluded.*` assignments; `artist_name` / `album_title` / `record_label`
+  // are covered by their own dedicated test below (a linked row keeps
+  // tubafrenzy's free text, so there is no CASE gating their value on
+  // resolved linkage — only presence-gating, same as everything else here).
   it('leaves legacy_library_release_id, rotation_bin, and kill_date as plain excluded.* assignments', async () => {
     const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
     onConflictSpy.mockClear();
@@ -1537,16 +1602,25 @@ describe('POST /internal/rotation-webhook', () => {
     }
   });
 
-  // BS#2109 review round 3 finding 2: a `/wxycdb` edit's incoming free text
-  // must not land on an already-linked row — that recreates the "album_id
-  // set AND snapshot set" shape `PATCH /library/rotation/:id/link`'s 409
-  // and sibling PR #2165 both exist to prevent, and that the BS#2080
-  // arm-(b)/(c) rotation-badge match doesn't filter `album_id IS NULL`
-  // against. `artist_name` / `album_title` / `record_label` are still
-  // presence-gated (BS#1082 + BS#1312, unchanged — see the previous two
-  // tests) but a present column is now a CASE, not a plain `excluded.*`
-  // assignment, gated on the exact same expression assigned to `album_id`.
-  it('gates artist_name/album_title/record_label on the resolved album_id rather than writing excluded.* unconditionally', async () => {
+  // A linked row is allowed to keep carrying tubafrenzy's free text: an
+  // earlier revision gated the trio on the row's resolved `album_id` (nulling
+  // it out whenever the row resolved linked) to stop a `/wxycdb` edit from
+  // recreating the "album_id set AND snapshot set" shape `PATCH
+  // /library/rotation/:id/link`'s 409 guards against — but that CASE was
+  // itself the bug: `linkRotationToAlbum` (`library.service.ts`) deliberately
+  // leaves a freshly-linked row's snapshot populated so the tracklist
+  // picker's tier-3 self-heal keeps working, and
+  // `jobs/rotation-release-id-backfill`'s candidate query requires
+  // `artist_name`/`album_title` NOT NULL to repair a row's
+  // `discogs_release_id` — nulling the trio on every subsequent edit
+  // permanently excluded a linked row (killed ones especially, since that
+  // job's predicate also excludes `kill_date`-past rows and this PR
+  // deliberately surfaces killed rows in the uncatalogued queue) from the
+  // only path that repairs it. It costs nothing display-side either:
+  // `getRotationFromDB` selects `COALESCE(artists.artist_name,
+  // rotation.artist_name)`, so a linked row always reads the canonical
+  // library value regardless of what `rotation`'s own columns hold.
+  it('writes excluded.* for artist_name/album_title/record_label unconditionally, so a linked row keeps tubafrenzy free text', async () => {
     const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
     onConflictSpy.mockClear();
 
@@ -1559,16 +1633,8 @@ describe('POST /internal/rotation-webhook', () => {
     for (const column of ['artist_name', 'album_title', 'record_label']) {
       const entry = setClause[column] as { sql?: string[]; values?: unknown[] };
       const rendered = (entry?.sql ?? []).join('?');
-      expect(rendered).toContain('CASE WHEN');
-      expect(rendered).toContain('IS NULL THEN');
+      expect(rendered).not.toContain('CASE');
       expect(rendered).toContain(`excluded.${column}`);
-      expect(rendered).toContain('ELSE NULL END');
-      // The CASE condition embeds the identical SQL fragment assigned to
-      // `album_id` — checked by object identity rather than re-rendering
-      // the nested SQL, since drizzle-orm's mock nests an interpolated
-      // `SQL` fragment as an opaque object inside `.values` rather than
-      // splicing its text into the outer `.sql` chunks.
-      expect(entry?.values?.[0]).toBe(setClause.album_id);
     }
   });
 

@@ -978,32 +978,40 @@ internal_route.post('/rotation-webhook', async (req, res) => {
         // could no longer *change* `album_id` at all). `rawLibraryId` falsy
         // (0/absent — tubafrenzy doesn't know) keeps the COALESCE fallback, so
         // a Backend-made link (or a link this same delivery just resolved)
-        // survives. `albumIdExpr` is shared with the three snapshot columns
-        // below so both agree on what "resolves linked" means from the exact
-        // same delivery.
+        // survives.
         const albumIdExpr = rawLibraryId
           ? sql`excluded.album_id`
           : sql`COALESCE(excluded.album_id, ${rotation.album_id})`;
 
-        // Review round 3 finding 2: presence in the payload still gates
-        // *whether* each snapshot column appears in SET at all (unchanged, see
-        // above), but a column that does appear is no longer written
-        // unconditionally from `excluded.*`. `PATCH /library/rotation/:id/link`
-        // deliberately leaves a freshly-linked row's snapshot columns
-        // populated (finding 1) so the tracklist picker can self-heal — a
-        // `/wxycdb` edit arriving afterward would otherwise write tubafrenzy's
-        // (necessarily stale, potentially divergent) free text straight onto
-        // an `album_id`-linked row, recreating the "both populated" shape
-        // `PATCH .../link`'s 409 and sibling PR #2165 both exist to prevent,
-        // and that the BS#2080 arm-(b)/(c) rotation-badge match in
-        // `shared/legacy-mirror/src/rotation-match.ts` and
-        // `apps/backend/services/flowsheet.service.ts` doesn't filter
-        // `album_id IS NULL` against. Each CASE reuses `albumIdExpr` — the
-        // exact same expression assigned to `album_id` in this statement — so
-        // a column is written from `excluded.*` only when the row resolves
-        // UNLINKED after this delivery; otherwise it's forced to NULL,
-        // matching the state `PATCH .../link` leaves a fresh link in until a
-        // subsequent edit or backfill catches up.
+        // The three snapshot columns below write `excluded.*` unconditionally
+        // (gated only on presence, same as every other column here) — a
+        // library-linked rotation row is allowed to keep carrying
+        // tubafrenzy's free text. Three reasons converge on that:
+        //
+        //   (a) `linkRotationToAlbum` (`apps/backend/services/library.service.ts`,
+        //       BS#2109 review round 3 finding 1) deliberately leaves a
+        //       freshly-linked row's `artist_name`/`album_title`/`record_label`
+        //       populated for exactly this reason — nulling them broke the
+        //       tracklist picker's tier-3 self-heal, which needs both columns
+        //       non-NULL to even attempt a lookup.
+        //   (b) `jobs/rotation-release-id-backfill`'s candidate query
+        //       (`query.ts`) requires `artist_name IS NOT NULL AND
+        //       album_title IS NOT NULL` to repair a row's
+        //       `discogs_release_id`. Nulling the trio on link permanently
+        //       excludes that row from the one job meant to fix it — and its
+        //       predicate also excludes killed rows (`kill_date IS NULL OR
+        //       kill_date > CURRENT_DATE`), which this same PR deliberately
+        //       surfaces in the uncatalogued queue, so a killed+linked row
+        //       would have no repair path at all.
+        //   (c) It costs nothing display-side: `getRotationFromDB` selects
+        //       `COALESCE(artists.artist_name, rotation.artist_name)` (and the
+        //       album/label siblings), so a linked row always reads the
+        //       canonical `library`/`artists` value regardless of what
+        //       `rotation`'s own snapshot columns hold.
+        //
+        // `albumIdExpr` is deliberately not reused here (unlike an earlier
+        // revision) — the trio's value no longer depends on whether the row
+        // resolves linked.
         const setClause: Record<string, unknown> = {
           album_id: albumIdExpr,
           legacy_library_release_id: sql`excluded.legacy_library_release_id`,
@@ -1013,13 +1021,13 @@ internal_route.post('/rotation-webhook', async (req, res) => {
           setClause.kill_date = sql`excluded.kill_date`;
         }
         if (release.artistName !== undefined) {
-          setClause.artist_name = sql`CASE WHEN (${albumIdExpr}) IS NULL THEN excluded.artist_name ELSE NULL END`;
+          setClause.artist_name = sql`excluded.artist_name`;
         }
         if (release.albumTitle !== undefined) {
-          setClause.album_title = sql`CASE WHEN (${albumIdExpr}) IS NULL THEN excluded.album_title ELSE NULL END`;
+          setClause.album_title = sql`excluded.album_title`;
         }
         if (release.labelName !== undefined) {
-          setClause.record_label = sql`CASE WHEN (${albumIdExpr}) IS NULL THEN excluded.record_label ELSE NULL END`;
+          setClause.record_label = sql`excluded.record_label`;
         }
 
         await db
