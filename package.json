@@ -106,8 +106,8 @@
     "ws": "^8.21.3"
   },
   "dependencies": {
-    "@sentry/node": "^10.69.0",
-    "eventsource": "^4.1.1",
+    "@sentry/node": "^10.70.0",
+    "eventsource": "^5.1.0",
     "jose": "^6.2.8"
   },
   "overrides": {
