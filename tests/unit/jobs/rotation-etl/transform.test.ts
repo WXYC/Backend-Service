@@ -1,28 +1,26 @@
-import { mapRotationType, epochMsToDateString } from '../../../../jobs/rotation-etl/transform';
+import { parseRotationBin, epochMsToDateString } from '../../../../jobs/rotation-etl/transform';
 
-describe('mapRotationType', () => {
+describe('parseRotationBin', () => {
   it.each([
     ['H', 'H'],
     ['M', 'M'],
     ['L', 'L'],
     ['S', 'S'],
-    ['N', 'N'],
-  ] as const)('maps "%s" to "%s"', (input, expected) => {
-    expect(mapRotationType(input)).toBe(expected);
+    ['h', 'H'],
+    [' H ', 'H'],
+  ] as const)('parses %p as the bin %p', (input, expected) => {
+    expect(parseRotationBin(input)).toEqual({ kind: 'bin', bin: expected });
   });
 
-  it('normalizes lowercase to uppercase', () => {
-    expect(mapRotationType('h')).toBe('H');
-    expect(mapRotationType('m')).toBe('M');
+  // Blank is a legitimate upstream state; the caller skips it quietly.
+  it.each([[''], ['  '], [null], [undefined]])('classifies %p as missing', (input) => {
+    expect(parseRotationBin(input)).toEqual({ kind: 'missing' });
   });
 
-  it('trims whitespace', () => {
-    expect(mapRotationType(' H ')).toBe('H');
-  });
-
-  it('defaults unknown types to N', () => {
-    expect(mapRotationType('X')).toBe('N');
-    expect(mapRotationType('')).toBe('N');
+  // Bad data, kept distinct from missing so the caller can warn on it. 'N' is
+  // pinned by name (BS#2173) so re-adding it has to delete a named case.
+  it.each([['X'], ['N'], ['new']])('classifies %p as invalid', (input) => {
+    expect(parseRotationBin(input)).toEqual({ kind: 'invalid', raw: input });
   });
 });
 

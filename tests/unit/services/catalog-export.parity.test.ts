@@ -74,12 +74,18 @@ type KeysEqual<A, B> = [keyof A] extends [keyof B] ? ([keyof B] extends [keyof A
 const _keysAgree: KeysEqual<PrivateRow, SharedRow> = true;
 void _keysAgree;
 
-// `rotation_bin` must stay assignable from a raw string on BOTH sides — i.e. a
-// non-enum value like 'N' (the SSOT doc's own example) is accepted. If either
-// side were re-narrowed to the `RotationBin` ("H" | "M" | "L" | "S") enum, the
-// 'N' literal would no longer be assignable and this would fail to compile.
-const _privateBinAcceptsRawString: PrivateRow['rotation_bin'] = 'N';
-const _sharedBinAcceptsRawString: SharedRow['rotation_bin'] = 'N';
+// `rotation_bin` must stay assignable from a raw string on BOTH sides. If
+// either were re-narrowed to the `RotationBin` ("H" | "M" | "L" | "S") enum,
+// the literal below would stop being assignable and this would fail to compile.
+//
+// The point is forward compatibility: a bin added server-side ahead of its
+// clients must not fail the whole NDJSON export. BS#2173 note — this used to
+// use 'N' and cite it as "the SSOT doc's own example". 'N' was never a server
+// bin (it is flowsheet entry-type 5, "new vinyl, not yet in rotation") and is
+// gone from `freq_enum` as of migration 0150, so the placeholder is now an
+// openly hypothetical value rather than one implied to exist.
+const _privateBinAcceptsRawString: PrivateRow['rotation_bin'] = 'SOME_FUTURE_BIN';
+const _sharedBinAcceptsRawString: SharedRow['rotation_bin'] = 'SOME_FUTURE_BIN';
 void _privateBinAcceptsRawString;
 void _sharedBinAcceptsRawString;
 

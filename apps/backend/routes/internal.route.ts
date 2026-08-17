@@ -11,6 +11,8 @@ import {
   user,
   epochMsToDate,
   isBeyondFutureTolerance,
+  parseRotationBin,
+  ROTATION_BINS,
 } from '@wxyc/database';
 import { getAlbumIdByLegacyId } from '../services/library.service.js';
 import { serverEventsMgr, Topics, FsEvents } from '../utils/serverEvents.js';
@@ -740,7 +742,6 @@ internal_route.post('/artist-identity-sync-notify', (req, res) => {
 });
 
 const VALID_ROTATION_ACTIONS = new Set(['create', 'update', 'kill', 'unkill']);
-const VALID_ROTATION_BINS = new Set(['S', 'L', 'M', 'H', 'N']);
 
 /**
  * Resolve a Backend-Service album_id from a tubafrenzy LIBRARY_RELEASE_ID.
@@ -822,7 +823,40 @@ internal_route.post('/rotation-webhook', async (req, res) => {
         return;
       }
 
-      const rotationType = VALID_ROTATION_BINS.has(release.rotationType) ? release.rotationType : 'N';
+      // BS#2173: what `'N'` actually became was this line's fallback — the
+      // value written whenever a payload carried no usable bin. `rotation_bin`
+      // is NOT NULL, so a bin-less payload cannot materialize a row, and that
+      // constraint is what pushed the original code into inventing one. The
+      // cost is on the record: BS#1082's incident was partial updates flipping
+      // live Heavy rows to 'N' until the rotation-etl tick repaired them, and
+      // the value leaked outward from here into the catalog export, api.yaml,
+      // and the iOS clone as a bin clients had to special-case.
+      //
+      // Split the two ways a bin goes missing instead of papering over both:
+      // a payload carrying NO bin is the documented linkage-only partial update
+      // (BS#1082/#1312), which updates in place and never inserts, while a bin
+      // that is present but unrecognized is bad data (400 below).
+      //
+      // "No bin" has THREE wire forms, not one. tubafrenzy's
+      // `BackendServiceWebhookClient.buildRotationPayload` serializes a null
+      // ROTATION_TYPE as the empty string rather than omitting the key:
+      //
+      //     releaseJson.put("rotationType", release.getRotationType() != null
+      //             ? release.getRotationType() : "");
+      //
+      // so `""` means "this release has no bin upstream", NOT "bad data" — and
+      // it is the form that actually occurs. Rejecting it would drop the whole
+      // event: an MD editing one of those releases would get a 400 and the kill
+      // date would never land, with only a `logger.warn` upstream to show for
+      // it. `parseRotationBin` collapses absent / null / blank to `missing`.
+      const parsedBin = parseRotationBin(release.rotationType);
+      if (parsedBin.kind === 'invalid') {
+        res.status(400).json({
+          error: `Invalid rotationType ${JSON.stringify(parsedBin.raw)}. Expected one of: ${ROTATION_BINS.join(', ')}.`,
+        });
+        return;
+      }
+
       const rawLibraryId = release.libraryReleaseId ?? 0;
       // Resolved once, here, against whatever `library` holds at delivery time.
       // The librarian routinely files the physical release AFTER the MD bins
@@ -839,52 +873,103 @@ internal_route.post('/rotation-webhook', async (req, res) => {
       const killDate =
         release.killDate && release.killDate !== 0 ? new Date(release.killDate).toISOString().split('T')[0] : null;
 
-      // BS#1082 + BS#1312: tubafrenzy's sendRotationLinked posts only {id,
-      // libraryReleaseId, action: 'update'} on linkage. Including any of the
-      // payload-derived denorm fields in SET unconditionally would clobber
-      // the existing row's values with the JS defaults computed above for
-      // missing payload fields ('N' for rotation_bin, null for kill_date,
-      // null for artist_name / album_title / record_label when albumId is
-      // null). Presence-gate the SET so partial updates leave them alone.
-      // The INSERT path keeps the JS-default values so the create branch
-      // still populates these columns on first delivery.
-      const setClause: Record<string, unknown> = {
-        album_id: sql`excluded.album_id`,
-        legacy_library_release_id: sql`excluded.legacy_library_release_id`,
-      };
-      if (release.rotationType !== undefined) {
-        setClause.rotation_bin = sql`excluded.rotation_bin`;
-      }
-      if (release.killDate !== undefined) {
-        setClause.kill_date = sql`excluded.kill_date`;
-      }
-      if (release.artistName !== undefined) {
-        setClause.artist_name = sql`excluded.artist_name`;
-      }
-      if (release.albumTitle !== undefined) {
-        setClause.album_title = sql`excluded.album_title`;
-      }
-      if (release.labelName !== undefined) {
-        setClause.record_label = sql`excluded.record_label`;
-      }
-
-      await db
-        .insert(rotation)
-        .values({
-          legacy_rotation_id: release.id,
-          legacy_library_release_id: rawLibraryId || null,
+      if (parsedBin.kind === 'missing') {
+        // BS#1082 + BS#1312: tubafrenzy's sendRotationLinked posts only {id,
+        // libraryReleaseId, action: 'update'} on linkage. Those payloads carry
+        // no bin, so there is nothing to INSERT — this arm updates the existing
+        // row and stops. Presence-gating still applies to the fields the
+        // payload may or may not carry, so a linkage event can't clobber the
+        // row's kill_date or its denormalized artist/album/label snapshot with
+        // the JS defaults computed above.
+        //
+        // BS#2173: this arm used to be the ON CONFLICT half of an upsert whose
+        // INSERT half supplied the fictional 'N' for the NOT NULL bin. Gating
+        // SET protected a row that already existed, but a payload naming a
+        // release BS had never seen fell through to that INSERT and created a
+        // phantom in-rotation row. Reaching that state now reports 404 rather
+        // than inventing a bin.
+        //
+        // Be clear about what that costs, because the obvious reassurance is
+        // wrong: rotation-etl is NOT a live repair path. It is a one-shot job,
+        // unregistered from the deploy crontab, refusing to run without
+        // LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1, and documented as a backwards
+        // write that reverts Backend-side edits. So a 404 here means the
+        // linkage is dropped, not deferred — the caller only logs the status.
+        // That is still better than the alternative it replaces, which was a
+        // permanent phantom rotation row visible in the catalog export and
+        // every client; a missing linkage is recoverable by hand, a fabricated
+        // bin is invisible. If these start appearing, the fix is upstream: give
+        // the release a real bin in tubafrenzy.
+        const partialSet: Record<string, unknown> = {
           album_id: albumId,
-          rotation_bin: rotationType,
-          add_date: addDate,
-          kill_date: killDate,
-          artist_name: albumId ? null : truncate(release.artistName, 128),
-          album_title: albumId ? null : truncate(release.albumTitle, 128),
-          record_label: albumId ? null : truncate(release.labelName, 128),
-        })
-        .onConflictDoUpdate({
-          target: rotation.legacy_rotation_id,
-          set: setClause,
-        });
+          legacy_library_release_id: rawLibraryId || null,
+        };
+        if (release.killDate !== undefined) {
+          partialSet.kill_date = killDate;
+        }
+        if (release.artistName !== undefined) {
+          partialSet.artist_name = albumId ? null : truncate(release.artistName, 128);
+        }
+        if (release.albumTitle !== undefined) {
+          partialSet.album_title = albumId ? null : truncate(release.albumTitle, 128);
+        }
+        if (release.labelName !== undefined) {
+          partialSet.record_label = albumId ? null : truncate(release.labelName, 128);
+        }
+
+        const updated = await db
+          .update(rotation)
+          .set(partialSet)
+          .where(eq(rotation.legacy_rotation_id, release.id))
+          .returning({ id: rotation.id });
+
+        if (updated.length === 0) {
+          res.status(404).json({
+            error: `Unknown rotation release ${release.id}: cannot create a rotation row without a rotationType.`,
+          });
+          return;
+        }
+      } else {
+        // A real bin is present, so the row can be created outright. SET stays
+        // presence-gated for the same reason as above — a full-shape update
+        // overwrites these, a sparser one leaves them alone — while the INSERT
+        // arm populates every column on first delivery.
+        const setClause: Record<string, unknown> = {
+          album_id: sql`excluded.album_id`,
+          legacy_library_release_id: sql`excluded.legacy_library_release_id`,
+          rotation_bin: sql`excluded.rotation_bin`,
+        };
+        if (release.killDate !== undefined) {
+          setClause.kill_date = sql`excluded.kill_date`;
+        }
+        if (release.artistName !== undefined) {
+          setClause.artist_name = sql`excluded.artist_name`;
+        }
+        if (release.albumTitle !== undefined) {
+          setClause.album_title = sql`excluded.album_title`;
+        }
+        if (release.labelName !== undefined) {
+          setClause.record_label = sql`excluded.record_label`;
+        }
+
+        await db
+          .insert(rotation)
+          .values({
+            legacy_rotation_id: release.id,
+            legacy_library_release_id: rawLibraryId || null,
+            album_id: albumId,
+            rotation_bin: parsedBin.bin,
+            add_date: addDate,
+            kill_date: killDate,
+            artist_name: albumId ? null : truncate(release.artistName, 128),
+            album_title: albumId ? null : truncate(release.albumTitle, 128),
+            record_label: albumId ? null : truncate(release.labelName, 128),
+          })
+          .onConflictDoUpdate({
+            target: rotation.legacy_rotation_id,
+            set: setClause,
+          });
+      }
     }
 
     serverEventsMgr.broadcast(Topics.liveFs, {

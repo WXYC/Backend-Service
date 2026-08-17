@@ -1,6 +1,14 @@
 import * as Sentry from '@sentry/node';
 import { inArray, sql, type SQL } from 'drizzle-orm';
-import { db, library, library_artist_view, genres, format as formatTable, album_plays } from '@wxyc/database';
+import {
+  db,
+  library,
+  library_artist_view,
+  genres,
+  format as formatTable,
+  album_plays,
+  ROTATION_BINS,
+} from '@wxyc/database';
 import type { TrackMatchHint } from '@wxyc/shared/dtos';
 import {
   parseSearchQuery,
@@ -18,8 +26,13 @@ import { buildAliasHitsCte, buildAliasOnlyTier } from '../utils/alias-hits.js';
 export type CatalogSort = 'artist' | 'album' | 'plays' | 'date';
 export type CatalogOrder = 'asc' | 'desc';
 
-/** Bins exposed as catalog tag filters (excludes New). */
-export const VALID_ROTATION_BINS = ['S', 'L', 'M', 'H'] as const;
+/**
+ * Bins exposed as catalog tag filters — the complete set, not a subset.
+ * Aliased rather than redeclared so it cannot drift from `freq_enum`; the array
+ * (ordered) form is load-bearing because `parseRotationBinsQueryList` renders it
+ * into a user-facing error via `.join(', ')`.
+ */
+export const VALID_ROTATION_BINS = ROTATION_BINS;
 export type CatalogRotationBin = (typeof VALID_ROTATION_BINS)[number];
 
 export type LibraryQueryParams = {
@@ -87,11 +100,20 @@ const playsColumn = sql`COALESCE(${album_plays.plays}, 0)`;
 // BS#1554: when an album has more than one active rotation row (e.g. H and
 // M simultaneously), the DISTINCT ON (id) dedup below must keep the
 // heaviest active bin, not the lightest. `rotation_bin`'s underlying
-// `freq_enum` sorts S < L < M < H < N, so a bare `rotation_bin ASC`/`DESC`
-// picks the wrong end (ASC kept the lightest bin; a bare DESC would let N —
-// which WXYC never treats as a rotation weight — win). This explicit CASE
-// assigns H the lowest ordinal (favored by the `ASC` used at every
-// DISTINCT-ON site) and pins N last so it can never be the surfaced bin.
+// `freq_enum` sorts S < L < M < H — declaration order, which runs lightest to
+// heaviest — so a bare `rotation_bin ASC` keeps the lightest. This explicit
+// CASE assigns H the lowest ordinal so the `ASC` used at every DISTINCT-ON
+// site surfaces the heaviest bin instead.
+//
+// The `ELSE` is not a totality guard for a hypothetical: it is the hot
+// path. `library_artist_view` LEFT JOINs `rotation` (filtered to live rows), so
+// `rotation_bin` is NULL for every catalog album not currently in rotation —
+// the large majority — and `CASE NULL WHEN 'H' ...` falls through to 5 on all
+// of them. That is correct: a LEFT JOIN cannot produce both a NULL and a
+// non-NULL row for the same `id`, so ordinal 5 never competes inside a
+// `DISTINCT ON` group. Keep the `ELSE` regardless — without it the expression
+// yields NULL, which sorts last under the bare `ASC` used here but FIRST under
+// a `DESC`, a trap for any future caller that flips the direction.
 const ROTATION_BIN_DEDUP_ORDINAL = sql`CASE rotation_bin WHEN 'H' THEN 1 WHEN 'M' THEN 2 WHEN 'L' THEN 3 WHEN 'S' THEN 4 ELSE 5 END`;
 
 const SORT_COLUMNS: Record<CatalogSort, SQL> = {

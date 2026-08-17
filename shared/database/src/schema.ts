@@ -1,3 +1,4 @@
+import { ROTATION_BINS } from './rotation-bin.js';
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import { sql, eq, and } from 'drizzle-orm';
 import {
@@ -764,7 +765,26 @@ export const compilation_track_artist = wxyc_schema.table(
 
 export type NewRotationRelease = InferInsertModel<typeof rotation>;
 export type RotationRelease = InferSelectModel<typeof rotation>;
-export const freqEnum = pgEnum('freq_enum', ['S', 'L', 'M', 'H', 'N']);
+// Singles, Light, Medium, Heavy — derived from ROTATION_BINS so the Postgres
+// enum and the TypeScript union cannot drift.
+//
+// A fifth member `'N'` existed between migrations 0041 and 0150 (BS#2173). It
+// was never a rotation bin, but the mistake was a category error rather than an
+// invention, and that is worth recording because it is easy to re-make.
+// Tubafrenzy does have a "New": flowsheet entry-type code 5, "new vinyl, NOT
+// yet in rotation", which sits next to the four bins in that enum and beside
+// them in `rotationIndicator()`'s output ("H","M","L","S","New"). It is
+// explicitly not a bin — `FlowsheetEntry.isRotation()` covers codes 1-4 only,
+// and tubafrenzy's own `RotationTypeBackfillCLI` excludes it saying so — and it
+// means the OPPOSITE of a rotation weight. The rotation-release form
+// (`rotationReleaseInsert.jsp`) offers exactly four radio buttons, so the UI
+// that created these rows cannot emit an 'N' at all.
+//
+// The value survived as the sentinel two writers used for an inbound release
+// with no usable bin. Both now go through `parseRotationBin`, which keeps
+// "missing" and "invalid" distinct instead. This is the canonical account; the
+// other sites point here rather than restating it.
+export const freqEnum = pgEnum('freq_enum', ROTATION_BINS);
 
 export const flowsheetEntryTypeEnum = wxyc_schema.enum('flowsheet_entry_type', [
   'track',

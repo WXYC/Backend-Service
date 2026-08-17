@@ -9,6 +9,8 @@ import {
   NewGenre,
   NewRotationRelease,
   RotationRelease,
+  parseRotationBin,
+  ROTATION_BINS,
 } from '@wxyc/database';
 import { gunzipSync } from 'node:zlib';
 import * as libraryService from '../services/library.service.js';
@@ -482,6 +484,17 @@ export function pickAddRotationFields(body: Partial<NewRotationRelease>): AddRot
 export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = async (req, res) => {
   if (req.body.album_id === undefined || req.body.rotation_bin === undefined) {
     throw new WxycError('Missing Parameters: album_id or rotation_bin', 400);
+  }
+  // BS#2173: this checked PRESENCE but never VALUE, so an unrecognized bin
+  // reached the INSERT and surfaced as a Postgres 22P02 — a 500 for what is
+  // plainly bad input. Shared with the rotation webhook via `parseRotationBin`
+  // so the two cannot disagree about normalization (they did: `'h'` was
+  // accepted by one and rejected by the other).
+  if (parseRotationBin(req.body.rotation_bin).kind !== 'bin') {
+    throw new WxycError(
+      `Invalid rotation_bin ${JSON.stringify(req.body.rotation_bin)}. Expected one of: ${ROTATION_BINS.join(', ')}.`,
+      400
+    );
   }
 
   const picked = pickAddRotationFields(req.body);

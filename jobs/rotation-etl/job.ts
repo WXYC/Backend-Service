@@ -23,7 +23,7 @@ import {
   runPollingLoop,
   truncate,
 } from '@wxyc/database';
-import { mapRotationType, epochMsToDateString } from './transform.js';
+import { parseRotationBin, epochMsToDateString } from './transform.js';
 import { fetchLegacyRotation, closeLegacyConnection } from './fetch-legacy.js';
 import { isBackwardsWriteAllowed, backwardsWriteRefusalMessage } from './backwards-write-guard.js';
 
@@ -67,11 +67,38 @@ const runIncremental = async (): Promise<SyncResult> => {
   // Rows whose legacy_rotation_id already existed in PG. Not necessarily
   // updated — setWhere skips the UPDATE when every excluded.* value matches.
   let matched = 0;
+  // Releases whose upstream ROTATION_TYPE is blank (a real, if rare, state)
+  // versus unrecognized (bad data). Counted apart — see the skip below.
+  let skippedNoBin = 0;
+  let skippedInvalidBin = 0;
 
   for (const release of legacyReleases) {
     if (!Number.isFinite(release.id)) continue;
 
-    const rotationBin = mapRotationType(release.rotationType);
+    // BS#2173: `rotation.rotation_bin` is NOT NULL and `freq_enum` admits only
+    // the four real bins, so a release with no usable bin cannot be
+    // represented — skip it rather than import it under a fabricated one.
+    // Historically this fell back to 'N', which is what put the rows migration
+    // 0150 reclassifies into the table.
+    //
+    // Blank and unrecognized are counted separately on purpose. A blank
+    // ROTATION_TYPE is a legitimate upstream state (15 releases have one); an
+    // unrecognized value is bad data the rotation webhook considers loud enough
+    // to reject an entire event over, and folding it into "no bin upstream"
+    // would hide it behind a log line that says the opposite.
+    const parsedBin = parseRotationBin(release.rotationType);
+    if (parsedBin.kind !== 'bin') {
+      if (parsedBin.kind === 'invalid') {
+        skippedInvalidBin++;
+        console.warn(
+          `[rotation-etl] Release ${release.id}: unrecognized ROTATION_TYPE ${JSON.stringify(parsedBin.raw)} — skipped.`
+        );
+      } else {
+        skippedNoBin++;
+      }
+      continue;
+    }
+    const rotationBin = parsedBin.bin;
     const addDate = epochMsToDateString(release.addDate) ?? new Date().toISOString().split('T')[0];
     const killDate = epochMsToDateString(release.killDate);
 
@@ -212,6 +239,8 @@ const runIncremental = async (): Promise<SyncResult> => {
   await updateLastRun(JOB_NAME, runStartedAt);
   const parts = [`${imported} new releases`];
   if (matched > 0) parts.push(`${matched} matched releases`);
+  if (skippedNoBin > 0) parts.push(`${skippedNoBin} skipped (no rotation bin upstream)`);
+  if (skippedInvalidBin > 0) parts.push(`${skippedInvalidBin} skipped (unrecognized rotation bin)`);
   console.log(`[rotation-etl] Incremental sync: ${parts.join(', ')}.`);
 
   return { imported, matched };

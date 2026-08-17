@@ -699,6 +699,11 @@ export const selectLinkedFlowsheetRow = jest
   .mockResolvedValue(null);
 
 export { requirePositiveInt, requireNonNegativeInt } from '../../shared/database/src/env-parsers.js';
+// BS#2173: re-exported (not re-declared) so the mock cannot drift from the real
+// bin list. Safe because rotation-bin.ts is pure — no drizzle, no schema.ts,
+// which is why that module exists separately from schema.ts in the first place.
+export { ROTATION_BINS, parseRotationBin } from '../../shared/database/src/rotation-bin.js';
+export type { RotationBin, RotationBinParse } from '../../shared/database/src/rotation-bin.js';
 export type { IntParserOptions } from '../../shared/database/src/env-parsers.js';
 
 // Same pure-module-path rationale as the env parsers above: `fold-artist-name`
