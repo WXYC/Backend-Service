@@ -44,7 +44,7 @@ export interface IFSEntryMetadata {
 // `legacy_link_attempted_at` and `metadata_attempt_at` are job-internal
 // markers consumed only by the broken-FK recovery and metadata backfill
 // jobs respectively, so they're excluded from the controller-facing entry.
-// `no_match_recheck_attempted_at` (migration 0150, BS#2176) joins them —
+// `no_match_recheck_attempted_at` (migration 0151, BS#2176) joins them —
 // it is consumed only by `jobs/flowsheet-no-match-recheck`'s own retry-TTL
 // gate and carries no reader-facing meaning.
 // `updated_at` (BS#902) is the row-level watermark consumed only by the

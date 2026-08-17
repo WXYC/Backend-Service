@@ -250,7 +250,7 @@ export const flowsheet = {
   metadata_status: 'metadata_status',
   enriching_since: 'enriching_since',
   // BS#2176: retry marker for jobs/flowsheet-no-match-recheck. See
-  // shared/database/src/schema.ts + migration 0150.
+  // shared/database/src/schema.ts + migration 0151.
   no_match_recheck_attempted_at: 'no_match_recheck_attempted_at',
   linkage_source: 'linkage_source',
   linkage_confidence: 'linkage_confidence',
