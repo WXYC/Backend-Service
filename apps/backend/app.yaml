@@ -2096,15 +2096,21 @@ paths:
           description: Artist not found
 
     patch:
-      summary: Update an artist's name fields (BS#2156)
+      summary: Update an artist's alphabetical_name (BS#2156)
       description: >
         Enforced by `requirePermissions({ catalog: ['write'] })` — musicDirector
-        or above, the same tier as `POST`/`PATCH /library`. Both fields are
-        capped at 128 characters (the `varchar(128)` column width) and must be
-        non-empty strings. `genre_id`, `code_letters`, and `code_artist_number`
-        are real fields on `/wxycdb`'s artist-card form but have no write path
-        here yet — sending one is rejected with a 400 naming why, not silently
-        dropped.
+        or above, the same tier as `POST`/`PATCH /library`. `alphabetical_name`
+        is capped at 128 characters (the `varchar(128)` column width) and must
+        be a non-empty string. `artist_name`, `genre_id`, `code_letters`, and
+        `code_artist_number` are real fields on `/wxycdb`'s artist-card form
+        but have no write path on this endpoint — sending one is rejected with
+        a 400 naming why, not silently dropped. `artist_name` specifically:
+        `artists`/`library` are still tubafrenzy-canonical and
+        `jobs/library-etl` (a live cron) matches artists by `fold_artist_name`
+        and never updates `artists`, so a Backend-side rename would be
+        silently duplicated and reverted by the next ETL pass. Re-enabling
+        `artist_name` renaming is a follow-up gated on `library-etl` becoming
+        a one-shot job.
       security:
         - BearerAuth: ['catalog-write']
       parameters:
@@ -2119,9 +2125,6 @@ paths:
             schema:
               type: object
               properties:
-                artist_name:
-                  type: string
-                  maxLength: 128
                 alphabetical_name:
                   type: string
                   maxLength: 128
@@ -2149,14 +2152,12 @@ paths:
                     type: integer
         '400':
           description: >
-            Invalid artist id, missing/non-object body, a `genre_id` /
-            `code_letters` / `code_artist_number` field with no write path,
-            no updatable fields provided, or a field that is empty or over
-            128 characters
+            Invalid artist id, missing/non-object body, an `artist_name` /
+            `genre_id` / `code_letters` / `code_artist_number` field with no
+            write path on this endpoint, no updatable fields provided, or
+            `alphabetical_name` that is empty or over 128 characters
         '404':
           description: Artist not found
-        '409':
-          description: artist_name already exists for another artist in that genre
 
   /library/artists/{id}/releases:
     get:
