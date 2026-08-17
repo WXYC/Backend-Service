@@ -27,6 +27,68 @@ describe('errorHandler middleware', () => {
     expect(jsonMock).toHaveBeenCalledWith({ message: 'Album not found' });
   });
 
+  /**
+   * `reason` is the machine-readable discriminant WxycError opts into
+   * (utils/error.ts) so handlers stop hand-rolling `res.status().json()`
+   * bypasses to get one onto the wire. These tests pin the exact response
+   * shape for each opt-in combination, plus the byte-identical `{ message }`
+   * shape a `WxycError` with no `reason` must still produce.
+   */
+  describe('WxycError reason/details seam', () => {
+    it('emits exactly { message } when no opts are passed (unchanged from today)', () => {
+      const { res, statusMock, jsonMock } = mockResponse();
+      const error = new WxycError('Album not found', 404);
+
+      errorHandler(error, mockReq, res, mockNext);
+
+      expect(statusMock).toHaveBeenCalledWith(404);
+      expect(jsonMock).toHaveBeenCalledWith({ message: 'Album not found' });
+    });
+
+    it('emits { message, reason } when reason is set with no details', () => {
+      const { res, statusMock, jsonMock } = mockResponse();
+      const error = new WxycError('Artist code already in use', 409, { reason: 'artist_code_conflict' });
+
+      errorHandler(error, mockReq, res, mockNext);
+
+      expect(statusMock).toHaveBeenCalledWith(409);
+      expect(jsonMock).toHaveBeenCalledWith({ message: 'Artist code already in use', reason: 'artist_code_conflict' });
+    });
+
+    it('spreads details alongside message and reason', () => {
+      const { res, jsonMock } = mockResponse();
+      const error = new WxycError('Artist code already in use', 409, {
+        reason: 'artist_code_conflict',
+        details: { code_letters: 'ABC', code_number: 12 },
+      });
+
+      errorHandler(error, mockReq, res, mockNext);
+
+      expect(jsonMock).toHaveBeenCalledWith({
+        message: 'Artist code already in use',
+        reason: 'artist_code_conflict',
+        code_letters: 'ABC',
+        code_number: 12,
+      });
+    });
+
+    it('never lets details overwrite message or reason', () => {
+      const { res, jsonMock } = mockResponse();
+      const error = new WxycError('Real message', 409, {
+        reason: 'real_reason',
+        details: { message: 'spoofed message', reason: 'spoofed reason', extra: 'kept' },
+      });
+
+      errorHandler(error, mockReq, res, mockNext);
+
+      expect(jsonMock).toHaveBeenCalledWith({
+        message: 'Real message',
+        reason: 'real_reason',
+        extra: 'kept',
+      });
+    });
+  });
+
   it('returns generic message for non-WxycError (does not leak internals)', () => {
     const { res, statusMock, jsonMock } = mockResponse();
     const error = new Error('SELECT * FROM users failed: connection refused');
