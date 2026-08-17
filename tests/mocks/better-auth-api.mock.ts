@@ -1,6 +1,22 @@
 // Mock for `better-auth/api` — the real subpath ships ESM that ts-jest
 // can't transform without the ESM preset. `APIError` is the only symbol the
 // production code we test under `tests/unit/**` imports from here.
+// Production code constructs APIError with better-auth's string statuses
+// ('BAD_REQUEST', 'FORBIDDEN', …) rather than numbers. Resolving them to the
+// numeric code the client actually receives lets a spec assert the status a
+// guard produces — the difference between a 400 and a 500 is frequently the
+// entire point of the guard under test.
+const STATUS_CODES = new Map<string, number>([
+  ['BAD_REQUEST', 400],
+  ['UNAUTHORIZED', 401],
+  ['FORBIDDEN', 403],
+  ['NOT_FOUND', 404],
+  ['CONFLICT', 409],
+  ['UNPROCESSABLE_ENTITY', 422],
+  ['TOO_MANY_REQUESTS', 429],
+  ['INTERNAL_SERVER_ERROR', 500],
+]);
+
 export class APIError extends Error {
   statusCode: number;
   body?: { message?: string; code?: string; error?: string; error_description?: string; [key: string]: unknown };
@@ -14,7 +30,7 @@ export class APIError extends Error {
     super(body?.message ?? body?.error ?? 'API Error');
     this.name = 'APIError';
     this.body = body;
-    this.statusCode = statusCode ?? (typeof status === 'number' ? status : 500);
+    this.statusCode = statusCode ?? (typeof status === 'number' ? status : (STATUS_CODES.get(status) ?? 500));
   }
 }
 

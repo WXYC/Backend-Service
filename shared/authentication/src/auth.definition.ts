@@ -43,6 +43,55 @@ import { buildTrustedClients } from './oidc-trusted-clients';
 import { buildLoginPage } from './oidc-login-page';
 import { buildResetUrl, rewriteUrlForFrontend } from './url-rewrite';
 import { accountSetupTokenExpiresInSeconds } from './account-setup-token';
+import { buildJwtPayload, buildOidcUserInfoClaim, type MemberRoleRow } from './jwt-payload';
+import {
+  syncAdminFlagOnAddMember,
+  syncAdminFlagOnRemoveMember,
+  syncAdminFlagOnUpdateMemberRole,
+  type AdminFlagSyncDeps,
+} from './admin-flag-sync';
+
+/**
+ * The one place a station role is read. Both token-minting paths and the
+ * device-approve gate resolve `role` from `auth_member`, never from
+ * `auth_user.role` — that column is the better-auth admin plugin's system
+ * flag and carries no station role.
+ */
+const selectMemberRole = async (userId: string): Promise<MemberRoleRow> => {
+  const rows = await db.select({ role: member.role }).from(member).where(eq(member.userId, userId)).limit(1);
+  return rows[0];
+};
+
+/**
+ * Does any *other* membership in the default organization still justify the
+ * admin flag? Consulted when a member is removed, so a user who holds the
+ * role through a second row does not lose it.
+ */
+const hasOtherAdminMembership = async (userId: string, defaultOrgSlug: string): Promise<boolean> => {
+  const rows = await db
+    .select({ role: member.role })
+    .from(member)
+    .innerJoin(organization, sql`${member.organizationId} = ${organization.id}`)
+    .where(
+      sql`${member.userId} = ${userId}
+                AND ${organization.slug} = ${defaultOrgSlug}
+                AND ${member.role} IN ('admin', 'owner', 'stationManager')`
+    )
+    .limit(1);
+  return rows.length > 0;
+};
+
+/**
+ * `defaultOrgSlug` is resolved per invocation, matching the hooks' original
+ * per-fire `process.env` read.
+ */
+const adminFlagSyncDeps = (hookName: string): AdminFlagSyncDeps => ({
+  defaultOrgSlug: process.env.DEFAULT_ORG_SLUG,
+  setUserRole: async (userId, role) => {
+    await db.update(user).set({ role }).where(eq(user.id, userId));
+  },
+  onError: (error) => console.error(`Error syncing admin role in ${hookName}:`, error),
+});
 
 // Type annotation avoids TS2742: tsup's DTS emitter cannot reference
 // better-auth's internal anonymous plugin types (unexported subpath).
@@ -209,36 +258,10 @@ export const auth = betterAuth({
       // JWKS endpoint automatically exposed at /api/auth/jwks
       // Custom payload to include organization member role and capabilities
       jwt: {
-        definePayload: async ({ user }) => {
-          const userWithCapabilities = user as typeof user & {
-            capabilities?: string[] | null;
-          };
-          // Query organization membership to get member role
-          if (user?.id) {
-            try {
-              const memberRecord = await db
-                .select({ role: member.role })
-                .from(member)
-                .where(eq(member.userId, user.id))
-                .limit(1);
-
-              if (memberRecord.length > 0) {
-                return {
-                  ...user,
-                  role: memberRecord[0].role,
-                  capabilities: userWithCapabilities.capabilities ?? [],
-                };
-              }
-            } catch (error) {
-              console.error('[JWT] Failed to fetch member role:', error);
-            }
-          }
-          // Fallback: no organization membership or query failed
-          return {
-            ...user,
-            capabilities: userWithCapabilities?.capabilities ?? [],
-          };
-        },
+        definePayload: async ({ user }) =>
+          buildJwtPayload(user, selectMemberRole, (error) =>
+            console.error('[JWT] Failed to fetch member role:', error)
+          ),
       },
     }),
     oidcProvider({
@@ -260,21 +283,7 @@ export const auth = betterAuth({
       // public trustedClient (see #1578, wxyc-canary#60).
       useJWTPlugin: true,
       trustedClients: buildTrustedClients(process.env),
-      getAdditionalUserInfoClaim: async (userRecord) => {
-        try {
-          const memberRecord = await db
-            .select({ role: member.role })
-            .from(member)
-            .where(eq(member.userId, userRecord.id))
-            .limit(1);
-          return {
-            role: memberRecord[0]?.role ?? 'member',
-            capabilities: (userRecord as typeof userRecord & { capabilities?: string[] }).capabilities ?? [],
-          };
-        } catch {
-          return { role: 'member', capabilities: [] };
-        }
-      },
+      getAdditionalUserInfoClaim: async (userRecord) => buildOidcUserInfoClaim(userRecord, selectMemberRole),
     }),
     organizationPlugin({
       // Configure for single organization model
@@ -284,107 +293,25 @@ export const auth = betterAuth({
       // Role information is included via custom JWT definePayload function above
       organizationHooks: {
         // Sync global user.role when members are added to default organization
-        afterAddMember: async ({ member, user: userData, organization: orgData }) => {
-          try {
-            const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
-            if (!defaultOrgSlug) {
-              console.warn('DEFAULT_ORG_SLUG is not set, skipping admin role sync');
-              return;
-            }
-
-            // Only update for default organization
-            if (orgData.slug !== defaultOrgSlug) {
-              return;
-            }
-
-            // Check if role should grant admin permissions
-            const adminRoles = ['stationManager', 'admin', 'owner'];
-            if (adminRoles.includes(member.role)) {
-              // Update user.role to "admin" for Better Auth Admin plugin
-              const userId = userData.id;
-              await db.update(user).set({ role: 'admin' }).where(eq(user.id, userId));
-              console.log(
-                `Granted admin role to user ${userId} (${userData.email}) with ${member.role} role in default organization`
-              );
-            }
-          } catch (error) {
-            console.error('Error syncing admin role in afterAddMember:', error);
-          }
-        },
+        afterAddMember: async ({ member, user: userData, organization: orgData }) =>
+          syncAdminFlagOnAddMember(
+            { member, user: userData, organization: orgData },
+            adminFlagSyncDeps('afterAddMember')
+          ),
 
         // Sync global user.role when member roles are updated
-        afterUpdateMemberRole: async ({ member, previousRole, user: userData, organization: orgData }) => {
-          try {
-            const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
-            if (!defaultOrgSlug) {
-              console.warn('DEFAULT_ORG_SLUG is not set, skipping admin role sync');
-              return;
-            }
-
-            // Only update for default organization
-            if (orgData.slug !== defaultOrgSlug) {
-              return;
-            }
-
-            const adminRoles = ['stationManager', 'admin', 'owner'];
-            const shouldHaveAdmin = adminRoles.includes(member.role);
-            const previouslyHadAdmin = adminRoles.includes(previousRole);
-
-            const userId = userData.id;
-            if (shouldHaveAdmin && !previouslyHadAdmin) {
-              // Promoted to admin role - grant admin
-              await db.update(user).set({ role: 'admin' }).where(eq(user.id, userId));
-              console.log(`Granted admin role to user ${userId} (${userData.email}) after promotion to ${member.role}`);
-            } else if (!shouldHaveAdmin && previouslyHadAdmin) {
-              // Demoted from admin role - remove admin
-              await db.update(user).set({ role: null }).where(eq(user.id, userId));
-              console.log(
-                `Removed admin role from user ${userId} (${userData.email}) after demotion from ${previousRole} to ${member.role}`
-              );
-            }
-          } catch (error) {
-            console.error('Error syncing admin role in afterUpdateMemberRole:', error);
-          }
-        },
+        afterUpdateMemberRole: async ({ member, previousRole, user: userData, organization: orgData }) =>
+          syncAdminFlagOnUpdateMemberRole(
+            { member, previousRole, user: userData, organization: orgData },
+            adminFlagSyncDeps('afterUpdateMemberRole')
+          ),
 
         // Sync global user.role when members are removed from default organization
-        afterRemoveMember: async ({ user: userData, organization: orgData }) => {
-          try {
-            const defaultOrgSlug = process.env.DEFAULT_ORG_SLUG;
-            if (!defaultOrgSlug) {
-              console.warn('DEFAULT_ORG_SLUG is not set, skipping admin role sync');
-              return;
-            }
-
-            // Only update for default organization
-            if (orgData.slug !== defaultOrgSlug) {
-              return;
-            }
-
-            // Check if user has any other memberships with admin roles
-            const otherAdminMemberships = await db
-              .select({ role: member.role })
-              .from(member)
-              .innerJoin(organization, sql`${member.organizationId} = ${organization.id}`)
-              .where(
-                sql`${member.userId} = ${userData.id}
-                AND ${organization.slug} = ${defaultOrgSlug}
-                AND ${member.role} IN ('admin', 'owner', 'stationManager')`
-              )
-              .limit(1);
-
-            // If no other admin memberships exist, remove admin role
-            if (otherAdminMemberships.length === 0) {
-              const userId = userData.id;
-              await db.update(user).set({ role: null }).where(eq(user.id, userId));
-              console.log(
-                `Removed admin role from user ${userId} (${userData.email}) after removal from default organization`
-              );
-            }
-          } catch (error) {
-            console.error('Error syncing admin role in afterRemoveMember:', error);
-          }
-        },
+        afterRemoveMember: async ({ user: userData, organization: orgData }) =>
+          syncAdminFlagOnRemoveMember(
+            { user: userData, organization: orgData },
+            { ...adminFlagSyncDeps('afterRemoveMember'), hasOtherAdminMembership }
+          ),
       },
     }),
     // ADR 0008 — QR sign-in for the shared control-room computer (RFC 8628).
