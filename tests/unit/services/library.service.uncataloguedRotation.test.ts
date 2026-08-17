@@ -9,7 +9,11 @@
  *     `getRotationFromDB`'s raw-SQL `DISTINCT ON`).
  *   - `linkRotationToAlbum` — the `PATCH /rotation/:id/link` transaction:
  *     album-exists check, rotation-exists check, already-linked rejection,
- *     and the same-transaction snapshot-column clear.
+ *     and (review round 3 finding 1) that it deliberately does NOT clear
+ *     the snapshot columns — see the function's doc for why. Also (finding
+ *     4) that the linked response is projected through the same
+ *     `UNCATALOGUED_ROTATION_PROJECTION` the queue read uses, not a bare
+ *     `.returning()`.
  *
  * Follows the established `db._chain` / `createMockQueryChain` override
  * conventions from `library.service.addToRotation.test.ts` and
@@ -158,19 +162,24 @@ describe('linkRotationToAlbum (BS#2109)', () => {
     jest.clearAllMocks();
   });
 
-  it('links: sets album_id and clears artist_name/album_title/record_label in one UPDATE', async () => {
+  it('links: sets album_id only — does NOT clear artist_name/album_title/record_label (review round 3 finding 1)', async () => {
     const albumChain = createMockQueryChain();
     albumChain.limit = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
 
     const rotationSelectChain = createMockQueryChain();
     rotationSelectChain.limit = jest.fn().mockResolvedValue([{ album_id: null }]);
 
+    // The snapshot survives the link untouched — clearing it stranded the
+    // tracklist picker's tier-3 self-heal (see linkRotationToAlbum's doc).
     const updatedRow = {
       id: ROTATION_ID,
       album_id: ALBUM_ID,
-      artist_name: null,
-      album_title: null,
-      record_label: null,
+      rotation_bin: 'L',
+      add_date: '2026-01-01',
+      kill_date: null,
+      artist_name: 'Preserved Artist',
+      album_title: 'Preserved Album',
+      record_label: 'Preserved Label',
     };
     const updateChain = createMockQueryChain([updatedRow]);
 
@@ -182,11 +191,21 @@ describe('linkRotationToAlbum (BS#2109)', () => {
     expect(result).toEqual({ outcome: 'linked', rotation: updatedRow });
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(albumChain.from).toHaveBeenCalledWith(library);
-    expect(updateChain.set).toHaveBeenCalledWith({
-      album_id: ALBUM_ID,
-      artist_name: null,
-      album_title: null,
-      record_label: null,
+    // Only album_id moves — no artist_name/album_title/record_label keys.
+    expect(updateChain.set).toHaveBeenCalledWith({ album_id: ALBUM_ID });
+    // Review round 3 finding 4: the response is projected through the same
+    // explicit column list `getUncataloguedRotationFromDB` uses, not a bare
+    // `.returning()` — asserted against the call's own args so a future
+    // migration-added column can't silently widen this response too.
+    expect(updateChain.returning).toHaveBeenCalledWith({
+      id: rotation.id,
+      album_id: rotation.album_id,
+      rotation_bin: rotation.rotation_bin,
+      add_date: rotation.add_date,
+      kill_date: rotation.kill_date,
+      artist_name: rotation.artist_name,
+      album_title: rotation.album_title,
+      record_label: rotation.record_label,
     });
     // The UPDATE's own WHERE re-guards album_id IS NULL, not just the earlier
     // SELECT. drizzle-orm is automocked project-wide (`tests/__mocks__/

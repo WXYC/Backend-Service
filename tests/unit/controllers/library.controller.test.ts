@@ -1130,6 +1130,23 @@ describe('library.controller', () => {
       expect(mockAddToRotation).not.toHaveBeenCalled();
     });
 
+    // Review round 3 finding 7: `Number.isInteger` tightens the pre-existing
+    // catalogued path too, not just the new uncatalogued one — a numeric
+    // *string* `album_id` previously inserted fine (PostgreSQL coerces on
+    // the way into an `integer` column) and now 400s. Deliberately kept:
+    // dj-site's `addRotationEntry` call site is typed `number` end to end
+    // (`AddRotationRequest` from the shared OpenAPI contract, sourced from
+    // `AlbumEntry.id: number`), so the only known caller never sends this
+    // shape — see `addRotation`'s docblock.
+    it('returns 400 for a numeric-string album_id rather than relying on PostgreSQL coercion', async () => {
+      const res = mockResponse();
+
+      await expect(
+        addRotation({ body: { album_id: '2', rotation_bin: 'M' } } as unknown as Request, res, next)
+      ).rejects.toThrow('album_id must be a positive integer');
+      expect(mockAddToRotation).not.toHaveBeenCalled();
+    });
+
     it('returns 400 when a blank/whitespace-only artist_name or album_title is supplied', async () => {
       const res = mockResponse();
 
@@ -1187,6 +1204,54 @@ describe('library.controller', () => {
         album_title: title,
       });
       expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    // Review round 3 finding 6: `varchar(128)` is a PostgreSQL *character*
+    // (code point) limit, but `String.prototype.length` counts UTF-16 code
+    // units — every astral character (emoji, CJK Extension B, …) counts as
+    // 2. 70 astral code points is a value PostgreSQL accepts outright, but
+    // `.length` reads it as 140 and would 400 it — undercutting this
+    // endpoint's own reject-over-truncate rationale (a guard that rejects
+    // something PG would have stored is not the guard the docblock argues
+    // for). Never the reverse: a bare `.length` only ever over-counts, so
+    // there was no 22001 escape either way.
+    it('accepts a 70-character astral-plane (emoji) artist_name even though .length reads it as 140', async () => {
+      mockAddToRotation.mockResolvedValue({ id: 6, album_id: null, rotation_bin: 'L' });
+      const astralName = '🎸'.repeat(70);
+      expect(astralName.length).toBe(140);
+      expect([...astralName].length).toBe(70);
+      const res = mockResponse();
+
+      await addRotation(
+        {
+          body: { rotation_bin: 'L', artist_name: astralName, album_title: 'I Love You Jennifer B' },
+        } as unknown as Request,
+        res,
+        next
+      );
+
+      expect(mockAddToRotation).toHaveBeenCalledWith({
+        rotation_bin: 'L',
+        artist_name: astralName,
+        album_title: 'I Love You Jennifer B',
+      });
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('rejects a 129-code-point astral-plane artist_name', async () => {
+      const astralName = '🎸'.repeat(129);
+      const res = mockResponse();
+
+      await expect(
+        addRotation(
+          {
+            body: { rotation_bin: 'L', artist_name: astralName, album_title: 'I Love You Jennifer B' },
+          } as unknown as Request,
+          res,
+          next
+        )
+      ).rejects.toThrow('artist_name exceeds the 128-character limit');
+      expect(mockAddToRotation).not.toHaveBeenCalled();
     });
 
     it('does not length-guard the snapshot trio when album_id is present (the trio is dropped anyway)', async () => {

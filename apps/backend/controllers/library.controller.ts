@@ -570,9 +570,23 @@ export function pickAddRotationFields(body: Partial<NewRotationRelease>): AddRot
  * would leave the librarian a corrupted record with no signal, whereas
  * without a guard PostgreSQL raises 22001 and the request becomes an opaque
  * 500 + Sentry event that names no field.
+ *
+ * The length check below counts `[...value].length` (Unicode code points),
+ * not `value.length` (UTF-16 code units) — `varchar(128)` is a
+ * **character** limit; PostgreSQL counts code points, and `value.length`
+ * over-counts every character outside the BMP (astral emoji, CJK
+ * Extension B, …) as 2. Review round 3 finding 6: a bare `.length` never
+ * *under*-rejects (so no 22001 could ever slip through), but it does
+ * over-reject values PostgreSQL would happily store — undercutting the
+ * very reason this endpoint chose reject-over-truncate.
  */
 const ROTATION_SNAPSHOT_MAX_LENGTH = 128;
 const ROTATION_SNAPSHOT_FIELDS = ['artist_name', 'album_title', 'record_label'] as const;
+
+/** Unicode-code-point length — see `ROTATION_SNAPSHOT_MAX_LENGTH` above. */
+function codePointLength(value: string): number {
+  return [...value].length;
+}
 
 /** `true` only for a string with at least one non-whitespace character. */
 function isNonBlankString(value: unknown): value is string {
@@ -596,6 +610,20 @@ function isNonBlankString(value: unknown): value is string {
  * `rotation.album_id` FKs it, so a `0` would drop the free text and then
  * violate the FK into an opaque 500. It is the literal payload the classic
  * `/wxycdb` rotation form posts, so it gets a named 400.
+ *
+ * **Behavior change (review round 3 finding 7):** `Number.isInteger(album_id)`
+ * also tightens the pre-existing catalogued path, not just the new
+ * uncatalogued one — `{"album_id": "2", "rotation_bin": "M"}` previously
+ * inserted fine (PostgreSQL coerces a numeric string on the way into an
+ * `integer` column) and now 400s. Kept deliberately: dj-site's
+ * `addRotationEntry` mutation (`lib/features/rotation/api.ts`) is typed
+ * against `AddRotationRequest` (`album_id: number`, from the shared OpenAPI
+ * contract) and its sole call site (`RotationClassifyControl.tsx`) passes
+ * `album.id!`, itself typed `number` — the only known caller of this
+ * endpoint always sends a genuine JSON number, never a numeric string, so
+ * this tightening does not affect it. A caller that does send a numeric
+ * string was relying on undocumented PostgreSQL coercion rather than the
+ * documented contract.
  */
 export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = async (req, res) => {
   const { body } = req;
@@ -633,7 +661,7 @@ export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = 
       if (typeof value !== 'string') {
         throw new WxycError(`Invalid Parameter: ${field} must be a string`, 400);
       }
-      if (value.length > ROTATION_SNAPSHOT_MAX_LENGTH) {
+      if (codePointLength(value) > ROTATION_SNAPSHOT_MAX_LENGTH) {
         throw new WxycError(
           `Invalid Parameter: ${field} exceeds the ${ROTATION_SNAPSHOT_MAX_LENGTH}-character limit`,
           400
@@ -659,9 +687,12 @@ export type LinkRotationRequest = {
  * `PATCH /library/rotation/:rotation_id/link` (BS#2109) — links an
  * uncatalogued rotation row to a library release after the fact (the
  * "Import to Library" step of the tubafrenzy `/wxycdb` workflow). Rejects
- * double-linking; clears the free-text snapshot columns in the same
- * transaction as the link, matching `jobs/legacy-linkage-resolve`. See
- * `libraryService.linkRotationToAlbum` for the transactional details.
+ * double-linking. Deliberately leaves the free-text snapshot columns
+ * (`artist_name` / `album_title` / `record_label`) untouched — see
+ * `libraryService.linkRotationToAlbum` for the transactional details and
+ * why (review round 3 finding 1: clearing them stranded the tracklist
+ * picker with no self-heal path). The response is a projected shape, not
+ * the raw `.returning()` row (finding 4) — see the same doc.
  */
 export const linkRotationToAlbum: RequestHandler<{ rotation_id: string }, unknown, LinkRotationRequest> = async (
   req,

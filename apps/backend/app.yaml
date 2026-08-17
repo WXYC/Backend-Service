@@ -474,16 +474,81 @@ components:
 
     NewRotationRequest:
       type: object
-      required: ['album_id', 'rotation_bin']
+      required: ['rotation_bin']
+      description: >-
+        BS#2109: `album_id` may be omitted (or explicitly `null`) when
+        `artist_name` and `album_title` are both supplied instead — the
+        free-text pair representing a rotation release the station hasn't
+        catalogued yet. `record_label` is optional in that case; blank or
+        whitespace-only `artist_name`/`album_title` don't count as
+        supplied. 400s when neither `album_id` nor the artist/title pair is
+        given. `artist_name` / `album_title` / `record_label` are ignored
+        when `album_id` is present — display is then sourced from the
+        library join, and a client-supplied snapshot there would leave
+        stale free text nothing ever clears.
       properties:
         album_id:
           type: integer
+          nullable: true
+          description: >-
+            Must be a positive integer, or omitted/null for an uncatalogued
+            release. `0` 400s — there is no `0` sentinel on this column;
+            `library.id` is a serial starting at 1.
         rotation_bin:
           type: string
           enum: ['S', 'L', 'M', 'H']
         kill_date:
           type: string
           format: date
+        artist_name:
+          type: string
+          maxLength: 128
+          description: Required (with album_title) when album_id is omitted. A value over 128 characters 400s rather than truncating.
+        album_title:
+          type: string
+          maxLength: 128
+          description: Required (with artist_name) when album_id is omitted. A value over 128 characters 400s rather than truncating.
+        record_label:
+          type: string
+          maxLength: 128
+          description: Optional, only used when album_id is omitted. A value over 128 characters 400s rather than truncating.
+
+    UncataloguedRotationRow:
+      type: object
+      description: >-
+        BS#2109. The explicit column projection `GET
+        /library/rotation/uncatalogued` and `PATCH
+        /library/rotation/{rotation_id}/link` both return — deliberately
+        narrower than the full `rotation` row, which also carries
+        server-derived plumbing (legacy_rotation_id,
+        legacy_library_release_id, discogs_release_id,
+        discogs_release_id_source, lml_identity_id, and two attempt-at
+        markers) that is never published on this surface.
+      properties:
+        id:
+          type: integer
+        album_id:
+          type: integer
+          nullable: true
+        rotation_bin:
+          type: string
+          enum: ['S', 'L', 'M', 'H', 'N']
+        add_date:
+          type: string
+          format: date
+        kill_date:
+          type: string
+          format: date
+          nullable: true
+        artist_name:
+          type: string
+          nullable: true
+        album_title:
+          type: string
+          nullable: true
+        record_label:
+          type: string
+          nullable: true
 
     BinLibraryDetails:
       type: object
@@ -1646,8 +1711,13 @@ paths:
             schema:
               $ref: '#/components/schemas/NewRotationRequest'
       responses:
-        '200':
+        '201':
           description: Successfully added rotation
+        '400':
+          description: >-
+            Missing rotation_bin; neither album_id nor a valid artist/title
+            pair given; album_id not a positive integer; or a snapshot
+            field over 128 characters.
 
     patch:
       summary: Set rotation removal date
@@ -1668,6 +1738,98 @@ paths:
       responses:
         '200':
           description: Successfully set rotation removal date
+
+  /library/rotation/uncatalogued:
+    get:
+      summary: List uncatalogued rotation releases (cataloging backlog queue)
+      description: >-
+        BS#2109. Rotation rows with no linked library release (`album_id IS
+        NULL`) — the "Import to Library" backlog a librarian works through
+        via `PATCH /library/rotation/{rotation_id}/link`. Deliberately NOT
+        deduplicated the way `GET /library/rotation`'s dropdown shape is:
+        two physically distinct promos sharing an artist and title are two
+        separate rows to catalogue, not one. Not restricted to active
+        (`kill_date`) rows — this is the full cataloging backlog, not a
+        live dropdown. `limit`/`offset` are both opt-in; omitting both
+        returns the full, unbounded backlog.
+      security:
+        - BearerAuth: ['catalog-read']
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: Uncatalogued rotation rows, newest add_date first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UncataloguedRotationRow'
+        '400':
+          description: Malformed limit or offset.
+        '401':
+          description: Missing or invalid bearer token.
+
+  /library/rotation/{rotation_id}/link:
+    patch:
+      summary: Link an uncatalogued rotation row to a library release
+      description: >-
+        BS#2109. The "Import to Library" step of the tubafrenzy `/wxycdb`
+        workflow: attaches a `library` release to a rotation row that was
+        added without one. Rejects double-linking (409). Deliberately does
+        NOT clear artist_name/album_title/record_label — they're left
+        populated so the tracklist picker (`GET
+        /library/rotation/{rotation_id}/tracks`) can still resolve a
+        release via LML free-text lookup until `discogs_release_id` is
+        independently backfilled; display elsewhere is unaffected because it
+        reads through the library join once album_id resolves.
+      security:
+        - BearerAuth: ['station-management']
+      parameters:
+        - name: rotation_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: ['album_id']
+              properties:
+                album_id:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: Linked rotation row.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UncataloguedRotationRow'
+        '400':
+          description: rotation_id is not a positive integer, or album_id is missing/not a positive integer.
+        '401':
+          description: Missing or invalid bearer token.
+        '404':
+          description: Rotation entry not found, or album not found.
+        '409':
+          description: Rotation entry is already linked to a library release.
 
   /library/artists:
     post:
