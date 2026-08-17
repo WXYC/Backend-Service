@@ -44,6 +44,9 @@ export interface IFSEntryMetadata {
 // `legacy_link_attempted_at` and `metadata_attempt_at` are job-internal
 // markers consumed only by the broken-FK recovery and metadata backfill
 // jobs respectively, so they're excluded from the controller-facing entry.
+// `no_match_recheck_attempted_at` (migration 0150, BS#2176) joins them —
+// it is consumed only by `jobs/flowsheet-no-match-recheck`'s own retry-TTL
+// gate and carries no reader-facing meaning.
 // `updated_at` (BS#902) is the row-level watermark consumed only by the
 // conditional-GET middleware via `getLastModifiedAt`; it's never projected
 // onto the wire format, so it stays out of IFSEntry alongside the other
@@ -69,7 +72,13 @@ export interface IFSEntryMetadata {
 // echoes and the DJ peek won't carry it.
 export interface IFSEntry extends Omit<
   FSEntry,
-  'search_doc' | 'legacy_link_attempted_at' | 'metadata_attempt_at' | 'updated_at' | 'composer' | 'composer_source'
+  | 'search_doc'
+  | 'legacy_link_attempted_at'
+  | 'metadata_attempt_at'
+  | 'no_match_recheck_attempted_at'
+  | 'updated_at'
+  | 'composer'
+  | 'composer_source'
 > {
   label_id: number | null;
   rotation_bin: string | null;
