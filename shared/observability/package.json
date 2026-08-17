@@ -1,7 +1,7 @@
 {
   "name": "@wxyc/observability",
   "version": "1.0.0",
-  "description": "Shared Sentry transaction/span filter predicates (BS#2089). Single source of truth for dropping liveness-route transactions (/ok, /healthcheck) and Express middleware bookkeeping spans, consumed by apps/backend/instrument.ts and apps/auth/instrument.ts so both containers apply byte-identical filtering.",
+  "description": "Cross-container observability primitives: Sentry transaction/span filter predicates (BS#2089, package root — dropping liveness-route transactions and Express middleware bookkeeping spans) and a generic buffered CloudWatch metric emitter (BS#2169, `./metrics` subpath). Consumed by apps/backend and apps/auth so both containers share byte-identical implementations.",
   "author": "WXYC",
   "license": "PolyForm-Noncommercial-1.0.0",
   "exports": {
@@ -11,6 +11,12 @@
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
     },
+    "./metrics": {
+      "source": "./src/metrics.ts",
+      "types": "./dist/metrics.d.ts",
+      "import": "./dist/metrics.mjs",
+      "require": "./dist/metrics.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -19,6 +25,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.1106.0",
     "@sentry/core": "^10.69.0",
     "@sentry/node": "^10.69.0"
   },

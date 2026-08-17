@@ -27,6 +27,13 @@ const config: Config = {
     '^@wxyc/metadata$': '<rootDir>/shared/metadata/src/index.ts',
     // @wxyc/observability: resolve to source for the same reason as @wxyc/lml-client.
     '^@wxyc/observability$': '<rootDir>/shared/observability/src/index.ts',
+    // @wxyc/observability/metrics: separate entry because moduleNameMapper
+    // patterns are anchored/exact — the bare-specifier mapping above does
+    // NOT also match this subpath. Without it, both the new tests and any
+    // apps/auth module importing the subpath fall through to node
+    // resolution against shared/observability/dist, which CI's unit-tests
+    // job never builds (BS#2169).
+    '^@wxyc/observability/metrics$': '<rootDir>/shared/observability/src/metrics.ts',
     // @wxyc/legacy-mirror: resolve to source (BS#1707). The tubafrenzy mirror
     // client moved here from apps/backend/middleware/legacy/; the app-path
     // http.mirror.ts / rotation-match.mirror.ts shims re-export it. rotation-match
