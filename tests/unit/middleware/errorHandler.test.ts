@@ -28,37 +28,70 @@ describe('errorHandler middleware', () => {
   });
 
   /**
-   * `reason` is the machine-readable discriminant WxycError opts into
+   * `code` is the machine-readable discriminant WxycError opts into
    * (utils/error.ts) so handlers stop hand-rolling `res.status().json()`
-   * bypasses to get one onto the wire. These tests pin the exact response
-   * shape for each opt-in combination, plus the byte-identical `{ message }`
-   * shape a `WxycError` with no `reason` must still produce.
+   * bypasses to get one onto the wire. The response shape mirrors
+   * `wxyc-shared/api.yaml`'s `ApiErrorResponse` (`message`, `code`,
+   * `details`) — the cross-repo SSOT that generates client models for
+   * dj-site, iOS, and Android — so `details` nests under its own key rather
+   * than spreading flat. These tests pin the exact response shape for each
+   * opt-in combination, plus the byte-identical `{ message }` shape a
+   * `WxycError` with neither `code` nor `details` must still produce.
    */
-  describe('WxycError reason/details seam', () => {
-    it('emits exactly { message } when no opts are passed (unchanged from today)', () => {
+  describe('WxycError code/details seam', () => {
+    // This is the constraint `toHaveBeenCalledWith` cannot see: it uses
+    // `toEqual` semantics, which treat a key holding `undefined` as absent.
+    // A regression that spreads `code: undefined` / `details: undefined`
+    // into the payload would pass a plain `toHaveBeenCalledWith({ message })`
+    // assertion while still shipping an extra key on the wire. Asserting on
+    // the payload's own key set closes that gap.
+    it('emits exactly { message } — no extra keys, not even undefined-valued ones — when no opts are passed', () => {
       const { res, statusMock, jsonMock } = mockResponse();
       const error = new WxycError('Album not found', 404);
 
       errorHandler(error, mockReq, res, mockNext);
 
       expect(statusMock).toHaveBeenCalledWith(404);
-      expect(jsonMock).toHaveBeenCalledWith({ message: 'Album not found' });
+      const payload = jsonMock.mock.calls[0][0];
+      expect(Object.keys(payload)).toEqual(['message']);
+      expect(payload).toEqual({ message: 'Album not found' });
     });
 
-    it('emits { message, reason } when reason is set with no details', () => {
+    it('emits { message, code } when code is set with no details', () => {
       const { res, statusMock, jsonMock } = mockResponse();
-      const error = new WxycError('Artist code already in use', 409, { reason: 'artist_code_conflict' });
+      const error = new WxycError('Artist code already in use', 409, { code: 'artist_code_conflict' });
 
       errorHandler(error, mockReq, res, mockNext);
 
       expect(statusMock).toHaveBeenCalledWith(409);
-      expect(jsonMock).toHaveBeenCalledWith({ message: 'Artist code already in use', reason: 'artist_code_conflict' });
+      expect(jsonMock).toHaveBeenCalledWith({ message: 'Artist code already in use', code: 'artist_code_conflict' });
     });
 
-    it('spreads details alongside message and reason', () => {
+    // Details-without-code is spec-legal (ApiErrorResponse requires only
+    // `message`; `code` is independently optional) and typechecks against
+    // WxycErrorOptions, but the enriched branch used to gate on the
+    // discriminant alone — so a handler that passed `details` with no `code`
+    // had its payload silently dropped: no type error, no runtime warning,
+    // no test. This pins that supplying `details` alone still reaches the wire.
+    it('emits { message, details } when only details is set (no code)', () => {
+      const { res, statusMock, jsonMock } = mockResponse();
+      const error = new WxycError('Artist code already in use', 409, {
+        details: { code_letters: 'ABC', code_number: 12 },
+      });
+
+      errorHandler(error, mockReq, res, mockNext);
+
+      expect(statusMock).toHaveBeenCalledWith(409);
+      expect(jsonMock).toHaveBeenCalledWith({
+        message: 'Artist code already in use',
+        details: { code_letters: 'ABC', code_number: 12 },
+      });
+    });
+
+    it('nests details under its own key alongside message and code', () => {
       const { res, jsonMock } = mockResponse();
       const error = new WxycError('Artist code already in use', 409, {
-        reason: 'artist_code_conflict',
+        code: 'artist_code_conflict',
         details: { code_letters: 'ABC', code_number: 12 },
       });
 
@@ -66,25 +99,24 @@ describe('errorHandler middleware', () => {
 
       expect(jsonMock).toHaveBeenCalledWith({
         message: 'Artist code already in use',
-        reason: 'artist_code_conflict',
-        code_letters: 'ABC',
-        code_number: 12,
+        code: 'artist_code_conflict',
+        details: { code_letters: 'ABC', code_number: 12 },
       });
     });
 
-    it('never lets details overwrite message or reason', () => {
+    it('never lets a message/code key inside details leak into the top level', () => {
       const { res, jsonMock } = mockResponse();
       const error = new WxycError('Real message', 409, {
-        reason: 'real_reason',
-        details: { message: 'spoofed message', reason: 'spoofed reason', extra: 'kept' },
+        code: 'real_code',
+        details: { message: 'spoofed message', code: 'spoofed code', extra: 'kept' },
       });
 
       errorHandler(error, mockReq, res, mockNext);
 
       expect(jsonMock).toHaveBeenCalledWith({
         message: 'Real message',
-        reason: 'real_reason',
-        extra: 'kept',
+        code: 'real_code',
+        details: { message: 'spoofed message', code: 'spoofed code', extra: 'kept' },
       });
     });
   });

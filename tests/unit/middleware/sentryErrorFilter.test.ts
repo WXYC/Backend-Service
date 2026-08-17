@@ -19,18 +19,18 @@ describe('shouldCaptureExpressError', () => {
     expect(shouldCaptureExpressError(new WxycError('Bad request', 400))).toBe(false);
   });
 
-  // The reason/details seam (utils/error.ts) only widens the RESPONSE shape;
+  // The code/details seam (utils/error.ts) only widens the RESPONSE shape;
   // capture is keyed on `statusCode` alone, same as before the seam existed.
-  // A WxycError carrying a reason must classify identically to one without.
-  it('ignores reason/details entirely — capture still keys on statusCode alone', () => {
-    const fourXxWithReason = new WxycError('Artist code already in use', 409, {
-      reason: 'artist_code_conflict',
+  // A WxycError carrying a code must classify identically to one without.
+  it('ignores code/details entirely — capture still keys on statusCode alone', () => {
+    const fourXxWithCode = new WxycError('Artist code already in use', 409, {
+      code: 'artist_code_conflict',
       details: { code_letters: 'ABC' },
     });
-    expect(shouldCaptureExpressError(fourXxWithReason)).toBe(false);
+    expect(shouldCaptureExpressError(fourXxWithCode)).toBe(false);
 
-    const fiveXxWithReason = new WxycError('Upstream failure', 503, { reason: 'lml_unavailable' });
-    expect(shouldCaptureExpressError(fiveXxWithReason)).toBe(true);
+    const fiveXxWithCode = new WxycError('Upstream failure', 503, { code: 'lml_unavailable' });
+    expect(shouldCaptureExpressError(fiveXxWithCode)).toBe(true);
   });
 
   it('captures generic Errors (no statusCode means unknown crash)', () => {
