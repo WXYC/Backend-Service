@@ -54,6 +54,21 @@ describe('sessionRateLimitKeyFromRequest', () => {
     expect(key.startsWith('bearer:')).toBe(true);
   });
 
+  it('keys the same bearer token identically regardless of trailing whitespace', () => {
+    // `Bearer (.+)` is greedy, so without trimming the capture the same token
+    // sent with a trailing space would land in a different bucket.
+    const withSpace = sessionRateLimitKeyFromRequest(makeReq({ headers: { authorization: 'Bearer sometoken ' } }));
+    const withoutSpace = sessionRateLimitKeyFromRequest(makeReq({ headers: { authorization: 'Bearer sometoken' } }));
+    expect(withSpace).toBe(withoutSpace);
+  });
+
+  it('falls back to IP when the Authorization header carries no token after the scheme', () => {
+    const key = sessionRateLimitKeyFromRequest(
+      makeReq({ headers: { authorization: 'Bearer    ', 'x-real-ip': '203.0.113.7' } })
+    );
+    expect(key).toBe('ip:203.0.113.7');
+  });
+
   it('falls back to ip:<x-real-ip> when neither a session cookie nor a bearer token is present', () => {
     const key = sessionRateLimitKeyFromRequest(makeReq({ headers: { 'x-real-ip': '203.0.113.7' } }));
     expect(key).toBe('ip:203.0.113.7');

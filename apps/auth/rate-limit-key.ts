@@ -55,8 +55,12 @@ function extractSessionCookieValue(cookieHeader: string | undefined): string | u
 function extractBearerToken(authorizationHeader: string | string[] | undefined): string | undefined {
   const raw = Array.isArray(authorizationHeader) ? authorizationHeader[0] : authorizationHeader;
   if (typeof raw !== 'string') return undefined;
+  // Trailing whitespace is trimmed off the capture: `.+` is greedy and would
+  // otherwise let `Bearer abc ` and `Bearer abc` hash to two different buckets
+  // for the same token.
   const match = /^Bearer\s+(.+)$/i.exec(raw);
-  return match?.[1];
+  const token = match?.[1]?.trim();
+  return token ? token : undefined;
 }
 
 // BS#2169. Identity-keyed fairness generator for GET /auth/get-session — see

@@ -92,8 +92,46 @@ export function makeHandler(limiter: LimiterName): RateLimitExceededEventHandler
       data: { limiter, keyKind, route: ROUTE },
     });
 
-    res.status(optionsUsed.statusCode).json(optionsUsed.message);
+    // express-rate-limit only sets Retry-After when `legacyHeaders ||
+    // standardHeaders` is truthy, and the abuse ceiling deliberately sets both
+    // false to stay out of the draft-7 header collision (see app.ts). That
+    // rationale covers the RateLimit-* headers but NOT Retry-After: without
+    // this, a client doing Retry-After backoff would back off correctly on a
+    // fairness rejection and hot-loop against the ceiling. Set it explicitly
+    // so both limiters return the same 429 contract — headers as well as body
+    // — while the ceiling keeps advertising no RateLimit budget of its own.
+    if (!res.headersSent) {
+      res.setHeader('Retry-After', Math.ceil(optionsUsed.windowMs / 1000).toString());
+    }
+
+    // Mirrors the `writableEnded` guard in express-rate-limit's own default
+    // handler. Supplying a custom handler replaces that path entirely, and
+    // without the guard a response something else already ended turns a silent
+    // no-op into ERR_HTTP_HEADERS_SENT.
+    if (!res.writableEnded) {
+      res.status(optionsUsed.statusCode).json(optionsUsed.message);
+    }
   };
+}
+
+/**
+ * Flushes any buffered rate-limit metrics, bounded by `timeoutMs`.
+ *
+ * Called from the SIGTERM/SIGINT path in `apps/auth/app.ts`. The emitter's
+ * flush timer is `unref`'d and its interval is 30 s, so without this every
+ * deploy silently drops up to a full window of `RateLimited` points — exactly
+ * the window you most want to see during a rollout that trips the limiters.
+ *
+ * The timeout is the point: a hung `PutMetricData` must never delay or block
+ * shutdown. Losing the batch is already this emitter's contract on failure, so
+ * timing out is the same outcome by a different route, and the caller can
+ * proceed unconditionally.
+ */
+export function flushRateLimitMetrics(timeoutMs = 2_000): Promise<void> {
+  return Promise.race([
+    emitter.flush(),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs).unref?.()),
+  ]).catch(() => undefined);
 }
 
 /**

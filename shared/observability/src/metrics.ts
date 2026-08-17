@@ -101,12 +101,19 @@ interface CoalescedEntry {
   emitDimensionlessCompanion: boolean;
 }
 
-function coalesceKey(metricName: string, dimensions: MetricDimension[]): string {
+// `unit` is part of the key, not just carried on the entry. Two records with
+// the same metric name and dimensions but different units are different
+// series, and summing them would publish one datum whose value is the sum of
+// (say) 250 milliseconds and 1 count, stamped with whichever unit happened to
+// arrive first. Inert for a single-unit call site; a real defect the moment a
+// second consumer of this shared package records more than one unit under a
+// name.
+function coalesceKey(metricName: string, dimensions: MetricDimension[], unit: StandardUnit): string {
   const dimensionKey = dimensions
     .map((d) => `${d.name}=${d.value}`)
     .sort()
     .join('&');
-  return `${metricName}::${dimensionKey}`;
+  return `${metricName}::${unit}::${dimensionKey}`;
 }
 
 export function createBufferedMetricEmitter(options: BufferedMetricEmitterOptions): BufferedMetricEmitter {
@@ -121,6 +128,14 @@ export function createBufferedMetricEmitter(options: BufferedMetricEmitterOption
   let buffer: BufferedDatum[] = [];
   let flushTimer: NodeJS.Timeout | null = null;
   let cloudwatchClient: CloudWatchClient | null = null;
+  // The PutMetricData round-trip currently in flight, if any. `record()` and
+  // the interval timer both kick a flush without awaiting it, and both drain
+  // `buffer` synchronously — so without this handle, a subsequent `flush()`
+  // would see an empty buffer and resolve immediately while the send is still
+  // pending, breaking the "await the CloudWatch round-trip deterministically"
+  // contract this interface documents. A shutdown hook awaiting `flush()`
+  // would exit before the batch landed.
+  let inFlight: Promise<void> | null = null;
 
   function getClient(): CloudWatchClient {
     if (!cloudwatchClient) {
@@ -135,10 +150,27 @@ export function createBufferedMetricEmitter(options: BufferedMetricEmitterOption
     if (flushTimer) return;
     flushTimer = setTimeout(() => {
       flushTimer = null;
-      void flushBuffer();
+      void startFlush();
     }, flushIntervalMs);
     // Don't keep the event loop alive on its own.
     flushTimer.unref?.();
+  }
+
+  /**
+   * Runs a flush and publishes its promise as `inFlight` for the duration, so
+   * a concurrent `flush()` can join it rather than resolving early against an
+   * already-drained buffer. Chains onto any existing in-flight send so two
+   * overlapping flushes stay ordered and `flush()` awaits both.
+   */
+  function startFlush(): Promise<void> {
+    const previous = inFlight ?? Promise.resolve();
+    const current = previous.then(flushBuffer);
+    inFlight = current;
+    void current.finally(() => {
+      // Only clear if no later flush has since taken the slot.
+      if (inFlight === current) inFlight = null;
+    });
+    return current;
   }
 
   async function flushBuffer(): Promise<void> {
@@ -148,10 +180,15 @@ export function createBufferedMetricEmitter(options: BufferedMetricEmitterOption
 
     const coalesced = new Map<string, CoalescedEntry>();
     for (const datum of drained) {
-      const key = coalesceKey(datum.metricName, datum.dimensions);
+      const key = coalesceKey(datum.metricName, datum.dimensions, datum.unit);
       const existing = coalesced.get(key);
       if (existing) {
         existing.value += datum.value;
+        // OR rather than first-wins: if ANY record in a coalesced group asked
+        // for the dimensionless companion, the group's alarm-input series
+        // needs it. First-wins would silently drop the companion whenever an
+        // opted-out record happened to land first.
+        existing.emitDimensionlessCompanion ||= datum.emitDimensionlessCompanion;
       } else {
         coalesced.set(key, {
           metricName: datum.metricName,
@@ -216,7 +253,7 @@ export function createBufferedMetricEmitter(options: BufferedMetricEmitterOption
         clearTimeout(flushTimer);
         flushTimer = null;
       }
-      void flushBuffer();
+      void startFlush();
       return;
     }
     ensureFlushTimer();
@@ -227,7 +264,9 @@ export function createBufferedMetricEmitter(options: BufferedMetricEmitterOption
       clearTimeout(flushTimer);
       flushTimer = null;
     }
-    return flushBuffer();
+    // startFlush() chains onto any in-flight send, so the returned promise
+    // covers both the pending round-trip and anything still buffered.
+    return startFlush();
   }
 
   function reset(): void {
@@ -236,6 +275,7 @@ export function createBufferedMetricEmitter(options: BufferedMetricEmitterOption
       clearTimeout(flushTimer);
       flushTimer = null;
     }
+    inFlight = null;
     cloudwatchClient = null;
   }
 
