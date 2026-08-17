@@ -1,4 +1,4 @@
--- 0150 add `flowsheet.no_match_recheck_attempted_at` + its partial index (BS#2176).
+-- 0151 add `flowsheet.no_match_recheck_attempted_at` + its partial index (BS#2176).
 --
 -- Retry marker for the new recurring `jobs/flowsheet-no-match-recheck` sweep:
 -- a cause-agnostic re-ask of `metadata_status = 'enriched_no_match'` rows, so a
@@ -35,6 +35,16 @@
 -- seq-scan the ~2.6M-row / ~1.7 GB `flowsheet` heap on every run, past the 5s
 -- `DB_STATEMENT_TIMEOUT_MS` — the same story `flowsheet_metadata_status_pending_idx`
 -- (0132) and `flowsheet_rotation_no_match_idx` (0132) already tell for this table.
+--
+-- Numbered 0151, not 0150: this migration originally landed as 0150, but
+-- WXYC/Backend-Service#2173's "unwind the rotation bin that never existed"
+-- migration merged to main first and independently claimed 0150 for the
+-- exact same journal idx (a parallel-PR migration-number collision — see
+-- docs/migrations.md's "Parallel-PR collision on `when`" rule, the same
+-- shape one level up in the numbering rather than the `when` field).
+-- Rebased and renumbered per that rule; regenerated through `drizzle-kit`
+-- (never hand-edited) against the post-#2173 schema state, so the SQL/
+-- snapshot/journal/hash chain stays internally consistent.
 --
 -- Production ops:
 --   - NOT the CONCURRENTLY form — Drizzle wraps each migration file in a
