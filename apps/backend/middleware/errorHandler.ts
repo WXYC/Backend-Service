@@ -57,7 +57,20 @@ function errorHandler(err: any, req: Request, res: Response, next: NextFunction)
 
   if (hasStatusCode(error)) {
     console.error(`[${req.method} ${req.url}] ${error.name} ${error.statusCode}: ${error.message}`);
-    res.status(error.statusCode).json({ message: error.message });
+    // `reason` is the discriminant a WxycError opts into (see utils/error.ts).
+    // Spread `details` first so `message`/`reason` — set explicitly afterward
+    // — always win; a handler's `details` payload can never clobber either.
+    // A WxycError with no `reason` falls through to the plain `{ message }`
+    // shape this endpoint has always returned, byte-for-byte.
+    if (error instanceof WxycError && error.reason !== undefined) {
+      res.status(error.statusCode).json({
+        ...(error.details ?? {}),
+        message: error.message,
+        reason: error.reason,
+      });
+    } else {
+      res.status(error.statusCode).json({ message: error.message });
+    }
     return;
   }
 

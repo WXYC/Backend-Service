@@ -17,12 +17,36 @@ describe('WxycError', () => {
     expect(error.name).toBe('WxycError');
   });
 
-  it('creates error with custom name', () => {
-    const error = new WxycError('Validation failed', 400, 'ValidationError');
+  it('has a fixed name (subclasses override it after calling super)', () => {
+    const error = new WxycError('Validation failed', 400);
 
     expect(error.message).toBe('Validation failed');
     expect(error.statusCode).toBe(400);
-    expect(error.name).toBe('ValidationError');
+    expect(error.name).toBe('WxycError');
+  });
+
+  it('leaves reason and details undefined when no opts are passed', () => {
+    const error = new WxycError('Not found', 404);
+
+    expect(error.reason).toBeUndefined();
+    expect(error.details).toBeUndefined();
+  });
+
+  it('carries a reason when opts.reason is passed', () => {
+    const error = new WxycError('Artist code already in use', 409, { reason: 'artist_code_conflict' });
+
+    expect(error.reason).toBe('artist_code_conflict');
+    expect(error.details).toBeUndefined();
+  });
+
+  it('carries details alongside a reason when both are passed', () => {
+    const error = new WxycError('Artist code already in use', 409, {
+      reason: 'artist_code_conflict',
+      details: { code_letters: 'ABC', code_number: 12 },
+    });
+
+    expect(error.reason).toBe('artist_code_conflict');
+    expect(error.details).toEqual({ code_letters: 'ABC', code_number: 12 });
   });
 
   it('extends Error class', () => {

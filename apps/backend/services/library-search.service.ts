@@ -787,7 +787,8 @@ async function getFormatSet(): Promise<Set<string>> {
 
 export class UnknownEnumError extends WxycError {
   constructor(message: string) {
-    super(message, 400, 'UnknownEnumError');
+    super(message, 400);
+    this.name = 'UnknownEnumError';
   }
 }
 
