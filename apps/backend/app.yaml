@@ -1965,9 +1965,10 @@ paths:
         code. The triple is not unique — the Various-Artists shelf files many distinct buckets
         (`Soundtracks - A`, `Soundtracks - B`, …) under one `V/A` code — so the response is
         always a list, ordered by `artist_name` then `id`. A code with a single owner returns a
-        one-element array. `code_letters` is trimmed and upper-cased before matching.
+        one-element array. `code_letters` must be 1-4 characters from A-Z, 0-9, or `/` (the
+        `artists.code_letters` column domain); it is trimmed and upper-cased before matching.
       security:
-        - BearerAuth: ['station-management']
+        - BearerAuth: ['catalog-read']
       parameters:
         - in: query
           name: genre_id
@@ -1981,6 +1982,7 @@ paths:
           required: true
           schema:
             type: string
+            pattern: '^[A-Za-z0-9/]{1,4}$'
         - in: query
           name: code_number
           required: true

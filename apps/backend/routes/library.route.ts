@@ -140,18 +140,28 @@ library_route.get('/artists/peek-code', requirePermissions({ catalog: ['write'] 
 // code_number) to the artists that own it -- the /wxycdb "find" half of the JSP
 // code-lookup flow that `peek-code` (a "next free number" create helper)
 // cannot answer. Answers a list because the code triple is not unique; see
-// `getArtistsByCode`. Same `catalog: ['write']` tier as the two routes above:
-// though this is a pure read, it serves the same librarian-only surface, and
-// widening the tier for one of three siblings would be an inconsistency, not
-// a simplification. Registered in this same `/artists/*` block, ahead of
-// where WXYC/Backend-Service#2156 adds a parameterized `/artists/:id` route,
-// so Express's path matching can't swallow it -- keep it here if that route
-// is ever reordered.
-library_route.get(
-  '/artists/by-code',
-  requirePermissions({ catalog: ['write'] }),
-  libraryController.resolveArtistByCode
-);
+// `getArtistsByCode`.
+//
+// `catalog: ['read']`, NOT `catalog: ['write']` like the two create-flow
+// helpers above (BS#2149 review finding 3). Shelf-code data is already
+// DJ-readable on two live endpoints: `GET /library/query` returns
+// `code_letters`/`code_number`/`code_artist_number` at `catalog: ['read']`
+// (`library-search.service.ts`), and `GET /djs/bin` returns the same at
+// `bin: ['read']` (`djs.service.ts`). A DJ needs the call number to pull a
+// record, and this route returns strictly LESS than `/library/query` already
+// does, so widening it leaks nothing. (An earlier version of this comment
+// argued the opposite -- that widening the tier for one of three siblings
+// would be an inconsistency. That's now falsified the other way: sibling PR
+// #2162 lands `catalog: ['read']` on `GET /artists/:id` and
+// `GET /artists/:id/releases`, so `write` here would be the inconsistency.)
+// `search` and `peek-code` stay at `catalog: ['write']` -- they back the
+// create-artist flow, not a plain lookup.
+//
+// Registered in this same `/artists/*` block, ahead of where
+// WXYC/Backend-Service#2156 adds a parameterized `/artists/:id` route, so
+// Express's path matching can't swallow it -- keep it here if that route is
+// ever reordered.
+library_route.get('/artists/by-code', requirePermissions({ catalog: ['read'] }), libraryController.resolveArtistByCode);
 
 library_route.get('/formats', requirePermissions({ catalog: ['read'] }), libraryController.getFormats);
 

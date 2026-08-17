@@ -24,15 +24,17 @@ import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import { getPostHogClient } from '../utils/posthog.js';
 import WxycError from '../utils/error.js';
+import { INT4_MAX } from '../utils/constants.js';
 
 // `genres.id` and `genre_artist_crossreference.artist_genre_code` are Postgres
 // int4 columns. A query value outside that range parses fine as a JS integer
 // (passing `Number.isInteger`) but blows up downstream as an unhandled
 // "value out of range for type integer" Postgres error — SQLSTATE 22003, which
 // is not a `WxycError` and so answers a generic 500 plus a Sentry capture.
-// Same constant and same guard as `flowsheet.controller.ts` (BS#1800), which
-// hit this first on `start_id`/`end_id`.
-const INT4_MAX = 2147483647;
+// `INT4_MAX` lives in `utils/constants.ts` and is imported, not re-declared --
+// `flowsheet.controller.ts` (BS#1800) hit this first on `start_id`/`end_id`
+// and owned the only copy until the BS#2149 review found this file had grown
+// a silently-drifting second one.
 
 // BS#1826 PR 2: `LIBRARY_LML_BUDGET_MS` retired. Budget for the add-album
 // insert + fire-and-forget canonical-entity paths now comes from the
@@ -488,6 +490,49 @@ const parseCodeQueryInt = (raw: string | undefined, name: string, min: number): 
 };
 
 /**
+ * `artists.code_letters` is a Postgres `varchar(4)` column (`shared/database/
+ * src/schema.ts:439`) storing a trimmed, upper-case, ASCII value -- every one
+ * of the 24,078 rows in the production clone matches that shape, with `/` the
+ * only non-alphanumeric character in use (the `V/A` filing). Neither writer
+ * enforces that shape, though: `insertArtist` (`library.service.ts`) only
+ * NFC-normalizes -- no trim, no upper-case -- and the tubafrenzy `library-etl`
+ * job writes `codeLetters ?? '??'` verbatim (`jobs/library-etl/job.ts:441`),
+ * so a row filed non-canonically can already be sitting in the table.
+ *
+ * `.trim().toUpperCase()` is not a safe repair for that gap: it is neither
+ * length- nor charset-preserving for non-ASCII input
+ * (`'ß'.toUpperCase() === 'SS'`, `'ı'.toUpperCase() === 'I'`), so silently
+ * folding an out-of-domain value could match a DIFFERENT real artist's shelf
+ * code with no precondition that the input was canonical to begin with. (An
+ * earlier version of this comment claimed normalizing "can never turn a real
+ * hit into a miss" -- true only of the measured production snapshot, not of
+ * every possible input, which is exactly the gap this validation closes.)
+ *
+ * Reject anything outside the column's real domain instead: ASCII letters,
+ * digits, or `/`, 1-4 characters. A 5+ character value can never match a row
+ * either (BS#2149 review finding 2) -- unvalidated, it used to fall through
+ * to the 404 branch, whose own docs called that "safe to create an artist
+ * under it," right up until `insertArtist`'s `varchar(4)` column threw
+ * SQLSTATE 22001 on the follow-up write and this route's sibling inherited a
+ * generic 500 plus a Sentry event. Restricted to this input charset,
+ * `.toUpperCase()` is always a deterministic, length- and charset-preserving
+ * map (`a`-`z` -> `A`-`Z`; digits and `/` are fixed points), so the fold
+ * hazard above cannot occur once this check has passed.
+ */
+const CANONICAL_CODE_LETTERS_PATTERN = /^[A-Za-z0-9/]{1,4}$/;
+
+const validateCanonicalCodeLetters = (raw: string): string => {
+  const trimmed = raw.trim();
+  if (!CANONICAL_CODE_LETTERS_PATTERN.test(trimmed)) {
+    throw new WxycError(
+      "Invalid code_letters: must be 1-4 characters from A-Z, 0-9, or '/' (artists.code_letters is varchar(4))",
+      400
+    );
+  }
+  return trimmed.toUpperCase();
+};
+
+/**
  * BS#2149: resolves a fully-specified library code to the artists that own it --
  * the `/wxycdb` "does this code already exist, and whose is it" question
  * `peek-code` (next-free-number) and `search` (name query) cannot answer.
@@ -539,18 +584,13 @@ export const resolveArtistByCode: RequestHandler = async (
   // Lower bound 0, not 1 — see the V/A note in this function's doc comment.
   const codeNumber = parseCodeQueryInt(query.code_number, 'code_number', 0);
 
-  // Trim + upper-case before matching. `artists.code_letters` is matched
-  // byte-for-byte by the query below, and every one of the 24,078 artist rows in
-  // the production clone stores a trimmed, upper-case value — so normalizing can
-  // never turn a real hit into a miss, while NOT normalizing lets ` BU ` or `bu`
-  // answer the "this code is free" 404 and invite the librarian to mint a
-  // duplicate shelf code. (The sibling write path, `addArtist`, still compares
-  // raw; widening its pre-check is a separate change, deliberately not made here
-  // because it alters an existing route's 409 behavior.)
-  const codeLetters = query.code_letters.trim().toUpperCase();
-  if (codeLetters === '') {
-    throw new WxycError('Invalid code_letters: must be a non-empty string', 400);
-  }
+  // Validate against the column's real domain, then trim + upper-case -- see
+  // `validateCanonicalCodeLetters` above for why a bare `.trim().toUpperCase()`
+  // is not a safe normalization on its own. (The sibling write path,
+  // `addArtist`, still compares raw; widening its pre-check is a separate
+  // change, deliberately not made here because it alters an existing route's
+  // 409 behavior.)
+  const codeLetters = validateCanonicalCodeLetters(query.code_letters);
 
   // Code lookup FIRST, genre check only to explain a miss: a hit proves the genre
   // exists (the lookup inner-joins `genre_artist_crossreference.genre_id`), so
@@ -574,8 +614,8 @@ export const resolveArtistByCode: RequestHandler = async (
     artists: owners.map((owner) => ({
       id: owner.artist_id,
       artist_name: owner.artist_name,
-      // The stored `code_letters`, not the normalized input: the row is the
-      // truth about how this code is filed.
+      // Echoes the row's own `code_letters`, not the locally normalized
+      // `codeLetters` variable used to query it.
       code_letters: owner.code_letters,
       code_number: codeNumber,
       genre_id: genreId,
