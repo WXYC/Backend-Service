@@ -58,6 +58,10 @@ The breaker trips on LML's Discogs API work, driven by LML's HTTP endpoints — 
 
 Promoting them to full ≥60 min compliance later is a trivial one-line follow-up, not silent debt.
 
+## Margin ceiling: `flowsheet-no-match-recheck` / `rotation-release-id-backfill` (30 min, not promotable)
+
+`flowsheet-no-match-recheck` (`47 */6 * * *`) and `rotation-release-id-backfill` (`17 */6 * * *`) are two heavy drains sharing the same `*/6`-hour anchor grid (00/06/12/18), 30 minutes apart (BS#2179 review LOW finding) — below the ≥60 min recommended margin but, unlike the 04:30/04:45 pair above, **not a promotable gap**: both crons recur every 6 hours from the same top-of-hour anchor, so the achievable separation between any two fixed minutes on that shared grid is capped at 30 min (two points on a 60-minute circle are farthest apart, at most, on opposite sides — `|47 − 17| = 30`, and `60 − 30 = 30` the other way round). Moving `flowsheet-no-match-recheck` to any other minute only trades which side of `:17` it sits on, never widens the gap past 30. Reaching ≥60 min would require moving one job off the shared `*/6` anchor entirely (a different, non-6-hourly cadence, or an hour-offset anchor like `1,7,13,19`) — a cadence-shape change out of scope for a spacing fix, and not justified here: both crons are TTL-gated with their own dedicated per-job limiter (`BACKFILL_LML_MAX_CONCURRENT=1` / `BACKFILL_LML_RATE_PER_MIN=20`-shaped knobs), satisfy the hard invariant (distinct `HH:MM`), and a slow run of one 30 minutes before the other is the same runtime-overlap concern BS#1201 owns, not this policy. Documented rather than silently accepted, same as the 04:30/04:45 pair.
+
 ## Adding a new LML-hitting cron
 
 1. Classify it: heavy-drain, light-touch, or DB-only.
