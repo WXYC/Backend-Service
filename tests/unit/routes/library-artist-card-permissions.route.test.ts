@@ -58,7 +58,6 @@ const ARTIST_CARD: ArtistCard = {
 const mockGetArtistCardById = jestGlobals.fn<() => Promise<ArtistCard | null>>();
 const mockUpdateArtistInDB =
   jestGlobals.fn<() => Promise<{ id: number; artist_name: string; alphabetical_name: string } | undefined>>();
-const mockConflictingArtistIdInGenre = jestGlobals.fn<() => Promise<number | null>>();
 const mockGetArtistNameById = jestGlobals.fn<() => Promise<string | null>>();
 const mockGetReleasesForArtist = jestGlobals.fn<() => Promise<unknown[]>>();
 const mockCountReleasesForArtist = jestGlobals.fn<() => Promise<number>>();
@@ -106,7 +105,6 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   recheckDiscogsAvailability: jest.fn(),
   getArtistCardById: mockGetArtistCardById,
   updateArtistInDB: mockUpdateArtistInDB,
-  conflictingArtistIdInGenre: mockConflictingArtistIdInGenre,
   getReleasesForArtist: mockGetReleasesForArtist,
   countReleasesForArtist: mockCountReleasesForArtist,
 }));
@@ -150,9 +148,11 @@ app.use('/library', library_route);
  *
  * Without these, every artist-card test drives the routes through the
  * privileged integration token or calls the controller directly, so relaxing
- * the PATCH to `catalog:['read']` — letting any DJ rename a catalog artist,
- * which cascades `library.artist_name` and `search_doc` across every one of
- * that artist's rows — would leave the whole suite green.
+ * the PATCH to `catalog:['read']` — letting any DJ edit a catalog artist's
+ * `alphabetical_name` (the only field this endpoint can still write; a
+ * follow-up review pulled `artist_name` off it entirely -- see
+ * `library.controller.ts`'s `updateArtistCard` doc comment) — would leave the
+ * whole suite green.
  */
 describe('BS#2156 artist-card routes — permission tiers', () => {
   beforeEach(() => {
@@ -160,7 +160,6 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
     mockUpdateArtistInDB
       .mockReset()
       .mockResolvedValue({ id: 1, artist_name: 'Jessica Pratt', alphabetical_name: 'Pratt, Jessica' });
-    mockConflictingArtistIdInGenre.mockReset().mockResolvedValue(null);
     mockGetArtistNameById.mockReset().mockResolvedValue('Jessica Pratt');
     mockGetReleasesForArtist.mockReset().mockResolvedValue([]);
     mockCountReleasesForArtist.mockReset().mockResolvedValue(0);
@@ -197,12 +196,16 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
   });
 
   describe('PATCH /library/artists/:id (catalog:write)', () => {
+    // `alphabetical_name`, not `artist_name`: these tests exist to pin the
+    // PERMISSION tier, and `artist_name` is no longer writable on this
+    // endpoint at all (BS#2156 follow-up review) -- sending it would 400
+    // regardless of role and defeat the point of a 200-on-authorized case.
     test.each(['stationManager', 'musicDirector'])('a %s-role token is authorized', async (role) => {
       mockRole(role);
       const res = await request(app)
         .patch('/library/artists/1')
         .set('Authorization', 'Bearer test-token')
-        .send({ artist_name: 'Jessica Pratt' });
+        .send({ alphabetical_name: 'Pratt, Jessica' });
       expect(res.status).toBe(200);
       expect(mockUpdateArtistInDB).toHaveBeenCalled();
     });
@@ -212,13 +215,13 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
       const res = await request(app)
         .patch('/library/artists/1')
         .set('Authorization', 'Bearer test-token')
-        .send({ artist_name: 'Renamed By A DJ' });
+        .send({ alphabetical_name: 'Renamed By A DJ' });
       expect(res.status).toBe(403);
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
     });
 
     test('a request with no Authorization header is rejected', async () => {
-      const res = await request(app).patch('/library/artists/1').send({ artist_name: 'Renamed Anonymously' });
+      const res = await request(app).patch('/library/artists/1').send({ alphabetical_name: 'Renamed Anonymously' });
       expect(res.status).toBe(401);
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
     });

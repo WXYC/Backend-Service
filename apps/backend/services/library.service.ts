@@ -2062,62 +2062,6 @@ export const artistIdFromName = async (artist_name: string, genre_id: number): P
   }
 };
 
-/**
- * `fold_artist_name` conflict probe for a RENAME (BS#2156), scoped to EVERY
- * genre `exclude_artist_id` is crossreferenced in -- not just one.
- *
- * `artistIdFromName` above answers "which artist is this name?" with a bare
- * `.limit(1)` and NO `orderBy`, so when a genre already holds two fold-equal
- * rows it returns an ARBITRARY one of them. A rename guard built on
- * "fetch one, compare it to the row being renamed" is therefore unsound: the
- * production clone holds 46 same-genre fold-equal groups (93 artist rows —
- * e.g. genre 11's two `The Trees`, ids 11362/11363), and renaming one of a
- * pair can have the probe hand back the row being renamed itself, whereupon a
- * self-exclusion check concludes "collides only with itself" and lets the
- * rename through — recreating exactly the duplicate state
- * `jobs/artist-unicode-dedup` exists to clean up.
- *
- * The exclusion belongs INSIDE the query: ask for any fold-equal row NOT this
- * artist, crossreferenced in any genre this artist is ALSO crossreferenced
- * in. A single fixed `genre_id` parameter first probed only the caller's
- * lowest-`genre_id` crossreference (`getArtistCardById`'s deliberate
- * `.orderBy(asc(genre_id)).limit(1)` collapse) -- multi-genre artists are a
- * designed state (`jobs/artist-unicode-dedup/merge.ts` repoints every
- * crossreference onto a survivor precisely so the matcher reaches it from
- * every genre), so a probe confined to one genre missed a fold-equal
- * duplicate sitting in any of the artist's other genres. Ordered by id so
- * the reported conflict is deterministic when several exist.
- */
-export const conflictingArtistIdInGenre = async (
-  artist_name: string,
-  exclude_artist_id: number
-): Promise<number | null> => {
-  const excludedArtistGenres = await db
-    .select({ genre_id: genre_artist_crossreference.genre_id })
-    .from(genre_artist_crossreference)
-    .where(eq(genre_artist_crossreference.artist_id, exclude_artist_id));
-  const genreIds = excludedArtistGenres.map((row) => row.genre_id);
-  if (genreIds.length === 0) {
-    return null;
-  }
-
-  const response = await db
-    .select({ id: artists.id })
-    .from(artists)
-    .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
-    .where(
-      and(
-        sql`${FOLD_ARTIST_NAME_FN}(${artists.artist_name}) = ${FOLD_ARTIST_NAME_FN}(${artist_name})`,
-        inArray(genre_artist_crossreference.genre_id, genreIds),
-        ne(artists.id, exclude_artist_id)
-      )
-    )
-    .orderBy(asc(artists.id))
-    .limit(1);
-
-  return response[0]?.id ?? null;
-};
-
 export const insertArtist = async (new_artist: NewArtist) => {
   // Store names NFC-canonical (BS#1897). The matcher folds NFC/NFD/ASCII-fold
   // together for *lookup*, but the *stored* form must be a single canonical
