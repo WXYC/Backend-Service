@@ -1913,23 +1913,47 @@ describe('Library Artist Card (BS#2156)', () => {
   // NEXT run starts against the previous run's database. A fixture keyed on the
   // counter alone then 409s `artist_code_conflict` against its own leftovers
   // from the failed run, which reads as an unrelated cascade across the file.
-  const runKey = Date.now().toString(36).toUpperCase().slice(-2);
+  // `code_letters` is varchar(4) and the counter needs two of them, so the run
+  // key gets the other two: 36^2 = 1,296 values, cycling every ~1.3 s of wall
+  // clock. That makes across-run uniqueness a probability, not a guarantee —
+  // and the odds get worse with every leftover run, because `ci:testmock` is
+  // `ci:env && ci:test && ci:clean`, so a FAILING run skips the volume drop and
+  // the next run starts against its rows. Widening the key isn't available
+  // (four characters is the column). So the helper re-rolls instead: a
+  // code-conflict costs one retry rather than cascading through the block.
+  let runKey = Date.now().toString(36).toUpperCase().slice(-2);
+  const rerollRunKey = () => {
+    const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const pick = () => alphabet[Math.floor(Math.random() * alphabet.length)];
+    runKey = `${pick()}${pick()}`;
+  };
 
   async function createTestArtist(overrides = {}) {
     artistCounter += 1;
     // Base36 of the counter, never truncated: unique per call by construction.
     const counterKey = artistCounter.toString(36).toUpperCase().padStart(2, '0');
-    const res = await auth.post('/library/artists').send({
-      artist_name: `Card Test Artist ${runKey}${counterKey}-${Date.now().toString(36).toUpperCase()}`,
-      // 4 chars, the `code_letters` ceiling: run key + counter.
-      code_letters: `${runKey}${counterKey}`,
-      genre_id: 11,
-      code_number: 8000 + artistCounter,
-      ...overrides,
-    });
-    // A 409 here is a fixture-uniqueness failure, not a test failure. Surface
-    // the server's own discriminant (`reason` + the conflicting artist) rather
-    // than a bare "expected 201, got 409" that names neither axis.
+
+    const attempt = () =>
+      auth.post('/library/artists').send({
+        artist_name: `Card Test Artist ${runKey}${counterKey}-${Date.now().toString(36).toUpperCase()}`,
+        // 4 chars, the `code_letters` ceiling: run key + counter.
+        code_letters: `${runKey}${counterKey}`,
+        genre_id: 11,
+        code_number: 8000 + artistCounter,
+        ...overrides,
+      });
+
+    let res = await attempt();
+    // A 409 here is a fixture-uniqueness failure, not a test failure — almost
+    // always this run key colliding with a leftover one. Re-roll and try once
+    // more before giving up.
+    if (res.status === 409) {
+      rerollRunKey();
+      res = await attempt();
+    }
+    // Surface the server's own discriminant (`reason` + the conflicting
+    // artist) rather than a bare "expected 201, got 409" that names neither
+    // axis of the collision.
     if (res.status !== 201) {
       throw new Error(
         `createTestArtist #${artistCounter} expected 201, got ${res.status}: ${JSON.stringify(res.body)}`

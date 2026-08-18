@@ -501,6 +501,27 @@ components:
         plays:
           type: integer
 
+    ArtistCard:
+      type: object
+      description: >-
+        The artist-card field set, returned by `GET /library/artists/{id}` and by
+        the `PATCH` 200 on the same path. `artist_id`, not `id` — the two
+        endpoints deliberately agree so a client that PATCHes and a client that
+        re-GETs the URL decode one shape.
+      properties:
+        artist_id:
+          type: integer
+        artist_name:
+          type: string
+        alphabetical_name:
+          type: string
+        genre_id:
+          type: integer
+        code_letters:
+          type: string
+        code_artist_number:
+          type: integer
+
     NewRotationRequest:
       type: object
       required: ['rotation_bin']
@@ -2076,20 +2097,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  artist_id:
-                    type: integer
-                  artist_name:
-                    type: string
-                  alphabetical_name:
-                    type: string
-                  genre_id:
-                    type: integer
-                  code_letters:
-                    type: string
-                  code_artist_number:
-                    type: integer
+                $ref: '#/components/schemas/ArtistCard'
         '400':
           description: Invalid artist id
         '404':
@@ -2120,14 +2128,22 @@ paths:
           schema:
             type: integer
       requestBody:
+        required: true
+        description: At least one updatable field must be provided.
         content:
           application/json:
             schema:
               type: object
+              required: ['alphabetical_name']
               properties:
                 alphabetical_name:
                   type: string
+                  minLength: 1
                   maxLength: 128
+                  description: >-
+                    Trimmed and NFC-normalized before storage, then measured in
+                    CODE POINTS against the `varchar(128)` column. A
+                    blank-after-trim value is a 400, not a silent no-op.
       responses:
         '200':
           description: >
@@ -2136,20 +2152,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  artist_id:
-                    type: integer
-                  artist_name:
-                    type: string
-                  alphabetical_name:
-                    type: string
-                  genre_id:
-                    type: integer
-                  code_letters:
-                    type: string
-                  code_artist_number:
-                    type: integer
+                $ref: '#/components/schemas/ArtistCard'
         '400':
           description: >
             Invalid artist id, missing/non-object body, an `artist_name` /

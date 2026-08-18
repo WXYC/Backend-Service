@@ -205,7 +205,12 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
       const res = await request(app)
         .patch('/library/artists/1')
         .set('Authorization', 'Bearer test-token')
-        .send({ alphabetical_name: 'Pratt, Jessica' });
+        // Must DIFFER from the seeded card's `alphabetical_name`
+        // (`'Pratt, Jessica'`), or the handler's no-op short-circuit correctly
+        // answers 200 without writing — and this test is about the permission
+        // tier, not about the short-circuit, so it needs a real edit to prove
+        // the write was reached.
+        .send({ alphabetical_name: 'Pratt, Jessica L.' });
       expect(res.status).toBe(200);
       expect(mockUpdateArtistInDB).toHaveBeenCalled();
     });

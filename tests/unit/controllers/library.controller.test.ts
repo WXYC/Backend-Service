@@ -2801,13 +2801,17 @@ describe('library.controller', () => {
     // and because it happened AFTER the existence lookup, a nonexistent
     // artist 404'd (hiding the bug from exactly the smoke test that would
     // find it) while a real one 500'd.
+    // Two groups, because the two failures are genuinely different and the
+    // messages now say so. An absent or null body normalizes to `{}` — which
+    // IS a JSON object, just an empty one — so the honest complaint is that it
+    // carries no writable field. A string/array/number body never gets that
+    // far: it is not an object at all, and telling that caller to "provide at
+    // least one of alphabetical_name" sends them to inspect their fields when
+    // the problem is their Content-Type.
     it.each([
       ['undefined (no body sent at all)', undefined],
       ['null', null],
-      ['a bare JSON string', 'alphabetical_name'],
-      ['a JSON array', ['alphabetical_name']],
-      ['a JSON number', 3],
-    ])('returns 400 rather than 500 when the body is %s', async (_label, body) => {
+    ])('returns 400 naming the missing field when the body is %s', async (_label, body) => {
       mockGetArtistCardById.mockResolvedValue(existingCard);
       const req = { params: { id: '42' }, body } as unknown as Request;
       const res = mockResponse();
@@ -2815,6 +2819,19 @@ describe('library.controller', () => {
       await expect(updateArtistCard(req, res, next)).rejects.toThrow(
         'Bad Request: provide at least one of alphabetical_name'
       );
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a bare JSON string', 'alphabetical_name'],
+      ['a JSON array', ['alphabetical_name']],
+      ['a JSON number', 3],
+    ])('returns 400 naming the body shape when the body is %s', async (_label, body) => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      const req = { params: { id: '42' }, body } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow('Bad Request: body must be a JSON object');
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
     });
 
@@ -2946,9 +2963,25 @@ describe('library.controller', () => {
     // raw-length 400 and would have reached Postgres at NFC length 256,
     // tripping SQLSTATE 22001 ("value too long") -> 500 where the documented
     // answer is 400.
+    // The fixtures below MUST use `'\u0958'` escape notation, never a literal
+    // pasted into the source. An editor, a formatter, or a git filter that
+    // normalizes the file silently rewrites that literal to its decomposed
+    // form U+0915 U+093C -- which is what happened to an earlier revision of
+    // these two tests. Once decomposed, the input is already NFC, so both
+    // tests passed identically with and without the normalize-before-measure
+    // fix they exist to pin: reverting the controller to measure the raw
+    // `trim()`ed value left them green. Asserting the code points up front
+    // makes that silent rewrite a test failure instead of a silent hole.
     it('returns 400 when alphabetical_name is within the raw-length limit but exceeds it after NFC normalization', async () => {
       mockGetArtistCardById.mockResolvedValue(existingCard);
-      const compositionExclusion = 'क़'.repeat(128); // raw length 128, NFC length 256
+      const precomposed = '\u0958'; // 'क़' as a single composition-exclusion code point
+      expect(precomposed.length).toBe(1);
+      expect(precomposed.normalize('NFC')).toBe('\u0915\u093C');
+
+      const compositionExclusion = precomposed.repeat(128); // raw length 128, NFC length 256
+      expect(compositionExclusion.length).toBe(128);
+      expect(compositionExclusion.normalize('NFC').length).toBe(256);
+
       const req = { params: { id: '42' }, body: { alphabetical_name: compositionExclusion } } as unknown as Request;
       const res = mockResponse();
 
@@ -2958,16 +2991,70 @@ describe('library.controller', () => {
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
     });
 
-    it('stores the NFC-normalized value, not the raw composed form', async () => {
+    // `updateArtistInDB` always SETs `last_modified = NOW()`, which fires
+    // `touch_library_watermark_from_artists` (migration 0105, FOR EACH
+    // STATEMENT on `artists`) and advances the catalog conditional-GET
+    // watermark — so a librarian hitting Save on an unchanged card makes every
+    // iOS and dj-site poller re-download the full catalog for a write that
+    // changed nothing. `updateAlbum` guards exactly this (#1555); this path
+    // reaches it through a coarser statement-level trigger on the parent table.
+    it('short-circuits a no-op edit without writing, so the catalog watermark does not advance', async () => {
       mockGetArtistCardById.mockResolvedValue(existingCard);
-      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni', alphabetical_name: 'क़' });
-      // U+0958 ('क़'), 1 raw UTF-16 unit, normalizes to U+0915 U+093C (2 units).
-      const req = { params: { id: '42' }, body: { alphabetical_name: 'क़' } } as unknown as Request;
+      const req = {
+        params: { id: '42' },
+        body: { alphabetical_name: existingCard.alphabetical_name },
+      } as unknown as Request;
       const res = mockResponse();
 
       await updateArtistCard(req, res, next);
 
-      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { alphabetical_name: 'क़' });
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(existingCard);
+    });
+
+    it('still writes when the value actually changes', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni', alphabetical_name: 'Hegarty, Antony' });
+      const req = { params: { id: '42' }, body: { alphabetical_name: 'Hegarty, Antony' } } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { alphabetical_name: 'Hegarty, Antony' });
+    });
+
+    // Postgres measures `varchar(128)` in characters; a bare `.length` measures
+    // UTF-16 units and counts every astral character twice, rejecting values PG
+    // would store happily — undercutting the reject-over-truncate choice
+    // `codePointLength` was written to protect.
+    it('accepts a 128-code-point alphabetical_name containing astral characters', async () => {
+      const astral = 'a'.repeat(127) + '\u{1F600}';
+      expect([...astral].length).toBe(128);
+      expect(astral.length).toBe(129);
+
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni', alphabetical_name: astral });
+      const req = { params: { id: '42' }, body: { alphabetical_name: astral } } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { alphabetical_name: astral });
+    });
+
+    it('stores the NFC-normalized value, not the raw composed form', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockUpdateArtistInDB.mockResolvedValue({ id: 42, artist_name: 'Anohni', alphabetical_name: '\u0915\u093C' });
+      // U+0958, 1 raw UTF-16 unit, normalizes to U+0915 U+093C (2 units).
+      const req = { params: { id: '42' }, body: { alphabetical_name: '\u0958' } } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      // The DECOMPOSED form must reach the service. Asserting 'क़' here
+      // would pass whether or not the controller normalizes.
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { alphabetical_name: '\u0915\u093C' });
     });
 
     // BS#2156 review: the AC says the endpoint allowlists exactly
