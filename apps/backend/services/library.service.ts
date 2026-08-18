@@ -615,7 +615,22 @@ const UNCATALOGUED_ROTATION_PROJECTION = {
  */
 export type UncataloguedRotationRow = Pick<RotationRelease, keyof typeof UNCATALOGUED_ROTATION_PROJECTION>;
 
-/** Optional window over the queue. Both absent ⇒ the full backlog. */
+/**
+ * Ceiling on `?limit=` for the uncatalogued queue, and the default when the
+ * caller omits it — so "omit `limit`" means "give me the largest page I could
+ * have asked for", never "give me the whole table".
+ *
+ * The cap is deliberately not a per-endpoint concern. It lives on the query
+ * because an unbounded default is a property of the read, not of one route:
+ * the backlog is ~3.8k rows (≈700 KB of JSON) and this runs on a single-worker
+ * 1 GB box that also serves the live flowsheet. It is also cheaper to set now
+ * than later — `wxyc-shared#354` is about to transcribe this shape into the
+ * published cross-repo contract, and narrowing "omit ⇒ everything" after a
+ * client depends on it is a breaking change.
+ */
+export const UNCATALOGUED_ROTATION_MAX_LIMIT = 500;
+
+/** Optional window over the queue. `limit` defaults to the max above. */
 export type UncataloguedRotationPage = { limit?: number; offset?: number };
 
 /**
@@ -652,17 +667,15 @@ export type UncataloguedRotationPage = { limit?: number; offset?: number };
 export const getUncataloguedRotationFromDB = async (
   page: UncataloguedRotationPage = {}
 ): Promise<UncataloguedRotationRow[]> => {
-  const { limit, offset } = page;
-  const base = db
+  const { limit = UNCATALOGUED_ROTATION_MAX_LIMIT, offset } = page;
+  const windowed = db
     .select(UNCATALOGUED_ROTATION_PROJECTION)
     .from(rotation)
     .where(isNull(rotation.album_id))
-    .orderBy(desc(rotation.add_date), asc(rotation.id));
+    .orderBy(desc(rotation.add_date), asc(rotation.id))
+    .limit(limit);
 
-  if (limit == null && offset == null) return base;
-  if (limit == null) return base.offset(offset as number);
-  if (offset == null) return base.limit(limit);
-  return base.limit(limit).offset(offset);
+  return offset == null ? windowed : windowed.offset(offset);
 };
 
 export type LinkRotationOutcome =

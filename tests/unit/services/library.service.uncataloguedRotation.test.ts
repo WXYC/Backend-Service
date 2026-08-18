@@ -3,7 +3,7 @@
  *
  *   - `getUncataloguedRotationFromDB` — read-side query for
  *     `GET /library/rotation/uncatalogued`. Asserts the `album_id IS NULL`
- *     predicate, the explicit column projection, the optional limit/offset
+ *     predicate, the explicit column projection, the always-bounded limit/offset
  *     window, and the absence of any `DISTINCT ON` (the query builder used
  *     here has no `selectDistinctOn` call at all, unlike
  *     `getRotationFromDB`'s raw-SQL `DISTINCT ON`).
@@ -33,7 +33,11 @@ jest.mock('@wxyc/lml-client', () => ({
   envInt: (_name: string, fallback: number) => fallback,
 }));
 
-import { getUncataloguedRotationFromDB, linkRotationToAlbum } from '../../../apps/backend/services/library.service';
+import {
+  getUncataloguedRotationFromDB,
+  linkRotationToAlbum,
+  UNCATALOGUED_ROTATION_MAX_LIMIT,
+} from '../../../apps/backend/services/library.service';
 
 describe('getUncataloguedRotationFromDB (BS#2109)', () => {
   beforeEach(() => {
@@ -50,7 +54,8 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
       { id: 11, album_id: null, artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' },
     ];
     const selectChain = createMockQueryChain(rows);
-    selectChain.orderBy = jest.fn().mockResolvedValue(rows);
+    selectChain.orderBy = jest.fn().mockReturnValue(selectChain);
+    selectChain.limit = jest.fn().mockResolvedValue(rows);
     db.select.mockReturnValue(selectChain);
 
     const result = await getUncataloguedRotationFromDB();
@@ -72,7 +77,8 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
     // `getRotationFromDB` publishes, and WXYC/wxyc-shared#354 would
     // transcribe the leak into a published contract.
     const selectChain = createMockQueryChain([]);
-    selectChain.orderBy = jest.fn().mockResolvedValue([]);
+    selectChain.orderBy = jest.fn().mockReturnValue(selectChain);
+    selectChain.limit = jest.fn().mockResolvedValue([]);
     db.select.mockReturnValue(selectChain);
 
     await getUncataloguedRotationFromDB();
@@ -91,15 +97,27 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
     ]);
   });
 
-  it('applies limit/offset only when supplied, leaving the queue unbounded by default', async () => {
-    const unboundedChain = createMockQueryChain([]);
-    unboundedChain.orderBy = jest.fn().mockResolvedValue([]);
-    db.select.mockReturnValue(unboundedChain);
+  // The query is ALWAYS bounded. An omitted `limit` defaults to the 500
+  // ceiling rather than returning the whole backlog: ~3.8k unlinked rows is
+  // ≈700 KB of JSON per request on a single-worker box that also serves the
+  // live flowsheet. Asserted on the service rather than the controller
+  // because the cap is a property of the read — a future second caller
+  // inherits it instead of having to remember it.
+  it('defaults limit to the 500 ceiling when the caller omits it', async () => {
+    const defaultChain = createMockQueryChain([]);
+    defaultChain.orderBy = jest.fn().mockReturnValue(defaultChain);
+    defaultChain.limit = jest.fn().mockResolvedValue([]);
+    db.select.mockReturnValue(defaultChain);
 
     await getUncataloguedRotationFromDB();
-    expect(unboundedChain.limit).not.toHaveBeenCalled();
-    expect(unboundedChain.offset).not.toHaveBeenCalled();
 
+    expect(defaultChain.limit).toHaveBeenCalledWith(UNCATALOGUED_ROTATION_MAX_LIMIT);
+    expect(UNCATALOGUED_ROTATION_MAX_LIMIT).toBe(500);
+    // `offset` stays genuinely optional — no OFFSET 0 on the common path.
+    expect(defaultChain.offset).not.toHaveBeenCalled();
+  });
+
+  it('applies an explicit limit/offset window', async () => {
     const pagedChain = createMockQueryChain([]);
     pagedChain.orderBy = jest.fn().mockReturnValue(pagedChain);
     pagedChain.limit = jest.fn().mockReturnValue(pagedChain);
@@ -120,7 +138,8 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
       { id: 21, album_id: null, artist_name: 'Duplicate Artist', album_title: 'Duplicate Title' },
     ];
     const selectChain = createMockQueryChain(rows);
-    selectChain.orderBy = jest.fn().mockResolvedValue(rows);
+    selectChain.orderBy = jest.fn().mockReturnValue(selectChain);
+    selectChain.limit = jest.fn().mockResolvedValue(rows);
     db.select.mockReturnValue(selectChain);
 
     const result = await getUncataloguedRotationFromDB();

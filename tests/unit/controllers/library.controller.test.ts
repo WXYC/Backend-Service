@@ -104,6 +104,11 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   addToRotation: mockAddToRotation,
   killRotationInDB: mockKillRotationInDB,
   getUncataloguedRotationFromDB: mockGetUncataloguedRotationFromDB,
+  // Not a function — a real value export the controller destructures at module
+  // load for its 400 message and bound check. Omitting it makes the ceiling
+  // `undefined`, so `limit > undefined` is false and every over-limit request
+  // silently 200s.
+  UNCATALOGUED_ROTATION_MAX_LIMIT: 500,
   linkRotationToAlbum: mockLinkRotationToAlbum,
   insertAlbum: mockInsertAlbum,
   updateArtworkUrl: mockUpdateArtworkUrl,
