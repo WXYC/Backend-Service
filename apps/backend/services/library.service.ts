@@ -2100,12 +2100,29 @@ export const insertArtistGenreCrossreference = async (
  * fine here, because the caller only needs *an* owner to name in its 409. A
  * route whose contract is "who owns this code" must use the plural instead.
  */
-export const getArtistByCode = async (
-  code_letters: string,
-  genre_id: number,
-  artist_genre_code: number
-): Promise<{ artist_id: number; artist_name: string; code_letters: string } | null> => {
-  const response = await db
+/**
+ * The `{ artist_id, artist_name, code_letters }` shape every code-owner lookup
+ * answers in: `getArtistByCode`'s 409 conflict payload, `getArtistsByCode`'s
+ * full owner list, and `getArtistById`. Named so the three cannot drift apart
+ * silently — it is now the wire shape of a public endpoint, not just an
+ * internal conflict payload.
+ */
+export type ArtistCodeOwner = {
+  artist_id: number;
+  artist_name: string;
+  code_letters: string;
+};
+
+/**
+ * The shared body of the two code-owner lookups. They differ only in the tail
+ * (`.limit(1)` for the conflict probe, `.orderBy(...)` for the full list), so
+ * the projection and the three-clause join predicate live here — a change to
+ * either (filtering soft-deleted artists, say) can no longer land on one and
+ * miss the other, leaving the 409 pre-check and the lookup disagreeing about
+ * who owns a code.
+ */
+const artistCodeOwnerQuery = (code_letters: string, genre_id: number, artist_genre_code: number) =>
+  db
     .select({
       artist_id: genre_artist_crossreference.artist_id,
       artist_name: artists.artist_name,
@@ -2119,8 +2136,14 @@ export const getArtistByCode = async (
         eq(genre_artist_crossreference.genre_id, genre_id),
         eq(genre_artist_crossreference.artist_genre_code, artist_genre_code)
       )
-    )
-    .limit(1);
+    );
+
+export const getArtistByCode = async (
+  code_letters: string,
+  genre_id: number,
+  artist_genre_code: number
+): Promise<ArtistCodeOwner | null> => {
+  const response = await artistCodeOwnerQuery(code_letters, genre_id, artist_genre_code).limit(1);
 
   // return null if no artist found
   return response[0] ?? null;
@@ -2159,23 +2182,11 @@ export const getArtistsByCode = async (
   code_letters: string,
   genre_id: number,
   artist_genre_code: number
-): Promise<Array<{ artist_id: number; artist_name: string; code_letters: string }>> => {
-  return db
-    .select({
-      artist_id: genre_artist_crossreference.artist_id,
-      artist_name: artists.artist_name,
-      code_letters: artists.code_letters,
-    })
-    .from(genre_artist_crossreference)
-    .innerJoin(artists, eq(genre_artist_crossreference.artist_id, artists.id))
-    .where(
-      and(
-        eq(artists.code_letters, code_letters),
-        eq(genre_artist_crossreference.genre_id, genre_id),
-        eq(genre_artist_crossreference.artist_genre_code, artist_genre_code)
-      )
-    )
-    .orderBy(asc(artists.artist_name), asc(artists.id));
+): Promise<ArtistCodeOwner[]> => {
+  return artistCodeOwnerQuery(code_letters, genre_id, artist_genre_code).orderBy(
+    asc(artists.artist_name),
+    asc(artists.id)
+  );
 };
 
 /**
@@ -2183,9 +2194,7 @@ export const getArtistsByCode = async (
  * shape `getArtistByCode` returns, so a 409 conflict payload can carry either
  * lookup's result through one consistent wire shape.
  */
-export const getArtistById = async (
-  artist_id: number
-): Promise<{ artist_id: number; artist_name: string; code_letters: string } | null> => {
+export const getArtistById = async (artist_id: number): Promise<ArtistCodeOwner | null> => {
   const response = await db
     .select({
       artist_id: artists.id,

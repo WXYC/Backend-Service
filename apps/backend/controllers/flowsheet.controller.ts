@@ -149,12 +149,6 @@ export const MAX_RANGE_MS = 8 * 24 * 60 * 60 * 1000;
 // `INT4_MAX` (imported above), for a different overflow.
 const MIN_EPOCH_MS = -62167219200000; // 0000-01-01T00:00:00.000Z
 const MAX_EPOCH_MS = 253402300799999; // 9999-12-31T23:59:59.999Z
-// flowsheet.id is a Postgres int4 column; a value outside this range parses
-// fine as a JS integer (passing Number.isInteger) but blows up downstream as
-// an unhandled "value out of range for type integer" Postgres error (BS#1800).
-// `INT4_MAX` itself now lives in `utils/constants.ts` (imported above) so
-// `library.controller.ts`'s `by-code` route can share this exact guard
-// instead of re-declaring it -- see that file's BS#2149 usage.
 // BS#1960 cost/DoS guard on `page * limit` (the OFFSET passed to
 // getEntriesByPage). This is not a correctness bound — it's a ceiling on how
 // much index-scanning a single request can ask for. A genuine deep-history
