@@ -754,7 +754,11 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
   // JSON document (`"x"`, `[]`, `3`) so the shape checks that follow hold.
   const body: UpdateArtistRequest = req.body ?? {};
   if (typeof body !== 'object' || Array.isArray(body)) {
-    throw new WxycError(NO_ARTIST_FIELDS_MESSAGE, 400);
+    // Names the actual failure. Answering "provide at least one of
+    // alphabetical_name" to `curl -X PATCH -d '[]'` points the caller at the
+    // wrong problem: the body is not a JSON object at all, so which fields it
+    // should have carried is not yet the question.
+    throw new WxycError('Bad Request: body must be a JSON object', 400);
   }
 
   // Reject a client that sends a field this endpoint cannot write, rather
@@ -799,14 +803,33 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
     if (trimmed === '') {
       throw new WxycError('alphabetical_name must be a non-empty string', 400);
     }
-    if (trimmed.length > MAX_ARTIST_TEXT_LENGTH) {
+    // Code points, not UTF-16 units -- `codePointLength`, not `.length`.
+    // Postgres measures `varchar(128)` in characters, so a bare `.length`
+    // counts every astral character (emoji, CJK Ext-B) twice and rejects
+    // values PG would store happily. This file already carries
+    // `codePointLength` for exactly that reason; measuring the wrong unit here
+    // undercut the reject-over-truncate choice it was written to protect.
+    if (codePointLength(trimmed) > MAX_ARTIST_TEXT_LENGTH) {
       throw new WxycError(`alphabetical_name must be ${MAX_ARTIST_TEXT_LENGTH} characters or fewer`, 400);
     }
     updates.alphabetical_name = trimmed;
   }
 
-  if (Object.keys(updates).length === 0) {
-    throw new WxycError(NO_ARTIST_FIELDS_MESSAGE, 400);
+  // Short-circuit a no-op edit. `updateArtistInDB` always SETs
+  // `last_modified = NOW()`, which fires `touch_library_watermark_from_artists`
+  // (migration 0105, `FOR EACH STATEMENT` on `artists`) and advances the
+  // catalog conditional-GET watermark -- forcing every iOS / dj-site poller to
+  // re-download the full catalog for a write that changed nothing. That is the
+  // same cost `updateAlbum`'s `effectiveChange` guard exists to avoid (#1555);
+  // this path reaches it through a coarser, statement-level trigger on the
+  // parent table. A librarian hitting Save on an unchanged card, or a dj-site
+  // form resubmitting the same value, is the common case.
+  const effectiveChange = (Object.keys(updates) as Array<keyof libraryService.UpdateArtistRow>).some(
+    (key) => updates[key] !== existing[key as keyof typeof existing]
+  );
+  if (!effectiveChange) {
+    res.status(200).json(existing);
+    return;
   }
 
   const updated = await libraryService.updateArtistInDB(artistId, updates);
