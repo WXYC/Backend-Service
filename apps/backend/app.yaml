@@ -2010,45 +2010,62 @@ paths:
       summary: Get album information
       description: >
         Takes exactly one release identifier, in either id space: `album_id`
-        (the serial `wxyc_schema.library.id`) or `legacy_release_id` (the
-        tubafrenzy `LIBRARY_RELEASE.ID` external callers hold). Neither is
-        required on its own — `getAlbum` returns 400 only when both are absent.
+        (Backend's serial `wxyc_schema.library.id`) or `legacy_release_id` (the
+        tubafrenzy `LIBRARY_RELEASE.ID` that external callers hold). Neither is
+        required on its own; the server returns 400 only when both are absent.
 
 
-        When both are sent, `legacy_release_id` wins outright: the handler
-        branches on its mere presence, before reading `album_id`, and a
-        malformed value on that branch is a 400 rather than a fallback. A
-        legacy id that maps to no catalog row is a 404 — a library.db release
-        not yet synced into Backend Postgres (BS#1880).
+        `legacy_release_id` wins whenever it is *present* — the server branches
+        on presence, before looking at `album_id`. That includes an empty
+        `legacy_release_id=`, which takes the branch and 400s even alongside a
+        valid `album_id`; a malformed value there is likewise a 400, never a
+        fallback (BS#1880).
 
 
-        Both branches return the same shape; only the lookup key differs.
+        The two branches agree on the shape of a hit and disagree on a miss. An
+        unmatched `legacy_release_id` is a 404 — a library.db release not yet
+        synced into Backend Postgres. An unmatched `album_id` is a 200 with an
+        empty body. Do not port a `if (!body)` branch from one to the other.
       parameters:
         - name: album_id
           in: query
           required: false
-          description: The serial `wxyc_schema.library.id`. Supply this or `legacy_release_id`, not both.
+          description: >-
+            Backend's serial `wxyc_schema.library.id`. Optional: supply this or
+            `legacy_release_id`, not both. Parsed leniently, unlike the strict
+            sibling below: trailing garbage is truncated to a valid-looking id
+            and a repeated param takes the first, so a corrupted value resolves
+            a different real release rather than erroring (BS#2212). Send a
+            bare integer.
           schema:
             type: integer
         - name: legacy_release_id
           in: query
           required: false
           description: >-
-            The tubafrenzy `LIBRARY_RELEASE.ID`, stored as
-            `library.legacy_release_id` — the id space LML, the request line,
-            and the wxyc.info permalink speak (BS#1880's inbound-compat front
-            door). NOT the serial `library.id`: the two spaces are numerically
-            coextensive, so the wrong one resolves a different real release
-            rather than 404ing. Supply this or `album_id`, not both.
+            The release's tubafrenzy `LIBRARY_RELEASE.ID` — Backend's
+            `library.legacy_release_id` column, and the id space external
+            callers hold (LML's `library_url`, the request line, the wxyc.info
+            permalink). This is the inbound-compatibility front door: it is NOT
+            Backend's serial `library.id`, and the two spaces are numerically
+            coextensive, so passing one where the other belongs resolves a
+            different real release rather than failing. Optional: supply this
+            or `album_id`, not both.
           schema:
             type: integer
       responses:
         '200':
-          description: Album details
+          description: >-
+            Album details. Also returned with an empty body when `album_id`
+            matches no row — see the operation description.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Album'
+        '400':
+          description: Both identifiers absent, or `legacy_release_id` present but not a positive integer
+        '404':
+          description: '`legacy_release_id` matched no catalog row'
 
   /schedule:
     get:
