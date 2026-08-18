@@ -906,6 +906,35 @@ export const getArtistReleases: RequestHandler<
   res.status(200).json({ artist_id: artistId, releases, total, page, totalPages: Math.ceil(total / limit) });
 };
 
+/**
+ * Validate one optional free-text body field: must be a string, must not be
+ * blank after trimming, must fit the column. Returns the trimmed value.
+ *
+ * The three `rotation` snapshot columns and `updateAlbum`'s `album_title`
+ * all sit on `varchar(128)` and all want the identical trim / non-empty /
+ * max-length shape; over-length input is rejected as a 400 here rather than
+ * reaching the UPDATE and tripping PG 22001 ("value too long") → 500.
+ * Callers pass their own limit so a future wider column doesn't have to
+ * fork the helper.
+ */
+const validateTextField = (value: unknown, field: string, maxLength: number): string => {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new WxycError(`${field} must be a non-empty string`, 400);
+  }
+  const trimmed = value.trim();
+  // Code points, not UTF-16 units — `codePointLength`, not `.length`. Postgres
+  // measures `varchar(n)` in characters, so a bare `.length` counts every
+  // astral character (emoji, CJK Ext-B) twice and rejects values PG would
+  // store happily. `addRotation` already measures these same three columns
+  // that way; using `.length` here made a 128-code-point `album_title`
+  // creatable via POST and un-editable via PATCH — a row you cannot fix a
+  // typo in without first shortening a legal title.
+  if (codePointLength(trimmed) > maxLength) {
+    throw new WxycError(`${field} must be ${maxLength} characters or fewer`, 400);
+  }
+  return trimmed;
+};
+
 export const getRotation: RequestHandler = async (req, res) => {
   const rotation = await libraryService.getRotationFromDB();
   res.status(200).json(rotation);
@@ -999,6 +1028,21 @@ export type RotationAddRequest = Omit<NewRotationRelease, 'id'>;
  * display sourced from the `library` join, and a client-supplied snapshot on
  * a catalogued row would leave stale free text nothing ever clears.
  *
+ * EDITING that trio after the fact is a different write path: `updateRotation`
+ * (BS#2113) on `PATCH /library/rotation/:id` owns post-creation edits, and
+ * `add_date` is post-creation-only in that same sense — it stays off this
+ * allowlist because `POST` mints a fresh row, not because the column is
+ * unwritable. (An earlier revision of this comment said the whole snapshot
+ * group "must never be client-supplied through this endpoint"; BS#2109 shipped
+ * exactly that for the uncatalogued case, so the rule is now conditional on
+ * `album_id`, not absolute.)
+ *
+ * `rotation` has been Backend-canonical since WXYC/wiki#88 Phase 3:
+ * `jobs/rotation-etl` is unscheduled (`"job-type": "one-shot"`, no
+ * `cron-schedule`) and refuses to run without
+ * `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`, so tubafrenzy is no longer "the
+ * legitimate source" for anything here.
+ *
  * **`null` and `undefined` mean the same thing in every test here.**
  * `{ album_id: selected?.id ?? null, ... }` is the idiomatic client shape,
  * and an `=== undefined` test would take the has-an-album_id branch on it —
@@ -1048,7 +1092,14 @@ export function pickAddRotationFields(body: Partial<NewRotationRelease>): AddRot
  * very reason this endpoint chose reject-over-truncate.
  */
 const ROTATION_SNAPSHOT_MAX_LENGTH = 128;
-const ROTATION_SNAPSHOT_FIELDS = ['artist_name', 'album_title', 'record_label'] as const;
+
+/**
+ * The denormalized display snapshot. A rotation row carries these three ONLY
+ * when it has no `album_id`; on a library-linked row they must stay NULL. See
+ * `updateRotation` (BS#2113) for why writing them on a catalogued row is
+ * rejected rather than accepted-and-ignored, and `addRotation` (BS#2109) for
+ * the creation-time half of the same rule.
+ */
 
 /** Unicode-code-point length — see `ROTATION_SNAPSHOT_MAX_LENGTH` above. */
 function codePointLength(value: string): number {
@@ -1122,7 +1173,7 @@ export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = 
     // Only guarded on the uncatalogued path: with an `album_id` present the
     // trio is deliberately dropped by `pickAddRotationFields`, so a long
     // value there is never written and must not fail an otherwise-valid add.
-    for (const field of ROTATION_SNAPSHOT_FIELDS) {
+    for (const field of libraryService.ROTATION_SNAPSHOT_COLUMNS) {
       const value = body[field];
       if (value == null) continue;
       if (typeof value !== 'string') {
@@ -1216,12 +1267,223 @@ export const killRotation: RequestHandler<object, unknown, KillRotationRelease> 
     throw new WxycError('Bad Request, Incorrect Date Format: kill_date should be of form YYYY-MM-DD', 400);
   }
 
-  const updatedRotation: RotationRelease = await libraryService.killRotationInDB(body.rotation_id, body.kill_date);
+  const updatedRotation = await libraryService.killRotationInDB(body.rotation_id, body.kill_date);
   if (updatedRotation !== undefined) {
     res.status(200).json(updatedRotation);
   } else {
     throw new WxycError('Rotation entry not found', 400);
   }
+};
+
+export type RotationUpdateRequest = {
+  artist_name?: string;
+  album_title?: string;
+  record_label?: string;
+  add_date?: string; //Accepts ISO8601 formatted dates YYYY-MM-DD
+  kill_date?: string | null; //Accepts ISO8601 formatted dates YYYY-MM-DD, or null to clear
+  // The JSP editor (tubafrenzy's `rotationReleaseModify.jsp`) also carries
+  // these three fields, but none has a column on `rotation` —
+  // alphabetical_name lives on `artists.alphabetical_name`
+  // (WXYC/Backend-Service#2156), format and format_size on the `library` ->
+  // `format` join (WXYC/dj-site#1169). Declared here (not just left unread)
+  // so `ROTATION_NO_COLUMN_FIELDS` below can reject a client that sends
+  // them with a precise 400 instead of silently writing less than it asked
+  // for.
+  alphabetical_name?: unknown;
+  format?: unknown;
+  format_size?: unknown;
+};
+
+const ROTATION_UPDATABLE_FIELDS = ['artist_name', 'album_title', 'record_label', 'add_date', 'kill_date'] as const;
+
+const ROTATION_NO_COLUMN_FIELDS = ['alphabetical_name', 'format', 'format_size'] as const;
+
+// Why each field has no `rotation` column, phrased so the remedy is correct
+// for BOTH a catalogued row (`album_id` present) and an uncatalogued one.
+//
+// `alphabetical_name` is the subtle case. `getRotationFromDB` projects
+// `COALESCE(artists.alphabetical_name, rotation.artist_name)`, so on a
+// catalogued row the value is the `artists` row's and #2156 is the fix,
+// but on an uncatalogued row there IS no `artists` row and the value falls
+// through to `rotation.artist_name` — a column this very endpoint writes.
+// Pointing such a caller at #2156 would send them to edit a row that does
+// not exist.
+const ROTATION_NO_COLUMN_FIELD_OWNERS: Record<(typeof ROTATION_NO_COLUMN_FIELDS)[number], string> = {
+  alphabetical_name:
+    "derived, not stored: a catalogued row takes it from artists.alphabetical_name (edit via PATCH /library/artists/:id, WXYC/Backend-Service#2156); an uncatalogued row falls back to this row's own artist_name, so send artist_name instead",
+  format: 'owned by the release PATCH surface (WXYC/dj-site#1169)',
+  format_size: 'owned by the release PATCH surface (WXYC/dj-site#1169)',
+};
+
+/**
+ * Field-specific remedy text for the linked-snapshot 409 (BS#2113 review
+ * finding 2). `album_title`/`record_label` have a working remedy on
+ * `PATCH /library/:id` (`album_title`/`label` respectively); `artist_name`
+ * does not — `library.artist_name` only ever changes by re-pointing
+ * `artist_id` at a different, already-existing `artists` row (which
+ * reattributes the release, not renames anyone), and no endpoint exposes a
+ * direct rename. Telling a caller to "edit the library release" for an
+ * `artist_name` rejection would send them looking for a field that isn't
+ * there.
+ */
+const ROTATION_SNAPSHOT_LIBRARY_FIELD: Partial<
+  Record<(typeof libraryService.ROTATION_SNAPSHOT_COLUMNS)[number], string>
+> = {
+  album_title: 'album_title',
+  record_label: 'label',
+};
+
+function buildLinkedSnapshotConflictMessage(
+  snapshotFields: ReadonlyArray<(typeof libraryService.ROTATION_SNAPSHOT_COLUMNS)[number]>,
+  albumId: number
+): string {
+  const editableViaLibrary = snapshotFields
+    .map((field) => ROTATION_SNAPSHOT_LIBRARY_FIELD[field])
+    .filter((field): field is string => field !== undefined);
+  const rejectsArtistName = snapshotFields.includes('artist_name');
+
+  const remedies: string[] = [];
+  if (editableViaLibrary.length > 0) {
+    remedies.push(`edit ${editableViaLibrary.join(', ')} via PATCH /library/${albumId} instead`);
+  }
+  if (rejectsArtistName) {
+    remedies.push(
+      'artist_name has no remedy here: library.artist_name is derived from the linked artists row via ' +
+        'artist_id, and no endpoint currently supports renaming an artist or setting free-text artist_name ' +
+        'on a catalogued release'
+    );
+  }
+
+  return (
+    `Conflict: ${snapshotFields.join(', ')} cannot be set on a rotation row linked to a library release ` +
+    `(album_id ${albumId}) — the rotation read path takes those values from the library join, so the write ` +
+    `would be invisible, and a non-NULL snapshot on a linked row misroutes the flowsheet rotation badge. ` +
+    `${remedies.join('; ')}.`
+  );
+}
+
+/**
+ * PATCH /library/rotation/:id (BS#2113): field-level edit for the five
+ * `rotation` columns the tubafrenzy JSP editor (`rotationReleaseModify.jsp`)
+ * exposes that actually have a column here — the alphabetical name, format,
+ * and format-size fields on that same screen are rejected (no column;
+ * `ROTATION_NO_COLUMN_FIELDS`), not silently dropped.
+ *
+ * True partial semantics — only fields present in the body are validated
+ * and written — mirroring `updateAlbum`. Delegates to the same
+ * `libraryService.updateRotation()` writer `killRotation` (`PATCH
+ * /library/rotation`) uses, so the two routes can't drift on how they set
+ * `kill_date`.
+ *
+ * The `artist_name`/`album_title`/`record_label` snapshot trio is rejected
+ * with a 409 on a row that HAS an `album_id`, for two independent reasons:
+ *
+ *   1. It would be a write nobody can read. `getRotationFromDB` projects
+ *      `COALESCE(artists.artist_name, rotation.artist_name)`,
+ *      `COALESCE(library.album_title, rotation.album_title)` and
+ *      `COALESCE(library.label, rotation.record_label)` — on a linked row
+ *      the library join always wins. The UPDATE would land in the column
+ *      and be echoed back by `.returning()`, then be invisible on the only
+ *      rotation read path: exactly the "silently writing less than it asked
+ *      for" failure `ROTATION_NO_COLUMN_FIELDS` above exists to prevent.
+ *   2. It would break a load-bearing invariant. "A library-LINKED rotation
+ *      row carries NULL denormalized names" is documented verbatim in
+ *      `flowsheet.service.ts` (the rotation-badge read path) and restated in
+ *      `shared/legacy-mirror/src/rotation-match.ts`; BS#2080's arm-(b) /
+ *      arm-(c) partition rests on it and neither arm filters
+ *      `album_id IS NULL`. A snapshot on a linked row makes arm (b) match
+ *      any hand-typed flowsheet entry with the same (artist, album), so one
+ *      rotation row badges two different releases — on the BS read path and
+ *      via `isActiveRotationMatch` on the tubafrenzy mirror write path.
+ *
+ * The 409's remedy is field-specific, not a blanket "edit the library
+ * release" — `PATCH /library/:id` genuinely covers `album_title` (its own
+ * `album_title` field) and `record_label` (its `label` field), but has no
+ * `artist_name` field at all: `library.artist_name` is derived from the
+ * linked `artists` row via `artist_id`, and no endpoint today lets a caller
+ * rename an artist or set free-text `artist_name` on a catalogued release.
+ * An earlier revision pointed every rejection at `PATCH /library/:id`
+ * uniformly, which was a real remedy for two of the three fields and a dead
+ * end for the third; `buildLinkedSnapshotConflictMessage` below says so
+ * rather than repeating the blanket claim.
+ *
+ * Sibling PR WXYC/Backend-Service#2164 (issue BS#2109) forbids the same trio
+ * on `POST /library/rotation` at creation time, on the same grounds — it
+ * picks the snapshot columns onto the insert allowlist only when the client
+ * supplied no `album_id`. `add_date` and `kill_date` stay
+ * editable on a catalogued row: `getRotationFromDB` reads both straight off
+ * `rotation`, with no library-join shadow.
+ *
+ * The linked/unlinked precondition on the trio is enforced as a
+ * compare-and-set inside `libraryService.updateRotation`, not from a read
+ * taken here first: `rotation` is a live ingest target (the tubafrenzy
+ * rotation webhook writes it continuously), so a row this handler read as
+ * unlinked can be linked by the time the write lands. The service carries
+ * `album_id IS NULL` into the UPDATE's own WHERE and reports a zero-row
+ * result as a conflict — this handler never makes the linked/unlinked call
+ * itself.
+ */
+export const updateRotation: RequestHandler<{ id: string }, unknown, RotationUpdateRequest> = async (req, res) => {
+  const rotationId = parseResourceId(req.params.id, 'rotation');
+
+  const { body } = req;
+
+  const rejectedFields = ROTATION_NO_COLUMN_FIELDS.filter((field) => field in body);
+  if (rejectedFields.length > 0) {
+    // `field — reason`, not `field (see reason)`. The reasons are phrases and
+    // sentences, not place names, so the "(see …)" frame produced unreadable
+    // output ("alphabetical_name (see derived, not stored: …)") and nested
+    // parens for the two entries that already carry their own.
+    const detail = rejectedFields.map((field) => `${field} — ${ROTATION_NO_COLUMN_FIELD_OWNERS[field]}`).join('; ');
+    throw new WxycError(`Bad Request: no rotation column exists for ${detail}`, 400);
+  }
+
+  if (!ROTATION_UPDATABLE_FIELDS.some((field) => field in body)) {
+    throw new WxycError(`Bad Request: provide at least one of ${ROTATION_UPDATABLE_FIELDS.join(', ')}`, 400);
+  }
+
+  const updates: libraryService.UpdateRotationRow = {};
+
+  for (const field of libraryService.ROTATION_SNAPSHOT_COLUMNS) {
+    if (body[field] !== undefined) {
+      updates[field] = validateTextField(body[field], field, ROTATION_SNAPSHOT_MAX_LENGTH);
+    }
+  }
+
+  if (body.add_date !== undefined) {
+    if (typeof body.add_date !== 'string' || !libraryService.isISODate(body.add_date)) {
+      throw new WxycError('Bad Request, Incorrect Date Format: add_date should be of form YYYY-MM-DD', 400);
+    }
+    updates.add_date = body.add_date;
+  }
+
+  if (body.kill_date !== undefined) {
+    if (body.kill_date !== null && (typeof body.kill_date !== 'string' || !libraryService.isISODate(body.kill_date))) {
+      throw new WxycError('Bad Request, Incorrect Date Format: kill_date should be of form YYYY-MM-DD', 400);
+    }
+    updates.kill_date = body.kill_date;
+  }
+
+  // BS#2113 review finding 4: the linked/unlinked precondition lives in the
+  // service's own compare-and-set UPDATE, not in a read taken here — see
+  // `libraryService.updateRotation` for why.
+  const outcome = await libraryService.updateRotation(rotationId, updates);
+
+  if (outcome.outcome === 'not_found') {
+    throw new WxycError('Rotation entry not found', 404);
+  }
+
+  if (outcome.outcome === 'linked_conflict') {
+    const snapshotFields = libraryService.ROTATION_SNAPSHOT_COLUMNS.filter((field) => body[field] !== undefined);
+    throw new WxycError(buildLinkedSnapshotConflictMessage(snapshotFields, outcome.albumId), 409);
+  }
+
+  // Projected, not the bare `.returning()` row: `rotation` also carries
+  // `legacy_rotation_id`, `legacy_library_release_id`, `discogs_release_id`,
+  // `discogs_release_id_source`, `lml_identity_id` and the two attempt-at
+  // markers, none of which any rotation read publishes -- and wxyc-shared#354
+  // transcribes whatever this returns into a published contract.
+  res.status(200).json(libraryService.toRotationRowSummary(outcome.rotation));
 };
 
 // Wire shape `RotationTrack` lives in `library.service.ts` so the service
@@ -1439,14 +1701,7 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
   const updates: libraryService.UpdateAlbumRow = {};
 
   if (body.album_title !== undefined) {
-    if (typeof body.album_title !== 'string' || body.album_title.trim() === '') {
-      throw new WxycError('album_title must be a non-empty string', 400);
-    }
-    const trimmedTitle = body.album_title.trim();
-    if (trimmedTitle.length > MAX_ALBUM_TEXT_LENGTH) {
-      throw new WxycError(`album_title must be ${MAX_ALBUM_TEXT_LENGTH} characters or fewer`, 400);
-    }
-    updates.album_title = trimmedTitle;
+    updates.album_title = validateTextField(body.album_title, 'album_title', MAX_ALBUM_TEXT_LENGTH);
   }
 
   if ('alternate_artist_name' in body) {

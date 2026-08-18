@@ -1883,6 +1883,112 @@ paths:
         '409':
           description: Rotation entry is already linked to a library release.
 
+  /library/rotation/{id}:
+    patch:
+      summary: Field-level edit of a rotation release (BS#2113)
+      description: >
+        Partial update of the five columns that actually exist on `wxyc_schema.rotation`:
+        `artist_name`, `album_title`, `record_label`, `add_date`, `kill_date`. Only the
+        fields present in the body are validated and written, so a typo fix on one field
+        cannot wipe another. Gated to MD/SM via `catalog:['write']`.
+
+
+        **`kill_date: null` clears the column.** This is the one non-obvious part of the
+        contract and the only way to un-kill a release through the HTTP surface: sending
+        an explicit JSON `null` writes SQL NULL, returning the row to active rotation.
+        Omitting `kill_date` entirely leaves the stored value untouched — `null` and
+        "absent" are deliberately different, which is why the field is nullable rather
+        than merely optional. `PATCH /library/rotation` (the kill endpoint) can only ever
+        set a date, never clear one.
+
+
+        **The `artist_name`/`album_title`/`record_label` snapshot trio is rejected with a
+        409 on a rotation row that has an `album_id`.** On a library-linked row the
+        rotation read path (`GET /library/rotation`) projects those three from the
+        `library`/`artists` join, so a write here would be echoed by the response and then
+        be invisible everywhere else; a non-NULL snapshot on a linked row also misroutes
+        the flowsheet rotation badge, which partitions its match arms on the invariant that
+        a linked row's denormalized names are NULL. Edit the linked release via
+        `PATCH /library/{id}` instead. `add_date` and `kill_date` stay editable on a
+        catalogued row.
+
+
+        `alphabetical_name`, `format`, and `format_size` appear on the same legacy editor
+        screen but have no `rotation` column, and are rejected with a 400 naming the field
+        rather than silently dropped.
+      security:
+        - BearerAuth: ['catalog-write']
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: '`rotation.id` of the row to edit (positive integer).'
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                artist_name:
+                  type: string
+                  maxLength: 128
+                  description: Denormalized artist snapshot. Rejected (409) when the row has an `album_id`.
+                album_title:
+                  type: string
+                  maxLength: 128
+                  description: Denormalized album snapshot. Rejected (409) when the row has an `album_id`.
+                record_label:
+                  type: string
+                  maxLength: 128
+                  description: Denormalized label snapshot. Rejected (409) when the row has an `album_id`.
+                add_date:
+                  type: string
+                  format: date
+                  description: '`YYYY-MM-DD`. Calendar-validated: `2026-09-31` is a 400, not a 500.'
+                kill_date:
+                  type: string
+                  format: date
+                  nullable: true
+                  description: '`YYYY-MM-DD`, or an explicit `null` to clear the column and return the release to active rotation.'
+      responses:
+        '200':
+          description: >-
+            The updated rotation row, projected to the same eight columns
+            `GET /library/rotation/uncatalogued` publishes. Not the raw `wxyc_schema.rotation`
+            row — that also carries server-derived plumbing (`legacy_rotation_id`,
+            `discogs_release_id`, `lml_identity_id`, the attempt-at markers) which this
+            endpoint does not publish — and not the joined `GET /library/rotation`
+            list-view shape either.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UncataloguedRotationRow'
+        '400':
+          description: >
+            Non-positive/non-integer `id`, empty body, a field with no `rotation` column
+            (`alphabetical_name`/`format`/`format_size`), a blank or over-128-character
+            text field, or a malformed/impossible `add_date`/`kill_date`.
+        '401':
+          description: Missing or invalid bearer token.
+        '403':
+          description: Authenticated role lacks `catalog:write` (below musicDirector).
+        '404':
+          description: No rotation row with that id.
+        '409':
+          description: >
+            One or more of `artist_name`/`album_title`/`record_label` was sent for a
+            rotation row linked to a library release (`album_id` is not NULL). The remedy
+            is field-specific: `album_title`/`record_label` are editable via
+            `PATCH /library/{album_id}` (`album_title`/`label`); `artist_name` is not —
+            `library.artist_name` is derived from the linked `artists` row via `artist_id`,
+            and no endpoint currently supports renaming an artist or setting free-text
+            `artist_name` on a catalogued release.
+
   /library/artists:
     post:
       summary: Add new artist

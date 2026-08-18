@@ -95,6 +95,8 @@ import {
   updateArtworkUrl,
   resolveRotationPickerSource,
   __resetRotationLmlLookupCacheForTests,
+  __rotationLmlCacheSizesForWarm,
+  updateRotation,
   isVariousArtistsName,
   getRotationTracksFromRelease,
   __resetReleaseTracklistCacheForTests,
@@ -1722,11 +1724,42 @@ describe('library.service', () => {
       expect(isISODate('2024-01')).toBe(false);
     });
 
-    it('returns true for edge case dates (format only, not validity)', () => {
-      // Note: isISODate only checks format, not calendar validity
+    // JS has a year 0; PostgreSQL does not (1 BC is followed directly by
+    // 1 AD). `Date.parse('0000-01-01T00:00:00.000Z')` succeeds AND
+    // round-trips cleanly through `toISOString()`, so the round-trip check
+    // alone cannot see these — they sailed through the 400 gate and raised
+    // the same 22008 the guard exists to prevent.
+    it('rejects year-0000 dates that JS parses but PostgreSQL cannot store', () => {
+      expect(isISODate('0000-01-01')).toBe(false);
+      expect(isISODate('0000-12-31')).toBe(false);
+      expect(isISODate('0000-06-15')).toBe(false);
+    });
+
+    it('still accepts the earliest date PostgreSQL can represent', () => {
+      expect(isISODate('0001-01-01')).toBe(true);
+      expect(isISODate('9999-12-31')).toBe(true);
+    });
+
+    // BS#2113: the guard used to be shape-only, so a well-formed but
+    // impossible date sailed through the 400 gate and PG raised 22008
+    // ("date/time field value out of range") — a 500 plus a Sentry event for
+    // a plain client mistake. Both `PATCH /library/rotation` (kill_date) and
+    // `PATCH /library/rotation/:id` (add_date + kill_date) read this.
+    it('rejects well-formed but impossible calendar dates', () => {
+      expect(isISODate('2024-02-30')).toBe(false); // February never has 30 days
+      expect(isISODate('2026-09-31')).toBe(false); // September has 30
+      expect(isISODate('2024-13-01')).toBe(false); // month 13
+      expect(isISODate('2024-00-10')).toBe(false); // month 0
+      expect(isISODate('2024-01-00')).toBe(false); // day 0
+      expect(isISODate('2024-01-32')).toBe(false); // day 32
+      expect(isISODate('2023-02-29')).toBe(false); // 2023 is not a leap year
+    });
+
+    it('still accepts real leap days and month boundaries', () => {
       expect(isISODate('2024-02-29')).toBe(true); // leap year
-      expect(isISODate('2024-02-30')).toBe(true); // invalid day but correct format
-      expect(isISODate('2024-13-01')).toBe(true); // invalid month but correct format
+      expect(isISODate('2000-02-29')).toBe(true); // century leap year
+      expect(isISODate('2024-01-31')).toBe(true);
+      expect(isISODate('2024-04-30')).toBe(true);
     });
   });
 
@@ -2549,6 +2582,85 @@ describe('library.service', () => {
       const second = await resolveRotationPickerSource(42);
       expect(second).toBeNull();
 
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+    });
+
+    // BS#2113 review finding 1: a snapshot-trio edit through `updateRotation`
+    // must evict this rotation_id from both LRUs, not just null the DB
+    // marker — otherwise the picker keeps serving a cached resolution for
+    // the release the row used to name until the TTL lapses.
+    it('evicts the positive cache when updateRotation writes a snapshot-trio edit', async () => {
+      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+      mockLookupMetadata.mockResolvedValueOnce({
+        results: [{ artwork: { release_id: 4080 } }],
+        search_type: 'direct',
+      });
+
+      const primed = await resolveRotationPickerSource(42);
+      expect(primed).toEqual({ releaseId: 4080, inlineTracklist: null });
+      expect(__rotationLmlCacheSizesForWarm().positive).toBe(1);
+
+      const updateChain = createMockQueryChain([{ id: 42, artist_name: 'Juana Molina', album_id: null }]);
+      db.update.mockReturnValueOnce(updateChain);
+      const outcome = await updateRotation(42, { artist_name: 'Juana Molina' });
+      expect(outcome.outcome).toBe('updated');
+      expect(__rotationLmlCacheSizesForWarm().positive).toBe(0);
+
+      // Eviction that doesn't cause a re-query on the next open would be a
+      // no-op with extra steps — prove the freed slot is actually re-asked.
+      mockRow({ direct: null, fallback: null, artist_name: 'Juana Molina', album_title: 'DOGA' });
+      mockLookupMetadata.mockResolvedValueOnce({
+        results: [{ artwork: { release_id: 9999 } }],
+        search_type: 'direct',
+      });
+      const afterEdit = await resolveRotationPickerSource(42);
+      expect(afterEdit).toEqual({ releaseId: 9999, inlineTracklist: null });
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
+    });
+
+    it('evicts the negative cache too, so a row that becomes resolvable is re-asked immediately', async () => {
+      mockRow({ direct: null, fallback: null, artist_name: 'Mystery Artist', album_title: 'Unknown' });
+      mockLookupMetadata.mockResolvedValueOnce({ results: [], search_type: 'none' });
+
+      const primed = await resolveRotationPickerSource(42);
+      expect(primed).toBeNull();
+      expect(__rotationLmlCacheSizesForWarm().negative).toBe(1);
+
+      const updateChain = createMockQueryChain([{ id: 42, album_title: 'Corrected Title', album_id: null }]);
+      db.update.mockReturnValueOnce(updateChain);
+      await updateRotation(42, { album_title: 'Corrected Title' });
+      expect(__rotationLmlCacheSizesForWarm().negative).toBe(0);
+
+      mockRow({ direct: null, fallback: null, artist_name: 'Mystery Artist', album_title: 'Corrected Title' });
+      mockLookupMetadata.mockResolvedValueOnce({
+        results: [{ artwork: { release_id: 5555 } }],
+        search_type: 'direct',
+      });
+      const afterEdit = await resolveRotationPickerSource(42);
+      expect(afterEdit).toEqual({ releaseId: 5555, inlineTracklist: null });
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
+    });
+
+    // A non-snapshot edit (add_date/kill_date only) has nothing stale to
+    // invalidate — the cache pair must survive it.
+    it('does NOT evict either cache when the edit never touches the snapshot trio', async () => {
+      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+      mockLookupMetadata.mockResolvedValueOnce({
+        results: [{ artwork: { release_id: 4080 } }],
+        search_type: 'direct',
+      });
+
+      await resolveRotationPickerSource(42);
+      expect(__rotationLmlCacheSizesForWarm().positive).toBe(1);
+
+      const updateChain = createMockQueryChain([{ id: 42, kill_date: '2024-06-01' }]);
+      db.update.mockReturnValueOnce(updateChain);
+      await updateRotation(42, { kill_date: '2024-06-01' });
+
+      expect(__rotationLmlCacheSizesForWarm().positive).toBe(1);
+
+      const second = await resolveRotationPickerSource(42);
+      expect(second).toEqual({ releaseId: 4080, inlineTracklist: null });
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
     });
 

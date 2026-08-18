@@ -91,6 +91,16 @@ type ArtistReleaseRowMock = {
 const mockGetReleasesForArtist =
   jest.fn<(artistId: number, page: number, limit: number) => Promise<ArtistReleaseRowMock[]>>();
 const mockCountReleasesForArtist = jest.fn<(artistId: number) => Promise<number>>();
+// PATCH /library/rotation/:id (updateRotation, BS#2113). The service now
+// resolves a compare-and-set outcome (review finding 4) rather than a bare
+// row, so the controller can't tell "not found" apart from "linked
+// concurrently" by re-reading the row itself.
+type UpdateRotationOutcome =
+  | { outcome: 'updated'; rotation: Record<string, unknown> }
+  | { outcome: 'not_found' }
+  | { outcome: 'linked_conflict'; albumId: number };
+const mockUpdateRotation = jest.fn<(id: number, updates: Record<string, unknown>) => Promise<UpdateRotationOutcome>>();
+const mockIsISODate = jest.fn<(date: string) => boolean>();
 
 // POST /library/:id/discogs-recheck (BS#1283).
 const mockRecheckDiscogsAvailability =
@@ -141,6 +151,18 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   getRotationFromDB: mockGetRotationFromDB,
   addToRotation: mockAddToRotation,
   killRotationInDB: mockKillRotationInDB,
+  // Real projection, not a stub: the controller now routes its 200 through
+  // this, so a pass-through mock would assert a shape the endpoint no longer
+  // returns. Mirrors `UNCATALOGUED_ROTATION_PROJECTION`'s key set. (Value and
+  // helper exports going missing from these hand-maintained mocks is the
+  // recurring hazard tracked in WXYC/Backend-Service#2209.)
+  ROTATION_SNAPSHOT_COLUMNS: ['artist_name', 'album_title', 'record_label'] as const,
+  toRotationRowSummary: (row) =>
+    Object.fromEntries(
+      ['id', 'album_id', 'rotation_bin', 'add_date', 'kill_date', 'artist_name', 'album_title', 'record_label'].map(
+        (key) => [key, row?.[key]]
+      )
+    ),
   getUncataloguedRotationFromDB: mockGetUncataloguedRotationFromDB,
   // Not a function — a real value export the controller destructures at module
   // load for its 400 message and bound check. Omitting it makes the ceiling
@@ -167,7 +189,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   insertGenre: jest.fn(),
   insertFormat: jest.fn(),
   getFormatById: mockGetFormatById,
-  isISODate: jest.fn(),
+  isISODate: mockIsISODate,
   resolveRotationPickerSource: mockResolveRotationPickerSource,
   getRotationTracksFromRelease: mockGetRotationTracksFromRelease,
   getLibraryRowById: mockGetLibraryRowById,
@@ -180,6 +202,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   updateArtistInDB: mockUpdateArtistInDB,
   getReleasesForArtist: mockGetReleasesForArtist,
   countReleasesForArtist: mockCountReleasesForArtist,
+  updateRotation: mockUpdateRotation,
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
@@ -260,6 +283,7 @@ import {
   getArtistCard,
   updateArtistCard,
   getArtistReleases,
+  updateRotation,
 } from '../../../apps/backend/controllers/library.controller';
 import WxycError from '../../../apps/backend/utils/error';
 
@@ -3265,6 +3289,327 @@ describe('library.controller', () => {
 
       await expect(getArtistReleases(req, res, next)).rejects.toThrow(message);
       expect(mockGetReleasesForArtist).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('updateRotation (BS#2113)', () => {
+    const reqFor = (body: Record<string, unknown>, id = '42') => ({ params: { id }, body }) as unknown as Request;
+
+    beforeEach(() => {
+      mockIsISODate.mockImplementation((date: string) => /^\d{4}-\d{2}-\d{2}$/.test(date));
+      // Default: the service reports a successful write. The linked/unlinked
+      // precondition on the snapshot trio (review finding 4) now lives
+      // entirely inside `libraryService.updateRotation`'s compare-and-set —
+      // this controller never reads the row itself, so there is no "target an
+      // uncatalogued row" fixture to arrange here the way there used to be.
+      mockUpdateRotation.mockResolvedValue({ outcome: 'updated', rotation: { id: 42, artist_name: 'Juana Molina' } });
+    });
+
+    // The message is `Invalid rotation ID` (capital ID) because this handler
+    // shares `parseResourceId` with the artist and album routes rather than
+    // carrying its own parser. That one is stricter than the parser this
+    // endpoint originally shipped -- it also rejects '42.0', '1e3', '+42' and
+    // '007' -- and one implementation per router is the point. Safe to change
+    // the wording: the endpoint is new and has no clients.
+    it.each(['42.0', '1e3', '+42', '007', ' 42 ', '0x2a'])(
+      'returns 400 for the non-canonical id spelling %s',
+      async (rawId) => {
+        const res = mockResponse();
+
+        await expect(updateRotation(reqFor({ artist_name: 'x' }, rawId), res, next)).rejects.toThrow(
+          'Invalid rotation ID'
+        );
+        expect(mockUpdateRotation).not.toHaveBeenCalled();
+      }
+    );
+
+    it('returns 400 for a non-numeric id', async () => {
+      const res = mockResponse();
+
+      await expect(updateRotation(reqFor({ artist_name: 'x' }, 'abc'), res, next)).rejects.toThrow(
+        'Invalid rotation ID'
+      );
+      expect(mockUpdateRotation).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 for a non-positive id', async () => {
+      const res = mockResponse();
+
+      await expect(updateRotation(reqFor({ artist_name: 'x' }, '0'), res, next)).rejects.toThrow('Invalid rotation ID');
+      expect(mockUpdateRotation).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 when no updatable field is provided', async () => {
+      const res = mockResponse();
+
+      await expect(updateRotation(reqFor({}), res, next)).rejects.toThrow('provide at least one of');
+      expect(mockUpdateRotation).not.toHaveBeenCalled();
+    });
+
+    // The issue's explicit scope correction: alphabetical_name, format, and
+    // format_size have no column on `rotation` and must be rejected outright,
+    // not silently dropped like an unrecognized field would be.
+    describe('no-column fields are rejected, not silently dropped (BS#2156 / dj-site#1169)', () => {
+      it.each([['alphabetical_name'], ['format'], ['format_size']])('rejects %s', async (field) => {
+        const res = mockResponse();
+
+        await expect(updateRotation(reqFor({ artist_name: 'ok', [field]: 'nope' }), res, next)).rejects.toThrow(
+          'no rotation column exists'
+        );
+        expect(mockUpdateRotation).not.toHaveBeenCalled();
+      });
+
+      it('reports every rejected field at once', async () => {
+        const res = mockResponse();
+
+        await expect(
+          updateRotation(reqFor({ alphabetical_name: 'a', format: 'LP', format_size: '12"' }), res, next)
+        ).rejects.toThrow(/alphabetical_name.*format.*format_size/s);
+      });
+    });
+
+    describe('per-field validation', () => {
+      it('rejects an empty artist_name', async () => {
+        const res = mockResponse();
+        await expect(updateRotation(reqFor({ artist_name: '   ' }), res, next)).rejects.toThrow(
+          'artist_name must be a non-empty string'
+        );
+        expect(mockUpdateRotation).not.toHaveBeenCalled();
+      });
+
+      it('rejects an over-length album_title (>128 chars)', async () => {
+        const res = mockResponse();
+        await expect(updateRotation(reqFor({ album_title: 'a'.repeat(129) }), res, next)).rejects.toThrow(
+          'album_title must be 128 characters or fewer'
+        );
+        expect(mockUpdateRotation).not.toHaveBeenCalled();
+      });
+
+      // Postgres measures `varchar(128)` in characters; a bare `.length`
+      // measures UTF-16 units and counts every astral character twice. This
+      // string is 128 code points (PG stores it) but `.length === 129`, so
+      // measuring the wrong unit made it creatable via `POST /library/rotation`
+      // — which uses `codePointLength` — and un-editable here. A librarian
+      // could not fix a typo elsewhere in the row without first shortening a
+      // title the system had already accepted.
+      it('accepts a 128-code-point album_title containing astral characters', async () => {
+        const astral = 'a'.repeat(127) + '\u{1F600}';
+        expect([...astral].length).toBe(128);
+        expect(astral.length).toBe(129);
+
+        const res = mockResponse();
+        mockUpdateRotation.mockResolvedValueOnce({
+          outcome: 'updated',
+          rotation: { id: 42, album_title: astral },
+        });
+
+        await updateRotation(reqFor({ album_title: astral }), res, next);
+
+        expect(mockUpdateRotation).toHaveBeenCalledWith(42, { album_title: astral });
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('rejects a malformed add_date', async () => {
+        const res = mockResponse();
+        await expect(updateRotation(reqFor({ add_date: '01/15/2024' }), res, next)).rejects.toThrow(
+          'Incorrect Date Format: add_date'
+        );
+        expect(mockUpdateRotation).not.toHaveBeenCalled();
+      });
+
+      it('rejects a malformed kill_date', async () => {
+        const res = mockResponse();
+        await expect(updateRotation(reqFor({ kill_date: '12/31/2025' }), res, next)).rejects.toThrow(
+          'Incorrect Date Format: kill_date'
+        );
+        expect(mockUpdateRotation).not.toHaveBeenCalled();
+      });
+
+      it('accepts an explicit null kill_date (clears the column)', async () => {
+        const res = mockResponse();
+
+        await updateRotation(reqFor({ kill_date: null }), res, next);
+
+        expect(mockUpdateRotation).toHaveBeenCalledWith(42, { kill_date: null });
+      });
+    });
+
+    // The snapshot trio is only meaningful on a rotation row with no library
+    // link. `getRotationFromDB` projects COALESCE(artists.artist_name,
+    // rotation.artist_name) and friends, so on a linked row the library join
+    // wins and the write would be invisible on the only rotation read path —
+    // while still breaking the "a library-LINKED rotation row carries NULL
+    // denormalized names" invariant the flowsheet rotation-badge arms rest on.
+    //
+    // Review finding 4 moved the linked/unlinked decision into the service's
+    // own compare-and-set, so from here the "row is linked" case is just
+    // another shape the mocked service resolves to (`linked_conflict`) — the
+    // controller no longer reads the row to decide this itself.
+    describe('the denormalized snapshot trio is rejected on a catalogued row (BS#2080 invariant)', () => {
+      beforeEach(() => {
+        mockUpdateRotation.mockResolvedValue({ outcome: 'linked_conflict', albumId: 3 });
+      });
+
+      it.each([['artist_name'], ['album_title'], ['record_label']])(
+        'rejects %s with a 409 naming the reason',
+        async (field) => {
+          const res = mockResponse();
+
+          await expect(updateRotation(reqFor({ [field]: 'Stereolab' }), res, next)).rejects.toMatchObject({
+            statusCode: 409,
+            message: expect.stringContaining(field),
+          });
+          // Unlike the old read-then-write shape, the service IS called here —
+          // it is the one deciding the row is linked, from inside its own
+          // UPDATE, not from a controller-side pre-check.
+          expect(mockUpdateRotation).toHaveBeenCalledWith(42, { [field]: 'Stereolab' });
+        }
+      );
+
+      it('names every rejected snapshot field at once', async () => {
+        const res = mockResponse();
+
+        await expect(
+          updateRotation(
+            reqFor({ artist_name: 'Stereolab', album_title: 'Dots and Loops', record_label: 'Duophonic' }),
+            res,
+            next
+          )
+        ).rejects.toThrow(/artist_name.*album_title.*record_label/s);
+      });
+
+      // BS#2113 review finding 2: the remedy is field-specific, not a blanket
+      // "edit the library release" — album_title/record_label really are
+      // editable there, artist_name is not.
+      it('honestly refuses to offer PATCH /library/:id as a remedy for artist_name', async () => {
+        const res = mockResponse();
+
+        await expect(updateRotation(reqFor({ artist_name: 'Stereolab' }), res, next)).rejects.toMatchObject({
+          statusCode: 409,
+          message: expect.stringContaining(
+            'artist_name has no remedy here: library.artist_name is derived from the linked artists row via ' +
+              'artist_id, and no endpoint currently supports renaming an artist'
+          ),
+        });
+      });
+
+      it('names the real remedy for album_title and record_label', async () => {
+        const res = mockResponse();
+
+        await expect(
+          updateRotation(reqFor({ album_title: 'Dots and Loops', record_label: 'Duophonic' }), res, next)
+        ).rejects.toMatchObject({
+          statusCode: 409,
+          message: expect.stringContaining('edit album_title, label via PATCH /library/3 instead'),
+        });
+      });
+
+      it('still accepts add_date and kill_date — those have no library-join shadow', async () => {
+        mockUpdateRotation.mockResolvedValue({
+          outcome: 'updated',
+          rotation: { id: 42, add_date: '2024-01-15', kill_date: null },
+        });
+        const res = mockResponse();
+
+        await updateRotation(reqFor({ add_date: '2024-01-15', kill_date: null }), res, next);
+
+        expect(mockUpdateRotation).toHaveBeenCalledWith(42, { add_date: '2024-01-15', kill_date: null });
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+    });
+
+    // Not writable today — the handler builds `updates` field-by-field and the
+    // service loops a hardcoded five-key array — but nothing pinned it, so a
+    // refactor to `Object.assign(set, updates)` would pass the whole suite
+    // while opening BS#1029's trust-gated provenance columns to client writes.
+    it('drops every server-derived and non-in-scope column the client sends', async () => {
+      const res = mockResponse();
+
+      await updateRotation(
+        reqFor({
+          add_date: '2024-01-15',
+          legacy_rotation_id: 555_000_001,
+          legacy_library_release_id: 555_000_002,
+          discogs_release_id: 999777,
+          discogs_release_id_source: 'discogs_direct_backfill',
+          lml_identity_id: 8_888_888,
+          tracklist_lookup_attempted_at: '2024-01-15T00:00:00.000Z',
+          album_id: 7,
+          rotation_bin: 'H',
+        }),
+        res,
+        next
+      );
+
+      expect(mockUpdateRotation).toHaveBeenCalledWith(42, { add_date: '2024-01-15' });
+    });
+
+    it('trims and forwards only the fields present in the body (true partial semantics)', async () => {
+      const res = mockResponse();
+
+      await updateRotation(
+        reqFor({
+          artist_name: '  Juana Molina  ',
+          album_title: 'DOGA',
+        }),
+        res,
+        next
+      );
+
+      expect(mockUpdateRotation).toHaveBeenCalledWith(42, {
+        artist_name: 'Juana Molina',
+        album_title: 'DOGA',
+      });
+    });
+
+    it('forwards all five in-scope fields, including kill_date, in one call', async () => {
+      const res = mockResponse();
+
+      await updateRotation(
+        reqFor({
+          artist_name: 'Jessica Pratt',
+          album_title: 'On Your Own Love Again',
+          record_label: 'Drag City',
+          add_date: '2024-01-15',
+          kill_date: '2024-06-01',
+        }),
+        res,
+        next
+      );
+
+      expect(mockUpdateRotation).toHaveBeenCalledWith(42, {
+        artist_name: 'Jessica Pratt',
+        album_title: 'On Your Own Love Again',
+        record_label: 'Drag City',
+        add_date: '2024-01-15',
+        kill_date: '2024-06-01',
+      });
+    });
+
+    it('returns 200 with the updated row on success', async () => {
+      const res = mockResponse();
+      mockUpdateRotation.mockResolvedValue({
+        outcome: 'updated',
+        rotation: { id: 42, artist_name: 'Juana Molina', kill_date: null },
+      });
+
+      await updateRotation(reqFor({ artist_name: 'Juana Molina' }), res, next);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({ id: 42, artist_name: 'Juana Molina', kill_date: null });
+    });
+
+    // Covers both "never existed" and "deleted between validation and the
+    // write" — the compare-and-set service can't (and doesn't try to) tell
+    // those apart from a zero-row UPDATE, so both resolve to the same
+    // `not_found` outcome the controller maps to 404.
+    it('returns 404 when the service reports the row not found', async () => {
+      const res = mockResponse();
+      mockUpdateRotation.mockResolvedValue({ outcome: 'not_found' });
+
+      await expect(updateRotation(reqFor({ artist_name: 'Juana Molina' }, '999'), res, next)).rejects.toThrow(
+        'Rotation entry not found'
+      );
     });
   });
 });

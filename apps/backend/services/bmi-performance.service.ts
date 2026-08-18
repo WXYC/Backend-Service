@@ -85,12 +85,12 @@ export type BmiDateRange = {
   toExclusive: Date;
 };
 
-// Shape-only ISO-day guard. A byte-identical regex backs the weaker shape-only
-// `isISODate` (library.service.ts); `parseIsoDay` below intentionally goes further,
-// also rejecting impossible calendar dates via an ISO round-trip. Not consolidated
-// here: reusing `isISODate` would drop the calendar-validity check, and promoting the
-// stronger check into a shared util would change `killRotation`'s accepted inputs —
-// out of scope for this shell.
+// Shape guard. A byte-identical regex backs `isISODate` (library.service.ts), which
+// as of BS#2113 also round-trips through `Date` to reject impossible calendar dates —
+// the two predicates now accept the same set of strings. Still not consolidated: the
+// two differ in what they do on failure (`parseIsoDay` throws a field-named 400,
+// `isISODate` returns a boolean its callers turn into their own message), so a shared
+// util would have to carry both shapes for no gain.
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
