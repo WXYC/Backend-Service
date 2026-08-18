@@ -2008,10 +2008,38 @@ paths:
   /library/info:
     get:
       summary: Get album information
+      description: >
+        Takes exactly one release identifier, in either id space: `album_id`
+        (the serial `wxyc_schema.library.id`) or `legacy_release_id` (the
+        tubafrenzy `LIBRARY_RELEASE.ID` external callers hold). Neither is
+        required on its own — `getAlbum` returns 400 only when both are absent.
+
+
+        When both are sent, `legacy_release_id` wins outright: the handler
+        branches on its mere presence, before reading `album_id`, and a
+        malformed value on that branch is a 400 rather than a fallback. A
+        legacy id that maps to no catalog row is a 404 — a library.db release
+        not yet synced into Backend Postgres (BS#1880).
+
+
+        Both branches return the same shape; only the lookup key differs.
       parameters:
         - name: album_id
           in: query
-          required: true
+          required: false
+          description: The serial `wxyc_schema.library.id`. Supply this or `legacy_release_id`, not both.
+          schema:
+            type: integer
+        - name: legacy_release_id
+          in: query
+          required: false
+          description: >-
+            The tubafrenzy `LIBRARY_RELEASE.ID`, stored as
+            `library.legacy_release_id` — the id space LML, the request line,
+            and the wxyc.info permalink speak (BS#1880's inbound-compat front
+            door). NOT the serial `library.id`: the two spaces are numerically
+            coextensive, so the wrong one resolves a different real release
+            rather than 404ing. Supply this or `album_id`, not both.
           schema:
             type: integer
       responses:
