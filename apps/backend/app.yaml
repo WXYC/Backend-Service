@@ -1982,7 +1982,7 @@ paths:
           required: true
           schema:
             type: string
-            pattern: '^[A-Za-z0-9/]{1,4}$'
+            pattern: '^\s*[A-Za-z0-9/]{1,4}\s*$'
         - in: query
           name: code_number
           required: true
@@ -2022,7 +2022,17 @@ paths:
             Two distinct outcomes, told apart by `reason`, never by the message text.
             `genre_not_found` — no genre has that `genre_id`, so the client's genre list is
             stale and the code was never evaluated. `code_not_assigned` — the genre exists and
-            the code is free within it, so it is safe to create an artist under it.
+            no artist is filed under that exact code.
+
+            `code_not_assigned` is NOT a guarantee that creating an artist under the code is
+            safe. This lookup upper-cases `code_letters` before matching, but `artists.code_letters`
+            is a plain `varchar(4)` with byte-exact equality and neither writer canonicalizes:
+            `insertArtist` only NFC-normalizes, and the tubafrenzy `library-etl` job writes its
+            source value verbatim. So a lower-case row filed under the same shelf code is
+            invisible here — and `POST /library/artists`, whose own conflict pre-check also
+            compares raw, will happily create one. Every row in the production catalog is
+            canonical today, so this is an open path rather than existing data; canonicalizing
+            on write (plus a backfill) is the real fix and is tracked separately.
           content:
             application/json:
               schema:

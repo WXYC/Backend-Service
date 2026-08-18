@@ -999,9 +999,15 @@ describe('library.controller', () => {
       it('rejects an overflowing parameter with a WxycError (400), never an unhandled error', async () => {
         const res = mockResponse();
 
-        await expect(resolveArtistByCode(req({ code_number: '9999999999' }), res, next)).rejects.toBeInstanceOf(
-          WxycError
+        // The status code is the whole point of the test's name: a
+        // `WxycError` carrying 500 would satisfy a bare `toBeInstanceOf` while
+        // being exactly the outcome this guard exists to prevent.
+        const thrown = await resolveArtistByCode(req({ code_number: '9999999999' }), res, next).then(
+          () => null,
+          (error: unknown) => error
         );
+        expect(thrown).toBeInstanceOf(WxycError);
+        expect((thrown as WxycError).statusCode).toBe(400);
       });
 
       it('still accepts values exactly at the INT4_MAX boundary', async () => {

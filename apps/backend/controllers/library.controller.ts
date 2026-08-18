@@ -479,10 +479,12 @@ const parseCodeQueryInt = (raw: string | undefined, name: string, min: number): 
   if (typeof raw !== 'string') {
     throw new WxycError(`Invalid ${name}: must be a single value`, 400);
   }
-  if (raw.trim() === '') {
-    throw new WxycError(`Invalid ${name}: must be an integer between ${min} and ${INT4_MAX}`, 400);
-  }
-  const value = Number(raw);
+  // Blank folds into the range check rather than throwing the identical
+  // message from its own branch: `Number('')` and `Number(' ')` are both 0,
+  // which would sail through `Number.isInteger` as a legitimate zero now that
+  // 0 is a valid `code_number`. Coercing blank to NaN first makes one
+  // comparison cover both cases.
+  const value = raw.trim() === '' ? NaN : Number(raw);
   if (!Number.isInteger(value) || value < min || value > INT4_MAX) {
     throw new WxycError(`Invalid ${name}: must be an integer between ${min} and ${INT4_MAX}`, 400);
   }
@@ -614,8 +616,6 @@ export const resolveArtistByCode: RequestHandler = async (
     artists: owners.map((owner) => ({
       id: owner.artist_id,
       artist_name: owner.artist_name,
-      // Echoes the row's own `code_letters`, not the locally normalized
-      // `codeLetters` variable used to query it.
       code_letters: owner.code_letters,
       code_number: codeNumber,
       genre_id: genreId,
