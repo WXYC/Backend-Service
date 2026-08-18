@@ -636,9 +636,9 @@ export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = 
   // plainly bad input. Shared with the rotation webhook via `parseRotationBin`
   // so the two cannot disagree about normalization (they did: `'h'` was
   // accepted by one and rejected by the other).
-  if (parseRotationBin(req.body.rotation_bin).kind !== 'bin') {
+  if (parseRotationBin(body.rotation_bin).kind !== 'bin') {
     throw new WxycError(
-      `Invalid rotation_bin ${JSON.stringify(req.body.rotation_bin)}. Expected one of: ${ROTATION_BINS.join(', ')}.`,
+      `Invalid rotation_bin ${JSON.stringify(body.rotation_bin)}. Expected one of: ${ROTATION_BINS.join(', ')}.`,
       400
     );
   }
@@ -706,7 +706,8 @@ export const linkRotationToAlbum: RequestHandler<{ rotation_id: string }, unknow
   }
 
   const { album_id } = req.body;
-  if (typeof album_id !== 'number' || !Number.isInteger(album_id) || album_id <= 0) {
+  // `Number.isInteger` already rejects every non-number, so no `typeof` guard.
+  if (!Number.isInteger(album_id) || album_id <= 0) {
     throw new WxycError('Missing Parameters: album_id', 400);
   }
 

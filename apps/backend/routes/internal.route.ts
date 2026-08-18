@@ -901,28 +901,19 @@ internal_route.post('/rotation-webhook', async (req, res) => {
         // bin is invisible. If these start appearing, the fix is upstream: give
         // the release a real bin in tubafrenzy.
         //
-        // `album_id` is deliberately ungated (unlike the fields below) — it is
-        // written on every delivery through this arm, or the linkage event
-        // BS#1082/#1312 exists to deliver would silently no-op.
-        //
-        // BS#2109 review round 3 finding 2, re-derived for this arm: it is a
-        // plain UPDATE, not the sibling INSERT...ON CONFLICT below, so there
-        // is no `excluded` row to read — the delivery's own resolved
-        // `albumId` stands in for it. `rawLibraryId` truthy means tubafrenzy
-        // is asserting a real link this delivery, so `albumId` (even null,
-        // if the id didn't resolve) is written outright — same unconditional
-        // overwrite as the sibling arm's `albumIdExpr`. `rawLibraryId` falsy
-        // (0/absent — tubafrenzy doesn't know) must not downgrade a
-        // Backend-made link (`PATCH /library/rotation/:id/link`) to NULL, so
-        // it COALESCEs against the row's current value instead — `albumId` is
-        // guaranteed null whenever `rawLibraryId` is falsy (`getAlbumIdByLegacyId`
-        // short-circuits on a falsy id), so this is the plain-UPDATE
-        // equivalent of the sibling arm's
-        // `COALESCE(excluded.album_id, rotation.album_id)`.
+        // BS#2109: tubafrenzy only asserts a link when it sends a
+        // `libraryReleaseId`. When it doesn't (0/absent — it simply doesn't
+        // know), leave `album_id` alone so a Backend-made link (`PATCH
+        // /library/rotation/:id/link`) isn't downgraded to NULL; presence-gating
+        // the key is how every other column here already expresses that. When
+        // it does, write the resolved `albumId` outright — even null, since an
+        // unresolved id is still tubafrenzy asserting a relink.
         const partialSet: Record<string, unknown> = {
           legacy_library_release_id: rawLibraryId || null,
-          album_id: rawLibraryId ? albumId : sql`COALESCE(${albumId}, ${rotation.album_id})`,
         };
+        if (rawLibraryId) {
+          partialSet.album_id = albumId;
+        }
         if (release.killDate !== undefined) {
           partialSet.kill_date = killDate;
         }
@@ -949,74 +940,46 @@ internal_route.post('/rotation-webhook', async (req, res) => {
           return;
         }
       } else {
-        // A real bin is present, so the row can be created outright. SET stays
-        // presence-gated for the same reason as above — a full-shape update
-        // overwrites these, a sparser one leaves them alone — while the INSERT
-        // arm populates every column on first delivery. This gate is
-        // load-bearing and untouched by review round 3 finding 2 below — it
-        // answers "was the field in the payload at all?", a different
-        // question from "does the row resolve linked?".
+        // A real bin is present, so the row can be created outright. Every SET
+        // key here is presence-gated — a full-shape update overwrites, a
+        // sparser one leaves alone — while the INSERT arm populates every
+        // column on first delivery. `album_id` is gated on the same rule as
+        // the plain-UPDATE arm above: tubafrenzy asserting a `libraryReleaseId`
+        // means write it (a create, or a genuine `/wxycdb` relink to a
+        // *different* release); tubafrenzy not knowing means leave the column
+        // alone, so a `PATCH /library/rotation/:id/link` survives.
         //
-        // BS#2109 (review round 2): `album_id` was first COALESCEd rather than
-        // overwritten, so an incoming NULL couldn't un-link a row. Before
-        // BS#2109 every `album_id` in this table originated upstream
-        // (`jobs/legacy-linkage-resolve` only links rows tubafrenzy has
-        // already linked), so `excluded.album_id` always agreed with what was
-        // there and overwriting was a no-op. `PATCH /library/rotation/:id/link`
-        // created the first Backend-canonical link tubafrenzy does not know
-        // about, so a blanket COALESCE was needed to stop a `libraryReleaseId:
-        // 0` delivery (tubafrenzy simply doesn't know) from reading as "tubafrenzy
-        // says unlink this."
+        // The three snapshot columns write `excluded.*` gated only on
+        // presence, same as every other column — this arm never re-decides the
+        // trio based on whether the row resolves linked. Note that the value
+        // it writes still can be NULL: the `.values()` below compute
+        // `albumId ? null : truncate(...)`, so a delivery carrying a
+        // *resolvable* `libraryReleaseId` nulls the trio. That is pre-existing
+        // behavior, deliberately unchanged here; the case this arm protects is
+        // the `libraryReleaseId: 0` delivery landing on a Backend-linked row,
+        // where `albumId` is null and the free text is written through.
         //
-        // Review round 3 finding 2 refines that to the payload itself rather
-        // than the resolution result: `rawLibraryId` truthy means tubafrenzy
-        // is asserting an actual link (create, or a genuine `/wxycdb` relink to
-        // a *different* release), so `excluded.album_id` wins outright — this
-        // restores tubafrenzy's ability to relink a row, which the blanket
-        // COALESCE had silently revoked (its docblock's claim that "tubafrenzy
-        // can no longer unlink a rotation row" was broader than intended: it
-        // could no longer *change* `album_id` at all). `rawLibraryId` falsy
-        // (0/absent — tubafrenzy doesn't know) keeps the COALESCE fallback, so
-        // a Backend-made link (or a link this same delivery just resolved)
-        // survives.
-        const albumIdExpr = rawLibraryId
-          ? sql`excluded.album_id`
-          : sql`COALESCE(excluded.album_id, ${rotation.album_id})`;
-
-        // The three snapshot columns below write `excluded.*` unconditionally
-        // (gated only on presence, same as every other column here) — a
-        // library-linked rotation row is allowed to keep carrying
-        // tubafrenzy's free text. Three reasons converge on that:
-        //
-        //   (a) `linkRotationToAlbum` (`apps/backend/services/library.service.ts`,
-        //       BS#2109 review round 3 finding 1) deliberately leaves a
-        //       freshly-linked row's `artist_name`/`album_title`/`record_label`
-        //       populated for exactly this reason — nulling them broke the
-        //       tracklist picker's tier-3 self-heal, which needs both columns
-        //       non-NULL to even attempt a lookup.
+        // Why the trio is worth keeping wherever it survives:
+        //   (a) `linkRotationToAlbum` (`apps/backend/services/library.service.ts`)
+        //       deliberately leaves a freshly-linked row's trio populated —
+        //       nulling it broke the tracklist picker's tier-3 self-heal,
+        //       which needs artist + title non-NULL to attempt a lookup.
         //   (b) `jobs/rotation-release-id-backfill`'s candidate query
         //       (`query.ts`) requires `artist_name IS NOT NULL AND
-        //       album_title IS NOT NULL` to repair a row's
-        //       `discogs_release_id`. Nulling the trio on link permanently
-        //       excludes that row from the one job meant to fix it — and its
-        //       predicate also excludes killed rows (`kill_date IS NULL OR
-        //       kill_date > CURRENT_DATE`), which this same PR deliberately
-        //       surfaces in the uncatalogued queue, so a killed+linked row
-        //       would have no repair path at all.
+        //       album_title IS NOT NULL` to repair `discogs_release_id`, and
+        //       also excludes killed rows — so a killed+linked row with a
+        //       nulled trio has no repair path at all.
         //   (c) It costs nothing display-side: `getRotationFromDB` selects
         //       `COALESCE(artists.artist_name, rotation.artist_name)` (and the
         //       album/label siblings), so a linked row always reads the
-        //       canonical `library`/`artists` value regardless of what
-        //       `rotation`'s own snapshot columns hold.
-        //
-        // `albumIdExpr` is deliberately not reused here (unlike an earlier
-        // revision) — the trio's value no longer depends on whether the row
-        // resolves linked.
+        //       canonical `library`/`artists` value regardless.
         const setClause: Record<string, unknown> = {
-          album_id: albumIdExpr,
           legacy_library_release_id: sql`excluded.legacy_library_release_id`,
           rotation_bin: sql`excluded.rotation_bin`,
         };
+        if (rawLibraryId) {
+          setClause.album_id = sql`excluded.album_id`;
+        }
         if (release.killDate !== undefined) {
           setClause.kill_date = sql`excluded.kill_date`;
         }

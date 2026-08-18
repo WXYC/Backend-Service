@@ -1374,10 +1374,12 @@ describe('POST /internal/rotation-webhook', () => {
     expect(setClause).not.toHaveProperty('artist_name');
     expect(setClause).not.toHaveProperty('album_title');
     expect(setClause).not.toHaveProperty('record_label');
-    // ...but the two ungated ones must still be written, or the linkage this
-    // whole payload shape exists to deliver (BS#1082/#1312) silently no-ops.
-    // Without these, an empty `partialSet` would satisfy every assertion above.
-    expect(setClause).toHaveProperty('album_id');
+    // ...and `album_id` stays out too, because `libraryReleaseId: 0` means
+    // tubafrenzy is not asserting a link — see the dedicated test below.
+    expect(setClause).not.toHaveProperty('album_id');
+    // But `legacy_library_release_id` must still be written, or the linkage
+    // this whole payload shape exists to deliver (BS#1082/#1312) silently
+    // no-ops — without it an empty `partialSet` would satisfy everything above.
     expect(setClause).toHaveProperty('legacy_library_release_id');
   });
 
@@ -1546,20 +1548,25 @@ describe('POST /internal/rotation-webhook', () => {
     expect(setClause).toHaveProperty('record_label');
   });
 
-  // BS#2109: `album_id` is COALESCEd, not overwritten, so a webhook `update`
-  // carrying `libraryReleaseId: 0` cannot revert a Backend-made link from
-  // `PATCH /library/rotation/:id/link`. Before this, the next /wxycdb edit on
-  // a release the librarian had catalogued in dj-site reset album_id to NULL,
-  // restored the free text, and dropped the row back into the cataloging
-  // queue.
+  // BS#2109: a webhook `update` carrying `libraryReleaseId: 0` must not revert
+  // a Backend-made link from `PATCH /library/rotation/:id/link`. Before this,
+  // the next /wxycdb edit on a release the librarian had catalogued in dj-site
+  // reset album_id to NULL, restored the free text, and dropped the row back
+  // into the cataloging queue.
+  //
+  // Expressed by OMITTING the key rather than by a `COALESCE(albumId,
+  // rotation.album_id)` expression. The two are equivalent — `resolveAlbumId`
+  // short-circuits to null on a falsy id (`getAlbumIdByLegacyId`,
+  // `library.service.ts`), so that COALESCE could only ever evaluate to the
+  // column's own current value, i.e. `SET album_id = album_id` — and omission
+  // is what every other conditionally-written column here already does.
+  // Asserting absence is also strictly stronger than asserting the SQL text:
+  // it cannot pass vacuously on a fragment shape the renderer doesn't
+  // recognize.
   //
   // BS#2173 moved a bin-less payload like this one off the INSERT...ON
-  // CONFLICT statement entirely (a plain UPDATE, asserted via `mockSet`
-  // below) — re-derived here rather than against `excluded.album_id`, which
-  // this arm has no `excluded` row to reference. `resolveAlbumId` is
-  // guaranteed to return null for `libraryReleaseId: 0`, so the COALESCE's
-  // first argument is the JS `null` that resolved to, not a SQL column ref.
-  it('update with libraryReleaseId: 0 COALESCEs album_id so a Backend-made link is never downgraded to NULL', async () => {
+  // CONFLICT statement entirely, so this is the plain UPDATE arm (`mockSet`).
+  it('update with libraryReleaseId: 0 leaves album_id untouched so a Backend-made link is never downgraded to NULL', async () => {
     mockReturning.mockResolvedValueOnce([{ id: 42 }]);
 
     const res = await request(app)
@@ -1570,14 +1577,7 @@ describe('POST /internal/rotation-webhook', () => {
     expect(res.status).toBe(200);
     expect(mockOnConflict).not.toHaveBeenCalled();
     const setClause = mockSet.mock.calls.at(-1)?.[0] as Record<string, unknown>;
-    // drizzle-orm is automocked project-wide, so `sql\`...\`` renders as
-    // `{ sql: TemplateStringsArray, values: [...] }`. Assert on the literal
-    // chunks: a bare value assignment would have no COALESCE.
-    const rendered = ((setClause.album_id as { sql?: string[] })?.sql ?? []).join('?');
-    expect(rendered).toContain('COALESCE(');
-    // First param is the resolved (null) albumId, second is the existing
-    // row's column — the fallback that wins, so tubafrenzy's NULL loses.
-    expect((setClause.album_id as { values?: unknown[] })?.values).toEqual([null, rotation.album_id]);
+    expect(setClause).not.toHaveProperty('album_id');
   });
 
   // All five gated columns — not just these three — render as plain
@@ -1599,6 +1599,42 @@ describe('POST /internal/rotation-webhook', () => {
       const rendered = ((setClause[column] as { sql?: string[] })?.sql ?? []).join('?');
       expect(rendered).not.toContain('COALESCE');
       expect(rendered).not.toContain('CASE');
+    }
+  });
+
+  // The ON CONFLICT arm gates `album_id` on the same rule as the plain-UPDATE
+  // arm: tubafrenzy asserting a `libraryReleaseId` means overwrite (a create,
+  // or a genuine /wxycdb relink to a different release); tubafrenzy not
+  // knowing means leave the column alone, so a `PATCH
+  // /library/rotation/:id/link` survives the next edit. Both directions are
+  // pinned because omitting the key is what preserves the link — a regression
+  // that always wrote `excluded.album_id` would still pass a
+  // present-and-correct assertion on the truthy case alone.
+  it.each([
+    [0, false, 'omits album_id when tubafrenzy sends no libraryReleaseId'],
+    [777, true, 'writes excluded.album_id when tubafrenzy asserts a libraryReleaseId'],
+  ])('ON CONFLICT arm with libraryReleaseId %p — %s', async (libraryReleaseId, shouldWrite) => {
+    const onConflictSpy = (db as unknown as { _chain: { onConflictDoUpdate: jest.Mock } })._chain.onConflictDoUpdate;
+    onConflictSpy.mockClear();
+    if (libraryReleaseId) {
+      // A truthy id makes `resolveAlbumId` actually query; seed the lookup so
+      // it resolves instead of destructuring an undefined result.
+      mockLimit.mockReset();
+      mockLimit.mockResolvedValue([{ id: 42 }]);
+    }
+
+    await request(app)
+      .post('/internal/rotation-webhook')
+      .set('X-Internal-Key', 'test-secret-key')
+      .send({ action: 'update', release: { ...validRelease, libraryReleaseId } });
+
+    const setClause = (onConflictSpy.mock.calls[0][0] as { set: Record<string, unknown> }).set;
+    if (shouldWrite) {
+      const rendered = ((setClause.album_id as { sql?: string[] })?.sql ?? []).join('?');
+      expect(rendered).toContain('excluded.album_id');
+      expect(rendered).not.toContain('COALESCE');
+    } else {
+      expect(setClause).not.toHaveProperty('album_id');
     }
   });
 
