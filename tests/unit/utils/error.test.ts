@@ -17,45 +17,44 @@ describe('WxycError', () => {
     expect(error.name).toBe('WxycError');
   });
 
-  it('has a fixed name (subclasses override it after calling super)', () => {
-    const error = new WxycError('Validation failed', 400);
+  // `details` with no `code` is deliberately in the matrix: both fields are
+  // independently optional (ApiErrorResponse requires only `message`), so a
+  // projection that gated on `code` alone would silently drop that payload on
+  // the wire with no type error and no runtime warning.
+  const DETAILS = { code_letters: 'ABC', code_number: 12 };
+  it.each([
+    ['no opts', undefined, undefined, undefined],
+    ['code only', { code: 'artist_code_conflict' }, 'artist_code_conflict', undefined],
+    ['code and details', { code: 'artist_code_conflict', details: DETAILS }, 'artist_code_conflict', DETAILS],
+    ['details only', { details: DETAILS }, undefined, DETAILS],
+  ])('carries %s onto code/details', (_label, opts, expectedCode, expectedDetails) => {
+    const error = new WxycError('Artist code already in use', 409, opts);
 
-    expect(error.message).toBe('Validation failed');
-    expect(error.statusCode).toBe(400);
-    expect(error.name).toBe('WxycError');
+    expect(error.code).toBe(expectedCode);
+    expect(error.details).toEqual(expectedDetails);
   });
 
-  it('leaves code and details undefined when no opts are passed', () => {
-    const error = new WxycError('Not found', 404);
+  // The projection is what the error handler puts on the wire. A bare error
+  // must serialize to exactly `{ message }` — no `code`/`details` keys present
+  // as undefined — or every existing 4xx body gains two keys.
+  it.each([
+    ['no opts', undefined, { message: 'Artist code already in use' }],
+    [
+      'code only',
+      { code: 'artist_code_conflict' },
+      { message: 'Artist code already in use', code: 'artist_code_conflict' },
+    ],
+    [
+      'code and details',
+      { code: 'artist_code_conflict', details: DETAILS },
+      { message: 'Artist code already in use', code: 'artist_code_conflict', details: DETAILS },
+    ],
+    ['details only', { details: DETAILS }, { message: 'Artist code already in use', details: DETAILS }],
+  ])('toApiErrorResponse emits the wire body for %s', (_label, opts, expected) => {
+    const body = new WxycError('Artist code already in use', 409, opts).toApiErrorResponse();
 
-    expect(error.code).toBeUndefined();
-    expect(error.details).toBeUndefined();
-  });
-
-  it('carries a code when opts.code is passed', () => {
-    const error = new WxycError('Artist code already in use', 409, { code: 'artist_code_conflict' });
-
-    expect(error.code).toBe('artist_code_conflict');
-    expect(error.details).toBeUndefined();
-  });
-
-  it('carries details alongside a code when both are passed', () => {
-    const error = new WxycError('Artist code already in use', 409, {
-      code: 'artist_code_conflict',
-      details: { code_letters: 'ABC', code_number: 12 },
-    });
-
-    expect(error.code).toBe('artist_code_conflict');
-    expect(error.details).toEqual({ code_letters: 'ABC', code_number: 12 });
-  });
-
-  it('carries details with no code when only opts.details is passed', () => {
-    const error = new WxycError('Artist code already in use', 409, {
-      details: { code_letters: 'ABC', code_number: 12 },
-    });
-
-    expect(error.code).toBeUndefined();
-    expect(error.details).toEqual({ code_letters: 'ABC', code_number: 12 });
+    expect(body).toEqual(expected);
+    expect(Object.keys(body).sort()).toEqual(Object.keys(expected).sort());
   });
 
   it('extends Error class', () => {

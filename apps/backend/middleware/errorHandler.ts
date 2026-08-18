@@ -57,31 +57,14 @@ function errorHandler(err: any, req: Request, res: Response, next: NextFunction)
 
   if (hasStatusCode(error)) {
     console.error(`[${req.method} ${req.url}] ${error.name} ${error.statusCode}: ${error.message}`);
-    // `code` is the discriminant a WxycError opts into (see utils/error.ts),
-    // mirroring wxyc-shared/api.yaml's ApiErrorResponse (message, code,
-    // details) so every generated client (dj-site, iOS, Android) decodes an
-    // enriched WxycError response the same way it decodes any other
-    // endpoint's error body. `details` nests under its own key rather than
-    // spreading flat, per that schema's `details: {type: object}` shape.
-    //
-    // Gate on `code !== undefined || details !== undefined`, not `code`
-    // alone: both fields are independently optional on WxycErrorOptions, so
-    // `new WxycError(msg, statusCode, { details })` with no `code` is
-    // spec-legal (ApiErrorResponse requires only `message`) and typechecks —
-    // gating on `code` alone would silently drop that `details` payload on
-    // the wire with no type error, no runtime warning, and no test to catch
-    // it. A WxycError with neither `code` nor `details` still falls through
-    // to the plain `{ message }` shape this endpoint has always returned,
-    // byte-for-byte — see the "no extra keys" test in errorHandler.test.ts.
-    if (error instanceof WxycError && (error.code !== undefined || error.details !== undefined)) {
-      res.status(error.statusCode).json({
-        message: error.message,
-        ...(error.code !== undefined && { code: error.code }),
-        ...(error.details !== undefined && { details: error.details }),
-      });
-    } else {
-      res.status(error.statusCode).json({ message: error.message });
-    }
+    // A WxycError owns its own wire projection (`toApiErrorResponse`), which
+    // emits the optional `code`/`details` discriminants when set and exactly
+    // `{ message }` when not. `LmlClientError` — the other class
+    // `hasStatusCode` admits — has no such projection, so it keeps the plain
+    // shape.
+    res
+      .status(error.statusCode)
+      .json(error instanceof WxycError ? error.toApiErrorResponse() : { message: error.message });
     return;
   }
 
