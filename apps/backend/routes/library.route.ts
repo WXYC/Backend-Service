@@ -126,6 +126,11 @@ library_route.patch(
   libraryController.linkRotationToAlbum
 );
 
+// BS#2113: field-level rotation edit. Registered after every literal
+// `/rotation/*` route above (and any WXYC/Backend-Service#2109 adds to this
+// block later) so `:id` never shadows a more specific path.
+library_route.patch('/rotation/:id', requirePermissions({ catalog: ['write'] }), libraryController.updateRotation);
+
 library_route.post('/artists', requirePermissions({ catalog: ['write'] }), libraryController.addArtist);
 
 library_route.get(

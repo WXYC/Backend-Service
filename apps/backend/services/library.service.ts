@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, SQL } from 'drizzle-orm';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
@@ -574,13 +574,177 @@ export const addToRotation = async (newRotation: RotationAddRequest) => {
   return insertedRotation[0];
 };
 
-export const killRotationInDB = async (rotationId: number, updatedKillDate?: string) => {
-  const updatedRotation = await db
-    .update(rotation)
-    .set({ kill_date: updatedKillDate || sql`CURRENT_DATE` })
-    .where(eq(rotation.id, rotationId))
-    .returning();
-  return updatedRotation[0];
+/**
+ * Partial-update payload for `PATCH /library/rotation/:id` (BS#2113). Every
+ * field is optional — `updateRotation` only SETs keys that are present, so
+ * a typo fix on `artist_name` can't wipe `record_label` or reset
+ * `kill_date`. Covers exactly the five columns the JSP editor's field set
+ * maps onto a real `rotation` column (see the controller's
+ * `ROTATION_NO_COLUMN_FIELDS` for the three that don't).
+ *
+ * `kill_date` additionally accepts a raw `SQL<unknown>` fragment — the sole
+ * caller of that widened type is `killRotationInDB` below, whose no-date
+ * default is `CURRENT_DATE` evaluated server-side. The public controller
+ * surface only ever passes a plain ISO string or `null`.
+ */
+export type UpdateRotationRow = {
+  artist_name?: string;
+  album_title?: string;
+  record_label?: string;
+  add_date?: string;
+  kill_date?: string | SQL<unknown> | null;
+};
+
+/**
+ * The three denormalized snapshot columns `updateRotation` may only set on
+ * an unlinked row — see the controller's `updateRotation` JSDoc for why.
+ *
+ * Exported, and the single declaration of this tuple in the codebase. The
+ * compare-and-set WHERE, the tracklist-cache invalidation branch below
+ * (BS#2113 review findings 4 and 1), and the controller's request validation +
+ * 409 message builder all read off it. An earlier revision declared it here and
+ * again in the controller as `ROTATION_SNAPSHOT_FIELDS` — two lists governing
+ * one invariant, which is precisely the drift this comment claimed to prevent.
+ */
+export const ROTATION_SNAPSHOT_COLUMNS = ['artist_name', 'album_title', 'record_label'] as const;
+
+/**
+ * Outcome of a `PATCH /library/rotation/:id` write attempt (BS#2113).
+ * `linked_conflict` carries the row's `album_id` as observed by the write
+ * itself — not by an earlier read — so the controller's 409 names the
+ * correct release even when the link happened concurrently with the
+ * request (review finding 4).
+ */
+export type UpdateRotationOutcome =
+  | { outcome: 'updated'; rotation: RotationRelease }
+  | { outcome: 'not_found' }
+  | { outcome: 'linked_conflict'; albumId: number };
+
+/**
+ * Sole writer of the five in-scope `rotation` columns among the
+ * `/library/rotation*` HTTP surfaces (BS#2113): both
+ * `PATCH /library/rotation/:id` (`updateRotation` controller handler) and
+ * `PATCH /library/rotation` (`killRotation`, via `killRotationInDB` below)
+ * delegate here rather than issuing their own UPDATE — the
+ * `rotation_bin` divergence (two writers, one column, drifting SET clauses)
+ * is the failure mode a shared writer forecloses.
+ *
+ * NOT the only writer of `rotation.kill_date` process-wide: the tubafrenzy
+ * webhook in `apps/backend/routes/internal.route.ts` sets it directly on its
+ * kill/unkill branches, keyed on `legacy_rotation_id` rather than `id`. That
+ * is a deliberately separate write path (a legacy-id-keyed mirror, not an
+ * HTTP edit surface) — grep before assuming exclusivity.
+ *
+ * Two review findings folded into this one function rather than left as two
+ * separate patches:
+ *
+ *   - **Finding 1 (stale tracklist-picker cache).** Editing any member of
+ *     the snapshot trio changes the text `resolveRotationDiscogsReleaseViaLml`
+ *     (the tier-3 tracklist-picker cascade) keys its cache on, so the same
+ *     write NULLs `rotation.tracklist_lookup_attempted_at` in its own SET and
+ *     evicts this `rotation_id` from both `rotationLmlPositiveCache` and
+ *     `rotationLmlNegativeCache` once the transaction has committed.
+ *
+ *     Scope, stated precisely because an earlier revision of this comment
+ *     overstated it: this clears **tier 3 only**. `resolveRotationPickerSource`
+ *     returns at its `stored !== null` short-circuit — on
+ *     `rotation.discogs_release_id`, or the `library_identity` fallback —
+ *     *before* it consults either the stamp or these caches. So on a row
+ *     already carrying a direct release id, correcting the free text does not
+ *     change which release the picker serves, even though the text that id was
+ *     derived from just changed. Clearing a machine-derived
+ *     `discogs_release_id` on a snapshot edit is the real fix; it means
+ *     reasoning about `discogs_release_id_source` (a trust-gated column —
+ *     `md_verified` and `tubafrenzy_paste` must survive), so it is deliberately
+ *     not done here. Tracked in BS#2214.
+ *   - **Finding 4 (TOCTOU).** The snapshot trio may only be set on an
+ *     unlinked row (`album_id IS NULL`). `rotation` is a live ingest
+ *     target — the tubafrenzy rotation webhook
+ *     (`POST /internal/rotation-webhook`) can link this exact row in the
+ *     window between a caller's read and a naive write — so the precondition
+ *     is asserted in the UPDATE's own WHERE, never trusted from an earlier
+ *     SELECT. A zero-row result while the trio is present means "this row
+ *     is linked as of right now", not "this row doesn't exist" or "the
+ *     write silently no-opped". Mirrors the re-guarded-WHERE discipline in
+ *     `linkRotationToAlbum` / `legacy-linkage-resolve`: a guarded write, then
+ *     one more read — inside the same transaction — to tell "no such row"
+ *     apart from "row changed under us" when the write matches nothing.
+ */
+export const updateRotation = async (
+  rotation_id: number,
+  updates: UpdateRotationRow
+): Promise<UpdateRotationOutcome> => {
+  const set: Record<string, unknown> = {};
+  for (const key of ['artist_name', 'album_title', 'record_label', 'add_date', 'kill_date'] as const) {
+    if (updates[key] !== undefined) set[key] = updates[key];
+  }
+  // Drizzle's `mapUpdateSet` throws `No values to set` on an empty payload
+  // before it generates any SQL. Refuse it here instead, so a future direct
+  // caller gets a message naming this function rather than an opaque ORM
+  // error. Unreachable through either HTTP surface: the controller 400s on
+  // an empty body and `killRotationInDB` always supplies a `kill_date`.
+  if (Object.keys(set).length === 0) {
+    throw new WxycError('updateRotation requires at least one column to set', 400);
+  }
+
+  const touchesSnapshot = ROTATION_SNAPSHOT_COLUMNS.some((key) => key in set);
+
+  // Only the snapshot path needs a transaction. Its guarded UPDATE can match
+  // zero rows for two different reasons, and telling them apart takes a second
+  // read that has to see the same snapshot. The other path — an `add_date` /
+  // `kill_date`-only edit, which is every `PATCH /library/rotation` kill via
+  // `killRotationInDB` — is a single statement, so wrapping it would turn one
+  // round trip into three (BEGIN / UPDATE / COMMIT) and hold a pooled
+  // connection across all three on a box that also serves the live flowsheet.
+  // That endpoint issued one bare UPDATE before BS#2113; keep it that way.
+  if (!touchesSnapshot) {
+    const [updated] = await db.update(rotation).set(set).where(eq(rotation.id, rotation_id)).returning();
+    // No guard beyond `id` in the WHERE — zero rows really does mean "no such
+    // row", exactly as before this function returned a bare row.
+    return updated ? { outcome: 'updated' as const, rotation: updated } : { outcome: 'not_found' as const };
+  }
+
+  set.tracklist_lookup_attempted_at = null;
+
+  const outcome = await db.transaction(async (tx): Promise<UpdateRotationOutcome> => {
+    const updatedRows = await tx
+      .update(rotation)
+      .set(set)
+      .where(and(eq(rotation.id, rotation_id), isNull(rotation.album_id)))
+      .returning();
+    const updated = updatedRows[0];
+    if (updated) {
+      return { outcome: 'updated' as const, rotation: updated };
+    }
+
+    // The guarded UPDATE matched nothing: either the row doesn't exist, or a
+    // concurrent writer linked it since the caller last looked. One more
+    // read, inside the same transaction, tells the two apart.
+    const [current] = await tx
+      .select({ album_id: rotation.album_id })
+      .from(rotation)
+      .where(eq(rotation.id, rotation_id))
+      .limit(1);
+    if (!current || current.album_id === null) {
+      // Either genuinely gone, or (a second concurrent write unlinked it
+      // again in the instant between our failed guarded UPDATE and this
+      // read) not actually linked after all. Neither is a 409 the caller
+      // can act on, so report not-found rather than fabricate an album id.
+      return { outcome: 'not_found' as const };
+    }
+    return { outcome: 'linked_conflict' as const, albumId: current.album_id };
+  });
+
+  // Evict AFTER the commit, never inside it. Between an in-transaction evict
+  // and the commit, a concurrent `/library/rotation/:id/tracks` read on its own
+  // connection still sees the pre-commit text and can re-prime the very entry
+  // this write just cleared — which would then outlive the commit for the full
+  // TTL. Post-commit, any racing reader primes from the new text instead.
+  if (outcome.outcome === 'updated') {
+    rotationLmlPositiveCache.delete(rotation_id);
+    rotationLmlNegativeCache.delete(rotation_id);
+  }
+  return outcome;
 };
 
 /**
@@ -614,6 +778,31 @@ const UNCATALOGUED_ROTATION_PROJECTION = {
  * the reverse) is a compile error instead of silent drift.
  */
 export type UncataloguedRotationRow = Pick<RotationRelease, keyof typeof UNCATALOGUED_ROTATION_PROJECTION>;
+
+/**
+ * Project a full `rotation` row down to the published surface — the same eight
+ * columns `UNCATALOGUED_ROTATION_PROJECTION` selects, so the rotation surface
+ * has ONE published shape rather than one per endpoint.
+ *
+ * Applied by the CALLER, deliberately not inside `updateRotation`'s
+ * `.returning()`. `killRotationInDB` delegates to that same writer and
+ * unwraps `outcome.rotation` straight onto `PATCH /library/rotation`'s
+ * response, so narrowing the writer would silently change a pre-existing
+ * endpoint's wire shape as a side effect of adding a new one. That endpoint's
+ * leak of the server-derived columns is real but is its own change, with its
+ * own consumer check.
+ */
+export function toRotationRowSummary(row: RotationRelease): UncataloguedRotationRow {
+  // Destructured explicitly rather than built via `Object.fromEntries(...) as
+  // UncataloguedRotationRow`. That form type-checks through `fromEntries`'s
+  // `{[k: string]: T}` return, so the `as` silences exactly the drift error
+  // `UncataloguedRotationRow`'s own docblock promises: widen
+  // `UNCATALOGUED_ROTATION_PROJECTION` without widening the type (or the
+  // reverse) and the cast keeps compiling. Written out, either direction is a
+  // compile error — which is the guarantee that was being advertised.
+  const { id, album_id, rotation_bin, add_date, kill_date, artist_name, album_title, record_label } = row;
+  return { id, album_id, rotation_bin, add_date, kill_date, artist_name, album_title, record_label };
+}
 
 /**
  * Ceiling on `?limit=` for the uncatalogued queue, and the default when the
@@ -792,6 +981,11 @@ export const linkRotationToAlbum = async (rotationId: number, albumId: number): 
 
     return { outcome: 'linked' as const, rotation: updated };
   });
+};
+
+export const killRotationInDB = async (rotationId: number, updatedKillDate?: string) => {
+  const outcome = await updateRotation(rotationId, { kill_date: updatedKillDate || sql`CURRENT_DATE` });
+  return outcome.outcome === 'updated' ? outcome.rotation : undefined;
 };
 
 export const insertAlbum = async (newAlbum: NewAlbum) => {
@@ -3160,9 +3354,37 @@ export const insertGenre = async (genre: NewGenre) => {
   return response[0];
 };
 
+/**
+ * `YYYY-MM-DD` guard for the `rotation.add_date` / `rotation.kill_date`
+ * write surfaces (`PATCH /library/rotation/:id`, `PATCH /library/rotation`).
+ *
+ * Shape AND calendar validity. The shape-only predecessor let `2026-09-31`
+ * and `2026-13-01` through the 400 gate; Postgres then raised 22008
+ * ("date/time field value out of range") and the caller got a 500 plus a
+ * Sentry event for what is plainly a client mistake. The round-trip below
+ * is the same one `parseIsoDay` in `bmi-performance.service.ts` uses: parse
+ * as UTC midnight, then require the re-serialized ISO day to equal the
+ * input, which rejects both NaN parses and silent rollovers.
+ */
+/**
+ * `0001-01-01T00:00:00.000Z` as epoch ms — the earliest instant PostgreSQL's
+ * `date` type can represent. Anything below it is a year-0 (or negative-year)
+ * value that JS is happy to parse and PG rejects with SQLSTATE 22008.
+ */
+const MIN_PG_DATE_MS = -62135596800000;
+
 export const isISODate = (date: string): boolean => {
-  const regex = /^\d{4}-\d{2}-\d{2}$/;
-  return date.match(regex) !== null;
+  if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  const ms = Date.parse(`${date}T00:00:00.000Z`);
+  if (Number.isNaN(ms)) return false;
+  // JS has a year 0; PostgreSQL does not (1 BC is followed directly by 1 AD),
+  // so every `0000-*` date raises 22008 "date/time field value out of range" —
+  // the same 500 this round-trip exists to keep out. `Date.parse` accepts them
+  // and `toISOString()` round-trips them cleanly, so the round-trip alone
+  // cannot see it. Written as a literal rather than `Date.UTC(1, 0, 1)`, which
+  // is 1901: `Date.UTC` maps years 0-99 onto 1900-1999.
+  if (ms < MIN_PG_DATE_MS) return false;
+  return new Date(ms).toISOString().slice(0, 10) === date;
 };
 
 // =============================================================================

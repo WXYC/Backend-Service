@@ -520,6 +520,21 @@ describe('Library Rotation', () => {
 
       expectErrorContains(res, 'Incorrect Date Format');
     });
+
+    // BS#2113: the shared `isISODate` guard is calendar-validating, so a
+    // well-formed-but-impossible date is a 400 here rather than a PG 22008
+    // ("date/time field value out of range") surfacing as a 500.
+    test('returns 400 for a well-formed but impossible kill_date', async () => {
+      const res = await auth
+        .patch('/library/rotation')
+        .send({
+          rotation_id: 1,
+          kill_date: '2026-09-31',
+        })
+        .expect(400);
+
+      expectErrorContains(res, 'Incorrect Date Format');
+    });
   });
 
   // BS#2109: an uncatalogued rotation release — no album_id, represented by
@@ -833,6 +848,288 @@ describe('Library Rotation', () => {
 
       const res = await auth.patch(`/library/rotation/${created.id}/link`).send({}).expect(400);
       expectErrorContains(res, 'Missing Parameters');
+    });
+  });
+
+  // BS#2113: field-level rotation edit. `killRotation` above and this route
+  // both delegate to the same `libraryService.updateRotation()` writer —
+  // the "identical column writes for kill_date" pin lives at the unit level
+  // (tests/unit/services/library.service.updateRotation.test.ts); this
+  // block is the end-to-end wire-shape coverage.
+  describe('PATCH /library/rotation/:id (Field-Level Update)', () => {
+    // A CATALOGUED row (`album_id` set), created through the public POST.
+    let testRotationId;
+    // An UNCATALOGUED row (`album_id` NULL), inserted directly: on this
+    // branch `POST /library/rotation` still requires `album_id`, and the
+    // denormalized snapshot trio is only writable on a row without one.
+    let uncataloguedRotationId;
+
+    beforeEach(async () => {
+      const res = await auth.post('/library/rotation').send({
+        album_id: 3,
+        rotation_bin: 'L',
+      });
+
+      // A failed setup must read as a failed setup. The old shape left
+      // `testRotationId` undefined and every request below went to
+      // `/library/rotation/undefined`, reporting as a validation failure.
+      expect(res.status).toBe(201);
+      expect(res.body.id).toEqual(expect.any(Number));
+      testRotationId = res.body.id;
+
+      const sql = getTestDb();
+      const [row] = await sql`
+        INSERT INTO ${sql(SCHEMA)}.rotation (album_id, rotation_bin, add_date, artist_name, album_title, record_label)
+        VALUES (NULL, 'L', CURRENT_DATE, 'Csillagrablok', 'Promo Tape', 'self-released')
+        RETURNING id`;
+      uncataloguedRotationId = row.id;
+    });
+
+    afterEach(async () => {
+      if (testRotationId) {
+        await auth.patch('/library/rotation').send({ rotation_id: testRotationId });
+        testRotationId = undefined;
+      }
+      if (uncataloguedRotationId) {
+        const sql = getTestDb();
+        await sql`DELETE FROM ${sql(SCHEMA)}.rotation WHERE id = ${uncataloguedRotationId}`;
+        uncataloguedRotationId = undefined;
+      }
+    });
+
+    test('updates the five in-scope columns on an uncatalogued row, including kill_date, in one call', async () => {
+      const res = await auth
+        .patch(`/library/rotation/${uncataloguedRotationId}`)
+        .send({
+          artist_name: 'Chuquimamani-Condori',
+          album_title: 'Edits',
+          record_label: 'self-released',
+          add_date: '2024-01-15',
+          kill_date: '2024-06-01',
+        })
+        .expect(200);
+
+      expect(res.body.id).toBe(uncataloguedRotationId);
+      expect(res.body.artist_name).toBe('Chuquimamani-Condori');
+      expect(res.body.album_title).toBe('Edits');
+      expect(res.body.record_label).toBe('self-released');
+      expect(res.body.add_date).toBe('2024-01-15');
+      expect(res.body.kill_date).toBe('2024-06-01');
+    });
+
+    // Mirrors the `link response is projected` pin above. Without an explicit
+    // key-set assertion, every other test here reads named fields only, so a
+    // controller that returned `outcome.rotation` bare — leaking
+    // `legacy_rotation_id`, `discogs_release_id`, `lml_identity_id` and the two
+    // attempt-at markers — would keep all of them green. `toRotationRowSummary`
+    // is applied by this caller precisely so that cannot happen; this is what
+    // proves it stayed applied.
+    test('update response is projected — no server-derived or external-ID columns', async () => {
+      const res = await auth
+        .patch(`/library/rotation/${uncataloguedRotationId}`)
+        .send({ artist_name: 'Chuquimamani-Condori' })
+        .expect(200);
+
+      expect(Object.keys(res.body).sort()).toEqual([
+        'add_date',
+        'album_id',
+        'album_title',
+        'artist_name',
+        'id',
+        'kill_date',
+        'record_label',
+        'rotation_bin',
+      ]);
+    });
+
+    test('true partial semantics — an artist_name-only edit leaves other fields untouched', async () => {
+      await auth
+        .patch(`/library/rotation/${uncataloguedRotationId}`)
+        .send({ album_title: 'DOGA', record_label: 'Sonamos' })
+        .expect(200);
+
+      const res = await auth
+        .patch(`/library/rotation/${uncataloguedRotationId}`)
+        .send({ artist_name: 'Juana Molina' })
+        .expect(200);
+
+      expect(res.body.artist_name).toBe('Juana Molina');
+      expect(res.body.album_title).toBe('DOGA');
+      expect(res.body.record_label).toBe('Sonamos');
+    });
+
+    test('an explicit null kill_date clears the column', async () => {
+      await auth.patch(`/library/rotation/${testRotationId}`).send({ kill_date: '2024-06-01' }).expect(200);
+
+      const res = await auth.patch(`/library/rotation/${testRotationId}`).send({ kill_date: null }).expect(200);
+
+      expect(res.body.kill_date).toBeNull();
+    });
+
+    // Every other assertion in this block reads the PATCH's own `.returning()`
+    // row, which reports what landed in the COLUMN. `GET /library/rotation` is
+    // the only rotation read path, and it projects the library join over the
+    // rotation columns — so a write that is invisible there is invisible to
+    // every client. Re-reading is what makes that shadowing observable.
+    //
+    // This asserts against the UNCATALOGUED row, not `testRotationId`, and the
+    // reason is load-bearing. `getRotationFromDB` is
+    // `SELECT DISTINCT ON (partitionKey, rotation_bin) … ORDER BY partitionKey,
+    // rotation_bin, add_date DESC, id ASC`, where `partitionKey` is
+    // `coalesce(album_id, -(abs(hashtext(lower(artist)||'|'||lower(album)))+1))`.
+    // So only ONE row per (album, bin) survives the read, and `add_date` is the
+    // tiebreak. `testRotationId` is created against the shared `album_id: 3`
+    // fixture, whose (3, 'L') partition already has an occupant — it loses on
+    // `id ASC` at equal `add_date`, and loses outright once its `add_date` is
+    // pushed back. Asserting on it tests the dedup, not the write. The
+    // uncatalogued row partitions on a hash of its own artist/album, which this
+    // block creates and drops per test, so it owns its partition outright.
+    //
+    // The dedup is deliberate (it is the #862 fix for the bin selector showing
+    // one release three times), so an MD editing `add_date` on one of several
+    // same-(album, bin) rotation rows can change WHICH of them the dropdown
+    // shows. That is the intended collapse, not a regression.
+    test('a written add_date is visible on the GET /library/rotation read path', async () => {
+      await auth.patch(`/library/rotation/${uncataloguedRotationId}`).send({ add_date: '2024-01-15' }).expect(200);
+
+      const list = await auth.get('/library/rotation').expect(200);
+      const row = list.body.find((r) => r.rotation_id === uncataloguedRotationId);
+
+      expect(row).toBeDefined();
+      expect(row.rotation_add_date).toBe('2024-01-15');
+    });
+
+    // BS#2080 invariant: a library-LINKED rotation row carries NULL
+    // denormalized names. `getRotationFromDB` COALESCEs the library join over
+    // these three, so the write would be echoed by `.returning()` and be
+    // invisible on the read path — and a non-NULL snapshot on a linked row
+    // makes the flowsheet rotation-badge arm (b) match unrelated free-text
+    // entries. Rejected rather than accepted-and-shadowed.
+    test('rejects the artist_name/album_title/record_label trio on a catalogued row', async () => {
+      const res = await auth
+        .patch(`/library/rotation/${testRotationId}`)
+        .send({ artist_name: 'Chuquimamani-Condori', album_title: 'Edits' })
+        .expect(409);
+
+      expectErrorContains(res, 'linked to a library release');
+
+      const sql = getTestDb();
+      const [row] = await sql`
+        SELECT artist_name, album_title FROM ${sql(SCHEMA)}.rotation WHERE id = ${testRotationId}`;
+      expect(row.artist_name).toBeNull();
+      expect(row.album_title).toBeNull();
+    });
+
+    // BS#2113 review finding 2: the 409's remedy is field-specific.
+    // album_title/record_label really are editable via PATCH /library/:id;
+    // artist_name is not — library.artist_name is derived from the linked
+    // artists row, and no endpoint renames an artist.
+    test('the 409 offers a real remedy for album_title/record_label but admits artist_name has none', async () => {
+      const res = await auth
+        .patch(`/library/rotation/${testRotationId}`)
+        .send({ artist_name: 'Chuquimamani-Condori', album_title: 'Edits' })
+        .expect(409);
+
+      expectErrorContains(res, 'edit album_title via PATCH /library/3 instead');
+      expectErrorContains(res, 'artist_name has no remedy here');
+    });
+
+    // BS#2113 review finding 4 (TOCTOU): the linked/unlinked precondition on
+    // the snapshot trio is a compare-and-set against the row's CURRENT
+    // `album_id`, not a value read earlier in the request. Re-link the
+    // fixture row to a DIFFERENT catalogued release after the beforeEach
+    // fixture already linked it to album 3 — the 409 must name the release
+    // this write actually collided with (2), not the one the fixture
+    // originally set up (3), proving the conflict is detected and reported
+    // from the row's live state.
+    test('a 409 on a linked row names the album it is linked to right now, not a stale value', async () => {
+      const sql = getTestDb();
+      await sql`UPDATE ${sql(SCHEMA)}.rotation SET album_id = 2 WHERE id = ${testRotationId}`;
+
+      const res = await auth.patch(`/library/rotation/${testRotationId}`).send({ album_title: 'Edits' }).expect(409);
+
+      expectErrorContains(res, 'album_id 2');
+
+      const [row] = await sql`SELECT album_title FROM ${sql(SCHEMA)}.rotation WHERE id = ${testRotationId}`;
+      expect(row.album_title).toBeNull();
+    });
+
+    // BS#2113 review finding 1: a snapshot edit invalidates the tracklist
+    // picker's persisted "don't bother asking LML" marker in the same write,
+    // so the picker re-attempts LML instead of trusting a stamp that
+    // describes the release the row used to name.
+    test('a snapshot edit resets tracklist_lookup_attempted_at to NULL', async () => {
+      const sql = getTestDb();
+      await sql`
+        UPDATE ${sql(SCHEMA)}.rotation SET tracklist_lookup_attempted_at = NOW()
+        WHERE id = ${uncataloguedRotationId}`;
+
+      await auth.patch(`/library/rotation/${uncataloguedRotationId}`).send({ artist_name: 'Juana Molina' }).expect(200);
+
+      const [row] = await sql`
+        SELECT tracklist_lookup_attempted_at FROM ${sql(SCHEMA)}.rotation WHERE id = ${uncataloguedRotationId}`;
+      expect(row.tracklist_lookup_attempted_at).toBeNull();
+    });
+
+    // Negative case for the same finding: an edit that never touches the
+    // snapshot trio has nothing stale to invalidate, so the marker — and
+    // whatever positive/negative picker verdict it protects — must survive.
+    test('an add_date/kill_date-only edit leaves tracklist_lookup_attempted_at untouched', async () => {
+      const sql = getTestDb();
+      const [{ tracklist_lookup_attempted_at: stampedAt }] = await sql`
+        UPDATE ${sql(SCHEMA)}.rotation SET tracklist_lookup_attempted_at = NOW()
+        WHERE id = ${uncataloguedRotationId}
+        RETURNING tracklist_lookup_attempted_at`;
+
+      await auth.patch(`/library/rotation/${uncataloguedRotationId}`).send({ add_date: '2024-01-15' }).expect(200);
+
+      const [row] = await sql`
+        SELECT tracklist_lookup_attempted_at FROM ${sql(SCHEMA)}.rotation WHERE id = ${uncataloguedRotationId}`;
+      expect(row.tracklist_lookup_attempted_at).not.toBeNull();
+      expect(new Date(row.tracklist_lookup_attempted_at)).toEqual(new Date(stampedAt));
+    });
+
+    test('add_date and kill_date stay editable on a catalogued row', async () => {
+      const res = await auth
+        .patch(`/library/rotation/${testRotationId}`)
+        .send({ add_date: '2024-02-01', kill_date: '2024-07-01' })
+        .expect(200);
+
+      expect(res.body.add_date).toBe('2024-02-01');
+      expect(res.body.kill_date).toBe('2024-07-01');
+    });
+
+    test('rejects alphabetical_name, format, and format_size — no column exists', async () => {
+      const res = await auth
+        .patch(`/library/rotation/${testRotationId}`)
+        .send({ alphabetical_name: 'Molina, Juana', format: 'LP', format_size: '12"' })
+        .expect(400);
+
+      expectErrorContains(res, 'no rotation column exists');
+    });
+
+    test('returns 400 when no updatable field is provided', async () => {
+      const res = await auth.patch(`/library/rotation/${testRotationId}`).send({}).expect(400);
+
+      expectErrorContains(res, 'provide at least one of');
+    });
+
+    test('returns 400 with invalid date format', async () => {
+      const res = await auth.patch(`/library/rotation/${testRotationId}`).send({ add_date: '01/15/2024' }).expect(400);
+
+      expectErrorContains(res, 'Incorrect Date Format');
+    });
+
+    // Well-formed shape, impossible calendar date. Used to sail through the
+    // 400 gate and surface as a PG 22008 -> 500 + Sentry event.
+    test('returns 400 for a well-formed but impossible calendar date', async () => {
+      const res = await auth.patch(`/library/rotation/${testRotationId}`).send({ add_date: '2026-09-31' }).expect(400);
+
+      expectErrorContains(res, 'Incorrect Date Format');
+    });
+
+    test('returns 404 for a rotation id that does not exist', async () => {
+      await auth.patch('/library/rotation/999999999').send({ add_date: '2024-01-15' }).expect(404);
     });
   });
 });
