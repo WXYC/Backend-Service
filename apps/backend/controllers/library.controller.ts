@@ -450,8 +450,13 @@ export const getRotation: RequestHandler = async (req, res) => {
   res.status(200).json(rotation);
 };
 
-/** Upper bound on `?limit=` for the uncatalogued queue. */
-const UNCATALOGUED_ROTATION_MAX_LIMIT = 500;
+/**
+ * Upper bound AND default for `?limit=` on the uncatalogued queue — owned by
+ * the service, since the cap is a property of the query rather than of this
+ * route. Re-exported through the namespace import so the 400 message and the
+ * query can never disagree about the number.
+ */
+const { UNCATALOGUED_ROTATION_MAX_LIMIT } = libraryService;
 
 /**
  * Parse an optional non-negative-integer query parameter or path segment.
@@ -479,12 +484,13 @@ function parseNonNegativeInt(raw: unknown): number | null | undefined {
  * reads through and why the `0` sentinel it once also matched does not
  * exist on this column.
  *
- * Optional `?limit=` (1…500) and `?offset=` window the queue. Both are
- * OPT-IN: absent means the full backlog, so this PR does not silently
- * truncate any existing caller's result. The backlog is ~3.8k rows today,
- * which is servable in one response; dj-site#1161's queue UI is the caller
- * that should start passing them, and a default cap is worth revisiting
- * once a paginating client exists to notice it.
+ * Optional `?limit=` (1…500) and `?offset=` window the queue. **`limit`
+ * defaults to 500 rather than to the whole backlog**: at ~3.8k unlinked rows
+ * an uncapped response is ≈700 KB of JSON per request on a single-worker box
+ * that also serves the live flowsheet, and the ceiling is far cheaper to set
+ * before `wxyc-shared#354` publishes this shape than after a client starts
+ * depending on "omit ⇒ everything". dj-site#1161's queue UI pages with
+ * `offset`.
  *
  * ROUTE REGISTRATION ORDER IS LOAD-BEARING — must be registered ahead of any
  * `/rotation/:id`-style parameterized route (see `library.route.ts`), the
