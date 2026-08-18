@@ -1632,7 +1632,25 @@ export const getAlbum: RequestHandler<
     throw new WxycError('Bad Request, missing album identifier: album_id or legacy_release_id', 400);
   }
 
-  const album = await libraryService.getAlbumFromDB(parseInt(query.album_id));
+  // BS#2212: `parseAlbumId`, not `parseInt`. This branch is the front door for
+  // dj-site's own permalinks and it had none of the discipline the legacy
+  // branch above documents: `parseInt('65880xyz')` is 65880, so a truncated or
+  // corrupted link resolved to a real, DIFFERENT release and returned it with
+  // a 200, and `parseInt('abc')` is NaN, which postgres-js serialized as the
+  // literal "NaN" for Postgres to reject with 22P02 -- a client-input 400
+  // arriving as a server-fault 500, counted against 5xx alerting and captured
+  // by Sentry. `parseResourceId` is the same guard every other `/library/:id`
+  // route on this router uses; its `typeof rawId !== 'string'` check also
+  // rejects the repeated-param case Express hands over as `string[]`.
+  const album = await libraryService.getAlbumFromDB(parseAlbumId(query.album_id));
+  // 404 on a miss, matching the legacy branch. This used to be a 200 carrying
+  // an empty body, which satisfied neither the declared response schema nor
+  // any consumer: dj-site's two readers collapse `isError || !data` into one
+  // error card, and wxyc-dj-ios decodes into a non-optional `AlbumInfo`, so an
+  // empty body already threw into its catch-and-degrade path.
+  if (album === undefined) {
+    throw new WxycError('No catalog album for that album_id', 404);
+  }
   res.status(200).json(album);
 };
 
