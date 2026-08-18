@@ -171,26 +171,28 @@ components:
     Album:
       type: object
       description: >
-        Abbreviated album-detail summary for Swagger-UI, shared by the two
-        endpoints that return `getAlbumFromDB`'s row verbatim: `GET
-        /library/info` (both the `album_id` and the BS#1880 `legacy_release_id`
-        branches) and the `PATCH /library/{id}` 200. Both handlers return the
-        same shape, so one local schema covers both.
+        Abbreviated album-detail summary, referenced here by `GET /library/info`
+        (both the `album_id` and the BS#1880 `legacy_release_id` branches) and
+        the `PATCH /library/{id}` 200. Four handlers actually return this shape
+        — `getAlbumFromDB`'s row verbatim; `/library/{id}/missing` and
+        `/library/{id}/found` return it too but declare no response body here.
 
-        Deliberately NOT the SSOT's `Album`, and the divergence is not drift to
-        delete (BS#2170). wxyc-shared's api.yaml models these two responses with
-        two different schemas — `AlbumInfoResponse` (an allOf over its own
-        `Album`) for `/library/info`, and `AlbumSearchResult` for the PATCH 200.
-        Both are satisfiable by what BS actually returns; both under-document it
-        by nine fields, and `AlbumSearchResult` additionally declares seven
-        search-only properties (`album_dist`, `rotation_id`, `matched_via`, …)
-        that neither handler emits. Porting `AlbumInfoResponse` here would
-        import a split the implementation does not have.
+        Interim divergence note (BS#2170), not drift to delete. The SSOT models
+        these responses with two schemas — `AlbumInfoResponse` for
+        `/library/info`, `AlbumSearchResult` for the three PATCHes — and
+        neither describes them well: both omit nine returned fields,
+        `AlbumSearchResult` declares seven search-only properties no
+        album-detail handler emits, and `AlbumInfoResponse` types `genre_name`
+        as a closed ten-value enum that six of the fifteen production genres
+        fall outside. Porting either one here would import a defect and a split
+        the implementation does not have. WXYC/wxyc-shared#365 re-models the
+        SSOT side; **revisit this note when it lands** rather than treating it
+        as a settled answer.
 
         This file is Swagger-UI display only — not a codegen source and not a
-        runtime validator — so its schemas are deliberately abbreviated
-        summaries rather than mirrors. `wxyc-shared/api.yaml` remains the
-        cross-repo SSOT and carries the authoritative field descriptions.
+        runtime validator — so its schemas stay abbreviated summaries rather
+        than mirrors, and `wxyc-shared/api.yaml` carries the authoritative
+        field descriptions.
       properties:
         id:
           type: integer
@@ -200,15 +202,17 @@ components:
             BS#2128. The library.db-producer surrogate key dj-site's track picker
             resolves against; NOT NULL since migration 0137. Sourced from
             getAlbumFromDB, so it is present on both consumers of this schema —
-            GET /library/info and the PATCH /library/{id} 200. It sits directly
-            on this schema for that reason; in the SSOT the same field hangs off
-            `AlbumInfoResponse` instead, and that spec's `Album` deliberately
-            does not carry it — so the identically-named schemas place this
-            field at different levels by design, not by accident.
+            GET /library/info and the PATCH /library/{id} 200, which is why it
+            sits directly on the schema here. The SSOT hangs the same field off
+            `AlbumInfoResponse` and omits it from its own `Album`, so the
+            identically-named schemas place it at different levels.
         code_letters:
           type: string
         code_artist_number:
-          type: string
+          # `genre_artist_crossreference.artist_genre_code`, an integer column.
+          # Four sibling schemas in this file already say so; only this one said
+          # `string`.
+          type: integer
         code_number:
           type: integer
         artist_name:
