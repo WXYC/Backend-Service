@@ -35,31 +35,6 @@ jest.mock('@wxyc/lml-client', () => ({
 
 import { getUncataloguedRotationFromDB, linkRotationToAlbum } from '../../../apps/backend/services/library.service';
 
-type SqlLike = {
-  sql?: string | string[];
-  raw?: string;
-  queryChunks?: Array<string | { value?: unknown; raw?: string }>;
-};
-
-const renderSql = (value: unknown): string => {
-  const obj = value as SqlLike | null | undefined;
-  if (!obj) return '';
-  if (typeof obj.raw === 'string') return obj.raw;
-  if (Array.isArray(obj.sql)) return obj.sql.join('');
-  if (typeof obj.sql === 'string') return obj.sql;
-  if (obj.queryChunks) {
-    return obj.queryChunks
-      .map((chunk) => {
-        if (typeof chunk === 'string') return chunk;
-        if (typeof chunk.raw === 'string') return chunk.raw;
-        if (chunk.value !== undefined) return JSON.stringify(chunk.value);
-        return '';
-      })
-      .join(' ');
-  }
-  return JSON.stringify(obj);
-};
-
 describe('getUncataloguedRotationFromDB (BS#2109)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -82,8 +57,9 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
 
     expect(result).toBe(rows);
     expect(selectChain.from).toHaveBeenCalledWith(rotation);
+    // Exact-match, so a COALESCE-0 predicate (or any added clause) fails here
+    // rather than needing a separate substring assertion against rendered SQL.
     expect(selectChain.where).toHaveBeenCalledWith({ isNull: rotation.album_id });
-    expect(renderSql(selectChain.where.mock.calls[0]?.[0])).not.toContain('COALESCE');
     // The query builder never calls selectDistinctOn — no dedup collapse.
     expect(db.selectDistinctOn).not.toHaveBeenCalled();
   });
@@ -209,10 +185,12 @@ describe('linkRotationToAlbum (BS#2109)', () => {
     });
     // The UPDATE's own WHERE re-guards album_id IS NULL, not just the earlier
     // SELECT. drizzle-orm is automocked project-wide (`tests/__mocks__/
-    // drizzle-orm.ts`), so `isNull(rotation.album_id)` renders as a plain
-    // `{ isNull: 'album_id' }` object rather than real SQL text.
-    expect(renderSql(updateChain.where.mock.calls[0]?.[0])).toContain('isNull');
-    expect(renderSql(updateChain.where.mock.calls[0]?.[0])).toContain('album_id');
+    // drizzle-orm.ts`), so the predicate is a plain object, not SQL text —
+    // assert it whole, which also pins the `eq(rotation.id, …)` half that a
+    // substring match would silently ignore.
+    expect(updateChain.where).toHaveBeenCalledWith({
+      and: [{ eq: [rotation.id, ROTATION_ID] }, { isNull: rotation.album_id }],
+    });
   });
 
   it('rejects double-linking when the rotation row already has an album_id', async () => {

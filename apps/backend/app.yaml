@@ -1796,7 +1796,7 @@ paths:
         independently backfilled; display elsewhere is unaffected because it
         reads through the library join once album_id resolves.
       security:
-        - BearerAuth: ['station-management']
+        - BearerAuth: ['catalog-write']
       parameters:
         - name: rotation_id
           in: path

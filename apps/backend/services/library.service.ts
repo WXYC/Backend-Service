@@ -608,10 +608,12 @@ const UNCATALOGUED_ROTATION_PROJECTION = {
   record_label: rotation.record_label,
 } as const;
 
-export type UncataloguedRotationRow = Pick<
-  RotationRelease,
-  'id' | 'album_id' | 'rotation_bin' | 'add_date' | 'kill_date' | 'artist_name' | 'album_title' | 'record_label'
->;
+/**
+ * Derived from the projection rather than restating its key list, so adding a
+ * column to `UNCATALOGUED_ROTATION_PROJECTION` without widening the type (or
+ * the reverse) is a compile error instead of silent drift.
+ */
+export type UncataloguedRotationRow = Pick<RotationRelease, keyof typeof UNCATALOGUED_ROTATION_PROJECTION>;
 
 /** Optional window over the queue. Both absent ⇒ the full backlog. */
 export type UncataloguedRotationPage = { limit?: number; offset?: number };
