@@ -2843,11 +2843,26 @@ describe('Library Album Info', () => {
       expectErrorContains(res, 'missing album identifier');
     });
 
-    test('returns undefined/empty for non-existent album_id', async () => {
-      const res = await auth.get('/library/info').query({ album_id: 999999 }).expect(200);
+    // BS#2212 flipped this from a 200 carrying an empty body. That shape
+    // satisfied no declared response schema and disagreed with the sibling
+    // legacy_release_id branch, which has always 404'd the same miss.
+    test('returns 404 for non-existent album_id', async () => {
+      const res = await auth.get('/library/info').query({ album_id: 999999 }).expect(404);
 
-      expect(res.body).toBeFalsy();
+      expectErrorContains(res, 'No catalog album for that album_id');
     });
+
+    // BS#2212: the branch used to parse with a bare parseInt, so '65880xyz'
+    // resolved to release 65880 -- a real, different album -- with a 200, and
+    // a non-numeric value reached Postgres as the literal "NaN" and 500'd.
+    test.each([['abc'], ['65880xyz'], [''], ['0'], ['-5'], ['007']])(
+      'returns 400 for a malformed album_id (%s)',
+      async (bad) => {
+        const res = await auth.get('/library/info').query({ album_id: bad }).expect(400);
+
+        expectErrorContains(res, 'Invalid album ID');
+      }
+    );
 
     test('returns nested reconciled_identity (no flat external-ID columns)', async () => {
       const res = await auth.get('/library/info').query({ album_id: 1 }).expect(200);

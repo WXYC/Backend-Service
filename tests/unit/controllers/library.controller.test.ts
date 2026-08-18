@@ -2305,6 +2305,60 @@ describe('library.controller', () => {
       await expect(getAlbum(req, res, next)).rejects.toThrow('Invalid legacy_release_id');
       expect(mockGetAlbumByLegacyId).not.toHaveBeenCalled();
     });
+
+    // BS#2212: the album_id branch parsed with a bare `parseInt`, so it had
+    // none of the discipline the legacy branch above documents. The same
+    // `parseResourceId` every other `/library/:id` route uses now guards it.
+    const rejectedAlbumIds: Array<[string, string]> = [
+      ['non-numeric', 'abc'],
+      ['trailing garbage', '65880xyz'],
+      ['empty', ''],
+      ['zero', '0'],
+      ['negative', '-5'],
+      ['leading-zero padded', '007'],
+      ['explicitly signed', '+42'],
+      ['above INT4_MAX', '2147483648'],
+      ['exponent notation', '1e21'],
+      ['surrounded by whitespace', ' 42 '],
+    ];
+
+    it.each(rejectedAlbumIds)('returns 400 for an album_id that is %s', async (_label, rawId) => {
+      const req = { query: { album_id: rawId } } as unknown as Request;
+
+      await expect(getAlbum(req, mockResponse(), next)).rejects.toThrow('Invalid album ID');
+      expect(mockGetAlbumFromDB).not.toHaveBeenCalled();
+    });
+
+    // Pinned by value, not just by status. `parseInt('65880xyz')` is 65880, so
+    // the failure this replaces did not error -- it fetched release 65880, a
+    // real and different album, and served it with a 200. Asserting the status
+    // alone would still pass if a future parse silently truncated again.
+    it('never fetches the truncated id when album_id carries trailing garbage', async () => {
+      const req = { query: { album_id: '65880xyz' } } as unknown as Request;
+
+      await expect(getAlbum(req, mockResponse(), next)).rejects.toThrow('Invalid album ID');
+      expect(mockGetAlbumFromDB).not.toHaveBeenCalledWith(65880);
+    });
+
+    it('returns 400 for a repeated album_id (Express yields string[])', async () => {
+      // parseInt(['1','2']) is parseInt("1,2") = 1, so a request naming two
+      // releases used to be served the first one.
+      const req = { query: { album_id: ['1', '2'] } } as unknown as Request;
+
+      await expect(getAlbum(req, mockResponse(), next)).rejects.toThrow('Invalid album ID');
+      expect(mockGetAlbumFromDB).not.toHaveBeenCalled();
+    });
+
+    // Matches the legacy branch's miss contract. Previously a 200 whose body
+    // was `undefined` -- which satisfied no declared response schema, and
+    // which all three consumers already routed to their error path anyway.
+    it('returns 404 when album_id resolves to no catalog row', async () => {
+      mockGetAlbumFromDB.mockResolvedValue(undefined);
+      const req = { query: { album_id: '999999' } } as unknown as Request;
+
+      await expect(getAlbum(req, mockResponse(), next)).rejects.toThrow('No catalog album for that album_id');
+      expect(mockGetAlbumFromDB).toHaveBeenCalledWith(999999);
+    });
   });
 
   describe('manualDiscogsRecheck (BS#1283)', () => {

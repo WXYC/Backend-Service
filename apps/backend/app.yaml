@@ -2417,21 +2417,22 @@ paths:
         fallback (BS#1880).
 
 
-        The two branches agree on the shape of a hit and disagree on a miss. An
-        unmatched `legacy_release_id` is a 404 — a library.db release not yet
-        synced into Backend Postgres. An unmatched `album_id` is a 200 with an
-        empty body. Do not port a `if (!body)` branch from one to the other.
+        The two branches now agree on a miss as well: either unmatched
+        identifier is a 404. For `legacy_release_id` that means a library.db
+        release not yet synced into Backend Postgres; for `album_id`, no such
+        serial. The `album_id` miss was a 200 with an empty body until BS#2212.
       parameters:
         - name: album_id
           in: query
           required: false
           description: >-
             Backend's serial `wxyc_schema.library.id`. Optional: supply this or
-            `legacy_release_id`, not both. Parsed leniently, unlike the strict
-            sibling below: trailing garbage is truncated to a valid-looking id
-            and a repeated param takes the first, so a corrupted value resolves
-            a different real release rather than erroring (BS#2212). Send a
-            bare integer.
+            `legacy_release_id`, not both. Parsed strictly, like the sibling
+            below and like every `/library/{id}` route: a positive int4 in
+            canonical form. Trailing garbage (`65880xyz`), leading zeros, an
+            explicit sign, whitespace, and a repeated param are each a 400 —
+            never a truncated id resolving a different real release, which is
+            what a bare `parseInt` did before BS#2212.
           schema:
             type: integer
         - name: legacy_release_id
@@ -2450,17 +2451,15 @@ paths:
             type: integer
       responses:
         '200':
-          description: >-
-            Album details. Also returned with an empty body when `album_id`
-            matches no row — see the operation description.
+          description: Album details.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Album'
         '400':
-          description: Both identifiers absent, or `legacy_release_id` present but not a positive integer
+          description: Both identifiers absent, or the supplied identifier is not a canonical positive int4
         '404':
-          description: '`legacy_release_id` matched no catalog row'
+          description: The supplied identifier matched no catalog row
 
   /schedule:
     get:
