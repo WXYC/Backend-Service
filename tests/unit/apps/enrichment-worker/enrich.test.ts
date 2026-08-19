@@ -1327,7 +1327,10 @@ describe('extractArtwork', () => {
         results: [
           {
             library_item: { id: 0, title },
-            artwork: { artwork_url: 'https://i.discogs.com/rowless/cover.jpg', release_url: 'https://discogs.com/release/rowless' },
+            artwork: {
+              artwork_url: 'https://i.discogs.com/rowless/cover.jpg',
+              release_url: 'https://discogs.com/release/rowless',
+            },
           },
         ],
       }) as unknown as LookupResponse;

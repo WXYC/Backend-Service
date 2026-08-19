@@ -172,10 +172,7 @@ const looseTitleKey = (s: string | null | undefined): string =>
  * | song_as_artist   | rejected                                 | rejected                        | explicit lane exclusion — the song TITLE drove the match as an artist name, so a matching title here is coincidence, not track correspondence |
  * | none / absent    | rejected                                 | correspondence-gated (in practice rejected — `results` is empty for this type) | no trust signal beyond whatever `results` independently carries |
  */
-export function isTrustedLmlTrackContextMatch(
-  response: LmlTrustGateInput,
-  requestedAlbum?: string | null
-): boolean {
+export function isTrustedLmlTrackContextMatch(response: LmlTrustGateInput, requestedAlbum?: string | null): boolean {
   const st = response.search_type;
   if (st === 'direct' || st === 'compilation') return true;
   if (st === 'song_as_artist') return false;

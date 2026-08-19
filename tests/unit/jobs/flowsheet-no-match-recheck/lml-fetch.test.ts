@@ -377,7 +377,9 @@ describe('extractTrustedArtwork', () => {
     const { extractTrustedArtwork } = await loadModule(mockLookup);
     const response = {
       search_type: 'alternative',
-      results: [{ library_item: { id: 0, title: 'The Spiritual Sound' }, artwork: { release_id: 1, release_url: 'x' } }],
+      results: [
+        { library_item: { id: 0, title: 'The Spiritual Sound' }, artwork: { release_id: 1, release_url: 'x' } },
+      ],
     };
 
     expect(extractTrustedArtwork(response)).toBeNull();

@@ -240,7 +240,10 @@ describe('reaskUnresolvedStreaming (BS#1915)', () => {
         results: [
           {
             library_item: { id: 64288, title: CANDIDATE.album_title },
-            artwork: { artwork_url: 'https://i.discogs.com/wrong.jpg', release_url: 'https://discogs.com/release/wrong' },
+            artwork: {
+              artwork_url: 'https://i.discogs.com/wrong.jpg',
+              release_url: 'https://discogs.com/release/wrong',
+            },
           },
         ],
       });
