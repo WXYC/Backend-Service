@@ -110,10 +110,17 @@ export type EnrichmentLookupLane = 'live' | 'sweep';
  * ceiling is ~4s regardless of the header's magnitude. That 4s fast-degrade
  * is the CORRECT, deliberate behavior for a batch drain — a hard-miss row
  * should give up quickly and free the shared Discogs ceiling for the next
- * row — which is why the `'sweep'` lane and every other class-5 caller
- * (`album-level-backfill`, `catalog-popularity-freetext-resolve`,
+ * row — which is why the `'sweep'` lane and nearly every other class-5
+ * caller (`album-level-backfill`, `catalog-popularity-freetext-resolve`,
  * `flowsheet-linked-reenrichment`, every `*-backfill` job) keep sending the
- * header unconditionally. It is WRONG for the `'live'` lane specifically:
+ * header unconditionally. BS#2218 added the one class-5 exception:
+ * `flowsheet-no-match-recheck` suppresses too (`budgetMs: null`,
+ * unconditional and unflagged), because its cohort is DEFINED by having
+ * already failed a live lookup, so it is not a hard-miss drain — it is the
+ * same cold-release population as the `'live'` lane, arriving later. That
+ * exception is about the cohort, not about batch-ness; a drain over rows
+ * that have not already failed still keeps the header. It is WRONG for the
+ * `'live'` lane specifically:
  * that lane enriches new rotation arrivals — albums in neither `library.db`
  * nor the library-filtered Discogs cache — whose cold non-library release
  * resolution measures 4-20s on prod. Under the 4s clamp LML gives up on
