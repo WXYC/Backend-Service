@@ -125,8 +125,12 @@ export function isTrustedLmlAlbumMatch(response: LmlTrustGateInput): boolean {
  * collapsing to single spaces. Deliberately NOT `@wxyc/database`'s
  * `normalizeAlbumTitle`: `@wxyc/lml-client` depends only on `@sentry/node`
  * and `@wxyc/shared`, and that normalizer carries a dedup-key stability
- * contract tied to a live cron (BS#2217 — considered and rejected). This is
- * a local, throwaway comparison key with no stability contract of its own;
+ * contract tied to a live cron (BS#2217 — considered and rejected). The same
+ * dependency-boundary argument rules out `@wxyc/database`'s `foldArtistName`,
+ * whose NFD-fold-then-casefold step is the closer twin of the folding below:
+ * it too lives across that edge, and it too carries a stability contract (its
+ * output must stay byte-identical to the SQL side of `artistIdFromName`).
+ * This is a local, throwaway comparison key with no stability contract of its own;
  * its only job is absorbing casing, punctuation, and accent noise between a
  * DJ's flowsheet entry and Discogs's title string, not edition-suffix
  * stripping or dedup-key parity.
@@ -213,6 +217,17 @@ const looseTitleKey = (s: string | null | undefined): string =>
  * | fallback         | rejected                                 | correspondence-gated            | same telemetry caveat as `alternative` — no case in prod has hit this shape row-less, but nothing about `search_type` rules it out, so it is not special-cased away from the general check |
  * | song_as_artist   | rejected                                 | rejected                        | explicit lane exclusion — the song TITLE drove the match as an artist name, so a matching title here is coincidence, not track correspondence |
  * | none / absent    | rejected                                 | correspondence-gated (in practice rejected — `results` is empty for this type) | no trust signal beyond whatever `results` independently carries |
+ *
+ * ⚠ **If you are about to walk `response.results`, do not call this.** As of
+ * BS#2217 this boolean has no production callers: both artwork extractors
+ * moved to `lmlTrackContextTrust` + `lmlTrackContextVouchedResults`, because
+ * a bare yes/no cannot tell them HOW MUCH of the response the trust covers,
+ * and walking the whole array on the correspondence path is precisely the
+ * `results[1]`-substitution hole that review closed. It is kept because it
+ * is the name BS#1356/BS#1359 established across the docs, and because a
+ * caller that genuinely only needs the yes/no (a metric, a log line, an
+ * assertion) is well served by it. A caller that reads a PAYLOAD out of the
+ * response is not — use the verdict pair.
  */
 export function isTrustedLmlTrackContextMatch(response: LmlTrustGateInput, requestedAlbum?: string | null): boolean {
   return lmlTrackContextTrust(response, requestedAlbum) !== 'none';
@@ -243,6 +258,34 @@ export function isTrustedLmlTrackContextMatch(response: LmlTrustGateInput, reque
  * classifiers, and the album-context gates that never walk `results`).
  */
 export type LmlTrackContextTrust = 'none' | 'search_type' | 'correspondence';
+
+/**
+ * The subset of `results` a `trust` verdict actually vouches for — the
+ * executable form of the contract `LmlTrustGateInput`'s doc comment states in
+ * prose (BS#2217 review).
+ *
+ * Every caller that walks `results` looking for a payload (artwork today)
+ * must iterate THIS, not `response.results`. The rule is one line, but it is
+ * the line that keeps the correspondence carve-out honest: the carve-out
+ * accepts a response on `results[0]`'s row-less id and title alone, so a
+ * same-artist substitution parked at `results[1]` — real `library_item.id`,
+ * its own artwork — must not be able to donate its cover to that acceptance.
+ * Keeping the rule here rather than hand-rolled at each walk means a future
+ * caller cannot reintroduce the Yenbett/Vantaa class by copying the loop and
+ * forgetting the guard.
+ *
+ * Generic in the element type so each caller keeps its own richer result
+ * shape (the artwork-bearing `LookupResponse['results']`) without a cast;
+ * this function only ever slices, never inspects.
+ */
+export function lmlTrackContextVouchedResults<T>(
+  trust: LmlTrackContextTrust,
+  results: readonly T[] | null | undefined
+): readonly T[] {
+  if (trust === 'none') return [];
+  const all = results ?? [];
+  return trust === 'correspondence' ? all.slice(0, 1) : all;
+}
 
 export function lmlTrackContextTrust(
   response: LmlTrustGateInput,

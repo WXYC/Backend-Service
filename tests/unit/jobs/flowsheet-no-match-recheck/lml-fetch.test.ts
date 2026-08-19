@@ -43,6 +43,7 @@
 import {
   isTrustedLmlTrackContextMatch as realIsTrustedLmlTrackContextMatch,
   lmlTrackContextTrust as realLmlTrackContextTrust,
+  lmlTrackContextVouchedResults as realLmlTrackContextVouchedResults,
 } from '@wxyc/lml-client';
 
 beforeEach(() => {
@@ -69,6 +70,7 @@ const loadModule = async (
     // need to be fakes; the trust gate is pure and is exactly what this
     // suite is asserting about.
     lmlTrackContextTrust: realLmlTrackContextTrust,
+    lmlTrackContextVouchedResults: realLmlTrackContextVouchedResults,
     isTrustedLmlTrackContextMatch: realIsTrustedLmlTrackContextMatch,
     shedReasonOf: (response: { outcome?: string }) =>
       response.outcome === 'shed_limiter_saturated' || response.outcome === 'shed_breaker_open'
