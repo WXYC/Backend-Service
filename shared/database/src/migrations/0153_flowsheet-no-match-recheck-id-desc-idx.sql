@@ -1,0 +1,109 @@
+-- 0153 re-key `flowsheet_no_match_recheck_idx` to `id DESC` (BS#2218).
+--
+-- @intentional-create-revert: 0151 shipped the correct index for the ordering
+-- that existed then, and prod has already applied it; 0153 re-keys it two
+-- migrations later because BS#2218 deliberately changed that ordering after a
+-- prod measurement. This is schema evolution, not a bugfix-revert, so the
+-- pair cannot be folded into one no-op migration -- 0151 is deployed and
+-- hash-frozen. 0151 carries no precondition guard, so the wedge the check
+-- protects against (a guard firing for an effect reverted moments later)
+-- cannot occur here.
+--
+-- BS#2218 flipped `jobs/flowsheet-no-match-recheck`'s candidate ordering to
+-- newest-first because oldest-first stranded 2026 playcuts 132,460 rows deep:
+--   ORDER BY no_match_recheck_attempted_at ASC NULLS FIRST, id DESC
+-- The BS#2176 index (migration 0151) is keyed `(no_match_recheck_attempted_at
+-- NULLS FIRST, id)` -- i.e. `id` ASC -- and a B-tree can only supply a
+-- mixed-direction order if it was built with those directions. So the new
+-- ORDER BY could not be served by walking the index, and the planner fell
+-- back to reading every matching row and top-N heapsorting it.
+--
+-- MEASURED ON PROD, 2026-08-18, same predicate, LIMIT 200 OFFSET 0, A/B on
+-- the tiebreak alone:
+--
+--   ORDER BY ... id ASC   ->     200 rows scanned,     76 ms
+--   ORDER BY ... id DESC  -> 137,278 rows scanned, 41,326 ms
+--
+-- A ~542x regression. The new plan reported `Buffers: shared hit=27246
+-- read=95110` with `I/O Timings: read=39982 ms` -- 97% of the runtime is heap
+-- I/O, ~743 MB per run -- and it did NOT improve on a warm second run
+-- (41,172 ms cold -> 41,326 ms warm), so this is steady state, not a cold
+-- cache. Against the job container's `DB_STATEMENT_TIMEOUT_MS=60000`
+-- (Dockerfile.flowsheet-no-match-recheck) that left ~19 s of headroom on a
+-- cohort that grows; crossing 60 s would make the job do nothing at all,
+-- which is strictly worse than the stall BS#2218 exists to fix.
+--
+-- `id DESC NULLS FIRST`, not `DESC NULLS LAST`: `ORDER BY id DESC` means
+-- `DESC NULLS FIRST` in Postgres (NULLS FIRST is the DESC default), and an
+-- index whose null ordering disagrees does not match the query's pathkeys.
+-- `id` is the primary key and never null, so this is invisible to results --
+-- it matters only for whether the index can be used at all, which is the
+-- entire point of this migration. The leading key keeps its explicit `NULLS
+-- FIRST` for the same reason (BS#2179 review MEDIUM 4).
+--
+-- REPLACE, not accompany. `flowsheet_no_match_recheck_idx` has exactly one
+-- consumer -- `jobs/flowsheet-no-match-recheck/query.ts` -- and BS#2218
+-- removed the last query wanting its `id` ASC sort order. The partial
+-- predicate is byte-identical between the two indexes, so any planner use
+-- that only needed the predicate match is served exactly as well by the new
+-- index. Carrying both would be pure write amplification: `flowsheet` is
+-- ~2.6M rows and is written live by DJs, and every INSERT/UPDATE landing in
+-- the partial predicate would maintain two near-identical B-trees.
+--
+-- This re-key is only possible because BS#2218's simplification pass
+-- collapsed the ORDER BY from a pair of mutually-exclusive CASE expressions
+-- (one per tier, so each could keep its own direction) to a plain two-key
+-- sort. A B-tree can never supply an `ORDER BY <CASE expression>` order, so
+-- under the CASE form no index could have fixed this.
+--
+-- Production ops -- READ BEFORE DEPLOYING:
+--   - This is NOT the CONCURRENTLY form, because Drizzle wraps each migration
+--     file in a transaction (`pg-core/dialect`'s `migrate` runs every
+--     statement inside `session.transaction(...)`) and both `CREATE INDEX
+--     CONCURRENTLY` and `DROP INDEX CONCURRENTLY` are rejected inside a
+--     transaction block. The runner has no escape hatch; the repo's standing
+--     answer is the out-of-band pattern below (same as 0057, 0068, 0070,
+--     0074, 0078, 0080, 0139, 0144, 0148, 0151).
+--   - Run BOTH steps out-of-band on prod FIRST, before the deploy that
+--     applies this migration, and in THIS ORDER so there is never a window
+--     with no usable index on the cohort:
+--
+--       -- Step 1: build the replacement. The old index still serves reads
+--       -- for the whole build.
+--       CREATE INDEX CONCURRENTLY IF NOT EXISTS "flowsheet_no_match_recheck_id_desc_idx"
+--         ON "wxyc_schema"."flowsheet" USING btree
+--           ("no_match_recheck_attempted_at" NULLS FIRST, "id" DESC NULLS FIRST)
+--         WHERE "wxyc_schema"."flowsheet"."metadata_status" = 'enriched_no_match'
+--           AND "wxyc_schema"."flowsheet"."entry_type" = 'track'
+--           AND "wxyc_schema"."flowsheet"."artist_name" IS NOT NULL;
+--
+--       -- Step 1a: confirm the build succeeded before dropping anything.
+--       -- A CONCURRENTLY build that fails leaves an INVALID index behind,
+--       -- and dropping the old one on top of that leaves the cohort with
+--       -- no usable index at all.
+--       SELECT c.relname, i.indisvalid, i.indisready
+--         FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+--        WHERE c.relname = 'flowsheet_no_match_recheck_id_desc_idx';
+--       -- Require indisvalid = true AND indisready = true. If not, DROP the
+--       -- invalid index and re-run step 1; do NOT proceed.
+--
+--       -- Step 2: retire the superseded index.
+--       DROP INDEX CONCURRENTLY IF EXISTS "wxyc_schema"."flowsheet_no_match_recheck_idx";
+--
+--     Neither step takes an AccessExclusiveLock, so no INSERT pause and no
+--     wedged flowsheet mid-show.
+--   - Then deploy. `IF NOT EXISTS` / `IF EXISTS` make both statements below
+--     no-ops against the prod DB where the swap has already happened, while
+--     fresh dev and CI databases (where `flowsheet` is empty, so the build is
+--     instant and the lock is uncontended) pick the change up on first
+--     migrate.
+--   - Skipping the out-of-band steps means the CREATE below takes an
+--     AccessExclusiveLock on `flowsheet` for the duration of a ~2.6M-row
+--     partial index build, pausing every live flowsheet write.
+--
+-- Order below is CREATE-then-DROP, inverted from `drizzle-kit generate`'s
+-- default DROP-then-CREATE emission, so that a fresh database is never
+-- momentarily without an index on this cohort either. The end state is
+-- identical, so the snapshot is unaffected.
+CREATE INDEX IF NOT EXISTS "flowsheet_no_match_recheck_id_desc_idx" ON "wxyc_schema"."flowsheet" USING btree ("no_match_recheck_attempted_at" NULLS FIRST,"id" DESC NULLS FIRST) WHERE "wxyc_schema"."flowsheet"."metadata_status" = 'enriched_no_match' AND "wxyc_schema"."flowsheet"."entry_type" = 'track' AND "wxyc_schema"."flowsheet"."artist_name" IS NOT NULL;--> statement-breakpoint
+DROP INDEX IF EXISTS "wxyc_schema"."flowsheet_no_match_recheck_idx";
