@@ -1,5 +1,5 @@
 /**
- * Candidate query for jobs/flowsheet-no-match-recheck (BS#2176).
+ * Candidate query for jobs/flowsheet-no-match-recheck (BS#2176, BS#2218).
  *
  * Selects terminal `metadata_status = 'enriched_no_match'` track rows whose
  * `no_match_recheck_attempted_at` marker is either NULL or outside the
@@ -16,19 +16,68 @@
  *
  * Bounded by an explicit `LIMIT` (the "bounded drip, not a full-cohort
  * sweep" constraint — the no-match population is large, LML budget is the
- * binding constraint) and ordered oldest-recheck-attempted-first (`NULLS
- * FIRST` so never-attempted rows lead), `id ASC` tiebreak — every run drains
- * the longest-waiting slice of a cohort too large to visit in one pass.
+ * binding constraint). Two priority tiers, in order:
+ *
+ *   1. Never-attempted rows (`no_match_recheck_attempted_at IS NULL`,
+ *      `NULLS FIRST`) — newest-first (`id DESC`) as of BS#2218. Prod
+ *      measurement on 2026-08-18 found 2026 playcuts were 4,880 of a
+ *      137,340-row cohort and sorted LAST under the pre-fix `id ASC`
+ *      tiebreak — 132,460 older rows sat ahead of them, so even a
+ *      perfectly functioning job needed ~5.5 months to reach a row anyone
+ *      can currently see. `id` is monotonically assigned at insert time, so
+ *      `id DESC` recovers recent playcuts first while 22 years of history
+ *      drains behind them; `add_time DESC` would express the same intent
+ *      more directly but `id` is both already indexed here
+ *      (`flowsheet_no_match_recheck_idx`, migration 0151) and exactly as
+ *      correct for this cohort (the BS#2218 measurement's id-to-year bands
+ *      were clean), so it's the smaller diff.
+ *   2. Previously-attempted, TTL-expired rows
+ *      (`no_match_recheck_attempted_at <= now() - TTL`) — unchanged,
+ *      oldest-attempted-first, `id ASC` tiebreak.
+ *
+ * These can't be expressed as a single `ORDER BY col ASC NULLS FIRST, id
+ * <dir>` (a single tiebreak column can't flip direction depending on which
+ * tier a row is in), so the tiebreak is two mutually-exclusive CASE
+ * expressions: the never-attempted tier's `id` DESC, and the
+ * previously-attempted tier's `id` ASC. Each CASE evaluates to NULL for
+ * rows outside its own tier, which is harmless — those rows are already
+ * separated onto the correct side of the primary `NULLS FIRST` sort key, so
+ * the tiebreak's NULL-ordering default never has to arbitrate across tiers.
+ *
+ * INDEXING NOTE: `flowsheet_no_match_recheck_idx` was built for the pre-fix
+ * `(no_match_recheck_attempted_at NULLS FIRST, id ASC)` order and can still
+ * serve the never-attempted tier's identification (all rows share the same
+ * NULL key) but not its new `id DESC` tiebreak directly — Postgres sorts
+ * that tier in memory after the index scan. The tier is bounded by the
+ * cohort's total never-attempted count (a fraction of the ~137K-row cohort
+ * measured 2026-08-18), and the columns involved are the two already in the
+ * index, so this is an in-memory sort over narrow, already-fetched rows, not
+ * an additional heap access — expected to stay well inside
+ * `DB_STATEMENT_TIMEOUT_MS`. If this ever measures otherwise, the fix is a
+ * companion partial index `(no_match_recheck_attempted_at NULLS FIRST, id
+ * DESC)`, analogous to migration 0151.
+ *
+ * BS#2218 also added `cursorOffset` (default 0, backward compatible) and
+ * the sibling `countCandidates` export: an OFFSET-based starvation guard so
+ * a batch of rows that transients on every call — leaving
+ * `no_match_recheck_attempted_at` untouched per the BS#1977 / BS#2179 review
+ * HIGH 2 contract — cannot occupy the same position in this ordering every
+ * run forever. See `jobs/flowsheet-no-match-recheck/watermark.ts` for the
+ * cursor's persistence and wraparound arithmetic, and migration 0152 for why
+ * it lives on `cronjob_runs` rather than a new table. This query only
+ * accepts the already-resolved offset; it has no opinion on how the caller
+ * got it.
  *
  * LEFT JOINs `library` on `album_id` to pre-read `discogs_unavailable`
  * (BS#1293 gate) the same way `rotation-release-id-backfill/query.ts` does —
  * a LEFT (not INNER) JOIN is required because `flowsheet.album_id` is
  * nullable (free-form entries), and those rows must still be candidates;
  * `COALESCE(..., false)` treats "no linked library row" the same as "not
- * flagged".
+ * flagged". `countCandidates` omits this join — it doesn't select
+ * `discogs_unavailable`, so there's nothing for it to serve.
  */
 
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { db } from '@wxyc/database';
 
 import type { Candidate } from './orchestrate.js';
@@ -39,9 +88,26 @@ export const NO_MATCH_TTL_DAYS_DEFAULT = 14;
 export const BATCH_SIZE_ENV = 'FLOWSHEET_NO_MATCH_RECHECK_BATCH_SIZE';
 export const BATCH_SIZE_DEFAULT = 200;
 
+/**
+ * The candidate predicate shared verbatim between `loadCandidates` and
+ * `countCandidates` — a single source of truth so `countCandidates`'s total
+ * (the denominator the BS#2218 cursor wraps against) can never silently
+ * drift from the population `loadCandidates` actually selects from.
+ */
+const candidatePredicate = (noMatchTtlDays: number): SQL => sql`
+      f."metadata_status" = 'enriched_no_match'
+      AND f."entry_type" = 'track'
+      AND f."artist_name" IS NOT NULL
+      AND (
+        f."no_match_recheck_attempted_at" IS NULL
+        OR f."no_match_recheck_attempted_at" <= now() - (interval '1 day' * ${noMatchTtlDays})
+      )
+`;
+
 export const loadCandidates = async (
   noMatchTtlDays: number = NO_MATCH_TTL_DAYS_DEFAULT,
-  batchSize: number = BATCH_SIZE_DEFAULT
+  batchSize: number = BATCH_SIZE_DEFAULT,
+  cursorOffset: number = 0
 ): Promise<Candidate[]> => {
   const rows = (await db.execute(sql`
     SELECT
@@ -53,15 +119,29 @@ export const loadCandidates = async (
       COALESCE(l."discogs_unavailable", false) AS "discogs_unavailable"
     FROM "wxyc_schema"."flowsheet" f
     LEFT JOIN "wxyc_schema"."library" l ON f."album_id" = l."id"
-    WHERE f."metadata_status" = 'enriched_no_match'
-      AND f."entry_type" = 'track'
-      AND f."artist_name" IS NOT NULL
-      AND (
-        f."no_match_recheck_attempted_at" IS NULL
-        OR f."no_match_recheck_attempted_at" <= now() - (interval '1 day' * ${noMatchTtlDays})
-      )
-    ORDER BY f."no_match_recheck_attempted_at" ASC NULLS FIRST, f."id" ASC
+    WHERE ${candidatePredicate(noMatchTtlDays)}
+    ORDER BY
+      f."no_match_recheck_attempted_at" ASC NULLS FIRST,
+      CASE WHEN f."no_match_recheck_attempted_at" IS NULL THEN f."id" END DESC,
+      CASE WHEN f."no_match_recheck_attempted_at" IS NOT NULL THEN f."id" END ASC
     LIMIT ${batchSize}
+    OFFSET ${cursorOffset}
   `)) as unknown as Candidate[];
   return rows ?? [];
+};
+
+/**
+ * Total rows matching `candidatePredicate` — the denominator
+ * `jobs/flowsheet-no-match-recheck/watermark.ts`'s cursor wraps the BS#2218
+ * OFFSET against. Deliberately no LEFT JOIN / ORDER BY / LIMIT / OFFSET: a
+ * plain count needs none of them, and skipping the join avoids paying for a
+ * column (`discogs_unavailable`) this function never returns.
+ */
+export const countCandidates = async (noMatchTtlDays: number = NO_MATCH_TTL_DAYS_DEFAULT): Promise<number> => {
+  const rows = (await db.execute(sql`
+    SELECT COUNT(*)::int AS "count"
+    FROM "wxyc_schema"."flowsheet" f
+    WHERE ${candidatePredicate(noMatchTtlDays)}
+  `)) as unknown as Array<{ count: number }>;
+  return Number(rows?.[0]?.count ?? 0);
 };
