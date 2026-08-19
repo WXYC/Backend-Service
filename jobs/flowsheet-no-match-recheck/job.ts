@@ -22,12 +22,12 @@
  * rather than inside `orchestrate.ts`: read the stored cursor + a fresh
  * candidate count, clamp it into range (`watermark.ts`'s `wrapCursor`), load
  * this run's batch at that offset, run the existing per-row loop unchanged,
- * then advance and persist the cursor by however many rows this run actually
- * scanned (`totals.scanned` — outcome-independent, see `watermark.ts`'s
- * module doc comment). Keeping this composition in `job.ts` means
- * `orchestrate.ts`'s `LoadCandidatesFn` stays the simple zero-arg shape its
- * existing tests already pin — no cursor concept leaks into the orchestrator
- * or its transient-handling contract.
+ * then advance and persist the cursor past however many of this run's
+ * candidates are still candidates (`watermark.ts`'s `nextCursorPosition`;
+ * that module's doc comment carries the reasoning). Keeping this composition
+ * in `job.ts` means `orchestrate.ts`'s `LoadCandidatesFn` stays the simple
+ * zero-arg shape its existing tests already pin — no cursor concept leaks
+ * into the orchestrator or its transient-handling contract.
  *
  * Cursor resolution is fail-fast, not best-effort: a `getCursorPosition` /
  * `countCandidates` failure aborts the run before any lookup (same posture
@@ -65,10 +65,15 @@ import {
 } from './query.js';
 import { lookupNoMatchRecheck } from './lml-fetch.js';
 import { markRecheckAttempted, writeMatch } from './writer.js';
-import { getCursorPosition, setCursorPosition, wrapCursor } from './watermark.js';
+import {
+  JOB_NAME,
+  getCursorPosition,
+  nextCursorPosition,
+  setCursorPosition,
+  stillCandidates,
+  wrapCursor,
+} from './watermark.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
-
-const JOB_NAME = 'flowsheet-no-match-recheck';
 
 const requireLmlConfigured = (): void => {
   if (!process.env.LIBRARY_METADATA_URL) {
@@ -135,21 +140,26 @@ const main = async (): Promise<void> => {
       },
     });
 
-    // Advance by `totals.scanned` (every candidate this run visited,
-    // regardless of outcome — including a row that transiented and left its
-    // retry marker untouched), not `batchSize`: a tail page can return fewer
-    // rows than a full batch when `cursorOffset + batchSize` overruns
-    // `totalCandidates`, and advancing by the actual count lands the next
-    // cursor exactly at the end instead of overshooting past it. Skipped
-    // entirely in dry-run mode — a preview run must stay side-effect-free,
-    // including for the next REAL run's starting offset.
+    // Advance past however many of this run's candidates are still
+    // candidates — see `watermark.ts`'s `nextCursorPosition` and module doc
+    // comment. Skipped entirely in dry-run mode: a preview run must stay
+    // side-effect-free, including for the next REAL run's starting offset.
+    //
+    // Not reached when the run throws (a lookup failure is isolated per-row,
+    // but `orchestrate.ts`'s cooperative-pause ceiling aborts the whole
+    // loop). Leaving the cursor unmoved there is the safe direction under
+    // this advance rule: the rows the aborted run did dispose of have left
+    // the candidate set, so the stored offset is a lower bound on where the
+    // next run should start — it re-reads leftovers, never skips unread
+    // rows. The aborted run still exits non-zero and captures to Sentry.
     if (!dryRun) {
-      const nextCursor = wrapCursor(cursorOffset + totals.scanned, totalCandidates);
+      const nextCursor = nextCursorPosition(cursorOffset, totals, totalCandidates);
       await setCursorPosition(db, nextCursor);
       log('info', 'cursor_advanced', "persisted the next run's OFFSET cursor", {
         cursor_offset: cursorOffset,
         next_cursor: nextCursor,
         scanned: totals.scanned,
+        still_candidates: stillCandidates(totals),
         total_candidates: totalCandidates,
       });
     }

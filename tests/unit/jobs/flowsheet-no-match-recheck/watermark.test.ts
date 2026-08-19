@@ -9,23 +9,29 @@
  *      for the same reason: the shared `tests/mocks/database.mock.ts` chain
  *      can't express a controllable "row exists" vs "no row" result from
  *      `.limit()`).
- *   2. `wrapCursor` — the pure modulo-wraparound arithmetic. The acceptance
- *      criterion this exists to satisfy: a batch in which every candidate
- *      transients (leaving `no_match_recheck_attempted_at` untouched, so
- *      `query.ts`'s ordering alone would re-select the identical window)
- *      still advances the cursor, because the advance amount is
- *      `RunResult.totals.scanned` — incremented for every candidate
- *      regardless of outcome (see `orchestrate.ts`) — not a count of
- *      resolved/marked rows. And the wraparound guarantees a persistently-
- *      transient head can't occupy every future run's window forever: the
- *      cursor cycles back through the WHOLE matching predicate (both the
- *      never-attempted tier and the TTL-expired tier `query.ts` already
- *      rotates), so a row's TTL rotation is never permanently skipped.
+ *   2. `stillCandidates` / `nextCursorPosition` — the advance rule, and the
+ *      acceptance criterion it exists to satisfy: a batch in which every
+ *      candidate transients (leaving `no_match_recheck_attempted_at`
+ *      untouched, so `query.ts`'s ordering alone would re-select the
+ *      identical window) still advances by the full scanned count, because
+ *      nothing left the candidate set. The complement matters just as much
+ *      and is pinned here too: a batch that WAS disposed of must not
+ *      advance, because those rows have left the set and the same offset
+ *      now addresses rows the job has never read. Advancing by `scanned`
+ *      there would skip a whole batch per run until the cursor wrapped —
+ *      the "recent playcuts are months out" failure `query.ts`'s
+ *      newest-first tiebreak exists to remove, one block down the ordering.
+ *   3. `wrapCursor` — the pure modulo-wraparound arithmetic underneath. The
+ *      wraparound is what stops a persistently-transient head from occupying
+ *      every future run's window: the cursor cycles back through the WHOLE
+ *      matching predicate (both the never-attempted tier and the TTL-expired
+ *      tier `query.ts` already rotates), so a row's TTL rotation is never
+ *      permanently skipped.
  */
 import { jest } from '@jest/globals';
 
 const mockLimit = jest.fn<() => Promise<Array<{ cursorPosition: number | null }>>>();
-const mockOnConflictDoUpdate = jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined);
+const mockOnConflictDoUpdate = jest.fn<(config: unknown) => Promise<undefined>>().mockResolvedValue(undefined);
 const mockValues = jest.fn().mockReturnValue({ onConflictDoUpdate: mockOnConflictDoUpdate });
 const mockInsert = jest.fn().mockReturnValue({ values: mockValues });
 const mockWhere = jest.fn().mockReturnValue({ limit: mockLimit });
@@ -46,12 +52,28 @@ jest.mock('drizzle-orm', () => ({
   eq: jest.fn((a: unknown, b: unknown) => ({ eq: [a, b] })),
 }));
 
+import type { Totals } from '../../../../jobs/flowsheet-no-match-recheck/orchestrate';
 import {
   getCursorPosition,
   JOB_NAME,
+  nextCursorPosition,
   setCursorPosition,
+  stillCandidates,
   wrapCursor,
 } from '../../../../jobs/flowsheet-no-match-recheck/watermark';
+
+/** A zeroed `Totals` with the named buckets applied — keeps each case below to the counters it is actually about. */
+const totalsOf = (overrides: Partial<Totals>): Totals => ({
+  scanned: 0,
+  resolved: 0,
+  resolved_dry: 0,
+  unresolved: 0,
+  trust_rejected: 0,
+  lml_error: 0,
+  raced: 0,
+  db_error: 0,
+  ...overrides,
+});
 
 describe('getCursorPosition', () => {
   beforeEach(() => {
@@ -93,8 +115,25 @@ describe('setCursorPosition', () => {
     await setCursorPosition(fakeDb as never, 600);
 
     expect(mockInsert).toHaveBeenCalled();
-    expect(mockValues).toHaveBeenCalledWith({ job_name: JOB_NAME, cursor_position: 600 });
-    expect(mockOnConflictDoUpdate).toHaveBeenCalledWith(expect.objectContaining({ set: { cursor_position: 600 } }));
+    expect(mockValues).toHaveBeenCalledWith(expect.objectContaining({ job_name: JOB_NAME, cursor_position: 600 }));
+    expect(mockOnConflictDoUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ set: expect.objectContaining({ cursor_position: 600 }) })
+    );
+  });
+
+  it('stamps last_run on both the insert and the conflict path, so the row stays an honest cron-liveness heartbeat', async () => {
+    // `cronjob_runs.last_run` is the fleet's liveness signal
+    // (docs/ops-cron-scheduling.md, "Cron liveness (BS#2064)"). Writing only
+    // `cursor_position` would let the column's `defaultNow()` freeze at
+    // whichever run first created the row, so from the second run on the
+    // table would claim this job stopped running.
+    await setCursorPosition(fakeDb as never, 600);
+
+    const inserted = mockValues.mock.calls[0]?.[0] as { last_run?: Date };
+    const updated = (mockOnConflictDoUpdate.mock.calls[0]?.[0] as { set?: { last_run?: Date } })?.set;
+    expect(inserted?.last_run).toBeInstanceOf(Date);
+    expect(updated?.last_run).toBeInstanceOf(Date);
+    expect(updated?.last_run).toEqual(inserted?.last_run);
   });
 
   it('JOB_NAME is the job-scoped cronjob_runs key, not shared with any other job', () => {
@@ -102,18 +141,63 @@ describe('setCursorPosition', () => {
   });
 });
 
-describe('wrapCursor', () => {
+describe('stillCandidates', () => {
+  it('counts a row that transiented (marker untouched, still enriched_no_match) as still a candidate', () => {
+    expect(stillCandidates(totalsOf({ scanned: 200, lml_error: 200 }))).toBe(200);
+  });
+
+  it('counts a row whose DB write failed as still a candidate -- its marker never got stamped either', () => {
+    expect(stillCandidates(totalsOf({ scanned: 200, lml_error: 150, db_error: 50 }))).toBe(200);
+  });
+
+  it('excludes every bucket whose rows left the candidate set: resolved, marked no-match, trust-rejected, raced', () => {
+    // `resolved` flips metadata_status off enriched_no_match; `unresolved`
+    // and `trust_rejected` stamp no_match_recheck_attempted_at = now(), which
+    // fails query.ts's TTL predicate; `raced` means another writer already
+    // moved the row off that status.
+    expect(
+      stillCandidates(totalsOf({ scanned: 200, resolved: 50, unresolved: 80, trust_rejected: 40, raced: 30 }))
+    ).toBe(0);
+  });
+});
+
+describe('nextCursorPosition', () => {
   it('BS#2218 acceptance criterion: an all-transient batch does not re-select the identical candidate window next run', () => {
-    // Every one of a 200-row batch transients (scanned=200, none marked) --
-    // the cursor still advances by the full scanned count, landing a
+    // Every one of a 200-row batch transients -- nothing leaves the candidate
+    // set, so the cursor advances by the full scanned count, landing a
     // DIFFERENT offset for the next run rather than the same one.
     const thisRunOffset = 0;
-    const nextRunOffset = wrapCursor(thisRunOffset + 200, 137340);
+    const nextRunOffset = nextCursorPosition(thisRunOffset, totalsOf({ scanned: 200, lml_error: 200 }), 137340);
 
     expect(nextRunOffset).not.toBe(thisRunOffset);
     expect(nextRunOffset).toBe(200);
   });
 
+  it('does NOT advance when the whole batch was disposed of -- those rows left the set, so the same offset now points at unread rows', () => {
+    // The regression this rule exists to prevent: advancing by `scanned`
+    // here would put the next run at offset 200 of a set that just lost its
+    // first 200 entries, stepping clean over the 200 next-newest rows until
+    // the cursor wrapped hundreds of runs later.
+    expect(nextCursorPosition(0, totalsOf({ scanned: 200, resolved: 200 }), 137140)).toBe(0);
+  });
+
+  it('advances by exactly the leftovers on a mixed batch', () => {
+    // 200 scanned, 180 disposed of, 20 still transient -- the 20 leftovers
+    // now sit at offsets 0..19, so the next run starts at 20.
+    const totals = totalsOf({ scanned: 200, resolved: 60, unresolved: 100, trust_rejected: 20, lml_error: 20 });
+    expect(nextCursorPosition(0, totals, 137160)).toBe(20);
+  });
+
+  it('wraps rather than running off the end when the advance overshoots the total', () => {
+    expect(nextCursorPosition(137200, totalsOf({ scanned: 200, lml_error: 200 }), 137340)).toBe(60);
+  });
+
+  it('returns 0 when the cohort raced to empty (nothing to offset into)', () => {
+    expect(nextCursorPosition(400, totalsOf({ scanned: 200, lml_error: 200 }), 0)).toBe(0);
+  });
+});
+
+describe('wrapCursor', () => {
   it('wraps back to 0 once the offset reaches the total candidate count', () => {
     expect(wrapCursor(137340, 137340)).toBe(0);
   });

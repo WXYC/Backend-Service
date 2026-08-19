@@ -44,18 +44,38 @@
  * separated onto the correct side of the primary `NULLS FIRST` sort key, so
  * the tiebreak's NULL-ordering default never has to arbitrate across tiers.
  *
- * INDEXING NOTE: `flowsheet_no_match_recheck_idx` was built for the pre-fix
- * `(no_match_recheck_attempted_at NULLS FIRST, id ASC)` order and can still
- * serve the never-attempted tier's identification (all rows share the same
- * NULL key) but not its new `id DESC` tiebreak directly — Postgres sorts
- * that tier in memory after the index scan. The tier is bounded by the
- * cohort's total never-attempted count (a fraction of the ~137K-row cohort
- * measured 2026-08-18), and the columns involved are the two already in the
- * index, so this is an in-memory sort over narrow, already-fetched rows, not
- * an additional heap access — expected to stay well inside
- * `DB_STATEMENT_TIMEOUT_MS`. If this ever measures otherwise, the fix is a
+ * INDEXING NOTE — this ordering is deliberately NOT index-servable, and the
+ * cost is real, so state it plainly rather than eliding it.
+ * `flowsheet_no_match_recheck_idx` (migration 0151) is
+ * `(no_match_recheck_attempted_at NULLS FIRST, id ASC)`, built for the
+ * pre-fix `ORDER BY`. A B-tree can never match an `ORDER BY <CASE
+ * expression>` key, so the index survives only as the PREDICATE match (its
+ * partial `WHERE` is exactly this cohort, keeping the plan off a seq scan of
+ * the ~2.6M-row / ~1.7 GB `flowsheet` heap); it no longer supplies the sort
+ * order. Consequences, both of which the pre-fix query avoided:
+ *
+ *   - The plan must materialize and Sort the WHOLE candidate set before
+ *     `LIMIT`/`OFFSET` can apply — not just the never-attempted tier.
+ *     Incremental sort can use the leading `no_match_recheck_attempted_at`
+ *     key, but every never-attempted row shares one NULL group, so that
+ *     group is sorted in a single shot regardless.
+ *   - The sort input is the projected row (three `text` columns among
+ *     them), so the heap is visited for every candidate, where the pre-fix
+ *     plan short-circuited at `LIMIT` after roughly one page of
+ *     index-ordered rows.
+ *
+ * At the 2026-08-18 cohort size (137,340) that is a ~20 MB sort — above the
+ * default `work_mem`, so an external merge — plus full-cohort heap access,
+ * four times a day. Judged acceptable because this job's container sets
+ * `DB_STATEMENT_TIMEOUT_MS=60000` (see `Dockerfile.flowsheet-no-match-recheck`;
+ * the 5s default the API containers run under, and that migration 0151's
+ * docstring cites, does NOT apply here), which leaves an order of magnitude
+ * of headroom. If the cohort grows enough to erode that, the fix is a
  * companion partial index `(no_match_recheck_attempted_at NULLS FIRST, id
- * DESC)`, analogous to migration 0151.
+ * DESC)` built out-of-band with `CONCURRENTLY` per migration 0151's
+ * production-ops runbook — deliberately deferred rather than bundled here,
+ * since a second index on a hot ~2.6M-row table costs write amplification on
+ * every live flowsheet INSERT/UPDATE to buy latency this job does not need.
  *
  * BS#2218 also added `cursorOffset` (default 0, backward compatible) and
  * the sibling `countCandidates` export: an OFFSET-based starvation guard so
