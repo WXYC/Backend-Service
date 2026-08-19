@@ -7,9 +7,9 @@
  * marker exits the window. Bounded by a per-run LIMIT (the "bounded drip, not
  * a full-cohort sweep" constraint).
  *
- * BS#2218 changed the ordering: previously-attempted (TTL-expired) rows still
- * lead, oldest-attempted-first, but the never-attempted (`NULLS FIRST`) tier's
- * tiebreak flipped from `id ASC` to `id DESC` (newest-first) — see
+ * BS#2218 changed the ordering: never-attempted rows still lead (`NULLS
+ * FIRST`) and previously-attempted rows still sort oldest-attempted-first,
+ * but the `id` tiebreak flipped from `ASC` to `DESC` (newest-first) — see
  * `query.ts`'s module docstring for why oldest-first stranded 2026 playcuts
  * 132,460 rows deep. BS#2218 also added an OFFSET cursor (`countCandidates` +
  * a `cursorOffset` param on `loadCandidates`) so a persistently-transient
@@ -79,29 +79,33 @@ describe('loadCandidates', () => {
     expect(text).toMatch(/LIMIT/i);
   });
 
-  test('BS#2218: never-attempted tiebreak is newest-first (id DESC) — a 2026 playcut sorts ahead of a 2004 one', async () => {
+  test('BS#2218: the id tiebreak is newest-first (DESC) — a 2026 playcut sorts ahead of a 2004 one', async () => {
     (db.execute as jest.Mock).mockResolvedValueOnce([]);
 
     await loadCandidates(14, 200);
 
-    // The never-attempted (NULLS FIRST) tier's tiebreak: `f."id"` DESC only
-    // when the marker is NULL. `id` is monotonically assigned at insert time,
-    // so a 2026 playcut (a large id, e.g. ~5,309,000 per the BS#2218
-    // measurement) sorts strictly before a 2004 playcut (a small id, e.g.
-    // ~200) under this CASE/DESC pair — the opposite of the pre-fix `id ASC`
-    // tiebreak that put 22 years of history ahead of anything a listener can
-    // currently see.
+    // `id` is monotonically assigned at insert time, so a 2026 playcut (a
+    // large id, e.g. ~5,309,000 per the BS#2218 measurement) sorts strictly
+    // before a 2004 playcut (a small id, e.g. ~200) — the opposite of the
+    // pre-fix `id ASC` tiebreak that put 22 years of history ahead of
+    // anything a listener can currently see.
     const text = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]).replace(/\s+/g, ' ');
-    expect(text).toMatch(/CASE WHEN f\."no_match_recheck_attempted_at" IS NULL THEN f\."id" END\s+DESC/i);
+    expect(text).toMatch(/ORDER BY f\."no_match_recheck_attempted_at" ASC NULLS FIRST, f\."id" DESC/i);
   });
 
-  test('BS#2218: previously-attempted tier keeps its own id ASC tiebreak, independent of the never-attempted tier', async () => {
+  test('BS#2218: no CASE expressions in the ORDER BY — a per-tier tiebreak would foreclose the index remedy', async () => {
     (db.execute as jest.Mock).mockResolvedValueOnce([]);
 
     await loadCandidates(14, 200);
 
+    // A B-tree can never supply an `ORDER BY <CASE expression>` order, so
+    // splitting the tiebreak per tier would rule out the companion
+    // `(no_match_recheck_attempted_at NULLS FIRST, id DESC)` index that
+    // query.ts's INDEXING NOTE holds in reserve. The tie a per-tier
+    // tiebreak would protect (two rows stamped at the identical timestamp)
+    // does not occur: each stamp is its own single-row UPDATE.
     const text = renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]).replace(/\s+/g, ' ');
-    expect(text).toMatch(/CASE WHEN f\."no_match_recheck_attempted_at" IS NOT NULL THEN f\."id" END\s+ASC/i);
+    expect(text).not.toMatch(/ORDER BY[^;]*CASE/i);
   });
 
   test('BS#2218: accepts a cursorOffset and appends it as OFFSET', async () => {

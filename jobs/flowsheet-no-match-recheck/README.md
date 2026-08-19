@@ -22,7 +22,7 @@ Each run:
 4. **Trusted match** → fill-null write (never clobbers a populated field) and flips the row to `enriched_match`: linked rows (`album_id` present) UPSERT into `album_metadata`; unlinked (free-form) rows update flowsheet's own inline metadata columns.
 5. **No match, or an untrusted candidate** → stamps `no_match_recheck_attempted_at` so the row backs off behind the TTL; `metadata_status` stays `enriched_no_match`.
 6. **Transient LML failure** (a throw, a cascade-timeout body, or a breaker-open/shed response with no usable answer) → leaves the row untouched entirely, so it stays a candidate. Note the BS#2218 nuance: "stays a candidate" is not "is re-read next run". The marker is what makes the row eligible; the OFFSET cursor decides which eligible slice a run reads, and it advances exactly past this run's leftovers — so a transient row is re-read once the cursor comes back around, not on the immediately following run. That is the starvation guard working as intended, and it is why the cursor advances by leftovers rather than by batch size (see below).
-7. Advances and persists the BS#2218 OFFSET cursor by however many rows this run scanned (skipped in `DRY_RUN`).
+7. Advances and persists the BS#2218 OFFSET cursor past however many of this run's candidates are still candidates (skipped in `DRY_RUN`).
 
 ## The BS#2218 self-lock and its fix
 
@@ -33,8 +33,10 @@ A second, independent defect compounded it: even a perfectly functioning job nee
 Fix, all three required together (see BS#2218 for the full measurement and decision record):
 
 - **Budget-header suppression** (`lml-fetch.ts`) — `budgetMs: null` unconditionally, the same BS#1914 lever BS#1978 applied to the live enrichment worker's CDC lane. No feature flag: every candidate this job looks up is exactly the cold-release population that needs the full cascade, so there's no adjacent lane to scope suppression away from.
-- **Never-attempted tiebreak flipped to newest-first** (`query.ts`) — `id DESC` instead of `id ASC`. TTL-expired rows keep their own `id ASC` tiebreak, unchanged.
+- **`id` tiebreak flipped to newest-first** (`query.ts`) — `id DESC` instead of `id ASC`. The TTL-expired tier still sorts oldest-attempted-first; only its `id` tiebreak rides along to `DESC`, which is immaterial because that tiebreak only arbitrates rows sharing an identical `no_match_recheck_attempted_at` and each stamp is its own single-row UPDATE.
 - **OFFSET cursor** (`watermark.ts`, `cronjob_runs.cursor_position`, migration 0152) — a starvation guard independent of the other two: even if some future condition makes a slice of the cohort chronically transient again, the cursor advances past it every run instead of re-reading the identical window forever. Wraps modulo a fresh candidate count, so it never permanently skips a row whose TTL has since expired — it layers on top of the TTL rotation, it doesn't replace it. It advances by however many of the run's candidates are STILL candidates afterwards, not by how many were scanned: a row that got a definitive answer has left the set, and advancing past it too would step over rows the job has never read (a whole batch per run at a healthy resolution rate, deferred until the next wrap). In the all-transient case nothing leaves, so the advance is the full batch and the guard behaves exactly as an outcome-independent one would.
+
+  The cursor's known cost is that it defers the head: a no-match row written today sorts to ordering position 0, and once the cursor has moved off 0 it does not return until it wraps — a fixed `total / BATCH_SIZE` runs, ~5.7 months at the 2026-08-18 numbers. `watermark.ts`'s module doc carries the reasoning for accepting that (the first pass still rescues the backlog newest-first, and a freshly-written no-match already survived a headerless live lookup since BS#1978, so it is a weaker recheck candidate than a historical one) and the shape to reach for if it stops holding.
 
 **Do not stamp the marker on a transient response to force progress** — that was considered and rejected; it would reintroduce the exact false-freeze BS#1977 and BS#2179 review HIGH 2 fixed, one TTL rotation removed.
 
