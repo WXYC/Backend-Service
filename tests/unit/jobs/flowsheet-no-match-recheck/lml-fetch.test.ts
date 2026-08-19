@@ -21,15 +21,23 @@
  *     `degraded_reason` `@wxyc/shared`'s `LookupResponse` DTO documents
  *     today, so a newly-added reason can't silently regress into
  *     "definitive" — see the dedicated describe block below.
+ *   - BS#2218: `lookupNoMatchRecheck` sends `budgetMs: null` unconditionally
+ *     (BS#1914's lever), so no `X-Caller-Budget-Ms` header reaches LML at
+ *     all — see the dedicated describe block below.
  *
- * This job stays registered at LML class 5 sending the `X-Caller-Budget-Ms`
- * header unconditionally (BS#2179 review HIGH 3, withdrawn on further
- * review) — it is a batch drain with per-item error isolation, the same
- * shape `apps/enrichment-worker/lookup-batcher.ts`'s BS#1978 doc comment
- * names as correctly keeping the header (`flowsheet-linked-reenrichment`,
- * every `*-backfill` job); the "4s cutoff is wrong" finding applies only to
- * `enrichment-worker`'s live CDC lane, not to class 5 generally. No
- * `budgetMs: null` override belongs here.
+ * CORRECTION (BS#2218): BS#2179 review HIGH 3 concluded this job should stay
+ * registered at LML class 5 sending `X-Caller-Budget-Ms` unconditionally,
+ * reasoning that the "4s cutoff is wrong" finding applied only to
+ * `enrichment-worker`'s live CDC lane, not to class-5 batch drains generally.
+ * That reasoning didn't hold for THIS drain specifically: unlike a generic
+ * backfill, this cohort is defined by having already failed a live lookup
+ * once, so it's enriched for exactly the cold non-library releases that need
+ * LML's full cascade (measured 4-20s on 2026-08-04) — the same population
+ * BS#1978 was built for. Prod measurement on 2026-08-18 confirmed the
+ * consequence directly: the header's ~4s empty-state cutoff was arming on
+ * this population so reliably that the job made near-zero forward progress
+ * (64 rows drained from a 137,340-row cohort in five runs). See BS#2218 for
+ * the full measurement and the corrected decision.
  */
 
 beforeEach(() => {
@@ -80,6 +88,20 @@ describe('lookupNoMatchRecheck', () => {
       'Entain',
       'Kohde',
       expect.objectContaining({ caller: 'flowsheet-no-match-recheck' })
+    );
+  });
+
+  it('sends no X-Caller-Budget-Ms — budgetMs: null unconditionally (BS#2218, BS#1914 lever)', async () => {
+    const mockLookup = jest.fn().mockResolvedValue({ search_type: 'none', results: [] });
+
+    const { lookupNoMatchRecheck } = await loadModule(mockLookup);
+    await lookupNoMatchRecheck(candidate);
+
+    expect(mockLookup).toHaveBeenCalledWith(
+      'Vladislav Delay',
+      'Entain',
+      'Kohde',
+      expect.objectContaining({ budgetMs: null })
     );
   });
 

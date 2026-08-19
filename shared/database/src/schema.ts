@@ -427,6 +427,14 @@ export type CronjobRun = InferSelectModel<typeof cronjob_runs>;
 export const cronjob_runs = wxyc_schema.table('cronjob_runs', {
   job_name: varchar('job_name', { length: 64 }).primaryKey(),
   last_run: timestamp('last_run', { withTimezone: true }).notNull().defaultNow(),
+  // BS#2218: opt-in OFFSET cursor for a job whose candidate query cannot use
+  // `last_run` alone as a "since last run" watermark (fleet-standard on this
+  // table) because its ordering key isn't time-partitionable per row -- see
+  // `jobs/flowsheet-no-match-recheck/query.ts`'s module docstring for the
+  // starvation this exists to break. NULL for every job that doesn't opt in
+  // (every row this table already has); a job that never writes this column
+  // never observes it.
+  cursor_position: integer('cursor_position'),
 });
 
 export type NewArtist = InferInsertModel<typeof artists>;

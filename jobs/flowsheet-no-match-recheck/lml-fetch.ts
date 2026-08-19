@@ -42,6 +42,30 @@
  * deliberately NOT included: it is a genuine (if degraded-confidence)
  * answer LML served from cache, not an unanswered call, so a `cache_only`
  * response with no artwork stays a definitive `no_match`.
+ *
+ * BUDGET HEADER (BS#2218): every call sends `budgetMs: null` (BS#1914's
+ * suppression lever) — no `X-Caller-Budget-Ms` header reaches LML at all,
+ * unconditionally, no feature flag. This corrects BS#2179 review HIGH 3,
+ * which concluded this job should keep the class-5 default (header sent
+ * unconditionally) on the reasoning that the "4s cutoff is wrong" finding
+ * was scoped to `enrichment-worker`'s live CDC lane, not batch drains
+ * generally. That reasoning doesn't hold for this drain specifically: unlike
+ * a generic backfill, this job's candidate cohort is DEFINED by having
+ * already failed a live lookup once (`metadata_status = 'enriched_no_match'`),
+ * so it is enriched for exactly the cold non-library releases that need
+ * LML's full cascade — measured 4-20s on 2026-08-04, the same population
+ * BS#1978 exists to serve. Prod measurement on 2026-08-18 confirmed the
+ * consequence: the header's mere presence arms LML's ~4s empty-state cutoff
+ * (`shared/lml-client/src/policy.ts`'s "CORRECTED MODEL"), so a `no_match`
+ * row needing genuine cold resolution came back `deadline_exceeded` so
+ * reliably that `isUnansweredDegraded` above kept re-queuing the same head
+ * of the candidate set run after run — 64 rows drained from a 137,340-row
+ * cohort in five runs, decaying toward zero. Unlike BS#1978's `'live'` lane,
+ * there is no `'sweep'` lane sharing this call site that suppression must be
+ * scoped away from — every candidate this job looks up is exactly the
+ * population that needs the full cascade — so the lever applies
+ * unconditionally, with no env-var gate. See BS#2218 for the measurement and
+ * the query-ordering half of the same fix (`query.ts`).
  */
 
 import {
@@ -98,17 +122,17 @@ const envInt = (name: string, fallback: number): number => {
 // A client-side socket-abort safety net (35_000ms mirrors
 // flowsheet-metadata-backfill's `BACKFILL_LML_PER_CALL_TIMEOUT_MS` default),
 // NOT a lever that extends how long LML itself will search a cold release.
-// This caller stays registered at LML class 5 (BS#2179 review HIGH 3,
-// withdrawn — see `shared/lml-client/src/policy.ts`), which sends the
-// `X-Caller-Budget-Ms` header unconditionally; per that module's "CORRECTED
-// MODEL" doc comment, the header's mere PRESENCE — not its magnitude — arms
-// LML's ~4s empty-state cascade cutoff regardless of what this constant is
-// set to. So a cold, hard-to-resolve release is expected to come back as a
-// `degraded_reason: 'deadline_exceeded'` response well under this timeout,
-// not to be given LML's full cascade on retry. `isUnansweredDegraded` below
-// (BS#2179 review HIGH 2 / BS#1977) treats that response as transient so the
-// row stays immediately retryable instead of freezing as a fresh false
-// no-match — this constant only bounds a genuinely wedged/hung connection.
+// BS#2218: `lookupNoMatchRecheck` now sends `budgetMs: null` unconditionally
+// (see the module doc comment above), so `X-Caller-Budget-Ms` never reaches
+// LML from this caller — the ~4s empty-state cascade cutoff that header arms
+// (`shared/lml-client/src/policy.ts`'s "CORRECTED MODEL") does not apply
+// here. A cold, hard-to-resolve release instead runs LML's full headerless
+// cascade, bounded by LML's own `LML_SEARCH_HARD_TIMEOUT_MS` (25000ms
+// default). This constant stays a safety margin ABOVE that hard cap — 35s —
+// so it only fires on a genuinely wedged/hung connection, never as LML's
+// normal (if slow) answer path. `isUnansweredDegraded` below still exists
+// for the shapes that remain transient even headerless (a breaker-open/shed
+// response, or a socket-level `timeout: true`) — see its own doc comment.
 const TIMEOUT_MS = envInt('FLOWSHEET_NO_MATCH_RECHECK_LML_PER_CALL_TIMEOUT_MS', 35_000);
 
 export const extractTrustedArtwork = (response: LookupResponse): DiscogsMatchResult | null => {
@@ -161,6 +185,10 @@ export const lookupNoMatchRecheck = async (candidate: Candidate): Promise<Lookup
       timeoutMs: TIMEOUT_MS,
       caller: 'flowsheet-no-match-recheck',
       discogsUnavailable: candidate.discogs_unavailable,
+      // BS#2218: unconditional BS#1914 suppression — see the module doc
+      // comment's "BUDGET HEADER" paragraph for why this drain, unlike a
+      // generic class-5 backfill, needs LML's full cascade on every call.
+      budgetMs: null,
     }
   );
 

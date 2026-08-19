@@ -1,0 +1,37 @@
+-- 0152 add `cronjob_runs.cursor_position` (BS#2218).
+--
+-- Opt-in OFFSET cursor for `jobs/flowsheet-no-match-recheck`, persisted on
+-- the fleet-standard `cronjob_runs` watermark table rather than a new
+-- per-job table -- see `jobs/metadata-no-match-digest/watermark.ts` for the
+-- existing `last_run`-only precedent this column extends.
+--
+-- WHY this job can't use `last_run` alone the way every other `cronjob_runs`
+-- consumer does: those jobs filter their candidate query by a timestamp
+-- column that advances monotonically as new rows arrive (`flowsheet.add_time`,
+-- `flowsheet.updated_at`), so "since last run" is a well-defined window. This
+-- job's candidate query (`jobs/flowsheet-no-match-recheck/query.ts`) orders by
+-- `no_match_recheck_attempted_at ASC NULLS FIRST, ...` and that marker is
+-- deliberately left untouched on a transient LML response (BS#1977 /
+-- BS#2179 review HIGH 2) -- see the query module's docstring. A batch of
+-- rows that transients every single time therefore never changes position in
+-- that ordering, and a `last_run`-only watermark can't skip past it, because
+-- skipping is exactly what would let a row's TTL rotation lapse unnoticed.
+-- `cursor_position` instead offsets INTO the same ordered candidate set the
+-- query already computes, advancing by `BATCH_SIZE` every run and wrapping
+-- modulo a fresh `COUNT(*)` of the matching predicate -- so a persistently-
+-- transient head cannot occupy every future run's candidate window, while
+-- every row is still guaranteed to cycle back into view within one full
+-- wrap. See `jobs/flowsheet-no-match-recheck/watermark.ts` for the read/write
+-- helpers and the wraparound arithmetic, and the query module's docstring for
+-- why this is a starvation GUARD layered on top of the TTL rotation, not a
+-- replacement for it.
+--
+-- NULL for every job_name row that doesn't opt in (every row this table has
+-- today) -- a job that never writes this column never reads it either.
+--
+-- DDL-only, additive, nullable column -> no table rewrite, no backfill, no
+-- CONCURRENTLY dance: `cronjob_runs` is a tiny (one row per job) control
+-- table, unlike `flowsheet`/`library`, so a plain in-migration ALTER TABLE
+-- is the same operation the CONCURRENTLY runbooks on those large tables
+-- exist to avoid taking there.
+ALTER TABLE "wxyc_schema"."cronjob_runs" ADD COLUMN "cursor_position" integer;

@@ -1,5 +1,5 @@
 /**
- * Entrypoint for jobs/flowsheet-no-match-recheck (BS#2176).
+ * Entrypoint for jobs/flowsheet-no-match-recheck (BS#2176, BS#2218).
  *
  * Recurring, cause-agnostic re-ask of `flowsheet.metadata_status =
  * 'enriched_no_match'` rows: `enriched_no_match` is a terminal status, but
@@ -9,13 +9,31 @@
  * the album). Nothing else revisits these rows, so this job generalizes the
  * one-shot rescue drains (#1433, #1638, #1979) into a standing mechanism:
  * every run re-asks LML for a bounded, TTL-gated slice of the cohort, ordered
- * oldest-recheck-attempted-first, so no future freeze cause needs its own
- * one-shot ticket.
+ * per `query.ts` (never-attempted rows newest-first, then TTL-expired rows
+ * oldest-attempted-first), so no future freeze cause needs its own one-shot
+ * ticket.
  *
  * Idempotent: the SELECT predicate is `metadata_status = 'enriched_no_match'`
  * and the WHERE guard on every write is the same — rerun-safe and race-safe
  * against a concurrent writer (another run of this job; in principle a
  * future writer) that already moved the row off that status.
+ *
+ * BS#2218's OFFSET cursor is composed here, around `runNoMatchRecheck`,
+ * rather than inside `orchestrate.ts`: read the stored cursor + a fresh
+ * candidate count, clamp it into range (`watermark.ts`'s `wrapCursor`), load
+ * this run's batch at that offset, run the existing per-row loop unchanged,
+ * then advance and persist the cursor by however many rows this run actually
+ * scanned (`totals.scanned` — outcome-independent, see `watermark.ts`'s
+ * module doc comment). Keeping this composition in `job.ts` means
+ * `orchestrate.ts`'s `LoadCandidatesFn` stays the simple zero-arg shape its
+ * existing tests already pin — no cursor concept leaks into the orchestrator
+ * or its transient-handling contract.
+ *
+ * Cursor resolution is fail-fast, not best-effort: a `getCursorPosition` /
+ * `countCandidates` failure aborts the run before any lookup (same posture
+ * as `requireLmlConfigured` below) rather than silently falling back to
+ * offset 0 — a DB outage should surface as a failed run, not masquerade as
+ * "cohort fully drained, start over from the top" on the next one.
  *
  * Invocation:
  *   docker run --rm --env-file .env <image>
@@ -34,11 +52,12 @@
  *   LIVE_ACTIVITY_PAUSE_MS=N                         default 30000
  */
 
-import { closeDatabaseConnection, requirePositiveInt } from '@wxyc/database';
+import { closeDatabaseConnection, db, requirePositiveInt } from '@wxyc/database';
 
 import { runNoMatchRecheck } from './orchestrate.js';
 import {
   loadCandidates,
+  countCandidates,
   BATCH_SIZE_DEFAULT,
   BATCH_SIZE_ENV,
   NO_MATCH_TTL_DAYS_DEFAULT,
@@ -46,6 +65,7 @@ import {
 } from './query.js';
 import { lookupNoMatchRecheck } from './lml-fetch.js';
 import { markRecheckAttempted, writeMatch } from './writer.js';
+import { getCursorPosition, setCursorPosition, wrapCursor } from './watermark.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
 
 const JOB_NAME = 'flowsheet-no-match-recheck';
@@ -87,13 +107,25 @@ const main = async (): Promise<void> => {
       context: JOB_NAME,
       note: 'This bounds the LML call volume per run — the whole point of the recurring drip.',
     });
+
+    // BS#2218 starvation guard: resolve this run's OFFSET from the stored
+    // cursor, clamped into the current candidate count's range (the cohort
+    // shrinks between runs as rows resolve, so a stale cursor can otherwise
+    // land past the current end) — see `watermark.ts`'s module doc comment
+    // for the full mechanism.
+    const totalCandidates = await countCandidates(noMatchTtlDays);
+    const storedCursor = await getCursorPosition();
+    const cursorOffset = wrapCursor(storedCursor ?? 0, totalCandidates);
+
     log('info', 'init', `${JOB_NAME} initialized`, {
       dry_run: dryRun,
       no_match_ttl_days: noMatchTtlDays,
       batch_size: batchSize,
+      total_candidates: totalCandidates,
+      cursor_offset: cursorOffset,
     });
     const { totals } = await runNoMatchRecheck({
-      loadCandidates: () => loadCandidates(noMatchTtlDays, batchSize),
+      loadCandidates: () => loadCandidates(noMatchTtlDays, batchSize, cursorOffset),
       lookup: lookupNoMatchRecheck,
       write: writeMatch,
       markAttempted: markRecheckAttempted,
@@ -102,6 +134,26 @@ const main = async (): Promise<void> => {
         log('info', 'live_activity_pause', 'live flowsheet activity detected; pausing');
       },
     });
+
+    // Advance by `totals.scanned` (every candidate this run visited,
+    // regardless of outcome — including a row that transiented and left its
+    // retry marker untouched), not `batchSize`: a tail page can return fewer
+    // rows than a full batch when `cursorOffset + batchSize` overruns
+    // `totalCandidates`, and advancing by the actual count lands the next
+    // cursor exactly at the end instead of overshooting past it. Skipped
+    // entirely in dry-run mode — a preview run must stay side-effect-free,
+    // including for the next REAL run's starting offset.
+    if (!dryRun) {
+      const nextCursor = wrapCursor(cursorOffset + totals.scanned, totalCandidates);
+      await setCursorPosition(db, nextCursor);
+      log('info', 'cursor_advanced', "persisted the next run's OFFSET cursor", {
+        cursor_offset: cursorOffset,
+        next_cursor: nextCursor,
+        scanned: totals.scanned,
+        total_candidates: totalCandidates,
+      });
+    }
+
     log('info', 'finished', `${JOB_NAME} done`, { dry_run: dryRun, ...totals });
   } catch (error) {
     log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });
