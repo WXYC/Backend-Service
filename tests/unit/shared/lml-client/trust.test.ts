@@ -9,7 +9,7 @@
  * tests still pin its standalone contract so the reservation is verifiable
  * ahead of that wiring.
  */
-import { isTrustedLmlAlbumMatch, isTrustedLmlTrackContextMatch } from '@wxyc/lml-client';
+import { isTrustedLmlAlbumMatch, isTrustedLmlTrackContextMatch, lmlTrackContextTrust } from '@wxyc/lml-client';
 
 describe('isTrustedLmlAlbumMatch', () => {
   it('trusts a direct match', () => {
@@ -157,4 +157,86 @@ describe('isTrustedLmlTrackContextMatch — request/result correspondence (BS#22
       ).toBe(true);
     }
   );
+});
+
+/**
+ * BS#2217 code review — the correspondence carve-out vouches for exactly one
+ * result (`results[0]`), where a trusted `search_type` vouches for the whole
+ * response. `lmlTrackContextTrust` exposes that distinction so the artwork
+ * extractors can scope their walk accordingly instead of inferring it.
+ */
+describe('lmlTrackContextTrust', () => {
+  it('reports search_type trust for direct and compilation', () => {
+    expect(lmlTrackContextTrust({ search_type: 'direct' })).toBe('search_type');
+    expect(lmlTrackContextTrust({ search_type: 'compilation' })).toBe('search_type');
+  });
+
+  it('reports correspondence trust for a row-less match of the requested album', () => {
+    expect(
+      lmlTrackContextTrust(
+        { search_type: 'alternative', results: [{ library_item: { id: 0, title: 'Ghetto Dub' } }] },
+        'Ghetto Dub'
+      )
+    ).toBe('correspondence');
+  });
+
+  it.each([
+    ['song_as_artist lane exclusion', { search_type: 'song_as_artist' as const }, 'Ghetto Dub'],
+    [
+      'a real library id',
+      { search_type: 'alternative' as const, results: [{ library_item: { id: 64288, title: 'Vantaa' } }] },
+      'Entain',
+    ],
+    [
+      'a non-corresponding title',
+      { search_type: 'alternative' as const, results: [{ library_item: { id: 0, title: 'Other' } }] },
+      'Ghetto Dub',
+    ],
+  ])('reports no trust for %s', (_label, response, requestedAlbum) => {
+    expect(lmlTrackContextTrust(response, requestedAlbum)).toBe('none');
+  });
+
+  it('agrees with isTrustedLmlTrackContextMatch on every shape', () => {
+    const shapes = [
+      { search_type: 'direct' as const },
+      { search_type: 'song_as_artist' as const },
+      { search_type: 'alternative' as const, results: [{ library_item: { id: 0, title: 'Ghetto Dub' } }] },
+      { search_type: 'alternative' as const, results: [{ library_item: { id: 7, title: 'Ghetto Dub' } }] },
+    ];
+    for (const shape of shapes) {
+      expect(lmlTrackContextTrust(shape, 'Ghetto Dub') !== 'none').toBe(
+        isTrustedLmlTrackContextMatch(shape, 'Ghetto Dub')
+      );
+    }
+  });
+});
+
+/**
+ * BS#2217 code review — the documented "absorbs the DJ-entry vs Discogs
+ * divergence" claim has to survive diacritics, which WXYC's catalog is full
+ * of (Nilüfer Yanya, Csillagrablók, Hermanos Gutiérrez). A flowsheet entry
+ * typed on a US keyboard must still correspond to Discogs's accented string.
+ */
+describe('looseTitleKey diacritic folding (BS#2217 review)', () => {
+  it.each([
+    ['Café Bar', 'cafe bar'],
+    ['Björk Sessions', 'bjork sessions'],
+    ['Csillagrablók', 'csillagrablok'],
+  ])('treats %s and %s as corresponding', (returned, requested) => {
+    expect(
+      isTrustedLmlTrackContextMatch(
+        { search_type: 'alternative', results: [{ library_item: { id: 0, title: returned } }] },
+        requested
+      )
+    ).toBe(true);
+  });
+
+  it('still rejects a genuinely different title', () => {
+    expect(
+      isTrustedLmlTrackContextMatch(
+        { search_type: 'alternative', results: [{ library_item: { id: 0, title: 'Café Bar' } }] },
+        'tea room'
+      )
+    ).toBe(false);
+  });
 });

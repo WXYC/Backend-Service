@@ -1347,6 +1347,48 @@ describe('extractArtwork', () => {
     it('returns null when requestedAlbum does not correspond to the returned title', () => {
       expect(extractArtwork(rowlessResponse('The Spiritual Sound'), 'A Different Album')).toBeNull();
     });
+
+    /**
+     * BS#2217 code review: the correspondence carve-out vouches for
+     * `results[0]` and nothing else. The BS#961 artwork walk must therefore
+     * stop at index 0 on that path, or a substitution parked at `results[1]`
+     * donates its cover to a row accepted purely on `results[0]`'s evidence.
+     */
+    it('does not walk past results[0] on the correspondence path — a substitution at results[1] cannot donate artwork', () => {
+      const response = {
+        search_type: 'alternative',
+        results: [
+          { library_item: { id: 0, title: 'The Spiritual Sound' }, artwork: null },
+          {
+            library_item: { id: 64288, title: 'Vantaa' },
+            artwork: {
+              artwork_url: 'https://i.discogs.com/substitution/cover.jpg',
+              release_url: 'https://discogs.com/release/substitution',
+            },
+          },
+        ],
+      } as unknown as LookupResponse;
+
+      expect(extractArtwork(response, 'The Spiritual Sound')).toBeNull();
+    });
+
+    it('still walks past results[0] on a trusted search_type — BS#961 compilation artwork is preserved', () => {
+      const response = {
+        search_type: 'compilation',
+        results: [
+          { library_item: { id: 0, title: 'Some Comp' }, artwork: null },
+          {
+            library_item: { id: 4242, title: 'Some Comp' },
+            artwork: {
+              artwork_url: 'https://i.discogs.com/comp/cover.jpg',
+              release_url: 'https://discogs.com/release/comp',
+            },
+          },
+        ],
+      } as unknown as LookupResponse;
+
+      expect(extractArtwork(response, 'Some Comp')).toEqual(response.results![1]!.artwork);
+    });
   });
 });
 

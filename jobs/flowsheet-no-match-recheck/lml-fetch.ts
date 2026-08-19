@@ -77,7 +77,7 @@
 
 import {
   lookupMetadata as sharedLookupMetadata,
-  isTrustedLmlTrackContextMatch,
+  lmlTrackContextTrust,
   shedReasonOf,
   type DiscogsMatchResult,
   type GatedLookupResponse,
@@ -146,12 +146,19 @@ export const extractTrustedArtwork = (
   response: LookupResponse,
   requestedAlbum?: string | null
 ): DiscogsMatchResult | null => {
-  if (!isTrustedLmlTrackContextMatch(response, requestedAlbum)) return null;
+  const trust = lmlTrackContextTrust(response, requestedAlbum);
+  if (trust === 'none') return null;
   // Walk `results` in order rather than reading only `results[0].artwork` —
   // an accepted `compilation` response can pair each `library_item` with
   // its own independently-resolved artwork, so the first entry's `artwork`
   // may be null while a later entry carries it (BS#961).
-  for (const result of response.results ?? []) {
+  //
+  // BS#2217 review: scoped to index 0 on the correspondence path, whose
+  // evidence is `results[0]`'s own row-less id and title and covers nothing
+  // else in the array. See the sibling walk in
+  // `apps/enrichment-worker/enrich.ts#extractArtwork` for the full rationale.
+  const vouchedFor = trust === 'correspondence' ? (response.results ?? []).slice(0, 1) : (response.results ?? []);
+  for (const result of vouchedFor) {
     if (result.artwork) return result.artwork;
   }
   return null;
@@ -186,9 +193,19 @@ const isUnansweredDegraded = (response: LookupResponse, artwork: DiscogsMatchRes
 };
 
 export const lookupNoMatchRecheck = async (candidate: Candidate): Promise<LookupOutcome> => {
+  // BS#2217 review: decode ONCE and reuse for both the request and the
+  // correspondence check. Sending LML the decoded album while gating on the
+  // raw one made every entity-bearing title self-reject: the row asks for
+  // `Rock & Roll`, LML returns `Rock & Roll` row-less, and the gate compared
+  // `rock amp roll` against `rock roll`. Those rows are exactly the
+  // population `decodeHtmlEntities` was added for, and because the recheck
+  // stamps `no_match_recheck_attempted_at` on every pass, the rejection
+  // would repeat behind the TTL forever — entrenching the defect this job
+  // exists to recover from.
+  const requestedAlbum = candidate.album_title !== null ? decodeHtmlEntities(candidate.album_title) : undefined;
   const response = await sharedLookupMetadata(
     decodeHtmlEntities(candidate.artist_name),
-    candidate.album_title !== null ? decodeHtmlEntities(candidate.album_title) : undefined,
+    requestedAlbum,
     candidate.track_title !== null ? decodeHtmlEntities(candidate.track_title) : undefined,
     {
       limiter: defaultLmlLimiter,
@@ -206,7 +223,8 @@ export const lookupNoMatchRecheck = async (candidate: Candidate): Promise<Lookup
     throw new Error('LML lookup returned a timeout body; treating as transient so the row stays retryable');
   }
 
-  const artwork = extractTrustedArtwork(response, candidate.album_title);
+  const trust = lmlTrackContextTrust(response, requestedAlbum);
+  const artwork = extractTrustedArtwork(response, requestedAlbum);
 
   if (isUnansweredDegraded(response, artwork)) {
     throw new Error(
@@ -216,16 +234,17 @@ export const lookupNoMatchRecheck = async (candidate: Candidate): Promise<Lookup
 
   if (artwork) return { kind: 'resolved', artwork };
 
-  if (
-    response.search_type === 'direct' ||
-    response.search_type === 'compilation' ||
-    response.search_type === undefined
-  ) {
-    // A trusted search_type with no artwork in any result (BS#961 edge
-    // case) is a genuine no-match, same as an absent search_type.
-    return { kind: 'no_match' };
-  }
-  if (response.search_type === 'none') {
+  if (trust !== 'none' || response.search_type === undefined || response.search_type === 'none') {
+    // A TRUSTED response with no artwork in any vouched-for result (BS#961
+    // edge case) is a genuine no-match, same as an absent search_type.
+    //
+    // BS#2217 review: this branches on what the GATE decided, not on
+    // `search_type` directly. `trust_rejected` is the counter the team reads
+    // to judge whether the correspondence carve-out is working, so a
+    // response the gate ACCEPTED which merely carried no artwork must not
+    // inflate it — before this fix a trusted-by-correspondence `alternative`
+    // fell through to `trust_rejected` and would have overstated the very
+    // rejection rate this change exists to reduce.
     return { kind: 'no_match' };
   }
   // fallback | alternative | song_as_artist: LML found a candidate but it's

@@ -40,6 +40,11 @@
  * the full measurement and the corrected decision.
  */
 
+import {
+  isTrustedLmlTrackContextMatch as realIsTrustedLmlTrackContextMatch,
+  lmlTrackContextTrust as realLmlTrackContextTrust,
+} from '@wxyc/lml-client';
+
 beforeEach(() => {
   jest.resetModules();
 });
@@ -56,26 +61,15 @@ const loadModule = async (
   }));
   jest.doMock('@wxyc/lml-client', () => ({
     lookupMetadata: mockLookup,
-    // BS#1359/#1959/#2217: faithful stand-in for the shared track-context
-    // trust predicate — mirrors its real (and only) rule, including the
-    // BS#2217 request<->result correspondence carve-out for everything
-    // other than `direct`/`compilation`/`song_as_artist`.
-    isTrustedLmlTrackContextMatch: (
-      r: { search_type?: string; results?: { library_item?: { id?: number; title?: string | null } }[] },
-      requestedAlbum?: string | null
-    ) => {
-      if (r.search_type === 'direct' || r.search_type === 'compilation') return true;
-      if (r.search_type === 'song_as_artist') return false;
-      const top = r.results?.[0];
-      if (top?.library_item?.id !== 0) return false;
-      const norm = (s: string | null | undefined) =>
-        (s ?? '')
-          .toLowerCase()
-          .replace(/[^\p{L}\p{N}]+/gu, ' ')
-          .trim();
-      const a = norm(top.library_item?.title);
-      return a !== '' && a === norm(requestedAlbum);
-    },
+    // BS#2217 review: delegate to the REAL trust predicates instead of
+    // hand-mirroring their rule here. The previous stand-in duplicated the
+    // gate's logic, so every refinement had to be applied in two places and
+    // any divergence would silently make this suite pass against a rule the
+    // job does not actually run. Only `lookupMetadata` and `shedReasonOf`
+    // need to be fakes; the trust gate is pure and is exactly what this
+    // suite is asserting about.
+    lmlTrackContextTrust: realLmlTrackContextTrust,
+    isTrustedLmlTrackContextMatch: realIsTrustedLmlTrackContextMatch,
     shedReasonOf: (response: { outcome?: string }) =>
       response.outcome === 'shed_limiter_saturated' || response.outcome === 'shed_breaker_open'
         ? response.outcome
@@ -238,6 +232,46 @@ describe('lookupNoMatchRecheck', () => {
     const outcome = await lookupNoMatchRecheck(candidate);
 
     expect(outcome).toEqual({ kind: 'resolved', artwork });
+  });
+
+  /**
+   * BS#2217 review: the request is sent entity-DECODED, so the correspondence
+   * check has to compare against the decoded string too. Comparing the raw
+   * `candidate.album_title` made every entity-bearing title self-reject
+   * (`rock amp roll` vs `rock roll`) — and since each pass stamps
+   * `no_match_recheck_attempted_at`, the rejection would have repeated behind
+   * the TTL forever, entrenching the very defect this job recovers from.
+   */
+  it('compares the DECODED album title, so an entity-bearing row still resolves', async () => {
+    const artwork = { release_id: 777, release_url: 'https://www.discogs.com/release/777' };
+    const mockLookup = jest.fn().mockResolvedValue({
+      search_type: 'alternative',
+      results: [{ library_item: { id: 0, title: 'Rock & Roll' }, artwork }],
+    });
+
+    const { lookupNoMatchRecheck } = await loadModule(mockLookup);
+    const outcome = await lookupNoMatchRecheck({ ...candidate, album_title: 'Rock &amp; Roll' });
+
+    expect(mockLookup).toHaveBeenCalledWith(expect.anything(), 'Rock & Roll', expect.anything(), expect.anything());
+    expect(outcome).toEqual({ kind: 'resolved', artwork });
+  });
+
+  /**
+   * BS#2217 review: `trust_rejected` is the counter the team reads to judge
+   * whether the correspondence carve-out is working. A response the gate
+   * ACCEPTED which merely carried no artwork is a genuine no-match, and must
+   * not inflate that counter.
+   */
+  it('buckets a correspondence-trusted response carrying no artwork as no_match, not trust_rejected', async () => {
+    const mockLookup = jest.fn().mockResolvedValue({
+      search_type: 'alternative',
+      results: [{ library_item: { id: 0, title: candidate.album_title }, artwork: null }],
+    });
+
+    const { lookupNoMatchRecheck } = await loadModule(mockLookup);
+    const outcome = await lookupNoMatchRecheck(candidate);
+
+    expect(outcome).toEqual({ kind: 'no_match' });
   });
 
   it('still trust_rejects an alternative match with a real library_item.id even when the title matches (the Vantaa/Animaru shape)', async () => {

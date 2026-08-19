@@ -55,14 +55,37 @@ import type { LookupResponse } from '@wxyc/shared/dtos';
  *
  * `results` is consulted only by `isTrustedLmlTrackContextMatch`'s
  * correspondence check (BS#2217) — `isTrustedLmlAlbumMatch` never reads it.
- * `library_item.id` is the load-bearing field there: LML mints
- * `id === 0` (a row-less result — no WXYC catalog row) exclusively from
- * `_make_rowless_item`, reached only via `_resolve_nonlibrary_release` /
- * `_select_rowless_artist_release`, both of which resolve strictly from the
- * REQUEST's own artist and song. A row-less item can therefore never be a
- * shelf album substituted in — that structural guarantee is what makes
- * `id === 0` trustworthy as a correspondence signal where `search_type`
- * alone is not. `library_item.title` is the secondary check, compared
+ * `library_item.id` is the load-bearing field there. LML has exactly two
+ * producers of `id === 0` (a row-less result — no WXYC catalog row), and
+ * the property that matters is shared by both: neither can return a shelf
+ * album, because neither reads the shelf.
+ *
+ *   1. `_make_rowless_item`, the chokepoint for the four
+ *      `LML_RESOLVE_NONLIBRARY_RELEASE`-gated producers, reached via
+ *      `_resolve_nonlibrary_release` / `_select_rowless_artist_release`.
+ *      Both resolve strictly from the REQUEST's own artist and song.
+ *   2. `_library_miss_discogs_search` (LML#583), which builds its
+ *      `LibraryItem(id=0)` directly rather than through that chokepoint —
+ *      see `lookup/rowless.py`'s own note on why the LML#681 counter is
+ *      deliberately scoped to producer 1 and not to all `id=0` items. It
+ *      fires only when the library search MISSED, and searches Discogs with
+ *      the typed artist and album under an 80/80 floor on both.
+ *
+ * So `id === 0` means "resolved from the request, not selected off the
+ * shelf" — that structural guarantee is what makes it trustworthy as a
+ * correspondence signal where `search_type` alone is not. Every substitution
+ * measured in prod (`Vantaa`, `Animaru / Kabutomushi`) carried a real
+ * library id.
+ *
+ * One caveat worth knowing when reading the title check below: producer 2
+ * builds its item as `title=best.album or album`, falling back to the
+ * caller's OWN typed album when the Discogs candidate carries no album
+ * string. On that lane the title comparison can therefore be tautological,
+ * and the real guarantee is the lane's own 80/80 artist+album floor rather
+ * than the title equality. That is the reason `id === 0` — not the title —
+ * is described as load-bearing here.
+ *
+ * `library_item.title` is the secondary check, compared
  * against the caller's requested album. Every field here is optional, like
  * `search_type` above: a caller with no `results` at all, an empty
  * `results` array, or a `results[0]` missing `library_item` all fail closed
@@ -98,18 +121,32 @@ export function isTrustedLmlAlbumMatch(response: LmlTrustGateInput): boolean {
 }
 
 /**
- * Casefold + strip everything but letters/digits, collapsing to single
- * spaces. Deliberately NOT `@wxyc/database`'s `normalizeAlbumTitle`:
- * `@wxyc/lml-client` depends only on `@sentry/node` and `@wxyc/shared`, and
- * that normalizer carries a dedup-key stability contract tied to a live
- * cron (BS#2217 — considered and rejected). This is a local, throwaway
- * comparison key with no stability contract of its own; its only job is
- * absorbing casing/punctuation noise between a DJ's flowsheet entry and
- * Discogs's title string (e.g. "Caf&eacute; & Bar" vs "cafe and bar" after
- * upstream decoding), not edition-suffix stripping or dedup-key parity.
+ * Fold diacritics, casefold, then strip everything but letters/digits,
+ * collapsing to single spaces. Deliberately NOT `@wxyc/database`'s
+ * `normalizeAlbumTitle`: `@wxyc/lml-client` depends only on `@sentry/node`
+ * and `@wxyc/shared`, and that normalizer carries a dedup-key stability
+ * contract tied to a live cron (BS#2217 — considered and rejected). This is
+ * a local, throwaway comparison key with no stability contract of its own;
+ * its only job is absorbing casing, punctuation, and accent noise between a
+ * DJ's flowsheet entry and Discogs's title string, not edition-suffix
+ * stripping or dedup-key parity.
+ *
+ * Worked examples of what each stage buys, from the shapes this actually
+ * meets (the first two are the BS#2217 prod replay's two recovered rows):
+ *   - `'Diptyque, Les Corps Glorieux'` vs `'Diptyque Les Corps Glorieux'`
+ *     → punctuation stripping.
+ *   - `'Minidisc'` vs `'MiniDisc'` → casefolding.
+ *   - `'Café Bar'` vs `'Cafe Bar'` → diacritic folding. WXYC's catalog is
+ *     full of accented titles (Nilüfer Yanya, Csillagrablók, Hermanos
+ *     Gutiérrez) while flowsheet entries are hand-typed, so an unfolded
+ *     comparison would reject that whole population (BS#2217 review).
+ *     Folding happens via NFD + combining-mark removal *before*
+ *     casefolding, so `é` and `E`-with-acute both reduce to `e`.
  */
 const looseTitleKey = (s: string | null | undefined): string =>
   (s ?? '')
+    .normalize('NFD')
+    .replace(/\p{M}+/gu, '')
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
@@ -137,9 +174,10 @@ const looseTitleKey = (s: string | null | undefined): string =>
  *     played.
  *   - Everything else (including `alternative`, `fallback`, `none`, and an
  *     absent `search_type`) is trusted only when `results[0].library_item.id
- *     === 0` (row-less — see `LmlTrustGateInput`'s doc comment for why that
- *     is structurally impossible for a shelf substitution) AND the returned
- *     title matches `requestedAlbum` after casefolding
+ *     === 0` (row-less — see `LmlTrustGateInput`'s doc comment for the two
+ *     producers and why neither can return a shelf substitution) AND the
+ *     returned title matches `requestedAlbum` after casefolding, diacritic
+ *     folding, and punctuation stripping
  *     (`looseTitleKey`). Wrong-artist and same-artist substitutions
  *     (`Vantaa`, `Animaru / Kabutomushi`) always carry a real library id and
  *     are rejected by the `id === 0` check alone, before the title is even
@@ -148,13 +186,17 @@ const looseTitleKey = (s: string | null | undefined): string =>
  * An absent/null `requestedAlbum` leaves the carve-out inactive:
  * `looseTitleKey(undefined)` is `''`, and the comparison requires a
  * non-empty match, so the result is identical to the pre-BS#2217 behavior.
- * This is deliberate for the two Sentry-telemetry callers
+ * That fail-closed default is for callers with genuinely no request context.
+ * A caller that HAS one must pass it: the two Sentry-telemetry classifiers
  * (`isEmptyOutcome`/`classifyEmptyCause` in
- * `apps/enrichment-worker/empty-outcome.ts`) that have no request context to
- * supply — they fail closed rather than inventing one.
+ * `apps/enrichment-worker/empty-outcome.ts`) share `extractArtwork` with
+ * `finalizeRow`, so asking them a different question than the write path was
+ * asked makes the alert describe a write that didn't happen — see their doc
+ * comments (BS#2217 review).
  *
- * The comparison is deliberately forgiving (casefold + strip punctuation,
- * nothing more) and deliberately narrow (gated behind `id === 0`): the
+ * The comparison is deliberately forgiving (casefold, fold diacritics, strip
+ * punctuation, nothing more) and deliberately narrow (gated behind
+ * `id === 0`): the
  * error asymmetry runs the opposite way from the usual trust-gate instinct
  * here. Too strict silently re-creates the BS#2217 defect (a validated
  * row-less match wrongly discarded) against a terminal `enriched_no_match`
@@ -173,11 +215,44 @@ const looseTitleKey = (s: string | null | undefined): string =>
  * | none / absent    | rejected                                 | correspondence-gated (in practice rejected — `results` is empty for this type) | no trust signal beyond whatever `results` independently carries |
  */
 export function isTrustedLmlTrackContextMatch(response: LmlTrustGateInput, requestedAlbum?: string | null): boolean {
+  return lmlTrackContextTrust(response, requestedAlbum) !== 'none';
+}
+
+/**
+ * Why a response is track-context-trusted — and, critically, HOW MUCH of it
+ * that trust covers (BS#2217 review).
+ *
+ *   - `'search_type'` — `direct`/`compilation`. LML vouched for the whole
+ *     response, so a caller may read artwork from ANY entry in `results`.
+ *     That matters: an accepted `compilation` response pairs each
+ *     `library_item` with its own independently-resolved artwork, so
+ *     `results[0].artwork` can be null while a later entry carries it
+ *     (BS#961).
+ *   - `'correspondence'` — the BS#2217 carve-out. The evidence is
+ *     `results[0]`'s own row-less id and title, and it extends to NOTHING
+ *     else in the array. A caller must read artwork from `results[0]` only.
+ *     Walking past it would let a same-artist substitution sitting at
+ *     `results[1]` (real `library_item.id`, its own artwork) donate its
+ *     cover to a row the gate accepted solely on `results[0]`'s evidence —
+ *     precisely the Yenbett/Vantaa class the gate exists to block, smuggled
+ *     in through the index.
+ *   - `'none'` — not trusted; no entry may be read.
+ *
+ * `isTrustedLmlTrackContextMatch` is the boolean projection of this, kept
+ * for the callers that only need the yes/no (the two Sentry-telemetry
+ * classifiers, and the album-context gates that never walk `results`).
+ */
+export type LmlTrackContextTrust = 'none' | 'search_type' | 'correspondence';
+
+export function lmlTrackContextTrust(
+  response: LmlTrustGateInput,
+  requestedAlbum?: string | null
+): LmlTrackContextTrust {
   const st = response.search_type;
-  if (st === 'direct' || st === 'compilation') return true;
-  if (st === 'song_as_artist') return false;
+  if (st === 'direct' || st === 'compilation') return 'search_type';
+  if (st === 'song_as_artist') return 'none';
   const top = response.results?.[0];
-  if (top?.library_item?.id !== 0) return false;
-  const a = looseTitleKey(top.library_item?.title);
-  return a !== '' && a === looseTitleKey(requestedAlbum);
+  if (top?.library_item?.id !== 0) return 'none';
+  const returned = looseTitleKey(top.library_item?.title);
+  return returned !== '' && returned === looseTitleKey(requestedAlbum) ? 'correspondence' : 'none';
 }
