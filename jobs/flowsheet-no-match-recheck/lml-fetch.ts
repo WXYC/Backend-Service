@@ -78,6 +78,8 @@
 import {
   lookupMetadata as sharedLookupMetadata,
   lmlTrackContextTrust,
+  lmlTrackContextVouchedResults,
+  type LmlTrackContextTrust,
   shedReasonOf,
   type DiscogsMatchResult,
   type GatedLookupResponse,
@@ -142,27 +144,34 @@ const envInt = (name: string, fallback: number): number => {
 // response, or a socket-level `timeout: true`) — see its own doc comment.
 const TIMEOUT_MS = envInt('FLOWSHEET_NO_MATCH_RECHECK_LML_PER_CALL_TIMEOUT_MS', 35_000);
 
-export const extractTrustedArtwork = (
+/**
+ * Artwork from the results a already-computed `trust` verdict vouches for.
+ *
+ * Split out from `extractTrustedArtwork` so `lookupNoMatchRecheck` — which
+ * needs the verdict anyway, to bucket a no-artwork response as `no_match`
+ * rather than `trust_rejected` — can compute it once and pass it here
+ * instead of having it recomputed inside.
+ */
+const artworkFromVouchedResults = (
   response: LookupResponse,
-  requestedAlbum?: string | null
+  trust: LmlTrackContextTrust
 ): DiscogsMatchResult | null => {
-  const trust = lmlTrackContextTrust(response, requestedAlbum);
-  if (trust === 'none') return null;
   // Walk `results` in order rather than reading only `results[0].artwork` —
   // an accepted `compilation` response can pair each `library_item` with
   // its own independently-resolved artwork, so the first entry's `artwork`
   // may be null while a later entry carries it (BS#961).
-  //
-  // BS#2217 review: scoped to index 0 on the correspondence path, whose
-  // evidence is `results[0]`'s own row-less id and title and covers nothing
-  // else in the array. See the sibling walk in
-  // `apps/enrichment-worker/enrich.ts#extractArtwork` for the full rationale.
-  const vouchedFor = trust === 'correspondence' ? (response.results ?? []).slice(0, 1) : (response.results ?? []);
-  for (const result of vouchedFor) {
+  // `lmlTrackContextVouchedResults` narrows that walk to `results[0]` on the
+  // correspondence path; see its doc comment (BS#2217 review).
+  for (const result of lmlTrackContextVouchedResults(trust, response.results)) {
     if (result.artwork) return result.artwork;
   }
   return null;
 };
+
+export const extractTrustedArtwork = (
+  response: LookupResponse,
+  requestedAlbum?: string | null
+): DiscogsMatchResult | null => artworkFromVouchedResults(response, lmlTrackContextTrust(response, requestedAlbum));
 
 type DegradedReason = NonNullable<LookupResponse['degraded_reason']>;
 
@@ -224,7 +233,7 @@ export const lookupNoMatchRecheck = async (candidate: Candidate): Promise<Lookup
   }
 
   const trust = lmlTrackContextTrust(response, requestedAlbum);
-  const artwork = extractTrustedArtwork(response, requestedAlbum);
+  const artwork = artworkFromVouchedResults(response, trust);
 
   if (isUnansweredDegraded(response, artwork)) {
     throw new Error(

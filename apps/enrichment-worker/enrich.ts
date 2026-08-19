@@ -79,7 +79,7 @@
 
 import { and, eq, sql } from 'drizzle-orm';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
-import { lmlTrackContextTrust } from '@wxyc/lml-client';
+import { lmlTrackContextTrust, lmlTrackContextVouchedResults } from '@wxyc/lml-client';
 import type { DiscogsMatchResult, LookupResponse, StreamingResolutionStatus } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
 import { buildStreamingFieldConflictSet, NO_FALLBACK } from './streaming-merge-sql.js';
@@ -496,26 +496,18 @@ export const extractArtwork = (response: LookupResponse, requestedAlbum?: string
   // with `requestedAlbum` omitted — the carve-out stays inactive and they
   // fail closed, identical to pre-BS#2217 behavior. All three callers route
   // to the existing "LML found nothing" path from this one chokepoint.
+  // Walk the results the trust verdict VOUCHES FOR, in order, rather than
+  // reading only `results[0].artwork`. An accepted `compilation` response can
+  // pair each `library_item` with its own independently-resolved artwork
+  // (LML's `items_with_artwork`), so the first entry's `artwork` may be null
+  // while a later entry carries it (BS#961); reading only index 0 would drop
+  // that artwork and silently route a genuine compilation match — the exact
+  // shape the gate just chose to accept — to the no-match arm. Mirrors the
+  // sibling walk in `jobs/flowsheet-metadata-backfill/enrich.ts#extractArtwork`.
+  // `lmlTrackContextVouchedResults` is what narrows that walk to `results[0]`
+  // on the correspondence path; see its doc comment (BS#2217 review).
   const trust = lmlTrackContextTrust(response, requestedAlbum);
-  if (trust === 'none') return null;
-  // Walk `results` in order rather than reading only `results[0].artwork`.
-  // An accepted `compilation` response can pair each `library_item` with its
-  // own independently-resolved artwork (LML's `items_with_artwork`), so the
-  // first entry's `artwork` may be null while a later entry carries it
-  // (BS#961). Reading only index 0 would drop that artwork and silently route
-  // a genuine compilation match — the exact shape the gate above just chose
-  // to accept — to the no-match arm. Mirrors the sibling walk in
-  // `jobs/flowsheet-metadata-backfill/enrich.ts#extractArtwork`.
-  //
-  // BS#2217 review: that walk is only sound when the trust covers the whole
-  // response. The correspondence carve-out's evidence is `results[0]`'s own
-  // row-less id and title and extends no further, so on that path the walk
-  // is scoped to index 0 — otherwise a same-artist substitution sitting at
-  // `results[1]` (real `library_item.id`, its own artwork) would donate its
-  // cover to a row accepted purely on `results[0]`'s evidence, smuggling the
-  // Yenbett/Vantaa class in through the index.
-  const vouchedFor = trust === 'correspondence' ? (response.results ?? []).slice(0, 1) : (response.results ?? []);
-  for (const result of vouchedFor) {
+  for (const result of lmlTrackContextVouchedResults(trust, response.results)) {
     if (result.artwork) return result.artwork;
   }
   return null;

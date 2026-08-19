@@ -9,7 +9,12 @@
  * tests still pin its standalone contract so the reservation is verifiable
  * ahead of that wiring.
  */
-import { isTrustedLmlAlbumMatch, isTrustedLmlTrackContextMatch, lmlTrackContextTrust } from '@wxyc/lml-client';
+import {
+  isTrustedLmlAlbumMatch,
+  isTrustedLmlTrackContextMatch,
+  lmlTrackContextTrust,
+  lmlTrackContextVouchedResults,
+} from '@wxyc/lml-client';
 
 describe('isTrustedLmlAlbumMatch', () => {
   it('trusts a direct match', () => {
@@ -238,5 +243,39 @@ describe('looseTitleKey diacritic folding (BS#2217 review)', () => {
         'tea room'
       )
     ).toBe(false);
+  });
+});
+
+/**
+ * BS#2217 review: this is the executable form of "correspondence trust
+ * vouches for `results[0]` and nothing else". Both artwork walks
+ * (`enrich.ts#extractArtwork`, `lml-fetch.ts`) iterate it rather than
+ * `response.results`, so the guard cannot be lost by a caller copying the
+ * loop without the slice.
+ */
+describe('lmlTrackContextVouchedResults', () => {
+  const results = ['first', 'second', 'third'];
+
+  it('vouches for the whole array on search_type trust — preserves the BS#961 walk', () => {
+    expect(lmlTrackContextVouchedResults('search_type', results)).toEqual(results);
+  });
+
+  it('vouches for results[0] alone on correspondence trust', () => {
+    expect(lmlTrackContextVouchedResults('correspondence', results)).toEqual(['first']);
+  });
+
+  it('vouches for nothing when untrusted', () => {
+    expect(lmlTrackContextVouchedResults('none', results)).toEqual([]);
+  });
+
+  it.each([undefined, null])('tolerates %s results without throwing', (absent) => {
+    expect(lmlTrackContextVouchedResults('search_type', absent)).toEqual([]);
+    expect(lmlTrackContextVouchedResults('correspondence', absent)).toEqual([]);
+  });
+
+  it('does not mutate the caller array', () => {
+    const original = [...results];
+    lmlTrackContextVouchedResults('correspondence', results);
+    expect(results).toEqual(original);
   });
 });
