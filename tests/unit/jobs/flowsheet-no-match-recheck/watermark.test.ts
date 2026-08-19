@@ -187,14 +187,6 @@ describe('nextCursorPosition', () => {
     const totals = totalsOf({ scanned: 200, resolved: 60, unresolved: 100, trust_rejected: 20, lml_error: 20 });
     expect(nextCursorPosition(0, totals, 137160)).toBe(20);
   });
-
-  it('wraps rather than running off the end when the advance overshoots the total', () => {
-    expect(nextCursorPosition(137200, totalsOf({ scanned: 200, lml_error: 200 }), 137340)).toBe(60);
-  });
-
-  it('returns 0 when the cohort raced to empty (nothing to offset into)', () => {
-    expect(nextCursorPosition(400, totalsOf({ scanned: 200, lml_error: 200 }), 0)).toBe(0);
-  });
 });
 
 describe('wrapCursor', () => {

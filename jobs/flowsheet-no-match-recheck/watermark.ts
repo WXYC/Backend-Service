@@ -54,6 +54,34 @@
  * job is making progress, which is the case where stepping over unread rows
  * has a cost and no benefit.
  *
+ * KNOWN COST — the cursor defers the head. `query.ts` sorts never-attempted
+ * rows newest-first, so a no-match row the live worker writes today lands at
+ * ordering position 0. Once the cursor has moved off 0 it does not come back
+ * until it wraps, and the wrap period is fixed at `total / BATCH_SIZE` runs
+ * regardless of the outcome mix (the cursor climbs by the leftovers while the
+ * cohort shrinks by the departures, and those sum to the batch size) — about
+ * 687 runs, or ~5.7 months, at the 2026-08-18 numbers. So a row written
+ * mid-cycle waits up to one wrap for its first recheck, which is the same
+ * order of magnitude as the ~5.5-month figure BS#2218 rejected for the
+ * historical backlog.
+ *
+ * That is accepted here rather than designed around, for two reasons. First,
+ * the backlog is what BS#2218 measured and what the newest-first tiebreak
+ * rescues: the FIRST pass starts at offset 0 and walks the cohort
+ * newest-first, so recent playcuts are recovered in the opening days, not in
+ * five months. Second, a freshly-written `enriched_no_match` is a much weaker
+ * recheck candidate than a historical one: since BS#1978 the live enrichment
+ * worker already asks headerlessly, so a new no-match means a full-cascade
+ * lookup ALREADY missed, where the 137,340-row backlog is dominated by rows
+ * that only ever failed under the ~4s clamp this ticket removes. Re-asking
+ * those promptly buys little.
+ *
+ * If that trade stops holding — e.g. new-arrival volume rises, or the
+ * cohort grows enough to stretch the wrap — the shape to reach for is
+ * reserving a slice of each batch for offset 0 and spending the rest at the
+ * cursor, so the head is sampled every run without giving up the guard.
+ * Deliberately not built here; BS#2218 is scoped to unlocking the queue.
+ *
  * Persisted on the fleet-standard `cronjob_runs` table (migration 0152)
  * rather than a new per-job table, under this job's own `JOB_NAME` row —
  * `cursor_position` is NULL for every job that doesn't opt in, so adding it

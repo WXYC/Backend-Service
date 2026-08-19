@@ -17,14 +17,14 @@
 -- that ordering, and a `last_run`-only watermark can't skip past it, because
 -- skipping is exactly what would let a row's TTL rotation lapse unnoticed.
 -- `cursor_position` instead offsets INTO the same ordered candidate set the
--- query already computes, advancing by `BATCH_SIZE` every run and wrapping
--- modulo a fresh `COUNT(*)` of the matching predicate -- so a persistently-
--- transient head cannot occupy every future run's candidate window, while
--- every row is still guaranteed to cycle back into view within one full
--- wrap. See `jobs/flowsheet-no-match-recheck/watermark.ts` for the read/write
--- helpers and the wraparound arithmetic, and the query module's docstring for
--- why this is a starvation GUARD layered on top of the TTL rotation, not a
--- replacement for it.
+-- query already computes, advancing every run past however many of that run's
+-- candidates are STILL candidates afterwards, and wrapping modulo a fresh
+-- `COUNT(*)` of the matching predicate -- so a persistently-transient head
+-- cannot occupy every future run's candidate window, while every row still
+-- cycles back into view. See `jobs/flowsheet-no-match-recheck/watermark.ts`
+-- for the read/write helpers, the advance rule and the wraparound arithmetic,
+-- and the query module's docstring for why this is a starvation GUARD layered
+-- on top of the TTL rotation, not a replacement for it.
 --
 -- NULL for every job_name row that doesn't opt in (every row this table has
 -- today) -- a job that never writes this column never reads it either.

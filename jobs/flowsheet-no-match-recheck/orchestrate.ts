@@ -7,8 +7,9 @@
  * no-match at write time and become resolvable days later when
  * discogs-etl's next rebuild caches the release, an LML matcher fix ships,
  * or the librarian files the album. This sweep re-asks LML for a bounded
- * slice of that cohort every run, ordered oldest-recheck-attempted-first
- * (see `query.ts`), so no future freeze cause needs its own one-shot drain.
+ * slice of that cohort every run — never-attempted rows first, newest-first
+ * within that tier, then TTL-expired rows oldest-attempted-first (BS#2218;
+ * see `query.ts`) — so no future freeze cause needs its own one-shot drain.
  *
  * Structural donor: `jobs/rotation-release-id-backfill/orchestrate.ts` — the
  * same attempt-marker + no-match-TTL + cooperative-pause shape, adapted for
