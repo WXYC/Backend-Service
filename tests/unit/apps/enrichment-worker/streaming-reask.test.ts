@@ -170,6 +170,12 @@ describe('reaskUnresolvedStreaming (BS#1915)', () => {
    * more conservative than the pre-gate "any artwork" behavior: an untrusted
    * re-match spends an attempt via `bumpStreamingReaskAttempts` instead of
    * healing streaming off an unconfirmed album re-match.
+   *
+   * BS#2217 — `reaskOne` now also threads `candidate.album_title` into
+   * `extractArtwork` as the requested-album correspondence check, so an
+   * `alternative` row-less match (`library_item.id === 0`) that corresponds
+   * to the candidate's own album title is reachable here too, not just via
+   * `direct`.
    */
   describe('BS#1359 track-context trust gate on the reask arm', () => {
     it("search_type 'direct' upserts a fresh match", async () => {
@@ -194,6 +200,48 @@ describe('reaskUnresolvedStreaming (BS#1915)', () => {
         search_type: 'fallback',
         results: [
           { artwork: { artwork_url: 'https://i.discogs.com/wrong.jpg', release_url: 'https://discogs.com/release/4' } },
+        ],
+      });
+
+      const result = await reaskUnresolvedStreaming(100);
+
+      expect(mockUpsertMatchedAlbumMetadata).not.toHaveBeenCalled();
+      expect(mockBumpStreamingReaskAttempts).toHaveBeenCalledWith(7);
+      expect(result).toEqual({ candidates: 1, succeeded: 1, failed: 0 });
+    });
+
+    it('BS#2217: an alternative row-less match whose title corresponds to candidate.album_title upserts a fresh match', async () => {
+      mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([CANDIDATE]));
+      mockEnrichmentBulkLookup.mockResolvedValueOnce({
+        search_type: 'alternative',
+        results: [
+          {
+            library_item: { id: 0, title: CANDIDATE.album_title },
+            artwork: {
+              artwork_url: 'https://i.discogs.com/rowless.jpg',
+              release_url: 'https://discogs.com/release/rowless',
+            },
+          },
+        ],
+      });
+
+      const result = await reaskUnresolvedStreaming(100);
+
+      expect(mockUpsertMatchedAlbumMetadata).toHaveBeenCalledTimes(1);
+      expect(mockUpsertMatchedAlbumMetadata.mock.calls[0]?.[0]).toBe(7);
+      expect(mockBumpStreamingReaskAttempts).not.toHaveBeenCalled();
+      expect(result).toEqual({ candidates: 1, succeeded: 1, failed: 0 });
+    });
+
+    it('BS#2217: an alternative match with a real library_item.id still bumps the attempt counter, even when the title corresponds (the Vantaa/Animaru shape)', async () => {
+      mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([CANDIDATE]));
+      mockEnrichmentBulkLookup.mockResolvedValueOnce({
+        search_type: 'alternative',
+        results: [
+          {
+            library_item: { id: 64288, title: CANDIDATE.album_title },
+            artwork: { artwork_url: 'https://i.discogs.com/wrong.jpg', release_url: 'https://discogs.com/release/wrong' },
+          },
         ],
       });
 

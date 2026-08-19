@@ -56,10 +56,26 @@ const loadModule = async (
   }));
   jest.doMock('@wxyc/lml-client', () => ({
     lookupMetadata: mockLookup,
-    // BS#1359/#1959: faithful stand-in for the shared track-context trust
-    // predicate — mirrors its real (and only) rule.
-    isTrustedLmlTrackContextMatch: (r: { search_type?: string }) =>
-      r.search_type === 'direct' || r.search_type === 'compilation',
+    // BS#1359/#1959/#2217: faithful stand-in for the shared track-context
+    // trust predicate — mirrors its real (and only) rule, including the
+    // BS#2217 request<->result correspondence carve-out for everything
+    // other than `direct`/`compilation`/`song_as_artist`.
+    isTrustedLmlTrackContextMatch: (
+      r: { search_type?: string; results?: { library_item?: { id?: number; title?: string | null } }[] },
+      requestedAlbum?: string | null
+    ) => {
+      if (r.search_type === 'direct' || r.search_type === 'compilation') return true;
+      if (r.search_type === 'song_as_artist') return false;
+      const top = r.results?.[0];
+      if (top?.library_item?.id !== 0) return false;
+      const norm = (s: string | null | undefined) =>
+        (s ?? '')
+          .toLowerCase()
+          .replace(/[^\p{L}\p{N}]+/gu, ' ')
+          .trim();
+      const a = norm(top.library_item?.title);
+      return a !== '' && a === norm(requestedAlbum);
+    },
     shedReasonOf: (response: { outcome?: string }) =>
       response.outcome === 'shed_limiter_saturated' || response.outcome === 'shed_breaker_open'
         ? response.outcome
@@ -211,6 +227,33 @@ describe('lookupNoMatchRecheck', () => {
     }
   );
 
+  it('resolves an alternative row-less match whose title corresponds to candidate.album_title (BS#2217)', async () => {
+    const artwork = { release_id: 555, release_url: 'https://www.discogs.com/release/555' };
+    const mockLookup = jest.fn().mockResolvedValue({
+      search_type: 'alternative',
+      results: [{ library_item: { id: 0, title: candidate.album_title }, artwork }],
+    });
+
+    const { lookupNoMatchRecheck } = await loadModule(mockLookup);
+    const outcome = await lookupNoMatchRecheck(candidate);
+
+    expect(outcome).toEqual({ kind: 'resolved', artwork });
+  });
+
+  it('still trust_rejects an alternative match with a real library_item.id even when the title matches (the Vantaa/Animaru shape)', async () => {
+    const mockLookup = jest.fn().mockResolvedValue({
+      search_type: 'alternative',
+      results: [
+        { library_item: { id: 64288, title: candidate.album_title }, artwork: { release_id: 1, release_url: 'x' } },
+      ],
+    });
+
+    const { lookupNoMatchRecheck } = await loadModule(mockLookup);
+    const outcome = await lookupNoMatchRecheck(candidate);
+
+    expect(outcome).toEqual({ kind: 'trust_rejected', searchType: 'alternative' });
+  });
+
   it('a cascade-timeout body is transient — throws so the row stays immediately retryable', async () => {
     const mockLookup = jest.fn().mockResolvedValue({ timeout: true, results: [], search_type: 'none' });
 
@@ -327,5 +370,17 @@ describe('extractTrustedArtwork', () => {
         results: [{ artwork: { release_id: 1, release_url: 'x' } }],
       })
     ).toBeNull();
+  });
+
+  it('threads requestedAlbum into the predicate — a row-less match resolves only when it is supplied and corresponds (BS#2217)', async () => {
+    const mockLookup = jest.fn();
+    const { extractTrustedArtwork } = await loadModule(mockLookup);
+    const response = {
+      search_type: 'alternative',
+      results: [{ library_item: { id: 0, title: 'The Spiritual Sound' }, artwork: { release_id: 1, release_url: 'x' } }],
+    };
+
+    expect(extractTrustedArtwork(response)).toBeNull();
+    expect(extractTrustedArtwork(response, 'The Spiritual Sound')).toEqual(response.results[0].artwork);
   });
 });
