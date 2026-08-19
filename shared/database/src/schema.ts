@@ -1541,31 +1541,39 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_rotation_id_idx')
       .on(table.rotation_id)
       .where(sql`${table.rotation_id} IS NOT NULL`),
-    // BS#2176. Partial B-tree on `(no_match_recheck_attempted_at, id)`,
-    // scoped to the exact cohort `jobs/flowsheet-no-match-recheck` scans:
-    // terminal no-match track rows with a real artist name. Same shape as
+    // BS#2176, re-keyed by BS#2218 (migration 0153). Partial B-tree scoped to
+    // the exact cohort `jobs/flowsheet-no-match-recheck` scans: terminal
+    // no-match track rows with a real artist name. Same shape as
     // `flowsheet_metadata_status_pending_idx` above (a partial predicate
-    // matching the sweep's own WHERE). The sweep's candidate query orders
-    // by `no_match_recheck_attempted_at ASC NULLS FIRST, id ASC` so every
-    // run drains the longest-waiting rows first; this index matches that
-    // ordering exactly — including the `NULLS FIRST` direction (a plain
-    // `ASC` B-tree defaults to `NULLS LAST` and cannot serve a `NULLS
-    // FIRST` query, forcing a full sort of the matching rows before the
-    // `LIMIT`, BS#2179 review MEDIUM 4) — and the `id` tiebreak, so the
-    // ORDER BY + LIMIT is satisfied by walking the index directly, with no
-    // separate sort node (the query still visits the heap for
-    // `artist_name`/`album_title`/`track_title`/`album_id`, not covered by
-    // this index — this is a no-sort scan, not an index-only scan).
+    // matching the sweep's own WHERE).
     //
-    // Built CONCURRENTLY out-of-band on prod first via:
-    //   CREATE INDEX CONCURRENTLY IF NOT EXISTS flowsheet_no_match_recheck_idx
-    //     ON wxyc_schema.flowsheet (no_match_recheck_attempted_at NULLS FIRST, id)
-    //     WHERE metadata_status = 'enriched_no_match' AND entry_type = 'track'
-    //       AND artist_name IS NOT NULL;
-    // Migration SQL carries IF NOT EXISTS so the apply is a no-op against
-    // the prod DB where the index is already present.
-    index('flowsheet_no_match_recheck_idx')
-      .on(table.no_match_recheck_attempted_at.asc().nullsFirst(), table.id.asc())
+    // The second key is `id` DESC, not ASC. BS#2218 flipped the sweep's
+    // tiebreak to newest-first (`ORDER BY no_match_recheck_attempted_at ASC
+    // NULLS FIRST, id DESC`) because oldest-first stranded 2026 playcuts
+    // 132,460 rows deep. A B-tree can only supply a mixed-direction order if
+    // it was built with those directions, so the original BS#2176 index
+    // (`id` ASC) could no longer serve it: measured on prod 2026-08-18, the
+    // planner fell back to scanning all 137,278 matching rows and top-N
+    // heapsorting them — 41,326 ms and ~743 MB of heap I/O, against 76 ms
+    // and 200 rows scanned under the old ordering. This index restores the
+    // walk-the-index-directly plan.
+    //
+    // `NULLS FIRST` on the leading key is load-bearing for the same reason a
+    // direction is load-bearing on the second: a plain `ASC` B-tree defaults
+    // to `NULLS LAST` and cannot serve a `NULLS FIRST` query (BS#2179 review
+    // MEDIUM 4). The query still visits the heap for
+    // `artist_name`/`album_title`/`track_title`/`album_id`, which this index
+    // does not cover — this is a no-sort scan, not an index-only scan.
+    //
+    // Replaces (does not accompany) the BS#2176 `flowsheet_no_match_recheck_idx`,
+    // whose only distinguishing capability was the `id` ASC sort order that
+    // BS#2218 removed the last consumer of. Same partial predicate, so any
+    // predicate-only planner use is served identically. Built and swapped
+    // CONCURRENTLY out-of-band on prod BEFORE the deploy — see migration 0153
+    // for the exact two-step runbook and why the migration itself cannot use
+    // the CONCURRENTLY form.
+    index('flowsheet_no_match_recheck_id_desc_idx')
+      .on(table.no_match_recheck_attempted_at.asc().nullsFirst(), table.id.desc().nullsFirst())
       .where(
         sql`${table.metadata_status} = 'enriched_no_match' AND ${table.entry_type} = 'track' AND ${table.artist_name} IS NOT NULL`
       ),

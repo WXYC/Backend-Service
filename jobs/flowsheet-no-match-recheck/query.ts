@@ -27,10 +27,10 @@
  *      can currently see. `id` is monotonically assigned at insert time, so
  *      `id DESC` recovers recent playcuts first while 22 years of history
  *      drains behind them; `add_time DESC` would express the same intent
- *      more directly but `id` is both already indexed here
- *      (`flowsheet_no_match_recheck_idx`, migration 0151) and exactly as
- *      correct for this cohort (the BS#2218 measurement's id-to-year bands
- *      were clean), so it's the smaller diff.
+ *      more directly but `id` is both already the indexed
+ *      tiebreak for this cohort (`flowsheet_no_match_recheck_id_desc_idx`,
+ *      migration 0153) and exactly as correct (the BS#2218 measurement's
+ *      id-to-year bands were clean), so it's the smaller diff.
  *   2. Previously-attempted, TTL-expired rows
  *      (`no_match_recheck_attempted_at <= now() - TTL`) — unchanged in the
  *      way that matters: oldest-attempted-first. Its `id` tiebreak rides
@@ -47,50 +47,50 @@
  * B-tree can never match an `ORDER BY <CASE expression>` key, so it also
  * forecloses the index remedy described below.
  *
- * INDEXING NOTE — this ordering is not index-servable TODAY, and the cost is
- * real, so state it plainly rather than eliding it.
- * `flowsheet_no_match_recheck_idx` (migration 0151) is
- * `(no_match_recheck_attempted_at NULLS FIRST, id ASC)`, built for the
- * pre-fix `ORDER BY`. A B-tree can only supply a mixed-direction order if it
- * was built with those directions, and this one wasn't, so the index survives
- * only as the PREDICATE match (its partial `WHERE` is exactly this cohort,
- * keeping the plan off a seq scan of the ~2.6M-row / ~1.7 GB `flowsheet`
- * heap); it no longer supplies the sort order. Consequences, both of which
- * the pre-fix query avoided:
+ * INDEXING NOTE — this `ORDER BY` REQUIRES `flowsheet_no_match_recheck_id_desc_idx`
+ * (migration 0153). It is not a nice-to-have, and the reason is worth keeping
+ * because the first version of this change got it wrong.
  *
- *   - The plan must materialize and Sort the WHOLE candidate set before
- *     `LIMIT`/`OFFSET` can apply — not just the never-attempted tier.
- *     Incremental sort can use the leading `no_match_recheck_attempted_at`
- *     key, but every never-attempted row shares one NULL group, so that
- *     group is sorted in a single shot regardless.
- *   - The sort input is the projected row (three `varchar` columns among
- *     them) joined to `library`, so the heap is visited for every candidate,
- *     where the pre-fix plan short-circuited at `LIMIT` after roughly one
- *     page of index-ordered rows.
+ * The BS#2176 index (migration 0151) was keyed `(no_match_recheck_attempted_at
+ * NULLS FIRST, id ASC)`, matching the pre-fix ordering. A B-tree can only
+ * supply a mixed-direction order if it was built with those directions, so
+ * flipping the tiebreak to `id DESC` left it able to serve the PREDICATE
+ * (its partial `WHERE` is exactly this cohort) but not the sort. The planner
+ * then read every matching row and top-N heapsorted it. Measured on prod
+ * 2026-08-18, same predicate, `LIMIT 200 OFFSET 0`, A/B on the tiebreak alone:
  *
- * At the 2026-08-18 cohort size (137,340 of ~2.6M rows) that is a ~20 MB
- * sort — above the default `work_mem`, so an external merge — plus heap
- * access spread across roughly half the table's pages, four times a day.
- * Shipped without a remedy because this job's container sets
+ *   ORDER BY ... id ASC   ->     200 rows scanned,     76 ms
+ *   ORDER BY ... id DESC  -> 137,278 rows scanned, 41,326 ms
+ *
+ * A ~542x regression: `Buffers: shared hit=27246 read=95110`, `I/O Timings:
+ * read=39982 ms` — 97% of the runtime is heap I/O, ~743 MB per run — and it
+ * did NOT improve warm (41,172 ms cold -> 41,326 ms warm), so that is steady
+ * state, not a cold cache. Against this job container's
  * `DB_STATEMENT_TIMEOUT_MS=60000` (see `Dockerfile.flowsheet-no-match-recheck`;
  * the 5 s default the API containers run under, and that migration 0151's
- * docstring cites, does NOT apply here) — but note that ceiling is the only
- * thing establishing the headroom. The run time itself has NOT been measured
- * against prod-shaped data; if it ever is, and it lands anywhere near that
- * ceiling, there are two remedies and the second is probably the better one:
+ * docstring cites, does NOT apply here) that is ~19 s of headroom on a cohort
+ * that grows — and crossing 60 s would make the job do nothing at all, a
+ * strictly worse failure than the stall BS#2218 exists to fix.
  *
- *   - A companion partial index `(no_match_recheck_attempted_at NULLS FIRST,
- *     id DESC)`, built out-of-band with `CONCURRENTLY` per migration 0151's
- *     production-ops runbook. Serves this exact `ORDER BY`, at the price of a
- *     second index writing on every live flowsheet INSERT/UPDATE.
- *   - A deferred join: sort `id` alone in an inner `LIMIT`/`OFFSET`
- *     subquery, then join back to `flowsheet`/`library` for the surviving
- *     `batchSize` rows. The inner leg reads only columns the existing index
- *     already holds, so it needs no new index at all, and the sort shrinks
- *     from full projected rows to ~16-byte tuples that fit `work_mem`.
+ * Migration 0153 therefore REPLACES 0151's index with the same partial
+ * predicate re-keyed to `id DESC NULLS FIRST` (the null ordering matters:
+ * `ORDER BY id DESC` means `DESC NULLS FIRST`, and an index disagreeing on
+ * that does not match the query's pathkeys, even though `id` is the never-null
+ * primary key). Replace rather than accompany: this query is the index's only
+ * consumer, the predicate is byte-identical so any predicate-only planner use
+ * is unaffected, and two near-identical partial B-trees on a live-written
+ * ~2.6M-row table is pure write amplification. The expected plan is once again
+ * a no-sort index scan short-circuiting at `LIMIT` — the query still visits
+ * the heap for `artist_name`/`album_title`/`track_title`/`album_id`, which the
+ * index does not cover, so a no-sort scan rather than an index-only scan.
  *
- * Both were deliberately left out of BS#2218, which is a correctness fix for
- * a stalled queue, not a query-performance change.
+ * Note this remedy exists ONLY because the tiebreak is a plain sort key. Under
+ * the `CASE`-per-tier form described above, no index could have fixed it.
+ *
+ * If the cohort ever outgrows even the indexed plan, the next lever is a
+ * deferred join: sort `id` alone in an inner `LIMIT`/`OFFSET` subquery over
+ * columns the index already holds, then join back to `flowsheet`/`library`
+ * for the surviving `batchSize` rows.
  *
  * BS#2218 also added `cursorOffset` (default 0, backward compatible) and
  * the sibling `countCandidates` export: an OFFSET-based starvation guard so
