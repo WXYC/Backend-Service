@@ -81,14 +81,17 @@ Express 5 application with these route groups:
 | `/config`       | Public app bootstrap configuration                         |
 | `/proxy`        | iOS proxy endpoints (anonymous auth + rate limit)          |
 | `/library`      | Music library catalog                                      |
-| `/flowsheet`    | V1 flowsheet (legacy)                                      |
-| `/v2/flowsheet` | V2 flowsheet (uses `@wxyc/shared` DTOs)                    |
-| `/djs`          | DJ profiles and management                                 |
+| `/flowsheet`    | Flowsheet — serves both the V1 shape and the V2 projection (see below) |
+| `/djs`          | DJ bin and playlists                                       |
 | `/request`      | Song request line                                          |
 | `/schedule`     | Schedule management                                        |
 | `/events`       | SSE for real-time updates                                  |
 | `/healthcheck`  | Health check                                               |
 | `/internal`     | Internal endpoints (ETL notifications, tubafrenzy webhook) |
+
+**There is no `/v2/flowsheet` route, and this table used to claim there was.** `app.ts` mounts no `/v2` router; `projectEntriesV2` (`utils/album-metadata-projection.ts`) is called by `getEntries`, the handler mounted at plain `GET /flowsheet`, so **the V2 discriminated-union shape ships on the V1 path**. Three source comments still name `/v2/flowsheet` as though it were mounted (`utils/album-metadata-projection.ts:5`, `services/flowsheet.service.ts:392`, `services/playlist-proxy.service.ts:451`) — read those as naming the projection, not a route. `api.wxyc.org/v2/flowsheet` returns 404 with an HTML `Cannot GET` body, and always has.
+
+The prefix was planned and never mounted. Mounting it now would mean maintaining two paths to one projection for zero callers, so `@wxyc/shared` deleted the two `/v2/flowsheet*` declarations from `api.yaml` in [WXYC/wxyc-shared#372](https://github.com/WXYC/wxyc-shared/issues/372) / [PR #378](https://github.com/WXYC/wxyc-shared/pull/378) and moved the explanation into `GET /flowsheet`'s description. This table was the second place the error was written down; correcting both together is the point.
 
 Code is organized as controllers (HTTP handling) → services (business logic) → database (Drizzle queries).
 
