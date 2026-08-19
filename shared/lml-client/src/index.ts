@@ -63,8 +63,8 @@ export { isSpotifyUrl, isAppleMusicUrl, sanitizeLookupStreamingUrls };
 // callsite needs it, so it's re-exported only. `isTrustedLmlTrackContextMatch`
 // (BS#1359) is wired into `apps/enrichment-worker/enrich.ts#extractArtwork`,
 // the live CDC track-context path.
-export { isTrustedLmlAlbumMatch, isTrustedLmlTrackContextMatch } from './trust.js';
-export type { LmlTrustGateInput } from './trust.js';
+export { isTrustedLmlAlbumMatch, isTrustedLmlTrackContextMatch, lmlTrackContextTrust } from './trust.js';
+export type { LmlTrustGateInput, LmlTrackContextTrust } from './trust.js';
 
 // BS#1826: per-caller traffic-class policy layer. `policy.ts` imports
 // `envInt` back from this module (below) — a deliberate circular import

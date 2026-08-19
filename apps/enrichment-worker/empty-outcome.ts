@@ -42,11 +42,24 @@ export type EmptyOutcomeCause = 'lml_degraded' | 'lml_no_match' | 'lml_timeout' 
  * either no Discogs match at all (artwork === null) or a match whose
  * `artwork_url` is missing (the LML#408 `_resolve_fallback_artwork` class).
  *
+ * `requestedAlbum` must be the SAME value `finalizeRow` passed to
+ * `extractArtwork` (BS#2217 review). This function's whole job is to describe
+ * the write `finalizeRow` just made, and both share that one chokepoint — ask
+ * it a different question and the two disagree. Concretely, once the BS#2217
+ * correspondence carve-out can accept a row-less `alternative` match, omitting
+ * the album here makes a blank-cover match classify as `lml_no_match` (which
+ * `SUPPRESSED_EMPTY_CAUSES` drops) even though `finalizeRow` wrote
+ * `enriched_match`. That row is then invisible to this alert AND to
+ * `flowsheet-no-match-recheck`, which only re-asks `enriched_no_match` —
+ * nothing revisits it. Passing the album classifies it `lml_degraded` and the
+ * alert fires. Omitting it remains valid for a caller with no request context;
+ * the carve-out simply stays inactive.
+ *
  * Does NOT cover the LML-threw path; the caller in handler.ts fires the
  * `lml_timeout` cause separately from its catch arm.
  */
-export const isEmptyOutcome = (response: LookupResponse): boolean => {
-  const artwork = extractArtwork(response);
+export const isEmptyOutcome = (response: LookupResponse, requestedAlbum?: string | null): boolean => {
+  const artwork = extractArtwork(response, requestedAlbum);
   if (!artwork) return true;
   return !artwork.artwork_url;
 };
@@ -60,8 +73,11 @@ export const isEmptyOutcome = (response: LookupResponse): boolean => {
  * path lives in handler.ts's catch arm); it exists in `EmptyOutcomeCause`
  * because the catch arm uses it as a tag value on its own captureMessage.
  */
-export const classifyEmptyCause = (response: LookupResponse): Exclude<EmptyOutcomeCause, 'lml_timeout'> => {
-  const artwork = extractArtwork(response);
+export const classifyEmptyCause = (
+  response: LookupResponse,
+  requestedAlbum?: string | null
+): Exclude<EmptyOutcomeCause, 'lml_timeout'> => {
+  const artwork = extractArtwork(response, requestedAlbum);
   if (!artwork) return 'lml_no_match';
   if (!artwork.artwork_url) return 'lml_degraded';
   return 'unknown';

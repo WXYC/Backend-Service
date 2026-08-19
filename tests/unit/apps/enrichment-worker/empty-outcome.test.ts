@@ -121,3 +121,44 @@ describe('BS#1359 track-context trust gate', () => {
     expect(classifyEmptyCause(response)).toBe('lml_degraded');
   });
 });
+
+/**
+ * BS#2217 review: these two classifiers share `extractArtwork` with
+ * `finalizeRow`, so they must be asked the same question `finalizeRow` was
+ * asked. Once the correspondence carve-out can accept a row-less
+ * `alternative` match, a classifier called WITHOUT the requested album
+ * disagrees with the write decision: `finalizeRow` persists
+ * `enriched_match` while the classifier reports `lml_no_match`, which
+ * `SUPPRESSED_EMPTY_CAUSES` in handler.ts drops. The blank tile that
+ * results is then invisible to the BS#969 alert AND invisible to
+ * `flowsheet-no-match-recheck` (which only re-asks `enriched_no_match`),
+ * so nothing revisits it. Threading the album restores `lml_degraded`.
+ */
+describe('BS#2217 requestedAlbum threading', () => {
+  const rowlessDegraded = {
+    search_type: 'alternative',
+    results: [{ library_item: { id: 0, title: 'The Spiritual Sound' }, artwork: { artwork_url: null } }],
+  } as unknown as Parameters<typeof isEmptyOutcome>[0];
+
+  it('classifies a row-less correspondence match with no artwork_url as lml_degraded, not lml_no_match', () => {
+    expect(isEmptyOutcome(rowlessDegraded, 'The Spiritual Sound')).toBe(true);
+    expect(classifyEmptyCause(rowlessDegraded, 'The Spiritual Sound')).toBe('lml_degraded');
+  });
+
+  it('still reports lml_no_match when no album is supplied — carve-out inactive', () => {
+    expect(classifyEmptyCause(rowlessDegraded)).toBe('lml_no_match');
+  });
+
+  it('reports a row-less correspondence match WITH artwork_url as not empty', () => {
+    const resolved = {
+      search_type: 'alternative',
+      results: [
+        {
+          library_item: { id: 0, title: 'The Spiritual Sound' },
+          artwork: { artwork_url: 'https://i.discogs.com/rowless.jpg' },
+        },
+      ],
+    } as unknown as Parameters<typeof isEmptyOutcome>[0];
+    expect(isEmptyOutcome(resolved, 'The Spiritual Sound')).toBe(false);
+  });
+});

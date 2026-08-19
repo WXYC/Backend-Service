@@ -221,8 +221,10 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
           // span.setAttribute below, but compute the classification while the
           // response is still in scope. `null` means the response was a real
           // user-visible match; non-null means we need to fire.
-          if (isEmptyOutcome(response)) {
-            emptyCause = classifyEmptyCause(response);
+          // BS#2217 review: pass the same album `finalizeRow` gated on, so the
+          // classification describes the write that was actually made.
+          if (isEmptyOutcome(response, candidate.album_title)) {
+            emptyCause = classifyEmptyCause(response, candidate.album_title);
           }
         } catch (err) {
           // Row stays `enriching`. C6 stranded-claim sweep recovers it past
