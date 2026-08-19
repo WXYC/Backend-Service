@@ -9,13 +9,20 @@
  * first, same as `rotation-release-id-backfill`'s donor.
  *
  * `extractTrustedArtwork` gates every match through the track-context trust
- * predicate (`isTrustedLmlTrackContextMatch`, BS#1359) before treating a
- * response as resolvable — the exact chokepoint
- * `apps/enrichment-worker/enrich.ts#extractArtwork` uses, so a same-artist
- * substitution (`fallback`/`alternative`/`song_as_artist`) is never
- * auto-persisted here either. This closes one of the three sibling
- * un-gated `extractArtwork`-shaped paths BS#1959 tracks, by making sure
- * this NEW path was gated from day one.
+ * predicate (`isTrustedLmlTrackContextMatch`, BS#1359, refined BS#2217)
+ * before treating a response as resolvable — the exact chokepoint
+ * `apps/enrichment-worker/enrich.ts#extractArtwork` uses, passing this
+ * job's own `candidate.album_title` as the requested-album correspondence
+ * check (BS#2217). A same-artist substitution (`fallback`/`alternative`)
+ * always carries a real `library_item.id` and is rejected regardless; a
+ * validated row-less resolution of the exact requested album
+ * (`library_item.id === 0`, title matching `candidate.album_title`) is now
+ * trusted even when `search_type` is `alternative` — that shape is the
+ * primary reason this recheck job exists to re-ask frozen
+ * `enriched_no_match` rows in the first place. `song_as_artist` stays
+ * rejected outright regardless of id/title. This closes one of the three
+ * sibling un-gated `extractArtwork`-shaped paths BS#1959 tracks, by making
+ * sure this NEW path was gated from day one.
  *
  * `no_match` vs `trust_rejected` (BS#1516): a `no_match` means LML found no
  * candidate at all (or a trusted search_type with no artwork among its
@@ -135,8 +142,11 @@ const envInt = (name: string, fallback: number): number => {
 // response, or a socket-level `timeout: true`) — see its own doc comment.
 const TIMEOUT_MS = envInt('FLOWSHEET_NO_MATCH_RECHECK_LML_PER_CALL_TIMEOUT_MS', 35_000);
 
-export const extractTrustedArtwork = (response: LookupResponse): DiscogsMatchResult | null => {
-  if (!isTrustedLmlTrackContextMatch(response)) return null;
+export const extractTrustedArtwork = (
+  response: LookupResponse,
+  requestedAlbum?: string | null
+): DiscogsMatchResult | null => {
+  if (!isTrustedLmlTrackContextMatch(response, requestedAlbum)) return null;
   // Walk `results` in order rather than reading only `results[0].artwork` —
   // an accepted `compilation` response can pair each `library_item` with
   // its own independently-resolved artwork, so the first entry's `artwork`
@@ -196,7 +206,7 @@ export const lookupNoMatchRecheck = async (candidate: Candidate): Promise<Lookup
     throw new Error('LML lookup returned a timeout body; treating as transient so the row stays retryable');
   }
 
-  const artwork = extractTrustedArtwork(response);
+  const artwork = extractTrustedArtwork(response, candidate.album_title);
 
   if (isUnansweredDegraded(response, artwork)) {
     throw new Error(

@@ -360,6 +360,69 @@ describe('finalizeRow (BS#1359) — track-context trust gate end to end', () => 
       expect(setCall.spotify_url).toContain('open.spotify.com/search');
     }
   );
+
+  it('BS#2217: an alternative row-less match whose title corresponds to row.album_title takes the match arm', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    const rowlessResponse = {
+      search_type: 'alternative',
+      results: [
+        {
+          library_item: { id: 0, title: ROW.album_title },
+          artwork: {
+            artwork_url: 'https://i.discogs.com/rowless/cover.jpg',
+            release_url: 'https://discogs.com/release/rowless',
+          },
+        },
+      ],
+    } as unknown as LookupResponse;
+
+    const outcome = await finalizeRow(ROW, rowlessResponse);
+
+    expect(outcome).toBe('enriched_match');
+    const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setCall.metadata_status).toBe('enriched_match');
+    expect(setCall.artwork_url).toBe('https://i.discogs.com/rowless/cover.jpg');
+  });
+
+  it('BS#2217: an alternative match with a real library_item.id still takes the no-match arm even when the title corresponds (the Vantaa/Animaru shape)', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    const substitutionResponse = {
+      search_type: 'alternative',
+      results: [
+        {
+          library_item: { id: 64288, title: ROW.album_title },
+          artwork: {
+            artwork_url: 'https://i.discogs.com/wrong-album/cover.jpg',
+            release_url: 'https://discogs.com/release/wrong',
+          },
+        },
+      ],
+    } as unknown as LookupResponse;
+
+    const outcome = await finalizeRow(ROW, substitutionResponse);
+
+    expect(outcome).toBe('enriched_no_match');
+  });
+
+  it('BS#2217: an alternative row-less match whose title does NOT correspond to row.album_title still takes the no-match arm', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    const rowlessMismatchResponse = {
+      search_type: 'alternative',
+      results: [
+        {
+          library_item: { id: 0, title: 'Some Unrelated Album' },
+          artwork: {
+            artwork_url: 'https://i.discogs.com/wrong-album/cover.jpg',
+            release_url: 'https://discogs.com/release/wrong',
+          },
+        },
+      ],
+    } as unknown as LookupResponse;
+
+    const outcome = await finalizeRow(ROW, rowlessMismatchResponse);
+
+    expect(outcome).toBe('enriched_no_match');
+  });
 });
 
 /**
@@ -1254,6 +1317,32 @@ describe('extractArtwork', () => {
 
     it('rejects an absent search_type (fail-closed)', () => {
       expect(extractArtwork(withSearchType(undefined))).toBeNull();
+    });
+  });
+
+  describe('BS#2217 request<->result correspondence', () => {
+    const rowlessResponse = (title: string) =>
+      ({
+        search_type: 'alternative',
+        results: [
+          {
+            library_item: { id: 0, title },
+            artwork: { artwork_url: 'https://i.discogs.com/rowless/cover.jpg', release_url: 'https://discogs.com/release/rowless' },
+          },
+        ],
+      }) as unknown as LookupResponse;
+
+    it('returns the artwork when a row-less alternative match corresponds to requestedAlbum', () => {
+      const response = rowlessResponse('The Spiritual Sound');
+      expect(extractArtwork(response, 'The Spiritual Sound')).toEqual(response.results![0]!.artwork);
+    });
+
+    it('returns null when requestedAlbum is omitted — carve-out inactive, identical to pre-BS#2217 behavior', () => {
+      expect(extractArtwork(rowlessResponse('The Spiritual Sound'))).toBeNull();
+    });
+
+    it('returns null when requestedAlbum does not correspond to the returned title', () => {
+      expect(extractArtwork(rowlessResponse('The Spiritual Sound'), 'A Different Album')).toBeNull();
     });
   });
 });

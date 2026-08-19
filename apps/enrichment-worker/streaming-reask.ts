@@ -162,7 +162,10 @@ async function reaskOne(candidate: StreamingReaskCandidate): Promise<void> {
     // relying on the enqueue default so the intent survives a refactor.
     'sweep'
   );
-  const artwork = extractArtwork(response);
+  // BS#2217: pass the candidate's own album_title so a row-less
+  // correspondence match (e.g. a rotation arrival re-asked here after
+  // already carrying a match) isn't rejected purely on `search_type`.
+  const artwork = extractArtwork(response, candidate.album_title);
   if (artwork) {
     // Reuse the ONE canonical search-URL synthesizer (parity-tested against
     // the shared `@wxyc/metadata` module — see enrich.ts's file header)

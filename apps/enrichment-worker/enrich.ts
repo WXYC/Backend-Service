@@ -481,14 +481,25 @@ export const synthesizeSearchUrls = (
   };
 };
 
-export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | null => {
-  // BS#1359: track-context trust gate. A DJ-played track only auto-persists
-  // Discogs data when LML confirms the track is on the returned release
-  // (direct or compilation). alternative/fallback/song_as_artist/none/absent
-  // are same-artist substitutions (Yenbett class) — treat them as no-match so
-  // all three callers (finalizeRow, empty-outcome, streaming-reask) route to
-  // the existing "LML found nothing" path from this one chokepoint.
-  if (!isTrustedLmlTrackContextMatch(response)) return null;
+export const extractArtwork = (
+  response: LookupResponse,
+  requestedAlbum?: string | null
+): DiscogsMatchResult | null => {
+  // BS#1359/BS#2217: track-context trust gate. A DJ-played track only
+  // auto-persists Discogs data when LML confirms the track is on the
+  // returned release: `direct`/`compilation` outright, or any other
+  // search_type — including `alternative`'s row-less resolutions — gated on
+  // request<->result correspondence against `requestedAlbum` (see
+  // `isTrustedLmlTrackContextMatch`'s doc comment for the full rule). A
+  // same-artist substitution (the Yenbett class) always carries a real
+  // library id and is rejected regardless of `requestedAlbum`. `finalizeRow`
+  // and `reaskOne` (streaming-reask.ts) both have a requested album to pass;
+  // `empty-outcome.ts`'s `isEmptyOutcome`/`classifyEmptyCause` are
+  // Sentry-telemetry only and have no request context, so they call this
+  // with `requestedAlbum` omitted — the carve-out stays inactive and they
+  // fail closed, identical to pre-BS#2217 behavior. All three callers route
+  // to the existing "LML found nothing" path from this one chokepoint.
+  if (!isTrustedLmlTrackContextMatch(response, requestedAlbum)) return null;
   // Walk `results` in order rather than reading only `results[0].artwork`.
   // An accepted `compilation` response can pair each `library_item` with its
   // own independently-resolved artwork (LML's `items_with_artwork`), so the
@@ -529,7 +540,7 @@ export const extractArtwork = (response: LookupResponse): DiscogsMatchResult | n
  * every reachable row has the inputs LML needs).
  */
 export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Promise<FinalizeOutcome> => {
-  const artwork = extractArtwork(response);
+  const artwork = extractArtwork(response, row.album_title);
   const searchUrls = synthesizeSearchUrls(row);
   // BS#1499: composer is a per-playcut property, so it rides the flowsheet
   // UPDATE in all four arms below (never the album-keyed album_metadata
