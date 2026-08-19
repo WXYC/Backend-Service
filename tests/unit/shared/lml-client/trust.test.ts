@@ -111,7 +111,7 @@ describe('isTrustedLmlTrackContextMatch — request/result correspondence (BS#22
   });
 
   it.each([undefined, null])(
-    'keeps the carve-out inactive when requestedAlbum is %s — identical to today\'s behavior',
+    "keeps the carve-out inactive when requestedAlbum is %s — identical to today's behavior",
     (requestedAlbum) => {
       expect(
         isTrustedLmlTrackContextMatch(

@@ -481,10 +481,7 @@ export const synthesizeSearchUrls = (
   };
 };
 
-export const extractArtwork = (
-  response: LookupResponse,
-  requestedAlbum?: string | null
-): DiscogsMatchResult | null => {
+export const extractArtwork = (response: LookupResponse, requestedAlbum?: string | null): DiscogsMatchResult | null => {
   // BS#1359/BS#2217: track-context trust gate. A DJ-played track only
   // auto-persists Discogs data when LML confirms the track is on the
   // returned release: `direct`/`compilation` outright, or any other
