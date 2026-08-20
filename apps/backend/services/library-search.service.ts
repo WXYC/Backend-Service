@@ -57,6 +57,7 @@ export type AlbumSearchResultRow = {
   add_date: string;
   album_title: string;
   artist_name: string;
+  artist_id: number;
   code_letters: string;
   code_number: number;
   code_artist_number: number;
@@ -260,6 +261,7 @@ export async function searchLibrary(
       ${library_artist_view.add_date} AS add_date,
       ${library_artist_view.album_title} AS album_title,
       ${library_artist_view.artist_name} AS artist_name,
+      ${library_artist_view.artist_id} AS artist_id,
       ${library_artist_view.code_letters} AS code_letters,
       ${library_artist_view.code_number} AS code_number,
       ${library_artist_view.code_artist_number} AS code_artist_number,
@@ -282,6 +284,7 @@ export async function searchLibrary(
       ${library_artist_view.add_date} AS add_date,
       ${library_artist_view.album_title} AS album_title,
       ${library_artist_view.artist_name} AS artist_name,
+      ${library_artist_view.artist_id} AS artist_id,
       ${library_artist_view.code_letters} AS code_letters,
       ${library_artist_view.code_number} AS code_number,
       ${library_artist_view.code_artist_number} AS code_artist_number,
@@ -358,6 +361,7 @@ export async function searchLibrary(
         ${library_artist_view.add_date} AS add_date,
         ${library_artist_view.album_title} AS album_title,
         ${library_artist_view.artist_name} AS artist_name,
+        ${library_artist_view.artist_id} AS artist_id,
         ${library_artist_view.code_letters} AS code_letters,
         ${library_artist_view.code_number} AS code_number,
         ${library_artist_view.code_artist_number} AS code_artist_number,
@@ -577,6 +581,7 @@ function taggedRowToAlbumSearchResultRow(row: TaggedLibraryViewEntry): AlbumSear
     add_date: row.add_date instanceof Date ? row.add_date.toISOString() : String(row.add_date ?? ''),
     album_title: row.album_title,
     artist_name: row.artist_name ?? '',
+    artist_id: row.artist_id,
     code_letters: row.code_letters,
     code_number: row.code_number,
     code_artist_number: row.code_artist_number,
@@ -602,6 +607,7 @@ type RawRow = {
   add_date: Date | string;
   album_title: string;
   artist_name: string | null;
+  artist_id: number;
   code_letters: string;
   code_number: number;
   code_artist_number: number;
@@ -633,6 +639,7 @@ function toAlbumSearchResultRow(row: RawRow): AlbumSearchResultRow {
     add_date: row.add_date instanceof Date ? row.add_date.toISOString() : String(row.add_date ?? ''),
     album_title: row.album_title,
     artist_name: row.artist_name ?? '',
+    artist_id: row.artist_id,
     code_letters: row.code_letters,
     code_number: row.code_number,
     code_artist_number: row.code_artist_number,
