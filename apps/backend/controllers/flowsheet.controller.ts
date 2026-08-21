@@ -933,6 +933,78 @@ export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = asy
   }
 };
 
+/**
+ * `GET /flowsheet/open-shows` — every open show an operator might need to
+ * close, oldest first (BS#2235).
+ *
+ * Gated to `flowsheet: ['manage']` (musicDirector / stationManager) on the
+ * route. That is deliberately NARROWER than the capability it replaces:
+ * tubafrenzy's `EndShowServlet` takes the show as a request parameter and
+ * checks nothing about who is asking, so any signed-on DJ can end anyone's
+ * recent show through the signon page's "Resume a Show" list. tubafrenzy
+ * retires 2026-08-31 and takes that path with it.
+ *
+ * `window_hours` bounds the lookback; see `getOpenShows` for why an unwindowed
+ * list is unusable in production.
+ */
+export const getOpenShows: RequestHandler<object, unknown, unknown, { window_hours?: string }> = async (req, res) => {
+  const raw = req.query.window_hours;
+  let windowHours = flowsheet_service.OPEN_SHOWS_DEFAULT_WINDOW_HOURS;
+
+  if (raw !== undefined) {
+    // Reject anything that isn't a bare positive integer rather than letting
+    // parseInt's prefix parsing turn "24h" into 24 — an operator who mistypes
+    // the unit should learn that, not silently get a different window than
+    // they asked for.
+    if (!/^\d+$/.test(raw)) {
+      throw new WxycError('Bad Request: window_hours must be a positive integer number of hours', 400);
+    }
+    windowHours = Number.parseInt(raw, 10);
+    if (windowHours < 1 || windowHours > flowsheet_service.OPEN_SHOWS_MAX_WINDOW_HOURS) {
+      throw new WxycError(
+        `Bad Request: window_hours must be between 1 and ${flowsheet_service.OPEN_SHOWS_MAX_WINDOW_HOURS}`,
+        400
+      );
+    }
+  }
+
+  res.status(200).json(await flowsheet_service.getOpenShows(windowHours));
+};
+
+/**
+ * `POST /flowsheet/shows/:id/force-end` — close a show the caller does not
+ * own (BS#2235).
+ *
+ * Reuses `endShow` rather than reimplementing the close, so the `show_end`
+ * marker, the `show_djs` deactivation, the co-host leave markers and the
+ * tubafrenzy sign-off follow one implementation and cannot drift from
+ * `POST /flowsheet/end`. It is the same call the 2026-08-20 manual
+ * remediation script made (BS#2232).
+ *
+ * The already-closed case is left to `endShow`'s compare-and-set on
+ * `end_time IS NULL`, which raises the same 400 — the explicit check below is
+ * only a fast path that avoids a wasted UPDATE, not the guard. A second
+ * force-end therefore cannot write a duplicate marker even if two operators
+ * click at the same instant.
+ */
+export const forceEndShow: RequestHandler<{ id: string }> = async (req, res) => {
+  if (!/^\d+$/.test(req.params.id)) {
+    throw new WxycError('Bad Request: show id must be a positive integer', 400);
+  }
+  const showId = Number.parseInt(req.params.id, 10);
+
+  const show = await flowsheet_service.getShowById(showId);
+  if (!show) {
+    throw new WxycError('Not Found: no show with that id', 404);
+  }
+  if (show.end_time !== null) {
+    throw new WxycError('Bad Request: show is already ended', 400);
+  }
+
+  const finalizedShow: Show = await flowsheet_service.endShow(show);
+  res.status(200).json(finalizedShow);
+};
+
 export const getDJList: RequestHandler = async (req, res) => {
   // getOnAirDJs preserves the account-DJ shape ({ id, dj_name }) and additionally
   // surfaces legacy/tubafrenzy-mirrored shows (null id, legacy_dj_name) that the
