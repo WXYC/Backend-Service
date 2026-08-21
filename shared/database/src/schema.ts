@@ -2468,6 +2468,17 @@ export const shows = wxyc_schema.table(
     // dj-site-originated shows.
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     uniqueIndex('shows_legacy_show_id_idx').on(table.legacy_show_id),
+    // Operator close (BS#2235): `GET /flowsheet/open-shows` filters on
+    // `end_time IS NULL` and orders by `start_time` ASC. `end_time` carried no
+    // index at all before this, so the read was a full scan of `shows`
+    // (72,736 rows in production on 2026-08-21) plus a sort. Partial on the
+    // predicate, which is what makes it cheap to maintain: only 2,814 of those
+    // rows qualify, and the closed 96% never enter the index. `start_time` is
+    // the indexed key rather than a bare `end_time` marker so the same index
+    // serves the ORDER BY and the window floor.
+    index('shows_open_start_time_idx')
+      .on(table.start_time)
+      .where(sql`${table.end_time} IS NULL`),
     // shows_legacy_dj_name_trgm_idx was dropped in migrations 0054 + 0065 —
     // search no longer joins through shows; dj-name reads come from
     // flowsheet.dj_name + flowsheet_dj_name_trgm_idx. Declaration removed to

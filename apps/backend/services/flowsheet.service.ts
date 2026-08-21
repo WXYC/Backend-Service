@@ -1115,8 +1115,23 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   //Add leave notification for all remaining guest djs;
   //Update their active state and set show end time.
 
+  // A NULL `primary_dj_id` no longer aborts the close (BS#2093, decided by
+  // BS#2235). It used to `throw new Error('Primary DJ not found')`, which made
+  // such a show permanently un-endable: `shows.primary_dj_id` is
+  // `onDelete: 'set null'`, so deleting a DJ's account orphans every show they
+  // ran, and the entire legacy ETL cohort (2,813 of production's 2,814 open
+  // shows as of 2026-08-21) carries NULL here by construction — those shows
+  // are exactly the ones the operator-close endpoint exists to reach.
+  //
+  // Nothing below actually needs the id: the `show_djs` deactivation already
+  // skips only the primary (a NULL one matches no row, so every membership
+  // deactivates and every co-host gets a leave marker, which is correct for an
+  // ownerless show), and the `show_end` marker already has a degraded
+  // no-name wording for an unresolvable DJ. `POST /flowsheet/end` cannot
+  // observe the change: it reaches here only when `req.body.dj_id ===
+  // currentShow.primary_dj_id`, and `dj_id` is cross-checked against
+  // `req.auth.id`, so the primary is non-null on that path by construction.
   const primary_dj_id = currentShow.primary_dj_id;
-  if (!primary_dj_id) throw new Error('Primary DJ not found');
 
   // Claim the show FIRST, before any other write.
   //
@@ -1164,7 +1179,9 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
     })
   );
 
-  const dj_information = (await db.select().from(user).where(eq(user.id, primary_dj_id)).limit(1))[0];
+  const dj_information = primary_dj_id
+    ? (await db.select().from(user).where(eq(user.id, primary_dj_id)).limit(1))[0]
+    : undefined;
   const display_dj_name = resolveDjDisplayName(dj_information?.djName ?? null);
   const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
   // Symmetric to startShow: keep the row, degrade the wording to bare
@@ -1250,6 +1267,166 @@ export const getNShows = async (numberOfShows: number = 1, page: number = 0): Pr
 
 export const getLatestShow = async (): Promise<Show | undefined> => {
   return (await getNShows(1))[0];
+};
+
+/**
+ * Operator close for abandoned shows (BS#2235). Backs
+ * `GET /flowsheet/open-shows`, the replacement for tubafrenzy's
+ * `EndShowServlet` + "Resume a Show" path, which retires 2026-08-31.
+ */
+
+/** Fewer entries than this on a non-current open show reads as abandoned. */
+export const LIKELY_ABANDONED_ENTRY_THRESHOLD = 4;
+
+/** Default lookback for `GET /flowsheet/open-shows`, in hours (7 days). */
+export const OPEN_SHOWS_DEFAULT_WINDOW_HOURS = 168;
+
+/** Hard ceiling on the caller-supplied lookback, in hours (1 year). */
+export const OPEN_SHOWS_MAX_WINDOW_HOURS = 8760;
+
+export type OpenShow = {
+  id: number;
+  primary_dj_id: string | null;
+  dj_name: string | null;
+  show_name: string | null;
+  start_time: Date;
+  legacy_show_id: number | null;
+  entry_count: number;
+  /** True for the show every on-air read resolves to — `max(shows.id)`. */
+  is_current: boolean;
+  likely_abandoned: boolean;
+};
+
+export type OpenShowsResult = {
+  shows: OpenShow[];
+  /**
+   * Open shows that started before the window. Reported as a count, never a
+   * list — see `getOpenShows`.
+   */
+  older_open_show_count: number;
+};
+
+/**
+ * The query behind `GET /flowsheet/open-shows`, exported so a unit test can
+ * render its SQL without a live Postgres.
+ *
+ * ONE grouped `LEFT JOIN … GROUP BY`, deliberately. tubafrenzy's unreachable
+ * `FixRadioShowListServlet` called `getNumberOfEntries` once per show inside
+ * its iteration — an N+1 that is fine over a handful of rows and is not fine
+ * over the population this reads. `flowsheet_show_id_play_order_idx`'s
+ * leading `show_id` column serves the join.
+ *
+ * `user` is LEFT JOINed so the shared `resolveShowDjName` chain runs in JS on
+ * columns fetched once, rather than one `resolveDjNameForShow` query per show
+ * — the same trade `getShowsInTimeWindow` (BS#2062) makes. `user.id` is
+ * selected alongside `djName` because the chain distinguishes "no user row"
+ * from "user row with an unusable djName".
+ *
+ * Grouping lists every non-aggregated column explicitly rather than leaning on
+ * Postgres's functional-dependency inference from `shows.id`: the inference
+ * does hold here, but spelling it out keeps the statement portable to a plain
+ * `GROUP BY` reader and survives a future `LEFT JOIN` that widens the select.
+ */
+export const buildOpenShowsQuery = (windowFloor: Date) =>
+  db
+    .select({
+      id: shows.id,
+      primary_dj_id: shows.primary_dj_id,
+      show_name: shows.show_name,
+      start_time: shows.start_time,
+      legacy_show_id: shows.legacy_show_id,
+      dj_name_override: shows.dj_name_override,
+      legacy_dj_name: shows.legacy_dj_name,
+      user_id: user.id,
+      user_dj_name: user.djName,
+      entry_count: sql<number>`count(${flowsheet.id})::int`,
+    })
+    .from(shows)
+    .leftJoin(user, eq(user.id, shows.primary_dj_id))
+    .leftJoin(flowsheet, eq(flowsheet.show_id, shows.id))
+    .where(and(isNull(shows.end_time), gte(shows.start_time, windowFloor)))
+    .groupBy(
+      shows.id,
+      shows.primary_dj_id,
+      shows.show_name,
+      shows.start_time,
+      shows.legacy_show_id,
+      shows.dj_name_override,
+      shows.legacy_dj_name,
+      user.id,
+      user.djName
+    )
+    // Oldest first: the most-stale show is the one an operator came here to
+    // close. `id` is a deterministic tie-break for the second-granularity
+    // collisions the legacy ETL produces (see the 00:55:35/00:55:41 pairs in
+    // production's open-show tail).
+    .orderBy(asc(shows.start_time), asc(shows.id));
+
+/**
+ * Every open show that started within `windowHours`, oldest first, plus a
+ * count of the older ones.
+ *
+ * **Why there is a window at all.** The ticket's first cut was "every show
+ * with `end_time IS NULL`". Measured against production on 2026-08-21 that is
+ * 2,814 rows, of which exactly ONE started in the last 90 days: 2,813 are
+ * legacy ETL imports whose `show_end` never arrived (`primary_dj_id IS NULL`
+ * for all but one of them), stretching back to 2006. Oldest-first over the
+ * unwindowed set therefore buries the one actionable show under two decades
+ * of orphans — the same reasoning that made `countHistoricalOpenShows` in
+ * `jobs/legacy-mirror-reconcile` count-only rather than list them. The tail is
+ * reported as `older_open_show_count` so an operator can see it exists, and
+ * reached by widening `window_hours` when they actually want it.
+ *
+ * The count is a second statement. The "one grouped query" constraint is
+ * about not re-introducing the per-show entry-count N+1; a single scalar
+ * aggregate over an indexed predicate is not that.
+ */
+export const getOpenShows = async (windowHours: number = OPEN_SHOWS_DEFAULT_WINDOW_HOURS): Promise<OpenShowsResult> => {
+  const windowFloor = new Date(Date.now() - windowHours * 60 * 60 * 1000);
+
+  // `is_current` is resolved against the same `max(shows.id)` pivot every
+  // on-air read uses (`getLatestShow`), so this endpoint and the banner can
+  // never disagree about which show is live. It matters for the abandoned
+  // flag: a show that just signed on legitimately has fewer than four
+  // entries, and must not be presented as a close candidate.
+  const [rows, olderCount, latestShow] = await Promise.all([
+    buildOpenShowsQuery(windowFloor),
+    db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(shows)
+      .where(and(isNull(shows.end_time), lt(shows.start_time, windowFloor))),
+    getLatestShow(),
+  ]);
+
+  const latestShowId = latestShow?.id ?? null;
+
+  return {
+    shows: rows.map((row) => {
+      const is_current = latestShowId !== null && row.id === latestShowId;
+      return {
+        id: row.id,
+        primary_dj_id: row.primary_dj_id ?? null,
+        dj_name: resolveShowDjName({
+          dj_name_override: row.dj_name_override ?? null,
+          legacy_dj_name: row.legacy_dj_name ?? null,
+          primary_dj_id: row.primary_dj_id ?? null,
+          user: row.user_id == null ? null : { djName: row.user_dj_name ?? null },
+        }),
+        show_name: row.show_name ?? null,
+        start_time: row.start_time,
+        legacy_show_id: row.legacy_show_id ?? null,
+        entry_count: row.entry_count,
+        is_current,
+        likely_abandoned: !is_current && row.entry_count < LIKELY_ABANDONED_ENTRY_THRESHOLD,
+      };
+    }),
+    older_open_show_count: olderCount[0]?.n ?? 0,
+  };
+};
+
+/** One show by primary key, for the operator-close path's existence check. */
+export const getShowById = async (show_id: number): Promise<Show | undefined> => {
+  return (await db.select().from(shows).where(eq(shows.id, show_id)).limit(1))[0];
 };
 
 /**

@@ -12,6 +12,7 @@ type MockQueryChain = {
   where: jest.Mock;
   innerJoin: jest.Mock;
   leftJoin: jest.Mock;
+  groupBy: jest.Mock;
   orderBy: jest.Mock;
   limit: jest.Mock;
   offset: jest.Mock;
@@ -36,6 +37,10 @@ export function createMockQueryChain(resolvedValue: unknown = []): MockQueryChai
     'where',
     'innerJoin',
     'leftJoin',
+    // `groupBy` is part of the query builder this stub models (BS#2235's
+    // `buildOpenShowsQuery` is the first caller here); without it an aggregate
+    // read fails as "groupBy is not a function" rather than returning the chain.
+    'groupBy',
     'orderBy',
     'limit',
     'insert',

@@ -92,6 +92,33 @@ flowsheet_route.post(
   flowsheetController.leaveShow
 );
 
+// Operator close for an abandoned show (BS#2235) — the Backend-Service
+// replacement for tubafrenzy's `EndShowServlet` + "Resume a Show", which
+// retires with tubafrenzy on 2026-08-31.
+//
+// `flowsheet: ['manage']` is the only gate in this router above `write`: it
+// selects musicDirector and stationManager, excluding the plain `dj` role that
+// every other write route here admits. See `shared/authentication/src/auth.roles.ts`.
+//
+// Placed above `get('/:something')`-shaped routes purely by convention — this
+// router declares no parameterized GET that could shadow `/open-shows`.
+flowsheet_route.get('/open-shows', requirePermissions({ flowsheet: ['manage'] }), flowsheetController.getOpenShows);
+
+// `flowsheetMirror.endShow` is chained exactly as it is on `POST /flowsheet/end`:
+// the controller responds with the finalized `Show`, the response tap stashes it
+// as `res.locals.mirrorData`, and the tap's `isShowPayload` guard admits it — so
+// an operator close signs the show off in tubafrenzy and writes its END_OF_SHOW
+// entry through the same path a DJ's own sign-off does.
+//
+// No `showMemberMiddleware`: the entire point is to act on a show the caller is
+// not a member of.
+flowsheet_route.post(
+  '/shows/:id/force-end',
+  requirePermissions({ flowsheet: ['manage'] }),
+  flowsheetMirror.endShow,
+  flowsheetController.forceEndShow
+);
+
 flowsheet_route.get('/djs-on-air', flowsheetController.getDJList);
 
 flowsheet_route.get('/on-air', flowsheetController.getOnAir);

@@ -1,0 +1,47 @@
+-- BS#2235. A partial B-tree on `shows.start_time`, restricted to open shows
+-- (`WHERE end_time IS NULL`).
+--
+-- `shows.end_time` carried no index at all before this. The only two indexes on
+-- the table are `shows_legacy_show_id_idx` (unique, on the tubafrenzy surrogate
+-- key) and the primary key, so every `end_time IS NULL` read is a full scan.
+--
+-- The consumer is `GET /flowsheet/open-shows` (BS#2235), the Backend-Service
+-- replacement for tubafrenzy's `EndShowServlet` + "Resume a Show" path, which
+-- retires with tubafrenzy on 2026-08-31. Its query is
+-- `WHERE end_time IS NULL AND start_time >= $floor ORDER BY start_time ASC`,
+-- which this index serves end to end: the partial predicate is the filter, and
+-- the indexed key is both the range bound and the sort.
+--
+-- `jobs/legacy-mirror-reconcile`'s stale-open-show sweep (BS#2065/#2067/#2068)
+-- runs the same `end_time IS NULL` + `start_time` bounds nightly and picks this
+-- up for free. It is not the reason the index exists — a nightly cron can
+-- afford a seq scan — but it is why the shape is `(start_time) WHERE end_time
+-- IS NULL` rather than a bare marker index on `end_time`.
+--
+-- Sized by the predicate, not the table. Measured on production 2026-08-21:
+-- 72,736 rows in `shows`, of which 2,814 have `end_time IS NULL` — so the index
+-- covers under 4% of the table and the closed 96% never enter it. (That 2,814
+-- is itself the backlog this endpoint exists to work through: 2,813 of them are
+-- legacy ETL imports whose `show_end` never arrived, all but one carrying a
+-- NULL `primary_dj_id`, stretching back to 2006. The number should fall.)
+--
+-- Production ops:
+--   - This is NOT the CONCURRENTLY form, because Drizzle wraps each migration
+--     file in a transaction and `CREATE INDEX CONCURRENTLY cannot run inside a
+--     transaction block` — same constraint as 0057, 0068, 0070, 0074, 0078,
+--     0080, 0139, 0144, 0148.
+--   - Unlike those, the in-migration form here is genuinely cheap: the
+--     AccessExclusiveLock is held for a sub-second build over 2,814 qualifying
+--     rows on a 72,736-row table, not the multi-minute build over `flowsheet`'s
+--     ~2.6M-row / ~1.7 GB heap that made 0148's out-of-band step mandatory. The
+--     lock still pauses `POST /flowsheet/join` and `POST /flowsheet/end` for
+--     its duration, so if the deploy lands mid-show, run it out of band first:
+--       CREATE INDEX CONCURRENTLY IF NOT EXISTS "shows_open_start_time_idx"
+--         ON "wxyc_schema"."shows" USING btree ("start_time")
+--         WHERE "wxyc_schema"."shows"."end_time" IS NULL;
+--   - `IF NOT EXISTS` makes the migration a no-op against a database where the
+--     index already exists (the out-of-band case above), while fresh dev and CI
+--     databases pick it up on first migrate. Same shape as 0068, 0070, 0074,
+--     0080, 0139, 0144, 0148.
+
+CREATE INDEX IF NOT EXISTS "shows_open_start_time_idx" ON "wxyc_schema"."shows" USING btree ("start_time") WHERE "wxyc_schema"."shows"."end_time" IS NULL;
