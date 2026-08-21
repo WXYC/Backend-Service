@@ -135,6 +135,130 @@ describe('endShow', () => {
     expect(leaveInsert.values).toHaveBeenCalledWith(expect.objectContaining({ entry_type: 'dj_leave' }));
   });
 
+  /**
+   * BS#2235 review finding 1/2. `endShow` was written for a DJ signing off NOW,
+   * and the operator-close path reuses it for shows that stopped broadcasting
+   * long ago. Two public reads make `now()` wrong there, not merely imprecise:
+   *
+   *   1. `getShowsInTimeWindow` (backing `GET /flowsheet/range`, which
+   *      archive.wxyc.org reads) admits a closed show when
+   *      `start_time < windowEnd AND end_time > windowStart`. A 2006 show
+   *      stamped `end_time = now` satisfies that for EVERY day since, so
+   *      working the backlog would inject bogus multi-decade shows into every
+   *      archive page.
+   *   2. `getEntriesByPage` orders globally by `add_time DESC, id DESC` and
+   *      serves `GET /flowsheet` page 0 and `GET /flowsheet/latest`. A
+   *      `show_end` marker at `add_time = now()` becomes the newest entry on
+   *      the public flowsheet.
+   */
+  it('stamps end_time and the marker add_time from the supplied instant, not now()', async () => {
+    const endedAt = new Date('2006-04-02T05:15:30.276Z');
+
+    const remainingDjsSelect = createMockQueryChain();
+    remainingDjsSelect.where.mockResolvedValue([]);
+    db.select.mockReturnValueOnce(remainingDjsSelect);
+
+    const userSelect = createMockQueryChain();
+    userSelect.limit.mockResolvedValue([{ djName: 'DJ Flacko' }]);
+    db.select.mockReturnValueOnce(userSelect);
+    db.select.mockReturnValueOnce(makeAwaitablePlayOrderChain(1));
+
+    const flowsheetInsert = createMockQueryChain([{ id: 999 }]);
+    db.insert.mockReturnValueOnce(flowsheetInsert);
+
+    const showsUpdate = createMockQueryChain([{ id: 72464, end_time: endedAt }]);
+    db.update.mockReturnValueOnce(showsUpdate);
+
+    await endShow({ id: 72464, primary_dj_id: 'user-1' } as unknown as Parameters<typeof endShow>[0], { endedAt });
+
+    expect(showsUpdate.set).toHaveBeenCalledWith({ end_time: endedAt });
+
+    const flowsheetValues = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(flowsheetValues.add_time).toEqual(endedAt);
+    // The rendered wording follows the same instant, so a closed show cannot
+    // disagree with its own marker about when it ended.
+    expect(flowsheetValues.message).toContain('2006');
+  });
+
+  it('defaults to now() when no instant is supplied, leaving the live sign-off unchanged', async () => {
+    const remainingDjsSelect = createMockQueryChain();
+    remainingDjsSelect.where.mockResolvedValue([]);
+    db.select.mockReturnValueOnce(remainingDjsSelect);
+
+    const userSelect = createMockQueryChain();
+    userSelect.limit.mockResolvedValue([{ djName: 'DJ Night Owl' }]);
+    db.select.mockReturnValueOnce(userSelect);
+    db.select.mockReturnValueOnce(makeAwaitablePlayOrderChain(1));
+    db.insert.mockReturnValueOnce(createMockQueryChain([{ id: 999 }]));
+
+    const showsUpdate = createMockQueryChain([{ id: 42, end_time: new Date() }]);
+    db.update.mockReturnValueOnce(showsUpdate);
+
+    const before = Date.now();
+    await endShow({ id: 42, primary_dj_id: 'user-1' } as unknown as Parameters<typeof endShow>[0]);
+    const after = Date.now();
+
+    const stamped = (showsUpdate.set.mock.calls[0]?.[0] as { end_time: Date }).end_time;
+    expect(stamped.getTime()).toBeGreaterThanOrEqual(before);
+    expect(stamped.getTime()).toBeLessThanOrEqual(after);
+  });
+
+  /**
+   * BS#2235 review finding 3. The marker name used to come from a bare
+   * `auth_user.dj_name` read, which ignored `shows.dj_name_override` — so a
+   * show carrying an override put it on `show_start` and on every track row,
+   * then reverted here, leaving the one within-show inconsistency BS#1321 set
+   * out to remove on the closing marker.
+   */
+  it('honours dj_name_override on the show_end marker', async () => {
+    const remainingDjsSelect = createMockQueryChain();
+    remainingDjsSelect.where.mockResolvedValue([]);
+    db.select.mockReturnValueOnce(remainingDjsSelect);
+
+    db.select.mockReturnValueOnce(makeAwaitablePlayOrderChain(4));
+
+    const flowsheetInsert = createMockQueryChain([{ id: 999 }]);
+    db.insert.mockReturnValueOnce(flowsheetInsert);
+    db.update.mockReturnValueOnce(createMockQueryChain([{ id: 42, end_time: new Date() }]));
+
+    await endShow({
+      id: 42,
+      primary_dj_id: 'user-1',
+      dj_name_override: 'Aubrey Hearst',
+    } as unknown as Parameters<typeof endShow>[0]);
+
+    const flowsheetValues = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(flowsheetValues.dj_name).toBe('Aubrey Hearst');
+  });
+
+  /**
+   * The other half of finding 3: with a NULL `primary_dj_id` there is no user
+   * row at all, so the old bare read resolved `null` for the ENTIRE legacy
+   * cohort and wrote a nameless marker among sibling rows that do carry the
+   * tubafrenzy handle.
+   */
+  it('falls back to legacy_dj_name on the show_end marker of an ownerless show', async () => {
+    const remainingDjsSelect = createMockQueryChain();
+    remainingDjsSelect.where.mockResolvedValue([]);
+    db.select.mockReturnValueOnce(remainingDjsSelect);
+
+    db.select.mockReturnValueOnce(makeAwaitablePlayOrderChain(2));
+
+    const flowsheetInsert = createMockQueryChain([{ id: 999 }]);
+    db.insert.mockReturnValueOnce(flowsheetInsert);
+    db.update.mockReturnValueOnce(createMockQueryChain([{ id: 73249, end_time: new Date() }]));
+
+    await endShow({
+      id: 73249,
+      primary_dj_id: null,
+      legacy_dj_name: 'DJ Mouseness',
+    } as unknown as Parameters<typeof endShow>[0]);
+
+    const flowsheetValues = flowsheetInsert.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(flowsheetValues.dj_name).toBe('DJ Mouseness');
+    expect(flowsheetValues.message).toContain('DJ Mouseness');
+  });
+
   it('rejects the loser of a concurrent double-end without writing a second show_end marker', async () => {
     // The end_time UPDATE is a compare-and-set (`WHERE id = ? AND end_time IS
     // NULL`) and runs FIRST, before any other write. The controller's own

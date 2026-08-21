@@ -1032,6 +1032,124 @@ paths:
                   - $ref: '#/components/schemas/ShowDJ'
                     description: 'Show joined'
 
+  /flowsheet/open-shows:
+    get:
+      summary: List open shows an operator may need to close (BS#2235)
+      description: >
+        Shows with `end_time IS NULL` that started inside the lookback window,
+        oldest first, with flowsheet entry counts. Requires the
+        `flowsheet: manage` permission (musicDirector / stationManager).
+        Replaces tubafrenzy's "Resume a Show" list, which retires 2026-08-31.
+        The window matters: `end_time IS NULL` is not a reliable "on the air"
+        signal, and production's open shows reach back to 2006 — see
+        `getOpenShows` in apps/backend/services/flowsheet.service.ts.
+      parameters:
+        - name: window_hours
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 262800
+            default: 168
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        '200':
+          description: Open shows inside the window, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  shows:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        primary_dj_id:
+                          type: string
+                          nullable: true
+                        dj_name:
+                          type: string
+                          nullable: true
+                        show_name:
+                          type: string
+                          nullable: true
+                        start_time:
+                          type: string
+                          format: date-time
+                        legacy_show_id:
+                          type: integer
+                          nullable: true
+                        entry_count:
+                          type: integer
+                        is_current:
+                          type: boolean
+                          description: The show every on-air read resolves to. Never offer to close it.
+                        likely_abandoned:
+                          type: boolean
+                          description: Advisory only — not current, and fewer than four entries.
+                  total_in_window:
+                    type: integer
+                    description: Total before `limit` truncates; the only signal a page is partial.
+                  older_open_show_count:
+                    type: integer
+                    description: Open shows older than the window. Counted, never listed.
+        '400':
+          description: 'window_hours or limit was not an integer in range'
+        '403':
+          description: 'Caller lacks the `flowsheet: manage` permission'
+
+  /flowsheet/shows/{id}/force-end:
+    post:
+      summary: End a show the caller does not own (BS#2235)
+      description: >
+        Closes an abandoned show, reusing the same `endShow` implementation as
+        `POST /flowsheet/end` — same `show_end` marker, same `show_djs`
+        deactivation, same tubafrenzy sign-off. `end_time` and the marker's
+        `add_time` come from the show's last logged entry, NOT from now(): a
+        show from the legacy backlog stamped now() would overlap every
+        `GET /flowsheet/range` window since it started and sort to the top of
+        the public flowsheet. Requires the `flowsheet: manage` permission.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Backend-Service `shows.id`, not the tubafrenzy `legacy_show_id`.
+          schema:
+            type: integer
+        - name: force
+          in: query
+          required: false
+          description: >
+            Set to `true` to close the show that is currently on air. Without
+            it, targeting `max(shows.id)` is a 409. The override exists because
+            an abandoned show IS the current show until something closes it —
+            the 2026-08-20 incident is exactly that case.
+          schema:
+            type: string
+            enum: ['true']
+      responses:
+        '200':
+          description: The finalized show, with `end_time` set
+        '400':
+          description: The id was not a positive integer, or the show is already ended
+        '403':
+          description: 'Caller lacks the `flowsheet: manage` permission'
+        '404':
+          description: No show with that id
+        '409':
+          description: The target is the current on-air show and `force=true` was not sent
+
   /flowsheet/djs-on-air:
     get:
       summary: Get list of DJs currently on air
