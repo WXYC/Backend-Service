@@ -294,6 +294,13 @@ describe('GET /library/query cascade — modern Card Catalog serves matched_via 
     expect(hit).toBeDefined();
     expect(hit.album_title).toBe(CTA_ALBUM_TITLE);
     expect(hit.artist_name).toBe(CTA_ARTIST);
+    // `artist_id` is declared non-nullable on `AlbumSearchResultRow`, and the
+    // CTA arm hand-rolls its own SELECT rather than reusing the view
+    // projection — so this is the one assertion that can catch the column
+    // going missing from that SELECT. The unit tests cannot: they hand their
+    // mocked rows an `artist_id`, so a column absent from the real SQL is
+    // invisible to them. This drives the actual statement.
+    expect(typeof hit.artist_id).toBe('number');
     expect(Array.isArray(hit.matched_via)).toBe(true);
     expect(hit.matched_via.length).toBeGreaterThanOrEqual(1);
     const bioHints = hit.matched_via.filter((m) => m.title === 'Bioluminescence');

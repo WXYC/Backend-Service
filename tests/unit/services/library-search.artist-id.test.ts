@@ -3,12 +3,27 @@ import { db } from '../../mocks/database.mock';
 
 /**
  * BS#2227: `artist_id` must reach `AlbumSearchResultRow` on every path that
- * produces one — the alias-OFF direct-match SELECT, the alias-ON branch B
- * (alias-only) SELECT, and the track-title cascade (which maps a
- * `TaggedLibraryViewEntry`, already carrying `artist_id` off
- * `library_artist_view`). A V/A compilation row must carry the shared
- * compilation artist id, not null — proven here via the same direct-match
- * path a real compilation row takes.
+ * produces one.
+ *
+ * What this file covers, and what it deliberately does not:
+ *
+ * These tests pin the two MAPPERS (`toAlbumSearchResultRow`,
+ * `taggedRowToAlbumSearchResultRow`) — that each carries `artist_id` from its
+ * input row to its output. They cannot verify that the SQL selects the column
+ * at all: `db.execute` is a bare mock that ignores its argument, and every
+ * fixture below supplies `artist_id` by hand, so deleting the
+ * `AS artist_id` projections from the SELECTs leaves this whole file green.
+ *
+ * Coverage of the projections themselves is therefore the integration suite's
+ * job, against real SQL: `tests/integration/library-query.spec.js` asserts
+ * `typeof hit.artist_id === 'number'` on a CTA cascade hit. Add an assertion
+ * there, not here, when a new search path starts producing these rows.
+ *
+ * Note the cascade's CTA arm does NOT read `library_artist_view` — it
+ * hand-rolls a join over `compilation_track_artist` / `library` / `artists`
+ * and returns `as TaggedLibraryViewEntry`, an unchecked cast. `artist_id`
+ * reaches it only because `searchLibraryByCTARaw` projects the column
+ * explicitly; nothing in the type system enforces that.
  */
 
 const mockRunCatalogTrackSearchCascade = jest.fn<() => Promise<unknown[]>>().mockResolvedValue([]);
