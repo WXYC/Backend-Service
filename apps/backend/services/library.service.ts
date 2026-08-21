@@ -3928,6 +3928,7 @@ export async function searchLibraryByCTARaw(
         ${library.album_artist} AS album_artist,
         ${library.plays} AS plays,
         ${library.artwork_url} AS artwork_url,
+        ${library.artist_id} AS artist_id,
         ${artists.discogs_artist_id} AS discogs_artist_id,
         ${artists.musicbrainz_artist_id} AS musicbrainz_artist_id,
         ${artists.wikidata_qid} AS wikidata_qid,
