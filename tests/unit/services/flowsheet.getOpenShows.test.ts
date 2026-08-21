@@ -9,6 +9,7 @@ import {
   getOpenShows,
   LIKELY_ABANDONED_ENTRY_THRESHOLD,
   OPEN_SHOWS_DEFAULT_WINDOW_HOURS,
+  OPEN_SHOWS_MAX_WINDOW_HOURS,
 } from '../../../apps/backend/services/flowsheet.service';
 
 type Row = Record<string, unknown>;
@@ -18,10 +19,14 @@ type Row = Record<string, unknown>;
  * `db.select` mock is primed positionally in call order: the grouped open-shows
  * query, the older-than-window count, then `getLatestShow`'s `getNShows`.
  */
-const primeReads = (rows: Row[], olderCount: number, latestShowId: number | null) => {
+const primeReads = (rows: Row[], olderCount: number, latestShowId: number | null, windowCount?: number) => {
   const openShows = createMockQueryChain();
-  openShows.orderBy.mockResolvedValue(rows);
+  openShows.limit.mockResolvedValue(rows);
   db.select.mockReturnValueOnce(openShows);
+
+  const inWindow = createMockQueryChain();
+  inWindow.where.mockResolvedValue([{ n: windowCount ?? rows.length }]);
+  db.select.mockReturnValueOnce(inWindow);
 
   const older = createMockQueryChain();
   older.where.mockResolvedValue([{ n: olderCount }]);
@@ -139,7 +144,37 @@ describe('getOpenShows', () => {
     expect(result.older_open_show_count).toBe(2813);
   });
 
+  /**
+   * `total_in_window` is the only way a caller can tell a truncated page from a
+   * complete one — without it, `limit` silently lies about how much is open.
+   */
+  it('reports total_in_window separately from the truncated page', async () => {
+    primeReads([row({ id: 1 }), row({ id: 2 })], 0, 99, 57);
+
+    const result = await getOpenShows(168, 2);
+
+    expect(result.shows).toHaveLength(2);
+    expect(result.total_in_window).toBe(57);
+  });
+
+  it('passes the caller’s limit to the query', async () => {
+    const { openShows } = primeReads([], 0, 99);
+
+    await getOpenShows(168, 25);
+
+    expect(openShows.limit).toHaveBeenCalledWith(25);
+  });
+
   it('defaults the window to a week', () => {
     expect(OPEN_SHOWS_DEFAULT_WINDOW_HOURS).toBe(24 * 7);
+  });
+
+  /**
+   * The ceiling must be able to reach the cohort `older_open_show_count`
+   * counts, or that number describes rows no request can list. Production's
+   * open shows start in 2006; the first cut was 8,760 hours (one year).
+   */
+  it('caps the window wide enough to reach a 2006 show', () => {
+    expect(OPEN_SHOWS_MAX_WINDOW_HOURS).toBeGreaterThan(20 * 365 * 24);
   });
 });

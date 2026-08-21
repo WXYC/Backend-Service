@@ -71,7 +71,16 @@ describe('buildOpenShowsQuery — rendered statement (BS#2235)', () => {
   it('filters on end_time IS NULL and binds the window floor as a parameter', () => {
     expect(text).toContain(`"${SCHEMA}"."shows"."end_time" is null`);
     expect(text).toContain(`"${SCHEMA}"."shows"."start_time" >= $1`);
-    expect(params).toHaveLength(1);
+    // Two bound values: the window floor and the row cap. Both parameters, not
+    // interpolated text.
+    // The floor arrives already serialized by drizzle's timestamptz encoder.
+    expect(params).toEqual(['2026-08-14T00:00:00.000Z', 100]);
+  });
+
+  it('caps the row count so the read is bounded by construction', () => {
+    // `window_hours` reaches 30 years, so without this the response is every
+    // open show in the database in one JSON body.
+    expect(text).toContain('limit $2');
   });
 
   it('orders oldest-first with a deterministic tie-break on id', () => {

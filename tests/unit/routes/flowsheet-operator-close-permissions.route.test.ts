@@ -37,12 +37,19 @@ const mockGetOpenShows = jestGlobals.fn<() => Promise<unknown>>();
 const mockGetShowById = jestGlobals.fn<() => Promise<unknown>>();
 const mockEndShow = jestGlobals.fn<() => Promise<unknown>>();
 
+const mockGetLatestShow = jestGlobals.fn<() => Promise<unknown>>();
+const mockResolveShowEndInstant = jestGlobals.fn<() => Promise<Date>>();
+
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getOpenShows: mockGetOpenShows,
   getShowById: mockGetShowById,
   endShow: mockEndShow,
+  getLatestShow: mockGetLatestShow,
+  resolveShowEndInstant: mockResolveShowEndInstant,
   OPEN_SHOWS_DEFAULT_WINDOW_HOURS: 168,
-  OPEN_SHOWS_MAX_WINDOW_HOURS: 8760,
+  OPEN_SHOWS_MAX_WINDOW_HOURS: 262_800,
+  OPEN_SHOWS_DEFAULT_LIMIT: 100,
+  OPEN_SHOWS_MAX_LIMIT: 500,
   getLastModifiedAt: jest.fn(),
 }));
 
@@ -80,7 +87,11 @@ app.use('/flowsheet', flowsheet_route);
  */
 describe('operator close — permission tier (BS#2235)', () => {
   beforeEach(() => {
-    mockGetOpenShows.mockReset().mockResolvedValue({ shows: [], older_open_show_count: 0 });
+    mockGetOpenShows.mockReset().mockResolvedValue({ shows: [], total_in_window: 0, older_open_show_count: 0 });
+    // Not the on-air show, so force-end's confirmation guard stays quiet —
+    // this suite is about the permission tier, not that guard.
+    mockGetLatestShow.mockReset().mockResolvedValue({ id: -1 });
+    mockResolveShowEndInstant.mockReset().mockResolvedValue(new Date('2026-08-20T18:46:20.000Z'));
     mockGetShowById.mockReset().mockResolvedValue({ id: 5, primary_dj_id: 'dj-1', end_time: null });
     mockEndShow.mockReset().mockResolvedValue({ id: 5, primary_dj_id: 'dj-1', end_time: new Date() });
   });

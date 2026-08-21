@@ -1111,9 +1111,43 @@ const createJoinNotification = async (id: string, show_id: number): Promise<FSEn
   return notification[0];
 };
 
-export const endShow = async (currentShow: Show): Promise<Show> => {
+/**
+ * Options for `endShow`.
+ *
+ * `endedAt` exists because "the show ended" and "right now" are the same
+ * instant only on the live sign-off path. `POST /flowsheet/shows/:id/force-end`
+ * (BS#2235) closes shows that stopped broadcasting long ago — production's open
+ * backlog reaches back to 2006 — and stamping `now()` on one of those is not a
+ * cosmetic inaccuracy. Two public reads consume these timestamps:
+ *
+ *   1. `getShowsInTimeWindow` (backing `GET /flowsheet/range`, which
+ *      archive.wxyc.org reads) admits a closed show when
+ *      `start_time < windowEnd AND end_time > windowStart`. A show stamped
+ *      `start_time = 2006, end_time = now` satisfies that for EVERY day in
+ *      between, so closing the backlog would inject bogus multi-decade shows
+ *      into every archive page.
+ *   2. `getEntriesByPage` orders globally by `add_time DESC, id DESC` and
+ *      serves both `GET /flowsheet` page 0 and `GET /flowsheet/latest`. A
+ *      `show_end` marker written with `add_time = now()` for a 2006 show
+ *      becomes the newest entry on the public flowsheet.
+ *
+ * So the operator path passes the instant the show actually stopped, derived
+ * from its last logged entry (`resolveShowEndInstant`). The live path passes
+ * nothing and keeps `new Date()` — byte-identical to the pre-BS#2235 behavior.
+ */
+export type EndShowOptions = {
+  /** When the show actually stopped. Defaults to now (the live sign-off case). */
+  endedAt?: Date;
+};
+
+export const endShow = async (currentShow: Show, options: EndShowOptions = {}): Promise<Show> => {
   //Add leave notification for all remaining guest djs;
   //Update their active state and set show end time.
+
+  // One instant for the `end_time` column, the `show_end` marker's `add_time`,
+  // its rendered message, and every co-host `dj_leave` marker — so a closed
+  // show cannot disagree with its own markers about when it ended.
+  const endedAt = options.endedAt ?? new Date();
 
   // A NULL `primary_dj_id` no longer aborts the close (BS#2093, decided by
   // BS#2235). It used to `throw new Error('Primary DJ not found')`, which made
@@ -1153,7 +1187,7 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
   //      the show first makes that add fail its own guard.
   const finalized = await db
     .update(shows)
-    .set({ end_time: new Date() })
+    .set({ end_time: endedAt })
     .where(and(eq(shows.id, currentShow.id), isNull(shows.end_time)))
     .returning();
 
@@ -1175,23 +1209,40 @@ export const endShow = async (currentShow: Show): Promise<Show> => {
         .set({ active: false })
         .where(and(eq(show_djs.show_id, currentShow.id), eq(show_djs.dj_id, dj.dj_id)));
       if (dj.dj_id === primary_dj_id) return;
-      await createLeaveNotification(dj.dj_id, currentShow.id);
+      await createLeaveNotification(dj.dj_id, currentShow.id, endedAt);
     })
   );
 
-  const dj_information = primary_dj_id
-    ? (await db.select().from(user).where(eq(user.id, primary_dj_id)).limit(1))[0]
-    : undefined;
-  const display_dj_name = resolveDjDisplayName(dj_information?.djName ?? null);
-  const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+  // Resolved through the SHARED chain (`dj_name_override` -> the linked
+  // account's handle -> `legacy_dj_name`), not the bare `auth_user.dj_name`
+  // read this used to do. Two things that read fixed:
+  //
+  //   - A show carrying a `dj_name_override` (BS#1321) put the override on its
+  //     `show_start` marker and on every track row, then reverted to
+  //     `auth_user.dj_name` here — the one within-show inconsistency BS#1321
+  //     set out to remove, left behind on the closing marker.
+  //   - A show with a NULL `primary_dj_id` has no user row to read at all, so
+  //     the old form resolved `null` for the ENTIRE legacy cohort (2,813 of
+  //     production's 2,814 open shows on 2026-08-21) and wrote a nameless
+  //     `End of show:` marker among sibling rows that do carry the handle.
+  //
+  // Still PII-safe by construction: `auth_user.name` is not an input to the
+  // chain (see `resolveShowDjName`).
+  const display_dj_name = await resolveDjNameForShow(currentShow);
+  const endedAtLocal = endedAt.toLocaleString('en-US', { timeZone: 'America/New_York' });
   // Symmetric to startShow: keep the row, degrade the wording to bare
   // "End of show: ${time}" when the name is unresolvable (epic #1288).
-  const message = display_dj_name ? `End of Show: ${display_dj_name} left the set at ${now}` : `End of show: ${now}`;
+  const message = display_dj_name
+    ? `End of Show: ${display_dj_name} left the set at ${endedAtLocal}`
+    : `End of show: ${endedAtLocal}`;
 
   await db.insert(flowsheet).values({
     show_id: currentShow.id,
     entry_type: 'show_end',
     dj_name: display_dj_name,
+    // Explicit, not the `defaultNow()`. See EndShowOptions: this column is the
+    // public flowsheet's global sort key.
+    add_time: endedAt,
     play_order: await nextPlayOrder(currentShow.id),
     message,
   });
@@ -1226,7 +1277,7 @@ export const leaveShow = async (dj_id: string, currentShow: Show): Promise<ShowD
   return update_result;
 };
 
-const createLeaveNotification = async (dj_id: string, show_id: number): Promise<FSEntry | null> => {
+const createLeaveNotification = async (dj_id: string, show_id: number, addTime?: Date): Promise<FSEntry | null> => {
   const dj = (await db.select().from(user).where(eq(user.id, dj_id)).limit(1))[0];
 
   const display_dj_name = resolveDjDisplayName(dj?.djName ?? null);
@@ -1248,6 +1299,11 @@ const createLeaveNotification = async (dj_id: string, show_id: number): Promise<
       show_id: show_id,
       entry_type: 'dj_leave',
       dj_name: display_dj_name,
+      // Omitted on the live path so the `defaultNow()` applies, exactly as
+      // before; supplied by `endShow`'s operator path so a co-host's leave
+      // marker lands with the show it belongs to rather than at the top of
+      // today's flowsheet (see EndShowOptions).
+      ...(addTime ? { add_time: addTime } : {}),
       play_order: await nextPlayOrder(show_id),
       message: `${display_dj_name} left the set!`,
     })
@@ -1281,8 +1337,24 @@ export const LIKELY_ABANDONED_ENTRY_THRESHOLD = 4;
 /** Default lookback for `GET /flowsheet/open-shows`, in hours (7 days). */
 export const OPEN_SHOWS_DEFAULT_WINDOW_HOURS = 168;
 
-/** Hard ceiling on the caller-supplied lookback, in hours (1 year). */
-export const OPEN_SHOWS_MAX_WINDOW_HOURS = 8760;
+/**
+ * Hard ceiling on the caller-supplied lookback, in hours — 30 years.
+ *
+ * Sized to REACH the tail, not to fence it off. The first cut was 8,760 (one
+ * year), which made `older_open_show_count` a number describing rows no legal
+ * request could ever list: production's open shows start in 2006. A count an
+ * operator cannot act on is worse than no count. The ceiling is kept only so
+ * the parameter has a bound at all; what actually bounds the response is
+ * `limit`, and the partial index on `(start_time) WHERE end_time IS NULL`
+ * makes the widest scan cheap (2,814 qualifying rows of 72,736 on 2026-08-21).
+ */
+export const OPEN_SHOWS_MAX_WINDOW_HOURS = 262_800;
+
+/** Rows returned per request when the caller does not say. */
+export const OPEN_SHOWS_DEFAULT_LIMIT = 100;
+
+/** Hard ceiling on `limit`. */
+export const OPEN_SHOWS_MAX_LIMIT = 500;
 
 export type OpenShow = {
   id: number;
@@ -1299,6 +1371,13 @@ export type OpenShow = {
 
 export type OpenShowsResult = {
   shows: OpenShow[];
+  /**
+   * How many open shows the window holds in total, before `limit` truncates.
+   * `shows.length < total_in_window` is the only way a caller can tell it is
+   * looking at a partial answer — without it, a truncated page is
+   * indistinguishable from a complete one.
+   */
+  total_in_window: number;
   /**
    * Open shows that started before the window. Reported as a count, never a
    * list — see `getOpenShows`.
@@ -1327,7 +1406,7 @@ export type OpenShowsResult = {
  * does hold here, but spelling it out keeps the statement portable to a plain
  * `GROUP BY` reader and survives a future `LEFT JOIN` that widens the select.
  */
-export const buildOpenShowsQuery = (windowFloor: Date) =>
+export const buildOpenShowsQuery = (windowFloor: Date, limit: number = OPEN_SHOWS_DEFAULT_LIMIT) =>
   db
     .select({
       id: shows.id,
@@ -1360,7 +1439,8 @@ export const buildOpenShowsQuery = (windowFloor: Date) =>
     // close. `id` is a deterministic tie-break for the second-granularity
     // collisions the legacy ETL produces (see the 00:55:35/00:55:41 pairs in
     // production's open-show tail).
-    .orderBy(asc(shows.start_time), asc(shows.id));
+    .orderBy(asc(shows.start_time), asc(shows.id))
+    .limit(limit);
 
 /**
  * Every open show that started within `windowHours`, oldest first, plus a
@@ -1377,11 +1457,15 @@ export const buildOpenShowsQuery = (windowFloor: Date) =>
  * reported as `older_open_show_count` so an operator can see it exists, and
  * reached by widening `window_hours` when they actually want it.
  *
- * The count is a second statement. The "one grouped query" constraint is
- * about not re-introducing the per-show entry-count N+1; a single scalar
- * aggregate over an indexed predicate is not that.
+ * The two counts and the `getLatestShow` pivot are separate statements. The
+ * "one grouped query" constraint is about not re-introducing the per-show
+ * entry-count N+1 — a scalar aggregate over the same indexed predicate is not
+ * that, and all four run concurrently.
  */
-export const getOpenShows = async (windowHours: number = OPEN_SHOWS_DEFAULT_WINDOW_HOURS): Promise<OpenShowsResult> => {
+export const getOpenShows = async (
+  windowHours: number = OPEN_SHOWS_DEFAULT_WINDOW_HOURS,
+  limit: number = OPEN_SHOWS_DEFAULT_LIMIT
+): Promise<OpenShowsResult> => {
   const windowFloor = new Date(Date.now() - windowHours * 60 * 60 * 1000);
 
   // `is_current` is resolved against the same `max(shows.id)` pivot every
@@ -1389,8 +1473,12 @@ export const getOpenShows = async (windowHours: number = OPEN_SHOWS_DEFAULT_WIND
   // never disagree about which show is live. It matters for the abandoned
   // flag: a show that just signed on legitimately has fewer than four
   // entries, and must not be presented as a close candidate.
-  const [rows, olderCount, latestShow] = await Promise.all([
-    buildOpenShowsQuery(windowFloor),
+  const [rows, windowCount, olderCount, latestShow] = await Promise.all([
+    buildOpenShowsQuery(windowFloor, limit),
+    db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(shows)
+      .where(and(isNull(shows.end_time), gte(shows.start_time, windowFloor))),
     db
       .select({ n: sql<number>`count(*)::int` })
       .from(shows)
@@ -1420,8 +1508,45 @@ export const getOpenShows = async (windowHours: number = OPEN_SHOWS_DEFAULT_WIND
         likely_abandoned: !is_current && row.entry_count < LIKELY_ABANDONED_ENTRY_THRESHOLD,
       };
     }),
+    total_in_window: windowCount[0]?.n ?? 0,
     older_open_show_count: olderCount[0]?.n ?? 0,
   };
+};
+
+/**
+ * When a show actually stopped broadcasting: its latest flowsheet `add_time`,
+ * floored at `start_time`, falling back to `start_time` when it logged nothing.
+ *
+ * This is the instant `POST /flowsheet/shows/:id/force-end` hands `endShow`,
+ * and the reason that parameter exists at all — see `EndShowOptions` for what
+ * `now()` does to `GET /flowsheet/range` and to the public flowsheet's global
+ * sort when the show being closed is from 2006.
+ *
+ * `MAX(add_time)`, deliberately NOT `lastLoggedShowEntryOrderBy`'s "add_time of
+ * the highest-id row". The two answer different questions and this one wants
+ * AIRTIME: `flowsheet.id` is insertion order, so a backfilled or gap-imported
+ * row (BS#2118, BS#2119) holds the highest id while carrying the `add_time` of
+ * whenever it really aired. The control-flow gates that ask "is this show's
+ * last row the sign-off marker?" correctly use insertion order; "when did this
+ * stop" is the display-surface question BS#2132/#2133 moved to airtime.
+ *
+ * Floored at `start_time` because a closed show with `end_time < start_time` is
+ * an interval that cannot overlap anything, which would make it invisible to
+ * `getShowsInTimeWindow` on the very day it aired. Legacy rows carrying an
+ * `add_time` earlier than their show's `start_time` are not hypothetical — the
+ * webhook derives `add_time` from tubafrenzy's `startTime` when that parses
+ * (BS#2143), against a `shows.start_time` the ETL set separately.
+ */
+export const resolveShowEndInstant = async (show: Show): Promise<Date> => {
+  const rows = await db
+    .select({ latest: sql<Date | null>`max(${flowsheet.add_time})` })
+    .from(flowsheet)
+    .where(eq(flowsheet.show_id, show.id));
+
+  const latest = rows[0]?.latest ? new Date(rows[0].latest) : null;
+  const startedAt = new Date(show.start_time);
+
+  return latest && latest.getTime() > startedAt.getTime() ? latest : startedAt;
 };
 
 /** One show by primary key, for the operator-close path's existence check. */

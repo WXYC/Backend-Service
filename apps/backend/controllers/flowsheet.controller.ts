@@ -947,28 +947,44 @@ export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = asy
  * `window_hours` bounds the lookback; see `getOpenShows` for why an unwindowed
  * list is unusable in production.
  */
-export const getOpenShows: RequestHandler<object, unknown, unknown, { window_hours?: string }> = async (req, res) => {
-  const raw = req.query.window_hours;
-  let windowHours = flowsheet_service.OPEN_SHOWS_DEFAULT_WINDOW_HOURS;
-
-  if (raw !== undefined) {
-    // Reject anything that isn't a bare positive integer rather than letting
-    // parseInt's prefix parsing turn "24h" into 24 — an operator who mistypes
-    // the unit should learn that, not silently get a different window than
-    // they asked for.
-    if (!/^\d+$/.test(raw)) {
-      throw new WxycError('Bad Request: window_hours must be a positive integer number of hours', 400);
-    }
-    windowHours = Number.parseInt(raw, 10);
-    if (windowHours < 1 || windowHours > flowsheet_service.OPEN_SHOWS_MAX_WINDOW_HOURS) {
-      throw new WxycError(
-        `Bad Request: window_hours must be between 1 and ${flowsheet_service.OPEN_SHOWS_MAX_WINDOW_HOURS}`,
-        400
-      );
-    }
+/**
+ * Parse a bounded positive-integer query parameter.
+ *
+ * Rejects anything that isn't a bare integer rather than letting `parseInt`'s
+ * prefix parsing turn `"24h"` into `24` — an operator who mistypes the unit
+ * should learn that, not silently get a different window than they asked for.
+ * Out-of-range is a 400 too, never a silent clamp, for the same reason.
+ */
+const parseBoundedInt = (raw: string | undefined, name: string, fallback: number, max: number): number => {
+  if (raw === undefined) return fallback;
+  if (!/^\d+$/.test(raw)) {
+    throw new WxycError(`Bad Request: ${name} must be a positive integer`, 400);
   }
+  const value = Number.parseInt(raw, 10);
+  if (value < 1 || value > max) {
+    throw new WxycError(`Bad Request: ${name} must be between 1 and ${max}`, 400);
+  }
+  return value;
+};
 
-  res.status(200).json(await flowsheet_service.getOpenShows(windowHours));
+export const getOpenShows: RequestHandler<object, unknown, unknown, { window_hours?: string; limit?: string }> = async (
+  req,
+  res
+) => {
+  const windowHours = parseBoundedInt(
+    req.query.window_hours,
+    'window_hours',
+    flowsheet_service.OPEN_SHOWS_DEFAULT_WINDOW_HOURS,
+    flowsheet_service.OPEN_SHOWS_MAX_WINDOW_HOURS
+  );
+  const limit = parseBoundedInt(
+    req.query.limit,
+    'limit',
+    flowsheet_service.OPEN_SHOWS_DEFAULT_LIMIT,
+    flowsheet_service.OPEN_SHOWS_MAX_LIMIT
+  );
+
+  res.status(200).json(await flowsheet_service.getOpenShows(windowHours, limit));
 };
 
 /**
@@ -987,7 +1003,7 @@ export const getOpenShows: RequestHandler<object, unknown, unknown, { window_hou
  * force-end therefore cannot write a duplicate marker even if two operators
  * click at the same instant.
  */
-export const forceEndShow: RequestHandler<{ id: string }> = async (req, res) => {
+export const forceEndShow: RequestHandler<{ id: string }, unknown, unknown, { force?: string }> = async (req, res) => {
   if (!/^\d+$/.test(req.params.id)) {
     throw new WxycError('Bad Request: show id must be a positive integer', 400);
   }
@@ -1001,7 +1017,32 @@ export const forceEndShow: RequestHandler<{ id: string }> = async (req, res) => 
     throw new WxycError('Bad Request: show is already ended', 400);
   }
 
-  const finalizedShow: Show = await flowsheet_service.endShow(show);
+  // Closing the show every on-air read resolves to needs `?force=true`.
+  //
+  // NOT a blanket refusal, and the 2026-08-20 incident is why: the show that
+  // hung for nine hours WAS `max(shows.id)` the whole time — an abandoned show
+  // is current until something closes it, so an unconditional guard would veto
+  // the exact case this endpoint was built for. The confirmation is aimed at
+  // the other failure: a mistyped id, or an operator acting on a list fetched
+  // before a new show started, silently ending a live broadcast (after which
+  // `POST /flowsheet` starts failing for the DJ on air). `is_current` on the
+  // listing exists so a UI can warn; this is the server-side half of the same
+  // signal, so a client that never implements the warning still can't do it by
+  // accident.
+  if (req.query.force !== 'true') {
+    const latestShow = await flowsheet_service.getLatestShow();
+    if (latestShow?.id === showId) {
+      throw new WxycError('Conflict: this is the current on-air show. Re-send with ?force=true to end it anyway.', 409);
+    }
+  }
+
+  // The instant the show actually stopped, not `now()`. See
+  // `EndShowOptions` in flowsheet.service — a show from the legacy backlog
+  // stamped `end_time = now()` overlaps every archive day since it started,
+  // and its `show_end` marker sorts to the top of the live flowsheet.
+  const endedAt = await flowsheet_service.resolveShowEndInstant(show);
+
+  const finalizedShow: Show = await flowsheet_service.endShow(show, { endedAt });
   res.status(200).json(finalizedShow);
 };
 

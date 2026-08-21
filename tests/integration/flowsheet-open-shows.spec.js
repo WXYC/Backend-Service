@@ -82,6 +82,7 @@ describe('operator close (BS#2235)', () => {
     await insertShow('busy', { startedDaysAgo: 5, legacyDjName: 'dj meowww', entries: 6 });
     await insertShow('closed', { startedDaysAgo: 4, endedDaysAgo: 4, legacyDjName: 'DJ Flacko', entries: 3 });
     await insertShow('ancient', { startedDaysAgo: 300, legacyDjName: 'DJ Flounder', entries: 1 });
+    await insertShow('cohost', { startedDaysAgo: 3, legacyDjName: 'El Vaquero', entries: 5 });
     await insertShow('current', { startedDaysAgo: 0, legacyDjName: 'dj barely there', entries: 2 });
   });
 
@@ -155,6 +156,21 @@ describe('operator close (BS#2235)', () => {
       expect(findShow(body, 'busy').likely_abandoned).toBe(false);
     });
 
+    it('reports total_in_window alongside the (possibly truncated) page', async () => {
+      const full = await fetchOpenShows();
+      const capped = await fetchOpenShows('?limit=1');
+
+      expect(capped.shows).toHaveLength(1);
+      // The only signal that a page is partial.
+      expect(capped.total_in_window).toBe(full.total_in_window);
+      expect(capped.total_in_window).toBeGreaterThan(1);
+    });
+
+    it('rejects a limit outside the allowed range', async () => {
+      const res = await request.get('/flowsheet/open-shows?limit=0').set('Authorization', global.access_token);
+      expect(res.status).toBe(400);
+    });
+
     // The exclusion that keeps an operator from ending a live broadcast: the
     // newest show has only two entries but is on the air.
     it('marks the newest show current and never flags it abandoned', async () => {
@@ -171,6 +187,26 @@ describe('operator close (BS#2235)', () => {
   });
 
   describe('POST /flowsheet/shows/:id/force-end', () => {
+    /**
+     * The server-side half of `is_current`. Not unconditional — the 2026-08-20
+     * stuck show WAS `max(shows.id)` for all nine hours it hung, so a blanket
+     * refusal would veto the case this endpoint exists for.
+     */
+    it('409s on the current on-air show, and proceeds with ?force=true', async () => {
+      const id = showIds.current;
+
+      const refused = await request.post(`/flowsheet/shows/${id}/force-end`).set('Authorization', global.access_token);
+      expect(refused.status).toBe(409);
+
+      const [stillOpen] = await sql`SELECT end_time FROM ${sql(SCHEMA)}.shows WHERE id = ${id}`;
+      expect(stillOpen.end_time).toBeNull();
+
+      const forced = await request
+        .post(`/flowsheet/shows/${id}/force-end?force=true`)
+        .set('Authorization', global.access_token);
+      expect(forced.status).toBe(200);
+    });
+
     it('404s an id that matches no show', async () => {
       const res = await request.post('/flowsheet/shows/2147483646/force-end').set('Authorization', global.access_token);
       expect(res.status).toBe(404);
@@ -200,7 +236,67 @@ describe('operator close (BS#2235)', () => {
         SELECT entry_type, message FROM ${sql(SCHEMA)}.flowsheet
         WHERE show_id = ${id} AND entry_type = 'show_end'`;
       expect(markers).toHaveLength(1);
-      expect(markers[0].message).toMatch(/^End of show: /);
+      // `stale` has a legacy handle and no account, so the marker carries it
+      // through the shared name chain rather than degrading to nameless.
+      expect(markers[0].message).toContain('DJ Mouseness');
+    });
+
+    /**
+     * The finding this endpoint's first cut got wrong, pinned end-to-end.
+     *
+     * `endShow` stamps `end_time = now()` for a live sign-off. Reused unchanged
+     * for an OLD show, that produces an interval `[2006, today]`, and
+     * `getShowsInTimeWindow` (backing `GET /flowsheet/range`, which
+     * archive.wxyc.org reads) admits a closed show whenever
+     * `start_time < windowEnd AND end_time > windowStart` — so the closed show
+     * would surface on every archive day between. `force-end` therefore derives
+     * the instant from the show's own last entry.
+     */
+    it('stamps end_time from the show’s last entry, not now()', async () => {
+      const id = showIds.busy;
+
+      const [{ latest }] = await sql`
+        SELECT max(add_time) AS latest FROM ${sql(SCHEMA)}.flowsheet WHERE show_id = ${id}`;
+      expect(latest).not.toBeNull();
+
+      const res = await request.post(`/flowsheet/shows/${id}/force-end`).set('Authorization', global.access_token);
+      expect(res.status).toBe(200);
+
+      const [row] = await sql`SELECT start_time, end_time FROM ${sql(SCHEMA)}.shows WHERE id = ${id}`;
+      expect(new Date(row.end_time).getTime()).toBe(new Date(latest).getTime());
+
+      // The property that matters downstream: the closed interval does not
+      // stretch to the present, so the show cannot overlap today's archive
+      // window.
+      const ageMs = Date.now() - new Date(row.end_time).getTime();
+      expect(ageMs).toBeGreaterThan(4 * DAY_MS);
+      // ...and it is still a valid interval.
+      expect(new Date(row.end_time).getTime()).toBeGreaterThanOrEqual(new Date(row.start_time).getTime());
+    });
+
+    /**
+     * Sibling of the above. `getEntriesByPage` orders globally by
+     * `add_time DESC, id DESC` and serves both `GET /flowsheet` page 0 and
+     * `GET /flowsheet/latest`, so a `show_end` marker written with the default
+     * `now()` for a five-day-old show becomes the newest entry on the public
+     * flowsheet.
+     */
+    it('writes the show_end marker with the show’s own add_time', async () => {
+      const id = showIds.busy;
+
+      const [marker] = await sql`
+        SELECT add_time FROM ${sql(SCHEMA)}.flowsheet
+        WHERE show_id = ${id} AND entry_type = 'show_end'`;
+      const [row] = await sql`SELECT end_time FROM ${sql(SCHEMA)}.shows WHERE id = ${id}`;
+
+      expect(new Date(marker.add_time).getTime()).toBe(new Date(row.end_time).getTime());
+
+      // The consequence, read through the endpoint that would have shown it:
+      // the marker is not the newest row on the public flowsheet.
+      const latest = await request.get('/flowsheet/latest');
+      expect(latest.status).toBe(200);
+      const latestBody = Array.isArray(latest.body) ? latest.body[0] : latest.body;
+      expect(latestBody?.show_id).not.toBe(id);
     });
 
     it('drops the closed show out of the open-shows list', async () => {
@@ -223,7 +319,7 @@ describe('operator close (BS#2235)', () => {
     });
 
     it('deactivates every show_djs membership on the closed show', async () => {
-      const id = showIds.busy;
+      const id = showIds.cohost;
 
       // A co-host membership, the state a stranded DJ is left in when the
       // primary walks away: `POST /flowsheet/end` can only deactivate them via
