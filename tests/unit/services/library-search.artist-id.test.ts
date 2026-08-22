@@ -19,11 +19,11 @@ import { db } from '../../mocks/database.mock';
  * `typeof hit.artist_id === 'number'` on a CTA cascade hit. Add an assertion
  * there, not here, when a new search path starts producing these rows.
  *
- * Note the cascade's CTA arm does NOT read `library_artist_view` — it
- * hand-rolls a join over `compilation_track_artist` / `library` / `artists`
- * and returns `as TaggedLibraryViewEntry`, an unchecked cast. `artist_id`
- * reaches it only because `searchLibraryByCTARaw` projects the column
- * explicitly; nothing in the type system enforces that.
+ * Note the cascade's CTA arm does NOT read `library_artist_view` — it joins
+ * `compilation_track_artist` / `library` / `artists` itself. Since BS#2231 it
+ * projects the shared `LIBRARY_VIEW_PROJECTION_RAW` rather than a hand-rolled
+ * column list, so `artist_id` reaches it by construction; what pins that is
+ * `library-cta-projection.test.ts`, not this file.
  */
 
 const mockRunCatalogTrackSearchCascade = jest.fn<() => Promise<unknown[]>>().mockResolvedValue([]);

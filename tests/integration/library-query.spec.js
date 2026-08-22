@@ -294,13 +294,21 @@ describe('GET /library/query cascade — modern Card Catalog serves matched_via 
     expect(hit).toBeDefined();
     expect(hit.album_title).toBe(CTA_ALBUM_TITLE);
     expect(hit.artist_name).toBe(CTA_ARTIST);
-    // `artist_id` is declared non-nullable on `AlbumSearchResultRow`, and the
-    // CTA arm hand-rolls its own SELECT rather than reusing the view
-    // projection — so this is the one assertion that can catch the column
-    // going missing from that SELECT. The unit tests cannot: they hand their
-    // mocked rows an `artist_id`, so a column absent from the real SQL is
-    // invisible to them. This drives the actual statement.
+    // The CTA arm reaches `AlbumSearchResultRow` through raw SQL and an
+    // unchecked cast, so these are the only assertions that can catch a column
+    // going missing from its SELECT. The unit tests cannot: they hand their
+    // mocked rows every field, so a column absent from the real SQL is
+    // invisible to them. `artist_id` went missing this way (BS#2228) and the
+    // three `discogs*` fields had been missing since BS#1895 (BS#2231).
+    //
+    // A dropped column reaches here as `undefined`, which `JSON.stringify`
+    // omits — so asserting the key's presence and its value is what
+    // discriminates, not the value alone. The CTA fixture is unflagged, hence
+    // `false`; `flowsheet.spec.js` covers a flagged row on the mutation echo.
     expect(typeof hit.artist_id).toBe('number');
+    expect(hit).toHaveProperty('discogsUnavailable', false);
+    expect(hit).toHaveProperty('discogsUnavailableNote', null);
+    expect(hit).toHaveProperty('lastDiscogsRecheckAt', null);
     expect(Array.isArray(hit.matched_via)).toBe(true);
     expect(hit.matched_via.length).toBeGreaterThanOrEqual(1);
     const bioHints = hit.matched_via.filter((m) => m.title === 'Bioluminescence');

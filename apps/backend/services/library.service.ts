@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, SQL, type Column } from 'drizzle-orm';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
@@ -1735,6 +1735,17 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[
  * shape consumers expect. Reading from `library` is what lets the planner
  * pick the trigram or tsvector index on the predicated column instead of
  * forcing the 5-way view JOIN to materialize first.
+ *
+ * The `satisfies` clause is the load-bearing part (BS#2231). Every consumer of
+ * this projection ultimately hands `tsc` a `LibraryArtistViewEntry` through an
+ * unchecked assertion — Drizzle can't type a raw `db.execute`, and the chained
+ * builder's inferred row type is cast too — so nothing else relates the columns
+ * actually selected to the fields the return type promises. Constraining the
+ * projection to cover every key of that type moves the check to compile time:
+ * adding a field to `LibraryArtistViewEntry` without projecting it here is now
+ * a build error rather than a column that silently arrives `undefined` behind a
+ * non-nullable declaration. `artist_id` (BS#2228) and the three `discogs_*`
+ * columns (BS#2231) each reached production as exactly that.
  */
 const LIBRARY_VIEW_PROJECTION = {
   id: library.id,
@@ -1772,13 +1783,15 @@ const LIBRARY_VIEW_PROJECTION = {
   discogs_unavailable: library.discogs_unavailable,
   discogs_unavailable_note: library.discogs_unavailable_note,
   last_discogs_recheck_at: library.last_discogs_recheck_at,
-} as const;
+} as const satisfies Record<keyof LibraryArtistViewEntry, Column>;
 
 /**
  * Raw SQL mirror of `libraryViewQuery(false)`'s join chain. Used when the
- * caller needs a query shape Drizzle's chained builder can't express
- * (the UNION ALL alias path emitted by `buildAliasHitsCte`). Schema is
- * named once here so a future column change is a single edit.
+ * caller needs a query shape Drizzle's chained builder can't express — the
+ * UNION ALL alias path emitted by `buildAliasHitsCte`, and the CTA arm's
+ * windowed subquery, which prepends its own `compilation_track_artist` →
+ * `library` join and then reuses these. Schema is named once here so a future
+ * column change is a single edit.
  */
 const LIBRARY_VIEW_JOINS_RAW = sql`
   INNER JOIN ${artists} ON ${artists.id} = ${library.artist_id}
@@ -1792,37 +1805,25 @@ const LIBRARY_VIEW_JOINS_RAW = sql`
     AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)
 `;
 
-/** Raw SQL projection mirroring `LIBRARY_VIEW_PROJECTION` for the alias path. */
-const LIBRARY_VIEW_PROJECTION_RAW = sql`
-  ${library.id} AS id,
-  ${artists.code_letters} AS code_letters,
-  ${genre_artist_crossreference.artist_genre_code} AS code_artist_number,
-  ${library.code_number} AS code_number,
-  ${artists.artist_name} AS artist_name,
-  ${artists.alphabetical_name} AS alphabetical_name,
-  ${library.album_title} AS album_title,
-  ${format.format_name} AS format_name,
-  ${genres.genre_name} AS genre_name,
-  ${rotation.rotation_bin} AS rotation_bin,
-  ${library.add_date} AS add_date,
-  ${library.label} AS label,
-  ${library.label_id} AS label_id,
-  ${library.on_streaming} AS on_streaming,
-  ${library.album_artist} AS album_artist,
-  ${library.plays} AS plays,
-  ${library.artwork_url} AS artwork_url,
-  ${artists.discogs_artist_id} AS discogs_artist_id,
-  ${artists.musicbrainz_artist_id} AS musicbrainz_artist_id,
-  ${artists.wikidata_qid} AS wikidata_qid,
-  ${artists.spotify_artist_id} AS spotify_artist_id,
-  ${artists.apple_music_artist_id} AS apple_music_artist_id,
-  ${artists.bandcamp_id} AS bandcamp_id,
-  ${library.artist_id} AS artist_id,
-  ${library.legacy_release_id} AS legacy_release_id,
-  ${library.discogs_unavailable} AS discogs_unavailable,
-  ${library.discogs_unavailable_note} AS discogs_unavailable_note,
-  ${library.last_discogs_recheck_at} AS last_discogs_recheck_at
-`;
+/**
+ * Raw SQL projection **derived from** `LIBRARY_VIEW_PROJECTION`, for the query
+ * shapes Drizzle's chained builder can't express (the UNION ALL alias path, the
+ * CTA arm's windowed subquery).
+ *
+ * Derived rather than hand-mirrored (BS#2231): this used to be a second copy of
+ * the column list, kept in sync by hand, which is one more place for a column
+ * to go missing than the `satisfies` above can see. Emitting it from the same
+ * object means the compile-time completeness check covers the raw paths too.
+ *
+ * Exported for `tests/unit/services/library-cta-projection.test.ts`, which pins
+ * that the CTA arm interpolates this constant instead of hand-rolling a list
+ * again — the one link in the chain a future edit could undo without failing
+ * the build.
+ */
+export const LIBRARY_VIEW_PROJECTION_RAW = sql.join(
+  Object.entries(LIBRARY_VIEW_PROJECTION).map(([alias, column]) => sql`${column} AS ${sql.identifier(alias)}`),
+  sql`, `
+);
 
 /** Projection columns emitted by the alias branch of a UNION ALL search query. */
 const ALIAS_HITS_PROJECTION = sql`,
@@ -3911,45 +3912,13 @@ export async function searchLibraryByCTARaw(
   const queryStmt = sql`
     SELECT * FROM (
       SELECT
-        ${library.id} AS id,
-        ${artists.code_letters} AS code_letters,
-        ${genre_artist_crossreference.artist_genre_code} AS code_artist_number,
-        ${library.code_number} AS code_number,
-        ${artists.artist_name} AS artist_name,
-        ${artists.alphabetical_name} AS alphabetical_name,
-        ${library.album_title} AS album_title,
-        ${format.format_name} AS format_name,
-        ${genres.genre_name} AS genre_name,
-        ${rotation.rotation_bin} AS rotation_bin,
-        ${library.add_date} AS add_date,
-        ${library.label} AS label,
-        ${library.label_id} AS label_id,
-        ${library.on_streaming} AS on_streaming,
-        ${library.album_artist} AS album_artist,
-        ${library.plays} AS plays,
-        ${library.artwork_url} AS artwork_url,
-        ${library.artist_id} AS artist_id,
-        ${artists.discogs_artist_id} AS discogs_artist_id,
-        ${artists.musicbrainz_artist_id} AS musicbrainz_artist_id,
-        ${artists.wikidata_qid} AS wikidata_qid,
-        ${artists.spotify_artist_id} AS spotify_artist_id,
-        ${artists.apple_music_artist_id} AS apple_music_artist_id,
-        ${artists.bandcamp_id} AS bandcamp_id,
-        ${library.legacy_release_id} AS legacy_release_id,
+        ${LIBRARY_VIEW_PROJECTION_RAW},
         ${compilation_track_artist.track_title} AS cta_track_title,
         ${compilation_track_artist.artist_name} AS cta_artist_name,
         DENSE_RANK() OVER (ORDER BY ${library.id}) AS library_rank
       FROM ${compilation_track_artist}
       INNER JOIN ${library} ON ${library.id} = ${compilation_track_artist.library_id}
-      INNER JOIN ${artists} ON ${artists.id} = ${library.artist_id}
-      INNER JOIN ${format} ON ${format.id} = ${library.format_id}
-      INNER JOIN ${genres} ON ${genres.id} = ${library.genre_id}
-      INNER JOIN ${genre_artist_crossreference}
-        ON ${genre_artist_crossreference.artist_id} = ${library.artist_id}
-        AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
-      LEFT JOIN ${rotation}
-        ON ${rotation.album_id} = ${library.id}
-        AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)
+      ${LIBRARY_VIEW_JOINS_RAW}
       WHERE ${matchPredicate}${streamingPredicate}
     ) ranked
     WHERE library_rank <= ${limit}
@@ -3982,8 +3951,15 @@ export async function searchLibraryByCTARaw(
     // Strip the CTA-only join columns so the returned row conforms to
     // `LibraryArtistViewEntry`. The wire-shape serializer would otherwise
     // emit `cta_track_title` / `cta_artist_name` next to `matched_via`.
+    //
+    // Deliberately unasserted (BS#2231): the rest object satisfies
+    // `TaggedLibraryViewEntry` structurally, so a field that `CTASearchRow`
+    // stops carrying is a compile error here. The `as TaggedLibraryViewEntry`
+    // this used to end with suppressed exactly that check. What it can't
+    // check is whether the SQL populated those fields — that's what pinning
+    // the shared projection above is for.
     const { cta_track_title: _t, cta_artist_name: _a, ...viewRow } = row;
-    return { ...viewRow, matched_via: hints } as TaggedLibraryViewEntry;
+    return { ...viewRow, matched_via: hints };
   });
 }
 
