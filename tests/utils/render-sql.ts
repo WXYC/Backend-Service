@@ -3,12 +3,14 @@
  * at `tests/__mocks__/drizzle-orm.ts` (BS#2051).
  *
  * The mock can hand `db.execute(...)` (and its own sub-fragments) one of
- * four distinct "chunk" shapes:
+ * five distinct "chunk" shapes:
  *
  *   - `{ sql: string[], values: unknown[] }` — the `` sql`...` `` tagged
  *     template (mock lines 5-9)
  *   - `{ raw: string }`                      — `sql.raw(...)` (mock line 11)
  *   - `{ join: unknown[], sep: unknown }`     — `sql.join(...)` (mock line 12)
+ *   - `{ identifier: string }`                — `sql.identifier(...)` (mock
+ *     line 13), rendered double-quoted the way real drizzle-orm emits it
  *   - `{ queryChunks: unknown[] }`            — a REAL drizzle-orm `SQL`
  *     fragment that slipped through the mock (e.g. built by code this suite
  *     doesn't mock, or produced by `sql.raw`'s real counterpart upstream)
@@ -20,8 +22,8 @@
  * nothing, the assertion saw `FROM (VALUES )` with an empty body, and the
  * resulting failure message pointed nowhere near the actual bug. `renderSql`
  * and `renderValue` below throw instead — loudly, with the offending value
- * serialized — the moment they meet something that isn't one of the four
- * shapes above. An unhandled shape is a bug in the renderer (or a fifth mock
+ * serialized — the moment they meet something that isn't one of the five
+ * shapes above. An unhandled shape is a bug in the renderer (or a sixth mock
  * shape nobody has taught it yet), never a silently empty string.
  *
  * Do not "fix" this by changing the shared mock's `sql.join` to compose a
@@ -36,6 +38,7 @@ interface SqlLikeShape {
   sql?: unknown;
   values?: readonly unknown[];
   raw?: unknown;
+  identifier?: unknown;
   join?: readonly unknown[];
   sep?: unknown;
   queryChunks?: readonly unknown[];
@@ -58,8 +61,8 @@ function describeUnknownShape(value: unknown): string {
 
 function unrecognizedShapeError(fnName: string, value: unknown): Error {
   return new Error(
-    `${fnName}: unrecognized SQL mock shape — expected one of {sql, values}, {raw}, {join, sep}, or ` +
-      `{queryChunks}. Received: ${describeUnknownShape(value)}`
+    `${fnName}: unrecognized SQL mock shape — expected one of {sql, values}, {raw}, {identifier}, ` +
+      `{join, sep}, or {queryChunks}. Received: ${describeUnknownShape(value)}`
   );
 }
 
@@ -91,7 +94,7 @@ function isMockTableShape(value: object): boolean {
  * `null`/`undefined` are legitimate bound-SQL-NULL values, not an
  * unrecognized shape, and render as `''`; so is an interpolated mock table
  * (see `isMockTableShape`). Anything else that isn't a primitive or one of
- * the four recognized chunk shapes throws.
+ * the five recognized chunk shapes throws.
  */
 export function renderValue(value: unknown): string {
   if (value === null || typeof value === 'undefined') return '';
@@ -104,6 +107,7 @@ export function renderValue(value: unknown): string {
       Array.isArray(obj.sql) ||
       typeof obj.sql === 'string' ||
       typeof obj.raw === 'string' ||
+      typeof obj.identifier === 'string' ||
       Array.isArray(obj.join) ||
       Array.isArray(obj.queryChunks)
     ) {
@@ -111,7 +115,7 @@ export function renderValue(value: unknown): string {
     }
     // A real drizzle-orm `Param`-like chunk, which carries its bound value
     // (or array of value fragments) under `.value` rather than one of the
-    // four shapes above.
+    // five shapes above.
     if (Array.isArray(obj.value)) return obj.value.join('');
     if (typeof obj.value === 'string') return obj.value;
     if (isMockTableShape(value)) return '';
@@ -124,7 +128,7 @@ export function renderValue(value: unknown): string {
  * `db.execute(...)` — to a flat string, recursing into nested fragments.
  *
  * Throws (never returns `''`) when `value` is `null`/`undefined` or doesn't
- * match one of the four recognized shapes. A SQL chunk, unlike a bound
+ * match one of the five recognized shapes. A SQL chunk, unlike a bound
  * value, should never legitimately be absent — `db.execute` is always
  * called with a real `sql`-tag result.
  */
@@ -147,6 +151,11 @@ export function renderSql(value: unknown): string {
 
     // sql.raw(...): { raw: string }
     if (typeof obj.raw === 'string') return obj.raw;
+
+    // sql.identifier(...): { identifier: string }. Real drizzle-orm emits a
+    // double-quoted identifier, and callers assert on that rendered form, so
+    // quote it here rather than returning the bare name.
+    if (typeof obj.identifier === 'string') return `"${obj.identifier}"`;
 
     // sql.join([...], sep): { join: unknown[], sep: unknown }. `sep` is
     // `undefined` only when the caller passed no separator to `sql.join`
