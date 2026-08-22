@@ -1,5 +1,5 @@
 import * as Sentry from '@sentry/node';
-import { inArray, sql, type SQL } from 'drizzle-orm';
+import { inArray, sql, type Column, type SQL } from 'drizzle-orm';
 import {
   db,
   library,
@@ -97,6 +97,56 @@ const FIELD_COLUMNS: Record<CatalogField, SQL> = {
 // COALESCE 0 covers never-played albums, which have no MV row.
 const albumPlaysJoin = sql`LEFT JOIN ${album_plays} ON ${album_plays.album_id} = ${library_artist_view.id}`;
 const playsColumn = sql`COALESCE(${album_plays.plays}, 0)`;
+
+/** The `RawRow` fields the alias UNION ALL branches supply from their own tails. */
+type AliasHitColumn = 'alias_max_sim' | 'alias_matched_variant' | 'alias_matched_source';
+
+/**
+ * The catalog columns every `/library/query` SELECT projects, named once.
+ *
+ * All three query shapes below — the alias UNION ALL's two branches and the
+ * alias-OFF single SELECT — used to carry their own copy of this list, kept in
+ * sync by hand, differing only in the alias tail each appends. `db.execute`
+ * results are cast `as unknown as RawRow[]`, so a copy that fell behind emitted
+ * `undefined` under a non-nullable declaration with no compile error and no
+ * failing test. That is the defect BS#2231 fixed on the CTA arm, where the same
+ * shape had cost `artist_id` (BS#2228) and the three `discogs*` columns
+ * (BS#1895); these three are the remaining instances of it.
+ *
+ * The `satisfies` is the guard: adding a required field to `RawRow` without
+ * projecting it here is now a build error. Alias fields are excluded because
+ * the branch tails own them — branch (a) projects NULLs, branch (b) reads
+ * `alias_hits`, and the alias-OFF shape omits them entirely.
+ */
+const CATALOG_ROW_PROJECTION_COLUMNS = {
+  id: library_artist_view.id,
+  add_date: library_artist_view.add_date,
+  album_title: library_artist_view.album_title,
+  artist_name: library_artist_view.artist_name,
+  artist_id: library_artist_view.artist_id,
+  code_letters: library_artist_view.code_letters,
+  code_number: library_artist_view.code_number,
+  code_artist_number: library_artist_view.code_artist_number,
+  format_name: library_artist_view.format_name,
+  genre_name: library_artist_view.genre_name,
+  label: library_artist_view.label,
+  label_id: library_artist_view.label_id,
+  rotation_bin: library_artist_view.rotation_bin,
+  // Sourced from the `album_plays` MV via `albumPlaysJoin`, not from the view's
+  // own `plays` column — every `FROM` below carries that join for this reason.
+  plays: playsColumn,
+  on_streaming: library_artist_view.on_streaming,
+  album_artist: library_artist_view.album_artist,
+  discogs_unavailable: library_artist_view.discogs_unavailable,
+  discogs_unavailable_note: library_artist_view.discogs_unavailable_note,
+  last_discogs_recheck_at: library_artist_view.last_discogs_recheck_at,
+} as const satisfies Record<Exclude<keyof RawRow, AliasHitColumn>, Column | SQL>;
+
+/** Raw SQL projection emitted from {@link CATALOG_ROW_PROJECTION_COLUMNS}. */
+const CATALOG_ROW_PROJECTION = sql.join(
+  Object.entries(CATALOG_ROW_PROJECTION_COLUMNS).map(([alias, column]) => sql`${column} AS ${sql.identifier(alias)}`),
+  sql`, `
+);
 
 // BS#1554: when an album has more than one active rotation row (e.g. H and
 // M simultaneously), the DISTINCT ON (id) dedup below must keep the
@@ -256,49 +306,11 @@ export async function searchLibrary(
     // `library.service.ts` can't drift on what counts as an alias match.
     const cte = buildAliasHitsCte(params.q, aliasConfig.minSimilarity);
 
-    const branchAProjection = sql`
-      ${library_artist_view.id} AS id,
-      ${library_artist_view.add_date} AS add_date,
-      ${library_artist_view.album_title} AS album_title,
-      ${library_artist_view.artist_name} AS artist_name,
-      ${library_artist_view.artist_id} AS artist_id,
-      ${library_artist_view.code_letters} AS code_letters,
-      ${library_artist_view.code_number} AS code_number,
-      ${library_artist_view.code_artist_number} AS code_artist_number,
-      ${library_artist_view.format_name} AS format_name,
-      ${library_artist_view.genre_name} AS genre_name,
-      ${library_artist_view.label} AS label,
-      ${library_artist_view.label_id} AS label_id,
-      ${library_artist_view.rotation_bin} AS rotation_bin,
-      ${playsColumn} AS plays,
-      ${library_artist_view.on_streaming} AS on_streaming,
-      ${library_artist_view.album_artist} AS album_artist,
-      ${library_artist_view.discogs_unavailable} AS discogs_unavailable,
-      ${library_artist_view.discogs_unavailable_note} AS discogs_unavailable_note,
-      ${library_artist_view.last_discogs_recheck_at} AS last_discogs_recheck_at,
+    const branchAProjection = sql`${CATALOG_ROW_PROJECTION},
       NULL::real AS alias_max_sim,
       NULL::text AS alias_matched_variant,
       NULL::text AS alias_matched_source`;
-    const branchBProjection = sql`
-      ${library_artist_view.id} AS id,
-      ${library_artist_view.add_date} AS add_date,
-      ${library_artist_view.album_title} AS album_title,
-      ${library_artist_view.artist_name} AS artist_name,
-      ${library_artist_view.artist_id} AS artist_id,
-      ${library_artist_view.code_letters} AS code_letters,
-      ${library_artist_view.code_number} AS code_number,
-      ${library_artist_view.code_artist_number} AS code_artist_number,
-      ${library_artist_view.format_name} AS format_name,
-      ${library_artist_view.genre_name} AS genre_name,
-      ${library_artist_view.label} AS label,
-      ${library_artist_view.label_id} AS label_id,
-      ${library_artist_view.rotation_bin} AS rotation_bin,
-      ${playsColumn} AS plays,
-      ${library_artist_view.on_streaming} AS on_streaming,
-      ${library_artist_view.album_artist} AS album_artist,
-      ${library_artist_view.discogs_unavailable} AS discogs_unavailable,
-      ${library_artist_view.discogs_unavailable_note} AS discogs_unavailable_note,
-      ${library_artist_view.last_discogs_recheck_at} AS last_discogs_recheck_at,
+    const branchBProjection = sql`${CATALOG_ROW_PROJECTION},
       alias_hits.max_sim AS alias_max_sim,
       alias_hits.matched_variant AS alias_matched_variant,
       alias_hits.matched_source AS alias_matched_source`;
@@ -356,26 +368,7 @@ export async function searchLibrary(
       : sql`FROM ${library_artist_view} ${albumPlaysJoin}`;
     const orderBy = sql`${SORT_COLUMNS_UNQUALIFIED[params.sort]} ${orderDirection}, ${SECONDARY_SORT_UNQUALIFIED[params.sort]} ASC, id ASC`;
     const innerSelect = sql`
-      SELECT
-        ${library_artist_view.id} AS id,
-        ${library_artist_view.add_date} AS add_date,
-        ${library_artist_view.album_title} AS album_title,
-        ${library_artist_view.artist_name} AS artist_name,
-        ${library_artist_view.artist_id} AS artist_id,
-        ${library_artist_view.code_letters} AS code_letters,
-        ${library_artist_view.code_number} AS code_number,
-        ${library_artist_view.code_artist_number} AS code_artist_number,
-        ${library_artist_view.format_name} AS format_name,
-        ${library_artist_view.genre_name} AS genre_name,
-        ${library_artist_view.label} AS label,
-        ${library_artist_view.label_id} AS label_id,
-        ${library_artist_view.rotation_bin} AS rotation_bin,
-        ${playsColumn} AS plays,
-        ${library_artist_view.on_streaming} AS on_streaming,
-        ${library_artist_view.album_artist} AS album_artist,
-        ${library_artist_view.discogs_unavailable} AS discogs_unavailable,
-        ${library_artist_view.discogs_unavailable_note} AS discogs_unavailable_note,
-        ${library_artist_view.last_discogs_recheck_at} AS last_discogs_recheck_at
+      SELECT ${CATALOG_ROW_PROJECTION}
       ${fromClause}
     `;
     dataQuery = sql`
