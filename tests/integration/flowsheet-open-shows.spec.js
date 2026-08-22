@@ -135,9 +135,10 @@ describe('operator close (BS#2235)', () => {
       expect(body.older_open_show_count).toBeGreaterThanOrEqual(1);
     });
 
-    // 300 days back: outside the 7-day default, inside the 8760-hour (1 year)
-    // ceiling. A probe past the ceiling would be unreachable by any legal
-    // request and could not distinguish a working widen from a broken one.
+    // 300 days back: outside the 7-day default, well inside the
+    // `OPEN_SHOWS_MAX_WINDOW_HOURS` ceiling. A probe past the ceiling would be
+    // unreachable by any legal request and could not distinguish a working
+    // widen from a broken one.
     it('includes the older show once the window is widened to reach it', async () => {
       const body = await fetchOpenShows('?window_hours=8760');
       expect(findShow(body, 'ancient')).toMatchObject({ entry_count: 1, dj_name: 'DJ Flounder' });
@@ -244,13 +245,11 @@ describe('operator close (BS#2235)', () => {
     /**
      * The finding this endpoint's first cut got wrong, pinned end-to-end.
      *
-     * `endShow` stamps `end_time = now()` for a live sign-off. Reused unchanged
-     * for an OLD show, that produces an interval `[2006, today]`, and
-     * `getShowsInTimeWindow` (backing `GET /flowsheet/range`, which
-     * archive.wxyc.org reads) admits a closed show whenever
-     * `start_time < windowEnd AND end_time > windowStart` — so the closed show
-     * would surface on every archive day between. `force-end` therefore derives
-     * the instant from the show's own last entry.
+     * `endShow` stamps `end_time = now()` for a live sign-off; reused unchanged
+     * for an OLD show that produces an interval `[2006, today]`, which
+     * `getShowsInTimeWindow` admits on every archive day between. See `endShow`
+     * for the full argument. `force-end` derives the instant from the show's
+     * own last entry instead.
      */
     it('stamps end_time from the show’s last entry, not now()', async () => {
       const id = showIds.busy;
@@ -275,11 +274,9 @@ describe('operator close (BS#2235)', () => {
     });
 
     /**
-     * Sibling of the above. `getEntriesByPage` orders globally by
-     * `add_time DESC, id DESC` and serves both `GET /flowsheet` page 0 and
-     * `GET /flowsheet/latest`, so a `show_end` marker written with the default
-     * `now()` for a five-day-old show becomes the newest entry on the public
-     * flowsheet.
+     * Sibling of the above, for the marker rather than the column: the public
+     * flowsheet's global sort key is `add_time`, so a `show_end` written with
+     * the default `now()` for a five-day-old show lands at the top of it.
      */
     it('writes the show_end marker with the show’s own add_time', async () => {
       const id = showIds.busy;

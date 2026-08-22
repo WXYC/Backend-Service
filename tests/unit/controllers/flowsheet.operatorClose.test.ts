@@ -9,23 +9,11 @@
  */
 import { jest } from '@jest/globals';
 
-const mockGetOpenShows = jest.fn<(hours?: number, limit?: number) => Promise<unknown>>();
-const mockGetShowById = jest.fn<(id: number) => Promise<unknown>>();
-const mockEndShow = jest.fn<(show: unknown, options?: unknown) => Promise<unknown>>();
-const mockGetLatestShow = jest.fn<() => Promise<unknown>>();
-const mockResolveShowEndInstant = jest.fn<(show: unknown) => Promise<Date>>();
-
-jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
-  getOpenShows: mockGetOpenShows,
-  getShowById: mockGetShowById,
-  endShow: mockEndShow,
-  getLatestShow: mockGetLatestShow,
-  resolveShowEndInstant: mockResolveShowEndInstant,
-  OPEN_SHOWS_DEFAULT_WINDOW_HOURS: 168,
-  OPEN_SHOWS_MAX_WINDOW_HOURS: 262_800,
-  OPEN_SHOWS_DEFAULT_LIMIT: 100,
-  OPEN_SHOWS_MAX_LIMIT: 500,
-}));
+jest.mock('../../../apps/backend/services/flowsheet.service', () =>
+  jest
+    .requireActual<typeof import('../../mocks/flowsheet-service.mock')>('../../mocks/flowsheet-service.mock')
+    .createFlowsheetServiceMock()
+);
 
 jest.mock('async-mutex', () => ({
   Mutex: jest.fn().mockImplementation(() => ({
@@ -33,6 +21,8 @@ jest.mock('async-mutex', () => ({
   })),
 }));
 
+import { resetFlowsheetServiceMock } from '../../mocks/flowsheet-service.mock';
+import * as flowsheetService from '../../../apps/backend/services/flowsheet.service';
 import { getOpenShows, forceEndShow } from '../../../apps/backend/controllers/flowsheet.controller';
 import WxycError from '../../../apps/backend/utils/error';
 import type { Request, Response, NextFunction } from 'express';
@@ -50,14 +40,25 @@ function createMockRes() {
 
 const next = jest.fn() as unknown as NextFunction;
 
+const END_INSTANT = new Date('2026-08-20T18:46:20.000Z');
+const service = flowsheetService as unknown as ReturnType<
+  typeof import('../../mocks/flowsheet-service.mock').createFlowsheetServiceMock
+>;
+const {
+  getOpenShows: mockGetOpenShows,
+  getShowById: mockGetShowById,
+  endShow: mockEndShow,
+  getLatestShow: mockGetLatestShow,
+  isLatestEntryShowEnd: mockIsLatestEntryShowEnd,
+  resolveShowEndInstant: mockResolveShowEndInstant,
+} = service;
+
 const makeReq = (query: Record<string, string> = {}, params: Record<string, string> = {}) =>
   ({ query, params }) as unknown as Request;
 
-describe('GET /flowsheet/open-shows — query parameters', () => {
-  beforeEach(() => {
-    mockGetOpenShows.mockReset().mockResolvedValue({ shows: [], total_in_window: 0, older_open_show_count: 0 });
-  });
+beforeEach(() => resetFlowsheetServiceMock(service, END_INSTANT));
 
+describe('GET /flowsheet/open-shows — query parameters', () => {
   it('defaults to the 7-day window and the default limit when neither is given', async () => {
     const { res, statusMock, jsonMock } = createMockRes();
 
@@ -89,7 +90,9 @@ describe('GET /flowsheet/open-shows — query parameters', () => {
     expect(mockGetOpenShows).not.toHaveBeenCalled();
   });
 
-  it.each(['0', '501', 'all', '1.5'])('rejects limit=%p with 400', async (raw) => {
+  // Only `limit`'s own bounds — both parameters share one parser, and its
+  // malformed-input handling is covered by the window_hours battery above.
+  it.each(['0', '501'])('rejects limit=%p with 400', async (raw) => {
     const { res } = createMockRes();
 
     await expect(getOpenShows(makeReq({ limit: raw }), res, next)).rejects.toThrow(WxycError);
@@ -121,15 +124,7 @@ describe('GET /flowsheet/open-shows — query parameters', () => {
 });
 
 describe('POST /flowsheet/shows/:id/force-end', () => {
-  const endInstant = new Date('2026-08-20T18:46:20.000Z');
-
-  beforeEach(() => {
-    mockGetShowById.mockReset();
-    mockEndShow.mockReset();
-    // Default: the target is not the on-air show, so the guard stays quiet.
-    mockGetLatestShow.mockReset().mockResolvedValue({ id: -1 });
-    mockResolveShowEndInstant.mockReset().mockResolvedValue(endInstant);
-  });
+  const endInstant = END_INSTANT;
 
   it('reuses endShow with the show’s own end instant and responds with the finalized show', async () => {
     const openShow = { id: 1951164, primary_dj_id: 'dj-1', end_time: null };
@@ -149,7 +144,7 @@ describe('POST /flowsheet/shows/:id/force-end', () => {
     // and put its show_end marker at the top of the live flowsheet — see
     // EndShowOptions in flowsheet.service.
     expect(mockResolveShowEndInstant).toHaveBeenCalledWith(openShow);
-    expect(mockEndShow).toHaveBeenCalledWith(openShow, { endedAt: endInstant });
+    expect(mockEndShow).toHaveBeenCalledWith(openShow, endInstant);
     expect(statusMock).toHaveBeenCalledWith(200);
     expect(jsonMock).toHaveBeenCalledWith(finalized);
   });
@@ -165,7 +160,7 @@ describe('POST /flowsheet/shows/:id/force-end', () => {
     const { res, statusMock } = createMockRes();
     await forceEndShow(makeReq({}, { id: '74840' }), res, next);
 
-    expect(mockEndShow).toHaveBeenCalledWith(orphan, { endedAt: endInstant });
+    expect(mockEndShow).toHaveBeenCalledWith(orphan, endInstant);
     expect(statusMock).toHaveBeenCalledWith(200);
   });
 
@@ -185,6 +180,28 @@ describe('POST /flowsheet/shows/:id/force-end', () => {
 
     await expect(forceEndShow(makeReq({}, { id: '1951168' }), res, next)).rejects.toThrow('current on-air show');
     expect(mockEndShow).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The carve-out that keeps the guard from blocking its own cohort. A show
+   * whose `show_end` marker landed but whose `end_time` was never stamped (the
+   * lost-webhook residue `jobs/legacy-mirror-reconcile` detects, BS#2065) holds
+   * `max(shows.id)` while being demonstrably over. `jobs/legacy-mirror-reconcile`
+   * already paid for this correction once (BS#2068); a bare `id === max(id)`
+   * test would 409 exactly the show the nightly detector flagged for closing.
+   */
+  it('does not 409 a max(id) show whose terminal entry is already a show_end marker', async () => {
+    const orphaned = { id: 1951168, primary_dj_id: null, end_time: null };
+    mockGetShowById.mockResolvedValue(orphaned);
+    mockGetLatestShow.mockResolvedValue(orphaned);
+    mockIsLatestEntryShowEnd.mockResolvedValue(true);
+    mockEndShow.mockResolvedValue({ ...orphaned, end_time: endInstant });
+
+    const { res, statusMock } = createMockRes();
+    await forceEndShow(makeReq({}, { id: '1951168' }), res, next);
+
+    expect(statusMock).toHaveBeenCalledWith(200);
+    expect(mockEndShow).toHaveBeenCalledWith(orphaned, endInstant);
   });
 
   it('ends the current on-air show when force=true is passed explicitly', async () => {

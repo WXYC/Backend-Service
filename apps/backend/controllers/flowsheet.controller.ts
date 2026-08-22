@@ -934,20 +934,6 @@ export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = asy
 };
 
 /**
- * `GET /flowsheet/open-shows` — every open show an operator might need to
- * close, oldest first (BS#2235).
- *
- * Gated to `flowsheet: ['manage']` (musicDirector / stationManager) on the
- * route. That is deliberately NARROWER than the capability it replaces:
- * tubafrenzy's `EndShowServlet` takes the show as a request parameter and
- * checks nothing about who is asking, so any signed-on DJ can end anyone's
- * recent show through the signon page's "Resume a Show" list. tubafrenzy
- * retires 2026-08-31 and takes that path with it.
- *
- * `window_hours` bounds the lookback; see `getOpenShows` for why an unwindowed
- * list is unusable in production.
- */
-/**
  * Parse a bounded positive-integer query parameter.
  *
  * Rejects anything that isn't a bare integer rather than letting `parseInt`'s
@@ -967,6 +953,20 @@ const parseBoundedInt = (raw: string | undefined, name: string, fallback: number
   return value;
 };
 
+/**
+ * `GET /flowsheet/open-shows` — every open show an operator might need to
+ * close, oldest first (BS#2235).
+ *
+ * Gated to `flowsheet: ['manage']` (musicDirector / stationManager) on the
+ * route. That is deliberately NARROWER than the capability it replaces:
+ * tubafrenzy's `EndShowServlet` takes the show as a request parameter and
+ * checks nothing about who is asking, so any signed-on DJ can end anyone's
+ * recent show through the signon page's "Resume a Show" list. tubafrenzy
+ * retires 2026-08-31 and takes that path with it.
+ *
+ * `window_hours` bounds the lookback; see `getOpenShows` for why an unwindowed
+ * list is unusable in production.
+ */
 export const getOpenShows: RequestHandler<object, unknown, unknown, { window_hours?: string; limit?: string }> = async (
   req,
   res
@@ -1029,20 +1029,21 @@ export const forceEndShow: RequestHandler<{ id: string }, unknown, unknown, { fo
   // listing exists so a UI can warn; this is the server-side half of the same
   // signal, so a client that never implements the warning still can't do it by
   // accident.
-  if (req.query.force !== 'true') {
-    const latestShow = await flowsheet_service.getLatestShow();
-    if (latestShow?.id === showId) {
+  //
+  // The terminal-marker carve-out matches `getOpenShows`'s `is_current`
+  // exactly: a show whose `show_end` marker landed but whose `end_time` was
+  // never stamped (the lost-webhook cohort BS#2065 detects) holds
+  // `max(shows.id)` while being demonstrably over, and must not be gated.
+  if (req.query.force !== 'true' && showId === (await flowsheet_service.getLatestShow())?.id) {
+    if (!(await flowsheet_service.isLatestEntryShowEnd(showId))) {
       throw new WxycError('Conflict: this is the current on-air show. Re-send with ?force=true to end it anyway.', 409);
     }
   }
 
-  // The instant the show actually stopped, not `now()`. See
-  // `EndShowOptions` in flowsheet.service — a show from the legacy backlog
-  // stamped `end_time = now()` overlaps every archive day since it started,
-  // and its `show_end` marker sorts to the top of the live flowsheet.
+  // The instant the show actually stopped, not `now()` — see `endShow`.
   const endedAt = await flowsheet_service.resolveShowEndInstant(show);
 
-  const finalizedShow: Show = await flowsheet_service.endShow(show, { endedAt });
+  const finalizedShow: Show = await flowsheet_service.endShow(show, endedAt);
   res.status(200).json(finalizedShow);
 };
 

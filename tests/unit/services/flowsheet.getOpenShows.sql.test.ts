@@ -1,18 +1,21 @@
 /**
  * Genuinely-rendered-SQL pin for `GET /flowsheet/open-shows` (BS#2235).
  *
- * WHAT THIS PROTECTS. tubafrenzy's open-show list called `getNumberOfEntries`
- * once per show from inside its iteration — an N+1 that is invisible over the
- * handful of rows a dev database holds and is not invisible over production's
- * (2,814 open shows measured 2026-08-21, against a `flowsheet` table of ~2.6M
- * rows on a `db.t3.micro` with a 5s statement timeout). The replacement gets
- * its counts from ONE grouped `LEFT JOIN`, and the acceptance criterion on the
- * ticket is that a future edit cannot quietly reintroduce the per-show count.
+ * WHAT THIS PROTECTS, precisely. tubafrenzy's open-show list called
+ * `getNumberOfEntries` once per show from inside its iteration — an N+1 of
+ * ROUND TRIPS. The invariant is one statement, and the page bounded before
+ * anything fans out from it.
  *
- * A call-shape mock cannot express that: "did anyone call `db.select` twice?"
- * is not the same question as "does the statement aggregate". So this renders
- * the real `buildOpenShowsQuery` through drizzle's own dialect and asserts on
- * the statement text.
+ * A prior version of this file asserted "the rendered text contains exactly
+ * one `select` keyword", which conflates a subquery with a round trip. That
+ * pin was not just imprecise, it was actively harmful: it forbade the very
+ * shape that fixes the performance defect. The first cut of the query was a
+ * `LEFT JOIN flowsheet … GROUP BY … LIMIT`, and `LIMIT` after `GROUP BY`
+ * cannot push down — at the widened window `getOpenShows` documents for
+ * reaching the 2006 tail that means grouping all 2,814 open shows across
+ * ~100k joined `flowsheet` rows (each needing a heap fetch, since no index on
+ * `show_id` carries `flowsheet.id`) and then discarding 2,714 of them. The
+ * assertions below pin the property that actually matters instead.
  *
  * The mechanism is the one `tests/unit/jobs/legacy-mirror-reconcile/stale-open-shows-sql.test.ts`
  * established: `jest.unit.config.ts`'s moduleNameMapper unconditionally
@@ -44,73 +47,69 @@ jest.mock('@wxyc/database', () => {
 import { buildOpenShowsQuery } from '../../../apps/backend/services/flowsheet.service';
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
-const { sql: text, params } = buildOpenShowsQuery(new Date('2026-08-14T00:00:00.000Z')).toSQL();
+const { sql: text, params } = buildOpenShowsQuery(new Date('2026-08-14T00:00:00.000Z'), 100).toSQL();
+
+/** Everything up to the first join — i.e. the subquery that produces the page. */
+const beforeJoin = text.slice(0, text.indexOf('left join'));
 
 describe('buildOpenShowsQuery — rendered statement (BS#2235)', () => {
-  it('aggregates the entry count in the statement rather than per show', () => {
-    expect(text).toContain(`count("${SCHEMA}"."flowsheet"."id")::int`);
-    expect(text).toContain(`group by`);
+  it('truncates the page BEFORE anything joins to it', () => {
+    // The load-bearing assertion. `limit` must land inside the `shows`
+    // subquery, not at the end of a grouped join — that is the difference
+    // between bounded work and 2,814 groups at the widened window.
+    expect(beforeJoin).toContain('limit $2');
+    expect(beforeJoin).toContain(`from "${SCHEMA}"."shows"`);
   });
 
-  it('reaches flowsheet through a LEFT JOIN, so a show with zero entries still appears', () => {
-    // An INNER JOIN here would silently drop exactly the cohort the endpoint
-    // exists for: production show 74840 is open with zero flowsheet entries.
+  it('bounds the page on the partial index: end_time IS NULL, ordered by start_time', () => {
+    // Filter, range bound and sort all come from `shows_open_start_time_idx`
+    // (migration 0154), so the truncation above is an index-only scan.
+    expect(beforeJoin).toContain(`"${SCHEMA}"."shows"."end_time" is null`);
+    expect(beforeJoin).toContain(`"${SCHEMA}"."shows"."start_time" >= $1`);
+    expect(beforeJoin).toContain(`order by "${SCHEMA}"."shows"."start_time" asc, "${SCHEMA}"."shows"."id" asc`);
+  });
+
+  it('counts entries in the same statement — one round trip, not the legacy N+1', () => {
     expect(text).toContain(
-      `left join "${SCHEMA}"."flowsheet" on "${SCHEMA}"."flowsheet"."show_id" = "${SCHEMA}"."shows"."id"`
+      `(SELECT count(*) FROM "${SCHEMA}"."flowsheet" WHERE "${SCHEMA}"."flowsheet"."show_id" = "page"."id")`
     );
+  });
+
+  it('counts with count(*), so the subquery is index-only', () => {
+    // `count(flowsheet.id)` — the grouped form's aggregate — would force a heap
+    // fetch per row, because neither `flowsheet_show_id_idx` nor
+    // `flowsheet_show_id_play_order_idx` carries `id`. `count(*)` needs no
+    // column value and is served entirely from the index.
+    expect(text).toContain('count(*)');
+    expect(text).not.toContain(`count("${SCHEMA}"."flowsheet"."id")`);
+  });
+
+  it('reaches flowsheet only through the correlated count, never an outer join', () => {
+    // An outer join to `flowsheet` would re-introduce the fan-out this shape
+    // exists to avoid, and an INNER one would silently drop exactly the cohort
+    // the endpoint is for — production show 74840 is open with zero entries.
+    expect(text).not.toContain(`join "${SCHEMA}"."flowsheet"`);
   });
 
   it('resolves the DJ handle via a LEFT JOIN on auth_user, not a per-show lookup', () => {
     // `resolveDjNameForShow` would cost one query per show. The chain runs in
     // JS over columns this join already fetched — the same trade
-    // `getShowsInTimeWindow` (BS#2062) makes.
-    expect(text).toContain(`left join "auth_user" on "auth_user"."id" = "${SCHEMA}"."shows"."primary_dj_id"`);
+    // `getShowsInTimeWindow` (BS#2062) makes. Joined to the already-truncated
+    // page, so it too is bounded by `limit`.
+    expect(text).toContain(`left join "auth_user" on "auth_user"."id" = "page"."primary_dj_id"`);
     expect(text).toContain(`"auth_user"."dj_name"`);
   });
 
-  it('filters on end_time IS NULL and binds the window floor as a parameter', () => {
-    expect(text).toContain(`"${SCHEMA}"."shows"."end_time" is null`);
-    expect(text).toContain(`"${SCHEMA}"."shows"."start_time" >= $1`);
-    // Two bound values: the window floor and the row cap. Both parameters, not
-    // interpolated text.
+  it('re-states the ordering on the outer statement', () => {
+    // A subquery is unordered by definition; without this the planner is free
+    // to reshuffle the page after the join. Second-granularity `start_time`
+    // collisions are real in this data (the legacy ETL's 00:55:35 / 00:55:41
+    // pairs), which is what the `id` tie-break is for.
+    expect(text.slice(text.indexOf('left join'))).toContain('order by "page"."start_time" asc, "page"."id" asc');
+  });
+
+  it('binds the window floor and the row cap as parameters', () => {
     // The floor arrives already serialized by drizzle's timestamptz encoder.
     expect(params).toEqual(['2026-08-14T00:00:00.000Z', 100]);
-  });
-
-  it('caps the row count so the read is bounded by construction', () => {
-    // `window_hours` reaches 30 years, so without this the response is every
-    // open show in the database in one JSON body.
-    expect(text).toContain('limit $2');
-  });
-
-  it('orders oldest-first with a deterministic tie-break on id', () => {
-    // Second-granularity start_time collisions are real in this data: the
-    // legacy ETL produced the 00:55:35 / 00:55:41 pairs visible in
-    // production's open-show tail. Without the `id` tie-break the list
-    // reshuffles between identical requests.
-    expect(text).toContain(`order by "${SCHEMA}"."shows"."start_time" asc, "${SCHEMA}"."shows"."id" asc`);
-  });
-
-  it('emits exactly one statement — no correlated per-show subquery', () => {
-    expect(text.toLowerCase().split('select').length - 1).toBe(1);
-  });
-
-  it('groups by every non-aggregated selected column', () => {
-    // Spelled out rather than leaning on Postgres inferring functional
-    // dependency from `shows.id`, so a future widening of the select list
-    // fails loudly here instead of at runtime.
-    for (const column of [
-      `"${SCHEMA}"."shows"."id"`,
-      `"${SCHEMA}"."shows"."primary_dj_id"`,
-      `"${SCHEMA}"."shows"."show_name"`,
-      `"${SCHEMA}"."shows"."start_time"`,
-      `"${SCHEMA}"."shows"."legacy_show_id"`,
-      `"${SCHEMA}"."shows"."dj_name_override"`,
-      `"${SCHEMA}"."shows"."legacy_dj_name"`,
-      `"auth_user"."id"`,
-      `"auth_user"."dj_name"`,
-    ]) {
-      expect(text.slice(text.indexOf('group by'))).toContain(column);
-    }
   });
 });

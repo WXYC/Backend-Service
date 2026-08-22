@@ -1111,43 +1111,38 @@ const createJoinNotification = async (id: string, show_id: number): Promise<FSEn
   return notification[0];
 };
 
-/**
- * Options for `endShow`.
- *
- * `endedAt` exists because "the show ended" and "right now" are the same
- * instant only on the live sign-off path. `POST /flowsheet/shows/:id/force-end`
- * (BS#2235) closes shows that stopped broadcasting long ago — production's open
- * backlog reaches back to 2006 — and stamping `now()` on one of those is not a
- * cosmetic inaccuracy. Two public reads consume these timestamps:
- *
- *   1. `getShowsInTimeWindow` (backing `GET /flowsheet/range`, which
- *      archive.wxyc.org reads) admits a closed show when
- *      `start_time < windowEnd AND end_time > windowStart`. A show stamped
- *      `start_time = 2006, end_time = now` satisfies that for EVERY day in
- *      between, so closing the backlog would inject bogus multi-decade shows
- *      into every archive page.
- *   2. `getEntriesByPage` orders globally by `add_time DESC, id DESC` and
- *      serves both `GET /flowsheet` page 0 and `GET /flowsheet/latest`. A
- *      `show_end` marker written with `add_time = now()` for a 2006 show
- *      becomes the newest entry on the public flowsheet.
- *
- * So the operator path passes the instant the show actually stopped, derived
- * from its last logged entry (`resolveShowEndInstant`). The live path passes
- * nothing and keeps `new Date()` — byte-identical to the pre-BS#2235 behavior.
- */
-export type EndShowOptions = {
-  /** When the show actually stopped. Defaults to now (the live sign-off case). */
-  endedAt?: Date;
-};
-
-export const endShow = async (currentShow: Show, options: EndShowOptions = {}): Promise<Show> => {
+export const endShow = async (currentShow: Show, endedAt: Date = new Date()): Promise<Show> => {
   //Add leave notification for all remaining guest djs;
   //Update their active state and set show end time.
-
-  // One instant for the `end_time` column, the `show_end` marker's `add_time`,
-  // its rendered message, and every co-host `dj_leave` marker — so a closed
-  // show cannot disagree with its own markers about when it ended.
-  const endedAt = options.endedAt ?? new Date();
+  //
+  // `endedAt` is one instant for the `end_time` column, the `show_end`
+  // marker's `add_time`, its rendered message, and every co-host `dj_leave`
+  // marker — so a closed show cannot disagree with its own markers about when
+  // it ended.
+  //
+  // It is a parameter because "the show ended" and "right now" are the same
+  // instant only on the live sign-off path. `POST /flowsheet/shows/:id/force-end`
+  // (BS#2235) closes shows that stopped broadcasting long ago — production's open
+  // backlog reaches back to 2006 — and stamping `now()` on one of those is not a
+  // cosmetic inaccuracy. Two public reads consume these timestamps:
+  //
+  //   1. `getShowsInTimeWindow` (backing `GET /flowsheet/range`, which
+  //      archive.wxyc.org reads) admits a closed show when
+  //      `start_time < windowEnd AND end_time > windowStart`. A show stamped
+  //      `start_time = 2006, end_time = now` satisfies that for EVERY day in
+  //      between, so closing the backlog would inject bogus multi-decade shows
+  //      into every archive page.
+  //   2. `getEntriesByPage` orders globally by `add_time DESC, id DESC` and
+  //      serves both `GET /flowsheet` page 0 and `GET /flowsheet/latest`. A
+  //      `show_end` marker written with `add_time = now()` for a 2006 show
+  //      becomes the newest entry on the public flowsheet.
+  //
+  // The operator path passes the instant the show actually stopped, derived
+  // from its last logged entry (`resolveShowEndInstant`). The live path passes
+  // nothing and keeps `new Date()` — byte-identical to the pre-BS#2235
+  // behavior. Deriving it unconditionally here would be wrong: a DJ signing
+  // off twenty minutes after their last logged track really did stay on the
+  // air for those twenty minutes.
 
   // A NULL `primary_dj_id` no longer aborts the close (BS#2093, decided by
   // BS#2235). It used to `throw new Error('Primary DJ not found')`, which made
@@ -1389,25 +1384,48 @@ export type OpenShowsResult = {
  * The query behind `GET /flowsheet/open-shows`, exported so a unit test can
  * render its SQL without a live Postgres.
  *
- * ONE grouped `LEFT JOIN … GROUP BY`, deliberately. tubafrenzy's unreachable
- * `FixRadioShowListServlet` called `getNumberOfEntries` once per show inside
- * its iteration — an N+1 that is fine over a handful of rows and is not fine
- * over the population this reads. `flowsheet_show_id_play_order_idx`'s
- * leading `show_id` column serves the join.
+ * ONE statement, one round trip — never the per-show count tubafrenzy's
+ * unreachable `FixRadioShowListServlet` made by calling `getNumberOfEntries`
+ * from inside its iteration. That is the invariant; the shape below is how it
+ * is bought.
+ *
+ * **The page is truncated BEFORE anything joins to it.** The first cut wrote
+ * this as a single `LEFT JOIN flowsheet … GROUP BY … LIMIT`, which reads
+ * correctly and behaves badly at exactly the request this endpoint tells
+ * operators to make. `LIMIT` after `GROUP BY` cannot push down: Postgres has
+ * to build every group before it can sort by `(start_time, id)` and truncate.
+ * At the widened window the docstring on `getOpenShows` recommends for
+ * reaching the 2006 tail, that is all 2,814 open shows fanned out across
+ * ~100k `flowsheet` rows — and since neither `flowsheet_show_id_idx` nor
+ * `flowsheet_show_id_play_order_idx` carries `flowsheet.id`, `count(id)`
+ * forces a heap fetch for every one of them, ~4% of a 1.7 GB table in random
+ * order, on a `db.t3.micro` with a 5 s statement timeout — to then discard
+ * 2,714 of the 2,814 groups. Limiting `shows` first bounds the work at
+ * `limit` rows (≤ 500) regardless of how wide the window is opened.
+ *
+ * The count is then a correlated `count(*)` per page row. That is NOT the
+ * legacy N+1: the legacy defect was N+1 *round trips*, and this is still one
+ * statement. `count(*)` needs no column value, so each subquery is an
+ * index-only scan of `flowsheet_show_id_idx` — no heap fetches at all, where
+ * the grouped form paid one per joined row.
  *
  * `user` is LEFT JOINed so the shared `resolveShowDjName` chain runs in JS on
  * columns fetched once, rather than one `resolveDjNameForShow` query per show
  * — the same trade `getShowsInTimeWindow` (BS#2062) makes. `user.id` is
  * selected alongside `djName` because the chain distinguishes "no user row"
- * from "user row with an unusable djName".
- *
- * Grouping lists every non-aggregated column explicitly rather than leaning on
- * Postgres's functional-dependency inference from `shows.id`: the inference
- * does hold here, but spelling it out keeps the statement portable to a plain
- * `GROUP BY` reader and survives a future `LEFT JOIN` that widens the select.
+ * from "user row with an unusable djName". It joins against the already-
+ * truncated page for the same reason the count does.
  */
-export const buildOpenShowsQuery = (windowFloor: Date, limit: number = OPEN_SHOWS_DEFAULT_LIMIT) =>
-  db
+export const buildOpenShowsQuery = (windowFloor: Date, limit: number = OPEN_SHOWS_DEFAULT_LIMIT) => {
+  // Served end to end by `shows_open_start_time_idx` (migration 0154): the
+  // partial predicate is the filter, and the indexed key is both the range
+  // bound and the sort, so this is an index-only scan truncated at `limit`.
+  //
+  // Oldest first: the most-stale show is the one an operator came here to
+  // close. `id` is a deterministic tie-break for the second-granularity
+  // collisions the legacy ETL produces (see the 00:55:35/00:55:41 pairs in
+  // production's open-show tail).
+  const page = db
     .select({
       id: shows.id,
       primary_dj_id: shows.primary_dj_id,
@@ -1416,31 +1434,35 @@ export const buildOpenShowsQuery = (windowFloor: Date, limit: number = OPEN_SHOW
       legacy_show_id: shows.legacy_show_id,
       dj_name_override: shows.dj_name_override,
       legacy_dj_name: shows.legacy_dj_name,
-      user_id: user.id,
-      user_dj_name: user.djName,
-      entry_count: sql<number>`count(${flowsheet.id})::int`,
     })
     .from(shows)
-    .leftJoin(user, eq(user.id, shows.primary_dj_id))
-    .leftJoin(flowsheet, eq(flowsheet.show_id, shows.id))
     .where(and(isNull(shows.end_time), gte(shows.start_time, windowFloor)))
-    .groupBy(
-      shows.id,
-      shows.primary_dj_id,
-      shows.show_name,
-      shows.start_time,
-      shows.legacy_show_id,
-      shows.dj_name_override,
-      shows.legacy_dj_name,
-      user.id,
-      user.djName
-    )
-    // Oldest first: the most-stale show is the one an operator came here to
-    // close. `id` is a deterministic tie-break for the second-granularity
-    // collisions the legacy ETL produces (see the 00:55:35/00:55:41 pairs in
-    // production's open-show tail).
     .orderBy(asc(shows.start_time), asc(shows.id))
-    .limit(limit);
+    .limit(limit)
+    .as('page');
+
+  return (
+    db
+      .select({
+        id: page.id,
+        primary_dj_id: page.primary_dj_id,
+        show_name: page.show_name,
+        start_time: page.start_time,
+        legacy_show_id: page.legacy_show_id,
+        dj_name_override: page.dj_name_override,
+        legacy_dj_name: page.legacy_dj_name,
+        user_id: user.id,
+        user_dj_name: user.djName,
+        entry_count: sql<number>`(SELECT count(*) FROM ${flowsheet} WHERE ${flowsheet.show_id} = ${page.id})::int`,
+      })
+      .from(page)
+      .leftJoin(user, eq(user.id, page.primary_dj_id))
+      // The subquery already emitted the page in order; re-stating it here is
+      // what makes the ordering a property of THIS statement rather than of an
+      // unordered-by-definition subquery the planner is free to reshuffle.
+      .orderBy(asc(page.start_time), asc(page.id))
+  );
+};
 
 /**
  * Every open show that started within `windowHours`, oldest first, plus a
@@ -1468,29 +1490,47 @@ export const getOpenShows = async (
 ): Promise<OpenShowsResult> => {
   const windowFloor = new Date(Date.now() - windowHours * 60 * 60 * 1000);
 
-  // `is_current` is resolved against the same `max(shows.id)` pivot every
-  // on-air read uses (`getLatestShow`), so this endpoint and the banner can
-  // never disagree about which show is live. It matters for the abandoned
-  // flag: a show that just signed on legitimately has fewer than four
-  // entries, and must not be presented as a close candidate.
-  const [rows, windowCount, olderCount, latestShow] = await Promise.all([
+  const [rows, counts, latestShow] = await Promise.all([
     buildOpenShowsQuery(windowFloor, limit),
+    // Both sides of the window in one pass over `shows_open_start_time_idx`.
+    // The `gte`/`lt` operators are embedded rather than the bare `windowFloor`
+    // so the column-aware timestamptz encoder still applies — interpolating the
+    // Date directly hits the postgres-js serializer trap documented on
+    // `getShowsInTimeWindow`.
     db
-      .select({ n: sql<number>`count(*)::int` })
+      .select({
+        in_window: sql<number>`count(*) FILTER (WHERE ${gte(shows.start_time, windowFloor)})::int`,
+        older: sql<number>`count(*) FILTER (WHERE ${lt(shows.start_time, windowFloor)})::int`,
+      })
       .from(shows)
-      .where(and(isNull(shows.end_time), gte(shows.start_time, windowFloor))),
-    db
-      .select({ n: sql<number>`count(*)::int` })
-      .from(shows)
-      .where(and(isNull(shows.end_time), lt(shows.start_time, windowFloor))),
+      .where(isNull(shows.end_time)),
     getLatestShow(),
   ]);
 
   const latestShowId = latestShow?.id ?? null;
 
+  // `is_current` is NOT a bare `id === max(shows.id)` test, and the difference
+  // is the whole cohort this endpoint serves. `jobs/legacy-mirror-reconcile`
+  // already paid for this correction (BS#2068): a show whose `show_end`
+  // webhook delivery was lost keeps its marker, never gets `end_time` stamped,
+  // and — until someone else goes live — holds `max(shows.id)`. Under the bare
+  // test it reports `is_current: true`, which suppresses `likely_abandoned`
+  // and makes `force-end` demand `?force=true` for precisely the show the
+  // nightly detector flagged as needing to be closed.
+  //
+  // `isLatestEntryShowEnd` is the same terminal-marker signal the reconcile
+  // job's `newestEntryType = 'show_end'` arm reads. Its docstring warns it is
+  // not self-safe without an `end_time` guard; every row here comes from a
+  // predicate that already required `end_time IS NULL`.
+  //
+  // At most ONE extra query, and only when the newest show is on this page —
+  // `is_current` can be true for exactly one row by construction.
+  const latestOnPage = latestShowId !== null && rows.some((row) => row.id === latestShowId);
+  const currentShowId = latestOnPage && !(await isLatestEntryShowEnd(latestShowId!)) ? latestShowId : null;
+
   return {
     shows: rows.map((row) => {
-      const is_current = latestShowId !== null && row.id === latestShowId;
+      const is_current = currentShowId !== null && row.id === currentShowId;
       return {
         id: row.id,
         primary_dj_id: row.primary_dj_id ?? null,
@@ -1508,8 +1548,8 @@ export const getOpenShows = async (
         likely_abandoned: !is_current && row.entry_count < LIKELY_ABANDONED_ENTRY_THRESHOLD,
       };
     }),
-    total_in_window: windowCount[0]?.n ?? 0,
-    older_open_show_count: olderCount[0]?.n ?? 0,
+    total_in_window: counts[0]?.in_window ?? 0,
+    older_open_show_count: counts[0]?.older ?? 0,
   };
 };
 
@@ -1518,9 +1558,9 @@ export const getOpenShows = async (
  * floored at `start_time`, falling back to `start_time` when it logged nothing.
  *
  * This is the instant `POST /flowsheet/shows/:id/force-end` hands `endShow`,
- * and the reason that parameter exists at all — see `EndShowOptions` for what
- * `now()` does to `GET /flowsheet/range` and to the public flowsheet's global
- * sort when the show being closed is from 2006.
+ * and the reason that parameter exists at all — see `endShow` for what `now()`
+ * does to `GET /flowsheet/range` and to the public flowsheet's global sort
+ * when the show being closed is from 2006.
  *
  * `MAX(add_time)`, deliberately NOT `lastLoggedShowEntryOrderBy`'s "add_time of
  * the highest-id row". The two answer different questions and this one wants
@@ -1543,10 +1583,13 @@ export const resolveShowEndInstant = async (show: Show): Promise<Date> => {
     .from(flowsheet)
     .where(eq(flowsheet.show_id, show.id));
 
-  const latest = rows[0]?.latest ? new Date(rows[0].latest) : null;
+  // "No entries at all" and "last entry predates start_time" have the same
+  // answer, so they share one branch rather than a nullable local plus a
+  // compound condition.
   const startedAt = new Date(show.start_time);
+  const latest = rows[0]?.latest ? new Date(rows[0].latest) : startedAt;
 
-  return latest && latest.getTime() > startedAt.getTime() ? latest : startedAt;
+  return latest.getTime() > startedAt.getTime() ? latest : startedAt;
 };
 
 /** One show by primary key, for the operator-close path's existence check. */
