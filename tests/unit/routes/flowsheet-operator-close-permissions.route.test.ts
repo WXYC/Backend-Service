@@ -33,23 +33,10 @@ function mockRole(role: string) {
   });
 }
 
-const mockGetOpenShows = jestGlobals.fn<() => Promise<unknown>>();
-const mockGetShowById = jestGlobals.fn<() => Promise<unknown>>();
-const mockEndShow = jestGlobals.fn<() => Promise<unknown>>();
-
-const mockGetLatestShow = jestGlobals.fn<() => Promise<unknown>>();
-const mockResolveShowEndInstant = jestGlobals.fn<() => Promise<Date>>();
-
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
-  getOpenShows: mockGetOpenShows,
-  getShowById: mockGetShowById,
-  endShow: mockEndShow,
-  getLatestShow: mockGetLatestShow,
-  resolveShowEndInstant: mockResolveShowEndInstant,
-  OPEN_SHOWS_DEFAULT_WINDOW_HOURS: 168,
-  OPEN_SHOWS_MAX_WINDOW_HOURS: 262_800,
-  OPEN_SHOWS_DEFAULT_LIMIT: 100,
-  OPEN_SHOWS_MAX_LIMIT: 500,
+  ...jest
+    .requireActual<typeof import('../../mocks/flowsheet-service.mock')>('../../mocks/flowsheet-service.mock')
+    .createFlowsheetServiceMock(),
   getLastModifiedAt: jest.fn(),
 }));
 
@@ -65,7 +52,14 @@ jest.mock('../../../apps/backend/middleware/legacy/flowsheet.mirror', () => ({
   ),
 }));
 
+import { resetFlowsheetServiceMock } from '../../mocks/flowsheet-service.mock';
+import * as flowsheetService from '../../../apps/backend/services/flowsheet.service';
 import { flowsheet_route } from '../../../apps/backend/routes/flowsheet.route';
+
+const service = flowsheetService as unknown as ReturnType<
+  typeof import('../../mocks/flowsheet-service.mock').createFlowsheetServiceMock
+>;
+const { getOpenShows: mockGetOpenShows, getShowById: mockGetShowById, endShow: mockEndShow } = service;
 
 const app = express();
 app.use(express.json());
@@ -87,13 +81,11 @@ app.use('/flowsheet', flowsheet_route);
  */
 describe('operator close — permission tier (BS#2235)', () => {
   beforeEach(() => {
-    mockGetOpenShows.mockReset().mockResolvedValue({ shows: [], total_in_window: 0, older_open_show_count: 0 });
-    // Not the on-air show, so force-end's confirmation guard stays quiet —
-    // this suite is about the permission tier, not that guard.
-    mockGetLatestShow.mockReset().mockResolvedValue({ id: -1 });
-    mockResolveShowEndInstant.mockReset().mockResolvedValue(new Date('2026-08-20T18:46:20.000Z'));
-    mockGetShowById.mockReset().mockResolvedValue({ id: 5, primary_dj_id: 'dj-1', end_time: null });
-    mockEndShow.mockReset().mockResolvedValue({ id: 5, primary_dj_id: 'dj-1', end_time: new Date() });
+    // The permission tier is what this suite is about; the baseline keeps the
+    // force-end confirmation guard quiet so a 403 can only come from the gate.
+    resetFlowsheetServiceMock(service, new Date('2026-08-20T18:46:20.000Z'));
+    mockGetShowById.mockResolvedValue({ id: 5, primary_dj_id: 'dj-1', end_time: null });
+    mockEndShow.mockResolvedValue({ id: 5, primary_dj_id: 'dj-1', end_time: new Date() });
   });
 
   describe.each([

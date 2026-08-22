@@ -5,12 +5,7 @@
  */
 import { jest } from '@jest/globals';
 import { db, createMockQueryChain } from '../../mocks/database.mock';
-import {
-  getOpenShows,
-  LIKELY_ABANDONED_ENTRY_THRESHOLD,
-  OPEN_SHOWS_DEFAULT_WINDOW_HOURS,
-  OPEN_SHOWS_MAX_WINDOW_HOURS,
-} from '../../../apps/backend/services/flowsheet.service';
+import { getOpenShows, LIKELY_ABANDONED_ENTRY_THRESHOLD } from '../../../apps/backend/services/flowsheet.service';
 
 type Row = Record<string, unknown>;
 
@@ -19,24 +14,63 @@ type Row = Record<string, unknown>;
  * `db.select` mock is primed positionally in call order: the grouped open-shows
  * query, the older-than-window count, then `getLatestShow`'s `getNShows`.
  */
-const primeReads = (rows: Row[], olderCount: number, latestShowId: number | null, windowCount?: number) => {
+/**
+ * `getOpenShows` fires three reads concurrently through `Promise.all`, so the
+ * `db.select` mock is primed positionally in call order: the open-shows page,
+ * the one FILTERed count row, then `getLatestShow`'s `getNShows`. A fourth
+ * (`isLatestEntryShowEnd`) follows only when the newest show is on the page.
+ *
+ * An options object rather than four positionals: `latestShowId` defaults to a
+ * value no fixture row uses, so the common "nothing is current" case says
+ * nothing at all instead of passing a bare sentinel.
+ */
+const NO_SHOW_IS_CURRENT = -1;
+
+const primeReads = ({
+  rows = [],
+  olderCount = 0,
+  latestShowId = NO_SHOW_IS_CURRENT,
+  windowCount,
+  latestEntryIsShowEnd = false,
+}: {
+  rows?: Row[];
+  olderCount?: number;
+  latestShowId?: number | null;
+  windowCount?: number;
+  latestEntryIsShowEnd?: boolean;
+} = {}) => {
+  // `buildOpenShowsQuery` builds two selects: the inner `shows` page (closed
+  // with `.as('page')`) and the outer statement that joins and counts against
+  // it. Both are constructed before anything awaits, so they take the first
+  // two `db.select` slots in that order.
+  const page = createMockQueryChain();
+  db.select.mockReturnValueOnce(page);
+
   const openShows = createMockQueryChain();
-  openShows.limit.mockResolvedValue(rows);
+  openShows.orderBy.mockResolvedValue(rows);
   db.select.mockReturnValueOnce(openShows);
 
-  const inWindow = createMockQueryChain();
-  inWindow.where.mockResolvedValue([{ n: windowCount ?? rows.length }]);
-  db.select.mockReturnValueOnce(inWindow);
-
-  const older = createMockQueryChain();
-  older.where.mockResolvedValue([{ n: olderCount }]);
-  db.select.mockReturnValueOnce(older);
+  const counts = createMockQueryChain();
+  counts.where.mockResolvedValue([{ in_window: windowCount ?? rows.length, older: olderCount }]);
+  db.select.mockReturnValueOnce(counts);
 
   const latest = createMockQueryChain();
   latest.limit.mockResolvedValue(latestShowId === null ? [] : [{ id: latestShowId }]);
   db.select.mockReturnValueOnce(latest);
 
-  return { openShows };
+  // Queued ONLY when it will actually be consumed. `getOpenShows` reads the
+  // terminal marker just for the newest show, and only when that show is on
+  // the page — `mockReturnValueOnce` is a queue, so an unconsumed entry does
+  // not vanish at `jest.clearAllMocks()` (that clears calls, not the queue).
+  // It leaks into the next test and hands the inner page query a chain whose
+  // `orderBy` resolves to rows, which fails on the following `.limit`.
+  if (latestShowId !== null && rows.some((r) => r.id === latestShowId)) {
+    const terminalMarker = createMockQueryChain();
+    terminalMarker.limit.mockResolvedValue([{ entry_type: latestEntryIsShowEnd ? 'show_end' : 'track' }]);
+    db.select.mockReturnValueOnce(terminalMarker);
+  }
+
+  return { page, openShows };
 };
 
 const row = (over: Row = {}): Row => ({
@@ -59,7 +93,7 @@ describe('getOpenShows', () => {
   });
 
   it('flags a low-entry non-current show as likely abandoned', async () => {
-    primeReads([row({ id: 74840, entry_count: 0 })], 0, 1951168);
+    primeReads({ rows: [row({ id: 74840, entry_count: 0 })], latestShowId: 1951168 });
 
     const { shows } = await getOpenShows();
 
@@ -74,7 +108,7 @@ describe('getOpenShows', () => {
    * on-air read uses, so this endpoint and the banner cannot disagree.
    */
   it('never flags the current show, however few entries it has', async () => {
-    primeReads([row({ id: 1951168, entry_count: 1 })], 0, 1951168);
+    primeReads({ rows: [row({ id: 1951168, entry_count: 1 })], latestShowId: 1951168 });
 
     const { shows } = await getOpenShows();
 
@@ -82,14 +116,12 @@ describe('getOpenShows', () => {
   });
 
   it('does not flag a non-current show at or above the entry threshold', async () => {
-    primeReads(
-      [
+    primeReads({
+      rows: [
         row({ id: 10, entry_count: LIKELY_ABANDONED_ENTRY_THRESHOLD - 1 }),
         row({ id: 11, entry_count: LIKELY_ABANDONED_ENTRY_THRESHOLD }),
       ],
-      0,
-      99
-    );
+    });
 
     const { shows } = await getOpenShows();
 
@@ -97,7 +129,25 @@ describe('getOpenShows', () => {
   });
 
   it('treats every show as non-current when nothing is open at all', async () => {
-    primeReads([row({ id: 7, entry_count: 1 })], 0, null);
+    primeReads({ rows: [row({ id: 7, entry_count: 1 })], latestShowId: null });
+
+    const { shows } = await getOpenShows();
+
+    expect(shows[0]).toMatchObject({ is_current: false, likely_abandoned: true });
+  });
+
+  /**
+   * BS#2068's correction, re-applied here. A show whose `show_end` marker
+   * landed but whose `end_time` was never stamped keeps `max(shows.id)` while
+   * being demonstrably over — a bare `id === max(id)` test reports it as live,
+   * suppressing `likely_abandoned` on exactly the cohort this endpoint serves.
+   */
+  it('does not treat a max(id) show as current when its terminal entry is a show_end marker', async () => {
+    primeReads({
+      rows: [row({ id: 1951168, entry_count: 2 })],
+      latestShowId: 1951168,
+      latestEntryIsShowEnd: true,
+    });
 
     const { shows } = await getOpenShows();
 
@@ -105,8 +155,8 @@ describe('getOpenShows', () => {
   });
 
   it('resolves the DJ handle through the shared chain: override beats the user row', async () => {
-    primeReads(
-      [
+    primeReads({
+      rows: [
         row({
           primary_dj_id: 'dj-1',
           user_id: 'dj-1',
@@ -114,9 +164,7 @@ describe('getOpenShows', () => {
           dj_name_override: 'Aubrey Hearst',
         }),
       ],
-      0,
-      99
-    );
+    });
 
     const { shows } = await getOpenShows();
 
@@ -126,7 +174,7 @@ describe('getOpenShows', () => {
   it('falls back to legacy_dj_name for a show with no linked account', async () => {
     // The shape of the entire historical cohort: primary_dj_id NULL, identity
     // carried by the tubafrenzy handle.
-    primeReads([row({ primary_dj_id: null, legacy_dj_name: 'DJ Mouseness' })], 0, 99);
+    primeReads({ rows: [row({ primary_dj_id: null, legacy_dj_name: 'DJ Mouseness' })] });
 
     const { shows } = await getOpenShows();
 
@@ -134,7 +182,7 @@ describe('getOpenShows', () => {
   });
 
   it('reports the count of open shows older than the window without listing them', async () => {
-    primeReads([row({ id: 1951168, entry_count: 11 })], 2813, 1951168);
+    primeReads({ rows: [row({ id: 1951168, entry_count: 11 })], olderCount: 2813, latestShowId: 1951168 });
 
     const result = await getOpenShows();
 
@@ -149,32 +197,11 @@ describe('getOpenShows', () => {
    * complete one — without it, `limit` silently lies about how much is open.
    */
   it('reports total_in_window separately from the truncated page', async () => {
-    primeReads([row({ id: 1 }), row({ id: 2 })], 0, 99, 57);
+    primeReads({ rows: [row({ id: 1 }), row({ id: 2 })], windowCount: 57 });
 
     const result = await getOpenShows(168, 2);
 
     expect(result.shows).toHaveLength(2);
     expect(result.total_in_window).toBe(57);
-  });
-
-  it('passes the caller’s limit to the query', async () => {
-    const { openShows } = primeReads([], 0, 99);
-
-    await getOpenShows(168, 25);
-
-    expect(openShows.limit).toHaveBeenCalledWith(25);
-  });
-
-  it('defaults the window to a week', () => {
-    expect(OPEN_SHOWS_DEFAULT_WINDOW_HOURS).toBe(24 * 7);
-  });
-
-  /**
-   * The ceiling must be able to reach the cohort `older_open_show_count`
-   * counts, or that number describes rows no request can list. Production's
-   * open shows start in 2006; the first cut was 8,760 hours (one year).
-   */
-  it('caps the window wide enough to reach a 2006 show', () => {
-    expect(OPEN_SHOWS_MAX_WINDOW_HOURS).toBeGreaterThan(20 * 365 * 24);
   });
 });

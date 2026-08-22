@@ -136,20 +136,10 @@ describe('endShow', () => {
   });
 
   /**
-   * BS#2235 review finding 1/2. `endShow` was written for a DJ signing off NOW,
-   * and the operator-close path reuses it for shows that stopped broadcasting
-   * long ago. Two public reads make `now()` wrong there, not merely imprecise:
-   *
-   *   1. `getShowsInTimeWindow` (backing `GET /flowsheet/range`, which
-   *      archive.wxyc.org reads) admits a closed show when
-   *      `start_time < windowEnd AND end_time > windowStart`. A 2006 show
-   *      stamped `end_time = now` satisfies that for EVERY day since, so
-   *      working the backlog would inject bogus multi-decade shows into every
-   *      archive page.
-   *   2. `getEntriesByPage` orders globally by `add_time DESC, id DESC` and
-   *      serves `GET /flowsheet` page 0 and `GET /flowsheet/latest`. A
-   *      `show_end` marker at `add_time = now()` becomes the newest entry on
-   *      the public flowsheet.
+   * BS#2235 review finding 1/2 — `endShow` was written for a DJ signing off
+   * NOW, and the operator path reuses it for shows that stopped long ago. The
+   * two public reads that make `now()` wrong there (rather than merely
+   * imprecise) are set out once, on `endShow` itself.
    */
   it('stamps end_time and the marker add_time from the supplied instant, not now()', async () => {
     const endedAt = new Date('2006-04-02T05:15:30.276Z');
@@ -169,7 +159,7 @@ describe('endShow', () => {
     const showsUpdate = createMockQueryChain([{ id: 72464, end_time: endedAt }]);
     db.update.mockReturnValueOnce(showsUpdate);
 
-    await endShow({ id: 72464, primary_dj_id: 'user-1' } as unknown as Parameters<typeof endShow>[0], { endedAt });
+    await endShow({ id: 72464, primary_dj_id: 'user-1' } as unknown as Parameters<typeof endShow>[0], endedAt);
 
     expect(showsUpdate.set).toHaveBeenCalledWith({ end_time: endedAt });
 
