@@ -89,4 +89,37 @@ describe('searchLibraryByCTARaw: shared view projection (BS#2231)', () => {
     expect(text).toContain('AS cta_track_title');
     expect(text).toContain('AS cta_artist_name');
   });
+
+  it('strips every query-only column from the returned row', async () => {
+    // The outer `SELECT * FROM (…) ranked` hands back the `DENSE_RANK()`
+    // window column alongside the projection, and the grouping pass builds
+    // its result by rest-spreading the row. `serializeLibraryArtistViewEntry`
+    // is spread-based too, so anything left on the row rides through to the
+    // `GET /library/` wire shape — where `library_rank` is not a field of
+    // `LibraryArtistViewResponse` or of api.yaml.
+    //
+    // The type system can't see this: `CTASearchRow` describes what the SELECT
+    // *should* return, and a raw `db.execute` result is cast to it. Same gap
+    // as the missing columns, pointed the other way — a field the SQL emits
+    // that the type doesn't declare, rather than one it declares and the SQL
+    // omits.
+    db.execute.mockResolvedValue([
+      {
+        id: 11,
+        artist_name: 'Chuquimamani-Condori',
+        album_title: 'Edits',
+        cta_track_title: 'Call Your Name',
+        cta_artist_name: 'Chuquimamani-Condori',
+        library_rank: 1,
+      },
+    ]);
+
+    const [row] = await searchLibraryByCTARaw('Call Your Name', 5);
+
+    expect(row).not.toHaveProperty('library_rank');
+    expect(row).not.toHaveProperty('cta_track_title');
+    expect(row).not.toHaveProperty('cta_artist_name');
+    expect(row.id).toBe(11);
+    expect(row.matched_via).toHaveLength(1);
+  });
 });

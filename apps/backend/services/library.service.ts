@@ -3870,6 +3870,14 @@ export async function searchByArtist(artistName: string, limit = 5): Promise<Enr
 type CTASearchRow = LibraryArtistViewEntry & {
   cta_track_title: string | null;
   cta_artist_name: string;
+  /**
+   * The `DENSE_RANK()` window the outer `SELECT *` hands back with the rest of
+   * the row. Declared so the grouping pass's destructure has to name it to
+   * strip it — the row is rest-spread onto the return value, and
+   * `serializeLibraryArtistViewEntry` is spread-based too, so a query-only
+   * column left here reaches the `GET /library/` wire shape.
+   */
+  library_rank: number;
 };
 
 /**
@@ -3948,17 +3956,22 @@ export async function searchLibraryByCTARaw(
   }
 
   return Array.from(byLibraryId.values()).map(({ row, hints }) => {
-    // Strip the CTA-only join columns so the returned row conforms to
-    // `LibraryArtistViewEntry`. The wire-shape serializer would otherwise
-    // emit `cta_track_title` / `cta_artist_name` next to `matched_via`.
+    // Strip the query-only columns so the returned row conforms to
+    // `LibraryArtistViewEntry`: the two CTA join columns, and `library_rank`,
+    // which the outer `SELECT *` returns alongside them. The wire-shape
+    // serializer spreads whatever it is handed, so anything left here reaches
+    // the `GET /library/` response next to `matched_via`.
     //
     // Deliberately unasserted (BS#2231): the rest object satisfies
     // `TaggedLibraryViewEntry` structurally, so a field that `CTASearchRow`
     // stops carrying is a compile error here. The `as TaggedLibraryViewEntry`
-    // this used to end with suppressed exactly that check. What it can't
-    // check is whether the SQL populated those fields — that's what pinning
-    // the shared projection above is for.
-    const { cta_track_title: _t, cta_artist_name: _a, ...viewRow } = row;
+    // this used to end with suppressed exactly that check. Two things it still
+    // can't check, both because a raw `db.execute` result is cast rather than
+    // inferred: whether the SQL populated the declared fields (what pinning
+    // the shared projection above is for), and whether it returned fields
+    // `CTASearchRow` doesn't declare — which is why `library_rank` is declared
+    // there rather than left to the cast to hide.
+    const { cta_track_title: _t, cta_artist_name: _a, library_rank: _rank, ...viewRow } = row;
     return { ...viewRow, matched_via: hints };
   });
 }
