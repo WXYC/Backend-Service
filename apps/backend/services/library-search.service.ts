@@ -21,7 +21,14 @@ import type { ArtistMatchHint, ArtistSearchAliasSource } from './requestLine/typ
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import WxycError from '../utils/error.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
-import { buildAliasHitsCte, buildAliasOnlyTier } from '../utils/alias-hits.js';
+import {
+  buildAliasHitsCte,
+  buildAliasOnlyTier,
+  ALIAS_HITS_PROJECTION,
+  ALIAS_HITS_PROJECTION_NULLS,
+  type AliasHitFields,
+} from '../utils/alias-hits.js';
+import { rawProjection } from '../utils/sql-projection.js';
 
 export type CatalogSort = 'artist' | 'album' | 'plays' | 'date';
 export type CatalogOrder = 'asc' | 'desc';
@@ -98,9 +105,6 @@ const FIELD_COLUMNS: Record<CatalogField, SQL> = {
 const albumPlaysJoin = sql`LEFT JOIN ${album_plays} ON ${album_plays.album_id} = ${library_artist_view.id}`;
 const playsColumn = sql`COALESCE(${album_plays.plays}, 0)`;
 
-/** The `RawRow` fields the alias UNION ALL branches supply from their own tails. */
-type AliasHitColumn = 'alias_max_sim' | 'alias_matched_variant' | 'alias_matched_source';
-
 /**
  * The catalog columns every `/library/query` SELECT projects, named once.
  *
@@ -116,7 +120,10 @@ type AliasHitColumn = 'alias_max_sim' | 'alias_matched_variant' | 'alias_matched
  * The `satisfies` is the guard: adding a required field to `RawRow` without
  * projecting it here is now a build error. Alias fields are excluded because
  * the branch tails own them — branch (a) projects NULLs, branch (b) reads
- * `alias_hits`, and the alias-OFF shape omits them entirely.
+ * `alias_hits`, and the alias-OFF shape omits them entirely. Those tails are
+ * `ALIAS_HITS_PROJECTION` / `_NULLS` from `utils/alias-hits.ts`, which is also
+ * where `AliasHitFields` names the carve-out, so the exclusion and the columns
+ * it excludes can't drift apart.
  */
 const CATALOG_ROW_PROJECTION_COLUMNS = {
   id: library_artist_view.id,
@@ -140,13 +147,10 @@ const CATALOG_ROW_PROJECTION_COLUMNS = {
   discogs_unavailable: library_artist_view.discogs_unavailable,
   discogs_unavailable_note: library_artist_view.discogs_unavailable_note,
   last_discogs_recheck_at: library_artist_view.last_discogs_recheck_at,
-} as const satisfies Record<Exclude<keyof RawRow, AliasHitColumn>, Column | SQL>;
+} as const satisfies Record<Exclude<keyof RawRow, keyof AliasHitFields>, Column | SQL>;
 
 /** Raw SQL projection emitted from {@link CATALOG_ROW_PROJECTION_COLUMNS}. */
-const CATALOG_ROW_PROJECTION = sql.join(
-  Object.entries(CATALOG_ROW_PROJECTION_COLUMNS).map(([alias, column]) => sql`${column} AS ${sql.identifier(alias)}`),
-  sql`, `
-);
+const CATALOG_ROW_PROJECTION = rawProjection(CATALOG_ROW_PROJECTION_COLUMNS);
 
 // BS#1554: when an album has more than one active rotation row (e.g. H and
 // M simultaneously), the DISTINCT ON (id) dedup below must keep the
@@ -306,14 +310,8 @@ export async function searchLibrary(
     // `library.service.ts` can't drift on what counts as an alias match.
     const cte = buildAliasHitsCte(params.q, aliasConfig.minSimilarity);
 
-    const branchAProjection = sql`${CATALOG_ROW_PROJECTION},
-      NULL::real AS alias_max_sim,
-      NULL::text AS alias_matched_variant,
-      NULL::text AS alias_matched_source`;
-    const branchBProjection = sql`${CATALOG_ROW_PROJECTION},
-      alias_hits.max_sim AS alias_max_sim,
-      alias_hits.matched_variant AS alias_matched_variant,
-      alias_hits.matched_source AS alias_matched_source`;
+    const branchAProjection = sql`${CATALOG_ROW_PROJECTION}${ALIAS_HITS_PROJECTION_NULLS}`;
+    const branchBProjection = sql`${CATALOG_ROW_PROJECTION}${ALIAS_HITS_PROJECTION}`;
 
     const branchAFrom = branchAWhere
       ? sql`FROM ${library_artist_view} ${albumPlaysJoin} WHERE ${branchAWhere}`
