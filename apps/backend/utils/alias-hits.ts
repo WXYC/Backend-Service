@@ -155,3 +155,42 @@ export function buildFuzzyAliasTier() {
 export function buildDirectMatchTieBreak() {
   return sql`(alias_max_sim IS NOT NULL) ASC`;
 }
+
+/**
+ * The three columns the alias UNION ALL's branches append after the shared
+ * catalog projection, and the shape they arrive in.
+ *
+ * Named here, beside the CTE that produces them, rather than in either service
+ * (BS#2231). Both alias-aware read paths — `library.service.ts`'s two raw
+ * UNION ALL sites and `library-search.service.ts`'s `/library/query` branches —
+ * used to carry their own copy of the same three-column tail, which is the
+ * drift channel BS#2231 closed for the catalog columns and left open for
+ * these. Adding a fourth alias column is now one edit here plus the row types
+ * that read it, not four.
+ *
+ * `library-search.service.ts` also uses `keyof AliasHitFields` to carve these
+ * out of the completeness check on its shared projection: the branch tails own
+ * them, so the projection must not.
+ *
+ * All three are nullable (BS#1318) so a caller can detect a no-hit row by
+ * `alias_max_sim === null` without a second query — the non-alias branch
+ * projects the `_NULLS` variant rather than omitting the columns, which is
+ * what keeps the two UNION ALL branches union-compatible.
+ */
+export type AliasHitFields = {
+  alias_max_sim: number | null;
+  alias_matched_variant: string | null;
+  alias_matched_source: string | null;
+};
+
+/** Projection columns emitted by the alias branch of a UNION ALL search query. */
+export const ALIAS_HITS_PROJECTION = sql`,
+  alias_hits.max_sim AS alias_max_sim,
+  alias_hits.matched_variant AS alias_matched_variant,
+  alias_hits.matched_source AS alias_matched_source`;
+
+/** NULL placeholders for the alias-shape columns on the non-alias UNION ALL branch. */
+export const ALIAS_HITS_PROJECTION_NULLS = sql`,
+  NULL::real AS alias_max_sim,
+  NULL::text AS alias_matched_variant,
+  NULL::text AS alias_matched_source`;

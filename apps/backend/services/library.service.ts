@@ -56,7 +56,15 @@ import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrack
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
-import { buildAliasHitsCte, buildFuzzyAliasTier, buildDirectMatchTieBreak } from '../utils/alias-hits.js';
+import {
+  buildAliasHitsCte,
+  buildFuzzyAliasTier,
+  buildDirectMatchTieBreak,
+  ALIAS_HITS_PROJECTION,
+  ALIAS_HITS_PROJECTION_NULLS,
+  type AliasHitFields,
+} from '../utils/alias-hits.js';
+import { rawProjection } from '../utils/sql-projection.js';
 import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from './observability/cache-stats.js';
 
 // Schema-qualified reference to the `fold_artist_name(text)` SQL function
@@ -117,17 +125,6 @@ type ReconciledIdentityKey = (typeof RECONCILED_IDENTITY_KEYS)[number];
 export type TaggedLibraryViewEntry = LibraryArtistViewEntry & {
   matched_via?: TrackMatchHint[];
   matched_via_alias?: ArtistMatchHint[];
-};
-
-/**
- * Raw projection fields appended to the SELECT when the alias UNION ALL
- * branch is on (BS#1318). Returned as nullable columns so callers can detect
- * a no-hit row by `alias_max_sim === null` without forcing a separate query.
- */
-type AliasHitFields = {
-  alias_max_sim: number | null;
-  alias_matched_variant: string | null;
-  alias_matched_source: string | null;
 };
 
 /**
@@ -1820,22 +1817,7 @@ const LIBRARY_VIEW_JOINS_RAW = sql`
  * again — the one link in the chain a future edit could undo without failing
  * the build.
  */
-export const LIBRARY_VIEW_PROJECTION_RAW = sql.join(
-  Object.entries(LIBRARY_VIEW_PROJECTION).map(([alias, column]) => sql`${column} AS ${sql.identifier(alias)}`),
-  sql`, `
-);
-
-/** Projection columns emitted by the alias branch of a UNION ALL search query. */
-const ALIAS_HITS_PROJECTION = sql`,
-  alias_hits.max_sim AS alias_max_sim,
-  alias_hits.matched_variant AS alias_matched_variant,
-  alias_hits.matched_source AS alias_matched_source`;
-
-/** NULL placeholders for the alias-shape columns on the non-alias UNION ALL branch. */
-const ALIAS_HITS_PROJECTION_NULLS = sql`,
-  NULL::real AS alias_max_sim,
-  NULL::text AS alias_matched_variant,
-  NULL::text AS alias_matched_source`;
+export const LIBRARY_VIEW_PROJECTION_RAW = rawProjection(LIBRARY_VIEW_PROJECTION);
 
 /**
  * Build the `FROM library` query shape with the joins needed to project the
@@ -3873,9 +3855,7 @@ type CTASearchRow = LibraryArtistViewEntry & {
   /**
    * The `DENSE_RANK()` window the outer `SELECT *` hands back with the rest of
    * the row. Declared so the grouping pass's destructure has to name it to
-   * strip it — the row is rest-spread onto the return value, and
-   * `serializeLibraryArtistViewEntry` is spread-based too, so a query-only
-   * column left here reaches the `GET /library/` wire shape.
+   * strip it — see the strip site at the end of `searchLibraryByCTARaw`.
    */
   library_rank: number;
 };

@@ -59,26 +59,15 @@ describe('searchLibraryByCTARaw: shared view projection (BS#2231)', () => {
   });
 
   it('interpolates the shared projection rather than a hand-rolled column list', async () => {
-    // The structural assertion, and the reason the per-column ones below stay
-    // short: with the shared constant interpolated, a column added to
-    // `LibraryArtistViewEntry` reaches this SELECT without anyone remembering
-    // to come here. A hand-rolled list that happens to be complete today is
-    // exactly how the defect shipped twice.
+    // Asserting containment of the whole fragment covers every column in it,
+    // including the four that actually went missing — `artist_id` (BS#2228)
+    // and the three `discogs*` (BS#1895) — without naming them, so a column
+    // added to `LibraryArtistViewEntry` tomorrow is covered too. Naming them
+    // would only restate what containment already implies.
     await searchLibraryByCTARaw('Bioluminescence', 5);
 
     expect(capturedCtaSql()).toContain(renderSql(LIBRARY_VIEW_PROJECTION_RAW));
   });
-
-  // The four columns that actually went missing, named so a regression reads
-  // as itself rather than as a diff of the whole SELECT.
-  it.each(['artist_id', 'discogs_unavailable', 'discogs_unavailable_note', 'last_discogs_recheck_at'])(
-    'projects %s',
-    async (alias) => {
-      await searchLibraryByCTARaw('Bioluminescence', 5);
-
-      expect(capturedCtaSql()).toContain(`AS "${alias}"`);
-    }
-  );
 
   it('still projects the CTA-only join columns alongside the shared projection', async () => {
     await searchLibraryByCTARaw('Bioluminescence', 5);
@@ -91,18 +80,12 @@ describe('searchLibraryByCTARaw: shared view projection (BS#2231)', () => {
   });
 
   it('strips every query-only column from the returned row', async () => {
-    // The outer `SELECT * FROM (…) ranked` hands back the `DENSE_RANK()`
-    // window column alongside the projection, and the grouping pass builds
-    // its result by rest-spreading the row. `serializeLibraryArtistViewEntry`
-    // is spread-based too, so anything left on the row rides through to the
-    // `GET /library/` wire shape — where `library_rank` is not a field of
-    // `LibraryArtistViewResponse` or of api.yaml.
-    //
     // The type system can't see this: `CTASearchRow` describes what the SELECT
     // *should* return, and a raw `db.execute` result is cast to it. Same gap
     // as the missing columns, pointed the other way — a field the SQL emits
     // that the type doesn't declare, rather than one it declares and the SQL
-    // omits.
+    // omits. Why a leftover column matters is documented at the strip site in
+    // `searchLibraryByCTARaw`.
     db.execute.mockResolvedValue([
       {
         id: 11,
