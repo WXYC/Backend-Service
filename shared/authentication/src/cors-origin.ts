@@ -29,7 +29,20 @@
  *     configured literal as ACAO on every response). Multiple entries return
  *     an array, which the `cors` package treats as a whitelist (ACAO is only
  *     emitted when the request's Origin matches an entry).
- *   - No usable value returns `false`, which disables the `cors` middleware —
+ *   - `previewVarName` (`CORS_PREVIEW_ORIGINS`) is a SEPARATE, comma-separated
+ *     list that is UNIONED onto whatever the primary list resolved to, rather
+ *     than being consulted first-wins like the names above. It exists because
+ *     the wildcard preview origins and the primary origin cannot share a
+ *     variable: `FRONTEND_SOURCE` is read as a SINGLE origin by
+ *     `oidc-login-page.ts`, `url-rewrite.ts`, and `provision-user.ts`, and
+ *     `new URL('https://dj.wxyc.org,https://*.wxyc-dj.pages.dev')` does not
+ *     throw — it parses, yielding host `dj.wxyc.org,https`. A comma-joined
+ *     value therefore sails through every guard on those paths and silently
+ *     points the OIDC login page, every password-reset email, and every DJ
+ *     invite at a host that does not exist. Keeping the previews in their own
+ *     variable makes that unrepresentable rather than merely discouraged.
+ *   - No usable value in the primary list returns `false`, which disables the
+ *     `cors` middleware —
  *     no `Access-Control-*` headers are ever emitted, so browsers refuse
  *     cross-origin reads while same-origin and non-browser clients (iOS app,
  *     supertest, curl) are unaffected. An error-level log makes the
@@ -38,20 +51,88 @@
  *     non-browser clients that never needed CORS.
  */
 
-export type ResolvedCorsOrigin = string | string[] | false;
+export type CorsOriginPattern = string | RegExp;
+export type ResolvedCorsOrigin = CorsOriginPattern | CorsOriginPattern[] | false;
+
+/** Split a comma-separated origin list into trimmed, non-empty entries. */
+const splitOrigins = (raw: string | undefined): string[] =>
+  (raw ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+/**
+ * Compile a single trimmed origin entry into the pattern the `cors` package
+ * consumes. Literal origins pass through as strings (exact match). Wildcard
+ * origins (containing `*` or `?`) become an anchored RegExp: `*` matches any
+ * run of non-separator characters and `?` matches exactly one, so
+ * `https://*.wxyc-dj.pages.dev` matches `https://abc123.wxyc-dj.pages.dev` but
+ * not `https://evil.com` or a suffix like `…pages.dev.evil.com` (the `$`
+ * anchor). `[^/\\]` as the wildcard class mirrors better-auth's
+ * `wildcardMatch` default separator so both trust layers agree.
+ *
+ * Breadth caveat — `/` and `\` are the ONLY separators, so `*` DOES cross
+ * dots: `https://*.wxyc-dj.pages.dev` also trusts arbitrarily-deep subdomains
+ * (`https://a.b.wxyc-dj.pages.dev`). That is safe here only because WXYC owns
+ * the entire `wxyc-dj.pages.dev` zone — every host under it is a WXYC Pages
+ * deployment, so a wildcard can only widen the subdomains WXYC controls.
+ * Do NOT configure a wildcard over a multi-tenant apex (e.g.
+ * `https://*.pages.dev`): that would trust every Cloudflare Pages project,
+ * including attacker-controlled ones, for credentialed requests. The wildcard
+ * segment must always be pinned to a zone WXYC owns end-to-end.
+ */
+export function toCorsPattern(entry: string): CorsOriginPattern {
+  if (!/[*?]/.test(entry)) return entry;
+  const source = Array.from(entry)
+    .map((ch) => {
+      if (ch === '*') return '[^/\\\\]*';
+      if (ch === '?') return '[^/\\\\]';
+      // Escape every regex metacharacter in the literal portions.
+      return ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    })
+    .join('');
+  // `source` is built from a deploy-controlled env var with every regex
+  // metacharacter in the literal portions escaped above and only `*`/`?`
+  // expanded to bounded, non-backtracking classes — not attacker input.
+  // eslint-disable-next-line security/detect-non-literal-regexp
+  return new RegExp(`^${source}$`);
+}
 
 export function resolveCorsOrigin(
   env: NodeJS.ProcessEnv,
-  envVarNames: string[] = ['FRONTEND_SOURCE']
+  envVarNames: string[] = ['FRONTEND_SOURCE'],
+  previewVarName = 'CORS_PREVIEW_ORIGINS'
 ): ResolvedCorsOrigin {
+  const previews = splitOrigins(env[previewVarName]).map(toCorsPattern);
+
   for (const name of envVarNames) {
-    const entries = (env[name] ?? '')
-      .split(',')
-      .map((origin) => origin.trim())
-      .filter(Boolean);
-    if (entries.length === 1) return entries[0];
-    if (entries.length > 1) return entries;
+    const entries = splitOrigins(env[name]).map(toCorsPattern);
+    if (entries.length === 0) continue;
+    // No previews configured: return exactly what this function always
+    // returned, including the bare-pattern form for a single entry, so an
+    // unset CORS_PREVIEW_ORIGINS is byte-for-byte the pre-existing behavior.
+    if (previews.length === 0) return entries.length === 1 ? entries[0] : entries;
+    // With previews the result is always an array, which the `cors` package
+    // treats as a whitelist: ACAO is emitted only when the request Origin
+    // matches an entry, rather than the configured literal being sent
+    // unconditionally. The primary origin still matches, so it is unaffected;
+    // origins that match nothing now get no ACAO instead of a header they
+    // could never use. That is the safer direction, and it happens only when
+    // previews are explicitly configured.
+    return [...entries, ...previews];
   }
+
+  // Previews alone do not open the door. FRONTEND_SOURCE is required by the
+  // login page, the reset/verification emails, and invite links regardless of
+  // CORS, so a deploy that sets only the preview list is misconfigured — and
+  // BS#1107's fail-closed contract is the whole point of this function.
+  if (previews.length > 0) {
+    console.error(
+      `[cors] ${previewVarName} is set but none of ${envVarNames.join(', ')} is — ignoring the preview origins and ` +
+        'serving no CORS headers. Preview origins widen the primary allow-list; they do not replace it.'
+    );
+  }
+
   console.error(
     `[cors] None of ${envVarNames.join(', ')} is set — cross-origin requests are disabled (no CORS headers will be served). ` +
       `Set ${envVarNames[0]} to the frontend origin (comma-separated for multiple origins). ` +

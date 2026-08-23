@@ -48,6 +48,24 @@ export function buildLoginPage(env: NodeJS.ProcessEnv): string {
     }
     return `${DEV_FALLBACK}/login`;
   }
+  if (raw.includes(',')) {
+    // A comma-joined list is the one malformed value that gets past every
+    // guard below: `new URL('https://dj.wxyc.org,https://*.wxyc-dj.pages.dev')`
+    // does not throw — it parses, with host `dj.wxyc.org,https` and protocol
+    // `https:`. So the try/catch and the scheme check both pass and this
+    // function happily returns `https://dj.wxyc.org,https/login`, while
+    // `url-rewrite.ts` puts the same nonexistent host into every reset and
+    // verification email and `provision-user.ts` concatenates it into every
+    // invite link. Nothing anywhere reports an error; the links just go
+    // nowhere. Reject it here, at the one consumer that already throws at
+    // startup, so the deploy fails loudly instead of shipping dead links.
+    //
+    // Multiple CORS origins belong in CORS_PREVIEW_ORIGINS, which only the
+    // CORS layer and better-auth's trustedOrigins read.
+    throw new Error(
+      '[oidc-login-page] FRONTEND_SOURCE must be a single origin, but contains a comma. It is read as one URL here and by url-rewrite.ts and provision-user.ts, and a comma-joined value parses into a nonexistent host rather than failing. Put additional CORS origins in CORS_PREVIEW_ORIGINS instead.'
+    );
+  }
   let parsed: URL;
   try {
     parsed = new URL(raw);
