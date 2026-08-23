@@ -37,16 +37,18 @@ Any uniqueness constraint added afterward must use this same key, including the 
 
 ## Order of operations is a data-safety property
 
-Every FK referencing `library.id` is repointed to the survivor **before** the losing row is deleted. That is not stylistic. Of the 14 reference sites, seven cascade and two null out the reference:
+Every FK referencing `library.id` is repointed to the survivor **before** the losing row is deleted. That is not stylistic. Of the 15 reference sites, seven cascade and two null out the reference:
 
 | On delete  | Sites                                                                                                                                                            |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `cascade`  | `rotation`, `album_metadata`, `reviews`, `album_critic_reviews`, `compilation_track_artist`, `artist_library_crossreference`, `uncovered_release_search_markers` |
 | `set null` | `flowsheet.album_id`, `album_review_submissions.album_id`                                                                                                        |
 | no action  | `bins`, `library_identity`, `library_identity_source`                                                                                                            |
-| no FK      | `library_identity_history`, `album_popularity.representative_library_id`                                                                                         |
+| no FK      | `library_identity_history`, `album_popularity.representative_library_id`, `library_delete_denylist.library_id`                                                   |
 
 Deleting first would silently destroy rotation history, album metadata, reviews, and now the artist cross-references too, and silently unlink plays — no error raised. The three no-action sites are the only ones that would fail loudly.
+
+The three no-FK sites need no repoint and are listed so the inventory is complete rather than merely correct. `library_delete_denylist` is the newest of them (migration `0146`, landed while this branch was in review — the same `0146` this branch had to renumber around): it is keyed on `legacy_release_id`, and its `library_id` is explicitly informational, recording the id the row carried at delete time. A merge that deletes the losing `library` row therefore leaves it alone by design, which is the right behavior — the denylist's one consumer, `jobs/library-etl`'s import loop, reads only `legacy_release_id`.
 
 **These actions are the ones the database enforces, not the ones `schema.ts` declares.** They used to disagree on `artist_library_crossreference.library_id`: `schema.ts` has always marked it `cascade`, while migration `0022` created it `no action` — one of the four drifted constraints catalogued in [#2015](https://github.com/WXYC/Backend-Service/issues/2015). **Migration `0147` ([BS#2112](https://github.com/WXYC/Backend-Service/issues/2112)) repaired exactly that constraint to the declared `cascade`, which is why it has moved rows in the table above.** On a database that has not yet applied `0147` it is still `no action`; the table describes a database that has. The sibling `artist_id` FK on the same table carries the same 0022 drift and was deliberately left alone.
 
