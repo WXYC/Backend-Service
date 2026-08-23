@@ -403,7 +403,13 @@ export const schedule = wxyc_schema.table('schedule', {
   day: smallint('day').notNull(),
   start_time: time('start_time').notNull(),
   show_duration: smallint('show_duration').notNull(), // In 15-minute blocs
-  specialty_id: integer('specialty_id').references(() => specialty_shows.id, { onDelete: 'set null' }), //null for regular shows
+  // No onDelete here: the deployed database has always been ON DELETE NO
+  // ACTION for this FK (0000_rare_prima.sql, unchanged by 0016_nervous_hydra).
+  // BS#2239 resolved the schema/DB drift by de-declaring rather than adding
+  // the cascade the DB never had — the opposite direction from BS#1126's
+  // migration 0097/0094 fix for a different five FKs. Do not "fix" this
+  // back to `{ onDelete: 'set null' }` without re-reading BS#2239.
+  specialty_id: integer('specialty_id').references(() => specialty_shows.id), //null for regular shows
   assigned_dj_id: varchar('assigned_dj_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
   assigned_dj_id2: varchar('assigned_dj_id2', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
 });
@@ -2315,12 +2321,17 @@ export type GenreArtistCrossreference = InferSelectModel<typeof genre_artist_cro
 export const genre_artist_crossreference = wxyc_schema.table(
   'genre_artist_crossreference',
   {
+    // No onDelete on either FK below: the deployed database has always been
+    // ON DELETE NO ACTION for both (migration 0022). BS#2239 de-declared
+    // rather than adding the cascade the DB never had — see the note on
+    // schedule.specialty_id above for the full reasoning; this deliberately
+    // diverges from BS#1126's opposite-direction fix for a different five FKs.
     artist_id: integer('artist_id')
       .notNull()
-      .references(() => artists.id, { onDelete: 'cascade' }),
+      .references(() => artists.id),
     genre_id: integer('genre_id')
       .notNull()
-      .references(() => genres.id, { onDelete: 'cascade' }),
+      .references(() => genres.id),
     artist_genre_code: integer('artist_genre_code').notNull(),
   },
   (table) => [uniqueIndex('artist_genre_key').on(table.artist_id, table.genre_id)]
@@ -2331,9 +2342,14 @@ export type ArtistLibraryCrossreference = InferSelectModel<typeof artist_library
 export const artist_library_crossreference = wxyc_schema.table(
   'artist_library_crossreference',
   {
+    // No onDelete on artist_id: the deployed database has always been ON
+    // DELETE NO ACTION for this FK (migration 0022). BS#2239 de-declared
+    // rather than adding the cascade the DB never had — see the note on
+    // schedule.specialty_id above. library_id below is untouched by #2239
+    // (its CASCADE matches the DB) and keeps its own onDelete.
     artist_id: integer('artist_id')
       .notNull()
-      .references(() => artists.id, { onDelete: 'cascade' }),
+      .references(() => artists.id),
     library_id: integer('library_id')
       .notNull()
       .references(() => library.id, { onDelete: 'cascade' }),
@@ -2491,8 +2507,13 @@ export type ShowDJ = InferSelectModel<typeof show_djs>;
 export const show_djs = wxyc_schema.table(
   'show_djs',
   {
+    // No onDelete here: the deployed database has always been ON DELETE NO
+    // ACTION for this FK (see the BS#2239 note on schedule.specialty_id
+    // above). This is deliberately NOT the same resolution BS#1126 chose for
+    // a different five FKs — do not add `{ onDelete: 'cascade' }` back
+    // without re-reading BS#2239's reasoning.
     show_id: integer('show_id')
-      .references(() => shows.id, { onDelete: 'cascade' })
+      .references(() => shows.id)
       .notNull(),
     dj_id: varchar('dj_id', { length: 255 })
       .references(() => user.id, { onDelete: 'cascade' })
