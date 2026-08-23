@@ -49,7 +49,7 @@ import type { SQL } from 'drizzle-orm';
 import { loadBatch, type Cohort, type LibraryRow } from './select.js';
 import type { BulkResolveInput, BulkResolveResponse, BulkResolveResult } from './lml-types.js';
 import type { CompilationWriteOutcome } from './writer.js';
-import { captureError, log } from './logger.js';
+import { captureError, errorMessage, log, pgDiagnostics } from './logger.js';
 
 const JOB_NAME = 'library-identity-consumer';
 
@@ -284,7 +284,8 @@ export const runConsumer = async (opts: {
       log('warn', 'lml_error', `LML bulk-resolve failed for batch ${batchIndex}`, {
         batch_index: batchIndex,
         batch_size: rows.length,
-        error_message: (error as Error).message,
+        error_message: errorMessage(error),
+        ...pgDiagnostics(error),
       });
       captureError(error, 'lml_error', { batch_index: batchIndex, batch_size: rows.length });
       // Count every row in this batch as skipped (lml_error). The next run
@@ -384,7 +385,8 @@ export const runConsumer = async (opts: {
           } catch (error) {
             log('warn', 'writer_error', `writer failed for library_id=${result.library_id}`, {
               library_id: result.library_id,
-              error_message: (error as Error).message,
+              error_message: errorMessage(error),
+              ...pgDiagnostics(error),
             });
             captureError(error, 'writer_error', { library_id: result.library_id });
             totals.rows_skipped.writer_error += 1;
@@ -441,7 +443,8 @@ export const runConsumer = async (opts: {
           log('warn', 'writer_error', `writeCompilationTracks failed for batch ${batchIndex}`, {
             batch_index: batchIndex,
             library_ids: resolvedCompilationResults.map((r) => r.library_id),
-            error_message: (error as Error).message,
+            error_message: errorMessage(error),
+            ...pgDiagnostics(error),
           });
           captureError(error, 'writer_error', {
             batch_index: batchIndex,
@@ -493,7 +496,8 @@ export const runConsumer = async (opts: {
         log('warn', 'stamp_error', `failed to stamp unresolved_attempted_at for batch ${batchIndex}`, {
           batch_index: batchIndex,
           count: idsToStamp.length,
-          error_message: (error as Error).message,
+          error_message: errorMessage(error),
+          ...pgDiagnostics(error),
         });
         captureError(error, 'stamp_error', { batch_index: batchIndex, count: idsToStamp.length });
       }
