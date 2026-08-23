@@ -1065,6 +1065,13 @@
       "when": 1787330210040,
       "tag": "0154_shows-open-start-time-idx",
       "breakpoints": true
+    },
+    {
+      "idx": 155,
+      "version": "7",
+      "when": 1787453472920,
+      "tag": "0155_fk-ondelete-snapshot-resync",
+      "breakpoints": true
     }
   ]
 }

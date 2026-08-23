@@ -60,6 +60,17 @@ const CONFDELTYPE_LABEL = {
   d: 'SET DEFAULT',
 };
 
+// `jest.config.json` sets testTimeout: 30000, but `jest.parallel.config.json`
+// (used by `npm run test:integration:parallel` and `ci:test:parallel`) sets
+// none, so those runs fall back to Jest's 5s default. The first thing this
+// test does is a SYNCHRONOUS execFileSync that boots a Node process and
+// requires both `drizzle-orm/pg-core` and the built `@wxyc/database`; on a
+// loaded 2-worker run that can exceed 5s, and because execFileSync blocks the
+// worker Jest cannot interrupt it -- it only reports the timeout after the
+// fact. Pinning the timeout here keeps the guard behaving the same under
+// either config instead of flaking in one of them.
+const TEST_TIMEOUT_MS = 30000;
+
 /**
  * Collect every foreign key `@wxyc/database`'s schema.ts declares (name,
  * onDelete action, owning schema/table, local column names) by delegating
@@ -86,7 +97,7 @@ function collectDeclaredForeignKeys() {
 
   const declared = new Map();
   for (const row of rows) {
-    declared.set(identityKey(row.schema, row.table, row.columns), {
+    setUnique(declared, identityKey(row.schema, row.table, row.columns), 'schema.ts', {
       constraint: row.constraint,
       expectedChar: row.expectedChar,
       action: row.action,
@@ -96,6 +107,36 @@ function collectDeclaredForeignKeys() {
     });
   }
   return declared;
+}
+
+/**
+ * Insert into `map` under `key`, refusing to overwrite an existing entry.
+ *
+ * Both sides of this comparison are keyed by identityKey(), and a plain
+ * `Map.set` would let a second foreign key over the same (schema, table,
+ * columns) silently evict the first -- dropping it out of the guard
+ * entirely. That is precisely the "coverage rots because nothing forces the
+ * new FK onto the list" failure this spec was written to prevent, so it must
+ * not be reintroduced by the matching key itself.
+ *
+ * Postgres does permit two foreign keys over the same columns (referencing
+ * different parent tables, say), so a collision is a real state rather than
+ * an impossible one. It just isn't a state a (schema, table, columns) join
+ * key can adjudicate, so this fails loudly instead of picking a winner. As
+ * of #2239 the schema has no such pair; if one is ever added, widen
+ * identityKey() to include the referenced table rather than deleting this
+ * check.
+ */
+function setUnique(map, key, side, value) {
+  if (map.has(key)) {
+    throw new Error(
+      `${side} has more than one foreign key on ${key}. This guard matches ` +
+        `constraints by (schema, table, columns), which cannot tell them apart. ` +
+        `Widen identityKey() to include the referenced table before adding a ` +
+        `second foreign key over the same columns.`
+    );
+  }
+  map.set(key, value);
 }
 
 /**
@@ -122,18 +163,20 @@ describe('FK ON DELETE guard: every constraint matches its schema.ts declaration
     sql = getTestDb();
   });
 
-  test('pg_constraint.confdeltype matches schema.ts for every FK in public + wxyc_schema', async () => {
-    const declared = collectDeclaredForeignKeys();
+  test(
+    'pg_constraint.confdeltype matches schema.ts for every FK in public + wxyc_schema',
+    async () => {
+      const declared = collectDeclaredForeignKeys();
 
-    // Sanity floor so a broken getTableConfig call (e.g. an export shape
-    // change upstream in drizzle-orm) fails loudly as "found nothing"
-    // rather than silently passing an empty comparison.
-    expect(declared.size).toBeGreaterThan(0);
+      // Sanity floor so a broken getTableConfig call (e.g. an export shape
+      // change upstream in drizzle-orm) fails loudly as "found nothing"
+      // rather than silently passing an empty comparison.
+      expect(declared.size).toBeGreaterThan(0);
 
-    // Resolve each FK's local column names too (not just its name), via
-    // conkey -> pg_attribute, so rows can be matched to schema.ts's
-    // declarations by (schema, table, columns) -- see identityKey().
-    const rows = await sql`
+      // Resolve each FK's local column names too (not just its name), via
+      // conkey -> pg_attribute, so rows can be matched to schema.ts's
+      // declarations by (schema, table, columns) -- see identityKey().
+      const rows = await sql`
       SELECT c.conname,
              c.confdeltype,
              n.nspname AS schema,
@@ -148,44 +191,49 @@ describe('FK ON DELETE guard: every constraint matches its schema.ts declaration
          AND n.nspname IN ('public', ${SCHEMA})
        GROUP BY c.conname, c.confdeltype, n.nspname, t.relname
     `;
-    const observed = new Map(
-      rows.map((r) => [
-        identityKey(r.schema, r.table, r.columns),
-        { conname: r.conname, confdeltype: r.confdeltype, schema: r.schema, table: r.table },
-      ])
-    );
-
-    const mismatches = [];
-    for (const [key, expected] of declared) {
-      const actual = observed.get(key);
-      if (!actual) {
-        mismatches.push({
-          table: `${expected.schema}.${expected.table}(${expected.columns.join(',')})`,
-          'schema.ts declares': `${expected.constraint}: ${expected.expectedChar} (${CONFDELTYPE_LABEL[expected.expectedChar]})`,
-          database: '(no FK found on these columns in public or ' + SCHEMA + ')',
-        });
-        continue;
-      }
-      if (actual.confdeltype !== expected.expectedChar) {
-        mismatches.push({
-          table: `${expected.schema}.${expected.table}(${expected.columns.join(',')})`,
-          'schema.ts declares': `${expected.constraint}: ${expected.expectedChar} (${CONFDELTYPE_LABEL[expected.expectedChar]})`,
-          database: `${actual.conname}: ${actual.confdeltype} (${CONFDELTYPE_LABEL[actual.confdeltype] ?? 'unknown'})`,
+      const observed = new Map();
+      for (const r of rows) {
+        setUnique(observed, identityKey(r.schema, r.table, r.columns), 'the database', {
+          conname: r.conname,
+          confdeltype: r.confdeltype,
+          schema: r.schema,
+          table: r.table,
         });
       }
-    }
 
-    // One assertion covering every constraint: a run with multiple
-    // divergences reports all of them, not just the first.
-    expect(mismatches).toEqual([]);
+      const mismatches = [];
+      for (const [key, expected] of declared) {
+        const actual = observed.get(key);
+        if (!actual) {
+          mismatches.push({
+            table: `${expected.schema}.${expected.table}(${expected.columns.join(',')})`,
+            'schema.ts declares': `${expected.constraint}: ${expected.expectedChar} (${CONFDELTYPE_LABEL[expected.expectedChar]})`,
+            database: '(no FK found on these columns in public or ' + SCHEMA + ')',
+          });
+          continue;
+        }
+        if (actual.confdeltype !== expected.expectedChar) {
+          mismatches.push({
+            table: `${expected.schema}.${expected.table}(${expected.columns.join(',')})`,
+            'schema.ts declares': `${expected.constraint}: ${expected.expectedChar} (${CONFDELTYPE_LABEL[expected.expectedChar]})`,
+            database: `${actual.conname}: ${actual.confdeltype} (${CONFDELTYPE_LABEL[actual.confdeltype] ?? 'unknown'})`,
+          });
+        }
+      }
 
-    // The converse direction: a foreign key the database has but schema.ts
-    // never declared (e.g. a hand-written migration that adds a raw FK
-    // Drizzle doesn't model) is its own kind of drift and should also fail
-    // this guard rather than pass silently.
-    const undeclared = rows
-      .map((r) => ({ key: identityKey(r.schema, r.table, r.columns), conname: r.conname }))
-      .filter((r) => !declared.has(r.key));
-    expect(undeclared).toEqual([]);
-  });
+      // One assertion covering every constraint: a run with multiple
+      // divergences reports all of them, not just the first.
+      expect(mismatches).toEqual([]);
+
+      // The converse direction: a foreign key the database has but schema.ts
+      // never declared (e.g. a hand-written migration that adds a raw FK
+      // Drizzle doesn't model) is its own kind of drift and should also fail
+      // this guard rather than pass silently.
+      const undeclared = rows
+        .map((r) => ({ key: identityKey(r.schema, r.table, r.columns), conname: r.conname }))
+        .filter((r) => !declared.has(r.key));
+      expect(undeclared).toEqual([]);
+    },
+    TEST_TIMEOUT_MS
+  );
 });
