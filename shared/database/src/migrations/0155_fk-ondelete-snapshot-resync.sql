@@ -1,0 +1,36 @@
+-- Intentionally no DDL. This migration exists only to re-sync the Drizzle
+-- snapshot after WXYC/Backend-Service#2239 removed five `onDelete` clauses
+-- from schema.ts that the database has never actually had.
+--
+-- Background: schema.ts declared ON DELETE CASCADE on show_djs.show_id,
+-- artist_library_crossreference.artist_id, and both genre_artist_crossreference
+-- FKs, plus ON DELETE SET NULL on schedule.specialty_id. Every one of those
+-- constraints is plain NO ACTION (pg_constraint.confdeltype = 'a') in prod AND
+-- in a CI database built from this migration chain from empty -- no migration
+-- ever created them any other way. #2239 corrected schema.ts to say what the
+-- database actually enforces.
+--
+-- That correction left schema.ts and meta/0154_snapshot.json disagreeing where
+-- they previously agreed. Drizzle diffs schema.ts against the LATEST snapshot,
+-- so the next `drizzle:generate` -- for some unrelated change, by someone not
+-- thinking about foreign keys -- would have silently bundled five
+-- DROP CONSTRAINT + five ADD CONSTRAINT statements into that migration.
+-- Re-adding a FK takes ACCESS EXCLUSIVE on both tables plus a full validation
+-- scan of the child; on artist_library_crossreference and
+-- genre_artist_crossreference that is a prod-sized scan riding along inside a
+-- migration nobody reviewed for it.
+--
+-- Running that DDL here instead would be equally pointless: it drops each
+-- constraint and re-adds it with the exact semantics it already has. The
+-- database needs no change. Only Drizzle's bookkeeping does, and that lives in
+-- meta/0155_snapshot.json, which `drizzle:generate` wrote alongside this file.
+--
+-- So the SQL is deliberately empty and the snapshot carries the whole payload.
+-- The generated statements were removed by hand; that is a sanctioned deviation
+-- from the "never hand-edit the SQL" rule in docs/migrations.md for the same
+-- reason Check 10 of scripts/validate-migrations.mjs recommends folding a
+-- net-no-op pair into a single no-op migration.
+--
+-- Do not "restore" the DDL. If a future change genuinely needs one of these
+-- FKs to cascade, add that cascade in the PR that introduces the delete path,
+-- so the destructive behaviour is reviewed next to the code that relies on it.
