@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@sentry/node": "^10.69.0",
-    "@wxyc/shared": "^3.5.0"
+    "@wxyc/shared": "^4.1.0"
   },
   "devDependencies": {
     "tsup": "^8.5.1",
