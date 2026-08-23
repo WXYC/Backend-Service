@@ -6,9 +6,18 @@ updates:
       interval: 'weekly'
       day: 'monday'
     groups:
+      # `better-call` belongs here, not in dev-dependencies: `@better-auth/core`
+      # peer-depends on it by EXACT version (1.6.26 pins 1.3.7; 1.7.1 pins 1.4.0),
+      # so a solo bump of either one can't produce a hoisted tree. npm satisfies
+      # the contradiction by duplicating the whole auth stack into per-workspace
+      # `node_modules` instead of failing, which is silent -- both halves install,
+      # both halves typecheck, and the split only shows up by reading the lockfile.
+      # Grouping them means the peer is always bumped by the same PR. See #2180
+      # and #2247, which were exactly this split in both directions at once.
       better-auth:
         patterns:
           - 'better-auth'
+          - 'better-call'
           - '@better-auth/*'
       drizzle:
         patterns:
@@ -21,6 +30,7 @@ updates:
         dependency-type: 'development'
         exclude-patterns:
           - 'better-auth'
+          - 'better-call'
           - '@better-auth/*'
           - 'drizzle-orm'
           - 'drizzle-kit'
@@ -29,6 +39,7 @@ updates:
         dependency-type: 'production'
         exclude-patterns:
           - 'better-auth'
+          - 'better-call'
           - '@better-auth/*'
           - 'drizzle-orm'
           - 'drizzle-kit'
@@ -40,6 +51,20 @@ updates:
       # upgrade TypeScript as a tracked change once the toolchain supports TS7.
       - dependency-name: 'typescript'
         update-types: ['version-update:semver-major']
+      # Hold better-auth at 1.6.x: 1.7.0 REMOVED the `oidcProvider` plugin
+      # outright -- `./plugins/oidc-provider` is gone from the package exports and
+      # no replacement is published (`@better-auth/oidc-provider` 404s). The build
+      # fails at `auth.definition.ts:28` with TS2724, and the plugin backs three
+      # live tables plus four unit tests that read its own source. #2180 is the
+      # bump this blocks; #2251 is the migration.
+      #
+      # This entry stops dependabot re-proposing it, but note the ranges are
+      # `^1.6.26`, which ADMITS 1.7.1 -- only package-lock.json holds the line, so
+      # any lockfile-less `npm install` still pulls the broken version. Lifting
+      # this ignore is part of #2251, which also decides whether the ranges should
+      # say `~1.6.26` instead.
+      - dependency-name: 'better-auth'
+        update-types: ['version-update:semver-minor', 'version-update:semver-major']
       # The better-auth 1.6.25 hold is gone: 1.6.25 tightened client-plugin
       # option inference so jwtClient() no longer satisfied BetterAuthClientPlugin
       # and `npm run typecheck` failed in shared/authentication/src/auth.client.ts
