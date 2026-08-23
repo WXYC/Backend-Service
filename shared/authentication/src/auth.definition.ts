@@ -132,8 +132,26 @@ export const auth = betterAuth({
   // Base URL for the auth service
   baseURL: process.env.BETTER_AUTH_URL || 'http://localhost:8082/auth',
 
-  // Trusted origins for CORS
-  trustedOrigins: (process.env.BETTER_AUTH_TRUSTED_ORIGINS || process.env.FRONTEND_SOURCE || 'http://localhost:3000')
+  // Trusted origins for CORS.
+  //
+  // `CORS_PREVIEW_ORIGINS` is unioned on rather than being another `||` rung:
+  // it must widen the primary list, never replace it, and it must apply
+  // whichever of the two primaries won. Wildcard entries (e.g.
+  // `https://*.wxyc-dj.pages.dev` for the dj-site Cloudflare Pages preview
+  // deployments) pass straight through — better-auth matches each entry with
+  // `matchesOriginPattern`, which understands `*`/`?` globs. The Express CORS
+  // layer compiles the same wildcards via `resolveCorsOrigin` reading the same
+  // variable, so both trust layers agree on exactly which previews are trusted.
+  //
+  // The previews deliberately do NOT live in `FRONTEND_SOURCE`: that variable
+  // is read as a single origin by `oidc-login-page.ts`, `url-rewrite.ts`, and
+  // `provision-user.ts`, and a comma-joined value parses there rather than
+  // throwing (`new URL('https://a.org,https://b.dev').host` is `a.org,https`).
+  trustedOrigins: [
+    process.env.BETTER_AUTH_TRUSTED_ORIGINS || process.env.FRONTEND_SOURCE || 'http://localhost:3000',
+    process.env.CORS_PREVIEW_ORIGINS ?? '',
+  ]
+    .join(',')
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean),

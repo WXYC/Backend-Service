@@ -125,6 +125,141 @@ describe('resolveCorsOrigin', () => {
       expect(message).toContain('BETTER_AUTH_TRUSTED_ORIGINS');
     });
   });
+
+  // dj-site deploys to the `wxyc-dj` Cloudflare Pages project; every branch and
+  // commit gets a fresh `https://<hash>.wxyc-dj.pages.dev` host that can't be
+  // enumerated ahead of time, so credentialed calls from a preview fail their
+  // CORS preflight before better-auth is ever reached. A wildcard entry lets
+  // both trust layers accept the whole subdomain. The `cors` package treats a
+  // RegExp entry as a matcher, which is what makes this work at all.
+  //
+  // The wildcard lives in CORS_PREVIEW_ORIGINS rather than FRONTEND_SOURCE
+  // because FRONTEND_SOURCE is read as a SINGLE URL by oidc-login-page.ts,
+  // url-rewrite.ts, and provision-user.ts — and a comma-joined value parses
+  // there instead of throwing. See the dedicated describe block below.
+  describe('wildcard preview origins (CORS_PREVIEW_ORIGINS)', () => {
+    const PROD = 'https://dj.wxyc.org';
+    const PREVIEW = 'https://*.wxyc-dj.pages.dev';
+    const AUTH_VARS = ['FRONTEND_SOURCE', 'BETTER_AUTH_TRUSTED_ORIGINS'];
+    const ENV = { FRONTEND_SOURCE: PROD, CORS_PREVIEW_ORIGINS: PREVIEW };
+
+    /** The compiled preview matcher out of the resolved whitelist. */
+    const previewOf = (env: NodeJS.ProcessEnv): RegExp => {
+      const resolved = resolveCorsOrigin(env);
+      if (!Array.isArray(resolved)) throw new Error(`expected an array, got ${JSON.stringify(resolved)}`);
+      const pattern = resolved.find((entry): entry is RegExp => entry instanceof RegExp);
+      if (!pattern) throw new Error(`no RegExp entry in ${JSON.stringify(resolved)}`);
+      return pattern;
+    };
+
+    it('unions the preview onto the primary origin', () => {
+      const resolved = resolveCorsOrigin(ENV);
+      expect(Array.isArray(resolved)).toBe(true);
+      const [prod, preview] = resolved as Array<string | RegExp>;
+      expect(prod).toBe(PROD);
+      expect(preview).toBeInstanceOf(RegExp);
+    });
+
+    it('matches a preview deployment host', () => {
+      const pattern = previewOf(ENV);
+      expect(pattern.test('https://abc123.wxyc-dj.pages.dev')).toBe(true);
+      expect(pattern.test('https://feat-color-system.wxyc-dj.pages.dev')).toBe(true);
+    });
+
+    it('does not match an unrelated origin', () => {
+      const pattern = previewOf(ENV);
+      expect(pattern.test('https://evil.com')).toBe(false);
+      expect(pattern.test('http://abc123.wxyc-dj.pages.dev')).toBe(false); // scheme differs
+    });
+
+    it('anchors the pattern so a matching prefix or suffix cannot smuggle through', () => {
+      const pattern = previewOf(ENV);
+      expect(pattern.test('https://abc.wxyc-dj.pages.dev.evil.com')).toBe(false);
+      expect(pattern.test('https://abc.wxyc-dj.pages.dev/../evil')).toBe(false);
+    });
+
+    it('does not let `*` cross an origin separator', () => {
+      // `*` matches `[^/\\]*`, so a path segment cannot satisfy the subdomain.
+      expect(previewOf(ENV).test('https://x/y.wxyc-dj.pages.dev')).toBe(false);
+    });
+
+    it('lets `*` span dots, so deeper subdomains under the named zone match', () => {
+      // `/` and `\` are the only separators, so `*` DOES cross dots: a
+      // multi-label host under the wildcard zone is trusted. This is the
+      // intended breadth — safe only because WXYC owns the whole
+      // `wxyc-dj.pages.dev` zone (see `toCorsPattern`'s breadth caveat). Pinned
+      // so a future tightening of the wildcard class can't silently narrow the
+      // trust scope without a failing test.
+      const pattern = previewOf(ENV);
+      expect(pattern.test('https://a.b.wxyc-dj.pages.dev')).toBe(true);
+      expect(pattern.test('https://deploy.preview.wxyc-dj.pages.dev')).toBe(true);
+    });
+
+    it('lets `*` match an empty label, still bounded to the named zone', () => {
+      // `*` compiles to `[^/\\]*` (zero-or-more), so an empty subdomain label
+      // matches. Unreachable from a real browser Origin, but pinned so the
+      // zero-width behavior is documented rather than incidental. Crucially the
+      // apex without the leading `.` still does NOT match — the literal
+      // separator dot is required.
+      const pattern = previewOf(ENV);
+      expect(pattern.test('https://.wxyc-dj.pages.dev')).toBe(true);
+      expect(pattern.test('https://wxyc-dj.pages.dev')).toBe(false);
+    });
+
+    it('treats regex metacharacters in the literal portion literally', () => {
+      // The dots must be literal dots, not "any character".
+      expect(previewOf(ENV).test('https://abc.wxyc-djXpages.dev')).toBe(false);
+    });
+
+    it('compiles several preview entries and keeps literals as plain strings', () => {
+      const resolved = resolveCorsOrigin({
+        FRONTEND_SOURCE: PROD,
+        CORS_PREVIEW_ORIGINS: `${PREVIEW},https://staging.wxyc.org,https://*.preview.wxyc.org`,
+      }) as Array<string | RegExp>;
+      expect(resolved).toHaveLength(4);
+      expect(resolved[0]).toBe(PROD);
+      expect(resolved[1]).toBeInstanceOf(RegExp);
+      expect(resolved[2]).toBe('https://staging.wxyc.org');
+      expect(resolved[3]).toBeInstanceOf(RegExp);
+    });
+
+    it('applies to whichever primary won, not just the first name', () => {
+      const resolved = resolveCorsOrigin(
+        { BETTER_AUTH_TRUSTED_ORIGINS: PROD, CORS_PREVIEW_ORIGINS: PREVIEW },
+        AUTH_VARS
+      ) as Array<string | RegExp>;
+      expect(resolved[0]).toBe(PROD);
+      expect(resolved[1]).toBeInstanceOf(RegExp);
+    });
+
+    it('widens but never replaces: previews alone still fail closed', () => {
+      // BS#1107's contract. A deploy that sets only the preview list is
+      // misconfigured — FRONTEND_SOURCE is required by the login page and the
+      // reset/invite emails regardless of CORS — so this must not open the door.
+      expect(resolveCorsOrigin({ CORS_PREVIEW_ORIGINS: PREVIEW })).toBe(false);
+      const messages = errorSpy.mock.calls.map((call) => String(call[0]));
+      expect(messages.some((m) => m.includes('CORS_PREVIEW_ORIGINS'))).toBe(true);
+    });
+
+    it('is byte-identical to the pre-existing behavior when unset', () => {
+      // The bare-string form for a single origin is load-bearing: the `cors`
+      // package emits a configured literal as ACAO unconditionally, whereas an
+      // array is treated as a whitelist. An unset preview var must not change
+      // which of those two a deploy gets.
+      expect(resolveCorsOrigin({ FRONTEND_SOURCE: PROD })).toBe(PROD);
+      expect(resolveCorsOrigin({ FRONTEND_SOURCE: PROD, CORS_PREVIEW_ORIGINS: '' })).toBe(PROD);
+      expect(resolveCorsOrigin({ FRONTEND_SOURCE: PROD, CORS_PREVIEW_ORIGINS: '  , ,' })).toBe(PROD);
+      expect(resolveCorsOrigin({ FRONTEND_SOURCE: `${PROD},https://b.wxyc.org` })).toEqual([
+        PROD,
+        'https://b.wxyc.org',
+      ]);
+    });
+
+    it('honors a custom preview variable name', () => {
+      const resolved = resolveCorsOrigin({ FRONTEND_SOURCE: PROD, OTHER: PREVIEW }, ['FRONTEND_SOURCE'], 'OTHER');
+      expect((resolved as Array<string | RegExp>)[1]).toBeInstanceOf(RegExp);
+    });
+  });
 });
 
 // BS#2061. `website` is a static export, so the three Phase 4 listener pages on

@@ -214,4 +214,45 @@ describe('buildLoginPage', () => {
       );
     });
   });
+
+  // The one malformed value that gets past every other guard in this file.
+  describe('comma-joined origin list (the value that parses instead of failing)', () => {
+    const LIST = 'https://dj.wxyc.org,https://*.wxyc-dj.pages.dev';
+
+    it('demonstrates why an explicit check is needed: URL accepts it', () => {
+      // Not an assertion about our code — an assertion about the platform, and
+      // the reason the try/catch and the scheme check below are both useless
+      // here. If a future WHATWG change makes this throw, this test fails and
+      // the guard can be reconsidered.
+      const parsed = new URL(LIST);
+      expect(parsed.protocol).toBe('https:');
+      expect(parsed.host).toBe('dj.wxyc.org,https');
+      expect(parsed.origin).toBe('https://dj.wxyc.org,https');
+    });
+
+    it('throws rather than returning a login URL on a nonexistent host', () => {
+      // Without the guard this returns 'https://dj.wxyc.org,https/login' and
+      // logs nothing. url-rewrite.ts puts the same host into every reset and
+      // verification email; provision-user.ts concatenates it into every invite.
+      expect(() => buildLoginPage({ ...PROD, FRONTEND_SOURCE: LIST })).toThrow(/single origin/);
+    });
+
+    it('names CORS_PREVIEW_ORIGINS so the operator knows where the value belongs', () => {
+      expect(() => buildLoginPage({ ...PROD, FRONTEND_SOURCE: LIST })).toThrow(/CORS_PREVIEW_ORIGINS/);
+    });
+
+    it('rejects a trailing comma too', () => {
+      expect(() => buildLoginPage({ ...PROD, FRONTEND_SOURCE: 'https://dj.wxyc.org,' })).toThrow(/single origin/);
+    });
+
+    it('still accepts a single origin under the same NODE_ENV', () => {
+      expect(buildLoginPage({ ...PROD, FRONTEND_SOURCE: 'https://dj.wxyc.org' })).toBe('https://dj.wxyc.org/login');
+    });
+
+    it('rejects a comma in dev-like environments as well', () => {
+      // The dev fallback covers an UNSET value, not a malformed one — a comma
+      // in a developer's .env should surface at once, not silently half-work.
+      expect(() => buildLoginPage({ NODE_ENV: 'development', FRONTEND_SOURCE: LIST })).toThrow(/single origin/);
+    });
+  });
 });
