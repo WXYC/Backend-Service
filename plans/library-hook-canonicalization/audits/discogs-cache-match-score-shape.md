@@ -1,13 +1,24 @@
 ---
 title: 'discogs-cache match score shape (sub-PR 2.2 spike)'
-status: draft
+status: findings retained; recommendations superseded
 related:
   - WXYC/wiki plans/library-hook-canonicalization-plan.md §3.4.1, §1.1.2
   - Backend-Service/plans/library-hook-canonicalization/section-4-step-2-backfill-plan.md §4 sub-PR 2.2
+  - Backend-Service/plans/library-hook-canonicalization/architecture-pivot-2026-05-09.md (supersedes the recommendations below)
 date: 2026-05-09
+superseded: 2026-05-09
 ---
 
 # discogs-cache match score shape (sub-PR 2.2 spike)
+
+> **Read this as findings, not as a plan.** The cross-cache-identity architecture pivot on the same day ([`architecture-pivot-2026-05-09.md`](../architecture-pivot-2026-05-09.md)) moved identity resolution to LML end-to-end; Backend no longer implements source-leg backfills against these tables, and the sub-PR 2.2a/2.2b split this memo argues for was retired with them.
+>
+> What survives the pivot is the audit itself — the observed shape of `flowsheet_match` and `fuzzy_resolved`:
+>
+> - Neither table carries a `trgm_score`. `flowsheet_match` is an exact equi-join (no fuzzy score by construction); `fuzzy_resolved` discards the score during its resolve step, so the plan's `0.7 + 0.3 * trgm_score` fallback had nothing to read.
+> - `fuzzy_resolved` carries no Discogs ID at all — it resolves to a Backend `library.id`. The master-vs-release question applies only to `flowsheet_match`.
+>
+> Those facts hold regardless of which service consumes the tables, which is why the memo is kept. Every "Recommendation for S3/S4" below, and the split decision at the end, describe a Backend-side writer contract that no longer exists — retained as the reasoning behind the pivot, not as work to do.
 
 ## Summary
 
@@ -16,7 +27,7 @@ The two questions in the sub-PR 2.2 spike both resolve to **"the assumption in t
 1. **Neither `flowsheet_match` nor `fuzzy_resolved` has a `trgm_score` column.** `flowsheet_match` is an _exact equi-join_ table (post-normalization) — there is no fuzzy score because there is no fuzzy match. `fuzzy_resolved` discards the per-row trigram score during its resolve step; the score lives only on the upstream `fuzzy_full` staging table as `combined = similarity(artist) + similarity(album)`, range `[0, 2]` (sum of two pg_trgm `similarity()` calls).
 2. **Only `flowsheet_match` carries Discogs IDs (both `master_id` and `release_id`, with `master_id` preferred and nullable). `fuzzy_resolved` carries no Discogs ID at all** — it pins a `(artist_norm, album_norm)` pair to a Backend `library.id`. So the master-vs-release decision matters only for S3 (flowsheet_match); for S4 (fuzzy_resolved) the question is moot — there is nothing Discogs-shaped to write.
 
-These two findings are independent and the mapping logic for S3 and S4 diverges materially. **Sub-PR 2.2 should split into 2.2a (`flowsheet_match`) + 2.2b (`fuzzy_resolved`).**
+These two findings are independent and the mapping logic for S3 and S4 diverges materially. The recommendation that followed — split sub-PR 2.2 into 2.2a (`flowsheet_match`) + 2.2b (`fuzzy_resolved`) — was retired by the pivot along with both sub-PRs; see [Sub-PR 2.2 split decision (retired)](#sub-pr-22-split-decision-retired).
 
 The tables themselves are not part of the discogs-cache schema in `discogs-etl/schema/create_database.sql`; they are working tables built by Backend-Service's one-shot reconciliation scripts (`Backend-Service/scripts/discogs-bridge-flowsheet.sql` and `fuzzy-trigram-flowsheet.sql`) that run inside the discogs-cache Postgres container during the §4 step 2 backfill. The plan §1.1's "23,408 / 4,594" counts are row counts inside the materialized `flowsheet_match` from a 2026-04-28 reconciliation run, not a permanent table that consumers can query in steady state.
 
@@ -123,9 +134,11 @@ So S4 contributes **identity at the Backend `library_id` level**, not at the Dis
 
 A plausible secondary path: for any `fuzzy_resolved.resolved_library_id` whose Backend `library.canonical_entity_id` is `'discogs:master:N'` or `'discogs:release:N'`, S4 _could_ propagate that stamp into the per-source row. But this is a copy of S1's signal under a different `method`, not new identity information; recommend skipping unless 2.2b implementation reveals coverage holes the simpler path does not fill.
 
-## Sub-PR 2.2 split decision
+## Sub-PR 2.2 split decision (retired)
 
-**Split into 2.2a (`flowsheet_match` only) + 2.2b (`fuzzy_resolved` only).** Justification:
+**Retired by the pivot.** Sub-PRs 2.2a and 2.2b were closed as superseded (#795, #796) — Backend does not consume these tables, so there is nothing left to split. The comparison below is kept because it is the clearest statement of _how far apart the two tables actually are_, which is the durable finding; read the rows, not the verdict.
+
+The recommendation at the time was to split into 2.2a (`flowsheet_match` only) + 2.2b (`fuzzy_resolved` only), justified by:
 
 | dimension          | flowsheet_match (2.2a)                                                        | fuzzy_resolved (2.2b)                                             |
 | ------------------ | ----------------------------------------------------------------------------- | ----------------------------------------------------------------- |

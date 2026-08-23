@@ -20,7 +20,7 @@ The original §4 step 2 plan committed Backend to a five-source backfill (S1=`ca
 
 - **Substrate** (`library_identity` + `library_identity_source` + `library_identity_history` tables; the dual-table writer with `ON CONFLICT` semantics; the §3.4.1.1 worked-example regression tests) — already merged in [#790](https://github.com/WXYC/Backend-Service/pull/790). Schema is correct in the new architecture.
 - **S1 self-migration leg** (`library.canonical_entity_id` → `library_identity_source` for legacy rows) — runs as a one-shot before the bulk-resolve consumer kicks in.
-- **The 2.2 spike memo** in PR [#794](https://github.com/WXYC/Backend-Service/pull/794) — durable findings about `flowsheet_match` and `fuzzy_resolved` shapes (no `trgm_score`; no Discogs ID on `fuzzy_resolved`); useful regardless of which service consumes the tables.
+- **The 2.2 spike memo** at [`audits/discogs-cache-match-score-shape.md`](audits/discogs-cache-match-score-shape.md) (merged from [#794](https://github.com/WXYC/Backend-Service/pull/794)) — durable findings about `flowsheet_match` and `fuzzy_resolved` shapes (no `trgm_score`; no Discogs ID on `fuzzy_resolved`); useful regardless of which service consumes the tables. Its S3/S4 writer recommendations and the 2.2a/2.2b split are retired — read it for the shapes, not the plan.
 
 ## What was discarded
 
