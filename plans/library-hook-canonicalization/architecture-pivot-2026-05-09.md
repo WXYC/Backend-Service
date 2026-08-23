@@ -251,7 +251,7 @@ Four waves. Three of them parallelize within their wave; one (the wiki amendment
 Independent `gh` calls touching different artifacts. No shared state. Fire all at once.
 
 - [ ] Close PR #797 with pivot comment; preserve worktree on disk.
-- [ ] Reframe PR #794: drop the plan-amendment commit, update body to "spike findings only," force-push.
+- [x] Reframe PR #794: drop the plan-amendment commit, update body to "spike findings only," force-push.
 - [ ] Close issue #795 (sub-PR 2.2a — flowsheet_match reader) as superseded.
 - [ ] Close issue #796 (sub-PR 2.2b — fuzzy_resolved reader) as superseded.
 - [ ] Close issue #793 (sub-PR 2.1 ticket) as superseded if not already closed-by-PR.
