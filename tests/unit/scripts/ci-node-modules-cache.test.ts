@@ -50,7 +50,22 @@ const workflowDir = path.join(repoRoot, '.github/workflows');
  * `runner.os` and lockfile-hash components -- they are what make the entry
  * safe to share across workflows.
  */
-const CANONICAL_KEY = "node-modules-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}";
+const CANONICAL_KEY = "node-modules-v2-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}";
+
+/**
+ * Every path a `node_modules` cache step must cover. This is an npm
+ * *workspaces* monorepo (`apps/*`, `jobs/*`, `shared/*`) and dependencies
+ * do not all hoist -- `apps/backend`, `apps/auth` and
+ * `shared/authentication` each carry their own `node_modules`.
+ *
+ * Caching root `node_modules` alone therefore restored a tree that
+ * `npm ls --depth=0` rejects (the workspaces' own deps are missing, so
+ * root's hoisted versions read as `invalid`), which trips the
+ * `Validate cached node_modules` gate, wipes the directory, and reinstalls.
+ * Every cache hit did that, so the cache never saved a second even when it
+ * hit. Keep this list in sync with `package.json`'s `workspaces`.
+ */
+const CANONICAL_PATHS = ['node_modules', 'apps/*/node_modules', 'jobs/*/node_modules', 'shared/*/node_modules'];
 
 /**
  * Exact number of steps expected to cache `node_modules`, as of BS#2256:
@@ -162,6 +177,16 @@ describe('the node_modules cache is one shared, restorable key (BS#2256)', () =>
     const files = new Set(nodeModulesCacheSteps.map((s) => s.file));
     expect([...files].some((f) => f === 'deploy-base.yml' || f === 'nightly-tests.yml')).toBe(true);
     expect(files.has('deploy-base.yml')).toBe(true);
+  });
+
+  it('caches the workspace node_modules directories too', () => {
+    // A partial tree under this key is worse than no cache: it restores,
+    // fails `npm ls`, and reinstalls anyway -- paying the download for
+    // nothing. See CANONICAL_PATHS.
+    const offenders = nodeModulesCacheSteps
+      .filter((s) => JSON.stringify(cachedPaths(s)) !== JSON.stringify(CANONICAL_PATHS))
+      .map((s) => `${s.file}: ${JSON.stringify(cachedPaths(s))}`);
+    expect(offenders).toEqual([]);
   });
 
   it('uses one identical key everywhere', () => {

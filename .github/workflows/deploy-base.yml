@@ -102,14 +102,29 @@ jobs:
       # held exactly one `node-modules-*` entry, at a stale hash, from a
       # nightly run.
       #
+      # The path list and the `-v2` are the second half of the same bug.
+      # This is an npm *workspaces* repo and deps do not all hoist, so
+      # caching root `node_modules` alone restored a tree `npm ls` rejects
+      # -- the `Validate cached node_modules` gate then wiped it and
+      # reinstalled, on every hit. The cache had never saved a second even
+      # when it hit. `-v2` is there because the path set changed while the
+      # lockfile hash did not, and actions/cache will not overwrite an
+      # existing key; without the bump every job would keep restoring the
+      # old, incomplete entry. Keep the list in sync with package.json's
+      # `workspaces`.
+      #
       # See BS#2256; pinned by
       # tests/unit/scripts/ci-node-modules-cache.test.ts.
       - name: Cache node_modules
         if: inputs.target == ''
         uses: actions/cache@v6
         with:
-          path: node_modules
-          key: node-modules-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}
+          path: |
+            node_modules
+            apps/*/node_modules
+            jobs/*/node_modules
+            shared/*/node_modules
+          key: node-modules-v2-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: inputs.target == ''
