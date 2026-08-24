@@ -25,7 +25,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@aws-sdk/client-cloudwatch": "^3.1114.0",
+    "@aws-sdk/client-cloudwatch": "^3.1115.0",
     "@sentry/core": "^10.69.0",
     "@sentry/node": "^10.70.0"
   },
