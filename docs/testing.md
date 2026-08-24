@@ -50,6 +50,6 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 
 1. **detect-changes** — Paths-filter identifies what changed (apps, jobs, shared, tests, db-init)
 2. **lint-and-typecheck** — `typecheck` + `lint` + `format:check` + `build`
-3. **unit-tests** — Runs affected tests only (`--changedSince=origin/<base>` on PRs)
+3. **unit-tests** — Runs the full unit suite (`npm run test:unit:coverage`). Deliberately _not_ Jest's affected-tests mode: selection comes from the module dependency graph, so the ~52 specs that read a source file as text (`fs.readFileSync`) instead of importing it are invisible to a change in the file they guard (BS#2249). The job gates nothing and finishes well inside `lint-and-typecheck`, so the full run is effectively free. `tests/unit/scripts/ci-unit-tests-full-suite.test.ts` pins this.
 4. **integration-tests** — Only if apps/jobs/shared/tests change. Docker images cached by commit SHA in ECR.
 5. **migrate-dryrun** — Only when `db-init` paths change. Restores latest RDS snapshot, runs `dryrun-migrate.mjs`, tears down. Catches data-shape preconditions at PR-review time. Detail in [`deploy.md`](deploy.md).
