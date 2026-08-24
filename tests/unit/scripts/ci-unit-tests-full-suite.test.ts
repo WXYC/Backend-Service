@@ -35,19 +35,37 @@ const packageJsonPath = path.join(repoRoot, 'package.json');
 const workflow = fs.readFileSync(workflowPath, 'utf-8');
 
 /**
- * Slice the `unit-tests:` job out of the workflow: from its key to the next
- * top-level job key (two-space indent followed by a name and a colon).
+ * Slice the `unit-tests:` job out of the workflow: from its key to the first
+ * following line at two-space indent, which is where the next job's block
+ * begins. Terminating on the next job *key* is not enough -- jobs here are
+ * introduced by their own `  #` comment block, which would then be pulled
+ * into this job's slice and could both satisfy a `toContain` that this job
+ * does not actually satisfy and trip the forbidden-flag assertions on text
+ * belonging to a different job. Every line of a job's own body is indented
+ * four spaces or more, so two spaces is unambiguously a boundary.
  */
 function extractUnitTestsJob(): string {
   const start = workflow.indexOf('\n  unit-tests:');
-  expect(start).toBeGreaterThan(-1);
+  if (start === -1) {
+    throw new Error(
+      `No \`unit-tests:\` job in ${workflowPath}. If the job was renamed, update this ` +
+        `guard and check that branch protection's required-check name moved with it.`
+    );
+  }
   const rest = workflow.slice(start + 1);
-  const next = rest.slice(1).search(/\n {2}[A-Za-z][\w-]*:\n/);
+  const next = rest.slice(1).search(/\n {2}(#|[A-Za-z])/);
   return next === -1 ? rest : rest.slice(0, next + 1);
 }
 
 describe('CI unit-tests job runs the full suite (BS#2249)', () => {
   const job = extractUnitTestsJob();
+
+  it('extracts only the unit-tests job', () => {
+    expect(job).toContain('unit-tests:');
+    // The next job's leading comment must not have been swallowed.
+    expect(job).not.toContain('Integration tests');
+    expect(job).toContain('Upload Coverage');
+  });
 
   it.each([
     ['--changedSince', 'selects by dependency graph; blind to text-reading specs'],

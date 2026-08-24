@@ -258,7 +258,6 @@ jobs:
       - name: Auth-tables doc drift (BS#1573)
         run: node scripts/check-auth-tables-doc.mjs
 
-  # Unit tests - runs affected tests only
   # Runs the WHOLE unit suite, deliberately -- do not reintroduce Jest's
   # affected-tests mode (`--changedSince`) here. Selection is built from the
   # module dependency graph, so a spec that reads a source file as text
