@@ -152,6 +152,21 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24'
+          # Turn OFF setup-node's automatic ~/.npm cache. It is on by
+          # default whenever package.json declares `packageManager` (ours
+          # says npm@11.11.0), so it was running in every job here without
+          # anyone asking for it -- ~169 MB saved per lockfile revision, on
+          # top of the 145 MB node_modules tarball.
+          #
+          # It can never pay for itself in a job like this one. Both caches
+          # key on hashFiles('package-lock.json'), so they hit together and
+          # miss together: when node_modules restores, npm never runs and
+          # ~/.npm goes unread; when the lockfile changes, ~/.npm misses too
+          # and cannot speed up the reinstall. Jobs that install a subset of
+          # deps WITHOUT a node_modules tarball (migrate-dryrun below, and
+          # schema-shape-report.yml) do benefit, and opt in with
+          # `cache: 'npm'`. See BS#2256.
+          package-manager-cache: false
 
       - name: Cache node_modules
         id: cache-node-modules
@@ -254,6 +269,9 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24'
+          # This job installs nothing -- it runs one script with plain node.
+          # setup-node would otherwise cache ~/.npm here by default (BS#2256).
+          package-manager-cache: false
 
       - name: Auth-tables doc drift (BS#1573)
         run: node scripts/check-auth-tables-doc.mjs
@@ -286,6 +304,10 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24'
+          # No ~/.npm cache -- see the note in test.yml's lint-and-typecheck
+          # job. Both caches key on the lockfile hash, so this one can never
+          # rescue a node_modules miss (BS#2256).
+          package-manager-cache: false
 
       - name: Cache node_modules
         id: cache-node-modules
@@ -390,6 +412,10 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24'
+          # No ~/.npm cache -- see the note in test.yml's lint-and-typecheck
+          # job. Both caches key on the lockfile hash, so this one can never
+          # rescue a node_modules miss (BS#2256).
+          package-manager-cache: false
 
       - name: Cache node_modules
         if: env.RUN_TESTS == 'true'

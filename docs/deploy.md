@@ -40,6 +40,12 @@ The `npm ci` layer still busts on any `package-lock.json` change — exactly the
 
 **ECR storage**: the `:buildcache` tag holds the live cache manifest per repo; `.github/ecr-lifecycle-policy.json` (applied via `Apply ECR Lifecycle Policy`, run every `build` invocation so a newly-created repository picks it up on its first build) expires untagged images (the dangling layers left behind each time `:buildcache` is retagged) after 1 day and caps `sha-*` tags at the 20 most recent per repo. The `buildcache` tag itself is never matched by either rule, since it's always tagged and never has the `sha-` prefix.
 
+## Dependency caching (`node_modules`)
+
+<!-- @rule id=shared-node-modules-cache-key enforced-by=tests/unit/scripts/ci-node-modules-cache.test.ts added=2026-08-23 incidents=#2256 -->
+
+**Every `node_modules` cache step in every workflow must use the identical key**, and `deploy-base.yml` is the one that matters: GHA scopes a cache entry to the ref that wrote it, a `pull_request` run can only read its own scope plus the default branch's, and this is the only workflow running on push-to-main. Keying it separately (it was `deploy-node-modules-*`) made every PR miss, reinstall, and save another ~145 MB copy nothing else could read — 194 entries / 10.59 GB against the same 10 GB cap that keeps buildx layers in ECR. setup-node's `package-manager-cache` is also ON by default here (`package.json` sets `packageManager`), and is disabled wherever a job already caches `node_modules` on the same lockfile hash: both caches hit and miss together, so the `~/.npm` copy can never rescue a miss.
+
 ## Host disk reclamation (pre-pull GC)
 
 <!-- @rule id=reclaim-before-pull enforced-by=none added=2026-07-27 incidents=#run-30313671442 -->
