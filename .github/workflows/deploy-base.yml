@@ -80,24 +80,29 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24'
-          # No ~/.npm cache -- see the note in test.yml's lint-and-typecheck
-          # job. Both caches key on the lockfile hash, so this one can never
-          # rescue a node_modules miss (BS#2256).
-          package-manager-cache: false
 
       # KEEP THIS KEY IDENTICAL to the `Cache node_modules` steps in
       # test.yml and nightly-tests.yml. GHA scopes cache entries to the
       # writing ref, and a `pull_request` run can only read its own
-      # `refs/pull/N/merge` scope plus the default branch's. This workflow
-      # is the only one that runs on push-to-main, which makes it the only
-      # writer that can populate the scope every PR restores from.
+      # `refs/pull/N/merge` scope plus the default branch's -- so the
+      # default branch is the only scope a cache can be shared through.
       #
       # It used to key this `deploy-node-modules-*`. Same directory, same
-      # lockfile hash, one prefix apart -- so the entry it wrote on every
-      # merge was unreachable from CI, every PR missed, ran `npm ci`, and
-      # saved another ~145 MB copy into a scope only it could read. That
-      # pushed the store to 194 entries / 10.59 GB against GitHub's 10 GB
-      # cap, permanently evicting. See BS#2256; pinned by
+      # lockfile hash, one prefix apart, so CI could never see what this
+      # workflow wrote: every PR missed, ran `npm ci`, and saved another
+      # ~145 MB copy into a scope only it could read. That pushed the store
+      # to 194 entries / 10.59 GB against GitHub's 10 GB cap, permanently
+      # evicting.
+      #
+      # nightly-tests.yml also writes this key on `main` (a `schedule`
+      # trigger runs on the default branch), so it is not the sole writer
+      # -- but it fires once a day, and its entry goes stale the moment the
+      # lockfile moves. This workflow runs on every merge, which is what
+      # keeps a current entry in the shared scope. Before the fix, main
+      # held exactly one `node-modules-*` entry, at a stale hash, from a
+      # nightly run.
+      #
+      # See BS#2256; pinned by
       # tests/unit/scripts/ci-node-modules-cache.test.ts.
       - name: Cache node_modules
         if: inputs.target == ''
