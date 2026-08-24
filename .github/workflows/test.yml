@@ -259,6 +259,22 @@ jobs:
         run: node scripts/check-auth-tables-doc.mjs
 
   # Unit tests - runs affected tests only
+  # Runs the WHOLE unit suite, deliberately -- do not reintroduce Jest's
+  # affected-tests mode (`--changedSince`) here. Selection is built from the
+  # module dependency graph, so a spec that reads a source file as text
+  # (`fs.readFileSync`) instead of importing it has no edge and is never
+  # selected by a change to the file it guards. Measured on BS#2249: a change
+  # to `shared/database/src/schema.ts` selected 250 suites and only 3 of the
+  # 31 `tests/unit/database/schema.*` specs written to guard that very file;
+  # `shared/authentication/src/auth.definition.ts` selected 1 suite and none
+  # of its 5 guards. That hole let BS#2246 merge green while breaking 5
+  # assertions in `schema.fk-cascades.test.ts`.
+  #
+  # The optimization was also buying nothing. This job gates no other job
+  # (`Integration-Tests` needs `[detect-changes, lint-and-typecheck]`), and it
+  # runs alongside `lint-and-typecheck`, which is consistently ~2x longer. The
+  # full suite costs roughly +30s of runner time inside a minute of existing
+  # slack, and the repo is public, so those minutes are free.
   unit-tests:
     needs: detect-changes
     if: needs.detect-changes.outputs.src == 'true'
@@ -266,8 +282,6 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0 # Need full history for --changedSince
 
       - name: Set Up Node.js
         uses: actions/setup-node@v7
@@ -299,14 +313,8 @@ jobs:
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Run affected unit tests
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            npx jest --config jest.unit.config.ts --changedSince=origin/${{ github.base_ref }} --coverage --passWithNoTests
-          else
-            # workflow_dispatch: run all unit tests
-            npm run test:unit:coverage
-          fi
+      - name: Run unit tests
+        run: npm run test:unit:coverage
 
       - name: Upload Coverage
         uses: actions/upload-artifact@v7
