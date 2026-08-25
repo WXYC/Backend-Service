@@ -10,6 +10,7 @@
     "tsBuildInfoFile": "./.cache/tsconfig.tsbuildinfo",
     "module": "esnext",
     "moduleResolution": "bundler",
-    "strict": true
+    "strict": true,
+    "types": ["node"]
   }
 }
