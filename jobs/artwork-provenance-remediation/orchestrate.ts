@@ -144,6 +144,49 @@ export const summarizePopulation = (rows: WrongArtworkRow[]): { artist_image: nu
   return split;
 };
 
+/**
+ * Does the release LML bound name the same album the catalog does?
+ *
+ * Compared on a normalization that strips case, punctuation, diacritics and
+ * surrounding whitespace -- the differences that separate two spellings of one
+ * title -- and on nothing looser. A fuzzy ratio would blur the one distinction
+ * this is for.
+ *
+ * Apostrophes are ELIDED where every other punctuation mark becomes a space.
+ * They sit inside a word rather than between two, so mapping them to a space
+ * splits "Amnesiac's" into "amnesiac s" and reports a divergence against
+ * "Amnesiacs". Catalog and Discogs disagree about apostrophes constantly, and
+ * a counter that fires on that measures typography, not identity.
+ *
+ * This is a MEASUREMENT, not a gate; `runRemediation` counts the answer and
+ * writes either way. A 240-row stratified read-only probe against prod on
+ * 2026-08-25 found 238/240 exact agreement, one same-album format variant
+ * ("Pork Soda" vs "Pork Soda + 2 [10-inch single]"), and zero wrong-album
+ * bindings -- so refusing on divergence would buy nothing. Refusing on the
+ * *release id* instead would have been worse than nothing: 23 of the 119
+ * sampled rows that carried a stored `discogs_url` bound a different release
+ * today than when they were written, 22 of those 23 still matched the catalog
+ * title exactly, and all 23 healed to a real cover. They are different
+ * pressings of the same album, and an id guard would have skipped every one.
+ *
+ * What the counter is for is the next regression: if LML's matching ever
+ * starts binding different albums, `title_diverged` moves and says so, instead
+ * of the drain quietly writing confident wrong covers.
+ */
+export const titlesAgree = (libraryTitle: string, discogsTitle: string | undefined): boolean => {
+  if (!discogsTitle) return false;
+  const normalize = (value: string): string =>
+    value
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/['\u2018\u2019]/g, '')
+      .replace(/[^a-z0-9 ]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  return normalize(libraryTitle) === normalize(discogsTitle);
+};
+
 export type LookupFn = (artist: string, album: string) => Promise<LookupResponse>;
 export type RemediateFn = (row: WrongArtworkRow, response: LookupResponse) => Promise<RemediationOutcome>;
 
@@ -158,6 +201,14 @@ export type Totals = {
   artist_image: number;
   label_logo: number;
   scanned: number;
+  /**
+   * Whether the release LML bound names the same album the catalog does,
+   * counted per answered row. Diagnostic only -- see `titlesAgree` for why
+   * this is not a gate, and why the release-id alternative would have been
+   * actively harmful.
+   */
+  title_agreed: number;
+  title_diverged: number;
   healed: number;
   still_wrong: number;
   no_match: number;
@@ -172,6 +223,8 @@ const emptyTotals = (): Totals => ({
   artist_image: 0,
   label_logo: 0,
   scanned: 0,
+  title_agreed: 0,
+  title_diverged: 0,
   healed: 0,
   still_wrong: 0,
   no_match: 0,
@@ -313,6 +366,18 @@ export const runRemediation = async (opts: RunRemediationOptions): Promise<RunRe
         });
         totals.error += 1;
         continue;
+      }
+
+      const discogsTitle = response.results?.[0]?.artwork?.album;
+      if (titlesAgree(row.album_title, discogsTitle)) {
+        totals.title_agreed += 1;
+      } else {
+        totals.title_diverged += 1;
+        log('info', 'title_divergence', `bound release names a different album than the catalog does`, {
+          album_id: row.album_id,
+          library_title: row.album_title,
+          discogs_title: discogsTitle ?? null,
+        });
       }
 
       // The write is isolated too, and for the opposite reason to the auth

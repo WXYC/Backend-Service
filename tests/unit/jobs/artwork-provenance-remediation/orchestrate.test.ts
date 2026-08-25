@@ -24,6 +24,7 @@ import {
   runRemediation,
   selectWrongProvenance,
   summarizePopulation,
+  titlesAgree,
   type LookupFn,
   type RemediateFn,
 } from '../../../../jobs/artwork-provenance-remediation/orchestrate';
@@ -294,5 +295,77 @@ describe('summarizePopulation', () => {
       artist_image: 0,
       label_logo: 0,
     });
+  });
+});
+
+/**
+ * BS#2258 measurement, not a gate. A 240-row stratified read-only probe on
+ * 2026-08-25 found 238/240 exact title agreement, one same-album format
+ * variant ("Pork Soda" vs "Pork Soda + 2 [10-inch single]"), and zero
+ * wrong-album bindings — so the drain does NOT refuse on divergence. It
+ * counts, so the same question is answered at 7,950 rows instead of 240, and
+ * so a regression in LML's matching surfaces as a number rather than as
+ * quietly-wrong covers.
+ */
+describe('titlesAgree', () => {
+  it.each([
+    ['identical titles', 'Confield', 'Confield', true],
+    ['case and spacing', 'girl in the half pearl', 'Girl In The Half Pearl', true],
+    ['a trailing space', 'A Sentimental Christmas', 'A Sentimental Christmas ', true],
+    ['a straight apostrophe', "Amnesiac's Blues", 'Amnesiacs Blues', true],
+    ['a curly apostrophe', 'Amnesiac\u2019s Blues', 'Amnesiacs Blues', true],
+    ['a hyphen against a space', 'Post-Punk Kitchen', 'Post Punk Kitchen', true],
+    ['diacritics', 'Pequena Vertigem de Amor', 'Pequeña Vertigem de Amor', true],
+    ['a genuinely different album', 'Confield', 'Aluminum Tunes', false],
+    ['a format-annotated variant', 'Pork Soda', 'Pork Soda + 2 [10-inch single]', false],
+    ['a missing Discogs title', 'Confield', undefined, false],
+    ['an empty Discogs title', 'Confield', '', false],
+  ])('%s', (_label, libraryTitle, discogsTitle, expected) => {
+    expect(titlesAgree(libraryTitle, discogsTitle)).toBe(expected);
+  });
+});
+
+describe('runRemediation — title agreement is counted, never enforced', () => {
+  const quiet = () => jest.fn<CheckLiveActivityFn>().mockResolvedValue(false);
+  const withTitle = (album: string | undefined) =>
+    ({ results: [{ artwork: { album, artwork_url: RELEASE_COVER } }] }) as unknown as LookupResponse;
+
+  it('counts an exact title match', async () => {
+    const { totals } = await runRemediation({
+      lookup: jest.fn<LookupFn>().mockResolvedValue(withTitle('Confield')),
+      remediate: jest.fn<RemediateFn>().mockResolvedValue('healed'),
+      rows: [row(1, LABEL_LOGO, 'Confield')],
+      liveActivityLookbackSeconds: 0,
+      checkLiveActivity: quiet(),
+    });
+
+    expect(totals).toMatchObject({ healed: 1, title_agreed: 1, title_diverged: 0 });
+  });
+
+  it('counts a divergence but still writes — the probe says divergence means a different pressing, not a different album', async () => {
+    const remediate = jest.fn<RemediateFn>().mockResolvedValue('healed');
+
+    const { totals } = await runRemediation({
+      lookup: jest.fn<LookupFn>().mockResolvedValue(withTitle('Something Else Entirely')),
+      remediate,
+      rows: [row(1, LABEL_LOGO, 'Confield')],
+      liveActivityLookbackSeconds: 0,
+      checkLiveActivity: quiet(),
+    });
+
+    expect(remediate).toHaveBeenCalledTimes(1);
+    expect(totals).toMatchObject({ healed: 1, title_agreed: 0, title_diverged: 1 });
+  });
+
+  it('does not count a title comparison for a row that never got an answer', async () => {
+    const { totals } = await runRemediation({
+      lookup: jest.fn<LookupFn>().mockRejectedValue(new Error('boom')),
+      remediate: jest.fn<RemediateFn>().mockResolvedValue('healed'),
+      rows: [row(1, LABEL_LOGO, 'Confield')],
+      liveActivityLookbackSeconds: 0,
+      checkLiveActivity: quiet(),
+    });
+
+    expect(totals).toMatchObject({ error: 1, title_agreed: 0, title_diverged: 0 });
   });
 });
