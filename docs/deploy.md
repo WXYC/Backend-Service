@@ -45,6 +45,31 @@ Two things keep it fixed, and both are load-bearing:
 
 The five-month latency is the lesson: over-deploying is invisible because it is safe. Any future change to target selection needs to fail loudly or not at all.
 
+## Job timeouts (`timeout-minutes`)
+
+<!-- @rule id=deploy-job-timeout-headroom enforced-by=tests/unit/scripts/deploy-timeouts.test.ts added=2026-08-25 incidents=#2266 -->
+
+Every job in `deploy-base.yml` sets an explicit `timeout-minutes`. Without one a job inherits GitHub's **360-minute default**, which is a reasonable default for a single job and a bad one here: the matrix from `setup` drives three jobs per target, and both `build` and `deploy` carry `fail-fast: false` — correctly, but that also means a stage-wide stall is not cancelled by a sibling failing. A hang that affects a whole stage would hold ~50 jobs at 360 minutes each until GitHub reaps them.
+
+**This is insurance, not a fix for an observed incident.** No hang has occurred. Caps below are derived from p100 job duration measured 2026-08-25 across 32 `deploy-auto.yml` runs (2026-08-11 → 2026-08-25); nothing came near 360. Runs that read as very long in wall clock are queued behind the `concurrency` group, and queue time is neither billed nor bounded by `timeout-minutes`.
+
+| job                | cap | p100  | headroom |
+| ------------------ | --- | ----- | -------- |
+| `validate_inputs`  | 10  | 0.38  | 26×      |
+| `setup`            | 15  | 1.08  | 14×      |
+| `handle-git-tags`  | 10  | 0.63  | 16×      |
+| `build`            | 75  | 17.82 | 4.2×     |
+| `reclaim-disk`     | 15  | 1.25  | 12×      |
+| `ecr-refresh-cron` | 10  | 0.13  | 77×      |
+| `migrate`          | 30  | 1.20  | 25×      |
+| `deploy`           | 30  | 4.27  | 7×       |
+
+**The caps are loose on purpose, and tightening them is the dangerous direction.** `deploy` runs `docker stop` → `docker rm` → `docker run` over SSH; a cap that fires between stop and run leaves the service **down** — the same hazard `fail-fast: false` on that matrix already exists to avoid. `migrate` applies schema migrations against prod. For both, a slow run is strictly better than a killed one.
+
+`build`'s 75 is the one number that looks out of place. Its p100 is not a lone outlier: three of 1,512 sampled builds exceeded 10 minutes, all successful ETL images that missed the registry buildcache (see **Build image caching** below). A 30-minute cap would sit under 2× a duration seen three times in two weeks, which is the kind of number that eventually fires on a healthy run. 75 still removes 79% of the exposure on the widest job.
+
+Re-measure before lowering any of these — the guard test holds the p100 figures, the date they were taken, and the full derivation.
+
 ## Build image caching
 
 <!-- @rule id=deploy-buildx-registry-cache enforced-by=none added=2026-07-21 incidents=#run-29874378612 -->
