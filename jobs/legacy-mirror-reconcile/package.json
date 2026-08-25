@@ -17,7 +17,7 @@
     "@sentry/node": "^10.70.0",
     "@wxyc/database": "^1.0.0",
     "@wxyc/legacy-mirror": "^1.0.0",
-    "posthog-node": "^5.49.2"
+    "posthog-node": "^5.50.0"
   },
   "peerDependencies": {
     "drizzle-orm": "^0.45.0"
