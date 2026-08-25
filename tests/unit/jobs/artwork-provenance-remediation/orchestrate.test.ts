@@ -28,6 +28,7 @@ import {
 } from '../../../../jobs/artwork-provenance-remediation/orchestrate';
 import type { WrongArtworkRow } from '../../../../jobs/artwork-provenance-remediation/remediate';
 import type { LookupResponse } from '@wxyc/lml-client';
+import { renderSql } from '../../../utils/render-sql';
 
 const LABEL_LOGO =
   'https://i.discogs.com/JuO51-lZvasOtw8-yLUjsen-4O17uPH1A9SILCO-lG4/rs:fit/g:sm/q:90/h:300/w:299/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9MLTE4NjYt/MTIzMzE5MzU1Ny5q/cGVn.jpeg';
@@ -37,31 +38,6 @@ const RELEASE_COVER =
   'https://i.discogs.com/FnUJPxhECqKDvFoT-z2-GT9g5uRYLE8rjIetCX4lsMs/rs:fit/g:sm/q:90/h:600/w:593/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTEzNzEy/OS0xMjIyODc4OTE5/LmpwZWc.jpeg';
 const APPLE_ARTWORK =
   'https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/b6/05/21/b605217c-42ee-8c1e-238b-0fc18570b10d/196873025063.jpg/600x600bb.jpg';
-
-type SqlLike = {
-  sql?: string | string[];
-  raw?: string;
-  queryChunks?: Array<string | { value?: string | string[]; raw?: string }>;
-};
-const renderSql = (value: unknown): string => {
-  const obj = value as SqlLike | null | undefined;
-  if (!obj) return '';
-  if (typeof obj.raw === 'string') return obj.raw;
-  if (Array.isArray(obj.sql)) return obj.sql.join('');
-  if (typeof obj.sql === 'string') return obj.sql;
-  if (obj.queryChunks) {
-    return obj.queryChunks
-      .map((chunk) => {
-        if (typeof chunk === 'string') return chunk;
-        if (typeof chunk.raw === 'string') return chunk.raw;
-        if (Array.isArray(chunk.value)) return chunk.value.join('');
-        if (typeof chunk.value === 'string') return chunk.value;
-        return '';
-      })
-      .join('');
-  }
-  return '';
-};
 
 const mockDb = db as unknown as { transaction: jest.Mock; execute: jest.Mock };
 
@@ -92,9 +68,10 @@ describe('enumerateDiscogsArtwork', () => {
     expect(select).toBeDefined();
     expect(select).toContain('i.discogs.com');
     expect(select).toContain('"artwork_url" IS NOT NULL');
+    expect(select).toContain('"wxyc_schema"."album_metadata" am');
     // The join key, pinned because it is easy to get wrong: `album_metadata`
     // has no `library_id` — it keys on `album_id`, which IS `library.id`.
-    expect(select).toContain('l."id" = am."album_id"');
+    expect(select).toContain('"wxyc_schema"."library" l ON l."id" = am."album_id"');
     expect(select).toContain('COALESCE(a."artist_name", l."artist_name")');
   });
 
