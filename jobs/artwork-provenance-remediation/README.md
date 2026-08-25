@@ -50,13 +50,22 @@ Two refusals are deliberate and are BS#2258's "decide this explicitly and record
 - **Never null a row out.** A wrong image is bad; a blank tile on a row that at least rendered something is a visible regression.
 - **Never write a lateral answer.** Swapping a label logo for an artist photo fixes nothing and spends the row's `updated_at`, which BS#2258 relies on as the only proxy for artwork-write time.
 
-### The known cost of writing narrowly
+### Does the fresh lookup bind the right album?
 
-Nothing checks that the fresh lookup binds the same release the row's `discogs_url` already points at, so a row can end up carrying a cover from release Y beside metadata describing release X.
+The obvious objection to a narrow write is that the replacement comes from a fresh lookup which might bind a different release than the row's `discogs_url` already names. Measured on a 240-row stratified read-only probe against prod, 2026-08-25 — 60 rows from each of `label`/`artist` x has-`discogs_url`/hasn't (the `artist`-without-`discogs_url` cell is a census; its pool is exactly 60):
 
-This is recorded rather than guarded because it is the _intended_ shape of the fix that produces the cover: LML#1241's sibling-pressing rung exists precisely to return a cover from a different pressing of the same master, so refusing on release-id disagreement would reject the rows that rung was built to heal. For a sibling pressing the art is the same and the divergence is cosmetic. The case that would genuinely hurt is an `album_title` ambiguous enough that top-1 binds a different album outright — and the pilot measured only that the answer was an `R-` cover, not that it was _this album's_, so that residue is unquantified.
+|                                                                      |                                       |
+| -------------------------------------------------------------------- | ------------------------------------- |
+| Discogs release title matches the catalog title exactly              | **238 / 240**                         |
+| Wrong-album bindings                                                 | **0**                                 |
+| Covers sourced from a sibling pressing rather than the bound release | **0**                                 |
+| Healed to a real `R-` cover                                          | 232 / 240 (99.6% population-weighted) |
 
-Two things bound it. A row is left byte-identical whenever the answer is not strictly better. And 79% of this population already carries a correct `R-` cover in `library` for the same `album_id` (see below) — produced by the same lookup path, and it would be full of wrong covers if this cohort mis-bound systematically. Quantifying the remainder means counting release-id disagreement across a real run; that is a follow-up, not a blocker.
+The two non-exact titles were a same-album format variant (`Pork Soda` vs `Pork Soda + 2 [10-inch single]`) and one row Discogs returned no title for. The 8 rows that did not heal were left byte-identical, as designed: 4 resolved to another artist image, 4 to no artwork at all.
+
+**A release-id guard would have been worse than no guard.** 23 of the 119 sampled rows carrying a stored `discogs_url` bound a _different_ release today than when they were written — and 22 of those 23 still matched the catalog title exactly, while all 23 healed to a real cover. They are different pressings of one album. Refusing on id disagreement would have skipped 19% of the rows that heal correctly.
+
+So the write is narrow and ungated, and the job **counts** title agreement instead of enforcing it (`title_agreed` / `title_diverged`, each divergence logged with both titles). That asks the same question at 7,950 rows rather than 240, and it is what would catch a regression in LML's matching before it wrote confident wrong covers.
 
 ### Race guard
 

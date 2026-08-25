@@ -31,6 +31,31 @@
  * `discogs_url` in particular is *correct* on these rows — LML bound the
  * right release and then failed to find that release's cover.
  *
+ * The obvious objection to writing narrowly is that the replacement comes from
+ * a fresh lookup that might bind a different release than the row's
+ * `discogs_url` already names, leaving artwork and metadata describing
+ * different records. That was measured before this shipped, on a 240-row
+ * stratified read-only probe against prod (2026-08-25):
+ *
+ *   - **Wrong-album bindings: 0 of 240.** 238 of 240 Discogs release titles
+ *     matched the catalog title exactly; the two that did not were a
+ *     same-album format variant ("Pork Soda" vs "Pork Soda + 2 [10-inch
+ *     single]") and one row Discogs returned no title for.
+ *   - **A release-id guard would have been worse than no guard.** 23 of the
+ *     119 sampled rows carrying a stored `discogs_url` bound a *different*
+ *     release today than when they were written -- and 22 of those 23 still
+ *     matched the catalog title exactly, while all 23 healed to a real cover.
+ *     They are different pressings of one album. Refusing on id disagreement
+ *     would have skipped 19% of the rows that heal correctly.
+ *   - **Nothing came from a sibling pressing** (0 of 240): every healed cover
+ *     belonged to the freshly-bound release itself, so the artwork-from-Y,
+ *     metadata-from-X shape does not currently arise at all.
+ *
+ * So the write stays narrow and ungated, and `runRemediation` counts title
+ * agreement per row instead -- the same question asked at 7,950 rows rather
+ * than 240, and the thing that would catch a regression in LML's matching
+ * before it wrote confident wrong covers. See `orchestrate.ts#titlesAgree`.
+ *
  * **4. Exact-value race guard.** The UPDATE's WHERE pins `artwork_url` to the
  * value the selector classified, not just `album_id`. Between the
  * orchestrator's SELECT and this write, a live enrichment may have healed the
