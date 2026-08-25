@@ -234,6 +234,14 @@ export const ALL_LML_CALLERS = [
   // documented deferred follow-up); `library-canonical-entity-backfill`
   // is migrated off a raw `fetch()` onto the shared client in the same PR
   // so it can carry the label at all.
+  // BS#2258: the one-shot drain for `album_metadata` rows whose persisted
+  // artwork is a Discogs artist image or label logo rather than a release
+  // cover. Class 5 — same offline shape as its `flowsheet-artwork-repair`
+  // donor. It is the documented exception to that class's empty-state
+  // decision: it passes `budgetMs: null` so no `X-Caller-Budget-Ms` is sent,
+  // because its rows are precisely the ones a 4s cap fails to resolve. See
+  // `jobs/artwork-provenance-remediation/lml-fetch.ts`.
+  'artwork-provenance-remediation',
   'library-artwork-url-backfill',
   'library-canonical-entity-backfill',
 ] as const;
@@ -279,6 +287,7 @@ const CALLER_CLASS: Record<LmlCaller, LmlCallerClass> = {
   'rotation-release-id-backfill': 5,
   'flowsheet-no-match-recheck': 5,
   'library-discogs-unavailable-recheck': 5,
+  'artwork-provenance-remediation': 5,
   'library-artwork-url-backfill': 5,
   'library-canonical-entity-backfill': 5,
 };

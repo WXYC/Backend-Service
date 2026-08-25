@@ -200,7 +200,7 @@ New class-4 labels (BS#1826 PR 2): `checkStreamingAvailability` on the add/updat
   - **Rollback**: set the secret to `FALSE` (`gh secret set ENRICHMENT_SUPPRESS_LML_BUDGET --body FALSE`) and re-run the same workflow invocation — reverts to today's ~4s empty-state cutoff with zero code change, since the flag is read fresh on every dispatch and only `true`/`TRUE` arms it. Set `FALSE` rather than clearing the secret: the workflow's resolve step hard-fails on an empty value, so an empty secret aborts the run instead of disarming the flag.
   - Post-rollout: a follow-up comment on WXYC/Backend-Service#1978 should record the observed `enriched_no_match` rate for rotation-linked rows before vs. after (per the issue's acceptance criteria) — not done as part of shipping the flag itself.
 
-### Backfill LML rate gating (`jobs/flowsheet-metadata-backfill`, `jobs/rotation-release-id-backfill`, `jobs/apple-music-url-backfill`, `jobs/va-apple-music-url-remediation`)
+### Backfill LML rate gating (`jobs/flowsheet-metadata-backfill`, `jobs/rotation-release-id-backfill`, `jobs/apple-music-url-backfill`, `jobs/va-apple-music-url-remediation`, `jobs/artwork-provenance-remediation`)
 
 Stricter ceilings for backfill-class LML callers, since one in-flight LML call held for the full per-call timeout saturates LML's serialized Discogs fan-out and starves real-time iOS/dj-site clients (BS#994 / BS#995). The first two are read at module load by each job's `lml-limiter.ts:createLmlLimiter`; the third by `lml-fetch.ts`. All three are positive integers; non-positive or unparseable values fall back to the default with a `console.warn`. Mutating `process.env` after first import does NOT reconfigure the singletons — restart the container to change a value. Each job creates its own `defaultLmlLimiter` so the same env name applied to one container does not lock-step the other.
 
@@ -481,3 +481,14 @@ One-shot. Reuses the `BACKFILL_LML_*` family above (and therefore its standing p
 - `VA_REMEDIATION_MAX_INDETERMINATE` (default `0` = no early abort) — ceiling on indeterminate triples before aborting mid-run. Independent of the end-of-run failure: the run exits non-zero whenever any triple stayed indeterminate, because the acceptance criterion ("no candidate row retains an unadjudicated pre-#1139 URL") is then not met.
 
 Full runbook, including the two-arm design and the load-bearing phase order, in `jobs/va-apple-music-url-remediation/README.md`.
+
+### Artwork-provenance remediation (`jobs/artwork-provenance-remediation`, BS#2258)
+
+One-shot. Repairs `album_metadata.artwork_url` rows whose stored image is provably a Discogs **artist image** (`A-`) or **label logo** (`L-`) rather than a release cover (`R-`) — 973 + 6,977 of 41,524 artwork-bearing rows as of 2026-08-24. Reuses the `BACKFILL_LML_*` family above (and its standing pre-flight rule: **verify the sibling cron containers are Exited** before running, since they share LML's Discogs budget) plus the shared `LIVE_ACTIVITY_*` cooperative-pause knobs.
+
+**This job deliberately sends no `X-Caller-Budget-Ms` header** (`budgetMs: null`), the only class-5 caller that does. Class 5's default header caps LML's effective search budget at ~4s, which is right for an ordinary backfill and wrong here: these rows are precisely the ones whose covers LML failed to resolve on the first attempt, so answering them means a cold cross-pressing resolution measuring 4–20s on prod, and under the cap LML returns `degraded: deadline_exceeded` with `artwork: null`. That is the same failure BS#1914 documented for the enrichment-worker, and the BS#2258 pilot that justified running this drain (120/120 sampled rows healed) was measured headerless. Rationale in `jobs/artwork-provenance-remediation/lml-fetch.ts`.
+
+- `DRY_RUN` (unset) — `1`/`true` enumerates and classifies the population and reports the counts without making a single LML call or writing a row. Sizing a run is free; use it to eyeball the selector's count before the real pass, per BS#2258's data-safety constraint.
+- `ARTWORK_PROVENANCE_TIMEOUT_MS` (default `35000`) — per-LML-call abort budget, the same value and sizing rationale as `flowsheet-artwork-repair`'s `BACKFILL_ARTWORK_REPAIR_TIMEOUT_MS`.
+
+Full runbook, including the provenance decode, the write policy's two deliberate refusals (never null a row out, never write a lateral wrong answer), and the LML#1237/#1241 sequencing, in `jobs/artwork-provenance-remediation/README.md`.

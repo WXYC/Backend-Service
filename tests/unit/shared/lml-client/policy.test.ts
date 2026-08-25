@@ -81,6 +81,7 @@ describe('lml-client policy', () => {
         'rotation-release-id-backfill': 5,
         'flowsheet-no-match-recheck': 5,
         'library-discogs-unavailable-recheck': 5,
+        'artwork-provenance-remediation': 5,
         'library-artwork-url-backfill': 5,
         'library-canonical-entity-backfill': 5,
       };

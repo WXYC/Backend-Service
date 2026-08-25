@@ -1,0 +1,28 @@
+{
+  "name": "@wxyc/artwork-provenance-remediation",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot drain (BS#2258): re-resolve album_metadata.artwork_url for rows whose stored artwork is provably a Discogs artist image or label logo rather than a release cover. Complement of flowsheet-artwork-repair (BS#1209), which could only reach the rows the same LML bug left NULL. Positive-match selector via @wxyc/metadata's provenance decoder; narrow artwork_url-only write behind an exact-value race guard; never nulls a row out.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_artwork_provenance_remediation:ci -f ../../Dockerfile.artwork-provenance-remediation ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@sentry/node": "^10.70.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0",
+    "@wxyc/metadata": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
