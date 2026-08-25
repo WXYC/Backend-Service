@@ -21,6 +21,9 @@ permissions:
 jobs:
   validate_inputs:
     runs-on: ubuntu-latest
+    # p100 0.38 min over 32 sampled runs; a pure-runner checkout plus two
+    # `if` guards. Nothing here talks to the prod host.
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -62,6 +65,9 @@ jobs:
   setup:
     needs: validate_inputs
     runs-on: ubuntu-latest
+    # p100 1.08 min. Unshallow checkout plus `turbo ls --affected`; the
+    # `fetch-depth: 0` clone is the only part that can grow with history.
+    timeout-minutes: 15
     outputs:
       targets: ${{ steps.detect_targets.outputs.TARGETS }}
       has_targets: ${{ steps.detect_targets.outputs.HAS_TARGETS }}
@@ -218,6 +224,8 @@ jobs:
   handle-git-tags:
     needs: setup
     runs-on: ubuntu-latest
+    # p100 0.63 min. Tag read/write against GitHub only.
+    timeout-minutes: 10
     if: needs.setup.outputs.has_targets == 'true'
     strategy:
       matrix:
@@ -291,6 +299,12 @@ jobs:
   build:
     needs: [handle-git-tags, setup]
     runs-on: ubuntu-latest
+    # p100 17.82 min -- and not a lone outlier: three of 1,512 sampled
+    # builds exceeded 10 minutes, all successful ETL images that missed the
+    # registry buildcache. A cap near 30 would sit under 2x a duration seen
+    # three times in two weeks, so it is set at ~4x p100 instead. Still cuts
+    # a stalled 50-wide fan-out from 360 min/job to 75.
+    timeout-minutes: 75
     if: needs.setup.outputs.has_targets == 'true'
     strategy:
       # Build all targets independently; one target's build failure shouldn't
@@ -458,6 +472,10 @@ jobs:
     # not ~38× across the deploy matrix. See docs/deploy.md.
     needs: [setup]
     runs-on: ubuntu-latest
+    # p100 1.25 min. SSHes into the shared prod host, so its stall mode is a
+    # wedged host rather than a crash -- the case this cap exists for.
+    # `continue-on-error` already keeps a failure here off the deploy path.
+    timeout-minutes: 15
     if: needs.setup.outputs.has_targets == 'true'
     steps:
       - name: Reclaim Docker disk
@@ -527,6 +545,8 @@ jobs:
     # never fail the deploy. See docs/deploy.md.
     needs: [validate_inputs]
     runs-on: ubuntu-latest
+    # p100 0.13 min. One idempotent crontab read-modify-write over SSH.
+    timeout-minutes: 10
     steps:
       - name: Install ECR auth refresh cron
         continue-on-error: true
@@ -623,6 +643,9 @@ jobs:
   migrate:
     needs: [handle-git-tags, setup, reclaim-disk]
     runs-on: ubuntu-latest
+    # p100 1.20 min, capped well above it: this applies schema migrations
+    # against prod, and being killed mid-migration is worse than being slow.
+    timeout-minutes: 30
     if: needs.setup.outputs.has_targets == 'true'
 
     steps:
@@ -701,6 +724,11 @@ jobs:
   deploy:
     needs: [setup, handle-git-tags, build, migrate, reclaim-disk]
     runs-on: ubuntu-latest
+    # p100 4.27 min, capped at ~7x. The deploy script does
+    # `docker stop` -> `docker rm` -> `docker run` over SSH, so a cap that
+    # fires between stop and run leaves the service DOWN -- the same hazard
+    # `fail-fast: false` below exists to avoid. Loose on purpose.
+    timeout-minutes: 30
     if: needs.setup.outputs.has_targets == 'true'
     strategy:
       # One target's deploy failure must not cancel sibling deploys mid-flight.
