@@ -136,6 +136,14 @@ jobs:
               # file needs that file to trigger the job the guard runs in,
               # and enumerating them one at a time has now failed twice.
               - '.github/workflows/**'
+              # BS#2267: the same requirement, one directory over.
+              # `tests/unit/scripts/latest-tag-fetch.test.ts` reads
+              # `.github/actions/latest_tag/action.yml` — it is the only
+              # thing standing between a re-added `git fetch --tags` (or an
+              # unanchored tag glob) and `main`. Composite actions are CI
+              # logic that guards read, so glob the directory; the rest of
+              # `.github/` is metadata no spec asserts on.
+              - '.github/actions/**'
               - 'dev_env/docker-compose.yml'
 
       - name: Determine if integration tests should run

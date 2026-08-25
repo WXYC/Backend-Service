@@ -18,11 +18,37 @@ runs:
       run: |
         TARGET_APP="${{ inputs.target }}"
 
-        # Ensure all tags are fetched first
-        git fetch --tags
-
-        # Get latest tag for build target
-        LATEST_TAG=$(git tag -l "${TARGET_APP}*" | sort -V | tail -n 1)
+        # Read the tags the caller already checked out; do not fetch.
+        #
+        # This step used to open with `git fetch --tags`, and `deploy-base.yml`
+        # invokes this action once per target in `handle-git-tags`'s matrix --
+        # up to 50 times per run. It never returned anything.
+        # `actions/checkout@v7` passes `--no-tags` unconditionally and selects
+        # tags purely by refspec, and `fetch-tags: true` pushes
+        # `+refs/tags/*:refs/tags/*` onto that refspec -- so every deploy tag
+        # is already in the workspace before this step runs. Replaying
+        # checkout's exact fetch against this repo on 2026-08-24: 18,408 tags
+        # after checkout, 18,408 after the extra fetch. Zero new refs, for
+        # 1.4-3.2s and a 1.5 MiB ref advertisement each time. It also pulled
+        # every branch head, because checkout leaves `remote.origin.fetch` at
+        # its `+refs/heads/*` default and the fetch named no refspec.
+        #
+        # The dependence on the caller is now load-bearing: a checkout without
+        # `fetch-tags: true` (or `fetch-depth: 0`) leaves `git tag -l` empty,
+        # which reports `is_initial=true` and restarts that target's versioning
+        # at v0.1.0, re-tagging over the rollback ladder `deploy-manual.yml`
+        # reads. That failure is silent and green, so
+        # tests/unit/scripts/latest-tag-fetch.test.ts asserts it instead.
+        #
+        # Match `${TARGET_APP}/v*`, not the bare prefix `${TARGET_APP}*`: the
+        # unanchored glob would let a target whose name prefixes another's
+        # resolve its sibling's tags and bump the wrong ladder. No target name
+        # is a prefix of another today (50 targets, 53 tag namespaces, checked
+        # 2026-08-24), so this changes no resolution -- it just keeps the next
+        # `library-etl-v2` from silently inheriting `library-etl`'s versions.
+        #
+        # See BS#2267.
+        LATEST_TAG=$(git tag -l "${TARGET_APP}/v*" | sort -V | tail -n 1)
 
         if [ -z "$LATEST_TAG" ]; then
           IS_INITIAL=true
@@ -34,7 +60,7 @@ runs:
           CURRENT_TAG="$LATEST_TAG"
         fi
 
-        echo "is_initial=$IS_INITIAL" 
+        echo "is_initial=$IS_INITIAL"
         echo "is_initial=$IS_INITIAL" >> $GITHUB_OUTPUT
 
         echo "latest_tag=$CURRENT_TAG"
