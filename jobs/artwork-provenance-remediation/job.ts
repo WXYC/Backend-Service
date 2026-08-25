@@ -58,13 +58,17 @@ const isDryRun = (): boolean => process.env.DRY_RUN === '1' || process.env.DRY_R
 const main = async () => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
   try {
-    requireLmlConfigured();
-    log('info', 'init', `${JOB_NAME} initialized`);
+    // Only the real pass needs LML, and it needs to know before it spends five
+    // minutes scanning. A dry run asks LML nothing, so requiring the var there
+    // would defeat the "sizing a run is free" property it exists to provide.
+    const dryRun = isDryRun();
+    if (!dryRun) requireLmlConfigured();
+    log('info', 'init', `${JOB_NAME} initialized`, { dry_run: dryRun });
 
     const candidates = await enumerateDiscogsArtwork();
     const rows = selectWrongProvenance(candidates);
 
-    if (isDryRun()) {
+    if (dryRun) {
       log('info', 'dry_run', `${JOB_NAME} dry run; no lookups, no writes`, {
         discogs_artwork_rows: candidates.length,
         selected: rows.length,
