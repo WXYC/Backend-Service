@@ -68,12 +68,27 @@ jobs:
       build_id: ${{ steps.generate_build_id.outputs.id }}
 
     steps:
+      # `fetch-depth: 0`, not the default 1, because `Detect Build Target`
+      # diffs `github.event.before..github.sha` and git cannot compute a
+      # merge base across two shallow grafts. 9ea9846d removed the
+      # `fetch-depth: 2` that made the old `HEAD^..HEAD` range work and
+      # replaced it with `git fetch origin <before> --depth=1`, which
+      # fetches the base commit with no ancestry to HEAD -- so
+      # `git merge-base` exited 1 on every run from 2026-03-08 to
+      # 2026-08-24, turbo fell back to "all packages", and every merge
+      # deployed all 50 targets. See BS#2264 and
+      # tests/unit/scripts/deploy-affected-targets.test.ts.
+      #
+      # Cost of full history here: ~2.5k commits and ~18k deploy tags
+      # pack to ~33 MiB. `fetch-depth: 0` pulls those tags whether or not
+      # `fetch-tags` is set -- that input only applies at a non-zero depth
+      # -- and `setup` reads none of them, but a few seconds once per run
+      # is not worth optimizing against the 266 billed minutes a silent
+      # full fan-out costs. Measure before trading depth away.
       - name: Checkout code
         uses: actions/checkout@v7
-
-      - name: Fetch base commit for Turbo diff
-        if: inputs.target == ''
-        run: git fetch origin ${{ github.event.before }} --depth=1
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         if: inputs.target == ''
@@ -142,9 +157,46 @@ jobs:
             echo "HAS_TARGETS=true" >> $GITHUB_OUTPUT
           else
             echo "Detecting affected app targets (Turborepo)..."
-            export TURBO_SCM_BASE=${{ github.event.before }}
-            export TURBO_SCM_HEAD=${{ github.sha }}
-            TARGETS=$(npx turbo ls --affected --output=json | jq -c '[.packages.items[] | select(.path | (startswith("apps/") or startswith("jobs/"))) | .path | split("/")[1]] | unique | sort')
+            BASE="${{ github.event.before }}"
+            HEAD_SHA="${{ github.sha }}"
+
+            # `turbo --affected` fails OPEN: when it cannot resolve the SCM
+            # range it prints a WARNING -- not an error -- and reports every
+            # package as affected. Safe, but this matrix feeds three jobs per
+            # target and GitHub bills a one-minute minimum per job, so a
+            # silent fallback costs ~266 billed minutes on a docs-only merge.
+            # It stayed silent for five months (BS#2264). Decide the fallback
+            # here instead, so turbo's warning can never be the thing that
+            # picks the matrix.
+            #
+            # A push that creates a branch, or force-pushes over history,
+            # genuinely has no usable base -- deploy everything and say so.
+            # A base that IS an ancestor and still fails to diff is this bug
+            # recurring; stop rather than bill for it.
+            if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+              echo "::warning title=Deploying all targets::No base commit on this push (branch creation or force-push); the deploy cannot be scoped."
+              RANGE_RESOLVABLE=false
+            elif ! git merge-base --is-ancestor "$BASE" "$HEAD_SHA" 2>/dev/null; then
+              echo "::warning title=Deploying all targets::Base $BASE is not an ancestor of $HEAD_SHA (force-push?); the deploy cannot be scoped."
+              RANGE_RESOLVABLE=false
+            else
+              RANGE_RESOLVABLE=true
+            fi
+
+            export TURBO_SCM_BASE="$BASE"
+            export TURBO_SCM_HEAD="$HEAD_SHA"
+            TURBO_STDERR=$(mktemp)
+            TARGETS=$(npx turbo ls --affected --output=json 2>"$TURBO_STDERR" | jq -c '[.packages.items[] | select(.path | (startswith("apps/") or startswith("jobs/"))) | .path | split("/")[1]] | unique | sort')
+            cat "$TURBO_STDERR"
+
+            if grep -q 'assuming all files have changed' "$TURBO_STDERR"; then
+              if [ "$RANGE_RESOLVABLE" = true ]; then
+                echo "::error title=Affected-target detection is broken::turbo could not diff $BASE..$HEAD_SHA even though it is a resolvable range. Refusing to deploy every target silently -- see BS#2264."
+                exit 1
+              fi
+              echo "Range genuinely unavailable; falling back to all targets."
+            fi
+
             if [ "$TARGETS" = "[]" ] || [ -z "$TARGETS" ]; then
               echo "No affected app targets found."
               echo "TARGETS=[]" >> $GITHUB_OUTPUT
