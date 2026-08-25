@@ -71,7 +71,40 @@ So the write is narrow and ungated, and the job **counts** title agreement inste
 
 The UPDATE's WHERE pins `artwork_url` to the value the selector classified, not just `album_id`. A row a live enrichment healed between the scan and the write falls out of the predicate (`raced`) instead of being overwritten with this drain's staler answer. That makes the whole run idempotent and order-independent — re-running it re-selects only rows that are still wrong.
 
-## Running it
+## Running it against prod
+
+**Prerequisite: this job must be merged to `main` first.** `deploy-manual.yml` builds from a ref, and the one-shot pathway only pushes an image for a workspace that exists there. There is no way to run this from a branch that does not amount to putting unreviewed code in front of 7,950 production writes.
+
+```bash
+# 1. Pre-flight: every sibling drain must be Exited — they share LML's Discogs
+#    budget through the same BACKFILL_LML_* ceiling.
+ssh wxyc-ec2 'docker ps --format "{{.Names}}" | grep -E "cron|backfill" || echo "clear"'
+
+# 2. Build + push the image.
+gh workflow run deploy-manual.yml --ref main \
+  -f target=artwork-provenance-remediation -f version=latest
+
+# 3. Size the run. Zero LML calls, zero writes — this is free, so there is no
+#    reason to skip it. Reconcile `selected` and the A-/L- split against the
+#    counts on BS#2258 before mutating anything.
+ssh wxyc-ec2
+docker run --rm --env-file .env -e DRY_RUN=1 <image> 2>&1 | tee /tmp/apr-dry.log
+
+# 4. Execute. ~6.6h for 7,950 rows at the default 20/min; the job pauses
+#    cooperatively while a DJ is on air, so wall-clock runs longer during a
+#    show. Safe to interrupt — every write re-checks the value it read, so a
+#    re-run resumes rather than repeating.
+docker run --rm --env-file .env <image> 2>&1 | tee /tmp/apr.log
+
+# 5. Verify with the same decoder that selected, not a SQL approximation of it.
+docker run --rm --env-file .env -e DRY_RUN=1 <image> 2>&1 | tail -1
+```
+
+Step 5's `selected` should fall from 7,950 to the residue the run's own `still_wrong` + `no_match` + `error` counters predict. Those three are the rows the job deliberately left byte-identical; they are not failures, and re-running will not move them until LML can answer them.
+
+Watch `title_diverged` in the finished line. The 240-row probe put it at ~1%, all same-album format variants. A materially higher number means LML's matching has changed and the run should stop for a look.
+
+## Running it locally
 
 ```bash
 # What would be drained, with no lookups and no writes.
