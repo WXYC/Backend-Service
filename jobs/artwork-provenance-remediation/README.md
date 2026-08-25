@@ -29,6 +29,8 @@ https://i.discogs.com/<sig>/rs:fit/g:sm/q:90/h:300/w:299/
 | **`A-` artist image — drained**            | **973**   |
 | Apple `mzstatic` — legitimate, untouched   | 191       |
 
+**79% of the drain population already has a correct cover in `library`.** Cross-checking the two tables on `album_metadata.album_id = library.id`: 5,764 label-logo rows and 517 artist-image rows (6,281 of 7,950) have an `R-` release cover in `library` for the same album, written by a different writer at a different time from a different LML answer. That is independent corroboration that LML _can_ resolve these covers, and an unexploited optimization — a copy-from-`library` path would cut the drain from 7,950 LML calls to 1,669. Not implemented: it is a second heal source with different failure modes, and `library`'s `R-` proves the image is _a_ release cover, not that it is _this album's_. Worth its own measurement.
+
 `wxyc_schema.library` carries a further 629 `L-` + 1,121 `A-` rows. **This job does not touch them.** Both `library.artwork_url` writers hard-guard `IS NULL` (BS#720), so that half needs a deliberate correction path rather than a re-enrichment drain; it stays open on BS#2258.
 
 ## What it writes
@@ -47,6 +49,16 @@ Two refusals are deliberate and are BS#2258's "decide this explicitly and record
 
 - **Never null a row out.** A wrong image is bad; a blank tile on a row that at least rendered something is a visible regression.
 - **Never write a lateral answer.** Swapping a label logo for an artist photo fixes nothing and spends the row's `updated_at`, which BS#2258 relies on as the only proxy for artwork-write time.
+
+### The known cost of writing narrowly
+
+Nothing checks that the fresh lookup binds the same release the row's `discogs_url` already points at, so a row can end up carrying a cover from release Y beside metadata describing release X.
+
+This is recorded rather than guarded because it is the _intended_ shape of the fix that produces the cover: LML#1241's sibling-pressing rung exists precisely to return a cover from a different pressing of the same master, so refusing on release-id disagreement would reject the rows that rung was built to heal. For a sibling pressing the art is the same and the divergence is cosmetic. The case that would genuinely hurt is an `album_title` ambiguous enough that top-1 binds a different album outright — and the pilot measured only that the answer was an `R-` cover, not that it was _this album's_, so that residue is unquantified.
+
+Two things bound it. A row is left byte-identical whenever the answer is not strictly better. And 79% of this population already carries a correct `R-` cover in `library` for the same `album_id` (see below) — produced by the same lookup path, and it would be full of wrong covers if this cohort mis-bound systematically. Quantifying the remainder means counting release-id disagreement across a real run; that is a follow-up, not a blocker.
+
+### Race guard
 
 The UPDATE's WHERE pins `artwork_url` to the value the selector classified, not just `album_id`. A row a live enrichment healed between the scan and the write falls out of the predicate (`raced`) instead of being overwritten with this drain's staler answer. That makes the whole run idempotent and order-independent — re-running it re-selects only rows that are still wrong.
 

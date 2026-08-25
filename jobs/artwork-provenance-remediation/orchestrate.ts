@@ -48,7 +48,8 @@ import {
   requireNonNegativeInt,
   type CheckLiveActivityFn,
 } from '@wxyc/database';
-import type { LookupResponse } from '@wxyc/lml-client';
+import * as Sentry from '@sentry/node';
+import { LmlAuthError, lmlApiKeyFingerprint, type LookupResponse } from '@wxyc/lml-client';
 import { classifyArtworkProvenance, isWrongArtworkProvenance } from '@wxyc/metadata';
 import type { RemediationOutcome, WrongArtworkRow } from './remediate.js';
 import { captureError, log } from './logger.js';
@@ -126,6 +127,22 @@ export const enumerateDiscogsArtwork = async (timeoutMs: number = ENUMERATE_TIME
  */
 export const selectWrongProvenance = (rows: WrongArtworkRow[]): WrongArtworkRow[] =>
   rows.filter((row) => isWrongArtworkProvenance(row.artwork_url));
+
+/**
+ * The `A-`/`L-` split of a selected population, so a run can be reconciled
+ * against BS#2258's own counts before it spends a single `updated_at`. Rows
+ * the selector would have dropped contribute to neither bucket — this counts
+ * positively, for the same reason the selector matches positively.
+ */
+export const summarizePopulation = (rows: WrongArtworkRow[]): { artist_image: number; label_logo: number } => {
+  const split = { artist_image: 0, label_logo: 0 };
+  for (const row of rows) {
+    const provenance = classifyArtworkProvenance(row.artwork_url);
+    if (provenance === 'artist') split.artist_image += 1;
+    else if (provenance === 'label') split.label_logo += 1;
+  }
+  return split;
+};
 
 export type LookupFn = (artist: string, album: string) => Promise<LookupResponse>;
 export type RemediateFn = (row: WrongArtworkRow, response: LookupResponse) => Promise<RemediationOutcome>;
@@ -215,18 +232,22 @@ export const runRemediation = async (opts: RunRemediationOptions): Promise<RunRe
 
   const totals = emptyTotals();
 
-  let rows = opts.rows;
-  if (rows) {
+  // The selector is re-applied even to caller-supplied rows. `rows` is a
+  // public entry point, and the property the whole design rests on -- an
+  // Apple cover or a release cover can never enter the drain -- has to hold
+  // at the boundary that writes, not at one call site in `job.ts`. A future
+  // resumable or `--limit` variant that assembles its own rows gets the
+  // guarantee for free instead of having to remember it.
+  let rows: WrongArtworkRow[];
+  if (opts.rows) {
     totals.discogs_artwork_rows = opts.discogsArtworkRows ?? 0;
+    rows = selectWrongProvenance(opts.rows);
   } else {
     const candidates = await enumerateDiscogsArtwork();
     totals.discogs_artwork_rows = candidates.length;
     rows = selectWrongProvenance(candidates);
   }
-  for (const row of rows) {
-    if (classifyArtworkProvenance(row.artwork_url) === 'artist') totals.artist_image += 1;
-    else totals.label_logo += 1;
-  }
+  Object.assign(totals, summarizePopulation(rows));
 
   log('info', 'started', `${JOB_NAME} starting`, {
     discogs_artwork_rows: totals.discogs_artwork_rows,
@@ -238,32 +259,81 @@ export const runRemediation = async (opts: RunRemediationOptions): Promise<RunRe
     live_activity_max_pause_ms: maxTotalPauseMs,
   });
 
-  for (const row of rows) {
-    await waitForQuietPeriod();
-    totals.scanned += 1;
+  // `finished` is emitted from a `finally` because the totals ARE the
+  // deliverable -- BS#2258's acceptance criteria ask for the per-row outcome
+  // counts to be reported. Losing six hours of accounting to a throw on the
+  // last row would mean re-earning it with a full re-run.
+  try {
+    for (const row of rows) {
+      await waitForQuietPeriod();
+      totals.scanned += 1;
 
-    let response: LookupResponse;
-    try {
-      response = await opts.lookup(row.artist_name, row.album_title);
-    } catch (error) {
-      log('warn', 'lml_error', `LML lookup failed for album_id=${row.album_id}`, {
-        album_id: row.album_id,
-        error_message: error instanceof Error ? error.message : String(error),
-      });
-      captureError(error, 'lml_error', {
-        album_id: row.album_id,
-        artist: row.artist_name,
-        album: row.album_title,
-        provenance: classifyArtworkProvenance(row.artwork_url),
-      });
-      totals.error += 1;
-      continue;
+      let response: LookupResponse;
+      try {
+        response = await opts.lookup(row.artist_name, row.album_title);
+      } catch (error) {
+        // A rejected bearer is global, not per-row: every remaining row would
+        // fail identically, so counting it and continuing paces the whole
+        // population through at 20/min, emits one Sentry event per row with no
+        // aggregate signal, and still exits 0. Abort on the first one (the
+        // BS#1094 silent-stall shape; same handling as
+        // `jobs/flowsheet-metadata-backfill/orchestrate.ts`).
+        if (error instanceof LmlAuthError) {
+          const bearerFingerprint = lmlApiKeyFingerprint() ?? 'unset';
+          Sentry.addBreadcrumb({
+            category: 'lml.auth',
+            message: `LML rejected the shared bearer with ${error.statusCode}`,
+            level: 'error',
+            data: { bearer_fingerprint: bearerFingerprint, status_code: error.statusCode, album_id: row.album_id },
+          });
+          log(
+            'error',
+            'lml_auth_error',
+            `LML rejected the shared LML_API_KEY bearer (status ${error.statusCode}) on album_id=${row.album_id} — aborting run instead of looping`,
+            { album_id: row.album_id, status_code: error.statusCode, bearer_fingerprint: bearerFingerprint }
+          );
+          captureError(error, 'lml_auth_error', {
+            album_id: row.album_id,
+            artist: row.artist_name,
+            album: row.album_title,
+            status_code: error.statusCode,
+            bearer_fingerprint: bearerFingerprint,
+          });
+          throw error;
+        }
+        log('warn', 'lml_error', `LML lookup failed for album_id=${row.album_id}`, {
+          album_id: row.album_id,
+          error_message: error instanceof Error ? error.message : String(error),
+        });
+        captureError(error, 'lml_error', {
+          album_id: row.album_id,
+          artist: row.artist_name,
+          album: row.album_title,
+          provenance: classifyArtworkProvenance(row.artwork_url),
+        });
+        totals.error += 1;
+        continue;
+      }
+
+      // The write is isolated too, and for the opposite reason to the auth
+      // case: a lock timeout or a connection blip is per-row and self-healing
+      // -- the row keeps its wrong artwork and re-selects on the next run --
+      // so letting it escape would trade a recoverable row for the whole run's
+      // accounting.
+      try {
+        const outcome = await opts.remediate(row, response);
+        totals[outcome] += 1;
+      } catch (error) {
+        log('warn', 'write_error', `write failed for album_id=${row.album_id}`, {
+          album_id: row.album_id,
+          error_message: error instanceof Error ? error.message : String(error),
+        });
+        captureError(error, 'write_error', { album_id: row.album_id, album: row.album_title });
+        totals.error += 1;
+      }
     }
-
-    const outcome = await opts.remediate(row, response);
-    totals[outcome] += 1;
+  } finally {
+    log('info', 'finished', `${JOB_NAME} done`, { ...totals });
   }
-
-  log('info', 'finished', `${JOB_NAME} done`, { ...totals });
   return { totals };
 };

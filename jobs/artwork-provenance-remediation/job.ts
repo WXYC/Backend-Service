@@ -33,7 +33,7 @@
  */
 
 import { closeDatabaseConnection } from '@wxyc/database';
-import { enumerateDiscogsArtwork, runRemediation, selectWrongProvenance } from './orchestrate.js';
+import { enumerateDiscogsArtwork, runRemediation, selectWrongProvenance, summarizePopulation } from './orchestrate.js';
 import { lookupMetadata } from './lml-fetch.js';
 import { remediateAlbum } from './remediate.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
@@ -69,9 +69,14 @@ const main = async () => {
     const rows = selectWrongProvenance(candidates);
 
     if (dryRun) {
+      // The A-/L- split, not just the total: BS#2258's data-safety constraint
+      // is to eyeball the selector before any UPDATE, and a single number
+      // cannot be reconciled against the ticket's own per-class counts, which
+      // is exactly the check that would catch a selector regression.
       log('info', 'dry_run', `${JOB_NAME} dry run; no lookups, no writes`, {
         discogs_artwork_rows: candidates.length,
         selected: rows.length,
+        ...summarizePopulation(rows),
       });
       return;
     }

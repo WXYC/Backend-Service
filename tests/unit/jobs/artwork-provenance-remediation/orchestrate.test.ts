@@ -23,11 +23,12 @@ import {
   enumerateDiscogsArtwork,
   runRemediation,
   selectWrongProvenance,
+  summarizePopulation,
   type LookupFn,
   type RemediateFn,
 } from '../../../../jobs/artwork-provenance-remediation/orchestrate';
 import type { WrongArtworkRow } from '../../../../jobs/artwork-provenance-remediation/remediate';
-import type { LookupResponse } from '@wxyc/lml-client';
+import { LmlAuthError, type LookupResponse } from '@wxyc/lml-client';
 import { renderSql } from '../../../utils/render-sql';
 
 const LABEL_LOGO =
@@ -213,5 +214,85 @@ describe('runRemediation', () => {
     });
 
     expect(probe.mock.calls.length).toBeGreaterThan(1);
+  });
+});
+
+describe('runRemediation — failure modes that would otherwise burn a six-hour run', () => {
+  const quiet = () => jest.fn<CheckLiveActivityFn>().mockResolvedValue(false);
+  const healed = () => jest.fn<RemediateFn>().mockResolvedValue('healed');
+
+  /**
+   * A rejected bearer is global, not per-row. Counting it as `error` and
+   * continuing paces the whole 7,950-row population through at 20/min, emits
+   * one Sentry event per row with no aggregate signal, and exits 0 — the
+   * silent-stall shape BS#1094 exists to close. Abort on the first one.
+   */
+  it('aborts the whole run when LML rejects the shared bearer, instead of grinding', async () => {
+    const remediate = healed();
+
+    await expect(
+      runRemediation({
+        lookup: jest.fn<LookupFn>().mockRejectedValue(new LmlAuthError('LML responded with 403', 403)),
+        remediate,
+        rows: [row(1, LABEL_LOGO), row(2, ARTIST_IMAGE)],
+        liveActivityLookbackSeconds: 0,
+        checkLiveActivity: quiet(),
+      })
+    ).rejects.toBeInstanceOf(LmlAuthError);
+
+    expect(remediate).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A write error is per-row, not global: the row keeps its wrong artwork and
+   * re-selects next run. Letting it escape would discard the run's accounting,
+   * which is what BS#2258's acceptance criteria actually ask to be reported.
+   */
+  it('counts a write failure as `error` and keeps going', async () => {
+    const { totals } = await runRemediation({
+      lookup: jest.fn<LookupFn>().mockResolvedValue(healedResponse),
+      remediate: jest.fn<RemediateFn>().mockRejectedValueOnce(new Error('lock timeout')).mockResolvedValue('healed'),
+      rows: [row(1, LABEL_LOGO), row(2, ARTIST_IMAGE)],
+      liveActivityLookbackSeconds: 0,
+      checkLiveActivity: quiet(),
+    });
+
+    expect(totals).toMatchObject({ scanned: 2, error: 1, healed: 1 });
+  });
+
+  /**
+   * The safety property — an Apple cover or a release cover can never enter
+   * the drain — has to hold at the boundary that writes, not at one call site
+   * in `job.ts`. `rows` is a public entry point.
+   */
+  it('re-applies the positive-match selector to caller-supplied rows', async () => {
+    const remediate = healed();
+
+    const { totals } = await runRemediation({
+      lookup: jest.fn<LookupFn>().mockResolvedValue(healedResponse),
+      remediate,
+      rows: [row(1, LABEL_LOGO), row(2, RELEASE_COVER), row(3, APPLE_ARTWORK)],
+      liveActivityLookbackSeconds: 0,
+      checkLiveActivity: quiet(),
+    });
+
+    expect(remediate).toHaveBeenCalledTimes(1);
+    expect(totals).toMatchObject({ scanned: 1, label_logo: 1, artist_image: 0 });
+  });
+});
+
+describe('summarizePopulation', () => {
+  it('reports the pre-drain split, so a dry run can be reconciled against the ticket', () => {
+    expect(summarizePopulation([row(1, LABEL_LOGO), row(2, ARTIST_IMAGE), row(3, LABEL_LOGO)])).toEqual({
+      artist_image: 1,
+      label_logo: 2,
+    });
+  });
+
+  it('counts nothing for rows the selector would have dropped', () => {
+    expect(summarizePopulation([row(1, RELEASE_COVER), row(2, APPLE_ARTWORK)])).toEqual({
+      artist_image: 0,
+      label_logo: 0,
+    });
   });
 });
