@@ -83,7 +83,7 @@
     "concurrently": "^10.0.5",
     "drizzle-kit": "^0.31.10",
     "drizzle-orm": "^0.45.2",
-    "eslint": "^10.8.1",
+    "eslint": "^10.9.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-security": "^4.0.1",
     "git-merge-append": "github:jakebromberg/git-merge-append",
