@@ -24,6 +24,7 @@ import { jest } from '@jest/globals';
 import { album_metadata, db } from '@wxyc/database';
 import { remediateAlbum, type WrongArtworkRow } from '../../../../jobs/artwork-provenance-remediation/remediate';
 import type { LookupResponse } from '@wxyc/lml-client';
+import { renderSql } from '../../../utils/render-sql';
 
 const LABEL_LOGO =
   'https://i.discogs.com/JuO51-lZvasOtw8-yLUjsen-4O17uPH1A9SILCO-lG4/rs:fit/g:sm/q:90/h:300/w:299/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9MLTE4NjYt/MTIzMzE5MzU1Ny5q/cGVn.jpeg';
@@ -51,39 +52,6 @@ const responseWith = (artworkUrl: string | null): LookupResponse => ({
   results: [{ artwork: artworkUrl === null ? null : { artwork_url: artworkUrl } }],
 });
 
-type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
-const renderSql = (value: unknown): string => {
-  const obj = value as SqlLike | null | undefined;
-  if (!obj) return '';
-  if (Array.isArray(obj.sql)) return obj.sql.join('');
-  if (typeof obj.sql === 'string') return obj.sql;
-  if (obj.queryChunks) {
-    return obj.queryChunks
-      .map((chunk) => {
-        if (typeof chunk === 'string') return chunk;
-        if (Array.isArray(chunk.value)) return chunk.value.join('');
-        if (typeof chunk.value === 'string') return chunk.value;
-        return '';
-      })
-      .join('');
-  }
-  return '';
-};
-
-/**
- * The interpolated params of a `sql` template, in order. Two shapes occur:
- * the unit suite's `drizzle-orm` stub exposes a flat `values` array, real
- * drizzle carries `Param` objects in `queryChunks` (same reason `renderSql`
- * handles both `sql` and `queryChunks` here and in the sibling job's suite).
- */
-const boundValues = (value: unknown): unknown[] => {
-  const obj = value as { values?: unknown[]; queryChunks?: Array<{ value?: unknown }> } | null | undefined;
-  if (Array.isArray(obj?.values)) return obj.values;
-  return (obj?.queryChunks ?? [])
-    .filter((chunk) => typeof chunk === 'object' && chunk !== null && 'value' in chunk && !Array.isArray(chunk.value))
-    .map((chunk) => chunk.value);
-};
-
 beforeEach(() => {
   mockDb._chain.returning.mockResolvedValue([{ album_id: row.album_id }]);
 });
@@ -109,11 +77,11 @@ describe('remediateAlbum — writes', () => {
   it('pins the selected artwork_url in the WHERE so a concurrent heal cannot be clobbered', async () => {
     await remediateAlbum(row, responseWith(RELEASE_COVER));
 
-    const [whereArg] = mockDb._chain.where.mock.calls[0] as [unknown];
-    expect(renderSql(whereArg)).toBe('"album_id" = ' + ' AND "artwork_url" = ' + '');
-    // The pinned value, not just the column: a guard on `album_id` alone
+    // The pinned VALUE, not just the column: a guard on `album_id` alone
     // would happily overwrite a row a live enrichment had already healed.
-    expect(boundValues(whereArg)).toEqual([row.album_id, LABEL_LOGO]);
+    expect(renderSql(mockDb._chain.where.mock.calls[0]?.[0])).toBe(
+      `"album_id" = ${row.album_id} AND "artwork_url" = ${LABEL_LOGO}`
+    );
   });
 
   it('reports `raced` when the guarded UPDATE matches no rows', async () => {
