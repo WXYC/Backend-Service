@@ -1,7 +1,7 @@
 /**
  * Factory for the single-boolean, strict-`true`-gated, lazily-cached
  * environment-flag config that several feature gates share verbatim
- * (`criticReviews`, `donate`). Each returned config is a small singleton over one env
+ * (`criticReviews`, `wxycReviews`, `donate`). Each returned config is a small singleton over one env
  * var; `getConfig()` reads the environment once and caches, `loadConfig()`
  * reads it fresh every call, and `resetConfig()` drops the cache so a test
  * that mutated the env var in `beforeEach` re-reads it.

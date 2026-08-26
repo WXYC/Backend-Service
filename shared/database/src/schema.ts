@@ -2151,8 +2151,13 @@ export const reviews = wxyc_schema.table('reviews', {
  *
  * PII: `reviewer_raw` holds real names and the form promised "your name
  * will not be shared" — stored for internal curation, NEVER emitted by
- * the read endpoint (the `flowsheet.dj_name` posture). Same for the
- * name-adjacent asides in `social_consent_raw`.
+ * any read surface (the `flowsheet.dj_name` posture). Same for the
+ * name-adjacent asides in `social_consent_raw`. The barrier is the
+ * enumerated `select({...})` in `lookupWxycReviewsByAlbumId`
+ * (`apps/backend/services/album-metadata-lookup.service.ts`), which is
+ * the only reader today: because these columns are never fetched, no
+ * downstream projection or serializer can surface them by accident. Any
+ * second reader must carry the same exclusion — see ADR 0011.
  *
  * `source` is text with a documented vocabulary rather than a pgEnum (the
  * 0109 lesson: enum additions cost a migration each). Values so far:
@@ -2188,7 +2193,7 @@ export const album_review_submissions = wxyc_schema.table(
     fcc_violations: text('fcc_violations'),
     // Raw multi-select.
     review_purpose: text('review_purpose'),
-    // PII-internal; never exposed by the read endpoint. See table JSDoc.
+    // PII-internal; never exposed by any read surface. See table JSDoc.
     reviewer_raw: text('reviewer_raw'),
     social_consent_raw: text('social_consent_raw'),
     social_consent: boolean('social_consent'),

@@ -1,10 +1,11 @@
 /**
  * Local read helpers backing the cache-first `/proxy/metadata/album` path
- * (BS#1331) and the external critic-review snippets attached to it
- * (album-critic-reviews slice, ADR 0012). All read BS's own persisted state
- * so the steady-state serve path skips the LML cascade entirely.
+ * (BS#1331) and the two review corpora attached to it — external critic-review
+ * snippets (album-critic-reviews slice, ADR 0012) and consented WXYC DJ
+ * reviews (DJ Google-Form archive, ADR 0011). All read BS's own persisted
+ * state so the steady-state serve path skips the LML cascade entirely.
  *
- * Five exported helpers, keyed on the `album_id` of a matching `flowsheet`
+ * Six exported helpers, keyed on the `album_id` of a matching `flowsheet`
  * row and staged so the handler resolves that id exactly once per request:
  *   - {@link selectLinkedFlowsheetRow} — normalized `(artist, release)` key →
  *     the matching linked flowsheet row (`album_id` plus the base,
@@ -34,6 +35,12 @@
  *     (`attachCriticReviews`, `apps/backend/services/flowsheet.service.ts`):
  *     one indexed query for a whole page's `album_id`s instead of one per
  *     row, capped and ordered identically per album.
+ *   - {@link lookupWxycReviewsByAlbumId} — up to `WXYC_REVIEWS_LIMIT`
+ *     CONSENTED DJ reviews for a resolved id (ADR 0011). Structurally the
+ *     critic-reviews read's sibling, but it carries a privacy contract the
+ *     others do not: the `social_consent = true` predicate and the explicit
+ *     column list are the enforcement points for the form's consent and
+ *     anonymity promises. See its own doc comment before editing either.
  *
  * The `/proxy/metadata/album` handler calls {@link selectLinkedFlowsheetRow}
  * once and feeds the resolved `album_id` to both the metadata and reviews
