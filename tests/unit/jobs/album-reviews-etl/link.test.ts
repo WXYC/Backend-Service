@@ -7,8 +7,11 @@
  * corrections always win).
  */
 import { db, normalizeAlbumTitle } from '@wxyc/database';
+import { renderSql } from '../../../utils/render-sql';
 import {
   decideLink,
+  loadCandidates,
+  emptyLinkTotals,
   enrichCandidateRow,
   linkSubmissions,
   relaxedAlbumKey,
@@ -53,13 +56,10 @@ const candidate = (overrides: Partial<LibraryCandidateRow> = {}): LibraryCandida
   });
 
 /** The all-zero totals shape, so a test naming one counter doesn't have to
- *  restate the other four. */
+ *  restate the other four. Built from the PRODUCTION factory, so a new
+ *  counter cannot be added without every one of these assertions seeing it. */
 const totalsShape = (overrides: Partial<LinkTotals> = {}): LinkTotals => ({
-  linked: 0,
-  linked_exact: 0,
-  linked_relaxed: 0,
-  link_ambiguous: 0,
-  link_unmatched: 0,
+  ...emptyLinkTotals(),
   ...overrides,
 });
 
@@ -94,37 +94,39 @@ describe('textArrayLiteral (BS#1068/BS#1071 single-param array binding)', () => 
 
 describe('decideLink (pure singleton rule)', () => {
   it('links when exactly one library row matches artist AND album', () => {
-    expect(decideLink(submission(), [candidate()])).toEqual({ kind: 'linked', library_id: 501 });
+    expect(decideLink(submission(), [candidate()], 'exact')).toEqual({ kind: 'linked', library_id: 501 });
   });
 
   it('reports unmatched when no candidate matches the album title', () => {
-    expect(decideLink(submission(), [candidate({ album_title: 'Segundo' })])).toEqual({ kind: 'unmatched' });
+    expect(decideLink(submission(), [candidate({ album_title: 'Segundo' })], 'exact')).toEqual({ kind: 'unmatched' });
   });
 
   it('reports unmatched when the artist norms differ (candidate rows are a broad artist sweep)', () => {
-    expect(decideLink(submission(), [candidate({ norm_primary: 'jessica pratt', norm_album_artist: '' })])).toEqual({
+    expect(
+      decideLink(submission(), [candidate({ norm_primary: 'jessica pratt', norm_album_artist: '' })], 'exact')
+    ).toEqual({
       kind: 'unmatched',
     });
   });
 
   it('reports ambiguous on two distinct matching library rows and links neither', () => {
-    const decision = decideLink(submission(), [candidate({ id: 501 }), candidate({ id: 777 })]);
+    const decision = decideLink(submission(), [candidate({ id: 501 }), candidate({ id: 777 })], 'exact');
     expect(decision.kind).toBe('ambiguous');
   });
 
   it('matches through the album_artist leg too (compilations file the artist there)', () => {
     const viaAlbumArtist = candidate({ norm_primary: 'various artists', norm_album_artist: 'juana molina' });
-    expect(decideLink(submission(), [viaAlbumArtist])).toEqual({ kind: 'linked', library_id: 501 });
+    expect(decideLink(submission(), [viaAlbumArtist], 'exact')).toEqual({ kind: 'linked', library_id: 501 });
   });
 
   it('dedups a row matching via BOTH artist legs — still a singleton, not ambiguous', () => {
     const both = candidate({ norm_primary: 'juana molina', norm_album_artist: 'juana molina' });
-    expect(decideLink(submission(), [both])).toEqual({ kind: 'linked', library_id: 501 });
+    expect(decideLink(submission(), [both], 'exact')).toEqual({ kind: 'linked', library_id: 501 });
   });
 
   it('compares album titles through normalizeAlbumTitle (edition suffixes collapse)', () => {
     const deluxe = candidate({ album_title: 'DOGA (Deluxe Edition)' });
-    expect(decideLink(submission(), [deluxe])).toEqual({ kind: 'linked', library_id: 501 });
+    expect(decideLink(submission(), [deluxe], 'exact')).toEqual({ kind: 'linked', library_id: 501 });
   });
 });
 
@@ -222,12 +224,6 @@ describe('decideLink relaxed tier (widening, BS album-review linkage)', () => {
     const blankSub = submission({ norm_artist: '', norm_album: normalizeAlbumTitle('DOGA') });
     expect(decideLink(blankSub, [blankLegs], 'relaxed')).toEqual({ kind: 'unmatched' });
     expect(decideLink(blankSub, [blankLegs], 'exact')).toEqual({ kind: 'unmatched' });
-  });
-
-  it('defaults to the exact tier when no tier is named (today’s callers are unchanged)', () => {
-    const coFiled = candidate({ norm_primary: 'thom yorke', norm_alternate: 'smile', album_title: 'Wall of Eyes' });
-    const sub = submission({ norm_artist: 'smile', norm_album: normalizeAlbumTitle('Wall of Eyes') });
-    expect(decideLink(sub, [coFiled])).toEqual({ kind: 'unmatched' });
   });
 });
 
@@ -361,6 +357,61 @@ describe('linkSubmissions (orchestration over injected deps)', () => {
     expect(totals).toEqual(totalsShape({ link_ambiguous: 1 }));
   });
 
+  it('reports an EXACT-tier ambiguity even when the relaxed album key is empty', async () => {
+    // The one shape where relaxed is not a coarsening of exact: a title made
+    // entirely of separators. `normalizeAlbumTitle('!!!')` is `'!!!'` (a real
+    // non-empty exact key — it is the !!! debut), but every character of it is
+    // a separator to `relaxedAlbumKey`, so the relaxed key is ''. decideLink
+    // declines an empty key, so the relaxed verdict is `unmatched` while the
+    // exact verdict is a genuine two-row ambiguity. The run must count the
+    // ambiguity, not report the row as unmatched.
+    const dupeA = candidate({ id: 501, norm_primary: '!!!', album_title: '!!!' });
+    const dupeB = candidate({ id: 502, norm_primary: '!!!', album_title: '!!!' });
+    const sub = submission({ id: 1, norm_artist: '!!!', norm_album: normalizeAlbumTitle('!!!') });
+
+    // Pin the premise, so this test fails loudly if the keys stop behaving
+    // this way rather than silently testing nothing.
+    expect(relaxedAlbumKey(normalizeAlbumTitle('!!!'))).toBe('');
+    expect(decideLink(sub, [dupeA, dupeB], 'exact')).toEqual({ kind: 'ambiguous', library_ids: [501, 502] });
+    expect(decideLink(sub, [dupeA, dupeB], 'relaxed')).toEqual({ kind: 'unmatched' });
+
+    const writes: Array<[number, number]> = [];
+    const totals = await linkSubmissions({
+      loadUnlinked: () => Promise.resolve([sub]),
+      loadCandidates: () => Promise.resolve([dupeA, dupeB]),
+      writeLink: (submissionId, libraryId) => {
+        writes.push([submissionId, libraryId]);
+        return Promise.resolve(true);
+      },
+    });
+
+    expect(writes).toEqual([]);
+    expect(totals).toEqual(totalsShape({ link_ambiguous: 1 }));
+  });
+
+  it('reaches a candidate whose ONLY matching leg is alternate_artist_name (the +41-row axis)', async () => {
+    // The largest measured relaxed axis, pinned END-TO-END rather than at
+    // decideLink: the bucket index is the layer that can starve it. Drop
+    // `norm_alternate`/`fold_alternate` from the index key set and this test
+    // fails while every decideLink-level test still passes.
+    const writes: Array<[number, number]> = [];
+    const totals = await linkSubmissions({
+      loadUnlinked: () =>
+        Promise.resolve([submission({ id: 1, norm_artist: 'smile', norm_album: normalizeAlbumTitle('Wall of Eyes') })]),
+      loadCandidates: () =>
+        Promise.resolve([
+          candidate({ id: 501, norm_primary: 'thom yorke', norm_alternate: 'smile', album_title: 'Wall of Eyes' }),
+        ]),
+      writeLink: (submissionId, libraryId) => {
+        writes.push([submissionId, libraryId]);
+        return Promise.resolve(true);
+      },
+    });
+
+    expect(writes).toEqual([[1, 501]]);
+    expect(totals).toEqual(totalsShape({ linked: 1, linked_relaxed: 1 }));
+  });
+
   it('sweeps the library ONCE for both tiers (no second query for the relaxed pass)', async () => {
     const loadCandidates = jest.fn(() => Promise.resolve([]));
     await linkSubmissions({
@@ -389,6 +440,110 @@ describe('linkSubmissions (orchestration over injected deps)', () => {
     });
     expect(seenNorms).toEqual(['hermanos gutiérrez']);
     expect(seenFolded).toEqual(['hermanos gutierrez']);
+  });
+});
+
+describe('loadCandidates (the statement the job actually emits)', () => {
+  // The widened sweep had no unit-level pin: `linkSubmissions` only ever sees
+  // an injected `loadCandidates`, and the integration spec asserts a HAND-COPY
+  // of this SQL, so a change here could leave both green while production
+  // swept differently. Rendered through the repo's canonical `renderSql`
+  // helper (the `flowsheet-no-match-recheck/query.test.ts` precedent).
+  beforeEach(() => {
+    (db.execute as jest.Mock).mockReset();
+    (db.execute as jest.Mock).mockResolvedValue([]);
+  });
+
+  const sweepText = async (): Promise<string> => {
+    await loadCandidates(['juana molina'], ['juana molina']);
+    return renderSql((db.execute as jest.Mock).mock.calls[0]?.[0]).replace(/\s+/g, ' ');
+  };
+
+  it('sweeps library through both MATERIALIZED CTEs', async () => {
+    const text = await sweepText();
+    expect(text).toMatch(/FROM\s+"?\w+"?\."?library"?/i);
+    expect(text).toContain('normalized AS MATERIALIZED');
+    expect(text).toContain('folded AS MATERIALIZED');
+  });
+
+  it('normalizes all THREE artist legs, alternate_artist_name included', async () => {
+    const text = await sweepText();
+    for (const leg of ['artist_name', 'album_artist', 'alternate_artist_name']) {
+      // Schema-qualified: `WXYC_SCHEMA_NAME` is what parallel Jest workers override.
+      expect(text).toContain(`"normalize_artist_name"(coalesce("${leg}", ''))`);
+    }
+  });
+
+  it('gates every fold on its leg being non-empty (a no-op that skips ~65% of the folds)', async () => {
+    const text = await sweepText();
+    for (const leg of ['norm_primary', 'norm_album_artist', 'norm_alternate']) {
+      expect(text).toContain(`CASE WHEN ${leg} <> '' THEN`);
+    }
+  });
+
+  it("guards every leg with <> '' so an empty probe norm cannot select the whole library", async () => {
+    const text = await sweepText();
+    expect(text).toContain(`(norm_primary <> ''`);
+    expect(text).toContain(`(norm_album_artist <> ''`);
+    expect(text).toContain(`(norm_alternate <> ''`);
+  });
+
+  it('binds ONE text[] literal per key space, never a splatted JS array', async () => {
+    const text = await sweepText();
+    // BS#1068/BS#1071: a bare JS array interpolated into a raw sql fragment is
+    // splatted into N positional placeholders — `ANY(($1, $2))` — which PG
+    // rejects. Every arm must bind ONE `text[]` array-literal instead.
+    expect(text).not.toMatch(/ANY\(\(/);
+    expect(text.match(/= ANY\(\{[^}]*\}::text\[\]\)/g) ?? []).toHaveLength(6);
+    // Three legs x two key spaces, and the folded literal is genuinely distinct
+    // from the norm literal (this probe folds to itself, so assert the binding
+    // count rather than the values).
+    expect(text).toContain(`fold_primary = ANY({"juana molina"}::text[])`);
+  });
+
+  it('projects only the normalized legs — the folds exist for the WHERE alone', async () => {
+    const text = await sweepText();
+    expect(text).toContain('SELECT "id", "album_title", norm_primary, norm_album_artist, norm_alternate FROM folded');
+  });
+});
+
+describe('the coarsening invariant (why exact runs first)', () => {
+  // The entire two-tier ordering rests on one property: the relaxed keys are a
+  // strict coarsening of the exact keys, so anything the exact tier links is
+  // still matched by the relaxed tier — EXCEPT when the relaxed album key
+  // collapses to empty, which decideLink declines. Stated as a property here
+  // so a future axis that breaks coarsening in a NEW way fails loudly, rather
+  // than being witnessed by the two anecdotes that motivated it.
+  it.each([
+    ['plain ascii', 'juana molina', 'DOGA'],
+    ['diacritic artist', 'hermanos gutierrez', 'Sonido Cosmico'],
+    ['punctuated title', 'dax pierson', 'Nerve Bumps: a queer divine satisfaction'],
+    ['comma title', 'jessica pratt', 'Landwerk, No. 3'],
+    ['digits', 'dean blunt', 'Black Metal 2'],
+    ['edition suffix', 'stereolab', 'Dots and Loops (Remastered)'],
+    ['separators-only title', 'quintron', '!!!'],
+  ])('exact-linked implies relaxed-matched, or an empty relaxed key: %s', (_label, artist, title) => {
+    const c = candidate({ id: 501, norm_primary: artist, album_title: title });
+    const sub = submission({ norm_artist: artist, norm_album: normalizeAlbumTitle(title) });
+
+    const exact = decideLink(sub, [c], 'exact');
+    expect(exact).toEqual({ kind: 'linked', library_id: 501 });
+
+    const relaxed = decideLink(sub, [c], 'relaxed');
+    if (relaxedAlbumKey(sub.norm_album) === '') {
+      expect(relaxed).toEqual({ kind: 'unmatched' });
+    } else {
+      expect(relaxed).toEqual({ kind: 'linked', library_id: 501 });
+    }
+  });
+
+  it('the relaxed tier never LINKS a row the exact tier called ambiguous', () => {
+    const a = candidate({ id: 501, norm_primary: 'pote', album_title: 'Ahora Mas' });
+    const b = candidate({ id: 502, norm_primary: 'pote', album_title: 'Ahora Mas' });
+    const sub = submission({ norm_artist: 'pote', norm_album: normalizeAlbumTitle('Ahora Mas') });
+
+    expect(decideLink(sub, [a, b], 'exact').kind).toBe('ambiguous');
+    expect(decideLink(sub, [a, b], 'relaxed').kind).not.toBe('linked');
   });
 });
 

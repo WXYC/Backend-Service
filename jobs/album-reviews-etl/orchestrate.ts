@@ -30,7 +30,7 @@
 
 import { mapRow, resolveHeaderIndexes, type SubmissionContent } from './map.js';
 import type { UpsertOutcome } from './writer.js';
-import type { LinkTotals } from './link.js';
+import { emptyLinkTotals, type LinkTotals } from './link.js';
 import { captureError, captureWarning, log } from './logger.js';
 
 const JOB_NAME = 'album-reviews-etl';
@@ -56,16 +56,11 @@ export type Totals = {
   updated: number;
   /** setWhere-suppressed no-op upserts — the idempotent-nightly signal. */
   unchanged: number;
-  /** Total rows the link pass FKed this run (exact + relaxed tiers). */
-  linked: number;
-  /** Tier-1 (exact) linkage — the pre-widening rule. Split out so a night's
-   *  run shows which tier is carrying the linkage. */
-  linked_exact: number;
-  /** Tier-2 (relaxed: alternate-artist / diacritic fold / punctuation). */
-  linked_relaxed: number;
-  link_ambiguous: number;
-  link_unmatched: number;
-};
+} & LinkTotals;
+// The link counters are INTERSECTED, never restated. They are the link pass's
+// vocabulary, and `link.ts` is where a tier's meaning is defined; retyping them
+// here made the widening an eight-site edit and let a forgotten field silently
+// report 0 forever (it is typed, and zero-initialized, so nothing fails).
 
 const emptyTotals = (): Totals => ({
   fetched: 0,
@@ -76,11 +71,7 @@ const emptyTotals = (): Totals => ({
   inserted: 0,
   updated: 0,
   unchanged: 0,
-  linked: 0,
-  linked_exact: 0,
-  linked_relaxed: 0,
-  link_ambiguous: 0,
-  link_unmatched: 0,
+  ...emptyLinkTotals(),
 });
 
 export type RunOptions = {
@@ -269,12 +260,9 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
 
   // 6. Link pass (its own errors propagate: the archive rows are already
   // safely upserted, and a broken link pass must fail the cron loudly).
-  const linkTotals = await opts.linkPass();
-  totals.linked = linkTotals.linked;
-  totals.linked_exact = linkTotals.linked_exact;
-  totals.linked_relaxed = linkTotals.linked_relaxed;
-  totals.link_ambiguous = linkTotals.link_ambiguous;
-  totals.link_unmatched = linkTotals.link_unmatched;
+  // Copied wholesale: a field-by-field copy is where a new counter goes
+  // missing without failing anything.
+  Object.assign(totals, await opts.linkPass());
 
   log('info', 'finished', `${JOB_NAME} done`, { ...totals, upsert_errors: upsertErrors });
   return totals;
