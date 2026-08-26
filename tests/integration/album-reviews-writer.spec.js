@@ -109,13 +109,32 @@ describe('album-reviews-etl writer + link SQL contract (real DB)', () => {
 
     await sql.unsafe(`CREATE SCHEMA "${schemaName}"`);
 
-    // Minimal `library` mirror — the FK target.
+    // Minimal `library` mirror — the FK target, plus the two extra artist
+    // legs the link pass's candidate sweep reads.
     await sql.unsafe(`
       CREATE TABLE "${schemaName}".library (
         id serial PRIMARY KEY,
         artist_name text,
+        album_artist text,
+        alternate_artist_name text,
         album_title text
       )
+    `);
+
+    // The two SQL twins the sweep calls, verbatim from migrations 0092 and
+    // 0134. Schema-local so the sweep statement below is byte-identical to
+    // the one `link.ts` emits (which schema-qualifies both).
+    await sql.unsafe(`
+      CREATE FUNCTION "${schemaName}".normalize_artist_name(input text) RETURNS text
+        LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $fn$
+        SELECT lower(regexp_replace(coalesce(input, ''), '^the[ \\t\\n\\r\\f\\v]+', '', 'i'));
+      $fn$
+    `);
+    await sql.unsafe(`
+      CREATE FUNCTION "${schemaName}".fold_artist_name(input text) RETURNS text
+        LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $fn$
+        SELECT lower(regexp_replace(normalize(coalesce(input, ''), NFD), '[\\u0300-\\u036f]', '', 'g'));
+      $fn$
     `);
 
     // The 0119 table, schema-substituted (columns + FK + partial unique
@@ -273,5 +292,72 @@ describe('album-reviews-etl writer + link SQL contract (real DB)', () => {
       submission.id,
     ]);
     expect(orphaned.album_id).toBeNull();
+  });
+
+  // The widened candidate sweep (`loadCandidates` in link.ts). Unit tests
+  // cover the TS decision; only a real PG can prove the SQL half — that the
+  // two MATERIALIZED CTEs compose, that `fold_artist_name` is reachable over
+  // a CTE column, that the `text[]` array-literal binding survives the
+  // `= ANY(...)` (the BS#1068/BS#1071 splat trap), and that the `<> ''`
+  // guards hold on the legs that are empty library-wide.
+  test('the candidate sweep selects via artist_name, album_artist, alternate_artist_name, and the diacritic fold', async () => {
+    await sql.unsafe(`TRUNCATE "${schemaName}".library RESTART IDENTITY CASCADE`);
+    const [viaPrimary] = await sql.unsafe(
+      `INSERT INTO "${schemaName}".library (artist_name, album_title) VALUES ('The Stereolab', 'Dots and Loops') RETURNING id`
+    );
+    const [viaAlbumArtist] = await sql.unsafe(
+      `INSERT INTO "${schemaName}".library (artist_name, album_artist, album_title) VALUES ('Various Artists', 'Jessica Pratt', 'Quiet Signs') RETURNING id`
+    );
+    const [viaAlternate] = await sql.unsafe(
+      `INSERT INTO "${schemaName}".library (artist_name, alternate_artist_name, album_title) VALUES ('Thom Yorke', 'The Smile', 'Wall of Eyes') RETURNING id`
+    );
+    const [viaFold] = await sql.unsafe(
+      `INSERT INTO "${schemaName}".library (artist_name, album_title) VALUES ('Hermanos Gutierrez', 'Sonido Cosmico') RETURNING id`
+    );
+    // Never a candidate: no leg matches any probe norm.
+    await sql.unsafe(`INSERT INTO "${schemaName}".library (artist_name, album_title) VALUES ('Cat Power', 'Moon Pix')`);
+
+    const sweep = `
+      WITH normalized AS MATERIALIZED (
+        SELECT
+          "id",
+          "album_title",
+          "${schemaName}".normalize_artist_name(coalesce("artist_name", '')) AS norm_primary,
+          "${schemaName}".normalize_artist_name(coalesce("album_artist", '')) AS norm_album_artist,
+          "${schemaName}".normalize_artist_name(coalesce("alternate_artist_name", '')) AS norm_alternate
+        FROM "${schemaName}"."library"
+      ),
+      folded AS MATERIALIZED (
+        SELECT
+          "id", "album_title", norm_primary, norm_album_artist, norm_alternate,
+          "${schemaName}".fold_artist_name(norm_primary) AS fold_primary,
+          "${schemaName}".fold_artist_name(norm_album_artist) AS fold_album_artist,
+          "${schemaName}".fold_artist_name(norm_alternate) AS fold_alternate
+        FROM normalized
+      )
+      SELECT "id", "album_title", norm_primary, norm_album_artist, norm_alternate
+      FROM folded
+      WHERE (norm_primary <> '' AND (norm_primary = ANY($1::text[]) OR fold_primary = ANY($2::text[])))
+         OR (norm_album_artist <> '' AND (norm_album_artist = ANY($1::text[]) OR fold_album_artist = ANY($2::text[])))
+         OR (norm_alternate <> '' AND (norm_alternate = ANY($1::text[]) OR fold_alternate = ANY($2::text[])))
+      ORDER BY "id"
+    `;
+
+    // Exactly the two literals link.ts binds: probe norms, and their folds.
+    // 'hermanos gutiérrez' reaches the ASCII-filed row ONLY via the fold arm.
+    const norms = '{"stereolab","jessica pratt","smile","hermanos gutiérrez"}';
+    const folded = '{"stereolab","jessica pratt","smile","hermanos gutierrez"}';
+    const rows = await sql.unsafe(sweep, [norms, folded]);
+    expect(rows.map((r) => r.id)).toEqual([viaPrimary.id, viaAlbumArtist.id, viaAlternate.id, viaFold.id]);
+
+    // The leading-"The " strip is the 0092 twin's job, and it ran in SQL.
+    expect(rows[0].norm_primary).toBe('stereolab');
+    expect(rows[2].norm_alternate).toBe('smile');
+
+    // The `<> ''` guards: an empty probe norm must not drag in the rows whose
+    // album_artist / alternate_artist_name legs are empty (all of them, in
+    // production). Without the guards this returns the whole table.
+    const empty = await sql.unsafe(sweep, ['{""}', '{""}']);
+    expect(empty).toHaveLength(0);
   });
 });

@@ -80,12 +80,47 @@ Row validity: artist + album non-empty (drops the sheet's formula-residue junk r
 ## Invariants (do not weaken)
 
 - **Never delete.** A row vanishing from the sheet leaves the DB row untouched (org data-safety rule). The job has no delete path at all.
-- **Never overwrite `album_id`.** The link pass is the column's only writer, links only on EXACTLY ONE library match (0092 SQL twin over `artist_name` + `album_artist`, TS-side `normalizeAlbumTitle` on the album leg), and its UPDATE is guarded `WHERE album_id IS NULL` — manual corrections always win. `album_id` and `add_date` are omitted from the writer's ON CONFLICT set, so a sheet edit can never clobber either.
+- **Never overwrite `album_id`.** The link pass is the column's only writer, links only on EXACTLY ONE library match at whichever tier decides it (see [Link pass](#link-pass)), and its UPDATE is guarded `WHERE album_id IS NULL` — manual corrections always win. `album_id` and `add_date` are omitted from the writer's ON CONFLICT set, so a sheet edit can never clobber either.
 - **Honest `last_modified`.** The writer's `setWhere` (IS DISTINCT FROM over every content column) suppresses no-op UPDATEs; an unchanged sheet reports `inserted=0, updated=0` and touches no `last_modified`.
 - **PII stays internal.** `reviewer_raw` and `social_consent_raw` hold names / name-adjacent asides the form promised not to share; no read endpoint emits them.
+
+## Link pass
+
+Best-effort FK from `album_review_submissions.album_id` to `library.id`, in TWO tiers over ONE library sweep. The relaxed tier runs only on the rows the exact tier left undecided.
+
+| Tier        | Artist leg                                                                                 | Album leg                                                                  | Counter          |
+| ----------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------- | ---------------- |
+| 1 — exact   | `normalize_artist_name` (0092 SQL twin) over `artist_name` + `album_artist`                | `normalizeAlbumTitle` equality                                             | `linked_exact`   |
+| 2 — relaxed | adds `alternate_artist_name`; all three legs compared under `fold_artist_name` (0134 twin) | `relaxedAlbumKey` — fold + every run of non-alphanumerics to one separator | `linked_relaxed` |
+
+**Exact runs first, and that ordering is load-bearing.** The relaxed keys are a strict coarsening, so two library rows the exact tier separates (the two prod `Markolino Dimond — Brujeria` rows) collapse into an ambiguous pair under relaxed alone. Tier 1 keeps its singleton; tier 2 only ever sees what tier 1 declined.
+
+`relaxedAlbumKey` is deliberately job-local and computed at match time on both sides. The persisted `norm_album` column stays exactly `normalizeAlbumTitle` output — that function is a shared dedup-key contract (`flowsheet_freetext_resolution`'s PRIMARY KEY is built on it), so relaxing it in place would silently re-key persisted rows.
+
+The `<> ''` guards on each artist leg in the sweep are load-bearing, not tidiness: `album_artist` is empty on ALL ~64k library rows today and `alternate_artist_name` on ~59.5k of them, so an empty probe norm would otherwise select the entire library. `tests/integration/album-reviews-writer.spec.js` pins this against a real PG.
+
+### What the widening was measured to buy (prod, 2026-08-25)
+
+Baseline 744 of 1,689 rows linked (44%); 945 candidates unlinked.
+
+| Axis, applied alone     | Newly linked | Newly ambiguous |
+| ----------------------- | ------------ | --------------- |
+| `alternate_artist_name` | +41          | 0               |
+| artist diacritic fold   | +23          | 0               |
+| album diacritic fold    | +13          | 0               |
+| album punctuation strip | +72          | 0               |
+| **all four (shipped)**  | **+146**     | **0**           |
+
+Replaying the widened matcher over the 744 already-linked rows elects the same library row 743 times and a **different** row zero times; the 744th becomes ambiguous because the library genuinely holds two rows for it, and declining is correct. The sweep costs ~1.8 s on prod against ~1.5 s before — still one query, nightly.
+
+### Deliberately not done
+
+- **Trigram / fuzzy album matching.** Measured false positives at similarity 0.84–0.88: `Erotic Probiotic 2` → `Erotic Probiotic`, `Black Metal 2` → `Black Metal`, `Keyboard Suite I` → `Keyboard Suite II`, `10,000 gecs` → `1000 Gecs`. Trigram similarity is blind to exactly the sequel/volume tokens that distinguish these, the whole band would have bought ~30 rows, and a wrong `album_id` is sticky (never overwritten, manual repair).
+- **Stripping a leading article from the album leg.** Bought exactly 1 additional row and would let `The Wall` reach `Wall`.
+- **Widening the artist leg past exact-normalized matching.** 416 of the 945 unlinked rows have no library artist under any spelling — the DJ reviewed a record the station does not hold. That is the residue's largest bucket and no album-leg work reaches it.
 
 ## Run guards + observability
 
 **Transient-fetch retry (BS#1692).** The Sheets fetch (`withSheetRetry` in `fetch.ts`, wired in `job.ts`) absorbs transient upstream failures — Google's canonical "service is currently unavailable" 503, plus any 5xx / 429 / 408 from EITHER the OAuth token mint or the values GET (both run inside the single authed `client.request`) — with a bounded jittered exponential backoff (3 retries after the first attempt, base 250ms, capped ~4s: a few seconds of added latency, never minutes). Each retry is warn-logged (`step=fetch_retry`) so a flaky-but-recovering night is visible in container logs without a Sentry alert. Deterministic 4xx config errors (401/403 bad credentials, 404 wrong sheet id) and non-HTTP errors are NOT retried — they fail fast on the first attempt, per the job's fail-fast contract. Retries exhausted → the run still fails loudly (`step=failed` Sentry capture in `job.ts`). The fetch precedes all writes, so a failed fetch leaves `album_review_submissions` untouched and the next night self-heals (idempotent full-snapshot UPSERT).
 
-Zero valid rows, a >50%-invalid sheet, a fallback-key spike (more than max(5, 1% of valid) rows keyed via `nots:` — the signature of the sheet's timestamp format drifting, e.g. a locale flip to 12-hour AM/PM), or valid-rows-but-zero-written all throw (non-zero exit) so cron monitoring can't stay green through a wholesale regression. An in-run duplicate source_key is skipped (first occurrence wins, counted as `duplicate_key_skipped`) so a later sheet row can never silently overwrite an earlier one. Per-row upsert errors are caught, counted in the `finished` log, and Sentry-deduped per (step, digit-normalized message class). Counters: `{fetched, valid, skipped_invalid, fallback_keys, duplicate_key_skipped, inserted, updated, unchanged, linked, link_ambiguous, link_unmatched}`. Upserts are one statement per row (~1.6k serial round-trips nightly, seconds at LAN RTT) — deliberate, matching the donor writers; the setWhere guard makes the steady-state cost read-mostly. Logger is the per-job copy (`logger.ts`, incl. `captureWarning`); traces default off per the cron convention.
+Zero valid rows, a >50%-invalid sheet, a fallback-key spike (more than max(5, 1% of valid) rows keyed via `nots:` — the signature of the sheet's timestamp format drifting, e.g. a locale flip to 12-hour AM/PM), or valid-rows-but-zero-written all throw (non-zero exit) so cron monitoring can't stay green through a wholesale regression. An in-run duplicate source_key is skipped (first occurrence wins, counted as `duplicate_key_skipped`) so a later sheet row can never silently overwrite an earlier one. Per-row upsert errors are caught, counted in the `finished` log, and Sentry-deduped per (step, digit-normalized message class). Counters: `{fetched, valid, skipped_invalid, fallback_keys, duplicate_key_skipped, inserted, updated, unchanged, linked, linked_exact, linked_relaxed, link_ambiguous, link_unmatched}` — `linked` is the total and stays the headline number; the two tier counters split it so a night's run shows which tier is carrying the linkage. The DRY_RUN report's locked schema is unaffected: it is emitted before the link pass and carries no link counters. Upserts are one statement per row (~1.6k serial round-trips nightly, seconds at LAN RTT) — deliberate, matching the donor writers; the setWhere guard makes the steady-state cost read-mostly. Logger is the per-job copy (`logger.ts`, incl. `captureWarning`); traces default off per the cron convention.

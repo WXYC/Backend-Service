@@ -56,7 +56,13 @@ export type Totals = {
   updated: number;
   /** setWhere-suppressed no-op upserts — the idempotent-nightly signal. */
   unchanged: number;
+  /** Total rows the link pass FKed this run (exact + relaxed tiers). */
   linked: number;
+  /** Tier-1 (exact) linkage — the pre-widening rule. Split out so a night's
+   *  run shows which tier is carrying the linkage. */
+  linked_exact: number;
+  /** Tier-2 (relaxed: alternate-artist / diacritic fold / punctuation). */
+  linked_relaxed: number;
   link_ambiguous: number;
   link_unmatched: number;
 };
@@ -71,6 +77,8 @@ const emptyTotals = (): Totals => ({
   updated: 0,
   unchanged: 0,
   linked: 0,
+  linked_exact: 0,
+  linked_relaxed: 0,
   link_ambiguous: 0,
   link_unmatched: 0,
 });
@@ -263,6 +271,8 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
   // safely upserted, and a broken link pass must fail the cron loudly).
   const linkTotals = await opts.linkPass();
   totals.linked = linkTotals.linked;
+  totals.linked_exact = linkTotals.linked_exact;
+  totals.linked_relaxed = linkTotals.linked_relaxed;
   totals.link_ambiguous = linkTotals.link_ambiguous;
   totals.link_unmatched = linkTotals.link_unmatched;
 
