@@ -47,9 +47,11 @@ import {
   selectLinkedFlowsheetRow,
   lookupAlbumMetadataById,
   lookupCriticReviewsByAlbumId,
+  lookupWxycReviewsByAlbumId,
   type PersistedAlbumMetadata,
 } from '../services/album-metadata-lookup.service.js';
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
+import { getConfig as getWxycReviewsConfig } from '../config/wxycReviews.js';
 import { LRUCache } from 'lru-cache';
 import WxycError from '../utils/error.js';
 import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from '../services/observability/cache-stats.js';
@@ -542,15 +544,21 @@ function extractAlbumMetadataEnrichment(metadata: Record<string, unknown>): Reco
 }
 
 /**
- * CRITIC_REVIEWS_ENABLED is the one feature flag that changes this
- * response's shape (adds `criticReviews`) — folded into the key so a flag
- * flip can't serve a stale shape out of the TTL window. Mirrors
- * `trackSearchCacheKey` in `library.service.ts`.
+ * Two feature flags change this response's shape — CRITIC_REVIEWS_ENABLED
+ * (adds `criticReviews`, ADR 0012) and WXYC_REVIEWS_ENABLED (adds
+ * `wxycReviews`, ADR 0011) — so both are folded into the key. Without a
+ * flag in the key, flipping it on would keep serving the cached pre-flip
+ * body for the rest of the 1h TTL window. Mirrors `trackSearchCacheKey` in
+ * `library.service.ts`.
+ *
+ * Any future flag that adds or removes a field on this response must be
+ * appended here as another bit.
  */
 function albumMetadataCacheKey(artistName: string, releaseTitle?: string, trackTitle?: string): string {
-  const flagBit = getCriticReviewsConfig().enabled ? '1' : '0';
+  const criticBit = getCriticReviewsConfig().enabled ? '1' : '0';
+  const wxycBit = getWxycReviewsConfig().enabled ? '1' : '0';
   const norm = (s?: string) => (s || '').toLowerCase().trim();
-  return `${norm(artistName)}|${norm(releaseTitle)}|${norm(trackTitle)}:${flagBit}`;
+  return `${norm(artistName)}|${norm(releaseTitle)}|${norm(trackTitle)}:${criticBit}${wxycBit}`;
 }
 
 /**
@@ -743,6 +751,37 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
         if (criticReviews.length > 0) metadata.criticReviews = criticReviews;
       } catch (reviewsError) {
         console.warn('[ProxyController] critic-reviews lookup failed; omitting criticReviews:', reviewsError);
+        cacheable = false;
+      }
+    }
+
+    // Consented WXYC DJ reviews (DJ Google-Form review archive, ADR 0011).
+    // Structurally the same additive, flag-gated attach as critic reviews
+    // above — same once-resolved `albumId`, same `albumId !== null` gate, same
+    // "attach only when non-empty" and same try/catch degradation — but the
+    // two are deliberately separate concepts with separate flags, separate
+    // tables and separate wire fields, and must not be merged (see the
+    // four-review-concepts note on `album_critic_reviews` in schema.ts).
+    //
+    // What differs is the stake in the flag. `criticReviews` publishes short
+    // excerpts of already-published third-party writing; `wxycReviews`
+    // publishes unpublished, WXYC-authored review bodies whose publication
+    // rests on a per-row opt-in the reviewer gave on a Google Form. The row
+    // filter that enforces that opt-in (`social_consent = true`) lives in SQL
+    // inside `lookupWxycReviewsByAlbumId`, NOT here — this flag governs only
+    // whether the surface is served at all, so flipping it on can never
+    // promote a non-consented row. Reviewer identity is excluded at the same
+    // place, by the query's explicit column list.
+    //
+    // Default off (`WXYC_REVIEWS_ENABLED`), so prod's response shape and
+    // serve-path query plan stay byte-identical until an operator opts in —
+    // the #32 hardening-freeze posture, and the reason this ships dark.
+    if (getWxycReviewsConfig().enabled && albumId !== null) {
+      try {
+        const wxycReviews = await lookupWxycReviewsByAlbumId(albumId);
+        if (wxycReviews.length > 0) metadata.wxycReviews = wxycReviews;
+      } catch (wxycReviewsError) {
+        console.warn('[ProxyController] wxyc-reviews lookup failed; omitting wxycReviews:', wxycReviewsError);
         cacheable = false;
       }
     }

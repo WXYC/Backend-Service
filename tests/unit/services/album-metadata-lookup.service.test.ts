@@ -120,13 +120,33 @@ jest.mock('@wxyc/database', () => ({
     published_at: 'published_at',
     rating: 'rating',
   },
+  // Consented DJ Google-Form reviews (ADR 0011). The PII-internal columns
+  // (`reviewer_raw`, `social_consent_raw`) are declared here DELIBERATELY,
+  // even though `lookupWxycReviewsByAlbumId` must never select them: the
+  // PII-barrier test asserts they are absent from the projection, and that
+  // assertion is only meaningful if they were reachable in the first place.
+  // A mock that omitted them would make the barrier test pass vacuously.
+  album_review_submissions: {
+    id: 'id',
+    album_id: 'album_id',
+    review: 'review',
+    artist_blurb: 'artist_blurb',
+    recommended_tracks: 'recommended_tracks',
+    buzzwords: 'buzzwords',
+    social_consent: 'social_consent',
+    submitted_at: 'submitted_at',
+    reviewer_raw: 'reviewer_raw',
+    social_consent_raw: 'social_consent_raw',
+  },
 }));
 
 import {
   lookupAlbumMetadataById,
   lookupCriticReviewsByAlbumId,
   lookupCriticReviewsByAlbumIds,
+  lookupWxycReviewsByAlbumId,
 } from '../../../apps/backend/services/album-metadata-lookup.service';
+import { renderSql } from '../../utils/render-sql';
 
 describe('album-metadata-lookup.service', () => {
   beforeEach(() => {
@@ -414,6 +434,128 @@ describe('album-metadata-lookup.service', () => {
       await lookupCriticReviewsByAlbumIds([501]);
       expect(chainSpy.orderBy).toHaveBeenCalledTimes(1);
       expect(chainSpy.orderBy).toHaveBeenCalledWith('album_id', expect.anything(), expect.anything());
+    });
+  });
+
+  describe('lookupWxycReviewsByAlbumId', () => {
+    // Consented WXYC DJ reviews (ADR 0011). Two properties here are safety
+    // properties, not merely shape contracts, and are asserted as such:
+    //
+    //   1. CONSENT GATE — the SQL must filter `social_consent = true`. The
+    //      exhaustive row-level proof lives in the integration spec (real
+    //      Postgres, real `false`/`NULL` rows); what this suite pins is that
+    //      the predicate is present and is an equality against `true`, so a
+    //      refactor to `IS NOT FALSE` / `IS NOT NULL` — which would publish
+    //      unparsed, ambiguous consent answers — fails here.
+    //   2. PII BARRIER — `reviewer_raw` / `social_consent_raw` must never be
+    //      selected. The mocked table above declares both columns, so this
+    //      assertion is a real barrier test rather than a vacuous one.
+
+    it('returns [] when the linked album has no consented, non-empty reviews', async () => {
+      mockRowsQueue.push([]);
+      const result = await lookupWxycReviewsByAlbumId(42);
+      expect(result).toEqual([]);
+      expect(mockSelect).toHaveBeenCalledTimes(1);
+    });
+
+    it('never selects the PII-internal columns (reviewer_raw / social_consent_raw)', async () => {
+      mockRowsQueue.push([]);
+      await lookupWxycReviewsByAlbumId(7);
+
+      const projection = mockSelect.mock.calls[0][0] as Record<string, unknown>;
+      const selected = Object.keys(projection);
+      expect(selected).not.toContain('reviewer_raw');
+      expect(selected).not.toContain('social_consent_raw');
+      // Nor may they hide inside a projected value (e.g. a raw sql fragment).
+      const serialized = JSON.stringify(Object.values(projection));
+      expect(serialized).not.toMatch(/reviewer_raw|social_consent_raw/);
+      // The projection is exactly the five publish-safe wire fields.
+      expect(selected.sort()).toEqual(
+        ['artist_blurb', 'buzzwords', 'recommended_tracks', 'review', 'submitted_date'].sort()
+      );
+    });
+
+    it('gates on social_consent = true (not IS NOT FALSE / IS NOT NULL)', async () => {
+      mockRowsQueue.push([]);
+      await lookupWxycReviewsByAlbumId(7);
+
+      // Pinned as an exact structure rather than a loose "contains consent"
+      // check: the whole safety property is that the consent comparison is
+      // an equality against boolean `true`. Rewriting it as `isNotNull` or
+      // `ne(..., false)` — either of which would publish rows whose consent
+      // answer the ETL could not parse — changes this shape and fails here.
+      expect(chainSpy.where).toHaveBeenCalledTimes(1);
+      expect(chainSpy.where).toHaveBeenCalledWith({
+        and: [{ eq: ['album_id', 7] }, { eq: ['social_consent', true] }, { isNotNull: 'review' }],
+      });
+    });
+
+    it('renders submittedDate as a YYYY-MM-DD ET calendar date, not a timestamp', async () => {
+      mockRowsQueue.push([]);
+      await lookupWxycReviewsByAlbumId(7);
+
+      const projection = mockSelect.mock.calls[0][0] as Record<string, unknown>;
+      const submitted = { text: renderSql(projection.submitted_date) };
+      // Formatted in SQL: `submitted_at` is timestamptz, so drizzle would
+      // otherwise hand back a JS Date and the wire value would become a full
+      // UTC ISO instant — wrong shape, and a day early for evening ET
+      // submissions.
+      expect(submitted.text).toContain('to_char');
+      expect(submitted.text).toContain('YYYY-MM-DD');
+      expect(submitted.text).toContain('America/New_York');
+    });
+
+    it('projects a full row onto the WxycReviewItem wire shape', async () => {
+      mockRowsQueue.push([
+        {
+          review: 'Molina builds a whole room out of two notes and a loop pedal.',
+          artist_blurb: 'Argentine songwriter, ex-comedian, patron saint of the loop.',
+          recommended_tracks: 'la paradoja!!, ceramica',
+          buzzwords: 'hypnotic, playful, unmoored',
+          submitted_date: '2024-03-15',
+        },
+      ]);
+      const result = await lookupWxycReviewsByAlbumId(7);
+      expect(result).toEqual([
+        {
+          review: 'Molina builds a whole room out of two notes and a loop pedal.',
+          artistBlurb: 'Argentine songwriter, ex-comedian, patron saint of the loop.',
+          recommendedTracks: 'la paradoja!!, ceramica',
+          buzzwords: 'hypnotic, playful, unmoored',
+          submittedDate: '2024-03-15',
+        },
+      ]);
+    });
+
+    it('omits optional fields when null so decodeIfPresent stays compatible', async () => {
+      mockRowsQueue.push([
+        {
+          review: 'Terse, and better for it.',
+          artist_blurb: null,
+          recommended_tracks: null,
+          buzzwords: null,
+          submitted_date: null,
+        },
+      ]);
+      const result = await lookupWxycReviewsByAlbumId(7);
+      expect(result).toEqual([{ review: 'Terse, and better for it.' }]);
+      // No undefined optional keys leaked onto the item.
+      expect(Object.keys(result[0])).toEqual(['review']);
+    });
+
+    it('preserves row order and caps the page at WXYC_REVIEWS_LIMIT (5)', async () => {
+      mockRowsQueue.push([]);
+      await lookupWxycReviewsByAlbumId(7);
+      expect(chainSpy.limit).toHaveBeenCalledWith(5);
+    });
+
+    it('pins the newest-first ORDER BY (submitted_at DESC NULLS LAST, id DESC)', async () => {
+      mockRowsQueue.push([]);
+      await lookupWxycReviewsByAlbumId(7);
+      expect(chainSpy.orderBy).toHaveBeenCalledTimes(1);
+      const [first, second] = chainSpy.orderBy.mock.calls[0];
+      expect(renderSql(first).toLowerCase()).toContain('desc nulls last');
+      expect(second).toEqual({ desc: 'id' });
     });
   });
 });

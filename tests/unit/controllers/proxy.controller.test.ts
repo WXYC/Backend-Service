@@ -70,10 +70,12 @@ const mockSelectLinkedFlowsheetRow =
   jest.fn<(artist: string, release?: string) => Promise<LinkedFlowsheetRow | null>>();
 const mockLookupAlbumMetadataById = jest.fn<(albumId: number) => Promise<unknown>>();
 const mockLookupCriticReviewsByAlbumId = jest.fn<(albumId: number) => Promise<unknown[]>>();
+const mockLookupWxycReviewsByAlbumId = jest.fn<(albumId: number) => Promise<unknown[]>>();
 jest.mock('../../../apps/backend/services/album-metadata-lookup.service', () => ({
   selectLinkedFlowsheetRow: mockSelectLinkedFlowsheetRow,
   lookupAlbumMetadataById: mockLookupAlbumMetadataById,
   lookupCriticReviewsByAlbumId: mockLookupCriticReviewsByAlbumId,
+  lookupWxycReviewsByAlbumId: mockLookupWxycReviewsByAlbumId,
 }));
 
 // Default album_id the resolve step returns across getAlbumMetadata tests so
@@ -99,6 +101,15 @@ const defaultLinkedRow = (): LinkedFlowsheetRow => ({
 const mockCriticReviewsConfig = jest.fn<() => { enabled: boolean }>(() => ({ enabled: false }));
 jest.mock('../../../apps/backend/config/criticReviews', () => ({
   getConfig: mockCriticReviewsConfig,
+}));
+
+// ADR 0011 flag: getConfig().enabled gates the wxycReviews attach. Default
+// off (matches prod — this one has never been flipped on) so unrelated
+// getAlbumMetadata tests keep their exact response shapes; the DJ-reviews
+// suite opts in per test.
+const mockWxycReviewsConfig = jest.fn<() => { enabled: boolean }>(() => ({ enabled: false }));
+jest.mock('../../../apps/backend/config/wxycReviews', () => ({
+  getConfig: mockWxycReviewsConfig,
 }));
 
 // BS#1331 acceptance: the cohort split for trace explorer turns on
@@ -222,6 +233,7 @@ describe('proxy.controller', () => {
     // mockReturnValue set by a prior test) so unrelated getAlbumMetadata
     // assertions never see a leaked criticReviews attach.
     mockCriticReviewsConfig.mockReturnValue({ enabled: false });
+    mockWxycReviewsConfig.mockReturnValue({ enabled: false });
   });
 
   // --- searchArtwork ---
@@ -689,6 +701,117 @@ describe('proxy.controller', () => {
         expect(res.status).toHaveBeenCalledWith(200);
         const result = (res.json as jest.Mock).mock.calls[0][0];
         expect(result).not.toHaveProperty('criticReviews');
+      });
+    });
+
+    // ADR 0011: attach consented WXYC DJ reviews, flag-gated. Structurally
+    // the same additive attach as criticReviews above, keyed on the same
+    // once-resolved album_id — but the flag-off case carries more weight
+    // here, because what stays off the wire is unpublished reviewer-authored
+    // text rather than an already-public excerpt.
+    describe('wxycReviews attach (ADR 0011)', () => {
+      const sampleWxycReviews = [
+        {
+          review: 'Molina builds a whole room out of two notes and a loop pedal.',
+          buzzwords: 'hypnotic, playful, unmoored',
+          submittedDate: '2024-03-15',
+        },
+      ];
+
+      it('flag off (default): never calls the reviews lookup and omits wxycReviews', async () => {
+        // Even with the lookup primed to return reviews, the flag gate must
+        // keep the response byte-identical to before — the #32 freeze-safety
+        // invariant, and the reason this change can ship dark.
+        mockLookupWxycReviewsByAlbumId.mockResolvedValue(sampleWxycReviews);
+        const req = { query: { artistName: 'Juana Molina', releaseTitle: 'DOGA' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupWxycReviewsByAlbumId).not.toHaveBeenCalled();
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result).not.toHaveProperty('wxycReviews');
+      });
+
+      it('flag off: response is byte-identical to a build without the attach', async () => {
+        // Stronger than "the key is absent": serialize the whole payload with
+        // the lookup primed, and compare against the same request served with
+        // the attach's dependencies removed entirely. Any stray key, key
+        // reordering, or empty-array default would diverge here.
+        mockLookupWxycReviewsByAlbumId.mockResolvedValue(sampleWxycReviews);
+        const req = { query: { artistName: 'Juana Molina', releaseTitle: 'DOGA' } } as unknown as Request;
+
+        const withFlagOff = createMockRes();
+        await getAlbumMetadata(req, withFlagOff as Response, mockNext);
+        const flagOffBody = JSON.stringify((withFlagOff.json as jest.Mock).mock.calls[0][0]);
+
+        // Same request, but the lookup resolves empty — i.e. the pre-change
+        // world, where no DJ-review read existed at all.
+        mockLookupWxycReviewsByAlbumId.mockResolvedValue([]);
+        const baseline = createMockRes();
+        await getAlbumMetadata(req, baseline as Response, mockNext);
+        const baselineBody = JSON.stringify((baseline.json as jest.Mock).mock.calls[0][0]);
+
+        expect(flagOffBody).toBe(baselineBody);
+        expect(flagOffBody).not.toContain('wxycReviews');
+      });
+
+      it('flag on + non-empty: attaches wxycReviews keyed on the resolved album_id', async () => {
+        mockWxycReviewsConfig.mockReturnValue({ enabled: true });
+        mockLookupWxycReviewsByAlbumId.mockResolvedValue(sampleWxycReviews);
+        const req = { query: { artistName: 'Juana Molina', releaseTitle: 'DOGA' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        // Reuses the album_id already resolved for the metadata read — one
+        // extra indexed read, not a second key resolve.
+        expect(mockSelectLinkedFlowsheetRow).toHaveBeenCalledWith('Juana Molina', 'DOGA');
+        expect(mockLookupWxycReviewsByAlbumId).toHaveBeenCalledWith(DEFAULT_LINKED_ALBUM_ID);
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.wxycReviews).toEqual(sampleWxycReviews);
+      });
+
+      it('flag on + empty result: omits wxycReviews so an unreviewed album is byte-identical', async () => {
+        mockWxycReviewsConfig.mockReturnValue({ enabled: true });
+        mockLookupWxycReviewsByAlbumId.mockResolvedValue([]);
+        const req = { query: { artistName: 'Unreviewed', releaseTitle: 'Album' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result).not.toHaveProperty('wxycReviews');
+      });
+
+      it('flag on + lookup throws: degrades to omitting wxycReviews, still responds 200', async () => {
+        mockWxycReviewsConfig.mockReturnValue({ enabled: true });
+        mockLookupWxycReviewsByAlbumId.mockRejectedValue(new Error('db down'));
+        const req = { query: { artistName: 'Any', releaseTitle: 'Album' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result).not.toHaveProperty('wxycReviews');
+      });
+
+      it('free-text row (no linked album): never calls the lookup', async () => {
+        // `album_id IS NULL` means there is no catalog album to key reviews
+        // on — the same gate criticReviews and the discogs-unavailable flag
+        // already apply.
+        mockWxycReviewsConfig.mockReturnValue({ enabled: true });
+        mockSelectLinkedFlowsheetRow.mockResolvedValue(null);
+        mockLookupWxycReviewsByAlbumId.mockResolvedValue(sampleWxycReviews);
+        const req = { query: { artistName: 'Free Text', releaseTitle: 'Unlinked' } } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect(mockLookupWxycReviewsByAlbumId).not.toHaveBeenCalled();
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result).not.toHaveProperty('wxycReviews');
       });
     });
 
@@ -2250,6 +2373,77 @@ describe('proxy.controller', () => {
         expect((onRes.json as jest.Mock).mock.calls[0][0].criticReviews).toEqual([
           { source: 'The Quietus', url: 'https://thequietus.com/x', snippet: 'snippet' },
         ]);
+
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
+      });
+
+      it('keys the cache on the WXYC_REVIEWS_ENABLED flag state too, so its flip is not served a stale shape', async () => {
+        // The memo key folds in EVERY flag that changes the response shape.
+        // WXYC_REVIEWS_ENABLED is the second such flag (ADR 0011); without it
+        // in the key, flipping the flag on would keep serving the cached
+        // flag-off body — no wxycReviews — for the rest of the 1h TTL.
+        mockSelectLinkedFlowsheetRow.mockResolvedValue({
+          album_id: DEFAULT_LINKED_ALBUM_ID,
+          record_label: null,
+          label_id: null,
+          metadata_status: 'enriched_no_match',
+        });
+        mockLookupAlbumMetadataById.mockResolvedValue(null);
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+        mockLookupWxycReviewsByAlbumId.mockResolvedValue([{ review: 'A consented DJ write-up.' }]);
+
+        const req = {
+          query: { artistName: 'DJ Flag Split Artist', releaseTitle: 'DJ Flag Split Album' },
+        } as unknown as Request;
+
+        // Flag off: cached without wxycReviews.
+        mockWxycReviewsConfig.mockReturnValue({ enabled: false });
+        const offRes = createMockRes();
+        await getAlbumMetadata(req, offRes as Response, mockNext);
+        expect((offRes.json as jest.Mock).mock.calls[0][0]).not.toHaveProperty('wxycReviews');
+
+        // Flag on: a DIFFERENT cache key, so the response is computed fresh
+        // rather than served from the flag-off entry.
+        mockWxycReviewsConfig.mockReturnValue({ enabled: true });
+        const onRes = createMockRes();
+        await getAlbumMetadata(req, onRes as Response, mockNext);
+        expect((onRes.json as jest.Mock).mock.calls[0][0].wxycReviews).toEqual([
+          { review: 'A consented DJ write-up.' },
+        ]);
+
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not cache when the DJ-reviews read throws: a repeat request re-attempts the whole lookup', async () => {
+        // Mirrors the critic-reviews contract: a per-response optional sub-read
+        // that failed must not freeze its degraded shape into the 1h memo.
+        mockSelectLinkedFlowsheetRow.mockResolvedValue({
+          album_id: DEFAULT_LINKED_ALBUM_ID,
+          record_label: null,
+          label_id: null,
+          metadata_status: 'enriched_no_match',
+        });
+        mockLookupAlbumMetadataById.mockResolvedValue(null);
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+        mockWxycReviewsConfig.mockReturnValue({ enabled: true });
+        mockLookupWxycReviewsByAlbumId.mockRejectedValue(new Error('db down'));
+
+        const req = {
+          query: { artistName: 'DJ Throw Artist', releaseTitle: 'DJ Throw Album' },
+        } as unknown as Request;
+
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
 
         expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
       });
