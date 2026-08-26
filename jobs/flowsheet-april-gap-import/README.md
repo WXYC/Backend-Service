@@ -78,7 +78,7 @@ A 403-row (or even 2000-row) window fetch never produces a MySQL `IN (...)` pred
 
 Imported rows land `metadata_status='pending'`, which `filterForEnrichment` (the CDC enrichment worker, `apps/enrichment-worker`) picks up on any track INSERT — but these rows' `add_time` is April-dated, which is **always** outside `jobs/flowsheet-metadata-backfill`'s `BACKFILL_RECOVERY_WINDOW_HOURS` (default 6h) gap-recovery sweep. If the CDC worker misses a row (a restart, a dropped notification), **nothing else will ever pick it up** — the hourly safety net that exists for exactly this situation is blind to historical `add_time` by construction.
 
-**Do not "fix" this by widening `BACKFILL_RECOVERY_WINDOW_HOURS`.** That knob's whole purpose is excluding the ~748k-row undrained historical backlog #1011 left behind; widening it (even temporarily) re-admits that entire backlog to the hourly sweep.
+**Do not "fix" this by widening `BACKFILL_RECOVERY_WINDOW_HOURS`.** That knob's whole purpose is excluding the undrained historical backlog #1011 left behind (≈163k rows as of 2026-08-26, down from ~748k after the 2026-08-01→08-12 catch-up drain (BS#2279)); widening it (even temporarily) re-admits that entire backlog to the hourly sweep.
 
 Instead:
 
