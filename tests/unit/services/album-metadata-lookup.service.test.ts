@@ -464,12 +464,19 @@ describe('album-metadata-lookup.service', () => {
 
       const projection = mockSelect.mock.calls[0][0] as Record<string, unknown>;
       const selected = Object.keys(projection);
+      // Named explicitly, and NOT redundant with the exact-set assertion
+      // below: these two survive a legitimate future widening of the wire
+      // shape (which forces the literal list below to be edited, and could be
+      // edited carelessly), so they keep guarding the columns that matter
+      // most even then.
       expect(selected).not.toContain('reviewer_raw');
       expect(selected).not.toContain('social_consent_raw');
       // Nor may they hide inside a projected value (e.g. a raw sql fragment).
       const serialized = JSON.stringify(Object.values(projection));
       expect(serialized).not.toMatch(/reviewer_raw|social_consent_raw/);
-      // The projection is exactly the five publish-safe wire fields.
+      // The projection is exactly the five publish-safe wire fields. This is
+      // the assertion that catches the realistic leak — a bare `select()` or
+      // a spread, neither of which mentions a PII column by name.
       expect(selected.sort()).toEqual(
         ['artist_blurb', 'buzzwords', 'recommended_tracks', 'review', 'submitted_date'].sort()
       );
@@ -495,14 +502,14 @@ describe('album-metadata-lookup.service', () => {
       await lookupWxycReviewsByAlbumId(7);
 
       const projection = mockSelect.mock.calls[0][0] as Record<string, unknown>;
-      const submitted = { text: renderSql(projection.submitted_date) };
+      const submitted = renderSql(projection.submitted_date);
       // Formatted in SQL: `submitted_at` is timestamptz, so drizzle would
       // otherwise hand back a JS Date and the wire value would become a full
       // UTC ISO instant — wrong shape, and a day early for evening ET
       // submissions.
-      expect(submitted.text).toContain('to_char');
-      expect(submitted.text).toContain('YYYY-MM-DD');
-      expect(submitted.text).toContain('America/New_York');
+      expect(submitted).toContain('to_char');
+      expect(submitted).toContain('YYYY-MM-DD');
+      expect(submitted).toContain('America/New_York');
     });
 
     it('projects a full row onto the WxycReviewItem wire shape', async () => {
@@ -543,7 +550,7 @@ describe('album-metadata-lookup.service', () => {
       expect(Object.keys(result[0])).toEqual(['review']);
     });
 
-    it('preserves row order and caps the page at WXYC_REVIEWS_LIMIT (5)', async () => {
+    it('caps the page at WXYC_REVIEWS_LIMIT (5)', async () => {
       mockRowsQueue.push([]);
       await lookupWxycReviewsByAlbumId(7);
       expect(chainSpy.limit).toHaveBeenCalledWith(5);

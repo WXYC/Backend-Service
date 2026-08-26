@@ -733,11 +733,20 @@ describe('proxy.controller', () => {
         expect(result).not.toHaveProperty('wxycReviews');
       });
 
-      it('flag off: response is byte-identical to a build without the attach', async () => {
-        // Stronger than "the key is absent": serialize the whole payload with
-        // the lookup primed, and compare against the same request served with
-        // the attach's dependencies removed entirely. Any stray key, key
-        // reordering, or empty-array default would diverge here.
+      it('byte-identical bodies: flag off, and flag on for an album with no consented rows', async () => {
+        // The dark-ship invariant, as a string comparison over the whole
+        // serialized payload rather than a key-absence check: a stray key, a
+        // key reordering, or an empty-array default would diverge here.
+        //
+        // The two legs are deliberately DIFFERENT code paths. Flag off skips
+        // the attach block entirely; flag on runs it, calls the lookup, and
+        // declines to attach because the result is empty. Comparing flag-off
+        // against flag-off with a different mock value would assert nothing —
+        // the lookup is never called when the flag is off, so the mock's
+        // value is unreachable and the two bodies are identical by
+        // construction. This pins the property for BOTH cohorts that must see
+        // an unchanged response: everyone today (flag off), and every album
+        // without consented reviews after the flag is flipped on.
         mockLookupWxycReviewsByAlbumId.mockResolvedValue(sampleWxycReviews);
         const req = { query: { artistName: 'Juana Molina', releaseTitle: 'DOGA' } } as unknown as Request;
 
@@ -745,14 +754,14 @@ describe('proxy.controller', () => {
         await getAlbumMetadata(req, withFlagOff as Response, mockNext);
         const flagOffBody = JSON.stringify((withFlagOff.json as jest.Mock).mock.calls[0][0]);
 
-        // Same request, but the lookup resolves empty — i.e. the pre-change
-        // world, where no DJ-review read existed at all.
+        mockWxycReviewsConfig.mockReturnValue({ enabled: true });
         mockLookupWxycReviewsByAlbumId.mockResolvedValue([]);
-        const baseline = createMockRes();
-        await getAlbumMetadata(req, baseline as Response, mockNext);
-        const baselineBody = JSON.stringify((baseline.json as jest.Mock).mock.calls[0][0]);
+        const flagOnUnreviewed = createMockRes();
+        await getAlbumMetadata(req, flagOnUnreviewed as Response, mockNext);
+        const flagOnUnreviewedBody = JSON.stringify((flagOnUnreviewed.json as jest.Mock).mock.calls[0][0]);
 
-        expect(flagOffBody).toBe(baselineBody);
+        expect(mockLookupWxycReviewsByAlbumId).toHaveBeenCalledTimes(1); // flag-on leg only
+        expect(flagOnUnreviewedBody).toBe(flagOffBody);
         expect(flagOffBody).not.toContain('wxycReviews');
       });
 
@@ -2445,7 +2454,51 @@ describe('proxy.controller', () => {
         await getAlbumMetadata(req, createMockRes() as Response, mockNext);
         await getAlbumMetadata(req, createMockRes() as Response, mockNext);
 
+        // Both requests independently re-attempt the full lookup — nothing was
+        // cached from the first (failed-reviews) attempt. Asserting the reviews
+        // lookup too, not just the LML read: without it the test would still
+        // pass if the failed attach were cached but the LML read repeated for
+        // some unrelated reason.
+        expect(mockLookupWxycReviewsByAlbumId).toHaveBeenCalledTimes(2);
         expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
+      });
+
+      it('still caches when the DJ-reviews read succeeds', async () => {
+        // The complement of the throw case above: a SUCCESSFUL attach must not
+        // block caching either. Terminal status so the response is cacheable at
+        // all — BS#1893's pending rule would otherwise mask the behaviour under
+        // test. Mirrors `still caches when the critic-reviews read succeeds`.
+        mockSelectLinkedFlowsheetRow.mockResolvedValue({
+          album_id: DEFAULT_LINKED_ALBUM_ID,
+          record_label: null,
+          label_id: null,
+          metadata_status: 'enriched_no_match',
+        });
+        mockLookupAlbumMetadataById.mockResolvedValue(null);
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+        mockWxycReviewsConfig.mockReturnValue({ enabled: true });
+        mockLookupWxycReviewsByAlbumId.mockResolvedValue([{ review: 'A consented DJ write-up.' }]);
+
+        const req = {
+          query: { artistName: 'Healthy DJ Reviews Artist', releaseTitle: 'Healthy DJ Reviews Album' },
+        } as unknown as Request;
+
+        await getAlbumMetadata(req, createMockRes() as Response, mockNext);
+        const secondRes = createMockRes();
+        await getAlbumMetadata(req, secondRes as Response, mockNext);
+
+        // The second request is served entirely from cache, and the memoized
+        // body still carries the attach.
+        expect(mockLookupWxycReviewsByAlbumId).toHaveBeenCalledTimes(1);
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+        expect((secondRes.json as jest.Mock).mock.calls[0][0].wxycReviews).toEqual([
+          { review: 'A consented DJ write-up.' },
+        ]);
       });
     });
   });

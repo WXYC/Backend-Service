@@ -237,9 +237,16 @@ describe('album_review_submissions serve contract (real PG)', () => {
     const albumId = await insertLibraryAlbum(sql, 'pii');
     insertedAlbumIds.push(albumId);
 
+    // The optional columns are populated here (the only row in this spec that
+    // does): the key-set assertion below then proves the projection selects
+    // exactly the five publish-safe columns while carrying REAL values, rather
+    // than only ever being exercised against an all-null row.
     await insertSubmission(sql, albumId, {
       key: 'pii-1',
       review: 'A review whose author asked not to be named.',
+      artistBlurb: 'Chapel Hill trio, three records deep.',
+      recommendedTracks: 'Side A, track 2!!',
+      buzzwords: 'jangly, wry, unhurried',
       socialConsent: true,
       submittedAt: '2024-03-15T14:00:00-04:00',
     });
@@ -262,6 +269,11 @@ describe('album_review_submissions serve contract (real PG)', () => {
       'review',
       'submitted_date',
     ]);
+    // The publish-safe columns really did round-trip...
+    expect(rows[0].artist_blurb).toBe('Chapel Hill trio, three records deep.');
+    expect(rows[0].recommended_tracks).toBe('Side A, track 2!!');
+    expect(rows[0].buzzwords).toBe('jangly, wry, unhurried');
+    // ...while the PII-internal values appear nowhere in the payload.
     const payload = JSON.stringify(rows);
     expect(payload).not.toContain('Dana Ruiz');
     expect(payload).not.toContain('consent answer verbatim');
