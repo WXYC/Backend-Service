@@ -121,20 +121,22 @@ describe('album-reviews-etl writer + link SQL contract (real DB)', () => {
       )
     `);
 
-    // The two SQL twins the sweep calls, verbatim from migrations 0092 and
-    // 0134. Schema-local so the sweep statement below is byte-identical to
-    // the one `link.ts` emits (which schema-qualifies both).
+    // The two SQL twins the sweep calls. Schema-local shims so the sweep
+    // statement below is byte-identical to the one `link.ts` emits (which
+    // schema-qualifies both), but each DELEGATES to the real migrated
+    // function rather than copying its body — the
+    // `bs-2117-crossreference-backfill.spec.js` precedent. A copy here would
+    // keep passing after migration 0092 or 0134 changed underneath it, which
+    // is precisely the drift this test exists to catch.
     await sql.unsafe(`
       CREATE FUNCTION "${schemaName}".normalize_artist_name(input text) RETURNS text
-        LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $fn$
-        SELECT lower(regexp_replace(coalesce(input, ''), '^the[ \\t\\n\\r\\f\\v]+', '', 'i'));
-      $fn$
+        LANGUAGE sql IMMUTABLE PARALLEL SAFE
+        AS $fn$ SELECT wxyc_schema.normalize_artist_name(input) $fn$
     `);
     await sql.unsafe(`
       CREATE FUNCTION "${schemaName}".fold_artist_name(input text) RETURNS text
-        LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $fn$
-        SELECT lower(regexp_replace(normalize(coalesce(input, ''), NFD), '[\\u0300-\\u036f]', '', 'g'));
-      $fn$
+        LANGUAGE sql IMMUTABLE PARALLEL SAFE
+        AS $fn$ SELECT wxyc_schema.fold_artist_name(input) $fn$
     `);
 
     // The 0119 table, schema-substituted (columns + FK + partial unique
@@ -294,14 +296,28 @@ describe('album-reviews-etl writer + link SQL contract (real DB)', () => {
     expect(orphaned.album_id).toBeNull();
   });
 
-  // The widened candidate sweep (`loadCandidates` in link.ts). Unit tests
-  // cover the TS decision; only a real PG can prove the SQL half — that the
-  // two MATERIALIZED CTEs compose, that `fold_artist_name` is reachable over
-  // a CTE column, that the `text[]` array-literal binding survives the
-  // `= ANY(...)` (the BS#1068/BS#1071 splat trap), and that the `<> ''`
-  // guards hold on the legs that are empty library-wide.
+  // The widened candidate sweep (`loadCandidates` in link.ts). This spec proves
+  // the SEMANTICS a real PG decides — that the two MATERIALIZED CTEs compose,
+  // that `fold_artist_name` is reachable over a CTE column and inside a CASE,
+  // that the `text[]` array-literal binding survives the `= ANY(...)` (the
+  // BS#1068/BS#1071 splat trap), and that the `<> ''` guards hold on the legs
+  // that are empty library-wide.
+  //
+  // It is a TRANSCRIPTION, not the emitted statement: the integration runner is
+  // babel-jest with no TypeScript (see the file header), so `link.ts` cannot be
+  // required here. Two deliberate deviations from what `link.ts` emits —
+  // `$1`/`$2` bind params instead of inlined array literals, and a trailing
+  // `ORDER BY "id"` production never asks for — so do NOT read this as
+  // byte-identical. The statement TEXT is pinned separately and exactly, in
+  // `tests/unit/jobs/album-reviews-etl/link.test.ts` via `renderSql`; that is
+  // the test that fails if the sweep changes shape. This one would not.
   test('the candidate sweep selects via artist_name, album_artist, alternate_artist_name, and the diacritic fold', async () => {
-    await sql.unsafe(`TRUNCATE "${schemaName}".library RESTART IDENTITY CASCADE`);
+    // Named explicitly rather than via CASCADE: album_review_submissions
+    // carries an FK to library, so `TRUNCATE library CASCADE` would silently
+    // take the submissions every earlier test in this file inserted with it.
+    // Spelling both out keeps that destruction visible to whoever adds the
+    // next test below this one.
+    await sql.unsafe(`TRUNCATE "${schemaName}".library, "${schemaName}".album_review_submissions RESTART IDENTITY`);
     const [viaPrimary] = await sql.unsafe(
       `INSERT INTO "${schemaName}".library (artist_name, album_title) VALUES ('The Stereolab', 'Dots and Loops') RETURNING id`
     );
@@ -330,9 +346,9 @@ describe('album-reviews-etl writer + link SQL contract (real DB)', () => {
       folded AS MATERIALIZED (
         SELECT
           "id", "album_title", norm_primary, norm_album_artist, norm_alternate,
-          "${schemaName}".fold_artist_name(norm_primary) AS fold_primary,
-          "${schemaName}".fold_artist_name(norm_album_artist) AS fold_album_artist,
-          "${schemaName}".fold_artist_name(norm_alternate) AS fold_alternate
+          CASE WHEN norm_primary <> '' THEN "${schemaName}".fold_artist_name(norm_primary) ELSE '' END AS fold_primary,
+          CASE WHEN norm_album_artist <> '' THEN "${schemaName}".fold_artist_name(norm_album_artist) ELSE '' END AS fold_album_artist,
+          CASE WHEN norm_alternate <> '' THEN "${schemaName}".fold_artist_name(norm_alternate) ELSE '' END AS fold_alternate
         FROM normalized
       )
       SELECT "id", "album_title", norm_primary, norm_album_artist, norm_alternate
@@ -348,11 +364,18 @@ describe('album-reviews-etl writer + link SQL contract (real DB)', () => {
     const norms = '{"stereolab","jessica pratt","smile","hermanos gutiérrez"}';
     const folded = '{"stereolab","jessica pratt","smile","hermanos gutierrez"}';
     const rows = await sql.unsafe(sweep, [norms, folded]);
-    expect(rows.map((r) => r.id)).toEqual([viaPrimary.id, viaAlbumArtist.id, viaAlternate.id, viaFold.id]);
+    // Compared as a SET: the `ORDER BY` above is a test-only convenience, so
+    // removing it (to close the gap with the emitted statement) must not turn
+    // this into a flake against an unordered scan.
+    const byId = (a, b) => a - b;
+    expect(rows.map((r) => r.id).sort(byId)).toEqual(
+      [viaPrimary.id, viaAlbumArtist.id, viaAlternate.id, viaFold.id].sort(byId)
+    );
 
     // The leading-"The " strip is the 0092 twin's job, and it ran in SQL.
-    expect(rows[0].norm_primary).toBe('stereolab');
-    expect(rows[2].norm_alternate).toBe('smile');
+    const rowById = (id) => rows.find((r) => r.id === id);
+    expect(rowById(viaPrimary.id).norm_primary).toBe('stereolab');
+    expect(rowById(viaAlternate.id).norm_alternate).toBe('smile');
 
     // The `<> ''` guards: an empty probe norm must not drag in the rows whose
     // album_artist / alternate_artist_name legs are empty (all of them, in

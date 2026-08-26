@@ -9,6 +9,7 @@
  */
 import { runEtl, resolveDryRun, type RunOptions, type Totals } from '../../../../jobs/album-reviews-etl/orchestrate';
 import type { UpsertOutcome } from '../../../../jobs/album-reviews-etl/writer';
+import { emptyLinkTotals } from '../../../../jobs/album-reviews-etl/link';
 
 const HEADERS = [
   'Timestamp',
@@ -47,7 +48,14 @@ const makeOpts = (overrides: Partial<RunOptions> = {}): RunOptions & { upserts: 
     },
     linkPass: () => {
       linkCalls.push(1);
-      return Promise.resolve({ linked: 2, link_ambiguous: 1, link_unmatched: 3 });
+      return Promise.resolve({
+        ...emptyLinkTotals(),
+        linked: 2,
+        linked_exact: 1,
+        linked_relaxed: 1,
+        link_ambiguous: 1,
+        link_unmatched: 3,
+      });
     },
     upserts,
     linkCalls,
@@ -80,6 +88,8 @@ describe('runEtl — counters', () => {
       updated: 1,
       unchanged: 1,
       linked: 2,
+      linked_exact: 1,
+      linked_relaxed: 1,
       link_ambiguous: 1,
       link_unmatched: 3,
     });
