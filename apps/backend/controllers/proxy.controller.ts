@@ -544,21 +544,44 @@ function extractAlbumMetadataEnrichment(metadata: Record<string, unknown>): Reco
 }
 
 /**
- * Two feature flags change this response's shape — CRITIC_REVIEWS_ENABLED
- * (adds `criticReviews`, ADR 0012) and WXYC_REVIEWS_ENABLED (adds
- * `wxycReviews`, ADR 0011) — so both are folded into the key. Without a
- * flag in the key, flipping it on would keep serving the cached pre-flip
- * body for the rest of the 1h TTL window. Mirrors `trackSearchCacheKey` in
- * `library.service.ts`.
+ * The response-SHAPE half of {@link albumMetadataCacheKey}: one bit per feature
+ * flag that adds or removes a field on this response. Two do today —
+ * CRITIC_REVIEWS_ENABLED (adds `criticReviews`, ADR 0012) and
+ * WXYC_REVIEWS_ENABLED (adds `wxycReviews`, ADR 0011).
  *
- * Any future flag that adds or removes a field on this response must be
- * appended here as another bit.
+ * **Any future flag that changes this response's shape must be appended here
+ * as another bit.** This function existing separately from the key builder is
+ * what gives that instruction a single-purpose home: a reader asking "what
+ * determines the shape?" gets one three-line answer instead of having to
+ * disentangle it from the request-identity normalization below. Mirrors the
+ * `getFlagStateHash` / `trackSearchCacheKey` split in `library.service.ts`,
+ * whose hash is likewise a hand-rolled bit string — a registry would relocate
+ * the "remember to register your flag" step, not remove it.
+ *
+ * Do not drop a bit on the argument that the current deployment mechanism
+ * hides the consequence. Today a flag flip means a new `.env` plus a container
+ * **recreate** (see docs/env-vars.md), which discards this in-process LRU at
+ * the same instant — so a live flip cannot in fact strand a pre-flip body for
+ * the rest of the 1h TTL. That is a property of how the flags happen to be
+ * delivered, not of the cache: it stops holding the moment a flag becomes
+ * reloadable in-process, and the key would then be silently wrong. The memo
+ * key must be a function of everything that determines the body, or the memo
+ * is unsound; keeping that true by construction is cheaper than the coupling
+ * to the deploy model that the alternative would take on.
  */
-function albumMetadataCacheKey(artistName: string, releaseTitle?: string, trackTitle?: string): string {
+function albumMetadataFlagStateHash(): string {
   const criticBit = getCriticReviewsConfig().enabled ? '1' : '0';
   const wxycBit = getWxycReviewsConfig().enabled ? '1' : '0';
+  return `${criticBit}${wxycBit}`;
+}
+
+/**
+ * Memo key for the assembled `/proxy/metadata/album` response: the normalized
+ * request identity, plus the response-shape hash above.
+ */
+function albumMetadataCacheKey(artistName: string, releaseTitle?: string, trackTitle?: string): string {
   const norm = (s?: string) => (s || '').toLowerCase().trim();
-  return `${norm(artistName)}|${norm(releaseTitle)}|${norm(trackTitle)}:${criticBit}${wxycBit}`;
+  return `${norm(artistName)}|${norm(releaseTitle)}|${norm(trackTitle)}:${albumMetadataFlagStateHash()}`;
 }
 
 /**
