@@ -48,9 +48,9 @@
  * linked-row cohort (the steady state for entries old enough to be of
  * interest to a detail-view fetch).
  */
-import { sql, eq, desc, inArray } from 'drizzle-orm';
-import { db, album_metadata, album_critic_reviews } from '@wxyc/database';
-import type { CriticReviewItem } from '@wxyc/shared/dtos';
+import { sql, eq, and, desc, inArray, isNotNull } from 'drizzle-orm';
+import { db, album_metadata, album_critic_reviews, album_review_submissions } from '@wxyc/database';
+import type { CriticReviewItem, WxycReviewItem } from '@wxyc/shared/dtos';
 import type { DiscogsResolvedToken, DiscogsTrackItem } from '@wxyc/lml-client';
 
 /**
@@ -314,4 +314,147 @@ export async function lookupCriticReviewsByAlbumIds(albumIds: number[]): Promise
   }
 
   return result;
+}
+
+/**
+ * Cap on the number of DJ reviews returned per album. Same rationale as
+ * {@link CRITIC_REVIEWS_LIMIT}: the detail view shows a short list, and an
+ * unbounded array on a serve path is a payload-size risk. Newest-first (see
+ * ORDER BY below) means the cap keeps the most recent write-ups. 14 albums
+ * currently carry 2-3 consented reviews, so this bound is not reached in
+ * practice today — it exists so a future import can't make it reachable.
+ *
+ * Deliberately a module constant and NOT an env var: only the `*_ENABLED`
+ * deployment flags go through `createEnvFlagConfig`. A tunable page size
+ * would be a wire-shape knob with no operator use case.
+ */
+const WXYC_REVIEWS_LIMIT = 5;
+
+/**
+ * Consented WXYC DJ album reviews for an already-resolved `library.id` (DJ
+ * Google-Form review archive, ADR 0011). The caller resolves the id via
+ * {@link selectLinkedFlowsheetRow} once and shares it with
+ * {@link lookupAlbumMetadataById}, so a given request describes the same
+ * album for metadata and reviews alike.
+ *
+ * **The consent gate is this function's reason to exist.** Reviewers were
+ * asked, on the Google Form, whether they were comfortable with the review
+ * being shared publicly; `jobs/album-reviews-etl/` parses that free-text
+ * answer through a closed vocabulary into `social_consent`, which is `true`
+ * only for an affirmative answer, `false` for exactly "no", and **NULL for
+ * blank or unrecognized text**. The predicate here is therefore an exact
+ * `social_consent = true` — never `IS NOT FALSE`, never `IS NOT NULL`. An
+ * ambiguous or unparsed answer is not consent, and a row that never cleared
+ * the parser must never be published on its behalf. Enforcing this in SQL
+ * (rather than in a mapper, or in the client) means no downstream bug can
+ * widen the set: a row that fails the predicate is never read out of
+ * Postgres at all.
+ *
+ * **Reviewer identity never leaves this function.** The form promised
+ * reviewers their names would not be shared, so `reviewer_raw` and
+ * `social_consent_raw` — both PII-internal, the latter because the verbatim
+ * consent answers carry name-adjacent asides — are absent from the explicit
+ * `select({...})` below. That field list is the leak barrier: because the
+ * columns are never fetched, no projection, serializer, or logging change
+ * downstream can surface them by accident.
+ *
+ * `review IS NOT NULL` completes the gate — a consented row with no body is
+ * useless to render, and emitting `review: null` would violate the required
+ * `review` field on the wire schema.
+ *
+ * Returns `[]` (never `null`) when the album has no qualifying rows — the
+ * caller attaches `wxycReviews` only when the array is non-empty, so an
+ * album with no consented reviews keeps a byte-identical response. Like the
+ * critic-reviews read, this is independent of whether `album_metadata`
+ * enrichment has run.
+ *
+ * Ordered newest-first (`submitted_at DESC NULLS LAST`, then `id DESC` as a
+ * stable tiebreak for undated and same-instant rows) and capped at
+ * {@link WXYC_REVIEWS_LIMIT}.
+ *
+ * **`submitted_at` is formatted in SQL, and this is the one place this read
+ * is NOT a mirror of its critic-reviews sibling.** `album_critic_reviews
+ * .published_at` is a `date`, which drizzle already returns as a clean
+ * `YYYY-MM-DD` string. `album_review_submissions.submitted_at` is
+ * `timestamptz`, so drizzle would return a JS `Date` and the serialized wire
+ * value would become a full UTC ISO instant — the wrong shape for the
+ * `submittedDate` date field, and a day early for evening submissions, whose
+ * UTC instant has already rolled past midnight. `to_char(... AT TIME ZONE
+ * 'America/New_York', 'YYYY-MM-DD')` renders the reviewer's own local
+ * submission date; ET is correct because the ETL parsed the form's naive
+ * timestamps as ET wall-clock in the first place.
+ *
+ * The return type is the generated `WxycReviewItem` from `@wxyc/shared`
+ * (SSOT: the schema of the same name in wxyc-shared `api.yaml`, contract
+ * WXYC/wxyc-shared#259). Unlike `CriticReviewItem`, the **full review body**
+ * is surfaced rather than a capped excerpt: these are WXYC-authored, so the
+ * copyright constraint that forces external critic text to be excerpt-only
+ * with a mandatory link-out does not apply. The binding constraint here is
+ * consent and reviewer anonymity, not copyright.
+ */
+export async function lookupWxycReviewsByAlbumId(albumId: number): Promise<WxycReviewItem[]> {
+  const rows = await db
+    .select({
+      review: album_review_submissions.review,
+      artist_blurb: album_review_submissions.artist_blurb,
+      recommended_tracks: album_review_submissions.recommended_tracks,
+      buzzwords: album_review_submissions.buzzwords,
+      submitted_date: sql<
+        string | null
+      >`to_char(${album_review_submissions.submitted_at} AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')`,
+    })
+    .from(album_review_submissions)
+    .where(
+      and(
+        eq(album_review_submissions.album_id, albumId),
+        eq(album_review_submissions.social_consent, true),
+        isNotNull(album_review_submissions.review)
+      )
+    )
+    .orderBy(sql`${album_review_submissions.submitted_at} DESC NULLS LAST`, desc(album_review_submissions.id))
+    .limit(WXYC_REVIEWS_LIMIT);
+
+  // The `review IS NOT NULL` predicate above already excludes bodyless rows,
+  // so this filter should never drop anything. It is kept because `review` is
+  // a nullable column and drizzle types it as such: narrowing here — rather
+  // than asserting the row type — means a future edit that loosens the WHERE
+  // clause degrades to omitting the row instead of emitting `review: null`
+  // against a wire schema that marks the field required.
+  return rows.filter((row): row is WxycReviewRow => row.review !== null).map(projectWxycReviewRow);
+}
+
+/**
+ * Row shape {@link lookupWxycReviewsByAlbumId} projects — the four
+ * publish-safe `album_review_submissions` text columns plus the SQL-formatted
+ * submission date. `review` is non-null here because the caller narrows to it;
+ * the underlying column is nullable.
+ */
+type WxycReviewRow = {
+  review: string;
+  artist_blurb: string | null;
+  recommended_tracks: string | null;
+  buzzwords: string | null;
+  submitted_date: string | null;
+};
+
+/**
+ * Project one `album_review_submissions` row onto the wire shape, omitting
+ * optional fields when null so the response carries only present keys
+ * (matches the metadata handler's "assign only when present" convention and
+ * keeps iOS `decodeIfPresent` compatible).
+ *
+ * Extracted — like {@link projectCriticReviewRow} — so that a future batched
+ * sibling (a `lookupWxycReviewsByAlbumIds` for flowsheet feed-assembly,
+ * should DJ reviews ever be inlined into the V2 feed the way BS#1872 inlined
+ * critic reviews) cannot drift from this projection. Drift here would be a
+ * privacy bug, not merely a shape bug, so the single-writer discipline
+ * matters more than it does for critic reviews.
+ */
+function projectWxycReviewRow(row: WxycReviewRow): WxycReviewItem {
+  const item: WxycReviewItem = { review: row.review };
+  if (row.artist_blurb) item.artistBlurb = row.artist_blurb;
+  if (row.recommended_tracks) item.recommendedTracks = row.recommended_tracks;
+  if (row.buzzwords) item.buzzwords = row.buzzwords;
+  if (row.submitted_date) item.submittedDate = row.submitted_date;
+  return item;
 }
