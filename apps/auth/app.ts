@@ -6,7 +6,13 @@ import * as Sentry from '@sentry/node';
 import { config } from 'dotenv';
 config();
 
-import { auth, bootstrapTrustedClients, buildTrustedClients, resolveCorsOrigin } from '@wxyc/authentication';
+import {
+  auth,
+  bootstrapTrustedClients,
+  buildTrustedClients,
+  grantsAdminFlag,
+  resolveCorsOrigin,
+} from '@wxyc/authentication';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import cors from 'cors';
 import express from 'express';
@@ -550,9 +556,17 @@ const runSyncAdminRoles = async () => {
 
     await syncAdminRoles({
       defaultOrgSlug: process.env.DEFAULT_ORG_SLUG,
-      // Find all users who are stationManager/admin/owner in default org but don't have admin role
-      findUsersMissingAdminFlag: (defaultOrgSlug) =>
-        db
+      // Find all users whose membership justifies the admin flag but who lack it.
+      //
+      // The role predicate is `grantsAdminFlag` in TS, not a SQL IN-list: this
+      // is the same question the membership hooks answer, and this reconciler
+      // exists precisely to retry a hook that failed. A hardcoded list here
+      // would stay narrow while the hook path widened with the shared alias
+      // table (BS#2282), so a membership stored as `station_manager` would be
+      // granted the flag by the hook and — if that hook ever failed — never
+      // repaired by this sweep. Grant and repair must accept the same strings.
+      findUsersMissingAdminFlag: async (defaultOrgSlug) => {
+        const rows = await db
           .select({
             userId: user.id,
             userEmail: user.email,
@@ -564,9 +578,10 @@ const runSyncAdminRoles = async () => {
           .innerJoin(organization, sql`${member.organizationId} = ${organization.id}`)
           .where(
             sql`${organization.slug} = ${defaultOrgSlug}
-        AND ${member.role} IN ('admin', 'owner', 'stationManager')
         AND (${user.role} IS NULL OR ${user.role} != 'admin')`
-          ),
+          );
+        return rows.filter((row) => typeof row.memberRole === 'string' && grantsAdminFlag(row.memberRole));
+      },
       setUserRole: async (userId, role) => {
         await db.update(user).set({ role }).where(eq(user.id, userId));
       },

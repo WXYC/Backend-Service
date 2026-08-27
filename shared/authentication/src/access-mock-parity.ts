@@ -66,12 +66,13 @@ const compareStatementMap = (
  *
  * Checks the two statement maps the roles are built from, then runs every
  * (role-shape, resource, action) triple through both implementations'
- * `authorize` and asserts the `success` verdicts agree. Note the deliberate
- * scope: only `success` is compared, never the error strings — better-auth
- * distinguishes an absent resource from an empty one in its message
+ * `authorize` — including the empty-request and empty-action-list shapes — and
+ * asserts the `success` verdicts agree. Note the deliberate scope: only
+ * `success` is compared, never the error strings. better-auth distinguishes an
+ * absent resource from an empty one in its *message*
  * (`unknownResourceResponse` vs `unauthorizedResourceResponse`) and the mock
- * does not model that. `auth.roles.ts` strips empty grants before
- * construction precisely so no role ever depends on that distinction.
+ * does not model that; `auth.roles.ts` strips empty grants before construction
+ * precisely so no role ever depends on that distinction.
  *
  * @returns findings; an empty array means the mocks faithfully stand in.
  */
@@ -104,16 +105,32 @@ export function compareAccessModules(
     const realRole = real.access.createAccessControl(statement).newRole(grants);
     const mockRole = mock.access.createAccessControl(statement).newRole(grants);
 
-    for (const [resource, actions] of Object.entries(statement)) {
-      for (const action of actions) {
-        const realVerdict = realRole.authorize({ [resource]: [action] }).success;
-        const mockVerdict = mockRole.authorize({ [resource]: [action] }).success;
-        if (realVerdict !== mockVerdict) {
-          findings.push({
-            kind: 'authorize',
-            detail: `grant shape #${shapeIndex}: ${resource}:${action} — real=${realVerdict} mock=${mockVerdict}`,
-          });
-        }
+    // Every declared (resource, action) pair, PLUS the two degenerate request
+    // shapes. The empty ones are not padding: `[]` is how `auth.roles.ts`
+    // spells an explicit denial, so an empty action list is the request shape
+    // this comparator most needs to agree on — and it was the one shape it
+    // originally never sent, which let a genuine `success`-level divergence sit
+    // undetected behind a green check (real: false, mock: true, both forms).
+    const requests: [string, Record<string, string[]>][] = [
+      ...Object.entries(statement).flatMap(([resource, actions]) =>
+        actions.map(
+          (action) => [`${resource}:${action}`, { [resource]: [action] }] as [string, Record<string, string[]>]
+        )
+      ),
+      ['<empty request>', {}],
+      ...Object.keys(statement).map(
+        (resource) => [`${resource}:<empty actions>`, { [resource]: [] }] as [string, Record<string, string[]>]
+      ),
+    ];
+
+    for (const [label, request] of requests) {
+      const realVerdict = realRole.authorize(request).success;
+      const mockVerdict = mockRole.authorize(request).success;
+      if (realVerdict !== mockVerdict) {
+        findings.push({
+          kind: 'authorize',
+          detail: `grant shape #${shapeIndex}: ${label} — real=${realVerdict} mock=${mockVerdict}`,
+        });
       }
     }
   }

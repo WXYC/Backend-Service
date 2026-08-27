@@ -26,6 +26,26 @@ const statement = {
 
 export type AccessControlStatement = typeof statement;
 
+/**
+ * The statement vocabulary, exported so the invariant tests derive their key
+ * list from it rather than restating it.
+ *
+ * This is load-bearing, not convenience: a hardcoded key list in the tests
+ * means a newly added key is silently exempt from the monotonicity check — the
+ * one moment the check exists for. With the list derived, adding `roster` here
+ * puts it under the invariant immediately.
+ */
+export const STATEMENT_KEYS = Object.keys(statement) as (keyof AccessControlStatement)[];
+
+/** The full vocabulary: every declarable action, per key. Read by the tests. */
+export const STATEMENT_ACTIONS: Readonly<Record<string, readonly string[]>> = statement;
+
+/** The station-domain keys — those `statement` adds beyond better-auth's own. */
+export const STATION_KEYS = STATEMENT_KEYS.filter((key) => !Object.hasOwn(defaultStatements, key)) as Exclude<
+  keyof AccessControlStatement,
+  keyof typeof defaultStatements
+>[];
+
 const accessControl = createAccessControl(statement);
 
 import { canonicalizeRole, type WXYCRole } from '@wxyc/shared/auth-client/auth';
@@ -34,6 +54,26 @@ export { roleToAuthorization, Authorization } from '@wxyc/shared/auth-client/aut
 
 /** The station-domain half of the statement: everything better-auth doesn't own. */
 type StationKey = Exclude<keyof AccessControlStatement, keyof typeof defaultStatements>;
+
+/**
+ * A grant row: every station-domain key decided, and — critically — each one
+ * constrained to the actions `statement` actually declares for that key.
+ *
+ * The action constraint is not decoration. Typing the values as a loose
+ * `readonly string[]` would make `flowsheet: ['read', 'write', 'mange']`
+ * compile, and no test would catch it: monotonicity only notices a typo when a
+ * *lower* role spells the action correctly, so a typo introduced on
+ * stationManager alone — or applied down a whole column — reaches production as
+ * a 403. better-auth's own `newRole` signature enforces this; deriving the
+ * constraint from `AccessControlStatement` keeps it after the matrix took over
+ * construction.
+ */
+type StationGrants = { [K in StationKey]: readonly AccessControlStatement[K][number][] };
+
+/** Same, for the library-owned org-administration keys stationManager holds. */
+type OrgAdminGrants = {
+  [K in keyof typeof defaultStatements]?: readonly (typeof defaultStatements)[K][number][];
+};
 
 /**
  * The grant matrix — the single source of truth for what each role may do,
@@ -79,7 +119,7 @@ const WXYC_GRANTS = {
     catalog: ['read', 'write'],
     flowsheet: ['read', 'write', 'manage'],
   },
-} as const satisfies Record<WXYCRole, Record<StationKey, readonly string[]>>;
+} as const satisfies Record<WXYCRole, StationGrants>;
 
 /**
  * better-auth's own org-administration grants, held by stationManager alone.
@@ -101,7 +141,7 @@ const ORG_ADMIN_GRANTS = {
   member: ['create', 'update', 'delete'],
   team: ['create', 'update', 'delete'],
   ac: ['create', 'read', 'update', 'delete'],
-} as const satisfies Partial<Record<keyof typeof defaultStatements, readonly string[]>>;
+} as const satisfies OrgAdminGrants;
 
 export { WXYC_GRANTS, ORG_ADMIN_GRANTS };
 
@@ -119,11 +159,18 @@ export { WXYC_GRANTS, ORG_ADMIN_GRANTS };
 const stripEmpty = (grants: Record<string, readonly string[]>): Record<string, readonly string[]> =>
   Object.fromEntries(Object.entries(grants).filter(([, actions]) => actions.length > 0));
 
-const buildRole = (role: WXYCRole) =>
-  accessControl.newRole({
+// `stripEmpty` widens to a string-keyed record, so the object handed to
+// `newRole` is rebuilt from the two typed sources rather than cast. The cast
+// this replaces (`as Parameters<typeof newRole>[0]`) instantiated better-auth's
+// generic at its constraint — an index signature — which silently discarded
+// action validity for the whole matrix.
+const buildRole = (role: WXYCRole) => {
+  const grants = {
     ...stripEmpty(WXYC_GRANTS[role]),
     ...(role === 'stationManager' ? ORG_ADMIN_GRANTS : {}),
-  } as Parameters<typeof accessControl.newRole>[0]);
+  };
+  return accessControl.newRole(grants);
+};
 
 export const member = buildRole('member');
 export const dj = buildRole('dj');
