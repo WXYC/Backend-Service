@@ -131,6 +131,9 @@ export const ANALYZE_TIMEOUT_MS_DEFAULT = 300_000;
 /** How many changed ids each pass carries in its summary. */
 export const SAMPLE_SIZE_DEFAULT = 20;
 
+/** Row ids retained per change class, for spot-checking. Ids only, never values. */
+export const CHANGE_CLASS_SAMPLE_SIZE = 5;
+
 const LOAD_BATCH_MAX_ATTEMPTS = 3;
 const LOAD_BATCH_BACKOFF_MS = [500, 2000];
 
@@ -295,6 +298,65 @@ const recomputeDjName = (row: ScrubRow): { djName: string | null; reason: WriteR
     djName,
     reason: row.entry_type === 'show_start' ? 'recomputed_show_start_legacy' : 'recomputed',
   };
+};
+
+/**
+ * Why a would-be write differs from what is stored — diagnostic only.
+ *
+ * The first prod dry run reported 1,826,070 track rows differing from the
+ * canonical value: 86.7% of everything scanned. That is consistent with cohort
+ * B — BS#1393 rewrote `shows.legacy_dj_name` from `DJ_NAME` to `DJ_HANDLE` and
+ * then only re-resolved marker rows with a NULL `dj_name`, leaving every track
+ * row on those shows holding the old real name — but "consistent with" is a
+ * story, not evidence, and 1.8M rows on the live on-air table deserves better
+ * than a story.
+ *
+ * This classifies each would-be write so the aggregate carries provenance:
+ * how much is genuine real-name removal, how much is cosmetic churn nobody
+ * asked for, and how much is neither. It gates nothing and changes no
+ * decision — `decideDjName` is untouched — so it cannot alter what the live
+ * run does.
+ *
+ * Two classes are the ones to read first:
+ *
+ *   - `stored_is_roster_real_name` is the number this whole job exists for.
+ *     If it is not the dominant class, the premise needs re-examining before
+ *     anything is written.
+ *   - `recomputed_null_non_pii` should be near zero. A non-trivial count means
+ *     the job is erasing handles it cannot justify as PII removal — attribution
+ *     loss with no privacy benefit.
+ *
+ * Order is priority, not convenience: the roster check ranks above a null
+ * recompute so that removing a real name is counted as PII removal even though
+ * the same write also nulls the column.
+ */
+export type ChangeClass =
+  | 'stored_null'
+  | 'stored_is_roster_real_name'
+  | 'recomputed_null_non_pii'
+  | 'whitespace_only'
+  | 'case_only'
+  | 'other_value_change';
+
+export const classifyChange = (
+  stored: string | null,
+  recomputed: string | null,
+  piiNames: ReadonlySet<string>
+): ChangeClass => {
+  if (stored === null) return 'stored_null';
+
+  const trimmedStored = stored.trim();
+  // Trimmed, because the two writer families stored the real name
+  // differently: the TypeScript path stored `trim(auth_user.name)`, the SQL
+  // COALESCE writers stored it untrimmed.
+  if (piiNames.has(trimmedStored)) return 'stored_is_roster_real_name';
+
+  if (recomputed === null) return 'recomputed_null_non_pii';
+
+  const trimmedRecomputed = recomputed.trim();
+  if (trimmedStored === trimmedRecomputed) return 'whitespace_only';
+  if (trimmedStored.toLowerCase() === trimmedRecomputed.toLowerCase()) return 'case_only';
+  return 'other_value_change';
 };
 
 /**
@@ -745,6 +807,17 @@ export type PassTotals = {
   last_id: number;
   sample: number[];
   by_reason: Record<string, number>;
+  /**
+   * Provenance for the `changed` count — see `classifyChange`. Diagnostic
+   * only; nothing reads this to make a decision.
+   */
+  by_change_class: Record<string, number>;
+  /**
+   * A few row ids per change class, so a human can spot-check the classes
+   * that matter. Ids only, never values: a sample that printed `dj_name`
+   * would put DJs' legal names into every log sink this job writes to.
+   */
+  change_class_samples: Record<string, number[]>;
 };
 
 export type RunResult = {
@@ -770,6 +843,8 @@ const emptyPassTotals = (): PassTotals => ({
   last_id: 0,
   sample: [],
   by_reason: {},
+  by_change_class: {},
+  change_class_samples: {},
 });
 
 const loadPageWithRetry = async <T>(
@@ -932,7 +1007,7 @@ export const runScrub = async (opts: {
     pass: PassName,
     afterId: number,
     loadPage: (afterId: number, batchSize: number) => Promise<Row[]>,
-    decide: (row: Row) => { fix: Fix | null; reason: string },
+    decide: (row: Row) => { fix: Fix | null; reason: string; changeClass?: ChangeClass },
     apply: (fixes: Fix[], timeoutMs: number) => Promise<number>
   ): Promise<void> => {
     const totals = result[pass];
@@ -970,11 +1045,17 @@ export const runScrub = async (opts: {
       const fixes: Fix[] = [];
       for (const row of rows) {
         totals.scanned += 1;
-        const { fix, reason } = decide(row);
+        const { fix, reason, changeClass } = decide(row);
         totals.by_reason[reason] = (totals.by_reason[reason] ?? 0) + 1;
         if (fix === null) continue;
         totals.changed += 1;
         if (totals.sample.length < sampleSize) totals.sample.push(row.id);
+        // Provenance for this write. Diagnostic only — see `classifyChange`.
+        if (changeClass) {
+          totals.by_change_class[changeClass] = (totals.by_change_class[changeClass] ?? 0) + 1;
+          const classSample = (totals.change_class_samples[changeClass] ??= []);
+          if (classSample.length < CHANGE_CLASS_SAMPLE_SIZE) classSample.push(row.id);
+        }
         fixes.push(fix);
       }
 
@@ -1021,12 +1102,13 @@ export const runScrub = async (opts: {
     }
   };
 
-  const decideForScrubPass = (row: ScrubRow): { fix: DjNameFix | null; reason: string } => {
+  const decideForScrubPass = (row: ScrubRow): { fix: DjNameFix | null; reason: string; changeClass?: ChangeClass } => {
     const decision = decideDjName(row, piiNames);
     if (decision.action === 'skip') return { fix: null, reason: decision.reason };
     return {
       fix: { id: row.id, djName: decision.djName, oldDjName: row.dj_name },
       reason: decision.reason,
+      changeClass: classifyChange(row.dj_name, decision.djName, piiNames),
     };
   };
 

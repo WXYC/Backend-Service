@@ -331,3 +331,57 @@ describe('the message pass counts each marker type separately', () => {
     });
   });
 });
+
+describe('change-class provenance reaches the summary', () => {
+  it('classifies every would-be write and samples ids per class', async () => {
+    const opts = baseOpts();
+    opts.loadMainPage = pager([
+      [
+        // stored holds a roster real name -> the class this job exists for
+        makeRow({ id: 1, dj_name: 'A. Hearst', user_dj_name: 'zorp' }),
+        // cosmetic only: same value, different padding
+        makeRow({ id: 2, dj_name: '  zorp  ', user_dj_name: 'zorp' }),
+        // a gap fill: nothing is being removed
+        makeRow({ id: 3, dj_name: null, user_dj_name: 'zorp' }),
+        // a plain handle change: legitimate, but NOT PII removal
+        makeRow({ id: 4, dj_name: 'old handle', user_dj_name: 'zorp' }),
+      ],
+    ]);
+
+    const result = await runScrub(opts);
+
+    expect(result.main.by_change_class).toEqual({
+      stored_is_roster_real_name: 1,
+      whitespace_only: 1,
+      stored_null: 1,
+      other_value_change: 1,
+    });
+    expect(result.main.change_class_samples.stored_is_roster_real_name).toEqual([1]);
+    expect(result.main.change_class_samples.whitespace_only).toEqual([2]);
+  });
+
+  it('samples ids only, never dj_name values', async () => {
+    // A sample carrying values would put DJs' legal names into every log sink
+    // this job writes to — stdout, Sentry, CloudWatch.
+    const opts = baseOpts();
+    opts.loadMainPage = pager([[makeRow({ id: 7, dj_name: 'A. Hearst', user_dj_name: 'zorp' })]]);
+
+    const result = await runScrub(opts);
+
+    const serialized = JSON.stringify(result.main.change_class_samples);
+    expect(serialized).not.toContain('A. Hearst');
+    expect(result.main.change_class_samples.stored_is_roster_real_name).toEqual([7]);
+  });
+
+  it('leaves the class map empty for the message pass, which has no stored/recomputed pair', async () => {
+    const opts = baseOpts();
+    opts.loadMessagePage = pager<MessageRow>([
+      [{ id: 1, entry_type: 'dj_join', message: 'A. Hearst joined the set!' }],
+    ]);
+
+    const result = await runScrub(opts);
+
+    expect(result.message.changed).toBe(1);
+    expect(result.message.by_change_class).toEqual({});
+  });
+});
