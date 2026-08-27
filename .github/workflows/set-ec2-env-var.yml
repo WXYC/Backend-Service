@@ -9,6 +9,7 @@ name: Set EC2 env var (manual)
 #   gh workflow run set-ec2-env-var.yml --ref main -f key=LML_API_KEY -f secret_name=LML_API_KEY
 #   gh workflow run set-ec2-env-var.yml --ref main -f key=AUTO_DJ_PASSWORD -f restart_target=auth
 #   gh workflow run set-ec2-env-var.yml --ref main -f key=LML_API_KEY -f restart_target=enrichment-worker
+#   gh workflow run set-ec2-env-var.yml --ref main -f key=BETTER_AUTH_TRUSTED_ORIGINS -f restart_target=auth
 #
 # The value is read from a GH secret whose name is provided via secret_name
 # (defaults to the same name as `key`). The value never appears in logs;
@@ -99,6 +100,40 @@ jobs:
           # hard-fails on empty.
           DONATE_URL: ${{ secrets.DONATE_URL }}
           DONATE_ENABLED: ${{ secrets.DONATE_ENABLED }}
+          # better-auth trusted origins (WXYC/auto-dj-orchestrator#27 AC#4).
+          # Not sensitive — it is a list of public origins — but carried through
+          # the same allowlist as CREATE_AUTO_DJ_USER/DONATE_* above, because the
+          # resolve step hard-fails on any key it can't index and this needs to be
+          # changeable on a live host without an image rebuild.
+          #
+          # ⚠️ WHOLE-VALUE OVERWRITE. The upsert below drops the existing
+          # `BETTER_AUTH_TRUSTED_ORIGINS=` line and appends a new one, so this
+          # secret must hold the COMPLETE comma-separated list, not just the entry
+          # being added. Read the current value off the host first
+          # (`grep '^BETTER_AUTH_TRUSTED_ORIGINS=' ~/.env`) and append to it.
+          # Dropping `https://dj.wxyc.org` here logs every DJ out of production.
+          #
+          # ⚠️ SETTING IT THE FIRST TIME SHADOWS `FRONTEND_SOURCE`.
+          # `shared/authentication/src/auth.definition.ts` resolves
+          # `BETTER_AUTH_TRUSTED_ORIGINS || FRONTEND_SOURCE || 'http://localhost:3000'`
+          # — first rung wins outright, it does not union. If this var is currently
+          # unset in prod, better-auth is trusting whatever `FRONTEND_SOURCE` holds;
+          # the value pushed here must be a superset of that or those origins
+          # silently lose trust. (Express-level CORS is unaffected: `apps/auth/app.ts`
+          # consults `FRONTEND_SOURCE` first and only falls back to this var.)
+          #
+          # Do NOT list the Cloudflare Pages preview wildcard here — it lives in
+          # `CORS_PREVIEW_ORIGINS`, which `auth.definition.ts` unions on top of
+          # whichever primary won.
+          #
+          # Pass restart_target=auth: better-auth builds `trustedOrigins` once at
+          # auth-service startup. (apps/backend reads only `FRONTEND_SOURCE` for its
+          # own CORS, so the backend container does not need the restart.)
+          #
+          # The ::add-mask:: below applies to this value too, so each origin string
+          # is redacted from the rest of the run's logs — harmless here, but it is
+          # why the verify step can only report a length.
+          BETTER_AUTH_TRUSTED_ORIGINS: ${{ secrets.BETTER_AUTH_TRUSTED_ORIGINS }}
         run: |
           set -euo pipefail
           KEY="${{ inputs.key }}"
@@ -113,6 +148,7 @@ jobs:
             ENRICHMENT_SUPPRESS_LML_BUDGET) VALUE="$ENRICHMENT_SUPPRESS_LML_BUDGET" ;;
             DONATE_URL) VALUE="$DONATE_URL" ;;
             DONATE_ENABLED) VALUE="$DONATE_ENABLED" ;;
+            BETTER_AUTH_TRUSTED_ORIGINS) VALUE="$BETTER_AUTH_TRUSTED_ORIGINS" ;;
             *)
               echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
               exit 1
