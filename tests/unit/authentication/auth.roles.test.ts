@@ -1,9 +1,12 @@
-import { adminAc, defaultStatements } from 'better-auth/plugins/organization/access';
+import { adminAc } from 'better-auth/plugins/organization/access';
 import {
   WXYCRoles,
   normalizeRole,
   WXYC_GRANTS,
   ORG_ADMIN_GRANTS,
+  STATEMENT_ACTIONS,
+  STATEMENT_KEYS,
+  STATION_KEYS,
   type WXYCRole,
 } from '../../../shared/authentication/src/auth.roles';
 import { ROLES } from '@wxyc/shared/auth-client/auth';
@@ -16,7 +19,13 @@ const grantedActions = (role: WXYCRole, key: string): readonly string[] => {
   return role === 'stationManager' ? ((ORG_ADMIN_GRANTS as Record<string, readonly string[]>)[key] ?? []) : [];
 };
 
-const allStatementKeys = [...Object.keys(defaultStatements), 'catalog', 'bin', 'flowsheet'];
+// Derived from `statement` itself, never restated. A hardcoded list here would
+// exempt every newly added key from the monotonicity check below — i.e. exempt
+// it at exactly the moment the check exists for. (Verified: with a literal
+// list, adding `roster` with `dj: ['write']` and `stationManager: []` passed
+// monotonicity, totality, and parity green — the DJ-200/SM-403 inversion this
+// file is built to kill, reintroduced silently.)
+const allStatementKeys: string[] = STATEMENT_KEYS;
 
 describe('normalizeRole', () => {
   it.each(['member', 'dj', 'musicDirector', 'stationManager'] as const)(
@@ -134,9 +143,10 @@ describe('grant monotonicity along the shared ROLES chain', () => {
 describe('every statement key is decided for every role', () => {
   it.each(Object.keys(WXYCRoles) as WXYCRole[])('%s decides all station-domain keys', (role) => {
     // Totality over the station domain is enforced by the type system; this
-    // asserts the runtime shape agrees, and catches a key added to `statement`
-    // but never routed into either grant block.
-    for (const key of ['catalog', 'bin', 'flowsheet']) {
+    // asserts the runtime shape agrees. Because STATION_KEYS is derived from
+    // `statement`, it genuinely catches a key added there but never routed
+    // into a grant block — which a literal key list could not.
+    for (const key of STATION_KEYS) {
       expect(Object.keys(WXYC_GRANTS[role])).toContain(key);
     }
   });
@@ -151,14 +161,9 @@ describe('runtime parity: authorize() agrees with the grant data', () => {
   const triples = (Object.keys(WXYCRoles) as WXYCRole[]).flatMap((role) =>
     allStatementKeys.flatMap((key) => {
       const granted = grantedActions(role, key);
-      const universe = [
-        ...new Set([
-          ...granted,
-          ...((defaultStatements as Record<string, readonly string[]>)[key] ?? []),
-          ...(key === 'flowsheet' ? ['read', 'write', 'manage'] : []),
-          ...(key === 'catalog' || key === 'bin' ? ['read', 'write'] : []),
-        ]),
-      ];
+      // Every action `statement` declares for this key — derived, so a new key
+      // or a new action on an existing key is covered the moment it is added.
+      const universe = [...new Set([...granted, ...(STATEMENT_ACTIONS[key] ?? [])])];
       return universe.map((action) => ({ role, key, action, expected: granted.includes(action) }));
     })
   );

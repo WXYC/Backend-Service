@@ -57,6 +57,15 @@ import {
  * device-approve gate resolve `role` from `auth_member`, never from
  * `auth_user.role` — that column is the better-auth admin plugin's system
  * flag and carries no station role.
+ *
+ * KNOWN GAP, deliberately not fixed here (BS#2286): this `.limit(1)` has no
+ * `ORDER BY` and no default-org filter, so a user holding two memberships
+ * mints a non-deterministic station role into their JWT, and a membership in
+ * *any* organization can supply it. That is the same multi-membership hazard
+ * this change removed from `hasOtherAdminMembership` below — the difference is
+ * that fixing it here changes which role real users get in their token, which
+ * deserves its own PR and its own review rather than riding along with a
+ * refactor that is otherwise behavior-preserving.
  */
 const selectMemberRole = async (userId: string): Promise<MemberRoleRow> => {
   const rows = await db.select({ role: member.role }).from(member).where(eq(member.userId, userId)).limit(1);

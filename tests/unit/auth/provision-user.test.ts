@@ -76,6 +76,9 @@ const mockCreateInvite = jest.fn().mockResolvedValue({ sent: true } as never);
 jest.mock('@wxyc/authentication', () => {
   // Use the real validator so the tests exercise the production regex.
   const actual = jest.requireActual('../../../shared/authentication/src/auth.username');
+  const actualAdminFlagSync: typeof import('../../../shared/authentication/src/admin-flag-sync') = jest.requireActual(
+    '../../../shared/authentication/src/admin-flag-sync'
+  );
   return {
     ...actual,
     auth: {
@@ -84,11 +87,14 @@ jest.mock('@wxyc/authentication', () => {
     createAndSendAccountSetupInvite: (...args: unknown[]) => mockCreateInvite(...args),
     // This factory enumerates the module's exports, so a new import in
     // provision-user.ts resolves to `undefined` unless it is added here.
-    // `grantsAdminFlag` replaced the local ADMIN_SYNC_ROLES copy (BS#2282);
-    // the real predicate is used so the mock can't drift from the policy.
-    grantsAdminFlag: (role: string) =>
-      ['stationManager', 'admin', 'owner'].includes(role.toLowerCase().trim()) ||
-      ['stationmanager', 'station_manager'].includes(role.toLowerCase().trim()),
+    // `grantsAdminFlag` replaced the local ADMIN_SYNC_ROLES copy (BS#2282), and
+    // the REAL predicate is wired in rather than restated: a hand-rolled copy
+    // here would be one more place the role set can drift — in the very file
+    // whose subject is that drift. It has no DB dependency, so requiring it is
+    // free. (An earlier draft did restate it, and the restatement was already
+    // wrong: it lowercased the input, then tested against a list containing the
+    // camelCase `stationManager`, a branch that could never match.)
+    grantsAdminFlag: actualAdminFlagSync.grantsAdminFlag,
     WXYCRoles: {
       member: {},
       dj: {},
