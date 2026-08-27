@@ -1,5 +1,9 @@
 import { createAccessControl } from 'better-auth/plugins/access';
-import { adminAc, defaultStatements } from 'better-auth/plugins/organization/access';
+// `adminAc` is deliberately NOT imported: replacing the `...adminAc.statements`
+// spread with the explicit `ORG_ADMIN_GRANTS` block below is the point of this
+// file's construction, and the pin that keeps the two equal lives in
+// tests/unit/authentication/auth.roles.test.ts, where importing it is correct.
+import { defaultStatements } from 'better-auth/plugins/organization/access';
 
 const statement = {
   ...defaultStatements,
@@ -153,6 +157,30 @@ const ORG_ADMIN_GRANTS = {
 export { WXYC_GRANTS, ORG_ADMIN_GRANTS };
 
 /**
+ * Freezes the grant blocks and the statement vocabulary, arrays included.
+ *
+ * All three are exported and re-exported from `@wxyc/authentication`, so they
+ * are reachable, mutable public API, and `as const` is erased at runtime.
+ * `buildRole` already clones, so a mutation here can no longer change an
+ * authorization verdict — but freezing closes the class rather than the one
+ * instance of it, and it is what keeps `STATEMENT_ACTIONS` honest as the
+ * oracle the invariant tests read. Module scope is strict, so a `push` on a
+ * frozen array throws rather than failing silently.
+ *
+ * Runs before the roles are constructed below; better-auth only reads these.
+ */
+const deepFreeze = <T extends object>(value: T): T => {
+  for (const entry of Object.values(value)) {
+    if (entry && typeof entry === 'object') deepFreeze(entry);
+  }
+  return Object.freeze(value);
+};
+
+deepFreeze(statement);
+deepFreeze(WXYC_GRANTS);
+deepFreeze(ORG_ADMIN_GRANTS);
+
+/**
  * Drops explicitly-denied (`[]`) keys before handing grants to better-auth.
  *
  * better-auth treats an absent key and an empty one identically for
@@ -193,10 +221,17 @@ const stripEmpty = (grants: Record<string, readonly string[]>): Record<string, r
 const clone = (grants: Record<string, readonly string[]>): Record<string, readonly string[]> =>
   Object.fromEntries(Object.entries(grants).map(([key, actions]) => [key, [...actions]]));
 
+// Both blocks go through `stripEmpty`, not just the station one. `OrgAdminGrants`
+// is a `Partial<...>` of `readonly string[]`, so `organization: []` compiles
+// there exactly as it does in `WXYC_GRANTS` — and an un-stripped `[]` reaching
+// `newRole` lands on better-auth's `unauthorizedResourceResponse` instead of
+// `unknownResourceResponse`, which is the one distinction `stripEmpty` exists
+// to keep no role depending on. Stripping one block and not the other would
+// make "an `[]` denial is free of side effects" true in half this file.
 const buildRole = (role: WXYCRole) => {
   const grants = {
     ...clone(stripEmpty(WXYC_GRANTS[role])),
-    ...(role === 'stationManager' ? clone(ORG_ADMIN_GRANTS) : {}),
+    ...(role === 'stationManager' ? clone(stripEmpty(ORG_ADMIN_GRANTS)) : {}),
   };
   return accessControl.newRole(grants);
 };
