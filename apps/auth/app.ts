@@ -560,11 +560,17 @@ const runSyncAdminRoles = async () => {
       //
       // The role predicate is `grantsAdminFlag` in TS, not a SQL IN-list: this
       // is the same question the membership hooks answer, and this reconciler
-      // is the retry path for a GRANT hook that failed. A hardcoded list here
-      // would stay narrow while the hook path widened with the shared alias
-      // table (BS#2282), so a membership stored as `station_manager` would be
-      // granted the flag by the hook and — if that hook ever failed — never
-      // repaired by this sweep. Grant and repair must accept the same strings.
+      // is the retry path for a GRANT hook that failed, so the two must accept
+      // exactly the same strings or the retry can't repair what the hook did.
+      //
+      // Note the motive is that consistency itself, NOT a live scenario: no
+      // write path can store an alias like `station_manager` in the first place
+      // (`organizationPlugin({ roles: WXYCRoles })` validates better-auth's own
+      // updates, `provisionUser` gates on `Object.hasOwn(WXYCRoles, role)`), so
+      // the widening `normalizeRole` inherited from the shared alias table is
+      // read-side only — see its JSDoc. What a hardcoded list here would buy is
+      // a second definition free to drift from the one in `admin-flag-sync.ts`,
+      // which is the defect BS#2282 exists to remove.
       //
       // Scope, stated precisely because the surrounding change is about
       // grant/revoke symmetry and this sweep does NOT have it: it only ever
@@ -581,8 +587,11 @@ const runSyncAdminRoles = async () => {
       // selective query to the default org's whole roster (minus users already
       // flagged `admin`): ~2k memberships at WXYC, one row each of four short
       // columns, read once per auth-service boot and awaited before
-      // `app.listen()`. That is well inside the budget; if the roster ever
-      // reaches a size where it isn't, page it — do NOT reach for a `LIMIT`.
+      // `app.listen()`. That is well inside the budget, but note what it means
+      // — startup latency now scales with roster size rather than with the
+      // number of station managers, so if it ever does bite it will present as
+      // a slow container boot on deploy, not as an error. Page it at that
+      // point; do NOT reach for a `LIMIT`.
       // This is a repair sweep, and a bare limit would silently leave the
       // remainder unrepaired every boot, which is the failure mode the sweep
       // exists to prevent.

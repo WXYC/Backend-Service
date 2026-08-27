@@ -68,8 +68,31 @@ const _assertNoShadowedStationKeys: [ShadowedStationKeys] extends [never]
   : ['station key shadows a better-auth statement key', ShadowedStationKeys] = true;
 void _assertNoShadowedStationKeys;
 
+/**
+ * Copies each action list, preserving the key and element types.
+ *
+ * Object spread copies *values*, and the values here are arrays — so
+ * `{...defaultStatements}` yields an object holding better-auth's own array
+ * instances. Since `statement` becomes the exported `STATEMENT_ACTIONS`, that
+ * left `STATEMENT_ACTIONS.organization` aliasing `defaultStatements.organization`
+ * inside the library's module, which `defaultAc.statements` also aliases and the
+ * organization plugin's `hasPermission` reads. An importer of
+ * `@wxyc/authentication` doing `STATEMENT_ACTIONS.organization.push('delete')`
+ * would have changed better-auth's own behaviour process-wide. Same aliasing
+ * class `buildRole`'s `clone` closes for the grant blocks, one level up.
+ *
+ * Copying here also removes the objection to freezing: the arrays below are
+ * ours, so `deepFreeze(statement)` no longer reaches into a dependency's state.
+ */
+// The double assertion is unavoidable, not laziness: `Object.fromEntries`
+// erases key literals to `{ [k: string]: string[] }`, which TypeScript will not
+// narrow back to `T` directly. The runtime shape is exactly `T` with each array
+// replaced by a copy of itself — same keys, same elements.
+const copyActions = <T extends Record<string, readonly string[]>>(source: T): T =>
+  Object.fromEntries(Object.entries(source).map(([key, actions]) => [key, [...actions]])) as unknown as T;
+
 const statement = {
-  ...defaultStatements,
+  ...copyActions(defaultStatements),
   ...stationStatement,
 } as const;
 
@@ -235,15 +258,13 @@ export { WXYC_GRANTS, ORG_ADMIN_GRANTS };
  * scope is strict, so a `push` on a frozen array throws rather than failing
  * silently.
  *
- * SCOPE, deliberately narrow: `statement` is frozen SHALLOWLY. Its
- * library-owned half is `{...defaultStatements}`, which copies *references* to
- * better-auth's own exported arrays — so recursing here would freeze
+ * `statement` is deep-frozen too, and safely so ONLY because `copyActions`
+ * ran: its library half holds BS's own copies, not better-auth's array
+ * instances. Freezing it before that change would have frozen
  * `defaultStatements.organization`/`.member`/`.invitation`/`.team`/`.ac` inside
- * the library's module, process-wide, for every other consumer in `apps/auth`.
- * Nothing in better-auth 1.6.x mutates them, so it would work; it would still
- * be this file reaching into a dependency's state to protect objects it does
- * not own. The shallow freeze keeps the key set fixed, and the three blocks
- * BS actually authors are frozen through.
+ * the library's module, process-wide, for every consumer in `apps/auth` —
+ * this file reaching into a dependency to protect objects it does not own. If
+ * `copyActions` is ever removed from the spread, remove this freeze with it.
  *
  * Runs before the roles are constructed below; better-auth only reads these.
  */
@@ -257,7 +278,7 @@ const deepFreeze = <T extends object>(value: T): T => {
 deepFreeze(stationStatement);
 deepFreeze(WXYC_GRANTS);
 deepFreeze(ORG_ADMIN_GRANTS);
-Object.freeze(statement);
+deepFreeze(statement);
 
 /**
  * Drops explicitly-denied (`[]`) keys before handing grants to better-auth.
