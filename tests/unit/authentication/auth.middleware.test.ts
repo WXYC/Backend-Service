@@ -384,5 +384,57 @@ describe('requirePermissions middleware', () => {
 
       expect(next).toHaveBeenCalled();
     });
+
+    /**
+     * `reviews: ['read']` gates `GET /album-reviews` (ADR 0011), the internal
+     * DJ-review surface that serves the archive WITHOUT the public attach's
+     * `social_consent = true` filter. These cases run the real middleware
+     * against a controlled role claim — the integration tier cannot, because
+     * it runs `AUTH_BYPASS=true` and short-circuits to next() at the top of
+     * this middleware, long before the permission block.
+     */
+    it.each(['dj', 'musicDirector', 'stationManager'] as const)(
+      '"%s" should be authorized for reviews:read (ADR 0011 internal surface)',
+      async (role) => {
+        mockJwtPayload({ role });
+        const { req, res, next } = createMocks('Bearer valid-token');
+        const middleware = requirePermissions({ reviews: ['read'] });
+
+        await middleware(req, res, next);
+
+        expect(next).toHaveBeenCalled();
+        expect(res.status).not.toHaveBeenCalled();
+      }
+    );
+
+    it('member should be rejected with 403 for reviews:read', async () => {
+      mockJwtPayload({ role: 'member' });
+      const { req, res, next } = createMocks('Bearer valid-token');
+      const middleware = requirePermissions({ reviews: ['read'] });
+
+      await middleware(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          error: expect.stringContaining('insufficient permissions'),
+        })
+      );
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it('an anonymous session (no role claim) is rejected with 403 for reviews:read', async () => {
+      // Anonymous sessions carry no membership, so buildJwtPayload leaves
+      // `role` unset — the property that keeps the listener app out of the
+      // unfiltered archive.
+      mockJwtPayload({ role: undefined });
+      const { req, res, next } = createMocks('Bearer valid-token');
+      const middleware = requirePermissions({ reviews: ['read'] });
+
+      await middleware(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(next).not.toHaveBeenCalled();
+    });
   });
 });

@@ -96,18 +96,23 @@ describe('WXYCRoles', () => {
  * guards library drift. Both are needed; neither alone means what it looks like.
  */
 describe('role statements (pinned)', () => {
+  // `member` has no `reviews` entry here on purpose: it decides the key as `[]`
+  // in the matrix, and `stripEmpty` drops an explicitly-denied key before
+  // better-auth ever sees it. That is what keeps an `[]` denial byte-identical
+  // to omitting the key, and this pin is where that stays true.
   const wxycOnly = {
     member: { bin: ['read', 'write'], catalog: ['read'], flowsheet: ['read'] },
-    dj: { bin: ['read', 'write'], catalog: ['read'], flowsheet: ['read', 'write'] },
+    dj: { bin: ['read', 'write'], catalog: ['read'], flowsheet: ['read', 'write'], reviews: ['read'] },
     musicDirector: {
       bin: ['read', 'write'],
       catalog: ['read', 'write'],
       flowsheet: ['read', 'write', 'manage'],
+      reviews: ['read'],
     },
   } as const;
 
   it.each(Object.keys(wxycOnly) as (keyof typeof wxycOnly)[])(
-    '%s carries exactly its three station-domain keys and no org-admin keys',
+    '%s carries exactly its granted station-domain keys and no org-admin keys',
     (role) => {
       expect({ ...(WXYCRoles[role] as any).statements }).toEqual(wxycOnly[role]);
     }
@@ -119,6 +124,7 @@ describe('role statements (pinned)', () => {
       bin: ['read', 'write'],
       catalog: ['read', 'write'],
       flowsheet: ['read', 'write', 'manage'],
+      reviews: ['read'],
     });
   });
 
@@ -143,14 +149,21 @@ describe('role statements (pinned)', () => {
    * Identity is the assertion, not equality: equality is what the pins above
    * already cover, and it stays true in exactly the aliased case this forbids.
    */
-  const stationKeys = ['bin', 'catalog', 'flowsheet'] as const;
-
   it.each(Object.keys(WXYCRoles) as WXYCRole[])(
     '%s statements are copies of the station grants, not aliases',
     (role) => {
       const statements = (WXYCRoles[role] as any).statements;
-      for (const key of stationKeys) {
+      // Derived from STATION_KEYS rather than a literal list, for the reason
+      // `allStatementKeys` gives: a hardcoded list exempts a newly added key
+      // from the aliasing check at the moment it is introduced. An explicitly
+      // denied (`[]`) key is skipped — `stripEmpty` removes it before
+      // construction, so there is no constructed array for it to alias.
+      for (const key of STATION_KEYS) {
         const matrixActions = (WXYC_GRANTS[role] as Record<string, readonly string[]>)[key];
+        if (matrixActions.length === 0) {
+          expect(statements[key]).toBeUndefined();
+          continue;
+        }
         expect(statements[key]).toEqual(matrixActions);
         expect(statements[key]).not.toBe(matrixActions);
       }
