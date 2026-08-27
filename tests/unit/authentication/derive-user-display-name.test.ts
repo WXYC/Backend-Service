@@ -87,4 +87,46 @@ describe('deriveUserNameOnUpdate', () => {
     const result = deriveUserNameOnUpdate({ djName: null });
     expect(result).toBeUndefined();
   });
+
+  // FINDING 1 (2297 review): better-auth's public POST /update-user accepts
+  // a client-supplied `name` for any signed-in session, and (prior to this
+  // fix) a name-only payload returned `undefined` here, so the value was
+  // written verbatim — re-creating the hidden-legal-name-copy state this
+  // whole plan exists to close. Direct writes to `name` are now prohibited:
+  // `false` tells better-auth's updateWithHooks to abort the write entirely
+  // (with-hooks.mjs: `if (result === false) return null`), never reaching
+  // the adapter. No legitimate writer sends bare `name` on update after this
+  // program's PRs (dj-site roster sends realName/djName only; onboarding
+  // sends realName/djName; provisioning is a create, not an update).
+  it('rejects a name-only payload outright (djName key absent)', () => {
+    const result = deriveUserNameOnUpdate({ name: 'Some Real Name' });
+    expect(result).toBe(false);
+  });
+
+  it('derives the handle and overrides a client-supplied name when both are present', () => {
+    // The override itself is better-auth's merge order, not this function:
+    // updateWithHooks does `actualData = { ...actualData, ...result.data }`
+    // (hook result spread AFTER actualData), so returning { data: { name:
+    // handle } } here wins regardless of what the payload's own `name` was.
+    const result = deriveUserNameOnUpdate({ name: 'Some Real Name', djName: 'DJ Jazzy Jane' });
+    expect(result).toEqual({ data: { name: 'DJ Jazzy Jane' } });
+  });
+
+  // Closes the trivial bypass of the name-only rejection above: without
+  // this, a caller could smuggle a bare `name` write through by attaching
+  // an unusable `djName` (blank, or the literal 'Anonymous') to the same
+  // payload — djName would be "present" but resolve to no handle, and the
+  // client-supplied name would slip through unrejected. A name-carrying
+  // payload is only ever allowed to leave `name` alone when it does NOT
+  // also try to set an unusable djName in the same breath; here it does
+  // both, so it's rejected exactly like the name-only case.
+  it('rejects a name payload accompanied by an unusable (blank) djName', () => {
+    const result = deriveUserNameOnUpdate({ name: 'Some Real Name', djName: '' });
+    expect(result).toBe(false);
+  });
+
+  it('rejects a name payload accompanied by djName set to the literal Anonymous', () => {
+    const result = deriveUserNameOnUpdate({ name: 'Some Real Name', djName: 'Anonymous' });
+    expect(result).toBe(false);
+  });
 });
