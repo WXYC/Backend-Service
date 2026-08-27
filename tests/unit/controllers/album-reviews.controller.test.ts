@@ -96,29 +96,41 @@ describe('album-reviews.controller getAlbumReviews', () => {
       );
     });
 
+    // One table over (field, value): every row asserts the same
+    // `${field} must be a positive integer`, so carrying the message as a
+    // second column stored what the first column already derives — and let a
+    // copy-paste leave `page must be…` in the album_id table, where the
+    // substring assertion would still pass against a message that branch
+    // never reaches. `album_id` rides along here rather than in its own
+    // describe: it is the same `parsePositiveInt` contract, and splitting it
+    // out is what let the two tables drift apart in the first place.
     it.each([
-      ['0', 'page must be a positive integer'],
-      ['-1', 'page must be a positive integer'],
-      ['abc', 'page must be a positive integer'],
+      ['page', '0'],
+      ['page', '-1'],
+      ['page', 'abc'],
       // radix-less / trailing-garbage inputs a bare parseInt would coerce
-      ['1abc', 'page must be a positive integer'],
-      ['0x10', 'page must be a positive integer'],
-    ])('rejects page=%s with a 400 WxycError', async (page, message) => {
-      setQuery({ page });
-      await expect(invoke()).rejects.toThrow(message);
+      ['page', '1abc'],
+      ['page', '0x10'],
+      ['limit', '0'],
+      ['limit', '-5'],
+      ['limit', 'abc'],
+      ['limit', '20xyz'],
+      ['limit', '0x10'],
+      ['album_id', '0'],
+      ['album_id', '-7'],
+      ['album_id', 'abc'],
+      ['album_id', '3.5'],
+      ['album_id', '7abc'],
+      ['album_id', '0x10'],
+    ])('rejects %s=%s with a 400 WxycError', async (field, value) => {
+      setQuery({ [field]: value });
+      await expect(invoke()).rejects.toThrow(`${field} must be a positive integer`);
       expect(mockGetAlbumReviewsPage).not.toHaveBeenCalled();
     });
 
-    it.each([
-      ['0', 'limit must be a positive integer'],
-      ['-5', 'limit must be a positive integer'],
-      ['abc', 'limit must be a positive integer'],
-      ['20xyz', 'limit must be a positive integer'],
-      ['0x10', 'limit must be a positive integer'],
-      ['101', 'limit must be at most 100'],
-    ])('rejects limit=%s with a 400 WxycError', async (limit, message) => {
-      setQuery({ limit });
-      await expect(invoke()).rejects.toThrow(message);
+    it('rejects a limit above the cap', async () => {
+      setQuery({ limit: '101' });
+      await expect(invoke()).rejects.toThrow('limit must be at most 100');
       expect(mockGetAlbumReviewsPage).not.toHaveBeenCalled();
     });
 
@@ -141,19 +153,6 @@ describe('album-reviews.controller getAlbumReviews', () => {
       await invoke();
       expect(mockGetAlbumReviewsPage).toHaveBeenCalledWith({ album_id: 42, artist: undefined }, 50, 0);
       expect(mockGetAlbumReviewsCount).toHaveBeenCalledWith({ album_id: 42, artist: undefined });
-    });
-
-    it.each([
-      ['0', 'album_id must be a positive integer'],
-      ['-7', 'album_id must be a positive integer'],
-      ['abc', 'album_id must be a positive integer'],
-      ['3.5', 'album_id must be a positive integer'],
-      ['7abc', 'album_id must be a positive integer'],
-      ['0x10', 'album_id must be a positive integer'],
-    ])('rejects album_id=%s with a 400 WxycError', async (album_id, message) => {
-      setQuery({ album_id });
-      await expect(invoke()).rejects.toThrow(message);
-      expect(mockGetAlbumReviewsPage).not.toHaveBeenCalled();
     });
   });
 

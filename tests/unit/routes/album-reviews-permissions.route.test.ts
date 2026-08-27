@@ -23,7 +23,7 @@ jest.mock('jose', () => ({
 // checks for an Authorization header, ignoring the role/permission argument
 // entirely). album-reviews.route.ts imports requirePermissions from that
 // package specifier, so this route-wiring test needs the REAL implementation
-// wired back in to actually exercise the reviews:read gate. Extending the
+// wired back in to actually exercise the album_reviews:read gate. Extending the
 // shared mock instead would change behavior for every unit test in the repo,
 // which its own docblock warns against.
 jest.mock('@wxyc/authentication', () => jest.requireActual('../../../shared/authentication/src/auth.middleware'));
@@ -80,7 +80,7 @@ app.use('/album-reviews', album_reviews_route);
  * asserts the HTTP consequence of it. Two independent guards for the inversion
  * class where a plain DJ gets 200 while the most privileged account 403s.
  */
-describe('GET /album-reviews — reviews:read gate (ADR 0011 internal surface)', () => {
+describe('GET /album-reviews — album_reviews:read gate (ADR 0011 internal surface)', () => {
   beforeEach(() => {
     mockedJwtVerify.mockReset();
     mockGetAlbumReviewsPage.mockReset().mockResolvedValue([]);
@@ -92,6 +92,11 @@ describe('GET /album-reviews — reviews:read gate (ADR 0011 internal surface)',
     const res = await request(app).get('/album-reviews').set('Authorization', 'Bearer test-token');
     expect(res.status).toBe(200);
     expect(mockGetAlbumReviewsPage).toHaveBeenCalled();
+    // Mounting assertion, folded in from the plain route test this file
+    // replaced: the router reaches the controller and the controller's
+    // envelope comes back, so a 200 here is a served request rather than a
+    // middleware that fell through to an empty handler.
+    expect(res.body).toEqual({ album_reviews: [], pagination: { page: 1, limit: 50, total: 0, hasMore: false } });
   });
 
   test('a member-role token is rejected with 403', async () => {

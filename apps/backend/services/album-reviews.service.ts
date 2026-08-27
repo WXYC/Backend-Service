@@ -1,5 +1,6 @@
-import { and, desc, eq, isNotNull, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, sql, type Column, type SQL } from 'drizzle-orm';
 import { album_review_submissions, db, normalizeArtistName } from '@wxyc/database';
+import type { AlbumReview } from '@wxyc/shared/dtos';
 
 /**
  * Album-review archive read service — backs `GET /album-reviews`
@@ -16,7 +17,7 @@ import { album_review_submissions, db, normalizeArtistName } from '@wxyc/databas
  * you comfortable with your review being shared on social media platforms?
  * (AKA blog and/or Instagram, your name will not be shared)" — and internal
  * station tools were never on the menu to decline. Its route gate
- * (`reviews: ['read']`) is what makes the posture safe; a caller with no role
+ * (`album_reviews: ['read']`) is what makes the posture safe; a caller with no role
  * claim, which is every anonymous listener-app session, cannot reach it.
  *
  * The PUBLIC per-album attach is a different surface with a different filter:
@@ -34,38 +35,21 @@ import { album_review_submissions, db, normalizeArtistName } from '@wxyc/databas
  */
 
 /**
- * Wire shape mirroring `AlbumReview` in `wxyc-shared/api.yaml` (the cross-repo
- * SSOT). Deliberately a local alias, matching the concerts `ConcertDTO`
- * precedent — NOT because the generated type is missing: `@wxyc/shared` 4.1.0
- * does export `AlbumReview`, which survived wxyc-shared#378 as an orphan schema
- * when that sweep removed the `GET /album-reviews` PATH. Re-adding the path is
- * a separate wxyc-shared PR, and the swap to
- * `import type { AlbumReview } from '@wxyc/shared/dtos'` belongs with the
- * dependency bump that lands alongside it. `tests/unit/services/album-reviews.service.test.ts`
- * holds a two-way compile-time `Equal` pin against the api.yaml shape in the
- * meantime.
+ * Wire shape: the generated `AlbumReview` from the cross-repo SSOT
+ * (`wxyc-shared/api.yaml`), not a local mirror of it.
+ *
+ * The schema survived wxyc-shared#378 as an orphan when that sweep removed the
+ * `GET /album-reviews` PATH, so the type is exportable from the `@wxyc/shared`
+ * version already pinned here — no dependency bump is pending, and there is
+ * nothing to hand-maintain in the meantime. Re-adding the path to `api.yaml` is
+ * a separate wxyc-shared PR and does not change this type.
+ *
+ * Named locally so the rest of this file and its callers read in domain terms;
+ * the sibling read over this same table
+ * (`album-metadata-lookup.service.ts`'s `WxycReviewItem`) imports its generated
+ * type the same way.
  */
-export type AlbumReviewDTO = {
-  id: number;
-  album_id: number | null;
-  artist_name: string | null;
-  album_title: string | null;
-  record_label: string | null;
-  artist_blurb: string | null;
-  review: string | null;
-  recommended_tracks: string | null;
-  buzzwords: string | null;
-  fcc_violations: string | null;
-  review_purpose: string | null;
-  rotated: boolean | null;
-  released_within_six_months: boolean | null;
-  social_consent: boolean | null;
-  // ISO-8601 date-time string (or null), matching the SSOT `AlbumReview`
-  // type (format: date-time). The Drizzle row surfaces the column as
-  // `Date`; `toAlbumReviewDTO` serializes it so the local alias aligns
-  // with the generated `@wxyc/shared` shape (see the alias note above).
-  submitted_at: string | null;
-};
+export type AlbumReviewDTO = AlbumReview;
 
 export type AlbumReviewsQueryFilters = {
   /** Exact match on the best-effort library link. */
@@ -78,23 +62,7 @@ export type AlbumReviewsQueryFilters = {
  * Flat row produced by the explicit select below. Exported for the
  * `toAlbumReviewDTO` unit tests.
  */
-export type AlbumReviewRow = {
-  id: number;
-  album_id: number | null;
-  artist_name: string | null;
-  album_title: string | null;
-  record_label: string | null;
-  artist_blurb: string | null;
-  review: string | null;
-  recommended_tracks: string | null;
-  buzzwords: string | null;
-  fcc_violations: string | null;
-  review_purpose: string | null;
-  rotated: boolean | null;
-  released_within_six_months: boolean | null;
-  social_consent: boolean | null;
-  submitted_at: Date | null;
-};
+export type AlbumReviewRow = Omit<AlbumReviewDTO, 'submitted_at'> & { submitted_at: Date | null };
 
 // Explicit select list — THE PROJECTION IS THE PII LEAK BARRIER (the
 // concerts.service precedent): `reviewer_raw` and `social_consent_raw`
@@ -119,7 +87,15 @@ const albumReviewFields = {
   released_within_six_months: album_review_submissions.released_within_six_months,
   social_consent: album_review_submissions.social_consent,
   submitted_at: album_review_submissions.submitted_at,
-};
+  // `satisfies Record<keyof AlbumReviewRow, Column>` is what upgrades the
+  // barrier above from a convention to a build error: a column added to
+  // `AlbumReviewRow` without an entry here fails to compile, and — the half
+  // that matters for PII — an entry here that is not in the row type fails
+  // too, so `reviewer_raw` cannot be added without also widening the type
+  // the wire mapper is written against. The `rawProjection` docblock
+  // (`apps/backend/utils/sql-projection.ts`, BS#2231) documents the pattern;
+  // `library.service.ts`'s `libraryArtistViewFields` is the in-repo precedent.
+} as const satisfies Record<keyof AlbumReviewRow, Column>;
 
 /** Maps a projected row to the `AlbumReview` wire shape. Explicit field
  *  list (never a spread) so a wider row cannot smuggle extra keys onto
@@ -157,9 +133,15 @@ export const toAlbumReviewDTO = (row: AlbumReviewRow): AlbumReviewDTO => ({
  *
  * `album_id` is an exact match on the link column; `artist` normalizes
  * TS-side via `normalizeArtistName` (lowercase, leading-"The"-strip — the
- * migration-0092 SSOT) and compares against the persisted `norm_artist`,
- * so the filter is an equality that reads
- * `album_review_submissions_norm_artist_idx`.
+ * migration-0092 SSOT) and compares against the persisted `norm_artist`, so
+ * the filter is an equality against an indexed column
+ * (`album_review_submissions_norm_artist_idx`) rather than a scan of raw
+ * `artist_name`. At this table's size the planner will seq-scan anyway — the
+ * unconditional body floor is unindexed and the ORDER BY needs a sort
+ * regardless — so the index matters for shape and for growth, not for today's
+ * plan. Do not add indexes here on the strength of this comment: ~1,700 rows
+ * sort in microseconds, and every index is write amplification on the nightly
+ * ETL upsert.
  */
 const buildWhere = ({ album_id, artist }: AlbumReviewsQueryFilters): SQL | undefined => {
   const conditions: SQL[] = [isNotNull(album_review_submissions.review)];
@@ -192,7 +174,7 @@ export const getAlbumReviewsPage = async (
     .limit(limit)
     .offset(offset);
 
-  return (rows as AlbumReviewRow[]).map(toAlbumReviewDTO);
+  return rows.map(toAlbumReviewDTO);
 };
 
 /** Total row count for the same filters, for `PaginationInfo`. */

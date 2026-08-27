@@ -26,50 +26,23 @@ import {
   toAlbumReviewDTO,
 } from '../../../apps/backend/services/album-reviews.service';
 
-/**
- * Compile-time pin: `AlbumReviewDTO` must match the SSOT `AlbumReview`
- * schema in `wxyc-shared/api.yaml`, asserted here against a hand-mirrored
- * shape — the same arrangement `tests/unit/services/concerts.service.test.ts`
- * uses for `ConcertDTO`/`ApiYamlConcert`.
+/*
+ * No compile-time SSOT pin lives here, on purpose.
  *
- * The mirror is NOT because the generated type is unavailable: `@wxyc/shared`
- * 4.1.0 does export `AlbumReview`/`AlbumReviewsResponse` (they survived
- * wxyc-shared#378 as orphan schemas when the `GET /album-reviews` PATH was
- * swept, so the types stayed published while the path did not). It is because
- * re-adding that path is a separate wxyc-shared PR, and swapping the service's
- * local alias for `import type { AlbumReview } from '@wxyc/shared/dtos'`
- * belongs with the dependency bump that lands alongside it — the sequencing
- * `ConcertDTO` still follows. Make that swap here when it happens; the two-way
- * `Equal` assertion then fails loudly on any drift (`submitted_at` a nullable
- * date-time string, the three normalized flags nullable booleans, everything
- * free-text nullable).
+ * `AlbumReviewDTO` IS the generated `AlbumReview` (the service aliases the
+ * `@wxyc/shared/dtos` export rather than mirroring it), so there is no
+ * equality left to assert — identity is not drift-prone. The predecessor of
+ * this file did assert it, against a hand-transcribed `ApiYamlAlbumReview`
+ * literal, and that assertion was doubly inert: a transcription cannot detect
+ * drift in the thing it transcribes, AND a type-level assertion in a test file
+ * is checked by nothing here — `npm run typecheck` covers `apps/**` and
+ * `shared/**` but not `tests/`, and ts-jest is transpile-only. Verified by
+ * mutation: breaking the alias left this suite green.
+ *
+ * The envelope shape is pinned where it can fail, in
+ * `controllers/album-reviews.controller.ts`, by typing the response body as
+ * `AlbumReviewsResponse`.
  */
-type ApiYamlAlbumReview = {
-  id: number;
-  album_id: number | null;
-  artist_name: string | null;
-  album_title: string | null;
-  record_label: string | null;
-  artist_blurb: string | null;
-  review: string | null;
-  recommended_tracks: string | null;
-  buzzwords: string | null;
-  fcc_violations: string | null;
-  review_purpose: string | null;
-  rotated: boolean | null;
-  released_within_six_months: boolean | null;
-  social_consent: boolean | null;
-  submitted_at: string | null;
-};
-
-type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
-type Expect<T extends true> = T;
-
-// Fails to compile if AlbumReviewDTO and the api.yaml-derived shape diverge
-// in either direction (extra key, missing key, or type mismatch).
-type _AlbumReviewDtoMatchesSsot = Expect<Equal<AlbumReviewDTO, ApiYamlAlbumReview>>;
-// Reference the alias so `noUnusedLocals`/lint keep the assertion live.
-const _albumReviewDtoTypeGuard: _AlbumReviewDtoMatchesSsot = true;
 
 const mockDb = db as unknown as { _chain: Record<string, jest.Mock> };
 
@@ -142,19 +115,10 @@ const nulledRow: AlbumReviewRow = {
   submitted_at: null,
 };
 
-describe('AlbumReviewDTO structural pin', () => {
-  it('matches the api.yaml-derived AlbumReview shape (compile-time assertion)', () => {
-    // The real check is the `_AlbumReviewDtoMatchesSsot` type above, which
-    // fails to compile on drift; this keeps a runtime reference to the guard.
-    expect(_albumReviewDtoTypeGuard).toBe(true);
-  });
-});
-
 describe('toAlbumReviewDTO', () => {
   it('serializes the submitted_at instant to an ISO-8601 string (SSOT date-time shape)', () => {
     const dto = toAlbumReviewDTO(timestampedRow);
     expect(dto.submitted_at).toBe('2026-03-15T17:45:12.000Z');
-    expect(typeof dto.submitted_at).toBe('string');
   });
 
   it('passes nulls through for a sparse row (null submitted_at and flags)', () => {
@@ -247,7 +211,6 @@ describe('getAlbumReviewsPage', () => {
     await getAlbumReviewsPage({}, 50, 0);
 
     const whereArg = mockDb._chain.where.mock.calls[0][0] as unknown;
-    expect(whereArg).toBeDefined();
     expect(whereArg).toEqual(and(isNotNull(album_review_submissions.review)));
   });
 });
