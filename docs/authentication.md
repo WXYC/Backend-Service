@@ -19,12 +19,12 @@ The `shared/authentication` workspace package wraps better-auth and provides JWT
 
 **Permissions per role (station domain):**
 
-| Role           | bin        | catalog    | flowsheet                                     | reviews |
-| -------------- | ---------- | ---------- | --------------------------------------------- | ------- |
+| Role           | bin        | catalog    | flowsheet                                     | reviews  |
+| -------------- | ---------- | ---------- | --------------------------------------------- | -------- |
 | member         | read/write | read       | read                                          | — (`[]`) |
-| dj             | read/write | read       | read/write                                    | read    |
-| musicDirector  | read/write | read/write | read/write + manage                           | read    |
-| stationManager | read/write | read/write | read/write + manage (plus org administration) | read    |
+| dj             | read/write | read       | read/write                                    | read     |
+| musicDirector  | read/write | read/write | read/write + manage                           | read     |
+| stationManager | read/write | read/write | read/write + manage (plus org administration) | read     |
 
 `reviews: read` gates `GET /album-reviews` (ADR 0011) — the internal surface over the whole DJ form-review archive, without the public `wxycReviews` attach's `social_consent = true` filter, because the form's consent question asked only about social media and internal station tools were never in its scope. `member` decides the key as `[]`, an explicit denial rather than an omission; `stripEmpty` drops it before better-auth sees it, so the constructed role is byte-identical to one that never mentioned `reviews`.
 
