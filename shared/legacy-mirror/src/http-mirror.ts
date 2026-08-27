@@ -528,8 +528,14 @@ interface MirrorDJ {
 export function mapShowToTubafrenzy(show: MirrorShow, dj: MirrorDJ): Record<string, unknown> {
   const startMs = show.start_time ? new Date(show.start_time).getTime() : Date.now();
   const override = show.dj_name_override?.trim();
+  // `.trim() || ''` on the username tail: the schema column is an
+  // unconstrained varchar, so a manually-edited or pre-validation legacy row
+  // could carry padding or pure whitespace — and the docblock's contract is
+  // "if all three are unusable, djHandle is ''". Every current write path
+  // validates usernames against /^[a-zA-Z0-9_.]+$/, so this is a guard, not a
+  // live code path.
   const djHandle =
-    override && override.length > 0 ? override : (resolveDjDisplayName(dj.djName ?? null) ?? dj.username ?? '');
+    override && override.length > 0 ? override : (resolveDjDisplayName(dj.djName ?? null) ?? dj.username?.trim() ?? '');
   return {
     djName: dj.realName || dj.name,
     djHandle,

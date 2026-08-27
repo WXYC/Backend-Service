@@ -1029,6 +1029,21 @@ describe('http.mirror', () => {
       expect(result.djHandle).toBe('kbailey');
     });
 
+    it('trims a padded username and empties a whitespace-only one', () => {
+      // The schema column is an unconstrained varchar: every CURRENT write
+      // path validates usernames against /^[a-zA-Z0-9_.]+$/, but a manually
+      // edited or pre-validation legacy row could carry padding or pure
+      // whitespace. The docblock's contract is "if all three are unusable,
+      // djHandle is ''" — a whitespace-only username is unusable.
+      const show = { id: 100, start_time: new Date() };
+      expect(
+        mapShowToTubafrenzy(show, { realName: null, djName: null, name: 'kate', username: '  kbailey  ' }).djHandle
+      ).toBe('kbailey');
+      expect(mapShowToTubafrenzy(show, { realName: null, djName: null, name: 'kate', username: '   ' }).djHandle).toBe(
+        ''
+      );
+    });
+
     it('yields empty string when override, handle, and username are all absent', () => {
       const show = { id: 100, start_time: new Date() };
       const dj = { realName: null, djName: null, name: 'kate', username: null };
