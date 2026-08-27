@@ -1,4 +1,26 @@
 /**
+ * ⛔ DO NOT RUN — superseded by `jobs/flowsheet-dj-name-scrub` (BS#2281).
+ *
+ * `reresolveMarkerDjNames` below fills `flowsheet.dj_name` WHERE it IS NULL,
+ * from the shows join. BS#2281's scrub deliberately CREATES those NULLs
+ * (PII-nulled `dj_join` / `dj_leave` markers, orphan rows), so running this
+ * job after the scrub silently re-attributes them to the primary DJ and UNDOES
+ * the privacy fix.
+ *
+ * Note also what this job did NOT do, which is why BS#2281 exists: its live
+ * UPDATE was scoped `dj_name IS NULL`, so a row already holding a polluted
+ * value was never corrected — its "124,031 marker rows re-resolved" counts
+ * rows filled from NULL, not rows cleaned. Reading that as "this job
+ * under-remediated, so re-run it" is the specific mistake this banner exists
+ * to stop: a re-run cleans nothing and reverses the scrub.
+ *
+ * Its root `Dockerfile.legacy-dj-name-remediation` has been removed, so
+ * `Manual Build & Deploy` with `target=legacy-dj-name-remediation` fails at
+ * image build rather than producing a runnable container. Enforced by
+ * `tests/unit/jobs/flowsheet-dj-name-scrub/reversal-guard.test.ts`.
+ *
+ * ---
+ *
  * One-shot remediation: scrub `shows.legacy_dj_name` of values pulled from the
  * wrong tubafrenzy column.
  *
@@ -38,7 +60,8 @@
  */
 
 import { sql, type SQL } from 'drizzle-orm';
-import { db, closeDatabaseConnection, intArrayLiteral, MirrorSQL } from '@wxyc/database';
+import { db, intArrayLiteral, MirrorSQL } from '@wxyc/database';
+import { supersededRefusalMessage } from './superseded-guard.js';
 
 export const DRY_RUN = process.argv.includes('--dry-run');
 export const BATCH_SIZE = 5000;
@@ -396,19 +419,18 @@ export const runRemediation = async (): Promise<void> => {
   console.log('\n[remediate] Done.');
 };
 
-const main = async () => {
-  try {
-    await runRemediation();
-  } finally {
-    MirrorSQL.instance().close();
-    await closeDatabaseConnection();
-  }
+/**
+ * Entry point. Now a REFUSAL and nothing else (BS#2281).
+ *
+ * Synchronous, and invoked without a `.catch` tail: reaching `runRemediation`
+ * would open both an SSH session to Kattare and a pg pool, and the old tail
+ * existed to avoid leaking them on the error path. Neither is opened now, so
+ * there is nothing to leak and nothing to await. `closeDatabaseConnection` was
+ * dropped from the imports for the same reason.
+ */
+const main = (): void => {
+  process.stderr.write(supersededRefusalMessage('legacy-dj-name-remediation') + '\n');
+  process.exitCode = 1;
 };
 
-main().catch((err) => {
-  console.error('[remediate] Fatal error:', err);
-  // Use exitCode (not exit) so the .finally body in main() completes —
-  // matches the sibling flowsheet-dj-name-backfill pattern and avoids leaking
-  // the SSH session + pg pool on the error path.
-  process.exitCode = 1;
-});
+main();

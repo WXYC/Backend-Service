@@ -16,6 +16,7 @@ import {
   BATCH_SIZE,
   resolveBatchSize,
 } from '../../../../jobs/flowsheet-dj-name-backfill/job';
+import { supersededRefusalMessage } from '../../../../jobs/flowsheet-dj-name-backfill/superseded-guard';
 
 type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
 const renderSql = (value: unknown): string => {
@@ -241,5 +242,36 @@ describe('flowsheet-dj-name-backfill: formatDuration', () => {
     expect(formatDuration(60_000)).toBe('1m 0s');
     expect(formatDuration(125_000)).toBe('2m 5s');
     expect(formatDuration(3_600_000)).toBe('60m 0s');
+  });
+});
+
+/**
+ * The module-scope `main()` in flowsheet-dj-name-backfill now REFUSES to run (BS#2281): its
+ * `dj_name IS NULL` predicate refills exactly the NULLs the dj-name scrub
+ * deliberately creates. Importing the module above therefore executes that
+ * refusal and sets `process.exitCode = 1`, which would fail this whole Jest
+ * run even with every test passing (Jest does not force the code back to 0 on
+ * success). Capture it, assert it, then restore — the same save/restore idiom
+ * `tests/unit/jobs/flowsheet-etl/backfill-legacy-ids.test.ts` uses for the
+ * same reason.
+ */
+const exitCodeSetOnImport = process.exitCode;
+
+describe('flowsheet-dj-name-backfill refuses to run (BS#2281)', () => {
+  beforeAll(() => {
+    process.exitCode = 0;
+  });
+
+  it('exits non-zero when its entry point is invoked', () => {
+    expect(exitCodeSetOnImport).toBe(1);
+  });
+
+  it('points the operator at the scrub that superseded it', () => {
+    const message = supersededRefusalMessage('flowsheet-dj-name-backfill');
+    expect(message).toContain('jobs/flowsheet-dj-name-scrub');
+    expect(message).toContain('refuses to run');
+    // The specific misreading this message exists to head off: BS#2281 calls
+    // the earlier remediation "under-remediated", which invites a re-run.
+    expect(message).toContain('re-running this job does not fix that');
   });
 });
