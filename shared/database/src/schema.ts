@@ -2497,8 +2497,20 @@ export const shows = wxyc_schema.table(
     /**
      * On-air DJ alias for the show, sourced from tubafrenzy's
      * `FLOWSHEET_RADIO_SHOW_PROD.DJ_HANDLE` column (NOT `DJ_NAME` — that's the
-     * full real name BS forwards through the legacy mirror as `realName || name`
-     * and surfacing it on the public v2 wire would be PII exposure; see BS#1393).
+     * full real name, still forwarded outbound through the legacy mirror as
+     * `realName || name` pending the `auth_user.name` backfill (Track 2d of
+     * the PII safeguards plan), and surfacing it on the public v2 wire would
+     * be PII exposure; see BS#1393).
+     *
+     * The *outbound* write to tubafrenzy's DJ_HANDLE (`mapShowToTubafrenzy` in
+     * `@wxyc/legacy-mirror`) does not read this column — it's computed fresh
+     * on every call as: per-show override (`dj_name_override`) -> the DJ's
+     * stage handle (`auth_user.dj_name`, via the canonical
+     * `resolveDjDisplayName`) -> `auth_user.username` -> `''`. It NEVER reads
+     * `auth_user.name`: that field used to be the last fallback there and
+     * leaked DJs' legal names into this public field for handle-less DJs
+     * (fixed; see shared/database/src/dj-name.ts:1-13 for why `.name` is
+     * never a valid input to this chain).
      *
      * The marker `flowsheet.dj_name` resolver (apps/backend/routes/internal.route.ts
      * via `resolveShow`'s COALESCE chain) reads this column as the fallback when

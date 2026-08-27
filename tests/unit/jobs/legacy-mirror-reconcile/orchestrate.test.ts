@@ -80,8 +80,20 @@ const makeEntry = (over: Partial<FSEntry> = {}): FSEntry =>
     ...over,
   }) as unknown as FSEntry;
 
+// `username` is included because the real `selectDj` selects the full
+// `auth_user` row (`orchestrate.ts` `selectDj`), and the mirror's
+// `djHandle` chain (override -> djName -> username, never `name`) needs it
+// available on this fixture even though `mapShowToTubafrenzy` is mocked in
+// this suite (the chain itself is unit-tested in http.mirror.test.ts).
 const makeDj = (over: Partial<User> = {}): User =>
-  ({ id: 'dj-1', name: 'Real Name', realName: 'Real Name', djName: 'DJ Handle', ...over }) as unknown as User;
+  ({
+    id: 'dj-1',
+    name: 'Real Name',
+    realName: 'Real Name',
+    djName: 'DJ Handle',
+    username: 'dj-handle-user',
+    ...over,
+  }) as unknown as User;
 
 /** jest.fn returning a resolved promise — a non-async wrapper so the fakes
  * don't trip `@typescript-eslint/require-await` (bare async arrow, no await). */
