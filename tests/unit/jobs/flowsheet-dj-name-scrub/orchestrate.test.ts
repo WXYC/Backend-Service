@@ -25,6 +25,7 @@ import { resolveShowDjName } from '@wxyc/database';
 import {
   decideDjName,
   buildPiiNameIndex,
+  classifyChange,
   EXCLUDED_ENTRY_TYPES,
   RECOMPUTED_ENTRY_TYPES,
   PII_NULL_ONLY_ENTRY_TYPES,
@@ -386,5 +387,58 @@ describe('rewriteMessage', () => {
     const stored = 'Start of Show: joined the set at joined the set at 6/8/2026, 9:05:52 PM';
     const decision = rewriteMessage('show_start', stored, new Set(['joined the set at']));
     expect(decision).toEqual({ action: 'write', message: 'Start of show: 6/8/2026, 9:05:52 PM' });
+  });
+});
+
+describe('classifyChange — provenance for a would-be write', () => {
+  // The prod dry run reported 1,826,070 track rows differing from the
+  // canonical value: 86.7% of everything scanned. That number is consistent
+  // with cohort B (BS#1393 rewrote `shows.legacy_dj_name` from DJ_NAME to
+  // DJ_HANDLE and never re-resolved the track rows), but "consistent with" is
+  // not evidence. This classifier turns the aggregate into provenance, so an
+  // operator can see how much of it is genuine real-name removal versus
+  // cosmetic churn BEFORE 1.8M rows are rewritten on the live on-air table.
+  //
+  // Diagnostic only — it changes no decision and gates no write.
+  const PII = new Set(['Realname Alpha']);
+
+  it('flags a stored roster real name as the confirmed-PII case', () => {
+    expect(classifyChange('Realname Alpha', 'zorp', PII)).toBe('stored_is_roster_real_name');
+  });
+
+  it('matches the roster on the trimmed stored value, covering both writer families', () => {
+    // The TypeScript writers stored trim(auth_user.name); the SQL COALESCE
+    // writers stored it untrimmed.
+    expect(classifyChange('  Realname Alpha  ', 'zorp', PII)).toBe('stored_is_roster_real_name');
+  });
+
+  it('reports a gap fill separately — nothing is being removed', () => {
+    expect(classifyChange(null, 'zorp', PII)).toBe('stored_null');
+  });
+
+  it('ranks the PII case above a null recompute', () => {
+    // Removing a real name is the outcome we want counted as PII removal,
+    // even though the write also happens to null the column.
+    expect(classifyChange('Realname Alpha', null, PII)).toBe('stored_is_roster_real_name');
+  });
+
+  it('flags nulling a NON-roster value as unexplained attribution loss', () => {
+    // This is the class that should be near zero. A non-empty count here means
+    // the job is erasing handles it cannot justify as PII.
+    expect(classifyChange('some handle', null, PII)).toBe('recomputed_null_non_pii');
+  });
+
+  it('separates a whitespace-only difference — a cosmetic write', () => {
+    expect(classifyChange('  zorp  ', 'zorp', PII)).toBe('whitespace_only');
+  });
+
+  it('separates a case-only difference', () => {
+    expect(classifyChange('ZORP', 'zorp', PII)).toBe('case_only');
+  });
+
+  it('falls through to a plain value change when nothing else explains it', () => {
+    // e.g. a DJ who changed their own handle. Legitimate, but not PII removal,
+    // and it should not be counted as such.
+    expect(classifyChange('old handle', 'new handle', PII)).toBe('other_value_change');
   });
 });
