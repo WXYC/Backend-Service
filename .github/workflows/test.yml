@@ -233,6 +233,13 @@ jobs:
       - name: 'Type check: va-apple-music-url-remediation (BS#2009)'
         run: npm run typecheck --workspace=jobs/va-apple-music-url-remediation
 
+      # Same narrow, per-job coverage rationale as the step above. This job
+      # writes to the live on-air `flowsheet` table under a PII mandate, so a
+      # transpile-only build silently shipping a type error is not an
+      # acceptable failure mode here.
+      - name: 'Type check: flowsheet-dj-name-scrub (BS#2281)'
+        run: npm run typecheck --workspace=jobs/flowsheet-dj-name-scrub
+
       - name: Lint
         run: npm run lint
 
