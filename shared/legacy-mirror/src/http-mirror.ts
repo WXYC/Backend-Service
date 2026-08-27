@@ -8,6 +8,7 @@
  */
 
 import * as Sentry from '@sentry/node';
+import { resolveDjDisplayName } from '@wxyc/database';
 
 const TUBAFRENZY_URL = process.env.TUBAFRENZY_URL ?? 'https://www.wxyc.info';
 const MIRROR_API_KEY = process.env.MIRROR_API_KEY ?? '';
@@ -492,6 +493,7 @@ interface MirrorDJ {
   realName?: string | null;
   djName?: string | null;
   name: string;
+  username?: string | null;
 }
 
 /**
@@ -499,17 +501,35 @@ interface MirrorDJ {
  *
  * `djHandle` picks the per-show override first (BS#1321) so the mirror
  * surface matches every other consumer of `resolveDjNameForShow`. If no
- * override is set, fall back to the DJ's stage handle (`auth_user.dj_name`)
- * and then to their name. `djName` (note: capital N — tubafrenzy's distinct
- * "real-name" field) is always `realName || name`; we don't override it
- * because the upstream surface treats `djName` as "the human behind the
- * mic" rather than "the on-air display name", and the override is the
- * latter, not the former.
+ * override is set, fall back to the DJ's stage handle (`auth_user.dj_name`,
+ * filtered through the canonical `resolveDjDisplayName` — trimmed, and
+ * treating the literal "Anonymous" as absent), and then to `auth_user.username`.
+ * If all three are unusable, `djHandle` is `''` (mirrors the `showName ?? ''`
+ * convention below; unreachable in practice since every provisioned user has
+ * a username and anonymous users cannot own shows).
+ *
+ * `djHandle` NEVER reads `auth_user.name`: that field is written once at
+ * provisioning as `realName || username` and never maintained, making it a
+ * stale, hidden copy of the DJ's legal name (see
+ * shared/database/src/dj-name.ts:1-13). Reading it here used to leak legal
+ * names into tubafrenzy's public `DJ_HANDLE` field for handle-less DJs —
+ * do not re-add it, and do not re-derive the trim/Anonymous logic locally;
+ * always go through `resolveDjDisplayName`.
+ *
+ * `djName` (note: capital N — tubafrenzy's distinct "real-name" field) is
+ * still `realName || name` and is DELIBERATELY left unchanged here: it
+ * targets tubafrenzy's legal-name field, where `name` remains the correct
+ * fallback until the `auth_user.name` backfill (Track 2d of the PII
+ * safeguards plan) makes `realName` reliably populated. We don't fold the
+ * override into `djName` either, because the upstream surface treats
+ * `djName` as "the human behind the mic" rather than "the on-air display
+ * name", and the override is the latter, not the former.
  */
 export function mapShowToTubafrenzy(show: MirrorShow, dj: MirrorDJ): Record<string, unknown> {
   const startMs = show.start_time ? new Date(show.start_time).getTime() : Date.now();
   const override = show.dj_name_override?.trim();
-  const djHandle = override && override.length > 0 ? override : dj.djName || dj.name;
+  const djHandle =
+    override && override.length > 0 ? override : (resolveDjDisplayName(dj.djName ?? null) ?? dj.username ?? '');
   return {
     djName: dj.realName || dj.name,
     djHandle,

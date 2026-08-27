@@ -996,14 +996,79 @@ describe('http.mirror', () => {
       expect(result.signonTime).toBe(new Date('2024-02-01T12:00:00Z').getTime());
     });
 
-    it('falls back to name when realName/djName are null', () => {
+    // Negative case for the removed leak: djHandle used to fall through to
+    // `dj.name` (a hidden copy of the DJ's legal name — see
+    // shared/database/src/dj-name.ts:1-13) for handle-less DJs. It must now
+    // fall to `dj.username` instead, and djName (the real-name field) is
+    // untouched by this change.
+    it('falls back to username, never name, when realName/djName are null', () => {
       const show = { id: 100, start_time: new Date() };
-      const dj = { realName: null, djName: null, name: 'kate' };
+      const dj = { realName: null, djName: null, name: 'kate', username: 'kbailey' };
 
       const result = mapShowToTubafrenzy(show, dj);
 
       expect(result.djName).toBe('kate');
-      expect(result.djHandle).toBe('kate');
+      expect(result.djHandle).toBe('kbailey');
+    });
+
+    it('uses the handle via resolveDjDisplayName, ignoring the literal "Anonymous"', () => {
+      const show = { id: 100, start_time: new Date() };
+      const dj = { realName: null, djName: 'Anonymous', name: 'kate', username: 'kbailey' };
+
+      const result = mapShowToTubafrenzy(show, dj);
+
+      expect(result.djHandle).toBe('kbailey');
+    });
+
+    it('falls back to username when the handle is blank', () => {
+      const show = { id: 100, start_time: new Date() };
+      const dj = { realName: null, djName: '   ', name: 'kate', username: 'kbailey' };
+
+      const result = mapShowToTubafrenzy(show, dj);
+
+      expect(result.djHandle).toBe('kbailey');
+    });
+
+    it('yields empty string when override, handle, and username are all absent', () => {
+      const show = { id: 100, start_time: new Date() };
+      const dj = { realName: null, djName: null, name: 'kate', username: null };
+
+      const result = mapShowToTubafrenzy(show, dj);
+
+      expect(result.djHandle).toBe('');
+    });
+
+    // Sentinel: djHandle must never equal a value planted only in
+    // `name`/`realName`, across the override/handle/username/all-absent
+    // matrix. Uses obviously-fake sentinel strings per WXYC convention.
+    it('never leaks a sentinel legal name planted in name/realName onto djHandle', () => {
+      const sentinel = 'SENTINEL Legal Name';
+      const cases: Array<{
+        show: Parameters<typeof mapShowToTubafrenzy>[0];
+        dj: Parameters<typeof mapShowToTubafrenzy>[1];
+      }> = [
+        {
+          show: { id: 1, start_time: new Date(), dj_name_override: 'Guest Host' },
+          dj: { realName: sentinel, djName: sentinel, name: sentinel, username: sentinel },
+        },
+        {
+          show: { id: 2, start_time: new Date() },
+          dj: { realName: sentinel, djName: 'DJ Catalyst', name: sentinel, username: sentinel },
+        },
+        {
+          show: { id: 3, start_time: new Date() },
+          dj: { realName: sentinel, djName: null, name: sentinel, username: 'kbailey' },
+        },
+        {
+          show: { id: 4, start_time: new Date() },
+          dj: { realName: sentinel, djName: null, name: sentinel, username: null },
+        },
+      ];
+
+      for (const { show, dj } of cases) {
+        const result = mapShowToTubafrenzy(show, dj);
+        expect(result.djHandle).not.toBe(sentinel);
+      }
     });
 
     it('defaults optional fields', () => {
