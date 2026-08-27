@@ -38,6 +38,7 @@ import {
   capSessionUpdateAgainstDeviceFlow,
   DEVICE_SESSION_TTL_MS,
 } from './device-authorization';
+import { deriveUserNameOnCreate, deriveUserNameOnUpdate } from './derive-user-display-name';
 import { sendEmail, sendOTPEmail, sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
 import { buildTrustedClients } from './oidc-trusted-clients';
 import { buildLoginPage } from './oidc-login-page';
@@ -521,6 +522,14 @@ export const auth = betterAuth({
   databaseHooks: {
     user: {
       create: {
+        // DJ real-name PII safeguards plan, Track 2b: the one choke point
+        // for auth_user.name — see derive-user-display-name.ts for the full
+        // constraint writeup (the {data} merge contract, why update.before
+        // can't fetch the row it's updating).
+        before: async (data) =>
+          deriveUserNameOnCreate(
+            data as { name: string; username?: string | null; djName?: string | null } & Record<string, unknown>
+          ),
         after: async (createdUser) => {
           const u = createdUser as { id: string; isAnonymous?: boolean | null };
           // Anonymous-plugin users are per-device throwaways, not station members.
@@ -566,6 +575,12 @@ export const auth = betterAuth({
             console.error('[user.create.after] Failed to auto-add member row:', error);
           }
         },
+      },
+      update: {
+        // Same Track 2b choke point as create.before above — payload-only,
+        // see derive-user-display-name.ts for why (update.before never
+        // receives the row it's updating).
+        before: async (data) => deriveUserNameOnUpdate(data as { djName?: string | null } & Record<string, unknown>),
       },
     },
     session: {

@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/auth-user-name-backfill",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "One-shot backfill: rewrite auth_user.name to the on-air handle (or username) it should always have held, so the column stops being a hidden second copy of the legal name (DJ real-name PII safeguards plan, Track 2d). Opens with a machine-enforced precondition gate that refuses to run until Track 2a's preserve-first copy (name -> real_name) has run. Dry-run by default; --execute to write. ~139 candidate rows, single SELECT-all.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_auth_user_name_backfill:ci -f ../../Dockerfile.auth-user-name-backfill ../../",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

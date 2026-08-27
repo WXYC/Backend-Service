@@ -233,6 +233,14 @@ jobs:
       - name: 'Type check: va-apple-music-url-remediation (BS#2009)'
         run: npm run typecheck --workspace=jobs/va-apple-music-url-remediation
 
+      # Same BS#2009 gap as above: this job carries the Track 2d
+      # precondition gate that stands between a rerun and an unrecoverable
+      # legal-name loss (DJ real-name PII safeguards plan) — the one job in
+      # jobs/** where shipping uncompiled-but-green is the worst possible
+      # place for that gap.
+      - name: 'Type check: auth-user-name-backfill'
+        run: npm run typecheck --workspace=jobs/auth-user-name-backfill
+
       - name: Lint
         run: npm run lint
 
