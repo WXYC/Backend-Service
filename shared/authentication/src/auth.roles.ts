@@ -5,8 +5,25 @@ import { createAccessControl } from 'better-auth/plugins/access';
 // tests/unit/authentication/auth.roles.test.ts, where importing it is correct.
 import { defaultStatements } from 'better-auth/plugins/organization/access';
 
-const statement = {
-  ...defaultStatements,
+/**
+ * The station domain: every key this repo adds on top of better-auth's own.
+ *
+ * Declared separately from `statement` rather than inline, because the station
+ * key set has to be knowable WITHOUT subtracting better-auth's. Deriving it as
+ * `Exclude<keyof typeof statement, keyof typeof defaultStatements>` left a hole
+ * exactly where it mattered: a station key that happens to be NAMED like a
+ * library key — `member` is the plausible one, for a roster gate — would be
+ * subtracted right back out. It would then be absent from `StationGrants`, so
+ * `WXYC_GRANTS` would still compile untouched (no "you must decide this key"
+ * error), absent from `STATION_KEYS`, so the totality test would skip it, and
+ * absent from every role's grants — while `ORG_ADMIN_GRANTS.member` quietly
+ * handed stationManager better-auth's `create`/`update`/`delete` under that
+ * name instead. Every one of the three invariant suites would stay green.
+ *
+ * Keyed off this object instead, the station set is exact, and the assertion
+ * below makes the shadowing case a compile error rather than a silent hole.
+ */
+const stationStatement = {
   catalog: ['read', 'write'],
   bin: ['read', 'write'],
   // `manage` is the operator tier: acting on a show you are not a member of.
@@ -35,6 +52,46 @@ const statement = {
   flowsheet: ['read', 'write', 'manage'],
 } as const;
 
+/**
+ * A station key may not shadow one of better-auth's own.
+ *
+ * If it did, the spread below would silently replace the library's declaration
+ * with ours while `ORG_ADMIN_GRANTS` kept granting stationManager the library's
+ * actions under that name. Naming the collision here turns that into a build
+ * failure whose error text names the offending key. Rename the station key —
+ * `roster` rather than `member` — or, if the library key genuinely is the one
+ * you want, grant it through `ORG_ADMIN_GRANTS` and leave `statement` alone.
+ */
+type ShadowedStationKeys = Extract<keyof typeof stationStatement, keyof typeof defaultStatements>;
+const _assertNoShadowedStationKeys: [ShadowedStationKeys] extends [never]
+  ? true
+  : ['station key shadows a better-auth statement key', ShadowedStationKeys] = true;
+void _assertNoShadowedStationKeys;
+
+const statement = {
+  ...defaultStatements,
+  ...stationStatement,
+} as const;
+
+/**
+ * Every key of `statement` must come from one of the two blocks above.
+ *
+ * The totality guarantee is "a new statement key must be decided for all four
+ * roles or it won't compile", and that only holds for keys `StationGrants`
+ * ranges over — i.e. keys declared in `stationStatement`. A key added inline
+ * here instead would slip past `StationGrants`, past `STATION_KEYS`, and past
+ * all three invariant suites. There is no reason to add one here, so this makes
+ * trying it a build failure that names the key and points at the right block.
+ */
+type UnroutedStatementKeys = Exclude<
+  keyof typeof statement,
+  keyof typeof defaultStatements | keyof typeof stationStatement
+>;
+const _assertEveryStatementKeyIsRouted: [UnroutedStatementKeys] extends [never]
+  ? true
+  : ['statement key must be declared in stationStatement, not inline', UnroutedStatementKeys] = true;
+void _assertEveryStatementKeyIsRouted;
+
 export type AccessControlStatement = typeof statement;
 
 /**
@@ -51,11 +108,15 @@ export const STATEMENT_KEYS = Object.keys(statement) as (keyof AccessControlStat
 /** The full vocabulary: every declarable action, per key. Read by the tests. */
 export const STATEMENT_ACTIONS: Readonly<Record<string, readonly string[]>> = statement;
 
-/** The station-domain keys — those `statement` adds beyond better-auth's own. */
-export const STATION_KEYS = STATEMENT_KEYS.filter((key) => !Object.hasOwn(defaultStatements, key)) as Exclude<
-  keyof AccessControlStatement,
-  keyof typeof defaultStatements
->[];
+/**
+ * The station-domain keys — those `statement` adds beyond better-auth's own.
+ *
+ * Read straight off `stationStatement`, NOT filtered out of `STATEMENT_KEYS` by
+ * subtracting `defaultStatements`. The subtraction silently dropped any station
+ * key sharing a name with a library one, which is the totality hole the
+ * `ShadowedStationKeys` assertion above now also closes at compile time.
+ */
+export const STATION_KEYS = Object.keys(stationStatement) as (keyof typeof stationStatement)[];
 
 const accessControl = createAccessControl(statement);
 
@@ -63,8 +124,14 @@ import { canonicalizeRole, type WXYCRole } from '@wxyc/shared/auth-client/auth';
 export type { WXYCRole } from '@wxyc/shared/auth-client/auth';
 export { roleToAuthorization, Authorization } from '@wxyc/shared/auth-client/auth';
 
-/** The station-domain half of the statement: everything better-auth doesn't own. */
-type StationKey = Exclude<keyof AccessControlStatement, keyof typeof defaultStatements>;
+/**
+ * The station-domain half of the statement: everything better-auth doesn't own.
+ *
+ * `keyof typeof stationStatement`, not an `Exclude` over the merged statement —
+ * see `stationStatement`'s own comment for the totality hole that subtraction
+ * opened.
+ */
+type StationKey = keyof typeof stationStatement;
 
 /**
  * A grant row: every station-domain key decided, and — critically — each one
@@ -157,15 +224,26 @@ const ORG_ADMIN_GRANTS = {
 export { WXYC_GRANTS, ORG_ADMIN_GRANTS };
 
 /**
- * Freezes the grant blocks and the statement vocabulary, arrays included.
+ * Freezes what this repo owns, and only what this repo owns.
  *
- * All three are exported and re-exported from `@wxyc/authentication`, so they
- * are reachable, mutable public API, and `as const` is erased at runtime.
- * `buildRole` already clones, so a mutation here can no longer change an
- * authorization verdict — but freezing closes the class rather than the one
- * instance of it, and it is what keeps `STATEMENT_ACTIONS` honest as the
- * oracle the invariant tests read. Module scope is strict, so a `push` on a
- * frozen array throws rather than failing silently.
+ * `WXYC_GRANTS`, `ORG_ADMIN_GRANTS` and `STATEMENT_ACTIONS` are exported and
+ * re-exported from `@wxyc/authentication`, so they are reachable, mutable
+ * public API, and `as const` is erased at runtime. `buildRole` already clones,
+ * so a mutation can no longer change an authorization verdict — but freezing
+ * closes the class rather than one instance of it, and it is what keeps
+ * `STATEMENT_ACTIONS` honest as the oracle the invariant tests read. Module
+ * scope is strict, so a `push` on a frozen array throws rather than failing
+ * silently.
+ *
+ * SCOPE, deliberately narrow: `statement` is frozen SHALLOWLY. Its
+ * library-owned half is `{...defaultStatements}`, which copies *references* to
+ * better-auth's own exported arrays — so recursing here would freeze
+ * `defaultStatements.organization`/`.member`/`.invitation`/`.team`/`.ac` inside
+ * the library's module, process-wide, for every other consumer in `apps/auth`.
+ * Nothing in better-auth 1.6.x mutates them, so it would work; it would still
+ * be this file reaching into a dependency's state to protect objects it does
+ * not own. The shallow freeze keeps the key set fixed, and the three blocks
+ * BS actually authors are frozen through.
  *
  * Runs before the roles are constructed below; better-auth only reads these.
  */
@@ -176,9 +254,10 @@ const deepFreeze = <T extends object>(value: T): T => {
   return Object.freeze(value);
 };
 
-deepFreeze(statement);
+deepFreeze(stationStatement);
 deepFreeze(WXYC_GRANTS);
 deepFreeze(ORG_ADMIN_GRANTS);
+Object.freeze(statement);
 
 /**
  * Drops explicitly-denied (`[]`) keys before handing grants to better-auth.
