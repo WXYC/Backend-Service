@@ -1,4 +1,28 @@
 /**
+ * ⛔ DO NOT RUN — superseded by `jobs/flowsheet-dj-name-scrub` (BS#2281).
+ *
+ * This job fills `flowsheet.dj_name` WHERE it IS NULL, from the shows join.
+ * BS#2281's scrub deliberately CREATES those NULLs: `dj_join` / `dj_leave`
+ * markers whose guest handle held a DJ's real name are nulled rather than
+ * re-attributed (the joining guest is not recoverable from `shows`, so a
+ * shows-join recompute writes the PRIMARY DJ's name over them — the exact
+ * wrong-attribution trap the docstring below already warns about), and orphan
+ * rows have no chain to recompute from at all. Running this job after the
+ * scrub silently refills those rows and UNDOES the privacy fix.
+ *
+ * Its root `Dockerfile.flowsheet-dj-name-backfill` has been removed, so
+ * `Manual Build & Deploy` with `target=flowsheet-dj-name-backfill` fails at
+ * image build rather than producing a runnable container. Enforced by
+ * `tests/unit/jobs/flowsheet-dj-name-scrub/reversal-guard.test.ts`.
+ *
+ * The source stays in the tree on purpose: `docs/migrations.md` and
+ * `docs/backfill-precondition-assertions.md` both cite the
+ * 0053 → this job → 0054 chain as the canonical precondition-guard pattern,
+ * and its run history is referenced from several issues. Restoring the
+ * Dockerfile is a deliberate, reviewed act — not a convenience.
+ *
+ * ---
+ *
  * One-shot backfill: populate flowsheet.dj_name on legacy track + marker rows.
  *
  * Splits the large UPDATE that was originally embedded in migration 0053 into
@@ -31,7 +55,8 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { db, closeDatabaseConnection } from '@wxyc/database';
+import { db } from '@wxyc/database';
+import { supersededRefusalMessage } from './superseded-guard.js';
 
 const JOB_NAME = 'flowsheet-dj-name-backfill';
 
@@ -155,19 +180,22 @@ const verifyComplete = async () => {
   console.log(`[${JOB_NAME}] Verification passed: 0 track + marker rows with dj_name IS NULL.`);
 };
 
-const main = async () => {
-  try {
-    await runBackfill();
-    await verifyComplete();
-  } finally {
-    await closeDatabaseConnection();
-  }
+/**
+ * Entry point. Now a REFUSAL and nothing else (BS#2281).
+ *
+ * Synchronous, and invoked without a `.catch` tail, because there is no
+ * longer any async work here to fail: no DB connection is opened, so nothing
+ * needs closing. `closeDatabaseConnection` was dropped from the imports for
+ * the same reason. The primitives below stay individually exported and
+ * callable so the unit suite can keep pinning their SQL shape — the refusal
+ * is on the operator's path, not on the module's.
+ */
+const main = (): void => {
+  process.stderr.write(supersededRefusalMessage(JOB_NAME) + '\n');
+  process.exitCode = 1;
 };
 
-main().catch((error) => {
-  console.error(`[${JOB_NAME}] Failed:`, error);
-  process.exitCode = 1;
-});
+main();
 
 // Exports for unit tests. Production entry point is the `main()` invocation
 // above; tests reach into the individual primitives.
