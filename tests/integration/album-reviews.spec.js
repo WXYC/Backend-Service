@@ -9,7 +9,7 @@
  * THIS TIER CANNOT PIN THE ROLE GATE, and does not try to. The CI containers
  * run `AUTH_BYPASS=true`, under which `requirePermissions` decodes the token,
  * checks only `banned`, and returns `next()` — the permission block is
- * unreachable, so `requirePermissions({ reviews: ['read'] })` and
+ * unreachable, so `requirePermissions({ album_reviews: ['read'] })` and
  * `requirePermissions({})` behave identically here. The gate lives in
  * `tests/unit/routes/album-reviews-permissions.route.test.ts` (CI) and
  * `tests/e2e/album-reviews-pipeline.test.ts` (the only tier with
@@ -70,60 +70,19 @@ describe('GET /album-reviews (ADR 0011)', () => {
   let libraryId;
   const seededIds = {};
 
+  // postgres.js object-insert (`${sql(row)}`), the idiom
+  // `concerts-genre-enrichment.spec.js` uses. This was a 19-key `defaults`
+  // object + a 20-column INSERT list + a positional `$1..$19` array that had
+  // to stay index-aligned with it — three representations of one row shape,
+  // whose failure mode is silent: inserting a column mid-list without shifting
+  // the values array writes `fcc_violations` text into `review_purpose` and
+  // every assertion that doesn't read those two still passes. The `defaults`
+  // object is gone because every column it nulled is nullable in the DDL
+  // (schema.ts), so an omitted key and an explicit null produce the same row.
   const seedSubmission = async (key, overrides) => {
-    const defaults = {
-      album_id: null,
-      artist_name: null,
-      album_title: null,
-      record_label: null,
-      artist_blurb: null,
-      review: null,
-      recommended_tracks: null,
-      buzzwords: null,
-      fcc_violations: null,
-      review_purpose: null,
-      reviewer_raw: null,
-      social_consent_raw: null,
-      social_consent: null,
-      released_within_six_months: null,
-      rotated: null,
-      submitted_at: null,
-      norm_artist: null,
-      norm_album: null,
-    };
-    const row = { ...defaults, ...overrides };
-    const [inserted] = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".album_review_submissions
-         (album_id, artist_name, album_title, record_label, artist_blurb, review,
-          recommended_tracks, buzzwords, fcc_violations, review_purpose,
-          reviewer_raw, social_consent_raw, social_consent,
-          released_within_six_months, rotated, submitted_at,
-          source, source_key, norm_artist, norm_album)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-               'google_form', $17, $18, $19)
-       RETURNING id`,
-      [
-        row.album_id,
-        row.artist_name,
-        row.album_title,
-        row.record_label,
-        row.artist_blurb,
-        row.review,
-        row.recommended_tracks,
-        row.buzzwords,
-        row.fcc_violations,
-        row.review_purpose,
-        row.reviewer_raw,
-        row.social_consent_raw,
-        row.social_consent,
-        row.released_within_six_months,
-        row.rotated,
-        row.submitted_at,
-        SOURCE_KEY_PREFIX + key,
-        row.norm_artist,
-        row.norm_album,
-      ]
-    );
+    const row = { source: 'google_form', source_key: SOURCE_KEY_PREFIX + key, ...overrides };
+    const [inserted] = await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_review_submissions ${sql(row)} RETURNING id`;
     seededIds[key] = inserted.id;
   };
 
@@ -262,11 +221,19 @@ describe('GET /album-reviews (ADR 0011)', () => {
   });
 
   describe('default listing', () => {
-    it('orders by submitted_at DESC with the timestamp-less row LAST (NULLS LAST)', async () => {
-      const res = await auth.get('/album-reviews').query({ limit: 100 });
-      expect(res.status).toBe(200);
+    // The seed is immutable after beforeAll and nothing in this describe
+    // mutates rows, so the unfiltered listing is fetched once rather than
+    // re-requested by each case — four identical HTTP round trips, eight
+    // Postgres queries, on a suite that runs in CI on every push.
+    let listing;
 
-      const rows = seeded(res.body);
+    beforeAll(async () => {
+      listing = await auth.get('/album-reviews').query({ limit: 100 });
+      expect(listing.status).toBe(200);
+    });
+
+    it('orders by submitted_at DESC with the timestamp-less row LAST (NULLS LAST)', async () => {
+      const rows = seeded(listing.body);
       expect(rows.map((r) => r.id)).toEqual([
         seededIds['juana-2'], // newest instant
         seededIds['pratt'],
@@ -280,10 +247,7 @@ describe('GET /album-reviews (ADR 0011)', () => {
     });
 
     it('serves all three social_consent states — the internal surface applies no consent filter', async () => {
-      const res = await auth.get('/album-reviews').query({ limit: 100 });
-      expect(res.status).toBe(200);
-
-      const byId = new Map(seeded(res.body).map((r) => [r.id, r]));
+      const byId = new Map(seeded(listing.body).map((r) => [r.id, r]));
       // true: answered yes. false: answered no to SOCIAL MEDIA — the question
       // never covered internal station tools. null: submitted before the
       // question existed (~2024-06-20), i.e. never asked.
@@ -295,9 +259,10 @@ describe('GET /album-reviews (ADR 0011)', () => {
     it('never serves a bodyless submission (review IS NOT NULL floor)', async () => {
       // Prod holds 2 bodyless rows of 1,689. Checked on the unfiltered listing
       // and on both filters, since the floor lives in the shared buildWhere.
-      const listing = await auth.get('/album-reviews').query({ limit: 100 });
-      const byAlbum = await auth.get('/album-reviews').query({ album_id: String(libraryId), limit: 100 });
-      const byArtist = await auth.get('/album-reviews').query({ artist: 'Juana Molina', limit: 100 });
+      const [byAlbum, byArtist] = await Promise.all([
+        auth.get('/album-reviews').query({ album_id: String(libraryId), limit: 100 }),
+        auth.get('/album-reviews').query({ artist: 'Juana Molina', limit: 100 }),
+      ]);
 
       for (const res of [listing, byAlbum, byArtist]) {
         expect(res.status).toBe(200);
@@ -309,8 +274,7 @@ describe('GET /album-reviews (ADR 0011)', () => {
     });
 
     it('serves the full AlbumReview wire shape with no PII and no internal columns', async () => {
-      const res = await auth.get('/album-reviews').query({ limit: 100 });
-      const full = seeded(res.body).find((r) => r.id === seededIds['juana-1']);
+      const full = seeded(listing.body).find((r) => r.id === seededIds['juana-1']);
 
       expect(full).toEqual({
         id: seededIds['juana-1'],
@@ -333,7 +297,7 @@ describe('GET /album-reviews (ADR 0011)', () => {
       // The load-bearing PII assertion: the seeded row HAS reviewer_raw and
       // social_consent_raw in the DB; the wire object must not carry the
       // keys at all (absent, not null).
-      for (const row of seeded(res.body)) {
+      for (const row of seeded(listing.body)) {
         for (const internal of [
           'reviewer_raw',
           'social_consent_raw',

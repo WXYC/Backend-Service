@@ -2811,7 +2811,7 @@ paths:
         name (normalized exact match). Deliberately not /reviews, which is
         reserved for the in-app Review model (ADR 0006).
 
-        INTERNAL SURFACE. Requires a station role (`reviews:read` — dj,
+        INTERNAL SURFACE. Requires a station role (`album_reviews:read` — dj,
         musicDirector, or stationManager); an anonymous session carries no role
         claim and is rejected with 403. It serves the WHOLE archive with NO
         `social_consent` filter, because the form's consent question asked only
@@ -2864,4 +2864,4 @@ paths:
         '401':
           description: Authentication required
         '403':
-          description: Authenticated but without the `reviews:read` permission (anonymous sessions and the `member` role)
+          description: Authenticated but without the `album_reviews:read` permission (anonymous sessions and the `member` role)

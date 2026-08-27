@@ -18,7 +18,7 @@
  *
  * THIS IS THE ONLY TIER THAT RUNS THE REAL AUTH GATE. The e2e backend sets
  * `AUTH_BYPASS=false` (`dev_env/docker-compose.yml`), so `requirePermissions`
- * actually verifies the JWT against JWKS and evaluates the `reviews: ['read']`
+ * actually verifies the JWT against JWKS and evaluates the `album_reviews: ['read']`
  * permission. The integration suite runs `AUTH_BYPASS=true` and short-circuits
  * to `next()` before any permission check, so it cannot. Note that NO CI
  * workflow invokes `jest.e2e.config.json` — these assertions are a pre-push
@@ -152,21 +152,33 @@ async function exchangeForJwt(sessionToken: string): Promise<string> {
 }
 
 /**
- * Anonymous session → JWT. Verifies against JWKS fine, but carries NO `role`
- * claim (anonymous users have no `auth_member` row), which is exactly why the
- * `reviews: ['read']` gate rejects it.
+ * Sign in at `path` and exchange the session for a JWT.
+ *
+ * The fiddly part is the session token: better-auth returns it in the
+ * `set-auth-token` header, falling back to a `token` field in the JSON body.
+ * That fallback existed twice here — once per sign-in flavour — which is two
+ * places to find if better-auth ever changes the response shape, in a tier no
+ * CI run exercises.
  */
-async function getAnonymousJwt(): Promise<string> {
-  const signIn = await fetch(`${AUTH_URL}/sign-in/anonymous`, {
+async function signInJwt(label: string, path: string, body?: unknown): Promise<string> {
+  const signIn = await fetch(`${AUTH_URL}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  if (!signIn.ok) throw new Error(await signInFailureMessage('anonymous', signIn));
+  if (!signIn.ok) throw new Error(await signInFailureMessage(label, signIn));
   const sessionToken =
     signIn.headers.get('set-auth-token') || ((await signIn.json().catch(() => ({}))) as { token?: string }).token;
-  if (!sessionToken) throw new Error('no session token from anonymous sign-in');
+  if (!sessionToken) throw new Error(`no session token from ${label} sign-in`);
   return exchangeForJwt(sessionToken);
 }
+
+/**
+ * Anonymous session → JWT. Verifies against JWKS fine, but carries NO `role`
+ * claim (anonymous users have no `auth_member` row), which is exactly why the
+ * `album_reviews: ['read']` gate rejects it.
+ */
+const getAnonymousJwt = (): Promise<string> => signInJwt('anonymous', '/sign-in/anonymous');
 
 /**
  * Username+password sign-in → JWT, for a seeded fixture account whose
@@ -179,18 +191,8 @@ async function getAnonymousJwt(): Promise<string> {
  */
 const FIXTURE_PASSWORD = 'testpassword123';
 
-async function getRoleJwt(username: string): Promise<string> {
-  const signIn = await fetch(`${AUTH_URL}/sign-in/username`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password: FIXTURE_PASSWORD }),
-  });
-  if (!signIn.ok) throw new Error(await signInFailureMessage(username, signIn));
-  const sessionToken =
-    signIn.headers.get('set-auth-token') || ((await signIn.json().catch(() => ({}))) as { token?: string }).token;
-  if (!sessionToken) throw new Error(`no session token from ${username} sign-in`);
-  return exchangeForJwt(sessionToken);
-}
+const getRoleJwt = (username: string): Promise<string> =>
+  signInJwt(username, '/sign-in/username', { username, password: FIXTURE_PASSWORD });
 
 /**
  * The two failure modes worth naming, because neither is obvious from a bare
@@ -224,7 +226,7 @@ let pg: ReturnType<typeof postgres>;
 let djToken: string;
 /** Anonymous session: verifies, but carries no role claim. */
 let anonToken: string;
-/** `test_member` — seeded with `auth_member.role = 'member'`, which lacks reviews:read. */
+/** `test_member` — seeded with `auth_member.role = 'member'`, which lacks album_reviews:read. */
 let memberToken: string;
 let libraryId: number;
 let firstRun: EtlTotals;
@@ -278,8 +280,7 @@ beforeAll(async () => {
   libraryId = (lib as { id: number }).id;
 
   // Serial, not Promise.all: the sign-in rate limiter counts a parallel burst
-  // as a burst, and the retry above cannot help a request that was already
-  // in flight when its sibling consumed the budget.
+  // as a burst, and 3 sign-ins is most of a 10-per-15-minute budget.
   djToken = await getRoleJwt('test_dj1');
   memberToken = await getRoleJwt('test_member');
   anonToken = await getAnonymousJwt();
@@ -342,7 +343,7 @@ describe('read step (GET /album-reviews)', () => {
   };
 
   /**
-   * The reviews:read gate, against the real middleware. `AUTH_BYPASS=false`
+   * The album_reviews:read gate, against the real middleware. `AUTH_BYPASS=false`
    * here, so these three cases are the end-to-end proof that the unfiltered
    * archive is reachable only by a station role.
    *

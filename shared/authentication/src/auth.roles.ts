@@ -50,7 +50,7 @@ const stationStatement = {
   // below server-side. dj-site gates its operator UI on
   // `roleToAuthorization(...) >= MD`.
   flowsheet: ['read', 'write', 'manage'],
-  // `reviews: read` is the signed-in-station tier over the DJ form-review
+  // `album_reviews: read` is the signed-in-station tier over the DJ form-review
   // archive (`album_review_submissions`, ADR 0011). It backs `GET
   // /album-reviews`, which serves the WHOLE archive with no `social_consent`
   // filter, because the consent question asked only about social media
@@ -64,7 +64,16 @@ const stationStatement = {
   // select the right roles today — the same reasoning `flowsheet: manage`
   // records above: a future re-grant of a borrowed key would silently move who
   // can read non-consented review bodies.
-  reviews: ['read'],
+  //
+  // Named `album_reviews`, NOT `reviews`, for the same reason the route is
+  // `/album-reviews`: ADR 0006 reserves `/reviews` and the `reviews` table for
+  // the in-app Review model — author-owned, MD-queued, one-per-album, a
+  // different resource with a different consent posture. A key named `reviews`
+  // would be the obvious one to reach for when that model ships, and reusing
+  // it would hand whoever gets in-app review read the full non-consented form
+  // archive. This file's rule is that a key belongs to the resource it names;
+  // the name has to match the resource for that rule to mean anything.
+  album_reviews: ['read'],
 } as const;
 
 /**
@@ -224,25 +233,25 @@ const WXYC_GRANTS = {
     // (plus 999 more written before the question was ever asked), so it opens
     // at `dj`. `stripEmpty` drops the key before better-auth sees it, so this
     // stays byte-identical to omitting it.
-    reviews: [],
+    album_reviews: [],
   },
   dj: {
     bin: ['read', 'write'],
     catalog: ['read'],
     flowsheet: ['read', 'write'],
-    reviews: ['read'],
+    album_reviews: ['read'],
   },
   musicDirector: {
     bin: ['read', 'write'],
     catalog: ['read', 'write'],
     flowsheet: ['read', 'write', 'manage'],
-    reviews: ['read'],
+    album_reviews: ['read'],
   },
   stationManager: {
     bin: ['read', 'write'],
     catalog: ['read', 'write'],
     flowsheet: ['read', 'write', 'manage'],
-    reviews: ['read'],
+    album_reviews: ['read'],
   },
 } as const satisfies Record<WXYCRole, StationGrants>;
 

@@ -96,9 +96,8 @@ app.use('/playlists', playlist_route);
 // On Tour concerts feed (anonymous auth, pure DB read) — BS#1603
 app.use('/concerts', concerts_route);
 
-// Form-review archive read (role-gated `reviews:read`, pure DB read) — ADR 0011.
-// NOT anonymous auth: this surface is unfiltered by `social_consent`, so the
-// role gate is what keeps it off listener-app sessions.
+// Form-review archive read (role-gated `album_reviews:read`, pure DB read) — ADR 0011.
+// Gate and consent posture: routes/album-reviews.route.ts.
 app.use('/album-reviews', album_reviews_route);
 
 // Business logic routes

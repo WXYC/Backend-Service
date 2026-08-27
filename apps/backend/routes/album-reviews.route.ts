@@ -17,6 +17,6 @@ export const album_reviews_route = Router();
 // Pinned by tests/unit/routes/album-reviews-permissions.route.test.ts, which
 // wires the real middleware in. The integration suite cannot pin it: it runs
 // AUTH_BYPASS=true, which returns next() before any permission check.
-album_reviews_route.use(requirePermissions({ reviews: ['read'] }));
+album_reviews_route.use(requirePermissions({ album_reviews: ['read'] }));
 
 album_reviews_route.get('/', albumReviewsController.getAlbumReviews);

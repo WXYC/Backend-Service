@@ -2,6 +2,7 @@ import { RequestHandler } from 'express';
 import { nyCalendarDate } from '@wxyc/database';
 import * as concertsService from '../services/concerts.service.js';
 import WxycError from '../utils/error.js';
+import { parsePositiveInt } from '../utils/query-params.js';
 
 /**
  * `GET /concerts` — On Tour feed (BS#1603, on-tour Phase 2).
@@ -52,25 +53,6 @@ const isValidIsoDate = (value: string): boolean => {
  * carries a full-ICU guard the inline `Intl` copy lacked.
  */
 const todayEastern = (): string => nyCalendarDate(new Date());
-
-/**
- * Parse a positive-integer param behind an all-digits guard. A bare
- * `parseInt` would accept '1abc' → 1 and '0x10' → 16; requiring the raw
- * value to be all digits (and using an explicit radix) rejects both. The
- * `< 1` rejection makes the name honest — '0' is all-digits but not
- * positive — so callers need no follow-up check. Returns 400 on malformed
- * input via `WxycError`.
- */
-const parsePositiveInt = (raw: string, field: string): number => {
-  if (!/^\d+$/.test(raw)) {
-    throw new WxycError(`${field} must be a positive integer`, 400);
-  }
-  const parsed = Number.parseInt(raw, 10);
-  if (parsed < 1) {
-    throw new WxycError(`${field} must be a positive integer`, 400);
-  }
-  return parsed;
-};
 
 export const getConcerts: RequestHandler<object, unknown, object, ConcertsQueryParams> = async (req, res) => {
   const { query } = req;

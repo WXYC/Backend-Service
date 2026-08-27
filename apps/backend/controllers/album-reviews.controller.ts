@@ -1,23 +1,24 @@
 import { RequestHandler } from 'express';
 import * as albumReviewsService from '../services/album-reviews.service.js';
 import WxycError from '../utils/error.js';
+import { parsePositiveInt } from '../utils/query-params.js';
+import type { AlbumReviewsResponse } from '@wxyc/shared/dtos';
 
 /**
  * `GET /album-reviews` — form-review archive read (ADR 0011 / the
  * dj-reviews-internal-surface plan).
  *
- * INTERNAL surface, gated on `reviews: ['read']` (dj / musicDirector /
- * stationManager) at `routes/album-reviews.route.ts`. It serves the whole
- * archive with no `social_consent` filter; the consent-gated PUBLIC surface is
- * the `wxycReviews` attach on `GET /proxy/metadata/album`. See ADR 0011 for
- * why the two postures must not be conflated.
+ * Gate and consent posture: `routes/album-reviews.route.ts`, where the
+ * argument lives once. PII barrier: `services/album-reviews.service.ts`. This
+ * file owns only param validation and the response envelope — the posture
+ * paragraph was restated in three files one import apart, and it is a posture
+ * that has already inverted once (PR #1679 shipped it as anonymous-auth), so
+ * each copy is a place a future reversal has to be chased.
  *
  * Contract lives in `wxyc-shared/api.yaml` (`AlbumReviewsResponse`).
  * Pagination follows the spec's `PaginationParams` conventions: 1-indexed
  * `page`, `limit` capped at 100; the response carries a `PaginationInfo`
- * object alongside the `album_reviews`. Reviewer identity never appears in
- * responses — the service's projection is the PII barrier (see
- * album-reviews.service.ts).
+ * object alongside the `album_reviews`.
  */
 
 export type AlbumReviewsQueryParams = {
@@ -31,42 +32,17 @@ const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 const MAX_ARTIST_LENGTH = 256;
 
-/**
- * Parse a positive-integer query param behind an all-digits guard. A bare
- * `parseInt` would accept '1abc' → 1 and '0x10' → 16; requiring the raw
- * value to be all digits (and using an explicit radix) rejects both.
- * Returns 400 on malformed input via `WxycError`.
- */
-const parsePositiveInt = (raw: string, field: string): number => {
-  if (!/^\d+$/.test(raw)) {
-    throw new WxycError(`${field} must be a positive integer`, 400);
-  }
-  return Number.parseInt(raw, 10);
-};
-
 export const getAlbumReviews: RequestHandler<object, unknown, object, AlbumReviewsQueryParams> = async (req, res) => {
   const { query } = req;
 
   const page = parsePositiveInt(query.page ?? '1', 'page');
   const limit = parsePositiveInt(query.limit ?? String(DEFAULT_LIMIT), 'limit');
 
-  if (page < 1) {
-    throw new WxycError('page must be a positive integer', 400);
-  }
-  if (limit < 1) {
-    throw new WxycError('limit must be a positive integer', 400);
-  }
   if (limit > MAX_LIMIT) {
     throw new WxycError(`limit must be at most ${MAX_LIMIT}`, 400);
   }
 
-  let album_id: number | undefined;
-  if (query.album_id !== undefined) {
-    album_id = parsePositiveInt(query.album_id, 'album_id');
-    if (album_id < 1) {
-      throw new WxycError('album_id must be a positive integer', 400);
-    }
-  }
+  const album_id = query.album_id === undefined ? undefined : parsePositiveInt(query.album_id, 'album_id');
 
   let artist: string | undefined;
   if (query.artist !== undefined) {
@@ -90,7 +66,15 @@ export const getAlbumReviews: RequestHandler<object, unknown, object, AlbumRevie
     albumReviewsService.getAlbumReviewsCount(filters),
   ]);
 
-  res.status(200).json({
+  // Typed as the SSOT envelope rather than an inline literal, so a drift in
+  // `AlbumReviewsResponse` is a build error here. This is deliberately in the
+  // controller and not a `Expect<Equal<...>>` pin in the unit test: `npm run
+  // typecheck` covers `apps/**` and `shared/**` but NOT `tests/`, and ts-jest
+  // runs transpile-only, so a type-level assertion living in a test file is
+  // checked by nothing. (The same is true of the `ConcertDTO`/`ApiYamlConcert`
+  // pin in `tests/unit/services/concerts.service.test.ts` — worth its own
+  // pass; do not add a third.)
+  const body: AlbumReviewsResponse = {
     album_reviews,
     pagination: {
       page,
@@ -98,5 +82,7 @@ export const getAlbumReviews: RequestHandler<object, unknown, object, AlbumRevie
       total,
       hasMore: offset + album_reviews.length < total,
     },
-  });
+  };
+
+  res.status(200).json(body);
 };
