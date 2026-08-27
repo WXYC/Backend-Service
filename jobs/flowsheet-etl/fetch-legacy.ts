@@ -17,10 +17,11 @@ export type LegacyShowRow = {
   endTime: number | null;
   showName: string | null;
   timeLastModified: number;
-  // On-air handle (FLOWSHEET_RADIO_SHOW_PROD.DJ_HANDLE). NOT the user's full
-  // name — that lives in DJ_NAME, which BS receives via the legacy mirror as
-  // `realName || name` (apps/backend/middleware/legacy/http.mirror.ts) and so
-  // is PII. Surfacing DJ_NAME on the public v2 wire (via the
+  // On-air handle (FLOWSHEET_RADIO_SHOW_PROD.DJ_HANDLE). NOT the legal name
+  // — that lives in DJ_NAME, which the legacy mirror
+  // (shared/legacy-mirror/src/http-mirror.ts) feeds from
+  // `auth_user.real_name`, the sole legal-name carrier (PII, see
+  // docs/pii.md). Surfacing DJ_NAME on the public v2 wire (via the
   // shows.legacy_dj_name → flowsheet.dj_name COALESCE chain) is the leak we
   // closed by reading DJ_HANDLE instead.
   djHandle: string | null;

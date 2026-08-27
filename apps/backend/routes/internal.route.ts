@@ -135,12 +135,13 @@ interface ResolvedShow {
    * 'Anonymous' the live path strips — is shared with both jobs by
    * design (BS#1371 spec).
    *
-   * `auth_user.name` is intentionally NOT in the chain — dj-site
-   * provisioning writes the user's real name into that column
-   * (`name: realName || username` in the roster UI), and surfacing real
-   * names on the public v2 wire would be PII exposure. The live path's
-   * asymmetric-fallback policy already handles null gracefully
-   * (degraded `Start of show: ${time}` instead of leaking a real name).
+   * `auth_user.name` is intentionally NOT in the chain — it's a derived
+   * display handle/username (backfill: jobs/auth-user-name-backfill), not
+   * a legal name; `auth_user.real_name` is the sole legal-name carrier
+   * (PII, see docs/pii.md) and was never an input here. The chain reads
+   * `auth_user.dj_name`/`shows.legacy_dj_name` directly instead. The live
+   * path's asymmetric-fallback policy already handles null gracefully
+   * (degraded `Start of show: ${time}` instead of an unresolved name).
    *
    * Null when the show has no resolvable name from either source
    * (stub shows created before the payload carried `djHandle` (BS#1723) —

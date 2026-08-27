@@ -3,8 +3,9 @@
  * wrong tubafrenzy column.
  *
  * The flowsheet ETL historically pulled `FLOWSHEET_RADIO_SHOW_PROD.DJ_NAME`
- * (the user's full real name, sent into tubafrenzy via the BS legacy mirror as
- * `realName || name`) into `shows.legacy_dj_name`, instead of the intended
+ * (the user's legal name, forwarded into tubafrenzy via the legacy mirror
+ * from `auth_user.real_name` — the sole legal-name carrier, PII, see
+ * docs/pii.md) into `shows.legacy_dj_name`, instead of the intended
  * `DJ_HANDLE` (on-air alias). That column became visible on the public v2
  * flowsheet wire as `dj_name` on marker rows (show_start / show_end / dj_join /
  * dj_leave) through the resolver's `COALESCE(auth_user.dj_name,

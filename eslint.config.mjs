@@ -4,14 +4,16 @@ import security from 'eslint-plugin-security';
 import prettierConfig from 'eslint-config-prettier';
 import wxycSourceTaggedConstraint from './eslint-rules/source-tagged-constraint.cjs';
 import wxycNoBareArrayInSqlTemplate from './eslint-rules/no-bare-array-in-sql-template.cjs';
+import wxycRestrictedRealName from './eslint-rules/restricted-real-name.cjs';
 
-// Both rule modules export `{ rules: { <name>: <rule> } }`; merge them into
+// All rule modules export `{ rules: { <name>: <rule> } }`; merge them into
 // one `wxyc` plugin object so `files`-scoped blocks below can mix and match
 // which rules apply where without re-importing per block.
 const wxycLocalRules = {
   rules: {
     ...wxycSourceTaggedConstraint.rules,
     ...wxycNoBareArrayInSqlTemplate.rules,
+    ...wxycRestrictedRealName.rules,
   },
 };
 
@@ -106,6 +108,35 @@ export default tseslint.config(
     },
     rules: {
       'wxyc/no-bare-array-in-sql-template': 'error',
+    },
+  },
+
+  // WXYC custom rules — restricted-real-name (docs/pii.md; the "DJ
+  // real-name PII safeguards" plan, Track 3a).
+  //
+  // Flags a `realName`/`real_name` member-expression access or
+  // object-literal property key outside the rule's own allow-list (see
+  // eslint-rules/restricted-real-name.cjs — the allow-list lives there,
+  // not in this config block, so RuleTester can exercise "allow-listed
+  // file" as a real rule behavior rather than an artifact of flat-config
+  // `ignores`). `auth_user.real_name` is the sole legal-name (PII) carrier
+  // in this schema; docs/pii.md is the registry.
+  //
+  // Deliberately excludes `tests/**/*.ts`, unlike the
+  // no-bare-array-in-sql-template block above — precedent:
+  // `source-tagged-constraint`'s narrow scoping just below (`shared/
+  // database/**/*.ts` only). At least seven unit fixtures under tests/
+  // legitimately construct `realName` objects; per-file allow-list entries
+  // for them would rot, and a fixture literal cannot reach a wire — the
+  // dj-real-name sentinel spec (docs/pii.md's Track 3b) is what covers
+  // what a test fixture could actually leak.
+  {
+    files: ['apps/**/*.ts', 'shared/**/*.ts', 'jobs/**/*.ts'],
+    plugins: {
+      wxyc: wxycLocalRules,
+    },
+    rules: {
+      'wxyc/restricted-real-name': 'error',
     },
   },
 
