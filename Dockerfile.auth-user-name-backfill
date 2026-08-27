@@ -1,0 +1,37 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+WORKDIR /auth-user-name-backfill-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/auth-user-name-backfill ./jobs/auth-user-name-backfill
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/auth-user-name-backfill
+
+#Production stage
+FROM node:24-alpine AS prod
+
+WORKDIR /auth-user-name-backfill
+
+COPY ./package* ./
+COPY ./jobs/auth-user-name-backfill/package* ./jobs/auth-user-name-backfill/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./auth-user-name-backfill-builder/jobs/auth-user-name-backfill/dist ./jobs/auth-user-name-backfill/dist
+COPY --from=builder ./auth-user-name-backfill-builder/shared/database/dist ./shared/database/dist
+
+# Tiny single-table workload (~139 candidate rows) — no bulk-update tuning
+# needed here, unlike the batched flowsheet/shows backfills.
+ENV DB_APPLICATION_NAME=wxyc-auth-user-name-backfill
+
+# ENTRYPOINT + empty CMD so docker-level args (`--execute`) pass through to
+# the job rather than replacing the launcher — same reasoning as
+# Dockerfile.legacy-dj-name-remediation. With `CMD ["npm", "start"]`,
+# `docker run <image> --execute` would replace the whole command instead of
+# extending it.
+ENTRYPOINT ["node", "/auth-user-name-backfill/jobs/auth-user-name-backfill/dist/job.js"]
+CMD []

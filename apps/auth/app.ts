@@ -255,10 +255,14 @@ app.post('/auth/admin/provision-user', async (req, res) => {
       return res.status(403).json({ error: 'Forbidden: admin role required' });
     }
 
-    // Validate required fields
+    // Validate required fields. `name` is deliberately NOT in this list
+    // (DJ real-name PII safeguards plan, Track 2c) — provisionUser() derives
+    // the stored name itself from djName/username, never from a
+    // client-supplied value. A still-supplied `name` is accepted-and-ignored
+    // for the deploy overlap window while dj-site still sends it.
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const { email, username, name, organizationSlug, role, realName, djName } = body;
-    const missing = ['email', 'username', 'name', 'organizationSlug', 'role'].filter(
+    const { email, username, organizationSlug, role, realName, djName } = body;
+    const missing = ['email', 'username', 'organizationSlug', 'role'].filter(
       (field) => !body[field] || typeof body[field] !== 'string'
     );
     if (missing.length > 0) {
@@ -273,7 +277,6 @@ app.post('/auth/admin/provision-user', async (req, res) => {
     const result = await provisionUser({
       email: email as string,
       username: username as string,
-      name: name as string,
       organizationSlug: organizationSlug as string,
       role: role as string,
       realName: realName as string | undefined,

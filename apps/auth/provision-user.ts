@@ -13,7 +13,7 @@ import {
   validateUsername,
   WXYCRoles,
 } from '@wxyc/authentication';
-import { db, user } from '@wxyc/database';
+import { db, resolveDjDisplayName, user } from '@wxyc/database';
 import { eq } from 'drizzle-orm';
 
 /** Error with an HTTP status code for the provision-user endpoint. */
@@ -32,7 +32,14 @@ export interface ProvisionUserInput {
   username: string;
   /** Internal-only: createDefaultUser supplies an explicit bootstrap password. */
   password?: string;
-  name: string;
+  /**
+   * Accepted-and-ignored: `provisionUser` derives the stored `name` itself
+   * (DJ real-name PII safeguards plan, Track 2c) from `djName`/`username`,
+   * never from a client-supplied value. Optional here only so an
+   * already-deployed caller that still sends it doesn't fail validation
+   * during the overlap window; dj-site drops the field in a follow-up PR.
+   */
+  name?: string;
   organizationSlug: string;
   role: string;
   realName?: string;
@@ -66,8 +73,17 @@ const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : S
  * sync, since bypassing better-auth's endpoint handler skips plugin hooks.
  */
 export async function provisionUser(input: ProvisionUserInput): Promise<ProvisionUserResult> {
-  const { email, username, name, organizationSlug, role, realName, djName } = input;
+  const { email, username, organizationSlug, role, realName, djName } = input;
   const password = input.password ?? generateProvisionBootstrapPassword();
+  // Track 2c: derive `name` here rather than trust `input.name` — belt and
+  // suspenders with the databaseHooks.user.create.before hook
+  // (auth.definition.ts), because whether the hook merge runs before
+  // better-auth's adapter enforces the core schema's `required: true` on
+  // `name` is unverified against the lockfile-resolved better-auth version.
+  // Supplying the value here removes that ordering dependency entirely.
+  // `username` is a required ProvisionUserInput field (validated below), so
+  // this is never empty in practice; `input.name` is not read at all.
+  const derivedName = resolveDjDisplayName(djName ?? null) ?? username;
 
   // 1. Validate role
   // `Object.hasOwn`, not `role in WXYCRoles`: `in` walks the prototype chain,
@@ -112,7 +128,13 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
     newUser = await internalAdapter.createUser({
       email,
       emailVerified: true,
-      name,
+      // Always a real string — `username` is a required, non-empty
+      // ProvisionUserInput field (validated above), so the `??` fallback in
+      // `derivedName` never actually bottoms out. Assigned directly (not
+      // spread conditionally) so this key is never present-but-undefined,
+      // which better-auth's adapter validation can treat differently from
+      // an absent key.
+      name: derivedName,
       username,
       realName: realName || undefined,
       djName: djName || undefined,

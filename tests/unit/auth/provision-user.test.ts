@@ -30,10 +30,20 @@ const mockDbUpdate = jest.fn().mockReturnValue({
   }),
 });
 
-jest.mock('@wxyc/database', () => ({
-  db: { update: (...args: unknown[]) => mockDbUpdate(...args) },
-  user: { id: 'id' },
-}));
+jest.mock('@wxyc/database', () => {
+  // resolveDjDisplayName is the REAL implementation (jest.requireActual), not
+  // a stub — provisionUser's Track 2c derivation is asserted against the
+  // actual PII-safe chain, the same reason grantsAdminFlag below is wired in
+  // real rather than restated.
+  const actualDjName: typeof import('../../../shared/database/src/dj-name') = jest.requireActual(
+    '../../../shared/database/src/dj-name'
+  );
+  return {
+    db: { update: (...args: unknown[]) => mockDbUpdate(...args) },
+    user: { id: 'id' },
+    resolveDjDisplayName: actualDjName.resolveDjDisplayName,
+  };
+});
 
 jest.mock('drizzle-orm', () => ({
   eq: jest.fn((a: unknown, b: unknown) => ({ field: a, value: b })),
@@ -189,7 +199,10 @@ describe('provisionUser()', () => {
           hasCompletedOnboarding: false,
           appSkin: 'modern-light',
           username: validInput.username,
-          name: validInput.name,
+          // Track 2c: name is DERIVED (resolveDjDisplayName(djName) ??
+          // username), never the caller-supplied `name` — validInput.name
+          // ('New DJ') must NOT appear here.
+          name: validInput.djName,
         })
       );
     });
@@ -228,6 +241,50 @@ describe('provisionUser()', () => {
           role: 'dj',
         }),
       });
+    });
+  });
+
+  describe('name derivation (Track 2c)', () => {
+    // DJ real-name PII safeguards plan, Track 2c: provisionUser stops
+    // trusting a caller-supplied `name` and derives it itself
+    // (resolveDjDisplayName(djName) ?? username) — belt and suspenders with
+    // the databaseHooks.user.create.before hook.
+
+    it('should succeed with no name in the input at all', async () => {
+      const { name: _name, ...withoutName } = validInput;
+      await expect(provisionUser(withoutName)).resolves.toBeDefined();
+    });
+
+    it('should NOT pass a caller-supplied name to createUser', async () => {
+      await provisionUser({ ...validInput, name: 'SENTINEL-CLIENT-SUPPLIED-NAME' });
+
+      const call = mockCreateUser.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(call.name).not.toBe('SENTINEL-CLIENT-SUPPLIED-NAME');
+    });
+
+    it('should derive name from djName when djName is a usable handle', async () => {
+      await provisionUser({ ...validInput, djName: 'DJ Jazzy Jane' });
+
+      expect(mockCreateUser).toHaveBeenCalledWith(expect.objectContaining({ name: 'DJ Jazzy Jane' }));
+    });
+
+    it('should fall back to username when djName is absent', async () => {
+      const { djName: _djName, ...withoutDjName } = validInput;
+      await provisionUser(withoutDjName);
+
+      expect(mockCreateUser).toHaveBeenCalledWith(expect.objectContaining({ name: validInput.username }));
+    });
+
+    it('should fall back to username when djName is the literal Anonymous', async () => {
+      await provisionUser({ ...validInput, djName: 'Anonymous' });
+
+      expect(mockCreateUser).toHaveBeenCalledWith(expect.objectContaining({ name: validInput.username }));
+    });
+
+    it('should preserve Auto DJ (create-auto-dj-user.ts-shaped input: name and djName both "Auto DJ")', async () => {
+      await provisionUser({ ...validInput, name: 'Auto DJ', djName: 'Auto DJ' });
+
+      expect(mockCreateUser).toHaveBeenCalledWith(expect.objectContaining({ name: 'Auto DJ' }));
     });
   });
 
