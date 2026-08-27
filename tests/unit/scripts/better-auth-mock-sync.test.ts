@@ -95,6 +95,65 @@ describe('compareAccessModules', () => {
     const findings = compareAccessModules({ ...identical(), access: denyAll }, mockModules);
     const authorizeFindings = findings.filter((f) => f.kind === 'authorize');
     expect(authorizeFindings.length).toBeGreaterThan(0);
-    expect(authorizeFindings[0].detail).toMatch(/\w+:\w+ — real=(true|false) mock=(true|false)/);
+    expect(authorizeFindings[0].detail).toMatch(
+      /\w+:\w+ \[connector=(<default>|\S+)\] — real=(true|false) mock=(true|false)/
+    );
+  });
+
+  /**
+   * Regression pin for the request surface the comparator sends.
+   *
+   * better-auth's `authorize(request, connector = 'AND')` accepts a
+   * per-resource `{ actions, connector }` object as well as a bare list, and a
+   * connector of `'OR'` — at either level — turns `every` into `some`. A
+   * comparator that only ever sends single-resource array-form requests at the
+   * default connector cannot see a mock that ignores all of that, and a unit
+   * test asserting a 403 would then pass while production returned 200.
+   *
+   * `connectorBlind` below is exactly that mock: array-form only, both
+   * connectors ignored, AND semantics always. It is what this file's own
+   * subject looked like before, and the point of the test is that parity now
+   * rejects it.
+   */
+  describe('connector and object-form coverage', () => {
+    const connectorBlind: AccessModule = {
+      createAccessControl: () => ({
+        newRole: (permissions) => ({
+          authorize: (request) => {
+            const entries = Object.entries(request);
+            if (entries.length === 0) return { success: false };
+            for (const [resource, requested] of entries) {
+              const actions = Array.isArray(requested) ? requested : (requested?.actions ?? []);
+              if (actions.length === 0) return { success: false };
+              const allowed = permissions[resource];
+              if (!allowed) return { success: false };
+              for (const action of actions) {
+                if (!allowed.includes(action)) return { success: false };
+              }
+            }
+            return { success: true };
+          },
+          statements: permissions,
+        }),
+      }),
+    };
+
+    it('detects a mock that ignores the connector and the object request form', () => {
+      const findings = compareAccessModules(identical(), { ...mockModules, access: connectorBlind });
+      expect(findings.some((f) => f.kind === 'authorize')).toBe(true);
+    });
+
+    it('attributes the divergence to an OR-connector shape, not only to the array form', () => {
+      const findings = compareAccessModules(identical(), { ...mockModules, access: connectorBlind });
+      expect(findings.some((f) => f.kind === 'authorize' && f.detail.includes('OR'))).toBe(true);
+    });
+
+    it('exercises the object request form without throwing', () => {
+      // A mock that understands only the array form throws
+      // `actions is not iterable` on `{ actions }`. Reaching a finding list at
+      // all — rather than an exception — is the assertion here.
+      expect(() => compareAccessModules(identical(), mockModules)).not.toThrow();
+      expect(compareAccessModules(identical(), mockModules)).toEqual([]);
+    });
   });
 });

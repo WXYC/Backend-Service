@@ -20,10 +20,21 @@
  * be the one unverified file in the repo. The runner in `scripts/` stays thin.
  */
 
+/**
+ * A per-resource action request. better-auth accepts a bare action list or a
+ * `{ actions, connector }` object, and the object form's connector flips the
+ * per-resource check from `every` to `some` — so the two forms are not
+ * interchangeable and both have to be compared.
+ */
+export type ActionRequest = string[] | { actions?: string[]; connector?: string };
+
+export type AuthorizeRequest = Record<string, ActionRequest>;
+
 export interface AccessModule {
   createAccessControl: (statements: Record<string, readonly string[]>) => {
     newRole: (permissions: Record<string, readonly string[]>) => {
-      authorize: (request: Record<string, string[]>) => { success: boolean };
+      /** The second argument is the TOP-LEVEL connector, defaulting to `'AND'`. */
+      authorize: (request: AuthorizeRequest, connector?: string) => { success: boolean };
       statements: Record<string, readonly string[]>;
     };
   };
@@ -65,9 +76,12 @@ const compareStatementMap = (
  * Compares the real better-auth access modules against the repo's mocks.
  *
  * Checks the two statement maps the roles are built from, then runs every
- * (role-shape, resource, action) triple through both implementations'
- * `authorize` — including the empty-request and empty-action-list shapes — and
- * asserts the `success` verdicts agree. Note the deliberate scope: only
+ * (role-shape, request-shape, top-level-connector) combination through both
+ * implementations' `authorize` and asserts the `success` verdicts agree. The
+ * request shapes span the whole surface better-auth accepts, not just the one
+ * `requirePermissions` sends: single (resource, action) pairs, the degenerate
+ * empty-request and empty-action-list forms, the `{ actions, connector }`
+ * object form, and multi-resource requests. Note the deliberate scope: only
  * `success` is compared, never the error strings. better-auth distinguishes an
  * absent resource from an empty one in its *message*
  * (`unknownResourceResponse` vs `unauthorizedResourceResponse`) and the mock
@@ -105,32 +119,75 @@ export function compareAccessModules(
     const realRole = real.access.createAccessControl(statement).newRole(grants);
     const mockRole = mock.access.createAccessControl(statement).newRole(grants);
 
-    // Every declared (resource, action) pair, PLUS the two degenerate request
-    // shapes. The empty ones are not padding: `[]` is how `auth.roles.ts`
-    // spells an explicit denial, so an empty action list is the request shape
-    // this comparator most needs to agree on — and it was the one shape it
-    // originally never sent, which let a genuine `success`-level divergence sit
-    // undetected behind a green check (real: false, mock: true, both forms).
-    const requests: [string, Record<string, string[]>][] = [
-      ...Object.entries(statement).flatMap(([resource, actions]) =>
-        actions.map(
-          (action) => [`${resource}:${action}`, { [resource]: [action] }] as [string, Record<string, string[]>]
-        )
+    const entries = Object.entries(statement);
+
+    // Every declared (resource, action) pair, PLUS the degenerate, object-form
+    // and multi-resource shapes. None of these are padding — each one is a
+    // place a plausible mock diverges from the library:
+    //
+    // - The EMPTY shapes: `[]` is how `auth.roles.ts` spells an explicit
+    //   denial, so an empty action list is the shape this comparator most
+    //   needs to agree on. It was the one shape originally never sent, which
+    //   let a genuine `success`-level divergence sit behind a green check
+    //   (real: false, mock: true, both forms).
+    // - The OBJECT form: `normalizeActionRequest` accepts `{ actions,
+    //   connector }`, and a per-resource `connector: 'OR'` turns `every` into
+    //   `some`. A mock that understands only the array form doesn't disagree
+    //   quietly here — it throws — which is a failure mode this check should
+    //   surface rather than a caller discover.
+    // - The MULTI-RESOURCE shapes: the only ones where the top-level connector
+    //   changes a verdict at all, since `AND` fails on the first unknown or
+    //   unauthorized resource while `OR` skips unknowns and succeeds on any
+    //   authorized one.
+    const requests: [string, AuthorizeRequest][] = [
+      ...entries.flatMap(([resource, actions]) =>
+        actions.map((action) => [`${resource}:${action}`, { [resource]: [action] }] as [string, AuthorizeRequest])
       ),
       ['<empty request>', {}],
-      ...Object.keys(statement).map(
-        (resource) => [`${resource}:<empty actions>`, { [resource]: [] }] as [string, Record<string, string[]>]
-      ),
+      ...entries.map(([resource]) => [`${resource}:<empty actions>`, { [resource]: [] }] as [string, AuthorizeRequest]),
+      ...entries.flatMap(([resource, actions]): [string, AuthorizeRequest][] => {
+        const all = [...actions];
+        return [
+          [`${resource}:{actions}`, { [resource]: { actions: all } }],
+          [`${resource}:{actions,OR}`, { [resource]: { actions: all, connector: 'OR' } }],
+          [`${resource}:{actions:[],OR}`, { [resource]: { actions: [], connector: 'OR' } }],
+          // `actions` absent entirely — normalizes to the empty list, so this
+          // must deny rather than throw or pass vacuously.
+          [`${resource}:{}`, { [resource]: {} }],
+        ];
+      }),
+      ...(entries.length > 1
+        ? ([
+            [
+              `${entries[0][0]}+${entries[entries.length - 1][0]}`,
+              {
+                [entries[0][0]]: [...entries[0][1]],
+                [entries[entries.length - 1][0]]: [...entries[entries.length - 1][1]],
+              },
+            ],
+            [`${entries[0][0]}+<unknown resource>`, { [entries[0][0]]: [...entries[0][1]], __nonexistent__: ['read'] }],
+            ['<unknown resource> only', { __nonexistent__: ['read'] }],
+          ] as [string, AuthorizeRequest][])
+        : []),
     ];
 
+    // `undefined` exercises the default. better-auth compares the top-level
+    // connector by identity (`=== 'AND'` / `=== 'OR'`) WITHOUT running it
+    // through `normalizeConnector`, unlike the per-resource one — so a
+    // lowercase `'or'` is a third behaviour rather than an alias, and that
+    // asymmetry is pinned here so a mock can't quietly normalize it away.
+    const connectors: (string | undefined)[] = [undefined, 'AND', 'OR', 'or'];
+
     for (const [label, request] of requests) {
-      const realVerdict = realRole.authorize(request).success;
-      const mockVerdict = mockRole.authorize(request).success;
-      if (realVerdict !== mockVerdict) {
-        findings.push({
-          kind: 'authorize',
-          detail: `grant shape #${shapeIndex}: ${label} — real=${realVerdict} mock=${mockVerdict}`,
-        });
+      for (const connector of connectors) {
+        const realVerdict = realRole.authorize(request, connector).success;
+        const mockVerdict = mockRole.authorize(request, connector).success;
+        if (realVerdict !== mockVerdict) {
+          findings.push({
+            kind: 'authorize',
+            detail: `grant shape #${shapeIndex}: ${label} [connector=${connector ?? '<default>'}] — real=${realVerdict} mock=${mockVerdict}`,
+          });
+        }
       }
     }
   }
