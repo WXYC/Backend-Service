@@ -11,9 +11,19 @@ import {
 } from '../../../shared/authentication/src/auth.roles';
 import { ROLES } from '@wxyc/shared/auth-client/auth';
 
-/** Actions granted for `key`, from whichever block owns it. `[]` = explicitly denied. */
+/**
+ * Actions granted for `key`, from whichever block owns it. `[]` = explicitly denied.
+ *
+ * `Object.hasOwn`, not `key in ...` — the same one-word difference this change
+ * makes at `normalizeRole` and `provision-user.ts`, and it matters more here
+ * than it looks. This helper is the oracle for the monotonicity, totality, and
+ * runtime-parity suites below, so a statement key named `constructor` or
+ * `valueOf` would make `in` return a prototype *function* instead of an action
+ * array, and `for (const action of ...)` would throw — the three suites would
+ * error out rather than report the grant inversion they exist to catch.
+ */
 const grantedActions = (role: WXYCRole, key: string): readonly string[] => {
-  if (key in WXYC_GRANTS[role]) {
+  if (Object.hasOwn(WXYC_GRANTS[role], key)) {
     return WXYC_GRANTS[role][key as keyof (typeof WXYC_GRANTS)[typeof role]];
   }
   return role === 'stationManager' ? ((ORG_ADMIN_GRANTS as Record<string, readonly string[]>)[key] ?? []) : [];
@@ -114,6 +124,45 @@ describe('role statements (pinned)', () => {
 
   it('the explicit ORG_ADMIN_GRANTS block equals better-auth adminAc.statements', () => {
     expect({ ...ORG_ADMIN_GRANTS }).toEqual({ ...adminAc.statements });
+  });
+
+  /**
+   * A constructed role must hold COPIES of the grant data, never the matrix's
+   * own arrays.
+   *
+   * `WXYC_GRANTS` and `ORG_ADMIN_GRANTS` are exported, and `index.ts` re-exports
+   * them from `@wxyc/authentication`, so they are reachable public API. Before
+   * `buildRole` cloned, `stripEmpty`'s `Object.entries` and the
+   * `ORG_ADMIN_GRANTS` spread both passed references straight through, making
+   * `dj.statements.flowsheet` the very array `WXYC_GRANTS.dj.flowsheet` names.
+   * A single `push('manage')` anywhere in-process then granted every DJ the
+   * operator tier behind `POST /flowsheet/shows/:id/force-end` — live, no
+   * restart, no diff near this file. `as const` is compile-time only and does
+   * not survive to runtime to stop it.
+   *
+   * Identity is the assertion, not equality: equality is what the pins above
+   * already cover, and it stays true in exactly the aliased case this forbids.
+   */
+  const stationKeys = ['bin', 'catalog', 'flowsheet'] as const;
+
+  it.each(Object.keys(WXYCRoles) as WXYCRole[])(
+    '%s statements are copies of the station grants, not aliases',
+    (role) => {
+      const statements = (WXYCRoles[role] as any).statements;
+      for (const key of stationKeys) {
+        const matrixActions = (WXYC_GRANTS[role] as Record<string, readonly string[]>)[key];
+        expect(statements[key]).toEqual(matrixActions);
+        expect(statements[key]).not.toBe(matrixActions);
+      }
+    }
+  );
+
+  it('stationManager statements are copies of the org-admin grants, not aliases', () => {
+    const statements = (WXYCRoles.stationManager as any).statements;
+    for (const [key, actions] of Object.entries(ORG_ADMIN_GRANTS as Record<string, readonly string[]>)) {
+      expect(statements[key]).toEqual(actions);
+      expect(statements[key]).not.toBe(actions);
+    }
   });
 });
 

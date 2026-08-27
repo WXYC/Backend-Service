@@ -16,11 +16,18 @@ const statement = {
   // but it is the catalog's grant, and a future re-grant of catalog editing
   // would silently move who can close a stranger's show.
   //
-  // Not mirrored into `@wxyc/shared`'s `RESOURCES`/`ROLE_PERMISSIONS` (which
-  // already carries a `roster` resource this statement does not). Nothing
-  // cross-repo consumes it: the JWT carries a role, not a permission set, and
-  // this middleware resolves the role against the table below server-side.
-  // dj-site gates its operator UI on `roleToAuthorization(...) >= MD`.
+  // There is nowhere cross-repo to mirror this to, and that is now structural
+  // rather than incidental: as of `@wxyc/shared` 5.0.0 — the bump this file
+  // ships with — shared exports no grant table at all. Its auth surface is
+  // `ROLES`, `ROLE_ALIASES`, `canonicalizeRole`, `roleToAuthorization`,
+  // `Authorization`, and the capability helpers; the client-side
+  // `RESOURCES`/`ROLE_PERMISSIONS` pair an earlier version carried is gone.
+  // Shared owns role identity and order, this file owns the ONLY grant matrix.
+  //
+  // Nothing cross-repo needs it anyway: the JWT carries a role, not a
+  // permission set, and the middleware resolves that role against the matrix
+  // below server-side. dj-site gates its operator UI on
+  // `roleToAuthorization(...) >= MD`.
   flowsheet: ['read', 'write', 'manage'],
 } as const;
 
@@ -159,15 +166,37 @@ export { WXYC_GRANTS, ORG_ADMIN_GRANTS };
 const stripEmpty = (grants: Record<string, readonly string[]>): Record<string, readonly string[]> =>
   Object.fromEntries(Object.entries(grants).filter(([, actions]) => actions.length > 0));
 
-// `stripEmpty` widens to a string-keyed record, so the object handed to
-// `newRole` is rebuilt from the two typed sources rather than cast. The cast
-// this replaces (`as Parameters<typeof newRole>[0]`) instantiated better-auth's
-// generic at its constraint — an index signature — which silently discarded
-// action validity for the whole matrix.
+// WHERE ACTION VALIDITY IS ENFORCED — read this before touching either block.
+//
+// It is the `as const satisfies` clauses above, and ONLY those. `stripEmpty`
+// widens to a string-keyed record, so by the time grants reach `newRole` they
+// are `Record<string, readonly string[]>` and better-auth's generic has already
+// instantiated at its constraint; nothing at this call site can still tell
+// `'manage'` from `'mange'`. Verified by removing `satisfies Record<WXYCRole,
+// StationGrants>` and typo'ing `'mange'` into stationManager: `tsc --noEmit`
+// exits 0. With the clause in place the same typo is a TS2820.
+//
+// So: do not drop a `satisfies` clause on the grounds that the construction
+// below re-derives the types. It does not. (This replaced an
+// `as Parameters<typeof newRole>[0]` cast, which was worse — it disabled the
+// check better-auth's own signature would otherwise have applied — but
+// removing that cast is not what restores the guarantee.)
+//
+// Each action list is COPIED, never aliased. `stripEmpty`'s `Object.entries`
+// hands back the very arrays `WXYC_GRANTS` holds, and `ORG_ADMIN_GRANTS` is
+// spread by reference, so without the clones a constructed role's
+// `.statements.flowsheet` would BE `WXYC_GRANTS.dj.flowsheet` — and these are
+// public exports of `@wxyc/authentication`. A single
+// `WXYC_GRANTS.dj.flowsheet.push('manage')` anywhere in-process would hand
+// every DJ the operator tier backing `POST /flowsheet/shows/:id/force-end`,
+// live, with no restart. `as const` is erased at runtime and stops none of it.
+const clone = (grants: Record<string, readonly string[]>): Record<string, readonly string[]> =>
+  Object.fromEntries(Object.entries(grants).map(([key, actions]) => [key, [...actions]]));
+
 const buildRole = (role: WXYCRole) => {
   const grants = {
-    ...stripEmpty(WXYC_GRANTS[role]),
-    ...(role === 'stationManager' ? ORG_ADMIN_GRANTS : {}),
+    ...clone(stripEmpty(WXYC_GRANTS[role])),
+    ...(role === 'stationManager' ? clone(ORG_ADMIN_GRANTS) : {}),
   };
   return accessControl.newRole(grants);
 };

@@ -560,11 +560,22 @@ const runSyncAdminRoles = async () => {
       //
       // The role predicate is `grantsAdminFlag` in TS, not a SQL IN-list: this
       // is the same question the membership hooks answer, and this reconciler
-      // exists precisely to retry a hook that failed. A hardcoded list here
+      // is the retry path for a GRANT hook that failed. A hardcoded list here
       // would stay narrow while the hook path widened with the shared alias
       // table (BS#2282), so a membership stored as `station_manager` would be
       // granted the flag by the hook and — if that hook ever failed — never
       // repaired by this sweep. Grant and repair must accept the same strings.
+      //
+      // Scope, stated precisely because the surrounding change is about
+      // grant/revoke symmetry and this sweep does NOT have it: it only ever
+      // adds the flag. `syncAdminRoles` calls `setUserRole(id, 'admin')` and
+      // nothing else, and the query below selects only users *missing* the
+      // flag, so a failed *revocation* hook — a stationManager demoted to `dj`
+      // whose `setUserRole(id, null)` write did not land — is not repaired
+      // here and the stale `auth_user.role='admin'` persists. Closing that
+      // needs a second sweep over `user.role='admin'` with no admin-granting
+      // membership, which is new behavior on a privileged column and belongs
+      // in its own change rather than this refactor.
       //
       // Sizing, since moving the predicate out of SQL widened this from a
       // selective query to the default org's whole roster (minus users already
