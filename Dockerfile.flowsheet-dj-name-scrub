@@ -1,0 +1,55 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /flowsheet-dj-name-scrub-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/flowsheet-dj-name-scrub ./jobs/flowsheet-dj-name-scrub
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-dj-name-scrub
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /flowsheet-dj-name-scrub
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/flowsheet-dj-name-scrub/package* ./jobs/flowsheet-dj-name-scrub/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./flowsheet-dj-name-scrub-builder/jobs/flowsheet-dj-name-scrub/dist ./jobs/flowsheet-dj-name-scrub/dist
+COPY --from=builder ./flowsheet-dj-name-scrub-builder/shared/database/dist ./shared/database/dist
+
+# All three passes walk `flowsheet` (~2.6M rows) with an id-cursor scan, and
+# the main pass joins `shows` + `auth_user` on the way. The API's tight 5s
+# default statement timeout is far too aggressive for that.
+ENV DB_STATEMENT_TIMEOUT_MS=300000
+
+# Async commit, per docs/bulk-update-playbook.md. A failure the Node client
+# SEES never strands a page: the cursor advances only after a page's UPDATE
+# commits, and re-deciding a re-selected row is idempotent because the
+# decision compares against the RECOMPUTED value rather than testing for NULL.
+# Async commit's real risk is a crash the client DOESN'T see — a page believed
+# committed, lost inside the fsync window, with the cursor already past it.
+# That is what the post-run `verifyScrub` re-scan (bounded to the drain's
+# high-water mark) exists to catch: it fails the run loudly instead of leaving
+# a silent permanent leftover behind an already-advanced cursor.
+ENV DB_SYNCHRONOUS_COMMIT=off
+
+# Identifies the connection in pg_stat_activity during triage.
+ENV DB_APPLICATION_NAME=wxyc-flowsheet-dj-name-scrub
+
+# ENTRYPOINT + empty CMD so docker-level args (`--execute`, `--dry-run`) pass
+# through to the job rather than replacing the launcher. With
+# `CMD ["npm", "start"]`, `docker run <image> --execute` would REPLACE the CMD
+# and npm would never run.
+ENTRYPOINT ["node", "/flowsheet-dj-name-scrub/jobs/flowsheet-dj-name-scrub/dist/job.js"]
+CMD []

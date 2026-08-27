@@ -514,3 +514,24 @@ One-shot. Repairs `album_metadata.artwork_url` rows whose stored image is provab
 - `ARTWORK_PROVENANCE_TIMEOUT_MS` (default `35000`) — per-LML-call abort budget, the same value and sizing rationale as `flowsheet-artwork-repair`'s `BACKFILL_ARTWORK_REPAIR_TIMEOUT_MS`.
 
 Full runbook, including the provenance decode, the write policy's two deliberate refusals (never null a row out, never write a lateral wrong answer), and the LML#1237/#1241 sequencing, in `jobs/artwork-provenance-remediation/README.md`.
+
+### DJ-name scrub (`jobs/flowsheet-dj-name-scrub`, BS#2281)
+
+One-shot, **dry-run by default**. Recomputes historical `flowsheet.dj_name` to the current PII-safe resolution chain via the canonical `@wxyc/database` helpers, and rewrites the marker `message` text that embeds a real name. Pass `--execute` to write; passing `--execute` and `--dry-run` together is a hard error. Reuses the shared `LIVE_ACTIVITY_*` cooperative-pause knobs — **including `LIVE_ACTIVITY_MAX_PAUSE_MS`**, whose exhaustion aborts the run by design (`buildWaitForQuietPeriod` throws; a TypeScript job must abort rather than silently continue). All three cursors below are persisted before that throw propagates, so the abort is resumable.
+
+**Prerequisite:** `LIVE_FS_UPDATE_MAX_AGE_HOURS`'s guard (above) must be deployed before the first live run, or the drain broadcasts one SSE `liveFs:update` per row for hours.
+
+Three passes drain independently, each with its own id cursor. Each is a resume point, read from the previous run's summary `last_id`:
+
+- `DJ_NAME_SCRUB_FLOWSHEET_AFTER_ID` (default `0`) — main recompute pass, over every in-scope row reachable through a `shows` join.
+- `DJ_NAME_SCRUB_MESSAGE_AFTER_ID` (default `0`) — marker `message` rewrite pass.
+- `DJ_NAME_SCRUB_ORPHAN_AFTER_ID` (default `0`) — `show_id IS NULL` rows, which the `shows` join cannot see and which therefore have nothing to recompute from (PII removal only).
+
+After a **failed** run, resume from a conservative cursor rather than the last logged one: the Dockerfile sets `DB_SYNCHRONOUS_COMMIT=off`, so a page the client believed had committed can be lost to a crash inside the fsync window.
+
+- `DJ_NAME_SCRUB_BATCH_SIZE` (default `5000`) — rows per page, per `docs/bulk-update-playbook.md`.
+- `DJ_NAME_SCRUB_UPDATE_TIMEOUT_MS` (default `300000`) — `SET LOCAL statement_timeout` for each page's UPDATE.
+- `DJ_NAME_SCRUB_ANALYZE_TIMEOUT_MS` (default `300000`) — timeout for the single post-drain `ANALYZE` (BS#934).
+- `DJ_NAME_SCRUB_SAMPLE_SIZE` (default `20`) — changed ids carried in each pass's summary. `0` omits the sample.
+
+Full runbook — including the three classes of **intentional** `NULL` this job creates (which a well-meaning re-run of `jobs/legacy-dj-name-remediation` or `jobs/flowsheet-dj-name-backfill` would reverse), the conditional-GET watermark side effect, and the WAL/NOTIFY budget — in `jobs/flowsheet-dj-name-scrub/README.md`.
