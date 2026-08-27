@@ -161,7 +161,7 @@ async function getAnonymousJwt(): Promise<string> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
   });
-  if (!signIn.ok) throw new Error(`anonymous sign-in failed: ${signIn.status} ${await signIn.text().catch(() => '')}`);
+  if (!signIn.ok) throw new Error(await signInFailureMessage('anonymous', signIn));
   const sessionToken =
     signIn.headers.get('set-auth-token') || ((await signIn.json().catch(() => ({}))) as { token?: string }).token;
   if (!sessionToken) throw new Error('no session token from anonymous sign-in');
@@ -185,15 +185,38 @@ async function getRoleJwt(username: string): Promise<string> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password: FIXTURE_PASSWORD }),
   });
-  if (!signIn.ok)
-    throw new Error(
-      `${username} sign-in failed: ${signIn.status} ${await signIn.text().catch(() => '')} ` +
-        '(did you run `npm run e2e:setup-users`? it is not part of `npm run e2e:env`)'
-    );
+  if (!signIn.ok) throw new Error(await signInFailureMessage(username, signIn));
   const sessionToken =
     signIn.headers.get('set-auth-token') || ((await signIn.json().catch(() => ({}))) as { token?: string }).token;
   if (!sessionToken) throw new Error(`no session token from ${username} sign-in`);
   return exchangeForJwt(sessionToken);
+}
+
+/**
+ * The two failure modes worth naming, because neither is obvious from a bare
+ * status code.
+ *
+ * 401: `npm run e2e:setup-users` was skipped. It sets the fixture passwords and
+ * is NOT part of `npm run e2e:env`.
+ *
+ * 429: the sign-in budget is spent. `apps/auth/app.ts` rate-limits the
+ * `/auth/sign-in` PREFIX — which covers `/sign-in/anonymous` too — at **10
+ * requests per 15 minutes** per key, and it is active here because the e2e
+ * containers run NODE_ENV=production (the limiter's dev/test escape hatch is a
+ * positive-list gate, BS#1097). This suite spends 3 of those per run, so a
+ * fourth consecutive run inside one window will fail. Deliberately NOT retried:
+ * no bounded wait fits a 15-minute window, and a retry loop would turn a clear
+ * failure into a slow one. Wait it out, or reset the in-memory counter with
+ * `docker restart dev_env-e2e-auth-1`.
+ */
+async function signInFailureMessage(username: string, res: Response): Promise<string> {
+  const body = await res.text().catch(() => '');
+  const hint =
+    res.status === 429
+      ? 'sign-in rate limit spent (10 per 15 min across the /auth/sign-in prefix, this suite uses 3 per run) — ' +
+        'wait it out or `docker restart dev_env-e2e-auth-1`'
+      : 'did you run `npm run e2e:setup-users`? it is not part of `npm run e2e:env`';
+  return `${username} sign-in failed: ${res.status} ${body} (${hint})`;
 }
 
 let pg: ReturnType<typeof postgres>;
@@ -254,11 +277,12 @@ beforeAll(async () => {
   `;
   libraryId = (lib as { id: number }).id;
 
-  [djToken, anonToken, memberToken] = await Promise.all([
-    getRoleJwt('test_dj1'),
-    getAnonymousJwt(),
-    getRoleJwt('test_member'),
-  ]);
+  // Serial, not Promise.all: the sign-in rate limiter counts a parallel burst
+  // as a burst, and the retry above cannot help a request that was already
+  // in flight when its sibling consumed the budget.
+  djToken = await getRoleJwt('test_dj1');
+  memberToken = await getRoleJwt('test_member');
+  anonToken = await getAnonymousJwt();
 
   // 1. Ingest the fixture sheet (map → upsert → link), twice: the second
   // run pins nightly idempotency against an unchanged sheet.
