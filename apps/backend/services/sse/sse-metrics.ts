@@ -33,6 +33,15 @@
  *     but isn't something a single metric can distinguish from "no import is
  *     running" — see that file's docstring for the full caveat.
  *
+ *   - `SSE/UpdateSuppressed` (counter, BS#2281 prerequisite): the UPDATE-path
+ *     sibling of the above — one increment per terminal flowsheet track
+ *     UPDATE that `filterMetadataUpdate` drops because its `add_time` is
+ *     older than `LIVE_FS_UPDATE_MAX_AGE_HOURS`. Dimensioned by `Topic` plus a
+ *     dimensionless companion. Expected to spike for the duration of a
+ *     deliberate bulk UPDATE (`jobs/flowsheet-dj-name-scrub`,
+ *     `jobs/flowsheet-metadata-backfill`) — that spike IS the guard working.
+ *     A spike with no such job running means the threshold is misconfigured.
+ *
  * Bounded sampling. Counters live in an in-memory `Map<topic, count>` and
  * flush on whichever comes first: the periodic timer (default 60 s) or when
  * the total buffered count exceeds `FLUSH_AT_BUFFER_SIZE`. ClientCount is a
@@ -40,7 +49,7 @@
  *
  * Opt-out. `SSE_METRICS_DISABLED=true` short-circuits the module: no client
  * is created, no timer fires, and the `recordBroadcast` / `recordBroadcastFailure`
- * / `recordInsertSuppressed` entry points become no-ops. Required so CI and
+ * / `recordInsertSuppressed` / `recordUpdateSuppressed` entry points become no-ops. Required so CI and
  * local dev don't try to talk to CloudWatch.
  *
  * Failure handling. `PutMetricData` rejections are logged and swallowed; the
@@ -55,6 +64,7 @@ const METRIC_CLIENT_COUNT = 'SSE/ClientCount';
 const METRIC_EVENTS_BROADCAST = 'SSE/EventsBroadcast';
 const METRIC_BROADCAST_FAILURES = 'SSE/BroadcastFailures';
 const METRIC_INSERT_SUPPRESSED = 'SSE/InsertSuppressed';
+const METRIC_UPDATE_SUPPRESSED = 'SSE/UpdateSuppressed';
 
 const DEFAULT_INTERVAL_MS = 60_000;
 const FLUSH_AT_BUFFER_SIZE = 100;
@@ -64,6 +74,7 @@ type TopicCount = Map<string, number>;
 let broadcastBuffer: TopicCount = new Map();
 let failureBuffer: TopicCount = new Map();
 let suppressedBuffer: TopicCount = new Map();
+let updateSuppressedBuffer: TopicCount = new Map();
 let bufferedTotal = 0;
 let flushTimer: NodeJS.Timeout | null = null;
 let cloudwatchClient: CloudWatchClient | null = null;
@@ -110,6 +121,23 @@ export function recordBroadcastFailure(topic: string): void {
 export function recordInsertSuppressed(topic: string): void {
   if (isDisabled()) return;
   incrementTopic(suppressedBuffer, topic);
+  bufferedTotal += 1;
+  if (bufferedTotal >= FLUSH_AT_BUFFER_SIZE) {
+    void flushCounters();
+  }
+}
+
+/**
+ * Record one age-guard-suppressed terminal flowsheet track UPDATE for the
+ * given topic. Sibling of `recordInsertSuppressed`; kept as its own buffer and
+ * its own metric rather than folded into `SSE/InsertSuppressed` because the
+ * two answer different questions — a spike here means a bulk UPDATE is running
+ * (or `LIVE_FS_UPDATE_MAX_AGE_HOURS` is misconfigured), which is a distinct
+ * operational condition from a bulk import.
+ */
+export function recordUpdateSuppressed(topic: string): void {
+  if (isDisabled()) return;
+  incrementTopic(updateSuppressedBuffer, topic);
   bufferedTotal += 1;
   if (bufferedTotal >= FLUSH_AT_BUFFER_SIZE) {
     void flushCounters();
@@ -175,6 +203,28 @@ function buildCounterData(timestamp: Date): MetricDatum[] {
     });
   }
 
+  for (const [topic, count] of updateSuppressedBuffer) {
+    data.push({
+      MetricName: METRIC_UPDATE_SUPPRESSED,
+      Timestamp: timestamp,
+      Unit: 'Count',
+      Value: count,
+      Dimensions: [{ Name: 'Topic', Value: topic }],
+    });
+  }
+  // Same alarm-input rationale again.
+  if (updateSuppressedBuffer.size > 0) {
+    let total = 0;
+    for (const count of updateSuppressedBuffer.values()) total += count;
+    data.push({
+      MetricName: METRIC_UPDATE_SUPPRESSED,
+      Timestamp: timestamp,
+      Unit: 'Count',
+      Value: total,
+      Dimensions: [],
+    });
+  }
+
   return data;
 }
 
@@ -220,7 +270,13 @@ function buildGaugeData(timestamp: Date): MetricDatum[] {
 }
 
 async function flushCounters(): Promise<void> {
-  if (broadcastBuffer.size === 0 && failureBuffer.size === 0 && suppressedBuffer.size === 0) return;
+  if (
+    broadcastBuffer.size === 0 &&
+    failureBuffer.size === 0 &&
+    suppressedBuffer.size === 0 &&
+    updateSuppressedBuffer.size === 0
+  )
+    return;
 
   const timestamp = new Date();
   const data = buildCounterData(timestamp);
@@ -228,6 +284,7 @@ async function flushCounters(): Promise<void> {
   broadcastBuffer = new Map();
   failureBuffer = new Map();
   suppressedBuffer = new Map();
+  updateSuppressedBuffer = new Map();
   bufferedTotal = 0;
 
   try {
@@ -289,6 +346,7 @@ export function __resetForTests(): void {
   broadcastBuffer = new Map();
   failureBuffer = new Map();
   suppressedBuffer = new Map();
+  updateSuppressedBuffer = new Map();
   bufferedTotal = 0;
   cloudwatchClient = null;
   snapshotFn = null;

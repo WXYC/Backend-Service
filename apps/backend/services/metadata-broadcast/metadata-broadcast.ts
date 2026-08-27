@@ -50,7 +50,7 @@ import type { LiveFsInsertEvent } from '@wxyc/shared/dtos';
 import { serverEventsMgr, Topics, FsEvents } from '../../utils/serverEvents.js';
 import { pickClientFacingColumns, toDiscogsUnavailableWireFields } from '../../utils/flowsheet-projection.js';
 import { getCachedDiscogsUnavailableFlags, invalidateDiscogsUnavailableFlags } from './discogs-unavailable-cache.js';
-import { recordInsertSuppressed } from '../sse/sse-metrics.js';
+import { recordInsertSuppressed, recordUpdateSuppressed } from '../sse/sse-metrics.js';
 
 const TERMINAL_STATUSES = new Set(['enriched_match', 'enriched_no_match', 'failed_no_retry']);
 
@@ -76,6 +76,75 @@ const LIVE_FS_INSERT_MAX_AGE_HOURS_DEFAULT = 24;
 let lastWarnedRawLiveFsInsertMaxAge: string | undefined;
 
 /**
+ * Default `liveFs:update` age-guard threshold (BS#2281 prerequisite). Same
+ * 24h as the insert guard, but its OWN knob: the two paths have different
+ * volume profiles, and an operator narrowing one during a bulk run should not
+ * silently move the other.
+ */
+const LIVE_FS_UPDATE_MAX_AGE_HOURS_DEFAULT = 24;
+
+/** Warn-once latch for `resolveLiveFsUpdateMaxAgeMs`. Same rationale as above. */
+let lastWarnedRawLiveFsUpdateMaxAge: string | undefined;
+
+/**
+ * Shared parse-and-warn body behind both age-guard resolvers.
+ *
+ * Extracted rather than copied when the update path gained its own threshold:
+ * the `0`-is-rejected rule below is the load-bearing part, and two hand-kept
+ * copies of it is precisely how one path ends up quietly accepting `0` as
+ * "disabled" and taking a live feed dark.
+ */
+function parseMaxAgeMs(
+  raw: string | undefined,
+  envName: string,
+  defaultHours: number,
+  readLatch: () => string | undefined,
+  writeLatch: (value: string) => void
+): number {
+  const defaultMs = defaultHours * 60 * 60 * 1000;
+  if (raw === undefined || raw.trim() === '') return defaultMs;
+  const parsedHours = Number(raw);
+  if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
+    if (readLatch() !== raw) {
+      console.warn(
+        `${LOG_PREFIX} invalid ${envName}=${JSON.stringify(raw)} (must be a positive number of hours; 0 is rejected, not "disabled" — see docs/env-vars.md); using default ${defaultHours}`
+      );
+      writeLatch(raw);
+    }
+    return defaultMs;
+  }
+  return parsedHours * 60 * 60 * 1000;
+}
+
+/**
+ * Resolves the `liveFs:update` age-guard threshold in milliseconds.
+ *
+ * Same warn-and-default-never-throw posture as the insert resolver, and the
+ * same rejection of `0`: `isOlderThanThreshold` compares `nowMs - addTimeMs >
+ * thresholdMs`, which is positive for every real row, so a `0` threshold
+ * would classify every update as historical and take the whole
+ * `liveFs:update` feed dark station-wide.
+ */
+export function resolveLiveFsUpdateMaxAgeMs(
+  raw: string | undefined = process.env.LIVE_FS_UPDATE_MAX_AGE_HOURS
+): number {
+  return parseMaxAgeMs(
+    raw,
+    'LIVE_FS_UPDATE_MAX_AGE_HOURS',
+    LIVE_FS_UPDATE_MAX_AGE_HOURS_DEFAULT,
+    () => lastWarnedRawLiveFsUpdateMaxAge,
+    (value) => {
+      lastWarnedRawLiveFsUpdateMaxAge = value;
+    }
+  );
+}
+
+/** Test hook: clear the update-path warn-once latch. Sibling of the insert one. */
+export function __resetLiveFsUpdateMaxAgeWarnLatchForTests(): void {
+  lastWarnedRawLiveFsUpdateMaxAge = undefined;
+}
+
+/**
  * Resolves the `liveFs:insert` age-guard threshold in milliseconds.
  * Warn-and-default on misconfig (never throw): this runs on every flowsheet
  * INSERT's CDC callback, so a bad env var must degrade to the safe default
@@ -94,19 +163,15 @@ let lastWarnedRawLiveFsInsertMaxAge: string | undefined;
 export function resolveLiveFsInsertMaxAgeMs(
   raw: string | undefined = process.env.LIVE_FS_INSERT_MAX_AGE_HOURS
 ): number {
-  const defaultMs = LIVE_FS_INSERT_MAX_AGE_HOURS_DEFAULT * 60 * 60 * 1000;
-  if (raw === undefined || raw.trim() === '') return defaultMs;
-  const parsedHours = Number(raw);
-  if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
-    if (lastWarnedRawLiveFsInsertMaxAge !== raw) {
-      console.warn(
-        `${LOG_PREFIX} invalid LIVE_FS_INSERT_MAX_AGE_HOURS=${JSON.stringify(raw)} (must be a positive number of hours; 0 is rejected, not "disabled" — see docs/env-vars.md); using default ${LIVE_FS_INSERT_MAX_AGE_HOURS_DEFAULT}`
-      );
-      lastWarnedRawLiveFsInsertMaxAge = raw;
+  return parseMaxAgeMs(
+    raw,
+    'LIVE_FS_INSERT_MAX_AGE_HOURS',
+    LIVE_FS_INSERT_MAX_AGE_HOURS_DEFAULT,
+    () => lastWarnedRawLiveFsInsertMaxAge,
+    (value) => {
+      lastWarnedRawLiveFsInsertMaxAge = value;
     }
-    return defaultMs;
-  }
-  return parsedHours * 60 * 60 * 1000;
+  );
 }
 
 /**
@@ -141,8 +206,8 @@ function parseAddTimeMs(rawAddTime: unknown): number | null {
  * is a parseable value to compare against — a marker row or a fixture
  * without `add_time` never reaches this function.
  */
-function isOlderThanThreshold(parsedAddTimeMs: number, nowMs: number): boolean {
-  return nowMs - parsedAddTimeMs > resolveLiveFsInsertMaxAgeMs();
+function isOlderThanThreshold(parsedAddTimeMs: number, nowMs: number, thresholdMs: number): boolean {
+  return nowMs - parsedAddTimeMs > thresholdMs;
 }
 
 /**
@@ -202,27 +267,109 @@ export type LiveFsUpdatePayload = {
   [key: string]: unknown;
 };
 
-/** Pure filter for testability — returns the broadcast payload on match, null on skip. */
-export function filterMetadataUpdate(event: CdcEvent): LiveFsUpdatePayload | null {
+type TerminalTrackUpdateMatch = { data: Record<string, unknown>; id: number; status: string };
+
+/**
+ * Structural match for a terminal-status flowsheet track UPDATE — WITHOUT the
+ * add_time age guard. Shared by `filterMetadataUpdate` and
+ * `isAgeSuppressedUpdate` so the two can never disagree about what counts as
+ * "an update the age guard applies to", exactly as `matchTrackInsert` does for
+ * the insert path.
+ *
+ * The `entry_type === 'track'` check is new with the age guard (BS#2281
+ * prerequisite) and is a no-op today: every enrichment writer already gates on
+ * `entry_type = 'track'`, and `metadata_status` defaults to `'pending'` for
+ * marker rows, so no non-track row reaches a terminal status. It exists so a
+ * future writer that does cannot start pushing marker rows onto a stream whose
+ * payload is typed as a track row and which dj-site patches into a track
+ * cache — and so the two filters stay symmetric.
+ */
+function matchTerminalTrackUpdate(event: CdcEvent): TerminalTrackUpdateMatch | null {
   if (event.table !== 'flowsheet') return null;
   if (event.action !== 'UPDATE') return null;
   if (!event.data) return null;
 
   const data = event.data as Record<string, unknown>;
+  if (data.entry_type !== undefined && data.entry_type !== 'track') return null;
+
   const status = data.metadata_status;
   if (typeof status !== 'string' || !TERMINAL_STATUSES.has(status)) return null;
 
   const id = data.id;
   if (typeof id !== 'number') return null;
 
+  return { data, id, status };
+}
+
+/**
+ * Pure filter for testability — returns the broadcast payload on match, null
+ * on skip.
+ *
+ * `add_time` age guard (BS#2281 prerequisite, mirroring BS#2131's insert
+ * guard). Without it this filter broadcasts on ANY flowsheet UPDATE landing
+ * in a terminal `metadata_status`, and historical `track` rows are almost all
+ * terminal — so any bulk UPDATE over the table emits one projected
+ * `liveFs:update` per row to every `/events/stream` client on every backend
+ * instance, for the entire run. `jobs/flowsheet-dj-name-scrub` (BS#2281) is a
+ * multi-hour drain over ~2.6M rows; without this guard it would push millions
+ * of unsolicited events at live connections. `jobs/flowsheet-metadata-backfill`
+ * has been paying a smaller nightly version of the same cost.
+ *
+ * What that costs: an enrichment landing on a row older than
+ * `LIVE_FS_UPDATE_MAX_AGE_HOURS` (default 24h) no longer emits its "refetch
+ * me" signal. That is a deliberate narrowing of the behaviour this
+ * docstring's "False positives" note previously described as desirable — a
+ * client viewing a historical range loses a live patch it would otherwise
+ * have received and must refetch on its own. Enrichment of anything played in
+ * the last day, which is the case that actually matters to a `/live` viewer,
+ * is unaffected.
+ *
+ * Fails OPEN on a missing or unparseable `add_time`, same as the insert path
+ * (see `parseAddTimeMs`): never silently drop a live update over an
+ * unreadable timestamp. Age is measured against `CdcEvent.timestamp` (the
+ * database clock that produced `add_time`), not `Date.now()` — see
+ * `resolveEventNowMs`.
+ */
+export function filterMetadataUpdate(event: CdcEvent): LiveFsUpdatePayload | null {
+  const match = matchTerminalTrackUpdate(event);
+  if (!match) return null;
+
+  const parsedAddTimeMs = parseAddTimeMs(match.data.add_time);
+  if (
+    parsedAddTimeMs !== null &&
+    isOlderThanThreshold(parsedAddTimeMs, resolveEventNowMs(event), resolveLiveFsUpdateMaxAgeMs())
+  ) {
+    return null;
+  }
+
   // Project through the client-facing allow-list before the row hits the
   // anonymous `/events/stream` (BS#1534): internal CDC columns (`search_doc`,
   // `composer`, `legacy_*`, `linkage_*`, …) must not ride the public stream.
   return {
-    ...pickClientFacingColumns(data),
-    id,
-    metadata_status: status as LiveFsUpdatePayload['metadata_status'],
+    ...pickClientFacingColumns(match.data),
+    id: match.id,
+    metadata_status: match.status as LiveFsUpdatePayload['metadata_status'],
   };
+}
+
+/**
+ * True when `event` structurally matches a terminal-status flowsheet track
+ * UPDATE but its `add_time` is older than the age-guard threshold — i.e.
+ * exactly the branch inside `filterMetadataUpdate` that returns `null` for
+ * that reason. Sibling of `isAgeSuppressedInsert`, and for the same reason:
+ * it separates an intentional historical-row drop (worth a metric) from the
+ * ordinary "this CDC event isn't a terminal track update at all" nulls that
+ * make up the bulk of `onCdcEvent` traffic and would otherwise swamp the
+ * counter with routing noise.
+ */
+export function isAgeSuppressedUpdate(event: CdcEvent): boolean {
+  const match = matchTerminalTrackUpdate(event);
+  if (!match) return false;
+
+  const parsedAddTimeMs = parseAddTimeMs(match.data.add_time);
+  if (parsedAddTimeMs === null) return false;
+
+  return isOlderThanThreshold(parsedAddTimeMs, resolveEventNowMs(event), resolveLiveFsUpdateMaxAgeMs());
 }
 
 /**
@@ -289,7 +436,10 @@ export function filterMetadataInsert(event: CdcEvent): LiveFsInsertEvent['payloa
   if (!match) return null;
 
   const parsedAddTimeMs = parseAddTimeMs(match.data.add_time);
-  if (parsedAddTimeMs !== null && isOlderThanThreshold(parsedAddTimeMs, resolveEventNowMs(event))) {
+  if (
+    parsedAddTimeMs !== null &&
+    isOlderThanThreshold(parsedAddTimeMs, resolveEventNowMs(event), resolveLiveFsInsertMaxAgeMs())
+  ) {
     return null;
   }
 
@@ -319,7 +469,7 @@ export function isAgeSuppressedInsert(event: CdcEvent): boolean {
   const parsedAddTimeMs = parseAddTimeMs(match.data.add_time);
   if (parsedAddTimeMs === null) return false;
 
-  return isOlderThanThreshold(parsedAddTimeMs, resolveEventNowMs(event));
+  return isOlderThanThreshold(parsedAddTimeMs, resolveEventNowMs(event), resolveLiveFsInsertMaxAgeMs());
 }
 
 /**
@@ -397,7 +547,17 @@ export function setupMetadataBroadcast(): void {
 
   onCdcEvent((event) => {
     const payload = filterMetadataUpdate(event);
-    if (!payload) return;
+    if (!payload) {
+      // Distinguish the intentional historical-row drop from the routing
+      // nulls that make up most of this handler's traffic, so a bulk UPDATE's
+      // suppression volume is observable in CloudWatch rather than invisible.
+      // Mirrors the insert path's `SSE/InsertSuppressed` wiring below;
+      // `filterMetadataUpdate` itself stays a side-effect-free predicate.
+      if (isAgeSuppressedUpdate(event)) {
+        recordUpdateSuppressed(Topics.liveFs);
+      }
+      return;
+    }
     const albumId = typeof payload.album_id === 'number' ? payload.album_id : null;
     if (albumId === null) {
       broadcastUpdate(payload);
