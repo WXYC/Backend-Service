@@ -54,6 +54,9 @@ import {
   setupMetadataBroadcast,
   resolveLiveFsInsertMaxAgeMs,
   __resetLiveFsInsertMaxAgeWarnLatchForTests,
+  isAgeSuppressedUpdate,
+  resolveLiveFsUpdateMaxAgeMs,
+  __resetLiveFsUpdateMaxAgeWarnLatchForTests,
 } from '../../../../../apps/backend/services/metadata-broadcast/metadata-broadcast';
 import { onCdcEvent } from '@wxyc/database';
 import { serverEventsMgr } from '../../../../../apps/backend/utils/serverEvents.js';
@@ -68,6 +71,7 @@ const flushAsync = (): Promise<void> => new Promise((resolve) => setImmediate(re
 // an earlier test that happened to warm the latch with the same raw value.
 afterEach(() => {
   __resetLiveFsInsertMaxAgeWarnLatchForTests();
+  __resetLiveFsUpdateMaxAgeWarnLatchForTests();
 });
 
 /**
@@ -84,6 +88,7 @@ const flowsheetUpdate = (overrides: Partial<Record<string, unknown>> = {}): CdcE
   action: 'UPDATE',
   data: {
     id: 42,
+    entry_type: 'track',
     metadata_status: 'enriched_match',
     ...overrides,
   },
@@ -116,6 +121,9 @@ describe('filterMetadataUpdate (BS#892 PR-2)', () => {
     });
     expect(filterMetadataUpdate(event)).toEqual({
       id: 42,
+      // `entry_type` is itself a client-facing column, so it rides the
+      // payload — the guard added in BS#2281 reads it, it does not strip it.
+      entry_type: 'track',
       metadata_status: 'enriched_match',
       artist_name: 'Juana Molina',
       album_title: 'DOGA',
@@ -850,5 +858,126 @@ describe('setupMetadataBroadcast library-CDC cache invalidation (BS#1962)', () =
     cb(libraryEvent({ data: { id: 'forty-two' } }));
     cb(libraryEvent({ data: {} }));
     expect(mockInvalidateDiscogsUnavailableFlags).not.toHaveBeenCalled();
+  });
+});
+
+describe('filterMetadataUpdate age + entry_type guard (BS#2281 prerequisite)', () => {
+  // `filterMetadataUpdate` broadcasts on ANY flowsheet UPDATE landing in a
+  // terminal metadata_status, and historical `track` rows are almost all
+  // terminal. Any bulk UPDATE over the table therefore emits one projected
+  // `liveFs:update` per row to every `/events/stream` client on every backend
+  // instance, for the whole run — millions of unsolicited events pushed at
+  // live connections. The sibling INSERT path received exactly this guard in
+  // BS#2131; the UPDATE path never did. BS#2281's multi-hour dj_name scrub is
+  // what made the gap load-bearing, but `jobs/flowsheet-metadata-backfill`
+  // has been paying a smaller version of it nightly.
+
+  const HOUR_MS = 60 * 60 * 1000;
+  const recentAddTime = new Date(NOW - HOUR_MS).toISOString();
+  const staleAddTime = new Date(NOW - 72 * HOUR_MS).toISOString();
+
+  it('broadcasts an update on a recently-played row', () => {
+    expect(filterMetadataUpdate(flowsheetUpdate({ add_time: recentAddTime }))).not.toBeNull();
+  });
+
+  it('suppresses an update on a row older than the threshold', () => {
+    expect(filterMetadataUpdate(flowsheetUpdate({ add_time: staleAddTime }))).toBeNull();
+  });
+
+  it('fails OPEN on a missing or unparseable add_time', () => {
+    // Same posture as the insert path: never silently drop a live update
+    // because a fixture or a schema drift left add_time unreadable.
+    expect(filterMetadataUpdate(flowsheetUpdate())).not.toBeNull();
+    expect(filterMetadataUpdate(flowsheetUpdate({ add_time: 'garbage' }))).not.toBeNull();
+    expect(filterMetadataUpdate(flowsheetUpdate({ add_time: 12345 }))).not.toBeNull();
+  });
+
+  it('measures age against the event timestamp, not the app-server clock', () => {
+    // resolveEventNowMs: `add_time` and `CdcEvent.timestamp` both come from
+    // the database clock in the same trigger invocation.
+    const event = { ...flowsheetUpdate({ add_time: staleAddTime }), timestamp: NOW - 72 * HOUR_MS };
+    expect(filterMetadataUpdate(event)).not.toBeNull();
+  });
+
+  it('honours LIVE_FS_UPDATE_MAX_AGE_HOURS', () => {
+    const original = process.env.LIVE_FS_UPDATE_MAX_AGE_HOURS;
+    try {
+      process.env.LIVE_FS_UPDATE_MAX_AGE_HOURS = '96';
+      expect(filterMetadataUpdate(flowsheetUpdate({ add_time: staleAddTime }))).not.toBeNull();
+      process.env.LIVE_FS_UPDATE_MAX_AGE_HOURS = '2';
+      expect(filterMetadataUpdate(flowsheetUpdate({ add_time: recentAddTime }))).not.toBeNull();
+      process.env.LIVE_FS_UPDATE_MAX_AGE_HOURS = '0.5';
+      expect(filterMetadataUpdate(flowsheetUpdate({ add_time: recentAddTime }))).toBeNull();
+    } finally {
+      if (original === undefined) delete process.env.LIVE_FS_UPDATE_MAX_AGE_HOURS;
+      else process.env.LIVE_FS_UPDATE_MAX_AGE_HOURS = original;
+    }
+  });
+
+  it('is independent of the insert threshold', () => {
+    const originalUpdate = process.env.LIVE_FS_UPDATE_MAX_AGE_HOURS;
+    const originalInsert = process.env.LIVE_FS_INSERT_MAX_AGE_HOURS;
+    try {
+      process.env.LIVE_FS_INSERT_MAX_AGE_HOURS = '96';
+      delete process.env.LIVE_FS_UPDATE_MAX_AGE_HOURS;
+      // The update path must not inherit the widened insert threshold.
+      expect(filterMetadataUpdate(flowsheetUpdate({ add_time: staleAddTime }))).toBeNull();
+    } finally {
+      if (originalUpdate === undefined) delete process.env.LIVE_FS_UPDATE_MAX_AGE_HOURS;
+      else process.env.LIVE_FS_UPDATE_MAX_AGE_HOURS = originalUpdate;
+      if (originalInsert === undefined) delete process.env.LIVE_FS_INSERT_MAX_AGE_HOURS;
+      else process.env.LIVE_FS_INSERT_MAX_AGE_HOURS = originalInsert;
+    }
+  });
+
+  it('rejects 0 rather than reading it as "disabled"', () => {
+    // Identical hazard to the insert path: a `0` threshold would classify
+    // every update as historical and take the whole feed dark.
+    expect(resolveLiveFsUpdateMaxAgeMs('0')).toBe(24 * HOUR_MS);
+    expect(resolveLiveFsUpdateMaxAgeMs('-1')).toBe(24 * HOUR_MS);
+    expect(resolveLiveFsUpdateMaxAgeMs('nonsense')).toBe(24 * HOUR_MS);
+    expect(resolveLiveFsUpdateMaxAgeMs(undefined)).toBe(24 * HOUR_MS);
+    expect(resolveLiveFsUpdateMaxAgeMs('48')).toBe(48 * HOUR_MS);
+  });
+
+  it('suppresses a non-track entry type', () => {
+    // `liveFs:update` is typed as a track row and dj-site patches it into a
+    // track cache. Marker rows never reach a terminal metadata_status today
+    // (every enrichment writer gates on entry_type='track'), so this is a
+    // no-op guard against a future writer that does — and it keeps the two
+    // filters symmetric.
+    for (const entry_type of ['show_start', 'show_end', 'dj_join', 'dj_leave', 'talkset', 'breakpoint', 'message']) {
+      expect(filterMetadataUpdate(flowsheetUpdate({ entry_type, add_time: recentAddTime }))).toBeNull();
+    }
+  });
+});
+
+describe('isAgeSuppressedUpdate (BS#2281 prerequisite)', () => {
+  const HOUR_MS = 60 * 60 * 1000;
+  const staleAddTime = new Date(NOW - 72 * HOUR_MS).toISOString();
+  const recentAddTime = new Date(NOW - HOUR_MS).toISOString();
+
+  it('reports true for an update dropped by the age guard', () => {
+    expect(isAgeSuppressedUpdate(flowsheetUpdate({ add_time: staleAddTime }))).toBe(true);
+  });
+
+  it('reports false for an update that broadcasts', () => {
+    expect(isAgeSuppressedUpdate(flowsheetUpdate({ add_time: recentAddTime }))).toBe(false);
+  });
+
+  it('does not conflate ordinary routing nulls with an age drop', () => {
+    // The bulk of onCdcEvent traffic is "not a terminal flowsheet track
+    // UPDATE at all". Counting those as suppressions would swamp the metric
+    // with routing noise — the same distinction isAgeSuppressedInsert draws.
+    expect(isAgeSuppressedUpdate({ ...flowsheetUpdate({ add_time: staleAddTime }), action: 'INSERT' })).toBe(false);
+    expect(isAgeSuppressedUpdate({ ...flowsheetUpdate({ add_time: staleAddTime }), table: 'rotation' })).toBe(false);
+    expect(isAgeSuppressedUpdate(flowsheetUpdate({ add_time: staleAddTime, metadata_status: 'pending' }))).toBe(false);
+    expect(isAgeSuppressedUpdate(flowsheetUpdate({ add_time: staleAddTime, entry_type: 'show_start' }))).toBe(false);
+    expect(isAgeSuppressedUpdate(flowsheetUpdate({ add_time: staleAddTime, id: undefined }))).toBe(false);
+  });
+
+  it('reports false when add_time is missing or unparseable (the fail-open branch)', () => {
+    expect(isAgeSuppressedUpdate(flowsheetUpdate())).toBe(false);
+    expect(isAgeSuppressedUpdate(flowsheetUpdate({ add_time: 'garbage' }))).toBe(false);
   });
 });
