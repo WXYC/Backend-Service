@@ -13,6 +13,7 @@ CLAUDE.md is a router for the always-loaded reference card. Topic depth lives in
 - **[`docs/cdc.md`](docs/cdc.md)** — CDC WebSocket endpoint, event format, reconciliation monitor
 - **[`docs/deploy.md`](docs/deploy.md)** — Deploy cadence, migration-chain risk, deploy-wedge anatomy, buildx registry layer caching (ECR manifest requirement, lifecycle policy), CI workflow pin maintenance (permissions, gha/v1 pins, caller-callee permissions trap from #857), edge gzip (allowlist, the SSE guard, `/auth` opt-out)
 - **[`docs/authentication.md`](docs/authentication.md)** — Roles, permissions matrix, JWT payload, `requirePermissions` middleware flow, `AUTH_BYPASS`, better-auth role-mismatch gotcha
+- **[`docs/pii.md`](docs/pii.md)** — PII field registry: `real_name`/`email` vs `dj_name`/`name` classification, allowed read sites, the `wxyc/restricted-real-name` ESLint rule, DJ-name/real-name conflation history
 - **[`docs/testing.md`](docs/testing.md)** — Unit + integration + CI-mock test setup, jest configs, CI workflow job list
 - **[`docs/dev-db-fixture.md`](docs/dev-db-fixture.md)** — Dev DB seed pipeline (`seed_db.sql` + `seed-clone.sql`), `LOAD_CLONE_FIXTURE` gate, `predev` rebuild hook, `db:stop` volume drop
 - **[`docs/ops-cron-scheduling.md`](docs/ops-cron-scheduling.md)** — LML-heavy cron spacing policy; heavy-drain vs light-touch vs hourly-safety-net; slot table; cron-liveness recipe (BS#2064 — Sentry cron monitor + `cronjob_runs` heartbeat + outcome check, with the per-monitor cost)

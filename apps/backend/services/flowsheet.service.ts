@@ -492,9 +492,10 @@ export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
  * for an upstream onboarding bug that wrote "Anonymous" automatically;
  * the override is operator-supplied, so we trust it verbatim.
  *
- * `auth_user.name` is intentionally NOT in the chain — it typically stores
- * the user's real name (set from realName at provision time), which is PII
- * and must not leak onto the public on-air playlist. See
+ * `auth_user.name` is intentionally NOT in the chain — it's a derived
+ * display handle/username (backfill: jobs/auth-user-name-backfill), not
+ * the canonical value; `auth_user.real_name` is the sole legal-name
+ * carrier (PII) and was never an input here either. See docs/pii.md and
  * `resolveDjDisplayName`'s docstring.
  */
 export const resolveDjNameForShow = async (show: Show): Promise<string | null> => {

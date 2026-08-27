@@ -148,16 +148,6 @@ components:
           type: string
           format: date
 
-    NewDJ:
-      type: object
-      properties:
-        cognito_user_name:
-          type: string
-        real_name:
-          type: string
-        dj_name:
-          type: string
-
     ShowDJ:
       type: object
       properties:
@@ -1367,57 +1357,6 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/FlowsheetEntryV2'
-
-  /djs:
-    get:
-      summary: Get DJ information
-      parameters:
-        - name: dj_id
-          in: query
-          schema:
-            type: integer
-        - name: cognito_user_name
-          in: query
-          schema:
-            type: string
-      responses:
-        '200':
-          description: DJ information
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/DJ'
-                  - $ref: '#/components/schemas/NewDJ'
-
-  /djs/register:
-    post:
-      summary: Register a new DJ
-      security:
-        - BearerAuth: ['station-management']
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewDJ'
-      responses:
-        '200':
-          description: Successfully registered DJ
-
-    patch:
-      summary: Update DJ information
-      security:
-        - BearerAuth: ['station-management']
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NewDJ'
-      responses:
-        '200':
-          description: Successfully updated DJ
 
   /djs/bin:
     get:

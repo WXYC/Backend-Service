@@ -34,13 +34,12 @@
  *      incident).
  *   3. Trim the returned value; return `null` if blank or Anonymous.
  *
- * Why this no longer falls back to `auth_user.name`: dj-site's admin
- * provisioning flow writes the user's real name into `auth_user.name`
- * (`name: newAccount.realName || newAccount.username` in roster UI), so
- * surfacing `name` on the public v2 flowsheet wire would leak PII —
- * exactly the same class of incident BS#1286 fixed for the 'Anonymous'
- * literal. Real names are appropriate for DJ-to-DJ internal views; they
- * are not appropriate for the public on-air playlist.
+ * Why this doesn't fall back to `auth_user.name`: `auth_user.real_name` is
+ * the sole legal-name carrier (PII, see docs/pii.md) and is never an input
+ * to this chain. `auth_user.name` is a derived display handle/username
+ * (backfill: jobs/auth-user-name-backfill) — redundant with, not
+ * authoritative over, `djName`/`legacy_dj_name` here, so this chain reads
+ * the canonical fields directly rather than the derived display column.
  *
  * Callers should treat `null` as "name is unresolvable" and either degrade
  * the marker template (show_start / show_end keep a row but drop the name)

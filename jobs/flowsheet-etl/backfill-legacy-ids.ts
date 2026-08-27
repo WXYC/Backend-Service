@@ -88,10 +88,11 @@ const backfillReleaseIds = async (mappings: ReleaseMapping[]): Promise<number> =
 // ---- Shows: legacy_dj_name, legacy_dj_id ----
 //
 // `legacy_dj_name` is sourced from FLOWSHEET_RADIO_SHOW_PROD.DJ_HANDLE (the
-// on-air alias), NOT DJ_NAME (the full real name BS forwards through the
-// legacy mirror as `realName || name`). Reading DJ_NAME here leaks PII onto
-// the v2 wire via the shows.legacy_dj_name → flowsheet.dj_name COALESCE
-// chain. See the leak path in fetch-legacy.ts's LegacyShowRow comment.
+// on-air alias), NOT DJ_NAME (the legal name the legacy mirror forwards
+// from `auth_user.real_name`, the sole legal-name carrier — PII, see
+// docs/pii.md). Reading DJ_NAME here leaks PII onto the v2 wire via the
+// shows.legacy_dj_name → flowsheet.dj_name COALESCE chain. See the leak
+// path in fetch-legacy.ts's LegacyShowRow comment.
 
 type DJMapping = { showId: number; djHandle: string | null; djId: number | null };
 

@@ -183,9 +183,11 @@ const importShows = async (dbClient: DbClient, lines: string[]) => {
         .values({
           legacy_show_id: Number(tuple[0]),
           // tuple[4] = DJ_HANDLE (on-air alias). tuple[2] (DJ_NAME) is the
-          // full real name that BS sends through the legacy mirror as
-          // `realName || name`; reading it here would leak PII onto the v2
-          // wire via shows.legacy_dj_name → flowsheet.dj_name COALESCE.
+          // full legal name — tubafrenzy's DJ_NAME field is fed from
+          // `auth_user.real_name`, the sole legal-name carrier (PII, see
+          // docs/pii.md), never from `auth_user.name`. Reading DJ_NAME here
+          // would leak PII onto the v2 wire via shows.legacy_dj_name →
+          // flowsheet.dj_name COALESCE.
           legacy_dj_name: truncate(tuple[4] != null ? String(tuple[4]) : null, 128),
           legacy_dj_id: Number.isFinite(rawDjId) && rawDjId !== 0 ? rawDjId : null,
           start_time: startTime,
