@@ -565,6 +565,16 @@ const runSyncAdminRoles = async () => {
       // table (BS#2282), so a membership stored as `station_manager` would be
       // granted the flag by the hook and — if that hook ever failed — never
       // repaired by this sweep. Grant and repair must accept the same strings.
+      //
+      // Sizing, since moving the predicate out of SQL widened this from a
+      // selective query to the default org's whole roster (minus users already
+      // flagged `admin`): ~2k memberships at WXYC, one row each of four short
+      // columns, read once per auth-service boot and awaited before
+      // `app.listen()`. That is well inside the budget; if the roster ever
+      // reaches a size where it isn't, page it — do NOT reach for a `LIMIT`.
+      // This is a repair sweep, and a bare limit would silently leave the
+      // remainder unrepaired every boot, which is the failure mode the sweep
+      // exists to prevent.
       findUsersMissingAdminFlag: async (defaultOrgSlug) => {
         const rows = await db
           .select({
