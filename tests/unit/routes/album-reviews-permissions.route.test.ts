@@ -72,11 +72,13 @@ app.use('/album-reviews', album_reviews_route);
  * next() before the permission block is reached. A green integration run proves
  * nothing about this gate.
  *
- * `stationManager` is asserted alongside `dj` deliberately. Its role definition
- * is `{ ...adminAc.statements, bin, catalog, flowsheet, reviews }` — the spread
- * is better-auth's org-plugin resources, not a wildcard over the WXYC custom
- * keys — and `requirePermissions` has no role hierarchy. Drop `reviews` from
- * that role and the MOST privileged account 403s while a plain DJ gets 200.
+ * `stationManager` is asserted alongside `dj` deliberately, even though the
+ * grant matrix in auth.roles.ts now makes omitting it a compile error rather
+ * than a runtime 403. `requirePermissions` is a pure per-role check with no
+ * hierarchy, so "the top role is covered because it is the top role" is not a
+ * property this route can rely on; the matrix enforces the grant, and this
+ * asserts the HTTP consequence of it. Two independent guards for the inversion
+ * class where a plain DJ gets 200 while the most privileged account 403s.
  */
 describe('GET /album-reviews — reviews:read gate (ADR 0011 internal surface)', () => {
   beforeEach(() => {
