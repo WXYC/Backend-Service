@@ -11,7 +11,7 @@
  * those users because there's no row to update.
  *
  * Mapping from `auth_user.role` to `auth_member.role`:
- *   admin  -> stationManager   (matches systemRoleMap in auth.roles.ts)
+ *   admin  -> stationManager   (matches canonicalizeRole in @wxyc/shared)
  *   dj     -> dj
  *   user   -> member
  *   null   -> member
@@ -35,6 +35,7 @@ import { generateId } from '@better-auth/core/utils/id';
 import { db } from '../shared/database/src/client';
 import { member, organization, user } from '../shared/database/src/schema';
 import { eq, sql } from 'drizzle-orm';
+import { grantsAdminFlag } from '../shared/authentication/src/admin-flag-sync';
 
 interface Args {
   apply: boolean;
@@ -43,8 +44,6 @@ interface Args {
 function parseArgs(argv: string[]): Args {
   return { apply: argv.includes('--apply') };
 }
-
-const ADMIN_SYNC_ROLES = new Set(['stationManager', 'admin', 'owner']);
 
 function mapUserRoleToMemberRole(userRole: string | null): string {
   if (userRole === 'admin') return 'stationManager';
@@ -152,7 +151,7 @@ async function main() {
 
         // Mirror the afterAddMember hook in auth.definition.ts:
         // sync global user.role -> 'admin' for stationManager/admin/owner.
-        if (ADMIN_SYNC_ROLES.has(memberRole) && u.role !== 'admin') {
+        if (grantsAdminFlag(memberRole) && u.role !== 'admin') {
           await tx.update(user).set({ role: 'admin' }).where(eq(user.id, u.id));
           userRoleUpdates++;
         }

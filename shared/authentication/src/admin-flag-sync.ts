@@ -19,6 +19,14 @@ import { normalizeRole } from './auth.roles';
 /**
  * Does this membership role justify the admin flag?
  *
+ * Exported and re-used as the ONE definition of that question: the
+ * revocation-side twin in `auth.definition.ts` (`hasOtherAdminMembership`),
+ * `provision-user.ts`, and `scripts/backfill-missing-org-members.ts` each
+ * carried a verbatim `['stationManager', 'admin', 'owner']` copy of this set
+ * before BS#2282. Four copies of one predicate is how a grant path and a
+ * revocation path come to disagree — the grant widening when `normalizeRole`
+ * gained shared's alias table, while a hardcoded SQL IN-list did not.
+ *
  * The flag means "holds stationManager authority", which is the one question
  * `normalizeRole` exists to answer: it resolves `stationManager` to itself and
  * better-auth's own `admin`/`owner` organization roles to `stationManager`,
@@ -26,7 +34,7 @@ import { normalizeRole } from './auth.roles';
  * than restating the role set keeps this in step with `auth.roles.ts`, which
  * already declares that mapping canonical.
  */
-const grantsAdminFlag = (memberRole: string): boolean => normalizeRole(memberRole) === 'stationManager';
+export const grantsAdminFlag = (memberRole: string): boolean => normalizeRole(memberRole) === 'stationManager';
 
 export interface AdminFlagSyncDeps {
   /**

@@ -257,6 +257,12 @@ jobs:
       - name: Bulk UPDATE + ANALYZE pairing (BS#934)
         run: node scripts/check-bulk-update-analyze.mjs --strict
 
+      # The unit suite runs against hand-written better-auth mocks, so this is
+      # the only check that sees a library upgrade change the org-admin
+      # statement set or `authorize` semantics (BS#2282).
+      - name: better-auth access mock parity (BS#2282)
+        run: npm run check:better-auth-mock-sync
+
       - name: Build
         run: npm run build
 

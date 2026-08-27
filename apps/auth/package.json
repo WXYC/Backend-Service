@@ -20,7 +20,7 @@
     "@wxyc/authentication": "^1.0.0",
     "@wxyc/database": "^1.0.0",
     "@wxyc/observability": "^1.0.0",
-    "@wxyc/shared": "^4.1.0",
+    "@wxyc/shared": "^5.0.0",
     "better-auth": "^1.6.30",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",

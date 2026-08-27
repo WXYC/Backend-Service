@@ -22,7 +22,7 @@
     "@aws-sdk/client-ses": "^3.1116.0",
     "@sentry/node": "^10.70.0",
     "@wxyc/database": "^1.0.0",
-    "@wxyc/shared": "^4.1.0",
+    "@wxyc/shared": "^5.0.0",
     "better-auth": "^1.6.30",
     "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.9"

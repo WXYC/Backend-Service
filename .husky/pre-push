@@ -30,3 +30,9 @@ npm run check:docs || true
 # CLAUDE.md sentinel list against the Drizzle schema, and a mismatch is
 # always a bug. Kept separate so `|| true` above doesn't mask it.
 npm run check:auth-tables-doc
+# `check:better-auth-mock-sync` (BS#2282) is hard-fail — the unit suite runs
+# against hand-written better-auth mocks, so this is the ONLY thing that
+# notices a library upgrade changing the org-admin statement set or
+# `authorize` semantics. Without it, the role pins in
+# tests/unit/authentication/auth.roles.test.ts compare the mock to itself.
+npm run check:better-auth-mock-sync
