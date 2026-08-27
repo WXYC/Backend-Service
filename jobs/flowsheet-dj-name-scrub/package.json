@@ -1,0 +1,27 @@
+{
+  "name": "@wxyc/flowsheet-dj-name-scrub",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "One-shot dry-run-by-default scrub (BS#2281): recompute historical flowsheet.dj_name to the current PII-safe resolution chain via the canonical @wxyc/database helpers, and rewrite the marker message text that embeds a real name. Three id-cursor passes (main / message / orphan), idempotent by IS DISTINCT FROM the recomputed value (never IS NULL), cooperative live-DJ pause, ANALYZE-after, SIGTERM graceful stop. Reverses nothing: running legacy-dj-name-remediation or flowsheet-dj-name-backfill after this UNDOES it.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_flowsheet_dj_name_scrub:ci -f ../../Dockerfile.flowsheet-dj-name-scrub ../../",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@sentry/node": "^10.70.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
