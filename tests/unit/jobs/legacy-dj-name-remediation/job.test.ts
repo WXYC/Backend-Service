@@ -74,6 +74,7 @@ import {
   fetchHandleMappings,
   BATCH_SIZE,
 } from '../../../../jobs/legacy-dj-name-remediation/job';
+import { supersededRefusalMessage } from '../../../../jobs/legacy-dj-name-remediation/superseded-guard';
 
 const lastSqlTagCall = (): SqlTagCall => {
   for (let i = recorded.length - 1; i >= 0; i--) {
@@ -338,5 +339,36 @@ describe('legacy-dj-name-remediation: fetchHandleMappings', () => {
 describe('legacy-dj-name-remediation: BATCH_SIZE', () => {
   it('matches the established one-shot-job convention (5000)', () => {
     expect(BATCH_SIZE).toBe(5000);
+  });
+});
+
+/**
+ * The module-scope `main()` in legacy-dj-name-remediation now REFUSES to run (BS#2281): its
+ * `dj_name IS NULL` predicate refills exactly the NULLs the dj-name scrub
+ * deliberately creates. Importing the module above therefore executes that
+ * refusal and sets `process.exitCode = 1`, which would fail this whole Jest
+ * run even with every test passing (Jest does not force the code back to 0 on
+ * success). Capture it, assert it, then restore — the same save/restore idiom
+ * `tests/unit/jobs/flowsheet-etl/backfill-legacy-ids.test.ts` uses for the
+ * same reason.
+ */
+const exitCodeSetOnImport = process.exitCode;
+
+describe('legacy-dj-name-remediation refuses to run (BS#2281)', () => {
+  beforeAll(() => {
+    process.exitCode = 0;
+  });
+
+  it('exits non-zero when its entry point is invoked', () => {
+    expect(exitCodeSetOnImport).toBe(1);
+  });
+
+  it('points the operator at the scrub that superseded it', () => {
+    const message = supersededRefusalMessage('legacy-dj-name-remediation');
+    expect(message).toContain('jobs/flowsheet-dj-name-scrub');
+    expect(message).toContain('refuses to run');
+    // The specific misreading this message exists to head off: BS#2281 calls
+    // the earlier remediation "under-remediated", which invites a re-run.
+    expect(message).toContain('re-running this job does not fix that');
   });
 });
