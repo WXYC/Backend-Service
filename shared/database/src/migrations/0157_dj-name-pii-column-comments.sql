@@ -56,6 +56,20 @@
 --      syntax is plain SQL, unchanged since Postgres 7.2, so it's PG14-safe
 --      by construction, no release-notes check required.
 --
+--      **Qualify each object with the right schema — this repo uses two.**
+--      Hand-written DDL gets no help from drizzle-kit here, and
+--      `wxyc_schema` is the wrong guess for the auth tables: `auth_user`
+--      (and every other better-auth table) is declared with a bare
+--      `pgTable(...)` in schema.ts, so it lives in `public`, while
+--      `flowsheet`, `shows`, and the rest are `wxyc_schema.table(...)`.
+--      Drizzle's own generated SQL shows both forms side by side — see
+--      0021's `REFERENCES "public"."auth_user"("id")` against its
+--      `ALTER TABLE "wxyc_schema"."shows"`. Guessing wrong fails at apply
+--      time with `42P01 relation "..." does not exist`, which
+--      `lint:migrations` cannot catch: it validates the journal, not the
+--      DDL. Only actually applying the chain does — `npm run db:start`,
+--      or `node dev_env/init-db.mjs` against a throwaway Postgres.
+--
 --   4. If `meta/<idx>_snapshot.json` wasn't written (only possible if step
 --      2's workaround wasn't applied), duplicate the predecessor's snapshot
 --      under the new index — a no-Drizzle-diff migration's snapshot is
@@ -76,10 +90,10 @@
 --      content), then `npm run lint:migrations` must be green before
 --      committing.
 
-COMMENT ON COLUMN "wxyc_schema"."auth_user"."real_name" IS
+COMMENT ON COLUMN "public"."auth_user"."real_name" IS
   'PII: legal name, collected as a legal requirement; never on a public wire; see docs/pii.md';
 
-COMMENT ON COLUMN "wxyc_schema"."auth_user"."name" IS
+COMMENT ON COLUMN "public"."auth_user"."name" IS
   'Display handle/username — NOT the legal name; real_name is. Backfill pending (jobs/auth-user-name-backfill); see docs/pii.md';
 
 COMMENT ON COLUMN "wxyc_schema"."flowsheet"."dj_name" IS
