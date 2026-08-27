@@ -19,13 +19,15 @@ import { normalizeRole } from './auth.roles';
 /**
  * Does this membership role justify the admin flag?
  *
- * Exported and re-used as the ONE definition of that question: the
+ * Exported and re-used as the ONE definition of that question. Before BS#2282
+ * the same role set existed five times over: the grant hook here, the
  * revocation-side twin in `auth.definition.ts` (`hasOtherAdminMembership`),
- * `provision-user.ts`, and `scripts/backfill-missing-org-members.ts` each
- * carried a verbatim `['stationManager', 'admin', 'owner']` copy of this set
- * before BS#2282. Four copies of one predicate is how a grant path and a
- * revocation path come to disagree — the grant widening when `normalizeRole`
- * gained shared's alias table, while a hardcoded SQL IN-list did not.
+ * the boot reconciler's SQL IN-list in `apps/auth/app.ts`
+ * (`findUsersMissingAdminFlag`), `provision-user.ts`, and
+ * `scripts/backfill-missing-org-members.ts`. Five copies of one predicate is
+ * how a grant path and a revocation path come to disagree — the grant widening
+ * when `normalizeRole` gained shared's alias table, while a hardcoded SQL
+ * IN-list did not.
  *
  * The flag means "holds stationManager authority", which is the one question
  * `normalizeRole` exists to answer: it resolves `stationManager` to itself and
