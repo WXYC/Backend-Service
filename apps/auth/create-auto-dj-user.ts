@@ -77,8 +77,15 @@ export const createAutoDjUser = async (): Promise<void> => {
     await provisionUser({
       email,
       username: 'autodj',
-      name: 'Auto DJ', // required (notNull); internal, never surfaced publicly
-      djName: 'Auto DJ', // the public HANDLE — what appears on-air
+      // `name` is required (notNull) but is NOT the invariant carrier here —
+      // `djName` below is. deriveUserNameOnCreate (databaseHooks.user.create.before,
+      // shared/authentication/src/derive-user-display-name.ts) derives the stored
+      // `name` from `djName`, falling back to `username` only when `djName` is
+      // absent/blank/'Anonymous'. Deleting `djName` while trusting a comment that
+      // called `name` load-bearing would surface this account as its username
+      // ('autodj') instead of the intended 'Auto DJ' handle.
+      name: 'Auto DJ',
+      djName: 'Auto DJ', // the public HANDLE — what appears on-air, and what derives `name` above
       organizationSlug,
       role: 'dj',
       password,

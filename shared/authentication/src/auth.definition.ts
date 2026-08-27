@@ -631,8 +631,26 @@ export const auth = betterAuth({
 
   user: {
     additionalFields: {
-      realName: { type: 'string', required: false },
-      djName: { type: 'string', required: false },
+      // input: false (BS#2297 review finding 3): without it, better-auth's
+      // public POST /update-user let any signed-in session rewrite
+      // realName/djName directly — bypassing every enumerated write flow
+      // (provisioning, onboarding, dj-site's admin roster path) and the
+      // databaseHooks.user choke point this whole plan builds around.
+      // input:false is enforced only by the public route handlers
+      // (api/routes/update-user.mjs's parseUserInput call, and sign-up's);
+      // verified it does NOT break the two legitimate writers, both of
+      // which bypass that filtering entirely:
+      //   - dj-site's roster editing (authClient.admin.updateUser) hits the
+      //     admin plugin's adminUpdateUser route, which passes ctx.body.data
+      //     straight to internalAdapter.updateUser with no input-filtering
+      //     call anywhere in that route.
+      //   - provisioning (provision-user.ts, internalAdapter.createUser) and
+      //     onboarding (complete-onboarding.ts, internalAdapter.updateUser)
+      //     both call internalAdapter methods directly, which hand their
+      //     payload straight to createWithHooks/updateWithHooks — no
+      //     input-filtering call there either.
+      realName: { type: 'string', required: false, input: false },
+      djName: { type: 'string', required: false, input: false },
       appSkin: { type: 'string', required: true, defaultValue: 'modern-light' },
       isAnonymous: { type: 'boolean', required: false, defaultValue: false },
       hasCompletedOnboarding: { type: 'boolean', required: false, defaultValue: false },

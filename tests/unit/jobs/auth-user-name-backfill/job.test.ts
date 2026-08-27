@@ -13,25 +13,7 @@ import {
   applyUpdate,
   runBackfill,
 } from '../../../../jobs/auth-user-name-backfill/job';
-
-type SqlLike = { sql?: string | string[]; queryChunks?: Array<string | { value?: string | string[] }> };
-const renderSql = (value: unknown): string => {
-  const obj = value as SqlLike | null | undefined;
-  if (!obj) return '';
-  if (Array.isArray(obj.sql)) return obj.sql.join('');
-  if (typeof obj.sql === 'string') return obj.sql;
-  if (obj.queryChunks) {
-    return obj.queryChunks
-      .map((chunk) => {
-        if (typeof chunk === 'string') return chunk;
-        if (Array.isArray(chunk.value)) return chunk.value.join('');
-        if (typeof chunk.value === 'string') return chunk.value;
-        return '';
-      })
-      .join('');
-  }
-  return '';
-};
+import { renderSql } from '../../../utils/render-sql';
 
 const rawRow = (overrides: Partial<Record<string, unknown>> = {}) => ({
   id: 'user-1',
@@ -48,7 +30,15 @@ describe('auth-user-name-backfill: fetchAllUsers', () => {
     jest.clearAllMocks();
   });
 
-  it('issues an unfiltered SELECT against auth_user', async () => {
+  // FINDING 7 (2297 review): the un-filtered SELECT pulled every anonymous
+  // per-device row — and everyone's real_name — into memory only for
+  // decideAuthUserNameBackfill to discard the anonymous ones immediately.
+  // Anonymous rows plausibly dominate auth_user; there's no reason to pull
+  // legal names into process memory for rows the job throws away unread.
+  // The WHERE clause is behavior-identical: decideAuthUserNameBackfill (and
+  // the precondition gate) already skip is_anonymous rows unconditionally,
+  // so excluding them earlier changes nothing about which rows get written.
+  it('issues a SELECT against auth_user filtered to non-anonymous rows, with no LIMIT', async () => {
     (db.execute as jest.Mock).mockResolvedValueOnce([]);
 
     await fetchAllUsers();
@@ -56,7 +46,7 @@ describe('auth-user-name-backfill: fetchAllUsers', () => {
     const call = (db.execute as jest.Mock).mock.calls[0];
     const sqlText = renderSql(call?.[0]);
     expect(sqlText).toMatch(/SELECT[\s\S]*FROM[\s\S]*auth_user/i);
-    expect(sqlText).not.toMatch(/WHERE/i);
+    expect(sqlText).toMatch(/WHERE[\s\S]*is_anonymous[\s\S]*DISTINCT FROM[\s\S]*true/i);
     expect(sqlText).not.toMatch(/LIMIT/i);
   });
 

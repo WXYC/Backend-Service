@@ -24,12 +24,13 @@
  * database; the gate makes run order irrelevant instead of trusting an
  * operator to sequence 2a before 2d correctly.
  *
- * The whole table is read in a single SELECT and the decision is computed
- * IN-PROCESS via the canonical `resolveDjDisplayName` helper, then written
- * back only for rows that differ. `auth_user` is a single small table
- * (~139 candidate rows out of the whole roster) — the batching / id-cursor
- * machinery `flowsheet-dj-name-backfill` needs for a many-million-row table
- * would be unneeded complexity here.
+ * The non-anonymous rows are read in a single SELECT (see `fetchAllUsers`'s
+ * docblock for why anonymous rows are filtered out at the query) and the
+ * decision is computed IN-PROCESS via the canonical `resolveDjDisplayName`
+ * helper, then written back only for rows that differ. `auth_user`'s
+ * non-anonymous slice is small (~139 candidate rows out of the whole
+ * roster) — the batching / id-cursor machinery `flowsheet-dj-name-backfill`
+ * needs for a many-million-row table would be unneeded complexity here.
  */
 
 import { sql } from 'drizzle-orm';
@@ -62,11 +63,23 @@ type RawUserRow = {
   is_anonymous: boolean | null;
 };
 
-/** The one read this job performs. No WHERE, no LIMIT — see the module doc for why that's fine here. */
+/**
+ * The one read this job performs. No LIMIT — see the module doc for why
+ * that's fine here (a single small table, ~139 candidate rows).
+ *
+ * WHERE excludes anonymous per-device rows (FINDING 7, BS#2297 review).
+ * `decideAuthUserNameBackfill` and `runPreconditionGate` already skip
+ * `is_anonymous` rows unconditionally, so this is behavior-identical — it
+ * just stops pulling them (and everyone's `real_name`) into process memory
+ * to be immediately discarded. Anonymous rows plausibly dominate
+ * `auth_user`; there's no reason to load legal names for rows this job
+ * never writes to.
+ */
 export const fetchAllUsers = async (): Promise<AuthUserBackfillRow[]> => {
   const rows = (await db.execute(sql`
     SELECT "id", "name", "username", "dj_name", "real_name", "is_anonymous"
     FROM "auth_user"
+    WHERE "is_anonymous" IS DISTINCT FROM true
   `)) as unknown as RawUserRow[];
   return rows.map((r) => ({
     id: r.id,
@@ -91,9 +104,10 @@ export const runPreconditionGate = (rows: AuthUserBackfillRow[]): void => {
   const sampleIds = violations.slice(0, 10).map((r) => r.id);
   throw new Error(
     `[${JOB_NAME}] Refusing to run: ${violations.length} row(s) hold their ONLY copy of a legal name in ` +
-      `auth_user.name (real_name is blank, name is not 'Anonymous'/'Auto DJ'/username). This means Track 2a of ` +
-      'the DJ real-name PII safeguards plan (the reviewed manual SQL that copies name -> real_name) has not run ' +
-      `against this database. Run 2a first, then re-run this job. Sample id(s): ${sampleIds.join(', ')}` +
+      `auth_user.name (real_name is blank, name is not 'Anonymous'/'Auto DJ'/username, and name is not the ` +
+      `on-air handle). This means Track 2a of the DJ real-name PII safeguards plan (the reviewed manual SQL ` +
+      'that copies name -> real_name) has not run against this database. Run 2a first, then re-run this job. ' +
+      `Sample id(s): ${sampleIds.join(', ')}` +
       (violations.length > sampleIds.length ? ', ...' : '')
   );
 };
