@@ -84,8 +84,16 @@ const hasOtherAdminMembership = async (userId: string, defaultOrgSlug: string): 
   // the shared alias table (BS#2282). Consequently there is NO `.limit(1)`:
   // with the role filter out of SQL, a limit would return one arbitrary
   // membership, and a user holding both a `dj` and a `stationManager` row
-  // would wrongly lose the flag on removal. Row counts here are per-user and
-  // tiny (organizationLimit: 1).
+  // would wrongly lose the flag on removal.
+  //
+  // The query is therefore unbounded, and nothing in the configuration bounds
+  // it either — `organizationLimit` is NOT that bound, whatever its name
+  // suggests: better-auth checks it only in `createOrganization`, so it caps
+  // organizations a user creates, not memberships a user holds. What actually
+  // keeps this small is the shape of the data — it is one user's rows in ONE
+  // organization (`organization.slug = defaultOrgSlug`), and a user has no
+  // reason to hold more than a handful of memberships there. Correctness
+  // needs all of them, so a `LIMIT` would be wrong at any size.
   const rows = await db
     .select({ role: member.role })
     .from(member)
