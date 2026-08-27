@@ -50,6 +50,21 @@ const stationStatement = {
   // below server-side. dj-site gates its operator UI on
   // `roleToAuthorization(...) >= MD`.
   flowsheet: ['read', 'write', 'manage'],
+  // `reviews: read` is the signed-in-station tier over the DJ form-review
+  // archive (`album_review_submissions`, ADR 0011). It backs `GET
+  // /album-reviews`, which serves the WHOLE archive with no `social_consent`
+  // filter, because the consent question asked only about social media
+  // (blog/Instagram) and internal station tools were never in its scope. The
+  // public per-album attach on `GET /proxy/metadata/album` keeps its hard
+  // `social_consent = true` gate; that endpoint is anonymous-reachable and
+  // this one is not, which is the whole of the difference.
+  //
+  // Its own key rather than a reuse of `catalog: ['read']`, which every role
+  // including `member` holds, or `flowsheet: ['write']`, which happens to
+  // select the right roles today — the same reasoning `flowsheet: manage`
+  // records above: a future re-grant of a borrowed key would silently move who
+  // can read non-consented review bodies.
+  reviews: ['read'],
 } as const;
 
 /**
@@ -204,21 +219,30 @@ const WXYC_GRANTS = {
     bin: ['read', 'write'],
     catalog: ['read'],
     flowsheet: ['read'],
+    // Explicit denial, not an oversight. `member` is the pre-DJ tier, and the
+    // review archive holds bodies whose authors declined external publication
+    // (plus 999 more written before the question was ever asked), so it opens
+    // at `dj`. `stripEmpty` drops the key before better-auth sees it, so this
+    // stays byte-identical to omitting it.
+    reviews: [],
   },
   dj: {
     bin: ['read', 'write'],
     catalog: ['read'],
     flowsheet: ['read', 'write'],
+    reviews: ['read'],
   },
   musicDirector: {
     bin: ['read', 'write'],
     catalog: ['read', 'write'],
     flowsheet: ['read', 'write', 'manage'],
+    reviews: ['read'],
   },
   stationManager: {
     bin: ['read', 'write'],
     catalog: ['read', 'write'],
     flowsheet: ['read', 'write', 'manage'],
+    reviews: ['read'],
   },
 } as const satisfies Record<WXYCRole, StationGrants>;
 
