@@ -45,6 +45,7 @@ import { buildResetUrl, rewriteUrlForFrontend } from './url-rewrite';
 import { accountSetupTokenExpiresInSeconds } from './account-setup-token';
 import { buildJwtPayload, buildOidcUserInfoClaim, type MemberRoleRow } from './jwt-payload';
 import {
+  grantsAdminFlag,
   syncAdminFlagOnAddMember,
   syncAdminFlagOnRemoveMember,
   syncAdminFlagOnUpdateMemberRole,
@@ -68,17 +69,23 @@ const selectMemberRole = async (userId: string): Promise<MemberRoleRow> => {
  * role through a second row does not lose it.
  */
 const hasOtherAdminMembership = async (userId: string, defaultOrgSlug: string): Promise<boolean> => {
+  // The role predicate is applied in TS via `grantsAdminFlag`, not as a SQL
+  // IN-list, so grant and revocation accept exactly the same strings — a
+  // hardcoded list here would stay narrow while the grant path widened with
+  // the shared alias table (BS#2282). Consequently there is NO `.limit(1)`:
+  // with the role filter out of SQL, a limit would return one arbitrary
+  // membership, and a user holding both a `dj` and a `stationManager` row
+  // would wrongly lose the flag on removal. Row counts here are per-user and
+  // tiny (organizationLimit: 1).
   const rows = await db
     .select({ role: member.role })
     .from(member)
     .innerJoin(organization, sql`${member.organizationId} = ${organization.id}`)
     .where(
       sql`${member.userId} = ${userId}
-                AND ${organization.slug} = ${defaultOrgSlug}
-                AND ${member.role} IN ('admin', 'owner', 'stationManager')`
-    )
-    .limit(1);
-  return rows.length > 0;
+                AND ${organization.slug} = ${defaultOrgSlug}`
+    );
+  return rows.some((row) => typeof row.role === 'string' && grantsAdminFlag(row.role));
 };
 
 /**

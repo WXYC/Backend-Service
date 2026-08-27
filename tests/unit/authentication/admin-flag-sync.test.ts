@@ -11,6 +11,7 @@
 import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 
 import {
+  grantsAdminFlag,
   syncAdminFlagOnAddMember,
   syncAdminFlagOnRemoveMember,
   syncAdminFlagOnUpdateMemberRole,
@@ -174,5 +175,71 @@ describe('admin flag sync', () => {
       expect(onError).toHaveBeenCalledWith(boom);
       expect(setUserRole).not.toHaveBeenCalled();
     });
+  });
+});
+
+/**
+ * `grantsAdminFlag` is now the ONE definition of "this membership role carries
+ * the global admin flag" — consumed by the grant path (the hooks above), the
+ * revocation path (`hasOtherAdminMembership` in auth.definition.ts), the
+ * provisioning path, and the backfill script, each of which previously held a
+ * verbatim `['stationManager', 'admin', 'owner']` copy (BS#2282).
+ *
+ * The hazard this closes: `normalizeRole` widened when it took over shared's
+ * alias table, so the grant path began accepting `station_manager` while a
+ * hardcoded SQL IN-list on the revocation side did not. A user granted the
+ * flag by a string the revocation path can't see would keep it forever.
+ */
+describe('grantsAdminFlag as the single admin-flag predicate', () => {
+  it.each(['stationManager', 'admin', 'owner'])('%s grants the flag', (role) => {
+    expect(grantsAdminFlag(role)).toBe(true);
+  });
+
+  it.each(['member', 'dj', 'musicDirector'])('%s does not grant the flag', (role) => {
+    expect(grantsAdminFlag(role)).toBe(false);
+  });
+
+  it.each(['station_manager', 'STATIONMANAGER', ' admin '])(
+    'accepts the alias variant %j (widened with the shared alias table)',
+    (role) => {
+      expect(grantsAdminFlag(role)).toBe(true);
+    }
+  );
+
+  it.each(['user', 'station-manager', 'unknown', 'toString', 'constructor', '__proto__'])(
+    'fails closed on %j',
+    (role) => {
+      expect(grantsAdminFlag(role)).toBe(false);
+    }
+  );
+
+  /**
+   * The revocation path's shape, replicated: it selects every membership row
+   * for the user in the default org and filters in TS. There is deliberately
+   * no `.limit(1)` there — with the role predicate out of SQL, a limit would
+   * return one arbitrary row, and this multi-membership case is exactly what
+   * would break.
+   */
+  const revocationFilter = (rows: { role: string }[]) => rows.some((r) => grantsAdminFlag(r.role));
+
+  it('sees a stationManager membership held alongside a dj membership', () => {
+    expect(revocationFilter([{ role: 'dj' }, { role: 'stationManager' }])).toBe(true);
+  });
+
+  it('agrees with the grant path on every string, including the widened aliases', () => {
+    for (const role of [
+      'stationManager',
+      'admin',
+      'owner',
+      'station_manager',
+      'STATIONMANAGER',
+      'dj',
+      'member',
+      'musicDirector',
+      'user',
+      'toString',
+    ]) {
+      expect(revocationFilter([{ role }])).toBe(grantsAdminFlag(role));
+    }
   });
 });

@@ -28,30 +28,107 @@ export type AccessControlStatement = typeof statement;
 
 const accessControl = createAccessControl(statement);
 
-export const member = accessControl.newRole({
-  bin: ['read', 'write'],
-  catalog: ['read'],
-  flowsheet: ['read'],
-});
+import { canonicalizeRole, type WXYCRole } from '@wxyc/shared/auth-client/auth';
+export type { WXYCRole } from '@wxyc/shared/auth-client/auth';
+export { roleToAuthorization, Authorization } from '@wxyc/shared/auth-client/auth';
 
-export const dj = accessControl.newRole({
-  bin: ['read', 'write'],
-  catalog: ['read'],
-  flowsheet: ['read', 'write'],
-});
+/** The station-domain half of the statement: everything better-auth doesn't own. */
+type StationKey = Exclude<keyof AccessControlStatement, keyof typeof defaultStatements>;
 
-export const musicDirector = accessControl.newRole({
-  bin: ['read', 'write'],
-  catalog: ['read', 'write'],
-  flowsheet: ['read', 'write', 'manage'],
-});
+/**
+ * The grant matrix — the single source of truth for what each role may do,
+ * as plain data rather than four hand-built `newRole` calls.
+ *
+ * Two properties this shape buys, both of which the old spread-based
+ * construction lacked:
+ *
+ * 1. **Totality by type.** Every role must decide every station-domain key;
+ *    an empty array is an explicit denial. Adding a key to `statement` above
+ *    without deciding it for all four roles is a compile error, not a
+ *    discovered-in-production 403.
+ * 2. **Monotonicity by test.** `tests/unit/authentication/auth.roles.test.ts`
+ *    asserts each role's grants are a superset of the role below it along
+ *    `@wxyc/shared`'s `ROLES` chain. The chain is an invariant on this data,
+ *    NOT a runtime fallback — `requirePermissions` remains a pure per-role
+ *    check, which is what keeps `flowsheet: ['manage']` meaningful (see its
+ *    rationale above).
+ *
+ * Keyed on shared's `WXYCRole` rather than a local `ImplementedRole`: the
+ * latter now derives FROM this object, so keying on it would be circular and
+ * TypeScript would silently degrade the whole matrix to `any`, taking the
+ * totality guarantee with it. Shared owns role identity; this file owns grants.
+ */
+const WXYC_GRANTS = {
+  member: {
+    bin: ['read', 'write'],
+    catalog: ['read'],
+    flowsheet: ['read'],
+  },
+  dj: {
+    bin: ['read', 'write'],
+    catalog: ['read'],
+    flowsheet: ['read', 'write'],
+  },
+  musicDirector: {
+    bin: ['read', 'write'],
+    catalog: ['read', 'write'],
+    flowsheet: ['read', 'write', 'manage'],
+  },
+  stationManager: {
+    bin: ['read', 'write'],
+    catalog: ['read', 'write'],
+    flowsheet: ['read', 'write', 'manage'],
+  },
+} as const satisfies Record<WXYCRole, Record<StationKey, readonly string[]>>;
 
-export const stationManager = accessControl.newRole({
-  ...adminAc.statements,
-  bin: ['read', 'write'],
-  catalog: ['read', 'write'],
-  flowsheet: ['read', 'write', 'manage'],
-});
+/**
+ * better-auth's own org-administration grants, held by stationManager alone.
+ *
+ * This was `...adminAc.statements` spread into the stationManager role, which
+ * read as "stationManager gets everything" and is nothing of the sort: it is a
+ * fixed library-owned key set (organization/member/invitation/team/ac) that
+ * confers NO custom key. A key added to `statement` and granted to dj but
+ * trusted to arrive here via the spread produced the exact inversion this
+ * file's tests now forbid — a plain DJ authorized while the station manager
+ * 403s. Writing the set out removes the illusion; the pin test
+ * (`ORG_ADMIN_GRANTS equals adminAc.statements`) keeps it honest, and
+ * `scripts/check-better-auth-mock-sync.ts` catches a library upgrade that
+ * changes what "honest" means.
+ */
+const ORG_ADMIN_GRANTS = {
+  organization: ['update'],
+  invitation: ['create', 'cancel'],
+  member: ['create', 'update', 'delete'],
+  team: ['create', 'update', 'delete'],
+  ac: ['create', 'read', 'update', 'delete'],
+} as const satisfies Partial<Record<keyof typeof defaultStatements, readonly string[]>>;
+
+export { WXYC_GRANTS, ORG_ADMIN_GRANTS };
+
+/**
+ * Drops explicitly-denied (`[]`) keys before handing grants to better-auth.
+ *
+ * better-auth treats an absent key and an empty one identically for
+ * `authorize().success`, but NOT for `role.statements` or the error string it
+ * produces (`unknownResourceResponse` vs `unauthorizedResourceResponse`), and
+ * the organization plugin surfaces those strings through its own
+ * `hasPermission`. Stripping keeps every constructed role byte-identical to
+ * the pre-matrix construction. No `[]` cells exist today; this is what makes a
+ * future explicit denial free of side effects.
+ */
+const stripEmpty = (grants: Record<string, readonly string[]>): Record<string, readonly string[]> =>
+  Object.fromEntries(Object.entries(grants).filter(([, actions]) => actions.length > 0));
+
+const buildRole = (role: WXYCRole) =>
+  accessControl.newRole({
+    ...stripEmpty(WXYC_GRANTS[role]),
+    ...(role === 'stationManager' ? ORG_ADMIN_GRANTS : {}),
+  } as Parameters<typeof accessControl.newRole>[0]);
+
+export const member = buildRole('member');
+export const dj = buildRole('dj');
+export const musicDirector = buildRole('musicDirector');
+export const stationManager = buildRole('stationManager');
 
 export const WXYCRoles = {
   member,
@@ -60,29 +137,29 @@ export const WXYCRoles = {
   stationManager,
 };
 
-import type { WXYCRole } from '@wxyc/shared/auth-client/auth';
-export type { WXYCRole } from '@wxyc/shared/auth-client/auth';
-export { roleToAuthorization, Authorization } from '@wxyc/shared/auth-client/auth';
-
-// Compile-time assertion: every role in WXYCRoles is a valid shared WXYCRole.
-// The reverse is intentionally not asserted -- shared includes "admin", which
-// Backend-Service maps to "stationManager" via normalizeRole() rather than
-// defining as a separate better-auth role.
-type _AssertLocalRolesAreShared = [keyof typeof WXYCRoles] extends [WXYCRole] ? true : never;
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const _localRolesValid: _AssertLocalRolesAreShared = true;
-
 /** The set of roles that have a better-auth access control implementation. */
-export type ImplementedRole = keyof typeof WXYCRoles;
+export type ImplementedRole = keyof typeof WXYC_GRANTS;
 
-/** Maps better-auth system roles to their WXYC equivalent. */
-const systemRoleMap: Record<string, ImplementedRole> = {
-  admin: 'stationManager',
-  owner: 'stationManager',
-};
-
-/** Normalizes a role string to an implemented role, mapping better-auth system roles. */
+/**
+ * Normalizes a role string to an implemented role.
+ *
+ * Delegates to `@wxyc/shared`'s `canonicalizeRole` — the org's single alias
+ * table — rather than keeping a fourth local copy. Two deliberate deltas from
+ * the `systemRoleMap` + `role in WXYCRoles` version this replaces:
+ *
+ * - **Wider:** case variants and `station_manager`/`music_director`/
+ *   `music-director` now resolve. This reaches `grantsAdminFlag` in
+ *   admin-flag-sync.ts, i.e. the global `auth_user.role='admin'` grant — but no
+ *   write path can store such a value (`provisionUser` validates against
+ *   `WXYCRoles`' own keys, better-auth's org role update against its
+ *   configured roles), so it is unreachable in stored data. Pinned either way
+ *   in tests/unit/authentication/shared-type-compatibility.test.ts.
+ * - **Narrower:** `role in WXYCRoles` walked the prototype chain, so
+ *   `normalizeRole('toString')` returned a truthy non-role and
+ *   `requirePermissions` then crashed calling `.authorize` on
+ *   `Object.prototype.toString` — a 500 where every other invalid role gets a
+ *   403. Prototype keys now fail closed like anything else.
+ */
 export function normalizeRole(role: string): ImplementedRole | undefined {
-  if (role in WXYCRoles) return role as ImplementedRole;
-  return systemRoleMap[role];
+  return canonicalizeRole(role);
 }

@@ -153,7 +153,9 @@ npm run drizzle:drop       # Delete a migration file
 
 ### Authentication (`shared/authentication`)
 
-better-auth wrapper providing JWT verification + role-based access control. Roles (hierarchical): member < dj < musicDirector < stationManager.
+better-auth wrapper providing JWT verification + role-based access control. Roles form a chain (member < dj < musicDirector < stationManager), but **the chain is a CI-enforced invariant on the grant data, not a runtime fallback** — `requirePermissions` checks each role's own flat grant set. `@wxyc/shared` owns role identity and order (`ROLES`, `ROLE_ALIASES`, `canonicalizeRole`); this repo owns the **only** grant matrix, in `auth.roles.ts` as two blocks: `WXYC_GRANTS` (station domain, **typed-total** — a new statement key must be decided for all four roles or it won't compile) and `ORG_ADMIN_GRANTS` (better-auth's org-administration keys, stationManager only, written out explicitly rather than spread). `grantsAdminFlag` (`admin-flag-sync.ts`) is the single admin-flag predicate for both the grant and revocation paths.
+
+Because the unit suite runs against hand-written better-auth mocks (`jest.unit.config.ts` maps the real ESM modules), the role pins there cannot see a library upgrade — `npm run check:better-auth-mock-sync` is what does, and it is hard-fail in pre-push and CI.
 
 See **[`docs/authentication.md`](docs/authentication.md)** for the permissions matrix, JWT payload shape, `requirePermissions` middleware flow, `AUTH_BYPASS` test hook, and the better-auth role-mismatch gotcha.
 

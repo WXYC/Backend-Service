@@ -1,5 +1,10 @@
 import { WXYCRoles, normalizeRole, type WXYCRole } from '../../../shared/authentication/src/auth.roles';
-import { Authorization, roleToAuthorization, type WXYCRole as SharedWXYCRole } from '@wxyc/shared/auth-client/auth';
+import {
+  Authorization,
+  ROLE_ALIASES,
+  roleToAuthorization,
+  type WXYCRole as SharedWXYCRole,
+} from '@wxyc/shared/auth-client/auth';
 
 describe('shared type compatibility', () => {
   describe('WXYCRoles alignment', () => {
@@ -42,5 +47,65 @@ describe('shared type compatibility', () => {
         }
       }
     );
+  });
+
+  /**
+   * `normalizeRole` delegates to `@wxyc/shared`'s alias table, which means the
+   * table now lives behind a caret-ranged dependency: a shared 5.x that adds an
+   * alias would reach Backend-Service as a lockfile-only bump, with no diff a
+   * BS reviewer sees next to `grantsAdminFlag` — and that predicate decides the
+   * global `auth_user.role='admin'` grant. Spot checks cannot catch a NEW
+   * alias, so the guard is exhaustive: pin the whole table, and pin the
+   * case-fold/trim that runs in front of it.
+   *
+   * A red test here after a dependency bump is the intended signal, not a
+   * breakage: re-read the widening, decide whether it's wanted on the admin
+   * path, then update this pin deliberately.
+   */
+  describe('role alias table (exhaustive pin against @wxyc/shared)', () => {
+    it('is exactly the accepted-input map Backend-Service expects', () => {
+      expect(ROLE_ALIASES).toEqual({
+        admin: 'stationManager',
+        owner: 'stationManager',
+        stationmanager: 'stationManager',
+        station_manager: 'stationManager',
+        musicdirector: 'musicDirector',
+        music_director: 'musicDirector',
+        'music-director': 'musicDirector',
+        dj: 'dj',
+        member: 'member',
+      });
+    });
+
+    // The fold in front of the lookup, pinned through BS's own consumer.
+    const foldAccepted: [string, WXYCRole][] = [
+      ['STATION_MANAGER', 'stationManager'],
+      [' admin ', 'stationManager'],
+      ['Owner', 'stationManager'],
+      ['MusicDirector', 'musicDirector'],
+      ['DJ', 'dj'],
+    ];
+
+    it.each(foldAccepted)('normalizeRole(%j) === %j (case-fold + trim)', (input, expected) => {
+      expect(normalizeRole(input)).toBe(expected);
+    });
+
+    const foldRejected = [
+      'user', // better-auth's global default role is not a station role
+      'station-manager', // historical asymmetry: music-director resolves, this does not
+      'station manager',
+      'unknown',
+      'administrator',
+      // Prototype keys: `role in WXYCRoles` used to resolve these, and
+      // requirePermissions then crashed calling .authorize on
+      // Object.prototype.toString (a 500). Fail-closed is the contract.
+      'toString',
+      'constructor',
+      '__proto__',
+    ];
+
+    it.each(foldRejected)('normalizeRole(%j) is undefined (fails closed)', (input) => {
+      expect(normalizeRole(input)).toBeUndefined();
+    });
   });
 });

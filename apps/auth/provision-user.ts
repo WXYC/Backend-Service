@@ -9,6 +9,7 @@ import {
   auth,
   createAndSendAccountSetupInvite,
   formatUsernameError,
+  grantsAdminFlag,
   validateUsername,
   WXYCRoles,
 } from '@wxyc/authentication';
@@ -53,8 +54,6 @@ export interface ProvisionUserResult {
   emailError?: string;
 }
 
-const ADMIN_SYNC_ROLES = ['stationManager', 'admin', 'owner'];
-
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /**
@@ -71,7 +70,11 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
   const password = input.password ?? generateProvisionBootstrapPassword();
 
   // 1. Validate role
-  if (!(role in WXYCRoles)) {
+  // `Object.hasOwn`, not `role in WXYCRoles`: `in` walks the prototype chain,
+  // so `role: 'toString'` passed this check and wrote an unusable member row.
+  // Same fix as normalizeRole's (BS#2282); device-authorization.ts already
+  // had it right.
+  if (!Object.hasOwn(WXYCRoles, role)) {
     throw new ProvisionError(400, `Invalid role: "${role}". Must be one of: ${Object.keys(WXYCRoles).join(', ')}`);
   }
 
@@ -173,7 +176,7 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
     }
 
     // 9. Sync admin role for stationManager (replicates afterAddMember hook)
-    if (ADMIN_SYNC_ROLES.includes(role)) {
+    if (grantsAdminFlag(role)) {
       await db.update(user).set({ role: 'admin' }).where(eq(user.id, newUser.id));
     }
 

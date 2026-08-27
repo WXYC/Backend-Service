@@ -82,6 +82,13 @@ jest.mock('@wxyc/authentication', () => {
       $context: Promise.resolve(mockAuthContext),
     },
     createAndSendAccountSetupInvite: (...args: unknown[]) => mockCreateInvite(...args),
+    // This factory enumerates the module's exports, so a new import in
+    // provision-user.ts resolves to `undefined` unless it is added here.
+    // `grantsAdminFlag` replaced the local ADMIN_SYNC_ROLES copy (BS#2282);
+    // the real predicate is used so the mock can't drift from the policy.
+    grantsAdminFlag: (role: string) =>
+      ['stationManager', 'admin', 'owner'].includes(role.toLowerCase().trim()) ||
+      ['stationmanager', 'station_manager'].includes(role.toLowerCase().trim()),
     WXYCRoles: {
       member: {},
       dj: {},
