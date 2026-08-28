@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node dist/job.js",
     "build": "tsup --minify",
+    "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
     "docker:build": "docker build -t wxyc_streaming_columns_drain:ci -f ../../Dockerfile.streaming-columns-drain ../../",
     "dev": "tsup --watch"

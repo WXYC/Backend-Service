@@ -73,6 +73,39 @@ describe('buildStreamingFill', () => {
     expect(fill.soundcloud_url).toBe('https://soundcloud.com/search?q=Stereolab');
     expect(fill.spotify_url).toBeNull();
     expect(fill.apple_music_url).toBeNull();
+    // no_match asserts NO streaming verdict, exactly like enrich.ts's linked
+    // no-match arm — so the status columns are left for someone who knows.
+    expect(fill.spotify_status).toBeNull();
+    expect(fill.apple_music_status).toBeNull();
+  });
+
+  it('marks a matched-but-empty service unresolved so the BS#1915 sweep can adjudicate it', () => {
+    // Leaving these NULL would freeze the row a second, subtler way: schema.ts
+    // is explicit that a NULL status means "never consulted" and is NOT
+    // re-ask-eligible. 'unresolved' is bounded by the attempt cap; 'absent'
+    // would be a terminal verdict this job has no standing to assert.
+    const fill = buildStreamingFill(
+      lookupWith({
+        artwork_url: 'https://i.discogs.com/x/cover.jpg',
+        release_url: 'https://www.discogs.com/release/1',
+      }),
+      FALLBACKS
+    );
+    expect(fill.spotify_status).toBe('unresolved');
+    expect(fill.apple_music_status).toBe('unresolved');
+  });
+
+  it('leaves the status null for a service whose URL was actually written', () => {
+    const fill = buildStreamingFill(
+      lookupWith({
+        artwork_url: 'https://i.discogs.com/x/cover.jpg',
+        release_url: 'https://www.discogs.com/release/1',
+        spotify_url: 'https://open.spotify.com/album/real',
+      }),
+      FALLBACKS
+    );
+    expect(fill.spotify_status).toBeNull();
+    expect(fill.apple_music_status).toBe('unresolved');
   });
 
   it('never synthesizes a spotify or apple search URL even when LML matched but returned neither', () => {

@@ -84,6 +84,10 @@ describe('lml-client policy', () => {
         'artwork-provenance-remediation': 5,
         'library-artwork-url-backfill': 5,
         'library-canonical-entity-backfill': 5,
+        // BS#2295: the streaming-columns drain. Its own label rather than
+        // its `album-level-backfill` donor's, so drain traffic is
+        // attributable on the `lml.caller` span and LML's per-caller metrics.
+        'streaming-columns-drain': 5,
       };
       for (const [caller, expectedClass] of Object.entries(expected) as [LmlCaller, LmlCallerClass][]) {
         expect(resolveLmlPolicy(caller).class).toBe(expectedClass);

@@ -28,32 +28,67 @@
  *
  * ## What it writes, and what it deliberately does not
  *
- * ONLY the five streaming URL columns, and only where they are NULL. The
- * identity columns (`artwork_url`, `discogs_url`, `release_year`, the bio
- * fields) are never touched. That is not timidity — it is the load-bearing
- * safety property of this job. LML resolves by SEARCH, so a lookup for
- * "Funkadelic / Hardcore Jollies" can legitimately land on a DIFFERENT
- * catalog release, and writing that release's artwork over ours would put one
- * album's identity on another (the failure mode `reference_bs_prod_db_...`
- * documents, where a 102-album run caught exactly one such mis-resolution).
- * By writing only streaming URLs we keep the blast radius to a wrong link
- * rather than a wrong album, and the three synthesized URLs below are derived
- * from OUR OWN `library` text, so they cannot be mis-resolved at all.
+ * ONLY the five streaming URL columns plus two status columns, and only where
+ * they are NULL. The identity columns (`artwork_url`, `discogs_url`,
+ * `release_year`, the bio fields) are never touched. That is not timidity —
+ * it is the load-bearing safety property of this job. LML resolves by SEARCH,
+ * so a lookup for "Funkadelic / Hardcore Jollies" can legitimately land on a
+ * DIFFERENT catalog release, and writing that release's artwork over ours
+ * would put one album's identity on another (the failure mode
+ * `reference_bs_prod_db_...` documents, where a 102-album run caught exactly
+ * one such mis-resolution). By writing only streaming columns we keep the
+ * blast radius to a wrong link rather than a wrong album, and the three
+ * synthesized URLs below are derived from OUR OWN `library` text, so they
+ * cannot be mis-resolved at all.
  *
- * Per-column policy, matching `enrich.ts`'s write arms exactly:
+ * Per-column policy, matching `enrich.ts`'s write arms:
  *
- *   - `youtube_music_url` / `bandcamp_url` / `soundcloud_url` — ALWAYS
- *     written: LML's verified URL when present, else the synthesized search
- *     URL from `@wxyc/metadata#synthesizeSearchUrls`. This is what guarantees
- *     every drained row leaves the cohort, including on a `no_match`.
+ *   - `youtube_music_url` / `bandcamp_url` / `soundcloud_url` — written on
+ *     any DEFINITIVE verdict: LML's verified URL when present, else the
+ *     synthesized search URL from `@wxyc/metadata#synthesizeSearchUrls`. This
+ *     is what guarantees a drained row leaves the cohort, including on a
+ *     `no_match`.
  *   - `spotify_url` / `apple_music_url` — written ONLY when LML returns a
  *     real one. There is deliberately no synthesized fallback for these two
  *     (BS#1184 / BS#1192): persisting a keyword-search URL would launder
  *     "we could not verify a match" into a clickable button. They are filled
  *     at READ time by the proxy controller instead.
+ *   - `spotify_status` / `apple_music_status` — set to `'unresolved'` on a
+ *     MATCH whose URL came back empty, so the row is handed to BS#1915's
+ *     bounded hourly `streaming-reask.ts` sweep for precise adjudication
+ *     rather than being left NULL. A NULL status means "never consulted" and
+ *     is explicitly NOT re-ask-eligible (`schema.ts`), so leaving it NULL
+ *     would freeze the row a second, subtler way. `'unresolved'` is chosen
+ *     over the more confident `'absent'` because this job cannot distinguish
+ *     "LML looked and the service has nothing" from "LML never got that far",
+ *     and `'absent'` is terminal — the attempt cap bounds the cost of being
+ *     wrong in the safe direction. Mirrors `va-apple-music-url-remediation`.
+ *     On a `no_match` the status columns are left alone, exactly as
+ *     `enrich.ts`'s linked no-match arm does ("this arm asserts no verdict").
  *
- * Known consequence, and it is pre-existing rather than introduced here: the
- * V2 flowsheet feed is a plain `coalesce(album_metadata.X, flowsheet.X)`
+ * ## Indeterminate verdicts are NOT written
+ *
+ * A shed (`shed_limiter_saturated` / `shed_breaker_open`), a per-item error,
+ * an out-of-order result, or a thrown bulk call writes NOTHING. The row stays
+ * in the cohort and the next run retries it.
+ *
+ * This is the design point most worth not getting wrong, and an earlier draft
+ * of this job got it exactly backwards: it wrote a synthesized-only fill on
+ * every non-match, reasoning that "skipping here means frozen forever". That
+ * reasoning is false — THIS JOB is the re-runner, and the cohort predicate is
+ * its resume mechanism. Writing on a shed would take the row out of the
+ * cohort permanently, satisfy `precheck.ts`'s new `hasAnyStreamingUrl`
+ * conjunct so the next play skips LML again, and leave `streaming-reask.ts`
+ * still unable to see it (all statuses NULL). One LML restart mid-drain would
+ * have permanently nulled Spotify and Apple on every remaining album.
+ * `@wxyc/lml-client`'s own `buildShedBulkResultItem` docstring states the rule
+ * directly: "never a terminal write, always re-attempted next run. Do NOT
+ * assume any bulk caller 'never sheds' — branch on `status`, not on `lookup`
+ * nullity."
+ *
+ * ## Known consequence (pre-existing, not introduced here)
+ *
+ * The V2 flowsheet feed is a plain `coalesce(album_metadata.X, flowsheet.X)`
  * (`apps/backend/utils/album-metadata-projection.ts`) and does NOT synthesize
  * spotify/apple at read time the way `/proxy/metadata/album` does. So a
  * drained album for which LML has no verified Spotify or Apple link still
@@ -65,13 +100,17 @@
  *
  * Dry-run is the DEFAULT; writes require `--execute` (the newer sibling
  * convention from `streaming-url-upgrade` / `streaming-url-remediation`, not
- * `album-level-backfill`'s older `--dry-run` opt-in). The cohort predicate is
- * defined ONCE in `cohortPredicateSql` and reused verbatim by the
- * before-count, the enumeration, the per-row UPDATE's WHERE, and the
- * after-count, so those four can never drift. Re-asserting it inside the
- * UPDATE is the TOCTOU guard: if the live worker filled a streaming column
- * between enumeration and write, the UPDATE matches zero rows and the row is
- * counted `skipped_raced` rather than overwritten.
+ * `album-level-backfill`'s older `--dry-run` opt-in). A dry run makes ZERO
+ * LML calls — it reports the counts and the batch plan and stops before the
+ * batch loop, so an operator sizing the job cannot accidentally spend the
+ * whole Discogs quota.
+ *
+ * The cohort predicate is defined ONCE in `cohortPredicateSql` and reused
+ * verbatim by the before-count, the enumeration, the per-row UPDATE's WHERE,
+ * and the after-count, so those four can never drift. Re-asserting it inside
+ * the UPDATE is the TOCTOU guard: if the live worker filled a streaming
+ * column between enumeration and write, the UPDATE matches zero rows and the
+ * row is counted `skipped_raced` rather than overwritten.
  *
  * @see WXYC/Backend-Service#2295
  * @see WXYC/Backend-Service#1747 (the pre-check this cohort was frozen by)
@@ -79,7 +118,16 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { closeDatabaseConnection, db, requireNonNegativeInt, requirePositiveInt } from '@wxyc/database';
+import {
+  buildWaitForQuietPeriod,
+  closeDatabaseConnection,
+  db,
+  requireNonNegativeInt,
+  requirePositiveInt,
+  resolveLiveActivityMaxPauseMs,
+  resolveLiveActivityPauseMs,
+  LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
+} from '@wxyc/database';
 import { bulkLookupMetadata, type BulkLookupItem, type LookupResponse } from '@wxyc/lml-client';
 import { normalizeLookup, synthesizeSearchUrls, type MetadataFallbacks } from '@wxyc/metadata';
 import * as Sentry from '@sentry/node';
@@ -116,11 +164,12 @@ export const MAX_ALBUMS_ENV = 'DRAIN_MAX_ALBUMS';
 export const MAX_ALBUMS_DEFAULT = 0;
 
 /** Cooperative-pause lookback. If a flowsheet track row landed within this
- * many seconds, a DJ is live — defer. `0` disables the probe. */
+ * many seconds, a DJ is live — defer. `0` disables the probe. The pause
+ * duration and the cumulative ceiling come from the shared
+ * `LIVE_ACTIVITY_PAUSE_MS` / `LIVE_ACTIVITY_MAX_PAUSE_MS` knobs every sibling
+ * honours (`@wxyc/database`, BS#2147). */
 export const LIVE_ACTIVITY_LOOKBACK_ENV = 'LIVE_ACTIVITY_LOOKBACK_SECONDS';
 export const LIVE_ACTIVITY_LOOKBACK_DEFAULT = 300;
-
-export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
 
 /** Per-item slice of the bulk fetch timeout, plus fixed slack. Mirrors
  * `album-level-backfill`: the shared LML client's 30s default would otherwise
@@ -180,7 +229,9 @@ export interface DrainCandidate {
 }
 
 /**
- * Enumerate the cohort joined to its lookup keys in ONE query.
+ * The drainable subset of the cohort, as one FROM/WHERE shared by the
+ * eligible-count and the enumeration so they cannot describe different
+ * populations.
  *
  * `library.artist_name` is nullable (denormalized, "nullable until A.2"), so
  * the canonical `artists.artist_name` is preferred and the
@@ -191,10 +242,36 @@ export interface DrainCandidate {
  * `album-level-backfill#resolveAlbums` applies (BS#1294): an MD has marked
  * these albums as not-on-Discogs, so asking LML about them burns quota for a
  * guaranteed no-match. They keep their five nulls, deliberately.
- *
- * Ordered by `album_id` so a resumed run after an abort covers the same
- * ground in the same order.
  */
+const ELIGIBLE_FROM_WHERE = (): string => `
+  FROM "wxyc_schema"."album_metadata" am
+  JOIN "wxyc_schema"."library" l ON l."id" = am."album_id"
+  LEFT JOIN "wxyc_schema"."artists" a ON l."artist_id" = a."id"
+  WHERE ${cohortPredicateSql('am')}
+    AND COALESCE(a."artist_name", l."artist_name") IS NOT NULL
+    AND l."discogs_unavailable" = false`;
+
+/**
+ * Count the drainable subset, ignoring `DRAIN_MAX_ALBUMS`.
+ *
+ * The gap between this and `countCohort` is the PERMANENTLY excluded
+ * population, which is what the run should report as `excluded`. Deriving
+ * that number from `cohortBefore - enumerated` instead would fold the cap's
+ * remainder into it — remaining work counted as exclusion — and make a
+ * 25-album canary against a 4,000-row cohort read as a finished drain.
+ */
+export const countEligible = async (timeoutMs: number = READ_TIMEOUT_DEFAULT): Promise<number> => {
+  return await db.transaction(async (tx) => {
+    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${timeoutMs}ms'`));
+    const rows = (await tx.execute(sql.raw(`SELECT count(*)::int AS n ${ELIGIBLE_FROM_WHERE()}`))) as unknown as Array<{
+      n: number;
+    }>;
+    return Number(rows[0]?.n ?? 0);
+  });
+};
+
+/** Enumerate the drainable cohort with its lookup keys. Ordered by `album_id`
+ * so a resumed run after an abort covers the same ground in the same order. */
 export const enumerateCohort = async (
   limit: number,
   timeoutMs: number = READ_TIMEOUT_DEFAULT
@@ -207,12 +284,7 @@ export const enumerateCohort = async (
         SELECT am."album_id" AS album_id,
                COALESCE(a."artist_name", l."artist_name") AS artist_name,
                l."album_title" AS album_title
-        FROM "wxyc_schema"."album_metadata" am
-        JOIN "wxyc_schema"."library" l ON l."id" = am."album_id"
-        LEFT JOIN "wxyc_schema"."artists" a ON l."artist_id" = a."id"
-        WHERE ${cohortPredicateSql('am')}
-          AND COALESCE(a."artist_name", l."artist_name") IS NOT NULL
-          AND l."discogs_unavailable" = false
+        ${ELIGIBLE_FROM_WHERE()}
         ORDER BY am."album_id"
         ${limitClause}
       `)
@@ -233,19 +305,24 @@ export interface StreamingFill {
   youtube_music_url: string;
   bandcamp_url: string;
   soundcloud_url: string;
+  /** `'unresolved'` when LML matched but returned no URL for that service, so
+   * BS#1915's bounded sweep can adjudicate it later; null when a real URL was
+   * written, or when this arm asserts no verdict at all (`no_match`). */
+  spotify_status: string | null;
+  apple_music_status: string | null;
 }
 
 /**
- * Compute the five streaming URLs for one album.
+ * Compute the fill for one album from a DEFINITIVE LML verdict.
  *
- * `lookup === null` is the no-match / error case and is a first-class outcome,
- * not a failure: `normalizeLookup`'s no-artwork branch still returns the three
- * synthesized search URLs, so the row still leaves the cohort. That mirrors
- * `enrich.ts`'s linked no-match arm, which writes the same three.
+ * `lookup === null` is the `no_match` case: `normalizeLookup`'s no-artwork
+ * branch still returns the three synthesized search URLs, so the row still
+ * leaves the cohort. That mirrors `enrich.ts`'s linked no-match arm, which
+ * writes the same three and — like this branch — asserts no streaming
+ * verdict, leaving the status columns alone.
  *
- * The three synthesized URLs are a pure function of our own `library` text, so
- * they are immune to LML resolving a different release. Spotify and Apple come
- * from LML or stay null — never a synthesized search URL (BS#1184 / BS#1192).
+ * Callers must NOT pass an indeterminate verdict here. A shed, a per-item
+ * error, or a thrown bulk call is not a `no_match`; see the file header.
  *
  * Pure. No I/O.
  */
@@ -258,6 +335,8 @@ export const buildStreamingFill = (lookup: LookupResponse | null, fallbacks: Met
       youtube_music_url: synth.youtube_music_url,
       bandcamp_url: synth.bandcamp_url,
       soundcloud_url: synth.soundcloud_url,
+      spotify_status: null,
+      apple_music_status: null,
     };
   }
   const normalized = normalizeLookup(lookup, fallbacks);
@@ -267,6 +346,10 @@ export const buildStreamingFill = (lookup: LookupResponse | null, fallbacks: Met
     youtube_music_url: normalized.youtube_music_url,
     bandcamp_url: normalized.bandcamp_url,
     soundcloud_url: normalized.soundcloud_url,
+    // Matched, but the service came back empty — hand it to the bounded sweep
+    // rather than leaving a NULL that nothing will ever re-ask.
+    spotify_status: normalized.spotify_url ? null : 'unresolved',
+    apple_music_status: normalized.apple_music_url ? null : 'unresolved',
   };
 };
 
@@ -281,18 +364,23 @@ export const buildStreamingFill = (lookup: LookupResponse | null, fallbacks: Met
  *      now that the forward fix lets it), the UPDATE matches zero rows.
  *
  * Guard 2 makes guard 1 redundant and vice versa; both are cheap and this job
- * writes to a table the live path also writes to. Returns true when a row was
- * actually updated.
+ * writes to a table the live path also writes to. `streaming_reask_attempts`
+ * is deliberately NOT written: the column defaults to 0 and these rows were
+ * never asked, so touching it could only reset a counter someone else set.
+ *
+ * Returns true when a row was actually updated.
  */
 export const applyStreamingFill = async (albumId: number, fill: StreamingFill): Promise<boolean> => {
   const rows = (await db.execute(sql`
     UPDATE "wxyc_schema"."album_metadata"
-       SET "spotify_url"       = COALESCE("spotify_url", ${fill.spotify_url}),
-           "apple_music_url"   = COALESCE("apple_music_url", ${fill.apple_music_url}),
-           "youtube_music_url" = COALESCE("youtube_music_url", ${fill.youtube_music_url}),
-           "bandcamp_url"      = COALESCE("bandcamp_url", ${fill.bandcamp_url}),
-           "soundcloud_url"    = COALESCE("soundcloud_url", ${fill.soundcloud_url}),
-           "updated_at"        = NOW()
+       SET "spotify_url"        = COALESCE("spotify_url", ${fill.spotify_url}),
+           "apple_music_url"    = COALESCE("apple_music_url", ${fill.apple_music_url}),
+           "youtube_music_url"  = COALESCE("youtube_music_url", ${fill.youtube_music_url}),
+           "bandcamp_url"       = COALESCE("bandcamp_url", ${fill.bandcamp_url}),
+           "soundcloud_url"     = COALESCE("soundcloud_url", ${fill.soundcloud_url}),
+           "spotify_status"     = COALESCE("spotify_status", ${fill.spotify_status}),
+           "apple_music_status" = COALESCE("apple_music_status", ${fill.apple_music_status}),
+           "updated_at"         = NOW()
      WHERE "album_id" = ${albumId}
        AND ${sql.raw(cohortPredicateSql())}
     RETURNING "album_id"
@@ -307,30 +395,7 @@ export const analyzeAlbumMetadata = async (): Promise<void> => {
   await db.execute(sql.raw('ANALYZE "wxyc_schema"."album_metadata"'));
 };
 
-// -- Cooperative pause -------------------------------------------------------
-
-export const checkLiveActivity = async (lookbackSeconds: number): Promise<boolean> => {
-  if (lookbackSeconds <= 0) return false;
-  const rows = (await db.execute(sql`
-    SELECT 1
-    FROM "wxyc_schema"."flowsheet"
-    WHERE "entry_type" = 'track'
-      AND "add_time" > now() - (interval '1 second' * ${lookbackSeconds})
-    LIMIT 1
-  `)) as unknown as unknown[];
-  return rows.length > 0;
-};
-
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
-export const awaitQuietWindow = async (lookbackSeconds: number, pauseMs: number): Promise<void> => {
-  while (await checkLiveActivity(lookbackSeconds)) {
-    log('info', 'live_activity_pause', `DJ activity detected; pausing ${pauseMs}ms`, {
-      lookback_seconds: lookbackSeconds,
-    });
-    await sleep(pauseMs);
-  }
-};
 
 // -- Batch -------------------------------------------------------------------
 
@@ -338,11 +403,23 @@ export interface BatchResult {
   batchSize: number;
   match: number;
   no_match: number;
-  error: number;
+  /** Shed, per-item error, out-of-order result, or a thrown bulk call. Nothing
+   * is written; the row stays in the cohort for the next run. */
+  indeterminate: number;
   filled: number;
   skipped_raced: number;
   unexpected_index: number;
 }
+
+const emptyBatchResult = (batchSize: number): BatchResult => ({
+  batchSize,
+  match: 0,
+  no_match: 0,
+  indeterminate: 0,
+  filled: 0,
+  skipped_raced: 0,
+  unexpected_index: 0,
+});
 
 const buildBulkItems = (candidates: DrainCandidate[]): BulkLookupItem[] =>
   candidates.map((c) => ({
@@ -352,42 +429,29 @@ const buildBulkItems = (candidates: DrainCandidate[]): BulkLookupItem[] =>
   }));
 
 /**
- * Resolve one chunk through LML and write the fills.
+ * Resolve one chunk through LML and write the fills for DEFINITIVE verdicts
+ * only. Never called on a dry run — `runDrain` stops before the batch loop.
  *
- * A thrown bulk call (timeout, 5xx, network) does NOT abandon the chunk. Every
- * candidate still gets its synthesized-only fill written, because the three
- * search URLs never needed LML in the first place — they come from our own
- * library text. That is the difference between this drain and
- * `album-level-backfill`, which has nothing to write without a match and so
- * leaves the row for the next sweep. Here, leaving the row means leaving it
- * frozen forever, so a degraded fill beats no fill.
+ * A thrown bulk call (timeout, 5xx, network) leaves the whole chunk
+ * indeterminate and writes nothing, so the rows stay in the cohort and the
+ * next run retries them. Same for a per-item shed or error. See the file
+ * header for why the opposite choice would have been a permanent data defect.
  *
  * The `result.index !== i` guard is the BS#1088 regression pin: LML's bulk
  * handler honors input order today, and a future refactor that silently broke
  * it would otherwise write one album's streaming URLs onto another.
  */
-export const runBatch = async (
-  candidates: DrainCandidate[],
-  options: { budgetMs: number; execute: boolean }
-): Promise<BatchResult> => {
-  const empty: BatchResult = {
-    batchSize: candidates.length,
-    match: 0,
-    no_match: 0,
-    error: 0,
-    filled: 0,
-    skipped_raced: 0,
-    unexpected_index: 0,
-  };
-  if (candidates.length === 0) return empty;
+export const runBatch = async (candidates: DrainCandidate[], options: { budgetMs: number }): Promise<BatchResult> => {
+  if (candidates.length === 0) return emptyBatchResult(0);
+  const result = emptyBatchResult(candidates.length);
 
   const items = buildBulkItems(candidates);
-  let response: Awaited<ReturnType<typeof bulkLookupMetadata>> | null = null;
+  let response: Awaited<ReturnType<typeof bulkLookupMetadata>>;
   try {
     response = await bulkLookupMetadata(items, {
       budgetMs: options.budgetMs,
       timeoutMs: computeBulkTimeoutMs(items.length),
-      caller: 'album-level-backfill',
+      caller: 'streaming-columns-drain',
     });
   } catch (err) {
     const extra = {
@@ -395,67 +459,73 @@ export const runBatch = async (
       first_album_id: candidates[0]?.album_id ?? null,
       last_album_id: candidates[candidates.length - 1]?.album_id ?? null,
     };
-    log('warn', 'lml_batch_failed', 'bulkLookupMetadata threw; falling back to synthesized-only fills', {
+    log('warn', 'lml_batch_failed', 'bulkLookupMetadata threw; whole batch left for the next run', {
       ...extra,
       error_message: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
     });
     captureError(err, 'lml_batch_failed', extra);
+    result.indeterminate = candidates.length;
+    return result;
   }
 
-  let match = 0;
-  let no_match = 0;
-  let error = 0;
-  let filled = 0;
-  let skipped_raced = 0;
-  let unexpected_index = 0;
   let firstMismatchIndex: number | null = null;
 
   for (let i = 0; i < candidates.length; i++) {
     const candidate = candidates[i];
     if (!candidate) continue;
-    const fallbacks: MetadataFallbacks = { artist: candidate.artist_name, album: candidate.album_title };
+    const item = response.results[i];
 
-    let lookup: LookupResponse | null = null;
-    if (response) {
-      const result = response.results[i];
-      if (!result || result.index !== i) {
-        unexpected_index += 1;
-        if (firstMismatchIndex === null) firstMismatchIndex = i;
-        log('warn', 'unexpected_result_index', `LML result.index mismatch at position ${i}; synthesized-only fill`, {
-          expected_index: i,
-          got_index: result?.index ?? null,
-          album_id: candidate.album_id,
-        });
-      } else if (result.status === 'match' && result.lookup) {
-        match += 1;
-        lookup = result.lookup;
-      } else if (result.status === 'no_match') {
-        no_match += 1;
-      } else {
-        error += 1;
-        log('warn', 'lml_error', `LML per-item error for album_id=${candidate.album_id}`, {
-          album_id: candidate.album_id,
-          error_message: result.message ?? null,
-        });
-      }
+    if (!item || item.index !== i) {
+      result.unexpected_index += 1;
+      result.indeterminate += 1;
+      if (firstMismatchIndex === null) firstMismatchIndex = i;
+      log('warn', 'unexpected_result_index', `LML result.index mismatch at position ${i}; skipping write`, {
+        expected_index: i,
+        got_index: item?.index ?? null,
+        album_id: candidate.album_id,
+      });
+      continue;
     }
 
-    const fill = buildStreamingFill(lookup, fallbacks);
-    if (!options.execute) continue;
-    if (await applyStreamingFill(candidate.album_id, fill)) filled += 1;
-    else skipped_raced += 1;
+    // Branch on `status`, never on `lookup` nullity — a shed carries a
+    // non-null placeholder `lookup` (`buildShedLookupResponse`), so reading
+    // nullity here would silently treat a shed as a match.
+    let lookup: LookupResponse | null;
+    if (item.status === 'match' && item.lookup) {
+      result.match += 1;
+      lookup = item.lookup;
+    } else if (item.status === 'no_match') {
+      result.no_match += 1;
+      lookup = null;
+    } else {
+      result.indeterminate += 1;
+      log('warn', 'lml_indeterminate', `indeterminate LML verdict for album_id=${candidate.album_id}; not written`, {
+        album_id: candidate.album_id,
+        status: item.status,
+        error_message: item.message ?? null,
+      });
+      continue;
+    }
+
+    const fill = buildStreamingFill(lookup, { artist: candidate.artist_name, album: candidate.album_title });
+    if (await applyStreamingFill(candidate.album_id, fill)) result.filled += 1;
+    else result.skipped_raced += 1;
   }
 
-  if (unexpected_index > 0) {
+  if (result.unexpected_index > 0) {
     Sentry.captureMessage(`${JOB_NAME}.unexpected_index`, {
       level: 'warning',
       tags: { source: JOB_NAME },
-      extra: { unexpected_index, batch_size: items.length, first_mismatch_index: firstMismatchIndex },
+      extra: {
+        unexpected_index: result.unexpected_index,
+        batch_size: items.length,
+        first_mismatch_index: firstMismatchIndex,
+      },
       fingerprint: [JOB_NAME, 'unexpected_index'],
     });
   }
 
-  return { batchSize: candidates.length, match, no_match, error, filled, skipped_raced, unexpected_index };
+  return result;
 };
 
 // -- Orchestration -----------------------------------------------------------
@@ -468,17 +538,20 @@ export interface DrainOptions {
   maxAlbums: number;
   liveActivityLookbackSeconds: number;
   liveActivityPauseMs: number;
+  liveActivityMaxPauseMs: number;
   execute: boolean;
 }
 
 export interface DrainSummary {
   cohortBefore: number;
   cohortAfter: number;
+  eligible: number;
+  excluded: number;
   enumerated: number;
   batches: number;
   match: number;
   no_match: number;
-  error: number;
+  indeterminate: number;
   filled: number;
   skipped_raced: number;
   unexpected_index: number;
@@ -500,7 +573,8 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
       LIVE_ACTIVITY_LOOKBACK_DEFAULT,
       ctx
     ),
-    liveActivityPauseMs: LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
+    liveActivityPauseMs: resolveLiveActivityPauseMs(env['LIVE_ACTIVITY_PAUSE_MS']),
+    liveActivityMaxPauseMs: resolveLiveActivityMaxPauseMs(env[LIVE_ACTIVITY_MAX_PAUSE_MS_ENV]),
     execute: args.includes('--execute'),
   };
 };
@@ -519,73 +593,109 @@ export const runDrain = async (options: DrainOptions): Promise<DrainSummary> => 
     max_albums: options.maxAlbums,
     execute: options.execute,
   });
-  if (!options.execute) {
-    log('info', 'dry_run', 'DRY RUN — no writes. Pass --execute to write.', {});
-  }
 
   const cohortBefore = await countCohort(options.readTimeoutMs);
-  log('info', 'cohort_before', `cohort before: ${cohortBefore} album_metadata rows`, { cohort_before: cohortBefore });
-
-  const candidates = await enumerateCohort(options.maxAlbums, options.readTimeoutMs);
-  log('info', 'enumerated', `enumerated ${candidates.length} drainable albums`, {
-    enumerated: candidates.length,
+  const eligible = await countEligible(options.readTimeoutMs);
+  // `excluded` is the PERMANENTLY excluded population — no usable artist name,
+  // or `discogs_unavailable` — never the `DRAIN_MAX_ALBUMS` remainder.
+  const excluded = cohortBefore - eligible;
+  log('info', 'cohort_before', `cohort ${cohortBefore}, drainable ${eligible}, permanently excluded ${excluded}`, {
     cohort_before: cohortBefore,
-    // cohort_before counts every frozen row; `enumerated` drops the ones with
-    // no usable artist name or a discogs_unavailable flag. A persistent gap
-    // between the two is expected, not a bug — those rows stay frozen by design.
-    excluded: cohortBefore - candidates.length,
+    eligible,
+    excluded,
   });
 
+  const candidates = await enumerateCohort(options.maxAlbums, options.readTimeoutMs);
   const batches = chunk(candidates, options.batchSize);
-  const interBatchSleepMs = Math.max(0, Math.floor(60_000 / options.ratePerMin));
+  const summaryBase = {
+    cohortBefore,
+    eligible,
+    excluded,
+    enumerated: candidates.length,
+    batches: batches.length,
+    execute: options.execute,
+  };
 
-  let match = 0;
-  let no_match = 0;
-  let error = 0;
-  let filled = 0;
-  let skipped_raced = 0;
-  let unexpected_index = 0;
+  if (!options.execute) {
+    // Stop BEFORE the batch loop. A dry run must make ZERO LML calls: an
+    // earlier draft ran the full drain's worth of bulk lookups and only
+    // skipped the writes, so an operator sizing the job would have spent the
+    // whole Discogs quota believing they were getting a plan report.
+    log(
+      'info',
+      'dry_run_plan',
+      `DRY RUN — no LML calls, no writes. Would run ${batches.length} batches of up to ${options.batchSize}. Pass --execute to write.`,
+      { ...summaryBase, estimated_minutes: Math.ceil(batches.length / Math.max(1, options.ratePerMin)) }
+    );
+    return {
+      ...summaryBase,
+      cohortAfter: cohortBefore,
+      match: 0,
+      no_match: 0,
+      indeterminate: 0,
+      filled: 0,
+      skipped_raced: 0,
+      unexpected_index: 0,
+    };
+  }
+
+  // Shared cooperative pause (BS#2147): carries the cumulative
+  // `LIVE_ACTIVITY_MAX_PAUSE_MS` ceiling and the fail-open probe that a
+  // hand-rolled loop drops. The bare `while (active) sleep` this replaces
+  // could spin silently for a whole show with no progress and no abort, and a
+  // transient DB error inside the probe would have killed the run.
+  const waitForQuietPeriod = buildWaitForQuietPeriod({
+    lookbackSeconds: options.liveActivityLookbackSeconds,
+    pauseMs: options.liveActivityPauseMs,
+    maxTotalPauseMs: options.liveActivityMaxPauseMs,
+    onPause: (info) =>
+      log('info', 'live_activity_pause', `DJ activity detected; pausing ${info.pauseMs}ms`, {
+        paused_ms_so_far: info.pausedMs,
+      }),
+    onProbeError: (err) => captureError(err, 'live_activity_probe'),
+    onBudgetExhausted: (pausedMs) =>
+      log('warn', 'live_activity_budget_exhausted', 'cumulative pause ceiling hit; stopping the drain', {
+        paused_ms: pausedMs,
+      }),
+  });
+
+  const interBatchSleepMs = Math.max(0, Math.floor(60_000 / options.ratePerMin));
+  const totals = emptyBatchResult(0);
 
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
     if (!batch) continue;
-    await awaitQuietWindow(options.liveActivityLookbackSeconds, options.liveActivityPauseMs);
-    const result = await runBatch(batch, { budgetMs: options.budgetMs, execute: options.execute });
-    match += result.match;
-    no_match += result.no_match;
-    error += result.error;
-    filled += result.filled;
-    skipped_raced += result.skipped_raced;
-    unexpected_index += result.unexpected_index;
-    log('info', 'batch_done', `batch ${b + 1}/${batches.length}`, {
-      batch: b + 1,
-      of: batches.length,
-      ...result,
-    });
+    if (!(await waitForQuietPeriod())) break;
+    const result = await runBatch(batch, { budgetMs: options.budgetMs });
+    totals.match += result.match;
+    totals.no_match += result.no_match;
+    totals.indeterminate += result.indeterminate;
+    totals.filled += result.filled;
+    totals.skipped_raced += result.skipped_raced;
+    totals.unexpected_index += result.unexpected_index;
+    log('info', 'batch_done', `batch ${b + 1}/${batches.length}`, { batch: b + 1, of: batches.length, ...result });
     if (b < batches.length - 1 && interBatchSleepMs > 0) await sleep(interBatchSleepMs);
   }
 
-  if (filled > 0) await analyzeAlbumMetadata();
+  if (totals.filled > 0) await analyzeAlbumMetadata();
 
   const cohortAfter = await countCohort(options.readTimeoutMs);
   log('info', 'cohort_after', `cohort after: ${cohortAfter} album_metadata rows`, {
     cohort_before: cohortBefore,
     cohort_after: cohortAfter,
     delta: cohortBefore - cohortAfter,
+    excluded,
   });
 
   return {
-    cohortBefore,
+    ...summaryBase,
     cohortAfter,
-    enumerated: candidates.length,
-    batches: batches.length,
-    match,
-    no_match,
-    error,
-    filled,
-    skipped_raced,
-    unexpected_index,
-    execute: options.execute,
+    match: totals.match,
+    no_match: totals.no_match,
+    indeterminate: totals.indeterminate,
+    filled: totals.filled,
+    skipped_raced: totals.skipped_raced,
+    unexpected_index: totals.unexpected_index,
   };
 };
 

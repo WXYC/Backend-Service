@@ -37,6 +37,8 @@ const FULL_FILL = {
   youtube_music_url: 'https://music.youtube.com/search?q=Stereolab%20Aluminum%20Tunes',
   bandcamp_url: 'https://bandcamp.com/search?q=Stereolab%20Aluminum%20Tunes',
   soundcloud_url: 'https://soundcloud.com/search?q=Stereolab',
+  spotify_status: null,
+  apple_music_status: null,
 };
 
 /** The no-match fill: three synthesized URLs, spotify/apple deliberately null. */
@@ -46,6 +48,16 @@ const SYNTH_ONLY_FILL = {
   youtube_music_url: FULL_FILL.youtube_music_url,
   bandcamp_url: FULL_FILL.bandcamp_url,
   soundcloud_url: FULL_FILL.soundcloud_url,
+  spotify_status: null,
+  apple_music_status: null,
+};
+
+/** A matched-but-empty fill: LML found the release but neither streaming
+ * service, so both statuses go to `'unresolved'` for the BS#1915 sweep. */
+const MATCHED_EMPTY_FILL = {
+  ...SYNTH_ONLY_FILL,
+  spotify_status: 'unresolved',
+  apple_music_status: 'unresolved',
 };
 
 async function insertLibraryAlbum(sql, suffix) {
@@ -61,7 +73,8 @@ async function insertLibraryAlbum(sql, suffix) {
 
 async function readStreaming(sql, albumId) {
   const rows = await sql`
-    SELECT spotify_url, apple_music_url, youtube_music_url, bandcamp_url, soundcloud_url, artwork_url, discogs_url
+    SELECT spotify_url, apple_music_url, youtube_music_url, bandcamp_url, soundcloud_url,
+           spotify_status, apple_music_status, artwork_url, discogs_url
       FROM ${sql(SCHEMA)}.album_metadata
      WHERE album_id = ${albumId}
   `;
@@ -244,6 +257,33 @@ describe('BS#2295 streaming-columns drain — the fill-null write (real PG)', ()
     expect(row.youtube_music_url).toBeNull();
     expect(row.bandcamp_url).toBeNull();
     expect(row.soundcloud_url).toBeNull();
+  });
+
+  test('a matched-but-empty service is left unresolved, not NULL, so the BS#1915 sweep can re-ask', async () => {
+    // A NULL status means "never consulted" and is explicitly NOT
+    // re-ask-eligible (schema.ts), so writing the URLs and leaving the
+    // statuses NULL would unfreeze the row from the cohort while freezing
+    // Spotify/Apple a second, subtler way.
+    const albumId = await seedFrozen(sql, 'matched-empty');
+
+    expect(await applyStreamingFill(sql, albumId, MATCHED_EMPTY_FILL)).toBe(true);
+
+    const row = await readStreaming(sql, albumId);
+    expect(row.spotify_url).toBeNull();
+    expect(row.spotify_status).toBe('unresolved');
+    expect(row.apple_music_status).toBe('unresolved');
+  });
+
+  test('a no_match asserts no streaming verdict — the status columns stay NULL', async () => {
+    // Mirrors enrich.ts's linked no-match arm, which writes the three
+    // synthesized URLs and deliberately touches no status column.
+    const albumId = await seedFrozen(sql, 'no-match-statuses');
+
+    expect(await applyStreamingFill(sql, albumId, SYNTH_ONLY_FILL)).toBe(true);
+
+    const row = await readStreaming(sql, albumId);
+    expect(row.spotify_status).toBeNull();
+    expect(row.apple_music_status).toBeNull();
   });
 
   test('idempotent: a second run over an already-drained row writes nothing', async () => {

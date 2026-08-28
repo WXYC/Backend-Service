@@ -54,6 +54,13 @@ Per-column policy, matching `enrich.ts`'s write arms exactly:
 
 - **`youtube_music_url` / `bandcamp_url` / `soundcloud_url`** — always written: LML's verified URL when present, else the synthesized search URL from `@wxyc/metadata#synthesizeSearchUrls`. These are a pure function of our own `library` text, so they cannot be mis-resolved at all, and they are what guarantee every drained row leaves the cohort **including on a `no_match`**.
 - **`spotify_url` / `apple_music_url`** — written only when LML returns a real one. There is deliberately no synthesized fallback for these two (BS#1184 / BS#1192): persisting a keyword-search URL would launder "we could not verify a match" into a clickable button. The proxy fills them at read time instead.
+- **`spotify_status` / `apple_music_status`** — set to `'unresolved'` on a **match** whose URL came back empty, so BS#1915's bounded hourly `streaming-reask.ts` sweep can adjudicate later. Leaving them NULL would freeze the row a second, subtler way: `schema.ts` is explicit that a NULL status means "never consulted" and is **not** re-ask-eligible. `'unresolved'` is chosen over the more confident `'absent'` because this job cannot distinguish "LML looked and the service has nothing" from "LML never got that far", and `'absent'` is terminal — the attempt cap bounds the cost of being wrong in the safe direction. On a `no_match` the status columns are left alone, exactly as `enrich.ts`'s linked no-match arm does.
+
+### Indeterminate verdicts are never written
+
+A shed (`shed_limiter_saturated` / `shed_breaker_open`), a per-item error, an out-of-order result, or a thrown bulk call writes **nothing**. The row stays in the cohort and the next run retries it.
+
+This is the design point most worth not getting wrong, and the first draft of this job got it backwards — it wrote a synthesized-only fill on every non-match, reasoning that "skipping here means frozen forever." That reasoning is false: **this job is the re-runner**, and the cohort predicate is its resume mechanism. Writing on a shed would take the row out of the cohort permanently, satisfy `precheck.ts`'s new `hasAnyStreamingUrl` conjunct so the next play skips LML again, and leave `streaming-reask.ts` still unable to see it. One LML restart mid-drain would have permanently nulled Spotify and Apple on every remaining album. `@wxyc/lml-client`'s `buildShedBulkResultItem` docstring states the rule: _"never a terminal write, always re-attempted next run. Do NOT assume any bulk caller 'never sheds' — branch on `status`, not on `lookup` nullity."_
 
 ### Known limit — read this before judging the result
 
@@ -63,7 +70,7 @@ That asymmetry is pre-existing and is **not** something this drain can fix — i
 
 ## Safety properties
 
-- **Dry-run by default.** `--execute` is the only way to write. (The newer sibling convention from `streaming-url-upgrade` / `streaming-url-remediation`, not `album-level-backfill`'s older `--dry-run` opt-in — a reader carrying that muscle memory still gets a dry run, and there is a unit test pinning exactly that.)
+- **Dry-run by default, and it makes ZERO LML calls.** `--execute` is the only way to write. The dry run stops _before_ the batch loop — it reports the counts and the plan and returns — so an operator sizing the job cannot accidentally spend the whole Discogs quota. (The newer sibling convention from `streaming-url-upgrade` / `streaming-url-remediation`, not `album-level-backfill`'s older `--dry-run` opt-in — a reader carrying that muscle memory still gets a dry run, and there is a unit test pinning exactly that.)
 - **Fill-null, twice over.** Each column is `COALESCE(<col>, $new)`, _and_ the full cohort predicate is re-asserted in the UPDATE's `WHERE`. The second is the TOCTOU guard, and it is live rather than theoretical now that the forward fix lets the worker re-open these rows: if any of the five became non-null since enumeration, the UPDATE matches zero rows and the album is counted `skipped_raced`. The row is left **completely** alone rather than partially topped up — two writers' values must never interleave on one album.
 - **Idempotent.** A drained row drops out of the cohort, so a second run is a no-op.
 - **Never mints a row.** An album with no `album_metadata` row is the enrichment worker's job; creating one here would assert a match nobody made.
@@ -81,6 +88,8 @@ That asymmetry is pre-existing and is **not** something this drain can fix — i
 | `DRAIN_READ_TIMEOUT_MS`          | `300000`       | Statement timeout for the counts and the enumeration.                                                         |
 | `DRAIN_MAX_ALBUMS`               | `0` (uncapped) | Stop after N albums. Set it for the bounded canary run.                                                       |
 | `LIVE_ACTIVITY_LOOKBACK_SECONDS` | `300`          | Cooperative-pause window. `0` disables.                                                                       |
+| `LIVE_ACTIVITY_PAUSE_MS`         | `30000`        | Per-iteration pause. Shared knob (`@wxyc/database`, BS#2147).                                                 |
+| `LIVE_ACTIVITY_MAX_PAUSE_MS`     | `1800000`      | Cumulative pause ceiling; the run stops rather than spinning through a whole show. `0` = uncapped.            |
 
 ## Run procedure (production)
 
@@ -117,7 +126,11 @@ At the default pacing (batch 5, 1 batch/min) the run takes roughly `cohort / 5` 
 
 The job reports `cohort_before` / `cohort_after` / `delta` itself — that is BS#2295's "catalog-wide count of the frozen shape reported before and after the drain" acceptance criterion, and it should be quoted onto the issue.
 
-`cohort_after` will not reach zero: the excluded rows (no artist name, or `discogs_unavailable`) stay. Expect `cohort_after == excluded`.
+`cohort_after` will not reach zero: the permanently-excluded rows (no usable artist name, or `discogs_unavailable`) stay. On an **uncapped** run that hit no indeterminate verdicts, expect `cohort_after == excluded`. `excluded` is computed against the uncapped eligible count, so it stays meaningful under `DRAIN_MAX_ALBUMS` — a bounded canary reports the real exclusion figure and leaves the rest as remaining work rather than counting it as excluded.
+
+A non-zero `indeterminate` means those rows were deliberately left for the next run; re-run the job to pick them up.
+
+One thing to know if `ENRICHMENT_BANDCAMP_REASK` is ever turned on: the drain writes `bandcamp.com/search` URLs with `bandcamp_status = NULL`, which is exactly the legacy frozen shape that flag's disjunct in `precheck.ts` targets. Flag-off (the default) this is inert, but flipping it after a large drain hands the hourly re-ask sweep a correspondingly large new cohort.
 
 Then check the four rows named in the issue actually serve links:
 
