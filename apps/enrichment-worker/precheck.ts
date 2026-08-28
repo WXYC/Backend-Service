@@ -42,6 +42,50 @@
  * explicit `'unresolved'` does. See `enrich.ts` for the merge logic that
  * writes these columns and the shared per-album `streaming_reask_attempts`
  * counter.
+ *
+ * BS#2295 (streaming-columns gate). Load-bearing artwork/discogs alone is
+ * not sufficient either: an album whose `album_metadata` row carries
+ * `artwork_url` (or `discogs_url`) but none of the five streaming columns
+ * (`spotify_url` / `apple_music_url` / `youtube_music_url` / `bandcamp_url` /
+ * `soundcloud_url`) used to skip the LML call anyway, and
+ * `finalizeFromCachedMetadata` then flips the flowsheet row to a terminal
+ * `'enriched_match'` WITHOUT ever writing those columns — every client
+ * reading that row got five permanent nulls. This is a standing prod
+ * backlog, not a hypothetical — measured at 4 of 152 recent track rows, all
+ * with `artwork_url` present and `discogs_url` NULL. Today's match-write
+ * path (`enrich.ts#upsertMatchedAlbumMetadata`) always lands at least one
+ * streaming column (a verified URL or a synthesized search fallback)
+ * alongside `artwork_url`, so it is not the writer that produced them;
+ * which path did is not established, and the gate deliberately does not
+ * care — it keys on the shape, so it also floors any future writer that
+ * persists a load-bearing match without the streaming columns. The skip
+ * therefore also requires at least one streaming URL column to be non-null;
+ * a row with artwork/discogs but zero streaming URLs falls through to the
+ * normal LML path so it gets a real chance to fill them. This does not widen the #1747 amplifier: an album with load-bearing
+ * artwork/discogs AND at least one streaming URL is still skipped, so the
+ * common already-enriched case pays no extra LML calls.
+ *
+ * Note that this conjunct is deliberately UNBOUNDED, unlike the BS#1915
+ * re-ask gate sitting beside it, which is capped by
+ * `streaming_reask_attempts`. The reason the two differ: #1915 re-asks a
+ * question that can legitimately keep coming back unanswered (a service
+ * that simply has no match for this album), so it needs a cap or it asks
+ * forever. This gate's question is answered by construction on the FIRST
+ * fall-through — both write arms in `enrich.ts` populate
+ * `youtube_music_url` and `soundcloud_url` unconditionally from
+ * `synthesizeSearchUrls` (the match arm at `upsertMatchedAlbumMetadata`, and
+ * the linked no-match arm) — so the qualifying population is self-draining
+ * and a cap would only serve to re-freeze rows the fix exists to unfreeze.
+ *
+ * The one shape that could defeat that: both write arms carry
+ * `setWhere: album_metadata.updated_at < NOW()`, so a row whose `updated_at`
+ * is not strictly in the past (clock skew on the writing host, an
+ * out-of-band backfill stamping a future timestamp) makes the whole conflict
+ * `SET` a no-op — `artwork_url` survives, the five streaming columns stay
+ * NULL, and the row re-calls LML on every play with nothing to stop it.
+ * That is a defect in the write guard rather than in this gate, and the
+ * fix belongs there; recorded here so a future reader tracing per-play LML
+ * calls back to this predicate finds the actual culprit.
  */
 
 import { and, eq, isNotNull, or, sql } from 'drizzle-orm';
@@ -51,11 +95,13 @@ import { isBandcampReaskEnabled, resolveComposer, STREAMING_REASK_ATTEMPT_CAP, t
 
 /**
  * True when the album already has a persisted, load-bearing Discogs match in
- * `album_metadata` (`artwork_url` OR `discogs_url` non-null) AND no
- * streaming field is still bounded-re-ask-eligible (BS#1915 — see file
- * header). False when the row is missing, all-null, a search-URL-only shell
- * (BS#1089 guard), or carries an `'unresolved'` streaming field under the
- * attempt cap, so the caller re-calls LML and the row self-heals.
+ * `album_metadata` (`artwork_url` OR `discogs_url` non-null) AND at least one
+ * of the five streaming URL columns is non-null (BS#2295 — see file header)
+ * AND no streaming field is still bounded-re-ask-eligible (BS#1915 — see
+ * file header). False when the row is missing, all-null, a search-URL-only
+ * shell (BS#1089 guard), a load-bearing match with zero streaming columns
+ * populated (BS#2295), or carries an `'unresolved'` streaming field under
+ * the attempt cap, so the caller re-calls LML and the row self-heals.
  *
  * Only linked rows (flowsheet `album_id` non-null) have an `album_metadata`
  * row to consult; the caller gates on that before invoking this.
@@ -88,6 +134,17 @@ export async function hasLoadBearingAlbumMetadata(albumId: number): Promise<bool
     ),
     false
   )`;
+  // BS#2295: a confirmed load-bearing match (artwork/discogs) is not "done"
+  // unless at least one of the five streaming columns actually carries a
+  // value — see the file header for why a load-bearing-only row must fall
+  // through to LML instead of freezing a terminal status with five nulls.
+  const hasAnyStreamingUrl = or(
+    isNotNull(album_metadata.spotify_url),
+    isNotNull(album_metadata.apple_music_url),
+    isNotNull(album_metadata.youtube_music_url),
+    isNotNull(album_metadata.bandcamp_url),
+    isNotNull(album_metadata.soundcloud_url)
+  );
   const rows = await db
     .select({ album_id: album_metadata.album_id })
     .from(album_metadata)
@@ -95,6 +152,7 @@ export async function hasLoadBearingAlbumMetadata(albumId: number): Promise<bool
       and(
         eq(album_metadata.album_id, albumId),
         or(isNotNull(album_metadata.artwork_url), isNotNull(album_metadata.discogs_url)),
+        hasAnyStreamingUrl,
         sql`NOT ${needsStreamingReask}`
       )
     )

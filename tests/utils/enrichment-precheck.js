@@ -11,13 +11,21 @@
  * predicate is chased through one file.
  *
  * The predicate is the load-bearing test the worker uses to decide whether to
- * skip the LML call. Skip (return true) requires BOTH:
+ * skip the LML call. Skip (return true) requires ALL THREE:
  *   1. A confirmed load-bearing Discogs match — `artwork_url` OR
  *      `discogs_url` is non-null. The four synthesized search-URL columns
  *      are deliberately NOT part of this — a search-URL-only shell is the
  *      BS#1089 poisoned-null shape that must keep re-calling LML to
  *      self-heal.
- *   2. BS#1915: no streaming field is still `unresolved` under the attempt
+ *   2. BS#2295: at least one of the five streaming URL columns
+ *      (`spotify_url` / `apple_music_url` / `youtube_music_url` /
+ *      `bandcamp_url` / `soundcloud_url`) is non-null. A row with a
+ *      load-bearing match but zero streaming columns used to skip anyway,
+ *      and `finalizeFromCachedMetadata` then stamped a terminal
+ *      `enriched_match` without ever writing those columns — permanent
+ *      five-null streaming URLs for every client. This condition sends that
+ *      shape through the normal LML path instead.
+ *   3. BS#1915: no streaming field is still `unresolved` under the attempt
  *      cap. `spotify_status` / `apple_music_status` / `bandcamp_status`
  *      `= 'unresolved'` AND `streaming_reask_attempts < STREAMING_REASK_ATTEMPT_CAP`
  *      on ANY of the three blocks the skip (re-ask instead), so a transient
@@ -37,7 +45,8 @@ const STREAMING_REASK_ATTEMPT_CAP = 3;
 
 /**
  * Return true iff the album already has a persisted load-bearing Discogs
- * match in `album_metadata` (`artwork_url` OR `discogs_url` non-null) AND no
+ * match in `album_metadata` (`artwork_url` OR `discogs_url` non-null) AND at
+ * least one of the five streaming URL columns is non-null (BS#2295) AND no
  * streaming field is still bounded-re-ask-eligible (BS#1915).
  *
  * @param {import('postgres').Sql} sql - the shared test pool from `getTestDb()`.
@@ -60,6 +69,17 @@ async function hasLoadBearingMetadata(sql, albumId) {
       FROM ${sql(SCHEMA)}.album_metadata
      WHERE album_id = ${albumId}
        AND (artwork_url IS NOT NULL OR discogs_url IS NOT NULL)
+       -- BS#2295: a load-bearing match alone isn't "done" -- the row also
+       -- needs at least one streaming URL column populated, or it falls
+       -- through to LML instead of freezing a terminal enriched_match with
+       -- five null streaming URLs. See the module doc comment.
+       AND (
+         spotify_url IS NOT NULL
+         OR apple_music_url IS NOT NULL
+         OR youtube_music_url IS NOT NULL
+         OR bandcamp_url IS NOT NULL
+         OR soundcloud_url IS NOT NULL
+       )
        -- COALESCE(..., false) is load-bearing, not decorative: SQL's
        -- three-valued logic makes NULL = 'unresolved' evaluate to NULL
        -- (not false), so for the common case of all three status columns
