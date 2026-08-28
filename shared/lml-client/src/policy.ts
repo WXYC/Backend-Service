@@ -244,6 +244,15 @@ export const ALL_LML_CALLERS = [
   'artwork-provenance-remediation',
   'library-artwork-url-backfill',
   'library-canonical-entity-backfill',
+  // BS#2295: the one-shot drain for `album_metadata` rows carrying a
+  // load-bearing Discogs match with all five streaming URL columns NULL.
+  // Class 5 — same offline bulk shape as its `album-level-backfill` donor.
+  // It gets its own label rather than borrowing the donor's (which the
+  // issue body suggested) so a drain-caused LML regression is attributable:
+  // sharing a label would make this traffic indistinguishable from a job
+  // that is not running, on both the `lml.caller` span attribute and LML's
+  // per-caller metrics.
+  'streaming-columns-drain',
 ] as const;
 
 export type LmlCaller = (typeof ALL_LML_CALLERS)[number];
@@ -282,6 +291,7 @@ const CALLER_CLASS: Record<LmlCaller, LmlCallerClass> = {
   'streaming-url-upgrade': 5,
   'apple-music-url-backfill': 5,
   'va-apple-music-url-remediation': 5,
+  'streaming-columns-drain': 5,
   'concerts-genre-enrichment': 5,
   'concerts-artist-lml-resolver': 5,
   'rotation-release-id-backfill': 5,

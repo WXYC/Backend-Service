@@ -75,6 +75,8 @@ async function applyStreamingFill(sql, albumId, fill) {
            youtube_music_url = COALESCE(youtube_music_url, ${fill.youtube_music_url ?? null}),
            bandcamp_url      = COALESCE(bandcamp_url, ${fill.bandcamp_url ?? null}),
            soundcloud_url    = COALESCE(soundcloud_url, ${fill.soundcloud_url ?? null}),
+           spotify_status     = COALESCE(spotify_status, ${fill.spotify_status ?? null}),
+           apple_music_status = COALESCE(apple_music_status, ${fill.apple_music_status ?? null}),
            updated_at        = NOW()
      WHERE album_id = ${albumId}
        AND (artwork_url IS NOT NULL OR discogs_url IS NOT NULL)

@@ -241,6 +241,13 @@ jobs:
       - name: 'Type check: auth-user-name-backfill'
         run: npm run typecheck --workspace=jobs/auth-user-name-backfill
 
+      # Same BS#2009 gap again (BS#2295): this drain writes to `album_metadata`
+      # rows the live enrichment path also writes to, and its indeterminate-
+      # verdict branch is the difference between a retryable row and a
+      # permanently-nulled one — not a job to ship uncompiled-but-green.
+      - name: 'Type check: streaming-columns-drain'
+        run: npm run typecheck --workspace=jobs/streaming-columns-drain
+
       - name: Lint
         run: npm run lint
 
