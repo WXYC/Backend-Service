@@ -52,11 +52,10 @@
  * ## Allow-list matching
  *
  * Entries are repo-root-relative paths, resolved against the linted file's
- * path relative to `context.cwd` (falling back to `process.cwd()` on older
- * ESLint). An entry ending in `/` is a path-prefix match (covers a whole
- * directory, including files that don't exist yet — e.g. the pending
- * `jobs/auth-user-name-backfill/` one-shot job); any other entry is an
- * exact match.
+ * path relative to `context.cwd`. An entry ending in `/` is a path-prefix
+ * match (covers a whole directory, including files that don't exist yet —
+ * e.g. the pending `jobs/auth-user-name-backfill/` one-shot job); any other
+ * entry is an exact match.
  *
  * ## Known gaps (documented, not closed)
  *
@@ -89,10 +88,6 @@ const ALLOW_LIST = [
   'apps/auth/complete-onboarding.ts',
   'apps/auth/create-auto-dj-user.ts',
   'shared/authentication/src/auth.definition.ts',
-  // Future hook-helper file (Track 2b of the originating plan) — not yet
-  // written. Allow-listing a nonexistent path is fine: the rule only ever
-  // consults this list against files that DO get linted.
-  'shared/authentication/src/derive-user-display-name.ts',
   // Until the 2026-08-31 tubafrenzy turndown: the legacy mirror forwards
   // `auth_user.real_name` into tubafrenzy's DJ_NAME field.
   'shared/legacy-mirror/src/http-mirror.ts',
@@ -103,15 +98,11 @@ const ALLOW_LIST = [
 ];
 
 const MESSAGE =
-  "'{{name}}' read/written outside the PII allow-list (docs/pii.md). `auth_user.real_name` is the sole legal-name (PII) carrier in this schema — see docs/pii.md for the registry and BS#1286/#1288/#1393/#2281 for the incident history a stray real-name read produced. If this is a genuine new legal-name read/write site, add this file to the ALLOW_LIST in eslint-rules/restricted-real-name.cjs (and to docs/pii.md's Enforcement section) in the same PR; otherwise use the public on-air handle instead (`dj_name` / `resolveDjDisplayName`, see shared/database/src/dj-name.ts).";
+  "'{{name}}' read/written outside the PII allow-list — auth_user.real_name is the sole legal-name carrier (docs/pii.md). Legitimate new site: add the file to ALLOW_LIST here and to docs/pii.md in the same PR; otherwise use dj_name / resolveDjDisplayName.";
 
 /**
- * Repo-root-relative, forward-slash-normalized path for `filename`,
- * resolved against `cwd`. `filename` may already be relative (as RuleTester
- * test cases pass it) or absolute (as real ESLint runs pass it) — both
- * resolve to the same relative form via `path.relative(path.resolve(cwd,
- * filename), ...)`... more simply: resolve `filename` to an absolute path
- * first, then relativize against `cwd`.
+ * Resolve `filename` (relative in RuleTester, absolute in real runs)
+ * against `cwd`, forward-slashed.
  */
 function toRepoRelativePath(filename, cwd) {
   const absolute = path.resolve(cwd, filename);
@@ -139,8 +130,8 @@ const rule = {
   },
 
   create(context) {
-    const cwd = context.cwd || process.cwd();
-    const filename = context.filename || context.getFilename();
+    const cwd = context.cwd;
+    const filename = context.filename;
     const relativePath = toRepoRelativePath(filename, cwd);
 
     if (isAllowListed(relativePath)) {
