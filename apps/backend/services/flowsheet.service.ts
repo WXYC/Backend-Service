@@ -1324,7 +1324,7 @@ export const getLatestShow = async (): Promise<Show | undefined> => {
 /**
  * Operator close for abandoned shows (BS#2235). Backs
  * `GET /flowsheet/open-shows`, the replacement for tubafrenzy's
- * `EndShowServlet` + "Resume a Show" path, which retires 2026-08-31.
+ * `EndShowServlet` + "Resume a Show" path, which retires 2026-09-07.
  */
 
 /** Fewer entries than this on a non-current open show reads as abandoned. */

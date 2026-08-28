@@ -94,7 +94,7 @@ flowsheet_route.post(
 
 // Operator close for an abandoned show (BS#2235) — the Backend-Service
 // replacement for tubafrenzy's `EndShowServlet` + "Resume a Show", which
-// retires with tubafrenzy on 2026-08-31.
+// retires with tubafrenzy on 2026-09-07.
 //
 // `flowsheet: ['manage']` is the only gate in this router above `write`: it
 // selects musicDirector and stationManager, excluding the plain `dj` role that

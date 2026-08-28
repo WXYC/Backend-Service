@@ -3,7 +3,7 @@
  *
  * `GET /flowsheet/open-shows` + `POST /flowsheet/shows/:id/force-end`, the
  * Backend-Service replacement for tubafrenzy's `EndShowServlet` +
- * "Resume a Show" path, which retires with tubafrenzy on 2026-08-31.
+ * "Resume a Show" path, which retires with tubafrenzy on 2026-09-07.
  *
  * What only a live Postgres can prove: the grouped entry counts are right for
  * shows with zero, few, and many entries; the `end_time IS NULL` filter and the

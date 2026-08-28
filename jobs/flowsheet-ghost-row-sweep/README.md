@@ -8,7 +8,7 @@ One-shot ghost-row sweep for BS#1887 (the mechanism slice of the BS#1083 cleanup
 
 ## Why this ships before BS#1083's dump access is decided
 
-BS#1083 is blocked on the final tubafrenzy `mysqldump` (WXYC/wiki#86, ~2026-08-31) and on deciding how BS gets an authoritative live keyspace out of it (SSH mirror? restored MySQL? extracted id file? — BS#1543 item 2, undecided). Neither blocker touches the _mechanism_: the batched anti-join-and-DELETE logic can be built and tested today against a fixture keyspace. This package is that mechanism. BS#1083 stays the run/close gate — it points the finished tool at the real dump, reviews the log-only counts, and executes the prod DELETEs.
+BS#1083 is blocked on the final tubafrenzy `mysqldump` (WXYC/wiki#86, ~2026-09-07) and on deciding how BS gets an authoritative live keyspace out of it (SSH mirror? restored MySQL? extracted id file? — BS#1543 item 2, undecided). Neither blocker touches the _mechanism_: the batched anti-join-and-DELETE logic can be built and tested today against a fixture keyspace. This package is that mechanism. BS#1083 stays the run/close gate — it points the finished tool at the real dump, reviews the log-only counts, and executes the prod DELETEs.
 
 ## The `LegacyKeyspaceSource` seam
 

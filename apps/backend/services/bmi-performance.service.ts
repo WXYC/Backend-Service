@@ -4,7 +4,7 @@
  * The station librarian (a non-engineer) semiannually pulls the list of played
  * musical works and submits it to BMI for royalty reporting. tubafrenzy served
  * this from `RecentBMIServlet` as a stateless "recent 1000" `###`-delimited
- * dump; that path dies with the 2026-08-31 turndown (org Project #36). This
+ * dump; that path dies with the 2026-09-07 turndown (org Project #36). This
  * module is the Backend-Service replacement, read by an MD/SM-gated dj-site
  * admin tool (`/dashboard/admin/bmi`) so the pull becomes self-serve.
  *
