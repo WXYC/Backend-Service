@@ -110,7 +110,7 @@
 --     live parity failure -- but the surface is wider than "someone writes
 --     to `artists`", and any of the three triggers fires it silently.
 --     Worth its own follow-up ticket,
---     which INHERITS THIS TICKET'S 2026-08-31 DEADLINE: tubafrenzy is the
+--     which INHERITS THIS TICKET'S 2026-09-07 DEADLINE: tubafrenzy is the
 --     ground truth for those `artists` rows as much as for these, and #863's
 --     values for them came from curated fuzzy matching, not from tubafrenzy.
 --     They are deliberately not folded in here because BS#2114 names exactly

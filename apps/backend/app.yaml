@@ -1133,7 +1133,7 @@ paths:
         Shows with `end_time IS NULL` that started inside the lookback window,
         oldest first, with flowsheet entry counts. Requires the
         `flowsheet: manage` permission (musicDirector / stationManager).
-        Replaces tubafrenzy's "Resume a Show" list, which retires 2026-08-31.
+        Replaces tubafrenzy's "Resume a Show" list, which retires 2026-09-07.
         The window matters: `end_time IS NULL` is not a reliable "on the air"
         signal, and production's open shows reach back to 2006 — see
         `getOpenShows` in apps/backend/services/flowsheet.service.ts.

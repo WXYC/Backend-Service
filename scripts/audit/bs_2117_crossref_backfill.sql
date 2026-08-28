@@ -1,5 +1,5 @@
 -- BS2117: backfill wxyc_schema.artist_crossreference from tubafrenzy's
--- LIBRARY_CODE_CROSS_REFERENCE, ahead of the 2026-08-31 tubafrenzy turndown.
+-- LIBRARY_CODE_CROSS_REFERENCE, ahead of the 2026-09-07 tubafrenzy turndown.
 --
 -- Like V_BS_FFFD (scripts/audit/bs_replacement_char_recovery.sql), this is a
 -- HAND-APPLIED operator script, NOT a Drizzle migration — docs/migrations.md

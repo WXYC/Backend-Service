@@ -152,7 +152,7 @@
 -- be recorded as 12". Revisiting it means adding a vocabulary row AND
 -- changing `parseFormatAndDiscs`, and would leave the ~500 rows already
 -- folded needing a second migration -- deliberately not done under a
--- 2026-08-31 turndown deadline.
+-- 2026-09-07 turndown deadline.
 --
 -- (2) The multi-disc count (`cd x 2`, `vinyl - LP x 3`, ...) -> the base
 -- format name plus `library.disc_quantity`. No vocabulary extension.

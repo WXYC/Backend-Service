@@ -41,11 +41,11 @@
  * refresh set, so while that ETL is live it will overwrite a renumber and
  * reinstate a deleted row from the upstream MySQL catalog.
  *
- * Do NOT read the 2026-08-31 turndown date as this job's start date. That date
+ * Do NOT read the 2026-09-07 turndown date as this job's start date. That date
  * binds Surface 1 only (the flowsheet/playlist UI, Phase 3 / wiki#88), where
  * flowsheet-etl and rotation-etl stop — BS#1858 flips those two and
  * deliberately leaves library-etl alone. Surface 2 (/wxycdb catalog edit) is
- * chain-ready-gated; MySQL + library-etl survive frozen-scope past 8/31 if the
+ * chain-ready-gated; MySQL + library-etl survive frozen-scope past 9/7 if the
  * chain isn't ready. Critical path is the MD catalog-edit UI (dj-site#1071).
  *
  * Also wait for PARITY SIGN-OFF, not just for the ETL to stop: Phase 3.5 ends

@@ -88,7 +88,7 @@ const ALLOW_LIST = [
   'apps/auth/complete-onboarding.ts',
   'apps/auth/create-auto-dj-user.ts',
   'shared/authentication/src/auth.definition.ts',
-  // Until the 2026-08-31 tubafrenzy turndown: the legacy mirror forwards
+  // Until the 2026-09-07 tubafrenzy turndown: the legacy mirror forwards
   // `auth_user.real_name` into tubafrenzy's DJ_NAME field.
   'shared/legacy-mirror/src/http-mirror.ts',
   // The `real_name` column definition itself.

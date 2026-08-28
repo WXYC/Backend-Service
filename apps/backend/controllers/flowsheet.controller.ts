@@ -280,7 +280,7 @@ const parseEpochMillis = (raw: unknown): number | null => {
  * GET /flowsheet/range?start=&end= — public, date-windowed flowsheet read.
  *
  * The successor to tubafrenzy's `GET /playlists/dailyEntries`, which the
- * `archive` app reads today and which dies at the 2026-08-31 cutover
+ * `archive` app reads today and which dies at the 2026-09-07 cutover
  * (WXYC/wiki#91 Phase 4). Contract: `wxyc-shared/api.yaml` `/flowsheet/range`.
  *
  * `start` / `end` are epoch **milliseconds**, matching the `dayStart`
@@ -962,7 +962,7 @@ const parseBoundedInt = (raw: string | undefined, name: string, fallback: number
  * tubafrenzy's `EndShowServlet` takes the show as a request parameter and
  * checks nothing about who is asking, so any signed-on DJ can end anyone's
  * recent show through the signon page's "Resume a Show" list. tubafrenzy
- * retires 2026-08-31 and takes that path with it.
+ * retires 2026-09-07 and takes that path with it.
  *
  * `window_hours` bounds the lookback; see `getOpenShows` for why an unwindowed
  * list is unusable in production.
