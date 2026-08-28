@@ -155,6 +155,30 @@ Eight `timestamp with time zone` markers record "this row was attempted by job X
 
 Don't move the file aside as part of the migration PR — restore it before commit.
 
+## DDL-only migrations via `drizzle-kit generate --custom`
+
+Some DDL doesn't correspond to any Drizzle-modeled schema change — `COMMENT ON COLUMN` is the case that motivated this section (migration `0157`), but a `GRANT` or an extension install qualifies the same way. Plain `npm run drizzle:generate` emits nothing on a no-diff schema, since a column comment (or any of these) isn't part of the Drizzle schema model, so there's no diff to detect. The escape hatch is an empty custom migration:
+
+1. `npx drizzle-kit generate --config drizzle.config.ts --custom --name <slug>` creates the empty `.sql` file and appends the journal entry. It needs `DB_*` env vars set for `drizzle.config.ts` to evaluate, but `--custom` never opens a connection — dummy values work fine, e.g. `DB_USERNAME=x DB_HOST=localhost DB_PORT=5432 DB_NAME=x`.
+
+2. **The `applied-hashes.json data is malformed` notice is NOT optional to work around under `--custom`**, unlike the plain-`generate` quirk documented above, where the malformed-file warning is non-blocking and the move-aside workaround is a just-in-case measure "if drizzle-kit's behavior tightens in a future bump" — true for a real schema diff, where the malformed file is merely skipped. Under `--custom` on drizzle-kit 0.31.10 it already fails every time: `preparePrevSnapshot` reads `snapshots[snapshots.length - 1]` off `meta/`'s directory listing sorted _alphabetically_, not by migration index, so `applied-hashes.json` (sorting after every `NNNN_snapshot.json`, since `'a'` > `'0'`-`'9'`) is picked as "the previous snapshot", fails `pgSchema.parse`, and drizzle-kit silently exits 0 having written nothing — no error, no `.sql`, no journal entry, just the malformed notice and then silence. The same move-aside workaround fixes it (step 6 below regenerates the moved file from scratch anyway, so the temporary absence is harmless) — it just isn't optional here:
+
+   ```bash
+   mv shared/database/src/migrations/meta/applied-hashes.json /tmp/
+   npx drizzle-kit generate --config drizzle.config.ts --custom --name <slug>
+   mv /tmp/applied-hashes.json shared/database/src/migrations/meta/
+   ```
+
+3. Hand-write the DDL below the placeholder line drizzle-kit leaves (`-- Custom SQL migration file, put your code below! --`), and prepend a header comment explaining the migration's purpose. `COMMENT ON COLUMN` is idempotent (last write wins, no error on re-apply), so no `IF NOT EXISTS`-style guard is needed — and see the `dev-prod-pg-version-skew` rule above: this syntax is plain SQL, unchanged since Postgres 7.2, so it's PG14-safe by construction, no release-notes check required.
+
+   **Qualify each object with the right schema — this repo uses two.** Hand-written DDL gets no help from drizzle-kit here, and `wxyc_schema` is the wrong guess for the auth tables: `auth_user` (and every other better-auth table) is declared with a bare `pgTable(...)` in `schema.ts`, so it lives in `public`, while `flowsheet`, `shows`, and the rest are `wxyc_schema.table(...)`. Drizzle's own generated SQL shows both forms side by side — see `0021`'s `REFERENCES "public"."auth_user"("id")` against its `ALTER TABLE "wxyc_schema"."shows"`. Guessing wrong fails at apply time with `42P01 relation "..." does not exist`, which `lint:migrations` cannot catch: it validates the journal, not the DDL. Only actually applying the chain does — `npm run db:start`, or `node dev_env/init-db.mjs` against a throwaway Postgres.
+
+4. If `meta/<idx>_snapshot.json` wasn't written (only possible if step 2's workaround wasn't applied), duplicate the predecessor's snapshot under the new index — a no-Drizzle-diff migration's snapshot is byte-for-byte identical to its predecessor's, since nothing in the Drizzle-modeled schema changed.
+
+5. Journal `when`: drizzle-kit auto-stamps `Date.now()` on the new entry. Diff it against the previous entry's `when` (the `hand-edit-when` rule above) rather than assuming — hand-bump to `previous.when + 1` only if it isn't already strictly greater.
+
+6. `npm run drizzle:freeze-hashes` (regenerates `meta/applied-hashes.json` from every `.sql` file's current content), then `npm run lint:migrations` must be green before committing.
+
 ## Journal idx vs filename idx (post-2026-06-14 invariant)
 
 From journal idx 47 onward, the journal `idx` field is one greater than the leading number in the corresponding filename. `_journal.json` historically had two entries at idx 47 (`0046_cdc_notify_triggers` and `0047_replica-identity-for-pkless-tables`); #1131 / PR #1415 broke the tie by shifting every entry from idx 47 onward by +1. Filenames were not renamed, so the relationship is now:

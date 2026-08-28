@@ -58,12 +58,6 @@ ruleTester.run('restricted-real-name', rule, {
       code: `const legal = row.real_name;`,
       filename: 'apps/auth/create-default-user.ts',
     },
-    // Allow-listed file: the future hook-helper module (doesn't exist on
-    // disk yet — allow-listing a nonexistent path is fine).
-    {
-      code: `export const deriveUserDisplayName = (data) => ({ data: { name: data.realName } });`,
-      filename: 'shared/authentication/src/derive-user-display-name.ts',
-    },
     // Allow-listed file: the legacy mirror's tubafrenzy DJ_NAME forward.
     {
       code: `const djName = dj.realName || dj.name;`,
@@ -163,6 +157,16 @@ ruleTester.run('restricted-real-name', rule, {
     {
       code: `const leaked = row.realName;`,
       filename: 'jobs/auth-user-name-backfill-other/job.ts',
+      errors: [{ messageId: 'restrictedRealName', data: { name: 'realName' } }],
+    },
+    // The hook-helper module is NOT allow-listed: its actual derivation
+    // reads `djName`, not `realName`/`real_name` (see Track 2b), so a
+    // `realName` read here would be a genuine new PII site, not the
+    // module's normal shape — the ALLOW_LIST entry for it was dropped as
+    // unexercised, and this proves the drop actually took effect.
+    {
+      code: `export const deriveUserDisplayName = (data) => ({ data: { name: data.realName } });`,
+      filename: 'shared/authentication/src/derive-user-display-name.ts',
       errors: [{ messageId: 'restrictedRealName', data: { name: 'realName' } }],
     },
   ],
