@@ -120,6 +120,7 @@
 import { sql } from 'drizzle-orm';
 import {
   buildWaitForQuietPeriod,
+  LiveActivityPauseCeilingExceededError,
   closeDatabaseConnection,
   db,
   requireNonNegativeInt,
@@ -397,6 +398,37 @@ export const analyzeAlbumMetadata = async (): Promise<void> => {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Cooperative stop, flipped by SIGTERM/SIGINT in `main`.
+ *
+ * A full drain is a ~15-hour run against ~890 batches, so it needs an ending
+ * that isn't `kill -9` mid-batch. The flag is read from two places: the shared
+ * pause's `shouldStop` (which both makes its own pause-sleep interruptible and
+ * returns a stop signal at the top of each batch) and `stopAwareSleep` below,
+ * so a signal arriving during the inter-batch throttle isn't waited out. The
+ * in-flight batch always finishes: its writes are already committed per album,
+ * and the job resumes from the cohort predicate on the next run.
+ *
+ * `process.on` (not `once`) is deliberate — a repeat signal just re-flips an
+ * already-true flag. Mirrors `va-apple-music-url-remediation`.
+ */
+let stopRequested = false;
+export const requestStop = (): void => {
+  stopRequested = true;
+};
+export const __resetStopForTesting = (): void => {
+  stopRequested = false;
+};
+
+/** `sleep`, but wakes early once a stop has been requested. */
+const stopAwareSleep = async (ms: number): Promise<void> => {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (stopRequested) return;
+    await sleep(Math.min(500, deadline - Date.now()));
+  }
+};
+
 // -- Batch -------------------------------------------------------------------
 
 export interface BatchResult {
@@ -556,6 +588,14 @@ export interface DrainSummary {
   skipped_raced: number;
   unexpected_index: number;
   execute: boolean;
+  /**
+   * True when the batch loop ended before walking every batch — an operator
+   * SIGTERM, or the cooperative-pause ceiling. Without it both loop exits are
+   * indistinguishable from a completed run: the only other in-summary signal
+   * is `cohortAfter ~= cohortBefore`, which is also what a successful bounded
+   * (`DRAIN_MAX_ALBUMS`) run looks like.
+   */
+  stopped_early: boolean;
 }
 
 /** Dry-run is the DEFAULT. `--execute` is the only way to write. */
@@ -636,6 +676,7 @@ export const runDrain = async (options: DrainOptions): Promise<DrainSummary> => 
       filled: 0,
       skipped_raced: 0,
       unexpected_index: 0,
+      stopped_early: false,
     };
   }
 
@@ -648,6 +689,11 @@ export const runDrain = async (options: DrainOptions): Promise<DrainSummary> => 
     lookbackSeconds: options.liveActivityLookbackSeconds,
     pauseMs: options.liveActivityPauseMs,
     maxTotalPauseMs: options.liveActivityMaxPauseMs,
+    // Without this the closure can only ever return `false` or throw, and the
+    // `break` below is dead code (review finding 5): `shouldStop` defaults to
+    // `() => false`. Wiring it makes the graceful-stop path real AND makes
+    // the shared pause's own sleep interruptible.
+    shouldStop: () => stopRequested,
     onPause: (info) =>
       log('info', 'live_activity_pause', `DJ activity detected; pausing ${info.pauseMs}ms`, {
         paused_ms_so_far: info.pausedMs,
@@ -661,10 +707,28 @@ export const runDrain = async (options: DrainOptions): Promise<DrainSummary> => 
 
   const interBatchSleepMs = Math.max(0, Math.floor(60_000 / options.ratePerMin));
   const totals = emptyBatchResult(0);
+  // Set when the loop ends on the cooperative-pause ceiling. The error is
+  // carried rather than thrown from inside the loop so the ANALYZE and the
+  // cohort re-count below still run against rows already durably written —
+  // then rethrown after that accounting, which is how
+  // `va-apple-music-url-remediation` handles the same abort.
+  let ceilingError: Error | undefined;
+  let stoppedEarly = false;
 
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
     if (!batch) continue;
+    // The shared pause consults `shouldStop` too, but returns early without
+    // consulting it when the probe is disabled (LIVE_ACTIVITY_LOOKBACK_SECONDS=0),
+    // so a catch-up run would have no stop path at all without this line.
+    if (stopRequested) {
+      log('warn', 'stopped', 'graceful stop requested; ending before the next batch', {
+        batches_done: b,
+        of: batches.length,
+      });
+      stoppedEarly = true;
+      break;
+    }
     // `waitForQuietPeriod()` returns a STOP signal, not a proceed signal —
     // `true` means "stop the loop", and the quiet-and-carry-on case returns
     // false. The first cut of this line had the polarity inverted
@@ -674,7 +738,10 @@ export const runDrain = async (options: DrainOptions): Promise<DrainSummary> => 
     // an unbounded "success" would have been mistaken for a completed drain.
     // Matches `va-apple-music-url-remediation`'s `if (await opts.waitForQuietPeriod()) break;`.
     try {
-      if (await waitForQuietPeriod()) break;
+      if (await waitForQuietPeriod()) {
+        stoppedEarly = true;
+        break;
+      }
     } catch (err) {
       // The shared helper THROWS `LiveActivityPauseCeilingExceededError` when
       // the cumulative pause budget is exhausted, rather than returning. Catch
@@ -682,12 +749,32 @@ export const runDrain = async (options: DrainOptions): Promise<DrainSummary> => 
       // cohort counts re-read) instead of unwinding to `main` with nothing —
       // the drain is resumable, so a partial run is a normal outcome and the
       // operator needs the numbers.
-      log('warn', 'live_activity_pause_ceiling_exceeded', 'cooperative-pause budget exhausted; ending the run early', {
-        batches_done: b,
-        of: batches.length,
-        error_message: err instanceof Error ? err.message : String(err),
-      });
-      captureError(err, 'live_activity_pause_ceiling_exceeded', { batches_done: b, of: batches.length });
+      //
+      // The catch is deliberately NOT narrowed to that class. Anything else
+      // escaping the closure (`onProbeError` is invoked from inside the
+      // probe's own catch, so a throwing Sentry client surfaces here) must
+      // also reach the accounting below rather than skipping it. What the
+      // class DOES decide is the label: reporting an unrelated failure as
+      // "cooperative-pause budget exhausted" would send an operator to the
+      // wrong knob. Either way the error is rethrown after the accounting.
+      const isCeiling = err instanceof LiveActivityPauseCeilingExceededError;
+      const step = isCeiling ? 'live_activity_pause_ceiling_exceeded' : 'live_activity_pause_failed';
+      log(
+        'error',
+        step,
+        isCeiling
+          ? 'cooperative-pause budget exhausted; ending the run early'
+          : 'cooperative pause threw; ending the run early',
+        {
+          batches_done: b,
+          of: batches.length,
+          error_message: err instanceof Error ? err.message : String(err),
+          error_name: err instanceof Error ? err.name : null,
+        }
+      );
+      captureError(err, step, { batches_done: b, of: batches.length });
+      ceilingError = err instanceof Error ? err : new Error(String(err));
+      stoppedEarly = true;
       break;
     }
     const result = await runBatch(batch, { budgetMs: options.budgetMs });
@@ -698,7 +785,7 @@ export const runDrain = async (options: DrainOptions): Promise<DrainSummary> => 
     totals.skipped_raced += result.skipped_raced;
     totals.unexpected_index += result.unexpected_index;
     log('info', 'batch_done', `batch ${b + 1}/${batches.length}`, { batch: b + 1, of: batches.length, ...result });
-    if (b < batches.length - 1 && interBatchSleepMs > 0) await sleep(interBatchSleepMs);
+    if (b < batches.length - 1 && interBatchSleepMs > 0) await stopAwareSleep(interBatchSleepMs);
   }
 
   if (totals.filled > 0) await analyzeAlbumMetadata();
@@ -711,7 +798,7 @@ export const runDrain = async (options: DrainOptions): Promise<DrainSummary> => 
     excluded,
   });
 
-  return {
+  const summary: DrainSummary = {
     ...summaryBase,
     cohortAfter,
     match: totals.match,
@@ -720,11 +807,38 @@ export const runDrain = async (options: DrainOptions): Promise<DrainSummary> => 
     filled: totals.filled,
     skipped_raced: totals.skipped_raced,
     unexpected_index: totals.unexpected_index,
+    stopped_early: stoppedEarly,
   };
+
+  // The accounting is done, so rethrow. Swallowing this error was the same
+  // failure shape the polarity fix above exists to close, moved one step over:
+  // `main` would log `finished` with a summary and exit 0, so a run aborted at
+  // batch 3 of ~890 would be indistinguishable — to a cron, to an operator
+  // reading logs, to anything watching exit codes — from a completed drain.
+  // `docs/env-vars.md` states the fleet contract as "the TypeScript loop
+  // THROWS ... and aborts the run"; the sole deliberate divergence is a Python
+  // job. This job's own `summary` log is what preserves the partial numbers,
+  // since `main`'s `finished` line will not run once this throws.
+  if (ceilingError) {
+    log('error', 'summary', `${JOB_NAME} aborted early`, { ...summary });
+    throw ceilingError;
+  }
+
+  return summary;
+};
+
+const registerSignalHandlers = (): void => {
+  const onSignal = (signal: NodeJS.Signals) => {
+    log('warn', 'signal', `received ${signal}; requesting graceful stop`, { signal });
+    requestStop();
+  };
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
 };
 
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
+  registerSignalHandlers();
 
   try {
     const options = resolveOptions();
