@@ -99,11 +99,21 @@ export function deriveUserNameOnCreate(
  * database, re-creating exactly the hidden-legal-name-copy state this plan
  * exists to close (`auth_user.name` silently holding a legal name again).
  *
- * So: any payload that carries a `name` key is rejected with `false` unless
- * it ALSO carries a `djName` that resolves to a usable handle — in which
+ * The rejection keys on the VALUE, not key presence: that same handler
+ * always builds its adapter payload as `{ name, image, ...additionalFields
+ * }`, so every `/update-user` call reaches this hook with the `name` key
+ * present — value `undefined` whenever the client didn't send one. A
+ * key-presence check therefore vetoes EVERY public profile update (dj-site's
+ * `updateUser({ appSkin })` experience switch was the first casualty);
+ * `undefined` must read as "not supplied". Any non-`undefined` value —
+ * including an explicit `null` — is a supplied value and an attempted
+ * direct write.
+ *
+ * So: any payload that supplies a `name` value is rejected with `false`
+ * unless it ALSO carries a `djName` that resolves to a usable handle — in which
  * case the returned `{ data: { name: handle } }` overrides the
  * client-supplied `name` via the merge contract below. This is deliberately
- * broader than "just don't derive from it": a payload carrying `name`
+ * broader than "just don't derive from it": a payload supplying `name`
  * alongside a blank/'Anonymous' djName is also rejected, closing the trivial
  * bypass of attaching an unusable djName to a bare-name payload to slip past
  * the rejection.
@@ -145,5 +155,5 @@ export function deriveOrRejectUserNameOnUpdate(
 ): { data: { name: string } } | false | undefined {
   const handle = 'djName' in data ? resolveDjDisplayName(data.djName ?? null) : null;
   if (handle !== null) return { data: { name: handle } };
-  return 'name' in data ? false : undefined;
+  return data.name !== undefined ? false : undefined;
 }
