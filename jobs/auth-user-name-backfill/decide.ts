@@ -6,7 +6,7 @@
  * machine-enforced precondition gate — are unit-testable without a database.
  */
 
-import { resolveDjDisplayName } from '@wxyc/database';
+import { deriveUserPublicName, resolveDjDisplayName } from '@wxyc/database';
 
 export interface AuthUserBackfillRow {
   id: string;
@@ -19,23 +19,16 @@ export interface AuthUserBackfillRow {
 
 /**
  * The 2a preserve-first predicate, mirrored here as the gate this job runs
- * against every row before it writes anything:
- *
- *   (real_name IS NULL OR trim(real_name) = '')
- *     AND NOT is_anonymous
- *     AND name NOT IN ('Anonymous', 'Auto DJ')
- *     AND name IS DISTINCT FROM username
- *     AND trim(name) IS DISTINCT FROM trim(dj_name)
- *
- * ('Anonymous'-literal handles need no special-case in that last clause:
- * a row whose `dj_name` is the literal 'Anonymous' can only collide with
- * `name = 'Anonymous'`, which the `name NOT IN (...)` clause already
- * excludes on its own. The TS predicate below applies the fuller
- * `resolveDjDisplayName` semantics — case-insensitive, treats blank/
- * 'Anonymous' as no handle — for the same reason `dj-name.ts`'s module doc
- * warns against re-deriving that chain in SQL; this comment documents the
- * simpler literal-trim SQL shape a manual audit query would use, not what
- * the function below executes.)
+ * against every row before it writes anything. A row violates it — holds its
+ * ONLY copy of a legal name in `auth_user.name` — when ALL of: `real_name`
+ * is null or blank; the user is not anonymous; `name` is not the literal
+ * `'Anonymous'` or `'Auto DJ'`; `name` is distinct from `username`; and
+ * `name` is not the resolved on-air handle (the HANDLE EXEMPTION below).
+ * Computed in TypeScript via `resolveDjDisplayName`, never re-derived in
+ * SQL — the exact mistake `dj-name.ts`'s module doc warns against. The 2a
+ * audit's violating-id list comes from this job's own dry-run output (see
+ * job.ts's `runPreconditionGate`), never from a hand-written SQL
+ * re-derivation of this predicate.
  *
  * A row matching this predicate holds its ONLY copy of a legal name in
  * `auth_user.name` — 2a (the reviewed manual SQL that copies `name ->
@@ -83,9 +76,11 @@ export function violatesPreserveFirstPrecondition(
 /**
  * Decide the backfilled `name` for one auth_user row.
  *
- * `name := resolveDjDisplayName(dj_name) ?? username`, computed in
- * TypeScript via the canonical helper — never re-derived in SQL, the exact
- * mistake `dj-name.ts`'s module doc warns against.
+ * `name := deriveUserPublicName(dj_name, username)` — the `auth_user.name`
+ * policy from `dj-name.ts`, computed in TypeScript via the canonical helper
+ * shared with the create hook and `provisionUser`, never re-derived in SQL.
+ * (The gate predicate above stays on `resolveDjDisplayName` directly — it
+ * needs only the handle link, not the username fallback.)
  *
  * Returns `undefined` (leave the row unchanged) when:
  *   - the user is anonymous (per-device throwaways, not station members —
@@ -105,7 +100,7 @@ export function decideAuthUserNameBackfill(
 ): string | undefined {
   if (row.isAnonymous) return undefined;
   if (row.name === 'Auto DJ') return undefined;
-  const derived = resolveDjDisplayName(row.djName ?? null) ?? row.username ?? undefined;
+  const derived = deriveUserPublicName(row.djName ?? null, row.username ?? null) ?? undefined;
   if (derived === undefined) return undefined;
   if (derived === row.name) return undefined;
   return derived;

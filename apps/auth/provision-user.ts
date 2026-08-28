@@ -13,7 +13,7 @@ import {
   validateUsername,
   WXYCRoles,
 } from '@wxyc/authentication';
-import { db, resolveDjDisplayName, user } from '@wxyc/database';
+import { db, deriveUserPublicName, user } from '@wxyc/database';
 import { eq } from 'drizzle-orm';
 
 /** Error with an HTTP status code for the provision-user endpoint. */
@@ -82,8 +82,12 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
   // `name` is unverified against the lockfile-resolved better-auth version.
   // Supplying the value here removes that ordering dependency entirely.
   // `username` is a required ProvisionUserInput field (validated below), so
-  // this is never empty in practice; `input.name` is not read at all.
-  const derivedName = resolveDjDisplayName(djName ?? null) ?? username;
+  // this is never empty in practice; `input.name` is not read at all. The
+  // policy itself (handle, else username) is `deriveUserPublicName` —
+  // see shared/database/src/dj-name.ts — with `?? username` kept as this
+  // site's own terminal fallback for the same reason the create hook and the
+  // backfill job each keep theirs.
+  const derivedName = deriveUserPublicName(djName ?? null, username) ?? username;
 
   // 1. Validate role
   // `Object.hasOwn`, not `role in WXYCRoles`: `in` walks the prototype chain,

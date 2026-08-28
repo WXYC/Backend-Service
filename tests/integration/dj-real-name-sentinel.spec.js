@@ -155,11 +155,19 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
     expect(JSON.stringify(res.body)).not.toContain(SENTINEL_REAL_NAME);
   };
 
+  // Collapses the five interchangeable "never leaks" bodies below (BS#2297
+  // review, fix 6): each endpoint keeps its own named `it` — what varies
+  // enough per endpoint to matter in failure output — but the boilerplate of
+  // firing a GET and running assertNoSentinel on it is written once.
+  // Positive controls stay bespoke; their assertions differ too much per
+  // endpoint to share.
+  const expectNoSentinelLeak = async (pathAndQuery) => {
+    const res = await request.get(pathAndQuery);
+    assertNoSentinel(res);
+  };
+
   describe('GET /flowsheet (default, most-recent page)', () => {
-    it('never leaks the sentinel real name', async () => {
-      const res = await request.get('/flowsheet');
-      assertNoSentinel(res);
-    });
+    it('never leaks the sentinel real name', () => expectNoSentinelLeak('/flowsheet'));
 
     it('positive control: included our probe row', async () => {
       // Track-type V2 entries don't carry a dj_name field at all
@@ -175,10 +183,7 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
   });
 
   describe('GET /flowsheet/latest', () => {
-    it('never leaks the sentinel real name', async () => {
-      const res = await request.get('/flowsheet/latest');
-      assertNoSentinel(res);
-    });
+    it('never leaks the sentinel real name', () => expectNoSentinelLeak('/flowsheet/latest'));
 
     it('positive control: returned our probe row', async () => {
       // Same track-type-has-no-dj_name-on-the-wire note as GET /flowsheet above.
@@ -191,10 +196,8 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
   describe('GET /flowsheet/range', () => {
     const fetchWindow = () => request.get(`/flowsheet/range?start=${WINDOW_START}&end=${WINDOW_END}`);
 
-    it('never leaks the sentinel real name', async () => {
-      const res = await fetchWindow();
-      assertNoSentinel(res);
-    });
+    it('never leaks the sentinel real name', () =>
+      expectNoSentinelLeak(`/flowsheet/range?start=${WINDOW_START}&end=${WINDOW_END}`));
 
     it('positive control: resolves the show dj_name through the live auth_user JOIN to the handle, not the real name', async () => {
       const res = await fetchWindow();
@@ -222,15 +225,10 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
   });
 
   describe('GET /flowsheet/search', () => {
-    it('never leaks the sentinel real name on an unfiltered query', async () => {
-      const res = await request.get('/flowsheet/search');
-      assertNoSentinel(res);
-    });
+    it('never leaks the sentinel real name on an unfiltered query', () => expectNoSentinelLeak('/flowsheet/search'));
 
-    it('never leaks the sentinel real name on a dj: operator query matching the handle', async () => {
-      const res = await request.get(`/flowsheet/search?q=${encodeURIComponent(`dj:${HANDLE}`)}`);
-      assertNoSentinel(res);
-    });
+    it('never leaks the sentinel real name on a dj: operator query matching the handle', () =>
+      expectNoSentinelLeak(`/flowsheet/search?q=${encodeURIComponent(`dj:${HANDLE}`)}`));
 
     it('positive control: the dj: operator query found our probe row(s), projecting the handle rather than the real name', async () => {
       const res = await request.get(`/flowsheet/search?q=${encodeURIComponent(`dj:${HANDLE}`)}`);

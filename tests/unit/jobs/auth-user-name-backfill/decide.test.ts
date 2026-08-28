@@ -3,9 +3,10 @@
  * (DJ real-name PII safeguards plan, Track 2d).
  *
  * @wxyc/database resolves to tests/mocks/database.mock.ts (jest.unit.config.ts
- * moduleNameMapper), which re-exports the REAL resolveDjDisplayName from
- * shared/database/src/dj-name.ts — decideAuthUserNameBackfill is exercised
- * against the actual PII-safe chain, not a stub of it.
+ * moduleNameMapper), which re-exports the REAL resolveDjDisplayName /
+ * deriveUserPublicName from shared/database/src/dj-name.ts — both decision
+ * functions here are exercised against the actual PII-safe chain, not a
+ * stub of it.
  */
 
 import { describe, it, expect } from '@jest/globals';
@@ -14,101 +15,58 @@ import {
   violatesPreserveFirstPrecondition,
 } from '../../../../jobs/auth-user-name-backfill/decide';
 
+// Mirrors job.test.ts's rawRow(overrides) pattern: a default row shaped like
+// the common case for both describe blocks below (case 1 of the gate suite,
+// case 2 of the decide suite), so each test shows only the fields its case
+// actually varies. `realName` is unused by decideAuthUserNameBackfill but
+// harmless to carry — same "one factory, ignore what a caller doesn't need"
+// convention as job.test.ts's rawRow.
+const row = (
+  overrides: Partial<Record<'realName' | 'isAnonymous' | 'name' | 'username' | 'djName', unknown>> = {}
+) => ({
+  realName: null,
+  isAnonymous: false,
+  name: 'Jane Doe',
+  username: 'jane_dj',
+  djName: null,
+  ...overrides,
+});
+
 describe('violatesPreserveFirstPrecondition (2a preserve-first gate predicate)', () => {
   it('flags a row whose only legal-name copy is in name (real_name blank, name is neither Anonymous/Auto DJ/username)', () => {
-    expect(
-      violatesPreserveFirstPrecondition({
-        realName: null,
-        isAnonymous: false,
-        name: 'Jane Doe',
-        username: 'jane_dj',
-        djName: null,
-      })
-    ).toBe(true);
+    expect(violatesPreserveFirstPrecondition(row())).toBe(true);
   });
 
   it('flags a row whose real_name is whitespace-only', () => {
-    expect(
-      violatesPreserveFirstPrecondition({
-        realName: '   ',
-        isAnonymous: false,
-        name: 'Jane Doe',
-        username: 'jane_dj',
-        djName: null,
-      })
-    ).toBe(true);
+    expect(violatesPreserveFirstPrecondition(row({ realName: '   ' }))).toBe(true);
   });
 
   it('does not flag a row that already has a real_name', () => {
-    expect(
-      violatesPreserveFirstPrecondition({
-        realName: 'Jane Doe',
-        isAnonymous: false,
-        name: 'Jane Doe',
-        username: 'jane_dj',
-        djName: null,
-      })
-    ).toBe(false);
+    expect(violatesPreserveFirstPrecondition(row({ realName: 'Jane Doe' }))).toBe(false);
   });
 
   it('does not flag an anonymous user', () => {
-    expect(
-      violatesPreserveFirstPrecondition({
-        realName: null,
-        isAnonymous: true,
-        name: 'Anonymous',
-        username: null,
-        djName: null,
-      })
-    ).toBe(false);
+    expect(violatesPreserveFirstPrecondition(row({ isAnonymous: true, name: 'Anonymous', username: null }))).toBe(
+      false
+    );
   });
 
   it('does not flag the literal Anonymous name', () => {
-    expect(
-      violatesPreserveFirstPrecondition({
-        realName: null,
-        isAnonymous: false,
-        name: 'Anonymous',
-        username: null,
-        djName: null,
-      })
-    ).toBe(false);
+    expect(violatesPreserveFirstPrecondition(row({ name: 'Anonymous', username: null }))).toBe(false);
   });
 
   it('does not flag the literal Auto DJ service-account name', () => {
-    expect(
-      violatesPreserveFirstPrecondition({
-        realName: null,
-        isAnonymous: false,
-        name: 'Auto DJ',
-        username: 'autodj',
-        djName: 'Auto DJ',
-      })
-    ).toBe(false);
+    expect(violatesPreserveFirstPrecondition(row({ name: 'Auto DJ', username: 'autodj', djName: 'Auto DJ' }))).toBe(
+      false
+    );
   });
 
   it('does not flag a row where name already equals username (handle-less user with no real name to lose)', () => {
-    expect(
-      violatesPreserveFirstPrecondition({
-        realName: null,
-        isAnonymous: false,
-        name: 'jane_dj',
-        username: 'jane_dj',
-        djName: null,
-      })
-    ).toBe(false);
+    expect(violatesPreserveFirstPrecondition(row({ name: 'jane_dj' }))).toBe(false);
   });
 
   it('null-safely treats name/username as distinct when username is null (IS DISTINCT FROM semantics)', () => {
-    expect(
-      violatesPreserveFirstPrecondition({
-        realName: null,
-        isAnonymous: false,
-        name: 'Jane Doe',
-        username: null,
-        djName: null,
-      })
-    ).toBe(true);
+    expect(violatesPreserveFirstPrecondition(row({ username: null }))).toBe(true);
   });
 
   // FINDING 2 (2297 review): a user provisioned AFTER this PR deploys can
@@ -121,26 +79,12 @@ describe('violatesPreserveFirstPrecondition (2a preserve-first gate predicate)',
   // to preserve, because `name` never held anything but the handle.
   it('does not flag a post-deploy-provisioned row: name is the on-air handle, real_name blank, name distinct from username', () => {
     expect(
-      violatesPreserveFirstPrecondition({
-        realName: null,
-        isAnonymous: false,
-        name: 'DJ Jazzy Jane',
-        username: 'jjane',
-        djName: 'DJ Jazzy Jane',
-      })
+      violatesPreserveFirstPrecondition(row({ name: 'DJ Jazzy Jane', username: 'jjane', djName: 'DJ Jazzy Jane' }))
     ).toBe(false);
   });
 
   it('still flags a genuine legacy row: name is a legal-looking value distinct from both the handle and username', () => {
-    expect(
-      violatesPreserveFirstPrecondition({
-        realName: null,
-        isAnonymous: false,
-        name: 'Jane Doe',
-        username: 'jjane',
-        djName: 'DJ Jazzy Jane',
-      })
-    ).toBe(true);
+    expect(violatesPreserveFirstPrecondition(row({ username: 'jjane', djName: 'DJ Jazzy Jane' }))).toBe(true);
   });
 
   // Handle-is-real-name edge: a DJ whose real legal name coincidentally
@@ -155,58 +99,36 @@ describe('violatesPreserveFirstPrecondition (2a preserve-first gate predicate)',
   // never overwrites a row's `name` away from a value that already equals
   // its resolved handle (decideAuthUserNameBackfill is a no-op there too).
   it('does not flag the handle-is-real-name coincidence: name equals both the handle and what could be a legal name', () => {
-    expect(
-      violatesPreserveFirstPrecondition({
-        realName: null,
-        isAnonymous: false,
-        name: 'Jane Doe',
-        username: 'jjane',
-        djName: 'Jane Doe',
-      })
-    ).toBe(false);
+    expect(violatesPreserveFirstPrecondition(row({ username: 'jjane', djName: 'Jane Doe' }))).toBe(false);
   });
 });
 
 describe('decideAuthUserNameBackfill', () => {
   it('derives the handle when djName is a usable handle', () => {
-    expect(
-      decideAuthUserNameBackfill({ name: 'Jane Doe', username: 'jane_dj', djName: 'DJ Jazzy Jane', isAnonymous: false })
-    ).toBe('DJ Jazzy Jane');
+    expect(decideAuthUserNameBackfill(row({ djName: 'DJ Jazzy Jane' }))).toBe('DJ Jazzy Jane');
   });
 
   it('falls back to username when djName is absent', () => {
-    expect(
-      decideAuthUserNameBackfill({ name: 'Jane Doe', username: 'jane_dj', djName: null, isAnonymous: false })
-    ).toBe('jane_dj');
+    expect(decideAuthUserNameBackfill(row())).toBe('jane_dj');
   });
 
   it('falls back to username when djName is the literal Anonymous', () => {
-    expect(
-      decideAuthUserNameBackfill({ name: 'Jane Doe', username: 'jane_dj', djName: 'Anonymous', isAnonymous: false })
-    ).toBe('jane_dj');
+    expect(decideAuthUserNameBackfill(row({ djName: 'Anonymous' }))).toBe('jane_dj');
   });
 
   it('leaves the row unchanged when the user is anonymous', () => {
-    expect(
-      decideAuthUserNameBackfill({ name: 'Anonymous', username: null, djName: null, isAnonymous: true })
-    ).toBeUndefined();
+    expect(decideAuthUserNameBackfill(row({ isAnonymous: true, name: 'Anonymous', username: null }))).toBeUndefined();
   });
 
   it('leaves the row unchanged when name is the literal Auto DJ', () => {
-    expect(
-      decideAuthUserNameBackfill({ name: 'Auto DJ', username: 'autodj', djName: 'Auto DJ', isAnonymous: false })
-    ).toBeUndefined();
+    expect(decideAuthUserNameBackfill(row({ name: 'Auto DJ', username: 'autodj', djName: 'Auto DJ' }))).toBeUndefined();
   });
 
   it('leaves the row unchanged when neither a usable handle nor a username exists', () => {
-    expect(
-      decideAuthUserNameBackfill({ name: 'Jane Doe', username: null, djName: null, isAnonymous: false })
-    ).toBeUndefined();
+    expect(decideAuthUserNameBackfill(row({ username: null }))).toBeUndefined();
   });
 
   it('is a no-op when the derived value already equals the stored name', () => {
-    expect(
-      decideAuthUserNameBackfill({ name: 'jane_dj', username: 'jane_dj', djName: null, isAnonymous: false })
-    ).toBeUndefined();
+    expect(decideAuthUserNameBackfill(row({ name: 'jane_dj' }))).toBeUndefined();
   });
 });

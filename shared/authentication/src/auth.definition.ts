@@ -38,7 +38,7 @@ import {
   capSessionUpdateAgainstDeviceFlow,
   DEVICE_SESSION_TTL_MS,
 } from './device-authorization';
-import { deriveUserNameOnCreate, deriveUserNameOnUpdate } from './derive-user-display-name';
+import { deriveUserNameOnCreate, deriveOrRejectUserNameOnUpdate } from './derive-user-display-name';
 import { sendEmail, sendOTPEmail, sendResetPasswordEmail, sendVerificationEmailMessage } from './email';
 import { buildTrustedClients } from './oidc-trusted-clients';
 import { buildLoginPage } from './oidc-login-page';
@@ -579,8 +579,11 @@ export const auth = betterAuth({
       update: {
         // Same Track 2b choke point as create.before above — payload-only,
         // see derive-user-display-name.ts for why (update.before never
-        // receives the row it's updating).
-        before: async (data) => deriveUserNameOnUpdate(data as { djName?: string | null } & Record<string, unknown>),
+        // receives the row it's updating). This hook can also return
+        // `false` and abort the entire write — see the rejection policy on
+        // `deriveOrRejectUserNameOnUpdate` in derive-user-display-name.ts.
+        before: async (data) =>
+          deriveOrRejectUserNameOnUpdate(data as { djName?: string | null } & Record<string, unknown>),
       },
     },
     session: {
@@ -649,6 +652,16 @@ export const auth = betterAuth({
       //     both call internalAdapter methods directly, which hand their
       //     payload straight to createWithHooks/updateWithHooks — no
       //     input-filtering call there either.
+      //
+      // This lock and the databaseHooks.user veto (derive-user-display-name.ts's
+      // deriveOrRejectUserNameOnUpdate) are complementary, not redundant: this
+      // input:false block cannot reach the core `name` field at all (better-auth
+      // destructures `name` out of `body` before parseUserInput ever runs, so
+      // there is no additionalFields gate for it to sit behind), and the hook
+      // veto cannot be bypassed by a non-public writer the way an input-level
+      // lock could be (it runs inside createWithHooks/updateWithHooks itself,
+      // not in route-level filtering). Do not remove either mechanism believing
+      // the other already covers it.
       realName: { type: 'string', required: false, input: false },
       djName: { type: 'string', required: false, input: false },
       appSkin: { type: 'string', required: true, defaultValue: 'modern-light' },

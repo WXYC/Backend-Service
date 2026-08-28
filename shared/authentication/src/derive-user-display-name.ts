@@ -1,4 +1,4 @@
-import { resolveDjDisplayName } from '@wxyc/database';
+import { deriveUserPublicName, resolveDjDisplayName } from '@wxyc/database';
 
 /**
  * The single choke point for `auth_user.name`: pure `databaseHooks.user`
@@ -11,15 +11,11 @@ import { resolveDjDisplayName } from '@wxyc/database';
  * Two verified constraints from better-auth's `db/with-hooks.mjs` (v1.6.26,
  * the lockfile-resolved version) shape both functions here:
  *
- * 1. **The `{ data }` merge contract is load-bearing, not style.**
- *    `createWithHooks`/`updateWithHooks` call `toRun(data, context)` and only
- *    merge a returned value that satisfies `typeof result === 'object' &&
- *    'data' in result` — `actualData = { ...actualData, ...result.data }`.
- *    A mutated `data` argument, a bare object, or any shape other than
- *    `{ data: {...} }` is silently discarded: the hook appears to run but the
- *    write proceeds with the original payload. `false` aborts the write
- *    entirely. So `undefined` is the only correct "no-op" return — not `{}`,
- *    not a mutated argument.
+ * 1. **The `{ data }` merge contract is load-bearing, not style.** Both hooks
+ *    below depend on it identically — the exact quoted contract, and why
+ *    `false` differs from `undefined`, is documented once, on
+ *    `deriveOrRejectUserNameOnUpdate` below (it's the function whose
+ *    rejection behavior actually depends on the distinction).
  *
  * 2. **`update.before` never receives the user id.** `internalAdapter
  *    .updateUser(userId, data)` builds `where: [{ field: 'id', value: userId
@@ -30,17 +26,21 @@ import { resolveDjDisplayName } from '@wxyc/database';
  *    any better-auth endpoint) goes through the identical path, so a
  *    request-context fallback isn't available there either.
  *
- * Constraint 2 is why `deriveUserNameOnUpdate` is payload-only: it can only
- * ever answer "does THIS update's own `djName` resolve to a usable handle?",
- * never "what is this user's handle right now?". Two update shapes are
- * therefore deliberately left untouched rather than guessed at:
+ * Constraint 2 is why `deriveOrRejectUserNameOnUpdate` is payload-only: it
+ * can only ever answer "does THIS update's own `djName` resolve to a usable
+ * handle?", never "what is this user's handle right now?". Two update shapes
+ * are therefore deliberately left untouched rather than guessed at:
  *
  *   - **Handle-clear** (`djName` present but blank/'Anonymous'): the prior
  *     `name` — itself already a handle or a username post-backfill — stays.
  *   - **Username-only rename** (no `djName` key in the payload at all): a
  *     username-only payload can't reveal whether the user currently has a
  *     handle, so deriving from `username` here risks clobbering a live
- *     handle with the new username. `name` stays at its prior value.
+ *     handle with the new username. `name` stays at its prior value. (This
+ *     is also why the update hook calls `resolveDjDisplayName` directly
+ *     instead of `deriveUserPublicName` from `@wxyc/database`'s
+ *     `dj-name.ts` — that helper's username link is create/backfill-only;
+ *     see its docblock.)
  *
  * Both are cosmetic staleness, not a PII regression: after the 2d backfill,
  * whatever `name` was already holding is structurally non-PII (an earlier
@@ -48,35 +48,32 @@ import { resolveDjDisplayName } from '@wxyc/database';
  * (Track 3b) is what actually polices the PII half of this invariant going
  * forward.
  *
- * Both "left untouched" shapes above assume the payload does NOT also carry
- * a bare `name` key. When it does, `deriveUserNameOnUpdate` rejects the
- * write outright (`false`) rather than leaving `name` untouched — see that
- * function's docblock for the full rejection policy (BS#2297 review finding
- * 1). better-auth's public `POST /update-user` accepts a client-supplied
- * `name` for any signed-in session; without the rejection, a name-only
- * payload would fall through this hook as a no-op and better-auth would
- * write the client-supplied `name` verbatim, re-opening the exact hole this
- * plan closes.
+ * The full rejection policy for a `name`-carrying update payload — what
+ * happens, and why — is documented once, on `deriveOrRejectUserNameOnUpdate`
+ * below.
  */
 
 /**
  * `databaseHooks.user.create.before`.
  *
  * The full create payload is present (unlike `update.before`), so the chain
- * is a straight priority order: on-air handle, else `username`, else keep
- * whatever `name` the caller supplied. The final fallback is deliberate —
- * it's how the literal `'Anonymous'` (better-auth's anonymous plugin) and
- * `'Auto DJ'` (`create-auto-dj-user.ts`) survive this hook unclobbered:
- * neither has a resolvable handle or a `username`, so `derived` lands back
- * on the supplied `name` and the no-op branch below fires.
+ * is the `auth_user.name` policy itself: `deriveUserPublicName` (on-air
+ * handle, else `username`) from `@wxyc/database`'s `dj-name.ts`, falling back
+ * to whatever `name` the caller supplied when neither resolves. The final
+ * fallback is deliberate — it's how the literal `'Anonymous'` (better-auth's
+ * anonymous plugin) and `'Auto DJ'` (`create-auto-dj-user.ts`) survive this
+ * hook unclobbered: neither has a resolvable handle or a `username`, so
+ * `derived` lands back on the supplied `name` and the no-op branch below
+ * fires.
  */
 export function deriveUserNameOnCreate(
   data: { name: string; username?: string | null; djName?: string | null } & Record<string, unknown>
 ): { data: { name: string } } | undefined {
   // `?? null` coercion is pinned here, same as Track 0's http-mirror.ts call:
-  // resolveDjDisplayName is typed `(djName: string | null)` and djName is
-  // optional on this payload shape under the package's `strict: true`.
-  const derived = resolveDjDisplayName(data.djName ?? null) ?? data.username ?? data.name;
+  // deriveUserPublicName is typed `(djName: string | null, username: string |
+  // null)` and both are optional on this payload shape under the package's
+  // `strict: true`.
+  const derived = deriveUserPublicName(data.djName ?? null, data.username ?? null) ?? data.name;
   if (derived === data.name) return undefined;
   return { data: { name: derived } };
 }
@@ -84,35 +81,46 @@ export function deriveUserNameOnCreate(
 /**
  * `databaseHooks.user.update.before`.
  *
- * Payload-only by construction — see constraint 2 above. Derives a new
- * `name` only when THIS update's own payload carries a `djName` key that
- * resolves to a usable handle. Any other shape (`djName` absent, blank, or
- * the literal `'Anonymous'`) is left untouched: see the handle-clear /
- * username-only-rename note above for why that's the correct call, not a
- * missed case.
+ * Payload-only by construction — see constraint 2 in the module docblock
+ * above. Derives a new `name` only when THIS update's own payload carries a
+ * `djName` key that resolves to a usable handle. Any other shape (`djName`
+ * absent, blank, or the literal `'Anonymous'`) is left untouched: see the
+ * handle-clear / username-only-rename note above for why that's the correct
+ * call, not a missed case.
  *
- * REJECTION POLICY (BS#2297 review finding 1): better-auth's core
- * `POST /update-user` accepts a client-supplied `name` from any signed-in
- * session (`api/routes/update-user.mjs`: `const { name, image, ...rest } =
- * body`) and writes it verbatim once it reaches the adapter. Before this
- * policy, a name-only payload fell through to the "no djName key" branch
- * and returned `undefined` — a no-op from this hook's point of view — so
- * better-auth wrote the client-supplied `name` straight to the database,
- * re-creating exactly the hidden-legal-name-copy state this plan exists to
- * close (`auth_user.name` silently holding a legal name again).
+ * REJECTION POLICY (BS#2297 review finding 1) — canonical statement; nowhere
+ * else in this codebase restates it in full, only points here. Better-auth's
+ * core `POST /update-user` accepts a client-supplied `name` from any
+ * signed-in session (`api/routes/update-user.mjs`: `const { name, image,
+ * ...rest } = body`) and writes it verbatim once it reaches the adapter.
+ * Before this policy, a name-only payload fell through to the "no djName
+ * key" branch and returned `undefined` — a no-op from this hook's point of
+ * view — so better-auth wrote the client-supplied `name` straight to the
+ * database, re-creating exactly the hidden-legal-name-copy state this plan
+ * exists to close (`auth_user.name` silently holding a legal name again).
  *
- * So: any payload that carries a `name` key is now rejected with `false`
- * unless it ALSO carries a `djName` that resolves to a usable handle — in
- * which case the returned `{ data: { name: handle } }` overrides the
- * client-supplied `name` via updateWithHooks's merge order (constraint 1
- * above: `actualData = { ...actualData, ...result.data }`, hook result
- * spread after actualData). `false` tells better-auth's `updateWithHooks`
- * to abort the write entirely (`with-hooks.mjs`: `if (result === false)
- * return null`) — the row is never touched, not even for other fields in
- * the same payload. This is deliberately broader than "just don't derive
- * from it": a payload carrying `name` alongside a blank/'Anonymous' djName
- * is also rejected, closing the trivial bypass of attaching an unusable
- * djName to a bare-name payload to slip past the rejection.
+ * So: any payload that carries a `name` key is rejected with `false` unless
+ * it ALSO carries a `djName` that resolves to a usable handle — in which
+ * case the returned `{ data: { name: handle } }` overrides the
+ * client-supplied `name` via the merge contract below. This is deliberately
+ * broader than "just don't derive from it": a payload carrying `name`
+ * alongside a blank/'Anonymous' djName is also rejected, closing the trivial
+ * bypass of attaching an unusable djName to a bare-name payload to slip past
+ * the rejection.
+ *
+ * THE MERGE CONTRACT this rejection depends on (constraint 1, module
+ * docblock above): `createWithHooks`/`updateWithHooks` call `toRun(data,
+ * context)` and only merge a returned value that satisfies `typeof result
+ * === 'object' && 'data' in result` — `actualData = { ...actualData,
+ * ...result.data }` (hook result spread AFTER actualData, which is why the
+ * override above wins regardless of what the payload's own `name` was). A
+ * mutated `data` argument, a bare object, or any shape other than `{ data:
+ * {...} }` is silently discarded: the hook appears to run but the write
+ * proceeds with the original payload. `false` tells `updateWithHooks` to
+ * abort the write entirely (`with-hooks.mjs`: `if (result === false) return
+ * null`) — the row is never touched, not even for other fields in the same
+ * payload — so `undefined` is the only correct "no-op" return, never `{}`
+ * and never a mutated argument.
  *
  * Direct writes to `name` are prohibited categorically, not case-by-case:
  * after this program's PRs, no legitimate writer sends bare `name` on
@@ -125,17 +133,17 @@ export function deriveUserNameOnCreate(
  * (better-auth's hook contract has no "drop one field" return shape; the
  * only choices are override the whole payload's fate via `{ data }` or
  * abort via `false`).
+ *
+ * This hook's veto is one of two independent PII-write guards, complementary
+ * rather than redundant with the other — `auth.definition.ts`'s
+ * `user.additionalFields` `input: false` lock on `realName`/`djName`. See
+ * the full two-writers writeup at that site for why neither can be removed
+ * believing the other covers it.
  */
-export function deriveUserNameOnUpdate(
+export function deriveOrRejectUserNameOnUpdate(
   data: { name?: unknown; djName?: string | null } & Record<string, unknown>
 ): { data: { name: string } } | false | undefined {
-  const hasName = 'name' in data;
-  if (!('djName' in data)) {
-    return hasName ? false : undefined;
-  }
-  const handle = resolveDjDisplayName(data.djName ?? null);
-  if (handle === null) {
-    return hasName ? false : undefined;
-  }
-  return { data: { name: handle } };
+  const handle = 'djName' in data ? resolveDjDisplayName(data.djName ?? null) : null;
+  if (handle !== null) return { data: { name: handle } };
+  return 'name' in data ? false : undefined;
 }

@@ -747,7 +747,12 @@ export { intArrayLiteral } from '../../shared/database/src/int-array-literal.js'
 // would let a consumer's test pass while the real chain disagrees, which is
 // precisely the drift the extraction exists to prevent. The job tests assert
 // their resolver AGAINST `resolveShowDjName`, so it must be the real one.
-export { resolveDjDisplayName, showDjNameOverride, resolveShowDjName } from '../../shared/database/src/dj-name.js';
+export {
+  resolveDjDisplayName,
+  showDjNameOverride,
+  resolveShowDjName,
+  deriveUserPublicName,
+} from '../../shared/database/src/dj-name.js';
 
 // Stubs of shared/database/src/last-logged-show-entry.ts (BS#2118 sites
 // 5/7/8). NOT re-exported from source, unlike the pure dj-name chain above:
