@@ -1030,11 +1030,7 @@ describe('http.mirror', () => {
     });
 
     it('trims a padded username and empties a whitespace-only one', () => {
-      // The schema column is an unconstrained varchar: every CURRENT write
-      // path validates usernames against /^[a-zA-Z0-9_.]+$/, but a manually
-      // edited or pre-validation legacy row could carry padding or pure
-      // whitespace. The docblock's contract is "if all three are unusable,
-      // djHandle is ''" — a whitespace-only username is unusable.
+      // Unconstrained-varchar / username-trim guard: see mapShowToTubafrenzy's docblock.
       const show = { id: 100, start_time: new Date() };
       expect(
         mapShowToTubafrenzy(show, { realName: null, djName: null, name: 'kate', username: '  kbailey  ' }).djHandle
@@ -1058,25 +1054,35 @@ describe('http.mirror', () => {
     // matrix. Uses obviously-fake sentinel strings per WXYC convention.
     it('never leaks a sentinel legal name planted in name/realName onto djHandle', () => {
       const sentinel = 'SENTINEL Legal Name';
+      // Local factory: every case plants the sentinel in realName/name (the
+      // fields under test) and only varies djName/username, so each case
+      // below shows just what it varies.
+      const sentinelDj = (over: Partial<{ djName: string | null; username: string | null }> = {}) => ({
+        realName: sentinel,
+        djName: sentinel,
+        name: sentinel,
+        username: sentinel,
+        ...over,
+      });
       const cases: Array<{
         show: Parameters<typeof mapShowToTubafrenzy>[0];
         dj: Parameters<typeof mapShowToTubafrenzy>[1];
       }> = [
         {
           show: { id: 1, start_time: new Date(), dj_name_override: 'Guest Host' },
-          dj: { realName: sentinel, djName: sentinel, name: sentinel, username: sentinel },
+          dj: sentinelDj(),
         },
         {
           show: { id: 2, start_time: new Date() },
-          dj: { realName: sentinel, djName: 'DJ Catalyst', name: sentinel, username: sentinel },
+          dj: sentinelDj({ djName: 'DJ Catalyst' }),
         },
         {
           show: { id: 3, start_time: new Date() },
-          dj: { realName: sentinel, djName: null, name: sentinel, username: 'kbailey' },
+          dj: sentinelDj({ djName: null, username: 'kbailey' }),
         },
         {
           show: { id: 4, start_time: new Date() },
-          dj: { realName: sentinel, djName: null, name: sentinel, username: null },
+          dj: sentinelDj({ djName: null, username: null }),
         },
       ];
 
