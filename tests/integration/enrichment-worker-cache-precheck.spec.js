@@ -4,7 +4,8 @@
  *
  * B1 reads `album_metadata` for a linked flowsheet row's album BEFORE calling
  * LML and skips the call only when a load-bearing field (`artwork_url` /
- * `discogs_url`) is already non-null. This spec validates the exact SQL
+ * `discogs_url`) is already non-null AND (BS#2295) at least one of the five
+ * streaming URL columns is non-null. This spec validates the exact SQL
  * predicate that decision keys on, against the live `album_metadata` table
  * (FK to `library`, PK on `album_id`, the real column NULLability).
  *
@@ -15,6 +16,15 @@
  * forever. The predicate under test MUST return false for such a shell (and
  * for an all-null row, and for a missing row) so the worker re-calls LML and
  * the row self-heals — and true ONLY when a real, persisted match is present.
+ *
+ * A second regression this locks down is BS#2295: a load-bearing match with
+ * zero streaming columns populated used to skip anyway, and
+ * `finalizeFromCachedMetadata` then stamped a terminal `enriched_match`
+ * without ever writing those columns — five permanent nulls for every
+ * client. The predicate MUST return false for that shape too (see the
+ * describe block below) so the row falls through to LML and gets a real
+ * chance to fill them, while an album that also carries at least one
+ * streaming URL stays skipped (the #1747 amplifier guarantee).
  *
  * Pure SQL — does NOT import `apps/enrichment-worker/precheck.ts`. The
  * integration runner is babel-jest with no TS support (drizzle-orm + ts-jest
@@ -30,6 +40,7 @@
  *
  * @see WXYC/Backend-Service#1747
  * @see WXYC/Backend-Service#1089
+ * @see WXYC/Backend-Service#2295
  */
 
 const { getTestDb } = require('../utils/db');
@@ -73,23 +84,28 @@ describe('enrichment-worker cache-first pre-check predicate (real PG)', () => {
     // Pool is shared with the rest of the integration suite; do NOT close it.
   });
 
-  test('SKIP: non-null artwork_url is load-bearing → true', async () => {
+  test('SKIP: non-null artwork_url is load-bearing, with a streaming URL present → true', async () => {
+    // BS#2295: load-bearing alone is no longer sufficient (see the dedicated
+    // describe block below) — this fixture also carries a streaming column so
+    // it still pins the amplifier-preserving "true" case.
     const albumId = await insertLibraryAlbum(sql, 'artwork');
     insertedAlbumIds.push(albumId);
     await sql`
-      INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, artwork_url, updated_at)
-      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', NOW())
+      INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, artwork_url, spotify_url, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'https://open.spotify.com/search/Stereolab', NOW())
     `;
 
     expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
   });
 
-  test('SKIP: non-null discogs_url is load-bearing → true', async () => {
+  test('SKIP: non-null discogs_url is load-bearing, with a streaming URL present → true', async () => {
+    // BS#2295: same amplifier-preserving pin as above, keyed on the other
+    // load-bearing column.
     const albumId = await insertLibraryAlbum(sql, 'discogs');
     insertedAlbumIds.push(albumId);
     await sql`
-      INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, discogs_url, updated_at)
-      VALUES (${albumId}, 'https://www.discogs.com/release/12345', NOW())
+      INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, discogs_url, spotify_url, updated_at)
+      VALUES (${albumId}, 'https://www.discogs.com/release/12345', 'https://open.spotify.com/search/Stereolab', NOW())
     `;
 
     expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
@@ -162,6 +178,106 @@ describe('enrichment-worker cache-first pre-check predicate (real PG)', () => {
 });
 
 /**
+ * BS#2295 — streaming-columns gate. A confirmed load-bearing match
+ * (`artwork_url` OR `discogs_url`) is not "done" on its own: an album whose
+ * `album_metadata` row carries one of those but none of the five streaming
+ * URL columns used to skip the LML call anyway, and
+ * `finalizeFromCachedMetadata` then stamped the flowsheet row terminal
+ * (`enriched_match`) without ever writing those columns — permanent
+ * five-null streaming URLs for every client. This is the exact shape
+ * measured in the issue (4 of 152 recent track rows, all `artwork_url`
+ * present / `discogs_url` NULL / all five streaming columns NULL).
+ *
+ * The fix must NOT widen the #1747 amplifier: an album that already carries
+ * a load-bearing match AND at least one streaming URL stays skipped, so the
+ * common already-enriched case pays no extra LML calls.
+ *
+ * @see WXYC/Backend-Service#2295
+ * @see WXYC/Backend-Service#1747
+ */
+describe('enrichment-worker cache-first pre-check predicate — BS#2295 streaming-columns gate (real PG)', () => {
+  let sql;
+  const insertedAlbumIds = [];
+
+  beforeAll(() => {
+    sql = getTestDb();
+  });
+
+  afterAll(async () => {
+    if (insertedAlbumIds.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ANY(${insertedAlbumIds})`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${insertedAlbumIds})`;
+    }
+  });
+
+  // The exact frozen shape from the issue: a linked album with a real
+  // Discogs match but zero streaming columns. Before BS#2295 every row here
+  // read true (skip) and the flowsheet row froze on enriched_match with five
+  // null streaming URLs forever. Both load-bearing columns are written
+  // explicitly (NULL where absent) so the fixture states the whole
+  // load-bearing shape rather than leaving half of it implied.
+  test.each([
+    ['artwork-only', 'https://i.discogs.com/b1/cover.jpg', null],
+    ['discogs-only', null, 'https://www.discogs.com/release/99999'],
+    ['both-load-bearing', 'https://i.discogs.com/b1/cover.jpg', 'https://www.discogs.com/release/99999'],
+  ])(
+    'NEWLY ASKED: %s, all five streaming columns NULL → false (worker calls LML)',
+    async (slug, artworkUrl, discogsUrl) => {
+      const albumId = await insertLibraryAlbum(sql, slug + '-no-streaming');
+      insertedAlbumIds.push(albumId);
+      await sql`
+        INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, artwork_url, discogs_url, updated_at)
+        VALUES (${albumId}, ${artworkUrl}, ${discogsUrl}, NOW())
+      `;
+
+      expect(await hasLoadBearingMetadata(sql, albumId)).toBe(false);
+    }
+  );
+
+  test.each([
+    ['spotify_url', 'https://open.spotify.com/search/Stereolab'],
+    ['apple_music_url', 'https://music.apple.com/album/aluminum-tunes'],
+    ['youtube_music_url', 'https://music.youtube.com/search?q=Stereolab'],
+    ['bandcamp_url', 'https://stereolab.bandcamp.com/album/aluminum-tunes'],
+    ['soundcloud_url', 'https://soundcloud.com/search?q=Stereolab'],
+  ])('STILL SKIPPED (amplifier guarantee): artwork_url present + %s alone → true', async (column, url) => {
+    // Pins the still-skipped case explicitly, one streaming column at a
+    // time: a load-bearing match with EXACTLY ONE streaming URL populated
+    // must still skip LML, preserving the #1747 amplifier fix for the
+    // common already-enriched case.
+    const albumId = await insertLibraryAlbum(sql, 'still-skipped-' + column);
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, artwork_url, ${sql(column)}, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', ${url}, NOW())
+    `;
+
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
+  });
+
+  test('SELF-HEAL flip: a load-bearing/no-streaming row flips true once LML fills a streaming URL', async () => {
+    // End-to-end of the BS#2295 self-heal contract: the frozen shape reads
+    // false (worker re-calls LML), then once the normal match-write path
+    // fills in a streaming column alongside the existing artwork, the
+    // predicate reads true (subsequent plays skip).
+    const albumId = await insertLibraryAlbum(sql, 'streaming-heal-flip-2295');
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, artwork_url, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', NOW())
+    `;
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(false);
+
+    await sql`
+      UPDATE ${sql(SCHEMA)}.album_metadata
+         SET spotify_url = 'https://open.spotify.com/search/Stereolab', updated_at = NOW()
+       WHERE album_id = ${albumId}
+    `;
+    expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
+  });
+});
+
+/**
  * BS#1915 — bounded self-heal of unresolved streaming links. Load-bearing
  * artwork/discogs alone is no longer sufficient to call a row "done": a
  * streaming field still `unresolved` and under the attempt cap must ALSO
@@ -190,10 +306,15 @@ describe('enrichment-worker cache-first pre-check predicate — BS#1915 streamin
   test('SELF-HEAL: load-bearing artwork present but apple_music unresolved under the cap → false (worker re-asks)', async () => {
     const albumId = await insertLibraryAlbum(sql, 'streaming-unresolved-under-cap');
     insertedAlbumIds.push(albumId);
+    // BS#2295: a streaming URL (spotify_url) is included so this fixture
+    // isolates the re-ask gate under test from the separate
+    // streaming-columns-presence gate. Without it this test would read false
+    // via BS#2295 alone and stop exercising `needsStreamingReask` at all —
+    // it is the ONLY false-arm coverage the BS#1915 gate has.
     await sql`
       INSERT INTO ${sql(SCHEMA)}.album_metadata
-        (album_id, artwork_url, apple_music_status, streaming_reask_attempts, updated_at)
-      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'unresolved', 0, NOW())
+        (album_id, artwork_url, spotify_url, apple_music_status, streaming_reask_attempts, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'https://open.spotify.com/search/Stereolab', 'unresolved', 0, NOW())
     `;
 
     expect(await hasLoadBearingMetadata(sql, albumId)).toBe(false);
@@ -202,10 +323,13 @@ describe('enrichment-worker cache-first pre-check predicate — BS#1915 streamin
   test('BOUNDED: the same unresolved field stops being re-ask-eligible once the attempt cap is hit → true', async () => {
     const albumId = await insertLibraryAlbum(sql, 'streaming-unresolved-at-cap');
     insertedAlbumIds.push(albumId);
+    // BS#2295: a streaming URL (spotify_url) is included so this fixture
+    // isolates the attempt-cap logic under test from the separate
+    // streaming-columns-presence gate (see that describe block).
     await sql`
       INSERT INTO ${sql(SCHEMA)}.album_metadata
-        (album_id, artwork_url, apple_music_status, streaming_reask_attempts, updated_at)
-      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'unresolved', 3, NOW())
+        (album_id, artwork_url, spotify_url, apple_music_status, streaming_reask_attempts, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'https://open.spotify.com/search/Stereolab', 'unresolved', 3, NOW())
     `;
 
     // No unbounded re-ask loop: attempts >= STREAMING_REASK_ATTEMPT_CAP (3)
@@ -216,10 +340,11 @@ describe('enrichment-worker cache-first pre-check predicate — BS#1915 streamin
   test('TERMINAL: an absent streaming field is never re-asked, regardless of the attempt count', async () => {
     const albumId = await insertLibraryAlbum(sql, 'streaming-absent');
     insertedAlbumIds.push(albumId);
+    // BS#2295: a streaming URL is included for the same isolation reason.
     await sql`
       INSERT INTO ${sql(SCHEMA)}.album_metadata
-        (album_id, artwork_url, apple_music_status, streaming_reask_attempts, updated_at)
-      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'absent', 0, NOW())
+        (album_id, artwork_url, spotify_url, apple_music_status, streaming_reask_attempts, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'https://open.spotify.com/search/Stereolab', 'absent', 0, NOW())
     `;
 
     // 'absent' is terminal — negative-cached, never re-asked, preserving the
@@ -232,10 +357,11 @@ describe('enrichment-worker cache-first pre-check predicate — BS#1915 streamin
     insertedAlbumIds.push(albumId);
     // apple_music_status left NULL — the key-omission convention for
     // "never consulted." Must NOT be treated as re-ask-eligible the way
-    // 'unresolved' is.
+    // 'unresolved' is. BS#2295: a streaming URL is included for the same
+    // isolation reason as the two tests above.
     await sql`
-      INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, artwork_url, updated_at)
-      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', NOW())
+      INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, artwork_url, spotify_url, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'https://open.spotify.com/search/Stereolab', NOW())
     `;
 
     expect(await hasLoadBearingMetadata(sql, albumId)).toBe(true);
@@ -244,10 +370,14 @@ describe('enrichment-worker cache-first pre-check predicate — BS#1915 streamin
   test('ANY-FIELD: one unresolved-under-cap field blocks "done" even when the other two are resolved', async () => {
     const albumId = await insertLibraryAlbum(sql, 'streaming-mixed-verdicts');
     insertedAlbumIds.push(albumId);
+    // BS#2295: `spotify_url` accompanies the 'verified' spotify_status --
+    // both because a verified verdict without a URL is a shape no writer
+    // produces, and so the expected false is attributable to the unresolved
+    // apple_music field under test rather than to the streaming-columns gate.
     await sql`
       INSERT INTO ${sql(SCHEMA)}.album_metadata
-        (album_id, artwork_url, spotify_status, bandcamp_status, apple_music_status, streaming_reask_attempts, updated_at)
-      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'verified', 'absent', 'unresolved', 1, NOW())
+        (album_id, artwork_url, spotify_url, spotify_status, bandcamp_status, apple_music_status, streaming_reask_attempts, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'https://open.spotify.com/album/aluminum-tunes', 'verified', 'absent', 'unresolved', 1, NOW())
     `;
 
     expect(await hasLoadBearingMetadata(sql, albumId)).toBe(false);
@@ -256,10 +386,14 @@ describe('enrichment-worker cache-first pre-check predicate — BS#1915 streamin
   test('SELF-HEAL flip: unresolved-under-cap flips to verified → predicate flips false → true', async () => {
     const albumId = await insertLibraryAlbum(sql, 'streaming-heal-flip');
     insertedAlbumIds.push(albumId);
+    // BS#2295: a streaming URL is present from the start so the opening
+    // false comes from the unresolved-under-cap verdict, not from the
+    // streaming-columns gate -- otherwise the UPDATE below would flip the
+    // predicate for two reasons at once and pin neither.
     await sql`
       INSERT INTO ${sql(SCHEMA)}.album_metadata
-        (album_id, artwork_url, apple_music_status, streaming_reask_attempts, updated_at)
-      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'unresolved', 1, NOW())
+        (album_id, artwork_url, spotify_url, apple_music_status, streaming_reask_attempts, updated_at)
+      VALUES (${albumId}, 'https://i.discogs.com/b1/cover.jpg', 'https://open.spotify.com/search/Stereolab', 'unresolved', 1, NOW())
     `;
     expect(await hasLoadBearingMetadata(sql, albumId)).toBe(false);
 

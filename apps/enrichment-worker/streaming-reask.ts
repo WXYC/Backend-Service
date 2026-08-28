@@ -60,14 +60,31 @@ export interface StreamingReaskCandidate {
  * (`artwork_url` OR `discogs_url` non-null — this sweep only upgrades
  * already-matched albums, never mints a new match) AND have at least one
  * streaming field `'unresolved'` under `STREAMING_REASK_ATTEMPT_CAP`.
- * Mirrors `precheck.ts`'s gate predicate (the two must stay in lockstep —
- * this is the positive form of that negative gate) including the same
- * `COALESCE(..., false)` guard against SQL's three-valued logic silently
+ * Mirrors the BS#1915 half of `precheck.ts`'s gate predicate — those two
+ * must stay in lockstep, this being the positive form of that negative gate
+ * — including the same `COALESCE(..., false)` guard against SQL's
+ * three-valued logic silently
  * dropping rows whose status columns are all still NULL... except here
  * NULL columns correctly never qualify a row (a never-consulted service
  * isn't a reason to re-ask), so the guard only matters for the base
  * artwork/discogs predicate interacting with an all-NULL streaming state —
  * kept for defense-in-depth and literal parity with precheck.ts.
+ *
+ * `precheck.ts`'s BS#2295 conjunct (skip also requires at least one of the
+ * five streaming URL columns to be non-null) is deliberately NOT mirrored
+ * here, so the lockstep is with that file's #1915 half only. This sweep
+ * re-opens rows that WERE asked and came back `unresolved`; the BS#2295
+ * cohort is the rows that were never asked at all — artwork present, all
+ * five streaming columns NULL, all three status columns NULL — which have
+ * no `unresolved` verdict for this query to key on and no attempt counter
+ * to bound a sweep against. That cohort is reached by the two mechanisms
+ * BS#2295 specifies instead: the pre-check gate re-opens each row the next
+ * time its album is played, and a one-shot drain heals the standing
+ * backlog. Consequence to know: an album in that shape which is never
+ * played again is invisible to this sweep and stays frozen until the drain
+ * runs. Widening the sweep to cover it would need a bound of its own — see
+ * `precheck.ts`'s header on why that gate is unbounded and why a shared
+ * `streaming_reask_attempts` cap is the wrong instrument for it.
  */
 export async function findUnresolvedStreamingCandidates(limit: number): Promise<StreamingReaskCandidate[]> {
   // Bandcamp re-ask de-freeze (ENRICHMENT_BANDCAMP_REASK): the plain
