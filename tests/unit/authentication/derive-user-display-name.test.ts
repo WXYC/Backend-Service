@@ -119,4 +119,31 @@ describe('deriveOrRejectUserNameOnUpdate', () => {
     const result = deriveOrRejectUserNameOnUpdate({ name: 'Some Real Name', djName: 'Anonymous' });
     expect(result).toBe(false);
   });
+
+  // better-auth's public POST /update-user handler (api/routes/update-user.mjs)
+  // always builds its adapter payload as `{ name, image, ...additionalFields }`
+  // — so EVERY update through that endpoint reaches this hook with the `name`
+  // key present, value `undefined` whenever the client didn't send one. The
+  // veto must therefore key on the VALUE, never on key presence: an undefined
+  // `name` is "not supplied", not an attempted write. Regression test for the
+  // key-presence veto that aborted every profile update (dj-site's
+  // `updateUser({ appSkin })` experience switch included).
+  it('no-ops on the endpoint-injected undefined name (unrelated-field update)', () => {
+    const result = deriveOrRejectUserNameOnUpdate({
+      name: undefined,
+      image: undefined,
+      appSkin: 'classic',
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it('derives the handle when the endpoint-injected undefined name rides along with a usable djName', () => {
+    const result = deriveOrRejectUserNameOnUpdate({ name: undefined, djName: 'DJ Jazzy Jane' });
+    expect(result).toEqual({ data: { name: 'DJ Jazzy Jane' } });
+  });
+
+  it('still rejects an explicit null name (a supplied value, not an absent one)', () => {
+    const result = deriveOrRejectUserNameOnUpdate({ name: null });
+    expect(result).toBe(false);
+  });
 });
