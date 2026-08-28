@@ -665,7 +665,31 @@ export const runDrain = async (options: DrainOptions): Promise<DrainSummary> => 
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
     if (!batch) continue;
-    if (!(await waitForQuietPeriod())) break;
+    // `waitForQuietPeriod()` returns a STOP signal, not a proceed signal —
+    // `true` means "stop the loop", and the quiet-and-carry-on case returns
+    // false. The first cut of this line had the polarity inverted
+    // (`if (!(await ...)) break`), which broke out on the very first batch and
+    // made the whole drain a 50ms no-op: it logged its counts, wrote nothing,
+    // and exited 0 looking like a successful run. A bounded canary caught it;
+    // an unbounded "success" would have been mistaken for a completed drain.
+    // Matches `va-apple-music-url-remediation`'s `if (await opts.waitForQuietPeriod()) break;`.
+    try {
+      if (await waitForQuietPeriod()) break;
+    } catch (err) {
+      // The shared helper THROWS `LiveActivityPauseCeilingExceededError` when
+      // the cumulative pause budget is exhausted, rather than returning. Catch
+      // it here so the run ends with its partial totals reported (and the
+      // cohort counts re-read) instead of unwinding to `main` with nothing —
+      // the drain is resumable, so a partial run is a normal outcome and the
+      // operator needs the numbers.
+      log('warn', 'live_activity_pause_ceiling_exceeded', 'cooperative-pause budget exhausted; ending the run early', {
+        batches_done: b,
+        of: batches.length,
+        error_message: err instanceof Error ? err.message : String(err),
+      });
+      captureError(err, 'live_activity_pause_ceiling_exceeded', { batches_done: b, of: batches.length });
+      break;
+    }
     const result = await runBatch(batch, { budgetMs: options.budgetMs });
     totals.match += result.match;
     totals.no_match += result.no_match;
