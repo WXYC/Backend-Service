@@ -8,7 +8,7 @@
  */
 
 import * as Sentry from '@sentry/node';
-import { resolveDjDisplayName } from '@wxyc/database';
+import { resolveDjDisplayName, showDjNameOverride } from '@wxyc/database';
 
 const TUBAFRENZY_URL = process.env.TUBAFRENZY_URL ?? 'https://www.wxyc.info';
 const MIRROR_API_KEY = process.env.MIRROR_API_KEY ?? '';
@@ -492,6 +492,7 @@ interface MirrorShow {
 interface MirrorDJ {
   realName?: string | null;
   djName?: string | null;
+  /** Read ONLY by the djName (legal-name) forward below; removed at Track 2d or the turndown. Do not add readers. */
   name: string;
   username?: string | null;
 }
@@ -511,10 +512,16 @@ interface MirrorDJ {
  * `djHandle` NEVER reads `auth_user.name`: that field is written once at
  * provisioning as `realName || username` and never maintained, making it a
  * stale, hidden copy of the DJ's legal name (see
- * shared/database/src/dj-name.ts:1-13). Reading it here used to leak legal
- * names into tubafrenzy's public `DJ_HANDLE` field for handle-less DJs —
- * do not re-add it, and do not re-derive the trim/Anonymous logic locally;
- * always go through `resolveDjDisplayName`.
+ * `shared/database/src/dj-name.ts`'s module doc). Reading it here used to
+ * leak legal names into tubafrenzy's public `DJ_HANDLE` field for
+ * handle-less DJs — do not re-add it, and do not re-derive the
+ * trim/Anonymous logic locally; always go through `resolveDjDisplayName`.
+ *
+ * The username tail additionally guards against an unconstrained-varchar
+ * edge case: `auth_user.username` has no DB-level format constraint, so a
+ * manually-edited or pre-validation legacy row could carry padding or pure
+ * whitespace. Every current write path validates usernames against
+ * `/^[a-zA-Z0-9_.]+$/`, so `.trim()` here is a guard, not a live code path.
  *
  * `djName` (note: capital N — tubafrenzy's distinct "real-name" field) is
  * still `realName || name` and is DELIBERATELY left unchanged here: it
@@ -527,15 +534,12 @@ interface MirrorDJ {
  */
 export function mapShowToTubafrenzy(show: MirrorShow, dj: MirrorDJ): Record<string, unknown> {
   const startMs = show.start_time ? new Date(show.start_time).getTime() : Date.now();
-  const override = show.dj_name_override?.trim();
-  // `.trim() || ''` on the username tail: the schema column is an
-  // unconstrained varchar, so a manually-edited or pre-validation legacy row
-  // could carry padding or pure whitespace — and the docblock's contract is
-  // "if all three are unusable, djHandle is ''". Every current write path
-  // validates usernames against /^[a-zA-Z0-9_.]+$/, so this is a guard, not a
-  // live code path.
+  // Unconstrained-varchar / username-trim guard: see this function's docblock above.
   const djHandle =
-    override && override.length > 0 ? override : (resolveDjDisplayName(dj.djName ?? null) ?? dj.username?.trim() ?? '');
+    showDjNameOverride(show.dj_name_override ?? null) ??
+    resolveDjDisplayName(dj.djName ?? null) ??
+    dj.username?.trim() ??
+    '';
   return {
     djName: dj.realName || dj.name,
     djHandle,

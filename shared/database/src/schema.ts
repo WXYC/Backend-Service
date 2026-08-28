@@ -2502,15 +2502,9 @@ export const shows = wxyc_schema.table(
      * the PII safeguards plan), and surfacing it on the public v2 wire would
      * be PII exposure; see BS#1393).
      *
-     * The *outbound* write to tubafrenzy's DJ_HANDLE (`mapShowToTubafrenzy` in
-     * `@wxyc/legacy-mirror`) does not read this column — it's computed fresh
-     * on every call as: per-show override (`dj_name_override`) -> the DJ's
-     * stage handle (`auth_user.dj_name`, via the canonical
-     * `resolveDjDisplayName`) -> `auth_user.username` -> `''`. It NEVER reads
-     * `auth_user.name`: that field used to be the last fallback there and
-     * leaked DJs' legal names into this public field for handle-less DJs
-     * (fixed; see shared/database/src/dj-name.ts:1-13 for why `.name` is
-     * never a valid input to this chain).
+     * The *outbound* write to tubafrenzy's DJ_HANDLE never reads this column
+     * or `auth_user.name` — see `mapShowToTubafrenzy`'s docblock in
+     * `@wxyc/legacy-mirror` for the resolution chain.
      *
      * The marker `flowsheet.dj_name` resolver (apps/backend/routes/internal.route.ts
      * via `resolveShow`'s COALESCE chain) reads this column as the fallback when
