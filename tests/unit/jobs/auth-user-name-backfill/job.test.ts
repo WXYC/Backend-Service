@@ -76,6 +76,19 @@ describe('auth-user-name-backfill: fetchAllUsers', () => {
   });
 });
 
+// Minimal violating row: real_name blank, name distinct from both username
+// and the (absent) handle — see decide.test.ts's violatesPreserveFirstPrecondition
+// suite for the full exemption matrix; this file only needs a
+// known-violating shape to drive runPreconditionGate's id-list output.
+const violatingRow = (id: string) => ({
+  id,
+  name: 'Jane Doe',
+  username: 'jane_dj',
+  djName: null,
+  realName: null,
+  isAnonymous: false,
+});
+
 describe('auth-user-name-backfill: runPreconditionGate', () => {
   it('does not throw when no row violates the 2a preserve-first predicate', () => {
     expect(() =>
@@ -114,6 +127,28 @@ describe('auth-user-name-backfill: runPreconditionGate', () => {
         },
       ])
     ).toThrow(/sentinel-user-001/);
+  });
+
+  // BS#2297 review finding 5: the message used to sample the first 10
+  // violating ids ("...and N more"), leaving an operator to re-derive the
+  // rest by re-running the (still-PII-holding) query themselves. It must now
+  // carry every id, unconditionally.
+  it('includes every violating id, not a truncated sample, for more than 10 violations', () => {
+    const ids = Array.from({ length: 12 }, (_, i) => `sentinel-user-${String(i).padStart(3, '0')}`);
+
+    expect(() => runPreconditionGate(ids.map(violatingRow))).toThrow(new RegExp(ids.map((id) => `'${id}'`).join(', ')));
+  });
+
+  it('quotes and comma-joins the violating ids for a direct WHERE id IN (...) paste', () => {
+    expect(() => runPreconditionGate([violatingRow('sentinel-user-a'), violatingRow('sentinel-user-b')])).toThrow(
+      /'sentinel-user-a', 'sentinel-user-b'/
+    );
+  });
+
+  it('tells the operator to copy name -> real_name for these ids, then re-run', () => {
+    expect(() => runPreconditionGate([violatingRow('sentinel-user-001')])).toThrow(
+      /copy name -> real_name for these ids, then re-run/
+    );
   });
 });
 

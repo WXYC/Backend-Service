@@ -31,17 +31,20 @@ const mockDbUpdate = jest.fn().mockReturnValue({
 });
 
 jest.mock('@wxyc/database', () => {
-  // resolveDjDisplayName is the REAL implementation (jest.requireActual), not
-  // a stub — provisionUser's Track 2c derivation is asserted against the
-  // actual PII-safe chain, the same reason grantsAdminFlag below is wired in
-  // real rather than restated.
-  const actualDjName: typeof import('../../../shared/database/src/dj-name') = jest.requireActual(
-    '../../../shared/database/src/dj-name'
-  );
+  // deriveUserPublicName is the REAL implementation, sourced via
+  // jest.requireActual from tests/mocks/database.mock.ts (same pattern as
+  // album-plays-refresh.service.test.ts) rather than a second, hand-wired
+  // jest.requireActual pointed straight at shared/database/src/dj-name.ts —
+  // the mock file already re-exports the real PII-safe dj-name chain, so
+  // this is the one place that decides which real helpers pass through a
+  // mocked @wxyc/database. provisionUser's Track 2c derivation is asserted
+  // against the actual chain, the same reason grantsAdminFlag below is
+  // wired in real rather than restated.
+  const actual: typeof import('../../mocks/database.mock') = jest.requireActual('../../mocks/database.mock');
   return {
     db: { update: (...args: unknown[]) => mockDbUpdate(...args) },
     user: { id: 'id' },
-    resolveDjDisplayName: actualDjName.resolveDjDisplayName,
+    deriveUserPublicName: actual.deriveUserPublicName,
   };
 });
 

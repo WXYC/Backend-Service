@@ -104,3 +104,34 @@ export const resolveShowDjName = (input: {
   if (legacy && legacy.trim().length > 0) return legacy.trim();
   return null;
 };
+
+/**
+ * The `auth_user.name` policy — on-air handle, else `username` — in one
+ * place. Three call sites derived this chain independently (`apps/auth/
+ * provision-user.ts`, the `databaseHooks.user.create.before` hook, and the
+ * `auth-user-name-backfill` job's rewrite-target computation); consolidated
+ * here so the policy has exactly one definition, same reasoning as
+ * `resolveDjDisplayName` and `resolveShowDjName` above.
+ *
+ * MICRO-BEHAVIOR CHANGE: the username link trims and blanks a whitespace-only
+ * `username`, converging on the mirror's documented contract (PR #2292).
+ * Every current writer validates `username` against `/^[a-zA-Z0-9_.]+$/`
+ * before it reaches any of these call sites, so a whitespace-only username is
+ * unreachable through normal writes — this only changes behavior for a
+ * manually-edited legacy row that already holds one.
+ *
+ * CREATE/BACKFILL-ONLY: this helper is for the create and backfill paths
+ * only. `databaseHooks.user.update.before` (`deriveOrRejectUserNameOnUpdate`
+ * in `derive-user-display-name.ts`) deliberately calls `resolveDjDisplayName`
+ * directly and does NOT fall back to `username` — an update payload carrying
+ * only `username` cannot reveal whether the user currently has a live
+ * handle, so deriving from it there risks clobbering one. Do not "fix" the
+ * update hook to use this helper; see that file's docblock for the full
+ * reasoning.
+ */
+export const deriveUserPublicName = (djName: string | null, username: string | null): string | null => {
+  const handle = resolveDjDisplayName(djName);
+  if (handle !== null) return handle;
+  const trimmed = username?.trim() ?? '';
+  return trimmed.length > 0 ? trimmed : null;
+};

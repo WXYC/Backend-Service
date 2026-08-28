@@ -7,7 +7,7 @@ import { describe, it, expect } from '@jest/globals';
 
 import {
   deriveUserNameOnCreate,
-  deriveUserNameOnUpdate,
+  deriveOrRejectUserNameOnUpdate,
 } from '../../../shared/authentication/src/derive-user-display-name';
 
 describe('deriveUserNameOnCreate', () => {
@@ -54,24 +54,24 @@ describe('deriveUserNameOnCreate', () => {
   });
 });
 
-describe('deriveUserNameOnUpdate', () => {
+describe('deriveOrRejectUserNameOnUpdate', () => {
   it('derives the handle when the update sets a usable djName', () => {
-    const result = deriveUserNameOnUpdate({ djName: 'DJ Jazzy Jane' });
+    const result = deriveOrRejectUserNameOnUpdate({ djName: 'DJ Jazzy Jane' });
     expect(result).toEqual({ data: { name: 'DJ Jazzy Jane' } });
   });
 
   it('leaves name untouched when the update clears the handle (blank djName)', () => {
-    const result = deriveUserNameOnUpdate({ djName: '' });
+    const result = deriveOrRejectUserNameOnUpdate({ djName: '' });
     expect(result).toBeUndefined();
   });
 
   it('leaves name untouched on a username-only payload (no djName key at all)', () => {
-    const result = deriveUserNameOnUpdate({ username: 'new_username' });
+    const result = deriveOrRejectUserNameOnUpdate({ username: 'new_username' });
     expect(result).toBeUndefined();
   });
 
   it('leaves name untouched when djName is set to the literal Anonymous', () => {
-    const result = deriveUserNameOnUpdate({ djName: 'Anonymous' });
+    const result = deriveOrRejectUserNameOnUpdate({ djName: 'Anonymous' });
     expect(result).toBeUndefined();
   });
 
@@ -79,36 +79,26 @@ describe('deriveUserNameOnUpdate', () => {
     // complete-onboarding.ts's markOnboardingComplete builds exactly this
     // shape: { realName, djName, ... } via internalAdapter.updateUser, which
     // still flows through updateWithHooks.
-    const result = deriveUserNameOnUpdate({ realName: 'Jane Doe', djName: 'DJ Jazzy Jane' });
+    const result = deriveOrRejectUserNameOnUpdate({ realName: 'Jane Doe', djName: 'DJ Jazzy Jane' });
     expect(result).toEqual({ data: { name: 'DJ Jazzy Jane' } });
   });
 
   it('leaves name untouched when djName is explicitly null', () => {
-    const result = deriveUserNameOnUpdate({ djName: null });
+    const result = deriveOrRejectUserNameOnUpdate({ djName: null });
     expect(result).toBeUndefined();
   });
 
-  // FINDING 1 (2297 review): better-auth's public POST /update-user accepts
-  // a client-supplied `name` for any signed-in session, and (prior to this
-  // fix) a name-only payload returned `undefined` here, so the value was
-  // written verbatim — re-creating the hidden-legal-name-copy state this
-  // whole plan exists to close. Direct writes to `name` are now prohibited:
-  // `false` tells better-auth's updateWithHooks to abort the write entirely
-  // (with-hooks.mjs: `if (result === false) return null`), never reaching
-  // the adapter. No legitimate writer sends bare `name` on update after this
-  // program's PRs (dj-site roster sends realName/djName only; onboarding
-  // sends realName/djName; provisioning is a create, not an update).
+  // FINDING 1 (2297 review) rejection policy — full writeup lives once, on
+  // deriveOrRejectUserNameOnUpdate's docblock in derive-user-display-name.ts.
   it('rejects a name-only payload outright (djName key absent)', () => {
-    const result = deriveUserNameOnUpdate({ name: 'Some Real Name' });
+    const result = deriveOrRejectUserNameOnUpdate({ name: 'Some Real Name' });
     expect(result).toBe(false);
   });
 
   it('derives the handle and overrides a client-supplied name when both are present', () => {
-    // The override itself is better-auth's merge order, not this function:
-    // updateWithHooks does `actualData = { ...actualData, ...result.data }`
-    // (hook result spread AFTER actualData), so returning { data: { name:
-    // handle } } here wins regardless of what the payload's own `name` was.
-    const result = deriveUserNameOnUpdate({ name: 'Some Real Name', djName: 'DJ Jazzy Jane' });
+    // The override is better-auth's merge order, not this function — see the
+    // "MERGE CONTRACT" section of the docblock referenced above.
+    const result = deriveOrRejectUserNameOnUpdate({ name: 'Some Real Name', djName: 'DJ Jazzy Jane' });
     expect(result).toEqual({ data: { name: 'DJ Jazzy Jane' } });
   });
 
@@ -121,12 +111,12 @@ describe('deriveUserNameOnUpdate', () => {
   // also try to set an unusable djName in the same breath; here it does
   // both, so it's rejected exactly like the name-only case.
   it('rejects a name payload accompanied by an unusable (blank) djName', () => {
-    const result = deriveUserNameOnUpdate({ name: 'Some Real Name', djName: '' });
+    const result = deriveOrRejectUserNameOnUpdate({ name: 'Some Real Name', djName: '' });
     expect(result).toBe(false);
   });
 
   it('rejects a name payload accompanied by djName set to the literal Anonymous', () => {
-    const result = deriveUserNameOnUpdate({ name: 'Some Real Name', djName: 'Anonymous' });
+    const result = deriveOrRejectUserNameOnUpdate({ name: 'Some Real Name', djName: 'Anonymous' });
     expect(result).toBe(false);
   });
 });

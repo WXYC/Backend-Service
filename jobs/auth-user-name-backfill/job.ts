@@ -95,20 +95,29 @@ export const fetchAllUsers = async (): Promise<AuthUserBackfillRow[]> => {
  * Abort non-zero (throw) if any row still relies on `auth_user.name` as its
  * only copy of a legal name. Runs against the SAME rows the backfill loop
  * below computes decisions from — one SELECT does double duty as both the
- * gate's input and the backfill's input.
+ * gate's input and the backfill's input. Fires identically in dry-run and
+ * execute mode (see the module doc) — this function isn't told which mode
+ * it's running in.
+ *
+ * The failure message carries the COMPLETE violating-id list, not a sample
+ * (BS#2297 review finding 5): an operator remediating this needs every id to
+ * act on, not "and N more" left to re-derive by re-running the
+ * (still-PII-holding) query themselves. Ids ONLY — never the row's
+ * name/username/dj_name values, which would put legal names in every log
+ * sink this error reaches — quoted and comma-joined so the list pastes
+ * directly into `WHERE id IN (...)`.
  */
 export const runPreconditionGate = (rows: AuthUserBackfillRow[]): void => {
   const violations = rows.filter(violatesPreserveFirstPrecondition);
   if (violations.length === 0) return;
 
-  const sampleIds = violations.slice(0, 10).map((r) => r.id);
+  const idList = violations.map((r) => `'${r.id}'`).join(', ');
   throw new Error(
     `[${JOB_NAME}] Refusing to run: ${violations.length} row(s) hold their ONLY copy of a legal name in ` +
       `auth_user.name (real_name is blank, name is not 'Anonymous'/'Auto DJ'/username, and name is not the ` +
-      `on-air handle). This means Track 2a of the DJ real-name PII safeguards plan (the reviewed manual SQL ` +
-      'that copies name -> real_name) has not run against this database. Run 2a first, then re-run this job. ' +
-      `Sample id(s): ${sampleIds.join(', ')}` +
-      (violations.length > sampleIds.length ? ', ...' : '')
+      `on-air handle). This means Track 2a of the DJ real-name PII safeguards plan has not run against this ` +
+      `database: copy name -> real_name for these ids, then re-run this job. Violating id(s) (WHERE id IN (...)): ` +
+      idList
   );
 };
 
