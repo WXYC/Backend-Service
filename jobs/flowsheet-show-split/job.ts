@@ -79,7 +79,7 @@
  * LEGACY_DB_DOCKER_CONTAINER for the mirror half).
  */
 
-import { and, asc, desc, eq, gt, isNull } from 'drizzle-orm';
+import { and, asc, eq, gt } from 'drizzle-orm';
 import { db, closeDatabaseConnection, MirrorSQL, flowsheet, show_djs, shows, user } from '@wxyc/database';
 import { planSegments, type Segment, type SplitEntry } from './segment.js';
 
@@ -361,17 +361,35 @@ export const main = async (): Promise<void> => {
   // because the ordering hazard was found only after the 2026-08-28 apply, and
   // re-running the split over an already-split show is not possible.
   if (process.argv.includes('--repair-marker-order')) {
-    const live = (await db.select().from(shows).where(isNull(shows.end_time)).orderBy(desc(shows.id)).limit(1))[0];
-    if (!live) {
-      log('repair-noop', { reason: 'no open show' });
+    // Requires the show explicitly. An earlier cut took "the newest open show"
+    // instead, which is right only when the repair runs immediately after the
+    // split and quietly wrong afterwards: run it hours later and the split's
+    // live tail has closed, so it no-ops against an unrelated show and still
+    // logs a success. That happened on the 2026-08-28 repair, which reported
+    // `repair-complete` for show 1951231 while 1951228 was the one it was
+    // aimed at. A repair tool that can look like it worked when it did not is
+    // worse than one that refuses.
+    const targetArg = argValue('show-id');
+    if (!targetArg || !/^\d+$/.test(targetArg)) {
+      throw new Error('Required with --repair-marker-order: --show-id=<the show whose show_start must stay newest>');
+    }
+    const target = await loadShow(Number.parseInt(targetArg, 10));
+
+    // The invariant only bites while the show is genuinely live — a blank
+    // banner is the correct rendering when nothing is on the air.
+    if (target.end_time !== null) {
+      log('repair-noop', {
+        show_id: target.id,
+        reason: 'show is already closed; the newest-marker invariant only applies to an open show',
+      });
       return;
     }
     if (DRY_RUN) {
-      log('repair-dry-run', { live_show_id: live.id, note: 'no writes performed' });
+      log('repair-dry-run', { show_id: target.id, note: 'no writes performed' });
       return;
     }
-    const changed = await db.transaction((tx) => ensureLiveShowStartIsNewestMarker(tx, live.id));
-    log('repair-complete', { live_show_id: live.id, reminted: changed });
+    const changed = await db.transaction((tx) => ensureLiveShowStartIsNewestMarker(tx, target.id));
+    log('repair-complete', { show_id: target.id, reminted: changed });
     return;
   }
 
