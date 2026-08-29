@@ -18,6 +18,17 @@ The underlying defect is that `POST /flowsheet/join` routes on `current_show?.en
 | `--dry-run`                 | off        | Log the full plan and exit without writing.                                                                            |
 | `--min-segment-seconds=<n>` | `120`      | Joins that close faster are treated as blind-toggle noise and left in place as co-host markers, not promoted to shows. |
 | `--skip-mirror`             | off        | Skip the tubafrenzy `SIGNOFF_TIME` write. See the warning below before using it.                                       |
+| `--repair-marker-order`     | off        | Standalone mode: re-mint `--show-id`'s `show_start` so it stays the newest marker by id. See below.                    |
+
+## `--repair-marker-order`
+
+The iOS listener app derives its on-air banner from `showMarkers.max(by: { $0.id })` and renders nothing when that marker is a `show_end`. It orders by **id**, not `add_time` — so a `show_end` this job mints for an earlier segment carries a correct `add_time` but a brand-new serial id that outranks the live show's `show_start`, and the app reads "AUTO DJ" while a DJ is on the air.
+
+`applySplit` already handles this inline: when the final segment is still open it re-mints that show's `show_start` last, after every other insert has taken its id. This standalone mode exists only for a split that already ran before that guard existed.
+
+It requires `--show-id` and refuses to guess. An earlier cut took "the newest open show" instead, which is right only when run immediately after the split and quietly wrong afterwards — run it hours later and the split's live tail has closed, so it no-ops against an unrelated show and still logs a success. That is exactly what happened on 2026-08-28: it reported `repair-complete` for show 1951231 while 1951228 was the one it was aimed at. No harm done, because by then the next DJ's `show_start` had taken a higher id than the minted marker and the banner had already self-corrected — but a repair tool that can look like it worked when it did not is worse than one that refuses.
+
+Pass the id of the **open** show whose `show_start` must stay newest — after a split that is the last new show the run created, not the original `--show-id`. A closed show is a logged no-op: the invariant only bites while something is genuinely live, since a blank banner is the correct rendering when nothing is on the air.
 
 ## Run procedure
 
