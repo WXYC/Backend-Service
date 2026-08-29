@@ -12,6 +12,8 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import type { CheckLiveActivityFn } from '@wxyc/database';
 import {
+  refusesForLegacyDjNamePii,
+  legacyDjNamePreconditionMessage,
   runScrub,
   requestStop,
   __resetStopForTesting,
@@ -429,5 +431,84 @@ describe('change-class provenance reaches the summary', () => {
 
     expect(result.message.changed).toBe(1);
     expect(result.message.by_change_class).toEqual({});
+  });
+});
+
+/**
+ * BS#2281 follow-up. The production dry run on 2026-08-29 measured 392 of
+ * 53,416 shows carrying a `legacy_dj_name` that is itself a roster real name.
+ * `resolveShowDjName` reads that column as a direct chain input with no PII
+ * check, so a live run would WRITE those 392 legal names onto every in-scope
+ * row of those shows — making the leak worse on the rows it touches.
+ *
+ * The pre-flight already measured it and warned. A warning was not enough:
+ * the only thing between an operator and that outcome was reading a log line,
+ * and nothing forced a dry run to happen first.
+ */
+describe('shows.legacy_dj_name precondition gate', () => {
+  it('refuses under --execute when the count is non-zero', () => {
+    expect(refusesForLegacyDjNamePii(392, false)).toBe(true);
+  });
+
+  it('does NOT refuse a dry run — measuring the cohort is what a dry run is for', () => {
+    // Refusing here would withhold the very counts an operator needs in order
+    // to fix the precondition, which would make the gate self-defeating.
+    expect(refusesForLegacyDjNamePii(392, true)).toBe(false);
+  });
+
+  it('clears itself once the precondition is actually met', () => {
+    // No override env var, matching auth-user-name-backfill's preserve-first
+    // gate: the way past this is to scrub the offending shows, not to set a
+    // flag. Deciding to ACCEPT them instead is a reviewed diff.
+    expect(refusesForLegacyDjNamePii(0, false)).toBe(false);
+  });
+
+  it('tells a live operator it is refusing, and a dry run that --execute will', () => {
+    expect(legacyDjNamePreconditionMessage(392, false)).toContain('Refusing to run');
+    expect(legacyDjNamePreconditionMessage(392, true)).toContain('--execute will REFUSE');
+    expect(legacyDjNamePreconditionMessage(392, true)).toContain('writes nothing');
+  });
+
+  it('fails the run before any pass loads a page', async () => {
+    // The refusal has to land before the drain, not after it: a partial write
+    // is exactly the outcome the gate exists to prevent.
+    const loadMainPage = jest.fn(() => Promise.resolve([]));
+    const loadMessagePage = jest.fn(() => Promise.resolve([]));
+    const loadOrphanPage = jest.fn(() => Promise.resolve([]));
+    const applyDjNameBatch = jest.fn(() => Promise.resolve(0));
+    const analyzeFlowsheet = jest.fn(() => Promise.resolve());
+
+    const result = await runScrub({
+      ...baseOpts(),
+      dryRun: false,
+      loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst' }])),
+      loadMainPage,
+      loadMessagePage,
+      loadOrphanPage,
+      applyDjNameBatch,
+      analyzeFlowsheet,
+    });
+
+    expect(result.failed).toBe(true);
+    expect(result.legacyDjNamePiiCount).toBe(1);
+    expect(loadMainPage).not.toHaveBeenCalled();
+    expect(loadMessagePage).not.toHaveBeenCalled();
+    expect(loadOrphanPage).not.toHaveBeenCalled();
+    expect(applyDjNameBatch).not.toHaveBeenCalled();
+    expect(analyzeFlowsheet).not.toHaveBeenCalled();
+  });
+
+  it('lets the same cohort through in dry-run so the counts still get reported', async () => {
+    const loadMainPage = jest.fn(() => Promise.resolve([]));
+    const result = await runScrub({
+      ...baseOpts(),
+      dryRun: true,
+      loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst' }])),
+      loadMainPage,
+    });
+
+    expect(result.failed).toBe(false);
+    expect(result.legacyDjNamePiiCount).toBe(1);
+    expect(loadMainPage).toHaveBeenCalled();
   });
 });

@@ -33,6 +33,17 @@ This job deliberately **creates** `dj_name IS NULL` rows. Two one-shot jobs exis
 
 Running either **after** this scrub silently re-attributes those rows to the primary DJ and undoes the privacy fix. Their root Dockerfiles have been removed so `Manual Build & Deploy` cannot produce an image, and `tests/unit/jobs/flowsheet-dj-name-scrub/reversal-guard.test.ts` fails if one is restored without a deliberate decision. Do not restore one because this document calls BS#1393 "under-remediated" — re-running it cleans nothing and reverses this job.
 
+## ⛔ `--execute` refuses while `shows.legacy_dj_name` holds a real name
+
+At startup, in **both** modes, the job counts `shows.legacy_dj_name` values that are themselves roster real names. If that count is non-zero:
+
+- **dry run** — reports it and carries on. Measuring the cohort is what a dry run is for.
+- **`--execute`** — **refuses, before any pass loads a page**, and exits non-zero.
+
+`resolveShowDjName` reads `legacy_dj_name` as a direct chain input with no PII check of its own, unlike `dj_name` and `message` which this job probes explicitly. So a live run against a polluted column does not merely fail to clean those shows — it **writes those legal names onto every in-scope row of them**, making the leak worse on the rows it touches.
+
+The 2026-08-29 production dry run measured **392 of 53,416** shows in that state, so this is a live precondition, not a hypothetical. There is **no override env var**, matching `jobs/auth-user-name-backfill`'s preserve-first gate and the superseded-job refusals above: the way past it is to scrub those shows (BS#2281) until the count is zero, at which point the gate clears itself. Deciding to _accept_ them instead changes what this job writes, and belongs in a reviewed diff rather than an env var set on the box.
+
 ## Where the job learns which names are PII
 
 The PII probe is an in-process index built from **`auth_user.real_name`**, the schema's sole legal-name carrier, loaded once at startup.
@@ -114,6 +125,7 @@ docker run --rm --name flowsheet-dj-name-scrub --env-file .env \
 ### Before the first live run
 
 - [ ] **The SSE fan-out guard is deployed.** `filterMetadataUpdate` broadcasts on _any_ flowsheet UPDATE landing in a terminal `metadata_status`, and historical `track` rows are almost all terminal. Without an age guard this drain emits one `liveFs:update` per row to every `/events/stream` client on every backend instance, for hours. The guard (`LIVE_FS_UPDATE_MAX_AGE_HOURS`, default 24h) ships alongside this job — confirm it is live, and watch `SSE/UpdateSuppressed` climb during the run. That climb is the guard working.
+- [ ] **The `shows.legacy_dj_name` pre-flight count is zero.** `--execute` refuses otherwise; see the section above. It was 392 on 2026-08-29.
 - [ ] **Run outside peak listening hours.** See the watermark note below.
 - [ ] **Confirm no sibling flowsheet job is running** (`flowsheet-metadata-backfill`, `flowsheet-etl`, the enrichment worker's sweep).
 - [ ] **Read the `legacy_dj_name_preflight` log line — even in the dry run.** Every run opens with a startup scan of `shows.legacy_dj_name` for roster real names, logged as `legacy_dj_name_pii_count` and surfaced on the run summary and the `flowsheet_dj_name_scrub.run.summary` Sentry span. A non-zero count means the recompute is about to WRITE those values onto every in-scope row of the affected shows — see "shows.legacy_dj_name pre-flight" below before proceeding to `--execute`.
