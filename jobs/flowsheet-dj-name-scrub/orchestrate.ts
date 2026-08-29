@@ -606,6 +606,9 @@ export type VerifyFn = (opts: {
   highWaterMark: number;
   piiNames: ReadonlySet<string>;
   batchSize: number;
+  loadMainPage: LoadScrubPageFn;
+  loadOrphanPage: LoadScrubPageFn;
+  loadMessagePage: LoadMessagePageFn;
 }) => Promise<number>;
 
 /**
@@ -876,11 +879,28 @@ export const analyzeFlowsheet: AnalyzeFn = async (analyzeTimeoutMs) => {
  * The upper bound is what keeps this deterministic: the two live SQL
  * re-derivers can write a non-canonical value to a row the drain already
  * passed, and an unbounded check would fail on it nondeterministically.
+ *
+ * The three loaders are passed in rather than closed over the module-level
+ * `loadMainPage` / `loadOrphanPage` / `loadMessagePage` directly (BS#2281
+ * review finding 9): `runScrub` binds them from its own resolved
+ * `loadMainPageFn` / `loadOrphanPageFn` / `loadMessagePageFn` — the same ones
+ * the three drain passes use — so an injected loader is also the one
+ * verification re-scans with. Before this, a test that injected only the
+ * loaders (not `verifyScrub` itself) would have silently hit a real
+ * database; every existing test happens to inject `verifyScrub` too, which
+ * is why this was harmless so far, not why it was correct.
  */
-export const verifyScrub: VerifyFn = async ({ highWaterMark, piiNames, batchSize }) => {
+export const verifyScrub: VerifyFn = async ({
+  highWaterMark,
+  piiNames,
+  batchSize,
+  loadMainPage: loadMain,
+  loadOrphanPage: loadOrphan,
+  loadMessagePage: loadMessage,
+}) => {
   let remaining = 0;
 
-  for (const loadPage of [loadMainPage, loadOrphanPage]) {
+  for (const loadPage of [loadMain, loadOrphan]) {
     let cursor = 0;
     while (cursor < highWaterMark) {
       if (stopRequested) return remaining;
@@ -896,7 +916,7 @@ export const verifyScrub: VerifyFn = async ({ highWaterMark, piiNames, batchSize
   let messageCursor = 0;
   while (messageCursor < highWaterMark) {
     if (stopRequested) return remaining;
-    const rows = await loadMessagePage(messageCursor, batchSize, highWaterMark);
+    const rows = await loadMessage(messageCursor, batchSize, highWaterMark);
     if (rows.length === 0) break;
     for (const row of rows) {
       if (rewriteMessage(row.entry_type, row.message, piiNames).action === 'write') remaining += 1;
@@ -1411,7 +1431,14 @@ export const runScrub = async (opts: {
 
   if (!dryRun && !result.stopped && !failure && wrote) {
     try {
-      const remaining = await verifyFn({ highWaterMark: result.highWaterMark, piiNames, batchSize });
+      const remaining = await verifyFn({
+        highWaterMark: result.highWaterMark,
+        piiNames,
+        batchSize,
+        loadMainPage: loadMainPageFn,
+        loadOrphanPage: loadOrphanPageFn,
+        loadMessagePage: loadMessagePageFn,
+      });
       result.remaining = remaining;
       if (remaining > 0) {
         const verifyError = new Error(
