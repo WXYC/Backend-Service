@@ -45,9 +45,9 @@
  * that table failed LOUDLY: the survivor's DELETE raised a foreign-key
  * violation and the per-slot transaction rolled back with nothing lost. Under
  * `cascade` the same bug fails SILENTLY — any crossreference row the repoint
- * missed is deleted along with the loser and the merge reports success. Three
- * of the thirteen sites (`bins`, `library_identity`,
- * `library_identity_source`) still raise, so the class of bug is not
+ * missed is deleted along with the loser and the merge reports success. Four
+ * of the fourteen sites (`bins`, `library_identity`,
+ * `library_identity_source`, `digital_asset`) still raise, so the class of bug is not
  * undetectable, but this particular table has stopped being one of the
  * canaries. Treat a change to the repoint logic here as unguarded by the
  * database.
@@ -68,6 +68,9 @@ export const schemaName = (): string => (process.env.WXYC_SCHEMA_NAME || 'wxyc_s
 
 const ident = (name: string): SQL => sql.raw(`"${name.replace(/"/g, '""')}"`);
 const qualified = (table: string): SQL => sql.raw(`"${schemaName()}"."${table.replace(/"/g, '""')}"`);
+
+/** Log prefix for this job. One spelling, shared by the CLI reporting and the merge internals. */
+const LOG_TAG = '[library-call-number-dedup]';
 
 /**
  * Every FK column referencing `library.id`. `uniqueKey` is the full unique/PK
@@ -128,10 +131,29 @@ export const FK_TARGETS: readonly FkTarget[] = [
   // NOT NULL (`disc_number` defaults to 1), so the key is total -- no
   // `uniqueWhenNull`. On a merge the loser's assets repoint to the survivor;
   // where both sides hold the same (provenance, disc_number) the loser's row is
-  // dropped as a collision. That drops only the *binding* row: the audio objects
-  // live in `digital_asset_file` under the store and are untouched here, so the
-  // survivor keeps its own audio and nothing in object storage is orphaned by
-  // the merge itself.
+  // dropped as a collision, and the SURVIVOR's wins arbitrarily -- not because
+  // it is the better of the two. Read on before relying on that.
+  //
+  // This is the only collision-delete in the list that reaches beyond its own
+  // row. `digital_asset_file.asset_id` REFERENCES `digital_asset(id)` ON DELETE
+  // cascade, so dropping a binding row also drops every file row under it --
+  // object_key, the md5/sha256/flac_md5 digests, bitrate, duration, raw tags --
+  // and `fillNullsFromLoser` carries none of it across first (the PRESERVED_*
+  // lists cover `library` and `album_metadata` only). The objects themselves
+  // survive in the store with nothing in Postgres pointing at them.
+  //
+  // They are recoverable rather than lost: BS#2319's bind job discovers assets
+  // by scanning the store, so a re-run re-binds an orphan. That recovery is why
+  // this is a delete rather than a hard failure, and it is why `repointTarget`
+  // names the orphaned keys on the way out -- the row that would tell you a
+  // re-bind is owed is precisely the row being removed, so a silent drop is
+  // what would stop anyone realising it.
+  //
+  // Preferring the *servable* asset over the survivor's is the correct
+  // behaviour and is deliberately not done here -- it is real logic in the
+  // merge path rather than something to smuggle into a schema PR. Until it
+  // lands, a merge can leave an album bound to a rejected asset while a good
+  // one is orphaned; loudly, per the warning in `repointTarget`.
   { table: 'digital_asset', column: 'library_id', uniqueKey: ['library_id', 'provenance', 'disc_number'] },
 ];
 
@@ -410,6 +432,23 @@ const repointTarget = async (tx: Tx, target: FkTarget, loser: number, survivor: 
     const partial = target.uniqueWhenNull;
     const dScope = partial ? sql` AND d.${ident(partial)} IS NULL` : sql``;
     const kScope = partial ? sql` AND k.${ident(partial)} IS NULL` : sql``;
+    // `digital_asset` is the one site whose collision-delete cascades into
+    // another table (`digital_asset_file`) and leaves objects in the store
+    // unreferenced. Name them before they go -- see the FK_TARGETS entry.
+    if (target.table === 'digital_asset') {
+      const orphaned = (await tx.execute(sql`
+        SELECT f.object_key
+          FROM ${t} d
+          JOIN ${qualified('digital_asset_file')} f ON f.asset_id = d.id
+         WHERE d.${col} = ${loser}${dScope}
+           AND EXISTS (SELECT 1 FROM ${t} k WHERE k.${col} = ${survivor}${kScope} AND ${matchClause})
+      `)) as unknown as Array<{ object_key: string }>;
+      if (orphaned.length > 0) {
+        console.warn(
+          `${LOG_TAG} merge ${loser} -> ${survivor}: dropping a colliding digital_asset. ${orphaned.length} file row(s) cascade with it and these objects are left unreferenced in the store (re-bindable via the BS#2319 bind job): ${orphaned.map((r) => r.object_key).join(', ')}`
+        );
+      }
+    }
     await tx.execute(sql`
       DELETE FROM ${t} d
        WHERE d.${col} = ${loser}${dScope}
@@ -613,7 +652,7 @@ export const previewSlot = (plan: Extract<SlotPlan, { kind: 'merge' }>): number 
  * same reason: there, no catalog row moved at all.
  */
 export const runDedup = async (): Promise<DedupSummary> => {
-  const tag = '[library-call-number-dedup]';
+  const tag = LOG_TAG;
   console.log(`${tag} mode: ${EXECUTE ? 'EXECUTE (writes)' : 'DRY RUN (no writes)'}`);
 
   const slots = await findCollisionSlots();
