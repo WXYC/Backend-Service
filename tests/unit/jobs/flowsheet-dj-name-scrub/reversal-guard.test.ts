@@ -58,6 +58,12 @@ describe.each(REVERSING_JOBS)('$name cannot be deployed', ({ dockerfile, source 
     expect(existsSync(join(REPO_ROOT, dockerfile))).toBe(false);
   });
 
+  it('has no docker:build script — it pointed at the Dockerfile removed above, and left in place would fail with a confusing file-not-found instead of the refusal message', () => {
+    const pkgPath = join(REPO_ROOT, source.replace(/job\.ts$/, 'package.json'));
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { scripts?: Record<string, string> };
+    expect(pkg.scripts).not.toHaveProperty('docker:build');
+  });
+
   it('refuses at runtime, so an image already in ECR cannot do damage either', () => {
     // Dockerfile removal stops a NEW build; it does nothing about an image
     // already pushed, or a `dist/` built on the box. Both of these jobs have
