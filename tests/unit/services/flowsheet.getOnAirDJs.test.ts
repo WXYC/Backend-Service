@@ -11,11 +11,16 @@
  * `resolveDjNameForShow` with a null id (BS#1547).
  *
  * Mock mechanics: getLatestShow → getNShows(1) terminates in `.limit()`.
- * getDJsInShow issues two queries that terminate in `.where()` (the show_djs
- * join, then the user lookup), so those are queued on the separate `.where`
- * once-queue. resolveDjNameForShow only queries (via `.limit(1)`) when a primary
- * DJ is present; the legacy branch here has `primary_dj_id: null`, so it
+ * getDJsInShow issues up to two queries that terminate in `.where()` — the
+ * show_djs join, then the user lookup, which is SKIPPED when the join returned
+ * no rows — so those are queued on the separate `.where` once-queue.
+ * resolveDjNameForShow only queries (via `.limit(1)`) when a primary DJ is
+ * present; the legacy branch here has `primary_dj_id: null`, so it
  * short-circuits to `legacy_dj_name` with no extra query.
+ *
+ * Queue exactly as many values as the case consumes. `jest.clearAllMocks()`
+ * does NOT drain `mockResolvedValueOnce` queues, so a value queued and left
+ * unconsumed leaks into the NEXT test and shifts every read after it by one.
  */
 import { jest } from '@jest/globals';
 
@@ -39,8 +44,7 @@ describe('getOnAirDJs', () => {
     queueLimit([
       { id: 1950003, end_time: null, primary_dj_id: null, dj_name_override: null, legacy_dj_name: 'DJ MONSTER' },
     ]);
-    queueWhere([]); // show_djs join: no account rows
-    queueWhere([]); // user lookup over the (empty) dj_ids
+    queueWhere([]); // show_djs join: no account rows — getDJsInShow stops here
 
     expect(await getOnAirDJs()).toEqual([{ id: null, dj_name: 'DJ MONSTER' }]);
   });
@@ -102,8 +106,7 @@ describe('getOnAirDJs', () => {
 
   it('returns [] for an open legacy show with no resolvable DJ name (no show_djs, null legacy_dj_name)', async () => {
     queueLimit([{ id: 5, end_time: null, primary_dj_id: null, dj_name_override: null, legacy_dj_name: null }]);
-    queueWhere([]); // show_djs join
-    queueWhere([]); // user lookup
+    queueWhere([]); // show_djs join — no account rows, so no user lookup follows
 
     expect(await getOnAirDJs()).toEqual([]);
   });

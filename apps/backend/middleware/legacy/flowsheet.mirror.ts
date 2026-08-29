@@ -229,7 +229,7 @@ export const endShow = createHttpMirrorMiddleware<Show>(
   // BS#1119's ShowDJ-vs-Show discrimination lives in `isShowPayload`, passed
   // as this registration's shouldMirror gate — a guest leave never reaches
   // this handler (and never pays the PostHog flag round-trip).
-  async (_req, show) => mirrorShowSignoff(show),
+  (_req, show) => mirrorShowSignoff(show),
   { shouldMirror: isShowPayload, resolveFlagIdentity: showFlagIdentity }
 );
 

@@ -25,14 +25,14 @@ const chain = mockDb._chain;
 // Queue the next value the terminal `.limit()` resolves to. Left unqueued, the
 // default mock returns the chain itself, so getLatestShow() yields undefined.
 const queueLimit = (rows: unknown[]) => chain.limit.mockResolvedValueOnce(rows);
-// getDJsInShow's two terminal `.where()` reads (the show_djs join, then the
-// user lookup). Only consumed on the BS#2233 branch below — a show carrying an
-// override or a linked primary DJ never reaches it.
+// getDJsInShow's terminal `.where()` reads: the show_djs join, then — only if
+// that returned members — the user lookup. Both are consumed on the BS#2233
+// branch below; a show carrying an override or a linked primary DJ never
+// reaches either.
 const queueWhere = (rows: unknown[]) => chain.where.mockResolvedValueOnce(rows);
-const queueNoActiveMembers = () => {
-  queueWhere([]);
-  queueWhere([]);
-};
+// An empty show_djs join short-circuits inside getDJsInShow, so the user
+// lookup is never issued and only ONE value is needed here.
+const queueNoActiveMembers = () => queueWhere([]);
 
 describe('getOnAirDJName', () => {
   beforeEach(() => {
