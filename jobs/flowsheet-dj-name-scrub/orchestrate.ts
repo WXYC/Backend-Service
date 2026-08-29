@@ -537,6 +537,19 @@ export type MessageDecision = { action: 'skip'; reason: string } | { action: 'wr
  * override added after the fact, say). That is a consistency nit, not a
  * privacy defect, and rewriting client-facing prose on rows that carry no PII
  * is a wider blast radius than this job is chartered for.
+ *
+ * A second, DIFFERENT case this also deliberately does not handle (BS#2281
+ * review finding 7): for `show_start` / `show_end`, the correct handle IS
+ * recoverable — it is the same `shows` join the main pass just used for this
+ * exact row, one table over. Unlike `dj_join` / `dj_leave` (the joining
+ * GUEST's identity is genuinely not recoverable from `shows` — it belongs to
+ * a DIFFERENT DJ), re-rendering `Start of Show: ${recomputedHandle} joined
+ * the set at ${t}` here would preserve attribution instead of discarding it.
+ * Deliberately deferred anyway: it widens this pass from "remove PII" to
+ * "restore attribution", it needs the main pass's recomputed value threaded
+ * into a pass that today has its own cursor and its own query, and rewording
+ * client-facing prose deserves its own review rather than riding in on a
+ * privacy scrub. Tracked as a follow-up (BS#2312), not implemented here.
  */
 export const rewriteMessage = (
   entryType: FlowsheetEntryType,
