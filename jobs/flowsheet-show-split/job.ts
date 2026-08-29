@@ -79,9 +79,10 @@
  * LEGACY_DB_DOCKER_CONTAINER for the mirror half).
  */
 
-import { and, asc, eq, gt } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, notInArray, sql } from 'drizzle-orm';
 import { db, closeDatabaseConnection, MirrorSQL, flowsheet, show_djs, shows, user } from '@wxyc/database';
-import { planSegments, type Segment, type SplitEntry } from './segment.js';
+import { showEndMessage, showStartMessage } from './markers.js';
+import { parseMinSegmentSeconds, planSegments, type Segment, type SplitEntry } from './segment.js';
 
 // ---- Options ----
 
@@ -96,8 +97,13 @@ export const SKIP_MIRROR = process.argv.includes('--skip-mirror');
  * The reference incident's DJ Whiskers pair is 4 seconds apart — the
  * blind-toggle retry dj-site#1035 documents. Promoting it would mint a
  * four-second show.
+ *
+ * Resolved inside `main` rather than at module load so a bad value surfaces
+ * through the job's own `failed` log line instead of a bare module-evaluation
+ * stack trace. The parse itself lives beside the comparison it guards, in
+ * `segment.ts`.
  */
-export const MIN_SEGMENT_SECONDS = Number(argValue('min-segment-seconds') ?? 120);
+const minSegmentSecondsArg = (): number => parseMinSegmentSeconds(argValue('min-segment-seconds'));
 
 const log = (event: string, detail: Record<string, unknown> = {}) =>
   console.log(JSON.stringify({ ts: new Date().toISOString(), job: 'flowsheet-show-split', event, ...detail }));
@@ -128,7 +134,7 @@ export const loadEntries = async (showId: number): Promise<SplitEntry[]> => {
   return rows.map((r) => ({
     id: r.id,
     play_order: r.play_order ?? 0,
-    add_time: new Date(r.add_time as unknown as string),
+    add_time: r.add_time,
     entry_type: r.entry_type,
     dj_name: r.dj_name,
   }));
@@ -154,7 +160,16 @@ export const resolveSegmentDjs = async (
     .innerJoin(user, eq(user.id, show_djs.dj_id))
     .where(eq(show_djs.show_id, showId));
 
-  const byHandle = new Map(members.filter((m) => m.djName).map((m) => [m.djName!.trim().toLowerCase(), m]));
+  // Two accounts whose handles fold to the same key make the marker's `dj_name`
+  // insufficient to tell them apart, and a Map would silently keep the last one
+  // — resolving the segment to a coin flip. Poison the key instead, so the
+  // segment reports unresolved and lands in `warn-unresolved-djs`.
+  const byHandle = new Map<string, { id: string; djName: string | null } | null>();
+  for (const member of members) {
+    if (!member.djName) continue;
+    const handle = member.djName.trim().toLowerCase();
+    byHandle.set(handle, byHandle.has(handle) ? null : member);
+  }
 
   const resolved = new Map<number, { id: string; djName: string | null }>();
   segments.forEach((seg, i) => {
@@ -208,12 +223,14 @@ export const applySplit = async (
       });
     }
 
+    const showIdForSegment = (i: number): number => (i === 0 ? original.id : newShowIds.get(i)!);
+
     // 3. Re-point entries and renumber play_order from 1 within each show, so
     //    a split show reads like one that started normally rather than one
     //    beginning at play_order 106.
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
-      const targetShowId = i === 0 ? original.id : newShowIds.get(i)!;
+      const targetShowId = showIdForSegment(i);
       for (let n = 0; n < seg.entryIds.length; n++) {
         await tx
           .update(flowsheet)
@@ -222,27 +239,85 @@ export const applySplit = async (
       }
     }
 
-    // 4. Promote the boundary markers. `dj_join` / `dj_leave` carry their
-    //    content in `dj_name` and no `message`, which is the same shape the
-    //    tubafrenzy-mirrored `show_start` rows already have — so the type flip
-    //    alone is the whole conversion.
+    // 3b. Re-denormalize `flowsheet.dj_name` on the moved rows.
+    //
+    //     `POST /flowsheet` resolves the on-air name ONCE per request and copies
+    //     it onto every row it writes (`addEntry`'s `resolveDjNameForShow`), so
+    //     on a hijacked show every later DJ's tracks carry the ORIGINAL DJ's
+    //     handle — for 1951224 that is `dj sue` on all 143 rows, because
+    //     `primary_dj_id` was NULL and the chain fell through to
+    //     `shows.legacy_dj_name`. Re-pointing `show_id` does not touch it, and
+    //     that column is what the v2 wire projection, `/playlists`, and the
+    //     search service's `DJ_NAME_EXPR` actually read — so without this a
+    //     "successful" repair still renders and searches Panzón's set as
+    //     `dj sue`. `jobs/flowsheet-dj-name-backfill` cannot mop it up either:
+    //     it selects `dj_name IS NULL`, and these rows are non-null and wrong.
+    //
+    //     `dj_join` / `dj_leave` are excluded because they name a PERSON, not a
+    //     show: the co-host markers left in place by the blip rule have to keep
+    //     saying "DJ Whiskers" inside eureka!'s show. The segment's own boundary
+    //     markers are in that same excluded set and already carry the right
+    //     name; step 4 only restates it. Segment 0 keeps the original show's
+    //     ownership, so its rows were already correct.
+    for (let i = 1; i < segments.length; i++) {
+      const seg = segments[i];
+      if (seg.entryIds.length === 0) continue;
+      // What `resolveDjNameForShow` will return for the new show: the linked
+      // account's handle when the segment resolved, else the `legacy_dj_name`
+      // written from the marker.
+      const djName = segmentDjs.get(i)?.djName ?? seg.djName;
+      const updated = await tx
+        .update(flowsheet)
+        .set({ dj_name: djName })
+        .where(
+          and(
+            inArray(flowsheet.id, seg.entryIds),
+            notInArray(flowsheet.entry_type, ['dj_join', 'dj_leave']),
+            // `IS DISTINCT FROM`, not `<>`: a row whose `dj_name` is NULL must
+            // still be corrected, and `NULL <> 'Panzón'` is NULL, not true.
+            sql`${flowsheet.dj_name} IS DISTINCT FROM ${djName}`
+          )
+        )
+        .returning({ id: flowsheet.id });
+      log('dj-name-redenormalized', { show_id: showIdForSegment(i), dj_name: djName, rows: updated.length });
+    }
+
+    // 4. Promote the boundary markers.
+    //
+    //    NOT just an `entry_type` flip: the join/leave writers put
+    //    "<name> joined the set!" in `message`, while a real `show_start` says
+    //    "Start of Show: <name> joined the set at <time>". `message` is on the
+    //    public read path, so a promoted marker that keeps the join wording
+    //    renders a repaired show as having no start-of-show line at all.
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
       if (seg.startMarkerId !== null) {
-        await tx.update(flowsheet).set({ entry_type: 'show_start' }).where(eq(flowsheet.id, seg.startMarkerId));
+        await tx
+          .update(flowsheet)
+          .set({ entry_type: 'show_start', message: showStartMessage(seg.djName, seg.startTime) })
+          .where(eq(flowsheet.id, seg.startMarkerId));
       }
+
+      // A segment that is genuinely still on the air has no sign-off to record.
+      if (seg.endTime === null) continue;
+      const endMessage = showEndMessage(seg.djName, seg.endTime);
+
       if (seg.endMarkerId !== null) {
-        await tx.update(flowsheet).set({ entry_type: 'show_end' }).where(eq(flowsheet.id, seg.endMarkerId));
-      } else if (seg.endTime !== null) {
+        await tx
+          .update(flowsheet)
+          .set({ entry_type: 'show_end', message: endMessage })
+          .where(eq(flowsheet.id, seg.endMarkerId));
+      } else {
         // The DJ never signed off; the next go-live is the only evidence the
         // set ended. Mint the marker the sign-off would have written.
-        const targetShowId = i === 0 ? original.id : newShowIds.get(i)!;
+        const targetShowId = showIdForSegment(i);
         await tx.insert(flowsheet).values({
           show_id: targetShowId,
           entry_type: 'show_end',
           dj_name: seg.djName,
           add_time: seg.endTime,
           play_order: seg.entryIds.length + 1,
+          message: endMessage,
         });
         log('show-end-minted', { show_id: targetShowId, dj_name: seg.djName, at: seg.endTime.toISOString() });
       }
@@ -250,19 +325,40 @@ export const applySplit = async (
 
     // 5. Move each membership to the show that DJ actually ran, deactivating
     //    it where that show is closed.
+    //
+    //    A DJ who ran two non-adjacent segments — went live, left, came back
+    //    later — has only ONE `show_djs` row on the original show, so the move
+    //    can satisfy the first of their segments and nothing else: the second
+    //    UPDATE matches zero rows and that show ends up with a `primary_dj_id`
+    //    and no membership at all. Later segments get an explicit insert
+    //    instead. `show_djs` is unique on `(show_id, dj_id)` and every target
+    //    show was created moments ago, so the conflict arm is unreachable
+    //    belt-and-braces.
+    const movedDjs = new Set<string>();
     for (let i = 1; i < segments.length; i++) {
       const dj = segmentDjs.get(i);
       if (!dj) continue;
-      await tx
-        .update(show_djs)
-        .set({ show_id: newShowIds.get(i)!, active: segments[i].endTime === null })
-        .where(and(eq(show_djs.show_id, original.id), eq(show_djs.dj_id, dj.id)));
+      const showId = showIdForSegment(i);
+      const active = segments[i].endTime === null;
+      if (movedDjs.has(dj.id)) {
+        await tx.insert(show_djs).values({ show_id: showId, dj_id: dj.id, active }).onConflictDoNothing();
+      } else {
+        await tx
+          .update(show_djs)
+          .set({ show_id: showId, active })
+          .where(and(eq(show_djs.show_id, original.id), eq(show_djs.dj_id, dj.id)));
+        movedDjs.add(dj.id);
+      }
     }
 
-    // Any membership still on the original show belongs to a DJ whose join was
-    // a sub-threshold blip — they really were a co-host of whichever segment
-    // held their marker, and step 3 already moved that marker. Deactivate the
-    // stale membership so the lead show doesn't report them as on the air.
+    // Whatever is still on the original show is either a DJ whose join was a
+    // sub-threshold blip — a genuine co-host of whichever segment held their
+    // marker, which step 3 already moved — or a DJ whose segment did not
+    // resolve to an account, in which case there is no way to tell WHICH
+    // leftover row is theirs and the move had to be skipped. The lead show is
+    // closed by step 1 either way, so nothing on it should read as on the air.
+    // The unresolved case is reported by `warn-unresolved-djs`, which is why
+    // the run procedure requires every segment to show `resolved: true`.
     await tx.update(show_djs).set({ active: false }).where(eq(show_djs.show_id, original.id));
 
     // 6. If the last segment is still on the air, its `show_start` must end up
@@ -300,6 +396,25 @@ export const applySplit = async (
  * from tubafrenzy, do not mirror it back"). Same transaction, so the unique
  * index on `legacy_entry_id` never sees both rows.
  *
+ * Nothing else keys on the row id it discards. `flowsheet_linkage_review` holds
+ * the only foreign key pointing at `flowsheet.id` and it is `ON DELETE CASCADE`,
+ * but it only ever queues `entry_type = 'track'` rows with ambiguous library
+ * linkage, so a marker cannot have a review to lose. No job persists a flowsheet
+ * id as a cursor (`flowsheet-etl` and the digests use time watermarks;
+ * `flowsheet-no-match-recheck`'s `cursor_position` is an OFFSET, not an id;
+ * the ghost sweep's id cursor is operator-supplied per run and a re-minted row
+ * moves AHEAD of it, the safe direction), and the mirror's only durable key is
+ * `legacy_entry_id`, preserved below.
+ *
+ * The `id DESC` "last logged entry" contract (`lastLoggedShowEntryOrderBy` in
+ * `@wxyc/database`) is the one thing a re-mint moves, and moving it is the
+ * point: it makes `show_start` the show's newest row, so `isLatestEntryShowEnd`
+ * reads false and `closeShowFromTerminalShowEndMarker` correctly declines to
+ * close a live show. That is why both callers gate on the show being open —
+ * pointing this at a closed show would be a lie about which row was logged last.
+ * `resolveShowEndInstant` is immune by construction: it reads `MAX(add_time)`,
+ * which the re-mint preserves.
+ *
  * Idempotent: a run where no `show_end` outranks the live `show_start` does
  * nothing.
  */
@@ -322,6 +437,13 @@ export const ensureLiveShowStartIsNewestMarker = async (
       .select({ id: flowsheet.id })
       .from(flowsheet)
       .where(and(eq(flowsheet.entry_type, 'show_end'), gt(flowsheet.id, startRow.id)))
+      // Ordered purely to pin the plan. `id > $1` is served by `flowsheet_pkey`
+      // and this ORDER BY is the order that scan already returns, so it costs
+      // nothing — but it takes a Seq Scan of the 1.7 GB heap off the planner's
+      // menu outright rather than trusting it to keep estimating the range as
+      // narrow. Worth one word inside a transaction that is not re-runnable and
+      // is holding row locks on every entry of the show while this runs.
+      .orderBy(asc(flowsheet.id))
       .limit(1)
   )[0];
   if (!newer) return false;
@@ -330,7 +452,21 @@ export const ensureLiveShowStartIsNewestMarker = async (
   const { id: oldId, ...columns } = startRow;
 
   await tx.delete(flowsheet).where(eq(flowsheet.id, oldId));
-  const reinserted = await tx.insert(flowsheet).values(columns).returning({ id: flowsheet.id });
+  const reinserted = await tx
+    .insert(flowsheet)
+    .values({
+      ...columns,
+      // Redundant with the spread, and deliberately so. This is a write site for
+      // `flowsheet.legacy_entry_id`, and `scripts/check-legacy-entry-id-writes.mjs`
+      // finds write sites by grepping for the literal `legacy_entry_id:` key —
+      // carried only by a spread, this one would evade the registry that exists
+      // to keep every writer of that overloaded column enumerable. It preserves
+      // an existing tubafrenzy id across a physical re-mint and never mints a
+      // value, so use #2's loop-guard invariant ("non-null ⇒ came from
+      // tubafrenzy") is unchanged.
+      legacy_entry_id: startRow.legacy_entry_id,
+    })
+    .returning({ id: flowsheet.id });
 
   log('live-show-start-reminted', {
     show_id: liveShowId,
@@ -347,9 +483,30 @@ export const ensureLiveShowStartIsNewestMarker = async (
  */
 export const mirrorSignoff = async (legacyShowId: number, endTime: Date): Promise<void> => {
   const epochMs = endTime.getTime();
-  await MirrorSQL.instance().send(
-    `UPDATE FLOWSHEET_RADIO_SHOW_PROD SET SIGNOFF_TIME = ${epochMs} WHERE ID = ${legacyShowId} AND SIGNOFF_TIME = 0;`
+  // Read the value back in the same batch. `MirrorSQL.send` returns stdout only,
+  // so an UPDATE that matched zero rows is indistinguishable from one that
+  // matched one — and this UPDATE is guarded on `SIGNOFF_TIME = 0`, which a show
+  // in the BS#1861 "sign-off happened, end_time lagged" class does not satisfy.
+  // Logging `mirror-signoff-written` unconditionally would report the guard as
+  // installed when it is not, and a later manual `flowsheet-etl` run would then
+  // overwrite the repaired `end_time` from tubafrenzy while the operator's log
+  // said the mirror half succeeded.
+  const output = await MirrorSQL.instance().send(
+    `UPDATE FLOWSHEET_RADIO_SHOW_PROD SET SIGNOFF_TIME = ${epochMs} WHERE ID = ${legacyShowId} AND SIGNOFF_TIME = 0;
+     SELECT SIGNOFF_TIME FROM FLOWSHEET_RADIO_SHOW_PROD WHERE ID = ${legacyShowId};`
   );
+  const observed = String(output ?? '')
+    .trim()
+    .split(/\s+/)
+    .pop();
+  if (observed !== String(epochMs)) {
+    throw new Error(
+      `tubafrenzy SIGNOFF_TIME for show ${legacyShowId} is ${observed ?? '<no row>'}, expected ${epochMs}. ` +
+        `The PostgreSQL split is ALREADY COMMITTED and cannot be re-run; only this stamp is missing. ` +
+        `Reconcile by hand once you know why the row disagrees: ` +
+        `UPDATE FLOWSHEET_RADIO_SHOW_PROD SET SIGNOFF_TIME = ${epochMs} WHERE ID = ${legacyShowId};`
+    );
+  }
   log('mirror-signoff-written', { legacy_show_id: legacyShowId, signoff_time: epochMs });
 };
 
@@ -399,20 +556,18 @@ export const main = async (): Promise<void> => {
   }
   const showId = Number.parseInt(showIdArg, 10);
 
+  const minSegmentSeconds = minSegmentSecondsArg();
+
   const original = await loadShow(showId);
   const entries = await loadEntries(showId);
-  const { segments, ignoredBlips } = planSegments(
-    entries,
-    new Date(original.start_time),
-    original.end_time ? new Date(original.end_time) : null,
-    MIN_SEGMENT_SECONDS
-  );
+  const { segments, ignoredBlips } = planSegments(entries, original.start_time, original.end_time, minSegmentSeconds);
 
   const segmentDjs = await resolveSegmentDjs(showId, segments);
 
   log('plan', {
     show_id: showId,
     dry_run: DRY_RUN,
+    min_segment_seconds: minSegmentSeconds,
     entries: entries.length,
     segments: segments.map((s, i) => ({
       index: i,
@@ -422,7 +577,13 @@ export const main = async (): Promise<void> => {
       start: s.startTime.toISOString(),
       end: s.endTime?.toISOString() ?? null,
       entries: s.entryIds.length,
-      mints_show_end: s.startMarkerId !== null && s.endMarkerId === null && s.endTime !== null,
+      // No `startMarkerId` clause: segment 0 has none by definition, and the
+      // apply's mint condition does not test one either — so gating on it made
+      // the dry run report `false` for the lead show in exactly the shape this
+      // job exists for (1951224: `dj sue` never signed off, so the apply DOES
+      // mint her `show_end`). A non-re-runnable one-shot must not understate
+      // its writes in the plan the operator is told to read first.
+      mints_show_end: s.endMarkerId === null && s.endTime !== null,
     })),
     ignored_blips: ignoredBlips,
   });
@@ -431,7 +592,11 @@ export const main = async (): Promise<void> => {
   if (unresolved.length > 0) {
     log('warn-unresolved-djs', {
       segments: unresolved,
-      note: 'these shows get primary_dj_id NULL and keep the handle in legacy_dj_name',
+      note:
+        'these shows get primary_dj_id NULL and keep the handle in legacy_dj_name, reintroducing the ' +
+        'legacy-name fallback this repair removes; their show_djs membership cannot be moved either, ' +
+        'so an unresolved DJ who is still on the air ends up with no active membership anywhere. ' +
+        'Resolve the handles (or fix auth_user.dj_name) before applying.',
     });
   }
 
