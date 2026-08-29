@@ -151,7 +151,7 @@ Per `docs/bulk-update-playbook.md`, the per-row cost on `flowsheet` is a heap re
 
 — and both predate `dj_name_override` (BS#1321) and omit the literal-`'Anonymous'` filter (BS#1286), so both can write values the canonical helper would not produce. An unbounded check would fail nondeterministically on any row they touch after the drain passed it.
 
-**Consequence beyond this run: divergence regrows at the rate those two writers run.** Converting them to the canonical helper is the durable fix and is tracked as a follow-up. This job is not complete without it.
+**Consequence beyond this run: divergence regrows at the rate those two writers run.** Converting them to the canonical helper is the durable fix and is tracked as a follow-up ([WXYC/Backend-Service#2313](https://github.com/WXYC/Backend-Service/issues/2313)). This job is not complete without it.
 
 Sample the **legacy cohort** (`primary_dj_id IS NULL`) when reviewing output — the `auth_user` join cannot see it, which is why BS#1393 reported an empty residue class.
 
