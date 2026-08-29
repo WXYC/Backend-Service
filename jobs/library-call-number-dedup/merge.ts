@@ -24,7 +24,7 @@
  *     let straight through.
  *
  * Every FK referencing `library.id` is repointed to the survivor BEFORE the
- * losing row is deleted. That ordering is not stylistic: six of the sites
+ * losing row is deleted. That ordering is not stylistic: seven of the sites
  * cascade and two null the reference out, so deleting first would silently
  * destroy rotation history, album metadata, reviews, and artist
  * cross-references, and silently unlink plays, with no error raised.
@@ -46,9 +46,9 @@
  * violation and the per-slot transaction rolled back with nothing lost. Under
  * `cascade` the same bug fails SILENTLY — any crossreference row the repoint
  * missed is deleted along with the loser and the merge reports success. Four
- * of the fourteen sites (`bins`, `library_identity`,
- * `library_identity_source`, `digital_asset`) still raise, so the class of bug is not
- * undetectable, but this particular table has stopped being one of the
+ * of the thirteen FK sites (`bins`, `library_identity`,
+ * `library_identity_source`, `digital_asset`) still raise, so the class of bug
+ * is not undetectable, but this particular table has stopped being one of the
  * canaries. Treat a change to the repoint logic here as unguarded by the
  * database.
  */
@@ -69,7 +69,7 @@ export const schemaName = (): string => (process.env.WXYC_SCHEMA_NAME || 'wxyc_s
 const ident = (name: string): SQL => sql.raw(`"${name.replace(/"/g, '""')}"`);
 const qualified = (table: string): SQL => sql.raw(`"${schemaName()}"."${table.replace(/"/g, '""')}"`);
 
-/** Log prefix for this job. One spelling, shared by the CLI reporting and the merge internals. */
+/** Log prefix for this job. One spelling, shared by `runDedup`'s reporting and the merge internals. */
 const LOG_TAG = '[library-call-number-dedup]';
 
 /**
@@ -134,8 +134,10 @@ export const FK_TARGETS: readonly FkTarget[] = [
   // dropped as a collision, and the SURVIVOR's wins arbitrarily -- not because
   // it is the better of the two. Read on before relying on that.
   //
-  // This is the only collision-delete in the list that reaches beyond its own
-  // row. `digital_asset_file.asset_id` REFERENCES `digital_asset(id)` ON DELETE
+  // This is the only collision-delete in the list that DESTROYS rows in another
+  // table. (`rotation` reaches beyond its own row too -- `flowsheet.rotation_id`
+  // references it -- but that FK is ON DELETE set null, so it loses a link and
+  // never a row. The distinction is the whole point of the warning below.) `digital_asset_file.asset_id` REFERENCES `digital_asset(id)` ON DELETE
   // cascade, so dropping a binding row also drops every file row under it --
   // object_key, the md5/sha256/flac_md5 digests, bitrate, duration, raw tags --
   // and `fillNullsFromLoser` carries none of it across first (the PRESERVED_*
@@ -445,7 +447,7 @@ const repointTarget = async (tx: Tx, target: FkTarget, loser: number, survivor: 
       `)) as unknown as Array<{ object_key: string }>;
       if (orphaned.length > 0) {
         console.warn(
-          `${LOG_TAG} merge ${loser} -> ${survivor}: dropping a colliding digital_asset. ${orphaned.length} file row(s) cascade with it and these objects are left unreferenced in the store (re-bindable via the BS#2319 bind job): ${orphaned.map((r) => r.object_key).join(', ')}`
+          `${LOG_TAG} merge ${loser} -> ${survivor}: dropping colliding digital_asset row(s). ${orphaned.length} file row(s) cascade with them and these objects are left unreferenced in the store (re-bindable via the BS#2319 bind job): ${orphaned.map((r) => r.object_key).join(', ')}`
         );
       }
     }

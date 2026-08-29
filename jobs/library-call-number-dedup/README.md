@@ -37,7 +37,7 @@ Any uniqueness constraint added afterward must use this same key, including the 
 
 ## Order of operations is a data-safety property
 
-Every FK referencing `library.id` is repointed to the survivor **before** the losing row is deleted. That is not stylistic. Of the 15 reference sites, seven cascade and two null out the reference:
+Every FK referencing `library.id` is repointed to the survivor **before** the losing row is deleted. That is not stylistic. Of the 16 reference sites, seven cascade and two null out the reference:
 
 | On delete  | Sites                                                                                                                                                            |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
