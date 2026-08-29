@@ -30,45 +30,19 @@ import {
   loadOrphanPage,
   loadMessagePage,
 } from '../../../../jobs/flowsheet-dj-name-scrub/orchestrate';
+import { renderSql } from '../../../utils/render-sql';
 
 /**
- * `orchestrate.ts` imports `sql` straight from `drizzle-orm` (not the
- * `@wxyc/database` mock), so `db.execute` is called with the REAL Drizzle
- * `SQL` object: `{ sql: string[], values: unknown[] }`, where a nested
- * `sql.raw(...)` or `sql\`...\`` interpolation (the schema-qualified table
- * refs, the entry-type lists, the VALUES rows) shows up inside `values` as
- * `{ raw: string }` or another nested `SQL` object, NOT inlined into the
- * outer `.sql` chunk array. A naive `chunks.join('')` — the shape the
- * `flowsheet-dj-name-backfill` donor's `renderSql` gets away with, because
- * that job writes its table/column names as literal template text rather
- * than interpolating a `sql.raw` table ref — would therefore drop every
- * interpolated fragment silently, including the table name itself. This
- * version reconstructs the literal SQL by interleaving chunks with rendered
- * values, recursing into nested `SQL` objects and unwrapping `{ raw }`.
+ * The renderer is the canonical `tests/utils/render-sql.ts` (BS#2051), not a
+ * local copy. That util exists precisely because forty-plus suites each
+ * hand-rolled their own subset of this logic and every one of them fell back
+ * to an empty string on a shape it didn't recognize — a silently-empty render
+ * makes an assertion pass against nothing. It matters more than usual here:
+ * `orchestrate.ts` interpolates `sql.raw(...)` table refs and `sql.join(...)`
+ * VALUES rows, so a naive `chunks.join('')` would drop the table name and the
+ * per-row values from every string this file asserts on. The shared renderer
+ * handles both shapes and THROWS on an unrecognized one.
  */
-type DrizzleSqlLike = { sql?: string[]; values?: unknown[] };
-
-const renderValue = (value: unknown): string => {
-  if (value === null || value === undefined) return String(value);
-  if (typeof value === 'object') {
-    const obj = value as { raw?: unknown; sql?: string[] };
-    if (typeof obj.raw === 'string') return obj.raw;
-    if (Array.isArray(obj.sql)) return renderSql(value);
-  }
-  return String(value);
-};
-
-const renderSql = (value: unknown): string => {
-  const obj = value as DrizzleSqlLike | null | undefined;
-  if (!obj || !Array.isArray(obj.sql)) return '';
-  const values = obj.values ?? [];
-  let out = '';
-  obj.sql.forEach((chunk, i) => {
-    out += chunk;
-    if (i < values.length) out += renderValue(values[i]);
-  });
-  return out;
-};
 
 const findExecuteCallMatching = (pattern: RegExp): unknown[] | undefined => {
   const calls = (db.execute as jest.Mock).mock.calls;
@@ -129,7 +103,10 @@ describe('applyMessageBatch — the real write statement', () => {
   it('is a compare-and-set VALUES-join UPDATE on IS NOT DISTINCT FROM, same shape as dj_name', async () => {
     (db.execute as jest.Mock).mockResolvedValue({ count: 1 });
 
-    await applyMessageBatch([{ id: 1, message: 'DJ joined the set!', oldMessage: 'A. Hearst joined the set!' }], 300_000);
+    await applyMessageBatch(
+      [{ id: 1, message: 'DJ joined the set!', oldMessage: 'A. Hearst joined the set!' }],
+      300_000
+    );
 
     const call = findExecuteCallMatching(/UPDATE[\s\S]*flowsheet[\s\S]*SET[\s\S]*"message"/i);
     expect(call).toBeDefined();
@@ -141,7 +118,10 @@ describe('applyMessageBatch — the real write statement', () => {
   it('never sets updated_at or dj_name — this pass touches message only', async () => {
     (db.execute as jest.Mock).mockResolvedValue({ count: 1 });
 
-    await applyMessageBatch([{ id: 1, message: 'DJ joined the set!', oldMessage: 'A. Hearst joined the set!' }], 300_000);
+    await applyMessageBatch(
+      [{ id: 1, message: 'DJ joined the set!', oldMessage: 'A. Hearst joined the set!' }],
+      300_000
+    );
 
     const call = findExecuteCallMatching(/UPDATE[\s\S]*flowsheet[\s\S]*SET[\s\S]*"message"/i);
     const sqlText = renderSql(call?.[0]);
@@ -196,7 +176,7 @@ describe('loadOrphanPage — the real candidate SELECT (BS#2281 review finding 4
     expect(sqlText).toMatch(/LIMIT/i);
   });
 
-  it('never joins the main pass\'s auth_user column — there is no shows chain to read one from', async () => {
+  it("never joins the main pass's auth_user column — there is no shows chain to read one from", async () => {
     (db.execute as jest.Mock).mockResolvedValue([]);
     await loadOrphanPage(0, 5000);
     const sqlText = renderSql(findExecuteCallMatching(/SELECT[\s\S]*flowsheet/i)?.[0]);
