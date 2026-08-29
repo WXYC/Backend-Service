@@ -85,7 +85,7 @@
  * promise: `verifyComplete` is capped at the drain's high-water mark so a
  * row one of them touches after the drain passed it cannot fail
  * verification nondeterministically. Converting them is the durable fix and
- * is tracked separately — divergence regrows at the rate they run.
+ * is tracked separately (BS#2313) — divergence regrows at the rate they run.
  *
  * ## Blast radius
  *
