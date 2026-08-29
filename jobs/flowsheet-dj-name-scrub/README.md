@@ -33,6 +33,14 @@ This job deliberately **creates** `dj_name IS NULL` rows. Two one-shot jobs exis
 
 Running either **after** this scrub silently re-attributes those rows to the primary DJ and undoes the privacy fix. Their root Dockerfiles have been removed so `Manual Build & Deploy` cannot produce an image, and `tests/unit/jobs/flowsheet-dj-name-scrub/reversal-guard.test.ts` fails if one is restored without a deliberate decision. Do not restore one because this document calls BS#1393 "under-remediated" — re-running it cleans nothing and reverses this job.
 
+## Where the job learns which names are PII
+
+The PII probe is an in-process index built from **`auth_user.real_name`**, the schema's sole legal-name carrier, loaded once at startup.
+
+It is deliberately **not** `auth_user.name`. That column was a second, unmaintained copy of the legal name from `a0cd1979` (2025-12-31) onward — which is exactly what the Cohort A rows froze onto themselves — but `jobs/auth-user-name-backfill` rewrote every production row to handle-else-username on **2026-08-28**, and the `databaseHooks.user` derivation hooks now hold that invariant on every write (`docs/pii.md`). An index built from `name` today fails in both directions at once: it misses every real name this job exists to remove (they live only in `real_name` now), and it indexes usernames as though they were PII. Either way the run reports clean — the BS#1393 empty-residue shape exactly.
+
+Reading `real_name` is an allow-listed PII read (`eslint-rules/restricted-real-name.cjs`, `docs/pii.md`). The names never leave the process: change samples are row ids only, and no log, metric, or Sentry payload this job emits carries a name.
+
 ## The three intentional-NULL classes
 
 A `NULL dj_name` after this run is the fix, not a regression. Do not "repair" these:

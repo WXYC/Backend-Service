@@ -95,6 +95,16 @@ const ALLOW_LIST = [
   'shared/database/src/schema.ts',
   // Future one-shot backfill job (Track 2d) — prefix, not yet written.
   'jobs/auth-user-name-backfill/',
+  // BS#2281's dj_name scrub. It removes legal names that were frozen onto
+  // the public `flowsheet.dj_name` column, so it has to be told which names
+  // those are — it builds an in-process index of `auth_user.real_name` and
+  // tests stored values against it. Reading the public-safe `auth_user.name`
+  // instead is what this job did before the 2026-08-28 backfill, and is now
+  // wrong in both directions (misses every real name, indexes usernames);
+  // see `buildPiiNameIndex`'s docblock. The names never leave the process:
+  // change samples are row ids only, and no log, metric, or Sentry payload
+  // in that job carries a name.
+  'jobs/flowsheet-dj-name-scrub/',
 ];
 
 const MESSAGE =

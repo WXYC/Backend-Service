@@ -22,8 +22,8 @@ import {
 } from '../../../../jobs/flowsheet-dj-name-scrub/orchestrate';
 
 const ROSTER = [
-  { name: 'A. Hearst', djName: null },
-  { name: 'B. Wilder', djName: 'zorp' },
+  { realName: 'A. Hearst', djName: null },
+  { realName: 'B. Wilder', djName: 'zorp' },
 ];
 
 const makeRow = (overrides: Partial<ScrubRow> = {}): ScrubRow => ({
