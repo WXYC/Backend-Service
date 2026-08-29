@@ -525,7 +525,7 @@ Three passes drain independently, each with its own id cursor. Each is a resume 
 
 - `DJ_NAME_SCRUB_FLOWSHEET_AFTER_ID` (default `0`) — main recompute pass, over every in-scope row reachable through a `shows` join.
 - `DJ_NAME_SCRUB_MESSAGE_AFTER_ID` (default `0`) — marker `message` rewrite pass.
-- `DJ_NAME_SCRUB_ORPHAN_AFTER_ID` (default `0`) — `show_id IS NULL` rows, which the `shows` join cannot see and which therefore have nothing to recompute from (PII removal only).
+- `DJ_NAME_SCRUB_ORPHAN_AFTER_ID` (default `0`) — `show_id IS NULL` rows, plus rows whose `show_id` is set but dangling (no matching `shows` row — migration 0097's FK was added `NOT VALID` and may never have been retroactively validated). Both shapes are invisible to the `shows` join and therefore have nothing to recompute from (PII removal only).
 
 After a **failed** run, resume from a conservative cursor rather than the last logged one: the Dockerfile sets `DB_SYNCHRONOUS_COMMIT=off`, so a page the client believed had committed can be lost to a crash inside the fsync window.
 

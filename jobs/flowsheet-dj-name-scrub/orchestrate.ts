@@ -67,8 +67,9 @@
  *   2. **message** (`DJ_NAME_SCRUB_MESSAGE_AFTER_ID`) — the four marker types
  *      whose `message` text embeds the resolved name.
  *   3. **orphan** (`DJ_NAME_SCRUB_ORPHAN_AFTER_ID`) — `show_id IS NULL` rows,
- *      which the `shows` join cannot see and which therefore have nothing to
- *      recompute from. PII removal only.
+ *      plus rows whose `show_id` is set but DANGLING (no matching `shows`
+ *      row — see `loadOrphanPage`). Both shapes are invisible to the `shows`
+ *      join and therefore have nothing to recompute from. PII removal only.
  *
  * The cost of separating them is two extra read-only PK walks of the table;
  * the benefit is that the one pass writing client-facing prose is separately
@@ -428,11 +429,24 @@ export const decideDjName = (row: ScrubRow, piiNames: ReadonlySet<string>): Scru
     return { action: 'skip', reason: 'entry_type_excluded' };
   }
 
-  // Orphans (`show_id IS NULL`) have no shows join, so there is nothing to
-  // recompute from — they get the same PII-removal probe as the guest-DJ
-  // markers. `flowsheet` has no user FK (only `show_id`), so "that user" does
-  // not exist for these rows and the rule has to be stated as membership in
-  // the index rather than as a per-row comparison.
+  // Orphans (`show_id IS NULL`, or dangling) have no shows join, so there is
+  // nothing to recompute from — they get the same PII-removal probe as the
+  // guest-DJ markers. `flowsheet` has no user FK (only `show_id`), so "that
+  // user" does not exist for these rows and the rule has to be stated as
+  // membership in the index rather than as a per-row comparison.
+  //
+  // Known limit (BS#2281 review finding 6, NOT widened here — that would be
+  // Cohort C): this exact-equality probe is sound for `dj_join`/`dj_leave`
+  // because those values provably came from `auth_user`. For orphans it is
+  // not — `schema.ts:1084` describes `show_id IS NULL` rows as pre-dating
+  // `shows` entirely, i.e. the legacy cohort: the population LEAST likely to
+  // have an `auth_user` row and MOST likely to hold a bare tubafrenzy real
+  // name the index can never contain. So this pass will likely find almost
+  // nothing on exactly the rows most likely to be polluted. Read
+  // `orphan.scanned` vs `orphan.changed` in the run summary accordingly — a
+  // near-zero `changed` on a non-trivial `scanned` is the probe finding
+  // nothing, not evidence the orphan cohort is clean. See the README's
+  // Cohort C caveat, which this sits beside.
   const piiOnly = row.show_id === null || (PII_NULL_ONLY_ENTRY_TYPES as readonly string[]).includes(row.entry_type);
   if (piiOnly) {
     const stored = row.dj_name?.trim() ?? '';
@@ -667,24 +681,73 @@ export const loadMainPage: LoadScrubPageFn = async (afterId, batchSize, maxId) =
 };
 
 /**
- * One page of orphan rows (`show_id IS NULL`).
+ * One page of orphan rows: `show_id IS NULL`, OR `show_id` is set but
+ * DANGLING (no matching `shows` row).
  *
- * The `shows` join in `loadMainPage` cannot see these at all, which is why
- * they need their own pass rather than a wider predicate. Scoped
- * `dj_name IS NOT NULL` because the only action available for an orphan is
- * REMOVING a name — there is nothing to recompute one from.
+ * The `shows` join in `loadMainPage` cannot see either shape at all, which is
+ * why they need their own pass rather than a wider predicate on that join.
+ * Scoped `dj_name IS NOT NULL` because the only action available for an
+ * orphan is REMOVING a name — there is nothing to recompute one from.
+ *
+ * The dangling case is real, not defensive caution:
+ * `flowsheet_show_id_shows_id_fk` was dropped and re-added `NOT VALID` in
+ * migration 0097, which documents `ALTER TABLE ... VALIDATE CONSTRAINT` as
+ * an out-of-band operator step that may never have run. A `NOT VALID` FK
+ * enforces every NEW write but never retroactively checks rows that predate
+ * it, so a pre-0097 row whose `show_id` no longer resolves is invisible to
+ * `loadMainPage`'s INNER JOIN, was invisible to the OLD `show_id IS NULL`
+ * orphan predicate, and was therefore invisible to `verifyScrub` too (it
+ * reuses these same two loaders) — the row could never be scrubbed AND the
+ * run would still report clean. Population is very likely zero — 0097's own
+ * comment argues the pre-existing `NO ACTION` FK already kept this
+ * consistent — but "very likely zero and structurally unverifiable" is
+ * precisely the failure shape this job exists to not repeat from BS#1393.
+ *
+ * Plan safety: the `NOT EXISTS` anti-join is a correlated subquery keyed on
+ * `shows."id"`, the primary key. `EXPLAIN (ANALYZE, BUFFERS)` against a
+ * 20k-row `flowsheet` with 2 orphans and a `shows`-side index confirms the
+ * expected shape: an `Index Scan` on the `flowsheet` id PK, with the
+ * `shows` side planned as `hashed SubPlan` — Postgres materializes the small
+ * `shows` table into an in-memory hash ONCE and does an O(1) hash probe per
+ * candidate row, rather than a per-row index lookup or (worse) a Hash Anti
+ * Join that would force materializing a large slice of `flowsheet` before
+ * `LIMIT` can apply. The plan is identical in shape to the plain
+ * `show_id IS NULL` predicate it replaces. What that measurement does NOT
+ * change: when the orphan+dangling cohort is sparse relative to the table
+ * (the expected production shape), a page still has to scan through the
+ * intervening non-matching rows to fill up to `LIMIT` — inherent to id-order
+ * pagination under any selective predicate, not something this widening
+ * introduces. That cost is a single index-scan pass at 20k rows/1.8ms, not a
+ * seq scan or a per-row round trip; if a future `EXPLAIN ANALYZE` against a
+ * production-sized table shows the planner choosing differently, prefer a
+ * cheap pre-flight COUNT of the dangling cohort plus a loud refusal over
+ * silently letting this pass degrade into a multi-hour scan that finds
+ * nothing.
  */
 export const loadOrphanPage: LoadScrubPageFn = async (afterId, batchSize, maxId) => {
   const rows = (await db.execute(sql`
     SELECT f."id", f."entry_type", f."dj_name", f."message", f."show_id"
       FROM ${FLOWSHEET_TABLE} AS f
      WHERE f."id" > ${afterId}${upperBound(maxId)}
-       AND f."show_id" IS NULL
+       AND (
+         f."show_id" IS NULL
+         OR NOT EXISTS (SELECT 1 FROM ${SHOWS_TABLE} AS s WHERE s."id" = f."show_id")
+       )
        AND f."dj_name" IS NOT NULL
        AND f."entry_type" IN (${sqlEntryTypeList(IN_SCOPE_ENTRY_TYPES)})
      ORDER BY f."id"
      LIMIT ${batchSize}
   `)) as unknown as Array<Pick<ScrubRow, 'id' | 'entry_type' | 'dj_name' | 'message' | 'show_id'>>;
+  // Normalized to `show_id: null` for EVERY row this pass returns, including
+  // a DANGLING non-null show_id. `decideDjName`'s piiOnly routing keys on
+  // `row.show_id === null` to mean "no shows chain to recompute from", and
+  // that is exactly as true for a dangling id as for a genuinely NULL one —
+  // there is no live `shows` row to join to either way. Do not "fix" this to
+  // preserve the raw dangling id: that would silently route these rows into
+  // the main pass's recompute branch, which has nothing valid to join
+  // against and would misbehave (an unmatched JOIN never happens today
+  // because `loadMainPage` uses an INNER JOIN, but this function's row shape
+  // is also what a future caller might reuse).
   return rows.map((row) => ({
     ...row,
     show_id: null,
