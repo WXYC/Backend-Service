@@ -43,7 +43,7 @@ Every FK referencing `library.id` is repointed to the survivor **before** the lo
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `cascade`  | `rotation`, `album_metadata`, `reviews`, `album_critic_reviews`, `compilation_track_artist`, `artist_library_crossreference`, `uncovered_release_search_markers` |
 | `set null` | `flowsheet.album_id`, `album_review_submissions.album_id`                                                                                                        |
-| no action  | `bins`, `library_identity`, `library_identity_source`                                                                                                            |
+| no action  | `bins`, `library_identity`, `library_identity_source`, `digital_asset.library_id`                                                                                |
 | no FK      | `library_identity_history`, `album_popularity.representative_library_id`, `library_delete_denylist.library_id`                                                   |
 
 Deleting first would silently destroy rotation history, album metadata, reviews, and now the artist cross-references too, and silently unlink plays — no error raised. The three no-action sites are the only ones that would fail loudly.

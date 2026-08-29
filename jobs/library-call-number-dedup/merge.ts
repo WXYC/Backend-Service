@@ -124,6 +124,15 @@ export const FK_TARGETS: readonly FkTarget[] = [
   { table: 'library_identity_source', column: 'library_id', uniqueKey: ['library_id', 'source'] },
   { table: 'library_identity_history', column: 'library_id', uniqueKey: null },
   { table: 'album_popularity', column: 'representative_library_id', uniqueKey: null },
+  // BS#2318. `(library_id, provenance, disc_number)` is UNIQUE and all three are
+  // NOT NULL (`disc_number` defaults to 1), so the key is total -- no
+  // `uniqueWhenNull`. On a merge the loser's assets repoint to the survivor;
+  // where both sides hold the same (provenance, disc_number) the loser's row is
+  // dropped as a collision. That drops only the *binding* row: the audio objects
+  // live in `digital_asset_file` under the store and are untouched here, so the
+  // survivor keeps its own audio and nothing in object storage is orphaned by
+  // the merge itself.
+  { table: 'digital_asset', column: 'library_id', uniqueKey: ['library_id', 'provenance', 'disc_number'] },
 ];
 
 export interface SlotRow extends SlotMember {
