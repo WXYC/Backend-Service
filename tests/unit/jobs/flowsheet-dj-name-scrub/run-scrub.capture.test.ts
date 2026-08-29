@@ -21,7 +21,7 @@ import { captureError, log } from '../../../../jobs/flowsheet-dj-name-scrub/logg
 jest.mock('../../../../jobs/flowsheet-dj-name-scrub/logger', () => ({
   log: jest.fn(),
   captureError: jest.fn(),
-  errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
+  errorMessage: (error: unknown): string => (error instanceof Error ? error.message : JSON.stringify(error)),
 }));
 
 const mockedLog = log as jest.MockedFunction<typeof log>;
