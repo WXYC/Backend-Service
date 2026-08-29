@@ -140,6 +140,16 @@ Runtime vars supplied at `docker run --env-file .env` (all four have historicall
 - `POSTHOG_API_KEY` — Personal/project API key for the per-DJ `backend-mirror` flag gate. When unset the mirror is enabled by default (dev/E2E convention), exactly like the live path. The cron `shutdown()`s the `posthog-node` client in `finally` (posthog-node's background flush timers would otherwise hang a short-lived container on exit).
 - `SENTRY_DSN` — Sentry project DSN. The moved `http-mirror` client reports mirror-call failures to Sentry directly, and the reconcile's detection signal (orphan-count threshold + per-show partial-mirror report) emits `captureMessage` warnings. Without a DSN the SDK silently no-ops; provision it so the self-heal is observable.
 
+## Flowsheet Go-Live Intent
+
+- `FLOWSHEET_TAKEOVER_ENABLED` (default `false`, BS#2233) — Strict `=== 'true'` gate (via `apps/backend/config/flowsheetTakeover.ts`'s `createEnvFlagConfig`, the same factory `CRITIC_REVIEWS_ENABLED` and `DONATE_ENABLED` use) for `POST /flowsheet/join`'s explicit start-vs-join decision. ON: a caller going live while a show they are not an active member of is still open must send `intent: "join"` (co-host) or `intent: "takeover"` (close it, start their own, `expected_show_id` required); sending neither is a `409 show_already_open` carrying `{ id, dj_name, start_time }`. OFF: `intent` and `expected_show_id` are ignored entirely and the route co-hosts as it always has.
+
+  **Flag-OFF must never 400 or 409, and that is load-bearing rather than cosmetic.** `auto-dj-orchestrator` ships `intent: "takeover"` before the flip, and its `join()` throws on any response body without a show id, so a 400 on the unrecognized field would crash that daemon at activation. It is also what lets the four repos in this chain deploy in any order: BS ships dormant, every client becomes 409-aware while nothing is emitting 409s, and the flip is one env var. The flag is the rollback too — no redeploy.
+
+  **It deliberately inverts the `backend-mirror` convention documented at the top of this section** ("when unset the mirror is enabled by default"). `isMirrorEnabled` returns `true` when `POSTHOG_API_KEY` is absent, which is right for the mirror and would be exactly wrong here: no CI or e2e environment sets a PostHog key, so copying that shape would ship this live everywhere it was supposed to be dormant.
+
+  Not in `set-ec2-env-var.yml`'s allowlist, so lighting it up takes the same two options `WXYC_REVIEWS_ENABLED` documents above: add the key to that workflow's `env:` block and its `case`, or edit `~/.env` on the host over SSH and recreate the backend container. Recreate, never restart.
+
 ## Metadata Services
 
 - `LIBRARY_METADATA_URL` — library-metadata-lookup base URL (e.g. `http://localhost:8001`). Required for proxy endpoints, metadata enrichment, and track search. All Discogs access is routed through LML. Do not include the `/api/v1` path prefix; the LML client adds it automatically.
