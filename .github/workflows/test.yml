@@ -575,11 +575,13 @@ jobs:
           CATALOG_TRACK_SEARCH_CTA_ENABLED: 'true'
           CATALOG_TRACK_SEARCH_DISCOGS_ENABLED: 'true'
           # Flowsheet Go-Live Intent (BS#2233/BS#2308): same GHA-vs-compose
-          # parity as the two flags above (dev_env/docker-compose.yml).
-          # Default OFF in prod; CI flips it on so
-          # tests/integration/flowsheet-takeover.spec.js exercises the
-          # routing against real Postgres. Test-coverage decision, not a
-          # rollout.
+          # parity requirement as the flags above (dev_env/docker-compose.yml),
+          # but NOT the same rollout state — those are ON in production, and
+          # this one ships OFF and stays OFF there. CI flips it on only so
+          # tests/integration/flowsheet-takeover.spec.js exercises the routing
+          # against real Postgres. Test-coverage decision, not a rollout.
+          # Must be on the SERVICE env (this step), not the jest runner's: the
+          # suite drives a separately spawned backend over HTTP.
           FLOWSHEET_TAKEOVER_ENABLED: 'true'
           # SES has a 200-message/month quota. The auth service (host process
           # here) is the only sendEmail/sendOTPEmail caller; keep real sends

@@ -41,17 +41,19 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
   let sql;
   let mockApiAvailable = false;
 
-  // A third identity, distinct from both fixture DJs. Takeover authorization
-  // is deliberately NOT role-gated beyond flowsheet:write (PR#2308's
-  // "Authorization — decided, not overlooked") — any write-capable DJ can
-  // take over an abandoned show, matching the physical reality that whoever
-  // is in the studio is on air. The seeded fixture pool only carries the two
-  // plain-DJ accounts (test_dj1/test_dj2), already playing the primary/
-  // co-host roles below, so the taker needs someone else. The seeded
-  // station-manager fixture (dev_env/seed_db.sql) fits: a real row with a
-  // resolvable dj_name ("Test SM"), and AUTH_BYPASS's raw-Bearer path
-  // (tests/setup/integration.setup.js, mirrored here) doesn't care about
-  // role — `/flowsheet/join` never checks one beyond flowsheet:write.
+  // A third identity, distinct from both fixture DJs, which are already
+  // playing the primary / co-host roles below. The seeded station-manager
+  // fixture (dev_env/seed_db.sql) is the pick: a real row with a resolvable
+  // dj_name ("Test SM"), and one no other spec mutates — unlike the
+  // deletable/reset fixtures the admin specs target.
+  //
+  // What this deliberately does NOT prove: that takeover is open to any
+  // write-capable DJ. PR#2308 decided takeover is not role-gated beyond
+  // flowsheet:write ("Authorization — decided, not overlooked"), but under
+  // AUTH_BYPASS + NODE_ENV=test `requirePermissions` returns next() before
+  // evaluating any permission, so the taker's role is never checked in this
+  // environment at all. The station-manager role is incidental here, not the
+  // thing under test; the authorization contract is unit-covered.
   const TAKER_DJ_ID = 'test-sm-id-0000000000000000001';
   const TAKER_ACCESS_TOKEN = `Bearer ${TAKER_DJ_ID}`;
   const TAKER_DJ_NAME = 'Test SM';
@@ -59,6 +61,12 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
   beforeAll(async () => {
     sql = makeSql();
     mockApiAvailable = await isMockApiAvailable();
+    if (!mockApiAvailable) {
+      // Say so, matching mirror-http.spec.js. Without this the sign-off
+      // assertions below skip in silence and a misconfigured MOCK_API_URL
+      // reads as a full green pass.
+      console.warn('Skipping tubafrenzy sign-off assertions: mock API server not available');
+    }
   });
 
   afterAll(async () => {
@@ -80,6 +88,13 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
           show_name: 'BS#2309 takeover fixture',
         });
         const startBody = await startRes.json();
+        // Assert the fixture actually STARTED a show rather than no-op-joining
+        // a leaked one. `join_show`'s throw only catches non-2xx: an open show
+        // leaked by an earlier spec returns the no-op-200 `ShowDJ` body, which
+        // carries no `id`, so `oldShowId` would be undefined and the failure
+        // would surface four assertions later against the 409 contract instead
+        // of here. Same guard, same reason, as mirror-http.spec.js's join A.
+        expect(startBody.primary_dj_id).toBe(global.primary_dj_id);
         const oldShowId = startBody.id;
 
         await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token, { intent: 'join' });
@@ -131,7 +146,6 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
         // join into the old one.
         expect(takeoverRes.body.primary_dj_id).toBe(TAKER_DJ_ID);
         expect(takeoverRes.body.id).not.toBe(oldShowId);
-        const newShowId = takeoverRes.body.id;
 
         const [closedShow] = await sql.unsafe(`SELECT end_time FROM ${SCHEMA}.shows WHERE id = $1`, [oldShowId]);
         expect(closedShow.end_time).not.toBeNull();
@@ -222,11 +236,18 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
               (r) => r.body && r.body.radioShowId === oldShowRow.legacy_show_id
             );
             expect(oldShowSignoffs.length).toBeGreaterThanOrEqual(1);
+          } else {
+            // Say so rather than degrading in silence. Without the id, the only
+            // surviving check is "some sign-off happened", which a mis-wired end
+            // tap signing off the NEW show would satisfy identically — the exact
+            // failure the correlation above exists to catch.
+            console.warn(
+              'Sign-off correlation skipped: shows.legacy_show_id was null for the closed show ' +
+                '(mirror create-tap persist had not landed). Only the weaker "a sign-off occurred" ' +
+                'assertion ran.'
+            );
           }
         }
-
-        await fls_util.leave_show(TAKER_DJ_ID, TAKER_ACCESS_TOKEN);
-        void newShowId;
       } finally {
         // Best-effort cleanup of both shows so a failed assertion above can't
         // leak an open show into a later spec (--runInBand shares state).
@@ -242,14 +263,31 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
         show_name: 'BS#2309 concurrent takeover fixture',
       });
       const startBody = await startRes.json();
+      // Same fixture guard as the first test — see the comment there.
+      expect(startBody.primary_dj_id).toBe(global.primary_dj_id);
       const oldShowId = startBody.id;
 
       // Both requests read the same open show before either commits — the
       // double-click shape `endShow`'s own compare-and-set comment describes
-      // ("A double-click has both requests reading a live show"), reproduced
-      // here with two genuinely concurrent requests rather than a timing
-      // guess. Same taker for both: the race is on the show's `end_time IS
-      // NULL` CAS, not on caller identity.
+      // ("A double-click has both requests reading a live show"). Same taker
+      // for both: the race is on the show's `end_time IS NULL` CAS, not on
+      // caller identity.
+      //
+      // This is a timing assumption, not an invariant the route guarantees,
+      // so a failure here is worth reading carefully before assuming a
+      // regression. `joinShow`'s first await is `getLatestShow()`; B only has
+      // to finish that read before A's `endShow` UPDATE commits, and A has
+      // three more awaited round trips (`isLatestEntryShowEnd`,
+      // `isDjAlreadyActiveOnShow`, `resolveShowEndInstant`) to get through
+      // first — roughly a 4x margin, which is why this is stable rather than
+      // lucky. Two other interleavings are legal but NOT what we want, and
+      // each has a distinct signature:
+      //   [200, 200] — B read after A's endShow commit but before A's
+      //     startShow INSERT, so B saw a closed show and started its own.
+      //     Two shows from one race; the length assertion below catches it.
+      //   [200, 409] — B read after A's startShow commit, so B's
+      //     expected_show_id no longer matched the open show.
+      // Neither is a flake to paper over: both mean the window widened.
       const [firstRes, secondRes] = await Promise.all([
         request
           .post('/flowsheet/join')
@@ -261,7 +299,7 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
           .send({ dj_id: TAKER_DJ_ID, intent: 'takeover', expected_show_id: oldShowId, show_name: 'Racer B' }),
       ]);
 
-      const statuses = [firstRes.status, secondRes.status].sort();
+      const statuses = [firstRes.status, secondRes.status].sort((a, b) => a - b);
       // One winner (200, a new show), one loser — endShow's own
       // `WHERE end_time IS NULL` CAS 400, not a second new show.
       expect(statuses).toEqual([200, 400]);
@@ -280,7 +318,17 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
       expect(newShowsFromThisRace.length).toBe(1);
       expect(newShowsFromThisRace[0].id).toBe(winner.body.id);
 
-      await fls_util.leave_show(TAKER_DJ_ID, TAKER_ACCESS_TOKEN);
+      // The CAS's own symptom, asserted directly rather than inferred from the
+      // show count. What `WHERE end_time IS NULL` exists to prevent (BS#1119)
+      // is the losing request ALSO running endShow's body — two `show_end`
+      // markers on one show and a double tubafrenzy sign-off. "Exactly one new
+      // show" is a downstream consequence of that and would still hold if the
+      // loser had failed for some unrelated reason, so pin the marker count too.
+      const oldShowEndMarkers = await sql.unsafe(
+        `SELECT id FROM ${SCHEMA}.flowsheet WHERE show_id = $1 AND entry_type = 'show_end'`,
+        [oldShowId]
+      );
+      expect(oldShowEndMarkers.length).toBe(1);
     } finally {
       await fls_util.leave_show(TAKER_DJ_ID, TAKER_ACCESS_TOKEN);
       await fls_util.leave_show(global.primary_dj_id, global.access_token);

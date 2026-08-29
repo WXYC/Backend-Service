@@ -19,6 +19,16 @@ const url = `${process.env.TEST_HOST}:${process.env.PORT}`;
  * assertion failure several lines later — never at the join that actually
  * failed. Throwing here fails fast, at the join, with the response body that
  * explains why.
+ *
+ * One consequence worth knowing before debugging a failure: this shifts where
+ * a leaked open show surfaces. A spec that ends leaving someone else's show
+ * open used to be absorbed silently by the next spec's `join_show` (it just
+ * co-hosted). With the flag on and this throw, that next spec's `beforeEach`
+ * now fails outright — so the red suite is the VICTIM of the leak, not its
+ * cause. `metadata.spec.js` and `djs.spec.js` are the likeliest victims: every
+ * one of their joins is a DJ starting its own show, correct as written and
+ * needing no `intent`, but they run after the flowsheet specs. If one of them
+ * fails at a join it never touched, look upstream for the spec that leaked.
  */
 exports.join_show = async (dj_id, access_token, body = {}) => {
   const res = await fetch(`${url}/flowsheet/join`, {
