@@ -33,6 +33,7 @@ Promoting such a row would file one show's `show_end` among another show's entri
 | `--min-segment-seconds=<n>` | `120`      | Joins that close faster are treated as blind-toggle noise and left in place as co-host markers, not promoted to shows. Rejected rather than coerced if it isn't a non-negative finite number — `Number('120s')` is `NaN` and every `seconds < NaN` test is false, so a coerced typo would promote every join and report `ignored_blips: []` while doing it. |
 | `--skip-mirror`             | off        | Skip the tubafrenzy `SIGNOFF_TIME` write. See the warning below before using it.                                                                                                                                                                                                                                                                            |
 | `--repair-marker-order`     | off        | Standalone mode: re-mint `--show-id`'s `show_start` so it stays the newest marker by id. See below.                                                                                                                                                                                                                                                         |
+| `--repair-dj-name`          | off        | Standalone mode: re-denormalize `flowsheet.dj_name` across `--show-id` (comma-separated list accepted). See below.                                                                                                                                                                                                                                          |
 
 ## `--repair-marker-order`
 
@@ -43,6 +44,26 @@ The iOS listener app derives its on-air banner from `showMarkers.max(by: { $0.id
 It requires `--show-id` and refuses to guess. An earlier cut took "the newest open show" instead, which is right only when run immediately after the split and quietly wrong afterwards — run it hours later and the split's live tail has closed, so it no-ops against an unrelated show and still logs a success. That is exactly what happened on 2026-08-28: it reported `repair-complete` for show 1951231 while 1951228 was the one it was aimed at. No harm done, because by then the next DJ's `show_start` had taken a higher id than the minted marker and the banner had already self-corrected — but a repair tool that can look like it worked when it did not is worse than one that refuses.
 
 Pass the id of the **open** show whose `show_start` must stay newest — after a split that is the last new show the run created, not the original `--show-id`. A closed show is a logged no-op: the invariant only bites while something is genuinely live, since a blank banner is the correct rendering when nothing is on the air.
+
+## `--repair-dj-name`
+
+`POST /flowsheet` resolves the on-air name once per request and copies it onto every row it writes, so on a hijacked show every later DJ's tracks carry the _original_ DJ's handle. Re-pointing `show_id` does not touch that column, and it is what the v2 wire projection, `/playlists` and the search service's `DJ_NAME_EXPR` actually read — so a split that looks complete can still render and search one DJ's set under another's name.
+
+Step 3b of `applySplit` handles this inline for a fresh split. This standalone mode is the retroactive form, for shows split before that step existed. The split cannot simply be re-run over them: a second pass finds its own promoted `show_start` markers where the `dj_join` boundaries were and splits nothing.
+
+The target is whatever `resolveDjNameForShow` will return for the show as it now stands, resolved through the canonical `resolveShowDjName` in `@wxyc/database` rather than a re-derived COALESCE — `jobs/flowsheet-etl`'s copy of that chain predates `dj_name_override` and omits the literal-"Anonymous" filter, and re-deriving it here would reintroduce both.
+
+`dj_join` / `dj_leave` rows are excluded: they name a person arriving or leaving, not the show's DJ, so a co-host blip left inside a show keeps its own handle.
+
+Idempotent by construction — the `IS DISTINCT FROM` predicate means an already-correct row is never rewritten, so a second run reports zero. Accepts a comma-separated list so the shows from one split are a single invocation:
+
+```
+docker run --rm --env-file .env <image> --repair-dj-name --show-id=1951225,1951226,1951227,1951228 --dry-run
+```
+
+### Known production debt
+
+The 2026-08-28 run of this job predates step 3b, so shows **1951225-1951228** still carry `dj sue` on their track rows. This mode is how they get corrected.
 
 ## Run procedure
 
