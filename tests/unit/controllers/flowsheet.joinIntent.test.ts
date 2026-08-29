@@ -4,9 +4,16 @@
  * The routing this file pins is the shared fix for both BS#2232 incidents: a
  * DJ pressing "Go Live" while somebody else's show is still open used to be
  * silently attached to that show as a co-host. On 2026-08-20 show 1951164 ran
- * nine hours and absorbed three later DJs; on 2026-08-28 show 1951224 absorbed
- * one three hours in. In both cases the public on-air name kept reading the
- * departed DJ's handle.
+ * nine hours and absorbed three later DJs; on 2026-08-28 show 1951224 ran ten
+ * hours and absorbed four — DJ String Theory at 14:02, Panzón at 16:02, dj
+ * eureka! at 18:03 and Dj xD at 21:00 PDT, plus a 3.6-second toggle blip — for
+ * 143 entries under one departed DJ's name. In both cases the public on-air
+ * name kept reading the departed DJ's handle.
+ *
+ * Measure 1951224 from that pre-repair shape, not from the show as it stands:
+ * `jobs/flowsheet-show-split` has since split it into five shows, so the
+ * surviving 1951224 row now runs 11:02–14:02 with one boundary and reads as a
+ * far smaller incident than it was.
  *
  * The two shows differ in HOW the banner went wrong, which is why the fix has
  * two halves. 1951164 is BS-native (`primary_dj_id` set), so `on_air` resolved
