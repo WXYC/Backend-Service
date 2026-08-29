@@ -26,10 +26,13 @@ export type Segment = {
    */
   startMarkerId: number | null;
   /**
-   * The `dj_leave` to promote to `show_end`, when the DJ actually signed off.
-   * `null` means no leave marker exists and a `show_end` has to be minted at
-   * `endTime` — the eureka!-shaped case where the next DJ's go-live is the
-   * only evidence the set ended.
+   * The `dj_leave` to promote to `show_end`, when the DJ actually signed off
+   * inside their own run. Always one of this segment's own `entryIds`.
+   *
+   * `null` means no usable leave marker exists and a `show_end` has to be minted
+   * at `endTime` — the eureka!-shaped case where the next DJ's go-live is the
+   * only evidence the set ended, or a leave that landed past the next boundary
+   * (see {@link ownEndMarker}).
    */
   endMarkerId: number | null;
   djName: string | null;
@@ -52,6 +55,31 @@ export type SegmentPlan = {
 
 const isMarker = (e: SplitEntry, t: MarkerType) => e.entry_type === t;
 
+/** Default blip threshold, in seconds, for {@link parseMinSegmentSeconds}. */
+export const DEFAULT_MIN_SEGMENT_SECONDS = 120;
+
+/**
+ * Parse the `--min-segment-seconds` threshold, rejecting anything unusable.
+ *
+ * Lives here rather than with the other CLI plumbing because the reason it
+ * cannot be a bare `Number(...)` is a property of the comparison below, not of
+ * the flag: `Number('120s')` is `NaN`, and `seconds < NaN` is false for EVERY
+ * join. A coerced typo would therefore promote every `dj_join` in the show —
+ * four-second blips included — mint a show for each, and report
+ * `ignored_blips: []` while doing it, which is precisely the outcome the
+ * threshold exists to prevent, arriving through the threshold itself.
+ */
+export const parseMinSegmentSeconds = (raw: string | undefined): number => {
+  if (raw === undefined) return DEFAULT_MIN_SEGMENT_SECONDS;
+  const parsed = Number(raw);
+  // `Number('')` and `Number('  ')` are both 0 — a valid-looking threshold that
+  // quietly disables the rule — so blank is rejected before the range test.
+  if (raw.trim() === '' || !Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`--min-segment-seconds must be a non-negative finite number; got ${JSON.stringify(raw)}`);
+  }
+  return parsed;
+};
+
 /**
  * Find the `dj_leave` that closes a given `dj_join`.
  *
@@ -61,12 +89,39 @@ const isMarker = (e: SplitEntry, t: MarkerType) => e.entry_type === t;
  * identity these rows carry.
  */
 export const findMatchingLeave = (entries: SplitEntry[], join: SplitEntry): SplitEntry | null => {
+  // A nameless join has no identity to match on, and `null === null` would pair
+  // it with the first later nameless `dj_leave` — an arbitrary pairing that then
+  // drives both the blip test and the marker promotion. The live path suppresses
+  // nameless `dj_join` markers outright (`createJoinNotification` in
+  // apps/backend/services/flowsheet.service.ts), so this guards the rule rather
+  // than a shape seen in production.
+  if (join.dj_name === null) return null;
   for (const e of entries) {
     if (e.play_order <= join.play_order) continue;
     if (isMarker(e, 'dj_leave') && e.dj_name === join.dj_name) return e;
   }
   return null;
 };
+
+/**
+ * Keep a segment's end marker inside that segment's own play-order run.
+ *
+ * `entryIds` is bounded by the next boundary, but neither search that produces
+ * an end marker is: `findMatchingLeave` scans the whole show by `dj_name`, and
+ * the lead segment takes the show's `show_end` wherever it sits. Either can
+ * return a row that play-order-wise belongs to a LATER segment — a DJ who stayed
+ * on as a co-host past the handoff and only signed off inside the next DJ's set,
+ * or a show somebody eventually terminated long after the first boundary.
+ *
+ * Promoting such a row files one show's `show_end` among another show's entries:
+ * the earlier show ends up with an `end_time` and no marker, the later one with
+ * two, and their windows overlap. Past the boundary the handoff is the better
+ * evidence of when the set ended, so the marker stays where it sits — still a
+ * `dj_leave`, naming its own DJ as a co-host of the show that holds it — and the
+ * segment ends at the next go-live with a minted `show_end` instead.
+ */
+const ownEndMarker = (marker: SplitEntry | null | undefined, upperOrder: number): SplitEntry | null =>
+  marker && marker.play_order < upperOrder ? marker : null;
 
 /**
  * Split one show's entries into per-DJ segments at its `dj_join` boundaries.
@@ -81,9 +136,10 @@ export const findMatchingLeave = (entries: SplitEntry[], join: SplitEntry): Spli
  *
  * A segment ends at its own `dj_leave` when one exists — a DJ who signed off
  * at 15:56 did not stay on until the next DJ arrived at 16:02, and recording
- * the gap as theirs would invent six minutes of airtime. Absent a leave, it
- * ends where the next boundary begins, and the final segment inherits the
- * original show's `end_time` (`null` when it is genuinely still live).
+ * the gap as theirs would invent six minutes of airtime. Absent a leave, or
+ * when the leave lands past the next boundary ({@link ownEndMarker}), it ends
+ * where that boundary begins; the final segment inherits the original show's
+ * `end_time` (`null` when it is genuinely still live).
  *
  * @param entries every row of the show, any order; sorted internally
  * @param showStartTime the original show's `start_time`
@@ -119,27 +175,36 @@ export const planSegments = (
   const segments: Segment[] = [];
   const firstBoundaryOrder = boundaries[0]?.join.play_order ?? Infinity;
 
+  // The original DJ's own sign-off, if it somehow landed within their own run.
+  // In the case this job exists for it never does — the show stayed open
+  // precisely because nobody ended it — so this is normally null and a marker
+  // gets minted.
+  const leadEnd = ownEndMarker(
+    sorted.find((e) => isMarker(e, 'show_end')),
+    firstBoundaryOrder
+  );
+
   segments.push({
     startMarkerId: null,
-    // The original DJ's own sign-off, if it somehow landed. In the case this
-    // job exists for it never does — the show stayed open precisely because
-    // nobody ended it — so this is normally null and a marker gets minted.
-    endMarkerId: sorted.find((e) => isMarker(e, 'show_end'))?.id ?? null,
+    endMarkerId: leadEnd?.id ?? null,
     djName: leadDjName,
     startTime: showStartTime,
-    endTime: boundaries.length > 0 ? boundaries[0].join.add_time : showEndTime,
+    // Same rule as every other segment: a lead DJ who did sign off ended their
+    // show then, not when the next DJ arrived.
+    endTime: leadEnd ? leadEnd.add_time : boundaries.length > 0 ? boundaries[0].join.add_time : showEndTime,
     entryIds: sorted.filter((e) => e.play_order < firstBoundaryOrder).map((e) => e.id),
   });
 
   boundaries.forEach(({ join, leave }, i) => {
     const next = boundaries[i + 1];
     const upperOrder = next ? next.join.play_order : Infinity;
+    const end = ownEndMarker(leave, upperOrder);
     segments.push({
       startMarkerId: join.id,
-      endMarkerId: leave?.id ?? null,
+      endMarkerId: end?.id ?? null,
       djName: join.dj_name,
       startTime: join.add_time,
-      endTime: leave ? leave.add_time : next ? next.join.add_time : showEndTime,
+      endTime: end ? end.add_time : next ? next.join.add_time : showEndTime,
       entryIds: sorted.filter((e) => e.play_order >= join.play_order && e.play_order < upperOrder).map((e) => e.id),
     });
   });
