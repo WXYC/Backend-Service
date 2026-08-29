@@ -79,7 +79,7 @@
  * LEGACY_DB_DOCKER_CONTAINER for the mirror half).
  */
 
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, isNull } from 'drizzle-orm';
 import { db, closeDatabaseConnection, MirrorSQL, flowsheet, show_djs, shows, user } from '@wxyc/database';
 import { planSegments, type Segment, type SplitEntry } from './segment.js';
 
@@ -264,7 +264,81 @@ export const applySplit = async (
     // held their marker, and step 3 already moved that marker. Deactivate the
     // stale membership so the lead show doesn't report them as on the air.
     await tx.update(show_djs).set({ active: false }).where(eq(show_djs.show_id, original.id));
+
+    // 6. If the last segment is still on the air, its `show_start` must end up
+    //    as the newest marker by id, or the iOS banner blanks to "AUTO DJ".
+    //    Runs last, after every mint above has already taken its id.
+    const liveIndex = segments.length - 1;
+    if (segments[liveIndex].endTime === null) {
+      const liveShowId = liveIndex === 0 ? original.id : newShowIds.get(liveIndex)!;
+      await ensureLiveShowStartIsNewestMarker(tx, liveShowId);
+    }
   });
+};
+
+/**
+ * Re-insert the live show's `show_start` so it holds the highest marker id.
+ *
+ * The iOS listener app derives its on-air banner from
+ * `showMarkers.max(by: { $0.id })` and renders nothing when that marker is a
+ * `show_end` (`Shared/Playlist/Sources/Playlist/PlaylistEntry.swift`,
+ * `onAirSignOn`). It orders by **id**, not `add_time` — so a `show_end` this
+ * job mints for an EARLIER segment carries a correct `add_time` but a
+ * brand-new serial id that outranks the live show's `show_start`, and the app
+ * shows "AUTO DJ" while a DJ is actually on the air.
+ *
+ * Observed in production on the 2026-08-28 run: eureka!'s minted `show_end`
+ * landed as id 5313060 against Dj xD's `show_start` at 5313038, and the
+ * listener banner went blank mid-broadcast. The same id-vs-`add_time`
+ * disagreement that `resolveShowEndInstant` exists to avoid, arriving from the
+ * write side instead of the read side.
+ *
+ * Serial ids cannot be inserted between existing values, so the only way to
+ * restore the invariant is to re-mint the marker that must win: delete the
+ * `show_start` and insert it again with every column preserved (including
+ * `legacy_entry_id`, which the mirror's loop-guard reads as "this row came
+ * from tubafrenzy, do not mirror it back"). Same transaction, so the unique
+ * index on `legacy_entry_id` never sees both rows.
+ *
+ * Idempotent: a run where no `show_end` outranks the live `show_start` does
+ * nothing.
+ */
+export const ensureLiveShowStartIsNewestMarker = async (
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  liveShowId: number
+): Promise<boolean> => {
+  const startRow = (
+    await tx
+      .select()
+      .from(flowsheet)
+      .where(and(eq(flowsheet.show_id, liveShowId), eq(flowsheet.entry_type, 'show_start')))
+      .orderBy(asc(flowsheet.id))
+      .limit(1)
+  )[0];
+  if (!startRow) return false;
+
+  const newer = (
+    await tx
+      .select({ id: flowsheet.id })
+      .from(flowsheet)
+      .where(and(eq(flowsheet.entry_type, 'show_end'), gt(flowsheet.id, startRow.id)))
+      .limit(1)
+  )[0];
+  if (!newer) return false;
+
+  // Every column except the serial id, which is the whole point of re-minting.
+  const { id: oldId, ...columns } = startRow;
+
+  await tx.delete(flowsheet).where(eq(flowsheet.id, oldId));
+  const reinserted = await tx.insert(flowsheet).values(columns).returning({ id: flowsheet.id });
+
+  log('live-show-start-reminted', {
+    show_id: liveShowId,
+    old_id: oldId,
+    new_id: reinserted[0].id,
+    outranked_by: newer.id,
+  });
+  return true;
 };
 
 /**
@@ -282,6 +356,25 @@ export const mirrorSignoff = async (legacyShowId: number, endTime: Date): Promis
 // ---- Entrypoint ----
 
 export const main = async (): Promise<void> => {
+  // Standalone repair for a split that already ran: re-mint the newest open
+  // show's `show_start` so it outranks any `show_end` minted after it. Needed
+  // because the ordering hazard was found only after the 2026-08-28 apply, and
+  // re-running the split over an already-split show is not possible.
+  if (process.argv.includes('--repair-marker-order')) {
+    const live = (await db.select().from(shows).where(isNull(shows.end_time)).orderBy(desc(shows.id)).limit(1))[0];
+    if (!live) {
+      log('repair-noop', { reason: 'no open show' });
+      return;
+    }
+    if (DRY_RUN) {
+      log('repair-dry-run', { live_show_id: live.id, note: 'no writes performed' });
+      return;
+    }
+    const changed = await db.transaction((tx) => ensureLiveShowStartIsNewestMarker(tx, live.id));
+    log('repair-complete', { live_show_id: live.id, reminted: changed });
+    return;
+  }
+
   const showIdArg = argValue('show-id');
   if (!showIdArg || !/^\d+$/.test(showIdArg)) {
     throw new Error('Required: --show-id=<positive integer>');
