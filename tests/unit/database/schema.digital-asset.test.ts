@@ -95,7 +95,7 @@ describe('schema: digital-asset manifest tables (migration 0158, BS#2318)', () =
       'album_gain_db',
       'ripped_at',
     ]) {
-      const line = tablesDdl.match(new RegExp(`"${col}"\\s+\\S+(?:\\([^)]*\\))?,?`, 'i'));
+      const line = tablesDdl.match(new RegExp(`"${col}"[^\\n]*`, 'i'));
       expect(line?.[0]).toBeDefined();
       expect(line?.[0]).not.toMatch(/NOT\s+NULL/i);
     }

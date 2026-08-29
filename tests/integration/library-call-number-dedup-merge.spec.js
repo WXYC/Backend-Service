@@ -348,6 +348,14 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       bins: 'NO ACTION',
       library_identity: 'NO ACTION',
       library_identity_source: 'NO ACTION',
+      // BS#2318. NO ACTION is deliberate: an incomplete repoint here must fail
+      // loudly rather than cascade, because `digital_asset_file.asset_id` DOES
+      // cascade off this row -- so a silent delete would take the file rows
+      // naming objects in the store with it. Pinned against information_schema
+      // for the reason the 0147 note above gives: drizzle-kit diffs schema.ts
+      // against the snapshot, never the database, so declared-vs-enforced drift
+      // is self-perpetuating and only this assertion can observe it.
+      digital_asset: 'NO ACTION',
     };
 
     it('matches the delete actions the database actually enforces', async () => {
