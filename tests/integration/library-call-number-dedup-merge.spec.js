@@ -348,6 +348,14 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       bins: 'NO ACTION',
       library_identity: 'NO ACTION',
       library_identity_source: 'NO ACTION',
+      // BS#2318. NO ACTION is deliberate: an incomplete repoint here must fail
+      // loudly rather than cascade, because `digital_asset_file.asset_id` DOES
+      // cascade off this row -- so a silent delete would take the file rows
+      // naming objects in the store with it. Pinned against information_schema
+      // for the reason the 0147 note above gives: drizzle-kit diffs schema.ts
+      // against the snapshot, never the database, so declared-vs-enforced drift
+      // is self-perpetuating and only this assertion can observe it.
+      digital_asset: 'NO ACTION',
     };
 
     it('matches the delete actions the database actually enforces', async () => {
@@ -386,9 +394,18 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
            AND ccu.table_name = 'library'
            AND ccu.column_name = 'id'
       `;
+      const found = [...new Set(rows.map((r) => r.table_name))];
       const targets = new Set(merge.FK_TARGETS.map((t) => t.table));
-      const missing = [...new Set(rows.map((r) => r.table_name))].filter((t) => !targets.has(t)).sort();
+      const missing = found.filter((t) => !targets.has(t)).sort();
       expect(missing).toEqual([]);
+      // ...and the same direction against EXPECTED. BS#2318 added an FK plus its
+      // FK_TARGETS entry while forgetting EXPECTED, and both tests stayed green:
+      // this one only consulted FK_TARGETS, and the sibling above iterates
+      // EXPECTED, so it can only check what is already listed. Asserting the
+      // catalog against BOTH is what makes the omission impossible rather than
+      // merely noticeable in review.
+      const unpinned = found.filter((t) => !(t in EXPECTED)).sort();
+      expect(unpinned).toEqual([]);
     });
 
     // The ordering invariant was pinned; the COLLISION invariant was not, which
