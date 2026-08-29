@@ -839,14 +839,34 @@ export type JoinIntent = 'join' | 'takeover';
 const JOIN_INTENTS: readonly JoinIntent[] = ['join', 'takeover'];
 
 /**
+ * Narrow an UNVALIDATED request-body value to {@link JoinIntent}.
+ *
+ * Takes `unknown` on purpose. `JoinRequestBody.intent` is a declaration about
+ * what clients are meant to send, not a fact about what arrived — nothing
+ * validates this route's body — so reading it at its declared type makes
+ * TypeScript narrow to `JoinIntent` and treat the membership check below as a
+ * comparison that cannot fail. It very much can, and if it is ever deleted on
+ * that reasoning `intent: "nonsense"` stops being a 400 and falls through to
+ * the TAKEOVER branch, ending a live DJ's show on a typo. Routing the value
+ * through `unknown` keeps the guard honest and the narrowing real.
+ */
+const isJoinIntent = (value: unknown): value is JoinIntent => (JOIN_INTENTS as readonly unknown[]).includes(value);
+
+/**
  * The 409 a `POST /flowsheet/join` answers with when a show the caller does not
  * belong to is genuinely open and they said nothing about what to do.
  *
  * `dj_name` resolves through the SHARED chain (`dj_name_override` → the linked
- * account's handle → `legacy_dj_name`), the same one `getOnAirDJName` and
- * `getOnAirDJs` use. Hand-joining `auth_user` here would let the prompt show a
- * name that disagrees with the on-air banner rendered beside it — the exact
- * class of divergence this work exists to remove.
+ * account's handle → `legacy_dj_name`) rather than a hand-joined `auth_user`
+ * read, so the prompt names the show the same way every other show-scoped
+ * surface does and cannot drift from them as the chain evolves.
+ *
+ * It does NOT necessarily match the on-air banner, and must not be "fixed" to.
+ * `getOnAirDJName` deliberately departs from this chain in one case (an open
+ * show with no override and no `primary_dj_id` but an active `show_djs`
+ * member), so on exactly the abandoned shows this 409 fires for, the banner
+ * names whoever is at the controls while this names the show's owner. Both are
+ * right, because they answer different questions — see below.
  *
  * Note what that name means: it is the show's OWNER, which for an abandoned
  * show is the DJ who left, not whoever is at the controls. That is the right
@@ -956,9 +976,19 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
   } else {
     // Everything above has been ruled out: a show is genuinely open, it isn't
     // the caller's, and its terminal entry doesn't say it ended. This is the
-    // handoff the incident happened at (BS#2232 — production show 1951224
-    // absorbed five DJs across ten hours while `on_air` named only the first),
-    // and the ONLY branch the intent contract governs.
+    // handoff both BS#2232 incidents happened at, and the ONLY branch the
+    // intent contract governs:
+    //
+    //   - 2026-08-20, show 1951164: a BS-native show (`primary_dj_id` set) ran
+    //     nine hours and absorbed three later DJs as co-hosts while `on_air`
+    //     named its original owner throughout.
+    //   - 2026-08-28, show 1951224: a tubafrenzy-mirrored show (`primary_dj_id`
+    //     NULL, `legacy_dj_name` "dj sue") absorbed a Backend account three
+    //     hours in, and `on_air` named the departed legacy DJ.
+    //
+    // The two are the same routing bug with different banner mechanisms, which
+    // is why this PR carries two fixes: the routing below, and
+    // `getOnAirDJName`'s legacy short-circuit. Neither one subsumes the other.
     //
     // Flag OFF is byte-identical to the pre-BS#2233 behavior, `intent`
     // included: no 400 for an unrecognized value, no 409 for an absent one.
@@ -971,7 +1001,12 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
       return;
     }
 
-    const intent = req.body.intent;
+    // A JSON `null` says exactly what an absent field says — "I have not
+    // chosen" — and it is what an unset optional serializes to from several of
+    // this epic's clients. Fold it into absence BEFORE the union check, or a
+    // caller who has not chosen is told their choice is invalid (400) instead
+    // of being prompted (409), which is the one answer they cannot act on.
+    const intent: unknown = req.body.intent ?? undefined;
 
     // No intent: the caller never chose. Refuse to choose for them, and say
     // which show is in the way so the client can prompt and echo the id back.
@@ -979,7 +1014,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
       throw await showAlreadyOpenError(current_show);
     }
 
-    if (!JOIN_INTENTS.includes(intent)) {
+    if (!isJoinIntent(intent)) {
       throw new WxycError(`Bad Request: intent must be one of ${JOIN_INTENTS.join(', ')}`, 400);
     }
 

@@ -1817,6 +1817,12 @@ export const ANONYMOUS_ON_AIR_NAME = 'WXYC';
  * (BS#2237). With no `primary_dj_id` to prefer, any stable order beats a
  * plan-dependent one.
  *
+ * The comparison is a plain relational one, NOT `localeCompare`: the sort's
+ * only job is to be the same on every host, and `localeCompare` without an
+ * explicit locale is collation-dependent, so it would make the banner's choice
+ * of DJ depend on the container's ICU data — the one property this sort exists
+ * to guarantee.
+ *
  * Scoped to the LIVE on-air read. Deliberately not folded into
  * `resolveDjNameForShow`, which also feeds the archive and the write path:
  * changing the shared chain would rewrite the names on historical shows.
@@ -1824,11 +1830,10 @@ export const ANONYMOUS_ON_AIR_NAME = 'WXYC';
 const activeMemberOnAirName = async (showId: number): Promise<string | null> => {
   const members = await getDJsInShow(showId, true);
   const named = members
-    .slice()
-    .sort((a, b) => String(a.id).localeCompare(String(b.id)))
-    .map((m) => resolveDjDisplayName((m.djName as string | null | undefined) ?? null))
-    .filter((name): name is string => !!name && name.trim().length > 0);
-  return named[0] ?? null;
+    .map((m) => ({ id: String(m.id), name: resolveDjDisplayName((m.djName as string | null | undefined) ?? null) }))
+    .filter((m): m is { id: string; name: string } => !!m.name && m.name.trim().length > 0)
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return named[0]?.name ?? null;
 };
 
 export const getOnAirDJName = async (): Promise<string | null> => {
@@ -1946,6 +1951,14 @@ export const getDJsInShow = async (show_id: number, activeOnly: boolean): Promis
   const dj_ids = showDJsInstance.map((dj) => {
     return dj.dj_id;
   });
+
+  // Drizzle compiles `inArray(col, [])` to a literal `false`, so without this
+  // the no-members case still pays a round trip to a query that cannot return
+  // a row. It is the COMMON case, not a corner: every tubafrenzy-mirrored show
+  // has zero `show_djs` rows, and BS#2233 put this call on `getOnAirDJName`'s
+  // path — which `GET /flowsheet` and the v2 playlist proxy both run per
+  // request.
+  if (dj_ids.length === 0) return [];
 
   return await db.select().from(user).where(inArray(user.id, dj_ids));
 };

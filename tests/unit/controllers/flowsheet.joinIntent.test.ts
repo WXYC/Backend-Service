@@ -1,11 +1,20 @@
 /**
  * `POST /flowsheet/join`'s explicit start-vs-join decision (BS#2233).
  *
- * The routing this file pins is the whole fix for BS#2232: a DJ pressing "Go
- * Live" while somebody else's show is still open used to be silently attached
- * to that show as a co-host. Production show 1951224 collected five DJs that
- * way over ten hours while the public on-air name read the first DJ's handle
- * the entire time.
+ * The routing this file pins is the shared fix for both BS#2232 incidents: a
+ * DJ pressing "Go Live" while somebody else's show is still open used to be
+ * silently attached to that show as a co-host. On 2026-08-20 show 1951164 ran
+ * nine hours and absorbed three later DJs; on 2026-08-28 show 1951224 absorbed
+ * one three hours in. In both cases the public on-air name kept reading the
+ * departed DJ's handle.
+ *
+ * The two shows differ in HOW the banner went wrong, which is why the fix has
+ * two halves. 1951164 is BS-native (`primary_dj_id` set), so `on_air` resolved
+ * the owner's account handle. 1951224 is tubafrenzy-mirrored (`primary_dj_id`
+ * NULL, `legacy_dj_name` "dj sue"), so `on_air` short-circuited to the legacy
+ * handle — the case `flowsheet.getOnAirDJName.test.ts` pins. This file covers
+ * the routing that stops the co-host attachment in the first place; neither
+ * half subsumes the other.
  *
  * The existing BS#1098 / #1295 / #1861 / #2065 cases live in
  * `flowsheet.controller.test.ts` and are deliberately not restated here — this
@@ -46,14 +55,22 @@ import { joinShow } from '../../../apps/backend/controllers/flowsheet.controller
 import { resetConfig } from '../../../apps/backend/config/flowsheetTakeover';
 import WxycError from '../../../apps/backend/utils/error';
 
+// Production show 1951224 as it actually is: tubafrenzy-mirrored, so
+// `primary_dj_id` is NULL and the identity lives in `legacy_dj_name`. That
+// shape matters — it is the one where `resolveDjNameForShow` short-circuits to
+// the legacy handle, so the 409's name and the on-air banner's name are
+// resolved by different rules (see `showAlreadyOpenError`). Giving this
+// fixture a `primary_dj_id` would model the easy case under the hard case's id.
 const OPEN_SHOW = {
   id: 1951224,
-  primary_dj_id: 'dj-sue',
-  start_time: new Date('2026-08-28T15:00:00.000Z'),
+  primary_dj_id: null,
+  legacy_dj_name: 'dj sue',
+  start_time: new Date('2026-08-28T18:02:34.234Z'),
   end_time: null,
 };
 
-const LAST_LOGGED = new Date('2026-08-28T17:41:00.000Z');
+// The show's last logged track, which is what `resolveShowEndInstant` derives.
+const LAST_LOGGED = new Date('2026-08-28T20:49:08.792Z');
 
 const createMockRes = () => {
   const res: Partial<Response> = {};
@@ -131,9 +148,12 @@ describe('joinShow — an open show the caller does not belong to', () => {
     expect(mockStartShow).not.toHaveBeenCalled();
   });
 
-  // Not a hand-joined `user` read: the modal renders beside a banner fed by
-  // the same chain, and two different resolutions of one show's name is the
-  // class of divergence this work exists to remove.
+  // Not a hand-joined `user` read: the prompt names the show the same way
+  // every other show-scoped surface does. Note this is NOT the same answer as
+  // the on-air banner for an abandoned legacy show — `getOnAirDJName` prefers
+  // an active `show_djs` member there, and deliberately so. The prompt names
+  // the show's OWNER ("whose show am I being asked about"); the banner names
+  // whoever is at the controls.
   it('resolves the 409 dj_name through the shared show-name chain', async () => {
     const res = createMockRes();
 
@@ -150,6 +170,21 @@ describe('joinShow — an open show the caller does not belong to', () => {
     expect(mockAddDJToShow).toHaveBeenCalledWith('dj-eureka', expect.objectContaining({ id: OPEN_SHOW.id }));
     expect(mockEndShow).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  // A JSON `null` is what an unset optional serializes to from several of this
+  // epic's clients, and it says the same thing an absent field says. Answering
+  // it with a 400 would tell a caller who has not chosen that their choice is
+  // invalid — the one response a client cannot turn into a prompt.
+  it('409s on an explicit null intent, exactly as it does on an absent one', async () => {
+    const res = createMockRes();
+
+    const err = await joinShow(makeReq({ intent: null }), res, next).catch((e: unknown) => e);
+
+    expect((err as WxycError).statusCode).toBe(409);
+    expect((err as WxycError).code).toBe('show_already_open');
+    expect(mockAddDJToShow).not.toHaveBeenCalled();
+    expect(mockEndShow).not.toHaveBeenCalled();
   });
 
   it('400s an unrecognized intent', async () => {
@@ -267,7 +302,7 @@ describe('joinShow — takeover', () => {
   // outcome they asked for is already true. Re-prompting here would be the
   // dialog firing on the common one-click path.
   it('starts the new show silently when the expected show closed while the dialog was open', async () => {
-    mockGetLatestShow.mockResolvedValue({ ...OPEN_SHOW, end_time: new Date('2026-08-28T17:45:00.000Z') });
+    mockGetLatestShow.mockResolvedValue({ ...OPEN_SHOW, end_time: new Date('2026-08-28T21:02:58.418Z') });
     const res = createMockRes();
 
     await joinShow(makeReq({ intent: 'takeover', expected_show_id: OPEN_SHOW.id }), res, next);
