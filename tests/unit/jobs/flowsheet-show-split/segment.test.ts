@@ -10,7 +10,14 @@
  * outgoing DJ never left, and a four-second toggle blip.
  */
 
-import { planSegments, findMatchingLeave, type SplitEntry } from '../../../../jobs/flowsheet-show-split/segment';
+import { showEndMessage, showStartMessage } from '../../../../jobs/flowsheet-show-split/markers';
+import {
+  DEFAULT_MIN_SEGMENT_SECONDS,
+  findMatchingLeave,
+  parseMinSegmentSeconds,
+  planSegments,
+  type SplitEntry,
+} from '../../../../jobs/flowsheet-show-split/segment';
 
 /** 2026-08-28 PDT wall-clock to UTC Date. */
 const pdt = (hhmmss: string): Date => new Date(`2026-08-28T${hhmmss}-07:00`);
@@ -144,8 +151,86 @@ describe('planSegments — boundary rules in isolation', () => {
     ];
     const joinB = entries[1];
     expect(findMatchingLeave(entries, joinB).id).toBe(5);
-    const [, b] = plan(entries).segments;
-    expect(b.endTime).toEqual(pdt('13:30:00'));
+  });
+
+  it('will not match a leave to a nameless join', () => {
+    const entries = [
+      marker(1, 1, '11:00:00', 'show_start', 'A'),
+      marker(2, 2, '12:00:00', 'dj_join', null),
+      marker(3, 3, '13:00:00', 'dj_leave', null),
+    ];
+    // `null === null` would pair these, then drive both the blip test and the
+    // marker promotion off an arbitrary match.
+    expect(findMatchingLeave(entries, entries[1])).toBeNull();
+  });
+
+  it('does not promote a leave that lands past the next boundary', () => {
+    // B stayed on as a co-host through C's go-live and only signed off inside
+    // C's set. Row 5 is B's leave but sits in C's play-order run, so promoting
+    // it would file B's show_end among C's entries: B would get an end_time and
+    // no marker, C would get two, and their windows would overlap.
+    const entries = [
+      marker(1, 1, '11:00:00', 'show_start', 'A'),
+      marker(2, 2, '12:00:00', 'dj_join', 'B'),
+      marker(3, 3, '12:30:00', 'dj_join', 'C'),
+      marker(4, 4, '13:00:00', 'dj_leave', 'C'),
+      marker(5, 5, '13:30:00', 'dj_leave', 'B'),
+    ];
+    const [, b, c] = plan(entries).segments;
+
+    expect(b.endMarkerId).toBeNull();
+    expect(b.endTime).toEqual(pdt('12:30:00'));
+    expect(c.entryIds).toContain(5);
+    // Every promoted marker is one of its own segment's entries, so no show can
+    // end on a row filed under another show.
+    for (const seg of plan(entries).segments) {
+      if (seg.endMarkerId !== null) expect(seg.entryIds).toContain(seg.endMarkerId);
+      if (seg.startMarkerId !== null) expect(seg.entryIds).toContain(seg.startMarkerId);
+    }
+  });
+
+  it('never leaves two segments overlapping in time', () => {
+    const entries = [
+      marker(1, 1, '11:00:00', 'show_start', 'A'),
+      marker(2, 2, '12:00:00', 'dj_join', 'B'),
+      marker(3, 3, '12:30:00', 'dj_join', 'C'),
+      marker(4, 4, '13:00:00', 'dj_leave', 'C'),
+      marker(5, 5, '13:30:00', 'dj_leave', 'B'),
+    ];
+    const { segments } = plan(entries, pdt('14:00:00'));
+    for (let i = 0; i < segments.length - 1; i++) {
+      expect(segments[i].endTime.getTime()).toBeLessThanOrEqual(segments[i + 1].startTime.getTime());
+    }
+  });
+
+  it('ends the lead segment at its own show_end rather than the next go-live', () => {
+    // The lead DJ did sign off, at 11:40, before B went live at 12:00. Those 20
+    // minutes are nobody's — the same rule the String Theory case encodes.
+    const entries = [
+      marker(1, 1, '11:00:00', 'show_start', 'A'),
+      marker(2, 2, '11:40:00', 'show_end', 'A'),
+      marker(3, 3, '12:00:00', 'dj_join', 'B'),
+      track(4, 4, '12:10:00'),
+    ];
+    const [lead] = plan(entries).segments;
+    expect(lead.endMarkerId).toBe(2);
+    expect(lead.endTime).toEqual(pdt('11:40:00'));
+  });
+
+  it('ignores a show_end that belongs to a later segment', () => {
+    // A show terminated long after the first handoff: the show_end is in B's
+    // play-order run, so it is B's marker, not the lead's.
+    const entries = [
+      marker(1, 1, '11:00:00', 'show_start', 'A'),
+      marker(2, 2, '12:00:00', 'dj_join', 'B'),
+      track(3, 3, '12:10:00'),
+      marker(4, 4, '13:00:00', 'show_end', 'B'),
+    ];
+    const [lead, b] = plan(entries, pdt('13:00:00')).segments;
+    // The lead ends where B went live, and needs a minted marker of its own.
+    expect(lead.endMarkerId).toBeNull();
+    expect(lead.endTime).toEqual(pdt('12:00:00'));
+    expect(b.entryIds).toContain(4);
   });
 
   it('returns a single segment for a show that never changed hands', () => {
@@ -158,5 +243,43 @@ describe('planSegments — boundary rules in isolation', () => {
   it('sorts by play_order regardless of input order', () => {
     const shuffled = [...showEntries()].reverse();
     expect(plan(shuffled).segments.map((s) => s.djName)).toEqual(plan().segments.map((s) => s.djName));
+  });
+});
+
+describe('parseMinSegmentSeconds', () => {
+  it('defaults when the flag is absent', () => {
+    expect(parseMinSegmentSeconds(undefined)).toBe(DEFAULT_MIN_SEGMENT_SECONDS);
+  });
+
+  it.each(['0', '4', '120.5'])('accepts the non-negative finite value %s', (raw) => {
+    expect(parseMinSegmentSeconds(raw)).toBe(Number(raw));
+  });
+
+  it.each(['120s', 'abc', '', '   ', '-1', 'Infinity'])('rejects %p rather than coercing it', (raw) => {
+    // `Number('120s')` is NaN and `seconds < NaN` is false for every join, so
+    // coercion would silently promote every dj_join — including four-second
+    // blips — and report `ignored_blips: []` while doing it. `Number('')` is a
+    // subtler trap: it is 0, a valid-looking threshold that disables the rule.
+    expect(() => parseMinSegmentSeconds(raw)).toThrow(/min-segment-seconds/);
+  });
+});
+
+describe('marker messages', () => {
+  // The live writers build their text with `toLocaleString('en-US', { timeZone:
+  // 'America/New_York' })`, so a repaired marker must render the same instant
+  // the same way. 12:00 UTC is 08:00 ET on 2026-08-28.
+  const at = new Date('2026-08-28T12:00:00Z');
+
+  it("reproduces startShow's wording, not the dj_join wording", () => {
+    expect(showStartMessage('Panzón', at)).toBe('Start of Show: Panzón joined the set at 8/28/2026, 8:00:00 AM');
+  });
+
+  it("reproduces endShow's wording, not the dj_leave wording", () => {
+    expect(showEndMessage('Panzón', at)).toBe('End of Show: Panzón left the set at 8/28/2026, 8:00:00 AM');
+  });
+
+  it('degrades to the nameless form the live writers use', () => {
+    expect(showStartMessage(null, at)).toBe('Start of show: 8/28/2026, 8:00:00 AM');
+    expect(showEndMessage(null, at)).toBe('End of show: 8/28/2026, 8:00:00 AM');
   });
 });

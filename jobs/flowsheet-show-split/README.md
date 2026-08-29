@@ -10,15 +10,29 @@ A show whose `end_time` is NULL long past its slot, with `dj_join` markers from 
 
 The underlying defect is that `POST /flowsheet/join` routes on `current_show?.end_time !== null`, so a go-live against a show nobody closed becomes a guest join (WXYC/dj-site#1035). This job repairs the data; it does not stop it recurring.
 
+## What a repair rewrites
+
+Re-pointing `flowsheet.show_id` is only part of it. Three columns would otherwise keep the pre-split answer and quietly outlive the repair:
+
+- **`flowsheet.dj_name`.** `POST /flowsheet` resolves the on-air name once per request and copies it onto every row it writes, so on a hijacked show _every_ later DJ's tracks carry the original DJ's handle — on 1951224 that is `dj sue` on all 143 rows. That column, not the show join, is what the v2 wire projection, `/playlists` and the search service's `DJ_NAME_EXPR` read, so a split that skipped it would still render and search Panzon's set as `dj sue`. `jobs/flowsheet-dj-name-backfill` cannot mop it up either — it selects `dj_name IS NULL`, and these rows are non-null and wrong. The re-denormalization deliberately skips `dj_join` / `dj_leave`, which name a _person_ rather than a show: a blip co-host's markers have to keep saying "DJ Whiskers" inside the show that holds them.
+- **`flowsheet.message`.** Promoting a marker is not just an `entry_type` flip. `createJoinNotification` writes `"<name> joined the set!"` where `startShow` writes `"Start of Show: <name> joined the set at <time>"`, and `message` is on the public read path — a promoted marker that kept the join wording would render a repaired show as having no start-of-show line at all. `markers.ts` reproduces both live writers' text, `America/New_York` rendering and nameless degradation included.
+- **`show_djs`.** Each membership moves to the show that DJ actually ran. A DJ who ran two non-adjacent segments has only one membership row to move, so later segments get an explicit insert rather than silently ending up with a `primary_dj_id` and no membership.
+
+## Boundary markers stay inside their own segment
+
+`findMatchingLeave` matches on `dj_name` rather than position, because co-hosts overlap and the next `dj_leave` in the list is frequently somebody else's. That search is not bounded by the next handoff, so for a DJ who stayed on as a co-host past it — signing off inside the next DJ's set — it can return a row that play-order-wise belongs to a _later_ segment. The same is true of the lead segment's `show_end`, which is found wherever it sits.
+
+Promoting such a row would file one show's `show_end` among another show's entries: the earlier show gets an `end_time` and no marker, the later one gets two, and their windows overlap. So an end marker is used only when it falls inside its own segment's play-order run; past the boundary the handoff is the better evidence, the marker stays a `dj_leave` where it sits, and the segment ends at the next go-live with a minted `show_end` instead.
+
 ## Options
 
-| Flag                        | Default    | Meaning                                                                                                                |
-| --------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `--show-id=<n>`             | _required_ | The show to split. No default, so it cannot run against the wrong one by accident.                                     |
-| `--dry-run`                 | off        | Log the full plan and exit without writing.                                                                            |
-| `--min-segment-seconds=<n>` | `120`      | Joins that close faster are treated as blind-toggle noise and left in place as co-host markers, not promoted to shows. |
-| `--skip-mirror`             | off        | Skip the tubafrenzy `SIGNOFF_TIME` write. See the warning below before using it.                                       |
-| `--repair-marker-order`     | off        | Standalone mode: re-mint `--show-id`'s `show_start` so it stays the newest marker by id. See below.                    |
+| Flag                        | Default    | Meaning                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--show-id=<n>`             | _required_ | The show to split. No default, so it cannot run against the wrong one by accident.                                                                                                                                                                                                                                                                          |
+| `--dry-run`                 | off        | Log the full plan and exit without writing.                                                                                                                                                                                                                                                                                                                 |
+| `--min-segment-seconds=<n>` | `120`      | Joins that close faster are treated as blind-toggle noise and left in place as co-host markers, not promoted to shows. Rejected rather than coerced if it isn't a non-negative finite number — `Number('120s')` is `NaN` and every `seconds < NaN` test is false, so a coerced typo would promote every join and report `ignored_blips: []` while doing it. |
+| `--skip-mirror`             | off        | Skip the tubafrenzy `SIGNOFF_TIME` write. See the warning below before using it.                                                                                                                                                                                                                                                                            |
+| `--repair-marker-order`     | off        | Standalone mode: re-mint `--show-id`'s `show_start` so it stays the newest marker by id. See below.                                                                                                                                                                                                                                                         |
 
 ## `--repair-marker-order`
 
