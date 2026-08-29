@@ -11,11 +11,23 @@
  *   Sweep 1 (create shows): `shows.legacy_show_id IS NULL` +
  *     `primary_dj_id IS NOT NULL` + inside [now-WINDOW, now-SETTLE] +
  *     NOT EXISTS any already-mirrored entry (the all-or-nothing guard —
- *     R4 High #1). Creates the tubafrenzy radioShow and persists
+ *     R4 High #1) + EXISTS a substantive (non-boundary-marker) entry
+ *     (BS#2314). Creates the tubafrenzy radioShow and persists
  *     `legacy_show_id`. The NOT EXISTS guard is load-bearing: a mid-show
  *     flag-flip show whose `addEntry` fired already has a server-side
  *     auto-resolved tubafrenzy show (`mapEntryToTubafrenzy` omits
- *     `radioShowID` when null), so creating another would duplicate.
+ *     `radioShowID` when null), so creating another would duplicate. The
+ *     EXISTS-substantive-entry guard is load-bearing too, for a different
+ *     reason: `jobs/flowsheet-show-split` writes its repaired shows with
+ *     `legacy_show_id = NULL` ON PURPOSE, to keep them outside
+ *     `flowsheet-etl`'s `ON CONFLICT (legacy_show_id) DO UPDATE` (see that
+ *     job's module docblock). Without this guard, a split segment whose DJ
+ *     logged no tracks before the next go-live — its only rows are the
+ *     promoted `show_start` / `show_end` boundary markers, both mirrorable
+ *     and both `legacy_entry_id IS NULL` — sails past the NOT-EXISTS guard
+ *     (nothing is "already mirrored") and gets adopted here, defeating the
+ *     split job's NULL. See `SHOW_BOUNDARY_MARKER_TYPES` below for why this
+ *     is framed as "no substantive entry" rather than "came from a split".
  *
  *   Sweep 2 (entries + signoff): `shows.legacy_show_id IS NOT NULL` +
  *     inside the window + all-or-nothing (EXISTS a NULL-legacy entry AND
@@ -723,6 +735,42 @@ const entryExists = (nullLegacy: boolean) =>
       )
     );
 
+/**
+ * `show_start` / `show_end` ARE mirrorable (unlike `dj_join`/`dj_leave` —
+ * `NON_MIRRORED_MARKER_TYPES` above), so they don't help `entryExists` tell a
+ * show worth creating from one that isn't. But they are still just boundary
+ * bookends, never evidence a set happened: `POST /flowsheet/join` writes a
+ * `show_start` for a show with zero tracks yet, `endShow` writes a `show_end`
+ * for one that never got any, and `jobs/flowsheet-show-split`'s `applySplit`
+ * step 4 promotes a segment's `dj_join`/`dj_leave` into exactly this pair
+ * (BS#2314) — a segment whose DJ logged nothing before the next go-live ends
+ * up with ONLY these two rows, both `legacy_entry_id IS NULL`, so they alone
+ * would satisfy `notExists(entryExists(false))` above and get adopted.
+ *
+ * Deliberately NOT keyed on anything specific to a split-created show (e.g.
+ * `legacy_dj_name IS NULL`, or "started right at another show's `end_time`")
+ * — every one of those is a shape a normal, never-split show can reproduce,
+ * which is exactly the kind of heuristic a future legitimate show could
+ * defeat. This asks the question Sweep 1 should ask regardless of how the
+ * show came to exist: did a set actually happen? A show whose only
+ * mirrorable rows are its own start/end bookends has no set to mirror,
+ * split segment or not — see BS#2314 Option 3 for the "not worth minting
+ * upstream" framing this codifies.
+ */
+const SHOW_BOUNDARY_MARKER_TYPES = ['show_start', 'show_end'] as const;
+
+/** A row that is actual DJ content — a track or a talkset/breakpoint/message note — not a boundary marker. */
+const substantiveEntryType = notInArray(flowsheet.entry_type, [
+  ...NON_MIRRORED_MARKER_TYPES,
+  ...SHOW_BOUNDARY_MARKER_TYPES,
+]);
+
+/** Subquery: does show S have at least one substantive (non-boundary-marker) entry? */
+const hasSubstantiveEntry = db
+  .select({ one: sql`1` })
+  .from(flowsheet)
+  .where(and(eq(flowsheet.show_id, shows.id), substantiveEntryType));
+
 export const selectShowsToCreate = async ({ windowHours, settleMinutes }: WindowOptions): Promise<Show[]> =>
   db
     .select()
@@ -733,7 +781,8 @@ export const selectShowsToCreate = async ({ windowHours, settleMinutes }: Window
         isNotNull(shows.primary_dj_id),
         lt(shows.start_time, settleCeiling(settleMinutes)),
         gt(shows.start_time, windowFloor(windowHours)),
-        notExists(entryExists(false))
+        notExists(entryExists(false)),
+        exists(hasSubstantiveEntry)
       )
     )
     .orderBy(asc(shows.start_time));

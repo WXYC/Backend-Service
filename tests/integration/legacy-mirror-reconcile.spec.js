@@ -89,6 +89,18 @@ describe('legacy-mirror-reconcile selection SQL (BS#1707)', () => {
   // row in each (sub)query — `shows` has no such column.
   const MIRRORABLE = `entry_type NOT IN ('dj_join', 'dj_leave')`;
 
+  // Twin of orchestrate.ts `substantiveEntryType` (SHOW_BOUNDARY_MARKER_TYPES,
+  // BS#2314): `show_start`/`show_end` ARE mirrorable (unlike dj_join/dj_leave)
+  // but are still just boundary bookends, never evidence a set happened.
+  // `jobs/flowsheet-show-split` promotes a segment's dj_join/dj_leave into
+  // exactly this pair when the DJ logged no tracks before the next go-live
+  // (see that job's module docblock — its shows are written legacy_show_id
+  // NULL ON PURPOSE, to stay outside flowsheet-etl's upsert). Without this
+  // guard such a segment's only rows — both mirrorable, both
+  // legacy_entry_id NULL — would satisfy the NOT EXISTS guard below and get
+  // adopted by sweep 1, defeating that NULL. See show L.
+  const SUBSTANTIVE = `entry_type NOT IN ('dj_join', 'dj_leave', 'show_start', 'show_end')`;
+
   const selectShowsToCreate = async () =>
     (
       await sql.unsafe(
@@ -98,6 +110,7 @@ describe('legacy-mirror-reconcile selection SQL (BS#1707)', () => {
            AND s.start_time < now() - (interval '1 minute' * $1::int)
            AND s.start_time > now() - (interval '1 hour' * $2::int)
            AND NOT EXISTS (SELECT 1 FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND f.legacy_entry_id IS NOT NULL AND ${MIRRORABLE})
+           AND EXISTS     (SELECT 1 FROM "${SCHEMA}".flowsheet f WHERE f.show_id = s.id AND ${SUBSTANTIVE})
            AND s.id = ANY($3)
          ORDER BY s.start_time ASC`,
         [SETTLE_MINUTES, WINDOW_HOURS, allShowIds]
@@ -247,6 +260,17 @@ describe('legacy-mirror-reconcile selection SQL (BS#1707)', () => {
     await seedEntry(showIds.K, 1, { legacyEntryId: LEGACY_ENTRY_SEQ++ });
     await seedEntry(showIds.K, 2);
 
+    // L — split-shaped, no tracks (BS#2314): no tubafrenzy show, DJ set, in
+    //     window, past settle, otherwise identical to A's create-candidate
+    //     shape — EXCEPT its only entries are the show_start/show_end pair
+    //     `flowsheet-show-split` promotes from a segment's dj_join/dj_leave
+    //     when the DJ logged no tracks before the next go-live. Both are
+    //     mirrorable and both legacy_entry_id NULL, so the pre-existing NOT
+    //     EXISTS guard alone would admit it; must be excluded from sweep 1.
+    await seedShow('L', { startExpr: "now() - interval '2 hours'" });
+    await seedEntry(showIds.L, 1, { entryType: 'show_start' });
+    await seedEntry(showIds.L, 2, { entryType: 'show_end' });
+
     allShowIds = Object.values(showIds);
   });
 
@@ -258,6 +282,22 @@ describe('legacy-mirror-reconcile selection SQL (BS#1707)', () => {
   it('sweep 1 selects only the all-or-nothing, in-window, past-settle, DJ-owned show', async () => {
     const ids = await selectShowsToCreate();
     expect(ids).toEqual([showIds.A]);
+  });
+
+  it('excludes a split-shaped show whose only entries are its own show_start/show_end markers (BS#2314)', async () => {
+    // Show L has no tubafrenzy show, a DJ, and is otherwise in every way a
+    // sweep-1 create candidate — the ONLY thing distinguishing it from A is
+    // that its two entries are boundary markers, not tracks. Must not be
+    // selected, regardless of the all-or-nothing NOT EXISTS guard (which L
+    // also satisfies, since neither marker is mirrored).
+    const ids = await selectShowsToCreate();
+    expect(ids).not.toContain(showIds.L);
+
+    // And L is not reported partial either — it has no orphan (or mirrored)
+    // SUBSTANTIVE entry, so this isn't the all-or-nothing partial case, it's
+    // "nothing to mirror at all".
+    const partials = await selectPartialShows();
+    expect(partials.map((p) => p.show_id)).not.toContain(showIds.L);
   });
 
   it('sweep 2 selects only the all-or-nothing show that already has a tubafrenzy show', async () => {
