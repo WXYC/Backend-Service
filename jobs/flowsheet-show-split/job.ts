@@ -80,7 +80,16 @@
  */
 
 import { and, asc, eq, gt, inArray, notInArray, sql } from 'drizzle-orm';
-import { db, closeDatabaseConnection, MirrorSQL, flowsheet, show_djs, shows, user } from '@wxyc/database';
+import {
+  db,
+  closeDatabaseConnection,
+  MirrorSQL,
+  flowsheet,
+  show_djs,
+  shows,
+  user,
+  resolveShowDjName,
+} from '@wxyc/database';
 import { showEndMessage, showStartMessage } from './markers.js';
 import { parseMinSegmentSeconds, planSegments, type Segment, type SplitEntry } from './segment.js';
 
@@ -373,6 +382,62 @@ export const applySplit = async (
 };
 
 /**
+ * Re-denormalize `flowsheet.dj_name` across one already-split show.
+ *
+ * Step 3b does this inline for a fresh split. This is the retroactive form,
+ * for shows split before that step existed — production shows 1951225-1951228,
+ * whose rows still carry `dj sue` from the 2026-08-28 run. The split cannot
+ * simply be re-run over them: a second pass finds its own promoted
+ * `show_start` markers where the `dj_join` boundaries were and splits nothing.
+ *
+ * The target name is whatever `resolveDjNameForShow` will return for the show
+ * as it now stands, so this converges on the read path rather than on a value
+ * this job invents. Resolution goes through the canonical `resolveShowDjName`
+ * (`@wxyc/database`) rather than a re-derived COALESCE — `jobs/flowsheet-etl`'s
+ * copy of that chain predates `dj_name_override` and omits the literal-
+ * "Anonymous" filter, and re-deriving it here would reintroduce both.
+ *
+ * `dj_join` / `dj_leave` are excluded for the same reason as step 3b: those
+ * markers name a PERSON arriving or leaving, not the show's DJ, so a co-host
+ * blip inside the show has to keep its own handle.
+ *
+ * Idempotent by construction — `IS DISTINCT FROM` means an already-correct row
+ * is not rewritten, so a second run reports zero.
+ */
+export const repairDjNameForShow = async (showId: number, dryRun: boolean): Promise<number> => {
+  const show = await loadShow(showId);
+
+  const linked =
+    show.primary_dj_id == null
+      ? null
+      : ((await db.select({ djName: user.djName }).from(user).where(eq(user.id, show.primary_dj_id)).limit(1))[0] ??
+        null);
+
+  const djName = resolveShowDjName({
+    dj_name_override: show.dj_name_override ?? null,
+    legacy_dj_name: show.legacy_dj_name ?? null,
+    primary_dj_id: show.primary_dj_id ?? null,
+    user: linked,
+  });
+
+  const stale = and(
+    eq(flowsheet.show_id, showId),
+    notInArray(flowsheet.entry_type, ['dj_join', 'dj_leave']),
+    sql`${flowsheet.dj_name} IS DISTINCT FROM ${djName}`
+  );
+
+  if (dryRun) {
+    const rows = await db.select({ id: flowsheet.id }).from(flowsheet).where(stale);
+    log('dj-name-repair-dry-run', { show_id: showId, dj_name: djName, would_update: rows.length });
+    return rows.length;
+  }
+
+  const updated = await db.update(flowsheet).set({ dj_name: djName }).where(stale).returning({ id: flowsheet.id });
+  log('dj-name-repaired', { show_id: showId, dj_name: djName, rows: updated.length });
+  return updated.length;
+};
+
+/**
  * Re-insert the live show's `show_start` so it holds the highest marker id.
  *
  * The iOS listener app derives its on-air banner from
@@ -517,6 +582,26 @@ export const main = async (): Promise<void> => {
   // show's `show_start` so it outranks any `show_end` minted after it. Needed
   // because the ordering hazard was found only after the 2026-08-28 apply, and
   // re-running the split over an already-split show is not possible.
+  // Retroactive `flowsheet.dj_name` repair for a show split before step 3b
+  // existed. Accepts a comma-separated list so the four shows from one split
+  // are one invocation; each is resolved and updated independently.
+  if (process.argv.includes('--repair-dj-name')) {
+    const raw = argValue('show-id');
+    if (!raw || !/^\d+(,\d+)*$/.test(raw)) {
+      throw new Error('Required with --repair-dj-name: --show-id=<id>[,<id>...]');
+    }
+    const ids = raw.split(',').map((v) => Number.parseInt(v, 10));
+    let total = 0;
+    for (const id of ids) {
+      total += await repairDjNameForShow(id, DRY_RUN);
+    }
+    log(DRY_RUN ? 'dj-name-repair-dry-run-complete' : 'dj-name-repair-complete', {
+      shows: ids,
+      rows: total,
+    });
+    return;
+  }
+
   if (process.argv.includes('--repair-marker-order')) {
     // Requires the show explicitly. An earlier cut took "the newest open show"
     // instead, which is right only when the repair runs immediately after the
