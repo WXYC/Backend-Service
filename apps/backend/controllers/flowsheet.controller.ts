@@ -11,6 +11,8 @@ import type { CriticReviewItem } from '@wxyc/shared/dtos';
 import { projectFlowsheetEntry, toDiscogsUnavailableWireFields } from '../utils/flowsheet-projection.js';
 import { getDiscogsUnavailableFlagsById } from '../services/library.service.js';
 import { stashMirrorData } from '../middleware/legacy/mirror.middleware.js';
+import { flowsheetMirror } from '../middleware/legacy/flowsheet.mirror.js';
+import * as flowsheetTakeoverConfig from '../config/flowsheetTakeover.js';
 import WxycError from '../utils/error.js';
 import { INT4_MAX } from '../utils/constants.js';
 
@@ -812,7 +814,57 @@ export type JoinRequestBody = {
    * (`addDJToShow`) because there's no per-co-host override surface today.
    */
   dj_name_override?: string;
+  /**
+   * What the caller means when a show they are not already an active member of
+   * is still open (BS#2233). Consulted ONLY in that case — the guards above it
+   * (an already-closed show, a terminal `show_end` marker, an existing active
+   * membership) all resolve first and never reach this field.
+   */
+  intent?: JoinIntent;
+  /**
+   * The `shows.id` a `takeover` intends to close, echoed from the 409's
+   * `details.show.id`. Compare-and-set: see `joinShow`.
+   */
+  expected_show_id?: number;
 };
+
+/**
+ * The two things a caller can mean by "Go Live" while somebody else's show is
+ * open. Absence is a THIRD state and deliberately not a member of this union:
+ * it means the caller never chose, and the answer to that is the 409, not a
+ * default. See `apps/backend/config/flowsheetTakeover.ts`.
+ */
+export type JoinIntent = 'join' | 'takeover';
+
+const JOIN_INTENTS: readonly JoinIntent[] = ['join', 'takeover'];
+
+/**
+ * The 409 a `POST /flowsheet/join` answers with when a show the caller does not
+ * belong to is genuinely open and they said nothing about what to do.
+ *
+ * `dj_name` resolves through the SHARED chain (`dj_name_override` → the linked
+ * account's handle → `legacy_dj_name`), the same one `getOnAirDJName` and
+ * `getOnAirDJs` use. Hand-joining `auth_user` here would let the prompt show a
+ * name that disagrees with the on-air banner rendered beside it — the exact
+ * class of divergence this work exists to remove.
+ *
+ * Note what that name means: it is the show's OWNER, which for an abandoned
+ * show is the DJ who left, not whoever is at the controls. That is the right
+ * answer to "whose show am I being asked about", and the wrong answer to "who
+ * is on air" — a client rendering the latter reads `GET /flowsheet/djs-on-air`.
+ * The spec's 409 description says so explicitly.
+ */
+const showAlreadyOpenError = async (show: Show): Promise<WxycError> =>
+  new WxycError('A show is already on air', 409, {
+    code: 'show_already_open',
+    details: {
+      show: {
+        id: show.id,
+        dj_name: await flowsheet_service.resolveDjNameForShow(show),
+        start_time: show.start_time,
+      },
+    },
+  });
 
 /**
  * Maximum length of `dj_name_override`. Absolute ceiling matching both the
@@ -902,10 +954,90 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     // dj_join marker (the issue's 16:37:59 duplicate-marker trace).
     res.status(200).json({ show_id: current_show.id, dj_id: req.body.dj_id, active: true } satisfies ShowDJ);
   } else {
-    // Override is only consumed on the new-show path. Co-host join uses the
-    // auth_user.dj_name resolution unchanged.
-    const show_dj_instance: ShowDJ = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
-    res.status(200).json(show_dj_instance);
+    // Everything above has been ruled out: a show is genuinely open, it isn't
+    // the caller's, and its terminal entry doesn't say it ended. This is the
+    // handoff the incident happened at (BS#2232 — production show 1951224
+    // absorbed five DJs across ten hours while `on_air` named only the first),
+    // and the ONLY branch the intent contract governs.
+    //
+    // Flag OFF is byte-identical to the pre-BS#2233 behavior, `intent`
+    // included: no 400 for an unrecognized value, no 409 for an absent one.
+    // auto-dj-orchestrator ships `intent: "takeover"` before the flip and its
+    // `join()` throws on a body with no show id, so a 400 here would crash
+    // that daemon at activation. See config/flowsheetTakeover.ts.
+    if (!flowsheetTakeoverConfig.getConfig().enabled) {
+      const show_dj_instance: ShowDJ = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
+      res.status(200).json(show_dj_instance);
+      return;
+    }
+
+    const intent = req.body.intent;
+
+    // No intent: the caller never chose. Refuse to choose for them, and say
+    // which show is in the way so the client can prompt and echo the id back.
+    if (intent === undefined) {
+      throw await showAlreadyOpenError(current_show);
+    }
+
+    if (!JOIN_INTENTS.includes(intent)) {
+      throw new WxycError(`Bad Request: intent must be one of ${JOIN_INTENTS.join(', ')}`, 400);
+    }
+
+    if (intent === 'join') {
+      // Override is only consumed on the new-show path. Co-host join uses the
+      // auth_user.dj_name resolution unchanged.
+      const show_dj_instance: ShowDJ = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
+      res.status(200).json(show_dj_instance);
+      return;
+    }
+
+    // Takeover. Bound to the show the DJ was actually shown: clients poll, so
+    // by the time someone reads the prompt and clicks, the open show may have
+    // moved on. Ending "whatever is open now" would close a show whose name
+    // they never saw, which voids the informed consent the prompt exists to
+    // provide. (The other stale-snapshot case — the expected show having
+    // CLOSED in that window — never reaches here: the first branch above
+    // already routed it to `startShow`, silently, because starting their own
+    // show is the outcome they asked for and re-prompting would put the dialog
+    // on the common one-click path.)
+    if (typeof req.body.expected_show_id !== 'number') {
+      throw new WxycError('Bad Request: intent "takeover" requires expected_show_id', 400);
+    }
+    if (req.body.expected_show_id !== current_show.id) {
+      throw await showAlreadyOpenError(current_show);
+    }
+
+    // `resolveShowEndInstant` (MAX(add_time) floored at start_time), never
+    // `now()`. `now()` is right for a prompt handoff and a lie for an abandoned
+    // one: it would credit a departed DJ with however many hours of dead air
+    // elapsed before the next DJ arrived, and — per `endShow`'s own
+    // EndShowOptions note — sort a `show_end` marker to the top of the public
+    // flowsheet with an interval overlapping every archive day in between. The
+    // derived instant is truthful in both cases, because a prompt handoff's
+    // last logged track IS recent. One rule, correct twice.
+    const endedAt = await flowsheet_service.resolveShowEndInstant(current_show);
+
+    // `endShow` first, and unwrapped: its `WHERE end_time IS NULL`
+    // compare-and-set is what serializes two racing takeovers, so the loser
+    // gets that 400 rather than opening a second show.
+    const closedShow: Show = await flowsheet_service.endShow(current_show, endedAt);
+
+    // The route chains `flowsheetMirror.startShow`, whose response tap will
+    // create the NEW show in tubafrenzy from the body below. The close has to
+    // mirror too, or tubafrenzy keeps a show open that Backend has closed —
+    // the split brain that made this incident ambiguous. It cannot ride a
+    // second tap (both read the same `res.locals.mirrorData`, so an end-tap
+    // would sign off the show that just started), so it is handed the closed
+    // show explicitly and deferred to `res.once('finish')`.
+    flowsheetMirror.scheduleTakeoverSignoff(req, res, closedShow);
+
+    const show_session: Show = await flowsheet_service.startShow(
+      req.body.dj_id,
+      req.body.show_name,
+      req.body.specialty_id,
+      dj_name_override
+    );
+    res.status(200).json(show_session);
   }
 };
 
@@ -1003,7 +1135,52 @@ export const getOpenShows: RequestHandler<object, unknown, unknown, { window_hou
  * force-end therefore cannot write a duplicate marker even if two operators
  * click at the same instant.
  */
-export const forceEndShow: RequestHandler<{ id: string }, unknown, unknown, { force?: string }> = async (req, res) => {
+/**
+ * The instant `force-end` stamps: the operator's `ended_at` when they supplied
+ * one, otherwise the show's own last logged entry.
+ *
+ * The derived instant is the right default and the wrong answer often enough to
+ * need an override — a DJ who stopped logging at 9pm and stayed on the air
+ * until 11pm leaves a show whose flowsheet cannot say so, and the operator can.
+ *
+ * Bounded on BOTH ends because each bound protects a public read. Below
+ * `start_time` yields `end_time < start_time`, an interval that cannot overlap
+ * anything, which hides the show from `GET /flowsheet/range` on the very day it
+ * aired (the same hazard `resolveShowEndInstant`'s own floor exists for). Above
+ * `now` yields a show claiming to have ended in the future, which sorts a
+ * `show_end` marker above every real entry on the public flowsheet. Out of
+ * range is a 400, never a silent clamp: an operator who mistypes a date should
+ * learn that, not get a different answer than they asked for.
+ */
+const resolveForceEndInstant = async (raw: unknown, show: Show): Promise<Date> => {
+  if (raw === undefined || raw === null) {
+    return flowsheet_service.resolveShowEndInstant(show);
+  }
+  // Only a string. `new Date(1755000000000)` parses an epoch happily, and a
+  // caller who sent a number meant something the contract does not offer.
+  if (typeof raw !== 'string') {
+    throw new WxycError('Bad Request: ended_at must be an ISO-8601 date-time string', 400);
+  }
+  const endedAt = new Date(raw);
+  if (Number.isNaN(endedAt.getTime())) {
+    throw new WxycError('Bad Request: ended_at must be an ISO-8601 date-time string', 400);
+  }
+  const startedAt = new Date(show.start_time);
+  if (endedAt.getTime() < startedAt.getTime()) {
+    throw new WxycError("Bad Request: ended_at must be at or after the show's start_time", 400);
+  }
+  if (endedAt.getTime() > Date.now()) {
+    throw new WxycError('Bad Request: ended_at must not be in the future', 400);
+  }
+  return endedAt;
+};
+
+export const forceEndShow: RequestHandler<
+  { id: string },
+  unknown,
+  { ended_at?: unknown } | undefined,
+  { force?: string }
+> = async (req, res) => {
   if (!/^\d+$/.test(req.params.id)) {
     throw new WxycError('Bad Request: show id must be a positive integer', 400);
   }
@@ -1040,8 +1217,9 @@ export const forceEndShow: RequestHandler<{ id: string }, unknown, unknown, { fo
     }
   }
 
-  // The instant the show actually stopped, not `now()` — see `endShow`.
-  const endedAt = await flowsheet_service.resolveShowEndInstant(show);
+  // The instant the show actually stopped, not `now()` — see `endShow`. An
+  // operator may override it within `[start_time, now]`.
+  const endedAt = await resolveForceEndInstant(req.body?.ended_at, show);
 
   const finalizedShow: Show = await flowsheet_service.endShow(show, endedAt);
   res.status(200).json(finalizedShow);

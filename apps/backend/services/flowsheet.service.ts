@@ -1782,12 +1782,19 @@ export const ANONYMOUS_ON_AIR_NAME = 'WXYC';
  * case to `null` was the "AUTO DJ while a human DJ is live" bug for handleless
  * sign-ons.
  *
- * Deliberately does NOT consult the `show_djs` join table the way
+ * Does NOT derive the name from the `show_djs` join table the way
  * `getDJsInCurrentShow`/`getOnAirStatusForDJ` do: tubafrenzy-mirrored shows have
  * no `show_djs` rows (the DJ has no Backend-Service account), so a join-table
  * read reports automation for essentially every legacy live show — the same
  * class of bug. `legacy_dj_name` is the authoritative identity for those shows,
  * and `resolveDjNameForShow` already reads it.
+ *
+ * It does consult the join table in ONE narrow case (BS#2233): a show with no
+ * override and no `primary_dj_id`, where the chain would otherwise fall through
+ * to `legacy_dj_name` even though `show_djs` holds an active account member.
+ * See the comment at the branch. That is a preference between two identities
+ * this function already had access to, not a return to deriving from the join
+ * table — a show with no account rows still resolves exactly as before.
  *
  * Known limitation (inherited from the `getLatestShow`-based on-air endpoints):
  * legacy/tubafrenzy shows are created open (`end_time: null`) and closed later by
@@ -1801,11 +1808,57 @@ export const ANONYMOUS_ON_AIR_NAME = 'WXYC';
  *   `ANONYMOUS_ON_AIR_NAME` when the open show has no resolvable name — or
  *   `null` only when no show is open (automation).
  */
+/**
+ * The display name of an active `show_djs` member of `showId`, or null when the
+ * show has no account members with a resolvable handle.
+ *
+ * Ordered by `auth_user.id` purely for determinism — `show_djs` carries no join
+ * timestamp and no serial id, so there is no "who arrived first" to read
+ * (BS#2237). With no `primary_dj_id` to prefer, any stable order beats a
+ * plan-dependent one.
+ *
+ * Scoped to the LIVE on-air read. Deliberately not folded into
+ * `resolveDjNameForShow`, which also feeds the archive and the write path:
+ * changing the shared chain would rewrite the names on historical shows.
+ */
+const activeMemberOnAirName = async (showId: number): Promise<string | null> => {
+  const members = await getDJsInShow(showId, true);
+  const named = members
+    .slice()
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+    .map((m) => resolveDjDisplayName((m.djName as string | null | undefined) ?? null))
+    .filter((name): name is string => !!name && name.trim().length > 0);
+  return named[0] ?? null;
+};
+
 export const getOnAirDJName = async (): Promise<string | null> => {
   const latest_show = await getLatestShow();
   if (!latest_show || latest_show.end_time !== null) {
     return null;
   }
+
+  // The one place this read departs from the shared chain (BS#2233).
+  //
+  // With no override and no `primary_dj_id`, `resolveDjNameForShow`
+  // short-circuits to `shows.legacy_dj_name` — the handle of whoever tubafrenzy
+  // recorded when the show opened. That is the correct answer for a legacy show
+  // with no Backend accounts on it (the DJ MONSTER case this function was
+  // written for), and the wrong one the moment a real account joins that show:
+  // `show_djs` then holds someone who is demonstrably at the controls, while
+  // the banner keeps naming a DJ who may have left hours ago. `djs-on-air`
+  // already prefers account rows for exactly this reason (`getOnAirDJs`), so
+  // before this the two on-air endpoints disagreed on precisely the shows where
+  // the answer mattered.
+  //
+  // Only consulted in that short-circuit: an override is operator-supplied and
+  // outranks everything, and a linked primary DJ is a real answer from the
+  // chain. So a BS-native show pays no extra query.
+  const hasOverride = showDjNameOverride((latest_show.dj_name_override as string | null | undefined) ?? null) !== null;
+  if (!hasOverride && (latest_show.primary_dj_id as string | null | undefined) == null) {
+    const memberName = await activeMemberOnAirName(latest_show.id);
+    if (memberName) return memberName;
+  }
+
   const resolved = (await resolveDjNameForShow(latest_show))?.trim();
   return resolved && resolved.length > 0 ? resolved : ANONYMOUS_ON_AIR_NAME;
 };

@@ -1,10 +1,15 @@
-import { QueryParams } from '../../controllers/flowsheet.controller';
+import type { QueryParams } from '../../controllers/flowsheet.controller';
 import { db } from '@wxyc/database';
 import { user, flowsheet, shows, FSEntry, Show } from '@wxyc/database';
 import { and, eq, isNull } from 'drizzle-orm';
 import * as Sentry from '@sentry/node';
-import { Request } from 'express';
-import { createBackendMirrorMiddleware, createHttpMirrorMiddleware } from './mirror.middleware.js';
+import { Request, Response } from 'express';
+import {
+  createBackendMirrorMiddleware,
+  createHttpMirrorMiddleware,
+  isMirrorEnabled,
+  type MirrorFlagRequest,
+} from './mirror.middleware.js';
 import { safeSql, safeSqlNum, toMs } from './utilities.mirror.js';
 import {
   mirrorCreateEntry,
@@ -189,26 +194,81 @@ const startShow = createHttpMirrorMiddleware<Show>(
   { shouldMirror: isShowPayload, resolveFlagIdentity: showFlagIdentity }
 );
 
+/**
+ * Sign one closed show off in tubafrenzy and mirror its `show_end` marker.
+ *
+ * Extracted from the `endShow` response tap so `POST /flowsheet/join`'s
+ * takeover branch can close a show through the identical sequence. Chaining
+ * `flowsheetMirror.endShow` onto `/join` instead is the trap: both taps read
+ * the SAME `res.locals.mirrorData` key under the same `isShowPayload` gate, so
+ * on a takeover both would receive the payload of the show that just STARTED
+ * and the end-tap would sign off the live broadcast.
+ *
+ * Takes the closed `Show` and resolves the tubafrenzy id itself rather than
+ * accepting one. `getCachedShowId` is module-private and is the *primary*
+ * source whenever `startShow`'s `legacy_show_id` persist failed, so a caller
+ * passing a pre-resolved id would silently drop the cache lookup and
+ * mis-target the sign-off.
+ */
+const mirrorShowSignoff = async (show: Show): Promise<void> => {
+  const endMs = toMs(show.end_time ?? Date.now());
+
+  // Resolve tubafrenzy show ID: in-memory cache → persisted legacy_show_id
+  const tubafrenzyShowId = getCachedShowId(show.id) ?? show.legacy_show_id;
+
+  // No tubafrenzy show to sign off or hang the END_OF_SHOW entry off (the
+  // startShow mirror failed, or this process never saw it and the persist
+  // failed too). Both arms skip together; legacy-mirror-reconcile heals it.
+  if (tubafrenzyShowId == null) return;
+
+  await mirrorSignoffShow(tubafrenzyShowId, endMs);
+  await mirrorAnnouncementEntry(show.id, 'show_end', tubafrenzyShowId);
+};
+
 export const endShow = createHttpMirrorMiddleware<Show>(
-  async (_req, show) => {
-    // BS#1119's ShowDJ-vs-Show discrimination lives in `isShowPayload`, passed
-    // as this registration's shouldMirror gate — a guest leave never reaches
-    // this handler (and never pays the PostHog flag round-trip).
-    const endMs = toMs(show.end_time ?? Date.now());
-
-    // Resolve tubafrenzy show ID: in-memory cache → persisted legacy_show_id
-    const tubafrenzyShowId = getCachedShowId(show.id) ?? show.legacy_show_id;
-
-    // No tubafrenzy show to sign off or hang the END_OF_SHOW entry off (the
-    // startShow mirror failed, or this process never saw it and the persist
-    // failed too). Both arms skip together; legacy-mirror-reconcile heals it.
-    if (tubafrenzyShowId == null) return;
-
-    await mirrorSignoffShow(tubafrenzyShowId, endMs);
-    await mirrorAnnouncementEntry(show.id, 'show_end', tubafrenzyShowId);
-  },
+  // BS#1119's ShowDJ-vs-Show discrimination lives in `isShowPayload`, passed
+  // as this registration's shouldMirror gate — a guest leave never reaches
+  // this handler (and never pays the PostHog flag round-trip).
+  async (_req, show) => mirrorShowSignoff(show),
   { shouldMirror: isShowPayload, resolveFlagIdentity: showFlagIdentity }
 );
+
+/**
+ * Queue the tubafrenzy sign-off for a show `POST /flowsheet/join` closed as
+ * part of a takeover (BS#2233).
+ *
+ * The takeover ends one show and starts another in a single request, but the
+ * route can only carry ONE response-tap payload — the new show, which
+ * `flowsheetMirror.startShow` needs. The close therefore mirrors from here,
+ * with the closed `Show` passed explicitly.
+ *
+ * Deferred to `res.once('finish')` rather than awaited inline, matching both
+ * mirror factories. Awaiting would put tubafrenzy's HTTP latency on the
+ * go-live path, and a tubafrenzy outage would 500 the takeover *after*
+ * `endShow` already committed `end_time` — stranding the DJ off air with no
+ * show, a worse version of the bug being fixed.
+ *
+ * Deliberately NOT gated on `res.statusCode`, which is where this departs from
+ * the taps. A tap decides whether a mutation happened by reading the status
+ * code; here the close has ALREADY COMMITTED before this is called, so a later
+ * failure in the same request (`startShow` throwing, say) changes nothing
+ * about whether tubafrenzy needs to hear about it. Skipping the sign-off on a
+ * non-2xx would leave exactly the BS-closed/tubafrenzy-open split brain that
+ * produced this incident's ambiguity.
+ */
+export const scheduleTakeoverSignoff = (req: MirrorFlagRequest, res: Response, closedShow: Show): void => {
+  res.once('finish', () => {
+    void (async () => {
+      try {
+        if (!(await isMirrorEnabled(req, () => Promise.resolve(showFlagIdentity(closedShow))))) return;
+        await mirrorShowSignoff(closedShow);
+      } catch (e) {
+        console.error('Error in takeover sign-off mirror:', e);
+        Sentry.captureException(e, { tags: { subsystem: 'legacy-mirror', variant: 'http' } });
+      }
+    })();
+  });
+};
 
 const getAddEntrySQL = async (req: Request, entry: FSEntry) => {
   const startMs = entry?.add_time ? new Date(entry.add_time).getTime() : Date.now();
@@ -560,5 +620,8 @@ export const flowsheetMirror = {
   addEntry,
   updateEntry,
   deleteEntry,
+  // Not a middleware: the takeover branch calls this directly. See its
+  // docstring for why the sign-off cannot ride a second response tap.
+  scheduleTakeoverSignoff,
   /*changeOrder,*/
 };

@@ -53,8 +53,8 @@ const {
   resolveShowEndInstant: mockResolveShowEndInstant,
 } = service;
 
-const makeReq = (query: Record<string, string> = {}, params: Record<string, string> = {}) =>
-  ({ query, params }) as unknown as Request;
+const makeReq = (query: Record<string, string> = {}, params: Record<string, string> = {}, body?: unknown) =>
+  ({ query, params, body }) as unknown as Request;
 
 beforeEach(() => resetFlowsheetServiceMock(service, END_INSTANT));
 
@@ -263,4 +263,86 @@ describe('POST /flowsheet/shows/:id/force-end', () => {
     await expect(forceEndShow(makeReq({}, { id }), res, next)).rejects.toThrow('show id must be a positive integer');
     expect(mockGetShowById).not.toHaveBeenCalled();
   });
+});
+
+/**
+ * The derived instant is the right default and the wrong answer often enough
+ * to need an override: a DJ who stopped logging at 9pm and stayed on the air
+ * until 11pm leaves a show whose flowsheet cannot say so. The operator can.
+ *
+ * Bounded on both ends, because both bounds protect a public read. Below
+ * `start_time` produces an interval that cannot overlap its own airdate, which
+ * hides the show from `GET /flowsheet/range` on the very day it aired; above
+ * `now` produces a show that claims to have ended in the future.
+ */
+describe('POST /flowsheet/shows/:id/force-end — operator-supplied ended_at', () => {
+  const openShow = {
+    id: 1951164,
+    primary_dj_id: 'dj-1',
+    start_time: new Date('2026-08-20T18:00:00.000Z'),
+    end_time: null,
+  };
+
+  beforeEach(() => {
+    mockGetShowById.mockResolvedValue(openShow);
+    mockEndShow.mockResolvedValue({ ...openShow, end_time: END_INSTANT });
+  });
+
+  it('uses the supplied instant instead of the derived one', async () => {
+    const operatorInstant = new Date('2026-08-20T23:30:00.000Z');
+    const { res, statusMock } = createMockRes();
+
+    await forceEndShow(makeReq({}, { id: '1951164' }, { ended_at: operatorInstant.toISOString() }), res, next);
+
+    expect(mockEndShow).toHaveBeenCalledWith(openShow, operatorInstant);
+    expect(statusMock).toHaveBeenCalledWith(200);
+  });
+
+  it('falls back to the derived instant when ended_at is absent', async () => {
+    const { res } = createMockRes();
+
+    await forceEndShow(makeReq({}, { id: '1951164' }, {}), res, next);
+
+    expect(mockResolveShowEndInstant).toHaveBeenCalledWith(openShow);
+    expect(mockEndShow).toHaveBeenCalledWith(openShow, END_INSTANT);
+  });
+
+  it('accepts an instant exactly at start_time', async () => {
+    const { res } = createMockRes();
+
+    await forceEndShow(makeReq({}, { id: '1951164' }, { ended_at: openShow.start_time.toISOString() }), res, next);
+
+    expect(mockEndShow).toHaveBeenCalledWith(openShow, openShow.start_time);
+  });
+
+  it('400s an instant before start_time without closing the show', async () => {
+    const { res } = createMockRes();
+
+    await expect(
+      forceEndShow(makeReq({}, { id: '1951164' }, { ended_at: '2026-08-20T17:59:59.000Z' }), res, next)
+    ).rejects.toThrow(WxycError);
+    expect(mockEndShow).not.toHaveBeenCalled();
+  });
+
+  it('400s an instant in the future without closing the show', async () => {
+    const { res } = createMockRes();
+    const future = new Date(Date.now() + 60_000).toISOString();
+
+    await expect(forceEndShow(makeReq({}, { id: '1951164' }, { ended_at: future }), res, next)).rejects.toThrow(
+      WxycError
+    );
+    expect(mockEndShow).not.toHaveBeenCalled();
+  });
+
+  it.each(['yesterday', '', '2026-13-45T00:00:00Z', 1_755_000_000_000])(
+    '400s an unparseable ended_at %p',
+    async (raw) => {
+      const { res } = createMockRes();
+
+      await expect(forceEndShow(makeReq({}, { id: '1951164' }, { ended_at: raw }), res, next)).rejects.toThrow(
+        WxycError
+      );
+      expect(mockEndShow).not.toHaveBeenCalled();
+    }
+  );
 });

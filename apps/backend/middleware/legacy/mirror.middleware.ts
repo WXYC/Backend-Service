@@ -4,6 +4,14 @@ import { MirrorCommandQueue } from './commandqueue.mirror';
 import { getPostHogClient } from '../../utils/posthog.js';
 
 /**
+ * The only parts of a request this gate reads. Narrowed from `Request` so a
+ * controller holding a route-typed `Request<object, object, Body>` — which is
+ * not assignable to the default `ParamsDictionary`-keyed one — can call it
+ * without a cast (BS#2233's takeover branch).
+ */
+export type MirrorFlagRequest = Pick<Request, 'auth' | 'ip'>;
+
+/**
  * Check the PostHog `backend-mirror` feature flag. If PostHog is not
  * configured (no API key), the mirror is enabled by default so that
  * local development and E2E tests work without external dependencies.
@@ -20,7 +28,10 @@ import { getPostHogClient } from '../../utils/posthog.js';
  * pre-BS#1119-follow-up `req.user?.id` read meant every evaluation fell back to
  * req.ip, one EC2-local value.
  */
-async function isMirrorEnabled(req: Request, resolveShowIdentity?: () => Promise<string | null>): Promise<boolean> {
+export async function isMirrorEnabled(
+  req: MirrorFlagRequest,
+  resolveShowIdentity?: () => Promise<string | null>
+): Promise<boolean> {
   if (!process.env.POSTHOG_API_KEY) {
     console.log('[mirror] enabled=true source=env-default');
     return true;
