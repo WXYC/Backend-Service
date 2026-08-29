@@ -153,5 +153,7 @@
   "0154_shows-open-start-time-idx": "8a2925defd3f84f0326ad4a5d36903577316b2e55a9cba433b1624a8b33e3d2d",
   "0155_fk-ondelete-snapshot-resync": "9777d64f9e76fb78b1057008aff411b065efce05217e768bd85bf672cc638be7",
   "0156_uncovered-release-search-markers": "642ad24c9e51344c7f3f219f81881c6787bf681f2da4cdfdb1c3bbd3b58f0fa5",
-  "0157_dj-name-pii-column-comments": "dc717fe1573629e5056c3a897927f4ff768449636032fae3e429a7f128b857ba"
+  "0157_dj-name-pii-column-comments": "dc717fe1573629e5056c3a897927f4ff768449636032fae3e429a7f128b857ba",
+  "0158_digital-asset-manifest": "81a02503fd392815b5b4cc2071528dc0f5700d36596e3d5b50f30c2ce6e59019",
+  "0159_digital-asset-watermark": "740d25b500445e488c7ed497d7594f446aa9d1daef2acbb50d5568394c00513f"
 }

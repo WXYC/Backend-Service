@@ -23,6 +23,8 @@ import {
   primaryKey,
   check,
   jsonb,
+  bigint,
+  char,
 } from 'drizzle-orm/pg-core';
 
 // PostgreSQL tsvector. Drizzle has no first-class tsvector type, but we only
@@ -3277,3 +3279,141 @@ export const concertPerformers = wxyc_schema.table(
 
 export type ConcertPerformer = InferSelectModel<typeof concertPerformers>;
 export type NewConcertPerformer = InferInsertModel<typeof concertPerformers>;
+
+/**
+ * Digital-asset object stores (BS#2318, epic WXYC/wxyc-dj-ios#135 digital
+ * archive). One row per storage backend a `digital_asset_file` can live in —
+ * e.g. 'azuracast-do-spaces' for today's hand-uploaded auto-DJ MP3s. Endpoint,
+ * bucket, and credentials are env-configured, keyed by `name`; this table only
+ * anchors the FK, never the connection details.
+ */
+export const digital_asset_store = wxyc_schema.table(
+  'digital_asset_store',
+  {
+    id: serial('id').primaryKey(),
+    name: text('name').notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex('digital_asset_store_name_idx').on(table.name)]
+);
+
+export type DigitalAssetStore = InferSelectModel<typeof digital_asset_store>;
+export type NewDigitalAssetStore = InferInsertModel<typeof digital_asset_store>;
+
+/**
+ * Digital-asset manifest core row (BS#2318): which `library.id` has audio,
+ * under what provenance, and its review/bind status. Generalized so today's
+ * hand-uploaded auto-DJ MP3s (`provenance = 'rotation_upload'`) and tomorrow's
+ * verified CD rips (`provenance = 'cd_rip'`) are rows in the same table rather
+ * than two schemas — WXYC/Backend-Service#2319 writes rows,
+ * WXYC/Backend-Service#2320 reads them and serves playback.
+ *
+ * The rip-evidence columns (`verification_method` through `ripped_at`) are ALL
+ * nullable now, on purpose: the CD-rip phase
+ * (`plans/digital-archive/cd-library-digitization.md` §13.1) adds rows that
+ * populate them, not new columns.
+ *
+ * `(library_id, provenance, disc_number)` is UNIQUE — one asset per album per
+ * provenance per disc.
+ */
+export const digital_asset = wxyc_schema.table(
+  'digital_asset',
+  {
+    id: serial('id').primaryKey(),
+    library_id: integer('library_id')
+      .notNull()
+      .references(() => library.id),
+    // 'rotation_upload' | 'cd_rip' today; open text vocabulary so a future
+    // provenance doesn't cost its own migration (the 0109 lesson).
+    provenance: text('provenance').notNull(),
+    disc_number: smallint('disc_number').default(1).notNull(),
+    // 'needs_review' | 'bound' | 'rejected' today; rip statuses
+    // ('pulled' | 'ripped' | 'exception') arrive with the CD-rip phase.
+    status: text('status').default('needs_review').notNull(),
+    // Reviewer's reason for a bind/reject decision, or the matcher's evidence.
+    bind_note: text('bind_note'),
+    // Rip evidence — see table JSDoc.
+    verification_method: text('verification_method'),
+    accuraterip_confidence: integer('accuraterip_confidence'),
+    c2_error_count: integer('c2_error_count'),
+    has_htoa: boolean('has_htoa'),
+    hdcd: boolean('hdcd'),
+    pre_emphasis: boolean('pre_emphasis'),
+    has_data_session: boolean('has_data_session'),
+    has_subchannel: boolean('has_subchannel'),
+    identity_qc_flag: text('identity_qc_flag'),
+    rip_log_key: text('rip_log_key'),
+    cue_sheet_key: text('cue_sheet_key'),
+    toc_key: text('toc_key'),
+    data_session_key: text('data_session_key'),
+    album_gain_db: real('album_gain_db'),
+    ripped_by: varchar('ripped_by', { length: 255 }).references(() => user.id),
+    ripped_at: timestamp('ripped_at', { withTimezone: true }),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('digital_asset_library_provenance_disc_idx').on(table.library_id, table.provenance, table.disc_number),
+    index('digital_asset_library_status_idx').on(table.library_id, table.status),
+  ]
+);
+
+export type DigitalAsset = InferSelectModel<typeof digital_asset>;
+export type NewDigitalAsset = InferInsertModel<typeof digital_asset>;
+
+/**
+ * One physical file backing a `digital_asset` (BS#2318): which object store,
+ * under what key, with what codec/checksums. A single asset can have more than
+ * one file (e.g. distinct tracks of a CD rip), hence a separate table rather
+ * than columns on `digital_asset`.
+ *
+ * `md5` is populated from the store's ETag for today's uploads; `sha256` /
+ * `flac_md5` are rip-era columns, nullable until the CD-rip phase writes them.
+ * `tag_artist`/`tag_album`/`tag_track` snapshot the raw tags the bind decision
+ * was made against, for audit and re-bind.
+ */
+export const digital_asset_file = wxyc_schema.table(
+  'digital_asset_file',
+  {
+    id: serial('id').primaryKey(),
+    asset_id: integer('asset_id')
+      .notNull()
+      .references(() => digital_asset.id, { onDelete: 'cascade' }),
+    store_id: integer('store_id')
+      .notNull()
+      .references(() => digital_asset_store.id),
+    object_key: text('object_key').notNull(),
+    // 'mp3' | 'aac' | 'flac' | 'm4a' | 'wav'
+    codec: text('codec').notNull(),
+    bitrate_kbps: integer('bitrate_kbps'),
+    track_number: smallint('track_number'),
+    title: text('title').notNull(),
+    duration_secs: real('duration_secs'),
+    bytes: bigint('bytes', { mode: 'number' }).notNull(),
+    md5: char('md5', { length: 32 }),
+    sha256: char('sha256', { length: 64 }),
+    flac_md5: char('flac_md5', { length: 32 }),
+    tag_artist: text('tag_artist'),
+    tag_album: text('tag_album'),
+    tag_track: text('tag_track'),
+  },
+  (table) => [uniqueIndex('digital_asset_file_store_object_key_idx').on(table.store_id, table.object_key)]
+);
+
+export type DigitalAssetFile = InferSelectModel<typeof digital_asset_file>;
+export type NewDigitalAssetFile = InferInsertModel<typeof digital_asset_file>;
+
+/**
+ * Last-seen value of each env flag whose flip changes the catalog export
+ * projection (BS#2318; consumed by WXYC/Backend-Service#2320's startup hook,
+ * which diffs the current flag value against the stored one and calls
+ * `touch_library_watermark_now()` on a change). Named for what it guards —
+ * not "any feature flag may register here".
+ */
+export const catalog_export_flag_state = wxyc_schema.table('catalog_export_flag_state', {
+  name: text('name').primaryKey(),
+  value: text('value').notNull(),
+  changed_at: timestamp('changed_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type CatalogExportFlagState = InferSelectModel<typeof catalog_export_flag_state>;
+export type NewCatalogExportFlagState = InferInsertModel<typeof catalog_export_flag_state>;
