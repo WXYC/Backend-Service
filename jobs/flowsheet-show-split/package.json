@@ -1,0 +1,26 @@
+{
+  "name": "@wxyc/flowsheet-show-split",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot repair: split a show that accumulated several DJs' sets into one show per DJ, promoting dj_join/dj_leave boundaries to show_start/show_end",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "docker:build": "docker build -t wxyc_flowsheet_show_split:ci -f ../../Dockerfile.flowsheet-show-split ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
