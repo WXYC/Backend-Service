@@ -317,39 +317,98 @@ const recomputeDjName = (row: ScrubRow): { djName: string | null; reason: WriteR
  * decision — `decideDjName` is untouched — so it cannot alter what the live
  * run does.
  *
- * Two classes are the ones to read first:
+ * ## `stored_is_roster_real_name` under-counts by construction
  *
- *   - `stored_is_roster_real_name` is the number this whole job exists for.
- *     If it is not the dominant class, the premise needs re-examining before
- *     anything is written.
- *   - `recomputed_null_non_pii` should be near zero. A non-trivial count means
- *     the job is erasing handles it cannot justify as PII removal — attribution
- *     loss with no privacy benefit.
+ * That class is keyed on `buildPiiNameIndex`, which is built SOLELY from
+ * `auth_user`. The largest affected cohort is legacy shows with
+ * `primary_dj_id IS NULL` — there is no `auth_user` row for them at all, by
+ * definition. `resolveShowDjName` falls through to `legacy_dj_name` for
+ * exactly those rows, so when that value is the pre-BS#1393 tubafrenzy
+ * `DJ_NAME`, the real name lives ONLY in `shows.legacy_dj_name` — a column
+ * this probe never reads. That is not a corner case. It is the precise blind
+ * spot that made BS#1393's own post-run verification report an empty residue
+ * class: the check that looked for remaining real names could not see the
+ * cohort holding almost all of them. Reading `stored_is_roster_real_name`
+ * alone as "how much of this run is PII removal" repeats that mistake.
  *
- * Order is priority, not convenience: the roster check ranks above a null
- * recompute so that removing a real name is counted as PII removal even though
- * the same write also nulls the column.
+ * `stored_is_superseded_legacy_name` closes the blind spot without a new
+ * query: the row already carries `legacy_dj_name` (it is joined in for the
+ * recompute), so a stored value that differs from a recompute whose WINNING
+ * ARM returned `legacy_dj_name` verbatim is, by construction, the cohort-B
+ * shape — a pre-scrub value now superseded by the legacy handle the
+ * resolution chain returns. It ranks BELOW `stored_is_roster_real_name` (a
+ * CONFIRMED roster real name, cross-checked against `auth_user`, is stronger
+ * evidence than an inferred one) but ABOVE every class that follows,
+ * including the cosmetic ones and `other_value_change`.
+ *
+ * Read together, not the first alone:
+ *
+ *   - `stored_is_roster_real_name` PLUS `stored_is_superseded_legacy_name`
+ *     are the PII-removal evidence, together. If their SUM is not the
+ *     dominant class, the premise needs re-examining before anything is
+ *     written — see the under-counting note above for why the first class
+ *     alone is not that check.
+ *   - `recomputed_null_non_pii` should be near zero. A non-trivial count
+ *     means the job is erasing handles it cannot justify as PII removal —
+ *     attribution loss with no privacy benefit.
+ *
+ * `recomputed_is_roster_real_name` is a different kind of signal: it is not
+ * about what a write REMOVES, it is about what a write would ITSELF WRITE —
+ * a stored-clean row whose recompute lands on a roster real name, most
+ * likely via a `dj_name_override` or a (post-scrub-trusted) `legacy_dj_name`
+ * that itself holds one — Cohort C, out of scope for this job to fix. See
+ * `runScrub`'s loud warning wired off it (BS#2281 review finding 2): counted
+ * and reported, never a hard failure, because this job has no in-scope way
+ * to correct its own recompute inputs.
+ *
+ * Order is priority, not convenience:
+ *   1. `stored_null` — nothing is being removed, a plain gap fill.
+ *   2. `recomputed_is_roster_real_name` — ranks ABOVE `stored_is_roster_real_name`
+ *      on purpose: writing PII in is a more urgent signal than removing PII,
+ *      and an operator scanning the summary must not have it hidden under a
+ *      class that reads as success.
+ *   3. `stored_is_roster_real_name` — the confirmed case this job exists for.
+ *   4. `stored_is_superseded_legacy_name` — the inferred cohort-B case, below
+ *      the confirmed case but above everything that follows.
+ *   5. `recomputed_null_non_pii`, `whitespace_only`, `case_only`,
+ *      `other_value_change` — unchanged from before.
  */
 export type ChangeClass =
   | 'stored_null'
+  | 'recomputed_is_roster_real_name'
   | 'stored_is_roster_real_name'
+  | 'stored_is_superseded_legacy_name'
   | 'recomputed_null_non_pii'
   | 'whitespace_only'
   | 'case_only'
   | 'other_value_change';
 
 export const classifyChange = (
-  stored: string | null,
+  row: Pick<ScrubRow, 'dj_name' | 'legacy_dj_name'>,
   recomputed: string | null,
   piiNames: ReadonlySet<string>
 ): ChangeClass => {
+  const stored = row.dj_name;
   if (stored === null) return 'stored_null';
+
+  // Ranked above stored_is_roster_real_name — see the docstring above for why
+  // writing PII in outranks removing PII as a signal an operator must see.
+  if (recomputed !== null && piiNames.has(recomputed.trim())) return 'recomputed_is_roster_real_name';
 
   const trimmedStored = stored.trim();
   // Trimmed, because the two writer families stored the real name
   // differently: the TypeScript path stored `trim(auth_user.name)`, the SQL
   // COALESCE writers stored it untrimmed.
   if (piiNames.has(trimmedStored)) return 'stored_is_roster_real_name';
+
+  // The cohort-B signature: the row already carries `legacy_dj_name`, so a
+  // recompute whose winning arm returned it VERBATIM (see resolveShowDjName's
+  // two legacy-return branches) against a stored value that differs is, by
+  // construction, cohort B — closing the blind spot the docstring above
+  // describes, without a second query.
+  if (recomputed !== null && recomputed === row.legacy_dj_name && stored !== recomputed) {
+    return 'stored_is_superseded_legacy_name';
+  }
 
   if (recomputed === null) return 'recomputed_null_non_pii';
 
@@ -533,6 +592,51 @@ export const loadUsers: LoadUsersFn = async () => {
     dj_name: string | null;
   }>;
   return rows.map((row) => ({ name: row.name, djName: row.dj_name }));
+};
+
+export type LoadShowsLegacyDjNameFn = () => Promise<Array<{ id: number; legacy_dj_name: string | null }>>;
+
+/**
+ * Every non-null `shows.legacy_dj_name`, loaded once at startup for the
+ * pre-flight PII scan below (BS#2281 review finding 3). `shows` is one row
+ * per broadcast, not one per track — small enough that, like `loadUsers`,
+ * this is a single unpaged query rather than a paged drain.
+ */
+export const loadShowsLegacyDjNames: LoadShowsLegacyDjNameFn = async () => {
+  const rows = (await db.execute(
+    sql`SELECT "id", "legacy_dj_name" FROM ${SHOWS_TABLE} WHERE "legacy_dj_name" IS NOT NULL`
+  )) as unknown as Array<{ id: number; legacy_dj_name: string | null }>;
+  return rows;
+};
+
+/**
+ * Count of `shows.legacy_dj_name` values that are themselves roster real
+ * names.
+ *
+ * This job's recompute TRUSTS `legacy_dj_name` to already be clean —
+ * `resolveShowDjName` reads it as a direct chain input with no PII check of
+ * its own, unlike `dj_name` and `message`, which this job probes explicitly.
+ * That trust rests on BS#1393 having rewritten the column from tubafrenzy
+ * `DJ_NAME` (real name) to `DJ_HANDLE` (on-air handle) — plausible, but
+ * asserted rather than verified anywhere until this check. If it is wrong
+ * for any subset of shows, this job actively WRITES real names onto every
+ * in-scope row of those shows, because the polluted value flows straight
+ * through the chain into `dj_name`.
+ *
+ * Pure so it is unit-testable without a database; see `runScrub` for where
+ * this is wired to a startup pre-flight that runs in BOTH dry-run and
+ * execute mode, before the first pass.
+ */
+export const countPollutedLegacyDjNames = (
+  shows: ReadonlyArray<{ legacy_dj_name: string | null }>,
+  piiNames: ReadonlySet<string>
+): number => {
+  let count = 0;
+  for (const show of shows) {
+    const trimmed = show.legacy_dj_name?.trim() ?? '';
+    if (trimmed.length > 0 && piiNames.has(trimmed)) count += 1;
+  }
+  return count;
 };
 
 const upperBound = (maxId?: number) => (maxId === undefined ? sql`` : sql` AND f."id" <= ${maxId}`);
@@ -829,6 +933,14 @@ export type RunResult = {
   failed: boolean;
   /** Size of the loaded PII index, so the summary shows the probe had inputs. */
   piiNameCount: number;
+  /**
+   * Count of `shows.legacy_dj_name` values that are themselves roster real
+   * names — the BS#2281 review finding 3 pre-flight. Non-zero means this
+   * job's recompute is about to WRITE those values onto every in-scope row
+   * of those shows; see `countPollutedLegacyDjNames` and the warning wired
+   * off it in `runScrub`.
+   */
+  legacyDjNamePiiCount: number;
   /** Highest id any pass reached; the bound `verifyScrub` is capped at. */
   highWaterMark: number;
   /** Verification residue below the high-water mark. -1 when not run. */
@@ -881,6 +993,7 @@ export const runScrub = async (opts: {
   liveActivityMaxPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
   loadUsers?: LoadUsersFn;
+  loadShowsLegacyDjNames?: LoadShowsLegacyDjNameFn;
   loadMainPage?: LoadScrubPageFn;
   loadMessagePage?: LoadMessagePageFn;
   loadOrphanPage?: LoadScrubPageFn;
@@ -906,6 +1019,7 @@ export const runScrub = async (opts: {
   const liveActivityMaxPauseMs = opts.liveActivityMaxPauseMs ?? resolveLiveActivityMaxPauseMs();
 
   const loadUsersFn = opts.loadUsers ?? loadUsers;
+  const loadShowsLegacyDjNamesFn = opts.loadShowsLegacyDjNames ?? loadShowsLegacyDjNames;
   const loadMainPageFn = opts.loadMainPage ?? loadMainPage;
   const loadMessagePageFn = opts.loadMessagePage ?? loadMessagePage;
   const loadOrphanPageFn = opts.loadOrphanPage ?? loadOrphanPage;
@@ -959,6 +1073,7 @@ export const runScrub = async (opts: {
     stopped: false,
     failed: false,
     piiNameCount: 0,
+    legacyDjNamePiiCount: 0,
     highWaterMark: 0,
     remaining: -1,
   };
@@ -995,6 +1110,38 @@ export const runScrub = async (opts: {
       error_message: errorMessage(error),
     });
     captureError(error, 'pii_index_failed');
+  }
+
+  // Startup pre-flight (BS#2281 review finding 3), run in BOTH dry-run and
+  // execute mode, before the first pass — so a dry-run operator sees the
+  // risk before anyone asks for `--execute`. This job's recompute TRUSTS
+  // `shows.legacy_dj_name` to already be clean (see `countPollutedLegacyDjNames`'s
+  // doc); `shows` is small, so this is one cheap query, not a paged drain.
+  if (!failure) {
+    try {
+      const shows = await loadShowsLegacyDjNamesFn();
+      const legacyDjNamePiiCount = countPollutedLegacyDjNames(shows, piiNames);
+      result.legacyDjNamePiiCount = legacyDjNamePiiCount;
+      log('info', 'legacy_dj_name_preflight', 'shows.legacy_dj_name pre-flight complete', {
+        legacy_dj_name_pii_count: legacyDjNamePiiCount,
+        shows_with_legacy_dj_name: shows.length,
+      });
+      if (legacyDjNamePiiCount > 0) {
+        const message =
+          `${legacyDjNamePiiCount} shows.legacy_dj_name value(s) are roster real names. ` +
+          'resolveShowDjName reads legacy_dj_name as a direct chain input with no PII check of its own, ' +
+          'so this run WILL WRITE those values onto every in-scope row of those shows. See ' +
+          'jobs/flowsheet-dj-name-scrub/README.md, "shows.legacy_dj_name pre-flight", before proceeding.';
+        log('warn', 'legacy_dj_name_pollution', message, { count: legacyDjNamePiiCount });
+        captureError(new Error(message), 'legacy_dj_name_pollution', { count: legacyDjNamePiiCount });
+      }
+    } catch (error) {
+      failure = { error };
+      log('error', 'legacy_dj_name_preflight_failed', 'failed to scan shows.legacy_dj_name for roster real names', {
+        error_message: errorMessage(error),
+      });
+      captureError(error, 'legacy_dj_name_preflight_failed');
+    }
   }
 
   /**
@@ -1108,7 +1255,7 @@ export const runScrub = async (opts: {
     return {
       fix: { id: row.id, djName: decision.djName, oldDjName: row.dj_name },
       reason: decision.reason,
-      changeClass: classifyChange(row.dj_name, decision.djName, piiNames),
+      changeClass: classifyChange(row, decision.djName, piiNames),
     };
   };
 
@@ -1142,6 +1289,30 @@ export const runScrub = async (opts: {
       // errors). Every cursor is already persisted on `result` by the time we
       // get here — that is the whole point of mutating totals in place.
       failure = { error };
+    }
+  }
+
+  // BS#2281 review finding 2: a class describing what a write would ITSELF
+  // WRITE, not what it removes. Only the `main` pass can produce it — the
+  // `orphan` pass's rows always route through `decideDjName`'s piiOnly
+  // branch, which never recomputes, so `orphan.by_change_class` can never
+  // carry this key. Counted, not gated: `verifyScrub` does NOT fail on this
+  // class. Fixing it for real means widening the PII probe to Cohort C
+  // (a `dj_name_override` or a `legacy_dj_name` that a DJ typed their own
+  // real name into) — explicitly out of scope for this job — so a hard
+  // failure here would be a permanent red build over a condition this job
+  // has no in-scope way to correct, not a signal an operator can act on.
+  // Loud instead: a structured warning plus a Sentry capture, deliberately
+  // never hidden behind dry-run.
+  if (!failure) {
+    const recomputedPiiCount = result.main.by_change_class['recomputed_is_roster_real_name'] ?? 0;
+    if (recomputedPiiCount > 0) {
+      const message =
+        `${recomputedPiiCount} would-be dj_name write(s) in the main pass would themselves recompute to a ` +
+        'roster real name (most likely a dj_name_override or a legacy_dj_name that itself holds one — ' +
+        'Cohort C, out of scope for this job). This run still WRITES those values; it does not fail on this class.';
+      log('warn', 'recomputed_pii_detected', message, { count: recomputedPiiCount });
+      captureError(new Error(message), 'recomputed_pii_detected', { count: recomputedPiiCount });
     }
   }
 
@@ -1205,6 +1376,7 @@ export const runScrub = async (opts: {
       attributes: {
         'scrub.dry_run': dryRun,
         'scrub.pii_name_count': result.piiNameCount,
+        'scrub.legacy_dj_name_pii_count': result.legacyDjNamePiiCount,
         'scrub.main.scanned': result.main.scanned,
         'scrub.main.changed': result.main.changed,
         'scrub.main.written': result.main.written,
@@ -1232,6 +1404,7 @@ export const runScrub = async (opts: {
   log(failure ? 'error' : 'info', step, `${JOB_NAME} ${step}`, {
     dry_run: dryRun,
     pii_name_count: result.piiNameCount,
+    legacy_dj_name_pii_count: result.legacyDjNamePiiCount,
     main: { ...result.main },
     message: { ...result.message },
     orphan: { ...result.orphan },
