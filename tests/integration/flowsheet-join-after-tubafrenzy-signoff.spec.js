@@ -176,10 +176,15 @@ describe('POST /flowsheet/join after a tubafrenzy sign-off (BS#1861)', () => {
 
     try {
       // Secondary DJ joins as a co-host — first join, genuine dj_join marker.
+      // The primary's show is genuinely open and the secondary is not yet a
+      // member, so under FLOWSHEET_TAKEOVER_ENABLED this needs `intent:
+      // 'join'` to say so. The two re-joins below do NOT — each hits
+      // `isDjAlreadyActiveOnShow`'s no-op-200 guard before the intent check
+      // even runs (see joinShow), so they are unaffected by the flag.
       const firstJoin = await request
         .post('/flowsheet/join')
         .set('Authorization', global.secondary_access_token)
-        .send({ dj_id: global.secondary_dj_id });
+        .send({ dj_id: global.secondary_dj_id, intent: 'join' });
       expect(firstJoin.status).toBe(200);
 
       const afterFirstJoin = await sql.unsafe(

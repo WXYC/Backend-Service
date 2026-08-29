@@ -230,11 +230,19 @@ describe('Join Show', () => {
     // BS#1098: dj_id must match the authenticated caller, so the secondary
     // DJ joins with their own Bearer (raw user-id token, accepted by
     // AUTH_BYPASS — see tests/setup/integration.setup.js).
+    //
+    // This IS the co-host join this describe block exists to exercise — the
+    // primary's show is genuinely open and the secondary is not yet a member
+    // of it, so with FLOWSHEET_TAKEOVER_ENABLED on this is exactly the
+    // BS#2233 "someone else's show is open" branch. `intent: 'join'` says
+    // what the secondary DJ actually means here (co-host), which is what the
+    // pre-#2308 behavior always did silently.
     const res = await request
       .post('/flowsheet/join')
       .set('Authorization', global.secondary_access_token)
       .send({
         dj_id: global.secondary_dj_id,
+        intent: 'join',
       })
       .expect(200);
   });
@@ -335,8 +343,11 @@ describe('Leave Show', () => {
     // Start show
     await fls_util.join_show(global.primary_dj_id, global.access_token);
 
-    // Second DJ joins under their own auth (BS#1098 cross-check).
-    await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token);
+    // Second DJ joins under their own auth (BS#1098 cross-check) as a
+    // co-host of the primary's open show — the exact setup this describe
+    // block's tests need to exercise a secondary DJ hitting /flowsheet/end.
+    // `intent: 'join'` says so explicitly under FLOWSHEET_TAKEOVER_ENABLED.
+    await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token, { intent: 'join' });
   });
 
   // Ensure that primary dj ends the show for all show djs
@@ -1420,8 +1431,11 @@ describe('On Air Status', () => {
     test('returns multiple DJs when multiple are on air', async () => {
       // Start a show with primary DJ
       await fls_util.join_show(global.primary_dj_id, global.access_token);
-      // Secondary DJ joins under their own auth (BS#1098 cross-check).
-      await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token);
+      // Secondary DJ joins under their own auth (BS#1098 cross-check) as a
+      // deliberate co-host — this test's whole point is two DJs on air at
+      // once, which is what `intent: 'join'` says under
+      // FLOWSHEET_TAKEOVER_ENABLED.
+      await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token, { intent: 'join' });
 
       const res = await request.get('/flowsheet/djs-on-air').set('Authorization', global.access_token).expect(200);
 
@@ -1445,8 +1459,11 @@ describe('Retrieve Playlist Object', () => {
     const body = await res.json();
     global.CurrentShowID = body.id;
 
-    // Secondary joins as themselves (BS#1098 cross-check).
-    await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token);
+    // Secondary joins as themselves (BS#1098 cross-check), as a co-host —
+    // the test below asserts both DJs appear in `show_djs` and that a
+    // `dj_join` marker is present, so this must be a genuine co-host join.
+    // `intent: 'join'` under FLOWSHEET_TAKEOVER_ENABLED.
+    await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token, { intent: 'join' });
 
     // Insert entry to for show
     await request
