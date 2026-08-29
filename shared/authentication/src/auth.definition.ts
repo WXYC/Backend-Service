@@ -44,6 +44,7 @@ import { buildTrustedClients } from './oidc-trusted-clients';
 import { buildLoginPage } from './oidc-login-page';
 import { buildResetUrl, rewriteUrlForFrontend } from './url-rewrite';
 import { accountSetupTokenExpiresInSeconds } from './account-setup-token';
+import { revokeOutstandingAccountSetupTokens } from './revoke-account-setup-tokens';
 import { buildJwtPayload, buildOidcUserInfoClaim, type MemberRoleRow } from './jwt-payload';
 import {
   grantsAdminFlag,
@@ -208,6 +209,10 @@ export const auth = betterAuth({
       // directly (like the other hooks in this file) rather than `auth.$context`
       // to avoid referencing `auth` before its initializer completes.
       if (isNewUserSetup) {
+        // Cutoff for the revocation below. better-auth minted this request's
+        // token microseconds ago, so anything older is a superseded invite and
+        // anything newer belongs to a concurrent send that must survive.
+        const invitedAt = new Date();
         try {
           const extended = await db
             .update(verification)
@@ -229,6 +234,16 @@ export const auth = betterAuth({
             tags: { subsystem: 'account-setup-invite', step: 'extend-token-expiry' },
           });
         }
+
+        // This is the roster "Send Invite" resend path, which used to mint a
+        // second concurrently-valid token on every click — better-auth's
+        // resetPassword consumes only the token it is handed and never sweeps
+        // the rest. Retire the predecessors so exactly one link is live; that
+        // invariant is what makes the 30-day TTL affordable. Never throws.
+        await revokeOutstandingAccountSetupTokens(user.id, {
+          exceptIdentifier: `reset-password:${token}`,
+          createdBefore: invitedAt,
+        });
       }
 
       // Fire-and-forget so the /request-password-reset response isn't held open

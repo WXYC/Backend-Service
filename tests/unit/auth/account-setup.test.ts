@@ -20,6 +20,11 @@ jest.mock('../../../shared/authentication/src/email', () => ({
   sendAccountSetupEmail: (...args: unknown[]) => mockSendAccountSetupEmail(...args),
 }));
 
+const mockRevokeOutstandingAccountSetupTokens = jest.fn().mockResolvedValue(1 as never);
+jest.mock('../../../shared/authentication/src/revoke-account-setup-tokens', () => ({
+  revokeOutstandingAccountSetupTokens: (...args: unknown[]) => mockRevokeOutstandingAccountSetupTokens(...args),
+}));
+
 const mockSentryCaptureException = jest.fn();
 jest.mock('@sentry/node', () => ({
   captureException: (...args: unknown[]) => mockSentryCaptureException(...args),
@@ -28,7 +33,7 @@ jest.mock('@sentry/node', () => ({
 // --- Import after mocks (url-rewrite + account-setup-token are real leaves) ---
 import { createAndSendAccountSetupInvite } from '../../../shared/authentication/src/account-setup';
 
-const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 const input = {
   userId: 'user-id-001',
@@ -47,13 +52,14 @@ describe('createAndSendAccountSetupInvite()', () => {
     process.env.FRONTEND_SOURCE = 'https://dj.wxyc.org';
     mockCreateVerificationValue.mockResolvedValue(undefined as never);
     mockSendAccountSetupEmail.mockResolvedValue(undefined as never);
+    mockRevokeOutstandingAccountSetupTokens.mockResolvedValue(1 as never);
   });
 
   afterAll(() => {
     process.env = OLD_ENV;
   });
 
-  it('mints a reset-password verification row bound to the user with the 7-day default TTL', async () => {
+  it('mints a reset-password verification row bound to the user with the 30-day default TTL', async () => {
     const before = Date.now();
     await createAndSendAccountSetupInvite(input);
     const after = Date.now();
@@ -67,8 +73,8 @@ describe('createAndSendAccountSetupInvite()', () => {
     expect(arg.identifier).toMatch(/^reset-password:[A-Za-z0-9_-]{20,}$/);
     expect(arg.value).toBe(input.userId);
     const ttlMs = arg.expiresAt.getTime() - before;
-    expect(ttlMs).toBeGreaterThanOrEqual(SEVEN_DAYS_MS - 1000);
-    expect(ttlMs).toBeLessThanOrEqual(after - before + SEVEN_DAYS_MS + 1000);
+    expect(ttlMs).toBeGreaterThanOrEqual(THIRTY_DAYS_MS - 1000);
+    expect(ttlMs).toBeLessThanOrEqual(after - before + THIRTY_DAYS_MS + 1000);
   });
 
   it('honors an ACCOUNT_SETUP_TOKEN_EXPIRES_IN override', async () => {
@@ -108,6 +114,28 @@ describe('createAndSendAccountSetupInvite()', () => {
     const call = mockSendAccountSetupEmail.mock.calls[0][0] as { setupUrl: string };
     const parsed = new URL(call.setupUrl);
     expect(parsed.searchParams.get('redirectTo')).toBe('https://dj.wxyc.org/reset');
+  });
+
+  // A 30-day invite is only safe if it is single-live: better-auth's
+  // resetPassword consumes just the token it is handed, so without this every
+  // resend left the previous link alive for its full TTL.
+  it('revokes the user\u2019s earlier invite tokens, sparing the one just minted', async () => {
+    await createAndSendAccountSetupInvite(input);
+
+    const mintedIdentifier = (mockCreateVerificationValue.mock.calls[0][0] as { identifier: string }).identifier;
+    expect(mockRevokeOutstandingAccountSetupTokens).toHaveBeenCalledWith(input.userId, {
+      exceptIdentifier: mintedIdentifier,
+      // age-bounded so a concurrent second invite isn't revoked by this one
+      createdBefore: expect.any(Date),
+    });
+  });
+
+  it('revokes only after the new token exists, so a failed mint cannot strand the DJ', async () => {
+    mockCreateVerificationValue.mockRejectedValue(new Error('verification insert failed') as never);
+
+    await createAndSendAccountSetupInvite(input);
+
+    expect(mockRevokeOutstandingAccountSetupTokens).not.toHaveBeenCalled();
   });
 
   it('returns { sent: true } and does not touch Sentry on a successful send', async () => {

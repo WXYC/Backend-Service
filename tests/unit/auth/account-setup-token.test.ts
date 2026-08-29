@@ -15,9 +15,9 @@ describe('accountSetupTokenExpiresInSeconds()', () => {
     process.env = OLD_ENV;
   });
 
-  it('defaults to 7 days when the var is unset', () => {
+  it('defaults to 30 days when the var is unset', () => {
     expect(accountSetupTokenExpiresInSeconds()).toBe(ACCOUNT_SETUP_TOKEN_DEFAULT_SECONDS);
-    expect(ACCOUNT_SETUP_TOKEN_DEFAULT_SECONDS).toBe(60 * 60 * 24 * 7);
+    expect(ACCOUNT_SETUP_TOKEN_DEFAULT_SECONDS).toBe(60 * 60 * 24 * 30);
   });
 
   it('honors a positive integer override (with surrounding whitespace)', () => {
