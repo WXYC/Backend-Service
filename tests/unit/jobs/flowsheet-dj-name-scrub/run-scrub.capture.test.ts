@@ -28,7 +28,7 @@ const mockedLog = log as jest.MockedFunction<typeof log>;
 const mockedCaptureError = captureError as jest.MockedFunction<typeof captureError>;
 
 /** Only DJ with no handle at all, so their real name is what leaks. */
-const ROSTER = [{ name: 'A. Hearst', djName: null }];
+const ROSTER = [{ realName: 'A. Hearst', djName: null }];
 
 const makeRow = (overrides: Partial<ScrubRow> = {}): ScrubRow => ({
   id: 1,

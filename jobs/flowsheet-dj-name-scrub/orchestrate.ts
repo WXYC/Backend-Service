@@ -217,16 +217,51 @@ export type ScrubDecision =
   { action: 'skip'; reason: SkipReason } | { action: 'write'; djName: string | null; reason: WriteReason };
 
 /**
- * Build the set of `auth_user.name` values that must never appear as a served
- * `dj_name`.
+ * Build the set of legal names that must never appear as a served `dj_name`.
+ *
+ * ## Reads `auth_user.real_name`, NOT `auth_user.name` (BS#2281 review)
+ *
+ * An earlier revision of this job built the index from `auth_user.name`,
+ * which was correct when it was written and became WRONG on 2026-08-28.
+ * `name` is better-auth's required display column; between `a0cd1979`
+ * (2025-12-31) and the DJ real-name PII safeguards work it was silently a
+ * second copy of the legal name (dj-site provisioning wrote
+ * `realName || username` into it), and that is precisely the value the
+ * Cohort A flowsheet rows this job exists to scrub froze onto themselves.
+ * `jobs/auth-user-name-backfill` then rewrote every pre-existing row in
+ * production to `resolveDjDisplayName(dj_name) ?? username`, and the
+ * `databaseHooks.user` derivation hooks now hold that invariant on every
+ * write (docs/pii.md).
+ *
+ * So post-backfill `auth_user.name` no longer holds a single legal name, and
+ * an index built from it fails in BOTH directions:
+ *
+ *   - It MISSES every real name this job is chartered to remove, because
+ *     those now live only in `real_name`. Every PII-keyed pass — the
+ *     `dj_join`/`dj_leave` null, the orphan probe, the `message` rewrite, the
+ *     `shows.legacy_dj_name` pre-flight, and the `stored_is_roster_real_name`
+ *     change class — would have quietly found nothing and reported a clean
+ *     run. That is the BS#1393 empty-residue failure shape exactly.
+ *   - It INDEXES values that are not PII at all: for a DJ with no handle the
+ *     backfilled `name` is their USERNAME, and the handle-is-real-name
+ *     exemption below (which compares against the handle) does not remove it,
+ *     so the job would null a `dj_name` that merely matched a username.
+ *
+ * Reading `real_name` here is a deliberate, allow-listed PII read — see
+ * `eslint-rules/restricted-real-name.cjs`'s ALLOW_LIST and docs/pii.md, both
+ * amended in the same change. A scrub whose whole job is removing legal names
+ * from a public column cannot do it without being told which names those are.
+ * The values never leave this process: samples are row ids only, and no log,
+ * metric, or Sentry payload in this job carries a name.
  *
  * A DJ whose on-air handle legitimately IS their real name is EXEMPT — the
  * canonical chain returns that handle unchanged, so without the exemption
  * this job would erase a handle they chose and the regression guard would
- * trip permanently for them. That is the "where that user's `dj_name` IS
- * DISTINCT FROM their `name`" clause, evaluated here on the resolved handle
- * (`resolveDjDisplayName`, which trims and nulls the literal 'Anonymous')
- * against the trimmed real name, so whitespace variance cannot defeat it.
+ * trip permanently for them. That is the issue's "where that user's `dj_name`
+ * IS DISTINCT FROM their real name" clause, evaluated here on the resolved
+ * handle (`resolveDjDisplayName`, which trims and nulls the literal
+ * 'Anonymous') against the trimmed legal name, so whitespace variance cannot
+ * defeat it.
  *
  * Comparison is on TRIMMED values because the two writer families stored the
  * real name differently: the TypeScript path stored `trim(auth_user.name)`
@@ -248,11 +283,11 @@ export type ScrubDecision =
  * removal, deterministically and regardless of iteration order.
  */
 export const buildPiiNameIndex = (
-  users: ReadonlyArray<{ name: string | null; djName: string | null }>
+  users: ReadonlyArray<{ realName: string | null; djName: string | null }>
 ): Set<string> => {
   const index = new Set<string>();
   for (const user of users) {
-    const realName = user.name?.trim() ?? '';
+    const realName = user.realName?.trim() ?? '';
     if (realName.length === 0) continue;
     if (resolveDjDisplayName(user.djName) === realName) continue;
     index.add(realName);
@@ -596,7 +631,7 @@ export type MessageRow = {
   message: string | null;
 };
 
-export type LoadUsersFn = () => Promise<Array<{ name: string | null; djName: string | null }>>;
+export type LoadUsersFn = () => Promise<Array<{ realName: string | null; djName: string | null }>>;
 export type LoadScrubPageFn = (afterId: number, batchSize: number, maxId?: number) => Promise<ScrubRow[]>;
 export type LoadMessagePageFn = (afterId: number, batchSize: number, maxId?: number) => Promise<MessageRow[]>;
 export type ApplyDjNameBatchFn = (fixes: DjNameFix[], updateTimeoutMs: number) => Promise<number>;
@@ -614,14 +649,19 @@ export type VerifyFn = (opts: {
 /**
  * The DJ roster, loaded once at startup. `auth_user` is a station roster, not
  * a user table at internet scale — see `buildPiiNameIndex` for why this is a
- * `Map` in process rather than a SQL `EXISTS` probe.
+ * `Set` in process rather than a SQL `EXISTS` probe.
+ *
+ * Selects `real_name`, the schema's sole legal-name carrier, NOT the
+ * public-safe display column `name` — see `buildPiiNameIndex` for why reading
+ * `name` here silently stopped working on 2026-08-28, and for the allow-list
+ * entry that makes this PII read a reviewed one.
  */
 export const loadUsers: LoadUsersFn = async () => {
-  const rows = (await db.execute(sql`SELECT "name", "dj_name" FROM "auth_user"`)) as unknown as Array<{
-    name: string | null;
+  const rows = (await db.execute(sql`SELECT "real_name", "dj_name" FROM "auth_user"`)) as unknown as Array<{
+    real_name: string | null;
     dj_name: string | null;
   }>;
-  return rows.map((row) => ({ name: row.name, djName: row.dj_name }));
+  return rows.map((row) => ({ realName: row.real_name, djName: row.dj_name }));
 };
 
 export type LoadShowsLegacyDjNameFn = () => Promise<Array<{ id: number; legacy_dj_name: string | null }>>;

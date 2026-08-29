@@ -24,6 +24,7 @@
 
 import { db } from '@wxyc/database';
 import {
+  loadUsers,
   applyDjNameBatch,
   applyMessageBatch,
   loadMainPage,
@@ -202,5 +203,26 @@ describe('loadMessagePage — the real candidate SELECT', () => {
     expect(sqlText).not.toMatch(/'track'/);
     expect(sqlText).toMatch(/ORDER\s+BY\s+f\."id"/i);
     expect(sqlText).toMatch(/LIMIT/i);
+  });
+});
+
+describe('loadUsers — the roster query behind the PII index', () => {
+  // Pins the COLUMN, at the SQL level, because getting it wrong is silent.
+  // `auth_user.name` was the legal-name carrier until `jobs/auth-user-name-backfill`
+  // rewrote every production row to handle-else-username on 2026-08-28
+  // (docs/pii.md); a job that kept reading `name` would build an index that
+  // misses every real name AND indexes usernames, then report a clean run.
+  // Nothing else in the suite would have failed.
+  it('selects real_name, the legal-name carrier, and never the display name', async () => {
+    (db.execute as jest.Mock).mockResolvedValue([]);
+
+    await loadUsers();
+
+    const call = findExecuteCallMatching(/FROM\s+"auth_user"/i);
+    expect(call).toBeDefined();
+    const sqlText = renderSql(call?.[0]);
+    expect(sqlText).toMatch(/SELECT[\s\S]*"real_name"/i);
+    expect(sqlText).toMatch(/"dj_name"/i);
+    expect(sqlText).not.toMatch(/"name"(?!\s*_)/i);
   });
 });

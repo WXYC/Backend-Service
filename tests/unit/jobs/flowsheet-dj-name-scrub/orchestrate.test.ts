@@ -221,36 +221,50 @@ describe('dj_join / dj_leave — PII-null only, never re-attributed', () => {
 
 describe('buildPiiNameIndex', () => {
   it('indexes the real name of a user whose handle differs from it', () => {
-    const index = buildPiiNameIndex([{ name: 'A. Hearst', djName: 'zorp' }]);
+    const index = buildPiiNameIndex([{ realName: 'A. Hearst', djName: 'zorp' }]);
     expect(index.has('A. Hearst')).toBe(true);
   });
 
   it('indexes the real name of a user with no handle at all — the Cohort A shape', () => {
-    const index = buildPiiNameIndex([{ name: 'A. Hearst', djName: null }]);
+    const index = buildPiiNameIndex([{ realName: 'A. Hearst', djName: null }]);
     expect(index.has('A. Hearst')).toBe(true);
   });
 
   it('indexes the real name of a user whose handle is the literal Anonymous', () => {
     // resolveDjDisplayName nulls 'Anonymous', so the stored snapshot fell
     // through to auth_user.name for these users too.
-    const index = buildPiiNameIndex([{ name: 'A. Hearst', djName: 'Anonymous' }]);
+    const index = buildPiiNameIndex([{ realName: 'A. Hearst', djName: 'Anonymous' }]);
     expect(index.has('A. Hearst')).toBe(true);
   });
 
   it('EXEMPTS a DJ whose on-air handle legitimately is their real name', () => {
     // Without the exemption this guard trips permanently for that DJ, and
     // the scrub would erase a handle they chose.
-    const index = buildPiiNameIndex([{ name: 'Mickey Mouse', djName: 'Mickey Mouse' }]);
+    const index = buildPiiNameIndex([{ realName: 'Mickey Mouse', djName: 'Mickey Mouse' }]);
     expect(index.has('Mickey Mouse')).toBe(false);
   });
 
   it('compares on the trimmed forms so whitespace variance cannot defeat the exemption', () => {
-    const index = buildPiiNameIndex([{ name: '  Mickey Mouse  ', djName: 'Mickey Mouse' }]);
+    const index = buildPiiNameIndex([{ realName: '  Mickey Mouse  ', djName: 'Mickey Mouse' }]);
     expect(index.has('Mickey Mouse')).toBe(false);
   });
 
+  // BS#2281 review: the index MUST be keyed on the legal-name column. Reading
+  // the public-safe `auth_user.name` was correct until `jobs/auth-user-name-backfill`
+  // rewrote every production row to handle-else-username on 2026-08-28
+  // (docs/pii.md). This fixture is that post-backfill shape: a DJ with no
+  // handle, whose `name` is now their USERNAME and whose legal name lives only
+  // in `real_name`. An index built from `name` would index 'ahearst89' (nulling
+  // any dj_name that merely matched a username) and MISS 'A. Hearst' entirely —
+  // failing in both directions at once, and reporting a clean run either way.
+  it('keys on the legal name, not the post-backfill display name', () => {
+    const index = buildPiiNameIndex([{ realName: 'A. Hearst', djName: null }]);
+    expect(index.has('A. Hearst')).toBe(true);
+    expect(index.has('ahearst89')).toBe(false);
+  });
+
   it('ignores users with a blank real name', () => {
-    const index = buildPiiNameIndex([{ name: '   ', djName: 'zorp' }]);
+    const index = buildPiiNameIndex([{ realName: '   ', djName: 'zorp' }]);
     expect(index.size).toBe(0);
   });
 });
