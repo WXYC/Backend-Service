@@ -248,6 +248,16 @@ jobs:
       - name: 'Type check: streaming-columns-drain'
         run: npm run typecheck --workspace=jobs/streaming-columns-drain
 
+      # Same BS#2009 gap again: this repair re-points `flowsheet.show_id` and
+      # `shows.primary_dj_id` for a whole evening of entries in one
+      # transaction, and it is explicitly NOT re-runnable — a second pass sees
+      # its own promoted `show_start` markers where the `dj_join` boundaries
+      # were and splits nothing. A transpile-only green build on a job whose
+      # failure mode is "one DJ's set filed under another DJ's name" is the
+      # gap this step exists to close.
+      - name: 'Type check: flowsheet-show-split'
+        run: npm run typecheck --workspace=jobs/flowsheet-show-split
+
       - name: Lint
         run: npm run lint
 
