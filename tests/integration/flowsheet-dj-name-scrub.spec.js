@@ -32,9 +32,23 @@
  *      demonstrate this.
  *   6. `updated_at` advances via migration 0084's BEFORE UPDATE trigger even
  *      though the job never names that column.
+ *   7. The orphan pass's `NOT EXISTS` anti-join genuinely catches a DANGLING
+ *      `show_id` (a row whose `show_id` is set but points at no live `shows`
+ *      row) — BS#2281 review finding 4. Only a real FK / real DELETE can
+ *      demonstrate this: the fixture below disables triggers on `shows` for
+ *      one DELETE to reproduce exactly the gap migration 0097 documents (a
+ *      FK added `NOT VALID` enforces new writes but never retroactively
+ *      revalidates old ones, and `VALIDATE CONSTRAINT` is an out-of-band
+ *      operator step that may never have run).
  *
  * SQL here mirrors `jobs/flowsheet-dj-name-scrub/orchestrate.ts`. When the
- * queries there change, these must follow.
+ * queries there change, these must follow. The RENDERED SQL of the real
+ * (non-mirrored) `applyDjNameBatch` / `applyMessageBatch` / `loadMainPage` /
+ * `loadOrphanPage` / `loadMessagePage` is pinned separately, against the
+ * actual TypeScript functions, in `tests/unit/jobs/flowsheet-dj-name-scrub/sql-shape.test.ts`
+ * (BS#2281 review finding 5) — that tier is what proves this mirror has not
+ * drifted from the shipped SQL; this tier proves the mirrored SQL behaves
+ * correctly against a real database.
  *
  * Note the binding convention inversion: `getTestDb()` is postgres-js, where a
  * bare JS array IS correctly bound as a PG array. The `intArrayLiteral` helper
@@ -65,13 +79,20 @@ async function loadMainPage(sql, afterId, batchSize) {
   `;
 }
 
-/** Mirrors `loadOrphanPage` in orchestrate.ts. */
+/**
+ * Mirrors `loadOrphanPage` in orchestrate.ts. Widened (BS#2281 review finding
+ * 4) to also catch a row whose `show_id` is set but DANGLING — see the file
+ * header for why that shape is real, not defensive caution.
+ */
 async function loadOrphanPage(sql, afterId, batchSize) {
   return sql`
     SELECT f."id", f."entry_type", f."dj_name", f."message", f."show_id"
       FROM ${sql(SCHEMA)}.flowsheet AS f
      WHERE f."id" > ${afterId}
-       AND f."show_id" IS NULL
+       AND (
+         f."show_id" IS NULL
+         OR NOT EXISTS (SELECT 1 FROM ${sql(SCHEMA)}.shows AS s WHERE s."id" = f."show_id")
+       )
        AND f."dj_name" IS NOT NULL
        AND f."entry_type" = ANY(${IN_SCOPE_ENTRY_TYPES}::${sql.unsafe(SCHEMA)}.flowsheet_entry_type[])
      ORDER BY f."id"
@@ -121,6 +142,8 @@ const USERS = [
 let showLiveId;
 let showLegacyId;
 let showOverrideId;
+let danglingShowId;
+let danglingFlowsheetId;
 const seededFlowsheetIds = [];
 
 describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
@@ -221,6 +244,35 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
     });
     // An orphan of an excluded type, to prove exclusion outranks the orphan pass.
     await seed({ show_id: null, entry_type: 'talkset', dj_name: 'Realname Alpha', play_order: 2 });
+
+    // A DANGLING orphan (BS#2281 review finding 4): show_id is set, but the
+    // show row it points at no longer exists. Genuinely reproducing this
+    // requires bypassing the flowsheet_show_id_shows_id_fk FK, which is
+    // enforced on every normal write (it was added NOT VALID in migration
+    // 0097, which enforces new writes immediately and only skips retroactive
+    // validation of PRE-EXISTING rows) — a plain DELETE FROM shows would
+    // instead SET NULL via the FK's own ON DELETE action. Disabling triggers
+    // on `shows` (not `flowsheet`) for exactly one DELETE reproduces the real
+    // hazard: an old row whose show was removed before the FK's action was in
+    // effect, or via a path that bypassed it.
+    const danglingShow = await sql`
+      INSERT INTO ${sql(SCHEMA)}.shows ("primary_dj_id", "legacy_dj_name")
+      VALUES (NULL, 'soon to be a dangling reference') RETURNING "id"
+    `;
+    danglingShowId = danglingShow[0].id;
+    danglingFlowsheetId = await seed({
+      show_id: danglingShowId,
+      entry_type: 'track',
+      dj_name: 'Realname Alpha',
+      play_order: 1,
+      artist_name: 'Ghost Artist',
+    });
+    await sql`ALTER TABLE ${sql(SCHEMA)}.shows DISABLE TRIGGER ALL`;
+    try {
+      await sql`DELETE FROM ${sql(SCHEMA)}.shows WHERE "id" = ${danglingShowId}`;
+    } finally {
+      await sql`ALTER TABLE ${sql(SCHEMA)}.shows ENABLE TRIGGER ALL`;
+    }
   });
 
   afterAll(async () => {
@@ -244,18 +296,39 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
     it('never surfaces an excluded entry type to the orphan pass', async () => {
       const rows = await loadOrphanPage(sql, 0, 1000);
       const seeded = rows.filter((r) => seededFlowsheetIds.includes(r.id));
-      // The orphan track row is in; the orphan talkset row is not, even though
-      // it holds a real name. Exclusion outranks PII removal by design — a
-      // talkset row is never attributed to a DJ, so writing one is worse.
-      expect(seeded.map((r) => r.entry_type)).toEqual(['track']);
+      // Two track rows are in — the NULL-show_id orphan AND the dangling-
+      // show_id orphan (BS#2281 review finding 4) — but the orphan talkset
+      // row is not, even though it holds a real name. Exclusion outranks PII
+      // removal by design — a talkset row is never attributed to a DJ, so
+      // writing one is worse.
+      expect(seeded.map((r) => r.entry_type).sort()).toEqual(['track', 'track']);
     });
 
-    it('scopes the orphan pass to show_id IS NULL with a non-null dj_name', async () => {
+    it('scopes the orphan pass to show_id IS NULL (or dangling) with a non-null dj_name', async () => {
       const rows = await loadOrphanPage(sql, 0, 1000);
       for (const row of rows) {
-        expect(row.show_id).toBeNull();
         expect(row.dj_name).not.toBeNull();
       }
+      // At least one seeded row proves each shape actually reaches the pass:
+      // a genuinely NULL show_id, and a non-null but DANGLING one.
+      const seeded = rows.filter((r) => seededFlowsheetIds.includes(r.id));
+      expect(seeded.some((r) => r.show_id === null)).toBe(true);
+      expect(seeded.some((r) => r.id === danglingFlowsheetId && r.show_id === danglingShowId)).toBe(true);
+    });
+
+    it('the main pass cannot see a dangling show_id row — its INNER JOIN excludes it', async () => {
+      const rows = await loadMainPage(sql, 0, 1000);
+      expect(rows.find((r) => r.id === danglingFlowsheetId)).toBeUndefined();
+    });
+
+    it('the orphan pass catches a dangling show_id row via the NOT EXISTS anti-join, not only NULL show_id', async () => {
+      const rows = await loadOrphanPage(sql, 0, 1000);
+      const found = rows.find((r) => r.id === danglingFlowsheetId);
+      expect(found).toBeDefined();
+      // The stored value is genuinely non-null — this is the "dangling",
+      // not "NULL", shape, and the anti-join still catches it.
+      expect(found.show_id).toBe(danglingShowId);
+      expect(found.dj_name).toBe('Realname Alpha');
     });
 
     it('scopes the message pass to the four marker types', async () => {

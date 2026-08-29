@@ -38,7 +38,7 @@ Running either **after** this scrub silently re-attributes those rows to the pri
 A `NULL dj_name` after this run is the fix, not a regression. Do not "repair" these:
 
 1. **PII-nulled `dj_join` / `dj_leave` markers.** The joining guest's identity is not recoverable from `shows` — that row joins through `shows.primary_dj_id`, which is a _different DJ_. Restoring attribution is out of scope; removing PII is not. These rows get an exact-equality probe against the `auth_user` real-name index and are nulled on a hit. **Attribution loss is accepted and counted.**
-2. **Orphan rows (`show_id IS NULL`).** No shows join exists, so there is nothing to recompute from. Same probe, same outcome.
+2. **Orphan rows (`show_id IS NULL`, or DANGLING — a `show_id` set but pointing at no `shows` row that exists).** No shows join is possible for either shape, so there is nothing to recompute from. Same probe, same outcome. See "Known limits" below for why this probe is weakest on exactly this cohort.
 3. **Rows whose canonical chain genuinely resolves to nothing** — no override, no usable handle, no legacy handle. `resolveShowDjName` returns `null` and so does this job.
 
 `verifyComplete`'s predicate is **deliberately inverted** relative to `jobs/flowsheet-dj-name-backfill`'s, which asserts _zero_ rows with `dj_name IS NULL`. Copying that predicate here would guarantee a false failure. Migration 0054's matching guard was already removed (`0054:3-4`), so nothing downstream depends on the old invariant.
