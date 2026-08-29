@@ -203,6 +203,36 @@ jobs:
               echo "Range genuinely unavailable; falling back to all targets."
             fi
 
+            # A retired job keeps its workspace (its source stays in the tree
+            # for the documented precondition-guard pattern, and its unit
+            # tests still import it) but loses its root Dockerfile, which is
+            # what stops `Manual Build & Deploy` producing a runnable image.
+            # `turbo ls --affected` has no notion of that: it still reports
+            # the workspace, the matrix still schedules a `build`, and
+            # `docker/build-push-action` hard-fails on the missing file --
+            # which fails the whole run and SKIPS `deploy`, so an unrelated
+            # target riding the same merge never ships. That is what happened
+            # on 9fbbc636 (BS#2281): two retired jobs' guards were touched,
+            # both builds died on `no such file or directory`, and the deploy
+            # job was skipped.
+            #
+            # Drop those targets here instead, and WARN per target rather than
+            # dropping silently -- deleting the Dockerfile of a job that
+            # should still deploy is a real mistake, and it must stay visible
+            # in the run summary. The `inputs.target` path above is
+            # deliberately NOT filtered: an operator who explicitly dispatches
+            # a retired target should get the loud build failure, which is the
+            # refusal the retirement was designed around.
+            BUILDABLE='[]'
+            for TARGET in $(echo "$TARGETS" | jq -r '.[]'); do
+              if [ -f "Dockerfile.$TARGET" ]; then
+                BUILDABLE=$(echo "$BUILDABLE" | jq -c --arg t "$TARGET" '. + [$t]')
+              else
+                echo "::warning title=Skipping target with no Dockerfile::$TARGET changed but has no root Dockerfile.$TARGET, so it cannot be built; skipping it rather than failing the whole deploy. If this target is meant to deploy, restore its Dockerfile."
+              fi
+            done
+            TARGETS="$BUILDABLE"
+
             if [ "$TARGETS" = "[]" ] || [ -z "$TARGETS" ]; then
               echo "No affected app targets found."
               echo "TARGETS=[]" >> $GITHUB_OUTPUT

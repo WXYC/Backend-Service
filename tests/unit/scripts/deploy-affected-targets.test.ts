@@ -131,4 +131,35 @@ describe('the deploy matrix is scoped to what the merge changed (BS#2264)', () =
     expect(setup).toContain('merge-base --is-ancestor');
     expect(setup).toMatch(/exit 1/);
   });
+
+  it('skips an affected target that has no root Dockerfile', () => {
+    // A retired job keeps its workspace -- its source stays in the tree for
+    // the precondition-guard pattern and its unit tests still import it --
+    // but loses `Dockerfile.<name>`, which is what stops `Manual Build &
+    // Deploy` producing a runnable image. turbo still reports the workspace
+    // as affected, so without this filter the matrix schedules a `build`
+    // that hard-fails on the missing file, which fails the run and SKIPS
+    // `deploy` -- taking every unrelated target on the same merge down with
+    // it. Happened on 9fbbc636 (BS#2281).
+    expect(setup).toContain('Dockerfile.$TARGET');
+    expect(setup).toMatch(/BUILDABLE/);
+  });
+
+  it('warns per skipped target rather than dropping it silently', () => {
+    // Deleting the Dockerfile of a job that SHOULD still deploy is a real
+    // mistake, and a silent filter would make it look like a clean deploy --
+    // the same "over-deploying looks exactly like working" shape that let
+    // BS#2264 survive five months, inverted.
+    expect(setup).toContain('::warning title=Skipping target with no Dockerfile');
+  });
+
+  it('leaves the explicit workflow_dispatch target unfiltered', () => {
+    // An operator who dispatches a retired target by name should get the
+    // loud build failure -- that refusal is the point of removing the
+    // Dockerfile. Only the auto-detected matrix is filtered, so the filter
+    // must sit inside the `else` branch, after turbo has produced TARGETS.
+    const dispatchArm = setup.slice(0, setup.indexOf('Detecting affected app targets'));
+    expect(dispatchArm).toContain('Using provided target');
+    expect(dispatchArm).not.toContain('BUILDABLE');
+  });
 });
