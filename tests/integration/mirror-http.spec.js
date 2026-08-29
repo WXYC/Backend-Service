@@ -258,7 +258,12 @@ describe('endShow mirror shape guard on guest-DJ leave (BS#1119)', () => {
     const joinABody = await joinARes.json();
     expect(joinABody.primary_dj_id).toBe(global.primary_dj_id);
 
-    const joinBRes = await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token);
+    // B joins as a guest co-host of A's show — the whole point of this test
+    // is a guest leave vs. a primary end, so B must actually be a co-host.
+    // `intent: 'join'` under FLOWSHEET_TAKEOVER_ENABLED.
+    const joinBRes = await fls_util.join_show(global.secondary_dj_id, global.secondary_access_token, {
+      intent: 'join',
+    });
     expect(joinBRes.status).toBe(200);
 
     const addRes = await request

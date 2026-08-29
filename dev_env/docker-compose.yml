@@ -266,6 +266,13 @@ services:
       # tests/integration/library-search-alias.spec.js exercises the LATERAL
       # against a seeded artist_search_alias variant ('Thee Oh Sees' → OHSEES).
       - CATALOG_SEARCH_ALIAS_ENABLED=${CATALOG_SEARCH_ALIAS_ENABLED:-true}
+      # Flowsheet Go-Live Intent (BS#2233/BS#2308): default OFF in prod: a
+      # caller must say `intent: "join"` or `"takeover"` before joining a show
+      # they don't belong to; an absent intent is a 409. CI flips it on so
+      # tests/integration/flowsheet-takeover.spec.js exercises the routing
+      # against real Postgres. This is a test-coverage decision, not a
+      # rollout — see docs/env-vars.md.
+      - FLOWSHEET_TAKEOVER_ENABLED=true
     ports:
       - '${CI_PORT:-8081}:8080'
 
