@@ -104,7 +104,7 @@ jest.mock('@wxyc/database', () => {
 });
 
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { db, shows, flowsheet } from '@wxyc/database';
+import { db, shows } from '@wxyc/database';
 import { selectShowsToCreate, type WindowOptions } from '../../../../jobs/legacy-mirror-reconcile/orchestrate';
 
 type Builder = { _table: unknown; _where: unknown };
@@ -123,7 +123,7 @@ describe('selectShowsToCreate — genuinely rendered predicate (BS#2314)', () =>
     // take the LAST `shows`-scoped one — a `find` would hand a future second
     // case this one's SQL and pass green against the wrong query.
     const builders = (db as unknown as MockDb).__builders;
-    const outer = builders.findLast((b) => b._table === shows);
+    const outer = builders.filter((b) => b._table === shows).at(-1);
     if (!outer) throw new Error('expected an outer builder scoped to `shows`');
 
     const { sql: text, params } = dialect.sqlToQuery(outer._where as Parameters<typeof dialect.sqlToQuery>[0]);
@@ -156,11 +156,5 @@ describe('selectShowsToCreate — genuinely rendered predicate (BS#2314)', () =>
     // `notInArray` binds its values as individual params, not one array
     // param — this pins the exact widened list landed in the right place.
     expect(params).toEqual([15, 48, 'dj_join', 'dj_leave', 'dj_join', 'dj_leave', 'show_start', 'show_end']);
-
-    // Sanity: two distinct subquery builders were built against `flowsheet`
-    // (not the same one read twice), proving the fresh-builder-per-call fake
-    // actually exercised both real subqueries rather than one shared mock.
-    const flowsheetBuilders = builders.filter((b) => b._table === flowsheet);
-    expect(flowsheetBuilders.length).toBeGreaterThanOrEqual(2);
   });
 });

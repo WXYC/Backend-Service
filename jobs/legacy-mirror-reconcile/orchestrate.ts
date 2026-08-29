@@ -18,16 +18,12 @@
  *     auto-resolved tubafrenzy show (`mapEntryToTubafrenzy` omits
  *     `radioShowID` when null), so creating another would duplicate. The
  *     EXISTS-substantive-entry guard is load-bearing too, for a different
- *     reason: `jobs/flowsheet-show-split` writes its repaired shows with
- *     `legacy_show_id = NULL` ON PURPOSE, to keep them outside
- *     `flowsheet-etl`'s `ON CONFLICT (legacy_show_id) DO UPDATE` (see that
- *     job's module docblock). Without this guard, a split segment whose DJ
- *     logged no tracks before the next go-live — its only rows are the
- *     promoted `show_start` / `show_end` boundary markers, both mirrorable
- *     and both `legacy_entry_id IS NULL` — sails past the NOT-EXISTS guard
- *     (nothing is "already mirrored") and gets adopted here, defeating the
- *     split job's NULL. See `SHOW_BOUNDARY_MARKER_TYPES` below for why this
- *     is framed as "no substantive entry" rather than "came from a split".
+ *     reason: it stops an empty `jobs/flowsheet-show-split` segment — one
+ *     whose only rows are its promoted `show_start`/`show_end` bookends —
+ *     from being adopted here and defeating that job's deliberate
+ *     `legacy_show_id = NULL`. See `SHOW_BOUNDARY_MARKER_TYPES` below for
+ *     the mechanism, why it is framed as "no substantive entry" rather
+ *     than "came from a split", and what it does not close.
  *
  *   Sweep 2 (entries + signoff): `shows.legacy_show_id IS NOT NULL` +
  *     inside the window + all-or-nothing (EXISTS a NULL-legacy entry AND
