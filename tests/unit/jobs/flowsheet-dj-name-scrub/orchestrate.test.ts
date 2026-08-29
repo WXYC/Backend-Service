@@ -401,44 +401,95 @@ describe('classifyChange — provenance for a would-be write', () => {
   //
   // Diagnostic only — it changes no decision and gates no write.
   const PII = new Set(['Realname Alpha']);
+  const row = (djName: string | null, legacyDjName: string | null = null) => ({
+    dj_name: djName,
+    legacy_dj_name: legacyDjName,
+  });
 
   it('flags a stored roster real name as the confirmed-PII case', () => {
-    expect(classifyChange('Realname Alpha', 'zorp', PII)).toBe('stored_is_roster_real_name');
+    expect(classifyChange(row('Realname Alpha'), 'zorp', PII)).toBe('stored_is_roster_real_name');
   });
 
   it('matches the roster on the trimmed stored value, covering both writer families', () => {
     // The TypeScript writers stored trim(auth_user.name); the SQL COALESCE
     // writers stored it untrimmed.
-    expect(classifyChange('  Realname Alpha  ', 'zorp', PII)).toBe('stored_is_roster_real_name');
+    expect(classifyChange(row('  Realname Alpha  '), 'zorp', PII)).toBe('stored_is_roster_real_name');
   });
 
   it('reports a gap fill separately — nothing is being removed', () => {
-    expect(classifyChange(null, 'zorp', PII)).toBe('stored_null');
+    expect(classifyChange(row(null), 'zorp', PII)).toBe('stored_null');
   });
 
   it('ranks the PII case above a null recompute', () => {
     // Removing a real name is the outcome we want counted as PII removal,
     // even though the write also happens to null the column.
-    expect(classifyChange('Realname Alpha', null, PII)).toBe('stored_is_roster_real_name');
+    expect(classifyChange(row('Realname Alpha'), null, PII)).toBe('stored_is_roster_real_name');
   });
 
   it('flags nulling a NON-roster value as unexplained attribution loss', () => {
     // This is the class that should be near zero. A non-empty count here means
     // the job is erasing handles it cannot justify as PII.
-    expect(classifyChange('some handle', null, PII)).toBe('recomputed_null_non_pii');
+    expect(classifyChange(row('some handle'), null, PII)).toBe('recomputed_null_non_pii');
   });
 
   it('separates a whitespace-only difference — a cosmetic write', () => {
-    expect(classifyChange('  zorp  ', 'zorp', PII)).toBe('whitespace_only');
+    expect(classifyChange(row('  zorp  '), 'zorp', PII)).toBe('whitespace_only');
   });
 
   it('separates a case-only difference', () => {
-    expect(classifyChange('ZORP', 'zorp', PII)).toBe('case_only');
+    expect(classifyChange(row('ZORP'), 'zorp', PII)).toBe('case_only');
   });
 
   it('falls through to a plain value change when nothing else explains it', () => {
     // e.g. a DJ who changed their own handle. Legitimate, but not PII removal,
     // and it should not be counted as such.
-    expect(classifyChange('old handle', 'new handle', PII)).toBe('other_value_change');
+    expect(classifyChange(row('old handle'), 'new handle', PII)).toBe('other_value_change');
+  });
+
+  // BS#2281 review finding 2: what a write would ITSELF WRITE, not what it
+  // removes. Ranked above stored_is_roster_real_name — see the docstring.
+  describe('recomputed_is_roster_real_name — the write-side guard', () => {
+    it('flags a recompute that lands on a roster real name', () => {
+      expect(classifyChange(row('stale handle'), 'Realname Alpha', PII)).toBe('recomputed_is_roster_real_name');
+    });
+
+    it('ranks ABOVE stored_is_roster_real_name when both would fire', () => {
+      const bothPii = new Set(['Realname Alpha', 'Realname Beta']);
+      expect(classifyChange(row('Realname Alpha'), 'Realname Beta', bothPii)).toBe('recomputed_is_roster_real_name');
+    });
+
+    it('matches on the trimmed recomputed value', () => {
+      expect(classifyChange(row('stale'), '  Realname Alpha  ', PII)).toBe('recomputed_is_roster_real_name');
+    });
+  });
+
+  // BS#2281 review finding 1: the blind spot in stored_is_roster_real_name.
+  describe('stored_is_superseded_legacy_name — the cohort-B signature', () => {
+    it('flags a stored value superseded by a legacy-arm recompute', () => {
+      // The row's legacy_dj_name is the winning arm's output verbatim, and it
+      // differs from what is stored — exactly the BS#1393 cohort-B shape.
+      expect(classifyChange(row('old real name', 'legacy handle'), 'legacy handle', PII)).toBe(
+        'stored_is_superseded_legacy_name'
+      );
+    });
+
+    it('ranks BELOW stored_is_roster_real_name — a confirmed match beats an inferred one', () => {
+      const row2 = row('Realname Alpha', 'legacy handle');
+      expect(classifyChange(row2, 'legacy handle', PII)).toBe('stored_is_roster_real_name');
+    });
+
+    it('does not fire when the recompute does not equal legacy_dj_name verbatim', () => {
+      // e.g. the trimmed-legacy branch of resolveShowDjName, or a live
+      // show_start's override/handle arm — neither returns legacy_dj_name AS
+      // STORED, so this is an ordinary value change, not the cohort-B shape.
+      expect(classifyChange(row('old', '  legacy  '), 'legacy', PII)).toBe('other_value_change');
+    });
+
+    it('does not fire when there is no legacy_dj_name to match against', () => {
+      // The `track`/`show_end` live arm and the `show_start` live arm never
+      // read legacy_dj_name — row.legacy_dj_name is null for them, so the
+      // verbatim-equality check can never accidentally match a null recompute.
+      expect(classifyChange(row('old handle', null), 'new handle', PII)).toBe('other_value_change');
+    });
   });
 });
