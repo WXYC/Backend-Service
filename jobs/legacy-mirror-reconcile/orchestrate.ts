@@ -756,6 +756,27 @@ const entryExists = (nullLegacy: boolean) =>
  * mirrorable rows are its own start/end bookends has no set to mirror,
  * split segment or not — see BS#2314 Option 3 for the "not worth minting
  * upstream" framing this codifies.
+ *
+ * The four excluded types are exactly the ones a SERVER writes unbidden.
+ * `talkset` / `breakpoint` / `message` stay substantive because on this write
+ * path they only ever arrive via `POST /flowsheet` with a message body
+ * (`inferMessageEntryType`) — a DJ pressing a button on air, which is
+ * evidence of a set even when no track was logged. tubafrenzy's automatic
+ * top-of-hour breakpoints come in through the `/internal` webhook already
+ * carrying a `legacy_entry_id`, so they fail `notExists(entryExists(false))`
+ * one guard earlier and never reach this one. If a BS-side writer ever starts
+ * POSTing a breakpoint on a timer — dj-site, or `auto-dj-orchestrator` once
+ * it deploys — that premise dies and `breakpoint` belongs in the excluded set.
+ *
+ * Scope, stated honestly: this closes the EMPTY split segment, not every
+ * split segment. One whose entries are all still un-mirrored (`backend-mirror`
+ * off for that DJ during the set) is substantive, and Sweep 1 will still adopt
+ * it and re-admit it to `flowsheet-etl`'s upsert scope. Closing that too needs
+ * a provenance mark on the show itself — BS#2314 Option 1, a migration — which
+ * this deliberately does not take on. The guard is also Sweep 1's alone:
+ * `selectPartialShows` keeps counting the bookends on purpose, because a show
+ * whose `show_start` mirrored and whose `show_end` did not is a genuinely
+ * half-written upstream copy someone should fix, however little else it holds.
  */
 const SHOW_BOUNDARY_MARKER_TYPES = ['show_start', 'show_end'] as const;
 

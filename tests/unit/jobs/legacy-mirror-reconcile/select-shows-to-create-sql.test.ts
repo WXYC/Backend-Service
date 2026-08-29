@@ -118,8 +118,12 @@ describe('selectShowsToCreate — genuinely rendered predicate (BS#2314)', () =>
   it('requires a substantive entry to exist, alongside the pre-existing all-or-nothing guard', async () => {
     await selectShowsToCreate(OPTIONS);
 
+    // `__builders` accumulates for the module's lifetime (it already holds the
+    // module-load-time `hasSubstantiveEntry` builder before any test runs), so
+    // take the LAST `shows`-scoped one — a `find` would hand a future second
+    // case this one's SQL and pass green against the wrong query.
     const builders = (db as unknown as MockDb).__builders;
-    const outer = builders.find((b) => b._table === shows);
+    const outer = builders.findLast((b) => b._table === shows);
     if (!outer) throw new Error('expected an outer builder scoped to `shows`');
 
     const { sql: text, params } = dialect.sqlToQuery(outer._where as Parameters<typeof dialect.sqlToQuery>[0]);
@@ -127,9 +131,14 @@ describe('selectShowsToCreate — genuinely rendered predicate (BS#2314)', () =>
     // Both correlated subqueries are present, AND-ed alongside the window/
     // settle/DJ bounds — not a sibling OR, not dropped, not swapped for one
     // another. `notExists(...)` is the pre-existing guard (BS#1707 R4 High
-    // #1); `exists(...)` is the new BS#2314 guard.
-    expect(text).toContain('not exists (select 1 from');
-    expect(text).toContain('exists (select 1 from');
+    // #1); `exists(...)` is the new BS#2314 guard. Counted rather than
+    // `toContain`-ed: `'not exists (select 1 from'` CONTAINS
+    // `'exists (select 1 from'`, so a bare `toContain` for the new guard stays
+    // green off the old guard's match alone when the new clause is deleted.
+    // `?? []` so a missing clause reports "expected length 1, received 0"
+    // rather than a TypeError on `String.match`'s null.
+    expect(text.match(/not exists \(select 1 from/g) ?? []).toHaveLength(1);
+    expect(text.match(/(?<!not )exists \(select 1 from/g) ?? []).toHaveLength(1);
 
     // The new guard's subquery is scoped to the SAME show (correlated on
     // shows.id, not a free-standing count) and excludes all four boundary-
