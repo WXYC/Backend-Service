@@ -88,6 +88,10 @@ export const ALLOWLIST = new Map([
     'jobs/flowsheet-april-gap-import/orchestrate.ts',
     "use #4 sibling (BS#2119): READS only here — a `db.execute` result-row type annotation (`Array<{ legacy_entry_id: number }>`) for the Backend-side existing-id check. The actual INSERT (`.onConflictDoNothing({ target: flowsheet.legacy_entry_id })` / `.returning({ legacyEntryId: flowsheet.legacy_entry_id })`) does not match this script's literal `legacy_entry_id:` pattern, since drizzle's column reference is aliased.",
   ],
+  [
+    'jobs/flowsheet-show-split/job.ts',
+    "use #2/#3 sibling: `ensureLiveShowStartIsNewestMarker` deletes a `show_start` row and re-inserts it to obtain a higher serial id (the iOS banner reads `showMarkers.max(by: id)`), carrying the row's EXISTING legacy_entry_id across the re-mint so the mirror loop-guard and the ETL upsert key both survive. Never mints or placeholders a value — the id written is one tubafrenzy already assigned to that same row — so use #2 is unaffected. Written explicitly rather than via the object spread precisely so this check can see the write site.",
+  ],
   ['shared/database/src/schema.ts', 'column declaration.'],
   ['apps/backend/services/flowsheet.service.ts', 'READS only: selection + result mapping. No writes.'],
 ]);
