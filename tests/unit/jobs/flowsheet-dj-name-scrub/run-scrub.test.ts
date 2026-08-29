@@ -54,6 +54,7 @@ const baseOpts = () => ({
   orphanAfterId: 0,
   liveActivityLookbackSeconds: 0,
   loadUsers: jest.fn(() => Promise.resolve(ROSTER)),
+  loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([])),
   loadMainPage: pager<ScrubRow>([]),
   loadMessagePage: pager<MessageRow>([]),
   loadOrphanPage: pager<ScrubRow>([]),
@@ -261,6 +262,51 @@ describe('verification is bounded to the drain high-water mark', () => {
     expect(opts.verifyScrub).toHaveBeenCalledWith(expect.objectContaining({ highWaterMark: 250 }));
     expect(result.highWaterMark).toBe(250);
     expect(result.remaining).toBe(0);
+  });
+
+  // BS#2281 review finding 9: verifyScrub must re-scan with the SAME loaders
+  // the drain passes used, not the module-level defaults — otherwise a test
+  // (or a future caller) injecting only the loaders, not verifyScrub itself,
+  // would silently hit a real database during verification.
+  it('threads the injected loaders through to the verifier by reference, not the module defaults', async () => {
+    const opts = baseOpts();
+    opts.dryRun = false;
+    opts.loadMainPage = pager([[makeRow({ id: 100 })]]);
+
+    await runScrub(opts);
+
+    expect(opts.verifyScrub).toHaveBeenCalledWith(
+      expect.objectContaining({
+        loadMainPage: opts.loadMainPage,
+        loadOrphanPage: opts.loadOrphanPage,
+        loadMessagePage: opts.loadMessagePage,
+      })
+    );
+  });
+
+  it('the REAL verifyScrub also uses the injected loaders, never the module-level defaults', async () => {
+    const opts = baseOpts();
+    opts.dryRun = false;
+    delete (opts as { verifyScrub?: unknown }).verifyScrub;
+
+    let mainCallCount = 0;
+    opts.loadMainPage = jest.fn(() => {
+      mainCallCount += 1;
+      if (mainCallCount === 1) return Promise.resolve([makeRow({ id: 100 })]); // the drain's data page (stale)
+      if (mainCallCount === 3) return Promise.resolve([makeRow({ id: 100, dj_name: 'zorp' })]); // verify's re-read (clean)
+      return Promise.resolve([]); // call 2: the drain's own empty terminator page
+    });
+
+    const result = await runScrub(opts);
+
+    // Three calls, all through the SAME injected mock: the drain's data
+    // page, the drain's empty terminator, and verifyScrub's re-read. If
+    // verifyScrub had fallen back to the module-level loadMainPage instead
+    // of the injected one, it would have hit a real (unmocked)
+    // `db.execute` call and thrown in this unit-test environment.
+    expect(mainCallCount).toBe(3);
+    expect(result.remaining).toBe(0);
+    expect(result.failed).toBe(false);
   });
 
   it('fails the run when verification finds residue below the mark', async () => {
