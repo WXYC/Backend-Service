@@ -709,6 +709,32 @@ export const countPollutedLegacyDjNames = (
   return count;
 };
 
+/**
+ * Whether a non-zero `shows.legacy_dj_name` PII count must REFUSE the run.
+ *
+ * True only under `--execute`. A dry run reports the count and proceeds —
+ * measuring the cohort is what a dry run is for, and refusing there would
+ * withhold the very numbers an operator needs in order to fix it.
+ *
+ * Pure so both arms are unit-testable without a database, matching
+ * `jobs/auth-user-name-backfill/decide.ts`'s `violatesPreserveFirstPrecondition`.
+ */
+export const refusesForLegacyDjNamePii = (legacyDjNamePiiCount: number, dryRun: boolean): boolean =>
+  legacyDjNamePiiCount > 0 && !dryRun;
+
+/** The operator-facing text for a non-zero pre-flight count, in either mode. */
+export const legacyDjNamePreconditionMessage = (legacyDjNamePiiCount: number, dryRun: boolean): string => {
+  const shared =
+    `${legacyDjNamePiiCount} shows.legacy_dj_name value(s) are roster real names. ` +
+    'resolveShowDjName reads legacy_dj_name as a direct chain input with no PII check of its own, ' +
+    'so a live run would WRITE those values onto every in-scope row of those shows.';
+  return dryRun
+    ? `${shared} This dry run writes nothing, but --execute will REFUSE until the count is zero. ` +
+        'See jobs/flowsheet-dj-name-scrub/README.md, "shows.legacy_dj_name pre-flight", and BS#2281.'
+    : `${shared} Refusing to run. Scrub those shows first (BS#2281); re-run the dry run to confirm the ` +
+        'count is zero. See jobs/flowsheet-dj-name-scrub/README.md, "shows.legacy_dj_name pre-flight".';
+};
+
 const upperBound = (maxId?: number) => (maxId === undefined ? sql`` : sql` AND f."id" <= ${maxId}`);
 
 /**
@@ -1263,13 +1289,41 @@ export const runScrub = async (opts: {
         shows_with_legacy_dj_name: shows.length,
       });
       if (legacyDjNamePiiCount > 0) {
-        const message =
-          `${legacyDjNamePiiCount} shows.legacy_dj_name value(s) are roster real names. ` +
-          'resolveShowDjName reads legacy_dj_name as a direct chain input with no PII check of its own, ' +
-          'so this run WILL WRITE those values onto every in-scope row of those shows. See ' +
-          'jobs/flowsheet-dj-name-scrub/README.md, "shows.legacy_dj_name pre-flight", before proceeding.';
-        log('warn', 'legacy_dj_name_pollution', message, { count: legacyDjNamePiiCount });
-        captureError(new Error(message), 'legacy_dj_name_pollution', { count: legacyDjNamePiiCount });
+        const message = legacyDjNamePreconditionMessage(legacyDjNamePiiCount, dryRun);
+        if (refusesForLegacyDjNamePii(legacyDjNamePiiCount, dryRun)) {
+          // HARD REFUSAL under --execute. Measured on production 2026-08-29:
+          // 392 of 53,416 shows carrying a `legacy_dj_name` hold a value that
+          // matches a roster real name, so a live run would not merely fail to
+          // clean those shows — it would WRITE those 392 legal names onto every
+          // in-scope row of them, making the leak worse on the rows it touches.
+          //
+          // A warning was not enough. The only thing standing between an
+          // operator and that outcome was reading a log line, and the run
+          // procedure's dry-run step is a convention rather than a mechanism —
+          // nothing stopped `--execute` being the first thing anyone typed.
+          // Same posture, and the same reason, as
+          // `jobs/auth-user-name-backfill`'s preserve-first precondition gate:
+          // an ordering hazard whose cost is unrecoverable belongs in the code,
+          // not in the operator's memory.
+          //
+          // Deliberately NO override env var, matching that donor and the
+          // superseded-job refusals this repo already carries. The gate clears
+          // itself the moment the precondition is actually met — scrub the
+          // offending `shows.legacy_dj_name` values and the count goes to zero
+          // on its own. Deciding instead to ACCEPT them is a change to what
+          // this job writes, and it should arrive as a reviewed diff rather
+          // than an env var somebody set on the box at 2am.
+          log('error', 'legacy_dj_name_pollution', message, { count: legacyDjNamePiiCount, dry_run: dryRun });
+          const refusal = new Error(message);
+          captureError(refusal, 'legacy_dj_name_pollution', { count: legacyDjNamePiiCount });
+          failure = { error: refusal };
+        } else {
+          // Dry run: report and carry on. Measuring the cohort is the whole
+          // point of a dry run, and refusing here would deny the operator the
+          // counts they need to decide what to do about it.
+          log('warn', 'legacy_dj_name_pollution', message, { count: legacyDjNamePiiCount, dry_run: dryRun });
+          captureError(new Error(message), 'legacy_dj_name_pollution', { count: legacyDjNamePiiCount });
+        }
       }
     } catch (error) {
       failure = { error };
