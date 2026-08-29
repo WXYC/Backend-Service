@@ -1,0 +1,44 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+WORKDIR /flowsheet-show-split-builder
+
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./jobs/flowsheet-show-split ./jobs/flowsheet-show-split
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-show-split
+
+#Production stage
+FROM node:24-alpine AS prod
+
+WORKDIR /flowsheet-show-split
+
+COPY ./package* ./
+COPY ./jobs/flowsheet-show-split/package* ./jobs/flowsheet-show-split/
+COPY ./shared/database/package* ./shared/database/
+
+RUN npm install --omit=dev
+
+COPY --from=builder ./flowsheet-show-split-builder/jobs/flowsheet-show-split/dist ./jobs/flowsheet-show-split/dist
+COPY --from=builder ./flowsheet-show-split-builder/shared/database/dist ./shared/database/dist
+
+# Deliberately NOT the sibling one-shots' `DB_SYNCHRONOUS_COMMIT=off` tuning.
+# Those are resumable bulk backfills whose worst case on a lost commit is
+# redoing a batch. This is a single transaction that re-points show ownership
+# across a few hundred rows and is NOT re-runnable against a partially applied
+# result — the second pass would find its own `show_start` markers where the
+# `dj_join` boundaries used to be and split nothing. Durability is worth more
+# than the WAL fsync it costs on a workload this small.
+ENV DB_APPLICATION_NAME=wxyc-flowsheet-show-split
+ENV DB_STATEMENT_TIMEOUT_MS=900000
+
+# ENTRYPOINT + empty CMD so docker-level args (e.g. `--dry-run`) pass through
+# to the job rather than replacing the launcher. With `CMD ["npm", "start"]`,
+# `docker run <image> --dry-run` would replace the whole command, npm would
+# never see `start`, and node would try to parse `--dry-run` itself. ENTRYPOINT
+# pins the launcher; any args after `<image>` extend it. node resolves
+# `@wxyc/database` etc. via the standard walk up to /flowsheet-show-split/node_modules.
+ENTRYPOINT ["node", "/flowsheet-show-split/jobs/flowsheet-show-split/dist/job.js"]
+CMD []
