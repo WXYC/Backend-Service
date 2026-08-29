@@ -9,7 +9,6 @@
     "start": "node dist/job.js",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
-    "docker:build": "docker build -t wxyc_flowsheet_dj_name_backfill:ci -f ../../Dockerfile.flowsheet-dj-name-backfill ../../",
     "dev": "tsup --watch"
   },
   "license": "PolyForm-Noncommercial-1.0.0",

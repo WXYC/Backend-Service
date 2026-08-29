@@ -9,7 +9,6 @@
     "start": "node dist/job.js",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
-    "docker:build": "docker build -t wxyc_legacy_dj_name_remediation:ci -f ../../Dockerfile.legacy-dj-name-remediation ../../",
     "dev": "tsup --watch"
   },
   "license": "PolyForm-Noncommercial-1.0.0",
