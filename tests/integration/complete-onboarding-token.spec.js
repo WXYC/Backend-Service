@@ -115,4 +115,62 @@ describe('POST /auth/wxyc/complete-onboarding invite-token flow', () => {
     // the exact configured TTL.
     expect(ttlMs).toBeGreaterThan(2 * 60 * 60 * 1000);
   });
+  async function requestInvite() {
+    const res = await fetch(`${authBaseUrl}/request-password-reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', origin: frontendUrl },
+      body: JSON.stringify({ email: INCOMPLETE_EMAIL, redirectTo: `${frontendUrl}/onboarding` }),
+    });
+    if (!res.ok) {
+      throw new Error(`request-password-reset failed: ${res.status} ${await res.text()}`);
+    }
+    const tokenRes = await fetch(
+      `${authBaseUrl}/test/verification-token?identifier=${encodeURIComponent(INCOMPLETE_EMAIL)}&type=reset-password`
+    );
+    if (!tokenRes.ok) {
+      throw new Error(`verification-token lookup failed: ${tokenRes.status} ${await tokenRes.text()}`);
+    }
+    return tokenRes.json();
+  }
+
+  // Single-live-invite invariant. better-auth's resetPassword consumes only the
+  // token it is handed and never sweeps a user's other outstanding rows, so
+  // before this every roster "Send Invite" click left the previous link alive
+  // for its full (now 30-day) TTL — a second working password-reset for the
+  // same account. This is also the only place the revocation WHERE predicate is
+  // exercised against real PostgreSQL; the unit suite can only prove that a
+  // predicate was passed, not that it selects the right rows.
+  test('a resent invite invalidates the previous link', async () => {
+    const first = await requestInvite();
+    expect(first.token).toBeTruthy();
+
+    const second = await requestInvite();
+    expect(second.token).toBeTruthy();
+    expect(second.token).not.toBe(first.token);
+
+    // the superseded link is dead on arrival
+    const staleRes = await fetch(`${authBaseUrl}/wxyc/complete-onboarding`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: first.token, newPassword: 'StaleInvitePass1' }),
+    });
+    expect(staleRes.status).toBe(400);
+    expect((await staleRes.json()).code).toBe('INVALID_TOKEN');
+
+    // and the DJ can still onboard with the one they were just sent
+    const freshRes = await fetch(`${authBaseUrl}/wxyc/complete-onboarding`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: second.token,
+        newPassword: 'FreshInvitePass1',
+        realName: 'Integration Test DJ',
+        djName: 'DJ Integration',
+      }),
+    });
+    if (!freshRes.ok) {
+      throw new Error(`complete-onboarding failed: ${freshRes.status} ${await freshRes.text()}`);
+    }
+    expect(await freshRes.json()).toMatchObject({ status: true, userId: INCOMPLETE_USER_ID });
+  });
 });

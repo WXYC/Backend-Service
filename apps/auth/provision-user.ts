@@ -208,7 +208,7 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
 
     // 10. Send the welcome email carrying a long-lived account-setup token.
     // createAndSendAccountSetupInvite mints its own `reset-password:<token>`
-    // verification row with the account-setup TTL (default 7 days, BS#1969) —
+    // verification row with the account-setup TTL (default 30 days, BS#1969) —
     // distinct from a genuine password reset's 1-hour token — and awaits the
     // SES send so `emailSent` reflects the real outcome (Sentry-captured on
     // failure inside the helper). `emailSent: false` means the account was

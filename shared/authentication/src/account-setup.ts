@@ -4,6 +4,7 @@ import { auth } from './auth.definition';
 import { sendAccountSetupEmail } from './email';
 import { buildResetUrl } from './url-rewrite';
 import { accountSetupTokenExpiresInSeconds } from './account-setup-token';
+import { revokeOutstandingAccountSetupTokens } from './revoke-account-setup-tokens';
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -30,7 +31,7 @@ export interface AccountSetupInviteResult {
  *
  * Unlike a password reset (better-auth's `requestPasswordReset`, hardcoded to a
  * 1-hour TTL), an onboarding invite is acted on hours-to-days later, so this
- * mints its own token with `accountSetupTokenExpiresInSeconds()` (default 7
+ * mints its own token with `accountSetupTokenExpiresInSeconds()` (default 30
  * days — BS#1969). It reuses better-auth's `reset-password:<token>` verification
  * identifier so the entire downstream pipeline — the `GET /reset-password/:token`
  * redirect and `complete-onboarding`'s `resetPassword` consumption — stays
@@ -60,10 +61,24 @@ export async function createAndSendAccountSetupInvite(
     // the GET redirect and complete-onboarding match on the exact string.
     const token = randomBytes(24).toString('base64url');
     const expiresAt = new Date(Date.now() + accountSetupTokenExpiresInSeconds() * 1000);
+    // Cutoff for the revocation below: only invites older than this one go. Read
+    // before the mint so a token another admin creates concurrently is newer
+    // than this cutoff and survives (see revoke-account-setup-tokens.ts).
+    const mintedAt = new Date();
     await context.internalAdapter.createVerificationValue({
       value: userId,
       identifier: `reset-password:${token}`,
       expiresAt,
+    });
+
+    // Retire any earlier invite for this DJ so exactly one link is live — the
+    // long TTL is only safe because the pool never grows (see
+    // revoke-account-setup-tokens.ts). Deliberately AFTER the mint: revoking
+    // first would leave the DJ with nothing at all if the mint then threw.
+    // Never throws, so a revocation failure costs a stale token, not the invite.
+    await revokeOutstandingAccountSetupTokens(userId, {
+      exceptIdentifier: `reset-password:${token}`,
+      createdBefore: mintedAt,
     });
 
     const rawUrl = `${context.baseURL}/reset-password/${token}?callbackURL=${encodeURIComponent(redirectTo)}`;

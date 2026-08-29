@@ -5,6 +5,7 @@ const mockUpdateUser = jest.fn();
 const mockFindUserById = jest.fn();
 const mockResetPassword = jest.fn();
 const mockGetSession = jest.fn();
+const mockRevokeOutstandingAccountSetupTokens = jest.fn();
 
 const mockAuthContext = {
   internalAdapter: {
@@ -22,6 +23,7 @@ jest.mock('@wxyc/authentication', () => ({
       getSession: mockGetSession,
     },
   },
+  revokeOutstandingAccountSetupTokens: (...args: unknown[]) => mockRevokeOutstandingAccountSetupTokens(...args),
 }));
 
 import {
@@ -50,6 +52,40 @@ beforeEach(() => {
   mockResetPassword.mockResolvedValue({ status: true } as never);
   mockUpdateUser.mockResolvedValue(undefined as never);
   mockGetSession.mockResolvedValue(null as never);
+  mockRevokeOutstandingAccountSetupTokens.mockResolvedValue(0 as never);
+});
+
+// Onboarding is the other end of the single-live-invite invariant: resetPassword
+// consumes only the token it was handed, and the session path consumes none at
+// all, so any leftover invite would stay a working password-reset on a
+// now-ACTIVE account for the rest of its 30-day TTL.
+describe('account-setup token revocation on completion', () => {
+  it('revokes every remaining invite token after token-mode completion', async () => {
+    await completeOnboardingWithToken({ token: 'setup-token-abc', newPassword: 'NewPassword1' });
+
+    // no exceptIdentifier: once onboarding is done, none should survive
+    expect(mockRevokeOutstandingAccountSetupTokens).toHaveBeenCalledWith('user-id-001');
+  });
+
+  it('revokes every remaining invite token after session-mode completion', async () => {
+    mockGetSession.mockResolvedValue({ user: { id: 'user-id-001' } } as never);
+
+    await completeOnboardingWithSession(emptyHeaders, { realName: 'Jane Doe' });
+
+    expect(mockRevokeOutstandingAccountSetupTokens).toHaveBeenCalledWith('user-id-001');
+  });
+
+  it('does not revoke when the password reset itself fails', async () => {
+    mockResetPassword.mockRejectedValue(
+      new APIError('BAD_REQUEST', { message: 'Invalid token', code: 'INVALID_TOKEN' }) as never
+    );
+
+    await expect(
+      completeOnboardingWithToken({ token: 'setup-token-abc', newPassword: 'NewPassword1' })
+    ).rejects.toThrow(CompleteOnboardingError);
+
+    expect(mockRevokeOutstandingAccountSetupTokens).not.toHaveBeenCalled();
+  });
 });
 
 describe('completeOnboardingWithToken()', () => {

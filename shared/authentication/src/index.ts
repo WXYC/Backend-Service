@@ -11,5 +11,6 @@ export { sendAccountSetupEmail } from './email';
 export { createAndSendAccountSetupInvite } from './account-setup';
 export type { AccountSetupInviteInput, AccountSetupInviteResult } from './account-setup';
 export { accountSetupTokenExpiresInSeconds, ACCOUNT_SETUP_TOKEN_DEFAULT_SECONDS } from './account-setup-token';
+export { revokeOutstandingAccountSetupTokens, ACCOUNT_SETUP_TOKEN_PREFIX } from './revoke-account-setup-tokens';
 export { bootstrapTrustedClients } from './bootstrap-trusted-clients';
 export { buildTrustedClients } from './oidc-trusted-clients';

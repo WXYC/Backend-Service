@@ -16,7 +16,7 @@
  * distinguishable error steering them to sign in and finish via session mode.
  */
 
-import { auth } from '@wxyc/authentication';
+import { auth, revokeOutstandingAccountSetupTokens } from '@wxyc/authentication';
 import type { User } from '@wxyc/database';
 import { APIError } from 'better-auth/api';
 
@@ -169,6 +169,10 @@ export async function completeOnboardingWithToken(
   }
 
   await markOnboardingComplete(userId, { realName, djName, emailVerified: true });
+  // `resetPassword` consumed only the token it was handed; any sibling invite
+  // (an admin resend that crossed the DJ in the mail) would otherwise stay a
+  // working password-reset on this now-active account for the rest of its TTL.
+  await revokeOutstandingAccountSetupTokens(userId);
 
   return toCompleteOnboardingResult(user);
 }
@@ -194,6 +198,9 @@ export async function completeOnboardingWithSession(
   const user = await assertIncompleteUser(session.user.id);
 
   await markOnboardingComplete(user.id, { realName: input.realName, djName: input.djName });
+  // Session mode consumes NO token, so without this an outstanding invite
+  // outlives onboarding entirely — the widest case of the same hole.
+  await revokeOutstandingAccountSetupTokens(user.id);
 
   return toCompleteOnboardingResult(user);
 }
