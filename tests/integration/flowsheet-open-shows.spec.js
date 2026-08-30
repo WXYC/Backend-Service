@@ -364,10 +364,10 @@ describe('operator close (BS#2235)', () => {
      * logged entry, floored at `start_time` — not `start_time` alone.
      *
      * The bound it replaces was the mirror image of the `now()` defect two
-     * tests above. `now()` stretched a closed show over archive days it did
-     * not air in; `start_time` let one close before entries it still owns, so
-     * `getShowsInTimeWindow` dropped it from windows `GET /flowsheet` was
-     * still serving its entries in.
+     * tests above, and it lands on the same surface. `now()` floated the
+     * `show_end` marker to the top of the public flowsheet; `start_time` sank
+     * it BELOW entries the show still owns, so the flowsheet rendered a show
+     * that signed off and kept playing.
      */
     describe('ended_at override', () => {
       const lastEntryOf = async (id) => {

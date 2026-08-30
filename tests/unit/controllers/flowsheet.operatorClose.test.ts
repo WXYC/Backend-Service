@@ -274,11 +274,12 @@ describe('POST /flowsheet/shows/:id/force-end', () => {
  * is the DERIVED instant itself — `resolveShowEndInstant`, i.e. the show's last
  * logged entry floored at `start_time` — so the override can only ever move the
  * close later than the flowsheet's own answer, never earlier (BS#2315). Below
- * it, a show closes at an instant that precedes entries it still owns:
- * `getShowsInTimeWindow` then drops it from windows `GET /flowsheet` serves its
- * entries in, and any "which show does this entry belong to" derivation from
- * the interval contradicts the `show_id` FK. Above `now` produces a show that
- * claims to have ended in the future.
+ * it, the `show_end` marker `endShow` stamps with that instant sorts BELOW
+ * entries the show still owns in `getEntriesByPage`'s global `add_time DESC`
+ * order, so the public flowsheet renders a show that signs off and keeps
+ * playing. Above `now` produces a show that claims to have ended in the
+ * future. See the controller docstring for what the range read does and does
+ * not do here — less than BS#2315's own text claims.
  *
  * `resolveShowEndInstant` is mocked here, so the floor these tests exercise is
  * whatever the mock returns — END_INSTANT by default, which is 46 minutes after
@@ -346,6 +347,31 @@ describe('POST /flowsheet/shows/:id/force-end — operator-supplied ended_at', (
     await expect(
       forceEndShow(makeReq({}, { id: '1951164' }, { ended_at: '2026-08-20T18:30:00.000Z' }), res, next)
     ).rejects.toThrow(END_INSTANT.toISOString());
+  });
+
+  /**
+   * The instant alone does not say which floor it is, and the two mean
+   * different things to the operator: "last logged entry" means split the show
+   * first, "start_time" means the show logged nothing at all. Asserted in both
+   * directions because the discriminator is a comparison that inverts
+   * silently — flipped, it would tell every operator "start_time" while
+   * quoting a last-entry instant, and the assertion above would still pass.
+   */
+  it('says the floor is the last logged entry when the show has one', async () => {
+    const { res } = createMockRes();
+
+    await expect(
+      forceEndShow(makeReq({}, { id: '1951164' }, { ended_at: '2026-08-20T18:30:00.000Z' }), res, next)
+    ).rejects.toThrow("the show's last logged entry");
+  });
+
+  it('says the floor is start_time when the show logged nothing', async () => {
+    mockResolveShowEndInstant.mockResolvedValue(openShow.start_time);
+    const { res } = createMockRes();
+
+    await expect(
+      forceEndShow(makeReq({}, { id: '1951164' }, { ended_at: '2026-08-20T17:59:59.000Z' }), res, next)
+    ).rejects.toThrow("the show's start_time");
   });
 
   /**
