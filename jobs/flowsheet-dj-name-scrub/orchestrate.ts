@@ -718,6 +718,21 @@ export const countPollutedLegacyDjNames = (
  *
  * Pure so both arms are unit-testable without a database, matching
  * `jobs/auth-user-name-backfill/decide.ts`'s `violatesPreserveFirstPrecondition`.
+ *
+ * WHY THIS GATES AND `recomputed_is_roster_real_name` DOES NOT (BS#2281 review
+ * finding 6). The two sit ~750 lines apart with opposite postures, and the
+ * asymmetry is deliberate rather than an oversight. This count is a COARSE
+ * PROXY — it counts every polluted `shows.legacy_dj_name`, including shows
+ * where `resolveShowDjName` never reaches that arm because an override or a
+ * usable handle wins first. Measured on production 2026-08-29: 832 of the 839
+ * flagged shows do reach it (0 have an override, 832 have a NULL
+ * `primary_dj_id`), so the over-count is ~0.8% and the proxy is tight in
+ * practice. `recomputed_is_roster_real_name` is the PRECISE detector — it sees
+ * what a write would itself write — but it is only observable AFTER the pass
+ * has already computed the page, which is too late to be a precondition. So:
+ * the cheap coarse signal runs first and refuses; the exact signal runs late
+ * and warns. A `dj_name_override` holding a real name therefore still writes
+ * freely, which is Cohort C and out of scope for this job either way.
  */
 export const refusesForLegacyDjNamePii = (legacyDjNamePiiCount: number, dryRun: boolean): boolean =>
   legacyDjNamePiiCount > 0 && !dryRun;
@@ -733,6 +748,47 @@ export const legacyDjNamePreconditionMessage = (legacyDjNamePiiCount: number, dr
         'See jobs/flowsheet-dj-name-scrub/README.md, "shows.legacy_dj_name pre-flight", and BS#2281.'
     : `${shared} Refusing to run. Scrub those shows first (BS#2281); re-run the dry run to confirm the ` +
         'count is zero. See jobs/flowsheet-dj-name-scrub/README.md, "shows.legacy_dj_name pre-flight".';
+};
+
+/**
+ * Whether an EMPTY roster PII index must REFUSE the run (BS#2281 review
+ * finding 2).
+ *
+ * `countPollutedLegacyDjNames` returns 0 both when `shows.legacy_dj_name` is
+ * genuinely clean AND when `piiNames` is empty, so without this the gate above
+ * clears itself on a broken index. The failure is silent in both directions at
+ * once: the pre-flight reports a reassuring `legacy_dj_name_pii_count: 0`
+ * while every PII-keyed decision in the job (the `piiOnly` null, every
+ * `rewriteMessage` probe, every change class) finds nothing, and the run still
+ * logs `finished` and exits 0.
+ *
+ * Not hypothetical in this file. `loadUsers`' own docblock records that
+ * reading the wrong column made exactly this happen on 2026-08-28, and that
+ * was BEFORE the count became load-bearing. A gate whose zero can mean either
+ * "nothing to do" or "I cannot see anything" is not a gate, so the ambiguity
+ * is resolved here rather than folded into the count.
+ *
+ * Blocks the WHOLE run, not just the main pass (unlike
+ * `refusesForLegacyDjNamePii`): the message and orphan passes read `piiNames`
+ * directly, so an empty index makes them silently vacuous rather than merely
+ * unprotected.
+ *
+ * Same dry-run asymmetry as its sibling: refuse under `--execute`, report
+ * under dry run, because surfacing the condition is what a dry run is for.
+ */
+export const refusesForEmptyPiiIndex = (piiNameCount: number, dryRun: boolean): boolean =>
+  piiNameCount === 0 && !dryRun;
+
+/** The operator-facing text for an empty roster PII index, in either mode. */
+export const emptyPiiIndexMessage = (dryRun: boolean): string => {
+  const shared =
+    'The auth_user roster real-name index is EMPTY. Every PII probe in this job keys on it, and the ' +
+    'shows.legacy_dj_name pre-flight cannot tell a clean column apart from an index that sees nothing.';
+  return dryRun
+    ? `${shared} This dry run writes nothing, but --execute will REFUSE until the index is non-empty. ` +
+        'Do not read any count below as evidence until auth_user.real_name is checked.'
+    : `${shared} Refusing to run. Check auth_user.real_name — reading the wrong column silently emptied ` +
+        'this index once already (2026-08-28).';
 };
 
 const upperBound = (maxId?: number) => (maxId === undefined ? sql`` : sql` AND f."id" <= ${maxId}`);
@@ -1245,6 +1301,9 @@ export const runScrub = async (opts: {
   result.message.last_id = messageAfterId;
   result.orphan.last_id = orphanAfterId;
   let failure: { error: unknown } | null = null;
+  // A refusal SCOPED to the main pass (BS#2281 review finding 5). Becomes
+  // `failure` once the two passes it does not protect have run.
+  let mainPassBlocked: Error | null = null;
   let wrote = false;
 
   log('info', 'started', `${JOB_NAME} starting`, {
@@ -1272,6 +1331,22 @@ export const runScrub = async (opts: {
       error_message: errorMessage(error),
     });
     captureError(error, 'pii_index_failed');
+  }
+
+  // The index built, but is it USABLE? An empty index makes every count below
+  // vacuous — see `refusesForEmptyPiiIndex`. Checked before the pre-flight so
+  // an operator is never handed a reassuring zero from a blind probe.
+  if (!failure && piiNames.size === 0) {
+    const message = emptyPiiIndexMessage(dryRun);
+    if (refusesForEmptyPiiIndex(piiNames.size, dryRun)) {
+      log('error', 'pii_index_empty', message, { pii_name_count: 0, dry_run: dryRun });
+      const refusal = new Error(message);
+      captureError(refusal, 'pii_index_empty');
+      failure = { error: refusal };
+    } else {
+      log('warn', 'pii_index_empty', message, { pii_name_count: 0, dry_run: dryRun });
+      captureError(new Error(message), 'pii_index_empty');
+    }
   }
 
   // Startup pre-flight (BS#2281 review finding 3), run in BOTH dry-run and
@@ -1316,7 +1391,21 @@ export const runScrub = async (opts: {
           log('error', 'legacy_dj_name_pollution', message, { count: legacyDjNamePiiCount, dry_run: dryRun });
           const refusal = new Error(message);
           captureError(refusal, 'legacy_dj_name_pollution', { count: legacyDjNamePiiCount });
-          failure = { error: refusal };
+          // SCOPED to the `main` pass (BS#2281 review finding 5), not the run.
+          // This precondition is about `shows.legacy_dj_name` flowing through
+          // `resolveShowDjName` into a recomputed `dj_name` — which only the
+          // main pass does. The other two provably cannot be harmed by it and
+          // provably cannot make it worse: `rewriteMessage` takes only the
+          // row's own text plus the roster index, and `loadOrphanPage`
+          // normalizes `show_id` to null on EVERY row it returns, so orphans
+          // always take `decideDjName`'s `piiOnly` branch and never recompute.
+          // Both passes only ever REMOVE a name. Blocking them here would have
+          // held marker-message PII in production for as long as the 392 shows
+          // stay unresolved — and they are unresolved pending a human policy
+          // call with no deadline (see the README's "How the gate clears").
+          // The run still FAILS: `mainPassBlocked` is promoted to `failure`
+          // the moment those two passes finish.
+          mainPassBlocked = refusal;
         } else {
           // Dry run: report and carry on. Measuring the cohort is the whole
           // point of a dry run, and refusing here would deny the operator the
@@ -1466,7 +1555,13 @@ export const runScrub = async (opts: {
 
   if (!failure) {
     try {
-      await runPass('main', mainAfterId, loadMainPageFn, decideForScrubPass, applyDjNameBatchFn);
+      if (mainPassBlocked) {
+        log('warn', 'main_pass_skipped', 'main pass skipped by the shows.legacy_dj_name refusal', {
+          legacy_dj_name_pii_count: result.legacyDjNamePiiCount,
+        });
+      } else {
+        await runPass('main', mainAfterId, loadMainPageFn, decideForScrubPass, applyDjNameBatchFn);
+      }
       if (!result.stopped && !failure) {
         await runPass('message', messageAfterId, loadMessagePageFn, decideForMessagePass, applyMessageBatchFn);
       }
@@ -1480,6 +1575,17 @@ export const runScrub = async (opts: {
       // get here — that is the whole point of mutating totals in place.
       failure = { error };
     }
+  }
+
+  // Promote the scoped refusal now that the two passes it does not protect
+  // have had their turn. Ordered HERE, before ANALYZE and verification, on
+  // purpose: `ANALYZE` keys on `wrote` so it still runs if those passes wrote,
+  // while `verifyScrub` keys on `!failure` and must NOT run — the residue it
+  // would find belongs to the main pass, which never executed, so a clean
+  // verify is impossible and a `verification_failed` here would name the wrong
+  // cause.
+  if (mainPassBlocked && !failure) {
+    failure = { error: mainPassBlocked };
   }
 
   // BS#2281 review finding 2: a class describing what a write would ITSELF
