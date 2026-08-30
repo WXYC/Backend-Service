@@ -270,10 +270,20 @@ describe('POST /flowsheet/shows/:id/force-end', () => {
  * to need an override: a DJ who stopped logging at 9pm and stayed on the air
  * until 11pm leaves a show whose flowsheet cannot say so. The operator can.
  *
- * Bounded on both ends, because both bounds protect a public read. Below
- * `start_time` produces an interval that cannot overlap its own airdate, which
- * hides the show from `GET /flowsheet/range` on the very day it aired; above
- * `now` produces a show that claims to have ended in the future.
+ * Bounded on both ends, because both bounds protect a public read. The floor
+ * is the DERIVED instant itself — `resolveShowEndInstant`, i.e. the show's last
+ * logged entry floored at `start_time` — so the override can only ever move the
+ * close later than the flowsheet's own answer, never earlier (BS#2315). Below
+ * it, a show closes at an instant that precedes entries it still owns:
+ * `getShowsInTimeWindow` then drops it from windows `GET /flowsheet` serves its
+ * entries in, and any "which show does this entry belong to" derivation from
+ * the interval contradicts the `show_id` FK. Above `now` produces a show that
+ * claims to have ended in the future.
+ *
+ * `resolveShowEndInstant` is mocked here, so the floor these tests exercise is
+ * whatever the mock returns — END_INSTANT by default, which is 46 minutes after
+ * `openShow.start_time`. That gap is the point: it separates the two floors the
+ * endpoint used to conflate.
  */
 describe('POST /flowsheet/shows/:id/force-end — operator-supplied ended_at', () => {
   const openShow = {
@@ -288,7 +298,7 @@ describe('POST /flowsheet/shows/:id/force-end — operator-supplied ended_at', (
     mockEndShow.mockResolvedValue({ ...openShow, end_time: END_INSTANT });
   });
 
-  it('uses the supplied instant instead of the derived one', async () => {
+  it('uses a supplied instant above the floor instead of the derived one', async () => {
     const operatorInstant = new Date('2026-08-20T23:30:00.000Z');
     const { res, statusMock } = createMockRes();
 
@@ -307,7 +317,44 @@ describe('POST /flowsheet/shows/:id/force-end — operator-supplied ended_at', (
     expect(mockEndShow).toHaveBeenCalledWith(openShow, END_INSTANT);
   });
 
-  it('accepts an instant exactly at start_time', async () => {
+  it('accepts an instant exactly at the floor', async () => {
+    const { res } = createMockRes();
+
+    await forceEndShow(makeReq({}, { id: '1951164' }, { ended_at: END_INSTANT.toISOString() }), res, next);
+
+    expect(mockEndShow).toHaveBeenCalledWith(openShow, END_INSTANT);
+  });
+
+  /**
+   * The defect BS#2315 fixes. 18:30 is inside `[start_time, now]` and was
+   * accepted, closing a show at an instant 16 minutes before the last entry it
+   * still owns.
+   */
+  it('400s an instant below the floor without closing the show', async () => {
+    const { res } = createMockRes();
+
+    await expect(
+      forceEndShow(makeReq({}, { id: '1951164' }, { ended_at: '2026-08-20T18:30:00.000Z' }), res, next)
+    ).rejects.toThrow(WxycError);
+    expect(mockEndShow).not.toHaveBeenCalled();
+  });
+
+  // An operator who is told "too early" and not told how early has to bisect.
+  it('names the floor in the rejection', async () => {
+    const { res } = createMockRes();
+
+    await expect(
+      forceEndShow(makeReq({}, { id: '1951164' }, { ended_at: '2026-08-20T18:30:00.000Z' }), res, next)
+    ).rejects.toThrow(END_INSTANT.toISOString());
+  });
+
+  /**
+   * A show with nothing logged has no last-entry instant, so
+   * `resolveShowEndInstant` returns `start_time` and the floor degrades to the
+   * old bound. That is the one case where closing at `start_time` is honest.
+   */
+  it('accepts start_time on a show with no logged entries', async () => {
+    mockResolveShowEndInstant.mockResolvedValue(openShow.start_time);
     const { res } = createMockRes();
 
     await forceEndShow(makeReq({}, { id: '1951164' }, { ended_at: openShow.start_time.toISOString() }), res, next);
@@ -315,7 +362,8 @@ describe('POST /flowsheet/shows/:id/force-end — operator-supplied ended_at', (
     expect(mockEndShow).toHaveBeenCalledWith(openShow, openShow.start_time);
   });
 
-  it('400s an instant before start_time without closing the show', async () => {
+  it('400s an instant before start_time on a show with no logged entries', async () => {
+    mockResolveShowEndInstant.mockResolvedValue(openShow.start_time);
     const { res } = createMockRes();
 
     await expect(
