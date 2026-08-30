@@ -14,6 +14,8 @@ import type { CheckLiveActivityFn } from '@wxyc/database';
 import {
   refusesForLegacyDjNamePii,
   legacyDjNamePreconditionMessage,
+  refusesForEmptyPiiIndex,
+  emptyPiiIndexMessage,
   runScrub,
   requestStop,
   __resetStopForTesting,
@@ -469,33 +471,71 @@ describe('shows.legacy_dj_name precondition gate', () => {
     expect(legacyDjNamePreconditionMessage(392, true)).toContain('writes nothing');
   });
 
-  it('fails the run before any pass loads a page', async () => {
+  it('fails the run and blocks the main pass before it loads a page', async () => {
     // The refusal has to land before the drain, not after it: a partial write
-    // is exactly the outcome the gate exists to prevent.
+    // by the pass this gate protects is exactly the outcome it exists to
+    // prevent.
     const loadMainPage = jest.fn(() => Promise.resolve([]));
-    const loadMessagePage = jest.fn(() => Promise.resolve([]));
-    const loadOrphanPage = jest.fn(() => Promise.resolve([]));
     const applyDjNameBatch = jest.fn(() => Promise.resolve(0));
-    const analyzeFlowsheet = jest.fn(() => Promise.resolve());
 
     const result = await runScrub({
       ...baseOpts(),
       dryRun: false,
       loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst' }])),
       loadMainPage,
-      loadMessagePage,
-      loadOrphanPage,
       applyDjNameBatch,
-      analyzeFlowsheet,
     });
 
     expect(result.failed).toBe(true);
     expect(result.legacyDjNamePiiCount).toBe(1);
     expect(loadMainPage).not.toHaveBeenCalled();
-    expect(loadMessagePage).not.toHaveBeenCalled();
-    expect(loadOrphanPage).not.toHaveBeenCalled();
-    expect(applyDjNameBatch).not.toHaveBeenCalled();
-    expect(analyzeFlowsheet).not.toHaveBeenCalled();
+    expect(result.main.scanned).toBe(0);
+  });
+
+  /**
+   * BS#2281 review finding 5. The refusal is about `shows.legacy_dj_name`
+   * flowing through `resolveShowDjName` into a RECOMPUTED `dj_name` — which
+   * only the main pass does. Scoping it to the whole run held the marker-
+   * message PII fix hostage to a precondition that has no bearing on it, and
+   * (measured 2026-08-29) that precondition is unresolved pending a human
+   * policy call with no deadline.
+   */
+  it('still runs the message and orphan passes, which the condition cannot reach', async () => {
+    const loadMessagePage = jest.fn(() => Promise.resolve([]));
+    const loadOrphanPage = jest.fn(() => Promise.resolve([]));
+
+    const result = await runScrub({
+      ...baseOpts(),
+      dryRun: false,
+      loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst' }])),
+      loadMessagePage,
+      loadOrphanPage,
+    });
+
+    // `rewriteMessage` takes only the row's own text plus the roster index,
+    // and `loadOrphanPage` normalizes `show_id` to null on every row so
+    // orphans always take the `piiOnly` branch. Neither reads
+    // `legacy_dj_name`, and both only ever REMOVE a name.
+    expect(loadMessagePage).toHaveBeenCalled();
+    expect(loadOrphanPage).toHaveBeenCalled();
+    // ...and the run still fails, so the exit code still says "do not proceed".
+    expect(result.failed).toBe(true);
+  });
+
+  it('skips verification when the main pass was blocked', async () => {
+    // The residue `verifyScrub` would find belongs to the pass that never
+    // ran, so a clean verify is impossible and a `verification_failed` here
+    // would name the wrong cause.
+    const verifyScrub = jest.fn(() => Promise.resolve(0));
+
+    await runScrub({
+      ...baseOpts(),
+      dryRun: false,
+      loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst' }])),
+      verifyScrub,
+    });
+
+    expect(verifyScrub).not.toHaveBeenCalled();
   });
 
   it('lets the same cohort through in dry-run so the counts still get reported', async () => {
@@ -510,5 +550,71 @@ describe('shows.legacy_dj_name precondition gate', () => {
     expect(result.failed).toBe(false);
     expect(result.legacyDjNamePiiCount).toBe(1);
     expect(loadMainPage).toHaveBeenCalled();
+  });
+});
+
+/**
+ * BS#2281 review finding 2. `countPollutedLegacyDjNames` returns 0 both when
+ * `shows.legacy_dj_name` is genuinely clean AND when the roster index is
+ * empty, so a broken index clears the load-bearing gate above while every
+ * PII-keyed decision in the job silently finds nothing — and the run still
+ * logs `finished` and exits 0.
+ *
+ * Not hypothetical: reading the wrong `auth_user` column made exactly this
+ * happen on 2026-08-28, before the count became load-bearing.
+ */
+describe('empty roster index gate', () => {
+  it('refuses under --execute when the index is empty', () => {
+    expect(refusesForEmptyPiiIndex(0, false)).toBe(true);
+  });
+
+  it('does not refuse a non-empty index', () => {
+    expect(refusesForEmptyPiiIndex(163, false)).toBe(false);
+  });
+
+  it('does NOT refuse a dry run — surfacing the condition is what a dry run is for', () => {
+    expect(refusesForEmptyPiiIndex(0, true)).toBe(false);
+  });
+
+  it('names the column whose misreading caused this once already', () => {
+    expect(emptyPiiIndexMessage(false)).toContain('Refusing to run');
+    expect(emptyPiiIndexMessage(false)).toContain('auth_user.real_name');
+    expect(emptyPiiIndexMessage(true)).toContain('--execute will REFUSE');
+  });
+
+  it('blocks the WHOLE run, not just the main pass', async () => {
+    // Unlike the legacy_dj_name gate: the message and orphan passes read
+    // `piiNames` directly, so an empty index makes them vacuous rather than
+    // merely unprotected. Letting them "run" would bank a clean-looking zero.
+    const loadMainPage = jest.fn(() => Promise.resolve([]));
+    const loadMessagePage = jest.fn(() => Promise.resolve([]));
+    const loadOrphanPage = jest.fn(() => Promise.resolve([]));
+
+    const result = await runScrub({
+      ...baseOpts(),
+      dryRun: false,
+      loadUsers: jest.fn(() => Promise.resolve([])),
+      loadMainPage,
+      loadMessagePage,
+      loadOrphanPage,
+    });
+
+    expect(result.failed).toBe(true);
+    expect(loadMainPage).not.toHaveBeenCalled();
+    expect(loadMessagePage).not.toHaveBeenCalled();
+    expect(loadOrphanPage).not.toHaveBeenCalled();
+  });
+
+  it('a zero pre-flight count from an empty index does not clear the run', async () => {
+    // The exact false negative: clean-looking count, blind probe.
+    const result = await runScrub({
+      ...baseOpts(),
+      dryRun: false,
+      loadUsers: jest.fn(() => Promise.resolve([])),
+      loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst' }])),
+    });
+
+    expect(result.legacyDjNamePiiCount).toBe(0);
+    expect(result.failed).toBe(true);
   });
 });

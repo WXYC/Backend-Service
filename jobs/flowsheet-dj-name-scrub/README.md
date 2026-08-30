@@ -99,7 +99,7 @@ The `talkset` / `breakpoint` / `message` exclusion is the single most dangerous 
 ## Known limits
 
 - **The orphan-pass PII probe is weakest on exactly the cohort most likely to need it.** The exact-equality probe against the `auth_user` real-name index is sound for `dj_join`/`dj_leave` — those values provably originated in `auth_user`. It is NOT sound for orphan rows: `schema.ts:1084` describes `show_id IS NULL` rows as pre-dating `shows` entirely, i.e. the legacy cohort — the population LEAST likely to have an `auth_user` row and MOST likely to hold a bare tubafrenzy real name the index can never contain. So the orphan pass will likely find almost nothing on exactly the rows most likely to be polluted. This is a documented limit, not a bug to widen here — widening the probe to catch it would mean matching on something other than roster membership, which is Cohort C (see above) and out of scope. **Read `orphan.scanned` vs `orphan.changed` in the run summary accordingly**: a near-zero `changed` count against a non-trivial `scanned` count is the probe finding nothing, not evidence the orphan cohort is clean.
-- **`shows.legacy_dj_name` being clean is asserted, not independently proven — this job checks it, but does not fix it.** The recompute TRUSTS `legacy_dj_name` on the strength of BS#1393's rewrite from tubafrenzy `DJ_NAME` (real name) to `DJ_HANDLE` (on-air handle). If that rewrite is wrong for any subset of shows, this job actively WRITES real names onto every in-scope row of those shows, because `resolveShowDjName` reads `legacy_dj_name` as a direct chain input with no PII check of its own — unlike `dj_name`/`message`, which this job probes explicitly. See "shows.legacy_dj_name pre-flight" below.
+- **`shows.legacy_dj_name` is NOT clean — measured 2026-08-29 — and this job refuses rather than fixes it.** The recompute TRUSTS `legacy_dj_name` on the strength of BS#1393's rewrite from tubafrenzy `DJ_NAME` (real name) to `DJ_HANDLE` (on-air handle). If that rewrite is wrong for any subset of shows, this job actively WRITES real names onto every in-scope row of those shows, because `resolveShowDjName` reads `legacy_dj_name` as a direct chain input with no PII check of its own — unlike `dj_name`/`message`, which this job probes explicitly. See "shows.legacy_dj_name pre-flight" below.
 
 ## Related issues
 
@@ -125,16 +125,38 @@ docker run --rm --name flowsheet-dj-name-scrub --env-file .env \
 ### Before the first live run
 
 - [ ] **The SSE fan-out guard is deployed.** `filterMetadataUpdate` broadcasts on _any_ flowsheet UPDATE landing in a terminal `metadata_status`, and historical `track` rows are almost all terminal. Without an age guard this drain emits one `liveFs:update` per row to every `/events/stream` client on every backend instance, for hours. The guard (`LIVE_FS_UPDATE_MAX_AGE_HOURS`, default 24h) ships alongside this job — confirm it is live, and watch `SSE/UpdateSuppressed` climb during the run. That climb is the guard working.
-- [ ] **The `shows.legacy_dj_name` pre-flight count is zero.** `--execute` refuses otherwise; see the section above. It was 392 on 2026-08-29.
+- [ ] **The `shows.legacy_dj_name` pre-flight count is zero.** `--execute` refuses the `main` pass otherwise and exits non-zero; see "How the gate clears" below for why no job can clear it for you. It was 392 on 2026-08-29.
 - [ ] **Run outside peak listening hours.** See the watermark note below.
 - [ ] **Confirm no sibling flowsheet job is running** (`flowsheet-metadata-backfill`, `flowsheet-etl`, the enrichment worker's sweep).
+- [ ] **The `pii_index_empty` refusal did not fire.** An empty `auth_user` roster index makes every count in the run vacuous, including the pre-flight's zero; `--execute` refuses the whole run on it. Reading the wrong column emptied this index once already (2026-08-28).
 - [ ] **Read the `legacy_dj_name_preflight` log line — even in the dry run.** Every run opens with a startup scan of `shows.legacy_dj_name` for roster real names, logged as `legacy_dj_name_pii_count` and surfaced on the run summary and the `flowsheet_dj_name_scrub.run.summary` Sentry span. A non-zero count means the recompute is about to WRITE those values onto every in-scope row of the affected shows — see "shows.legacy_dj_name pre-flight" below before proceeding to `--execute`.
 
 ### `shows.legacy_dj_name` pre-flight
 
-This job's recompute (`resolveShowDjName`) reads `shows.legacy_dj_name` as a direct chain input with no PII check of its own — unlike `dj_name` and `message`, which this job probes explicitly against the `auth_user` real-name index. That is safe only if `legacy_dj_name` is already clean, which rests entirely on BS#1393 having rewritten it from tubafrenzy `DJ_NAME` (real name) to `DJ_HANDLE` (on-air handle) across the whole table. That rewrite is probably correct, but it was asserted, not independently checked, until this pre-flight existed — and if it is wrong for any subset of shows, this job actively writes real names onto every in-scope row of those shows.
+**This section described the pre-BS#2281-hardening behaviour and is now the refusal documented under "⛔ `--execute` refuses while `shows.legacy_dj_name` holds a real name" above.** It no longer warns-and-continues under `--execute`; it refuses. Kept as a heading because the refusal message and the checklist both point here.
 
-The pre-flight is a single cheap query (`shows` is one row per broadcast, not one per track) run at startup, in BOTH dry-run and `--execute` mode, before the first pass. A non-zero count logs a `warn` line and a Sentry capture, and is carried on the run's `RunResult.legacyDjNamePiiCount` and the summary span's `scrub.legacy_dj_name_pii_count` attribute — but it does NOT abort the run: fixing the underlying pollution is a `shows`-table remediation outside this job's scope (this job only ever nulls or recomputes `flowsheet` columns), so a hard failure here would be a permanent red build over a condition this job cannot itself correct. Treat a non-zero count as a stop-and-investigate signal before running `--execute`, not as a run failure to route around.
+This job's recompute (`resolveShowDjName`) reads `shows.legacy_dj_name` as a direct chain input with no PII check of its own — unlike `dj_name` and `message`, which this job probes explicitly against the `auth_user` real-name index. That is safe only if `legacy_dj_name` is already clean, which rested entirely on BS#1393 having rewritten it from tubafrenzy `DJ_NAME` (real name) to `DJ_HANDLE` (on-air handle) across the whole table.
+
+**That premise is now measured, and it is false for 839 shows.** The pre-flight is a single cheap query (`shows` is one row per broadcast, not one per track) run at startup, in BOTH modes, before the first pass. It is carried on `RunResult.legacyDjNamePiiCount` and the summary span's `scrub.legacy_dj_name_pii_count` attribute. Under `--execute` a non-zero count logs an `error` and **refuses**; under `--dry-run` it logs a `warn` and continues.
+
+The refusal is **scoped to the `main` pass**, not to the run. The `message` and `orphan` passes still execute, because neither can be harmed by the condition and neither can make it worse — `rewriteMessage` takes only the row's own text plus the roster index, and `loadOrphanPage` normalizes `show_id` to null on every row it returns, so orphan rows always take `decideDjName`'s `piiOnly` branch and never recompute. Both passes only ever REMOVE a name. The run still exits non-zero, and `verifyScrub` is skipped (the residue it would find belongs to the pass that never ran).
+
+#### How the gate clears
+
+**There is no job that clears it, and no upstream value to repair from.** Measured against production and tubafrenzy on 2026-08-29, before the turndown:
+
+- All **839** affected shows already hold their upstream tubafrenzy `DJ_HANDLE` **verbatim** — zero differ. BS#1393 copied the column losslessly; `DJ_HANDLE` **itself** contains the real name. Re-sourcing from tubafrenzy is a complete no-op, so this precondition is **not** gated by the 2026-09-07 turndown.
+- The 839 shows carry only **10 distinct values** — 10 people, not 839 problems. 0 have a `dj_name_override` and 832 have `primary_dj_id IS NULL`, so the value really is reached by the chain.
+- **447 shows (2 values)** are already exempted by `buildPiiNameIndex`, because those DJs' Backend `dj_name` **is** their real name. That is the whole 839-vs-392 gap.
+- Of the remaining **392**: **16 shows (3 values) are false positives** — junk `auth_user.real_name` entries (one is _two characters_) colliding with legacy DJs' short handles. Of 163 distinct roster real names, 152 are 2+ capitalized tokens and only 5 are single-token; 3 of those 5 are what blocks the run.
+- The other **376 shows (5 values)** are genuine real names that were these DJs' on-air identity. For three of them the upstream `DJ_HANDLE` equals `DJ_NAME` on every show and the DJ has no Backend `dj_name` at all — there was never an alias, so nulling is total attribution loss, not a downgrade to a handle.
+
+So clearing the gate is two pieces of work, neither of them a scrub and neither automatable:
+
+1. **Fix the junk `auth_user.real_name` rows.** A data bug in the wrong table; removes 3 of the 10 values. Do NOT instead teach `buildPiiNameIndex` a name-shape heuristic — inside a PII gate that trades a visible false block for an invisible false pass.
+2. **Get a human policy call on the five genuine names**: public on-air identity (Cohort C, keep) or PII in the handle field (null it, 16,470 rows go unattributed). Encode the answer as an explicit, dated, reviewed exemption — not by widening the exemption rule.
+
+Until both are done, `--execute` refuses and the main pass does not run. **Do not hand-write UPDATEs against production `shows` to get past it**; that is exactly the unreviewed prod SQL this repo's data-safety rules exist to prevent. `jobs/legacy-dj-name-remediation` is NOT the remedy — it is superseded, its Dockerfile is removed, and its runtime guard redirects here.
 
 ### Resume
 
