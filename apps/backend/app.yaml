@@ -1310,11 +1310,35 @@ paths:
           schema:
             type: string
             enum: ['true']
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ended_at:
+                  type: string
+                  format: date-time
+                  description: >
+                    Override the derived end instant. Bounded on both ends, or
+                    the request is a 400 naming the bound it missed: at or
+                    before now, and at or after the derived instant it replaces
+                    (the show's last logged entry, floored at `start_time`). An
+                    override can only ever move the close LATER than the
+                    flowsheet's own answer — closing a show before entries it
+                    still owns would sink its `show_end` marker below them in
+                    the flowsheet's global `add_time` order. A show that logged
+                    nothing has no last entry, and there the floor is
+                    `start_time`.
       responses:
         '200':
           description: The finalized show, with `end_time` set
         '400':
-          description: The id was not a positive integer, or the show is already ended
+          description: >
+            The id was not a positive integer, the show is already ended, or
+            `ended_at` was unparseable, in the future, or earlier than the
+            show's last logged entry.
         '403':
           description: 'Caller lacks the `flowsheet: manage` permission'
         '404':

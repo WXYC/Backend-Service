@@ -1185,15 +1185,35 @@ export const getOpenShows: RequestHandler<object, unknown, unknown, { window_hou
  * The floor is the DERIVED instant itself, not `start_time` (BS#2315): an
  * override may only ever move the close LATER than the flowsheet's own answer.
  * `start_time` alone let a show close before entries it still owns — start
- * 02:00, entries through 05:00, `ended_at: 02:30` accepted — and that interval
- * is wrong in the mirror image of the way `now()` is. `getShowsInTimeWindow`
- * admits a closed show on `start_time < windowEnd AND end_time > windowStart`,
- * so a 03:00-05:00 window drops it while `GET /flowsheet` still serves its
- * entries from that span, and any "which show does this entry belong to"
- * derivation from the interval contradicts the `show_id` FK and `show_djs`.
+ * 02:00, entries at 02:10 and 04:50, `ended_at: 02:30` accepted — and that is
+ * the SAME marker-ordering defect as the `now()` one, pointing the other way.
+ * `endShow` stamps this instant on the `show_end` marker's `add_time` and on
+ * every co-host `dj_leave` marker, and `getEntriesByPage` orders globally by
+ * `add_time DESC, id DESC`, so a sign-off written at 02:30 sorts BELOW the
+ * show's own 04:50 entry: the public flowsheet renders a show that signs off
+ * and then keeps playing.
+ *
+ * The interval misleads reads too, though less than BS#2315's own text claims.
+ * That argument predates `getShowsInTimeWindow`'s third arm (BS#2062,
+ * 2026-08-09), which admits any show an in-window entry references — so a
+ * truncated show is NOT lost from a window holding its entries, and
+ * `entries[].show_id` stays resolvable. What survives is the window holding
+ * NONE of them: over 03:00-04:00 the range read reports that the show above
+ * did not air, though a show is on the air between its start and its last
+ * entry.
+ *
  * A show with nothing logged has no last-entry instant, and there
  * `resolveShowEndInstant` returns `start_time` — so the old bound survives
  * exactly where it was the honest one.
+ *
+ * The floor is deliberately NOT clamped to `now`. `resolveShowEndInstant` has
+ * no upper bound, and `add_time` is written from source values rather than the
+ * server clock on every legacy path, so a show holding a future-stamped entry
+ * has an empty legal range and every override 400s naming a floor in the
+ * future. Clamping would be the worse answer — it re-admits exactly the
+ * truncation this bound exists to refuse — so the floor wins, and the operator
+ * omits `ended_at` and takes the derived instant the no-override path already
+ * stamps.
  *
  * Closing a show BEFORE some of its entries is therefore not something this
  * endpoint offers. When the entries are the thing that is wrong — a later DJ's
