@@ -96,10 +96,27 @@ describe('digital-archive-bind ID3v2 parser', () => {
     });
   });
 
-  it('is total over a short/truncated buffer (the 256KB ranged-GET boundary)', () => {
+  it('is total over a buffer cut before any frame header is readable', () => {
     const full = buildId3v2([textFrame('TIT2', 'Truncated'), textFrame('TPE1', 'Artist Whose Tag Overruns')]);
     const truncated = full.subarray(0, 12); // header + a sliver of the first frame header
     expect(() => parseId3v2(truncated)).not.toThrow();
+    expect(parseId3v2(truncated).title).toBeNull();
+  });
+
+  it('recovers whole frames when the buffer is cut MID-BODY (the 256KB ranged-GET boundary)', () => {
+    // The case the ranged GET actually produces: a complete first frame, then
+    // a second whose header parses but whose body runs past the end of what
+    // we fetched. Cutting at 12 bytes (above) never enters the frame loop at
+    // all -- `offset + 10 <= tagEnd` is false on the first iteration -- so it
+    // exercises none of the truncation handling it appears to name.
+    const full = buildId3v2([textFrame('TIT2', 'Complete Title'), textFrame('TPE1', 'Artist Whose Tag Overruns')]);
+    const firstFrameEnd = 10 + 10 + Buffer.byteLength('Complete Title', 'latin1') + 1;
+    const midSecondBody = full.subarray(0, firstFrameEnd + 10 + 4);
+
+    expect(() => parseId3v2(midSecondBody)).not.toThrow();
+    const tags = parseId3v2(midSecondBody);
+    expect(tags.title).toBe('Complete Title'); // the frame that fully arrived survives
+    expect(tags.artist).toBeNull(); // the one cut mid-body is dropped, not half-decoded
   });
 
   it('decodes a UTF-16 (BOM) text frame', () => {

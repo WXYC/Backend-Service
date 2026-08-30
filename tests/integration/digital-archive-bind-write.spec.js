@@ -272,4 +272,91 @@ describe('digital-archive-bind — REAL write functions (real PG)', () => {
       await sql`SELECT object_key FROM ${sql(SCHEMA)}.digital_asset_file WHERE asset_id = ${assetRow.id}`;
     expect(stillOriginal.map((r) => r.object_key)).toEqual(['original.mp3']);
   });
+
+  // BS#2319 review F1: `fileRowOf` supplies 15 explicit columns and drizzle
+  // emits one bind parameter per provided value, while postgres.js writes the
+  // Bind message's parameter count as an int16 -- so a single unchunked
+  // `digital_asset_file` INSERT dies above 4,369 rows (65,535 / 15). The real
+  // Space holds ~23,500 files. This album alone exceeds the ceiling, so the
+  // test fails against an unchunked insert and passes only with the chunking
+  // in `executeWrites`. It sits just over the boundary rather than at full
+  // scale, to stay fast while still being a true regression test.
+  it('writes an album whose file count exceeds the single-statement bind-parameter ceiling', async () => {
+    const FILES = 4_400; // 4,400 * 15 params = 66,000 > 65,535
+    const libraryId = await seedLibrary('BS2319 Oversized Album');
+
+    const album = candidateAlbum({
+      contentKind: 'freeform',
+      artist: 'BS2319 Fixture Artist',
+      album: 'BS2319 Oversized Album',
+      objectKeys: Array.from(
+        { length: FILES },
+        (_, i) => `library/freeform/oversized/${String(i).padStart(5, '0')}.mp3`
+      ),
+    });
+    const matched = { candidate: album, libraryId, tier: 'exact', bindNote: 'exact' };
+
+    const storeId = await write.ensureStore();
+    const plan = write.planWrites([matched], await write.loadExistingSlots([libraryId]), new Map(), new Set());
+    const counts = await write.executeWrites(plan, storeId);
+
+    expect(counts.inserted).toBe(1);
+    expect(counts.filesWritten).toBe(FILES);
+
+    const [asset] = await sql`SELECT id FROM ${sql(SCHEMA)}.digital_asset WHERE library_id = ${libraryId}`;
+    assetIds.push(asset.id);
+    const [{ count }] =
+      await sql`SELECT COUNT(*)::int AS count FROM ${sql(SCHEMA)}.digital_asset_file WHERE asset_id = ${asset.id}`;
+    expect(count).toBe(FILES);
+  });
+
+  // BS#2319 review F2: the asset INSERT and the file INSERT must commit
+  // together. Committed separately, a mid-sequence failure leaves
+  // `needs_review` assets holding zero files -- and `planWrites` deliberately
+  // leaves `needs_review` slots untouched, so no re-run would ever fill them.
+  // Here the file INSERT is forced to fail on `digital_asset_file`'s
+  // UNIQUE (store_id, object_key) by pre-planting one of the object keys.
+  it('rolls the asset rows back when the file insert fails, leaving no fileless asset behind', async () => {
+    const libraryId = await seedLibrary('BS2319 Rollback Album');
+    const storeId = await write.ensureStore();
+    const collidingKey = 'library/freeform/rollback/collide.mp3';
+
+    // A pre-existing file row owning the key, attached to an unrelated asset.
+    const squatterLibraryId = await seedLibrary('BS2319 Rollback Squatter');
+    const squatter = candidateAlbum({
+      contentKind: 'freeform',
+      artist: 'BS2319 Fixture Artist',
+      album: 'BS2319 Rollback Squatter',
+      objectKeys: [collidingKey],
+    });
+    const squatterPlan = write.planWrites(
+      [{ candidate: squatter, libraryId: squatterLibraryId, tier: 'exact', bindNote: 'exact' }],
+      await write.loadExistingSlots([squatterLibraryId]),
+      new Map(),
+      new Set()
+    );
+    await write.executeWrites(squatterPlan, storeId);
+    const [squatterAsset] =
+      await sql`SELECT id FROM ${sql(SCHEMA)}.digital_asset WHERE library_id = ${squatterLibraryId}`;
+    assetIds.push(squatterAsset.id);
+
+    const album = candidateAlbum({
+      contentKind: 'freeform',
+      artist: 'BS2319 Fixture Artist',
+      album: 'BS2319 Rollback Album',
+      objectKeys: [collidingKey],
+    });
+    const plan = write.planWrites(
+      [{ candidate: album, libraryId, tier: 'exact', bindNote: 'exact' }],
+      await write.loadExistingSlots([libraryId]),
+      new Map(),
+      new Set()
+    );
+    expect(plan.toInsert).toHaveLength(1);
+
+    await expect(write.executeWrites(plan, storeId)).rejects.toThrow();
+
+    const orphans = await sql`SELECT id FROM ${sql(SCHEMA)}.digital_asset WHERE library_id = ${libraryId}`;
+    expect(orphans).toHaveLength(0); // the asset must not survive its files' failure
+  });
 });
