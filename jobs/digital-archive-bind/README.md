@@ -74,14 +74,14 @@ docker run --rm --env-file .env -v "$PWD:/out" <image> --import /out/review.csv
 
 ## Environment
 
-| var                                                 | default                               | meaning                                                                                 |
-| --------------------------------------------------- | ------------------------------------- | --------------------------------------------------------------------------------------- |
-| `DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID`            | —                                     | required; DigitalOcean Spaces **read-only** key                                          |
-| `DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET`            | —                                     | required                                                                                |
-| `DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT`          | `https://nyc3.digitaloceanspaces.com` | S3-compatible endpoint; the SigV4 region is derived from its first host label            |
-| `DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET`            | `wxyc`                                |                                                                                         |
-| `AZURACAST_API_KEY`                                 | unset                                 | when set, tags come from AzuraCast's media API instead of the ID3v2 ranged-GET fallback |
-| `AZURACAST_BASE_URL`                                | `https://remote.wxyc.org`             | AzuraCast host (behind Cloudflare Access)                                               |
+| var                                        | default                               | meaning                                                                                 |
+| ------------------------------------------ | ------------------------------------- | --------------------------------------------------------------------------------------- |
+| `DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID`   | —                                     | required; DigitalOcean Spaces **read-only** key                                         |
+| `DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET`   | —                                     | required                                                                                |
+| `DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT` | `https://nyc3.digitaloceanspaces.com` | S3-compatible endpoint; the SigV4 region is derived from its first host label           |
+| `DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET`   | `wxyc`                                |                                                                                         |
+| `AZURACAST_API_KEY`                        | unset                                 | when set, tags come from AzuraCast's media API instead of the ID3v2 ranged-GET fallback |
+| `AZURACAST_BASE_URL`                       | `https://remote.wxyc.org`             | AzuraCast host (behind Cloudflare Access)                                               |
 
 The `DIGITAL_ARCHIVE_STORE_AZURACAST_*` naming matches `digital_asset_store.name = 'azuracast'` and the env var convention WXYC/Backend-Service#2320's allowlist uses (`DIGITAL_ARCHIVE_STORE_<UPPERCASE_NAME>_*`).
 
