@@ -32,17 +32,36 @@ const requireEnv = (name: string): string => {
 
 /**
  * `digital_asset_store.name` is `'azuracast'` (issue comment 1), so its
- * store-scoped env vars are `DIGITAL_ARCHIVE_STORE_AZURACAST_*` --
- * `WXYC/Backend-Service#2320`'s allowlist convention, which this job's
- * writer has to agree with.
+ * store-scoped env vars are `DIGITAL_ARCHIVE_STORE_AZURACAST_*`.
+ *
+ * **The four names below are `#2320`'s, exactly** -- `_ENDPOINT` / `_BUCKET`
+ * / `_KEY_ID` / `_SECRET`, matching `readStoreEnvConfig` in
+ * `apps/backend/services/digital-archive-store.service.ts`. That agreement is
+ * operational, not cosmetic: `.github/workflows/set-ec2-env-var.yml` carries
+ * an **allowlist** of names it will push to EC2, and only those four are on
+ * it. A reader-specific spelling (this job once used `_ACCESS_KEY_ID` /
+ * `_SECRET_ACCESS_KEY`) has no provisioning path at all, so an operator who
+ * followed `docs/env-vars.md`'s light-up procedure would have the secrets set
+ * and still hit `… is not configured` before listing a single object.
+ *
+ * `region` is likewise **derived from the endpoint** rather than read from a
+ * fifth var, for the same reason and by the same rule as the presigner: a
+ * DigitalOcean Spaces endpoint is `https://<region>.digitaloceanspaces.com`,
+ * so the region SigV4 needs is that first host label. Region only shapes the
+ * signature, never which bucket is hit, so an unrecognized host shape falls
+ * back to `us-east-1` rather than throwing.
  */
-export const loadStoreConfigFromEnv = (): StoreConfig => ({
-  endpoint: process.env.DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT || 'https://nyc3.digitaloceanspaces.com',
-  region: process.env.DIGITAL_ARCHIVE_STORE_AZURACAST_REGION || 'nyc3',
-  bucket: process.env.DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET || 'wxyc',
-  accessKeyId: requireEnv('DIGITAL_ARCHIVE_STORE_AZURACAST_ACCESS_KEY_ID'),
-  secretAccessKey: requireEnv('DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET_ACCESS_KEY'),
-});
+export const loadStoreConfigFromEnv = (): StoreConfig => {
+  const endpoint =
+    process.env.DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT || 'https://nyc3.digitaloceanspaces.com';
+  return {
+    endpoint,
+    region: new URL(endpoint).hostname.split('.')[0] || 'us-east-1',
+    bucket: process.env.DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET || 'wxyc',
+    accessKeyId: requireEnv('DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID'),
+    secretAccessKey: requireEnv('DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET'),
+  };
+};
 
 export const createStoreClient = (config: StoreConfig): S3Client =>
   new S3Client({
