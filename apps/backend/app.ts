@@ -23,6 +23,8 @@ import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
 import { concerts_route } from './routes/concerts.route.js';
 import { album_reviews_route } from './routes/album-reviews.route.js';
+import { digital_archive_route } from './routes/digital-archive.route.js';
+import { reconcileCatalogExportFlag } from './services/catalog-export-flag-reconcile.service.js';
 import { buildCorsMiddleware } from './middleware/cors.js';
 import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
 import {
@@ -99,6 +101,12 @@ app.use('/concerts', concerts_route);
 // Form-review archive read (role-gated `album_reviews:read`, pure DB read) — ADR 0011.
 // Gate and consent posture: routes/album-reviews.route.ts.
 app.use('/album-reviews', album_reviews_route);
+
+// Digital-archive playback manifest (role-gated `digital_archive:listen`,
+// flag-gated `DIGITAL_ARCHIVE_STREAMING_ENABLED`) — BS#2320.
+// Gate and 403/404 posture: routes/digital-archive.route.ts +
+// controllers/digital-archive.controller.ts.
+app.use('/digital-archive', digital_archive_route);
 
 // Business logic routes
 app.use('/labels', labels_route);
@@ -215,6 +223,14 @@ const server = app.listen(port, () => {
   // the work would otherwise have to happen on the first picker open per
   // row after every restart. See `services/rotation-tracks-cache-warm.service.ts`.
   startRotationTracksCacheWarm();
+  // BS#2320: diff DIGITAL_ARCHIVE_STREAMING_ENABLED against its last-observed
+  // value in catalog_export_flag_state and advance library_watermark on a
+  // change — see the service doc comment for why a flag flip needs this and
+  // why it belongs at startup (every flip already recreates the container).
+  void reconcileCatalogExportFlag('DIGITAL_ARCHIVE_STREAMING_ENABLED').catch((err) => {
+    console.error('reconcileCatalogExportFlag failed:', err);
+    Sentry.captureException(err, { tags: { subsystem: 'digital-archive' } });
+  });
   // BS#989 (G6): once-per-minute cache-stats emit for the eight in-process
   // LRU caches (proxy.controller.ts's seven + library.service.ts's
   // track_search), projecting eviction pressure + current size onto a

@@ -74,6 +74,16 @@ const stationStatement = {
   // archive. This file's rule is that a key belongs to the resource it names;
   // the name has to match the resource for that rule to mean anything.
   album_reviews: ['read'],
+  // `digital_archive: listen` backs `GET /digital-archive/albums/:id/playback`
+  // (BS#2320, epic WXYC/wxyc-dj-ios#135) — presigned playback manifests into
+  // the auto-DJ Space. Opens at `dj`, same tier as `album_reviews`: `member`
+  // is the pre-DJ tier and the legal boundary here is "authenticated DJs".
+  // Its own key rather than `catalog: ['read']` (which `member` already
+  // holds) — the `album_reviews` precedent above: a key belongs to the
+  // resource it names, and reusing a wider key would silently open playback
+  // to `member` the next time `catalog: read` is re-granted for an unrelated
+  // reason.
+  digital_archive: ['listen'],
 } as const;
 
 /**
@@ -234,24 +244,31 @@ const WXYC_GRANTS = {
     // at `dj`. `stripEmpty` drops the key before better-auth sees it, so this
     // stays byte-identical to omitting it.
     album_reviews: [],
+    // Explicit denial, same reasoning as `album_reviews` above: `member` is
+    // the pre-DJ tier and the legal boundary for digital-archive playback is
+    // "authenticated DJs".
+    digital_archive: [],
   },
   dj: {
     bin: ['read', 'write'],
     catalog: ['read'],
     flowsheet: ['read', 'write'],
     album_reviews: ['read'],
+    digital_archive: ['listen'],
   },
   musicDirector: {
     bin: ['read', 'write'],
     catalog: ['read', 'write'],
     flowsheet: ['read', 'write', 'manage'],
     album_reviews: ['read'],
+    digital_archive: ['listen'],
   },
   stationManager: {
     bin: ['read', 'write'],
     catalog: ['read', 'write'],
     flowsheet: ['read', 'write', 'manage'],
     album_reviews: ['read'],
+    digital_archive: ['listen'],
   },
 } as const satisfies Record<WXYCRole, StationGrants>;
 

@@ -350,6 +350,13 @@ components:
           type: string
           format: date
           nullable: true
+        has_digital_audio:
+          type: boolean
+          description: >
+            True when the digital archive (BS#2320) has at least one asset
+            bound to this album. Forced false for every row when
+            DIGITAL_ARCHIVE_STREAMING_ENABLED is off. The SSOT (wxyc-shared
+            api.yaml) carries the authoritative description.
 
     CatalogCompilationTrackRow:
       type: object
@@ -373,6 +380,77 @@ components:
           type: string
           maxLength: 255
           nullable: true
+
+    DigitalArchivePlaybackManifest:
+      type: object
+      description: >
+        Response body for GET /digital-archive/albums/{id}/playback (BS#2320,
+        wxyc-shared#417/#422). No bucket, key, or store name appears anywhere
+        in this shape — only opaque presigned URLs that die at expires_at.
+        This block is Swagger display only; the SSOT is wxyc-shared/api.yaml.
+      required:
+        - library_id
+        - expires_at
+        - tracks
+      properties:
+        library_id:
+          type: integer
+        expires_at:
+          type: string
+          format: date-time
+        tracks:
+          type: array
+          items:
+            $ref: '#/components/schemas/DigitalArchivePlaybackTrack'
+
+    DigitalArchivePlaybackTrack:
+      type: object
+      description: >
+        One track of a DigitalArchivePlaybackManifest. provenance is per-track
+        (not per-manifest) because a manifest may merge several bound assets
+        for one album.
+      required:
+        - file_id
+        - provenance
+        - title
+        - renditions
+      properties:
+        file_id:
+          type: integer
+        provenance:
+          type: string
+          enum: [rotation_upload, cd_rip]
+        disc_number:
+          type: integer
+          nullable: true
+        track_number:
+          type: integer
+          nullable: true
+        title:
+          type: string
+        duration_secs:
+          type: number
+          nullable: true
+        content_hash:
+          type: string
+          nullable: true
+        renditions:
+          type: array
+          items:
+            type: object
+            required:
+              - codec
+              - url
+            properties:
+              codec:
+                type: string
+                enum: [mp3, aac, flac, m4a, wav]
+              bitrate_kbps:
+                type: integer
+                nullable: true
+              url:
+                type: string
+                format: uri
 
     BmiPerformanceRow:
       type: object
@@ -2804,3 +2882,48 @@ paths:
           description: Authentication required
         '403':
           description: Authenticated but without the `album_reviews:read` permission (anonymous sessions and the `member` role)
+
+  /digital-archive/albums/{id}/playback:
+    get:
+      summary: Presigned playback manifest for a digital-archive album (BS#2320)
+      description: >-
+        Presigned playback manifest into the auto-DJ Space for the digital
+        archive bound to library album {id} (epic WXYC/wxyc-dj-ios#135).
+        Merges every `bound` digital_asset for the album (a multi-disc set
+        today, eventually a cd_rip alongside a rotation_upload) — no
+        precedence rule; provenance is reported per track. Ordered by
+        (disc_number, track_number NULLS LAST, title). Serves every codec the
+        archive holds, not just mp3.
+
+        Gated at `dj`+ (`digital_archive:listen`) AND behind
+        DIGITAL_ARCHIVE_STREAMING_ENABLED, checked before any DB read. 403
+        means the feature is off or the caller is below dj; 404 means the
+        caller is permitted but nothing is bound and servable — this endpoint
+        never returns 200 with an empty tracks array.
+
+        Every URL in the response is a presigned, per-caller bearer
+        credential until expires_at: never cache, log, or share it. Response
+        carries Cache-Control: private, no-store. This block is Swagger
+        display only; the SSOT is wxyc-shared/api.yaml.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: The album's library.id (the same key CatalogExportRow.id ships).
+      responses:
+        '200':
+          description: Presigned playback manifest with at least one playable track
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DigitalArchivePlaybackManifest'
+        '400':
+          description: Malformed id (non-integer or non-positive)
+        '401':
+          description: Authentication required
+        '403':
+          description: DIGITAL_ARCHIVE_STREAMING_ENABLED is off, or the caller is below `dj` (anonymous sessions and the `member` role)
+        '404':
+          description: No bound digital-archive asset with a servable file exists for this album

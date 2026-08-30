@@ -26,10 +26,12 @@ import {
   rotation,
   album_plays,
   album_popularity,
+  digital_asset,
 } from '@wxyc/database';
 import { createWatermarkCache } from './watermark-cache.service.js';
 import { getCatalogLastModifiedAt } from './library.service.js';
 import { logicalAlbumKeySql } from './logical-album-key.service.js';
+import { getConfig as getDigitalArchiveConfig } from '../config/digitalArchive.js';
 
 /**
  * One catalog row as exported to the client. Flat projection over the
@@ -63,6 +65,13 @@ export type CatalogExportRow = {
   artwork_url: string | null;
   rotation_bin: string | null;
   rotation_kill_date: string | null;
+  /**
+   * True when the digital archive (BS#2320) has at least one `bound` asset
+   * for this album. Forced `false` for every row when
+   * `DIGITAL_ARCHIVE_STREAMING_ENABLED` is off, regardless of what
+   * `digital_asset` holds — see `getCatalogExportRows`.
+   */
+  has_digital_audio: boolean;
 };
 
 /**
@@ -91,6 +100,7 @@ const projectRow = (row: CatalogExportRow): CatalogExportRow => ({
   artwork_url: row.artwork_url,
   rotation_bin: row.rotation_bin,
   rotation_kill_date: row.rotation_kill_date,
+  has_digital_audio: row.has_digital_audio,
 });
 
 /**
@@ -170,6 +180,15 @@ export const serializeCatalogNdjson = (rows: CatalogExportRow[]): string =>
  *    trigger the failure is silent and unbounded, not a lag — the producer would
  *    304 forever against a body that will never contain the new alias.
  *
+ *  - `has_digital_audio` (BS#2320) is a per-row `EXISTS` against `digital_asset`
+ *    (`status = 'bound'`), computed once at query-build time behind
+ *    `DIGITAL_ARCHIVE_STREAMING_ENABLED` rather than per-row in application
+ *    code: with the flag off the whole clause collapses to the literal `false`,
+ *    so a disabled feature costs nothing beyond emitting the column. This is
+ *    format-blind (any bound asset counts, regardless of codec) by design —
+ *    it stays consistent with `GET /digital-archive/albums/:id/playback`
+ *    (`digital-archive.service.ts`), which likewise never filters by codec.
+ *
  * One scan per watermark (cached below), so the full-table cost is paid ~daily.
  */
 export const getCatalogExportRows = async (): Promise<CatalogExportRow[]> => {
@@ -237,7 +256,15 @@ export const getCatalogExportRows = async (): Promise<CatalogExportRow[]> => {
       ${album_popularity.plays}::int           AS popularity,
       ${library.artwork_url}                   AS artwork_url,
       ${rotation.rotation_bin}                 AS rotation_bin,
-      ${rotation.kill_date}::text              AS rotation_kill_date
+      ${rotation.kill_date}::text              AS rotation_kill_date,
+      ${
+        getDigitalArchiveConfig().enabled
+          ? sql`EXISTS (
+              SELECT 1 FROM ${digital_asset}
+              WHERE ${digital_asset.library_id} = ${library.id} AND ${digital_asset.status} = 'bound'
+            )`
+          : sql`false`
+      }                                         AS has_digital_audio
     FROM ${library}
       INNER JOIN ${artists} ON ${artists.id} = ${library.artist_id}
       INNER JOIN ${format} ON ${format.id} = ${library.format_id}

@@ -574,6 +574,18 @@ jobs:
           # column was previously destructured away, with no gating coverage.
           CATALOG_TRACK_SEARCH_CTA_ENABLED: 'true'
           CATALOG_TRACK_SEARCH_DISCOGS_ENABLED: 'true'
+          # Digital archive playback (BS#2320): mirrors
+          # dev_env/docker-compose.yml's ci-profile default so the
+          # presigned-manifest happy path and has_digital_audio are exercised
+          # on both integration-test paths. presignGet computes a SigV4
+          # signature locally and never contacts the endpoint, so fake
+          # credentials are sufficient in CI.
+          DIGITAL_ARCHIVE_STREAMING_ENABLED: 'true'
+          DIGITAL_ARCHIVE_SIGN_TTL_SECONDS: '14400'
+          DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT: 'https://nyc3.digitaloceanspaces.com'
+          DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET: 'wxyc'
+          DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID: 'test-key-id'
+          DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET: 'test-secret'
           # Flowsheet Go-Live Intent (BS#2233/BS#2308): same GHA-vs-compose
           # parity requirement as the flags above (dev_env/docker-compose.yml),
           # but NOT the same rollout state — those are ON in production, and

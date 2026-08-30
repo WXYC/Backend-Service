@@ -100,6 +100,27 @@ jobs:
           # hard-fails on empty.
           DONATE_URL: ${{ secrets.DONATE_URL }}
           DONATE_ENABLED: ${{ secrets.DONATE_ENABLED }}
+          # Digital-archive playback endpoint (BS#2320, epic
+          # WXYC/wxyc-dj-ios#135). Carried through the same allowlist as
+          # DONATE_* above — light-up is meant to be a variable-only change.
+          # DIGITAL_ARCHIVE_STREAMING_ENABLED is a strict `=== 'true'` gate
+          # (apps/backend/config/digitalArchive.ts), same caveat as
+          # DONATE_ENABLED: set it to lowercase 'true' and expect the
+          # ::add-mask:: to redact the word "true" elsewhere in the run's
+          # logs; rollback is 'false', not an empty value. The four
+          # DIGITAL_ARCHIVE_STORE_AZURACAST_* vars are the presigner's
+          # endpoint/bucket/credentials for the `azuracast` store name
+          # (digital-archive-store.service.ts) — _KEY_ID/_SECRET are genuine
+          # secrets and mask automatically; _ENDPOINT/_BUCKET are not
+          # sensitive but are pushed through the same mechanism for
+          # consistency. Pass restart_target=backend (the default) for all
+          # six — only apps/backend reads them.
+          DIGITAL_ARCHIVE_STREAMING_ENABLED: ${{ secrets.DIGITAL_ARCHIVE_STREAMING_ENABLED }}
+          DIGITAL_ARCHIVE_SIGN_TTL_SECONDS: ${{ secrets.DIGITAL_ARCHIVE_SIGN_TTL_SECONDS }}
+          DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT: ${{ secrets.DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT }}
+          DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET: ${{ secrets.DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET }}
+          DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID: ${{ secrets.DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID }}
+          DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET: ${{ secrets.DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET }}
           # better-auth trusted origins (WXYC/auto-dj-orchestrator#27 AC#4).
           # Not sensitive — it is a list of public origins — but carried through
           # the same allowlist as CREATE_AUTO_DJ_USER/DONATE_* above, because the
@@ -177,6 +198,12 @@ jobs:
             ENRICHMENT_SUPPRESS_LML_BUDGET) VALUE="$ENRICHMENT_SUPPRESS_LML_BUDGET" ;;
             DONATE_URL) VALUE="$DONATE_URL" ;;
             DONATE_ENABLED) VALUE="$DONATE_ENABLED" ;;
+            DIGITAL_ARCHIVE_STREAMING_ENABLED) VALUE="$DIGITAL_ARCHIVE_STREAMING_ENABLED" ;;
+            DIGITAL_ARCHIVE_SIGN_TTL_SECONDS) VALUE="$DIGITAL_ARCHIVE_SIGN_TTL_SECONDS" ;;
+            DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT) VALUE="$DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT" ;;
+            DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET) VALUE="$DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET" ;;
+            DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID) VALUE="$DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID" ;;
+            DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET) VALUE="$DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET" ;;
             BETTER_AUTH_TRUSTED_ORIGINS) VALUE="$BETTER_AUTH_TRUSTED_ORIGINS" ;;
             *)
               echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
