@@ -163,7 +163,13 @@ export const parseId3v2 = (buf: Buffer): Id3Tags => {
     const truncated = bodyEnd - bodyStart < frameSize;
 
     const field = WANTED_FRAMES[frameId];
-    if (field) {
+    // A frame whose body the ranged GET cut short is DROPPED, never
+    // half-decoded. Assigning the partial text would put a silently wrong
+    // value into grouping and fuzzy matching -- "Artist Whose Tag Overruns"
+    // arriving as "Art" would split an album across two groups, or match the
+    // wrong library row, with nothing to indicate it happened. A null is
+    // merely `ungroupable`, which the report surfaces. Fail closed.
+    if (field && !truncated) {
       const text = decodeTextFrame(buf.subarray(bodyStart, bodyEnd));
       if (text.length > 0) {
         if (NUMERIC_FIELDS.has(field)) {

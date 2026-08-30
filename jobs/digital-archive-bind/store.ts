@@ -5,7 +5,7 @@
  * imports exactly `S3Client`, `ListObjectsV2Command`, and `GetObjectCommand`
  * from `@aws-sdk/client-s3` -- no `Put*`/`Delete*`/`Copy*`/`*MultipartUpload*`
  * command is imported anywhere in this job, and
- * `tests/unit/jobs/digital-archive-bind/store-read-only.test.ts` greps this
+ * `tests/unit/jobs/digital-archive-bind/store.test.ts` greps this
  * file's own source for those names so a future edit can't reintroduce one
  * silently.
  *

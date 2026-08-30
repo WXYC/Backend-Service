@@ -31,15 +31,24 @@
  *                                       under a binding that was correct
  *                                       when it was made).
  *
- * **Watermark bound (comment 3, migration 0159): at most one
- * `digital_asset`-touching statement per write phase per outcome class.**
- * All new-slot inserts land in ONE multi-row `INSERT` (the trigger is
- * `FOR EACH STATEMENT`, so one INSERT of 4,000 rows costs the same one
- * advance as an INSERT of one row); all `--rebind-keys` reopens land in ONE
- * multi-row `UPDATE`. A run that only inserts costs exactly one advance; a
- * run that also reopens rejected slots costs at most two -- never one per
- * album. `digital_asset_file` carries no trigger, so its writes are free to
- * batch however is convenient.
+ * **Watermark bound (comment 3, migration 0159): one advance per write
+ * phase, enforced by the transaction rather than by statement counting.**
+ * `executeWrites` runs entirely inside `db.transaction`, and Postgres
+ * `now()` is transaction-start time, so every `FOR EACH STATEMENT` firing of
+ * `touch_library_watermark()` inside the phase writes the SAME instant --
+ * one advance however many statements touch `digital_asset`. That is what
+ * makes chunking safe: it decouples the watermark cost from the statement
+ * count, so the inserts below can be split to respect the bind-parameter
+ * ceiling without paying an advance per chunk. Every advance forces every
+ * iOS device to re-download the whole gzipped NDJSON catalog and rebuild its
+ * FTS5 index, so this is a real user-visible cost, not bookkeeping.
+ *
+ * The transaction is equally load-bearing for atomicity: the `digital_asset`
+ * INSERT and the `digital_asset_file` INSERT must commit together or not at
+ * all. Committed separately, a failure between them leaves `needs_review`
+ * assets holding zero files -- and `planWrites` deliberately leaves
+ * `needs_review` slots untouched, so no re-run would ever fill them. The
+ * only recovery would be hand-editing rows.
  */
 
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -161,6 +170,17 @@ export const planWrites = (
 
     if (existing.status === 'rejected') {
       if (candidateKeys.some((k) => rebindKeys.has(k))) {
+        // The same-run collision guard covers reopens too, not just fresh
+        // slots: two candidates resolving to one rejected slot (a
+        // `freeform/` copy and a `rotation/Heavy/` copy, say) with a rebind
+        // file naming a key from each would otherwise both reopen the SAME
+        // asset id -- putting a duplicate id in the VALUES-join UPDATE and
+        // pushing both albums' files onto one asset.
+        if (claimedThisRun.has(key)) {
+          plan.sameRunCollision.push({ libraryId: candidate.libraryId, discNumber, objectKeys: candidateKeys });
+          continue;
+        }
+        claimedThisRun.add(key);
         plan.rejectedReopened.push({ assetId: existing.id, matched: candidate });
       } else {
         plan.rejectedBlocked.push({ libraryId: candidate.libraryId, discNumber, objectKeys: candidateKeys });
@@ -242,60 +262,109 @@ const fileRowOf = (assetId: number, storeId: number, file: MatchedAlbum['candida
 });
 
 /**
- * Execute a plan: at most one `digital_asset` INSERT and one `digital_asset`
- * UPDATE, per the watermark constraint in this file's header. Runs outside
- * any long-lived transaction spanning the inventory/tag-read phases --
- * everything needed is already in memory by the time this is called, so the
- * DB round-trips here are the whole cost.
+ * Largest number of rows to put in one multi-row INSERT.
+ *
+ * postgres.js writes the Bind message's parameter count as an int16, so a
+ * single statement can carry at most 65,535 bind parameters, and drizzle
+ * emits one parameter per explicitly-provided column value (nulls included;
+ * only `undefined` becomes DEFAULT). `fileRowOf` supplies 15 columns, so an
+ * unchunked `digital_asset_file` INSERT overflows at 4,369 rows -- against a
+ * Space holding ~23,500 files. 1,000 rows is 15,000 parameters at today's
+ * widest row, leaving room for several more columns before this constant
+ * needs revisiting. Chunking costs nothing on the watermark because the
+ * whole phase is one transaction (see this file's header).
  */
-export const executeWrites = async (plan: WritePlan, storeId: number): Promise<WriteCounts> => {
-  let inserted = 0;
-  let reopened = 0;
-  const fileRows: ReturnType<typeof fileRowOf>[] = [];
+const INSERT_CHUNK_ROWS = 1_000;
 
-  if (plan.toInsert.length > 0) {
-    const inserts = plan.toInsert.map((m) => ({
-      library_id: m.libraryId,
-      provenance: PROVENANCE,
-      disc_number: m.candidate.discNumber,
-      status: 'needs_review' as const,
-      bind_note: m.bindNote,
-    }));
-    const returned = await db.insert(digital_asset).values(inserts).returning({ id: digital_asset.id });
-    inserted = returned.length;
-    plan.toInsert.forEach((m, i) => {
-      for (const file of m.candidate.files) fileRows.push(fileRowOf(returned[i].id, storeId, file));
-    });
-  }
-
-  if (plan.rejectedReopened.length > 0) {
-    // Single VALUES-join UPDATE so every reopen advances the watermark
-    // together, not once per row (docs/bulk-update-playbook.md).
-    const values = sql.join(
-      plan.rejectedReopened.map((r) => sql`(${r.assetId}::int, ${r.matched.bindNote}::text)`),
-      sql`, `
-    );
-    await db.execute(sql`
-      UPDATE ${digital_asset} AS d
-         SET status = 'needs_review', bind_note = v.bind_note
-        FROM (VALUES ${values}) AS v(id, bind_note)
-       WHERE d.id = v.id
-    `);
-    reopened = plan.rejectedReopened.length;
-
-    const reopenedIds = plan.rejectedReopened.map((r) => r.assetId);
-    await db.delete(digital_asset_file).where(inArray(digital_asset_file.asset_id, reopenedIds));
-    for (const r of plan.rejectedReopened) {
-      for (const file of r.matched.candidate.files) fileRows.push(fileRowOf(r.assetId, storeId, file));
-    }
-  }
-
-  if (fileRows.length > 0) {
-    await db.insert(digital_asset_file).values(fileRows);
-  }
-
-  return { inserted, reopened, filesWritten: fileRows.length };
+const chunk = <T>(rows: readonly T[], size: number): T[][] => {
+  const out: T[][] = [];
+  for (let i = 0; i < rows.length; i += size) out.push(rows.slice(i, i + size));
+  return out;
 };
+
+/**
+ * Execute a plan, atomically. Every statement runs in one transaction, which
+ * is what bounds the watermark to a single advance and what keeps assets and
+ * their files from committing separately (see this file's header for both).
+ * The inventory/tag-read phases stay outside it -- everything needed is
+ * already in memory by the time this is called.
+ */
+export const executeWrites = async (plan: WritePlan, storeId: number): Promise<WriteCounts> =>
+  db.transaction(async (tx) => {
+    let inserted = 0;
+    let reopened = 0;
+    const fileRows: ReturnType<typeof fileRowOf>[] = [];
+
+    if (plan.toInsert.length > 0) {
+      // Attach files to assets by SLOT, never by the position of the
+      // `RETURNING` rows. Postgres does not document row order for
+      // `INSERT ... VALUES ... RETURNING`, and chunking makes the old
+      // positional correspondence wrong across chunk boundaries as well.
+      // A divergence there would attach every album's files to a different
+      // album's asset -- silent mass mis-binding, no error, no failing test.
+      // `(library_id, disc_number)` is unique here because `provenance` is
+      // the constant PROVENANCE, matching the table's unique index.
+      const assetIdBySlot = new Map<string, number>();
+      for (const group of chunk(plan.toInsert, INSERT_CHUNK_ROWS)) {
+        const returned = await tx
+          .insert(digital_asset)
+          .values(
+            group.map((m) => ({
+              library_id: m.libraryId,
+              provenance: PROVENANCE,
+              disc_number: m.candidate.discNumber,
+              status: 'needs_review' as const,
+              bind_note: m.bindNote,
+            }))
+          )
+          .returning({
+            id: digital_asset.id,
+            library_id: digital_asset.library_id,
+            disc_number: digital_asset.disc_number,
+          });
+        for (const row of returned) assetIdBySlot.set(slotKey(row.library_id, row.disc_number), row.id);
+        inserted += returned.length;
+      }
+
+      for (const m of plan.toInsert) {
+        const key = slotKey(m.libraryId, m.candidate.discNumber);
+        const assetId = assetIdBySlot.get(key);
+        // Unreachable unless the INSERT silently dropped a row. Throwing
+        // rolls the whole transaction back, which is the point: a partial
+        // write here is the state no re-run can repair.
+        if (assetId === undefined) throw new Error(`digital_asset INSERT returned no row for slot ${key}`);
+        for (const file of m.candidate.files) fileRows.push(fileRowOf(assetId, storeId, file));
+      }
+    }
+
+    if (plan.rejectedReopened.length > 0) {
+      // Single VALUES-join UPDATE, matching the shape in
+      // docs/bulk-update-playbook.md.
+      const values = sql.join(
+        plan.rejectedReopened.map((r) => sql`(${r.assetId}::int, ${r.matched.bindNote}::text)`),
+        sql`, `
+      );
+      await tx.execute(sql`
+        UPDATE ${digital_asset} AS d
+           SET status = 'needs_review', bind_note = v.bind_note
+          FROM (VALUES ${values}) AS v(id, bind_note)
+         WHERE d.id = v.id
+      `);
+      reopened = plan.rejectedReopened.length;
+
+      const reopenedIds = plan.rejectedReopened.map((r) => r.assetId);
+      await tx.delete(digital_asset_file).where(inArray(digital_asset_file.asset_id, reopenedIds));
+      for (const r of plan.rejectedReopened) {
+        for (const file of r.matched.candidate.files) fileRows.push(fileRowOf(r.assetId, storeId, file));
+      }
+    }
+
+    for (const group of chunk(fileRows, INSERT_CHUNK_ROWS)) {
+      await tx.insert(digital_asset_file).values(group);
+    }
+
+    return { inserted, reopened, filesWritten: fileRows.length };
+  });
 
 export interface ApplyDecisionsResult {
   boundAttempted: number;
@@ -312,18 +381,27 @@ export interface ApplyDecisionsResult {
  * the whole file, matching the watermark-bound shape above.
  */
 export const applyReviewDecisions = async (
-  decisions: readonly { assetId: number; decision: 'bound' | 'rejected' }[]
+  decisions: readonly { assetId: number; decision: 'bound' | 'rejected'; note?: string | null }[]
 ): Promise<ApplyDecisionsResult> => {
   if (decisions.length === 0) return { boundAttempted: 0, rejectedAttempted: 0, rowsUpdated: 0 };
 
   const values = sql.join(
-    decisions.map((d) => sql`(${d.assetId}::int, ${d.decision}::text)`),
+    decisions.map((d) => sql`(${d.assetId}::int, ${d.decision}::text, ${d.note ?? null}::text)`),
     sql`, `
   );
+  // The reviewer's note is APPENDED to `bind_note`, not written over it: the
+  // existing value holds the matcher's own evidence (`exact`,
+  // `fuzzy:relaxed-key`), which is what a later reader needs in order to
+  // judge whether a rejection was the matcher's fault or the tags'. An empty
+  // note leaves the column untouched.
   const result = await db.execute(sql`
     UPDATE ${digital_asset} AS d
-       SET status = v.decision
-      FROM (VALUES ${values}) AS v(id, decision)
+       SET status = v.decision,
+           bind_note = CASE
+                         WHEN NULLIF(v.note, '') IS NULL THEN d.bind_note
+                         ELSE COALESCE(d.bind_note || ' | ', '') || 'review: ' || v.note
+                       END
+      FROM (VALUES ${values}) AS v(id, decision, note)
      WHERE d.id = v.id AND d.status = 'needs_review'
   `);
 
