@@ -354,9 +354,82 @@ describe('digital-archive-bind — REAL write functions (real PG)', () => {
     );
     expect(plan.toInsert).toHaveLength(1);
 
-    await expect(write.executeWrites(plan, storeId)).rejects.toThrow();
+    // Pinned to the constraint this test's own setup forces, not a bare
+    // `toThrow()`: an unrelated failure earlier in `executeWrites` (the
+    // slot-map guard, a connection error) would otherwise satisfy the
+    // assertion while proving nothing about rollback.
+    await expect(write.executeWrites(plan, storeId)).rejects.toThrow(/duplicate key|unique/i);
 
     const orphans = await sql`SELECT id FROM ${sql(SCHEMA)}.digital_asset WHERE library_id = ${libraryId}`;
     expect(orphans).toHaveLength(0); // the asset must not survive its files' failure
+  });
+
+  // BS#2319 review: `importReviewCsv` parses the reviewer's note and
+  // `applyReviewDecisions` used to discard it, so rejection reasons were lost
+  // on import. It is APPENDED rather than written over, because `bind_note`
+  // already holds the matcher's own evidence (`exact`, `fuzzy:relaxed-key`) —
+  // which is what tells a later reader whether a rejection was the matcher's
+  // fault or the tags'. The NULL case is the one worth pinning: naive
+  // concatenation against a NULL `bind_note` yields NULL and silently erases
+  // the note instead of storing it.
+  it('appends the reviewer note to bind_note, and leaves it alone when the note is empty', async () => {
+    const libNote = await seedLibrary('BS2319 Note Album');
+    const libEmpty = await seedLibrary('BS2319 Empty Note Album');
+    const libNull = await seedLibrary('BS2319 Null BindNote Album');
+    const storeId = await write.ensureStore();
+
+    const matchedFor = (libraryId, key) => ({
+      candidate: candidateAlbum({
+        contentKind: 'freeform',
+        artist: 'BS2319 Fixture Artist',
+        album: 'BS2319 Note Album',
+        objectKeys: [key],
+      }),
+      libraryId,
+      tier: 'exact',
+      bindNote: 'exact',
+    });
+
+    const plan = write.planWrites(
+      [
+        matchedFor(libNote, 'note-a.mp3'),
+        matchedFor(libEmpty, 'note-b.mp3'),
+        matchedFor(libNull, 'note-c.mp3'),
+      ],
+      [],
+      new Map(),
+      new Set()
+    );
+    await write.executeWrites(plan, storeId);
+
+    const seeded = await sql`
+      SELECT id, library_id FROM ${sql(SCHEMA)}.digital_asset
+       WHERE library_id = ANY(${[libNote, libEmpty, libNull]})
+    `;
+    seeded.forEach((r) => assetIds.push(r.id));
+    const idOf = (libraryId) => seeded.find((r) => r.library_id === libraryId).id;
+
+    // The third row starts with a NULL bind_note — the concatenation trap.
+    await sql`UPDATE ${sql(SCHEMA)}.digital_asset SET bind_note = NULL WHERE id = ${idOf(libNull)}`;
+
+    await write.applyReviewDecisions([
+      { assetId: idOf(libNote), decision: 'rejected', note: 'wrong album' },
+      { assetId: idOf(libEmpty), decision: 'bound', note: '' },
+      { assetId: idOf(libNull), decision: 'rejected', note: 'no such release' },
+    ]);
+
+    const after = await sql`
+      SELECT id, status, bind_note FROM ${sql(SCHEMA)}.digital_asset
+       WHERE id = ANY(${[idOf(libNote), idOf(libEmpty), idOf(libNull)]})
+    `;
+    const noteOf = (id) => after.find((r) => r.id === id).bind_note;
+
+    // Appended, with the matcher's evidence preserved ahead of it.
+    expect(noteOf(idOf(libNote))).toBe('exact | review: wrong album');
+    // Empty note leaves the column exactly as the matcher wrote it.
+    expect(noteOf(idOf(libEmpty))).toBe('exact');
+    // NULL prior note stores the review note alone — never NULL, and with no
+    // leading separator.
+    expect(noteOf(idOf(libNull))).toBe('review: no such release');
   });
 });

@@ -101,4 +101,44 @@ describe('digital-archive-bind planWrites', () => {
     expect(plan.toInsert[0].candidate.files[0].objectKey).toBe('freeform.mp3');
     expect(plan.sameRunCollision).toEqual([{ libraryId: 1, discNumber: 1, objectKeys: ['rotation.mp3'] }]);
   });
+
+  // The collision guard has to cover the reopen branch as well as the empty-slot
+  // one. Without it both candidates land in `rejectedReopened` carrying the SAME
+  // asset id, which puts a duplicate id in `executeWrites`'s VALUES-join UPDATE
+  // (Postgres then picks one `v` row arbitrarily) and pushes both albums' files
+  // onto that single asset — plus a unique-index abort if their keys overlap.
+  // Delete the `claimedThisRun` check in the `rejected` branch and this fails.
+  it('reports a same-run collision when two candidates reopen the same rejected slot', () => {
+    const existing: ExistingSlot[] = [{ id: 20, libraryId: 1, discNumber: 1, status: 'rejected' }];
+    const plan = planWrites(
+      [matchedOf(1, 1, ['freeform.mp3']), matchedOf(1, 1, ['rotation.mp3'])],
+      existing,
+      new Map(),
+      // A rebind file naming a key from each candidate — the case an operator
+      // reaches for when recovering an orphaned slot.
+      new Set(['freeform.mp3', 'rotation.mp3'])
+    );
+    expect(plan.rejectedReopened).toHaveLength(1);
+    expect(plan.rejectedReopened[0].assetId).toBe(20);
+    expect(plan.rejectedReopened[0].matched.candidate.files[0].objectKey).toBe('freeform.mp3');
+    expect(plan.sameRunCollision).toEqual([{ libraryId: 1, discNumber: 1, objectKeys: ['rotation.mp3'] }]);
+  });
+
+  // A candidate that doesn't win the rebind must not consume the slot claim:
+  // it was never queued, so a later candidate that DOES name a rebind key is
+  // still free to reopen. Guards against "fix" the collision by claiming the
+  // key on the blocked path too.
+  it('a rebind-less candidate leaves a later rebind-bearing one free to reopen the slot', () => {
+    const existing: ExistingSlot[] = [{ id: 20, libraryId: 1, discNumber: 1, status: 'rejected' }];
+    const plan = planWrites(
+      [matchedOf(1, 1, ['no-rebind.mp3']), matchedOf(1, 1, ['named.mp3'])],
+      existing,
+      new Map(),
+      new Set(['named.mp3'])
+    );
+    expect(plan.rejectedBlocked).toEqual([{ libraryId: 1, discNumber: 1, objectKeys: ['no-rebind.mp3'] }]);
+    expect(plan.rejectedReopened).toHaveLength(1);
+    expect(plan.rejectedReopened[0].matched.candidate.files[0].objectKey).toBe('named.mp3');
+    expect(plan.sameRunCollision).toHaveLength(0);
+  });
 });
