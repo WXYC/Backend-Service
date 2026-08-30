@@ -391,11 +391,7 @@ describe('digital-archive-bind — REAL write functions (real PG)', () => {
     });
 
     const plan = write.planWrites(
-      [
-        matchedFor(libNote, 'note-a.mp3'),
-        matchedFor(libEmpty, 'note-b.mp3'),
-        matchedFor(libNull, 'note-c.mp3'),
-      ],
+      [matchedFor(libNote, 'note-a.mp3'), matchedFor(libEmpty, 'note-b.mp3'), matchedFor(libNull, 'note-c.mp3')],
       [],
       new Map(),
       new Set()

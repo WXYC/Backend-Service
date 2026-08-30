@@ -52,8 +52,7 @@ const requireEnv = (name: string): string => {
  * back to `us-east-1` rather than throwing.
  */
 export const loadStoreConfigFromEnv = (): StoreConfig => {
-  const endpoint =
-    process.env.DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT || 'https://nyc3.digitaloceanspaces.com';
+  const endpoint = process.env.DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT || 'https://nyc3.digitaloceanspaces.com';
   return {
     endpoint,
     region: new URL(endpoint).hostname.split('.')[0] || 'us-east-1',
