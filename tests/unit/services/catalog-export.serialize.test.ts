@@ -32,6 +32,7 @@ const sampleRow = (overrides: Partial<CatalogExportRow> = {}): CatalogExportRow 
   artwork_url: 'https://example.test/doga.jpg',
   rotation_bin: 'H',
   rotation_kill_date: '2026-07-01',
+  has_digital_audio: false,
   ...overrides,
 });
 
@@ -73,6 +74,7 @@ describe('catalog-export.service: serializeCatalogNdjson', () => {
         'cross_reference_names',
         'format_name',
         'genre_name',
+        'has_digital_audio',
         'id',
         'label',
         'legacy_release_id',
@@ -154,6 +156,13 @@ describe('catalog-export.service: serializeCatalogNdjson', () => {
 
     expect(parsed.cross_reference_names).toHaveLength(1);
     expect(parsed.cross_reference_names[0]).toBe('Godspeed You! Black Emperor | GY!BE');
+  });
+
+  it('round-trips has_digital_audio (BS#2320)', () => {
+    const withAudio = JSON.parse(serializeCatalogNdjson([sampleRow({ has_digital_audio: true })]));
+    const withoutAudio = JSON.parse(serializeCatalogNdjson([sampleRow({ has_digital_audio: false })]));
+    expect(withAudio.has_digital_audio).toBe(true);
+    expect(withoutAudio.has_digital_audio).toBe(false);
   });
 
   it('ships an EMPTY ARRAY (not null, not absent) for an artist with no cross-references', () => {

@@ -266,6 +266,19 @@ services:
       # tests/integration/library-search-alias.spec.js exercises the LATERAL
       # against a seeded artist_search_alias variant ('Thee Oh Sees' → OHSEES).
       - CATALOG_SEARCH_ALIAS_ENABLED=${CATALOG_SEARCH_ALIAS_ENABLED:-true}
+      # Digital archive playback (BS#2320, epic WXYC/wxyc-dj-ios#135).
+      # Defaults to off in prod; CI flips it on so integration tests can
+      # exercise the presigned-manifest happy path and the has_digital_audio
+      # catalog-export column. presignGet never makes a network call — it is
+      # a local SigV4 computation — so a fake key/secret/endpoint is enough
+      # to produce a well-formed presigned URL in CI with no real DigitalOcean
+      # Spaces credentials.
+      - DIGITAL_ARCHIVE_STREAMING_ENABLED=${DIGITAL_ARCHIVE_STREAMING_ENABLED:-true}
+      - DIGITAL_ARCHIVE_SIGN_TTL_SECONDS=${DIGITAL_ARCHIVE_SIGN_TTL_SECONDS:-14400}
+      - DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT=${DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT:-https://nyc3.digitaloceanspaces.com}
+      - DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET=${DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET:-wxyc}
+      - DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID=${DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID:-test-key-id}
+      - DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET=${DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET:-test-secret}
       # Flowsheet Go-Live Intent (BS#2233/BS#2308). When ON, a caller must say
       # `intent: "join"` or `"takeover"` before joining a show they don't
       # belong to; an absent intent is a 409. CI flips it on so

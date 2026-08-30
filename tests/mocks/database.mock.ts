@@ -127,6 +127,34 @@ export const artists = {
 };
 export const genres = {};
 export const format = {};
+export const digital_asset_store = {
+  id: 'id',
+  name: 'name',
+};
+export const digital_asset = {
+  id: 'id',
+  library_id: 'library_id',
+  provenance: 'provenance',
+  disc_number: 'disc_number',
+  status: 'status',
+};
+export const digital_asset_file = {
+  id: 'id',
+  asset_id: 'asset_id',
+  store_id: 'store_id',
+  object_key: 'object_key',
+  codec: 'codec',
+  bitrate_kbps: 'bitrate_kbps',
+  track_number: 'track_number',
+  title: 'title',
+  duration_secs: 'duration_secs',
+  md5: 'md5',
+};
+export const catalog_export_flag_state = {
+  name: 'name',
+  value: 'value',
+  changed_at: 'changed_at',
+};
 export const rotation = {
   id: 'id',
   album_id: 'album_id',

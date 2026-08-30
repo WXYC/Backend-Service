@@ -48,6 +48,12 @@ const POP_RELEASE_TOTAL = 4; // seeded album_popularity.plays for the release ke
 const PROBE_POP_LIBFALLBACK = 7061; // NULL canonical -> ELSE branch key 'library:7061'
 const POP_LIBFALLBACK_KEY = `library:${PROBE_POP_LIBFALLBACK}`;
 const POP_LIBFALLBACK_TOTAL = 7; // seeded album_popularity.plays for the library: key
+// 7063 (7062 is library-query-sort-plays.spec.js's PROBE_HIGH). BS#2320:
+// has_digital_audio is a format-blind EXISTS against a `bound` digital_asset
+// row. This backend process runs with DIGITAL_ARCHIVE_STREAMING_ENABLED=true
+// in CI (dev_env/docker-compose.yml / .github/workflows/test.yml), so the
+// EXISTS clause is live, not the flag's forced-false branch.
+const PROBE_DIGITAL_AUDIO = 7063; // has a bound digital_asset row -> true
 
 // Exactly the export contract field set (#1468 AC + #1493 popularity + the four
 // BS#1965 library.db-producer fields), sorted.
@@ -63,6 +69,7 @@ const CONTRACT_KEYS = [
   'cross_reference_names',
   'format_name',
   'genre_name',
+  'has_digital_audio',
   'id',
   'label',
   'legacy_release_id',
@@ -231,6 +238,23 @@ describe('GET /library/catalog (BS#1468)', () => {
         PROBE_POP_LIBFALLBACK,
       ]
     );
+
+    // BS#2320: has_digital_audio probe. A library row with one `bound`
+    // digital_asset row must export true; PROBE_ACTIVE (no digital_asset row
+    // at all) is the false control, asserted below without any extra seeding.
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".library
+         (id, artist_id, genre_id, format_id, album_title, code_number, artist_name)
+       VALUES ($1, $2, $3, $4, 'BS#2320 Export Probe Digital Audio', 99, 'Shape Fixture Artist Alpha')
+       ON CONFLICT (id) DO NOTHING`,
+      [PROBE_DIGITAL_AUDIO, ART, GEN, FMT]
+    );
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".digital_asset (library_id, provenance, disc_number, status)
+       VALUES ($1, 'rotation_upload', 1, 'bound')
+       ON CONFLICT (library_id, provenance, disc_number) DO UPDATE SET status = 'bound'`,
+      [PROBE_DIGITAL_AUDIO]
+    );
   });
 
   afterAll(async () => {
@@ -241,7 +265,11 @@ describe('GET /library/catalog (BS#1468)', () => {
       // reaps the probe rotation rows.
       await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE album_id = $1`, [PROBE_PLAYS]);
       await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE album_id = $1`, [PROBE_POP_A]);
-      await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id IN ($1, $2, $3, $4, $5, $6, $7, $8)`, [
+      // digital_asset.library_id has no ON DELETE CASCADE (migration 0158),
+      // so the probe row must be reaped BEFORE the library delete below or
+      // the library delete fails on the FK.
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".digital_asset WHERE library_id = $1`, [PROBE_DIGITAL_AUDIO]);
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id IN ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [
         PROBE_ACTIVE,
         PROBE_EXPIRED,
         PROBE_PLAYS,
@@ -250,6 +278,7 @@ describe('GET /library/catalog (BS#1468)', () => {
         PROBE_POP_NULL,
         PROBE_POP_RELEASE,
         PROBE_POP_LIBFALLBACK,
+        PROBE_DIGITAL_AUDIO,
       ]);
       // album_popularity has no FK to library, so reap the seeded rows by their keys.
       await sql.unsafe(`DELETE FROM "${SCHEMA}".album_popularity WHERE logical_album_key IN ($1, $2, $3)`, [
@@ -320,6 +349,19 @@ describe('GET /library/catalog (BS#1468)', () => {
     // NULL; the export ships the real bin + the past kill_date.
     expect(expired.rotation_bin).toBe('M');
     expect(expired.rotation_kill_date).toBe('2024-07-01');
+  });
+
+  test('has_digital_audio is true for an album with a bound digital_asset row, false otherwise (BS#2320)', async () => {
+    const byId = new Map(parseRows(await getCatalog(auth)).map((r) => [r.id, r]));
+
+    const withAudio = byId.get(PROBE_DIGITAL_AUDIO);
+    expect(withAudio).toBeDefined();
+    expect(withAudio.has_digital_audio).toBe(true);
+
+    // PROBE_ACTIVE has no digital_asset row at all — the false control.
+    const withoutAudio = byId.get(PROBE_ACTIVE);
+    expect(withoutAudio).toBeDefined();
+    expect(withoutAudio.has_digital_audio).toBe(false);
   });
 
   test('artist_name is never null: a row with NULL library.artist_name falls back to the authoritative artists.artist_name', async () => {

@@ -102,12 +102,19 @@ describe('role statements (pinned)', () => {
   // to omitting the key, and this pin is where that stays true.
   const wxycOnly = {
     member: { bin: ['read', 'write'], catalog: ['read'], flowsheet: ['read'] },
-    dj: { bin: ['read', 'write'], catalog: ['read'], flowsheet: ['read', 'write'], album_reviews: ['read'] },
+    dj: {
+      bin: ['read', 'write'],
+      catalog: ['read'],
+      flowsheet: ['read', 'write'],
+      album_reviews: ['read'],
+      digital_archive: ['listen'],
+    },
     musicDirector: {
       bin: ['read', 'write'],
       catalog: ['read', 'write'],
       flowsheet: ['read', 'write', 'manage'],
       album_reviews: ['read'],
+      digital_archive: ['listen'],
     },
   } as const;
 
@@ -125,6 +132,7 @@ describe('role statements (pinned)', () => {
       catalog: ['read', 'write'],
       flowsheet: ['read', 'write', 'manage'],
       album_reviews: ['read'],
+      digital_archive: ['listen'],
     });
   });
 
