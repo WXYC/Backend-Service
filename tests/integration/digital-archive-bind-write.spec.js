@@ -358,7 +358,19 @@ describe('digital-archive-bind — REAL write functions (real PG)', () => {
     // `toThrow()`: an unrelated failure earlier in `executeWrites` (the
     // slot-map guard, a connection error) would otherwise satisfy the
     // assertion while proving nothing about rollback.
-    await expect(write.executeWrites(plan, storeId)).rejects.toThrow(/duplicate key|unique/i);
+    //
+    // Pinned on the SQLSTATE rather than the message, because drizzle wraps
+    // the driver error: `err.message` is only "Failed query: insert into
+    // digital_asset_file …", and the Postgres "duplicate key value violates
+    // unique constraint" text lives on `err.cause`. 23505 is unique_violation,
+    // and a code can't drift the way wording can.
+    const err = await write.executeWrites(plan, storeId).then(
+      () => {
+        throw new Error('executeWrites resolved; expected a unique violation on digital_asset_file');
+      },
+      (e) => e
+    );
+    expect(err.cause?.code ?? err.code).toBe('23505');
 
     const orphans = await sql`SELECT id FROM ${sql(SCHEMA)}.digital_asset WHERE library_id = ${libraryId}`;
     expect(orphans).toHaveLength(0); // the asset must not survive its files' failure
