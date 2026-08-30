@@ -1178,14 +1178,33 @@ export const getOpenShows: RequestHandler<object, unknown, unknown, { window_hou
  * need an override — a DJ who stopped logging at 9pm and stayed on the air
  * until 11pm leaves a show whose flowsheet cannot say so, and the operator can.
  *
- * Bounded on BOTH ends because each bound protects a public read. Below
- * `start_time` yields `end_time < start_time`, an interval that cannot overlap
- * anything, which hides the show from `GET /flowsheet/range` on the very day it
- * aired (the same hazard `resolveShowEndInstant`'s own floor exists for). Above
- * `now` yields a show claiming to have ended in the future, which sorts a
- * `show_end` marker above every real entry on the public flowsheet. Out of
- * range is a 400, never a silent clamp: an operator who mistypes a date should
- * learn that, not get a different answer than they asked for.
+ * Bounded on BOTH ends because each bound protects a public read. Above `now`
+ * yields a show claiming to have ended in the future, which sorts a `show_end`
+ * marker above every real entry on the public flowsheet.
+ *
+ * The floor is the DERIVED instant itself, not `start_time` (BS#2315): an
+ * override may only ever move the close LATER than the flowsheet's own answer.
+ * `start_time` alone let a show close before entries it still owns — start
+ * 02:00, entries through 05:00, `ended_at: 02:30` accepted — and that interval
+ * is wrong in the mirror image of the way `now()` is. `getShowsInTimeWindow`
+ * admits a closed show on `start_time < windowEnd AND end_time > windowStart`,
+ * so a 03:00-05:00 window drops it while `GET /flowsheet` still serves its
+ * entries from that span, and any "which show does this entry belong to"
+ * derivation from the interval contradicts the `show_id` FK and `show_djs`.
+ * A show with nothing logged has no last-entry instant, and there
+ * `resolveShowEndInstant` returns `start_time` — so the old bound survives
+ * exactly where it was the honest one.
+ *
+ * Closing a show BEFORE some of its entries is therefore not something this
+ * endpoint offers. When the entries are the thing that is wrong — a later DJ's
+ * rows absorbed into an abandoned show, the 2026-08-20 shape — the remedy is to
+ * re-point them (`jobs/flowsheet-show-split`) and then close, not to truncate
+ * the show around them.
+ *
+ * Out of range is a 400, never a silent clamp: an operator who mistypes a date
+ * should learn that, not get a different answer than they asked for. The
+ * rejection names the floor, because "too early" without "earlier than what"
+ * leaves the operator bisecting.
  */
 const resolveForceEndInstant = async (raw: unknown, show: Show): Promise<Date> => {
   if (raw === undefined || raw === null) {
@@ -1200,12 +1219,18 @@ const resolveForceEndInstant = async (raw: unknown, show: Show): Promise<Date> =
   if (Number.isNaN(endedAt.getTime())) {
     throw new WxycError('Bad Request: ended_at must be an ISO-8601 date-time string', 400);
   }
-  const startedAt = new Date(show.start_time);
-  if (endedAt.getTime() < startedAt.getTime()) {
-    throw new WxycError("Bad Request: ended_at must be at or after the show's start_time", 400);
-  }
+  // Checked before the floor is fetched so a mistyped year costs no query.
   if (endedAt.getTime() > Date.now()) {
     throw new WxycError('Bad Request: ended_at must not be in the future', 400);
+  }
+  const floor = await flowsheet_service.resolveShowEndInstant(show);
+  if (endedAt.getTime() < floor.getTime()) {
+    // `resolveShowEndInstant` collapses "nothing logged" and "last entry
+    // predates start_time" into the same `start_time` answer, so the two
+    // floors are told apart here by comparison rather than by a second query.
+    const because =
+      floor.getTime() > new Date(show.start_time).getTime() ? "the show's last logged entry" : "the show's start_time";
+    throw new WxycError(`Bad Request: ended_at must be at or after ${floor.toISOString()}, ${because}`, 400);
   }
   return endedAt;
 };
@@ -1253,7 +1278,8 @@ export const forceEndShow: RequestHandler<
   }
 
   // The instant the show actually stopped, not `now()` — see `endShow`. An
-  // operator may override it within `[start_time, now]`.
+  // operator may override it, but only upward: the window is
+  // `[resolveShowEndInstant(show), now]`.
   const endedAt = await resolveForceEndInstant(req.body?.ended_at, show);
 
   const finalizedShow: Show = await flowsheet_service.endShow(show, endedAt);

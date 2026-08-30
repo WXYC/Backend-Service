@@ -52,7 +52,13 @@ describe('operator close (BS#2235)', () => {
   let sql;
   const showIds = {};
 
-  const insertShow = async (key, { startedDaysAgo, endedDaysAgo = null, legacyDjName = null, entries = 0 }) => {
+  // `entriesDaysAgo` defaults to the show's own start, which is what every
+  // pre-BS#2315 probe wanted: a show whose last entry IS its start_time has one
+  // floor, not two, and cannot tell the old bound from the new one.
+  const insertShow = async (
+    key,
+    { startedDaysAgo, endedDaysAgo = null, legacyDjName = null, entries = 0, entriesDaysAgo = undefined }
+  ) => {
     const rows = await sql`
       INSERT INTO ${sql(SCHEMA)}.shows (start_time, end_time, legacy_dj_name)
       VALUES (
@@ -67,7 +73,10 @@ describe('operator close (BS#2235)', () => {
     for (let i = 1; i <= entries; i += 1) {
       await sql`
         INSERT INTO ${sql(SCHEMA)}.flowsheet (show_id, entry_type, play_order, message, add_time)
-        VALUES (${id}, 'message', ${i}, ${`BS2235 probe ${key} ${i}`}, ${daysAgo(startedDaysAgo)}::timestamptz)`;
+        VALUES (
+          ${id}, 'message', ${i}, ${`BS2235 probe ${key} ${i}`},
+          ${daysAgo(entriesDaysAgo ?? startedDaysAgo)}::timestamptz
+        )`;
     }
     return id;
   };
@@ -83,6 +92,22 @@ describe('operator close (BS#2235)', () => {
     await insertShow('closed', { startedDaysAgo: 4, endedDaysAgo: 4, legacyDjName: 'DJ Flacko', entries: 3 });
     await insertShow('ancient', { startedDaysAgo: 300, legacyDjName: 'DJ Flounder', entries: 1 });
     await insertShow('cohost', { startedDaysAgo: 3, legacyDjName: 'El Vaquero', entries: 5 });
+    // The BS#2315 shapes: a four-day gap between start_time and the last
+    // logged entry, which is the span the old `[start_time, now]` bound
+    // accepted in full. One show per 2xx case, since each close consumes it.
+    await insertShow('overrun', {
+      startedDaysAgo: 6,
+      entriesDaysAgo: 2,
+      legacyDjName: 'DJ Overrun',
+      entries: 3,
+    });
+    await insertShow('overrunHigh', {
+      startedDaysAgo: 6,
+      entriesDaysAgo: 2,
+      legacyDjName: 'DJ Overtime',
+      entries: 2,
+    });
+    await insertShow('unlogged', { startedDaysAgo: 6, legacyDjName: 'DJ Blank Slate', entries: 0 });
     await insertShow('current', { startedDaysAgo: 0, legacyDjName: 'dj barely there', entries: 2 });
   });
 
@@ -332,6 +357,84 @@ describe('operator close (BS#2235)', () => {
       const memberships = await sql`SELECT active FROM ${sql(SCHEMA)}.show_djs WHERE show_id = ${id}`;
       expect(memberships).toHaveLength(1);
       expect(memberships[0].active).toBe(false);
+    });
+
+    /**
+     * BS#2315. The override's floor is the DERIVED instant — the show's last
+     * logged entry, floored at `start_time` — not `start_time` alone.
+     *
+     * The bound it replaces was the mirror image of the `now()` defect two
+     * tests above. `now()` stretched a closed show over archive days it did
+     * not air in; `start_time` let one close before entries it still owns, so
+     * `getShowsInTimeWindow` dropped it from windows `GET /flowsheet` was
+     * still serving its entries in.
+     */
+    describe('ended_at override', () => {
+      const lastEntryOf = async (id) => {
+        const [{ latest }] = await sql`
+          SELECT max(add_time) AS latest FROM ${sql(SCHEMA)}.flowsheet WHERE show_id = ${id}`;
+        return new Date(latest);
+      };
+
+      const forceEnd = (id, endedAt) =>
+        request
+          .post(`/flowsheet/shows/${id}/force-end`)
+          .set('Authorization', global.access_token)
+          .send({ ended_at: endedAt });
+
+      const endTimeOf = async (id) => {
+        const [row] = await sql`SELECT end_time FROM ${sql(SCHEMA)}.shows WHERE id = ${id}`;
+        return row.end_time;
+      };
+
+      // Four days after start_time and two days before the last entry: inside
+      // the old bound, outside the new one.
+      it('rejects an instant below the last logged entry, naming the floor', async () => {
+        const id = showIds.overrun;
+        const floor = await lastEntryOf(id);
+
+        const res = await forceEnd(id, daysAgo(4));
+
+        expect(res.status).toBe(400);
+        expect(res.body.message).toContain(floor.toISOString());
+        expect(await endTimeOf(id)).toBeNull();
+      });
+
+      it('accepts the floor exactly and stamps it', async () => {
+        const id = showIds.overrun;
+        const floor = await lastEntryOf(id);
+
+        const res = await forceEnd(id, floor.toISOString());
+
+        expect(res.status).toBe(200);
+        expect(new Date(await endTimeOf(id)).getTime()).toBe(floor.getTime());
+      });
+
+      // The case the override exists for: a DJ who stopped logging two days
+      // before they actually went off the air.
+      it('accepts an instant above the floor', async () => {
+        const id = showIds.overrunHigh;
+        const above = daysAgo(1);
+
+        const res = await forceEnd(id, above);
+
+        expect(res.status).toBe(200);
+        expect(new Date(await endTimeOf(id)).getTime()).toBe(new Date(above).getTime());
+      });
+
+      // Nothing logged means no last-entry instant, so the floor degrades to
+      // `start_time` — the one case where closing at the start is honest, and
+      // the shape of the entire legacy open-show backlog.
+      it('accepts start_time on a show with no entries', async () => {
+        const id = showIds.unlogged;
+        const [{ start_time: startTime }] = await sql`
+          SELECT start_time FROM ${sql(SCHEMA)}.shows WHERE id = ${id}`;
+
+        const res = await forceEnd(id, new Date(startTime).toISOString());
+
+        expect(res.status).toBe(200);
+        expect(new Date(await endTimeOf(id)).getTime()).toBe(new Date(startTime).getTime());
+      });
     });
   });
 });
