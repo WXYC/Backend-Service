@@ -85,6 +85,7 @@ import type { CriticReviewItem } from '@wxyc/shared/dtos';
 import {
   ALBUM_METADATA_PROJECTION_WITHOUT_ARTWORK,
   suppressMislabeledStreamingUrls,
+  fillSynthesizedSearchUrls,
 } from '../utils/album-metadata-projection.js';
 import type { ConcertDTO } from './concerts.service.js';
 import { attachUpcomingShows, attachCriticReviews, getOnAirDJName } from './flowsheet.service.js';
@@ -951,6 +952,14 @@ type PlaycutMetadataRow = {
   discogs_unavailable: boolean | null;
   discogs_unavailable_note: string | null;
   metadata_status: string | null;
+  // #2339: search-URL-synthesis inputs. Pulled straight off `flowsheet`
+  // (not `GroupedPlaycut.artistName`/`releaseTitle`/`songTitle`, which come
+  // from the tubafrenzy mirror payload and can drift from these columns —
+  // mojibake era, name variants) so this surface synthesizes from the exact
+  // same text `/flowsheet`'s `transformToIFSEntry` does.
+  artist_name: string | null;
+  album_title: string | null;
+  track_title: string | null;
 };
 
 /**
@@ -1000,6 +1009,10 @@ async function enrichPlaycutMetadata(candidates: Array<{ id: number }>): Promise
         discogs_unavailable: library.discogs_unavailable,
         discogs_unavailable_note: library.discogs_unavailable_note,
         metadata_status: flowsheet.metadata_status,
+        // #2339 synthesis inputs — see PlaycutMetadataRow's doc comment.
+        artist_name: flowsheet.artist_name,
+        album_title: flowsheet.album_title,
+        track_title: flowsheet.track_title,
       })
       .from(flowsheet)
       .leftJoin(library, eq(library.id, flowsheet.album_id))
@@ -1217,14 +1230,31 @@ function applyPlaycutMetadata(grouped: GroupedPlaycut, meta: PlaycutMetadataRow)
   // Spotify/Apple was mislabeled at the LML boundary before #1712 shipped and
   // must not reach the hardwired iOS "Spotify"/"Apple Music" button. Same
   // guard, same helper, as the /flowsheet serve seam.
-  const { spotify_url, apple_music_url } = suppressMislabeledStreamingUrls(meta);
+  const { spotify_url: guardedSpotifyUrl, apple_music_url: guardedAppleMusicUrl } =
+    suppressMislabeledStreamingUrls(meta);
+  // #2339: request-time-only fill for whatever the host guard just left
+  // absent, same helper and same ordering (guard, THEN fill) as
+  // `transformToIFSEntry` — a suppressed mislabeled URL degrades to a
+  // synthesized one exactly as an outright-missing one does. Never
+  // persisted: `meta` (the DB row) is untouched, only this local response
+  // shape is filled.
+  const { spotify_url, apple_music_url, youtube_music_url, bandcamp_url, soundcloud_url } = fillSynthesizedSearchUrls(
+    {
+      spotify_url: guardedSpotifyUrl,
+      apple_music_url: guardedAppleMusicUrl,
+      youtube_music_url: meta.youtube_music_url,
+      bandcamp_url: meta.bandcamp_url,
+      soundcloud_url: meta.soundcloud_url,
+    },
+    { artist_name: meta.artist_name, album_title: meta.album_title, track_title: meta.track_title }
+  );
 
   setUrlField(grouped, 'discogsURL', meta.discogs_url);
   setUrlField(grouped, 'spotifyURL', spotify_url);
   setUrlField(grouped, 'appleMusicURL', apple_music_url);
-  setUrlField(grouped, 'youtubeMusicURL', meta.youtube_music_url);
-  setUrlField(grouped, 'bandcampURL', meta.bandcamp_url);
-  setUrlField(grouped, 'soundcloudURL', meta.soundcloud_url);
+  setUrlField(grouped, 'youtubeMusicURL', youtube_music_url);
+  setUrlField(grouped, 'bandcampURL', bandcamp_url);
+  setUrlField(grouped, 'soundcloudURL', soundcloud_url);
   setUrlField(grouped, 'artistWikipediaURL', meta.artist_wikipedia_url);
 
   if (meta.release_year !== null) {

@@ -34,10 +34,26 @@
  * (`library` is only needed for the sibling `artist_id` / `on_streaming` /
  * `discogs_unavailable` reads, which are NOT part of this projection — they
  * come off `library` directly.)
+ *
+ * A THIRD behavior lives one layer up, not here (#2339): when the COALESCE
+ * above (plus the host guard) still leaves a streaming URL absent, the two
+ * serializer seams — `transformToIFSEntry` in `flowsheet.service.ts` and
+ * `applyPlaycutMetadata` in `playlist-proxy.service.ts` — fill it with a
+ * synthesized search URL via {@link fillSynthesizedSearchUrls}, mirroring
+ * `GET /proxy/metadata/album`'s degradation (BS#1184/#1185). It is
+ * deliberately NOT folded into this SQL projection: URL-encoding
+ * artist/album/track text is a TS concern (`SearchUrlProvider` /
+ * `synthesizeSearchUrls`), and — more importantly — this projection is a
+ * pure read of persisted state, while a synthesized URL must never be
+ * persisted (#1192 — a synthesized Spotify/Apple link would launder a
+ * "couldn't verify" signal into a clickable button on disk). Keeping
+ * synthesis in TS, downstream of this SELECT, keeps that boundary visible:
+ * nothing this projection returns is ever fabricated, only coalesced.
  */
 import { album_metadata, flowsheet } from '@wxyc/database';
 import { sql } from 'drizzle-orm';
 import { isSpotifyUrl, isAppleMusicUrl } from '@wxyc/lml-client';
+import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
 
 /**
  * Every coalesced album-metadata field EXCEPT `artwork_url`.
@@ -101,5 +117,59 @@ export function suppressMislabeledStreamingUrls(raw: StreamingUrlPair): Streamin
   return {
     spotify_url: isSpotifyUrl(raw.spotify_url) ? raw.spotify_url : null,
     apple_music_url: isAppleMusicUrl(raw.apple_music_url) ? raw.apple_music_url : null,
+  };
+}
+
+/** The five request-time-synthesizable streaming URL fields (#2339). */
+export interface SynthesizableStreamingUrls {
+  spotify_url: string | null;
+  apple_music_url: string | null;
+  youtube_music_url: string | null;
+  bandcamp_url: string | null;
+  soundcloud_url: string | null;
+}
+
+const searchUrlProvider = new SearchUrlProvider();
+
+/**
+ * Request-time fallback fill (#2339): whatever is still `null` after the
+ * COALESCE + BS#1714 host guard gets a synthesized search URL, the same
+ * `SearchUrlProvider.getAllSearchUrls` degradation `GET /proxy/metadata/album`
+ * already applies at request time (BS#1184/#1185). A populated value — verified
+ * or already-suppressed-then-filled — always wins; this only fills absences.
+ * Never persisted (#1192): callers must apply this to the *response* object,
+ * never write the result back to `album_metadata` or `flowsheet`.
+ *
+ * Requires a non-blank `artist_name` to have anything to search on — mirrors
+ * `FSEntryFieldsRaw.rotation_bin`'s "looks like a real track" gate just above
+ * it in `flowsheet.service.ts`. A marker/talkset/breakpoint row (or a track
+ * row that somehow lost its artist name) degrades to nulls exactly as before.
+ */
+export function fillSynthesizedSearchUrls(
+  urls: SynthesizableStreamingUrls,
+  text: { artist_name: string | null; album_title: string | null; track_title: string | null }
+): SynthesizableStreamingUrls {
+  if (!text.artist_name) return urls;
+  if (
+    urls.spotify_url !== null &&
+    urls.apple_music_url !== null &&
+    urls.youtube_music_url !== null &&
+    urls.bandcamp_url !== null &&
+    urls.soundcloud_url !== null
+  ) {
+    return urls;
+  }
+
+  const fallback = searchUrlProvider.getAllSearchUrls(
+    text.artist_name,
+    text.album_title ?? undefined,
+    text.track_title ?? undefined
+  );
+  return {
+    spotify_url: urls.spotify_url ?? fallback.spotifyUrl,
+    apple_music_url: urls.apple_music_url ?? fallback.appleMusicUrl,
+    youtube_music_url: urls.youtube_music_url ?? fallback.youtubeMusicUrl,
+    bandcamp_url: urls.bandcamp_url ?? fallback.bandcampUrl,
+    soundcloud_url: urls.soundcloud_url ?? fallback.soundcloudUrl,
   };
 }

@@ -1003,6 +1003,72 @@ describe('playlist-proxy.service', () => {
       expect(Object.prototype.hasOwnProperty.call(pc, 'metadataStatus')).toBe(false);
     });
 
+    // #2339: the legacy `?v=2` grouped payload must degrade the same way the
+    // V2 flowsheet feed does — a still-absent streaming URL after the
+    // COALESCE/host-guard gets a synthesized search URL rather than reaching
+    // the wire as omitted, exactly mirroring `GET /proxy/metadata/album`
+    // (BS#1184/#1185). Synthesized from `flowsheet.artist_name`/
+    // `album_title`/`track_title` (added to `enrichPlaycutMetadata`'s select
+    // by this ticket), never from `GroupedPlaycut.artistName`/`releaseTitle`/
+    // `songTitle` (the tubafrenzy-mirror-derived legacy fields).
+    describe('streaming-URL search-url fill (#2339)', () => {
+      it('fills all five absent streaming URLs with synthesized search URLs', async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        mockMetadataWhere.mockResolvedValue([
+          {
+            ...emptyMetadata,
+            artist_name: jessicaPrattRow.artist_name,
+            album_title: jessicaPrattRow.album_title,
+            track_title: jessicaPrattRow.track_title,
+          },
+        ]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        expect(pc.spotifyURL).toBe('https://open.spotify.com/search/Jessica%20Pratt%20Back%2C%20Baby');
+        expect(pc.appleMusicURL).toBe('https://music.apple.com/search?term=Jessica%20Pratt%20Back%2C%20Baby');
+        expect(pc.youtubeMusicURL).toBe('https://music.youtube.com/search?q=Jessica%20Pratt%20Back%2C%20Baby');
+        expect(pc.bandcampURL).toBe('https://bandcamp.com/search?q=Jessica%20Pratt%20On%20Your%20Own%20Love%20Again');
+        expect(pc.soundcloudURL).toBe('https://soundcloud.com/search?q=Jessica%20Pratt%20Back%2C%20Baby');
+      });
+
+      it('a verified persisted URL still wins over the fill', async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        mockMetadataWhere.mockResolvedValue([
+          {
+            ...emptyMetadata,
+            artist_name: jessicaPrattRow.artist_name,
+            album_title: jessicaPrattRow.album_title,
+            track_title: jessicaPrattRow.track_title,
+            spotify_url: 'https://open.spotify.com/album/genuine',
+          },
+        ]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        expect(pc.spotifyURL).toBe('https://open.spotify.com/album/genuine');
+        expect(pc.appleMusicURL).not.toBeUndefined();
+      });
+
+      it('a suppressed mislabeled host degrades to a synthesized URL rather than staying omitted', async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        mockMetadataWhere.mockResolvedValue([
+          {
+            ...emptyMetadata,
+            artist_name: jessicaPrattRow.artist_name,
+            album_title: jessicaPrattRow.album_title,
+            track_title: jessicaPrattRow.track_title,
+            // Mislabeled at the LML boundary (BS#1714) — a Deezer URL under spotify_url.
+            spotify_url: 'https://www.deezer.com/album/254381182',
+          },
+        ]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        expect(pc.spotifyURL).toBe('https://open.spotify.com/search/Jessica%20Pratt%20Back%2C%20Baby');
+      });
+    });
+
     // On shipped iOS 3.2, `metadataStatus` is a CONTROL field, not data: a
     // terminal value makes `PlaycutDetailView.loadMetadata()` render straight
     // from the inline fields and never call `/proxy/metadata/album`
