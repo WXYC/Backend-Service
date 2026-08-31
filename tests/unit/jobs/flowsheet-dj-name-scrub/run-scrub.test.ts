@@ -17,6 +17,7 @@ import {
   countHarmfulRecomputes,
   selectHarmCandidateShows,
   type PreflightRow,
+  ACCEPTED_LEGACY_SHOW_IDS,
   refusesForEmptyPiiIndex,
   emptyPiiIndexMessage,
   runScrub,
@@ -453,6 +454,7 @@ describe('change-class provenance reaches the summary', () => {
  */
 const harmfulRow = (over: Partial<PreflightRow> = {}): PreflightRow => ({
   entry_type: 'track',
+  legacy_show_id: 999999,
   dj_name: 'some other name',
   dj_name_override: null,
   legacy_dj_name: 'A. Hearst',
@@ -477,16 +479,49 @@ const harmfulRow = (over: Partial<PreflightRow> = {}): PreflightRow => ({
  */
 describe('harmful-recompute precondition gate', () => {
   it('counts a row the pass would rewrite to a roster real name', () => {
-    expect(countHarmfulRecomputes([harmfulRow()], new Set(['A. Hearst']))).toBe(1);
+    expect(countHarmfulRecomputes([harmfulRow()], new Set(['A. Hearst']))).toEqual({ harmful: 1, accepted: 0 });
   });
 
   it('does NOT count an already-current row — the pass skips it, so nothing is written', () => {
     // This is the 14,581-of-14,663 case, and the reason the old proxy was wrong.
-    expect(countHarmfulRecomputes([harmfulRow({ dj_name: 'A. Hearst' })], new Set(['A. Hearst']))).toBe(0);
+    expect(countHarmfulRecomputes([harmfulRow({ dj_name: 'A. Hearst' })], new Set(['A. Hearst']))).toEqual({
+      harmful: 0,
+      accepted: 0,
+    });
   });
 
   it('does NOT count a change that writes something other than a real name', () => {
-    expect(countHarmfulRecomputes([harmfulRow({ legacy_dj_name: 'zorp' })], new Set(['A. Hearst']))).toBe(0);
+    expect(countHarmfulRecomputes([harmfulRow({ legacy_dj_name: 'zorp' })], new Set(['A. Hearst']))).toEqual({
+      harmful: 0,
+      accepted: 0,
+    });
+  });
+
+  /**
+   * Reviewed 2026-08-31 against the tubafrenzy backup of 2025-10-13: on these
+   * three shows the STORED value is `DJ_NAME` (the fuller legal name) and the
+   * recompute writes `DJ_HANDLE` (the short handle), so the write is strictly
+   * LESS identifying. The probe scores it as harm only because those handles
+   * are short first names that three current accounts also carry in
+   * `auth_user.real_name` — a semantic collision, not corruption.
+   */
+  it('excuses a reviewed acceptance, and REPORTS it rather than dropping it', () => {
+    const acceptedId = [...ACCEPTED_LEGACY_SHOW_IDS][0];
+    expect(countHarmfulRecomputes([harmfulRow({ legacy_show_id: acceptedId })], new Set(['A. Hearst']))).toEqual({
+      harmful: 0,
+      accepted: 1,
+    });
+  });
+
+  it('pins the acceptance list — adding to it is a reviewed decision, not a way to quiet the gate', () => {
+    expect([...ACCEPTED_LEGACY_SHOW_IDS].sort((a, b) => a - b)).toEqual([115609, 134431, 163809]);
+  });
+
+  it('does not excuse an unaccepted show that happens to sit beside an accepted one', () => {
+    expect(countHarmfulRecomputes([harmfulRow({ legacy_show_id: null })], new Set(['A. Hearst']))).toEqual({
+      harmful: 1,
+      accepted: 0,
+    });
   });
 
   it('selects candidate shows from BOTH recompute sources, not just legacy_dj_name', () => {
@@ -554,6 +589,26 @@ describe('harmful-recompute precondition gate', () => {
 
     expect(result.legacyDjNamePiiCount).toBe(1);
     expect(result.harmfulRecomputeCount).toBe(0);
+    expect(result.failed).toBe(false);
+    expect(loadMainPage).toHaveBeenCalled();
+  });
+
+  it('lets an accepted cohort through, and surfaces the acceptance on the result', async () => {
+    const loadMainPage = jest.fn(() => Promise.resolve([]));
+    const acceptedId = [...ACCEPTED_LEGACY_SHOW_IDS][0];
+
+    const result = await runScrub({
+      ...baseOpts(),
+      dryRun: false,
+      loadShowsLegacyDjNames: jest.fn(() =>
+        Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst', dj_name_override: null }])
+      ),
+      loadPreflightRows: jest.fn(() => Promise.resolve([harmfulRow({ legacy_show_id: acceptedId })])),
+      loadMainPage,
+    });
+
+    expect(result.harmfulRecomputeCount).toBe(0);
+    expect(result.acceptedRecomputeCount).toBe(1);
     expect(result.failed).toBe(false);
     expect(loadMainPage).toHaveBeenCalled();
   });
