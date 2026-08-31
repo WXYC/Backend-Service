@@ -237,10 +237,6 @@
       "labelName": "BS2103 Probe Records",
       "rotation": "false",
       "request": "false",
-      "spotifyURL": "https://open.spotify.com/search/Stereolab%20Brakhage",
-      "appleMusicURL": "https://music.apple.com/search?term=Stereolab%20Brakhage",
-      "youtubeMusicURL": "https://music.youtube.com/search?q=Stereolab%20Brakhage",
-      "soundcloudURL": "https://soundcloud.com/search?q=Stereolab%20Brakhage",
       "artistId": 7000,
       "discogsUnavailable": false
     },
@@ -267,8 +263,6 @@
       "labelName": "BS2103 Probe Records",
       "rotation": "false",
       "request": "false",
-      "spotifyURL": "https://open.spotify.com/search/Hermanos%20Guti%C3%A9rrez%20Tres%20Hermanos",
-      "appleMusicURL": "https://music.apple.com/search?term=Hermanos%20Guti%C3%A9rrez%20Tres%20Hermanos",
       "genres": [
         "Rock"
       ],

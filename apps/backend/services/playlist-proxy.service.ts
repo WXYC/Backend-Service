@@ -86,6 +86,7 @@ import {
   ALBUM_METADATA_PROJECTION_WITHOUT_ARTWORK,
   suppressMislabeledStreamingUrls,
   fillSynthesizedSearchUrls,
+  wireUrl,
   type SynthesizableStreamingUrls,
 } from '../utils/album-metadata-projection.js';
 import type { ConcertDTO } from './concerts.service.js';
@@ -103,77 +104,15 @@ function lookupKey(artist: string, album: string): string {
 /** SQL expression that computes the same lookup key from flowsheet columns. */
 const flowsheetLookupKey = sql<string>`lower(trim(${flowsheet.artist_name})) || '-' || lower(trim(coalesce(${flowsheet.album_title}, '')))`;
 
-/**
- * True iff `value` contains a character that makes `new URL()`'s verdict a
- * statement about a DIFFERENT string than the one we are about to emit.
- *
- * `wireUrl` validates with the WHATWG parser but emits the original text, so
- * every place the two disagree is a parser differential the wire inherits:
- *
- *   - **Backslash.** For the http(s) special schemes WHATWG folds `\` to `/`,
- *     so `new URL('https://www.discogs.com\\@evil.example/release/1')` reports
- *     hostname `www.discogs.com`. Foundation/RFC 3986 do NOT fold it, so the
- *     same bytes resolve to host `evil.example` on iOS. This is the identical
- *     differential `shared/lml-client/src/streaming-url-guard.ts`'s
- *     `safeHostname` opens with `if (url.includes('\\')) return null` (BS#1710);
- *     same reasoning, same verdict, at this seam.
- *   - **ASCII whitespace and control characters.** WHATWG *strips* raw tab, LF
- *     and CR anywhere in the input and percent-encodes other C0 characters and
- *     the space before parsing, so `'https://e.com/a\tb'` validates as
- *     `https://e.com/ab` — a URL that is not what we would emit. `.trim()`
- *     only reaches the ends. Foundation rejects the raw form, which is the
- *     throwing decode this whole helper exists to avoid.
+/*
+ * `hasWireUrlParserDifferential` and `wireUrl` moved to
+ * `../utils/album-metadata-projection.js` (#2339). They are imported below, not
+ * reimplemented: `wireUrl` is simultaneously this endpoint's OUTPUT filter and
+ * the read path's shared "does this streaming URL exist for the client"
+ * predicate, and the two must be one function or the fill's gate and the wire's
+ * key set can drift apart. Same collapse-the-copies rule BS#889 applied to
+ * `synthesizeSearchUrls`.
  */
-function hasWireUrlParserDifferential(value: string): boolean {
-  for (const char of value) {
-    const code = char.codePointAt(0) ?? 0;
-    // C0 controls + space (<= 0x20), DEL (0x7f), backslash (0x5c).
-    if (code <= 0x20 || code === 0x7f || code === 0x5c) return true;
-  }
-  return false;
-}
-
-/**
- * Normalize a persisted URL for the wire, or `undefined` to omit the key.
- *
- * iOS decodes every URL-typed playcut field with
- * `try container.decodeIfPresent(URL.self, forKey:)`. That is *throwing*, not
- * tolerant: a present-but-unparseable value raises `DecodingError` and fails
- * the whole `Playcut` decode, which empties the playlist for that listener.
- * `/flowsheet` can pass these through raw because its consumer decodes them as
- * strings; this endpoint cannot.
- *
- * Only an absolute `http`/`https` URL survives. Everything else — `''`,
- * whitespace, a relative path, a bare hostname, a scheme-relative `//host/...`,
- * a non-web scheme — is dropped rather than risked. Dropping a field costs one
- * missing button; emitting a bad one costs the whole playlist.
- *
- * REJECT, don't normalize. The emitted value is the trimmed ORIGINAL, never
- * `parsed.href`, so anything `new URL()` silently rewrites while parsing is a
- * differential between what was validated and what ships — see
- * {@link hasWireUrlParserDifferential}, which rejects those inputs outright.
- * Emitting `parsed.href` instead would close the same differentials, but it
- * would also percent-encode the ~21 production values carrying raw non-ASCII in
- * the path (`https://en.wikipedia.org/wiki/Nilüfer_Yanya` -> `…/Nil%C3%BCfer_…`),
- * which ship verbatim today and decode fine on iOS. Rejecting touches only the
- * hazardous inputs, leaves every good byte alone, and matches the repo's
- * existing precedent at the LML boundary (BS#1710).
- */
-function wireUrl(value: string | null | undefined): string | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim();
-  if (trimmed === '') return undefined;
-  if (hasWireUrlParserDifferential(trimmed)) return undefined;
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    return undefined;
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
-  if (parsed.hostname === '') return undefined;
-  return trimmed;
-}
 
 /**
  * Normalize a free-text wire field: the trimmed value, or `undefined` to omit

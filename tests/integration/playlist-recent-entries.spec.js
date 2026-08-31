@@ -634,7 +634,7 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
     // everything else uses /flowsheet's own-album_id projection.
     expect(lpEntry.artworkURL).toBe(CD_ARTWORK);
     // #2339's fill does not fire here: this album_metadata row holds artwork
-    // only, so the play carries zero real streaming URLs and stays past the
+    // only, so the play carries no wireable streaming URL and stops at the
     // fill's gate — no spotifyURL key, exactly as before the ticket.
     expect(Object.prototype.hasOwnProperty.call(lpEntry, 'spotifyURL')).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(lpEntry, 'discogsURL')).toBe(false);

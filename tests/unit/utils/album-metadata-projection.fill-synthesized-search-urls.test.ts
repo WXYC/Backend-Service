@@ -4,13 +4,14 @@
  * URL, mirroring `GET /proxy/metadata/album`'s degradation (BS#1184/#1185).
  *
  * The fill is GATED (owner decision, 2026-08-31): it only fires for a row whose
- * post-host-guard values already carry at least one REAL streaming URL —
- * non-null and non-blank. Shipped iOS 3.2 skips its live
- * `/proxy/metadata/album` fetch on `inline.streaming.hasAny`, so such a row
- * short-circuits inline regardless and the fill can only upgrade grey
- * Spotify/Apple buttons; a zero-streaming row must keep serving NULLs so the
- * live proxy fallback (full metadata plus its own synthesized links) still
- * fires.
+ * post-host-guard values already carry at least one streaming URL the client
+ * would actually see. "Would see" is `wireUrl`'s predicate — absolute http(s),
+ * no parser differential — so the gate bit and shipped iOS 3.2's
+ * `inline.streaming.hasAny` are the same bit by construction. Such a row skips
+ * its live `/proxy/metadata/album` fetch regardless, so the fill can only
+ * upgrade grey Spotify/Apple buttons; a row with no wireable streaming URL must
+ * keep serving NULLs so the live proxy fallback (full metadata plus its own
+ * synthesized links) still fires.
  */
 
 import {
@@ -32,7 +33,7 @@ const JUANA = { artist_name: 'Juana Molina', album_title: 'DOGA', track_title: '
 const DRAINED_YOUTUBE = 'https://music.youtube.com/search?q=Juana%20Molina%20la%20paradoja';
 
 describe('fillSynthesizedSearchUrls', () => {
-  describe('the gate: at least one real streaming URL', () => {
+  describe('the gate: at least one streaming URL the client would see', () => {
     it('fills the absent fields on a row that already carries one', () => {
       const filled = fillSynthesizedSearchUrls({ ...allNull, youtube_music_url: DRAINED_YOUTUBE }, JUANA);
 
@@ -47,7 +48,7 @@ describe('fillSynthesizedSearchUrls', () => {
       expect(fillSynthesizedSearchUrls(allNull, JUANA)).toEqual(allNull);
     });
 
-    it("does not count a blank as real: '' / whitespace-only leave the row zero-streaming", () => {
+    it("does not count a blank as present: '' / whitespace-only leave the row zero-streaming", () => {
       const filled = fillSynthesizedSearchUrls({ ...allNull, spotify_url: '', bandcamp_url: '   ' }, JUANA);
 
       // …and the blanks are normalized to null, so neither can reach the V1
@@ -55,11 +56,27 @@ describe('fillSynthesizedSearchUrls', () => {
       expect(filled).toEqual(allNull);
     });
 
-    it('counts a caller-supplied post-guard null as absent (a suppressed URL never re-qualifies its own row)', () => {
-      // `suppressMislabeledStreamingUrls` has already nulled the mislabeled
-      // spotify_url before this helper sees it, so the row reads as
-      // zero-streaming — BS#1714 degradation, unchanged.
-      expect(fillSynthesizedSearchUrls(allNull, JUANA)).toEqual(allNull);
+    // The adjudicated fix: a non-blank value the wire would never carry must
+    // not qualify its row, or the fill flips `streaming.hasAny` false -> true
+    // out of nothing and suppresses 3.2's live proxy fallback. Every shape here
+    // is one the columns permit and no write path validates — LML values reach
+    // youtube/bandcamp/soundcloud verbatim, and BS#1710's guard covers only
+    // spotify/apple.
+    it.each([
+      ['scheme-relative', '//open.spotify.com/album/xyz'],
+      ['bare hostname', 'juanamolina.bandcamp.com/album/doga'],
+      ['non-web scheme', 'javascript:alert(1)'],
+      ['raw-tab parser differential', 'https://music.youtube.com/playlist?list=OLAK5uy_\tabc'],
+      ['backslash parser differential', 'https://open.spotify.com\\@evil.example/album/1'],
+      ['relative path', '/album/doga'],
+    ])('does not count an unwireable value as present (%s)', (_label, hazard) => {
+      expect(fillSynthesizedSearchUrls({ ...allNull, bandcamp_url: hazard }, JUANA)).toEqual(allNull);
+    });
+
+    it('normalizes an unwireable value to null rather than passing it through', () => {
+      const filled = fillSynthesizedSearchUrls({ ...allNull, soundcloud_url: 'javascript:alert(1)' }, JUANA);
+
+      expect(filled.soundcloud_url).toBeNull();
     });
   });
 
@@ -71,6 +88,18 @@ describe('fillSynthesizedSearchUrls', () => {
       );
 
       expect(filled.spotify_url).toBe('https://open.spotify.com/search/Juana%20Molina%20la%20paradoja');
+    });
+
+    // An unwireable value is absent for the FILL too: on a qualifying row it
+    // degrades to a synthesized URL rather than surviving to be dropped
+    // downstream with no fallback left to run.
+    it('degrades an unwireable persisted value to a synthesized URL on a qualifying row', () => {
+      const filled = fillSynthesizedSearchUrls(
+        { ...allNull, bandcamp_url: 'juanamolina.bandcamp.com/album/doga', youtube_music_url: DRAINED_YOUTUBE },
+        JUANA
+      );
+
+      expect(filled.bandcamp_url).toBe('https://bandcamp.com/search?q=Juana%20Molina%20DOGA');
     });
 
     it('degrades a whitespace-only persisted value the same way', () => {
