@@ -10,7 +10,14 @@
  * at the untrusted-upstream boundary, before any writer persists it.
  */
 import type { LookupResponse } from '@wxyc/lml-client';
-import { isSpotifyUrl, isAppleMusicUrl, sanitizeLookupStreamingUrls } from '@wxyc/lml-client';
+import {
+  isSpotifyUrl,
+  isAppleMusicUrl,
+  isYouTubeMusicUrl,
+  isBandcampUrl,
+  isSoundcloudUrl,
+  sanitizeLookupStreamingUrls,
+} from '@wxyc/lml-client';
 
 describe('isSpotifyUrl', () => {
   it.each([
@@ -77,6 +84,90 @@ describe('isAppleMusicUrl', () => {
   });
 });
 
+describe('isYouTubeMusicUrl', () => {
+  it.each([
+    ['music.youtube.com browse (direct album link)', 'https://music.youtube.com/browse/MPREb_abc123'],
+    ['music.youtube.com search (synthesized fallback)', 'https://music.youtube.com/search?q=kid%20606'],
+    ['bare youtube.com apex', 'https://youtube.com/watch?v=abc'],
+    ['case-insensitive host', 'HTTPS://MUSIC.YOUTUBE.COM/browse/MPREb_abc123'],
+  ])('accepts a YouTube-host URL (%s)', (_label, url) => {
+    expect(isYouTubeMusicUrl(url)).toBe(true);
+  });
+
+  it.each([
+    ['Spotify', 'https://open.spotify.com/album/abc'],
+    ['scheme-relative', '//music.youtube.com/browse/MPREb_abc123'],
+    ['bare host, no scheme', 'music.youtube.com/browse/MPREb_abc123'],
+    ['non-web scheme', 'javascript:alert(1)'],
+    ['host-suffix spoof', 'https://youtube.com.evil.example/browse/x'],
+    ['backslash-authority spoof', 'https://youtube.com\\@evil.example/x'],
+    ['embedded tab', 'https://music.youtube.com/\tbrowse/x'],
+    ['embedded newline', 'https://music.youtube.com/\nbrowse/x'],
+    ['embedded space', 'https://music.youtube.com/browse/ x'],
+    ['not a URL', 'not a url'],
+    ['empty string', ''],
+    ['null', null],
+  ])('rejects a non-YouTube-Music URL (%s)', (_label, url) => {
+    expect(isYouTubeMusicUrl(url)).toBe(false);
+  });
+});
+
+describe('isBandcampUrl', () => {
+  it.each([
+    ['artist subdomain album (direct link)', 'https://autechre.bandcamp.com/album/confield'],
+    ['label/imprint-hosted subdomain', 'https://into-the-light.bandcamp.com/album/the-rules-of-the-game'],
+    ['bandcamp.com search (synthesized fallback)', 'https://bandcamp.com/search?q=kid%20606'],
+    ['bare bandcamp.com apex', 'https://bandcamp.com/foo'],
+  ])('accepts a Bandcamp-host URL (%s)', (_label, url) => {
+    expect(isBandcampUrl(url)).toBe(true);
+  });
+
+  it.each([
+    ['Spotify', 'https://open.spotify.com/album/abc'],
+    ['scheme-relative', '//artist.bandcamp.com/album/foo'],
+    ['bare host, no scheme', 'artist.bandcamp.com/album/foo'],
+    ['non-web scheme', 'javascript:alert(1)'],
+    ['host-suffix spoof', 'https://bandcamp.com.evil.example/album/foo'],
+    ['backslash-authority spoof', 'https://bandcamp.com\\@evil.example/x'],
+    ['embedded tab', 'https://artist.bandcamp.com/\talbum/foo'],
+    ['embedded newline', 'https://artist.bandcamp.com/\nalbum/foo'],
+    ['embedded space', 'https://artist.bandcamp.com/album/ foo'],
+    ['not a URL', 'not a url'],
+    ['empty string', ''],
+    ['null', null],
+  ])('rejects a non-Bandcamp URL (%s)', (_label, url) => {
+    expect(isBandcampUrl(url)).toBe(false);
+  });
+});
+
+describe('isSoundcloudUrl', () => {
+  it.each([
+    ['artist/track (direct link)', 'https://soundcloud.com/artist/track'],
+    ['soundcloud.com search (synthesized fallback)', 'https://soundcloud.com/search?q=kid%20606'],
+    ['www.soundcloud.com', 'https://www.soundcloud.com/artist/track'],
+    ['case-insensitive host', 'HTTPS://SOUNDCLOUD.COM/artist/track'],
+  ])('accepts a SoundCloud-host URL (%s)', (_label, url) => {
+    expect(isSoundcloudUrl(url)).toBe(true);
+  });
+
+  it.each([
+    ['Spotify', 'https://open.spotify.com/album/abc'],
+    ['scheme-relative', '//soundcloud.com/artist/track'],
+    ['bare host, no scheme', 'soundcloud.com/artist/track'],
+    ['non-web scheme', 'javascript:alert(1)'],
+    ['host-suffix spoof', 'https://soundcloud.com.evil.example/artist/track'],
+    ['backslash-authority spoof', 'https://soundcloud.com\\@evil.example/x'],
+    ['embedded tab', 'https://soundcloud.com/\tartist/track'],
+    ['embedded newline', 'https://soundcloud.com/\nartist/track'],
+    ['embedded space', 'https://soundcloud.com/artist/ track'],
+    ['not a URL', 'not a url'],
+    ['empty string', ''],
+    ['null', null],
+  ])('rejects a non-SoundCloud URL (%s)', (_label, url) => {
+    expect(isSoundcloudUrl(url)).toBe(false);
+  });
+});
+
 describe('sanitizeLookupStreamingUrls', () => {
   // The guard only reads `results[].artwork.{spotify_url,apple_music_url}`;
   // a minimal cast keeps the fixture legible without a full LibraryCatalogItem.
@@ -119,15 +210,49 @@ describe('sanitizeLookupStreamingUrls', () => {
     expect(sanitizeLookupStreamingUrls(resp).results[0].artwork?.apple_music_url).toBe(url);
   });
 
-  it('leaves other streaming slots untouched (only spotify/apple are host-guarded)', () => {
+  it('preserves genuine youtube_music_url, bandcamp_url and soundcloud_url values', () => {
     const resp = build({
       spotify_url: 'https://open.spotify.com/album/ok',
+      youtube_music_url: 'https://music.youtube.com/browse/MPREb_abc123',
       bandcamp_url: 'https://artist.bandcamp.com/album/foo',
       soundcloud_url: 'https://soundcloud.com/artist/track',
     });
     const out = sanitizeLookupStreamingUrls(resp).results[0].artwork;
+    expect(out?.youtube_music_url).toBe('https://music.youtube.com/browse/MPREb_abc123');
     expect(out?.bandcamp_url).toBe('https://artist.bandcamp.com/album/foo');
     expect(out?.soundcloud_url).toBe('https://soundcloud.com/artist/track');
+  });
+
+  it('nulls a mislabeled URL in the youtube_music_url slot', () => {
+    const resp = build({ youtube_music_url: 'https://www.deezer.com/album/1' });
+    expect(sanitizeLookupStreamingUrls(resp).results[0].artwork?.youtube_music_url).toBeNull();
+  });
+
+  it('nulls a mislabeled URL in the bandcamp_url slot', () => {
+    const resp = build({ bandcamp_url: 'https://www.deezer.com/album/1' });
+    expect(sanitizeLookupStreamingUrls(resp).results[0].artwork?.bandcamp_url).toBeNull();
+  });
+
+  it('nulls a mislabeled URL in the soundcloud_url slot', () => {
+    const resp = build({ soundcloud_url: 'https://www.deezer.com/album/1' });
+    expect(sanitizeLookupStreamingUrls(resp).results[0].artwork?.soundcloud_url).toBeNull();
+  });
+
+  it('nulls a whitespace-polluted value in the bandcamp_url slot (2026-08-11 audit shape)', () => {
+    const resp = build({ bandcamp_url: 'https://artist.bandcamp.com/\talbum/foo' });
+    expect(sanitizeLookupStreamingUrls(resp).results[0].artwork?.bandcamp_url).toBeNull();
+  });
+
+  it('preserves each genuine synthesized search-URL shape LML emits', () => {
+    const resp = build({
+      youtube_music_url: 'https://music.youtube.com/search?q=kid%20606',
+      bandcamp_url: 'https://bandcamp.com/search?q=kid%20606',
+      soundcloud_url: 'https://soundcloud.com/search?q=kid%20606',
+    });
+    const out = sanitizeLookupStreamingUrls(resp).results[0].artwork;
+    expect(out?.youtube_music_url).toBe('https://music.youtube.com/search?q=kid%20606');
+    expect(out?.bandcamp_url).toBe('https://bandcamp.com/search?q=kid%20606');
+    expect(out?.soundcloud_url).toBe('https://soundcloud.com/search?q=kid%20606');
   });
 
   it('tolerates a result item with no artwork', () => {

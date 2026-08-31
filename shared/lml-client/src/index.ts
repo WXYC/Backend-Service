@@ -52,9 +52,25 @@ export type {
 // — `sanitizeLookupStreamingUrls` is applied in `postLookup` +
 // `bulkLookupMetadata` below so every downstream writer + serve seam is
 // covered at one chokepoint. Imported (not just re-exported) so it's in
-// local scope for those callsites.
-import { isSpotifyUrl, isAppleMusicUrl, sanitizeLookupStreamingUrls } from './streaming-url-guard.js';
-export { isSpotifyUrl, isAppleMusicUrl, sanitizeLookupStreamingUrls };
+// local scope for those callsites. BS#2350 extended the same guard to the
+// three remaining streaming fields (`isYouTubeMusicUrl`/`isBandcampUrl`/
+// `isSoundcloudUrl`).
+import {
+  isSpotifyUrl,
+  isAppleMusicUrl,
+  isYouTubeMusicUrl,
+  isBandcampUrl,
+  isSoundcloudUrl,
+  sanitizeLookupStreamingUrls,
+} from './streaming-url-guard.js';
+export {
+  isSpotifyUrl,
+  isAppleMusicUrl,
+  isYouTubeMusicUrl,
+  isBandcampUrl,
+  isSoundcloudUrl,
+  sanitizeLookupStreamingUrls,
+};
 
 // BS#1356: shared search_type trust predicates. `isTrustedLmlAlbumMatch` is
 // the single authority every album-context write gate delegates to (the
