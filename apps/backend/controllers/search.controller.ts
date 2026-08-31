@@ -73,7 +73,8 @@ export const searchFlowsheetEndpoint: RequestHandler<object, unknown, unknown, S
 
     // totalPages stays in the response for backward compat with offset-mode
     // clients during the dj-site cursor migration. nextCursor is included
-    // only when the service produced one (cursor mode + full page).
+    // only when the service produced one (date sort + full page — BS#2344
+    // widened that from "cursor mode + full page").
     const body: Record<string, unknown> = { results, total, page, totalPages };
     if (nextCursor !== undefined) body.nextCursor = nextCursor;
     res.status(200).json(body);

@@ -8,18 +8,28 @@
  * first request of any session carries no cursor, so the forward chain had no
  * first link.
  *
- * Widening the gate alone would have been wrong, and that is what the walk
- * test below pins. Page 0 and cursor mode used to compile DIFFERENT `ORDER BY`
- * clauses: cursor mode ordered `add_time <dir>, id <dir>` (matching the
- * compound cursor predicate), page 0 ordered by `add_time` alone. Postgres is
- * free to return rows sharing an `add_time` in any order under the untied
- * clause, and batch-imported legacy entries all carry one import timestamp, so
- * tie groups are large and routinely straddle a page boundary. A cursor
- * derived from whichever row of the group happened to land last on page 0
- * would then skip or duplicate the rest of that group on page 2. So the
- * ordering is now deterministic whenever cursor pagination can apply
- * (`sort === 'date'`), cursor passed in or not, and `nextCursor` is emitted
- * off that deterministic last row.
+ * Widening the gate alone would have been wrong. Page 0 and cursor mode used
+ * to compile DIFFERENT `ORDER BY` clauses: cursor mode ordered
+ * `add_time <dir>, id <dir>` (matching the compound cursor predicate), page 0
+ * ordered by `add_time` alone. Postgres is free to return rows sharing an
+ * `add_time` in any order under the untied clause, and batch-imported legacy
+ * entries all carry one import timestamp, so tie groups are large and
+ * routinely straddle a page boundary. A cursor derived from whichever row of
+ * the group happened to land last on page 0 would then skip or duplicate the
+ * rest of that group. So the ordering is now deterministic whenever cursor
+ * pagination can apply (`sort === 'date'`), cursor passed in or not.
+ *
+ * The third piece is precision: the cursor's timestamp is selected from the
+ * query as a full-microsecond ISO string (`cursor_time`) rather than derived
+ * from `play_date`, which is a JS `Date` rendering in every code path that
+ * produces one and therefore floored to milliseconds. See `CURSOR_TIME_EXPR`.
+ *
+ * The end-to-end duplicate/skip symptom is pinned in
+ * `tests/integration/flowsheet-search-cursor-walk.spec.js`, which walks real
+ * pages against real Postgres. What belongs HERE is the compiled SQL — the
+ * ordering, the cursor predicate, and the cursor expression — because the unit
+ * suite mocks `@wxyc/database` and can see the statement but never a row's
+ * true timestamp resolution.
  *
  * Uses the real drizzle-orm `sql` tag (the unit suite auto-mocks it) compiled
  * with PgDialect, mirroring search.service.escape.test.ts and
@@ -78,121 +88,22 @@ beforeEach(() => {
 
 import { searchFlowsheet, encodeCursor } from '../../../apps/backend/services/search.service';
 
-const T = (hour: number) => new Date(`2026-08-30T${String(hour).padStart(2, '0')}:00:00.000Z`);
-
-type FixtureRow = { id: number; add_time: Date };
-
 /**
- * Nine track rows in three `add_time` groups, modelled on a batch import: one
- * singleton and two four-row tie groups. Under the deterministic
- * `add_time DESC, id DESC` ordering the canonical sequence is 9..1, and at
- * `limit: 3` BOTH page boundaries fall strictly inside a tie group (7|6 splits
- * the 11:00 group, 4|3 splits the 10:00 group) — which is exactly the shape
- * that a cursor taken off an untied page 0 gets wrong.
+ * A row as the DATA QUERY returns it — `play_date` and `cursor_time` are the
+ * same instant at two resolutions, which is the distinction the cursor rests
+ * on. `play_date` is millisecond-floored (it is what a JS `Date` can hold);
+ * `cursor_time` is the microsecond string Postgres rendered.
  */
-const FIXTURE: FixtureRow[] = [
-  { id: 9, add_time: T(12) },
-  { id: 8, add_time: T(11) },
-  { id: 7, add_time: T(11) },
-  { id: 6, add_time: T(11) },
-  { id: 5, add_time: T(11) },
-  { id: 4, add_time: T(10) },
-  { id: 3, add_time: T(10) },
-  { id: 2, add_time: T(10) },
-  { id: 1, add_time: T(10) },
-];
-
-const CANONICAL_DESC_IDS = [9, 8, 7, 6, 5, 4, 3, 2, 1];
-
-const asResultRow = (row: FixtureRow) => ({
-  id: row.id,
-  play_date: row.add_time,
+const makeRow = (overrides: Record<string, unknown> = {}) => ({
+  id: 1,
+  play_date: new Date('2026-08-30T12:00:00.123Z'),
+  cursor_time: '2026-08-30T12:00:00.123456Z',
   artist_name: 'Chuquimamani-Condori',
-  track_title: `Call Your Name #${row.id}`,
+  track_title: 'Call Your Name',
   album_title: 'Edits',
   record_label: 'self-released',
   show_id: 100,
   dj_name: 'DJ Test',
-});
-
-/**
- * A deliberately hostile stand-in for Postgres's freedom within a tie group.
- *
- * When the compiled `ORDER BY` carries the `id` tiebreaker, rows sharing an
- * `add_time` come back in the sort's own direction — the real index/sort
- * behaviour. When it does not, this returns the tie group in the OPPOSITE
- * direction: still a legal ordering under `ORDER BY add_time <dir>` alone, and
- * chosen so that any code depending on the untied clause's row order fails
- * loudly instead of passing by luck on a stable sort.
- */
-function orderRows(rows: FixtureRow[], hasIdTiebreak: boolean, ascending: boolean): FixtureRow[] {
-  const dir = ascending ? 1 : -1;
-  return [...rows].sort((a, b) => {
-    const byTime = dir * (a.add_time.getTime() - b.add_time.getTime());
-    if (byTime !== 0) return byTime;
-    return (hasIdTiebreak ? dir : -dir) * (a.id - b.id);
-  });
-}
-
-/**
- * Execute a compiled statement against FIXTURE, honouring the parts of the
- * query the pagination contract actually rests on: the compound cursor
- * predicate, the sort direction, the ORDER BY tiebreaker (or its absence),
- * LIMIT and OFFSET.
- *
- * Every value is read back through its `$n` placeholder rather than a fixed
- * parameter position, so the simulator does not quietly depend on how many
- * parameters the WHERE clause happens to contribute.
- */
-function runDataQuery(text: string, params: readonly unknown[]) {
-  const lower = text.toLowerCase();
-  const terms = orderByTerms(text, params);
-  const hasIdTiebreak = terms.length > 1 && terms[1].column === 'id';
-  const ascending = terms[0]?.direction === 'asc';
-
-  const boundNumber = (placeholder: string) => Number(params[Number(placeholder) - 1]);
-  const boundTimestamp = (placeholder: string) => {
-    const value = params[Number(placeholder) - 1];
-    if (typeof value !== 'string') throw new Error(`cursor timestamp bound as ${typeof value}, expected string`);
-    return Date.parse(value);
-  };
-
-  const limitMatch = lower.match(/\blimit \$(\d+)/);
-  const offsetMatch = lower.match(/\boffset \$(\d+)/);
-  const limit = limitMatch ? boundNumber(limitMatch[1]) : FIXTURE.length;
-  const offset = offsetMatch ? boundNumber(offsetMatch[1]) : 0;
-
-  let rows = orderRows(FIXTURE, hasIdTiebreak, ascending);
-
-  const cursorPredicate = lower.match(/\$(\d+)::timestamptz\s*,\s*\$(\d+)\s*\)/);
-  if (cursorPredicate) {
-    const cursorTime = boundTimestamp(cursorPredicate[1]);
-    const cursorId = boundNumber(cursorPredicate[2]);
-    // Row-wise `(add_time, id) < (cursor…)` — or `>` when ordering ascending.
-    rows = rows.filter((r) => {
-      const t = r.add_time.getTime();
-      const strictlyPast = ascending ? t > cursorTime : t < cursorTime;
-      const tiedAndPast = t === cursorTime && (ascending ? r.id > cursorId : r.id < cursorId);
-      return strictlyPast || tiedAndPast;
-    });
-  }
-
-  return rows.slice(offset, offset + limit).map(asResultRow);
-}
-
-/** Route data queries through the fixture simulator and answer counts from it. */
-function mockFixtureBackedExecute() {
-  (db.execute as jest.Mock).mockImplementation((stmt: unknown) => {
-    const { sql: text, params } = dialect.sqlToQuery(stmt as never);
-    if (text.toLowerCase().includes('count(*)')) {
-      return Promise.resolve([{ total: FIXTURE.length }]);
-    }
-    return Promise.resolve(runDataQuery(text, params));
-  });
-}
-
-const makeRow = (overrides: Record<string, unknown> = {}) => ({
-  ...asResultRow({ id: 1, add_time: T(12) }),
   ...overrides,
 });
 
@@ -204,16 +115,6 @@ const mockDataAndCount = (rows: unknown[], total: number) => {
 const fullPageOf = (limit: number) => Array.from({ length: limit }, (_, i) => makeRow({ id: 100 - i }));
 
 describe('BS#2344: nextCursor on the first page (no cursor passed in)', () => {
-  it('emits nextCursor for a full first page under sort=date with no cursor', async () => {
-    const rows = fullPageOf(50);
-    mockDataAndCount(rows, 1000);
-
-    const result = await searchFlowsheet({ q: '', page: 0, limit: 50, sort: 'date', order: 'desc' });
-
-    const last = result.results[49];
-    expect(result.nextCursor).toBe(encodeCursor(last.play_date, last.id));
-  });
-
   it.each([['desc' as const], ['asc' as const]])('emits nextCursor on a cold start in %s order', async (order) => {
     mockDataAndCount(fullPageOf(10), 1000);
 
@@ -313,52 +214,76 @@ describe('BS#2344: deterministic ordering wherever a cursor can be emitted', () 
   });
 });
 
-describe('BS#2344: cold-start walk across tie groups', () => {
-  it('walks the whole archive from no cursor without skipping or duplicating a row', async () => {
-    mockFixtureBackedExecute();
+describe('BS#2344: the compiled cursor predicate', () => {
+  it.each([
+    ['desc' as const, '<'],
+    ['asc' as const, '>'],
+  ])('compiles a strict row-wise (add_time, id) comparison for %s, and drops OFFSET', async (order, cmp) => {
+    mockDataAndCount([], 0);
 
-    const seen: number[] = [];
-    const pageSizes: number[] = [];
-    let cursor: string | undefined;
-    let requests = 0;
+    await searchFlowsheet({
+      q: '',
+      page: 3,
+      limit: 50,
+      sort: 'date',
+      order,
+      cursor: '2026-08-30T12:00:00.000Z_999',
+    });
 
-    do {
-      const result = await searchFlowsheet({ q: '', page: 0, limit: 3, sort: 'date', order: 'desc', cursor });
-      seen.push(...result.results.map((r) => r.id));
-      pageSizes.push(result.results.length);
-      cursor = result.nextCursor;
-      requests += 1;
-    } while (cursor !== undefined && requests < 10);
-
-    // Four pages of three, then one empty page. The final full page emits a
-    // cursor and costs one extra request that returns nothing — correct and
-    // standard for cursor pagination; avoiding it would mean counting.
-    expect(pageSizes).toEqual([3, 3, 3, 0]);
-    expect(requests).toBe(4);
-
-    // Every row exactly once, in order — no skip across the 7|6 boundary and
-    // no duplicate across the 4|3 one, the two tie-group splits.
-    expect(seen).toEqual(CANONICAL_DESC_IDS);
-    expect(new Set(seen).size).toBe(seen.length);
+    const { sql: text } = compiledExecuteCall(0);
+    // The mock binds columns as params, so the left-hand side of the
+    // comparison compiles to `($n, $m)`; what matters is that the operator
+    // is strict and the right-hand side is cast to timestamptz.
+    expect(text).toMatch(new RegExp(`\\)\\s*${cmp}\\s*\\(\\$\\d+::timestamptz`));
+    // `page: 3` above is deliberate: an inbound cursor replaces offset
+    // paging outright rather than compounding with it.
+    expect(text.toLowerCase()).not.toContain('offset');
   });
 
-  it('walks ascending order across the same tie groups', async () => {
-    mockFixtureBackedExecute();
+  it('keeps LIMIT/OFFSET when no cursor was supplied', async () => {
+    mockDataAndCount([], 0);
 
-    const seen: number[] = [];
-    let cursor: string | undefined;
-    let requests = 0;
+    await searchFlowsheet({ q: '', page: 3, limit: 50, sort: 'date', order: 'desc' });
 
-    do {
-      const result = await searchFlowsheet({ q: '', page: 0, limit: 3, sort: 'date', order: 'asc', cursor });
-      seen.push(...result.results.map((r) => r.id));
-      cursor = result.nextCursor;
-      requests += 1;
-    } while (cursor !== undefined && requests < 10);
+    const { sql: text } = compiledExecuteCall(0);
+    expect(text.toLowerCase()).toContain('offset');
+    expect(text).not.toMatch(/::timestamptz/);
+  });
+});
 
-    // Ascending, the two boundaries land at 3|4 and 6|7 — both inside a tie
-    // group, same as the descending walk.
-    expect(seen).toEqual([...CANONICAL_DESC_IDS].reverse());
-    expect(new Set(seen).size).toBe(seen.length);
+describe("BS#2344: the cursor carries the row's full timestamp resolution", () => {
+  it('selects the cursor timestamp from the query at microsecond precision', async () => {
+    mockDataAndCount([], 0);
+
+    await searchFlowsheet({ q: '', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+    const { sql: text } = compiledExecuteCall(0);
+    // `.US` is the microseconds field; anything less would floor the cursor
+    // below the boundary row's real add_time. Rendered by Postgres in UTC so
+    // the token does not vary with the session timezone.
+    expect(text).toMatch(/to_char\(\$\d+ AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS\.US"Z"'\) AS cursor_time/);
+  });
+
+  it('builds the cursor from cursor_time, never from the floored play_date', async () => {
+    // The two fields are the same instant at two resolutions. `play_date` is
+    // what the response contract carries and what a JS `Date` can hold;
+    // `cursor_time` is what Postgres actually stored.
+    mockDataAndCount([makeRow({ id: 42 })], 1000);
+
+    const result = await searchFlowsheet({ q: '', page: 0, limit: 1, sort: 'date', order: 'desc' });
+
+    expect(result.nextCursor).toBe(encodeCursor('2026-08-30T12:00:00.123456Z', 42));
+    expect(result.nextCursor).not.toBe(encodeCursor(result.results[0].play_date, 42));
+  });
+
+  it('keeps cursor_time out of the returned SearchResult objects', async () => {
+    // `SearchResult` is the api.yaml response contract; the cursor column is
+    // an implementation detail of the query and must not leak into it.
+    mockDataAndCount([makeRow()], 1);
+
+    const result = await searchFlowsheet({ q: '', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+    expect(result.results[0]).not.toHaveProperty('cursor_time');
+    expect(result.results[0].play_date).toBe('2026-08-30T12:00:00.123Z');
   });
 });
