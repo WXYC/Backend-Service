@@ -58,6 +58,7 @@ const baseOpts = () => ({
   liveActivityLookbackSeconds: 0,
   loadUsers: jest.fn(() => Promise.resolve(ROSTER)),
   loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([])),
+  loadPreflightRows: jest.fn(() => Promise.resolve([])),
   loadMainPage: pager<ScrubRow>([]),
   loadMessagePage: pager<MessageRow>([]),
   loadOrphanPage: pager<ScrubRow>([]),
@@ -115,21 +116,76 @@ describe('finding 2 — recomputed_is_roster_real_name is a loud warning, not a 
 });
 
 describe('finding 3 — shows.legacy_dj_name pre-flight', () => {
-  it('warns and captures when a shows.legacy_dj_name value is a roster real name', async () => {
+  /**
+   * A polluted show is REPORTED; only a row the pass would actually rewrite to
+   * a real name WARNS. Measured on production 2026-08-30: 392 polluted shows,
+   * 14,663 of their rows in scope, and 82 actual writes — the other 14,581 are
+   * `already_current` skips, because migration 0053 froze `flowsheet.dj_name`
+   * from the very `legacy_dj_name` the recompute returns.
+   */
+  it('reports a polluted show but stays SILENT when the pass would rewrite nothing', async () => {
     const opts = baseOpts();
-    opts.loadShowsLegacyDjNames = jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst' }]));
+    opts.loadShowsLegacyDjNames = jest.fn(() =>
+      Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst', dj_name_override: null }])
+    );
+    // The show's rows already hold the value the chain resolves — the pass
+    // skips every one of them, so there is nothing to warn about.
+    opts.loadPreflightRows = jest.fn(() =>
+      Promise.resolve([
+        {
+          entry_type: 'track' as const,
+          dj_name: 'A. Hearst',
+          dj_name_override: null,
+          legacy_dj_name: 'A. Hearst',
+          primary_dj_id: null,
+          user_found: false,
+          user_dj_name: null,
+        },
+      ])
+    );
 
     const result = await runScrub(opts);
 
     expect(result.legacyDjNamePiiCount).toBe(1);
-    expect(warnStepCalls('legacy_dj_name_pollution')).toHaveLength(1);
-    expect(captureStepCalls('legacy_dj_name_pollution')).toHaveLength(1);
+    expect(result.harmCandidateShowCount).toBe(1);
+    expect(result.harmfulRecomputeCount).toBe(0);
+    expect(warnStepCalls('harmful_recompute_detected')).toHaveLength(0);
+    expect(captureStepCalls('harmful_recompute_detected')).toHaveLength(0);
+  });
+
+  it('warns and captures when the pass WOULD rewrite a row to a roster real name', async () => {
+    const opts = baseOpts();
+    opts.loadShowsLegacyDjNames = jest.fn(() =>
+      Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst', dj_name_override: null }])
+    );
+    // Stored value disagrees with the chain, so this row really would change.
+    opts.loadPreflightRows = jest.fn(() =>
+      Promise.resolve([
+        {
+          entry_type: 'track' as const,
+          dj_name: 'some other name',
+          dj_name_override: null,
+          legacy_dj_name: 'A. Hearst',
+          primary_dj_id: null,
+          user_found: false,
+          user_dj_name: null,
+        },
+      ])
+    );
+
+    const result = await runScrub(opts);
+
+    expect(result.harmfulRecomputeCount).toBe(1);
+    expect(warnStepCalls('harmful_recompute_detected')).toHaveLength(1);
+    expect(captureStepCalls('harmful_recompute_detected')).toHaveLength(1);
   });
 
   it('runs before the first pass, in dry-run mode too', async () => {
     const opts = baseOpts();
     opts.dryRun = true;
-    opts.loadShowsLegacyDjNames = jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst' }]));
+    opts.loadShowsLegacyDjNames = jest.fn(() =>
+      Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst', dj_name_override: null }])
+    );
 
     await runScrub(opts);
 
@@ -138,12 +194,14 @@ describe('finding 3 — shows.legacy_dj_name pre-flight', () => {
 
   it('stays silent, and reports zero, when no legacy_dj_name is polluted', async () => {
     const opts = baseOpts();
-    opts.loadShowsLegacyDjNames = jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'genuine legacy handle' }]));
+    opts.loadShowsLegacyDjNames = jest.fn(() =>
+      Promise.resolve([{ id: 1, legacy_dj_name: 'genuine legacy handle', dj_name_override: null }])
+    );
 
     const result = await runScrub(opts);
 
     expect(result.legacyDjNamePiiCount).toBe(0);
-    expect(warnStepCalls('legacy_dj_name_pollution')).toHaveLength(0);
+    expect(warnStepCalls('harmful_recompute_detected')).toHaveLength(0);
   });
 
   it('fails the run, before any pass starts, when the pre-flight query itself throws', async () => {
@@ -160,9 +218,9 @@ describe('finding 3 — shows.legacy_dj_name pre-flight', () => {
     const opts = baseOpts();
     opts.loadShowsLegacyDjNames = jest.fn(() =>
       Promise.resolve([
-        { id: 1, legacy_dj_name: 'A. Hearst' },
-        { id: 2, legacy_dj_name: 'A. Hearst' },
-        { id: 3, legacy_dj_name: 'genuine legacy handle' },
+        { id: 1, legacy_dj_name: 'A. Hearst', dj_name_override: null },
+        { id: 2, legacy_dj_name: 'A. Hearst', dj_name_override: null },
+        { id: 3, legacy_dj_name: 'genuine legacy handle', dj_name_override: null },
       ])
     );
 
