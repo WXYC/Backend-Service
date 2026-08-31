@@ -14,6 +14,9 @@ import {
 const makeRow = (overrides: Partial<Record<string, unknown>> = {}) => ({
   id: 1,
   play_date: new Date('2024-06-15T14:30:00Z'),
+  // The data query selects this alongside play_date; it is what nextCursor is
+  // built from. See CURSOR_TIME_EXPR in search.service.ts.
+  cursor_time: '2024-06-15T14:30:00.000000Z',
   artist_name: 'Autechre',
   track_title: 'VI Scose Poise',
   album_title: 'Confield',
@@ -237,9 +240,14 @@ describe('cursor codec', () => {
 
 describe('searchFlowsheet cursor pagination', () => {
   it('returns nextCursor when results fill the page and cursor mode is active', async () => {
-    const rows = Array.from({ length: 50 }, (_, i) => ({
-      ...makeRow({ id: 100 - i, play_date: new Date(`2024-06-15T${String(i % 24).padStart(2, '0')}:00:00Z`) }),
-    }));
+    const rows = Array.from({ length: 50 }, (_, i) => {
+      const hour = String(i % 24).padStart(2, '0');
+      return makeRow({
+        id: 100 - i,
+        play_date: new Date(`2024-06-15T${hour}:00:00Z`),
+        cursor_time: `2024-06-15T${hour}:00:00.000000Z`,
+      });
+    });
     mockDataAndCount(rows, 1000);
 
     const result = await searchFlowsheet({
@@ -252,8 +260,7 @@ describe('searchFlowsheet cursor pagination', () => {
     });
 
     expect(result.results).toHaveLength(50);
-    const lastRow = result.results[49];
-    expect(result.nextCursor).toBe(encodeCursor(lastRow.play_date, lastRow.id));
+    expect(result.nextCursor).toBe(encodeCursor(rows[49].cursor_time, rows[49].id));
   });
 
   it('omits nextCursor when fewer rows are returned than requested', async () => {
@@ -288,8 +295,7 @@ describe('searchFlowsheet cursor pagination', () => {
       order: 'desc',
     });
 
-    const lastRow = result.results[49];
-    expect(result.nextCursor).toBe(encodeCursor(lastRow.play_date, lastRow.id));
+    expect(result.nextCursor).toBe(encodeCursor(rows[49].cursor_time, rows[49].id));
   });
 
   it('omits nextCursor when sort is not date even if cursor is provided', async () => {

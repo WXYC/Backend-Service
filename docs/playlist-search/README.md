@@ -87,6 +87,8 @@ CREATE INDEX flowsheet_track_add_time_idx
 
 Lets the planner satisfy `ORDER BY add_time DESC LIMIT 50` directly from the index, avoiding the in-memory sort. Also services the empty-query "show recent tracks" default the dj-site Previous Sets page is moving to.
 
+**Amended by step 3 (BS#2344).** The date sort now compiles `ORDER BY add_time <dir>, id <dir>`, so this index no longer satisfies the ordering outright: Postgres keeps the index scan and adds an Incremental Sort over each equal-`add_time` group. That is not the sort this index was built to remove — that one was over the whole trigram bitmap output, this one is over a single timestamp's tie group — and it is what buys the total order cursor pagination needs. See "Where the chain starts" below.
+
 ### 3. Cursor-based pagination
 
 The frontend already uses infinite scroll, so `OFFSET` is doing extra work for no benefit — its cost grows linearly with page depth because Postgres still has to scan and discard the skipped rows. Replacing it with a cursor (`WHERE (add_time, id) < (cursor_time, cursor_id)`) makes every page O(limit) regardless of depth and pairs cleanly with the new `add_time` index.
@@ -102,6 +104,8 @@ A final page holding exactly `limit` rows emits a cursor and costs one extra req
 **Compatibility plan.** The dj-site `useLazySearchPlaylistsQuery` is the only known consumer and currently reads `totalPages`. The response returns both `nextCursor` (on any full `sort=date` page) and `totalPages` (always) so dj-site can migrate when convenient. Once dj-site is migrated, `totalPages` and the `page` query parameter can be removed in a follow-up. New consumers should be guided to the cursor form from the start.
 
 A malformed cursor returns `400`. Encoding format is `${ISO_timestamp}_${id}` — opaque to clients in spirit, debuggable in practice.
+
+**The timestamp half is rendered by Postgres, not by JavaScript** (`CURSOR_TIME_EXPR` in `search.service.ts`), at the column's own microsecond resolution: `2026-08-30T12:00:00.123456Z_4711`. `add_time` is `timestamptz DEFAULT now()` and live inserts omit the column, so production rows carry microseconds a JS `Date` cannot hold. A cursor floored to milliseconds names an instant strictly before the boundary row while `parseCursor` binds it back at full precision, which duplicates the boundary row on every ascending page and steps over anything inside `(floor_ms(T), T)` descending. Today a raw `db.execute` happens to return Postgres's own text rendering — drizzle's postgres-js driver installs a transparent parser over OID 1184 — so the precision was never actually lost; selecting it explicitly makes that a property of the query rather than of a dependency, and produces the ISO-8601 form this section claims (the text rendering, `2026-08-30 12:00:00.1234+00`, is not one).
 
 ### 4. Generated `tsvector` column with hybrid trigram fallback
 

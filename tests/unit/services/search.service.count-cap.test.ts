@@ -37,6 +37,7 @@ import { searchFlowsheet, COUNT_CAP } from '../../../apps/backend/services/searc
 const makeRow = (overrides: Partial<Record<string, unknown>> = {}) => ({
   id: 1,
   play_date: new Date('2024-06-15T14:30:00Z'),
+  cursor_time: '2024-06-15T14:30:00.000000Z',
   artist_name: 'Juana Molina',
   track_title: 'la paradoja',
   album_title: 'DOGA',

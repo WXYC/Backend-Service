@@ -46,7 +46,19 @@ export function parseCursor(cursor: string): Cursor | null {
 
 type SearchResultRow = {
   id: number;
-  play_date: Date;
+  /**
+   * `Date | string` because which one arrives is the driver's decision, not
+   * this file's: a raw `db.execute` gets Postgres's text rendering while a
+   * typed query — and every unit test that mocks this row — gets a `Date`.
+   * `transformRow` normalizes both; see `CURSOR_TIME_EXPR` for the mechanism.
+   */
+  play_date: Date | string;
+  /**
+   * The same instant as a full-precision ISO-8601 UTC string, rendered by
+   * Postgres. This — never `play_date` — is what the emitted cursor is built
+   * from; `CURSOR_TIME_EXPR` says why.
+   */
+  cursor_time: string;
   artist_name: string | null;
   track_title: string | null;
   album_title: string | null;
@@ -92,6 +104,32 @@ export type SearchResult = {
 // stable (clients see a non-null string).
 const DJ_NAME_EXPR = sql`COALESCE(${flowsheet.dj_name}, 'Unknown DJ')`;
 
+/**
+ * The cursor's timestamp half, rendered by Postgres rather than by JavaScript.
+ *
+ * `add_time` is `timestamptz` (migration 0030 widened migration 0019's naive
+ * `timestamp`) defaulting to `now()`, which is microsecond-resolution, and
+ * every live insert omits the column — so production rows carry microseconds
+ * that a JS `Date` cannot hold. A `Date`-derived cursor would name
+ * `floor_ms(T)` rather than the boundary row's real `T`, while `parseCursor`
+ * binds it back at full `::timestamptz` precision: ascending, the row-value
+ * comparison `(T, id) > (floor_ms(T), id)` then re-serves the boundary row on
+ * every page; descending, any row inside the open interval `(floor_ms(T), T)`
+ * fails `< floor_ms(T)` and is stepped over.
+ *
+ * Today that does not happen, but only by accident of a dependency: drizzle's
+ * postgres-js driver installs a transparent parser over OID 1184 so its own
+ * column mappers can do the converting, which leaves a raw `db.execute` with
+ * Postgres's text rendering and its full precision. Nothing in this file asks
+ * for that, no test outside the integration tier can see it, and the unit
+ * suite's mocks assert the opposite shape. Selecting the cursor value
+ * explicitly makes the precision a property of the query instead of a
+ * property of the driver — and yields the ISO-8601 form
+ * `docs/playlist-search/README.md` already documents, which the text rendering
+ * (`2026-08-30 12:00:00.1234+00`) is not.
+ */
+const CURSOR_TIME_EXPR = sql`to_char(${flowsheet.add_time} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
 const SORT_MAP: Record<SearchParams['sort'], SQL> = {
   date: sql`${flowsheet.add_time}`,
   artist: sql`${flowsheet.artist_name}`,
@@ -118,20 +156,17 @@ export async function searchFlowsheet(
   const orderDirection = order === 'asc' ? sql`ASC` : sql`DESC`;
   const sortExpr = SORT_MAP[sort];
 
-  // Cursor pagination is only meaningful for date sort. Other sorts fall back
-  // to offset because their sort columns are not unique and there is no
-  // compound index to support a (sort_col, id) cursor predicate.
-  const parsedCursor = cursor !== undefined && sort === 'date' ? parseCursor(cursor) : null;
-  const useCursor = parsedCursor !== null;
-  const offset = useCursor ? 0 : page * limit;
-
   // Whether this request can take part in cursor pagination at all — as the
   // page that RECEIVES a cursor, as the page that EMITS one, or both. Date
-  // sort is the whole condition: `parseCursor` above is consulted only for
-  // `sort === 'date'`, so a cursor handed out under any other sort would be
-  // silently ignored on the way back in and the client would re-request the
-  // same page forever.
+  // sort is the whole condition: `parseCursor` is consulted only when this
+  // holds, so a cursor handed out under any other sort would be silently
+  // ignored on the way back in and the client would re-request the same page
+  // forever. Non-date sorts fall back to offset regardless — their sort
+  // columns are not unique and there is no compound (sort_col, id) index to
+  // support a cursor predicate for them.
   const cursorEligible = sort === 'date';
+  const parsedCursor = cursorEligible && cursor !== undefined ? parseCursor(cursor) : null;
+  const offset = parsedCursor !== null ? 0 : page * limit;
 
   const baseFrom = sql`
     FROM ${flowsheet}
@@ -150,8 +185,8 @@ export async function searchFlowsheet(
   // Add id as a tiebreaker whenever a cursor could be involved — received OR
   // handed out — so the ORDER BY matches the cursor predicate's compound key.
   //
-  // This is deliberately NOT gated on `useCursor` (BS#2344). `add_time` alone
-  // is not a total order: batch-imported legacy entries all carry the same
+  // This is deliberately NOT gated on an INBOUND cursor (BS#2344). `add_time`
+  // alone is not a total order: batch-imported legacy entries carry one shared
   // import timestamp, so tie groups are large and routinely straddle a page
   // boundary. Under the untied clause Postgres may return such a group in any
   // order, which is harmless while the page is only ever addressed by OFFSET
@@ -161,10 +196,19 @@ export async function searchFlowsheet(
   // first page emits a cursor now, so the first page has to be totally ordered
   // too.
   //
-  // Cost: the single-column `flowsheet_add_time_idx` still drives the scan and
-  // Postgres adds an Incremental Sort over each timestamp group — the same
-  // plan `getEntriesByPage` (BS#2133) and `fetchRecentRows` (BS#2132) already
-  // run for their `desc(add_time), desc(id)` reads. Non-date sorts keep the
+  // Cost: the partial `flowsheet_track_add_time_idx` (migration 0050) still
+  // drives the scan — its `WHERE entry_type = 'track'` predicate is this
+  // query's own, which is what 0050's header means by "matches the exact
+  // predicate in apps/backend/services/search.service.ts" — and Postgres adds
+  // an Incremental Sort over each timestamp group. (The unpartitioned ASC
+  // `flowsheet_add_time_idx` from migration 0144 is a different index, built
+  // for `GET /flowsheet/range`.) `getEntriesByPage` (BS#2133) and
+  // `fetchRecentRows` (BS#2132) measured that sort node in production and
+  // found it cheap, but neither measurement covers this query: both are
+  // DESC-only, unfiltered, and over small timestamp groups, where this one
+  // also serves `order=asc` and can carry a text predicate that changes which
+  // rows reach the sort. Read them as evidence that the plan SHAPE is
+  // affordable, not as a measurement of this query. Non-date sorts keep the
   // untied clause: they never emit or accept a cursor, so a tiebreaker there
   // would buy nothing and only add sort work.
   const orderByClause = cursorEligible
@@ -175,11 +219,12 @@ export async function searchFlowsheet(
   // forces Postgres to materialize the full match set before LIMIT can apply,
   // which defeats short-circuiting on the data side. Two queries let the data
   // query stop at LIMIT rows via index, while the count runs concurrently.
-  const limitClause = useCursor ? sql`LIMIT ${limit}` : sql`LIMIT ${limit} OFFSET ${offset}`;
+  const limitClause = parsedCursor !== null ? sql`LIMIT ${limit}` : sql`LIMIT ${limit} OFFSET ${offset}`;
   const dataQuery = sql`
     SELECT
       ${flowsheet.id},
       ${flowsheet.add_time} AS play_date,
+      ${CURSOR_TIME_EXPR} AS cursor_time,
       ${flowsheet.artist_name},
       ${flowsheet.track_title},
       ${flowsheet.album_title},
@@ -208,7 +253,8 @@ export async function searchFlowsheet(
     throw dataSettled.reason;
   }
 
-  const results = (dataSettled.value as unknown as SearchResultRow[]).map(transformRow);
+  const rows = dataSettled.value as unknown as SearchResultRow[];
+  const results = rows.map(transformRow);
 
   let total: number;
   if (countSettled.status === 'fulfilled') {
@@ -222,7 +268,10 @@ export async function searchFlowsheet(
     total = offset + results.length;
     Sentry.captureException(countSettled.reason, {
       tags: { subsystem: 'flowsheet-search' },
-      extra: { q, page, limit },
+      // `cursor`, not just `page`: in cursor mode `page` is always 0, so
+      // without the token there is nothing in this report that says WHERE in
+      // a walk the count gave out.
+      extra: { q, page, limit, cursor },
     });
     console.error('flowsheet search count query failed; returning lower-bound total', countSettled.reason);
   }
@@ -230,10 +279,10 @@ export async function searchFlowsheet(
   // nextCursor whenever this sort supports cursors AND we got a full page —
   // a short page means there are no more rows.
   //
-  // The gate is `cursorEligible`, not `useCursor` (BS#2344). Conditioning the
-  // emit on a cursor having been passed IN meant the first request of every
-  // session — which by definition carries none — never handed back the link to
-  // the second, so the forward chain had no first link and dj-site's
+  // The gate is `cursorEligible`, not "a cursor was passed in" (BS#2344).
+  // Conditioning the emit on an inbound cursor meant the first request of
+  // every session — which by definition carries none — never handed back the
+  // link to the second, so the forward chain had no first link and dj-site's
   // `getNextPageParam` stopped at one page. The page's own row count is the
   // only thing that says whether there is more; whether the caller arrived by
   // cursor or by offset says nothing about it.
@@ -244,8 +293,8 @@ export async function searchFlowsheet(
   // on every page, and the count here is capped (COUNT_CAP) precisely because
   // exact counts are what this endpoint cannot afford.
   const nextCursor =
-    cursorEligible && results.length === limit
-      ? encodeCursor(results[results.length - 1].play_date, results[results.length - 1].id)
+    cursorEligible && rows.length === limit
+      ? encodeCursor(rows[rows.length - 1].cursor_time, rows[rows.length - 1].id)
       : undefined;
 
   return nextCursor !== undefined ? { results, total, nextCursor } : { results, total };
