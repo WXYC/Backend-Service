@@ -28,7 +28,11 @@ import {
   lastLoggedShowEntryOrderBy,
   lastLoggedShowEntryOrderBySql,
 } from '@wxyc/database';
-import { ALBUM_METADATA_PROJECTION, suppressMislabeledStreamingUrls } from '../utils/album-metadata-projection.js';
+import {
+  ALBUM_METADATA_PROJECTION,
+  suppressMislabeledStreamingUrls,
+  fillSynthesizedSearchUrls,
+} from '../utils/album-metadata-projection.js';
 import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { lookupCriticReviewsByAlbumIds } from './album-metadata-lookup.service.js';
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
@@ -397,7 +401,24 @@ export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
   // (BS#2103) — see `suppressMislabeledStreamingUrls`. Applied once and
   // reused for both the top-level field and the nested `metadata` object
   // below.
-  const { spotify_url, apple_music_url } = suppressMislabeledStreamingUrls(raw);
+  const { spotify_url: guardedSpotifyUrl, apple_music_url: guardedAppleMusicUrl } =
+    suppressMislabeledStreamingUrls(raw);
+  // #2339: request-time-only fill for whatever the host guard just left
+  // absent, mirroring `GET /proxy/metadata/album`'s degradation so the same
+  // album doesn't grey out its streaming buttons on this endpoint alone. Runs
+  // AFTER the host guard so a suppressed mislabeled URL degrades to a
+  // synthesized one, same as an outright-missing one. Never persisted — this
+  // only touches the values below, not `raw` or any DB write.
+  const { spotify_url, apple_music_url, youtube_music_url, bandcamp_url, soundcloud_url } = fillSynthesizedSearchUrls(
+    {
+      spotify_url: guardedSpotifyUrl,
+      apple_music_url: guardedAppleMusicUrl,
+      youtube_music_url: raw.youtube_music_url,
+      bandcamp_url: raw.bandcamp_url,
+      soundcloud_url: raw.soundcloud_url,
+    },
+    { artist_name: raw.artist_name, album_title: raw.album_title, track_title: raw.track_title }
+  );
   return {
     id: raw.id,
     show_id: raw.show_id,
@@ -429,9 +450,9 @@ export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
     release_year: raw.release_year,
     spotify_url,
     apple_music_url,
-    youtube_music_url: raw.youtube_music_url,
-    bandcamp_url: raw.bandcamp_url,
-    soundcloud_url: raw.soundcloud_url,
+    youtube_music_url,
+    bandcamp_url,
+    soundcloud_url,
     artist_bio: raw.artist_bio,
     artist_wikipedia_url: raw.artist_wikipedia_url,
     on_streaming: raw.on_streaming ?? null,
@@ -452,9 +473,9 @@ export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
       release_year: raw.release_year,
       spotify_url,
       apple_music_url,
-      youtube_music_url: raw.youtube_music_url,
-      bandcamp_url: raw.bandcamp_url,
-      soundcloud_url: raw.soundcloud_url,
+      youtube_music_url,
+      bandcamp_url,
+      soundcloud_url,
       artist_bio: raw.artist_bio,
       artist_wikipedia_url: raw.artist_wikipedia_url,
       genres: raw.genres,

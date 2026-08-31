@@ -8,6 +8,13 @@ import { transformToIFSEntry, type FSEntryRaw } from '../../../apps/backend/serv
  * #1712's ingestion guard shipped; this seam host-guards them so a mislabeled
  * value never reaches the hardwired iOS "Spotify"/"Apple Music" button. Both the
  * top-level field and the nested `metadata` copy must be suppressed together.
+ *
+ * Since #2339, a value the guard just suppressed degrades to a synthesized
+ * search URL rather than staying `null` (the same fill every other absent
+ * streaming URL gets) — see `flowsheet.transformToIFSEntry.search-url-fill.test.ts`
+ * for the fill itself. The suppression assertions below were updated in that
+ * ticket to expect the synthesized fallback instead of `null`, since a raw
+ * makeRaw() fixture always carries a non-blank `artist_name`.
  */
 
 const makeRaw = (overrides: Partial<FSEntryRaw> = {}): FSEntryRaw => ({
@@ -55,22 +62,25 @@ const makeRaw = (overrides: Partial<FSEntryRaw> = {}): FSEntryRaw => ({
 });
 
 describe('transformToIFSEntry streaming-URL host guard (BS#1714)', () => {
-  it('suppresses a mislabeled spotify_url on both the top-level field and nested metadata', () => {
+  it('suppresses a mislabeled spotify_url on both the top-level field and nested metadata, degrading to a synthesized search URL (#2339)', () => {
     const entry = transformToIFSEntry(makeRaw({ spotify_url: 'https://www.deezer.com/album/254381182' }));
-    expect(entry.spotify_url).toBeNull();
-    expect(entry.metadata.spotify_url).toBeNull();
+    const expected = 'https://open.spotify.com/search/Juana%20Molina%20la%20paradoja';
+    expect(entry.spotify_url).toBe(expected);
+    expect(entry.metadata.spotify_url).toBe(expected);
   });
 
-  it('suppresses a mislabeled apple_music_url on both the top-level field and nested metadata', () => {
+  it('suppresses a mislabeled apple_music_url on both the top-level field and nested metadata, degrading to a synthesized search URL (#2339)', () => {
     const entry = transformToIFSEntry(makeRaw({ apple_music_url: 'https://tidal.com/browse/album/254381182' }));
-    expect(entry.apple_music_url).toBeNull();
-    expect(entry.metadata.apple_music_url).toBeNull();
+    const expected = 'https://music.apple.com/search?term=Juana%20Molina%20la%20paradoja';
+    expect(entry.apple_music_url).toBe(expected);
+    expect(entry.metadata.apple_music_url).toBe(expected);
   });
 
-  it('drops a suffix-spoof host to null', () => {
+  it('drops a suffix-spoof host and degrades to a synthesized search URL (#2339)', () => {
     const entry = transformToIFSEntry(makeRaw({ spotify_url: 'https://open.spotify.com.evil.example/album/1' }));
-    expect(entry.spotify_url).toBeNull();
-    expect(entry.metadata.spotify_url).toBeNull();
+    const expected = 'https://open.spotify.com/search/Juana%20Molina%20la%20paradoja';
+    expect(entry.spotify_url).toBe(expected);
+    expect(entry.metadata.spotify_url).toBe(expected);
   });
 
   it('passes a genuine Spotify/Apple URL through on both positions', () => {

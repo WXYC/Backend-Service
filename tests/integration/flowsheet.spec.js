@@ -1710,3 +1710,71 @@ describe('discogsUnavailable on the flowsheet mutation echo (BS#1962)', () => {
     expect(res.body).not.toHaveProperty('discogsUnavailableNote');
   });
 });
+
+/*
+ * #2339: V2 flowsheet read-path streaming-URL search-url fill.
+ *
+ * A library-linked track whose album carries no `album_metadata` row (fresh
+ * library insert, no LML lookup has ever run) must serve synthesized search
+ * URLs on every streaming field instead of `null` — matching `GET
+ * /proxy/metadata/album`'s degradation (BS#1184/#1185) instead of the V2
+ * flowsheet feed alone greying out those buttons.
+ */
+describe('streaming-URL search-url fill on GET /flowsheet (#2339)', () => {
+  let sql;
+  let albumId;
+
+  beforeAll(async () => {
+    sql = makeSql();
+    const rows = await sql`
+      INSERT INTO ${sql(SCHEMA)}.library
+        (artist_id, genre_id, format_id, album_title, code_number)
+      VALUES
+        (1, 11, 1, 'BS2339 Test No Streaming Links', 9002)
+      RETURNING id
+    `;
+    albumId = rows[0].id;
+  });
+
+  afterAll(async () => {
+    if (albumId) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ${albumId}`;
+    }
+    if (sql) await sql.end({ timeout: 5 });
+  });
+
+  beforeEach(async () => {
+    await fls_util.join_show(global.primary_dj_id, global.access_token);
+  });
+
+  afterEach(async () => {
+    await fls_util.leave_show(global.primary_dj_id, global.access_token);
+  });
+
+  test('a track whose album has no persisted streaming links serves synthesized search URLs, not null', async () => {
+    await request.post('/flowsheet').set('Authorization', global.access_token).send({
+      album_id: albumId,
+      track_title: 'BS2339 Test Track',
+    });
+
+    const res = await request.get('/flowsheet').query({ limit: 30 }).send().expect(200);
+    const entry = res.body.entries.find((e) => e.album_id === albumId);
+
+    expect(entry).toBeDefined();
+    expect(entry.spotify_url).toBe(
+      'https://open.spotify.com/search/' + encodeURIComponent('Built to Spill BS2339 Test Track')
+    );
+    expect(entry.apple_music_url).toBe(
+      'https://music.apple.com/search?term=' + encodeURIComponent('Built to Spill BS2339 Test Track')
+    );
+    expect(entry.youtube_music_url).toBe(
+      'https://music.youtube.com/search?q=' + encodeURIComponent('Built to Spill BS2339 Test Track')
+    );
+    expect(entry.bandcamp_url).toBe(
+      'https://bandcamp.com/search?q=' + encodeURIComponent('Built to Spill BS2339 Test No Streaming Links')
+    );
+    expect(entry.soundcloud_url).toBe(
+      'https://soundcloud.com/search?q=' + encodeURIComponent('Built to Spill BS2339 Test Track')
+    );
+  });
+});
