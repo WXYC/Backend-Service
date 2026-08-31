@@ -1239,10 +1239,14 @@ describe('playlist-proxy.service', () => {
       // `inline.streaming.hasAny` from false to true purely by synthesizing,
       // and suppressing the live `/proxy/metadata/album` fallback that is the
       // only thing serving it any metadata. Every hazard shape below is one the
-      // columns permit and no write path validates: `youtube_music_url` /
-      // `bandcamp_url` / `soundcloud_url` are written verbatim from LML
-      // (`normalize-lookup.ts`, `enrich.ts`, `flowsheet-no-match-recheck`),
-      // and `sanitizeLookupStreamingUrls` guards only spotify/apple (BS#1710).
+      // columns permit: `sanitizeLookupStreamingUrls` (BS#1710, extended to all
+      // five streaming fields by BS#2350) guards the LML response boundary, but
+      // this fixture writes straight into the mocked DB row, bypassing that
+      // boundary entirely — exactly the shape a row persisted before BS#1710/
+      // BS#2350 shipped, or written via any future path that skips the guard,
+      // would still carry. The wire-level `wireUrl` gate this test exercises is
+      // what actually protects the client in that case, independent of
+      // whichever ingestion-time guard exists.
       it('emits no streaming key for a row whose only persisted streaming URLs are unwireable (#2339 gate uses wire semantics)', async () => {
         mockLimit.mockResolvedValue([jessicaPrattRow]);
         mockMetadataWhere.mockResolvedValue([
