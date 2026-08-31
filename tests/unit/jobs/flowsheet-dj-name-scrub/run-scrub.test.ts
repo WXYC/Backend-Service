@@ -12,8 +12,11 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import type { CheckLiveActivityFn } from '@wxyc/database';
 import {
-  refusesForLegacyDjNamePii,
-  legacyDjNamePreconditionMessage,
+  refusesForHarmfulRecomputes,
+  harmfulRecomputeMessage,
+  countHarmfulRecomputes,
+  selectHarmCandidateShows,
+  type PreflightRow,
   refusesForEmptyPiiIndex,
   emptyPiiIndexMessage,
   runScrub,
@@ -59,6 +62,7 @@ const baseOpts = () => ({
   liveActivityLookbackSeconds: 0,
   loadUsers: jest.fn(() => Promise.resolve(ROSTER)),
   loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([])),
+  loadPreflightRows: jest.fn(() => Promise.resolve([])),
   loadMainPage: pager<ScrubRow>([]),
   loadMessagePage: pager<MessageRow>([]),
   loadOrphanPage: pager<ScrubRow>([]),
@@ -447,59 +451,113 @@ describe('change-class provenance reaches the summary', () => {
  * the only thing between an operator and that outcome was reading a log line,
  * and nothing forced a dry run to happen first.
  */
-describe('shows.legacy_dj_name precondition gate', () => {
-  it('refuses under --execute when the count is non-zero', () => {
-    expect(refusesForLegacyDjNamePii(392, false)).toBe(true);
+const harmfulRow = (over: Partial<PreflightRow> = {}): PreflightRow => ({
+  entry_type: 'track',
+  dj_name: 'some other name',
+  dj_name_override: null,
+  legacy_dj_name: 'A. Hearst',
+  primary_dj_id: null,
+  user_found: false,
+  user_dj_name: null,
+  ...over,
+});
+
+/**
+ * The gate keys on what the pass would WRITE, not on how many shows carry a
+ * real name. The two numbers are nothing like each other: measured on
+ * production 2026-08-30, 392 shows carry one, and across their 14,663 in-scope
+ * rows the pass would change 82. The rest are `already_current` skips, because
+ * migration 0053 froze `flowsheet.dj_name` from the very `legacy_dj_name` the
+ * recompute now returns.
+ *
+ * Gating on the show count blocked a ~1.8M-row drain over rows the job
+ * provably does not touch, and turned the remedy into a question about DJs'
+ * naming choices (Cohort C, out of scope) rather than about anything this job
+ * does.
+ */
+describe('harmful-recompute precondition gate', () => {
+  it('counts a row the pass would rewrite to a roster real name', () => {
+    expect(countHarmfulRecomputes([harmfulRow()], new Set(['A. Hearst']))).toBe(1);
+  });
+
+  it('does NOT count an already-current row — the pass skips it, so nothing is written', () => {
+    // This is the 14,581-of-14,663 case, and the reason the old proxy was wrong.
+    expect(countHarmfulRecomputes([harmfulRow({ dj_name: 'A. Hearst' })], new Set(['A. Hearst']))).toBe(0);
+  });
+
+  it('does NOT count a change that writes something other than a real name', () => {
+    expect(countHarmfulRecomputes([harmfulRow({ legacy_dj_name: 'zorp' })], new Set(['A. Hearst']))).toBe(0);
+  });
+
+  it('selects candidate shows from BOTH recompute sources, not just legacy_dj_name', () => {
+    // A dj_name_override holding a real name wins resolveShowDjName outright.
+    const shows = [
+      { id: 1, legacy_dj_name: 'A. Hearst', dj_name_override: null },
+      { id: 2, legacy_dj_name: 'zorp', dj_name_override: 'A. Hearst' },
+      { id: 3, legacy_dj_name: 'zorp', dj_name_override: null },
+    ];
+    expect(selectHarmCandidateShows(shows, new Set(['A. Hearst']))).toEqual([1, 2]);
+  });
+
+  it('refuses under --execute when the harm count is non-zero', () => {
+    expect(refusesForHarmfulRecomputes(82, false)).toBe(true);
   });
 
   it('does NOT refuse a dry run — measuring the cohort is what a dry run is for', () => {
-    // Refusing here would withhold the very counts an operator needs in order
-    // to fix the precondition, which would make the gate self-defeating.
-    expect(refusesForLegacyDjNamePii(392, true)).toBe(false);
+    expect(refusesForHarmfulRecomputes(82, true)).toBe(false);
   });
 
   it('clears itself once the precondition is actually met', () => {
     // No override env var, matching auth-user-name-backfill's preserve-first
-    // gate: the way past this is to scrub the offending shows, not to set a
-    // flag. Deciding to ACCEPT them instead is a reviewed diff.
-    expect(refusesForLegacyDjNamePii(0, false)).toBe(false);
+    // gate: the way past this is to fix the rows, not to set a flag.
+    expect(refusesForHarmfulRecomputes(0, false)).toBe(false);
   });
 
   it('tells a live operator it is refusing, and a dry run that --execute will', () => {
-    expect(legacyDjNamePreconditionMessage(392, false)).toContain('Refusing to run');
-    expect(legacyDjNamePreconditionMessage(392, true)).toContain('--execute will REFUSE');
-    expect(legacyDjNamePreconditionMessage(392, true)).toContain('writes nothing');
+    expect(harmfulRecomputeMessage(82, 392, false)).toContain('Refusing to run the main pass');
+    expect(harmfulRecomputeMessage(82, 392, true)).toContain('--execute will REFUSE');
+    expect(harmfulRecomputeMessage(82, 392, true)).toContain('writes nothing');
   });
 
-  it('fails the run and blocks the main pass before it loads a page', async () => {
-    // The refusal has to land before the drain, not after it: a partial write
-    // by the pass this gate protects is exactly the outcome it exists to
-    // prevent.
+  it('blocks the main pass before it loads a page', async () => {
     const loadMainPage = jest.fn(() => Promise.resolve([]));
-    const applyDjNameBatch = jest.fn(() => Promise.resolve(0));
 
     const result = await runScrub({
       ...baseOpts(),
       dryRun: false,
-      loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst' }])),
+      loadShowsLegacyDjNames: jest.fn(() =>
+        Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst', dj_name_override: null }])
+      ),
+      loadPreflightRows: jest.fn(() => Promise.resolve([harmfulRow()])),
       loadMainPage,
-      applyDjNameBatch,
     });
 
     expect(result.failed).toBe(true);
-    expect(result.legacyDjNamePiiCount).toBe(1);
+    expect(result.harmfulRecomputeCount).toBe(1);
     expect(loadMainPage).not.toHaveBeenCalled();
-    expect(result.main.scanned).toBe(0);
   });
 
-  /**
-   * BS#2281 review finding 5. The refusal is about `shows.legacy_dj_name`
-   * flowing through `resolveShowDjName` into a RECOMPUTED `dj_name` — which
-   * only the main pass does. Scoping it to the whole run held the marker-
-   * message PII fix hostage to a precondition that has no bearing on it, and
-   * (measured 2026-08-29) that precondition is unresolved pending a human
-   * policy call with no deadline.
-   */
+  it('lets a polluted-but-harmless cohort through — the pass would write nothing', async () => {
+    // The whole point of the change: 392 shows carrying a real name is not a
+    // reason to block, if the rows already hold the value the chain resolves.
+    const loadMainPage = jest.fn(() => Promise.resolve([]));
+
+    const result = await runScrub({
+      ...baseOpts(),
+      dryRun: false,
+      loadShowsLegacyDjNames: jest.fn(() =>
+        Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst', dj_name_override: null }])
+      ),
+      loadPreflightRows: jest.fn(() => Promise.resolve([harmfulRow({ dj_name: 'A. Hearst' })])),
+      loadMainPage,
+    });
+
+    expect(result.legacyDjNamePiiCount).toBe(1);
+    expect(result.harmfulRecomputeCount).toBe(0);
+    expect(result.failed).toBe(false);
+    expect(loadMainPage).toHaveBeenCalled();
+  });
+
   it('still runs the message and orphan passes, which the condition cannot reach', async () => {
     const loadMessagePage = jest.fn(() => Promise.resolve([]));
     const loadOrphanPage = jest.fn(() => Promise.resolve([]));
@@ -507,31 +565,29 @@ describe('shows.legacy_dj_name precondition gate', () => {
     const result = await runScrub({
       ...baseOpts(),
       dryRun: false,
-      loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst' }])),
+      loadShowsLegacyDjNames: jest.fn(() =>
+        Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst', dj_name_override: null }])
+      ),
+      loadPreflightRows: jest.fn(() => Promise.resolve([harmfulRow()])),
       loadMessagePage,
       loadOrphanPage,
     });
 
-    // `rewriteMessage` takes only the row's own text plus the roster index,
-    // and `loadOrphanPage` normalizes `show_id` to null on every row so
-    // orphans always take the `piiOnly` branch. Neither reads
-    // `legacy_dj_name`, and both only ever REMOVE a name.
     expect(loadMessagePage).toHaveBeenCalled();
     expect(loadOrphanPage).toHaveBeenCalled();
-    // ...and the run still fails, so the exit code still says "do not proceed".
     expect(result.failed).toBe(true);
   });
 
   it('skips verification when the main pass was blocked', async () => {
-    // The residue `verifyScrub` would find belongs to the pass that never
-    // ran, so a clean verify is impossible and a `verification_failed` here
-    // would name the wrong cause.
     const verifyScrub = jest.fn(() => Promise.resolve(0));
 
     await runScrub({
       ...baseOpts(),
       dryRun: false,
-      loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst' }])),
+      loadShowsLegacyDjNames: jest.fn(() =>
+        Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst', dj_name_override: null }])
+      ),
+      loadPreflightRows: jest.fn(() => Promise.resolve([harmfulRow()])),
       verifyScrub,
     });
 
@@ -543,12 +599,15 @@ describe('shows.legacy_dj_name precondition gate', () => {
     const result = await runScrub({
       ...baseOpts(),
       dryRun: true,
-      loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst' }])),
+      loadShowsLegacyDjNames: jest.fn(() =>
+        Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst', dj_name_override: null }])
+      ),
+      loadPreflightRows: jest.fn(() => Promise.resolve([harmfulRow()])),
       loadMainPage,
     });
 
     expect(result.failed).toBe(false);
-    expect(result.legacyDjNamePiiCount).toBe(1);
+    expect(result.harmfulRecomputeCount).toBe(1);
     expect(loadMainPage).toHaveBeenCalled();
   });
 });
@@ -611,7 +670,9 @@ describe('empty roster index gate', () => {
       ...baseOpts(),
       dryRun: false,
       loadUsers: jest.fn(() => Promise.resolve([])),
-      loadShowsLegacyDjNames: jest.fn(() => Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst' }])),
+      loadShowsLegacyDjNames: jest.fn(() =>
+        Promise.resolve([{ id: 1, legacy_dj_name: 'A. Hearst', dj_name_override: null }])
+      ),
     });
 
     expect(result.legacyDjNamePiiCount).toBe(0);

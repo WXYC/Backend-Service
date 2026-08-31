@@ -188,6 +188,28 @@ export const MESSAGE_ENTRY_TYPES = ['show_start', 'show_end', 'dj_join', 'dj_lea
 const sqlEntryTypeList = (types: readonly string[]) => sql.raw(types.map((t) => `'${t}'`).join(', '));
 
 /**
+ * A bound-parameter-free id list, mirroring `sqlEntryTypeList` above.
+ *
+ * `sql.raw` is safe here ONLY because every element is coerced through
+ * `Number` and rejected unless it is a finite integer — these ids come from
+ * `shows.id` via `selectHarmCandidateShows`, never from operator input, and
+ * the coercion is belt-and-braces rather than the primary defence. Drizzle's
+ * `sql` tag has no `.array()` helper (that is postgres-js), and a
+ * `$1::int[]`-style bind would need the driver's array codec, so the list is
+ * inlined the same way the entry-type list already is.
+ */
+const sqlShowIdList = (ids: readonly number[]) =>
+  sql.raw(
+    ids
+      .map((id) => {
+        const n = Number(id);
+        if (!Number.isInteger(n)) throw new Error(`non-integer show id in pre-flight cohort: ${String(id)}`);
+        return String(n);
+      })
+      .join(', ')
+  );
+
+/**
  * One flowsheet row plus the show / user columns the canonical chain needs.
  *
  * `user_found` is NOT derivable from `user_dj_name`: `resolveShowDjName`
@@ -664,7 +686,17 @@ export const loadUsers: LoadUsersFn = async () => {
   return rows.map((row) => ({ realName: row.real_name, djName: row.dj_name }));
 };
 
-export type LoadShowsLegacyDjNameFn = () => Promise<Array<{ id: number; legacy_dj_name: string | null }>>;
+export type LoadShowsLegacyDjNameFn = () => Promise<
+  Array<{ id: number; legacy_dj_name: string | null; dj_name_override: string | null }>
+>;
+
+/** The narrow row shape the pre-flight probe recomputes over. */
+export type PreflightRow = Pick<
+  ScrubRow,
+  'entry_type' | 'dj_name' | 'dj_name_override' | 'legacy_dj_name' | 'primary_dj_id' | 'user_found' | 'user_dj_name'
+>;
+
+export type LoadPreflightRowsFn = (showIds: readonly number[]) => Promise<PreflightRow[]>;
 
 /**
  * Every non-null `shows.legacy_dj_name`, loaded once at startup for the
@@ -674,8 +706,33 @@ export type LoadShowsLegacyDjNameFn = () => Promise<Array<{ id: number; legacy_d
  */
 export const loadShowsLegacyDjNames: LoadShowsLegacyDjNameFn = async () => {
   const rows = (await db.execute(
-    sql`SELECT "id", "legacy_dj_name" FROM ${SHOWS_TABLE} WHERE "legacy_dj_name" IS NOT NULL`
-  )) as unknown as Array<{ id: number; legacy_dj_name: string | null }>;
+    sql`SELECT "id", "legacy_dj_name", "dj_name_override" FROM ${SHOWS_TABLE}
+         WHERE "legacy_dj_name" IS NOT NULL OR "dj_name_override" IS NOT NULL`
+  )) as unknown as Array<{ id: number; legacy_dj_name: string | null; dj_name_override: string | null }>;
+  return rows;
+};
+
+/**
+ * The in-scope recomputed rows of a bounded set of shows, in `loadMainPage`'s
+ * exact join shape — so the pre-flight's simulated recompute is the same
+ * decision the pass would make, not a re-derivation of it.
+ *
+ * `RECOMPUTED_ENTRY_TYPES` only: `dj_join`/`dj_leave` take `decideDjName`'s
+ * `piiOnly` branch, which can only ever write NULL, so they cannot contribute
+ * a harmful write and loading them would only inflate the probe.
+ */
+export const loadPreflightRows: LoadPreflightRowsFn = async (showIds) => {
+  if (showIds.length === 0) return [];
+  const rows = (await db.execute(sql`
+    SELECT f."entry_type", f."dj_name",
+           s."dj_name_override", s."legacy_dj_name", s."primary_dj_id",
+           (u."id" IS NOT NULL) AS "user_found", u."dj_name" AS "user_dj_name"
+      FROM ${FLOWSHEET_TABLE} AS f
+      JOIN ${SHOWS_TABLE} AS s ON s."id" = f."show_id"
+      LEFT JOIN "auth_user" AS u ON u."id" = s."primary_dj_id"
+     WHERE f."show_id" IN (${sqlShowIdList(showIds)})
+       AND f."entry_type" IN (${sqlEntryTypeList(RECOMPUTED_ENTRY_TYPES)})
+  `)) as unknown as PreflightRow[];
   return rows;
 };
 
@@ -710,45 +767,120 @@ export const countPollutedLegacyDjNames = (
 };
 
 /**
- * Whether a non-zero `shows.legacy_dj_name` PII count must REFUSE the run.
+ * The shows whose recompute could SOURCE a roster real name — the bounded set
+ * the harm probe below has to look at.
  *
- * True only under `--execute`. A dry run reports the count and proceeds —
- * measuring the cohort is what a dry run is for, and refusing there would
- * withhold the very numbers an operator needs in order to fix it.
+ * Both `shows`-level inputs to `resolveShowDjName` are checked, not just
+ * `legacy_dj_name`: a `dj_name_override` holding a real name wins the chain
+ * outright and would be written just as readily. The third arm — a live
+ * `show_start` resolving through `auth_user.dj_name` — cannot land here,
+ * because `buildPiiNameIndex` already excludes any user whose handle IS their
+ * real name; it could only fire if one DJ's handle were another DJ's legal
+ * name, which the pass-time `recomputed_is_roster_real_name` detector catches.
+ */
+export const selectHarmCandidateShows = (
+  shows: ReadonlyArray<{ id: number; legacy_dj_name: string | null; dj_name_override: string | null }>,
+  piiNames: ReadonlySet<string>
+): number[] => {
+  const ids: number[] = [];
+  for (const show of shows) {
+    const legacy = show.legacy_dj_name?.trim() ?? '';
+    const override = show.dj_name_override?.trim() ?? '';
+    if ((legacy.length > 0 && piiNames.has(legacy)) || (override.length > 0 && piiNames.has(override))) {
+      ids.push(show.id);
+    }
+  }
+  return ids;
+};
+
+/**
+ * A candidate cohort this large is an anomaly, not a workload. The probe below
+ * loads every in-scope row of every candidate show in one query; bounding the
+ * cohort bounds that query. Tripping this ceiling means the roster index has
+ * started matching handles wholesale — the mirror image of the empty-index
+ * failure, and equally not something to drain through.
+ */
+export const PREFLIGHT_MAX_CANDIDATE_SHOWS = 5_000;
+
+/**
+ * The number of rows the `main` pass would actually WRITE that would themselves
+ * hold a roster real name.
+ *
+ * THIS, not the count of polluted shows, is the harm the gate exists to
+ * prevent — and the two numbers are nothing like each other. Measured on
+ * production 2026-08-30: 392 shows carry a `legacy_dj_name` that is a roster
+ * real name, and across their 14,663 in-scope rows the pass would change
+ * **82**. The other 14,581 are `already_current` skips, because migration 0053
+ * froze `flowsheet.dj_name` from the very `legacy_dj_name` the recompute now
+ * returns — the value is already there, and re-deriving it writes nothing.
+ *
+ * Gating on the show count therefore blocked a ~1.8M-row drain over rows the
+ * job provably does not touch, and made the remedy a question about the DJs'
+ * naming choices (Cohort C — explicitly out of this job's scope) rather than
+ * about anything this job does. Gating on the write count asks the question
+ * the job can actually answer: would this run put a legal name somewhere it is
+ * not already?
+ *
+ * Deliberately reuses `recomputeDjName` and the `already_current` equality
+ * rather than restating either. A probe that predicts the pass by
+ * re-derivation is a second implementation of the decision, and this file's
+ * whole thesis (see `resolveShowDjName`'s extraction) is that two copies of one
+ * decision drift.
+ */
+export const countHarmfulRecomputes = (rows: ReadonlyArray<PreflightRow>, piiNames: ReadonlySet<string>): number => {
+  let count = 0;
+  for (const row of rows) {
+    const { djName } = recomputeDjName(row as ScrubRow);
+    if (djName === row.dj_name) continue; // `already_current` — the pass skips it
+    if (djName !== null && piiNames.has(djName.trim())) count += 1;
+  }
+  return count;
+};
+
+/**
+ * Whether the harm count must REFUSE the run.
+ *
+ * True only under `--execute`. A dry run reports and proceeds — measuring the
+ * cohort is what a dry run is for, and refusing there would withhold the very
+ * numbers an operator needs in order to fix it.
  *
  * Pure so both arms are unit-testable without a database, matching
  * `jobs/auth-user-name-backfill/decide.ts`'s `violatesPreserveFirstPrecondition`.
  *
  * WHY THIS GATES AND `recomputed_is_roster_real_name` DOES NOT (BS#2281 review
- * finding 6). The two sit ~750 lines apart with opposite postures, and the
- * asymmetry is deliberate rather than an oversight. This count is a COARSE
- * PROXY — it counts every polluted `shows.legacy_dj_name`, including shows
- * where `resolveShowDjName` never reaches that arm because an override or a
- * usable handle wins first. Measured on production 2026-08-29: 832 of the 839
- * flagged shows do reach it (0 have an override, 832 have a NULL
- * `primary_dj_id`), so the over-count is ~0.8% and the proxy is tight in
- * practice. `recomputed_is_roster_real_name` is the PRECISE detector — it sees
- * what a write would itself write — but it is only observable AFTER the pass
- * has already computed the page, which is too late to be a precondition. So:
- * the cheap coarse signal runs first and refuses; the exact signal runs late
- * and warns. A `dj_name_override` holding a real name therefore still writes
- * freely, which is Cohort C and out of scope for this job either way.
+ * finding 6). They now measure the SAME thing — the difference is only when.
+ * This one simulates the decision over a bounded candidate cohort before the
+ * drain starts, which is what makes it usable as a precondition; the pass-time
+ * class observes the real writes across the whole table, which is complete but
+ * only knowable once the pass has already computed the page. So the cheap early
+ * simulation refuses, and the complete late observation warns. The remaining
+ * gap between them is the live `show_start` arm the candidate selector cannot
+ * reach — which is exactly what the pass-time warning is left to cover.
  */
-export const refusesForLegacyDjNamePii = (legacyDjNamePiiCount: number, dryRun: boolean): boolean =>
-  legacyDjNamePiiCount > 0 && !dryRun;
+export const refusesForHarmfulRecomputes = (harmfulRecomputeCount: number, dryRun: boolean): boolean =>
+  harmfulRecomputeCount > 0 && !dryRun;
 
-/** The operator-facing text for a non-zero pre-flight count, in either mode. */
-export const legacyDjNamePreconditionMessage = (legacyDjNamePiiCount: number, dryRun: boolean): string => {
+/** The operator-facing text for a non-zero harm count, in either mode. */
+export const harmfulRecomputeMessage = (
+  harmfulRecomputeCount: number,
+  candidateShowCount: number,
+  dryRun: boolean
+): string => {
   const shared =
-    `${legacyDjNamePiiCount} shows.legacy_dj_name value(s) are roster real names. ` +
-    'resolveShowDjName reads legacy_dj_name as a direct chain input with no PII check of its own, ' +
-    'so a live run would WRITE those values onto every in-scope row of those shows.';
+    `${harmfulRecomputeCount} row(s) across ${candidateShowCount} candidate show(s) would be REWRITTEN to a ` +
+    'roster real name. These are rows whose stored dj_name currently differs from what the chain resolves, ' +
+    'so the run would put a legal name where one is not already.';
   return dryRun
     ? `${shared} This dry run writes nothing, but --execute will REFUSE until the count is zero. ` +
-        'See jobs/flowsheet-dj-name-scrub/README.md, "shows.legacy_dj_name pre-flight", and BS#2281.'
-    : `${shared} Refusing to run. Scrub those shows first (BS#2281); re-run the dry run to confirm the ` +
-        'count is zero. See jobs/flowsheet-dj-name-scrub/README.md, "shows.legacy_dj_name pre-flight".';
+        'See jobs/flowsheet-dj-name-scrub/README.md, "How the gate clears".'
+    : `${shared} Refusing to run the main pass. See jobs/flowsheet-dj-name-scrub/README.md, ` +
+        '"How the gate clears" — this cohort is small and meant to be read row by row, not drained past.';
 };
+
+/** Refusal text for a candidate cohort so large the probe will not run it. */
+export const oversizedCandidateCohortMessage = (candidateShowCount: number): string =>
+  `${candidateShowCount} candidate shows exceed the ${PREFLIGHT_MAX_CANDIDATE_SHOWS} ceiling. The roster ` +
+  'index is matching handles wholesale — check auth_user.real_name before reading any count from this run.';
 
 /**
  * Whether an EMPTY roster PII index must REFUSE the run (BS#2281 review
@@ -769,7 +901,7 @@ export const legacyDjNamePreconditionMessage = (legacyDjNamePiiCount: number, dr
  * is resolved here rather than folded into the count.
  *
  * Blocks the WHOLE run, not just the main pass (unlike
- * `refusesForLegacyDjNamePii`): the message and orphan passes read `piiNames`
+ * `refusesForHarmfulRecomputes`): the message and orphan passes read `piiNames`
  * directly, so an empty index makes them silently vacuous rather than merely
  * unprotected.
  *
@@ -1159,6 +1291,10 @@ export type RunResult = {
    * off it in `runScrub`.
    */
   legacyDjNamePiiCount: number;
+  /** Shows whose recompute could source a roster real name (reported, not gated). */
+  harmCandidateShowCount: number;
+  /** Rows the main pass would rewrite TO a roster real name. THIS is the gate. */
+  harmfulRecomputeCount: number;
   /** Highest id any pass reached; the bound `verifyScrub` is capped at. */
   highWaterMark: number;
   /** Verification residue below the high-water mark. -1 when not run. */
@@ -1212,6 +1348,7 @@ export const runScrub = async (opts: {
   checkLiveActivity?: CheckLiveActivityFn;
   loadUsers?: LoadUsersFn;
   loadShowsLegacyDjNames?: LoadShowsLegacyDjNameFn;
+  loadPreflightRows?: LoadPreflightRowsFn;
   loadMainPage?: LoadScrubPageFn;
   loadMessagePage?: LoadMessagePageFn;
   loadOrphanPage?: LoadScrubPageFn;
@@ -1238,6 +1375,7 @@ export const runScrub = async (opts: {
 
   const loadUsersFn = opts.loadUsers ?? loadUsers;
   const loadShowsLegacyDjNamesFn = opts.loadShowsLegacyDjNames ?? loadShowsLegacyDjNames;
+  const loadPreflightRowsFn = opts.loadPreflightRows ?? loadPreflightRows;
   const loadMainPageFn = opts.loadMainPage ?? loadMainPage;
   const loadMessagePageFn = opts.loadMessagePage ?? loadMessagePage;
   const loadOrphanPageFn = opts.loadOrphanPage ?? loadOrphanPage;
@@ -1292,6 +1430,8 @@ export const runScrub = async (opts: {
     failed: false,
     piiNameCount: 0,
     legacyDjNamePiiCount: 0,
+    harmCandidateShowCount: 0,
+    harmfulRecomputeCount: 0,
     highWaterMark: 0,
     remaining: -1,
   };
@@ -1349,74 +1489,90 @@ export const runScrub = async (opts: {
     }
   }
 
-  // Startup pre-flight (BS#2281 review finding 3), run in BOTH dry-run and
-  // execute mode, before the first pass — so a dry-run operator sees the
-  // risk before anyone asks for `--execute`. This job's recompute TRUSTS
-  // `shows.legacy_dj_name` to already be clean (see `countPollutedLegacyDjNames`'s
-  // doc); `shows` is small, so this is one cheap query, not a paged drain.
+  // Startup pre-flight, run in BOTH dry-run and execute mode, before the first
+  // pass. Two stages, because the cheap question and the load-bearing question
+  // are different questions:
+  //
+  //   1. How many `shows` carry a recompute source that is a roster real name?
+  //      One cheap query. Reported, never gated — measured 392 on production
+  //      2026-08-30, and gating on it blocked a ~1.8M-row drain over rows the
+  //      job provably does not touch.
+  //   2. Of THOSE shows' rows, how many would the pass actually rewrite to a
+  //      real name? 82 of 14,663 on the same measurement. This is the harm, so
+  //      this is the gate. See `countHarmfulRecomputes`.
   if (!failure) {
     try {
       const shows = await loadShowsLegacyDjNamesFn();
       const legacyDjNamePiiCount = countPollutedLegacyDjNames(shows, piiNames);
       result.legacyDjNamePiiCount = legacyDjNamePiiCount;
-      log('info', 'legacy_dj_name_preflight', 'shows.legacy_dj_name pre-flight complete', {
-        legacy_dj_name_pii_count: legacyDjNamePiiCount,
-        shows_with_legacy_dj_name: shows.length,
-      });
-      if (legacyDjNamePiiCount > 0) {
-        const message = legacyDjNamePreconditionMessage(legacyDjNamePiiCount, dryRun);
-        if (refusesForLegacyDjNamePii(legacyDjNamePiiCount, dryRun)) {
-          // HARD REFUSAL under --execute. Measured on production 2026-08-29:
-          // 392 of 53,416 shows carrying a `legacy_dj_name` hold a value that
-          // matches a roster real name, so a live run would not merely fail to
-          // clean those shows — it would WRITE those 392 legal names onto every
-          // in-scope row of them, making the leak worse on the rows it touches.
-          //
-          // A warning was not enough. The only thing standing between an
-          // operator and that outcome was reading a log line, and the run
-          // procedure's dry-run step is a convention rather than a mechanism —
-          // nothing stopped `--execute` being the first thing anyone typed.
-          // Same posture, and the same reason, as
-          // `jobs/auth-user-name-backfill`'s preserve-first precondition gate:
-          // an ordering hazard whose cost is unrecoverable belongs in the code,
-          // not in the operator's memory.
-          //
-          // Deliberately NO override env var, matching that donor and the
-          // superseded-job refusals this repo already carries. The gate clears
-          // itself the moment the precondition is actually met — scrub the
-          // offending `shows.legacy_dj_name` values and the count goes to zero
-          // on its own. Deciding instead to ACCEPT them is a change to what
-          // this job writes, and it should arrive as a reviewed diff rather
-          // than an env var somebody set on the box at 2am.
-          log('error', 'legacy_dj_name_pollution', message, { count: legacyDjNamePiiCount, dry_run: dryRun });
-          const refusal = new Error(message);
-          captureError(refusal, 'legacy_dj_name_pollution', { count: legacyDjNamePiiCount });
-          // SCOPED to the `main` pass (BS#2281 review finding 5), not the run.
-          // This precondition is about `shows.legacy_dj_name` flowing through
-          // `resolveShowDjName` into a recomputed `dj_name` — which only the
-          // main pass does. The other two provably cannot be harmed by it and
-          // provably cannot make it worse: `rewriteMessage` takes only the
-          // row's own text plus the roster index, and `loadOrphanPage`
-          // normalizes `show_id` to null on EVERY row it returns, so orphans
-          // always take `decideDjName`'s `piiOnly` branch and never recompute.
-          // Both passes only ever REMOVE a name. Blocking them here would have
-          // held marker-message PII in production for as long as the 392 shows
-          // stay unresolved — and they are unresolved pending a human policy
-          // call with no deadline (see the README's "How the gate clears").
-          // The run still FAILS: `mainPassBlocked` is promoted to `failure`
-          // the moment those two passes finish.
-          mainPassBlocked = refusal;
-        } else {
-          // Dry run: report and carry on. Measuring the cohort is the whole
-          // point of a dry run, and refusing here would deny the operator the
-          // counts they need to decide what to do about it.
-          log('warn', 'legacy_dj_name_pollution', message, { count: legacyDjNamePiiCount, dry_run: dryRun });
-          captureError(new Error(message), 'legacy_dj_name_pollution', { count: legacyDjNamePiiCount });
+      const candidateShowIds = selectHarmCandidateShows(shows, piiNames);
+      result.harmCandidateShowCount = candidateShowIds.length;
+
+      if (candidateShowIds.length > PREFLIGHT_MAX_CANDIDATE_SHOWS) {
+        const message = oversizedCandidateCohortMessage(candidateShowIds.length);
+        log('error', 'preflight_cohort_oversized', message, { candidate_show_count: candidateShowIds.length });
+        const refusal = new Error(message);
+        captureError(refusal, 'preflight_cohort_oversized', { count: candidateShowIds.length });
+        failure = { error: refusal };
+      } else {
+        const preflightRows = await loadPreflightRowsFn(candidateShowIds);
+        const harmfulRecomputeCount = countHarmfulRecomputes(preflightRows, piiNames);
+        result.harmfulRecomputeCount = harmfulRecomputeCount;
+        log('info', 'legacy_dj_name_preflight', 'shows.legacy_dj_name pre-flight complete', {
+          legacy_dj_name_pii_count: legacyDjNamePiiCount,
+          shows_with_legacy_dj_name: shows.length,
+          harm_candidate_show_count: candidateShowIds.length,
+          preflight_rows_probed: preflightRows.length,
+          harmful_recompute_count: harmfulRecomputeCount,
+        });
+
+        if (harmfulRecomputeCount > 0) {
+          const message = harmfulRecomputeMessage(harmfulRecomputeCount, candidateShowIds.length, dryRun);
+          if (refusesForHarmfulRecomputes(harmfulRecomputeCount, dryRun)) {
+            // HARD REFUSAL of the `main` pass under --execute, before it loads
+            // a page. A warning was not enough: the only thing between an
+            // operator and these writes was reading a log line, and the run
+            // procedure's dry-run step is a convention rather than a mechanism.
+            // Same posture, and the same reason, as
+            // `jobs/auth-user-name-backfill`'s preserve-first gate.
+            //
+            // Deliberately NO override env var. The gate clears itself the
+            // moment the precondition is met, and the cohort it names is small
+            // enough to read row by row. Deciding instead to ACCEPT these
+            // writes changes what this job writes, and should arrive as a
+            // reviewed diff rather than an env var set on the box at 2am.
+            //
+            // SCOPED to the `main` pass, not the run (BS#2281 review finding
+            // 5): the `message` and `orphan` passes cannot be harmed by this
+            // condition and cannot make it worse — `rewriteMessage` takes only
+            // the row's own text plus the roster index, and `loadOrphanPage`
+            // normalizes `show_id` to null on every row it returns, so orphans
+            // always take `decideDjName`'s `piiOnly` branch and never
+            // recompute. Both only ever REMOVE a name.
+            log('error', 'harmful_recompute_detected', message, {
+              count: harmfulRecomputeCount,
+              candidate_show_count: candidateShowIds.length,
+              dry_run: dryRun,
+            });
+            const refusal = new Error(message);
+            captureError(refusal, 'harmful_recompute_detected', { count: harmfulRecomputeCount });
+            mainPassBlocked = refusal;
+          } else {
+            // Dry run: report and carry on. Measuring the cohort is the whole
+            // point of a dry run, and refusing here would deny the operator the
+            // counts they need to decide what to do about it.
+            log('warn', 'harmful_recompute_detected', message, {
+              count: harmfulRecomputeCount,
+              candidate_show_count: candidateShowIds.length,
+              dry_run: dryRun,
+            });
+            captureError(new Error(message), 'harmful_recompute_detected', { count: harmfulRecomputeCount });
+          }
         }
       }
     } catch (error) {
       failure = { error };
-      log('error', 'legacy_dj_name_preflight_failed', 'failed to scan shows.legacy_dj_name for roster real names', {
+      log('error', 'legacy_dj_name_preflight_failed', 'failed to run the shows.legacy_dj_name pre-flight', {
         error_message: errorMessage(error),
       });
       captureError(error, 'legacy_dj_name_preflight_failed');
@@ -1558,6 +1714,8 @@ export const runScrub = async (opts: {
       if (mainPassBlocked) {
         log('warn', 'main_pass_skipped', 'main pass skipped by the shows.legacy_dj_name refusal', {
           legacy_dj_name_pii_count: result.legacyDjNamePiiCount,
+          'scrub.harm_candidate_show_count': result.harmCandidateShowCount,
+          'scrub.harmful_recompute_count': result.harmfulRecomputeCount,
         });
       } else {
         await runPass('main', mainAfterId, loadMainPageFn, decideForScrubPass, applyDjNameBatchFn);
