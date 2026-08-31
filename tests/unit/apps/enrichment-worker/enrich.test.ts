@@ -16,6 +16,7 @@
 import { jest } from '@jest/globals';
 
 import { album_metadata, db, flowsheet } from '@wxyc/database';
+import { sanitizeLookupStreamingUrls } from '@wxyc/lml-client';
 import type { LookupResponse, StreamingResolutionStatus } from '@wxyc/lml-client';
 import {
   buildStreamingFieldConflictSet,
@@ -1066,6 +1067,60 @@ describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-matc
     expect(bandcampUrlValues[0]).toBe(album_metadata.bandcamp_status);
     expect(bandcampUrlValues[1]).toBe(album_metadata.bandcamp_url);
     expect(bandcampUrlValues[2]).toContain('bandcamp.com/search');
+  });
+});
+
+/**
+ * BS#2350 — a suppressed `bandcamp_url` must land as the synthesized search
+ * URL, never a bare persisted null. This runs the REAL boundary guard
+ * (`sanitizeLookupStreamingUrls`, `@wxyc/lml-client`) against a raw LML
+ * response before handing the sanitized result to `finalizeRow`, so the fix
+ * is pinned end to end — guard suppression -> status-clearing ->
+ * merge/UPSERT — rather than only at the guard unit level
+ * (`tests/unit/shared/lml-client/streaming-url-guard.test.ts`) or only at
+ * the merge unit level (the BS#1915 suite above).
+ */
+describe('sanitizeLookupStreamingUrls -> finalizeRow (BS#2350 status-clearing integration)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('a suppressed bandcamp_url (was verified) lands as the synthesized search URL, not null', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    // A raw LML response as it would arrive off the wire: a whitespace-
+    // polluted bandcamp_url (the 2026-08-11 audit shape) paired with an
+    // explicit 'verified' status LML asserted before the pollution.
+    const rawResponse = {
+      search_type: 'direct',
+      results: [
+        {
+          artwork: {
+            artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+            release_url: 'https://discogs.com/release/123',
+            bandcamp_url: 'https://artist.bandcamp.com/\talbum/foo',
+            streaming_status: { bandcamp: 'verified' },
+          },
+        },
+      ],
+    } as unknown as LookupResponse;
+
+    const sanitized = sanitizeLookupStreamingUrls(rawResponse);
+    // Confirms the guard actually suppressed the value and cleared the
+    // paired status before this test hands it to the writer — otherwise a
+    // guard regression would make this test pass for the wrong reason.
+    expect(sanitized.results[0].artwork?.bandcamp_url).toBeNull();
+    expect(sanitized.results[0].artwork?.streaming_status).not.toHaveProperty('bandcamp');
+
+    await finalizeRow(LINKED_ROW, sanitized);
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    // Not null: the cleared status reads as "not consulted" this round, so
+    // mergeStreamingField leaves the (fresh, all-null) prior state alone and
+    // the payload falls back to the synthesized search URL — exactly like
+    // the pre-BS#2350 spotify/apple behavior, and the opposite of the
+    // permanent-null freeze a leftover 'verified' status would have caused.
+    expect(insertPayload.bandcamp_url).toContain('bandcamp.com/search');
+    expect(insertPayload.bandcamp_status).toBeNull();
   });
 });
 
