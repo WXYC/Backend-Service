@@ -1232,29 +1232,16 @@ function applyPlaycutMetadata(grouped: GroupedPlaycut, meta: PlaycutMetadataRow)
   // guard, same helper, as the /flowsheet serve seam.
   const { spotify_url: guardedSpotifyUrl, apple_music_url: guardedAppleMusicUrl } =
     suppressMislabeledStreamingUrls(meta);
-  // #2339: request-time-only fill for whatever the host guard just left
-  // absent, same helper and same ordering (guard, THEN fill) as
-  // `transformToIFSEntry` — a suppressed mislabeled URL degrades to a
-  // synthesized one exactly as an outright-missing one does. Never
-  // persisted: `meta` (the DB row) is untouched, only this local response
-  // shape is filled.
-  const { spotify_url, apple_music_url, youtube_music_url, bandcamp_url, soundcloud_url } = fillSynthesizedSearchUrls(
-    {
-      spotify_url: guardedSpotifyUrl,
-      apple_music_url: guardedAppleMusicUrl,
-      youtube_music_url: meta.youtube_music_url,
-      bandcamp_url: meta.bandcamp_url,
-      soundcloud_url: meta.soundcloud_url,
-    },
-    { artist_name: meta.artist_name, album_title: meta.album_title, track_title: meta.track_title }
-  );
 
   setUrlField(grouped, 'discogsURL', meta.discogs_url);
-  setUrlField(grouped, 'spotifyURL', spotify_url);
-  setUrlField(grouped, 'appleMusicURL', apple_music_url);
-  setUrlField(grouped, 'youtubeMusicURL', youtube_music_url);
-  setUrlField(grouped, 'bandcampURL', bandcamp_url);
-  setUrlField(grouped, 'soundcloudURL', soundcloud_url);
+  // Pre-#2339 (guarded, not yet synthesized) values first, so the
+  // `hasRenderableInlineMetadata` snapshot below reads real persisted state —
+  // see the snapshot's own comment for why.
+  setUrlField(grouped, 'spotifyURL', guardedSpotifyUrl);
+  setUrlField(grouped, 'appleMusicURL', guardedAppleMusicUrl);
+  setUrlField(grouped, 'youtubeMusicURL', meta.youtube_music_url);
+  setUrlField(grouped, 'bandcampURL', meta.bandcamp_url);
+  setUrlField(grouped, 'soundcloudURL', meta.soundcloud_url);
   setUrlField(grouped, 'artistWikipediaURL', meta.artist_wikipedia_url);
 
   if (meta.release_year !== null) {
@@ -1282,11 +1269,44 @@ function applyPlaycutMetadata(grouped: GroupedPlaycut, meta: PlaycutMetadataRow)
   // Option-3 serve rule (BS#2103 review): the status accompanies renderable
   // metadata or stays home. Evaluated HERE — after every one of the 12
   // predicate fields above (and the caller's earlier artworkURL assignment)
-  // has run — so the check reads the post-guard WIRE payload, not the DB row:
-  // a row whose only persisted values were guarded off the wire counts as
-  // empty. Position in the key order is unchanged from the unconditional
-  // version; only presence is conditional.
-  if (meta.metadata_status !== null && hasRenderableInlineMetadata(grouped)) {
+  // has run, but BEFORE the #2339 fill below overwrites the five streaming
+  // URL fields — so the check reads the post-guard, PRE-SYNTHESIS payload,
+  // not the DB row and not the filled-in search URLs. A synthesized search
+  // URL is not "renderable metadata" in the sense this predicate protects:
+  // it's the same request-time fallback the proxy already builds from
+  // nothing, so a row whose only wire values are synthesized fallbacks is
+  // still terminal-but-empty for this rule's purposes, and must still ride
+  // to the `!hasRenderableInlineMetadata` branch's 3.2 fallback fetch rather
+  // than short-circuiting to a card with five search buttons and nothing
+  // else (BS#2103's empty-card bug, reopened if this snapshot moved after
+  // the fill).
+  const hasRealRenderableMetadata = hasRenderableInlineMetadata(grouped);
+
+  // #2339: request-time-only fill for whatever the host guard just left
+  // absent, same helper and same ordering (guard, THEN fill) as
+  // `transformToIFSEntry` — a suppressed mislabeled URL degrades to a
+  // synthesized one exactly as an outright-missing one does. Never
+  // persisted: `meta` (the DB row) is untouched, only this local response
+  // shape is filled. Applied AFTER the `hasRenderableInlineMetadata`
+  // snapshot above so the fill can't manufacture "renderable metadata" out
+  // of a row that has none.
+  const { spotify_url, apple_music_url, youtube_music_url, bandcamp_url, soundcloud_url } = fillSynthesizedSearchUrls(
+    {
+      spotify_url: guardedSpotifyUrl,
+      apple_music_url: guardedAppleMusicUrl,
+      youtube_music_url: meta.youtube_music_url,
+      bandcamp_url: meta.bandcamp_url,
+      soundcloud_url: meta.soundcloud_url,
+    },
+    { artist_name: meta.artist_name, album_title: meta.album_title, track_title: meta.track_title }
+  );
+  setUrlField(grouped, 'spotifyURL', spotify_url);
+  setUrlField(grouped, 'appleMusicURL', apple_music_url);
+  setUrlField(grouped, 'youtubeMusicURL', youtube_music_url);
+  setUrlField(grouped, 'bandcampURL', bandcamp_url);
+  setUrlField(grouped, 'soundcloudURL', soundcloud_url);
+
+  if (meta.metadata_status !== null && hasRealRenderableMetadata) {
     grouped.metadataStatus = meta.metadata_status;
   }
   // BS#1908 present-or-absent: null means "no library row", which is not the

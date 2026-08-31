@@ -172,7 +172,7 @@ const GOLDEN_PATH = join(__dirname, '../../fixtures/recent-entries-v2-wire-golde
  * file from the fixture, so regenerating one without acknowledging the other is
  * a red test rather than a silent change.
  */
-const GOLDEN_SHA256 = '46a1064409f65356e076390bd209c198d0a8748ccb23bd51b5fb7ae1409c8f70';
+const GOLDEN_SHA256 = '1e4ed064c31619303db81e263ec1b039867dc65b1ed685b6da121dcf49cf0d72';
 
 /** Fixed ids and add_times — the payload must be byte-reproducible. */
 function row(id: number, albumId: number | null, artist: string, album: string, track: string, seconds: number) {
@@ -194,8 +194,22 @@ function row(id: number, albumId: number | null, artist: string, album: string, 
   };
 }
 
-/** Every metadata column, so each probe states its whole row explicitly. */
+/**
+ * Every metadata column, so each probe states its whole row explicitly.
+ *
+ * #2339 (pre-PR review finding 2): `artist_name` / `album_title` /
+ * `track_title` are three columns this ticket added to `enrichPlaycutMetadata`'s
+ * select — see `PlaycutMetadataRow`'s doc comment in
+ * `playlist-proxy.service.ts` — and in production they come off the SAME
+ * `flowsheet` row {@link row} builds, never a separate source. Defaulting them
+ * here from {@link ROWS_BY_ID} (rather than leaving them undefined, which
+ * silently short-circuits `fillSynthesizedSearchUrls`'s `if (!text.artist_name)
+ * return urls` guard and lets the golden pass without ever exercising the
+ * fill) keeps that invariant instead of hand-duplicating the strings and
+ * risking drift between the two.
+ */
 function meta(id: number, overrides: Record<string, unknown> = {}) {
+  const sourceRow = ROWS_BY_ID.get(id);
   return {
     id,
     discogs_url: null,
@@ -213,6 +227,9 @@ function meta(id: number, overrides: Record<string, unknown> = {}) {
     discogs_unavailable: false,
     discogs_unavailable_note: null,
     metadata_status: 'enriched_match',
+    artist_name: sourceRow?.artist_name ?? null,
+    album_title: sourceRow?.album_title ?? null,
+    track_title: sourceRow?.track_title ?? null,
     ...overrides,
   };
 }
@@ -233,6 +250,9 @@ const ROWS = [
   row(9013, 990013, 'Hermanos Gutiérrez', 'El Bueno Y El Malo', 'Tres Hermanos', 13),
   row(9014, 990014, 'Cat Power', 'Moon Pix', 'Cross Bones Style', 14),
 ];
+
+/** Row-id -> row lookup, so {@link meta} can default its #2339 text fields off the matching {@link row}. */
+const ROWS_BY_ID = new Map(ROWS.map((r) => [r.id, r]));
 
 const METADATA = [
   // Fully enriched. `artist_wikipedia_url` carries RAW un-percent-encoded UTF-8,
@@ -475,15 +495,25 @@ describe('BS#2103 v=2 wire golden (cross-repo contract with iOS 3.2)', () => {
     expect(byArtist('Art Garfunkel')).not.toHaveProperty('artistWikipediaURL');
     // '' discogs sentinel (BS#1628).
     expect(byArtist('Jessica Pratt')).not.toHaveProperty('discogsURL');
-    // Mislabeled streaming host (BS#1714) — the correct sibling survives.
-    expect(byArtist('Chuquimamani-Condori')).not.toHaveProperty('spotifyURL');
+    // Mislabeled streaming host (BS#1714) — the correct sibling survives, and
+    // (#2339) the suppressed spotify_url now degrades to the same synthesized
+    // search URL an outright-missing value would get, rather than staying
+    // omitted.
+    expect(byArtist('Chuquimamani-Condori').spotifyURL).toBe(
+      'https://open.spotify.com/search/Chuquimamani-Condori%20Call%20Your%20Name'
+    );
     expect(byArtist('Chuquimamani-Condori').bandcampURL).toBe('https://chuquimamanicondori.bandcamp.com/album/dj-e');
     // Whitespace: padded is trimmed, blank is dropped.
     expect(byArtist('Juana Molina').discogsURL).toBe('https://www.discogs.com/release/999');
     expect(byArtist('Juana Molina')).not.toHaveProperty('artistWikipediaURL');
-    // Non-web scheme, scheme-relative, bare host.
+    // Non-web scheme, scheme-relative, bare host. discogsURL/bandcampURL have
+    // no synthesized fallback (discogs isn't one of the five #2339-synthesizable
+    // fields; the scheme-less bandcamp_url is a non-null string, so the fill's
+    // `?? fallback` never runs for it) and stay dropped. spotifyURL's
+    // scheme-relative value fails the same `isSpotifyUrl` host check the
+    // mislabeled-host case above does, so it degrades the same way (#2339).
     expect(byArtist('Stereolab')).not.toHaveProperty('discogsURL');
-    expect(byArtist('Stereolab')).not.toHaveProperty('spotifyURL');
+    expect(byArtist('Stereolab').spotifyURL).toBe('https://open.spotify.com/search/Stereolab%20Brakhage');
     expect(byArtist('Stereolab')).not.toHaveProperty('bandcampURL');
     // Raw non-ASCII is NOT a hazard and must survive untouched. This is also
     // why the serializer rejects rather than emitting `parsed.href`: href would
@@ -510,11 +540,34 @@ describe('BS#2103 v=2 wire golden (cross-repo contract with iOS 3.2)', () => {
     expect(degenerate).not.toHaveProperty('artistBio');
     expect(degenerate).not.toHaveProperty('discogsUnavailableNote');
     expect(degenerate.discogsUnavailable).toBe(true);
-    // A free-text play carries no URL key at all.
+    // A free-text play has nothing persisted, so the fields with no
+    // synthesized fallback carry no URL key at all…
     const bare = byArtist('BS2103 Unenriched Artist');
-    for (const key of ['artworkURL', 'discogsURL', 'spotifyURL', 'artistWikipediaURL']) {
+    for (const key of ['artworkURL', 'discogsURL', 'artistWikipediaURL']) {
       expect(bare).not.toHaveProperty(key);
     }
+    // …but (#2339) it DOES have an artist_name, so the five synthesizable
+    // streaming fields fill with search URLs — matching /proxy/metadata/album's
+    // degradation for the exact same unenriched-play shape.
+    expect(bare.spotifyURL).toBe(
+      'https://open.spotify.com/search/BS2103%20Unenriched%20Artist%20Probe%20Track%20(no%20metadata)'
+    );
+    expect(bare.appleMusicURL).toBe(
+      'https://music.apple.com/search?term=BS2103%20Unenriched%20Artist%20Probe%20Track%20(no%20metadata)'
+    );
+    expect(bare.youtubeMusicURL).toBe(
+      'https://music.youtube.com/search?q=BS2103%20Unenriched%20Artist%20Probe%20Track%20(no%20metadata)'
+    );
+    expect(bare.bandcampURL).toBe(
+      'https://bandcamp.com/search?q=' + encodeURIComponent('BS2103 Unenriched Artist BS2103 Unenriched Album')
+    );
+    expect(bare.soundcloudURL).toBe(
+      'https://soundcloud.com/search?q=BS2103%20Unenriched%20Artist%20Probe%20Track%20(no%20metadata)'
+    );
+    // No persisted field is renderable inline metadata (the fill doesn't
+    // count — pre-PR review finding 1), so the terminal-vs-empty predicate
+    // stays false and the control field stays home; this row's status is
+    // 'pending' (non-terminal) regardless, so this is harmless either way.
     expect(bare).not.toHaveProperty('metadataStatus');
   });
 

@@ -612,12 +612,19 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
     expect(entry.artistId).toBeUndefined();
     // No library row -> the discogs-unavailable flag is omitted, not `false`.
     expect(Object.prototype.hasOwnProperty.call(entry, 'discogsUnavailable')).toBe(false);
-    // `metadata_status` is NOT NULL on the table, but the wire key is
-    // conditional (option-3 serve rule): the five synthesized fields above
-    // now count as renderable inline metadata, so this predicate has flipped
-    // to riding the status alongside them — an intentional #2339 side effect
-    // of the fill counting toward `hasRenderableInlineMetadata`.
-    expect(entry.metadataStatus).toBe('pending');
+    // `metadata_status` is NOT NULL on the table (default 'pending'), but the
+    // wire key is conditional (option-3 serve rule) and evaluated against the
+    // PRE-#2339-fill payload (pre-PR review finding 1): a synthesized search
+    // URL is the same request-time fallback the proxy already builds from
+    // nothing, so it does not count as renderable inline metadata. This row
+    // has no persisted field at all, so the predicate stays false and the key
+    // stays home — harmless here either way, since 'pending' is non-terminal
+    // and 3.2 takes the same fetch arm whether the key rides or not. The row
+    // that actually matters (a terminal `enriched_no_match` row with an
+    // otherwise-empty payload) is pinned in the unit suite:
+    // playlist-proxy.service.test.ts's "conditional metadataStatus
+    // (terminal-but-empty guard)" describe block.
+    expect(Object.prototype.hasOwnProperty.call(entry, 'metadataStatus')).toBe(false);
   });
 
   test('metadata keys off the play’s own album_id, matching /flowsheet (artwork keeps its own lookup-key tie-break)', async () => {
