@@ -1098,6 +1098,46 @@ describe('playlist-proxy.service', () => {
         expect(pc.artistId).toBe(44321);
       });
 
+      // #2339 regression (pre-PR review finding 1): the fill in
+      // `applyPlaycutMetadata` used to run BEFORE this predicate was read, so
+      // a terminal-but-empty row's five freshly-synthesized search URLs made
+      // `hasRenderableInlineMetadata` true and let `metadataStatus` ride —
+      // exactly the empty-card regression this guard exists to prevent
+      // (measured 579 of 37,054 production playcuts, all `enriched_no_match`
+      // with no artwork/bio/discogs/year/genres). A synthesized search URL is
+      // the same request-time fallback the proxy already builds from
+      // nothing, so it must not count as "renderable metadata" for this
+      // predicate. `artist_name` is present here (unlike the sibling test
+      // above), so the fill DOES fire — the assertions below prove that
+      // directly, so this test cannot pass merely because the fill
+      // short-circuited on a blank artist_name.
+      it('withholds a terminal status even though the #2339 fill populates all five streaming URLs (enriched_no_match, no other renderable field)', async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        mockMetadataWhere.mockResolvedValue([
+          {
+            ...emptyMetadata,
+            metadata_status: 'enriched_no_match',
+            artist_name: jessicaPrattRow.artist_name,
+            album_title: jessicaPrattRow.album_title,
+            track_title: jessicaPrattRow.track_title,
+          },
+        ]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        // The fill fired — proves the withheld status below isn't just the
+        // fill being a no-op.
+        expect(pc.spotifyURL).toBe('https://open.spotify.com/search/Jessica%20Pratt%20Back%2C%20Baby');
+        expect(pc.appleMusicURL).toBe('https://music.apple.com/search?term=Jessica%20Pratt%20Back%2C%20Baby');
+        expect(pc.youtubeMusicURL).toBe('https://music.youtube.com/search?q=Jessica%20Pratt%20Back%2C%20Baby');
+        expect(pc.bandcampURL).toBe('https://bandcamp.com/search?q=Jessica%20Pratt%20On%20Your%20Own%20Love%20Again');
+        expect(pc.soundcloudURL).toBe('https://soundcloud.com/search?q=Jessica%20Pratt%20Back%2C%20Baby');
+        // …but the control field stays home: 3.2 must keep its live fallback
+        // fetch rather than short-circuit to a card with five search buttons
+        // and nothing else.
+        expect(Object.prototype.hasOwnProperty.call(pc, 'metadataStatus')).toBe(false);
+      });
+
       it('withholds a terminal status when the only persisted values were guarded off the wire', async () => {
         mockLimit.mockResolvedValue([jessicaPrattRow]);
         // Every field is present in the DB but hazardous: the URL guard drops
