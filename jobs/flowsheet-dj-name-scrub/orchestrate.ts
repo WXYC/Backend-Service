@@ -322,7 +322,18 @@ export const buildPiiNameIndex = (
  * type. There is no single "current chain" — each entry type is reconciled
  * against its own writer.
  */
-const recomputeDjName = (row: ScrubRow): { djName: string | null; reason: WriteReason } => {
+/**
+ * The inputs `recomputeDjName` actually reads. Narrowed from `ScrubRow` so the
+ * pre-flight probe can pass a `PreflightRow` — which carries `legacy_show_id`
+ * and lacks `id`/`message`/`show_id` — without a cast. Both row shapes satisfy
+ * it structurally, which is the point: one decision, no second copy.
+ */
+export type RecomputeInput = Pick<
+  ScrubRow,
+  'entry_type' | 'dj_name_override' | 'legacy_dj_name' | 'primary_dj_id' | 'user_found' | 'user_dj_name'
+>;
+
+const recomputeDjName = (row: RecomputeInput): { djName: string | null; reason: WriteReason } => {
   // `show_start` split by provenance. This is load-bearing, not a
   // refinement. `startShow` (`flowsheet.service.ts:1022`) resolves
   // `effective_override ?? resolveDjDisplayName(dj_info.djName)` and has NO
@@ -694,7 +705,7 @@ export type LoadShowsLegacyDjNameFn = () => Promise<
 export type PreflightRow = Pick<
   ScrubRow,
   'entry_type' | 'dj_name' | 'dj_name_override' | 'legacy_dj_name' | 'primary_dj_id' | 'user_found' | 'user_dj_name'
->;
+> & { legacy_show_id: number | null };
 
 export type LoadPreflightRowsFn = (showIds: readonly number[]) => Promise<PreflightRow[]>;
 
@@ -725,7 +736,7 @@ export const loadPreflightRows: LoadPreflightRowsFn = async (showIds) => {
   if (showIds.length === 0) return [];
   const rows = (await db.execute(sql`
     SELECT f."entry_type", f."dj_name",
-           s."dj_name_override", s."legacy_dj_name", s."primary_dj_id",
+           s."legacy_show_id", s."dj_name_override", s."legacy_dj_name", s."primary_dj_id",
            (u."id" IS NOT NULL) AS "user_found", u."dj_name" AS "user_dj_name"
       FROM ${FLOWSHEET_TABLE} AS f
       JOIN ${SHOWS_TABLE} AS s ON s."id" = f."show_id"
@@ -827,14 +838,100 @@ export const PREFLIGHT_MAX_CANDIDATE_SHOWS = 5_000;
  * whole thesis (see `resolveShowDjName`'s extraction) is that two copies of one
  * decision drift.
  */
-export const countHarmfulRecomputes = (rows: ReadonlyArray<PreflightRow>, piiNames: ReadonlySet<string>): number => {
-  let count = 0;
+/**
+ * Shows whose recompute is ACCEPTED despite scoring as a real-name write.
+ *
+ * Reviewed and accepted 2026-08-31, on evidence from the tubafrenzy backup
+ * archive (`/Volumes/Spark/wxyc-backups`, dump of 2025-10-13) rather than from
+ * Backend state, which cannot see this cohort. Keyed on `legacy_show_id` — the
+ * tubafrenzy id — so the decision is checkable against that same dump, and so
+ * this file carries three integers instead of three people's names.
+ *
+ * WHAT THE EVIDENCE SHOWED. For each of these shows, matched by SHA-256
+ * fingerprint on both columns:
+ *
+ *   - `flowsheet.dj_name` (the STORED value) is tubafrenzy's `DJ_NAME` — the
+ *     DJ's fuller legal name.
+ *   - `shows.legacy_dj_name` (what the recompute WRITES) is `DJ_HANDLE` — the
+ *     short on-air handle.
+ *
+ * So the write replaces a more identifying string with a less identifying one.
+ * That is Cohort B — the remediation this job exists to perform — and the
+ * opposite of harm.
+ *
+ * WHY THE PROBE SCORES IT AS HARM ANYWAY. `countHarmfulRecomputes` asks only
+ * whether the NEW value is in the roster index. These three handles are short
+ * first names ("Jake", "PJ", "Jackson" in shape: 4, 2 and 7 ASCII characters,
+ * single-token), and three current WXYC accounts carry those same strings in
+ * `auth_user.real_name`. A first-name real name is indistinguishable by string
+ * equality from a first-name-style handle. The collision is semantic, not
+ * corruption: for a 2009 or 2014 legacy show, "Jake" is a handle, not a leak
+ * of the 2026 account holder's identity.
+ *
+ * The deeper reason the probe cannot see this for itself: the STORED value is
+ * a legacy DJ's legal name that never existed in `auth_user`, so the index
+ * cannot recognise it as PII, and the probe has no way to notice that the row
+ * already holds something MORE identifying than what it is about to write.
+ * That is the same `auth_user`-keyed blind spot recorded on
+ * `stored_is_superseded_legacy_name` and `recomputed_null_non_pii`, reaching
+ * this job a fifth time.
+ *
+ * WHY A LIST AND NOT A RULE. The obvious generalisation — "do not count a
+ * write whose new value is less identifying than the stored one" — needs a
+ * comparison the index cannot make, and encoding it as a shape heuristic
+ * inside a PII gate would trade a visible false block for an invisible false
+ * pass. An explicit, dated, three-element list is auditable; a heuristic that
+ * silently stops flagging things is not. Do NOT replace this with one.
+ *
+ * ADDING TO THIS LIST is a reviewed decision about a specific show, backed by
+ * the same kind of evidence, not a way to quiet a noisy gate.
+ */
+export const ACCEPTED_LEGACY_SHOW_IDS: ReadonlySet<number> = new Set([115609, 134431, 163809]);
+
+/**
+ * The number of rows the `main` pass would actually WRITE that would themselves
+ * hold a roster real name, EXCLUDING the reviewed acceptances above.
+ *
+ * THIS, not the count of polluted shows, is the harm the gate exists to
+ * prevent — and the two numbers are nothing like each other. Measured on
+ * production 2026-08-30: 392 shows carry a `legacy_dj_name` that is a roster
+ * real name, and across their 14,663 in-scope rows the pass would change
+ * **82**. The other 14,581 are `already_current` skips, because migration 0053
+ * froze `flowsheet.dj_name` from the very `legacy_dj_name` the recompute now
+ * returns — the value is already there, and re-deriving it writes nothing.
+ * Every one of those 82 falls in the three accepted shows.
+ *
+ * Gating on the show count therefore blocked a ~1.8M-row drain over rows the
+ * job provably does not touch. Gating on the write count asks the question the
+ * job can actually answer: would this run put a legal name somewhere it is not
+ * already?
+ *
+ * Returns both halves. The accepted count is reported, never silently dropped
+ * — a gate that hides what it excused is a gate nobody can audit.
+ *
+ * Deliberately reuses `recomputeDjName` and the `already_current` equality
+ * rather than restating either. A probe that predicts the pass by
+ * re-derivation is a second implementation of the decision, and this file's
+ * whole thesis (see `resolveShowDjName`'s extraction) is that two copies of one
+ * decision drift.
+ */
+export const countHarmfulRecomputes = (
+  rows: ReadonlyArray<PreflightRow>,
+  piiNames: ReadonlySet<string>
+): { harmful: number; accepted: number } => {
+  let harmful = 0;
+  let accepted = 0;
   for (const row of rows) {
-    const { djName } = recomputeDjName(row as ScrubRow);
+    const { djName } = recomputeDjName(row);
     if (djName === row.dj_name) continue; // `already_current` — the pass skips it
-    if (djName !== null && piiNames.has(djName.trim())) count += 1;
+    if (djName === null || !piiNames.has(djName.trim())) continue;
+    if (row.legacy_show_id !== null && ACCEPTED_LEGACY_SHOW_IDS.has(row.legacy_show_id)) {
+      accepted += 1;
+      continue;
+    }
+    harmful += 1;
   }
-  return count;
+  return { harmful, accepted };
 };
 
 /**
@@ -1295,6 +1392,8 @@ export type RunResult = {
   harmCandidateShowCount: number;
   /** Rows the main pass would rewrite TO a roster real name. THIS is the gate. */
   harmfulRecomputeCount: number;
+  /** Rows that scored as harmful but fall in a reviewed acceptance (ACCEPTED_LEGACY_SHOW_IDS). */
+  acceptedRecomputeCount: number;
   /** Highest id any pass reached; the bound `verifyScrub` is capped at. */
   highWaterMark: number;
   /** Verification residue below the high-water mark. -1 when not run. */
@@ -1432,6 +1531,7 @@ export const runScrub = async (opts: {
     legacyDjNamePiiCount: 0,
     harmCandidateShowCount: 0,
     harmfulRecomputeCount: 0,
+    acceptedRecomputeCount: 0,
     highWaterMark: 0,
     remaining: -1,
   };
@@ -1516,14 +1616,21 @@ export const runScrub = async (opts: {
         failure = { error: refusal };
       } else {
         const preflightRows = await loadPreflightRowsFn(candidateShowIds);
-        const harmfulRecomputeCount = countHarmfulRecomputes(preflightRows, piiNames);
+        const { harmful: harmfulRecomputeCount, accepted: acceptedRecomputeCount } = countHarmfulRecomputes(
+          preflightRows,
+          piiNames
+        );
         result.harmfulRecomputeCount = harmfulRecomputeCount;
+        result.acceptedRecomputeCount = acceptedRecomputeCount;
         log('info', 'legacy_dj_name_preflight', 'shows.legacy_dj_name pre-flight complete', {
           legacy_dj_name_pii_count: legacyDjNamePiiCount,
           shows_with_legacy_dj_name: shows.length,
           harm_candidate_show_count: candidateShowIds.length,
           preflight_rows_probed: preflightRows.length,
           harmful_recompute_count: harmfulRecomputeCount,
+          // Reported, never silently dropped — a gate that hides what it
+          // excused is a gate nobody can audit. See ACCEPTED_LEGACY_SHOW_IDS.
+          accepted_recompute_count: acceptedRecomputeCount,
         });
 
         if (harmfulRecomputeCount > 0) {
@@ -1716,6 +1823,7 @@ export const runScrub = async (opts: {
           legacy_dj_name_pii_count: result.legacyDjNamePiiCount,
           'scrub.harm_candidate_show_count': result.harmCandidateShowCount,
           'scrub.harmful_recompute_count': result.harmfulRecomputeCount,
+          'scrub.accepted_recompute_count': result.acceptedRecomputeCount,
         });
       } else {
         await runPass('main', mainAfterId, loadMainPageFn, decideForScrubPass, applyDjNameBatchFn);

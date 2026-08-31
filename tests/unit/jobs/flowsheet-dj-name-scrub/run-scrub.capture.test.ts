@@ -134,6 +134,7 @@ describe('finding 3 — shows.legacy_dj_name pre-flight', () => {
       Promise.resolve([
         {
           entry_type: 'track' as const,
+          legacy_show_id: 999999,
           dj_name: 'A. Hearst',
           dj_name_override: null,
           legacy_dj_name: 'A. Hearst',
@@ -163,6 +164,7 @@ describe('finding 3 — shows.legacy_dj_name pre-flight', () => {
       Promise.resolve([
         {
           entry_type: 'track' as const,
+          legacy_show_id: 999999,
           dj_name: 'some other name',
           dj_name_override: null,
           legacy_dj_name: 'A. Hearst',

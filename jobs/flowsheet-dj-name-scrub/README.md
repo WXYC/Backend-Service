@@ -53,31 +53,37 @@ A candidate cohort above `PREFLIGHT_MAX_CANDIDATE_SHOWS` (5,000) refuses the who
 
 ### How the gate clears
 
-**Fix three junk `auth_user.real_name` rows.** That is the whole blocker, and it always was — both this gate and the #2327 proxy it replaced are downstream of the same bad data.
+**It is clear.** As of 2026-08-31 the harm count is **0**, with **82 rows reported as reviewed acceptances**.
 
-Of 163 distinct roster real names, 152 are two-or-more capitalized tokens and only 5 are single-token. Three of those 5 are not names at all — **one is two characters** — and they collide with legacy DJs' genuine short on-air handles. That collision is what puts those DJs' shows in the candidate cohort and what makes the probe score "writes the handle" as "writes a real name".
+#### The 82 rows were the scrub working, and are accepted
 
-Do **not** fix this by teaching `buildPiiNameIndex` a name-shape heuristic. Inside a PII gate that trades a visible false block for an invisible false pass. Fix the rows.
+All 82 fall in three shows (tubafrenzy ids **115609, 134431, 163809**), listed in `ACCEPTED_LEGACY_SHOW_IDS`. Verified by SHA-256 fingerprint against the tubafrenzy backup of 2025-10-13 (`/Volumes/Spark/wxyc-backups`), on both columns of all three shows:
 
-#### The 82 rows are the scrub working, not harm
+|                                                    | Backend holds           | tubafrenzy column |
+| -------------------------------------------------- | ----------------------- | ----------------- |
+| `flowsheet.dj_name` (stored)                       | the fuller legal name   | `DJ_NAME`         |
+| `shows.legacy_dj_name` (what the recompute writes) | the short on-air handle | `DJ_HANDLE`       |
 
-Verified against the tubafrenzy backup of 2025-10-13 (`/Volumes/Spark/wxyc-backups`), by SHA-256 fingerprint, for all three affected shows (legacy ids 115609, 134431, 163809):
+So the write replaces a **more** identifying string with a **less** identifying one — Cohort B, the remediation this job exists to perform, and the opposite of harm.
 
-|                                           | Backend holds     | tubafrenzy column |
-| ----------------------------------------- | ----------------- | ----------------- |
-| `flowsheet.dj_name` (stored)              | the legal name    | `DJ_NAME`         |
-| `shows.legacy_dj_name` (recompute source) | the on-air handle | `DJ_HANDLE`       |
+The probe scored it as harm because it asks only whether the NEW value is in the roster index. These three handles are short first names (4, 2 and 7 ASCII characters, single-token), and three current WXYC accounts carry those same strings in `auth_user.real_name`. A first-name real name is indistinguishable by string equality from a first-name-style handle. For a 2009 or 2014 legacy show that string is a handle, not a leak of the 2026 account holder's identity.
 
-All three fingerprints match on both columns. So the recompute would replace a **legal name** with the DJ's **handle** — Cohort B, the exact remediation this job exists to perform. The probe scores it as harmful only because the handle is in the roster index by collision.
+The probe cannot see this for itself because the STORED value is a legacy DJ's legal name that never existed in `auth_user` — so the index cannot recognise it as PII, and the probe has no way to notice the row already holds something more identifying than what it is about to write. Same `auth_user`-keyed blind spot as `stored_is_superseded_legacy_name` and `recomputed_null_non_pii`, reaching this job a fifth time.
 
-Clean the three `real_name` rows and the count goes to zero on its own: those shows leave the candidate cohort, and the 82 rows are then scrubbed correctly on the next run.
+**A list, not a rule.** The obvious generalisation — "do not count a write whose new value is less identifying than the stored one" — needs a comparison the index cannot make, and as a shape heuristic inside a PII gate it would trade a visible false block for an invisible false pass. Three reviewed integers are auditable; a heuristic that silently stops flagging things is not. Adding to `ACCEPTED_LEGACY_SHOW_IDS` is a reviewed decision about a specific show backed by the same kind of evidence — **not** a way to quiet a noisy gate.
+
+The acceptance is **reported, never silently dropped**: `accepted_recompute_count` appears on the pre-flight log line, the `RunResult`, and the summary span.
+
+#### There were no junk `real_name` rows
+
+An earlier revision of this document said three junk `auth_user.real_name` values (one "two characters") were the blocker and should be cleaned. **That was wrong and the cleanup was never run.** The SELECT showed all three are legitimate first names belonging to real, current accounts — two of them admins. Nulling them would have destroyed real PII to unblock a job. The two-character value is a person's initials.
 
 #### What this is NOT
 
-Earlier revisions of this document sent operators to a Cohort C consent question about 5 DJs whose `legacy_dj_name` is their own real name, and to a `DJ_HANDLE` re-source from tubafrenzy. Both were artifacts of the #2327 proxy:
+Two earlier framings, both artifacts of #2327's proxy gate:
 
-- The consent question never blocked anything the job does. Those rows are `already_current` skips — the scrub does not touch them, and Cohort C is out of scope by design. Worth answering as a standalone privacy question; not a precondition here.
-- The `DJ_HANDLE` re-source is a **no-op**. All 839 shows whose `legacy_dj_name` is a roster real name already hold their upstream `DJ_HANDLE` verbatim. **Nothing here is gated by the 2026-09-07 tubafrenzy turndown.**
+- A **Cohort C consent question** about 5 DJs whose `legacy_dj_name` is their own real name. It never blocked anything: those rows are `already_current` skips, the scrub does not touch them, and Cohort C is out of scope by design. Still worth answering as a standalone privacy question; not a precondition here.
+- A **`DJ_HANDLE` re-source** from tubafrenzy. A **no-op** — all 839 shows whose `legacy_dj_name` is a roster real name already hold their upstream `DJ_HANDLE` verbatim. **Nothing here is gated by the 2026-09-07 tubafrenzy turndown.**
 
 ## Where the job learns which names are PII
 
@@ -160,7 +166,7 @@ docker run --rm --name flowsheet-dj-name-scrub --env-file .env \
 ### Before the first live run
 
 - [ ] **The SSE fan-out guard is deployed.** `filterMetadataUpdate` broadcasts on _any_ flowsheet UPDATE landing in a terminal `metadata_status`, and historical `track` rows are almost all terminal. Without an age guard this drain emits one `liveFs:update` per row to every `/events/stream` client on every backend instance, for hours. The guard (`LIVE_FS_UPDATE_MAX_AGE_HOURS`, default 24h) ships alongside this job — confirm it is live, and watch `SSE/UpdateSuppressed` climb during the run. That climb is the guard working.
-- [ ] **The `harmful_recompute_count` is zero.** `--execute` refuses the `main` pass otherwise and exits non-zero. It was **82** on 2026-08-30 (in 3 shows). The companion `legacy_dj_name_pii_count` (392) is reported but does NOT gate — see "How the gate clears".
+- [ ] **The `harmful_recompute_count` is zero.** `--execute` refuses the `main` pass otherwise and exits non-zero. It is **0** as of 2026-08-31, with `accepted_recompute_count` **82** (see "How the gate clears"). The companion `legacy_dj_name_pii_count` (392) is reported but does NOT gate.
 - [ ] **Run outside peak listening hours.** See the watermark note below.
 - [ ] **Confirm no sibling flowsheet job is running** (`flowsheet-metadata-backfill`, `flowsheet-etl`, the enrichment worker's sweep).
 - [ ] **The `pii_index_empty` refusal did not fire.** An empty `auth_user` roster index makes every count in the run vacuous, including the pre-flight's zero; `--execute` refuses the whole run on it. Reading the wrong column emptied this index once already (2026-08-28).
