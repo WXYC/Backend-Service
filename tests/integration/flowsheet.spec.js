@@ -1712,33 +1712,54 @@ describe('discogsUnavailable on the flowsheet mutation echo (BS#1962)', () => {
 });
 
 /*
- * #2339: V2 flowsheet read-path streaming-URL search-url fill.
+ * #2339: V2 flowsheet read-path streaming-URL search-url fill, end to end.
  *
- * A library-linked track whose album carries no `album_metadata` row (fresh
- * library insert, no LML lookup has ever run) must serve synthesized search
- * URLs on every streaming field instead of `null` — matching `GET
- * /proxy/metadata/album`'s degradation (BS#1184/#1185) instead of the V2
- * flowsheet feed alone greying out those buttons.
+ * The fill is GATED on the row already carrying at least one real streaming
+ * URL: shipped iOS 3.2 skips its live `/proxy/metadata/album` fetch on
+ * `inline.streaming.hasAny`, so filling a zero-streaming row would suppress
+ * the only thing serving that row any metadata. Both arms are pinned here —
+ * a qualifying album (one persisted YouTube Music link, the post-#2295-drain
+ * shape) whose Spotify/Apple buttons upgrade from grey, and a zero-streaming
+ * album that must keep serving NULLs.
  */
 describe('streaming-URL search-url fill on GET /flowsheet (#2339)', () => {
+  const VERIFIED_YOUTUBE = 'https://music.youtube.com/playlist?list=OLAK5uy_bs2339';
   let sql;
-  let albumId;
+  let qualifyingAlbumId;
+  let zeroStreamingAlbumId;
 
   beforeAll(async () => {
     sql = makeSql();
-    const rows = await sql`
+    // artist_id 1 / genre_id 11 / format_id 1 reuse the existing
+    // genre_artist_crossreference row, same as the BS#1962 block above.
+    const qualifying = await sql`
       INSERT INTO ${sql(SCHEMA)}.library
         (artist_id, genre_id, format_id, album_title, code_number)
       VALUES
-        (1, 11, 1, 'BS2339 Test No Streaming Links', 9002)
+        (1, 11, 1, 'BS2339 Test Partial Streaming', 9002)
       RETURNING id
     `;
-    albumId = rows[0].id;
+    qualifyingAlbumId = qualifying[0].id;
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, youtube_music_url)
+      VALUES (${qualifyingAlbumId}, ${VERIFIED_YOUTUBE})
+    `;
+
+    const zero = await sql`
+      INSERT INTO ${sql(SCHEMA)}.library
+        (artist_id, genre_id, format_id, album_title, code_number)
+      VALUES
+        (1, 11, 1, 'BS2339 Test No Streaming Links', 9003)
+      RETURNING id
+    `;
+    zeroStreamingAlbumId = zero[0].id;
   });
 
   afterAll(async () => {
-    if (albumId) {
-      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ${albumId}`;
+    const ids = [qualifyingAlbumId, zeroStreamingAlbumId].filter(Boolean);
+    if (ids.length) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ANY(${ids})`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${ids})`;
     }
     if (sql) await sql.end({ timeout: 5 });
   });
@@ -1751,30 +1772,48 @@ describe('streaming-URL search-url fill on GET /flowsheet (#2339)', () => {
     await fls_util.leave_show(global.primary_dj_id, global.access_token);
   });
 
-  test('a track whose album has no persisted streaming links serves synthesized search URLs, not null', async () => {
-    await request.post('/flowsheet').set('Authorization', global.access_token).send({
-      album_id: albumId,
-      track_title: 'BS2339 Test Track',
-    });
+  test('an album with one persisted streaming link serves synthesized search URLs for the rest', async () => {
+    const post = await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({ album_id: qualifyingAlbumId, track_title: 'BS2339 Test Track' })
+      .expect(201);
+
+    // Read the text back off the echo rather than hardcoding the seeded
+    // artist name, so this pins the fill and not the seed fixture.
+    const artist = post.body.artist_name;
+    const album = post.body.album_title;
+    const track = post.body.track_title;
 
     const res = await request.get('/flowsheet').query({ limit: 30 }).send().expect(200);
-    const entry = res.body.entries.find((e) => e.album_id === albumId);
+    const entry = res.body.entries.find((e) => e.album_id === qualifyingAlbumId);
 
     expect(entry).toBeDefined();
-    expect(entry.spotify_url).toBe(
-      'https://open.spotify.com/search/' + encodeURIComponent('Built to Spill BS2339 Test Track')
-    );
+    expect(entry.spotify_url).toBe('https://open.spotify.com/search/' + encodeURIComponent(`${artist} ${track}`));
     expect(entry.apple_music_url).toBe(
-      'https://music.apple.com/search?term=' + encodeURIComponent('Built to Spill BS2339 Test Track')
+      'https://music.apple.com/search?term=' + encodeURIComponent(`${artist} ${track}`)
     );
-    expect(entry.youtube_music_url).toBe(
-      'https://music.youtube.com/search?q=' + encodeURIComponent('Built to Spill BS2339 Test Track')
-    );
-    expect(entry.bandcamp_url).toBe(
-      'https://bandcamp.com/search?q=' + encodeURIComponent('Built to Spill BS2339 Test No Streaming Links')
-    );
-    expect(entry.soundcloud_url).toBe(
-      'https://soundcloud.com/search?q=' + encodeURIComponent('Built to Spill BS2339 Test Track')
-    );
+    expect(entry.bandcamp_url).toBe('https://bandcamp.com/search?q=' + encodeURIComponent(`${artist} ${album}`));
+    expect(entry.soundcloud_url).toBe('https://soundcloud.com/search?q=' + encodeURIComponent(`${artist} ${track}`));
+    // The verified link wins untouched.
+    expect(entry.youtube_music_url).toBe(VERIFIED_YOUTUBE);
+  });
+
+  test('an album with zero persisted streaming links keeps serving NULLs (the 3.2 proxy fallback must still fire)', async () => {
+    await request
+      .post('/flowsheet')
+      .set('Authorization', global.access_token)
+      .send({ album_id: zeroStreamingAlbumId, track_title: 'BS2339 Zero Streaming Track' })
+      .expect(201);
+
+    const res = await request.get('/flowsheet').query({ limit: 30 }).send().expect(200);
+    const entry = res.body.entries.find((e) => e.album_id === zeroStreamingAlbumId);
+
+    expect(entry).toBeDefined();
+    expect(entry.spotify_url).toBeNull();
+    expect(entry.apple_music_url).toBeNull();
+    expect(entry.youtube_music_url).toBeNull();
+    expect(entry.bandcamp_url).toBeNull();
+    expect(entry.soundcloud_url).toBeNull();
   });
 });

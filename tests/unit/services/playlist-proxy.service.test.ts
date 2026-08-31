@@ -874,6 +874,12 @@ describe('playlist-proxy.service', () => {
       discogs_unavailable: false,
       discogs_unavailable_note: null,
       metadata_status: 'enriched_match',
+      // #2339 synthesis inputs. `enrichPlaycutMetadata` selects these off the
+      // SAME `flowsheet` row it selects the metadata projection from, so they
+      // are sourced here from `jessicaPrattRow` rather than hand-duplicated.
+      artist_name: jessicaPrattRow.artist_name,
+      album_title: jessicaPrattRow.album_title,
+      track_title: jessicaPrattRow.track_title,
     };
 
     /** An unenriched row: every metadata column NULL (no album_metadata, no inline value). */
@@ -894,6 +900,10 @@ describe('playlist-proxy.service', () => {
       discogs_unavailable: null,
       discogs_unavailable_note: null,
       metadata_status: 'pending',
+      // See fullMetadata: the #2339 text columns come off the same flowsheet row.
+      artist_name: jessicaPrattRow.artist_name,
+      album_title: jessicaPrattRow.album_title,
+      track_title: jessicaPrattRow.track_title,
     };
 
     it('emits every enrichment field under the exact iOS 3.2 camelCase key', async () => {
@@ -1004,68 +1014,122 @@ describe('playlist-proxy.service', () => {
     });
 
     // #2339: the legacy `?v=2` grouped payload must degrade the same way the
-    // V2 flowsheet feed does — a still-absent streaming URL after the
-    // COALESCE/host-guard gets a synthesized search URL rather than reaching
-    // the wire as omitted, exactly mirroring `GET /proxy/metadata/album`
-    // (BS#1184/#1185). Synthesized from `flowsheet.artist_name`/
-    // `album_title`/`track_title` (added to `enrichPlaycutMetadata`'s select
-    // by this ticket), never from `GroupedPlaycut.artistName`/`releaseTitle`/
-    // `songTitle` (the tubafrenzy-mirror-derived legacy fields).
+    // V2 flowsheet feed does — an absent streaming URL after the COALESCE /
+    // host guard gets a synthesized search URL instead of no key at all,
+    // mirroring `GET /proxy/metadata/album` (BS#1184/#1185). Synthesized from
+    // `flowsheet.artist_name`/`album_title`/`track_title` (added to
+    // `enrichPlaycutMetadata`'s select by this ticket), never from
+    // `GroupedPlaycut.artistName`/`releaseTitle`/`songTitle` (the
+    // tubafrenzy-mirror-derived legacy fields, which can drift).
+    //
+    // GATED on the row already carrying at least one real streaming URL —
+    // see `fillSynthesizedSearchUrls` and the zero-streaming test below.
     describe('streaming-URL search-url fill (#2339)', () => {
-      it('fills all five absent streaming URLs with synthesized search URLs', async () => {
+      /** The post-#2295-drain shape: synthesized YT/Bandcamp/SoundCloud, NULL Spotify/Apple. */
+      const drainedYoutube = 'https://music.youtube.com/search?q=Jessica%20Pratt%20Back%2C%20Baby';
+
+      it('fills the absent streaming URLs on a row that already carries one, leaving the verified value untouched', async () => {
         mockLimit.mockResolvedValue([jessicaPrattRow]);
-        mockMetadataWhere.mockResolvedValue([
-          {
-            ...emptyMetadata,
-            artist_name: jessicaPrattRow.artist_name,
-            album_title: jessicaPrattRow.album_title,
-            track_title: jessicaPrattRow.track_title,
-          },
-        ]);
+        mockMetadataWhere.mockResolvedValue([{ ...emptyMetadata, youtube_music_url: drainedYoutube }]);
 
         const [pc] = (await getRecentEntries(50)).playcuts;
 
         expect(pc.spotifyURL).toBe('https://open.spotify.com/search/Jessica%20Pratt%20Back%2C%20Baby');
         expect(pc.appleMusicURL).toBe('https://music.apple.com/search?term=Jessica%20Pratt%20Back%2C%20Baby');
-        expect(pc.youtubeMusicURL).toBe('https://music.youtube.com/search?q=Jessica%20Pratt%20Back%2C%20Baby');
         expect(pc.bandcampURL).toBe('https://bandcamp.com/search?q=Jessica%20Pratt%20On%20Your%20Own%20Love%20Again');
         expect(pc.soundcloudURL).toBe('https://soundcloud.com/search?q=Jessica%20Pratt%20Back%2C%20Baby');
+        expect(pc.youtubeMusicURL).toBe(drainedYoutube);
+      });
+
+      // THE GATE. Shipped iOS 3.2's `PlaycutMetadataService` skips the live
+      // `/proxy/metadata/album` fetch when `metadataStatus?.isTerminal == true
+      // || inline.streaming.hasAny`. A payload whose only populated fields
+      // would be synthesized fallbacks must not satisfy the client's
+      // inline-metadata gate — zero-streaming rows serve no streaming keys at
+      // all, so the proxy fallback (which returns full metadata AND
+      // synthesizes its own links) still fires. Filling here would leave the
+      // user a card with five search buttons and nothing else, permanently:
+      // BS#2103's empty-card bug, reopened.
+      it('fills nothing on a zero-streaming row — no streaming key rides at all', async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        mockMetadataWhere.mockResolvedValue([emptyMetadata]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        for (const key of ['spotifyURL', 'appleMusicURL', 'youtubeMusicURL', 'bandcampURL', 'soundcloudURL']) {
+          expect(Object.prototype.hasOwnProperty.call(pc, key)).toBe(false);
+        }
       });
 
       it('a verified persisted URL still wins over the fill', async () => {
         mockLimit.mockResolvedValue([jessicaPrattRow]);
         mockMetadataWhere.mockResolvedValue([
-          {
-            ...emptyMetadata,
-            artist_name: jessicaPrattRow.artist_name,
-            album_title: jessicaPrattRow.album_title,
-            track_title: jessicaPrattRow.track_title,
-            spotify_url: 'https://open.spotify.com/album/genuine',
-          },
+          { ...emptyMetadata, spotify_url: 'https://open.spotify.com/album/genuine' },
         ]);
 
         const [pc] = (await getRecentEntries(50)).playcuts;
 
         expect(pc.spotifyURL).toBe('https://open.spotify.com/album/genuine');
-        expect(pc.appleMusicURL).not.toBeUndefined();
+        expect(pc.appleMusicURL).toBe('https://music.apple.com/search?term=Jessica%20Pratt%20Back%2C%20Baby');
       });
 
-      it('a suppressed mislabeled host degrades to a synthesized URL rather than staying omitted', async () => {
+      it('a suppressed mislabeled host degrades to a synthesized URL when a sibling keeps the row qualifying', async () => {
         mockLimit.mockResolvedValue([jessicaPrattRow]);
         mockMetadataWhere.mockResolvedValue([
           {
             ...emptyMetadata,
-            artist_name: jessicaPrattRow.artist_name,
-            album_title: jessicaPrattRow.album_title,
-            track_title: jessicaPrattRow.track_title,
             // Mislabeled at the LML boundary (BS#1714) — a Deezer URL under spotify_url.
             spotify_url: 'https://www.deezer.com/album/254381182',
+            bandcamp_url: 'https://jessicapratt.bandcamp.com/album/on-your-own-love-again',
           },
         ]);
 
         const [pc] = (await getRecentEntries(50)).playcuts;
 
         expect(pc.spotifyURL).toBe('https://open.spotify.com/search/Jessica%20Pratt%20Back%2C%20Baby');
+        expect(pc.bandcampURL).toBe('https://jessicapratt.bandcamp.com/album/on-your-own-love-again');
+      });
+
+      // A suppressed URL is not a real streaming URL: the row it leaves behind
+      // has zero, so it serves nothing and the proxy fallback both fetches and
+      // synthesizes — consistent with BS#1714's degradation.
+      it('treats a row whose ONLY streaming URL was host-guard-suppressed as zero-streaming', async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        mockMetadataWhere.mockResolvedValue([
+          { ...emptyMetadata, spotify_url: 'https://www.deezer.com/album/254381182' },
+        ]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        for (const key of ['spotifyURL', 'appleMusicURL', 'youtubeMusicURL', 'bandcampURL', 'soundcloudURL']) {
+          expect(Object.prototype.hasOwnProperty.call(pc, key)).toBe(false);
+        }
+      });
+
+      // Blank-aware, matching the proxy's `if (!metadata.spotifyUrl)` falsy
+      // branch: a `??`-nullish check would let the '' survive the fill and then
+      // be dropped by `wireUrl` with no fallback left to run.
+      it("degrades a persisted '' to a synthesized URL on a qualifying row", async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        mockMetadataWhere.mockResolvedValue([{ ...emptyMetadata, spotify_url: '', youtube_music_url: drainedYoutube }]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        expect(pc.spotifyURL).toBe('https://open.spotify.com/search/Jessica%20Pratt%20Back%2C%20Baby');
+      });
+
+      it('synthesizes nothing for a whitespace-only artist_name', async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        mockMetadataWhere.mockResolvedValue([
+          { ...emptyMetadata, artist_name: '   ', youtube_music_url: drainedYoutube },
+        ]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        expect(pc.youtubeMusicURL).toBe(drainedYoutube);
+        for (const key of ['spotifyURL', 'appleMusicURL', 'bandcampURL', 'soundcloudURL']) {
+          expect(Object.prototype.hasOwnProperty.call(pc, key)).toBe(false);
+        }
       });
     });
 
@@ -1098,44 +1162,49 @@ describe('playlist-proxy.service', () => {
         expect(pc.artistId).toBe(44321);
       });
 
-      // #2339 regression (pre-PR review finding 1): the fill in
-      // `applyPlaycutMetadata` used to run BEFORE this predicate was read, so
-      // a terminal-but-empty row's five freshly-synthesized search URLs made
-      // `hasRenderableInlineMetadata` true and let `metadataStatus` ride —
-      // exactly the empty-card regression this guard exists to prevent
-      // (measured 579 of 37,054 production playcuts, all `enriched_no_match`
-      // with no artwork/bio/discogs/year/genres). A synthesized search URL is
-      // the same request-time fallback the proxy already builds from
-      // nothing, so it must not count as "renderable metadata" for this
-      // predicate. `artist_name` is present here (unlike the sibling test
-      // above), so the fill DOES fire — the assertions below prove that
-      // directly, so this test cannot pass merely because the fill
-      // short-circuited on a blank artist_name.
-      it('withholds a terminal status even though the #2339 fill populates all five streaming URLs (enriched_no_match, no other renderable field)', async () => {
+      // #2339 + BS#2103 together. A terminal-but-empty row (measured 579 of
+      // 37,054 production playcuts, all `enriched_no_match` with no
+      // artwork/bio/discogs/year/genres) has ZERO real streaming URLs, so the
+      // gated fill does not fire at all: the contract is that a payload whose
+      // only populated fields would be synthesized fallbacks must not satisfy
+      // the client's inline-metadata gate — zero-streaming rows serve no
+      // streaming keys at all, and 3.2 keeps its live `/proxy/metadata/album`
+      // fetch rather than short-circuiting to a card with five search buttons
+      // and nothing else.
+      //
+      // Belt and braces: `hasRenderableInlineMetadata` reads the PRE-fill
+      // streaming snapshot, not the emitted wire values, so even a row that
+      // does qualify for the fill cannot manufacture a renderable-metadata
+      // verdict out of synthesized fallbacks.
+      it('withholds a terminal status on a zero-streaming enriched_no_match row, and emits no streaming key (#2339 gate)', async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        mockMetadataWhere.mockResolvedValue([{ ...emptyMetadata, metadata_status: 'enriched_no_match' }]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        for (const key of ['spotifyURL', 'appleMusicURL', 'youtubeMusicURL', 'bandcampURL', 'soundcloudURL']) {
+          expect(Object.prototype.hasOwnProperty.call(pc, key)).toBe(false);
+        }
+        expect(Object.prototype.hasOwnProperty.call(pc, 'metadataStatus')).toBe(false);
+      });
+
+      // The row that DOES fill still gets its status, because the pre-fill
+      // snapshot already had a renderable streaming URL — the fill changed
+      // decoration, not the verdict.
+      it('still emits a terminal status for a row whose real streaming URL made it renderable before the fill', async () => {
         mockLimit.mockResolvedValue([jessicaPrattRow]);
         mockMetadataWhere.mockResolvedValue([
           {
             ...emptyMetadata,
             metadata_status: 'enriched_no_match',
-            artist_name: jessicaPrattRow.artist_name,
-            album_title: jessicaPrattRow.album_title,
-            track_title: jessicaPrattRow.track_title,
+            youtube_music_url: 'https://music.youtube.com/playlist?list=OLAK5uy_real',
           },
         ]);
 
         const [pc] = (await getRecentEntries(50)).playcuts;
 
-        // The fill fired — proves the withheld status below isn't just the
-        // fill being a no-op.
         expect(pc.spotifyURL).toBe('https://open.spotify.com/search/Jessica%20Pratt%20Back%2C%20Baby');
-        expect(pc.appleMusicURL).toBe('https://music.apple.com/search?term=Jessica%20Pratt%20Back%2C%20Baby');
-        expect(pc.youtubeMusicURL).toBe('https://music.youtube.com/search?q=Jessica%20Pratt%20Back%2C%20Baby');
-        expect(pc.bandcampURL).toBe('https://bandcamp.com/search?q=Jessica%20Pratt%20On%20Your%20Own%20Love%20Again');
-        expect(pc.soundcloudURL).toBe('https://soundcloud.com/search?q=Jessica%20Pratt%20Back%2C%20Baby');
-        // …but the control field stays home: 3.2 must keep its live fallback
-        // fetch rather than short-circuit to a card with five search buttons
-        // and nothing else.
-        expect(Object.prototype.hasOwnProperty.call(pc, 'metadataStatus')).toBe(false);
+        expect(pc.metadataStatus).toBe('enriched_no_match');
       });
 
       it('withholds a terminal status when the only persisted values were guarded off the wire', async () => {
@@ -1237,8 +1306,13 @@ describe('playlist-proxy.service', () => {
 
       const [pc] = (await getRecentEntries(50)).playcuts;
 
-      expect(pc.spotifyURL).toBeUndefined();
-      expect(pc.appleMusicURL).toBeUndefined();
+      // Neither mislabeled value reaches its hardwired button. Since #2339
+      // they degrade to synthesized search URLs rather than to no key at all,
+      // because the three un-mislabeled siblings keep this row past the fill's
+      // "already carries a real streaming URL" gate — the identical-degradation
+      // rule from BS#1185.
+      expect(pc.spotifyURL).toBe('https://open.spotify.com/search/Jessica%20Pratt%20Back%2C%20Baby');
+      expect(pc.appleMusicURL).toBe('https://music.apple.com/search?term=Jessica%20Pratt%20Back%2C%20Baby');
       // The un-mislabeled siblings are untouched.
       expect(pc.bandcampURL).toBe(fullMetadata.bandcamp_url);
       expect(pc.youtubeMusicURL).toBe(fullMetadata.youtube_music_url);
