@@ -1231,6 +1231,44 @@ describe('playlist-proxy.service', () => {
         expect(pc.genres).toBeUndefined();
       });
 
+      // #2339's gate uses the WIRE's presence predicate (`wireUrl`), not
+      // "non-blank" — so a persisted streaming value that would never reach the
+      // client cannot qualify its row for the fill. Without this, a row like
+      // this one emits ZERO streaming keys before the ticket and FOUR
+      // synthesized ones after, flipping shipped 3.2's
+      // `inline.streaming.hasAny` from false to true purely by synthesizing,
+      // and suppressing the live `/proxy/metadata/album` fallback that is the
+      // only thing serving it any metadata. Every hazard shape below is one the
+      // columns permit and no write path validates: `youtube_music_url` /
+      // `bandcamp_url` / `soundcloud_url` are written verbatim from LML
+      // (`normalize-lookup.ts`, `enrich.ts`, `flowsheet-no-match-recheck`),
+      // and `sanitizeLookupStreamingUrls` guards only spotify/apple (BS#1710).
+      it('emits no streaming key for a row whose only persisted streaming URLs are unwireable (#2339 gate uses wire semantics)', async () => {
+        mockLimit.mockResolvedValue([jessicaPrattRow]);
+        mockMetadataWhere.mockResolvedValue([
+          {
+            ...emptyMetadata,
+            metadata_status: 'enriched_match',
+            // Scheme-relative: `new URL()` rejects it, iOS would too.
+            spotify_url: '//open.spotify.com/album/xyz',
+            // Bare hostname, no scheme.
+            bandcamp_url: 'jessicapratt.bandcamp.com/album/on-your-own-love-again',
+            // Raw tab — a WHATWG-vs-Foundation parser differential.
+            youtube_music_url: 'https://music.youtube.com/playlist?list=OLAK5uy_\tabc',
+            // Non-web scheme.
+            soundcloud_url: 'javascript:alert(1)',
+          },
+        ]);
+
+        const [pc] = (await getRecentEntries(50)).playcuts;
+
+        for (const key of ['spotifyURL', 'appleMusicURL', 'youtubeMusicURL', 'bandcampURL', 'soundcloudURL']) {
+          expect(Object.prototype.hasOwnProperty.call(pc, key)).toBe(false);
+        }
+        // Nothing renderable shipped, so the control field stays home too.
+        expect(Object.prototype.hasOwnProperty.call(pc, 'metadataStatus')).toBe(false);
+      });
+
       it('emits a terminal status when artwork alone survives (set before applyPlaycutMetadata)', async () => {
         mockLimit.mockResolvedValue([jessicaPrattRow]);
         mockArtworkOrderBy.mockResolvedValue([

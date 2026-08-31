@@ -172,7 +172,7 @@ const GOLDEN_PATH = join(__dirname, '../../fixtures/recent-entries-v2-wire-golde
  * file from the fixture, so regenerating one without acknowledging the other is
  * a red test rather than a silent change.
  */
-const GOLDEN_SHA256 = '775de938c03fe6aa3e5ba2dfe63eba6cc5093f2dcb1f1948e5554a917439322f';
+const GOLDEN_SHA256 = 'd8cc07bd3d720442cf6ea39f71d12ca641e9330e4145ac7ad6737b3708acfbb8';
 
 /** Fixed ids and add_times — the payload must be byte-reproducible. */
 function row(id: number, albumId: number | null, artist: string, album: string, track: string, seconds: number) {
@@ -507,25 +507,24 @@ describe('BS#2103 v=2 wire golden (cross-repo contract with iOS 3.2)', () => {
     // Whitespace: padded is trimmed, blank is dropped.
     expect(byArtist('Juana Molina').discogsURL).toBe('https://www.discogs.com/release/999');
     expect(byArtist('Juana Molina')).not.toHaveProperty('artistWikipediaURL');
-    // Non-web scheme, scheme-relative, bare host. discogsURL/bandcampURL stay
-    // dropped: discogs isn't one of the five #2339-synthesizable fields, and
-    // the scheme-less bandcamp_url is a non-blank string, so the fill's
-    // `?? fallback` never runs for it (it is then dropped by `wireUrl`).
-    // spotifyURL's scheme-relative value fails the same `isSpotifyUrl` host
-    // check the mislabeled-host case above does, so it degrades to a
-    // synthesized search URL (#2339).
-    //
-    // This row is also where the fill's gate shows its edge: "real streaming
-    // URL" means non-null and non-blank, NOT "survives `wireUrl`", so the
-    // unwireable bandcamp_url is what carries this row past the gate even
-    // though it earns no wire key. That matches the proxy's own
-    // `if (!metadata.spotifyUrl)` falsy check, which likewise treats a
-    // non-empty garbage string as present. Production `bandcamp_url` values
-    // are written absolute by the enrichment path, so this shape is a
-    // constructed hazard rather than a live population.
-    expect(byArtist('Stereolab')).not.toHaveProperty('discogsURL');
-    expect(byArtist('Stereolab').spotifyURL).toBe('https://open.spotify.com/search/Stereolab%20Brakhage');
-    expect(byArtist('Stereolab')).not.toHaveProperty('bandcampURL');
+    // Non-web scheme, scheme-relative, bare host — every persisted value on
+    // this row is unwireable, so the row emits no URL key at all. It is also
+    // the row that proves #2339's gate uses WIRE semantics: the scheme-less
+    // `bandcamp_url` and scheme-relative `spotify_url` are non-blank strings,
+    // but neither would reach the client, so neither qualifies the row for the
+    // fill. Gating on non-blankness instead would have flipped this row's
+    // `inline.streaming.hasAny` from false to true purely by synthesizing —
+    // precisely the 3.2 fallback suppression the gate exists to prevent.
+    for (const key of [
+      'discogsURL',
+      'spotifyURL',
+      'appleMusicURL',
+      'youtubeMusicURL',
+      'bandcampURL',
+      'soundcloudURL',
+    ]) {
+      expect(byArtist('Stereolab')).not.toHaveProperty(key);
+    }
     // Raw non-ASCII is NOT a hazard and must survive untouched. This is also
     // why the serializer rejects rather than emitting `parsed.href`: href would
     // percent-encode these ~21 real production values for no gain.

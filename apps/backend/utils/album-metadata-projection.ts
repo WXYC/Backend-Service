@@ -40,8 +40,10 @@
  * serializer seams fill it with a synthesized search URL via
  * {@link fillSynthesizedSearchUrls}, mirroring `GET /proxy/metadata/album`'s
  * degradation (BS#1184/#1185) — but only for a row that ALREADY carries at
- * least one real streaming URL. See that function for the gate and why it
- * exists.
+ * least one streaming URL the client would actually see. The gate uses
+ * {@link wireUrl}, the wire's own presence predicate, so the gate bit and iOS
+ * 3.2's `inline.streaming.hasAny` are the same bit by construction. See that
+ * function for why the gate exists.
  *
  * Exactly TWO seams fill, and both are read-GETs:
  *   - `transformToIFSEntry` in `flowsheet.service.ts` — serves the V1
@@ -151,28 +153,104 @@ export interface SynthesizableStreamingUrls {
   soundcloud_url: string | null;
 }
 
+/**
+ * True iff `value` contains a character that makes `new URL()`'s verdict a
+ * statement about a DIFFERENT string than the one we are about to emit.
+ *
+ * `wireUrl` validates with the WHATWG parser but emits the original text, so
+ * every place the two disagree is a parser differential the wire inherits:
+ *
+ *   - **Backslash.** For the http(s) special schemes WHATWG folds `\` to `/`,
+ *     so `new URL('https://www.discogs.com\\@evil.example/release/1')` reports
+ *     hostname `www.discogs.com`. Foundation/RFC 3986 do NOT fold it, so the
+ *     same bytes resolve to host `evil.example` on iOS. This is the identical
+ *     differential `shared/lml-client/src/streaming-url-guard.ts`'s
+ *     `safeHostname` opens with `if (url.includes('\\')) return null` (BS#1710);
+ *     same reasoning, same verdict, at this seam.
+ *   - **ASCII whitespace and control characters.** WHATWG *strips* raw tab, LF
+ *     and CR anywhere in the input and percent-encodes other C0 characters and
+ *     the space before parsing, so `'https://e.com/a\tb'` validates as
+ *     `https://e.com/ab` — a URL that is not what we would emit. `.trim()`
+ *     only reaches the ends. Foundation rejects the raw form, which is the
+ *     throwing decode this whole helper exists to avoid.
+ */
+export function hasWireUrlParserDifferential(value: string): boolean {
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    // C0 controls + space (<= 0x20), DEL (0x7f), backslash (0x5c).
+    if (code <= 0x20 || code === 0x7f || code === 0x5c) return true;
+  }
+  return false;
+}
+
+/**
+ * Normalize a persisted URL for the wire, or `undefined` to omit the key.
+ *
+ * iOS decodes every URL-typed playcut field with
+ * `try container.decodeIfPresent(URL.self, forKey:)`. That is *throwing*, not
+ * tolerant: a present-but-unparseable value raises `DecodingError` and fails
+ * the whole `Playcut` decode, which empties the playlist for that listener.
+ * `/flowsheet` passes these through raw because its consumer decodes them as
+ * strings, so only the legacy `?v=2` seam uses this as an OUTPUT filter. Both
+ * seams use it as a PREDICATE, though — `fillSynthesizedSearchUrls` asks it
+ * whether a persisted streaming URL exists for the client at all (#2339).
+ *
+ * Only an absolute `http`/`https` URL survives. Everything else — `''`,
+ * whitespace, a relative path, a bare hostname, a scheme-relative `//host/...`,
+ * a non-web scheme — is dropped rather than risked. Dropping a field costs one
+ * missing button; emitting a bad one costs the whole playlist.
+ *
+ * REJECT, don't normalize. The emitted value is the trimmed ORIGINAL, never
+ * `parsed.href`, so anything `new URL()` silently rewrites while parsing is a
+ * differential between what was validated and what ships — see
+ * {@link hasWireUrlParserDifferential}, which rejects those inputs outright.
+ * Emitting `parsed.href` instead would close the same differentials, but it
+ * would also percent-encode the ~21 production values carrying raw non-ASCII in
+ * the path (`https://en.wikipedia.org/wiki/Nilüfer_Yanya` -> `…/Nil%C3%BCfer_…`),
+ * which ship verbatim today and decode fine on iOS. Rejecting touches only the
+ * hazardous inputs, leaves every good byte alone, and matches the repo's
+ * existing precedent at the LML boundary (BS#1710).
+ */
+export function wireUrl(value: string | null | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (trimmed === '') return undefined;
+  if (hasWireUrlParserDifferential(trimmed)) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
+  if (parsed.hostname === '') return undefined;
+  return trimmed;
+}
+
 const searchUrlProvider = new SearchUrlProvider();
 
 /**
- * A persisted string that actually carries information, or `null`.
+ * A persisted streaming URL that will actually reach a client, or `null`.
  *
- * `''` and whitespace-only values are treated as ABSENT, matching the
- * degradation `GET /proxy/metadata/album` already applies: its fallback arms
- * are plain falsy checks (`if (!metadata.spotifyUrl) …`), not `??`-nullish
- * ones, so a persisted `''` there earns a synthesized URL rather than
- * surviving to the wire. A `??` check here would instead let the blank
- * through, where the legacy seam's `wireUrl` drops it with no fallback
- * left to run and the V1 `/flowsheet` seam emits it verbatim as `""`.
+ * The test is {@link wireUrl}'s — absolute http(s), no parser differential —
+ * NOT merely "non-blank". Anything else (`''`, whitespace, a bare hostname, a
+ * scheme-relative `//host/…`, `javascript:`, a raw-tab/LF/backslash
+ * differential) is ABSENT for both of {@link fillSynthesizedSearchUrls}'s
+ * purposes: it does not qualify a row for the fill, and on a row that does
+ * qualify it degrades to a synthesized URL instead of surviving to be dropped
+ * downstream with no fallback left to run.
  *
- * A non-blank value that is nonetheless unusable (scheme-relative, `javascript:`,
- * a raw-backslash parser differential) counts as PRESENT here, exactly as the
- * proxy's falsy check counts it — this helper's job is proxy parity, and the
- * legacy seam's `wireUrl` is the separate, later filter that decides whether
- * such a value earns a wire key.
+ * Using the wire's own predicate is what makes the gate sound. The proxy's
+ * fallback arms are falsy checks (`if (!metadata.spotifyUrl) …`) rather than
+ * `??`-nullish ones, so this is the same degradation shape, evaluated against
+ * the same question the client asks: is there a link here or not.
+ *
+ * The original value is returned, not `wireUrl`'s trimmed copy — trimming is
+ * the legacy seam's output concern, and the `/flowsheet` seam has always
+ * emitted persisted text verbatim.
  */
-function nonBlank(value: string | null): string | null {
-  if (value === null) return null;
-  return value.trim() === '' ? null : value;
+function wireablePersistedUrl(value: string | null): string | null {
+  return wireUrl(value) === undefined ? null : value;
 }
 
 /**
@@ -189,67 +267,64 @@ function nonBlank(value: string | null): string | null {
  *
  * TWO gates, both load-bearing:
  *
- *   1. **At least one real streaming URL already present** (owner decision,
- *      2026-08-31, on #2339). Shipped iOS 3.2's `PlaycutMetadataService`
- *      skips the live `/proxy/metadata/album` fetch when
- *      `metadataStatus?.isTerminal == true || inline.streaming.hasAny`. A row
- *      that already carries a real streaming URL short-circuits inline
+ *   1. **At least one streaming URL that would reach the client** (owner
+ *      decision, 2026-08-31, on #2339). Shipped iOS 3.2's
+ *      `PlaycutMetadataService` skips the live `/proxy/metadata/album` fetch
+ *      when `metadataStatus?.isTerminal == true || inline.streaming.hasAny`. A
+ *      row that already carries a real streaming URL short-circuits inline
  *      REGARDLESS of what we do, so filling it only upgrades grey
- *      Spotify/Apple buttons and can never suppress a fetch. A row with zero
- *      real streaming URLs must keep serving NULLs: filling it would satisfy
- *      `streaming.hasAny` and suppress the live proxy fallback — which
- *      returns full metadata AND synthesizes its own links — leaving the user
- *      a card with five search buttons and nothing else, permanently. That is
+ *      Spotify/Apple buttons and can never suppress a fetch. A row with no such
+ *      URL must keep serving NULLs: filling it would satisfy
+ *      `streaming.hasAny` and suppress the live proxy fallback — which returns
+ *      full metadata AND synthesizes its own links — leaving the user a card
+ *      with five search buttons and nothing else, permanently. That is
  *      BS#2103's empty-card bug, reopened. The post-#2295-drain cohort (the
  *      population this ticket exists for) qualifies: the drain persisted
  *      synthesized YouTube Music / Bandcamp / SoundCloud URLs on every matched
  *      row.
  *
+ *      "Would reach the client" is {@link wireablePersistedUrl}, i.e.
+ *      {@link wireUrl}'s own predicate — so `carriesWireableStreamingUrl` and
+ *      the client's `streaming.hasAny` are the same bit by construction, and
+ *      the gate cannot be flipped by a value the wire is about to drop. The
+ *      gate is this one shared function at both seams; only the OUTPUT filters
+ *      differ per seam (the legacy `?v=2` payload runs `wireUrl` again on the
+ *      way out; `/flowsheet` emits verbatim).
+ *
  *      A row whose ONLY streaming URL was suppressed by the host guard counts
  *      as zero-streaming and serves NULLs — the proxy fallback then both
  *      fetches and synthesizes, consistent with #1714's degradation.
- *
- *      "Real" is non-null and non-blank, deliberately NOT "parses to a usable
- *      URL". That leaves one residual gap: a row whose only streaming value is
- *      non-blank yet unusable (scheme-relative, a raw-backslash parser
- *      differential) passes the gate here while the legacy seam's `wireUrl`
- *      drops it from the wire, so that row's `streaming.hasAny` does flip
- *      false -> true. The known population is nil — the enrichment write path
- *      only ever persists absolute URLs, and the two shapes in the wire golden
- *      (rows 9011 / 9013) are constructed hazards, not audit findings — and a
- *      URL-validity gate would have to differ per seam (the `/flowsheet` seam
- *      applies no such filter), which is exactly the fork BS#2103 exists to
- *      prevent. Revisit if such rows ever appear in the corpus.
  *
  *   2. **A non-blank `artist_name`** — there is nothing to search on without
  *      one, and a whitespace-only name would synthesize five buttons opening
  *      `%20%20%20` searches. A marker/talkset/breakpoint row (or a track row
  *      that somehow lost its artist name) degrades to nulls exactly as before.
  *
- * Blank (`''` / whitespace-only) persisted values are normalized to `null`
- * unconditionally — see {@link nonBlank} — whether or not the row qualifies
- * for the fill, so a blank never reaches a wire as `""`.
+ * A persisted value that fails the wire predicate is normalized to `null`
+ * unconditionally, whether or not the row qualifies for the fill, so a blank
+ * can never reach a wire as `""` and an unusable one can never reach a
+ * hardwired iOS button.
  */
 export function fillSynthesizedSearchUrls(
   urls: SynthesizableStreamingUrls,
   text: { artist_name: string | null; album_title: string | null; track_title: string | null }
 ): SynthesizableStreamingUrls {
   const present: SynthesizableStreamingUrls = {
-    spotify_url: nonBlank(urls.spotify_url),
-    apple_music_url: nonBlank(urls.apple_music_url),
-    youtube_music_url: nonBlank(urls.youtube_music_url),
-    bandcamp_url: nonBlank(urls.bandcamp_url),
-    soundcloud_url: nonBlank(urls.soundcloud_url),
+    spotify_url: wireablePersistedUrl(urls.spotify_url),
+    apple_music_url: wireablePersistedUrl(urls.apple_music_url),
+    youtube_music_url: wireablePersistedUrl(urls.youtube_music_url),
+    bandcamp_url: wireablePersistedUrl(urls.bandcamp_url),
+    soundcloud_url: wireablePersistedUrl(urls.soundcloud_url),
   };
 
-  // Gate 1: zero real streaming URLs -> serve NULLs, keep the 3.2 proxy fallback.
-  const carriesRealStreamingUrl =
+  // Gate 1: nothing the client would see -> serve NULLs, keep the 3.2 proxy fallback.
+  const carriesWireableStreamingUrl =
     present.spotify_url !== null ||
     present.apple_music_url !== null ||
     present.youtube_music_url !== null ||
     present.bandcamp_url !== null ||
     present.soundcloud_url !== null;
-  if (!carriesRealStreamingUrl) return present;
+  if (!carriesWireableStreamingUrl) return present;
 
   // Gate 2: nothing to search on.
   const artistName = text.artist_name?.trim() ?? '';
@@ -264,11 +339,9 @@ export function fillSynthesizedSearchUrls(
     present.soundcloud_url === null;
   if (!hasAbsent) return present;
 
-  const fallback = searchUrlProvider.getAllSearchUrls(
-    artistName,
-    nonBlank(text.album_title)?.trim(),
-    nonBlank(text.track_title)?.trim()
-  );
+  const albumTitle = text.album_title?.trim();
+  const trackTitle = text.track_title?.trim();
+  const fallback = searchUrlProvider.getAllSearchUrls(artistName, albumTitle || undefined, trackTitle || undefined);
   return {
     spotify_url: present.spotify_url ?? fallback.spotifyUrl,
     apple_music_url: present.apple_music_url ?? fallback.appleMusicUrl,
