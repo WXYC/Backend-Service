@@ -91,11 +91,6 @@
         "Jazz"
       ],
       "artistId": 7000,
-      "spotifyURL": "https://open.spotify.com/search/Jo%C3%A3o%20Gilberto%20Bim%20Bom",
-      "appleMusicURL": "https://music.apple.com/search?term=Jo%C3%A3o%20Gilberto%20Bim%20Bom",
-      "youtubeMusicURL": "https://music.youtube.com/search?q=Jo%C3%A3o%20Gilberto%20Bim%20Bom",
-      "bandcampURL": "https://bandcamp.com/search?q=Jo%C3%A3o%20Gilberto%20Chega%20de%20Saudade",
-      "soundcloudURL": "https://soundcloud.com/search?q=Jo%C3%A3o%20Gilberto%20Bim%20Bom",
       "metadataStatus": "enriched_match",
       "discogsUnavailable": false
     },
@@ -112,11 +107,6 @@
       "request": "false",
       "artistWikipediaURL": "https://en.wikipedia.org/wiki/İbrahim_Tatlıses",
       "artistId": 7000,
-      "spotifyURL": "https://open.spotify.com/search/%C4%B0brahim%20Tatl%C4%B1ses%20Mavi%20Mavi",
-      "appleMusicURL": "https://music.apple.com/search?term=%C4%B0brahim%20Tatl%C4%B1ses%20Mavi%20Mavi",
-      "youtubeMusicURL": "https://music.youtube.com/search?q=%C4%B0brahim%20Tatl%C4%B1ses%20Mavi%20Mavi",
-      "bandcampURL": "https://bandcamp.com/search?q=%C4%B0brahim%20Tatl%C4%B1ses%20Selam%20Olsun",
-      "soundcloudURL": "https://soundcloud.com/search?q=%C4%B0brahim%20Tatl%C4%B1ses%20Mavi%20Mavi",
       "metadataStatus": "enriched_match",
       "discogsUnavailable": false
     },
@@ -133,11 +123,6 @@
       "request": "false",
       "artistWikipediaURL": "https://en.wikipedia.org/wiki/Konono_Nº1",
       "artistId": 7000,
-      "spotifyURL": "https://open.spotify.com/search/Konono%20N%C2%BA1%20Lufuala%20Ndonga",
-      "appleMusicURL": "https://music.apple.com/search?term=Konono%20N%C2%BA1%20Lufuala%20Ndonga",
-      "youtubeMusicURL": "https://music.youtube.com/search?q=Konono%20N%C2%BA1%20Lufuala%20Ndonga",
-      "bandcampURL": "https://bandcamp.com/search?q=Konono%20N%C2%BA1%20Congotronics",
-      "soundcloudURL": "https://soundcloud.com/search?q=Konono%20N%C2%BA1%20Lufuala%20Ndonga",
       "metadataStatus": "enriched_match",
       "discogsUnavailable": false
     },
@@ -153,11 +138,11 @@
       "rotation": "false",
       "request": "false",
       "spotifyURL": "https://open.spotify.com/search/Eiko%20Ishibashi%20%26%20Jim%20O'Rourke%20Ei",
+      "appleMusicURL": "https://music.apple.com/search?term=Eiko%20Ishibashi%20%26%20Jim%20O'Rourke%20Ei",
       "youtubeMusicURL": "https://music.youtube.com/search?q=Agriculture%20Dan's%20Love%20Song",
       "bandcampURL": "https://bandcamp.com/search?q=Ash%20Wednesday%20Can't%20Stop%20It!%20Australian%20Post-Punk%201978-82%20(2025%20Deluxe%20Edition)",
       "soundcloudURL": "https://soundcloud.com/search?q=Agriculture%20Dan's%20Love%20Song",
       "artistId": 7000,
-      "appleMusicURL": "https://music.apple.com/search?term=Eiko%20Ishibashi%20%26%20Jim%20O'Rourke%20Ei",
       "metadataStatus": "enriched_match",
       "discogsUnavailable": false
     },
@@ -173,11 +158,6 @@
       "rotation": "false",
       "request": "false",
       "artistId": 7000,
-      "spotifyURL": "https://open.spotify.com/search/Hole%20Violet",
-      "appleMusicURL": "https://music.apple.com/search?term=Hole%20Violet",
-      "youtubeMusicURL": "https://music.youtube.com/search?q=Hole%20Violet",
-      "bandcampURL": "https://bandcamp.com/search?q=Hole%20Live%20Through%20This",
-      "soundcloudURL": "https://soundcloud.com/search?q=Hole%20Violet",
       "discogsUnavailable": false
     },
     {
@@ -192,11 +172,6 @@
       "rotation": "false",
       "request": "false",
       "artistId": 7000,
-      "spotifyURL": "https://open.spotify.com/search/Art%20Garfunkel%20All%20I%20Know",
-      "appleMusicURL": "https://music.apple.com/search?term=Art%20Garfunkel%20All%20I%20Know",
-      "youtubeMusicURL": "https://music.youtube.com/search?q=Art%20Garfunkel%20All%20I%20Know",
-      "bandcampURL": "https://bandcamp.com/search?q=Art%20Garfunkel%20Angel%20Clare",
-      "soundcloudURL": "https://soundcloud.com/search?q=Art%20Garfunkel%20All%20I%20Know",
       "discogsUnavailable": false
     },
     {
@@ -212,11 +187,6 @@
       "request": "false",
       "artworkURL": "https://i.discogs.com/bs2103-pratt.jpg",
       "artistId": 7000,
-      "spotifyURL": "https://open.spotify.com/search/Jessica%20Pratt%20Back%2C%20Baby",
-      "appleMusicURL": "https://music.apple.com/search?term=Jessica%20Pratt%20Back%2C%20Baby",
-      "youtubeMusicURL": "https://music.youtube.com/search?q=Jessica%20Pratt%20Back%2C%20Baby",
-      "bandcampURL": "https://bandcamp.com/search?q=Jessica%20Pratt%20On%20Your%20Own%20Love%20Again",
-      "soundcloudURL": "https://soundcloud.com/search?q=Jessica%20Pratt%20Back%2C%20Baby",
       "metadataStatus": "enriched_match",
       "discogsUnavailable": false
     },
@@ -231,12 +201,12 @@
       "labelName": "BS2103 Probe Records",
       "rotation": "false",
       "request": "false",
-      "bandcampURL": "https://chuquimamanicondori.bandcamp.com/album/dj-e",
-      "artistId": 7000,
       "spotifyURL": "https://open.spotify.com/search/Chuquimamani-Condori%20Call%20Your%20Name",
       "appleMusicURL": "https://music.apple.com/search?term=Chuquimamani-Condori%20Call%20Your%20Name",
       "youtubeMusicURL": "https://music.youtube.com/search?q=Chuquimamani-Condori%20Call%20Your%20Name",
+      "bandcampURL": "https://chuquimamanicondori.bandcamp.com/album/dj-e",
       "soundcloudURL": "https://soundcloud.com/search?q=Chuquimamani-Condori%20Call%20Your%20Name",
+      "artistId": 7000,
       "metadataStatus": "enriched_match",
       "discogsUnavailable": false
     },
@@ -253,11 +223,6 @@
       "request": "false",
       "discogsURL": "https://www.discogs.com/release/999",
       "artistId": 7000,
-      "spotifyURL": "https://open.spotify.com/search/Juana%20Molina%20la%20paradoja",
-      "appleMusicURL": "https://music.apple.com/search?term=Juana%20Molina%20la%20paradoja",
-      "youtubeMusicURL": "https://music.youtube.com/search?q=Juana%20Molina%20la%20paradoja",
-      "bandcampURL": "https://bandcamp.com/search?q=Juana%20Molina%20DOGA",
-      "soundcloudURL": "https://soundcloud.com/search?q=Juana%20Molina%20la%20paradoja",
       "metadataStatus": "enriched_match",
       "discogsUnavailable": false
     },
@@ -272,11 +237,11 @@
       "labelName": "BS2103 Probe Records",
       "rotation": "false",
       "request": "false",
-      "artistId": 7000,
       "spotifyURL": "https://open.spotify.com/search/Stereolab%20Brakhage",
       "appleMusicURL": "https://music.apple.com/search?term=Stereolab%20Brakhage",
       "youtubeMusicURL": "https://music.youtube.com/search?q=Stereolab%20Brakhage",
       "soundcloudURL": "https://soundcloud.com/search?q=Stereolab%20Brakhage",
+      "artistId": 7000,
       "discogsUnavailable": false
     },
     {
@@ -289,12 +254,7 @@
       "releaseTitle": "BS2103 Unenriched Album",
       "labelName": "BS2103 Probe Records",
       "rotation": "false",
-      "request": "false",
-      "spotifyURL": "https://open.spotify.com/search/BS2103%20Unenriched%20Artist%20Probe%20Track%20(no%20metadata)",
-      "appleMusicURL": "https://music.apple.com/search?term=BS2103%20Unenriched%20Artist%20Probe%20Track%20(no%20metadata)",
-      "youtubeMusicURL": "https://music.youtube.com/search?q=BS2103%20Unenriched%20Artist%20Probe%20Track%20(no%20metadata)",
-      "bandcampURL": "https://bandcamp.com/search?q=BS2103%20Unenriched%20Artist%20BS2103%20Unenriched%20Album",
-      "soundcloudURL": "https://soundcloud.com/search?q=BS2103%20Unenriched%20Artist%20Probe%20Track%20(no%20metadata)"
+      "request": "false"
     },
     {
       "id": 9013,
@@ -307,12 +267,12 @@
       "labelName": "BS2103 Probe Records",
       "rotation": "false",
       "request": "false",
+      "spotifyURL": "https://open.spotify.com/search/Hermanos%20Guti%C3%A9rrez%20Tres%20Hermanos",
+      "appleMusicURL": "https://music.apple.com/search?term=Hermanos%20Guti%C3%A9rrez%20Tres%20Hermanos",
       "genres": [
         "Rock"
       ],
       "artistId": 7000,
-      "spotifyURL": "https://open.spotify.com/search/Hermanos%20Guti%C3%A9rrez%20Tres%20Hermanos",
-      "appleMusicURL": "https://music.apple.com/search?term=Hermanos%20Guti%C3%A9rrez%20Tres%20Hermanos",
       "metadataStatus": "enriched_match",
       "discogsUnavailable": false
     },
@@ -332,11 +292,6 @@
         "Folk Rock"
       ],
       "artistId": 7000,
-      "spotifyURL": "https://open.spotify.com/search/Cat%20Power%20Cross%20Bones%20Style",
-      "appleMusicURL": "https://music.apple.com/search?term=Cat%20Power%20Cross%20Bones%20Style",
-      "youtubeMusicURL": "https://music.youtube.com/search?q=Cat%20Power%20Cross%20Bones%20Style",
-      "bandcampURL": "https://bandcamp.com/search?q=Cat%20Power%20Moon%20Pix",
-      "soundcloudURL": "https://soundcloud.com/search?q=Cat%20Power%20Cross%20Bones%20Style",
       "metadataStatus": "enriched_match",
       "discogsUnavailable": true
     }

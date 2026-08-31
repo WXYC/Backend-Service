@@ -395,6 +395,13 @@ export type FSEntryRaw = {
  * this is the single producer of every IFSEntry that reaches the `/flowsheet`
  * (top-level fields) and `/v2/flowsheet` (`transformToV2`, nested `metadata`)
  * read paths, so guarding the two hardwired streaming URLs here covers both.
+ *
+ * It is NOT, however, the single producer of every flowsheet-shaped payload:
+ * the mutation/peek echoes (`projectFlowsheetEntry`) and the SSE `liveFs:update`
+ * channel (`pickClientFacingColumns`) project straight off the DB/CDC row and
+ * never come through here. They therefore do not get #2339's search-URL fill —
+ * see the header of `utils/album-metadata-projection.ts` for why that asymmetry
+ * is safe.
  */
 export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
   // BS#1714 host guard, shared with the legacy recentEntries serializer
@@ -406,9 +413,14 @@ export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
   // #2339: request-time-only fill for whatever the host guard just left
   // absent, mirroring `GET /proxy/metadata/album`'s degradation so the same
   // album doesn't grey out its streaming buttons on this endpoint alone. Runs
-  // AFTER the host guard so a suppressed mislabeled URL degrades to a
-  // synthesized one, same as an outright-missing one. Never persisted — this
-  // only touches the values below, not `raw` or any DB write.
+  // AFTER the host guard so a suppressed mislabeled URL degrades the same way
+  // an outright-missing one does. GATED: the fill only fires for a row whose
+  // post-guard values already carry at least one real streaming URL — shipped
+  // iOS 3.2 skips its live `/proxy/metadata/album` fetch on
+  // `inline.streaming.hasAny`, so filling a zero-streaming row would suppress
+  // the fallback that is the only thing serving it any metadata at all. See
+  // `fillSynthesizedSearchUrls` for the full rationale. Never persisted —
+  // this only touches the values below, not `raw` or any DB write.
   const { spotify_url, apple_music_url, youtube_music_url, bandcamp_url, soundcloud_url } = fillSynthesizedSearchUrls(
     {
       spotify_url: guardedSpotifyUrl,

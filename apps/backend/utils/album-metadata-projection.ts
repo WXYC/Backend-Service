@@ -36,12 +36,34 @@
  * come off `library` directly.)
  *
  * A THIRD behavior lives one layer up, not here (#2339): when the COALESCE
- * above (plus the host guard) still leaves a streaming URL absent, the two
- * serializer seams — `transformToIFSEntry` in `flowsheet.service.ts` and
- * `applyPlaycutMetadata` in `playlist-proxy.service.ts` — fill it with a
- * synthesized search URL via {@link fillSynthesizedSearchUrls}, mirroring
- * `GET /proxy/metadata/album`'s degradation (BS#1184/#1185). It is
- * deliberately NOT folded into this SQL projection: URL-encoding
+ * above (plus the host guard) still leaves a streaming URL absent, two
+ * serializer seams fill it with a synthesized search URL via
+ * {@link fillSynthesizedSearchUrls}, mirroring `GET /proxy/metadata/album`'s
+ * degradation (BS#1184/#1185) — but only for a row that ALREADY carries at
+ * least one real streaming URL. See that function for the gate and why it
+ * exists.
+ *
+ * Exactly TWO seams fill, and both are read-GETs:
+ *   - `transformToIFSEntry` in `flowsheet.service.ts` — serves the V1
+ *     `GET /flowsheet` top-level fields AND `/v2/flowsheet`'s nested
+ *     `metadata` object (both come off the one IFSEntry it builds);
+ *   - `applyPlaycutMetadata` in `playlist-proxy.service.ts` — the legacy
+ *     `GET /playlists/recentEntries?v=2` grouped payload.
+ *
+ * The other two producers of flowsheet-shaped payloads deliberately do NOT
+ * fill, and neither routes through `transformToIFSEntry`:
+ *   - the mutation/peek echoes (`projectFlowsheetEntry` in
+ *     `utils/flowsheet-projection.ts`, an allow-list projection straight off
+ *     the DB row — BS#1513);
+ *   - the SSE `liveFs:update` channel (`pickClientFacingColumns`, same
+ *     allow-list over a CDC row).
+ * That asymmetry is safe precisely BECAUSE the fill is gated: the only bit
+ * shipped iOS 3.2 branches on is "does this payload carry any streaming URL
+ * at all" (`inline.streaming.hasAny`), and the gate can only fire on rows
+ * where that bit is already true. So the gate-relevant bit never differs
+ * between producers for the same row — only button decoration does.
+ *
+ * The fill is deliberately NOT folded into this SQL projection: URL-encoding
  * artist/album/track text is a TS concern (`SearchUrlProvider` /
  * `synthesizeSearchUrls`), and — more importantly — this projection is a
  * pure read of persisted state, while a synthesized URL must never be
@@ -132,44 +154,126 @@ export interface SynthesizableStreamingUrls {
 const searchUrlProvider = new SearchUrlProvider();
 
 /**
- * Request-time fallback fill (#2339): whatever is still `null` after the
- * COALESCE + BS#1714 host guard gets a synthesized search URL, the same
- * `SearchUrlProvider.getAllSearchUrls` degradation `GET /proxy/metadata/album`
- * already applies at request time (BS#1184/#1185). A populated value — verified
- * or already-suppressed-then-filled — always wins; this only fills absences.
- * Never persisted (#1192): callers must apply this to the *response* object,
- * never write the result back to `album_metadata` or `flowsheet`.
+ * A persisted string that actually carries information, or `null`.
  *
- * Requires a non-blank `artist_name` to have anything to search on — mirrors
- * `FSEntryFieldsRaw.rotation_bin`'s "looks like a real track" gate just above
- * it in `flowsheet.service.ts`. A marker/talkset/breakpoint row (or a track
- * row that somehow lost its artist name) degrades to nulls exactly as before.
+ * `''` and whitespace-only values are treated as ABSENT, matching the
+ * degradation `GET /proxy/metadata/album` already applies: its fallback arms
+ * are plain falsy checks (`if (!metadata.spotifyUrl) …`), not `??`-nullish
+ * ones, so a persisted `''` there earns a synthesized URL rather than
+ * surviving to the wire. A `??` check here would instead let the blank
+ * through, where the legacy seam's `wireUrl` drops it with no fallback
+ * left to run and the V1 `/flowsheet` seam emits it verbatim as `""`.
+ *
+ * A non-blank value that is nonetheless unusable (scheme-relative, `javascript:`,
+ * a raw-backslash parser differential) counts as PRESENT here, exactly as the
+ * proxy's falsy check counts it — this helper's job is proxy parity, and the
+ * legacy seam's `wireUrl` is the separate, later filter that decides whether
+ * such a value earns a wire key.
+ */
+function nonBlank(value: string | null): string | null {
+  if (value === null) return null;
+  return value.trim() === '' ? null : value;
+}
+
+/**
+ * Request-time fallback fill (#2339): fill a still-absent streaming URL with a
+ * synthesized search URL — the same `SearchUrlProvider.getAllSearchUrls`
+ * degradation `GET /proxy/metadata/album` applies at request time
+ * (BS#1184/#1185) — for rows that qualify. Never persisted (#1192): callers
+ * must apply this to the *response* object, never write the result back to
+ * `album_metadata` or `flowsheet`.
+ *
+ * Inputs are the POST-host-guard values: `spotify_url` / `apple_music_url`
+ * must already have been through {@link suppressMislabeledStreamingUrls}, so a
+ * mislabeled URL degrades exactly as an outright-missing one does (#1714).
+ *
+ * TWO gates, both load-bearing:
+ *
+ *   1. **At least one real streaming URL already present** (owner decision,
+ *      2026-08-31, on #2339). Shipped iOS 3.2's `PlaycutMetadataService`
+ *      skips the live `/proxy/metadata/album` fetch when
+ *      `metadataStatus?.isTerminal == true || inline.streaming.hasAny`. A row
+ *      that already carries a real streaming URL short-circuits inline
+ *      REGARDLESS of what we do, so filling it only upgrades grey
+ *      Spotify/Apple buttons and can never suppress a fetch. A row with zero
+ *      real streaming URLs must keep serving NULLs: filling it would satisfy
+ *      `streaming.hasAny` and suppress the live proxy fallback — which
+ *      returns full metadata AND synthesizes its own links — leaving the user
+ *      a card with five search buttons and nothing else, permanently. That is
+ *      BS#2103's empty-card bug, reopened. The post-#2295-drain cohort (the
+ *      population this ticket exists for) qualifies: the drain persisted
+ *      synthesized YouTube Music / Bandcamp / SoundCloud URLs on every matched
+ *      row.
+ *
+ *      A row whose ONLY streaming URL was suppressed by the host guard counts
+ *      as zero-streaming and serves NULLs — the proxy fallback then both
+ *      fetches and synthesizes, consistent with #1714's degradation.
+ *
+ *      "Real" is non-null and non-blank, deliberately NOT "parses to a usable
+ *      URL". That leaves one residual gap: a row whose only streaming value is
+ *      non-blank yet unusable (scheme-relative, a raw-backslash parser
+ *      differential) passes the gate here while the legacy seam's `wireUrl`
+ *      drops it from the wire, so that row's `streaming.hasAny` does flip
+ *      false -> true. The known population is nil — the enrichment write path
+ *      only ever persists absolute URLs, and the two shapes in the wire golden
+ *      (rows 9011 / 9013) are constructed hazards, not audit findings — and a
+ *      URL-validity gate would have to differ per seam (the `/flowsheet` seam
+ *      applies no such filter), which is exactly the fork BS#2103 exists to
+ *      prevent. Revisit if such rows ever appear in the corpus.
+ *
+ *   2. **A non-blank `artist_name`** — there is nothing to search on without
+ *      one, and a whitespace-only name would synthesize five buttons opening
+ *      `%20%20%20` searches. A marker/talkset/breakpoint row (or a track row
+ *      that somehow lost its artist name) degrades to nulls exactly as before.
+ *
+ * Blank (`''` / whitespace-only) persisted values are normalized to `null`
+ * unconditionally — see {@link nonBlank} — whether or not the row qualifies
+ * for the fill, so a blank never reaches a wire as `""`.
  */
 export function fillSynthesizedSearchUrls(
   urls: SynthesizableStreamingUrls,
   text: { artist_name: string | null; album_title: string | null; track_title: string | null }
 ): SynthesizableStreamingUrls {
-  if (!text.artist_name) return urls;
-  if (
-    urls.spotify_url !== null &&
-    urls.apple_music_url !== null &&
-    urls.youtube_music_url !== null &&
-    urls.bandcamp_url !== null &&
-    urls.soundcloud_url !== null
-  ) {
-    return urls;
-  }
+  const present: SynthesizableStreamingUrls = {
+    spotify_url: nonBlank(urls.spotify_url),
+    apple_music_url: nonBlank(urls.apple_music_url),
+    youtube_music_url: nonBlank(urls.youtube_music_url),
+    bandcamp_url: nonBlank(urls.bandcamp_url),
+    soundcloud_url: nonBlank(urls.soundcloud_url),
+  };
+
+  // Gate 1: zero real streaming URLs -> serve NULLs, keep the 3.2 proxy fallback.
+  const carriesRealStreamingUrl =
+    present.spotify_url !== null ||
+    present.apple_music_url !== null ||
+    present.youtube_music_url !== null ||
+    present.bandcamp_url !== null ||
+    present.soundcloud_url !== null;
+  if (!carriesRealStreamingUrl) return present;
+
+  // Gate 2: nothing to search on.
+  const artistName = text.artist_name?.trim() ?? '';
+  if (artistName === '') return present;
+
+  // Nothing absent -> nothing to build. O(rows) string work, so skip it.
+  const hasAbsent =
+    present.spotify_url === null ||
+    present.apple_music_url === null ||
+    present.youtube_music_url === null ||
+    present.bandcamp_url === null ||
+    present.soundcloud_url === null;
+  if (!hasAbsent) return present;
 
   const fallback = searchUrlProvider.getAllSearchUrls(
-    text.artist_name,
-    text.album_title ?? undefined,
-    text.track_title ?? undefined
+    artistName,
+    nonBlank(text.album_title)?.trim(),
+    nonBlank(text.track_title)?.trim()
   );
   return {
-    spotify_url: urls.spotify_url ?? fallback.spotifyUrl,
-    apple_music_url: urls.apple_music_url ?? fallback.appleMusicUrl,
-    youtube_music_url: urls.youtube_music_url ?? fallback.youtubeMusicUrl,
-    bandcamp_url: urls.bandcamp_url ?? fallback.bandcampUrl,
-    soundcloud_url: urls.soundcloud_url ?? fallback.soundcloudUrl,
+    spotify_url: present.spotify_url ?? fallback.spotifyUrl,
+    apple_music_url: present.apple_music_url ?? fallback.appleMusicUrl,
+    youtube_music_url: present.youtube_music_url ?? fallback.youtubeMusicUrl,
+    bandcamp_url: present.bandcamp_url ?? fallback.bandcampUrl,
+    soundcloud_url: present.soundcloud_url ?? fallback.soundcloudUrl,
   };
 }

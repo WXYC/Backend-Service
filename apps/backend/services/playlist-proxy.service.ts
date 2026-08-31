@@ -86,6 +86,7 @@ import {
   ALBUM_METADATA_PROJECTION_WITHOUT_ARTWORK,
   suppressMislabeledStreamingUrls,
   fillSynthesizedSearchUrls,
+  type SynthesizableStreamingUrls,
 } from '../utils/album-metadata-projection.js';
 import type { ConcertDTO } from './concerts.service.js';
 import { attachUpcomingShows, attachCriticReviews, getOnAirDJName } from './flowsheet.service.js';
@@ -1207,17 +1208,29 @@ async function resolveCriticReviews(candidates: RecentRow[]): Promise<Map<number
  * deliberately excluded, mirroring their exclusion from the iOS predicate —
  * none of them is playcut-detail metadata, so none of them can prevent the
  * empty render this guard exists to stop.
+ *
+ * The five streaming fields come in as `preFillStreaming` — the post-host-guard
+ * values BEFORE #2339's search-URL fill — rather than being read back off
+ * `grouped`, because a synthesized search URL is not renderable metadata for
+ * this rule's purposes: it is the same request-time fallback the proxy already
+ * builds out of nothing, so a row whose only wire values are synthesized
+ * fallbacks is still terminal-but-empty and must keep the 3.2 fallback fetch.
+ * They run through the same {@link wireUrl} filter the wire keys themselves do,
+ * so "present" here means exactly "would have earned a key without the fill".
+ * (With the fill gated on an existing real streaming URL this can only differ
+ * from the post-fill reading for a value that is non-blank yet unwireable, but
+ * the pre-fill reading is the one that is correct by construction.)
  */
-function hasRenderableInlineMetadata(grouped: GroupedPlaycut): boolean {
+function hasRenderableInlineMetadata(grouped: GroupedPlaycut, preFillStreaming: SynthesizableStreamingUrls): boolean {
   return (
     grouped.artworkURL !== undefined ||
     grouped.discogsURL !== undefined ||
     grouped.releaseYear !== undefined ||
-    grouped.spotifyURL !== undefined ||
-    grouped.appleMusicURL !== undefined ||
-    grouped.youtubeMusicURL !== undefined ||
-    grouped.bandcampURL !== undefined ||
-    grouped.soundcloudURL !== undefined ||
+    wireUrl(preFillStreaming.spotify_url) !== undefined ||
+    wireUrl(preFillStreaming.apple_music_url) !== undefined ||
+    wireUrl(preFillStreaming.youtube_music_url) !== undefined ||
+    wireUrl(preFillStreaming.bandcamp_url) !== undefined ||
+    wireUrl(preFillStreaming.soundcloud_url) !== undefined ||
     grouped.artistBio !== undefined ||
     grouped.artistWikipediaURL !== undefined ||
     grouped.genres !== undefined ||
@@ -1230,18 +1243,45 @@ function applyPlaycutMetadata(grouped: GroupedPlaycut, meta: PlaycutMetadataRow)
   // Spotify/Apple was mislabeled at the LML boundary before #1712 shipped and
   // must not reach the hardwired iOS "Spotify"/"Apple Music" button. Same
   // guard, same helper, as the /flowsheet serve seam.
-  const { spotify_url: guardedSpotifyUrl, apple_music_url: guardedAppleMusicUrl } =
-    suppressMislabeledStreamingUrls(meta);
+  const guarded = suppressMislabeledStreamingUrls(meta);
+  // The post-guard, PRE-#2339-fill streaming snapshot. Two consumers: the fill
+  // below takes it as input, and `hasRenderableInlineMetadata` reads it instead
+  // of `grouped` so a synthesized fallback can never manufacture "renderable
+  // metadata" out of a row that has none (BS#2103's empty-card guard).
+  const preFillStreaming: SynthesizableStreamingUrls = {
+    spotify_url: guarded.spotify_url,
+    apple_music_url: guarded.apple_music_url,
+    youtube_music_url: meta.youtube_music_url,
+    bandcamp_url: meta.bandcamp_url,
+    soundcloud_url: meta.soundcloud_url,
+  };
+
+  // #2339: request-time-only fill of whatever the COALESCE + host guard left
+  // absent, same helper and same ordering (guard, THEN fill) as
+  // `transformToIFSEntry` — so a suppressed mislabeled URL degrades exactly as
+  // an outright-missing one does. GATED on the snapshot above already carrying
+  // at least one real streaming URL: shipped iOS 3.2 skips its live
+  // `/proxy/metadata/album` fetch on `inline.streaming.hasAny`, so filling a
+  // zero-streaming row would suppress the very fallback that gives that row any
+  // metadata at all. See `fillSynthesizedSearchUrls` for the full rationale.
+  // Never persisted: `meta` (the DB row) is untouched, only this local response
+  // shape is filled.
+  //
+  // Computed BEFORE any of the five keys is written, so each is set exactly
+  // once and the wire's JSON key order is byte-identical to the pre-#2339
+  // output (pre-PR review finding 5).
+  const streaming = fillSynthesizedSearchUrls(preFillStreaming, {
+    artist_name: meta.artist_name,
+    album_title: meta.album_title,
+    track_title: meta.track_title,
+  });
 
   setUrlField(grouped, 'discogsURL', meta.discogs_url);
-  // Pre-#2339 (guarded, not yet synthesized) values first, so the
-  // `hasRenderableInlineMetadata` snapshot below reads real persisted state —
-  // see the snapshot's own comment for why.
-  setUrlField(grouped, 'spotifyURL', guardedSpotifyUrl);
-  setUrlField(grouped, 'appleMusicURL', guardedAppleMusicUrl);
-  setUrlField(grouped, 'youtubeMusicURL', meta.youtube_music_url);
-  setUrlField(grouped, 'bandcampURL', meta.bandcamp_url);
-  setUrlField(grouped, 'soundcloudURL', meta.soundcloud_url);
+  setUrlField(grouped, 'spotifyURL', streaming.spotify_url);
+  setUrlField(grouped, 'appleMusicURL', streaming.apple_music_url);
+  setUrlField(grouped, 'youtubeMusicURL', streaming.youtube_music_url);
+  setUrlField(grouped, 'bandcampURL', streaming.bandcamp_url);
+  setUrlField(grouped, 'soundcloudURL', streaming.soundcloud_url);
   setUrlField(grouped, 'artistWikipediaURL', meta.artist_wikipedia_url);
 
   if (meta.release_year !== null) {
@@ -1269,44 +1309,13 @@ function applyPlaycutMetadata(grouped: GroupedPlaycut, meta: PlaycutMetadataRow)
   // Option-3 serve rule (BS#2103 review): the status accompanies renderable
   // metadata or stays home. Evaluated HERE — after every one of the 12
   // predicate fields above (and the caller's earlier artworkURL assignment)
-  // has run, but BEFORE the #2339 fill below overwrites the five streaming
-  // URL fields — so the check reads the post-guard, PRE-SYNTHESIS payload,
-  // not the DB row and not the filled-in search URLs. A synthesized search
-  // URL is not "renderable metadata" in the sense this predicate protects:
-  // it's the same request-time fallback the proxy already builds from
-  // nothing, so a row whose only wire values are synthesized fallbacks is
-  // still terminal-but-empty for this rule's purposes, and must still ride
-  // to the `!hasRenderableInlineMetadata` branch's 3.2 fallback fetch rather
-  // than short-circuiting to a card with five search buttons and nothing
-  // else (BS#2103's empty-card bug, reopened if this snapshot moved after
-  // the fill).
-  const hasRealRenderableMetadata = hasRenderableInlineMetadata(grouped);
-
-  // #2339: request-time-only fill for whatever the host guard just left
-  // absent, same helper and same ordering (guard, THEN fill) as
-  // `transformToIFSEntry` — a suppressed mislabeled URL degrades to a
-  // synthesized one exactly as an outright-missing one does. Never
-  // persisted: `meta` (the DB row) is untouched, only this local response
-  // shape is filled. Applied AFTER the `hasRenderableInlineMetadata`
-  // snapshot above so the fill can't manufacture "renderable metadata" out
-  // of a row that has none.
-  const { spotify_url, apple_music_url, youtube_music_url, bandcamp_url, soundcloud_url } = fillSynthesizedSearchUrls(
-    {
-      spotify_url: guardedSpotifyUrl,
-      apple_music_url: guardedAppleMusicUrl,
-      youtube_music_url: meta.youtube_music_url,
-      bandcamp_url: meta.bandcamp_url,
-      soundcloud_url: meta.soundcloud_url,
-    },
-    { artist_name: meta.artist_name, album_title: meta.album_title, track_title: meta.track_title }
-  );
-  setUrlField(grouped, 'spotifyURL', spotify_url);
-  setUrlField(grouped, 'appleMusicURL', apple_music_url);
-  setUrlField(grouped, 'youtubeMusicURL', youtube_music_url);
-  setUrlField(grouped, 'bandcampURL', bandcamp_url);
-  setUrlField(grouped, 'soundcloudURL', soundcloud_url);
-
-  if (meta.metadata_status !== null && hasRealRenderableMetadata) {
+  // has run — and against `preFillStreaming` rather than the filled wire
+  // values, so a row whose only populated fields would be synthesized
+  // fallbacks still counts as terminal-but-EMPTY and keeps 3.2's live
+  // `/proxy/metadata/album` fetch instead of short-circuiting to a card with
+  // five search buttons and nothing else. Position in the key order is
+  // unchanged from the unconditional version; only presence is conditional.
+  if (meta.metadata_status !== null && hasRenderableInlineMetadata(grouped, preFillStreaming)) {
     grouped.metadataStatus = meta.metadata_status;
   }
   // BS#1908 present-or-absent: null means "no library row", which is not the

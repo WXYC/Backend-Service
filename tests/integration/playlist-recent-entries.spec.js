@@ -565,9 +565,10 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
 
     const entry = res.body.playcuts.find((p) => p.id === flowsheetIds[11]);
     // The persisted value is a Bandcamp URL mislabeled as Spotify; it must not
-    // reach the hardwired iOS "Spotify" button — and since #2339, it degrades
+    // reach the hardwired iOS "Spotify" button — and since #2339 it degrades
     // to the same synthesized search URL an outright-missing value would get,
-    // rather than staying undefined.
+    // because this row's other four streaming links keep it past the fill's
+    // "already carries a real streaming URL" gate.
     expect(entry.spotifyURL).toBe(
       'https://open.spotify.com/search/' + encodeURIComponent(`${ENRICHED_ARTIST} stabilise`)
     );
@@ -584,46 +585,41 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
     expect(Object.prototype.hasOwnProperty.call(entry, 'discogsURL')).toBe(false);
   });
 
-  test('a play with no persisted metadata still has an artist_name, so its five streaming URLs are synthesized (#2339) — everything else stays absent, never ""', async () => {
+  test('a play with no metadata emits no URL keys at all — never "" and, since #2339, no synthesized search URL either', async () => {
     const res = await request.get('/playlists/recentEntries').query({ v: 2, n: 100 }).expect(200);
 
     const entry = res.body.playcuts.find((p) => p.id === flowsheetIds[12]);
     expect(entry).toBeDefined();
-    // These have nothing to synthesize from (no lookup-key text / no library
-    // row) and stay absent exactly as before.
-    for (const key of ['artworkURL', 'discogsURL', 'artistWikipediaURL']) {
+    // #2339's fill is GATED on the row already carrying at least one real
+    // streaming URL. This row carries none, so it fills nothing: shipped iOS
+    // 3.2 skips its live `/proxy/metadata/album` fetch on
+    // `inline.streaming.hasAny`, and filling here would suppress the only
+    // thing that serves this row any metadata — leaving a card with five
+    // search buttons and nothing else (BS#2103's empty-card bug).
+    for (const key of [
+      'artworkURL',
+      'discogsURL',
+      'spotifyURL',
+      'appleMusicURL',
+      'youtubeMusicURL',
+      'bandcampURL',
+      'soundcloudURL',
+      'artistWikipediaURL',
+    ]) {
       expect(Object.prototype.hasOwnProperty.call(entry, key)).toBe(false);
     }
-    // #2339: artist_name/album_title/track_title ARE present on this
-    // free-text row, so the five search-URL-synthesizable fields fill
-    // instead of staying absent — matching /proxy/metadata/album's
-    // degradation for the exact same unenriched-play shape.
-    const query = encodeURIComponent('BS2103 Unenriched Artist Probe Track (no metadata)');
-    expect(entry.spotifyURL).toBe('https://open.spotify.com/search/' + query);
-    expect(entry.appleMusicURL).toBe('https://music.apple.com/search?term=' + query);
-    expect(entry.youtubeMusicURL).toBe('https://music.youtube.com/search?q=' + query);
-    expect(entry.bandcampURL).toBe(
-      'https://bandcamp.com/search?q=' + encodeURIComponent('BS2103 Unenriched Artist BS2103 Unenriched Album')
-    );
-    expect(entry.soundcloudURL).toBe('https://soundcloud.com/search?q=' + query);
     expect(entry.releaseYear).toBeUndefined();
     expect(entry.artistBio).toBeUndefined();
     expect(entry.genres).toBeUndefined();
     expect(entry.artistId).toBeUndefined();
     // No library row -> the discogs-unavailable flag is omitted, not `false`.
     expect(Object.prototype.hasOwnProperty.call(entry, 'discogsUnavailable')).toBe(false);
-    // `metadata_status` is NOT NULL on the table (default 'pending'), but the
-    // wire key is conditional (option-3 serve rule) and evaluated against the
-    // PRE-#2339-fill payload (pre-PR review finding 1): a synthesized search
-    // URL is the same request-time fallback the proxy already builds from
-    // nothing, so it does not count as renderable inline metadata. This row
-    // has no persisted field at all, so the predicate stays false and the key
-    // stays home — harmless here either way, since 'pending' is non-terminal
-    // and 3.2 takes the same fetch arm whether the key rides or not. The row
-    // that actually matters (a terminal `enriched_no_match` row with an
-    // otherwise-empty payload) is pinned in the unit suite:
-    // playlist-proxy.service.test.ts's "conditional metadataStatus
-    // (terminal-but-empty guard)" describe block.
+    // `metadata_status` is NOT NULL on the table, but the wire key is
+    // conditional (option-3 serve rule): with zero renderable inline fields it
+    // is withheld, so shipped 3.2 keeps its live `/proxy/metadata/album`
+    // fallback instead of short-circuiting a terminal status to an empty card.
+    // Evaluated against the PRE-#2339-fill values, so a synthesized fallback
+    // could never flip it either.
     expect(Object.prototype.hasOwnProperty.call(entry, 'metadataStatus')).toBe(false);
   });
 
@@ -637,12 +633,10 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
     // deliberately independent: artwork keeps its historical semantics,
     // everything else uses /flowsheet's own-album_id projection.
     expect(lpEntry.artworkURL).toBe(CD_ARTWORK);
-    // #2339: no persisted spotify_url on either side of the COALESCE, but the
-    // play has an artist_name/album_title/track_title, so it synthesizes a
-    // search URL — unlike discogsURL, which the fill never touches.
-    expect(lpEntry.spotifyURL).toBe(
-      'https://open.spotify.com/search/' + encodeURIComponent(`${ARTIST_NAME} Probe Track (LP press)`)
-    );
+    // #2339's fill does not fire here: this album_metadata row holds artwork
+    // only, so the play carries zero real streaming URLs and stays past the
+    // fill's gate — no spotifyURL key, exactly as before the ticket.
+    expect(Object.prototype.hasOwnProperty.call(lpEntry, 'spotifyURL')).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(lpEntry, 'discogsURL')).toBe(false);
   });
 
