@@ -4,6 +4,11 @@
 #
 # Options:
 #   --full    Run all tests including rate limiting and admin ban tests
+#
+# CI_PORT / CI_AUTH_PORT / CI_DB_PORT / CI_BETTER_AUTH_URL resolve from the
+# same .env dev_env/docker-compose.yml reads via --env-file, with an
+# explicit shell export still able to override deliberately (BS#2348). See
+# scripts/ci-env-vars.sh for the full precedence chain.
 
 set -e
 
@@ -23,9 +28,7 @@ done
 
 # Base environment variables
 export DB_HOST=localhost
-export DB_PORT=${CI_DB_PORT:-15433}
-export PORT=${CI_PORT:-8081}
-export BETTER_AUTH_URL=${CI_BETTER_AUTH_URL:-http://localhost:8083/auth}
+source "$SCRIPT_DIR/ci-env-vars.sh" # sets DB_PORT / PORT / BETTER_AUTH_URL
 export MOCK_API_URL=http://localhost:${MOCK_API_PORT:-9090}
 
 if [ "$FULL_MODE" = true ]; then
