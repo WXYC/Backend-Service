@@ -272,7 +272,11 @@ describe('searchFlowsheet cursor pagination', () => {
     expect(result.nextCursor).toBeUndefined();
   });
 
-  it('omits nextCursor when cursor is not provided (offset mode)', async () => {
+  // BS#2344: a full page emits a cursor whether or not the request carried
+  // one. This used to assert the opposite, which is the bug that capped
+  // dj-site's Previous Sets archive at a single page — see
+  // search.service.first-page-cursor.test.ts for the full coverage.
+  it('returns nextCursor on a full first page even though no cursor was provided', async () => {
     const rows = Array.from({ length: 50 }, (_, i) => makeRow({ id: i + 1 }));
     mockDataAndCount(rows, 1000);
 
@@ -284,7 +288,8 @@ describe('searchFlowsheet cursor pagination', () => {
       order: 'desc',
     });
 
-    expect(result.nextCursor).toBeUndefined();
+    const lastRow = result.results[49];
+    expect(result.nextCursor).toBe(encodeCursor(lastRow.play_date, lastRow.id));
   });
 
   it('omits nextCursor when sort is not date even if cursor is provided', async () => {

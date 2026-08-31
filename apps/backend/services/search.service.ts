@@ -125,6 +125,14 @@ export async function searchFlowsheet(
   const useCursor = parsedCursor !== null;
   const offset = useCursor ? 0 : page * limit;
 
+  // Whether this request can take part in cursor pagination at all — as the
+  // page that RECEIVES a cursor, as the page that EMITS one, or both. Date
+  // sort is the whole condition: `parseCursor` above is consulted only for
+  // `sort === 'date'`, so a cursor handed out under any other sort would be
+  // silently ignored on the way back in and the client would re-request the
+  // same page forever.
+  const cursorEligible = sort === 'date';
+
   const baseFrom = sql`
     FROM ${flowsheet}
     WHERE ${flowsheet.entry_type} = 'track'
@@ -139,9 +147,27 @@ export async function searchFlowsheet(
     fullWhere = sql`${fullWhere} AND (${flowsheet.add_time}, ${flowsheet.id}) ${cmp} (${parsedCursor.addTime}::timestamptz, ${parsedCursor.id})`;
   }
 
-  // In cursor mode, add id as a tiebreaker so the ORDER BY matches the
-  // cursor predicate's compound key — required for stable pagination.
-  const orderByClause = useCursor
+  // Add id as a tiebreaker whenever a cursor could be involved — received OR
+  // handed out — so the ORDER BY matches the cursor predicate's compound key.
+  //
+  // This is deliberately NOT gated on `useCursor` (BS#2344). `add_time` alone
+  // is not a total order: batch-imported legacy entries all carry the same
+  // import timestamp, so tie groups are large and routinely straddle a page
+  // boundary. Under the untied clause Postgres may return such a group in any
+  // order, which is harmless while the page is only ever addressed by OFFSET
+  // but not once the last row of the page becomes the cursor for the next one
+  // — that row is then an arbitrary member of its tie group, and the rest of
+  // the group is either re-served (duplicate) or stepped over (skipped). The
+  // first page emits a cursor now, so the first page has to be totally ordered
+  // too.
+  //
+  // Cost: the single-column `flowsheet_add_time_idx` still drives the scan and
+  // Postgres adds an Incremental Sort over each timestamp group — the same
+  // plan `getEntriesByPage` (BS#2133) and `fetchRecentRows` (BS#2132) already
+  // run for their `desc(add_time), desc(id)` reads. Non-date sorts keep the
+  // untied clause: they never emit or accept a cursor, so a tiebreaker there
+  // would buy nothing and only add sort work.
+  const orderByClause = cursorEligible
     ? sql`${sortExpr} ${orderDirection}, ${flowsheet.id} ${orderDirection}`
     : sql`${sortExpr} ${orderDirection}`;
 
@@ -201,10 +227,24 @@ export async function searchFlowsheet(
     console.error('flowsheet search count query failed; returning lower-bound total', countSettled.reason);
   }
 
-  // nextCursor only when cursor mode is active AND we got a full page —
+  // nextCursor whenever this sort supports cursors AND we got a full page —
   // a short page means there are no more rows.
+  //
+  // The gate is `cursorEligible`, not `useCursor` (BS#2344). Conditioning the
+  // emit on a cursor having been passed IN meant the first request of every
+  // session — which by definition carries none — never handed back the link to
+  // the second, so the forward chain had no first link and dj-site's
+  // `getNextPageParam` stopped at one page. The page's own row count is the
+  // only thing that says whether there is more; whether the caller arrived by
+  // cursor or by offset says nothing about it.
+  //
+  // A final page that happens to hold exactly `limit` rows emits a cursor and
+  // costs one extra request that returns nothing. That is correct and standard
+  // for cursor pagination — the alternative is an extra row fetch or a count
+  // on every page, and the count here is capped (COUNT_CAP) precisely because
+  // exact counts are what this endpoint cannot afford.
   const nextCursor =
-    useCursor && results.length === limit
+    cursorEligible && results.length === limit
       ? encodeCursor(results[results.length - 1].play_date, results[results.length - 1].id)
       : undefined;
 
