@@ -53,16 +53,31 @@ A candidate cohort above `PREFLIGHT_MAX_CANDIDATE_SHOWS` (5,000) refuses the who
 
 ### How the gate clears
 
-**82 rows, in 3 shows, holding 3 distinct values** (production, 2026-08-30). This cohort is meant to be read row by row, not drained past.
+**Fix three junk `auth_user.real_name` rows.** That is the whole blocker, and it always was — both this gate and the #2327 proxy it replaced are downstream of the same bad data.
 
-All three values are name-shaped (2+ capitalized tokens) and match **neither** a roster real name **nor** any DJ's handle. So the pass would replace a name we cannot identify with the show's `legacy_dj_name` — plausibly a misattribution as well as a real-name write. Look at the three shows and decide per show; there is no bulk remedy and there should not be one.
+Of 163 distinct roster real names, 152 are two-or-more capitalized tokens and only 5 are single-token. Three of those 5 are not names at all — **one is two characters** — and they collide with legacy DJs' genuine short on-air handles. That collision is what puts those DJs' shows in the candidate cohort and what makes the probe score "writes the handle" as "writes a real name".
 
-**What this is NOT.** Earlier revisions of this document sent operators to a Cohort C consent question about 5 DJs whose `legacy_dj_name` is their own real name, and to a `DJ_HANDLE` re-source from tubafrenzy. Both were artifacts of gating on (1):
+Do **not** fix this by teaching `buildPiiNameIndex` a name-shape heuristic. Inside a PII gate that trades a visible false block for an invisible false pass. Fix the rows.
 
-- The consent question never blocked anything the job does. Those rows are `already_current` skips — the scrub does not touch them, and Cohort C is out of scope by design. It may still be worth answering as a standalone privacy question; it is not a precondition for this job.
-- The `DJ_HANDLE` re-source is a **no-op**. All 839 shows whose `legacy_dj_name` is a roster real name already hold their upstream `DJ_HANDLE` verbatim — BS#1393 copied it losslessly, and `DJ_HANDLE` itself contains the real name. Nothing to re-source, and **nothing here is gated by the 2026-09-07 tubafrenzy turndown.**
+#### The 82 rows are the scrub working, not harm
 
-Three junk `auth_user.real_name` rows (one is _two characters_) still inflate count (1) as false positives. They are a data bug in the wrong table, worth fixing on their own merits — but they no longer block anything. Do **not** fix them by teaching `buildPiiNameIndex` a name-shape heuristic: inside a PII gate that trades a visible false block for an invisible false pass.
+Verified against the tubafrenzy backup of 2025-10-13 (`/Volumes/Spark/wxyc-backups`), by SHA-256 fingerprint, for all three affected shows (legacy ids 115609, 134431, 163809):
+
+|                                           | Backend holds     | tubafrenzy column |
+| ----------------------------------------- | ----------------- | ----------------- |
+| `flowsheet.dj_name` (stored)              | the legal name    | `DJ_NAME`         |
+| `shows.legacy_dj_name` (recompute source) | the on-air handle | `DJ_HANDLE`       |
+
+All three fingerprints match on both columns. So the recompute would replace a **legal name** with the DJ's **handle** — Cohort B, the exact remediation this job exists to perform. The probe scores it as harmful only because the handle is in the roster index by collision.
+
+Clean the three `real_name` rows and the count goes to zero on its own: those shows leave the candidate cohort, and the 82 rows are then scrubbed correctly on the next run.
+
+#### What this is NOT
+
+Earlier revisions of this document sent operators to a Cohort C consent question about 5 DJs whose `legacy_dj_name` is their own real name, and to a `DJ_HANDLE` re-source from tubafrenzy. Both were artifacts of the #2327 proxy:
+
+- The consent question never blocked anything the job does. Those rows are `already_current` skips — the scrub does not touch them, and Cohort C is out of scope by design. Worth answering as a standalone privacy question; not a precondition here.
+- The `DJ_HANDLE` re-source is a **no-op**. All 839 shows whose `legacy_dj_name` is a roster real name already hold their upstream `DJ_HANDLE` verbatim. **Nothing here is gated by the 2026-09-07 tubafrenzy turndown.**
 
 ## Where the job learns which names are PII
 
