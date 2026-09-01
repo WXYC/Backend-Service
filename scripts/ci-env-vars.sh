@@ -9,12 +9,23 @@
 # instead, and `ci:testmock` times out waiting on the wrong port (BS#2348).
 #
 # Precedence, highest first:
-#   1. an explicit shell export (CI_PORT=28081 npm run ci:test)
-#   2. the value in .env -- the file compose's --env-file also reads
+#   1. a NON-EMPTY explicit shell export (CI_PORT=28081 npm run ci:test).
+#      An explicitly empty shell export (CI_PORT= npm run ci:test) is
+#      treated the same as unset and falls through to .env -- bash's
+#      ${VAR:-fallback} can't tell "empty" from "unset", and this script
+#      doesn't try to make it.
+#   2. the value in .env -- the same file compose's --env-file reads,
+#      parsed with `dotenvx get` (the same parser `dotenvx run -f .env --
+#      jest ...` uses a few lines below in the caller), so this resolver
+#      and compose can never disagree about what a line in .env means:
+#      `export KEY=value`, leading whitespace, an unquoted inline comment,
+#      CRLF line endings, and a quoted value all resolve the same way here
+#      as they do for compose. A missing or empty .env (GHA's `touch .env`)
+#      cleanly falls through to the next tier.
 #   3. the hard-coded default below (byte-identical to pre-BS#2348 behavior
 #      when neither of the above is set -- GHA's case: test.yml exports
 #      CI_PORT / CI_DB_PORT / CI_BETTER_AUTH_URL itself, so precedence 1
-#      wins there and .env is never consulted)
+#      wins there and .env -- which GHA leaves empty -- is never consulted)
 #
 # Intended to be sourced (`source "$SCRIPT_DIR/ci-env-vars.sh"`), not
 # executed, by scripts/ci-test.sh and scripts/ci-test-parallel.sh. Callers
@@ -23,9 +34,18 @@
 _ci_env_var() {
   local key="$1" file="$2"
   [ -f "$file" ] || return 0
-  # Last matching non-comment assignment wins, mirroring dotenvx/compose
-  # semantics; strip a surrounding pair of quotes if present.
-  grep -E "^${key}=" "$file" | tail -n1 | cut -d'=' -f2- | sed -E "s/^\"(.*)\"\$/\1/; s/^'(.*)'\$/\1/"
+  # `env -u "$key"` strips the caller's shell value for this one key
+  # before invoking dotenvx, so the result always reflects .env's own
+  # value regardless of what's in the shell. Without it, dotenvx's own
+  # default behavior (an unqualified `get`) prefers an existing env var --
+  # including an explicitly empty one -- over .env, which would leak the
+  # caller's shell state into what is meant to be a pure .env-only lookup
+  # and break the "empty shell export falls through to .env" precedence
+  # documented above. `2>/dev/null` swallows dotenvx's MISSING_KEY /
+  # MISSING_ENV_FILE warnings; `return 0` keeps a not-found key (dotenvx
+  # exits 1 on those) from tripping `set -e` in the sourcing caller.
+  env -u "$key" dotenvx get "$key" -f "$file" 2>/dev/null
+  return 0
 }
 
 : "${PROJECT_ROOT:?PROJECT_ROOT must be set before sourcing ci-env-vars.sh}"

@@ -1,14 +1,16 @@
 #!/bin/bash
 # CI Test Runner Script
-# Usage: ./scripts/ci-test.sh [--full]
+# Usage: ./scripts/ci-test.sh [--full] [jest args...]
 #
 # Options:
 #   --full    Run all tests including rate limiting and admin ban tests
 #
+# Any other arguments (e.g. -t <pattern>) are forwarded to jest verbatim.
+#
 # CI_PORT / CI_AUTH_PORT / CI_DB_PORT / CI_BETTER_AUTH_URL resolve from the
-# same .env dev_env/docker-compose.yml reads via --env-file, with an
-# explicit shell export still able to override deliberately (BS#2348). See
-# scripts/ci-env-vars.sh for the full precedence chain.
+# same .env dev_env/docker-compose.yml reads via --env-file, with a
+# non-empty explicit shell export still able to override deliberately
+# (BS#2348). See scripts/ci-env-vars.sh for the full precedence chain.
 
 set -e
 
@@ -55,4 +57,4 @@ fi
 
 # Run tests with dotenvx to load .env file
 cd "$PROJECT_ROOT"
-dotenvx run -f .env -- jest --config jest.config.json --runInBand --coverage
+dotenvx run -f .env -- jest --config jest.config.json --runInBand --coverage "$@"
