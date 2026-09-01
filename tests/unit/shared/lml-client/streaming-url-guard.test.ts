@@ -27,7 +27,34 @@ import {
   isBandcampUrl,
   isSoundcloudUrl,
   sanitizeLookupStreamingUrls,
+  hasUrlParserDifferentialChar,
 } from '@wxyc/lml-client';
+
+describe('hasUrlParserDifferentialChar', () => {
+  // BS#2356: the single exported scan `safeHttpHostname` and
+  // `apps/backend/utils/album-metadata-projection.ts`'s
+  // `hasWireUrlParserDifferential` both delegate to, instead of each
+  // hand-maintaining their own copy of the `<= 0x20 || 0x7f || 0x5c` bar.
+  it.each([
+    ['space', 'https://e.com/a b'],
+    ['tab', 'https://e.com/a\tb'],
+    ['newline', 'https://e.com/a\nb'],
+    ['carriage return', 'https://e.com/a\rb'],
+    ['DEL (0x7f)', 'https://e.com/a\x7fb'],
+    ['backslash', 'https://e.com\\@evil.example/x'],
+    ['a NUL control character', 'https://e.com/a\x00b'],
+  ])('is true for a string containing %s', (_label, value) => {
+    expect(hasUrlParserDifferentialChar(value)).toBe(true);
+  });
+
+  it.each([
+    ['a well-formed URL with no offending characters', 'https://e.com/a/b?q=1'],
+    ['a raw non-ASCII character (not part of this bar)', 'https://en.wikipedia.org/wiki/Nilüfer_Yanya'],
+    ['the empty string', ''],
+  ])('is false for %s', (_label, value) => {
+    expect(hasUrlParserDifferentialChar(value)).toBe(false);
+  });
+});
 
 describe('isSpotifyUrl', () => {
   it.each([
