@@ -1,5 +1,6 @@
 /**
- * Tests for `scripts/ci-env-vars.sh` (BS#2348).
+ * Tests for `scripts/ci-env-vars.sh` (BS#2348, hardened after the BS#2352
+ * review round).
  *
  * `scripts/ci-test.sh` and the `ci:test:parallel` npm script used to expand
  * `${CI_PORT:-8081}` etc. straight from the shell, while
@@ -8,8 +9,22 @@
  * Docker stack and a test runner pointed at different addresses, and
  * `ci:testmock` timed out in jest's `globalSetup` waiting on the wrong
  * port. `ci-env-vars.sh` is the shared fix: both callers now source it to
- * resolve DB_PORT / PORT / BETTER_AUTH_URL from the same `.env` compose
- * reads, with precedence explicit shell export > `.env` > script default.
+ * resolve DB_PORT / PORT / AUTH_PORT / BETTER_AUTH_URL from the same `.env`
+ * compose reads, with precedence a NON-EMPTY explicit shell export > `.env`
+ * > script default.
+ *
+ * The first implementation of the `.env` tier hand-rolled a
+ * `grep`/`cut`/`sed` pipeline, which missed `export KEY=value` and
+ * leading-whitespace forms that `docker compose --env-file` accepts (so it
+ * silently fell back to the hard-coded default while compose honored
+ * `.env` -- the exact split BS#2348 exists to close), and captured
+ * unquoted inline comments and CRLF line endings verbatim into the
+ * resolved value (producing a malformed `BETTER_AUTH_URL`). The fix
+ * replaces that pipeline with `dotenvx get "$key" -f .env` -- the same
+ * parser `dotenvx run -f .env -- jest ...` uses two lines later in the
+ * caller, so the two consumers of `.env` can never disagree about what a
+ * line means. The shape-coverage `describe` block below pins that
+ * directly.
  *
  * Behavioral test (spawns bash against a temp PROJECT_ROOT) rather than a
  * source-grep, since the thing under test is the resolution precedence
@@ -23,6 +38,13 @@ import { spawnSync } from 'child_process';
 
 const repoRoot = path.resolve(__dirname, '../../..');
 const scriptPath = path.join(repoRoot, 'scripts/ci-env-vars.sh');
+// scripts/ci-env-vars.sh shells out to a bare `dotenvx`, resolved via PATH
+// -- the same assumption its caller (`dotenvx run -f .env -- jest ...`)
+// already makes, which only holds when invoked through an npm script (npm
+// prepends the repo's node_modules/.bin to PATH for its child process).
+// Prepend it explicitly here too, so this spawned-bash test doesn't depend
+// on however the test runner itself was launched.
+const localBinPath = path.join(repoRoot, 'node_modules/.bin');
 
 interface Resolved {
   PORT: string;
@@ -53,7 +75,12 @@ function resolve(opts: { envFileContents?: string; shellEnv?: Record<string, str
         `source "${scriptPath}" && printf '%s\\n%s\\n%s\\n%s\\n' "$PORT" "$DB_PORT" "$AUTH_PORT" "$BETTER_AUTH_URL"`,
       ],
       {
-        env: { ...baseEnv, ...opts.shellEnv, PROJECT_ROOT: tmpRoot },
+        env: {
+          ...baseEnv,
+          ...opts.shellEnv,
+          PROJECT_ROOT: tmpRoot,
+          PATH: `${localBinPath}:${baseEnv.PATH ?? ''}`,
+        },
       }
     );
 
@@ -163,5 +190,45 @@ describe('scripts/ci-env-vars.sh CI port resolution (BS#2348)', () => {
       AUTH_PORT: '8083',
       BETTER_AUTH_URL: 'http://localhost:8083/auth',
     });
+  });
+});
+
+describe('scripts/ci-env-vars.sh .env syntax shapes (BS#2352 review)', () => {
+  // Each row is a shape `docker compose --env-file` accepts for CI_PORT.
+  // The pre-review grep/cut/sed pipeline mishandled the `export` prefix,
+  // leading whitespace, unquoted inline comments, and CRLF -- either
+  // missing the value entirely (silently falling back to the hard-coded
+  // default while compose honored .env) or capturing trailing junk
+  // verbatim into the resolved PORT. `dotenvx get` is the same parser
+  // `dotenvx run -f .env` uses to launch jest, so every shape here must
+  // resolve exactly like compose would resolve it.
+  test.each<[label: string, envFileLine: string | null, expectedPort: string]>([
+    ['bare KEY=value', 'CI_PORT=28081', '28081'],
+    ['export KEY=value', 'export CI_PORT=28081', '28081'],
+    ['leading whitespace before KEY=value', '   CI_PORT=28081', '28081'],
+    ['unquoted inline comment', 'CI_PORT=28081 # note', '28081'],
+    ['CRLF line ending', 'CI_PORT=28081\r', '28081'],
+    ['quoted value', 'CI_PORT="28081"', '28081'],
+    // null = an existing-but-EMPTY .env, the GHA `touch .env` state --
+    // distinct from no .env file at all, which the earlier describe block
+    // above already covers. Falls through to the hard-coded default.
+    ['existing-but-empty .env (GHA touch .env state)', null, '8081'],
+  ])('%s', (_label, envFileLine, expectedPort) => {
+    const resolved = resolve({
+      envFileContents: envFileLine === null ? '' : `${envFileLine}\n`,
+    });
+    expect(resolved.PORT).toBe(expectedPort);
+  });
+
+  it('pins the reworded precedence: a set-but-empty shell export falls through to .env, not to the hard default', () => {
+    // ${VAR:-} can't distinguish "set to empty" from "unset", so this
+    // resolver documents (and this test pins) "a NON-EMPTY shell export
+    // wins" rather than a stricter claim the mechanism can't actually
+    // make -- see the precedence note in scripts/ci-env-vars.sh's header.
+    const resolved = resolve({
+      envFileContents: 'CI_PORT=28081\n',
+      shellEnv: { CI_PORT: '' },
+    });
+    expect(resolved.PORT).toBe('28081');
   });
 });
