@@ -76,7 +76,7 @@
  */
 import { album_metadata, flowsheet } from '@wxyc/database';
 import { sql } from 'drizzle-orm';
-import { isSpotifyUrl, isAppleMusicUrl } from '@wxyc/lml-client';
+import { isSpotifyUrl, isAppleMusicUrl, hasUrlParserDifferentialChar } from '@wxyc/lml-client';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
 
 /**
@@ -173,14 +173,16 @@ export interface SynthesizableStreamingUrls {
  *     `https://e.com/ab` — a URL that is not what we would emit. `.trim()`
  *     only reaches the ends. Foundation rejects the raw form, which is the
  *     throwing decode this whole helper exists to avoid.
+ *
+ * BS#2356: the scan itself is `@wxyc/lml-client`'s exported
+ * `hasUrlParserDifferentialChar` — this function is a thin, differential-named
+ * wrapper kept for its own callers and this doc comment, which is the source
+ * of truth for the rationale above. `apps/backend` already depends on
+ * `shared/lml-client` (see the `isSpotifyUrl`/`isAppleMusicUrl` import
+ * above), so delegating here doesn't invert the package graph.
  */
 export function hasWireUrlParserDifferential(value: string): boolean {
-  for (const char of value) {
-    const code = char.codePointAt(0) ?? 0;
-    // C0 controls + space (<= 0x20), DEL (0x7f), backslash (0x5c).
-    if (code <= 0x20 || code === 0x7f || code === 0x5c) return true;
-  }
-  return false;
+  return hasUrlParserDifferentialChar(value);
 }
 
 /**

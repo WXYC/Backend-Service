@@ -53,6 +53,29 @@
 import type { LookupResponse } from '@wxyc/shared/dtos';
 
 /**
+ * True iff `value` contains a character that makes `new URL()`'s verdict a
+ * statement about a DIFFERENT string than the one that is actually
+ * persisted or emitted: a C0 control character, space, or DEL
+ * (`<= 0x20` or `0x7f`), or a raw backslash (`0x5c`) — the
+ * WHATWG-vs-Foundation/RFC-3986 authority-folding differential
+ * {@link safeHostname}'s own doc comment describes (BS#1710).
+ *
+ * The single exported primitive behind this module's `safeHttpHostname` and
+ * `apps/backend/utils/album-metadata-projection.ts`'s
+ * `hasWireUrlParserDifferential` (BS#2356) — see that function's doc comment
+ * for the full per-character rationale (backslash-authority spoofing,
+ * WHATWG's strip-and-percent-encode-on-parse behavior for whitespace and
+ * other C0 controls).
+ */
+export function hasUrlParserDifferentialChar(value: string): boolean {
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code <= 0x20 || code === 0x7f || code === 0x5c) return true;
+  }
+  return false;
+}
+
+/**
  * True iff `host` is `apex` or a subdomain of it. The leading-dot check
  * rejects suffix spoofs like `spotify.com.evil.example` (whose host ends
  * in `.evil.example`, not `.spotify.com`).
@@ -110,15 +133,17 @@ export function isAppleMusicUrl(url: string | null | undefined): boolean {
 /**
  * True iff `url` is an absolute `http`/`https` URL free of the
  * backslash-authority parser differential {@link safeHostname} rejects, and
- * free of any C0 control character, space, or DEL anywhere in the string.
- * That second bar mirrors `apps/backend/utils/album-metadata-projection.ts`'s
+ * free of any C0 control character, space, or DEL anywhere in the string
+ * — {@link hasUrlParserDifferentialChar}. That second bar mirrors
+ * `apps/backend/utils/album-metadata-projection.ts`'s
  * `wireUrl`/`hasWireUrlParserDifferential` well-formedness contract — the
  * layer-3 (client-facing) predicate this layer-2 (LML-response) guard is
- * deliberately kept in agreement with, without a cross-workspace import
- * (`shared/lml-client` has no dependency on `apps/backend`, and importing
- * one in would invert the package graph). BS#2339's own `wireUrl` docstring
- * is the source of truth for the contract; this is a same-workspace copy
- * of its predicate, not a re-export.
+ * deliberately kept in agreement with. BS#2356 collapsed the two into one
+ * exported primitive here (`hasUrlParserDifferentialChar`), which
+ * `hasWireUrlParserDifferential` now delegates to (`apps/backend` already
+ * depends on `shared/lml-client`, not the other way around, so that import
+ * doesn't invert the package graph); BS#2339's own `wireUrl` docstring
+ * remains the source of truth for the wire contract's rationale.
  *
  * `spotify_url`/`apple_music_url` deliberately do NOT run through this
  * stricter check — that would risk changing which URLs `isSpotifyUrl` /
@@ -127,19 +152,12 @@ export function isAppleMusicUrl(url: string | null | undefined): boolean {
  *
  * Checks run cheapest-first and share a single `new URL()` parse (unlike
  * {@link safeHostname}, which this function deliberately does not call —
- * calling it would parse `url` a second time): the control-character scan
- * and the backslash check are both plain string scans with no parsing cost,
- * so both run before the one `new URL()` call.
+ * calling it would parse `url` a second time): {@link hasUrlParserDifferentialChar}'s
+ * scan is a plain string scan with no parsing cost, so it runs before the
+ * one `new URL()` call.
  */
 function safeHttpHostname(url: string): string | null {
-  for (const char of url) {
-    const code = char.codePointAt(0) ?? 0;
-    if (code <= 0x20 || code === 0x7f) return null;
-  }
-  // Same backslash-authority differential `safeHostname` rejects (see its
-  // doc comment) — duplicated here rather than delegated to it, since
-  // delegating would mean parsing `url` twice.
-  if (url.includes('\\')) return null;
+  if (hasUrlParserDifferentialChar(url)) return null;
   let parsed: URL;
   try {
     parsed = new URL(url);

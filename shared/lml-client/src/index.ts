@@ -72,6 +72,12 @@ export {
   sanitizeLookupStreamingUrls,
 };
 
+// BS#2356: the single exported `<= 0x20 || 0x7f || 0x5c` well-formedness
+// scan behind `safeHttpHostname` above, so `apps/backend`'s
+// `hasWireUrlParserDifferential` can delegate to it instead of carrying its
+// own hand-maintained copy.
+export { hasUrlParserDifferentialChar } from './streaming-url-guard.js';
+
 // BS#1356: shared search_type trust predicates. `isTrustedLmlAlbumMatch` is
 // the single authority every album-context write gate delegates to (the
 // coordinator's `applyTrustGate` in `apps/backend/services/lml/
