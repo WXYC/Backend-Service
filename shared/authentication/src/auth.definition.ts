@@ -680,7 +680,21 @@ export const auth = betterAuth({
       realName: { type: 'string', required: false, input: false },
       djName: { type: 'string', required: false, input: false },
       appSkin: { type: 'string', required: true, defaultValue: 'modern-light' },
-      isAnonymous: { type: 'boolean', required: false, defaultValue: false },
+      // input:false (BS#2358). Explicit rather than inherited, deliberately.
+      // better-auth's own anonymous plugin already declares this field
+      // `input: false` (plugins/anonymous/schema.mjs), and today THAT
+      // declaration is what holds on the write path: `getFields()`
+      // (better-auth/dist/db/schema.mjs) spreads plugin schemas AFTER
+      // `options.user.additionalFields`, so the plugin's entry wins for
+      // `parseUserInput`. But `getAuthTables()` (@better-auth/core) spreads the
+      // two in the OPPOSITE order — additionalFields last — so this entry is
+      // the one that wins there. Leaving the flag off meant the lock held only
+      // by virtue of which of two contradictory merge orders a given call site
+      // happens to use; restating it here removes that dependency instead of
+      // betting on it surviving a better-auth bump. No legitimate writer is
+      // affected: /sign-in/anonymous sets isAnonymous through
+      // `internalAdapter.createUser` directly, which never calls parseUserInput.
+      isAnonymous: { type: 'boolean', required: false, defaultValue: false, input: false },
       // input:false (BS#2358 / station-signup-schema): without it, public
       // POST /update-user could already flip this — the same BS#2297 hole,
       // just never registered with the flag until now. Every current writer
@@ -696,8 +710,28 @@ export const auth = betterAuth({
       selfSignupAt: { type: 'date', required: false, input: false },
       selfSignupReviewedAt: { type: 'date', required: false, input: false },
       selfSignupReviewedBy: { type: 'string', required: false, input: false },
-      // Cross-cutting capabilities independent of role hierarchy (e.g., 'editor', 'webmaster')
-      capabilities: { type: 'string[]', required: false, defaultValue: [] },
+      // Cross-cutting capabilities independent of role hierarchy (e.g., 'editor', 'webmaster').
+      //
+      // input:false (BS#2358). This is the highest-stakes instance of the
+      // BS#2297 hole above, because the field is a PRIVILEGE grant rather than
+      // PII: `buildJwtPayload` and `buildOidcUserInfoClaim` (jwt-payload.ts)
+      // copy the array verbatim onto the JWT and OIDC `capabilities` claim, and
+      // docs/authentication.md records that claim gating WXYC/wxyc-crm's
+      // donor-dedup admin tool (`crm_merge`) and dj-site's editor/webmaster
+      // surfaces. Without the flag the escalation was a single request:
+      // POST /update-user sits behind `sessionMiddleware` only and types its
+      // body `z.record(z.string(), z.any())`, `parseInputData` passes through
+      // every additionalField that lacks input:false, and the
+      // `databaseHooks.user.update.before` choke point only vetoes `name` — so
+      // any signed-in DJ could grant themselves any capability.
+      //
+      // Verified this does NOT break the documented operator grant path:
+      // `authClient.admin.updateUser` (dj-site's AccountEditForm.tsx
+      // `updateCapabilities`) hits the admin plugin's `/admin/update-user`,
+      // which passes `ctx.body.data` straight to `internalAdapter.updateUser`
+      // with no `parseUserInput` call anywhere in the route — the same bypass
+      // the realName/djName writeup above verified.
+      capabilities: { type: 'string[]', required: false, defaultValue: [], input: false },
     },
   },
 }) as unknown as ReturnType<typeof betterAuth>;

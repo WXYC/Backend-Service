@@ -1,34 +1,22 @@
--- BS#2358 — schema foundation for station self-signup: DJs without an
--- account can create one during holiday-break shows using a short passcode
+-- BS#2358 — schema foundation for station self-signup: a DJ without an
+-- account can create one during a holiday-break show using a short passcode
 -- posted in the control room, and the resulting account is flagged for
 -- manager review.
 --
+-- Per-column rationale deliberately does NOT live here — it lives at each
+-- column in shared/database/src/schema.ts. This file's SHA-256 is frozen in
+-- meta/applied-hashes.json the moment it is applied, so any prose duplicated
+-- into it could never be corrected once schema.ts moves on (the #705 wedge).
+-- Only what is specific to this file stays below.
+--
 -- `station_passcode` and `station_signup_attempt` are unprefixed
 -- deliberately — `auth_` marks better-auth-managed tables (auth_user,
--- auth_session, auth_verification, auth_jwks); these are ours, alongside the
--- other hand-rolled auth-adjacent tables (`anonymous_devices` in 0024,
--- `user_activity` in 0025).
+-- auth_session, auth_verification, auth_jwks); these two are ours, alongside
+-- the other hand-rolled auth-adjacent tables (`anonymous_devices` in 0024,
+-- `user_activity` in 0025). An `auth_` prefix would misrepresent ownership.
 --
--- `station_signup_attempt`'s composite `(outcome, attempted_at)` index (not
--- `attempted_at` alone) is load-bearing: every cooldown read filters on
--- `outcome` first — the in-window failure count, the
--- `MAX(attempted_at) WHERE outcome = 'cooldown_cleared'` floor, and the
--- once-per-window `cooldown_refused` check.
---
--- `auth_user.self_signup_at` / `self_signup_reviewed_at` /
--- `self_signup_reviewed_by` track manager review of self-signed-up accounts.
--- Pending review = `self_signup_at IS NOT NULL AND self_signup_reviewed_at
--- IS NULL`; there is deliberately no separate `pending_review` boolean.
---
--- Every new `auth_user` FK is `ON DELETE SET NULL` and its column nullable,
--- per the fix in `0048_fix-fk-on-delete-set-null.sql`. This migration adds no
--- data, so no precondition guard is needed on these constraints.
--- @no-precondition-needed: all three FKs are on freshly-added nullable
--- columns / freshly-created tables with no existing rows.
---
--- This is a schema-only foundation migration — no application code reads or
--- writes these tables/columns yet. Every other issue in the station-signup
--- epic depends on it.
+-- @no-precondition-needed: all four FKs land on freshly-created tables or
+-- freshly-added nullable columns, so no existing row can violate them.
 
 CREATE TABLE "station_passcode" (
 	"id" varchar(255) PRIMARY KEY NOT NULL,
@@ -48,6 +36,7 @@ CREATE TABLE "station_signup_attempt" (
 	"attempted_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"ip_hash" varchar(16),
 	"actor_user_id" varchar(255),
+	"passcode_id" varchar(255),
 	"outcome" varchar(24) NOT NULL
 );
 --> statement-breakpoint
@@ -56,5 +45,10 @@ ALTER TABLE "auth_user" ADD COLUMN "self_signup_reviewed_at" timestamp with time
 ALTER TABLE "auth_user" ADD COLUMN "self_signup_reviewed_by" varchar(255);--> statement-breakpoint
 ALTER TABLE "station_passcode" ADD CONSTRAINT "station_passcode_created_by_auth_user_id_fk" FOREIGN KEY ("created_by") REFERENCES "public"."auth_user"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "station_signup_attempt" ADD CONSTRAINT "station_signup_attempt_actor_user_id_auth_user_id_fk" FOREIGN KEY ("actor_user_id") REFERENCES "public"."auth_user"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "station_signup_attempt" ADD CONSTRAINT "station_signup_attempt_passcode_id_station_passcode_id_fk" FOREIGN KEY ("passcode_id") REFERENCES "public"."station_passcode"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "station_passcode_created_by_idx" ON "station_passcode" USING btree ("created_by");--> statement-breakpoint
 CREATE INDEX "station_signup_attempt_outcome_attempted_at_idx" ON "station_signup_attempt" USING btree ("outcome","attempted_at");--> statement-breakpoint
-ALTER TABLE "auth_user" ADD CONSTRAINT "auth_user_self_signup_reviewed_by_auth_user_id_fk" FOREIGN KEY ("self_signup_reviewed_by") REFERENCES "public"."auth_user"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX "station_signup_attempt_actor_user_id_idx" ON "station_signup_attempt" USING btree ("actor_user_id");--> statement-breakpoint
+CREATE INDEX "station_signup_attempt_passcode_id_idx" ON "station_signup_attempt" USING btree ("passcode_id");--> statement-breakpoint
+ALTER TABLE "auth_user" ADD CONSTRAINT "auth_user_self_signup_reviewed_by_auth_user_id_fk" FOREIGN KEY ("self_signup_reviewed_by") REFERENCES "public"."auth_user"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "auth_user_self_signup_reviewed_by_idx" ON "auth_user" USING btree ("self_signup_reviewed_by");

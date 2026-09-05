@@ -1,5 +1,5 @@
 {
-  "id": "74dd42fd-01c4-44ec-ba51-17b6420f2739",
+  "id": "f1fd8da5-ce84-44c4-b619-e63bed1dd964",
   "prevId": "1d0288c4-dac8-4c56-9868-3d446f791e59",
   "version": "7",
   "dialect": "postgresql",
@@ -6380,7 +6380,23 @@
           "default": 25
         }
       },
-      "indexes": {},
+      "indexes": {
+        "station_passcode_created_by_idx": {
+          "name": "station_passcode_created_by_idx",
+          "columns": [
+            {
+              "expression": "created_by",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "station_passcode_created_by_auth_user_id_fk": {
           "name": "station_passcode_created_by_auth_user_id_fk",
@@ -6431,6 +6447,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "passcode_id": {
+          "name": "passcode_id",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
         "outcome": {
           "name": "outcome",
           "type": "varchar(24)",
@@ -6459,6 +6481,36 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "station_signup_attempt_actor_user_id_idx": {
+          "name": "station_signup_attempt_actor_user_id_idx",
+          "columns": [
+            {
+              "expression": "actor_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "station_signup_attempt_passcode_id_idx": {
+          "name": "station_signup_attempt_passcode_id_idx",
+          "columns": [
+            {
+              "expression": "passcode_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -6468,6 +6520,19 @@
           "tableTo": "auth_user",
           "columnsFrom": [
             "actor_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "station_signup_attempt_passcode_id_station_passcode_id_fk": {
+          "name": "station_signup_attempt_passcode_id_station_passcode_id_fk",
+          "tableFrom": "station_signup_attempt",
+          "tableTo": "station_passcode",
+          "columnsFrom": [
+            "passcode_id"
           ],
           "columnsTo": [
             "id"
@@ -6731,6 +6796,21 @@
             }
           ],
           "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "auth_user_self_signup_reviewed_by_idx": {
+          "name": "auth_user_self_signup_reviewed_by_idx",
+          "columns": [
+            {
+              "expression": "self_signup_reviewed_by",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
           "concurrently": false,
           "method": "btree",
           "with": {}

@@ -81,6 +81,14 @@ export const user = pgTable(
   (table) => [
     uniqueIndex('auth_user_email_key').on(table.email),
     uniqueIndex('auth_user_username_key').on(table.username),
+    // Postgres indexes the REFERENCED side of a foreign key (auth_user.id, the
+    // primary key) automatically and the REFERENCING side never. Without this,
+    // every DELETE of an auth_user row has to sequentially scan all of auth_user
+    // to find the rows whose self_signup_reviewed_by pointed at it and NULL them,
+    // because that is what ON DELETE SET NULL makes the delete responsible for.
+    // Same reasoning as station_passcode_created_by_idx and the two indexes on
+    // station_signup_attempt below.
+    index('auth_user_self_signup_reviewed_by_idx').on(table.selfSignupReviewedBy),
     // auth_user trigram indexes (auth_user_dj_name_trgm_idx, auth_user_name_trgm_idx)
     // were dropped in migrations 0054 + 0065 — search no longer joins through
     // auth_user; reads come from flowsheet.dj_name + flowsheet_dj_name_trgm_idx.
@@ -2803,18 +2811,25 @@ export type NewAnonymousDevice = InferInsertModel<typeof anonymous_devices>;
 // auth_verification, auth_jwks); this table is ours, alongside the other
 // hand-rolled auth-adjacent tables above (anonymous_devices in 0024,
 // user_activity in 0025) — an auth_ prefix here would misrepresent ownership.
-export const station_passcode = pgTable('station_passcode', {
-  id: varchar('id', { length: 255 }).primaryKey(),
-  codeEncrypted: text('code_encrypted').notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  createdBy: varchar('created_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
-  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-  revokedAt: timestamp('revoked_at', { withTimezone: true }),
-  revokedReason: text('revoked_reason'),
-  lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
-  useCount: integer('use_count').notNull().default(0),
-  maxUses: integer('max_uses').notNull().default(25),
-});
+export const station_passcode = pgTable(
+  'station_passcode',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    codeEncrypted: text('code_encrypted').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdBy: varchar('created_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedReason: text('revoked_reason'),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    useCount: integer('use_count').notNull().default(0),
+    maxUses: integer('max_uses').notNull().default(25),
+  },
+  // FK referencing-side index — see auth_user_self_signup_reviewed_by_idx for
+  // the full reasoning. Deleting the manager who cut a passcode would otherwise
+  // sequentially scan station_passcode to satisfy ON DELETE SET NULL.
+  (table) => [index('station_passcode_created_by_idx').on(table.createdBy)]
+);
 
 export type StationPasscode = InferSelectModel<typeof station_passcode>;
 export type NewStationPasscode = InferInsertModel<typeof station_passcode>;
@@ -2831,14 +2846,60 @@ export const station_signup_attempt = pgTable(
   {
     id: varchar('id', { length: 255 }).primaryKey(),
     attemptedAt: timestamp('attempted_at', { withTimezone: true }).notNull().defaultNow(),
-    // sha256 truncated to 16 hex chars, exactly as apps/auth/rate-limit-key.ts
-    // does it. Never a raw IP.
+    // KEYED hash, not a bare digest: the first 16 hex characters of
+    // HMAC-SHA256(key, <client IP as the string sent to the socket>), lowercase.
+    // A plain sha256 of an IP is not a privacy control — IPv4's whole keyspace
+    // is 2^32, exhaustively invertible on a laptop in seconds, so an unkeyed
+    // digest column is a raw IP with extra steps. The key is what makes the
+    // value non-reversible to a reader who has only the data: read it from
+    // `STATION_SIGNUP_IP_HMAC_KEY` (server-held, alongside the passcode's
+    // `STATION_PASSCODE_KEY` in the EC2 host's .env), and fail closed rather
+    // than falling back to an unkeyed digest if it is absent. This protects a
+    // leaked dump or RDS snapshot; it does not survive host compromise, the
+    // same boundary BS#2359's passcode encryption draws.
+    //
+    // The derivation is a pure function of (key, IP), so equal IPs still hash
+    // equal and the cooldown's per-IP grouping is unaffected. Rotating the key
+    // only breaks correlation with rows written before the rotation, which is
+    // acceptable on a 30-day log.
+    //
+    // Deliberately NOT the apps/auth/rate-limit-key.ts recipe, despite its
+    // superficial similarity: `rateLimitKeyFromRequest` there returns a RAW IP
+    // by design, and its 16-hex truncation lives in `hashCredential`, which is
+    // module-private and hashes session tokens and bearer credentials — high-
+    // entropy secrets, where an unkeyed digest is sound and this whole
+    // invertibility problem does not arise. Truncation to 16 hex chars is
+    // carried over from there on purpose (collisions are irrelevant for a
+    // bucketing key, and a short value limits what a leak yields), which is why
+    // this stays varchar(16).
+    //
+    // Implemented by BS#2359; classified as a stored PII class in docs/pii.md
+    // by BS#2360.
     ipHash: varchar('ip_hash', { length: 16 }),
     // Set only on manager actions (e.g. cooldown_cleared, passcode_revealed).
     actorUserId: varchar('actor_user_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    // The station_passcode row this attempt resolved to. NULL for every outcome
+    // that matches no passcode row — `passcode_fail` (a wrong code matches
+    // nothing by construction, which is exactly why the cooldown counts attempt
+    // rows instead of incrementing a per-passcode counter, BS#2359),
+    // `cooldown_refused`, and `cooldown_cleared`. Populated for `passcode_ok`
+    // and `passcode_revealed`. ON DELETE SET NULL so pruning a passcode row
+    // cannot delete the attempts recorded against it — the attempt log is the
+    // audit trail and the cooldown's own input.
+    passcodeId: varchar('passcode_id', { length: 255 }).references(() => station_passcode.id, {
+      onDelete: 'set null',
+    }),
     outcome: varchar('outcome', { length: 24 }).notNull(),
   },
-  (table) => [index('station_signup_attempt_outcome_attempted_at_idx').on(table.outcome, table.attemptedAt)]
+  (table) => [
+    index('station_signup_attempt_outcome_attempted_at_idx').on(table.outcome, table.attemptedAt),
+    // FK referencing-side indexes — see auth_user_self_signup_reviewed_by_idx.
+    // Without these, deleting one auth_user or one station_passcode row
+    // sequentially scans the attempt log, which is the table that grows with an
+    // attack.
+    index('station_signup_attempt_actor_user_id_idx').on(table.actorUserId),
+    index('station_signup_attempt_passcode_id_idx').on(table.passcodeId),
+  ]
 );
 
 export type StationSignupAttempt = InferSelectModel<typeof station_signup_attempt>;
