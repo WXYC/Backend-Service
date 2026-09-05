@@ -121,6 +121,25 @@ jobs:
           DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET: ${{ secrets.DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET }}
           DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID: ${{ secrets.DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID }}
           DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET: ${{ secrets.DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET }}
+          # Station self-signup passcode lifecycle (BS#2359). Both are
+          # genuine secrets and mask automatically. STATION_PASSCODE_KEY is
+          # 64 hex characters (32 raw bytes) — the AES-256-GCM key encrypting
+          # `station_passcode.code_encrypted` at rest; see the threat-model
+          # comment at the top of shared/authentication/src/station-passcode.ts.
+          # Key rotation is free (rows live <=14 days, at most two active):
+          # push a new value here, then call rotateStationPasscode — no
+          # re-encryption needed, old ciphertext just becomes undecryptable
+          # garbage. STATION_SIGNUP_IP_HMAC_KEY is also 64 hex characters
+          # (32 raw bytes) — keys the `station_signup_attempt.ip_hash` HMAC
+          # derivation; see that column's comment in
+          # shared/database/src/schema.ts for the exact derivation this key
+          # feeds. Neither var is read by any app route yet — this issue only
+          # ships the lifecycle module — but the feature cannot be enabled in
+          # production until both are in this allowlist, which is why they're
+          # added here now rather than deferred to the endpoint issue.
+          # Pass restart_target=backend once a consuming route exists.
+          STATION_PASSCODE_KEY: ${{ secrets.STATION_PASSCODE_KEY }}
+          STATION_SIGNUP_IP_HMAC_KEY: ${{ secrets.STATION_SIGNUP_IP_HMAC_KEY }}
           # better-auth trusted origins (WXYC/auto-dj-orchestrator#27 AC#4).
           # Not sensitive — it is a list of public origins — but carried through
           # the same allowlist as CREATE_AUTO_DJ_USER/DONATE_* above, because the
@@ -204,6 +223,8 @@ jobs:
             DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET) VALUE="$DIGITAL_ARCHIVE_STORE_AZURACAST_BUCKET" ;;
             DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID) VALUE="$DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID" ;;
             DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET) VALUE="$DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET" ;;
+            STATION_PASSCODE_KEY) VALUE="$STATION_PASSCODE_KEY" ;;
+            STATION_SIGNUP_IP_HMAC_KEY) VALUE="$STATION_SIGNUP_IP_HMAC_KEY" ;;
             BETTER_AUTH_TRUSTED_ORIGINS) VALUE="$BETTER_AUTH_TRUSTED_ORIGINS" ;;
             *)
               echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
