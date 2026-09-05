@@ -44,6 +44,25 @@ export interface ProvisionUserInput {
   role: string;
   realName?: string;
   djName?: string;
+  /**
+   * Default `true` (today's behaviour). Set `false` for a DJ who just chose
+   * their own password (station signup): the invite mints a 30-day
+   * `reset-password:<token>` (BS#1969, BS#2306), so sending one anyway would
+   * leave a month-long live credential sitting unused in an inbox.
+   */
+  sendSetupInvite?: boolean;
+  /** Default `false` (today's behaviour). */
+  hasCompletedOnboarding?: boolean;
+  /**
+   * Default `null` (today's behaviour: admin-provisioned). Station signup
+   * passes the attempt time here — this is the ONLY writer of the column the
+   * self-signup review queue is built on, and it must land inside this
+   * function's own `createUser` call, never as a follow-up update: a crash
+   * between create and stamp would leave an account with `self_signup_at`
+   * NULL that never appears in the review queue and is indistinguishable
+   * from an admin-provisioned one (BS#2360).
+   */
+  selfSignupAt?: Date | null;
 }
 
 /** Unguessable bootstrap credential — DJs set their real password via invite token onboarding. */
@@ -71,9 +90,18 @@ const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : S
  *
  * Replicates the `afterAddMember` hook from auth.definition.ts for admin role
  * sync, since bypassing better-auth's endpoint handler skips plugin hooks.
+ *
+ * Serves two callers at different trust levels: the admin `/provision-user`
+ * endpoint, and station signup, which passes a caller-chosen password
+ * (`input.password`) and self-signup metadata for an unauthenticated walk-in
+ * DJ. A careless future edit here does the most damage at that trust
+ * boundary — think about which caller a new option is really for.
  */
 export async function provisionUser(input: ProvisionUserInput): Promise<ProvisionUserResult> {
   const { email, username, organizationSlug, role, realName, djName } = input;
+  const sendSetupInvite = input.sendSetupInvite ?? true;
+  const hasCompletedOnboarding = input.hasCompletedOnboarding ?? false;
+  const selfSignupAt = input.selfSignupAt ?? null;
   const password = input.password ?? generateProvisionBootstrapPassword();
   // Track 2c: derive `name` here rather than trust `input.name` — belt and
   // suspenders with the databaseHooks.user.create.before hook
@@ -143,7 +171,10 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
       realName: realName || undefined,
       djName: djName || undefined,
       appSkin: 'modern-light',
-      hasCompletedOnboarding: false,
+      hasCompletedOnboarding,
+      // The sole writer of this column: must land inside THIS createUser
+      // call, not a follow-up update — see the ProvisionUserInput docblock.
+      selfSignupAt,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
@@ -215,14 +246,22 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
     // provisioned (user row, credential, and member row are committed) but the
     // setup email did not go out — the caller surfaces this so an admin can
     // resend from the roster. Never throws, so provisioning is not aborted.
-    const frontendUrl = process.env.FRONTEND_SOURCE || 'http://localhost:3000';
-    const invite = await createAndSendAccountSetupInvite({
-      userId: newUser.id,
-      email,
-      redirectTo: `${frontendUrl}/onboarding`,
-    });
-    if (!invite.sent) {
-      console.error('[PROVISION USER] Failed to send setup email:', invite.error);
+    //
+    // `sendSetupInvite: false` (station signup) skips this entirely: the
+    // invite mints a 30-day reset-password token (BS#1969, BS#2306), and a DJ
+    // who just chose their own password has no use for a month-long live
+    // credential sitting in their inbox.
+    let invite: { sent: boolean; error?: string } = { sent: false };
+    if (sendSetupInvite) {
+      const frontendUrl = process.env.FRONTEND_SOURCE || 'http://localhost:3000';
+      invite = await createAndSendAccountSetupInvite({
+        userId: newUser.id,
+        email,
+        redirectTo: `${frontendUrl}/onboarding`,
+      });
+      if (!invite.sent) {
+        console.error('[PROVISION USER] Failed to send setup email:', invite.error);
+      }
     }
 
     return {
