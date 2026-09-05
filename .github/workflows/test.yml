@@ -265,6 +265,13 @@ jobs:
       - name: 'Type check: flowsheet-show-split'
         run: npm run typecheck --workspace=jobs/flowsheet-show-split
 
+      # Same BS#2009 gap again: this job writes auth_member.role directly
+      # (dj -> member) outside better-auth's own hooks. A transpile-only
+      # green build silently shipping a type error is not an acceptable
+      # failure mode for a job that changes a DJ's station privileges.
+      - name: 'Type check: station-signup-review'
+        run: npm run typecheck --workspace=jobs/station-signup-review
+
       - name: Lint
         run: npm run lint
 

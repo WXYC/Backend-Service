@@ -1,0 +1,28 @@
+{
+  "name": "@wxyc/station-signup-review",
+  "cron-schedule": "17 15 * * *",
+  "version": "1.0.0",
+  "description": "Daily EC2-cron station-signup review (BS#2364): while any self-signed-up account is pending manager review (self_signup_at IS NOT NULL AND self_signup_reviewed_at IS NULL), email a summary to STATION_SIGNUP_ALERT_EMAIL naming every pending account and its days-pending. Any account pending for more than 30 days has its auth_member.role downgraded from dj to member -- reversible with one roster edit, never deletes or bans, and never touches auth_user.role. Zero pending accounts sends nothing.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_station_signup_review:ci -f ../../Dockerfile.station-signup-review ../../",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@aws-sdk/client-ses": "^3.1116.0",
+    "@sentry/node": "^10.70.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
