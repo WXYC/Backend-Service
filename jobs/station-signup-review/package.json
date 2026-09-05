@@ -10,7 +10,8 @@
     "build": "tsup --minify",
     "clean": "rm -rf dist",
     "docker:build": "docker build -t wxyc_station_signup_review:ci -f ../../Dockerfile.station-signup-review ../../",
-    "dev": "tsup --watch"
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
   },
   "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {

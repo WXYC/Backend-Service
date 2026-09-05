@@ -48,7 +48,11 @@ const rowLabel = (row: PendingSignupRow): string => row.djName ?? row.name;
  *
  * Rows already downgraded this run are called out separately from rows
  * still within the 30-day window, so a reviewer sees at a glance which
- * accounts need attention today.
+ * accounts need attention today. A row past the cutoff but NOT in
+ * `downgraded` was downgraded by a PRIOR run -- the downgrade never sets
+ * `self_signup_reviewed_at`, so it stays in the pending cohort every day
+ * after that, and `DOWNGRADE_AFTER_DAYS - days` would go negative for it.
+ * That row gets its own status instead of the countdown.
  */
 export const buildStationSignupDigestEmail = (
   pending: PendingSignupRow[],
@@ -66,11 +70,20 @@ export const buildStationSignupDigestEmail = (
     downgraded.length > 0 ? `, ${downgraded.length} downgraded` : ''
   } — ${dateLabel}`;
 
+  const rowStatus = (
+    row: PendingSignupRow,
+    days: number,
+    downgradedTodayLabel: string,
+    alreadyDowngradedLabel: string
+  ) => {
+    if (downgradedIds.has(row.userId)) return downgradedTodayLabel;
+    if (days >= DOWNGRADE_AFTER_DAYS) return alreadyDowngradedLabel;
+    return `${DOWNGRADE_AFTER_DAYS - days} day(s) until auto-downgrade`;
+  };
+
   const textLines = sorted.map((row) => {
     const days = daysPending(row.selfSignupAt, now);
-    const status = downgradedIds.has(row.userId)
-      ? 'DOWNGRADED dj -> member today'
-      : `${DOWNGRADE_AFTER_DAYS - days} day(s) until auto-downgrade`;
+    const status = rowStatus(row, days, 'DOWNGRADED dj -> member today', 'already downgraded — awaiting review');
     return `- ${rowLabel(row)} <${row.email}> — pending ${days} day(s) (${status})`;
   });
 
@@ -83,10 +96,12 @@ export const buildStationSignupDigestEmail = (
   const htmlRows = sorted
     .map((row) => {
       const days = daysPending(row.selfSignupAt, now);
-      const isDowngraded = downgradedIds.has(row.userId);
-      const status = isDowngraded
-        ? '<strong>downgraded dj -&gt; member today</strong>'
-        : `${DOWNGRADE_AFTER_DAYS - days} day(s) until auto-downgrade`;
+      const status = rowStatus(
+        row,
+        days,
+        '<strong>downgraded dj -&gt; member today</strong>',
+        'already downgraded — awaiting review'
+      );
       return `<li>${escapeHtml(rowLabel(row))} &lt;${escapeHtml(row.email)}&gt; — pending ${days} day(s) (${status})</li>`;
     })
     .join('');
