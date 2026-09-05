@@ -69,6 +69,18 @@ describe('buildStationSignupDigestEmail', () => {
     expect(digest?.html).toContain('downgraded dj -&gt; member today');
   });
 
+  it('marks an account downgraded by a PRIOR run distinctly, without a negative countdown', () => {
+    // 75 days pending, well past the 30-day cutoff, but not in this run's `downgraded` list --
+    // i.e. a prior run already flipped its role, and it never leaves the pending cohort because
+    // the downgrade doesn't set self_signup_reviewed_at.
+    const staleDowngrade = row({ userId: 'u3', selfSignupAt: new Date('2026-05-18T00:00:00Z') });
+    const digest = buildStationSignupDigestEmail([staleDowngrade], { now, downgraded: [] });
+
+    expect(digest?.text).not.toMatch(/-\d+ day\(s\) until auto-downgrade/);
+    expect(digest?.text).toContain('already downgraded — awaiting review');
+    expect(digest?.html).toContain('already downgraded — awaiting review');
+  });
+
   it('escapes HTML-significant characters in name/email', () => {
     const malicious = row({ name: '<script>alert(1)</script>', djName: null, email: 'a&b@example.com' });
     const digest = buildStationSignupDigestEmail([malicious], { now, downgraded: [] });

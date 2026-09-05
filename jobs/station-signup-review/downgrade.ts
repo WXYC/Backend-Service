@@ -53,6 +53,10 @@ type DbClient = typeof db;
  * pending cohort is small (self-signup is a rare event, not a bulk import),
  * so the simplicity of an independent per-row result outweighs the
  * batching this table's normal write volume would otherwise call for.
+ *
+ * Scoped by `userId` alone, not `(organizationId, userId)` -- WXYC runs one
+ * station org today, so this downgrades every `auth_member` row the user
+ * holds. Revisit if a second org is ever added.
  */
 export const downgradeOverdueAccounts = async (
   dbClient: DbClient,
