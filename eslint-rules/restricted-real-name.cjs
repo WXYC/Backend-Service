@@ -87,6 +87,11 @@ const ALLOW_LIST = [
   'apps/auth/create-default-user.ts',
   'apps/auth/complete-onboarding.ts',
   'apps/auth/create-auto-dj-user.ts',
+  // Station signup (BS#2358/#2360). Lands ahead of the endpoint file itself,
+  // which destructures `realName` from the request body — the exact flagged
+  // shape. Not yet written as of this entry; see docs/pii.md's Enforcement
+  // section.
+  'apps/auth/station-signup.ts',
   'shared/authentication/src/auth.definition.ts',
   // Until the 2026-09-07 tubafrenzy turndown: the legacy mirror forwards
   // `auth_user.real_name` into tubafrenzy's DJ_NAME field.
