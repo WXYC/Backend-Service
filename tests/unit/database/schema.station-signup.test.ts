@@ -83,6 +83,38 @@ const columnLine = (createTableBody: string, column: string): string => {
   return line;
 };
 
+/*
+ * Both sides of every structural claim below are asserted, not just the
+ * migration's. Migration 0160's SHA-256 is frozen in applied-hashes.json, so
+ * the DDL literally cannot drift — which means a DDL-only assertion pins a
+ * file nobody can change and leaves `schema.ts`, the file everyone edits,
+ * unguarded. Deleting an index there, renaming one, or adding a column with no
+ * migration all used to pass this suite; the parity helpers close that.
+ */
+
+/** Physical column names declared on a drizzle table, in declaration order. */
+const declaredColumns = (tableDef: string): string[] =>
+  [...tableDef.matchAll(/\b\w+:\s*(?:varchar|text|timestamp|integer|boolean|serial|jsonb)\(\s*'([a-z0-9_]+)'/g)].map(
+    (m) => m[1]
+  );
+
+/** Column names in a `CREATE TABLE` body, in declaration order. */
+const ddlColumns = (createTableBody: string): string[] =>
+  createTableBody
+    .split('\n')
+    .map((line) => /^"([a-z0-9_]+)"/.exec(line.trim())?.[1])
+    .filter((name): name is string => name !== undefined);
+
+/** Index names declared on a drizzle table. */
+const declaredIndexes = (tableDef: string): string[] =>
+  [...tableDef.matchAll(/\bindex\(\s*'([a-z0-9_]+)'\s*\)/g)].map((m) => m[1]);
+
+/** Index names the migration creates on one table. */
+const ddlIndexes = (tableName: string): string[] =>
+  [...ddl.matchAll(new RegExp(`CREATE INDEX "([a-z0-9_]+)" ON "${tableName}"`, 'g'))].map((m) => m[1]);
+
+const sorted = (names: string[]): string[] => [...names].sort();
+
 describe('schema: station-signup substrate (migration 0160, BS#2358)', () => {
   it('migration 0160 exists at the journal-pointed path', () => {
     expect(fs.existsSync(migrationPath)).toBe(true);
@@ -113,6 +145,17 @@ describe('schema: station-signup substrate (migration 0160, BS#2358)', () => {
 
     it('indexes created_by, the FK referencing side Postgres never indexes on its own', () => {
       expect(ddl).toMatch(/CREATE INDEX "station_passcode_created_by_idx"[\s\S]*?\("created_by"\)/i);
+      expect(extractTableDef('station_passcode')).toMatch(
+        /index\('station_passcode_created_by_idx'\)\.on\(table\.createdBy\)/
+      );
+    });
+
+    it('declares the same columns and indexes in schema.ts as migration 0160 creates', () => {
+      const def = extractTableDef('station_passcode');
+      expect(sorted(declaredColumns(def))).toEqual(sorted(ddlColumns(body)));
+      expect(declaredColumns(def).length).toBe(10);
+      expect(sorted(declaredIndexes(def))).toEqual(sorted(ddlIndexes('station_passcode')));
+      expect(declaredIndexes(def)).toEqual(['station_passcode_created_by_idx']);
     });
   });
 
@@ -138,6 +181,19 @@ describe('schema: station-signup substrate (migration 0160, BS#2358)', () => {
       );
     });
 
+    it('defaults attempted_at to now() and keeps it NOT NULL, on both sides', () => {
+      // The other half of the composite index, and unasserted until now.
+      // A nullable attempted_at would let a row land outside every cooldown
+      // window silently; a missing DEFAULT would push the timestamp onto the
+      // writer, where a forgotten field yields the same invisible hole.
+      expect(columnLine(body, 'attempted_at')).toMatch(
+        /"attempted_at"\s+timestamp with time zone\s+DEFAULT\s+now\(\)\s+NOT\s+NULL/i
+      );
+      expect(extractTableDef('station_signup_attempt')).toMatch(
+        /attemptedAt:\s*timestamp\('attempted_at',\s*\{\s*withTimezone:\s*true\s*\}\)\.notNull\(\)\.defaultNow\(\)/
+      );
+    });
+
     it('keeps ip_hash at varchar(16) and nullable', () => {
       // 16 hex characters — the truncation width the derivation is specified
       // against in schema.ts. Widening or narrowing it silently changes what
@@ -149,14 +205,56 @@ describe('schema: station-signup substrate (migration 0160, BS#2358)', () => {
       );
     });
 
-    it('specifies ip_hash as a KEYED hash, not a bare digest', () => {
+    it('specifies ip_hash as a KEYED hash over the X-Real-IP client address', () => {
       // The column comment is the entire carrier of this decision until BS#2359
-      // implements it — nothing executable pins it yet. An unkeyed sha256 over
-      // IPv4's 2^32 keyspace is exhaustively invertible, so "sha256 truncated to
-      // 16 hex chars" is not the privacy property the column claims to have.
+      // implements it — nothing executable pins it yet, so the prose is the
+      // artefact worth regression-testing.
+      //
+      // KEYED: an unkeyed sha256 over IPv4's 2^32 keyspace is exhaustively
+      // invertible, so "sha256 truncated to 16 hex chars" is not the privacy
+      // property the column claims to have.
+      //
+      // X-Real-IP: behind this deployment's nginx the socket peer is nginx
+      // itself, identical for every client, so a derivation over
+      // `socket.remoteAddress` would write one constant into every row and
+      // nothing would go red. XFF is client-appended and spoofable. Same
+      // header better-auth and apps/auth/rate-limit-key.ts are pinned to
+      // (BS#774, BS#1048).
       const def = extractTableDef('station_signup_attempt');
       const ipHashComment = def.slice(0, def.indexOf('ipHash:'));
       expect(ipHashComment).toMatch(/HMAC-SHA256/);
+      expect(ipHashComment).toMatch(/X-Real-IP/);
+      expect(ipHashComment).not.toMatch(/sent to the socket/);
+      // Key encoding and IP canonicalization are both named, because leaving
+      // either open makes "equal IPs hash equal" untrue in practice: a hex key
+      // and a base64 key give two hash spaces, and `::ffff:1.2.3.4` and
+      // `1.2.3.4` are one address spelled two ways.
+      expect(ipHashComment).toMatch(/hex/i);
+      expect(ipHashComment).toMatch(/::ffff:/);
+    });
+
+    it('states that the cooldown is station-global and ip_hash is not its grouping key', () => {
+      // The contradiction this replaces: an earlier revision claimed the
+      // derivation left "the cooldown's per-IP grouping" unaffected. There is
+      // no per-IP grouping. The epic rejected a per-IP limiter outright —
+      // every legitimate user shares the control-room computer's IP, so a few
+      // fumbled codes would lock the whole room out — and the table's only
+      // non-FK index is (outcome, attempted_at), which could not serve a
+      // per-IP read even if one were written. The header comment and the
+      // ip_hash comment have to say the same thing or BS#2359 can implement
+      // against the wrong one.
+      const def = extractTableDef('station_signup_attempt');
+      const ipHashComment = def.slice(0, def.indexOf('ipHash:'));
+      expect(ipHashComment).toMatch(/STATION-GLOBAL/);
+      expect(ipHashComment).toMatch(/NOT A GROUPING KEY/);
+      expect(ipHashComment).not.toMatch(/per-IP grouping is unaffected/);
+      // No index on ip_hash, in either the migration or schema.ts — the
+      // structural half of the same claim.
+      expect(ddl).not.toMatch(/CREATE INDEX[^\n]*\("ip_hash"/i);
+      expect(def).not.toMatch(/\.on\(table\.ipHash\)/);
+
+      const header = schemaSource.slice(0, schemaSource.indexOf('export const station_signup_attempt'));
+      expect(header.slice(header.lastIndexOf('// Station self-signup attempt log'))).toMatch(/STATION-WIDE/);
     });
 
     it('records the passcode an attempt resolved to, nullably', () => {
@@ -177,6 +275,17 @@ describe('schema: station-signup substrate (migration 0160, BS#2358)', () => {
     it('indexes both FK referencing columns', () => {
       expect(ddl).toMatch(/CREATE INDEX "station_signup_attempt_actor_user_id_idx"[\s\S]*?\("actor_user_id"\)/i);
       expect(ddl).toMatch(/CREATE INDEX "station_signup_attempt_passcode_id_idx"[\s\S]*?\("passcode_id"\)/i);
+      const def = extractTableDef('station_signup_attempt');
+      expect(def).toMatch(/index\('station_signup_attempt_actor_user_id_idx'\)\.on\(table\.actorUserId\)/);
+      expect(def).toMatch(/index\('station_signup_attempt_passcode_id_idx'\)\.on\(table\.passcodeId\)/);
+    });
+
+    it('declares the same columns and indexes in schema.ts as migration 0160 creates', () => {
+      const def = extractTableDef('station_signup_attempt');
+      expect(sorted(declaredColumns(def))).toEqual(sorted(ddlColumns(body)));
+      expect(declaredColumns(def).length).toBe(6);
+      expect(sorted(declaredIndexes(def))).toEqual(sorted(ddlIndexes('station_signup_attempt')));
+      expect(declaredIndexes(def)).toHaveLength(3);
     });
   });
 

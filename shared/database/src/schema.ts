@@ -2836,56 +2836,125 @@ export type NewStationPasscode = InferInsertModel<typeof station_passcode>;
 
 // Station self-signup attempt log: cooldown state + audit trail for the
 // passcode gate. Composite (outcome, attempted_at) index rather than
-// attempted_at alone — every cooldown read filters on outcome first (the
-// in-window failure count, the MAX(attempted_at) WHERE outcome =
+// attempted_at alone — every cooldown read is STATION-WIDE (the cooldown is
+// global, never per-IP: see the ip_hash comment below) and filters on outcome
+// first (the in-window failure count, the MAX(attempted_at) WHERE outcome =
 // 'cooldown_cleared' floor, and the once-per-window cooldown_refused check),
 // and an attempted_at-only index would leave all three scanning a table that
-// grows with the attack.
+// grows with the attack. No read filters on ip_hash, which is why no index
+// covers it.
 export const station_signup_attempt = pgTable(
   'station_signup_attempt',
   {
     id: varchar('id', { length: 255 }).primaryKey(),
     attemptedAt: timestamp('attempted_at', { withTimezone: true }).notNull().defaultNow(),
-    // KEYED hash, not a bare digest: the first 16 hex characters of
-    // HMAC-SHA256(key, <client IP as the string sent to the socket>), lowercase.
-    // A plain sha256 of an IP is not a privacy control — IPv4's whole keyspace
-    // is 2^32, exhaustively invertible on a laptop in seconds, so an unkeyed
-    // digest column is a raw IP with extra steps. The key is what makes the
-    // value non-reversible to a reader who has only the data: read it from
-    // `STATION_SIGNUP_IP_HMAC_KEY` (server-held, alongside the passcode's
-    // `STATION_PASSCODE_KEY` in the EC2 host's .env), and fail closed rather
-    // than falling back to an unkeyed digest if it is absent. This protects a
-    // leaked dump or RDS snapshot; it does not survive host compromise, the
-    // same boundary BS#2359's passcode encryption draws.
+    // AUDIT ONLY — never a cooldown grouping key. See the "not a grouping key"
+    // paragraph below before writing any read against this column.
     //
-    // The derivation is a pure function of (key, IP), so equal IPs still hash
-    // equal and the cooldown's per-IP grouping is unaffected. Rotating the key
-    // only breaks correlation with rows written before the rotation, which is
-    // acceptable on a 30-day log.
+    // KEYED hash, not a bare digest: the first 16 lowercase hex characters of
+    // HMAC-SHA256(key, canonicalClientIp). Fully specified, because every part
+    // of this is a decision a reimplementation could get wrong silently:
     //
-    // Deliberately NOT the apps/auth/rate-limit-key.ts recipe, despite its
-    // superficial similarity: `rateLimitKeyFromRequest` there returns a RAW IP
-    // by design, and its 16-hex truncation lives in `hashCredential`, which is
-    // module-private and hashes session tokens and bearer credentials — high-
-    // entropy secrets, where an unkeyed digest is sound and this whole
-    // invertibility problem does not arise. Truncation to 16 hex chars is
-    // carried over from there on purpose (collisions are irrelevant for a
-    // bucketing key, and a short value limits what a leak yields), which is why
-    // this stays varchar(16).
+    // 1. WHICH IP. The client IP is the value of the nginx-set `X-Real-IP`
+    //    request header. Never `X-Forwarded-For`, and never the bare socket.
+    //    Behind this deployment's nginx, `req.socket.remoteAddress` is nginx's
+    //    own upstream address — the SAME string for every client — so hashing
+    //    it would write one constant into every row, destroying the column's
+    //    entire information content with no test going red and no error
+    //    logged. XFF is out for the opposite reason: nginx appends to it
+    //    rather than replacing it, so a caller can spoof the first element.
+    //    This is the same header better-auth is pinned to by
+    //    `advanced.ipAddress.ipAddressHeaders: ['x-real-ip']`
+    //    (shared/authentication/src/auth.definition.ts) and the same one
+    //    `rateLimitKeyFromRequest` resolves (apps/auth/rate-limit-key.ts:9-14).
+    //    BS#774 and BS#1048 are the two times this repo got it wrong; treat
+    //    the header as the single source of client IP, here as everywhere.
+    //
+    // 2. CANONICALIZATION, so that two spellings of one address cannot hash
+    //    apart: trim surrounding whitespace, lowercase, and reduce an
+    //    IPv4-mapped IPv6 address to its dotted quad (`::ffff:1.2.3.4` and
+    //    `1.2.3.4` are one address and must produce one hash — without this
+    //    step the "equal IPs hash equal" property below is simply false).
+    //    Hash the canonical string's UTF-8 bytes.
+    //
+    // 3. THE KEY. `STATION_SIGNUP_IP_HMAC_KEY`, held server-side beside the
+    //    passcode's `STATION_PASSCODE_KEY` in the EC2 host's .env, and read as
+    //    64 hex characters decoded to 32 raw bytes (`Buffer.from(key, 'hex')`)
+    //    — one encoding, stated, so a base64 key and a hex key cannot both
+    //    "work" and produce two different hash spaces for one address. A value
+    //    that does not decode to exactly 32 bytes is a configuration error.
+    //
+    // 4. FAILURE MODES, which differ deliberately from the passcode's. The
+    //    DERIVATION fails closed: never fall back to an unkeyed digest, since
+    //    a plain sha256 of an IP is not a privacy control at all (IPv4's 2^32
+    //    keyspace is exhaustively invertible on a laptop in seconds, making an
+    //    unkeyed digest a raw IP with extra steps). But the REQUEST does not:
+    //    a missing key, an absent header, or a value `net.isIP()` rejects
+    //    writes NULL here — which is why the column is nullable — and the
+    //    signup proceeds. Refusing a walk-in DJ over an audit-only column
+    //    would be exactly the "control room is locked out" failure the epic
+    //    (BS#2365) forbids, and the misconfiguration belongs at startup, where
+    //    BS#2359 should surface it loudly the way create-auto-dj-user.ts:44-49
+    //    surfaces its own missing var.
+    //
+    // What the key buys: a leaked dump or RDS snapshot yields nothing
+    // invertible. It does not survive host compromise, where the .env and the
+    // rows are both in hand — the same boundary BS#2359's passcode encryption
+    // draws.
+    //
+    // NOT A GROUPING KEY. The signup cooldown is STATION-GLOBAL: it counts
+    // `passcode_fail` rows table-wide within a window and never partitions by
+    // source. A per-IP limiter was considered and explicitly REJECTED for this
+    // feature (BS#2365) because every legitimate user shares one IP — the
+    // control-room computer — so three DJs fumbling a hand-copied code would
+    // lock the whole room out during a break with no manager on site. This
+    // column is therefore read only after the fact, by a human asking what an
+    // attack looked like or who revealed the code; nothing on the request path
+    // touches it. That is why there is deliberately no index on `ip_hash`, and
+    // why the sole non-FK index here is (outcome, attempted_at), which serves
+    // the station-wide reads described in the table header above. BS#2359 must
+    // not key the cooldown on this column: the grouping would be wrong, and no
+    // index exists that could serve it.
+    //
+    // Being a pure function of (key, canonical IP), the derivation is stable —
+    // equal client IPs produce equal hashes — which is what makes the column
+    // groupable in a forensic query written days later. Rotating the key only
+    // breaks correlation with rows written before the rotation, acceptable on
+    // a log BS#2363 prunes at 30 days.
+    //
+    // Deliberately NOT the apps/auth/rate-limit-key.ts hashing recipe, despite
+    // sharing that file's IP source: `rateLimitKeyFromRequest` returns a RAW
+    // IP by design, and the 16-hex truncation there lives in `hashCredential`,
+    // which is module-private and hashes session tokens and bearer credentials
+    // — high-entropy secrets, where an unkeyed digest is sound and this whole
+    // invertibility problem does not arise. Only the truncation width is
+    // carried over, on purpose (collisions are irrelevant for an audit label,
+    // and a short value limits what a leak yields), which is why this stays
+    // varchar(16).
     //
     // Implemented by BS#2359; classified as a stored PII class in docs/pii.md
     // by BS#2360.
     ipHash: varchar('ip_hash', { length: 16 }),
     // Set only on manager actions (e.g. cooldown_cleared, passcode_revealed).
     actorUserId: varchar('actor_user_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
-    // The station_passcode row this attempt resolved to. NULL for every outcome
-    // that matches no passcode row — `passcode_fail` (a wrong code matches
-    // nothing by construction, which is exactly why the cooldown counts attempt
-    // rows instead of incrementing a per-passcode counter, BS#2359),
-    // `cooldown_refused`, and `cooldown_cleared`. Populated for `passcode_ok`
-    // and `passcode_revealed`. ON DELETE SET NULL so pruning a passcode row
-    // cannot delete the attempts recorded against it — the attempt log is the
-    // audit trail and the cooldown's own input.
+    // The station_passcode row this attempt resolved to. NULL whenever the
+    // attempt resolved to no row: `cooldown_refused` and `cooldown_cleared`
+    // never consult a passcode at all, and a mistyped code matches nothing —
+    // which is exactly why the cooldown counts attempt rows instead of
+    // incrementing a per-passcode counter (BS#2359). Populated for
+    // `passcode_ok` and `passcode_revealed`. ON DELETE SET NULL so pruning a
+    // passcode row cannot delete the attempts recorded against it — the
+    // attempt log is the audit trail and the cooldown's own input.
+    //
+    // OPEN, for BS#2359 to settle when it owns the writer: `passcode_fail` is
+    // today the only failure token, so it has to cover both "matched nothing"
+    // (NULL here, correctly) and "matched a row that was expired, revoked, or
+    // at its use cap" — where a passcode_id IS known and losing it would throw
+    // away the most useful fact in the audit trail. Do not read "passcode_fail
+    // implies NULL" as an invariant; the vocabulary is incomplete, not the
+    // nullability. Adding the distinguishing outcome token (and any CHECK
+    // constraint over the resulting vocabulary) belongs with that writer, not
+    // with a schema that has no producer yet.
     passcodeId: varchar('passcode_id', { length: 255 }).references(() => station_passcode.id, {
       onDelete: 'set null',
     }),

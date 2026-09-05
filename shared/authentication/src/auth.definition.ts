@@ -706,10 +706,47 @@ export const auth = betterAuth({
       // selfSignupReviewedAt/_By are exactly the shape that finding warned
       // about, and the account holder under review is signed in, so without
       // the lock a DJ could approve their own pending signup via public
-      // /update-user.
+      // /update-user. (BS#2362's approve endpoint therefore must not use
+      // public /update-user — it uses the admin plugin route, which bypasses
+      // parseUserInput. That is the point of the lock, not a problem with it.)
+      //
+      // `returned` is the SEPARATE, output-side flag, and only
+      // selfSignupReviewedBy carries it. The two flags are independent:
+      // `parseUserInput` filters on `input`, `parseUserOutput`
+      // (better-auth/dist/db/schema.mjs:24 -> filterOutputFields) filters on
+      // `returned`, so input:false alone leaves a field on every response body.
+      //
+      // Why selfSignupReviewedBy is `returned: false`: it holds ANOTHER
+      // person's `auth_user.id` — the manager who cleared the review. Without
+      // the flag that id rides /get-session back to the very DJ who was
+      // reviewed, and `buildJwtPayload` / `buildOidcUserInfoClaim`
+      // (jwt-payload.ts:47,55) spread the whole user object, so it also lands
+      // in the signed JWT and the OIDC `additional_user_info` claim handed to
+      // every relying party (wxyc-crm, wxyc-canary). A reviewer's internal id
+      // is not part of any contract those consumers have; this is the one
+      // field here that discloses a third party.
+      //
+      // Why selfSignupAt and selfSignupReviewedAt are NOT `returned: false`,
+      // deliberately — verified against better-auth, not assumed. `returned`
+      // is global, not audience-scoped: the admin plugin's roster route runs
+      // the same filter (`plugins/admin/routes.mjs:373` maps every row through
+      // `parseUserOutput`), so hiding these hides them from
+      // `admin/list-users` too. dj-site's roster review queue reads them
+      // straight off that payload — its `isPendingManagerReview` predicate is
+      // `self_signup_at IS NOT NULL AND self_signup_reviewed_at IS NULL` — and
+      // an absent field silently pins that predicate to a constant: drop
+      // selfSignupReviewedAt and every reviewed account reads as pending
+      // forever; drop selfSignupAt and the queue is permanently empty, the
+      // exact "ships looking healthy with an empty manager queue" failure the
+      // epic warns about. Nothing goes red either way. Both are timestamps on
+      // the account holder's OWN row and name no third party, so the trade is
+      // one-sided: a manager's id is withheld, two of the subject's own
+      // timestamps are not. If a "reviewed by <name>" display is ever wanted
+      // in the roster, it must come from an admin endpoint of ours (BS#2362's
+      // surface), never from re-opening this flag.
       selfSignupAt: { type: 'date', required: false, input: false },
       selfSignupReviewedAt: { type: 'date', required: false, input: false },
-      selfSignupReviewedBy: { type: 'string', required: false, input: false },
+      selfSignupReviewedBy: { type: 'string', required: false, input: false, returned: false },
       // Cross-cutting capabilities independent of role hierarchy (e.g., 'editor', 'webmaster').
       //
       // input:false (BS#2358). This is the highest-stakes instance of the
