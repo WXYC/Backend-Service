@@ -1100,6 +1100,13 @@
       "when": 1788036046082,
       "tag": "0159_digital-asset-watermark",
       "breakpoints": true
+    },
+    {
+      "idx": 160,
+      "version": "7",
+      "when": 1788585491000,
+      "tag": "0160_station-signup-schema",
+      "breakpoints": true
     }
   ]
 }
