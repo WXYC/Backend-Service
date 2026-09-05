@@ -681,7 +681,21 @@ export const auth = betterAuth({
       djName: { type: 'string', required: false, input: false },
       appSkin: { type: 'string', required: true, defaultValue: 'modern-light' },
       isAnonymous: { type: 'boolean', required: false, defaultValue: false },
-      hasCompletedOnboarding: { type: 'boolean', required: false, defaultValue: false },
+      // input:false (BS#2358 / station-signup-schema): without it, public
+      // POST /update-user could already flip this — the same BS#2297 hole,
+      // just never registered with the flag until now. Every current writer
+      // goes through internalAdapter or a direct db.update, so the flag
+      // breaks nothing.
+      hasCompletedOnboarding: { type: 'boolean', required: false, defaultValue: false, input: false },
+      // Station self-signup review tracking (BS#2358). All three input:false
+      // for the same BS#2297 reason as realName/djName above:
+      // selfSignupReviewedAt/_By are exactly the shape that finding warned
+      // about, and the account holder under review is signed in, so without
+      // the lock a DJ could approve their own pending signup via public
+      // /update-user.
+      selfSignupAt: { type: 'date', required: false, input: false },
+      selfSignupReviewedAt: { type: 'date', required: false, input: false },
+      selfSignupReviewedBy: { type: 'string', required: false, input: false },
       // Cross-cutting capabilities independent of role hierarchy (e.g., 'editor', 'webmaster')
       capabilities: { type: 'string[]', required: false, defaultValue: [] },
     },

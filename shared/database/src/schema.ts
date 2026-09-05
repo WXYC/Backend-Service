@@ -25,6 +25,7 @@ import {
   jsonb,
   bigint,
   char,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
 // PostgreSQL tsvector. Drizzle has no first-class tsvector type, but we only
@@ -67,6 +68,15 @@ export const user = pgTable(
     hasCompletedOnboarding: boolean('has_completed_onboarding').notNull().default(false),
     // Cross-cutting capabilities independent of role hierarchy (e.g., 'editor', 'webmaster')
     capabilities: text('capabilities').array().notNull().default([]),
+    // Station self-signup review tracking (station-signup-schema plan step 1).
+    // Pending review = selfSignupAt IS NOT NULL AND selfSignupReviewedAt IS NULL —
+    // deliberately no separate pending_review boolean, which would duplicate
+    // what these two columns already answer.
+    selfSignupAt: timestamp('self_signup_at', { withTimezone: true }),
+    selfSignupReviewedAt: timestamp('self_signup_reviewed_at', { withTimezone: true }),
+    selfSignupReviewedBy: varchar('self_signup_reviewed_by', { length: 255 }).references((): AnyPgColumn => user.id, {
+      onDelete: 'set null',
+    }),
   },
   (table) => [
     uniqueIndex('auth_user_email_key').on(table.email),
@@ -2787,6 +2797,52 @@ export const anonymous_devices = pgTable(
 
 export type AnonymousDevice = InferSelectModel<typeof anonymous_devices>;
 export type NewAnonymousDevice = InferInsertModel<typeof anonymous_devices>;
+
+// Station self-signup passcode (station-signup-schema plan step 1). Unprefixed
+// deliberately: auth_ marks better-auth-managed tables (auth_user, auth_session,
+// auth_verification, auth_jwks); this table is ours, alongside the other
+// hand-rolled auth-adjacent tables above (anonymous_devices in 0024,
+// user_activity in 0025) — an auth_ prefix here would misrepresent ownership.
+export const station_passcode = pgTable('station_passcode', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  codeEncrypted: text('code_encrypted').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  createdBy: varchar('created_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  revokedReason: text('revoked_reason'),
+  lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+  useCount: integer('use_count').notNull().default(0),
+  maxUses: integer('max_uses').notNull().default(25),
+});
+
+export type StationPasscode = InferSelectModel<typeof station_passcode>;
+export type NewStationPasscode = InferInsertModel<typeof station_passcode>;
+
+// Station self-signup attempt log: cooldown state + audit trail for the
+// passcode gate. Composite (outcome, attempted_at) index rather than
+// attempted_at alone — every cooldown read filters on outcome first (the
+// in-window failure count, the MAX(attempted_at) WHERE outcome =
+// 'cooldown_cleared' floor, and the once-per-window cooldown_refused check),
+// and an attempted_at-only index would leave all three scanning a table that
+// grows with the attack.
+export const station_signup_attempt = pgTable(
+  'station_signup_attempt',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    attemptedAt: timestamp('attempted_at', { withTimezone: true }).notNull().defaultNow(),
+    // sha256 truncated to 16 hex chars, exactly as apps/auth/rate-limit-key.ts
+    // does it. Never a raw IP.
+    ipHash: varchar('ip_hash', { length: 16 }),
+    // Set only on manager actions (e.g. cooldown_cleared, passcode_revealed).
+    actorUserId: varchar('actor_user_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    outcome: varchar('outcome', { length: 24 }).notNull(),
+  },
+  (table) => [index('station_signup_attempt_outcome_attempted_at_idx').on(table.outcome, table.attemptedAt)]
+);
+
+export type StationSignupAttempt = InferSelectModel<typeof station_signup_attempt>;
+export type NewStationSignupAttempt = InferInsertModel<typeof station_signup_attempt>;
 
 // Cross-cache-identity substrate (§3.2 of the library-hook-canonicalization
 // plan). Three empty tables behind `BS_USE_LIBRARY_IDENTITY=false`. No writers
