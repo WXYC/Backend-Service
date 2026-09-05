@@ -550,6 +550,65 @@ describe('provisionUser()', () => {
     });
   });
 
+  describe('new options (station signup, BS#2360)', () => {
+    describe('sendSetupInvite', () => {
+      it('should send the invite by default when sendSetupInvite is omitted', async () => {
+        await provisionUser(validInput);
+
+        expect(mockCreateInvite).toHaveBeenCalled();
+      });
+
+      it('should send the invite when sendSetupInvite is explicitly true', async () => {
+        await provisionUser({ ...validInput, sendSetupInvite: true });
+
+        expect(mockCreateInvite).toHaveBeenCalled();
+      });
+
+      it('should NOT send the invite when sendSetupInvite is false', async () => {
+        const result = await provisionUser({ ...validInput, sendSetupInvite: false });
+
+        expect(mockCreateInvite).not.toHaveBeenCalled();
+        expect(result.emailSent).toBe(false);
+      });
+    });
+
+    describe('hasCompletedOnboarding', () => {
+      it('should default hasCompletedOnboarding to false when omitted', async () => {
+        await provisionUser(validInput);
+
+        expect(mockCreateUser).toHaveBeenCalledWith(expect.objectContaining({ hasCompletedOnboarding: false }));
+      });
+
+      it('should pass hasCompletedOnboarding through when true', async () => {
+        await provisionUser({ ...validInput, hasCompletedOnboarding: true });
+
+        expect(mockCreateUser).toHaveBeenCalledWith(expect.objectContaining({ hasCompletedOnboarding: true }));
+      });
+    });
+
+    describe('selfSignupAt', () => {
+      it('should default selfSignupAt to null when omitted (admin-provisioned)', async () => {
+        await provisionUser(validInput);
+
+        expect(mockCreateUser).toHaveBeenCalledWith(expect.objectContaining({ selfSignupAt: null }));
+      });
+
+      it('should pass a supplied selfSignupAt through to the SAME createUser call', async () => {
+        const selfSignupAt = new Date('2026-09-05T12:00:00.000Z');
+
+        await provisionUser({ ...validInput, selfSignupAt });
+
+        // Must land on the row inside createUser's own atomicity — never a
+        // follow-up update — or a crash between create and stamp leaves a
+        // row indistinguishable from an admin-provisioned one (BS#2360).
+        expect(mockCreateUser).toHaveBeenCalledWith(expect.objectContaining({ selfSignupAt }));
+        expect(mockAdapterUpdate).not.toHaveBeenCalledWith(
+          expect.objectContaining({ update: expect.objectContaining({ selfSignupAt: expect.anything() }) })
+        );
+      });
+    });
+  });
+
   describe('cleanup on failure', () => {
     it('should delete the created user if member creation fails', async () => {
       mockAdapterCreate.mockRejectedValue(new Error('DB constraint violation'));
