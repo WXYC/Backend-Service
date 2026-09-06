@@ -30,12 +30,14 @@ const mockUpdate = jest.fn<(table: unknown) => unknown>();
 // --- SELECT chain (holdsDjRole / hasOpenShow) -----------------------------
 /** Queue of results, one per `.limit()` call, so each read can be steered independently. */
 let selectResults: Array<unknown[] | Error> = [];
+/** Records the lock strength so a test can pin `.for('update')` -- the lock, not just the predicates, is what closes the plan->apply race. */
+const mockFor = jest.fn<(lockStrength: unknown) => unknown>();
 const mockLimit = jest.fn(() => {
   const next = selectResults.shift() ?? [];
   const rows: Promise<unknown[]> = next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
   // The guard SELECTs await `.limit()` directly; the apply re-check chains
   // `.for('update')` onto it. Both resolve to the same queued result.
-  return Object.assign(rows, { for: () => rows });
+  return Object.assign(rows, { for: mockFor.mockImplementation(() => rows) });
 });
 const mockSelectWhere = jest.fn<(clause: unknown) => unknown>().mockReturnValue({ limit: mockLimit });
 const mockFrom = jest.fn<(table: unknown) => unknown>().mockReturnValue({ where: mockSelectWhere });
@@ -313,6 +315,9 @@ describe('applyDowngrades', () => {
         { isNull: USER_TABLE.selfSignupDowngradedAt },
       ],
     });
+    // `FOR UPDATE` specifically: a weaker lock (`for('share')`) does not
+    // conflict with a reviewer's row update and would silently reopen the race.
+    expect(mockFor).toHaveBeenCalledWith('update');
   });
 
   it('aborts as raced -- no role flip, no marker -- when a review landed between plan and apply', async () => {

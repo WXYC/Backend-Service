@@ -292,7 +292,10 @@ export interface AppliedDowngrades {
  * `auth_member`. Any future writer that touches both tables in one
  * transaction -- in particular the BS#2362 approve endpoint, which will be
  * the first writer of `self_signup_reviewed_at` -- must take them in the same
- * `auth_user`-first order, or the two deadlock.
+ * `auth_user`-first order, or the two deadlock. That wait is bounded by the
+ * connection-level `statement_timeout` (5s default; this job sets no
+ * override), and a timeout throws -- so the loser lands in `failed` with a
+ * non-zero exit and is retried next run, not silently dropped into `raced`.
  *
  * The role flip and the marker stamp go in ONE transaction. Half of this
  * pair is a defect either way: the role without the marker re-fires on the
