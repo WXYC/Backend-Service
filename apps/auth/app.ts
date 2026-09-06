@@ -27,7 +27,7 @@ import { CompleteOnboardingError, completeOnboardingFromRequest } from './comple
 import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
-import { stationSignupFromRequest, StationSignupError } from './station-signup';
+import { stationSignupFromRequest, StationSignupError, isStationSignupEnabled } from './station-signup';
 import { createAutoDjUser } from './create-auto-dj-user';
 import { createDefaultUser } from './create-default-user';
 import { syncAdminRoles } from './sync-admin-roles';
@@ -430,15 +430,21 @@ if (!isTestEnv) {
   // minutes with no manager on site. Adopts checkRequestBanRateLimit's shape
   // verbatim (60s/120): public, cheap per call (~3 indexed reads, one
   // insert, two AES decrypts), but must not exhaust the DB pool.
-  const stationSignupRateLimit = rateLimit({
-    windowMs: 60_000,
-    limit: 120,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-    message: { error: 'Too many requests, please try again later.' },
-    keyGenerator: rateLimitKeyFromRequest,
-  });
-  app.use('/auth/wxyc/station-signup', stationSignupRateLimit);
+  //
+  // Mounted only when the feature is ON, in lockstep with the route below:
+  // a limiter on a path that answers nothing is a fingerprint of its own
+  // (429 headers on an otherwise "nonexistent" path).
+  if (isStationSignupEnabled()) {
+    const stationSignupRateLimit = rateLimit({
+      windowMs: 60_000,
+      limit: 120,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      message: { error: 'Too many requests, please try again later.' },
+      keyGenerator: rateLimitKeyFromRequest,
+    });
+    app.use('/auth/wxyc/station-signup', stationSignupRateLimit);
+  }
 
   // BS#2169 — GET /auth/get-session. auth.definition.ts's `customRules`
   // block disables better-auth's own IP-keyed limiter for this path (it
@@ -516,7 +522,18 @@ if (!isTestEnv) {
 
 app.post('/auth/wxyc/lookup-email', lookupEmailHandler);
 app.post('/auth/wxyc/complete-onboarding', completeOnboardingHandler);
-app.post('/auth/wxyc/station-signup', stationSignupHandler);
+
+// BS#2361 — mounted only when STATION_SIGNUP_ENABLED is on. Not a
+// convenience: with the flag off the path falls through to the better-auth
+// handler's own catch-all below, so a disabled deployment is
+// INDISTINGUISHABLE from one that never shipped the feature. Mounting the
+// route unconditionally and answering `{"error":"Not found","code":"NOT_FOUND"}`
+// advertised the endpoint's existence — and its exact body shape — to anyone
+// probing, which is the opposite of what the 404 was for. The handler keeps
+// its own flag guard for direct callers.
+if (isStationSignupEnabled()) {
+  app.post('/auth/wxyc/station-signup', stationSignupHandler);
+}
 
 // BS#1261 — request-line ban enforcement. Registered before the better-auth
 // handler so this specific path doesn't fall through to better-auth's

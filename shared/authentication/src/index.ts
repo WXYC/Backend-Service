@@ -29,6 +29,12 @@ export { buildTrustedClients } from './oidc-trusted-clients';
 export {
   generateStationPasscode,
   verifyStationPasscode,
+  // The two halves of `verifyStationPasscode` (BS#2361 review). The fused
+  // call cannot serve an endpoint that must run the passcode gate BEFORE its
+  // enumeration-observable existence checks and the use-claim AFTER them;
+  // splitting the phases is what lets apps/auth/station-signup.ts do both.
+  matchStationPasscode,
+  claimStationPasscode,
   revealStationPasscode,
   rotateStationPasscode,
   revokeStationPasscode,
@@ -57,6 +63,7 @@ export type {
   RevealedStationPasscode,
   VerifyStationPasscodeOptions,
   VerifyStationPasscodeResult,
+  MatchStationPasscodeResult,
   SignupCooldownEvaluation,
   ReadRecentSignupAttemptsOptions,
   PruneSignupAttemptsOptions,

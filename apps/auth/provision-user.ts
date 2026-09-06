@@ -180,7 +180,23 @@ export async function provisionUser(input: ProvisionUserInput): Promise<Provisio
     });
   } catch (error) {
     const message = errorMessage(error);
-    if (message.includes('unique') || message.includes('duplicate') || message.includes('already exists')) {
+    // Two distinct producers, and both have to be caught here. The first
+    // three needles are the DATABASE's unique-constraint violation, phrased
+    // differently by driver. `already taken` is better-auth's own: the
+    // `username` plugin's `databaseHooks.user.create.before` hook runs its
+    // duplicate check against the LOWERCASED username on every direct
+    // `internalAdapter.createUser` call (its `pathsWithHttpHookValidation`
+    // skip only applies to real HTTP paths) and throws
+    // `USERNAME_IS_ALREADY_TAKEN` — "Username is already taken. Please try
+    // another." — which matched none of the other needles and so escaped as
+    // an unhandled 500. That is a caller-fixable duplicate, not a server
+    // fault, and station signup reaches it after claiming a passcode use.
+    if (
+      message.includes('unique') ||
+      message.includes('duplicate') ||
+      message.includes('already exists') ||
+      message.includes('already taken')
+    ) {
       throw new ProvisionError(409, `Username "${username}" is already taken`);
     }
     throw error;
