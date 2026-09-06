@@ -350,6 +350,37 @@ describe('station-signup-review downgrade (REAL fns, real PG)', () => {
     expect(user.self_signup_downgraded_at).toEqual(concurrentMarker);
   });
 
+  it('aborts as raced when the marker is stamped but the account was re-promoted back to dj', async () => {
+    const userId = await seedAccount({ daysPending: 31, memberRole: 'dj' });
+
+    const pending = (await queryPendingSelfSignups()).filter((r) => r.userId === userId);
+    const decisions = await planDowngrades(db, pending, new Date());
+    expect(decisions[0].status).toBe('downgraded');
+
+    // The discriminating case: a competing run downgraded the account and
+    // stamped the marker, THEN a manager re-promoted it to `dj`. The marker
+    // says "already handled", the member role says "still eligible", and the
+    // `WHERE role = 'dj'` guard alone cannot tell the two apart -- so without
+    // the in-transaction re-check this stale apply would flip the role a
+    // second time and report a downgrade, which is exactly the re-promotion
+    // the marker exists to protect.
+    await sql`UPDATE auth_user SET self_signup_downgraded_at = now() WHERE id = ${userId}`;
+    const concurrentMarker = (await authUserRowOf(userId)).self_signup_downgraded_at;
+    expect(await memberRoleOf(userId)).toBe('dj');
+
+    const applied = await applyDowngrades(db, decisions, new Date());
+
+    expect(applied.downgraded).toEqual([]);
+    expect(applied.raced.map((r) => r.userId)).toEqual([userId]);
+
+    // The manager's re-promotion survives, and the original marker is not
+    // rewritten with this run's timestamp.
+    expect(await memberRoleOf(userId)).toBe('dj');
+    const user = await authUserRowOf(userId);
+    expect(user.role).toBe(SENTINEL_AUTH_USER_ROLE);
+    expect(user.self_signup_downgraded_at).toEqual(concurrentMarker);
+  });
+
   it('never touches an account outside the self-signup cohort', async () => {
     // A plain account with no self_signup_at is invisible to the query, and
     // therefore to the actuator, no matter how old or what role it holds.
