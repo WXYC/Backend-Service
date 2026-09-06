@@ -272,6 +272,13 @@ jobs:
       - name: 'Type check: station-signup-review'
         run: npm run typecheck --workspace=jobs/station-signup-review
 
+      # Same BS#2009 gap again: this job deletes rows from the station-signup
+      # audit trail. A transpile-only green build silently shipping a type
+      # error is not an acceptable failure mode for a job whose only output
+      # is a DELETE.
+      - name: 'Type check: station-signup-attempt-prune'
+        run: npm run typecheck --workspace=jobs/station-signup-attempt-prune
+
       - name: Lint
         run: npm run lint
 
