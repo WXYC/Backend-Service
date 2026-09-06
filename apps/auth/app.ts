@@ -27,6 +27,7 @@ import { CompleteOnboardingError, completeOnboardingFromRequest } from './comple
 import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
+import { stationSignupFromRequest, StationSignupError } from './station-signup';
 import { createAutoDjUser } from './create-auto-dj-user';
 import { createDefaultUser } from './create-default-user';
 import { syncAdminRoles } from './sync-admin-roles';
@@ -332,6 +333,27 @@ const completeOnboardingHandler = async (req: Request, res: Response) => {
   }
 };
 
+// Passcode-gated self-signup (BS#2361). Public — no session, no JWT. The
+// dedicated rate limiter below (not `rateLimitedPaths`) is what bounds
+// abuse here; see its own comment for why the brute-force tier is wrong for
+// this endpoint's traffic profile.
+const stationSignupHandler = async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const rawIp = req.headers['x-real-ip'];
+    const rawClientIp = Array.isArray(rawIp) ? rawIp[0] : rawIp;
+    const result = await stationSignupFromRequest(body, rawClientIp);
+    return res.status(201).json(result);
+  } catch (error) {
+    if (error instanceof StationSignupError) {
+      return res.status(error.statusCode).json({ error: error.message, code: error.code });
+    }
+    console.error('[STATION SIGNUP] Unexpected error:', error);
+    Sentry.captureException(error, { tags: { subsystem: 'station-signup' } });
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 // Disable rate limiting in test environments to avoid flaky integration tests.
 // This matches the pattern used by the backend's rateLimiting middleware.
 // Positive-list gate (BS#1097): the AUTH_BYPASS / USE_MOCK_SERVICES escape
@@ -400,6 +422,23 @@ if (!isTestEnv) {
     keyGenerator: rateLimitKeyFromRequest,
   });
   app.use('/auth/check-request-ban', checkRequestBanRateLimit);
+
+  // BS#2361 — station signup gets its OWN limiter, not `rateLimitedPaths`'s
+  // 10/15min brute-force tier. Every legitimate caller of this endpoint
+  // shares one IP (the control-room computer), so that tier would let three
+  // DJs fumbling a hand-copied code lock the whole room out for fifteen
+  // minutes with no manager on site. Adopts checkRequestBanRateLimit's shape
+  // verbatim (60s/120): public, cheap per call (~3 indexed reads, one
+  // insert, two AES decrypts), but must not exhaust the DB pool.
+  const stationSignupRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 120,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please try again later.' },
+    keyGenerator: rateLimitKeyFromRequest,
+  });
+  app.use('/auth/wxyc/station-signup', stationSignupRateLimit);
 
   // BS#2169 — GET /auth/get-session. auth.definition.ts's `customRules`
   // block disables better-auth's own IP-keyed limiter for this path (it
@@ -477,6 +516,7 @@ if (!isTestEnv) {
 
 app.post('/auth/wxyc/lookup-email', lookupEmailHandler);
 app.post('/auth/wxyc/complete-onboarding', completeOnboardingHandler);
+app.post('/auth/wxyc/station-signup', stationSignupHandler);
 
 // BS#1261 — request-line ban enforcement. Registered before the better-auth
 // handler so this specific path doesn't fall through to better-auth's

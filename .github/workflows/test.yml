@@ -615,6 +615,16 @@ jobs:
           # this job. See shared/authentication/src/email.ts
           # `isEmailSendingEnabled`.
           EMAIL_ENABLED: 'false'
+          # Station signup (BS#2361): same test-coverage-not-rollout rationale
+          # as FLOWSHEET_TAKEOVER_ENABLED above — ships OFF in production, ON
+          # here so tests/integration/station-signup.spec.js exercises the
+          # routing against real Postgres. STATION_PASSCODE_KEY is ALSO set
+          # (identically) on the "Run Integration Tests" step below, unlike
+          # every other flag on this step: that spec constructs real encrypted
+          # passcode rows in the JEST process via rotateStationPasscode, and
+          # the auth service here must decrypt them with the SAME key.
+          STATION_SIGNUP_ENABLED: 'true'
+          STATION_PASSCODE_KEY: '5a859c11b96205498dda4b3cbe21c1c956d472104ee1d85ca2058cb8535ab28b'
         run: |
           node dev_env/mock-api-server/dist/server.js > /tmp/mock-api.log 2>&1 &
           node apps/auth/dist/app.js > /tmp/auth.log 2>&1 &
@@ -640,6 +650,13 @@ jobs:
           # against dev_env/docker-compose.yml; the local ci:testmock flow
           # is untouched by this change.
           TEST_ADMIN_BAN: 'true'
+          # BS#2361: tests/integration/station-signup.spec.js requires the
+          # compiled station-passcode module directly (bypassing the barrel —
+          # see that spec's own comment) to mint real encrypted passcode rows
+          # via rotateStationPasscode, and must use the IDENTICAL key the
+          # "Start services" step above gave the live auth service, or every
+          # row it mints decrypts to garbage there.
+          STATION_PASSCODE_KEY: '5a859c11b96205498dda4b3cbe21c1c956d472104ee1d85ca2058cb8535ab28b'
         run: npm run ci:test
 
       - name: Show service logs on failure

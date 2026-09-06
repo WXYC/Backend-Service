@@ -150,6 +150,16 @@ services:
       # developer's .env. See shared/authentication/src/email.ts
       # `isEmailSendingEnabled`.
       - EMAIL_ENABLED=false
+      # Station signup (BS#2361). ON so tests/integration/station-signup.spec.js
+      # exercises the routing against real Postgres — a test-coverage decision,
+      # not a rollout; the flag ships OFF in production. STATION_PASSCODE_KEY's
+      # fallback matches the literal fallback tests/integration/station-signup.spec.js
+      # falls back to when the developer's .env doesn't set one, because that
+      # spec constructs real encrypted passcode rows in its own process via the
+      # SAME key and must always agree with whatever value this service was
+      # started with — set STATION_PASSCODE_KEY in .env to override both at once.
+      - STATION_SIGNUP_ENABLED=${STATION_SIGNUP_ENABLED:-true}
+      - STATION_PASSCODE_KEY=${STATION_PASSCODE_KEY:-5a859c11b96205498dda4b3cbe21c1c956d472104ee1d85ca2058cb8535ab28b}
     ports:
       - '${CI_AUTH_PORT:-8083}:8080'
 
@@ -366,6 +376,13 @@ services:
       - DEFAULT_ORG_SLUG=test-org
       - DEFAULT_ORG_NAME=Test Organization
       - APP_ORGANIZATION_ID=test-org-id-0000000000000000001
+      # Station signup (BS#2361). ON so dj-site's Playwright suite can drive
+      # the signup form against this service; the flag ships OFF in
+      # production. Same fixed test key as the ci-profile `auth` service
+      # above — hardcoded, not ${}-substituted, since this block never reads
+      # the developer's .env (see BETTER_AUTH_SECRET/DEFAULT_ORG_SLUG above).
+      - STATION_SIGNUP_ENABLED=true
+      - STATION_PASSCODE_KEY=5a859c11b96205498dda4b3cbe21c1c956d472104ee1d85ca2058cb8535ab28b
     ports:
       - '${E2E_AUTH_PORT:-8084}:8080'
     healthcheck:

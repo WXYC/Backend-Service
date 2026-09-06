@@ -147,6 +147,17 @@ const EXPECTED_ONLY_IN_WORKFLOW = [
   // runs everything unconditionally; profile selection is the gate).
   'RUN_TESTS',
 
+  // Why: station-signup passcode encryption key (BS#2361), read only by the
+  // auth service (shared/authentication/src/station-passcode.ts). Compose
+  // sets it on the `auth` service env block (dev_env/docker-compose.yml),
+  // not `backend` — the backend never touches a passcode row.
+  'STATION_PASSCODE_KEY',
+
+  // Why: station-signup feature flag (BS#2361), read only by the auth
+  // service (apps/auth/station-signup.ts). Compose sets it on the `auth`
+  // service env block, not `backend`.
+  'STATION_SIGNUP_ENABLED',
+
   // Why: backend-host URL for the integration test harness. Read by tests
   // when forming http requests; the backend itself doesn't bind based on
   // it (it binds on PORT).
