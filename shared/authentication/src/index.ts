@@ -8,6 +8,14 @@ export * from './device-authorization';
 // provision path consumes it instead of restating the role set (BS#2282).
 export { grantsAdminFlag } from './admin-flag-sync';
 export { sendAccountSetupEmail } from './email';
+// Station signup (BS#2361) sends this directly rather than going through
+// better-auth's `sendVerificationEmail` endpoint: that endpoint no-ops for an
+// already-`emailVerified` account (see email-verification.mjs's
+// `!user.emailVerified` guard), and provisionUser sets `emailVerified: true`
+// unconditionally for every caller. Calling it here is a deliberate SES
+// deliverability probe, not a verification-state change — see
+// apps/auth/station-signup.ts for the reasoning.
+export { sendVerificationEmailMessage } from './email';
 export { createAndSendAccountSetupInvite } from './account-setup';
 export type { AccountSetupInviteInput, AccountSetupInviteResult } from './account-setup';
 export { accountSetupTokenExpiresInSeconds, ACCOUNT_SETUP_TOKEN_DEFAULT_SECONDS } from './account-setup-token';
@@ -35,6 +43,10 @@ export {
   // #2362's admin surface can match the marker exactly instead of by prose,
   // and tell "a manager revoked this" apart from "a key rotation retired it".
   STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON,
+  // The cooldown hold duration (BS#2361): the endpoint's refusal message
+  // tells a caller how long the station-global gate stays closed, so it
+  // must read the module's own constant rather than restate the number.
+  SIGNUP_COOLDOWN_HOLD_MS,
 } from './station-passcode';
 export type {
   StationPasscodeDecryptFailureReason,

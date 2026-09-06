@@ -260,6 +260,16 @@ jobs:
           # effect.
           STATION_SIGNUP_ALERT_EMAIL: ${{ secrets.STATION_SIGNUP_ALERT_EMAIL }}
           STATION_SIGNUP_DOWNGRADE_ENABLED: ${{ secrets.STATION_SIGNUP_DOWNGRADE_ENABLED }}
+          # STATION_SIGNUP_ENABLED (BS#2361) gates POST /auth/wxyc/station-signup
+          # itself — off (the default), the route 404s. Not sensitive, but
+          # carried through the allowlist for the same "Unsupported secret_name"
+          # reason as DONATE_* above. Strict `=== 'true'` comparison
+          # (apps/auth/station-signup.ts), same lowercase/::add-mask::/rollback
+          # rules as STATION_SIGNUP_DOWNGRADE_ENABLED above. Pass
+          # restart_target=auth — only the auth service reads it, and unlike the
+          # two keys above this one DOES need the restart: the auth service is a
+          # long-running container, not a per-run cron invocation.
+          STATION_SIGNUP_ENABLED: ${{ secrets.STATION_SIGNUP_ENABLED }}
         run: |
           set -euo pipefail
           KEY="${{ inputs.key }}"
@@ -286,6 +296,7 @@ jobs:
             BETTER_AUTH_TRUSTED_ORIGINS) VALUE="$BETTER_AUTH_TRUSTED_ORIGINS" ;;
             STATION_SIGNUP_ALERT_EMAIL) VALUE="$STATION_SIGNUP_ALERT_EMAIL" ;;
             STATION_SIGNUP_DOWNGRADE_ENABLED) VALUE="$STATION_SIGNUP_DOWNGRADE_ENABLED" ;;
+            STATION_SIGNUP_ENABLED) VALUE="$STATION_SIGNUP_ENABLED" ;;
             *)
               echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
               exit 1
