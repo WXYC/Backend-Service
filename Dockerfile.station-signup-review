@@ -28,11 +28,23 @@ RUN npm install --omit=dev && rm -f .npmrc
 COPY --from=builder ./station-signup-review-builder/jobs/station-signup-review/dist ./jobs/station-signup-review/dist
 COPY --from=builder ./station-signup-review-builder/shared/database/dist ./shared/database/dist
 
-# One indexed-column filter over auth_user plus a handful of small
-# per-account UPDATEs against auth_member -- both well inside the API's
-# 5s default statement timeout. Left at the default deliberately: this is a
-# short read-mostly job with no bulk write pass, so it doesn't need the
-# long-timeout / async-commit tuning the paged sweeps carry.
+# Statement timeout left at the API's 5s default, deliberately.
+#
+# NOT because the reads are indexed -- they are not. Neither `self_signup_at`
+# nor `self_signup_reviewed_at` carries an index (migration 0160 indexes only
+# `self_signup_reviewed_by`, the self-referencing FK column, and 0161 adds
+# `self_signup_downgraded_at` unindexed), so the pending-cohort read is a
+# sequential scan of `auth_user`. That is fine at this table's size -- low
+# thousands of rows, one scan per day -- and the reason is the table, not the
+# plan. Revisit the timeout, not just the index, if `auth_user` ever grows an
+# order of magnitude.
+#
+# Everything after that read is per-account and tiny: at most one `auth_member`
+# lookup, one `shows` probe (served by the partial index
+# `shows_open_start_time_idx`), and one short transaction per downgrade, over a
+# cohort that is a handful of rows because self-signup is a rare event. No bulk
+# write pass, so none of the long-timeout / async-commit tuning the paged
+# sweeps carry applies here.
 
 # Identifies the connection in pg_stat_activity during triage.
 ENV DB_APPLICATION_NAME=wxyc-station-signup-review

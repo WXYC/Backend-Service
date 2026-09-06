@@ -53,16 +53,35 @@ export function isEmailSendingEnabled(): boolean {
   return normalized !== 'false' && normalized !== '0';
 }
 
-const DEFAULT_STATION_SIGNUP_RECIPIENT = 'jake@wxyc.org';
+export const DEFAULT_STATION_SIGNUP_RECIPIENT = 'jake@wxyc.org';
+
+export interface StationSignupRecipient {
+  address: string;
+  /** `true` when `STATION_SIGNUP_ALERT_EMAIL` was unset/blank and the built-in default is carrying the digest. */
+  usedFallback: boolean;
+}
 
 /**
  * `STATION_SIGNUP_ALERT_EMAIL`, defaulting to `jake@wxyc.org`. See
  * docs/env-vars.md. Deliberately meant to be pointed at a station alias
  * rather than a personal inbox -- this feature exists for weeks when
  * individuals are away (see the issue's "Recipient" section).
+ *
+ * **Falls back rather than failing loudly, and says so.** Hard-failing on an
+ * unset variable would kill the safety-net digest during exactly the weeks
+ * nobody is watching, which is the one thing this feature exists to prevent
+ * (the epic's availability-over-secrecy constraint). But a silent fallback
+ * quietly becomes the permanent configuration, so the caller announces it
+ * twice: a `warn` log line, and a line in the digest body itself
+ * (`format.ts`'s `RECIPIENT_FALLBACK_NOTICE`), where a human will actually
+ * read it.
  */
-export const resolveStationSignupRecipient = (): string =>
-  process.env.STATION_SIGNUP_ALERT_EMAIL?.trim() || DEFAULT_STATION_SIGNUP_RECIPIENT;
+export const resolveStationSignupRecipient = (): StationSignupRecipient => {
+  const configured = process.env.STATION_SIGNUP_ALERT_EMAIL?.trim();
+  return configured
+    ? { address: configured, usedFallback: false }
+    : { address: DEFAULT_STATION_SIGNUP_RECIPIENT, usedFallback: true };
+};
 
 export interface DigestEmailContent {
   subject: string;

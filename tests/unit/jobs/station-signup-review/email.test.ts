@@ -43,13 +43,23 @@ describe('email.ts', () => {
   });
 
   describe('resolveStationSignupRecipient', () => {
-    it('defaults to jake@wxyc.org when STATION_SIGNUP_ALERT_EMAIL is unset', () => {
-      expect(resolveStationSignupRecipient()).toBe('jake@wxyc.org');
+    it('falls back to jake@wxyc.org when STATION_SIGNUP_ALERT_EMAIL is unset, and FLAGS the fallback', () => {
+      // Falling back rather than throwing is deliberate: hard-failing here
+      // would kill the safety-net digest during exactly the weeks nobody is
+      // watching. The flag is what stops it becoming the silent permanent
+      // configuration -- orchestrate.ts logs a warn on it and format.ts puts
+      // a line in the digest body.
+      expect(resolveStationSignupRecipient()).toEqual({ address: 'jake@wxyc.org', usedFallback: true });
     });
 
-    it('uses STATION_SIGNUP_ALERT_EMAIL when set', () => {
+    it('uses STATION_SIGNUP_ALERT_EMAIL when set, with no fallback flag', () => {
       process.env.STATION_SIGNUP_ALERT_EMAIL = 'station-manager@wxyc.org';
-      expect(resolveStationSignupRecipient()).toBe('station-manager@wxyc.org');
+      expect(resolveStationSignupRecipient()).toEqual({ address: 'station-manager@wxyc.org', usedFallback: false });
+    });
+
+    it('treats a whitespace-only value as unset, and flags the fallback', () => {
+      process.env.STATION_SIGNUP_ALERT_EMAIL = '   ';
+      expect(resolveStationSignupRecipient()).toEqual({ address: 'jake@wxyc.org', usedFallback: true });
     });
   });
 

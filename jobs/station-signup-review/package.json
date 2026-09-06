@@ -2,7 +2,7 @@
   "name": "@wxyc/station-signup-review",
   "cron-schedule": "17 15 * * *",
   "version": "1.0.0",
-  "description": "Daily EC2-cron station-signup review (BS#2364): while any self-signed-up account is pending manager review (self_signup_at IS NOT NULL AND self_signup_reviewed_at IS NULL), email a summary to STATION_SIGNUP_ALERT_EMAIL naming every pending account and its days-pending. Any account pending for more than 30 days has its auth_member.role downgraded from dj to member -- reversible with one roster edit, never deletes or bans, and never touches auth_user.role. Zero pending accounts sends nothing.",
+  "description": "Daily EC2-cron station-signup review (BS#2364): while any self-signed-up account is pending manager review (self_signup_at IS NOT NULL AND self_signup_reviewed_at IS NULL), email a summary to STATION_SIGNUP_ALERT_EMAIL naming every pending account, its days-pending, and this run's per-account downgrade decision. Any account pending 30 days or more has its auth_member.role downgraded from dj to member -- gated by the STATION_SIGNUP_DOWNGRADE_ENABLED kill switch (strict === 'true', defaults OFF), skipped while the DJ holds an open show, and stamped with auth_user.self_signup_downgraded_at so the actuator fires at most once per account and a manager's re-promotion sticks. Reversible with one roster edit, never deletes or bans, and never touches auth_user.role. The digest is sent before the writes but never gated on the send. Zero pending accounts sends nothing.",
   "type": "module",
   "main": "./dist/job.js",
   "scripts": {

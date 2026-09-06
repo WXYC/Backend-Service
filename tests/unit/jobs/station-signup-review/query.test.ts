@@ -24,6 +24,7 @@ const USER_TABLE = {
   djName: 'dj_name',
   selfSignupAt: 'self_signup_at',
   selfSignupReviewedAt: 'self_signup_reviewed_at',
+  selfSignupDowngradedAt: 'self_signup_downgraded_at',
 };
 
 jest.mock('@wxyc/database', () => ({
@@ -54,23 +55,63 @@ describe('queryPendingSelfSignups', () => {
     });
   });
 
+  it('selects self_signup_downgraded_at but deliberately does NOT filter on it', async () => {
+    // This is the DIGEST's cohort, and the same one dj-site's roster review
+    // queue shows. Narrowing it by the downgrade marker would make an account
+    // vanish from the digest the morning after it was downgraded — silently,
+    // and exactly when a human most needs to see it. Only downgrade.ts's
+    // actuator narrows by the marker.
+    mockWhere.mockResolvedValueOnce([]);
+
+    await queryPendingSelfSignups();
+
+    expect(mockSelect).toHaveBeenCalledWith(
+      expect.objectContaining({ selfSignupDowngradedAt: USER_TABLE.selfSignupDowngradedAt })
+    );
+    // Exactly two clauses, neither of them the marker.
+    expect(mockWhere).toHaveBeenCalledWith({
+      and: [{ isNotNull: USER_TABLE.selfSignupAt }, { isNull: USER_TABLE.selfSignupReviewedAt }],
+    });
+  });
+
   it('maps rows to PendingSignupRow, preserving all fields', async () => {
     const selfSignupAt = new Date('2026-07-01T00:00:00Z');
     mockWhere.mockResolvedValueOnce([
-      { userId: 'u1', name: 'Test DJ', email: 'testdj@example.com', djName: 'DJ Test', selfSignupAt },
+      {
+        userId: 'u1',
+        name: 'Test DJ',
+        email: 'testdj@example.com',
+        djName: 'DJ Test',
+        selfSignupAt,
+        selfSignupDowngradedAt: null,
+      },
     ]);
 
     const rows = await queryPendingSelfSignups();
 
     expect(rows).toEqual([
-      { userId: 'u1', name: 'Test DJ', email: 'testdj@example.com', djName: 'DJ Test', selfSignupAt },
+      {
+        userId: 'u1',
+        name: 'Test DJ',
+        email: 'testdj@example.com',
+        djName: 'DJ Test',
+        selfSignupAt,
+        selfSignupDowngradedAt: null,
+      },
     ]);
   });
 
   it('tolerates a null djName', async () => {
     const selfSignupAt = new Date('2026-07-01T00:00:00Z');
     mockWhere.mockResolvedValueOnce([
-      { userId: 'u1', name: 'Test DJ', email: 'testdj@example.com', djName: null, selfSignupAt },
+      {
+        userId: 'u1',
+        name: 'Test DJ',
+        email: 'testdj@example.com',
+        djName: null,
+        selfSignupAt,
+        selfSignupDowngradedAt: null,
+      },
     ]);
 
     const rows = await queryPendingSelfSignups();
@@ -80,7 +121,14 @@ describe('queryPendingSelfSignups', () => {
 
   it('defensively drops a row whose selfSignupAt somehow came back null despite the WHERE clause', async () => {
     mockWhere.mockResolvedValueOnce([
-      { userId: 'u1', name: 'Test DJ', email: 'testdj@example.com', djName: null, selfSignupAt: null },
+      {
+        userId: 'u1',
+        name: 'Test DJ',
+        email: 'testdj@example.com',
+        djName: null,
+        selfSignupAt: null,
+        selfSignupDowngradedAt: null,
+      },
     ]);
 
     const rows = await queryPendingSelfSignups();
