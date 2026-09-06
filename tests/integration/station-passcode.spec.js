@@ -47,10 +47,20 @@ const {
   revokeStationPasscode,
   verifyStationPasscode,
   evaluateSignupCooldown,
+  computeSignupCooldownState,
   clearSignupCooldown,
   encryptStationPasscodeValue,
+  stationPasscodeKeyId,
   StationPasscodeDecryptionError,
+  STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON,
+  SIGNUP_COOLDOWN_TRIGGER_ROW_LIMIT,
+  SIGNUP_COOLDOWN_THRESHOLD,
 } = require('../../shared/authentication/dist/station-passcode.js');
+
+// The key this spec's process starts with. Captured so the dual-key and
+// auto-revoke cases can swap `STATION_PASSCODE_KEY` for a test and put it
+// back — the module resolves both key vars per call, never at import.
+const CURRENT_KEY_HEX = process.env.STATION_PASSCODE_KEY;
 
 const { getTestDb } = require('../utils/db');
 
@@ -171,21 +181,194 @@ describe('station-passcode lifecycle (BS#2359, real Postgres)', () => {
     });
   });
 
+  /** Insert an ACTIVE passcode row nothing in the key ring can decrypt. */
+  async function insertUndecryptableActiveRow(id, plaintext = 'WXYC2026', ttlMs = 60_000) {
+    const ciphertext = encryptStationPasscodeValue(plaintext, randomBytes(32));
+    await sql`
+      INSERT INTO station_passcode (id, code_encrypted, expires_at, max_uses)
+      VALUES (${id}, ${ciphertext}, ${new Date(Date.now() + ttlMs)}, 25)
+    `;
+    return id;
+  }
+
   describe('active-row decrypt failure fails closed', () => {
     it('throws rather than silently reporting no match', async () => {
-      const now = new Date();
-      const wrongKeyCiphertext = encryptStationPasscodeValue('WXYC2026', randomBytes(32));
-      const id = `test-decrypt-fail-${Date.now()}`;
-      await sql`
-        INSERT INTO station_passcode (id, code_encrypted, expires_at, max_uses)
-        VALUES (${id}, ${wrongKeyCiphertext}, ${new Date(now.getTime() + 60_000)}, 25)
-      `;
+      const id = await insertUndecryptableActiveRow(`test-decrypt-fail-${Date.now()}`);
 
       await expect(verifyStationPasscode('WXYC2026')).rejects.toBeInstanceOf(StationPasscodeDecryptionError);
 
       // The broken row must not have been mutated by the failed attempt.
       const row = await sql`SELECT use_count FROM station_passcode WHERE id = ${id}`;
       expect(row[0].use_count).toBe(0);
+    });
+
+    it('records a passcode_unverifiable attempt row before throwing', async () => {
+      // BS#2359 review: previously the throw happened before any
+      // insertSignupAttempt, so a gate that was down for EVERY request left
+      // no trace at all in the log #2362's status endpoint and #2364's
+      // digest both read.
+      await insertUndecryptableActiveRow(`test-decrypt-trace-${Date.now()}`);
+
+      await expect(verifyStationPasscode('WXYC2026')).rejects.toBeInstanceOf(StationPasscodeDecryptionError);
+
+      const attempts = await sql`SELECT outcome, passcode_id FROM station_signup_attempt`;
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0].outcome).toBe('passcode_unverifiable');
+      // Always NULL on this token: the plaintext behind an undecryptable row
+      // is unknowable, so attributing the attempt to a row would be a guess.
+      expect(attempts[0].passcode_id).toBeNull();
+    });
+
+    it('does not let that unverifiable row feed the refusal count', async () => {
+      // A broken gate must never also push the station into cooldown — that
+      // would stack an outage on top of an outage.
+      await insertUndecryptableActiveRow(`test-decrypt-refusal-${Date.now()}`);
+      await expect(verifyStationPasscode('WXYC2026')).rejects.toBeInstanceOf(StationPasscodeDecryptionError);
+
+      const evaluation = await evaluateSignupCooldown();
+      expect(evaluation.noMatchFailureCount).toBe(0);
+      expect(evaluation.allFailureCount).toBe(1);
+      expect(evaluation.inCooldown).toBe(false);
+    });
+  });
+
+  describe('dual-key decryption across a key rotation', () => {
+    afterEach(() => {
+      process.env.STATION_PASSCODE_KEY = CURRENT_KEY_HEX;
+      delete process.env.STATION_PASSCODE_KEY_PREVIOUS;
+    });
+
+    it('verifies a code minted under the PREVIOUS key after the current key changes', async () => {
+      const { code } = await rotateStationPasscode();
+
+      // Step 1 + 2 of the runbook: previous <- old key, current <- new key.
+      process.env.STATION_PASSCODE_KEY_PREVIOUS = CURRENT_KEY_HEX;
+      process.env.STATION_PASSCODE_KEY = randomBytes(32).toString('hex');
+
+      const result = await verifyStationPasscode(code);
+      expect(result.ok).toBe(true);
+      expect(result.cooldown).toBe(false);
+
+      const attempts = await sql`SELECT outcome FROM station_signup_attempt`;
+      expect(attempts.map((a) => a.outcome)).toEqual(['passcode_ok']);
+    });
+
+    it('fails closed on that same row when the previous key is NOT set', async () => {
+      // The pre-dual-key behavior, and the whole reason the documented
+      // one-step rotation bricked the gate.
+      const { code } = await rotateStationPasscode();
+      process.env.STATION_PASSCODE_KEY = randomBytes(32).toString('hex');
+
+      await expect(verifyStationPasscode(code)).rejects.toBeInstanceOf(StationPasscodeDecryptionError);
+    });
+
+    it('encrypts new rows under the CURRENT key only, so the old key drains out', async () => {
+      process.env.STATION_PASSCODE_KEY_PREVIOUS = CURRENT_KEY_HEX;
+      const newKeyHex = randomBytes(32).toString('hex');
+      process.env.STATION_PASSCODE_KEY = newKeyHex;
+
+      const { id } = await rotateStationPasscode();
+      const rows = await sql`SELECT code_encrypted FROM station_passcode WHERE id = ${id}`;
+      const keyId = rows[0].code_encrypted.split(':')[0];
+
+      expect(keyId).toBe(stationPasscodeKeyId(Buffer.from(newKeyHex, 'hex')));
+      expect(keyId).not.toBe(stationPasscodeKeyId(Buffer.from(CURRENT_KEY_HEX, 'hex')));
+    });
+  });
+
+  describe('rotation auto-revokes undecryptable active rows', () => {
+    it('revokes the poisoned row, mints a new code, and reports what it revoked', async () => {
+      const id = await insertUndecryptableActiveRow(`test-autorevoke-${Date.now()}`);
+
+      const rotated = await rotateStationPasscode();
+      expect(rotated.autoRevokedPasscodeIds).toEqual([id]);
+
+      const [row] = await sql`SELECT revoked_at, revoked_reason FROM station_passcode WHERE id = ${id}`;
+      expect(row.revoked_at).not.toBeNull();
+      expect(row.revoked_reason).toBe(STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON);
+
+      // Exactly one active row remains — the one just minted — and the gate
+      // works again on it.
+      expect(await activeCount()).toBe(1);
+      expect((await verifyStationPasscode(rotated.code)).ok).toBe(true);
+    });
+
+    it('unwedges the two-row cap that two poisoned rows would otherwise hold shut', async () => {
+      // The CAP-EXCEEDED brick shape: both rows are "active" by the SQL
+      // predicate, so rotation itself threw and there was no way to mint a
+      // working code without raw SQL on prod.
+      const first = await insertUndecryptableActiveRow(`test-cap-a-${Date.now()}`);
+      const second = await insertUndecryptableActiveRow(`test-cap-b-${Date.now()}`);
+      expect(await activeCount()).toBe(2);
+
+      const rotated = await rotateStationPasscode();
+      expect(rotated.autoRevokedPasscodeIds.sort()).toEqual([first, second].sort());
+      expect(await activeCount()).toBe(1);
+    });
+
+    it('leaves a decryptable active row alone', async () => {
+      const { id } = await rotateStationPasscode();
+      const rotated = await rotateStationPasscode();
+
+      expect(rotated.autoRevokedPasscodeIds).toEqual([]);
+      const [row] = await sql`SELECT revoked_at FROM station_passcode WHERE id = ${id}`;
+      expect(row.revoked_at).toBeNull();
+      expect(await activeCount()).toBe(2);
+    });
+
+    it('does not revoke a row the PREVIOUS key can still open', async () => {
+      // Auto-revoke is a last resort, not the rotation mechanism. Follow the
+      // runbook and nothing gets destroyed.
+      const { id, code } = await rotateStationPasscode();
+      process.env.STATION_PASSCODE_KEY_PREVIOUS = CURRENT_KEY_HEX;
+      process.env.STATION_PASSCODE_KEY = randomBytes(32).toString('hex');
+      try {
+        const rotated = await rotateStationPasscode();
+        expect(rotated.autoRevokedPasscodeIds).toEqual([]);
+        const [row] = await sql`SELECT revoked_at FROM station_passcode WHERE id = ${id}`;
+        expect(row.revoked_at).toBeNull();
+        expect((await verifyStationPasscode(code)).ok).toBe(true);
+      } finally {
+        process.env.STATION_PASSCODE_KEY = CURRENT_KEY_HEX;
+        delete process.env.STATION_PASSCODE_KEY_PREVIOUS;
+      }
+    });
+  });
+
+  describe('passcode_unverifiable classification', () => {
+    it('classifies a no-match against a skipped in-horizon inactive row as unverifiable', async () => {
+      // Inactive (already expired) and encrypted under a key nobody holds:
+      // classification must skip it, and the skip must not fall through to
+      // passcode_fail, the one token that feeds refusal.
+      const id = `test-unverifiable-${Date.now()}`;
+      await sql`
+        INSERT INTO station_passcode (id, code_encrypted, expires_at, max_uses)
+        VALUES (${id}, ${encryptStationPasscodeValue('WXYC2026', randomBytes(32))}, ${new Date(Date.now() - 60_000)}, 25)
+      `;
+      expect(await activeCount()).toBe(0);
+
+      const result = await verifyStationPasscode('ZZZZZZZZ');
+      expect(result.ok).toBe(false);
+      expect(result.cooldown).toBe(false);
+
+      const attempts = await sql`SELECT outcome, passcode_id FROM station_signup_attempt`;
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0].outcome).toBe('passcode_unverifiable');
+      expect(attempts[0].passcode_id).toBeNull();
+
+      const evaluation = await evaluateSignupCooldown();
+      expect(evaluation.noMatchFailureCount).toBe(0);
+      expect(evaluation.allFailureCount).toBe(1);
+    });
+
+    it('still returns passcode_fail when every in-horizon inactive row decrypted cleanly', async () => {
+      const { id } = await rotateStationPasscode();
+      await revokeStationPasscode(id, { revokedReason: 'test revoke' });
+
+      await verifyStationPasscode('ZZZZZZZZ');
+
+      const attempts = await sql`SELECT outcome FROM station_signup_attempt`;
+      expect(attempts.map((a) => a.outcome)).toEqual(['passcode_fail']);
     });
   });
 
@@ -258,6 +441,97 @@ describe('station-passcode lifecycle (BS#2359, real Postgres)', () => {
       const evaluationAfterClear = await evaluateSignupCooldown(new Date(now.getTime() + 2000));
       expect(evaluationAfterClear.noMatchFailureCount).toBe(0);
       expect(evaluationAfterClear.inCooldown).toBe(false);
+    });
+  });
+
+  describe('cooldown counts are computed in SQL, not materialized in Node', () => {
+    /** Bulk-seed `count` attempt rows of one outcome, 1ms apart, ending at `endTime`. */
+    async function seedAttempts(outcome, count, endTime) {
+      // Explicit casts throughout: postgres.js sends bare parameters as
+      // unknown-typed, and `$n || g` / `generate_series(1, $n)` are both
+      // ambiguous without them.
+      await sql`
+        INSERT INTO station_signup_attempt (id, attempted_at, outcome)
+        SELECT ${`seed-${outcome}-${endTime.getTime()}-`}::text || g::text,
+               ${endTime}::timestamptz - ((${count}::int - g) * interval '1 millisecond'),
+               ${outcome}::varchar(24)
+        FROM generate_series(1, ${count}::int) AS g
+      `;
+    }
+
+    /**
+     * The whole point of the aggregate query. `passcode_exhausted` and
+     * `passcode_unverifiable` are refusal-exempt BY DESIGN, so they are
+     * unbounded — anyone looping a dead code grows the set without ever
+     * engaging the cooldown that would stop them. If the counts came from a
+     * materialized row fetch capped at SIGNUP_COOLDOWN_TRIGGER_ROW_LIMIT,
+     * this would come back clipped at 500.
+     */
+    it('returns an exact allFailureCount well past the trigger-fetch LIMIT', async () => {
+      const now = new Date();
+      const overLimit = SIGNUP_COOLDOWN_TRIGGER_ROW_LIMIT + 100;
+      await seedAttempts('passcode_exhausted', overLimit, now);
+
+      const evaluation = await evaluateSignupCooldown(new Date(now.getTime() + 1000));
+      expect(evaluation.allFailureCount).toBe(overLimit);
+      expect(evaluation.noMatchFailureCount).toBe(0);
+      // Refusal-exempt: a pile this size must still not close the gate.
+      expect(evaluation.inCooldown).toBe(false);
+    });
+
+    it('returns an exact noMatchFailureCount past the LIMIT, and still triggers', async () => {
+      // The LIMIT cannot cause a false negative: the retained rows are the
+      // newest, and 500 >> the 20-failure threshold.
+      const now = new Date();
+      const overLimit = SIGNUP_COOLDOWN_TRIGGER_ROW_LIMIT + 100;
+      await seedAttempts('passcode_fail', overLimit, now);
+
+      const evaluation = await evaluateSignupCooldown(new Date(now.getTime() + 1000));
+      expect(evaluation.noMatchFailureCount).toBe(overLimit);
+      expect(evaluation.allFailureCount).toBe(overLimit);
+      expect(evaluation.inCooldown).toBe(true);
+    });
+
+    it('splits the two counts exactly as computeSignupCooldownState does', async () => {
+      // computeSignupCooldownState stays the executable specification of what
+      // the SQL must produce; this pins the two together.
+      const now = new Date();
+      await seedAttempts('passcode_fail', SIGNUP_COOLDOWN_THRESHOLD - 5, now);
+      await seedAttempts('passcode_expired', 4, now);
+      await seedAttempts('passcode_revoked', 3, now);
+      await seedAttempts('passcode_exhausted', 2, now);
+      await seedAttempts('passcode_unverifiable', 6, now);
+      // Non-failure outcomes must be invisible to both counts.
+      await seedAttempts('cooldown_refused', 7, now);
+      await seedAttempts('passcode_ok', 5, now);
+
+      const at = new Date(now.getTime() + 1000);
+      const rows = await sql`
+        SELECT outcome, attempted_at FROM station_signup_attempt
+        WHERE outcome IN ('passcode_fail','passcode_expired','passcode_revoked','passcode_exhausted','passcode_unverifiable')
+      `;
+      const expected = computeSignupCooldownState(
+        rows.map((r) => ({ outcome: r.outcome, attemptedAt: new Date(r.attempted_at) })),
+        at
+      );
+
+      const evaluation = await evaluateSignupCooldown(at);
+      expect(evaluation).toEqual(expected);
+      expect(evaluation.noMatchFailureCount).toBe(SIGNUP_COOLDOWN_THRESHOLD - 5);
+      expect(evaluation.allFailureCount).toBe(SIGNUP_COOLDOWN_THRESHOLD - 5 + 4 + 3 + 2 + 6);
+      expect(evaluation.inCooldown).toBe(false);
+    });
+
+    it('scopes the counts to the 10-minute window, not the full trigger lookback', async () => {
+      const now = new Date();
+      await seedAttempts('passcode_fail', 3, now);
+      // Older than the count window but inside the window+hold lookback the
+      // trigger check reads.
+      await seedAttempts('passcode_fail', 4, new Date(now.getTime() - 11 * 60 * 1000));
+
+      const evaluation = await evaluateSignupCooldown(new Date(now.getTime() + 1000));
+      expect(evaluation.noMatchFailureCount).toBe(3);
+      expect(evaluation.allFailureCount).toBe(3);
     });
   });
 });
