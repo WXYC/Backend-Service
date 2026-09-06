@@ -16,7 +16,8 @@
  * - ORDERING, which is the whole security argument for this file. The
  *   handler runs, strictly in this order: (0) the two pure env preconditions
  *   (feature flag, `DEFAULT_ORG_SLUG`); (1) every shape check; (2) the
- *   passcode MATCH; (3) the email/username existence checks; (4) the
+ *   passcode MATCH; (3) the email/username existence checks and the org
+ *   row's; (4) the
  *   passcode CLAIM; (5) `provisionUser`. Two properties fall out, and the
  *   endpoint owes both at once:
  *
@@ -118,6 +119,14 @@ const MAX_EMAIL_LENGTH = 255;
 const MAX_REAL_NAME_LENGTH = 255;
 const MAX_DJ_NAME_LENGTH = 255;
 
+// Generously above any real code's length (the sticky note holds a short
+// string) while keeping the bound in THIS file's shape phase rather than in
+// express.json()'s 100 kB body default. The match hashes both sides before
+// comparing, so an over-length value costs hashing work, never a timing or
+// length oracle — this cap is symmetry with the four fields above, not a
+// security control.
+const MAX_PASSCODE_LENGTH = 128;
+
 /** Strict `=== 'true'` gate, same convention as DONATE_ENABLED / FLOWSHEET_TAKEOVER_ENABLED. Ships OFF. */
 export function isStationSignupEnabled(): boolean {
   return process.env.STATION_SIGNUP_ENABLED === 'true';
@@ -172,6 +181,29 @@ async function assertEmailAndUsernameAvailable(email: string, username: string):
   });
   if (existingByUsername) {
     throw new StationSignupError(409, `Username "${username}" is already taken`, 'USERNAME_TAKEN');
+  }
+}
+
+/**
+ * Step (0) checks that `DEFAULT_ORG_SLUG` is SET; whether it names a real
+ * `organization` row is only discoverable in the database. Discovering it
+ * inside `provisionUser` — after the claim — burns one use per attempt on a
+ * host whose slug is wrong (typo, un-seeded org, renamed slug): 25 requests
+ * brick the sticky-note code, the lockout epic #2365 forbids outright. One
+ * indexed read here keeps that failure loud and free — a generic 500 with no
+ * use claimed. Post-gate and driven by config alone, it varies with nothing
+ * in the request, so it leaks nothing.
+ */
+async function assertOrganizationExists(organizationSlug: string): Promise<void> {
+  const context = await auth.$context;
+  const org = await context.adapter.findOne<{ id: string }>({
+    model: 'organization',
+    where: [{ field: 'slug', value: organizationSlug }],
+  });
+  if (!org) {
+    throw new Error(
+      `DEFAULT_ORG_SLUG "${organizationSlug}" names no organization; cannot provision a station-signup account`
+    );
   }
 }
 
@@ -245,14 +277,16 @@ export async function stationSignupFromRequest(
   // burn one use per attempt and brick the code inside 25 requests — the
   // control-room lockout epic #2365 forbids outright — while every caller
   // got a 500 anyway. Fail loudly rather than provision into a missing org;
-  // mirrors create-auto-dj-user.ts's guard.
+  // mirrors create-auto-dj-user.ts's guard. This covers the variable being
+  // SET; whether it names a real row is checked at step (3), still ahead of
+  // the claim — see assertOrganizationExists.
   const organizationSlug = process.env.DEFAULT_ORG_SLUG;
   if (!organizationSlug) {
     throw new Error('DEFAULT_ORG_SLUG is not set; cannot provision a station-signup account');
   }
 
   // ---- (1) Shape. All of it, before the passcode is touched. ----
-  const passcode = requireNonEmptyString(body.passcode, 'passcode');
+  const passcode = requireMaxLength(requireNonEmptyString(body.passcode, 'passcode'), MAX_PASSCODE_LENGTH, 'passcode');
   const rawUsername = requireNonEmptyString(body.username, 'username');
   const email = requireMaxLength(requireNonEmptyString(body.email, 'email'), MAX_EMAIL_LENGTH, 'email');
   const password = requireNonEmptyString(body.password, 'password');
@@ -303,6 +337,11 @@ export async function stationSignupFromRequest(
 
   // ---- (3) Existence checks. Behind the gate, ahead of the claim. ----
   await assertEmailAndUsernameAvailable(email, username);
+
+  // Last check before anything is consumed: the org row the provision step
+  // will resolve. See assertOrganizationExists for why this cannot wait
+  // until after the claim.
+  await assertOrganizationExists(organizationSlug);
 
   // ---- (4) Claim exactly one use. ----
   const claim = await claimStationPasscode(matched.passcodeId, { rawClientIp });
