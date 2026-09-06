@@ -87,10 +87,12 @@ const ALLOW_LIST = [
   'apps/auth/create-default-user.ts',
   'apps/auth/complete-onboarding.ts',
   'apps/auth/create-auto-dj-user.ts',
-  // Station signup (BS#2358/#2360). Lands ahead of the endpoint file itself,
-  // which destructures `realName` from the request body — the exact flagged
-  // shape. Not yet written as of this entry; see docs/pii.md's Enforcement
-  // section.
+  // Station signup (BS#2361, blocked by BS#2360/#2359). Lands ahead of the
+  // endpoint file itself, which will construct `provisionUser({ realName,
+  // ... })` — an object-literal property key, the exact flagged shape (NOT
+  // the `const { realName } = ...` destructuring this rule doesn't cover;
+  // see Known Gap #1 above). Not yet written as of this entry; see
+  // docs/pii.md's Enforcement section.
   'apps/auth/station-signup.ts',
   'shared/authentication/src/auth.definition.ts',
   // Until the 2026-09-07 tubafrenzy turndown: the legacy mirror forwards
