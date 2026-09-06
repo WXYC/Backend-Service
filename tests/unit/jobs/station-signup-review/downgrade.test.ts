@@ -32,8 +32,10 @@ const mockUpdate = jest.fn<(table: unknown) => unknown>();
 let selectResults: Array<unknown[] | Error> = [];
 const mockLimit = jest.fn(() => {
   const next = selectResults.shift() ?? [];
-  if (next instanceof Error) return Promise.reject(next);
-  return Promise.resolve(next);
+  const rows: Promise<unknown[]> = next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+  // The guard SELECTs await `.limit()` directly; the apply re-check chains
+  // `.for('update')` onto it. Both resolve to the same queued result.
+  return Object.assign(rows, { for: () => rows });
 });
 const mockSelectWhere = jest.fn<(clause: unknown) => unknown>().mockReturnValue({ limit: mockLimit });
 const mockFrom = jest.fn<(table: unknown) => unknown>().mockReturnValue({ where: mockSelectWhere });
@@ -333,8 +335,7 @@ describe('applyDowngrades', () => {
     const result = await applyDowngrades(fakeDb as never, [plannedFor(row())], OVERDUE_NOW);
 
     expect(result.raced).toEqual([expect.objectContaining({ userId: 'u1' })]);
-    expect(mockUpdate).not.toHaveBeenCalledWith(MEMBER_TABLE);
-    expect(mockUpdate).not.toHaveBeenCalledWith(USER_TABLE);
+    expect(mockUpdate).not.toHaveBeenCalled();
   });
 
   it('writes ONLY auth_member.role and auth_user.self_signup_downgraded_at -- never auth_user.role', async () => {

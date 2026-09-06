@@ -274,6 +274,26 @@ export interface AppliedDowngrades {
  * columns live on `auth_user`, a different table from the one the role flip
  * writes.
  *
+ * **Concurrency.** `db.transaction()` runs at READ COMMITTED, so a bare
+ * re-select would move the check-then-act window rather than close it: a
+ * review committing between the re-select and the `auth_member` UPDATE is
+ * invisible to both writes, because the UPDATE's own guard is `role = 'dj'`
+ * and the marker stamp's is `self_signup_downgraded_at IS NULL`, and a review
+ * touches neither column -- the result would be the reviewed-AND-downgraded
+ * terminal state this re-check exists to prevent. So the re-select takes
+ * `FOR UPDATE` on the `auth_user` row, which is what makes the check and the
+ * act atomic: a concurrent writer of `self_signup_reviewed_at` either waits
+ * on the lock or holds it first, and when it holds it first READ COMMITTED's
+ * EvalPlanQual recheck re-applies the `IS NULL` predicates against the newly
+ * committed row version once the lock is granted, so the row filters out and
+ * this transaction aborts into `raced`.
+ *
+ * **Lock order.** This transaction locks `auth_user`, then writes
+ * `auth_member`. Any future writer that touches both tables in one
+ * transaction -- in particular the BS#2362 approve endpoint, which will be
+ * the first writer of `self_signup_reviewed_at` -- must take them in the same
+ * `auth_user`-first order, or the two deadlock.
+ *
  * The role flip and the marker stamp go in ONE transaction. Half of this
  * pair is a defect either way: the role without the marker re-fires on the
  * next re-promotion (the bug BS#2364 exists to fix), and the marker without
@@ -310,7 +330,8 @@ export const applyDowngrades = async (
           .select({ id: user.id })
           .from(user)
           .where(and(eq(user.id, row.userId), isNull(user.selfSignupReviewedAt), isNull(user.selfSignupDowngradedAt)))
-          .limit(1);
+          .limit(1)
+          .for('update');
 
         if (stillPending.length === 0) return false;
 
