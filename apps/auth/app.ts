@@ -19,11 +19,12 @@ import {
   rotateStationPasscode,
   StationPasscodeCapExceededError,
   StationPasscodeDecryptionError,
+  StationPasscodeKeyUnsetError,
 } from '@wxyc/authentication';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import cors from 'cors';
 import express from 'express';
-import type { Request, Response } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { rateLimitKeyFromRequest, sessionRateLimitKeyFromRequest } from './rate-limit-key';
 import { makeHandler as makeRateLimitMetricsHandler, flushRateLimitMetrics } from './auth-rate-limit-metrics';
@@ -313,44 +314,78 @@ app.post('/auth/admin/provision-user', async (req, res) => {
 // stationManager-only gate. `requirePermissions` is the backend app's
 // middleware and is not available here.
 //
-// Registered before the better-auth handler, like every other /auth/admin
-// route in this file, so they intercept rather than fall through to it.
+// They share one path prefix and are mounted as ONE express.Router with the
+// gate on `router.use`, rather than six flat `app.post`s each wrapped in it.
+// The prefix is registered before the better-auth handler, like every other
+// /auth/admin route in this file, so it intercepts rather than falls through.
+
+/** Common mount point for all six. Every path below is this plus one segment. */
+const STATION_SIGNUP_ADMIN_PREFIX = '/auth/admin/station-signup';
+
+/** `res.locals` key the gate writes the acting manager's id under. */
+const STATION_SIGNUP_ACTOR_LOCAL = 'stationSignupActorUserId';
 
 /**
- * Resolve the acting manager, or write the 401/403 and return null. The
- * caller must return immediately on null.
+ * THE GATE. Mounted ONCE with `router.use` at the prefix above, so it runs
+ * ahead of every handler on this router — including one a future change
+ * forgets to think about. It used to be a line inside the per-route wrapper,
+ * which made "no route can be added without the gate" a convention held by
+ * whoever registered the next route; mounting it on the router makes it
+ * structural (BS#2362 review).
  *
- * The returned id is the ONLY source of `actorUserId` for the reveal audit
+ * The id it stashes is the ONLY source of `actorUserId` for the reveal audit
  * row and of `reviewedBy` on approve. Neither is ever read from the request
  * body: an audit trail a caller can forge names the wrong person, and
  * WXYC/dj-site#1358's any-manager attribution residual is exactly what
  * deriving it server-side retires.
+ *
+ * `session.user.role !== 'admin'` -> 403. See station-signup-admin.ts's
+ * module header for why this is deliberately not a stationManager-only gate.
  */
-const resolveStationSignupActor = async (req: Request, res: Response): Promise<string | null> => {
-  const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
-  if (!session?.user) {
-    res.status(401).json({ error: 'Unauthorized' });
-    return null;
+const stationSignupAdminGate = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+    if (!session?.user) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    if ((session.user as { role?: string }).role !== 'admin') {
+      res.status(403).json({ error: 'Forbidden: admin role required' });
+      return;
+    }
+    res.locals[STATION_SIGNUP_ACTOR_LOCAL] = session.user.id;
+    next();
+  } catch (error) {
+    // A session lookup that throws must not fall through to the routes with
+    // no actor resolved. Same 500 shape the operation wrapper below writes.
+    console.error('[STATION SIGNUP ADMIN] gate: session lookup failed', error);
+    Sentry.captureException(error, { tags: { subsystem: 'station-signup-gate' } });
+    res.status(500).json({ error: 'Internal server error' });
   }
-  if ((session.user as { role?: string }).role !== 'admin') {
-    res.status(403).json({ error: 'Forbidden: admin role required' });
-    return null;
-  }
-  return session.user.id;
 };
 
 /**
- * Wrap one manager operation: gate, run, and map the module's typed failures
- * onto status codes. Every station-signup route below is registered through
- * this, so no route can be added without the gate.
+ * The acting manager the gate resolved. Never optional in practice — the
+ * router cannot reach a handler without running `stationSignupAdminGate`
+ * first — so a miss means the gate was unmounted, and this fails closed with
+ * the same 401 an anonymous caller gets rather than running the operation
+ * with an undefined actor.
+ */
+const stationSignupActorOf = (res: Response): string => {
+  const actorUserId: unknown = res.locals[STATION_SIGNUP_ACTOR_LOCAL];
+  if (typeof actorUserId !== 'string') throw new StationSignupAdminError('Unauthorized', 401);
+  return actorUserId;
+};
+
+/**
+ * Wrap one manager operation: run it, and map the module's typed failures
+ * onto status codes. The gate is the router's, not this wrapper's.
  */
 const stationSignupAdminRoute =
   (subsystem: string, handler: (actorUserId: string, req: Request, res: Response) => Promise<unknown>) =>
   async (req: Request, res: Response) => {
     try {
-      const actorUserId = await resolveStationSignupActor(req, res);
-      if (actorUserId === null) return;
-      const body = await handler(actorUserId, req, res);
+      const body = await handler(stationSignupActorOf(res), req, res);
       if (res.headersSent) return;
       return res.json(body);
     } catch (error) {
@@ -361,6 +396,22 @@ const stationSignupAdminRoute =
         // Not a server fault: two codes are already live and the room is
         // presumably still using at least one of them. Revoke one first.
         return res.status(409).json({ error: error.message, code: 'passcode_cap_exceeded' });
+      }
+      if (error instanceof StationPasscodeKeyUnsetError) {
+        // Unconfigured, not corrupt. Mirrors the decrypt branch below but
+        // names the variable that is actually missing: with no
+        // STATION_PASSCODE_KEY, reveal previously blamed
+        // STATION_PASSCODE_KEY_PREVIOUS (the decrypt path defaults an
+        // untyped throw to `corrupt`) or answered `200 {passcodes: []}` on an
+        // empty table, and rotate fell through to a code-less 500.
+        console.error(`[STATION SIGNUP ADMIN] ${subsystem}: STATION_PASSCODE_KEY is not set`, error);
+        Sentry.captureException(error, { tags: { subsystem: `station-signup-${subsystem}` } });
+        return res.status(503).json({
+          error:
+            'STATION_PASSCODE_KEY is not set on the auth service, so station passcodes can be neither revealed ' +
+            'nor minted. Set it on the host and restart the service.',
+          code: 'passcode_key_unset',
+        });
       }
       if (error instanceof StationPasscodeDecryptionError) {
         // The gate is down for the same reason every signup attempt is
@@ -382,14 +433,27 @@ const stationSignupAdminRoute =
     }
   };
 
+/**
+ * The six operations, on ONE router mounted at STATION_SIGNUP_ADMIN_PREFIX.
+ *
+ * The paths are unchanged — `${prefix}/reveal` and so on — but the gate is
+ * now the router's `use`, so a seventh route added here is gated by
+ * construction rather than by remembering to wrap it (BS#2362 review). The
+ * mount is also a prefix match on segment boundaries, so anything under
+ * `/auth/admin/station-signup/` that this router does not answer meets the
+ * gate before falling through to the better-auth handler below.
+ */
+const stationSignupAdminRouter = express.Router();
+stationSignupAdminRouter.use(stationSignupAdminGate);
+
 // Current plaintext code(s), for a manager to read to a stranded DJ by phone.
 // POST, not GET: readable storage removed show-once's structural guarantee
 // that only whoever rotated ever saw the code, so every reveal WRITES a
 // `passcode_revealed` attempt row carrying the acting manager's id — that
 // audit log is what replaces the guarantee, and it is what makes "who could
 // have seen this?" answerable after a suspected leak.
-app.post(
-  '/auth/admin/station-signup/reveal',
+stationSignupAdminRouter.post(
+  '/reveal',
   stationSignupAdminRoute('reveal', async (actorUserId) => ({
     passcodes: await revealStationPasscode(actorUserId),
   }))
@@ -397,14 +461,14 @@ app.post(
 
 // Mint a new code and return its plaintext once. Refuses beyond two active
 // rows (409) rather than silently retiring a note the room is still using.
-app.post(
-  '/auth/admin/station-signup/rotate',
+stationSignupAdminRouter.post(
+  '/rotate',
   stationSignupAdminRoute('rotate', async (actorUserId) => await rotateStationPasscode({ createdBy: actorUserId }))
 );
 
 // Manual kill switch for one code.
-app.post(
-  '/auth/admin/station-signup/revoke',
+stationSignupAdminRouter.post(
+  '/revoke',
   stationSignupAdminRoute('revoke', async (_actorUserId, req) => {
     const passcodeId = (req.body as { passcodeId?: unknown } | undefined)?.passcodeId;
     if (!passcodeId || typeof passcodeId !== 'string') {
@@ -426,8 +490,8 @@ app.post(
 // hold the endpoint in cooldown with nothing in the product able to clear it,
 // and "wait for a manager who is not on site" becomes the failure mode; with
 // it, one phone call.
-app.post(
-  '/auth/admin/station-signup/clear-cooldown',
+stationSignupAdminRouter.post(
+  '/clear-cooldown',
   stationSignupAdminRoute('clear-cooldown', async (actorUserId) => {
     await clearSignupCooldown(actorUserId);
     return { cleared: true, cooldown: await evaluateSignupCooldown() };
@@ -435,8 +499,8 @@ app.post(
 );
 
 // Read-only. Writes nothing at all — safe to poll.
-app.get(
-  '/auth/admin/station-signup/status',
+stationSignupAdminRouter.get(
+  '/status',
   stationSignupAdminRoute('status', async () => await readStationSignupStatus())
 );
 
@@ -444,8 +508,8 @@ app.get(
 // the `dj` role the 30-day actuator took. See approveSelfSignup for the lock
 // order it shares with jobs/station-signup-review, and for why
 // `self_signup_downgraded_at` survives approval.
-app.post(
-  '/auth/admin/station-signup/approve',
+stationSignupAdminRouter.post(
+  '/approve',
   stationSignupAdminRoute('approve', async (actorUserId, req) => {
     const body = (req.body ?? {}) as { userId?: unknown; restoreDjRole?: unknown };
     if (!body.userId || typeof body.userId !== 'string') {
@@ -462,6 +526,8 @@ app.post(
     });
   })
 );
+
+app.use(STATION_SIGNUP_ADMIN_PREFIX, stationSignupAdminRouter);
 
 // Resolve a login identifier (username or email) to a verification email.
 // Public — rate-limited below alongside the other brute-force-sensitive

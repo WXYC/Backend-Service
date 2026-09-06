@@ -56,9 +56,20 @@ export {
   SIGNUP_COOLDOWN_HOLD_MS,
   SIGNUP_COOLDOWN_THRESHOLD,
   readRecentSignupAttempts,
+  // The WINDOW-WIDE outcome census (BS#2362 review). readRecentSignupAttempts
+  // is a capped display list, so counting its rows saturates at the cap; the
+  // status endpoint's per-outcome numbers come from this SQL aggregate
+  // instead, and its "last clear" from readLastCooldownClearedAt rather than
+  // from whatever survived the cap.
+  countSignupAttemptOutcomes,
+  readLastCooldownClearedAt,
   pruneSignupAttempts,
   StationPasscodeCapExceededError,
   StationPasscodeDecryptionError,
+  // The key-is-not-configured failure, kept distinct from a decrypt failure
+  // so apps/auth can answer 503 `passcode_key_unset` instead of blaming
+  // STATION_PASSCODE_KEY_PREVIOUS for a missing current key.
+  StationPasscodeKeyUnsetError,
   // The `revoked_reason` rotateStationPasscode writes when it administratively
   // revokes an active row that will not decrypt (BS#2359 review). Exported so
   // #2362's admin surface can match the marker exactly instead of by prose,
@@ -80,6 +91,7 @@ export type {
   MatchStationPasscodeResult,
   SignupCooldownEvaluation,
   ReadRecentSignupAttemptsOptions,
+  CountSignupAttemptOutcomesOptions,
   PruneSignupAttemptsOptions,
   StationSignupOutcome,
 } from './station-passcode';

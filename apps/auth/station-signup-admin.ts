@@ -22,7 +22,9 @@
 import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { db, member, user } from '@wxyc/database';
 import {
+  countSignupAttemptOutcomes,
   evaluateSignupCooldown,
+  readLastCooldownClearedAt,
   readRecentSignupAttempts,
   readStationPasscodeStates,
   SIGNUP_COOLDOWN_HOLD_MS,
@@ -46,10 +48,18 @@ export class StationSignupAdminError extends Error {
 // Status
 // ---------------------------------------------------------------------------
 
-/** Attempt-log window the status endpoint reports over, unless the caller narrows it. */
+/**
+ * Attempt-log window the status endpoint reports over. Fixed: the route calls
+ * `readStationSignupStatus()` with no arguments, and the options below are a
+ * test seam, not a query-string contract — no HTTP caller can narrow it.
+ */
 export const STATUS_ATTEMPT_WINDOW_HOURS = 24;
 
-/** Cap on the individual attempt rows returned alongside the counts. */
+/**
+ * Cap on the individual attempt ROWS returned. It bounds the `recent` display
+ * list only. The per-outcome counts beside it are a SQL aggregate over the
+ * whole window and are NOT subject to this (BS#2362 review).
+ */
 export const STATUS_ATTEMPT_ROW_LIMIT = 100;
 
 /**
@@ -111,24 +121,44 @@ export interface StationSignupStatus {
     /** Refusal triggers on MORE than this many no-match failures in the window. */
     threshold: number;
     /**
-     * The most recent `cooldown_cleared` row inside the reported attempt
-     * window, or null. Scoped to that window rather than to all history: an
-     * older clear has no bearing on the cooldown state above, which only ever
-     * looks back window+hold.
+     * The most recent `cooldown_cleared` row in the WHOLE log, or null —
+     * `readLastCooldownClearedAt`, the same indexed query
+     * `evaluateSignupCooldown` uses to floor the counts above, so this field
+     * and those numbers can never disagree about which clear is in effect.
+     *
+     * Deliberately not scoped to the reported attempt window, and deliberately
+     * NOT read off `recent` (BS#2362 review): the display list is capped, so
+     * scanning it for the clear row returned null again the moment
+     * STATUS_ATTEMPT_ROW_LIMIT attempts landed after a clear — during a
+     * `cooldown_refused` storm that is a couple of minutes, and it is exactly
+     * when a manager is polling to confirm their clear took.
      */
     lastClearedAt: Date | null;
   };
   attempts: {
     since: Date;
     windowHours: number;
-    /** Every outcome seen in the window, counted. Absent outcomes are absent, not zero. */
+    /**
+     * WINDOW-WIDE census: every outcome present at or after `since`, counted
+     * in SQL across every matching row. NOT derived from `recent`, which is
+     * capped. Absent outcomes are absent, not zero.
+     */
     countsByOutcome: Record<string, number>;
-    /** Newest first, capped at STATUS_ATTEMPT_ROW_LIMIT. */
+    /**
+     * A display list, not a census: the NEWEST STATUS_ATTEMPT_ROW_LIMIT rows
+     * inside the window, newest first. Older rows in the same window are
+     * simply not here — `countsByOutcome` is what says how many there were.
+     */
     recent: StationSignupAttemptView[];
   };
   pendingReview: PendingReviewAccountView[];
 }
 
+/**
+ * A TEST SEAM. The route calls `readStationSignupStatus()` with no arguments
+ * and parses nothing off the query string, so every field here is fixed to
+ * its constant in production.
+ */
 export interface ReadStationSignupStatusOptions {
   now?: Date;
   windowHours?: number;
@@ -153,9 +183,17 @@ export const readStationSignupStatus = async (
   const attemptLimit = options.attemptLimit ?? STATUS_ATTEMPT_ROW_LIMIT;
   const since = new Date(now.getTime() - windowHours * 60 * 60 * 1000);
 
-  const [passcodes, cooldown, attempts, pending] = await Promise.all([
+  const [passcodes, cooldown, countsByOutcome, lastClearedAt, attempts, pending] = await Promise.all([
     readStationPasscodeStates({ now }),
     evaluateSignupCooldown(now),
+    // WINDOW-WIDE, in SQL. Iterating `attempts` below would cap the total of
+    // every outcome at `attemptLimit` and let this "24 hours" report fewer
+    // passcode_fail than the cooldown block's SQL count over ten minutes.
+    countSignupAttemptOutcomes({ since }),
+    // The clear FLOOR itself, not whatever clear row happened to survive the
+    // display cap. Same query evaluateSignupCooldown runs; a second LIMIT 1
+    // on an indexed column is cheaper than being wrong about it.
+    readLastCooldownClearedAt(),
     readRecentSignupAttempts({ since, limit: attemptLimit }),
     db
       .select({
@@ -177,13 +215,6 @@ export const readStationSignupStatus = async (
       .where(and(isNotNull(user.selfSignupAt), isNull(user.selfSignupReviewedAt))),
   ]);
 
-  const countsByOutcome: Record<string, number> = {};
-  for (const attempt of attempts) {
-    countsByOutcome[attempt.outcome] = (countsByOutcome[attempt.outcome] ?? 0) + 1;
-  }
-
-  const cleared = attempts.find((attempt) => attempt.outcome === 'cooldown_cleared');
-
   return {
     now,
     passcodes,
@@ -194,7 +225,7 @@ export const readStationSignupStatus = async (
       windowMinutes: SIGNUP_COOLDOWN_WINDOW_MS / 60000,
       holdMinutes: SIGNUP_COOLDOWN_HOLD_MS / 60000,
       threshold: SIGNUP_COOLDOWN_THRESHOLD,
-      lastClearedAt: cleared?.attemptedAt ?? null,
+      lastClearedAt,
     },
     attempts: {
       since,
