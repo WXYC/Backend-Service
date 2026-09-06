@@ -1474,6 +1474,116 @@ export async function verifyStationPasscode(
 }
 
 // ---------------------------------------------------------------------------
+// Passcode state (BS#2362's status endpoint)
+// ---------------------------------------------------------------------------
+
+export type StationPasscodeState = 'active' | 'revoked' | 'expired';
+
+export interface StationPasscodeStateRow {
+  id: string;
+  state: StationPasscodeState;
+  createdAt: Date;
+  createdBy: string | null;
+  expiresAt: Date;
+  revokedAt: Date | null;
+  revokedReason: string | null;
+  /**
+   * The row was retired by rotation's auto-revoke (its `revoked_reason` is
+   * STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON) rather than by a manager.
+   * Surfaced separately so a status screen can say "a key rotation killed
+   * this code" instead of implying a person did.
+   */
+  revokedByKeyRotation: boolean;
+  lastUsedAt: Date | null;
+  useCount: number;
+  maxUses: number;
+  /**
+   * `use_count >= max_uses`. Such a row is still ACTIVE by the SQL predicate
+   * — nothing revokes it on exhaustion — but `verifyStationPasscode`'s claim
+   * UPDATE carries `use_count < max_uses`, so every further attempt logs
+   * `passcode_exhausted`. A status screen has to say that out loud or a dead
+   * sticky note reads as a live one.
+   */
+  exhausted: boolean;
+}
+
+/**
+ * Pure classifier, kept beside `isStationPasscodeActive` for the same reason
+ * that one exists: the SQL and the JS are two hand-synced statements of one
+ * rule.
+ *
+ * REVOKED WINS over expired when a row is both. Revocation is a deliberate
+ * operator action and expiry is the passage of time, so the operator action
+ * is the more informative of the two — and it is the only one of the pair
+ * that carries a `revoked_reason` worth reading.
+ */
+export function classifyStationPasscodeState(
+  row: { revokedAt: Date | null; expiresAt: Date },
+  now: Date
+): StationPasscodeState {
+  if (row.revokedAt !== null) return 'revoked';
+  return row.expiresAt.getTime() > now.getTime() ? 'active' : 'expired';
+}
+
+export interface ReadStationPasscodeStatesOptions {
+  now?: Date;
+  /** How far back inactive rows are reported. Defaults to the 30-day classification horizon. */
+  horizonMs?: number;
+}
+
+/**
+ * Every passcode row a manager needs to see: the active ones, plus the ones
+ * that went inactive inside the horizon. Read-only, and it NEVER decrypts —
+ * plaintext is `revealStationPasscode`'s job, and only that path writes the
+ * `passcode_revealed` audit row that replaces show-once storage's structural
+ * guarantee. The projection deliberately omits `code_encrypted` entirely so
+ * no caller can be tempted to open it off this path.
+ *
+ * TWO deliberate divergences from `recentlyInactivePasscodePredicate`, whose
+ * job (bounding the classification sweep) is not this one:
+ *
+ *   1. No `revoked_reason IS DISTINCT FROM
+ *      STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON` exclusion. That term
+ *      is mark-and-exclude, and a row rotation auto-revoked is exactly what a
+ *      manager most needs to see here — it means a sticky note in the room is
+ *      dead. Excluding it would hide the one event this screen exists to
+ *      report.
+ *   2. Active rows are included, which the classification predicate excludes
+ *      by construction. No separate OR term is needed for them: an active row
+ *      has `expires_at > now >= since`, so `expires_at >= since` already
+ *      matches it.
+ */
+export async function readStationPasscodeStates(
+  options: ReadStationPasscodeStatesOptions = {}
+): Promise<StationPasscodeStateRow[]> {
+  const now = options.now ?? new Date();
+  const since = new Date(now.getTime() - (options.horizonMs ?? STATION_PASSCODE_CLASSIFICATION_HORIZON_MS));
+
+  const rows = await db
+    .select({
+      id: station_passcode.id,
+      createdAt: station_passcode.createdAt,
+      createdBy: station_passcode.createdBy,
+      expiresAt: station_passcode.expiresAt,
+      revokedAt: station_passcode.revokedAt,
+      revokedReason: station_passcode.revokedReason,
+      lastUsedAt: station_passcode.lastUsedAt,
+      useCount: station_passcode.useCount,
+      maxUses: station_passcode.maxUses,
+    })
+    .from(station_passcode)
+    .where(or(gte(station_passcode.revokedAt, since), gte(station_passcode.expiresAt, since)))
+    .orderBy(desc(station_passcode.createdAt));
+
+  return rows.map((row) => ({
+    ...row,
+    state: classifyStationPasscodeState(row, now),
+    revokedByKeyRotation: row.revokedReason === STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON,
+    exhausted: row.useCount >= row.maxUses,
+  }));
+}
+
+// ---------------------------------------------------------------------------
 // Reveal
 // ---------------------------------------------------------------------------
 

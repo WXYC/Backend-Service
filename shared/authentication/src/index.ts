@@ -37,9 +37,24 @@ export {
   claimStationPasscode,
   revealStationPasscode,
   rotateStationPasscode,
+  // The read-only, never-decrypting view of station_passcode behind BS#2362's
+  // status endpoint. Kept in the module so `station_passcode` keeps exactly
+  // one owner of its SQL, and so the state classifier stays beside the
+  // active/inactive predicates it has to agree with.
+  readStationPasscodeStates,
+  classifyStationPasscodeState,
   revokeStationPasscode,
   evaluateSignupCooldown,
   clearSignupCooldown,
+  // The cooldown's own tunables. BS#2361's endpoint needs the hold duration
+  // for its refusal message ("the gate stays closed for N minutes"), and
+  // BS#2362's status response needs all three so it can describe the rule it
+  // is reporting against ("21 failures in 10 minutes holds for 15") — either
+  // way the number has to come from the module's own constant rather than be
+  // restated by a caller.
+  SIGNUP_COOLDOWN_WINDOW_MS,
+  SIGNUP_COOLDOWN_HOLD_MS,
+  SIGNUP_COOLDOWN_THRESHOLD,
   readRecentSignupAttempts,
   pruneSignupAttempts,
   StationPasscodeCapExceededError,
@@ -49,10 +64,6 @@ export {
   // #2362's admin surface can match the marker exactly instead of by prose,
   // and tell "a manager revoked this" apart from "a key rotation retired it".
   STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON,
-  // The cooldown hold duration (BS#2361): the endpoint's refusal message
-  // tells a caller how long the station-global gate stays closed, so it
-  // must read the module's own constant rather than restate the number.
-  SIGNUP_COOLDOWN_HOLD_MS,
 } from './station-passcode';
 export type {
   StationPasscodeDecryptFailureReason,
@@ -61,6 +72,9 @@ export type {
   RotatedStationPasscode,
   RevokeStationPasscodeOptions,
   RevealedStationPasscode,
+  StationPasscodeState,
+  StationPasscodeStateRow,
+  ReadStationPasscodeStatesOptions,
   VerifyStationPasscodeOptions,
   VerifyStationPasscodeResult,
   MatchStationPasscodeResult,
