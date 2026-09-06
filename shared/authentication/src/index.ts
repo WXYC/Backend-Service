@@ -30,8 +30,14 @@ export {
   pruneSignupAttempts,
   StationPasscodeCapExceededError,
   StationPasscodeDecryptionError,
+  // The `revoked_reason` rotateStationPasscode writes when it administratively
+  // revokes an active row that will not decrypt (BS#2359 review). Exported so
+  // #2362's admin surface can match the marker exactly instead of by prose,
+  // and tell "a manager revoked this" apart from "a key rotation retired it".
+  STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON,
 } from './station-passcode';
 export type {
+  StationPasscodeDecryptFailureReason,
   GeneratedStationPasscode,
   RotateStationPasscodeOptions,
   RotatedStationPasscode,

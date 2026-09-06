@@ -2946,15 +2946,30 @@ export const station_signup_attempt = pgTable(
     // passcode row cannot delete the attempts recorded against it — the
     // attempt log is the audit trail and the cooldown's own input.
     //
-    // OPEN, for BS#2359 to settle when it owns the writer: `passcode_fail` is
-    // today the only failure token, so it has to cover both "matched nothing"
-    // (NULL here, correctly) and "matched a row that was expired, revoked, or
-    // at its use cap" — where a passcode_id IS known and losing it would throw
-    // away the most useful fact in the audit trail. Do not read "passcode_fail
-    // implies NULL" as an invariant; the vocabulary is incomplete, not the
-    // nullability. Adding the distinguishing outcome token (and any CHECK
-    // constraint over the resulting vocabulary) belongs with that writer, not
-    // with a schema that has no producer yet.
+    // SETTLED by BS#2359, which owns the sole writer
+    // (shared/authentication/src/station-passcode.ts — see
+    // STATION_SIGNUP_OUTCOMES there, the authoritative list). This note was
+    // previously OPEN, on the grounds that `passcode_fail` was the only
+    // failure token and therefore had to cover both "matched nothing" and
+    // "matched a row that was expired, revoked, or at its use cap". It no
+    // longer does: the vocabulary split into nine tokens, of which
+    // `passcode_expired`, `passcode_revoked` and `passcode_exhausted` each
+    // matched a real row and carry its id here.
+    //
+    // `passcode_fail` implies NULL IS now an invariant of the writer, and so
+    // does `passcode_unverifiable` (an undecryptable row makes the submitted
+    // code's status unknowable, so attributing it to a row would be a guess).
+    // Set for `passcode_ok`, `passcode_revealed`, `passcode_expired`,
+    // `passcode_revoked` and `passcode_exhausted`; NULL for `passcode_fail`,
+    // `passcode_unverifiable`, `cooldown_refused` and `cooldown_cleared`.
+    //
+    // Still no CHECK constraint, deliberately, and that part did not change:
+    // the table has exactly one writer, which enforces the vocabulary as a
+    // TypeScript union, so a CHECK would cost a migration now and another on
+    // every future token to catch the same misspelling class the compiler
+    // already catches. `passcode_unverifiable` (21 chars) is the longest
+    // token and fits `varchar(24)` — a tenth token longer than that is the
+    // one change here that would need a migration.
     passcodeId: varchar('passcode_id', { length: 255 }).references(() => station_passcode.id, {
       onDelete: 'set null',
     }),
