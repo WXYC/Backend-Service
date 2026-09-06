@@ -1,0 +1,41 @@
+#Build stage
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /station-signup-attempt-prune-builder
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared/database ./shared/database
+COPY ./shared/authentication ./shared/authentication
+COPY ./jobs/station-signup-attempt-prune ./jobs/station-signup-attempt-prune
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication --workspace=@wxyc/station-signup-attempt-prune
+
+#Production stage
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /station-signup-attempt-prune
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/station-signup-attempt-prune/package* ./jobs/station-signup-attempt-prune/
+COPY ./shared/database/package* ./shared/database/
+COPY ./shared/authentication/package* ./shared/authentication/
+
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --from=builder ./station-signup-attempt-prune-builder/jobs/station-signup-attempt-prune/dist ./jobs/station-signup-attempt-prune/dist
+COPY --from=builder ./station-signup-attempt-prune-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder ./station-signup-attempt-prune-builder/shared/authentication/dist ./shared/authentication/dist
+
+# A single DELETE against a table bounded by the retention window itself —
+# the API's 5s default statement timeout is fine here, unlike the paged
+# multi-million-row sweeps that override it.
+
+# Identifies the connection in pg_stat_activity during triage.
+ENV DB_APPLICATION_NAME=wxyc-station-signup-attempt-prune
+
+ENTRYPOINT ["node", "/station-signup-attempt-prune/jobs/station-signup-attempt-prune/dist/job.js"]
