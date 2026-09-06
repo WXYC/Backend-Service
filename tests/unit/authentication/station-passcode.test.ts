@@ -18,6 +18,7 @@ import {
   resolveCooldownCountStart,
   isStationPasscodeActive,
   isStationPasscodeRecentlyInactive,
+  classifyStationPasscodeState,
   StationPasscodeDecryptionError,
   STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON,
   SIGNUP_COOLDOWN_WINDOW_MS,
@@ -511,6 +512,53 @@ describe('isStationPasscodeActive / isStationPasscodeRecentlyInactive', () => {
       revokedReason: 'manager revoked it',
     };
     expect(isStationPasscodeRecentlyInactive(row, now, since)).toBe(true);
+  });
+});
+
+describe('classifyStationPasscodeState (BS#2362 status)', () => {
+  const now = new Date('2026-09-05T12:00:00Z');
+
+  it('active when neither revoked nor expired', () => {
+    expect(classifyStationPasscodeState({ revokedAt: null, expiresAt: new Date('2026-09-10T00:00:00Z') }, now)).toBe(
+      'active'
+    );
+  });
+
+  it('expired once past expires_at, never revoked', () => {
+    expect(classifyStationPasscodeState({ revokedAt: null, expiresAt: new Date('2026-09-01T00:00:00Z') }, now)).toBe(
+      'expired'
+    );
+  });
+
+  it('revoked when revoked_at is set and the row has not expired', () => {
+    expect(
+      classifyStationPasscodeState(
+        { revokedAt: new Date('2026-09-02T00:00:00Z'), expiresAt: new Date('2026-09-10T00:00:00Z') },
+        now
+      )
+    ).toBe('revoked');
+  });
+
+  it("reports 'revoked', not 'expired', for a row that is BOTH", () => {
+    // Revocation is a deliberate operator action and the only one of the pair
+    // carrying a revoked_reason worth reading, so it wins the label.
+    expect(
+      classifyStationPasscodeState(
+        { revokedAt: new Date('2026-08-20T00:00:00Z'), expiresAt: new Date('2026-09-01T00:00:00Z') },
+        now
+      )
+    ).toBe('revoked');
+  });
+
+  it('agrees with isStationPasscodeActive on which rows are active', () => {
+    const rows = [
+      { revokedAt: null, expiresAt: new Date('2026-09-10T00:00:00Z') },
+      { revokedAt: null, expiresAt: new Date('2026-09-01T00:00:00Z') },
+      { revokedAt: new Date('2026-09-02T00:00:00Z'), expiresAt: new Date('2026-09-10T00:00:00Z') },
+    ];
+    for (const row of rows) {
+      expect(classifyStationPasscodeState(row, now) === 'active').toBe(isStationPasscodeActive(row, now));
+    }
   });
 });
 

@@ -10,8 +10,15 @@ import {
   auth,
   bootstrapTrustedClients,
   buildTrustedClients,
+  clearSignupCooldown,
+  evaluateSignupCooldown,
   grantsAdminFlag,
   resolveCorsOrigin,
+  revealStationPasscode,
+  revokeStationPasscode,
+  rotateStationPasscode,
+  StationPasscodeCapExceededError,
+  StationPasscodeDecryptionError,
 } from '@wxyc/authentication';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import cors from 'cors';
@@ -32,6 +39,7 @@ import { createAutoDjUser } from './create-auto-dj-user';
 import { createDefaultUser } from './create-default-user';
 import { syncAdminRoles } from './sync-admin-roles';
 import { resolveOrganization } from './resolve-organization';
+import { approveSelfSignup, readStationSignupStatus, StationSignupAdminError } from './station-signup-admin';
 import { shouldCaptureAuthExpressError } from './sentry-error-filter';
 import { E2E_INCOMPLETE_USER_ID, E2E_INCOMPLETE_USER_PASSWORD } from './e2e-test-constants';
 
@@ -294,6 +302,166 @@ app.post('/auth/admin/provision-user', async (req, res) => {
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Station self-signup manager API (BS#2362)
+// ---------------------------------------------------------------------------
+//
+// Six operations behind the SAME admin-flag gate as /auth/admin/provision-user
+// directly above — `session.user.role !== 'admin'` -> 403. See
+// station-signup-admin.ts's module header for why this is deliberately not a
+// stationManager-only gate. `requirePermissions` is the backend app's
+// middleware and is not available here.
+//
+// Registered before the better-auth handler, like every other /auth/admin
+// route in this file, so they intercept rather than fall through to it.
+
+/**
+ * Resolve the acting manager, or write the 401/403 and return null. The
+ * caller must return immediately on null.
+ *
+ * The returned id is the ONLY source of `actorUserId` for the reveal audit
+ * row and of `reviewedBy` on approve. Neither is ever read from the request
+ * body: an audit trail a caller can forge names the wrong person, and
+ * WXYC/dj-site#1358's any-manager attribution residual is exactly what
+ * deriving it server-side retires.
+ */
+const resolveStationSignupActor = async (req: Request, res: Response): Promise<string | null> => {
+  const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+  if (!session?.user) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return null;
+  }
+  if ((session.user as { role?: string }).role !== 'admin') {
+    res.status(403).json({ error: 'Forbidden: admin role required' });
+    return null;
+  }
+  return session.user.id;
+};
+
+/**
+ * Wrap one manager operation: gate, run, and map the module's typed failures
+ * onto status codes. Every station-signup route below is registered through
+ * this, so no route can be added without the gate.
+ */
+const stationSignupAdminRoute =
+  (subsystem: string, handler: (actorUserId: string, req: Request, res: Response) => Promise<unknown>) =>
+  async (req: Request, res: Response) => {
+    try {
+      const actorUserId = await resolveStationSignupActor(req, res);
+      if (actorUserId === null) return;
+      const body = await handler(actorUserId, req, res);
+      if (res.headersSent) return;
+      return res.json(body);
+    } catch (error) {
+      if (error instanceof StationSignupAdminError) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+      if (error instanceof StationPasscodeCapExceededError) {
+        // Not a server fault: two codes are already live and the room is
+        // presumably still using at least one of them. Revoke one first.
+        return res.status(409).json({ error: error.message, code: 'passcode_cap_exceeded' });
+      }
+      if (error instanceof StationPasscodeDecryptionError) {
+        // The gate is down for the same reason every signup attempt is
+        // failing closed. 503, and say what fixes it — the runbook lives at
+        // the top of station-passcode.ts.
+        console.error(`[STATION SIGNUP ADMIN] ${subsystem}: active passcode row will not decrypt`, error);
+        Sentry.captureException(error, { tags: { subsystem: `station-signup-${subsystem}` } });
+        return res.status(503).json({
+          error:
+            'An active station passcode will not decrypt, so the signup gate is failing closed. Set ' +
+            'STATION_PASSCODE_KEY_PREVIOUS to the key that wrote it, or rotate, which administratively ' +
+            'revokes undecryptable active rows.',
+          code: 'passcode_undecryptable',
+        });
+      }
+      console.error(`[STATION SIGNUP ADMIN] ${subsystem}: unexpected error`, error);
+      Sentry.captureException(error, { tags: { subsystem: `station-signup-${subsystem}` } });
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  };
+
+// Current plaintext code(s), for a manager to read to a stranded DJ by phone.
+// POST, not GET: readable storage removed show-once's structural guarantee
+// that only whoever rotated ever saw the code, so every reveal WRITES a
+// `passcode_revealed` attempt row carrying the acting manager's id — that
+// audit log is what replaces the guarantee, and it is what makes "who could
+// have seen this?" answerable after a suspected leak.
+app.post(
+  '/auth/admin/station-signup/reveal',
+  stationSignupAdminRoute('reveal', async (actorUserId) => ({
+    passcodes: await revealStationPasscode(actorUserId),
+  }))
+);
+
+// Mint a new code and return its plaintext once. Refuses beyond two active
+// rows (409) rather than silently retiring a note the room is still using.
+app.post(
+  '/auth/admin/station-signup/rotate',
+  stationSignupAdminRoute('rotate', async (actorUserId) => await rotateStationPasscode({ createdBy: actorUserId }))
+);
+
+// Manual kill switch for one code.
+app.post(
+  '/auth/admin/station-signup/revoke',
+  stationSignupAdminRoute('revoke', async (_actorUserId, req) => {
+    const passcodeId = (req.body as { passcodeId?: unknown } | undefined)?.passcodeId;
+    if (!passcodeId || typeof passcodeId !== 'string') {
+      throw new StationSignupAdminError('Missing required field: passcodeId', 400);
+    }
+    // 'manual' distinguishes a manager's revoke from rotation's
+    // STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON auto-revoke, which the
+    // status endpoint reports as `revokedByKeyRotation`.
+    const revoked = await revokeStationPasscode(passcodeId, { revokedReason: 'manual' });
+    // `false` is the idempotent no-op: no such row, or already revoked.
+    return { passcodeId, revoked };
+  })
+);
+
+// THE ANTI-LOCKOUT ESCAPE HATCH. Writes a `cooldown_cleared` attempt row,
+// which `evaluateSignupCooldown` already honours as a floor on the failure
+// window — it DELETES NOTHING, because that log is both the cooldown's own
+// input and the 30-day audit trail. Without this a sustained attacker can
+// hold the endpoint in cooldown with nothing in the product able to clear it,
+// and "wait for a manager who is not on site" becomes the failure mode; with
+// it, one phone call.
+app.post(
+  '/auth/admin/station-signup/clear-cooldown',
+  stationSignupAdminRoute('clear-cooldown', async (actorUserId) => {
+    await clearSignupCooldown(actorUserId);
+    return { cleared: true, cooldown: await evaluateSignupCooldown() };
+  })
+);
+
+// Read-only. Writes nothing at all — safe to poll.
+app.get(
+  '/auth/admin/station-signup/status',
+  stationSignupAdminRoute('status', async () => await readStationSignupStatus())
+);
+
+// Clear one account out of the manager review queue, optionally handing back
+// the `dj` role the 30-day actuator took. See approveSelfSignup for the lock
+// order it shares with jobs/station-signup-review, and for why
+// `self_signup_downgraded_at` survives approval.
+app.post(
+  '/auth/admin/station-signup/approve',
+  stationSignupAdminRoute('approve', async (actorUserId, req) => {
+    const body = (req.body ?? {}) as { userId?: unknown; restoreDjRole?: unknown };
+    if (!body.userId || typeof body.userId !== 'string') {
+      throw new StationSignupAdminError('Missing required field: userId', 400);
+    }
+    if (body.restoreDjRole !== undefined && typeof body.restoreDjRole !== 'boolean') {
+      throw new StationSignupAdminError('restoreDjRole must be a boolean', 400);
+    }
+    // reviewerId comes from the session, never the body.
+    return await approveSelfSignup({
+      userId: body.userId,
+      reviewerId: actorUserId,
+      restoreDjRole: body.restoreDjRole === true,
+    });
+  })
+);
 
 // Resolve a login identifier (username or email) to a verification email.
 // Public — rate-limited below alongside the other brute-force-sensitive
