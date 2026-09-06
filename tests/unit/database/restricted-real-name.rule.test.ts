@@ -78,6 +78,14 @@ ruleTester.run('restricted-real-name', rule, {
       code: `console.log(row.realName);`,
       filename: 'jobs/auth-user-name-backfill/writer.ts',
     },
+    // Allow-listed file: the future station signup endpoint (BS#2361, not
+    // yet written) constructs `provisionUser({ realName, ... })` — an
+    // object-literal property key, the exact shape the rule flags on a
+    // non-allow-listed file.
+    {
+      code: `const result = provisionUser({ realName, djName, email, username });`,
+      filename: 'apps/auth/station-signup.ts',
+    },
     // Non-allow-listed file, but no restricted identifier anywhere —
     // unrelated `.name` / `.djName` reads must never fire (no `user.name`
     // clause, by design — see the rule's docblock).

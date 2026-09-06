@@ -601,10 +601,30 @@ describe('provisionUser()', () => {
         // Must land on the row inside createUser's own atomicity — never a
         // follow-up update — or a crash between create and stamp leaves a
         // row indistinguishable from an admin-provisioned one (BS#2360).
+        // A single createUser call carrying selfSignupAt, with no other
+        // write of any kind, is what rules out a refactor that moves the
+        // stamp into a second call.
+        expect(mockCreateUser).toHaveBeenCalledTimes(1);
         expect(mockCreateUser).toHaveBeenCalledWith(expect.objectContaining({ selfSignupAt }));
-        expect(mockAdapterUpdate).not.toHaveBeenCalledWith(
-          expect.objectContaining({ update: expect.objectContaining({ selfSignupAt: expect.anything() }) })
+
+        // `db.update(user).set(...)` (mockDbUpdate) is the admin-flag-sync
+        // write, not the createUser call — a refactor could move the stamp
+        // there just as easily as into adapter.update and still leave every
+        // other assertion in this suite green. `validInput`'s role ('dj')
+        // never trips grantsAdminFlag (`grantsAdminFlag('dj') === false`),
+        // so mockDbUpdate must not be called at all for this fixture.
+        expect(mockDbUpdate).not.toHaveBeenCalled();
+
+        // `expect.anything()` matches neither `null` nor `undefined`, so a
+        // follow-up `update: { selfSignupAt: null }` would slip straight
+        // past a `selfSignupAt: expect.anything()` matcher. Check for the
+        // key's presence on any adapter.update call directly, regardless of
+        // what value it was set to.
+        const adapterUpdateCalls = mockAdapterUpdate.mock.calls as Array<[{ update?: Record<string, unknown> }]>;
+        const anyAdapterUpdateTouchedSelfSignupAt = adapterUpdateCalls.some(
+          ([arg]) => !!arg?.update && Object.prototype.hasOwnProperty.call(arg.update, 'selfSignupAt')
         );
+        expect(anyAdapterUpdateTouchedSelfSignupAt).toBe(false);
       });
     });
   });
