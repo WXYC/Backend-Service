@@ -136,10 +136,12 @@ export const run = async (): Promise<void> => {
       });
     }
     if (applied.raced.length > 0) {
-      // The account left `dj` between the plan and the write. Nothing was
-      // written and no marker was stamped, so the next run re-decides from
-      // scratch; the digest already sent is one line stale for one day.
-      log('warn', 'downgrade_raced', 'planned downgrade matched no auth_member row; role changed mid-run', {
+      // The account's state moved between the plan and the write: it left
+      // `dj`, or a manager reviewed it, or a competing run downgraded it
+      // first. Nothing was written and no marker was stamped, so the next run
+      // re-decides from scratch; the digest already sent is one line stale for
+      // one day. Not a failure -- the run still exits 0 for this.
+      log('warn', 'downgrade_raced', 'planned downgrade aborted; account state changed between plan and apply', {
         user_ids: applied.raced.map((row) => row.userId),
       });
     }
