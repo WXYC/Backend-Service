@@ -88,7 +88,12 @@ describe('station-signup', () => {
 
     jest.clearAllMocks();
     mockFindUserByEmail.mockResolvedValue(null);
-    mockAdapterFindOne.mockResolvedValue(null);
+    // Keyed on model: the org row exists (the healthy-host default) while
+    // user lookups find nothing. A blanket null would trip the org-existence
+    // probe on every happy path.
+    mockAdapterFindOne.mockImplementation((args) =>
+      Promise.resolve(args.model === 'organization' ? { id: 'org-id-001' } : null)
+    );
     mockMatchStationPasscode.mockResolvedValue({ ok: true, cooldown: false, passcodeId: 'passcode-id-001' });
     mockClaimStationPasscode.mockResolvedValue({ ok: true, cooldown: false });
     mockSendVerificationEmailMessage.mockResolvedValue(undefined);
@@ -150,6 +155,13 @@ describe('station-signup', () => {
 
     it('rejects an invalid username before checking the passcode', async () => {
       const body = { ...VALID_BODY, username: 'no' }; // below MIN_USERNAME_LENGTH
+
+      await expect(stationSignupFromRequest(body, undefined)).rejects.toMatchObject({ statusCode: 400 });
+      expectPasscodeUntouched();
+    });
+
+    it('rejects an over-length passcode before checking it', async () => {
+      const body = { ...VALID_BODY, passcode: 'x'.repeat(129) }; // MAX_PASSCODE_LENGTH + 1
 
       await expect(stationSignupFromRequest(body, undefined)).rejects.toMatchObject({ statusCode: 400 });
       expectPasscodeUntouched();
@@ -397,6 +409,19 @@ describe('station-signup', () => {
 
       await expect(stationSignupFromRequest(VALID_BODY, undefined)).rejects.toThrow(/DEFAULT_ORG_SLUG/);
       expectPasscodeUntouched();
+      expect(mockProvisionUser).not.toHaveBeenCalled();
+    });
+
+    // BS#2361 review 2, the finding-3 residual: a SET slug that names no
+    // organization row was only discovered inside provisionUser, after the
+    // claim — the same one-use-per-attempt brick, narrowed from "unset" to
+    // "wrong". The probe runs behind the gate but ahead of the claim.
+    it('fails loudly when DEFAULT_ORG_SLUG names no organization row, after the match but before any use is claimed', async () => {
+      mockAdapterFindOne.mockResolvedValue(null); // username available, org missing
+
+      await expect(stationSignupFromRequest(VALID_BODY, undefined)).rejects.toThrow(/names no organization/);
+      expect(mockMatchStationPasscode).toHaveBeenCalled();
+      expect(mockClaimStationPasscode).not.toHaveBeenCalled();
       expect(mockProvisionUser).not.toHaveBeenCalled();
     });
 

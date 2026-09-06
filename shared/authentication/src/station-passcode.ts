@@ -1464,7 +1464,11 @@ export async function verifyStationPasscode(
   const now = options.now ?? new Date();
   const matched = await matchStationPasscode(code, { ...options, now });
   if (!matched.ok || !matched.passcodeId) {
-    return { ok: matched.ok, cooldown: matched.cooldown };
+    // `ok` is hard-coded false rather than echoed: this arm is reachable
+    // only when the match refused, but if the type-impossible ok-without-id
+    // state ever appeared, a gate must fail CLOSED — echoing `matched.ok`
+    // here would report success without a claimed use.
+    return { ok: false, cooldown: matched.cooldown };
   }
   return claimStationPasscode(matched.passcodeId, { ...options, now });
 }
