@@ -6,6 +6,15 @@
  * NULL` -- see `shared/database/src/schema.ts`'s comment on those columns
  * for why there is deliberately no separate `pending_review` boolean.
  *
+ * **`self_signup_downgraded_at` is selected but deliberately NOT filtered
+ * on here.** It is the downgrade actuator's terminal marker (BS#2364), and
+ * only `downgrade.ts` narrows by it. This cohort is the *digest's* cohort,
+ * and it is the same cohort dj-site's roster review queue shows, so an
+ * account the job already downgraded must keep appearing every day until a
+ * manager actually reviews it. Adding the marker to this WHERE clause would
+ * make a downgraded account vanish from the digest the morning after it was
+ * downgraded -- silently, and exactly when a human most needs to see it.
+ *
  * Uses the Drizzle query builder (not raw `db.execute`), unlike
  * `jobs/metadata-no-match-digest/query.ts` -- that job's epoch-extraction
  * workaround exists only for `db.execute(sql\`...\`)`, which bypasses
@@ -23,6 +32,12 @@ export interface PendingSignupRow {
   djName: string | null;
   /** NOT NULL by construction of the WHERE clause below. */
   selfSignupAt: Date;
+  /**
+   * When `jobs/station-signup-review`'s downgrade actuator last flipped this
+   * account `dj` -> `member`, or `null` if it never has. Read-only here; the
+   * actuator's own predicate lives in `downgrade.ts`.
+   */
+  selfSignupDowngradedAt: Date | null;
 }
 
 /**
@@ -36,6 +51,7 @@ interface RawPendingSignupRow {
   email: string;
   djName: string | null;
   selfSignupAt: Date | null;
+  selfSignupDowngradedAt: Date | null;
 }
 
 export const queryPendingSelfSignups = async (): Promise<PendingSignupRow[]> => {
@@ -46,6 +62,7 @@ export const queryPendingSelfSignups = async (): Promise<PendingSignupRow[]> => 
       email: user.email,
       djName: user.djName,
       selfSignupAt: user.selfSignupAt,
+      selfSignupDowngradedAt: user.selfSignupDowngradedAt,
     })
     .from(user)
     .where(and(isNotNull(user.selfSignupAt), isNull(user.selfSignupReviewedAt)));

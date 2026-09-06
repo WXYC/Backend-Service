@@ -184,6 +184,37 @@ jobs:
           # in the run's log is not redacted. (Only a single-origin value masks the
           # origin itself.) Harmless either way — these are public origins.
           BETTER_AUTH_TRUSTED_ORIGINS: ${{ secrets.BETTER_AUTH_TRUSTED_ORIGINS }}
+          # Station self-signup review cron (BS#2364, jobs/station-signup-review).
+          # Neither is sensitive; both are carried through the allowlist for the
+          # same reason as DONATE_* above — the resolve step's `case` below
+          # hard-fails with "Unsupported secret_name" on any key it can't index,
+          # so without an entry here light-up needs a code PR.
+          #
+          # STATION_SIGNUP_DOWNGRADE_ENABLED arms the ONE automatic privilege
+          # downgrade in the fleet (dj -> member after 30 days pending review)
+          # and ships OFF. Its reader is a strict `=== 'true'` comparison
+          # (jobs/station-signup-review/downgrade.ts), so 'TRUE' reads as false
+          # and cannot use the uppercase log-safety workaround
+          # ENRICHMENT_SUPPRESS_LML_BUDGET uses: set it to lowercase 'true' and
+          # expect the ::add-mask:: to redact the word "true" elsewhere in the
+          # run's logs. Rollback is 'false', not an empty value — the resolve
+          # step hard-fails on empty. Turning it off does NOT silence the daily
+          # digest; overdue accounts are still named, reported as
+          # "downgrade disabled".
+          #
+          # ⚠️ THE `restart_target` IS IRRELEVANT FOR BOTH OF THESE KEYS, and the
+          # restart it performs is pure collateral. This job is not a
+          # long-running container: EC2 cron invokes it as
+          # `docker run --env-file .env`, so it re-reads the host's `.env` on
+          # every run and the flip takes effect on the next scheduled run with
+          # no restart of anything. There is no `none` option, so the run will
+          # bounce whichever container `restart_target` names (default
+          # `backend`) for no reason. Prefer running this off-peak, or edit
+          # `~/.env` over SSH directly — for THESE keys, unlike every other key
+          # in this allowlist, the hand-edit needs no container recreate to take
+          # effect.
+          STATION_SIGNUP_ALERT_EMAIL: ${{ secrets.STATION_SIGNUP_ALERT_EMAIL }}
+          STATION_SIGNUP_DOWNGRADE_ENABLED: ${{ secrets.STATION_SIGNUP_DOWNGRADE_ENABLED }}
         run: |
           set -euo pipefail
           KEY="${{ inputs.key }}"
@@ -205,6 +236,8 @@ jobs:
             DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID) VALUE="$DIGITAL_ARCHIVE_STORE_AZURACAST_KEY_ID" ;;
             DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET) VALUE="$DIGITAL_ARCHIVE_STORE_AZURACAST_SECRET" ;;
             BETTER_AUTH_TRUSTED_ORIGINS) VALUE="$BETTER_AUTH_TRUSTED_ORIGINS" ;;
+            STATION_SIGNUP_ALERT_EMAIL) VALUE="$STATION_SIGNUP_ALERT_EMAIL" ;;
+            STATION_SIGNUP_DOWNGRADE_ENABLED) VALUE="$STATION_SIGNUP_DOWNGRADE_ENABLED" ;;
             *)
               echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
               exit 1

@@ -288,7 +288,7 @@ describe('auth.definition.ts user.additionalFields output locks', () => {
     expect(bodyOf('selfSignupReviewedBy')).toMatch(/returned:\s*false/);
   });
 
-  it.each(['selfSignupAt', 'selfSignupReviewedAt'])(
+  it.each(['selfSignupAt', 'selfSignupReviewedAt', 'selfSignupDowngradedAt'])(
     'leaves %s returned, because the roster review queue reads it from admin/list-users',
     (name) => {
       // `returned` is global, not audience-scoped: the admin plugin's roster
@@ -296,8 +296,13 @@ describe('auth.definition.ts user.additionalFields output locks', () => {
       // pending-review predicate is `self_signup_at IS NOT NULL AND
       // self_signup_reviewed_at IS NULL`, so hiding either field pins it to a
       // constant — a queue that never empties, or one that is never populated —
-      // with nothing going red. Both are timestamps on the account holder's own
-      // row and name no third party.
+      // with nothing going red. selfSignupDowngradedAt (BS#2364) is the same
+      // trade one step further on: hidden, a manager looking at a `member`-role
+      // account in the review queue cannot tell one this job auto-downgraded
+      // from one that was always a member, and BS#2362's approve endpoint
+      // cannot preserve it as history. All three are timestamps on the account
+      // holder's own row and name no third party -- the downgrade's actor is a
+      // cron job, not a person.
       expect(bodyOf(name)).not.toMatch(/returned:\s*false/);
     }
   );

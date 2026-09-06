@@ -747,6 +747,31 @@ export const auth = betterAuth({
       selfSignupAt: { type: 'date', required: false, input: false },
       selfSignupReviewedAt: { type: 'date', required: false, input: false },
       selfSignupReviewedBy: { type: 'string', required: false, input: false, returned: false },
+      // selfSignupDowngradedAt (BS#2364): the marker jobs/station-signup-review
+      // stamps when it auto-downgrades an unreviewed account dj -> member.
+      //
+      // input: false for a sharper version of the reason above — this is the
+      // ONE field here whose value suppresses an automatic privilege action.
+      // The job's downgrade pass selects `AND self_signup_downgraded_at IS
+      // NULL`, so a signed-in DJ who could POST /update-user this column would
+      // exempt themselves from the 30-day backstop permanently, with nothing
+      // going red. Its only legitimate writer is the job's own `db.update`,
+      // which never touches parseUserInput.
+      //
+      // NOT `returned: false`, for exactly the reason the two sibling
+      // timestamps aren't, and the reason selfSignupReviewedBy is: `returned`
+      // is global rather than audience-scoped, and this timestamp names nobody
+      // but the account holder. It records what happened to the subject's own
+      // row, not who did it — the job is the actor, and it is not a person.
+      // Hiding it would hide it from `admin/list-users` too, which is the only
+      // payload dj-site's roster has: a manager looking at a `member`-role
+      // account in the review queue could not tell "auto-downgraded on
+      // 2026-08-06, still needs review" from "signed up as a member", and
+      // BS#2362's approve endpoint could not preserve it as history. The
+      // asymmetry with selfSignupReviewedBy is deliberate and one-sided: a
+      // third party's id is withheld, three of the subject's own timestamps
+      // are not.
+      selfSignupDowngradedAt: { type: 'date', required: false, input: false },
       // Cross-cutting capabilities independent of role hierarchy (e.g., 'editor', 'webmaster').
       //
       // input:false (BS#2358). This is the highest-stakes instance of the

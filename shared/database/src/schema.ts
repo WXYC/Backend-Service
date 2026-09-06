@@ -77,6 +77,27 @@ export const user = pgTable(
     selfSignupReviewedBy: varchar('self_signup_reviewed_by', { length: 255 }).references((): AnyPgColumn => user.id, {
       onDelete: 'set null',
     }),
+    // Terminal marker for the ONE automatic privilege downgrade in the fleet
+    // (BS#2364, jobs/station-signup-review). Set the moment that job flips an
+    // account's auth_member.role from 'dj' to 'member' after 30 days pending;
+    // NULL means the actuator has never fired for this account.
+    //
+    // It exists because the downgrade deliberately does NOT set
+    // selfSignupReviewedAt — that column is the manager's review queue, shared
+    // with dj-site's roster predicate, and stamping it would empty the queue
+    // and hide the account. Without a separate marker the downgraded account
+    // stays in the pending cohort forever and satisfies the 30-day cutoff on
+    // every subsequent run, so the moment a manager re-promotes it to 'dj' the
+    // next morning's run demotes it again — the "reversible with one roster
+    // edit" promise inverted into a trap. The job's downgrade pass therefore
+    // adds `AND self_signup_downgraded_at IS NULL`; the digest keeps selecting
+    // on selfSignupReviewedAt alone, so a downgraded-but-unreviewed account
+    // still nags daily.
+    //
+    // Never cleared by the job. A manager's re-promotion is a role edit, not a
+    // history edit, and BS#2362's approve endpoint should let this survive
+    // approval as the record of what happened to the account.
+    selfSignupDowngradedAt: timestamp('self_signup_downgraded_at', { withTimezone: true }),
   },
   (table) => [
     uniqueIndex('auth_user_email_key').on(table.email),

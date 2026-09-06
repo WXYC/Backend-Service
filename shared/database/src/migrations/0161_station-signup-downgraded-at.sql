@@ -1,0 +1,22 @@
+-- BS#2364 — the terminal marker for jobs/station-signup-review's automatic
+-- dj -> member downgrade. Without it the job has no way to tell "this account
+-- has already been through the actuator" from "this account is overdue", and
+-- re-fires on every re-promotion.
+--
+-- Per-column rationale deliberately does NOT live here — it lives at the
+-- column in shared/database/src/schema.ts, for the same reason 0160 gives:
+-- this file's SHA-256 is frozen in meta/applied-hashes.json the moment it is
+-- applied, so prose duplicated into it could never be corrected once schema.ts
+-- moves on (the #705 wedge).
+--
+-- @no-precondition-needed: adds one nullable column with no default and no
+-- constraint, so no existing row can violate anything.
+--
+-- Deliberately NOT indexed. The only reader is the daily cron's downgrade
+-- pass, which already sequentially scans auth_user for
+-- `self_signup_at IS NOT NULL AND self_signup_reviewed_at IS NULL` (neither of
+-- those is indexed either) over a table in the low thousands of rows; a third
+-- index on a column that is NULL for all but a handful of rows would cost
+-- every auth_user write and save that one nightly scan nothing.
+
+ALTER TABLE "auth_user" ADD COLUMN "self_signup_downgraded_at" timestamp with time zone;

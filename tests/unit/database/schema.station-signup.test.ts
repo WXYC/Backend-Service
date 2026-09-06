@@ -46,6 +46,12 @@ if (!entry) {
 const migrationPath = path.join(migrationsDir, `${entry.tag}.sql`);
 const migrationSql = fs.readFileSync(migrationPath, 'utf-8');
 
+const downgradeEntry = journal.entries.find((e) => e.tag.startsWith('0161_'));
+if (!downgradeEntry) {
+  throw new Error('No journal entry matches /^0161_/. Did the self_signup_downgraded_at migration land?');
+}
+const downgradeMigrationSql = fs.readFileSync(path.join(migrationsDir, `${downgradeEntry.tag}.sql`), 'utf-8');
+
 // Strip both full-line and inline `--` comments so the header prose can't
 // false-match the DDL assertions below. No DDL string literal in this
 // migration contains `--`.
@@ -59,6 +65,7 @@ const stripComments = (sql: string) =>
     .join('\n');
 
 const ddl = stripComments(migrationSql);
+const downgradeDdl = stripComments(downgradeMigrationSql);
 const schemaSource = fs.readFileSync(schemaPath, 'utf-8');
 
 const extractTableDef = (tableName: string): string => {
@@ -309,6 +316,42 @@ describe('schema: station-signup substrate (migration 0160, BS#2358)', () => {
       expect(schemaSource).toMatch(
         /index\('auth_user_self_signup_reviewed_by_idx'\)\.on\(table\.selfSignupReviewedBy\)/
       );
+    });
+  });
+
+  describe('auth_user.self_signup_downgraded_at (migration 0161, BS#2364)', () => {
+    it('adds it as a nullable timestamptz — the terminal marker for the auto-downgrade', () => {
+      expect(downgradeDdl).toMatch(
+        /ALTER TABLE "auth_user" ADD COLUMN "self_signup_downgraded_at" timestamp with time zone;/i
+      );
+      expect(downgradeDdl).not.toMatch(/NOT\s+NULL/i);
+      expect(downgradeDdl).not.toMatch(/DEFAULT/i);
+    });
+
+    it('declares the matching nullable column in schema.ts', () => {
+      expect(extractTableDef('user')).toMatch(
+        /selfSignupDowngradedAt:\s*timestamp\('self_signup_downgraded_at',\s*\{\s*withTimezone:\s*true\s*\}\)/
+      );
+      // Nullable: no `.notNull()` chained onto it, so every pre-existing row
+      // reads as "the actuator has never fired for this account".
+      expect(extractTableDef('user')).not.toMatch(/selfSignupDowngradedAt:[^,]*notNull\(\)/);
+    });
+
+    it('ships unindexed on purpose', () => {
+      // Its only reader is a daily cron that already sequentially scans
+      // auth_user for the pending cohort. A third index on a column that is
+      // NULL for all but a handful of rows would cost every auth_user write.
+      expect(downgradeDdl).not.toMatch(/CREATE INDEX/i);
+      expect(extractTableDef('user')).not.toMatch(/index\([^)]*\)\.on\(table\.selfSignupDowngradedAt\)/);
+    });
+
+    it('is a separate column from self_signup_reviewed_at, which the downgrade must never stamp', () => {
+      // The downgrade deliberately leaves self_signup_reviewed_at alone: that
+      // column is the manager's review queue, shared verbatim with dj-site's
+      // roster predicate, so stamping it would empty the queue and make the
+      // account permanently invisible. This column exists precisely so the
+      // actuator has somewhere else to record that it fired.
+      expect(downgradeDdl).not.toMatch(/self_signup_reviewed_at/);
     });
   });
 
