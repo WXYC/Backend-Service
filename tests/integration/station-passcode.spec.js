@@ -18,6 +18,12 @@
  *      closed, never silently classify as "no match".
  *   5. The cooldown must never revoke a passcode, and clearing it must
  *      delete no attempt rows while still acting as a floor on the window.
+ *   6. Mark-and-exclude: an undecryptable INACTIVE row must be marked on the
+ *      first classification that meets it and excluded from every later
+ *      sweep, so the brute-force cooldown goes blind for one attempt rather
+ *      than for the 30-day classification horizon. Both halves are a
+ *      statement's effect on a real row, which is precisely what a mock
+ *      cannot show.
  */
 
 // See jobs/artist-unicode-dedup-merge.spec.js for the fuller explanation:
@@ -335,30 +341,95 @@ describe('station-passcode lifecycle (BS#2359, real Postgres)', () => {
     });
   });
 
-  describe('passcode_unverifiable classification', () => {
-    it('classifies a no-match against a skipped in-horizon inactive row as unverifiable', async () => {
-      // Inactive (already expired) and encrypted under a key nobody holds:
-      // classification must skip it, and the skip must not fall through to
-      // passcode_fail, the one token that feeds refusal.
-      const id = `test-unverifiable-${Date.now()}`;
+  describe('passcode_unverifiable classification heals itself (mark-and-exclude)', () => {
+    /** An INACTIVE (already expired) row encrypted under a key nobody holds. */
+    async function insertUndecryptableInactiveRow(id, { revokedAt = null, revokedReason = null } = {}) {
       await sql`
-        INSERT INTO station_passcode (id, code_encrypted, expires_at, max_uses)
-        VALUES (${id}, ${encryptStationPasscodeValue('WXYC2026', randomBytes(32))}, ${new Date(Date.now() - 60_000)}, 25)
+        INSERT INTO station_passcode (id, code_encrypted, expires_at, max_uses, revoked_at, revoked_reason)
+        VALUES (
+          ${id},
+          ${encryptStationPasscodeValue('WXYC2026', randomBytes(32))},
+          ${new Date(Date.now() - 60_000)},
+          25,
+          ${revokedAt},
+          ${revokedReason}
+        )
       `;
+      return id;
+    }
+
+    it('logs unverifiable and MARKS the poisoned row on the first attempt, then classifies cleanly on the second', async () => {
+      // The finding this closes (BS#2359 review 3): `passcode_unverifiable`
+      // is refusal-exempt by design, so ONE undecryptable in-horizon row used
+      // to relabel 100% of would-be `passcode_fail` attempts, pin
+      // noMatchFailureCount at 0, and disable the brute-force cooldown — whose
+      // trigger reads only `passcode_fail` — for up to the whole 30-day
+      // classification horizon. Both production paths create that state:
+      // rotation's auto-revoke, and the runbook's key-retirement step.
+      const id = await insertUndecryptableInactiveRow(`test-unverifiable-${Date.now()}`);
       expect(await activeCount()).toBe(0);
 
-      const result = await verifyStationPasscode('ZZZZZZZZ');
-      expect(result.ok).toBe(false);
-      expect(result.cooldown).toBe(false);
+      // FIRST attempt: honest about not knowing, and refusal-exempt.
+      const first = await verifyStationPasscode('ZZZZZZZZ');
+      expect(first.ok).toBe(false);
+      expect(first.cooldown).toBe(false);
 
-      const attempts = await sql`SELECT outcome, passcode_id FROM station_signup_attempt`;
-      expect(attempts).toHaveLength(1);
-      expect(attempts[0].outcome).toBe('passcode_unverifiable');
-      expect(attempts[0].passcode_id).toBeNull();
+      const afterFirst = await sql`SELECT outcome, passcode_id FROM station_signup_attempt`;
+      expect(afterFirst).toHaveLength(1);
+      expect(afterFirst[0].outcome).toBe('passcode_unverifiable');
+      expect(afterFirst[0].passcode_id).toBeNull();
+
+      // ...and it healed the row on its way out: marked, and revoked_at
+      // filled in because it was still NULL (expired but never revoked).
+      const [marked] = await sql`SELECT revoked_at, revoked_reason FROM station_passcode WHERE id = ${id}`;
+      expect(marked.revoked_reason).toBe(STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON);
+      expect(marked.revoked_at).not.toBeNull();
+
+      // SECOND attempt: the marked row is excluded from the sweep, so the
+      // no-match classifies as passcode_fail and reaches the cooldown.
+      const second = await verifyStationPasscode('ZZZZZZZZ');
+      expect(second.ok).toBe(false);
+
+      const outcomes = await sql`SELECT outcome FROM station_signup_attempt ORDER BY attempted_at`;
+      expect(outcomes.map((a) => a.outcome)).toEqual(['passcode_unverifiable', 'passcode_fail']);
 
       const evaluation = await evaluateSignupCooldown();
-      expect(evaluation.noMatchFailureCount).toBe(0);
-      expect(evaluation.allFailureCount).toBe(1);
+      expect(evaluation.noMatchFailureCount).toBe(1);
+      expect(evaluation.allFailureCount).toBe(2);
+    });
+
+    it('excludes an already-marked row from classification from the very first attempt', async () => {
+      // The post-rotation path. rotateStationPasscode's auto-revoke writes
+      // this exact marker, so a row it retired never blinds classification
+      // for even one attempt.
+      await insertUndecryptableInactiveRow(`test-premarked-${Date.now()}`, {
+        revokedAt: new Date(Date.now() - 30_000),
+        revokedReason: STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON,
+      });
+
+      await verifyStationPasscode('ZZZZZZZZ');
+
+      const attempts = await sql`SELECT outcome FROM station_signup_attempt`;
+      expect(attempts.map((a) => a.outcome)).toEqual(['passcode_fail']);
+      expect((await evaluateSignupCooldown()).noMatchFailureCount).toBe(1);
+    });
+
+    it('overwrites a different revoked_reason but keeps the original revoked_at', async () => {
+      // The marker is what the cooldown depends on, so it wins; the operator
+      // prose it replaces survives in the loud log line instead. revoked_at
+      // is COALESCEd, never overwritten — the row was already dead at that
+      // timestamp and rewriting it would falsify the audit trail.
+      const revokedAt = new Date(Date.now() - 5 * 60_000);
+      const id = await insertUndecryptableInactiveRow(`test-remark-${Date.now()}`, {
+        revokedAt,
+        revokedReason: 'manager revoked it',
+      });
+
+      await verifyStationPasscode('ZZZZZZZZ');
+
+      const [row] = await sql`SELECT revoked_at, revoked_reason FROM station_passcode WHERE id = ${id}`;
+      expect(row.revoked_reason).toBe(STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON);
+      expect(new Date(row.revoked_at).getTime()).toBe(revokedAt.getTime());
     });
 
     it('still returns passcode_fail when every in-horizon inactive row decrypted cleanly', async () => {
@@ -369,6 +440,11 @@ describe('station-passcode lifecycle (BS#2359, real Postgres)', () => {
 
       const attempts = await sql`SELECT outcome FROM station_signup_attempt`;
       expect(attempts.map((a) => a.outcome)).toEqual(['passcode_fail']);
+
+      // A decryptable row must NOT be marked — mark-and-exclude only ever
+      // touches rows nothing can read.
+      const [row] = await sql`SELECT revoked_reason FROM station_passcode WHERE id = ${id}`;
+      expect(row.revoked_reason).toBe('test revoke');
     });
   });
 

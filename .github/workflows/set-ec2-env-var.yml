@@ -147,7 +147,12 @@ jobs:
           # survivable but destructive: rotateStationPasscode then
           # administratively revokes the rows it cannot decrypt so the gate
           # comes back up, and the sticky notes carrying the old code are
-          # dead. Full runbook: docs/env-vars.md and the module header.
+          # dead. Step 4 leaves old-key INACTIVE rows unreadable, which used
+          # to silently disable the brute-force cooldown for 30 days; those
+          # rows are now marked 'undecryptable_after_key_rotation' on first
+          # encounter and excluded from classification thereafter, so the
+          # blind window is one attempt per row and needs no operator step.
+          # Full runbook: docs/env-vars.md and the module header.
           #
           # STATION_SIGNUP_IP_HMAC_KEY is also 64 hex characters
           # (32 raw bytes) — keys the `station_signup_attempt.ip_hash` HMAC
