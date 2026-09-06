@@ -416,6 +416,18 @@ describe('provisionUser()', () => {
       await expect(provisionUser(validInput)).rejects.toMatchObject({ statusCode: 409 });
     });
 
+    // BS#2361 review. Not a DB constraint violation: better-auth's own
+    // `username` plugin create hook duplicate-checks the lowercased username
+    // on every direct `internalAdapter.createUser` call and throws this exact
+    // string. It matched none of the older `unique`/`duplicate`/`already
+    // exists` needles, so it escaped as an unhandled 500 — with a station
+    // passcode use already claimed, on the one caller that has one to lose.
+    it("should throw 409 on better-auth's own 'Username is already taken' error", async () => {
+      mockCreateUser.mockRejectedValue(new Error('Username is already taken. Please try another.'));
+
+      await expect(provisionUser(validInput)).rejects.toMatchObject({ statusCode: 409 });
+    });
+
     it('should rethrow non-uniqueness errors from createUser', async () => {
       mockCreateUser.mockRejectedValue(new Error('connection timeout'));
 

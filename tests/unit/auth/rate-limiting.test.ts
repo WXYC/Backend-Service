@@ -43,4 +43,44 @@ describe('Auth service rate limiting', () => {
       /app\.use\(\s*['"]\/auth\/get-session['"]\s*,\s*getSessionIpRateLimit\s*,\s*getSessionIdentityRateLimit\s*\)/
     );
   });
+
+  // BS#2361. Two properties, and the source text is the only place to pin
+  // either: isTestEnv disables every mounted limiter, so nothing exercises
+  // this configuration at runtime in the suite.
+  //
+  //   1. The dedicated limiter is 60s/120 on the exact path, keyed by
+  //      rateLimitKeyFromRequest. Anything tighter locks out the whole
+  //      control room, which shares one IP.
+  //   2. The path is NOT in `rateLimitedPaths`. That tier is 10 per 15
+  //      minutes; three DJs fumbling a hand-copied code would take the
+  //      station off the signup path for a quarter of an hour with no
+  //      manager on site (issue body, "Do not add this to rateLimitedPaths").
+  describe('station signup (BS#2361)', () => {
+    it('mounts its own 60s/120 limiter on /auth/wxyc/station-signup, keyed by rateLimitKeyFromRequest', () => {
+      expect(authAppSource).toMatch(
+        /const stationSignupRateLimit = rateLimit\(\{[\s\S]*?windowMs: 60_000,[\s\S]*?limit: 120,[\s\S]*?keyGenerator: rateLimitKeyFromRequest,[\s\S]*?\}\);/
+      );
+      expect(authAppSource).toMatch(
+        /app\.use\(\s*['"]\/auth\/wxyc\/station-signup['"]\s*,\s*stationSignupRateLimit\s*\)/
+      );
+    });
+
+    it('keeps /auth/wxyc/station-signup out of the 10/15min rateLimitedPaths tier', () => {
+      const tier = authAppSource.match(/const rateLimitedPaths = \[([\s\S]*?)\n {2}\];/)?.[1];
+      expect(tier).toBeDefined();
+      expect(tier).not.toMatch(/station-signup/);
+    });
+
+    // The route and its limiter are mounted only when the feature is on, so
+    // a disabled deployment falls through to better-auth's catch-all and is
+    // indistinguishable from one that never shipped the endpoint.
+    it('gates both the limiter and the route on isStationSignupEnabled()', () => {
+      expect(authAppSource).toMatch(
+        /if \(isStationSignupEnabled\(\)\) \{[\s\S]*?const stationSignupRateLimit = rateLimit\(/
+      );
+      expect(authAppSource).toMatch(
+        /if \(isStationSignupEnabled\(\)\) \{\s*app\.post\(\s*['"]\/auth\/wxyc\/station-signup['"]\s*,\s*stationSignupHandler\s*\);\s*\}/
+      );
+    });
+  });
 });

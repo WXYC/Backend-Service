@@ -272,10 +272,10 @@ describe('POST /auth/wxyc/station-signup (BS#2361, real Postgres + live auth ser
 
     it('refuses with a wait-time message once the no-match threshold is crossed, without ever touching a passcode row', async () => {
       const { id, code } = await rotateStationPasscode();
-      // SIGNUP_COOLDOWN_THRESHOLD is "more than 20 in 10 minutes" — the
-      // existence check passes every time (this email/username is never
-      // actually created, since the code is wrong), so every attempt reaches
-      // verifyStationPasscode and logs a genuine passcode_fail.
+      // SIGNUP_COOLDOWN_THRESHOLD is "more than 20 in 10 minutes". The
+      // passcode gate is the FIRST thing a well-formed request reaches, so
+      // every one of these logs a genuine passcode_fail regardless of what
+      // the rest of the body says.
       const wrongBody = validBody();
       for (let i = 0; i < 21; i++) {
         // eslint-disable-next-line no-await-in-loop
@@ -293,7 +293,7 @@ describe('POST /auth/wxyc/station-signup (BS#2361, real Postgres + live auth ser
     });
   });
 
-  describe('pre-claim validation — duplicates and weak input never touch the passcode', () => {
+  describe('pre-claim validation — duplicates and weak input never CLAIM a use', () => {
     it('rejects a duplicate email without claiming a use', async () => {
       const { id, code } = await rotateStationPasscode();
       const first = validBody();
@@ -330,6 +330,93 @@ describe('POST /auth/wxyc/station-signup (BS#2361, real Postgres + live auth ser
       const { res } = await postSignup(authBaseUrl, code, body);
       expect(res.status).toBe(400);
       expect((await passcodeRow(id)).use_count).toBe(0);
+    });
+
+    // BS#2361 review, finding 2. better-auth's username plugin lowercases on
+    // store and duplicate-checks the lowercased value, so a raw-case
+    // pre-check missed this row entirely: the request claimed a use and then
+    // died inside the plugin's create hook with "Username is already taken.
+    // Please try another." — a 500 with the use burned.
+    it('rejects a case-variant duplicate username as a 409, without claiming a second use', async () => {
+      const { id, code } = await rotateStationPasscode();
+      const first = validBody();
+      const okRes = await postSignup(authBaseUrl, code, first);
+      expect(okRes.res.status).toBe(201);
+      createdUserIds.push(okRes.json.userId);
+      expect((await passcodeRow(id)).use_count).toBe(1);
+
+      const second = validBody({ username: first.username.toUpperCase() });
+      const { res } = await postSignup(authBaseUrl, code, second);
+      expect(res.status).toBe(409);
+      expect((await passcodeRow(id)).use_count).toBe(1);
+    });
+
+    it('stores and echoes the username lowercased', async () => {
+      const { code } = await rotateStationPasscode();
+      const body = validBody();
+      const mixedCase = { ...body, username: body.username.toUpperCase() };
+
+      const { res, json } = await postSignup(authBaseUrl, code, mixedCase);
+      expect(res.status).toBe(201);
+      createdUserIds.push(json.userId);
+
+      expect(json.username).toBe(body.username.toLowerCase());
+      const [userRow] = await sql`SELECT username FROM auth_user WHERE id = ${json.userId}`;
+      expect(userRow.username).toBe(body.username.toLowerCase());
+    });
+
+    it('rejects an over-length realName without claiming a use', async () => {
+      const { id, code } = await rotateStationPasscode();
+      const body = validBody({ realName: 'R'.repeat(256) });
+
+      const { res } = await postSignup(authBaseUrl, code, body);
+      expect(res.status).toBe(400);
+      expect((await passcodeRow(id)).use_count).toBe(0);
+    });
+  });
+
+  // BS#2361 review, finding 1. The existence checks used to run BEFORE the
+  // passcode was ever looked at, so an unauthenticated caller with a garbage
+  // code read email-registration status straight off the status code (409
+  // EMAIL_TAKEN, with the address echoed back, versus 401) — and those
+  // pre-claim rejections wrote no station_signup_attempt row at all, leaving
+  // the probe invisible to the cooldown and to #2362/#2364.
+  describe('the passcode gate runs before anything a caller can enumerate', () => {
+    it('answers a garbage passcode identically for a registered and an unregistered email', async () => {
+      const { code } = await rotateStationPasscode();
+
+      // Register one address for real, so the two probes below differ only
+      // in whether the email exists.
+      const registered = validBody();
+      const okRes = await postSignup(authBaseUrl, code, registered);
+      expect(okRes.res.status).toBe(201);
+      createdUserIds.push(okRes.json.userId);
+
+      const takenProbe = await postSignup(authBaseUrl, 'ZZZZZZZZ', validBody({ email: registered.email }));
+      const freshProbe = await postSignup(authBaseUrl, 'ZZZZZZZZ', validBody());
+
+      expect(takenProbe.res.status).toBe(401);
+      expect(takenProbe.res.status).toBe(freshProbe.res.status);
+      expect(JSON.stringify(takenProbe.json)).toBe(JSON.stringify(freshProbe.json));
+      // And neither probe echoes the address it was handed.
+      expect(JSON.stringify(takenProbe.json)).not.toContain(registered.email);
+    });
+
+    it('logs an attempt row for a garbage passcode carrying an already-registered email', async () => {
+      const { code } = await rotateStationPasscode();
+      const registered = validBody();
+      const okRes = await postSignup(authBaseUrl, code, registered);
+      expect(okRes.res.status).toBe(201);
+      createdUserIds.push(okRes.json.userId);
+
+      await sql`DELETE FROM station_signup_attempt`;
+      const { res } = await postSignup(authBaseUrl, 'ZZZZZZZZ', validBody({ email: registered.email }));
+      expect(res.status).toBe(401);
+
+      // Exactly one row, and it is the refusal token the cooldown counts —
+      // the old ordering wrote nothing here.
+      const attempts = await sql`SELECT outcome FROM station_signup_attempt`;
+      expect(attempts.map((a) => a.outcome)).toEqual(['passcode_fail']);
     });
   });
 });

@@ -1239,7 +1239,7 @@ async function classifyInactiveStationPasscode(code: string, now: Date): Promise
 }
 
 // ---------------------------------------------------------------------------
-// Verification (+ implicit cooldown gate, + the use-claim)
+// Verification: the MATCH phase, the CLAIM phase, and the fused wrapper
 // ---------------------------------------------------------------------------
 
 export interface VerifyStationPasscodeOptions {
@@ -1267,32 +1267,76 @@ export interface VerifyStationPasscodeResult {
   cooldown: boolean;
 }
 
+export interface MatchStationPasscodeResult extends VerifyStationPasscodeResult {
+  /**
+   * The row the submitted code matched, to hand straight to
+   * `claimStationPasscode`. Non-null IFF `ok`.
+   *
+   * Internal plumbing between the two phases, never a response field: two
+   * callers who both saw the same id would learn they are holding the same
+   * physical sticky note, and the whole point of the generic refusal is
+   * that the caller learns nothing about WHICH row anything matched.
+   */
+  passcodeId: string | null;
+}
+
 /**
- * Verify a submitted code and, on a genuine match, claim one use.
+ * MATCH phase — "does this code name a live passcode row?" Claims nothing.
  *
- * Ordering, per the issue body: the cooldown check runs BEFORE
- * verification (a refusal must never decrypt anything or touch a passcode
- * row), and any caller-side validation unrelated to which passcode row
- * matched (e.g. #2361's username checks) must run before calling this
- * function at all — the use-claim below must never fire for a request that
- * is going to be rejected for an unrelated reason, or a fumbled username
- * burns a real code's limited uses.
+ * Split out of the fused `verifyStationPasscode` for BS#2361's endpoint,
+ * which has to run work BETWEEN the two phases. The endpoint owes two
+ * properties that a single fused call cannot deliver at once:
+ *
+ *   1. An unauthenticated caller must learn nothing — not even whether an
+ *      email is registered — until they have proven they hold a live code.
+ *      So the gate has to run BEFORE the email/username existence checks.
+ *   2. A typo must never burn one of a code's 25 uses. So the use-claim has
+ *      to run AFTER them.
+ *
+ * Fusing match and claim forces a choice between the two; splitting them
+ * satisfies both. See apps/auth/station-signup.ts's docblock.
+ *
+ * ATTEMPT-LOG INVARIANT. The match/claim pair writes EXACTLY ONE
+ * `station_signup_attempt` row per verification, on every path:
+ *
+ *   - cooldown armed        -> `cooldown_refused` here, no claim follows
+ *   - active row won't decrypt -> `passcode_unverifiable` here, then throws
+ *   - no match              -> the classification token here (`passcode_fail`
+ *                              / `_expired` / `_revoked` / `_unverifiable`),
+ *                              mark-and-exclude untouched
+ *   - match                 -> NOTHING here; the row is the claim's to write
+ *
+ * That last line is the whole reason this function is quiet on success: a
+ * match row written here plus the claim's own row would double-count every
+ * successful signup for #2362's status endpoint and #2364's digest, and
+ * would put a second row in front of the integration suite's
+ * `['passcode_ok']` assertion.
+ *
+ * The ONE gap, and it is the caller's: a caller that matches and then
+ * abandons without claiming (station-signup's duplicate-email 409) leaves no
+ * row. That caller already held a live passcode, so the signal it gets is
+ * the enumeration oracle the issue body accepts by name, not an
+ * unauthenticated leak — and it is unchanged from the shipped behaviour,
+ * where the same rejection happened even earlier.
+ *
+ * Ordering, per the issue body: the cooldown check runs BEFORE verification
+ * — a refusal must never decrypt anything or touch a passcode row.
  *
  * The classification split (passcode_fail vs. _expired/_revoked/_exhausted)
  * lives ONLY in the attempt log. The return value here stays generic on
  * purpose — see the outcome vocabulary table in the issue body.
  */
-export async function verifyStationPasscode(
+export async function matchStationPasscode(
   code: string,
   options: VerifyStationPasscodeOptions = {}
-): Promise<VerifyStationPasscodeResult> {
+): Promise<MatchStationPasscodeResult> {
   const now = options.now ?? new Date();
   const ipHash = deriveStationSignupIpHash(options.rawClientIp);
 
   const cooldown = await evaluateSignupCooldown(now);
   if (cooldown.inCooldown) {
     await insertSignupAttempt({ outcome: 'cooldown_refused', ipHash, attemptedAt: now });
-    return { ok: false, cooldown: true };
+    return { ok: false, cooldown: true, passcodeId: null };
   }
 
   const activeRows = await db.select().from(station_passcode).where(activePasscodePredicate(now));
@@ -1323,44 +1367,9 @@ export async function verifyStationPasscode(
   }
 
   const matchedId = findActivePasscodeMatch(decrypted, code);
-
   if (matchedId) {
-    // Single conditional UPDATE — atomic on its own under READ COMMITTED,
-    // no advisory lock, no CHECK. Zero rows back means the claim lost;
-    // that classifies as passcode_exhausted (issue body), which is
-    // refusal-exempt because the submitted code was CORRECT.
-    //
-    // The predicate re-checks the full active predicate, not just the use
-    // cap (BS#2359 review). Revocation is this design's one authoritative
-    // manual lever — the cooldown deliberately never revokes anything — so
-    // a code revoked between the SELECT above and this UPDATE must not
-    // still be claimable; likewise one that expired in the same gap. Both
-    // widen the same race the `use_count < max_uses` term already closes.
-    // A loser here stays passcode_exhausted rather than costing another
-    // SELECT to re-read why: it IS the claim-race token by definition, it
-    // never feeds refusal either way, and the row's own revoked_at /
-    // expires_at carry the reason for anyone auditing later.
-    //
-    // `now.toISOString()`, not the bare Date: postgres-js's raw bind encoder
-    // (unlike drizzle's typed `.set()`/`.values()`, which converts through
-    // the column's own timestamp mode) requires a string/Buffer parameter
-    // and throws a low-level TypeError on a Date object.
-    const claimRows = (await db.execute(sql`
-      UPDATE ${station_passcode}
-      SET use_count = use_count + 1, last_used_at = ${now.toISOString()}
-      WHERE id = ${matchedId}
-        AND use_count < max_uses
-        AND revoked_at IS NULL
-        AND expires_at > ${now.toISOString()}
-      RETURNING id
-    `)) as unknown as Array<{ id: string }>;
-
-    if (claimRows.length > 0) {
-      await insertSignupAttempt({ outcome: 'passcode_ok', passcodeId: matchedId, ipHash, attemptedAt: now });
-      return { ok: true, cooldown: false };
-    }
-    await insertSignupAttempt({ outcome: 'passcode_exhausted', passcodeId: matchedId, ipHash, attemptedAt: now });
-    return { ok: false, cooldown: false };
+    // No attempt row — see the ATTEMPT-LOG INVARIANT above. The claim owns it.
+    return { ok: true, cooldown: false, passcodeId: matchedId };
   }
 
   const classification = await classifyInactiveStationPasscode(code, now);
@@ -1370,7 +1379,94 @@ export async function verifyStationPasscode(
     ipHash,
     attemptedAt: now,
   });
+  return { ok: false, cooldown: false, passcodeId: null };
+}
+
+/**
+ * CLAIM phase — take one use of the row `matchStationPasscode` just matched.
+ *
+ * Single conditional UPDATE — atomic on its own under READ COMMITTED, no
+ * advisory lock, no CHECK. Zero rows back means the claim lost; that
+ * classifies as `passcode_exhausted` (issue body), which is refusal-exempt
+ * because the submitted code was CORRECT.
+ *
+ * The predicate re-checks the full active predicate, not just the use cap
+ * (BS#2359 review). Revocation is this design's one authoritative manual
+ * lever — the cooldown deliberately never revokes anything — so a code
+ * revoked between the match and this UPDATE must not still be claimable;
+ * likewise one that expired in the same gap. Both widen the same race the
+ * `use_count < max_uses` term already closes. A loser here stays
+ * `passcode_exhausted` rather than costing another SELECT to re-read why:
+ * it IS the claim-race token by definition, it never feeds refusal either
+ * way, and the row's own revoked_at / expires_at carry the reason for anyone
+ * auditing later.
+ *
+ * Splitting the phases WIDENS that race by however long the caller spends in
+ * between (station-signup: two indexed existence reads). Deliberate and
+ * bounded: the loser gets the same generic 401 every other refusal gets and
+ * retries, and no use is burned. That is the accepted residual for making
+ * the gate run before the enumeration-observable checks.
+ *
+ * Writes exactly one attempt row, always — `passcode_ok` on a won claim,
+ * `passcode_exhausted` on a lost one.
+ */
+export async function claimStationPasscode(
+  passcodeId: string,
+  options: VerifyStationPasscodeOptions = {}
+): Promise<VerifyStationPasscodeResult> {
+  const now = options.now ?? new Date();
+  const ipHash = deriveStationSignupIpHash(options.rawClientIp);
+
+  // `now.toISOString()`, not the bare Date: postgres-js's raw bind encoder
+  // (unlike drizzle's typed `.set()`/`.values()`, which converts through
+  // the column's own timestamp mode) requires a string/Buffer parameter
+  // and throws a low-level TypeError on a Date object.
+  const claimRows = (await db.execute(sql`
+      UPDATE ${station_passcode}
+      SET use_count = use_count + 1, last_used_at = ${now.toISOString()}
+      WHERE id = ${passcodeId}
+        AND use_count < max_uses
+        AND revoked_at IS NULL
+        AND expires_at > ${now.toISOString()}
+      RETURNING id
+    `)) as unknown as Array<{ id: string }>;
+
+  if (claimRows.length > 0) {
+    await insertSignupAttempt({ outcome: 'passcode_ok', passcodeId, ipHash, attemptedAt: now });
+    return { ok: true, cooldown: false };
+  }
+  await insertSignupAttempt({ outcome: 'passcode_exhausted', passcodeId, ipHash, attemptedAt: now });
   return { ok: false, cooldown: false };
+}
+
+/**
+ * Verify a submitted code and, on a genuine match, claim one use — the
+ * fused match-then-claim, kept as the module's original entry point.
+ *
+ * Signature and semantics are unchanged from before the split (same result
+ * shape, same single attempt row, same generic return), so every existing
+ * caller and test keeps binding the shared logic rather than a copy of it.
+ * Callers that must interleave their own work between the two phases —
+ * BS#2361's endpoint, which runs its existence checks there — call
+ * `matchStationPasscode` and `claimStationPasscode` directly instead.
+ *
+ * Both phases share ONE resolved `now` so an injected test clock still
+ * stamps a single instant across the pair.
+ *
+ * Any caller-side validation unrelated to which passcode row matched must
+ * still run before the CLAIM, or a fumbled username burns a real code's
+ * limited uses.
+ */
+export async function verifyStationPasscode(
+  code: string,
+  options: VerifyStationPasscodeOptions = {}
+): Promise<VerifyStationPasscodeResult> {
+  const now = options.now ?? new Date();
+  const matched = await matchStationPasscode(code, { ...options, now });
+  if (!matched.ok || !matched.passcodeId) {
+    return { ok: matched.ok, cooldown: matched.cooldown };
+  }
+  return claimStationPasscode(matched.passcodeId, { ...options, now });
 }
 
 // ---------------------------------------------------------------------------
