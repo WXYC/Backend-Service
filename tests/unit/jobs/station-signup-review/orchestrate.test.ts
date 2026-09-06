@@ -186,7 +186,7 @@ describe('orchestrate.run()', () => {
     expect(mockLog).toHaveBeenCalledWith('error', 'downgrade_failed', expect.any(String), expect.anything());
   });
 
-  it('logs a raced account (role changed between plan and write) as a warning, not a failure', async () => {
+  it('logs a raced account (state changed between plan and write) as a warning, not a failure', async () => {
     happyPath();
     mockApplyDowngrades.mockResolvedValue({ downgraded: [], raced: [PENDING_ROW], failed: [] } as never);
 

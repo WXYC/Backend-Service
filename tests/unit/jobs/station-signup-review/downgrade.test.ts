@@ -47,7 +47,12 @@ const fakeDb: Record<string, unknown> = {
   transaction: mockTransaction,
 };
 
-const USER_TABLE = { __table: 'auth_user', id: 'id', selfSignupDowngradedAt: 'self_signup_downgraded_at' };
+const USER_TABLE = {
+  __table: 'auth_user',
+  id: 'id',
+  selfSignupReviewedAt: 'self_signup_reviewed_at',
+  selfSignupDowngradedAt: 'self_signup_downgraded_at',
+};
 const MEMBER_TABLE = { __table: 'auth_member', id: 'id', userId: 'userId', role: 'role' };
 const SHOWS_TABLE = { __table: 'shows', id: 'id', end_time: 'end_time', primary_dj_id: 'primary_dj_id' };
 const SHOW_DJS_TABLE = { __table: 'show_djs', show_id: 'show_id', dj_id: 'dj_id' };
@@ -288,7 +293,52 @@ describe('applyDowngrades', () => {
     downgradedAt: OVERDUE_NOW,
   });
 
+  /** Steer the in-transaction re-check: still-pending, i.e. neither reviewed nor already downgraded. */
+  const stillPending = (): void => {
+    selectResults.push([{ id: 'u1' }]);
+  };
+
+  it('re-checks self_signup_reviewed_at and self_signup_downgraded_at before touching anything', async () => {
+    stillPending();
+    mockReturning.mockResolvedValueOnce([{ id: 'm1' }]);
+
+    await applyDowngrades(fakeDb as never, [plannedFor(row())], OVERDUE_NOW);
+
+    expect(mockSelectWhere).toHaveBeenCalledWith({
+      and: [
+        { eq: [USER_TABLE.id, 'u1'] },
+        { isNull: USER_TABLE.selfSignupReviewedAt },
+        { isNull: USER_TABLE.selfSignupDowngradedAt },
+      ],
+    });
+  });
+
+  it('aborts as raced -- no role flip, no marker -- when a review landed between plan and apply', async () => {
+    // The re-check finds the account no longer pending: a manager reviewed it
+    // during the notify window.
+    selectResults.push([]);
+
+    const result = await applyDowngrades(fakeDb as never, [plannedFor(row())], OVERDUE_NOW);
+
+    expect(result.downgraded).toEqual([]);
+    expect(result.raced).toEqual([expect.objectContaining({ userId: 'u1' })]);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it('aborts as raced when a concurrent run already stamped the downgrade marker', async () => {
+    // Same re-check, different real-world cause: a competing run of this job
+    // downgraded the account first. Either way the row comes back empty.
+    selectResults.push([]);
+
+    const result = await applyDowngrades(fakeDb as never, [plannedFor(row())], OVERDUE_NOW);
+
+    expect(result.raced).toEqual([expect.objectContaining({ userId: 'u1' })]);
+    expect(mockUpdate).not.toHaveBeenCalledWith(MEMBER_TABLE);
+    expect(mockUpdate).not.toHaveBeenCalledWith(USER_TABLE);
+  });
+
   it('writes ONLY auth_member.role and auth_user.self_signup_downgraded_at -- never auth_user.role', async () => {
+    stillPending();
     mockReturning.mockResolvedValueOnce([{ id: 'm1' }]);
 
     const result = await applyDowngrades(fakeDb as never, [plannedFor(row())], OVERDUE_NOW);
@@ -310,6 +360,7 @@ describe('applyDowngrades', () => {
   });
 
   it('puts the role flip and the marker stamp in ONE transaction -- half the pair is a defect either way', async () => {
+    stillPending();
     mockReturning.mockResolvedValueOnce([{ id: 'm1' }]);
 
     await applyDowngrades(fakeDb as never, [plannedFor(row())], OVERDUE_NOW);
@@ -318,6 +369,7 @@ describe('applyDowngrades', () => {
   });
 
   it('scopes the auth_member UPDATE to the account AND role=dj', async () => {
+    stillPending();
     mockReturning.mockResolvedValueOnce([{ id: 'm1' }]);
 
     await applyDowngrades(fakeDb as never, [plannedFor(row())], OVERDUE_NOW);
@@ -328,6 +380,7 @@ describe('applyDowngrades', () => {
   });
 
   it('stamps the marker only where it is still NULL, so a re-run cannot rewrite the original date', async () => {
+    stillPending();
     mockReturning.mockResolvedValueOnce([{ id: 'm1' }]);
 
     await applyDowngrades(fakeDb as never, [plannedFor(row())], OVERDUE_NOW);
@@ -338,7 +391,9 @@ describe('applyDowngrades', () => {
   });
 
   it('reports a raced account and stamps NO marker when the role guard matched nothing', async () => {
-    // The account left `dj` between the plan and the write.
+    // The re-check passes -- still pending -- but the account left `dj`
+    // between the plan and the write.
+    stillPending();
     mockReturning.mockResolvedValueOnce([]);
 
     const result = await applyDowngrades(fakeDb as never, [plannedFor(row())], OVERDUE_NOW);
@@ -363,6 +418,7 @@ describe('applyDowngrades', () => {
     mockTransaction
       .mockImplementationOnce(() => Promise.reject(new Error('deadlock detected')))
       .mockImplementationOnce(async (fn: (tx: unknown) => Promise<boolean>) => fn(fakeDb));
+    stillPending();
     mockReturning.mockResolvedValueOnce([{ id: 'm2' }]);
 
     const result = await applyDowngrades(

@@ -300,6 +300,56 @@ describe('station-signup-review downgrade (REAL fns, real PG)', () => {
     expect((await authUserRowOf(userId)).self_signup_downgraded_at).toBeNull();
   });
 
+  it('aborts the flip as raced when a review lands between plan and apply', async () => {
+    const userId = await seedAccount({ daysPending: 31, memberRole: 'dj' });
+
+    const pending = (await queryPendingSelfSignups()).filter((r) => r.userId === userId);
+    const decisions = await planDowngrades(db, pending, new Date());
+    expect(decisions[0].status).toBe('downgraded');
+
+    // A manager reviews the account during the notify window, after the plan
+    // was computed but before the apply transaction runs.
+    await sql`UPDATE auth_user SET self_signup_reviewed_at = now() WHERE id = ${userId}`;
+
+    const applied = await applyDowngrades(db, decisions, new Date());
+
+    expect(applied.downgraded).toEqual([]);
+    expect(applied.raced.map((r) => r.userId)).toEqual([userId]);
+
+    // No flip, no marker: the auth_user.role sentinel and the member role
+    // are both untouched by this run.
+    expect(await memberRoleOf(userId)).toBe('dj');
+    const user = await authUserRowOf(userId);
+    expect(user.role).toBe(SENTINEL_AUTH_USER_ROLE);
+    expect(user.self_signup_downgraded_at).toBeNull();
+  });
+
+  it('does no double work when the marker is stamped concurrently between plan and apply', async () => {
+    const userId = await seedAccount({ daysPending: 31, memberRole: 'dj' });
+
+    const pending = (await queryPendingSelfSignups()).filter((r) => r.userId === userId);
+    const decisions = await planDowngrades(db, pending, new Date());
+    expect(decisions[0].status).toBe('downgraded');
+
+    // A competing run of this same job downgrades the account first: the
+    // role flip AND the marker land before this run's apply transaction.
+    await sql`UPDATE auth_member SET role = 'member' WHERE user_id = ${userId}`;
+    await sql`UPDATE auth_user SET self_signup_downgraded_at = now() WHERE id = ${userId}`;
+    const concurrentMarker = (await authUserRowOf(userId)).self_signup_downgraded_at;
+
+    const applied = await applyDowngrades(db, decisions, new Date());
+
+    expect(applied.downgraded).toEqual([]);
+    expect(applied.raced.map((r) => r.userId)).toEqual([userId]);
+
+    // The concurrent run's marker is left exactly as it wrote it -- no
+    // double work, no overwrite.
+    expect(await memberRoleOf(userId)).toBe('member');
+    const user = await authUserRowOf(userId);
+    expect(user.role).toBe(SENTINEL_AUTH_USER_ROLE);
+    expect(user.self_signup_downgraded_at).toEqual(concurrentMarker);
+  });
+
   it('never touches an account outside the self-signup cohort', async () => {
     // A plain account with no self_signup_at is invisible to the query, and
     // therefore to the actuator, no matter how old or what role it holds.

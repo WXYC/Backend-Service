@@ -245,9 +245,12 @@ export interface AppliedDowngrades {
   /** Accounts whose `auth_member.role` this run actually flipped `dj` -> `member`. */
   downgraded: PendingSignupRow[];
   /**
-   * Planned accounts whose UPDATE matched no row -- the account left `dj`
-   * between the plan phase and the write (a manager edit landing mid-run).
-   * Nothing is written for these, and no marker is stamped, so they are
+   * Planned accounts this run did NOT flip, because something about the
+   * account's state moved between the plan phase and the write: the
+   * `auth_member.role` UPDATE matched no row (a manager edit landing
+   * mid-run), or the in-transaction re-check below found the account was
+   * reviewed or downgraded by something else in the notify window. Nothing
+   * is written for these, and no marker is stamped, so they are
    * re-evaluated from scratch on the next run.
    */
   raced: PendingSignupRow[];
@@ -261,11 +264,21 @@ export interface AppliedDowngrades {
  * succeeded -- see `orchestrate.ts` for why gating the backstop on SES
  * health would be the wrong coupling.
  *
+ * The plan phase reads `self_signup_reviewed_at IS NULL AND
+ * self_signup_downgraded_at IS NULL` once, minutes before this runs (the
+ * SES round trip sits in between). Either column can flip during that
+ * window -- a manager reviews the account, or a concurrent run of this same
+ * job downgrades it -- so the transaction below re-checks BOTH before
+ * touching anything, rather than trusting the plan-phase snapshot. Re-select
+ * over folding the columns into the `auth_member` UPDATE's WHERE because the
+ * columns live on `auth_user`, a different table from the one the role flip
+ * writes.
+ *
  * The role flip and the marker stamp go in ONE transaction. Half of this
  * pair is a defect either way: the role without the marker re-fires on the
- * next re-promotion (the bug this change exists to fix), and the marker
- * without the role permanently exempts an account that still holds `dj`
- * from the only backstop there is.
+ * next re-promotion (the bug BS#2364 exists to fix), and the marker without
+ * the role permanently exempts an account that still holds `dj` from the
+ * only backstop there is.
  *
  * The `WHERE role = 'dj'` guard (not just `WHERE user_id = :id`) keeps the
  * write idempotent against a role edit that lands between plan and apply --
@@ -293,6 +306,14 @@ export const applyDowngrades = async (
 
     try {
       const flipped = await dbClient.transaction(async (tx) => {
+        const stillPending = await tx
+          .select({ id: user.id })
+          .from(user)
+          .where(and(eq(user.id, row.userId), isNull(user.selfSignupReviewedAt), isNull(user.selfSignupDowngradedAt)))
+          .limit(1);
+
+        if (stillPending.length === 0) return false;
+
         const updated = await tx
           .update(member)
           .set({ role: 'member' })
