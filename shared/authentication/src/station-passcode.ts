@@ -72,6 +72,36 @@
  * a skipped row means the submitted code's status is unknowable, which is
  * `passcode_unverifiable`, refusal-exempt by construction.
  *
+ * MARK-AND-EXCLUDE is the FOURTH policy (BS#2359 review 3), and it exists
+ * because the third and the "skip" policy combined to disable the
+ * brute-force cooldown. `passcode_unverifiable` is refusal-exempt, so a
+ * SINGLE undecryptable inactive row inside the 30-day classification horizon
+ * relabelled every would-be `passcode_fail`, pinned the cooldown's own input
+ * at zero, and left the gate with no brute-force protection until the row
+ * aged out — up to 30 days. Both production paths produce that state on
+ * purpose: rotation's auto-revoke turns poisoned ACTIVE rows into in-horizon
+ * INACTIVE ones, and the runbook's step 4 (retire the previous key) makes
+ * every old-key inactive row undecryptable at once.
+ *
+ * So an undecryptable inactive row is ADMINISTRATIVELY MARKED with
+ * `revoked_reason = 'undecryptable_after_key_rotation'` the first time
+ * classification meets it (setting `revoked_at` only when it was still
+ * NULL), and `recentlyInactivePasscodePredicate` EXCLUDES marked rows from
+ * every later sweep. Rotation already writes that same marker, so the
+ * post-rotation path is never blind at all; the first attempt after a
+ * key retirement logs `passcode_unverifiable` and heals the row, and every
+ * attempt after that classifies cleanly and counts toward the cooldown.
+ * Blind window: one attempt per poisoned row, not 30 days. The mark is
+ * best-effort — a failed UPDATE never breaks the attempt.
+ *
+ * The ACCEPTED RESIDUAL: once a row is excluded, an attempt actually
+ * carrying that row's code labels `passcode_fail` ("never valid") when the
+ * honest answer is "formerly valid, unreadable". That is a bounded honesty
+ * loss in the ALERT stream only, on codes nobody can read, and it is taken
+ * deliberately in exchange for a cooldown that stays fail-secure. The
+ * alternative — keeping the row in the sweep — is a gate with no brute-force
+ * protection, which is strictly worse.
+ *
  * Everything here is designed against the epic #2365 availability
  * constraint: every control fails toward "wait a few minutes", never
  * toward locking the control room out. That is why the cooldown never
@@ -116,6 +146,10 @@ export const STATION_SIGNUP_OUTCOMES = [
   //   1. Classification skipped at least one in-horizon inactive row it
   //      could not decrypt, and the code matched no active row and no
   //      inactive row it COULD decrypt (classifyInactivePasscodeRows).
+  //      SELF-LIMITING since mark-and-exclude: that same attempt marks the
+  //      skipped row, so the NEXT attempt against the same poison
+  //      classifies cleanly. One token per poisoned row, not one per
+  //      attempt for 30 days — see the module header.
   //   2. An ACTIVE row would not decrypt, so verification failed closed
   //      before comparing anything (verifyStationPasscode /
   //      revealStationPasscode) — previously that threw with no trace at
@@ -214,6 +248,24 @@ export const STATION_PASSCODE_CLASSIFICATION_HORIZON_MS = 30 * 24 * 60 * 60 * 10
 
 /** Default retention for pruneSignupAttempts — the 30-day audit window. */
 export const STATION_SIGNUP_ATTEMPT_DEFAULT_RETENTION_DAYS = 30;
+
+/**
+ * The `revoked_reason` marking a row as "nothing this process holds can open
+ * this". TWO producers write it, and a third reader is what gives it teeth:
+ *
+ *   - `rotateStationPasscode`'s auto-revoke, when an ACTIVE row will not
+ *     decrypt under either key (see there);
+ *   - classification's self-healing mark, when an in-horizon INACTIVE row
+ *     will not decrypt (see markUndecryptableInactivePasscode);
+ *   - `recentlyInactivePasscodePredicate`, which EXCLUDES marked rows from
+ *     the classification sweep entirely — that exclusion is what makes the
+ *     mark self-healing rather than merely descriptive, and it is why the
+ *     post-rotation path is never blind at all.
+ *
+ * A constant so the admin surface (#2362) and any forensic query can match it
+ * exactly rather than by prose.
+ */
+export const STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON = 'undecryptable_after_key_rotation';
 
 // 32-character unambiguous alphabet: digits 2-9 (excludes 0/1) plus A-Z
 // excluding I/O (excludes the two letters most easily confused with 1 and
@@ -615,13 +667,17 @@ function activePasscodePredicate(now: Date) {
 
 /**
  * Pure mirror of recentlyInactivePasscodePredicate's SQL — see
- * isStationPasscodeActive for why these two are kept separately.
+ * isStationPasscodeActive for why these two are kept separately. That
+ * includes the marker exclusion: a row carrying
+ * STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON is not "recently inactive"
+ * for classification purposes, it is administratively out of the sweep.
  */
 export function isStationPasscodeRecentlyInactive(
-  row: { revokedAt: Date | null; expiresAt: Date },
+  row: { revokedAt: Date | null; expiresAt: Date; revokedReason?: string | null },
   now: Date,
   since: Date
 ): boolean {
+  if (row.revokedReason === STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON) return false;
   const inactive = row.revokedAt !== null || row.expiresAt.getTime() <= now.getTime();
   if (!inactive) return false;
   const recentlyRevoked = row.revokedAt !== null && row.revokedAt.getTime() >= since.getTime();
@@ -633,11 +689,26 @@ export function isStationPasscodeRecentlyInactive(
  * Rows that are NOT active (revoked, or past expiry) but became inactive
  * within STATION_PASSCODE_CLASSIFICATION_HORIZON_MS — the bounded scan
  * classifyInactiveStationPasscode needs, since nothing prunes this table.
+ *
+ * MINUS every row already marked
+ * STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON. That third term is the
+ * "exclude" half of mark-and-exclude (BS#2359 review 3), and it is load
+ * bearing rather than cosmetic: a single undecryptable row inside the
+ * 30-day horizon used to relabel every would-be `passcode_fail` as the
+ * refusal-exempt `passcode_unverifiable`, which pinned the cooldown's own
+ * input at zero and disabled brute-force protection until the row aged out.
+ * Excluding marked rows means the poisoned row stops participating in
+ * classification the moment it is known to be poisoned.
+ *
+ * `IS DISTINCT FROM` rather than `<>`, because `revoked_reason` is nullable
+ * and `NULL <> 'x'` is NULL, which would silently drop every row that has
+ * no reason at all — i.e. almost all of them.
  */
 function recentlyInactivePasscodePredicate(now: Date, since: Date) {
   return and(
     or(isNotNull(station_passcode.revokedAt), lte(station_passcode.expiresAt, now)),
-    or(gte(station_passcode.revokedAt, since), gte(station_passcode.expiresAt, since))
+    or(gte(station_passcode.revokedAt, since), gte(station_passcode.expiresAt, since)),
+    sql`${station_passcode.revokedReason} IS DISTINCT FROM ${STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON}`
   );
 }
 
@@ -775,15 +846,18 @@ export interface PruneSignupAttemptsOptions {
  * Delete attempt rows older than the retention window (default 30 days —
  * the audit horizon). Never touches station_passcode. Run from a job, not
  * the request path.
+ *
+ * Returns the driver's affected-row count rather than `.returning({ id })`.
+ * The ids were never used for anything but `.length`, and this is the one
+ * call in the module whose row set is a full month of attempt log — shipping
+ * every one of those ids back over the wire to count them is real transfer
+ * and real allocation for a number Postgres already reports.
  */
 export async function pruneSignupAttempts(options: PruneSignupAttemptsOptions = {}): Promise<number> {
   const { olderThanDays = STATION_SIGNUP_ATTEMPT_DEFAULT_RETENTION_DAYS, now = new Date() } = options;
   const cutoff = new Date(now.getTime() - olderThanDays * 24 * 60 * 60 * 1000);
-  const deleted = await db
-    .delete(station_signup_attempt)
-    .where(lt(station_signup_attempt.attemptedAt, cutoff))
-    .returning({ id: station_signup_attempt.id });
-  return deleted.length;
+  const deleted = await db.delete(station_signup_attempt).where(lt(station_signup_attempt.attemptedAt, cutoff));
+  return deleted.count;
 }
 
 // ---------------------------------------------------------------------------
@@ -989,6 +1063,14 @@ interface InactiveClassification {
     'passcode_fail' | 'passcode_expired' | 'passcode_revoked' | 'passcode_unverifiable'
   >;
   passcodeId: string | null;
+  /**
+   * Ids of the rows this sweep could not decrypt, in row order — the input
+   * to the self-healing mark (see markUndecryptableInactivePasscode).
+   * Populated even when the sweep ended in a MATCH, since a row that will
+   * not open is equally dead either way and equally worth excluding from
+   * the next sweep.
+   */
+  undecryptableRowIds: string[];
 }
 
 /**
@@ -1010,6 +1092,19 @@ interface InactiveClassification {
  * `passcode_unverifiable`: honest ("we cannot tell"), refusal-exempt, and
  * still alerting. Only a clean sweep with nothing skipped is `passcode_fail`.
  *
+ * That fix opened a second hole, which mark-and-exclude closes (BS#2359
+ * review 3). `passcode_unverifiable` being refusal-exempt means ONE
+ * undecryptable in-horizon row relabels 100% of would-be `passcode_fail`
+ * attempts, pins the cooldown's own input at zero, and disables brute-force
+ * protection for as long as the row stays in the horizon — up to 30 days,
+ * and both production paths (rotation's auto-revoke, the runbook's
+ * key-retirement step) create exactly that state. So the skipped ids come
+ * back with the classification: the caller marks those rows
+ * administratively, `recentlyInactivePasscodePredicate` excludes marked
+ * rows, and the blind window collapses from 30 days to one attempt per
+ * poisoned row. This function stays pure — the marking is the DB half's
+ * job, below.
+ *
  * Not constant-time: unlike the active-row match, an early return here
  * costs nothing an attacker can use (the client response stays generic
  * regardless — see verifyStationPasscode), and there is no live credential
@@ -1021,22 +1116,104 @@ export function classifyInactivePasscodeRows(
   code: string,
   decrypt: (stored: string) => string = (stored) => decryptStationPasscodeValue(stored)
 ): InactiveClassification {
-  let skippedUndecryptable = false;
+  const undecryptableRowIds: string[] = [];
 
   for (const row of rows) {
     let plaintext: string;
     try {
       plaintext = decrypt(row.codeEncrypted);
     } catch {
-      skippedUndecryptable = true;
+      undecryptableRowIds.push(row.id);
       continue;
     }
     if (constantTimeStringsEqual(plaintext, code)) {
-      return { outcome: row.revokedAt ? 'passcode_revoked' : 'passcode_expired', passcodeId: row.id };
+      return {
+        outcome: row.revokedAt ? 'passcode_revoked' : 'passcode_expired',
+        passcodeId: row.id,
+        undecryptableRowIds,
+      };
     }
   }
 
-  return { outcome: skippedUndecryptable ? 'passcode_unverifiable' : 'passcode_fail', passcodeId: null };
+  return {
+    outcome: undecryptableRowIds.length > 0 ? 'passcode_unverifiable' : 'passcode_fail',
+    passcodeId: null,
+    undecryptableRowIds,
+  };
+}
+
+/**
+ * The self-healing half of mark-and-exclude: an in-horizon inactive row that
+ * would not decrypt is ADMINISTRATIVELY MARKED
+ * `STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON`, so
+ * recentlyInactivePasscodePredicate drops it from every later sweep and
+ * classification stops going blind on its account.
+ *
+ * This is the FOURTH decrypt-failure policy (active → fail closed, inactive
+ * → skip, rotation's active rows → auto-revoke, and now inactive rows →
+ * mark-and-exclude). It destroys no capability: the row is already inactive
+ * AND already unreadable, so nothing could have been verified against it
+ * whether it is marked or not. `revoked_at` is set only when it was NULL —
+ * the expired-but-never-revoked case — via COALESCE in SQL rather than a
+ * read-then-write, so a concurrent manual revoke keeps its own timestamp.
+ *
+ * The overwritten `revoked_reason`, if the row carried a different one, is
+ * logged BEFORE the UPDATE: the log line is then the only surviving record
+ * of it, and losing an operator's prose while keeping the machine-readable
+ * marker is the deliberate trade (the marker is what the cooldown depends
+ * on; the prose is what a human reads afterwards).
+ *
+ * BEST EFFORT. A failed mark must never break the attempt flow — the
+ * attempt still logs `passcode_unverifiable` exactly as before, and the
+ * next attempt simply gets another chance to heal the row. Idempotent and
+ * safe under concurrency: the guard makes a second attempt a no-op, and two
+ * racing attempts write the identical value.
+ */
+async function markUndecryptableInactivePasscode(
+  row: { id: string; revokedReason: string | null },
+  now: Date
+): Promise<void> {
+  console.error(
+    `[station-passcode] MARKING inactive passcode row ${row.id} as ` +
+      `'${STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON}': it will not decrypt under any key this process holds, ` +
+      'so classification skipped it and this attempt logged passcode_unverifiable. ' +
+      (row.revokedReason === null
+        ? 'The row carried no revoked_reason.'
+        : `The row's previous revoked_reason was '${row.revokedReason}' and is being overwritten — this log line ` +
+          'is the only surviving record of it.') +
+      ' Later classifications exclude the row, so the brute-force cooldown stops being blind to no-match ' +
+      'failures — see the decrypt-failure policy at the top of station-passcode.ts.'
+  );
+
+  try {
+    await db
+      .update(station_passcode)
+      .set({
+        revokedReason: STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON,
+        // COALESCE, not a read-then-write: "set revoked_at only if it is
+        // still NULL" has to be decided by the database, or a manual revoke
+        // landing in the same instant loses its own timestamp to ours.
+        //
+        // `now.toISOString()` with an explicit cast, not the bare Date and
+        // not SQL `now()`: raw `sql` chunks bypass drizzle's typed column
+        // conversion (the same trap documented on the use-claim UPDATE), and
+        // the request's own `now` is what every other timestamp on this path
+        // is written from.
+        revokedAt: sql`COALESCE(${station_passcode.revokedAt}, ${now.toISOString()}::timestamptz)`,
+      })
+      .where(
+        and(
+          eq(station_passcode.id, row.id),
+          sql`${station_passcode.revokedReason} IS DISTINCT FROM ${STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON}`
+        )
+      );
+  } catch (error) {
+    console.error(
+      `[station-passcode] failed to mark undecryptable inactive passcode row ${row.id}; classification will ` +
+        'remain blind to no-match failures until a later attempt succeeds at marking it',
+      error
+    );
+  }
 }
 
 /**
@@ -1045,12 +1222,20 @@ export function classifyInactivePasscodeRows(
  * stopped being active — a stale sticky note, not a guess — so the digest
  * alert (#2364) can tell the two apart. The bounded horizon is
  * STATION_PASSCODE_CLASSIFICATION_HORIZON_MS; see
- * classifyInactivePasscodeRows for the decrypt-failure policy.
+ * classifyInactivePasscodeRows for the decrypt-failure policy and
+ * markUndecryptableInactivePasscode for what this does about it.
  */
 async function classifyInactiveStationPasscode(code: string, now: Date): Promise<InactiveClassification> {
   const since = new Date(now.getTime() - STATION_PASSCODE_CLASSIFICATION_HORIZON_MS);
   const rows = await db.select().from(station_passcode).where(recentlyInactivePasscodePredicate(now, since));
-  return classifyInactivePasscodeRows(rows, code);
+  const classification = classifyInactivePasscodeRows(rows, code);
+
+  const undecryptable = new Set(classification.undecryptableRowIds);
+  for (const row of rows) {
+    if (undecryptable.has(row.id)) await markUndecryptableInactivePasscode(row, now);
+  }
+
+  return classification;
 }
 
 // ---------------------------------------------------------------------------
@@ -1060,6 +1245,13 @@ async function classifyInactiveStationPasscode(code: string, now: Date): Promise
 export interface VerifyStationPasscodeOptions {
   /** The X-Real-IP header value, if any — see deriveStationSignupIpHash. */
   rawClientIp?: string;
+  /**
+   * TEST SEAM ONLY. Never bind this to request, client, or header input: it
+   * becomes the attempt row's `attempted_at`, which is the cooldown's own
+   * input, so a caller-chosen `now` lets an attacker date every failure into
+   * the past and walk out of the trailing window the brute-force protection
+   * is computed over.
+   */
   now?: Date;
 }
 
@@ -1266,13 +1458,6 @@ export interface RotatedStationPasscode {
 }
 
 /**
- * `revoked_reason` written by rotateStationPasscode's auto-revoke. A
- * constant so the admin surface (#2362) and any forensic query can match it
- * exactly rather than by prose.
- */
-export const STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON = 'undecryptable_after_key_rotation';
-
-/**
  * Mint a new station passcode, refusing when two are already active. See
  * STATION_PASSCODE_ROTATE_ADVISORY_LOCK_KEY for why this must serialize on
  * a station-global advisory lock rather than a row lock.
@@ -1300,6 +1485,12 @@ export const STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON = 'undecryptable_afte
  * operator action whose whole purpose is to change which codes are live, and
  * a code nobody can decrypt is a code nobody can verify, so revoking it
  * destroys no capability that still existed.
+ *
+ * The `revoked_reason` it writes is also the mark-and-exclude marker (the
+ * FOURTH policy, module header), so a row revoked here is excluded from
+ * classification the moment it becomes inactive. That is what keeps this
+ * step from trading a poisoned ACTIVE row for a poisoned INACTIVE one that
+ * would blind the cooldown for the next 30 days.
  */
 export async function rotateStationPasscode(
   options: RotateStationPasscodeOptions = {}
@@ -1351,11 +1542,18 @@ export async function rotateStationPasscode(
         failure
       );
 
-      await tx
+      // The reported ids come from the UPDATE's own RETURNING, not from the
+      // candidate list above (BS#2359 review 3). The predicate can match
+      // zero rows — a manual revokeStationPasscode landing between the
+      // SELECT and here — and reporting a row this rotation did not actually
+      // revoke would tell the manager a sticky note died when someone else
+      // had already killed it, with a different reason on the row.
+      const revoked = await tx
         .update(station_passcode)
         .set({ revokedAt: now, revokedReason: STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON })
-        .where(and(eq(station_passcode.id, row.id), isNull(station_passcode.revokedAt)));
-      autoRevokedPasscodeIds.push(row.id);
+        .where(and(eq(station_passcode.id, row.id), isNull(station_passcode.revokedAt)))
+        .returning({ id: station_passcode.id });
+      autoRevokedPasscodeIds.push(...revoked.map((revokedRow) => revokedRow.id));
     }
 
     // Counts only rows that survived the sweep — a poisoned row can no

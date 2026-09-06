@@ -19,6 +19,7 @@ import {
   isStationPasscodeActive,
   isStationPasscodeRecentlyInactive,
   StationPasscodeDecryptionError,
+  STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON,
   SIGNUP_COOLDOWN_WINDOW_MS,
   SIGNUP_COOLDOWN_HOLD_MS,
   SIGNUP_COOLDOWN_THRESHOLD,
@@ -213,6 +214,7 @@ describe('classifyInactivePasscodeRows (the passcode_unverifiable fall-through)'
     expect(classifyInactivePasscodeRows(rows, 'STALE123', decryptWithA)).toEqual({
       outcome: 'passcode_expired',
       passcodeId: 'row-1',
+      undecryptableRowIds: [],
     });
   });
 
@@ -221,6 +223,7 @@ describe('classifyInactivePasscodeRows (the passcode_unverifiable fall-through)'
     expect(classifyInactivePasscodeRows(rows, 'STALE123', decryptWithA)).toEqual({
       outcome: 'passcode_revoked',
       passcodeId: 'row-1',
+      undecryptableRowIds: [],
     });
   });
 
@@ -229,6 +232,7 @@ describe('classifyInactivePasscodeRows (the passcode_unverifiable fall-through)'
     expect(classifyInactivePasscodeRows(rows, 'ZZZZZZZZ', decryptWithA)).toEqual({
       outcome: 'passcode_fail',
       passcodeId: null,
+      undecryptableRowIds: [],
     });
   });
 
@@ -244,6 +248,9 @@ describe('classifyInactivePasscodeRows (the passcode_unverifiable fall-through)'
     expect(classifyInactivePasscodeRows(rows, 'ZZZZZZZZ', decryptWithA)).toEqual({
       outcome: 'passcode_unverifiable',
       passcodeId: null,
+      // The healing input: the caller marks exactly these rows so the next
+      // sweep excludes them and stops relabelling passcode_fail.
+      undecryptableRowIds: ['row-1'],
     });
   });
 
@@ -257,6 +264,9 @@ describe('classifyInactivePasscodeRows (the passcode_unverifiable fall-through)'
     expect(classifyInactivePasscodeRows(rows, 'STALE456', decryptWithA)).toEqual({
       outcome: 'passcode_expired',
       passcodeId: 'row-2',
+      // Reported even though the sweep ended in a match: a row that will not
+      // open is equally dead either way, and equally worth excluding next time.
+      undecryptableRowIds: ['row-1'],
     });
   });
 
@@ -264,6 +274,23 @@ describe('classifyInactivePasscodeRows (the passcode_unverifiable fall-through)'
     expect(classifyInactivePasscodeRows([], 'ZZZZZZZZ', decryptWithA)).toEqual({
       outcome: 'passcode_fail',
       passcodeId: null,
+      undecryptableRowIds: [],
+    });
+  });
+
+  it('reports EVERY undecryptable row it skipped, not just the first', () => {
+    // The full mark list matters: the caller marks each one, and a row left
+    // unmarked keeps blinding the cooldown for the rest of the 30-day
+    // horizon (BS#2359 review 3, the mark-and-exclude finding).
+    const rows = [
+      { id: 'row-1', revokedAt: null, codeEncrypted: encryptStationPasscodeValue('OTHERKEY', KEY_B) },
+      inactiveRow('row-2', 'STALE456'),
+      { id: 'row-3', revokedAt: null, codeEncrypted: encryptStationPasscodeValue('THIRDKEY', KEY_C) },
+    ];
+    expect(classifyInactivePasscodeRows(rows, 'ZZZZZZZZ', decryptWithA)).toEqual({
+      outcome: 'passcode_unverifiable',
+      passcodeId: null,
+      undecryptableRowIds: ['row-1', 'row-3'],
     });
   });
 
@@ -275,6 +302,7 @@ describe('classifyInactivePasscodeRows (the passcode_unverifiable fall-through)'
       expect(classifyInactivePasscodeRows(rows, 'STALE123')).toEqual({
         outcome: 'passcode_expired',
         passcodeId: 'row-1',
+        undecryptableRowIds: [],
       });
     } finally {
       delete process.env.STATION_PASSCODE_KEY;
@@ -458,6 +486,31 @@ describe('isStationPasscodeActive / isStationPasscodeRecentlyInactive', () => {
     const since = new Date('2026-08-06T12:00:00Z');
     const row = { revokedAt: null, expiresAt: new Date('2026-09-10T00:00:00Z') };
     expect(isStationPasscodeRecentlyInactive(row, now, since)).toBe(false);
+  });
+
+  it('EXCLUDES a row already marked undecryptable, however recently it went inactive', () => {
+    // The "exclude" half of mark-and-exclude, mirrored from
+    // recentlyInactivePasscodePredicate's third term. Without it, one
+    // unreadable in-horizon row relabels every would-be passcode_fail as the
+    // refusal-exempt passcode_unverifiable and the brute-force cooldown —
+    // which counts only passcode_fail — never engages.
+    const since = new Date('2026-08-06T12:00:00Z');
+    const row = {
+      revokedAt: new Date('2026-09-04T00:00:00Z'),
+      expiresAt: new Date('2026-09-01T00:00:00Z'),
+      revokedReason: STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON,
+    };
+    expect(isStationPasscodeRecentlyInactive(row, now, since)).toBe(false);
+  });
+
+  it('still includes an in-horizon row carrying some OTHER revoked_reason', () => {
+    const since = new Date('2026-08-06T12:00:00Z');
+    const row = {
+      revokedAt: new Date('2026-09-04T00:00:00Z'),
+      expiresAt: new Date('2026-09-10T00:00:00Z'),
+      revokedReason: 'manager revoked it',
+    };
+    expect(isStationPasscodeRecentlyInactive(row, now, since)).toBe(true);
   });
 });
 
