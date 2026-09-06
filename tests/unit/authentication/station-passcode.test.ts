@@ -19,7 +19,10 @@ import {
   isStationPasscodeActive,
   isStationPasscodeRecentlyInactive,
   classifyStationPasscodeState,
+  revealStationPasscode,
+  rotateStationPasscode,
   StationPasscodeDecryptionError,
+  StationPasscodeKeyUnsetError,
   STATION_PASSCODE_UNDECRYPTABLE_REVOKED_REASON,
   SIGNUP_COOLDOWN_WINDOW_MS,
   SIGNUP_COOLDOWN_HOLD_MS,
@@ -199,6 +202,36 @@ describe('resolveStationPasscodeKeyRing', () => {
   it('still throws when the CURRENT key is missing — there is no degraded mode for it', () => {
     delete process.env.STATION_PASSCODE_KEY;
     expect(() => resolveStationPasscodeKeyRing()).toThrow(/STATION_PASSCODE_KEY is not set/);
+  });
+
+  // BS#2362 review. The manager operations that need the key must say
+  // "unconfigured" in their own type, because apps/auth maps that to
+  // 503 `passcode_key_unset` and the alternatives are all wrong answers:
+  // rotate fell through to a code-less 500, reveal WITH an active row
+  // surfaced as a StationPasscodeDecryptionError whose remedy names
+  // STATION_PASSCODE_KEY_PREVIOUS (activeRowDecryptionError defaults a
+  // non-typed throw to `corrupt`), and reveal with an empty table answered
+  // `200 {passcodes: []}` — "there is no station code" when the truth is
+  // "this process cannot read one". Only reachable in an unconfigured
+  // deployment, so the integration tier (which always has the key) cannot
+  // cover it.
+  describe('with STATION_PASSCODE_KEY unset', () => {
+    beforeEach(() => {
+      delete process.env.STATION_PASSCODE_KEY;
+    });
+
+    it('reveal throws the typed key-unset error before reading a single row', async () => {
+      await expect(revealStationPasscode('manager-1')).rejects.toBeInstanceOf(StationPasscodeKeyUnsetError);
+      // NOT the decrypt failure: that one's operator remedy is the previous
+      // key, which cannot fix a missing current key.
+      await expect(revealStationPasscode('manager-1')).rejects.not.toBeInstanceOf(StationPasscodeDecryptionError);
+      await expect(revealStationPasscode('manager-1')).rejects.toThrow(/STATION_PASSCODE_KEY/);
+    });
+
+    it('rotate throws it too, before the advisory lock and before minting anything', async () => {
+      await expect(rotateStationPasscode()).rejects.toBeInstanceOf(StationPasscodeKeyUnsetError);
+      await expect(rotateStationPasscode()).rejects.toThrow(/STATION_PASSCODE_KEY/);
+    });
   });
 });
 

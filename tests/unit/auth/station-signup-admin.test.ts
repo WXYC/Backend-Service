@@ -23,6 +23,8 @@
  */
 
 import { jest } from '@jest/globals';
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 
 // --- Mocks ---
 
@@ -126,11 +128,15 @@ jest.mock('drizzle-orm', () => ({
 const mockReadStationPasscodeStates = jest.fn<() => Promise<unknown[]>>();
 const mockEvaluateSignupCooldown = jest.fn<() => Promise<unknown>>();
 const mockReadRecentSignupAttempts = jest.fn<() => Promise<Record<string, unknown>[]>>();
+const mockCountSignupAttemptOutcomes = jest.fn<() => Promise<Record<string, number>>>();
+const mockReadLastCooldownClearedAt = jest.fn<() => Promise<Date | null>>();
 
 jest.mock('@wxyc/authentication', () => ({
   readStationPasscodeStates: (...args: unknown[]) => mockReadStationPasscodeStates(...(args as [])),
   evaluateSignupCooldown: (...args: unknown[]) => mockEvaluateSignupCooldown(...(args as [])),
   readRecentSignupAttempts: (...args: unknown[]) => mockReadRecentSignupAttempts(...(args as [])),
+  countSignupAttemptOutcomes: (...args: unknown[]) => mockCountSignupAttemptOutcomes(...(args as [])),
+  readLastCooldownClearedAt: (...args: unknown[]) => mockReadLastCooldownClearedAt(...(args as [])),
   // The module's real values. The status response divides the two durations
   // down to minutes, so stubbing round numbers here would let a
   // milliseconds-for-minutes mixup pass; these are pinned against the real
@@ -164,6 +170,8 @@ beforeEach(() => {
     allFailureCount: 0,
   });
   mockReadRecentSignupAttempts.mockResolvedValue([]);
+  mockCountSignupAttemptOutcomes.mockResolvedValue({});
+  mockReadLastCooldownClearedAt.mockResolvedValue(null);
 });
 
 describe('readStationSignupStatus', () => {
@@ -178,6 +186,7 @@ describe('readStationSignupStatus', () => {
   });
 
   it('counts the attempt log by outcome, leaving absent outcomes absent rather than zero', async () => {
+    mockCountSignupAttemptOutcomes.mockResolvedValue({ passcode_fail: 2, passcode_ok: 1 });
     mockReadRecentSignupAttempts.mockResolvedValue([
       attempt({ id: 'a1', outcome: 'passcode_fail' }),
       attempt({ id: 'a2', outcome: 'passcode_fail' }),
@@ -189,6 +198,27 @@ describe('readStationSignupStatus', () => {
     expect(status.attempts.countsByOutcome).toEqual({ passcode_fail: 2, passcode_ok: 1 });
     expect(status.attempts.countsByOutcome).not.toHaveProperty('passcode_revoked');
     expect(status.attempts.recent).toHaveLength(3);
+    // Window-wide, from the same floor the display list uses.
+    expect(mockCountSignupAttemptOutcomes).toHaveBeenCalledWith({ since: status.attempts.since });
+  });
+
+  // BS#2362 review, the blocking one. `recent` is `ORDER BY attempted_at DESC
+  // LIMIT 100`, so counting ITS rows caps the TOTAL across every outcome at
+  // 100 for a window documented as 24 hours — and lets this payload report
+  // fewer 24-hour `passcode_fail` than the cooldown block's SQL count over
+  // ten minutes.
+  it('takes the counts from the SQL aggregate, NOT from the capped display list', async () => {
+    mockCountSignupAttemptOutcomes.mockResolvedValue({ passcode_fail: 4312, cooldown_cleared: 1 });
+    mockReadRecentSignupAttempts.mockResolvedValue(
+      Array.from({ length: 100 }, (_, i) => attempt({ id: `a${i}`, outcome: 'passcode_fail' }))
+    );
+
+    const status = await readStationSignupStatus({ now: NOW });
+
+    expect(status.attempts.countsByOutcome).toEqual({ passcode_fail: 4312, cooldown_cleared: 1 });
+    expect(status.attempts.recent).toHaveLength(100);
+    // The one outcome the cap pushed out of the display list is still counted.
+    expect(status.attempts.countsByOutcome.cooldown_cleared).toBe(1);
   });
 
   it('reports the cooldown rule in MINUTES, not milliseconds', async () => {
@@ -210,16 +240,32 @@ describe('readStationSignupStatus', () => {
     });
   });
 
-  it('surfaces the most recent cooldown_cleared row in the window, and null when there is none', async () => {
+  it('surfaces the most recent cooldown_cleared row, and null when there is none', async () => {
     const clearedAt = new Date('2026-09-05T11:30:00.000Z');
-    mockReadRecentSignupAttempts.mockResolvedValue([
-      attempt({ id: 'a1', outcome: 'cooldown_cleared', attemptedAt: clearedAt, actorUserId: 'manager-1' }),
-      attempt({ id: 'a2', outcome: 'passcode_fail' }),
-    ]);
+    mockReadLastCooldownClearedAt.mockResolvedValue(clearedAt);
     expect((await readStationSignupStatus({ now: NOW })).cooldown.lastClearedAt).toEqual(clearedAt);
 
-    mockReadRecentSignupAttempts.mockResolvedValue([attempt({ id: 'a2', outcome: 'passcode_fail' })]);
+    mockReadLastCooldownClearedAt.mockResolvedValue(null);
     expect((await readStationSignupStatus({ now: NOW })).cooldown.lastClearedAt).toBeNull();
+  });
+
+  // The other half of the blocking finding: derived from `recent`,
+  // lastClearedAt reverted to null the moment 100 attempts landed after the
+  // clear — during a cooldown_refused storm that is a couple of minutes, and
+  // it is exactly when a manager is polling to confirm the clear took.
+  it('reads the clear from the dedicated floor query, not from the capped display list', async () => {
+    const clearedAt = new Date('2026-09-05T11:30:00.000Z');
+    mockReadLastCooldownClearedAt.mockResolvedValue(clearedAt);
+    // A full display list, every row a refusal — the clear has been pushed
+    // out of it entirely.
+    mockReadRecentSignupAttempts.mockResolvedValue(
+      Array.from({ length: 100 }, (_, i) => attempt({ id: `a${i}`, outcome: 'cooldown_refused' }))
+    );
+
+    const status = await readStationSignupStatus({ now: NOW });
+
+    expect(status.cooldown.lastClearedAt).toEqual(clearedAt);
+    expect(status.attempts.recent.some((row) => row.outcome === 'cooldown_cleared')).toBe(false);
   });
 
   it('floors days-pending and lists the longest-waiting account first', async () => {
@@ -420,5 +466,44 @@ describe('approveSelfSignup', () => {
     expect(mockOps.findIndex((op) => op.kind === 'update' && op.table === 'member')).toBeGreaterThan(0);
     // One transaction, so the stamp and the role flip cannot half-apply.
     expect(mockTransaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The route wiring in `apps/auth/app.ts`, asserted against its source text.
+ *
+ * Importing that module starts a server and pulls in better-auth, so the
+ * express app itself is out of reach of this tier — the same reason
+ * `tests/unit/auth/rate-limiting.test.ts` pins its limiters this way. The
+ * integration suite proves the gate REJECTS (401/403 on all six routes); what
+ * it cannot show is that the gate is mounted structurally rather than by
+ * convention, or that a branch only an unconfigured deployment can reach
+ * exists at all — CI always has STATION_PASSCODE_KEY set.
+ */
+describe('station-signup admin route wiring (app.ts source)', () => {
+  const appSource = readFileSync(resolve(__dirname, '../../../apps/auth/app.ts'), 'utf-8');
+
+  it('mounts the admin-flag gate ONCE on the router, so a new route cannot skip it', () => {
+    expect(appSource).toMatch(/const stationSignupAdminRouter = express\.Router\(\);/);
+    expect(appSource).toMatch(/stationSignupAdminRouter\.use\(stationSignupAdminGate\);/);
+    expect(appSource).toMatch(/app\.use\(STATION_SIGNUP_ADMIN_PREFIX, stationSignupAdminRouter\);/);
+  });
+
+  it('keeps the six paths on the same prefix they shipped with', () => {
+    expect(appSource).toMatch(/const STATION_SIGNUP_ADMIN_PREFIX = '\/auth\/admin\/station-signup';/);
+    for (const route of ['/reveal', '/rotate', '/revoke', '/clear-cooldown', '/status', '/approve']) {
+      expect(appSource).toContain(`stationSignupAdminRouter.${route === '/status' ? 'get' : 'post'}(\n  '${route}',`);
+    }
+  });
+
+  it('maps StationPasscodeKeyUnsetError to 503 passcode_key_unset, distinct from the decrypt branch', () => {
+    expect(appSource).toMatch(/error instanceof StationPasscodeKeyUnsetError/);
+    expect(appSource).toMatch(/code: 'passcode_key_unset'/);
+    // The two 503s must stay distinguishable: the decrypt one's remedy is
+    // STATION_PASSCODE_KEY_PREVIOUS, which cannot fix a missing current key.
+    expect(appSource).toMatch(/code: 'passcode_undecryptable'/);
+    expect(appSource.indexOf("code: 'passcode_key_unset'")).toBeLessThan(
+      appSource.indexOf("code: 'passcode_undecryptable'")
+    );
   });
 });

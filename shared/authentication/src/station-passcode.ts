@@ -358,6 +358,42 @@ export class StationPasscodeDecryptionError extends Error {
   }
 }
 
+/**
+ * Thrown when an operation that CANNOT proceed without `STATION_PASSCODE_KEY`
+ * is asked to run on a process that does not have it — reveal, which must
+ * decrypt, and rotate, which must encrypt.
+ *
+ * A DISTINCT type rather than the bare `Error` resolveStationPasscodeKey
+ * throws, because "the key is not configured" and "a row will not open" need
+ * different answers from an operator. Without it the two collapsed in three
+ * different wrong ways at the admin surface (BS#2362 review):
+ *
+ *   - rotate fell through to a generic, code-less 500;
+ *   - reveal WITH an active row surfaced as a StationPasscodeDecryptionError
+ *     with `reason: 'corrupt'` (activeRowDecryptionError's default for a
+ *     non-typed throw), whose remedy names STATION_PASSCODE_KEY_PREVIOUS —
+ *     the one variable that cannot fix a missing current key;
+ *   - reveal with NO rows answered `200 {passcodes: []}`, which reads as "the
+ *     station has no live code" when the truth is "this process cannot read
+ *     one".
+ *
+ * Deliberately NOT thrown from resolveStationPasscodeKey itself. That would
+ * retype the failure on the PUBLIC signup path too, where the current
+ * fail-closed behaviour (an active row that will not open logs
+ * `passcode_unverifiable` and throws) is exactly right and must not start
+ * naming server configuration in a response an unauthenticated caller can
+ * see. The guard is applied at the two admin entry points instead — see
+ * assertStationPasscodeKeyConfigured.
+ */
+export class StationPasscodeKeyUnsetError extends Error {
+  constructor(
+    message = 'STATION_PASSCODE_KEY is not set, so station passcodes can be neither decrypted nor minted by this process.'
+  ) {
+    super(message);
+    this.name = 'StationPasscodeKeyUnsetError';
+  }
+}
+
 /** Thrown by rotateStationPasscode when two passcodes are already active. */
 export class StationPasscodeCapExceededError extends Error {
   constructor() {
@@ -403,6 +439,21 @@ function resolveStationPasscodeKey(): Buffer {
   const raw = process.env.STATION_PASSCODE_KEY;
   if (!raw) throw new Error('STATION_PASSCODE_KEY is not set');
   return parseStationPasscodeKeyEnv('STATION_PASSCODE_KEY', raw);
+}
+
+/**
+ * Upfront presence check for the two ADMIN operations that need the key
+ * (reveal, rotate), run before they touch a row. Cheap, and it is what turns
+ * "unconfigured" into its own typed failure without changing what the public
+ * signup path does — see StationPasscodeKeyUnsetError for why the throw site
+ * is here rather than inside resolveStationPasscodeKey.
+ *
+ * Presence only. A key that is SET but malformed is still
+ * parseStationPasscodeKeyEnv's error to report, since that message names the
+ * actual defect (byte length) and this one cannot.
+ */
+function assertStationPasscodeKeyConfigured(): void {
+  if (!process.env.STATION_PASSCODE_KEY) throw new StationPasscodeKeyUnsetError();
 }
 
 let warnedMalformedPreviousKey = false;
@@ -826,7 +877,17 @@ export interface ReadRecentSignupAttemptsOptions {
   since?: Date;
 }
 
-/** For the admin API (#2362) to display recent attempts. */
+/**
+ * The NEWEST `limit` attempt rows at or after `since` — a display list for
+ * the admin API (#2362), not a census.
+ *
+ * `ORDER BY attempted_at DESC LIMIT n` truncates, so anything a caller
+ * derives from the returned array is a statement about the newest `limit`
+ * rows and NOT about the window. Counting outcomes off this list saturates
+ * at `limit` and loses every clear/reveal/ok row a burst has pushed past the
+ * cap; use countSignupAttemptOutcomes for counts and
+ * evaluateSignupCooldown's `clearedAt` for the last clear.
+ */
 export async function readRecentSignupAttempts(options: ReadRecentSignupAttemptsOptions = {}) {
   const { limit = 100, since = new Date(0) } = options;
   return db
@@ -835,6 +896,47 @@ export async function readRecentSignupAttempts(options: ReadRecentSignupAttempts
     .where(gte(station_signup_attempt.attemptedAt, since))
     .orderBy(desc(station_signup_attempt.attemptedAt))
     .limit(limit);
+}
+
+export interface CountSignupAttemptOutcomesOptions {
+  /** Floor on `attempted_at`. Defaults to the epoch, i.e. the whole log. */
+  since?: Date;
+}
+
+/**
+ * `SELECT outcome, count(*) ... GROUP BY outcome` over the window — one row
+ * per outcome actually present, so an absent outcome is ABSENT rather than
+ * zero.
+ *
+ * Counted in Postgres, deliberately. The status endpoint used to build these
+ * numbers by iterating readRecentSignupAttempts, which is capped at 100 rows
+ * TOTAL, so a "24-hour" figure silently saturated the moment a burst filled
+ * the cap — and it could report fewer `passcode_fail` over 24 hours than
+ * evaluateSignupCooldown's SQL-aggregated count over 10 minutes, which is a
+ * self-contradictory payload. The row cap belongs to the display list only
+ * (BS#2362 review).
+ *
+ * The aggregate is O(1) transfer for this process regardless of how many
+ * rows an attacker put in the window — the same reason evaluateSignupCooldown
+ * moved its two counts into SQL. Served by the composite
+ * (outcome, attempted_at) index; see the table's header comment in schema.ts.
+ */
+export async function countSignupAttemptOutcomes(
+  options: CountSignupAttemptOutcomesOptions = {}
+): Promise<Record<string, number>> {
+  const { since = new Date(0) } = options;
+  const rows = await db
+    .select({
+      outcome: station_signup_attempt.outcome,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(station_signup_attempt)
+    .where(gte(station_signup_attempt.attemptedAt, since))
+    .groupBy(station_signup_attempt.outcome);
+
+  const counts: Record<string, number> = {};
+  for (const row of rows) counts[row.outcome] = row.count;
+  return counts;
 }
 
 export interface PruneSignupAttemptsOptions {
@@ -971,6 +1073,31 @@ export function resolveCooldownCountStart(now: Date, clearedAt: Date | null): Da
 export const SIGNUP_COOLDOWN_TRIGGER_ROW_LIMIT = 500;
 
 /**
+ * `attempted_at` of the most recent `cooldown_cleared` row in the whole log,
+ * or null if a manager has never cleared. Indexed, `LIMIT 1`.
+ *
+ * Query 1 of evaluateSignupCooldown, extracted so the status endpoint can
+ * ask the same question directly (BS#2362 review). It previously answered it
+ * by scanning readRecentSignupAttempts' capped display list for a
+ * `cooldown_cleared` row, which reverts to null as soon as 100 attempts land
+ * after the clear — minutes, during the `cooldown_refused` storm that is
+ * exactly when a manager is polling to confirm their clear took.
+ *
+ * NOT scoped to any window. The clear is a floor on all subsequent evaluation
+ * (see resolveCooldownLookbackStart), so the row that matters is the latest
+ * one there has ever been, whatever the caller's display window happens to be.
+ */
+export async function readLastCooldownClearedAt(): Promise<Date | null> {
+  const [clearedRow] = await db
+    .select({ attemptedAt: station_signup_attempt.attemptedAt })
+    .from(station_signup_attempt)
+    .where(eq(station_signup_attempt.outcome, 'cooldown_cleared'))
+    .orderBy(desc(station_signup_attempt.attemptedAt))
+    .limit(1);
+  return clearedRow?.attemptedAt ?? null;
+}
+
+/**
  * Evaluate the station-global signup cooldown. Read-only — safe to call on
  * every poll of a status endpoint (#2362) without side effects.
  *
@@ -1002,13 +1129,7 @@ export const SIGNUP_COOLDOWN_TRIGGER_ROW_LIMIT = 500;
  * allFailureCount }`.
  */
 export async function evaluateSignupCooldown(now: Date = new Date()): Promise<SignupCooldownEvaluation> {
-  const [clearedRow] = await db
-    .select({ attemptedAt: station_signup_attempt.attemptedAt })
-    .from(station_signup_attempt)
-    .where(eq(station_signup_attempt.outcome, 'cooldown_cleared'))
-    .orderBy(desc(station_signup_attempt.attemptedAt))
-    .limit(1);
-  const clearedAt = clearedRow?.attemptedAt ?? null;
+  const clearedAt = await readLastCooldownClearedAt();
 
   const [counts] = await db
     .select({
@@ -1600,11 +1721,29 @@ export interface RevealedStationPasscode {
  * one `passcode_revealed` attempt per row revealed. Active-row decrypt
  * failure fails closed here too — same gate-integrity argument as
  * verifyStationPasscode.
+ *
+ * TWO PASSES, not one (BS#2362 review). Every row is decrypted first, and
+ * only then are the audit rows written. Interleaving them left a
+ * `passcode_revealed` row for row 1 when row 2 would not decrypt and the call
+ * threw — an audit trail claiming the manager received a code they never saw,
+ * in the one place the audit trail IS the security control (it is what
+ * replaces show-once storage's structural guarantee). All-or-nothing is the
+ * only reading of that log that can be trusted.
+ *
+ * The error semantics are unchanged: an undecryptable active row still logs
+ * `passcode_unverifiable` and throws StationPasscodeDecryptionError, and now
+ * writes NO `passcode_revealed` row at all rather than a partial set.
  */
 export async function revealStationPasscode(
   actorUserId: string,
   now: Date = new Date()
 ): Promise<RevealedStationPasscode[]> {
+  // Before the read: a process with no key cannot open a single row, and
+  // without this the empty-table case answers "no codes exist" and the
+  // non-empty case blames STATION_PASSCODE_KEY_PREVIOUS for a missing
+  // current key. See StationPasscodeKeyUnsetError.
+  assertStationPasscodeKeyConfigured();
+
   const activeRows = await db.select().from(station_passcode).where(activePasscodePredicate(now));
 
   const revealed: RevealedStationPasscode[] = [];
@@ -1636,7 +1775,13 @@ export async function revealStationPasscode(
       useCount: row.useCount,
       maxUses: row.maxUses,
     });
-    await insertSignupAttempt({ outcome: 'passcode_revealed', passcodeId: row.id, actorUserId, attemptedAt: now });
+  }
+
+  // Second pass — see the two-passes note above. Reached only when every
+  // active row opened, so the log says "the manager received exactly these
+  // codes" and never a prefix of them.
+  for (const entry of revealed) {
+    await insertSignupAttempt({ outcome: 'passcode_revealed', passcodeId: entry.id, actorUserId, attemptedAt: now });
   }
   return revealed;
 }
@@ -1705,6 +1850,12 @@ export interface RotatedStationPasscode {
 export async function rotateStationPasscode(
   options: RotateStationPasscodeOptions = {}
 ): Promise<RotatedStationPasscode> {
+  // Before the advisory lock and before generateStationPasscode's encrypt:
+  // without the key this call cannot mint anything, and the bare Error
+  // resolveStationPasscodeKey throws reaches the admin surface as a
+  // code-less 500. See StationPasscodeKeyUnsetError.
+  assertStationPasscodeKeyConfigured();
+
   const now = options.now ?? new Date();
   const ttlMs = options.ttlMs ?? STATION_PASSCODE_DEFAULT_TTL_MS;
   const maxUses = options.maxUses ?? STATION_PASSCODE_DEFAULT_MAX_USES;

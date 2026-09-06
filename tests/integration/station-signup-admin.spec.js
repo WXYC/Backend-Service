@@ -153,14 +153,23 @@ describe('station-signup manager API (BS#2362, real endpoints, real Postgres)', 
   const attemptsWithOutcome = async (outcome) =>
     sql`SELECT * FROM station_signup_attempt WHERE outcome = ${outcome} ORDER BY attempted_at ASC`;
 
-  /** Seed n `passcode_fail` rows spread across the last `spreadSeconds` seconds. */
-  async function seedFailures(n, spreadSeconds = 120) {
-    for (let i = 0; i < n; i += 1) {
-      await sql`
-        INSERT INTO station_signup_attempt (id, attempted_at, outcome)
-        VALUES (${`${uniqueId()}-f${i}`}, now() - make_interval(secs => ${(i * spreadSeconds) / n}), 'passcode_fail')
-      `;
-    }
+  /**
+   * Seed n attempt rows spread evenly back across the last `spreadSeconds`
+   * seconds (row 0 at `now()`, oldest at `now() - spreadSeconds`).
+   *
+   * ONE statement over `generate_series`, not n round trips: the cases below
+   * seed past the status endpoint's 100-row display cap, and a per-row insert
+   * loop makes that fixture cost more than the assertion it supports.
+   */
+  async function seedFailures(n, spreadSeconds = 120, outcome = 'passcode_fail') {
+    if (n <= 0) return;
+    const prefix = uniqueId();
+    const step = spreadSeconds / n;
+    await sql`
+      INSERT INTO station_signup_attempt (id, attempted_at, outcome)
+      SELECT ${prefix} || '-f' || i::text, now() - make_interval(secs => i * ${step}::float8), ${outcome}
+      FROM generate_series(0, ${n - 1}) AS i
+    `;
   }
 
   beforeAll(async () => {
@@ -314,6 +323,28 @@ describe('station-signup manager API (BS#2362, real endpoints, real Postgres)', 
 
       expect(revealed.body.passcodes.map((p) => p.code).sort()).toEqual([first.body.code, second.body.code].sort());
       expect(await attemptsWithOutcome('passcode_revealed')).toHaveLength(2);
+    });
+
+    it('audits ALL-OR-NOTHING: an undecryptable second row leaves no audit row for the first', async () => {
+      // BS#2362 review. The audit log is what replaces show-once storage's
+      // structural guarantee, so a `passcode_revealed` row for a code the
+      // manager never received is worse than none at all: it is the one place
+      // where the log IS the control. Decrypt every row first, write the
+      // audit rows only once they all opened.
+      await call('POST', `${BASE}/rotate`, { cookie: managerCookie, body: {} });
+      await sql`
+        INSERT INTO station_passcode (id, code_encrypted, expires_at)
+        VALUES (${`${uniqueId()}-bad`}, 'not-a-real-ciphertext', now() + interval '1 hour')
+      `;
+
+      const revealed = await call('POST', `${BASE}/reveal`, { cookie: managerCookie, body: {} });
+
+      // Unchanged error semantics: still the typed 503, still fail-closed.
+      expect(revealed.status).toBe(503);
+      expect(revealed.body.code).toBe('passcode_undecryptable');
+      expect(await attemptsWithOutcome('passcode_revealed')).toHaveLength(0);
+      // The gate-down trace the verify path writes is still there.
+      expect(await attemptsWithOutcome('passcode_unverifiable')).toHaveLength(1);
     });
   });
 
@@ -495,6 +526,40 @@ describe('station-signup manager API (BS#2362, real endpoints, real Postgres)', 
       });
       expect(res.body.attempts.countsByOutcome).toMatchObject({ passcode_fail: 3, passcode_expired: 1 });
       expect(res.body.attempts.recent).toHaveLength(4);
+    });
+
+    // BS#2362 review, the blocking finding. `recent` is `ORDER BY
+    // attempted_at DESC LIMIT 100`; the counts and the last-clear used to be
+    // derived from it, so both were statements about the newest 100 rows
+    // while the payload called them a 24-hour window. Past the cap the
+    // per-outcome totals saturated (and could report fewer 24-hour
+    // passcode_fail than the cooldown block counts over ten minutes), and
+    // lastClearedAt reverted to null — during a refusal storm, which is
+    // exactly when a manager polls to confirm their clear took.
+    it('counts the WHOLE window past the 100-row cap, and keeps lastClearedAt behind the burst', async () => {
+      await sql`
+        INSERT INTO station_signup_attempt (id, attempted_at, outcome, actor_user_id)
+        VALUES (${`${uniqueId()}-clr`}, now() - interval '5 minutes', 'cooldown_cleared', ${managerUserId})
+      `;
+      const [clearRow] = await attemptsWithOutcome('cooldown_cleared');
+      // 120 > STATUS_ATTEMPT_ROW_LIMIT, all of them landing AFTER the clear.
+      await seedFailures(120, 60);
+
+      const res = await call('GET', `${BASE}/status`, { cookie: managerCookie });
+
+      expect(res.status).toBe(200);
+      expect(res.body.attempts.countsByOutcome.passcode_fail).toBe(120);
+      // The clear was pushed clean out of the display list and is still counted.
+      expect(res.body.attempts.countsByOutcome.cooldown_cleared).toBe(1);
+      expect(res.body.attempts.recent).toHaveLength(100);
+      expect(res.body.attempts.recent.every((row) => row.outcome === 'passcode_fail')).toBe(true);
+
+      expect(new Date(res.body.cooldown.lastClearedAt).getTime()).toBe(new Date(clearRow.attempted_at).getTime());
+      // The payload can no longer contradict itself: a 24-hour count is never
+      // smaller than the cooldown block's 10-minute count of the same outcome.
+      expect(res.body.attempts.countsByOutcome.passcode_fail).toBeGreaterThanOrEqual(
+        res.body.cooldown.noMatchFailureCount
+      );
     });
 
     it('lists pending accounts with their days-pending and self_signup_downgraded_at', async () => {
