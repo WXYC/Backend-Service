@@ -907,6 +907,101 @@ export const getArtistReleases: RequestHandler<
 };
 
 /**
+ * Page bounds for the two cross-reference collections.
+ *
+ * NOT `DEFAULT_LIMIT`/`MAX_LIMIT` (50/100), which the catalog-search endpoints
+ * share. Those cap an open-ended catalog; these cap two frozen legacy tables
+ * that hold 78 and 22 rows on prod (WXYC/wiki#89's 2026-08-11 measurement),
+ * with `artist_crossreference` rising to at most 119 once
+ * `scripts/audit/bs_2117_crossref_backfill.sql` has loaded the resolvable
+ * pairs. A 100-row ceiling would make the artist collection permanently
+ * un-fetchable in one request for the sake of a cap that never binds, so the
+ * default is set above the whole frozen set and the maximum a few multiples
+ * beyond it. The cap still exists rather than the endpoint serving the table
+ * whole: `jobs/library-etl` keeps upserting into both on a 30-minute cron
+ * until the tubafrenzy cutover, and the freeze is a decision, not something
+ * the query can enforce.
+ */
+const CROSSREFERENCE_DEFAULT_LIMIT = 200;
+const CROSSREFERENCE_MAX_LIMIT = 500;
+
+type CrossReferenceQueryParams = { page?: string; limit?: string };
+
+/**
+ * Parse `?page=`/`?limit=` for the two cross-reference listings.
+ *
+ * Same rules as `getArtistReleases` and `searchLibraryQueryEndpoint` — a
+ * repeated key is a 400 rather than a silent coercion, because Express's
+ * `simple` query parser yields `string[]` and `parseInt(['1','2'])`
+ * stringifies to `'1,2'` and returns `1` (#1553). Factored out here because
+ * two handlers need it identically; the existing callers keep their inline
+ * copies, which validate against different bounds.
+ */
+const parseCrossReferencePage = (query: CrossReferenceQueryParams): { page: number; limit: number } => {
+  if (query.page !== undefined && typeof query.page !== 'string') {
+    throw new WxycError('page must be a single string value', 400);
+  }
+  const page = parseInt(query.page ?? '0');
+  if (isNaN(page) || page < 0) {
+    throw new WxycError('page must be a non-negative integer', 400);
+  }
+
+  if (query.limit !== undefined && typeof query.limit !== 'string') {
+    throw new WxycError('limit must be a single string value', 400);
+  }
+  const limit = parseInt(query.limit ?? String(CROSSREFERENCE_DEFAULT_LIMIT));
+  if (isNaN(limit) || limit < 1) {
+    throw new WxycError('limit must be a positive integer', 400);
+  }
+  if (limit > CROSSREFERENCE_MAX_LIMIT) {
+    throw new WxycError(`limit must not exceed ${CROSSREFERENCE_MAX_LIMIT}`, 400);
+  }
+
+  return { page, limit };
+};
+
+/**
+ * GET /library/crossreferences/artists — the whole `artist_crossreference`
+ * collection, successor to `/wxycdb`'s `xrefsToLibraryCodes.jsp`.
+ *
+ * Read-only by decision, not by omission: WXYC/wiki#89 D5 freezes this set at
+ * the tubafrenzy cutover, so there is no POST/PATCH/DELETE sibling and adding
+ * one would unfreeze it. An empty collection is a 200 with `total: 0`, which
+ * is what the JSP's "There are no Library Code Cross-References" state
+ * renders from — not a 404, since the collection exists and is empty.
+ */
+export const listArtistCrossReferences: RequestHandler<object, unknown, unknown, CrossReferenceQueryParams> = async (
+  req,
+  res
+) => {
+  const { page, limit } = parseCrossReferencePage(req.query);
+  const [results, total] = await Promise.all([
+    libraryService.getArtistCrossReferences(page, limit),
+    libraryService.countArtistCrossReferences(),
+  ]);
+  res.status(200).json({ results, total, page, totalPages: Math.ceil(total / limit) });
+};
+
+/**
+ * GET /library/crossreferences/releases — the whole
+ * `artist_library_crossreference` collection, successor to `/wxycdb`'s
+ * `xrefsToLibraryReleases.jsp`. Read-only for the same reason as its sibling
+ * above; D5 drops this set rather than freezing it, which is a still stronger
+ * argument against a write path.
+ */
+export const listReleaseCrossReferences: RequestHandler<object, unknown, unknown, CrossReferenceQueryParams> = async (
+  req,
+  res
+) => {
+  const { page, limit } = parseCrossReferencePage(req.query);
+  const [results, total] = await Promise.all([
+    libraryService.getReleaseCrossReferences(page, limit),
+    libraryService.countReleaseCrossReferences(),
+  ]);
+  res.status(200).json({ results, total, page, totalPages: Math.ceil(total / limit) });
+};
+
+/**
  * Validate one optional free-text body field: must be a string, must not be
  * blank after trimming, must fit the column. Returns the trimmed value.
  *

@@ -89,6 +89,39 @@ library_route.get(
   libraryController.exportBmiPerformanceList
 );
 
+// The two legacy cross-reference listings — successors to `/wxycdb`'s
+// `xrefsToLibraryCodes.jsp` and `xrefsToLibraryReleases.jsp`. Read-only: both
+// sets are frozen (artist codes) or dropped (releases) by WXYC/wiki#89's
+// decision D5, so no write sibling belongs on this router.
+//
+// `catalog: ['write']` on a READ, deliberately, and for the same reason
+// `/bmi-performance-list` above carries it: `mainmenu.jsp:32-38` wraps both of
+// these links in `<c:if test="${user.hasAdminAccess()}">`, unlike Missing
+// Releases and the rotation links right below them, which sit outside it. That
+// flag is tubafrenzy's librarian/MD tier, and `catalog: ['write']` is the
+// grant that selects musicDirector + stationManager here — the same pair —
+// without minting a statement key. `catalog: ['read']` would hand every DJ and
+// `member` a screen the legacy system gated; a new `catalog: ['admin']`-style
+// key would have to be decided for all four roles (auth.roles.ts) to express a
+// tier that already exists. `/artists/search` and `/artists/peek-code` set the
+// same precedent for an admin-gated read.
+//
+// Two literal segments, so neither collides with the templated
+// `/:id/compilation-tracks` GET further down (different second segment) — but
+// they are registered here, ahead of every templated route on this router,
+// rather than relying on that.
+library_route.get(
+  '/crossreferences/artists',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.listArtistCrossReferences
+);
+
+library_route.get(
+  '/crossreferences/releases',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.listReleaseCrossReferences
+);
+
 library_route.post('/', requirePermissions({ catalog: ['write'] }), libraryController.addAlbum);
 
 library_route.get('/rotation', requirePermissions({ catalog: ['read'] }), libraryController.getRotation);
