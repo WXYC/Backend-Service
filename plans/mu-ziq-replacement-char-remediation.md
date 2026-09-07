@@ -1,4 +1,4 @@
-# `μ-Ziq` renders as U+FFFD in the app — close Phase 4's flowsheet gap, and repair the residue now that ground truth is captured
+# `μ-Ziq` renders as U+FFFD in the app — close Phase 4's flowsheet gap, and repair the residue now that ground truth is captured (BS#2382)
 
 > Revision 9. Supersedes r1–r8. Three things changed the shape of this plan: `scripts/audit/bs_replacement_char_phase4.sql` already repairs the catalog rows (r3); **tubafrenzy ground truth has been captured for every residual row** (r4); and a **decode-fidelity probe of the live read path** now settles empirically that the corruption is historical rather than ongoing (r5). Both captures are in `audit/tubafrenzy_ground_truth_pre_turndown.md`, taken 2026-09-07 hours before Milestone 1 retirement and not repeatable. The deadline that dominated r3 is met. See [What changed](#what-changed-across-revisions).
 
@@ -227,7 +227,7 @@ Test at `tests/unit/middleware/legacy/mirror.charset.test.ts`, alongside the exi
 
 ## Acceptance criteria
 
-- [ ] **Step zero: file the BS# issue.** Every artifact in this plan needs it by convention and cannot be written without it: `bs_replacement_char_phase4.sql:1` carries "for #2114" in its header, `bs_replacement_char_cta.sql` carries BS#2152, and the paths-filter comments at `.github/workflows/test.yml:78` and `:80-89` cite BS#2117 / BS#2152. Thread the number through both new script headers, both new filter comments, and the PR title.
+- [x] **Step zero: file the BS# issue — this is BS#2382.** Every artifact in this plan needs it by convention and cannot be written without it: `bs_replacement_char_phase4.sql:1` carries "for #2114" in its header, `bs_replacement_char_cta.sql` carries BS#2152, and the paths-filter comments at `.github/workflows/test.yml:78` and `:80-89` cite BS#2117 / BS#2152. Thread `#2382` through both new script headers (`V_BS_FFFD_FS` and `V_BS_FFFD_RES`), both new paths-filter comments, and the PR title.
 - [ ] Phase 4 application status established and recorded in the PR.
 - [ ] Phase 4 applied (or confirmed already applied).
 - [ ] `scripts/audit/bs_replacement_char_flowsheet.sql` written to the predecessor skeleton, pre-count recorded in the PR, tested by `tests/integration/bs-replacement-char-flowsheet.spec.js` to the existing spec shape, applied.
