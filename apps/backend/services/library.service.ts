@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, SQL, type Column } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
@@ -15,6 +16,7 @@ import {
   RotationRelease,
   album_plays,
   album_popularity,
+  artist_crossreference,
   artist_library_crossreference,
   artists,
   bins,
@@ -2561,6 +2563,221 @@ export const countReleasesForArtist = async (artist_id: number): Promise<number>
   const response = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(artistReleasesQuery(artist_id).as('artist_releases'));
+
+  return Number(response[0]?.count ?? 0);
+};
+
+/**
+ * The two legacy cross-reference collections, read-only.
+ *
+ * `/wxycdb`'s admin menu carries two whole-collection views with no successor
+ * anywhere in this service — `xrefsToLibraryCodes.jsp` over
+ * `artist_crossreference` (artist -> artist, tubafrenzy's
+ * `LIBRARY_CODE_CROSS_REFERENCE`) and `xrefsToLibraryReleases.jsp` over
+ * `artist_library_crossreference` (artist -> release, tubafrenzy's
+ * `RELEASE_CROSS_REFERENCE`). Both are READ paths only, and deliberately so:
+ * WXYC/wiki#89 decision D5 freezes the artist-code cross-references at the
+ * tubafrenzy cutover ("post-cutover artists don't gain aliases; unfreezing is
+ * a future ticket") and drops the release cross-references outright. Adding a
+ * write path here would unfreeze a set that decision deliberately froze.
+ *
+ * Both collections are small and bounded by that freeze — the 2026-08-11
+ * prod measurement on WXYC/wiki#89 has 78 rows in `artist_crossreference`
+ * (rising to at most 119, the source table's full size, once
+ * `scripts/audit/bs_2117_crossref_backfill.sql` has loaded its 110 resolvable
+ * pairs) and 22 in `artist_library_crossreference`. They are nonetheless
+ * paginated rather than served whole: `jobs/library-etl` still upserts into
+ * both on a 30-minute cron until the cutover, so the ceiling is a decision
+ * rather than a constraint the query can rely on, and the page/limit envelope
+ * costs a caller that wants everything exactly one parameter.
+ */
+const sourceArtist = alias(artists, 'source_artist');
+const targetArtist = alias(artists, 'target_artist');
+
+export type ArtistCrossReferenceRow = {
+  source_artist_id: number;
+  source_artist_name: string;
+  target_artist_id: number;
+  target_artist_name: string;
+  target_code_letters: string;
+  target_code_artist_number: number | null;
+  comment: string | null;
+};
+
+/**
+ * Join chain for `xrefsToLibraryCodes.jsp`'s four columns. Shared verbatim by
+ * the page query and its `total` so the two cannot disagree about scope, the
+ * same arrangement `artistReleasesQuery` uses.
+ *
+ * Both FKs are `NOT NULL` and `ON DELETE CASCADE` to `artists`, so neither
+ * INNER JOIN can drop a row that the base table holds.
+ *
+ * `target_code_artist_number` is a correlated subquery, not a join.
+ * `artist_genre_key` is unique on `(artist_id, genre_id)` rather than on
+ * `artist_id`, so a legacy artist filed under several genres owns several
+ * `artist_genre_code`s — joining would fan one cross-reference row out into
+ * several. It picks the lowest `genre_id`, matching `getArtistCardById`'s
+ * collapse, so the code this view shows for an artist is the code that
+ * artist's own card shows. Nullable: `genre_artist_crossreference` has no row
+ * for an artist that was never filed under a genre.
+ *
+ * Only the TARGET carries a call number, matching the JSP: its
+ * "Cross-Referencing Artist" column renders a bare presentation name and its
+ * "Cross-Referenced Library Code" column renders code + name.
+ */
+const artistCrossReferencesQuery = () =>
+  db
+    .select({
+      source_artist_id: artist_crossreference.source_artist_id,
+      source_artist_name: sourceArtist.artist_name,
+      target_artist_id: artist_crossreference.target_artist_id,
+      target_artist_name: targetArtist.artist_name,
+      target_code_letters: targetArtist.code_letters,
+      target_code_artist_number: sql<number | null>`(
+        SELECT gac.artist_genre_code
+        FROM ${genre_artist_crossreference} AS gac
+        WHERE gac.artist_id = ${targetArtist.id}
+        ORDER BY gac.genre_id ASC
+        LIMIT 1
+      )`,
+      comment: artist_crossreference.comment,
+    })
+    .from(artist_crossreference)
+    .innerJoin(sourceArtist, eq(sourceArtist.id, artist_crossreference.source_artist_id))
+    .innerJoin(targetArtist, eq(targetArtist.id, artist_crossreference.target_artist_id));
+
+/**
+ * One page of `artist_crossreference`, alphabetical by the cross-referencing
+ * artist.
+ *
+ * The table has no primary key and no timestamp — its only unique constraint
+ * is `artist_crossref_source_target` on the FK pair — so the sort carries both
+ * FK columns after the name to reach a total order. Without that, two artists
+ * sharing a `artist_name` (the legacy catalog has several) would order
+ * arbitrarily and rows could repeat or vanish across page boundaries. The name
+ * itself sorts under the database's default collation, which is what a
+ * librarian reading an alphabetical list expects; determinism comes from the
+ * id tiebreak, not from the collation.
+ */
+export const getArtistCrossReferences = async (page: number, limit: number): Promise<ArtistCrossReferenceRow[]> => {
+  return artistCrossReferencesQuery()
+    .orderBy(
+      asc(sourceArtist.artist_name),
+      asc(artist_crossreference.source_artist_id),
+      asc(artist_crossreference.target_artist_id)
+    )
+    .limit(limit)
+    .offset(page * limit);
+};
+
+/** Total row count for `getArtistCrossReferences`' page envelope (same join scope). */
+export const countArtistCrossReferences = async (): Promise<number> => {
+  const response = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(artistCrossReferencesQuery().as('artist_cross_references'));
+
+  return Number(response[0]?.count ?? 0);
+};
+
+const referencingArtist = alias(artists, 'referencing_artist');
+const releaseArtist = alias(artists, 'release_artist');
+
+export type ReleaseCrossReferenceRow = {
+  artist_id: number;
+  artist_name: string;
+  library_id: number;
+  album_title: string;
+  album_artist_name: string | null;
+  alternate_artist_name: string | null;
+  format_name: string;
+  genre_id: number;
+  code_letters: string;
+  code_artist_number: number | null;
+  code_number: number;
+  code_volume_letters: string | null;
+  comment: string | null;
+};
+
+/**
+ * Join chain for `xrefsToLibraryReleases.jsp`'s five columns, shared by the
+ * page query and its `total`.
+ *
+ * TWO artist rows per cross-reference, aliased apart because they are usually
+ * different artists: `referencing_artist` is the artist the cross-reference
+ * hangs off (`artist_library_crossreference.artist_id`), `release_artist` is
+ * whoever the cross-referenced release is filed under (`library.artist_id`).
+ * That difference is the whole point of the table — "Barry Black" pointing at
+ * an Eric Bachmann release — so collapsing them would lose the association
+ * the row records. The call number belongs to the RELEASE, hence
+ * `release_artist.code_letters`.
+ *
+ * `genre_artist_crossreference` is LEFT joined, unlike `artistReleasesQuery`'s
+ * INNER join of the same pair. There the join is a scoping predicate over one
+ * artist's shelf; here it supplies one display column, and this endpoint's job
+ * is to show a frozen legacy set in full. An artist missing its genre
+ * crossreference row would silently drop its cross-reference from a list
+ * nothing else in the system can reproduce. The key is still the
+ * `(artist_id, genre_id)` PAIR, because `artist_genre_code` is genre-scoped,
+ * so the join cannot fan out.
+ *
+ * `album_artist_name` COALESCEs `library.artist_name` over the joined artist,
+ * matching `getCatalogExportRows` — the denormalized column is the ETL's own
+ * value for the release and wins where it is present.
+ */
+const releaseCrossReferencesQuery = () =>
+  db
+    .select({
+      artist_id: artist_library_crossreference.artist_id,
+      artist_name: referencingArtist.artist_name,
+      library_id: artist_library_crossreference.library_id,
+      album_title: library.album_title,
+      album_artist_name: sql<string | null>`COALESCE(${library.artist_name}, ${releaseArtist.artist_name})`,
+      alternate_artist_name: library.alternate_artist_name,
+      format_name: format.format_name,
+      genre_id: library.genre_id,
+      code_letters: releaseArtist.code_letters,
+      code_artist_number: genre_artist_crossreference.artist_genre_code,
+      code_number: library.code_number,
+      code_volume_letters: library.code_volume_letters,
+      comment: artist_library_crossreference.comment,
+    })
+    .from(artist_library_crossreference)
+    .innerJoin(referencingArtist, eq(referencingArtist.id, artist_library_crossreference.artist_id))
+    .innerJoin(library, eq(library.id, artist_library_crossreference.library_id))
+    .innerJoin(releaseArtist, eq(releaseArtist.id, library.artist_id))
+    .innerJoin(format, eq(format.id, library.format_id))
+    .leftJoin(
+      genre_artist_crossreference,
+      and(
+        eq(genre_artist_crossreference.artist_id, library.artist_id),
+        eq(genre_artist_crossreference.genre_id, library.genre_id)
+      )
+    );
+
+/**
+ * One page of `artist_library_crossreference`, alphabetical by the
+ * cross-referencing artist.
+ *
+ * Same no-primary-key situation as `getArtistCrossReferences`: the unique
+ * constraint is `library_id_artist_id` over the FK pair, so both FK columns
+ * follow the name to make the order total and the pages stable.
+ */
+export const getReleaseCrossReferences = async (page: number, limit: number): Promise<ReleaseCrossReferenceRow[]> => {
+  return releaseCrossReferencesQuery()
+    .orderBy(
+      asc(referencingArtist.artist_name),
+      asc(artist_library_crossreference.artist_id),
+      asc(artist_library_crossreference.library_id)
+    )
+    .limit(limit)
+    .offset(page * limit);
+};
+
+/** Total row count for `getReleaseCrossReferences`' page envelope (same join scope). */
+export const countReleaseCrossReferences = async (): Promise<number> => {
+  const response = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(releaseCrossReferencesQuery().as('release_cross_references'));
 
   return Number(response[0]?.count ?? 0);
 };

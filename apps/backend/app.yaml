@@ -2615,6 +2615,206 @@ paths:
         '404':
           description: Artist not found
 
+  /library/crossreferences/artists:
+    get:
+      summary: List the legacy artist-to-artist cross-references
+      description: >
+        Successor to `/wxycdb`'s `xrefsToLibraryCodes.jsp` — the whole
+        `artist_crossreference` collection, the "see also" pointers a librarian
+        filed between two artist cards. READ ONLY, deliberately: WXYC/wiki#89's
+        decision D5 freezes this set at the tubafrenzy cutover ("post-cutover
+        artists don't gain aliases; unfreezing is a future ticket"), so there is
+        no create, update, or delete sibling and adding one would unfreeze it.
+
+
+        Enforced by `requirePermissions({ catalog: ['write'] })` — musicDirector
+        or above. A READ at the write tier, matching
+        `/library/bmi-performance-list`: `mainmenu.jsp` wraps this link in
+        `<c:if test="${user.hasAdminAccess()}">`, unlike the Missing Releases
+        and rotation links beside it, and `catalog:write` is the grant that
+        selects the same musicDirector + stationManager pair that flag names.
+
+
+        `target_code_artist_number` is genre-scoped and collapses to the lowest
+        `genre_id`, matching `GET /library/artists/{id}`; it is null for an
+        artist with no `genre_artist_crossreference` row. Only the TARGET
+        carries a call number, matching the JSP's columns. Ordered by the
+        cross-referencing artist's name, then both FK columns — the table has no
+        primary key, so the FK pair is what makes the order total and the pages
+        stable.
+
+
+        Known divergence from the JSP: it renders a "Time Last Modified" column
+        and NEITHER cross-reference table has a timestamp column. The field is
+        omitted here rather than invented.
+      security:
+        - BearerAuth: ['catalog-write']
+      parameters:
+        - in: query
+          name: page
+          required: false
+          description: Zero-based page index.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - in: query
+          name: limit
+          required: false
+          description: >
+            Defaults above the whole frozen collection (119 rows at most) so a
+            caller can fetch it in one request.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 200
+      responses:
+        '200':
+          description: >
+            One page of artist cross-references. An empty collection is a 200
+            with `total: 0` — the JSP's "There are no Library Code
+            Cross-References" state — not a 404.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        source_artist_id:
+                          type: integer
+                        source_artist_name:
+                          type: string
+                        target_artist_id:
+                          type: integer
+                        target_artist_name:
+                          type: string
+                        target_code_letters:
+                          type: string
+                        target_code_artist_number:
+                          type: integer
+                          nullable: true
+                        comment:
+                          type: string
+                          nullable: true
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  totalPages:
+                    type: integer
+        '400':
+          description: Invalid page or limit
+
+  /library/crossreferences/releases:
+    get:
+      summary: List the legacy artist-to-release cross-references
+      description: >
+        Successor to `/wxycdb`'s `xrefsToLibraryReleases.jsp` — the whole
+        `artist_library_crossreference` collection, the pointers a librarian
+        filed from an artist card to a specific release. READ ONLY for the same
+        reason as its artist sibling; WXYC/wiki#89 D5 drops this set rather than
+        freezing it, which is a still stronger argument against a write path.
+
+
+        Enforced by `requirePermissions({ catalog: ['write'] })` — musicDirector
+        or above, same `hasAdminAccess()` reasoning as the sibling above.
+
+
+        Each row carries TWO artists: `artist_id`/`artist_name` is the
+        cross-REFERENCING artist, `album_artist_name` is whoever the
+        cross-referenced release is filed under. They are usually different —
+        that difference is the association the row records. The call number
+        belongs to the release and ships as PARTS (`code_letters` +
+        `code_artist_number` + `code_number` + `code_volume_letters`), matching
+        `GET /library/artists/{id}/releases`, not as a composed string.
+        `code_artist_number` is genre-scoped (hence the per-row `genre_id`) and
+        is null when the release's artist has no `genre_artist_crossreference`
+        row for that genre — LEFT joined so a frozen legacy row can never
+        silently vanish from a listing nothing else reproduces.
+
+
+        Known divergence from the JSP: no "Time Last Modified" — the table has
+        no timestamp column.
+      security:
+        - BearerAuth: ['catalog-write']
+      parameters:
+        - in: query
+          name: page
+          required: false
+          description: Zero-based page index.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 200
+      responses:
+        '200':
+          description: >
+            One page of release cross-references. An empty collection is a 200
+            with `total: 0` — the JSP's "There are no Library Release
+            Cross-References" state — not a 404.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        artist_id:
+                          type: integer
+                        artist_name:
+                          type: string
+                        library_id:
+                          type: integer
+                        album_title:
+                          type: string
+                        album_artist_name:
+                          type: string
+                          nullable: true
+                        alternate_artist_name:
+                          type: string
+                          nullable: true
+                        format_name:
+                          type: string
+                        genre_id:
+                          type: integer
+                        code_letters:
+                          type: string
+                        code_artist_number:
+                          type: integer
+                          nullable: true
+                        code_number:
+                          type: integer
+                        code_volume_letters:
+                          type: string
+                          nullable: true
+                        comment:
+                          type: string
+                          nullable: true
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  totalPages:
+                    type: integer
+        '400':
+          description: Invalid page or limit
+
   /library/formats:
     get:
       summary: Get format list
