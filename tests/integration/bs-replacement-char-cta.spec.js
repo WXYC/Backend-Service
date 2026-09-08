@@ -516,10 +516,7 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
       [49848, 'd8b9d8a8d8afd8a7d984d986d982db8c20d8a7d981d8b4d8a7d8b1d986db8cd8a7'],
       [53042, '44c3a963616cc3a9204368696e6f6973'],
       [53478, 'e0b88ae0b8b2e0b88d20e0b980e0b8aae0b8b5e0b8a2e0b887e0b89ee0b8b4e0b893'],
-      [
-        56717,
-        '4b6f7274204b6f7274204b72656469742c2042c3a66e61676ac3b672c3b06972204f672054726f6d6d7573c3b36cc3b3',
-      ],
+      [56717, '4b6f7274204b6f7274204b72656469742c2042c3a66e61676ac3b672c3b06972204f672054726f6d6d7573c3b36cc3b3'],
       [
         58487,
         'e4bfbae381afe4babae3818ce382afe382bde38197e381a6e3828be381a8e38193e381aae38293e3818be8a68be3819fe3818fe381ade38188202852656d697829',
@@ -612,9 +609,7 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
     // schema deliberately carries no matching compilation_track_artist rows,
     // which isolates the guard path from the write path. Twin/no-twin
     // branching is covered by the synthetic-fixture tests below.
-    const RELEASES = [
-      8844, 11615, 11704, 12988, 49848, 53042, 53478, 56717, 58487, 59002, 59194, 67454,
-    ];
+    const RELEASES = [8844, 11615, 11704, 12988, 49848, 53042, 53478, 56717, 58487, 59002, 59194, 67454];
     for (const releaseId of RELEASES) {
       await seedLibrary(releaseId);
     }
