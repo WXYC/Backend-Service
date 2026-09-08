@@ -489,33 +489,67 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
     expect(postAmbleIdx).toBeLessThan(commitIdx);
   });
 
-  test('the shipped insert-pending-rows block carries no quoted string literals in its SQL -- i.e. it is still just the all-NULL placeholder (the missing enforcement gate, PR #2154 review round 2)', () => {
-    // The deferred byte-exact codepoint assertion (Phase 4's
-    // scriptUsesTheRightCodepoints analogue, see the header's "Known gap,
-    // deliberately deferred" note) can't be written until an operator has
-    // actually captured and pasted the 14 real rows. The INVERSE is
-    // checkable today: as long as the shipped VALUES list is still just the
-    // placeholder, that gap is inert. Every real captured row has at least
-    // one single-quoted string (an artist_name or track_title); the
-    // placeholder and its scrub DELETE have none. This goes red the moment
-    // real data lands, forcing whoever adds it to add the codepoint
-    // assertion in the SAME change (see the header note this test is
-    // pointed at).
-    const sqlOnly = blocks['insert-pending-rows']
+  test('every captured true_* value in the shipped block is byte-exact (BS#2382 capture; succeeds the placeholder gate this test replaced)', () => {
+    // Through the 2026-09-07 capture this test asserted the INVERSE -- that
+    // the block carried no string literals at all, i.e. was still the all-NULL
+    // placeholder -- and its comment named its own succession plan: it "goes
+    // red the moment real data lands, forcing whoever adds it to add the
+    // codepoint assertion in the SAME change". This is that assertion, and it
+    // is the CTA analogue of bs-replacement-char-phase4.spec.js's
+    // scriptUsesTheRightCodepoints.
+    //
+    // Byte pins, not eyeballed strings: every value here is diacritic- or
+    // CJK-bearing, several are visually identical to a wrong neighbour (`·`
+    // U+00B7 MIDDLE DOT vs `・` U+30FB KATAKANA MIDDLE DOT appear in two
+    // different titles of the same release, 59194), and an editor or a
+    // copy-paste that normalises one into the other would be invisible in
+    // review and would break the byte-exact parity comparison downstream.
+    const TRUE_VALUE_BYTES = [
+      [8844, '53c3b32044616ec3a76f2053616d6261203d204a617a7a20274e272053616d6261'],
+      [11615, 'cea4ceaccf83cebfcf8220cea7ceb1cebbcebaceb9ceaccf82'],
+      [11615, 'ce94ceb5cebbcf86ceafcebdceb920ce94ceb5cebbcf86ceb9cebdceaccebaceb9'],
+      [11704, '48756c647265736cc3a57474656e203d2054686520576f6f64204e796d70682054756e65'],
+      [
+        12988,
+        '537472696e672051756172746574202253756e726973652220337264204d6f76656d656e74203d20e5bca6e6a5bde59b9be9878de5a58fe69bb2e3808ae697a5e381aee587bae3808be38288e3828a20e7acac33e6a5bde7aba0',
+      ],
+      [49848, 'd8b9d8a8d8afd8a7d984d986d982db8c20d8a7d981d8b4d8a7d8b1d986db8cd8a7'],
+      [53042, '44c3a963616cc3a9204368696e6f6973'],
+      [53478, 'e0b88ae0b8b2e0b88d20e0b980e0b8aae0b8b5e0b8a2e0b887e0b89ee0b8b4e0b893'],
+      [
+        56717,
+        '4b6f7274204b6f7274204b72656469742c2042c3a66e61676ac3b672c3b06972204f672054726f6d6d7573c3b36cc3b3',
+      ],
+      [
+        58487,
+        'e4bfbae381afe4babae3818ce382afe382bde38197e381a6e3828be381a8e38193e381aae38293e3818be8a68be3819fe3818fe381ade38188202852656d697829',
+      ],
+      [59002, 'e3838fe383bce383a2e3838be382afe382b920286262616e6773616d692052656d697829'],
+      [59194, 'e38388e383ace383bce3838be383b3e382b0c2b7e3838fe382a6e382b9'],
+      [59194, 'e382b7e383bce382bae383bbe383ade382b9e38388e383bbe382aee382bfe383bce382bde383ad'],
+      [67454, '416f69204e61747375203d20e99d92e38184e5a48f'],
+    ];
+    const block = blocks['insert-pending-rows'];
+    for (const [releaseId, hex] of TRUE_VALUE_BYTES) {
+      const value = Buffer.from(hex, 'hex').toString('utf8');
+      // The file escapes apostrophes by doubling them, so compare against the
+      // SQL-literal form rather than the raw string.
+      expect(block).toContain(value.replace(/'/g, "''"));
+      expect(block).toContain(String(releaseId));
+    }
+    // The block must declare exactly the 14 rows the ticket names -- no more
+    // (a stray paste) and no fewer (a dropped line).
+    const valueRows = block.split('\n').filter((line) => /^\s{2}\(\d+, /.test(line));
+    expect(valueRows).toHaveLength(14);
+    // Dollar quoting stays banned (round 3 finding). `$$Csillagrablók$$` and
+    // `$t$Reménytelen Tánc$t$` are valid PostgreSQL literals containing zero
+    // apostrophes, and they are exactly what someone reaches for to avoid
+    // escaping the apostrophes real track titles contain -- which would slip
+    // the `''` escaping this test's own toContain assertions rely on.
+    const sqlOnly = block
       .split('\n')
       .map((line) => line.replace(/--.*$/, ''))
       .join('\n');
-    expect(sqlOnly).not.toMatch(/'/);
-    // Dollar quoting is the hole the single-quote check alone leaves open
-    // (round 3 finding). `$$Csillagrablók$$` and `$t$Reménytelen Tánc$t$` are
-    // both valid PostgreSQL string literals containing zero apostrophes, and
-    // they are exactly what an operator (or an agent) reaches for to avoid
-    // escaping the apostrophes real track titles contain. Traced end to end:
-    // with real dollar-quoted rows pasted in, every guard passes, the
-    // synthetic-fixture tests match nothing against their own libraries, and
-    // the whole suite stays green -- so the header's "goes red the moment
-    // real rows land" contract, and the byte-assertion gate it defers to,
-    // would both be bypassable without this second assertion.
     expect(sqlOnly).not.toMatch(DOLLAR_QUOTE_PATTERN);
   });
 
@@ -543,23 +577,54 @@ describe('bs_replacement_char_cta mojibake repair (BS#2152)', () => {
     }
   });
 
-  test('the shipped insert-pending-rows block (as committed) is a genuine no-op', async () => {
-    const libraryId = await seedLibrary(90011);
-    const cleanId = await seedCta(libraryId, 'Jessica Pratt', 'Back, Baby', '1');
+  test('the shipped insert-pending-rows block declares 14 rows that survive the placeholder scrub', async () => {
+    // Before the BS#2382 capture this asserted the block was a genuine no-op,
+    // because it held nothing but the all-NULL placeholder. It holds the 14
+    // real rows now, so the property worth pinning is the opposite one: the
+    // scrub must remove the placeholder shape ONLY, and leave every captured
+    // row standing. A scrub that over-matched would silently empty the repair
+    // and still exit 0.
+    const reservedSql = await sql.reserve();
+    try {
+      await reservedSql.unsafe(blocks['create-pending-table']);
+      await reservedSql.unsafe(blocks['insert-pending-rows']);
+      await reservedSql.unsafe(blocks['guard-placeholder-scrub']);
+      const [{ count }] = await reservedSql`SELECT count(*)::int AS count FROM pending_cta_repair`;
+      expect(count).toBe(14);
+      // Exactly the split the ticket and the script header both declare:
+      // 11 track_title repairs, 3 artist_name repairs.
+      const [{ titles, artists }] = await reservedSql`
+        SELECT count(*) FILTER (WHERE true_track_title IS NOT NULL)::int AS titles,
+               count(*) FILTER (WHERE true_artist_name IS NOT NULL)::int AS artists
+          FROM pending_cta_repair`;
+      expect(titles).toBe(11);
+      expect(artists).toBe(3);
+    } finally {
+      await reservedSql.release();
+    }
+  });
 
-    // Runs the LITERAL shipped block -- its own hardcoded placeholder INSERT
-    // plus its own scrub DELETE -- not a harness-constructed substitute
-    // (PR #2154 review, finding 5: the block an operator hand-edits with 14
-    // real rows previously had zero execution coverage).
+  test('the shipped insert-pending-rows block clears every operator-error guard', async () => {
+    // Runs the LITERAL shipped block -- not a harness-constructed substitute
+    // (PR #2154 review, finding 5: the block an operator hand-edits previously
+    // had zero execution coverage). Every captured legacy_release_id is seeded
+    // so guard-unknown-release has something to resolve against; the throwaway
+    // schema deliberately carries no matching compilation_track_artist rows,
+    // which isolates the guard path from the write path. Twin/no-twin
+    // branching is covered by the synthetic-fixture tests below.
+    const RELEASES = [
+      8844, 11615, 11704, 12988, 49848, 53042, 53478, 56717, 58487, 59002, 59194, 67454,
+    ];
+    for (const releaseId of RELEASES) {
+      await seedLibrary(releaseId);
+    }
+
     const result = await runRepairScript(async (reservedSql) => {
       await reservedSql.unsafe(blocks['insert-pending-rows']);
     });
 
     expect(result.deleted).toBe(0);
     expect(result.updated).toBe(0);
-    expect(await ctaCount(libraryId)).toBe(1);
-    const row = await ctaRow(cleanId);
-    expect(row.artist_name).toBe('Jessica Pratt');
   });
 
   test('corrupt track_title WITH a clean twin: DELETEs the corrupt row, raises no unique violation', async () => {

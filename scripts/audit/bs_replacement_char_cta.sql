@@ -257,14 +257,52 @@
 --
 -- So the 14 `(library_id / legacy_release_id, track_position, column,
 -- corrupt value, true value)` tuples are captured into the
--- "PENDING CAPTURE" block below as a separate, deadline-bound operator step
--- (see "Capture procedure"), not invented or fuzzy-matched. AS DELIVERED,
--- that block holds a single filtered-out placeholder row -- every statement
--- below is syntactically real and has been run end-to-end against synthetic
--- fixtures (see the paired integration spec), but with ZERO pending rows
--- declared, so running this script as-is against prod today is a genuine,
--- verified no-op. It becomes the actual repair only once an operator fills
--- in the 14 real rows and re-runs it.
+-- "PENDING CAPTURE" block below, not invented or fuzzy-matched.
+--
+-- CAPTURED 2026-09-07 (BS#2382). The block below now holds the 14 real rows
+-- and this script is live: running it against prod performs the repair.
+--
+-- The values did NOT come from any of the three channels the capture
+-- procedure below lists. All three read tubafrenzy, and tubafrenzy had
+-- already retired when the capture was attempted -- channel (b)'s escape
+-- hatch never materialised either, since no `library.db` snapshot ever
+-- gained per-track data. The procedure below is therefore preserved as the
+-- record of what was intended, and is now unrunnable as written.
+--
+-- What replaced it: the true values were still IN THIS TABLE. The reason is
+-- in "Sequencing vs #1996" further down -- post-#454 the ETL derives the
+-- correct string -- combined with `importCompilationTracks` inserting via a
+-- bare, untargeted `onConflictDoNothing()`. A correct row does not conflict
+-- with a corrupt one, because their (library_id, artist_name, track_title)
+-- tuples differ, so it lands BESIDE it instead of being suppressed. That is
+-- the same 98.5% double-ingest shape #1996 measured, and it is the same fact
+-- this script's whole twin-detection design already depends on; what was not
+-- previously noticed is that it makes the twin a source of ground truth and
+-- not merely a unique-index hazard to route around. Release 8844 carries
+-- three generations of one credit: the clean original (id 110864), its
+-- #1996-double-encoded copy (1228848), and this ticket's U+FFFD row
+-- (3185320).
+--
+-- Method, so a reviewer can re-derive rather than trust: for each corrupt
+-- row the UNDAMAGED column is the join key against clean rows in the same
+-- release, and the DAMAGED column is then matched with its U+FFFD runs as
+-- bounded wildcards, against each candidate in both its stored and its
+-- re-encoded form. 13 of the 14 resolved to a value that exists BYTE-EXACT
+-- as a live row in the same release -- located, not reconstructed. See
+-- BS#2152's issue comment of 2026-09-07 for the per-row table, the two
+-- decoding subtleties that mattered (CP1252's five undefined bytes, which
+-- the corrupting client passed through, and twins truncated mid-character at
+-- varchar(255)), and the one caveat below.
+--
+-- ONE ROW NEEDS THE CLOSEST LOOK AT STEP 5: legacy_release_id 12988. Its only
+-- pattern-matching twin (id 1293751) is itself #1996-double-encoded AND
+-- truncated at the varchar limit, so mechanically reversing it yields
+-- `... 第3楽`, dropping the final `章`. The captured value instead comes from
+-- id 36019, which holds the untruncated clean string. This is the single row
+-- whose true value comes from a sibling rather than a direct correspondent.
+--
+-- Every statement below is syntactically real and has been run end-to-end
+-- against synthetic fixtures (see the paired integration spec).
 --
 -- "Every statement" is meant literally -- round 3 made it nearly true and
 -- round 5 finished it (the `before-matched-rows` print was still untagged
@@ -654,7 +692,20 @@ CREATE TEMP TABLE pending_cta_repair (
 INSERT INTO pending_cta_repair
   (legacy_release_id, track_position, current_artist_name, current_track_title, true_artist_name, true_track_title)
 VALUES
-  (NULL, NULL, NULL, NULL, NULL, NULL); -- placeholder; keeps VALUES syntactically valid with 0 rows captured so far
+  (8844, '1', 'Wanda SÃ¡', 'SÃ³ DanÃ��o Samba = Jazz ''N'' Samba', NULL, 'Só Danço Samba = Jazz ''N'' Samba'),
+  (11615, NULL, 'Î“Î¹Î¬Î½Î½Î·Ï‚ ÎšÎ±Î»Î±Ï„Î¶Î®Ï‚', 'Î”ÎµÎ»Ï†Î¯Î½Î¹ Î”ÎµÎ»Ï���Î¹Î½Î¬ÎºÎ¹', NULL, 'Δελφίνι Δελφινάκι'),
+  (11615, NULL, '��¤Î¬ÏƒÎ¿Ï‚ Î§Î±Î»ÎºÎ¹Î¬Ï‚', 'Wedding Song From The North Epirus', 'Τάσος Χαλκιάς', NULL),
+  (11704, NULL, 'Ale Möller', 'Huldresl��tten = The Wood Nymph Tune', NULL, 'Huldreslåtten = The Wood Nymph Tune'),
+  (12988, NULL, 'Joseph Haydn', 'String Quartet "Sunrise" 3rd Movement = å¼¦æ¥½å›���é‡å¥æ›²ã€Šæ—¥ã®å‡ºã€‹ã‚ˆã‚Š ç¬¬3æ¥½ç«', NULL, 'String Quartet "Sunrise" 3rd Movement = 弦楽四重奏曲《日の出》より 第3楽章'),
+  (49848, NULL, 'Ø¹Ø¨Ø¯Ø§Ù„Ù†Ù‚ÛŒ Ø§��Ø´Ø§Ø±Ù†ÛŒØ§', 'Dashti', 'عبدالنقی افشارنیا', NULL),
+  (53042, NULL, 'Papa Ministre', 'DÃ��calÃ© Chinois', NULL, 'Décalé Chinois'),
+  (53478, NULL, '��าญ เสียงพิณ', 'Wasana Gam Par = Could You Love Me?', 'ชาญ เสียงพิณ', NULL),
+  (56717, NULL, 'Stilluppsteypa', 'Kort Kort Kredit, BÃ¦nagjÃ¶rÃ°ir Og TrommusÃ³lÃ��', NULL, 'Kort Kort Kredit, Bænagjörðir Og Trommusóló'),
+  (58487, NULL, 'Juda', 'ä¿º��¯äººãŒã‚¯ã‚½ã—ã¦ã‚‹ã¨ã“ãªã‚“ã‹è¦‹ãŸãã­ãˆ (Remix)', NULL, '俺は人がクソしてるとこなんか見たくねえ (Remix)'),
+  (59002, '6', 'D/Zeal', 'ã��ãƒ¼ãƒ¢ãƒ‹ã‚¯ã‚¹ (bbangsami Remix)', NULL, 'ハーモニクス (bbangsami Remix)'),
+  (59194, NULL, 'ã‚¸ãƒ§ã‚¤ãƒ»ãƒªãƒ“ã‚¸ãƒ§ãƒ³', 'ã‚·ãƒ¼ã‚ºãƒ»ãƒ­ã‚¹ãƒˆãƒ»ã‚®ã��¿ãƒ¼ã‚½ãƒ­', NULL, 'シーズ・ロスト・ギターソロ'),
+  (59194, NULL, 'ãƒ¦ã‚ºãƒ«ãƒ»ãƒ»ã‚¢ãƒ³ãƒ‰ãƒ»ã‚¿ã‚«ãƒ¦ã‚­', 'ãƒˆãƒ¬ãƒ¼ãƒ‹ãƒ³ã‚°Â·��ƒã‚¦ã‚¹', NULL, 'トレーニング·ハウス'),
+  (67454, NULL, 'Takuro Yoshida', 'Aoi Natsu = é’��„å¤', NULL, 'Aoi Natsu = 青い夏');
 
 -- Scrub ONLY the exact placeholder shape (every column NULL) -- MEDIUM
 -- finding (PR #2154 review). A genuinely captured row that happens to carry
