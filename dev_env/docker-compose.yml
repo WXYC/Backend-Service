@@ -1,3 +1,14 @@
+# Compose falls back to this file's directory name when no project name is
+# declared, so every clone and worktree of this repo shared one `dev_env`
+# project: a `down` run from any tree tore down the containers of all of
+# them. Declaring the project here makes it one explicit value instead of a
+# function of where the repo happens to live. To run a second, independent
+# stack from another worktree, set COMPOSE_PROJECT_NAME in that worktree's
+# .env along with distinct host ports (DB_PORT, CI_DB_PORT, E2E_DB_PORT,
+# ETL_PG_PORT, ETL_MYSQL_PORT) — the containers are namespaced but the host
+# ports they publish are not.
+name: wxyc-backend
+
 services:
   # NOTE: postgres:18.0-alpine here (and on ci-db/e2e-db/etl-pg below) is
   # newer than prod RDS (PostgreSQL 14.22) -- a known, intentional skew, not
@@ -25,13 +36,19 @@ services:
       start_period: 5s
 
   # Database Initialization (migrations + seeding)
+  #
+  # No `container_name:` here or on the other three *-db-init services.
+  # Container names are global to the daemon rather than scoped to a Compose
+  # project, so a pinned one makes two projects mutually exclusive: the
+  # second to start fails with `Conflict. The container name "/..." is
+  # already in use`. Address this service through `docker compose` (which
+  # resolves it within the project) instead of by name.
   db-init:
     image: wxyc-db-init-image
     profiles: [dev]
     build:
       context: ..
       dockerfile: dev_env/Dockerfile.init
-    container_name: wxyc-db-init
     depends_on:
       db:
         condition: service_healthy
@@ -86,7 +103,6 @@ services:
     build:
       context: ..
       dockerfile: dev_env/Dockerfile.init
-    container_name: wxyc-ci-db-init
     depends_on:
       ci-db:
         condition: service_healthy
@@ -330,7 +346,6 @@ services:
     build:
       context: ..
       dockerfile: dev_env/Dockerfile.init
-    container_name: wxyc-e2e-db-init
     depends_on:
       e2e-db:
         condition: service_healthy
@@ -485,7 +500,6 @@ services:
     build:
       context: ..
       dockerfile: dev_env/Dockerfile.init
-    container_name: wxyc-etl-db-init
     depends_on:
       etl-pg:
         condition: service_healthy

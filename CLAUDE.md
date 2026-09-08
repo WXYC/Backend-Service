@@ -15,7 +15,7 @@ CLAUDE.md is a router for the always-loaded reference card. Topic depth lives in
 - **[`docs/authentication.md`](docs/authentication.md)** — Roles, permissions matrix, JWT payload, `requirePermissions` middleware flow, `AUTH_BYPASS`, better-auth role-mismatch gotcha
 - **[`docs/pii.md`](docs/pii.md)** — PII field registry: `real_name`/`email` vs `dj_name`/`name` classification, allowed read sites, the `wxyc/restricted-real-name` ESLint rule, DJ-name/real-name conflation history
 - **[`docs/testing.md`](docs/testing.md)** — Unit + integration + CI-mock test setup, jest configs, CI workflow job list
-- **[`docs/dev-db-fixture.md`](docs/dev-db-fixture.md)** — Dev DB seed pipeline (`seed_db.sql` + `seed-clone.sql`), `LOAD_CLONE_FIXTURE` gate, `predev` rebuild hook, `db:stop` volume drop
+- **[`docs/dev-db-fixture.md`](docs/dev-db-fixture.md)** — Dev DB seed pipeline (`seed_db.sql` + `seed-clone.sql`), `LOAD_CLONE_FIXTURE` gate, `predev` rebuild hook, Compose project naming, `db:stop` vs `db:reset`
 - **[`docs/ops-cron-scheduling.md`](docs/ops-cron-scheduling.md)** — LML-heavy cron spacing policy; heavy-drain vs light-touch vs hourly-safety-net; slot table; cron-liveness recipe (BS#2064 — Sentry cron monitor + `cronjob_runs` heartbeat + outcome check, with the per-monitor cost)
 
 For the org-wide cache-hierarchy reference (BS's `proxy.controller` LRUs in context with the upstream iOS caches and downstream LML caches), see [`WXYC/wiki/architecture/cache-hierarchy.md`](https://github.com/WXYC/wiki/blob/main/architecture/cache-hierarchy.md).
@@ -177,7 +177,7 @@ npm run db:start         # Start PostgreSQL in Docker (port 5432)
 npm run dev              # Start auth (8082) + backend (8080) concurrently with hot reload
 ```
 
-`npm run dev` rebuilds `@wxyc/database` + `@wxyc/authentication` first via the `predev` lifecycle hook so the backend doesn't serve a stale schema export. Stop the database with `npm run db:stop` (drops the `pg-data` volume; next `db:start` is a fresh DB).
+`npm run dev` rebuilds `@wxyc/database` + `@wxyc/authentication` first via the `predev` lifecycle hook so the backend doesn't serve a stale schema export. Stop the database with `npm run db:stop` (keeps the `pg-data` volume); `npm run db:reset` is the destructive form that drops it, so the next `db:start` is a fresh DB. Both act on the `wxyc-backend` Compose project declared in `dev_env/docker-compose.yml`, which every checkout shares unless the worktree sets `COMPOSE_PROJECT_NAME` and its own host ports.
 
 See **[`docs/dev-db-fixture.md`](docs/dev-db-fixture.md)** for the seed pipeline (`seed_db.sql` + `seed-clone.sql`), the `LOAD_CLONE_FIXTURE` gate distinguishing dev from CI, the `predev` rebuild rationale, and how to refresh the clone.
 

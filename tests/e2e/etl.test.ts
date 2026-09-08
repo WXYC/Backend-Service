@@ -19,6 +19,14 @@ import { execSync } from 'child_process';
 import postgres from 'postgres';
 
 const PG_PORT = process.env.ETL_PG_PORT || '5435';
+
+/**
+ * Compose builds this name from the project declared in
+ * `dev_env/docker-compose.yml` plus the service name. Override it when the
+ * etl profile runs under a different COMPOSE_PROJECT_NAME.
+ */
+const MYSQL_CONTAINER = process.env.ETL_MYSQL_CONTAINER || 'wxyc-backend-etl-mysql-1';
+
 let pg: ReturnType<typeof postgres>;
 
 const SCHEMA = 'wxyc_schema';
@@ -30,7 +38,7 @@ const etlEnv = {
   DB_NAME: 'etldb',
   DB_USERNAME: 'etluser',
   DB_PASSWORD: 'etltest',
-  LEGACY_DB_DOCKER_CONTAINER: 'dev_env-etl-mysql-1',
+  LEGACY_DB_DOCKER_CONTAINER: MYSQL_CONTAINER,
   REMOTE_DB_USER: 'etluser',
   REMOTE_DB_PASSWORD: 'etltest',
   REMOTE_DB_NAME: 'wxycmusic',
@@ -328,7 +336,6 @@ describe('Flowsheet API ordering after ETL import', () => {
 });
 
 describe('Flowsheet ETL incremental sync', () => {
-  const MYSQL_CONTAINER = 'dev_env-etl-mysql-1';
   const MYSQL_CMD = `docker exec -i ${MYSQL_CONTAINER} mysql -uetluser -petltest wxycmusic --batch --raw --silent`;
 
   const runMySQL = (sql: string) => {
