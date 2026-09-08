@@ -60,6 +60,38 @@ const FILES_THAT_NAMED_A_CONTAINER = [
   'tests/e2e/album-reviews-pipeline.test.ts',
 ];
 
+/** A `docker compose ...` run, up to the next shell separator. */
+const COMPOSE_INVOCATION = /docker compose\b[^\n;&|]*/g;
+
+/**
+ * Compose resolves a bare `.env` against the compose file's own directory
+ * (`dev_env/`), not the caller's cwd, so an invocation that omits
+ * `--env-file` never reads the checkout's `.env` — and therefore ignores the
+ * `COMPOSE_PROJECT_NAME` a worktree set there, driving the declared project
+ * instead of that worktree's. On a `down -v` it drops the shared volume.
+ */
+const LOADS_AN_ENV_FILE = /--env-file\b/;
+
+/**
+ * A compose command spelled out in prose carries no `--env-file` when a
+ * reader pastes it, so a destructive one deletes the declared project's
+ * volume rather than their own worktree's. Docs name `npm run db:reset`.
+ */
+const RAW_DESTRUCTIVE_COMPOSE = /docker compose[^`]*down +-v/;
+
+/** Directories holding no authored content. */
+const NOT_AUTHORED = new Set(['node_modules', '.git', '.cache', 'dist', 'build', 'coverage']);
+
+function filesUnder(dir: string, extension: string): string[] {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      return NOT_AUTHORED.has(entry.name) ? [] : filesUnder(full, extension);
+    }
+    return entry.name.endsWith(extension) ? [full] : [];
+  });
+}
+
 describe('dev_env/docker-compose.yml declares its Compose project', () => {
   it('sets a top-level project name that is not the directory-derived default', () => {
     const declared = compose.match(/^name:\s*(\S+)\s*$/m)?.[1];
@@ -108,5 +140,42 @@ describe('stopping the dev database keeps its data', () => {
 
   it('db:reset is the one dev-profile script that removes them', () => {
     expect(scripts['db:reset']).toMatch(/\bdown\b.*\s(-v|--volumes)\b/);
+  });
+});
+
+describe('every Compose invocation loads the checkout .env', () => {
+  const sources: Array<[string, string]> = [
+    ...Object.entries(scripts).map(([name, command]): [string, string] => [`package.json ${name}`, command]),
+    ...filesUnder(path.join(repoRoot, 'scripts'), '.sh').map((file): [string, string] => [
+      path.relative(repoRoot, file),
+      fs.readFileSync(file, 'utf-8'),
+    ]),
+  ].filter(([, body]) => body.includes('docker compose'));
+
+  it('has Compose-driving sources to check', () => {
+    expect(sources.length).toBeGreaterThan(0);
+  });
+
+  it.each(sources)('%s passes --env-file on every invocation', (_source, body) => {
+    const invocations = body.match(COMPOSE_INVOCATION) ?? [];
+    expect(invocations.length).toBeGreaterThan(0);
+    for (const invocation of invocations) {
+      expect(invocation).toMatch(LOADS_AN_ENV_FILE);
+    }
+  });
+});
+
+describe('docs route volume deletion through db:reset', () => {
+  const markdown = filesUnder(repoRoot, '.md');
+
+  it('has markdown to check', () => {
+    expect(markdown.length).toBeGreaterThan(0);
+  });
+
+  it('no markdown file spells out a destructive compose command', () => {
+    const offenders = markdown
+      .filter((file) => RAW_DESTRUCTIVE_COMPOSE.test(fs.readFileSync(file, 'utf-8')))
+      .map((file) => path.relative(repoRoot, file));
+    expect(offenders).toEqual([]);
   });
 });
