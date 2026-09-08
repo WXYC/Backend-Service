@@ -270,6 +270,24 @@ jobs:
           # two keys above this one DOES need the restart: the auth service is a
           # long-running container, not a per-run cron invocation.
           STATION_SIGNUP_ENABLED: ${{ secrets.STATION_SIGNUP_ENABLED }}
+          # FLOWSHEET_TAKEOVER_ENABLED (BS#2233) gates POST /flowsheet/join's
+          # explicit start-vs-join decision. Off (the default), `intent` and
+          # `expected_show_id` are ignored and the route silently co-hosts a
+          # caller onto whatever show is still open; on, an undecided caller
+          # gets a 409 `show_already_open` and `intent: "takeover"` closes the
+          # open show and starts their own. Not sensitive, but carried through
+          # the allowlist for the same "Unsupported secret_name" reason as
+          # DONATE_* above. Strict `=== 'true'` comparison
+          # (apps/backend/config/flowsheetTakeover.ts), same
+          # lowercase/::add-mask::/rollback rules as STATION_SIGNUP_ENABLED
+          # above. Pass restart_target=backend (the default) — only
+          # apps/backend reads it, and the backend is a long-running container,
+          # so the flip does need the restart.
+          #
+          # The flag is also the rollback: 'false' here restores the pre-BS#2233
+          # behavior with no redeploy. Every 409-aware client tolerates the flag
+          # in either position, so it can be flipped back mid-show.
+          FLOWSHEET_TAKEOVER_ENABLED: ${{ secrets.FLOWSHEET_TAKEOVER_ENABLED }}
         run: |
           set -euo pipefail
           KEY="${{ inputs.key }}"
@@ -297,6 +315,7 @@ jobs:
             STATION_SIGNUP_ALERT_EMAIL) VALUE="$STATION_SIGNUP_ALERT_EMAIL" ;;
             STATION_SIGNUP_DOWNGRADE_ENABLED) VALUE="$STATION_SIGNUP_DOWNGRADE_ENABLED" ;;
             STATION_SIGNUP_ENABLED) VALUE="$STATION_SIGNUP_ENABLED" ;;
+            FLOWSHEET_TAKEOVER_ENABLED) VALUE="$FLOWSHEET_TAKEOVER_ENABLED" ;;
             *)
               echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
               exit 1
