@@ -71,7 +71,7 @@ No authoring. Run the existing script per its operator instructions, including t
 
 **Artifact: `scripts/audit/bs_replacement_char_flowsheet.sql`, with a mirrored `tests/integration/bs-replacement-char-flowsheet.spec.js`.** A hand-applied `psql -f` operator script under `scripts/audit/`. **Do not author a Drizzle migration** (r1–r2 proposed this; wrong) — but cite the authority accurately, because `docs/migrations.md`'s `ddl-only` rule (`:62-64`) does not actually prescribe this artifact. It establishes that migrations are DDL-only (so: not a migration, which is the half that holds) and then prescribes a **one-shot backfill job under `jobs/<name>-backfill/`** for bulk DML — scoped to "rewrites of more than ~10k rows," which these repairs are nowhere near. The real authority for the operator-script posture is the predecessor headers: `bs_replacement_char_phase4.sql:3-7` states it verbatim ("Hand-applied operator script, NOT a Drizzle-tracked migration — same posture as … `bs_replacement_char_recovery.sql` … and `bs_replacement_char_phase35.sql`"). Both new scripts should carry that same sentence. The name is load-bearing in three other places below — the spec's `SCRIPT_PATH` constant (the shape at `bs-replacement-char-phase4.spec.js:43`), the CI paths-filter entry, and the acceptance criteria — so it is fixed here rather than left to the implementer. It follows the family convention already set by `recovery` / `phase35` / `phase4` / `cta`.
 
-There is a direct precedent to extend rather than invent: `bs_replacement_char_recovery.sql:110-112` already contains exact-match `flowsheet.artist_name` repairs of precisely this family (`Csillagrablók`, `Sonido Dueñez`, `Eydie Gorme`). Those three lines only — `:113` is `record_label` and `:114-118` are `track_title`. Match its conventions, including **embedding both the corrupt and correct characters raw** rather than as `U&'\FFFD'` escapes — every predecessor does, and `bs-replacement-char-phase4.spec.js:166-176` extracts values by regex from the *script file text*, so a mirrored spec inherits that assumption.
+There is a direct precedent to extend rather than invent: `bs_replacement_char_recovery.sql:110-112` already contains exact-match `flowsheet.artist_name` repairs of precisely this family (`Csillagrablók`, `Sonido Dueñez`, `Eydie Gorme`). Those three lines only — `:113` is `record_label` and `:114-118` are `track_title`. Match its conventions, including **embedding both the corrupt and correct characters raw** rather than as `U&'\FFFD'` escapes — every predecessor does, and `bs-replacement-char-phase4.spec.js:166-176` extracts values by regex from the _script file text_, so a mirrored spec inherits that assumption.
 
 Use the full skeleton all three predecessors share — header block → pre-amble counts → `BEGIN; SET LOCAL statement_timeout = …;` → UPDATEs → `COMMIT;` → post-amble residual verify → `ANALYZE` outside the transaction. Open with the family's `V_BS_FFFD_*` tag, which every sibling carries and which appears in operator-visible output: `bs_replacement_char_phase4.sql:1` is `V_BS_FFFD_P4`, `bs_replacement_char_cta.sql:1` is `V_BS_FFFD_CTA`, and `phase35` reuses its tag in a post-amble section label at `:56`. **Pin `V_BS_FFFD_FS` for §2 and `V_BS_FFFD_RES` for §3** rather than leaving them to the implementer.
 
@@ -105,22 +105,22 @@ The replacement must be byte-identical to Phase 4's `C2B5…` or the two repairs
 
 **Test it** to the established shape — `tests/integration/bs-replacement-char-phase4.spec.js` and `bs-replacement-char-cta.spec.js` extract the real UPDATEs from the `.sql`, run them against a throwaway schema, and pin exact-string scoping, idempotency, and near-miss decoys. Port the suffix-sharing decoy at `bs-replacement-char-phase4.spec.js:193` (`<?>ther-Ziq [mu-Ziq]` under a different corrupt prefix), which an exact-match UPDATE satisfies, plus a hex assertion mirroring `c2b52d5a6971205b6d752d5a69715d` so the two scripts cannot drift. **Do not port the second decoy at `:200`** — the exact corrupt string at an unlisted id. It passes in Phase 4 only because that UPDATE carries `legacy_release_id IN (…)`; §2's flowsheet statement is deliberately unscoped, so copying it would fail by design.
 
-**Why unscoped, stated correctly.** An earlier revision justified this as "flowsheet has no catalog id" — that is false; it has `album_id` → `library.id` (`schema.ts:1156`). The real reason is that scoping on it would **under-repair**: free-form plays carry a NULL `album_id`, and those rows hold the same denormalized `artist_name` snapshot. An `album_id`-scoped UPDATE would silently skip every one of them. Record that rationale in the script header, and add a NULL-`album_id` row to the spec as a *positive* case — it must be repaired — alongside the ported `:193` decoy, which must not.
+**Why unscoped, stated correctly.** An earlier revision justified this as "flowsheet has no catalog id" — that is false; it has `album_id` → `library.id` (`schema.ts:1156`). The real reason is that scoping on it would **under-repair**: free-form plays carry a NULL `album_id`, and those rows hold the same denormalized `artist_name` snapshot. An `album_id`-scoped UPDATE would silently skip every one of them. Record that rationale in the script header, and add a NULL-`album_id` row to the spec as a _positive_ case — it must be repaired — alongside the ported `:193` decoy, which must not.
 
 **Register the script in the CI paths-filter — the drift guard is opt-in, not automatic.** `.github/workflows/test.yml:68-89` lists each operator `.sql` that an integration spec reads verbatim under the `tests:` filter, with a comment explaining why: "editing one must re-run its integration test, or the drift guard is silently bypassed on a script-only PR." Four scripts are enrolled today (`relabel-rotation-direct-backfill.sql`, `bs_format_qualifier_recovery.sql`, `bs_2117_crossref_backfill.sql`, `bs_replacement_char_cta.sql`). Both new scripts in this plan need an entry with the same commented rationale, or their specs simply do not run on the PR that edits the `.sql` — which is exactly the PR where drift is introduced:
 
 ```yaml
-            # tests/integration/bs-replacement-char-flowsheet.spec.js reads:
-            - 'scripts/audit/bs_replacement_char_flowsheet.sql'
-            # tests/integration/bs-replacement-char-residue.spec.js reads:
-            - 'scripts/audit/bs_replacement_char_residue.sql'
+# tests/integration/bs-replacement-char-flowsheet.spec.js reads:
+- 'scripts/audit/bs_replacement_char_flowsheet.sql'
+# tests/integration/bs-replacement-char-residue.spec.js reads:
+- 'scripts/audit/bs_replacement_char_residue.sql'
 ```
 
 `scripts/audit/bs_replacement_char_phase4.sql` is itself missing from that list despite `bs-replacement-char-phase4.spec.js:43` reading it verbatim — a pre-existing hole in this same family. Fix it in the same PR; it is a one-line addition and this plan is the natural place to notice it.
 
 ### 3. Repair the residue — now unblocked
 
-Ground truth for all seven previously-unrecoverable rows is captured in `audit/tubafrenzy_ground_truth_pre_turndown.md`. This was the deadline-driven work; it is no longer deadline-driven, but it is no longer *blocked* either.
+Ground truth for all seven previously-unrecoverable rows is captured in `audit/tubafrenzy_ground_truth_pre_turndown.md`. This was the deadline-driven work; it is no longer deadline-driven, but it is no longer _blocked_ either.
 
 **Artifact: a new `scripts/audit/bs_replacement_char_residue.sql`, with a mirrored `tests/integration/bs-replacement-char-residue.spec.js`** following the same extract-and-run shape as §2's. It must **not** be folded into `bs_replacement_char_phase4.sql` — that script's spec hard-codes its shape, throwing unless it finds exactly three UPDATEs (`bs-replacement-char-phase4.spec.js:78-81`), so adding statements there breaks a green test.
 
@@ -128,7 +128,7 @@ Ground truth for all seven previously-unrecoverable rows is captured in `audit/t
 
 **`ANALYZE` `artists`, `library`, and `rotation`** — all three. `bs_replacement_char_phase4.sql:361-362` is the precedent for the first two only; its comment at `:358-360` explicitly notes that script leaves `rotation`/`flowsheet` alone because they are read-only there. For the `rotation` ANALYZE the precedent is `bs_replacement_char_phase35.sql:97-98` (`ANALYZE flowsheet; ANALYZE rotation;`), which does write them. All three are cheap and unconditionally correct, but be accurate about why, because the obvious rationale is wrong here: the `0060` cascade will write **zero** `library` rows on this repair. `bs_replacement_char_recovery.sql:126-127` already set `library.artist_name` to `Beyoncé` and `Damian Nisenson / Jean Félix Mailloux / Pierre Tanguay` — byte-identical to the captured ground truth — and `cascade_library_artist_name` guards with `artist_name IS DISTINCT FROM NEW.artist_name` (`0060_*.sql:20-30`), so it is inert. The `library` `ANALYZE` is defensive only. And `rotation` is named directly in §3's own UPDATE statements, so `scripts/check-bulk-update-analyze.mjs` sees it normally — it is not an instance of the line-level checker's blind spot.
 
-(That blind spot is real and worth keeping in mind for any *future* repair where a cascade is the only writer of a table: the checker is line-level per its own header, so it would see only `UPDATE artists` and pass CI while the cascaded table's stats went stale — the BS#934 shape. It just isn't what is happening here.)
+(That blind spot is real and worth keeping in mind for any _future_ repair where a cascade is the only writer of a table: the checker is line-level per its own header, so it would see only `UPDATE artists` and pass CI while the cascaded table's stats went stale — the BS#934 shape. It just isn't what is happening here.)
 
 **`artists` 22025 / 23162 should go first among these** — they are actively regressive, not merely unfinished. #863 fixed both on `library.artist_name` only, never the `artists` source of truth, so via the `0060` cascade any future write to `artists.artist_name` pushes the corrupt value back onto every linked `library` row and **silently undoes the #863 fix**. Phase 4's header records two further arming conditions needing no `artists` write at all: discogs-etl's `cross_reference_names` reads that column directly with no `library` fallback, and its `artist_name` COALESCEs through to it on any NULL `library.artist_name`. Both measured unarmed in the 2026-08-12 clone. Note 22025's `alphabetical_name` is corrupt too and has **no** cascade (trigger `0060` fires only on `artist_name`) — inert, but it is what sorts and displays.
 
@@ -148,19 +148,20 @@ SELECT a.id, a.artist_name, t.target_id
  WHERE a.id <> t.target_id;
 ```
 
-It has to be phrased as the *post-repair* question — a plain `GROUP BY fold HAVING count(*) > 1` over the current state finds nothing, because the corrupt and clean spellings fold differently until the UPDATE lands (U+FFFD is not a combining mark, so `Beyonc<?>` folds to `beyonc<?>`, not `beyonce`). If this returns a row, the repair is a **merge**, not an UPDATE, and belongs on `artist-unicode-dedup`'s path. Extend verification step 5's "exactly one artist" check to cover 22025 and 23162, not just 656.
+It has to be phrased as the _post-repair_ question — a plain `GROUP BY fold HAVING count(*) > 1` over the current state finds nothing, because the corrupt and clean spellings fold differently until the UPDATE lands (U+FFFD is not a combining mark, so `Beyonc<?>` folds to `beyonc<?>`, not `beyonce`). If this returns a row, the repair is a **merge**, not an UPDATE, and belongs on `artist-unicode-dedup`'s path. Extend verification step 5's "exactly one artist" check to cover 22025 and 23162, not just 656.
 
 The `rotation` work splits into **five mechanical repairs and one conditional** — do not bundle them, because five of the six are unambiguous:
 
-*Mechanical* (each still contains U+FFFD; each keyed on its unique corrupt value, self-scoping by construction):
+_Mechanical_ (each still contains U+FFFD; each keyed on its unique corrupt value, self-scoping by construction):
+
 - `artist_name` at 13703 (`Accüsed`), 21149 (`Nídia & Valentina`), 21335 (`Civilistjävel! & Mayssa Jallad`)
 - `album_title` at 10789 (`«†»`) and **16683 (`Amare Touré 1973-1980`)**
 
-That last one matters: `audit/bs_replacement_char_audit.csv` records `rotation,album_title,Amare Tour<?> 1973-1980,1,1,id=16683`, so 16683's *album_title* still holds U+FFFD and its repair is **not** optional — it is one of the two album_title fixes that produce the "0 rows" residual. Only 16683's `artist_name` is the judgement call.
+That last one matters: `audit/bs_replacement_char_audit.csv` records `rotation,album_title,Amare Tour<?> 1973-1980,1,1,id=16683`, so 16683's _album_title_ still holds U+FFFD and its repair is **not** optional — it is one of the two album_title fixes that produce the "0 rows" residual. Only 16683's `artist_name` is the judgement call.
 
-*Conditional — MD decision:* **Phase 2's curated `Amara Toure` fix for rotation 16683's `artist_name` appears to be wrong.** Tubafrenzy holds `Amare Touré`, differing in both a vowel and an accent. Overriding it means overwriting a previously-curated value.
+_Conditional — MD decision:_ **Phase 2's curated `Amara Toure` fix for rotation 16683's `artist_name` appears to be wrong.** Tubafrenzy holds `Amare Touré`, differing in both a vowel and an accent. Overriding it means overwriting a previously-curated value.
 
-**If overriding, this is the one UPDATE in the family that needs an explicit id bound.** `bs_replacement_char_recovery.sql:130` already rewrote that row to plain-ASCII `Amara Toure` — a value that is *not* unique by construction, unlike every other target here, whose corrupt string is self-scoping. Follow the house pattern from `bs_replacement_char_phase4.sql:278-279` and key it `WHERE id = 16683 AND artist_name = 'Amara Toure'`, after confirming 16683 against `wxyc_schema.rotation` (the tubafrenzy→Backend mapping is name-matched, not verified).
+**If overriding, this is the one UPDATE in the family that needs an explicit id bound.** `bs_replacement_char_recovery.sql:130` already rewrote that row to plain-ASCII `Amara Toure` — a value that is _not_ unique by construction, unlike every other target here, whose corrupt string is self-scoping. Follow the house pattern from `bs_replacement_char_phase4.sql:278-279` and key it `WHERE id = 16683 AND artist_name = 'Amara Toure'`, after confirming 16683 against `wxyc_schema.rotation` (the tubafrenzy→Backend mapping is name-matched, not verified).
 
 If the MD declines the override, the row lands mixed — `artist_name = 'Amara Toure'`, `album_title = 'Amare Touré 1973-1980'` — which is a legitimate outcome but should be a chosen one. Note tubafrenzy is itself internally inconsistent for this artist (`LIBRARY_CODE` says `Amara Toure`, `ROTATION_RELEASE` says `Amare Touré`); byte-exact parity means faithfully reproducing that inconsistency.
 
@@ -182,9 +183,9 @@ Three constraints, in dependency order:
 
   **Set strictness on the instance, not per call — `library-etl` has nine `send` sites.** `legacyDB.send(...)` appears at `jobs/library-etl/job.ts:221, 226, 353, 359, 365, 369, 590, 629, 725`. A per-call opt-in satisfied by editing one of them leaves eight silently lenient, which is precisely the gap §4 exists to close. Configure the instance the job already holds at `job.ts:20` (`const legacyDB = MirrorSQL.instance()`) so every read inherits it. The same multiplicity applies to the other jobs if they are ever wired: `flowsheet-etl` (`fetch-legacy.ts:89, 196, 202`; `backfill-legacy-ids.ts:28, 101`) and `rotation-etl` (`fetch-legacy.ts:86`).
 
-- **Scope limit: strict decode cannot catch the utf8mb3 substitution class.** `makeSqlCommand` pins `--default-character-set=utf8` (`sql.mirror.ts:81`), which in MySQL is the 3-byte `utf8mb3` alias. Any 4-byte codepoint in a `utf8mb4` column is substituted server-side *before* it reaches the wire and arrives as valid ASCII `?`, so a whole-buffer strict decode passes it silently — and the fidelity probe, which replayed this exact flag set, cannot distinguish it either. Two things bound how much this matters here: the four tubafrenzy source columns are declared `utf8_unicode_ci` (itself utf8mb3), so they cannot *store* a 4-byte codepoint in the first place, and this class produces `?`, not U+FFFD, so it is not the `#863` corruption. But §4 is framed above as the item that stops the failure mode recurring, and that claim should be scoped: it catches invalid-byte-sequence loss, not charset-narrowing loss. Widening the connection to `utf8mb4`, or flagging literal `?` runs, is a separate change and out of scope here.
+- **Scope limit: strict decode cannot catch the utf8mb3 substitution class.** `makeSqlCommand` pins `--default-character-set=utf8` (`sql.mirror.ts:81`), which in MySQL is the 3-byte `utf8mb3` alias. Any 4-byte codepoint in a `utf8mb4` column is substituted server-side _before_ it reaches the wire and arrives as valid ASCII `?`, so a whole-buffer strict decode passes it silently — and the fidelity probe, which replayed this exact flag set, cannot distinguish it either. Two things bound how much this matters here: the four tubafrenzy source columns are declared `utf8_unicode_ci` (itself utf8mb3), so they cannot _store_ a 4-byte codepoint in the first place, and this class produces `?`, not U+FFFD, so it is not the `#863` corruption. But §4 is framed above as the item that stops the failure mode recurring, and that claim should be scoped: it catches invalid-byte-sequence loss, not charset-narrowing loss. Widening the connection to `utf8mb4`, or flagging literal `?` runs, is a separate change and out of scope here.
 
-Test at `tests/unit/middleware/legacy/mirror.charset.test.ts`, alongside the existing suite (`ssh-timeout.test.ts` is the precedent for importing `MirrorSQL` and mocking `node-ssh`), feeding a lone `0xB5` through both branches. Do **not** add this artist to `tests/unit/charset-torture/`: `tests/fixtures/charset-torture.json:55-60` pins the *bare* name `μ-Ziq` in U+03BC, a different string from the catalog form — conflating the two is what produced r2's wrong recommendation.
+Test at `tests/unit/middleware/legacy/mirror.charset.test.ts`, alongside the existing suite (`ssh-timeout.test.ts` is the precedent for importing `MirrorSQL` and mocking `node-ssh`), feeding a lone `0xB5` through both branches. Do **not** add this artist to `tests/unit/charset-torture/`: `tests/fixtures/charset-torture.json:55-60` pins the _bare_ name `μ-Ziq` in U+03BC, a different string from the catalog form — conflating the two is what produced r2's wrong recommendation.
 
 ## Data safety
 
@@ -199,16 +200,16 @@ Test at `tests/unit/middleware/legacy/mirror.charset.test.ts`, alongside the exi
 1. `SELECT encode(convert_to(artist_name,'UTF8'),'hex') FROM wxyc_schema.artists WHERE id = 656` returns `c2b52d5a6971205b6d752d5a69715d`.
 2. **Scoped to this repair's strings only**: zero rows remain matching `'<?>-Ziq [mu-Ziq]'` across `artists`, `library`, `flowsheet`; and zero for the seven §3 values.
 
-   Residual U+FFFD elsewhere is expected, but **the figures must net out the Phase 2 / 3.5 repairs that already shipped, and the units must be carried explicitly** — the audit CSV is one line per *distinct lossy value* with a separate `row_count` column, while the post-amble this mirrors (`bs_replacement_char_phase4.sql:333-339`) returns `COUNT(*)` **rows**. Mixing them reads a passing verify as a failure. Both units are carried below so the derivation can be checked either way; they agree here, but that is a fact to be shown, not assumed. Derived against `bs_replacement_char_recovery.sql:110-135` and `bs_replacement_char_phase35.sql:44-49`:
+   Residual U+FFFD elsewhere is expected, but **the figures must net out the Phase 2 / 3.5 repairs that already shipped, and the units must be carried explicitly** — the audit CSV is one line per _distinct lossy value_ with a separate `row_count` column, while the post-amble this mirrors (`bs_replacement_char_phase4.sql:333-339`) returns `COUNT(*)` **rows**. Mixing them reads a passing verify as a failure. Both units are carried below so the derivation can be checked either way; they agree here, but that is a fact to be shown, not assumed. Derived against `bs_replacement_char_recovery.sql:110-135` and `bs_replacement_char_phase35.sql:44-49`:
 
-   | column | audit (values / rows) | already repaired | repaired by §2 | repaired by §3 | **expected residual** |
-   |---|---:|---:|---:|---:|---:|
-   | `artists.artist_name` | — | — | — | 2 / 2 | **0 / 0** (was 2) |
-   | `artists.alphabetical_name` | — | — | — | 1 / 1 | **0 / 0** (was 1) |
-   | `flowsheet.artist_name` | 7 / 9 | 6 / 8 | *N* (unmeasured) | 0 | **1 value / 1 row** (`p<?>r-no`) |
-   | `rotation.artist_name` | 8 / 8 | 5 / 5 | — | 3 / 3 | **0 / 0** |
-   | `rotation.album_title` | 5 / 5 | 3 / 3 | — | 2 / 2 | **0 / 0** |
-   | `compilation_track_artist.artist_name` / `.track_title` | — | — | — | 0 | **0 rows** (measure, don't assume) |
+   | column                                                  | audit (values / rows) | already repaired |   repaired by §2 | repaired by §3 |              **expected residual** |
+   | ------------------------------------------------------- | --------------------: | ---------------: | ---------------: | -------------: | ---------------------------------: |
+   | `artists.artist_name`                                   |                     — |                — |                — |          2 / 2 |                  **0 / 0** (was 2) |
+   | `artists.alphabetical_name`                             |                     — |                — |                — |          1 / 1 |                  **0 / 0** (was 1) |
+   | `flowsheet.artist_name`                                 |                 7 / 9 |            6 / 8 | _N_ (unmeasured) |              0 |   **1 value / 1 row** (`p<?>r-no`) |
+   | `rotation.artist_name`                                  |                 8 / 8 |            5 / 5 |                — |          3 / 3 |                          **0 / 0** |
+   | `rotation.album_title`                                  |                 5 / 5 |            3 / 3 |                — |          2 / 2 |                          **0 / 0** |
+   | `compilation_track_artist.artist_name` / `.track_title` |                     — |                — |                — |              0 | **0 rows** (measure, don't assume) |
 
    The two `artists` rows come from a different source than the rest of the table: `bs_replacement_char_phase4.sql:319` pins the expected **post-Phase-4** residual against the 2026-08-12 clone as "artist_name 2, alphabetical_name 1" — those are 22025 and 23162, plus 22025's `alphabetical_name`. §3 is what drives them to zero, and its post-amble counts sit at `:321` and `:323`. Without these rows an operator re-running Phase 4's post-amble after §3 has no stated expectation and reads a passing verify as a failure.
 
@@ -219,6 +220,7 @@ Test at `tests/unit/middleware/legacy/mirror.charset.test.ts`, alongside the exi
    The CTA row is there because `bs_replacement_char_phase4.sql:351` and `:353` audit that table for exactly this reason — so a script cannot report clean while the parity harness fails on rows it never looked at — and `bs_replacement_char_cta.sql` (BS#2152) is a whole sibling script for it. No `Ziq` value appears in that script, so 0 is the expected answer; Phase 4's convention is to state it as measured rather than assumed.
 
    Note the consequence: **§3 fully clears `rotation` for this corruption class.** Both rotation columns should verify at zero, not at a non-zero residual.
+
 3. `GET https://api.wxyc.org/flowsheet` contains `c2 b5` and no `ef bf bd` for this artist.
 4. iOS renders `µ-Ziq [mu-Ziq]` — no app release; the string is server-supplied.
 5. dj-site autocomplete returns exactly one artist for "ziq" — and, per the fold-collision pre-flight above, exactly one for "beyonce" and one for "nisenson". A repair that stranded a fold-key duplicate shows up here as two entries, which is the user-visible face of the BS#1897 partition.
@@ -262,25 +264,25 @@ Test at `tests/unit/middleware/legacy/mirror.charset.test.ts`, alongside the exi
 
 ## What changed across revisions
 
-| Earlier revision said | Established since |
-|---|---|
-| r1–r2: author a Drizzle migration | `scripts/audit/*.sql` operator script — migrations are DDL-only (r3) |
-| r1–r2: step 1 is "verify the upstream byte" | Captured directly: tubafrenzy has **zero** U+FFFD anywhere (r4) |
-| r2: recommend U+03BC, "two pins vs zero" | U+00B5, now verified byte-for-byte against tubafrenzy (r3, confirmed r4) |
-| r3: rotation rows are unrecoverable, deadline-lost | All five recovered from `ROTATION_RELEASE` (r4) |
-| r3: ETL re-corruption is a critical hazard | Low — upstream is clean, so the post-fix ETL fold-matches the corrected row (r4) |
-| r3: `check-bulk-update-analyze` is warn-only | Hard CI gate: `test.yml:304` runs it `--strict` (r2 was right) |
-| r3: fallback = "log the row key and skip" | Not implementable at `send`; it returns one string per batch (r4) |
-| r3: throw-vs-skip is an ETL cron decision | `send` is on the live DJ write path via `commandqueue.mirror.ts:286` (r4) |
-| r3: framed the flowsheet write as new work | `bs_replacement_char_recovery.sql:110-112` already repairs this exact family |
-| r6: §2's script left unnamed; new scripts not enrolled in the CI paths-filter | Named `bs_replacement_char_flowsheet.sql`; both new scripts (and the pre-existing `phase4.sql` hole) enrolled at `test.yml:68-89` (r7) |
-| r6: fold-match argument applied to artist 656 only | `artists_fold_name_idx` is non-unique (`0134:82`), so 22025 / 23162 need a post-repair collision pre-flight (r7) |
-| r7: §4 caller inventory omitted `library-etl` | `jobs/library-etl/job.ts:20` — it owns `ensureArtist` and is the last live `*/30` consumer, so it is *the* strict-mode caller (r8) |
-| r7: "mirror §2's spec shape" for §3 | Phase 4's hex regex is non-global (`spec.js:167`); copied onto a 5–6 UPDATE script it checks only the first (r8) |
-| r1–r7: §4 stops the failure mode recurring | Scoped: it catches invalid-byte loss, not utf8mb3 charset-narrowing to `?` (`sql.mirror.ts:81`) (r8) |
-| r1–r8: "flowsheet has no catalog id" | False — it has `album_id` (`schema.ts:1156`); unscoped is right because free-form plays carry NULL `album_id` and scoping would under-repair (r9) |
-| r8: 120s "from `recovery.sql:97`, the flowsheet-writing predecessor" | `phase35.sql:42` also writes flowsheet, at 60s. 120s stands, justified by the cost model instead (r9) |
-| r1–r8: operator script "per `docs/migrations.md`'s `ddl-only` rule" | That rule prescribes a one-shot backfill job above ~10k rows; the real authority is `phase4.sql:3-7` (r9) |
-| r8: "wire strict decode into `library-etl`" | Nine `send` sites in that job — set it on the instance at `job.ts:20` (r9) |
+| Earlier revision said                                                         | Established since                                                                                                                                 |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| r1–r2: author a Drizzle migration                                             | `scripts/audit/*.sql` operator script — migrations are DDL-only (r3)                                                                              |
+| r1–r2: step 1 is "verify the upstream byte"                                   | Captured directly: tubafrenzy has **zero** U+FFFD anywhere (r4)                                                                                   |
+| r2: recommend U+03BC, "two pins vs zero"                                      | U+00B5, now verified byte-for-byte against tubafrenzy (r3, confirmed r4)                                                                          |
+| r3: rotation rows are unrecoverable, deadline-lost                            | All five recovered from `ROTATION_RELEASE` (r4)                                                                                                   |
+| r3: ETL re-corruption is a critical hazard                                    | Low — upstream is clean, so the post-fix ETL fold-matches the corrected row (r4)                                                                  |
+| r3: `check-bulk-update-analyze` is warn-only                                  | Hard CI gate: `test.yml:304` runs it `--strict` (r2 was right)                                                                                    |
+| r3: fallback = "log the row key and skip"                                     | Not implementable at `send`; it returns one string per batch (r4)                                                                                 |
+| r3: throw-vs-skip is an ETL cron decision                                     | `send` is on the live DJ write path via `commandqueue.mirror.ts:286` (r4)                                                                         |
+| r3: framed the flowsheet write as new work                                    | `bs_replacement_char_recovery.sql:110-112` already repairs this exact family                                                                      |
+| r6: §2's script left unnamed; new scripts not enrolled in the CI paths-filter | Named `bs_replacement_char_flowsheet.sql`; both new scripts (and the pre-existing `phase4.sql` hole) enrolled at `test.yml:68-89` (r7)            |
+| r6: fold-match argument applied to artist 656 only                            | `artists_fold_name_idx` is non-unique (`0134:82`), so 22025 / 23162 need a post-repair collision pre-flight (r7)                                  |
+| r7: §4 caller inventory omitted `library-etl`                                 | `jobs/library-etl/job.ts:20` — it owns `ensureArtist` and is the last live `*/30` consumer, so it is _the_ strict-mode caller (r8)                |
+| r7: "mirror §2's spec shape" for §3                                           | Phase 4's hex regex is non-global (`spec.js:167`); copied onto a 5–6 UPDATE script it checks only the first (r8)                                  |
+| r1–r7: §4 stops the failure mode recurring                                    | Scoped: it catches invalid-byte loss, not utf8mb3 charset-narrowing to `?` (`sql.mirror.ts:81`) (r8)                                              |
+| r1–r8: "flowsheet has no catalog id"                                          | False — it has `album_id` (`schema.ts:1156`); unscoped is right because free-form plays carry NULL `album_id` and scoping would under-repair (r9) |
+| r8: 120s "from `recovery.sql:97`, the flowsheet-writing predecessor"          | `phase35.sql:42` also writes flowsheet, at 60s. 120s stands, justified by the cost model instead (r9)                                             |
+| r1–r8: operator script "per `docs/migrations.md`'s `ddl-only` rule"           | That rule prescribes a one-shot backfill job above ~10k rows; the real authority is `phase4.sql:3-7` (r9)                                         |
+| r8: "wire strict decode into `library-etl`"                                   | Nine `send` sites in that job — set it on the instance at `job.ts:20` (r9)                                                                        |
 
 Constant across all four: `flowsheet` is a real gap Phase 4 does not cover, and the `MirrorSQL` SSH decode is a real silent-corruption source.
