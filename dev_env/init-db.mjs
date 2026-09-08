@@ -373,15 +373,19 @@ async function verifySeedData() {
       (SELECT COUNT(*) FROM auth_account) AS accounts,
       (SELECT COUNT(*) FROM auth_member) AS members,
       (SELECT COUNT(*) FROM wxyc_schema.genres) AS genres,
-      (SELECT COUNT(*) FROM wxyc_schema.artists) AS artists
+      (SELECT COUNT(*) FROM wxyc_schema.artists) AS artists,
+      (SELECT COUNT(*) FROM wxyc_schema.artist_crossreference) AS artist_xrefs,
+      (SELECT COUNT(*) FROM wxyc_schema.artist_library_crossreference) AS release_xrefs
   `;
 
-  const { users, accounts, members, genres, artists } = counts[0];
-  console.log(`   auth_user:    ${users} rows`);
-  console.log(`   auth_account: ${accounts} rows`);
-  console.log(`   auth_member:  ${members} rows`);
-  console.log(`   genres:       ${genres} rows`);
-  console.log(`   artists:      ${artists} rows\n`);
+  const { users, accounts, members, genres, artists, artist_xrefs, release_xrefs } = counts[0];
+  console.log(`   auth_user:     ${users} rows`);
+  console.log(`   auth_account:  ${accounts} rows`);
+  console.log(`   auth_member:   ${members} rows`);
+  console.log(`   genres:        ${genres} rows`);
+  console.log(`   artists:       ${artists} rows`);
+  console.log(`   artist xrefs:  ${artist_xrefs} rows`);
+  console.log(`   release xrefs: ${release_xrefs} rows\n`);
 
   if (parseInt(users) === 0 || parseInt(genres) === 0) {
     throw new Error(
