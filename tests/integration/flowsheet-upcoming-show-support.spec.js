@@ -28,7 +28,7 @@
  * Artist/library fixtures: this spec creates its OWN `artists` + `library`
  * rows (cleaned up in `afterAll`) rather than assuming specific ids from
  * `dev_env/seed_db.sql`. Local dev database volumes persist across sessions
- * (`npm run db:stop` drops it; nothing else does) and accumulate drift from
+ * (`npm run db:reset` drops it; nothing else does) and accumulate drift from
  * whatever has run against them, so a fixed-id assumption like "library id 4
  * is Sufjan Stevens" — true on a freshly-provisioned DB — is not safe to rely
  * on here. Creating fresh rows sidesteps that drift entirely and matches the

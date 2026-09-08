@@ -95,7 +95,11 @@ if [ "$DB_HOST" = "localhost" ] || [ "$DB_HOST" = "127.0.0.1" ]; then
     info "Docker is running"
   fi
 
-  if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'dev_env-db-1'; then
+  # Ask Compose which container backs the `db` service rather than matching a
+  # generated name: the name is a function of the project, which a worktree
+  # can override with COMPOSE_PROJECT_NAME.
+  DEV_DB_CONTAINER="$(docker compose -f "$PROJECT_ROOT/dev_env/docker-compose.yml" --env-file "$ENV_FILE" --profile dev ps -q db 2>/dev/null || true)"
+  if [ -z "$DEV_DB_CONTAINER" ]; then
     info "Database container is not running. Starting it..."
     npm run db:start
   fi
@@ -142,7 +146,7 @@ if [ "$DB_CHECK" != "ok" ]; then
     echo "   The Docker container is running but the database may not exist."
     echo "   Try removing the volume and reinitializing:"
     echo ""
-    echo "     docker compose -f dev_env/docker-compose.yml --profile dev down -v"
+    echo "     npm run db:reset"
     echo "     npm run db:start"
   fi
   exit 1

@@ -67,8 +67,10 @@ The dev experience makes extensive use of Node.js project scripts. Here's a rund
 - `npm run start` : Starts the nodejs server that is compiled by the prior command.
 - `npm run clean` : Removes the `dist` directory containing the artifacts of the build command.
 - `npm run test` : Runs our Jest unit test suite against an instance of the backend service. This requires an environment variable `PORT` to be defined so that jest may find the backend service to run the tests against.
-- `npm run db:start` : Starts and seeds a docker container running Postgresql on `localhost:5432` by default. It can be configured with the environment variable `DB_PORT`.
-- `npm run db:stop` : Shuts down the aforementioned psql docker container and cleans up any volumes or networks.
+- `npm run db:start` : Starts and seeds a docker container running Postgresql on `localhost:5432` by default. It can be configured with the environment variable `DB_PORT`. The migration and seeding output streams to your terminal, and a failed initialization fails the command.
+- `npm run db:stop` : Shuts down the aforementioned psql docker container. The `pg-data` volume survives, so the next `db:start` picks the same database back up.
+- `npm run db:reset` : Shuts it down _and_ deletes the `pg-data` volume, so the next `db:start` builds a fresh database from the migrations and seed fixtures. This is the destructive one.
+  - All of these act on the Compose project named by `dev_env/docker-compose.yml` (`wxyc-backend`), which every checkout of this repo shares. To give a worktree its own stack, set `COMPOSE_PROJECT_NAME` and distinct host ports in that worktree's `.env`.
 - `npm run ci:env` : Spins up a sandboxed docker environment with a backend service and db.
   - Can be run in independantly of `npm run dev` or `npm run db:start`.
 - `npm run ci:clean` : Shuts down and cleans up any straggling containers, volumes, and networks.

@@ -19,4 +19,14 @@ To refresh the clone, follow the recipe in the comment at the top of `dev_env/se
 
 ## Stopping the database
 
-Stop the database with `npm run db:stop` (this runs `docker compose down -v` — the `-v` drops the `pg-data` named volume, so the dev DB is recreated from scratch on the next `db:start`).
+`npm run db:stop` runs `docker compose down` and leaves the `pg-data` named volume in place, so the next `db:start` reattaches to the same database. `npm run db:reset` is the destructive form (`down -v`): it drops the volume, and the next `db:start` rebuilds the database from the migrations and both seed files. Reach for `db:reset` when you want a clean fixture — after a migration rewrite, or when the local DB has drifted — and for nothing else.
+
+The split matters because these commands act on a project shared by every checkout of this repo (see below): a stop that also dropped the volume was a stop that could delete the seeded database another worktree was working against.
+
+## Which stack these commands act on
+
+`dev_env/docker-compose.yml` declares `name: wxyc-backend`. That name is the Compose project, and it prefixes every container, network, and volume the file creates: `wxyc-backend-db-1`, `wxyc-backend_pg-data`, and so on. Without the declaration Compose derives the project from the compose file's own directory — `dev_env` for every clone and every worktree of this repo, so all of them addressed one project without saying so.
+
+Declaring it does not by itself give each worktree its own database; it makes the sharing explicit and stops a stray `down` from being a function of which directory you happened to be standing in. A worktree that genuinely needs an independent stack sets `COMPOSE_PROJECT_NAME` in its own `.env`, plus distinct host ports (`DB_PORT`, `CI_DB_PORT`, `E2E_DB_PORT`, `ETL_PG_PORT`, `ETL_MYSQL_PORT`) — containers are namespaced by project, but the host ports they publish are not, so two stacks on the same ports still collide.
+
+No service pins a `container_name`. Container names are global to the Docker daemon rather than scoped to a Compose project, so a pinned name makes two projects mutually exclusive — the second to start fails with `Conflict. The container name "/..." is already in use`. Address a container through `docker compose <subcommand> <service>`, which resolves it within the project, rather than by a generated name.

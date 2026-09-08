@@ -209,14 +209,14 @@ const getRoleJwt = (username: string): Promise<string> =>
  * fourth consecutive run inside one window will fail. Deliberately NOT retried:
  * no bounded wait fits a 15-minute window, and a retry loop would turn a clear
  * failure into a slow one. Wait it out, or reset the in-memory counter with
- * `docker restart dev_env-e2e-auth-1`.
+ * `docker compose -f dev_env/docker-compose.yml --profile e2e restart e2e-auth`.
  */
 async function signInFailureMessage(username: string, res: Response): Promise<string> {
   const body = await res.text().catch(() => '');
   const hint =
     res.status === 429
       ? 'sign-in rate limit spent (10 per 15 min across the /auth/sign-in prefix, this suite uses 3 per run) — ' +
-        'wait it out or `docker restart dev_env-e2e-auth-1`'
+        'wait it out or `docker compose -f dev_env/docker-compose.yml --profile e2e restart e2e-auth`'
       : 'did you run `npm run e2e:setup-users`? it is not part of `npm run e2e:env`';
   return `${username} sign-in failed: ${res.status} ${body} (${hint})`;
 }
