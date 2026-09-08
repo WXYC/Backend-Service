@@ -112,7 +112,7 @@ The job requires two sets of credentials: one for the SSH tunnel to the legacy s
 - Node.js 22+
 - Docker (for local development database; the runner script starts Docker and the database container automatically if needed)
 - Network access to the legacy SSH server
-- A running PostgreSQL database with migrations applied. For local development, the runner script (`npm run etl:library`) handles this automatically — it starts Docker, launches the database container, and runs Drizzle migrations. If the database container already exists with stale settings, remove the volume first: `docker compose -f dev_env/docker-compose.yml --profile dev down -v`. The job automatically syncs genres and formats from the legacy database on each run, so no manual seeding is required.
+- A running PostgreSQL database with migrations applied. For local development, the runner script (`npm run etl:library`) handles this automatically — it starts Docker, launches the database container, and runs Drizzle migrations. If the database container already exists with stale settings, remove the volume first with `npm run db:reset`. The job automatically syncs genres and formats from the legacy database on each run, so no manual seeding is required.
 
 ## Building
 
