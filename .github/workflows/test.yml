@@ -149,10 +149,18 @@ jobs:
       - name: Determine if integration tests should run
         id: should-run
         run: |
+          # `db-init` is here because every integration spec runs against the
+          # database this seed builds. Without it, a change to seed_db.sql or
+          # init-db.mjs runs no job that executes them: `db-init` otherwise
+          # gates only the migration dry-run, which applies migrations and
+          # never reaches the seed. A seed that fails to apply, or that
+          # applies different rows than a spec expects, would surface at the
+          # next developer's first run rather than here.
           if [[ "${{ github.event_name }}" == "workflow_dispatch" || \
                 "${{ steps.changes.outputs.apps }}" == "true" || \
                 "${{ steps.changes.outputs.jobs }}" == "true" || \
                 "${{ steps.changes.outputs.shared }}" == "true" || \
+                "${{ steps.changes.outputs.db-init }}" == "true" || \
                 "${{ steps.changes.outputs.tests }}" == "true" ]]; then
             echo "run-integration=true" >> $GITHUB_OUTPUT
           else
