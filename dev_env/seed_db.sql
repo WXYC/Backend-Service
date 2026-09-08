@@ -227,6 +227,76 @@ INSERT INTO wxyc_schema.library(
     artist_id, genre_id, format_id, album_title, code_number)
     VALUES (9, 7, 1, 'Kind of Blue', 1);
 
+-- Cross-reference fixtures.
+--
+-- Both cross-reference tables were empty in every dev database while carrying
+-- rows in production, so nothing local exercised their read path and the
+-- screens that surface them showed an empty state indistinguishable from a
+-- failed fetch.
+--
+-- The relationships are real, and so is the filing situation they record:
+-- Coltrane played tenor on Kind of Blue, which is filed under Davis, and the
+-- Ellington and Alice Coltrane pairings are the canonical "filed under one
+-- name, credited to another" case these tables exist for.
+--
+-- Ids are resolved by name rather than written as literals. Artist ids come
+-- from a sequence here, so any row inserted above shifts every literal below
+-- it -- the failure would be silent, attaching a cross-reference to whichever
+-- artist happened to land on that id.
+-- Every insert below is guarded. Resolving by name means a second run would
+-- otherwise match both the original row and the duplicate it just made, and
+-- artists carries no unique constraint on the name to catch that.
+INSERT INTO wxyc_schema.artists(artist_name, alphabetical_name, code_letters)
+SELECT v.artist_name, v.alphabetical_name, v.code_letters
+  FROM (VALUES
+      ('John Coltrane', 'Coltrane, John', 'CO'),
+      ('Alice Coltrane', 'Coltrane, Alice', 'CO'),
+      ('Duke Ellington', 'Ellington, Duke', 'EL')
+  ) AS v(artist_name, alphabetical_name, code_letters)
+ WHERE NOT EXISTS (
+   SELECT 1 FROM wxyc_schema.artists a WHERE a.artist_name = v.artist_name
+ );
+
+INSERT INTO wxyc_schema.genre_artist_crossreference(artist_id, genre_id, artist_genre_code)
+SELECT a.id, 7, v.code
+  FROM (VALUES ('John Coltrane', 2), ('Alice Coltrane', 3), ('Duke Ellington', 4))
+       AS v(artist_name, code)
+  JOIN wxyc_schema.artists a ON a.artist_name = v.artist_name
+ON CONFLICT (artist_id, genre_id) DO NOTHING;
+
+-- Filed under Ellington; the release the second cross-reference below points at.
+INSERT INTO wxyc_schema.library(artist_id, genre_id, format_id, album_title, code_number)
+SELECT a.id, 7, 1, 'Duke Ellington & John Coltrane', 1
+  FROM wxyc_schema.artists a
+ WHERE a.artist_name = 'Duke Ellington'
+   AND NOT EXISTS (
+     SELECT 1 FROM wxyc_schema.library l
+      WHERE l.album_title = 'Duke Ellington & John Coltrane'
+   );
+
+INSERT INTO wxyc_schema.artist_crossreference(source_artist_id, target_artist_id, comment)
+SELECT s.id, t.id, v.comment
+  FROM (VALUES
+      ('Miles Davis', 'John Coltrane', 'Played tenor in the Miles Davis Quintet, 1955-1960.'),
+      ('John Coltrane', 'Miles Davis', 'See Miles Davis for the quintet and sextet sessions.'),
+      ('John Coltrane', 'Alice Coltrane', 'See Alice Coltrane for the sessions she led after 1967.'),
+      ('Alice Coltrane', 'John Coltrane', 'Recorded together 1965-1967.'),
+      ('Duke Ellington', 'John Coltrane', 'See John Coltrane for their 1962 session.')
+  ) AS v(source_name, target_name, comment)
+  JOIN wxyc_schema.artists s ON s.artist_name = v.source_name
+  JOIN wxyc_schema.artists t ON t.artist_name = v.target_name
+ON CONFLICT (source_artist_id, target_artist_id) DO NOTHING;
+
+INSERT INTO wxyc_schema.artist_library_crossreference(artist_id, library_id, comment)
+SELECT a.id, l.id, v.comment
+  FROM (VALUES
+      ('John Coltrane', 'Kind of Blue', 'Plays tenor on this Miles Davis-filed release.'),
+      ('John Coltrane', 'Duke Ellington & John Coltrane', 'Credited on this Ellington-filed release.')
+  ) AS v(artist_name, album_title, comment)
+  JOIN wxyc_schema.artists a ON a.artist_name = v.artist_name
+  JOIN wxyc_schema.library l ON l.album_title = v.album_title
+ON CONFLICT (artist_id, library_id) DO NOTHING;
+
 -- Mirror the A.2 backfill outcome for all seeded library rows so the new
 -- tsvector path (which reads library.artist_name directly) and the trigram
 -- fallback (which uses the GIN index on library.artist_name) have populated
