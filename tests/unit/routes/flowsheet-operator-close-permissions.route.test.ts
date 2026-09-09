@@ -40,18 +40,6 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getLastModifiedAt: jest.fn(),
 }));
 
-// The mirror middleware is registered on the force-end route; it taps the
-// response and defers everything else to `res.once('finish')`. Stubbed to a
-// pass-through so this suite tests the gate, not the tubafrenzy path.
-jest.mock('../../../apps/backend/middleware/legacy/flowsheet.mirror', () => ({
-  flowsheetMirror: new Proxy(
-    {},
-    {
-      get: () => (_req: unknown, _res: unknown, next: () => void) => next(),
-    }
-  ),
-}));
-
 import { resetFlowsheetServiceMock } from '../../mocks/flowsheet-service.mock';
 import * as flowsheetService from '../../../apps/backend/services/flowsheet.service';
 import { flowsheet_route } from '../../../apps/backend/routes/flowsheet.route';

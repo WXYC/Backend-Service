@@ -5,7 +5,7 @@
  */
 
 export interface RecordedRequest {
-  service: 'lml' | 'slack' | 'tubafrenzy';
+  service: 'lml' | 'slack';
   method: string;
   path: string;
   query: Record<string, string>;

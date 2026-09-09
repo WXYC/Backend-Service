@@ -9,7 +9,8 @@
  * omitted the literal-"Anonymous" filter (BS#1286), so an imported row could
  * disagree with every sibling row in the same show. Same reasoning as the
  * `recomputeHasResolvedSupport` extraction (BS#1763) and the
- * `@wxyc/legacy-mirror` payload extraction (BS#1707): two consumers, one
+ * `@wxyc/legacy-mirror` payload extraction (BS#1707, removed in BS#2403):
+ * two consumers, one
  * decision.
  *
  * `flowsheet.service.ts` re-exports `resolveDjDisplayName` and

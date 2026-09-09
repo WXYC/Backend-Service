@@ -7,7 +7,8 @@
  * directly (no TS transform registered for `jest.config.json`; see BS#1799).
  *
  * `jobs/catalog-popularity-freetext-resolve/job.ts` is now a thin re-export
- * shim pointing here (à la the `@wxyc/legacy-mirror` BS#1707 extraction and
+ * shim pointing here (à la the BS#1707 `@wxyc/legacy-mirror` extraction,
+ * removed in BS#2403, and
  * `jobs/concerts-artist-resolver/recompute.ts`'s BS#1763 shim), so its
  * existing import site stays untouched.
  *

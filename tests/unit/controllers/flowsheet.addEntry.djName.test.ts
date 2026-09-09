@@ -22,8 +22,9 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
 import { addEntry } from '../../../apps/backend/controllers/flowsheet.controller';
 
 const makeRes = () => {
-  // `locals` is required: the controller stashes the unprojected row for the
-  // legacy mirror via `stashMirrorData(res, ...)` (BS#1513 / PR #1532).
+  // `locals` is retained after BS#2403 removed the legacy mirror's
+  // `stashMirrorData(res, ...)` (BS#1513 / PR #1532): Express always provides
+  // it, and a bare `{}` keeps this double as faithful as it was.
   const res: any = { locals: {} };
   res.status = jest.fn().mockReturnValue(res);
   res.json = jest.fn().mockReturnValue(res);

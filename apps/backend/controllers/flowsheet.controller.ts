@@ -10,8 +10,6 @@ import type { ConcertDTO } from '../services/concerts.service.js';
 import type { CriticReviewItem } from '@wxyc/shared/dtos';
 import { projectFlowsheetEntry, toDiscogsUnavailableWireFields } from '../utils/flowsheet-projection.js';
 import { getDiscogsUnavailableFlagsById } from '../services/library.service.js';
-import { stashMirrorData } from '../middleware/legacy/mirror.middleware.js';
-import { flowsheetMirror } from '../middleware/legacy/flowsheet.mirror.js';
 import * as flowsheetTakeoverConfig from '../config/flowsheetTakeover.js';
 import WxycError from '../utils/error.js';
 import { INT4_MAX } from '../utils/constants.js';
@@ -560,7 +558,6 @@ export type FSEntryRequestBody = {
  * blip on this read degrades to omitting the fields, never 500s the mutation.
  */
 const sendProjectedEntry = async (res: Response, statusCode: number, entry: FSEntry): Promise<void> => {
-  stashMirrorData(res, entry);
   const projected = projectFlowsheetEntry(entry);
   if (entry.album_id != null) {
     try {
@@ -951,7 +948,8 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
   // fast-path, so a later delivery or #1543's authoritative dump pass still
   // wins. Purely additive to the routing below — the start-vs-join decision is
   // unchanged, and a failed/no-op backfill cannot weaken it. Only a
-  // complement to the `jobs/legacy-mirror-reconcile` detector: this fires
+  // complement to `GET /flowsheet/open-shows` (BS#2235), which replaced the
+  // `jobs/legacy-mirror-reconcile` detector removed in BS#2403: this fires
   // solely when someone next goes live.
   if (latestEntryIsShowEnd && current_show !== undefined) {
     await flowsheet_service.closeShowFromTerminalShowEndMarker(current_show.id);
@@ -1054,17 +1052,11 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
 
     // `endShow` first, and unwrapped: its `WHERE end_time IS NULL`
     // compare-and-set is what serializes two racing takeovers, so the loser
-    // gets that 400 rather than opening a second show.
-    const closedShow: Show = await flowsheet_service.endShow(current_show, endedAt);
-
-    // The route chains `flowsheetMirror.startShow`, whose response tap will
-    // create the NEW show in tubafrenzy from the body below. The close has to
-    // mirror too, or tubafrenzy keeps a show open that Backend has closed —
-    // the split brain that made this incident ambiguous. It cannot ride a
-    // second tap (both read the same `res.locals.mirrorData`, so an end-tap
-    // would sign off the show that just started), so it is handed the closed
-    // show explicitly and deferred to `res.once('finish')`.
-    flowsheetMirror.scheduleTakeoverSignoff(req, res, closedShow);
+    // gets that 400 rather than opening a second show. The return value is
+    // discarded — it existed only to hand the closed show to the tubafrenzy
+    // mirror's deferred sign-off (BS#2403 removed it); the call is kept for
+    // the compare-and-set, not the row.
+    await flowsheet_service.endShow(current_show, endedAt);
 
     const show_session: Show = await flowsheet_service.startShow(
       req.body.dj_id,

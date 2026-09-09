@@ -15,7 +15,8 @@
  * concerts-domain logic used by multiple jobs.
  *
  * `jobs/concerts-artist-resolver/recompute.ts` is now a thin re-export
- * shim pointing here (à la the `@wxyc/legacy-mirror` BS#1707 extraction) so
+ * shim pointing here (à la the BS#1707 `@wxyc/legacy-mirror` extraction,
+ * itself removed in BS#2403) so
  * its existing import site and callers stay untouched.
  *
  * Locked decision from the BS#1760 issue: this is a windowed recompute, NOT

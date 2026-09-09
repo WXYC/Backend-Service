@@ -1163,13 +1163,11 @@ export const flowsheet = wxyc_schema.table(
     //   1. Webhook upsert target — apps/backend/routes/internal.route.ts
     //      uses `ON CONFLICT (legacy_entry_id) DO UPDATE` keyed on the
     //      tubafrenzy-assigned entry ID.
-    //   2. Mirror loop-guard — apps/backend/middleware/legacy/flowsheet.mirror.ts
-    //      reads `legacy_entry_id != null` as a boolean meaning "this row
-    //      came from tubafrenzy, do not mirror back" (avoids an infinite
-    //      ETL → mirror → webhook → ETL loop). The reconcile cron
-    //      (jobs/legacy-mirror-reconcile/orchestrate.ts, BS#1707) is a use-#2
-    //      sibling: it records the just-allocated tubafrenzy ID after a
-    //      successful re-driven mirrorCreateEntry, same as the live path.
+    //   2. Mirror loop-guard — RETIRED by BS#2403 with the outbound mirror
+    //      itself. It read `legacy_entry_id != null` as a boolean meaning
+    //      "this row came from tubafrenzy, do not mirror back" (avoiding an
+    //      infinite ETL → mirror → webhook → ETL loop). Numbering below is
+    //      left unchanged so the allowlist rationales still line up.
     //   3. ETL incremental sync key — jobs/flowsheet-etl/job.ts uses the
     //      same `ON CONFLICT (legacy_entry_id)` shape as #1.
     //   4. Insert-only historical backfill — jobs/flowsheet-april-gap-import
@@ -1426,9 +1424,8 @@ export const flowsheet = wxyc_schema.table(
     // promised). The composite makes the per-show MAX a true O(1) lookup:
     // each show's rows form a contiguous run in the index, with DESC ordering
     // putting the per-show max at the run's leading edge. Same shape also
-    // accelerates the legacy mirror's announcement-entry lookup
-    // (`WHERE show_id = ? ORDER BY play_order DESC LIMIT 1` in
-    // apps/backend/middleware/legacy/flowsheet.mirror.ts) and `getEntriesByShow`
+    // accelerated the legacy mirror's announcement-entry lookup (removed by
+    // BS#2403) and still serves `getEntriesByShow`
     // (`WHERE show_id IN (...) ORDER BY play_order DESC`). Built CONCURRENTLY
     // out-of-band on prod first; the migration is a no-op against the prod DB
     // via `IF NOT EXISTS`. The prior single-column index is dropped in the
@@ -2480,11 +2477,11 @@ export type Show = InferSelectModel<typeof shows>;
  * of the tubafrenzy decommission — WXYC/wiki#88); `jobs/flowsheet-etl/` is
  * retained as one-shot code (see jobs/flowsheet-etl/package.json),
  * unregistered from the deploy's crontab install, and refuses to run without
- * an explicit opt-in. Tubafrenzy remains a SECONDARY writer until Phase 6a
- * via the show-lifecycle path on `/internal/flowsheet-webhook`, and the
- * live mirror in `apps/backend/middleware/legacy/flowsheet.mirror.ts` still
- * replicates Backend's own show lifecycle out to tubafrenzy while the
- * PostHog `backend-mirror` flag is on. Shapes this table carries — from the
+ * an explicit opt-in. The outbound mirror that replicated Backend's own show
+ * lifecycle out to tubafrenzy is gone (BS#2403, after Milestone 1 took the
+ * flowsheet surface to 410). Tubafrenzy can still reach this table as a
+ * SECONDARY writer via the show-lifecycle path on `/internal/flowsheet-webhook`,
+ * which is deliberately still routed. Shapes this table carries — from the
  * tubafrenzy-via-ETL/mirror era and from that still-open webhook path —
  * that Backend-canonical writes must accept:
  *
@@ -2503,14 +2500,15 @@ export type Show = InferSelectModel<typeof shows>;
  *     accumulated NULLs are repaired from the final tubafrenzy dump under
  *     #1543, not by any scheduled job.
  *   - NULL `legacy_show_id`, `legacy_dj_id`, `legacy_dj_name` for shows
- *     that originated in dj-site and have not been mirrored to tubafrenzy.
- *     `legacy_show_id` is persisted by `startShow` in
- *     `apps/backend/middleware/legacy/flowsheet.mirror.ts` — NOT by
- *     `mirrorCreateShow`, which only POSTs to tubafrenzy and returns the id
- *     (it lives in `@wxyc/legacy-mirror` and has no `db` import). That
- *     persist is best-effort inside a try/catch that only `console.error`s,
- *     so a NULL here can also mean the POST succeeded and the UPDATE didn't.
- *     Either way it is not a permanent property of a dj-site show.
+ *     that originated in dj-site and were never mirrored to tubafrenzy.
+ *     Nothing populates these any more: BS#2403 removed the outbound mirror
+ *     that used to persist `legacy_show_id` after creating the tubafrenzy
+ *     show, so every show opened from Milestone 1 (WXYC/wiki#93) onward
+ *     carries NULL here by construction. On older rows a NULL is still
+ *     ambiguous — the mirror's persist was best-effort inside a try/catch
+ *     that only `console.error`d, so it can mean either "never mirrored" or
+ *     "POSTed but the UPDATE didn't land". Not a permanent property of a
+ *     dj-site show; read it as provenance, never as liveness.
  *   - Stub-shaped rows from `resolveShow` (`/internal/flowsheet-webhook`):
  *     a `start_time` of the webhook-delivery instant rather than the show's
  *     real start, NULL `show_name`, and NULL `legacy_dj_name` when the
@@ -2538,14 +2536,13 @@ export const shows = wxyc_schema.table(
     /**
      * On-air DJ alias for the show, sourced from tubafrenzy's
      * `FLOWSHEET_RADIO_SHOW_PROD.DJ_HANDLE` column (NOT `DJ_NAME` — that's the
-     * full real name, still forwarded outbound through the legacy mirror as
-     * `realName || name` pending the `auth_user.name` backfill (Track 2d of
-     * the PII safeguards plan), and surfacing it on the public v2 wire would
-     * be PII exposure; see BS#1393).
+     * full real name; surfacing it on the public v2 wire would be PII
+     * exposure, see BS#1393).
      *
-     * The *outbound* write to tubafrenzy's DJ_HANDLE never reads this column
-     * or `auth_user.name` — see `mapShowToTubafrenzy`'s docblock in
-     * `@wxyc/legacy-mirror` for the resolution chain.
+     * The outbound mirror that used to forward a legal name into tubafrenzy's
+     * `DJ_NAME` as `realName || name` is gone (BS#2403). No code in this repo
+     * writes a real name to tubafrenzy any more; what remains here is the
+     * inbound/historical read described below.
      *
      * The marker `flowsheet.dj_name` resolver (apps/backend/routes/internal.route.ts
      * via `resolveShow`'s COALESCE chain) reads this column as the fallback when

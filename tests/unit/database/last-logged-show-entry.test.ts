@@ -5,7 +5,7 @@
  * Pure SQL-fragment module — no DB client — so these render the real
  * fragments through drizzle's own `PgDialect` and assert on the genuine SQL
  * text, mirroring `tests/unit/utils/sql-like.test.ts` and
- * `tests/unit/jobs/legacy-mirror-reconcile/stale-open-shows-sql.test.ts`
+ * the since-removed `tests/unit/jobs/legacy-mirror-reconcile/stale-open-shows-sql.test.ts` (BS#2403)
  * (both chosen over a call-shape mock for the same reason: a mock can pin
  * that `orderBy` was called, not what it was called WITH).
  *

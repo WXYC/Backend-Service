@@ -141,44 +141,13 @@ The wireup is per-job: see `jobs/flowsheet-etl/logger.ts` for the canonical patt
 
 > TODO (separate child task): provision `SENTRY_DSN` for the flowsheet-etl cron in EC2 / GitHub Actions secrets.
 
-## Legacy mirror queue (`apps/backend/middleware/legacy/commandqueue.mirror.ts`)
-
-Bounded ring-buffer reports written under `mirror-logs/`. Reports never include raw SQL — only length, sha256, and statement count.
-
-- `MIRROR_FATAL_REPORTS_MAX` (default `10`) — Number of ring slots for fatal reports. Total disk = max × `MIRROR_REPORT_MAX_BYTES`.
-- `MIRROR_FATAL_REPORTS_INTERVAL_MS` (default `900000` / 15 min) — Bucket width for the fatal ring index. Reports in the same bucket overwrite the same slot.
-- `MIRROR_SECONDARY_REPORTS_MAX` (default `10`) — Same scheme for first-failure secondary reports. Set to `0` to disable secondaries.
-- `MIRROR_SECONDARY_REPORTS_INTERVAL_MS` (default `600000` / 10 min) — Bucket width for secondary ring.
-- `MIRROR_SECONDARY_REPORT_ON_ATTEMPT` (default `1`) — Attempt number that triggers a secondary report.
-- `MIRROR_REPORT_MAX_BYTES` (default `65536` / 64 KiB) — Per-file JSON cap. Oversize payloads are replaced with a `truncated: true` summary.
-- `MIRROR_PENDING_QUEUE_SUMMARIES_MAX` (default `20`) — Max number of pending-queue summaries embedded in a fatal report.
-
-### Legacy mirror reconciliation cron (`jobs/legacy-mirror-reconcile`)
-
-Recurring cron (BS#1707) that self-heals tubafrenzy mirror rows orphaned when the live mirror's one-shot `res.finish` attempt was skipped. Two DB-durable, all-or-nothing sweeps re-drive shows (`shows.legacy_show_id IS NULL`) then their entries + signoff (`flowsheet.legacy_entry_id IS NULL`); partially-mirrored shows are reported for manual remediation, never auto-appended. Schedule is static from `package.json`'s `cron-schedule` (`0 8 * * *` UTC ≈ 03:00 ET); there is no `BACKFILL_CRON_SCHEDULE`-style override.
-
-New knobs:
-
-- `RECONCILE_WINDOW_HOURS` (default `48`) — Bounded recent window. Only shows started within this many hours are candidates; older orphans are the historical-remediation class, deliberately out of scope for this recurring sweep. Positive integer; anything else throws at startup.
-- `RECONCILE_SETTLE_MINUTES` (default `15`) — Settle window for the show-create sweep only. Shows started within this many minutes are skipped so the sweep never races a still-in-flight live mirror (which persists `legacy_show_id` within the `res.finish` settling window). Non-negative integer; `0` disables the settle bound.
-- `RECONCILE_ALERT_THRESHOLD` (default `0`) — The detection signal escalates to a Sentry warning when `orphan_shows + orphan_entries + partial_shows` exceeds this value. The default `0` alerts whenever the sweep found anything to heal or report, so the accruing condition is visible before a user notices. Non-negative integer.
-
-Reuses the shared cooperative-pause names rather than a `RECONCILE_`-prefixed fork: `LIVE_ACTIVITY_LOOKBACK_SECONDS` (default `60`; `0` disables the probe) and `LIVE_ACTIVITY_PAUSE_MS` (default `30000`) — same semantics as `flowsheet-metadata-backfill`. The pause honors `WXYC_SCHEMA_NAME` via the shared `checkLiveActivity` probe.
-
-Runtime vars supplied at `docker run --env-file .env` (all four have historically been a missed step for per-cron images, so they are called out here):
-
-- `TUBAFRENZY_URL` (default `https://www.wxyc.info`) — Base URL of the tubafrenzy mirror API the reconcile POSTs to (read at module load by `@wxyc/legacy-mirror`'s `http-mirror.ts`, shared with the live mirror path).
-- `MIRROR_API_KEY` — Bearer token for the tubafrenzy mirror API. Must match tubafrenzy's mirror-API key. Same var the live mirror uses.
-- `POSTHOG_API_KEY` — Personal/project API key for the per-DJ `backend-mirror` flag gate. When unset the mirror is enabled by default (dev/E2E convention), exactly like the live path. The cron `shutdown()`s the `posthog-node` client in `finally` (posthog-node's background flush timers would otherwise hang a short-lived container on exit).
-- `SENTRY_DSN` — Sentry project DSN. The moved `http-mirror` client reports mirror-call failures to Sentry directly, and the reconcile's detection signal (orphan-count threshold + per-show partial-mirror report) emits `captureMessage` warnings. Without a DSN the SDK silently no-ops; provision it so the self-heal is observable.
-
 ## Flowsheet Go-Live Intent
 
 - `FLOWSHEET_TAKEOVER_ENABLED` (default `false`, BS#2233) — Strict `=== 'true'` gate (via `apps/backend/config/flowsheetTakeover.ts`'s `createEnvFlagConfig`, the same factory `CRITIC_REVIEWS_ENABLED` and `DONATE_ENABLED` use) for `POST /flowsheet/join`'s explicit start-vs-join decision. ON: a caller going live while a show they are not an active member of is still open must send `intent: "join"` (co-host) or `intent: "takeover"` (close it, start their own, `expected_show_id` required); sending neither is a `409 show_already_open` carrying `{ id, dj_name, start_time }`. OFF: `intent` and `expected_show_id` are ignored entirely and the route co-hosts as it always has. In the `set-ec2-env-var.yml` allowlist; like `STATION_SIGNUP_ENABLED` (and unlike the cron-invoked `STATION_SIGNUP_DOWNGRADE_ENABLED`), the backend is a long-running container, so light-up needs the restart `restart_target=backend` performs. Rollback is the same invocation with the secret set to `false` — never cleared, since the resolve step hard-fails on an empty value.
 
   **Flag-OFF must never 400 or 409, and that is load-bearing rather than cosmetic.** `auto-dj-orchestrator` ships `intent: "takeover"` before the flip, and its `join()` throws on any response body without a show id, so a 400 on the unrecognized field would crash that daemon at activation. It is also what lets the four repos in this chain deploy in any order: BS ships dormant, every client becomes 409-aware while nothing is emitting 409s, and the flip is one env var. The flag is the rollback too — no redeploy.
 
-  **It deliberately inverts the `backend-mirror` convention documented at the top of this section** ("when unset the mirror is enabled by default"). `isMirrorEnabled` returns `true` when `POSTHOG_API_KEY` is absent, which is right for the mirror and would be exactly wrong here: no CI or e2e environment sets a PostHog key, so copying that shape would ship this live everywhere it was supposed to be dormant.
+  **It deliberately inverts the convention the `backend-mirror` flag used** (removed with the mirror in BS#2403, recorded here because the trap outlives it): `isMirrorEnabled` returned `true` when `POSTHOG_API_KEY` was absent — "when unset, enabled by default" — which was right for a mirror that had to work in local dev and E2E, and is exactly wrong for a feature gate. No CI or e2e environment sets a PostHog key, so any new flag copying that shape ships live everywhere it was supposed to be dormant. Fail closed.
 
   Not in `set-ec2-env-var.yml`'s allowlist, so lighting it up takes the same two options `WXYC_REVIEWS_ENABLED` documents above: add the key to that workflow's `env:` block and its `case`, or edit `~/.env` on the host over SSH and recreate the backend container. Recreate, never restart.
 

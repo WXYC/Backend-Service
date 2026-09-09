@@ -9,7 +9,7 @@
  *
  *   - The shows UPSERT targets `shows.legacy_show_id`, and the live mirror
  *     back-stamps that column onto dj-site-originated shows
- *     (`apps/backend/middleware/legacy/flowsheet.mirror.ts`). A mirrored
+ *     (the live mirror, removed by BS#2403). A mirrored
  *     dj-site show therefore EXISTS in tubafrenzy, is fetched by
  *     `fetchLegacyShows`, and has its `start_time` / `end_time` / `show_name` /
  *     `legacy_dj_name` overwritten from tubafrenzy's mirror copy.

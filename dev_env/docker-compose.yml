@@ -259,9 +259,6 @@ services:
       # Slack failure simulation (for testing error handling)
       # Set SIMULATE_SLACK_FAILURE=true to test Slack webhook failure scenarios
       - SIMULATE_SLACK_FAILURE=${SIMULATE_SLACK_FAILURE:-false}
-      # Mirror: route HTTP mirror through mock tubafrenzy
-      - TUBAFRENZY_URL=http://mock-api:9090
-      - MIRROR_API_KEY=ci-test-mirror-key
       # Internal endpoints (ETL notify, tubafrenzy webhook). The
       # authenticateInternal() check fails closed on an empty key, so the
       # tubafrenzy-webhook integration spec needs this wired explicitly.

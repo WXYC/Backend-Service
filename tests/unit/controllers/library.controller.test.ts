@@ -246,8 +246,8 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
 }));
 
 // BS#1228: streaming-check partial-error telemetry (PostHog capture + Sentry
-// span projection). Mirrors the `getPostHogClient` mock shape in
-// tests/unit/middleware/legacy/mirror.posthog.test.ts and the
+// span projection). Mirrors the `getPostHogClient` mock shape once pinned by
+// tests/unit/middleware/legacy/mirror.posthog.test.ts (removed in BS#2403) and the
 // `Sentry.getActiveSpan()?.setAttributes(...)` span mock shape in
 // tests/unit/services/library-search.cascade-span.test.ts.
 const mockPostHogCapture = jest.fn();

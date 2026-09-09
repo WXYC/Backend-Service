@@ -19,18 +19,22 @@
  *     correlated subqueries in an UPDATE...WHERE context, where an unaliased
  *     `${flowsheet.column}` renders fully-qualified. Uses
  *     {@link lastLoggedShowEntryOrderBySql} with no alias.
- *   - `jobs/legacy-mirror-reconcile/orchestrate.ts`'s `selectStaleOpenShows`
- *     (site 8) — the same raw-`sql` shape but inside a `.select({...})`
- *     PROJECTION, where an unaliased interpolation renders BARE and can
- *     self-correlate against the subquery's own `flowsheet` scope instead of
- *     the outer table. Uses {@link lastLoggedShowEntryOrderBySql} with an
- *     explicit alias (`'fe'` there).
  *
- * Lives in `@wxyc/database`, not `apps/backend`, because
- * `jobs/legacy-mirror-reconcile` is a separate npm workspace whose Dockerfile
- * copies only its own directory plus this package — an `apps/backend` import
- * fails that build stage. Same shape as the `concerts-recompute.ts` (BS#1763)
- * and `album-resolve.ts` (BS#1829) extractions.
+ * A third call site — `jobs/legacy-mirror-reconcile/orchestrate.ts`'s
+ * `selectStaleOpenShows` (site 8) — was removed with that job in BS#2403. It
+ * used the same raw-`sql` shape inside a `.select({...})` PROJECTION, where an
+ * unaliased interpolation renders BARE and can self-correlate against the
+ * subquery's own `flowsheet` scope instead of the outer table, so it passed an
+ * explicit alias (`'fe'`). {@link lastLoggedShowEntryOrderBySql} keeps the
+ * alias parameter for that reason: the hazard is a property of the projection
+ * context, not of the deleted caller, and the next projection-context caller
+ * will need it.
+ *
+ * Lives in `@wxyc/database` rather than `apps/backend` because that removed job
+ * was a separate npm workspace whose Dockerfile copied only its own directory
+ * plus this package. The placement is retained — same shape as the
+ * `concerts-recompute.ts` (BS#1763) and `album-resolve.ts` (BS#1829)
+ * extractions — so a future job-side caller does not have to move it back.
  *
  * ── WHY `id DESC` AND NOT `play_order DESC` ──
  *

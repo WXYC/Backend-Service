@@ -21,7 +21,7 @@
  *
  * Deliberately does NOT reuse the mirror's `isMirrorEnabled`, which
  * env-defaults to `true` when `POSTHOG_API_KEY` is unset
- * (`middleware/legacy/mirror.middleware.ts`). Copying that shape would make
+ * (the mirror middleware removed by BS#2403). Copying that shape would make
  * this flag default ON in every environment without a PostHog key — including
  * the dj-site e2e stack, which sets none — the exact inverse of shipping
  * dormant.

@@ -9,23 +9,25 @@
  *      `ON CONFLICT (legacy_entry_id) DO UPDATE`. Needs an actual tubafrenzy
  *      ID to dedup against. Reads via `flowsheet.legacy_entry_id` column.
  *
- *   2. **Mirror loop-guard** (`apps/backend/middleware/legacy/flowsheet.mirror.ts`).
- *      `if (entry.legacy_entry_id != null) return;` — "this entry came from
- *      tubafrenzy via ETL, don't mirror back." Treats the column as a boolean
- *      ("is this row from tubafrenzy?"). Writes happen *after* a successful
- *      `mirrorCreateEntry` (the inverse direction) to record the just-allocated
- *      tubafrenzy ID for ETL dedup.
+ *   2. **Mirror loop-guard** — RETIRED by BS#2403, which removed the outbound
+ *      tubafrenzy mirror after Milestone 1 (WXYC/wiki#93) took the flowsheet
+ *      surface to 410. It read the column as a boolean ("is this row from
+ *      tubafrenzy? then don't mirror it back") and wrote the just-allocated
+ *      tubafrenzy ID after a successful `mirrorCreateEntry`. Numbering is kept
+ *      stable so the rationales below, and the three-use comment in
+ *      `shared/database/src/schema.ts`, still read straight.
  *
  *   3. **ETL incremental sync key** (`jobs/flowsheet-etl/job.ts`).
  *      Same `ON CONFLICT (legacy_entry_id) DO UPDATE` shape as use #1.
  *
- * The three uses are fine today, but fragile: a future change that, say,
+ * The remaining uses are fine today, but fragile: a future change that, say,
  * populates `legacy_entry_id` to a placeholder for non-tubafrenzy rows would
- * silently break use #2 (the mirror loop-guard), sending those rows back to
- * tubafrenzy and creating an infinite mirror loop. This check pins the set of
- * files allowed to write the column; adding a new write site requires
- * registering it here with a documented rationale that names which of the
- * three uses (or a new fourth) it belongs to.
+ * silently corrupt the `ON CONFLICT (legacy_entry_id)` dedup that uses #1, #3
+ * and #4 all key on — colliding unrelated rows onto one upsert target. (Before
+ * BS#2403 the sharper failure was use #2's loop-guard: such a row looked
+ * tubafrenzy-born and was never mirrored.) This check pins the set of files
+ * allowed to write the column; adding a new write site requires registering it
+ * here with a documented rationale naming which use it belongs to.
  *
  * Wired into CI as the "legacy_entry_id writes" job in `.github/workflows/test.yml`.
  *
@@ -56,14 +58,10 @@ const REPO_ROOT = resolve(__dirname, '..');
 
 // Allowlist: every file that may contain `legacy_entry_id:` in source.
 // Each entry includes the use-case rationale (1, 2, 3, or "READS only").
-// Adding a new entry requires updating the three-use comment in
-// `shared/database/src/schema.ts` and `apps/backend/middleware/legacy/flowsheet.mirror.ts`
-// so future readers can find the invariant from any write site.
+// Adding a new entry requires updating the use-case comment in
+// `shared/database/src/schema.ts` so future readers can find the invariant
+// from any write site.
 export const ALLOWLIST = new Map([
-  [
-    'apps/backend/middleware/legacy/flowsheet.mirror.ts',
-    'use #2 (mirror loop-guard, READS) + writes that record the just-allocated tubafrenzy ID after mirrorCreateEntry returns.',
-  ],
   [
     'apps/backend/routes/internal.route.ts',
     'use #1: tubafrenzy webhook upsert. INSERT values + ON CONFLICT target on `flowsheet.legacy_entry_id`.',
@@ -75,10 +73,6 @@ export const ALLOWLIST = new Map([
   [
     'jobs/flowsheet-etl/transform.ts',
     'use #3 (DTO): produces the row shape consumed by jobs/flowsheet-etl/job.ts insert.',
-  ],
-  [
-    'jobs/legacy-mirror-reconcile/orchestrate.ts',
-    'use #2 sibling (BS#1707): records the just-allocated tubafrenzy ID via `.set({ legacy_entry_id })` AFTER a successful mirrorCreateEntry, exactly like the live mirror path in flowsheet.mirror.ts. Never a placeholder for a non-tubafrenzy row, so the loop-guard read stays sound.',
   ],
   [
     'jobs/flowsheet-april-gap-import/build-row.ts',
