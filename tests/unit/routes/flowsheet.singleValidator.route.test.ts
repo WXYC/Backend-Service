@@ -32,17 +32,6 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
 
 const passThrough = (_req: unknown, _res: unknown, next: () => void) => next();
 
-jest.mock('../../../apps/backend/middleware/legacy/flowsheet.mirror', () => ({
-  flowsheetMirror: {
-    getEntries: passThrough,
-    addEntry: passThrough,
-    updateEntry: passThrough,
-    deleteEntry: passThrough,
-    startShow: passThrough,
-    endShow: passThrough,
-  },
-}));
-
 import { flowsheet_route } from '../../../apps/backend/routes/flowsheet.route';
 
 const app = express();

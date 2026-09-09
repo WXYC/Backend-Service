@@ -18,7 +18,8 @@
  * unchanged. `apps/backend/services/album-metadata-lookup.service.ts` now
  * carries a thin re-export shim (`export { resolveLinkedAlbumId } from
  * '@wxyc/database';`) so its existing import site stays untouched, mirroring
- * the `@wxyc/legacy-mirror` (BS#1707) and `concerts-recompute.ts` (BS#1763)
+ * the `@wxyc/legacy-mirror` (BS#1707, removed in BS#2403) and
+ * `concerts-recompute.ts` (BS#1763)
  * extractions. `scripts/seed-critic-reviews.ts` imports this directly.
  */
 import { sql, desc } from 'drizzle-orm';

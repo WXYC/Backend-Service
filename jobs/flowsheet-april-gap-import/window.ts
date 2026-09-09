@@ -8,8 +8,8 @@
  * 2026-08-11 (post-Phase-3 residue whose provenance is ambiguous: an id
  * present upstream and absent in Backend is EITHER a failed insert-webhook
  * — import is correct — OR a successful DJ delete whose delete-mirror failed
- * — import resurrects a deletion; see `apps/backend/middleware/legacy/
- * flowsheet.mirror.ts`'s `deleteEntry`). The mechanism below handles either
+ * — import resurrects a deletion; the mirror's `deleteEntry` path that made
+ * this ambiguous was removed in BS#2403). The mechanism below handles either
  * population — it is a plain date-window fetch, nothing April-specific — but
  * the DEFAULT window covers only the unambiguous April cohort. Widening it
  * to reach the August rows is a deliberate per-row provenance decision left

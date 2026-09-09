@@ -311,8 +311,9 @@ export const resolveDjNamesForShows = async (showIds: number[]): Promise<Map<num
  * and a unique index does not constrain NULLs, so the conflict target cannot
  * fire against one either. A dj-site-originated April row that reached
  * tubafrenzy but never got its `legacy_entry_id` back-stamped (the live
- * mirror's one-shot `res.finish` attempt was skipped — precisely the orphan
- * class `jobs/legacy-mirror-reconcile` Sweep 2 exists to heal) therefore
+ * mirror's one-shot `res.finish` attempt was skipped — the orphan class
+ * `jobs/legacy-mirror-reconcile` Sweep 2 used to heal, before BS#2403 removed
+ * both the mirror and that job) therefore
  * reads as "missing from Backend" and gets inserted a SECOND time.
  *
  * The README's mitigation — the 15 April shows hold only lifecycle markers —
@@ -737,8 +738,9 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
           `show(s) [backend_show_id:count — ${offenders}], above GAP_IMPORT_MAX_NULL_KEY_ROWS ` +
           `(${maxNullKeyRows}). Those rows are invisible to this job's existence check AND to its ` +
           `ON CONFLICT (legacy_entry_id) target, so importing could duplicate a row a DJ already entered. ` +
-          `Reconcile them first (jobs/legacy-mirror-reconcile heals the missing back-stamp), or raise the ` +
-          `ceiling once you have confirmed by hand that no candidate id corresponds to one of them.`;
+          `The back-stamp can no longer be healed automatically — BS#2403 removed jobs/legacy-mirror-reconcile ` +
+          `along with the mirror — so raise the ceiling only after confirming by hand that no candidate id ` +
+          `corresponds to one of these rows.`;
         log('error', 'refused_null_key_rows', result.refusalReason, {
           total_null_key_rows: totalNullKeyRows,
           per_show_breakdown: result.perShowBreakdown,

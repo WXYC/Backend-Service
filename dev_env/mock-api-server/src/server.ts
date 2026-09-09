@@ -12,7 +12,6 @@
 import express from 'express';
 import lmlRoutes from './routes/lml.js';
 import slackRoutes from './routes/slack.js';
-import tubafrenzyRoutes from './routes/tubafrenzy.js';
 import adminRoutes from './control/admin.js';
 
 const app = express();
@@ -23,7 +22,6 @@ app.use(express.json());
 // Service routes
 app.use(lmlRoutes);
 app.use(slackRoutes);
-app.use(tubafrenzyRoutes);
 
 // Admin control
 app.use('/_admin', adminRoutes);

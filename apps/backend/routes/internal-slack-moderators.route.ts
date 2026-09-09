@@ -22,7 +22,8 @@ const ROM_INTERNAL_KEY = process.env.ROM_INTERNAL_KEY ?? '';
 /**
  * Advisory-lock key serializing concurrent `PUT`s (see the transaction below).
  *
- * MUST stay distinct from `jobs/legacy-mirror-reconcile/job.ts`'s
+ * MUST stay distinct from the advisory-lock key formerly held by
+ * `jobs/legacy-mirror-reconcile/job.ts` (removed in BS#2403) —
  * `ADVISORY_LOCK_KEY = 17071707`, the only other advisory lock in this
  * codebase. Single-bigint `pg_try_advisory_lock` and `pg_advisory_xact_lock`
  * share one lock space database-wide, so reusing that number would make a

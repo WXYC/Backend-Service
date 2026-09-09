@@ -4,7 +4,6 @@ import * as flowsheetController from '../controllers/flowsheet.controller';
 import * as searchController from '../controllers/search.controller';
 import * as suggestController from '../controllers/suggest.controller';
 import * as flowsheet_service from '../services/flowsheet.service';
-import { flowsheetMirror } from '../middleware/legacy/flowsheet.mirror';
 import { conditionalGet, singleValidatorCache } from '../middleware/conditionalGet';
 import { showMemberMiddleware } from '../middleware/checkShowMember';
 
@@ -17,7 +16,7 @@ export const flowsheet_route = Router();
 // Express's own default per-body `ETag` and marks `Cache-Control: no-cache`,
 // so a client can't trip an independent, un-watermarked 304 off a stale
 // cached ETag. Order matters: it must run before the route handler emits a
-// body, so it's chained ahead of the mirror/controller handlers below rather
+// body, so it's chained ahead of the controller handlers below rather
 // than folded into the conditionalGet factory (which the catalog route also
 // uses, out of this fix's scope).
 const flowsheetConditionalGet = [conditionalGet(flowsheet_service.getLastModifiedAt), singleValidatorCache];
@@ -33,21 +32,19 @@ flowsheet_route.get('/search', searchController.searchFlowsheetEndpoint);
 // line below it would change nothing. (Said plainly because the opposite claim
 // is easy to assume and would send a future reader hunting a hazard that
 // cannot occur.) It carries no `requirePermissions` (the contract is
-// `security: []`) and no `flowsheetMirror` (read-only; the mirror is a
-// write-path concern).
+// `security: []`).
 // Deliberately outside `flowsheetConditionalGet`: that middleware's watermark
 // is the whole-table `flowsheet_watermark`, which any live write advances, so
 // it would invalidate a historical window that cannot have changed — a
 // misleading validator rather than a useful one.
 flowsheet_route.get('/range', flowsheetController.getEntriesInRange);
 
-flowsheet_route.get('/', flowsheetConditionalGet, flowsheetMirror.getEntries, flowsheetController.getEntries);
+flowsheet_route.get('/', flowsheetConditionalGet, flowsheetController.getEntries);
 
 flowsheet_route.post(
   '/',
   requirePermissions({ flowsheet: ['write'] }),
   showMemberMiddleware,
-  flowsheetMirror.addEntry,
   flowsheetController.addEntry
 );
 
@@ -55,7 +52,6 @@ flowsheet_route.patch(
   '/',
   requirePermissions({ flowsheet: ['write'] }),
   showMemberMiddleware,
-  flowsheetMirror.updateEntry,
   flowsheetController.updateEntry
 );
 
@@ -63,7 +59,6 @@ flowsheet_route.delete(
   '/',
   requirePermissions({ flowsheet: ['write'] }),
   showMemberMiddleware,
-  flowsheetMirror.deleteEntry,
   flowsheetController.deleteEntry
 );
 
@@ -71,24 +66,17 @@ flowsheet_route.patch(
   '/play-order',
   requirePermissions({ flowsheet: ['write'] }),
   showMemberMiddleware,
-  /*flowsheetMirror.changeOrder,*/
   flowsheetController.changeOrder
 );
 
 flowsheet_route.get('/latest', flowsheetConditionalGet, flowsheetController.getLatest);
 
-flowsheet_route.post(
-  '/join',
-  requirePermissions({ flowsheet: ['write'] }),
-  flowsheetMirror.startShow,
-  flowsheetController.joinShow
-);
+flowsheet_route.post('/join', requirePermissions({ flowsheet: ['write'] }), flowsheetController.joinShow);
 
 flowsheet_route.post(
   '/end',
   requirePermissions({ flowsheet: ['write'] }),
   showMemberMiddleware,
-  flowsheetMirror.endShow,
   flowsheetController.leaveShow
 );
 
@@ -104,18 +92,11 @@ flowsheet_route.post(
 // router declares no parameterized GET that could shadow `/open-shows`.
 flowsheet_route.get('/open-shows', requirePermissions({ flowsheet: ['manage'] }), flowsheetController.getOpenShows);
 
-// `flowsheetMirror.endShow` is chained exactly as it is on `POST /flowsheet/end`:
-// the controller responds with the finalized `Show`, the response tap stashes it
-// as `res.locals.mirrorData`, and the tap's `isShowPayload` guard admits it — so
-// an operator close signs the show off in tubafrenzy and writes its END_OF_SHOW
-// entry through the same path a DJ's own sign-off does.
-//
 // No `showMemberMiddleware`: the entire point is to act on a show the caller is
 // not a member of.
 flowsheet_route.post(
   '/shows/:id/force-end',
   requirePermissions({ flowsheet: ['manage'] }),
-  flowsheetMirror.endShow,
   flowsheetController.forceEndShow
 );
 

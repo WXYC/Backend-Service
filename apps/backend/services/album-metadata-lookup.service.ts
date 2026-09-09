@@ -65,8 +65,9 @@ import type { DiscogsResolvedToken, DiscogsTrackItem } from '@wxyc/lml-client';
  * (BS#1829, `shared/database/src/album-resolve.ts`) so the upcoming
  * `jobs/album-critic-reviews-etl/` (#1830) can call the SAME resolver a
  * `jobs/` workspace can't reach into `apps/backend` for. This path is
- * preserved deliberately (mirrors the `@wxyc/legacy-mirror` BS#1707
- * extraction and `concerts-recompute.ts`'s BS#1763 shim in
+ * preserved deliberately (mirrors the BS#1707 `@wxyc/legacy-mirror`
+ * extraction — that package is gone as of BS#2403, but the pattern it set is
+ * why this shape exists — and `concerts-recompute.ts`'s BS#1763 shim in
  * `jobs/concerts-artist-resolver/recompute.ts`): `apps/backend/controllers/
  * proxy.controller.ts` still imports from here, so its import site doesn't
  * need touching. New code should import from `@wxyc/database` directly, as

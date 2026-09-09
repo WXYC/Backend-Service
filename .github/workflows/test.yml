@@ -544,8 +544,6 @@ jobs:
           LIBRARY_METADATA_URL: http://localhost:9090
           SLACK_WEBHOOK_URL: http://localhost:9090
           SLACK_WXYC_REQUESTS_WEBHOOK: /services/T00/B00/ci-test-webhook
-          TUBAFRENZY_URL: http://localhost:9090
-          MIRROR_API_KEY: ci-test-mirror-key
           MOCK_API_PORT: '9090'
           # Internal endpoints (ETL notify, tubafrenzy webhook).
           # authenticateInternal() fails closed on an empty key, so the

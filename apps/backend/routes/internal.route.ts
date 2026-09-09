@@ -608,7 +608,7 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       //
       // BS#2065 closes the loop on that second consequence without weakening
       // anything here. A dropped delivery is now (1) detected — the daily
-      // stale-open-show report in `jobs/legacy-mirror-reconcile` lists shows
+      // stale-open-show report behind `GET /flowsheet/open-shows` lists shows
       // held open past a plausible duration; (2) opportunistically closed on
       // the next go-live, by `closeShowFromTerminalShowEndMarker` under the
       // (b) guard, from the marker row's own `add_time` so the value matches

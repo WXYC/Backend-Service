@@ -218,12 +218,18 @@ const FSEntryFieldsRaw = {
   // dropped a legitimate badge. Verified against the clone: album_id 36962
   // returned 'M' under the original guard and nothing under the tightened one.
   //
-  // Two further reasons to leave it alone. `shared/legacy-mirror`'s
-  // `isActiveRotationMatch` — the write-path twin, kept in sync at the
-  // cohort/predicate level — guards on the raw value specifically so neither
-  // side normalizes more aggressively than the other; trimming here forks that
-  // key. And PG's `trim()` strips only ASCII space, so it would not have
-  // caught the NBSP/tab cases the word "whitespace" implies anyway.
+  // One further reason to leave it alone: PG's `trim()` strips only ASCII
+  // space, so it would not have caught the NBSP/tab cases the word
+  // "whitespace" implies anyway.
+  //
+  // A second reason has now expired, and is recorded so it is not mistaken for
+  // a live constraint. `isActiveRotationMatch` — the mirror's write-path twin,
+  // kept in sync with this guard at the cohort/predicate level — was deleted
+  // with the outbound mirror in BS#2403. There is no longer a second predicate
+  // to fork, so the sync argument no longer forbids anything. The verified
+  // counter-example above (album_id 36962) is the reason that still stands on
+  // its own, and it is sufficient: do not tighten this guard on the strength
+  // of the twin being gone.
   //
   // What remains is one narrow difference, and it is very hard to observe. For
   // an entry whose artist AND album both trim to '', arm 3's original LEFT JOIN
@@ -1508,8 +1514,9 @@ export const buildOpenShowsQuery = (windowFloor: Date, limit: number = OPEN_SHOW
  * legacy ETL imports whose `show_end` never arrived (`primary_dj_id IS NULL`
  * for all but one of them), stretching back to 2006. Oldest-first over the
  * unwindowed set therefore buries the one actionable show under two decades
- * of orphans — the same reasoning that made `countHistoricalOpenShows` in
- * `jobs/legacy-mirror-reconcile` count-only rather than list them. The tail is
+ * of orphans — the same reasoning that made `countHistoricalOpenShows` in the
+ * since-removed `jobs/legacy-mirror-reconcile` count-only rather than list
+ * them (BS#2403). The tail is
  * reported as `older_open_show_count` so an operator can see it exists, and
  * reached by widening `window_hours` when they actually want it.
  *
@@ -1545,7 +1552,7 @@ export const getOpenShows = async (
 
   // `is_current` is NOT a bare `id === max(shows.id)` test, and the difference
   // is the whole cohort this endpoint serves. `jobs/legacy-mirror-reconcile`
-  // already paid for this correction (BS#2068): a show whose `show_end`
+  // paid for this correction first (BS#2068, before BS#2403 removed it): a show whose `show_end`
   // webhook delivery was lost keeps its marker, never gets `end_time` stamped,
   // and — until someone else goes live — holds `max(shows.id)`. Under the bare
   // test it reports `is_current: true`, which suppresses `likely_abandoned`
@@ -1683,8 +1690,8 @@ export const isLatestEntryShowEnd = async (showId: number): Promise<boolean> => 
     .from(flowsheet)
     .where(eq(flowsheet.show_id, showId))
     // `id DESC` — see `lastLoggedShowEntryOrderBy` (@wxyc/database) for the
-    // shared rationale this and its two siblings (site 7 below, site 8 in
-    // jobs/legacy-mirror-reconcile) now hold in one place.
+    // shared rationale this and its sibling (site 7 below) hold in one place.
+    // A third site lived in jobs/legacy-mirror-reconcile until BS#2403.
     .orderBy(...lastLoggedShowEntryOrderBy())
     .limit(1);
   return latest?.entry_type === 'show_end';
@@ -1716,9 +1723,11 @@ export const isLatestEntryShowEnd = async (showId: number): Promise<boolean> => 
  * check is re-evaluated atomically with the write (no TOCTOU against the
  * caller's separate `isLatestEntryShowEnd` read).
  *
- * Complement, never a substitute, for the BS#2065 detector in
- * `jobs/legacy-mirror-reconcile`: this only fires when someone next goes live.
- * A show nobody joins after stays open until that job reports it.
+ * Complement, never a substitute, for `GET /flowsheet/open-shows` (BS#2235):
+ * this only fires when someone next goes live, so a show nobody joins after
+ * stays open until an operator looks. That endpoint is what remains of the
+ * nightly BS#2065 detector in `jobs/legacy-mirror-reconcile`, removed with the
+ * mirror in BS#2403 — same cohort, pulled on demand instead of pushed.
  *
  * BEST-EFFORT BY CONSTRUCTION. A DB error is reported to Sentry and swallowed,
  * returning 0. Its caller is `joinShow`, sitting between the BS#1861 option

@@ -1394,7 +1394,8 @@ function buildLinkedSnapshotConflictMessage(
  *      `album_id IS NULL`. A snapshot on a linked row makes arm (b) match
  *      any hand-typed flowsheet entry with the same (artist, album), so one
  *      rotation row badges two different releases — on the BS read path and
- *      via `isActiveRotationMatch` on the tubafrenzy mirror write path.
+ *      via `isActiveRotationMatch` on the tubafrenzy mirror write path
+ *      (removed by BS#2403; the read-path badge in flowsheet.service.ts remains).
  *
  * The 409's remedy is field-specific, not a blanket "edit the library
  * release" — `PATCH /library/:id` genuinely covers `album_title` (its own

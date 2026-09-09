@@ -53,11 +53,6 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   resolveDjNameForShow: mockResolveDjNameForShow,
 }));
 
-const mockScheduleTakeoverSignoff = jest.fn();
-jest.mock('../../../apps/backend/middleware/legacy/flowsheet.mirror', () => ({
-  flowsheetMirror: { scheduleTakeoverSignoff: mockScheduleTakeoverSignoff },
-}));
-
 import { joinShow } from '../../../apps/backend/controllers/flowsheet.controller';
 import { resetConfig } from '../../../apps/backend/config/flowsheetTakeover';
 import WxycError from '../../../apps/backend/utils/error';
@@ -260,18 +255,19 @@ describe('joinShow — takeover', () => {
     expect(mockStartShow).toHaveBeenCalledWith('dj-eureka', 'Night Shift', 7, 'eureka!');
   });
 
-  // The sign-off has to name the show that CLOSED. Handing the mirror the new
-  // show would sign off the broadcast that just started — the failure the
-  // response-tap middleware cannot avoid, which is why the takeover branch
-  // calls the mirror directly instead of chaining `flowsheetMirror.endShow`.
-  it('mirrors the sign-off for the CLOSED show, never the new one', async () => {
+  // BS#2403 removed the tubafrenzy sign-off this branch used to schedule for
+  // the CLOSED show. What survives it is the ordering the sign-off depended
+  // on: `endShow` must be awaited on the OPEN show before `startShow` opens
+  // the next one, so the compare-and-set that serializes two racing takeovers
+  // still runs first.
+  it('ends the OPEN show before starting the new one', async () => {
     const res = createMockRes();
-    const finalized = { ...OPEN_SHOW, end_time: LAST_LOGGED, legacy_show_id: 172773 };
-    mockEndShow.mockResolvedValue(finalized);
+    mockEndShow.mockResolvedValue({ ...OPEN_SHOW, end_time: LAST_LOGGED });
 
     await joinShow(makeReq({ intent: 'takeover', expected_show_id: OPEN_SHOW.id }), res, next);
 
-    expect(mockScheduleTakeoverSignoff).toHaveBeenCalledWith(expect.anything(), res, finalized);
+    expect(mockEndShow).toHaveBeenCalledWith(expect.objectContaining({ id: OPEN_SHOW.id }), LAST_LOGGED);
+    expect(mockEndShow.mock.invocationCallOrder[0]).toBeLessThan(mockStartShow.mock.invocationCallOrder[0]);
   });
 
   it('400s a takeover with no expected_show_id', async () => {

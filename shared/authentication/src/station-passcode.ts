@@ -220,7 +220,8 @@ export const STATION_PASSCODE_DEFAULT_MAX_USES = 25;
  * against `SELECT ... FOR UPDATE` as a substitute.
  *
  * MUST stay distinct from the two other advisory locks in this codebase:
- * `jobs/legacy-mirror-reconcile/job.ts`'s `ADVISORY_LOCK_KEY = 17071707` and
+ * the `ADVISORY_LOCK_KEY = 17071707` formerly held by
+ * `jobs/legacy-mirror-reconcile/job.ts` (removed in BS#2403, key not reused) and
  * `apps/backend/routes/internal-slack-moderators.route.ts`'s
  * `SLACK_MODERATORS_ADVISORY_LOCK_KEY = 20260808`. `pg_try_advisory_lock`
  * and `pg_advisory_xact_lock` share one lock space database-wide, so

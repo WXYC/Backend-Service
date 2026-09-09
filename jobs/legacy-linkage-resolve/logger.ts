@@ -71,7 +71,7 @@ export const captureError = (error: unknown, step: string, extra: Record<string,
  * Warning-level Sentry message (no exception object) for the BS#2064 liveness
  * signals — a run gap or an undrained candidate cohort is a *condition*, not a
  * thrown error, so `captureMessage` is the right shape (same call the
- * `triangle-shows-etl` staleness signal and `legacy-mirror-reconcile`'s
+ * `triangle-shows-etl` staleness signal and the former `legacy-mirror-reconcile`'s
  * partial-mirror report use).
  *
  * Fingerprinted per `step` so each distinct condition rolls up into one stable

@@ -23,7 +23,6 @@
     "@tensorflow/tfjs": "^4.22.0",
     "@wxyc/authentication": "^1.0.0",
     "@wxyc/database": "^1.0.0",
-    "@wxyc/legacy-mirror": "^1.0.0",
     "@wxyc/lml-client": "^1.0.0",
     "@wxyc/metadata": "^1.0.0",
     "@wxyc/observability": "^1.0.0",
