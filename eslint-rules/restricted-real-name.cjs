@@ -95,9 +95,6 @@ const ALLOW_LIST = [
   // docs/pii.md's Enforcement section.
   'apps/auth/station-signup.ts',
   'shared/authentication/src/auth.definition.ts',
-  // Until the 2026-09-07 tubafrenzy turndown: the legacy mirror forwards
-  // `auth_user.real_name` into tubafrenzy's DJ_NAME field.
-  'shared/legacy-mirror/src/http-mirror.ts',
   // The `real_name` column definition itself.
   'shared/database/src/schema.ts',
   // Future one-shot backfill job (Track 2d) — prefix, not yet written.

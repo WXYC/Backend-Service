@@ -35,7 +35,7 @@
  * 'dj_leave' | 'message' -> talkset; 'breakpoint' -> breakpoint;
  * 'show_start' | 'show_end' -> showDelimiter (omitted from every output
  * array, matching tubafrenzy's v=2 wire contract). This mirrors
- * `shared/legacy-mirror/src/http-mirror.ts`'s `mapEntryToTubafrenzy` /
+ * the mirror's `mapEntryToTubafrenzy` (removed in BS#2403) /
  * `isNonTrackEntry`, the codebase's own canonical BS-entry_type ->
  * tubafrenzy-flowsheetEntryType mapping (flowsheetEntryType 7 covers both
  * real talksets and dj_join/dj_leave; 9/10 are show_start/show_end).
@@ -357,7 +357,7 @@ function classifyEntryType(entryType: string): EntryBucket {
  * for rows that predate the radio_hour backfill.
  *
  * Every other entry type floors add_time to the top of the hour, reusing
- * `shared/legacy-mirror/src/http-mirror.ts`'s `mapEntryToTubafrenzy`
+ * the mirror's `mapEntryToTubafrenzy` (removed in BS#2403)
  * `radioHour` formula verbatim (`Math.floor(startMs / 3_600_000) *
  * 3_600_000`) — that function computes the same "hour" concept for the
  * mirror-write direction (BS -> tubafrenzy), so reusing its formula here is

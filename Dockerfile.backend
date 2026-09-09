@@ -25,7 +25,6 @@ COPY ./shared/database/package* ./shared/database/
 COPY ./shared/authentication/package* ./shared/authentication/
 COPY ./shared/lml-client/package* ./shared/lml-client/
 COPY ./shared/metadata/package* ./shared/metadata/
-COPY ./shared/legacy-mirror/package* ./shared/legacy-mirror/
 COPY ./shared/observability/package* ./shared/observability/
 
 RUN npm install --omit=dev && rm -f .npmrc
@@ -35,7 +34,6 @@ COPY --from=builder ./builder/shared/database/dist ./shared/database/dist
 COPY --from=builder ./builder/shared/authentication/dist ./shared/authentication/dist
 COPY --from=builder ./builder/shared/lml-client/dist ./shared/lml-client/dist
 COPY --from=builder ./builder/shared/metadata/dist ./shared/metadata/dist
-COPY --from=builder ./builder/shared/legacy-mirror/dist ./shared/legacy-mirror/dist
 COPY --from=builder ./builder/shared/observability/dist ./shared/observability/dist
 
 # Inherit the @wxyc/database 5s default. Backend HTTP handlers always finish

@@ -1389,7 +1389,7 @@ function buildLinkedSnapshotConflictMessage(
  *   2. It would break a load-bearing invariant. "A library-LINKED rotation
  *      row carries NULL denormalized names" is documented verbatim in
  *      `flowsheet.service.ts` (the rotation-badge read path) and restated in
- *      `shared/legacy-mirror/src/rotation-match.ts`; BS#2080's arm-(b) /
+ *      the mirror's `rotation-match.ts` (removed in BS#2403); BS#2080's arm-(b) /
  *      arm-(c) partition rests on it and neither arm filters
  *      `album_id IS NULL`. A snapshot on a linked row makes arm (b) match
  *      any hand-typed flowsheet entry with the same (artist, album), so one

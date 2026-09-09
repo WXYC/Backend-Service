@@ -58,11 +58,6 @@ ruleTester.run('restricted-real-name', rule, {
       code: `const legal = row.real_name;`,
       filename: 'apps/auth/create-default-user.ts',
     },
-    // Allow-listed file: the legacy mirror's tubafrenzy DJ_NAME forward.
-    {
-      code: `const djName = dj.realName || dj.name;`,
-      filename: 'shared/legacy-mirror/src/http-mirror.ts',
-    },
     // Allow-listed file: the schema column definition itself.
     {
       code: `export const user = pgTable('auth_user', { realName: varchar('real_name', { length: 255 }) });`,
@@ -114,6 +109,16 @@ ruleTester.run('restricted-real-name', rule, {
   ],
 
   invalid: [
+    // BS#2403: the legacy mirror's tubafrenzy DJ_NAME forward was the last
+    // serving-path reader of a legal name, and it is gone along with its
+    // allow-list entry. Pinned as INVALID so the exemption cannot be restored
+    // without deliberately re-adding it here — the mirror is the only reason
+    // `real_name` ever left this system, and nothing should inherit that path.
+    {
+      code: `const djName = dj.realName || dj.name;`,
+      filename: 'shared/legacy-mirror/src/http-mirror.ts',
+      errors: [{ messageId: 'restrictedRealName', data: { name: 'realName' } }],
+    },
     // Non-allow-listed file: member-expression access, camelCase.
     {
       code: `const leaked = dj.realName;`,
