@@ -8,7 +8,7 @@
   },
   "scripts": {
     "typecheck": "npm run lint:prebuild && npm run typecheck --workspace=@wxyc/database --workspace=shared/** --workspace=apps/**",
-    "lint:prebuild": "npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication --workspace=@wxyc/lml-client --workspace=@wxyc/metadata --workspace=@wxyc/legacy-mirror --workspace=@wxyc/observability",
+    "lint:prebuild": "npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication --workspace=@wxyc/lml-client --workspace=@wxyc/metadata --workspace=@wxyc/observability",
     "//lint": "12288 heap: eslint holds typed AST + program graph for every workspace, and `projectService: true` adds one program per tsconfig. Raised from 8192 in BS#2258, whose 51st jobs/* workspace pushed a cold-cache run to a measured 9.37 GiB peak RSS and OOMed the 8 GiB ceiling in CI. GitHub ubuntu-latest has 16 GB, so 12288 keeps ~2.6 GiB of headroom over that peak and ~4 GB for the OS. The next workspace that trips this needs a real fix, not another bump: scope the type-aware rules, or split the lint job.",
     "lint": "npm run lint:prebuild && NODE_OPTIONS=--max-old-space-size=12288 eslint --cache --cache-strategy content --cache-location .cache/eslint/ .",
     "lint:fix": "npm run lint:prebuild && NODE_OPTIONS=--max-old-space-size=12288 eslint --cache --cache-strategy content --cache-location .cache/eslint/ . --fix",
@@ -16,7 +16,7 @@
     "format": "prettier --cache --cache-location .cache/prettier/ --write .",
     "format:check": "prettier --cache --cache-location .cache/prettier/ --check .",
     "build": "npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=apps/** --workspace=jobs/**",
-    "predev": "npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication --workspace=@wxyc/lml-client --workspace=@wxyc/metadata --workspace=@wxyc/legacy-mirror --workspace=@wxyc/observability",
+    "predev": "npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication --workspace=@wxyc/lml-client --workspace=@wxyc/metadata --workspace=@wxyc/observability",
     "dev": "dotenvx run -f .env -- concurrently \"npm:dev:auth\" \"npm:dev:backend\"",
     "dev:backend": "npm run dev --workspace=@wxyc/backend",
     "dev:auth": "npm run dev --workspace=@wxyc/auth-service",

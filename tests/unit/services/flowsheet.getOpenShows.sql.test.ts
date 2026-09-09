@@ -17,7 +17,7 @@
  * `show_id` carries `flowsheet.id`) and then discarding 2,714 of them. The
  * assertions below pin the property that actually matters instead.
  *
- * The mechanism is the one `tests/unit/jobs/legacy-mirror-reconcile/stale-open-shows-sql.test.ts`
+ * The mechanism is the one the since-removed `tests/unit/jobs/legacy-mirror-reconcile/stale-open-shows-sql.test.ts`
  * established: `jest.unit.config.ts`'s moduleNameMapper unconditionally
  * redirects the bare `@wxyc/database` specifier to a chain-returning stub whose
  * tables are plain string maps, so real drizzle operators cannot compose an

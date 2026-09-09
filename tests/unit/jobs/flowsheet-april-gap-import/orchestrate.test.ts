@@ -238,7 +238,8 @@ describe('buildShowBreakdown', () => {
  * Finding 1 of the BS#2119 review. The cohort diff keys on
  * `legacy_entry_id`, and `ON CONFLICT (legacy_entry_id) DO NOTHING` cannot
  * dedup against a NULL key — so a dj-site-originated row whose back-stamp was
- * skipped (the orphan class `jobs/legacy-mirror-reconcile` Sweep 2 heals) is
+ * skipped (the orphan class `jobs/legacy-mirror-reconcile` Sweep 2 healed
+ * before BS#2403 removed it) is
  * invisible to the diff AND unprotected by the conflict target. The README's
  * "these shows hold only lifecycle markers" was a prior measurement; this
  * turns it into a run-time check.

@@ -185,10 +185,10 @@ describe('POST /flowsheet/shows/:id/force-end', () => {
   /**
    * The carve-out that keeps the guard from blocking its own cohort. A show
    * whose `show_end` marker landed but whose `end_time` was never stamped (the
-   * lost-webhook residue `jobs/legacy-mirror-reconcile` detects, BS#2065) holds
-   * `max(shows.id)` while being demonstrably over. `jobs/legacy-mirror-reconcile`
-   * already paid for this correction once (BS#2068); a bare `id === max(id)`
-   * test would 409 exactly the show the nightly detector flagged for closing.
+   * lost-webhook residue BS#2065 identified) holds `max(shows.id)` while being
+   * demonstrably over. `jobs/legacy-mirror-reconcile` paid for this correction
+   * once (BS#2068) before BS#2403 removed it; a bare `id === max(id)` test
+   * would 409 exactly the show `GET /flowsheet/open-shows` flags for closing.
    */
   it('does not 409 a max(id) show whose terminal entry is already a show_end marker', async () => {
     const orphaned = { id: 1951168, primary_dj_id: null, end_time: null };

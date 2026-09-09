@@ -34,13 +34,6 @@ const config: Config = {
     // resolution against shared/observability/dist, which CI's unit-tests
     // job never builds (BS#2169).
     '^@wxyc/observability/metrics$': '<rootDir>/shared/observability/src/metrics.ts',
-    // @wxyc/legacy-mirror: resolve to source (BS#1707). The tubafrenzy mirror
-    // client moved here from apps/backend/middleware/legacy/; the app-path
-    // http.mirror.ts / rotation-match.mirror.ts shims re-export it. rotation-match
-    // imports @wxyc/database, which the mapper above sends to the DB mock — same
-    // boundary the tests relied on pre-extraction. jest.mock(...) of the app-path
-    // shims still takes precedence for collaborator tests.
-    '^@wxyc/legacy-mirror$': '<rootDir>/shared/legacy-mirror/src/index.ts',
     // Mock database client for any path resolving to shared/database/src/client
     '^.*/shared/database/src/client(\\.js)?$': '<rootDir>/tests/mocks/database.mock.ts',
     // Mock better-auth modules (ESM-only, can't be transformed by ts-jest)
