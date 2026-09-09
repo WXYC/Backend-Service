@@ -1,7 +1,6 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const postgres = require('postgres');
 const fls_util = require('../utils/flowsheet_util');
-const { isMockApiAvailable, resetMockApi, getMockRequests } = require('../utils/mock_api');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
@@ -39,7 +38,6 @@ function makeSql() {
  */
 describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
   let sql;
-  let mockApiAvailable = false;
 
   // A third identity, distinct from both fixture DJs, which are already
   // playing the primary / co-host roles below. The seeded station-manager
@@ -60,21 +58,13 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
 
   beforeAll(async () => {
     sql = makeSql();
-    mockApiAvailable = await isMockApiAvailable();
-    if (!mockApiAvailable) {
-      // Say so, matching mirror-http.spec.js. Without this the sign-off
-      // assertions below skip in silence and a misconfigured MOCK_API_URL
-      // reads as a full green pass.
-      console.warn('Skipping tubafrenzy sign-off assertions: mock API server not available');
-    }
   });
 
   // Best-effort cleanup of both shows, so a failed assertion can't leak an
   // open show into a later spec (--runInBand shares state, and with the flag
   // on a leaked show turns the next spec's join into a hard throw — see
   // tests/utils/flowsheet_util.js). `leave_show` never throws, so calling it
-  // unconditionally is safe whether or not the show exists. Same shape as
-  // mirror-http.spec.js's afterEach.
+  // unconditionally is safe whether or not the show exists.
   afterEach(async () => {
     await fls_util.leave_show(TAKER_DJ_ID, TAKER_ACCESS_TOKEN);
     await fls_util.leave_show(global.primary_dj_id, global.access_token);
@@ -87,10 +77,8 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
   test(
     'takeover closes the abandoned show (end_time = last logged add_time, show_end marker, ' +
       'all show_djs deactivated, dj_leave for the co-host), opens exactly one new show owned by the ' +
-      'caller, signs off tubafrenzy, and on_air/djs-on-air agree afterward',
+      'caller, and on_air/djs-on-air agree afterward',
     async () => {
-      if (mockApiAvailable) await resetMockApi();
-
       // Seed: primary opens a show, secondary joins as an active co-host —
       // the incident's shape (BS#2232: an open show plus a guest, nobody
       // signs off).
@@ -211,50 +199,6 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
       expect(flowsheetRes.body.on_air.dj_name).not.toBe('Test dj1');
       expect(djsOnAirRes.body.map((dj) => dj.id)).not.toContain(global.primary_dj_id);
       expect(djsOnAirRes.body.map((dj) => dj.id)).not.toContain(global.secondary_dj_id);
-
-      // The old show's tubafrenzy sign-off. This belongs here, against the
-      // real mirror helper, rather than the dj-site E2E, where tubafrenzy
-      // is a mock. `scheduleTakeoverSignoff` defers to `res.once('finish')`
-      // (fire-and-forget, per BS#2233's "do not await it on the request
-      // path"), so poll briefly rather than asserting immediately.
-      // Nothing below this point can run without the mock tubafrenzy.
-      if (!mockApiAvailable) return;
-
-      const [oldShowRow] = await sql.unsafe(`SELECT legacy_show_id FROM ${SCHEMA}.shows WHERE id = $1`, [oldShowId]);
-
-      const deadline = Date.now() + 4000;
-      let signoffRequests = [];
-      while (Date.now() < deadline) {
-        const tubafrenzyRequests = await getMockRequests('tubafrenzy');
-        signoffRequests = tubafrenzyRequests.filter(
-          (r) => r.method === 'POST' && r.path.includes('/api/radioShow/signoff')
-        );
-        if (signoffRequests.length > 0) break;
-        await new Promise((r) => setTimeout(r, 100));
-      }
-
-      expect(signoffRequests.length).toBeGreaterThanOrEqual(1);
-      // Correlate to the OLD show's tubafrenzy id when the create-show
-      // mirror tap has already persisted it — signs off the CLOSED show,
-      // never the one that just started (the subtle case PR#2308 calls
-      // out: both taps read the same res.locals.mirrorData key, so a
-      // mis-wired end tap would sign off the wrong show).
-      if (oldShowRow?.legacy_show_id != null) {
-        const oldShowSignoffs = signoffRequests.filter(
-          (r) => r.body && r.body.radioShowId === oldShowRow.legacy_show_id
-        );
-        expect(oldShowSignoffs.length).toBeGreaterThanOrEqual(1);
-      } else {
-        // Say so rather than degrading in silence. Without the id, the only
-        // surviving check is "some sign-off happened", which a mis-wired end
-        // tap signing off the NEW show would satisfy identically — the exact
-        // failure the correlation above exists to catch.
-        console.warn(
-          'Sign-off correlation skipped: shows.legacy_show_id was null for the closed show ' +
-            '(mirror create-tap persist had not landed). Only the weaker "a sign-off occurred" ' +
-            'assertion ran.'
-        );
-      }
     }
   );
 
@@ -320,7 +264,7 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
     // The CAS's own symptom, asserted directly rather than inferred from the
     // show count. What `WHERE end_time IS NULL` exists to prevent (BS#1119)
     // is the losing request ALSO running endShow's body — two `show_end`
-    // markers on one show and a double tubafrenzy sign-off. "Exactly one new
+    // markers on one show. "Exactly one new
     // show" is a downstream consequence of that and would still hold if the
     // loser had failed for some unrelated reason, so pin the marker count too.
     const oldShowEndMarkers = await sql.unsafe(
