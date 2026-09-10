@@ -85,11 +85,7 @@ export function isLivenessRequestPath(url: string | undefined): boolean {
  * If this is ever revisited, restore `request_handler.express` first;
  * `router.express` is Express choosing which function to call.
  */
-const EXPRESS_INSTRUMENTATION_SPAN_OPS = new Set([
-  'middleware.express',
-  'router.express',
-  'request_handler.express',
-]);
+const EXPRESS_INSTRUMENTATION_SPAN_OPS = new Set(['middleware.express', 'router.express', 'request_handler.express']);
 
 export function isExpressInstrumentationSpan(span: Pick<SpanJSON, 'op'>): boolean {
   return span.op !== undefined && EXPRESS_INSTRUMENTATION_SPAN_OPS.has(span.op);
