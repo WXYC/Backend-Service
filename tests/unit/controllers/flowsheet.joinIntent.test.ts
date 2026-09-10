@@ -36,7 +36,6 @@ const mockStartShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockAddDJToShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockEndShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockIsLatestEntryShowEnd = jest.fn<() => Promise<boolean>>();
-const mockIsDjAlreadyActiveOnShow = jest.fn<() => Promise<boolean>>();
 const mockCloseShowFromTerminalShowEndMarker = jest.fn<() => Promise<number>>();
 const mockResolveShowEndInstant = jest.fn<() => Promise<Date>>();
 const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
@@ -47,7 +46,6 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   addDJToShow: mockAddDJToShow,
   endShow: mockEndShow,
   isLatestEntryShowEnd: mockIsLatestEntryShowEnd,
-  isDjAlreadyActiveOnShow: mockIsDjAlreadyActiveOnShow,
   closeShowFromTerminalShowEndMarker: mockCloseShowFromTerminalShowEndMarker,
   resolveShowEndInstant: mockResolveShowEndInstant,
   resolveDjNameForShow: mockResolveDjNameForShow,
@@ -68,6 +66,18 @@ const OPEN_SHOW = {
   primary_dj_id: null,
   legacy_dj_name: 'dj sue',
   start_time: new Date('2026-08-28T18:02:34.234Z'),
+  end_time: null,
+};
+
+// Production show 1951325, the 2026-09-08 BS#2405 incident: BS-native, so
+// `primary_dj_id` names a real account and the show HAS an owner. The mirrored
+// fixture above cannot express "owner" at all, which is why the owner-versus-
+// co-host pair below needs its own show rather than an override.
+const NATIVE_SHOW = {
+  id: 1951325,
+  primary_dj_id: 'dj-houndstooth',
+  legacy_dj_name: null,
+  start_time: new Date('2026-09-09T01:02:37.000Z'),
   end_time: null,
 };
 
@@ -101,7 +111,6 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockGetLatestShow.mockResolvedValue(OPEN_SHOW);
   mockIsLatestEntryShowEnd.mockResolvedValue(false);
-  mockIsDjAlreadyActiveOnShow.mockResolvedValue(false);
   mockCloseShowFromTerminalShowEndMarker.mockResolvedValue(0);
   mockResolveShowEndInstant.mockResolvedValue(LAST_LOGGED);
   mockResolveDjNameForShow.mockResolvedValue('dj sue');
@@ -327,16 +336,25 @@ describe('joinShow — the cases that must never prompt', () => {
     expect(res.status).toHaveBeenCalledWith(200);
   });
 
-  // BS#1861 arm (c). A DJ re-pressing their own toggle is a retry, not a
-  // handoff; prompting them would put the dialog on the most common path.
-  it('returns the existing membership when the caller is already active on the show', async () => {
-    mockIsDjAlreadyActiveOnShow.mockResolvedValue(true);
+  // BS#1861 arm (c), re-pointed by BS#2405. A DJ re-pressing their OWN toggle
+  // is a retry, not a handoff; prompting them would put the dialog on the most
+  // common path. This case used to be written as "already active on the show",
+  // asserted through `isDjAlreadyActiveOnShow` against the MIRRORED fixture —
+  // a show with no owner at all — so it pinned the wider predicate that
+  // swallowed the co-host's intent contract rather than BS#1861's actual
+  // requirement. BS#1861's trace is the show's own DJ double-pressing, so the
+  // case belongs on a BS-native show with the caller as its `primary_dj_id`.
+  // The co-host converse is the BS#2405 describe below.
+  it('returns the existing membership when the caller OWNS the show', async () => {
+    mockGetLatestShow.mockResolvedValue({ ...NATIVE_SHOW, primary_dj_id: 'dj-eureka' });
     const res = createMockRes();
 
     await joinShow(makeReq({}), res, next);
 
-    expect(res.json).toHaveBeenCalledWith({ show_id: OPEN_SHOW.id, dj_id: 'dj-eureka', active: true });
+    expect(res.json).toHaveBeenCalledWith({ show_id: NATIVE_SHOW.id, dj_id: 'dj-eureka', active: true });
     expect(mockEndShow).not.toHaveBeenCalled();
+    expect(mockStartShow).not.toHaveBeenCalled();
+    expect(mockAddDJToShow).not.toHaveBeenCalled();
   });
 
   // BS#1861 arm (b): a show whose terminal entry is a `show_end` marker is
@@ -351,5 +369,131 @@ describe('joinShow — the cases that must never prompt', () => {
     expect(mockCloseShowFromTerminalShowEndMarker).toHaveBeenCalledWith(OPEN_SHOW.id);
     expect(mockStartShow).toHaveBeenCalled();
     expect(mockAddDJToShow).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BS#2405. Branch (c) used to fire for ANY active member of the open show, so
+// a co-host's every press — `intent: "takeover"` included — was answered 200
+// with zero writes, and the 409 / prompt / takeover below it were dead code
+// for them. On 2026-09-08 a DJ spent 1h44m trapped that way on show 1951325
+// while 31 of his rows were filed under the owner's name.
+//
+// Read the boundary carefully before adding a case here. The narrowing means
+// `joinShow` no longer asks whether the caller is a MEMBER of the open show at
+// all — the only input the decision now reads is `current_show.primary_dj_id`.
+// So at this (mocked-service) boundary an active co-host and a total stranger
+// are the same caller: both are "not the owner", and neither can be mocked
+// into being distinguishable, because there is nothing left to mock. That
+// collapse is the fix. The genuinely-a-co-host case — a real active `show_djs`
+// row for the caller — is only expressible where those rows exist, and is
+// pinned in tests/integration/flowsheet-takeover.spec.js.
+// ---------------------------------------------------------------------------
+describe('joinShow — ownership is the only thing branch (c) reads (BS#2405)', () => {
+  beforeEach(() => {
+    mockGetLatestShow.mockResolvedValue(NATIVE_SHOW);
+    mockResolveDjNameForShow.mockResolvedValue('DJ Houndstooth');
+    mockAddDJToShow.mockResolvedValue({ show_id: NATIVE_SHOW.id, dj_id: 'dj-eureka', active: true });
+  });
+
+  // The details payload is the half that settles the paired client change: the
+  // 409 carries the open show's id, so dj-site's existing `readShowAlreadyOpen`
+  // parser can lift it straight into the `expected_show_id` a takeover sends.
+  // Nothing new is needed on `OnAirDJ` for the trapped co-host to escape.
+  it('409s a non-owner with a usable show id rather than answering 200 and writing nothing', async () => {
+    const res = createMockRes();
+
+    const err = await joinShow(makeReq({}), res, next).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(WxycError);
+    expect((err as WxycError).statusCode).toBe(409);
+    expect((err as WxycError).code).toBe('show_already_open');
+    expect((err as WxycError).details).toEqual({
+      show: { id: NATIVE_SHOW.id, dj_name: 'DJ Houndstooth', start_time: NATIVE_SHOW.start_time },
+    });
+    expect(mockAddDJToShow).not.toHaveBeenCalled();
+    expect(mockStartShow).not.toHaveBeenCalled();
+    expect(mockEndShow).not.toHaveBeenCalled();
+  });
+
+  it('carries that non-owner’s intent="takeover" through to ending the show and starting theirs', async () => {
+    const res = createMockRes();
+    mockEndShow.mockResolvedValue({ ...NATIVE_SHOW, end_time: LAST_LOGGED });
+
+    await joinShow(makeReq({ intent: 'takeover', expected_show_id: NATIVE_SHOW.id }), res, next);
+
+    expect(mockEndShow).toHaveBeenCalledWith(expect.objectContaining({ id: NATIVE_SHOW.id }), LAST_LOGGED);
+    expect(mockStartShow).toHaveBeenCalled();
+    expect(mockEndShow.mock.invocationCallOrder[0]).toBeLessThan(mockStartShow.mock.invocationCallOrder[0]);
+  });
+
+  it('still no-ops for the show OWNER, preserving the BS#1861 retried toggle', async () => {
+    const res = createMockRes();
+
+    await joinShow(
+      {
+        auth: { id: NATIVE_SHOW.primary_dj_id },
+        body: { dj_id: NATIVE_SHOW.primary_dj_id },
+      } as unknown as Request,
+      res,
+      next
+    );
+
+    expect(res.json).toHaveBeenCalledWith({
+      show_id: NATIVE_SHOW.id,
+      dj_id: NATIVE_SHOW.primary_dj_id,
+      active: true,
+    });
+    expect(mockEndShow).not.toHaveBeenCalled();
+    expect(mockStartShow).not.toHaveBeenCalled();
+    expect(mockAddDJToShow).not.toHaveBeenCalled();
+  });
+
+  // The behaviour change BS#2405 makes that is NOT the bug fix, stated here
+  // rather than discovered in production.
+  //
+  // `primary_dj_id === req.body.dj_id` is unsatisfiable when the column is
+  // NULL, so on a tubafrenzy-mirrored show branch (c) cannot fire for ANY
+  // caller — including one who really is an active co-host of it. Every caller
+  // reaches the intent contract and is prompted.
+  //
+  // That is the correct answer, not a casualty. Branch (c) absorbs a retried
+  // press by the person who STARTED the show; a mirrored show's identity lives
+  // in `legacy_dj_name`, the DJ it names holds no Backend account, and nobody
+  // who can press anything is that person. The pre-BS#2405 answer here was the
+  // same silent 200 the co-host got, which is what made the two one fix.
+  //
+  // It is also nearly vacuous going forward: the tubafrenzy flowsheet webhook
+  // was disabled 2026-09-07 (WXYC/wiki#88 step E4), so no NEW mirrored show can
+  // be created — only a historically-open one can still be the open show.
+  it('cannot fire at all on a tubafrenzy-mirrored show, which has no owner', async () => {
+    mockGetLatestShow.mockResolvedValue(OPEN_SHOW);
+    mockResolveDjNameForShow.mockResolvedValue('dj sue');
+    const res = createMockRes();
+
+    const err = await joinShow(makeReq({}), res, next).catch((e: unknown) => e);
+
+    expect(OPEN_SHOW.primary_dj_id).toBeNull();
+    expect((err as WxycError).statusCode).toBe(409);
+    expect((err as WxycError).code).toBe('show_already_open');
+    expect((err as WxycError).details).toEqual({
+      show: { id: OPEN_SHOW.id, dj_name: 'dj sue', start_time: OPEN_SHOW.start_time },
+    });
+    expect(mockAddDJToShow).not.toHaveBeenCalled();
+    expect(mockStartShow).not.toHaveBeenCalled();
+  });
+
+  // And that prompt is actionable: the mirrored show's id comes back in the
+  // 409, so echoing it as `expected_show_id` closes the abandoned legacy show
+  // rather than leaving it to collect another DJ's set — the BS#2232 shape.
+  it('lets the mirrored show be taken over with the id the 409 handed back', async () => {
+    mockGetLatestShow.mockResolvedValue(OPEN_SHOW);
+    mockResolveDjNameForShow.mockResolvedValue('dj sue');
+    const res = createMockRes();
+
+    await joinShow(makeReq({ intent: 'takeover', expected_show_id: OPEN_SHOW.id }), res, next);
+
+    expect(mockEndShow).toHaveBeenCalledWith(expect.objectContaining({ id: OPEN_SHOW.id }), LAST_LOGGED);
+    expect(mockStartShow).toHaveBeenCalled();
   });
 });

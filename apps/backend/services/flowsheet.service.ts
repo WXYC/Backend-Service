@@ -1771,30 +1771,16 @@ export const closeShowFromTerminalShowEndMarker = async (showId: number): Promis
   }
 };
 
-/**
- * True when `dj_id` is already an active participant in `show` — either the
- * primary DJ or a co-host whose `show_djs.active` is true.
- *
- * Belt-and-braces guard for `joinShow` (BS#1861 option (c)): a retried
- * "Go Live" toggle that lands on an already-open show for a DJ already live
- * on it is not a genuine join, and should not write another `dj_join`
- * marker (the issue's 16:37:59 duplicate-marker trace). `addDJToShow`
- * itself already no-ops the marker write when a co-host's `show_djs` row is
- * found active (it only inserts/notifies on first join or reactivates from
- * inactive) — this check makes that guarantee explicit at the call site and
- * additionally covers the primary DJ, whose `show_djs` row this check does
- * not assume is present.
- */
-export const isDjAlreadyActiveOnShow = async (show: Show, dj_id: string): Promise<boolean> => {
-  if (show.primary_dj_id === dj_id) return true;
-
-  const [row] = await db
-    .select({ active: show_djs.active })
-    .from(show_djs)
-    .where(and(eq(show_djs.show_id, show.id), eq(show_djs.dj_id, dj_id)))
-    .limit(1);
-  return row?.active === true;
-};
+// `isDjAlreadyActiveOnShow(show, dj_id)` — "the primary DJ OR a co-host whose
+// `show_djs.active` is true" — was removed by BS#2405 along with its last
+// caller. It was `joinShow`'s branch (c) guard (BS#1861 option (c)), and its
+// one-word-too-wide answer WAS the bug: because branch (c) returned 200 before
+// reaching the intent contract, every active co-host was permanently unable to
+// end a show or start their own (2026-09-08, show 1951325, 1h44m). Branch (c)
+// now compares `dj_id === current_show.primary_dj_id` inline. Deleted rather
+// than left dead so nothing offers a ready-made, tested answer to a question
+// the routing must not ask: `addDJToShow` is already idempotent for an active
+// co-host, so ownership is the only case that ever needed an explicit check.
 
 /**
  * Display name shown on air for a live show whose DJ we cannot name — an
