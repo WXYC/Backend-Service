@@ -15,7 +15,7 @@
   },
   "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
-    "@sentry/node": "^10.70.0",
+    "@sentry/node": "^10.73.0",
     "@wxyc/authentication": "^1.0.0",
     "@wxyc/database": "^1.0.0"
   },
