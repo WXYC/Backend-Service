@@ -64,11 +64,20 @@ describe('check-legacy-entry-id-writes.mjs', () => {
   it('every rationale names one of the documented uses or "READS only" or "column declaration"', () => {
     // Pins the invariant prose to the rationale taxonomy. A new allowlist
     // entry must register its use case in one of these buckets.
-    const acceptable = /(use #1|use #2|use #3|READS only|column declaration)/;
+    //
+    // `use #4` belongs here and was missing until BS#2403. The script header
+    // has documented four uses since BS#2119, but this pattern only listed
+    // three, so the one `use #4` entry (flowsheet-april-gap-import/build-row)
+    // satisfied the check solely by mentioning "(use #2)" in passing. Editing
+    // that incidental phrase out — which BS#2403 did, since use #2 retired
+    // with the mirror — failed the test and surfaced the gap. Keep this
+    // pattern in step with the header's numbered list, not with whatever the
+    // current rationales happen to say.
+    const acceptable = /(use #1|use #2|use #3|use #4|READS only|column declaration)/;
     for (const [rel, rationale] of allowlist) {
       if (!acceptable.test(rationale)) {
         throw new Error(
-          `Rationale for ${rel} must name use #1/#2/#3, READS only, or column declaration. Got: "${rationale}"`
+          `Rationale for ${rel} must name use #1/#2/#3/#4, READS only, or column declaration. Got: "${rationale}"`
         );
       }
     }

@@ -1,10 +1,11 @@
 /**
  * Mock API server for WXYC Backend-Service CI integration tests.
  *
- * Simulates three external services:
+ * Simulates two external services:
  * - LML (library-metadata-lookup): /api/v1/discogs/*
  * - Slack: /services/*
- * - Tubafrenzy: /playlists/api/flowsheetEntry
+ *
+ * A tubafrenzy mirror mock lived here until BS#2403 retired the mirror.
  *
  * Plus a control API at /_admin/* for test orchestration.
  */
@@ -30,6 +31,5 @@ app.listen(PORT, () => {
   console.log(`🎭 Mock API server listening on port ${PORT}`);
   console.log(`   LML:        /api/v1/discogs/*`);
   console.log(`   Slack:      /services/*`);
-  console.log(`   Tubafrenzy: /playlists/api/flowsheetEntry`);
   console.log(`   Admin:      /_admin/*`);
 });
