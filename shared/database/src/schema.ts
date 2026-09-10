@@ -1006,6 +1006,19 @@ export const rotation = wxyc_schema.table(
     artist_name: varchar('artist_name', { length: 128 }),
     album_title: varchar('album_title', { length: 128 }),
     record_label: varchar('record_label', { length: 128 }),
+    // BS#2409: pre-catalog format, restoring what tubafrenzy's
+    // ROTATION_RELEASE.FORMAT_ID always carried. Written only while
+    // `album_id IS NULL` (the same rule as the free-text trio above); once
+    // the row is linked, format authority is `library.format_id`. NULL for
+    // every row created before the dj-site classic add form started sending
+    // it — the legacy backfill from the tubafrenzy final dump is BS#2412.
+    format_id: integer('format_id').references(() => format.id),
+    // BS#2409: pre-catalog label, restoring tubafrenzy's normalized
+    // ROTATION_RELEASE.COMPANY_ID (Backend had flattened it to the
+    // `record_label` text above). Same write rule and backfill story as
+    // `format_id`; `record_label` remains the display snapshot for rows
+    // whose label never resolved to a `labels` row.
+    label_id: integer('label_id').references(() => labels.id),
     // Mirrored from tubafrenzy ROTATION_RELEASE.DISCOGS_RELEASE_ID by
     // jobs/rotation-etl. Populated by the rotation form's paste-URL prefill
     // in tubafrenzy. NULL when the music director added the release without

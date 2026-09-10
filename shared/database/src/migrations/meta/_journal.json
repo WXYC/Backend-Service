@@ -1114,6 +1114,13 @@
       "when": 1788665840121,
       "tag": "0161_station-signup-downgraded-at",
       "breakpoints": true
+    },
+    {
+      "idx": 162,
+      "version": "7",
+      "when": 1788665840122,
+      "tag": "0162_rotation-format-label-columns",
+      "breakpoints": true
     }
   ]
 }
