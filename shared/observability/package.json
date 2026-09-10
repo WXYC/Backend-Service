@@ -1,7 +1,7 @@
 {
   "name": "@wxyc/observability",
   "version": "1.0.0",
-  "description": "Cross-container observability primitives: Sentry transaction/span filter predicates (BS#2089, package root — dropping liveness-route transactions and Express middleware bookkeeping spans) and a generic buffered CloudWatch metric emitter (BS#2169, `./metrics` subpath). Consumed by apps/backend and apps/auth so both containers share byte-identical implementations.",
+  "description": "Cross-container observability primitives: Sentry transaction/span filter predicates (BS#2089 + BS#2406, package root — dropping liveness-route transactions and Express instrumentation bookkeeping spans) and a generic buffered CloudWatch metric emitter (BS#2169, `./metrics` subpath). Consumed by apps/backend and apps/auth so both containers share byte-identical implementations.",
   "author": "WXYC",
   "license": "PolyForm-Noncommercial-1.0.0",
   "exports": {

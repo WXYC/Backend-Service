@@ -1,1 +1,1 @@
-export { isLivenessRequestPath, isExpressMiddlewareSpan, filterSentryTransactionEvent } from './sentry-filters.js';
+export { isLivenessRequestPath, isExpressInstrumentationSpan, filterSentryTransactionEvent } from './sentry-filters.js';
