@@ -109,9 +109,9 @@
     "ws": "^8.21.3"
   },
   "dependencies": {
-    "@sentry/node": "^10.70.0",
+    "@sentry/node": "^10.73.0",
     "eventsource": "^5.1.1",
-    "jose": "^6.2.10"
+    "jose": "^6.2.12"
   },
   "overrides": {
     "esbuild": "^0.25.0"
