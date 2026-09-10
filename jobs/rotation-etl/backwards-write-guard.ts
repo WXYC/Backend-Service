@@ -9,7 +9,8 @@
  * The mechanism differs from the flowsheet sibling's, so don't reason by
  * analogy. There is no rotation mirror: `legacy_rotation_id` is written only by
  * `/internal/rotation-webhook`, never back-stamped onto a dj-site-originated
- * row (`rotation-match.mirror.ts` is the badge probe, not a writer). So this
+ * row (the mirror's rotation-badge probe, removed in BS#2403, only ever read
+ * rotation — it was never a writer). So this
  * job cannot reach a pure dj-site row. What it does reach is every row that
  * ever came from tubafrenzy — and for those it overwrites `rotation_bin`,
  * `kill_date`, `album_id`, and the denormalized `artist_name` / `album_title` /

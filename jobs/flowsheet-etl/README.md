@@ -19,7 +19,9 @@ The upserts key on columns the **live mirror back-stamps onto dj-site-originated
 | shows     | `shows.legacy_show_id`      | `start_time`, `end_time`, `show_name`, `legacy_dj_name`, `legacy_dj_id`          |
 | flowsheet | `flowsheet.legacy_entry_id` | `play_order`, `add_time`, `show_id`, `artist_name`, `album_title`, `track_title` |
 
-`startShow` in `apps/backend/middleware/legacy/flowsheet.mirror.ts` persists `legacy_show_id` after `mirrorCreateShow` succeeds, and the entry mirror does the same for `legacy_entry_id`. So a mirrored dj-site show **exists in tubafrenzy**, is returned by `fetchLegacyShows`, and has its Backend-canonical values replaced by tubafrenzy's mirror copy.
+The live mirror's `startShow` persisted `legacy_show_id` after `mirrorCreateShow` succeeded, and the entry mirror did the same for `legacy_entry_id`. So a mirrored dj-site show **exists in tubafrenzy**, is returned by `fetchLegacyShows`, and has its Backend-canonical values replaced by tubafrenzy's mirror copy.
+
+**BS#2403 removed that mirror, which narrows the hazard without eliminating it.** No new dj-site show is back-stamped any more, so shows opened from Milestone 1 (2026-09-07) onward carry `legacy_show_id IS NULL` and this job cannot reach them. Every dj-site show mirrored _before_ that date still carries the key and is still reachable — the historical cohort is exactly as exposed as it was.
 
 Under the old regime tubafrenzy was authoritative and that overwrite was the whole point. After the SOURCE flip it round-trips Backend's own data through a mirror and lets the copy win.
 

@@ -12,7 +12,7 @@ It **refuses to run** unless `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1` is set. Read t
 
 ## Why running it is a backwards write — and how it differs from the flowsheet sibling
 
-**Do not reason by analogy with `flowsheet-etl`.** There is no rotation mirror: `legacy_rotation_id` is written only by `/internal/rotation-webhook`, never back-stamped onto a dj-site-originated row (`rotation-match.mirror.ts` is the rotation-badge probe, not a writer). So unlike the flowsheet job, this one **cannot reach a pure dj-site row**.
+**Do not reason by analogy with `flowsheet-etl`.** There is no rotation mirror: `legacy_rotation_id` is written only by `/internal/rotation-webhook`, never back-stamped onto a dj-site-originated row (the mirror's rotation-badge probe, removed in BS#2403, only ever read rotation — it was never a writer). So unlike the flowsheet job, this one **cannot reach a pure dj-site row**.
 
 What it does reach is **every row that ever came from tubafrenzy**. For those, the upsert on `rotation.legacy_rotation_id` overwrites:
 

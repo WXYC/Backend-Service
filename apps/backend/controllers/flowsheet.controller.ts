@@ -538,13 +538,15 @@ export type FSEntryRequestBody = {
 };
 
 /**
- * Shared egress for the flowsheet mutation echoes (BS#1513 / PR #1532): stash
- * the UNPROJECTED row for the legacy mirror middleware — whose BS#908 loop
- * guards read `legacy_entry_id`, a column the client projection strips — then
- * send the client-facing projection. Keeping the pair in one call means a new
- * mutation site can't pick up the projection without the stash. The stash is
- * inert on routes with no mirror middleware attached (changeOrder today) and
- * becomes load-bearing automatically if one is wired up.
+ * Shared egress for the flowsheet mutation echoes (BS#1513 / PR #1532): send
+ * the client-facing projection of a just-written row.
+ *
+ * It used to do two things — stash the UNPROJECTED row on `res.locals` for the
+ * legacy mirror middleware, whose BS#908 loop guards read the `legacy_entry_id`
+ * the projection strips, and then send. BS#2403 removed the mirror, so the
+ * stash went with it and nothing on `res.locals` carries the unprojected row
+ * any more. Said explicitly because the pairing was the reason this helper
+ * existed: a new mutation site no longer has anything to forget to do here.
  *
  * BS#1962: when the entry has a non-null `album_id`, additionally merges
  * `discogsUnavailable` / `discogsUnavailableNote` onto the projected body —

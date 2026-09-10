@@ -6,7 +6,6 @@ jest.mock('../../../apps/backend/utils/serverEvents', () => {
     primaryDj: 'prim-dj-topic',
     showDj: 'show-dj-topic',
     liveFs: 'live-fs-topic',
-    mirror: 'mirror-topic',
   };
 
   return {
@@ -88,11 +87,11 @@ describe('events controller', () => {
     it('excludes DJ-only topics when the caller has the member role (BS#1104)', () => {
       // Pre-fix: filterAuthorizedTopics returned every topic in TopicAuthz as
       // long as !!req.auth was truthy — the role list was never consulted.
-      // A member-role user could subscribe to `mirror`, `primaryDj`,
-      // `showDj`.
+      // A member-role user could subscribe to `primaryDj`, `showDj` (and
+      // the since-removed `mirror`).
       const req = {
         auth: { id: 'user-1', role: 'member' },
-        body: { topics: [Topics.liveFs, Topics.showDj, Topics.primaryDj, Topics.mirror] },
+        body: { topics: [Topics.liveFs, Topics.showDj, Topics.primaryDj] },
       } as unknown as Request;
 
       const res = {} as Response;
@@ -101,7 +100,7 @@ describe('events controller', () => {
       registerEventClient(req, res, next);
 
       expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(
-        expect.not.arrayContaining([Topics.showDj, Topics.primaryDj, Topics.mirror]),
+        expect.not.arrayContaining([Topics.showDj, Topics.primaryDj]),
         'client-1'
       );
       // Public topics still allowed.
@@ -121,13 +120,13 @@ describe('events controller', () => {
       // and called serverEventsMgr.subscribe with the raw body topics.
       const req = {
         auth: { id: 'user-1', role: 'member' },
-        body: { client_id: 'client-1', topics: [Topics.liveFs, Topics.mirror, Topics.primaryDj] },
+        body: { client_id: 'client-1', topics: [Topics.liveFs, Topics.primaryDj] },
       } as unknown as Request;
 
       subscribeToTopic(req, makeRes(), jest.fn());
 
       expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(
-        expect.not.arrayContaining([Topics.mirror, Topics.primaryDj]),
+        expect.not.arrayContaining([Topics.primaryDj]),
         'client-1'
       );
     });
@@ -135,15 +134,34 @@ describe('events controller', () => {
     it('allows DJ-only topics when the caller has the dj role', () => {
       const req = {
         auth: { id: 'user-1', role: 'dj' },
-        body: { client_id: 'client-1', topics: [Topics.mirror, Topics.primaryDj, Topics.showDj] },
+        body: { client_id: 'client-1', topics: [Topics.primaryDj, Topics.showDj] },
       } as unknown as Request;
 
       subscribeToTopic(req, makeRes(), jest.fn());
 
       expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(
-        expect.arrayContaining([Topics.mirror, Topics.primaryDj, Topics.showDj]),
+        expect.arrayContaining([Topics.primaryDj, Topics.showDj]),
         'client-1'
       );
+    });
+
+    it('refuses a retired topic for every role, including dj (BS#2403)', () => {
+      // `mirror-topic` was a real DJ-tier topic until BS#2403 removed the
+      // mirror that broadcast on it. It is now absent from TopicAuthz, and
+      // `filterAuthorizedTopics` returns false for an unknown topic — so a
+      // client asking for it is dropped rather than subscribed to a stream
+      // that can never deliver. Pinned with a dj caller specifically: the
+      // old entry was DJ-tier, so a dj is the role that would still get it
+      // if the topic were ever re-added by accident.
+      const req = {
+        auth: { id: 'user-1', role: 'dj' },
+        body: { client_id: 'client-1', topics: [Topics.liveFs, 'mirror-topic'] },
+      } as unknown as Request;
+
+      subscribeToTopic(req, makeRes(), jest.fn());
+
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(expect.not.arrayContaining(['mirror-topic']), 'client-1');
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(expect.arrayContaining([Topics.liveFs]), 'client-1');
     });
 
     it('still allows public topics for any authenticated caller', () => {
@@ -199,30 +217,24 @@ describe('events controller', () => {
 
     it('drops DJ-tier topics for unauthenticated callers (the EventSource path has no Authorization header)', () => {
       const req = {
-        query: { topics: `${Topics.liveFs},${Topics.showDj},${Topics.mirror}` },
+        query: { topics: `${Topics.liveFs},${Topics.showDj}` },
       } as unknown as Request;
 
       streamEventClient(req, {} as Response, jest.fn());
 
-      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(
-        expect.not.arrayContaining([Topics.showDj, Topics.mirror]),
-        'client-1'
-      );
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(expect.not.arrayContaining([Topics.showDj]), 'client-1');
       expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(expect.arrayContaining([Topics.liveFs]), 'client-1');
     });
 
     it('drops DJ-tier topics when the caller has the member role (parity with POST /register)', () => {
       const req = {
         auth: { id: 'user-1', role: 'member' },
-        query: { topics: `${Topics.liveFs},${Topics.showDj},${Topics.mirror}` },
+        query: { topics: `${Topics.liveFs},${Topics.showDj}` },
       } as unknown as Request;
 
       streamEventClient(req, {} as Response, jest.fn());
 
-      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(
-        expect.not.arrayContaining([Topics.showDj, Topics.mirror]),
-        'client-1'
-      );
+      expect(serverEventsMgr.subscribe).toHaveBeenCalledWith(expect.not.arrayContaining([Topics.showDj]), 'client-1');
     });
 
     it('includes DJ-tier topics when the caller has the dj role (still works for authenticated EventSource clients)', () => {

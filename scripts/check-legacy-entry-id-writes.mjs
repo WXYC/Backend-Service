@@ -76,7 +76,7 @@ export const ALLOWLIST = new Map([
   ],
   [
     'jobs/flowsheet-april-gap-import/build-row.ts',
-    'use #4 (BS#2119): insert-only backfill of the closed BS#351 residue. Pure row builder — produces the `GapImportRow` shape (type declaration + object literal) that orchestrate.ts inserts with `ON CONFLICT (legacy_entry_id) DO NOTHING`, never `DO UPDATE`. A real tubafrenzy-assigned id on every row (the discovery pass only ever selects ids confirmed present upstream and absent in Backend), so the loop-guard invariant (use #2) is unaffected.',
+    'use #4 (BS#2119): insert-only backfill of the closed BS#351 residue. Pure row builder — produces the `GapImportRow` shape (type declaration + object literal) that orchestrate.ts inserts with `ON CONFLICT (legacy_entry_id) DO NOTHING`, never `DO UPDATE`. A real tubafrenzy-assigned id on every row (the discovery pass only ever selects ids confirmed present upstream and absent in Backend), so the ON CONFLICT dedup uses #1/#3 key on stays sound (and the retired use-#2 loop-guard was unaffected too).',
   ],
   [
     'jobs/flowsheet-april-gap-import/orchestrate.ts',
@@ -84,7 +84,7 @@ export const ALLOWLIST = new Map([
   ],
   [
     'jobs/flowsheet-show-split/job.ts',
-    "use #2/#3 sibling: `ensureLiveShowStartIsNewestMarker` deletes a `show_start` row and re-inserts it to obtain a higher serial id (the iOS banner reads `showMarkers.max(by: id)`), carrying the row's EXISTING legacy_entry_id across the re-mint so the mirror loop-guard and the ETL upsert key both survive. Never mints or placeholders a value — the id written is one tubafrenzy already assigned to that same row — so use #2 is unaffected. Written explicitly rather than via the object spread precisely so this check can see the write site.",
+    "use #2/#3 sibling: `ensureLiveShowStartIsNewestMarker` deletes a `show_start` row and re-inserts it to obtain a higher serial id (the iOS banner reads `showMarkers.max(by: id)`), carrying the row's EXISTING legacy_entry_id across the re-mint so the ETL upsert key survives (and, before BS#2403 retired it, the mirror loop-guard too). Never mints or placeholders a value — the id written is one tubafrenzy already assigned to that same row. Written explicitly rather than via the object spread precisely so this check can see the write site.",
   ],
   ['shared/database/src/schema.ts', 'column declaration.'],
   ['apps/backend/services/flowsheet.service.ts', 'READS only: selection + result mapping. No writes.'],

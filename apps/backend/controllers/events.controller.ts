@@ -16,7 +16,6 @@ const TopicAuthz: Record<string, string[]> = {
   [Topics.liveFs]: [],
   [Topics.showDj]: DJ_TIER_ROLES,
   [Topics.primaryDj]: DJ_TIER_ROLES,
-  [Topics.mirror]: DJ_TIER_ROLES,
 };
 
 const filterAuthorizedTopics = (req: Pick<Request, 'auth'>, topics: string[]) => {
@@ -26,7 +25,8 @@ const filterAuthorizedTopics = (req: Pick<Request, 'auth'>, topics: string[]) =>
     if (allowedRoles.length === 0) return true; // public topic
     // Per-topic authz check (BS#1104). Pre-fix this returned `!!req.auth` —
     // any authenticated caller, including a member-role user, got every
-    // topic in TopicAuthz including the `mirror` SQL stream.
+    // topic in TopicAuthz (which then included a `mirror` SQL stream, removed
+    // with the mirror in BS#2403).
     const role = req.auth?.role;
     return role !== undefined && allowedRoles.includes(role);
   });
