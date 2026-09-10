@@ -38,11 +38,13 @@ const mockStartShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockAddDJToShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockEndShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockServiceLeaveShow = jest.fn<() => Promise<Record<string, unknown>>>();
-// BS#1861 (b)/(c): joinShow's belt-and-braces checks. Default to the
-// pre-existing behavior (show open per end_time, DJ not already active) so
-// every joinShow test not specifically about these guards is unaffected.
+// BS#1861 (b): joinShow's belt-and-braces "newest entry is show_end" check.
+// Defaults to the pre-existing behavior (show open per end_time) so every
+// joinShow test not specifically about this guard is unaffected. Arm (c) has
+// no mock here any more: BS#2405 narrowed it to `dj_id ===
+// current_show.primary_dj_id`, a pure comparison on the fixture, and retired
+// the `isDjAlreadyActiveOnShow` service read it used to make.
 const mockIsLatestEntryShowEnd = jest.fn<() => Promise<boolean>>().mockResolvedValue(false);
-const mockIsDjAlreadyActiveOnShow = jest.fn<() => Promise<boolean>>().mockResolvedValue(false);
 // BS#2065: opportunistic end_time backfill under the (b) guard. Defaults to
 // "closed nothing" so unrelated joinShow tests are unaffected.
 const mockCloseShowFromTerminalShowEndMarker = jest.fn<() => Promise<number>>().mockResolvedValue(0);
@@ -71,7 +73,6 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   endShow: mockEndShow,
   leaveShow: mockServiceLeaveShow,
   isLatestEntryShowEnd: mockIsLatestEntryShowEnd,
-  isDjAlreadyActiveOnShow: mockIsDjAlreadyActiveOnShow,
   closeShowFromTerminalShowEndMarker: mockCloseShowFromTerminalShowEndMarker,
 }));
 
@@ -1684,17 +1685,25 @@ describe('flowsheet.controller', () => {
       expect(mockCloseShowFromTerminalShowEndMarker).not.toHaveBeenCalled();
     });
 
-    it('(c) no-ops when the DJ is already active on the current show, instead of writing a duplicate dj_join (BS#1861)', async () => {
-      mockGetLatestShow.mockResolvedValue({ id: 7, end_time: null, primary_dj_id: 'someone-else' });
-      mockIsDjAlreadyActiveOnShow.mockResolvedValueOnce(true);
+    // Re-pointed by BS#2405. This used to open a show owned by `someone-else`
+    // and force `isDjAlreadyActiveOnShow` true, i.e. it pinned the no-op for a
+    // CO-HOST — the reading that swallowed the intent contract and trapped a DJ
+    // for 1h44m on 2026-09-08. BS#1861's own trace is the show's own DJ
+    // double-pressing "Go Live", so the guard belongs on the OWNER: `dj_id ===
+    // current_show.primary_dj_id`. The co-host converse (a 409 that reaches the
+    // intent contract) lives in flowsheet.joinIntent.test.ts, which runs with
+    // the takeover flag on; this file's flag is off, where a non-owner co-hosts
+    // through the unchanged `addDJToShow` path instead (asserted two cases up).
+    it('(c) no-ops when the caller OWNS the current show, instead of writing a duplicate dj_join (BS#1861)', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 7, end_time: null, primary_dj_id: 'caller-dj' });
 
       const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
       const res = createMockRes();
 
       await joinShow(req, res as Response, mockNext);
 
-      expect(mockIsDjAlreadyActiveOnShow).toHaveBeenCalledWith(expect.objectContaining({ id: 7 }), 'caller-dj');
       expect(mockAddDJToShow).not.toHaveBeenCalled();
+      expect(mockStartShow).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({ show_id: 7, dj_id: 'caller-dj', active: true });
     });

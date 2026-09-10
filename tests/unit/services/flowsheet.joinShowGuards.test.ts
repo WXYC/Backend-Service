@@ -1,17 +1,23 @@
 import { eq, desc, and, isNull } from 'drizzle-orm';
-import { db, createMockQueryChain, flowsheet, show_djs, shows } from '../../mocks/database.mock';
+import { db, createMockQueryChain, flowsheet, shows } from '../../mocks/database.mock';
 import {
   closeShowFromTerminalShowEndMarker,
   isLatestEntryShowEnd,
-  isDjAlreadyActiveOnShow,
 } from '../../../apps/backend/services/flowsheet.service';
 
 /**
- * Unit shape-pins for the two belt-and-braces reads `joinShow` uses (BS#1861
- * options (b) and (c)). The end-to-end start-vs-join decision is covered by
- * the controller unit tests (tests/unit/controllers/flowsheet.controller.test.ts)
- * and by the integration spec exercising the real webhook → join sequence
- * against Postgres; these tests pin each read in isolation.
+ * Unit shape-pins for the reads `joinShow` uses (BS#1861 option (b), BS#2065).
+ * The end-to-end start-vs-join decision is covered by the controller unit tests
+ * (tests/unit/controllers/flowsheet.controller.test.ts) and by the integration
+ * spec exercising the real webhook → join sequence against Postgres; these
+ * tests pin each read in isolation.
+ *
+ * Option (c)'s `isDjAlreadyActiveOnShow` used to be pinned here too. BS#2405
+ * removed the function: its answer — "the owner OR any active co-host" — was
+ * one word wider than the guard needed, and that extra word is what made a
+ * co-host unable to leave a show. Branch (c) now compares `dj_id ===
+ * current_show.primary_dj_id` inline, which has no read to shape-pin; the
+ * routing it decides is pinned in tests/unit/controllers/flowsheet.joinIntent.test.ts.
  */
 describe('flowsheet.service: joinShow belt-and-braces guards (BS#1861)', () => {
   beforeEach(() => {
@@ -47,40 +53,6 @@ describe('flowsheet.service: joinShow belt-and-braces guards (BS#1861)', () => {
       db.select.mockReturnValueOnce(chain);
 
       await expect(isLatestEntryShowEnd(42)).resolves.toBe(false);
-    });
-  });
-
-  describe('isDjAlreadyActiveOnShow', () => {
-    const show = { id: 1, primary_dj_id: 'dj-A' } as unknown as Parameters<typeof isDjAlreadyActiveOnShow>[0];
-
-    it('returns true for the primary DJ without a show_djs round trip', async () => {
-      await expect(isDjAlreadyActiveOnShow(show, 'dj-A')).resolves.toBe(true);
-      expect(db.select).not.toHaveBeenCalled();
-    });
-
-    it('returns true when a co-host show_djs row is active', async () => {
-      const chain = createMockQueryChain();
-      chain.limit.mockResolvedValue([{ active: true }]);
-      db.select.mockReturnValueOnce(chain);
-
-      await expect(isDjAlreadyActiveOnShow(show, 'dj-B')).resolves.toBe(true);
-      expect(chain.where).toHaveBeenCalledWith(and(eq(show_djs.show_id, 1), eq(show_djs.dj_id, 'dj-B')));
-    });
-
-    it('returns false when the co-host show_djs row is inactive', async () => {
-      const chain = createMockQueryChain();
-      chain.limit.mockResolvedValue([{ active: false }]);
-      db.select.mockReturnValueOnce(chain);
-
-      await expect(isDjAlreadyActiveOnShow(show, 'dj-B')).resolves.toBe(false);
-    });
-
-    it('returns false when no show_djs row exists for the DJ', async () => {
-      const chain = createMockQueryChain();
-      chain.limit.mockResolvedValue([]);
-      db.select.mockReturnValueOnce(chain);
-
-      await expect(isDjAlreadyActiveOnShow(show, 'dj-B')).resolves.toBe(false);
     });
   });
 

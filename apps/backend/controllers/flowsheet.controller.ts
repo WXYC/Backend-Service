@@ -966,12 +966,36 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     );
 
     res.status(200).json(show_session);
-  } else if (await flowsheet_service.isDjAlreadyActiveOnShow(current_show, req.body.dj_id)) {
-    // (c) No-op duplicate dj_join (BS#1861): the requesting DJ is already
-    // active on this show — either the primary DJ or an active co-host — so
-    // this is a retried "Go Live" toggle, not a genuine join. Hand back
+  } else if (req.body.dj_id === current_show.primary_dj_id) {
+    // (c) No-op duplicate dj_join (BS#1861): the requesting DJ OWNS this show,
+    // so this is a retried "Go Live" toggle, not a genuine join. Hand back
     // their existing (already-active) membership without writing another
     // dj_join marker (the issue's 16:37:59 duplicate-marker trace).
+    //
+    // BS#2405 narrowed this from `isDjAlreadyActiveOnShow` — "the owner OR any
+    // active co-host" — to ownership alone. The wider predicate absorbed a
+    // second, opposite case: a co-host asking for exactly what the intent
+    // contract below was built to give them. Because it returned 200 before
+    // reaching that `else`, a co-host's every subsequent press — `intent:
+    // "takeover"` included — was answered 200 with zero writes, so the 409, the
+    // handoff prompt and the takeover were all dead code for them. On
+    // 2026-09-08 a DJ spent 1h44m trapped that way on show 1951325 and 31 of
+    // his rows were filed under the owner's name. Nothing is lost by
+    // narrowing: `addDJToShow` is already internally idempotent for an active
+    // co-host (it only inserts, and only notifies, on first join or
+    // reactivation from inactive). The primary DJ is the half that needed the
+    // explicit check, because the owner's `show_djs` row is not guaranteed
+    // present.
+    //
+    // A tubafrenzy-mirrored show has `primary_dj_id` NULL and the identity in
+    // `legacy_dj_name`, so NOBODY satisfies this test and every caller —
+    // including one already co-hosting it — falls through to the intent
+    // contract. That is the intended outcome (nobody owns the show, so nobody
+    // holds a retried toggle), and it is nearly vacuous going forward: the
+    // tubafrenzy flowsheet webhook was disabled 2026-09-07 (WXYC/wiki#88 step
+    // E4), so no NEW mirrored show can be created and only historically-open
+    // ones can reach here. Pinned explicitly in
+    // tests/unit/controllers/flowsheet.joinIntent.test.ts.
     res.status(200).json({ show_id: current_show.id, dj_id: req.body.dj_id, active: true } satisfies ShowDJ);
   } else {
     // Everything above has been ruled out: a show is genuinely open, it isn't

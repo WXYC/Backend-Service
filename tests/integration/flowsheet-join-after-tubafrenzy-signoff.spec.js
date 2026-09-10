@@ -8,12 +8,14 @@
  *   (b) `joinShow`'s belt-and-braces "newest entry is show_end" check,
  *       pinned in isolation by forcing `end_time` back to NULL so the test
  *       can't pass on (a) alone
- *   (c) no duplicate `dj_join` marker for a DJ already active on the show
+ *   (c) no duplicate `dj_join` marker when the show's OWNER re-presses their
+ *       own toggle — narrowed from "any DJ already active on the show" by
+ *       BS#2405, which is why the co-host arm of that test now asserts a 409
  *
  * Companion unit coverage: tests/unit/routes/internal.route.test.ts (the
  * end_time fast-path in isolation), tests/unit/controllers/flowsheet.controller.test.ts
- * and tests/unit/services/flowsheet.joinShowGuards.test.ts (the two joinShow
- * guards in isolation).
+ * and tests/unit/services/flowsheet.joinShowGuards.test.ts (the (b) guard's read
+ * in isolation; (c) is now an inline comparison with no read to pin).
  */
 
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
@@ -166,7 +168,7 @@ describe('POST /flowsheet/join after a tubafrenzy sign-off (BS#1861)', () => {
     }
   });
 
-  test('option (c): an already-active DJ re-join does not write a duplicate dj_join marker', async () => {
+  test('option (c): the show OWNER re-joining does not write a duplicate dj_join marker', async () => {
     const startRes = await request
       .post('/flowsheet/join')
       .set('Authorization', global.access_token)
@@ -178,9 +180,7 @@ describe('POST /flowsheet/join after a tubafrenzy sign-off (BS#1861)', () => {
       // Secondary DJ joins as a co-host — first join, genuine dj_join marker.
       // The primary's show is genuinely open and the secondary is not yet a
       // member, so under FLOWSHEET_TAKEOVER_ENABLED this needs `intent:
-      // 'join'` to say so. The two re-joins below do NOT — each hits
-      // `isDjAlreadyActiveOnShow`'s no-op-200 guard before the intent check
-      // even runs (see joinShow), so they are unaffected by the flag.
+      // 'join'` to say so.
       const firstJoin = await request
         .post('/flowsheet/join')
         .set('Authorization', global.secondary_access_token)
@@ -193,23 +193,48 @@ describe('POST /flowsheet/join after a tubafrenzy sign-off (BS#1861)', () => {
       );
       expect(afterFirstJoin.length).toBe(1);
 
-      // Secondary DJ retries the same join (the dj-site "Go Live" retry flap
-      // from the issue's 16:32-16:35 trace).
-      const secondJoin = await request
+      // The now-active CO-HOST pressing "Go Live" again. Before BS#2405 this
+      // asserted a 200, because branch (c) fired for any active member — and
+      // that 200-with-no-writes is exactly what left a DJ unable to end a show
+      // or start his own for 1h44m on 2026-09-08. It is now a 409 naming the
+      // open show, which is the prompt dj-site turns into the handoff dialog.
+      //
+      // The marker count is still the BS#1861 assertion this test exists for:
+      // a refusal must not write a second dj_join either.
+      const cohostRetry = await request
         .post('/flowsheet/join')
         .set('Authorization', global.secondary_access_token)
         .send({ dj_id: global.secondary_dj_id });
-      expect(secondJoin.status).toBe(200);
+      expect(cohostRetry.status).toBe(409);
+      expect(cohostRetry.body.code).toBe('show_already_open');
+      expect(cohostRetry.body.details.show.id).toBe(showId);
 
-      const afterSecondJoin = await sql.unsafe(
+      const afterCohostRetry = await sql.unsafe(
         `SELECT id FROM ${SCHEMA}.flowsheet WHERE show_id = $1 AND entry_type = 'dj_join'`,
         [showId]
       );
-      // Still exactly one — the retry did not write a second marker.
-      expect(afterSecondJoin.length).toBe(1);
+      // Still exactly one — the refusal did not write a second marker.
+      expect(afterCohostRetry.length).toBe(1);
+
+      // An explicit `intent: 'join'` from that same already-active co-host is
+      // the idempotent path, and the one dj-site's prompt must stop offering
+      // them (WXYC/dj-site#1397): it is answered 200 and changes nothing.
+      const cohostRejoin = await request
+        .post('/flowsheet/join')
+        .set('Authorization', global.secondary_access_token)
+        .send({ dj_id: global.secondary_dj_id, intent: 'join' });
+      expect(cohostRejoin.status).toBe(200);
+
+      const afterCohostRejoin = await sql.unsafe(
+        `SELECT id FROM ${SCHEMA}.flowsheet WHERE show_id = $1 AND entry_type = 'dj_join'`,
+        [showId]
+      );
+      expect(afterCohostRejoin.length).toBe(1);
 
       // The primary DJ re-joining their own already-active show (the
-      // issue's 16:37:59 duplicate) must not write a dj_join either.
+      // issue's 16:37:59 duplicate) must not write a dj_join either. This is
+      // the half BS#1861 was actually about, and the only one branch (c) still
+      // serves — note it sends no intent and is NOT refused.
       const primaryRejoin = await request
         .post('/flowsheet/join')
         .set('Authorization', global.access_token)
