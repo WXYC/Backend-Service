@@ -788,10 +788,15 @@ const run = async () => {
   let exitCode = 0;
   try {
     const result = await runOnce(dryRun);
-    log('info', 'complete', 'Linkage resolve complete.', {
+    const deferred = hasLockContention(result);
+    log('info', 'complete', deferred ? 'Linkage resolve complete (a pass stood down).' : 'Linkage resolve complete.', {
       dry_run: dryRun,
       flowsheet_resolved: result.flowsheet.resolved,
       rotation_resolved: result.rotation.resolved,
+      // BS#2413: `…_resolved: 0` on a stand-down means "did not run", not
+      // "found nothing" — the two are the exact pair this job's liveness work
+      // exists to keep distinguishable, so the terminal line says which.
+      deferred,
     });
   } catch (error) {
     exitCode = 1;
