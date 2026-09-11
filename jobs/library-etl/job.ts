@@ -55,6 +55,14 @@ const CTA_DELTA_ID_MAX = 500;
 const SECONDARY_FULL_PASS_INTERVAL_HOURS = 24;
 
 /**
+ * Release ids per `legacy_release_id -> library.id` lookup statement. Upstream
+ * has ~2,586 releases carrying compilation tracks, so a full pass is one
+ * statement today; the chunking is only so the bind-parameter count can never
+ * approach Postgres's 65,535 if that coverage grows.
+ */
+const LIBRARY_MAP_LOOKUP_CHUNK_IDS = 5000;
+
+/**
  * Split an array into fixed-size chunks. Empty input yields no chunks.
  */
 const chunk = <T>(items: T[], size: number): T[][] => {
@@ -330,6 +338,18 @@ const syncFormats = async (tx: DbTransaction, canonicalFormatNames: string[]) =>
     inserted++;
   }
   return inserted;
+};
+
+/**
+ * `genre_name` (lower-cased) -> `genres.id`. The lower-casing is the lookup
+ * convention every consumer depends on, so it lives here rather than being
+ * respelled per call site: phase 1 and phase 2 each build this map in their
+ * own transaction (phase 2 deliberately re-reads rather than inheriting phase
+ * 1's in-transaction snapshot — see `runSecondaryImports`).
+ */
+const loadGenreMap = async (tx: DbTransaction): Promise<Map<string, number>> => {
+  const genreRows = await tx.select().from(genres);
+  return new Map(genreRows.map((genre) => [genre.genre_name.toLowerCase(), genre.id]));
 };
 
 const updateLastRun = async (dbClient: DbClient, jobName: string, lastRun: Date) => {
@@ -769,6 +789,23 @@ const fetchLegacyReleaseCrossRefs = async (watermarkMs: number | null): Promise<
  * `artist_library_crossreference` carries only the `FOR EACH ROW` `cdc_notify`
  * trigger (migration 0046), never the statement-level watermark one.
  */
+/**
+ * One awaited statement per row, deliberately — and **do not batch this the
+ * way `importCompilationTracks` batches its insert.**
+ *
+ * That batcher is safe because its conflict clause is an untargeted
+ * `DO NOTHING`, which uses speculative insertion and tolerates a duplicate
+ * appearing twice inside one multi-row statement. This upsert is a *targeted*
+ * `DO UPDATE`, which raises `cannot affect row a second time` in exactly that
+ * case (verified on PG 14.24 — prod's major — and 18.x). And the duplicate is
+ * reachable: the Postgres key is the resolved `(source_artist_id,
+ * target_artist_id)` pair, not upstream's `ID`, so two upstream rows naming
+ * the same artist under different spellings collapse onto one key once
+ * `findArtistId` folds them — the shape `dev_env/etl-seed.sql`'s two
+ * `LIBRARY_CODE_CROSS_REFERENCE` rows were written to exercise. Batching here
+ * needs a dedupe-by-conflict-key pass first. The same applies to
+ * `importReleaseCrossRefs` below.
+ */
 const importArtistCrossRefs = async (
   tx: DbTransaction,
   rows: LegacyCrossrefRow[],
@@ -920,9 +957,11 @@ const fetchCompilationTrackDeltaReleaseIds = async (watermarkMs: number): Promis
 
 type CompilationTrackFetch = {
   rows: LegacyCompilationTrackRow[];
-  /** The bound actually used, or `null` for a full pass. Reused as the `library` map filter. */
-  legacyReleaseIds: number[] | null;
-  /** True when the upstream read failed; the caller must not advance the watermark. */
+  /**
+   * True when the upstream read failed; the caller must not advance the
+   * watermark. Deliberately not derivable from `rows.length === 0` — a
+   * successful empty delta is the common case and MUST still advance it.
+   */
   failed: boolean;
 };
 
@@ -931,7 +970,7 @@ const fetchLegacyCompilationTracks = async (watermarkMs: number | null): Promise
   if (watermarkMs != null) {
     deltaIds = await fetchCompilationTrackDeltaReleaseIds(watermarkMs);
     if (deltaIds.length === 0) {
-      return { rows: [], legacyReleaseIds: [], failed: false };
+      return { rows: [], failed: false };
     }
     if (deltaIds.length > CTA_DELTA_ID_MAX) {
       // A full re-sync, or an unusually large librarian batch. Same work
@@ -943,22 +982,20 @@ const fetchLegacyCompilationTracks = async (watermarkMs: number | null): Promise
     }
   }
 
-  // Built OUTSIDE the try. The builder's empty-set `RangeError` exists
-  // precisely so a caller that forgets the early return above fails loudly;
-  // inside the try, the catch below would swallow it into the misleading
-  // "table not available" warning it was written to avoid — and then pin the
-  // watermark via `failed: true`.
+  // Built OUTSIDE the try on purpose: the catch below would swallow the
+  // builder's empty-set `RangeError` into the very warning it exists to avoid,
+  // and then pin the watermark via `failed: true`.
   const query = buildCompilationTrackQuery(deltaIds);
 
   try {
     const raw = await legacyDB.send(query);
-    return { rows: parseLegacyCompilationTrackRows(raw), legacyReleaseIds: deltaIds, failed: false };
+    return { rows: parseLegacyCompilationTrackRows(raw), failed: false };
   } catch (error) {
     // Kept tolerant (the table may legitimately be absent in some
     // environments), but `failed` keeps the watermark where it is so the next
     // run re-attempts exactly this delta instead of skipping past it.
     console.warn('[library-etl] COMPILATION_TRACK_ARTIST not available, skipping:', error);
-    return { rows: [], legacyReleaseIds: deltaIds, failed: true };
+    return { rows: [], failed: true };
   }
 };
 
@@ -990,9 +1027,6 @@ const fetchLegacyCompilationTracks = async (watermarkMs: number | null): Promise
  *   is not hypothetical: upstream holds 2,070 surplus rows that collide
  *   intra-table on exactly `cta_unique_idx`'s tuple.
  *
- * `legacyReleaseIds` filters the `legacy_release_id -> library.id` map load;
- * `null` (a full pass) scans the whole `library` table as before.
- *
  * **Counter semantics are unchanged on purpose.** `imported` still counts
  * rows that resolved to a `library` row and were handed to the insert, NOT
  * rows actually written — the 6-for-6 BS#2413 correlation was read against
@@ -1001,25 +1035,36 @@ const fetchLegacyCompilationTracks = async (watermarkMs: number | null): Promise
  */
 const importCompilationTracks = async (
   tx: DbTransaction,
-  rows: LegacyCompilationTrackRow[],
-  legacyReleaseIds: number[] | null
+  rows: LegacyCompilationTrackRow[]
 ): Promise<{ imported: number; skipped: number; batches: number }> => {
-  // Build map of legacy_release_id -> library.id. Bounded to the delta's
-  // releases when there is one; `inArray` rather than an interpolated array
-  // in a `sql` template (docs/bulk-update-playbook.md:69 — that defect has
-  // shipped three times).
-  const releaseRows = await tx
-    .select({ id: library.id, legacyReleaseId: library.legacy_release_id })
-    .from(library)
-    .where(
-      legacyReleaseIds == null
-        ? sql`${library.legacy_release_id} IS NOT NULL`
-        : and(sql`${library.legacy_release_id} IS NOT NULL`, inArray(library.legacy_release_id, legacyReleaseIds))
-    );
+  // Build map of legacy_release_id -> library.id, over exactly the releases
+  // `rows` can ask about — never the whole `library` table.
+  //
+  // The delta's id set is NOT the right filter here even on a bounded pass,
+  // and is catastrophically wrong on a full one: a full pass has no id set,
+  // so this used to fall back to scanning all ~64k `library` rows to resolve
+  // the ~2,586 releases that actually carry compilation tracks — inside a
+  // transaction that is already holding the single-row `library_watermark`
+  // lock (taken ~119 statements earlier by `importArtistCrossRefs`, whose
+  // FOR EACH STATEMENT trigger fires on every one). That is the BS#2413 lock
+  // window, so the scan belongs out of it. Deriving from `rows` is exactly
+  // the set of keys the loop below looks up, on both paths.
+  //
+  // `inArray` rather than an interpolated array in a `sql` template
+  // (docs/bulk-update-playbook.md:69 — that defect has shipped three times),
+  // chunked so the bind-parameter count cannot approach Postgres's 65,535
+  // however far upstream's compilation coverage grows. One statement today.
+  const wantedIds = [...new Set(rows.map((row) => row.libraryReleaseId))];
   const releaseMap = new Map<number, number>();
-  for (const row of releaseRows) {
-    if (row.legacyReleaseId != null) {
-      releaseMap.set(row.legacyReleaseId, row.id);
+  for (const idChunk of chunk(wantedIds, LIBRARY_MAP_LOOKUP_CHUNK_IDS)) {
+    const releaseRows = await tx
+      .select({ id: library.id, legacyReleaseId: library.legacy_release_id })
+      .from(library)
+      .where(and(sql`${library.legacy_release_id} IS NOT NULL`, inArray(library.legacy_release_id, idChunk)));
+    for (const row of releaseRows) {
+      if (row.legacyReleaseId != null) {
+        releaseMap.set(row.legacyReleaseId, row.id);
+      }
     }
   }
 
@@ -1233,7 +1278,7 @@ const LEGACY_SOURCED_SET_WHERE = buildLegacySourcedSetWhere();
  * **Deliberately unfiltered.** There is no `last_run` / delta predicate here
  * and there must never be one: the ETL's own delta filter is dropped
  * entirely by the documented full-resync recipe (`DELETE FROM cronjob_runs
- * WHERE job_name LIKE 'library-etl%'`), which re-selects the whole upstream
+ * WHERE job_name = 'library-etl' OR job_name LIKE 'library-etl:%'`), which re-selects the whole upstream
  * catalog in one pass. A denylist that were itself windowed would let that
  * single run resurrect every release ever deleted. The table holds one small
  * row per deletion, so loading all of it per run is cheap.
@@ -1407,8 +1452,7 @@ const runSecondaryImports = async (runStartedAt: Date) => {
   const legacyCTA = await fetchLegacyCompilationTracks(compilationTrackWatermark);
 
   await db.transaction(async (tx) => {
-    const genreRows = await tx.select().from(genres);
-    const genreMap = new Map(genreRows.map((genre) => [genre.genre_name.toLowerCase(), genre.id]));
+    const genreMap = await loadGenreMap(tx);
 
     // Shared caches for cross-reference resolution
     const artistIdCache = new Map<string, number>();
@@ -1435,7 +1479,7 @@ const runSecondaryImports = async (runStartedAt: Date) => {
     }
 
     if (legacyCTA.rows.length > 0) {
-      const ctaResult = await importCompilationTracks(tx, legacyCTA.rows, legacyCTA.legacyReleaseIds);
+      const ctaResult = await importCompilationTracks(tx, legacyCTA.rows);
       console.log(
         `[library-etl] Compilation track artists: imported ${ctaResult.imported}, skipped ${ctaResult.skipped}. (${ctaResult.batches} batched statement(s) of up to ${CTA_INSERT_CHUNK_ROWS} rows.)`
       );
@@ -1498,8 +1542,7 @@ const run = async () => {
           );
         }
 
-        const genreRows = await tx.select().from(genres);
-        const genreMap = new Map(genreRows.map((genre) => [genre.genre_name.toLowerCase(), genre.id]));
+        const genreMap = await loadGenreMap(tx);
 
         const formatRows = await tx.select().from(format);
         const formatMap = new Map(formatRows.map((row) => [row.format_name.toLowerCase(), row.id]));
@@ -1722,15 +1765,6 @@ const run = async () => {
             `[library-etl] Undid ${resurrectionsUndone} resurrection(s) of denylisted release(s) inserted by this run: library ids ${reconciled.removed.join(', ')}.`
           );
         }
-
-        // BS#2424: the cross-reference, compilation-track and secondary
-        // watermark writes used to live here, inside this transaction. They
-        // are phase 2 now (`runSecondaryImports`), which runs after this
-        // transaction COMMITS and carries its own per-import watermarks. The
-        // former `isFirstCrossrefRun` flag went with them: "both crossref
-        // tables are empty" is the wrong first-run test once each import has
-        // a watermark of its own, and a missing watermark row already means
-        // an unbounded fetch for exactly that import.
 
         await updateLastRun(tx, JOB_NAME, runStartedAt);
       });

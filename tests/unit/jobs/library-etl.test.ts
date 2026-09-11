@@ -833,7 +833,7 @@ describe('library-etl delete denylist (BS#2112)', () => {
 
   /**
    * The load must stay UNFILTERED. The documented full-re-sync recipe
-   * (`DELETE FROM cronjob_runs WHERE job_name LIKE 'library-etl%'`) drops this
+   * (`DELETE FROM cronjob_runs WHERE job_name = 'library-etl' OR job_name LIKE 'library-etl:%'`) drops this
    * job's own `TIME_LAST_MODIFIED >` delta filter and re-selects the entire
    * upstream catalog in one pass — so a denylist that were itself windowed by
    * `last_run`, or by a recency bound on `deleted_at`, would let that single
@@ -1283,7 +1283,7 @@ describe('secondary import delta bounds (BS#2424)', () => {
     it('issues one statement per 1,000 resolvable rows, not one per row', async () => {
       const { tx, inserted } = makeCtaTx([{ id: 77, legacyReleaseId: 500 }]);
 
-      const result = await importCompilationTracks(tx, upstream(2500), null);
+      const result = await importCompilationTracks(tx, upstream(2500));
 
       expect(inserted).toHaveLength(3);
       expect(inserted.map((batch) => batch.length)).toEqual([1000, 1000, 500]);
@@ -1298,7 +1298,7 @@ describe('secondary import delta bounds (BS#2424)', () => {
       const { tx } = makeCtaTx([{ id: 77, legacyReleaseId: 500 }]);
       const rows = [...upstream(2, 500), ...upstream(1, 999)];
 
-      await expect(importCompilationTracks(tx, rows, null)).resolves.toEqual({
+      await expect(importCompilationTracks(tx, rows)).resolves.toEqual({
         imported: 2,
         skipped: 1,
         batches: 1,
@@ -1308,7 +1308,7 @@ describe('secondary import delta bounds (BS#2424)', () => {
     it('issues no statement at all when nothing resolves', async () => {
       const { tx, inserted } = makeCtaTx([]);
 
-      const result = await importCompilationTracks(tx, upstream(10), null);
+      const result = await importCompilationTracks(tx, upstream(10));
 
       expect(inserted).toEqual([]);
       expect(result).toEqual({ imported: 0, skipped: 10, batches: 0 });
@@ -1322,7 +1322,7 @@ describe('secondary import delta bounds (BS#2424)', () => {
       });
       const logged = jest.spyOn(console, 'error').mockImplementation(() => {});
 
-      await expect(importCompilationTracks(tx, upstream(3), null)).rejects.toBe(boom);
+      await expect(importCompilationTracks(tx, upstream(3))).rejects.toBe(boom);
 
       const message = logged.mock.calls[0][0] as string;
       expect(message).toContain('batch 1/1');
