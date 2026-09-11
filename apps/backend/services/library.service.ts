@@ -574,12 +574,13 @@ export const addToRotation = async (newRotation: RotationAddRequest) => {
 };
 
 /**
- * Partial-update payload for `PATCH /library/rotation/:id` (BS#2113). Every
- * field is optional — `updateRotation` only SETs keys that are present, so
- * a typo fix on `artist_name` can't wipe `record_label` or reset
- * `kill_date`. Covers exactly the five columns the JSP editor's field set
- * maps onto a real `rotation` column (see the controller's
- * `ROTATION_NO_COLUMN_FIELDS` for the three that don't).
+ * Partial-update payload for `PATCH /library/rotation/:id` (BS#2113, widened
+ * by BS#2410). Every field is optional — `updateRotation` only SETs keys that
+ * are present, so a typo fix on `artist_name` can't wipe `record_label` or
+ * reset `kill_date`. Covers exactly the seven columns the JSP editor's field
+ * set maps onto a real `rotation` column (see the controller's
+ * `ROTATION_NO_COLUMN_FIELDS` for the three that don't; `format` is one of
+ * them — the wire field for the format is `format_id` here).
  *
  * `kill_date` additionally accepts a raw `SQL<unknown>` fragment — the sole
  * caller of that widened type is `killRotationInDB` below, whose no-date
@@ -592,20 +593,46 @@ export type UpdateRotationRow = {
   record_label?: string;
   add_date?: string;
   kill_date?: string | SQL<unknown> | null;
+  format_id?: number | null;
+  label_id?: number | null;
 };
 
 /**
- * The three denormalized snapshot columns `updateRotation` may only set on
- * an unlinked row — see the controller's `updateRotation` JSDoc for why.
+ * **Two lists, one invariant each — read this before widening either.**
  *
- * Exported, and the single declaration of this tuple in the codebase. The
- * compare-and-set WHERE, the tracklist-cache invalidation branch below
- * (BS#2113 review findings 4 and 1), and the controller's request validation +
- * 409 message builder all read off it. An earlier revision declared it here and
- * again in the controller as `ROTATION_SNAPSHOT_FIELDS` — two lists governing
- * one invariant, which is precisely the drift this comment claimed to prevent.
+ * The `rotation` row's pre-catalog fields fall into two overlapping sets, and
+ * BS#2410 kept them apart deliberately. Merging them, or repointing a consumer
+ * from one to the other, breaks something in each direction:
+ *
+ *   - `ROTATION_SNAPSHOT_COLUMNS` — the denormalized **text** trio. Widening
+ *     it to include the FKs would 400 every `format_id: 3` on the controller's
+ *     string-validation loop ("must be a string"), and would re-arm the
+ *     documented 22-second tier-3 LML cascade on every format-only edit by
+ *     dragging `tracklist_lookup_attempted_at = null` and the LRU eviction
+ *     along with it. Both of those consumers exist for artist/title text the
+ *     LML lookup keys on; neither has anything to do with a format id.
+ *   - `ROTATION_PRECATALOG_FIELDS` — the trio **plus** `format_id` and
+ *     `label_id`. This is the set that may only be written while
+ *     `album_id IS NULL`: once the row is linked the library release is the
+ *     authority for all five, and a rotation-side copy invites exactly the
+ *     drift `record_label` would. It drives the transactional,
+ *     `album_id IS NULL`-guarded write below and the controller's linked-row
+ *     409 (message builder + remedy map).
+ *
+ * Both are exported and each is the single declaration of its tuple. An
+ * earlier revision declared the trio here and again in the controller as
+ * `ROTATION_SNAPSHOT_FIELDS` — two lists governing one invariant, which is
+ * precisely the drift this comment exists to prevent. Two lists governing
+ * *two* invariants is the opposite situation, and is the point.
  */
 export const ROTATION_SNAPSHOT_COLUMNS = ['artist_name', 'album_title', 'record_label'] as const;
+
+/** See `ROTATION_SNAPSHOT_COLUMNS` above for why this is a second list rather than a widening. */
+export const ROTATION_PRECATALOG_FIELDS = [
+  ...ROTATION_SNAPSHOT_COLUMNS,
+  'format_id',
+  'label_id',
+] as const satisfies readonly (keyof UpdateRotationRow)[];
 
 /**
  * Outcome of a `PATCH /library/rotation/:id` write attempt (BS#2113).
@@ -620,8 +647,8 @@ export type UpdateRotationOutcome =
   | { outcome: 'linked_conflict'; albumId: number };
 
 /**
- * Sole writer of the five in-scope `rotation` columns among the
- * `/library/rotation*` HTTP surfaces (BS#2113): both
+ * Sole writer of the seven in-scope `rotation` columns among the
+ * `/library/rotation*` HTTP surfaces (BS#2113, widened by BS#2410): both
  * `PATCH /library/rotation/:id` (`updateRotation` controller handler) and
  * `PATCH /library/rotation` (`killRotation`, via `killRotationInDB` below)
  * delegate here rather than issuing their own UPDATE — the
@@ -656,15 +683,16 @@ export type UpdateRotationOutcome =
  *     reasoning about `discogs_release_id_source` (a trust-gated column —
  *     `md_verified` and `tubafrenzy_paste` must survive), so it is deliberately
  *     not done here. Tracked in BS#2214.
- *   - **Finding 4 (TOCTOU).** The snapshot trio may only be set on an
- *     unlinked row (`album_id IS NULL`). `rotation` is a live ingest
- *     target — the tubafrenzy rotation webhook
+ *   - **Finding 4 (TOCTOU).** The pre-catalog set — the trio plus
+ *     `format_id`/`label_id` since BS#2410, i.e. `ROTATION_PRECATALOG_FIELDS`
+ *     — may only be set on an unlinked row (`album_id IS NULL`). `rotation`
+ *     is a live ingest target — the tubafrenzy rotation webhook
  *     (`POST /internal/rotation-webhook`) can link this exact row in the
  *     window between a caller's read and a naive write — so the precondition
  *     is asserted in the UPDATE's own WHERE, never trusted from an earlier
- *     SELECT. A zero-row result while the trio is present means "this row
- *     is linked as of right now", not "this row doesn't exist" or "the
- *     write silently no-opped". Mirrors the re-guarded-WHERE discipline in
+ *     SELECT. A zero-row result while one of those fields is present means
+ *     "this row is linked as of right now", not "this row doesn't exist" or
+ *     "the write silently no-opped". Mirrors the re-guarded-WHERE discipline in
  *     `linkRotationToAlbum` / `legacy-linkage-resolve`: a guarded write, then
  *     one more read — inside the same transaction — to tell "no such row"
  *     apart from "row changed under us" when the write matches nothing.
@@ -674,7 +702,15 @@ export const updateRotation = async (
   updates: UpdateRotationRow
 ): Promise<UpdateRotationOutcome> => {
   const set: Record<string, unknown> = {};
-  for (const key of ['artist_name', 'album_title', 'record_label', 'add_date', 'kill_date'] as const) {
+  for (const key of [
+    'artist_name',
+    'album_title',
+    'record_label',
+    'add_date',
+    'kill_date',
+    'format_id',
+    'label_id',
+  ] as const) {
     if (updates[key] !== undefined) set[key] = updates[key];
   }
   // Drizzle's `mapUpdateSet` throws `No values to set` on an empty payload
@@ -686,24 +722,41 @@ export const updateRotation = async (
     throw new WxycError('updateRotation requires at least one column to set', 400);
   }
 
+  // TWO booleans, deliberately — see `ROTATION_SNAPSHOT_COLUMNS` above. This
+  // was one flag before BS#2410, and repointing that one flag at the wider
+  // list (rather than splitting it) is the single most damaging mistake
+  // available here: it would silently drag the `tracklist_lookup_attempted_at`
+  // reset below onto every format-or-label-only edit, re-arming the 22-second
+  // tier-3 LML cascade. That failure is invisible in every response — it shows
+  // up only as latency — which is why the `format_id`-only regression test
+  // exists (`library.service.updateRotation.test.ts`, and the integration
+  // pin in `library.spec.js`).
+  const touchesPrecatalog = ROTATION_PRECATALOG_FIELDS.some((key) => key in set);
   const touchesSnapshot = ROTATION_SNAPSHOT_COLUMNS.some((key) => key in set);
 
-  // Only the snapshot path needs a transaction. Its guarded UPDATE can match
-  // zero rows for two different reasons, and telling them apart takes a second
-  // read that has to see the same snapshot. The other path — an `add_date` /
+  // Only the pre-catalog path needs a transaction. Its guarded UPDATE can
+  // match zero rows for two different reasons, and telling them apart takes a
+  // second read that has to see the same row. The other path — an `add_date` /
   // `kill_date`-only edit, which is every `PATCH /library/rotation` kill via
   // `killRotationInDB` — is a single statement, so wrapping it would turn one
   // round trip into three (BEGIN / UPDATE / COMMIT) and hold a pooled
   // connection across all three on a box that also serves the live flowsheet.
   // That endpoint issued one bare UPDATE before BS#2113; keep it that way.
-  if (!touchesSnapshot) {
+  if (!touchesPrecatalog) {
     const [updated] = await db.update(rotation).set(set).where(eq(rotation.id, rotation_id)).returning();
     // No guard beyond `id` in the WHERE — zero rows really does mean "no such
     // row", exactly as before this function returned a bare row.
     return updated ? { outcome: 'updated' as const, rotation: updated } : { outcome: 'not_found' as const };
   }
 
-  set.tracklist_lookup_attempted_at = null;
+  // Gated on the TRIO, not on the pre-catalog set that opened the transaction.
+  // The tier-3 picker keys its cache and this marker on
+  // `(artist_name, album_title)`; a `format_id`/`label_id` edit changes
+  // neither, so there is nothing stale to invalidate and nothing to re-ask
+  // LML for.
+  if (touchesSnapshot) {
+    set.tracklist_lookup_attempted_at = null;
+  }
 
   const outcome = await db.transaction(async (tx): Promise<UpdateRotationOutcome> => {
     const updatedRows = await tx
@@ -739,7 +792,11 @@ export const updateRotation = async (
   // connection still sees the pre-commit text and can re-prime the very entry
   // this write just cleared — which would then outlive the commit for the full
   // TTL. Post-commit, any racing reader primes from the new text instead.
-  if (outcome.outcome === 'updated') {
+  //
+  // `touchesSnapshot`, not `touchesPrecatalog`: same reasoning as the marker
+  // reset above. Evicting on an FK-only edit would throw away a warm
+  // resolution and re-pay the cascade for a write the cascade cannot see.
+  if (touchesSnapshot && outcome.outcome === 'updated') {
     rotationLmlPositiveCache.delete(rotation_id);
     rotationLmlNegativeCache.delete(rotation_id);
   }
@@ -747,7 +804,9 @@ export const updateRotation = async (
 };
 
 /**
- * Explicit SELECT list for `GET /library/rotation/uncatalogued` (BS#2109).
+ * Explicit SELECT list for the published rotation surface — the shape
+ * `GET /library/rotation/uncatalogued` (BS#2109), `GET /library/rotation/:id`
+ * and `PATCH /library/rotation/:rotation_id/link` (BS#2410) all return.
  *
  * Deliberately a projection, not `select()`. `rotation` also carries
  * `legacy_rotation_id`, `legacy_library_release_id`, `discogs_release_id`,
@@ -759,6 +818,15 @@ export const updateRotation = async (
  * exposing flat. A bare `select()` would also auto-publish every column a
  * future migration adds, and WXYC/wxyc-shared#354 transcribes whatever this
  * returns into a published contract.
+ *
+ * **Columns only — `format_id`/`label_id`, never `format_name`** (BS#2410).
+ * The `Pick<RotationRelease, …>` derivation below refuses a non-column by
+ * design, and `toRotationRowSummary` is handed plain `.returning()` rows with
+ * no join to source a display name from; dj-site resolves names client-side
+ * through its existing `getFormats` query. Note the sibling list read
+ * `getRotationFromDB` DOES join `format` and serve `format_name` — its
+ * columns describe the linked *library release*, a different referent. See
+ * `getRotationRowFromDB` for the full rule and why nothing here is COALESCEd.
  */
 const UNCATALOGUED_ROTATION_PROJECTION = {
   id: rotation.id,
@@ -769,6 +837,8 @@ const UNCATALOGUED_ROTATION_PROJECTION = {
   artist_name: rotation.artist_name,
   album_title: rotation.album_title,
   record_label: rotation.record_label,
+  format_id: rotation.format_id,
+  label_id: rotation.label_id,
 } as const;
 
 /**
@@ -779,7 +849,7 @@ const UNCATALOGUED_ROTATION_PROJECTION = {
 export type UncataloguedRotationRow = Pick<RotationRelease, keyof typeof UNCATALOGUED_ROTATION_PROJECTION>;
 
 /**
- * Project a full `rotation` row down to the published surface — the same eight
+ * Project a full `rotation` row down to the published surface — the same ten
  * columns `UNCATALOGUED_ROTATION_PROJECTION` selects, so the rotation surface
  * has ONE published shape rather than one per endpoint.
  *
@@ -799,8 +869,30 @@ export function toRotationRowSummary(row: RotationRelease): UncataloguedRotation
   // `UNCATALOGUED_ROTATION_PROJECTION` without widening the type (or the
   // reverse) and the cast keeps compiling. Written out, either direction is a
   // compile error — which is the guarantee that was being advertised.
-  const { id, album_id, rotation_bin, add_date, kill_date, artist_name, album_title, record_label } = row;
-  return { id, album_id, rotation_bin, add_date, kill_date, artist_name, album_title, record_label };
+  const {
+    id,
+    album_id,
+    rotation_bin,
+    add_date,
+    kill_date,
+    artist_name,
+    album_title,
+    record_label,
+    format_id,
+    label_id,
+  } = row;
+  return {
+    id,
+    album_id,
+    rotation_bin,
+    add_date,
+    kill_date,
+    artist_name,
+    album_title,
+    record_label,
+    format_id,
+    label_id,
+  };
 }
 
 /**
@@ -864,6 +956,43 @@ export const getUncataloguedRotationFromDB = async (
     .limit(limit);
 
   return offset == null ? windowed : windowed.offset(offset);
+};
+
+/**
+ * Read-side query for `GET /library/rotation/:id` (BS#2410) — the single-row
+ * read the dj-site Import-to-Library screen renders its summary table from,
+ * and the one its pre-submit staleness check re-reads (a populated `album_id`
+ * means the row was catalogued while the operator had the form open).
+ *
+ * **Deliberately NOT filtered on `album_id IS NULL`.** The queue read above
+ * is the backlog; this is the resource. Answering 404 for a linked row would
+ * make "was this row linked while I was filling the form in?" indistinguishable
+ * from "this row was deleted", which is precisely the question the staleness
+ * check asks.
+ *
+ * **And deliberately NOT joined or COALESCEd**, unlike the sibling
+ * `getRotationFromDB`, whose list rows read
+ * `COALESCE(${library.label}, ${rotation.record_label}) AS record_label` and
+ * publish `${library.label_id} AS label_id` from the `library` join one line
+ * under it. On THIS endpoint every published column is the rotation row's
+ * own: `format_id` and `label_id` are the pre-catalog fields captured at
+ * rotation-add and retained after linking, never the linked release's. The
+ * two endpoints therefore give the same key name two different referents on
+ * purpose — blurring them here would hide exactly what the import screen
+ * exists to catalog (an operator needs to see that a linked row's own
+ * `format_id` is still NULL, not the format the library row happens to
+ * carry). The rule is in the published contract on both endpoints
+ * (wxyc-shared 1.51.0, `RotationRowSummary`), so it is a conformance
+ * requirement rather than a preference; dj-site resolves display names
+ * client-side from its existing `getFormats` query.
+ */
+export const getRotationRowFromDB = async (rotationId: number): Promise<UncataloguedRotationRow | undefined> => {
+  const [row] = await db
+    .select(UNCATALOGUED_ROTATION_PROJECTION)
+    .from(rotation)
+    .where(eq(rotation.id, rotationId))
+    .limit(1);
+  return row;
 };
 
 export type LinkRotationOutcome =

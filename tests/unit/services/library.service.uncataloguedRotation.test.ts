@@ -34,10 +34,35 @@ jest.mock('@wxyc/lml-client', () => ({
 }));
 
 import {
+  getRotationRowFromDB,
   getUncataloguedRotationFromDB,
   linkRotationToAlbum,
   UNCATALOGUED_ROTATION_MAX_LIMIT,
 } from '../../../apps/backend/services/library.service';
+
+/**
+ * The published rotation column set, sorted — what
+ * `UNCATALOGUED_ROTATION_PROJECTION` selects and what every rotation surface
+ * returns. BS#2410 widened it from eight to ten with the two pre-catalog FKs.
+ *
+ * This is the pin that should go red FIRST when the projection is widened:
+ * it reads the projection object itself out of `db.select`'s call args, so it
+ * fails before any integration assertion can, and before the shared test
+ * double in `tests/mocks/library-service-rotation.mock.ts` has a chance to
+ * mask the change.
+ */
+const PUBLISHED_ROTATION_COLUMNS = [
+  'add_date',
+  'album_id',
+  'album_title',
+  'artist_name',
+  'format_id',
+  'id',
+  'kill_date',
+  'label_id',
+  'record_label',
+  'rotation_bin',
+];
 
 describe('getUncataloguedRotationFromDB (BS#2109)', () => {
   beforeEach(() => {
@@ -85,16 +110,7 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
 
     const projection = db.select.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
     expect(projection).toBeDefined();
-    expect(Object.keys(projection ?? {}).sort()).toEqual([
-      'add_date',
-      'album_id',
-      'album_title',
-      'artist_name',
-      'id',
-      'kill_date',
-      'record_label',
-      'rotation_bin',
-    ]);
+    expect(Object.keys(projection ?? {}).sort()).toEqual(PUBLISHED_ROTATION_COLUMNS);
   });
 
   // The query is ALWAYS bounded. An omitted `limit` defaults to the 500
@@ -146,6 +162,73 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
 
     expect(result).toHaveLength(2);
     expect(result.map((r) => (r as { id: number }).id).sort()).toEqual([20, 21]);
+  });
+});
+
+describe('getRotationRowFromDB (BS#2410)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  function mockSingleRowRead(rows: unknown[]) {
+    const chain = createMockQueryChain(rows);
+    chain.limit = jest.fn().mockResolvedValue(rows);
+    db.select.mockReturnValue(chain);
+    return chain;
+  }
+
+  it('reads one rotation row by id through the same published projection', async () => {
+    const chain = mockSingleRowRead([{ id: 42 }]);
+
+    const result = await getRotationRowFromDB(42);
+
+    expect(result).toEqual({ id: 42 });
+    expect(chain.from).toHaveBeenCalledWith(rotation);
+    expect(chain.where).toHaveBeenCalledWith({ eq: [rotation.id, 42] });
+    expect(chain.limit).toHaveBeenCalledWith(1);
+
+    const projection = db.select.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
+    expect(Object.keys(projection ?? {}).sort()).toEqual(PUBLISHED_ROTATION_COLUMNS);
+  });
+
+  // The queue read filters `album_id IS NULL`; this one must NOT. A 404 for a
+  // linked row would make "catalogued while I had the form open" (the D8
+  // staleness check's whole question) indistinguishable from "deleted".
+  it('does NOT filter album_id IS NULL — a linked row is still readable', async () => {
+    const chain = mockSingleRowRead([{ id: 42, album_id: 5 }]);
+
+    const result = await getRotationRowFromDB(42);
+
+    expect(result).toEqual({ id: 42, album_id: 5 });
+    expect(chain.where).toHaveBeenCalledWith({ eq: [rotation.id, 42] });
+    expect(chain.where).toHaveBeenCalledTimes(1);
+  });
+
+  // The referent rule, asserted structurally. `getRotationFromDB` publishes
+  // `${library.label_id} AS label_id` from its join, one line under a
+  // COALESCE — so the same key name means the LIBRARY release's label one
+  // endpoint over. Here every projected value must be a `rotation` column
+  // object, never a joined or COALESCEd expression.
+  it('projects rotation columns only — no join, no COALESCE (the referent rule)', async () => {
+    mockSingleRowRead([{ id: 42 }]);
+
+    await getRotationRowFromDB(42);
+
+    const projection = (db.select.mock.calls[0]?.[0] ?? {}) as Record<string, unknown>;
+    expect(projection.format_id).toBe(rotation.format_id);
+    expect(projection.label_id).toBe(rotation.label_id);
+    expect(projection.record_label).toBe(rotation.record_label);
+
+    const rotationColumns = new Set(Object.values(rotation as unknown as Record<string, unknown>));
+    for (const [key, value] of Object.entries(projection)) {
+      expect([key, rotationColumns.has(value)]).toEqual([key, true]);
+    }
+  });
+
+  it('resolves undefined when no row carries that id', async () => {
+    mockSingleRowRead([]);
+
+    await expect(getRotationRowFromDB(999999)).resolves.toBeUndefined();
   });
 });
 
@@ -201,6 +284,8 @@ describe('linkRotationToAlbum (BS#2109)', () => {
       artist_name: rotation.artist_name,
       album_title: rotation.album_title,
       record_label: rotation.record_label,
+      format_id: rotation.format_id,
+      label_id: rotation.label_id,
     });
     // The UPDATE's own WHERE re-guards album_id IS NULL, not just the earlier
     // SELECT. drizzle-orm is automocked project-wide (`tests/__mocks__/

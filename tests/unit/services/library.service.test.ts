@@ -2687,6 +2687,33 @@ describe('library.service', () => {
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
     });
 
+    // BS#2410: the second half of the two-list split. `format_id`/`label_id`
+    // travel the same transactional, `album_id IS NULL`-guarded path as the
+    // trio, but the picker's caches key on `(artist_name, album_title)` — so
+    // an FK-only edit has nothing stale to invalidate either. Evicting here
+    // would throw away a warm resolution and re-pay the 22 s tier-3 cascade
+    // on the next open, for a write that changed nothing the cascade reads.
+    it('does NOT evict either cache for a format_id/label_id-only edit (BS#2410)', async () => {
+      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+      mockLookupMetadata.mockResolvedValueOnce({
+        results: [{ artwork: { release_id: 4080 } }],
+        search_type: 'direct',
+      });
+
+      await resolveRotationPickerSource(42);
+      expect(__rotationLmlCacheSizesForWarm().positive).toBe(1);
+
+      const updateChain = createMockQueryChain([{ id: 42, format_id: 3, album_id: null }]);
+      db.update.mockReturnValueOnce(updateChain);
+      await updateRotation(42, { format_id: 3, label_id: 91 });
+
+      expect(__rotationLmlCacheSizesForWarm().positive).toBe(1);
+
+      const second = await resolveRotationPickerSource(42);
+      expect(second).toEqual({ releaseId: 4080, inlineTracklist: null });
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
+    });
+
     it('does not cache transient LML failures so the next call retries', async () => {
       // A thrown LML error indicates an upstream blip (timeout, 5xx). Caching
       // null in that case would lock the picker into degraded mode for the

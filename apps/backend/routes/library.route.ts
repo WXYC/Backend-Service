@@ -146,13 +146,19 @@ library_route.post('/', requirePermissions({ catalog: ['write'] }), libraryContr
 library_route.get('/rotation', requirePermissions({ catalog: ['read'] }), libraryController.getRotation);
 
 // BS#2109: the cataloging-backlog queue. REGISTRATION ORDER IS LOAD-BEARING —
-// keep this literal ahead of any templated `/rotation/:id`-style route (the
-// same '/catalog' vs '/:id/compilation-tracks' trap documented above). At
-// the time of writing there is no single-segment `/rotation/:id` route to
-// collide with, but WXYC/Backend-Service#2113 adds one to this same block;
-// this GET must stay registered before it. Pinned by
-// `tests/unit/routes/library-rotation-uncatalogued.route.test.ts`, which
-// fails if a parameterized `/rotation/:x` GET is ever registered ahead of it.
+// keep this literal ahead of the templated `/rotation/:id` routes below (the
+// same '/catalog' vs '/:id/compilation-tracks' trap documented above).
+//
+// Both of those templated routes now exist: WXYC/Backend-Service#2113's
+// `PATCH /rotation/:id` and WXYC/Backend-Service#2410's `GET /rotation/:id`.
+// The GET is the one that can actually shadow this line. Express falls
+// through a Layer whose Route does not handle the request method, so the
+// PATCH never could — but the #2410 GET matches this path's method AND its
+// segment count, which makes it the router's first genuine same-method
+// hazard. Pinned by `tests/unit/routes/library-rotation-uncatalogued.route.test.ts`
+// (which now fails if the parameterized GET goes missing as well as if it is
+// registered ahead of this line) and by
+// `tests/unit/routes/library-rotation-route-order.route.test.ts`.
 library_route.get(
   '/rotation/uncatalogued',
   requirePermissions({ catalog: ['read'] }),
@@ -171,16 +177,29 @@ library_route.get(
 
 // BS#2109: links an uncatalogued rotation row to a library release (the
 // "Import to Library" step). Two-segment route, so it does not collide with
-// `/rotation/uncatalogued` (one segment) or a future `/rotation/:id`.
+// `/rotation/uncatalogued` (one segment) or with `/rotation/:id`.
 library_route.patch(
   '/rotation/:rotation_id/link',
   requirePermissions({ catalog: ['write'] }),
   libraryController.linkRotationToAlbum
 );
 
+// BS#2410: the single-row rotation read, for dj-site#1161's Import to Library
+// screen and its pre-submit staleness check. `catalog: ['read']`, matching
+// `GET /rotation` and `GET /rotation/uncatalogued` rather than the PATCH that
+// shares its path.
+//
+// Registered after every literal `/rotation/*` route above, and this is the
+// registration on this router for which that ordering is load-bearing rather
+// than defensive: it is the first parameterized route sharing both method and
+// segment count with a literal (`GET /rotation/uncatalogued`), so ahead of
+// that line it would capture the literal segment as an id.
+library_route.get('/rotation/:id', requirePermissions({ catalog: ['read'] }), libraryController.getRotationRow);
+
 // BS#2113: field-level rotation edit. Registered after every literal
-// `/rotation/*` route above (and any WXYC/Backend-Service#2109 adds to this
-// block later) so `:id` never shadows a more specific path.
+// `/rotation/*` route above so `:id` never shadows a more specific path —
+// belt-and-braces for this one, since no literal `PATCH /rotation/<name>`
+// exists to be shadowed today.
 library_route.patch('/rotation/:id', requirePermissions({ catalog: ['write'] }), libraryController.updateRotation);
 
 library_route.post('/artists', requirePermissions({ catalog: ['write'] }), libraryController.addArtist);

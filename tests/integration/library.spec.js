@@ -650,6 +650,67 @@ describe('Library Rotation', () => {
       expectErrorContains(res, 'album_title exceeds the 128-character limit');
     });
 
+    // BS#2410: the pre-catalog FKs BS#2409 added, accepted on this branch
+    // only. `pickAddRotationFields` drops them on a linked add, so a
+    // catalogued row cannot be given a rotation-side copy of values the
+    // library release already owns.
+    test('accepts format_id and label_id on an uncatalogued add and persists both', async () => {
+      const res = await createUncatalogued({
+        rotation_bin: 'L',
+        artist_name: 'Precatalog FK Artist',
+        album_title: 'Precatalog FK Album',
+        format_id: 1,
+        label_id: 7000,
+      });
+
+      expect(res.body.format_id).toBe(1);
+      expect(res.body.label_id).toBe(7000);
+
+      const readBack = await auth.get(`/library/rotation/${res.body.id}`).expect(200);
+      expect(readBack.body.format_id).toBe(1);
+      expect(readBack.body.label_id).toBe(7000);
+    });
+
+    test('drops format_id and label_id when album_id is present, exactly like the trio', async () => {
+      const res = await auth
+        .post('/library/rotation')
+        .send({ album_id: 3, rotation_bin: 'M', format_id: 1, label_id: 7000 })
+        .expect(201);
+      createdRotationIds.push(res.body.id);
+
+      expect(res.body.album_id).toBe(3);
+      expect(res.body.format_id).toBeNull();
+      expect(res.body.label_id).toBeNull();
+    });
+
+    test('400s on a dangling format_id rather than 500ing on the FK', async () => {
+      const res = await auth
+        .post('/library/rotation')
+        .send({
+          rotation_bin: 'L',
+          artist_name: 'Dangling Format Artist',
+          album_title: 'Dangling Format Album',
+          format_id: 4242424,
+        })
+        .expect(400);
+
+      expectErrorContains(res, 'format_id does not reference an existing format');
+    });
+
+    test('400s on a dangling label_id with the established wording', async () => {
+      const res = await auth
+        .post('/library/rotation')
+        .send({
+          rotation_bin: 'L',
+          artist_name: 'Dangling Label Artist',
+          album_title: 'Dangling Label Album',
+          label_id: 4242424,
+        })
+        .expect(400);
+
+      expectErrorContains(res, 'label_id does not reference an existing label');
+    });
+
     test('does not synchronously call LML / resolveIdentity when album_id is absent (no library_identity row to resolve)', async () => {
       // No library_identity hop is possible without an album_id — the
       // server-derived Discogs columns must stay at their defaults rather
@@ -691,8 +752,10 @@ describe('Library Rotation', () => {
         'album_id',
         'album_title',
         'artist_name',
+        'format_id',
         'id',
         'kill_date',
+        'label_id',
         'record_label',
         'rotation_bin',
       ]);
@@ -742,6 +805,123 @@ describe('Library Rotation', () => {
       );
       expect(orphanOneRows).toHaveLength(1);
       expect(orphanOneRows[0].rotation_add_date).toBe('2024-09-12');
+    });
+  });
+
+  // BS#2410: the single-row rotation read the dj-site Import to Library
+  // screen renders from, and re-reads before submitting (plan D8).
+  describe('GET /library/rotation/:id', () => {
+    // Shape-fixture rows: 7007 is unlinked (album_id NULL); 7000 is linked to
+    // library release 7000. Both are fixture-owned, so this block reads only
+    // and creates nothing to tear down — except where it needs pre-catalog
+    // values on a LINKED row, which no fixture row carries.
+    const UNLINKED_ROTATION_ID = 7007;
+    const LINKED_ROTATION_ID = 7000;
+
+    test('returns the row for an unlinked rotation id', async () => {
+      const res = await auth.get(`/library/rotation/${UNLINKED_ROTATION_ID}`).expect(200);
+
+      expect(res.body.id).toBe(UNLINKED_ROTATION_ID);
+      expect(res.body.album_id).toBeNull();
+      expect(res.body.artist_name).toBe('Shape Fixture Orphan One');
+      expect(res.body.album_title).toBe('Shape Fixture Orphan Album One');
+    });
+
+    test('publishes the same explicit projection the queue and link responses do', async () => {
+      const res = await auth.get(`/library/rotation/${UNLINKED_ROTATION_ID}`).expect(200);
+
+      expect(Object.keys(res.body).sort()).toEqual([
+        'add_date',
+        'album_id',
+        'album_title',
+        'artist_name',
+        'format_id',
+        'id',
+        'kill_date',
+        'label_id',
+        'record_label',
+        'rotation_bin',
+      ]);
+    });
+
+    // The queue read filters `album_id IS NULL`; this one must not. Answering
+    // 404 for a linked row is what makes the staleness check unbuildable: it
+    // would conflate "catalogued while I had the form open" with "deleted".
+    test('answers for a LINKED row too, rather than 404ing it out of the backlog', async () => {
+      const res = await auth.get(`/library/rotation/${LINKED_ROTATION_ID}`).expect(200);
+
+      expect(res.body.id).toBe(LINKED_ROTATION_ID);
+      expect(res.body.album_id).toBe(7000);
+    });
+
+    /**
+     * The referent rule, end to end — the assertion this endpoint most needs.
+     *
+     * `format_id`/`label_id` here are the ROTATION row's own pre-catalog
+     * fields. One endpoint over, `GET /library/rotation` publishes
+     * `${library.label_id} AS label_id` from its join, directly beneath a
+     * `COALESCE(library.label, rotation.record_label)` — so the same key name
+     * already means the library release's label there, and copying that habit
+     * here would hide exactly what the import screen exists to catalog.
+     *
+     * Set up as the adversarial case: a linked row whose own pre-catalog
+     * fields are NULL, pointed at a library release that DOES carry a
+     * `format_id` and a `label_id`. A COALESCE or a join would surface the
+     * release's values; the correct answer is NULL.
+     */
+    test('a linked row returns its OWN pre-catalog fields, not those of the library release', async () => {
+      const sql = getTestDb();
+
+      // Read-only: the shape fixture already supplies the adversarial pair —
+      // library 7000 carries format_id 1 and label_id 7000, while rotation
+      // 7000 (linked to it) carries NULL for both. Asserting both halves here
+      // rather than seeding them keeps the test from mutating shared fixture
+      // state, and makes a fixture change that neuters the test fail loudly
+      // instead of passing for the wrong reason (NULL === NULL).
+      const [linkedRelease] = await sql`
+        SELECT format_id, label_id FROM ${sql(SCHEMA)}.library WHERE id = 7000`;
+      expect(linkedRelease.format_id).not.toBeNull();
+      expect(linkedRelease.label_id).not.toBeNull();
+
+      const [rotationRow] = await sql`
+        SELECT format_id, label_id FROM ${sql(SCHEMA)}.rotation WHERE id = ${LINKED_ROTATION_ID}`;
+      expect(rotationRow.format_id).toBeNull();
+      expect(rotationRow.label_id).toBeNull();
+
+      const res = await auth.get(`/library/rotation/${LINKED_ROTATION_ID}`).expect(200);
+
+      expect(res.body.album_id).toBe(7000);
+      expect(res.body.format_id).toBeNull();
+      expect(res.body.label_id).toBeNull();
+
+      // And the sibling list read really does mean the other thing, so the
+      // divergence is pinned from both sides rather than asserted about one.
+      // That endpoint is DISTINCT ON (album, bin)-collapsed, so whichever of
+      // rotation 7000/7001/7002 survives the collapse is the row to check —
+      // all three are linked to library 7000.
+      const list = await auth.get('/library/rotation').expect(200);
+      const listed = list.body.find((r) => [7000, 7001, 7002].includes(r.rotation_id));
+      expect(listed).toBeDefined();
+      expect(listed.label_id).toBe(linkedRelease.label_id);
+    });
+
+    test('404s for an id no rotation row carries', async () => {
+      const res = await auth.get('/library/rotation/9999999').expect(404);
+      expectErrorContains(res, 'Rotation entry not found');
+    });
+
+    // The literal sibling must still win: `uncatalogued` is one segment, the
+    // same method, and would be captured as an id by a mis-ordered router.
+    test('does not shadow GET /library/rotation/uncatalogued', async () => {
+      const res = await auth.get('/library/rotation/uncatalogued').expect(200);
+
+      expectArray(res);
+      expect(res.body.length).toBeGreaterThan(0);
+    });
+
+    test.each(['abc', '42abc', '0', '-1', '1.5'])('400s on the malformed id %p', async (id) => {
+      const res = await auth.get(`/library/rotation/${id}`).expect(400);
+      expectErrorContains(res, 'Invalid rotation ID');
     });
   });
 
@@ -803,8 +983,10 @@ describe('Library Rotation', () => {
         'album_id',
         'album_title',
         'artist_name',
+        'format_id',
         'id',
         'kill_date',
+        'label_id',
         'record_label',
         'rotation_bin',
       ]);
@@ -897,7 +1079,7 @@ describe('Library Rotation', () => {
       }
     });
 
-    test('updates the five in-scope columns on an uncatalogued row, including kill_date, in one call', async () => {
+    test('updates the five text/date columns on an uncatalogued row, including kill_date, in one call', async () => {
       const res = await auth
         .patch(`/library/rotation/${uncataloguedRotationId}`)
         .send({
@@ -935,8 +1117,10 @@ describe('Library Rotation', () => {
         'album_id',
         'album_title',
         'artist_name',
+        'format_id',
         'id',
         'kill_date',
+        'label_id',
         'record_label',
         'rotation_bin',
       ]);
@@ -1087,6 +1271,127 @@ describe('Library Rotation', () => {
         SELECT tracklist_lookup_attempted_at FROM ${sql(SCHEMA)}.rotation WHERE id = ${uncataloguedRotationId}`;
       expect(row.tracklist_lookup_attempted_at).not.toBeNull();
       expect(new Date(row.tracklist_lookup_attempted_at)).toEqual(new Date(stampedAt));
+    });
+
+    /**
+     * BS#2410's non-optional regression test, and #2410's own acceptance
+     * criterion.
+     *
+     * `format_id`/`label_id` are pre-catalog fields, so they travel the same
+     * transactional, `album_id IS NULL`-guarded write the text trio does —
+     * but they are NOT snapshot text, and `updateRotation` carries two
+     * booleans rather than one precisely so this edit does not drag the
+     * marker reset along. Repointing the old single `touchesSnapshot` flag at
+     * the wider list is the natural-reading mistake, and it fails silently:
+     * the response is identical either way, and the only symptom is that every
+     * format-only edit re-arms the documented 22-second tier-3 LML cascade.
+     */
+    test.each([
+      ['format_id', { format_id: 1 }],
+      ['label_id', { label_id: 7000 }],
+      ['both FKs', { format_id: 1, label_id: 7000 }],
+    ])('a %s-only edit leaves tracklist_lookup_attempted_at untouched', async (_label, payload) => {
+      const sql = getTestDb();
+      const [{ tracklist_lookup_attempted_at: stampedAt }] = await sql`
+        UPDATE ${sql(SCHEMA)}.rotation SET tracklist_lookup_attempted_at = NOW()
+        WHERE id = ${uncataloguedRotationId}
+        RETURNING tracklist_lookup_attempted_at`;
+
+      await auth.patch(`/library/rotation/${uncataloguedRotationId}`).send(payload).expect(200);
+
+      const [row] = await sql`
+        SELECT tracklist_lookup_attempted_at, format_id, label_id
+        FROM ${sql(SCHEMA)}.rotation WHERE id = ${uncataloguedRotationId}`;
+      expect(row.tracklist_lookup_attempted_at).not.toBeNull();
+      expect(new Date(row.tracklist_lookup_attempted_at)).toEqual(new Date(stampedAt));
+      // The write itself landed — otherwise the marker would survive for the
+      // uninteresting reason that nothing happened at all.
+      for (const [field, value] of Object.entries(payload)) {
+        expect(row[field]).toBe(value);
+      }
+    });
+
+    // The other half of the split: bundling an FK WITH snapshot text still
+    // resets the marker, because the trio is what the picker keys on.
+    test('an edit bundling format_id with artist_name does reset the marker', async () => {
+      const sql = getTestDb();
+      await sql`
+        UPDATE ${sql(SCHEMA)}.rotation SET tracklist_lookup_attempted_at = NOW()
+        WHERE id = ${uncataloguedRotationId}`;
+
+      await auth
+        .patch(`/library/rotation/${uncataloguedRotationId}`)
+        .send({ format_id: 1, artist_name: 'Juana Molina' })
+        .expect(200);
+
+      const [row] = await sql`
+        SELECT tracklist_lookup_attempted_at FROM ${sql(SCHEMA)}.rotation WHERE id = ${uncataloguedRotationId}`;
+      expect(row.tracklist_lookup_attempted_at).toBeNull();
+    });
+
+    test('the FKs come back on the wire and can be cleared with an explicit null', async () => {
+      const set = await auth
+        .patch(`/library/rotation/${uncataloguedRotationId}`)
+        .send({ format_id: 1, label_id: 7000 })
+        .expect(200);
+      expect(set.body.format_id).toBe(1);
+      expect(set.body.label_id).toBe(7000);
+
+      const cleared = await auth
+        .patch(`/library/rotation/${uncataloguedRotationId}`)
+        .send({ format_id: null, label_id: null })
+        .expect(200);
+      expect(cleared.body.format_id).toBeNull();
+      expect(cleared.body.label_id).toBeNull();
+    });
+
+    // Without the pre-write existence check these are PG 23503 → opaque 500s
+    // naming no field.
+    test('400s on a dangling format_id rather than 500ing on the FK', async () => {
+      const res = await auth
+        .patch(`/library/rotation/${uncataloguedRotationId}`)
+        .send({ format_id: 4242424 })
+        .expect(400);
+
+      expectErrorContains(res, 'format_id does not reference an existing format');
+    });
+
+    test('400s on a dangling label_id with the established wording', async () => {
+      const res = await auth
+        .patch(`/library/rotation/${uncataloguedRotationId}`)
+        .send({ label_id: 4242424 })
+        .expect(400);
+
+      expectErrorContains(res, 'label_id does not reference an existing label');
+    });
+
+    // The asymmetry BS#2410 closes: `record_label: 'X'` already 409'd on a
+    // linked row while `label_id: 7` would have written a rotation-side copy
+    // of a value the library release owns.
+    test('rejects format_id/label_id on a catalogued row, same as the text trio', async () => {
+      const res = await auth
+        .patch(`/library/rotation/${testRotationId}`)
+        .send({ format_id: 1, label_id: 7000 })
+        .expect(409);
+
+      expectErrorContains(res, 'linked to a library release');
+      expectErrorContains(res, 'edit format_id, label_id via PATCH /library/3 instead');
+
+      const sql = getTestDb();
+      const [row] = await sql`
+        SELECT format_id, label_id FROM ${sql(SCHEMA)}.rotation WHERE id = ${testRotationId}`;
+      expect(row.format_id).toBeNull();
+      expect(row.label_id).toBeNull();
+    });
+
+    // `format` (the JSP's free-text name) stays a 400, now pointing the caller
+    // at `format_id`. Removing the rejection would turn it into a silent
+    // 200-no-write.
+    test('still rejects the free-text `format` field, pointing at format_id', async () => {
+      const res = await auth.patch(`/library/rotation/${testRotationId}`).send({ format: 'LP' }).expect(400);
+
+      expectErrorContains(res, 'no rotation column exists');
+      expectErrorContains(res, 'format_id');
     });
 
     test('add_date and kill_date stay editable on a catalogued row', async () => {
