@@ -177,6 +177,21 @@ describe('Library ETL', () => {
     expect(rows.length).toBe(1);
     expect(rows[0].last_run).toBeInstanceOf(Date);
   });
+
+  /**
+   * BS#2424. `COMPILATION_TRACK_ARTIST` has no unique key upstream and prod
+   * holds 2,070 rows that collide on Postgres's `cta_unique_idx` tuple, so
+   * the batched importer meets a duplicate inside one multi-row statement.
+   * The seed carries such a pair; exactly one row must land.
+   */
+  it('dedupes an intra-batch duplicate compilation track', async () => {
+    const rows = await pg`
+      SELECT COUNT(*)::int AS count
+      FROM ${pg(SCHEMA)}.compilation_track_artist
+      WHERE artist_name = 'Flowertown' AND track_title = 'Half Moon'
+    `;
+    expect(rows[0].count).toBe(1);
+  });
 });
 
 // ---- Flowsheet ETL ----
