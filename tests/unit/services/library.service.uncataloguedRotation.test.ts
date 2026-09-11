@@ -39,6 +39,7 @@ import {
   linkRotationToAlbum,
   UNCATALOGUED_ROTATION_MAX_LIMIT,
 } from '../../../apps/backend/services/library.service';
+import { ROTATION_ROW_SUMMARY_KEYS } from '../../mocks/library-service-rotation.mock';
 
 /**
  * The published rotation column set, sorted — what
@@ -63,6 +64,18 @@ const PUBLISHED_ROTATION_COLUMNS = [
   'record_label',
   'rotation_bin',
 ];
+
+// The shared service double in `tests/mocks/library-service-rotation.mock.ts`
+// hands three controller/route suites a fake `toRotationRowSummary` built from
+// its own hand-written key list. Nothing about that double is derived from the
+// real projection, so without this it could fall behind and those three suites
+// would keep asserting a wire shape the endpoint no longer returns — the
+// WXYC/Backend-Service#2209 hazard the extraction was meant to close. The two
+// lists are spelled out independently on purpose; deriving either from
+// `UNCATALOGUED_ROTATION_PROJECTION` would make the pin above vacuous.
+test('the shared rotation service double publishes the same column set as the real projection', () => {
+  expect([...ROTATION_ROW_SUMMARY_KEYS].sort()).toEqual(PUBLISHED_ROTATION_COLUMNS);
+});
 
 describe('getUncataloguedRotationFromDB (BS#2109)', () => {
   beforeEach(() => {
@@ -220,9 +233,10 @@ describe('getRotationRowFromDB (BS#2410)', () => {
     expect(projection.record_label).toBe(rotation.record_label);
 
     const rotationColumns = new Set(Object.values(rotation as unknown as Record<string, unknown>));
-    for (const [key, value] of Object.entries(projection)) {
-      expect([key, rotationColumns.has(value)]).toEqual([key, true]);
-    }
+    const notOwnedByRotation = Object.entries(projection)
+      .filter(([, column]) => !rotationColumns.has(column))
+      .map(([key]) => key);
+    expect(notOwnedByRotation).toEqual([]);
   });
 
   it('resolves undefined when no row carries that id', async () => {
