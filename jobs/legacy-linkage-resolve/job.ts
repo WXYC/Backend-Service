@@ -761,9 +761,10 @@ const reportDrain = (result: RunResult): void => {
 /**
  * One execution with its liveness signals attached.
  *
- * A dry run deliberately skips all three: it must not send a check-in Sentry
- * would read as a scheduled execution, must not advance the heartbeat, and
- * would trip (c) trivially (it counts candidates and writes nothing by design).
+ * A dry run deliberately skips all of them: it must not send a check-in Sentry
+ * would read as a scheduled execution, must not advance the heartbeat, would
+ * trip (c) trivially (it counts candidates and writes nothing by design), and
+ * cannot reach (d) because it issues no UPDATE to be blocked.
  */
 export const runOnce = async (dryRun: boolean): Promise<RunResult> => {
   if (dryRun) return runResolve(true);
@@ -795,17 +796,19 @@ export const runOnce = async (dryRun: boolean): Promise<RunResult> => {
   // claims, so it checks in `ok` while (b)'s gap keeps growing and (d) names
   // the reason. Do not read a green cron check-in as proof the heartbeat
   // advanced — `reportLockContention`'s warning is what distinguishes them.
+  let deferred = false;
   const result = await Sentry.withMonitor(
     JOB_NAME,
     async () => {
       const passes = await runResolve(false);
-      if (!hasLockContention(passes)) await updateLastRun(JOB_NAME, startedAt);
+      deferred = hasLockContention(passes);
+      if (!deferred) await updateLastRun(JOB_NAME, startedAt);
       return passes;
     },
     MONITOR_CONFIG
   );
 
-  if (hasLockContention(result)) {
+  if (deferred) {
     log('warn', 'heartbeat', 'Heartbeat NOT advanced: a pass stood down before repairing.', {
       last_run: null,
     });

@@ -312,20 +312,20 @@ describe('legacy-linkage-resolve lock guard (BS#2413)', () => {
    * Runs `statement` the way the fix does: same transaction, same statement
    * timeout, plus the `SET LOCAL lock_timeout` guard ahead of it.
    *
-   * **Ends in ROLLBACK, not COMMIT, unless `commit: true` is passed.** The
-   * statements transcribed above are the PRODUCTION CTEs, unbounded by
-   * construction: `ROTATION_DRAIN_SQL` links every unlinked rotation row in
-   * the database and NULLs its denormalized `artist_name`/`album_title`/
-   * `record_label`, and `FLOWSHEET_DRAIN_SQL` does the same across the whole
-   * flowsheet table (and bumps `flowsheet_watermark`). Committing that from a
-   * spec mutates rows other specs own — the integration suite runs
-   * `--runInBand` against one shared database, and `cleanupProbes` only knows
-   * about this spec's two probe rows. Rolling back keeps the lock behaviour
-   * under test (locks are taken and released exactly the same way) while
-   * leaving the ambient cohort untouched; a caller that must observe the
-   * write reads it back INSIDE the transaction, before the rollback.
+   * **Always ends in ROLLBACK.** The statements transcribed above are the
+   * PRODUCTION CTEs, unbounded by construction: `ROTATION_DRAIN_SQL` links
+   * every unlinked rotation row in the database and NULLs its denormalized
+   * `artist_name`/`album_title`/`record_label`, and `FLOWSHEET_DRAIN_SQL` does
+   * the same across the whole flowsheet table (and bumps
+   * `flowsheet_watermark`). Committing that from a spec mutates rows other
+   * specs own — the integration suite runs `--runInBand` against one shared
+   * database, and `cleanupProbes` only knows about this spec's two probe rows.
+   * Rolling back keeps the lock behaviour under test (locks are taken and
+   * released exactly the same way) while leaving the ambient cohort untouched;
+   * the one case that must observe the write passes `readBack` and reads it
+   * INSIDE the transaction, before the rollback.
    */
-  const runGuarded = async (statement, { commit = false, readBack } = {}) => {
+  const runGuarded = async (statement, { readBack } = {}) => {
     const startedAt = Date.now();
     try {
       await worker.unsafe('BEGIN');
@@ -333,7 +333,7 @@ describe('legacy-linkage-resolve lock guard (BS#2413)', () => {
       await worker.unsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
       const rows = await worker.unsafe(statement);
       const readBackRows = readBack ? await readBack(worker) : null;
-      await worker.unsafe(commit ? 'COMMIT' : 'ROLLBACK');
+      await worker.unsafe('ROLLBACK');
       return { rows, readBackRows, error: null, elapsedMs: Date.now() - startedAt };
     } catch (error) {
       await worker.unsafe('ROLLBACK').catch(() => {});
