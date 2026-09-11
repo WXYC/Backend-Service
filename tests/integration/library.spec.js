@@ -2843,20 +2843,93 @@ describe('Library Cross-References (BS#2386)', () => {
     }
   });
 
-  // Declared FIRST and fixture-free on purpose: this is the only place the
-  // genuinely empty collection can be observed. `dev_env/seed_db.sql` seeds
-  // neither cross-reference table and no other integration spec writes them, so
-  // a non-zero total here is a real signal — either leftover rows from a run
-  // that failed before `ci:clean` dropped the volume, or a new writer that
-  // wants this block's fixtures rethinking. It is NOT a flake to retry past.
-  describe('the empty collections', () => {
-    test.each([['artists'], ['releases']])(
-      'GET /library/crossreferences/%s answers 200 with total 0, not 404',
-      async (collection) => {
-        const res = await auth.get(`/library/crossreferences/${collection}`).expect(200);
+  /**
+   * Read the current row count straight off the endpoint, so every assertion
+   * below can be expressed as a DELTA.
+   *
+   * **Both collections are shared, mutable state and must never be asserted
+   * absolutely.** An earlier version of this block asserted `total: 0` before
+   * inserting and `total: 3` after, on the belief that `dev_env/seed_db.sql`
+   * seeds neither table and nothing else writes them. The first half is true;
+   * the second is not. `library-etl-setwhere.spec.js` inserts into BOTH tables
+   * and `library-delete.spec.js` into `artist_library_crossreference`, and
+   * whether their rows exist when this file runs depends on jest's file
+   * ordering — which differs between a local single-file run and a full CI run,
+   * so the absolute form passed locally and failed in CI. Anything keyed to
+   * "this collection holds exactly N rows" is the same bug rewritten.
+   */
+  async function totalFor(collection) {
+    const res = await auth.get(`/library/crossreferences/${collection}`).query({ limit: 1 }).expect(200);
+    return res.body.total;
+  }
 
-        // The state each JSP renders as "There are no ... Cross-References".
-        expect(res.body).toEqual({ results: [], total: 0, page: 0, totalPages: 0 });
+  /**
+   * Fetch a collection whole, and fail loudly rather than silently truncating.
+   *
+   * 500 is the endpoint's documented maximum, and both collections are frozen
+   * far below it (119 and 35 rows upstream) — but "frozen" is a project
+   * decision, not something the query enforces, and other specs add rows. If
+   * this ever trips, the fixtures need rethinking; it must not degrade into
+   * assertions over a first page that happens to exclude them.
+   */
+  async function fetchWhole(collection) {
+    const res = await auth.get(`/library/crossreferences/${collection}`).query({ limit: 500 }).expect(200);
+    expect(res.body.results).toHaveLength(res.body.total);
+    return res.body;
+  }
+
+  /**
+   * Walk a whole collection in small pages and prove the paged sequence equals
+   * the unpaged one — no row repeated, none skipped, none reordered.
+   *
+   * Neither table has a primary key in the Postgres mirror, so the sort has to
+   * reach a total order through the FK pair after the name; without that, two
+   * artists sharing a name order arbitrarily and a boundary can repeat or drop
+   * a row. Walking the entire collection crosses every boundary there is
+   * (including ones that fall inside rows other specs inserted) rather than the
+   * single boundary a three-row fixture can offer, and it needs no assumption
+   * about how many rows are present.
+   */
+  async function expectStablePaging(collection, key, pageSize) {
+    const whole = await fetchWhole(collection);
+    expect(whole.total).toBeGreaterThan(pageSize); // or there is no boundary to cross
+
+    const paged = [];
+    const pageCount = Math.ceil(whole.total / pageSize);
+    for (let page = 0; page < pageCount; page += 1) {
+      const res = await auth.get(`/library/crossreferences/${collection}`).query({ page, limit: pageSize }).expect(200);
+      expect(res.body.total).toBe(whole.total);
+      expect(res.body.page).toBe(page);
+      expect(res.body.totalPages).toBe(pageCount);
+      paged.push(...res.body.results.map(key));
+    }
+
+    expect(paged).toHaveLength(whole.total);
+    expect(new Set(paged).size).toBe(whole.total);
+    expect(paged).toEqual(whole.results.map(key));
+  }
+
+  // The 200-with-no-rows contract, pinned without needing an empty collection.
+  // A page past the end is the one way to reach `results: []` against a shared
+  // table. The literal `total: 0` state each JSP renders as "There are no ...
+  // Cross-References" is a controller concern and is covered where the service
+  // is mocked and the count CAN be forced to zero —
+  // tests/unit/controllers/library.crossReferences.test.ts.
+  describe('an empty page', () => {
+    test.each([['artists'], ['releases']])(
+      'GET /library/crossreferences/%s answers 200 with an empty results array, not 404',
+      async (collection) => {
+        const total = await totalFor(collection);
+        const pastTheEnd = Math.ceil(total / 10) + 5;
+
+        const res = await auth
+          .get(`/library/crossreferences/${collection}`)
+          .query({ page: pastTheEnd, limit: 10 })
+          .expect(200);
+
+        expect(res.body.results).toEqual([]);
+        expect(res.body.total).toBe(total);
+        expect(res.body.page).toBe(pastTheEnd);
       }
     );
   });
@@ -2871,10 +2944,13 @@ describe('Library Cross-References (BS#2386)', () => {
     let filedTarget;
     let jazzId;
     let rockId;
+    let baselineTotal;
 
     beforeAll(async () => {
       jazzId = await genreIdByName('Jazz');
       rockId = await genreIdByName('Rock');
+      // Captured BEFORE the inserts; every count below is this plus three.
+      baselineTotal = await totalFor('artists');
 
       // Filed under BOTH Jazz and Rock, with different codes per filing.
       // `artist_genre_key` is unique on (artist_id, genre_id), not on
@@ -2899,13 +2975,11 @@ describe('Library Cross-References (BS#2386)', () => {
     });
 
     test('serves every cross-reference with the JSP column set, alphabetical by the referencing artist', async () => {
-      const res = await auth.get('/library/crossreferences/artists').expect(200);
+      const body = await fetchWhole('artists');
 
-      expect(res.body.total).toBe(3);
-      expect(res.body.page).toBe(0);
-      expect(res.body.totalPages).toBe(1);
-      expect(res.body.results).toHaveLength(3);
-      res.body.results.forEach((row) =>
+      expect(body.total).toBe(baselineTotal + 3);
+      expect(body.page).toBe(0);
+      body.results.forEach((row) =>
         expectFields(
           row,
           'source_artist_id',
@@ -2920,12 +2994,16 @@ describe('Library Cross-References (BS#2386)', () => {
           'comment'
         )
       );
-      expect(res.body.results.map((row) => row.source_artist_id)).toEqual([
-        sources.angel.id,
-        sources.jessica.id,
-        sources.juana.id,
-      ]);
-      expect(res.body.results[2]).toMatchObject({
+
+      // RELATIVE order among this block's own rows. A total sort preserves the
+      // relative order of any subset, so filtering to the fixtures proves the
+      // alphabetical key without assuming the collection holds only them.
+      const mine = [sources.angel.id, sources.jessica.id, sources.juana.id];
+      expect(
+        body.results.filter((row) => mine.includes(row.source_artist_id)).map((row) => row.source_artist_id)
+      ).toEqual(mine);
+
+      expect(body.results.find((row) => row.source_artist_id === sources.juana.id)).toMatchObject({
         target_artist_id: filedTarget.id,
         target_artist_name: filedTarget.artist_name,
         target_code_letters: filedTarget.code_letters,
@@ -2945,8 +3023,8 @@ describe('Library Cross-References (BS#2386)', () => {
       expect(jazzId).toBeLessThan(rockId);
 
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        const res = await auth.get('/library/crossreferences/artists').expect(200);
-        const row = res.body.results.find((candidate) => candidate.target_artist_id === twoGenreTarget.id);
+        const body = await fetchWhole('artists');
+        const row = body.results.find((candidate) => candidate.target_artist_id === twoGenreTarget.id);
 
         expect(row).toBeDefined();
         expect(row.target_code_genre_id).toBe(jazzId);
@@ -2958,8 +3036,8 @@ describe('Library Cross-References (BS#2386)', () => {
     // two genre-scoped columns null. The alternative — a join — would drop the
     // row from the only listing that reproduces this frozen set.
     test('keeps a target with no genre filing, with a null genre and null code', async () => {
-      const res = await auth.get('/library/crossreferences/artists').expect(200);
-      const row = res.body.results.find((candidate) => candidate.target_artist_id === unfiledTarget.id);
+      const body = await fetchWhole('artists');
+      const row = body.results.find((candidate) => candidate.target_artist_id === unfiledTarget.id);
 
       expect(row).toBeDefined();
       expect(row.target_code_genre_id).toBeNull();
@@ -2970,29 +3048,8 @@ describe('Library Cross-References (BS#2386)', () => {
       expect(row.comment).toBeNull();
     });
 
-    // The table has no primary key, so the sort has to reach a total order
-    // through the FK pair. If it didn't, a boundary could repeat or skip.
-    test('pages without repeating or skipping a row across the boundary', async () => {
-      const first = await auth.get('/library/crossreferences/artists').query({ limit: 2 }).expect(200);
-      const second = await auth.get('/library/crossreferences/artists').query({ page: 1, limit: 2 }).expect(200);
-
-      expect(first.body).toMatchObject({ total: 3, page: 0, totalPages: 2 });
-      expect(second.body).toMatchObject({ total: 3, page: 1, totalPages: 2 });
-      expect(first.body.results).toHaveLength(2);
-      expect(second.body.results).toHaveLength(1);
-
-      const key = (row) => `${row.source_artist_id}:${row.target_artist_id}`;
-      const paged = [...first.body.results, ...second.body.results].map(key);
-      expect(new Set(paged).size).toBe(3);
-
-      const whole = await auth.get('/library/crossreferences/artists').expect(200);
-      expect(paged).toEqual(whole.body.results.map(key));
-    });
-
-    test('serves an in-range page past the end as an empty results array with the real total', async () => {
-      const res = await auth.get('/library/crossreferences/artists').query({ page: 9, limit: 2 }).expect(200);
-
-      expect(res.body).toMatchObject({ results: [], total: 3, page: 9, totalPages: 2 });
+    test('pages the whole collection without repeating, skipping or reordering a row', async () => {
+      await expectStablePaging('artists', (row) => `${row.source_artist_id}:${row.target_artist_id}`, 2);
     });
   });
 
@@ -3005,11 +3062,14 @@ describe('Library Cross-References (BS#2386)', () => {
     let secondRelease;
     let unfiledRelease;
     let rockId;
-    let cdFormatId;
+    let baselineTotal;
 
     beforeAll(async () => {
       rockId = await genreIdByName('Rock');
-      cdFormatId = await formatIdByName('cd');
+      // Captured BEFORE the inserts; this collection is shared state too --
+      // `library-etl-setwhere.spec.js` and `library-delete.spec.js` both write
+      // `artist_library_crossreference`.
+      baselineTotal = await totalFor('releases');
 
       // The two artists on each row are usually different, and that difference
       // IS the association the row records, so the fixtures never let them
@@ -3038,11 +3098,11 @@ describe('Library Cross-References (BS#2386)', () => {
     });
 
     test('serves every cross-reference with the JSP column set and both artists kept apart', async () => {
-      const res = await auth.get('/library/crossreferences/releases').expect(200);
+      const body = await fetchWhole('releases');
 
-      expect(res.body).toMatchObject({ total: 3, page: 0, totalPages: 1 });
-      expect(res.body.results).toHaveLength(3);
-      res.body.results.forEach((row) =>
+      expect(body.total).toBe(baselineTotal + 3);
+      expect(body.page).toBe(0);
+      body.results.forEach((row) =>
         expectFields(
           row,
           'artist_id',
@@ -3061,7 +3121,7 @@ describe('Library Cross-References (BS#2386)', () => {
         )
       );
 
-      const row = res.body.results.find((candidate) => candidate.library_id === firstRelease.id);
+      const row = body.results.find((candidate) => candidate.library_id === firstRelease.id);
       expect(row).toMatchObject({
         // The cross-REFERENCING artist...
         artist_id: catPower.id,
@@ -3079,12 +3139,11 @@ describe('Library Cross-References (BS#2386)', () => {
         comment: 'collab.',
       });
       expect(row.code_letters).not.toBe(catPower.code_letters);
-      expect(typeof cdFormatId).toBe('number');
     });
 
     test('keeps a row whose release artist has no filing for that genre, with a null code', async () => {
-      const res = await auth.get('/library/crossreferences/releases').expect(200);
-      const row = res.body.results.find((candidate) => candidate.library_id === unfiledRelease.id);
+      const body = await fetchWhole('releases');
+      const row = body.results.find((candidate) => candidate.library_id === unfiledRelease.id);
 
       // Present, not dropped: the LEFT JOIN is the whole point.
       expect(row).toBeDefined();
@@ -3097,28 +3156,25 @@ describe('Library Cross-References (BS#2386)', () => {
       expect(typeof row.code_number).toBe('number');
     });
 
-    // Two of the three rows share a referencing artist, so this also exercises
-    // the `library_id` leg of the tiebreak rather than only the name.
-    test('pages without repeating or skipping a row across the boundary', async () => {
-      const first = await auth.get('/library/crossreferences/releases').query({ limit: 2 }).expect(200);
-      const second = await auth.get('/library/crossreferences/releases').query({ page: 1, limit: 2 }).expect(200);
+    test('pages the whole collection without repeating, skipping or reordering a row', async () => {
+      await expectStablePaging('releases', (row) => `${row.artist_id}:${row.library_id}`, 2);
+    });
 
-      expect(first.body).toMatchObject({ total: 3, page: 0, totalPages: 2 });
-      expect(second.body).toMatchObject({ total: 3, page: 1, totalPages: 2 });
-
+    // Two of this block's three rows share a referencing artist, so their
+    // relative order is decided by the `library_id` leg of the tiebreak rather
+    // than by the name — the leg a name-only sort would leave non-deterministic.
+    test('orders two rows of one referencing artist by library_id, after the name', async () => {
+      const body = await fetchWhole('releases');
       const key = (row) => `${row.artist_id}:${row.library_id}`;
-      const paged = [...first.body.results, ...second.body.results].map(key);
-      expect(paged).toHaveLength(3);
-      expect(new Set(paged).size).toBe(3);
-
-      const whole = await auth.get('/library/crossreferences/releases').expect(200);
-      expect(paged).toEqual(whole.body.results.map(key));
-      // Cat Power sorts before Wire, and its two rows sort by library_id.
-      expect(paged).toEqual([
+      const mine = [
         `${catPower.id}:${firstRelease.id}`,
         `${catPower.id}:${secondRelease.id}`,
         `${wire.id}:${unfiledRelease.id}`,
-      ]);
+      ];
+
+      // Cat Power sorts before Wire; its two rows sort by ascending library_id.
+      expect(body.results.map(key).filter((candidate) => mine.includes(candidate))).toEqual(mine);
+      expect(firstRelease.id).toBeLessThan(secondRelease.id);
     });
   });
 
