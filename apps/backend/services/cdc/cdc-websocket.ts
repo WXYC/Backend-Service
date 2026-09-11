@@ -114,6 +114,16 @@ function extractCdcSecret(request: IncomingMessage, url: URL): string | null {
 const BACKPRESSURE_THRESHOLD_BYTES = 1024 * 1024;
 
 /**
+ * Shared Sentry fingerprint for both back-pressure captures (pre-send and
+ * heartbeat). Explicit so the live byte count can never reach the grouping
+ * key: the condition's own failure mode is a reconnect storm where one slow
+ * consumer returns with a different buffer depth each time, which under
+ * default message-derived grouping mints a fresh issue per occurrence. The
+ * two paths stay separable by their `step` tag within the one issue.
+ */
+const BACKPRESSURE_FINGERPRINT = ['cdc-ws', 'buffered-amount-high'];
+
+/**
  * Per-client liveness flag. Set true on `'pong'` arrival, cleared at the
  * start of each heartbeat tick after we ping. A client whose flag is still
  * false on the next tick has missed a pong round-trip and is terminated.
@@ -135,17 +145,15 @@ let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
  */
 function safeSend(client: WebSocket, msg: string): boolean {
   if (client.bufferedAmount > BACKPRESSURE_THRESHOLD_BYTES) {
-    Sentry.captureMessage(
-      `cdc_ws.buffered_amount_high — terminating slow consumer (${client.bufferedAmount} bytes buffered)`,
-      {
-        level: 'warning',
-        tags: { tool: 'cdc-ws', step: 'backpressure' },
-        extra: {
-          bufferedAmount: client.bufferedAmount,
-          threshold: BACKPRESSURE_THRESHOLD_BYTES,
-        },
-      }
-    );
+    Sentry.captureMessage('cdc_ws.buffered_amount_high — terminating slow consumer', {
+      level: 'warning',
+      tags: { tool: 'cdc-ws', step: 'backpressure' },
+      extra: {
+        bufferedAmount: client.bufferedAmount,
+        threshold: BACKPRESSURE_THRESHOLD_BYTES,
+      },
+      fingerprint: BACKPRESSURE_FINGERPRINT,
+    });
     console.warn(
       `[cdc-ws] Terminating slow consumer: bufferedAmount=${client.bufferedAmount} > ${BACKPRESSURE_THRESHOLD_BYTES}`
     );
@@ -247,17 +255,15 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
       // Back-pressure check before issuing the ping — a wedged outbound
       // buffer means the ping won't reach the wire either.
       if (client.bufferedAmount > BACKPRESSURE_THRESHOLD_BYTES) {
-        Sentry.captureMessage(
-          `cdc_ws.buffered_amount_high — terminating slow consumer (${client.bufferedAmount} bytes buffered)`,
-          {
-            level: 'warning',
-            tags: { tool: 'cdc-ws', step: 'backpressure-heartbeat' },
-            extra: {
-              bufferedAmount: client.bufferedAmount,
-              threshold: BACKPRESSURE_THRESHOLD_BYTES,
-            },
-          }
-        );
+        Sentry.captureMessage('cdc_ws.buffered_amount_high — terminating slow consumer', {
+          level: 'warning',
+          tags: { tool: 'cdc-ws', step: 'backpressure-heartbeat' },
+          extra: {
+            bufferedAmount: client.bufferedAmount,
+            threshold: BACKPRESSURE_THRESHOLD_BYTES,
+          },
+          fingerprint: BACKPRESSURE_FINGERPRINT,
+        });
         console.warn(
           `[cdc-ws] Terminating slow consumer on heartbeat: bufferedAmount=${client.bufferedAmount} > ${BACKPRESSURE_THRESHOLD_BYTES}`
         );
