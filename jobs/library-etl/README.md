@@ -18,6 +18,10 @@ Incremental synchronization of the music library from the legacy tubafrenzy MySQ
    - Inserts new albums into the `library` table, skipping duplicates.
 5. Updates the `cronjob_runs` timestamp on success.
 
+Compilation-track credits (`compilation_track_artist`) are written in **batched multi-row statements** — chunked `INSERT … ON CONFLICT DO NOTHING` at 1,000 rows per statement, so importing the whole ~140,617-row upstream table costs ~141 statements rather than ~140,617 (BS#2424). That loop was the entire 12-15 minute duration of a working run, and the root cause of BS#2413: every one of those statements fired the `FOR EACH STATEMENT` watermark trigger against the single-row `library_watermark` table whose row lock the transaction holds throughout.
+
+The conflict clause is deliberately **untargeted**. `compilation_track_artist` carries two unique indexes — `cta_unique_idx` and the partial `cta_unique_null_track_idx` — and an untargeted clause arbitrates on both; naming a target would silently stop deduping the other. Duplicates that appear _inside a single statement_ are skipped rather than inserted twice, which matters because upstream holds 2,070 surplus rows colliding on exactly `cta_unique_idx`'s tuple. In the log line, `imported` still counts rows handed to the insert rather than rows actually written; the batch count is reported separately.
+
 Rows with `db_only` genre, missing genre/format mappings, empty artist names, or empty album titles are skipped with a warning.
 
 ## Delete denylist

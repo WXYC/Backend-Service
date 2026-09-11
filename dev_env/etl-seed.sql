@@ -168,7 +168,14 @@ UPDATE LIBRARY_RELEASE SET LIBRARY_CODE_ID = 8 WHERE ID = 108;
 INSERT INTO COMPILATION_TRACK_ARTIST (LIBRARY_RELEASE_ID, ARTIST_NAME, TRACK_TITLE, TRACK_POSITION) VALUES
   (106, 'Sharp Pins', 'You Turned off the Light', 'A1'),
   (106, 'Scott and Charlene''s Wedding', 'Footscray Station', 'A2'),
-  (106, 'Naked on the Vague', 'Left Behind', 'B1');
+  (106, 'Naked on the Vague', 'Left Behind', 'B1'),
+  -- BS#2424: an intra-table duplicate on (LIBRARY_RELEASE_ID, ARTIST_NAME,
+  -- TRACK_TITLE) -- the exact tuple of Postgres's `cta_unique_idx`. This
+  -- table has no unique key upstream, and prod holds 2,070 such surplus
+  -- rows, so the batched importer meets a duplicate INSIDE a single
+  -- multi-row statement on its very first pass. Exactly one row must land.
+  (106, 'Flowertown', 'Half Moon', 'B2'),
+  (106, 'Flowertown', 'Half Moon', 'B2');
 
 -- Case-variant artist (same artist as ID=1 but uppercase name)
 INSERT INTO LIBRARY_CODE (ID, PRESENTATION_NAME, ALPHABETICAL_NAME, CALL_LETTERS, CALL_NUMBERS, GENRE_ID) VALUES

@@ -20,6 +20,26 @@ import {
 const legacyDB = MirrorSQL.instance();
 const JOB_NAME = 'library-etl';
 
+/**
+ * Rows per multi-row compilation-track INSERT. Four columns x 1,000 rows =
+ * 4,000 bind parameters, comfortably under Postgres's 65,535 limit.
+ */
+const CTA_INSERT_CHUNK_ROWS = 1000;
+
+/**
+ * Split an array into fixed-size chunks. Empty input yields no chunks.
+ */
+const chunk = <T>(items: T[], size: number): T[][] => {
+  if (!Number.isInteger(size) || size <= 0) {
+    throw new RangeError(`[library-etl] chunk() size must be a positive integer, got ${size}.`);
+  }
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+};
+
 // Schema-qualified reference to the `fold_artist_name(text)` SQL function
 // (migration 0134 / BS#1095, mirroring the `artistIdFromName` runtime-path
 // fix in `apps/backend/services/library.service.ts` for BS#1897). Derived
@@ -737,10 +757,40 @@ const fetchLegacyCompilationTracks = async (): Promise<LegacyCompilationTrackRow
   }
 };
 
+/**
+ * Import compilation-track credits in **batched multi-row statements**
+ * (BS#2424).
+ *
+ * This used to issue one awaited `INSERT ... ON CONFLICT DO NOTHING` per row
+ * over ~140,617 upstream rows, inside the release import's write transaction
+ * — 140,617 sequential round trips, measured at 12-15 minutes per working
+ * run, and 140,617 firings of the `FOR EACH STATEMENT`
+ * `touch_library_watermark_from_compilation_track_artist` trigger against the
+ * single-row `library_watermark` table whose row lock it holds for the whole
+ * transaction (which is what starved `legacy-linkage-resolve` in BS#2413).
+ *
+ * Two properties are load-bearing and pinned by tests:
+ *
+ * - **`ON CONFLICT DO NOTHING` stays UNTARGETED.** The table carries two
+ *   unique indexes (`cta_unique_idx` and the partial
+ *   `cta_unique_null_track_idx`); an untargeted clause arbitrates on both,
+ *   and naming a target would silently stop deduping the other.
+ * - **Duplicates *within one statement* are skipped, not inserted twice.**
+ *   `DO NOTHING` uses speculative insertion and sees rows inserted earlier in
+ *   the same command (verified on PG 14.24 — prod's major — and 18.0). This
+ *   is not hypothetical: upstream holds 2,070 surplus rows that collide
+ *   intra-table on exactly `cta_unique_idx`'s tuple.
+ *
+ * **Counter semantics are unchanged on purpose.** `imported` still counts
+ * rows that resolved to a `library` row and were handed to the insert, NOT
+ * rows actually written — the 6-for-6 BS#2413 correlation was read against
+ * these log lines, and switching to a real affected-row count would collapse
+ * the number for reasons unrelated to coverage.
+ */
 const importCompilationTracks = async (
   tx: DbTransaction,
   rows: LegacyCompilationTrackRow[]
-): Promise<{ imported: number; skipped: number }> => {
+): Promise<{ imported: number; skipped: number; batches: number }> => {
   // Build map of legacy_release_id -> library.id
   const releaseRows = await tx
     .select({ id: library.id, legacyReleaseId: library.legacy_release_id })
@@ -753,28 +803,44 @@ const importCompilationTracks = async (
     }
   }
 
-  let imported = 0;
   let skipped = 0;
+  const values: {
+    library_id: number;
+    artist_name: string;
+    track_title: string | null;
+    track_position: string | null;
+  }[] = [];
   for (const row of rows) {
     const libraryId = releaseMap.get(row.libraryReleaseId);
     if (!libraryId) {
       skipped++;
       continue;
     }
-
-    await tx
-      .insert(compilation_track_artist)
-      .values({
-        library_id: libraryId,
-        artist_name: row.artistName,
-        track_title: row.trackTitle,
-        track_position: row.trackPosition,
-      })
-      .onConflictDoNothing();
-    imported++;
+    values.push({
+      library_id: libraryId,
+      artist_name: row.artistName,
+      track_title: row.trackTitle,
+      track_position: row.trackPosition,
+    });
   }
 
-  return { imported, skipped };
+  const batches = chunk(values, CTA_INSERT_CHUNK_ROWS);
+  for (const [index, batch] of batches.entries()) {
+    try {
+      await tx.insert(compilation_track_artist).values(batch).onConflictDoNothing();
+    } catch (error) {
+      // A malformed row now aborts a 1,000-row statement rather than a
+      // 1-row one; either way it aborts the transaction, so the only thing
+      // lost is which row it was. Log the window so it stays identifiable.
+      const first = index * CTA_INSERT_CHUNK_ROWS;
+      console.error(
+        `[library-etl] Compilation track insert failed on batch ${index + 1}/${batches.length} (rows ${first}-${first + batch.length - 1} of ${values.length}).`
+      );
+      throw error;
+    }
+  }
+
+  return { imported: values.length, skipped, batches: batches.length };
 };
 
 /**
@@ -1369,7 +1435,7 @@ const run = async () => {
       if (legacyCTA.length > 0) {
         const ctaResult = await importCompilationTracks(tx, legacyCTA);
         console.log(
-          `[library-etl] Compilation track artists: imported ${ctaResult.imported}, skipped ${ctaResult.skipped}.`
+          `[library-etl] Compilation track artists: imported ${ctaResult.imported}, skipped ${ctaResult.skipped}. (${ctaResult.batches} batched statement(s) of up to ${CTA_INSERT_CHUNK_ROWS} rows.)`
         );
       }
 
@@ -1409,6 +1475,8 @@ export {
   buildLegacySourcedSetWhere,
   ensureArtist,
   findArtistId,
+  // BS#2424 — the compilation-track batcher.
+  chunk,
 };
 
 run().catch((error) => {

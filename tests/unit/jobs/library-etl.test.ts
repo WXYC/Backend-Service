@@ -106,6 +106,7 @@ import {
   isDeniedAtWriteTime,
   reconcileDenylistedInserts,
   reportStrandedResurrections,
+  chunk,
 } from '../../../jobs/library-etl/job';
 
 describe('library-etl job helpers', () => {
@@ -1073,5 +1074,42 @@ describe('library-etl denylist race (BS#2112 review finding 2)', () => {
 
     expect(idleSweep).toBeGreaterThan(idleBranch);
     expect(idleSweep).toBeLessThan(returnAfter);
+  });
+});
+
+/**
+ * BS#2424 — batching the compilation-track write.
+ *
+ * `importCompilationTracks` used to issue one awaited
+ * `INSERT ... ON CONFLICT DO NOTHING` per row over ~140,617 upstream rows,
+ * inside the release import's write transaction. `chunk` is what turns that
+ * into ~141 multi-row statements; the Postgres semantics the batching relies
+ * on are pinned separately in
+ * `tests/integration/library-etl-cta-batch.spec.js`.
+ */
+describe('compilation-track batching (BS#2424)', () => {
+  describe('chunk', () => {
+    it('splits an exact multiple into equal chunks', () => {
+      expect(chunk([1, 2, 3, 4], 2)).toEqual([
+        [1, 2],
+        [3, 4],
+      ]);
+    });
+
+    it('keeps the remainder as a final short chunk', () => {
+      expect(chunk([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
+    });
+
+    it('returns no chunks for empty input', () => {
+      expect(chunk([], 1000)).toEqual([]);
+    });
+
+    it('returns a single chunk for a single element', () => {
+      expect(chunk(['a'], 1000)).toEqual([['a']]);
+    });
+
+    it('rejects a non-positive chunk size rather than looping forever', () => {
+      expect(() => chunk([1, 2], 0)).toThrow();
+    });
   });
 });
