@@ -1114,6 +1114,52 @@ export const getUncataloguedRotation: RequestHandler = async (req, res) => {
   res.status(200).json(rotation);
 };
 
+/**
+ * `GET /library/rotation/:id` (BS#2410) — the single-row rotation read.
+ *
+ * Serves dj-site#1161's Import-to-Library screen: the summary table it
+ * renders, and the pre-submit staleness re-read that refuses cleanly when the
+ * row was catalogued while the form was open (plan D8). No existing read path
+ * answers this — `GET /library/rotation` is a DISTINCT-ON-collapsed dropdown
+ * shape keyed on the library join, and `GET /library/rotation/uncatalogued`
+ * filters `album_id IS NULL` behind a 500-row cap against a ~3.8k backlog, so
+ * "absent from that page" conflates *linked* with *past the window*. This
+ * endpoint answers for linked and unlinked rows alike.
+ *
+ * `catalog: ['read']`, matching its read siblings rather than the
+ * `catalog: ['write']` PATCH that shares its path.
+ *
+ * **Referent note, deliberate.** `format_id`/`label_id` in the response are
+ * the rotation row's own pre-catalog fields, never the linked library
+ * release's — the opposite of what `label_id` means on the sibling
+ * `GET /library/rotation`, whose rows come from the `library` join. See
+ * `libraryService.getRotationRowFromDB` for why, and why there is no COALESCE
+ * here even though the adjacent endpoint's query is full of them.
+ *
+ * ROUTE REGISTRATION ORDER IS LOAD-BEARING, and more so than for its PATCH
+ * sibling: this is the first parameterized route on the router that shares
+ * BOTH method and segment count with a literal (`GET /rotation/uncatalogued`),
+ * so registering it earlier really would swallow the queue endpoint. Pinned
+ * by both `tests/unit/routes/library-rotation-uncatalogued.route.test.ts` and
+ * `tests/unit/routes/library-rotation-route-order.route.test.ts`.
+ */
+export const getRotationRow: RequestHandler<{ id: string }> = async (req, res) => {
+  const rotationId = parseResourceId(req.params.id, 'rotation');
+
+  // Already narrowed — `getRotationRowFromDB` SELECTs
+  // `UNCATALOGUED_ROTATION_PROJECTION`, exactly as the queue read does, so
+  // there is no full `rotation` row here to run back through
+  // `toRotationRowSummary`. That helper is for the write paths, which hold a
+  // bare `.returning()` row; both routes end at the same key set because the
+  // projection and the helper are derived from one declaration.
+  const row = await libraryService.getRotationRowFromDB(rotationId);
+  if (!row) {
+    throw new WxycError('Rotation entry not found', 404);
+  }
+
+  res.status(200).json(row);
+};
+
 export type RotationAddRequest = Omit<NewRotationRelease, 'id'>;
 
 /**
@@ -1135,6 +1181,14 @@ export type RotationAddRequest = Omit<NewRotationRelease, 'id'>;
  * supply an `album_id`: a catalogued row (`album_id` present) still has its
  * display sourced from the `library` join, and a client-supplied snapshot on
  * a catalogued row would leave stale free text nothing ever clears.
+ *
+ * **`format_id` and `label_id` (BS#2409's columns, accepted here by BS#2410)
+ * follow the same conditional rule, not a looser one.** They are pre-catalog
+ * fields — `libraryService.ROTATION_PRECATALOG_FIELDS` is the list, and the
+ * PATCH surface enforces the same `album_id IS NULL` precondition on them.
+ * Picking them on a linked add would write a rotation-side copy of values the
+ * library row already owns, which is the drift the trio's rule exists to
+ * prevent; the format authority for a linked row is `library.format_id`.
  *
  * EDITING that trio after the fact is a different write path: `updateRotation`
  * (BS#2113) on `PATCH /library/rotation/:id` owns post-creation edits, and
@@ -1165,7 +1219,7 @@ export type RotationAddRequest = Omit<NewRotationRelease, 'id'>;
  */
 type AddRotationAllowlist = Pick<
   NewRotationRelease,
-  'album_id' | 'rotation_bin' | 'artist_name' | 'album_title' | 'record_label'
+  'album_id' | 'rotation_bin' | 'artist_name' | 'album_title' | 'record_label' | 'format_id' | 'label_id'
 >;
 
 export function pickAddRotationFields(body: Partial<NewRotationRelease>): AddRotationAllowlist {
@@ -1176,6 +1230,12 @@ export function pickAddRotationFields(body: Partial<NewRotationRelease>): AddRot
     if (body.artist_name != null) picked.artist_name = body.artist_name;
     if (body.album_title != null) picked.album_title = body.album_title;
     if (body.record_label != null) picked.record_label = body.record_label;
+    // BS#2410's pre-catalog FKs sit on THIS branch only, exactly like the
+    // trio above. On a linked add the format and label are the library row's
+    // to state, and a rotation-side copy would drift from it the same way a
+    // client-supplied `record_label` would.
+    if (body.format_id != null) picked.format_id = body.format_id;
+    if (body.label_id != null) picked.label_id = body.label_id;
   }
   return picked;
 }
@@ -1217,6 +1277,59 @@ function codePointLength(value: string): number {
 /** `true` only for a string with at least one non-whitespace character. */
 function isNonBlankString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+/**
+ * The two pre-catalog FKs `rotation` gained in BS#2409, and how to prove a
+ * client-supplied id actually resolves (BS#2410).
+ *
+ * `rotation.format_id → format(id)` and `rotation.label_id → labels(id)` are
+ * real foreign keys, so a stale or guessed id reaches Postgres as a 23503 and
+ * surfaces as an opaque 500 plus a Sentry event naming no field. Both rotation
+ * write paths therefore check existence before the write, and both reuse the
+ * wording `updateAlbum` already 400s with for exactly these two references —
+ * verbatim, so a client that learned the string from one endpoint recognizes
+ * it from the other.
+ */
+const ROTATION_PRECATALOG_FK_CHECKS = {
+  format_id: {
+    exists: (id: number) => libraryService.getFormatById(id),
+    danglingMessage: 'format_id does not reference an existing format',
+  },
+  label_id: {
+    exists: (id: number) => labelsService.getLabelById(id),
+    danglingMessage: 'label_id does not reference an existing label',
+  },
+} as const;
+
+type RotationPrecatalogFk = keyof typeof ROTATION_PRECATALOG_FK_CHECKS;
+
+/**
+ * Shape-check then existence-check one pre-catalog FK, or throw the 400.
+ *
+ * `nullable` distinguishes the two write paths rather than being cosmetic:
+ * on `POST /library/rotation` an explicit `null` means "absent" (the
+ * `selected?.id ?? null` client shape, which `pickAddRotationFields` drops),
+ * while on `PATCH /library/rotation/:id` it means "clear the column" — the
+ * same `null`-vs-absent distinction `kill_date` carries there. A cleared
+ * reference has nothing to look up, so it skips the round trip.
+ */
+async function assertRotationPrecatalogFk(
+  field: RotationPrecatalogFk,
+  value: unknown,
+  { nullable }: { nullable: boolean }
+): Promise<void> {
+  if (nullable && value === null) return;
+
+  const suffix = nullable ? ' or null' : ', or omitted';
+  if (!Number.isInteger(value) || (value as number) < 1) {
+    throw new WxycError(`Invalid Parameter: ${field} must be a positive integer${suffix}`, 400);
+  }
+
+  const check = ROTATION_PRECATALOG_FK_CHECKS[field];
+  if (!(await check.exists(value as number))) {
+    throw new WxycError(check.danglingMessage, 400);
+  }
 }
 
 /**
@@ -1297,6 +1410,15 @@ export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = 
 
     if (!isNonBlankString(body.artist_name) || !isNonBlankString(body.album_title)) {
       throw new WxycError('Missing Parameters: album_id, or artist_name and album_title', 400);
+    }
+
+    // Same branch, same reason as the length guard above: with an `album_id`
+    // present `pickAddRotationFields` drops both FKs, so validating them there
+    // would 400 a valid add over a value that is never written. `null` is
+    // "absent" on this endpoint, so it is skipped rather than cleared.
+    for (const field of ['format_id', 'label_id'] as const) {
+      if (body[field] == null) continue;
+      await assertRotationPrecatalogFk(field, body[field], { nullable: false });
     }
   }
 
@@ -1389,21 +1511,39 @@ export type RotationUpdateRequest = {
   record_label?: string;
   add_date?: string; //Accepts ISO8601 formatted dates YYYY-MM-DD
   kill_date?: string | null; //Accepts ISO8601 formatted dates YYYY-MM-DD, or null to clear
+  // BS#2409's pre-catalog FKs, editable here since BS#2410. Nullable: an
+  // explicit `null` clears the reference, the same null-vs-absent distinction
+  // `kill_date` above carries.
+  format_id?: unknown;
+  label_id?: unknown;
   // The JSP editor (tubafrenzy's `rotationReleaseModify.jsp`) also carries
   // these three fields, but none has a column on `rotation` —
   // alphabetical_name lives on `artists.alphabetical_name`
-  // (WXYC/Backend-Service#2156), format and format_size on the `library` ->
-  // `format` join (WXYC/dj-site#1169). Declared here (not just left unread)
-  // so `ROTATION_NO_COLUMN_FIELDS` below can reject a client that sends
-  // them with a precise 400 instead of silently writing less than it asked
-  // for.
+  // (WXYC/Backend-Service#2156), format_size on the `library` -> `format`
+  // join (WXYC/dj-site#1169), and the JSP's free-text `format` is `format_id`
+  // on this endpoint. Declared here (not just left unread) so
+  // `ROTATION_NO_COLUMN_FIELDS` below can reject a client that sends them
+  // with a precise 400 instead of silently writing less than it asked for.
   alphabetical_name?: unknown;
   format?: unknown;
   format_size?: unknown;
 };
 
-const ROTATION_UPDATABLE_FIELDS = ['artist_name', 'album_title', 'record_label', 'add_date', 'kill_date'] as const;
+const ROTATION_UPDATABLE_FIELDS = [
+  'artist_name',
+  'album_title',
+  'record_label',
+  'add_date',
+  'kill_date',
+  'format_id',
+  'label_id',
+] as const;
 
+// `format` STAYS rejected even though BS#2410 made the format editable here.
+// The wire field is `format_id`, so removing the rejection would not enable
+// anything — it would only turn a JSP-shaped client's `format: "CD"` from a
+// precise 400 into a silent 200-no-write, which is the exact failure this
+// list exists to prevent. Its owner text is retargeted at `format_id` below.
 const ROTATION_NO_COLUMN_FIELDS = ['alphabetical_name', 'format', 'format_size'] as const;
 
 // Why each field has no `rotation` column, phrased so the remedy is correct
@@ -1419,36 +1559,45 @@ const ROTATION_NO_COLUMN_FIELDS = ['alphabetical_name', 'format', 'format_size']
 const ROTATION_NO_COLUMN_FIELD_OWNERS: Record<(typeof ROTATION_NO_COLUMN_FIELDS)[number], string> = {
   alphabetical_name:
     "derived, not stored: a catalogued row takes it from artists.alphabetical_name (edit via PATCH /library/artists/:id, WXYC/Backend-Service#2156); an uncatalogued row falls back to this row's own artist_name, so send artist_name instead",
-  format: 'owned by the release PATCH surface (WXYC/dj-site#1169)',
+  format:
+    "the rotation row does carry a format since WXYC/Backend-Service#2409, but as an id: send format_id (an integer referencing format(id)) rather than the free-text name; the linked release's own format is owned by the release PATCH surface (WXYC/dj-site#1169)",
   format_size: 'owned by the release PATCH surface (WXYC/dj-site#1169)',
 };
 
 /**
- * Field-specific remedy text for the linked-snapshot 409 (BS#2113 review
- * finding 2). `album_title`/`record_label` have a working remedy on
- * `PATCH /library/:id` (`album_title`/`label` respectively); `artist_name`
- * does not — `library.artist_name` only ever changes by re-pointing
- * `artist_id` at a different, already-existing `artists` row (which
- * reattributes the release, not renames anyone), and no endpoint exposes a
- * direct rename. Telling a caller to "edit the library release" for an
- * `artist_name` rejection would send them looking for a field that isn't
- * there.
+ * Field-specific remedy text for the linked-row 409 (BS#2113 review finding 2,
+ * widened to the pre-catalog set by BS#2410).
+ *
+ * Four of the five have a working remedy on `PATCH /library/:id` —
+ * `album_title`, `label` (for `record_label`), and `format_id`/`label_id`
+ * under their own names. `artist_name` does not: `library.artist_name` only
+ * ever changes by re-pointing `artist_id` at a different, already-existing
+ * `artists` row (which reattributes the release, not renames anyone), and no
+ * endpoint exposes a direct rename. Telling a caller to "edit the library
+ * release" for an `artist_name` rejection would send them looking for a field
+ * that isn't there.
+ *
+ * Keyed on `ROTATION_PRECATALOG_FIELDS`, not `ROTATION_SNAPSHOT_COLUMNS`:
+ * the two lists govern different invariants (see the service's declaration),
+ * and this 409 is the pre-catalog one.
  */
 const ROTATION_SNAPSHOT_LIBRARY_FIELD: Partial<
-  Record<(typeof libraryService.ROTATION_SNAPSHOT_COLUMNS)[number], string>
+  Record<(typeof libraryService.ROTATION_PRECATALOG_FIELDS)[number], string>
 > = {
   album_title: 'album_title',
   record_label: 'label',
+  format_id: 'format_id',
+  label_id: 'label_id',
 };
 
 function buildLinkedSnapshotConflictMessage(
-  snapshotFields: ReadonlyArray<(typeof libraryService.ROTATION_SNAPSHOT_COLUMNS)[number]>,
+  precatalogFields: ReadonlyArray<(typeof libraryService.ROTATION_PRECATALOG_FIELDS)[number]>,
   albumId: number
 ): string {
-  const editableViaLibrary = snapshotFields
+  const editableViaLibrary = precatalogFields
     .map((field) => ROTATION_SNAPSHOT_LIBRARY_FIELD[field])
     .filter((field): field is string => field !== undefined);
-  const rejectsArtistName = snapshotFields.includes('artist_name');
+  const rejectsArtistName = precatalogFields.includes('artist_name');
 
   const remedies: string[] = [];
   if (editableViaLibrary.length > 0) {
@@ -1463,10 +1612,11 @@ function buildLinkedSnapshotConflictMessage(
   }
 
   return (
-    `Conflict: ${snapshotFields.join(', ')} cannot be set on a rotation row linked to a library release ` +
-    `(album_id ${albumId}) — the rotation read path takes those values from the library join, so the write ` +
-    `would be invisible, and a non-NULL snapshot on a linked row misroutes the flowsheet rotation badge. ` +
-    `${remedies.join('; ')}.`
+    `Conflict: ${precatalogFields.join(', ')} cannot be set on a rotation row linked to a library release ` +
+    `(album_id ${albumId}) — these are pre-catalog fields, and once the row is linked the library release is ` +
+    `the authority for all of them: the rotation list read takes artist, title, label and format from the ` +
+    `library join, so the write would be invisible there, and a non-NULL snapshot on a linked row misroutes ` +
+    `the flowsheet rotation badge. ${remedies.join('; ')}.`
   );
 }
 
@@ -1573,6 +1723,17 @@ export const updateRotation: RequestHandler<{ id: string }, unknown, RotationUpd
     updates.kill_date = body.kill_date;
   }
 
+  // BS#2410's pre-catalog FKs. Deliberately NOT folded into the snapshot loop
+  // above: that loop is keyed on `ROTATION_SNAPSHOT_COLUMNS` and runs
+  // `validateTextField`, which would 400 every `format_id: 3` with "must be a
+  // string". Integer + existence instead, so a stale id is a named 400 rather
+  // than a PG 23503 → 500.
+  for (const field of ['format_id', 'label_id'] as const) {
+    if (body[field] === undefined) continue;
+    await assertRotationPrecatalogFk(field, body[field], { nullable: true });
+    updates[field] = body[field] as number | null;
+  }
+
   // BS#2113 review finding 4: the linked/unlinked precondition lives in the
   // service's own compare-and-set UPDATE, not in a read taken here — see
   // `libraryService.updateRotation` for why.
@@ -1583,8 +1744,12 @@ export const updateRotation: RequestHandler<{ id: string }, unknown, RotationUpd
   }
 
   if (outcome.outcome === 'linked_conflict') {
-    const snapshotFields = libraryService.ROTATION_SNAPSHOT_COLUMNS.filter((field) => body[field] !== undefined);
-    throw new WxycError(buildLinkedSnapshotConflictMessage(snapshotFields, outcome.albumId), 409);
+    // The PRE-CATALOG list, not the snapshot trio: the service guards all five
+    // on `album_id IS NULL`, so naming only the trio here would produce a 409
+    // that lists none of the fields the caller actually sent when the sent
+    // field was `format_id` or `label_id`.
+    const precatalogFields = libraryService.ROTATION_PRECATALOG_FIELDS.filter((field) => body[field] !== undefined);
+    throw new WxycError(buildLinkedSnapshotConflictMessage(precatalogFields, outcome.albumId), 409);
   }
 
   // Projected, not the bare `.returning()` row: `rotation` also carries

@@ -166,6 +166,13 @@ export const rotation = {
   artist_name: 'artist_name',
   album_title: 'album_title',
   record_label: 'record_label',
+  // BS#2409 added both columns to `schema.ts` but not to this double, so a
+  // `rotation.format_id` reference resolved to `undefined` here — and
+  // `toHaveBeenCalledWith({ format_id: undefined })` matches a call that
+  // omitted the key entirely, which would have let the BS#2410 projection
+  // widening pass its own pins while writing nothing.
+  format_id: 'format_id',
+  label_id: 'label_id',
   discogs_release_id: 'discogs_release_id',
   discogs_release_id_resolve_attempted_at: 'discogs_release_id_resolve_attempted_at',
   tracklist_lookup_attempted_at: 'tracklist_lookup_attempted_at',

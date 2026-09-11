@@ -4,17 +4,25 @@
  * Express matches route layers in registration order, so a templated
  * `/rotation/:something` GET registered ahead of the literal
  * `/rotation/uncatalogued` would swallow the queue endpoint and hand
- * `'uncatalogued'` to the parameterized handler as an id. The ordering is
- * correct as written — and WXYC/Backend-Service#2113's `PATCH /rotation/:id`
- * cannot collide with it in any case, differing in both method and segment
- * count — but the acceptance criteria ask for the guardrail explicitly, and
- * #2113 adds a parameterized route to this very block.
+ * `'uncatalogued'` to the parameterized handler as an id.
  *
- * Two assertions:
+ * **The hazard stopped being hypothetical in WXYC/Backend-Service#2410.**
+ * #2113's `PATCH /rotation/:id` could not collide with this GET in any case
+ * — it differs in method, and Express falls through a layer whose Route does
+ * not handle the request method. #2410's `GET /rotation/:id` is the first
+ * parameterized route on this router that shares BOTH the method and the
+ * segment count, so the assertions below are now load-bearing rather than
+ * vacuous, and they assert the parameterized GET exists rather than skipping
+ * when it doesn't.
+ *
+ * Three assertions:
  *   1. Static — over the registered layer list, the literal path precedes
- *      any single-segment `/rotation/:param` GET.
+ *      the single-segment `/rotation/:param` GET, which must exist.
  *   2. Functional — a real request for `/library/rotation/uncatalogued`
- *      reaches `getUncataloguedRotation`, not some `:id`-shaped handler.
+ *      reaches `getUncataloguedRotation`, not the `:id`-shaped handler.
+ *   3. Functional — a real request for `/library/rotation/<digits>` does
+ *      reach the `:id` handler, so assertion 2 is proving an ordering rather
+ *      than the absence of a competitor.
  *
  * Collaborator mocks below mirror
  * `tests/unit/routes/library-genres-permissions.route.test.ts` — only enough
@@ -29,8 +37,19 @@ import express from 'express';
 import request from 'supertest';
 
 const mockGetUncataloguedRotationFromDB = jest.fn<() => Promise<unknown[]>>();
+const mockGetRotationRowFromDB = jest.fn<() => Promise<unknown>>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
+  // The projection, the two field lists, and the queue ceiling come from the
+  // shared rotation double (WXYC/Backend-Service#2209) rather than being
+  // restated here: `GET /rotation/:id` routes its 200 through the real
+  // `toRotationRowSummary`, so this suite acquired the drift hazard its two
+  // siblings already carried.
+  ...jest
+    .requireActual<typeof import('../../mocks/library-service-rotation.mock')>(
+      '../../mocks/library-service-rotation.mock'
+    )
+    .createLibraryServiceRotationMock(),
   markAlbumMissing: jest.fn(),
   markAlbumFound: jest.fn(),
   getAlbumFromDB: jest.fn(),
@@ -44,6 +63,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   addToRotation: jest.fn(),
   killRotationInDB: jest.fn(),
   getUncataloguedRotationFromDB: mockGetUncataloguedRotationFromDB,
+  getRotationRowFromDB: mockGetRotationRowFromDB,
   linkRotationToAlbum: jest.fn(),
   insertAlbum: jest.fn(),
   updateArtworkUrl: jest.fn(),
@@ -114,28 +134,48 @@ function registeredGetPaths(): string[] {
     .filter((path): path is string => typeof path === 'string');
 }
 
-describe('GET /library/rotation/uncatalogued — route registration order (BS#2109)', () => {
-  test('the literal path is registered ahead of any single-segment /rotation/:param GET', () => {
+describe('GET /library/rotation/uncatalogued — route registration order (BS#2109, BS#2410)', () => {
+  test('the literal path is registered ahead of the single-segment /rotation/:param GET', () => {
     const paths = registeredGetPaths();
 
     const literalIndex = paths.indexOf('/rotation/uncatalogued');
     expect(literalIndex).toBeGreaterThanOrEqual(0);
 
+    // BS#2410 registers `GET /rotation/:id`. The competitor is no longer
+    // hypothetical, so its absence is a failure rather than a skip: an
+    // `if (shadowingIndex >= 0)` guard would pass just as happily on a
+    // router that lost the single-row read entirely.
     const shadowingIndex = paths.findIndex((path) => /^\/rotation\/:[^/]+$/.test(path));
-    if (shadowingIndex >= 0) {
-      expect(literalIndex).toBeLessThan(shadowingIndex);
-    }
+    expect(shadowingIndex).toBeGreaterThanOrEqual(0);
+    expect(literalIndex).toBeLessThan(shadowingIndex);
   });
 
-  test('a request for the literal path reaches getUncataloguedRotation, not a :id handler', async () => {
+  test('a request for the literal path reaches getUncataloguedRotation, not the :id handler', async () => {
     const rows = [{ id: 7007, album_id: null, artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' }];
     mockGetUncataloguedRotationFromDB.mockReset().mockResolvedValue(rows);
+    mockGetRotationRowFromDB.mockReset();
 
     const res = await request(app).get('/library/rotation/uncatalogued').set('Authorization', 'Bearer test-token');
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual(rows);
     expect(mockGetUncataloguedRotationFromDB).toHaveBeenCalledTimes(1);
+    expect(mockGetRotationRowFromDB).not.toHaveBeenCalled();
+  });
+
+  // The negative above only means something if the parameterized GET is
+  // reachable at all. Without this, deleting `GET /rotation/:id` from the
+  // router would leave the whole block green.
+  test('a numeric single segment does reach the :id handler (BS#2410)', async () => {
+    const row = { id: 7007, album_id: null, artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' };
+    mockGetUncataloguedRotationFromDB.mockReset();
+    mockGetRotationRowFromDB.mockReset().mockResolvedValue(row);
+
+    const res = await request(app).get('/library/rotation/7007').set('Authorization', 'Bearer test-token');
+
+    expect(res.status).toBe(200);
+    expect(mockGetRotationRowFromDB).toHaveBeenCalledWith(7007);
+    expect(mockGetUncataloguedRotationFromDB).not.toHaveBeenCalled();
   });
 
   test('a hypothetical /rotation/:id GET registered after the literal still cannot shadow it', async () => {

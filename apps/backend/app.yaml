@@ -630,18 +630,51 @@ components:
           type: string
           maxLength: 128
           description: Optional, only used when album_id is omitted. A value over 128 characters 400s rather than truncating.
+        format_id:
+          type: integer
+          minimum: 1
+          description: >-
+            BS#2410. Optional pre-catalog `format(id)` reference. Like the
+            free-text trio, accepted ONLY when `album_id` is omitted — on a
+            linked add the format authority is `library.format_id`, and a
+            rotation-side copy would drift from it. An id that references no
+            `format` row 400s ("format_id does not reference an existing
+            format") rather than reaching Postgres as a 23503.
+        label_id:
+          type: integer
+          minimum: 1
+          description: >-
+            BS#2410. Optional pre-catalog `labels(id)` reference. Same
+            `album_id`-absent rule and same dangling-id 400 ("label_id does
+            not reference an existing label") as `format_id`. `record_label`
+            stays the free-text display snapshot and the two are independent.
 
     UncataloguedRotationRow:
       type: object
       description: >-
-        BS#2109. The explicit column projection `GET
-        /library/rotation/uncatalogued` and `PATCH
-        /library/rotation/{rotation_id}/link` both return — deliberately
+        BS#2109, widened to ten columns by BS#2410. The explicit column
+        projection `GET /library/rotation/uncatalogued`, `GET
+        /library/rotation/{id}` and `PATCH
+        /library/rotation/{rotation_id}/link` all return — deliberately
         narrower than the full `rotation` row, which also carries
         server-derived plumbing (legacy_rotation_id,
         legacy_library_release_id, discogs_release_id,
         discogs_release_id_source, lml_identity_id, and two attempt-at
         markers) that is never published on this surface.
+
+
+        **Referent rule for `format_id` / `label_id`, deliberate and the
+        opposite of the sibling list read.** On this shape both are the
+        ROTATION row's own pre-catalog fields: captured at rotation-add,
+        writable only while `album_id` is NULL, and retained unchanged after
+        the row is linked. They never describe the linked library release. On
+        `GET /library/rotation` the same `label_id` key means
+        `library.label_id` (that endpoint joins `library` and COALESCEs
+        across sources), so do not read the two as interchangeable. Display
+        names are resolved client-side from `GET /library/formats`; this
+        projection is join-free on purpose. The cross-repo SSOT carries the
+        same rule on both endpoints (wxyc-shared 1.51.0,
+        `RotationRowSummary`).
       properties:
         id:
           type: integer
@@ -667,6 +700,24 @@ components:
         record_label:
           type: string
           nullable: true
+          description: >-
+            Free-text label snapshot. Retained even when `label_id` is set,
+            for rows whose text never resolved to a `labels` row.
+        format_id:
+          type: integer
+          nullable: true
+          description: >-
+            BS#2409/BS#2410. Pre-catalog `format(id)` reference — the
+            rotation row's own, never the linked release's. NULL on every row
+            created before the dj-site classic add form began sending it; the
+            legacy backfill is WXYC/Backend-Service#2412.
+        label_id:
+          type: integer
+          nullable: true
+          description: >-
+            BS#2409/BS#2410. Pre-catalog `labels(id)` reference — the
+            rotation row's own, never the linked release's. Same null
+            population and backfill story as `format_id`.
 
     BinLibraryDetails:
       type: object
@@ -2147,13 +2198,64 @@ paths:
           description: Rotation entry is already linked to a library release.
 
   /library/rotation/{id}:
-    patch:
-      summary: Field-level edit of a rotation release (BS#2113)
+    get:
+      summary: Get one rotation row (BS#2410)
       description: >
-        Partial update of the five columns that actually exist on `wxyc_schema.rotation`:
-        `artist_name`, `album_title`, `record_label`, `add_date`, `kill_date`. Only the
-        fields present in the body are validated and written, so a typo fix on one field
-        cannot wipe another. Gated to MD/SM via `catalog:['write']`.
+        The single-row rotation read: renders dj-site#1161's Import to Library summary
+        table and backs its pre-submit staleness check (a populated `album_id` means the
+        row was catalogued while the operator had the form open). `catalog:['read']`,
+        matching `GET /library/rotation` and `GET /library/rotation/uncatalogued` rather
+        than the `catalog:['write']` PATCH on this same path.
+
+
+        **Answers for linked rows as well as unlinked ones.** `GET
+        /library/rotation/uncatalogued` filters `album_id IS NULL` behind a 500-row cap,
+        so "absent from that page" conflates *linked* with *past the window* — which is
+        exactly the distinction the staleness check needs. 404 here means no such row.
+
+
+        **Returns the rotation resource itself, with no join and no COALESCE.**
+        `format_id` and `label_id` are this row's own pre-catalog fields, never the linked
+        library release's — the opposite of what `label_id` means on `GET
+        /library/rotation`, whose rows come from the `library` join. See
+        `UncataloguedRotationRow` for the full rule.
+
+
+        Registered AFTER the literal `/library/rotation/uncatalogued`: it is the first
+        route on this router that shares both method and segment count with a literal, so
+        the ordering is load-bearing rather than defensive.
+      security:
+        - BearerAuth: ['catalog-read']
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: '`rotation.id` of the row to read (positive integer).'
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: The rotation row, in the shared ten-column projection.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UncataloguedRotationRow'
+        '400':
+          description: Non-positive or non-canonical `id` spelling.
+        '401':
+          description: Missing or invalid bearer token.
+        '404':
+          description: No rotation row with that id.
+
+    patch:
+      summary: Field-level edit of a rotation release (BS#2113, widened by BS#2410)
+      description: >
+        Partial update of the seven columns that actually exist on `wxyc_schema.rotation`:
+        `artist_name`, `album_title`, `record_label`, `add_date`, `kill_date`,
+        `format_id`, `label_id`. Only the fields present in the body are validated and
+        written, so a typo fix on one field cannot wipe another. Gated to MD/SM via
+        `catalog:['write']`.
 
 
         **`kill_date: null` clears the column.** This is the one non-obvious part of the
@@ -2165,20 +2267,32 @@ paths:
         set a date, never clear one.
 
 
-        **The `artist_name`/`album_title`/`record_label` snapshot trio is rejected with a
-        409 on a rotation row that has an `album_id`.** On a library-linked row the
-        rotation read path (`GET /library/rotation`) projects those three from the
-        `library`/`artists` join, so a write here would be echoed by the response and then
-        be invisible everywhere else; a non-NULL snapshot on a linked row also misroutes
-        the flowsheet rotation badge, which partitions its match arms on the invariant that
-        a linked row's denormalized names are NULL. Edit the linked release via
-        `PATCH /library/{id}` instead. `add_date` and `kill_date` stay editable on a
-        catalogued row.
+        **The five pre-catalog fields — the `artist_name`/`album_title`/`record_label`
+        snapshot trio plus `format_id` and `label_id` — are rejected with a 409 on a
+        rotation row that has an `album_id`.** Once the row is linked, the library release
+        is the authority for all five: the rotation list read (`GET /library/rotation`)
+        projects artist, title, label and format from the `library`/`artists`/`format`
+        join, so a write here would be echoed by the response and then be invisible there;
+        a non-NULL snapshot on a linked row also misroutes the flowsheet rotation badge,
+        which partitions its match arms on the invariant that a linked row's denormalized
+        names are NULL. Edit the linked release via `PATCH /library/{id}` instead — it
+        accepts `album_title`, `label`, `format_id` and `label_id` by name. `add_date` and
+        `kill_date` stay editable on a catalogued row.
+
+
+        **`format_id`/`label_id` do NOT reset the tracklist-picker marker.** A snapshot
+        text edit nulls `rotation.tracklist_lookup_attempted_at` so the tier-3 LML
+        cascade re-attempts against the corrected text; the picker keys that cascade on
+        `(artist_name, album_title)`, so a format- or label-only edit has nothing stale to
+        invalidate and deliberately leaves the marker alone rather than re-arming a
+        ~22-second lookup on every such edit.
 
 
         `alphabetical_name`, `format`, and `format_size` appear on the same legacy editor
         screen but have no `rotation` column, and are rejected with a 400 naming the field
-        rather than silently dropped.
+        rather than silently dropped. `format` in particular stays rejected even though
+        the format is now editable here: the wire field is `format_id`, so accepting the
+        free-text name would be a silent 200-no-write rather than a precise 400.
       security:
         - BearerAuth: ['catalog-write']
       parameters:
@@ -2218,10 +2332,28 @@ paths:
                   format: date
                   nullable: true
                   description: '`YYYY-MM-DD`, or an explicit `null` to clear the column and return the release to active rotation.'
+                format_id:
+                  type: integer
+                  minimum: 1
+                  nullable: true
+                  description: >-
+                    BS#2410. Pre-catalog `format(id)` reference; an explicit `null` clears it.
+                    Rejected (409) when the row has an `album_id`. A dangling id 400s with
+                    "format_id does not reference an existing format". Does not reset
+                    `tracklist_lookup_attempted_at`.
+                label_id:
+                  type: integer
+                  minimum: 1
+                  nullable: true
+                  description: >-
+                    BS#2410. Pre-catalog `labels(id)` reference; an explicit `null` clears it.
+                    Rejected (409) when the row has an `album_id`. A dangling id 400s with
+                    "label_id does not reference an existing label". Independent of the
+                    free-text `record_label`, and does not reset `tracklist_lookup_attempted_at`.
       responses:
         '200':
           description: >-
-            The updated rotation row, projected to the same eight columns
+            The updated rotation row, projected to the same ten columns
             `GET /library/rotation/uncatalogued` publishes. Not the raw `wxyc_schema.rotation`
             row — that also carries server-derived plumbing (`legacy_rotation_id`,
             `discogs_release_id`, `lml_identity_id`, the attempt-at markers) which this
@@ -2235,7 +2367,8 @@ paths:
           description: >
             Non-positive/non-integer `id`, empty body, a field with no `rotation` column
             (`alphabetical_name`/`format`/`format_size`), a blank or over-128-character
-            text field, or a malformed/impossible `add_date`/`kill_date`.
+            text field, a malformed/impossible `add_date`/`kill_date`, a non-positive
+            `format_id`/`label_id`, or a `format_id`/`label_id` referencing no row.
         '401':
           description: Missing or invalid bearer token.
         '403':
@@ -2244,10 +2377,12 @@ paths:
           description: No rotation row with that id.
         '409':
           description: >
-            One or more of `artist_name`/`album_title`/`record_label` was sent for a
-            rotation row linked to a library release (`album_id` is not NULL). The remedy
-            is field-specific: `album_title`/`record_label` are editable via
-            `PATCH /library/{album_id}` (`album_title`/`label`); `artist_name` is not —
+            One or more pre-catalog fields
+            (`artist_name`/`album_title`/`record_label`/`format_id`/`label_id`) was sent
+            for a rotation row linked to a library release (`album_id` is not NULL). The
+            remedy is field-specific: `album_title`, `record_label`, `format_id` and
+            `label_id` are editable via `PATCH /library/{album_id}` (as `album_title`,
+            `label`, `format_id`, `label_id`); `artist_name` is not —
             `library.artist_name` is derived from the linked `artists` row via `artist_id`,
             and no endpoint currently supports renaming an artist or setting free-text
             `artist_name` on a catalogued release.

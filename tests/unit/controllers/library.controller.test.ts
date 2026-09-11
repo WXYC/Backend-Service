@@ -40,6 +40,8 @@ const mockGetRotationFromDB = jest.fn<() => Promise<unknown[]>>();
 const mockAddToRotation = jest.fn<(fields: Record<string, unknown>) => Promise<Record<string, unknown>>>();
 const mockKillRotationInDB = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
 const mockGetUncataloguedRotationFromDB = jest.fn<(page?: { limit?: number; offset?: number }) => Promise<unknown[]>>();
+// GET /library/rotation/:id (BS#2410).
+const mockGetRotationRowFromDB = jest.fn<(id: number) => Promise<Record<string, unknown> | undefined>>();
 type LinkRotationOutcomeMock =
   | { outcome: 'linked'; rotation: Record<string, unknown> }
   | { outcome: 'rotation_not_found' }
@@ -151,24 +153,22 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   getRotationFromDB: mockGetRotationFromDB,
   addToRotation: mockAddToRotation,
   killRotationInDB: mockKillRotationInDB,
-  // Real projection, not a stub: the controller now routes its 200 through
-  // this, so a pass-through mock would assert a shape the endpoint no longer
-  // returns. Mirrors `UNCATALOGUED_ROTATION_PROJECTION`'s key set. (Value and
-  // helper exports going missing from these hand-maintained mocks is the
-  // recurring hazard tracked in WXYC/Backend-Service#2209.)
-  ROTATION_SNAPSHOT_COLUMNS: ['artist_name', 'album_title', 'record_label'] as const,
-  toRotationRowSummary: (row) =>
-    Object.fromEntries(
-      ['id', 'album_id', 'rotation_bin', 'add_date', 'kill_date', 'artist_name', 'album_title', 'record_label'].map(
-        (key) => [key, row?.[key]]
-      )
-    ),
+  // Real projection and real field lists, not stubs: the controller routes
+  // its 200 through `toRotationRowSummary`, reads both field lists for its
+  // validation loop and 409 message, and destructures
+  // `UNCATALOGUED_ROTATION_MAX_LIMIT` at module load for its bound check
+  // (omitting it makes the ceiling `undefined`, so `limit > undefined` is
+  // false and every over-limit request silently 200s). All four come from one
+  // shared declaration rather than a per-suite copy — value and helper exports
+  // drifting out of these hand-maintained mocks is
+  // WXYC/Backend-Service#2209.
+  ...jest
+    .requireActual<typeof import('../../mocks/library-service-rotation.mock')>(
+      '../../mocks/library-service-rotation.mock'
+    )
+    .createLibraryServiceRotationMock(),
   getUncataloguedRotationFromDB: mockGetUncataloguedRotationFromDB,
-  // Not a function — a real value export the controller destructures at module
-  // load for its 400 message and bound check. Omitting it makes the ceiling
-  // `undefined`, so `limit > undefined` is false and every over-limit request
-  // silently 200s.
-  UNCATALOGUED_ROTATION_MAX_LIMIT: 500,
+  getRotationRowFromDB: mockGetRotationRowFromDB,
   linkRotationToAlbum: mockLinkRotationToAlbum,
   insertAlbum: mockInsertAlbum,
   updateArtworkUrl: mockUpdateArtworkUrl,
@@ -278,6 +278,7 @@ import {
   deleteAlbum,
   addRotation,
   getUncataloguedRotation,
+  getRotationRow,
   linkRotationToAlbum,
   pickAddRotationFields,
   getArtistCard,
@@ -1506,6 +1507,52 @@ describe('library.controller', () => {
 
       expect(picked).toEqual({ rotation_bin: 'L', artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' });
     });
+
+    // BS#2410: the two pre-catalog FKs ride the SAME `album_id == null`
+    // branch as the text trio, not both branches. On a linked add the format
+    // and label come from the library row, and a rotation-side copy invites
+    // the drift `record_label` would.
+    it('picks format_id and label_id when album_id is absent', () => {
+      const picked = pickAddRotationFields({
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+        format_id: 3,
+        label_id: 91,
+      });
+
+      expect(picked).toEqual({
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+        format_id: 3,
+        label_id: 91,
+      });
+    });
+
+    it('drops format_id and label_id when album_id is present, exactly like the trio', () => {
+      const picked = pickAddRotationFields({
+        album_id: 5,
+        rotation_bin: 'M',
+        artist_name: 'Forged Artist',
+        format_id: 3,
+        label_id: 91,
+      });
+
+      expect(picked).toEqual({ album_id: 5, rotation_bin: 'M' });
+    });
+
+    it('drops explicitly-null FKs rather than writing NULL over them', () => {
+      const picked = pickAddRotationFields({
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+        format_id: null,
+        label_id: null,
+      });
+
+      expect(picked).toEqual({ rotation_bin: 'L', artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' });
+    });
   });
 
   describe('addRotation (BS#2109)', () => {
@@ -1771,6 +1818,88 @@ describe('library.controller', () => {
       expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 7, rotation_bin: 'M' });
       expect(res.status).toHaveBeenCalledWith(201);
     });
+
+    // BS#2410: the pre-catalog FKs, accepted on the uncatalogued branch and
+    // validated against their tables so a stale id is a named 400 rather
+    // than a PG 23503 → 500.
+    describe('pre-catalog FKs on the uncatalogued branch (BS#2410)', () => {
+      const uncataloguedBody = (extra: Record<string, unknown>) => ({
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+        ...extra,
+      });
+
+      beforeEach(() => {
+        mockGetFormatById.mockReset().mockResolvedValue({ id: 3, format_name: 'CD' });
+        mockGetLabelById.mockReset().mockResolvedValue({ id: 91, label_name: 'Rough Trade' });
+        mockAddToRotation.mockResolvedValue({ id: 9, album_id: null, rotation_bin: 'L' });
+      });
+
+      it('writes both FKs through to the insert', async () => {
+        const res = mockResponse();
+
+        await addRotation({ body: uncataloguedBody({ format_id: 3, label_id: 91 }) } as unknown as Request, res, next);
+
+        expect(mockAddToRotation).toHaveBeenCalledWith(expect.objectContaining({ format_id: 3, label_id: 91 }));
+        expect(res.status).toHaveBeenCalledWith(201);
+      });
+
+      it.each([
+        ['format_id', 0],
+        ['format_id', -1],
+        ['format_id', 1.5],
+        ['format_id', '3'],
+        ['label_id', 0],
+        ['label_id', 'ninety-one'],
+      ])('returns 400 for %s: %p', async (field, value) => {
+        const res = mockResponse();
+
+        await expect(
+          addRotation({ body: uncataloguedBody({ [field]: value }) } as unknown as Request, res, next)
+        ).rejects.toThrow(`${field} must be a positive integer`);
+        expect(mockAddToRotation).not.toHaveBeenCalled();
+      });
+
+      it('returns 400 with the established wording for a dangling format_id', async () => {
+        mockGetFormatById.mockResolvedValue(undefined);
+        const res = mockResponse();
+
+        await expect(
+          addRotation({ body: uncataloguedBody({ format_id: 4242 }) } as unknown as Request, res, next)
+        ).rejects.toThrow('format_id does not reference an existing format');
+        expect(mockAddToRotation).not.toHaveBeenCalled();
+      });
+
+      it('returns 400 with the established wording for a dangling label_id', async () => {
+        mockGetLabelById.mockResolvedValue(undefined);
+        const res = mockResponse();
+
+        await expect(
+          addRotation({ body: uncataloguedBody({ label_id: 4242 }) } as unknown as Request, res, next)
+        ).rejects.toThrow('label_id does not reference an existing label');
+        expect(mockAddToRotation).not.toHaveBeenCalled();
+      });
+
+      // Mirrors the trio's rule exactly: on a linked add the FKs are dropped
+      // by `pickAddRotationFields`, so validating them would fail a request
+      // over a value that is never written.
+      it('does not validate the FKs when album_id is present — they are dropped anyway', async () => {
+        mockAddToRotation.mockResolvedValue({ id: 10, album_id: 7, rotation_bin: 'M' });
+        const res = mockResponse();
+
+        await addRotation(
+          { body: { album_id: 7, rotation_bin: 'M', format_id: 999999, label_id: 999999 } } as unknown as Request,
+          res,
+          next
+        );
+
+        expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 7, rotation_bin: 'M' });
+        expect(mockGetFormatById).not.toHaveBeenCalled();
+        expect(mockGetLabelById).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(201);
+      });
+    });
   });
 
   describe('getUncataloguedRotation (BS#2109)', () => {
@@ -1816,6 +1945,82 @@ describe('library.controller', () => {
       await expect(getUncataloguedRotation(req, res, next)).rejects.toThrow('offset must be a non-negative integer');
       expect(mockGetUncataloguedRotationFromDB).not.toHaveBeenCalled();
     });
+  });
+
+  describe('getRotationRow (BS#2410)', () => {
+    // Ten keys, not eight: the BS#2409 pre-catalog FKs joined the published
+    // projection in BS#2410. Spelled out rather than derived so this suite
+    // fails if the shared service double and the real projection ever part.
+    const uncataloguedRow = {
+      id: 7007,
+      album_id: null,
+      rotation_bin: 'L',
+      add_date: '2026-09-01',
+      kill_date: null,
+      artist_name: 'Jockstrap',
+      album_title: 'I Love You Jennifer B',
+      record_label: 'Rough Trade',
+      format_id: 2,
+      label_id: 91,
+    };
+
+    beforeEach(() => {
+      mockGetRotationRowFromDB.mockReset();
+    });
+
+    it('returns the row for an unlinked rotation id', async () => {
+      mockGetRotationRowFromDB.mockResolvedValue(uncataloguedRow);
+      const req = { params: { id: '7007' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getRotationRow(req, res, next);
+
+      expect(mockGetRotationRowFromDB).toHaveBeenCalledWith(7007);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(uncataloguedRow);
+    });
+
+    // The referent rule at the controller boundary: a LINKED row still
+    // publishes its own pre-catalog `format_id`/`label_id` — typically NULL —
+    // not the linked release's. The sibling `GET /library/rotation` means the
+    // opposite by the same key name, so this is pinned rather than assumed.
+    it('returns a linked row, publishing its own pre-catalog fields and not those of the library release', async () => {
+      const linkedRow = { ...uncataloguedRow, album_id: 5, format_id: null, label_id: null };
+      mockGetRotationRowFromDB.mockResolvedValue(linkedRow);
+      const req = { params: { id: '7007' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getRotationRow(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(linkedRow);
+      const body = (res.json as jest.Mock).mock.calls[0][0] as Record<string, unknown>;
+      expect(body.album_id).toBe(5);
+      expect(body.format_id).toBeNull();
+      expect(body.label_id).toBeNull();
+    });
+
+    it('returns 404 when no rotation row carries that id', async () => {
+      mockGetRotationRowFromDB.mockResolvedValue(undefined);
+      const req = { params: { id: '999999' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getRotationRow(req, res, next)).rejects.toThrow('Rotation entry not found');
+      expect(res.json).not.toHaveBeenCalled();
+    });
+
+    // Same strict spelling every other `/library/:id` read uses — `Number()`
+    // would alias '1e21', '0x2a', ' 42 ' and '007' onto one resource.
+    it.each(['abc', '42abc', '0', '-1', '1.5', '007', ' 42 ', '0x2a'])(
+      'returns 400 for the malformed id %p without reaching the service',
+      async (id) => {
+        const req = { params: { id } } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(getRotationRow(req, res, next)).rejects.toThrow('Invalid rotation ID');
+        expect(mockGetRotationRowFromDB).not.toHaveBeenCalled();
+      }
+    );
   });
 
   describe('linkRotationToAlbum (BS#2109)', () => {
@@ -3611,6 +3816,127 @@ describe('library.controller', () => {
 
         expect(mockUpdateRotation).toHaveBeenCalledWith(42, { add_date: '2024-01-15', kill_date: null });
         expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      // BS#2410: the FKs are pre-catalog fields too, so they take the same
+      // 409 rather than the asymmetry where `record_label: 'X'` conflicts
+      // while `label_id: 7` quietly succeeds on the very same linked row.
+      it.each([
+        ['format_id', 3],
+        ['label_id', 91],
+      ])('rejects %s with the same 409 the trio gets', async (field, value) => {
+        const res = mockResponse();
+
+        await expect(updateRotation(reqFor({ [field]: value }), res, next)).rejects.toMatchObject({
+          statusCode: 409,
+          message: expect.stringContaining(field),
+        });
+      });
+
+      it('names a real remedy for both FKs — PATCH /library/:id accepts each by name', async () => {
+        const res = mockResponse();
+
+        await expect(updateRotation(reqFor({ format_id: 3, label_id: 91 }), res, next)).rejects.toMatchObject({
+          statusCode: 409,
+          message: expect.stringContaining('edit format_id, label_id via PATCH /library/3 instead'),
+        });
+      });
+    });
+
+    // BS#2410 item 4/5: the two FKs join the updatable set on the PATCH
+    // surface, validated as integers here and against their tables before the
+    // write, so a stale id is a named 400 rather than a PG 23503 → 500.
+    describe('pre-catalog FKs (format_id / label_id) — BS#2410', () => {
+      beforeEach(() => {
+        mockGetFormatById.mockReset().mockResolvedValue({ id: 3, format_name: 'CD' });
+        mockGetLabelById.mockReset().mockResolvedValue({ id: 91, label_name: 'Drag City' });
+      });
+
+      it('forwards both FKs to the service', async () => {
+        mockUpdateRotation.mockResolvedValue({ outcome: 'updated', rotation: { id: 42, format_id: 3, label_id: 91 } });
+        const res = mockResponse();
+
+        await updateRotation(reqFor({ format_id: 3, label_id: 91 }), res, next);
+
+        expect(mockUpdateRotation).toHaveBeenCalledWith(42, { format_id: 3, label_id: 91 });
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('accepts either FK as the ONLY field in the body', async () => {
+        mockUpdateRotation.mockResolvedValue({ outcome: 'updated', rotation: { id: 42, format_id: 3 } });
+        const res = mockResponse();
+
+        await updateRotation(reqFor({ format_id: 3 }), res, next);
+
+        expect(mockUpdateRotation).toHaveBeenCalledWith(42, { format_id: 3 });
+      });
+
+      it('accepts an explicit null to clear either FK', async () => {
+        mockUpdateRotation.mockResolvedValue({ outcome: 'updated', rotation: { id: 42 } });
+        const res = mockResponse();
+
+        await updateRotation(reqFor({ format_id: null, label_id: null }), res, next);
+
+        expect(mockUpdateRotation).toHaveBeenCalledWith(42, { format_id: null, label_id: null });
+        // Nothing to look up when the caller is clearing the reference.
+        expect(mockGetFormatById).not.toHaveBeenCalled();
+        expect(mockGetLabelById).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['format_id', 0],
+        ['format_id', -1],
+        ['format_id', 1.5],
+        ['format_id', '3'],
+        ['label_id', 0],
+        ['label_id', 'ninety-one'],
+      ])('returns 400 for %s: %p', async (field, value) => {
+        const res = mockResponse();
+
+        await expect(updateRotation(reqFor({ [field]: value }), res, next)).rejects.toThrow(
+          `${field} must be a positive integer or null`
+        );
+        expect(mockUpdateRotation).not.toHaveBeenCalled();
+      });
+
+      // The established wording, verbatim — `updateAlbum` already 400s with
+      // these exact strings for the same two dangling references.
+      it('returns 400 with the established wording for a dangling format_id', async () => {
+        mockGetFormatById.mockResolvedValue(undefined);
+        const res = mockResponse();
+
+        await expect(updateRotation(reqFor({ format_id: 4242 }), res, next)).rejects.toThrow(
+          'format_id does not reference an existing format'
+        );
+        expect(mockUpdateRotation).not.toHaveBeenCalled();
+      });
+
+      it('returns 400 with the established wording for a dangling label_id', async () => {
+        mockGetLabelById.mockResolvedValue(undefined);
+        const res = mockResponse();
+
+        await expect(updateRotation(reqFor({ label_id: 4242 }), res, next)).rejects.toThrow(
+          'label_id does not reference an existing label'
+        );
+        expect(mockUpdateRotation).not.toHaveBeenCalled();
+      });
+
+      // `format` (the JSP's free-text field) stays rejected. Removing the
+      // rejection would not enable anything — the wire field is `format_id` —
+      // it would only turn a precise 400 into a silent 200-no-write.
+      it('still rejects the no-column `format` field, now pointing at format_id', async () => {
+        const res = mockResponse();
+
+        await expect(updateRotation(reqFor({ format: 'CD' }), res, next)).rejects.toThrow(
+          /no rotation column exists for format — .*format_id/
+        );
+        expect(mockUpdateRotation).not.toHaveBeenCalled();
+      });
+
+      it('names both FKs in the empty-body 400, so the message lists what is writable', async () => {
+        const res = mockResponse();
+
+        await expect(updateRotation(reqFor({}), res, next)).rejects.toThrow(/format_id.*label_id/s);
       });
     });
 

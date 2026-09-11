@@ -9,19 +9,27 @@
  * dispatch loop a Layer whose Route does not handle the request method sets
  * `match = false` and dispatch falls through to the next layer. So the
  * `GET /rotation/uncatalogued` vs. `PATCH /rotation/:id` pair cited in the
- * original #2164 note could never actually collide — only a future literal
+ * original #2164 note could never actually collide — only a literal
  * registered for the SAME method as the parameterized route can be shadowed.
- * The order assertion is kept because that future is cheap to arrive at
- * (#2109 adding a `PATCH /rotation/uncatalogued`, say) and expensive to
- * debug, but the classifier below is deliberately narrow so it flags only
- * genuinely shadowable paths.
+ * The order assertion was kept because that future was cheap to arrive at and
+ * expensive to debug, and the classifier below is deliberately narrow so it
+ * flags only genuinely shadowable paths.
+ *
+ * **That future arrived in WXYC/Backend-Service#2410**, which registers
+ * `GET /rotation/:id` alongside the literal `GET /rotation/uncatalogued` —
+ * the first genuine same-method hazard on this router, and exactly the case
+ * the narrow classifier exists to flag. The header reasoning above is still
+ * correct as written; what changed is that the assertions are now scoped BY
+ * METHOD, because "registered earlier in the stack" only shadows within one
+ * method.
  *
  * Two levels of coverage:
  *   1. Structural — inspect the Express router's own `.stack` to assert the
- *      registration order directly.
+ *      registration order directly, per method.
  *   2. Behavioral — a request to the literal `/rotation/:rotation_id/tracks`
  *      path still reaches its own handler rather than being captured by
- *      `/rotation/:id`.
+ *      `/rotation/:id`, and `GET /rotation/uncatalogued` still reaches the
+ *      queue handler rather than the new single-row read.
  *
  * Mirrors the mock scaffolding of
  * tests/unit/routes/library-discogs-recheck-permissions.route.test.ts —
@@ -66,20 +74,23 @@ type UpdateRotationOutcome =
   | { outcome: 'not_found' }
   | { outcome: 'linked_conflict'; albumId: number };
 const mockUpdateRotation = jestGlobals.fn<() => Promise<UpdateRotationOutcome>>();
+const mockGetUncataloguedRotationFromDB = jestGlobals.fn<() => Promise<unknown[]>>();
+const mockGetRotationRowFromDB = jestGlobals.fn<() => Promise<unknown>>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
-  // Real projection, not a stub: the controller now routes its 200 through
-  // this, so a pass-through mock would assert a shape the endpoint no longer
-  // returns. Mirrors `UNCATALOGUED_ROTATION_PROJECTION`'s key set. (Value and
-  // helper exports going missing from these hand-maintained mocks is the
-  // recurring hazard tracked in WXYC/Backend-Service#2209.)
-  ROTATION_SNAPSHOT_COLUMNS: ['artist_name', 'album_title', 'record_label'] as const,
-  toRotationRowSummary: (row) =>
-    Object.fromEntries(
-      ['id', 'album_id', 'rotation_bin', 'add_date', 'kill_date', 'artist_name', 'album_title', 'record_label'].map(
-        (key) => [key, row?.[key]]
-      )
-    ),
+  // Real projection and real field lists, not stubs: the controller routes
+  // its 200 through `toRotationRowSummary` and reads the two field lists for
+  // its validation loop and its 409 message, so a pass-through mock would
+  // assert a shape the endpoint does not return. One shared declaration
+  // rather than a per-suite copy — value and helper exports drifting out of
+  // these hand-maintained mocks is WXYC/Backend-Service#2209.
+  ...jest
+    .requireActual<typeof import('../../mocks/library-service-rotation.mock')>(
+      '../../mocks/library-service-rotation.mock'
+    )
+    .createLibraryServiceRotationMock(),
+  getUncataloguedRotationFromDB: mockGetUncataloguedRotationFromDB,
+  getRotationRowFromDB: mockGetRotationRowFromDB,
   markAlbumMissing: jest.fn(),
   markAlbumFound: jest.fn(),
   getAlbumFromDB: jest.fn(),
@@ -197,34 +208,58 @@ describe('rotation route shadowing classifier (BS#2113)', () => {
   });
 });
 
-describe('library.route rotation ordering (BS#2113)', () => {
-  test('every literal one-segment /rotation/<name> route is registered before /rotation/:id', () => {
-    const layers = rotationLayers();
-    const paramLayerIndex = layers.findIndex((l) => l.path === PARAM_PATH);
+describe('library.route rotation ordering (BS#2113, BS#2410)', () => {
+  // Scoped by method: a Layer whose Route does not handle the request method
+  // never matches, so `/rotation/uncatalogued` (GET) is shadowable by
+  // `/rotation/:id`'s GET registration and untouchable by its PATCH one.
+  // Asserting across all methods at once would have flagged the pre-#2410
+  // router — where the only parameterized registration was a PATCH — as a
+  // defect it did not have.
+  test.each([['get'], ['patch']])(
+    'every literal one-segment /rotation/<name> %s route is registered before the same-method /rotation/:id',
+    (method) => {
+      const layers = rotationLayers().filter((l) => l.methods.includes(method));
+      const paramLayerIndex = layers.findIndex((l) => l.path === PARAM_PATH);
 
-    expect(paramLayerIndex).toBeGreaterThan(-1);
+      expect(paramLayerIndex).toBeGreaterThan(-1);
 
-    // No shadowable literal exists on this router today — `/rotation` and
-    // `/rotation/:rotation_id/tracks` are both out of `:id`'s reach — so this
-    // assertion is vacuously true until #2109 (or a successor) adds one.
-    // The classifier itself is pinned by the table above so it can't rot in
-    // the meantime.
-    const shadowableIndices = layers
-      .map((l, i) => ({ i, path: l.path }))
-      .filter((l) => isShadowableByRotationIdParam(l.path))
-      .map((l) => l.i);
+      const shadowableIndices = layers
+        .map((l, i) => ({ i, path: l.path }))
+        .filter((l) => isShadowableByRotationIdParam(l.path))
+        .map((l) => l.i);
 
-    for (const index of shadowableIndices) {
-      expect(index).toBeLessThan(paramLayerIndex);
+      for (const index of shadowableIndices) {
+        expect(index).toBeLessThan(paramLayerIndex);
+      }
     }
+  );
+
+  // The GET arm above is only load-bearing while a shadowable literal exists
+  // to order against. Before #2410 there was none and the assertion was
+  // vacuous; this pins that at least one genuinely-shadowable same-method
+  // literal is present, so a router that lost `/rotation/uncatalogued` can't
+  // quietly satisfy the ordering test by having nothing left to shadow.
+  test('the GET pair is a real same-method hazard, not a vacuous assertion', () => {
+    const getLayers = rotationLayers().filter((l) => l.methods.includes('get'));
+
+    expect(getLayers.filter((l) => isShadowableByRotationIdParam(l.path)).map((l) => l.path)).toContain(
+      '/rotation/uncatalogued'
+    );
+    expect(getLayers.some((l) => l.path === PARAM_PATH)).toBe(true);
   });
 
-  test('registers exactly one PATCH handler on /rotation/:id', () => {
+  test('registers exactly one handler per method on /rotation/:id (GET read, PATCH write)', () => {
     const layers = rotationLayers();
     const paramLayers = layers.filter((l) => l.path === '/rotation/:id');
 
-    expect(paramLayers).toHaveLength(1);
-    expect(paramLayers[0].methods).toEqual(['patch']);
+    // One Layer per `library_route.<method>()` call, so the two registrations
+    // are two entries rather than one entry with two methods.
+    expect(
+      paramLayers
+        .map((l) => l.methods)
+        .flat()
+        .sort()
+    ).toEqual(['get', 'patch']);
   });
 
   test('a request to the literal /rotation/:rotation_id/tracks path still reaches its own handler', async () => {
@@ -236,6 +271,44 @@ describe('library.route rotation ordering (BS#2113)', () => {
 
     expect(res.status).toBe(200);
     expect(mockUpdateRotation).not.toHaveBeenCalled();
+  });
+
+  // The behavioral half of the same-method hazard: ordering asserted on the
+  // stack is one thing, dispatch actually honouring it is another.
+  test('GET /rotation/uncatalogued reaches the queue handler, not the new single-row read', async () => {
+    mockRole('dj');
+    mockGetUncataloguedRotationFromDB.mockReset().mockResolvedValue([]);
+    mockGetRotationRowFromDB.mockReset();
+
+    const res = await request(app).get('/library/rotation/uncatalogued').set('Authorization', 'Bearer test-token');
+
+    expect(res.status).toBe(200);
+    expect(mockGetUncataloguedRotationFromDB).toHaveBeenCalledTimes(1);
+    expect(mockGetRotationRowFromDB).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /library/rotation/:id — permission tier (BS#2410, catalog:read)', () => {
+  beforeEach(() => {
+    mockGetRotationRowFromDB.mockReset().mockResolvedValue({ id: 5, album_id: null, artist_name: 'Juana Molina' });
+  });
+
+  // Deliberately a LOWER tier than the PATCH on the same path: the single-row
+  // read matches its read siblings (`GET /rotation`,
+  // `GET /rotation/uncatalogued`), not the editor.
+  test('a dj-role token (catalog:read only) is authorized', async () => {
+    mockRole('dj');
+    const res = await request(app).get('/library/rotation/5').set('Authorization', 'Bearer test-token');
+
+    expect(res.status).toBe(200);
+    expect(mockGetRotationRowFromDB).toHaveBeenCalledWith(5);
+  });
+
+  test('a request with no Authorization header is rejected', async () => {
+    const res = await request(app).get('/library/rotation/5');
+
+    expect(res.status).toBe(401);
+    expect(mockGetRotationRowFromDB).not.toHaveBeenCalled();
   });
 });
 

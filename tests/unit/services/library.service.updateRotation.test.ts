@@ -227,6 +227,104 @@ describe('updateRotation (BS#2113)', () => {
     });
   });
 
+  /**
+   * BS#2410's two-list split, and the reason it is a split rather than a
+   * repointing.
+   *
+   * `format_id` and `label_id` are pre-catalog fields like the text trio:
+   * refused on a linked row, written through the same `album_id IS NULL`-
+   * guarded transactional path. But they are NOT snapshot text. The tier-3
+   * tracklist picker keys its cache on `(artist_name, album_title)`, so a
+   * format-or-label-only edit has nothing stale to invalidate — and nulling
+   * `tracklist_lookup_attempted_at` for it would re-arm the documented 22-second
+   * LML cascade on every such edit, silently, visible only as latency.
+   *
+   * So `updateRotation` carries TWO booleans: `touchesPrecatalog` (trio + both
+   * FKs) drives the transaction and the linked-row guard; `touchesSnapshot`
+   * (the trio alone) drives the timestamp reset and the LRU eviction, and
+   * nothing else. Pointing the single pre-#2410 flag at the wider list would
+   * produce exactly the regression these tests exist to catch.
+   */
+  describe('pre-catalog FKs (format_id / label_id) — BS#2410 two-list split', () => {
+    test.each([
+      ['format_id', { format_id: 3 }],
+      ['label_id', { label_id: 91 }],
+      ['both FKs', { format_id: 3, label_id: 91 }],
+    ])('a %s-only edit does NOT null tracklist_lookup_attempted_at', async (_label, updates) => {
+      const chain = createMockQueryChain([{ id: 42, ...updates }]);
+      db.update.mockReturnValueOnce(chain);
+
+      await updateRotation(42, updates);
+
+      expect(chain.set).toHaveBeenCalledWith(updates);
+      const setArg = chain.set.mock.calls[0][0] as Record<string, unknown>;
+      expect(setArg).not.toHaveProperty('tracklist_lookup_attempted_at');
+    });
+
+    test.each([
+      ['format_id', { format_id: 3 }],
+      ['label_id', { label_id: 91 }],
+    ])('a %s-only edit still takes the transactional, album_id-guarded path', async (_label, updates) => {
+      // The guard is the half that DOES follow the wider list: these columns
+      // may only be set while the row is unlinked, and `rotation` is a live
+      // ingest target, so the precondition rides in the UPDATE's own WHERE.
+      const plainChain = createMockQueryChain([{ id: 42, kill_date: '2024-06-01' }]);
+      db.update.mockReturnValueOnce(plainChain);
+      await updateRotation(42, { kill_date: '2024-06-01' });
+      const plainWhere = plainChain.where.mock.calls[0][0];
+
+      db.transaction.mockClear();
+      db.update.mockClear();
+      const guardedChain = createMockQueryChain([{ id: 42, ...updates }]);
+      db.update.mockReturnValueOnce(guardedChain);
+      await updateRotation(42, updates);
+
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(guardedChain.where.mock.calls[0][0])).not.toEqual(JSON.stringify(plainWhere));
+    });
+
+    test('a format_id edit on a linked row resolves linked_conflict, same as a snapshot edit', async () => {
+      const updateChain = createMockQueryChain([]); // guarded UPDATE matches nothing
+      db.update.mockReturnValueOnce(updateChain);
+      mockSelectViaLimit([{ album_id: 7 }]);
+
+      const outcome = await updateRotation(42, { format_id: 3 });
+
+      expect(outcome).toEqual({ outcome: 'linked_conflict', albumId: 7 });
+    });
+
+    test('an FK edit bundled WITH snapshot text does null the marker — the trio is what arms it', async () => {
+      const chain = createMockQueryChain([{ id: 42 }]);
+      db.update.mockReturnValueOnce(chain);
+
+      await updateRotation(42, { format_id: 3, artist_name: 'Juana Molina' });
+
+      expect(chain.set).toHaveBeenCalledWith({
+        format_id: 3,
+        artist_name: 'Juana Molina',
+        tracklist_lookup_attempted_at: null,
+      });
+    });
+
+    test('an FK edit bundled with a date keeps the date and stays off the marker', async () => {
+      const chain = createMockQueryChain([{ id: 42 }]);
+      db.update.mockReturnValueOnce(chain);
+
+      await updateRotation(42, { label_id: 91, add_date: '2024-01-15' });
+
+      expect(chain.set).toHaveBeenCalledWith({ label_id: 91, add_date: '2024-01-15' });
+    });
+
+    test('an explicit null clears either FK', async () => {
+      const chain = createMockQueryChain([{ id: 42, format_id: null, label_id: null }]);
+      db.update.mockReturnValueOnce(chain);
+
+      await updateRotation(42, { format_id: null, label_id: null });
+
+      expect(chain.set).toHaveBeenCalledWith({ format_id: null, label_id: null });
+    });
+  });
+
   // Real drizzle never issues this UPDATE: `mapUpdateSet` throws
   // `Error: No values to set` before it generates any SQL, so an earlier
   // version of this test — which asserted `chain.set` was called with `{}` —
