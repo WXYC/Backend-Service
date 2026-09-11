@@ -183,6 +183,13 @@ describe('Library ETL', () => {
    * holds 2,070 rows that collide on Postgres's `cta_unique_idx` tuple, so
    * the batched importer meets a duplicate inside one multi-row statement.
    * The seed carries such a pair; exactly one row must land.
+   *
+   * A `count` of 0 here is more likely a stale MySQL volume than a broken
+   * batcher: `dev_env/etl-seed.sql` is mounted into
+   * `docker-entrypoint-initdb.d`, which MySQL runs only on an empty data
+   * dir, and `npm run test:etl:env` brings the container up without
+   * recreating it. Run `npm run test:etl:clean` first if the etl profile
+   * predates this commit.
    */
   it('dedupes an intra-batch duplicate compilation track', async () => {
     const rows = await pg`

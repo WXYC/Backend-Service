@@ -832,9 +832,23 @@ const importCompilationTracks = async (
       // A malformed row now aborts a 1,000-row statement rather than a
       // 1-row one; either way it aborts the transaction, so the only thing
       // lost is which row it was. Log the window so it stays identifiable.
+      //
+      // The offsets index `values` — the rows that RESOLVED to a library row
+      // — not the upstream `COMPILATION_TRACK_ARTIST` rows, and every row
+      // dropped by the `!libraryId` skip above shifts them. So name the
+      // window's endpoints by their key tuple as well: with a non-zero
+      // `skipped` count the offsets alone cannot be mapped back to the
+      // source table, and this branch only runs when the whole transaction
+      // has already aborted.
       const first = index * CTA_INSERT_CHUNK_ROWS;
+      const head = batch[0];
+      const tail = batch[batch.length - 1];
+      const describe = (row: (typeof batch)[number]) =>
+        `library_id=${row.library_id} artist=${JSON.stringify(row.artist_name)} track=${JSON.stringify(row.track_title)}`;
       console.error(
-        `[library-etl] Compilation track insert failed on batch ${index + 1}/${batches.length} (rows ${first}-${first + batch.length - 1} of ${values.length}).`
+        `[library-etl] Compilation track insert failed on batch ${index + 1}/${batches.length} ` +
+          `(resolved rows ${first}-${first + batch.length - 1} of ${values.length}; ` +
+          `first: ${describe(head)}; last: ${describe(tail)}).`
       );
       throw error;
     }
@@ -1475,7 +1489,12 @@ export {
   buildLegacySourcedSetWhere,
   ensureArtist,
   findArtistId,
-  // BS#2424 — the compilation-track batcher.
+  // BS#2424 — the compilation-track batcher and the array splitter it uses.
+  // `importCompilationTracks` is exported so a test can pin the STATEMENT
+  // COUNT: every other test in this change passes identically against the
+  // old row-at-a-time loop, so without this the batching itself — the whole
+  // point of BS#2424 — has no regression guard.
+  importCompilationTracks,
   chunk,
 };
 
