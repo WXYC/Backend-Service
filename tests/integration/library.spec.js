@@ -1184,6 +1184,106 @@ describe('Library Rotation', () => {
       const res = await auth.patch(`/library/rotation/${created.id}/link`).send({}).expect(400);
       expectErrorContains(res, 'Missing Parameters');
     });
+
+    /**
+     * BS#2410 item 6 / plan D7 — link-time flowsheet resolution.
+     *
+     * tubafrenzy's `processImportToLibrary` had a third step Backend dropped:
+     * after attaching the library release to the rotation row it retroactively
+     * pointed that row's already-logged plays at the new release. Without it a
+     * dj-site-era import is invisible to every scheduled repair forever —
+     * `jobs/legacy-linkage-resolve` joins on legacy ids, and an import through
+     * this endpoint mints a `legacy_release_id` no flowsheet row references.
+     *
+     * FK-keyed only, and deliberately so: only a play carrying this
+     * `rotation_id` with a NULL `album_id` flips. A free-text play of the same
+     * promo keeps its snapshot-match display path, and a play already pointing
+     * at some other release is never repointed.
+     */
+    describe('flowsheet resolution (BS#2410, plan D7)', () => {
+      const createdFlowsheetIds = [];
+      let sql;
+
+      beforeAll(() => {
+        sql = getTestDb();
+      });
+
+      afterAll(async () => {
+        if (createdFlowsheetIds.length > 0) {
+          await sql`DELETE FROM ${sql(SCHEMA)}.flowsheet WHERE id = ANY(${createdFlowsheetIds})`;
+        }
+        // Pool is shared with the rest of the integration suite; do NOT close it.
+      });
+
+      /**
+       * A play row, inserted straight into PG rather than through the flowsheet
+       * endpoints — those require a live show and a DJ session, neither of which
+       * this behavior depends on. `play_order` is NOT NULL with no default;
+       * `show_id` is deliberately omitted (flowsheet permits NULL for entries
+       * orphaned from a show), same as `enrichment-worker-claim.spec.js`.
+       */
+      async function insertPlay({ rotationId = null, albumId = null, suffix }) {
+        const rows = await sql`
+          INSERT INTO ${sql(SCHEMA)}.flowsheet
+            (play_order, entry_type, artist_name, album_title, track_title, rotation_id, album_id)
+          VALUES
+            (99998, 'track', ${'link-flowsheet-test-artist-' + suffix}, 'Link Test Album',
+             'Link Test Track', ${rotationId}, ${albumId})
+          RETURNING id
+        `;
+        createdFlowsheetIds.push(rows[0].id);
+        return rows[0].id;
+      }
+
+      const albumIdOf = async (flowsheetId) => {
+        const rows = await sql`SELECT album_id FROM ${sql(SCHEMA)}.flowsheet WHERE id = ${flowsheetId}`;
+        return rows[0].album_id;
+      };
+
+      test("links the rotation row's own NULL-album plays and nothing else", async () => {
+        const created = await createUncataloguedRotation();
+
+        const rotationPlay = await insertPlay({ rotationId: created.id, suffix: 'linked' });
+        // Same promo played as free text: no rotation_id to key on, so it keeps
+        // the snapshot-match display path rather than being repointed by guess.
+        const freeTextPlay = await insertPlay({ suffix: 'freetext' });
+        // Already resolved to a different release — the `album_id IS NULL`
+        // guard is what keeps this from being overwritten.
+        const alreadyLinkedPlay = await insertPlay({ rotationId: created.id, albumId: 2, suffix: 'already' });
+
+        await auth.patch(`/library/rotation/${created.id}/link`).send({ album_id: 1 }).expect(200);
+
+        expect(await albumIdOf(rotationPlay)).toBe(1);
+        expect(await albumIdOf(freeTextPlay)).toBeNull();
+        expect(await albumIdOf(alreadyLinkedPlay)).toBe(2);
+      });
+
+      // The guard that matters more than the happy path: `already_linked` is
+      // reached on a row whose plays may still be unresolved, and flipping them
+      // there would point them at an album this request never linked.
+      test("a 409 already_linked leaves the rotation row's plays untouched", async () => {
+        const created = await createUncataloguedRotation();
+        await auth.patch(`/library/rotation/${created.id}/link`).send({ album_id: 1 }).expect(200);
+
+        // Logged AFTER the first link, so the first link's UPDATE could not have
+        // reached it — this row's NULL album_id is the second call's to flip.
+        const play = await insertPlay({ rotationId: created.id, suffix: 'already-linked-outcome' });
+
+        const res = await auth.patch(`/library/rotation/${created.id}/link`).send({ album_id: 2 }).expect(409);
+        expectErrorContains(res, 'already linked');
+
+        expect(await albumIdOf(play)).toBeNull();
+      });
+
+      test("a 404 album_not_found leaves the rotation row's plays untouched", async () => {
+        const created = await createUncataloguedRotation();
+        const play = await insertPlay({ rotationId: created.id, suffix: 'album-not-found' });
+
+        await auth.patch(`/library/rotation/${created.id}/link`).send({ album_id: 9999999 }).expect(404);
+
+        expect(await albumIdOf(play)).toBeNull();
+      });
+    });
   });
 
   // BS#2113: field-level rotation edit. `killRotation` above and this route

@@ -2212,6 +2212,23 @@ paths:
         release via LML free-text lookup until `discogs_release_id` is
         independently backfilled; display elsewhere is unaffected because it
         reads through the library join once album_id resolves.
+
+
+        **BS#2410: linking also resolves the rotation row's flowsheet
+        plays.** In the same transaction, every `flowsheet` row carrying this
+        `rotation_id` with a NULL `album_id` is repointed at the linked
+        release — the third step of tubafrenzy's `processImportToLibrary`,
+        which Backend previously dropped. The match is FK-keyed only: a
+        free-text play of the same promo carries no `rotation_id` and keeps
+        its snapshot-match display path deliberately, and a play that already
+        resolved to some other release is never overwritten. No other outcome
+        writes to `flowsheet` — a 404 or a 409 (including the
+        linked-between-check-and-write race) leaves every play untouched.
+
+
+        The response shape is unchanged. The number of plays resolved is
+        observability only, published as the `rotation_link.flowsheet_rows_linked`
+        span attribute rather than serialized.
       security:
         - BearerAuth: ['catalog-write']
       parameters:
