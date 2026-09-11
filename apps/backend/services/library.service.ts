@@ -996,7 +996,13 @@ export const getRotationRowFromDB = async (rotationId: number): Promise<Uncatalo
 };
 
 export type LinkRotationOutcome =
-  | { outcome: 'linked'; rotation: UncataloguedRotationRow }
+  /**
+   * `flowsheetRowsLinked` is how many of the rotation row's plays this link
+   * resolved (BS#2410). It exists for logging, and is deliberately absent from
+   * every other variant rather than reported as `0` — no other outcome runs
+   * the UPDATE, and a `0` there would read as "ran, matched nothing".
+   */
+  | { outcome: 'linked'; rotation: UncataloguedRotationRow; flowsheetRowsLinked: number }
   | { outcome: 'rotation_not_found' }
   | { outcome: 'already_linked' }
   | { outcome: 'album_not_found' };
@@ -1005,6 +1011,14 @@ export type LinkRotationOutcome =
  * Links an uncatalogued rotation row to a library release (BS#2109's
  * `PATCH /library/rotation/:rotation_id/link` — the "Import to Library"
  * step of the tubafrenzy `/wxycdb` workflow).
+ *
+ * **Two writes, one transaction (BS#2410 / plan D7).** The rotation row's
+ * `album_id`, then the rotation row's own already-logged flowsheet plays. The
+ * second write is the JSP's third step, which Backend had dropped; its
+ * predicates, why it is FK-keyed rather than text-matched, and the enrichment
+ * carryover it accepts are all documented at the statement itself. The count of
+ * plays it resolved comes back on the `linked` outcome for logging — the
+ * controller keeps it off the wire.
  *
  * **Review round 3 finding 1: deliberately does NOT clear `artist_name` /
  * `album_title` / `record_label`.** The first revision cleared the trio in
@@ -1107,7 +1121,46 @@ export const linkRotationToAlbum = async (rotationId: number, albumId: number): 
       return { outcome: 'already_linked' as const };
     }
 
-    return { outcome: 'linked' as const, rotation: updated };
+    // BS#2410 / plan D7 — the JSP's third step, which Backend dropped.
+    // tubafrenzy's `processImportToLibrary` retroactively pointed the rotation
+    // row's already-logged plays at the new release
+    // (`resolveLibraryReleaseForRotation`); this function set
+    // `rotation.album_id` and stopped. The gap is not self-healing: the
+    // scheduled repair `jobs/legacy-linkage-resolve` joins on legacy ids only,
+    // and an import through this endpoint mints a `legacy_release_id` that no
+    // flowsheet row references, so that cohort was invisible to it forever.
+    //
+    // FK-keyed only, and both conjuncts are load-bearing:
+    //   - `rotation_id` is the whole match rule. A free-text play of the same
+    //     promo carries none and keeps its snapshot-match display path
+    //     deliberately — text matching here would repoint plays this rotation
+    //     row never accounted for.
+    //   - `album_id IS NULL` leaves a play that already resolved to some other
+    //     release alone, the same anti-join discipline
+    //     `legacy-linkage-resolve` uses.
+    //
+    // Inside the same transaction as the rotation UPDATE above, so a link is
+    // all-or-nothing rather than a rotation row pointing at a release whose
+    // plays were half-flipped. It is also reached on no other outcome: both
+    // `already_linked` paths and the two not-found paths return above. The
+    // race is the one worth naming — the winning request owns the linkage, so
+    // flipping plays here would point them at the release THIS request failed
+    // to attach.
+    //
+    // **Known carryover, accepted (plan D7; follow-up
+    // WXYC/Backend-Service#2411).** The flip moves rows across the
+    // `album_id IS NOT NULL` partition the enrichment jobs key on, so a row
+    // carrying a terminal `enriched_no_match` verdict lands in the linked
+    // cohort with no scheduled sweeper reaching it. Tolerable at roughly two
+    // imports a week, and the ticket makes it a known cohort rather than a
+    // surprise.
+    const linkedPlays = await tx
+      .update(flowsheet)
+      .set({ album_id: albumId })
+      .where(and(eq(flowsheet.rotation_id, rotationId), isNull(flowsheet.album_id)))
+      .returning({ id: flowsheet.id });
+
+    return { outcome: 'linked' as const, rotation: updated, flowsheetRowsLinked: linkedPlays.length };
   });
 };
 

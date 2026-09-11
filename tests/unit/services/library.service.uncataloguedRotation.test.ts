@@ -13,7 +13,10 @@
  *     the snapshot columns — see the function's doc for why. Also (finding
  *     4) that the linked response is projected through the same
  *     `UNCATALOGUED_ROTATION_PROJECTION` the queue read uses, not a bare
- *     `.returning()`.
+ *     `.returning()`. And, from BS#2410, the second UPDATE that resolves the
+ *     rotation row's flowsheet plays: its two predicates, the count it reports,
+ *     and — the guard that matters more than the happy path — that it fires on
+ *     no outcome but `linked`.
  *
  * Follows the established `db._chain` / `createMockQueryChain` override
  * conventions from `library.service.addToRotation.test.ts` and
@@ -22,7 +25,7 @@
  * read gets its terminal method's resolved value overridden per test.
  */
 import { jest } from '@jest/globals';
-import { db, createMockQueryChain, rotation, library } from '../../mocks/database.mock';
+import { db, createMockQueryChain, rotation, library, flowsheet } from '../../mocks/database.mock';
 
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockIsLmlConfigured = jest.fn<() => boolean>();
@@ -274,13 +277,14 @@ describe('linkRotationToAlbum (BS#2109)', () => {
       record_label: 'Preserved Label',
     };
     const updateChain = createMockQueryChain([updatedRow]);
+    const flowsheetUpdateChain = createMockQueryChain([{ id: 11 }, { id: 12 }]);
 
     db.select.mockReturnValueOnce(albumChain).mockReturnValueOnce(rotationSelectChain);
-    db.update.mockReturnValue(updateChain);
+    db.update.mockReturnValueOnce(updateChain).mockReturnValueOnce(flowsheetUpdateChain);
 
     const result = await linkRotationToAlbum(ROTATION_ID, ALBUM_ID);
 
-    expect(result).toEqual({ outcome: 'linked', rotation: updatedRow });
+    expect(result).toEqual({ outcome: 'linked', rotation: updatedRow, flowsheetRowsLinked: 2 });
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(albumChain.from).toHaveBeenCalledWith(library);
     // Only album_id moves — no artist_name/album_title/record_label keys.
@@ -311,6 +315,71 @@ describe('linkRotationToAlbum (BS#2109)', () => {
     });
   });
 
+  /**
+   * BS#2410 item 6 / plan D7 — the second UPDATE, in the same transaction.
+   *
+   * The pins that matter are its two predicates. `rotation_id` makes it
+   * FK-keyed: a free-text play of the same promo carries no rotation_id and is
+   * deliberately left on its snapshot-match display path rather than repointed
+   * by text. `album_id IS NULL` keeps it from overwriting a play that already
+   * resolved somewhere else. Widening either one is the regression this asserts
+   * against — the WHERE is compared whole rather than by substring so a dropped
+   * conjunct cannot pass.
+   */
+  it("links the rotation row's NULL-album flowsheet plays in the same transaction, FK-keyed", async () => {
+    const albumChain = createMockQueryChain();
+    albumChain.limit = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
+
+    const rotationSelectChain = createMockQueryChain();
+    rotationSelectChain.limit = jest.fn().mockResolvedValue([{ album_id: null }]);
+
+    const updateChain = createMockQueryChain([{ id: ROTATION_ID, album_id: ALBUM_ID }]);
+    const flowsheetUpdateChain = createMockQueryChain([{ id: 11 }, { id: 12 }, { id: 13 }]);
+
+    db.select.mockReturnValueOnce(albumChain).mockReturnValueOnce(rotationSelectChain);
+    db.update.mockReturnValueOnce(updateChain).mockReturnValueOnce(flowsheetUpdateChain);
+
+    const result = await linkRotationToAlbum(ROTATION_ID, ALBUM_ID);
+
+    // Two UPDATEs, in order: the rotation row, then its plays. The count is on
+    // the outcome for logging; `library.controller.ts` deliberately keeps it
+    // off the wire.
+    expect(db.update).toHaveBeenCalledTimes(2);
+    expect(db.update).toHaveBeenNthCalledWith(1, rotation);
+    expect(db.update).toHaveBeenNthCalledWith(2, flowsheet);
+    expect(result).toEqual({
+      outcome: 'linked',
+      rotation: { id: ROTATION_ID, album_id: ALBUM_ID },
+      flowsheetRowsLinked: 3,
+    });
+
+    expect(flowsheetUpdateChain.set).toHaveBeenCalledWith({ album_id: ALBUM_ID });
+    expect(flowsheetUpdateChain.where).toHaveBeenCalledWith({
+      and: [{ eq: [flowsheet.rotation_id, ROTATION_ID] }, { isNull: flowsheet.album_id }],
+    });
+  });
+
+  it('reports zero linked plays when the rotation row has none', async () => {
+    const albumChain = createMockQueryChain();
+    albumChain.limit = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
+
+    const rotationSelectChain = createMockQueryChain();
+    rotationSelectChain.limit = jest.fn().mockResolvedValue([{ album_id: null }]);
+
+    db.select.mockReturnValueOnce(albumChain).mockReturnValueOnce(rotationSelectChain);
+    db.update
+      .mockReturnValueOnce(createMockQueryChain([{ id: ROTATION_ID, album_id: ALBUM_ID }]))
+      .mockReturnValueOnce(createMockQueryChain([]));
+
+    const result = await linkRotationToAlbum(ROTATION_ID, ALBUM_ID);
+
+    expect(result).toEqual({
+      outcome: 'linked',
+      rotation: { id: ROTATION_ID, album_id: ALBUM_ID },
+      flowsheetRowsLinked: 0,
+    });
+  });
+
   it('rejects double-linking when the rotation row already has an album_id', async () => {
     const albumChain = createMockQueryChain();
     albumChain.limit = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
@@ -323,6 +392,8 @@ describe('linkRotationToAlbum (BS#2109)', () => {
     const result = await linkRotationToAlbum(ROTATION_ID, ALBUM_ID);
 
     expect(result).toEqual({ outcome: 'already_linked' });
+    // Covers BS#2410's flowsheet UPDATE too: neither write runs on a row this
+    // request did not link.
     expect(db.update).not.toHaveBeenCalled();
   });
 
@@ -368,5 +439,11 @@ describe('linkRotationToAlbum (BS#2109)', () => {
     const result = await linkRotationToAlbum(ROTATION_ID, ALBUM_ID);
 
     expect(result).toEqual({ outcome: 'already_linked' });
+    // BS#2410: the race is the one path where the rotation UPDATE runs and
+    // still must not resolve any plays — the winning request linked this row
+    // to some other album, and flipping its plays here would point them at the
+    // release THIS request failed to attach.
+    expect(db.update).toHaveBeenCalledTimes(1);
+    expect(db.update).not.toHaveBeenCalledWith(flowsheet);
   });
 });

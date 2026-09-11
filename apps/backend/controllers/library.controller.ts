@@ -1623,6 +1623,11 @@ export type LinkRotationRequest = {
  * why (review round 3 finding 1: clearing them stranded the tracklist
  * picker with no self-heal path). The response is a projected shape, not
  * the raw `.returning()` row (finding 4) — see the same doc.
+ *
+ * BS#2410 (plan D7) added the JSP's third step to that transaction: the
+ * rotation row's own flowsheet plays are repointed at the new release. The
+ * response shape is unchanged — the count of resolved plays is observability
+ * only, projected onto the active span rather than serialized.
  */
 export const linkRotationToAlbum: RequestHandler<{ rotation_id: string }, unknown, LinkRotationRequest> = async (
   req,
@@ -1651,6 +1656,21 @@ export const linkRotationToAlbum: RequestHandler<{ rotation_id: string }, unknow
     case 'already_linked':
       throw new WxycError('Rotation entry is already linked to a library release', 409);
     case 'linked':
+      // BS#2410 (plan D7): how many of this rotation row's flowsheet plays the
+      // link resolved. Deliberately NOT on the wire — dj-site has nothing to
+      // render from it and the published shape is pinned to the rotation
+      // projection — but an import's blast radius should be reconstructable
+      // from tracing rather than by querying the flowsheet after the fact.
+      // Own try/catch for the same reason the streaming-check projection has
+      // one: the write is already committed, so a telemetry failure must not
+      // turn a successful link into a 500.
+      try {
+        Sentry.getActiveSpan()?.setAttributes({
+          'rotation_link.flowsheet_rows_linked': result.flowsheetRowsLinked,
+        });
+      } catch (e) {
+        console.warn('Failed to project rotation-link telemetry onto span:', (e as Error).message);
+      }
       res.status(200).json(result.rotation);
       break;
     default: {

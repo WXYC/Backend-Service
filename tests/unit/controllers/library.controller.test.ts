@@ -42,8 +42,11 @@ const mockKillRotationInDB = jest.fn<() => Promise<Record<string, unknown> | und
 const mockGetUncataloguedRotationFromDB = jest.fn<(page?: { limit?: number; offset?: number }) => Promise<unknown[]>>();
 // GET /library/rotation/:id (BS#2410).
 const mockGetRotationRowFromDB = jest.fn<(id: number) => Promise<Record<string, unknown> | undefined>>();
+// `flowsheetRowsLinked` (BS#2410) rides the `linked` variant for logging only;
+// the controller projects it onto the active span and keeps it off the wire,
+// which the 200 test below pins.
 type LinkRotationOutcomeMock =
-  | { outcome: 'linked'; rotation: Record<string, unknown> }
+  | { outcome: 'linked'; rotation: Record<string, unknown>; flowsheetRowsLinked: number }
   | { outcome: 'rotation_not_found' }
   | { outcome: 'already_linked' }
   | { outcome: 'album_not_found' };
@@ -2271,6 +2274,7 @@ describe('library.controller', () => {
   describe('linkRotationToAlbum (BS#2109)', () => {
     beforeEach(() => {
       mockLinkRotationToAlbum.mockReset();
+      mockSpan.setAttributes.mockClear();
     });
 
     it('returns 400 for a non-numeric rotation_id', async () => {
@@ -2309,10 +2313,14 @@ describe('library.controller', () => {
       expect(mockLinkRotationToAlbum).not.toHaveBeenCalled();
     });
 
-    it('returns 200 with the updated row on success', async () => {
+    // BS#2410: the flowsheet-resolution count reaches the controller on the
+    // `linked` outcome and must NOT reach the client — `res.json` is asserted
+    // whole rather than with `objectContaining`, so a stray key fails here.
+    it('returns 200 with the updated row on success, without the flowsheet-resolution count', async () => {
       mockLinkRotationToAlbum.mockResolvedValue({
         outcome: 'linked',
         rotation: { id: 42, album_id: 5, artist_name: null, album_title: null, record_label: null },
+        flowsheetRowsLinked: 3,
       });
       const req = { params: { rotation_id: '42' }, body: { album_id: 5 } } as unknown as Request;
       const res = mockResponse();
@@ -2328,6 +2336,18 @@ describe('library.controller', () => {
         album_title: null,
         record_label: null,
       });
+      // Where the count does go: the active span, so an import's blast radius
+      // is reconstructable from tracing.
+      expect(mockSpan.setAttributes).toHaveBeenCalledWith({ 'rotation_link.flowsheet_rows_linked': 3 });
+    });
+
+    it('projects nothing onto the span when no link happened', async () => {
+      mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'already_linked' });
+      const req = { params: { rotation_id: '42' }, body: { album_id: 5 } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('already linked');
+      expect(mockSpan.setAttributes).not.toHaveBeenCalled();
     });
 
     it('returns 404 when the rotation row does not exist', async () => {
