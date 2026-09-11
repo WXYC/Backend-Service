@@ -2302,19 +2302,42 @@ export const getArtistNameById = async (artist_id: number): Promise<string | nul
   return response[0]?.artist_name ?? null;
 };
 
+/**
+ * One (artist, genre) membership matching an artist prefix search.
+ *
+ * `code_number` is the artist's number *within* `genre_id`
+ * (`genre_artist_crossreference.artist_genre_code`), which is why the genre
+ * travels on the row: a multi-genre artist appears once per membership with a
+ * different number each time, and library-wide the row would otherwise not say
+ * which shelf its number belongs to. Mirrors `ArtistSearchMatch` in
+ * `wxyc-shared/api.yaml`; both genre fields are always present.
+ */
 export type ArtistInGenreSearchRow = {
   id: number;
   artist_name: string;
   code_letters: string;
   code_number: number;
+  genre_id: number;
+  genre_name: string;
 };
 
 /**
- * Prefix search for artists in a genre (catalog add-entry autocomplete).
- * `code_number` is the artist's number within that genre (`artist_genre_code`).
+ * Prefix search for catalogued artists, library-wide or scoped to one genre
+ * (BS#2410). Backs the catalog add-entry autocomplete, which passes a genre,
+ * and the rotation import screen's duplicate-artist guard, which cannot:
+ * "is this artist already filed anywhere?" is not a per-genre question.
+ *
+ * A `null` `genre_id` drops the filter; the `genres` join stays either way, so
+ * every row carries its genre in both modes.
+ *
+ * The limit applies to the membership join, not to distinct artists, so once
+ * the filter drops a four-genre artist consumes four of the caller's slots.
+ * It is clamped into 1..20 rather than rejected — the published contract
+ * documents 20 as a ceiling, not a rejection threshold, and callers wanting
+ * the widest window pass `limit=20`.
  */
 export const searchArtistsInGenre = async (
-  genre_id: number,
+  genre_id: number | null,
   q: string,
   limit: number
 ): Promise<ArtistInGenreSearchRow[]> => {
@@ -2327,18 +2350,30 @@ export const searchArtistsInGenre = async (
 
   // Escape %/_ so e.g. q='%a' can't short the prefix-search contract into a
   // contains-anything scan (review issue 14).
-  return db
-    .select({
-      id: artists.id,
-      artist_name: artists.artist_name,
-      code_letters: artists.code_letters,
-      code_number: genre_artist_crossreference.artist_genre_code,
-    })
-    .from(artists)
-    .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
-    .where(and(eq(genre_artist_crossreference.genre_id, genre_id), ilikeEscaped(artists.artist_name, prefix, 'prefix')))
-    .orderBy(asc(artists.artist_name))
-    .limit(cappedLimit);
+  const namePrefix = ilikeEscaped(artists.artist_name, prefix, 'prefix');
+
+  return (
+    db
+      .select({
+        id: artists.id,
+        artist_name: artists.artist_name,
+        code_letters: artists.code_letters,
+        code_number: genre_artist_crossreference.artist_genre_code,
+        genre_id: genre_artist_crossreference.genre_id,
+        genre_name: genres.genre_name,
+      })
+      .from(artists)
+      .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
+      .innerJoin(genres, eq(genres.id, genre_artist_crossreference.genre_id))
+      .where(genre_id === null ? namePrefix : and(eq(genre_artist_crossreference.genre_id, genre_id), namePrefix))
+      // Artist name is the caller-visible order; the two tiebreaks only make
+      // the LIMIT deterministic. Without them the rows dropped by a truncated
+      // library-wide search would vary between identical requests, since
+      // `artists` carries no unique constraint on the name and one artist can
+      // now contribute several rows.
+      .orderBy(asc(artists.artist_name), asc(artists.id), asc(genre_artist_crossreference.genre_id))
+      .limit(cappedLimit)
+  );
 };
 
 export const artistIdFromName = async (artist_name: string, genre_id: number): Promise<number> => {

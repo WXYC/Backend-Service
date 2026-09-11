@@ -548,12 +548,30 @@ type SearchArtistsInGenreQuery = {
   limit?: string;
 };
 
+/**
+ * `GET /library/artists/search` — prefix-search catalogued artists.
+ *
+ * `genre_id` is optional (BS#2410). Given, it scopes the search to that
+ * genre's memberships, exactly as before; omitted, the search is library-wide,
+ * which is what the rotation import screen's duplicate-artist guard needs —
+ * "is this artist already filed anywhere?" has no genre to ask it in. Either
+ * way the response is one row per (artist, genre) membership, each carrying
+ * its own genre.
+ *
+ * Permission tier stays `catalog: ['write']` (library.route.ts): dropping the
+ * filter widens the query, not the audience.
+ */
 export const searchArtistsInGenre: RequestHandler = async (
   req: Request<object, object, object, SearchArtistsInGenreQuery>,
   res
 ) => {
-  const genreId = Number(req.query.genre_id);
-  if (!Number.isInteger(genreId) || genreId < 1) {
+  // Only an absent `genre_id` means "library-wide". A present-but-empty
+  // `?genre_id=` is a client bug, not an omission — `Number('')` is 0, so it
+  // keeps the 400 it has always had rather than silently widening the search.
+  // A repeated key arrives as string[] and `Number()` makes it NaN, which the
+  // same guard rejects.
+  const genreId = req.query.genre_id === undefined ? null : Number(req.query.genre_id);
+  if (genreId !== null && (!Number.isInteger(genreId) || genreId < 1)) {
     throw new WxycError('Invalid genre_id: must be a positive integer', 400);
   }
 
@@ -572,7 +590,10 @@ export const searchArtistsInGenre: RequestHandler = async (
 
   // Distinguish a stale/unknown genre_id from a genre with no matching
   // artists — silent `{ artists: [] }` hides stale dropdown IDs from clients.
-  if (!(await libraryService.genreExists(genreId))) {
+  // Only reachable when a genre was given: with none there is no id to be
+  // stale, and a 404 would report "genre not found" for a search that never
+  // named one.
+  if (genreId !== null && !(await libraryService.genreExists(genreId))) {
     throw new WxycError('Genre not found', 404);
   }
 
