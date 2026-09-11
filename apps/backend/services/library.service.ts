@@ -3569,10 +3569,23 @@ export const getDiscogsUnavailableFlagsById = async (
   };
 };
 
+/**
+ * Shelf-location toggles. `date_lost` / `date_found` carry the whole state, and
+ * neither deliberately writes `last_modified`: where a record sits on the shelf
+ * is not a change to the catalogue record, and `last_modified` is what a
+ * librarian sorts and audits "recently changed" by. Both routes are gated to
+ * `catalog: ['read']` so any DJ pulling records fires them, which is why
+ * stamping the column here buried every genuine edit.
+ *
+ * The omission costs the catalogue no freshness signal: `library_watermark` —
+ * the catalog-export conditional-GET and gzip-cache key — is advanced by a
+ * trigger narrowed to the columns the export projects (migration 0142), and
+ * `last_modified`, `date_lost`, and `date_found` all sit outside that list.
+ */
 export const markAlbumMissing = async (album_id: number) => {
   const result = await db
     .update(library)
-    .set({ date_lost: sql`NOW()`, date_found: null, last_modified: sql`NOW()` })
+    .set({ date_lost: sql`NOW()`, date_found: null })
     .where(eq(library.id, album_id))
     .returning({ id: library.id });
   return result[0];
@@ -3581,7 +3594,7 @@ export const markAlbumMissing = async (album_id: number) => {
 export const markAlbumFound = async (album_id: number) => {
   const result = await db
     .update(library)
-    .set({ date_found: sql`NOW()`, last_modified: sql`NOW()` })
+    .set({ date_found: sql`NOW()` })
     .where(eq(library.id, album_id))
     .returning({ id: library.id });
   return result[0];

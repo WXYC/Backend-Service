@@ -1941,6 +1941,19 @@ describe('library.service', () => {
 
       expect(result).toBeUndefined();
     });
+
+    // BS#2436: a shelf-location toggle is not a catalogue edit. `last_modified`
+    // is what "recently changed" sorts by, so writing it here buried genuine
+    // edits under every DJ's missing/found flag.
+    it('does not write last_modified', async () => {
+      const chain = createMockQueryChain([{ id: 42 }]);
+      db.update.mockReturnValue(chain);
+      chain.returning = jest.fn().mockResolvedValue([{ id: 42 }]);
+
+      await markAlbumMissing(42);
+
+      expect(Object.keys(chain.set.mock.calls[0][0] as object).sort()).toEqual(['date_found', 'date_lost']);
+    });
   });
 
   describe('markAlbumFound', () => {
@@ -1963,6 +1976,16 @@ describe('library.service', () => {
       const result = await markAlbumFound(999);
 
       expect(result).toBeUndefined();
+    });
+
+    it('does not write last_modified', async () => {
+      const chain = createMockQueryChain([{ id: 42 }]);
+      db.update.mockReturnValue(chain);
+      chain.returning = jest.fn().mockResolvedValue([{ id: 42 }]);
+
+      await markAlbumFound(42);
+
+      expect(Object.keys(chain.set.mock.calls[0][0] as object).sort()).toEqual(['date_found']);
     });
   });
 
