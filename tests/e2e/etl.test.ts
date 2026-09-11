@@ -46,14 +46,16 @@ const etlEnv = {
 
 const runETL = (jobPath: string, jobName: string, { resetLastRun = true } = {}) => {
   if (resetLastRun) {
-    // Clear last_run to force a full import. `LIKE` rather than `=`
-    // (BS#2424): library-etl's secondary imports carry their own
-    // `library-etl:*` watermark rows, and leaving those behind would make
-    // this suite order-dependent — a second suite run would find them and
-    // take the bounded path. Same reason the README's full-re-sync recipe
-    // uses `LIKE`.
+    // Clear last_run to force a full import. The `:` clause is for BS#2424:
+    // library-etl's secondary imports carry their own `library-etl:*`
+    // watermark rows, and leaving those behind would make this suite
+    // order-dependent — a second suite run would find them and take the
+    // bounded path. Matched exactly (`= name OR LIKE 'name:%'`) rather than
+    // with a bare `name%` wildcard, because this helper drives every ETL job
+    // in the suite and must not reset a different job that merely shares a
+    // name prefix. Same predicate as the README's full-re-sync recipe.
     execSync(
-      `psql "postgres://etluser:etltest@localhost:${PG_PORT}/etldb" -c "DELETE FROM ${SCHEMA}.cronjob_runs WHERE job_name LIKE '${jobName}%'"`,
+      `psql "postgres://etluser:etltest@localhost:${PG_PORT}/etldb" -c "DELETE FROM ${SCHEMA}.cronjob_runs WHERE job_name = '${jobName}' OR job_name LIKE '${jobName}:%'"`,
       { stdio: 'pipe' }
     );
   }
@@ -65,12 +67,15 @@ const runETL = (jobPath: string, jobName: string, { resetLastRun = true } = {}) 
   });
 };
 
-/** Run a statement against the seeded tubafrenzy MySQL container. */
-const mysqlExec = (statement: string) => {
-  execSync(`docker exec -i ${MYSQL_CONTAINER} mysql -uetluser -petltest wxycmusic --default-character-set=utf8`, {
-    input: statement,
-    stdio: 'pipe',
-  });
+/**
+ * Run a statement against the seeded tubafrenzy MySQL container. Module scope
+ * so both the library-etl and flowsheet-etl blocks share one spelling of the
+ * container name, credentials and flags.
+ */
+const MYSQL_CMD = `docker exec -i ${MYSQL_CONTAINER} mysql -uetluser -petltest wxycmusic --batch --raw --silent`;
+
+const runMySQL = (sql: string) => {
+  execSync(MYSQL_CMD, { encoding: 'utf8', input: sql, stdio: 'pipe' });
 };
 
 beforeAll(async () => {
@@ -245,7 +250,7 @@ describe('Library ETL delta bounds (BS#2424)', () => {
   // left-behind edit would fail the `Library ETL` block's 'see also'
   // assertion on the next suite run against the same containers.
   afterAll(() => {
-    mysqlExec(
+    runMySQL(
       `UPDATE LIBRARY_CODE_CROSS_REFERENCE SET COMMENT = 'see also', TIME_LAST_MODIFIED = 1775000000000 WHERE ID = 2;`
     );
   });
@@ -289,7 +294,7 @@ describe('Library ETL delta bounds (BS#2424)', () => {
 
     // Far-future stamp so it is unambiguously past the watermark, which is
     // wall-clock `now()` from the previous run.
-    mysqlExec(
+    runMySQL(
       `UPDATE LIBRARY_CODE_CROSS_REFERENCE SET COMMENT = 'edited upstream', TIME_LAST_MODIFIED = 4102444800000 WHERE ID = 2;`
     );
 
@@ -501,12 +506,6 @@ describe('Flowsheet API ordering after ETL import', () => {
 });
 
 describe('Flowsheet ETL incremental sync', () => {
-  const MYSQL_CMD = `docker exec -i ${MYSQL_CONTAINER} mysql -uetluser -petltest wxycmusic --batch --raw --silent`;
-
-  const runMySQL = (sql: string) => {
-    execSync(MYSQL_CMD, { encoding: 'utf8', input: sql, stdio: 'pipe' });
-  };
-
   it('imports a new entry added to tubafrenzy after the initial sync', async () => {
     const newStartTime = Date.now();
     runMySQL(`
