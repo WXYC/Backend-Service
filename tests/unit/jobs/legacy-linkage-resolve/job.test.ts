@@ -1,7 +1,9 @@
 /**
- * Unit tests for `jobs/legacy-linkage-resolve` (BS#2064 liveness, hardened by BS#2071).
+ * Unit tests for `jobs/legacy-linkage-resolve` (BS#2064 liveness, hardened by
+ * BS#2071, lock-guarded by BS#2413).
  *
- * Two things are under test here and they pull in opposite directions:
+ * Three things are under test here and the first two pull in opposite
+ * directions:
  *
  *   1. The repair cohort must stay unbounded in time. Both passes anti-join on
  *      `album_id IS NULL` and nothing else — the `cronjob_runs` row this job
@@ -12,6 +14,13 @@
  *   2. A missed run must alert, and a healthy zero-candidate run must not —
  *      and, per BS#2071, so must a run that merely raced a benign concurrent
  *      write; only a genuine non-draining UPDATE may alert.
+ *   3. BS#2413: neither pass may wait on a lock for minutes. A pass with
+ *      nothing to do issues no UPDATE at all, and a pass that does have work
+ *      bounds its lock wait with `SET LOCAL lock_timeout` inside an explicit
+ *      transaction, standing down cleanly on `55P03`/`40P01` rather than
+ *      burning the 300 s `statement_timeout` and reporting a generic
+ *      "Failed query". The stand-down must be visible: its own Sentry
+ *      warning, and a heartbeat deliberately NOT advanced.
  */
 
 // `withMonitor` returns whatever the callback returns (and re-throws its
@@ -37,6 +46,7 @@ import {
   CHECKIN_MARGIN_MINUTES,
   CRON_SCHEDULE,
   JOB_NAME,
+  LINKAGE_LOCK_TIMEOUT_MS,
   MAX_RUNTIME_MINUTES,
   MAX_RUN_GAP_HOURS_DEFAULT,
   MONITOR_CONFIG,
@@ -56,6 +66,28 @@ const normalizedExecutedSql = (): string[] => executedSql().map((text) => text.r
 const findSqlMatching = (pattern: RegExp): string | undefined => executedSql().find((text) => pattern.test(text));
 
 /**
+ * The raw `db.execute` argument for the statement whose rendered text matches
+ * `pattern`. Used by the table-identity assertions below, which need the
+ * PRE-render `{ values }` array rather than the rendered string.
+ *
+ * Selects by content, not by call index: BS#2413 put a candidate pre-check and
+ * a `SET LOCAL lock_timeout` ahead of each pass's CTE, so a positional index
+ * would have to be re-derived every time the statement sequence changes.
+ */
+const executeCallMatching = (pattern: RegExp): { values: unknown[] } | undefined =>
+  (db.execute as jest.Mock).mock.calls.find((call) => pattern.test(renderSql(call[0])))?.[0] as
+    { values: unknown[] } | undefined;
+
+/**
+ * A Postgres lock-contention rejection, as the postgres-js driver surfaces it:
+ * an `Error` carrying a `code` property holding the SQLSTATE. `55P03`
+ * (`lock_not_available`) is our own `lock_timeout` firing; `40P01`
+ * (`deadlock_detected`) is the deadlock detector picking us as the victim.
+ */
+const lockContentionError = (code: '55P03' | '40P01' = '55P03'): Error =>
+  Object.assign(new Error('canceling statement due to lock timeout'), { code });
+
+/**
  * BS#2071: `candidates` and `resolved` now come back from a single
  * data-modifying CTE, in one row — there is no longer a separate "residual"
  * value to mock independently. Production code derives
@@ -64,16 +96,43 @@ const findSqlMatching = (pattern: RegExp): string | undefined => executedSql().f
  * a separately-issued post-write re-COUNT used to be able to (that was the
  * shape BS#2071 replaced — see `hasUnresolvedResidue`'s docblock in job.ts).
  */
-type PassMock = { candidates: number; resolved: number };
+type PassMock = {
+  candidates: number;
+  resolved: number;
+  /**
+   * What the BS#2413 pre-check COUNT saw, when that must differ from what the
+   * CTE goes on to measure. Defaults to `candidates`. The two are allowed to
+   * disagree — the pre-check is a gate, never an input to the drain
+   * comparison; see the "pre-check count never reaches the drain check" test.
+   */
+  precheck?: number;
+  /** Reject the CTE with a lock-contention SQLSTATE instead of resolving it. */
+  defer?: '55P03' | '40P01';
+};
 
 /**
- * Queue one pass's statements for a REAL (non-dry) run: the single combined
- * cohort-count-and-UPDATE CTE, then — only if it actually wrote something —
- * the conditional ANALYZE. Unlike the pre-BS#2071 shape, this issues exactly
- * one statement even for a zero-candidate pass: the combined statement itself
- * is what measures `candidates`, so there's nothing to check first.
+ * Queue one pass's statements for a REAL (non-dry) run:
+ *
+ *   1. the standalone candidate COUNT pre-check (BS#2413). A pass that sees
+ *      zero returns here and issues nothing else — no transaction, no
+ *      `SET LOCAL`, no UPDATE, and so no lock request at all: not on the
+ *      `library_watermark` singleton the rotation statement trigger takes,
+ *      and not on the `library` rows either pass's FK check reads.
+ *   2. `SET LOCAL lock_timeout`, then the combined cohort-count-and-UPDATE
+ *      CTE, both inside one explicit transaction (the `SET LOCAL` only binds
+ *      there under the postgres-js driver).
+ *   3. only if the CTE actually wrote something, the conditional ANALYZE —
+ *      deliberately outside the transaction.
  */
 const queuePass = (execute: jest.Mock, pass: PassMock): void => {
+  const seen = pass.precheck ?? pass.candidates;
+  execute.mockResolvedValueOnce([{ count: seen }]);
+  if (seen === 0) return;
+  execute.mockResolvedValueOnce([]); // SET LOCAL lock_timeout
+  if (pass.defer) {
+    execute.mockRejectedValueOnce(lockContentionError(pass.defer));
+    return;
+  }
   execute.mockResolvedValueOnce([{ candidates: pass.candidates, resolved: pass.resolved }]);
   if (pass.resolved > 0) execute.mockResolvedValueOnce([]); // ANALYZE
 };
@@ -117,12 +176,18 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
    * these constants is a deliberate, reviewable act, not a pattern to slip
    * past.
    *
-   * BS#2071 (this revision) folded each pass's COUNT and UPDATE into one
-   * data-modifying CTE (`resolveFlowsheetAlbumIds`/`resolveRotationAlbumIds`
-   * in job.ts), so the allowlisted text below covers the whole combined
-   * statement rather than a COUNT and an UPDATE separately. The plain
-   * COUNT-only statement survives only on the `--dry-run` path, which must
-   * count without writing.
+   * BS#2071 folded each pass's COUNT and UPDATE into one data-modifying CTE
+   * (`resolveFlowsheetAlbumIds`/`resolveRotationAlbumIds` in job.ts), so the
+   * allowlisted text below covers the whole combined statement rather than a
+   * COUNT and an UPDATE separately.
+   *
+   * BS#2413 put the plain COUNT back in FRONT of that CTE as a gate — a pass
+   * that sees no candidates issues no UPDATE, and therefore never queues
+   * behind whoever holds the `library_watermark` singleton row. That is a
+   * second, independent use of the same statement, not a revival of the
+   * two-snapshot comparison BS#2071 removed: the pre-check's number decides
+   * only whether to run the CTE, and is discarded the moment it does. The CTE
+   * remains the sole source of both `candidates` and `resolved`.
    *
    * `${flowsheet}`/`${rotation}`/`${library}` render as `''` under the mock
    * (`tests/mocks/database.mock.ts` models each as a plain object of
@@ -152,6 +217,10 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
     'SET album_id = l.id, artist_name = NULL, album_title = NULL, record_label = NULL FROM l, cohort c ' +
     'WHERE r.id = c.id AND r.legacy_library_release_id = l.legacy_release_id AND r.album_id IS NULL ' +
     'RETURNING 1 ) SELECT (SELECT COUNT(*)::int FROM cohort) AS candidates, (SELECT COUNT(*)::int FROM upd) AS resolved';
+  // BS#2413. Allowlisted alongside the repair statements because it is the
+  // guard that keeps them from waiting five minutes, and a silent drop would
+  // restore the failure mode without changing any other assertion here.
+  const SET_LOCK_TIMEOUT_SQL = `SET LOCAL lock_timeout = '${LINKAGE_LOCK_TIMEOUT_MS}ms'`;
 
   it('flowsheet drain statement matches the allowlisted statement exactly — no added predicate survives', async () => {
     queueRun({ candidates: 5, resolved: 5 }, { candidates: 0, resolved: 0 });
@@ -189,8 +258,8 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
 
     await runResolve(false);
 
-    const drainCall = (db.execute as jest.Mock).mock.calls[0][0] as { values: unknown[] };
-    expect(drainCall.values).toEqual([flowsheet, library, flowsheet, library]);
+    const drainCall = executeCallMatching(/upd AS/);
+    expect(drainCall?.values).toEqual([flowsheet, library, flowsheet, library]);
   });
 
   it('rotation drain statement interpolates rotation/library, not a swapped table, at each ${...} site', async () => {
@@ -198,19 +267,36 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
 
     await runResolve(false);
 
-    const drainCall = (db.execute as jest.Mock).mock.calls[1][0] as { values: unknown[] };
-    expect(drainCall.values).toEqual([rotation, library, rotation, library]);
+    const drainCall = executeCallMatching(/upd AS/);
+    expect(drainCall?.values).toEqual([rotation, library, rotation, library]);
   });
 
-  it('a zero-candidate real-run pass still issues its combined statement once, and never an ANALYZE', async () => {
+  it('a zero-candidate real-run pass issues its pre-check COUNT and nothing else — no UPDATE, no ANALYZE', async () => {
     queueRun({ candidates: 0, resolved: 0 }, { candidates: 0, resolved: 0 });
 
     await runResolve(false);
 
-    // The combined statement is what measures `candidates` — there's no
-    // separate pre-check to skip, so it always runs exactly once per pass,
-    // real or idle. Only a resolved write earns a follow-up ANALYZE.
-    expect(normalizedExecutedSql()).toEqual([FLOWSHEET_DRAIN_SQL, ROTATION_DRAIN_SQL]);
+    // BS#2413: the whole point of the pre-check. On the ~98% of runs with
+    // nothing to repair, this job now issues two MVCC-safe SELECTs and takes
+    // no write lock at all — where the BS#2071 shape ran its UPDATE arm
+    // unconditionally and so could queue behind `library-etl`'s quarter-hour
+    // transaction for a run that had nothing to do. A statement-level trigger
+    // fires even on `UPDATE 0`, so "the cohort is empty" was never protection.
+    expect(normalizedExecutedSql()).toEqual([FLOWSHEET_COUNT_SQL, ROTATION_COUNT_SQL]);
+  });
+
+  it('a pass with work wraps its CTE in a transaction that bounds the lock wait first', async () => {
+    queueRun({ candidates: 5, resolved: 5 }, { candidates: 0, resolved: 0 });
+
+    await runResolve(false);
+
+    // `SET LOCAL` only binds inside an explicit transaction under the
+    // postgres-js driver, and it must precede the statement it bounds.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    const statements = normalizedExecutedSql();
+    expect(statements[0]).toBe(FLOWSHEET_COUNT_SQL);
+    expect(statements[1]).toBe(SET_LOCK_TIMEOUT_SQL);
+    expect(statements[2]).toBe(FLOWSHEET_DRAIN_SQL);
   });
 
   it('a dry run issues only the two candidate COUNTs — no combined statement, no ANALYZE', async () => {
@@ -263,7 +349,9 @@ describe('legacy-linkage-resolve: UPDATE re-checks album_id IS NULL against a co
 
     await runResolve(false);
 
-    const [flowsheetSql] = normalizedExecutedSql();
+    const flowsheetSql = findSqlMatching(/upd AS/)
+      ?.replace(/\s+/g, ' ')
+      .trim();
     // Distinguishes the UPDATE's own predicate (right before `RETURNING 1`)
     // from `cohort`'s otherwise-identical `AND f.album_id IS NULL` earlier in
     // the same statement (which is followed by `),`, not `RETURNING 1`).
@@ -277,7 +365,9 @@ describe('legacy-linkage-resolve: UPDATE re-checks album_id IS NULL against a co
 
     await runResolve(false);
 
-    const [, rotationSql] = normalizedExecutedSql();
+    const rotationSql = findSqlMatching(/upd AS/)
+      ?.replace(/\s+/g, ' ')
+      .trim();
     expect(rotationSql).toContain(
       'WHERE r.id = c.id AND r.legacy_library_release_id = l.legacy_release_id AND r.album_id IS NULL RETURNING 1'
     );
@@ -428,7 +518,7 @@ describe('legacy-linkage-resolve: drain check (signal c)', () => {
     [7, true],
     [12, true],
   ])('residual=%s -> hasUnresolvedResidue=%s', (residual, expected) => {
-    expect(hasUnresolvedResidue({ candidates: 12, resolved: 12 - residual, residual })).toBe(expected);
+    expect(hasUnresolvedResidue({ candidates: 12, resolved: 12 - residual, residual, deferred: false })).toBe(expected);
   });
 
   it('does not alert on a healthy zero-candidate run', async () => {
@@ -521,5 +611,152 @@ describe('legacy-linkage-resolve: drain check (signal c)', () => {
     } finally {
       logSpy.mockRestore();
     }
+  });
+});
+
+describe('legacy-linkage-resolve: lock guard (BS#2413)', () => {
+  /**
+   * BS#2413. `wxyc_schema.library_watermark` is a SINGLE-row table
+   * (`CHECK (id = true)`, migration 0104) and seven `FOR EACH STATEMENT`
+   * triggers rewrite that one row — including
+   * `touch_library_watermark_from_rotation` (migration 0105) and the
+   * `library` trigger itself. Any statement that fires one takes an
+   * exclusive row lock on that row and holds it until COMMIT, so
+   * `jobs/library-etl`'s single 13-15 minute import transaction blocks this
+   * job's rotation UPDATE outright — and, because a statement-level trigger
+   * fires even on `UPDATE 0`, blocks it whether or not the cohort is empty.
+   *
+   * Two levers land here, and they cover disjoint halves of the problem:
+   *
+   *   - the candidate pre-check (allowlisted above) keeps a pass with nothing
+   *     to repair from issuing an UPDATE at all, so it never asks for the
+   *     watermark row;
+   *   - `SET LOCAL lock_timeout`, below the default 1 s `deadlock_timeout`,
+   *     bounds the wait for the pass that DOES have work, turning a 300 s
+   *     `statement_timeout` burn and a generic "Failed query" into a
+   *     seconds-long stand-down with a lock-specific SQLSTATE.
+   */
+  it('bounds the lock wait below the default deadlock_timeout', () => {
+    // Under 1000 ms on purpose. This job holds FOR KEY SHARE on `library`
+    // rows (the `album_id` FK check) and wants the watermark row;
+    // `library-etl` holds the watermark row and wants FOR UPDATE on `library`
+    // rows — a real cycle. Giving up before the deadlock detector runs means
+    // this job is always the side that stands down, never the reason
+    // `library-etl` loses a quarter-hour transaction as the chosen victim.
+    // Same reasoning, and the same value, as `DELETE_ALBUM_LOCK_TIMEOUT_MS`
+    // in `apps/backend/services/library.service.ts`.
+    expect(LINKAGE_LOCK_TIMEOUT_MS).toBeGreaterThan(0);
+    expect(LINKAGE_LOCK_TIMEOUT_MS).toBeLessThan(1000);
+  });
+
+  it.each([['55P03' as const], ['40P01' as const]])(
+    'stands down without throwing when the rotation CTE is rejected with %s',
+    async (code) => {
+      queueRun({ candidates: 0, resolved: 0 }, { candidates: 4, resolved: 0, defer: code });
+
+      const result = await runOnce(false);
+
+      expect(result.rotation.deferred).toBe(true);
+      expect(result.rotation.resolved).toBe(0);
+      // `residual: null`, not 0 — nothing was drained and nothing was
+      // measured. A 0 here would read as "cohort is clear".
+      expect(result.rotation.residual).toBeNull();
+      expect(result.flowsheet.deferred).toBe(false);
+    }
+  );
+
+  it('guards the flowsheet pass too, not only rotation', async () => {
+    // The flowsheet pass survives in production on DATA, not on design.
+    // `flowsheet` has no watermark trigger, but its UPDATE still takes
+    // FOR KEY SHARE on each `library` row it links (the `album_id` FK check),
+    // which can queue behind a FOR UPDATE `library-etl` holds on that row —
+    // so the first non-empty flowsheet cohort landing on a `library-etl` work
+    // slot reproduces the rotation failure, just by a narrower route.
+    queueRun({ candidates: 6, resolved: 0, defer: '55P03' }, { candidates: 0, resolved: 0 });
+
+    const result = await runOnce(false);
+
+    expect(result.flowsheet.deferred).toBe(true);
+    expect(result.rotation.deferred).toBe(false);
+  });
+
+  it('does not advance the cronjob_runs heartbeat on a stand-down', async () => {
+    // A skipped slot is a new way for the repair to be deferred. Advancing
+    // the heartbeat would make signal (b) read a run that repaired nothing as
+    // a successful one, so a persistent collision would look healthy forever.
+    queueRun({ candidates: 0, resolved: 0 }, { candidates: 4, resolved: 0, defer: '55P03' });
+
+    await runOnce(false);
+
+    expect(updateLastRun).not.toHaveBeenCalled();
+  });
+
+  it('still records the heartbeat when both passes complete', async () => {
+    queueRun({ candidates: 2, resolved: 2 }, { candidates: 1, resolved: 1 });
+
+    await runOnce(false);
+
+    expect(updateLastRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns with a lock-specific Sentry message, never the drain warning', async () => {
+    queueRun({ candidates: 0, resolved: 0 }, { candidates: 4, resolved: 0, defer: '55P03' });
+
+    await runOnce(false);
+
+    const messages = mockCaptureMessage.mock.calls.map((call) => call[0] as string);
+    expect(messages).toEqual([`${JOB_NAME}.lock_contention`]);
+    // `unresolved_candidates` asserts "the UPDATE did not resolve what it
+    // found". A stand-down never ran the UPDATE, so claiming that would be a
+    // report on a cohort this pass never looked at.
+    expect(messages).not.toContain(`${JOB_NAME}.unresolved_candidates`);
+    expect(mockCaptureMessage.mock.calls[0][1]).toEqual(
+      expect.objectContaining({
+        level: 'warning',
+        tags: expect.objectContaining({ step: 'lock-rotation' }),
+        extra: expect.objectContaining({ pass: 'rotation', candidates: 4 }),
+      })
+    );
+  });
+
+  it('lets a non-lock SQLSTATE propagate rather than swallowing it as a stand-down', async () => {
+    // 57014 is `query_canceled` — the 300 s `statement_timeout` firing. If the
+    // lock guard ever fails to bind, this is the error that comes back, and it
+    // must stay a hard failure rather than being reported as a clean skip.
+    const execute = db.execute as jest.Mock;
+    execute.mockResolvedValueOnce([{ count: 0 }]); // flowsheet pre-check
+    execute.mockResolvedValueOnce([{ count: 3 }]); // rotation pre-check
+    execute.mockResolvedValueOnce([]); // SET LOCAL
+    execute.mockRejectedValueOnce(
+      Object.assign(new Error('canceling statement due to statement timeout'), {
+        code: '57014',
+      })
+    );
+
+    await expect(runOnce(false)).rejects.toThrow('canceling statement due to statement timeout');
+    expect(updateLastRun).not.toHaveBeenCalled();
+  });
+
+  it('never feeds the pre-check count into the drain comparison (BS#2071 two-snapshot regression)', async () => {
+    // The pre-check sees 5; the CTE's own single snapshot sees 3 and drains
+    // all 3. That gap is the benign race BS#2071 exists to stop warning
+    // about — two rows left the cohort between the two statements. Comparing
+    // the pre-check's 5 against the CTE's 3 would resurrect exactly the false
+    // positive BS#2071 removed, on a run that did everything right.
+    queueRun({ candidates: 3, resolved: 3, precheck: 5 }, { candidates: 0, resolved: 0 });
+
+    const result = await runOnce(false);
+
+    expect(result.flowsheet).toEqual({ candidates: 3, resolved: 3, residual: 0, deferred: false });
+    expect(mockCaptureMessage).not.toHaveBeenCalled();
+  });
+
+  it('a dry run takes no transaction and sets no lock timeout', async () => {
+    queueDryRun(7, 4);
+
+    await runOnce(true);
+
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(findSqlMatching(/lock_timeout/i)).toBeUndefined();
   });
 });
