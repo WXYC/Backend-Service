@@ -39,6 +39,17 @@
  *      The tick checks back-pressure before the missed-pong verdict
  *      (BS#2426), so `missed_pong` is only ever reported for a client
  *      whose outbound buffer is healthy.
+ *
+ * App-level heartbeat frame (BS#2427). Native ping/pong is handled by the
+ * protocol layer and is not observable through the browser `WebSocket` API
+ * or any hand-rolled consumer that doesn't decode frames, so BS#1412's
+ * removal of the app-level frame made an idle-but-healthy stream look
+ * identical to a dead one for that population — a silent wire break for
+ * consumers outside this repo. The frame is therefore re-emitted on the same
+ * tick as the ping, alongside it and never instead of it: ping/pong stays
+ * the liveness mechanism (an app frame can't detect a half-open socket),
+ * while the frame exists purely so those consumers see traffic. Its shape is
+ * part of the wire contract, not an implementation detail — see `docs/cdc.md`.
  */
 
 import { Server as HttpServer, IncomingMessage } from 'http';
@@ -51,6 +62,15 @@ import type { CdcEvent } from '@wxyc/database';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const CDC_PATH = '/cdc';
+
+/**
+ * The app-level heartbeat frame (BS#2427), serialized once at module load
+ * because it never varies. The exact shape — `type` and nothing else — is
+ * the pre-BS#1412 contract that out-of-band consumers were written against,
+ * so this is a restoration, not a redesign: adding a timestamp or a sequence
+ * number here would be a new contract for a population we can't survey.
+ */
+const HEARTBEAT_FRAME = JSON.stringify({ type: 'heartbeat' });
 
 /**
  * Constant-time string comparison (BS#1136). The previous auth used
@@ -239,8 +259,9 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
   // terminate any client over the back-pressure threshold (slow consumer),
   // then any remaining client that didn't pong since the previous tick
   // (dead socket), then ping the survivors and clear their flag for next
-  // tick. Pre-#1134 this was an app-level JSON message which couldn't
-  // distinguish a wedged client from a slow one.
+  // tick. Pre-#1134 liveness was an app-level JSON message which couldn't
+  // distinguish a wedged client from a slow one; that message is back as a
+  // visibility frame only (BS#2427), never as the liveness signal.
   heartbeatTimer = setInterval(() => {
     if (!wss || wss.clients.size === 0) return;
     for (const client of wss.clients) {
@@ -282,6 +303,14 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
 
       isAlive.set(client, false);
       client.ping();
+
+      // App-level companion to the ping (BS#2427), for consumers that can't
+      // observe protocol frames. Placed after both termination checks so a
+      // client dying on this tick is never handed one last heartbeat, and
+      // routed through `safeSend` so it is subject to the same
+      // `bufferedAmount` guard as a fan-out event rather than being the one
+      // write that can grow an already-saturated buffer.
+      safeSend(client, HEARTBEAT_FRAME);
     }
   }, HEARTBEAT_INTERVAL_MS);
   heartbeatTimer.unref();
