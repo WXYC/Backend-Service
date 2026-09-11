@@ -2,10 +2,11 @@
  * Unit tests for `updateRotation` + its `killRotationInDB` delegate
  * (BS#2113).
  *
- * `updateRotation` is the sole writer of the five in-scope `rotation`
+ * `updateRotation` is the sole writer of the seven in-scope `rotation`
  * columns (`artist_name`, `album_title`, `record_label`, `add_date`,
- * `kill_date`) — both `PATCH /library/rotation/:id` (the new field-level
- * editor) and `PATCH /library/rotation` (`killRotation`, via
+ * `kill_date`, and — since BS#2410 — `format_id`, `label_id`) — both
+ * `PATCH /library/rotation/:id` (the field-level editor) and
+ * `PATCH /library/rotation` (`killRotation`, via
  * `killRotationInDB`) delegate to it rather than issuing their own UPDATE.
  * `killRotationInDB`'s wire behavior (default-to-`CURRENT_DATE` when no
  * date is supplied) must stay unchanged.

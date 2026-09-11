@@ -42,9 +42,12 @@ const mockGetRotationRowFromDB = jest.fn<() => Promise<unknown>>();
 jest.mock('../../../apps/backend/services/library.service', () => ({
   // The projection, the two field lists, and the queue ceiling come from the
   // shared rotation double (WXYC/Backend-Service#2209) rather than being
-  // restated here: `GET /rotation/:id` routes its 200 through the real
-  // `toRotationRowSummary`, so this suite acquired the drift hazard its two
-  // siblings already carried.
+  // restated here. This suite mounts the whole `library.route`, so it loads a
+  // controller that destructures `UNCATALOGUED_ROTATION_MAX_LIMIT` at module
+  // load — omitting it left the ceiling `undefined`, which is the drift its
+  // two sibling suites already guarded against by hand. (`GET /rotation/:id`
+  // itself does NOT route through `toRotationRowSummary`: its service query
+  // already projects the published column set — see `getRotationRowFromDB`.)
   ...jest
     .requireActual<typeof import('../../mocks/library-service-rotation.mock')>(
       '../../mocks/library-service-rotation.mock'

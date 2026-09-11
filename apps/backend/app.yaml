@@ -633,21 +633,28 @@ components:
         format_id:
           type: integer
           minimum: 1
+          nullable: true
           description: >-
             BS#2410. Optional pre-catalog `format(id)` reference. Like the
             free-text trio, accepted ONLY when `album_id` is omitted — on a
             linked add the format authority is `library.format_id`, and a
             rotation-side copy would drift from it. An id that references no
             `format` row 400s ("format_id does not reference an existing
-            format") rather than reaching Postgres as a 23503.
+            format") rather than reaching Postgres as a 23503. An explicit
+            `null` means ABSENT here, not "clear" — it is dropped unwritten
+            and unvalidated, so the `selected?.id ?? null` shape a picker
+            produces needs no client-side pruning. (On `PATCH
+            /library/rotation/{id}` the same `null` clears the column.)
         label_id:
           type: integer
           minimum: 1
+          nullable: true
           description: >-
             BS#2410. Optional pre-catalog `labels(id)` reference. Same
-            `album_id`-absent rule and same dangling-id 400 ("label_id does
-            not reference an existing label") as `format_id`. `record_label`
-            stays the free-text display snapshot and the two are independent.
+            `album_id`-absent rule, same null-means-absent rule, and same
+            dangling-id 400 ("label_id does not reference an existing label")
+            as `format_id`. `record_label` stays the free-text display
+            snapshot and the two are independent.
 
     UncataloguedRotationRow:
       type: object

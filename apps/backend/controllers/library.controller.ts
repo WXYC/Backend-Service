@@ -1290,8 +1290,20 @@ function isNonBlankString(value: unknown): value is string {
  * wording `updateAlbum` already 400s with for exactly these two references —
  * verbatim, so a client that learned the string from one endpoint recognizes
  * it from the other.
+ *
+ * The tuple is the single declaration of the pair: both write-path loops
+ * iterate it, and `ROTATION_PRECATALOG_FK_CHECKS` is typed `Record` over it,
+ * so a third pre-catalog FK is added once and the missing check is a compile
+ * error rather than a field that quietly skips validation on both paths.
  */
-const ROTATION_PRECATALOG_FK_CHECKS = {
+const ROTATION_PRECATALOG_FK_FIELDS = ['format_id', 'label_id'] as const;
+
+type RotationPrecatalogFk = (typeof ROTATION_PRECATALOG_FK_FIELDS)[number];
+
+const ROTATION_PRECATALOG_FK_CHECKS: Record<
+  RotationPrecatalogFk,
+  { exists: (id: number) => Promise<unknown>; danglingMessage: string }
+> = {
   format_id: {
     exists: (id: number) => libraryService.getFormatById(id),
     danglingMessage: 'format_id does not reference an existing format',
@@ -1300,9 +1312,7 @@ const ROTATION_PRECATALOG_FK_CHECKS = {
     exists: (id: number) => labelsService.getLabelById(id),
     danglingMessage: 'label_id does not reference an existing label',
   },
-} as const;
-
-type RotationPrecatalogFk = keyof typeof ROTATION_PRECATALOG_FK_CHECKS;
+};
 
 /**
  * Shape-check then existence-check one pre-catalog FK, or throw the 400.
@@ -1416,7 +1426,7 @@ export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = 
     // present `pickAddRotationFields` drops both FKs, so validating them there
     // would 400 a valid add over a value that is never written. `null` is
     // "absent" on this endpoint, so it is skipped rather than cleared.
-    for (const field of ['format_id', 'label_id'] as const) {
+    for (const field of ROTATION_PRECATALOG_FK_FIELDS) {
       if (body[field] == null) continue;
       await assertRotationPrecatalogFk(field, body[field], { nullable: false });
     }
@@ -1621,11 +1631,14 @@ function buildLinkedSnapshotConflictMessage(
 }
 
 /**
- * PATCH /library/rotation/:id (BS#2113): field-level edit for the five
- * `rotation` columns the tubafrenzy JSP editor (`rotationReleaseModify.jsp`)
- * exposes that actually have a column here — the alphabetical name, format,
- * and format-size fields on that same screen are rejected (no column;
- * `ROTATION_NO_COLUMN_FIELDS`), not silently dropped.
+ * PATCH /library/rotation/:id (BS#2113, widened by BS#2410): field-level edit
+ * for the seven `rotation` columns the tubafrenzy JSP editor
+ * (`rotationReleaseModify.jsp`) exposes that this endpoint can write — the
+ * BS#2113 five plus `format_id`/`label_id`. The alphabetical name, format,
+ * and format-size fields on that same screen stay rejected
+ * (`ROTATION_NO_COLUMN_FIELDS`) rather than silently dropped: the first two
+ * have no `rotation` column at all, and the JSP's free-text `format` is
+ * `format_id` here, so accepting the name would be a 200-no-write.
  *
  * True partial semantics — only fields present in the body are validated
  * and written — mirroring `updateAlbum`. Delegates to the same
@@ -1654,6 +1667,16 @@ function buildLinkedSnapshotConflictMessage(
  *      rotation row badges two different releases — on the BS read path and
  *      via `isActiveRotationMatch` on the tubafrenzy mirror write path
  *      (removed by BS#2403; the read-path badge in flowsheet.service.ts remains).
+ *
+ * **BS#2410 extends that 409 from the trio to the whole pre-catalog set**, so
+ * the rejected list is `libraryService.ROTATION_PRECATALOG_FIELDS` (trio +
+ * `format_id` + `label_id`), not `ROTATION_SNAPSHOT_COLUMNS`. Reason 1 carries
+ * over — `getRotationFromDB` publishes `library.label_id` and the `format`
+ * join's `format_name` on a linked row, so a rotation-side FK write is just as
+ * invisible there. Reason 2 does not: the flowsheet badge partitions on the
+ * denormalized NAMES, not on the FKs. The FKs are refused anyway because the
+ * library release is the authority for them once the row is linked — the same
+ * drift rule `pickAddRotationFields` applies at creation time.
  *
  * The 409's remedy is field-specific, not a blanket "edit the library
  * release" — `PATCH /library/:id` genuinely covers `album_title` (its own
@@ -1728,7 +1751,7 @@ export const updateRotation: RequestHandler<{ id: string }, unknown, RotationUpd
   // `validateTextField`, which would 400 every `format_id: 3` with "must be a
   // string". Integer + existence instead, so a stale id is a named 400 rather
   // than a PG 23503 → 500.
-  for (const field of ['format_id', 'label_id'] as const) {
+  for (const field of ROTATION_PRECATALOG_FK_FIELDS) {
     if (body[field] === undefined) continue;
     await assertRotationPrecatalogFk(field, body[field], { nullable: true });
     updates[field] = body[field] as number | null;
