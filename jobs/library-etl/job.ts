@@ -888,14 +888,32 @@ const buildCompilationTrackQuery = (libraryReleaseIds: number[] | null): string 
  * invisible to the release import too, and admitting it here would put its
  * ids in the delta on every single run forever. The periodic full pass is
  * what covers that case.
+ *
+ * **This is a proxy, not a bound on the table's own changes, and the proxy is
+ * blind to the only thing that writes it.** tubafrenzy never writes
+ * `COMPILATION_TRACK_ARTIST` (it is read-only there —
+ * `libs/lucene/.../BuildIndexCLI.java` and `LibraryRelease.java`); the rows
+ * come from library-metadata-lookup's `scripts/va_disambiguate` SQL writer,
+ * which emits bare `INSERT INTO COMPILATION_TRACK_ARTIST` statements and
+ * never touches `LIBRARY_RELEASE`. So a freshly disambiguated batch does not
+ * move any release's `TIME_LAST_MODIFIED` and is invisible to this delta. New
+ * compilation-track credits therefore arrive on the 24-hour full
+ * reconciliation pass rather than within 30 minutes — a real latency change
+ * from before BS#2424, bounded at a day, and the reason the full pass is not
+ * optional for this import either.
  */
 const fetchCompilationTrackDeltaReleaseIds = async (watermarkMs: number): Promise<number[]> => {
   const raw = await legacyDB.send(`SELECT ID FROM LIBRARY_RELEASE WHERE TIME_LAST_MODIFIED > ${watermarkMs};`);
   if (raw.trim().length === 0) return [];
   const ids: number[] = [];
   for (const line of raw.trim().split('\n')) {
-    const id = Number(line.trim());
-    if (Number.isInteger(id)) ids.push(id);
+    // Strict digits, not `Number.isInteger(Number(line))`: `Number('')` is 0
+    // and `Number.isInteger(0)` is true, so an interior blank line would put
+    // release id 0 in the `IN` list and take the bounded path on a set that
+    // should have been empty.
+    const trimmed = line.trim();
+    if (!/^\d+$/.test(trimmed)) continue;
+    ids.push(Number(trimmed));
   }
   return ids;
 };
@@ -925,8 +943,15 @@ const fetchLegacyCompilationTracks = async (watermarkMs: number | null): Promise
     }
   }
 
+  // Built OUTSIDE the try. The builder's empty-set `RangeError` exists
+  // precisely so a caller that forgets the early return above fails loudly;
+  // inside the try, the catch below would swallow it into the misleading
+  // "table not available" warning it was written to avoid — and then pin the
+  // watermark via `failed: true`.
+  const query = buildCompilationTrackQuery(deltaIds);
+
   try {
-    const raw = await legacyDB.send(buildCompilationTrackQuery(deltaIds));
+    const raw = await legacyDB.send(query);
     return { rows: parseLegacyCompilationTrackRows(raw), legacyReleaseIds: deltaIds, failed: false };
   } catch (error) {
     // Kept tolerant (the table may legitimately be absent in some
