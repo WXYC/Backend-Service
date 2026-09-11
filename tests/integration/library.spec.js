@@ -2698,6 +2698,462 @@ describe('Library Artist Card (BS#2156)', () => {
   });
 });
 
+/**
+ * The two frozen `/wxycdb` cross-reference listings (BS#2386) against real
+ * Postgres.
+ *
+ * The unit suite for these endpoints `jest.mock`s the whole library service, so
+ * it can only prove the controller's envelope and its 400s — every SQL claim
+ * the two queries make is invisible to it. These tests exist for the claims:
+ * the lowest-`genre_id` collapse on the artist listing, the LEFT JOIN on the
+ * release listing not dropping a row, page stability across a boundary, and
+ * the `count(*)`-over-derived-table totals actually executing (both subqueries
+ * wrap a bare `sql` expression, and the release one has two artist columns
+ * aliased apart).
+ *
+ * Fixtures go in through SQL rather than the API for the cross-reference rows
+ * themselves, because there is no write path and deliberately never will be —
+ * WXYC/wiki#89 decision D5 freezes the artist set and drops the release set.
+ * Artists likewise: two of the cases here (an artist filed under two genres, an
+ * artist with no `genre_artist_crossreference` row) are unreachable through
+ * `POST /library/artists`, which always writes exactly one crossreference row.
+ * Releases DO go through `POST /library`, so the rows carry the real writer's
+ * denormalized `library.artist_name` that `album_artist_name` COALESCEs over.
+ */
+describe('Library Cross-References (BS#2386)', () => {
+  let auth;
+  let sql;
+
+  // Per-run token on every fixture name and code_letters. `ci:testmock` is
+  // `ci:env && ci:test && ci:clean`, so a FAILING run skips the `down -v`
+  // volume drop and the next run starts against these rows — see the longer
+  // note on `createTestArtist` above. This block needs less machinery than that
+  // helper (no genre-scoped 409 pre-check to trip, since it inserts artists
+  // directly) but it does need the token, and it cleans up after itself so the
+  // two collections are empty again for the next run.
+  const RUN_KEY = Date.now().toString(36).toUpperCase().slice(-3);
+  const NAME_SUFFIX = ` [xref ${RUN_KEY}]`;
+
+  const createdArtistIds = [];
+  const createdLibraryIds = [];
+  let artistSeq = 0;
+
+  beforeAll(() => {
+    auth = createAuthRequest(request, global.access_token);
+    sql = getTestDb();
+  });
+
+  // Resolve the two FK dimensions BY NAME. `genres` is seeded with explicit
+  // production ids and `format` is not, so a hardcoded `format_id` is a bet on
+  // insertion order; and a hardcoded `genre_id` reads as a magic number even
+  // where it happens to be stable. The throw is the point — a rename upstream
+  // should fail here as fixture drift, not as a confusing FK violation.
+  async function genreIdByName(name) {
+    const rows = await sql.unsafe(`SELECT id FROM "${SCHEMA}".genres WHERE genre_name = $1`, [name]);
+    if (rows.length === 0) throw new Error(`Seed genre "${name}" not found in ${SCHEMA}.genres -- fixture drift?`);
+    return rows[0].id;
+  }
+
+  async function formatIdByName(name) {
+    const rows = await sql.unsafe(`SELECT id FROM "${SCHEMA}".format WHERE format_name = $1`, [name]);
+    if (rows.length === 0) throw new Error(`Seed format "${name}" not found in ${SCHEMA}.format -- fixture drift?`);
+    return rows[0].id;
+  }
+
+  /**
+   * Insert one artist plus zero or more genre filings.
+   *
+   * `filings` is a list of `{ genre, code }`. Zero filings is a legal and
+   * load-bearing state here: it is what makes `target_code_genre_id` /
+   * `target_code_artist_number` null, and `POST /library/artists` cannot
+   * produce it. `artist_genre_code` values start at 9000 so they cannot be
+   * confused with a seeded call number.
+   */
+  async function createArtist(baseName, filings = []) {
+    artistSeq += 1;
+    const [row] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters)
+       VALUES ($1, $1, $2) RETURNING id, artist_name, code_letters`,
+      [`${baseName}${NAME_SUFFIX}`, `${RUN_KEY.slice(0, 2)}${artistSeq.toString(36).toUpperCase()}`.slice(0, 4)]
+    );
+    createdArtistIds.push(row.id);
+    for (const filing of filings) {
+      await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES ($1, $2, $3)`,
+        [row.id, await genreIdByName(filing.genre), filing.code]
+      );
+    }
+    return row;
+  }
+
+  async function addRelease(artistId, title, genreName) {
+    const res = await auth
+      .post('/library')
+      .send({
+        album_title: `${title}${NAME_SUFFIX}`,
+        artist_id: artistId,
+        label: 'Sonamos',
+        genre_id: await genreIdByName(genreName),
+        format_id: await formatIdByName('cd'),
+      })
+      .expect(201);
+    createdLibraryIds.push(res.body.id);
+    return res.body;
+  }
+
+  const linkArtists = (sourceId, targetId, comment) =>
+    sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artist_crossreference (source_artist_id, target_artist_id, comment)
+       VALUES ($1, $2, $3)`,
+      [sourceId, targetId, comment]
+    );
+
+  const linkRelease = (artistId, libraryId, comment) =>
+    sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artist_library_crossreference (artist_id, library_id, comment)
+       VALUES ($1, $2, $3)`,
+      [artistId, libraryId, comment]
+    );
+
+  // Explicit teardown in FK order. `artist_crossreference`'s two FKs cascade
+  // from `artists`, but `artist_library_crossreference.artist_id`,
+  // `genre_artist_crossreference.artist_id` and `library.artist_id` are all ON
+  // DELETE NO ACTION (BS#2239 de-declared those deliberately), so the artists
+  // DELETE would fail rather than cascade. The pool is shared with the rest of
+  // the suite — never `sql.end()` here.
+  afterAll(async () => {
+    if (!sql) return;
+    const artistIds = createdArtistIds.filter((id) => Number.isInteger(id)).join(',');
+    const libraryIds = createdLibraryIds.filter((id) => Number.isInteger(id)).join(',');
+    if (artistIds) {
+      await sql.unsafe(
+        `DELETE FROM "${SCHEMA}".artist_crossreference
+         WHERE source_artist_id IN (${artistIds}) OR target_artist_id IN (${artistIds})`
+      );
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".artist_library_crossreference WHERE artist_id IN (${artistIds})`);
+    }
+    if (libraryIds) {
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".artist_library_crossreference WHERE library_id IN (${libraryIds})`);
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id IN (${libraryIds})`);
+    }
+    if (artistIds) {
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".genre_artist_crossreference WHERE artist_id IN (${artistIds})`);
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE id IN (${artistIds})`);
+    }
+  });
+
+  // Declared FIRST and fixture-free on purpose: this is the only place the
+  // genuinely empty collection can be observed. `dev_env/seed_db.sql` seeds
+  // neither cross-reference table and no other integration spec writes them, so
+  // a non-zero total here is a real signal — either leftover rows from a run
+  // that failed before `ci:clean` dropped the volume, or a new writer that
+  // wants this block's fixtures rethinking. It is NOT a flake to retry past.
+  describe('the empty collections', () => {
+    test.each([['artists'], ['releases']])(
+      'GET /library/crossreferences/%s answers 200 with total 0, not 404',
+      async (collection) => {
+        const res = await auth.get(`/library/crossreferences/${collection}`).expect(200);
+
+        // The state each JSP renders as "There are no ... Cross-References".
+        expect(res.body).toEqual({ results: [], total: 0, page: 0, totalPages: 0 });
+      }
+    );
+  });
+
+  describe('GET /library/crossreferences/artists', () => {
+    // Alphabetical by the cross-REFERENCING artist, so the three sources are
+    // named to order unambiguously under any collation (A < Je < Ju decides on
+    // the first two characters, never on the shared suffix or on a diacritic).
+    let sources;
+    let twoGenreTarget;
+    let unfiledTarget;
+    let filedTarget;
+    let jazzId;
+    let rockId;
+
+    beforeAll(async () => {
+      jazzId = await genreIdByName('Jazz');
+      rockId = await genreIdByName('Rock');
+
+      // Filed under BOTH Jazz and Rock, with different codes per filing.
+      // `artist_genre_key` is unique on (artist_id, genre_id), not on
+      // artist_id, so this is the legacy multi-genre shape the correlated
+      // subquery has to collapse.
+      twoGenreTarget = await createArtist('Chuquimamani-Condori', [
+        { genre: 'Rock', code: 9042 },
+        { genre: 'Jazz', code: 9007 },
+      ]);
+      unfiledTarget = await createArtist('Hermanos Gutiérrez');
+      filedTarget = await createArtist('Stereolab', [{ genre: 'Rock', code: 9087 }]);
+
+      sources = {
+        angel: await createArtist('Angel Olsen', [{ genre: 'Rock', code: 9101 }]),
+        jessica: await createArtist('Jessica Pratt', [{ genre: 'Rock', code: 9102 }]),
+        juana: await createArtist('Juana Molina', [{ genre: 'Rock', code: 9103 }]),
+      };
+
+      await linkArtists(sources.angel.id, twoGenreTarget.id, 'filed w/ Chuquimamani-Condori');
+      await linkArtists(sources.jessica.id, unfiledTarget.id, null);
+      await linkArtists(sources.juana.id, filedTarget.id, 'see also');
+    });
+
+    test('serves every cross-reference with the JSP column set, alphabetical by the referencing artist', async () => {
+      const res = await auth.get('/library/crossreferences/artists').expect(200);
+
+      expect(res.body.total).toBe(3);
+      expect(res.body.page).toBe(0);
+      expect(res.body.totalPages).toBe(1);
+      expect(res.body.results).toHaveLength(3);
+      res.body.results.forEach((row) =>
+        expectFields(
+          row,
+          'source_artist_id',
+          'source_artist_name',
+          'target_artist_id',
+          'target_artist_name',
+          'target_code_letters',
+          // Without the genre the call number is unattributed: the JSP renders
+          // `getFullLibraryCode()`, which prefixes the genre name.
+          'target_code_genre_id',
+          'target_code_artist_number',
+          'comment'
+        )
+      );
+      expect(res.body.results.map((row) => row.source_artist_id)).toEqual([
+        sources.angel.id,
+        sources.jessica.id,
+        sources.juana.id,
+      ]);
+      expect(res.body.results[2]).toMatchObject({
+        target_artist_id: filedTarget.id,
+        target_artist_name: filedTarget.artist_name,
+        target_code_letters: filedTarget.code_letters,
+        target_code_genre_id: rockId,
+        target_code_artist_number: 9087,
+        comment: 'see also',
+      });
+    });
+
+    // The claim the mocked unit suite cannot reach: the subquery collapses a
+    // multi-genre target to its LOWEST genre_id, matching
+    // `getArtistCardById`, and the two projected columns describe the SAME
+    // filing rather than being picked independently. Jazz (7) sorts below Rock
+    // (11), so the Jazz code wins — repeated, because "whichever row the
+    // planner emitted first" would also pass once.
+    test('collapses a multi-genre target to its lowest-genre_id filing, genre and code together', async () => {
+      expect(jazzId).toBeLessThan(rockId);
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const res = await auth.get('/library/crossreferences/artists').expect(200);
+        const row = res.body.results.find((candidate) => candidate.target_artist_id === twoGenreTarget.id);
+
+        expect(row).toBeDefined();
+        expect(row.target_code_genre_id).toBe(jazzId);
+        expect(row.target_code_artist_number).toBe(9007);
+      }
+    });
+
+    // A target that was never filed under a genre must still appear, with the
+    // two genre-scoped columns null. The alternative — a join — would drop the
+    // row from the only listing that reproduces this frozen set.
+    test('keeps a target with no genre filing, with a null genre and null code', async () => {
+      const res = await auth.get('/library/crossreferences/artists').expect(200);
+      const row = res.body.results.find((candidate) => candidate.target_artist_id === unfiledTarget.id);
+
+      expect(row).toBeDefined();
+      expect(row.target_code_genre_id).toBeNull();
+      expect(row.target_code_artist_number).toBeNull();
+      // The name and code_letters come off `artists`, so they survive.
+      expect(row.target_artist_name).toBe(unfiledTarget.artist_name);
+      expect(row.target_code_letters).toBe(unfiledTarget.code_letters);
+      expect(row.comment).toBeNull();
+    });
+
+    // The table has no primary key, so the sort has to reach a total order
+    // through the FK pair. If it didn't, a boundary could repeat or skip.
+    test('pages without repeating or skipping a row across the boundary', async () => {
+      const first = await auth.get('/library/crossreferences/artists').query({ limit: 2 }).expect(200);
+      const second = await auth.get('/library/crossreferences/artists').query({ page: 1, limit: 2 }).expect(200);
+
+      expect(first.body).toMatchObject({ total: 3, page: 0, totalPages: 2 });
+      expect(second.body).toMatchObject({ total: 3, page: 1, totalPages: 2 });
+      expect(first.body.results).toHaveLength(2);
+      expect(second.body.results).toHaveLength(1);
+
+      const key = (row) => `${row.source_artist_id}:${row.target_artist_id}`;
+      const paged = [...first.body.results, ...second.body.results].map(key);
+      expect(new Set(paged).size).toBe(3);
+
+      const whole = await auth.get('/library/crossreferences/artists').expect(200);
+      expect(paged).toEqual(whole.body.results.map(key));
+    });
+
+    test('serves an in-range page past the end as an empty results array with the real total', async () => {
+      const res = await auth.get('/library/crossreferences/artists').query({ page: 9, limit: 2 }).expect(200);
+
+      expect(res.body).toMatchObject({ results: [], total: 3, page: 9, totalPages: 2 });
+    });
+  });
+
+  describe('GET /library/crossreferences/releases', () => {
+    let catPower;
+    let wire;
+    let yoLaTengo;
+    let sunRa;
+    let firstRelease;
+    let secondRelease;
+    let unfiledRelease;
+    let rockId;
+    let cdFormatId;
+
+    beforeAll(async () => {
+      rockId = await genreIdByName('Rock');
+      cdFormatId = await formatIdByName('cd');
+
+      // The two artists on each row are usually different, and that difference
+      // IS the association the row records, so the fixtures never let them
+      // coincide.
+      catPower = await createArtist('Cat Power', [{ genre: 'Rock', code: 9201 }]);
+      wire = await createArtist('Wire', [{ genre: 'Rock', code: 9202 }]);
+      yoLaTengo = await createArtist('Yo La Tengo', [{ genre: 'Rock', code: 9203 }]);
+      sunRa = await createArtist('Sun Ra', [{ genre: 'Rock', code: 9204 }]);
+
+      firstRelease = await addRelease(yoLaTengo.id, 'Painful', 'Rock');
+      secondRelease = await addRelease(yoLaTengo.id, 'Electr-O-Pura', 'Rock');
+      unfiledRelease = await addRelease(sunRa.id, 'Lanquidity', 'Rock');
+
+      // Drop the release artist's filing for that genre so the LEFT JOIN has
+      // nothing to match. This is the shape `POST /library/artists` cannot
+      // create and `getReleasesForArtist`'s INNER JOIN of the same pair would
+      // silently drop.
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".genre_artist_crossreference WHERE artist_id = $1 AND genre_id = $2`, [
+        sunRa.id,
+        rockId,
+      ]);
+
+      await linkRelease(catPower.id, firstRelease.id, 'collab.');
+      await linkRelease(catPower.id, secondRelease.id, null);
+      await linkRelease(wire.id, unfiledRelease.id, 'see also');
+    });
+
+    test('serves every cross-reference with the JSP column set and both artists kept apart', async () => {
+      const res = await auth.get('/library/crossreferences/releases').expect(200);
+
+      expect(res.body).toMatchObject({ total: 3, page: 0, totalPages: 1 });
+      expect(res.body.results).toHaveLength(3);
+      res.body.results.forEach((row) =>
+        expectFields(
+          row,
+          'artist_id',
+          'artist_name',
+          'library_id',
+          'album_title',
+          'album_artist_name',
+          'alternate_artist_name',
+          'format_name',
+          'genre_id',
+          'code_letters',
+          'code_artist_number',
+          'code_number',
+          'code_volume_letters',
+          'comment'
+        )
+      );
+
+      const row = res.body.results.find((candidate) => candidate.library_id === firstRelease.id);
+      expect(row).toMatchObject({
+        // The cross-REFERENCING artist...
+        artist_id: catPower.id,
+        artist_name: catPower.artist_name,
+        // ...and the release's OWN artist, which is a different person. A
+        // query that collapsed the two aliases would report one name twice.
+        album_artist_name: yoLaTengo.artist_name,
+        album_title: firstRelease.album_title,
+        format_name: 'cd',
+        genre_id: rockId,
+        // The call number belongs to the RELEASE, so code_letters comes off the
+        // release's artist, not the referencing one.
+        code_letters: yoLaTengo.code_letters,
+        code_artist_number: 9203,
+        comment: 'collab.',
+      });
+      expect(row.code_letters).not.toBe(catPower.code_letters);
+      expect(typeof cdFormatId).toBe('number');
+    });
+
+    test('keeps a row whose release artist has no filing for that genre, with a null code', async () => {
+      const res = await auth.get('/library/crossreferences/releases').expect(200);
+      const row = res.body.results.find((candidate) => candidate.library_id === unfiledRelease.id);
+
+      // Present, not dropped: the LEFT JOIN is the whole point.
+      expect(row).toBeDefined();
+      expect(row.code_artist_number).toBeNull();
+      // Everything not sourced from the genre crossreference survives.
+      expect(row.artist_name).toBe(wire.artist_name);
+      expect(row.album_artist_name).toBe(sunRa.artist_name);
+      expect(row.code_letters).toBe(sunRa.code_letters);
+      expect(row.genre_id).toBe(rockId);
+      expect(typeof row.code_number).toBe('number');
+    });
+
+    // Two of the three rows share a referencing artist, so this also exercises
+    // the `library_id` leg of the tiebreak rather than only the name.
+    test('pages without repeating or skipping a row across the boundary', async () => {
+      const first = await auth.get('/library/crossreferences/releases').query({ limit: 2 }).expect(200);
+      const second = await auth.get('/library/crossreferences/releases').query({ page: 1, limit: 2 }).expect(200);
+
+      expect(first.body).toMatchObject({ total: 3, page: 0, totalPages: 2 });
+      expect(second.body).toMatchObject({ total: 3, page: 1, totalPages: 2 });
+
+      const key = (row) => `${row.artist_id}:${row.library_id}`;
+      const paged = [...first.body.results, ...second.body.results].map(key);
+      expect(paged).toHaveLength(3);
+      expect(new Set(paged).size).toBe(3);
+
+      const whole = await auth.get('/library/crossreferences/releases').expect(200);
+      expect(paged).toEqual(whole.body.results.map(key));
+      // Cat Power sorts before Wire, and its two rows sort by library_id.
+      expect(paged).toEqual([
+        `${catPower.id}:${firstRelease.id}`,
+        `${catPower.id}:${secondRelease.id}`,
+        `${wire.id}:${unfiledRelease.id}`,
+      ]);
+    });
+  });
+
+  // Shared by both endpoints through `parsePageParams`. The last two used to
+  // be 500s: `parseInt` truncated `?page=2.9` to 2 and served a different
+  // window than was asked for, and an over-large `page` produced an `OFFSET`
+  // the driver stringified in exponential notation, which Postgres rejects
+  // with `bigint out of range`.
+  describe('page/limit validation', () => {
+    const collections = ['artists', 'releases'];
+    const cases = [
+      ['a limit above the maximum', { limit: 501 }],
+      ['a zero limit', { limit: 0 }],
+      ['a negative page', { page: -1 }],
+      ['a non-numeric limit', { limit: 'all' }],
+      ['a non-numeric page', { page: 'first' }],
+      ['a fractional page', { page: '2.9' }],
+      ['a limit with trailing garbage', { limit: '7abc' }],
+      ['a page far past the safe-integer range', { page: '99999999999999999999' }],
+      ['a page whose offset would leave the safe-integer range', { page: '100000000000000', limit: 500 }],
+    ];
+
+    test.each(collections.flatMap((collection) => cases.map(([label, query]) => [collection, label, query])))(
+      '/%s 400s on %s',
+      async (collection, _label, query) => {
+        await auth.get(`/library/crossreferences/${collection}`).query(query).expect(400);
+      }
+    );
+
+    test.each(collections)('/%s serves the documented maximum limit', async (collection) => {
+      await auth.get(`/library/crossreferences/${collection}`).query({ limit: 500 }).expect(200);
+    });
+  });
+});
+
 describe('Library Formats', () => {
   let auth;
 
