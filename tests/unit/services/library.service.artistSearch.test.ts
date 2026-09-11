@@ -49,15 +49,26 @@ const projectionKeys = (): string[] => {
   return Object.keys(projection ?? {}).sort();
 };
 
+/** The predicate handed to `where()`, in the drizzle mock's plain-object form. */
+const wherePredicate = (chain: Chain) => chain.where.mock.calls[0]?.[0] as { and?: unknown[]; values?: unknown[] };
+
+/**
+ * The two modes, for every assertion that must hold in both. Only the genre
+ * predicate is allowed to differ between them — projection, joins, escaping
+ * and clamp are shared, which is what makes `genre_id`/`genre_name` safe to
+ * declare required in the published contract.
+ */
+const MODES: Array<[string, number | null]> = [
+  ['genre-scoped', 11],
+  ['library-wide', null],
+];
+
 describe('searchArtistsInGenre (BS#2410)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  it.each([
-    ['genre-scoped', 11],
-    ['library-wide', null],
-  ])('projects the genre membership columns in %s mode', async (_mode, genreId) => {
+  it.each(MODES)('projects the genre membership columns in %s mode', async (_mode, genreId) => {
     stubSelect();
 
     await searchArtistsInGenre(genreId, 'ju', 10);
@@ -65,10 +76,7 @@ describe('searchArtistsInGenre (BS#2410)', () => {
     expect(projectionKeys()).toEqual(['artist_name', 'code_letters', 'code_number', 'genre_id', 'genre_name', 'id']);
   });
 
-  it.each([
-    ['genre-scoped', 11],
-    ['library-wide', null],
-  ])('joins genres for the display name in %s mode', async (_mode, genreId) => {
+  it.each(MODES)('joins genres for the display name in %s mode', async (_mode, genreId) => {
     const chain = stubSelect();
 
     await searchArtistsInGenre(genreId, 'ju', 10);
@@ -87,7 +95,7 @@ describe('searchArtistsInGenre (BS#2410)', () => {
 
     await searchArtistsInGenre(11, 'bu', 10);
 
-    const predicate = chain.where.mock.calls[0]?.[0] as { and?: unknown[] };
+    const predicate = wherePredicate(chain);
     expect(predicate.and).toBeDefined();
     expect(predicate.and?.[0]).toEqual({ eq: [genre_artist_crossreference.genre_id, 11] });
   });
@@ -100,23 +108,20 @@ describe('searchArtistsInGenre (BS#2410)', () => {
     // The whole predicate is the ILIKE fragment: no `and`, and nothing
     // mentioning genre_id. A library-wide search that still ANDed a genre
     // equality would silently return nothing.
-    const predicate = chain.where.mock.calls[0]?.[0] as Record<string, unknown>;
+    const predicate = wherePredicate(chain);
     expect(predicate).not.toHaveProperty('and');
     expect(predicate.values).toEqual([artists.artist_name, 'bu%']);
   });
 
-  it.each([
-    ['genre-scoped', 11],
-    ['library-wide', null],
-  ])('escapes ILIKE metacharacters in %s mode', async (_mode, genreId) => {
+  it.each(MODES)('escapes ILIKE metacharacters in %s mode', async (_mode, genreId) => {
     const chain = stubSelect();
 
     await searchArtistsInGenre(genreId, '%u', 10);
 
-    const predicate = chain.where.mock.calls[0]?.[0] as { and?: unknown[] };
-    const ilike = (genreId === null ? predicate : (predicate.and?.[1] as Record<string, unknown>)) as {
-      values: unknown[];
-    };
+    // Library-wide the predicate *is* the ILIKE fragment; genre-scoped it is
+    // the second conjunct of the `and`.
+    const predicate = wherePredicate(chain);
+    const ilike = (genreId === null ? predicate : predicate.and?.[1]) as { values: unknown[] };
     expect(ilike.values).toEqual([artists.artist_name, '\\%u%']);
   });
 
