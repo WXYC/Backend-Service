@@ -2274,7 +2274,6 @@ describe('library.controller', () => {
   describe('linkRotationToAlbum (BS#2109)', () => {
     beforeEach(() => {
       mockLinkRotationToAlbum.mockReset();
-      mockSpan.setAttributes.mockClear();
     });
 
     it('returns 400 for a non-numeric rotation_id', async () => {
