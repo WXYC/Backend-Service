@@ -866,27 +866,11 @@ export const getArtistReleases: RequestHandler<
 > = async (req, res) => {
   const artistId = parseArtistId(req.params.id);
 
-  // Express's `simple` query parser yields string[] for a repeated key, and
-  // parseInt(['1','2']) stringifies to '1,2' → 1, silently coercing rather
-  // than erroring (#1553).
-  if (req.query.page !== undefined && typeof req.query.page !== 'string') {
-    throw new WxycError('page must be a single string value', 400);
-  }
-  const page = parseInt(req.query.page ?? '0');
-  if (isNaN(page) || page < 0) {
-    throw new WxycError('page must be a non-negative integer', 400);
-  }
-
-  if (req.query.limit !== undefined && typeof req.query.limit !== 'string') {
-    throw new WxycError('limit must be a single string value', 400);
-  }
-  const limit = parseInt(req.query.limit ?? String(DEFAULT_LIMIT));
-  if (isNaN(limit) || limit < 1) {
-    throw new WxycError('limit must be a positive integer', 400);
-  }
-  if (limit > MAX_LIMIT) {
-    throw new WxycError(`limit must not exceed ${MAX_LIMIT}`, 400);
-  }
+  // Shared with the two cross-reference listings (`parsePageParams`, declared
+  // below); this endpoint's own inline copy accepted `?limit=7abc` as 7 and
+  // `?page=99999999999999999999` as 1e20, which reached Postgres as an
+  // `OFFSET` of `5e+21` and answered 500 instead of the documented 400.
+  const { page, limit } = parsePageParams(req.query, DEFAULT_LIMIT, MAX_LIMIT);
 
   // Same existence predicate GET/PATCH /library/artists/:id use
   // (`getArtistCardById`'s INNER JOIN to `genre_artist_crossreference`), not
@@ -928,33 +912,62 @@ const CROSSREFERENCE_MAX_LIMIT = 500;
 type CrossReferenceQueryParams = { page?: string; limit?: string };
 
 /**
- * Parse `?page=`/`?limit=` for the two cross-reference listings.
+ * Parse `?page=`/`?limit=` for an offset-paginated listing, against the
+ * caller's own bounds. Shared by `getArtistReleases` and the two
+ * cross-reference listings; `searchLibraryQueryEndpoint` keeps its inline copy
+ * because it parses a wider parameter set in one pass.
  *
- * Same rules as `getArtistReleases` and `searchLibraryQueryEndpoint` — a
- * repeated key is a 400 rather than a silent coercion, because Express's
- * `simple` query parser yields `string[]` and `parseInt(['1','2'])`
- * stringifies to `'1,2'` and returns `1` (#1553). Factored out here because
- * two handlers need it identically; the existing callers keep their inline
- * copies, which validate against different bounds.
+ * A repeated key is a 400 rather than a silent coercion: Express's `simple`
+ * query parser yields `string[]` and `parseInt(['1','2'])` stringifies to
+ * `'1,2'` and returns `1` (#1553).
+ *
+ * **Strict spelling, via `parseNonNegativeInt` rather than `parseInt`.** The
+ * inline copies this replaced truncated instead of rejecting — `?limit=7abc`
+ * was 7 and `?page=2.9` was 2 — so a caller got a silently different window
+ * from the one it asked for, on a parameter `app.yaml` declares as
+ * `type: integer`.
+ *
+ * **`page * limit` is bounded, and that is the bug fix rather than a
+ * nicety.** Neither inline copy had a ceiling on `page`, so
+ * `?page=99999999999999999999` parsed to `1e20`, and `page * limit` reached
+ * the driver as the string `"5e+22"`, which Postgres rejects with `bigint out
+ * of range` — a 500 plus a Sentry event for input the spec says is a 400.
+ * `parseNonNegativeInt`'s `Number.isSafeInteger` check already rejects that
+ * literal; the product check below closes the remaining band where each factor
+ * is individually safe but the offset is not (e.g. `page` at
+ * `MAX_SAFE_INTEGER / 2` with `limit` 500).
  */
-const parseCrossReferencePage = (query: CrossReferenceQueryParams): { page: number; limit: number } => {
+const parsePageParams = (
+  query: { page?: unknown; limit?: unknown },
+  defaultLimit: number,
+  maxLimit: number
+): { page: number; limit: number } => {
   if (query.page !== undefined && typeof query.page !== 'string') {
     throw new WxycError('page must be a single string value', 400);
   }
-  const page = parseInt(query.page ?? '0');
-  if (isNaN(page) || page < 0) {
+  const parsedPage = parseNonNegativeInt(query.page);
+  if (parsedPage === null) {
     throw new WxycError('page must be a non-negative integer', 400);
   }
+  const page = parsedPage ?? 0;
 
   if (query.limit !== undefined && typeof query.limit !== 'string') {
     throw new WxycError('limit must be a single string value', 400);
   }
-  const limit = parseInt(query.limit ?? String(CROSSREFERENCE_DEFAULT_LIMIT));
-  if (isNaN(limit) || limit < 1) {
+  const parsedLimit = parseNonNegativeInt(query.limit);
+  if (parsedLimit === null) {
     throw new WxycError('limit must be a positive integer', 400);
   }
-  if (limit > CROSSREFERENCE_MAX_LIMIT) {
-    throw new WxycError(`limit must not exceed ${CROSSREFERENCE_MAX_LIMIT}`, 400);
+  const limit = parsedLimit ?? defaultLimit;
+  if (limit < 1) {
+    throw new WxycError('limit must be a positive integer', 400);
+  }
+  if (limit > maxLimit) {
+    throw new WxycError(`limit must not exceed ${maxLimit}`, 400);
+  }
+
+  if (!Number.isSafeInteger(page * limit)) {
+    throw new WxycError(`page must not exceed ${Math.floor(Number.MAX_SAFE_INTEGER / limit)} at limit ${limit}`, 400);
   }
 
   return { page, limit };
@@ -974,7 +987,7 @@ export const listArtistCrossReferences: RequestHandler<object, unknown, unknown,
   req,
   res
 ) => {
-  const { page, limit } = parseCrossReferencePage(req.query);
+  const { page, limit } = parsePageParams(req.query, CROSSREFERENCE_DEFAULT_LIMIT, CROSSREFERENCE_MAX_LIMIT);
   const [results, total] = await Promise.all([
     libraryService.getArtistCrossReferences(page, limit),
     libraryService.countArtistCrossReferences(),
@@ -993,7 +1006,7 @@ export const listReleaseCrossReferences: RequestHandler<object, unknown, unknown
   req,
   res
 ) => {
-  const { page, limit } = parseCrossReferencePage(req.query);
+  const { page, limit } = parsePageParams(req.query, CROSSREFERENCE_DEFAULT_LIMIT, CROSSREFERENCE_MAX_LIMIT);
   const [results, total] = await Promise.all([
     libraryService.getReleaseCrossReferences(page, limit),
     libraryService.countReleaseCrossReferences(),

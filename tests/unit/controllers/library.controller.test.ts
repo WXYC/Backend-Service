@@ -3319,12 +3319,26 @@ describe('library.controller', () => {
 
     // Unbounded, this endpoint hands any catalog:read DJ every row an artist
     // has — 3,107 of them for artist 1087, freely repeatable.
+    //
+    // The last four came in with the shared `parsePageParams` extraction: this
+    // handler's inline parser truncated rather than rejected (`'2.9'` → 2,
+    // `'7abc'` → 7) and put no ceiling on `page`, so an over-large `page`
+    // produced an `OFFSET` the driver stringified as `"5e+21"` and Postgres
+    // answered `bigint out of range` — a 500 where `app.yaml` documents a 400.
     it.each([
       ['limit above the maximum', { limit: '101' }, 'limit must not exceed 100'],
       ['a zero limit', { limit: '0' }, 'limit must be a positive integer'],
       ['a negative page', { page: '-1' }, 'page must be a non-negative integer'],
       ['a non-numeric limit', { limit: 'all' }, 'limit must be a positive integer'],
       ['a non-numeric page', { page: 'first' }, 'page must be a non-negative integer'],
+      ['a fractional page', { page: '2.9' }, 'page must be a non-negative integer'],
+      ['a fractional limit', { limit: '4.5' }, 'limit must be a positive integer'],
+      ['a limit with trailing garbage', { limit: '7abc' }, 'limit must be a positive integer'],
+      [
+        'a page far past the safe-integer range',
+        { page: '99999999999999999999' },
+        'page must be a non-negative integer',
+      ],
     ])('rejects %s with 400', async (_label, query, message) => {
       mockGetArtistCardById.mockResolvedValue(anyCard);
       const req = { params: { id: '1087' }, query } as unknown as Request;
@@ -3343,6 +3357,34 @@ describe('library.controller', () => {
 
       await expect(getArtistReleases(req, res, next)).rejects.toThrow(message);
       expect(mockGetReleasesForArtist).not.toHaveBeenCalled();
+    });
+
+    // The band a per-parameter check cannot see: both factors are individually
+    // safe integers, their PRODUCT is not, and the product is the OFFSET.
+    it('rejects a page whose offset would leave the safe-integer range, naming the ceiling', async () => {
+      mockGetArtistCardById.mockResolvedValue(anyCard);
+      const req = { params: { id: '1087' }, query: { page: '1000000000000000' } } as unknown as Request;
+      const res = mockResponse();
+
+      // 1e15 is a safe integer; 1e15 * 50 (the default limit) is not.
+      expect(Number.isSafeInteger(1_000_000_000_000_000)).toBe(true);
+      await expect(getArtistReleases(req, res, next)).rejects.toThrow('page must not exceed');
+      expect(mockGetReleasesForArtist).not.toHaveBeenCalled();
+    });
+
+    // The boundary in the other direction: the largest page that still keeps
+    // the offset inside the safe range must be served, not rejected.
+    it('serves the largest page whose offset is still a safe integer', async () => {
+      mockGetArtistCardById.mockResolvedValue(anyCard);
+      mockGetReleasesForArtist.mockResolvedValue([]);
+      mockCountReleasesForArtist.mockResolvedValue(0);
+      const maxPage = Math.floor(Number.MAX_SAFE_INTEGER / 50);
+      const req = { params: { id: '1087' }, query: { page: String(maxPage) } } as unknown as Request;
+      const res = mockResponse();
+
+      await getArtistReleases(req, res, next);
+
+      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(1087, maxPage, 50);
     });
   });
 
