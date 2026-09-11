@@ -1807,7 +1807,7 @@ export const library_watermark = wxyc_schema.table(
  *
  * The whole table is loaded on every ETL run with no predicate, so it also
  * holds under the documented full-resync recipe (`DELETE FROM cronjob_runs
- * WHERE job_name = 'library-etl'`), which drops the delta filter and would
+ * WHERE job_name LIKE 'library-etl%'`), which drops the delta filter and would
  * otherwise return every deleted release in a single pass.
  *
  * `library_id` records the `library.id` the row carried at delete time and is
@@ -1827,7 +1827,7 @@ export const library_watermark = wxyc_schema.table(
  * -- then EITHER have a librarian re-save that release in tubafrenzy's
  * -- /wxycdb (bumps TIME_LAST_MODIFIED; the next half-hourly pass re-imports
  * -- it), OR force one full re-sync:
- * DELETE FROM wxyc_schema.cronjob_runs WHERE job_name = 'library-etl';
+ * DELETE FROM wxyc_schema.cronjob_runs WHERE job_name LIKE 'library-etl%';
  * ```
  *
  * Either way the release returns under a FRESH `library.id`, without the

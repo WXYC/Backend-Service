@@ -21,10 +21,38 @@ const legacyDB = MirrorSQL.instance();
 const JOB_NAME = 'library-etl';
 
 /**
+ * Per-import watermarks for the secondary imports (BS#2424).
+ *
+ * The job-wide `library-etl` row cannot be reused as their delta bound: the
+ * idle early-return path advances it *before* the secondary imports have run,
+ * and that is the path ~98% of runs take — so a cross-reference an MD adds
+ * during a half hour with no `LIBRARY_RELEASE` edit would be skipped at that
+ * run and then excluded forever. Each secondary import therefore keeps its
+ * own `cronjob_runs` row and advances it only on its own success.
+ *
+ * `cronjob_runs.job_name` is `varchar(64)`; all four fit.
+ */
+const ARTIST_CROSSREF_JOB_NAME = `${JOB_NAME}:artist-crossref`;
+const RELEASE_CROSSREF_JOB_NAME = `${JOB_NAME}:release-crossref`;
+const COMPILATION_TRACKS_JOB_NAME = `${JOB_NAME}:compilation-tracks`;
+/** Not a delta bound — the "last full reconciliation" clock. See `isSecondaryFullPassDue`. */
+const SECONDARY_FULL_JOB_NAME = `${JOB_NAME}:secondary-full`;
+
+/**
  * Rows per multi-row compilation-track INSERT. Four columns x 1,000 rows =
  * 4,000 bind parameters, comfortably under Postgres's 65,535 limit.
  */
 const CTA_INSERT_CHUNK_ROWS = 1000;
+
+/**
+ * Above this many delta release ids, the compilation-track fetch drops its
+ * `IN` list and pulls the table in full — the same work, without a
+ * 50k-element list in a heredoc.
+ */
+const CTA_DELTA_ID_MAX = 500;
+
+/** How stale the last full secondary reconciliation may get before one is forced. */
+const SECONDARY_FULL_PASS_INTERVAL_HOURS = 24;
 
 /**
  * Split an array into fixed-size chunks. Empty input yields no chunks.
@@ -38,6 +66,29 @@ const chunk = <T>(items: T[], size: number): T[][] => {
     chunks.push(items.slice(index, index + size));
   }
   return chunks;
+};
+
+/**
+ * Whether the secondary imports should drop their delta bounds and run
+ * unbounded this pass.
+ *
+ * This is the whole of the backfill story, and it is not a nicety. The newest
+ * upstream `LIBRARY_CODE_CROSS_REFERENCE` edit is 17 months old and the
+ * newest `RELEASE_CROSS_REFERENCE` edit is 18 **years** old, so a timestamp
+ * bound alone makes both deltas permanently empty on the first run after
+ * deploy — and the unbounded re-import has been doubling as the retry that
+ * has been slowly narrowing the BS#2386 shortfall (`imported 74, skipped 35`
+ * every working run). A missing watermark row is also "due", which is the
+ * first-run backfill the old `isFirstCrossrefRun` flag was reaching for.
+ *
+ * 24 h is not a reduction in that retry cadence: today's retry already sits
+ * behind the release-delta gate and therefore runs only on work slots, which
+ * were measured at ~1.15x/day. An operator can force a pass immediately by
+ * deleting the `library-etl:secondary-full` row.
+ */
+const isSecondaryFullPassDue = (lastFullPassMs: number | null, nowMs: number): boolean => {
+  if (lastFullPassMs == null) return true;
+  return nowMs - lastFullPassMs >= SECONDARY_FULL_PASS_INTERVAL_HOURS * 60 * 60 * 1000;
 };
 
 // Schema-qualified reference to the `fold_artist_name(text)` SQL function
@@ -592,11 +643,28 @@ type LegacyReleaseCrossrefRow = {
 };
 
 /**
- * Fetch artist-to-artist cross-references (aliases, side projects, related artists)
- * from tubafrenzy's LIBRARY_CODE_CROSS_REFERENCE table.
+ * Delta bound shared by both cross-reference tables (BS#2424).
+ *
+ * tubafrenzy stamps `TIME_LAST_MODIFIED` on create AND on edit in both
+ * repositories, so `> watermark` is a real delta and mirrors what
+ * `buildReleaseQuery` already does for `LIBRARY_RELEASE`.
+ *
+ * `IS NULL` is deliberately in-delta. Prod carries zero NULL-stamped rows in
+ * either table, but a row that were ever inserted without a stamp would
+ * otherwise be invisible to the bound forever, and re-importing an unstamped
+ * row is a no-op upsert. `dev_env/etl-seed.sql` relies on this too.
  */
-const fetchLegacyArtistCrossRefs = async (): Promise<LegacyCrossrefRow[]> => {
-  const sqlQuery = `
+const buildCrossRefTimeBound = (watermarkMs: number | null) =>
+  watermarkMs == null ? '' : `WHERE (cr.TIME_LAST_MODIFIED IS NULL OR cr.TIME_LAST_MODIFIED > ${watermarkMs})`;
+
+/**
+ * Artist-to-artist cross-references (aliases, side projects, related artists)
+ * from tubafrenzy's LIBRARY_CODE_CROSS_REFERENCE table.
+ *
+ * A null watermark emits no bound, which is both the first-run backfill and
+ * the periodic full reconciliation pass (`isSecondaryFullPassDue`).
+ */
+const buildArtistCrossRefQuery = (watermarkMs: number | null): string => `
     SELECT
       REPLACE(REPLACE(src.PRESENTATION_NAME, '\\t', ' '), '\\n', ' '),
       src.CALL_LETTERS,
@@ -605,9 +673,16 @@ const fetchLegacyArtistCrossRefs = async (): Promise<LegacyCrossrefRow[]> => {
       REPLACE(REPLACE(IFNULL(cr.COMMENT, ''), '\\t', ' '), '\\n', ' ')
     FROM LIBRARY_CODE_CROSS_REFERENCE cr
     JOIN LIBRARY_CODE src ON cr.CROSS_REFERENCING_ARTIST_ID = src.ID
-    JOIN LIBRARY_CODE tgt ON cr.CROSS_REFERENCED_LIBRARY_CODE_ID = tgt.ID;
+    JOIN LIBRARY_CODE tgt ON cr.CROSS_REFERENCED_LIBRARY_CODE_ID = tgt.ID
+    ${buildCrossRefTimeBound(watermarkMs)};
   `;
-  const raw = await legacyDB.send(sqlQuery);
+
+/**
+ * Fetch artist-to-artist cross-references, bounded on the
+ * `library-etl:artist-crossref` watermark (BS#2424).
+ */
+const fetchLegacyArtistCrossRefs = async (watermarkMs: number | null): Promise<LegacyCrossrefRow[]> => {
+  const raw = await legacyDB.send(buildArtistCrossRefQuery(watermarkMs));
   if (raw.trim().length === 0) return [];
 
   const rows: LegacyCrossrefRow[] = [];
@@ -629,11 +704,11 @@ const fetchLegacyArtistCrossRefs = async (): Promise<LegacyCrossrefRow[]> => {
 };
 
 /**
- * Fetch release cross-references (guest appearances, collaborations)
- * from tubafrenzy's RELEASE_CROSS_REFERENCE table.
+ * Release cross-references (guest appearances, collaborations) from
+ * tubafrenzy's RELEASE_CROSS_REFERENCE table. See `buildArtistCrossRefQuery`
+ * for the bound's semantics.
  */
-const fetchLegacyReleaseCrossRefs = async (): Promise<LegacyReleaseCrossrefRow[]> => {
-  const sqlQuery = `
+const buildReleaseCrossRefQuery = (watermarkMs: number | null): string => `
     SELECT
       REPLACE(REPLACE(lc.PRESENTATION_NAME, '\\t', ' '), '\\n', ' '),
       lc.CALL_LETTERS,
@@ -644,9 +719,16 @@ const fetchLegacyReleaseCrossRefs = async (): Promise<LegacyReleaseCrossrefRow[]
     FROM RELEASE_CROSS_REFERENCE cr
     JOIN LIBRARY_RELEASE lr ON cr.CROSS_REFERENCED_RELEASE_ID = lr.ID
     JOIN LIBRARY_CODE lc ON cr.CROSS_REFERENCING_ARTIST_ID = lc.ID
-    JOIN GENRE g ON lc.GENRE_ID = g.ID;
+    JOIN GENRE g ON lc.GENRE_ID = g.ID
+    ${buildCrossRefTimeBound(watermarkMs)};
   `;
-  const raw = await legacyDB.send(sqlQuery);
+
+/**
+ * Fetch release cross-references, bounded on the
+ * `library-etl:release-crossref` watermark (BS#2424).
+ */
+const fetchLegacyReleaseCrossRefs = async (watermarkMs: number | null): Promise<LegacyReleaseCrossrefRow[]> => {
+  const raw = await legacyDB.send(buildReleaseCrossRefQuery(watermarkMs));
   if (raw.trim().length === 0) return [];
 
   const rows: LegacyReleaseCrossrefRow[] = [];
@@ -768,20 +850,90 @@ const parseLegacyCompilationTrackRows = (raw: string): LegacyCompilationTrackRow
   return results;
 };
 
-const fetchLegacyCompilationTracks = async (): Promise<LegacyCompilationTrackRow[]> => {
-  try {
-    const raw = await legacyDB.send(`
+/**
+ * `COMPILATION_TRACK_ARTIST` query, optionally bounded on a set of
+ * `LIBRARY_RELEASE_ID`s (BS#2424).
+ *
+ * The table is four columns with **no timestamp and no surrogate key**
+ * (`V008__add-compilation-track-artist.sql`), so it cannot be bounded on a
+ * modification time the way the two cross-reference tables are. The bound is
+ * instead the set of release ids whose `LIBRARY_RELEASE` row changed since
+ * this import's own watermark.
+ *
+ * `null` means a full pass — the first run, or the periodic reconciliation.
+ */
+const buildCompilationTrackQuery = (libraryReleaseIds: number[] | null): string => {
+  if (libraryReleaseIds != null && libraryReleaseIds.length === 0) {
+    // `IN ()` is a MySQL syntax error, and `fetchLegacyCompilationTracks`
+    // swallows query failures — the caller must return early instead, or the
+    // failure surfaces as a misleading "table not available" warning.
+    throw new RangeError('[library-etl] buildCompilationTrackQuery called with an empty release-id set.');
+  }
+  const bound = libraryReleaseIds == null ? '' : `WHERE LIBRARY_RELEASE_ID IN (${libraryReleaseIds.join(', ')})`;
+  return `
       SELECT
         LIBRARY_RELEASE_ID,
         REPLACE(REPLACE(ARTIST_NAME, '\\t', ' '), '\\n', ' '),
         REPLACE(REPLACE(IFNULL(TRACK_TITLE, ''), '\\t', ' '), '\\n', ' '),
         REPLACE(REPLACE(IFNULL(TRACK_POSITION, ''), '\\t', ' '), '\\n', ' ')
-      FROM COMPILATION_TRACK_ARTIST;
-    `);
-    return parseLegacyCompilationTrackRows(raw);
-  } catch {
-    console.warn('[library-etl] COMPILATION_TRACK_ARTIST table not available, skipping.');
-    return [];
+      FROM COMPILATION_TRACK_ARTIST
+      ${bound};
+  `;
+};
+
+/**
+ * The `LIBRARY_RELEASE` ids whose row changed since the compilation-track
+ * watermark. Plain `>` rather than the cross-references' `IS NULL OR >`,
+ * mirroring `buildReleaseQuery`: an unstamped `LIBRARY_RELEASE` row is
+ * invisible to the release import too, and admitting it here would put its
+ * ids in the delta on every single run forever. The periodic full pass is
+ * what covers that case.
+ */
+const fetchCompilationTrackDeltaReleaseIds = async (watermarkMs: number): Promise<number[]> => {
+  const raw = await legacyDB.send(`SELECT ID FROM LIBRARY_RELEASE WHERE TIME_LAST_MODIFIED > ${watermarkMs};`);
+  if (raw.trim().length === 0) return [];
+  const ids: number[] = [];
+  for (const line of raw.trim().split('\n')) {
+    const id = Number(line.trim());
+    if (Number.isInteger(id)) ids.push(id);
+  }
+  return ids;
+};
+
+type CompilationTrackFetch = {
+  rows: LegacyCompilationTrackRow[];
+  /** The bound actually used, or `null` for a full pass. Reused as the `library` map filter. */
+  legacyReleaseIds: number[] | null;
+  /** True when the upstream read failed; the caller must not advance the watermark. */
+  failed: boolean;
+};
+
+const fetchLegacyCompilationTracks = async (watermarkMs: number | null): Promise<CompilationTrackFetch> => {
+  let deltaIds: number[] | null = null;
+  if (watermarkMs != null) {
+    deltaIds = await fetchCompilationTrackDeltaReleaseIds(watermarkMs);
+    if (deltaIds.length === 0) {
+      return { rows: [], legacyReleaseIds: [], failed: false };
+    }
+    if (deltaIds.length > CTA_DELTA_ID_MAX) {
+      // A full re-sync, or an unusually large librarian batch. Same work
+      // either way, without a 50k-element list in a heredoc.
+      console.log(
+        `[library-etl] Compilation-track delta covers ${deltaIds.length} releases (> ${CTA_DELTA_ID_MAX}); falling back to a full fetch.`
+      );
+      deltaIds = null;
+    }
+  }
+
+  try {
+    const raw = await legacyDB.send(buildCompilationTrackQuery(deltaIds));
+    return { rows: parseLegacyCompilationTrackRows(raw), legacyReleaseIds: deltaIds, failed: false };
+  } catch (error) {
+    // Kept tolerant (the table may legitimately be absent in some
+    // environments), but `failed` keeps the watermark where it is so the next
+    // run re-attempts exactly this delta instead of skipping past it.
+    console.warn('[library-etl] COMPILATION_TRACK_ARTIST not available, skipping:', error);
+    return { rows: [], legacyReleaseIds: deltaIds, failed: true };
   }
 };
 
@@ -813,6 +965,9 @@ const fetchLegacyCompilationTracks = async (): Promise<LegacyCompilationTrackRow
  *   is not hypothetical: upstream holds 2,070 surplus rows that collide
  *   intra-table on exactly `cta_unique_idx`'s tuple.
  *
+ * `legacyReleaseIds` filters the `legacy_release_id -> library.id` map load;
+ * `null` (a full pass) scans the whole `library` table as before.
+ *
  * **Counter semantics are unchanged on purpose.** `imported` still counts
  * rows that resolved to a `library` row and were handed to the insert, NOT
  * rows actually written — the 6-for-6 BS#2413 correlation was read against
@@ -821,13 +976,21 @@ const fetchLegacyCompilationTracks = async (): Promise<LegacyCompilationTrackRow
  */
 const importCompilationTracks = async (
   tx: DbTransaction,
-  rows: LegacyCompilationTrackRow[]
+  rows: LegacyCompilationTrackRow[],
+  legacyReleaseIds: number[] | null
 ): Promise<{ imported: number; skipped: number; batches: number }> => {
-  // Build map of legacy_release_id -> library.id
+  // Build map of legacy_release_id -> library.id. Bounded to the delta's
+  // releases when there is one; `inArray` rather than an interpolated array
+  // in a `sql` template (docs/bulk-update-playbook.md:69 — that defect has
+  // shipped three times).
   const releaseRows = await tx
     .select({ id: library.id, legacyReleaseId: library.legacy_release_id })
     .from(library)
-    .where(sql`${library.legacy_release_id} IS NOT NULL`);
+    .where(
+      legacyReleaseIds == null
+        ? sql`${library.legacy_release_id} IS NOT NULL`
+        : and(sql`${library.legacy_release_id} IS NOT NULL`, inArray(library.legacy_release_id, legacyReleaseIds))
+    );
   const releaseMap = new Map<number, number>();
   for (const row of releaseRows) {
     if (row.legacyReleaseId != null) {
@@ -1045,7 +1208,7 @@ const LEGACY_SOURCED_SET_WHERE = buildLegacySourcedSetWhere();
  * **Deliberately unfiltered.** There is no `last_run` / delta predicate here
  * and there must never be one: the ETL's own delta filter is dropped
  * entirely by the documented full-resync recipe (`DELETE FROM cronjob_runs
- * WHERE job_name = 'library-etl'`), which re-selects the whole upstream
+ * WHERE job_name LIKE 'library-etl%'`), which re-selects the whole upstream
  * catalog in one pass. A denylist that were itself windowed would let that
  * single run resurrect every release ever deleted. The table holds one small
  * row per deletion, so loading all of it per run is cheap.
@@ -1170,6 +1333,101 @@ export const reportStrandedResurrections = (stranded: Array<{ id: number; legacy
   process.exitCode = 1;
 };
 
+/**
+ * Phase 2 — the secondary imports (BS#2424).
+ *
+ * Three things changed here, and all three matter:
+ *
+ * 1. **It runs on EVERY pass**, including the ~98% that return "No new legacy
+ *    releases found". With the secondary imports behind the release-delta
+ *    early return *and* bounded on a watermark, a cross-reference-only edit
+ *    would be skipped at that run and then excluded forever. See the
+ *    per-import watermark constants at the top of this file.
+ * 2. **Every legacy read happens with no Postgres transaction open.** Each is
+ *    an SSH `execCommand` spawning a remote `mysql` process; the
+ *    compilation-track read alone streams up to 140,617 rows, and none of
+ *    them needs a write transaction held open while it runs.
+ * 3. It runs strictly AFTER phase 1 commits. `importCompilationTracks` and
+ *    `importReleaseCrossRefs` (via `findAlbumId`) resolve against `library`
+ *    rows phase 1 writes, and `reconcileDenylistedInserts`' `tx.delete` must
+ *    land before a compilation track can reference the row — read-your-writes
+ *    becomes read-your-committed-writes, which is strictly safer. It re-reads
+ *    `genreMap` itself rather than inheriting phase 1's in-transaction
+ *    snapshot.
+ *
+ * One consequence worth stating: a cross-reference failure no longer rolls
+ * back the release import. The releases stay committed and only the secondary
+ * watermarks fail to advance, so the next run retries exactly the failed part
+ * — which is why every secondary import, compilation tracks included, has a
+ * watermark of its own.
+ */
+const runSecondaryImports = async (runStartedAt: Date) => {
+  const lastFullPassMs = await getLastRunTimestamp(SECONDARY_FULL_JOB_NAME);
+  const fullPass = isSecondaryFullPassDue(lastFullPassMs, runStartedAt.getTime());
+  if (fullPass) {
+    console.log(
+      `[library-etl] Secondary imports: running a FULL reconciliation pass (last full pass: ${lastFullPassMs == null ? 'never' : new Date(lastFullPassMs).toISOString()}).`
+    );
+  }
+
+  // A null watermark means an unbounded fetch for that import — which is both
+  // the first-run backfill and the periodic full pass.
+  const artistCrossRefWatermark = fullPass ? null : await getLastRunTimestamp(ARTIST_CROSSREF_JOB_NAME);
+  const releaseCrossRefWatermark = fullPass ? null : await getLastRunTimestamp(RELEASE_CROSSREF_JOB_NAME);
+  const compilationTrackWatermark = fullPass ? null : await getLastRunTimestamp(COMPILATION_TRACKS_JOB_NAME);
+
+  // --- Legacy reads, with NO Postgres transaction open ---
+  const legacyArtistCrossRefs = await fetchLegacyArtistCrossRefs(artistCrossRefWatermark);
+  const legacyReleaseCrossRefs = await fetchLegacyReleaseCrossRefs(releaseCrossRefWatermark);
+  const legacyCTA = await fetchLegacyCompilationTracks(compilationTrackWatermark);
+
+  await db.transaction(async (tx) => {
+    const genreRows = await tx.select().from(genres);
+    const genreMap = new Map(genreRows.map((genre) => [genre.genre_name.toLowerCase(), genre.id]));
+
+    // Shared caches for cross-reference resolution
+    const artistIdCache = new Map<string, number>();
+    const albumIdCache = new Map<string, number>();
+
+    const artistCrossResult = await importArtistCrossRefs(tx, legacyArtistCrossRefs, artistIdCache);
+    if (artistCrossResult.imported > 0 || artistCrossResult.skipped > 0) {
+      console.log(
+        `[library-etl] Artist cross-references: imported ${artistCrossResult.imported}, skipped ${artistCrossResult.skipped}.`
+      );
+    }
+
+    const releaseCrossResult = await importReleaseCrossRefs(
+      tx,
+      legacyReleaseCrossRefs,
+      artistIdCache,
+      albumIdCache,
+      genreMap
+    );
+    if (releaseCrossResult.imported > 0 || releaseCrossResult.skipped > 0) {
+      console.log(
+        `[library-etl] Release cross-references: imported ${releaseCrossResult.imported}, skipped ${releaseCrossResult.skipped}.`
+      );
+    }
+
+    if (legacyCTA.rows.length > 0) {
+      const ctaResult = await importCompilationTracks(tx, legacyCTA.rows, legacyCTA.legacyReleaseIds);
+      console.log(
+        `[library-etl] Compilation track artists: imported ${ctaResult.imported}, skipped ${ctaResult.skipped}. (${ctaResult.batches} batched statement(s) of up to ${CTA_INSERT_CHUNK_ROWS} rows.)`
+      );
+    }
+
+    await updateLastRun(tx, ARTIST_CROSSREF_JOB_NAME, runStartedAt);
+    await updateLastRun(tx, RELEASE_CROSSREF_JOB_NAME, runStartedAt);
+    // A failed upstream read must not advance past the delta it never saw.
+    if (!legacyCTA.failed) {
+      await updateLastRun(tx, COMPILATION_TRACKS_JOB_NAME, runStartedAt);
+      if (fullPass) {
+        await updateLastRun(tx, SECONDARY_FULL_JOB_NAME, runStartedAt);
+      }
+    }
+  });
+};
+
 const run = async () => {
   try {
     const runStartedAt = new Date();
@@ -1186,308 +1444,285 @@ const run = async () => {
       const idleReconcile = await db.transaction((tx) => reconcileDenylistedInserts(tx, new Set<number>()));
       reportStrandedResurrections(idleReconcile.stranded);
       await updateLastRun(db, JOB_NAME, runStartedAt);
-      return;
-    }
+      // BS#2424: NO early return here. The secondary imports are bounded on
+      // their own watermarks now, so they must still run on an idle pass —
+      // otherwise a cross-reference-only edit is skipped at this run and then
+      // excluded forever by a watermark that has already moved past it.
+    } else {
+      let insertedCount = 0;
+      let updatedFromLegacyConflictCount = 0;
+      let skippedCount = 0;
+      let denylistedCount = 0;
+      let denylistedAtWriteTimeCount = 0;
+      let resurrectionsUndone = 0;
+      let strandedResurrections: Array<{ id: number; legacy_release_id: number }> = [];
 
-    let insertedCount = 0;
-    let updatedFromLegacyConflictCount = 0;
-    let skippedCount = 0;
-    let denylistedCount = 0;
-    let denylistedAtWriteTimeCount = 0;
-    let resurrectionsUndone = 0;
-    let strandedResurrections: Array<{ id: number; legacy_release_id: number }> = [];
-
-    await db.transaction(async (tx) => {
-      // Sync genres and formats from legacy database before processing releases
+      // BS#2424: the two legacy reads are hoisted ABOVE the transaction.
+      // Each is an SSH `execCommand` spawning a remote `mysql` process;
+      // neither needs a Postgres write transaction open while it runs.
       const legacyGenreNames = await fetchLegacyGenres();
       const canonicalFormatNames = await fetchLegacyFormats();
-      const genresInserted = await syncGenres(tx, legacyGenreNames);
-      const formatsInserted = await syncFormats(tx, canonicalFormatNames);
-      if (genresInserted > 0 || formatsInserted > 0) {
-        console.log(
-          `[library-etl] Synced ${genresInserted} new genre(s), ${formatsInserted} new format(s) from legacy database.`
-        );
-      }
 
-      const genreRows = await tx.select().from(genres);
-      const genreMap = new Map(genreRows.map((genre) => [genre.genre_name.toLowerCase(), genre.id]));
-
-      const formatRows = await tx.select().from(format);
-      const formatMap = new Map(formatRows.map((row) => [row.format_name.toLowerCase(), row.id]));
-
-      const artistCache = new Map<string, EnsuredArtist>();
-
-      // BS#2112. Loaded once per run, ahead of the loop, and consulted first
-      // for every release — before `findExistingRelease`, so a deleted
-      // release can neither be re-inserted nor have its `legacy_release_id`
-      // back-stamped onto some other row by the canonical-tuple backfill.
-      //
-      // This is a PRE-FILTER, not the only check. It is a snapshot taken once
-      // at the top of a transaction that runs for the length of the import, so
-      // a delete committing mid-run is invisible to it; `isDeniedAtWriteTime`
-      // re-reads per release at the point of write and
-      // `reconcileDenylistedInserts` sweeps up after the loop. See those two
-      // for the mechanism.
-      const deleteDenylist = await loadDeleteDenylist(tx);
-      /** Legacy ids this run took the INSERT branch for — the reconcile pass's safe-to-undo set. */
-      const insertedLegacyIds = new Set<number>();
-
-      for (const release of legacyReleases) {
-        if (deleteDenylist.has(release.release_id)) {
-          denylistedCount += 1;
-          continue;
+      await db.transaction(async (tx) => {
+        // Sync genres and formats from legacy database before processing releases
+        const genresInserted = await syncGenres(tx, legacyGenreNames);
+        const formatsInserted = await syncFormats(tx, canonicalFormatNames);
+        if (genresInserted > 0 || formatsInserted > 0) {
+          console.log(
+            `[library-etl] Synced ${genresInserted} new genre(s), ${formatsInserted} new format(s) from legacy database.`
+          );
         }
 
-        if (isDbOnlyGenre(release.genre_ref_name)) {
-          skippedCount += 1;
-          continue;
-        }
+        const genreRows = await tx.select().from(genres);
+        const genreMap = new Map(genreRows.map((genre) => [genre.genre_name.toLowerCase(), genre.id]));
 
-        const genreName = release.genre_ref_name ?? '';
-        const genreId = genreMap.get(genreName.toLowerCase());
-        if (!genreId) {
-          console.warn(`[library-etl] Missing genre "${genreName}" for release ${release.release_id}.`);
-          skippedCount += 1;
-          continue;
-        }
+        const formatRows = await tx.select().from(format);
+        const formatMap = new Map(formatRows.map((row) => [row.format_name.toLowerCase(), row.id]));
 
-        const formatText = release.format_ref_name ?? '';
-        const formatParsed = parseFormatAndDiscs(formatText);
-        if (!formatParsed) {
-          console.warn(`[library-etl] Unsupported format "${formatText}" for release ${release.release_id}.`);
-          skippedCount += 1;
-          continue;
-        }
+        const artistCache = new Map<string, EnsuredArtist>();
 
-        const formatId = formatMap.get(formatParsed.formatName.toLowerCase()) ?? null;
-        if (!formatId) {
-          console.warn(`[library-etl] Missing format "${formatParsed.formatName}" for release ${release.release_id}.`);
-          skippedCount += 1;
-          continue;
-        }
-
-        const artistInfo = normalizeArtistName(release.artist_name);
-        if (artistInfo.name.length === 0) {
-          skippedCount += 1;
-          continue;
-        }
-        const alphabeticalName = toAlphabeticalName(artistInfo.name, release.artist_alpha_name);
-        const codeLetters = artistInfo.isVarious
-          ? VARIOUS_ARTISTS_CODE_LETTERS
-          : normalizeCodeLetters(release.artist_call_letters);
-        const artistGenreCode = artistInfo.isVarious ? VARIOUS_ARTISTS_CODE_NUMBER : (release.artist_call_numbers ?? 0);
-
-        const { id: artistId, artist_name: canonicalArtistName } = await ensureArtist(
-          tx,
-          artistInfo.name,
-          alphabeticalName,
-          artistInfo.isVarious,
-          genreId,
-          codeLetters,
-          artistGenreCode,
-          artistCache,
-          toDateOnlyString(release.release_time_created),
-          toDateOrUndefined(release.release_last_modified)
-        );
-
-        await ensureGenreArtistCrossref(tx, artistId, genreId, artistGenreCode);
-
-        const albumTitle = release.release_title.trim();
-        if (albumTitle.length === 0) {
-          skippedCount += 1;
-          continue;
-        }
-
-        // BS#2112. Re-read the denylist at the point of write, on a fresh
-        // statement snapshot. The Set above was taken once for the whole run
-        // and cannot see a delete that committed since; this can, and it runs
-        // ahead of `findExistingRelease` because that call's canonical-tuple
-        // match can back-stamp a deleted release's `legacy_release_id` onto a
-        // different `library` row — a resurrection by a second door, which
-        // checking only at the INSERT would miss. See `isDeniedAtWriteTime`.
-        if (await isDeniedAtWriteTime(tx, release.release_id)) {
-          denylistedAtWriteTimeCount += 1;
-          continue;
-        }
-
-        const codeVolumeLetters =
-          release.release_call_letters != null && release.release_call_letters.trim().length > 0
-            ? release.release_call_letters.trim()
-            : null;
-        const existing = await findExistingRelease(
-          tx,
-          artistId,
-          genreId,
-          albumTitle,
-          release.release_call_numbers,
-          codeVolumeLetters
-        );
-        if (existing) {
-          // Backfill legacy_release_id and update date_lost/date_found if changed
-          const updates: Record<string, unknown> = {};
-          if (existing.legacyReleaseId == null) {
-            updates.legacy_release_id = release.release_id;
-          }
-          const newDateLost = toDateOrUndefined(release.date_lost) ?? null;
-          const newDateFound = toDateOrUndefined(release.date_found) ?? null;
-          if (existing.dateLost?.getTime() !== newDateLost?.getTime()) {
-            updates.date_lost = newDateLost;
-          }
-          if (existing.dateFound?.getTime() !== newDateFound?.getTime()) {
-            updates.date_found = newDateFound;
-          }
-          const newAlbumArtist = release.release_album_artist ?? null;
-          if ((existing.albumArtist ?? null) !== newAlbumArtist) {
-            updates.album_artist = newAlbumArtist;
-          }
-          const newOnStreaming = release.release_on_streaming ?? null;
-          if ((existing.onStreaming ?? null) !== newOnStreaming) {
-            updates.on_streaming = newOnStreaming;
-          }
-          if (Object.keys(updates).length > 0) {
-            await tx.update(library).set(updates).where(eq(library.id, existing.id));
-          }
-          skippedCount += 1;
-          continue;
-        }
-
-        // Pre-flight by legacy_release_id so we can split the inserted vs
-        // conflict-updated counters in the final log line. The row landed in
-        // findExistingRelease's null branch, so the only way the upsert below
-        // hits the UPDATE path is via the unique index on legacy_release_id —
-        // i.e. an upstream edit since the last sync changed the canonical
-        // tuple while preserving the legacy id. Knowing which case fired is
-        // operationally useful (a sustained non-zero conflict count signals
-        // upstream churn worth investigating).
-        const conflictRows = await tx
-          .select({ id: library.id })
-          .from(library)
-          .where(eq(library.legacy_release_id, release.release_id))
-          .limit(1);
-        const willConflictOnLegacyId = conflictRows.length > 0;
-
-        // Denormalize the canonical `artists.artist_name` onto `library.artist_name`
-        // so the column the tsvector / trigram catalog search reads against
-        // (`library.artist_name`) is populated at insert time. Omitting it lets
-        // the row land NULL — invisible to search, and (pre-fix) tripping the
-        // 503-on-any-NULL precondition in library-artist-name-assertion.service.
+        // BS#2112. Loaded once per run, ahead of the loop, and consulted first
+        // for every release — before `findExistingRelease`, so a deleted
+        // release can neither be re-inserted nor have its `legacy_release_id`
+        // back-stamped onto some other row by the canonical-tuple backfill.
         //
-        // ON CONFLICT (legacy_release_id) DO UPDATE handles the case the
-        // pre-flight above identified: the canonical-tuple lookup missed but
-        // a row already exists with this legacy_release_id. Without it, the
-        // INSERT violates `library_legacy_release_id_idx` and aborts the
-        // whole run on first conflict (#752). The SET list is built from
-        // LEGACY_SOURCED_LIBRARY_COLUMNS, which is also exported and pinned
-        // by a unit test — so PG-only / LML-resolved columns (id, plays,
-        // label, label_id, artwork_url, canonical_entity_*, search_doc)
-        // can't drift into the SET list by accident.
-        await tx
-          .insert(library)
-          .values({
-            artist_id: artistId,
-            artist_name: canonicalArtistName,
-            genre_id: genreId,
-            format_id: formatId,
-            alternate_artist_name: release.release_alternate_artist_name,
-            album_artist: release.release_album_artist,
-            album_title: albumTitle,
-            code_number: release.release_call_numbers ?? 0,
-            code_volume_letters: codeVolumeLetters,
-            disc_quantity: formatParsed.discQuantity,
-            legacy_release_id: release.release_id,
-            add_date: toDateOrUndefined(release.release_time_created),
-            last_modified: toDateOrUndefined(release.release_last_modified),
-            date_lost: toDateOrUndefined(release.date_lost),
-            date_found: toDateOrUndefined(release.date_found),
-            on_streaming: release.release_on_streaming,
-          })
-          .onConflictDoUpdate({
-            target: library.legacy_release_id,
-            set: LEGACY_SOURCED_SET_MAP,
-            setWhere: LEGACY_SOURCED_SET_WHERE,
-          });
+        // This is a PRE-FILTER, not the only check. It is a snapshot taken once
+        // at the top of a transaction that runs for the length of the import, so
+        // a delete committing mid-run is invisible to it; `isDeniedAtWriteTime`
+        // re-reads per release at the point of write and
+        // `reconcileDenylistedInserts` sweeps up after the loop. See those two
+        // for the mechanism.
+        const deleteDenylist = await loadDeleteDenylist(tx);
+        /** Legacy ids this run took the INSERT branch for — the reconcile pass's safe-to-undo set. */
+        const insertedLegacyIds = new Set<number>();
 
-        if (willConflictOnLegacyId) {
-          updatedFromLegacyConflictCount += 1;
-        } else {
-          insertedCount += 1;
-          insertedLegacyIds.add(release.release_id);
+        for (const release of legacyReleases) {
+          if (deleteDenylist.has(release.release_id)) {
+            denylistedCount += 1;
+            continue;
+          }
+
+          if (isDbOnlyGenre(release.genre_ref_name)) {
+            skippedCount += 1;
+            continue;
+          }
+
+          const genreName = release.genre_ref_name ?? '';
+          const genreId = genreMap.get(genreName.toLowerCase());
+          if (!genreId) {
+            console.warn(`[library-etl] Missing genre "${genreName}" for release ${release.release_id}.`);
+            skippedCount += 1;
+            continue;
+          }
+
+          const formatText = release.format_ref_name ?? '';
+          const formatParsed = parseFormatAndDiscs(formatText);
+          if (!formatParsed) {
+            console.warn(`[library-etl] Unsupported format "${formatText}" for release ${release.release_id}.`);
+            skippedCount += 1;
+            continue;
+          }
+
+          const formatId = formatMap.get(formatParsed.formatName.toLowerCase()) ?? null;
+          if (!formatId) {
+            console.warn(
+              `[library-etl] Missing format "${formatParsed.formatName}" for release ${release.release_id}.`
+            );
+            skippedCount += 1;
+            continue;
+          }
+
+          const artistInfo = normalizeArtistName(release.artist_name);
+          if (artistInfo.name.length === 0) {
+            skippedCount += 1;
+            continue;
+          }
+          const alphabeticalName = toAlphabeticalName(artistInfo.name, release.artist_alpha_name);
+          const codeLetters = artistInfo.isVarious
+            ? VARIOUS_ARTISTS_CODE_LETTERS
+            : normalizeCodeLetters(release.artist_call_letters);
+          const artistGenreCode = artistInfo.isVarious
+            ? VARIOUS_ARTISTS_CODE_NUMBER
+            : (release.artist_call_numbers ?? 0);
+
+          const { id: artistId, artist_name: canonicalArtistName } = await ensureArtist(
+            tx,
+            artistInfo.name,
+            alphabeticalName,
+            artistInfo.isVarious,
+            genreId,
+            codeLetters,
+            artistGenreCode,
+            artistCache,
+            toDateOnlyString(release.release_time_created),
+            toDateOrUndefined(release.release_last_modified)
+          );
+
+          await ensureGenreArtistCrossref(tx, artistId, genreId, artistGenreCode);
+
+          const albumTitle = release.release_title.trim();
+          if (albumTitle.length === 0) {
+            skippedCount += 1;
+            continue;
+          }
+
+          // BS#2112. Re-read the denylist at the point of write, on a fresh
+          // statement snapshot. The Set above was taken once for the whole run
+          // and cannot see a delete that committed since; this can, and it runs
+          // ahead of `findExistingRelease` because that call's canonical-tuple
+          // match can back-stamp a deleted release's `legacy_release_id` onto a
+          // different `library` row — a resurrection by a second door, which
+          // checking only at the INSERT would miss. See `isDeniedAtWriteTime`.
+          if (await isDeniedAtWriteTime(tx, release.release_id)) {
+            denylistedAtWriteTimeCount += 1;
+            continue;
+          }
+
+          const codeVolumeLetters =
+            release.release_call_letters != null && release.release_call_letters.trim().length > 0
+              ? release.release_call_letters.trim()
+              : null;
+          const existing = await findExistingRelease(
+            tx,
+            artistId,
+            genreId,
+            albumTitle,
+            release.release_call_numbers,
+            codeVolumeLetters
+          );
+          if (existing) {
+            // Backfill legacy_release_id and update date_lost/date_found if changed
+            const updates: Record<string, unknown> = {};
+            if (existing.legacyReleaseId == null) {
+              updates.legacy_release_id = release.release_id;
+            }
+            const newDateLost = toDateOrUndefined(release.date_lost) ?? null;
+            const newDateFound = toDateOrUndefined(release.date_found) ?? null;
+            if (existing.dateLost?.getTime() !== newDateLost?.getTime()) {
+              updates.date_lost = newDateLost;
+            }
+            if (existing.dateFound?.getTime() !== newDateFound?.getTime()) {
+              updates.date_found = newDateFound;
+            }
+            const newAlbumArtist = release.release_album_artist ?? null;
+            if ((existing.albumArtist ?? null) !== newAlbumArtist) {
+              updates.album_artist = newAlbumArtist;
+            }
+            const newOnStreaming = release.release_on_streaming ?? null;
+            if ((existing.onStreaming ?? null) !== newOnStreaming) {
+              updates.on_streaming = newOnStreaming;
+            }
+            if (Object.keys(updates).length > 0) {
+              await tx.update(library).set(updates).where(eq(library.id, existing.id));
+            }
+            skippedCount += 1;
+            continue;
+          }
+
+          // Pre-flight by legacy_release_id so we can split the inserted vs
+          // conflict-updated counters in the final log line. The row landed in
+          // findExistingRelease's null branch, so the only way the upsert below
+          // hits the UPDATE path is via the unique index on legacy_release_id —
+          // i.e. an upstream edit since the last sync changed the canonical
+          // tuple while preserving the legacy id. Knowing which case fired is
+          // operationally useful (a sustained non-zero conflict count signals
+          // upstream churn worth investigating).
+          const conflictRows = await tx
+            .select({ id: library.id })
+            .from(library)
+            .where(eq(library.legacy_release_id, release.release_id))
+            .limit(1);
+          const willConflictOnLegacyId = conflictRows.length > 0;
+
+          // Denormalize the canonical `artists.artist_name` onto `library.artist_name`
+          // so the column the tsvector / trigram catalog search reads against
+          // (`library.artist_name`) is populated at insert time. Omitting it lets
+          // the row land NULL — invisible to search, and (pre-fix) tripping the
+          // 503-on-any-NULL precondition in library-artist-name-assertion.service.
+          //
+          // ON CONFLICT (legacy_release_id) DO UPDATE handles the case the
+          // pre-flight above identified: the canonical-tuple lookup missed but
+          // a row already exists with this legacy_release_id. Without it, the
+          // INSERT violates `library_legacy_release_id_idx` and aborts the
+          // whole run on first conflict (#752). The SET list is built from
+          // LEGACY_SOURCED_LIBRARY_COLUMNS, which is also exported and pinned
+          // by a unit test — so PG-only / LML-resolved columns (id, plays,
+          // label, label_id, artwork_url, canonical_entity_*, search_doc)
+          // can't drift into the SET list by accident.
+          await tx
+            .insert(library)
+            .values({
+              artist_id: artistId,
+              artist_name: canonicalArtistName,
+              genre_id: genreId,
+              format_id: formatId,
+              alternate_artist_name: release.release_alternate_artist_name,
+              album_artist: release.release_album_artist,
+              album_title: albumTitle,
+              code_number: release.release_call_numbers ?? 0,
+              code_volume_letters: codeVolumeLetters,
+              disc_quantity: formatParsed.discQuantity,
+              legacy_release_id: release.release_id,
+              add_date: toDateOrUndefined(release.release_time_created),
+              last_modified: toDateOrUndefined(release.release_last_modified),
+              date_lost: toDateOrUndefined(release.date_lost),
+              date_found: toDateOrUndefined(release.date_found),
+              on_streaming: release.release_on_streaming,
+            })
+            .onConflictDoUpdate({
+              target: library.legacy_release_id,
+              set: LEGACY_SOURCED_SET_MAP,
+              setWhere: LEGACY_SOURCED_SET_WHERE,
+            });
+
+          if (willConflictOnLegacyId) {
+            updatedFromLegacyConflictCount += 1;
+          } else {
+            insertedCount += 1;
+            insertedLegacyIds.add(release.release_id);
+          }
         }
-      }
 
-      // BS#2112. Sweep for anything the two checks above still let through —
-      // a delete that committed inside the one-statement gap between
-      // `isDeniedAtWriteTime` and the upsert. Runs here, right after the loop
-      // that could have created a resurrection and before the cross-reference
-      // imports, so an undone row is gone before anything can reference it.
-      const reconciled = await reconcileDenylistedInserts(tx, insertedLegacyIds);
-      resurrectionsUndone = reconciled.removed.length;
-      strandedResurrections = reconciled.stranded;
-      if (resurrectionsUndone > 0) {
-        insertedCount -= resurrectionsUndone;
-        console.warn(
-          `[library-etl] Undid ${resurrectionsUndone} resurrection(s) of denylisted release(s) inserted by this run: library ids ${reconciled.removed.join(', ')}.`
-        );
-      }
+        // BS#2112. Sweep for anything the two checks above still let through —
+        // a delete that committed inside the one-statement gap between
+        // `isDeniedAtWriteTime` and the upsert. Runs here, right after the loop
+        // that could have created a resurrection and before the cross-reference
+        // imports, so an undone row is gone before anything can reference it.
+        const reconciled = await reconcileDenylistedInserts(tx, insertedLegacyIds);
+        resurrectionsUndone = reconciled.removed.length;
+        strandedResurrections = reconciled.stranded;
+        if (resurrectionsUndone > 0) {
+          insertedCount -= resurrectionsUndone;
+          console.warn(
+            `[library-etl] Undid ${resurrectionsUndone} resurrection(s) of denylisted release(s) inserted by this run: library ids ${reconciled.removed.join(', ')}.`
+          );
+        }
 
-      // --- Cross-reference imports ---
-      // Detect if this is the first run by checking if both crossref tables are empty.
-      // If so, do a full backfill regardless of last_run timestamp.
-      const artistCrossrefCount = await tx.select({ count: sql<number>`count(*)::int` }).from(artist_crossreference);
-      const releaseCrossrefCount = await tx
-        .select({ count: sql<number>`count(*)::int` })
-        .from(artist_library_crossreference);
-      const isFirstCrossrefRun = artistCrossrefCount[0].count === 0 && releaseCrossrefCount[0].count === 0;
+        // BS#2424: the cross-reference, compilation-track and secondary
+        // watermark writes used to live here, inside this transaction. They
+        // are phase 2 now (`runSecondaryImports`), which runs after this
+        // transaction COMMITS and carries its own per-import watermarks. The
+        // former `isFirstCrossrefRun` flag went with them: "both crossref
+        // tables are empty" is the wrong first-run test once each import has
+        // a watermark of its own, and a missing watermark row already means
+        // an unbounded fetch for exactly that import.
 
-      if (isFirstCrossrefRun) {
-        console.log('[library-etl] Cross-reference tables are empty — running full backfill.');
-      }
+        await updateLastRun(tx, JOB_NAME, runStartedAt);
+      });
 
-      // Build shared caches for cross-reference resolution
-      const artistIdCache = new Map<string, number>();
-      const albumIdCache = new Map<string, number>();
-
-      // Import artist-to-artist cross-references
-      const legacyArtistCrossRefs = await fetchLegacyArtistCrossRefs();
-      const artistCrossResult = await importArtistCrossRefs(tx, legacyArtistCrossRefs, artistIdCache);
-      if (artistCrossResult.imported > 0 || artistCrossResult.skipped > 0) {
-        console.log(
-          `[library-etl] Artist cross-references: imported ${artistCrossResult.imported}, skipped ${artistCrossResult.skipped}.`
-        );
-      }
-
-      // Import release cross-references (artist→album links)
-      const legacyReleaseCrossRefs = await fetchLegacyReleaseCrossRefs();
-      const releaseCrossResult = await importReleaseCrossRefs(
-        tx,
-        legacyReleaseCrossRefs,
-        artistIdCache,
-        albumIdCache,
-        genreMap
+      console.log(
+        `[library-etl] Completed. Inserted ${insertedCount}, updated via legacy-id conflict ${updatedFromLegacyConflictCount}, skipped ${skippedCount}, skipped as deleted ${denylistedCount} (+${denylistedAtWriteTimeCount} caught at write time), resurrections undone ${resurrectionsUndone}.`
       );
-      if (releaseCrossResult.imported > 0 || releaseCrossResult.skipped > 0) {
-        console.log(
-          `[library-etl] Release cross-references: imported ${releaseCrossResult.imported}, skipped ${releaseCrossResult.skipped}.`
-        );
-      }
 
-      // Import compilation track artists (V/A releases)
-      const legacyCTA = await fetchLegacyCompilationTracks();
-      if (legacyCTA.length > 0) {
-        const ctaResult = await importCompilationTracks(tx, legacyCTA);
-        console.log(
-          `[library-etl] Compilation track artists: imported ${ctaResult.imported}, skipped ${ctaResult.skipped}. (${ctaResult.batches} batched statement(s) of up to ${CTA_INSERT_CHUNK_ROWS} rows.)`
-        );
-      }
+      reportStrandedResurrections(strandedResurrections);
+    }
 
-      await updateLastRun(tx, JOB_NAME, runStartedAt);
-    });
-
-    console.log(
-      `[library-etl] Completed. Inserted ${insertedCount}, updated via legacy-id conflict ${updatedFromLegacyConflictCount}, skipped ${skippedCount}, skipped as deleted ${denylistedCount} (+${denylistedAtWriteTimeCount} caught at write time), resurrections undone ${resurrectionsUndone}.`
-    );
-
-    reportStrandedResurrections(strandedResurrections);
+    // BS#2424 phase 2. Deliberately OUTSIDE the release-delta branch: the
+    // secondary imports carry their own watermarks now, so an idle pass —
+    // which is ~98% of runs — must still process a cross-reference-only
+    // edit. It runs after phase 1 has COMMITTED, because the imports below
+    // resolve against `library` rows phase 1 writes and deletes.
+    await runSecondaryImports(runStartedAt);
   } finally {
     await closeDatabaseConnection();
     legacyDB.close();
@@ -1523,6 +1758,11 @@ export {
   // point of BS#2424 — has no regression guard.
   importCompilationTracks,
   chunk,
+  // BS#2424 — the delta bounds and the full-pass clock.
+  buildArtistCrossRefQuery,
+  buildReleaseCrossRefQuery,
+  buildCompilationTrackQuery,
+  isSecondaryFullPassDue,
 };
 
 run().catch((error) => {

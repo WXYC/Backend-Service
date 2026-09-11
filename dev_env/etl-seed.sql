@@ -185,13 +185,17 @@ INSERT INTO LIBRARY_CODE (ID, PRESENTATION_NAME, ALPHABETICAL_NAME, CALL_LETTERS
 -- ID=1 uses the case-variant source (AUTECHRE) so it is processed FIRST by MySQL
 -- (InnoDB returns rows in PK order). This ensures the case-insensitive cache
 -- doesn't mask a DB-level exact-match bug in findArtistId.
-INSERT INTO LIBRARY_CODE_CROSS_REFERENCE (ID, CROSS_REFERENCING_ARTIST_ID, CROSS_REFERENCED_LIBRARY_CODE_ID, COMMENT) VALUES
-  (1, 10, 2, 'case test'),
-  (2, 1, 4, 'see also');
+-- BS#2424: TIME_LAST_MODIFIED is the delta bound the artist-crossref import
+-- runs on, against the `library-etl:artist-crossref` watermark. Seeded with
+-- real values so the bounded path is exercised rather than only the
+-- first-run/full-pass path.
+INSERT INTO LIBRARY_CODE_CROSS_REFERENCE (ID, CROSS_REFERENCING_ARTIST_ID, CROSS_REFERENCED_LIBRARY_CODE_ID, COMMENT, TIME_LAST_MODIFIED, TIME_CREATED) VALUES
+  (1, 10, 2, 'case test', 1775000000000, 1700000000000),
+  (2, 1, 4, 'see also', 1775000000000, 1700000000000);
 
 -- ---- Release Cross-References ----
-INSERT INTO RELEASE_CROSS_REFERENCE (ID, CROSS_REFERENCING_ARTIST_ID, CROSS_REFERENCED_RELEASE_ID, COMMENT) VALUES
-  (1, 5, 105, 'featured artist');
+INSERT INTO RELEASE_CROSS_REFERENCE (ID, CROSS_REFERENCING_ARTIST_ID, CROSS_REFERENCED_RELEASE_ID, COMMENT, TIME_LAST_MODIFIED, TIME_CREATED) VALUES
+  (1, 5, 105, 'featured artist', 1775000000000, 1700000000000);
 
 -- ---- Shows ----
 -- DJ_NAME holds the full real name in prod (BS forwards `realName || name` via

@@ -46,9 +46,14 @@ const etlEnv = {
 
 const runETL = (jobPath: string, jobName: string, { resetLastRun = true } = {}) => {
   if (resetLastRun) {
-    // Clear last_run to force a full import
+    // Clear last_run to force a full import. `LIKE` rather than `=`
+    // (BS#2424): library-etl's secondary imports carry their own
+    // `library-etl:*` watermark rows, and leaving those behind would make
+    // this suite order-dependent — a second suite run would find them and
+    // take the bounded path. Same reason the README's full-re-sync recipe
+    // uses `LIKE`.
     execSync(
-      `psql "postgres://etluser:etltest@localhost:${PG_PORT}/etldb" -c "DELETE FROM ${SCHEMA}.cronjob_runs WHERE job_name = '${jobName}'"`,
+      `psql "postgres://etluser:etltest@localhost:${PG_PORT}/etldb" -c "DELETE FROM ${SCHEMA}.cronjob_runs WHERE job_name LIKE '${jobName}%'"`,
       { stdio: 'pipe' }
     );
   }
@@ -57,6 +62,14 @@ const runETL = (jobPath: string, jobName: string, { resetLastRun = true } = {}) 
     cwd: process.cwd(),
     stdio: 'pipe',
     timeout: 60000,
+  });
+};
+
+/** Run a statement against the seeded tubafrenzy MySQL container. */
+const mysqlExec = (statement: string) => {
+  execSync(`docker exec -i ${MYSQL_CONTAINER} mysql -uetluser -petltest wxycmusic --default-character-set=utf8`, {
+    input: statement,
+    stdio: 'pipe',
   });
 };
 
@@ -198,6 +211,136 @@ describe('Library ETL', () => {
       WHERE artist_name = 'Flowertown' AND track_title = 'Half Moon'
     `;
     expect(rows[0].count).toBe(1);
+  });
+
+  /** BS#2424 — the four per-import watermarks the secondary imports run on. */
+  it('records a watermark for every secondary import', async () => {
+    const rows = await pg`
+      SELECT job_name, last_run FROM ${pg(SCHEMA)}.cronjob_runs
+      WHERE job_name LIKE 'library-etl:%' ORDER BY job_name
+    `;
+    expect(rows.map((r: any) => r.job_name)).toEqual([
+      'library-etl:artist-crossref',
+      'library-etl:compilation-tracks',
+      'library-etl:release-crossref',
+      'library-etl:secondary-full',
+    ]);
+    for (const row of rows) {
+      expect(row.last_run).toBeInstanceOf(Date);
+    }
+  });
+});
+
+// ---- Library ETL, delta-bounded second pass (BS#2424) ----
+
+/**
+ * The first pass above is a full pass by construction (no watermarks exist
+ * yet). These tests re-run the job WITHOUT clearing the watermarks, so the
+ * secondary imports take their bounded path — which is the path that runs
+ * ~98% of the time in production and the one the bounds can break.
+ */
+describe('Library ETL delta bounds (BS#2424)', () => {
+  // This block is the only one that MUTATES the MySQL fixture, so it puts the
+  // row back: the seed is loaded once when the container is created, and a
+  // left-behind edit would fail the `Library ETL` block's 'see also'
+  // assertion on the next suite run against the same containers.
+  afterAll(() => {
+    mysqlExec(
+      `UPDATE LIBRARY_CODE_CROSS_REFERENCE SET COMMENT = 'see also', TIME_LAST_MODIFIED = 1775000000000 WHERE ID = 2;`
+    );
+  });
+
+  const countCrossRefs = async () => {
+    const [artist] = await pg`SELECT COUNT(*)::int AS count FROM ${pg(SCHEMA)}.artist_crossreference`;
+    const [release] = await pg`SELECT COUNT(*)::int AS count FROM ${pg(SCHEMA)}.artist_library_crossreference`;
+    const [cta] = await pg`SELECT COUNT(*)::int AS count FROM ${pg(SCHEMA)}.compilation_track_artist`;
+    return { artist: artist.count, release: release.count, cta: cta.count };
+  };
+
+  it('imports nothing new on a bounded re-run', async () => {
+    const before = await countCrossRefs();
+
+    runETL('jobs/library-etl/job.ts', 'library-etl', { resetLastRun: false });
+
+    expect(await countCrossRefs()).toEqual(before);
+  });
+
+  /**
+   * The note-4 regression test. The release delta is empty here — every
+   * `LIBRARY_RELEASE` row is older than the watermark — so this run takes the
+   * "No new legacy releases found" path. Before BS#2424 that path returned
+   * early, and the edit below would have been skipped at this run and then
+   * excluded forever by a watermark that had already moved past it.
+   */
+  it('picks up a cross-reference-only edit on an otherwise idle run', async () => {
+    // LIBRARY_CODE_CROSS_REFERENCE row ID=2: Autechre -> Chuquimamani-Condori.
+    // Selected by TARGET, because the case-variant row (ID=1) shares the same
+    // deduplicated source artist.
+    const crossRefComment = async () => {
+      const [row] = await pg`
+        SELECT ac.comment
+        FROM ${pg(SCHEMA)}.artist_crossreference ac
+        JOIN ${pg(SCHEMA)}.artists target ON ac.target_artist_id = target.id
+        WHERE target.artist_name = 'Chuquimamani-Condori'
+      `;
+      return row.comment;
+    };
+    expect(await crossRefComment()).toBe('see also');
+
+    // Far-future stamp so it is unambiguously past the watermark, which is
+    // wall-clock `now()` from the previous run.
+    mysqlExec(
+      `UPDATE LIBRARY_CODE_CROSS_REFERENCE SET COMMENT = 'edited upstream', TIME_LAST_MODIFIED = 4102444800000 WHERE ID = 2;`
+    );
+
+    const [releaseCount] = await pg`SELECT COUNT(*)::int AS count FROM ${pg(SCHEMA)}.library`;
+    runETL('jobs/library-etl/job.ts', 'library-etl', { resetLastRun: false });
+
+    expect(await crossRefComment()).toBe('edited upstream');
+
+    // No new releases: the run went down the idle branch and still did the
+    // secondary work.
+    const [releaseCountAfter] = await pg`SELECT COUNT(*)::int AS count FROM ${pg(SCHEMA)}.library`;
+    expect(releaseCountAfter.count).toBe(releaseCount.count);
+  });
+
+  it('advances every secondary watermark on each run', async () => {
+    const before = await pg`
+      SELECT job_name, last_run FROM ${pg(SCHEMA)}.cronjob_runs
+      WHERE job_name LIKE 'library-etl:%' AND job_name <> 'library-etl:secondary-full'
+      ORDER BY job_name
+    `;
+
+    runETL('jobs/library-etl/job.ts', 'library-etl', { resetLastRun: false });
+
+    const after = await pg`
+      SELECT job_name, last_run FROM ${pg(SCHEMA)}.cronjob_runs
+      WHERE job_name LIKE 'library-etl:%' AND job_name <> 'library-etl:secondary-full'
+      ORDER BY job_name
+    `;
+    expect(after.length).toBe(3);
+    const beforeByName = new Map(before.map((row: any) => [row.job_name, row.last_run.getTime()]));
+    for (const row of after) {
+      expect(beforeByName.has(row.job_name)).toBe(true);
+      expect(row.last_run.getTime()).toBeGreaterThan(beforeByName.get(row.job_name));
+    }
+  });
+
+  /**
+   * The full-pass clock is NOT advanced by an ordinary bounded run — it is
+   * what makes the reconciliation pass periodic rather than every-run.
+   */
+  it('leaves the full-pass clock alone on a bounded run', async () => {
+    const [before] = await pg`
+      SELECT last_run FROM ${pg(SCHEMA)}.cronjob_runs WHERE job_name = 'library-etl:secondary-full'
+    `;
+
+    runETL('jobs/library-etl/job.ts', 'library-etl', { resetLastRun: false });
+
+    const [after] = await pg`
+      SELECT last_run FROM ${pg(SCHEMA)}.cronjob_runs WHERE job_name = 'library-etl:secondary-full'
+    `;
+    expect(after.last_run.getTime()).toBe(before.last_run.getTime());
   });
 });
 
