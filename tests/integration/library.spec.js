@@ -178,7 +178,9 @@ describe('Library Catalog', () => {
       expectErrorContains(res, 'Missing Parameters');
     });
 
-    test('returns 400 when label is missing', async () => {
+    // BS#2410: `label` left the required set — `label_id` satisfies it too —
+    // so the 400 here is for a body carrying neither.
+    test('returns 400 when both label and label_id are missing', async () => {
       const res = await auth
         .post('/library')
         .send({
@@ -232,6 +234,157 @@ describe('Library Catalog', () => {
         .expect(400);
 
       expectErrorContains(res, 'Missing Parameters');
+    });
+
+    /**
+     * BS#2410 item 3 — the release call code becomes operator-supplied.
+     *
+     * Before this, `addAlbum` overwrote `code_number` with
+     * `generateAlbumCodeNumber(artist_id)` unconditionally, so a sent value
+     * was discarded silently and the request succeeded with a server-assigned
+     * number. The smallint bound is what makes the passthrough safe:
+     * `library.code_number` is a Postgres smallint, so 40000 would otherwise
+     * reach PG as SQLSTATE 22003 → 500.
+     *
+     * Rows are deleted in `afterAll` rather than left behind: the numbers
+     * these tests pick sit far above the seeded catalog, and
+     * `generateAlbumCodeNumber` is MAX+1 per artist, so a surviving row would
+     * push every later add for the same artist into the same range.
+     */
+    describe('operator-supplied call code (BS#2410)', () => {
+      const createdAlbumIds = [];
+
+      const addAlbumBody = (overrides) => ({
+        album_title: `Call Code ${Date.now()}${Math.random()}`,
+        artist_name: 'Built to Spill',
+        label: 'Test Label',
+        genre_id: 11,
+        format_id: 1,
+        ...overrides,
+      });
+
+      afterAll(async () => {
+        if (createdAlbumIds.length === 0) return;
+        const sql = getTestDb();
+        await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id IN ${sql(createdAlbumIds)}`;
+      });
+
+      test('persists a client-supplied code_number and code_volume_letters', async () => {
+        const res = await auth
+          .post('/library')
+          .send(addAlbumBody({ code_number: 12345, code_volume_letters: 'B' }))
+          .expect(201);
+        createdAlbumIds.push(res.body.id);
+
+        const sql = getTestDb();
+        const [row] = await sql`
+          SELECT code_number, code_volume_letters FROM ${sql(SCHEMA)}.library WHERE id = ${res.body.id}
+        `;
+        expect(row.code_number).toBe(12345);
+        expect(row.code_volume_letters).toBe('B');
+      });
+
+      test('falls back to the generated code_number when omitted, leaving volume letters NULL', async () => {
+        const res = await auth.post('/library').send(addAlbumBody({})).expect(201);
+        createdAlbumIds.push(res.body.id);
+
+        const sql = getTestDb();
+        const [row] = await sql`
+          SELECT code_number, code_volume_letters FROM ${sql(SCHEMA)}.library WHERE id = ${res.body.id}
+        `;
+        expect(typeof row.code_number).toBe('number');
+        expect(row.code_number).toBeGreaterThanOrEqual(1);
+        expect(row.code_volume_letters).toBeNull();
+      });
+
+      // 32768 and 40000 are out of smallint range; 0 and -1 are out of the
+      // call-number range. Every one of them was a silent no-op before this
+      // ticket, not a 500 — the 500 only becomes reachable once the
+      // passthrough above is wired.
+      test.each([0, -1, 32768, 40000, 1.5])('rejects code_number %p with a 400', async (code_number) => {
+        const res = await auth.post('/library').send(addAlbumBody({ code_number })).expect(400);
+        expectErrorContains(res, 'code_number');
+      });
+
+      test('rejects code_volume_letters longer than the varchar(4) column', async () => {
+        const res = await auth
+          .post('/library')
+          .send(addAlbumBody({ code_volume_letters: 'ABCDE' }))
+          .expect(400);
+        expectErrorContains(res, 'code_volume_letters');
+      });
+    });
+
+    /**
+     * BS#2410 item 3 / rotation-import plan D5 — `label_id` alone satisfies
+     * the label requirement, with Backend resolving `labels.label_name` for
+     * the denormalized `library.label` column rather than upserting a second
+     * labels row. Before this, a body without `label` was rejected outright.
+     */
+    describe('label_id satisfies the label requirement (BS#2410)', () => {
+      const createdAlbumIds = [];
+
+      afterAll(async () => {
+        if (createdAlbumIds.length === 0) return;
+        const sql = getTestDb();
+        await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id IN ${sql(createdAlbumIds)}`;
+      });
+
+      test('creates a release from label_id alone and denormalizes the resolved name', async () => {
+        const labelName = `Sonamos ${Date.now()}`;
+        // Mint the labels row through the existing text path, then re-use its
+        // id the way the import screen does — carrying the rotation row's
+        // label_id with no label text at all.
+        const seed = await auth
+          .post('/library')
+          .send({
+            album_title: `Label Seed ${Date.now()}`,
+            artist_name: 'Built to Spill',
+            label: labelName,
+            genre_id: 11,
+            format_id: 1,
+          })
+          .expect(201);
+        createdAlbumIds.push(seed.body.id);
+        expect(seed.body.label_id).toEqual(expect.any(Number));
+
+        const res = await auth
+          .post('/library')
+          .send({
+            album_title: `Label Carry ${Date.now()}`,
+            artist_name: 'Built to Spill',
+            label_id: seed.body.label_id,
+            genre_id: 11,
+            format_id: 1,
+          })
+          .expect(201);
+        createdAlbumIds.push(res.body.id);
+
+        expect(res.body.label_id).toBe(seed.body.label_id);
+        expect(res.body.label).toBe(labelName);
+
+        const sql = getTestDb();
+        const [row] = await sql`
+          SELECT label, label_id FROM ${sql(SCHEMA)}.library WHERE id = ${res.body.id}
+        `;
+        expect(row.label).toBe(labelName);
+        expect(row.label_id).toBe(seed.body.label_id);
+      });
+
+      test('rejects a dangling label_id with the established wording', async () => {
+        const res = await auth
+          .post('/library')
+          .send({
+            album_title: `Dangling Label ${Date.now()}`,
+            artist_name: 'Built to Spill',
+            label_id: 99999999,
+            genre_id: 11,
+            format_id: 1,
+          })
+          .expect(400);
+
+        expectErrorContains(res, 'label_id does not reference an existing label');
+      });
     });
   });
 });
