@@ -651,6 +651,17 @@ describe('library.controller', () => {
         expect(mockInsertAlbum).not.toHaveBeenCalled();
       });
 
+      // `varchar(4)` is a CHARACTER limit, so the bound counts code points,
+      // not UTF-16 units. These four astral letters are eight UTF-16 units: a
+      // bare `.length` rejects a value Postgres stores happily, the same
+      // over-rejection `validateTextField` and `addRotation` were corrected
+      // for on their `varchar(128)` columns.
+      it('measures code_volume_letters in code points, not UTF-16 units', async () => {
+        await addAlbum(req({ code_volume_letters: '𝐀𝐁𝐂𝐃' }), mockResponse(), next);
+
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ code_volume_letters: '𝐀𝐁𝐂𝐃' }));
+      });
+
       it('rejects a non-string code_volume_letters', async () => {
         await expect(addAlbum(req({ code_volume_letters: 4 }), mockResponse(), next)).rejects.toThrow(
           'code_volume_letters'
