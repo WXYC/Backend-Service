@@ -49,9 +49,13 @@ type NewAlbumRequest = {
   artist_id?: number;
   alternate_artist_name?: string;
   // BS#2410: `label` is no longer required on its own — see the either-or
-  // guard in `addAlbum` and `resolveNewAlbumLabel` below.
+  // guard in `addAlbum` and `resolveNewAlbumLabel` below. `label_id` admits
+  // `null` (the `selected?.id ?? null` wire shape) and treats it as absent;
+  // the member is typed `| null` for the same reason `UpdateAlbumRequest`'s
+  // is — so the null the client actually sends is in the type rather than
+  // arriving as an untyped surprise.
   label?: string;
-  label_id?: number;
+  label_id?: number | null;
   genre_id: number;
   format_id: number;
   disc_quantity?: number;
@@ -144,11 +148,23 @@ const validateCodeVolumeLetters = (code_volume_letters: unknown): string | undef
  * and which still skips the upsert rather than minting an empty `labels` row.
  * Tightening that is `PATCH /library/:id`'s "clear the label by sending
  * label_id: null" rule and is not this ticket's to change.
+ *
+ * **`label_id: null` means absent here, not "clear the label."** The gate is
+ * `!= null`, not `!== undefined`: `{ label_id: selected?.id ?? null }` is what
+ * dj-site#1161's Import-to-Library combo-box emits when the operator types a
+ * new label name instead of picking an existing row, and an `=== undefined`
+ * test takes the has-a-label_id branch on it and 400s `Number.isInteger(null)`
+ * — the defect `1cebb1da` (BS#2164) fixed on `addRotation`. `null` cannot mean
+ * "clear" on a create, because there is nothing yet to clear; giving it the
+ * PATCH meaning would leave POST and PATCH permanently disagreeing about one
+ * field name. The required-set guard in `addAlbum` uses the same `!= null`, so
+ * a `null` with no label text draws the "Missing Parameters" 400 rather than
+ * the malformed-integer one.
  */
 const resolveNewAlbumLabel = async (
   body: NewAlbumRequest
 ): Promise<{ label_id: number | undefined; label: string | undefined }> => {
-  if (body.label_id !== undefined) {
+  if (body.label_id != null) {
     if (!Number.isInteger(body.label_id) || body.label_id < 1) {
       throw new WxycError('label_id must be a positive integer', 400);
     }
@@ -177,7 +193,11 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     // own. This guard ran before any label resolution and rejected every
     // label-less body outright, so widening it here — not adding a branch
     // further down — is what lets a `label_id`-only import through at all.
-    (body.label === undefined && body.label_id === undefined) ||
+    // `!= null` because an explicit `label_id: null` is absent, not supplied
+    // (see `resolveNewAlbumLabel`): both sites have to agree, or a label-less
+    // `{ label_id: null }` clears this guard and then 400s further down naming
+    // `label_id` rather than the label it is actually missing.
+    (body.label === undefined && body.label_id == null) ||
     body.genre_id === undefined ||
     body.format_id === undefined ||
     (body.artist_name === undefined && body.artist_id === undefined)

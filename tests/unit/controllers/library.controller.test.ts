@@ -741,6 +741,57 @@ describe('library.controller', () => {
         expect(mockInsertAlbum).not.toHaveBeenCalled();
       });
 
+      // `label_id: selected?.id ?? null` is what dj-site#1161's Import-to-
+      // Library label combo-box emits when the operator types a new name
+      // instead of picking an existing row, so an explicit `null` is the
+      // common shape, not an edge case. `null` is not `undefined`, so an
+      // `!== undefined` gate took the has-a-label_id branch and 400'd on
+      // `Number.isInteger(null)` — the same defect `1cebb1da` fixed on
+      // `addRotation`. On a create there is nothing to clear (PATCH's
+      // dedicated `label_id: null` meaning), so `null` can only mean "not
+      // supplied": the two cases below are interchangeable everywhere.
+      const LABEL_ID_ABSENT: Array<[string, Record<string, unknown>]> = [
+        ['omitted', {}],
+        ['explicitly null', { label_id: null }],
+      ];
+
+      it.each(LABEL_ID_ABSENT)(
+        'upserts the labels row from label text when label_id is %s',
+        async (_case, labelIdField) => {
+          const res = mockResponse();
+
+          await addAlbum(req({ label: 'Drag City', ...labelIdField }), res, next);
+
+          expect(mockCreateLabel).toHaveBeenCalledWith('Drag City');
+          expect(mockGetLabelById).not.toHaveBeenCalled();
+          expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ label_id: 99, label: 'Drag City' }));
+          expect(res.status).toHaveBeenCalledWith(201);
+        }
+      );
+
+      // The required-set 400 is the right refusal for a label-less body: the
+      // caller has to be told to send a label at all, not that a `null` it
+      // meant as "nothing selected" is a malformed integer. Asserting the
+      // absent message too, because `toThrow('Missing Parameters')` alone
+      // would pass on a handler that reached `resolveNewAlbumLabel` first and
+      // happened to word its rejection the same way.
+      it.each(LABEL_ID_ABSENT)(
+        'answers the required-set 400, not the malformed-label_id 400, for a label-less body with label_id %s',
+        async (_case, labelIdField) => {
+          const thrown = await addAlbum(req(labelIdField), mockResponse(), next).then(
+            () => null,
+            (err: unknown) => err
+          );
+
+          expect(thrown).toBeInstanceOf(WxycError);
+          expect((thrown as WxycError).statusCode).toBe(400);
+          expect((thrown as WxycError).message).toContain('Missing Parameters');
+          expect((thrown as WxycError).message).not.toContain('must be a positive integer');
+          expect(mockGetLabelById).not.toHaveBeenCalled();
+          expect(mockInsertAlbum).not.toHaveBeenCalled();
+        }
+      );
+
       // Parity pin, not an endorsement: `''` satisfied the pre-2410
       // required-set guard and skipped the upsert (`label_id === undefined &&
       // body.label` is falsy), landing an empty denormalized column with no
