@@ -92,13 +92,28 @@ const validateCodeNumber = (code_number: unknown): number => {
   return code_number;
 };
 
-/** Validate an operator-supplied `code_volume_letters` for `POST /library` (BS#2410). */
+/**
+ * Validate an operator-supplied `code_volume_letters` for `POST /library`
+ * (BS#2410).
+ *
+ * Not `validateTextField`, deliberately: that helper rejects a blank value and
+ * this column is nullable. An import form that submits an empty volume-letters
+ * box means "no volume letters", so `''` (and whitespace) resolves to
+ * `undefined` — i.e. NULL — rather than a 400 or a stored empty string.
+ * `jobs/library-call-number-dedup` keys its shelf slot on
+ * `upper(coalesce(code_volume_letters, ''))`, so NULL and `''` address the
+ * same slot either way; storing NULL keeps one spelling of it.
+ *
+ * The bound counts code points, not UTF-16 units, for the reason spelled out
+ * at `validateTextField`: `varchar(4)` is a CHARACTER limit, so a bare
+ * `.length` over-rejects astral input Postgres would store happily.
+ */
 const validateCodeVolumeLetters = (code_volume_letters: unknown): string | undefined => {
   if (typeof code_volume_letters !== 'string') {
     throw new WxycError('code_volume_letters must be a string', 400);
   }
   const trimmed = code_volume_letters.trim();
-  if (trimmed.length > MAX_CODE_VOLUME_LETTERS_LENGTH) {
+  if (codePointLength(trimmed) > MAX_CODE_VOLUME_LETTERS_LENGTH) {
     throw new WxycError(`code_volume_letters must be ${MAX_CODE_VOLUME_LETTERS_LENGTH} characters or fewer`, 400);
   }
   return trimmed || undefined;
@@ -119,7 +134,10 @@ const validateCodeVolumeLetters = (code_volume_letters: unknown): string | undef
  * would otherwise become.
  *
  * Explicit label text still wins for the denormalized column when both are
- * sent, matching `updateAlbum`'s `trimmedLabel ?? labelRow.label_name`.
+ * sent — the same precedence `updateAlbum` applies in
+ * `trimmedLabel ?? labelRow.label_name`, but spelled `||` rather than `??`
+ * because this path still admits `''` (PATCH rejects it outright), and an
+ * empty label must not beat the name just resolved from the FK.
  *
  * The label-text-only branch is byte-for-byte the pre-BS#2410 path, including
  * its treatment of `''` — which the widened required-set guard still admits,
