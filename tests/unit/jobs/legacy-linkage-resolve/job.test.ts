@@ -635,7 +635,7 @@ describe('legacy-linkage-resolve: drain check (signal c)', () => {
 describe('legacy-linkage-resolve: lock guard (BS#2413)', () => {
   /**
    * BS#2413. `wxyc_schema.library_watermark` is a SINGLE-row table
-   * (`CHECK (id = true)`, migration 0104) and seven `FOR EACH STATEMENT`
+   * (`CHECK (id = true)`, migration 0104) and nine `FOR EACH STATEMENT`
    * triggers rewrite that one row — including
    * `touch_library_watermark_from_rotation` (migration 0105) and the
    * `library` trigger itself. Any statement that fires one takes an
