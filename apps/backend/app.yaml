@@ -2466,13 +2466,20 @@ paths:
 
   /library/artists/search:
     get:
-      summary: Prefix-search artists within a genre (catalog add-entry autocomplete)
+      summary: Prefix-search catalogued artists, library-wide or within a genre
+      description: >-
+        Backs the catalog add-entry autocomplete and the rotation import screen's
+        duplicate-artist guard. With `genre_id`, matches only that genre's memberships;
+        without it (BS#2410) the search is library-wide. Either way the result is one row
+        per (artist, genre) membership, each carrying its own genre and per-genre
+        `code_number`.
       security:
         - BearerAuth: ['station-management']
       parameters:
         - in: query
           name: genre_id
-          required: true
+          required: false
+          description: Optional genre scope. Omit for a library-wide match.
           schema:
             type: integer
         - in: query
@@ -2484,6 +2491,11 @@ paths:
             minLength: 2
         - in: query
           name: limit
+          description: >-
+            Applies to the (artist, genre) membership join, not to distinct artists, so a
+            multi-genre artist consumes one slot per genre. 20 is a ceiling, not a rejection
+            threshold — out-of-range values are clamped into 1..20 and a non-integer falls
+            back to the default.
           schema:
             type: integer
             minimum: 1
@@ -2491,7 +2503,7 @@ paths:
             default: 10
       responses:
         '200':
-          description: Matching artists with their per-genre code numbers
+          description: Matching (artist, genre) memberships, ordered by artist name
           content:
             application/json:
               schema:
@@ -2510,10 +2522,15 @@ paths:
                           type: string
                         code_number:
                           type: integer
+                          description: The artist's number within `genre_id`.
+                        genre_id:
+                          type: integer
+                        genre_name:
+                          type: string
         '400':
           description: Invalid genre_id or q
         '404':
-          description: Genre not found
+          description: Genre not found (only when `genre_id` is given)
 
   /library/artists/peek-code:
     get:

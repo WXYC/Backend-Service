@@ -125,7 +125,10 @@ export const artists = {
   artist_name: 'artist_name',
   discogs_artist_id: 'discogs_artist_id',
 };
-export const genres = {};
+export const genres = {
+  id: 'id',
+  genre_name: 'genre_name',
+};
 export const format = {};
 export const digital_asset_store = {
   id: 'id',

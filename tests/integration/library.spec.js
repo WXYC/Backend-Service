@@ -2355,8 +2355,13 @@ describe('Library Artists Search', () => {
     expect(res.body.artists.length).toBeGreaterThan(0);
     const built = res.body.artists.find((a) => a.artist_name.toLowerCase().includes('built'));
     expect(built).toBeDefined();
-    expectFields(built, 'id', 'artist_name', 'code_letters', 'code_number');
+    // BS#2410: `genre_id`/`genre_name` are additive on this genre-scoped mode
+    // — both existing consumers pass a genre and ignore the two new keys — and
+    // they are what makes the library-wide mode below legible at all.
+    expectFields(built, 'id', 'artist_name', 'code_letters', 'code_number', 'genre_id', 'genre_name');
     expect(built.code_letters).toBe('BU');
+    expect(built.genre_id).toBe(11);
+    expect(built.genre_name).toBe('Rock');
   });
 
   test('returns 400 when q is too short', async () => {
@@ -2369,6 +2374,90 @@ describe('Library Artists Search', () => {
     const res = await auth.get('/library/artists/search').query({ genre_id: 0, q: 'Bu' }).expect(400);
 
     expectErrorContains(res, 'genre_id');
+  });
+
+  /**
+   * BS#2410 item 1: `genre_id` is optional. The import screen's duplicate-
+   * artist guard is a library-wide question — "is this artist already filed
+   * anywhere?" — which a genre-locked endpoint cannot answer.
+   *
+   * The fixture artist carries two genre memberships because that is the case
+   * the row shape exists for: library-wide, the result is one row per (artist,
+   * genre) pair, each with its own `code_number`, so the row has to say which
+   * genre its number belongs to.
+   */
+  describe('without genre_id (library-wide)', () => {
+    const uniq = Date.now();
+    const artistName = `Juana Molina BS2410 ${uniq}`;
+    let artistId;
+
+    beforeAll(async () => {
+      const sql = getTestDb();
+      const [row] = await sql`
+        INSERT INTO ${sql(SCHEMA)}.artists (artist_name, alphabetical_name, code_letters)
+        VALUES (${artistName}, ${artistName}, 'MO')
+        RETURNING id
+      `;
+      artistId = row.id;
+      await sql`
+        INSERT INTO ${sql(SCHEMA)}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+        VALUES (${artistId}, 11, 901), (${artistId}, 15, 902)
+      `;
+    });
+
+    afterAll(async () => {
+      if (!artistId) return;
+      const sql = getTestDb();
+      await sql`DELETE FROM ${sql(SCHEMA)}.genre_artist_crossreference WHERE artist_id = ${artistId}`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id = ${artistId}`;
+    });
+
+    test('answers 200 instead of 400', async () => {
+      const res = await auth.get('/library/artists/search').query({ q: 'juana' }).expect(200);
+
+      expect(Array.isArray(res.body.artists)).toBe(true);
+    });
+
+    test('returns one row per genre membership, each naming its genre', async () => {
+      const res = await auth.get('/library/artists/search').query({ q: 'juana', limit: 20 }).expect(200);
+
+      const mine = res.body.artists.filter((a) => a.id === artistId);
+      expect(mine).toHaveLength(2);
+      expect(mine.map((a) => [a.genre_id, a.genre_name, a.code_number]).sort()).toEqual([
+        [11, 'Rock', 901],
+        [15, 'Electronic', 902],
+      ]);
+      mine.forEach((row) => {
+        expectFields(row, 'id', 'artist_name', 'code_letters', 'code_number', 'genre_id', 'genre_name');
+        expect(row.artist_name).toBe(artistName);
+        expect(row.code_letters).toBe('MO');
+      });
+    });
+
+    test('is genuinely library-wide — it crosses genres', async () => {
+      // 'jo' prefix-matches Jockstrap (Rock) and John Coltrane (Jazz) in the
+      // seed. A still-filtered query would return at most one genre's rows.
+      const res = await auth.get('/library/artists/search').query({ q: 'jo', limit: 20 }).expect(200);
+
+      const genreIds = new Set(res.body.artists.map((a) => a.genre_id));
+      expect(genreIds.size).toBeGreaterThan(1);
+    });
+
+    test('narrows to the given genre when one is supplied', async () => {
+      const res = await auth.get('/library/artists/search').query({ genre_id: 15, q: 'juana' }).expect(200);
+
+      const mine = res.body.artists.filter((a) => a.id === artistId);
+      expect(mine).toHaveLength(1);
+      expect(mine[0].genre_id).toBe(15);
+      expect(mine[0].genre_name).toBe('Electronic');
+      expect(mine[0].code_number).toBe(902);
+    });
+
+    test('still enforces the 2-character minimum on q', async () => {
+      const res = await auth.get('/library/artists/search').query({ q: 'j' }).expect(400);
+
+      expectErrorContains(res, 'q');
+    });
   });
 });
 
