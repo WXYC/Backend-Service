@@ -670,7 +670,22 @@ const fetchLegacyReleaseCrossRefs = async (): Promise<LegacyReleaseCrossrefRow[]
 
 /**
  * Import artist-to-artist cross-references into the artist_crossreference table.
- * Uses ON CONFLICT DO NOTHING for idempotent upserts.
+ * Uses `ON CONFLICT ... DO UPDATE` for idempotent upserts.
+ *
+ * **This loop shares BS#2424's pathology and is deliberately left alone.**
+ * `artist_crossreference` carries `touch_library_watermark_from_artist_crossreference`
+ * (migration 0138) — the same unqualified `FOR EACH STATEMENT` trigger against the
+ * same single-row `library_watermark` table that made `importCompilationTracks` a
+ * lock-starvation source, so this row-at-a-time loop is the same bug class at a
+ * smaller row count (0138's own comment calls this table "librarian-edited at human
+ * cadence"). It is NOT batchable by copying `importCompilationTracks`: `DO UPDATE`
+ * raises `cannot affect row a second time` when one statement's VALUES list carries
+ * an intra-statement duplicate, where `DO NOTHING` skips it — so batching here needs
+ * an in-memory dedupe on the conflict target first. Revisit if this table ever grows.
+ *
+ * The third importer, `importReleaseCrossRefs`, does NOT share this: its
+ * `artist_library_crossreference` carries only the `FOR EACH ROW` `cdc_notify`
+ * trigger (migration 0046), never the statement-level watermark one.
  */
 const importArtistCrossRefs = async (
   tx: DbTransaction,
@@ -714,6 +729,19 @@ type LegacyCompilationTrackRow = {
   artistName: string;
   trackTitle: string | null;
   trackPosition: string | null;
+};
+
+/**
+ * One `compilation_track_artist` row as handed to the batched INSERT. Named
+ * because both the accumulator and the failure-path formatter refer to it —
+ * the four columns here are also what fixes the bind-parameter budget that
+ * `CTA_INSERT_CHUNK_ROWS` is sized against.
+ */
+type CompilationTrackInsertRow = {
+  library_id: number;
+  artist_name: string;
+  track_title: string | null;
+  track_position: string | null;
 };
 
 /**
@@ -774,7 +802,11 @@ const fetchLegacyCompilationTracks = async (): Promise<LegacyCompilationTrackRow
  * - **`ON CONFLICT DO NOTHING` stays UNTARGETED.** The table carries two
  *   unique indexes (`cta_unique_idx` and the partial
  *   `cta_unique_null_track_idx`); an untargeted clause arbitrates on both,
- *   and naming a target would silently stop deduping the other.
+ *   and naming a target would silently stop deduping the other. Those two
+ *   indexes are documented canonically on `compilation_track_artist` in
+ *   `shared/database/src/schema.ts` — including the standing question of
+ *   whether the partial one is ever dropped. Check there before changing
+ *   this clause; this comment is a dependent, not the source of truth.
  * - **Duplicates *within one statement* are skipped, not inserted twice.**
  *   `DO NOTHING` uses speculative insertion and sees rows inserted earlier in
  *   the same command (verified on PG 14.24 — prod's major — and 18.0). This
@@ -804,12 +836,7 @@ const importCompilationTracks = async (
   }
 
   let skipped = 0;
-  const values: {
-    library_id: number;
-    artist_name: string;
-    track_title: string | null;
-    track_position: string | null;
-  }[] = [];
+  const values: CompilationTrackInsertRow[] = [];
   for (const row of rows) {
     const libraryId = releaseMap.get(row.libraryReleaseId);
     if (!libraryId) {
@@ -843,7 +870,7 @@ const importCompilationTracks = async (
       const first = index * CTA_INSERT_CHUNK_ROWS;
       const head = batch[0];
       const tail = batch[batch.length - 1];
-      const describe = (row: (typeof batch)[number]) =>
+      const describe = (row: CompilationTrackInsertRow) =>
         `library_id=${row.library_id} artist=${JSON.stringify(row.artist_name)} track=${JSON.stringify(row.track_title)}`;
       console.error(
         `[library-etl] Compilation track insert failed on batch ${index + 1}/${batches.length} ` +
