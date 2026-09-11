@@ -106,8 +106,12 @@ import {
   isDeniedAtWriteTime,
   reconcileDenylistedInserts,
   reportStrandedResurrections,
+  buildArtistCrossRefQuery,
+  buildReleaseCrossRefQuery,
+  buildCompilationTrackQuery,
   chunk,
   importCompilationTracks,
+  isSecondaryFullPassDue,
 } from '../../../jobs/library-etl/job';
 
 describe('library-etl job helpers', () => {
@@ -829,7 +833,7 @@ describe('library-etl delete denylist (BS#2112)', () => {
 
   /**
    * The load must stay UNFILTERED. The documented full-re-sync recipe
-   * (`DELETE FROM cronjob_runs WHERE job_name = 'library-etl'`) drops this
+   * (`DELETE FROM cronjob_runs WHERE job_name LIKE 'library-etl%'`) drops this
    * job's own `TIME_LAST_MODIFIED >` delta filter and re-selects the entire
    * upstream catalog in one pass — so a denylist that were itself windowed by
    * `last_run`, or by a recency bound on `deleted_at`, would let that single
@@ -1041,8 +1045,14 @@ describe('library-etl denylist race (BS#2112 review finding 2)', () => {
    * merely the INSERT. That call's canonical-tuple match can back-stamp a
    * deleted release's `legacy_release_id` onto a DIFFERENT library row — a
    * resurrection by a second door.
+   *
+   * BS#2424 moved the cross-reference and compilation-track imports out of
+   * this transaction into `runSecondaryImports`, which runs after it commits.
+   * The invariant is unchanged and in fact strengthened — "reconcile commits
+   * before anything can reference the row" — so the evidence moves to the
+   * phase-2 entry point rather than to a call that is no longer in `run()`.
    */
-  it('re-checks at write time ahead of findExistingRelease, and reconciles after the loop', () => {
+  it('re-checks at write time ahead of findExistingRelease, and reconciles before phase 2', () => {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     const jobSource = fs.readFileSync(path.resolve(__dirname, '../../../jobs/library-etl/job.ts'), 'utf-8');
 
@@ -1050,45 +1060,165 @@ describe('library-etl denylist race (BS#2112 review finding 2)', () => {
     const writeTimeCheck = jobSource.indexOf('isDeniedAtWriteTime(tx, release.release_id)', loopStart);
     const existingLookup = jobSource.indexOf('findExistingRelease(', loopStart);
     const reconcile = jobSource.indexOf('reconcileDenylistedInserts(tx, insertedLegacyIds)', loopStart);
-    const crossrefImport = jobSource.indexOf('importArtistCrossRefs(', loopStart);
+    const phaseTwo = jobSource.indexOf('runSecondaryImports(runStartedAt)', loopStart);
 
     expect(writeTimeCheck).toBeGreaterThan(loopStart);
     expect(writeTimeCheck).toBeLessThan(existingLookup);
     // After the loop that can create a resurrection, and before anything can
     // reference the row it undoes.
     expect(reconcile).toBeGreaterThan(existingLookup);
-    expect(reconcile).toBeLessThan(crossrefImport);
+    expect(phaseTwo).toBeGreaterThan(-1);
+    expect(reconcile).toBeLessThan(phaseTwo);
+  });
+
+  /**
+   * The imports that can reference a resurrected `library` row live in phase
+   * 2, so pin that they are actually there — a future edit that moved one of
+   * them back into the release transaction would satisfy the ordering test
+   * above while reintroducing the read-your-uncommitted-writes exposure.
+   */
+  it('keeps the cross-reference and compilation-track imports inside phase 2', () => {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const jobSource = fs.readFileSync(path.resolve(__dirname, '../../../jobs/library-etl/job.ts'), 'utf-8');
+
+    const phaseTwoStart = jobSource.indexOf('const runSecondaryImports = async');
+    const runStart = jobSource.indexOf('const run = async ()');
+    expect(phaseTwoStart).toBeGreaterThan(-1);
+    expect(runStart).toBeGreaterThan(phaseTwoStart);
+
+    for (const call of ['importArtistCrossRefs(', 'importReleaseCrossRefs(', 'importCompilationTracks(']) {
+      const callIndex = jobSource.indexOf(call, phaseTwoStart);
+      expect(callIndex).toBeGreaterThan(phaseTwoStart);
+      expect(callIndex).toBeLessThan(runStart);
+    }
   });
 
   /**
    * An idle delta pass is the COMMON case, so a sweep that only ran when there
    * was work would leave detection dependent on the next run that happened to
    * have some — for a state whose defining property is that it hides.
+   *
+   * BS#2424 removed the `return;` this used to anchor on: the idle branch now
+   * falls through to phase 2 instead of ending the run. Same invariant, new
+   * evidence — the sweep is in the idle branch and precedes phase 2.
    */
   it('sweeps on idle runs too', () => {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     const jobSource = fs.readFileSync(path.resolve(__dirname, '../../../jobs/library-etl/job.ts'), 'utf-8');
 
     const idleBranch = jobSource.indexOf('No new legacy releases found');
-    const returnAfter = jobSource.indexOf('return;', idleBranch);
-    const idleSweep = jobSource.indexOf('reconcileDenylistedInserts', idleBranch);
+    const idleSweep = jobSource.indexOf('reconcileDenylistedInserts(tx, new Set<number>())', idleBranch);
+    const phaseTwo = jobSource.indexOf('runSecondaryImports(runStartedAt)', idleBranch);
 
+    expect(idleBranch).toBeGreaterThan(-1);
     expect(idleSweep).toBeGreaterThan(idleBranch);
-    expect(idleSweep).toBeLessThan(returnAfter);
+    expect(phaseTwo).toBeGreaterThan(idleSweep);
+  });
+
+  /**
+   * BS#2424 note 4: with the secondary imports bounded on their own
+   * watermarks, an early return above phase 2 would make a
+   * cross-reference-only edit skipped-then-excluded — permanently. The idle
+   * branch must fall through, not return.
+   */
+  it('does not return out of the idle branch before phase 2', () => {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const jobSource = fs.readFileSync(path.resolve(__dirname, '../../../jobs/library-etl/job.ts'), 'utf-8');
+
+    const idleBranch = jobSource.indexOf('No new legacy releases found');
+    const phaseTwo = jobSource.indexOf('runSecondaryImports(runStartedAt)', idleBranch);
+    const returnAfter = jobSource.indexOf('return;', idleBranch);
+
+    expect(phaseTwo).toBeGreaterThan(idleBranch);
+    // Either there is no `return;` left in `run()` at all, or it comes after
+    // phase 2 has already been invoked.
+    expect(returnAfter === -1 || returnAfter > phaseTwo).toBe(true);
   });
 });
 
 /**
- * BS#2424 — batching the compilation-track write.
+ * BS#2424 — delta bounds and batching for the secondary imports.
  *
- * `importCompilationTracks` used to issue one awaited
- * `INSERT ... ON CONFLICT DO NOTHING` per row over ~140,617 upstream rows,
- * inside the release import's write transaction. `chunk` is what turns that
- * into ~141 multi-row statements; the Postgres semantics the batching relies
- * on are pinned separately in
- * `tests/integration/library-etl-cta-batch.spec.js`.
+ * Three of the four things this job imports used to be unbounded full-table
+ * pulls issued inside the release import's write transaction, and the
+ * compilation-track import wrote one awaited statement per row over ~140k
+ * rows. The pure functions below are what bounds and batches them.
  */
-describe('compilation-track batching (BS#2424)', () => {
+describe('secondary import delta bounds (BS#2424)', () => {
+  describe('buildArtistCrossRefQuery', () => {
+    it('emits no WHERE clause without a watermark', () => {
+      const query = buildArtistCrossRefQuery(null);
+
+      expect(query).toContain('FROM LIBRARY_CODE_CROSS_REFERENCE cr');
+      expect(query).not.toContain('WHERE');
+      expect(query).not.toContain('TIME_LAST_MODIFIED');
+    });
+
+    it('bounds on TIME_LAST_MODIFIED against the watermark', () => {
+      const query = buildArtistCrossRefQuery(1_757_000_000_000);
+
+      expect(query).toContain('WHERE (cr.TIME_LAST_MODIFIED IS NULL OR cr.TIME_LAST_MODIFIED > 1757000000000)');
+    });
+
+    /**
+     * Prod has no NULL-stamped crossref rows today, but a row inserted
+     * without a stamp would otherwise be invisible to the bound forever, and
+     * re-importing an unstamped row is a no-op upsert. The `etl-seed.sql`
+     * fixture's rows depend on this too.
+     */
+    it('treats a NULL timestamp as always in-delta', () => {
+      expect(buildArtistCrossRefQuery(42)).toContain('cr.TIME_LAST_MODIFIED IS NULL OR');
+    });
+  });
+
+  describe('buildReleaseCrossRefQuery', () => {
+    it('emits no WHERE clause without a watermark', () => {
+      const query = buildReleaseCrossRefQuery(null);
+
+      expect(query).toContain('FROM RELEASE_CROSS_REFERENCE cr');
+      expect(query).not.toContain('WHERE');
+      expect(query).not.toContain('TIME_LAST_MODIFIED');
+    });
+
+    it('bounds on TIME_LAST_MODIFIED against the watermark', () => {
+      const query = buildReleaseCrossRefQuery(1_757_000_000_000);
+
+      expect(query).toContain('WHERE (cr.TIME_LAST_MODIFIED IS NULL OR cr.TIME_LAST_MODIFIED > 1757000000000)');
+    });
+  });
+
+  /**
+   * `COMPILATION_TRACK_ARTIST` is four columns with no timestamp and no
+   * surrogate key, so it cannot be bounded on a timestamp at all. It is
+   * bounded on the set of `LIBRARY_RELEASE_ID`s whose release row changed
+   * since this import's own watermark.
+   */
+  describe('buildCompilationTrackQuery', () => {
+    it('emits no WHERE clause for a full pass', () => {
+      const query = buildCompilationTrackQuery(null);
+
+      expect(query).toContain('FROM COMPILATION_TRACK_ARTIST');
+      expect(query).not.toContain('WHERE');
+    });
+
+    it('bounds on the delta release-id set', () => {
+      const query = buildCompilationTrackQuery([106, 107, 42]);
+
+      expect(query).toContain('WHERE LIBRARY_RELEASE_ID IN (106, 107, 42)');
+    });
+
+    /**
+     * `IN ()` is a MySQL syntax error and `fetchLegacyCompilationTracks`
+     * swallows the failure, so an empty id set must be refused by the
+     * CALLER — which returns early rather than issuing a query at all. The
+     * builder is pinned here only so a future caller that gets this wrong
+     * fails loudly instead of silently logging "table not available".
+     */
+    it('refuses an empty id set rather than emitting IN ()', () => {
+      expect(() => buildCompilationTrackQuery([])).toThrow();
+    });
+  });
+
   describe('chunk', () => {
     it('splits an exact multiple into equal chunks', () => {
       expect(chunk([1, 2, 3, 4], 2)).toEqual([
@@ -1153,7 +1283,7 @@ describe('compilation-track batching (BS#2424)', () => {
     it('issues one statement per 1,000 resolvable rows, not one per row', async () => {
       const { tx, inserted } = makeCtaTx([{ id: 77, legacyReleaseId: 500 }]);
 
-      const result = await importCompilationTracks(tx, upstream(2500));
+      const result = await importCompilationTracks(tx, upstream(2500), null);
 
       expect(inserted).toHaveLength(3);
       expect(inserted.map((batch) => batch.length)).toEqual([1000, 1000, 500]);
@@ -1168,7 +1298,7 @@ describe('compilation-track batching (BS#2424)', () => {
       const { tx } = makeCtaTx([{ id: 77, legacyReleaseId: 500 }]);
       const rows = [...upstream(2, 500), ...upstream(1, 999)];
 
-      await expect(importCompilationTracks(tx, rows)).resolves.toEqual({
+      await expect(importCompilationTracks(tx, rows, null)).resolves.toEqual({
         imported: 2,
         skipped: 1,
         batches: 1,
@@ -1178,7 +1308,7 @@ describe('compilation-track batching (BS#2424)', () => {
     it('issues no statement at all when nothing resolves', async () => {
       const { tx, inserted } = makeCtaTx([]);
 
-      const result = await importCompilationTracks(tx, upstream(10));
+      const result = await importCompilationTracks(tx, upstream(10), null);
 
       expect(inserted).toEqual([]);
       expect(result).toEqual({ imported: 0, skipped: 10, batches: 0 });
@@ -1192,7 +1322,7 @@ describe('compilation-track batching (BS#2424)', () => {
       });
       const logged = jest.spyOn(console, 'error').mockImplementation(() => {});
 
-      await expect(importCompilationTracks(tx, upstream(3))).rejects.toBe(boom);
+      await expect(importCompilationTracks(tx, upstream(3), null)).rejects.toBe(boom);
 
       const message = logged.mock.calls[0][0] as string;
       expect(message).toContain('batch 1/1');
@@ -1200,6 +1330,33 @@ describe('compilation-track batching (BS#2424)', () => {
       expect(message).toContain('first: library_id=77 artist="Artist 0" track="Track 0"');
       expect(message).toContain('last: library_id=77 artist="Artist 2" track="Track 2"');
       logged.mockRestore();
+    });
+  });
+
+  /**
+   * The periodic full pass is the whole of the backfill story: the newest
+   * upstream artist-crossref edit is 17 months old and the newest release
+   * crossref edit is 18 years old, so a timestamp bound on its own makes both
+   * deltas permanently empty and freezes the BS#2386 shortfall forever.
+   */
+  describe('isSecondaryFullPassDue', () => {
+    const HOUR_MS = 60 * 60 * 1000;
+    const now = Date.UTC(2026, 8, 10, 16, 0, 0);
+
+    it('is due when no full pass has ever run', () => {
+      expect(isSecondaryFullPassDue(null, now)).toBe(true);
+    });
+
+    it('is due exactly at the interval', () => {
+      expect(isSecondaryFullPassDue(now - 24 * HOUR_MS, now)).toBe(true);
+    });
+
+    it('is not due one millisecond under the interval', () => {
+      expect(isSecondaryFullPassDue(now - 24 * HOUR_MS + 1, now)).toBe(false);
+    });
+
+    it('is not due right after a pass', () => {
+      expect(isSecondaryFullPassDue(now, now)).toBe(false);
     });
   });
 });
