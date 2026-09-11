@@ -23,11 +23,17 @@
  *      `terminate()`d, a Sentry warning is captured, and the event is not
  *      sent — this caps unbounded outbound buffer growth caused by a slow
  *      consumer.
- *   6. The heartbeat now uses native WebSocket ping/pong frames (not an
- *      app-level JSON message). Clients that don't pong before the next
- *      heartbeat tick are terminated with a Sentry warning.
+ *   6. The heartbeat uses native WebSocket ping/pong frames for liveness.
+ *      Clients that don't pong before the next heartbeat tick are
+ *      terminated with a Sentry warning.
  *   7. The `'pong'` arrival keeps the connection alive across the next
  *      heartbeat tick.
+ *
+ * BS#2427 addition:
+ *   8. The same tick also emits an app-level `{"type":"heartbeat"}` frame,
+ *      alongside (never instead of) the native ping, so a consumer that
+ *      cannot observe protocol frames still sees traffic on an idle stream.
+ *      A client terminated on that tick gets no frame.
  *
  * The metadata-broadcast subscriber's actual filtering is covered in
  * `metadata-broadcast.test.ts`; this file pins the wiring contract that
@@ -104,6 +110,14 @@ import { startCdcDispatcher, shutdownCdcDispatcher } from '../../../../../../app
  */
 const BACKPRESSURE_MESSAGE = 'cdc_ws.buffered_amount_high — terminating slow consumer';
 const BACKPRESSURE_FINGERPRINT = ['cdc-ws', 'buffered-amount-high'];
+
+/**
+ * The app-level heartbeat frame, pinned as a literal (BS#2427). Written out
+ * rather than re-derived with `JSON.stringify` because the exact bytes are
+ * the wire contract: this is the pre-BS#1412 shape, and consumers outside
+ * this repo parse it. An added field or a renamed key must fail here.
+ */
+const HEARTBEAT_FRAME = '{"type":"heartbeat"}';
 
 const makeServer = (): HttpServer => {
   const server = { on: jest.fn(), setTimeout: jest.fn() };
@@ -615,25 +629,19 @@ describe('CDC WebSocket back-pressure and ping/pong (BS#1134)', () => {
   });
 
   describe('native ping/pong', () => {
-    it('sends a native ping (not an app-level JSON message) on the heartbeat tick', async () => {
+    it('sends a native ping on the heartbeat tick', async () => {
       await withCdcSecret('test-secret', async () => {
         await setupCdcWebSocket(makeServer());
 
         const client = makeClient();
         connectClient(client);
-        // Clear the initial `'connected'` envelope so the assertion below
-        // measures only what the heartbeat tick produced.
-        client.send.mockClear();
 
         jest.advanceTimersByTime(30_000);
 
+        // The native ping is the wedge-detection channel; the app-level
+        // frame that rides the same tick (BS#2427) is not a substitute for
+        // it and is asserted separately below.
         expect(client.ping).toHaveBeenCalledTimes(1);
-        // App-level `{type:'heartbeat'}` payloads must no longer be sent —
-        // ping/pong is the wedge-detection channel.
-        for (const call of client.send.mock.calls) {
-          const payload = String(call[0] ?? '');
-          expect(payload).not.toMatch(/"type"\s*:\s*"heartbeat"/);
-        }
       });
     });
 
@@ -674,6 +682,86 @@ describe('CDC WebSocket back-pressure and ping/pong (BS#1134)', () => {
           expect.stringMatching(/pong|heartbeat/i),
           expect.objectContaining({ level: 'warning' })
         );
+      });
+    });
+  });
+
+  /**
+   * BS#2427 — the app-level heartbeat frame, restored alongside the native
+   * ping. BS#1412 replaced the frame with ping/pong, which is the right
+   * liveness mechanism but is invisible to the browser `WebSocket` API and
+   * to any hand-rolled consumer that doesn't speak protocol frames: to them
+   * an idle-but-healthy stream became indistinguishable from a dead one.
+   */
+  describe('app-level heartbeat frame (BS#2427)', () => {
+    /** Every payload the client was sent, as strings. */
+    function sentPayloads(client: SyntheticClient): string[] {
+      return client.send.mock.calls.map((call) => String(call[0] ?? ''));
+    }
+
+    it('emits the app-level frame alongside the native ping on each tick', async () => {
+      await withCdcSecret('test-secret', async () => {
+        await setupCdcWebSocket(makeServer());
+
+        const client = makeClient();
+        connectClient(client);
+        // Clear the initial `'connected'` envelope so the assertions below
+        // measure only what the heartbeat tick produced.
+        client.send.mockClear();
+
+        jest.advanceTimersByTime(30_000);
+
+        expect(client.ping).toHaveBeenCalledTimes(1);
+        expect(sentPayloads(client)).toEqual([HEARTBEAT_FRAME]);
+
+        // The frame rides every tick, not just the first — that is the whole
+        // point for a consumer whose watchdog expects traffic within N
+        // seconds.
+        client.triggerPong();
+        jest.advanceTimersByTime(30_000);
+
+        expect(client.ping).toHaveBeenCalledTimes(2);
+        expect(sentPayloads(client)).toEqual([HEARTBEAT_FRAME, HEARTBEAT_FRAME]);
+        expect(client.terminate).not.toHaveBeenCalled();
+      });
+    });
+
+    it('does not send the frame to a client terminated on that tick for a missed pong', async () => {
+      await withCdcSecret('test-secret', async () => {
+        await setupCdcWebSocket(makeServer());
+
+        const client = makeClient();
+        connectClient(client);
+
+        // First tick: pinged and framed. The client never pongs.
+        jest.advanceTimersByTime(30_000);
+        client.send.mockClear();
+
+        // Second tick: the missed-pong check terminates before the frame is
+        // reached, so a dying client is not handed one last heartbeat.
+        jest.advanceTimersByTime(30_000);
+
+        expect(client.terminate).toHaveBeenCalledTimes(1);
+        expect(client.send).not.toHaveBeenCalled();
+      });
+    });
+
+    it('does not send the frame to a client terminated on that tick for back-pressure', async () => {
+      await withCdcSecret('test-secret', async () => {
+        await setupCdcWebSocket(makeServer());
+
+        const client = makeClient();
+        connectClient(client);
+        // Pong so the missed-pong policy doesn't pre-empt the back-pressure
+        // path we're pinning here.
+        client.triggerPong();
+        client.bufferedAmount = 2 * 1024 * 1024;
+        client.send.mockClear();
+
+        jest.advanceTimersByTime(30_000);
+
+        expect(client.terminate).toHaveBeenCalled();
+        expect(client.send).not.toHaveBeenCalled();
       });
     });
   });

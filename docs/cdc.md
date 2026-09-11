@@ -30,6 +30,19 @@ The header path replaces the old `?key=<CDC_SECRET>` query parameter, which leak
 }
 ```
 
+### Non-event frames (wire contract)
+
+Two of the frames on this channel are not CDC events. Both are part of the wire contract, not an implementation detail — a consumer must tolerate them and must not read `table` / `action` off them:
+
+| Frame       | Emitted                                      | Shape                                             |
+| ----------- | -------------------------------------------- | ------------------------------------------------- |
+| `connected` | once, immediately after a successful upgrade | `{"type":"connected","serverTime":1714000000000}` |
+| `heartbeat` | every 30s, on the heartbeat tick             | `{"type":"heartbeat"}`                            |
+
+Discriminate on `type`: a CDC event never carries it, and these two never carry `table`. `scripts/sync/reconcile.ts` is the reference consumer — its `msg.type === 'heartbeat' || msg.type === 'connected'` early return is the minimum handling every consumer needs.
+
+The `heartbeat` frame's shape is fixed at exactly `{"type":"heartbeat"}`. It carries no timestamp or sequence number deliberately: consumers outside this repo were written against that shape, and the channel is `CDC_SECRET`-gated so we cannot survey who is connected. Widening it is a contract change to be announced, not an implementation detail (BS#2427).
+
 ## Architecture
 
 PostgreSQL triggers (`cdc_notify()`) fire `pg_notify('cdc', payload)` on every INSERT/UPDATE/DELETE. A dedicated LISTEN connection in Node.js receives notifications and broadcasts them to WebSocket clients. Zero application code instrumentation — captures all changes including ETL, auth, and direct SQL.
@@ -54,7 +67,21 @@ This is intentional and stays unprojected: the `/cdc` channel is **internal-trus
 Per-client guards in `cdc-websocket.ts` keep one misbehaving consumer from leaking memory or wedging the heartbeat signal:
 
 - **Back-pressure**: every send (fan-out and heartbeat) checks `client.bufferedAmount`. Over `BACKPRESSURE_THRESHOLD_BYTES` (1 MiB) the client is `terminate()`d and a Sentry `cdc_ws.buffered_amount_high` warning is captured. The CDC stream offers no replay, so dropping a single event for a slow consumer is no worse than what already happens at reconnect (see the "consumers reconcile out-of-band" contract above).
-- **Native ping/pong**: the 30s heartbeat now uses `ws.ping()` and tracks `'pong'` arrival, not an app-level JSON message. Clients that miss a pong before the next tick are terminated with a Sentry `cdc_ws.missed_pong` warning. This decouples "client is wedged" from "client is slow" — pre-#1134 the app-level message conflated both into a single send-callback signal.
+- **Native ping/pong**: the 30s heartbeat uses `ws.ping()` and tracks `'pong'` arrival. Clients that miss a pong before the next tick are terminated with a Sentry `cdc_ws.missed_pong` warning. This decouples "client is wedged" from "client is slow" — pre-#1134 the app-level message conflated both into a single send-callback signal. **This, and only this, is the liveness mechanism**: an app-level frame cannot detect a half-open socket, because writing into one succeeds.
+
+### Two heartbeat mechanisms, one tick (BS#2427)
+
+The same 30s tick emits **both** a native ping and an app-level `{"type":"heartbeat"}` frame. They are not alternatives and neither replaces the other:
+
+|                                                       | Native ping/pong                   | App-level `heartbeat` frame          |
+| ----------------------------------------------------- | ---------------------------------- | ------------------------------------ |
+| Purpose                                               | detect a half-open socket          | give the consumer observable traffic |
+| Visible to a browser `WebSocket` / hand-rolled client | no — the protocol layer absorbs it | yes, as an ordinary message          |
+| Termination on failure                                | yes (`cdc_ws.missed_pong`)         | no                                   |
+
+Order within the tick: both termination checks run first (missed pong, back-pressure), then the ping, then the frame — so a client being terminated on that tick receives no heartbeat frame. The frame goes out through the same `safeSend` back-pressure guard as a fan-out event, so it can never be the write that grows an already-saturated buffer.
+
+**What an idle stream looks like.** A consumer on Node `ws` sees nothing at all when there are no database changes: `ws` answers pings automatically below the API, so ping/pong never surfaces as a message. A consumer that cannot observe protocol frames — a browser `WebSocket`, or any hand-rolled client — sees exactly one `{"type":"heartbeat"}` message every 30s and nothing else. That is the healthy idle signature, and it is what makes a "no frame in N seconds → reconnect" watchdog safe to write against this endpoint (pick N > 30s, ideally ≥ 90s to tolerate one dropped tick). BS#1412 removed this frame in favour of ping/pong alone, which left that population seeing a healthy idle stream as a dead one; the restoration is deliberate and the per-consumer cost of one small frame per 30s was accepted. Any future change that again makes an idle stream invisible to a non-`ws` consumer is a breaking wire change to be announced, not an implementation detail.
 
 ## Reconciliation monitor
 
