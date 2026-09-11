@@ -79,13 +79,31 @@ const executeCallMatching = (pattern: RegExp): { values: unknown[] } | undefined
     { values: unknown[] } | undefined;
 
 /**
- * A Postgres lock-contention rejection, as the postgres-js driver surfaces it:
- * an `Error` carrying a `code` property holding the SQLSTATE. `55P03`
- * (`lock_not_available`) is our own `lock_timeout` firing; `40P01`
+ * A Postgres rejection in the shape the job ACTUALLY catches.
+ *
+ * postgres-js puts the SQLSTATE on `error.code`, but nothing in this job ever
+ * sees a bare driver error: drizzle-orm wraps every query rejection in a
+ * `DrizzleQueryError` whose own `message` is the generic `Failed query: …`,
+ * whose own `code` is `undefined`, and whose `.cause` is the driver error
+ * (`drizzle-orm/errors.js`; the wrap is unconditional, in
+ * `pg-core/session.js`'s `queryWithCache`). A test double that throws a bare
+ * `{ code }` passes against a classifier that only reads `error.code` while
+ * production fails every stand-down — so the default here is the WRAPPED
+ * shape, and `bare` is the opt-out used by the one test that pins the
+ * fallback path.
+ */
+const pgError = (code: string, message: string): Error => Object.assign(new Error(message), { code });
+
+const drizzleWrapped = (cause: Error): Error => Object.assign(new Error('Failed query: <sql>\nparams: '), { cause });
+
+/**
+ * `55P03` (`lock_not_available`) is our own `lock_timeout` firing; `40P01`
  * (`deadlock_detected`) is the deadlock detector picking us as the victim.
  */
-const lockContentionError = (code: '55P03' | '40P01' = '55P03'): Error =>
-  Object.assign(new Error('canceling statement due to lock timeout'), { code });
+const lockContentionError = (code: '55P03' | '40P01' = '55P03', shape: 'wrapped' | 'bare' = 'wrapped'): Error => {
+  const driverError = pgError(code, 'canceling statement due to lock timeout');
+  return shape === 'bare' ? driverError : drizzleWrapped(driverError);
+};
 
 /**
  * BS#2071: `candidates` and `resolved` now come back from a single
@@ -723,17 +741,45 @@ describe('legacy-linkage-resolve: lock guard (BS#2413)', () => {
     // 57014 is `query_canceled` — the 300 s `statement_timeout` firing. If the
     // lock guard ever fails to bind, this is the error that comes back, and it
     // must stay a hard failure rather than being reported as a clean skip.
+    // Wrapped, because that is the shape the job catches: reading the SQLSTATE
+    // out of `.cause` must not become "any wrapped error is contention".
     const execute = db.execute as jest.Mock;
     execute.mockResolvedValueOnce([{ count: 0 }]); // flowsheet pre-check
     execute.mockResolvedValueOnce([{ count: 3 }]); // rotation pre-check
     execute.mockResolvedValueOnce([]); // SET LOCAL
-    execute.mockRejectedValueOnce(
-      Object.assign(new Error('canceling statement due to statement timeout'), {
-        code: '57014',
-      })
-    );
+    execute.mockRejectedValueOnce(drizzleWrapped(pgError('57014', 'canceling statement due to statement timeout')));
 
-    await expect(runOnce(false)).rejects.toThrow('canceling statement due to statement timeout');
+    await expect(runOnce(false)).rejects.toThrow('Failed query');
+    expect(updateLastRun).not.toHaveBeenCalled();
+  });
+
+  it('stands down on a bare driver error too — the wrapper is preferred, not required', async () => {
+    // The classifier reads `.cause.code` first and falls back to `.code`. The
+    // fallback is what keeps a driver error that reaches the job unwrapped
+    // (and every hand-built test double that models one) classifying the same
+    // way as the wrapped production form.
+    const execute = db.execute as jest.Mock;
+    execute.mockResolvedValueOnce([{ count: 0 }]); // flowsheet pre-check
+    execute.mockResolvedValueOnce([{ count: 4 }]); // rotation pre-check
+    execute.mockResolvedValueOnce([]); // SET LOCAL
+    execute.mockRejectedValueOnce(lockContentionError('55P03', 'bare'));
+
+    const result = await runOnce(false);
+
+    expect(result.rotation.deferred).toBe(true);
+    expect(updateLastRun).not.toHaveBeenCalled();
+  });
+
+  it('does not mistake an unrelated wrapped error for lock contention', async () => {
+    // `DrizzleQueryError.code` is always undefined, so the classifier can only
+    // work off `.cause`. A wrapped FK violation must still be a hard failure.
+    const execute = db.execute as jest.Mock;
+    execute.mockResolvedValueOnce([{ count: 0 }]); // flowsheet pre-check
+    execute.mockResolvedValueOnce([{ count: 2 }]); // rotation pre-check
+    execute.mockResolvedValueOnce([]); // SET LOCAL
+    execute.mockRejectedValueOnce(drizzleWrapped(pgError('23503', 'insert or update violates foreign key')));
+
+    await expect(runOnce(false)).rejects.toThrow('Failed query');
     expect(updateLastRun).not.toHaveBeenCalled();
   });
 

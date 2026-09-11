@@ -102,7 +102,7 @@ const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""
  * or `flowsheet`, so the contention is not on this job's own target rows. It
  * is on `wxyc_schema.library_watermark`, a SINGLE-row table
  * (`CONSTRAINT library_watermark_singleton CHECK ("id" = true)`, migration
- * 0104) that seven `FOR EACH STATEMENT` triggers all rewrite —
+ * 0104) that nine `FOR EACH STATEMENT` triggers all rewrite —
  * `touch_library_watermark` on `library`, and, among the parent-table fan-out
  * in migration 0105, `touch_library_watermark_from_rotation`. Every statement
  * that fires one takes an exclusive row lock on that one row and holds it
@@ -119,17 +119,29 @@ const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""
  * timeout, not a redundant one.
  *
  * **The two passes are exposed differently, and both are guarded anyway.**
- * `flowsheet` carries no watermark trigger (migrations 0104/0105/0138/0143/0159
- * attach them to `library`, `artists`, `genres`, `format`,
- * `genre_artist_crossreference`, `rotation`, `artist_crossreference`,
- * `compilation_track_artist` and `digital_asset` — not `flowsheet`). The
- * flowsheet pass's exposure is the narrower one: the
- * `flowsheet.album_id -> library.id` FK check takes `FOR KEY SHARE` on each
- * `library` row it actually links, which can queue behind a `FOR UPDATE`
- * `library-etl` holds on that row. That is a per-updated-row cost, so an empty
- * flowsheet cohort really does take no locks — the flowsheet pass survives in
- * production on its DATA, not on any design property, and the first non-empty
- * cohort landing on a `library-etl` work slot reproduces the rotation failure.
+ * `flowsheet` carries no `library_watermark` trigger — migrations
+ * 0104/0105/0138/0142/0143/0159 attach those to `library`, `artists`,
+ * `genres`, `format`, `genre_artist_crossreference`, `rotation`,
+ * `artist_crossreference`, `compilation_track_artist` and `digital_asset`, and
+ * none of them to `flowsheet`. That is what makes `library-etl` specifically a
+ * rotation-pass problem.
+ *
+ * It does NOT make the flowsheet pass lock-free. `flowsheet` carries its own
+ * `touch_flowsheet_watermark` (migration 0084) — also `FOR EACH STATEMENT`,
+ * also over a singleton (`flowsheet_watermark_singleton CHECK ("id" = true)`),
+ * also fired on `UPDATE 0` — so the flowsheet drain contends for THAT row with
+ * every `flowsheet` writer (a live DJ's play insert, `flowsheet-metadata-
+ * backfill` on its `10 * * * *` slot) and with `concerts` writers, which fire
+ * the same function via migration 0114. Plus the narrower
+ * `flowsheet.album_id -> library.id` FK check, which takes `FOR KEY SHARE` on
+ * each `library` row it actually links and so can queue behind a `FOR UPDATE`
+ * `library-etl` holds on that row.
+ *
+ * The practical consequence is the same for both passes and is why the
+ * pre-check gate is applied to both: an empty cohort is safe because this job
+ * then issues no UPDATE at all, NOT because the flowsheet table has nothing to
+ * fire. Do not "simplify" the flowsheet pass by dropping its pre-check on the
+ * reasoning that it has no trigger to fire — it does.
  *
  * **Why below 1 s.** Deliberately under Postgres's default 1 s
  * `deadlock_timeout`, the same reasoning (and the same value) as
@@ -149,7 +161,7 @@ export const LINKAGE_LOCK_TIMEOUT_MS = 750;
 
 /**
  * Postgres SQLSTATEs this job converts into a clean stand-down rather than a
- * failed run. Mirrors `library.service.ts`'s `LOCK_CONTENTION_SQLSTATES`.
+ * failed run. Same pair as `library.service.ts`'s `LOCK_CONTENTION_SQLSTATES`.
  *
  * Deliberately does NOT include `57014` (`query_canceled`, which is what the
  * 300 s `statement_timeout` raises). If the guard ever fails to bind — a
@@ -163,8 +175,30 @@ const LOCK_CONTENTION_SQLSTATES = new Set([
   '40P01', // deadlock_detected — we were chosen as the victim
 ]);
 
+/**
+ * The SQLSTATE is NOT at the top level of what `tx.execute` throws.
+ * drizzle-orm (0.45.x) wraps every query rejection in a `DrizzleQueryError`
+ * whose `message` is the generic `Failed query: …` and whose `.cause` is the
+ * postgres-js `PostgresError` carrying `.code` (`drizzle-orm/errors.js`; the
+ * wrap is unconditional, in `pg-core/session.js`'s `queryWithCache`). Reading
+ * only `error.code` therefore sees `undefined` for a real `55P03`, the guard
+ * never converts the block into a stand-down, and the run fails with the
+ * generic message this change exists to stop reporting — while every unit
+ * test that throws a hand-built `{ code }` still passes, because a mock
+ * cannot reproduce the wrapper.
+ *
+ * So: prefer `cause.code`, fall back to a top-level `.code`. Same shape as
+ * `extractSqlState` in `jobs/flowsheet-metadata-backfill/orchestrate.ts`,
+ * `classifyDatabaseError` in `apps/backend/services/health/database-check.ts`,
+ * and the `23503` check in `apps/backend/routes/internal-bans.route.ts` — the
+ * fallback is what keeps a bare driver error (and the test doubles that model
+ * one) classifying correctly alongside the wrapped production form.
+ */
 const isLockContentionError = (error: unknown): boolean => {
-  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof error !== 'object' || error === null) return false;
+  const cause = (error as { cause?: unknown }).cause;
+  const causeCode = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  const code = causeCode ?? (error as { code?: unknown }).code;
   return typeof code === 'string' && LOCK_CONTENTION_SQLSTATES.has(code);
 };
 
@@ -452,8 +486,9 @@ const resolveFlowsheetAlbumIds = async (dryRun: boolean): Promise<PassResult> =>
 };
 
 /**
- * The rotation candidate COUNT, standalone — same role as
- * `countUnresolvedFlowsheetCandidates` above: `--dry-run` reporting only.
+ * The rotation candidate COUNT, standalone — same two callers, and the same
+ * gate-not-measurement argument, as `countUnresolvedFlowsheetCandidates`
+ * above: `--dry-run` reporting, and (BS#2413) the real pass's pre-check gate.
  */
 const countUnresolvedRotationCandidates = async (): Promise<number> => {
   const [row] = (await db.execute(sql`
@@ -745,15 +780,21 @@ export const runOnce = async (dryRun: boolean): Promise<RunResult> => {
     captureError(error, 'gap-check');
   }
 
-  // (a) + (b). The heartbeat is inside the monitored callback so the check-in
-  // reports `ok` only when the whole unit of work — repair and heartbeat —
-  // committed. `withMonitor` re-throws, so the caller's catch is unchanged.
+  // (a) + (b). The heartbeat is inside the monitored callback so a THROWN run
+  // cannot check in `ok` with the repair half-done. `withMonitor` re-throws,
+  // so the caller's catch is unchanged.
   //
   // BS#2413: a run in which either pass stood down on lock contention
   // deliberately does NOT advance the heartbeat. Signal (b) measures the gap
   // between *successful* runs, and a stand-down repaired nothing — stamping
   // it would make a collision that persists for hours read as healthy, which
   // is the one thing the gap warning exists to catch.
+  //
+  // That is the one case where `ok` and the heartbeat part company, and it is
+  // deliberate: a stand-down is a run that HAPPENED, which is all signal (a)
+  // claims, so it checks in `ok` while (b)'s gap keeps growing and (d) names
+  // the reason. Do not read a green cron check-in as proof the heartbeat
+  // advanced — `reportLockContention`'s warning is what distinguishes them.
   const result = await Sentry.withMonitor(
     JOB_NAME,
     async () => {

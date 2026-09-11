@@ -32,24 +32,39 @@
  * slots, so no conflict arm ran and no such lock was ever taken. Building the
  * test that way would reproduce a GREEN run.
  *
- * The FK path is real, just not what fired here, and it is the flowsheet
- * pass's only exposure (`flowsheet` has no watermark trigger) — which is why
- * the flowsheet pass survives on its DATA rather than on any design property,
- * and why the guard has to cover both passes.
+ * The FK path is real, just not what fired here, and against `library-etl` it
+ * is the flowsheet pass's only exposure — `flowsheet` carries no
+ * `library_watermark` trigger — which is why the flowsheet pass survives on
+ * its DATA rather than on any design property.
+ *
+ * **`flowsheet` is not lock-free, though, and the flowsheet cases below hold
+ * the right row.** It has its own singleton, `flowsheet_watermark`
+ * (`flowsheet_watermark_singleton CHECK ("id" = true)`, migration 0084),
+ * rewritten by `touch_flowsheet_watermark` — equally `FOR EACH STATEMENT`,
+ * equally fired on `UPDATE 0`. Holding `library_watermark` cannot block the
+ * flowsheet drain at all (`UPDATE library … WHERE id = 7000` takes only
+ * `FOR NO KEY UPDATE`, which does not conflict with the FK check's
+ * `FOR KEY SHARE`), so a flowsheet case built on that holder passes whether
+ * or not the pass is guarded.
  *
  * ## What this spec asserts
  *
- * 1. A held watermark row blocks a rotation UPDATE that matches ZERO rows.
+ * 1. A held watermark row blocks a rotation UPDATE that matches ZERO rows —
+ *    and, on the flowsheet singleton, a flowsheet UPDATE that matches zero.
  * 2. It blocks the production rotation CTE.
  * 3. `SET LOCAL lock_timeout` converts that block into `55P03` in well under
  *    the statement timeout, on both passes.
  * 4. The candidate pre-check COUNT is not blocked at all — the other lever.
- * 5. Once the holder commits, the guarded statement links the probe row.
+ * 5. With no holder, the guarded statement links the probe row.
  *
  * Postgres-dependent, like `library-watermark-parents.spec.js`: every
  * statement is raw SQL against the test DB on two independent connections,
  * because the whole phenomenon is cross-session lock behaviour that no mock
  * can model.
+ *
+ * **Nothing here commits.** The transcribed statements are the production
+ * CTEs, unbounded by construction, and this suite runs `--runInBand` against
+ * one shared database — see `runGuarded`'s docblock.
  *
  * The SQL below transcribes `jobs/legacy-linkage-resolve/job.ts`; the job's
  * own statement text is pinned separately by the exact-match allowlist in
@@ -243,6 +258,29 @@ describe('legacy-linkage-resolve lock guard (BS#2413)', () => {
     ]);
   };
 
+  /**
+   * The flowsheet pass's equivalent hold. `flowsheet` carries NO
+   * `library_watermark` trigger, and `UPDATE library … WHERE id = 7000` takes
+   * only `FOR NO KEY UPDATE`, which does not conflict with the `FOR KEY SHARE`
+   * the flowsheet FK check takes — so `holdWatermark` above cannot block the
+   * flowsheet drain at all, and a "does the guard cover flowsheet?" test built
+   * on it asserts nothing.
+   *
+   * What the flowsheet drain really contends for is `flowsheet_watermark`:
+   * its own single-row table (`flowsheet_watermark_singleton CHECK (id = true)`,
+   * migration 0084), rewritten by `touch_flowsheet_watermark`, an equally
+   * `FOR EACH STATEMENT` trigger fired by every `flowsheet` write — including,
+   * as below, one matching zero rows. A live DJ's play insert and
+   * `flowsheet-metadata-backfill` are the production holders of that row.
+   */
+  const holdFlowsheetWatermark = async () => {
+    await holder.unsafe('BEGIN');
+    // `id = -1` matches nothing (the column is a serial), so this writes no
+    // flowsheet row — it exists purely to fire the statement trigger and take
+    // the singleton, which is the same `UPDATE 0` claim the rotation case pins.
+    await holder.unsafe(`UPDATE "${SCHEMA}".flowsheet SET album_id = album_id WHERE id = -1`);
+  };
+
   const releaseWatermark = async () => {
     // ROLLBACK, not COMMIT: `album_title = album_title` is a no-op write, but
     // rolling back keeps this spec from touching the shape fixture's row
@@ -260,7 +298,9 @@ describe('legacy-linkage-resolve lock guard (BS#2413)', () => {
       await worker.unsafe('BEGIN');
       await worker.unsafe(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT_MS}ms'`);
       await worker.unsafe(statement);
-      await worker.unsafe('COMMIT');
+      // ROLLBACK for the same reason `runGuarded` does — see its docblock.
+      // These cases are expected to be cancelled before they get here anyway.
+      await worker.unsafe('ROLLBACK');
       return null;
     } catch (error) {
       await worker.unsafe('ROLLBACK').catch(() => {});
@@ -271,19 +311,33 @@ describe('legacy-linkage-resolve lock guard (BS#2413)', () => {
   /**
    * Runs `statement` the way the fix does: same transaction, same statement
    * timeout, plus the `SET LOCAL lock_timeout` guard ahead of it.
+   *
+   * **Ends in ROLLBACK, not COMMIT, unless `commit: true` is passed.** The
+   * statements transcribed above are the PRODUCTION CTEs, unbounded by
+   * construction: `ROTATION_DRAIN_SQL` links every unlinked rotation row in
+   * the database and NULLs its denormalized `artist_name`/`album_title`/
+   * `record_label`, and `FLOWSHEET_DRAIN_SQL` does the same across the whole
+   * flowsheet table (and bumps `flowsheet_watermark`). Committing that from a
+   * spec mutates rows other specs own — the integration suite runs
+   * `--runInBand` against one shared database, and `cleanupProbes` only knows
+   * about this spec's two probe rows. Rolling back keeps the lock behaviour
+   * under test (locks are taken and released exactly the same way) while
+   * leaving the ambient cohort untouched; a caller that must observe the
+   * write reads it back INSIDE the transaction, before the rollback.
    */
-  const runGuarded = async (statement) => {
+  const runGuarded = async (statement, { commit = false, readBack } = {}) => {
     const startedAt = Date.now();
     try {
       await worker.unsafe('BEGIN');
       await worker.unsafe(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT_MS}ms'`);
       await worker.unsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
       const rows = await worker.unsafe(statement);
-      await worker.unsafe('COMMIT');
-      return { rows, error: null, elapsedMs: Date.now() - startedAt };
+      const readBackRows = readBack ? await readBack(worker) : null;
+      await worker.unsafe(commit ? 'COMMIT' : 'ROLLBACK');
+      return { rows, readBackRows, error: null, elapsedMs: Date.now() - startedAt };
     } catch (error) {
       await worker.unsafe('ROLLBACK').catch(() => {});
-      return { rows: null, error, elapsedMs: Date.now() - startedAt };
+      return { rows: null, readBackRows: null, error, elapsedMs: Date.now() - startedAt };
     }
   };
 
@@ -310,6 +364,19 @@ describe('legacy-linkage-resolve lock guard (BS#2413)', () => {
       // This is the claim the FK story cannot make and the watermark story
       // requires: no row matched, no FK check ran, nothing was written, and
       // the statement still waited until it was cancelled.
+      expect(error).not.toBeNull();
+      expect(error.code).toBe(SQLSTATE_QUERY_CANCELED);
+    });
+
+    test('a flowsheet UPDATE matching ZERO rows blocks too — flowsheet has its own singleton', async () => {
+      // The flowsheet half of the `UPDATE 0` claim. It is what makes the
+      // pre-check load-bearing on BOTH passes rather than only on rotation:
+      // an empty flowsheet cohort is safe because no UPDATE is issued, not
+      // because `flowsheet` has no statement trigger to fire.
+      await holdFlowsheetWatermark();
+
+      const error = await runUnguarded(`UPDATE "${SCHEMA}".flowsheet SET album_id = album_id WHERE id = -2`);
+
       expect(error).not.toBeNull();
       expect(error.code).toBe(SQLSTATE_QUERY_CANCELED);
     });
@@ -343,18 +410,17 @@ describe('legacy-linkage-resolve lock guard (BS#2413)', () => {
     });
 
     test('the guard covers the flowsheet pass too, not only rotation', async () => {
-      // `flowsheet` carries no watermark trigger, so this pass reaches the
-      // held row only through a `library` FK check on rows it links. It is
-      // guarded anyway: the pass survives in production on its data, and the
-      // first non-empty cohort on a `library-etl` work slot would not.
-      await holdWatermark();
+      // Holds `flowsheet_watermark`, NOT `library_watermark` — see
+      // `holdFlowsheetWatermark`. Held through `library_watermark` this case
+      // never blocks at all and passes whether or not the flowsheet pass is
+      // guarded, which is the one thing it is supposed to prove.
+      await holdFlowsheetWatermark();
 
-      const { error } = await runGuarded(FLOWSHEET_DRAIN_SQL);
+      const { error, elapsedMs } = await runGuarded(FLOWSHEET_DRAIN_SQL);
 
-      // Either it completes (the ambient flowsheet cohort took no conflicting
-      // lock) or it stands down cleanly. What it must never do is sit until
-      // the statement timeout — which is what `57014` would mean here.
-      if (error) expect(error.code).toBe(SQLSTATE_LOCK_NOT_AVAILABLE);
+      expect(error).not.toBeNull();
+      expect(error.code).toBe(SQLSTATE_LOCK_NOT_AVAILABLE);
+      expect(elapsedMs).toBeLessThan(STATEMENT_TIMEOUT_MS);
     });
 
     test('the candidate pre-check is not blocked at all — a plain SELECT fires no trigger', async () => {
@@ -368,20 +434,33 @@ describe('legacy-linkage-resolve lock guard (BS#2413)', () => {
       // UPDATE unconditional.
       expect(error).toBeNull();
       expect(Number(rows[0].count)).toBeGreaterThanOrEqual(1); // the probe row
-      expect(elapsedMs).toBeLessThan(LOCK_TIMEOUT_MS);
+      // Bounded by the STATEMENT timeout, not the 750 ms lock timeout. The
+      // assertion's claim is "was not blocked"; a `LOCK_TIMEOUT_MS` ceiling
+      // adds a flake surface instead, because `elapsedMs` starts before BEGIN
+      // and so has to cover five round trips plus the rotation×library join
+      // on whatever the CI box is doing that minute. Same bound as the
+      // sibling assertion above, for the same reason.
+      expect(elapsedMs).toBeLessThan(STATEMENT_TIMEOUT_MS);
     });
   });
 
   test('with the holder released, the guarded rotation pass links the probe row', async () => {
-    const { rows, error } = await runGuarded(ROTATION_DRAIN_SQL);
+    // Read back INSIDE the transaction, then roll back. `ROTATION_DRAIN_SQL`
+    // is the unbounded production CTE: committing it here would link every
+    // ambient unlinked rotation row in the shared integration database and
+    // NULL its denormalized display columns, which is a side effect on rows
+    // other specs own — see `runGuarded`'s docblock.
+    const { rows, readBackRows, error } = await runGuarded(ROTATION_DRAIN_SQL, {
+      readBack: (sql) =>
+        sql.unsafe(`SELECT album_id, artist_name, album_title, record_label FROM "${SCHEMA}".rotation WHERE id = $1`, [
+          probeRotationId,
+        ]),
+    });
 
     expect(error).toBeNull();
     expect(Number(rows[0].resolved)).toBeGreaterThanOrEqual(1);
 
-    const linked = await worker.unsafe(
-      `SELECT album_id, artist_name, album_title, record_label FROM "${SCHEMA}".rotation WHERE id = $1`,
-      [probeRotationId]
-    );
+    const linked = readBackRows;
     expect(linked[0].album_id).toBe(probeLibraryId);
     // The rotation pass clears the denormalized display columns the row
     // carried while it was unlinked.
