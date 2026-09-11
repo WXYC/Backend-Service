@@ -2494,8 +2494,8 @@ paths:
           description: >-
             Applies to the (artist, genre) membership join, not to distinct artists, so a
             multi-genre artist consumes one slot per genre. 20 is a ceiling, not a rejection
-            threshold — out-of-range values are clamped into 1..20 and a non-integer falls
-            back to the default.
+            threshold: a value above 20 is clamped to 20, and a zero, negative or non-integer
+            value falls back to the default of 10. Nothing here 400s.
           schema:
             type: integer
             minimum: 1
@@ -2522,7 +2522,11 @@ paths:
                           type: string
                         code_number:
                           type: integer
-                          description: The artist's number within `genre_id`.
+                          description: >-
+                            The artist's number within this row's own `genre_id`
+                            (`genre_artist_crossreference.artist_genre_code`), which is why the
+                            genre travels on the row: library-wide, neighbouring rows carry
+                            numbers from different shelves.
                         genre_id:
                           type: integer
                         genre_name:

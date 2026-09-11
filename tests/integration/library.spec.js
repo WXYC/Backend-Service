@@ -2423,7 +2423,9 @@ describe('Library Artists Search', () => {
 
       const mine = res.body.artists.filter((a) => a.id === artistId);
       expect(mine).toHaveLength(2);
-      expect(mine.map((a) => [a.genre_id, a.genre_name, a.code_number]).sort()).toEqual([
+      // Sort numerically, not with the default string coercion: '15' < '2'
+      // would reorder this pair the moment either fixture genre id changes.
+      expect(mine.map((a) => [a.genre_id, a.genre_name, a.code_number]).sort((a, b) => a[0] - b[0])).toEqual([
         [11, 'Rock', 901],
         [15, 'Electronic', 902],
       ]);
