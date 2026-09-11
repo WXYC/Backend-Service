@@ -97,6 +97,14 @@ import {
 } from '../../../../../../apps/backend/services/cdc/cdc-websocket';
 import { startCdcDispatcher, shutdownCdcDispatcher } from '../../../../../../apps/backend/services/cdc/dispatcher';
 
+/**
+ * Pinned copies of the back-pressure capture's grouping inputs. Both live
+ * in the module under test; duplicating them here is what makes a change to
+ * either one a visible test failure rather than a silent regrouping in Sentry.
+ */
+const BACKPRESSURE_MESSAGE = 'cdc_ws.buffered_amount_high — terminating slow consumer';
+const BACKPRESSURE_FINGERPRINT = ['cdc-ws', 'buffered-amount-high'];
+
 const makeServer = (): HttpServer => {
   const server = { on: jest.fn(), setTimeout: jest.fn() };
   return server as unknown as HttpServer;
@@ -444,8 +452,13 @@ describe('CDC WebSocket back-pressure and ping/pong (BS#1134)', () => {
         expect(client.send).not.toHaveBeenCalled();
         expect(client.terminate).toHaveBeenCalledTimes(1);
         expect(captureMessageMock).toHaveBeenCalledWith(
-          expect.stringMatching(/buffered_amount|back.?pressure/i),
-          expect.objectContaining({ level: 'warning' })
+          BACKPRESSURE_MESSAGE,
+          expect.objectContaining({
+            level: 'warning',
+            tags: expect.objectContaining({ tool: 'cdc-ws', step: 'backpressure' }),
+            extra: expect.objectContaining({ bufferedAmount: 2 * 1024 * 1024, threshold: 1024 * 1024 }),
+            fingerprint: BACKPRESSURE_FINGERPRINT,
+          })
         );
       });
     });
@@ -483,6 +496,52 @@ describe('CDC WebSocket back-pressure and ping/pong (BS#1134)', () => {
 
         expect(client.terminate).toHaveBeenCalled();
         expect(client.ping).not.toHaveBeenCalled();
+        expect(captureMessageMock).toHaveBeenCalledWith(
+          BACKPRESSURE_MESSAGE,
+          expect.objectContaining({
+            level: 'warning',
+            tags: expect.objectContaining({ tool: 'cdc-ws', step: 'backpressure-heartbeat' }),
+            extra: expect.objectContaining({ bufferedAmount: 2 * 1024 * 1024, threshold: 1024 * 1024 }),
+            fingerprint: BACKPRESSURE_FINGERPRINT,
+          })
+        );
+      });
+    });
+
+    // The grouping key must not vary with the live buffer depth: the
+    // reconnect storm this capture exists to measure produces a different
+    // `bufferedAmount` on every occurrence, so a byte count anywhere in the
+    // message or fingerprint splits the signal into one issue per event.
+    it('groups every occurrence under one key regardless of buffer depth or which path tripped', async () => {
+      await withCdcSecret('test-secret', async () => {
+        await setupCdcWebSocket(makeServer());
+
+        const fanoutClient = makeClient();
+        connectClient(fanoutClient);
+        fanoutClient.bufferedAmount = 2 * 1024 * 1024;
+        fireFanoutEvent();
+        // `terminate()` closes the real socket; model that so the heartbeat
+        // tick below doesn't re-capture this client as a third occurrence.
+        fanoutClient.readyState = 3; // CLOSED
+
+        const heartbeatClient = makeClient();
+        connectClient(heartbeatClient);
+        heartbeatClient.triggerPong();
+        heartbeatClient.bufferedAmount = 7 * 1024 * 1024;
+        jest.advanceTimersByTime(30_000);
+
+        const backpressureCalls = captureMessageMock.mock.calls.filter((call) =>
+          String(call[0]).includes('buffered_amount_high')
+        );
+        expect(backpressureCalls).toHaveLength(2);
+
+        const groupingKeys = backpressureCalls.map((call) =>
+          JSON.stringify([call[0], (call[1] as { fingerprint?: unknown }).fingerprint])
+        );
+        expect(new Set(groupingKeys).size).toBe(1);
+        for (const [message] of backpressureCalls) {
+          expect(String(message)).not.toMatch(/\d/);
+        }
       });
     });
   });
