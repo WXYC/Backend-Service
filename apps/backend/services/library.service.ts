@@ -1148,12 +1148,40 @@ export const linkRotationToAlbum = async (rotationId: number, albumId: number): 
     // to attach.
     //
     // **Known carryover, accepted (plan D7; follow-up
-    // WXYC/Backend-Service#2411).** The flip moves rows across the
-    // `album_id IS NOT NULL` partition the enrichment jobs key on, so a row
-    // carrying a terminal `enriched_no_match` verdict lands in the linked
-    // cohort with no scheduled sweeper reaching it. Tolerable at roughly two
-    // imports a week, and the ticket makes it a known cohort rather than a
-    // surprise.
+    // WXYC/Backend-Service#2411) — a latency note, not a coverage gap.** The
+    // flip moves rows across the `album_id IS NOT NULL` partition the
+    // enrichment jobs key on, so a row carrying a terminal
+    // `enriched_no_match` verdict lands in the linked cohort still carrying
+    // it. Nothing strands it there. `jobs/flowsheet-no-match-recheck` (cron
+    // `47 */6 * * *`, four runs a day) selects on `metadata_status`,
+    // `entry_type`, `artist_name` and its own recheck TTL and nothing else —
+    // `jobs/flowsheet-no-match-recheck/query.ts`'s `candidatePredicate` has
+    // no `album_id` clause at all — and
+    // `jobs/flowsheet-no-match-recheck/writer.ts`'s `writeMatch` branches on
+    // `candidate.album_id !== null` into a dedicated linked arm that UPSERTs
+    // `album_metadata`, which is where a linked row's metadata belongs. That
+    // job was built to generalize the one-shot rescue drains "so no future
+    // freeze cause needs its own one-shot ticket", and this is one of those
+    // causes. So: no second sweeper for this cohort, and no open issue
+    // premised on it having none.
+    //
+    // What is true is that the sweep is slow, and the number is worth
+    // writing down. It is a bounded, TTL-gated drip over an OFFSET cursor:
+    // `FLOWSHEET_NO_MATCH_RECHECK_BATCH_SIZE` rows per run (default 200) ×
+    // four runs a day is 800 rows a day against the 137,340-row
+    // `enriched_no_match` cohort BS#2218 measured on 2026-08-18, so one full
+    // pass over that cohort is ~172 days. That is the ceiling rather than
+    // the expectation, because a transient LML answer deliberately leaves
+    // the attempt marker untouched and so consumes a slot without advancing
+    // its row; `FLOWSHEET_NO_MATCH_RECHECK_TTL_DAYS` (default 14) is a floor
+    // on the reattempt interval, not a promise of one. The rows this UPDATE
+    // flips do better than that cohort average: BS#2218 drains
+    // never-attempted rows newest-first (`id DESC`), and a play flipped here
+    // was logged against a rotation row still waiting for its catalog entry,
+    // so it carries a recent `id` and sorts near the head of that tier
+    // rather than behind 22 years of history. At roughly two imports a week
+    // the exposure is small either way; #2411 tracks whether closing it
+    // faster than the drip does is worth the work.
     const linkedPlays = await tx
       .update(flowsheet)
       .set({ album_id: albumId })
@@ -3336,7 +3364,7 @@ const isLockContentionError = (error: unknown): boolean => {
  * so deleting a release also blanks `rotation_id` on every play that reached
  * it through the rotation entry. That is not an edge case: the tubafrenzy
  * webhook resolves `album_id` and `rotation_id` independently
- * (`internal.route.ts:318-322`), so a play routinely carries a `rotation_id`
+ * (`internal.route.ts:321-325`), so a play routinely carries a `rotation_id`
  * with a NULL `album_id` — invisible to a direct-FK-only count, and its
  * provenance destroyed just as silently. The SET NULL is an UPDATE on
  * `flowsheet`, so it would also fire `bump_flowsheet_updated_at` and
@@ -3362,10 +3390,18 @@ const isLockContentionError = (error: unknown): boolean => {
  *
  * **Concurrency.** `db.transaction()` runs at READ COMMITTED, so a bare
  * existence check followed by a count is check-then-act: a writer attaching
- * `flowsheet.album_id` (`flowsheet.service.ts:848`, `internal.route.ts:502`,
- * `jobs/legacy-linkage-resolve/job.ts:271`) between the count and the DELETE
- * would get its play blanked by the RI action — exactly what the 409 exists
- * to prevent. Both lock-taking SELECTs below use `FOR UPDATE`, not
+ * `flowsheet.album_id` — `addTrack` (`flowsheet.service.ts:922`), the
+ * tubafrenzy webhook's INSERT (`internal.route.ts:505`), the scheduled
+ * resolver's UPDATE (`jobs/legacy-linkage-resolve/job.ts:271`), and
+ * `linkRotationToAlbum`'s retroactive play flip (this file, line 1186) —
+ * between the count and the DELETE would get its play blanked by the RI
+ * action — exactly what the 409 exists to prevent. That enumeration is meant
+ * to be exhaustive, and it is what a reviewer reads to decide whether some
+ * newly-added write site is already covered, so a new one belongs in it even
+ * when it needs no new defence: `linkRotationToAlbum`'s UPDATE is fenced
+ * exactly like the other three, because setting `album_id` fires the FK
+ * check, which takes `FOR KEY SHARE` on the `library` row this transaction
+ * holds `FOR UPDATE`. Both lock-taking SELECTs below use `FOR UPDATE`, not
  * `FOR NO KEY UPDATE`: only `FOR UPDATE` conflicts with the `FOR KEY SHARE`
  * an inserting writer's FK check takes on the parent row. Locking the
  * `library` row closes the `album_id` path; locking the release's `rotation`
@@ -3374,8 +3410,8 @@ const isLockContentionError = (error: unknown): boolean => {
  *
  * **Lock order, and why it is bounded rather than reasoned about.** This
  * transaction takes library-then-rotation. A single `flowsheet` INSERT
- * carrying BOTH `album_id` and `rotation_id` (`internal.route.ts:502`,
- * `flowsheet.service.ts:846`) takes the same two locks via its two RI checks,
+ * carrying BOTH `album_id` and `rotation_id` (`internal.route.ts:505`,
+ * `flowsheet.service.ts:922`) takes the same two locks via its two RI checks,
  * in Postgres's trigger firing order — which is by trigger name, and RI
  * triggers are named `RI_ConstraintTrigger_c_<oid>`, so the order is really
  * constraint-creation order. Today that favours us: `flowsheet.album_id`'s FK
