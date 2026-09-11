@@ -36,6 +36,9 @@
  *      that hasn't ponged since the previous tick is terminated with a
  *      Sentry warning (`cdc_ws.missed_pong`). This decouples "client is
  *      gone" from "client is slow" — pre-#1134 a single signal mixed both.
+ *      The tick checks back-pressure before the missed-pong verdict
+ *      (BS#2426), so `missed_pong` is only ever reported for a client
+ *      whose outbound buffer is healthy.
  */
 
 import { Server as HttpServer, IncomingMessage } from 'http';
@@ -233,27 +236,23 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
   });
 
   // Heartbeat: native WebSocket ping/pong (BS#1134). On each tick we
-  // terminate any client that didn't pong since the previous tick (dead
-  // socket), then ping the survivors and clear their flag for next tick.
-  // Pre-#1134 this was an app-level JSON message which couldn't distinguish
-  // a wedged client from a slow one.
+  // terminate any client over the back-pressure threshold (slow consumer),
+  // then any remaining client that didn't pong since the previous tick
+  // (dead socket), then ping the survivors and clear their flag for next
+  // tick. Pre-#1134 this was an app-level JSON message which couldn't
+  // distinguish a wedged client from a slow one.
   heartbeatTimer = setInterval(() => {
     if (!wss || wss.clients.size === 0) return;
     for (const client of wss.clients) {
       if (client.readyState !== WebSocket.OPEN) continue;
 
-      if (isAlive.get(client) === false) {
-        Sentry.captureMessage('cdc_ws.missed_pong — terminating unresponsive consumer', {
-          level: 'warning',
-          tags: { tool: 'cdc-ws', step: 'missed-pong' },
-        });
-        console.warn('[cdc-ws] Terminating unresponsive consumer (missed pong)');
-        client.terminate();
-        continue;
-      }
-
-      // Back-pressure check before issuing the ping — a wedged outbound
-      // buffer means the ping won't reach the wire either.
+      // Back-pressure check before the missed-pong verdict, not merely
+      // before the ping (BS#2426). A ping frame cannot overtake bytes
+      // already queued on the socket, so a backed-up consumer also misses
+      // its pong round-trip — judged on `isAlive` first it would be
+      // terminated as `missed_pong`, re-conflating "slow" with "gone",
+      // the exact split BS#1134 introduced. (And a wedged outbound buffer
+      // means the ping below wouldn't reach the wire either.)
       if (client.bufferedAmount > BACKPRESSURE_THRESHOLD_BYTES) {
         Sentry.captureMessage('cdc_ws.buffered_amount_high — terminating slow consumer', {
           level: 'warning',
@@ -267,6 +266,16 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
         console.warn(
           `[cdc-ws] Terminating slow consumer on heartbeat: bufferedAmount=${client.bufferedAmount} > ${BACKPRESSURE_THRESHOLD_BYTES}`
         );
+        client.terminate();
+        continue;
+      }
+
+      if (isAlive.get(client) === false) {
+        Sentry.captureMessage('cdc_ws.missed_pong — terminating unresponsive consumer', {
+          level: 'warning',
+          tags: { tool: 'cdc-ws', step: 'missed-pong' },
+        });
+        console.warn('[cdc-ws] Terminating unresponsive consumer (missed pong)');
         client.terminate();
         continue;
       }

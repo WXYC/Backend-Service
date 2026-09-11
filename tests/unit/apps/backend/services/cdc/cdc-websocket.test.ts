@@ -485,8 +485,8 @@ describe('CDC WebSocket back-pressure and ping/pong (BS#1134)', () => {
 
         const client = makeClient();
         connectClient(client);
-        // Need a pong on the first tick so the missed-pong policy doesn't
-        // pre-empt the back-pressure path.
+        // The client is alive (ponged) but backed up — the not-alive-and-
+        // backed-up combination is pinned in the BS#2426 block below.
         client.triggerPong();
         client.bufferedAmount = 2 * 1024 * 1024;
         client.ping.mockClear();
@@ -505,6 +505,8 @@ describe('CDC WebSocket back-pressure and ping/pong (BS#1134)', () => {
             fingerprint: BACKPRESSURE_FINGERPRINT,
           })
         );
+        // The verdict names back-pressure, not a missed pong (BS#2426).
+        expect(captureMessageMock).not.toHaveBeenCalledWith(expect.stringContaining('missed_pong'), expect.anything());
       });
     });
 
@@ -542,6 +544,72 @@ describe('CDC WebSocket back-pressure and ping/pong (BS#1134)', () => {
         for (const [message] of backpressureCalls) {
           expect(String(message)).not.toMatch(/\d/);
         }
+      });
+    });
+  });
+
+  /**
+   * BS#2426 — attribution ordering in the heartbeat tick. A ping frame
+   * cannot overtake bytes already queued on the same socket, so a consumer
+   * buffered past the threshold will also miss its pong round-trip. The
+   * back-pressure check must therefore precede the missed-pong verdict:
+   * otherwise the slow consumer is terminated as an unresponsive one,
+   * re-conflating "slow" with "gone" — the exact split BS#1134 introduced.
+   */
+  describe('attribution ordering (BS#2426)', () => {
+    it('attributes a client that is both backed up and pong-silent to back-pressure, not missed_pong', async () => {
+      await withCdcSecret('test-secret', async () => {
+        await setupCdcWebSocket(makeServer());
+
+        const client = makeClient();
+        connectClient(client);
+
+        // Tick 1 pings and clears the liveness flag. The client never
+        // pongs — its outbound buffer is saturated, so the missed pong is
+        // a symptom of the back-pressure, not an independent fault.
+        jest.advanceTimersByTime(30_000);
+        expect(client.ping).toHaveBeenCalledTimes(1);
+        client.bufferedAmount = 2 * 1024 * 1024;
+
+        // Tick 2 sees both conditions; the verdict must name the cause an
+        // operator can act on.
+        jest.advanceTimersByTime(30_000);
+
+        expect(client.terminate).toHaveBeenCalledTimes(1);
+        expect(captureMessageMock).toHaveBeenCalledWith(
+          BACKPRESSURE_MESSAGE,
+          expect.objectContaining({
+            level: 'warning',
+            tags: expect.objectContaining({ tool: 'cdc-ws', step: 'backpressure-heartbeat' }),
+          })
+        );
+        expect(captureMessageMock).not.toHaveBeenCalledWith(expect.stringContaining('missed_pong'), expect.anything());
+      });
+    });
+
+    it('still attributes a pong-silent client with an empty outbound buffer to missed_pong', async () => {
+      await withCdcSecret('test-secret', async () => {
+        await setupCdcWebSocket(makeServer());
+
+        const client = makeClient();
+        connectClient(client);
+        client.bufferedAmount = 0;
+
+        // Tick 1 pings; the client never pongs and nothing is buffered —
+        // a genuinely unresponsive consumer, not a slow one.
+        jest.advanceTimersByTime(30_000);
+        // Tick 2: the missed-pong verdict stands.
+        jest.advanceTimersByTime(30_000);
+
+        expect(client.terminate).toHaveBeenCalledTimes(1);
+        expect(captureMessageMock).toHaveBeenCalledWith(
+          expect.stringContaining('missed_pong'),
+          expect.objectContaining({ level: 'warning' })
+        );
+        expect(captureMessageMock).not.toHaveBeenCalledWith(
+          expect.stringContaining('buffered_amount_high'),
+          expect.anything()
+        );
       });
     });
   });
