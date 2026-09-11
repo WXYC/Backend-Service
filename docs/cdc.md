@@ -37,11 +37,11 @@ Two of the frames on this channel are not CDC events. Both are part of the wire 
 | Frame       | Emitted                                      | Shape                                             |
 | ----------- | -------------------------------------------- | ------------------------------------------------- |
 | `connected` | once, immediately after a successful upgrade | `{"type":"connected","serverTime":1714000000000}` |
-| `heartbeat` | every 30s, on the heartbeat tick             | `{"type":"heartbeat"}`                            |
+| `heartbeat` | every 30s, on the heartbeat tick             | `{"type":"heartbeat","timestamp":1714000000000}`  |
 
 Discriminate on `type`: a CDC event never carries it, and these two never carry `table`. `scripts/sync/reconcile.ts` is the reference consumer — its `msg.type === 'heartbeat' || msg.type === 'connected'` early return is the minimum handling every consumer needs.
 
-The `heartbeat` frame's shape is fixed at exactly `{"type":"heartbeat"}`. It carries no timestamp or sequence number deliberately: consumers outside this repo were written against that shape, and the channel is `CDC_SECRET`-gated so we cannot survey who is connected. Widening it is a contract change to be announced, not an implementation detail (BS#2427).
+The `heartbeat` frame carries an epoch-ms `timestamp`, as it did from this endpoint's first commit until BS#1412 removed the frame — restoring it verbatim is the point of BS#2427, since it is the only periodic frame on a channel that carries no other clock and a consumer deriving staleness from it would read `undefined` off a narrowed frame. All clients on a given tick are stamped with the same value. Both narrowing and widening the shape are contract changes to be announced, not implementation details: the channel is `CDC_SECRET`-gated, so who is connected cannot be surveyed.
 
 ## Architecture
 
@@ -71,7 +71,7 @@ Per-client guards in `cdc-websocket.ts` keep one misbehaving consumer from leaki
 
 ### Two heartbeat mechanisms, one tick (BS#2427)
 
-The same 30s tick emits **both** a native ping and an app-level `{"type":"heartbeat"}` frame. They are not alternatives and neither replaces the other:
+The same 30s tick emits **both** a native ping and an app-level `heartbeat` frame. They are not alternatives and neither replaces the other:
 
 |                                                       | Native ping/pong                   | App-level `heartbeat` frame          |
 | ----------------------------------------------------- | ---------------------------------- | ------------------------------------ |
@@ -81,7 +81,7 @@ The same 30s tick emits **both** a native ping and an app-level `{"type":"heartb
 
 Order within the tick: both termination checks run first (missed pong, back-pressure), then the ping, then the frame — so a client being terminated on that tick receives no heartbeat frame. The frame goes out through the same `safeSend` back-pressure guard as a fan-out event, so it can never be the write that grows an already-saturated buffer.
 
-**What an idle stream looks like.** A consumer on Node `ws` sees nothing at all when there are no database changes: `ws` answers pings automatically below the API, so ping/pong never surfaces as a message. A consumer that cannot observe protocol frames — a browser `WebSocket`, or any hand-rolled client — sees exactly one `{"type":"heartbeat"}` message every 30s and nothing else. That is the healthy idle signature, and it is what makes a "no frame in N seconds → reconnect" watchdog safe to write against this endpoint (pick N > 30s, ideally ≥ 90s to tolerate one dropped tick). BS#1412 removed this frame in favour of ping/pong alone, which left that population seeing a healthy idle stream as a dead one; the restoration is deliberate and the per-consumer cost of one small frame per 30s was accepted. Any future change that again makes an idle stream invisible to a non-`ws` consumer is a breaking wire change to be announced, not an implementation detail.
+**What an idle stream looks like.** Every consumer — Node `ws`, browser `WebSocket`, hand-rolled — receives exactly one `heartbeat` message every 30s and nothing else when there are no database changes. The frame goes to every open client; what differs between consumers is only whether ping/pong is _also_ visible, and it never is at the application layer (`ws` answers pings automatically below the API, and browsers expose no hook at all). So a Node `ws` consumer must discriminate on `type` exactly like any other: an idle stream is not a silent one. That single frame per 30s is the healthy idle signature, and it is what makes a "no frame in N seconds → reconnect" watchdog safe to write against this endpoint (pick N > 30s, ideally ≥ 90s to tolerate one dropped tick). BS#1412 removed this frame in favour of ping/pong alone, which left that population seeing a healthy idle stream as a dead one; the restoration is deliberate and the per-consumer cost of one small frame per 30s was accepted. Any future change that again makes an idle stream invisible to a non-`ws` consumer is a breaking wire change to be announced, not an implementation detail.
 
 ## Reconciliation monitor
 

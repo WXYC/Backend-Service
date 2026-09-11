@@ -112,12 +112,13 @@ const BACKPRESSURE_MESSAGE = 'cdc_ws.buffered_amount_high — terminating slow c
 const BACKPRESSURE_FINGERPRINT = ['cdc-ws', 'buffered-amount-high'];
 
 /**
- * The app-level heartbeat frame, pinned as a literal (BS#2427). Written out
- * rather than re-derived with `JSON.stringify` because the exact bytes are
- * the wire contract: this is the pre-BS#1412 shape, and consumers outside
- * this repo parse it. An added field or a renamed key must fail here.
+ * The app-level heartbeat frame's shape (BS#2427), spelled out rather than
+ * re-derived from the implementation because it is the wire contract: this
+ * is the pre-BS#1412 shape, and consumers outside this repo parse it. Used
+ * with `toEqual`, so a renamed key, a dropped `timestamp`, or an added
+ * field all fail here.
  */
-const HEARTBEAT_FRAME = '{"type":"heartbeat"}';
+const HEARTBEAT_FRAME_SHAPE = { type: 'heartbeat', timestamp: expect.any(Number) };
 
 const makeServer = (): HttpServer => {
   const server = { on: jest.fn(), setTimeout: jest.fn() };
@@ -699,6 +700,11 @@ describe('CDC WebSocket back-pressure and ping/pong (BS#1134)', () => {
       return client.send.mock.calls.map((call) => String(call[0] ?? ''));
     }
 
+    /** Every payload the client was sent, parsed. */
+    function sentFrames(client: SyntheticClient): unknown[] {
+      return sentPayloads(client).map((payload) => JSON.parse(payload));
+    }
+
     it('emits the app-level frame alongside the native ping on each tick', async () => {
       await withCdcSecret('test-secret', async () => {
         await setupCdcWebSocket(makeServer());
@@ -712,7 +718,7 @@ describe('CDC WebSocket back-pressure and ping/pong (BS#1134)', () => {
         jest.advanceTimersByTime(30_000);
 
         expect(client.ping).toHaveBeenCalledTimes(1);
-        expect(sentPayloads(client)).toEqual([HEARTBEAT_FRAME]);
+        expect(sentFrames(client)).toEqual([HEARTBEAT_FRAME_SHAPE]);
 
         // The frame rides every tick, not just the first — that is the whole
         // point for a consumer whose watchdog expects traffic within N
@@ -721,8 +727,71 @@ describe('CDC WebSocket back-pressure and ping/pong (BS#1134)', () => {
         jest.advanceTimersByTime(30_000);
 
         expect(client.ping).toHaveBeenCalledTimes(2);
-        expect(sentPayloads(client)).toEqual([HEARTBEAT_FRAME, HEARTBEAT_FRAME]);
+        expect(sentFrames(client)).toEqual([HEARTBEAT_FRAME_SHAPE, HEARTBEAT_FRAME_SHAPE]);
         expect(client.terminate).not.toHaveBeenCalled();
+
+        // The timestamp advances with the tick. A frame serialized once at
+        // module load would satisfy every assertion above and fail this one,
+        // handing consumers a clock frozen at process start.
+        const [first, second] = sentFrames(client) as { timestamp: number }[];
+        expect(second.timestamp - first.timestamp).toBe(30_000);
+      });
+    });
+
+    it('stamps every client on a tick with the same timestamp', async () => {
+      await withCdcSecret('test-secret', async () => {
+        await setupCdcWebSocket(makeServer());
+
+        const first = makeClient();
+        const second = makeClient();
+        connectClient(first);
+        connectClient(second);
+        first.send.mockClear();
+        second.send.mockClear();
+
+        jest.advanceTimersByTime(30_000);
+
+        // Built once per tick, not once per client: a consumer comparing
+        // frames across two connections is reading the tick, not its
+        // socket's position in the iteration.
+        const [firstFrame] = sentFrames(first) as { timestamp: number }[];
+        const [secondFrame] = sentFrames(second) as { timestamp: number }[];
+        expect(firstFrame.timestamp).toBe(secondFrame.timestamp);
+      });
+    });
+
+    it('attributes a termination inside the frame send to the heartbeat, not to fan-out', async () => {
+      await withCdcSecret('test-secret', async () => {
+        await setupCdcWebSocket(makeServer());
+
+        const client = makeClient();
+        connectClient(client);
+        client.triggerPong();
+
+        // Exactly at the threshold, so the inline `>` check lets it through;
+        // the ping's own bytes then push it over. This is the only path on
+        // which the heartbeat terminates a client from inside `safeSend`,
+        // and it must not be reported as a fan-out termination — the two
+        // step tags are what separate the paths under one fingerprint.
+        client.bufferedAmount = 1024 * 1024;
+        client.ping.mockImplementation(() => {
+          client.bufferedAmount = 2 * 1024 * 1024;
+        });
+
+        jest.advanceTimersByTime(30_000);
+
+        expect(client.terminate).toHaveBeenCalledTimes(1);
+        expect(captureMessageMock).toHaveBeenCalledWith(
+          BACKPRESSURE_MESSAGE,
+          expect.objectContaining({
+            tags: expect.objectContaining({ tool: 'cdc-ws', step: 'backpressure-heartbeat' }),
+            fingerprint: BACKPRESSURE_FINGERPRINT,
+          })
+        );
+        expect(captureMessageMock).not.toHaveBeenCalledWith(
+          BACKPRESSURE_MESSAGE,
+          expect.objectContaining({ tags: expect.objectContaining({ step: 'backpressure' }) })
+        );
       });
     });
 
