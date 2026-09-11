@@ -1990,10 +1990,13 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
   }
   // --- end discogs_unavailable block --------------------------------------
 
-  // Short-circuit a no-op edit: updateAlbumInDB always SETs last_modified =
-  // NOW(), which fires the touch_library_watermark trigger and advances the
-  // catalog conditional-GET watermark — forcing every iOS / dj-site poller to
-  // re-download the full catalog for a write that changed nothing (#1555). A
+  // Short-circuit a no-op edit: updateAlbumInDB SETs the submitted columns,
+  // which fires the touch_library_watermark trigger and advances the catalog
+  // conditional-GET watermark — forcing every iOS / dj-site poller to
+  // re-download the full catalog for a write that changed nothing (#1555).
+  // The trigger keys on those exported columns appearing in the SET list at
+  // all, not on their values changing; `last_modified` is also always SET but
+  // is outside the narrowed list (migration 0142) and cannot fire it alone. A
   // PATCH resolves to no-op when every computed update already equals the
   // stored value (e.g. `{artist_id: <same>}`, or a dj-site "Save" that
   // resubmits the unchanged record). Compare against the already-fetched row
