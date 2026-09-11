@@ -24,7 +24,7 @@ import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import { getPostHogClient } from '../utils/posthog.js';
 import WxycError from '../utils/error.js';
-import { INT4_MAX } from '../utils/constants.js';
+import { INT2_MAX, INT4_MAX } from '../utils/constants.js';
 
 // `genres.id` and `genre_artist_crossreference.artist_genre_code` are Postgres
 // int4 columns. A query value outside that range parses fine as a JS integer
@@ -48,11 +48,105 @@ type NewAlbumRequest = {
   artist_name?: string;
   artist_id?: number;
   alternate_artist_name?: string;
-  label: string;
+  // BS#2410: `label` is no longer required on its own — see the either-or
+  // guard in `addAlbum` and `resolveNewAlbumLabel` below.
+  label?: string;
   label_id?: number;
   genre_id: number;
   format_id: number;
   disc_quantity?: number;
+  // BS#2410 (rotation-import plan D2): the release call code, operator-chosen
+  // rather than server-assigned. Both optional; omitting them reproduces the
+  // pre-2410 behavior exactly (MAX+1 for the artist, NULL volume letters).
+  code_number?: number;
+  code_volume_letters?: string;
+};
+
+// `library.code_volume_letters` is `varchar(4)`. Reject over-length input as a
+// 400 rather than letting it reach the INSERT and trip PG 22001 ("value too
+// long") -> 500, the same treatment `MAX_ALBUM_TEXT_LENGTH` gives the
+// `varchar(128)` text columns on the PATCH path.
+const MAX_CODE_VOLUME_LETTERS_LENGTH = 4;
+
+/**
+ * Validate an operator-supplied `code_number` for `POST /library` (BS#2410).
+ *
+ * Bounded at `INT2_MAX` because `library.code_number` is a Postgres
+ * `smallint`: unbounded, a plausible-looking 40000 passes `Number.isInteger`
+ * and reaches PG as SQLSTATE 22003 -> 500 where this codebase's convention is
+ * a boundary 400.
+ *
+ * Deliberately NOT collision-checked. `libraryService.albumCodeNumberTaken`
+ * exists and `updateAlbum` calls it for exactly the collision a client-chosen
+ * number can create, so its absence here reads as an oversight unless said
+ * out loud: WXYC has a single librarian, so the two-operator race does not
+ * exist, and an application-side 409 would block the deliberate re-use of a
+ * lost record's slot (rotation-import plan D2). Uniqueness becomes the
+ * database's job on BS#2033, whose constraint carries the 23505 -> 409
+ * obligation recorded in `jobs/library-call-number-dedup/README.md`.
+ */
+const validateCodeNumber = (code_number: unknown): number => {
+  if (typeof code_number !== 'number' || !Number.isInteger(code_number) || code_number < 1 || code_number > INT2_MAX) {
+    throw new WxycError(`code_number must be an integer between 1 and ${INT2_MAX}`, 400);
+  }
+  return code_number;
+};
+
+/** Validate an operator-supplied `code_volume_letters` for `POST /library` (BS#2410). */
+const validateCodeVolumeLetters = (code_volume_letters: unknown): string | undefined => {
+  if (typeof code_volume_letters !== 'string') {
+    throw new WxycError('code_volume_letters must be a string', 400);
+  }
+  const trimmed = code_volume_letters.trim();
+  if (trimmed.length > MAX_CODE_VOLUME_LETTERS_LENGTH) {
+    throw new WxycError(`code_volume_letters must be ${MAX_CODE_VOLUME_LETTERS_LENGTH} characters or fewer`, 400);
+  }
+  return trimmed || undefined;
+};
+
+/**
+ * Resolve the `(label_id, label)` pair `POST /library` writes, given a body
+ * carrying label text, a `label_id`, or both (BS#2410, rotation-import plan
+ * D5).
+ *
+ * `library.label` is denormalized alongside the `labels` FK, so both halves
+ * have to come out of this together. With a `label_id` the name is re-fetched
+ * server-side rather than trusted from the body — the same rationale as
+ * `addAlbum`'s canonical `artist_name` re-fetch — and `createLabel` is
+ * skipped, so the import screen carrying a rotation row's `label_id` cannot
+ * mint a near-duplicate labels row. A `label_id` that resolves to nothing is a
+ * 400 with the wording `updateAlbum` already uses, not the PG 23503 -> 500 it
+ * would otherwise become.
+ *
+ * Explicit label text still wins for the denormalized column when both are
+ * sent, matching `updateAlbum`'s `trimmedLabel ?? labelRow.label_name`.
+ *
+ * The label-text-only branch is byte-for-byte the pre-BS#2410 path, including
+ * its treatment of `''` — which the widened required-set guard still admits,
+ * and which still skips the upsert rather than minting an empty `labels` row.
+ * Tightening that is `PATCH /library/:id`'s "clear the label by sending
+ * label_id: null" rule and is not this ticket's to change.
+ */
+const resolveNewAlbumLabel = async (
+  body: NewAlbumRequest
+): Promise<{ label_id: number | undefined; label: string | undefined }> => {
+  if (body.label_id !== undefined) {
+    if (!Number.isInteger(body.label_id) || body.label_id < 1) {
+      throw new WxycError('label_id must be a positive integer', 400);
+    }
+    const labelRow = await labelsService.getLabelById(body.label_id);
+    if (!labelRow) {
+      throw new WxycError('label_id does not reference an existing label', 400);
+    }
+    return { label_id: labelRow.id, label: body.label || labelRow.label_name };
+  }
+
+  if (!body.label) {
+    return { label_id: undefined, label: body.label };
+  }
+
+  const resolvedLabel = await labelsService.createLabel(body.label);
+  return { label_id: resolvedLabel.id, label: body.label };
 };
 
 //Check if artist exists.
@@ -61,18 +155,33 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
   const { body } = req;
   if (
     body.album_title === undefined ||
-    body.label === undefined ||
+    // BS#2410 / plan D5: `label_id` satisfies the label requirement on its
+    // own. This guard ran before any label resolution and rejected every
+    // label-less body outright, so widening it here — not adding a branch
+    // further down — is what lets a `label_id`-only import through at all.
+    (body.label === undefined && body.label_id === undefined) ||
     body.genre_id === undefined ||
     body.format_id === undefined ||
     (body.artist_name === undefined && body.artist_id === undefined)
   ) {
-    throw new WxycError('Missing Parameters: album_title, label, genre_id, format_id, artist_name, or artist_id', 400);
+    throw new WxycError(
+      'Missing Parameters: album_title, label or label_id, genre_id, format_id, artist_name, or artist_id',
+      400
+    );
   }
   // '' satisfies the NOT NULL constraint but is never a valid title — reject
   // before it lands in the catalog (PR #1154 review issue 8).
   if (typeof body.album_title !== 'string' || body.album_title.trim() === '') {
     throw new WxycError('album_title must be a non-empty string', 400);
   }
+
+  // BS#2410: validate the operator-supplied call code before any of the
+  // artist/label resolution below, so a bad value costs no queries and can't
+  // strand an orphan `labels` row on the failure path (#1550's rationale,
+  // applied to the POST side).
+  const code_volume_letters =
+    body.code_volume_letters === undefined ? undefined : validateCodeVolumeLetters(body.code_volume_letters);
+  const supplied_code_number = body.code_number === undefined ? undefined : validateCodeNumber(body.code_number);
 
   let artist_id = body.artist_id;
   if (artist_id === undefined && body.artist_name !== undefined) {
@@ -91,12 +200,9 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
   // sent a casing variant. Renames cascade via the trigger added in 0060.
   const canonical_artist_name = await libraryService.getArtistNameById(artist_id);
 
-  // Resolve label string to label_id via upsert
-  let label_id = body.label_id;
-  if (label_id === undefined && body.label) {
-    const resolvedLabel = await labelsService.createLabel(body.label);
-    label_id = resolvedLabel.id;
-  }
+  // Resolve label text to label_id via upsert, or label_id to the
+  // denormalized name (BS#2410 / plan D5).
+  const { label_id, label } = await resolveNewAlbumLabel(body);
 
   const new_album: NewAlbum = {
     artist_id: artist_id,
@@ -104,9 +210,12 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     genre_id: body.genre_id,
     format_id: body.format_id,
     album_title: body.album_title,
-    label: body.label,
+    label: label,
     label_id: label_id,
-    code_number: await libraryService.generateAlbumCodeNumber(artist_id),
+    // BS#2410: an omitted code_number still takes MAX+1 for the artist, which
+    // is byte-for-byte the pre-2410 behavior.
+    code_number: supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artist_id)),
+    code_volume_letters: code_volume_letters,
     alternate_artist_name: body.alternate_artist_name,
     disc_quantity: body.disc_quantity,
   };

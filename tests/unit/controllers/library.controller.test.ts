@@ -561,6 +561,189 @@ describe('library.controller', () => {
       );
     });
 
+    // BS#2410 item 3 / rotation-import plan D2. Before this, `addAlbum` had no
+    // `code_number` member on its request type and overwrote the column with
+    // `generateAlbumCodeNumber(artist_id)` unconditionally, so a client-sent
+    // value was discarded silently and the request still succeeded with a
+    // server-assigned number — the trap wxyc-shared 1.51.0's `AddAlbumRequest`
+    // documented as "not yet served". The bound is the reason the passthrough
+    // is safe: `library.code_number` is a Postgres smallint, so an unbounded
+    // 40000 reaches PG as SQLSTATE 22003 → 500 where this codebase's
+    // convention for an out-of-range scalar is a boundary 400.
+    //
+    // Deliberately NOT checked here: whether the artist already owns this
+    // number. `albumCodeNumberTaken` exists and `updateAlbum` calls it, but
+    // the single-librarian decision (plan D2) is that a hard 409 would block
+    // deliberate re-use of a lost record's slot. Uniqueness becomes the
+    // database's job on BS#2033.
+    describe('operator-supplied call code (BS#2410)', () => {
+      const req = (overrides: Record<string, unknown>) =>
+        ({
+          body: {
+            album_title: 'DOGA',
+            artist_id: 42,
+            label: 'Sonamos',
+            genre_id: 11,
+            format_id: 1,
+            ...overrides,
+          },
+        }) as unknown as Request;
+
+      beforeEach(() => {
+        mockGetArtistNameById.mockResolvedValue('Juana Molina');
+      });
+
+      it('persists a client-supplied code_number instead of generating one', async () => {
+        await addAlbum(req({ code_number: 12345 }), mockResponse(), next);
+
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ code_number: 12345 }));
+        expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+      });
+
+      it('does not consult albumCodeNumberTaken for a client-supplied code_number (plan D2)', async () => {
+        await addAlbum(req({ code_number: 12345 }), mockResponse(), next);
+
+        expect(mockAlbumCodeNumberTaken).not.toHaveBeenCalled();
+      });
+
+      it('falls back to generateAlbumCodeNumber when code_number is omitted', async () => {
+        mockGenerateAlbumCodeNumber.mockResolvedValue(7);
+
+        await addAlbum(req({}), mockResponse(), next);
+
+        expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(42);
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ code_number: 7 }));
+      });
+
+      it.each([[0], [-1], [32768], [40000], [1.5]])('rejects code_number %p before the insert', async (code_number) => {
+        await expect(addAlbum(req({ code_number }), mockResponse(), next)).rejects.toThrow('code_number');
+        expect(mockInsertAlbum).not.toHaveBeenCalled();
+      });
+
+      it('rejects a code_number sent as a string', async () => {
+        await expect(addAlbum(req({ code_number: '12345' }), mockResponse(), next)).rejects.toThrow('code_number');
+        expect(mockInsertAlbum).not.toHaveBeenCalled();
+      });
+
+      it.each([[1], [32767]])('accepts the boundary code_number %p', async (code_number) => {
+        await addAlbum(req({ code_number }), mockResponse(), next);
+
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ code_number }));
+      });
+
+      it('passes code_volume_letters through to the insert', async () => {
+        await addAlbum(req({ code_volume_letters: 'B' }), mockResponse(), next);
+
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ code_volume_letters: 'B' }));
+      });
+
+      it('leaves code_volume_letters unset when omitted', async () => {
+        await addAlbum(req({}), mockResponse(), next);
+
+        const [inserted] = mockInsertAlbum.mock.calls[0];
+        expect(inserted.code_volume_letters).toBeUndefined();
+      });
+
+      it('rejects code_volume_letters longer than the varchar(4) column', async () => {
+        await expect(addAlbum(req({ code_volume_letters: 'ABCDE' }), mockResponse(), next)).rejects.toThrow(
+          'code_volume_letters'
+        );
+        expect(mockInsertAlbum).not.toHaveBeenCalled();
+      });
+
+      it('rejects a non-string code_volume_letters', async () => {
+        await expect(addAlbum(req({ code_volume_letters: 4 }), mockResponse(), next)).rejects.toThrow(
+          'code_volume_letters'
+        );
+        expect(mockInsertAlbum).not.toHaveBeenCalled();
+      });
+    });
+
+    // BS#2410 item 3 / rotation-import plan D5. The import screen carries a
+    // `label_id` from the rotation row and no label text, so `label_id` alone
+    // now satisfies the label requirement: Backend resolves `labels.label_name`
+    // for the denormalized `library.label` column instead of upserting a
+    // second labels row. The pre-2410 required-set check rejected a
+    // label-less body outright, before any label resolution ran, so it becomes
+    // an either-or rather than gaining a branch further down.
+    describe('label_id satisfies the label requirement (BS#2410)', () => {
+      const req = (overrides: Record<string, unknown>) =>
+        ({
+          body: {
+            album_title: 'DOGA',
+            artist_id: 42,
+            genre_id: 11,
+            format_id: 1,
+            ...overrides,
+          },
+        }) as unknown as Request;
+
+      beforeEach(() => {
+        mockGetArtistNameById.mockResolvedValue('Juana Molina');
+      });
+
+      it('resolves the denormalized label name from label_id and skips createLabel', async () => {
+        mockGetLabelById.mockResolvedValue({ id: 55, label_name: 'Sonamos' });
+
+        await addAlbum(req({ label_id: 55 }), mockResponse(), next);
+
+        expect(mockGetLabelById).toHaveBeenCalledWith(55);
+        expect(mockCreateLabel).not.toHaveBeenCalled();
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ label_id: 55, label: 'Sonamos' }));
+      });
+
+      it('rejects a dangling label_id with the wording updateAlbum already uses', async () => {
+        mockGetLabelById.mockResolvedValue(undefined);
+
+        await expect(addAlbum(req({ label_id: 999 }), mockResponse(), next)).rejects.toThrow(
+          'label_id does not reference an existing label'
+        );
+        expect(mockInsertAlbum).not.toHaveBeenCalled();
+      });
+
+      it('rejects a label_id that is not a positive integer before touching the labels table', async () => {
+        await expect(addAlbum(req({ label_id: 0 }), mockResponse(), next)).rejects.toThrow('label_id');
+
+        expect(mockGetLabelById).not.toHaveBeenCalled();
+        expect(mockInsertAlbum).not.toHaveBeenCalled();
+      });
+
+      it('keeps an explicitly sent label over the resolved name when both are present', async () => {
+        mockGetLabelById.mockResolvedValue({ id: 55, label_name: 'Sonamos' });
+
+        await addAlbum(req({ label_id: 55, label: 'Sonamos US' }), mockResponse(), next);
+
+        expect(mockCreateLabel).not.toHaveBeenCalled();
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ label_id: 55, label: 'Sonamos US' }));
+      });
+
+      it('still creates or reuses the labels row when only label text is sent', async () => {
+        await addAlbum(req({ label: 'Drag City' }), mockResponse(), next);
+
+        expect(mockCreateLabel).toHaveBeenCalledWith('Drag City');
+        expect(mockGetLabelById).not.toHaveBeenCalled();
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ label_id: 99, label: 'Drag City' }));
+      });
+
+      it('rejects a body carrying neither label nor label_id', async () => {
+        await expect(addAlbum(req({}), mockResponse(), next)).rejects.toThrow('Missing Parameters');
+        expect(mockInsertAlbum).not.toHaveBeenCalled();
+      });
+
+      // Parity pin, not an endorsement: `''` satisfied the pre-2410
+      // required-set guard and skipped the upsert (`label_id === undefined &&
+      // body.label` is falsy), landing an empty denormalized column with no
+      // FK. Refactoring the label branch must not start minting empty `labels`
+      // rows instead. Tightening this is PATCH's "clear the label by sending
+      // label_id: null" rule, not BS#2410's.
+      it("keeps the pre-2410 treatment of an empty label: '' mints no labels row", async () => {
+        await addAlbum(req({ label: '' }), mockResponse(), next);
+
+        expect(mockCreateLabel).not.toHaveBeenCalled();
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ label: '', label_id: undefined }));
+      });
+    });
+
     describe('canonical entity (B-1.3)', () => {
       beforeEach(() => {
         mockGetArtistNameById.mockResolvedValue('Juana Molina');

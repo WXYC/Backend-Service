@@ -14,3 +14,16 @@
  * guard; do not re-declare it locally.
  */
 export const INT4_MAX = 2147483647;
+
+/**
+ * Upper bound for a Postgres int2 (`smallint`) column, with the same failure
+ * mode as `INT4_MAX` two orders of magnitude lower: `code_number: 40000`
+ * passes `Number.isInteger` and reaches PG as SQLSTATE 22003 -> 500 rather
+ * than the boundary 400 this codebase answers everywhere else.
+ *
+ * First consumer: `POST /library`'s operator-supplied `code_number`
+ * (BS#2410), whose column `library.code_number` is a `smallint`. Import this
+ * one wherever an int2-bound field needs the same guard; do not re-declare it
+ * locally.
+ */
+export const INT2_MAX = 32767;

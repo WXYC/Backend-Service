@@ -222,7 +222,17 @@ components:
 
     NewAlbumRequest:
       type: object
-      required: ['album_title', 'label', 'genre_id', 'format_id']
+      description: >-
+        `label` left the required set in BS#2410: exactly one of `label` or
+        `label_id` must be supplied. With `label_id` alone, Backend resolves
+        `labels.label_name` server-side for the denormalized `library.label`
+        column and skips label creation; a dangling `label_id` is a 400
+        ("label_id does not reference an existing label"). With `label` alone,
+        the create-or-reuse-by-exact-name behavior is unchanged. Mirrors
+        wxyc-shared's `AddAlbumRequest` (api.yaml 1.51.0) — that spec is the
+        SSOT; this copy exists because no CI guard catches app.yaml drift
+        (BS#1479).
+      required: ['album_title', 'genre_id', 'format_id']
       properties:
         album_title:
           type: string
@@ -234,10 +244,31 @@ components:
           type: string
         label:
           type: string
+        label_id:
+          type: integer
         genre_id:
           type: integer
         format_id:
           type: integer
+        code_number:
+          type: integer
+          minimum: 1
+          maximum: 32767
+          description: >-
+            Operator-chosen release call number (BS#2410). `library.code_number`
+            is a Postgres smallint, hence the 32767 ceiling; out-of-range values
+            are a 400, not the SQLSTATE 22003 → 500 they would otherwise become.
+            Omitted, Backend assigns MAX+1 for the artist — the pre-BS#2410
+            behavior. No application-level collision check by design
+            (single-librarian decision, rotation-import plan D2); the eventual
+            DB uniqueness constraint and its 23505 → 409 mapping are tracked on
+            #2033.
+        code_volume_letters:
+          type: string
+          maxLength: 4
+          description: >-
+            Optional volume letters for the release call code (BS#2410;
+            `library.code_volume_letters`, varchar(4)). Omitted → NULL.
         disc_quantity:
           type: integer
 
