@@ -106,6 +106,25 @@ library_route.get(
 // tier that already exists. `/artists/search` and `/artists/peek-code` set the
 // same precedent for an admin-gated read.
 //
+// Two honest caveats on that argument. First, `hasAdminAccess()` does NOT
+// partition tubafrenzy's admin menu the way "everything in that block is
+// MD-gated here" implies. The `<c:if>` holds FOUR links, and the two that are
+// not these already have BS read successors at `catalog: ['read']`: "Add, Edit,
+// & Delete Artists & Releases" → `GET /library/artists/:id`,
+// `/artists/:id/releases`, `/artists/by-code`; "Manage Labels" → `GET /labels`,
+// `/labels/info`, `/labels/search` (only the label POST is at `write`). So the
+// inference from that block supports two of its four links, and for the other
+// two this repo has already decided the opposite way.
+// Second, `auth.roles.ts` says three separate times that borrowing a permission
+// key because it "happens to select the right roles today" is the thing not to
+// do, and that is exactly the move here. The tier stays anyway: the shipped
+// dj-site consumer independently gates these screens on
+// `requireRole(session, Authorization.MD)`, the two existing `catalog: ['write']`
+// reads set the precedent, and of the two alternatives one widens access the
+// legacy system withheld while the other mints a four-role statement key to name
+// a tier that already exists. If a third admin-gated read arrives, that is the
+// signal to mint the key rather than to borrow again.
+//
 // Two literal segments, so neither collides with the templated
 // `/:id/compilation-tracks` GET further down (different second segment) — but
 // they are registered here, ahead of every templated route on this router,

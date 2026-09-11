@@ -2600,9 +2600,36 @@ export type ArtistCrossReferenceRow = {
   target_artist_id: number;
   target_artist_name: string;
   target_code_letters: string;
+  target_code_genre_id: number | null;
   target_code_artist_number: number | null;
   comment: string | null;
 };
+
+/**
+ * One column of the TARGET artist's lowest-`genre_id` filing, as a correlated
+ * scalar subquery.
+ *
+ * `artist_genre_key` is unique on `(artist_id, genre_id)` rather than on
+ * `artist_id`, so a legacy artist filed under several genres owns several
+ * `artist_genre_code`s — a join would fan one cross-reference row out into
+ * several. `ORDER BY genre_id ASC LIMIT 1` collapses to the lowest `genre_id`,
+ * matching `getArtistCardById`, so the code this view shows for an artist is
+ * the code that artist's own card shows.
+ *
+ * Both projected columns go through this helper rather than being written out
+ * twice, so `target_code_genre_id` and `target_code_artist_number` are
+ * guaranteed to describe the SAME filing: the uniqueness of
+ * `artist_genre_key` means "lowest `genre_id`" names exactly one row, and both
+ * subqueries read it. Null for an artist with no `genre_artist_crossreference`
+ * row at all.
+ */
+const targetLowestGenreFiling = (column: 'genre_id' | 'artist_genre_code') => sql<number | null>`(
+        SELECT gac.${sql.raw(column)}
+        FROM ${genre_artist_crossreference} AS gac
+        WHERE gac.artist_id = ${targetArtist.id}
+        ORDER BY gac.genre_id ASC
+        LIMIT 1
+      )`;
 
 /**
  * Join chain for `xrefsToLibraryCodes.jsp`'s four columns. Shared verbatim by
@@ -2612,18 +2639,25 @@ export type ArtistCrossReferenceRow = {
  * Both FKs are `NOT NULL` and `ON DELETE CASCADE` to `artists`, so neither
  * INNER JOIN can drop a row that the base table holds.
  *
- * `target_code_artist_number` is a correlated subquery, not a join.
- * `artist_genre_key` is unique on `(artist_id, genre_id)` rather than on
- * `artist_id`, so a legacy artist filed under several genres owns several
- * `artist_genre_code`s — joining would fan one cross-reference row out into
- * several. It picks the lowest `genre_id`, matching `getArtistCardById`'s
- * collapse, so the code this view shows for an artist is the code that
- * artist's own card shows. Nullable: `genre_artist_crossreference` has no row
- * for an artist that was never filed under a genre.
- *
  * Only the TARGET carries a call number, matching the JSP: its
  * "Cross-Referencing Artist" column renders a bare presentation name and its
  * "Cross-Referenced Library Code" column renders code + name.
+ *
+ * `target_code_genre_id` ships alongside the number, and has to. The JSP's
+ * code column is `ArtistLibraryCode.getFullLibraryCode()` —
+ * `genreName + " " + callLetters + " " + callNumbers`, e.g. `Rock BA 42` —
+ * because a tubafrenzy cross-reference points at one `LIBRARY_CODE` row, which
+ * IS one `(artist, genre)` placement. `artist_crossreference` stores only the
+ * two artist ids (`jobs/library-etl` resolves by name plus `code_letters`;
+ * `scripts/audit/bs_2117_crossref_backfill.sql` documents the rule), so the
+ * placement the librarian chose is not recoverable and the subquery above
+ * substitutes the lowest `genre_id`. Projecting that `genre_id` is what lets a
+ * client label the filing it actually got instead of rendering a bare `BA 7`
+ * where the JSP rendered `Jazz BA 7` — and it keeps this row consistent with
+ * `ArtistCardRow` and `ReleaseCrossReferenceRow`, the other two call-number
+ * projections in this service, both of which carry `genre_id`. The collapse
+ * itself remains a divergence from the JSP, documented on both paths in
+ * `app.yaml`.
  */
 const artistCrossReferencesQuery = () =>
   db
@@ -2633,13 +2667,8 @@ const artistCrossReferencesQuery = () =>
       target_artist_id: artist_crossreference.target_artist_id,
       target_artist_name: targetArtist.artist_name,
       target_code_letters: targetArtist.code_letters,
-      target_code_artist_number: sql<number | null>`(
-        SELECT gac.artist_genre_code
-        FROM ${genre_artist_crossreference} AS gac
-        WHERE gac.artist_id = ${targetArtist.id}
-        ORDER BY gac.genre_id ASC
-        LIMIT 1
-      )`,
+      target_code_genre_id: targetLowestGenreFiling('genre_id'),
+      target_code_artist_number: targetLowestGenreFiling('artist_genre_code'),
       comment: artist_crossreference.comment,
     })
     .from(artist_crossreference)
@@ -2650,14 +2679,27 @@ const artistCrossReferencesQuery = () =>
  * One page of `artist_crossreference`, alphabetical by the cross-referencing
  * artist.
  *
- * The table has no primary key and no timestamp — its only unique constraint
- * is `artist_crossref_source_target` on the FK pair — so the sort carries both
- * FK columns after the name to reach a total order. Without that, two artists
- * sharing a `artist_name` (the legacy catalog has several) would order
- * arbitrarily and rows could repeat or vanish across page boundaries. The name
- * itself sorts under the database's default collation, which is what a
+ * **The PG mirror** has no primary key and no timestamp — its only unique
+ * constraint is `artist_crossref_source_target` on the FK pair — so the sort
+ * carries both FK columns after the name to reach a total order. Without that,
+ * two artists sharing a `artist_name` (the legacy catalog has several) would
+ * order arbitrarily and rows could repeat or vanish across page boundaries.
+ * The name itself sorts under the database's default collation, which is what a
  * librarian reading an alphabetical list expects; determinism comes from the
  * id tiebreak, not from the collation.
+ *
+ * That is a property of the mirror, NOT of the upstream. tubafrenzy's
+ * `LIBRARY_CODE_CROSS_REFERENCE` declares `PRIMARY KEY (ID)`,
+ * `TIME_LAST_MODIFIED bigint` and `TIME_CREATED bigint`
+ * (`scripts/dev/fixtures/wxycmusic-fixture.sql:251-257`), and the JSP's listing
+ * is `findAllByModifiedDesc()` — `ORDER BY TIME_LAST_MODIFIED DESC`. So the
+ * order a librarian actually worked in was newest-edit-first, and alphabetical
+ * here is a DIFFERENT VIEW rather than a substitute for an order that never
+ * existed. `jobs/library-etl`'s `fetchLegacyArtistCrossRefs` simply never
+ * selects those three columns, which is why the mirror lacks them. Recovering
+ * them is tracked separately and is time-bounded by the final tubafrenzy
+ * mysqldump (see the `app.yaml` note on both paths); it is deliberately out of
+ * scope here.
  */
 export const getArtistCrossReferences = async (page: number, limit: number): Promise<ArtistCrossReferenceRow[]> => {
   return artistCrossReferencesQuery()
@@ -2758,9 +2800,15 @@ const releaseCrossReferencesQuery = () =>
  * One page of `artist_library_crossreference`, alphabetical by the
  * cross-referencing artist.
  *
- * Same no-primary-key situation as `getArtistCrossReferences`: the unique
- * constraint is `library_id_artist_id` over the FK pair, so both FK columns
- * follow the name to make the order total and the pages stable.
+ * Same no-primary-key situation as `getArtistCrossReferences`, and the same
+ * caveat: it is true of the PG MIRROR, not of the upstream. The unique
+ * constraint here is `library_id_artist_id` over the FK pair, so both FK
+ * columns follow the name to make the order total and the pages stable.
+ * tubafrenzy's `RELEASE_CROSS_REFERENCE` has `PRIMARY KEY (ID)` plus
+ * `TIME_LAST_MODIFIED` / `TIME_CREATED`
+ * (`scripts/dev/fixtures/wxycmusic-fixture.sql:291-297`) and its JSP likewise
+ * lists via `findAllByModifiedDesc()`; `fetchLegacyReleaseCrossRefs` never
+ * selects them.
  */
 export const getReleaseCrossReferences = async (page: number, limit: number): Promise<ReleaseCrossReferenceRow[]> => {
   return releaseCrossReferencesQuery()

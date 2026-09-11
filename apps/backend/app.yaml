@@ -2639,14 +2639,40 @@ paths:
         `genre_id`, matching `GET /library/artists/{id}`; it is null for an
         artist with no `genre_artist_crossreference` row. Only the TARGET
         carries a call number, matching the JSP's columns. Ordered by the
-        cross-referencing artist's name, then both FK columns — the table has no
-        primary key, so the FK pair is what makes the order total and the pages
-        stable.
+        cross-referencing artist's name, then both FK columns — the Postgres
+        mirror of this table has no primary key, so the FK pair is what makes
+        the order total and the pages stable.
 
 
-        Known divergence from the JSP: it renders a "Time Last Modified" column
-        and NEITHER cross-reference table has a timestamp column. The field is
-        omitted here rather than invented.
+        **Known divergence 1 — the code is genre-collapsed.** The JSP renders
+        `ArtistLibraryCode.getFullLibraryCode()`, which is
+        `genreName + " " + callLetters + " " + callNumbers` (e.g. `Jazz BA 7`),
+        because a tubafrenzy cross-reference points at one `LIBRARY_CODE` row
+        and that row IS one `(artist, genre)` placement. `artist_crossreference`
+        stores only the two artist ids, so the placement the librarian chose is
+        not recoverable, and `target_code_genre_id` /
+        `target_code_artist_number` report the target's LOWEST-`genre_id`
+        filing instead. An artist filed in both Jazz and Rock therefore renders
+        its Jazz code here where the JSP may have rendered its Rock one.
+        `target_code_genre_id` is served precisely so a client can label which
+        filing it got rather than showing a bare, unattributed `BA 7`.
+
+
+        **Known divergence 2 — no `Time Last Modified`.** The JSP renders that
+        column and this response omits it. To be precise about why, because an
+        earlier version of this note was wrong: tubafrenzy's
+        `LIBRARY_CODE_CROSS_REFERENCE` **does** carry `TIME_LAST_MODIFIED` and
+        `TIME_CREATED` (both `bigint`) **and** a `PRIMARY KEY (ID)`, and its JSP
+        listing is `findAllByModifiedDesc()` — `ORDER BY TIME_LAST_MODIFIED
+        DESC`, i.e. newest-edit-first. It is the Postgres MIRROR that has
+        neither timestamp nor primary key, because `jobs/library-etl`'s
+        cross-reference fetch never selected those columns. So carrying the
+        field would RECOVER data rather than invent it, and the alphabetical
+        order above is a different VIEW rather than a substitute for an order
+        that never existed. Recovery is a scoped decision with a real deadline —
+        the window closes with the final tubafrenzy mysqldump — tracked as
+        WXYC/Backend-Service#2423; it is deliberately out of scope for the
+        endpoint that first exposed the gap.
       security:
         - BearerAuth: ['catalog-write']
       parameters:
@@ -2695,6 +2721,16 @@ paths:
                           type: string
                         target_code_letters:
                           type: string
+                        target_code_genre_id:
+                          type: integer
+                          nullable: true
+                          description: >
+                            Which genre filing `target_code_artist_number`
+                            belongs to — the target artist's lowest `genre_id`.
+                            Always describes the same
+                            `genre_artist_crossreference` row as the number
+                            beside it. Null together with that number when the
+                            target has no crossreference row at all.
                         target_code_artist_number:
                           type: integer
                           nullable: true
@@ -2738,8 +2774,16 @@ paths:
         silently vanish from a listing nothing else reproduces.
 
 
-        Known divergence from the JSP: no "Time Last Modified" — the table has
-        no timestamp column.
+        Known divergence from the JSP: no "Time Last Modified". Same correction
+        as the artist sibling above — tubafrenzy's `RELEASE_CROSS_REFERENCE`
+        carries `TIME_LAST_MODIFIED`, `TIME_CREATED` and `PRIMARY KEY (ID)`, and
+        its JSP likewise lists via `findAllByModifiedDesc()`; it is the Postgres
+        mirror that has none of them, because `jobs/library-etl` never selected
+        those columns. Serving the field would recover data, not invent it, and
+        the alphabetical order here is a different view rather than a substitute
+        for a missing one. Pending the recovery decision in
+        WXYC/Backend-Service#2423, which is time-bounded by the final tubafrenzy
+        mysqldump.
       security:
         - BearerAuth: ['catalog-write']
       parameters:
