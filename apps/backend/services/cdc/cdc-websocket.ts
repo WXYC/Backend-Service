@@ -48,8 +48,9 @@
  * consumers outside this repo. The frame is therefore re-emitted on the same
  * tick as the ping, alongside it and never instead of it: ping/pong stays
  * the liveness mechanism (an app frame can't detect a half-open socket),
- * while the frame exists purely so those consumers see traffic. Its shape is
- * part of the wire contract, not an implementation detail — see `docs/cdc.md`.
+ * while the frame exists purely so those consumers see traffic. It is
+ * re-emitted at its original shape, `timestamp` included — see
+ * `heartbeatFrame()` and `docs/cdc.md`.
  */
 
 import { Server as HttpServer, IncomingMessage } from 'http';
@@ -64,13 +65,21 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const CDC_PATH = '/cdc';
 
 /**
- * The app-level heartbeat frame (BS#2427), serialized once at module load
- * because it never varies. The exact shape — `type` and nothing else — is
- * the pre-BS#1412 contract that out-of-band consumers were written against,
- * so this is a restoration, not a redesign: adding a timestamp or a sequence
- * number here would be a new contract for a population we can't survey.
+ * The app-level heartbeat frame (BS#2427). The shape — `type` plus an
+ * epoch-ms `timestamp` — is the one this endpoint emitted from its first
+ * commit until BS#1412 removed the frame, so restoring it verbatim is the
+ * point: this is the only periodic frame on a channel that carries no other
+ * clock, and a consumer that derived staleness or skew from `timestamp`
+ * would read `undefined` off a narrowed frame and compute a `NaN` age
+ * rather than fail loudly. The channel is `CDC_SECRET`-gated, so that
+ * population cannot be surveyed — narrowing the shape is not ours to do.
+ * Built per tick rather than hoisted to module load because the timestamp
+ * has to be current; the sibling `connected` frame carries `serverTime` the
+ * same way.
  */
-const HEARTBEAT_FRAME = JSON.stringify({ type: 'heartbeat' });
+function heartbeatFrame(): string {
+  return JSON.stringify({ type: 'heartbeat', timestamp: Date.now() });
+}
 
 /**
  * Constant-time string comparison (BS#1136). The previous auth used
@@ -165,12 +174,19 @@ let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
  * Sends `msg` to `client` after a `bufferedAmount` check. If the buffer is
  * already over the threshold the client is terminated, a Sentry warning is
  * surfaced, and the send is skipped. Returns whether the message was sent.
+ *
+ * `step` tags which write tripped the guard. The heartbeat tick passes its
+ * own value because `client.ping()` runs first and adds its bytes to the
+ * buffer: a client sitting just under the threshold can cross it on the
+ * ping alone and terminate inside this function, which would otherwise be
+ * reported as a fan-out termination. Keeping the paths separable is the
+ * whole reason the two tags exist under one fingerprint.
  */
-function safeSend(client: WebSocket, msg: string): boolean {
+function safeSend(client: WebSocket, msg: string, step = 'backpressure'): boolean {
   if (client.bufferedAmount > BACKPRESSURE_THRESHOLD_BYTES) {
     Sentry.captureMessage('cdc_ws.buffered_amount_high — terminating slow consumer', {
       level: 'warning',
-      tags: { tool: 'cdc-ws', step: 'backpressure' },
+      tags: { tool: 'cdc-ws', step },
       extra: {
         bufferedAmount: client.bufferedAmount,
         threshold: BACKPRESSURE_THRESHOLD_BYTES,
@@ -264,6 +280,10 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
   // visibility frame only (BS#2427), never as the liveness signal.
   heartbeatTimer = setInterval(() => {
     if (!wss || wss.clients.size === 0) return;
+    // One timestamp for the whole tick: every client on it is stamped
+    // identically, so a consumer comparing frames across connections sees
+    // the tick, not the position of its socket in the iteration.
+    const frame = heartbeatFrame();
     for (const client of wss.clients) {
       if (client.readyState !== WebSocket.OPEN) continue;
 
@@ -310,7 +330,7 @@ export async function setupCdcWebSocket(server: HttpServer): Promise<void> {
       // routed through `safeSend` so it is subject to the same
       // `bufferedAmount` guard as a fan-out event rather than being the one
       // write that can grow an already-saturated buffer.
-      safeSend(client, HEARTBEAT_FRAME);
+      safeSend(client, frame, 'backpressure-heartbeat');
     }
   }, HEARTBEAT_INTERVAL_MS);
   heartbeatTimer.unref();
