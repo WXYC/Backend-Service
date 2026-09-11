@@ -107,6 +107,7 @@ import {
   reconcileDenylistedInserts,
   reportStrandedResurrections,
   chunk,
+  importCompilationTracks,
 } from '../../../jobs/library-etl/job';
 
 describe('library-etl job helpers', () => {
@@ -1110,6 +1111,95 @@ describe('compilation-track batching (BS#2424)', () => {
 
     it('rejects a non-positive chunk size rather than looping forever', () => {
       expect(() => chunk([1, 2], 0)).toThrow();
+    });
+  });
+
+  /**
+   * The statement count IS the fix. Every other assertion in this change —
+   * the `chunk` cases above, the e2e `count == 1` for the seeded duplicate,
+   * the PG-semantics spec's hand-written SQL — passes identically against
+   * the old row-at-a-time loop, so this is the only guard that fails if
+   * someone unrolls the batching back into `for (row of values) await
+   * tx.insert(...)`. A regression there restores ~140,617 round trips and
+   * ~140,617 firings of the statement-level watermark trigger, which is what
+   * starved `legacy-linkage-resolve` in BS#2413.
+   */
+  describe('importCompilationTracks', () => {
+    /** Tx double that records the multi-row payload of every INSERT issued. */
+    const makeCtaTx = (releaseRows: Array<{ id: number; legacyReleaseId: number | null }>) => {
+      const inserted: Array<Array<{ library_id: number; artist_name: string; track_title: string | null }>> = [];
+      const tx = {
+        select: () => ({ from: () => ({ where: () => Promise.resolve(releaseRows) }) }),
+        insert: () => ({
+          values: (rows: (typeof inserted)[number]) => ({
+            onConflictDoNothing: () => {
+              inserted.push(rows);
+              return Promise.resolve([]);
+            },
+          }),
+        }),
+      };
+      return { tx: tx as never, inserted };
+    };
+
+    const upstream = (count: number, libraryReleaseId = 500) =>
+      Array.from({ length: count }, (_, i) => ({
+        libraryReleaseId,
+        artistName: `Artist ${i}`,
+        trackTitle: `Track ${i}`,
+        trackPosition: `A${i}`,
+      }));
+
+    it('issues one statement per 1,000 resolvable rows, not one per row', async () => {
+      const { tx, inserted } = makeCtaTx([{ id: 77, legacyReleaseId: 500 }]);
+
+      const result = await importCompilationTracks(tx, upstream(2500));
+
+      expect(inserted).toHaveLength(3);
+      expect(inserted.map((batch) => batch.length)).toEqual([1000, 1000, 500]);
+      expect(result.batches).toBe(3);
+    });
+
+    it('preserves the historical `imported` counter: rows handed to the insert, not rows written', async () => {
+      // 2 of the 3 upstream rows resolve; the third has no `library` row. The
+      // BS#2413 correlation was read against these log counters, so
+      // `imported` must stay the non-skipped count even though the batch
+      // may write fewer rows than that once `ON CONFLICT` dedupes.
+      const { tx } = makeCtaTx([{ id: 77, legacyReleaseId: 500 }]);
+      const rows = [...upstream(2, 500), ...upstream(1, 999)];
+
+      await expect(importCompilationTracks(tx, rows)).resolves.toEqual({
+        imported: 2,
+        skipped: 1,
+        batches: 1,
+      });
+    });
+
+    it('issues no statement at all when nothing resolves', async () => {
+      const { tx, inserted } = makeCtaTx([]);
+
+      const result = await importCompilationTracks(tx, upstream(10));
+
+      expect(inserted).toEqual([]);
+      expect(result).toEqual({ imported: 0, skipped: 10, batches: 0 });
+    });
+
+    it('names the failing batch and its endpoint rows so the window stays identifiable', async () => {
+      const { tx } = makeCtaTx([{ id: 77, legacyReleaseId: 500 }]);
+      const boom = new Error('value too long for type character varying(255)');
+      (tx as unknown as { insert: () => unknown }).insert = () => ({
+        values: () => ({ onConflictDoNothing: () => Promise.reject(boom) }),
+      });
+      const logged = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+      await expect(importCompilationTracks(tx, upstream(3))).rejects.toBe(boom);
+
+      const message = logged.mock.calls[0][0] as string;
+      expect(message).toContain('batch 1/1');
+      expect(message).toContain('resolved rows 0-2 of 3');
+      expect(message).toContain('first: library_id=77 artist="Artist 0" track="Track 0"');
+      expect(message).toContain('last: library_id=77 artist="Artist 2" track="Track 2"');
+      logged.mockRestore();
     });
   });
 });
