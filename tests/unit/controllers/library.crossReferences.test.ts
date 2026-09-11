@@ -28,6 +28,9 @@ const ARTIST_CROSSREFERENCES: libraryService.ArtistCrossReferenceRow[] = [
     target_artist_id: 991,
     target_artist_name: 'Eric Bachmann',
     target_code_letters: 'BA',
+    // Rock (genre 11) — the target's lowest-genre_id filing, and the reason the
+    // row has to carry the genre at all: the JSP rendered `Rock BA 42`.
+    target_code_genre_id: 11,
     target_code_artist_number: 42,
     comment: 'Barry Black is filed w/ Eric Bachmann',
   },
@@ -37,6 +40,7 @@ const ARTIST_CROSSREFERENCES: libraryService.ArtistCrossReferenceRow[] = [
     target_artist_id: 1855,
     target_artist_name: 'Thee Speaking Canaries',
     target_code_letters: 'SP',
+    target_code_genre_id: 11,
     target_code_artist_number: 72,
     comment: null,
   },
@@ -109,6 +113,7 @@ describe('GET /library/crossreferences/artists', () => {
         'target_artist_id',
         'target_artist_name',
         'target_code_artist_number',
+        'target_code_genre_id',
         'target_code_letters',
       ].sort()
     );
@@ -152,6 +157,13 @@ describe('GET /library/crossreferences/artists', () => {
     expect(jsonMock).toHaveBeenCalledWith({ results: [], total: 240, page: 2, totalPages: 3 });
   });
 
+  // `page` has no documented ceiling beyond `minimum: 0`, so every one of
+  // these has to be turned away by the parser. The last three used to get
+  // through: `parseInt` truncated `'2.9'` to 2 and `'7abc'` to 7, silently
+  // serving a different window than was asked for, and an over-large `page`
+  // became an `OFFSET` the driver stringified in exponential notation, which
+  // Postgres answers with `bigint out of range` -- a 500 and a Sentry event
+  // for input `app.yaml` declares as a 400.
   it.each([
     ['a negative page', { page: '-1' }],
     ['a non-numeric page', { page: 'first' }],
@@ -160,6 +172,10 @@ describe('GET /library/crossreferences/artists', () => {
     ['a non-numeric limit', { limit: 'all' }],
     ['a limit over the maximum', { limit: '501' }],
     ['a repeated limit key', { limit: ['10', '20'] }],
+    ['a fractional page', { page: '2.9' }],
+    ['a limit with trailing garbage', { limit: '7abc' }],
+    ['a page far past the safe-integer range', { page: '99999999999999999999' }],
+    ['a page whose offset would leave the safe-integer range', { page: '100000000000000', limit: '500' }],
   ])('rejects %s with a 400 before reading anything', async (_label, query) => {
     const { req, res, next } = mockReqResNext({ query } as Partial<Request>);
     await expect(listArtistCrossReferences(req, res, next)).rejects.toMatchObject({ statusCode: 400 });
