@@ -6,6 +6,8 @@ Closes the root cause of WXYC/Backend-Service#2413.
 
 _Revision 2 — incorporates the plan review. Changes from r1 are marked **[r2]**._
 
+> **As-landed correction — the full-re-sync predicate.** Wherever this document writes `WHERE job_name LIKE 'library-etl%'` (§4's `[r2]` row, §6 step 5, §7's last risk row), the shipped predicate is the narrower `WHERE job_name = 'library-etl' OR job_name LIKE 'library-etl:%'`. `:` is the namespace separator and the bare `%` form would sweep up a future job named `library-etl-something`, which an operator running the recipe would not intend. That is what `jobs/library-etl/job.ts`, `shared/database/src/schema.ts`, `jobs/library-etl/README.md` and both test suites use, and `jobs/library-etl/README.md`'s "Delta bounds and watermarks" section is the canonical statement of it. The body below is left as the historical plan record; copy the recipe from the README, not from here.
+
 ## 0. Measurements taken before designing (acceptance criterion 1)
 
 **The `Compilation track artists:` line was read off real work slots.** Host journal on `wxyc-ec2`, three consecutive working runs on 2026-09-10 (all times PDT; journald stamps UTC and is converted here):
