@@ -36,3 +36,11 @@ npm run check:auth-tables-doc
 # `authorize` semantics. Without it, the role pins in
 # tests/unit/authentication/auth.roles.test.ts compare the mock to itself.
 npm run check:better-auth-mock-sync
+# `check:db-mock-sync` (BS#2448) is hard-fail for the same reason as the line
+# above, on a different hand-written double: the unit suite resolves
+# @wxyc/database to tests/mocks/database.mock.ts, so a column a migration adds
+# to schema.ts but not to the double reads as `undefined` in every assertion
+# that names it — and `toHaveBeenCalledWith({ col: undefined })` MATCHES a call
+# that omitted the key. The assertion cannot fail either way. Kept separate from
+# the `|| true` pair above, and never given one: a finding here is always a bug.
+npm run check:db-mock-sync

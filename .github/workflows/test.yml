@@ -317,6 +317,14 @@ jobs:
       - name: better-auth access mock parity (BS#2282)
         run: npm run check:better-auth-mock-sync
 
+      # Same class of problem on a different hand-written double: the unit
+      # suite resolves @wxyc/database to tests/mocks/database.mock.ts, and a
+      # column missing from a double makes every assertion naming it pass
+      # vacuously (BS#2448). Pre-push runs this too, but `--no-verify` skips
+      # that and this is what protects `main`.
+      - name: database.mock drift vs schema.ts (BS#2448)
+        run: npm run check:db-mock-sync
+
       - name: Build
         run: npm run build
 

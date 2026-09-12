@@ -147,6 +147,8 @@ Schema is in `shared/database/src/schema.ts`. Migrations are in `shared/database
 
 **Test isolation**: Each Jest worker gets its own PostgreSQL schema via the `WXYC_SCHEMA_NAME` env var (defaults to `wxyc_schema`).
 
+**Mock drift**: the unit suite resolves `@wxyc/database` to `tests/mocks/database.mock.ts`, a hand-maintained double. A column in `schema.ts` but not in its double reads as `undefined`, and `toHaveBeenCalledWith({ col: undefined })` **matches a call that omitted the key** — so the assertion passes whether or not the code writes it (BS#2409 shipped exactly that). `npm run check:db-mock-sync` (hard-fail in pre-push and CI, BS#2448) is what notices. Its doubles map each column to a **table-qualified** sentinel — `rotation.format_id === 'rotation.format_id'` — so a same-named column on another table is a different value; `tests/utils/db-mock-allowlist.ts` records the pre-existing backlog and is enforced shrink-only.
+
 **Migration workflow**:
 
 ```bash
