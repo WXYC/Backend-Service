@@ -5,7 +5,13 @@ import * as Sentry from '@sentry/node';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import WxycError from '../utils/error.js';
-import { db, type RotationBin } from '@wxyc/database';
+import {
+  db,
+  extractSqlState,
+  isLockContentionError,
+  SUB_DEADLOCK_LOCK_TIMEOUT_MS,
+  type RotationBin,
+} from '@wxyc/database';
 import {
   AlbumFormat,
   Artist,
@@ -3090,22 +3096,12 @@ export type DeleteAlbumActor = {
 /**
  * Bounds how long the delete will wait for the row locks it takes. Chosen
  * BELOW Postgres's default `deadlock_timeout` (1 s) on purpose — see the
- * lock-order discussion in `deleteAlbumFromDB`'s docstring. A librarian's
+ * lock-order discussion in `deleteAlbumFromDB`'s docstring, and
+ * `SUB_DEADLOCK_LOCK_TIMEOUT_MS` for the shared rationale. A librarian's
  * delete is a rare, retryable administrative action; a live DJ's play insert
  * is not, so when the two contend this side is the one that gives up.
  */
-export const DELETE_ALBUM_LOCK_TIMEOUT_MS = 750;
-
-/** Postgres SQLSTATEs the delete converts into `lock_unavailable` rather than a 500. */
-const LOCK_CONTENTION_SQLSTATES = new Set([
-  '55P03', // lock_not_available — our own lock_timeout fired
-  '40P01', // deadlock_detected — we were chosen as the victim
-]);
-
-const isLockContentionError = (error: unknown): boolean => {
-  const code = (error as { code?: unknown } | null)?.code;
-  return typeof code === 'string' && LOCK_CONTENTION_SQLSTATES.has(code);
-};
+export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
 
 /**
  * Hard-deletes a library release (BS#2112, D10 policy). Refuses when the
@@ -3244,7 +3240,7 @@ export const deleteAlbumFromDB = async (
         category: 'library.delete',
         level: 'warning',
         message: 'DELETE /library/:id stood down on lock contention',
-        data: { album_id, code: (error as { code?: string }).code },
+        data: { album_id, code: extractSqlState(error) },
       });
       return { outcome: 'lock_unavailable' };
     }
