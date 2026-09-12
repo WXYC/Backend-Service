@@ -42,8 +42,19 @@
  */
 
 import { jest } from '@jest/globals';
+
+// `addBreadcrumb` is what the lock-contention arm records instead of a Sentry
+// issue, and its payload carries the SQLSTATE — so it needs to be observable.
+// Mocking the module (rather than `jest.spyOn`) because @sentry/node's ESM
+// namespace exports aren't configurable; every other export stays real.
+jest.mock('@sentry/node', () => {
+  const actual = jest.requireActual('@sentry/node');
+  return { ...actual, addBreadcrumb: jest.fn() };
+});
+
 import * as fs from 'fs';
 import * as path from 'path';
+import * as Sentry from '@sentry/node';
 import { db, library } from '@wxyc/database';
 
 const servicePath = path.resolve(__dirname, '../../../apps/backend/services/library.service.ts');
@@ -136,6 +147,23 @@ const zero = [{ count: 0 }];
 
 /** A clean release: no rotation rows, no plays by any of the three paths. */
 const CLEAN = [EXISTS, NO_ROTATION, zero, zero];
+
+/**
+ * A Postgres rejection in the shape the catch block ACTUALLY sees.
+ *
+ * postgres-js puts the SQLSTATE on `error.code`, but nothing here ever sees a
+ * bare driver error: drizzle-orm wraps every query rejection in a
+ * `DrizzleQueryError` whose own `message` is the generic `Failed query: …`,
+ * whose own `code` is `undefined`, and whose `.cause` is the driver error
+ * (`drizzle-orm/errors.js`; the wrap is unconditional, in
+ * `pg-core/session.js`'s `queryWithCache`). A double that throws a bare
+ * `{ code }` passes against a classifier reading only `error.code` while
+ * production fails every stand-down — so the wrapped shape is the default and
+ * `bare` is the opt-out that pins the fallback path. Same pair of builders as
+ * `tests/unit/jobs/legacy-linkage-resolve/job.test.ts`.
+ */
+const pgError = (code: string, message: string): Error => Object.assign(new Error(message), { code });
+const drizzleWrapped = (cause: Error): Error => Object.assign(new Error('Failed query: <sql>\nparams: '), { cause });
 
 describe('deleteAlbumFromDB (BS#2112)', () => {
   describe('check-then-act race on the play-count guard (finding 2)', () => {
@@ -291,11 +319,46 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
     it.each([
       ['55P03', 'lock_not_available — our own lock_timeout fired'],
       ['40P01', 'deadlock_detected — we were chosen as the victim'],
-    ])('maps SQLSTATE %s to lock_unavailable rather than a 500', async (code) => {
-      const error = Object.assign(new Error('lock'), { code });
+    ])('maps a drizzle-wrapped SQLSTATE %s to lock_unavailable rather than a 500', async (code) => {
+      // Wrapped, because that is the only shape production throws. Pinning
+      // this against the bare form alone is how the 503 path came to be dead
+      // code with a green suite.
+      const error = drizzleWrapped(pgError(code, 'canceling statement due to lock timeout'));
       const { outcome } = await runDelete(42, CLEAN, { throwOn: { op: 'select', error } });
 
       expect(outcome).toEqual({ outcome: 'lock_unavailable' });
+    });
+
+    it.each([['55P03'], ['40P01']])(
+      'stands down on a bare driver error too — the wrapper is preferred, not required',
+      async (code) => {
+        const error = pgError(code, 'canceling statement due to lock timeout');
+        const { outcome } = await runDelete(42, CLEAN, { throwOn: { op: 'select', error } });
+
+        expect(outcome).toEqual({ outcome: 'lock_unavailable' });
+      }
+    );
+
+    it('breadcrumbs the real SQLSTATE, not the wrapper’s undefined .code', async () => {
+      // The breadcrumb is the only record a stand-down leaves (no Sentry
+      // issue), so reading the code off the wrapper rather than its cause
+      // would make it `undefined` for every stand-down it exists to explain.
+      const addBreadcrumb = Sentry.addBreadcrumb as jest.MockedFunction<typeof Sentry.addBreadcrumb>;
+      const error = drizzleWrapped(pgError('55P03', 'canceling statement due to lock timeout'));
+
+      await runDelete(42, CLEAN, { throwOn: { op: 'select', error } });
+
+      expect(addBreadcrumb).toHaveBeenCalledWith(
+        expect.objectContaining({
+          category: 'library.delete',
+          data: expect.objectContaining({ album_id: 42, code: '55P03' }),
+        })
+      );
+    });
+
+    it('does not mistake an unrelated wrapped error for lock contention', async () => {
+      const error = drizzleWrapped(pgError('23503', 'insert or update violates foreign key'));
+      await expect(runDelete(42, CLEAN, { throwOn: { op: 'select', error } })).rejects.toThrow('Failed query');
     });
 
     it('rethrows any other database error', async () => {
