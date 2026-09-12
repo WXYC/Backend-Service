@@ -1,9 +1,9 @@
 /**
- * BS#2113: `PATCH /library/rotation/:id` must be registered AFTER every
- * literal one-segment `/rotation/<name>` route on this router — a
- * parameterized route registered earlier would shadow a more specific
- * literal path (e.g. a future `PATCH /rotation/uncatalogued` from
- * WXYC/Backend-Service#2109, which lands in this same route block).
+ * BS#2113 / BS#2410: a parameterized `/<prefix>/:id` route on this router must
+ * be registered AFTER every literal one-segment `/<prefix>/<name>` route it
+ * shares a method with — a parameterized route registered earlier shadows the
+ * more specific literal path and hands the literal segment to the `:id`
+ * handler as an id.
  *
  * SCOPE OF THE HAZARD. Express does NOT match on path alone: in the router's
  * dispatch loop a Layer whose Route does not handle the request method sets
@@ -15,17 +15,26 @@
  * expensive to debug, and the classifier below is deliberately narrow so it
  * flags only genuinely shadowable paths.
  *
- * **That future arrived in WXYC/Backend-Service#2410**, which registers
- * `GET /rotation/:id` alongside the literal `GET /rotation/uncatalogued` —
- * the first genuine same-method hazard on this router, and exactly the case
- * the narrow classifier exists to flag. The header reasoning above is still
- * correct as written; what changed is that the assertions are now scoped BY
- * METHOD, because "registered earlier in the stack" only shadows within one
- * method.
+ * TWO FAMILIES, NOT ONE. `GET /rotation/:id` (WXYC/Backend-Service#2410) is a
+ * genuine same-method hazard against the literal `GET /rotation/uncatalogued`
+ * — but it is the SECOND such family on this router, not the first.
+ * `GET /artists/:id` (WXYC/Backend-Service#2156) has stood in exactly that
+ * relation to the literals `GET /artists/search`, `GET /artists/peek-code` and
+ * `GET /artists/by-code` since before the rotation routes existed, and
+ * `library.route.ts` says so at that registration. An earlier revision of this
+ * header called the rotation pair the first; it wasn't, so rather than just
+ * correct the sentence the assertions below now run over BOTH families. The
+ * `/artists/*` ordering had behavioral cover only — `library.spec.js` requests
+ * `search` and `peek-code`, `library-by-code-permissions.route.test.ts`
+ * requests `by-code` — so a reorder was caught by whichever of those happened
+ * to break, never by an assertion about registration order itself. It is now.
+ *
+ * What #2410 did change is that the assertions are scoped BY METHOD, because
+ * "registered earlier in the stack" only shadows within one method.
  *
  * Two levels of coverage:
  *   1. Structural — inspect the Express router's own `.stack` to assert the
- *      registration order directly, per method.
+ *      registration order directly, per family and per method.
  *   2. Behavioral — a request to the literal `/rotation/:rotation_id/tracks`
  *      path still reaches its own handler rather than being captured by
  *      `/rotation/:id`, and `GET /rotation/uncatalogued` still reaches the
@@ -165,13 +174,35 @@ app.use('/library', library_route);
 
 type RouteLayer = { route?: { path: string; methods: Record<string, boolean> } };
 
-const PARAM_PATH = '/rotation/:id';
+/**
+ * The same-method shadowing families on this router.
+ *
+ * `param` is the parameterized registration; `literals` are the literal
+ * one-segment siblings whose continued existence is what keeps the ordering
+ * assertion from going vacuous. The ordering assertion itself does NOT read
+ * this list — it discovers shadowable literals from the router's own `.stack`
+ * via the classifier, so a literal added to either block is covered the moment
+ * it is registered. The named list exists only for the vacuity guard, which
+ * has to know what it would be missing.
+ *
+ * `/artists/:id` (BS#2156) predates `/rotation/:id` (BS#2410) and carries
+ * three literals to the rotation block's one.
+ */
+const PARAM_FAMILIES = [
+  { param: '/rotation/:id', literals: ['/rotation/uncatalogued'] },
+  { param: '/artists/:id', literals: ['/artists/search', '/artists/peek-code', '/artists/by-code'] },
+];
+
+/** `/rotation/:id` -> `/rotation`. */
+function familyPrefix(param: string): string {
+  return param.slice(0, param.lastIndexOf('/'));
+}
 
 /**
- * Is `path` a route that `/rotation/:id` could shadow?
+ * Is `path` a route that `param` could shadow?
  *
- * Only if it is exactly ONE literal segment below `/rotation`. `:id` matches
- * a single path segment, so:
+ * Only if it is exactly ONE literal segment below the family prefix. `:id`
+ * matches a single path segment, so (taking `/rotation/:id` as the example):
  *   - `/rotation` itself is above it, not under it — unreachable.
  *   - `/rotation/:rotation_id/tracks` (and a hypothetical
  *     `/rotation/:id/notes`) is two segments deep — also unreachable, and
@@ -179,53 +210,63 @@ const PARAM_PATH = '/rotation/:id';
  *     That over-broad classification is what this predicate replaced.
  *   - a parameterized sibling (`/rotation/:other`) is not a literal, so
  *     ordering it is meaningless — the first one registered wins either way.
+ *
+ * Equivalent to `^<prefix>/[^/:][^/]*$`, spelled out rather than built as a
+ * RegExp from an interpolated prefix.
  */
-function isShadowableByRotationIdParam(path: string): boolean {
-  return /^\/rotation\/[^/:][^/]*$/.test(path);
+function isShadowableByParam(param: string, path: string): boolean {
+  const prefix = `${familyPrefix(param)}/`;
+  if (!path.startsWith(prefix)) return false;
+  const rest = path.slice(prefix.length);
+  return rest.length > 0 && !rest.startsWith(':') && !rest.includes('/');
 }
 
-function rotationLayers() {
+function familyLayers(param: string) {
+  const prefix = familyPrefix(param);
   return (library_route.stack as RouteLayer[])
     .map((layer) => layer.route)
     .filter(
-      (route): route is NonNullable<RouteLayer['route']> => route !== undefined && route.path.startsWith('/rotation')
+      (route): route is NonNullable<RouteLayer['route']> =>
+        route !== undefined && (route.path === prefix || route.path.startsWith(`${prefix}/`))
     )
     .map((route) => ({ path: route.path, methods: Object.keys(route.methods) }));
 }
 
-describe('rotation route shadowing classifier (BS#2113)', () => {
+describe.each(PARAM_FAMILIES)('$param shadowing classifier (BS#2113)', ({ param, literals }) => {
+  const prefix = familyPrefix(param);
+
   test.each([
-    ['/rotation/uncatalogued', true],
-    ['/rotation/catalog', true],
-    ['/rotation', false],
-    ['/rotation/:id', false],
-    ['/rotation/:other', false],
-    ['/rotation/:rotation_id/tracks', false],
-    ['/rotation/:id/notes', false],
-    ['/rotation/uncatalogued/notes', false],
+    ...literals.map((literal): [string, boolean] => [literal, true]),
+    [`${prefix}/catalog`, true],
+    [prefix, false],
+    [param, false],
+    [`${prefix}/:other`, false],
+    [`${prefix}/:some_id/tracks`, false],
+    [`${prefix}/:id/notes`, false],
+    [`${literals[0]}/notes`, false],
   ])('classifies %s as shadowable=%s', (path, expected) => {
-    expect(isShadowableByRotationIdParam(path)).toBe(expected);
+    expect(isShadowableByParam(param, path)).toBe(expected);
   });
 });
 
-describe('library.route rotation ordering (BS#2113, BS#2410)', () => {
+describe.each(PARAM_FAMILIES)('library.route $param ordering (BS#2113, BS#2156, BS#2410)', ({ param, literals }) => {
   // Scoped by method: a Layer whose Route does not handle the request method
   // never matches, so `/rotation/uncatalogued` (GET) is shadowable by
   // `/rotation/:id`'s GET registration and untouchable by its PATCH one.
   // Asserting across all methods at once would have flagged the pre-#2410
-  // router — where the only parameterized registration was a PATCH — as a
-  // defect it did not have.
+  // rotation block — where the only parameterized registration was a PATCH —
+  // as a defect it did not have.
   test.each([['get'], ['patch']])(
-    'every literal one-segment /rotation/<name> %s route is registered before the same-method /rotation/:id',
+    `every literal one-segment ${familyPrefix(param)}/<name> %s route is registered before the same-method ${param}`,
     (method) => {
-      const layers = rotationLayers().filter((l) => l.methods.includes(method));
-      const paramLayerIndex = layers.findIndex((l) => l.path === PARAM_PATH);
+      const layers = familyLayers(param).filter((l) => l.methods.includes(method));
+      const paramLayerIndex = layers.findIndex((l) => l.path === param);
 
       expect(paramLayerIndex).toBeGreaterThan(-1);
 
       const shadowableIndices = layers
         .map((l, i) => ({ i, path: l.path }))
-        .filter((l) => isShadowableByRotationIdParam(l.path))
+        .filter((l) => isShadowableByParam(param, l.path))
         .map((l) => l.i);
 
       for (const index of shadowableIndices) {
@@ -235,22 +276,23 @@ describe('library.route rotation ordering (BS#2113, BS#2410)', () => {
   );
 
   // The GET arm above is only load-bearing while a shadowable literal exists
-  // to order against. Before #2410 there was none and the assertion was
-  // vacuous; this pins that at least one genuinely-shadowable same-method
-  // literal is present, so a router that lost `/rotation/uncatalogued` can't
-  // quietly satisfy the ordering test by having nothing left to shadow.
+  // to order against. Before #2410 the rotation block had none and its
+  // assertion was vacuous; this pins that every named same-method literal is
+  // still present, so a router that lost `/rotation/uncatalogued` (or
+  // `/artists/by-code`) can't quietly satisfy the ordering test by having
+  // nothing left to shadow.
   test('the GET pair is a real same-method hazard, not a vacuous assertion', () => {
-    const getLayers = rotationLayers().filter((l) => l.methods.includes('get'));
+    const getLayers = familyLayers(param).filter((l) => l.methods.includes('get'));
+    const shadowable = getLayers.filter((l) => isShadowableByParam(param, l.path)).map((l) => l.path);
 
-    expect(getLayers.filter((l) => isShadowableByRotationIdParam(l.path)).map((l) => l.path)).toContain(
-      '/rotation/uncatalogued'
-    );
-    expect(getLayers.some((l) => l.path === PARAM_PATH)).toBe(true);
+    for (const literal of literals) {
+      expect(shadowable).toContain(literal);
+    }
+    expect(getLayers.some((l) => l.path === param)).toBe(true);
   });
 
-  test('registers exactly one handler per method on /rotation/:id (GET read, PATCH write)', () => {
-    const layers = rotationLayers();
-    const paramLayers = layers.filter((l) => l.path === '/rotation/:id');
+  test(`registers exactly one handler per method on ${param} (GET read, PATCH write)`, () => {
+    const paramLayers = familyLayers(param).filter((l) => l.path === param);
 
     // One Layer per `library_route.<method>()` call, so the two registrations
     // are two entries rather than one entry with two methods.
@@ -261,7 +303,9 @@ describe('library.route rotation ordering (BS#2113, BS#2410)', () => {
         .sort()
     ).toEqual(['get', 'patch']);
   });
+});
 
+describe('library.route rotation behavior (BS#2113, BS#2410)', () => {
   test('a request to the literal /rotation/:rotation_id/tracks path still reaches its own handler', async () => {
     mockRole('dj');
     mockGetRotationTracksFromRelease.mockResolvedValue([]);
