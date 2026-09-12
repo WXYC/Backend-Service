@@ -68,23 +68,35 @@ function unrecognizedShapeError(fnName: string, value: unknown): Error {
 
 /**
  * A schema table as `tests/mocks/database.mock.ts` models it: a plain object
- * whose every own key maps to a string equal to that key (`{ id: 'id',
- * album_id: 'album_id' }`), or the empty object used for tables no test reads
+ * whose every own value is a TABLE-QUALIFIED sentinel string — `<table>.<column>`,
+ * all sharing one `<table>` segment (`{ id: 'flowsheet.id', album_id:
+ * 'flowsheet.album_id' }`) — or the empty object used for tables no test reads
  * columns off. Interpolating one — `` sql`FROM ${flowsheet} f` `` — is a table
  * *reference*, not a bound value, and the mock carries no table name to
  * render, so it contributes nothing to the rendered text.
  *
  * Recognized explicitly rather than left to fall through to the throw, for the
  * same reason `null` is: it is a legitimate chunk shape, not an unhandled one.
- * The key-equals-value test keeps this from swallowing a genuine bound object
+ * The shared-qualifier test keeps this from swallowing a genuine bound object
  * (a JSONB param, say), which should still throw.
+ *
+ * This used to test key-equals-value (`{ id: 'id' }`), which is what the mock
+ * declared before the sentinels were qualified. Both halves had to move
+ * together: the bare form made `library.label_id` and `rotation.label_id` the
+ * same string, so a wrong-table substitution was invisible to any assertion
+ * that inspects a projection's *values* — see the docblock at the top of
+ * `tests/mocks/database.mock.ts`.
  */
 function isMockTableShape(value: object): boolean {
-  const entries = Object.entries(value);
-  return (
-    Object.getPrototypeOf(value) === Object.prototype &&
-    entries.every(([key, columnName]) => typeof columnName === 'string' && columnName === key)
+  if (Object.getPrototypeOf(value) !== Object.prototype) return false;
+  const values = Object.values(value);
+  if (!values.every((sentinel) => typeof sentinel === 'string' && /^[A-Za-z_][A-Za-z0-9_]*\..+$/.test(sentinel))) {
+    return false;
+  }
+  const qualifiers = new Set(
+    values.map((sentinel) => (sentinel as string).slice(0, (sentinel as string).indexOf('.')))
   );
+  return qualifiers.size <= 1;
 }
 
 /**

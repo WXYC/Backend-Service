@@ -54,7 +54,8 @@ const compiledExecuteCall = (n = 0) => {
  * one sorts on.
  *
  * The unit suite mocks `@wxyc/database`, so `flowsheet.add_time` is the plain
- * string `'add_time'` rather than a `PgColumn`; drizzle therefore binds it as
+ * table-qualified sentinel string `'flowsheet.add_time'` rather than a
+ * `PgColumn`; drizzle therefore binds it as
  * a parameter and the compiled text reads `order by $11 desc, $12 desc`. Each
  * placeholder is resolved back through the bound params to recover the column
  * name, which is what the assertions want to talk about.
@@ -177,8 +178,8 @@ describe('BS#2344: deterministic ordering wherever a cursor can be emitted', () 
       // Tiebreaker present, and sorted the same direction as the primary key
       // so it matches the compound cursor predicate's row-wise comparison.
       expect(orderByOf()).toEqual([
-        { column: 'add_time', direction: order },
-        { column: 'id', direction: order },
+        { column: 'flowsheet.add_time', direction: order },
+        { column: 'flowsheet.id', direction: order },
       ]);
     }
   );
@@ -196,15 +197,15 @@ describe('BS#2344: deterministic ordering wherever a cursor can be emitted', () 
     });
 
     expect(orderByOf()).toEqual([
-      { column: 'add_time', direction: 'desc' },
-      { column: 'id', direction: 'desc' },
+      { column: 'flowsheet.add_time', direction: 'desc' },
+      { column: 'flowsheet.id', direction: 'desc' },
     ]);
   });
 
   it.each([
-    ['artist' as const, 'artist_name'],
-    ['song' as const, 'track_title'],
-    ['dj' as const, 'dj_name'],
+    ['artist' as const, 'flowsheet.artist_name'],
+    ['song' as const, 'flowsheet.track_title'],
+    ['dj' as const, 'flowsheet.dj_name'],
   ])('leaves sort=%s without an id tiebreaker — no cursor is ever emitted for it', async (sort, column) => {
     mockDataAndCount([], 0);
 

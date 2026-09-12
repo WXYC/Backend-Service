@@ -146,10 +146,12 @@ describe('applyUpdate', () => {
 
       // Exact shape from tests/__mocks__/drizzle-orm.ts (and/eq/isNull) —
       // a mutation to e.g. eq(apple_music_url, url) must fail this, not
-      // slip past a loose substring match.
+      // slip past a loose substring match. The mock maps each column to a
+      // TABLE-QUALIFIED sentinel, so building the expectation from `target`
+      // also pins that both predicates come from THIS target's table.
       const whereCall = mockDb._chain.where.mock.calls[0]?.[0];
       expect(whereCall).toEqual({
-        and: [{ eq: [idColumn, 42] }, { isNull: 'apple_music_url' }],
+        and: [{ eq: [`${target}.${idColumn}`, 42] }, { isNull: `${target}.apple_music_url` }],
       });
     }
   );

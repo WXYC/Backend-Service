@@ -2023,7 +2023,7 @@ describe('library.service', () => {
 
       const whereArg = chain.where.mock.calls[0]?.[0] as { and?: unknown[] };
       expect(whereArg).toEqual({
-        and: [{ eq: ['id', 42] }, { isNull: 'artwork_url' }],
+        and: [{ eq: ['library.id', 42] }, { isNull: 'library.artwork_url' }],
       });
     });
   });
