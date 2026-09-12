@@ -32,7 +32,7 @@ Rows with `db_only` genre, missing genre/format mappings, empty artist names, or
 
 ## Delta bounds and watermarks
 
-Four `cronjob_runs` rows, not one. The job-wide `library-etl` row bounds the release import; the three `library-etl:*` rows bound the secondary imports; a fourth is a clock rather than a bound.
+Five `cronjob_runs` rows, not one. The job-wide `library-etl` row bounds the release import; three `library-etl:*` rows bound the secondary imports; a fourth `library-etl:*` row is a clock rather than a bound.
 
 | `cronjob_runs.job_name`          | bounds                         | how                                                                            |
 | -------------------------------- | ------------------------------ | ------------------------------------------------------------------------------ |
@@ -41,6 +41,8 @@ Four `cronjob_runs` rows, not one. The job-wide `library-etl` row bounds the rel
 | `library-etl:release-crossref`   | `RELEASE_CROSS_REFERENCE`      | same, on that table                                                            |
 | `library-etl:compilation-tracks` | `COMPILATION_TRACK_ARTIST`     | `WHERE LIBRARY_RELEASE_ID IN (…)` — see below                                  |
 | `library-etl:secondary-full`     | nothing                        | the "last full reconciliation" clock, not a delta bound                        |
+
+**The clock belongs to the phase, not to any one import.** `library-etl:secondary-full` records the last pass that _dropped_ its bounds, and it advances on every such pass that completes — it is not a success receipt for the three imports. Each import's own row is that receipt, and a failing import holds back only its own row. This matters for `COMPILATION_TRACK_ARTIST`, whose read is deliberately tolerant of an absent table: gating the clock on it would mean that in an environment without the table the clock never advances, `isSecondaryFullPassDue` is permanently true, all three bounds are `null` on every run, and the delta bounds never engage at all. What is lost when that read fails is that cycle's unbounded re-read of that one table — deferred to the next full pass, at most 24 hours later, which is the same day-bounded latency that import already accepts.
 
 **Why the secondary imports cannot reuse the job-wide watermark.** The idle path advances `library-etl` _before_ the secondary imports run, and that is the path ~98% of runs take. Bound on that row, a cross-reference an MD adds in `/wxycdb` during any half hour with no `LIBRARY_RELEASE` edit would be skipped at that run (nothing else ran) and then excluded forever (the watermark had already moved past it). Each secondary import therefore owns its watermark and advances it only on its own success — which is also what makes phase 2's failure mode benign: a cross-reference failure no longer rolls back the release import, it just leaves that import's watermark where it was so the next run retries exactly the failed part.
 

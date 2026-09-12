@@ -35,7 +35,14 @@ const JOB_NAME = 'library-etl';
 const ARTIST_CROSSREF_JOB_NAME = `${JOB_NAME}:artist-crossref`;
 const RELEASE_CROSSREF_JOB_NAME = `${JOB_NAME}:release-crossref`;
 const COMPILATION_TRACKS_JOB_NAME = `${JOB_NAME}:compilation-tracks`;
-/** Not a delta bound — the "last full reconciliation" clock. See `isSecondaryFullPassDue`. */
+/**
+ * Not a delta bound — the "last full reconciliation" clock, for the secondary
+ * phase as a whole rather than for any one import. It records the last pass
+ * that DROPPED its bounds, and it advances on every such pass that completes.
+ * It is not a success receipt for the three imports; each import's own
+ * `cronjob_runs` row is that, and only that row is held back when an import
+ * fails. See `isSecondaryFullPassDue` and the advance in `runSecondaryImports`.
+ */
 const SECONDARY_FULL_JOB_NAME = `${JOB_NAME}:secondary-full`;
 
 /**
@@ -958,9 +965,11 @@ const fetchCompilationTrackDeltaReleaseIds = async (watermarkMs: number): Promis
 type CompilationTrackFetch = {
   rows: LegacyCompilationTrackRow[];
   /**
-   * True when the upstream read failed; the caller must not advance the
-   * watermark. Deliberately not derivable from `rows.length === 0` — a
-   * successful empty delta is the common case and MUST still advance it.
+   * True when the upstream read failed; the caller must not advance THIS
+   * import's watermark (`library-etl:compilation-tracks`), and only that one
+   * — the `library-etl:secondary-full` clock is not this import's to hold.
+   * Deliberately not derivable from `rows.length === 0` — a successful empty
+   * delta is the common case and MUST still advance it.
    */
   failed: boolean;
 };
@@ -1487,12 +1496,33 @@ const runSecondaryImports = async (runStartedAt: Date) => {
 
     await updateLastRun(tx, ARTIST_CROSSREF_JOB_NAME, runStartedAt);
     await updateLastRun(tx, RELEASE_CROSSREF_JOB_NAME, runStartedAt);
-    // A failed upstream read must not advance past the delta it never saw.
+    // A failed upstream read must not advance past the delta it never saw —
+    // but only ITS OWN bound. Pinning this one row is the whole of that
+    // promise: the next run reads it back as `compilationTrackWatermark` and
+    // re-attempts exactly the delta this run missed.
     if (!legacyCTA.failed) {
       await updateLastRun(tx, COMPILATION_TRACKS_JOB_NAME, runStartedAt);
-      if (fullPass) {
-        await updateLastRun(tx, SECONDARY_FULL_JOB_NAME, runStartedAt);
-      }
+    }
+    // Deliberately NOT inside the guard above. `fetchLegacyCompilationTracks`
+    // tolerates an absent `COMPILATION_TRACK_ARTIST` on purpose, so gating
+    // the clock on it means that in such an environment the clock never
+    // advances, `isSecondaryFullPassDue` is permanently true, all three
+    // bounds are `null` on every run, and the delta bounds this job was
+    // rewritten around never engage at all — an environment-local, tolerated
+    // absence turned into a permanent global regression.
+    //
+    // Reaching this line means both cross-reference reads succeeded (they do
+    // not swallow failures; a throw aborts the pass before the transaction)
+    // and all three imports completed against whatever bounds they were
+    // given, which is what "a reconciliation cycle happened" means. What is
+    // lost when the compilation-track read fails is that cycle's UNBOUNDED
+    // re-read of that one table — the only way a `va_disambiguate` batch is
+    // ever seen, since it moves no `LIBRARY_RELEASE.TIME_LAST_MODIFIED`. It
+    // is deferred to the next full pass, at most `SECONDARY_FULL_PASS_INTERVAL_HOURS`
+    // later, which is the same day-bounded latency that import already
+    // accepts by design.
+    if (fullPass) {
+      await updateLastRun(tx, SECONDARY_FULL_JOB_NAME, runStartedAt);
     }
   });
 };
@@ -1822,6 +1852,11 @@ export {
   buildReleaseCrossRefQuery,
   buildCompilationTrackQuery,
   isSecondaryFullPassDue,
+  // Exported so a test can pin WHICH watermarks a pass advances. The bug this
+  // guards is invisible to `isSecondaryFullPassDue` on its own: the predicate
+  // was always right, it was the advance of the row it reads that was
+  // conditioned on an unrelated import's success.
+  runSecondaryImports,
 };
 
 run().catch((error) => {
