@@ -112,6 +112,7 @@ import {
   chunk,
   importCompilationTracks,
   isSecondaryFullPassDue,
+  runSecondaryImports,
 } from '../../../jobs/library-etl/job';
 
 describe('library-etl job helpers', () => {
@@ -1357,6 +1358,155 @@ describe('secondary import delta bounds (BS#2424)', () => {
 
     it('is not due right after a pass', () => {
       expect(isSecondaryFullPassDue(now, now)).toBe(false);
+    });
+  });
+
+  /**
+   * Which watermarks a secondary pass advances — the other half of the
+   * full-pass story, and the half `isSecondaryFullPassDue` cannot see. That
+   * predicate was always correct; what was wrong was that the advance of the
+   * row it reads sat inside the compilation-track import's success guard.
+   *
+   * `fetchLegacyCompilationTracks` swallows an upstream read failure on
+   * purpose — `COMPILATION_TRACK_ARTIST` may legitimately be absent — so in
+   * such an environment the clock never moved, every run was therefore "full
+   * pass due", all three delta bounds were `null` on every run, and the
+   * bounds BS#2424 shipped never engaged at all.
+   */
+  describe('runSecondaryImports watermark advance', () => {
+    const mockedDb = jest.requireMock('@wxyc/database').db as {
+      select: jest.Mock;
+      transaction: jest.Mock;
+    };
+    const runStartedAt = new Date(Date.UTC(2026, 8, 11, 12, 0, 0));
+
+    /** Tx double recording the `cronjob_runs` payload of every watermark write. */
+    const makeWatermarkTx = () => {
+      const advanced: Array<{ job_name: string; last_run: Date }> = [];
+      const tx = {
+        select: () => ({ from: () => Promise.resolve([]) }),
+        insert: () => ({
+          values: (row: { job_name: string; last_run: Date }) => {
+            advanced.push(row);
+            return { onConflictDoUpdate: () => Promise.resolve(undefined) };
+          },
+        }),
+      };
+      return { tx, advanced };
+    };
+
+    /**
+     * `getLastRunTimestamp` reads through the module-level `db`, whose shared
+     * mock chain ignores its predicate. Key the stub on the mocked `eq()`
+     * shape so each job name can be answered separately.
+     */
+    const stubWatermarks = (lastRunByJob: Record<string, Date>) => {
+      mockedDb.select.mockImplementation(() => ({
+        from: () => ({
+          where: (predicate: { eq: [unknown, string] }) => ({
+            limit: () => {
+              const lastRun = lastRunByJob[predicate.eq[1]];
+              return Promise.resolve(lastRun ? [{ lastRun }] : []);
+            },
+          }),
+        }),
+      }));
+    };
+
+    /** Fail ONLY the compilation-track read, the way an absent table does. */
+    const failCompilationTrackRead = () => {
+      mockSend.mockImplementation((query: string) =>
+        query.includes('COMPILATION_TRACK_ARTIST')
+          ? Promise.reject(new Error("ERROR 1146 (42S02): Table 'wxyc.COMPILATION_TRACK_ARTIST' doesn't exist"))
+          : Promise.resolve('')
+      );
+    };
+
+    let advanced: Array<{ job_name: string; last_run: Date }>;
+
+    beforeEach(() => {
+      const recorder = makeWatermarkTx();
+      advanced = recorder.advanced;
+      mockedDb.transaction.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
+        callback(recorder.tx)
+      );
+      stubWatermarks({});
+      jest.spyOn(console, 'log').mockImplementation(() => {});
+      jest.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+      mockSend.mockResolvedValue('');
+      mockedDb.select.mockImplementation(() => ({
+        from: () => ({ where: () => ({ limit: () => Promise.resolve([]) }) }),
+      }));
+      mockedDb.transaction.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
+        callback({
+          select: () => ({ from: () => Promise.resolve([]) }),
+          insert: () => ({
+            values: () => ({
+              onConflictDoUpdate: () => Promise.resolve(undefined),
+              returning: () => Promise.resolve([{ id: 1 }]),
+            }),
+          }),
+        })
+      );
+    });
+
+    it('advances the full-pass clock even when the compilation-track read fails', async () => {
+      failCompilationTrackRead();
+
+      await runSecondaryImports(runStartedAt);
+
+      // Only the compilation-track delta bound stays pinned, so the next run
+      // re-attempts exactly the delta it never saw. The clock is a
+      // reconciliation-cycle marker for the phase, not a receipt for that one
+      // import — holding it turns a tolerated, environment-local absence into
+      // a permanent unbounded re-read of all three sources, forever.
+      expect(advanced.map((row) => row.job_name)).toEqual([
+        'library-etl:artist-crossref',
+        'library-etl:release-crossref',
+        'library-etl:secondary-full',
+      ]);
+    });
+
+    it('advances every watermark when the compilation-track read succeeds', async () => {
+      await runSecondaryImports(runStartedAt);
+
+      expect(advanced.map((row) => row.job_name)).toEqual([
+        'library-etl:artist-crossref',
+        'library-etl:release-crossref',
+        'library-etl:compilation-tracks',
+        'library-etl:secondary-full',
+      ]);
+    });
+
+    it('leaves the clock alone on a bounded pass, and the bounds engage', async () => {
+      const recentFullPass = new Date(runStartedAt.getTime() - 60 * 60 * 1000);
+      stubWatermarks({
+        'library-etl:secondary-full': recentFullPass,
+        'library-etl:artist-crossref': recentFullPass,
+        'library-etl:release-crossref': recentFullPass,
+        'library-etl:compilation-tracks': recentFullPass,
+      });
+
+      await runSecondaryImports(runStartedAt);
+
+      expect(advanced.map((row) => row.job_name)).toEqual([
+        'library-etl:artist-crossref',
+        'library-etl:release-crossref',
+        'library-etl:compilation-tracks',
+      ]);
+      // The bounds are what the clock exists to protect: a bounded pass must
+      // issue bounded cross-reference reads, not the unbounded full-pass ones.
+      const queries = mockSend.mock.calls.map((call) => call[0] as string);
+      expect(
+        queries.some((query) => query.includes('FROM LIBRARY_CODE_CROSS_REFERENCE') && query.includes('WHERE (cr.'))
+      ).toBe(true);
+      expect(
+        queries.some((query) => query.includes('FROM RELEASE_CROSS_REFERENCE') && query.includes('WHERE (cr.'))
+      ).toBe(true);
     });
   });
 });
