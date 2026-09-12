@@ -2112,6 +2112,93 @@ export const getShowMetadata = async (show_id: number): Promise<ShowMetadata | u
 };
 
 /**
+ * The ids of the shows either side of one show in airtime order, as
+ * `GET /flowsheet/playlist?show_id=` publishes them.
+ *
+ * `null` means "there is no show that way" — the ends of the archive. It is
+ * never a sentinel id: tubafrenzy ended both of its neighbour queries in
+ * `.orElse(0)`, so the oldest show's "<< Previous Show" linked to
+ * `radioShowID=0` and threw `RadioShowDoesNotExistException` at whoever
+ * followed it. That is the one thing here that deliberately diverges from the
+ * legacy behavior this endpoint otherwise reproduces.
+ */
+export type AdjacentShowIds = {
+  previous_show_id: number | null;
+  next_show_id: number | null;
+};
+
+/**
+ * One direction of the archive walk, exported so a unit test can render its
+ * SQL without a live Postgres.
+ *
+ * **Airtime order, not id order.** tubafrenzy walked `MIN(ID) WHERE ID >` /
+ * `MAX(ID) WHERE ID <` and was right to: it hand-assigned `MAX(ID)+1` at
+ * signon, so id order WAS creation order. That stopped being true through the
+ * ETL import — measured against production on 2026-09-08, 32 of 72,893 shows
+ * have a lower id than a show that aired earlier. An id walk would therefore
+ * hand "Next Show" a show from the past at 32 boundaries.
+ *
+ * **The comparison is a row value, and that is not a stylistic choice.**
+ * `start_time` has no uniqueness constraint (`defaultNow().notNull()`), and the
+ * live tie-generator is still accruing: the tubafrenzy webhook stamps NOW() at
+ * delivery, not airtime. Production holds a five-show tie group today. A
+ * strict `>` on the bare column skips every member of a tie at once — the walk
+ * would step over all five — where `(start_time, id) > ($1, $2)` orders within
+ * the tie and lands on the next one. Same form as the flowsheet search
+ * cursor's `(add_time, id)` predicate, and for the same reason.
+ *
+ * **No `end_time` predicate, in either direction.** A NULL `end_time` is not
+ * "still on the air" — of production's 2,814 open shows, 2,813 are legacy ETL
+ * imports whose `show_end` never arrived, stretching back to 2006. Skipping
+ * open shows would hide those 2,813 from the walk to hide the one live show,
+ * and linking to the live show is what tubafrenzy did.
+ *
+ * Served end to end by `shows_start_time_id_idx` (migration 0163): the indexed
+ * key is both the range bound and the sort, and `id` is the only column
+ * selected, so each direction is an index-only scan stopping at one row.
+ */
+export const buildAdjacentShowQuery = (direction: 'previous' | 'next', start_time: Date, show_id: number) => {
+  const comparison = direction === 'previous' ? sql`<` : sql`>`;
+  const order = direction === 'previous' ? desc : asc;
+
+  return (
+    db
+      .select({ id: shows.id })
+      .from(shows)
+      // The pivot is bound as an ISO string with an explicit `::timestamptz`
+      // rather than as a bare Date: a raw `sql` template gets no help from the
+      // column-aware timestamptz encoder, and the postgres-js driver's
+      // serializer override mangles a JS Date interpolated directly (the same
+      // trap `getShowsInTimeWindow`'s third arm documents).
+      .where(
+        sql`(${shows.start_time}, ${shows.id}) ${comparison} (${start_time.toISOString()}::timestamptz, ${show_id})`
+      )
+      .orderBy(order(shows.start_time), order(shows.id))
+      .limit(1)
+  );
+};
+
+/**
+ * Both neighbours of one show, for the archive walk behind
+ * `GET /flowsheet/playlist?show_id=`. See {@link buildAdjacentShowQuery} for
+ * why the order is `(start_time, id)` and why nothing filters on `end_time`.
+ *
+ * Two statements, run concurrently — a single statement would need a UNION of
+ * the same two index scans, and each direction has its own sort order.
+ */
+export const getAdjacentShowIds = async (show_id: number, start_time: Date): Promise<AdjacentShowIds> => {
+  const [previous, next] = await Promise.all([
+    buildAdjacentShowQuery('previous', start_time, show_id),
+    buildAdjacentShowQuery('next', start_time, show_id),
+  ]);
+
+  return {
+    previous_show_id: previous[0]?.id ?? null,
+    next_show_id: next[0]?.id ?? null,
+  };
+};
+
+/**
  * Transform a V1 flowsheet entry to V2 discriminated union format.
  * Removes irrelevant fields based on entry_type for cleaner API responses.
  */
