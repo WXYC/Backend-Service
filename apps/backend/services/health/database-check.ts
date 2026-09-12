@@ -14,11 +14,9 @@
  *     `CONNECTION_DESTROYED`, `CONNECTION_ENDED`) for anything that failed
  *     before, or without, a Postgres wire response.
  *
- * Classification checks both `error.cause.code` and `error.code` — the same
- * dual-path idiom as `extractSqlState` in
- * `jobs/flowsheet-metadata-backfill/orchestrate.ts` and
- * `apps/backend/routes/internal-bans.route.ts` — so a test that throws a
- * bare `{code}` error and a prod run that throws the real
+ * Classification reads the code through `extractSqlState` (`@wxyc/database`),
+ * which checks both `error.cause.code` and `error.code`, so a test that throws
+ * a bare `{code}` error and a prod run that throws the real
  * `DrizzleQueryError` wrapper both classify identically. The reported
  * `cause` string prefers `error.cause.message` for the same reason: the
  * wrapper's own message is just `"Failed query: ..."`, not the useful part.
@@ -35,7 +33,7 @@
  * timeout" grouping for `NETWORK_ERROR`.
  */
 import { sql } from 'drizzle-orm';
-import { db } from '@wxyc/database';
+import { db, extractSqlState } from '@wxyc/database';
 
 export type DbCheckStatus = 'auth-error' | 'rate-limited' | 'upstream-error' | 'network-error' | 'error';
 
@@ -76,19 +74,6 @@ const NETWORK_ERROR_DRIVER_CODES = new Set([
 ]);
 
 /**
- * Extract the SQLSTATE / driver error code, preferring the wrapped
- * `DrizzleQueryError.cause` shape and falling back to a bare `error.code` —
- * see the module doc comment.
- */
-const extractErrorCode = (error: unknown): string | undefined => {
-  if (typeof error !== 'object' || error === null) return undefined;
-  const cause = (error as { cause?: unknown }).cause;
-  const causeCode = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
-  const code = causeCode ?? (error as { code?: unknown }).code;
-  return typeof code === 'string' ? code : undefined;
-};
-
-/**
  * Extract a human-readable message, preferring the wrapped
  * `DrizzleQueryError.cause`'s message (the underlying driver/server error)
  * over the wrapper's own generic `"Failed query: ..."` message.
@@ -107,7 +92,7 @@ const extractErrorMessage = (error: unknown): string => {
 
 /** Classify a `db.execute` failure into the shared cross-service health-check vocabulary. */
 export const classifyDatabaseError = (error: unknown): DbCheckResult => {
-  const code = extractErrorCode(error);
+  const code = extractSqlState(error);
   const cause = extractErrorMessage(error);
 
   if (code) {

@@ -33,7 +33,7 @@
  *     the /register handler persists both, so bootstrap rows do too.
  */
 
-import { oauthApplication } from '@wxyc/database';
+import { extractSqlState, oauthApplication } from '@wxyc/database';
 import type { DBAdapter } from 'better-auth';
 import type { Client } from 'better-auth/plugins';
 
@@ -76,18 +76,10 @@ const buildMutableFields = (client: Client, now: Date): MutableFields => ({
 
 // Postgres SQLSTATE for `unique_violation`. `postgres` (the driver under
 // Drizzle) reports it as `.code`, but Drizzle wraps driver errors in a
-// `DrizzleQueryError` and puts the real error on `.cause`. Check both
-// locations — same pattern as `extractSqlState` in
-// `jobs/flowsheet-metadata-backfill/orchestrate.ts:194-200` and
-// `apps/backend/routes/internal-bans.route.ts:162-163`, so tests that throw a
-// bare error and prod runs that throw the wrapped form both classify.
-const isUniqueViolation = (error: unknown): boolean => {
-  if (typeof error !== 'object' || error === null) return false;
-  const cause = (error as { cause?: unknown }).cause;
-  const causeCode = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
-  const code = causeCode ?? (error as { code?: unknown }).code;
-  return code === '23505';
-};
+// `DrizzleQueryError` and puts the real error on `.cause` — `extractSqlState`
+// checks both, so tests that throw a bare error and prod runs that throw the
+// wrapped form both classify.
+const isUniqueViolation = (error: unknown): boolean => extractSqlState(error) === '23505';
 
 async function upsertOne(adapter: DBAdapter<Record<string, unknown>>, client: Client): Promise<'created' | 'updated'> {
   const existing = await adapter.findOne<OauthApplicationRow>({

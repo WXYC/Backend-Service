@@ -128,10 +128,22 @@ describe('POST /internal/banned-fingerprints (create)', () => {
     expect(res.body.error).toMatch(/1000/);
   });
 
-  it('returns 400 with a clear message when bannedByUserId triggers a foreign-key violation', async () => {
-    // PG raises SQLSTATE 23503 when bannedByUserId doesn't reference an
-    // existing auth_user.id. Handler surfaces as 400, not generic 500.
-    const fkError = Object.assign(new Error('insert violates foreign key constraint'), { code: '23503' });
+  // PG raises SQLSTATE 23503 when bannedByUserId doesn't reference an existing
+  // auth_user.id. The handler surfaces that as 400, not a generic 500 — but
+  // only if it reads the code where drizzle actually puts it. drizzle-orm
+  // wraps every query rejection in a `DrizzleQueryError` whose own `code` is
+  // undefined and whose `.cause` is the postgres-js error, so the WRAPPED case
+  // is the one production throws; the bare case covers a driver error that
+  // reaches the handler unwrapped, and every hand-built double that models one.
+  it.each([
+    [
+      'drizzle-wrapped (the shape production throws)',
+      Object.assign(new Error('Failed query: insert into ...'), {
+        cause: Object.assign(new Error('insert violates foreign key constraint'), { code: '23503' }),
+      }),
+    ],
+    ['bare driver error', Object.assign(new Error('insert violates foreign key constraint'), { code: '23503' })],
+  ])('returns 400 when bannedByUserId triggers a foreign-key violation — %s', async (_label, fkError) => {
     mockReturning.mockRejectedValueOnce(fkError);
 
     const res = await request(app)

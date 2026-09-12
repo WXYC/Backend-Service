@@ -108,6 +108,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import {
   db,
   checkLiveActivity as defaultCheckLiveActivity,
+  extractSqlState,
   intArrayLiteral,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
   LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
@@ -399,23 +400,6 @@ export type EnrichFn = (row: EnrichRow, response: LookupResponse) => Promise<Enr
  * resolves — the helper swallows its own errors (best-effort).
  */
 export type StampDeadLetterFn = (rowId: number) => Promise<void>;
-
-/**
- * Extract a postgres-js SQLSTATE from a caught enrich error, robust to the
- * drizzle wrapper shape. drizzle re-throws the driver error; postgres-js
- * exposes the 5-char SQLSTATE as `.code`, typically surfaced on the wrapper's
- * `.cause`. Prefer `cause.code`, fall back to a top-level `.code`. Returns
- * undefined when no *string* code can be read — the caller treats that as
- * transient (retryable), failing safe toward retry rather than silent
- * give-up.
- */
-const extractSqlState = (error: unknown): string | undefined => {
-  if (typeof error !== 'object' || error === null) return undefined;
-  const cause = (error as { cause?: unknown }).cause;
-  const causeCode = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
-  const code = causeCode ?? (error as { code?: unknown }).code;
-  return typeof code === 'string' ? code : undefined;
-};
 
 /**
  * Classify an enrich failure as *permanent* (re-running the same row will

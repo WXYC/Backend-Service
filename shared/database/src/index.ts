@@ -20,3 +20,4 @@ export * from './freetext-enumerate.js';
 export * from './int-array-literal.js';
 export * from './dj-name.js';
 export * from './last-logged-show-entry.js';
+export * from './sqlstate.js';

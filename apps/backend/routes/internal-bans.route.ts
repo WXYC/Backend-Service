@@ -15,7 +15,7 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { eq, desc, sql } from 'drizzle-orm';
-import { db, banned_fingerprints } from '@wxyc/database';
+import { db, banned_fingerprints, extractSqlState } from '@wxyc/database';
 
 const ROM_INTERNAL_KEY = process.env.ROM_INTERNAL_KEY ?? '';
 
@@ -156,12 +156,10 @@ internalBansRoute.post('/', async (req, res) => {
     // Surface as 400 so the caller can correct the input instead of being
     // told the server is broken. Drizzle wraps the underlying postgres-js
     // error in DrizzleQueryError with the real error on `.cause` (see
-    // drizzle-orm/errors.ts) — check both `.code` and `.cause.code` so
-    // tests that throw a bare error and prod runs that throw the wrapped
-    // form both classify correctly.
-    const directCode = (error as { code?: string })?.code;
-    const causeCode = (error as { cause?: { code?: string } })?.cause?.code;
-    if (directCode === '23503' || causeCode === '23503') {
+    // drizzle-orm/errors.ts) — `extractSqlState` checks both `.cause.code`
+    // and `.code` so tests that throw a bare error and prod runs that throw
+    // the wrapped form both classify correctly.
+    if (extractSqlState(error) === '23503') {
       return res.status(400).json({ error: 'bannedByUserId does not reference an existing user' });
     }
     console.error('[INTERNAL BANS] POST error:', error);
