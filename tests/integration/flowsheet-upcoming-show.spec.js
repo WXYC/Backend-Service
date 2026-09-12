@@ -173,6 +173,17 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
 
   beforeAll(async () => {
     sql = makeSql();
+
+    // BS#2194 option 3, taken alongside the growth comparison below (never
+    // instead of it). Autovacuum and autoanalyze on `concerts` bump the same
+    // database-wide scan counter the batching proof reads, and this spec's own
+    // seed/cleanup churn on the table is exactly what arms them. Off for the
+    // duration of this file, RESET in afterAll. Strictly reduces the noise; it
+    // does NOT make the measurement sound — pooled application connections and
+    // concurrent work still land in the counter, which is why the assertion is
+    // a growth comparison rather than a bound on a magnitude.
+    await sql.unsafe(`ALTER TABLE "${SCHEMA}".concerts SET (autovacuum_enabled = false)`);
+
     await cleanup();
 
     const [venue] = await sql.unsafe(
@@ -296,17 +307,23 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
 
   afterAll(async () => {
     await cleanup();
+    // Restore the table default (a no-op if the beforeAll SET never ran).
+    await sql.unsafe(`ALTER TABLE "${SCHEMA}".concerts RESET (autovacuum_enabled)`);
     await sql.end();
   });
 
-  /** Fetch this spec's seeded track rows via the V2 range read. */
-  const fetchSeededTracks = async () => {
-    const startId = Math.min(...insertedTrackIds);
-    const endId = Math.max(...insertedTrackIds);
+  /** One V2 range read over [startId, endId] — the raw page, unfiltered. */
+  const fetchPage = async (startId, endId) => {
     const res = await request.get('/flowsheet').query({ start_id: startId, end_id: endId });
     expect(res.status).toBe(200);
+    return res.body;
+  };
+
+  /** Fetch this spec's seeded track rows via the V2 range read. */
+  const fetchSeededTracks = async () => {
+    const body = await fetchPage(Math.min(...insertedTrackIds), Math.max(...insertedTrackIds));
     const bySeed = new Set(insertedTrackIds);
-    return res.body.filter((e) => bySeed.has(e.id));
+    return body.filter((e) => bySeed.has(e.id));
   };
 
   it('attaches the soonest curated upcoming concert to a matching track', async () => {
@@ -420,19 +437,46 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
   });
 
   /**
-   * Batching proof (no per-row query): count how many times the `concerts`
-   * table is scanned per feed read via `pg_stat_user_tables`, and show the
-   * per-request delta does NOT grow with the number of matching rows on the
-   * page. A per-row implementation scans `concerts` once per matching row (so
-   * the delta tracks the match count); the batched implementation issues a
-   * single lookup for the whole page, so the delta is a small constant.
+   * Batching proof (no per-row query). The contract — the one the ticket and
+   * project #32's perf posture require — is that the `concerts` cost of a feed
+   * read does NOT grow with the number of matching rows on the page: a per-row
+   * implementation scans `concerts` once per matching row, the batched one
+   * (BS#1616 `getUpcomingShowsMaps`) issues a fixed two queries for the whole
+   * page. We prove it by counting scans of the `concerts` table in
+   * `pg_stat_user_tables` across two brackets whose ONLY difference is
+   * EXTRA_MATCHES additional matching rows, and asserting the growth between
+   * them stays far below one scan per added row.
    *
-   * `pg_stat_user_tables` is updated asynchronously by each backend and the
-   * server serves the feed on its own connection pool, so a naive before/after
-   * around one request races the flush. `drainedScans` clears the caller's stats
-   * snapshot and polls until the cumulative counter has held STILL for a
-   * sustained run of reads (not just two — see below), giving a fully drained
-   * reading; the assertions then bound the drained cold and warm deltas.
+   * WHY A GROWTH COMPARISON AND NOT AN ABSOLUTE CEILING (BS#2194). The
+   * `pg_stat_user_tables` counter is per-table and DATABASE-WIDE. It is scoped
+   * to neither the connection, the request, nor the test, so autovacuum, the
+   * app's own pooled connections and any concurrent work all land in whichever
+   * bracket happens to be open — no amount of care about WHEN the counter is
+   * read can recover WHOSE work it counted. The earlier form of this test put an
+   * absolute ceiling on a single bracket and went red three times on ambient
+   * scans it had no way to attribute: deltas of 6 (#1661), 10 (CI) and 36
+   * (local) against a ceiling of 7, and on two of those three the anti-N+1
+   * property the test exists to defend was provably intact. Raising the ceiling
+   * was #1661's fix and does not survive a 36 — past `1 + match count` the
+   * bound stops proving anything at all, so there is no number that both
+   * tolerates the observed noise and keeps the contract. A growth comparison
+   * survives the leak instead of trying to bound it: ambient scans land in both
+   * brackets and cancel in the difference. What that gives up is stated on the
+   * ticket and accepted: it says nothing about the cost of ONE read, so a
+   * batched lookup that became 3x more expensive at a constant match count
+   * still passes. And the cancellation is statistical — under heavy concurrent
+   * writes to `concerts` the residual can exceed the signal (measured here:
+   * ~2,400 ambient scans per bracket cancelled down to 156; a no-sleep hammer
+   * loop left 416 against a 96-scan signal). It stays GREEN in both cases,
+   * which is the property this ticket is after; what degrades under load is
+   * detection, not the flake. If a regression ever does slip through, option 1
+   * on the ticket — `pg_stat_statements` keyed by queryid — is the
+   * per-statement counter that needs none of this.
+   *
+   * Attribution is only half of it. The counter is also published LATE, on a
+   * schedule this test does not control, and the second half of the fix is the
+   * flush barrier described below — without which a bracket measures somebody
+   * else's work no matter how the assertion is phrased.
    */
 
   /** Raw cumulative concerts-scan counter (single read, snapshot cleared first). */
@@ -447,14 +491,25 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
     return Number(row ? row.scans : 0);
   };
 
-  // `pg_stat_user_tables` is flushed asynchronously per backend (no more often
-  // than ~1s, PGSTAT_MIN_INTERVAL), and one maps build bumps the concerts
-  // counter by SEVERAL (seq/idx probe + heap access, BS#1661). Two helpers read
-  // the cumulative counter drained to a SUSTAINED quiescent value — a longer run
-  // of consecutive equal reads (STABLE × GAP_MS > the 1s flush floor) waits the
-  // whole flush out, so no trailing increment leaks into a later bracket.
+  // `pg_stat_user_tables` is flushed asynchronously PER BACKEND, and a pooled
+  // application connection flushes on its own schedule: at the end of a
+  // transaction once PGSTAT_MIN_INTERVAL (1s) has passed since its last flush,
+  // and otherwise only after Postgres's ~10s idle-stats timeout. That second
+  // number is the one that matters and it is an order of magnitude longer than
+  // this file used to assume. Measured on this harness (BS#2194): a burst of
+  // feed reads on an idle pooled connection was STILL invisible to another
+  // session 8s later and only surfaced at ~14s — until then the counter sits on
+  // a perfectly flat plateau that any "has it stopped moving?" poll reads as
+  // drained. That is why a bracket can measure a fraction of its own work and
+  // the remainder shows up in a later one, and it is not fixable by polling
+  // longer at a tolerable cost. See `flushBarrier` below, which makes the flush
+  // happen on demand instead of waiting for it.
+  //
+  // Two helpers read the cumulative counter drained to a sustained quiescent
+  // value — a run of consecutive equal reads — which is still needed to absorb
+  // the sub-second jitter after a barrier has published the pending stats.
   const STABLE = 6; // consecutive equal reads ⇒ the flush has fully settled
-  const GAP_MS = 200; // STABLE × GAP_MS = 1.2s > the ~1s stats-flush floor
+  const GAP_MS = 200; // STABLE × GAP_MS = 1.2s of stillness after a barrier
   const MAX_POLLS = 80;
 
   /** Drained counter with no advancement requirement (a quiescent baseline). */
@@ -475,15 +530,17 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
   };
 
   /**
-   * Drained counter AFTER it has advanced past `baseline`. A read's scan flushes
-   * ~1s late, so a plain quiesce right after the read can latch onto the
-   * PRE-flush plateau (counter still at `baseline`) and declare "drained" before
-   * the read's increments ever appear — they then surface in a later bracket. So
-   * we only begin counting stability once the counter has moved past `baseline`,
-   * guaranteeing this read's whole (multi-increment, atomic-per-commit) flush is
-   * captured here and nothing bleeds forward. If it never advances (a regression
-   * that stopped querying concerts), it exhausts the budget and returns
-   * `baseline`, so the caller's `>= 1` liveness assertion fails honestly.
+   * Drained counter AFTER it has advanced past `baseline`. A plain quiesce can
+   * latch onto a PRE-flush plateau (counter still at `baseline`) and declare
+   * "drained" before the bracket's increments ever appear — they then surface in
+   * a later bracket. Requiring an advance first rules that out. Note this is a
+   * guard, not the mechanism: it is `flushBarrier` that makes the advance happen
+   * promptly, and without one this helper happily returns `baseline + 1` while
+   * the other 31 scans sit unpublished (that is measured, not hypothetical —
+   * see the flush model above). If the counter never advances at all (a
+   * regression that stopped querying `concerts`), it exhausts the budget and
+   * returns `baseline`, so the caller's `>= 1` liveness assertion fails
+   * honestly.
    */
   const drainedScansAbove = async (baseline) => {
     let last = -1;
@@ -501,83 +558,213 @@ describe('V2 flowsheet upcoming_show enrichment (BS#1607)', () => {
     return last;
   };
 
-  // The batched lookup scans `concerts` a small, bounded number of times per
-  // feed read regardless of how many matching rows the page carries. A per-row
-  // implementation would scan once per matching row, so with MANY_MATCHES rows
-  // the delta would be >= 1 + MANY_MATCHES. We assert the delta stays well under
-  // that count — the clean separation between "one batched query" (a handful of
-  // scans) and "one query per row" (>= 1 + MANY_MATCHES). An absolute bound is
-  // used rather than a small-vs-large diff because a single query's scan count
-  // already varies run to run (BS#1661: seq_scan-vs-idx_scan + index probe +
-  // heap access observed at 4-6). The ceiling carries one unit of headroom above
-  // that observed max, and MANY_MATCHES is set high enough that the per-row
-  // threshold (13) stays far above the ceiling — so the anti-N+1 contract still
-  // reads cleanly without the ceiling flaking on planner variance.
-  const MANY_MATCHES = 12;
-  const BATCHED_SCAN_CEILING = 7;
+  // FLUSH BARRIER — how a bracket boundary is made to mean something.
+  //
+  // Per the flush model above, the work a bracket did is invisible until the
+  // pooled backend that did it flushes, which on an idle connection is ~10s
+  // away. Rather than pay that at all four boundaries, force it: wait out the
+  // 1s PGSTAT_MIN_INTERVAL floor, then fire a CONCURRENT burst of cheap
+  // DB-backed requests wider than the app's connection pool (postgres-js
+  // defaults to max 10; the feed reads above occupy only two or three of them).
+  // Every pooled backend then ends a transaction more than a second after its
+  // last flush and publishes everything it had been holding.
+  //
+  // The burst hits `/flowsheet/djs-on-air` specifically because it reads the DB
+  // (so it ends a transaction and flushes) while touching NOTHING this test
+  // measures — no `concerts` query anywhere in `getOnAirDJs`. A barrier that
+  // read the feed instead would work too, but it would add its own `concerts`
+  // scans to the bracket AND leave them pending for the next one, and that
+  // deferred batch does not always land in the same bracket: measured against
+  // the per-row implementation, one run lost exactly one barrier's worth (96
+  // scans) out of a 256-scan signal. Keeping the barrier off the measured table
+  // removes the quantum instead of hoping it cancels.
+  const FLUSH_FANOUT = 12;
+  const FLUSH_SETTLE_MS = 1200;
 
-  it('cold read batches the lookup (bounded scans, no per-row query); warm reads are served from cache (no per-read rebuild)', async () => {
-    // Add many more matching tracks, all resolving to ARTIST_WITH_SHOW, so the
-    // page has 1 + MANY_MATCHES matches. A per-row lookup would scan concerts
-    // once per matching row.
+  /** Publish every pooled backend's pending table stats. Touches no `concerts` row. */
+  const flushBarrier = async () => {
+    await new Promise((r) => setTimeout(r, FLUSH_SETTLE_MS));
+    await Promise.all(
+      Array.from({ length: FLUSH_FANOUT }, async () => {
+        const res = await request.get('/flowsheet/djs-on-air');
+        expect(res.status).toBe(200);
+      })
+    );
+  };
+
+  // BRACKET GEOMETRY. The FEW bracket reads the beforeAll page; the MANY
+  // bracket reads that SAME page plus EXTRA_MATCHES more track rows, every one
+  // of them resolving to ARTIST_WITH_SHOW. The two brackets therefore differ by
+  // exactly EXTRA_MATCHES matching rows and by nothing else, which is what lets
+  // their difference be read as "cost per added matching row".
+  //
+  // Each bracket does COLD_READS cold reads rather than one, and that is the
+  // whole trick for noise robustness: the per-row SIGNAL scales with the read
+  // count (COLD_READS x EXTRA_MATCHES scans) while ambient NOISE does not. Noise
+  // is a function of wall-clock time, and a bracket's wall clock is dominated by
+  // its flush barrier and drain (~2.5s), not by the ~20ms feed reads inside it —
+  // so eight reads buy 8x the separation for a few hundred milliseconds. The
+  // extra rows are free on the batched side too: `getUpcomingShowsMaps` scans
+  // the upcoming-concerts set, whose size is independent of the page. BOTH
+  // numbers are therefore cheap to raise and should be raised, not lowered, if
+  // this ever proves marginal again — the whole point of the geometry is that
+  // buying separation costs milliseconds.
+  const EXTRA_MATCHES = 32;
+  const COLD_READS = 8;
+
+  // THE THRESHOLD, from both sides. A per-row implementation scans `concerts`
+  // at least once per matching row per read, so between the two brackets it
+  // grows by at least COLD_READS x EXTRA_MATCHES = 256. The batched
+  // implementation grows by ~0 (its two page-independent queries cost the same
+  // either way). We fail at HALF the per-row growth, 128:
+  //   - detection: a genuine per-row regression overshoots the bound 2x, and so
+  //     does any half-way regression — one query per two rows would land
+  //     exactly ON it, so anything at or above "half an N+1" is caught;
+  //   - noise: it tolerates 127 scans of ASYMMETRIC ambient leakage, i.e. one
+  //     bracket absorbing all of it and the other none. The largest leak ever
+  //     seen on this counter in a real run is the ~30 behind BS#2194's 36
+  //     (against a true value of ~6). Under a deliberate hammer-loop writer on
+  //     `concerts` — ~2,350 ambient scans PER BRACKET, two orders of magnitude
+  //     past anything the `--runInBand` suite produces — the two brackets still
+  //     cancelled to a growth of 0. So the tolerance sits above the whole
+  //     observed distribution rather than inside it, which is precisely what
+  //     every absolute ceiling tried here has failed to do.
+  // Neither half of that is a magnitude claim about one read, which is the
+  // point: nothing below depends on how many scans a single lookup costs.
+  //
+  // MEASURED on the docker ci profile while writing this (BS#2194), with the
+  // flush barrier in place. Batched: fewScans=16, manyScans=16, growth=0 — the
+  // two page-independent queries, eight times each — across ten runs (one -1).
+  // Against a deliberately reverted per-row lookup (one `concerts` query per
+  // feed row, restored immediately after): fewScans=64 (8 rows x 8 reads),
+  // manyScans=320 (40 rows x 8 reads), growth=256, identical on three runs.
+  // The bound therefore sits exactly halfway between two readings that are each
+  // reproducible to the scan — the separation the old absolute ceiling never
+  // had, because it was comparing against noise instead of against the other
+  // arm of the same experiment.
+  //
+  // Anyone re-tuning these numbers should redo that revert rather than reason
+  // about it. The FIRST version of this assertion looked sound, passed on the
+  // batched implementation — and then passed AGAIN under a real per-row one,
+  // reading growth = -49, because the brackets were not measuring what they
+  // appeared to. Only the revert caught that.
+  const PER_ROW_GROWTH = COLD_READS * EXTRA_MATCHES;
+  const GROWTH_CEILING = PER_ROW_GROWTH / 2;
+
+  // Warm-cache bracket (BS#1616): reads with NO cache reset must cost ~nothing,
+  // where a cache that rebuilt per read would cost one build each. Amplified
+  // and derived for the same reason as above — a hard-coded constant here would
+  // be the same indefensible absolute bound BS#2194 removed from the cold side,
+  // read off the same database-wide counter. WARM_READS is large because a warm
+  // read is just an HTTP GET (~20ms, no cache reset, no rebuild), so the
+  // separation is nearly free, and it is set well above what the 3x detection
+  // margin alone needs: WARM_READS and the ceiling move together, so raising it
+  // buys absolute noise tolerance without weakening detection. Measured with the
+  // barrier in place, warmScans is 0 on a clean run and 2,028 under the hammer
+  // loop — against a ceiling that the loop's own inflated per-read cost had by
+  // then widened to 8,835, which is the `Math.max` below doing its job.
+  const WARM_READS = 90;
+  const WARM_REBUILD_FRACTION = 1 / 3;
+
+  it('the concerts cost of a feed read does not grow with the match count (batched, no per-row query); warm reads are served from cache', async () => {
+    const pageStart = Math.min(...insertedTrackIds);
+    const fewEnd = Math.max(...insertedTrackIds);
+
+    // The MANY page is the FEW page plus EXTRA_MATCHES rows that all resolve to
+    // ARTIST_WITH_SHOW. Seeded here rather than in beforeAll so every other case
+    // in this file keeps reading the small fixture page.
     const extraIds = [];
-    for (let i = 0; i < MANY_MATCHES; i++) {
+    for (let i = 0; i < EXTRA_MATCHES; i++) {
       // eslint-disable-next-line no-await-in-loop
       const id = await seedTrack({ albumId: ALBUM_WITH_SHOW, artistName: 'Built to Spill', playOrder: 100 + i });
       extraIds.push(id);
     }
     insertedTrackIds.push(...extraIds);
+    const manyEnd = Math.max(...extraIds);
 
-    // Force a genuine COLD read: clear the server's per-process map cache so this
-    // read rebuilds and actually scans `concerts`. Without the reset, a mid-suite
-    // read is warm (BS#1616 memoizes the maps across reads) and scans nothing —
-    // which would make the anti-N+1 assertion below vacuous.
-    await resetUpcomingShowsCache();
+    /**
+     * COLD_READS genuinely cold reads of one page. The server memoizes the maps
+     * per ET day (BS#1616), so without the reset before each read only the first
+     * would scan `concerts` and every bracket would measure one build — which
+     * would make the comparison below vacuous rather than merely weak.
+     */
+    const coldReadsOf = async (endId) => {
+      for (let i = 0; i < COLD_READS; i++) {
+        await resetUpcomingShowsCache(); // eslint-disable-line no-await-in-loop
+        await fetchPage(pageStart, endId); // eslint-disable-line no-await-in-loop
+      }
+    };
 
-    // COLD read. `beforeCold` is a quiesced baseline; `afterCold` waits for the
-    // counter to ADVANCE past it and then settle, so this rebuild's whole flush
-    // (which surfaces ~1s late) is captured here and none of its increments
-    // bleed into the warm bracket below.
-    const beforeCold = await quiescedScans();
-    await fetchSeededTracks();
-    const afterCold = await drainedScansAbove(beforeCold);
-    const coldDelta = afterCold - beforeCold;
+    // Bracket 1 — FEW matching rows. Every boundary is "barrier, then drained
+    // read", so each bracket is bounded by a published counter rather than by a
+    // hopeful one. FEW runs FIRST deliberately: the ambient contributor this
+    // file can generate itself is vacuum/analyze armed by the beforeAll writes,
+    // which is front-loaded, and a stray burst landing in the SMALL bracket
+    // inflates `fewScans` — shrinking the growth, i.e. biasing toward a false
+    // PASS rather than toward the false FAIL this ticket exists to stop.
+    await flushBarrier();
+    const base = await quiescedScans();
+    await coldReadsOf(fewEnd);
+    await flushBarrier();
+    const afterFew = await drainedScansAbove(base);
+    const fewScans = afterFew - base;
 
-    // Liveness lower bound: the cold read must scan `concerts` at LEAST once,
-    // else the enrichment is a no-op and the whole batching contract is vacuous
-    // (a delta of 0 would silently pass a regression that stopped querying
-    // concerts entirely).
-    expect(coldDelta).toBeGreaterThanOrEqual(1);
-    // Upper bounds (anti-N+1): never one-scan-per-row — a per-row impl would
-    // push this to >= 1 + MANY_MATCHES (13). The `< 1 + MANY_MATCHES` assertion
-    // is the load-bearing anti-N+1 guarantee; BATCHED_SCAN_CEILING is the
-    // tighter "still just a handful of scans" bound, with headroom for planner
-    // variance (BS#1661).
-    expect(coldDelta).toBeLessThanOrEqual(BATCHED_SCAN_CEILING);
-    expect(coldDelta).toBeLessThan(1 + MANY_MATCHES);
+    // Bracket 2 — the same page plus EXTRA_MATCHES more matching rows. Its
+    // baseline is bracket 1's drained value, which is quiesced by construction.
+    await coldReadsOf(manyEnd);
+    await flushBarrier();
+    const afterMany = await drainedScansAbove(afterFew);
+    const manyScans = afterMany - afterFew;
 
-    // Cache proof (BS#1616): the cold read above warmed the per-day map cache.
-    // Further reads of the same page/today — with NO reset between — are served
-    // entirely from that cache and issue ZERO `concerts` queries (confirmed by
-    // statement logging during development). `pg_stat_user_tables` flushes
-    // asynchronously (~1s) and one build bumps the counter by several (BS#1661),
-    // so a strict "== 0" on the warm bracket races that flush: a cold increment
-    // can slip past `afterCold` into it. That slip is bounded by ONE build
-    // (< BATCHED_SCAN_CEILING) and is INDEPENDENT of how many warm reads we do —
-    // whereas a cache that rebuilt per read would scan WARM_READS times. So we
-    // do WARM_READS (> the ceiling) reads and assert the whole warm bracket
-    // stayed under a single build's worth: cleanly separates "served from cache"
-    // (< ceiling, just flush bleed) from "rebuilt each read" (>= WARM_READS).
-    // The deterministic per-call proof (one build cold, zero warm) is in the
-    // mocked unit tests (concerts.service.test.ts). This is the hot-path win —
-    // getLatest stops scanning concerts on every poll — proven end-to-end.
-    const WARM_READS = 10; // > BATCHED_SCAN_CEILING, so a per-read rebuild overshoots the bound
+    // Printed unconditionally. Each of the three BS#2194 incidents cost a
+    // diagnostic cycle because the failing run reported a violated bound and not
+    // the bracket values behind it, leaving "flake or my regression?" answerable
+    // only by reading the commit that last moved the bound.
+    const growth = manyScans - fewScans;
+    console.log(
+      `[upcoming_show batching] fewScans=${fewScans} manyScans=${manyScans} growth=${growth} ` +
+        `ceiling=${GROWTH_CEILING} (a per-row impl would grow by >= ${PER_ROW_GROWTH})`
+    );
+
+    // Liveness lower bound: a cold read must scan `concerts` at LEAST once, else
+    // the enrichment is a no-op and the comparison is vacuous — a regression
+    // that stopped querying `concerts` entirely shows zero growth and would
+    // otherwise sail straight through.
+    expect(fewScans).toBeGreaterThanOrEqual(1);
+    expect(manyScans).toBeGreaterThanOrEqual(1);
+
+    // The load-bearing anti-N+1 assertion: cost does not scale with match count.
+    expect(growth).toBeLessThan(GROWTH_CEILING);
+
+    // Cache proof (BS#1616): the cold bracket above left the per-day map cache
+    // warm. Further reads of the same page/today — with NO reset between — are
+    // served entirely from it and issue ZERO `concerts` queries (confirmed by
+    // statement logging during development; the deterministic per-call proof,
+    // one build cold and zero warm, is in the mocked concerts.service.test.ts).
+    // This is the hot-path win — getLatest stops scanning `concerts` on every
+    // poll — proven end to end.
     for (let i = 0; i < WARM_READS; i++) {
-      await fetchSeededTracks(); // eslint-disable-line no-await-in-loop
+      await fetchPage(pageStart, manyEnd); // eslint-disable-line no-await-in-loop
     }
+    await flushBarrier();
     const afterWarm = await quiescedScans();
-    expect(afterWarm - afterCold).toBeLessThan(BATCHED_SCAN_CEILING);
-  });
+    const warmScans = afterWarm - afterMany;
+
+    // Per-cold-read build cost, measured in this same run instead of asserted as
+    // a constant. Floored at one scan per read (the liveness minimum) so a freak
+    // small bracket can't collapse the bound to nothing, and taken as the MAX of
+    // the two brackets so a noisy measurement widens the bound rather than
+    // tightening it — noise must not be able to turn this into a red build.
+    const perColdRead = Math.max(fewScans, manyScans, COLD_READS) / COLD_READS;
+    const warmCeiling = WARM_READS * perColdRead * WARM_REBUILD_FRACTION;
+    console.log(
+      `[upcoming_show warm cache] warmScans=${warmScans} ceiling=${warmCeiling.toFixed(1)} ` +
+        `(a per-read rebuild would cost ~${(WARM_READS * perColdRead).toFixed(0)})`
+    );
+    expect(warmScans).toBeLessThan(warmCeiling);
+    // Four stats drains at 1.2s-16s each, two of them waiting on an advance, put
+    // this case's worst case well past jest.config.json's 30s default.
+  }, 120_000);
 
   /**
    * Conditional-GET freshness across `concerts` writes (BS#1607, migration
