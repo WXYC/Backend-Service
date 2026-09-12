@@ -154,11 +154,17 @@ library_route.get('/rotation', requirePermissions({ catalog: ['read'] }), librar
 // The GET is the one that can actually shadow this line. Express falls
 // through a Layer whose Route does not handle the request method, so the
 // PATCH never could — but the #2410 GET matches this path's method AND its
-// segment count, which makes it the router's first genuine same-method
-// hazard. Pinned by `tests/unit/routes/library-rotation-uncatalogued.route.test.ts`
-// (which now fails if the parameterized GET goes missing as well as if it is
-// registered ahead of this line) and by
-// `tests/unit/routes/library-rotation-route-order.route.test.ts`.
+// segment count, which makes it a genuine same-method hazard rather than a
+// hypothetical one. It is the SECOND such family on this router, not the
+// first: `GET /artists/:id` has shared method and segment count with the
+// literals `GET /artists/search`, `GET /artists/peek-code` and
+// `GET /artists/by-code` since WXYC/Backend-Service#2156, and the comment
+// above that registration says so. Pinned by
+// `tests/unit/routes/library-rotation-uncatalogued.route.test.ts` (which now
+// fails if the parameterized GET goes missing as well as if it is registered
+// ahead of this line) and by
+// `tests/unit/routes/library-rotation-route-order.route.test.ts`, whose
+// ordering assertions run over both families.
 library_route.get(
   '/rotation/uncatalogued',
   requirePermissions({ catalog: ['read'] }),
@@ -189,11 +195,13 @@ library_route.patch(
 // `GET /rotation` and `GET /rotation/uncatalogued` rather than the PATCH that
 // shares its path.
 //
-// Registered after every literal `/rotation/*` route above, and this is the
-// registration on this router for which that ordering is load-bearing rather
-// than defensive: it is the first parameterized route sharing both method and
-// segment count with a literal (`GET /rotation/uncatalogued`), so ahead of
-// that line it would capture the literal segment as an id.
+// Registered after every literal `/rotation/*` route above, and for this
+// registration that ordering is load-bearing rather than defensive: it shares
+// both method and segment count with a literal (`GET /rotation/uncatalogued`),
+// so ahead of that line it would capture the literal segment as an id. That
+// makes it the second such family on this router — `GET /artists/:id` below
+// is the first, standing in the same relation to `GET /artists/search`,
+// `GET /artists/peek-code` and `GET /artists/by-code`.
 library_route.get('/rotation/:id', requirePermissions({ catalog: ['read'] }), libraryController.getRotationRow);
 
 // BS#2113: field-level rotation edit. Registered after every literal

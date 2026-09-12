@@ -1137,11 +1137,15 @@ export const getUncataloguedRotation: RequestHandler = async (req, res) => {
  * here even though the adjacent endpoint's query is full of them.
  *
  * ROUTE REGISTRATION ORDER IS LOAD-BEARING, and more so than for its PATCH
- * sibling: this is the first parameterized route on the router that shares
- * BOTH method and segment count with a literal (`GET /rotation/uncatalogued`),
- * so registering it earlier really would swallow the queue endpoint. Pinned
- * by both `tests/unit/routes/library-rotation-uncatalogued.route.test.ts` and
- * `tests/unit/routes/library-rotation-route-order.route.test.ts`.
+ * sibling: this route shares BOTH method and segment count with a literal
+ * (`GET /rotation/uncatalogued`), so registering it earlier really would
+ * swallow the queue endpoint. It is the second such family on this router,
+ * not the first — `GET /artists/:id` (BS#2156) stands in exactly this
+ * relation to `GET /artists/search`, `GET /artists/peek-code` and
+ * `GET /artists/by-code`. Pinned by both
+ * `tests/unit/routes/library-rotation-uncatalogued.route.test.ts` and
+ * `tests/unit/routes/library-rotation-route-order.route.test.ts`, which
+ * asserts the ordering over both families.
  */
 export const getRotationRow: RequestHandler<{ id: string }> = async (req, res) => {
   const rotationId = parseResourceId(req.params.id, 'rotation');

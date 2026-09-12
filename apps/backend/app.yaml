@@ -2228,9 +2228,11 @@ paths:
         `UncataloguedRotationRow` for the full rule.
 
 
-        Registered AFTER the literal `/library/rotation/uncatalogued`: it is the first
-        route on this router that shares both method and segment count with a literal, so
-        the ordering is load-bearing rather than defensive.
+        Registered AFTER the literal `/library/rotation/uncatalogued`: it shares both
+        method and segment count with that literal, so the ordering is load-bearing rather
+        than defensive. It is the second such family on this router — `GET
+        /library/artists/{id}` stands in the same relation to `/library/artists/search`,
+        `/library/artists/peek-code` and `/library/artists/by-code`.
       security:
         - BearerAuth: ['catalog-read']
       parameters:

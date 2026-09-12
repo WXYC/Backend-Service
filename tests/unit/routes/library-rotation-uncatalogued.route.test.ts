@@ -6,14 +6,17 @@
  * `/rotation/uncatalogued` would swallow the queue endpoint and hand
  * `'uncatalogued'` to the parameterized handler as an id.
  *
- * **The hazard stopped being hypothetical in WXYC/Backend-Service#2410.**
- * #2113's `PATCH /rotation/:id` could not collide with this GET in any case
- * — it differs in method, and Express falls through a layer whose Route does
- * not handle the request method. #2410's `GET /rotation/:id` is the first
- * parameterized route on this router that shares BOTH the method and the
- * segment count, so the assertions below are now load-bearing rather than
- * vacuous, and they assert the parameterized GET exists rather than skipping
- * when it doesn't.
+ * **The hazard stopped being hypothetical FOR THIS PATH in
+ * WXYC/Backend-Service#2410.** #2113's `PATCH /rotation/:id` could not
+ * collide with this GET in any case — it differs in method, and Express falls
+ * through a layer whose Route does not handle the request method. #2410's
+ * `GET /rotation/:id` shares BOTH the method and the segment count, so the
+ * assertions below are now load-bearing rather than vacuous, and they assert
+ * the parameterized GET exists rather than skipping when it doesn't. The
+ * router's first such family is `GET /artists/:id` over `/artists/search`,
+ * `/artists/peek-code` and `/artists/by-code` (BS#2156); the generalized
+ * ordering pin over both families lives in
+ * `tests/unit/routes/library-rotation-route-order.route.test.ts`.
  *
  * Three assertions:
  *   1. Static — over the registered layer list, the literal path precedes
