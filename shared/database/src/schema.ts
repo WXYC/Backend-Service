@@ -2609,6 +2609,15 @@ export const shows = wxyc_schema.table(
     index('shows_open_start_time_idx')
       .on(table.start_time)
       .where(sql`${table.end_time} IS NULL`),
+    // Archive walk (BS#2399): `GET /flowsheet/playlist?show_id=` resolves the
+    // neighbouring shows with `(start_time, id) < ($1, $2) ORDER BY start_time
+    // DESC, id DESC LIMIT 1` and its mirror image. Non-partial on purpose —
+    // `shows_open_start_time_idx` above covers only the 4% of rows with a NULL
+    // `end_time`, which is the exact complement of the closed shows a visitor
+    // walks. The indexed key is both the range bound and the sort, and `id` is
+    // the only column selected, so both lookups are index-only scans stopping
+    // at one row instead of the sequential scan of 72,893 rows they were.
+    index('shows_start_time_id_idx').on(table.start_time, table.id),
     // shows_legacy_dj_name_trgm_idx was dropped in migrations 0054 + 0065 —
     // search no longer joins through shows; dj-name reads come from
     // flowsheet.dj_name + flowsheet_dj_name_trgm_idx. Declaration removed to
