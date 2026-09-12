@@ -721,11 +721,16 @@ components:
         the row is linked. They never describe the linked library release. On
         `GET /library/rotation` the same `label_id` key means
         `library.label_id` (that endpoint joins `library` and COALESCEs
-        across sources), so do not read the two as interchangeable. Display
-        names are resolved client-side from `GET /library/formats`; this
-        projection is join-free on purpose. The cross-repo SSOT carries the
-        same rule on both endpoints (wxyc-shared 1.51.0,
-        `RotationRowSummary`).
+        across sources), so do not read the two as interchangeable. The
+        import screen must therefore source both fields from `GET
+        /library/rotation/{id}` and never from a `GET /library/rotation`
+        list row: that row's `label_id` (and its `format_name`) describe the
+        library release it joined to, so carrying either into a `POST
+        /library` body would file the new catalog entry under a different
+        release's label or format. Display names are resolved client-side
+        from `GET /library/formats`; this projection is join-free on purpose.
+        The cross-repo SSOT carries the same rule on both endpoints
+        (wxyc-shared 1.51.0, `RotationRowSummary`).
       properties:
         id:
           type: integer
