@@ -13,6 +13,12 @@ const mockGetEntriesByShow = jest.fn<() => Promise<unknown[]>>();
 const mockGetEntriesByRange = jest.fn<() => Promise<unknown[]>>();
 const mockGetNShows = jest.fn<() => Promise<unknown[]>>();
 const mockGetShowMetadata = jest.fn<() => Promise<Record<string, unknown>>>();
+// BS#2399: the archive walk (`previous_show_id` / `next_show_id`). Defaults to
+// "no neighbours" so every getShowInfo test that isn't about the walk sees the
+// ends-of-the-archive shape without arranging one.
+const mockGetAdjacentShowIds = jest
+  .fn<() => Promise<{ previous_show_id: number | null; next_show_id: number | null }>>()
+  .mockResolvedValue({ previous_show_id: null, next_show_id: null });
 const mockTransformToV2 = jest.fn((entry: unknown) => ({ ...(entry as Record<string, unknown>), v2: true }));
 // BS#1607: the feed paths call attachUpcomingShows before projecting to V2.
 // It's a no-op passthrough here (the enrichment logic is unit-tested in
@@ -56,6 +62,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getEntriesByRange: mockGetEntriesByRange,
   getNShows: mockGetNShows,
   getShowMetadata: mockGetShowMetadata,
+  getAdjacentShowIds: mockGetAdjacentShowIds,
   transformToV2: mockTransformToV2,
   attachUpcomingShows: mockAttachUpcomingShows,
   attachCriticReviews: mockAttachCriticReviews,
@@ -761,11 +768,15 @@ describe('flowsheet.controller', () => {
   });
 
   describe('getShowInfo', () => {
+    const SHOW_START_TIME = new Date('2026-09-07T10:00:00.000Z');
     const mockShowMetadata = {
       id: 1,
+      start_time: SHOW_START_TIME,
       specialty_show_name: '',
       show_djs: [{ id: '1', dj_name: 'DJ Test' }],
     };
+    /** The ends-of-the-archive default every test below inherits. */
+    const noNeighbours = { previous_show_id: null, next_show_id: null };
 
     it('returns show metadata with V2-transformed entries', async () => {
       const entries = [createMockEntry(1), createMockEntry(2)];
@@ -782,6 +793,7 @@ describe('flowsheet.controller', () => {
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({
         ...mockShowMetadata,
+        ...noNeighbours,
         entries: entries.map((e) => ({ ...e, v2: true })),
       });
       // BS#1870: getShowInfo is one of the 5 attachCriticReviews call sites.
@@ -804,6 +816,7 @@ describe('flowsheet.controller', () => {
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({
         ...mockShowMetadata,
+        ...noNeighbours,
         entries: [{ ...validEntry, v2: true }],
       });
       expect(mockCaptureException).toHaveBeenCalledTimes(1);
@@ -828,6 +841,56 @@ describe('flowsheet.controller', () => {
       // Both should be called (Promise.all)
       expect(mockGetShowMetadata).toHaveBeenCalledWith(1);
       expect(mockGetEntriesByShow).toHaveBeenCalledWith(1);
+    });
+
+    // BS#2399. dj-site#1394's archive walk: the show view renders
+    // "<< Previous Show" / "Next Show >>" straight off these two fields, so
+    // they ride the same response as the entries rather than costing a second
+    // round trip from the browser.
+    it('carries the neighbouring show ids alongside the metadata', async () => {
+      mockGetShowMetadata.mockResolvedValue(mockShowMetadata);
+      mockGetEntriesByShow.mockResolvedValue([]);
+      mockGetAdjacentShowIds.mockResolvedValue({ previous_show_id: 41, next_show_id: 43 });
+
+      const req = createMockReq({ show_id: '1' });
+      const res = createMockRes();
+
+      await getShowInfo(req as Request, res as Response, mockNext);
+
+      expect(mockGetAdjacentShowIds).toHaveBeenCalledWith(1, SHOW_START_TIME);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ previous_show_id: 41, next_show_id: 43 }));
+    });
+
+    it.each([
+      ['the oldest show', { previous_show_id: null, next_show_id: 2 }],
+      ['the newest show', { previous_show_id: 72892, next_show_id: null }],
+    ])('publishes a null neighbour at %s rather than a sentinel id', async (_end, neighbours) => {
+      // tubafrenzy's `.orElse(0)` sent the oldest show's "Previous" link to
+      // `radioShowID=0`, which threw. A null is the only thing a client can
+      // render as a disabled control.
+      mockGetShowMetadata.mockResolvedValue(mockShowMetadata);
+      mockGetEntriesByShow.mockResolvedValue([]);
+      mockGetAdjacentShowIds.mockResolvedValue(neighbours);
+
+      const req = createMockReq({ show_id: '1' });
+      const res = createMockRes();
+
+      await getShowInfo(req as Request, res as Response, mockNext);
+
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining(neighbours));
+    });
+
+    it('does not walk the archive for a show that does not exist', async () => {
+      // The walk needs the show's own `start_time` as its pivot, so it can only
+      // run behind the 404 guard.
+      mockGetShowMetadata.mockResolvedValue(undefined);
+      mockGetEntriesByShow.mockResolvedValue([]);
+
+      const req = createMockReq({ show_id: '999999999' });
+      const res = createMockRes();
+
+      await expect(getShowInfo(req as Request, res as Response, mockNext)).rejects.toThrow(WxycError);
+      expect(mockGetAdjacentShowIds).not.toHaveBeenCalled();
     });
 
     it.each([['abc'], [undefined]])('throws WxycError for invalid show_id=%s', async (show_id) => {

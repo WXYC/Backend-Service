@@ -1562,6 +1562,20 @@ paths:
                           type: integer
                         dj_name:
                           type: string
+                  previous_show_id:
+                    type: integer
+                    nullable: true
+                    description: >-
+                      The show that aired immediately before this one, in
+                      `(start_time, id)` order. Null on the oldest show in the
+                      archive — never a sentinel id.
+                  next_show_id:
+                    type: integer
+                    nullable: true
+                    description: >-
+                      The show that aired immediately after this one, in
+                      `(start_time, id)` order. Null on the newest show. Points
+                      at the live show while one is on the air.
                   entries:
                     type: array
                     items:
