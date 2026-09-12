@@ -552,15 +552,19 @@ describe('writeLink (no-overwrite guard)', () => {
     jest.clearAllMocks();
   });
 
-  /** True when the condition tree carries an IS NULL guard on album_id.
+  /** True when the condition tree carries an IS NULL guard on
+   *  `album_review_submissions.album_id`.
    *  Robust to both condition shapes (donor idiom): the unit env's
-   *  drizzle-orm stub emits `{ and: [{ eq }, { isNull: 'album_id' }] }`;
-   *  real drizzle nests SQL objects with StringChunk ` is null` text. */
+   *  drizzle-orm stub emits
+   *  `{ and: [{ eq }, { isNull: 'album_review_submissions.album_id' }] }` —
+   *  the mock maps each column to a TABLE-QUALIFIED sentinel, which is what
+   *  keeps this from also accepting some other table's `album_id`; real
+   *  drizzle nests SQL objects with StringChunk ` is null` text. */
   const hasAlbumIdIsNullGuard = (node: unknown, seen = new Set<unknown>()): boolean => {
     if (!node || typeof node !== 'object' || seen.has(node)) return false;
     seen.add(node);
     const n = node as Record<string, unknown>;
-    if (n.isNull === 'album_id') return true; // stub shape
+    if (n.isNull === 'album_review_submissions.album_id') return true; // stub shape
     if (Array.isArray(n.value) && (n.value as unknown[]).some((v) => typeof v === 'string' && /is null/i.test(v))) {
       return true;
     }

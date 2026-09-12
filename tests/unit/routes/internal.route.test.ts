@@ -1057,9 +1057,11 @@ describe('POST /internal/flowsheet-webhook', () => {
     expect(res.status).toBe(200);
     // `target` matters: a non-unique conflict target would make PG reject the
     // INSERT ("no unique or exclusion constraint...") and 500 the webhook.
+    // The mock maps each column to a TABLE-QUALIFIED sentinel, so this also
+    // pins that the target is shows' own column.
     expect(mockOnConflictDoUpdate.mock.calls.map((c) => c[0])).toEqual([
       expect.objectContaining({
-        target: 'legacy_show_id',
+        target: 'shows.legacy_show_id',
         set: { legacy_dj_name: 'ovni' },
         setWhere: expect.anything(),
       }),

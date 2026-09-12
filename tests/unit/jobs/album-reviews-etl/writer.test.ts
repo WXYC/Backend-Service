@@ -35,6 +35,15 @@ type MockDb = typeof db & {
 
 const mockDb = db as MockDb;
 
+/**
+ * The table every column in this writer's UPSERT belongs to. `tests/mocks/
+ * database.mock.ts` maps each column to a table-qualified sentinel
+ * (`'album_review_submissions.source_key'`), so the qualifier is what
+ * distinguishes this table's `source` from `concerts.source` — see that
+ * file's header for why the bare form could not.
+ */
+const MOCK_TABLE = 'album_review_submissions';
+
 const HEADERS = [
   'Timestamp',
   'Artist Name',
@@ -130,7 +139,9 @@ describe('upsertSubmission', () => {
     await upsertSubmission(makeContent());
 
     const config = upsertConfig();
-    expect(config.target).toBe('source_key'); // the mock table maps columns to their names
+    // The mock maps each column to a TABLE-QUALIFIED sentinel, so this pins
+    // the conflict target's table as well as its column name.
+    expect(config.target).toBe(`${MOCK_TABLE}.source_key`);
     expect(config.targetWhere).toBeDefined();
     expect(fragmentText(config.targetWhere)).toMatch(/IS NOT NULL/);
   });
@@ -163,20 +174,31 @@ describe('upsertSubmission', () => {
   /** Collect the setWhere's IS DISTINCT FROM arms from the OR-reduction
    *  tree the writer builds. Handles both fragment shapes: the unit env's
    *  drizzle-orm stub tag ({ sql: strings, values }) and real drizzle
-   *  (queryChunks). A leaf arm's first interpolation is the column (the
-   *  mock table maps columns to their name strings). */
+   *  (queryChunks). A leaf arm's first interpolation is the column, which
+   *  the mock maps to a TABLE-QUALIFIED sentinel (`'<table>.<column>'`).
+   *  `column` is recorded bare so the assertions below read as column
+   *  lists; `qualifier` carries the table half, pinned separately by the
+   *  arm-table assertion — that is what catches an arm built against the
+   *  wrong table's column object, which a bare name cannot see. */
   const collectDistinctArms = (
     node: unknown,
-    arms: Array<{ column: string; text: string; values: unknown[] }> = []
+    arms: Array<{ column: string; qualifier: string; text: string; values: unknown[] }> = []
   ) => {
     if (!node || typeof node !== 'object') return arms;
     const n = node as { sql?: readonly string[]; values?: unknown[]; queryChunks?: unknown[] };
     const text = Array.isArray(n.sql) ? n.sql.join('|') : '';
     if (text.includes('IS DISTINCT FROM')) {
-      // The mock table maps columns to their name strings; anything else
+      // The mock maps columns to qualified sentinel strings; anything else
       // is a fixture bug worth seeing verbatim in the assertion diff.
       const first = n.values?.[0];
-      arms.push({ column: typeof first === 'string' ? first : JSON.stringify(first), text, values: n.values ?? [] });
+      const sentinel = typeof first === 'string' ? first : JSON.stringify(first);
+      const dot = sentinel.indexOf('.');
+      arms.push({
+        column: dot === -1 ? sentinel : sentinel.slice(dot + 1),
+        qualifier: dot === -1 ? '' : sentinel.slice(0, dot),
+        text,
+        values: n.values ?? [],
+      });
       return arms;
     }
     for (const child of [...(n.values ?? []), ...(n.queryChunks ?? [])]) collectDistinctArms(child, arms);
@@ -194,6 +216,9 @@ describe('upsertSubmission', () => {
     // the derivation would freeze propagation of its sheet edits exactly
     // when ONLY that column changed; an extra one would churn last_modified.
     expect(arms.map((a) => a.column).sort()).toEqual([...SET_CONTENT_COLUMNS].sort());
+    // Every arm is built from THIS table's column object, not a same-named
+    // column on another table — invisible before the sentinels were qualified.
+    expect([...new Set(arms.map((a) => a.qualifier))]).toEqual([MOCK_TABLE]);
     const armColumns = new Set(arms.map((a) => a.column));
     expect(armColumns.has('last_modified')).toBe(false);
     expect(armColumns.has('add_date')).toBe(false);

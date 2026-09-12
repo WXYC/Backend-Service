@@ -147,7 +147,7 @@ describe('schema: artist_search_alias + library_artist_view.artist_id (artist-se
     it('library_artist_view mock includes artist_id (PR 5 search-side LATERAL will reference it)', () => {
       const viewMock = mockSource.match(/export const library_artist_view\s*=\s*\{[\s\S]*?\};/)?.[0];
       expect(viewMock).toBeDefined();
-      expect(viewMock).toContain("artist_id: 'artist_id'");
+      expect(viewMock).toContain("artist_id: 'library_artist_view.artist_id'");
     });
   });
 });

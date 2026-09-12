@@ -202,8 +202,12 @@ describe('applyUpgrade', () => {
       await applyUpgrade(target, 42, service, 'https://verified.example/x');
 
       const whereCall = mockDb._chain.where.mock.calls[0]?.[0];
+      // The mock maps each column to a TABLE-QUALIFIED sentinel, so building
+      // the expectation from `target` pins that both predicates are built
+      // against THIS target's table — `flowsheet.spotify_url` and
+      // `album_metadata.spotify_url` used to be the same string.
       expect(whereCall).toEqual({
-        and: [{ eq: [idColumn, 42] }, { like: [column, prefix] }],
+        and: [{ eq: [`${target}.${idColumn}`, 42] }, { like: [`${target}.${column}`, prefix] }],
       });
     }
   );

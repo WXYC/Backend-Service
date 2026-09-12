@@ -203,7 +203,7 @@ describe('writeMatch — unlinked search-URL upgrade (BS#2179 review HIGH 1)', (
     // incoming IS NOT NULL guards the THEN branch — a null incoming always
     // falls through to ELSE <column>, exactly like COALESCE(column, null).
     expect(rendered).toMatch(/CASE WHEN/i);
-    expect(rendered).toMatch(/ELSE\s+spotify_url\s+END/i);
+    expect(rendered).toMatch(/ELSE\s+flowsheet\.spotify_url\s+END/i);
   });
 });
 
