@@ -2593,7 +2593,22 @@ paths:
             maximum: 2147483647
       responses:
         '200':
-          description: The artists that own this code, ordered by artist_name then id
+          description: >-
+            The artists that own this code, ordered by artist_name then id.
+
+            Deliberately NOT the same row object as `GET /library/artists/search`, which is
+            one field wider, and deliberately not hoisted into a shared schema. That route
+            reads `genre_artist_crossreference` joined to `genres`, so every row carries its
+            own membership's `code_number`, `genre_id` and `genre_name`. This route is a code
+            lookup: `getArtistsByCode` projects `(artist_id, artist_name, code_letters)` and
+            never joins `genres`, and the handler echoes the already-validated
+            `genre_id`/`code_number` back onto each row — they are the request restated,
+            identical across the whole list, not per-row facts, and there is no `genre_name`
+            because nothing on this path reads one. Keeping the two declarations separate is
+            what stops widening the search projection from silently promising fields this
+            lookup does not select. `ArtistSearchMatch` in the cross-repo SSOT
+            (`wxyc-shared/api.yaml`) is the search row alone — this endpoint is not declared
+            there at all.
           content:
             application/json:
               schema:
@@ -2612,8 +2627,15 @@ paths:
                           type: string
                         code_number:
                           type: integer
+                          description: >-
+                            Echo of the request's `code_number`, identical on every row — not
+                            a per-row `artist_genre_code` the way the same-named field on
+                            `GET /library/artists/search` is.
                         genre_id:
                           type: integer
+                          description: >-
+                            Echo of the request's `genre_id`, identical on every row. No
+                            `genre_name` travels with it: this lookup never joins `genres`.
         '400':
           description: Invalid or missing genre_id, code_letters, or code_number
         '404':
