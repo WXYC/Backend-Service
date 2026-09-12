@@ -223,15 +223,17 @@ components:
     NewAlbumRequest:
       type: object
       description: >-
-        `label` left the required set in BS#2410: exactly one of `label` or
+        `label` left the required set in BS#2410: at least one of `label` or
         `label_id` must be supplied. With `label_id` alone, Backend resolves
         `labels.label_name` server-side for the denormalized `library.label`
         column and skips label creation; a dangling `label_id` is a 400
         ("label_id does not reference an existing label"). With `label` alone,
-        the create-or-reuse-by-exact-name behavior is unchanged. Mirrors
-        wxyc-shared's `AddAlbumRequest` (api.yaml 1.51.0) — that spec is the
-        SSOT; this copy exists because no CI guard catches app.yaml drift
-        (BS#1479).
+        the create-or-reuse-by-exact-name behavior is unchanged. Both may be
+        sent together — the `label_id` is still validated and written to the
+        FK, and the explicit `label` text wins for the denormalized
+        `library.label` column. Mirrors wxyc-shared's `AddAlbumRequest`
+        (api.yaml 1.51.0) — that spec is the SSOT; this copy exists because
+        nothing in CI catches app.yaml drifting from it.
       required: ['album_title', 'genre_id', 'format_id']
       properties:
         album_title:
@@ -246,6 +248,17 @@ components:
           type: string
         label_id:
           type: integer
+          minimum: 1
+          nullable: true
+          description: >-
+            BS#2410. Optional `labels(id)` reference; supplying it satisfies
+            the label requirement on its own. An explicit `null` means ABSENT
+            here, not "clear" — it is treated exactly as an omitted field and
+            is neither written nor validated, so the `selected?.id ?? null`
+            shape a picker produces needs no client-side pruning. (On `PATCH
+            /library/{id}` the same `null` clears the label.) An id that
+            references no `labels` row 400s ("label_id does not reference an
+            existing label") rather than reaching Postgres as a 23503.
         genre_id:
           type: integer
         format_id:
