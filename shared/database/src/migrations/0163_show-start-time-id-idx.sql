@@ -1,0 +1,37 @@
+-- BS#2399. A non-partial B-tree on `shows (start_time, id)`.
+--
+-- The consumer is the archive walk on `GET /flowsheet/playlist?show_id=`, which
+-- resolves the neighbouring shows with
+--   `(start_time, id) < ($1, $2) ORDER BY start_time DESC, id DESC LIMIT 1`
+-- and its mirror image. This index serves both end to end: the indexed key is
+-- the range bound AND the sort, and `id` is the only column the query selects,
+-- so each direction is an index-only scan that stops at one row.
+--
+-- **Why a second `start_time` index rather than widening the existing one.**
+-- `shows_open_start_time_idx` (migration 0154) is partial on `WHERE end_time IS
+-- NULL`. Measured on production 2026-09-08 that is 2,814 of 72,893 rows — under
+-- 4% — and it is the exact complement of what a visitor walks: the closed shows.
+-- Without this index both lookups are sequential scans of the whole table plus a
+-- sort, on every archive page view.
+--
+-- The write-amplification argument that governs `flowsheet` does not apply here.
+-- `shows` is 72,893 rows growing at roughly 8/day, so the second btree costs
+-- ~2-3 MB and a negligible per-signon insert.
+--
+-- Production ops:
+--   - NOT the CONCURRENTLY form, because Drizzle wraps each migration file in a
+--     transaction and `CREATE INDEX CONCURRENTLY cannot run inside a transaction
+--     block` — same constraint as 0057, 0068, 0070, 0074, 0078, 0080, 0139,
+--     0144, 0148, 0154.
+--   - The build is a sub-second sort of 72,893 narrow rows, but the
+--     AccessExclusiveLock still pauses `POST /flowsheet/join` and
+--     `POST /flowsheet/end` for its duration. If the deploy lands mid-show, run
+--     it out of band first:
+--       CREATE INDEX CONCURRENTLY IF NOT EXISTS "shows_start_time_id_idx"
+--         ON "wxyc_schema"."shows" USING btree ("start_time","id");
+--   - `IF NOT EXISTS` makes this a no-op against a database that already has the
+--     index (the out-of-band case above), while fresh dev and CI databases pick
+--     it up on first migrate. Same shape as 0068, 0070, 0074, 0080, 0139, 0144,
+--     0148, 0154.
+
+CREATE INDEX IF NOT EXISTS "shows_start_time_id_idx" ON "wxyc_schema"."shows" USING btree ("start_time","id");
