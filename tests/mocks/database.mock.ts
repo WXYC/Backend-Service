@@ -780,6 +780,18 @@ export { foldArtistName } from '../../shared/database/src/fold-artist-name.js';
 // REAL validating implementation, not a jest.fn() stub.
 export { intArrayLiteral } from '../../shared/database/src/int-array-literal.js';
 
+// Same pure-module-path rationale, and it matters more here than anywhere
+// else in this block: `extractSqlState` exists precisely because a MOCK
+// cannot reproduce drizzle's `DrizzleQueryError` wrapper, so a stub would
+// let a consumer's test pass against a classifier that reads nothing in
+// production — the exact defect the extraction was made to kill.
+export {
+  extractSqlState,
+  isLockContentionError,
+  LOCK_CONTENTION_SQLSTATES,
+  SUB_DEADLOCK_LOCK_TIMEOUT_MS,
+} from '../../shared/database/src/sqlstate.js';
+
 // Same pure-module-path rationale for the PII-safe DJ-name chain (BS#2119
 // review). It matters more here than for the other pure re-exports: a stub
 // would let a consumer's test pass while the real chain disagrees, which is
