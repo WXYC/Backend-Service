@@ -32,15 +32,20 @@
  * unconditional data-modifying CTE: the rotation UPDATE fires a `FOR EACH
  * STATEMENT` trigger that rewrites the single-row `library_watermark` table
  * even on `UPDATE 0`, so every run — including the ~98% with nothing to
- * repair — queued behind `jobs/library-etl`'s 13-15 minute import transaction
- * and died at the 300 s `statement_timeout`. Two levers restore it, and
- * `LINKAGE_LOCK_TIMEOUT_MS`'s docblock has the full mechanism: a candidate
- * pre-check, so a pass with nothing to do issues no UPDATE at all; and
- * `SET LOCAL lock_timeout` inside an explicit transaction, so a pass that
- * does have work stands down in under a second with a lock-specific SQLSTATE
- * instead of burning five minutes and reporting a generic failed query. The
- * root-cause fix is BS#2424, which collapses the blocking window itself;
- * these are defence in depth behind it.
+ * repair — queued behind what was then `jobs/library-etl`'s single 13-15
+ * minute import transaction and died at the 300 s `statement_timeout`. Two
+ * levers restore it, and `LINKAGE_LOCK_TIMEOUT_MS`'s docblock has the full
+ * mechanism: a candidate pre-check, so a pass with nothing to do issues no
+ * UPDATE at all; and `SET LOCAL lock_timeout` inside an explicit transaction,
+ * so a pass that does have work stands down in under a second with a
+ * lock-specific SQLSTATE instead of burning five minutes and reporting a
+ * generic failed query. The root-cause fix was BS#2424, and it has landed:
+ * `library-etl` now runs two transactions rather than one, and its
+ * compilation-track writes are batched, so the common case holds the
+ * watermark row for seconds. These levers stay because the window narrowed
+ * rather than closed — the once-daily full secondary reconciliation pass
+ * still runs the cross-reference imports unbounded inside one transaction.
+ * See the README's "Contention" section.
  *
  * No cooperative live-DJ pause:
  * the candidate set is bounded by the rows a webhook could not link, the writes
@@ -106,11 +111,20 @@ const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""
  * `touch_library_watermark` on `library`, and, among the parent-table fan-out
  * in migration 0105, `touch_library_watermark_from_rotation`. Every statement
  * that fires one takes an exclusive row lock on that one row and holds it
- * until COMMIT. `jobs/library-etl` wraps its whole run in a single
- * transaction, grabs the row on its first `library` write, and holds it for
- * the 13-15 minutes the import takes; this job's rotation UPDATE fires the
- * rotation trigger, asks for the same row, and is cancelled at the image's
- * 300 s `DB_STATEMENT_TIMEOUT_MS` long before `library-etl` commits.
+ * until COMMIT. When this was diagnosed, `jobs/library-etl` wrapped its whole
+ * run in a single transaction, grabbed the row on its first `library` write,
+ * and held it for the 13-15 minutes the import took; this job's rotation
+ * UPDATE fired the rotation trigger, asked for the same row, and was
+ * cancelled at the image's 300 s `DB_STATEMENT_TIMEOUT_MS` long before
+ * `library-etl` committed.
+ *
+ * BS#2424 has since split that import into two transactions and batched its
+ * compilation-track writes, so an ordinary pass holds the row for seconds.
+ * The residual is the once-daily full secondary reconciliation pass
+ * (`SECONDARY_FULL_PASS_INTERVAL_HOURS`), which drops the delta bounds and
+ * re-runs the row-at-a-time `artist_crossreference` import, whose own
+ * migration-0138 trigger reuses `touch_library_watermark()` against the same
+ * single row, inside one transaction. Rarer, not gone.
  *
  * A statement-level trigger fires on `UPDATE 0` as well, so on the rotation
  * pass an empty cohort is NOT protection: the ~98% of runs that find nothing
