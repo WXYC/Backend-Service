@@ -11,6 +11,7 @@ import type { CriticReviewItem } from '@wxyc/shared/dtos';
 import { projectFlowsheetEntry, toDiscogsUnavailableWireFields } from '../utils/flowsheet-projection.js';
 import { getDiscogsUnavailableFlagsById } from '../services/library.service.js';
 import * as flowsheetTakeoverConfig from '../config/flowsheetTakeover.js';
+import { recordGoLiveHandoff } from '../services/flowsheet/go-live-handoff-signal.js';
 import WxycError from '../utils/error.js';
 import { INT4_MAX } from '../utils/constants.js';
 
@@ -1046,6 +1047,10 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
       // Override is only consumed on the new-show path. Co-host join uses the
       // auth_user.dj_name resolution unchanged.
       const show_dj_instance: ShowDJ = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
+      // Only under the flag: this is a DJ's deliberate choice. The flag-OFF
+      // branch above reaches the same call by silently co-hosting every
+      // collision, which is the bug, not an outcome anyone chose.
+      recordGoLiveHandoff('join', { open_show_id: current_show.id, dj_id: req.body.dj_id });
       res.status(200).json(show_dj_instance);
       return;
     }
@@ -1084,12 +1089,21 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     // the compare-and-set, not the row.
     await flowsheet_service.endShow(current_show, endedAt);
 
+    // Between the two writes on purpose. `endShow` has already closed and
+    // back-dated somebody else's show; that is the unrecoverable step and the
+    // one the archive cannot evidence afterwards.
+    recordGoLiveHandoff('takeover', { open_show_id: current_show.id, dj_id: req.body.dj_id });
+
     const show_session: Show = await flowsheet_service.startShow(
       req.body.dj_id,
       req.body.show_name,
       req.body.specialty_id,
       dj_name_override
     );
+    // Recorded after `endShow` resolves rather than here, because `endShow` is
+    // the destructive half: if `startShow` had failed, a DJ's show would have
+    // been terminated with nobody on air, which is the case most worth knowing
+    // about. See the `recordGoLiveHandoff` call above `startShow`.
     res.status(200).json(show_session);
   }
 };

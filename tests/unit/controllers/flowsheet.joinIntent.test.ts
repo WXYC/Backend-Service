@@ -39,6 +39,8 @@ const mockIsLatestEntryShowEnd = jest.fn<() => Promise<boolean>>();
 const mockCloseShowFromTerminalShowEndMarker = jest.fn<() => Promise<number>>();
 const mockResolveShowEndInstant = jest.fn<() => Promise<Date>>();
 const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
+const mockRecordGoLiveHandoff =
+  jest.fn<(intent: 'takeover' | 'join', handoff: { open_show_id: number; dj_id: string }) => void>();
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getLatestShow: mockGetLatestShow,
@@ -49,6 +51,10 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   closeShowFromTerminalShowEndMarker: mockCloseShowFromTerminalShowEndMarker,
   resolveShowEndInstant: mockResolveShowEndInstant,
   resolveDjNameForShow: mockResolveDjNameForShow,
+}));
+
+jest.mock('../../../apps/backend/services/flowsheet/go-live-handoff-signal', () => ({
+  recordGoLiveHandoff: mockRecordGoLiveHandoff,
 }));
 
 import { joinShow } from '../../../apps/backend/controllers/flowsheet.controller';
@@ -495,5 +501,54 @@ describe('joinShow — ownership is the only thing branch (c) reads (BS#2405)', 
 
     expect(mockEndShow).toHaveBeenCalledWith(expect.objectContaining({ id: OPEN_SHOW.id }), LAST_LOGGED);
     expect(mockStartShow).toHaveBeenCalled();
+  });
+});
+
+/**
+ * A takeover is invisible after the fact -- `endShow` back-dates `end_time` and
+ * `shows` has no `updated_at` -- so this signal is the only durable evidence
+ * the branch ran. These cases pin that it records resolved handoffs and not
+ * prompts: a caller merely shown the 409 has handed nothing off.
+ */
+describe('joinShow — go-live handoff signal', () => {
+  it.each([
+    ['a completed takeover', { intent: 'takeover', expected_show_id: OPEN_SHOW.id }, 'takeover'],
+    ['a completed co-host join', { intent: 'join' }, 'join'],
+  ] as const)('records %s', async (_name, body, intent) => {
+    const res = createMockRes();
+
+    await joinShow(makeReq({ ...body }), res, next);
+
+    expect(mockRecordGoLiveHandoff).toHaveBeenCalledWith(intent, {
+      open_show_id: OPEN_SHOW.id,
+      dj_id: 'dj-eureka',
+    });
+  });
+
+  it.each([
+    ['the caller is only prompted', {}],
+    ['a stale takeover is refused', { intent: 'takeover', expected_show_id: OPEN_SHOW.id + 1 }],
+  ] as const)('records nothing when %s', async (_name, body) => {
+    const res = createMockRes();
+
+    await joinShow(makeReq({ ...body }), res, next).catch(() => undefined);
+
+    expect(mockRecordGoLiveHandoff).not.toHaveBeenCalled();
+  });
+
+  // `endShow` is the destructive half. If `startShow` then fails, a DJ's show
+  // has been terminated with nobody on air — the case most worth alerting on,
+  // and the one a happy-path-only record would drop.
+  it('records a takeover whose new show fails to start', async () => {
+    mockStartShow.mockRejectedValueOnce(new Error('insert failed'));
+    const res = createMockRes();
+
+    await joinShow(makeReq({ intent: 'takeover', expected_show_id: OPEN_SHOW.id }), res, next).catch(() => undefined);
+
+    expect(mockEndShow).toHaveBeenCalled();
+    expect(mockRecordGoLiveHandoff).toHaveBeenCalledWith('takeover', {
+      open_show_id: OPEN_SHOW.id,
+      dj_id: 'dj-eureka',
+    });
   });
 });
