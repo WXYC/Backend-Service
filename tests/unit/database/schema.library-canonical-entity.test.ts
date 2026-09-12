@@ -85,8 +85,8 @@ describe('schema: library canonical_entity_id columns + index (B-1.1)', () => {
     const mockSource = fs.readFileSync(mockPath, 'utf-8');
     const libraryMock = mockSource.match(/export const library\s*=\s*\{[\s\S]*?\};/)?.[0];
     expect(libraryMock).toBeDefined();
-    expect(libraryMock).toContain("canonical_entity_id: 'canonical_entity_id'");
-    expect(libraryMock).toContain("canonical_entity_confidence: 'canonical_entity_confidence'");
-    expect(libraryMock).toContain("canonical_entity_resolved_at: 'canonical_entity_resolved_at'");
+    expect(libraryMock).toContain("canonical_entity_id: 'library.canonical_entity_id'");
+    expect(libraryMock).toContain("canonical_entity_confidence: 'library.canonical_entity_confidence'");
+    expect(libraryMock).toContain("canonical_entity_resolved_at: 'library.canonical_entity_resolved_at'");
   });
 });

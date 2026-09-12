@@ -55,7 +55,7 @@ describe('schema: flowsheet.legacy_link_attempted_at marker (B-0.5)', () => {
     const mockSource = fs.readFileSync(mockPath, 'utf-8');
     const flowsheetMock = mockSource.match(/export const flowsheet\s*=\s*\{[\s\S]*?\};/)?.[0];
     expect(flowsheetMock).toBeDefined();
-    expect(flowsheetMock).toContain("legacy_release_id: 'legacy_release_id'");
-    expect(flowsheetMock).toContain("legacy_link_attempted_at: 'legacy_link_attempted_at'");
+    expect(flowsheetMock).toContain("legacy_release_id: 'flowsheet.legacy_release_id'");
+    expect(flowsheetMock).toContain("legacy_link_attempted_at: 'flowsheet.legacy_link_attempted_at'");
   });
 });

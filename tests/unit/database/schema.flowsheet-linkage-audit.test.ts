@@ -67,8 +67,8 @@ describe('schema: flowsheet linkage audit columns (B-1.4)', () => {
     const mockSource = fs.readFileSync(mockPath, 'utf-8');
     const flowsheetMock = mockSource.match(/export const flowsheet\s*=\s*\{[\s\S]*?\};/)?.[0];
     expect(flowsheetMock).toBeDefined();
-    expect(flowsheetMock).toContain("linkage_source: 'linkage_source'");
-    expect(flowsheetMock).toContain("linkage_confidence: 'linkage_confidence'");
-    expect(flowsheetMock).toContain("linked_at: 'linked_at'");
+    expect(flowsheetMock).toContain("linkage_source: 'flowsheet.linkage_source'");
+    expect(flowsheetMock).toContain("linkage_confidence: 'flowsheet.linkage_confidence'");
+    expect(flowsheetMock).toContain("linked_at: 'flowsheet.linked_at'");
   });
 });

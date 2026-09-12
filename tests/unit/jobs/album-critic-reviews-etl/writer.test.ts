@@ -29,6 +29,15 @@ type MockDb = typeof db & {
 
 const mockDb = db as MockDb;
 
+/**
+ * The table every column in this writer's UPSERT belongs to. `tests/mocks/
+ * database.mock.ts` maps each column to a table-qualified sentinel
+ * (`'album_critic_reviews.source_url'`), so the qualifier is what
+ * distinguishes this table's `source` from `concerts.source` — see that
+ * file's header for why the bare form could not.
+ */
+const MOCK_TABLE = 'album_critic_reviews';
+
 const makeRow = (): typeof album_critic_reviews.$inferInsert => ({
   album_id: 42,
   source: 'The Quietus',
@@ -79,7 +88,7 @@ describe('upsertRow', () => {
     await upsertRow(makeRow());
 
     const config = upsertConfig();
-    expect(config.target).toEqual(['album_id', 'source_url']);
+    expect(config.target).toEqual([`${MOCK_TABLE}.album_id`, `${MOCK_TABLE}.source_url`]);
   });
 
   it('sets exactly the content columns plus last_modified', async () => {
@@ -99,16 +108,29 @@ describe('upsertRow', () => {
     expect(values).toMatchObject(makeRow());
   });
 
+  /**
+   * A leaf arm's first interpolation is the column, which the mock maps to a
+   * table-qualified sentinel. `column` is recorded bare so the assertions
+   * below read as column lists; `qualifier` carries the table half, pinned
+   * separately — that is what catches an arm built against the wrong table's
+   * column object, which a bare name cannot see.
+   */
   const collectDistinctArms = (
     node: unknown,
-    arms: Array<{ column: string; text: string }> = []
-  ): Array<{ column: string; text: string }> => {
+    arms: Array<{ column: string; qualifier: string; text: string }> = []
+  ): Array<{ column: string; qualifier: string; text: string }> => {
     if (!node || typeof node !== 'object') return arms;
     const n = node as { sql?: readonly string[]; values?: unknown[]; queryChunks?: unknown[] };
     const text = Array.isArray(n.sql) ? n.sql.join('|') : '';
     if (text.includes('IS DISTINCT FROM')) {
       const first = n.values?.[0];
-      arms.push({ column: typeof first === 'string' ? first : JSON.stringify(first), text });
+      const sentinel = typeof first === 'string' ? first : JSON.stringify(first);
+      const dot = sentinel.indexOf('.');
+      arms.push({
+        column: dot === -1 ? sentinel : sentinel.slice(dot + 1),
+        qualifier: dot === -1 ? '' : sentinel.slice(0, dot),
+        text,
+      });
       return arms;
     }
     for (const child of [...(n.values ?? []), ...(n.queryChunks ?? [])]) collectDistinctArms(child, arms);
@@ -123,6 +145,9 @@ describe('upsertRow', () => {
     expect(config.setWhere).toBeDefined();
     const arms = collectDistinctArms(config.setWhere);
     expect(arms.map((a) => a.column).sort()).toEqual([...SET_CONTENT_COLUMNS].sort());
+    // Every arm is built from THIS table's column object, not a same-named
+    // column on another table — invisible before the sentinels were qualified.
+    expect([...new Set(arms.map((a) => a.qualifier))]).toEqual([MOCK_TABLE]);
     const armColumns = new Set(arms.map((a) => a.column));
     expect(armColumns.has('last_modified')).toBe(false);
     expect(armColumns.has('album_id')).toBe(false);

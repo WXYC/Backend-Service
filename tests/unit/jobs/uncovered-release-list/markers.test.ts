@@ -47,7 +47,9 @@ describe('recordHandoffs', () => {
   it('conflicts on album_id (the migration-0156 unique index)', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 1 }]);
     await recordHandoffs([10]);
-    expect(upsertConfig().target).toBe('album_id'); // the mock table maps columns to their names
+    // The mock maps each column to a TABLE-QUALIFIED sentinel, so this pins
+    // the conflict target's table as well as its column name.
+    expect(upsertConfig().target).toBe('uncovered_release_search_markers.album_id');
   });
 
   it('a repeat handoff refreshes last_handed_off_at and bumps handoff_count rather than a no-op', async () => {

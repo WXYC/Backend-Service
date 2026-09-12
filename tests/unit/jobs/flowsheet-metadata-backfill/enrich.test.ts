@@ -766,12 +766,13 @@ describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () =
       // so the visible text alone already proves the existing-column
       // reference sits BEFORE the literal `, excluded."<field>")` suffix —
       // i.e. COALESCE's first (winning) argument is the existing value, not
-      // `excluded`. `values` confirms an interpolation happened at all
-      // (the mock's album_metadata.<field> placeholder is the field's own
-      // name — see tests/mocks/database.mock.ts).
+      // `excluded`. `values` confirms an interpolation happened at all, and
+      // that it came from album_metadata rather than a same-named flowsheet
+      // column: the mock's placeholder is the TABLE-QUALIFIED
+      // `album_metadata.<field>` — see tests/mocks/database.mock.ts.
       expect(rendered).toMatch(/^COALESCE\(/i);
       expect(rendered).toBe(`COALESCE(, excluded."${field}")`);
-      expect(values).toContain(field);
+      expect(values).toContain(`album_metadata.${field}`);
     }
     // updated_at is NOT COALESCE'd — freezing it would neuter the setWhere
     // race guard (a stale run could never re-pass `updated_at < NOW()`).

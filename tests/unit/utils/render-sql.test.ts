@@ -149,18 +149,24 @@ describe('renderValue — bound SQL parameter values', () => {
 
   it('renders an interpolated mock schema table as an empty string', () => {
     // `tests/mocks/database.mock.ts` models every table as `{ column:
-    // 'column' }` (or `{}`), so `` sql`FROM ${flowsheet} f` `` carries a table
-    // *reference* with no name to render. Jobs that interpolate tables rather
-    // than naming them via `sql.raw` (e.g. jobs/legacy-linkage-resolve) hit
-    // this on every statement.
-    expect(renderValue({ id: 'id', album_id: 'album_id' })).toBe('');
+    // '<table>.<column>' }` (or `{}`), so `` sql`FROM ${flowsheet} f` ``
+    // carries a table *reference* with no name to render. Jobs that
+    // interpolate tables rather than naming them via `sql.raw` (e.g.
+    // jobs/legacy-linkage-resolve) hit this on every statement.
+    expect(renderValue({ id: 'flowsheet.id', album_id: 'flowsheet.album_id' })).toBe('');
     expect(renderValue({})).toBe('');
   });
 
   it('still throws on a bound object that is not a mock table', () => {
-    // The key-equals-value test is what separates the two: a JSONB param or
+    // The shared-qualifier test is what separates the two: a JSONB param or
     // any other genuine object value must not be silently swallowed.
-    expect(() => renderValue({ id: 'not-the-key' })).toThrow(/not-the-key/);
+    expect(() => renderValue({ id: 'not-qualified' })).toThrow(/not-qualified/);
+  });
+
+  it('throws on an object whose values are qualified by DIFFERENT tables', () => {
+    // Not a mock table — a mock table's sentinels all share one qualifier.
+    // Without this, any two-key object of dotted strings would be swallowed.
+    expect(() => renderValue({ id: 'flowsheet.id', album_id: 'library.id' })).toThrow(/library\.id/);
   });
 
   it('throws with the offending value serialized for an unrecognized shape', () => {

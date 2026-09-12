@@ -82,7 +82,7 @@ describe('schema: library.artist_name + library.search_doc denormalization (A.1)
     const mockSource = fs.readFileSync(mockPath, 'utf-8');
     const libraryMock = mockSource.match(/export const library\s*=\s*\{[\s\S]*?\};/)?.[0];
     expect(libraryMock).toBeDefined();
-    expect(libraryMock).toContain("artist_name: 'artist_name'");
-    expect(libraryMock).toContain("search_doc: 'search_doc'");
+    expect(libraryMock).toContain("artist_name: 'library.artist_name'");
+    expect(libraryMock).toContain("search_doc: 'library.search_doc'");
   });
 });

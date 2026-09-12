@@ -49,6 +49,6 @@ describe('schema: flowsheet.dj_name denormalization (step 5b.1)', () => {
     const mockSource = fs.readFileSync(mockPath, 'utf-8');
     const flowsheetMock = mockSource.match(/export const flowsheet\s*=\s*\{[\s\S]*?\};/)?.[0];
     expect(flowsheetMock).toBeDefined();
-    expect(flowsheetMock).toContain("dj_name: 'dj_name'");
+    expect(flowsheetMock).toContain("dj_name: 'flowsheet.dj_name'");
   });
 });
