@@ -1398,15 +1398,16 @@ export const getShowInfo: RequestHandler<object, unknown, object, { show_id: str
     throw new WxycError(`Show ${showId} not found`, 404);
   }
 
-  // The archive walk (BS#2399) pivots on this show's own `start_time`, so it
-  // can only start once `getShowMetadata` has returned — but it shares the
-  // round trip with the two entry enrichments rather than adding one after
-  // them. dj-site#1394 renders "<< Previous Show" / "Next Show >>" straight
-  // off the two ids; a null means the end of the archive, never a sentinel.
+  // The archive walk shares this round trip with the two entry enrichments
+  // rather than adding one after them. It resolves the pivot's instant inside
+  // its own statement, so it needs only the id. dj-site renders
+  // "<< Previous Show" / "Next Show >>" straight off the two ids; a null means
+  // the end of the archive, never a sentinel — and is also what a failed
+  // lookup degrades to, so the page survives a `shows` blip.
   const [, , adjacentShows] = await Promise.all([
     flowsheet_service.attachUpcomingShows(entries),
     flowsheet_service.attachCriticReviews(entries),
-    flowsheet_service.getAdjacentShowIds(showId, showMetadata.start_time),
+    flowsheet_service.getAdjacentShowIds(showId),
   ]);
 
   res.status(200).json({

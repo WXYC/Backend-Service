@@ -2157,7 +2157,7 @@ export type AdjacentShowIds = {
  * key is both the range bound and the sort, and `id` is the only column
  * selected, so each direction is an index-only scan stopping at one row.
  */
-export const buildAdjacentShowQuery = (direction: 'previous' | 'next', start_time: Date, show_id: number) => {
+export const buildAdjacentShowQuery = (direction: 'previous' | 'next', show_id: number) => {
   const comparison = direction === 'previous' ? sql`<` : sql`>`;
   const order = direction === 'previous' ? desc : asc;
 
@@ -2165,13 +2165,18 @@ export const buildAdjacentShowQuery = (direction: 'previous' | 'next', start_tim
     db
       .select({ id: shows.id })
       .from(shows)
-      // The pivot is bound as an ISO string with an explicit `::timestamptz`
-      // rather than as a bare Date: a raw `sql` template gets no help from the
-      // column-aware timestamptz encoder, and the postgres-js driver's
-      // serializer override mangles a JS Date interpolated directly (the same
-      // trap `getShowsInTimeWindow`'s third arm documents).
+      // The pivot's `start_time` is read inside the statement, never bound from
+      // a JS `Date`. `shows.start_time` defaults to `now()`, which Postgres
+      // stores at microsecond precision, and `Date.toISOString()` renders only
+      // milliseconds — so a bound pivot is strictly earlier than the row it
+      // came from, the row satisfies its own `>` predicate on the first element
+      // of the row value, and `next` returns the show already being viewed.
+      // Every show `startShow` creates takes the default, so that truncation is
+      // the ordinary case, not an edge one. (ETL rows are `epochMsToDate`
+      // -aligned and would have hidden it.) The subquery is a primary-key
+      // lookup, so it costs one extra index hit and removes the whole class.
       .where(
-        sql`(${shows.start_time}, ${shows.id}) ${comparison} (${start_time.toISOString()}::timestamptz, ${show_id})`
+        sql`(${shows.start_time}, ${shows.id}) ${comparison} ((select ${shows.start_time} from ${shows} where ${shows.id} = ${show_id}), ${show_id})`
       )
       .orderBy(order(shows.start_time), order(shows.id))
       .limit(1)
@@ -2186,16 +2191,31 @@ export const buildAdjacentShowQuery = (direction: 'previous' | 'next', start_tim
  * Two statements, run concurrently — a single statement would need a UNION of
  * the same two index scans, and each direction has its own sort order.
  */
-export const getAdjacentShowIds = async (show_id: number, start_time: Date): Promise<AdjacentShowIds> => {
-  const [previous, next] = await Promise.all([
-    buildAdjacentShowQuery('previous', start_time, show_id),
-    buildAdjacentShowQuery('next', start_time, show_id),
-  ]);
+export const getAdjacentShowIds = async (show_id: number): Promise<AdjacentShowIds> => {
+  // Same "strictly additive, must never break the response" contract
+  // `attachCriticReviews` applies, and for the same reason: this rides the
+  // `GET /flowsheet/playlist` round trip, where an unguarded rejection would
+  // 500 the whole archived show — every entry, the DJ, the date — over two
+  // decorative navigation links. A statement timeout or a lock wait on
+  // `shows` degrades to "you are at the end of the archive", which is the
+  // meaning null already carries at both real ends.
+  try {
+    const [previous, next] = await Promise.all([
+      buildAdjacentShowQuery('previous', show_id),
+      buildAdjacentShowQuery('next', show_id),
+    ]);
 
-  return {
-    previous_show_id: previous[0]?.id ?? null,
-    next_show_id: next[0]?.id ?? null,
-  };
+    return {
+      previous_show_id: previous[0]?.id ?? null,
+      next_show_id: next[0]?.id ?? null,
+    };
+  } catch (err) {
+    Sentry.captureException(err, {
+      tags: { subsystem: 'adjacent-shows' },
+      extra: { show_id },
+    });
+    return { previous_show_id: null, next_show_id: null };
+  }
 };
 
 /**
