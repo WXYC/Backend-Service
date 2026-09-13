@@ -857,7 +857,10 @@ describe('flowsheet.controller', () => {
 
       await getShowInfo(req as Request, res as Response, mockNext);
 
-      expect(mockGetAdjacentShowIds).toHaveBeenCalledWith(1, SHOW_START_TIME);
+      // Only the id: the pivot instant is read inside the statement, because a
+      // JS-bound `start_time` truncates Postgres's microseconds and makes the
+      // show its own "next".
+      expect(mockGetAdjacentShowIds).toHaveBeenCalledWith(1);
       expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ previous_show_id: 41, next_show_id: 43 }));
     });
 

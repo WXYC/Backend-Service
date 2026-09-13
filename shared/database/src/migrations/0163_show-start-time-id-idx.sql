@@ -23,10 +23,12 @@
 --     transaction and `CREATE INDEX CONCURRENTLY cannot run inside a transaction
 --     block` — same constraint as 0057, 0068, 0070, 0074, 0078, 0080, 0139,
 --     0144, 0148, 0154.
---   - The build is a sub-second sort of 72,893 narrow rows, but the
---     AccessExclusiveLock still pauses `POST /flowsheet/join` and
---     `POST /flowsheet/end` for its duration. If the deploy lands mid-show, run
---     it out of band first:
+--   - The build is a sub-second sort of 72,893 narrow rows, but the SHARE lock
+--     a non-concurrent CREATE INDEX takes still pauses `POST /flowsheet/join`
+--     and `POST /flowsheet/end` for its duration. Readers are unaffected --
+--     SHARE conflicts with ROW EXCLUSIVE (writes), not with the SELECTs the
+--     public flowsheet serves. If the deploy lands mid-show, run it out of
+--     band first:
 --       CREATE INDEX CONCURRENTLY IF NOT EXISTS "shows_start_time_id_idx"
 --         ON "wxyc_schema"."shows" USING btree ("start_time","id");
 --   - `IF NOT EXISTS` makes this a no-op against a database that already has the
