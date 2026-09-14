@@ -149,6 +149,17 @@ library_route.post('/', requirePermissions({ catalog: ['write'] }), libraryContr
 // never POST, so this route can't be shadowed regardless of placement.
 library_route.post('/filings', requirePermissions({ catalog: ['write'] }), libraryController.createLibraryFiling);
 
+// Discogs autopopulate: resolve a pasted Discogs release URL (or bare id) to
+// the add-to-rotation bench's prefill fields via LML. `catalog: ['read']`
+// matches the sibling catalog reads on this router. Two literal segments, so
+// it carries none of the `/:id` ordering hazards documented throughout this
+// file — no templated route on this router shares both segments.
+library_route.get(
+  '/releases/discogs-prefill',
+  requirePermissions({ catalog: ['read'] }),
+  libraryController.getDiscogsReleasePrefill
+);
+
 library_route.get('/rotation', requirePermissions({ catalog: ['read'] }), libraryController.getRotation);
 
 // BS#2109: the cataloging-backlog queue. REGISTRATION ORDER IS LOAD-BEARING —

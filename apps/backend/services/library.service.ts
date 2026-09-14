@@ -2120,6 +2120,67 @@ export async function getRotationTracksFromRelease(releaseId: number): Promise<R
   return pending;
 }
 
+/**
+ * Discogs autopopulate prefill: the subset of `DiscogsReleaseMetadata` the
+ * add-to-rotation bench prefills from a pasted Discogs release link.
+ *
+ * Deliberately an internal shape, NOT a wxyc-shared contract type — the
+ * contract ticket owns the wire schema; this endpoint stays internal and
+ * reuses `DiscogsReleaseMetadata`'s field semantics verbatim. Field names
+ * mirror `AlbumCreateFields` (`album_title`, `label`, `label_id`) plus the
+ * artist name and the Discogs identifiers the bench carries onto the filing.
+ */
+export type DiscogsReleasePrefill = {
+  discogs_release_id: number;
+  discogs_master_id: number | null;
+  artist_name: string;
+  album_title: string;
+  label: string | null;
+  label_id: number | null;
+  year: number | null;
+  discogs_artist_id: number | null;
+  genres: string[];
+  styles: string[];
+  artwork_url: string | null;
+};
+
+/**
+ * Resolve a Discogs release id to prefill fields via LML
+ * (`GET /api/v1/discogs/release/{id}`).
+ *
+ * Returns `null` when LML reports Discogs has no such release (404), which the
+ * controller maps to a named 404. Every other LML failure (timeout, 5xx,
+ * unconfigured `LIBRARY_METADATA_URL`) bubbles as an `LmlClientError` so the
+ * caller sees the upstream status — the operator asked to resolve a specific
+ * link, so a hard upstream failure is surfaced rather than silently returning
+ * an empty prefill. Mirrors `getRotationTracksFromRelease`'s 404-to-null,
+ * everything-else-bubbles contract.
+ */
+export async function resolveDiscogsReleasePrefill(releaseId: number): Promise<DiscogsReleasePrefill | null> {
+  let release: DiscogsReleaseMetadata;
+  try {
+    release = await getRelease(releaseId);
+  } catch (err) {
+    if (err instanceof LmlClientError && err.statusCode === 404) return null;
+    throw err;
+  }
+  return {
+    discogs_release_id: release.release_id,
+    discogs_master_id: release.master_id ?? null,
+    artist_name: release.artist,
+    album_title: release.title,
+    label: release.label ?? null,
+    label_id: release.label_id ?? null,
+    // Discogs encodes "year unknown" as 0; coerce to null so the bench does
+    // not prefill a literal "0" year (mirrors `populateReleaseMetadata`).
+    year: release.year || null,
+    discogs_artist_id: release.artist_id ?? null,
+    genres: release.genres ?? [],
+    styles: release.styles ?? [],
+    artwork_url: filterSpacerGif(release.artwork_url),
+  };
+}
+
 // ============================================================================
 // Compilation-track (CTA) write path — BS#1964 / Phase 3.5 `/wxycdb` cutover.
 //
