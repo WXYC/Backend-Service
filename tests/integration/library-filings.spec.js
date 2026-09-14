@@ -127,6 +127,26 @@ describe('POST /library/filings', () => {
     expect(res.body.rotation).toBeUndefined();
   });
 
+  test('treats an explicit rotation: null as a filing with no rotation', async () => {
+    const suffix = uniqueSuffix();
+    const res = await auth
+      .post('/library/filings')
+      .send({
+        artist: {
+          kind: 'create',
+          artist_name: `Filing NullRot ${suffix}`,
+          code_letters: suffix,
+          genre_id: 11,
+          code_number: 1,
+        },
+        release: { album_title: `Filing NullRot Album ${suffix}`, label: 'Test Label', genre_id: 11, format_id: 1 },
+        rotation: null,
+      })
+      .expect(200);
+
+    expect(res.body.rotation).toBeUndefined();
+  });
+
   test('existing-artist arm skips creation and reuses the referenced artist', async () => {
     const suffix = uniqueSuffix();
     const existingArtist = await auth
