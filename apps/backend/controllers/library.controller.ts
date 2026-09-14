@@ -478,12 +478,20 @@ type NewArtistRequest = {
  * Validate an operator-supplied artist `code_number` for `POST
  * /library/artists` (BS#2475). Bounded at `INT4_MAX`, not `INT2_MAX`: the
  * backing column is `genre_artist_crossreference.artist_genre_code`, a
- * Postgres `integer`, not `library.code_number`'s `smallint` — matches the
- * published `AddArtistRequest.code_number` bound (`wxyc-shared/api.yaml`).
+ * Postgres `integer`, not `library.code_number`'s `smallint`.
+ *
+ * The floor is **0**, below the published `AddArtistRequest.code_number`
+ * minimum of 1 (`wxyc-shared/api.yaml`), deliberately: the whole
+ * Various-Artists surface is filed at `artist_genre_code = 0` — 68 rows in
+ * the production clone (see `resolveArtistByCode` below, which accepts 0 for
+ * the same reason) — and this endpoint accepted 0 unvalidated for its whole
+ * life before BS#2475. The write path must not refuse a value the catalog
+ * demonstrably holds and the read path resolves; the contract's floor is the
+ * side that needs amending.
  */
 const validateArtistCodeNumber = (code_number: unknown): number => {
-  if (typeof code_number !== 'number' || !Number.isInteger(code_number) || code_number < 1 || code_number > INT4_MAX) {
-    throw new WxycError(`code_number must be an integer between 1 and ${INT4_MAX}`, 400);
+  if (typeof code_number !== 'number' || !Number.isInteger(code_number) || code_number < 0 || code_number > INT4_MAX) {
+    throw new WxycError(`code_number must be an integer between 0 and ${INT4_MAX}`, 400);
   }
   return code_number;
 };
@@ -494,21 +502,26 @@ const validateArtistCodeNumber = (code_number: unknown): number => {
  * `peekArtistNumber` preview route, NOT `generateAlbumCodeNumber`, which is
  * the unrelated per-artist release number.
  *
- * The BS#2475 precondition audit found the constraint as filed impossible
- * (it spans `artists` and `genre_artist_crossreference`) and the ETL
- * exposure real (`ensureArtist`'s dedup miss would turn a unique index into a
- * whole-run abort, the BS#2033 hazard class), so no index backs this triple —
- * there is no 23505 to catch. This advisory re-check against
- * `getArtistByCode` is the whole retry: a concurrent create landing on the
- * same number between generate and check gets one recompute against the
- * now-current MAX, then whatever conflict remains is reported by the caller's
- * own pre-check. Residual race accepted on the same single-librarian grounds
- * as BS#2410's release-side decision.
+ * Bound-checked before any write: the generator returns bucket-MAX + 1, and
+ * the supplied arm's ceiling is an *inclusive* `INT4_MAX`, so a bucket whose
+ * top row sits at exactly `INT4_MAX` would otherwise assign a number the
+ * `integer` crossreference column cannot hold and fail only at insert time
+ * (SQLSTATE 22003). The 409 carries a `code` discriminant so a client can
+ * tell "no number left to assign" from the pre-check's "that number is
+ * taken".
+ *
+ * No collision check here: the caller's own `getArtistByCode` pre-check is
+ * the collision detector, and re-invoking this helper on a pre-check hit is
+ * the whole retry — see the recompute branch in `addArtist` below.
  */
 const assignArtistCodeNumber = async (code_letters: string, genre_id: number): Promise<number> => {
   const code_number = await libraryService.generateArtistNumber(code_letters, genre_id);
-  if (await libraryService.getArtistByCode(code_letters, genre_id, code_number)) {
-    return libraryService.generateArtistNumber(code_letters, genre_id);
+  if (code_number > INT4_MAX) {
+    throw new WxycError(
+      `No assignable code_number left for those code letters in that genre: the next number would exceed ${INT4_MAX}. Supply an explicit unused code_number instead.`,
+      409,
+      { code: 'artist_code_number_exhausted' }
+    );
   }
   return code_number;
 };
@@ -519,13 +532,24 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
     throw new WxycError('Missing Request Parameters: artist_name, code_letters, or genre_id', 400);
   }
 
-  // Omitted `code_number` (BS#2475): server-assigns it below. Supplied: an
-  // MD's deliberate choice, validated but never rewritten -- a collision on
-  // that arm is reported as a straight 409, not silently recomputed.
-  const code_number =
-    body.code_number === undefined
-      ? await assignArtistCodeNumber(body.code_letters, body.genre_id)
-      : validateArtistCodeNumber(body.code_number);
+  // NFC once, up front, and every read below keys on it: the generator and
+  // both code pre-checks match `artists.code_letters` byte-for-byte, but
+  // `insertArtistWithGenreCrossreference` stores the NFC form (BS#1897). An
+  // NFD-composed `code_letters` would otherwise read an empty bucket, assign
+  // 1 into a shelf that already holds rows, and file the row — stored NFC —
+  // into exactly the collision the pre-check exists to prevent.
+  const code_letters = body.code_letters.normalize('NFC');
+
+  // Omitted or JSON-`null` `code_number` (BS#2475): server-assigns it below.
+  // `!= null` rather than a falsy check because `code_number: 0` is a real
+  // filing (the V/A shelves — see `validateArtistCodeNumber` above) and must
+  // take the supplied arm. Supplied: an MD's deliberate choice, validated but
+  // never rewritten -- a collision on that arm is reported as a straight 409,
+  // not silently recomputed.
+  const supplied = body.code_number != null;
+  let code_number = supplied
+    ? validateArtistCodeNumber(body.code_number)
+    : await assignArtistCodeNumber(code_letters, body.genre_id);
 
   // The code-triple check runs first and wins a collision on both axes: a
   // taken code blocks the write outright no matter what name accompanies it,
@@ -535,7 +559,22 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
   // of sync. `reason` gives this 409 the same positive discriminant as the
   // name-conflict branch below, so a client never has to infer "code
   // conflict" from the absence of a field.
-  const existingArtist = await libraryService.getArtistByCode(body.code_letters, body.genre_id, code_number);
+  let existingArtist = await libraryService.getArtistByCode(code_letters, body.genre_id, code_number);
+  // Server-assigned arm only: a pre-check hit means a concurrent create took
+  // the generated number between generate and check, so recompute once
+  // against the now-current MAX and re-check. The pre-check doubling as the
+  // retry trigger is the whole retry: the BS#2475 precondition audit found
+  // the unique constraint as filed impossible (it spans `artists` and
+  // `genre_artist_crossreference`) and the ETL exposure real (`ensureArtist`'s
+  // dedup miss would turn a unique index into a whole-run abort, the BS#2033
+  // hazard class), so no index backs this triple and there is no 23505 to
+  // catch — whatever conflict remains after one recompute is reported below.
+  // Residual race accepted on the same single-librarian grounds as BS#2410's
+  // release-side decision.
+  if (existingArtist && !supplied) {
+    code_number = await assignArtistCodeNumber(code_letters, body.genre_id);
+    existingArtist = await libraryService.getArtistByCode(code_letters, body.genre_id, code_number);
+  }
   if (existingArtist) {
     res.status(409).json({
       message: 'Artist code already exists for that genre and code letters.',
@@ -572,11 +611,14 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
   const new_artist: NewArtist = {
     artist_name: body.artist_name,
     alphabetical_name: body.alphabetical_name ?? body.artist_name,
-    code_letters: body.code_letters,
+    code_letters,
   };
 
-  const response: Artist = await libraryService.insertArtist(new_artist);
-  await libraryService.insertArtistGenreCrossreference(response.id, body.genre_id, code_number);
+  const response: Artist = await libraryService.insertArtistWithGenreCrossreference(
+    new_artist,
+    body.genre_id,
+    code_number
+  );
   res.status(201).json({
     ...libraryService.serializeArtist(response),
     code_number,
@@ -706,7 +748,7 @@ const parseCodeQueryInt = (raw: string | undefined, name: string, min: number): 
  * src/schema.ts:439`) storing a trimmed, upper-case, ASCII value -- every one
  * of the 24,078 rows in the production clone matches that shape, with `/` the
  * only non-alphanumeric character in use (the `V/A` filing). Neither writer
- * enforces that shape, though: `insertArtist` (`library.service.ts`) only
+ * enforces that shape, though: `insertArtistWithGenreCrossreference` (`library.service.ts`) only
  * NFC-normalizes -- no trim, no upper-case -- and the tubafrenzy `library-etl`
  * job writes `codeLetters ?? '??'` verbatim (`jobs/library-etl/job.ts:441`),
  * so a row filed non-canonically can already be sitting in the table.
@@ -724,7 +766,7 @@ const parseCodeQueryInt = (raw: string | undefined, name: string, min: number): 
  * digits, or `/`, 1-4 characters. A 5+ character value can never match a row
  * either (BS#2149 review finding 2) -- unvalidated, it used to fall through
  * to the 404 branch, whose own docs called that "safe to create an artist
- * under it," right up until `insertArtist`'s `varchar(4)` column threw
+ * under it," right up until the artist insert's `varchar(4)` column threw
  * SQLSTATE 22001 on the follow-up write and this route's sibling inherited a
  * generic 500 plus a Sentry event. Restricted to this input charset,
  * `.toUpperCase()` is always a deterministic, length- and charset-preserving
@@ -758,8 +800,9 @@ const validateCanonicalCodeLetters = (raw: string): string => {
  * `code_number` accepts **0**: the whole Various-Artists surface is filed at
  * `artist_genre_code = 0` — 68 such rows in the production clone, 66 of them
  * `code_letters = 'V/A'` and the other two a `VA`-spelled "V/A" and an `UNK`
- * "Unknown", both in genre 6. Neither sibling route imposes a floor: `addArtist`
- * passes the value straight through and `peekArtistNumber` uses
+ * "Unknown", both in genre 6. Neither sibling route imposes a higher floor:
+ * `addArtist` validates at the same 0 floor (`validateArtistCodeNumber`) and
+ * `peekArtistNumber` uses
  * `Number.isFinite`. A `< 1` floor here made the one filing class that most
  * needs code-first resolution (compilations have no artist name to search by)
  * the one class this route could not answer.
@@ -799,9 +842,9 @@ export const resolveArtistByCode: RequestHandler = async (
   // Validate against the column's real domain, then trim + upper-case -- see
   // `validateCanonicalCodeLetters` above for why a bare `.trim().toUpperCase()`
   // is not a safe normalization on its own. (The sibling write path,
-  // `addArtist`, still compares raw; widening its pre-check is a separate
-  // change, deliberately not made here because it alters an existing route's
-  // 409 behavior.)
+  // `addArtist`, only NFC-normalizes -- no trim, no upper-case; widening its
+  // pre-check to this fold is a separate change, deliberately not made here
+  // because it alters an existing route's 409 behavior.)
   const codeLetters = validateCanonicalCodeLetters(query.code_letters);
 
   // Code lookup FIRST, genre check only to explain a miss: a hit proves the genre

@@ -2773,7 +2773,7 @@ export const artistIdFromName = async (artist_name: string, genre_id: number): P
         // former `lower(artist_name) = lower($name)` is collation-aware but NOT
         // Unicode-form aware: `Nilüfer Yanya` in NFC (`ü` = U+00FC) vs NFD (`u`
         // + U+0308) is byte-distinct and misses, so the caller falls through to
-        // insertArtist and creates a duplicate `artists` row. `fold_artist_name`
+        // the artist insert and creates a duplicate `artists` row. `fold_artist_name`
         // (migration 0134) folds NFC/NFD/ASCII-fold/case onto one key on BOTH
         // sides — an app-side `.normalize('NFC')` on the input alone can't match
         // an NFD-stored row. Backed by `artists_fold_name_idx`. The genre
@@ -2791,35 +2791,40 @@ export const artistIdFromName = async (artist_name: string, genre_id: number): P
   }
 };
 
-export const insertArtist = async (new_artist: NewArtist) => {
-  // Store names NFC-canonical (BS#1897). The matcher folds NFC/NFD/ASCII-fold
-  // together for *lookup*, but the *stored* form must be a single canonical
-  // shape or later exact-equality consumers (e.g. the artist-identity ETL
-  // match, BS#521) see spurious NFC/NFD splits. NFC preserves the diacritics
-  // themselves, so the display string (bound by the librarian V/A invariant)
-  // is unchanged — only the composition form is canonicalized. `code_letters`
-  // and `alphabetical_name` can carry diacritics from the source, so they get
-  // the same treatment for consistency with `artist_name`.
+/**
+ * The `addArtist` write: the `artists` row and its
+ * `genre_artist_crossreference` filing in ONE transaction. An artist without
+ * a crossreference is filed nowhere — invisible to every genre-scoped lookup
+ * and to the very pre-checks that would prevent re-creating it — so a
+ * crossreference failure (e.g. SQLSTATE 22003 on an out-of-range
+ * `artist_genre_code`) must roll the artist row back rather than orphan it.
+ *
+ * Stores names NFC-canonical (BS#1897). The matcher folds NFC/NFD/ASCII-fold
+ * together for *lookup*, but the *stored* form must be a single canonical
+ * shape or later exact-equality consumers (e.g. the artist-identity ETL
+ * match, BS#521) see spurious NFC/NFD splits. NFC preserves the diacritics
+ * themselves, so the display string (bound by the librarian V/A invariant)
+ * is unchanged — only the composition form is canonicalized. `code_letters`
+ * and `alphabetical_name` can carry diacritics from the source, so they get
+ * the same treatment for consistency with `artist_name`.
+ */
+export const insertArtistWithGenreCrossreference = async (
+  new_artist: NewArtist,
+  genre_id: number,
+  artist_genre_code: number
+): Promise<Artist> => {
   const normalized: NewArtist = {
     ...new_artist,
     artist_name: new_artist.artist_name.normalize('NFC'),
     alphabetical_name: new_artist.alphabetical_name.normalize('NFC'),
     code_letters: new_artist.code_letters.normalize('NFC'),
   };
-  const response = await db.insert(artists).values(normalized).returning();
-  return response[0];
-};
-
-export const insertArtistGenreCrossreference = async (
-  artist_id: number,
-  genre_id: number,
-  artist_genre_code: number
-) => {
-  const response = await db
-    .insert(genre_artist_crossreference)
-    .values({ artist_id, genre_id, artist_genre_code })
-    .returning();
-  return response[0];
+  return db.transaction(async (tx) => {
+    const inserted = await tx.insert(artists).values(normalized).returning();
+    const artist = inserted[0];
+    await tx.insert(genre_artist_crossreference).values({ artist_id: artist.id, genre_id, artist_genre_code });
+    return artist;
+  });
 };
 
 /**
@@ -2987,7 +2992,7 @@ export type UpdateArtistRow = {
 
 /**
  * Applies the `modifyArtist` form's edit to `artists`. Normalizes both fields
- * to NFC on write, matching `insertArtist` (BS#1897) -- the stored form must
+ * to NFC on write, matching `insertArtistWithGenreCrossreference` (BS#1897) -- the stored form must
  * stay a single canonical composition or the `fold_artist_name` matcher's
  * exact-equality consumers see spurious NFC/NFD splits.
  */
