@@ -1763,17 +1763,49 @@ describe('Library Artists', () => {
       expectErrorContains(res, 'Missing Request Parameters');
     });
 
-    test('returns 400 when code_number is missing', async () => {
+    // BS#2475: omitting code_number is no longer a 400 -- the server assigns
+    // bucket-MAX + 1. Seeding the bucket first (a fresh code_letters, so no
+    // other test's rows can raise its MAX) makes the assignment
+    // deterministic, and the by-code follow-up proves the crossreference row
+    // landed too -- the assignment is filed, not just echoed.
+    test('server-assigns the next code_number in the bucket when code_number is omitted', async () => {
+      const uniqueSuffix = Date.now().toString(36).toUpperCase().slice(-3);
+
+      await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `BS2475 Seed ${uniqueSuffix}`,
+          code_letters: uniqueSuffix,
+          genre_id: 11,
+          code_number: 41,
+        })
+        .expect(201);
+
       const res = await auth
         .post('/library/artists')
         .send({
-          artist_name: 'Test Artist',
-          code_letters: 'TS',
+          artist_name: `BS2475 Assigned ${uniqueSuffix}`,
+          code_letters: uniqueSuffix,
           genre_id: 11,
         })
-        .expect(400);
+        .expect(201);
 
-      expectErrorContains(res, 'Missing Request Parameters');
+      expect(res.body.code_number).toBe(42);
+
+      const byCode = await auth
+        .get('/library/artists/by-code')
+        .query({ genre_id: 11, code_letters: uniqueSuffix, code_number: 42 })
+        .expect(200);
+
+      expect(byCode.body.artists).toEqual([
+        {
+          id: res.body.id,
+          artist_name: `BS2475 Assigned ${uniqueSuffix}`,
+          code_letters: uniqueSuffix,
+          code_number: 42,
+          genre_id: 11,
+        },
+      ]);
     });
 
     test('accepts optional alphabetical_name and returns it', async () => {

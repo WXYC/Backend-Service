@@ -18,9 +18,8 @@ const mockGetArtistsByCode =
   jest.fn<(codeLetters: string, genreId: number, codeNumber: number) => Promise<ArtistConflictRow[]>>();
 const mockGenreExists = jest.fn<(genreId: number) => Promise<boolean>>();
 const mockGenerateArtistNumber = jest.fn<(codeLetters: string, genreId: number) => Promise<number>>();
-const mockInsertArtist = jest.fn<(artist: Record<string, unknown>) => Promise<Record<string, unknown>>>();
-const mockInsertArtistGenreCrossreference =
-  jest.fn<(artistId: number, genreId: number, codeNumber: number) => Promise<unknown>>();
+const mockInsertArtistWithGenreCrossreference =
+  jest.fn<(artist: Record<string, unknown>, genreId: number, codeNumber: number) => Promise<Record<string, unknown>>>();
 const mockInsertAlbum = jest.fn<(album: Record<string, unknown>) => Promise<Record<string, unknown>>>();
 const mockGenerateAlbumCodeNumber = jest.fn<(artistId: number) => Promise<number>>();
 const mockCreateLabel = jest.fn<(label: string) => Promise<{ id: number }>>();
@@ -192,8 +191,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   mapLookupToCanonicalEntity: mockMapLookupToCanonicalEntity,
   artistIdFromName: mockArtistIdFromName,
   getArtistNameById: mockGetArtistNameById,
-  insertArtist: mockInsertArtist,
-  insertArtistGenreCrossreference: mockInsertArtistGenreCrossreference,
+  insertArtistWithGenreCrossreference: mockInsertArtistWithGenreCrossreference,
   getArtistByCode: mockGetArtistByCode,
   getArtistsByCode: mockGetArtistsByCode,
   genreExists: mockGenreExists,
@@ -1108,7 +1106,7 @@ describe('library.controller', () => {
       }) as unknown as Request;
 
     it('creates a new artist when neither the code triple nor the name conflicts in that genre', async () => {
-      mockInsertArtist.mockResolvedValue({
+      mockInsertArtistWithGenreCrossreference.mockResolvedValue({
         id: 55,
         artist_name: 'Chuquimamani-Condori',
         alphabetical_name: 'Chuquimamani-Condori',
@@ -1120,8 +1118,10 @@ describe('library.controller', () => {
 
       expect(mockGetArtistByCode).toHaveBeenCalledWith('CH', 15, 12);
       expect(mockArtistIdFromName).toHaveBeenCalledWith('Chuquimamani-Condori', 15);
-      expect(mockInsertArtist).toHaveBeenCalledWith(
-        expect.objectContaining({ artist_name: 'Chuquimamani-Condori', code_letters: 'CH' })
+      expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalledWith(
+        expect.objectContaining({ artist_name: 'Chuquimamani-Condori', code_letters: 'CH' }),
+        15,
+        12
       );
       expect(res.status).toHaveBeenCalledWith(201);
     });
@@ -1138,7 +1138,7 @@ describe('library.controller', () => {
         reason: 'artist_code_conflict',
         artist: { artist_id: 3, artist_name: 'Jockstrap', code_letters: 'CH' },
       });
-      expect(mockInsertArtist).not.toHaveBeenCalled();
+      expect(mockInsertArtistWithGenreCrossreference).not.toHaveBeenCalled();
     });
 
     it('returns a distinguishable 409 when only the artist name conflicts in that genre', async () => {
@@ -1159,13 +1159,13 @@ describe('library.controller', () => {
       // Distinguishable from the code-triple 409: different reason and message text.
       const [payload] = (res.json as jest.Mock).mock.calls[0] as [{ message: string }];
       expect(payload.message).not.toBe('Artist code already exists for that genre and code letters.');
-      expect(mockInsertArtist).not.toHaveBeenCalled();
+      expect(mockInsertArtistWithGenreCrossreference).not.toHaveBeenCalled();
     });
 
     it('creates the artist when the name match disappears between the two lookups', async () => {
       mockArtistIdFromName.mockResolvedValue(7);
       mockGetArtistById.mockResolvedValue(null);
-      mockInsertArtist.mockResolvedValue({
+      mockInsertArtistWithGenreCrossreference.mockResolvedValue({
         id: 55,
         artist_name: 'Chuquimamani-Condori',
         alphabetical_name: 'Chuquimamani-Condori',
@@ -1176,7 +1176,7 @@ describe('library.controller', () => {
       await addArtist(req(), res, next);
 
       expect(res.status).toHaveBeenCalledWith(201);
-      expect(mockInsertArtist).toHaveBeenCalled();
+      expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalled();
       // Never a 409 that asserts a conflicting artist it cannot name.
       expect(res.json).not.toHaveBeenCalledWith(expect.objectContaining({ artist: null }));
     });
@@ -1195,14 +1195,14 @@ describe('library.controller', () => {
       });
       // Short-circuits before the name pre-check even runs.
       expect(mockArtistIdFromName).not.toHaveBeenCalled();
-      expect(mockInsertArtist).not.toHaveBeenCalled();
+      expect(mockInsertArtistWithGenreCrossreference).not.toHaveBeenCalled();
     });
 
     // Server-assigned code_number, omitted-arm (BS#2475).
     describe('omitted code_number', () => {
       it('assigns the next number in the (genre_id, code_letters) bucket via generateArtistNumber', async () => {
         mockGenerateArtistNumber.mockResolvedValue(13);
-        mockInsertArtist.mockResolvedValue({
+        mockInsertArtistWithGenreCrossreference.mockResolvedValue({
           id: 55,
           artist_name: 'Chuquimamani-Condori',
           alphabetical_name: 'Chuquimamani-Condori',
@@ -1213,7 +1213,11 @@ describe('library.controller', () => {
         await addArtist(req({ code_number: undefined }), res, next);
 
         expect(mockGenerateArtistNumber).toHaveBeenCalledWith('CH', 15);
-        expect(mockInsertArtistGenreCrossreference).toHaveBeenCalledWith(55, 15, 13);
+        expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalledWith(
+          expect.objectContaining({ code_letters: 'CH' }),
+          15,
+          13
+        );
         expect(res.status).toHaveBeenCalledWith(201);
         expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code_number: 13 }));
       });
@@ -1223,7 +1227,7 @@ describe('library.controller', () => {
         mockGetArtistByCode
           .mockResolvedValueOnce({ artist_id: 9, artist_name: 'Someone Else', code_letters: 'CH' })
           .mockResolvedValueOnce(null);
-        mockInsertArtist.mockResolvedValue({
+        mockInsertArtistWithGenreCrossreference.mockResolvedValue({
           id: 55,
           artist_name: 'Chuquimamani-Condori',
           alphabetical_name: 'Chuquimamani-Condori',
@@ -1234,7 +1238,11 @@ describe('library.controller', () => {
         await addArtist(req({ code_number: undefined }), res, next);
 
         expect(mockGenerateArtistNumber).toHaveBeenCalledTimes(2);
-        expect(mockInsertArtistGenreCrossreference).toHaveBeenCalledWith(55, 15, 14);
+        expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalledWith(
+          expect.objectContaining({ code_letters: 'CH' }),
+          15,
+          14
+        );
         expect(res.status).toHaveBeenCalledWith(201);
       });
 
@@ -1255,18 +1263,101 @@ describe('library.controller', () => {
             artist: { artist_id: 10, artist_name: 'Another Winner', code_letters: 'CH' },
           })
         );
-        expect(mockInsertArtist).not.toHaveBeenCalled();
+        expect(mockInsertArtistWithGenreCrossreference).not.toHaveBeenCalled();
+      });
+
+      it('treats JSON null the same as omitted and assigns', async () => {
+        mockGenerateArtistNumber.mockResolvedValue(13);
+        mockInsertArtistWithGenreCrossreference.mockResolvedValue({
+          id: 55,
+          artist_name: 'Chuquimamani-Condori',
+          alphabetical_name: 'Chuquimamani-Condori',
+          code_letters: 'CH',
+        });
+
+        const res = mockResponse();
+        await addArtist(req({ code_number: null }), res, next);
+
+        expect(mockGenerateArtistNumber).toHaveBeenCalledWith('CH', 15);
+        expect(res.status).toHaveBeenCalledWith(201);
+        expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code_number: 13 }));
+      });
+
+      it('refuses with a discriminated 409 and writes nothing when the bucket is exhausted at INT4_MAX', async () => {
+        // generateArtistNumber returns bucket-MAX + 1, so a bucket topping out
+        // at exactly INT4_MAX (a value the supplied arm accepts) yields an
+        // unstorable INT4_MAX + 1.
+        mockGenerateArtistNumber.mockResolvedValue(2147483648);
+
+        const res = mockResponse();
+        await expect(addArtist(req({ code_number: undefined }), res, next)).rejects.toMatchObject({
+          statusCode: 409,
+          code: 'artist_code_number_exhausted',
+        });
+
+        expect(mockGetArtistByCode).not.toHaveBeenCalled();
+        expect(mockInsertArtistWithGenreCrossreference).not.toHaveBeenCalled();
+      });
+
+      it('keys the assignment bucket on the NFC form of code_letters -- the form insertArtistWithGenreCrossreference stores', async () => {
+        const nfdCodeLetters = 'NU\u0308'; // decomposed: U + combining diaeresis
+        const nfcCodeLetters = 'N\u00DC'; // precomposed U-umlaut
+        mockGenerateArtistNumber.mockResolvedValue(41);
+        mockInsertArtistWithGenreCrossreference.mockResolvedValue({
+          id: 56,
+          artist_name: 'Nilüfer Yanya',
+          alphabetical_name: 'Nilüfer Yanya',
+          code_letters: nfcCodeLetters,
+        });
+
+        const res = mockResponse();
+        await addArtist(
+          req({ artist_name: 'Nilüfer Yanya', code_letters: nfdCodeLetters, code_number: undefined }),
+          res,
+          next
+        );
+
+        expect(mockGenerateArtistNumber).toHaveBeenCalledWith(nfcCodeLetters, 15);
+        expect(mockGetArtistByCode).toHaveBeenCalledWith(nfcCodeLetters, 15, 41);
+        expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalledWith(
+          expect.objectContaining({ code_letters: nfcCodeLetters }),
+          15,
+          41
+        );
+        expect(res.status).toHaveBeenCalledWith(201);
       });
     });
 
     // Supplied-arm bounds + never-rewritten conflict (BS#2475).
     describe('supplied code_number', () => {
       it('rejects a non-integer or out-of-int4-bounds code_number with a 400', async () => {
-        for (const bad of [0, 1.5, -1, 2147483648, 'twelve']) {
+        for (const bad of [1.5, -1, 2147483648, 'twelve']) {
           const res = mockResponse();
-          await expect(addArtist(req({ code_number: bad }), res, next)).rejects.toThrow(WxycError);
+          await expect(addArtist(req({ code_number: bad }), res, next)).rejects.toMatchObject({ statusCode: 400 });
         }
-        expect(mockInsertArtist).not.toHaveBeenCalled();
+        expect(mockInsertArtistWithGenreCrossreference).not.toHaveBeenCalled();
+      });
+
+      it('honors an explicit code_number of 0 -- the V/A shelf filing -- as supplied, not omitted', async () => {
+        mockInsertArtistWithGenreCrossreference.mockResolvedValue({
+          id: 57,
+          artist_name: 'Various Artists - Soundtracks - Q',
+          alphabetical_name: 'Various Artists - Soundtracks - Q',
+          code_letters: 'V/A',
+        });
+
+        const res = mockResponse();
+        await addArtist(req({ code_letters: 'V/A', code_number: 0 }), res, next);
+
+        expect(mockGenerateArtistNumber).not.toHaveBeenCalled();
+        expect(mockGetArtistByCode).toHaveBeenCalledWith('V/A', 15, 0);
+        expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalledWith(
+          expect.objectContaining({ code_letters: 'V/A' }),
+          15,
+          0
+        );
+        expect(res.status).toHaveBeenCalledWith(201);
+        expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code_number: 0 }));
       });
 
       it('never recomputes a caller-supplied number on conflict -- straight 409', async () => {
@@ -1517,7 +1608,7 @@ describe('library.controller', () => {
     });
 
     // BS#2149 review findings 1 + 2: `artists.code_letters` is a Postgres
-    // varchar(4) column and neither writer (insertArtist, the tubafrenzy
+    // varchar(4) column and neither writer (insertArtistWithGenreCrossreference, the tubafrenzy
     // library-etl job) guarantees a trimmed/upper-case/ASCII-only value, so a
     // bare `.trim().toUpperCase()` isn't a safe read-side repair -- it can
     // fold a non-canonical input onto a DIFFERENT real artist's code (`ß` ->
