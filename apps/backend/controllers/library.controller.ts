@@ -2801,6 +2801,112 @@ export const getRotationTracks: RequestHandler<{ rotation_id: string }> = async 
   res.status(200).json(tracks ?? []);
 };
 
+/**
+ * Discogs autopopulate URL/id parse outcome. A discriminated union so the
+ * handler maps each failure to a distinct named 4xx (the `code` is the
+ * machine-readable `WxycError` discriminant the bench switches on).
+ */
+type DiscogsReleaseIdParse =
+  | { ok: true; releaseId: number }
+  | { ok: false; code: 'missing_url' | 'invalid_url' | 'not_release_url' | 'master_url'; message: string };
+
+/**
+ * Extract a Discogs release id from an operator-pasted release URL or a bare
+ * numeric id, for the add-to-rotation bench's "Autopopulate with Discogs link".
+ *
+ * Accepted:
+ *   - `https://www.discogs.com/release/{id}` and any `/{slug}/release/{id}`
+ *     variant — any number of leading path segments, with the scheme, `www`,
+ *     a `-{slug}` suffix on the id, query, and fragment all optional.
+ *   - a bare positive integer, taken as the release id directly.
+ *
+ * MASTER LINKS ARE REJECTED (`master_url`), not resolved to their main
+ * release. LML resolves a specific *release* id and exposes no
+ * master→main-release lookup, so a master link (`discogs.com/master/{id}`)
+ * cannot be prefilled — the operator must paste a specific release link. This
+ * is the documented choice for the "reject or resolve main release" fork.
+ *
+ * The master check runs before the release check so a pathological path
+ * carrying both segments rejects rather than silently resolving; a slug that
+ * merely contains the word "master" (e.g. `/Grandmaster-Flash/release/{id}`)
+ * is unaffected because the pattern anchors on `/master/` as a whole segment.
+ */
+export function parseDiscogsReleaseIdInput(raw: string): DiscogsReleaseIdParse {
+  const trimmed = raw.trim();
+  if (trimmed === '') {
+    return { ok: false, code: 'missing_url', message: 'A Discogs release URL or id is required' };
+  }
+
+  if (/^\d+$/.test(trimmed)) {
+    const id = Number(trimmed);
+    return Number.isSafeInteger(id) && id > 0
+      ? { ok: true, releaseId: id }
+      : { ok: false, code: 'invalid_url', message: 'Not a valid Discogs release id' };
+  }
+
+  let parsed: URL;
+  try {
+    // Accept scheme-less input (`www.discogs.com/release/123`) by defaulting
+    // to https; a real scheme is left intact.
+    parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
+  } catch {
+    return { ok: false, code: 'invalid_url', message: 'Not a valid Discogs release URL' };
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (host !== 'discogs.com' && !host.endsWith('.discogs.com')) {
+    return { ok: false, code: 'invalid_url', message: 'Not a Discogs URL' };
+  }
+
+  if (/\/master\/\d+/.test(parsed.pathname)) {
+    return {
+      ok: false,
+      code: 'master_url',
+      message: 'Discogs master links cannot be autopopulated; paste a specific release link',
+    };
+  }
+
+  const match = parsed.pathname.match(/\/release\/(\d+)/);
+  if (!match) {
+    return { ok: false, code: 'not_release_url', message: 'Not a Discogs release URL' };
+  }
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) && id > 0
+    ? { ok: true, releaseId: id }
+    : { ok: false, code: 'invalid_url', message: 'Not a valid Discogs release id' };
+}
+
+/**
+ * `GET /library/releases/discogs-prefill?url=` — resolve a Discogs release URL
+ * (or bare id) to the bench's prefill fields via LML.
+ *
+ * Failure is always a named 4xx, never a 500: an unparseable / non-release /
+ * master URL is a 400 carrying the parse `code`; a valid release id LML has
+ * no record of is a 404 (`release_not_found`). A hard LML failure (timeout,
+ * 5xx, unconfigured) bubbles as its `LmlClientError` upstream status because
+ * the operator asked to resolve a specific link.
+ */
+export const getDiscogsReleasePrefill: RequestHandler = async (req, res) => {
+  const raw = req.query.url;
+  if (typeof raw !== 'string') {
+    // Absent, or repeated (`?url=a&url=b` parses to an array): the endpoint
+    // needs exactly one URL string.
+    throw new WxycError('A single "url" query parameter is required', 400, { code: 'missing_url' });
+  }
+
+  const parsed = parseDiscogsReleaseIdInput(raw);
+  if (!parsed.ok) {
+    throw new WxycError(parsed.message, 400, { code: parsed.code });
+  }
+
+  const prefill = await libraryService.resolveDiscogsReleasePrefill(parsed.releaseId);
+  if (prefill === null) {
+    throw new WxycError('Discogs has no release for that link', 404, { code: 'release_not_found' });
+  }
+
+  res.status(200).json(prefill);
+};
+
 export const getFormats: RequestHandler = async (req, res) => {
   const formats = await libraryService.getFormatsFromDB();
   res.status(200).json(formats);
