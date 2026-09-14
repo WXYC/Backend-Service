@@ -13,7 +13,8 @@
 -- queries, and every other rotation read in this repo (`getRotationFromDB`,
 -- the search projections, `deleteRotationCardFromDB`'s guard), actually
 -- filter on the broader canonical predicate — `kill_date IS NULL OR
--- kill_date > CURRENT_DATE` (`rotationActiveSql()` in library.service.ts) —
+-- kill_date > CURRENT_DATE` (`rotationActiveSql()`, exported from
+-- shared/database/src/schema.ts next to `rotation` itself) —
 -- because a future-dated kill is still rotating: catalog search still
 -- emits its `rotation_bin` and `card`, so its card must still count it as
 -- active or `DELETE /library/rotation/cards/:id` would unfile a record DJs
@@ -26,54 +27,54 @@
 -- in place either: `CURRENT_DATE` is STABLE, not IMMUTABLE, and Postgres
 -- rejects a non-immutable expression in an index predicate outright.
 --
--- Plain `(card_id)`, not a `(card_id, kill_date)` composite — measured,
--- not guessed, against a prod-shaped 21,566-row clone (313 active/carded
--- rows, matching the counts cited in 0150/0165's headers):
+-- Plain `(card_id)`, not a `(card_id, kill_date)` composite. The
+-- load-bearing change is partial -> non-partial: with no usable index on
+-- `card_id`, both consumers seq-scan all ~21.6k rotation rows on every
+-- delete-guard check and every cards listing. Between the two non-partial
+-- shapes the choice is minimalism, not a measured composite penalty —
+-- measured on a throwaway PG 18.6 cluster against a synthetic fixture
+-- matching this table's documented shape (21,566 rows, of which 313 active
+-- and filed across 40 cards; the counts 0150/0165's headers cite):
 --
 --   1. Point lookup (`deleteRotationCardFromDB`'s guard — `card_id = $1
---      AND (kill_date IS NULL OR kill_date > CURRENT_DATE)`), OLD partial
---      index only usable via the narrow spelling gone, so today this seq-
---      scans the full table:
---        Seq Scan on rotation (actual time=0.027..5.322 rows=113)
---          Filter: ((card_id = 4) AND ((kill_date IS NULL) OR (kill_date > CURRENT_DATE)))
---          Rows Removed by Filter: 21453
---        Execution Time: 5.418 ms
---      Both a plain `(card_id)` index and a `(card_id, kill_date)` composite
---      fix this equally well — sub-millisecond either way (0.034ms plain,
---      0.041ms composite; the composite's OR-predicate decomposes into a
---      BitmapOr over two index probes instead of one Index Scan + Filter).
+--      AND (kill_date IS NULL OR kill_date > CURRENT_DATE)`): plain gets a
+--      Bitmap Heap Scan (5 buffers, 3 heap blocks, 0.018 ms); the
+--      composite an Index Only Scan (3 buffers, 0 heap fetches, 0.006 ms).
+--      Both effectively free; the composite marginally ahead.
 --
 --   2. Listing (`listRotationCardsFromDB`'s `rotation_cards LEFT JOIN
 --      rotation ON card_id = rotation_cards.id AND (kill_date IS NULL OR
---      kill_date > CURRENT_DATE) GROUP BY rotation_cards.id`) drives a full
---      scan of WHATEVER index exists on `card_id` (a Merge Join needs every
---      row, not one card's rows), so index SIZE — not just presence —
---      decides cost here. Plain `(card_id)`:
---        Index Scan using rotation_card_id_full_idx on rotation (actual time=0.009..1.034 rows=313)
---          Filter: ((kill_date IS NULL) OR (kill_date > CURRENT_DATE))
---          Rows Removed by Filter: 21253
---        Buffers: shared hit=218 read=20 · Execution Time: 1.101 ms
---      The `(card_id, kill_date)` composite, same query: 7,457 buffer hits
---      (34x) and 1.723 ms — the extra column widens every leaf entry, so
---      the same full-index scan reads a bigger index. `kill_date` earns its
---      keep as a POST-scan Filter either way at this table's active-row
---      cardinality (~310 of 21,566); it does not earn a second index
---      column. Composited indexes are usually a size argument FOR
---      widening (fewer heap fetches) — this is the case where index size
---      argues the other way, because the query's own shape (GROUP BY the
---      whole table, not an equality lookup) reads the whole index anyway.
+--      kill_date > CURRENT_DATE) GROUP BY rotation_cards.id`), under
+--      enable_seqscan = off to expose the index path a larger table would
+--      take: 18 buffers / 0.135 ms on the composite — nothing for the
+--      plain shape to meaningfully beat.
+--
+-- Both shapes serve both queries at this scale; either would close this
+-- migration's actual gap. Plain wins on size (168 kB vs 272 kB — each leaf
+-- entry carries only `card_id`) and on being the minimal shape the queries
+-- demonstrably need: `kill_date` earns its keep as a post-scan Filter over
+-- the small per-card row set (~310 active of 21,566), not as a second key
+-- column maintained on every rotation write. If the listing ever gains a
+-- kill_date-ordered access pattern, or active-row cardinality grows an
+-- order of magnitude, re-measure before widening — the composite's
+-- index-only point lookup is the upside to weigh then.
 --
 -- Lock behavior. Both statements run inside the whole pending-migration
 -- batch's single transaction (docs/migrations.md's `single-transaction-migrate`
--- rule), so whichever table lock they take is held to that batch's COMMIT,
+-- rule), and Postgres holds every lock they take to that batch's COMMIT —
 -- not just for these two statements' own runtime. `CREATE INDEX` (this
--- non-CONCURRENTLY form) takes a SHARE lock on `rotation`, which blocks
--- writers (INSERT/UPDATE/DELETE) but not readers for the build's duration;
--- `DROP INDEX` (also non-CONCURRENTLY) takes an AccessExclusiveLock, which
--- blocks readers too, but only for the drop itself — dropping an index is
--- metadata-only, no heap or index scan. `rotation` is ~21.6k rows (0150), so
--- the CREATE's SHARE-holding build is sub-second at this scale (measured
--- build time on the prod-shaped clone: well under 50ms).
+-- non-CONCURRENTLY form) takes a SHARE lock on `rotation`: from that
+-- statement on, writes (INSERT/UPDATE/DELETE) of `rotation` block for the
+-- rest of the batch; reads do not. `DROP INDEX` (also non-CONCURRENTLY)
+-- takes an AccessExclusiveLock on the TABLE `rotation`, not merely on the
+-- index being dropped: from that statement on, reads AND writes of
+-- `rotation` block until the whole batch commits — the same rule 0164's
+-- header states for its ADD COLUMN. The statements' own runtime is tiny
+-- (the drop is metadata-only; the build is one scan-and-sort of ~21.6k
+-- rows), but that bounds only when each lock is ACQUIRED, never how long
+-- it is held — the hold is governed by everything that runs after them in
+-- the same transaction, i.e. every other migration pending in the same
+-- deploy.
 --
 -- CREATE runs before DROP so `card_id` is never left with zero covering
 -- indexes at any point the transaction could be inspected from outside (it

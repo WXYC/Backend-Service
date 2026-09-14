@@ -1,6 +1,6 @@
 import { ROTATION_BINS } from './rotation-bin.js';
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
-import { sql, eq, and } from 'drizzle-orm';
+import { sql, eq, and, type SQL } from 'drizzle-orm';
 import {
   pgSchema,
   pgTable,
@@ -1101,22 +1101,21 @@ export const rotation = wxyc_schema.table(
       // FK columns aren't auto-indexed by Postgres. 0164 shipped this
       // partial on `kill_date IS NULL`, but the cards listing's per-card
       // active count and the admin list's card filter both query the
-      // canonical active predicate (`kill_date IS NULL OR kill_date >
-      // CURRENT_DATE`, `rotationActiveSql` in library.service.ts) — broader
+      // canonical active predicate (`rotationActiveSql()` below — `kill_date
+      // IS NULL OR kill_date > CURRENT_DATE`) — broader
       // than the partial predicate implies, so Postgres could never use that
       // index for them. A non-partial predicate is also the only option
       // here: `CURRENT_DATE` is STABLE, not IMMUTABLE, so it cannot appear
       // in an index predicate at all. 0167 (BS#2479) replaced it with this
       // plain, non-partial index — `card_id` alone, not composited with
-      // `kill_date`. Measured against a prod-shaped 21,566-row clone: a
-      // composite `(card_id, kill_date)` loses to plain `(card_id)` on the
-      // cards listing's GROUP BY query (7,457 buffer hits vs. 218, because
-      // the listing scans the WHOLE index and the composite's extra column
-      // makes each leaf entry, and so the index, bigger) while the two tie
-      // on the single-card lookup (`deleteRotationCardFromDB`'s guard);
-      // `kill_date` is left as a post-index-scan Filter on the small
-      // per-card row set either way, which costs nothing measurable at this
-      // table's active-row cardinality (~310 of 21,566).
+      // `kill_date`, because plain is the minimal shape both consumers
+      // demonstrably need, not because the composite measured worse: on a
+      // synthetic fixture at this table's documented scale both shapes
+      // answer both queries in well under a millisecond (0167's header has
+      // the numbers and the fixture), while the composite is ~1.6x larger
+      // and is maintained on every rotation write. `kill_date` is left as a
+      // post-index-scan Filter on the small per-card row set (~310 active
+      // of 21,566), which costs nothing measurable at this cardinality.
       cardIdIdx: index('rotation_card_id_full_idx').on(table.card_id),
       // BS#2080. Serves arm 2 of the `rotation_bin` fallback in
       // `FSEntryFieldsRaw` — the denormalized (artist, album) snapshot match
@@ -1143,6 +1142,39 @@ export const rotation = wxyc_schema.table(
     };
   }
 );
+
+/**
+ * The canonical active-rotation predicate — `kill_date IS NULL OR kill_date
+ * > CURRENT_DATE`, the rule `getRotationFromDB`'s doc block states and every
+ * deployed rotation read applies. Every consumer MUST use it, not the
+ * narrower `kill_date IS NULL`: a future-dated kill is still rotating — the
+ * search projections still emit its `rotation_bin` — so under the narrow
+ * spelling its card would report `active_count: 0` and the card-delete
+ * guard would unfile a record DJs are still routed to. A fresh fragment per
+ * call so no two queries share one `SQL` instance.
+ *
+ * BS#2479 consolidated the hand-written spellings of this predicate onto
+ * this one exported fragment; it lives here, next to `rotation` itself,
+ * because consumers span both `apps/backend` (library.service.ts's card and
+ * search reads, the rotation-tracks cache warmer) and this package
+ * (`library-tiebreak.ts`), and package layering only lets both sides import
+ * from here. The columns interpolate as unaliased `rotation` references, so
+ * the fragment serves the query builder and any raw SQL whose FROM binds
+ * `rotation` un-aliased; raw SQL that aliases the table cannot consume it
+ * (see the allowlist in
+ * `tests/unit/database/schema.rotation-active-predicate.test.ts`, which pins
+ * every spelling tree-wide). `library_artist_view` below carries the one
+ * deployed duplicate — frozen into the database by migration 0166's applied
+ * DDL, documented at its leftJoin.
+ *
+ * The same issue replaced 0164's partial `rotation_card_id_idx` — whose
+ * `kill_date IS NULL` predicate this broader filter can never use, since
+ * Postgres requires the query's WHERE to imply the index predicate — with
+ * the non-partial `rotation_card_id_full_idx` (migration 0167) this broader
+ * filter CAN use.
+ */
+export const rotationActiveSql = (): SQL =>
+  sql`(${rotation.kill_date} IS NULL OR ${rotation.kill_date} > CURRENT_DATE)`;
 
 export type NewRotationCard = InferInsertModel<typeof rotation_cards>;
 export type RotationCard = InferSelectModel<typeof rotation_cards>;
@@ -2756,78 +2788,89 @@ export const specialty_shows = wxyc_schema.table('specialty_shows', {
 });
 
 export const library_artist_view = wxyc_schema.view('library_artist_view').as((qb) => {
-  return qb
-    .select({
-      id: library.id,
-      code_letters: artists.code_letters,
-      code_artist_number: genre_artist_crossreference.artist_genre_code,
-      code_number: library.code_number,
-      artist_name: artists.artist_name,
-      alphabetical_name: artists.alphabetical_name,
-      album_title: library.album_title,
-      format_name: format.format_name,
-      genre_name: genres.genre_name,
-      rotation_bin: rotation.rotation_bin,
-      add_date: library.add_date,
-      label: library.label,
-      label_id: library.label_id,
-      on_streaming: library.on_streaming,
-      album_artist: library.album_artist,
-      plays: library.plays,
-      artwork_url: library.artwork_url,
-      discogs_artist_id: artists.discogs_artist_id,
-      musicbrainz_artist_id: artists.musicbrainz_artist_id,
-      wikidata_qid: artists.wikidata_qid,
-      spotify_artist_id: artists.spotify_artist_id,
-      apple_music_artist_id: artists.apple_music_artist_id,
-      bandcamp_id: artists.bandcamp_id,
-      // Keyed read for the artist_search_alias LATERAL JOIN (PR 5).
-      artist_id: library.artist_id,
-      // BS#1895 (Serialize discogsUnavailable / Not-on-Discogs epic #1280
-      // sub-issue 5): the MD-set flag + optional rationale + server-write-only
-      // recheck timestamp, so every read of `library_artist_view` can gate
-      // rendering on it. Camelcased at the wire boundary (serializeLibraryArtistViewEntry).
-      discogs_unavailable: library.discogs_unavailable,
-      discogs_unavailable_note: library.discogs_unavailable_note,
-      last_discogs_recheck_at: library.last_discogs_recheck_at,
-      // BS#2476 (Rotation Admin epic, backend B6): the physical card the
-      // active rotation row is filed under. Sourced from the SAME
-      // CURRENT_DATE-filtered `rotation` LEFT JOIN that already populates
-      // `rotation_bin` — never a second rotation subquery with its own date
-      // logic — so `card_id` can only be non-null while the row is actively
-      // rotating, and always names the same rotation row `rotation_bin` does.
-      // Wrapped in `sql...as()` rather than selected as the bare column: a
-      // bare `Column` reference carries its own baked-in name ("id") into the
-      // view's CREATE VIEW SQL regardless of this select object's key, which
-      // collides with `library.id` (already unaliased "id" above) and trips
-      // Postgres's "column 'id' specified more than once". drizzle-kit
-      // requires a raw `sql` field used this way to declare its own alias.
-      card_id: sql<number | null>`${rotation_cards.id}`.as('rotation_card_id'),
-      // The card's OWN bin, distinct from `rotation_bin` above. The two are
-      // equal by a service-layer invariant only (BS#2472's 409 validation, no
-      // DB constraint), so reads carry the card's own coordinate rather than
-      // deriving it from the rotation row — a mismatched row then surfaces as
-      // a mismatch instead of silently pointing DJs at the wrong bin.
-      card_bin: rotation_cards.bin,
-      card_number: rotation_cards.number,
-      card_name: rotation_cards.name,
-    })
-    .from(library)
-    .innerJoin(artists, eq(artists.id, library.artist_id))
-    .innerJoin(format, eq(format.id, library.format_id))
-    .innerJoin(genres, eq(genres.id, library.genre_id))
-    .innerJoin(
-      genre_artist_crossreference,
-      and(
-        eq(genre_artist_crossreference.artist_id, library.artist_id),
-        eq(genre_artist_crossreference.genre_id, library.genre_id)
+  return (
+    qb
+      .select({
+        id: library.id,
+        code_letters: artists.code_letters,
+        code_artist_number: genre_artist_crossreference.artist_genre_code,
+        code_number: library.code_number,
+        artist_name: artists.artist_name,
+        alphabetical_name: artists.alphabetical_name,
+        album_title: library.album_title,
+        format_name: format.format_name,
+        genre_name: genres.genre_name,
+        rotation_bin: rotation.rotation_bin,
+        add_date: library.add_date,
+        label: library.label,
+        label_id: library.label_id,
+        on_streaming: library.on_streaming,
+        album_artist: library.album_artist,
+        plays: library.plays,
+        artwork_url: library.artwork_url,
+        discogs_artist_id: artists.discogs_artist_id,
+        musicbrainz_artist_id: artists.musicbrainz_artist_id,
+        wikidata_qid: artists.wikidata_qid,
+        spotify_artist_id: artists.spotify_artist_id,
+        apple_music_artist_id: artists.apple_music_artist_id,
+        bandcamp_id: artists.bandcamp_id,
+        // Keyed read for the artist_search_alias LATERAL JOIN (PR 5).
+        artist_id: library.artist_id,
+        // BS#1895 (Serialize discogsUnavailable / Not-on-Discogs epic #1280
+        // sub-issue 5): the MD-set flag + optional rationale + server-write-only
+        // recheck timestamp, so every read of `library_artist_view` can gate
+        // rendering on it. Camelcased at the wire boundary (serializeLibraryArtistViewEntry).
+        discogs_unavailable: library.discogs_unavailable,
+        discogs_unavailable_note: library.discogs_unavailable_note,
+        last_discogs_recheck_at: library.last_discogs_recheck_at,
+        // BS#2476 (Rotation Admin epic, backend B6): the physical card the
+        // active rotation row is filed under. Sourced from the SAME
+        // CURRENT_DATE-filtered `rotation` LEFT JOIN that already populates
+        // `rotation_bin` — never a second rotation subquery with its own date
+        // logic — so `card_id` can only be non-null while the row is actively
+        // rotating, and always names the same rotation row `rotation_bin` does.
+        // Wrapped in `sql...as()` rather than selected as the bare column: a
+        // bare `Column` reference carries its own baked-in name ("id") into the
+        // view's CREATE VIEW SQL regardless of this select object's key, which
+        // collides with `library.id` (already unaliased "id" above) and trips
+        // Postgres's "column 'id' specified more than once". drizzle-kit
+        // requires a raw `sql` field used this way to declare its own alias.
+        card_id: sql<number | null>`${rotation_cards.id}`.as('rotation_card_id'),
+        // The card's OWN bin, distinct from `rotation_bin` above. The two are
+        // equal by a service-layer invariant only (BS#2472's 409 validation, no
+        // DB constraint), so reads carry the card's own coordinate rather than
+        // deriving it from the rotation row — a mismatched row then surfaces as
+        // a mismatch instead of silently pointing DJs at the wrong bin.
+        card_bin: rotation_cards.bin,
+        card_number: rotation_cards.number,
+        card_name: rotation_cards.name,
+      })
+      .from(library)
+      .innerJoin(artists, eq(artists.id, library.artist_id))
+      .innerJoin(format, eq(format.id, library.format_id))
+      .innerJoin(genres, eq(genres.id, library.genre_id))
+      .innerJoin(
+        genre_artist_crossreference,
+        and(
+          eq(genre_artist_crossreference.artist_id, library.artist_id),
+          eq(genre_artist_crossreference.genre_id, library.genre_id)
+        )
       )
-    )
-    .leftJoin(
-      rotation,
-      sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
-    )
-    .leftJoin(rotation_cards, eq(rotation_cards.id, rotation.card_id));
+      // DELIBERATE hand-typed copy of the canonical active predicate
+      // (`rotationActiveSql()` above) — the ONE allowed besides the definition
+      // (pinned by tests/unit/database/schema.rotation-active-predicate.test.ts).
+      // This spelling is frozen into the deployed database: migration 0166's
+      // applied DDL materialized the view from these exact bytes, so editing
+      // this TS mirror (even to consume the runtime fragment) would change
+      // nothing in production until a view migration re-CREATEs it — worse, it
+      // would make this mirror silently disagree with the deployed view.
+      // Changing the predicate here requires a new view migration.
+      .leftJoin(
+        rotation,
+        sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
+      )
+      .leftJoin(rotation_cards, eq(rotation_cards.id, rotation.card_id))
+  );
 });
 export type LibraryArtistViewEntry = {
   id: number;

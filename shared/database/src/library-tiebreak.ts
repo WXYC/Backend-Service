@@ -8,7 +8,8 @@
  * helper so they agree on a deterministic choice.
  *
  * Tie-break order (issue #500):
- *   1. Currently in rotation — `rotation.kill_date` IS NULL OR > today.
+ *   1. Currently in rotation — the canonical active predicate
+ *      (`rotationActiveSql()` from schema.ts).
  *   2. Format priority — vinyl > CD/CDR > digital > unknown.
  *   3. Higher play count — read from the `album_plays` materialized view
  *      (Epic A.5/A.6).
@@ -35,6 +36,7 @@
 import { sql } from 'drizzle-orm';
 import { db } from './client.js';
 import { intArrayLiteral } from './int-array-literal.js';
+import { rotation, rotationActiveSql } from './schema.js';
 
 export const pickPrimaryLibraryRow = async (libraryIds: number[]): Promise<number | null> => {
   if (libraryIds.length === 0) return null;
@@ -60,9 +62,9 @@ export const pickPrimaryLibraryRow = async (libraryIds: number[]): Promise<numbe
     ORDER BY
       CASE WHEN EXISTS (
         SELECT 1
-        FROM "wxyc_schema"."rotation" r
-        WHERE r."album_id" = l."id"
-          AND (r."kill_date" IS NULL OR r."kill_date" > CURRENT_DATE)
+        FROM ${rotation}
+        WHERE ${rotation.album_id} = l."id"
+          AND ${rotationActiveSql()}
       ) THEN 1 ELSE 0 END DESC,
       CASE
         WHEN f."format_name" ILIKE 'vinyl%' THEN 4

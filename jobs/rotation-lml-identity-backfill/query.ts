@@ -19,7 +19,7 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { db } from '@wxyc/database';
+import { db, rotationActiveSql } from '@wxyc/database';
 
 export type Candidate = {
   id: number;
@@ -32,7 +32,7 @@ export const loadCandidates = async (): Promise<Candidate[]> => {
       "id",
       "discogs_release_id"
     FROM "wxyc_schema"."rotation"
-    WHERE ("kill_date" IS NULL OR "kill_date" > CURRENT_DATE)
+    WHERE ${rotationActiveSql()}
       AND "lml_identity_id" IS NULL
       AND "discogs_release_id" IS NOT NULL
     ORDER BY "id" ASC
@@ -60,17 +60,17 @@ export type CoverageReport = {
 export const loadCoverageReport = async (): Promise<CoverageReport> => {
   const rows = (await db.execute(sql`
     SELECT
-      COUNT(*) FILTER (WHERE "kill_date" IS NULL OR "kill_date" > CURRENT_DATE) AS active,
-      COUNT(*) FILTER (WHERE ("kill_date" IS NULL OR "kill_date" > CURRENT_DATE)
+      COUNT(*) FILTER (WHERE ${rotationActiveSql()}) AS active,
+      COUNT(*) FILTER (WHERE ${rotationActiveSql()}
                        AND "discogs_release_id" IS NOT NULL) AS active_with_discogs,
-      COUNT(*) FILTER (WHERE ("kill_date" IS NULL OR "kill_date" > CURRENT_DATE)
+      COUNT(*) FILTER (WHERE ${rotationActiveSql()}
                        AND "discogs_release_id" IS NOT NULL
                        AND "lml_identity_id" IS NOT NULL) AS active_with_lml,
       ROUND(
-        100.0 * COUNT(*) FILTER (WHERE ("kill_date" IS NULL OR "kill_date" > CURRENT_DATE)
+        100.0 * COUNT(*) FILTER (WHERE ${rotationActiveSql()}
                                  AND "discogs_release_id" IS NOT NULL
                                  AND "lml_identity_id" IS NOT NULL)
-            / NULLIF(COUNT(*) FILTER (WHERE ("kill_date" IS NULL OR "kill_date" > CURRENT_DATE)
+            / NULLIF(COUNT(*) FILTER (WHERE ${rotationActiveSql()}
                                       AND "discogs_release_id" IS NOT NULL), 0),
         2
       ) AS resolvable_coverage_pct

@@ -21,7 +21,7 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { db } from '@wxyc/database';
+import { db, rotationActiveSql } from '@wxyc/database';
 
 export type RotationIdentity = { lml_identity_id: number };
 
@@ -29,7 +29,7 @@ export const loadActiveRotationIdentityIds = async (): Promise<number[]> => {
   const rows = (await db.execute(sql`
     SELECT DISTINCT "lml_identity_id"
     FROM "wxyc_schema"."rotation"
-    WHERE ("kill_date" IS NULL OR "kill_date" > CURRENT_DATE)
+    WHERE ${rotationActiveSql()}
       AND "lml_identity_id" IS NOT NULL
     ORDER BY "lml_identity_id" ASC
   `)) as unknown as RotationIdentity[];

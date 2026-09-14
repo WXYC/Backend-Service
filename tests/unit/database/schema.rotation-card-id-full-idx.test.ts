@@ -4,9 +4,10 @@
  * canonical active-rotation predicate (`kill_date IS NULL OR kill_date >
  * CURRENT_DATE`) can never use — for a non-partial btree on `(card_id)`
  * the broad predicate CAN use. Plain, not a `(card_id, kill_date)`
- * composite: measured against a prod-shaped clone, the composite loses to
- * the plain form on the cards listing's GROUP BY query (the migration's
- * own header has the numbers) while tying on the single-card lookup.
+ * composite: plain is the minimal shape both consumers need — measured at
+ * the table's documented scale, both shapes answer both queries in well
+ * under a millisecond (the migration's own header has the numbers and the
+ * fixture), and the plain form is smaller and cheaper to maintain.
  *
  * Pure file-reading guard, in the style of
  * `schema.rotation-bin-fallback-idx.test.ts` and `schema.rotation-cards.test.ts`.
@@ -49,7 +50,7 @@ describe('schema: rotation_card_id_full_idx (migration 0167, BS#2479)', () => {
     expect(executableSql).not.toMatch(/rotation_card_id_full_idx"[^;]*WHERE/);
   });
 
-  it('does NOT composite kill_date onto the index (measured slower on the listing query)', () => {
+  it('does NOT composite kill_date onto the index (plain is the minimal shape both consumers need)', () => {
     expect(executableSql).not.toMatch(/rotation_card_id_full_idx"[^;]*"kill_date"/);
   });
 
