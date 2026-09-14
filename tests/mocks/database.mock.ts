@@ -59,6 +59,7 @@ type MockQueryChain = {
   groupBy: jest.Mock;
   as: jest.Mock;
   orderBy: jest.Mock;
+  for: jest.Mock;
   limit: jest.Mock;
   offset: jest.Mock;
   insert: jest.Mock;
@@ -91,6 +92,10 @@ export function createMockQueryChain(resolvedValue: unknown = []): MockQueryChai
     // build fails as "as is not a function" rather than returning the chain.
     'as',
     'orderBy',
+    // `.for('update')` — the row-lock clause. Chained BEFORE the terminal
+    // `.limit()` in production code so fixtures that resolve via an
+    // overridden `.limit()` keep working unchanged.
+    'for',
     'limit',
     'insert',
     'values',

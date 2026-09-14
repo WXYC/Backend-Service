@@ -1136,10 +1136,18 @@ export type RotationCard = InferSelectModel<typeof rotation_cards>;
 /**
  * BS#2471 (WXYC/dj-site#1480 Rotation Admin, backend PR B1). A rotation bin
  * physically subdivides into numbered, optionally-named cards. Card identity
- * is the stable `id`; `number` is display order only — contiguity across a
- * bin's cards is a service-layer rule decided on the epic, not a DB
- * constraint, so gaps and renumbers are legal rows here. Schema only in this
- * PR: `rotation.card_id` (below) ships nullable and unbackfilled — see #2477.
+ * is the stable `id`; `number` is display order. Contiguity semantics, in
+ * two layers: through the API, `number` is contiguous 1..N within a bin —
+ * that is the published contract (wxyc-shared `RotationCard.number`), kept
+ * by the service layer (`addRotationCard` assigns max + 1 under a lock on
+ * the bin's top card; `deleteRotationCardFromDB` refuses everything but the
+ * top card, under the same lock). The DB itself enforces only
+ * `(bin, number)` uniqueness, so gap rows remain REPRESENTABLE as storage —
+ * a manual SQL write can create one — but they are a contract violation if
+ * served, not a legal state. (Migration 0164's header still says "gaps and
+ * renumbers are legal"; it predates the contract and is hash-frozen — the
+ * correction lives in `migrations/PRECONDITION_NOTES.md`.) `rotation.card_id`
+ * (below) shipped nullable and unbackfilled; backfilled by 0165 (#2477).
  */
 export const rotation_cards = wxyc_schema.table(
   'rotation_cards',

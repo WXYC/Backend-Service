@@ -344,13 +344,19 @@ describe('updateRotation (BS#2113)', () => {
     });
 
     test('a positive card_id validates against the ROW OWN bin (not a client-supplied one) via resolveRotationCardId', async () => {
-      mockSelectViaLimit([{ rotation_bin: 'M' }]); // the row's own bin
+      const binReadChain = createMockQueryChain();
+      binReadChain.limit = jest.fn().mockResolvedValue([{ rotation_bin: 'M' }]); // the row's own bin
+      db.select.mockReturnValueOnce(binReadChain);
       db.execute.mockResolvedValueOnce([{ bin: 'M' }]); // the named card lives in the same bin
       const updateChain = createMockQueryChain([{ id: 42, card_id: 5 }]);
       db.update.mockReturnValueOnce(updateChain);
 
       const outcome = await updateRotation(42, { card_id: 5 });
 
+      // FOR UPDATE on the bin read: the tubafrenzy rotation webhook can
+      // re-bin this exact row mid-request, and an unlocked read would let
+      // the UPDATE file the row cross-bin behind a 200.
+      expect(binReadChain.for).toHaveBeenCalledWith('update');
       expect(updateChain.set).toHaveBeenCalledWith({ card_id: 5 });
       expect(outcome).toEqual({ outcome: 'updated', rotation: { id: 42, card_id: 5 } });
     });
@@ -372,8 +378,10 @@ describe('updateRotation (BS#2113)', () => {
   });
 
   describe('urls (BS#2473) — wholesale replacement', () => {
-    test('a urls-only edit issues no rotation column UPDATE — reads the row, then deletes and reinserts', async () => {
-      mockSelectViaLimit([{ id: 42, rotation_bin: 'M' }]);
+    test('a urls-only edit issues no rotation column UPDATE — locks and reads the row, then deletes and reinserts', async () => {
+      const rowReadChain = createMockQueryChain();
+      rowReadChain.limit = jest.fn().mockResolvedValue([{ id: 42, rotation_bin: 'M' }]);
+      db.select.mockReturnValueOnce(rowReadChain);
       const deleteChain = createMockQueryChain();
       db.delete.mockReturnValueOnce(deleteChain);
       const insertChain = createMockQueryChain();
@@ -382,6 +390,10 @@ describe('updateRotation (BS#2113)', () => {
       const outcome = await updateRotation(42, { urls: ['https://example.com/a'] });
 
       expect(db.update).not.toHaveBeenCalled();
+      // FOR UPDATE — the row lock is what serializes two concurrent
+      // wholesale replacements (without it the loser's reinsert 23505s on
+      // the (rotation_id, position) unique index).
+      expect(rowReadChain.for).toHaveBeenCalledWith('update');
       expect(db.delete).toHaveBeenCalledTimes(1);
       expect(insertChain.values).toHaveBeenCalledWith([{ rotation_id: 42, url: 'https://example.com/a', position: 0 }]);
       expect(outcome).toEqual({ outcome: 'updated', rotation: { id: 42, rotation_bin: 'M' } });

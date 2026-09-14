@@ -43,11 +43,14 @@ describe('addRotationCard (BS#2472)', () => {
     jest.clearAllMocks();
   });
 
-  test('assigns number = 1 for a bin with no existing cards', async () => {
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([]);
-    db.select.mockReturnValue(selectChain);
+  // The MAX read arrives at `tx.execute` as a raw FOR UPDATE statement —
+  // the lock on the bin's top card must live in the same transaction as the
+  // INSERT it protects (the create-side half of number contiguity: without
+  // it, a concurrent top-card delete between MAX read and INSERT opens a
+  // gap the 23505 retry can never see).
 
+  test('assigns number = 1 for a bin with no existing cards', async () => {
+    db.execute.mockResolvedValueOnce([]);
     const insertChain = createMockQueryChain([{ id: 1, bin: 'M', number: 1, name: null }]);
     db.insert.mockReturnValue(insertChain);
 
@@ -56,16 +59,15 @@ describe('addRotationCard (BS#2472)', () => {
     expect(insertChain.values).toHaveBeenCalledWith({ bin: 'M', number: 1, name: null });
   });
 
-  test('assigns number = max + 1 for a bin with existing cards', async () => {
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([{ number: 4 }]);
-    db.select.mockReturnValue(selectChain);
-
+  test('assigns number = max + 1 for a bin with existing cards, locking the top card across the INSERT', async () => {
+    db.execute.mockResolvedValueOnce([{ number: 4 }]);
     const insertChain = createMockQueryChain([{ id: 2, bin: 'M', number: 5, name: 'Front row' }]);
     db.insert.mockReturnValue(insertChain);
 
     await addRotationCard('M', 'Front row');
 
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(db.execute.mock.calls[0][0])).toMatch(/FOR UPDATE/);
     expect(insertChain.values).toHaveBeenCalledWith({ bin: 'M', number: 5, name: 'Front row' });
   });
 
@@ -80,13 +82,7 @@ describe('addRotationCard (BS#2472)', () => {
     });
 
   test('retries once against a fresh MAX when the (bin, number) unique index rejects the INSERT', async () => {
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest
-      .fn()
-      .mockResolvedValueOnce([{ number: 4 }])
-      .mockResolvedValueOnce([{ number: 5 }]);
-    db.select.mockReturnValue(selectChain);
-
+    db.execute.mockResolvedValueOnce([{ number: 4 }]).mockResolvedValueOnce([{ number: 5 }]);
     const losingInsert = createMockQueryChain();
     losingInsert.returning = jest.fn().mockRejectedValue(wrappedUniqueViolation());
     const winningInsert = createMockQueryChain([{ id: 9, bin: 'M', number: 6, name: null }]);
@@ -96,14 +92,14 @@ describe('addRotationCard (BS#2472)', () => {
 
     expect(losingInsert.values).toHaveBeenCalledWith({ bin: 'M', number: 5, name: null });
     expect(winningInsert.values).toHaveBeenCalledWith({ bin: 'M', number: 6, name: null });
+    // Each attempt is its own transaction — the aborted loser can't leave
+    // the retry running inside a failed transaction.
+    expect(db.transaction).toHaveBeenCalledTimes(2);
     expect(card).toEqual({ id: 9, bin: 'M', number: 6, name: null });
   });
 
   test('409s when the retry collides again', async () => {
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([{ number: 4 }]);
-    db.select.mockReturnValue(selectChain);
-
+    db.execute.mockResolvedValueOnce([{ number: 4 }]).mockResolvedValueOnce([{ number: 4 }]);
     const insertChain = createMockQueryChain();
     insertChain.returning = jest.fn().mockRejectedValue(wrappedUniqueViolation());
     db.insert.mockReturnValue(insertChain);
@@ -113,10 +109,7 @@ describe('addRotationCard (BS#2472)', () => {
   });
 
   test('rethrows a non-unique-violation INSERT failure without retrying', async () => {
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([{ number: 4 }]);
-    db.select.mockReturnValue(selectChain);
-
+    db.execute.mockResolvedValueOnce([{ number: 4 }]);
     const insertChain = createMockQueryChain();
     insertChain.returning = jest.fn().mockRejectedValue(new Error('connection reset'));
     db.insert.mockReturnValue(insertChain);
@@ -158,8 +151,12 @@ describe('deleteRotationCardFromDB (BS#2472)', () => {
   });
 
   // The transaction's raw statements arrive at `tx.execute` in a fixed
-  // order: (1) the FOR UPDATE lock on the card row, (2) the guarded DELETE.
-  // Each test queues exactly the sequence its path consumes.
+  // order: (1) the FOR UPDATE lock on the card row, (2) ONE combined
+  // guard + DELETE + classification statement. The combination is the
+  // point: a classification read in a separate statement takes a later
+  // snapshot than the DELETE, so a refusing fact could vanish in between
+  // and leave a refusal no contract reason describes. Sharing the snapshot
+  // makes that state unrepresentable — every refusal names its guard.
 
   test('not_found when the lock SELECT finds no card — the DELETE never runs', async () => {
     db.execute.mockResolvedValueOnce([]);
@@ -171,8 +168,10 @@ describe('deleteRotationCardFromDB (BS#2472)', () => {
     expect(db.select).not.toHaveBeenCalled();
   });
 
-  test('deleted when the guarded DELETE matches — no classification reads run', async () => {
-    db.execute.mockResolvedValueOnce([{ id: 1 }]).mockResolvedValueOnce([{ id: 1 }]);
+  test('deleted when the single-statement guard passes — no further statements run', async () => {
+    db.execute
+      .mockResolvedValueOnce([{ id: 1 }])
+      .mockResolvedValueOnce([{ is_highest: true, active_count: 0, deleted: true }]);
 
     const result = await deleteRotationCardFromDB(1);
 
@@ -180,18 +179,16 @@ describe('deleteRotationCardFromDB (BS#2472)', () => {
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(db.execute).toHaveBeenCalledTimes(2);
     expect(db.select).not.toHaveBeenCalled();
+    // Guard facts and DELETE ride one statement (one snapshot).
+    const combined = JSON.stringify(db.execute.mock.calls[1][0]);
+    expect(combined).toMatch(/DELETE FROM/);
+    expect(combined).toMatch(/is_highest/);
   });
 
-  test('not_last_in_bin when a higher-numbered sibling card exists', async () => {
-    db.execute.mockResolvedValueOnce([{ id: 1 }]).mockResolvedValueOnce([]);
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([{ bin: 'M', number: 1 }]);
-    // First terminal .where() call (after the card lookup) is the MAX(number) query.
-    selectChain.where = jest
-      .fn()
-      .mockReturnValueOnce(selectChain)
-      .mockResolvedValueOnce([{ maxNumber: 2 }]);
-    db.select.mockReturnValue(selectChain);
+  test('not_last_in_bin when a higher-numbered sibling card exists at the DELETE snapshot', async () => {
+    db.execute
+      .mockResolvedValueOnce([{ id: 1 }])
+      .mockResolvedValueOnce([{ is_highest: false, active_count: 0, deleted: false }]);
 
     const result = await deleteRotationCardFromDB(1);
 
@@ -199,40 +196,25 @@ describe('deleteRotationCardFromDB (BS#2472)', () => {
   });
 
   test('has_active_rows when the highest-numbered card still has active rotation rows', async () => {
-    db.execute.mockResolvedValueOnce([{ id: 1 }]).mockResolvedValueOnce([]);
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([{ bin: 'M', number: 2 }]);
-    selectChain.where = jest
-      .fn()
-      .mockReturnValueOnce(selectChain) // card lookup, intermediate
-      .mockResolvedValueOnce([{ maxNumber: 2 }]) // MAX(number) query
-      .mockResolvedValueOnce([{ activeCount: 3 }]); // active-row count query
-    db.select.mockReturnValue(selectChain);
+    db.execute
+      .mockResolvedValueOnce([{ id: 1 }])
+      .mockResolvedValueOnce([{ is_highest: true, active_count: 3, deleted: false }]);
 
     const result = await deleteRotationCardFromDB(1);
 
     expect(result).toEqual({ outcome: 'has_active_rows', activeCount: 3 });
   });
 
-  test('409s when every guard passes on re-read yet the guarded DELETE matched nothing', async () => {
-    // The remaining corner: a refusing fact (a higher-numbered sibling —
-    // sibling creation takes no lock on this row) existed at the DELETE's
-    // snapshot and was itself removed before the classification reads. The
-    // service refuses rather than fabricating a reason.
-    db.execute.mockResolvedValueOnce([{ id: 1 }]).mockResolvedValueOnce([]);
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([{ bin: 'M', number: 2 }]);
-    selectChain.where = jest
-      .fn()
-      .mockReturnValueOnce(selectChain)
-      .mockResolvedValueOnce([{ maxNumber: 2 }])
-      .mockResolvedValueOnce([{ activeCount: 0 }]);
-    db.select.mockReturnValue(selectChain);
+  test('a refusal reports the guard that held even when BOTH refusing facts are present', async () => {
+    // Precedence pin: a card that is neither highest nor empty answers
+    // not_last_in_bin (matching the pre-consolidation classification order).
+    db.execute
+      .mockResolvedValueOnce([{ id: 1 }])
+      .mockResolvedValueOnce([{ is_highest: false, active_count: 3, deleted: false }]);
 
-    await expect(deleteRotationCardFromDB(1)).rejects.toMatchObject({
-      statusCode: 409,
-      message: expect.stringContaining('concurrently'),
-    });
+    const result = await deleteRotationCardFromDB(1);
+
+    expect(result).toEqual({ outcome: 'not_last_in_bin' });
   });
 });
 
