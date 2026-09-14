@@ -4443,6 +4443,16 @@ export const getAlbumFromDB = async (album_id: number) => {
       discogs_unavailable: library.discogs_unavailable,
       discogs_unavailable_note: library.discogs_unavailable_note,
       last_discogs_recheck_at: library.last_discogs_recheck_at,
+      // BS#2492: the release's definitive links, position-ordered — a
+      // correlated `library_urls` subquery keyed on the release, with NO
+      // rotation/CURRENT_DATE predicate, so they persist on the album detail
+      // whether or not the release is rotating. `array_agg` over zero rows is
+      // NULL, coalesced to `[]` so the wire always carries an array. Because
+      // this feeds the `PUT /library/:id/urls` re-read, that write now echoes
+      // the just-stored set (BS#2491's re-read loose end).
+      urls: sql<
+        string[]
+      >`COALESCE((SELECT array_agg(${library_urls.url} ORDER BY ${library_urls.position}) FROM ${library_urls} WHERE ${library_urls.library_id} = ${library.id}), '{}'::text[])`,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))

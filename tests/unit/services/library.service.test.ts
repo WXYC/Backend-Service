@@ -1869,6 +1869,94 @@ describe('library.service', () => {
 
       expect(result).toBeUndefined();
     });
+
+    // BS#2492: the album-detail read carries the release's definitive links
+    // (`library_urls`) as a position-ordered array, release-scoped and
+    // unconditional. `db.execute`/`db.select` are bare mocks that ignore the
+    // SQL, so the fixture supplies `urls` (the coalesced `array_agg` result)
+    // by hand; the real correlated subquery — with no rotation/CURRENT_DATE
+    // predicate — is pinned against real SQL in
+    // tests/integration/library-urls-projection.spec.js.
+    it('carries the release urls from library_urls in order', async () => {
+      const mockAlbum = {
+        id: 42,
+        code_letters: 'AU',
+        code_artist_number: 1,
+        code_number: 3,
+        artist_name: 'Autechre',
+        alphabetical_name: 'Autechre',
+        album_title: 'Confield',
+        record_label: 'Warp',
+        label_id: 10,
+        plays: 5,
+        add_date: new Date('2024-01-15'),
+        last_modified: new Date('2024-03-01'),
+        format_name: 'CD',
+        genre_name: 'Electronic',
+        date_lost: null,
+        date_found: null,
+        on_streaming: true,
+        discogs_artist_id: null,
+        musicbrainz_artist_id: null,
+        wikidata_qid: null,
+        spotify_artist_id: null,
+        apple_music_artist_id: null,
+        bandcamp_id: null,
+        discogs_unavailable: false,
+        discogs_unavailable_note: null,
+        last_discogs_recheck_at: null,
+        urls: ['https://autechre.bandcamp.com/album/confield', 'https://discogs.com/release/456'],
+      };
+      const chain = createMockQueryChain([mockAlbum]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockAlbum]);
+
+      const result = await getAlbumFromDB(42);
+
+      expect(result).toHaveProperty('urls', [
+        'https://autechre.bandcamp.com/album/confield',
+        'https://discogs.com/release/456',
+      ]);
+    });
+
+    it('carries an empty urls array when the release has no links', async () => {
+      const mockAlbum = {
+        id: 42,
+        code_letters: 'AU',
+        code_artist_number: 1,
+        code_number: 3,
+        artist_name: 'Autechre',
+        alphabetical_name: 'Autechre',
+        album_title: 'Confield',
+        record_label: 'Warp',
+        label_id: 10,
+        plays: 5,
+        add_date: new Date('2024-01-15'),
+        last_modified: new Date('2024-03-01'),
+        format_name: 'CD',
+        genre_name: 'Electronic',
+        date_lost: null,
+        date_found: null,
+        on_streaming: true,
+        discogs_artist_id: null,
+        musicbrainz_artist_id: null,
+        wikidata_qid: null,
+        spotify_artist_id: null,
+        apple_music_artist_id: null,
+        bandcamp_id: null,
+        discogs_unavailable: false,
+        discogs_unavailable_note: null,
+        last_discogs_recheck_at: null,
+        urls: [],
+      };
+      const chain = createMockQueryChain([mockAlbum]);
+      db.select.mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([mockAlbum]);
+
+      const result = await getAlbumFromDB(42);
+
+      expect(result).toHaveProperty('urls', []);
+    });
   });
 
   describe('getDiscogsUnavailableFlagsById (BS#1895)', () => {

@@ -4,6 +4,7 @@ import {
   db,
   library,
   library_artist_view,
+  library_urls,
   genres,
   format as formatTable,
   album_plays,
@@ -78,6 +79,16 @@ export type AlbumSearchResultRow = {
   // rotation JOIN as `rotation_bin` — non-null only while actively rotating.
   // `card.bin` is the card's own `rotation_cards.bin` (see `buildCard`).
   card: RotationCardWire | null;
+  // BS#2492: the release's definitive links, position-ordered, `[]` when none.
+  // RELEASE-SCOPED and unconditional (unlike `card`/`rotation_bin` above, which
+  // ride the CURRENT_DATE-filtered rotation JOIN): they persist on the release,
+  // so a non-rotating hit still carries its links. Sourced from a correlated
+  // `library_urls` subquery in the row projection — an array-valued scalar, so
+  // it folds cleanly into the DISTINCT ON collapse without a row-multiplying
+  // join. The cascade (track-title) mapper has no SQL row to read, so its rows
+  // carry `[]`; the release detail (getAlbumFromDB) is the always-populated
+  // surface for a cascade-only hit.
+  urls: string[];
   plays: number | null;
   on_streaming: boolean | null;
   album_artist: string | null;
@@ -151,6 +162,17 @@ const CATALOG_ROW_PROJECTION_COLUMNS = {
   card_bin: library_artist_view.card_bin,
   card_number: library_artist_view.card_number,
   card_name: library_artist_view.card_name,
+  // BS#2492: the release's definitive links, position-ordered. A correlated
+  // `library_urls` subquery keyed on the release (`library_id`), NOT on the
+  // CURRENT_DATE-filtered rotation JOIN the four card columns above ride —
+  // release-scoped and unconditional, so the links persist on the catalog read
+  // whether or not the release is currently rotating. An array-valued scalar
+  // folds through the DISTINCT ON collapse without multiplying rows, so this
+  // needs no batch second query. `array_agg` over zero rows is NULL; the mapper
+  // coalesces that to `[]`. The sibling count query reuses this projection but
+  // selects only `id`/`alias_max_sim` from it, so `urls` is dead output there —
+  // an indexed correlated lookup on a sparse child table regardless.
+  urls: sql`(SELECT array_agg(${library_urls.url} ORDER BY ${library_urls.position}) FROM ${library_urls} WHERE ${library_urls.library_id} = ${library_artist_view.id})`,
   // Sourced from the `album_plays` MV via `albumPlaysJoin`, not from the view's
   // own `plays` column — every `FROM` below carries that join for this reason.
   plays: playsColumn,
@@ -594,6 +616,10 @@ function taggedRowToAlbumSearchResultRow(row: TaggedLibraryViewEntry): AlbumSear
     label_id: row.label_id,
     rotation_bin: row.rotation_bin,
     card: buildCard(row),
+    // Cascade (track-title) rows come from LML, not the catalog SQL, so they
+    // carry no `library_urls` projection (BS#2492). The release detail is the
+    // populated surface for these; a cascade-only hit shows `[]` inline here.
+    urls: [],
     plays: row.plays,
     on_streaming: row.on_streaming,
     album_artist: row.album_artist,
@@ -627,6 +653,9 @@ type RawRow = {
   card_bin: string | null;
   card_number: number | null;
   card_name: string | null;
+  // BS#2492: `array_agg` of the release's `library_urls`, position-ordered;
+  // NULL when the release has none (coalesced to `[]` in the mapper).
+  urls: string[] | null;
   plays: number | null;
   on_streaming: boolean | null;
   album_artist: string | null;
@@ -657,6 +686,10 @@ function toAlbumSearchResultRow(row: RawRow): AlbumSearchResultRow {
     label_id: row.label_id,
     rotation_bin: row.rotation_bin,
     card: buildCard(row),
+    // BS#2492: release-scoped links from the `library_urls` correlated subquery
+    // in the projection. NULL (no rows) coalesces to `[]` here rather than in
+    // SQL, so a release with no links reads as an empty array on the wire.
+    urls: row.urls ?? [],
     plays: row.plays,
     on_streaming: row.on_streaming,
     album_artist: row.album_artist,
