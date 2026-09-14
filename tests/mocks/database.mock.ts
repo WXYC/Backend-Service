@@ -270,6 +270,12 @@ export const rotation_urls = {
   url: 'rotation_urls.url',
   position: 'rotation_urls.position',
 };
+export const library_urls = {
+  id: 'library_urls.id',
+  library_id: 'library_urls.library_id',
+  url: 'library_urls.url',
+  position: 'library_urls.position',
+};
 export const library_identity = {
   library_id: 'library_identity.library_id',
   discogs_release_id: 'library_identity.discogs_release_id',

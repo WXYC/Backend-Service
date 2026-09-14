@@ -37,6 +37,10 @@ const mockGetRotationTracksFromRelease = jest.fn<(releaseId: number) => Promise<
 // GET /library/rotation/uncatalogued, PATCH /library/rotation/:id/link (BS#2109).
 const mockGetRotationFromDB = jest.fn<() => Promise<unknown[]>>();
 const mockAddToRotation = jest.fn<(fields: Record<string, unknown>) => Promise<Record<string, unknown>>>();
+// BS#2491 release-scoped definitive links.
+const mockReconcileLibraryUrlsToLml = jest.fn<(urls: string[]) => Promise<void>>();
+const mockSetLibraryUrls = jest.fn<(id: number, urls: string[]) => Promise<Record<string, unknown> | undefined>>();
+const mockLibraryRowExists = jest.fn<(id: number) => Promise<boolean>>();
 const mockKillRotationInDB = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
 const mockGetUncataloguedRotationFromDB = jest.fn<(page?: { limit?: number; offset?: number }) => Promise<unknown[]>>();
 // GET /library/rotation/:id (BS#2410).
@@ -168,6 +172,11 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   getFormatsFromDB: jest.fn(),
   getRotationFromDB: mockGetRotationFromDB,
   addToRotation: mockAddToRotation,
+  // BS#2491 release-scoped definitive links: the rotation-add and filings arms
+  // reconcile after the write, and `PUT /library/:id/urls` writes + re-reads.
+  reconcileLibraryUrlsToLml: mockReconcileLibraryUrlsToLml,
+  setLibraryUrls: mockSetLibraryUrls,
+  libraryRowExists: mockLibraryRowExists,
   killRotationInDB: mockKillRotationInDB,
   // Real projection and real field lists, not stubs: the controller routes
   // its 200 through `toRotationRowSummary`, reads both field lists for its
@@ -305,6 +314,7 @@ import {
   getAlbum,
   getRotationTracks,
   updateAlbum,
+  setAlbumUrls,
   searchLibraryQueryEndpoint,
   manualDiscogsRecheck,
   deleteAlbum,
@@ -2940,6 +2950,51 @@ describe('library.controller', () => {
       const res = mockResponse();
 
       await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('already linked');
+    });
+  });
+
+  describe('setAlbumUrls (PUT /library/:id/urls, BS#2491)', () => {
+    beforeEach(() => {
+      mockLibraryRowExists.mockReset();
+      mockSetLibraryUrls.mockReset();
+    });
+
+    it('returns 400 for a non-numeric id parameter', async () => {
+      const req = { params: { id: 'abc' }, body: { urls: [] } } as unknown as Request;
+      const res = mockResponse();
+      await expect(setAlbumUrls(req, res, next)).rejects.toThrow('Invalid album ID');
+    });
+
+    it('returns 400 when urls is not an array', async () => {
+      const req = { params: { id: '42' }, body: {} } as unknown as Request;
+      const res = mockResponse();
+      await expect(setAlbumUrls(req, res, next)).rejects.toThrow('urls must be an array');
+      expect(mockSetLibraryUrls).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 when the release does not exist', async () => {
+      mockLibraryRowExists.mockResolvedValue(false);
+      const req = { params: { id: '999' }, body: { urls: ['https://a.example'] } } as unknown as Request;
+      const res = mockResponse();
+      await expect(setAlbumUrls(req, res, next)).rejects.toThrow('No catalog album for that id');
+      expect(mockSetLibraryUrls).not.toHaveBeenCalled();
+    });
+
+    it('writes the links and returns 200 with the re-read album', async () => {
+      mockLibraryRowExists.mockResolvedValue(true);
+      mockSetLibraryUrls.mockResolvedValue(fullAlbum);
+      const req = {
+        params: { id: '42' },
+        body: { urls: ['https://www.discogs.com/release/3', '  https://a.example  '] },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await setAlbumUrls(req, res, next);
+
+      // urls are trimmed and passed through to the service, replace-wholesale.
+      expect(mockSetLibraryUrls).toHaveBeenCalledWith(42, ['https://www.discogs.com/release/3', 'https://a.example']);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(fullAlbum);
     });
   });
 

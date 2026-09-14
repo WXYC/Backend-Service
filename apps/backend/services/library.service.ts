@@ -42,6 +42,7 @@ import {
   rotation,
   rotation_cards,
   rotation_urls,
+  library_urls,
   NewRotationCard,
   RotationCard,
   LibraryArtistViewEntry,
@@ -63,6 +64,7 @@ import {
   type LookupResponse,
   type DiscogsTrackItem,
   type DiscogsReleaseMetadata,
+  type ReleaseIdentityResolveRequest,
 } from '@wxyc/lml-client';
 import { lmlLookupCoordinator } from './lml/index.js';
 import { filterSpacerGif } from './metadata/metadata.service.js';
@@ -807,6 +809,18 @@ export const addToRotation = async (newRotation: RotationAddRequest, urls?: stri
 
     if (urls && urls.length > 0) {
       await tx.insert(rotation_urls).values(urls.map((url, position) => ({ rotation_id: row.id, url, position })));
+
+      // Release-scoped definitive links (BS#2491): for the catalogued arm the
+      // same urls ALSO land on the release itself, so they survive the
+      // rotation stint and show on the release detail regardless of rotation
+      // state. `rotation_urls` above is untouched (B3) — this is additive.
+      // Replace-wholesale, inside this same transaction so the composite stays
+      // all-or-nothing. The LML reconcile is a network hop and deliberately
+      // does NOT run here — a row lock must not be held across it; the
+      // controller runs `reconcileLibraryUrlsToLml` after this write commits.
+      if (values.album_id != null) {
+        await replaceLibraryUrls(tx, values.album_id, urls);
+      }
     }
 
     return row;
@@ -814,6 +828,122 @@ export const addToRotation = async (newRotation: RotationAddRequest, urls?: stri
 
   return outerTx ? run(outerTx) : db.transaction(run);
 };
+
+/**
+ * True when `host` is `apex` or a subdomain of it (`open.spotify.com` under
+ * `spotify.com`). Case-fold the host before calling.
+ */
+const hostIsUnder = (host: string, apex: string): boolean => host === apex || host.endsWith(`.${apex}`);
+
+/**
+ * Derive the LML identity `(source, external_id)` a stored release URL
+ * reconciles to, or null when the host maps to no source the resolver knows
+ * (the URL is still stored — it is simply not reconciled).
+ *
+ * Bare-domain tolerant: music directors paste values with no scheme, so a
+ * missing scheme is treated as `https://` before the host is read rather than
+ * rejected (the same "no scheme guaranteed" contract the stored strings carry).
+ * A value that still can't be parsed, or whose scheme isn't http(s), yields
+ * null.
+ *
+ *   - a `discogs.com` `/release/<id>` URL → `discogs_release`, external_id =
+ *     the numeric release id (LML resolves a Discogs release id directly). A
+ *     master/artist/label URL carries no release id and is not reconciled here.
+ *   - a `bandcamp.com` host (or subdomain) → `bandcamp`, external_id = URL.
+ *   - a `spotify.com` / `open.spotify.com` host → `spotify`, external_id = URL.
+ *   - a `music.apple.com` host → `apple_music`, external_id = URL.
+ *   - anything else → null.
+ */
+export function deriveLibraryUrlIdentity(url: string): ReleaseIdentityResolveRequest | null {
+  const trimmed = url.trim();
+  if (trimmed.length === 0) return null;
+
+  // `new URL` needs an absolute URL; an MD's "discogs.com/release/123" has no
+  // scheme, so assume https rather than reject it.
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(withScheme);
+  } catch {
+    return null;
+  }
+  // Only http(s) describes a streaming/reference link — reject javascript:,
+  // data:, mailto:, etc. that a prepended scheme wouldn't have covered.
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+
+  const host = parsed.hostname.toLowerCase();
+  const href = parsed.toString();
+
+  if (hostIsUnder(host, 'discogs.com')) {
+    // Matches /release/12345, /release/12345-Album-Title, and the older
+    // /Artist-Album/release/12345 shape; never /master/12345.
+    const match = parsed.pathname.match(/\/release\/(\d+)/i);
+    return match ? { kind: 'release', source: 'discogs_release', external_id: match[1] } : null;
+  }
+  if (hostIsUnder(host, 'bandcamp.com')) return { kind: 'release', source: 'bandcamp', external_id: href };
+  if (hostIsUnder(host, 'spotify.com')) return { kind: 'release', source: 'spotify', external_id: href };
+  if (hostIsUnder(host, 'music.apple.com')) return { kind: 'release', source: 'apple_music', external_id: href };
+  return null;
+}
+
+/**
+ * Replace a release's stored definitive links wholesale (BS#2491): delete the
+ * release's existing `library_urls` rows and insert the new set, `position` =
+ * array index. Runs on the caller's transaction so it composes atomically with
+ * the rotation/filings write. An empty `urls` clears the set. Pure DB — the
+ * LML reconcile is a separate, post-commit concern (`reconcileLibraryUrlsToLml`).
+ */
+export async function replaceLibraryUrls(tx: DbTransaction, libraryId: number, urls: string[]): Promise<void> {
+  await tx.delete(library_urls).where(eq(library_urls.library_id, libraryId));
+  if (urls.length > 0) {
+    await tx.insert(library_urls).values(urls.map((url, position) => ({ library_id: libraryId, url, position })));
+  }
+}
+
+/**
+ * Reconcile a release's stored definitive links to LML's identity resolver
+ * (BS#2491). For each URL that resolves to a known source, POST
+ * `/api/v1/identity/resolve` so LML mints/returns a stable identity and stops
+ * re-guessing that link; a URL whose host maps to no source is skipped.
+ *
+ * FAIL-OPEN: a reconcile failure must never fail the write. Mirrors
+ * `addToRotation`'s LML-resolve fallback — each failure is classified once and
+ * counted on the `lml.resolve.fallback_to_null` Sentry counter (caller =
+ * `library_urls`), then swallowed. Callers run this AFTER the write commits,
+ * never inside a transaction, because it is a network hop and a row lock must
+ * not be held across one.
+ */
+export async function reconcileLibraryUrlsToLml(urls: string[]): Promise<void> {
+  for (const url of urls) {
+    const request = deriveLibraryUrlIdentity(url);
+    if (request === null) continue;
+    try {
+      await resolveIdentity(request);
+    } catch (err) {
+      const reason = classifyLmlResolveError(err);
+      try {
+        Sentry.metrics.count('lml.resolve.fallback_to_null', 1, {
+          attributes: { caller: 'library_urls', reason },
+        });
+      } catch {
+        // Observability must never break the write path; swallow.
+      }
+    }
+  }
+}
+
+/**
+ * `PUT /library/:id/urls` (BS#2491): set a release's definitive links
+ * replace-wholesale, reconcile them to LML, and return the re-read album
+ * detail. The reconcile runs after the write transaction commits and is
+ * fail-open, so an LML outage never fails the write. The caller has already
+ * asserted the release exists (404), so the re-read cannot miss.
+ */
+export async function setLibraryUrls(libraryId: number, urls: string[]) {
+  await db.transaction((tx) => replaceLibraryUrls(tx, libraryId, urls));
+  await reconcileLibraryUrlsToLml(urls);
+  return getAlbumFromDB(libraryId);
+}
 
 /**
  * `GET /library/rotation/cards` (BS#2472): every card across all bins, each

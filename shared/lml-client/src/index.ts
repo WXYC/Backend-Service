@@ -1770,8 +1770,15 @@ export async function searchLibrary(params: {
  *
  * v1 accepts only `kind: 'release'`; `kind: 'artist'` is reserved for the
  * symmetric extension.
+ *
+ * The source vocabulary tracks LML's `library_identity_source.source` open
+ * enum: `spotify` and `apple_music` join the Discogs/Bandcamp sources so a
+ * music director's definitive per-service links can each be reconciled to the
+ * identity resolver. For those two the `external_id` is the canonical service
+ * URL, same as `bandcamp`.
  */
-export type ReleaseIdentityResolveSource = 'discogs_release' | 'discogs_master' | 'bandcamp';
+export type ReleaseIdentityResolveSource =
+  'discogs_release' | 'discogs_master' | 'bandcamp' | 'spotify' | 'apple_music';
 
 export interface ReleaseIdentityResolveRequest {
   kind: 'release';
@@ -1780,7 +1787,7 @@ export interface ReleaseIdentityResolveRequest {
    * Source-specific identifier. For `discogs_release` / `discogs_master` it
    * is the positive integer ID as a string; zero / negative values are
    * rejected with 422 (Discogs uses `0` for the unknown-release sentinel).
-   * For `bandcamp` it is the canonical album URL.
+   * For `bandcamp` / `spotify` / `apple_music` it is the canonical album URL.
    */
   external_id: string;
 }

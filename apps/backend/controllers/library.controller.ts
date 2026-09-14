@@ -1969,6 +1969,16 @@ export const addRotation: RequestHandler<object, unknown, AddRotationRequestBody
     }
     throw err;
   }
+
+  // BS#2491: the catalogued arm also wrote the urls release-scoped into
+  // `library_urls` (inside `addToRotation`'s transaction). Reconcile them to
+  // LML after that write commits — fail-open, and outside any transaction so
+  // no row lock is held across the network hop. The uncatalogued arm writes no
+  // library_urls, so it doesn't reconcile.
+  if (hasAlbumId && urls && urls.length > 0) {
+    await libraryService.reconcileLibraryUrlsToLml(urls);
+  }
+
   res.status(201).json(rotationRelease);
 };
 
@@ -2315,6 +2325,14 @@ export const createLibraryFiling: RequestHandler<object, unknown, LibraryFilingR
       result.artist.artist_name,
       album_title
     );
+
+    // BS#2491: a filing always produces a catalogued release, so any provided
+    // urls were written release-scoped into `library_urls` inside the
+    // transaction above. Reconcile them to LML after the commit — fail-open,
+    // and outside the transaction so no row lock is held across the hop.
+    if (rotationBody?.urls && rotationBody.urls.length > 0) {
+      await libraryService.reconcileLibraryUrlsToLml(rotationBody.urls);
+    }
 
     res.status(200).json({ ...result, release: enrichedRelease });
   } catch (err) {
@@ -3006,6 +3024,45 @@ export const getAlbum: RequestHandler<
 };
 
 const parseAlbumId = (rawId: string): number => parseResourceId(rawId, 'album');
+
+// BS#2491: `PUT /library/:id/urls` (contract `AlbumUrlsUpdate`). The request
+// body is modeled locally — the controller layer hand-validates bodies rather
+// than importing the generated request type (same posture as
+// `AddRotationRequestBody`) — and is `{ urls: string[] }`.
+type AlbumUrlsUpdateBody = { urls?: unknown };
+
+/**
+ * `PUT /library/:id/urls` (BS#2491, definitive-release-links epic): set a
+ * release's definitive streaming/reference links, replace-wholesale, then
+ * reconcile them to LML's identity resolver (fail-open). Returns the re-read
+ * album detail (the contract's `AlbumDetail`).
+ *
+ * Links are stored release-scoped (`library_urls`), independent of any
+ * rotation stint — the rotation-add/filings arms capture the same set when a
+ * catalogued release enters rotation, but this endpoint edits them without one.
+ */
+export const setAlbumUrls: RequestHandler<{ id: string }, unknown, AlbumUrlsUpdateBody> = async (req, res) => {
+  const albumId = parseAlbumId(req.params.id);
+  // Same bounds and verbatim-store discipline the rotation urls arm enforces
+  // (≤20 entries, each a non-blank string of ≤2048 chars), reused so the two
+  // url write surfaces cannot diverge. `urls` is required by the contract; an
+  // absent body fails the array check as a 400.
+  const urls = parseRotationUrls(req.body.urls);
+
+  // The release must exist: replace-wholesale's DELETE plus an empty (or
+  // fully-unreconciled) set would otherwise write nothing and 200 for a
+  // non-existent id, so this existence check is what turns a bad id into a 404.
+  if (!(await libraryService.libraryRowExists(albumId))) {
+    throw new WxycError('No catalog album for that id', 404);
+  }
+
+  const album = await libraryService.setLibraryUrls(albumId, urls);
+  if (album === undefined) {
+    // The release was deleted between the existence check and the re-read.
+    throw new WxycError('No catalog album for that id', 404);
+  }
+  res.status(200).json(album);
+};
 
 type UpdateAlbumRequest = {
   album_title?: string;

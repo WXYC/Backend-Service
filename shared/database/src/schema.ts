@@ -1244,6 +1244,43 @@ export const rotation_urls = wxyc_schema.table(
   }
 );
 
+export type NewLibraryUrl = InferInsertModel<typeof library_urls>;
+export type LibraryUrl = InferSelectModel<typeof library_urls>;
+/**
+ * The definitive streaming/reference links a music director enters for a
+ * release, persisted on the RELEASE rather than a rotation stint — the
+ * release-scoped successor to `rotation_urls`' display half. Keyed to
+ * `library.id` so the links stay visible on the release detail regardless of
+ * rotation state, and reconciled to LML's identity resolver on write so LML
+ * stops re-guessing the same links.
+ *
+ * Same child-table shape as `rotation_urls` (ordered by `position`,
+ * independently queryable), and the same replace-wholesale write discipline:
+ * a write deletes the release's existing rows and re-inserts the new set
+ * position-ordered. `rotation_urls` is untouched by this store — its
+ * migration or retirement is a separate cleanup. Unique on
+ * (library_id, position): one URL per slot, so `ORDER BY position` is
+ * deterministic and a stale-read `max(position)+1` writer collides instead of
+ * silently landing a duplicate slot; the index's leading column also does the
+ * FK-lookup duty, so there is no separate library_id index.
+ */
+export const library_urls = wxyc_schema.table(
+  'library_urls',
+  {
+    id: serial('id').primaryKey(),
+    library_id: integer('library_id')
+      .notNull()
+      .references(() => library.id, { onDelete: 'cascade' }),
+    url: text('url').notNull(),
+    position: integer('position').notNull(),
+  },
+  (table) => {
+    return {
+      libraryIdPositionIdx: uniqueIndex('library_urls_library_id_position_idx').on(table.library_id, table.position),
+    };
+  }
+);
+
 export type NewFSEntry = InferInsertModel<typeof flowsheet>;
 export type FSEntry = InferSelectModel<typeof flowsheet>;
 /**

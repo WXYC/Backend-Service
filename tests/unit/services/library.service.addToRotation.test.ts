@@ -290,7 +290,10 @@ describe('addToRotation (BS#1380)', () => {
         'https://example.com/b',
       ]);
 
-      expect(db.insert).toHaveBeenCalledTimes(2);
+      // Three INSERTs: the rotation row, its rotation_urls, and — because this
+      // is the catalogued arm (album_id present) — the release-scoped
+      // library_urls added by BS#2491. rotation_urls is call index 1.
+      expect(db.insert).toHaveBeenCalledTimes(3);
       const urlsValuesArg = insertChain.values.mock.calls[1][0];
       expect(urlsValuesArg).toEqual([
         { rotation_id: 10, url: 'https://example.com/a', position: 0 },
