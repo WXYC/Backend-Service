@@ -1,5 +1,6 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
+const { getTestDb } = require('../utils/db');
 
 /**
  * Integration coverage for GET /library/query — the new query-builder endpoint.
@@ -503,5 +504,88 @@ describe('GET /library/query — review-feedback regressions (PR #1154)', () => 
     const binRows = binFiltered.body.results.filter((r) => r.id === album.id);
     expect(binRows.length).toBe(1);
     expect(binRows[0].rotation_bin).toBe('H');
+  });
+});
+
+describe('GET /library/query — active rotation card (BS#2476)', () => {
+  let auth;
+  let sql;
+  const uniq = Date.now();
+
+  beforeAll(() => {
+    auth = createAuthRequest(request, global.access_token);
+    sql = getTestDb();
+  });
+
+  async function makeAlbum(title) {
+    const res = await auth
+      .post('/library')
+      .send({
+        album_title: title,
+        artist_name: 'Card Fixture Artist',
+        label: 'Card Fixture Label',
+        genre_id: 11,
+        format_id: 1,
+      })
+      .expect(201);
+    return res.body;
+  }
+
+  async function makeCard(bin, number, name) {
+    const [card] = await sql`
+      INSERT INTO wxyc_schema.rotation_cards (bin, number, name)
+      VALUES (${bin}, ${number}, ${name})
+      RETURNING id
+    `;
+    return card.id;
+  }
+
+  async function findResult(query, albumId) {
+    const res = await auth.get('/library/query').query(query).expect(200);
+    return res.body.results.find((r) => r.id === albumId);
+  }
+
+  test('an actively-rotating release emits card', async () => {
+    const album = await makeAlbum(`Card Fixture Active ${uniq}`);
+    const cardId = await makeCard('H', 9001, 'Active Test Card');
+    await sql`
+      INSERT INTO wxyc_schema.rotation (album_id, rotation_bin, card_id)
+      VALUES (${album.id}, 'H', ${cardId})
+    `;
+
+    const row = await findResult({ q: `Card Fixture Active ${uniq}`, limit: 50 }, album.id);
+    expect(row.rotation_bin).toBe('H');
+    expect(row.card).toEqual({ id: cardId, bin: 'H', number: 9001, name: 'Active Test Card' });
+  });
+
+  test('a killed row — including one killed by a since-elapsed future kill_date — emits neither rotation_bin nor card', async () => {
+    const album = await makeAlbum(`Card Fixture Killed ${uniq}`);
+    const cardId = await makeCard('M', 9002, 'Killed Test Card');
+    await sql`
+      INSERT INTO wxyc_schema.rotation (album_id, rotation_bin, card_id, kill_date)
+      VALUES (${album.id}, 'M', ${cardId}, CURRENT_DATE - INTERVAL '1 day')
+    `;
+
+    const row = await findResult({ q: `Card Fixture Killed ${uniq}`, limit: 50 }, album.id);
+    expect(row.rotation_bin).toBeNull();
+    expect(row.card).toBeNull();
+  });
+
+  test('rotation_bin and card come from the same live row, not a stale killed one in another bin', async () => {
+    const album = await makeAlbum(`Card Fixture Mixed ${uniq}`);
+    const killedCardId = await makeCard('L', 9003, 'Stale Killed Card');
+    const liveCardId = await makeCard('S', 9004, 'Live Card');
+    await sql`
+      INSERT INTO wxyc_schema.rotation (album_id, rotation_bin, card_id, kill_date)
+      VALUES (${album.id}, 'L', ${killedCardId}, CURRENT_DATE - INTERVAL '1 day')
+    `;
+    await sql`
+      INSERT INTO wxyc_schema.rotation (album_id, rotation_bin, card_id)
+      VALUES (${album.id}, 'S', ${liveCardId})
+    `;
+
+    const row = await findResult({ q: `Card Fixture Mixed ${uniq}`, limit: 50 }, album.id);
+    expect(row.rotation_bin).toBe('S');
+    expect(row.card).toEqual({ id: liveCardId, bin: 'S', number: 9004, name: 'Live Card' });
   });
 });

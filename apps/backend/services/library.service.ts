@@ -37,6 +37,7 @@ import {
   library_identity_source,
   library_watermark,
   rotation,
+  rotation_cards,
   LibraryArtistViewEntry,
 } from '@wxyc/database';
 import {
@@ -1998,6 +1999,12 @@ const LIBRARY_VIEW_PROJECTION = {
   discogs_unavailable: library.discogs_unavailable,
   discogs_unavailable_note: library.discogs_unavailable_note,
   last_discogs_recheck_at: library.last_discogs_recheck_at,
+  // BS#2476: same CURRENT_DATE-filtered `rotation` LEFT JOIN as `rotation_bin`
+  // (see `LIBRARY_VIEW_JOINS_RAW` / `libraryViewQuery`'s `rotation_cards` join
+  // below) — non-null only while the row is actively rotating.
+  card_id: rotation_cards.id,
+  card_number: rotation_cards.number,
+  card_name: rotation_cards.name,
 } as const satisfies Record<keyof LibraryArtistViewEntry, Column>;
 
 /**
@@ -2018,6 +2025,7 @@ const LIBRARY_VIEW_JOINS_RAW = sql`
   LEFT JOIN ${rotation}
     ON ${rotation.album_id} = ${library.id}
     AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)
+  LEFT JOIN ${rotation_cards} ON ${rotation_cards.id} = ${rotation.card_id}
 `;
 
 /**
@@ -2060,7 +2068,8 @@ function libraryViewQuery(withPlays: boolean) {
     .leftJoin(
       rotation,
       sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
-    );
+    )
+    .leftJoin(rotation_cards, eq(rotation_cards.id, rotation.card_id));
   return withPlays ? base.leftJoin(album_plays, eq(album_plays.album_id, library.id)) : base;
 }
 
@@ -4098,6 +4107,7 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Tagge
       rotation,
       sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
     )
+    .leftJoin(rotation_cards, eq(rotation_cards.id, rotation.card_id))
     .where(inArray(library.legacy_release_id, legacyIds))
     // Bound by the LML response size (already capped server-side). The
     // wrapper trims to caller's `limit` post-cache so the cached entry can

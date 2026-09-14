@@ -73,6 +73,9 @@ export type AlbumSearchResultRow = {
   label: string;
   label_id: number | null;
   rotation_bin: string | null;
+  // The card the release is filed under, from the same CURRENT_DATE-filtered
+  // rotation JOIN as `rotation_bin` — non-null only while actively rotating.
+  card: { id: number; bin: string; number: number; name: string | null } | null;
   plays: number | null;
   on_streaming: boolean | null;
   album_artist: string | null;
@@ -139,6 +142,12 @@ const CATALOG_ROW_PROJECTION_COLUMNS = {
   label: library_artist_view.label,
   label_id: library_artist_view.label_id,
   rotation_bin: library_artist_view.rotation_bin,
+  // `library_artist_view.card_id` is itself aliased (the view disambiguates
+  // it from `library.id`), so its column type isn't a plain `Column` — wrap
+  // it in `sql` to satisfy this projection's `Column | SQL` constraint.
+  card_id: sql`${library_artist_view.card_id}`,
+  card_number: library_artist_view.card_number,
+  card_name: library_artist_view.card_name,
   // Sourced from the `album_plays` MV via `albumPlaysJoin`, not from the view's
   // own `plays` column — every `FROM` below carries that join for this reason.
   plays: playsColumn,
@@ -558,6 +567,21 @@ const SECONDARY_SORT_KEYS: Record<CatalogSort, SortableKey> = {
   date: 'artist_name',
 };
 
+/**
+ * Builds the `card` wire field from the same rotation row `rotation_bin` was
+ * sourced from — `card_id` is non-null only while `rotation_bin` is (both
+ * come from the CURRENT_DATE-filtered rotation JOIN on `library_artist_view`).
+ */
+function buildCard(row: {
+  card_id: number | null;
+  card_number: number | null;
+  card_name: string | null;
+  rotation_bin: string | null;
+}): AlbumSearchResultRow['card'] {
+  if (row.card_id === null || row.card_number === null || row.rotation_bin === null) return null;
+  return { id: row.card_id, bin: row.rotation_bin, number: row.card_number, name: row.card_name };
+}
+
 function compareSortable(a: string | number | null, b: string | number | null): number {
   if (a === b) return 0;
   if (a === null) return 1;
@@ -581,6 +605,7 @@ function taggedRowToAlbumSearchResultRow(row: TaggedLibraryViewEntry): AlbumSear
     label: row.label ?? '',
     label_id: row.label_id,
     rotation_bin: row.rotation_bin,
+    card: buildCard(row),
     plays: row.plays,
     on_streaming: row.on_streaming,
     album_artist: row.album_artist,
@@ -610,6 +635,9 @@ type RawRow = {
   label: string | null;
   label_id: number | null;
   rotation_bin: string | null;
+  card_id: number | null;
+  card_number: number | null;
+  card_name: string | null;
   plays: number | null;
   on_streaming: boolean | null;
   album_artist: string | null;
@@ -639,6 +667,7 @@ function toAlbumSearchResultRow(row: RawRow): AlbumSearchResultRow {
     label: row.label ?? '',
     label_id: row.label_id,
     rotation_bin: row.rotation_bin,
+    card: buildCard(row),
     plays: row.plays,
     on_streaming: row.on_streaming,
     album_artist: row.album_artist,

@@ -269,6 +269,9 @@ export const library_identity_source = {
 export const library_artist_view = {
   on_streaming: 'library_artist_view.on_streaming',
   artist_id: 'library_artist_view.artist_id',
+  card_id: 'library_artist_view.card_id',
+  card_number: 'library_artist_view.card_number',
+  card_name: 'library_artist_view.card_name',
 };
 export const artist_search_alias = {
   artist_id: 'artist_search_alias.artist_id',
