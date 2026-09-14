@@ -35,18 +35,31 @@
 -- `jobs/*-backfill` one-shot — same call as 0101's 6-row sentinel cleanup
 -- and 0150's 15-row reclassification, both against this same table.
 --
--- Lock behavior. Neither statement is DDL, so neither takes an
--- AccessExclusiveLock. The INSERT and UPDATE each take a RowExclusiveLock
--- at the table level (blocks concurrent DDL, e.g. another migration's ALTER
--- TABLE on `rotation` or `rotation_cards` in the same deploy batch; does not
--- block concurrent reads or other DML) plus a row-level lock on every row
--- they touch, held to COMMIT of the whole pending-migration transaction
--- (docs/migrations.md's `migrate()`-is-one-transaction note). At ~310
--- UPDATEd rows and at most 4 INSERTed rows, the row-lock set is small and
--- the statements themselves are sub-second; unlike 0164's ADD COLUMN, there
--- is no full-table scan here; the UPDATE's `card_id IS NULL` and
--- `kill_date` legs are both covered by 0164's partial `rotation_card_id_idx`
--- and this repo's existing `kill_date` indexes rather than a seq scan.
+-- Lock behavior. The INSERT and UPDATE each take a RowExclusiveLock at the
+-- table level plus row-level locks on the rows they touch (~310 UPDATEd, at
+-- most 4 INSERTed), but the file's true maximum lock level comes from the
+-- two ANALYZE statements at the bottom: ANALYZE takes a
+-- ShareUpdateExclusiveLock on its table, and because the whole
+-- pending-migration batch runs as one transaction (docs/migrations.md's
+-- `migrate()`-is-one-transaction note), `rotation` and `rotation_cards`
+-- both hold ShareUpdateExclusive from the ANALYZE until the batch COMMITs,
+-- not just for the ANALYZE's own runtime. ShareUpdateExclusive conflicts
+-- with ShareUpdateExclusive-and-stronger takers — autovacuum and manual
+-- VACUUM/ANALYZE, CREATE INDEX (CONCURRENTLY included), REINDEX, ALTER
+-- TABLE — but not with AccessShare or RowExclusive, so concurrent reads
+-- and normal DML flow uninterrupted for the batch's whole duration.
+--
+-- Duration. The UPDATE's `kill_date IS NULL OR kill_date > CURRENT_DATE`
+-- disjunction has no index path: 0164's partial `rotation_card_id_idx` is
+-- predicated on `kill_date IS NULL` alone (the same narrowness Step 2
+-- explains above; BS#2479), and `rotation` has no kill_date index at all.
+-- So the UPDATE plans as a Seq Scan on `rotation` once per joined
+-- `rotation_cards` row — four full passes over the ~21.6k-row table, ~86k
+-- row examinations. That is the honest plan and the acceptable one: it
+-- measures ~8 ms on a prod-shaped PG14 fixture at today's row counts, and
+-- adding a kill_date index just to reshape a one-time backfill's plan
+-- would cost more than the seq scans it saves. Both statements stay
+-- sub-second with a small row-lock set.
 --
 -- Wire note: `rotation.card_id` was already exposed (as NULL) by 0164 — see
 -- that migration's header. This backfill changes only the values ~310 active

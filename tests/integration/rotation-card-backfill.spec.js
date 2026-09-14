@@ -192,6 +192,24 @@ describe('rotation card backfill (BS#2477)', () => {
       expect(await cardIdOf(id)).toBeNull();
     });
 
+    test('a row whose kill_date is exactly CURRENT_DATE is inactive and left uncarded', async () => {
+      // kill_date comes from the database's own CURRENT_DATE (not a JS date)
+      // so the row sits exactly on the predicate's boundary regardless of
+      // node-vs-Postgres timezone skew. Under the canonical active predicate
+      // (`kill_date IS NULL OR kill_date > CURRENT_DATE`) a same-day kill is
+      // already inactive, so this pins `>` against a `>=` regression that
+      // would card every row killed on deploy day.
+      const rows = await sql.unsafe(
+        `INSERT INTO "${TEST_SCHEMA}".rotation (rotation_bin, kill_date) VALUES ('M', CURRENT_DATE) RETURNING id`
+      );
+      const id = rows[0].id;
+
+      const result = await sql.unsafe(updateActiveRows);
+
+      expect(result.count).toBe(0);
+      expect(await cardIdOf(id)).toBeNull();
+    });
+
     test('an already-carded active row is left untouched, even if pointed at a different card', async () => {
       await sql.unsafe(`INSERT INTO "${TEST_SCHEMA}".rotation_cards (bin, number, name) VALUES ('L', 2, 'Card Two')`);
       const otherCard = await sql.unsafe(
