@@ -157,6 +157,11 @@ export const FK_TARGETS: readonly FkTarget[] = [
   // lands, a merge can leave an album bound to a rejected asset while a good
   // one is orphaned; loudly, per the warning in `repointTarget`.
   { table: 'digital_asset', column: 'library_id', uniqueKey: ['library_id', 'provenance', 'disc_number'] },
+  // Release-scoped streaming/reference links. FK ON DELETE cascade, and
+  // UNIQUE(library_id, position) — one URL per slot. The repoint has to dedup on
+  // `position` before it fires, or a loser row repointed onto a slot the
+  // survivor already holds violates the unique index (23505).
+  { table: 'library_urls', column: 'library_id', uniqueKey: ['library_id', 'position'] },
 ];
 
 export interface SlotRow extends SlotMember {

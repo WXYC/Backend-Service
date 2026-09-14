@@ -335,6 +335,9 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       album_critic_reviews: 'CASCADE',
       uncovered_release_search_markers: 'CASCADE',
       compilation_track_artist: 'CASCADE',
+      // Release-scoped links FK is ON DELETE cascade; deleting a release takes
+      // its links with it, so a merge must repoint them before the loser goes.
+      library_urls: 'CASCADE',
       flowsheet: 'SET NULL',
       album_review_submissions: 'SET NULL',
       // Repaired by migration 0147. schema.ts and every snapshot from 0022
