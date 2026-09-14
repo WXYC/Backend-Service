@@ -17,6 +17,7 @@ import {
   type SearchCondition,
 } from './search-parser.service.js';
 import { runCatalogTrackSearchCascade, type TaggedLibraryViewEntry } from './library.service.js';
+import { buildCard, type RotationCardWire } from '../utils/rotation-card.js';
 import type { ArtistMatchHint, ArtistSearchAliasSource } from './requestLine/types.js';
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import WxycError from '../utils/error.js';
@@ -75,7 +76,8 @@ export type AlbumSearchResultRow = {
   rotation_bin: string | null;
   // The card the release is filed under, from the same CURRENT_DATE-filtered
   // rotation JOIN as `rotation_bin` — non-null only while actively rotating.
-  card: { id: number; bin: string; number: number; name: string | null } | null;
+  // `card.bin` is the card's own `rotation_cards.bin` (see `buildCard`).
+  card: RotationCardWire | null;
   plays: number | null;
   on_streaming: boolean | null;
   album_artist: string | null;
@@ -146,6 +148,7 @@ const CATALOG_ROW_PROJECTION_COLUMNS = {
   // it from `library.id`), so its column type isn't a plain `Column` — wrap
   // it in `sql` to satisfy this projection's `Column | SQL` constraint.
   card_id: sql`${library_artist_view.card_id}`,
+  card_bin: library_artist_view.card_bin,
   card_number: library_artist_view.card_number,
   card_name: library_artist_view.card_name,
   // Sourced from the `album_plays` MV via `albumPlaysJoin`, not from the view's
@@ -567,21 +570,6 @@ const SECONDARY_SORT_KEYS: Record<CatalogSort, SortableKey> = {
   date: 'artist_name',
 };
 
-/**
- * Builds the `card` wire field from the same rotation row `rotation_bin` was
- * sourced from — `card_id` is non-null only while `rotation_bin` is (both
- * come from the CURRENT_DATE-filtered rotation JOIN on `library_artist_view`).
- */
-function buildCard(row: {
-  card_id: number | null;
-  card_number: number | null;
-  card_name: string | null;
-  rotation_bin: string | null;
-}): AlbumSearchResultRow['card'] {
-  if (row.card_id === null || row.card_number === null || row.rotation_bin === null) return null;
-  return { id: row.card_id, bin: row.rotation_bin, number: row.card_number, name: row.card_name };
-}
-
 function compareSortable(a: string | number | null, b: string | number | null): number {
   if (a === b) return 0;
   if (a === null) return 1;
@@ -636,6 +624,7 @@ type RawRow = {
   label_id: number | null;
   rotation_bin: string | null;
   card_id: number | null;
+  card_bin: string | null;
   card_number: number | null;
   card_name: string | null;
   plays: number | null;

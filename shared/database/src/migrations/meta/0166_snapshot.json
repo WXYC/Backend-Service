@@ -1,5 +1,5 @@
 {
-  "id": "2a65a27f-a306-4eeb-bd40-f64ef68d612a",
+  "id": "dbf1dc82-079f-4e7b-a813-ec7ae77925b4",
   "prevId": "196f0cea-f21f-4587-ad74-7605a81ba1ca",
   "version": "7",
   "dialect": "postgresql",
@@ -7520,6 +7520,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "bin": {
+          "name": "bin",
+          "type": "freq_enum",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
         "number": {
           "name": "number",
           "type": "integer",
@@ -7533,7 +7540,7 @@
           "notNull": false
         }
       },
-      "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"artists\".\"code_letters\", \"wxyc_schema\".\"genre_artist_crossreference\".\"artist_genre_code\", \"wxyc_schema\".\"library\".\"code_number\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"artists\".\"alphabetical_name\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"format\".\"format_name\", \"wxyc_schema\".\"genres\".\"genre_name\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"add_date\", \"wxyc_schema\".\"library\".\"label\", \"wxyc_schema\".\"library\".\"label_id\", \"wxyc_schema\".\"library\".\"on_streaming\", \"wxyc_schema\".\"library\".\"album_artist\", \"wxyc_schema\".\"library\".\"plays\", \"wxyc_schema\".\"library\".\"artwork_url\", \"wxyc_schema\".\"artists\".\"discogs_artist_id\", \"wxyc_schema\".\"artists\".\"musicbrainz_artist_id\", \"wxyc_schema\".\"artists\".\"wikidata_qid\", \"wxyc_schema\".\"artists\".\"spotify_artist_id\", \"wxyc_schema\".\"artists\".\"apple_music_artist_id\", \"wxyc_schema\".\"artists\".\"bandcamp_id\", \"wxyc_schema\".\"library\".\"artist_id\", \"wxyc_schema\".\"library\".\"discogs_unavailable\", \"wxyc_schema\".\"library\".\"discogs_unavailable_note\", \"wxyc_schema\".\"library\".\"last_discogs_recheck_at\", \"wxyc_schema\".\"rotation_cards\".\"id\" as \"rotation_card_id\", \"wxyc_schema\".\"rotation_cards\".\"number\", \"wxyc_schema\".\"rotation_cards\".\"name\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\" inner join \"wxyc_schema\".\"format\" on \"wxyc_schema\".\"format\".\"id\" = \"wxyc_schema\".\"library\".\"format_id\" inner join \"wxyc_schema\".\"genres\" on \"wxyc_schema\".\"genres\".\"id\" = \"wxyc_schema\".\"library\".\"genre_id\" inner join \"wxyc_schema\".\"genre_artist_crossreference\" on (\"wxyc_schema\".\"genre_artist_crossreference\".\"artist_id\" = \"wxyc_schema\".\"library\".\"artist_id\" and \"wxyc_schema\".\"genre_artist_crossreference\".\"genre_id\" = \"wxyc_schema\".\"library\".\"genre_id\") left join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"rotation\".\"album_id\" = \"wxyc_schema\".\"library\".\"id\" AND (\"wxyc_schema\".\"rotation\".\"kill_date\" > CURRENT_DATE OR \"wxyc_schema\".\"rotation\".\"kill_date\" IS NULL) left join \"wxyc_schema\".\"rotation_cards\" on \"wxyc_schema\".\"rotation_cards\".\"id\" = \"wxyc_schema\".\"rotation\".\"card_id\"",
+      "definition": "select \"wxyc_schema\".\"library\".\"id\", \"wxyc_schema\".\"artists\".\"code_letters\", \"wxyc_schema\".\"genre_artist_crossreference\".\"artist_genre_code\", \"wxyc_schema\".\"library\".\"code_number\", \"wxyc_schema\".\"artists\".\"artist_name\", \"wxyc_schema\".\"artists\".\"alphabetical_name\", \"wxyc_schema\".\"library\".\"album_title\", \"wxyc_schema\".\"format\".\"format_name\", \"wxyc_schema\".\"genres\".\"genre_name\", \"wxyc_schema\".\"rotation\".\"rotation_bin\", \"wxyc_schema\".\"library\".\"add_date\", \"wxyc_schema\".\"library\".\"label\", \"wxyc_schema\".\"library\".\"label_id\", \"wxyc_schema\".\"library\".\"on_streaming\", \"wxyc_schema\".\"library\".\"album_artist\", \"wxyc_schema\".\"library\".\"plays\", \"wxyc_schema\".\"library\".\"artwork_url\", \"wxyc_schema\".\"artists\".\"discogs_artist_id\", \"wxyc_schema\".\"artists\".\"musicbrainz_artist_id\", \"wxyc_schema\".\"artists\".\"wikidata_qid\", \"wxyc_schema\".\"artists\".\"spotify_artist_id\", \"wxyc_schema\".\"artists\".\"apple_music_artist_id\", \"wxyc_schema\".\"artists\".\"bandcamp_id\", \"wxyc_schema\".\"library\".\"artist_id\", \"wxyc_schema\".\"library\".\"discogs_unavailable\", \"wxyc_schema\".\"library\".\"discogs_unavailable_note\", \"wxyc_schema\".\"library\".\"last_discogs_recheck_at\", \"wxyc_schema\".\"rotation_cards\".\"id\" as \"rotation_card_id\", \"wxyc_schema\".\"rotation_cards\".\"bin\", \"wxyc_schema\".\"rotation_cards\".\"number\", \"wxyc_schema\".\"rotation_cards\".\"name\" from \"wxyc_schema\".\"library\" inner join \"wxyc_schema\".\"artists\" on \"wxyc_schema\".\"artists\".\"id\" = \"wxyc_schema\".\"library\".\"artist_id\" inner join \"wxyc_schema\".\"format\" on \"wxyc_schema\".\"format\".\"id\" = \"wxyc_schema\".\"library\".\"format_id\" inner join \"wxyc_schema\".\"genres\" on \"wxyc_schema\".\"genres\".\"id\" = \"wxyc_schema\".\"library\".\"genre_id\" inner join \"wxyc_schema\".\"genre_artist_crossreference\" on (\"wxyc_schema\".\"genre_artist_crossreference\".\"artist_id\" = \"wxyc_schema\".\"library\".\"artist_id\" and \"wxyc_schema\".\"genre_artist_crossreference\".\"genre_id\" = \"wxyc_schema\".\"library\".\"genre_id\") left join \"wxyc_schema\".\"rotation\" on \"wxyc_schema\".\"rotation\".\"album_id\" = \"wxyc_schema\".\"library\".\"id\" AND (\"wxyc_schema\".\"rotation\".\"kill_date\" > CURRENT_DATE OR \"wxyc_schema\".\"rotation\".\"kill_date\" IS NULL) left join \"wxyc_schema\".\"rotation_cards\" on \"wxyc_schema\".\"rotation_cards\".\"id\" = \"wxyc_schema\".\"rotation\".\"card_id\"",
       "name": "library_artist_view",
       "schema": "wxyc_schema",
       "isExisting": false,

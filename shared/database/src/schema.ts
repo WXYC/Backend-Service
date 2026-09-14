@@ -2782,6 +2782,12 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       // Postgres's "column 'id' specified more than once". drizzle-kit
       // requires a raw `sql` field used this way to declare its own alias.
       card_id: sql<number | null>`${rotation_cards.id}`.as('rotation_card_id'),
+      // The card's OWN bin, distinct from `rotation_bin` above. The two are
+      // equal by a service-layer invariant only (BS#2472's 409 validation, no
+      // DB constraint), so reads carry the card's own coordinate rather than
+      // deriving it from the rotation row — a mismatched row then surfaces as
+      // a mismatch instead of silently pointing DJs at the wrong bin.
+      card_bin: rotation_cards.bin,
       card_number: rotation_cards.number,
       card_name: rotation_cards.name,
     })
@@ -2835,6 +2841,7 @@ export type LibraryArtistViewEntry = {
   discogs_unavailable_note: string | null;
   last_discogs_recheck_at: Date | null;
   card_id: number | null;
+  card_bin: string | null;
   card_number: number | null;
   card_name: string | null;
 };
