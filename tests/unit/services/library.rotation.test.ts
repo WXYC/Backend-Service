@@ -64,6 +64,10 @@ type RawRotationRow = {
   spotify_artist_id: string | null;
   apple_music_artist_id: string | null;
   bandcamp_id: string | null;
+  card_id: number | null;
+  card_bin: string | null;
+  card_number: number | null;
+  card_name: string | null;
 };
 
 /** Build a fully-populated joined-album row for the rotation query. */
@@ -92,6 +96,10 @@ function joinedRow(overrides: Partial<RawRotationRow> = {}): RawRotationRow {
     spotify_artist_id: null,
     apple_music_artist_id: null,
     bandcamp_id: null,
+    card_id: null,
+    card_bin: null,
+    card_number: null,
+    card_name: null,
     ...overrides,
   };
 }
@@ -129,6 +137,10 @@ function orphanRow(overrides: Partial<RawRotationRow> = {}): RawRotationRow {
     spotify_artist_id: null,
     apple_music_artist_id: null,
     bandcamp_id: null,
+    card_id: null,
+    card_bin: null,
+    card_number: null,
+    card_name: null,
     ...overrides,
   };
 }
@@ -152,15 +164,18 @@ describe('library.service / getRotationFromDB', () => {
         rotation_add_date: '2024-08-22',
       });
       db.execute.mockResolvedValueOnce([collapsed]);
+      db.execute.mockResolvedValueOnce([]); // BS#2473: the rotation_urls batch lookup
 
       const result = await getRotationFromDB();
 
-      expect(db.execute).toHaveBeenCalledTimes(1);
+      expect(db.execute).toHaveBeenCalledTimes(2);
       expect(result).toHaveLength(1);
       expect(result[0]).toMatchObject({
         rotation_id: 7002,
         rotation_add_date: '2024-08-22',
         rotation_bin: 'H',
+        card: null,
+        urls: [],
       });
       // Reconciled-identity rewrite: nested object replaces flat columns.
       expect(result[0]).toHaveProperty('reconciled_identity');
@@ -192,6 +207,7 @@ describe('library.service / getRotationFromDB', () => {
         alphabetical_name: 'Shape Fixture Orphan Two',
       });
       db.execute.mockResolvedValueOnce([orphan1, orphan2]);
+      db.execute.mockResolvedValueOnce([]); // BS#2473: the rotation_urls batch lookup
 
       const result = await getRotationFromDB();
 
@@ -241,6 +257,7 @@ describe('library.service / getRotationFromDB', () => {
         orphanRow({ rotation_id: 9003, artist_name: 'Orphan C' }),
       ];
       db.execute.mockResolvedValueOnce([...linked, ...orphans]);
+      db.execute.mockResolvedValueOnce([]); // BS#2473: the rotation_urls batch lookup
 
       const result = await getRotationFromDB();
 
@@ -277,6 +294,7 @@ describe('library.service / getRotationFromDB', () => {
         record_label: 'Drag City', // COALESCE(library.label=NULL, rotation.record_label='Drag City')
       });
       db.execute.mockResolvedValueOnce([fromLibrary, fromRotation]);
+      db.execute.mockResolvedValueOnce([]); // BS#2473: the rotation_urls batch lookup
 
       const result = await getRotationFromDB();
 
@@ -312,6 +330,7 @@ describe('library.service / getRotationFromDB', () => {
         rotation_add_date: '2024-09-12',
       });
       db.execute.mockResolvedValueOnce([collapsed]);
+      db.execute.mockResolvedValueOnce([]); // BS#2473: the rotation_urls batch lookup
 
       const result = await getRotationFromDB();
 
@@ -355,6 +374,89 @@ describe('library.service / getRotationFromDB', () => {
       // The pre-#862 `-rotation.id` partition trick should no longer
       // appear in the query.
       expect(stringified).not.toMatch(/-"rotation"\."id"/);
+    });
+  });
+
+  /**
+   * `?status=` (BS#2473) — non-partition semantics and the additive `card`/
+   * `urls` fields. The unit-level mock can't observe Postgres's actual
+   * filtering, so these assert the SQL shape (which predicate + whether the
+   * DISTINCT ON collapse is present) and the serializer's composition of
+   * `card`/`urls` onto each row. Integration coverage of the real filtering
+   * lives in tests/integration/library.spec.js.
+   */
+  describe('status param (BS#2473)', () => {
+    it('defaults to the active predicate with the DISTINCT ON collapse, byte-compatible with pre-#2473 callers', async () => {
+      db.execute.mockResolvedValueOnce([]);
+
+      await getRotationFromDB();
+
+      const stringified = JSON.stringify(db.execute.mock.calls[0][0]);
+      expect(stringified).toMatch(/DISTINCT ON/);
+      expect(stringified).toMatch(/CURRENT_DATE/);
+    });
+
+    it('status=killed drops the DISTINCT ON collapse and filters on kill_date IS NOT NULL', async () => {
+      db.execute.mockResolvedValueOnce([]);
+
+      await getRotationFromDB('killed');
+
+      const stringified = JSON.stringify(db.execute.mock.calls[0][0]);
+      expect(stringified).not.toMatch(/DISTINCT ON/);
+      expect(stringified).toMatch(/IS NOT NULL/);
+    });
+
+    it('status=all drops the DISTINCT ON collapse and applies no kill_date filter', async () => {
+      db.execute.mockResolvedValueOnce([]);
+
+      await getRotationFromDB('all');
+
+      const stringified = JSON.stringify(db.execute.mock.calls[0][0]);
+      expect(stringified).not.toMatch(/DISTINCT ON/);
+      expect(stringified).toMatch(/TRUE/);
+    });
+  });
+
+  describe('card + urls (BS#2473)', () => {
+    it('composes a nested card object from the four flat card columns', async () => {
+      const row = joinedRow({
+        rotation_id: 300,
+        card_id: 9,
+        card_bin: 'H',
+        card_number: 2,
+        card_name: 'Rock Card 2',
+      });
+      db.execute.mockResolvedValueOnce([row]);
+      db.execute.mockResolvedValueOnce([]); // no urls for this rotation_id
+
+      const [result] = await getRotationFromDB();
+
+      expect(result.card).toEqual({ id: 9, bin: 'H', number: 2, name: 'Rock Card 2' });
+      expect(result).not.toHaveProperty('card_id');
+      expect(result).not.toHaveProperty('card_bin');
+      expect(result.urls).toEqual([]);
+    });
+
+    it('attaches ordered urls from the batch lookup, keyed by rotation_id', async () => {
+      const row = joinedRow({ rotation_id: 301 });
+      db.execute.mockResolvedValueOnce([row]);
+      db.execute.mockResolvedValueOnce([
+        { rotation_id: 301, url: 'https://example.com/a' },
+        { rotation_id: 301, url: 'https://example.com/b' },
+      ]);
+
+      const [result] = await getRotationFromDB();
+
+      expect(result.urls).toEqual(['https://example.com/a', 'https://example.com/b']);
+      expect(result.card).toBeNull();
+    });
+
+    it('skips the urls batch query entirely when the main query returns no rows', async () => {
+      db.execute.mockResolvedValueOnce([]);
+
+      await getRotationFromDB();
+
+      expect(db.execute).toHaveBeenCalledTimes(1);
     });
   });
 });

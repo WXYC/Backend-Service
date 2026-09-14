@@ -39,6 +39,7 @@ import {
   library_watermark,
   rotation,
   rotation_cards,
+  rotation_urls,
   NewRotationCard,
   RotationCard,
   LibraryArtistViewEntry,
@@ -77,7 +78,7 @@ import {
   type AliasHitFields,
 } from '../utils/alias-hits.js';
 import { rawProjection } from '../utils/sql-projection.js';
-import { withRotationCard, type RotationCardSource, type RotationCardWire } from '../utils/rotation-card.js';
+import { buildCard, withRotationCard, type RotationCardSource, type RotationCardWire } from '../utils/rotation-card.js';
 import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from './observability/cache-stats.js';
 
 // Schema-qualified reference to the `fold_artist_name(text)` SQL function
@@ -298,6 +299,9 @@ export const getFormatById = async (id: number): Promise<AlbumFormat | undefined
   return result[0];
 };
 
+/** `GET /library/rotation`'s `?status=` (BS#2473) — see `getRotationFromDB` for the non-partition semantics. */
+export type RotationStatus = 'active' | 'killed' | 'all';
+
 export interface Rotation {
   id: number | null;
   code_letters: string | null;
@@ -321,13 +325,21 @@ export interface Rotation {
   // row has no library row at all, hence no legacy id (BS#2128).
   legacy_release_id: number | null;
   reconciled_identity: ReconciledIdentity | null;
+  // BS#2473: additive — the row's physical card (null if uncarded) and its
+  // ordered URL set, built via the same `buildCard` other card reads use.
+  card: RotationCardWire | null;
+  urls: string[];
 }
 
 /**
  * Raw row shape returned by the rotation query before reconciled-identity
- * serialization. Mirrors the SELECT list in `getRotationFromDB`. Carries
- * the six external-ID columns flat; `serializeReconciledIdentity` strips
- * them and replaces them with a nested `reconciled_identity` object.
+ * and card serialization. Mirrors the SELECT list in `getRotationFromDB`.
+ * Carries the six external-ID columns and the four flat card columns flat;
+ * `serializeReconciledIdentity` / `withRotationCard` strip them and replace
+ * them with nested `reconciled_identity` / `card` objects. `urls` is never
+ * part of this shape — it comes from a separate batch query, never a join,
+ * since the DISTINCT ON collapse below can't coexist with a one-to-many
+ * child table.
  *
  * Most fields are nullable because the LEFT JOINs (#689) intentionally
  * surface rotation rows whose `album_id` doesn't resolve to a `library`
@@ -335,7 +347,34 @@ export interface Rotation {
  * artist/album/label snapshot fields and have NULL ancillary metadata
  * (`code_letters`, `genre_name`, `format_name`, identity ids).
  */
-type RotationRow = Omit<Rotation, 'reconciled_identity'> & ReconciledIdentitySource;
+type RotationRow = Omit<Rotation, 'reconciled_identity' | 'card' | 'urls'> &
+  ReconciledIdentitySource &
+  RotationCardSource;
+
+/**
+ * Batch-load `rotation_urls` for a set of rotation ids, grouped by
+ * `rotation_id` and ordered by `position`. Shared by every rotation list
+ * read rather than joined into the main query — `rotation_urls` is
+ * one-to-many and the active read's DISTINCT ON collapse has no honest way
+ * to fold a child table's rows into one line.
+ */
+async function fetchRotationUrlsByRotationId(rotationIds: number[]): Promise<Map<number, string[]>> {
+  const urlsByRotationId = new Map<number, string[]>();
+  if (rotationIds.length === 0) return urlsByRotationId;
+  const response = await db.execute(sql`
+    SELECT ${rotation_urls.rotation_id} AS rotation_id, ${rotation_urls.url} AS url
+    FROM ${rotation_urls}
+    WHERE ${inArray(rotation_urls.rotation_id, rotationIds)}
+    ORDER BY ${rotation_urls.position} ASC
+  `);
+  const rows = response as unknown as Array<{ rotation_id: number; url: string }>;
+  for (const { rotation_id, url } of rows) {
+    const list = urlsByRotationId.get(rotation_id);
+    if (list) list.push(url);
+    else urlsByRotationId.set(rotation_id, [url]);
+  }
+  return urlsByRotationId;
+}
 
 /**
  * Read-side query for `GET /library/rotation`.
@@ -377,11 +416,18 @@ type RotationRow = Omit<Rotation, 'reconciled_identity'> & ReconciledIdentitySou
  *   cleanly); negating gives a strictly negative key so it can never
  *   collide with a positive `album_id`.
  *
- * - **`kill_date IS NULL OR kill_date > CURRENT_DATE`.** Active rows
- *   only; the planner-stable predicate also excludes future-dated
- *   kills correctly.
+ * - **`?status=`, default `active` (BS#2473).** NOT a partition of the same
+ *   set: `active` = `kill_date IS NULL OR kill_date > CURRENT_DATE` (the
+ *   canonical active predicate, unchanged from before this param existed —
+ *   the default omits nothing a pre-#2473 caller could see), `killed` =
+ *   `kill_date IS NOT NULL`, `all` = no filter. A future-dated kill matches
+ *   BOTH `active` and `killed` — it is still rotating today, and it does
+ *   carry a `kill_date`. `active` keeps the DISTINCT ON collapse above
+ *   (dropdown shape); `killed`/`all` are deliberately NOT collapsed — the
+ *   admin list this param serves needs every historical row, not one per
+ *   `(album, bin)` group, to offer Unkill on the right one.
  */
-export const getRotationFromDB = async (): Promise<Rotation[]> => {
+export const getRotationFromDB = async (status: RotationStatus = 'active'): Promise<Rotation[]> => {
   // Stable partition key for the DISTINCT ON / ORDER BY: real album_id when
   // present, else a hash of the (artist_name, album_title) snapshot so
   // unlinked duplicates collapse together (#862). The expression is computed
@@ -398,8 +444,7 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
     ${rotation.album_id}::bigint,
     -(abs(hashtext(lower(coalesce(${rotation.artist_name}, '')) || '|' || lower(coalesce(${rotation.album_title}, '')))::bigint) + 1)
   )`;
-  const query = sql`
-    SELECT DISTINCT ON (${partitionKey}, ${rotation.rotation_bin})
+  const columns = sql`
       ${library.id} AS id,
       ${artists.code_letters} AS code_letters,
       ${genre_artist_crossreference.artist_genre_code} AS code_artist_number,
@@ -423,7 +468,12 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
       ${artists.wikidata_qid} AS wikidata_qid,
       ${artists.spotify_artist_id} AS spotify_artist_id,
       ${artists.apple_music_artist_id} AS apple_music_artist_id,
-      ${artists.bandcamp_id} AS bandcamp_id
+      ${artists.bandcamp_id} AS bandcamp_id,
+      ${rotation_cards.id} AS card_id,
+      ${rotation_cards.bin} AS card_bin,
+      ${rotation_cards.number} AS card_number,
+      ${rotation_cards.name} AS card_name`;
+  const joins = sql`
     FROM ${rotation}
     LEFT JOIN ${library} ON ${library.id} = ${rotation.album_id}
     LEFT JOIN ${artists} ON ${artists.id} = ${library.artist_id}
@@ -432,17 +482,40 @@ export const getRotationFromDB = async (): Promise<Rotation[]> => {
     LEFT JOIN ${genre_artist_crossreference}
       ON ${genre_artist_crossreference.artist_id} = ${library.artist_id}
       AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
-    WHERE ${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL
+    LEFT JOIN ${rotation_cards} ON ${rotation_cards.id} = ${rotation.card_id}`;
+  const statusPredicate =
+    status === 'killed'
+      ? sql`${rotation.kill_date} IS NOT NULL`
+      : status === 'all'
+        ? sql`TRUE`
+        : sql`${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL`;
+
+  const query =
+    status === 'active'
+      ? sql`
+    SELECT DISTINCT ON (${partitionKey}, ${rotation.rotation_bin}) ${columns}
+    ${joins}
+    WHERE ${statusPredicate}
     ORDER BY ${partitionKey},
              ${rotation.rotation_bin},
              ${rotation.add_date} DESC,
              ${rotation.id} ASC
+  `
+      : sql`
+    SELECT ${columns}
+    ${joins}
+    WHERE ${statusPredicate}
+    ORDER BY ${rotation.add_date} DESC, ${rotation.id} ASC
   `;
 
   const response = await db.execute(query);
   const rows = response as unknown as RotationRow[];
+  const urlsByRotationId = await fetchRotationUrlsByRotationId(rows.map((row) => row.rotation_id));
 
-  return rows.map((row) => serializeReconciledIdentity(row));
+  return rows.map((row) => {
+    const withCard = withRotationCard(serializeReconciledIdentity(row));
+    return { ...withCard, urls: urlsByRotationId.get(row.rotation_id) ?? [] };
+  });
 };
 
 /**
@@ -631,8 +704,12 @@ const resolveRotationCardId = async (
  * first. The trade: an add naming a dangling or mismatched card spends the
  * LML hop before its 404/409 — rare enough to pay for a lock window that
  * contains exactly one SELECT and one INSERT.
+ *
+ * `urls` (BS#2473): written inside the same transaction as the INSERT,
+ * `position` = array index. Not part of `RotationAddRequest` — `rotation_urls`
+ * is a child table, so it's a separate parameter rather than riding the allowlist.
  */
-export const addToRotation = async (newRotation: RotationAddRequest) => {
+export const addToRotation = async (newRotation: RotationAddRequest, urls?: string[]) => {
   const values: RotationAddRequest = { ...newRotation };
 
   // Allowlist guard already runs at the controller layer, but the server-
@@ -692,7 +769,13 @@ export const addToRotation = async (newRotation: RotationAddRequest) => {
     if (cardId !== undefined) values.card_id = cardId;
 
     const insertedRotation: RotationRelease[] = await tx.insert(rotation).values(values).returning();
-    return insertedRotation[0];
+    const row = insertedRotation[0];
+
+    if (urls && urls.length > 0) {
+      await tx.insert(rotation_urls).values(urls.map((url, position) => ({ rotation_id: row.id, url, position })));
+    }
+
+    return row;
   });
 };
 
@@ -883,6 +966,13 @@ export type UpdateRotationRow = {
   kill_date?: string | SQL<unknown> | null;
   format_id?: number | null;
   label_id?: number | null;
+  // BS#2473: the within-bin move — `null` uncards the row. Not gated on
+  // `album_id IS NULL` like the pre-catalog set below (same rule as
+  // `pickAddRotationFields` at creation time).
+  card_id?: number | null;
+  // BS#2473: wholesale replacement, deleted and reinserted transactionally
+  // with the row update. `undefined` leaves URLs untouched; `[]` clears them.
+  urls?: string[];
 };
 
 /**
@@ -998,15 +1088,19 @@ export const updateRotation = async (
     'kill_date',
     'format_id',
     'label_id',
+    'card_id',
   ] as const) {
     if (updates[key] !== undefined) set[key] = updates[key];
   }
+  const touchesUrls = updates.urls !== undefined;
   // Drizzle's `mapUpdateSet` throws `No values to set` on an empty payload
   // before it generates any SQL. Refuse it here instead, so a future direct
   // caller gets a message naming this function rather than an opaque ORM
-  // error. Unreachable through either HTTP surface: the controller 400s on
-  // an empty body and `killRotationInDB` always supplies a `kill_date`.
-  if (Object.keys(set).length === 0) {
+  // error. `touchesUrls` exempts the case — BS#2473's urls-only PATCH sets
+  // no `rotation` column at all. Unreachable through either HTTP surface
+  // otherwise: the controller 400s on an empty body and `killRotationInDB`
+  // always supplies a `kill_date`.
+  if (Object.keys(set).length === 0 && !touchesUrls) {
     throw new WxycError('updateRotation requires at least one column to set', 400);
   }
 
@@ -1021,16 +1115,18 @@ export const updateRotation = async (
   // pin in `library.spec.js`).
   const touchesPrecatalog = ROTATION_PRECATALOG_FIELDS.some((key) => key in set);
   const touchesSnapshot = ROTATION_SNAPSHOT_COLUMNS.some((key) => key in set);
+  // BS#2473: a non-null `card_id` must be proven to exist and to live in the
+  // ROW'S OWN bin — reused via `resolveRotationCardId`, same as `addToRotation`.
+  const touchesCardId = 'card_id' in set;
 
-  // Only the pre-catalog path needs a transaction. Its guarded UPDATE can
-  // match zero rows for two different reasons, and telling them apart takes a
-  // second read that has to see the same row. The other path — an `add_date` /
-  // `kill_date`-only edit, which is every `PATCH /library/rotation` kill via
-  // `killRotationInDB` — is a single statement, so wrapping it would turn one
-  // round trip into three (BEGIN / UPDATE / COMMIT) and hold a pooled
-  // connection across all three on a box that also serves the live flowsheet.
-  // That endpoint issued one bare UPDATE before BS#2113; keep it that way.
-  if (!touchesPrecatalog) {
+  // Only the pre-catalog / card / urls paths need a transaction. The plain
+  // path — an `add_date` / `kill_date`-only edit, which is every
+  // `PATCH /library/rotation` kill via `killRotationInDB` — is a single
+  // statement, so wrapping it would turn one round trip into three
+  // (BEGIN / UPDATE / COMMIT) and hold a pooled connection across all three
+  // on a box that also serves the live flowsheet. That endpoint issued one
+  // bare UPDATE before BS#2113; keep it that way.
+  if (!touchesPrecatalog && !touchesCardId && !touchesUrls) {
     const [updated] = await db.update(rotation).set(set).where(eq(rotation.id, rotation_id)).returning();
     // No guard beyond `id` in the WHERE — zero rows really does mean "no such
     // row", exactly as before this function returned a bare row.
@@ -1047,32 +1143,65 @@ export const updateRotation = async (
   }
 
   const outcome = await db.transaction(async (tx): Promise<UpdateRotationOutcome> => {
-    const updatedRows = await tx
-      .update(rotation)
-      .set(set)
-      .where(and(eq(rotation.id, rotation_id), isNull(rotation.album_id)))
-      .returning();
-    const updated = updatedRows[0];
-    if (updated) {
-      return { outcome: 'updated' as const, rotation: updated };
+    // A non-null `card_id` must be validated against the ROW'S OWN bin,
+    // never a client-supplied one — PATCH carries no `rotation_bin` field.
+    // `resolveRotationCardId` throws 404 (dangling card) or
+    // `RotationCardBinMismatchError` (409, wrong bin); an explicit `null`
+    // (uncard) skips validation entirely, same as `format_id`/`label_id`.
+    if (touchesCardId && set.card_id !== null) {
+      const [current] = await tx
+        .select({ rotation_bin: rotation.rotation_bin })
+        .from(rotation)
+        .where(eq(rotation.id, rotation_id))
+        .limit(1);
+      if (!current) return { outcome: 'not_found' as const };
+      await resolveRotationCardId(tx, current.rotation_bin, set.card_id as number);
     }
 
-    // The guarded UPDATE matched nothing: either the row doesn't exist, or a
-    // concurrent writer linked it since the caller last looked. One more
-    // read, inside the same transaction, tells the two apart.
-    const [current] = await tx
-      .select({ album_id: rotation.album_id })
-      .from(rotation)
-      .where(eq(rotation.id, rotation_id))
-      .limit(1);
-    if (!current || current.album_id === null) {
-      // Either genuinely gone, or (a second concurrent write unlinked it
-      // again in the instant between our failed guarded UPDATE and this
-      // read) not actually linked after all. Neither is a 409 the caller
-      // can act on, so report not-found rather than fabricate an album id.
-      return { outcome: 'not_found' as const };
+    const whereClause = touchesPrecatalog
+      ? and(eq(rotation.id, rotation_id), isNull(rotation.album_id))
+      : eq(rotation.id, rotation_id);
+
+    // A urls-only PATCH sets no `rotation` column (`set` is empty) — lock
+    // and re-read the row instead of running an empty UPDATE, which Drizzle
+    // rejects before generating any SQL.
+    const updated =
+      Object.keys(set).length > 0
+        ? (await tx.update(rotation).set(set).where(whereClause).returning())[0]
+        : (await tx.select().from(rotation).where(whereClause).limit(1))[0];
+
+    if (!updated) {
+      if (!touchesPrecatalog) return { outcome: 'not_found' as const };
+      // The guarded UPDATE matched nothing: either the row doesn't exist, or
+      // a concurrent writer linked it since the caller last looked. One more
+      // read, inside the same transaction, tells the two apart.
+      const [current] = await tx
+        .select({ album_id: rotation.album_id })
+        .from(rotation)
+        .where(eq(rotation.id, rotation_id))
+        .limit(1);
+      if (!current || current.album_id === null) {
+        // Either genuinely gone, or (a second concurrent write unlinked it
+        // again in the instant between our failed guarded UPDATE and this
+        // read) not actually linked after all. Neither is a 409 the caller
+        // can act on, so report not-found rather than fabricate an album id.
+        return { outcome: 'not_found' as const };
+      }
+      return { outcome: 'linked_conflict' as const, albumId: current.album_id };
     }
-    return { outcome: 'linked_conflict' as const, albumId: current.album_id };
+
+    // Wholesale replacement (BS#2473) — delete-then-reinsert inside this
+    // same transaction as the row update, so there is never a window where
+    // the row has half its URLs. `position` is the array index.
+    if (touchesUrls) {
+      await tx.delete(rotation_urls).where(eq(rotation_urls.rotation_id, rotation_id));
+      const urls = updates.urls as string[];
+      if (urls.length > 0) {
+        await tx.insert(rotation_urls).values(urls.map((url, position) => ({ rotation_id, url, position })));
+      }
+    }
+
+    return { outcome: 'updated' as const, rotation: updated };
   });
 
   // Evict AFTER the commit, never inside it. Between an in-transaction evict

@@ -20,6 +20,7 @@ import * as labelsService from '../services/labels.service.js';
 import * as librarySearchService from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
 import { checkStreamingAvailability, isLmlConfigured } from '@wxyc/lml-client';
+import { hasWireUrlParserDifferential } from '../utils/album-metadata-projection.js';
 import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import { getPostHogClient } from '../utils/posthog.js';
@@ -1211,8 +1212,18 @@ const validateTextField = (value: unknown, field: string, maxLength: number): st
   return trimmed;
 };
 
+const ROTATION_STATUSES = ['active', 'killed', 'all'] as const;
+
+/**
+ * `?status=` (BS#2473) — default `active`, byte-compatible with every
+ * pre-#2473 caller. See `getRotationFromDB` for the non-partition semantics.
+ */
 export const getRotation: RequestHandler = async (req, res) => {
-  const rotation = await libraryService.getRotationFromDB();
+  const { status } = req.query;
+  if (status !== undefined && !ROTATION_STATUSES.includes(status as (typeof ROTATION_STATUSES)[number])) {
+    throw new WxycError(`Invalid Parameter: status must be one of ${ROTATION_STATUSES.join(', ')}`, 400);
+  }
+  const rotation = await libraryService.getRotationFromDB(status as libraryService.RotationStatus | undefined);
   res.status(200).json(rotation);
 };
 
@@ -1562,6 +1573,40 @@ function isNonBlankString(value: unknown): value is string {
 }
 
 /**
+ * `urls[]` on both rotation write arms (BS#2473) — POST's initial set and
+ * PATCH's wholesale replacement. The whole array is validated before any of
+ * it is written, so a bad entry can't leave a partially-written set.
+ *
+ * Reuses `hasWireUrlParserDifferential`, the WHATWG-parser-differential guard
+ * the streaming-URL boundary established (BS#1710/BS#2356) for exactly this
+ * reasoning: a value that parses one way here and another on a client must
+ * never be accepted, since this service serves it back verbatim.
+ */
+function parseRotationUrls(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw new WxycError('Invalid Parameter: urls must be an array of strings', 400);
+  }
+  return value.map((entry) => {
+    const trimmed = typeof entry === 'string' ? entry.trim() : '';
+    let parsed: URL | undefined;
+    try {
+      parsed = trimmed === '' ? undefined : new URL(trimmed);
+    } catch {
+      parsed = undefined;
+    }
+    const valid =
+      parsed !== undefined &&
+      !hasWireUrlParserDifferential(trimmed) &&
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      parsed.hostname !== '';
+    if (!valid) {
+      throw new WxycError(`Invalid Parameter: urls contains an unusable URL: ${JSON.stringify(entry)}`, 400);
+    }
+    return trimmed;
+  });
+}
+
+/**
  * The two pre-catalog FKs `rotation` gained in BS#2409, and how to prove a
  * client-supplied id actually resolves (BS#2410).
  *
@@ -1662,7 +1707,13 @@ async function assertRotationPrecatalogFk(
  * keep filing correctly. Existence (404) and bin agreement (the named 409
  * below) live in `resolveRotationCardId` at the service layer.
  */
-export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = async (req, res) => {
+// BS#2473: `urls` rides the request body alongside the `NewRotationRelease`
+// columns but isn't one of them (`rotation_urls` is a child table) — widened
+// here rather than on `NewRotationRelease` itself, which mirrors the real
+// `rotation` table and must not grow a non-column field.
+type AddRotationRequestBody = NewRotationRelease & { urls?: unknown };
+
+export const addRotation: RequestHandler<object, unknown, AddRotationRequestBody> = async (req, res) => {
   const { body } = req;
 
   if (body.rotation_bin == null) {
@@ -1732,10 +1783,14 @@ export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = 
     }
   }
 
+  // BS#2473: the row's initial URL set, on both arms. Validated up front so
+  // a bad entry never reaches the insert transaction.
+  const urls = body.urls !== undefined ? parseRotationUrls(body.urls) : undefined;
+
   const picked = pickAddRotationFields(body);
   let rotationRelease: RotationRelease;
   try {
-    rotationRelease = await libraryService.addToRotation(picked);
+    rotationRelease = await libraryService.addToRotation(picked, urls);
   } catch (err) {
     if (err instanceof libraryService.RotationCardBinMismatchError) {
       // The named-reason 409 convention (`addArtist`, `deleteRotationCard`);
@@ -1858,6 +1913,12 @@ export type RotationUpdateRequest = {
   // `kill_date` above carries.
   format_id?: unknown;
   label_id?: unknown;
+  // BS#2473: the within-bin move (validated against the row's OWN bin, not
+  // a client-supplied one — see `libraryService.updateRotation`) and the
+  // wholesale URL replacement. `card_id: null` uncards the row; `urls`
+  // replaces the whole set, `[]` clears it.
+  card_id?: unknown;
+  urls?: unknown;
   // The JSP editor (tubafrenzy's `rotationReleaseModify.jsp`) also carries
   // these three fields, but none has a column on `rotation` —
   // alphabetical_name lives on `artists.alphabetical_name`
@@ -1879,6 +1940,7 @@ const ROTATION_UPDATABLE_FIELDS = [
   'kill_date',
   'format_id',
   'label_id',
+  'card_id',
 ] as const;
 
 // `format` STAYS rejected even though BS#2410 made the format editable here.
@@ -2052,8 +2114,11 @@ export const updateRotation: RequestHandler<{ id: string }, unknown, RotationUpd
     throw new WxycError(`Bad Request: no rotation column exists for ${detail}`, 400);
   }
 
-  if (!ROTATION_UPDATABLE_FIELDS.some((field) => field in body)) {
-    throw new WxycError(`Bad Request: provide at least one of ${ROTATION_UPDATABLE_FIELDS.join(', ')}`, 400);
+  // `urls` isn't a `rotation` column, so it can't join `ROTATION_UPDATABLE_FIELDS`
+  // (that list also drives the pre-catalog 409's field-name projection above),
+  // but a urls-only PATCH is a legal request — checked separately.
+  if (!ROTATION_UPDATABLE_FIELDS.some((field) => field in body) && !('urls' in body)) {
+    throw new WxycError(`Bad Request: provide at least one of ${ROTATION_UPDATABLE_FIELDS.join(', ')}, urls`, 400);
   }
 
   const updates: libraryService.UpdateRotationRow = {};
@@ -2089,10 +2154,33 @@ export const updateRotation: RequestHandler<{ id: string }, unknown, RotationUpd
     updates[field] = body[field] as number | null;
   }
 
+  // BS#2473: `card_id` — a positive integer to move the row, or `null` to
+  // uncard it. Shape-only here; existence and the row's-own-bin invariant
+  // are the service's to assert (`resolveRotationCardId`, reused verbatim).
+  if (body.card_id !== undefined) {
+    if (body.card_id !== null && !(Number.isInteger(body.card_id) && (body.card_id as number) > 0)) {
+      throw new WxycError('Invalid Parameter: card_id must be a positive integer, or null to uncard the row', 400);
+    }
+    updates.card_id = body.card_id as number | null;
+  }
+
+  if (body.urls !== undefined) {
+    updates.urls = parseRotationUrls(body.urls);
+  }
+
   // BS#2113 review finding 4: the linked/unlinked precondition lives in the
   // service's own compare-and-set UPDATE, not in a read taken here — see
   // `libraryService.updateRotation` for why.
-  const outcome = await libraryService.updateRotation(rotationId, updates);
+  let outcome: libraryService.UpdateRotationOutcome;
+  try {
+    outcome = await libraryService.updateRotation(rotationId, updates);
+  } catch (err) {
+    if (err instanceof libraryService.RotationCardBinMismatchError) {
+      res.status(409).json({ message: err.message, reason: 'rotation_card_bin_mismatch' });
+      return;
+    }
+    throw err;
+  }
 
   if (outcome.outcome === 'not_found') {
     throw new WxycError('Rotation entry not found', 404);

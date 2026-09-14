@@ -255,6 +255,17 @@ jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   isLmlConfigured: mockIsLmlConfigured,
   envInt: (_name: string, fallback: number) => fallback,
+  // BS#2473: `album-metadata-projection.ts`'s `hasWireUrlParserDifferential`
+  // (used by the rotation `urls[]` validator) delegates to this real
+  // primitive rather than a mock — same behavior, so the rotation urls
+  // tests exercise the actual differential-character scan.
+  hasUrlParserDifferentialChar: (value: string) => {
+    for (const char of value) {
+      const code = char.codePointAt(0) ?? 0;
+      if (code <= 0x20 || code === 0x7f || code === 0x5c) return true;
+    }
+    return false;
+  },
 }));
 
 // Backend code paths now route through the LmlLookupCoordinator (BS#885).
@@ -307,6 +318,7 @@ import {
   manualDiscogsRecheck,
   deleteAlbum,
   addRotation,
+  getRotation,
   getUncataloguedRotation,
   getRotationRow,
   linkRotationToAlbum,
@@ -1868,6 +1880,39 @@ describe('library.controller', () => {
     });
   });
 
+  describe('getRotation (BS#2473 status param)', () => {
+    beforeEach(() => {
+      mockGetRotationFromDB.mockReset().mockResolvedValue([]);
+    });
+
+    it('omitting status calls the service with undefined (its own default is active)', async () => {
+      const req = { query: {} } as unknown as Request;
+      const res = mockResponse();
+
+      await getRotation(req, res, next);
+
+      expect(mockGetRotationFromDB).toHaveBeenCalledWith(undefined);
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it.each(['active', 'killed', 'all'])('forwards a valid status=%s to the service', async (status) => {
+      const req = { query: { status } } as unknown as Request;
+      const res = mockResponse();
+
+      await getRotation(req, res, next);
+
+      expect(mockGetRotationFromDB).toHaveBeenCalledWith(status);
+    });
+
+    it('rejects an unrecognized status value', async () => {
+      const req = { query: { status: 'retired' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getRotation(req, res, next)).rejects.toThrow('status must be one of');
+      expect(mockGetRotationFromDB).not.toHaveBeenCalled();
+    });
+  });
+
   describe('addRotation (BS#2109)', () => {
     beforeEach(() => {
       mockAddToRotation.mockReset();
@@ -1904,7 +1949,7 @@ describe('library.controller', () => {
 
       await addRotation(req, res, next);
 
-      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M' });
+      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M' }, undefined);
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -1923,11 +1968,14 @@ describe('library.controller', () => {
 
       await addRotation(req, res, next);
 
-      expect(mockAddToRotation).toHaveBeenCalledWith({
-        rotation_bin: 'L',
-        artist_name: 'Jockstrap',
-        album_title: 'I Love You Jennifer B',
-      });
+      expect(mockAddToRotation).toHaveBeenCalledWith(
+        {
+          rotation_bin: 'L',
+          artist_name: 'Jockstrap',
+          album_title: 'I Love You Jennifer B',
+        },
+        undefined
+      );
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -1944,11 +1992,14 @@ describe('library.controller', () => {
 
       await addRotation(req, res, next);
 
-      expect(mockAddToRotation).toHaveBeenCalledWith({
-        rotation_bin: 'L',
-        artist_name: 'Jockstrap',
-        album_title: 'I Love You Jennifer B',
-      });
+      expect(mockAddToRotation).toHaveBeenCalledWith(
+        {
+          rotation_bin: 'L',
+          artist_name: 'Jockstrap',
+          album_title: 'I Love You Jennifer B',
+        },
+        undefined
+      );
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -2028,7 +2079,7 @@ describe('library.controller', () => {
 
       await addRotation(req, res, next);
 
-      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M', card_id: 7 });
+      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M', card_id: 7 }, undefined);
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -2039,7 +2090,7 @@ describe('library.controller', () => {
 
       await addRotation(req, res, next);
 
-      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M' });
+      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M' }, undefined);
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -2060,6 +2111,42 @@ describe('library.controller', () => {
       const res = mockResponse();
 
       await expect(addRotation(req, res, next)).rejects.toMatchObject({ statusCode: 404 });
+    });
+
+    describe('urls (BS#2473)', () => {
+      it('parses and forwards a valid urls array on the catalogued arm', async () => {
+        mockAddToRotation.mockResolvedValue({ id: 1, album_id: 5, rotation_bin: 'M' });
+        const req = {
+          body: { album_id: 5, rotation_bin: 'M', urls: ['https://example.com/a', 'https://example.com/b'] },
+        } as unknown as Request;
+        const res = mockResponse();
+
+        await addRotation(req, res, next);
+
+        expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M' }, [
+          'https://example.com/a',
+          'https://example.com/b',
+        ]);
+        expect(res.status).toHaveBeenCalledWith(201);
+      });
+
+      it('rejects a urls entry that fails the WHATWG-differential/http(s) guard', async () => {
+        const req = {
+          body: { album_id: 5, rotation_bin: 'M', urls: ['ftp://example.com/file'] },
+        } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(addRotation(req, res, next)).rejects.toThrow('unusable URL');
+        expect(mockAddToRotation).not.toHaveBeenCalled();
+      });
+
+      it('rejects a non-array urls value', async () => {
+        const req = { body: { album_id: 5, rotation_bin: 'M', urls: 'https://example.com' } } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(addRotation(req, res, next)).rejects.toThrow('urls must be an array');
+        expect(mockAddToRotation).not.toHaveBeenCalled();
+      });
     });
 
     it('returns 400 when a blank/whitespace-only artist_name or album_title is supplied', async () => {
@@ -2113,11 +2200,14 @@ describe('library.controller', () => {
         next
       );
 
-      expect(mockAddToRotation).toHaveBeenCalledWith({
-        rotation_bin: 'L',
-        artist_name: 'Jockstrap',
-        album_title: title,
-      });
+      expect(mockAddToRotation).toHaveBeenCalledWith(
+        {
+          rotation_bin: 'L',
+          artist_name: 'Jockstrap',
+          album_title: title,
+        },
+        undefined
+      );
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -2145,11 +2235,14 @@ describe('library.controller', () => {
         next
       );
 
-      expect(mockAddToRotation).toHaveBeenCalledWith({
-        rotation_bin: 'L',
-        artist_name: astralName,
-        album_title: 'I Love You Jennifer B',
-      });
+      expect(mockAddToRotation).toHaveBeenCalledWith(
+        {
+          rotation_bin: 'L',
+          artist_name: astralName,
+          album_title: 'I Love You Jennifer B',
+        },
+        undefined
+      );
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -2179,7 +2272,7 @@ describe('library.controller', () => {
         next
       );
 
-      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 7, rotation_bin: 'M' });
+      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 7, rotation_bin: 'M' }, undefined);
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -2205,7 +2298,10 @@ describe('library.controller', () => {
 
         await addRotation({ body: uncataloguedBody({ format_id: 3, label_id: 91 }) } as unknown as Request, res, next);
 
-        expect(mockAddToRotation).toHaveBeenCalledWith(expect.objectContaining({ format_id: 3, label_id: 91 }));
+        expect(mockAddToRotation).toHaveBeenCalledWith(
+          expect.objectContaining({ format_id: 3, label_id: 91 }),
+          undefined
+        );
         expect(res.status).toHaveBeenCalledWith(201);
       });
 
@@ -2258,7 +2354,7 @@ describe('library.controller', () => {
           next
         );
 
-        expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 7, rotation_bin: 'M' });
+        expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 7, rotation_bin: 'M' }, undefined);
         expect(mockGetFormatById).not.toHaveBeenCalled();
         expect(mockGetLabelById).not.toHaveBeenCalled();
         expect(res.status).toHaveBeenCalledWith(201);
@@ -4560,6 +4656,66 @@ describe('library.controller', () => {
       await expect(updateRotation(reqFor({ artist_name: 'Juana Molina' }, '999'), res, next)).rejects.toThrow(
         'Rotation entry not found'
       );
+    });
+
+    describe('card_id + urls (BS#2473)', () => {
+      it('rejects a non-positive card_id', async () => {
+        const res = mockResponse();
+
+        await expect(updateRotation(reqFor({ card_id: 0 }), res, next)).rejects.toThrow('card_id must be');
+        expect(mockUpdateRotation).not.toHaveBeenCalled();
+      });
+
+      it('passes an explicit null card_id through to the service (uncard the row)', async () => {
+        const res = mockResponse();
+
+        await updateRotation(reqFor({ card_id: null }), res, next);
+
+        expect(mockUpdateRotation).toHaveBeenCalledWith(42, { card_id: null });
+      });
+
+      it('passes a valid positive card_id through to the service', async () => {
+        const res = mockResponse();
+
+        await updateRotation(reqFor({ card_id: 5 }), res, next);
+
+        expect(mockUpdateRotation).toHaveBeenCalledWith(42, { card_id: 5 });
+      });
+
+      it('maps RotationCardBinMismatchError onto the named 409 (rotation_card_bin_mismatch)', async () => {
+        mockUpdateRotation.mockRejectedValueOnce(new RotationCardBinMismatchError(5, 'S', 'M'));
+        const res = mockResponse();
+
+        await updateRotation(reqFor({ card_id: 5 }), res, next);
+
+        expect(res.status).toHaveBeenCalledWith(409);
+        expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ reason: 'rotation_card_bin_mismatch' }));
+      });
+
+      it('rejects a urls entry that is not a well-formed http(s) URL', async () => {
+        const res = mockResponse();
+
+        await expect(updateRotation(reqFor({ urls: ['not a url'] }), res, next)).rejects.toThrow('unusable URL');
+        expect(mockUpdateRotation).not.toHaveBeenCalled();
+      });
+
+      it('accepts a urls-only PATCH and passes the parsed array through', async () => {
+        const res = mockResponse();
+
+        await updateRotation(reqFor({ urls: ['https://example.com/a', 'https://example.com/b'] }), res, next);
+
+        expect(mockUpdateRotation).toHaveBeenCalledWith(42, {
+          urls: ['https://example.com/a', 'https://example.com/b'],
+        });
+      });
+
+      it('accepts urls: [] to clear the set', async () => {
+        const res = mockResponse();
+
+        await updateRotation(reqFor({ urls: [] }), res, next);
+
+        expect(mockUpdateRotation).toHaveBeenCalledWith(42, { urls: [] });
+      });
     });
   });
 });
