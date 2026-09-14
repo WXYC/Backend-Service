@@ -61,6 +61,7 @@ const mockUpdateArtistInDB =
 const mockGetArtistNameById = jestGlobals.fn<() => Promise<string | null>>();
 const mockGetReleasesForArtist = jestGlobals.fn<() => Promise<unknown[]>>();
 const mockCountReleasesForArtist = jestGlobals.fn<() => Promise<number>>();
+const mockGenerateAlbumCodeNumber = jestGlobals.fn<() => Promise<number>>();
 
 // Collaborator mocks below mirror the discogs-recheck route-permission test —
 // only enough is stubbed here to let library.route's import chain resolve
@@ -88,7 +89,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   insertArtistWithGenreCrossreference: jest.fn(),
   getArtistByCode: jest.fn(),
   getArtistById: jest.fn(),
-  generateAlbumCodeNumber: jest.fn(),
+  generateAlbumCodeNumber: mockGenerateAlbumCodeNumber,
   generateArtistNumber: jest.fn(),
   getGenresFromDB: jest.fn(),
   insertGenre: jest.fn(),
@@ -162,6 +163,7 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
     mockGetArtistNameById.mockReset().mockResolvedValue('Jessica Pratt');
     mockGetReleasesForArtist.mockReset().mockResolvedValue([]);
     mockCountReleasesForArtist.mockReset().mockResolvedValue(0);
+    mockGenerateAlbumCodeNumber.mockReset().mockResolvedValue(1);
   });
 
   describe('GET /library/artists/:id (catalog:read)', () => {
@@ -228,6 +230,38 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
       const res = await request(app).patch('/library/artists/1').send({ alphabetical_name: 'Renamed Anonymously' });
       expect(res.status).toBe(401);
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+    });
+  });
+
+  // BS#2502: the next-release-number peek is a create helper, gated
+  // `catalog:['write']` to match the `/artists/peek-code` sibling — NOT the
+  // `catalog:['read']` tier of the two artist-card GETs beside it. Without this,
+  // relaxing it to `read` (letting any DJ preview the number) would leave the
+  // suite green.
+  describe('GET /library/artists/:id/next-release-number (catalog:write)', () => {
+    test.each(['stationManager', 'musicDirector'])('a %s-role token is authorized', async (role) => {
+      mockRole(role);
+      const res = await request(app)
+        .get('/library/artists/1/next-release-number')
+        .set('Authorization', 'Bearer test-token');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ next_code_number: 1 });
+      expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(1);
+    });
+
+    test.each(['dj', 'member'])('a %s-role token (catalog:read only) is rejected', async (role) => {
+      mockRole(role);
+      const res = await request(app)
+        .get('/library/artists/1/next-release-number')
+        .set('Authorization', 'Bearer test-token');
+      expect(res.status).toBe(403);
+      expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+    });
+
+    test('a request with no Authorization header is rejected', async () => {
+      const res = await request(app).get('/library/artists/1/next-release-number');
+      expect(res.status).toBe(401);
+      expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
     });
   });
 });
