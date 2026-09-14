@@ -2487,6 +2487,10 @@ paths:
           application/json:
             schema:
               type: object
+              required:
+                - artist_name
+                - code_letters
+                - genre_id
               properties:
                 artist_name:
                   type: string
@@ -2496,9 +2500,28 @@ paths:
                   type: integer
                 code_number:
                   type: integer
+                  minimum: 0
+                  maximum: 2147483647
+                  description: >-
+                    Optional since BS#2475. Omitted (or JSON `null`), the server assigns the next
+                    number in the `(code_letters, genre_id)` bucket — bucket MAX + 1, starting at 1
+                    for an empty bucket, the same value `GET /library/artists/peek-code` previews —
+                    and echoes the assignment in the 201 body. Supplied, the number is honored or
+                    refused (409), never rewritten. The floor is 0, below the wxyc-shared
+                    `AddArtistRequest` minimum of 1, deliberately: the Various-Artists shelves are
+                    filed at `artist_genre_code = 0` and the by-code read resolves them, so the
+                    published contract's floor is the side awaiting amendment.
       responses:
         '200':
           description: Successfully added artist
+        '409':
+          description: >-
+            Conflicts. `reason: artist_code_conflict` / `artist_name_conflict` — the code triple
+            or the genre-scoped artist name is already taken (each 409 names the owning artist).
+            `code: artist_code_number_exhausted` (BS#2475) — reachable only with `code_number`
+            omitted: the bucket's next number would exceed 2147483647
+            (`genre_artist_crossreference.artist_genre_code` is a Postgres `integer`), so nothing
+            was written; supply an explicit unused `code_number` instead.
 
   /library/artists/search:
     get:
@@ -2684,10 +2707,11 @@ paths:
             `code_not_assigned` is NOT a guarantee that creating an artist under the code is
             safe. This lookup upper-cases `code_letters` before matching, but `artists.code_letters`
             is a plain `varchar(4)` with byte-exact equality and neither writer canonicalizes:
-            `insertArtist` only NFC-normalizes, and the tubafrenzy `library-etl` job writes its
-            source value verbatim. So a lower-case row filed under the same shelf code is
-            invisible here — and `POST /library/artists`, whose own conflict pre-check also
-            compares raw, will happily create one. Every row in the production catalog is
+            `insertArtistWithGenreCrossreference` only NFC-normalizes, and the tubafrenzy
+            `library-etl` job writes its source value verbatim. So a lower-case row filed under
+            the same shelf code is invisible here — and `POST /library/artists`, whose own
+            conflict pre-check NFC-normalizes but does not case-fold, will happily create one.
+            Every row in the production catalog is
             canonical today, so this is an open path rather than existing data; canonicalizing
             on write (plus a backfill) is the real fix and is tracked separately.
           content:
