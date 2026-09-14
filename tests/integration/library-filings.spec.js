@@ -45,6 +45,19 @@ async function countLabels(labelName) {
   return rows.length;
 }
 
+/**
+ * Exact-title library probe for the rollback assertions. NOT
+ * `GET /library?album_title=` — that search is fuzzy, so once this suite's
+ * earlier tests really insert releases all titled `Filing … Album …`, a probe
+ * for the rejected request's title matches the sibling rows and the
+ * nothing-persisted assertion can never hold.
+ */
+async function countLibraryRows(albumTitle) {
+  const sql = getTestDb();
+  const rows = await sql`SELECT id FROM ${sql(SCHEMA)}.library WHERE album_title = ${albumTitle}`;
+  return rows.length;
+}
+
 describe('POST /library/filings', () => {
   let auth;
   const createdRotationIds = [];
@@ -255,8 +268,7 @@ describe('POST /library/filings', () => {
     });
 
     // No release was inserted under the rejected request.
-    const search = await auth.get('/library').query({ album_title: albumTitle }).expect(200);
-    expect(search.body).toHaveLength(0);
+    expect(await countLibraryRows(albumTitle)).toBe(0);
   });
 
   test('artist_name_conflict: propagates the named reason with the contract Artist shape', async () => {
@@ -354,8 +366,7 @@ describe('POST /library/filings', () => {
       .expect(404);
     expect(byCode.body.reason).toBe('code_not_assigned');
 
-    const search = await auth.get('/library').query({ album_title: albumTitle }).expect(200);
-    expect(search.body).toHaveLength(0);
+    expect(await countLibraryRows(albumTitle)).toBe(0);
 
     expect(await countLabels(labelName)).toBe(0);
   });
