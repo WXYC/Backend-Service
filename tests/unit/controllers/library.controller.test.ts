@@ -85,6 +85,8 @@ type ArtistCardMock = {
   code_artist_number: number;
 };
 const mockGetArtistCardById = jest.fn<(artistId: number) => Promise<ArtistCardMock | null>>();
+// POST /library/filings (BS#2474): genre-scoped artist-card resolution.
+const mockGetArtistCardByIdInGenre = jest.fn<(artistId: number, genreId: number) => Promise<ArtistCardMock | null>>();
 const mockUpdateArtistInDB =
   jest.fn<
     (
@@ -212,6 +214,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   recheckDiscogsAvailability: mockRecheckDiscogsAvailability,
   deleteAlbumFromDB: mockDeleteAlbumFromDB,
   getArtistCardById: mockGetArtistCardById,
+  getArtistCardByIdInGenre: mockGetArtistCardByIdInGenre,
   updateArtistInDB: mockUpdateArtistInDB,
   getReleasesForArtist: mockGetReleasesForArtist,
   countReleasesForArtist: mockCountReleasesForArtist,
@@ -296,6 +299,7 @@ import {
   searchForAlbum,
   addAlbum,
   addArtist,
+  createLibraryFiling,
   resolveArtistByCode,
   peekArtistNumber,
   getAlbum,
@@ -734,7 +738,9 @@ describe('library.controller', () => {
 
         await addAlbum(req({ label_id: 55 }), mockResponse(), next);
 
-        expect(mockGetLabelById).toHaveBeenCalledWith(55);
+        // Trailing undefined: `resolveNewAlbumLabel` threads no transaction
+        // on the standalone add path (only `POST /library/filings` passes one).
+        expect(mockGetLabelById).toHaveBeenCalledWith(55, undefined);
         expect(mockCreateLabel).not.toHaveBeenCalled();
         expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ label_id: 55, label: 'Sonamos' }));
       });
@@ -767,7 +773,9 @@ describe('library.controller', () => {
       it('still creates or reuses the labels row when only label text is sent', async () => {
         await addAlbum(req({ label: 'Drag City' }), mockResponse(), next);
 
-        expect(mockCreateLabel).toHaveBeenCalledWith('Drag City');
+        // Trailing undefineds: no parent label, and no transaction on the
+        // standalone add path (only `POST /library/filings` passes one).
+        expect(mockCreateLabel).toHaveBeenCalledWith('Drag City', undefined, undefined);
         expect(mockGetLabelById).not.toHaveBeenCalled();
         expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ label_id: 99, label: 'Drag City' }));
       });
@@ -798,7 +806,7 @@ describe('library.controller', () => {
 
           await addAlbum(req({ label: 'Drag City', ...labelIdField }), res, next);
 
-          expect(mockCreateLabel).toHaveBeenCalledWith('Drag City');
+          expect(mockCreateLabel).toHaveBeenCalledWith('Drag City', undefined, undefined);
           expect(mockGetLabelById).not.toHaveBeenCalled();
           expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ label_id: 99, label: 'Drag City' }));
           expect(res.status).toHaveBeenCalledWith(201);
@@ -4925,6 +4933,238 @@ describe('library.controller', () => {
 
         expect(mockUpdateRotation).toHaveBeenCalledWith(42, { urls: [] });
       });
+    });
+  });
+
+  describe('createLibraryFiling (POST /library/filings, BS#2474)', () => {
+    const filingArtist = {
+      kind: 'create',
+      artist_name: 'Juana Molina',
+      code_letters: 'MO',
+      genre_id: 11,
+      code_number: 3,
+    };
+    const filingRelease = { album_title: 'DOGA', label: 'Sonamos', genre_id: 11, format_id: 1 };
+    const req = (overrides: Record<string, unknown> = {}) =>
+      ({ body: { artist: { ...filingArtist }, release: { ...filingRelease }, ...overrides } }) as unknown as Request;
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockIsLmlConfigured.mockReturnValue(false);
+      mockGetArtistByCode.mockResolvedValue(null);
+      mockArtistIdFromName.mockResolvedValue(0);
+      mockCreateLabel.mockResolvedValue({ id: 77 });
+      mockInsertArtistWithGenreCrossreference.mockResolvedValue({
+        id: 55,
+        artist_name: 'Juana Molina',
+        alphabetical_name: 'Juana Molina',
+        code_letters: 'MO',
+      });
+      mockGenerateAlbumCodeNumber.mockResolvedValue(1);
+      mockInsertAlbum.mockResolvedValue({ id: 42, artist_id: 55, album_title: 'DOGA' });
+    });
+
+    it('files artist, release, and rotation through one transaction handle and answers the contract shapes', async () => {
+      mockAddToRotation.mockResolvedValue({ id: 9, album_id: 42, rotation_bin: 'S' });
+      const res = mockResponse();
+
+      await createLibraryFiling(req({ rotation: { rotation_bin: 'S' } }), res, next);
+
+      expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalledWith(
+        { artist_name: 'Juana Molina', alphabetical_name: 'Juana Molina', code_letters: 'MO' },
+        11,
+        3,
+        expect.anything()
+      );
+      // The label upsert is a write, so it must ride the SAME transaction —
+      // `expect.anything()` rejects undefined, pinning that a handle was
+      // actually passed (a bare-pool `createLabel` survives the rollback the
+      // all-or-nothing contract promises to take back).
+      expect(mockCreateLabel).toHaveBeenCalledWith('Sonamos', undefined, expect.anything());
+      expect(mockInsertAlbum).toHaveBeenCalledWith(
+        expect.objectContaining({ artist_id: 55, album_title: 'DOGA', label: 'Sonamos', label_id: 77 }),
+        expect.anything()
+      );
+      expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(55, expect.anything());
+      expect(mockAddToRotation).toHaveBeenCalledWith(
+        { rotation_bin: 'S', album_id: 42, card_id: undefined },
+        undefined,
+        expect.anything()
+      );
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({
+        artist: { id: 55, artist_name: 'Juana Molina', code_letters: 'MO', code_artist_number: 3, genre_id: 11 },
+        release: { id: 42, artist_id: 55, album_title: 'DOGA' },
+        rotation: { id: 9, album_id: 42, rotation_bin: 'S' },
+      });
+    });
+
+    it('answers artist_code_conflict with the full contract Artist and writes nothing', async () => {
+      mockGetArtistByCode.mockResolvedValue({ artist_id: 8, artist_name: 'Stereolab', code_letters: 'MO' });
+      const res = mockResponse();
+
+      await createLibraryFiling(req(), res, next);
+
+      expect(res.status).toHaveBeenCalledWith(409);
+      // Not `ArtistCodeOwner` ({artist_id, artist_name, code_letters}): the
+      // contract requires id/code_artist_number/genre_id too, or the typed
+      // generated clients cannot decode the 409.
+      expect(res.json).toHaveBeenCalledWith({
+        message: 'Artist code already exists for that genre and code letters.',
+        reason: 'artist_code_conflict',
+        artist: { id: 8, artist_name: 'Stereolab', code_letters: 'MO', code_artist_number: 3, genre_id: 11 },
+      });
+      expect(mockInsertArtistWithGenreCrossreference).not.toHaveBeenCalled();
+      expect(mockInsertAlbum).not.toHaveBeenCalled();
+    });
+
+    it('answers artist_name_conflict with the conflicting membership resolved in the filing genre', async () => {
+      mockArtistIdFromName.mockResolvedValue(8);
+      mockGetArtistCardByIdInGenre.mockResolvedValue({
+        artist_id: 8,
+        artist_name: 'Juana Molina',
+        alphabetical_name: 'Molina, Juana',
+        genre_id: 11,
+        code_letters: 'JM',
+        code_artist_number: 4,
+      });
+      const res = mockResponse();
+
+      await createLibraryFiling(req(), res, next);
+
+      expect(mockGetArtistCardByIdInGenre).toHaveBeenCalledWith(8, 11);
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith({
+        message: 'Artist name already exists in that genre.',
+        reason: 'artist_name_conflict',
+        artist: { id: 8, artist_name: 'Juana Molina', code_letters: 'JM', code_artist_number: 4, genre_id: 11 },
+      });
+    });
+
+    it('answers code-number exhaustion as a decodable 409: contract reason plus the standalone code discriminant', async () => {
+      // Bucket MAX already at INT4_MAX, so the assigned number would overflow
+      // the crossreference column.
+      mockGenerateArtistNumber.mockResolvedValue(2147483648);
+      const res = mockResponse();
+
+      await createLibraryFiling(
+        req({ artist: { kind: 'create', artist_name: 'Juana Molina', code_letters: 'MO', genre_id: 11 } }),
+        res,
+        next
+      );
+
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'artist_code_conflict', code: 'artist_code_number_exhausted' })
+      );
+    });
+
+    it('400s an over-length code_letters instead of letting the varchar(4) column 500', async () => {
+      const res = mockResponse();
+
+      await expect(
+        createLibraryFiling(req({ artist: { ...filingArtist, code_letters: 'ABCDE' } }), res, next)
+      ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('code_letters') });
+    });
+
+    it('400s a create arm whose artist.genre_id diverges from release.genre_id', async () => {
+      const res = mockResponse();
+
+      await expect(
+        createLibraryFiling(req({ artist: { ...filingArtist, genre_id: 6 } }), res, next)
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: expect.stringContaining('artist.genre_id must equal release.genre_id'),
+      });
+    });
+
+    it('existing arm resolves the referenced artist in the RELEASE genre and skips creation', async () => {
+      mockGetArtistCardByIdInGenre.mockResolvedValue({
+        artist_id: 21,
+        artist_name: 'Cat Power',
+        alphabetical_name: 'Cat Power',
+        genre_id: 11,
+        code_letters: 'CA',
+        code_artist_number: 9,
+      });
+      mockInsertAlbum.mockResolvedValue({ id: 43, artist_id: 21, album_title: 'DOGA' });
+      const res = mockResponse();
+
+      await createLibraryFiling(req({ artist: { kind: 'existing', artist_id: 21 } }), res, next);
+
+      expect(mockGetArtistCardByIdInGenre).toHaveBeenCalledWith(21, 11);
+      expect(mockInsertArtistWithGenreCrossreference).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          artist: { id: 21, artist_name: 'Cat Power', code_letters: 'CA', code_artist_number: 9, genre_id: 11 },
+        })
+      );
+    });
+
+    it('400s a dangling artist.artist_id (the contract declares no 404 on this route)', async () => {
+      mockGetArtistCardByIdInGenre.mockResolvedValue(null);
+      mockGetArtistById.mockResolvedValue(null);
+      const res = mockResponse();
+
+      await expect(
+        createLibraryFiling(req({ artist: { kind: 'existing', artist_id: 999 } }), res, next)
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: expect.stringContaining('does not reference an existing artist'),
+      });
+    });
+
+    it('400s an existing artist with no code in the release genre, distinctly from the dangling-id case', async () => {
+      mockGetArtistCardByIdInGenre.mockResolvedValue(null);
+      mockGetArtistById.mockResolvedValue({ artist_id: 21, artist_name: 'Cat Power', code_letters: 'CA' });
+      const res = mockResponse();
+
+      await expect(
+        createLibraryFiling(req({ artist: { kind: 'existing', artist_id: 21 } }), res, next)
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: expect.stringContaining('no artist code in release.genre_id'),
+      });
+    });
+
+    it('maps RotationCardBinMismatchError onto the named 409', async () => {
+      mockAddToRotation.mockRejectedValue(new RotationCardBinMismatchError(7, 'H', 'S'));
+      const res = mockResponse();
+
+      await createLibraryFiling(req({ rotation: { rotation_bin: 'S', card_id: 7 } }), res, next);
+
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ reason: 'rotation_card_bin_mismatch' }));
+    });
+
+    it('remaps the dangling-card 404 onto the declared 400, code intact', async () => {
+      mockAddToRotation.mockRejectedValue(
+        new WxycError('Rotation card not found', 404, { code: 'rotation_card_not_found' })
+      );
+      const res = mockResponse();
+
+      await expect(
+        createLibraryFiling(req({ rotation: { rotation_bin: 'S', card_id: 999 } }), res, next)
+      ).rejects.toMatchObject({ statusCode: 400, code: 'rotation_card_not_found' });
+    });
+
+    it('runs the same post-insert enrichment the standalone add runs, and responds with the enriched release', async () => {
+      mockIsLmlConfigured.mockReturnValue(true);
+      mockCheckStreamingAvailability.mockResolvedValue({ on_streaming: true });
+      mockLookupMetadata.mockResolvedValue(null);
+      mockUpdateOnStreaming.mockResolvedValue({ id: 42, artist_id: 55, album_title: 'DOGA', on_streaming: true });
+      const res = mockResponse();
+
+      await createLibraryFiling(req(), res, next);
+
+      expect(mockCheckStreamingAvailability).toHaveBeenCalledWith('Juana Molina', 'DOGA', {
+        caller: 'library-add-album-streaming',
+      });
+      expect(mockUpdateOnStreaming).toHaveBeenCalledWith(42, true);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ release: expect.objectContaining({ on_streaming: true }) })
+      );
     });
   });
 });

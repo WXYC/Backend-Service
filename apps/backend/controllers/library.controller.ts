@@ -168,13 +168,20 @@ const resolveNewAlbumLabel = async (
   // `addAlbum`'s `NewAlbumRequest` and `POST /library/filings`'s
   // `FilingReleaseBody` carry them, and widening the parameter to their
   // common shape is what lets both call sites share this resolver.
-  body: { label?: string; label_id?: number | null }
+  body: { label?: string; label_id?: number | null },
+  // `tx` (BS#2474): `createLabel`'s upsert is a real write, so the composite
+  // must run this resolver INSIDE its transaction — on the bare pool, a
+  // later-stage rollback would strand the freshly minted `labels` row while
+  // everything else vanishes, breaking the endpoint's all-or-nothing
+  // contract with exactly the near-duplicate-labels outcome the `label_id`
+  // path above exists to prevent. `addAlbum` keeps calling without one.
+  tx?: libraryService.DbTransaction
 ): Promise<{ label_id: number | undefined; label: string | undefined }> => {
   if (body.label_id != null) {
     if (!Number.isInteger(body.label_id) || body.label_id < 1) {
       throw new WxycError('label_id must be a positive integer', 400);
     }
-    const labelRow = await labelsService.getLabelById(body.label_id);
+    const labelRow = await labelsService.getLabelById(body.label_id, tx);
     if (!labelRow) {
       throw new WxycError('label_id does not reference an existing label', 400);
     }
@@ -185,7 +192,7 @@ const resolveNewAlbumLabel = async (
     return { label_id: undefined, label: body.label };
   }
 
-  const resolvedLabel = await labelsService.createLabel(body.label);
+  const resolvedLabel = await labelsService.createLabel(body.label, undefined, tx);
   return { label_id: resolvedLabel.id, label: body.label };
 };
 
@@ -264,98 +271,128 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     disc_quantity: body.disc_quantity,
   };
 
-  let inserted_album: Album = await libraryService.insertAlbum(new_album);
+  const inserted_album: Album = await libraryService.insertAlbum(new_album);
 
-  // Enrich with LML metadata (streaming + artwork) -- don't fail the insert
-  if (isLmlConfigured()) {
-    const artistName = body.alternate_artist_name || body.artist_name || '';
-    const [streamingResult, artworkResult] = await Promise.allSettled([
-      checkStreamingAvailability(artistName, body.album_title, { caller: 'library-add-album-streaming' }),
-      // BS#1294 (1c): pre-read the just-inserted row's discogs_unavailable
-      // flag. On the fresh-insert path this is always false (the row was
-      // just created with the schema default — BS#1281 / plan §3), so the
-      // gate is a no-op here. Wired for consistency with the other three
-      // lookupMetadata callers, and for the day addAlbum gains a dedup/
-      // upsert path that could re-touch an already-flagged row.
-      lmlLookupCoordinator.lookup(artistName, body.album_title, undefined, {
-        caller: 'library-add-album',
-        warm_cache: true,
-        requireSearchType: 'direct',
-        discogsUnavailable: inserted_album.discogs_unavailable,
-      }),
-    ]);
+  const enriched_album = await enrichNewAlbum(
+    inserted_album,
+    body.alternate_artist_name || body.artist_name || '',
+    canonical_artist_name,
+    body.album_title
+  );
 
-    if (streamingResult.status === 'fulfilled' && streamingResult.value.on_streaming !== null) {
-      try {
-        inserted_album = await libraryService.updateOnStreaming(inserted_album.id, streamingResult.value.on_streaming);
-      } catch (e) {
-        console.warn('Failed to persist streaming status:', (e as Error).message);
-      }
-    } else if (streamingResult.status === 'rejected') {
-      console.warn('Streaming check failed for new album:', streamingResult.reason);
+  res.status(201).json(enriched_album);
+};
+
+/**
+ * `addAlbum`'s post-insert LML enrichment (streaming + artwork + telemetry +
+ * fire-and-forget canonical entity), extracted so `POST /library/filings`'s
+ * release arm runs the SAME pipeline the standalone add runs — a record
+ * filed through the composite must not silently come out poorer (no
+ * `on_streaming`, no `artwork_url`, no canonical entity) than the identical
+ * record filed through `POST /library` (BS#2474). The row is already
+ * committed when this runs — the composite calls it strictly AFTER its
+ * transaction commits, never inside it (these are network hops) — and every
+ * branch is best-effort: enrichment failure never fails the insert.
+ *
+ * Returns the album to respond with: `updateOnStreaming`'s refreshed row
+ * when the streaming verdict persisted, with `artwork_url` patched on when
+ * the artwork write landed.
+ */
+async function enrichNewAlbum(
+  insertedAlbum: Album,
+  displayArtistName: string,
+  canonicalArtistName: string | null,
+  albumTitle: string
+): Promise<Album> {
+  if (!isLmlConfigured()) return insertedAlbum;
+
+  let album = insertedAlbum;
+  const [streamingResult, artworkResult] = await Promise.allSettled([
+    checkStreamingAvailability(displayArtistName, albumTitle, { caller: 'library-add-album-streaming' }),
+    // BS#1294 (1c): pre-read the just-inserted row's discogs_unavailable
+    // flag. On the fresh-insert path this is always false (the row was
+    // just created with the schema default — BS#1281 / plan §3), so the
+    // gate is a no-op here. Wired for consistency with the other three
+    // lookupMetadata callers, and for the day addAlbum gains a dedup/
+    // upsert path that could re-touch an already-flagged row.
+    lmlLookupCoordinator.lookup(displayArtistName, albumTitle, undefined, {
+      caller: 'library-add-album',
+      warm_cache: true,
+      requireSearchType: 'direct',
+      discogsUnavailable: album.discogs_unavailable,
+    }),
+  ]);
+
+  if (streamingResult.status === 'fulfilled' && streamingResult.value.on_streaming !== null) {
+    try {
+      album = await libraryService.updateOnStreaming(album.id, streamingResult.value.on_streaming);
+    } catch (e) {
+      console.warn('Failed to persist streaming status:', (e as Error).message);
     }
-
-    // BS#1228 (LML#376 follow-up): capture which streaming services errored
-    // out so a future retry-policy decision can be data-driven. Pure
-    // observability — never persisted to `library.*`, independent of the
-    // on_streaming verdict above (a service can error while others still
-    // resolve a match). Each emit is its own try/catch so a PostHog outage
-    // can't suppress the Sentry span projection or vice versa.
-    if (streamingResult.status === 'fulfilled' && streamingResult.value.errored_sources?.length) {
-      try {
-        getPostHogClient().capture({
-          distinctId: String(inserted_album.id),
-          event: 'streaming_check_partial_error',
-          properties: {
-            album_id: inserted_album.id,
-            artist: artistName,
-            title: body.album_title,
-            on_streaming_verdict: streamingResult.value.on_streaming,
-            errored_sources: streamingResult.value.errored_sources,
-          },
-        });
-      } catch (e) {
-        console.warn('Failed to emit streaming-check telemetry:', (e as Error).message);
-      }
-
-      try {
-        // `on_streaming` is `boolean | null`; Sentry's SpanAttributeValue has
-        // no `null` member, so a null verdict (LML's "inconclusive" case)
-        // omits the attribute entirely rather than coercing it to a string.
-        Sentry.getActiveSpan()?.setAttributes({
-          'streaming_check.errored_sources': streamingResult.value.errored_sources,
-          'streaming_check.on_streaming': streamingResult.value.on_streaming ?? undefined,
-        });
-      } catch (e) {
-        console.warn('Failed to project streaming-check telemetry onto span:', (e as Error).message);
-      }
-    }
-
-    if (artworkResult.status === 'rejected') {
-      console.warn('Artwork fetch failed for new album:', artworkResult.reason);
-    } else if (artworkResult.value !== null) {
-      const artworkUrl = filterSpacerGif(artworkResult.value.results?.[0]?.artwork?.artwork_url);
-      if (artworkUrl) {
-        try {
-          await libraryService.updateArtworkUrl(inserted_album.id, artworkUrl);
-          (inserted_album as Record<string, unknown>).artwork_url = artworkUrl;
-        } catch (e) {
-          console.warn('Failed to persist artwork URL:', (e as Error).message);
-        }
-      }
-    }
-
-    // Fire-and-forget canonical-entity resolution (Epic B.1.3). The library
-    // insert succeeds immediately; the canonical_entity_id lands within
-    // seconds. UI and downstream consumers tolerate the lag. We use the
-    // canonical artist name resolved from the artists table, not the raw
-    // request body, so casing/diacritic variants in client input don't
-    // poison LML's match.
-    fireAndForgetCanonicalEntity(inserted_album.id, canonical_artist_name, body.album_title);
+  } else if (streamingResult.status === 'rejected') {
+    console.warn('Streaming check failed for new album:', streamingResult.reason);
   }
 
-  res.status(201).json(inserted_album);
-};
+  // BS#1228 (LML#376 follow-up): capture which streaming services errored
+  // out so a future retry-policy decision can be data-driven. Pure
+  // observability — never persisted to `library.*`, independent of the
+  // on_streaming verdict above (a service can error while others still
+  // resolve a match). Each emit is its own try/catch so a PostHog outage
+  // can't suppress the Sentry span projection or vice versa.
+  if (streamingResult.status === 'fulfilled' && streamingResult.value.errored_sources?.length) {
+    try {
+      getPostHogClient().capture({
+        distinctId: String(album.id),
+        event: 'streaming_check_partial_error',
+        properties: {
+          album_id: album.id,
+          artist: displayArtistName,
+          title: albumTitle,
+          on_streaming_verdict: streamingResult.value.on_streaming,
+          errored_sources: streamingResult.value.errored_sources,
+        },
+      });
+    } catch (e) {
+      console.warn('Failed to emit streaming-check telemetry:', (e as Error).message);
+    }
+
+    try {
+      // `on_streaming` is `boolean | null`; Sentry's SpanAttributeValue has
+      // no `null` member, so a null verdict (LML's "inconclusive" case)
+      // omits the attribute entirely rather than coercing it to a string.
+      Sentry.getActiveSpan()?.setAttributes({
+        'streaming_check.errored_sources': streamingResult.value.errored_sources,
+        'streaming_check.on_streaming': streamingResult.value.on_streaming ?? undefined,
+      });
+    } catch (e) {
+      console.warn('Failed to project streaming-check telemetry onto span:', (e as Error).message);
+    }
+  }
+
+  if (artworkResult.status === 'rejected') {
+    console.warn('Artwork fetch failed for new album:', artworkResult.reason);
+  } else if (artworkResult.value !== null) {
+    const artworkUrl = filterSpacerGif(artworkResult.value.results?.[0]?.artwork?.artwork_url);
+    if (artworkUrl) {
+      try {
+        await libraryService.updateArtworkUrl(album.id, artworkUrl);
+        (album as Record<string, unknown>).artwork_url = artworkUrl;
+      } catch (e) {
+        console.warn('Failed to persist artwork URL:', (e as Error).message);
+      }
+    }
+  }
+
+  // Fire-and-forget canonical-entity resolution (Epic B.1.3). The library
+  // insert succeeds immediately; the canonical_entity_id lands within
+  // seconds. UI and downstream consumers tolerate the lag. We use the
+  // canonical artist name resolved from the artists table, not the raw
+  // request body, so casing/diacritic variants in client input don't
+  // poison LML's match.
+  fireAndForgetCanonicalEntity(album.id, canonicalArtistName, albumTitle);
+
+  return album;
+}
 
 /**
  * Resolve the canonical entity for a freshly inserted library row via LML and
@@ -502,6 +539,37 @@ const validateArtistCodeNumber = (code_number: unknown): number => {
   return code_number;
 };
 
+// `artists.code_letters` is `varchar(4)` (schema.ts). Same rationale as
+// `MAX_CODE_VOLUME_LETTERS_LENGTH` above: reject over-length input as a named
+// 400 instead of letting it reach the INSERT as PG 22001 -> an opaque 500
+// plus a Sentry event for routine operator input.
+const MAX_ARTIST_CODE_LETTERS_LENGTH = 4;
+
+/**
+ * Validate `code_letters` for the artist-create paths (`POST /library/artists`
+ * and `POST /library/filings`' create arm) and return the NFC form every read
+ * and write below must key on (see `addArtist`'s normalization comment).
+ *
+ * The bound counts code points of the NFC form — the composition that is
+ * actually stored — not UTF-16 units of the raw input, per
+ * `validateCodeVolumeLetters`'s rationale for the sibling `varchar(4)`
+ * column. No trim and no case fold, deliberately: the artist card paths
+ * only ever NFC-normalize (`insertArtistWithGenreCrossreference`), and
+ * validation must not admit-by-rewriting a value the write path would then
+ * store differently. Non-string input is caught here too — `.normalize` on
+ * a non-string is a TypeError -> 500 otherwise.
+ */
+const validateArtistCodeLetters = (code_letters: unknown): string => {
+  if (typeof code_letters !== 'string') {
+    throw new WxycError('code_letters must be a string', 400);
+  }
+  const normalized = code_letters.normalize('NFC');
+  if (codePointLength(normalized) > MAX_ARTIST_CODE_LETTERS_LENGTH) {
+    throw new WxycError(`code_letters must be ${MAX_ARTIST_CODE_LETTERS_LENGTH} characters or fewer`, 400);
+  }
+  return normalized;
+};
+
 /**
  * Server-assigns the next `code_number` in the `(genre_id, code_letters)`
  * bucket via `generateArtistNumber` — the same generator behind the
@@ -543,8 +611,10 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
   // `insertArtistWithGenreCrossreference` stores the NFC form (BS#1897). An
   // NFD-composed `code_letters` would otherwise read an empty bucket, assign
   // 1 into a shelf that already holds rows, and file the row — stored NFC —
-  // into exactly the collision the pre-check exists to prevent.
-  const code_letters = body.code_letters.normalize('NFC');
+  // into exactly the collision the pre-check exists to prevent. The
+  // validator (BS#2474) folds the normalize in, adding the varchar(4) length
+  // bound as a named 400.
+  const code_letters = validateArtistCodeLetters(body.code_letters);
 
   // Omitted or JSON-`null` `code_number` (BS#2475): server-assigns it below.
   // `!= null` rather than a falsy check because `code_number: 0` is a real
@@ -1935,38 +2005,75 @@ type LibraryFilingRequestBody = {
 };
 
 /**
- * The create arm's own conflict shape, mirroring `addArtist`'s two named
- * 409s so `createLibraryFiling` below can map either to the same
- * `LibraryFilingConflictReason` the standalone endpoint answers with.
+ * The `Artist` shape `wxyc-shared/api.yaml` declares — the composite's 200
+ * `artist` block AND the 409 `LibraryFilingConflictError.artist` payload
+ * both `$ref` it, so every artist this endpoint puts on the wire must carry
+ * this exact field set. NOT `ArtistCodeOwner` (`addArtist`'s own 409 shape):
+ * that projection has no `id`, `code_artist_number` or `genre_id`, and the
+ * contract's prescribed remedy for a name conflict — resubmit with
+ * `kind: 'existing'` and the returned `artist.id` — reads fields it lacks.
+ * The strictly-typed generated clients (Swift/Kotlin) fail to decode the
+ * 409 at all when any required `Artist` member is missing.
  */
-class FilingArtistConflictError extends Error {
-  constructor(
-    readonly reason: 'artist_code_conflict' | 'artist_name_conflict',
-    message: string,
-    readonly artist: libraryService.ArtistCodeOwner
-  ) {
-    super(message);
-  }
-}
+type FilingArtist = {
+  id: number;
+  artist_name: string;
+  code_letters: string;
+  code_artist_number: number;
+  genre_id: number;
+};
+
+const artistCardToFilingArtist = (row: libraryService.ArtistCardRow): FilingArtist => ({
+  id: row.artist_id,
+  artist_name: row.artist_name,
+  code_letters: row.code_letters,
+  code_artist_number: row.code_artist_number,
+  genre_id: row.genre_id,
+});
 
 /**
  * `POST /library/filings` (BS#2474): artist (create-or-reference), release,
  * and an optional rotation entry, in ONE `db.transaction` — a mid-chain
  * failure rolls back everything already written this request, including an
- * artist the create arm just inserted. Composed from the same writes
- * `addArtist`/`addAlbum`/`addRotation` use (`assignArtistCodeNumber` /
- * `validateArtistCodeNumber` above, and `libraryService.getArtistByCode` /
- * `artistIdFromName` / `getArtistById` / `insertArtistWithGenreCrossreference`
- * / `insertAlbum` / `addToRotation`), each threaded onto this function's own
- * `tx` (BS#2474; see `DbTransaction`'s doc comment for why a nested bare
+ * artist the create arm just inserted and a `labels` row the release's
+ * label text minted. Composed from the same writes
+ * `addArtist`/`addAlbum`/`addRotation` use
+ * (`insertArtistWithGenreCrossreference` / `resolveNewAlbumLabel` /
+ * `insertAlbum` / `addToRotation`), each threaded onto this function's own
+ * `tx` (see `DbTransaction`'s doc comment for why a nested bare
  * `db.transaction()` inside those functions would NOT roll back with it).
+ * The reads inside the transaction ride the same `tx` — a bare `db` read
+ * there borrows a SECOND pool connection while this one sits reserved, and
+ * enough concurrent filings would each hold a connection while waiting on a
+ * read none of them can be granted (`addToRotation`'s identity-read comment
+ * has the mechanics). Everything with no write to protect — the conflict
+ * pre-checks, mirroring `addArtist`'s exact sequence and residual-race
+ * posture — runs BEFORE the transaction on the plain pool.
  *
- * The `kind: 'existing'` arm skips artist creation and answers with
- * `getArtistCardById`'s crossreference row (the same lowest-`genre_id`
- * collapse a multi-genre-filed artist gets on `GET /library/artists/:id`),
- * 404ing a dangling `artist_id` before any write. Both arms answer the
- * `Artist` contract shape (`code_artist_number`), not `addArtist`'s own
- * response's `code_number` key, so a caller sees one field set either way.
+ * The `kind: 'existing'` arm resolves the referenced artist's
+ * crossreference IN `release.genre_id` specifically, not the lowest-genre
+ * collapse `GET /library/artists/:id` answers with: the release is filed
+ * under that genre, so the artist code echoed back must be the code for
+ * that shelf — a multi-genre artist's lowest membership can carry a
+ * different genre's call number. An artist with no membership in the
+ * release's genre is a 400 (the create arm's mirror guard is the
+ * `artist.genre_id === release.genre_id` equality check), as is a dangling
+ * `artist_id` — the contract declares no 404 on this route.
+ *
+ * After the transaction commits, the release runs the SAME LML enrichment
+ * pipeline `POST /library` runs (`enrichNewAlbum`: streaming + artwork +
+ * canonical entity) — after, never inside, because those are network hops
+ * and the transaction must not stay open across them.
+ *
+ * The 409s all conform to `LibraryFilingConflictError` (`message` +
+ * `reason`, `artist` on the two artist reasons). Code-number exhaustion —
+ * `assignArtistCodeNumber`'s 409, which the standalone endpoint emits as
+ * `{message, code}` — is answered here as `reason: 'artist_code_conflict'`
+ * (its remedy is the same: pick/supply another code) with the standalone's
+ * `code: 'artist_code_number_exhausted'` alongside as the finer
+ * discriminant, because `reason` is required by the contract and its enum
+ * has no exhaustion member. It is the one `artist_code_conflict` 409 with
+ * no `artist` to name.
  */
 export const createLibraryFiling: RequestHandler<object, unknown, LibraryFilingRequestBody> = async (req, res) => {
   const { body } = req;
@@ -2005,10 +2112,23 @@ export const createLibraryFiling: RequestHandler<object, unknown, LibraryFilingR
   if (typeof release.album_title !== 'string' || release.album_title.trim() === '') {
     throw new WxycError('release.album_title must be a non-empty string', 400);
   }
+  // The create arm files the artist's crossreference in `artist.genre_id`
+  // and the release in `release.genre_id`. Diverging, the release's genre
+  // would hold no artist code to resolve its shelf position against — the
+  // same misfiling the existing arm's genre-scoped resolution below rejects
+  // — so the composite requires the two to agree.
+  if (artistBody.kind === 'create' && artistBody.genre_id !== release.genre_id) {
+    throw new WxycError(
+      'artist.genre_id must equal release.genre_id: the release is shelved under the artist code the create arm files in that genre',
+      400
+    );
+  }
+  const album_title = release.album_title;
+  const release_genre_id = release.genre_id;
+  const release_format_id = release.format_id;
   const code_volume_letters =
     release.code_volume_letters === undefined ? undefined : validateCodeVolumeLetters(release.code_volume_letters);
   const supplied_code_number = release.code_number === undefined ? undefined : validateCodeNumber(release.code_number);
-  const { label_id, label } = await resolveNewAlbumLabel(release);
 
   let rotationBody: { rotation_bin: RotationBin; card_id?: number; urls?: string[] } | undefined;
   if (body.rotation !== undefined) {
@@ -2032,81 +2152,136 @@ export const createLibraryFiling: RequestHandler<object, unknown, LibraryFilingR
     };
   }
 
+  // Artist resolution and conflict pre-checks: plain-pool reads BEFORE the
+  // transaction, `addArtist`'s exact sequence and precedence (code conflict
+  // wins over name conflict; the server-assigned arm recomputes once on a
+  // pre-check hit). Residual races carry `addArtist`'s documented
+  // single-librarian acceptance.
+  let filingPlan:
+    | { kind: 'create'; artist_name: string; alphabetical_name: string; code_letters: string; code_number: number }
+    | { kind: 'existing'; artist: FilingArtist };
+  if (artistBody.kind === 'create') {
+    const code_letters = validateArtistCodeLetters(artistBody.code_letters);
+    const supplied = artistBody.code_number != null;
+    let code_number: number;
+    try {
+      code_number = supplied
+        ? validateArtistCodeNumber(artistBody.code_number)
+        : await assignArtistCodeNumber(code_letters, artistBody.genre_id);
+      let existing = await libraryService.getArtistByCode(code_letters, artistBody.genre_id, code_number);
+      if (existing && !supplied) {
+        code_number = await assignArtistCodeNumber(code_letters, artistBody.genre_id);
+        existing = await libraryService.getArtistByCode(code_letters, artistBody.genre_id, code_number);
+      }
+      if (existing) {
+        // The conflicting artist demonstrably holds exactly the checked
+        // `(code_letters, genre_id, code_number)` triple, so the contract
+        // `Artist` payload is assembled from the probe itself — no second
+        // lookup can disagree with it.
+        res.status(409).json({
+          message: 'Artist code already exists for that genre and code letters.',
+          reason: 'artist_code_conflict',
+          artist: {
+            id: existing.artist_id,
+            artist_name: existing.artist_name,
+            code_letters: existing.code_letters,
+            code_artist_number: code_number,
+            genre_id: artistBody.genre_id,
+          } satisfies FilingArtist,
+        });
+        return;
+      }
+    } catch (err) {
+      // See the doc block: exhaustion is a real conflict but the contract's
+      // `reason` enum has no member for it, so it rides the code-conflict
+      // reason (same remedy) with the standalone endpoint's `code` kept as
+      // the precise discriminant.
+      if (err instanceof WxycError && err.code === 'artist_code_number_exhausted') {
+        res.status(409).json({ message: err.message, reason: 'artist_code_conflict', code: err.code });
+        return;
+      }
+      throw err;
+    }
+    const conflictingId = await libraryService.artistIdFromName(artistBody.artist_name, artistBody.genre_id);
+    // Genre-scoped card lookup, not `getArtistById`: the fold-match above is
+    // scoped to `artist.genre_id`, and the contract payload needs that
+    // membership's own call number. A miss means the row was deleted between
+    // the two queries, so the name is free again — proceed, as `addArtist`
+    // does.
+    const conflicting = conflictingId
+      ? await libraryService.getArtistCardByIdInGenre(conflictingId, artistBody.genre_id)
+      : null;
+    if (conflicting) {
+      res.status(409).json({
+        message: 'Artist name already exists in that genre.',
+        reason: 'artist_name_conflict',
+        artist: artistCardToFilingArtist(conflicting),
+      });
+      return;
+    }
+    filingPlan = {
+      kind: 'create',
+      artist_name: artistBody.artist_name,
+      alphabetical_name: artistBody.alphabetical_name ?? artistBody.artist_name,
+      code_letters,
+      code_number,
+    };
+  } else {
+    const referenced = await libraryService.getArtistCardByIdInGenre(artistBody.artist_id as number, release_genre_id);
+    if (!referenced) {
+      // Both misses are 400s — the contract assigns a dangling
+      // `artist.artist_id` to 400 and declares no 404 on this route — but
+      // the remedies differ, so the messages distinguish them.
+      const artistExists = await libraryService.getArtistById(artistBody.artist_id as number);
+      throw artistExists
+        ? new WxycError(
+            'artist.artist_id references an artist with no artist code in release.genre_id: file the artist in that genre first, or file the release under a genre the artist is already coded in',
+            400
+          )
+        : new WxycError('artist.artist_id does not reference an existing artist', 400);
+    }
+    filingPlan = { kind: 'existing', artist: artistCardToFilingArtist(referenced) };
+  }
+
   try {
     const result = await db.transaction(async (tx) => {
-      let artistRow: {
-        id: number;
-        artist_name: string;
-        code_letters: string;
-        code_artist_number: number;
-        genre_id: number;
-      };
-      if (artistBody.kind === 'create') {
-        const code_letters = artistBody.code_letters.normalize('NFC');
-        const supplied = artistBody.code_number != null;
-        let code_number = supplied
-          ? validateArtistCodeNumber(artistBody.code_number)
-          : await assignArtistCodeNumber(code_letters, artistBody.genre_id);
-        let existing = await libraryService.getArtistByCode(code_letters, artistBody.genre_id, code_number);
-        if (existing && !supplied) {
-          code_number = await assignArtistCodeNumber(code_letters, artistBody.genre_id);
-          existing = await libraryService.getArtistByCode(code_letters, artistBody.genre_id, code_number);
-        }
-        if (existing) {
-          throw new FilingArtistConflictError(
-            'artist_code_conflict',
-            'Artist code already exists for that genre and code letters.',
-            existing
-          );
-        }
-        const conflictingId = await libraryService.artistIdFromName(artistBody.artist_name, artistBody.genre_id);
-        const conflicting = conflictingId ? await libraryService.getArtistById(conflictingId) : null;
-        if (conflicting) {
-          throw new FilingArtistConflictError(
-            'artist_name_conflict',
-            'Artist name already exists in that genre.',
-            conflicting
-          );
-        }
+      // Inside the transaction so a later-stage rollback also takes back a
+      // `labels` row minted from fresh label text (see `resolveNewAlbumLabel`'s
+      // `tx` comment).
+      const { label_id, label } = await resolveNewAlbumLabel(release, tx);
+
+      let artistRow: FilingArtist;
+      if (filingPlan.kind === 'create') {
         const artist = await libraryService.insertArtistWithGenreCrossreference(
           {
-            artist_name: artistBody.artist_name,
-            alphabetical_name: artistBody.alphabetical_name ?? artistBody.artist_name,
-            code_letters,
+            artist_name: filingPlan.artist_name,
+            alphabetical_name: filingPlan.alphabetical_name,
+            code_letters: filingPlan.code_letters,
           },
-          artistBody.genre_id,
-          code_number,
+          release_genre_id,
+          filingPlan.code_number,
           tx
         );
         artistRow = {
           id: artist.id,
           artist_name: artist.artist_name,
           code_letters: artist.code_letters,
-          code_artist_number: code_number,
-          genre_id: artistBody.genre_id,
+          code_artist_number: filingPlan.code_number,
+          genre_id: release_genre_id,
         };
       } else {
-        const existing = await libraryService.getArtistCardById(artistBody.artist_id as number);
-        if (!existing) {
-          throw new WxycError('artist.artist_id does not reference an existing artist', 404);
-        }
-        artistRow = {
-          id: existing.artist_id,
-          artist_name: existing.artist_name,
-          code_letters: existing.code_letters,
-          code_artist_number: existing.code_artist_number,
-          genre_id: existing.genre_id,
-        };
+        artistRow = filingPlan.artist;
       }
 
-      const release_code_number = supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artistRow.id));
+      const release_code_number =
+        supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artistRow.id, tx));
       const releaseRow = await libraryService.insertAlbum(
         {
           artist_id: artistRow.id,
           artist_name: artistRow.artist_name,
-          genre_id: release.genre_id as number,
-          format_id: release.format_id as number,
-          album_title: release.album_title as string,
+          genre_id: release_genre_id,
+          format_id: release_format_id,
+          album_title,
           label,
           label_id,
           code_number: release_code_number,
@@ -2128,15 +2303,28 @@ export const createLibraryFiling: RequestHandler<object, unknown, LibraryFilingR
 
       return { artist: artistRow, release: releaseRow, rotation: rotationRow };
     });
-    res.status(200).json(result);
+
+    // Post-commit, never in-transaction: the same enrichment the standalone
+    // add runs, so a record filed here carries the same on_streaming /
+    // artwork_url / canonical entity it would get from `POST /library`.
+    const enrichedRelease = await enrichNewAlbum(
+      result.release,
+      release.alternate_artist_name || result.artist.artist_name,
+      result.artist.artist_name,
+      album_title
+    );
+
+    res.status(200).json({ ...result, release: enrichedRelease });
   } catch (err) {
-    if (err instanceof FilingArtistConflictError) {
-      res.status(409).json({ message: err.message, reason: err.reason, artist: err.artist });
-      return;
-    }
     if (err instanceof libraryService.RotationCardBinMismatchError) {
       res.status(409).json({ message: err.message, reason: 'rotation_card_bin_mismatch' });
       return;
+    }
+    // `resolveRotationCardId`'s dangling-card 404 (see its `code` comment):
+    // this route's contract declares no 404, so the dangling reference is
+    // remapped onto the declared validation 400, message and `code` intact.
+    if (err instanceof WxycError && err.code === 'rotation_card_not_found') {
+      throw new WxycError(err.message, 400, { code: err.code });
     }
     throw err;
   }

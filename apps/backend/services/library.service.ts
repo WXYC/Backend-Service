@@ -661,7 +661,13 @@ const resolveRotationCardId = async (
     `)) as unknown as Array<{ bin: RotationBin }>;
     const card = cardRows[0];
     if (!card) {
-      throw new WxycError('Rotation card not found', 404);
+      // `code` (BS#2474): `POST /library/filings` composes this probe inside
+      // its own transaction but declares no 404 — its contract assigns a
+      // dangling reference to 400 — so the composite's catch needs a stable
+      // discriminant to remap on, not this message's English prose. Additive
+      // for the direct `POST /library/rotation` path, whose body keeps
+      // `message` and merely gains `code`.
+      throw new WxycError('Rotation card not found', 404, { code: 'rotation_card_not_found' });
     }
     if (card.bin !== requestedBin) {
       throw new RotationCardBinMismatchError(cardId, card.bin, String(rotationBin));
@@ -737,8 +743,17 @@ export const addToRotation = async (newRotation: RotationAddRequest, urls?: stri
   // Allowlist guard already runs at the controller layer, but the server-
   // derived fields below must always come from this function, not the
   // request — defense in depth.
+  //
+  // `outerTx ?? db` (BS#2474): with the composite's transaction already open
+  // around this whole call, a bare `db` read here would borrow a SECOND pool
+  // connection while the first sits reserved — the wedge case being every
+  // pool connection held by a transaction awaiting a pool read none of them
+  // can be granted. On the composite path the album was inserted in this
+  // same transaction, so no `library_identity` row can exist yet and the LML
+  // resolve below stays unreachable — no network hop ever runs inside the
+  // caller's transaction.
   if (values.album_id != null) {
-    const [identityRow] = await db
+    const [identityRow] = await (outerTx ?? db)
       .select({ discogs_release_id: library_identity.discogs_release_id })
       .from(library_identity)
       .where(eq(library_identity.library_id, values.album_id))
@@ -3180,6 +3195,34 @@ export const getArtistCardById = async (artist_id: number): Promise<ArtistCardRo
   return response[0] ?? null;
 };
 
+/**
+ * `getArtistCardById`, scoped to ONE genre membership instead of collapsing
+ * a multi-genre artist onto its lowest `genre_id` (BS#2474). The composite
+ * filing endpoint files its release under `release.genre_id`, so the artist
+ * code it reports back must be the artist's code IN THAT GENRE — the
+ * lowest-membership row can carry a different genre's call number, which is
+ * the wrong shelf for the release just written. Returns null both for an
+ * unknown `artist_id` and for an artist with no crossreference in
+ * `genre_id`; the caller distinguishes the two with `getArtistById`.
+ */
+export const getArtistCardByIdInGenre = async (artist_id: number, genre_id: number): Promise<ArtistCardRow | null> => {
+  const response = await db
+    .select({
+      artist_id: artists.id,
+      artist_name: artists.artist_name,
+      alphabetical_name: artists.alphabetical_name,
+      genre_id: genre_artist_crossreference.genre_id,
+      code_letters: artists.code_letters,
+      code_artist_number: genre_artist_crossreference.artist_genre_code,
+    })
+    .from(artists)
+    .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
+    .where(and(eq(artists.id, artist_id), eq(genre_artist_crossreference.genre_id, genre_id)))
+    .limit(1);
+
+  return response[0] ?? null;
+};
+
 /** Partial-update payload for PATCH /library/artists/:id -- the two `modifyArtist` form fields. */
 export type UpdateArtistRow = {
   artist_name?: string;
@@ -3581,8 +3624,13 @@ export const countReleaseCrossReferences = async (): Promise<number> => {
   return Number(response[0]?.count ?? 0);
 };
 
-export const generateAlbumCodeNumber = async (artist_id: number): Promise<number> => {
-  const response = await db
+// `tx` (BS#2474): `POST /library/filings` runs this read inside its own
+// transaction, where it must (a) see the artist row the create arm inserted
+// moments earlier in that same, uncommitted transaction, and (b) not borrow a
+// second pool connection while the transaction's own sits reserved — see
+// `addToRotation`'s identity-read comment for the pool-wedge mechanics.
+export const generateAlbumCodeNumber = async (artist_id: number, tx?: DbTransaction): Promise<number> => {
+  const response = await (tx ?? db)
     .select({ code_number: library.code_number })
     .from(library)
     .where(eq(library.artist_id, artist_id))
