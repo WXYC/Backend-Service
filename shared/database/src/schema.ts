@@ -2769,6 +2769,21 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       discogs_unavailable: library.discogs_unavailable,
       discogs_unavailable_note: library.discogs_unavailable_note,
       last_discogs_recheck_at: library.last_discogs_recheck_at,
+      // BS#2476 (Rotation Admin epic, backend B6): the physical card the
+      // active rotation row is filed under. Sourced from the SAME
+      // CURRENT_DATE-filtered `rotation` LEFT JOIN that already populates
+      // `rotation_bin` — never a second rotation subquery with its own date
+      // logic — so `card_id` can only be non-null while the row is actively
+      // rotating, and always names the same rotation row `rotation_bin` does.
+      // Wrapped in `sql...as()` rather than selected as the bare column: a
+      // bare `Column` reference carries its own baked-in name ("id") into the
+      // view's CREATE VIEW SQL regardless of this select object's key, which
+      // collides with `library.id` (already unaliased "id" above) and trips
+      // Postgres's "column 'id' specified more than once". drizzle-kit
+      // requires a raw `sql` field used this way to declare its own alias.
+      card_id: sql<number | null>`${rotation_cards.id}`.as('rotation_card_id'),
+      card_number: rotation_cards.number,
+      card_name: rotation_cards.name,
     })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -2784,7 +2799,8 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
     .leftJoin(
       rotation,
       sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
-    );
+    )
+    .leftJoin(rotation_cards, eq(rotation_cards.id, rotation.card_id));
 });
 export type LibraryArtistViewEntry = {
   id: number;
@@ -2818,6 +2834,9 @@ export type LibraryArtistViewEntry = {
   discogs_unavailable: boolean;
   discogs_unavailable_note: string | null;
   last_discogs_recheck_at: Date | null;
+  card_id: number | null;
+  card_number: number | null;
+  card_name: string | null;
 };
 
 // Per-album play count, aggregated from `flowsheet` track entries. The MV is

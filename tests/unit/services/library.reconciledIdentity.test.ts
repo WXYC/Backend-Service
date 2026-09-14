@@ -15,6 +15,7 @@ jest.mock('@wxyc/database', () => ({
   library: {},
   library_artist_view: {},
   rotation: {},
+  rotation_cards: {},
 }));
 
 jest.mock('@wxyc/lml-client', () => ({
