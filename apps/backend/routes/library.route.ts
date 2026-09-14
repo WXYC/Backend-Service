@@ -143,6 +143,12 @@ library_route.get(
 
 library_route.post('/', requirePermissions({ catalog: ['write'] }), libraryController.addAlbum);
 
+// BS#2474: the transactional artist+release+rotation composite. A literal
+// segment, so it carries none of the `/:id` ordering hazards documented
+// throughout this file — `/:id` only ever registers PATCH/DELETE handlers,
+// never POST, so this route can't be shadowed regardless of placement.
+library_route.post('/filings', requirePermissions({ catalog: ['write'] }), libraryController.createLibraryFiling);
+
 library_route.get('/rotation', requirePermissions({ catalog: ['read'] }), libraryController.getRotation);
 
 // BS#2109: the cataloging-backlog queue. REGISTRATION ORDER IS LOAD-BEARING —

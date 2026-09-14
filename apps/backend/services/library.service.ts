@@ -605,8 +605,15 @@ export class RotationCardBinMismatchError extends Error {
  * The transaction handle `db.transaction` hands its callback. Named so the
  * card-resolution helper below can require one — its reads take row locks
  * that are only meaningful inside the transaction whose write they protect.
+ *
+ * Exported (BS#2474) so `POST /library/filings`'s composed writes
+ * (`insertArtistWithGenreCrossreference`, `insertAlbum`, `addToRotation`) can
+ * all be threaded through the ONE transaction it opens, rather than each
+ * opening its own — a nested top-level `db.transaction()` call runs on a
+ * separate pooled connection, not as a savepoint of the outer one, so it
+ * would NOT roll back when the outer transaction does.
  */
-type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /**
  * Which `rotation_cards` row a new rotation row is filed under (BS#2472).
@@ -717,8 +724,14 @@ const resolveRotationCardId = async (
  * `urls` (BS#2473): written inside the same transaction as the INSERT,
  * `position` = array index. Not part of `RotationAddRequest` — `rotation_urls`
  * is a child table, so it's a separate parameter rather than riding the allowlist.
+ *
+ * `outerTx` (BS#2474): `POST /library/filings` composes this call inside its
+ * own `db.transaction`, and a bare `db.transaction()` here would run on a
+ * separate connection rather than as a savepoint of that outer one — see
+ * `DbTransaction`'s doc comment. Passed, the insert transaction below is
+ * skipped in favor of running directly against the caller's own `tx`.
  */
-export const addToRotation = async (newRotation: RotationAddRequest, urls?: string[]) => {
+export const addToRotation = async (newRotation: RotationAddRequest, urls?: string[], outerTx?: DbTransaction) => {
   const values: RotationAddRequest = { ...newRotation };
 
   // Allowlist guard already runs at the controller layer, but the server-
@@ -773,7 +786,7 @@ export const addToRotation = async (newRotation: RotationAddRequest, urls?: stri
     }
   }
 
-  return db.transaction(async (tx) => {
+  const run = async (tx: DbTransaction) => {
     const cardId = await resolveRotationCardId(tx, values.rotation_bin, values.card_id);
     if (cardId !== undefined) values.card_id = cardId;
 
@@ -785,7 +798,9 @@ export const addToRotation = async (newRotation: RotationAddRequest, urls?: stri
     }
 
     return row;
-  });
+  };
+
+  return outerTx ? run(outerTx) : db.transaction(run);
 };
 
 /**
@@ -1658,8 +1673,11 @@ export const killRotationInDB = async (rotationId: number, updatedKillDate?: str
   return outcome.outcome === 'updated' ? outcome.rotation : undefined;
 };
 
-export const insertAlbum = async (newAlbum: NewAlbum) => {
-  const response = await db.insert(library).values(newAlbum).returning();
+// `tx` (BS#2474): threaded through by `POST /library/filings` so the insert
+// lands in its caller's own transaction rather than a bare autocommit write —
+// see `DbTransaction`'s doc comment.
+export const insertAlbum = async (newAlbum: NewAlbum, tx?: DbTransaction) => {
+  const response = await (tx ?? db).insert(library).values(newAlbum).returning();
   return response[0];
 };
 
@@ -2981,10 +2999,14 @@ export const artistIdFromName = async (artist_name: string, genre_id: number): P
  * and `alphabetical_name` can carry diacritics from the source, so they get
  * the same treatment for consistency with `artist_name`.
  */
+// `outerTx` (BS#2474): threaded through by `POST /library/filings` so this
+// write lands in the caller's own transaction instead of opening a second,
+// unrelated one — see `DbTransaction`'s doc comment.
 export const insertArtistWithGenreCrossreference = async (
   new_artist: NewArtist,
   genre_id: number,
-  artist_genre_code: number
+  artist_genre_code: number,
+  outerTx?: DbTransaction
 ): Promise<Artist> => {
   const normalized: NewArtist = {
     ...new_artist,
@@ -2992,12 +3014,13 @@ export const insertArtistWithGenreCrossreference = async (
     alphabetical_name: new_artist.alphabetical_name.normalize('NFC'),
     code_letters: new_artist.code_letters.normalize('NFC'),
   };
-  return db.transaction(async (tx) => {
+  const run = async (tx: DbTransaction) => {
     const inserted = await tx.insert(artists).values(normalized).returning();
     const artist = inserted[0];
     await tx.insert(genre_artist_crossreference).values({ artist_id: artist.id, genre_id, artist_genre_code });
     return artist;
-  });
+  };
+  return outerTx ? run(outerTx) : db.transaction(run);
 };
 
 /**

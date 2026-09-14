@@ -3,11 +3,13 @@ import * as Sentry from '@sentry/node';
 import {
   Album,
   Artist,
+  db,
   NewAlbum,
   NewAlbumFormat,
   NewArtist,
   NewGenre,
   NewRotationRelease,
+  RotationBin,
   RotationRelease,
   parseRotationBin,
   ROTATION_BINS,
@@ -162,7 +164,11 @@ const validateCodeVolumeLetters = (code_volume_letters: unknown): string | undef
  * the malformed-integer one.
  */
 const resolveNewAlbumLabel = async (
-  body: NewAlbumRequest
+  // Narrowed to the two fields this function actually reads (BS#2474): both
+  // `addAlbum`'s `NewAlbumRequest` and `POST /library/filings`'s
+  // `FilingReleaseBody` carry them, and widening the parameter to their
+  // common shape is what lets both call sites share this resolver.
+  body: { label?: string; label_id?: number | null }
 ): Promise<{ label_id: number | undefined; label: string | undefined }> => {
   if (body.label_id != null) {
     if (!Number.isInteger(body.label_id) || body.label_id < 1) {
@@ -1894,6 +1900,246 @@ export const addRotation: RequestHandler<object, unknown, AddRotationRequestBody
     throw err;
   }
   res.status(201).json(rotationRelease);
+};
+
+// `POST /library/filings` (BS#2474; wxyc-shared `LibraryFilingRequest`).
+// `artist` is discriminated by `kind`: `create` carries the exact
+// `POST /library/artists` fields, `existing` names an already-catalogued
+// row. `release` is `AlbumCreateFields` (every `addAlbum` field except the
+// artist reference pair). `rotation`, given, is the release's initial
+// rotation entry — no `album_id` on it, since that FK is this same release.
+type FilingArtistBody = ({ kind: 'create' } & NewArtistRequest) | { kind: 'existing'; artist_id: unknown };
+
+type FilingReleaseBody = {
+  album_title?: string;
+  label?: string;
+  label_id?: number | null;
+  genre_id?: number;
+  format_id?: number;
+  code_number?: number;
+  code_volume_letters?: string;
+  alternate_artist_name?: string;
+  disc_quantity?: number;
+};
+
+type FilingRotationBody = {
+  rotation_bin?: string;
+  card_id?: number | null;
+  urls?: unknown;
+};
+
+type LibraryFilingRequestBody = {
+  artist?: FilingArtistBody;
+  release?: FilingReleaseBody;
+  rotation?: FilingRotationBody;
+};
+
+/**
+ * The create arm's own conflict shape, mirroring `addArtist`'s two named
+ * 409s so `createLibraryFiling` below can map either to the same
+ * `LibraryFilingConflictReason` the standalone endpoint answers with.
+ */
+class FilingArtistConflictError extends Error {
+  constructor(
+    readonly reason: 'artist_code_conflict' | 'artist_name_conflict',
+    message: string,
+    readonly artist: libraryService.ArtistCodeOwner
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * `POST /library/filings` (BS#2474): artist (create-or-reference), release,
+ * and an optional rotation entry, in ONE `db.transaction` — a mid-chain
+ * failure rolls back everything already written this request, including an
+ * artist the create arm just inserted. Composed from the same writes
+ * `addArtist`/`addAlbum`/`addRotation` use (`assignArtistCodeNumber` /
+ * `validateArtistCodeNumber` above, and `libraryService.getArtistByCode` /
+ * `artistIdFromName` / `getArtistById` / `insertArtistWithGenreCrossreference`
+ * / `insertAlbum` / `addToRotation`), each threaded onto this function's own
+ * `tx` (BS#2474; see `DbTransaction`'s doc comment for why a nested bare
+ * `db.transaction()` inside those functions would NOT roll back with it).
+ *
+ * The `kind: 'existing'` arm skips artist creation and answers with
+ * `getArtistCardById`'s crossreference row (the same lowest-`genre_id`
+ * collapse a multi-genre-filed artist gets on `GET /library/artists/:id`),
+ * 404ing a dangling `artist_id` before any write. Both arms answer the
+ * `Artist` contract shape (`code_artist_number`), not `addArtist`'s own
+ * response's `code_number` key, so a caller sees one field set either way.
+ */
+export const createLibraryFiling: RequestHandler<object, unknown, LibraryFilingRequestBody> = async (req, res) => {
+  const { body } = req;
+
+  if (!body.artist || typeof body.artist !== 'object') {
+    throw new WxycError('Missing Parameters: artist', 400);
+  }
+  if (body.artist.kind !== 'create' && body.artist.kind !== 'existing') {
+    throw new WxycError("Invalid Parameter: artist.kind must be 'create' or 'existing'", 400);
+  }
+  if (body.artist.kind === 'create') {
+    const a = body.artist;
+    if (a.artist_name === undefined || a.code_letters === undefined || a.genre_id === undefined) {
+      throw new WxycError('Missing Parameters: artist.artist_name, artist.code_letters, or artist.genre_id', 400);
+    }
+  } else if (!Number.isInteger(body.artist.artist_id) || (body.artist.artist_id as number) <= 0) {
+    throw new WxycError('Invalid Parameter: artist.artist_id must be a positive integer', 400);
+  }
+  const artistBody = body.artist;
+
+  if (!body.release || typeof body.release !== 'object') {
+    throw new WxycError('Missing Parameters: release', 400);
+  }
+  const release = body.release;
+  if (
+    release.album_title === undefined ||
+    (release.label === undefined && release.label_id == null) ||
+    release.genre_id === undefined ||
+    release.format_id === undefined
+  ) {
+    throw new WxycError(
+      'Missing Parameters: release.album_title, release.label or release.label_id, release.genre_id, or release.format_id',
+      400
+    );
+  }
+  if (typeof release.album_title !== 'string' || release.album_title.trim() === '') {
+    throw new WxycError('release.album_title must be a non-empty string', 400);
+  }
+  const code_volume_letters =
+    release.code_volume_letters === undefined ? undefined : validateCodeVolumeLetters(release.code_volume_letters);
+  const supplied_code_number = release.code_number === undefined ? undefined : validateCodeNumber(release.code_number);
+  const { label_id, label } = await resolveNewAlbumLabel(release);
+
+  let rotationBody: { rotation_bin: RotationBin; card_id?: number; urls?: string[] } | undefined;
+  if (body.rotation !== undefined) {
+    const rot = body.rotation;
+    if (rot.rotation_bin == null || parseRotationBin(rot.rotation_bin).kind !== 'bin') {
+      throw new WxycError(
+        `Invalid rotation.rotation_bin ${JSON.stringify(rot.rotation_bin)}. Expected one of: ${ROTATION_BINS.join(', ')}.`,
+        400
+      );
+    }
+    if (rot.card_id != null && !(Number.isInteger(rot.card_id) && rot.card_id > 0)) {
+      throw new WxycError(
+        "Invalid Parameter: rotation.card_id must be a positive integer, or omitted to file on the bin's newest card",
+        400
+      );
+    }
+    rotationBody = {
+      rotation_bin: rot.rotation_bin as RotationBin,
+      card_id: rot.card_id ?? undefined,
+      urls: rot.urls !== undefined ? parseRotationUrls(rot.urls) : undefined,
+    };
+  }
+
+  try {
+    const result = await db.transaction(async (tx) => {
+      let artistRow: {
+        id: number;
+        artist_name: string;
+        code_letters: string;
+        code_artist_number: number;
+        genre_id: number;
+      };
+      if (artistBody.kind === 'create') {
+        const code_letters = artistBody.code_letters.normalize('NFC');
+        const supplied = artistBody.code_number != null;
+        let code_number = supplied
+          ? validateArtistCodeNumber(artistBody.code_number)
+          : await assignArtistCodeNumber(code_letters, artistBody.genre_id);
+        let existing = await libraryService.getArtistByCode(code_letters, artistBody.genre_id, code_number);
+        if (existing && !supplied) {
+          code_number = await assignArtistCodeNumber(code_letters, artistBody.genre_id);
+          existing = await libraryService.getArtistByCode(code_letters, artistBody.genre_id, code_number);
+        }
+        if (existing) {
+          throw new FilingArtistConflictError(
+            'artist_code_conflict',
+            'Artist code already exists for that genre and code letters.',
+            existing
+          );
+        }
+        const conflictingId = await libraryService.artistIdFromName(artistBody.artist_name, artistBody.genre_id);
+        const conflicting = conflictingId ? await libraryService.getArtistById(conflictingId) : null;
+        if (conflicting) {
+          throw new FilingArtistConflictError(
+            'artist_name_conflict',
+            'Artist name already exists in that genre.',
+            conflicting
+          );
+        }
+        const artist = await libraryService.insertArtistWithGenreCrossreference(
+          {
+            artist_name: artistBody.artist_name,
+            alphabetical_name: artistBody.alphabetical_name ?? artistBody.artist_name,
+            code_letters,
+          },
+          artistBody.genre_id,
+          code_number,
+          tx
+        );
+        artistRow = {
+          id: artist.id,
+          artist_name: artist.artist_name,
+          code_letters: artist.code_letters,
+          code_artist_number: code_number,
+          genre_id: artistBody.genre_id,
+        };
+      } else {
+        const existing = await libraryService.getArtistCardById(artistBody.artist_id as number);
+        if (!existing) {
+          throw new WxycError('artist.artist_id does not reference an existing artist', 404);
+        }
+        artistRow = {
+          id: existing.artist_id,
+          artist_name: existing.artist_name,
+          code_letters: existing.code_letters,
+          code_artist_number: existing.code_artist_number,
+          genre_id: existing.genre_id,
+        };
+      }
+
+      const release_code_number = supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artistRow.id));
+      const releaseRow = await libraryService.insertAlbum(
+        {
+          artist_id: artistRow.id,
+          artist_name: artistRow.artist_name,
+          genre_id: release.genre_id as number,
+          format_id: release.format_id as number,
+          album_title: release.album_title as string,
+          label,
+          label_id,
+          code_number: release_code_number,
+          code_volume_letters,
+          alternate_artist_name: release.alternate_artist_name,
+          disc_quantity: release.disc_quantity,
+        },
+        tx
+      );
+
+      let rotationRow: RotationRelease | undefined;
+      if (rotationBody) {
+        rotationRow = await libraryService.addToRotation(
+          { rotation_bin: rotationBody.rotation_bin, album_id: releaseRow.id, card_id: rotationBody.card_id },
+          rotationBody.urls,
+          tx
+        );
+      }
+
+      return { artist: artistRow, release: releaseRow, rotation: rotationRow };
+    });
+    res.status(200).json(result);
+  } catch (err) {
+    if (err instanceof FilingArtistConflictError) {
+      res.status(409).json({ message: err.message, reason: err.reason, artist: err.artist });
+      return;
+    }
+    if (err instanceof libraryService.RotationCardBinMismatchError) {
+      res.status(409).json({ message: err.message, reason: 'rotation_card_bin_mismatch' });
+      return;
+    }
+    throw err;
+  }
 };
 
 export type LinkRotationRequest = {
