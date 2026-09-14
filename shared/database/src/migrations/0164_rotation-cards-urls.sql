@@ -36,8 +36,8 @@
 -- partial-index build. Expected duration: sub-second to low seconds at
 -- rotation's scale (the FK scan measures ~100 ms per 3M cached rows on
 -- PG14), longer if other migrations are pending in the same batch.
--- CREATE TABLE and the constraints on the two freshly-created empty tables
--- are metadata-only.
+-- CREATE TABLE is metadata-only; the constraints and unique indexes on the
+-- two freshly-created empty tables validate and build against zero rows.
 --
 -- The card_id FK's ADD CONSTRAINT runs its initial validation as a full seq
 -- scan of `rotation` even though the column is all-NULL — the scan happens
