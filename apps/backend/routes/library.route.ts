@@ -307,6 +307,20 @@ library_route.get(
   libraryController.getArtistReleases
 );
 
+// BS#2502: previews the next release call number `generateAlbumCodeNumber`
+// would assign this artist (MAX(code_number)+1, 1 when none), so the classic
+// add-release form can prepopulate an editable field. `catalog: ['write']`
+// matches the `/artists/peek-code` sibling — both back the create flow, not a
+// plain lookup. Three literal-plus-templated segments, so it carries none of
+// the `/artists/:id` ordering hazards documented above the `search`/`peek-code`
+// block: a three-segment request can never be captured by the two-segment
+// `/artists/:id` handler or by any one-segment `/artists/<literal>` route.
+library_route.get(
+  '/artists/:id/next-release-number',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.peekArtistReleaseNumber
+);
+
 library_route.get('/formats', requirePermissions({ catalog: ['read'] }), libraryController.getFormats);
 
 library_route.post('/formats', requirePermissions({ catalog: ['write'] }), libraryController.addFormat);

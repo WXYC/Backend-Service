@@ -3630,6 +3630,70 @@ describe('Library Artist Card (BS#2156)', () => {
       }
     });
   });
+
+  // BS#2502: previews the release call number `POST /library` would assign —
+  // `generateAlbumCodeNumber` (MAX(code_number)+1, 1 when none) — so the classic
+  // add-release form can prepopulate an editable field. The unit suite mocks the
+  // service; these exercise the real generator against Postgres.
+  describe('GET /library/artists/:id/next-release-number', () => {
+    async function addRelease(artistId, title) {
+      const res = await auth
+        .post('/library')
+        .send({ album_title: title, artist_id: artistId, label: 'Test Label', genre_id: 11, format_id: 1 })
+        .expect(201);
+      return res.body;
+    }
+
+    test('previews 1 for an artist with no releases', async () => {
+      const artist = await createTestArtist();
+
+      const res = await auth.get(`/library/artists/${artist.id}/next-release-number`).expect(200);
+
+      expect(res.body).toEqual({ next_code_number: 1 });
+    });
+
+    // The preview must agree with the number the create path actually assigns:
+    // after two releases at 1 and 2, the next is 3, and a fresh POST lands there.
+    test('previews MAX(code_number)+1 and agrees with the next assignment', async () => {
+      const artist = await createTestArtist();
+      await addRelease(artist.id, `Next Number One ${Date.now()}`);
+      await addRelease(artist.id, `Next Number Two ${Date.now()}`);
+
+      const res = await auth.get(`/library/artists/${artist.id}/next-release-number`).expect(200);
+      expect(res.body).toEqual({ next_code_number: 3 });
+
+      const third = await addRelease(artist.id, `Next Number Three ${Date.now()}`);
+      expect(third.code_number).toBe(3);
+    });
+
+    test('404s on an unknown artist id', async () => {
+      const res = await auth.get('/library/artists/99999999/next-release-number').expect(404);
+      expectErrorContains(res, 'not found');
+    });
+
+    test('400s on a malformed artist id', async () => {
+      await auth.get('/library/artists/2147483648/next-release-number').expect(400);
+    });
+
+    // Matches GET/PATCH /artists/:id and /releases: an artist row with no genre
+    // crossreference resolves as not-found, not a bare `artists` lookup that
+    // would 200 with a preview of 1.
+    test('404s, matching the card, on an artist row with no genre crossreference', async () => {
+      const sql = getTestDb();
+      const [orphan] = await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artists (artist_name, alphabetical_name, code_letters)
+         VALUES ('Peek Orphan ${Date.now()}', 'Peek Orphan', 'PO')
+         RETURNING id`
+      );
+
+      try {
+        const res = await auth.get(`/library/artists/${orphan.id}/next-release-number`).expect(404);
+        expectErrorContains(res, 'not found');
+      } finally {
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.artists WHERE id = ${orphan.id}`);
+      }
+    });
+  });
 });
 
 /**

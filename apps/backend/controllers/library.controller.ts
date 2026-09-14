@@ -1220,6 +1220,38 @@ export const getArtistReleases: RequestHandler<
 };
 
 /**
+ * GET /library/artists/:id/next-release-number — previews the release
+ * `code_number` a `POST /library` would assign this artist, so the classic
+ * add-release form can prepopulate an EDITABLE field with the authoritative
+ * value instead of a client-side `max+1`. That client guess is unreliable
+ * because `/artists/:id/releases` is paginated, and a wrong-but-valid call
+ * number written onto a physical card is the expensive outcome this endpoint
+ * exists to prevent.
+ *
+ * The value is `generateAlbumCodeNumber(artist_id)` — the SAME server-side
+ * generator `addAlbum` and `createLibraryFiling` fall back to when `code_number`
+ * is omitted (MAX(code_number)+1 for the artist, 1 when none) — so the preview
+ * and the eventual write agree by construction. Pure read, no side effects.
+ *
+ * Mirrors the `/artists/peek-code` sibling: an internal `{ next_code_number }`
+ * shape with no wxyc-shared contract schema, gated at `catalog: ['write']`
+ * because both back the create flow. Existence is resolved through
+ * `getArtistCardById`, the same 404 predicate GET/PATCH `/artists/:id` and
+ * `/artists/:id/releases` use — so an unknown id (or an artist row with no
+ * `genre_artist_crossreference`) 404s rather than previewing 1 as if the artist
+ * existed with no releases. A malformed id is the named 400 from
+ * `parseArtistId`, never a 500.
+ */
+export const peekArtistReleaseNumber: RequestHandler<{ id: string }> = async (req, res) => {
+  const artistId = parseArtistId(req.params.id);
+  if (!(await libraryService.getArtistCardById(artistId))) {
+    throw new WxycError('Artist not found', 404);
+  }
+  const next_code_number = await libraryService.generateAlbumCodeNumber(artistId);
+  res.status(200).json({ next_code_number });
+};
+
+/**
  * Page bounds for the two cross-reference collections.
  *
  * NOT `DEFAULT_LIMIT`/`MAX_LIMIT` (50/100), which the catalog-search endpoints

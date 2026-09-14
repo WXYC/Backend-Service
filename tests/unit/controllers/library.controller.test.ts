@@ -327,6 +327,7 @@ import {
   getArtistCard,
   updateArtistCard,
   getArtistReleases,
+  peekArtistReleaseNumber,
   updateRotation,
   getRotationCards,
   addRotationCard,
@@ -4478,6 +4479,84 @@ describe('library.controller', () => {
       await getArtistReleases(req, res, next);
 
       expect(mockGetReleasesForArtist).toHaveBeenCalledWith(1087, maxPage, 50);
+    });
+  });
+
+  describe('peekArtistReleaseNumber (BS#2502)', () => {
+    // Only proves existence — the response never echoes card fields, so the
+    // exact content is irrelevant, only that it is non-null.
+    const anyCard: ArtistCardMock = {
+      artist_id: 42,
+      artist_name: 'Chuquimamani-Condori',
+      alphabetical_name: 'Chuquimamani-Condori',
+      genre_id: 11,
+      code_letters: 'CH',
+      code_artist_number: 4,
+    };
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    // The number is `generateAlbumCodeNumber` verbatim (MAX(code_number)+1),
+    // so an artist with releases previews max+1.
+    it('returns the generator value (max+1) for an artist with releases', async () => {
+      mockGetArtistCardById.mockResolvedValue(anyCard);
+      mockGenerateAlbumCodeNumber.mockResolvedValue(4);
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await peekArtistReleaseNumber(req, res, next);
+
+      expect(mockGetArtistCardById).toHaveBeenCalledWith(42);
+      expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(42);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith({ next_code_number: 4 });
+    });
+
+    // `generateAlbumCodeNumber` returns 1 when the artist has no releases, and
+    // this endpoint passes it straight through.
+    it('returns 1 for an artist with no releases', async () => {
+      mockGetArtistCardById.mockResolvedValue(anyCard);
+      mockGenerateAlbumCodeNumber.mockResolvedValue(1);
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await peekArtistReleaseNumber(req, res, next);
+
+      expect(res.json).toHaveBeenCalledWith({ next_code_number: 1 });
+    });
+
+    // Existence is resolved through `getArtistCardById` — the same 404
+    // predicate GET/PATCH /artists/:id and /artists/:id/releases use — so an
+    // unknown id (or an artist row with no genre crossreference) 404s rather
+    // than previewing 1 as if the artist existed with no releases.
+    it('returns 404 for an unknown artist id, without invoking the generator', async () => {
+      mockGetArtistCardById.mockResolvedValue(null);
+      const req = { params: { id: '999' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(peekArtistReleaseNumber(req, res, next)).rejects.toThrow('Artist not found');
+      expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+    });
+
+    // A malformed id is the named 400 from `parseArtistId`, never a 500, and it
+    // reaches neither the existence read nor the generator.
+    it.each([
+      ['non-numeric', 'abc'],
+      ['above INT4_MAX', '2147483648'],
+      ['exponent notation', '1e21'],
+      ['zero', '0'],
+      ['negative', '-42'],
+      ['leading-zero padded', '007'],
+      ['empty', ''],
+    ])('rejects an id that is %s with 400', async (_label, rawId) => {
+      const req = { params: { id: rawId } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(peekArtistReleaseNumber(req, res, next)).rejects.toThrow('Invalid artist ID');
+      expect(mockGetArtistCardById).not.toHaveBeenCalled();
+      expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
     });
   });
 
