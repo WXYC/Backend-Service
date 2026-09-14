@@ -471,19 +471,61 @@ type NewArtistRequest = {
   alphabetical_name?: string;
   code_letters: string;
   genre_id: number;
-  code_number: number;
+  code_number?: number;
+};
+
+/**
+ * Validate an operator-supplied artist `code_number` for `POST
+ * /library/artists` (BS#2475). Bounded at `INT4_MAX`, not `INT2_MAX`: the
+ * backing column is `genre_artist_crossreference.artist_genre_code`, a
+ * Postgres `integer`, not `library.code_number`'s `smallint` — matches the
+ * published `AddArtistRequest.code_number` bound (`wxyc-shared/api.yaml`).
+ */
+const validateArtistCodeNumber = (code_number: unknown): number => {
+  if (typeof code_number !== 'number' || !Number.isInteger(code_number) || code_number < 1 || code_number > INT4_MAX) {
+    throw new WxycError(`code_number must be an integer between 1 and ${INT4_MAX}`, 400);
+  }
+  return code_number;
+};
+
+/**
+ * Server-assigns the next `code_number` in the `(genre_id, code_letters)`
+ * bucket via `generateArtistNumber` — the same generator behind the
+ * `peekArtistNumber` preview route, NOT `generateAlbumCodeNumber`, which is
+ * the unrelated per-artist release number.
+ *
+ * The BS#2475 precondition audit found the constraint as filed impossible
+ * (it spans `artists` and `genre_artist_crossreference`) and the ETL
+ * exposure real (`ensureArtist`'s dedup miss would turn a unique index into a
+ * whole-run abort, the BS#2033 hazard class), so no index backs this triple —
+ * there is no 23505 to catch. This advisory re-check against
+ * `getArtistByCode` is the whole retry: a concurrent create landing on the
+ * same number between generate and check gets one recompute against the
+ * now-current MAX, then whatever conflict remains is reported by the caller's
+ * own pre-check. Residual race accepted on the same single-librarian grounds
+ * as BS#2410's release-side decision.
+ */
+const assignArtistCodeNumber = async (code_letters: string, genre_id: number): Promise<number> => {
+  const code_number = await libraryService.generateArtistNumber(code_letters, genre_id);
+  if (await libraryService.getArtistByCode(code_letters, genre_id, code_number)) {
+    return libraryService.generateArtistNumber(code_letters, genre_id);
+  }
+  return code_number;
 };
 
 export const addArtist: RequestHandler = async (req: Request<object, object, NewArtistRequest>, res) => {
   const { body } = req;
-  if (
-    body.artist_name === undefined ||
-    body.code_letters === undefined ||
-    body.genre_id === undefined ||
-    body.code_number === undefined
-  ) {
-    throw new WxycError('Missing Request Parameters: artist_name, code_letters, genre_id, or code_number', 400);
+  if (body.artist_name === undefined || body.code_letters === undefined || body.genre_id === undefined) {
+    throw new WxycError('Missing Request Parameters: artist_name, code_letters, or genre_id', 400);
   }
+
+  // Omitted `code_number` (BS#2475): server-assigns it below. Supplied: an
+  // MD's deliberate choice, validated but never rewritten -- a collision on
+  // that arm is reported as a straight 409, not silently recomputed.
+  const code_number =
+    body.code_number === undefined
+      ? await assignArtistCodeNumber(body.code_letters, body.genre_id)
+      : validateArtistCodeNumber(body.code_number);
 
   // The code-triple check runs first and wins a collision on both axes: a
   // taken code blocks the write outright no matter what name accompanies it,
@@ -493,7 +535,7 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
   // of sync. `reason` gives this 409 the same positive discriminant as the
   // name-conflict branch below, so a client never has to infer "code
   // conflict" from the absence of a field.
-  const existingArtist = await libraryService.getArtistByCode(body.code_letters, body.genre_id, body.code_number);
+  const existingArtist = await libraryService.getArtistByCode(body.code_letters, body.genre_id, code_number);
   if (existingArtist) {
     res.status(409).json({
       message: 'Artist code already exists for that genre and code letters.',
@@ -534,10 +576,10 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
   };
 
   const response: Artist = await libraryService.insertArtist(new_artist);
-  await libraryService.insertArtistGenreCrossreference(response.id, body.genre_id, body.code_number);
+  await libraryService.insertArtistGenreCrossreference(response.id, body.genre_id, code_number);
   res.status(201).json({
     ...libraryService.serializeArtist(response),
-    code_number: body.code_number,
+    code_number,
     genre_id: body.genre_id,
   });
 };

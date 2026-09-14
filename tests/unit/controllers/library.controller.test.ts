@@ -1197,6 +1197,91 @@ describe('library.controller', () => {
       expect(mockArtistIdFromName).not.toHaveBeenCalled();
       expect(mockInsertArtist).not.toHaveBeenCalled();
     });
+
+    // Server-assigned code_number, omitted-arm (BS#2475).
+    describe('omitted code_number', () => {
+      it('assigns the next number in the (genre_id, code_letters) bucket via generateArtistNumber', async () => {
+        mockGenerateArtistNumber.mockResolvedValue(13);
+        mockInsertArtist.mockResolvedValue({
+          id: 55,
+          artist_name: 'Chuquimamani-Condori',
+          alphabetical_name: 'Chuquimamani-Condori',
+          code_letters: 'CH',
+        });
+
+        const res = mockResponse();
+        await addArtist(req({ code_number: undefined }), res, next);
+
+        expect(mockGenerateArtistNumber).toHaveBeenCalledWith('CH', 15);
+        expect(mockInsertArtistGenreCrossreference).toHaveBeenCalledWith(55, 15, 13);
+        expect(res.status).toHaveBeenCalledWith(201);
+        expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code_number: 13 }));
+      });
+
+      it('recomputes once and succeeds when a concurrent writer took the first generated number', async () => {
+        mockGenerateArtistNumber.mockResolvedValueOnce(13).mockResolvedValueOnce(14);
+        mockGetArtistByCode
+          .mockResolvedValueOnce({ artist_id: 9, artist_name: 'Someone Else', code_letters: 'CH' })
+          .mockResolvedValueOnce(null);
+        mockInsertArtist.mockResolvedValue({
+          id: 55,
+          artist_name: 'Chuquimamani-Condori',
+          alphabetical_name: 'Chuquimamani-Condori',
+          code_letters: 'CH',
+        });
+
+        const res = mockResponse();
+        await addArtist(req({ code_number: undefined }), res, next);
+
+        expect(mockGenerateArtistNumber).toHaveBeenCalledTimes(2);
+        expect(mockInsertArtistGenreCrossreference).toHaveBeenCalledWith(55, 15, 14);
+        expect(res.status).toHaveBeenCalledWith(201);
+      });
+
+      it('409s with the winner when the recomputed number is also taken', async () => {
+        mockGenerateArtistNumber.mockResolvedValueOnce(13).mockResolvedValueOnce(14);
+        mockGetArtistByCode
+          .mockResolvedValueOnce({ artist_id: 9, artist_name: 'Someone Else', code_letters: 'CH' })
+          .mockResolvedValueOnce({ artist_id: 10, artist_name: 'Another Winner', code_letters: 'CH' });
+
+        const res = mockResponse();
+        await addArtist(req({ code_number: undefined }), res, next);
+
+        expect(mockGenerateArtistNumber).toHaveBeenCalledTimes(2);
+        expect(res.status).toHaveBeenCalledWith(409);
+        expect(res.json).toHaveBeenCalledWith(
+          expect.objectContaining({
+            reason: 'artist_code_conflict',
+            artist: { artist_id: 10, artist_name: 'Another Winner', code_letters: 'CH' },
+          })
+        );
+        expect(mockInsertArtist).not.toHaveBeenCalled();
+      });
+    });
+
+    // Supplied-arm bounds + never-rewritten conflict (BS#2475).
+    describe('supplied code_number', () => {
+      it('rejects a non-integer or out-of-int4-bounds code_number with a 400', async () => {
+        for (const bad of [0, 1.5, -1, 2147483648, 'twelve']) {
+          const res = mockResponse();
+          await expect(addArtist(req({ code_number: bad }), res, next)).rejects.toThrow(WxycError);
+        }
+        expect(mockInsertArtist).not.toHaveBeenCalled();
+      });
+
+      it('never recomputes a caller-supplied number on conflict -- straight 409', async () => {
+        mockGetArtistByCode.mockResolvedValue({ artist_id: 3, artist_name: 'Jockstrap', code_letters: 'CH' });
+
+        const res = mockResponse();
+        await addArtist(req({ code_number: 12 }), res, next);
+
+        expect(mockGenerateArtistNumber).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(409);
+        expect(res.json).toHaveBeenCalledWith(
+          expect.objectContaining({ reason: 'artist_code_conflict' })
+        );
+      });
+    });
   });
 
   // GET /library/artists/by-code (BS#2149).
