@@ -20,7 +20,6 @@ import * as labelsService from '../services/labels.service.js';
 import * as librarySearchService from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
 import { checkStreamingAvailability, isLmlConfigured } from '@wxyc/lml-client';
-import { hasWireUrlParserDifferential } from '../utils/album-metadata-projection.js';
 import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import { getPostHogClient } from '../utils/posthog.js';
@@ -1657,35 +1656,43 @@ function isNonBlankString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+// The request-side bounds RotationCreateFields.urls declares (wxyc-shared
+// 1.55.0). Declared there at publish time because oasdiff treats adding
+// request-side bounds later as breaking — which makes them permanent
+// promises this server must actually keep, not trust from the contract.
+const ROTATION_URLS_MAX_ITEMS = 20;
+const ROTATION_URL_MAX_LENGTH = 2048;
+
 /**
  * `urls[]` on both rotation write arms (BS#2473) — POST's initial set and
  * PATCH's wholesale replacement. The whole array is validated before any of
  * it is written, so a bad entry can't leave a partially-written set.
  *
- * Reuses `hasWireUrlParserDifferential`, the WHATWG-parser-differential guard
- * the streaming-URL boundary established (BS#1710/BS#2356) for exactly this
- * reasoning: a value that parses one way here and another on a client must
- * never be accepted, since this service serves it back verbatim.
+ * Deliberately NOT URL-parsed. The contract (`RotationCreateFields.urls`)
+ * stores plain strings, not `format: uri` — MDs paste bare domains, so a
+ * value carries no scheme guarantee, and the read side pairs that with "a
+ * renderer must not bind one into an href without checking it". Rejecting a
+ * scheme-less value here would make the input the schema tells clients to
+ * expect unstorable. What IS enforced is exactly the contract's declared
+ * bounds: at most 20 entries, each a non-blank string of at most 2048
+ * characters (code points, matching OpenAPI `maxLength` semantics and the
+ * snapshot fields' `codePointLength` convention above). Entries are stored
+ * trimmed and otherwise verbatim.
  */
 function parseRotationUrls(value: unknown): string[] {
   if (!Array.isArray(value)) {
     throw new WxycError('Invalid Parameter: urls must be an array of strings', 400);
   }
+  if (value.length > ROTATION_URLS_MAX_ITEMS) {
+    throw new WxycError(`Invalid Parameter: urls accepts at most ${ROTATION_URLS_MAX_ITEMS} entries`, 400);
+  }
   return value.map((entry) => {
-    const trimmed = typeof entry === 'string' ? entry.trim() : '';
-    let parsed: URL | undefined;
-    try {
-      parsed = trimmed === '' ? undefined : new URL(trimmed);
-    } catch {
-      parsed = undefined;
+    if (!isNonBlankString(entry)) {
+      throw new WxycError(`Invalid Parameter: urls entries must be non-blank strings: ${JSON.stringify(entry)}`, 400);
     }
-    const valid =
-      parsed !== undefined &&
-      !hasWireUrlParserDifferential(trimmed) &&
-      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
-      parsed.hostname !== '';
-    if (!valid) {
-      throw new WxycError(`Invalid Parameter: urls contains an unusable URL: ${JSON.stringify(entry)}`, 400);
+    const trimmed = entry.trim();
+    if (codePointLength(trimmed) > ROTATION_URL_MAX_LENGTH) {
+      throw new WxycError(`Invalid Parameter: urls entries must be at most ${ROTATION_URL_MAX_LENGTH} characters`, 400);
     }
     return trimmed;
   });

@@ -253,17 +253,6 @@ jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   isLmlConfigured: mockIsLmlConfigured,
   envInt: (_name: string, fallback: number) => fallback,
-  // BS#2473: `album-metadata-projection.ts`'s `hasWireUrlParserDifferential`
-  // (used by the rotation `urls[]` validator) delegates to this real
-  // primitive rather than a mock — same behavior, so the rotation urls
-  // tests exercise the actual differential-character scan.
-  hasUrlParserDifferentialChar: (value: string) => {
-    for (const char of value) {
-      const code = char.codePointAt(0) ?? 0;
-      if (code <= 0x20 || code === 0x7f || code === 0x5c) return true;
-    }
-    return false;
-  },
 }));
 
 // Backend code paths now route through the LmlLookupCoordinator (BS#885).
@@ -2304,13 +2293,51 @@ describe('library.controller', () => {
         expect(res.status).toHaveBeenCalledWith(201);
       });
 
-      it('rejects a urls entry that fails the WHATWG-differential/http(s) guard', async () => {
+      it('accepts a scheme-less entry verbatim — MDs paste bare domains, the contract makes no scheme guarantee', async () => {
+        mockAddToRotation.mockResolvedValue({ id: 1, album_id: 5, rotation_bin: 'M' });
         const req = {
-          body: { album_id: 5, rotation_bin: 'M', urls: ['ftp://example.com/file'] },
+          body: { album_id: 5, rotation_bin: 'M', urls: ['bandcamp.com/album/x', '  www.dragcity.com  '] },
         } as unknown as Request;
         const res = mockResponse();
 
-        await expect(addRotation(req, res, next)).rejects.toThrow('unusable URL');
+        await addRotation(req, res, next);
+
+        // Stored trimmed and otherwise as-is: no scheme is bound on, no
+        // parse is attempted.
+        expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M' }, [
+          'bandcamp.com/album/x',
+          'www.dragcity.com',
+        ]);
+        expect(res.status).toHaveBeenCalledWith(201);
+      });
+
+      it.each([[42], [null], ['   ']])('rejects a non-string or blank urls entry (%p)', async (entry) => {
+        const req = {
+          body: { album_id: 5, rotation_bin: 'M', urls: [entry] },
+        } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(addRotation(req, res, next)).rejects.toThrow('non-blank strings');
+        expect(mockAddToRotation).not.toHaveBeenCalled();
+      });
+
+      it('rejects more than 20 entries — the contract maxItems bound, enforced server-side', async () => {
+        const req = {
+          body: { album_id: 5, rotation_bin: 'M', urls: Array.from({ length: 21 }, (_, i) => `example.com/${i}`) },
+        } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(addRotation(req, res, next)).rejects.toThrow('at most 20 entries');
+        expect(mockAddToRotation).not.toHaveBeenCalled();
+      });
+
+      it('rejects an entry longer than 2048 characters — the contract maxLength bound, enforced server-side', async () => {
+        const req = {
+          body: { album_id: 5, rotation_bin: 'M', urls: ['https://example.com/' + 'a'.repeat(2048)] },
+        } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(addRotation(req, res, next)).rejects.toThrow('at most 2048 characters');
         expect(mockAddToRotation).not.toHaveBeenCalled();
       });
 
@@ -4866,11 +4893,19 @@ describe('library.controller', () => {
         expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ reason: 'rotation_card_bin_mismatch' }));
       });
 
-      it('rejects a urls entry that is not a well-formed http(s) URL', async () => {
+      it('rejects a non-string or blank urls entry, but never a scheme-less one', async () => {
         const res = mockResponse();
 
-        await expect(updateRotation(reqFor({ urls: ['not a url'] }), res, next)).rejects.toThrow('unusable URL');
+        await expect(updateRotation(reqFor({ urls: ['   '] }), res, next)).rejects.toThrow('non-blank strings');
         expect(mockUpdateRotation).not.toHaveBeenCalled();
+      });
+
+      it('accepts a bare-domain entry verbatim — same no-scheme-guarantee contract as the POST arm', async () => {
+        const res = mockResponse();
+
+        await updateRotation(reqFor({ urls: ['bandcamp.com/album/x'] }), res, next);
+
+        expect(mockUpdateRotation).toHaveBeenCalledWith(42, { urls: ['bandcamp.com/album/x'] });
       });
 
       it('accepts a urls-only PATCH and passes the parsed array through', async () => {

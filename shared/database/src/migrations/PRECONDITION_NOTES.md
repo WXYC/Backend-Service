@@ -1,6 +1,6 @@
 # Post-apply migration notes
 
-This file documents corrections and rationale that postdate a migration's prod apply, and therefore can't live in the migration's own `.sql` file. Two kinds of entries live here: **precondition rationale**, documenting why specific migrations don't carry an inline `DO $$ ... RAISE EXCEPTION ... END $$;` precondition guard even though they add `UNIQUE`, `CHECK`, `NOT NULL`, or `FOREIGN KEY` constraints; and **transaction-model corrections**, documenting where a migration header's own prose reasons wrongly about Drizzle's transaction model.
+This file documents corrections and rationale that postdate a migration's prod apply, and therefore can't live in the migration's own `.sql` file. Three kinds of entries live here: **precondition rationale**, documenting why specific migrations don't carry an inline `DO $$ ... RAISE EXCEPTION ... END $$;` precondition guard even though they add `UNIQUE`, `CHECK`, `NOT NULL`, or `FOREIGN KEY` constraints; **transaction-model corrections**, documenting where a migration header's own prose reasons wrongly about Drizzle's transaction model; and **semantic corrections**, where a header's claim about a column's meaning was superseded after the migration applied.
 
 The notes live here rather than as inline comments in the SQL files themselves because retroactively editing an applied migration's SQL changes its content hash, which two separate guards reject: `scripts/validate-migrations.mjs` Check 11 catches it at PR time, and `dev_env/init-db.mjs`'s `verifyMigrations()` — the production migrate job — throws on it at deploy time. That is the wedge that motivated this file (WXYC/Backend-Service#705 follow-up). Documentation that postdates a migration's prod apply must therefore live outside the .sql file. New migrations being authored may still inline `-- @no-precondition-needed:` annotations, or write accurate header prose directly — those exist before the migration is applied and never need to change after.
 
@@ -65,3 +65,15 @@ The transaction fact is right — 0112 is the one predecessor among the three th
 First, the fresh-CI-database exemption does not exist: 0091 creating `concert_source_enum` in the same batch does not exempt the value 0112 adds to it, so a later migration batched with 0112 that references `'triangle_shows'` in DML or an index predicate raises 55P04 on a fresh CI database exactly as it does on prod.
 
 Second, the closing "migrate-dryrun usually catches it." That was defensible while 0112 was still unapplied, when a consumer would be pending alongside it against the prod snapshot and the dry-run would apply both in one transaction. It is not true for a reader today: 0112 committed to prod long ago, so it is not pending there at all, and a new consumer of `'triangle_shows'` is the **cross-deploy** case that `docs/migrations.md`'s `single-transaction-migrate` rule identifies as precisely the dry-run's structural blind spot. `Integration-Tests` is the job that catches it — the same inversion migration 0150 demonstrated.
+
+---
+
+## Semantic corrections
+
+### 0164_rotation-cards-urls
+
+The `rotation_cards` paragraph (`shared/database/src/migrations/0164_rotation-cards-urls.sql:7-9`) reads:
+
+> rotation_cards: card identity is the stable `id`; `number` is display order only — contiguity across a bin's cards is a service-layer rule decided on the epic, not a DB constraint, so gaps and renumbers are legal.
+
+The "not a DB constraint" half is right and stands: the DB enforces only `(bin, number)` uniqueness, so a gap row is representable as storage. The conclusion drawn from it — "gaps and renumbers are legal" — was superseded when wxyc-shared published `RotationCard.number` as "Contiguous 1..N within a bin" (the WXYC/Backend-Service#2472 contract). Contiguity is a published API promise, not a free service-layer choice: `addRotationCard` assigns `number` as the bin's max + 1 under a `FOR UPDATE` lock on the bin's top card, and `deleteRotationCardFromDB` refuses every delete but the bin's top card under the same lock, so bins grow and shrink only at the top. A gap row is therefore a contract violation if it is ever served, reachable only by manual SQL — not a legal state the schema deliberately admits. `shared/database/src/schema.ts`'s `rotation_cards` comment carries the corrected two-layer statement; this entry exists because the migration header's `.sql` bytes are frozen by the applied-hash pin and cannot say it themselves.

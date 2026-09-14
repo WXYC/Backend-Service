@@ -8,6 +8,7 @@ import WxycError from '../utils/error.js';
 import {
   db,
   extractSqlState,
+  intArrayLiteral,
   isLockContentionError,
   parseRotationBin,
   SUB_DEADLOCK_LOCK_TIMEOUT_MS,
@@ -78,7 +79,7 @@ import {
   type AliasHitFields,
 } from '../utils/alias-hits.js';
 import { rawProjection } from '../utils/sql-projection.js';
-import { buildCard, withRotationCard, type RotationCardSource, type RotationCardWire } from '../utils/rotation-card.js';
+import { withRotationCard, type RotationCardSource, type RotationCardWire } from '../utils/rotation-card.js';
 import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from './observability/cache-stats.js';
 
 // Schema-qualified reference to the `fold_artist_name(text)` SQL function
@@ -361,10 +362,18 @@ type RotationRow = Omit<Rotation, 'reconciled_identity' | 'card' | 'urls'> &
 async function fetchRotationUrlsByRotationId(rotationIds: number[]): Promise<Map<number, string[]>> {
   const urlsByRotationId = new Map<number, string[]>();
   if (rotationIds.length === 0) return urlsByRotationId;
+  // `= ANY(<one array-literal param>)`, not `inArray` — `inArray` renders
+  // one bind parameter per id, and the uncollapsed `status=killed`/`all`
+  // facets feed the whole rotation history through here. PostgreSQL's
+  // extended protocol caps a statement at 65535 binds, so the per-id
+  // spelling turns "history grew" into a hard query failure instead of a
+  // slower read. `intArrayLiteral` (one validated `'{1,2,3}'::int[]` string
+  // param) rather than the bare array, which Drizzle's `sql` would splat
+  // back into N placeholders — see the helper's docblock (BS#2010).
   const response = await db.execute(sql`
     SELECT ${rotation_urls.rotation_id} AS rotation_id, ${rotation_urls.url} AS url
     FROM ${rotation_urls}
-    WHERE ${inArray(rotation_urls.rotation_id, rotationIds)}
+    WHERE ${rotation_urls.rotation_id} = ANY(${intArrayLiteral(rotationIds)}::int[])
     ORDER BY ${rotation_urls.position} ASC
   `);
   const rows = response as unknown as Array<{ rotation_id: number; url: string }>;
@@ -822,28 +831,47 @@ export const listRotationCardsFromDB = async (): Promise<Array<RotationCard & { 
  * `POST /library/rotation/cards` (BS#2472): `number` is server-assigned as
  * the bin's current max + 1 (1 for the bin's first card).
  *
- * MAX+1-then-INSERT is two statements, and at READ COMMITTED no transaction
- * serializes them — two concurrent same-bin creates (a double-clicked
- * button) can both read max = N and both write N + 1. Unlike
- * `generateAlbumCodeNumber`'s MAX+1 above (whose column carries no unique
- * index, so the same interleaving silently duplicates), migration 0164 made
- * `(bin, number)` unique, so the loser surfaces as SQLSTATE 23505. Handle it
- * where it surfaces: one retry against a fresh MAX, then a 409 rather than
- * an opaque 500 if the bin is somehow still contended.
+ * The MAX read locks the bin's current top card (`FOR UPDATE`, held across
+ * the INSERT in the same transaction) — the same idiom `resolveRotationCardId`
+ * and `deleteRotationCardFromDB` use, and the create-side half of the
+ * argument that keeps `RotationCard.number` contiguous 1..N (the published
+ * contract, wxyc-shared `RotationCard.number`). The delete guard only lets
+ * bins shrink from the top, and a delete locks the card row first — so with
+ * this lock, a concurrent top-card delete can no longer slip between the MAX
+ * read and the INSERT and leave a gap (read max = 3, card 3 deleted, insert
+ * 4 → 1, 2, 4). Whichever side commits first, the loser sees a settled bin.
+ *
+ * The 23505 retry stays for the interleavings the lock cannot serialize:
+ * two concurrent creates on an EMPTY bin lock nothing (both plan number 1),
+ * and a locking read whose top row is concurrently deleted SKIPS it rather
+ * than re-scanning (`FOR UPDATE` + `LIMIT 1`, same caveat
+ * `resolveRotationCardId` documents), planning a number the survivors may
+ * hold. Unlike `generateAlbumCodeNumber`'s MAX+1 above (no unique index, so
+ * the same interleaving silently duplicates), migration 0164 made
+ * `(bin, number)` unique, so the loser surfaces as SQLSTATE 23505: one retry
+ * against a fresh MAX, then a 409 rather than an opaque 500 if the bin is
+ * somehow still contended. That last-resort 409 carries no `reason` field
+ * deliberately — the contract declares no 409 body for
+ * `POST /library/rotation/cards` (no `RotationConflictReason` value fits
+ * retriable creation contention), so it surfaces in the generic
+ * `ApiErrorResponse` shape.
  */
 export const addRotationCard = async (bin: RotationBin, name: string | null | undefined): Promise<RotationCard> => {
   for (let attempt = 0; ; attempt++) {
-    const [maxRow] = await db
-      .select({ number: rotation_cards.number })
-      .from(rotation_cards)
-      .where(eq(rotation_cards.bin, bin))
-      .orderBy(desc(rotation_cards.number))
-      .limit(1);
-
-    const values: NewRotationCard = { bin, number: (maxRow?.number ?? 0) + 1, name: name ?? null };
     try {
-      const [card] = await db.insert(rotation_cards).values(values).returning();
-      return card;
+      return await db.transaction(async (tx) => {
+        const maxRows = (await tx.execute(sql`
+          SELECT ${rotation_cards.number} AS number FROM ${rotation_cards}
+          WHERE ${rotation_cards.bin} = ${bin}
+          ORDER BY ${rotation_cards.number} DESC, ${rotation_cards.id} DESC
+          LIMIT 1
+          FOR UPDATE
+        `)) as unknown as Array<{ number: number }>;
+
+        const values: NewRotationCard = { bin, number: (maxRows[0]?.number ?? 0) + 1, name: name ?? null };
+        const [card] = await tx.insert(rotation_cards).values(values).returning();
+        return card;
+      });
     } catch (err) {
       // Only the `rotation_cards_bin_number_idx` collision is retryable —
       // anything else is a real failure and keeps its original shape.
@@ -883,12 +911,16 @@ export type DeleteRotationCardOutcome =
  * commits first, the loser's next statement takes a fresh READ COMMITTED
  * snapshot: an add that lost sees the card gone (404 / next-best default);
  * a delete that lost sees the freshly filed active row and refuses. (2) The
- * DELETE's own WHERE re-asserts both refusal conditions rather than
- * trusting the lock or earlier SELECTs — a higher-numbered sibling CREATED
- * mid-request takes no lock on this row, and only the re-asserted WHERE
- * catches it. Same discipline as `updateRotation`'s `album_id IS NULL`
- * guard above: a guarded write, then reads inside the same transaction to
- * tell the refusal reasons apart when the write matches nothing.
+ * guard facts and the DELETE ride ONE statement (the `guard` CTE below), so
+ * both evaluate against the same snapshot. Re-asserting the conditions in
+ * the DELETE still matters — a higher-numbered sibling CREATED mid-request
+ * takes no lock on this row, and only a check at the DELETE's own snapshot
+ * catches it — but classifying from a SECOND statement's snapshot could
+ * disagree with the DELETE's (the refusing fact can vanish in between),
+ * which previously forced an unclassifiable "changed concurrently" 409 that
+ * the contract's `RotationConflictError` (`required: [message, reason]`)
+ * has no reason value for. Single-snapshot classification makes every
+ * refusal carry its correct contract reason, so that case no longer exists.
  */
 export const deleteRotationCardFromDB = async (id: number): Promise<DeleteRotationCardOutcome> => {
   return db.transaction(async (tx): Promise<DeleteRotationCardOutcome> => {
@@ -899,48 +931,45 @@ export const deleteRotationCardFromDB = async (id: number): Promise<DeleteRotati
     `)) as unknown as Array<{ id: number }>;
     if (lockedRows.length === 0) return { outcome: 'not_found' };
 
-    const deletedRows = (await tx.execute(sql`
-      DELETE FROM ${rotation_cards}
-      WHERE ${rotation_cards.id} = ${id}
-        AND ${rotation_cards.number} = (
-          SELECT max(sibling.number) FROM ${rotation_cards} AS sibling
-          WHERE sibling.bin = ${rotation_cards.bin}
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM ${rotation}
-          WHERE ${rotation.card_id} = ${rotation_cards.id} AND ${rotationActiveSql()}
-        )
-      RETURNING ${rotation_cards.id}
-    `)) as unknown as Array<{ id: number }>;
-    if (deletedRows.length > 0) return { outcome: 'deleted' };
+    // Guard, DELETE, and classification in one statement: every part of a
+    // single statement shares one snapshot, and the row itself is pinned by
+    // the lock above, so `deleted = false` always comes with the guard fact
+    // that refused it. `is_highest` compares against a max that includes
+    // this card's own row (locked, so it cannot vanish) — never NULL.
+    const [guarded] = (await tx.execute(sql`
+      WITH guard AS (
+        SELECT
+          ${rotation_cards.id} AS id,
+          ${rotation_cards.number} = (
+            SELECT max(sibling.number) FROM ${rotation_cards} AS sibling
+            WHERE sibling.bin = ${rotation_cards.bin}
+          ) AS is_highest,
+          (
+            SELECT count(*)::int FROM ${rotation}
+            WHERE ${rotation.card_id} = ${rotation_cards.id} AND ${rotationActiveSql()}
+          ) AS active_count
+        FROM ${rotation_cards}
+        WHERE ${rotation_cards.id} = ${id}
+      ),
+      deleted AS (
+        DELETE FROM ${rotation_cards}
+        USING guard
+        WHERE ${rotation_cards.id} = guard.id AND guard.is_highest AND guard.active_count = 0
+        RETURNING ${rotation_cards.id}
+      )
+      SELECT guard.is_highest AS is_highest,
+             guard.active_count AS active_count,
+             EXISTS (SELECT 1 FROM deleted) AS deleted
+      FROM guard
+    `)) as unknown as Array<{ is_highest: boolean; active_count: number; deleted: boolean }>;
 
-    // The guarded DELETE matched nothing — classify why, inside the same
-    // transaction so the answer names the state that refused the write.
-    const [card] = await tx
-      .select({ bin: rotation_cards.bin, number: rotation_cards.number })
-      .from(rotation_cards)
-      .where(eq(rotation_cards.id, id))
-      .limit(1);
-    if (!card) return { outcome: 'not_found' };
+    // Unreachable while the FOR UPDATE lock above holds the row in place;
+    // kept so a future restructuring fails loudly instead of undefined-ing.
+    if (!guarded) return { outcome: 'not_found' };
 
-    const [{ maxNumber }] = await tx
-      .select({ maxNumber: sql<number>`max(${rotation_cards.number})::int` })
-      .from(rotation_cards)
-      .where(eq(rotation_cards.bin, card.bin));
-    if (maxNumber !== card.number) return { outcome: 'not_last_in_bin' };
-
-    const [{ activeCount }] = await tx
-      .select({ activeCount: sql<number>`count(*)::int` })
-      .from(rotation)
-      .where(and(eq(rotation.card_id, id), rotationActiveSql()));
-    if (activeCount > 0) return { outcome: 'has_active_rows', activeCount };
-
-    // Every guard passes on re-read, yet the DELETE matched nothing: a
-    // refusing fact existed at the DELETE's snapshot and was itself removed
-    // before these reads landed — two concurrent writers inside one request
-    // window. Refuse honestly rather than fabricate a specific reason; the
-    // librarian's retry runs against settled state.
-    throw new WxycError('Rotation card changed concurrently; retry the delete', 409);
+    if (guarded.deleted) return { outcome: 'deleted' };
+    if (!guarded.is_highest) return { outcome: 'not_last_in_bin' };
+    return { outcome: 'has_active_rows', activeCount: guarded.active_count };
   });
 };
 
@@ -1148,11 +1177,20 @@ export const updateRotation = async (
     // `resolveRotationCardId` throws 404 (dangling card) or
     // `RotationCardBinMismatchError` (409, wrong bin); an explicit `null`
     // (uncard) skips validation entirely, same as `format_id`/`label_id`.
+    //
+    // `FOR UPDATE` on the bin read, because `rotation` is a live ingest
+    // target (this function's own docstring rule): the tubafrenzy rotation
+    // webhook upsert sets `rotation_bin` unconditionally on conflict, so a
+    // re-bin landing between an unlocked read and the UPDATE below would
+    // file the row cross-bin — the exact state `RotationCardBinMismatchError`
+    // exists to prevent — behind a 200. The lock holds the bin still until
+    // this transaction's write commits.
     if (touchesCardId && set.card_id !== null) {
       const [current] = await tx
         .select({ rotation_bin: rotation.rotation_bin })
         .from(rotation)
         .where(eq(rotation.id, rotation_id))
+        .for('update')
         .limit(1);
       if (!current) return { outcome: 'not_found' as const };
       await resolveRotationCardId(tx, current.rotation_bin, set.card_id as number);
@@ -1163,12 +1201,18 @@ export const updateRotation = async (
       : eq(rotation.id, rotation_id);
 
     // A urls-only PATCH sets no `rotation` column (`set` is empty) — lock
-    // and re-read the row instead of running an empty UPDATE, which Drizzle
-    // rejects before generating any SQL.
+    // (`FOR UPDATE`) and re-read the row instead of running an empty UPDATE,
+    // which Drizzle rejects before generating any SQL. The lock is what
+    // serializes the delete-then-reinsert below against a concurrent
+    // wholesale replacement of the same row's URLs: without it, two racing
+    // urls-only PATCHes interleave as delete/delete/insert/insert and the
+    // loser's INSERT collides on `rotation_urls_rotation_id_position_idx`
+    // (23505 → opaque 500, edit silently lost). The non-empty-`set` arm gets
+    // the same serialization for free — its UPDATE takes the row lock.
     const updated =
       Object.keys(set).length > 0
         ? (await tx.update(rotation).set(set).where(whereClause).returning())[0]
-        : (await tx.select().from(rotation).where(whereClause).limit(1))[0];
+        : (await tx.select().from(rotation).where(whereClause).for('update').limit(1))[0];
 
     if (!updated) {
       if (!touchesPrecatalog) return { outcome: 'not_found' as const };

@@ -1723,6 +1723,10 @@ describe('Library Rotation', () => {
       expect(findRow(explicitActive)).toEqual(findRow(noParam));
     });
 
+    // The three facets are provably DIFFERENT sets, one membership case per
+    // row state. A killed-as-TRUE (or active-stops-excluding-expired-kills)
+    // regression fails at least one of these three.
+
     test('a future-dated kill appears in BOTH active and killed — non-partition semantics', async () => {
       const created = await auth.post('/library/rotation').send({ album_id: 2, rotation_bin: 'S' }).expect(201);
       createdRotationIds.push(created.body.id);
@@ -1741,28 +1745,97 @@ describe('Library Rotation', () => {
       expect(all.body.some((r) => r.rotation_id === created.body.id)).toBe(true);
     });
 
+    test('a PAST kill appears in killed and all but NOT active — the rows the admin Unkill list exists for', async () => {
+      const created = await auth.post('/library/rotation').send({ album_id: 2, rotation_bin: 'S' }).expect(201);
+      createdRotationIds.push(created.body.id);
+
+      await auth.patch(`/library/rotation/${created.body.id}`).send({ kill_date: '2020-01-15' }).expect(200);
+
+      const active = await auth.get('/library/rotation?status=active').expect(200);
+      const killed = await auth.get('/library/rotation?status=killed').expect(200);
+      const all = await auth.get('/library/rotation?status=all').expect(200);
+
+      expect(active.body.some((r) => r.rotation_id === created.body.id)).toBe(false);
+      expect(killed.body.some((r) => r.rotation_id === created.body.id)).toBe(true);
+      expect(all.body.some((r) => r.rotation_id === created.body.id)).toBe(true);
+    });
+
+    test('a never-killed row appears in active and all but NOT killed', async () => {
+      const created = await auth.post('/library/rotation').send({ album_id: 2, rotation_bin: 'S' }).expect(201);
+      createdRotationIds.push(created.body.id);
+
+      const active = await auth.get('/library/rotation?status=active').expect(200);
+      const killed = await auth.get('/library/rotation?status=killed').expect(200);
+      const all = await auth.get('/library/rotation?status=all').expect(200);
+
+      expect(active.body.some((r) => r.rotation_id === created.body.id)).toBe(true);
+      expect(killed.body.some((r) => r.rotation_id === created.body.id)).toBe(false);
+      expect(all.body.some((r) => r.rotation_id === created.body.id)).toBe(true);
+    });
+
+    test('status=all keeps BOTH rows of a duplicate (album, bin) pair; active collapses them to one', async () => {
+      // Free-text arm with a per-run album title: the pair's partition key
+      // (the name-hash fallback) then belongs to this test alone, so a
+      // seeded fixture row can never be the collapse winner.
+      const snapshot = { rotation_bin: 'S', artist_name: 'Csillagrablok', album_title: `Collapse Pin ${Date.now()}` };
+      const first = await auth.post('/library/rotation').send(snapshot).expect(201);
+      createdRotationIds.push(first.body.id);
+      const second = await auth.post('/library/rotation').send(snapshot).expect(201);
+      createdRotationIds.push(second.body.id);
+      const ids = [first.body.id, second.body.id];
+
+      const active = await auth.get('/library/rotation?status=active').expect(200);
+      const all = await auth.get('/library/rotation?status=all').expect(200);
+
+      // DISTINCT ON keeps the dropdown shape: one row per (album, bin).
+      expect(active.body.filter((r) => ids.includes(r.rotation_id))).toHaveLength(1);
+      // Deliberately NOT collapsed: the admin list must offer Unkill on
+      // every historical row, not one representative per group.
+      expect(all.body.filter((r) => ids.includes(r.rotation_id))).toHaveLength(2);
+    });
+
     test('rejects an unrecognized status value', async () => {
       const res = await auth.get('/library/rotation?status=retired').expect(400);
 
       expectErrorContains(res, 'status must be one of');
     });
 
-    test('additive shape: the default read still carries every pre-#2473 field, plus card and urls', async () => {
-      const res = await auth.get('/library/rotation').expect(200);
+    test('additive shape: the default read is EXACTLY the pre-#2473 key set plus card and urls', async () => {
+      // A row is created first so this can never pass vacuously against an
+      // empty fixture, and the assertion is a CLOSED key set rather than a
+      // has-these-properties subset: the acceptance criterion is "existing
+      // consumer shapes unchanged", which means this test must fail when a
+      // pre-#2473 key is dropped OR an unplanned key leaks — a
+      // `toHaveProperty` loop can catch neither.
+      const created = await auth.post('/library/rotation').send({ album_id: 2, rotation_bin: 'S' }).expect(201);
+      createdRotationIds.push(created.body.id);
 
-      if (res.body.length > 0) {
-        expectFields(
-          res.body[0],
-          'id',
-          'artist_name',
-          'alphabetical_name',
-          'album_title',
-          'rotation_bin',
-          'rotation_id',
-          'card',
-          'urls'
-        );
-      }
+      const res = await auth.get('/library/rotation').expect(200);
+      const row = res.body.find((r) => r.rotation_id === created.body.id);
+      expect(row).toBeDefined();
+
+      const pre2473Keys = [
+        'add_date',
+        'album_title',
+        'alphabetical_name',
+        'artist_name',
+        'code_artist_number',
+        'code_letters',
+        'code_number',
+        'format_name',
+        'genre_name',
+        'id',
+        'label_id',
+        'legacy_release_id',
+        'plays',
+        'reconciled_identity',
+        'record_label',
+        'rotation_add_date',
+        'rotation_bin',
+        'rotation_id',
+        'rotation_kill_date',
+      ];
+      expect(Object.keys(row).sort()).toEqual([...pre2473Keys, 'card', 'urls'].sort());
     });
 
     test('urls round-trip on the catalogued write arm', async () => {
@@ -1796,13 +1869,35 @@ describe('Library Rotation', () => {
       expect(row.urls).toEqual(['https://example.com/promo']);
     });
 
-    test('POST rejects a malformed url', async () => {
-      const res = await auth
+    test('POST accepts a scheme-less bare domain — the input the contract tells MDs to paste — and serves it back verbatim', async () => {
+      const created = await auth
         .post('/library/rotation')
-        .send({ album_id: 2, rotation_bin: 'S', urls: ['not a url'] })
+        .send({ album_id: 2, rotation_bin: 'S', urls: ['bandcamp.com/album/x'] })
+        .expect(201);
+      createdRotationIds.push(created.body.id);
+
+      const list = await auth.get('/library/rotation').expect(200);
+      const row = list.body.find((r) => r.rotation_id === created.body.id);
+
+      expect(row.urls).toEqual(['bandcamp.com/album/x']);
+    });
+
+    test('POST enforces the contract bounds on urls: at most 20 entries, 2048 characters each, non-blank strings only', async () => {
+      await auth
+        .post('/library/rotation')
+        .send({ album_id: 2, rotation_bin: 'S', urls: Array.from({ length: 21 }, (_, i) => `example.com/${i}`) })
         .expect(400);
 
-      expectErrorContains(res, 'unusable URL');
+      await auth
+        .post('/library/rotation')
+        .send({ album_id: 2, rotation_bin: 'S', urls: [`https://example.com/${'a'.repeat(2048)}`] })
+        .expect(400);
+
+      const res = await auth
+        .post('/library/rotation')
+        .send({ album_id: 2, rotation_bin: 'S', urls: [42] })
+        .expect(400);
+      expectErrorContains(res, 'non-blank strings');
     });
 
     test('PATCH wholesale-replaces urls with fewer than before', async () => {
