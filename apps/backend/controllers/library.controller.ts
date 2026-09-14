@@ -1359,17 +1359,19 @@ export const deleteRotationCard: RequestHandler<{ id: string }> = async (req, re
   switch (result.outcome) {
     case 'not_found':
       throw new WxycError('Rotation card not found', 404);
+    // Reason strings are contract-pinned (wxyc-shared #460); the error body
+    // is exactly `{message, reason}` — a per-card count belongs to the cards
+    // LIST response, not this 409, so the count rides only in the prose.
     case 'not_last_in_bin':
       res.status(409).json({
         message: 'Cannot delete: a higher-numbered card exists in this bin. Bins shrink only from the top.',
-        reason: 'card_not_last_in_bin',
+        reason: 'card_not_highest_in_bin',
       });
       return;
     case 'has_active_rows':
       res.status(409).json({
         message: `Cannot delete: ${result.activeCount} active rotation row${result.activeCount === 1 ? '' : 's'} still assigned to this card`,
-        reason: 'card_has_active_rows',
-        active_count: result.activeCount,
+        reason: 'card_has_active_rotations',
       });
       return;
     case 'deleted':

@@ -2373,7 +2373,7 @@ describe('library.controller', () => {
         await expect(deleteRotationCard(req, res, next)).rejects.toThrow('Rotation card not found');
       });
 
-      it('returns 409 with reason card_not_last_in_bin when a higher-numbered card exists', async () => {
+      it('returns 409 with the contract reason card_not_highest_in_bin when a higher-numbered card exists', async () => {
         mockDeleteRotationCardFromDB.mockResolvedValue({ outcome: 'not_last_in_bin' });
         const req = { params: { id: '5' } } as unknown as Request;
         const res = mockResponse();
@@ -2381,10 +2381,10 @@ describe('library.controller', () => {
         await deleteRotationCard(req, res, next);
 
         expect(res.status).toHaveBeenCalledWith(409);
-        expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ reason: 'card_not_last_in_bin' }));
+        expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ reason: 'card_not_highest_in_bin' }));
       });
 
-      it('returns 409 with reason card_has_active_rows when active rows remain', async () => {
+      it('returns 409 with the contract reason card_has_active_rotations and exactly {message, reason}', async () => {
         mockDeleteRotationCardFromDB.mockResolvedValue({ outcome: 'has_active_rows', activeCount: 2 });
         const req = { params: { id: '5' } } as unknown as Request;
         const res = mockResponse();
@@ -2392,9 +2392,12 @@ describe('library.controller', () => {
         await deleteRotationCard(req, res, next);
 
         expect(res.status).toHaveBeenCalledWith(409);
-        expect(res.json).toHaveBeenCalledWith(
-          expect.objectContaining({ reason: 'card_has_active_rows', active_count: 2 })
-        );
+        // The contract error shape carries no per-card count field — the
+        // count belongs to the cards LIST response; here it rides in prose.
+        const body = (res.json as jest.Mock).mock.calls[0][0] as Record<string, unknown>;
+        expect(body.reason).toBe('card_has_active_rotations');
+        expect(Object.keys(body).sort()).toEqual(['message', 'reason']);
+        expect(body.message).toContain('2 active rotation rows');
       });
 
       it('returns 204 when the card is deleted', async () => {
