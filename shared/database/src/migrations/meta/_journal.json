@@ -1149,6 +1149,13 @@
       "when": 1789360920378,
       "tag": "0166_2476-rotation-card-on-library-artist-view",
       "breakpoints": true
+    },
+    {
+      "idx": 167,
+      "version": "7",
+      "when": 1789360920379,
+      "tag": "0167_rotation-card-id-full-idx",
+      "breakpoints": true
     }
   ]
 }

@@ -493,11 +493,7 @@ export const getRotationFromDB = async (status: RotationStatus = 'active'): Prom
       AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
     LEFT JOIN ${rotation_cards} ON ${rotation_cards.id} = ${rotation.card_id}`;
   const statusPredicate =
-    status === 'killed'
-      ? sql`${rotation.kill_date} IS NOT NULL`
-      : status === 'all'
-        ? sql`TRUE`
-        : sql`${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL`;
+    status === 'killed' ? sql`${rotation.kill_date} IS NOT NULL` : status === 'all' ? sql`TRUE` : rotationActiveSql();
 
   const query =
     status === 'active'
@@ -821,16 +817,20 @@ export const addToRotation = async (newRotation: RotationAddRequest, urls?: stri
 /**
  * The canonical active-rotation predicate — `kill_date IS NULL OR kill_date
  * > CURRENT_DATE`, the rule `getRotationFromDB`'s doc block states and every
- * deployed rotation read in this file applies. The card queries below MUST
- * use it, not the narrower `kill_date IS NULL`: a future-dated kill is still
+ * deployed rotation read in this file applies. Every consumer below MUST use
+ * it, not the narrower `kill_date IS NULL`: a future-dated kill is still
  * rotating — the search projections still emit its `rotation_bin` — so under
  * the narrow spelling its card would report `active_count: 0` and the delete
  * guard would unfile a record DJs are still routed to. A fresh fragment per
- * call so no two queries share one `SQL` instance. Consolidating the
- * pre-existing hand-written spellings (`getRotationFromDB`, the search
- * projections) onto one exported fragment — and replacing the partial
- * `rotation_card_id_idx`, whose `kill_date IS NULL` predicate this broader
- * filter cannot use — is BS#2479; correctness wins over the index here.
+ * call so no two queries share one `SQL` instance.
+ *
+ * BS#2479 consolidated every hand-written spelling of this predicate
+ * (`getRotationFromDB`'s status=active facet, the search projections' JOINs)
+ * onto this one exported fragment, and replaced 0164's partial
+ * `rotation_card_id_idx` — whose `kill_date IS NULL` predicate this broader
+ * filter can never use, since Postgres requires the query's WHERE to imply
+ * the index predicate — with the non-partial `rotation_card_id_full_idx`
+ * (migration 0167) this broader filter CAN use.
  */
 const rotationActiveSql = () => sql`(${rotation.kill_date} IS NULL OR ${rotation.kill_date} > CURRENT_DATE)`;
 
@@ -2515,7 +2515,7 @@ const LIBRARY_VIEW_JOINS_RAW = sql`
     AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
   LEFT JOIN ${rotation}
     ON ${rotation.album_id} = ${library.id}
-    AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)
+    AND ${rotationActiveSql()}
   LEFT JOIN ${rotation_cards} ON ${rotation_cards.id} = ${rotation.card_id}
 `;
 
@@ -2556,10 +2556,7 @@ function libraryViewQuery(withPlays: boolean) {
         eq(genre_artist_crossreference.genre_id, library.genre_id)
       )
     )
-    .leftJoin(
-      rotation,
-      sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
-    )
+    .leftJoin(rotation, sql`${rotation.album_id} = ${library.id} AND ${rotationActiveSql()}`)
     .leftJoin(rotation_cards, eq(rotation_cards.id, rotation.card_id));
   return withPlays ? base.leftJoin(album_plays, eq(album_plays.album_id, library.id)) : base;
 }
@@ -4642,10 +4639,7 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Tagge
         eq(genre_artist_crossreference.genre_id, library.genre_id)
       )
     )
-    .leftJoin(
-      rotation,
-      sql`${rotation.album_id} = ${library.id} AND (${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL)`
-    )
+    .leftJoin(rotation, sql`${rotation.album_id} = ${library.id} AND ${rotationActiveSql()}`)
     .leftJoin(rotation_cards, eq(rotation_cards.id, rotation.card_id))
     .where(inArray(library.legacy_release_id, legacyIds))
     // Bound by the LML response size (already capped server-side). The

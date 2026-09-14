@@ -134,16 +134,21 @@ describe('schema: rotation_cards / rotation_urls substrate (migration 0164, BS#2
       expect(headerText).toContain(`CREATE INDEX CONCURRENTLY IF NOT EXISTS ${body}`.replace(/\s+/g, ' '));
     });
 
-    it("declares the matching nullable, FK'd, partially-indexed column in schema.ts", () => {
+    it("declares the matching nullable, FK'd column in schema.ts", () => {
       const def = extractTableDef('rotation');
       expect(def).toMatch(
         /card_id:\s*integer\('card_id'\)\.references\(\(\)\s*=>\s*rotation_cards\.id,\s*\{\s*onDelete:\s*'set null'\s*\}\)/
       );
       expect(def).not.toMatch(/card_id:[^,]*notNull\(\)/);
-      expect(def).toMatch(
-        /cardIdIdx:\s*index\('rotation_card_id_idx'\)\s*\.on\(table\.card_id\)\s*\.where\(sql`\$\{table\.kill_date\}\s*IS NULL`\)/
-      );
     });
+
+    // schema.ts's `cardIdIdx` moved on from 0164's `rotation_card_id_idx`
+    // (partial on `kill_date IS NULL`) to 0167's `rotation_card_id_full_idx`
+    // (non-partial, plain on `card_id`) — see BS#2479 /
+    // PRECONDITION_NOTES.md's semantic correction for 0164. This 0164-scoped
+    // describe block intentionally stops pinning the index shape here; the
+    // current index is exercised by the EXPLAIN test in
+    // tests/integration/rotation-cards.spec.js instead.
   });
 
   describe('rotation_urls', () => {

@@ -125,6 +125,54 @@ describe('Rotation Cards', () => {
       const listed = list.body.find((c) => c.id === card.body.id);
       expect(listed.active_count).toBe(1);
     });
+
+    /**
+     * BS#2479 AC: the per-card active-count query (`deleteRotationCardFromDB`'s
+     * guard subquery, mirrored by `listRotationCardsFromDB`'s JOIN condition —
+     * both filter `rotation.card_id = <card>` AND the canonical active
+     * predicate) must be answerable by migration 0167's non-partial
+     * `rotation_card_id_full_idx (card_id)`. 0164's original
+     * `rotation_card_id_idx`, partial on `kill_date IS NULL`, could never serve
+     * this query: the canonical predicate (`kill_date IS NULL OR kill_date >
+     * CURRENT_DATE`) does not imply the narrower partial predicate, so
+     * Postgres could not prove the index applicable and fell back to a full
+     * scan of `rotation` on every delete-guard check and every cards listing.
+     * Plain, not a `(card_id, kill_date)` composite — measured against a
+     * prod-shaped clone (the migration's own header has the numbers), the
+     * composite loses on the listing's GROUP BY query because the extra
+     * column widens every leaf entry of an index that query scans in full.
+     *
+     * `enable_seqscan = off` inside a ROLLED-BACK transaction neutralizes the
+     * tiny-test-dataset confounder (same pattern as
+     * `flowsheet-upcoming-show-support.spec.js` /
+     * `concerts-artist-lml-resolver-writer.spec.js`): the absence of a Seq
+     * Scan node is the "index-supported" proof, since a small table would
+     * otherwise make a seq scan cheaper regardless of index availability.
+     */
+    test('EXPLAIN: the per-card active-count query is index-supported (no seq scan) at production scale', async () => {
+      const sql = getTestDb();
+      let planJson;
+      const sentinel = new Error('rollback-explain-probe');
+      try {
+        await sql.begin(async (tx) => {
+          await tx.unsafe(`SET LOCAL enable_seqscan = off`);
+          const rows = await tx.unsafe(
+            `EXPLAIN (FORMAT JSON)
+             SELECT count(*)::int
+             FROM "${SCHEMA}".rotation
+             WHERE "card_id" = 1
+               AND ("kill_date" IS NULL OR "kill_date" > CURRENT_DATE)`
+          );
+          planJson = JSON.stringify(rows[0]['QUERY PLAN']);
+          throw sentinel;
+        });
+      } catch (err) {
+        if (err !== sentinel) throw err;
+      }
+      expect(planJson).toContain('"Relation Name":"rotation"');
+      expect(planJson).not.toContain('"Node Type":"Seq Scan"');
+      expect(planJson).toContain('rotation_card_id_full_idx');
+    });
   });
 
   describe('PATCH /library/rotation/cards/:id', () => {
