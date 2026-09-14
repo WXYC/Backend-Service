@@ -95,9 +95,7 @@ describe('searchLibrary: card on AlbumSearchResultRow (BS#2476)', () => {
   });
 
   it('raw-row mapper: rotation without a card assigned carries no card', async () => {
-    db.execute
-      .mockResolvedValueOnce([primaryRow({ rotation_bin: 'M' })])
-      .mockResolvedValueOnce([{ total: 1 }]);
+    db.execute.mockResolvedValueOnce([primaryRow({ rotation_bin: 'M' })]).mockResolvedValueOnce([{ total: 1 }]);
 
     const { results } = await searchLibrary(PARAMS);
 
