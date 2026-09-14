@@ -1,0 +1,104 @@
+-- BS#2479. Swap migration 0164's `rotation_card_id_idx` for a non-partial
+-- btree the canonical active-rotation predicate can actually use.
+--
+-- @intentional-create-revert: this migration DROPs 0164's
+-- `rotation_card_id_idx` and CREATEs a differently-named, differently-shaped
+-- replacement — not a net no-op. 0164's index was never usable by the
+-- queries it was built for (see below), so this is a correction, not
+-- reverted schema evolution.
+--
+-- 0164 built `rotation_card_id_idx` partial on `kill_date IS NULL`, stating
+-- in its header that the index existed to serve "the cards listing's
+-- per-card active count and the admin list's card filter." Those two
+-- queries, and every other rotation read in this repo (`getRotationFromDB`,
+-- the search projections, `deleteRotationCardFromDB`'s guard), actually
+-- filter on the broader canonical predicate — `kill_date IS NULL OR
+-- kill_date > CURRENT_DATE` (`rotationActiveSql()` in library.service.ts) —
+-- because a future-dated kill is still rotating: catalog search still
+-- emits its `rotation_bin` and `card`, so its card must still count it as
+-- active or `DELETE /library/rotation/cards/:id` would unfile a record DJs
+-- are still routed to (`rotation.card_id` is `ON DELETE SET NULL`).
+--
+-- Postgres uses a partial index only when it can prove the query's WHERE
+-- implies the index predicate, and `kill_date IS NULL OR kill_date >
+-- CURRENT_DATE` does not imply `kill_date IS NULL` — so 0164's index was
+-- never usable for the queries its own header named. It cannot be widened
+-- in place either: `CURRENT_DATE` is STABLE, not IMMUTABLE, and Postgres
+-- rejects a non-immutable expression in an index predicate outright.
+--
+-- Plain `(card_id)`, not a `(card_id, kill_date)` composite — measured,
+-- not guessed, against a prod-shaped 21,566-row clone (313 active/carded
+-- rows, matching the counts cited in 0150/0165's headers):
+--
+--   1. Point lookup (`deleteRotationCardFromDB`'s guard — `card_id = $1
+--      AND (kill_date IS NULL OR kill_date > CURRENT_DATE)`), OLD partial
+--      index only usable via the narrow spelling gone, so today this seq-
+--      scans the full table:
+--        Seq Scan on rotation (actual time=0.027..5.322 rows=113)
+--          Filter: ((card_id = 4) AND ((kill_date IS NULL) OR (kill_date > CURRENT_DATE)))
+--          Rows Removed by Filter: 21453
+--        Execution Time: 5.418 ms
+--      Both a plain `(card_id)` index and a `(card_id, kill_date)` composite
+--      fix this equally well — sub-millisecond either way (0.034ms plain,
+--      0.041ms composite; the composite's OR-predicate decomposes into a
+--      BitmapOr over two index probes instead of one Index Scan + Filter).
+--
+--   2. Listing (`listRotationCardsFromDB`'s `rotation_cards LEFT JOIN
+--      rotation ON card_id = rotation_cards.id AND (kill_date IS NULL OR
+--      kill_date > CURRENT_DATE) GROUP BY rotation_cards.id`) drives a full
+--      scan of WHATEVER index exists on `card_id` (a Merge Join needs every
+--      row, not one card's rows), so index SIZE — not just presence —
+--      decides cost here. Plain `(card_id)`:
+--        Index Scan using rotation_card_id_full_idx on rotation (actual time=0.009..1.034 rows=313)
+--          Filter: ((kill_date IS NULL) OR (kill_date > CURRENT_DATE))
+--          Rows Removed by Filter: 21253
+--        Buffers: shared hit=218 read=20 · Execution Time: 1.101 ms
+--      The `(card_id, kill_date)` composite, same query: 7,457 buffer hits
+--      (34x) and 1.723 ms — the extra column widens every leaf entry, so
+--      the same full-index scan reads a bigger index. `kill_date` earns its
+--      keep as a POST-scan Filter either way at this table's active-row
+--      cardinality (~310 of 21,566); it does not earn a second index
+--      column. Composited indexes are usually a size argument FOR
+--      widening (fewer heap fetches) — this is the case where index size
+--      argues the other way, because the query's own shape (GROUP BY the
+--      whole table, not an equality lookup) reads the whole index anyway.
+--
+-- Lock behavior. Both statements run inside the whole pending-migration
+-- batch's single transaction (docs/migrations.md's `single-transaction-migrate`
+-- rule), so whichever table lock they take is held to that batch's COMMIT,
+-- not just for these two statements' own runtime. `CREATE INDEX` (this
+-- non-CONCURRENTLY form) takes a SHARE lock on `rotation`, which blocks
+-- writers (INSERT/UPDATE/DELETE) but not readers for the build's duration;
+-- `DROP INDEX` (also non-CONCURRENTLY) takes an AccessExclusiveLock, which
+-- blocks readers too, but only for the drop itself — dropping an index is
+-- metadata-only, no heap or index scan. `rotation` is ~21.6k rows (0150), so
+-- the CREATE's SHARE-holding build is sub-second at this scale (measured
+-- build time on the prod-shaped clone: well under 50ms).
+--
+-- CREATE runs before DROP so `card_id` is never left with zero covering
+-- indexes at any point the transaction could be inspected from outside (it
+-- can't be, since both statements are in the same transaction as every
+-- other pending migration — but the ordering is the same discipline 0139
+-- documents, and it is what the out-of-band runbook below needs to be safe
+-- to run partially).
+--
+-- Neither statement is the CONCURRENTLY form, because migrations run inside
+-- a transaction (`CREATE INDEX CONCURRENTLY` / `DROP INDEX CONCURRENTLY`
+-- cannot run inside a transaction block) — same constraint as 0057, 0068,
+-- 0070, 0074, 0078, 0080, 0139, 0144, 0148, 0153, 0154, 0163. If this
+-- deploy lands mid-show, pre-build out of band first, in this order:
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "rotation_card_id_full_idx"
+--     ON "wxyc_schema"."rotation" USING btree ("card_id");
+--   DROP INDEX CONCURRENTLY IF EXISTS "wxyc_schema"."rotation_card_id_idx";
+-- Neither takes an AccessExclusiveLock; no write pause. Create before drop so
+-- `card_id` is never uncovered. `IF NOT EXISTS` / `IF EXISTS` make the
+-- in-migration statements no-ops against a database where the out-of-band
+-- swap already happened, while fresh dev and CI databases pick up both
+-- statements on first migrate. Same shape as 0068, 0070, 0074, 0080, 0139,
+-- 0144, 0148, 0153, 0154, 0163.
+--
+-- @no-precondition-needed: an index swap changes no data and adds no
+-- constraint — nothing here can find a row that violates anything.
+
+CREATE INDEX IF NOT EXISTS "rotation_card_id_full_idx" ON "wxyc_schema"."rotation" USING btree ("card_id");--> statement-breakpoint
+DROP INDEX IF EXISTS "wxyc_schema"."rotation_card_id_idx";

@@ -1098,13 +1098,26 @@ export const rotation = wxyc_schema.table(
   (table) => {
     return {
       albumIdIdx: index('album_id_idx').on(table.album_id),
-      // FK columns aren't auto-indexed by Postgres. Partial on the active
-      // set (`kill_date IS NULL`) because both the cards listing's per-card
-      // active count and the admin list's card filter only ever query
-      // active rows, against the whole rotation history.
-      cardIdIdx: index('rotation_card_id_idx')
-        .on(table.card_id)
-        .where(sql`${table.kill_date} IS NULL`),
+      // FK columns aren't auto-indexed by Postgres. 0164 shipped this
+      // partial on `kill_date IS NULL`, but the cards listing's per-card
+      // active count and the admin list's card filter both query the
+      // canonical active predicate (`kill_date IS NULL OR kill_date >
+      // CURRENT_DATE`, `rotationActiveSql` in library.service.ts) — broader
+      // than the partial predicate implies, so Postgres could never use that
+      // index for them. A non-partial predicate is also the only option
+      // here: `CURRENT_DATE` is STABLE, not IMMUTABLE, so it cannot appear
+      // in an index predicate at all. 0167 (BS#2479) replaced it with this
+      // plain, non-partial index — `card_id` alone, not composited with
+      // `kill_date`. Measured against a prod-shaped 21,566-row clone: a
+      // composite `(card_id, kill_date)` loses to plain `(card_id)` on the
+      // cards listing's GROUP BY query (7,457 buffer hits vs. 218, because
+      // the listing scans the WHOLE index and the composite's extra column
+      // makes each leaf entry, and so the index, bigger) while the two tie
+      // on the single-card lookup (`deleteRotationCardFromDB`'s guard);
+      // `kill_date` is left as a post-index-scan Filter on the small
+      // per-card row set either way, which costs nothing measurable at this
+      // table's active-row cardinality (~310 of 21,566).
+      cardIdIdx: index('rotation_card_id_full_idx').on(table.card_id),
       // BS#2080. Serves arm 2 of the `rotation_bin` fallback in
       // `FSEntryFieldsRaw` — the denormalized (artist, album) snapshot match
       // for library-unlinked rotation rows. The expression must stay
