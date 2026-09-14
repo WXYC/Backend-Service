@@ -190,6 +190,30 @@ library_route.patch(
   libraryController.linkRotationToAlbum
 );
 
+// BS#2472 (WXYC/dj-site#1480 Rotation Admin): card lifecycle CRUD. The GET
+// and POST literal `/rotation/cards` share the same trap as
+// `/rotation/uncatalogued` above — they MUST be registered ahead of the
+// templated `GET /rotation/:id` and `PATCH /rotation/:id` below, or Express
+// hands "cards" to `:id`. Pinned by `library-rotation-route-order.route.test.ts`.
+// `/rotation/cards/:id` (PATCH, DELETE) is a two-segment path, so it carries
+// no ordering hazard against `/rotation/:id` (one segment) — registered here
+// only to keep the card endpoints together.
+library_route.get('/rotation/cards', requirePermissions({ catalog: ['read'] }), libraryController.getRotationCards);
+
+library_route.post('/rotation/cards', requirePermissions({ catalog: ['write'] }), libraryController.addRotationCard);
+
+library_route.patch(
+  '/rotation/cards/:id',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.renameRotationCard
+);
+
+library_route.delete(
+  '/rotation/cards/:id',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.deleteRotationCard
+);
+
 // BS#2410: the single-row rotation read, for dj-site#1161's Import to Library
 // screen and its pre-submit staleness check. `catalog: ['read']`, matching
 // `GET /rotation` and `GET /rotation/uncatalogued` rather than the PATCH that
@@ -197,11 +221,11 @@ library_route.patch(
 //
 // Registered after every literal `/rotation/*` route above, and for this
 // registration that ordering is load-bearing rather than defensive: it shares
-// both method and segment count with a literal (`GET /rotation/uncatalogued`),
-// so ahead of that line it would capture the literal segment as an id. That
-// makes it the second such family on this router — `GET /artists/:id` below
-// is the first, standing in the same relation to `GET /artists/search`,
-// `GET /artists/peek-code` and `GET /artists/by-code`.
+// both method and segment count with two literals now (`GET /rotation/uncatalogued`,
+// `GET /rotation/cards`), so ahead of either it would capture the literal
+// segment as an id. It is the second such family on this router — `GET
+// /artists/:id` below is the first, standing in the same relation to `GET
+// /artists/search`, `GET /artists/peek-code` and `GET /artists/by-code`.
 library_route.get('/rotation/:id', requirePermissions({ catalog: ['read'] }), libraryController.getRotationRow);
 
 // BS#2113: field-level rotation edit. Registered after every literal

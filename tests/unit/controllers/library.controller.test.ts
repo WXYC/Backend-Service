@@ -52,6 +52,18 @@ type LinkRotationOutcomeMock =
   | { outcome: 'album_not_found' };
 const mockLinkRotationToAlbum = jest.fn<(rotationId: number, albumId: number) => Promise<LinkRotationOutcomeMock>>();
 
+// GET/POST/PATCH/DELETE /library/rotation/cards (BS#2472).
+type RotationCardMock = { id: number; bin: string; number: number; name: string | null };
+const mockListRotationCardsFromDB = jest.fn<() => Promise<Array<RotationCardMock & { active_count: number }>>>();
+const mockAddRotationCard = jest.fn<(bin: string, name: string | null | undefined) => Promise<RotationCardMock>>();
+const mockRenameRotationCard = jest.fn<(id: number, name: string | null) => Promise<RotationCardMock | undefined>>();
+type DeleteRotationCardOutcomeMock =
+  | { outcome: 'deleted' }
+  | { outcome: 'not_found' }
+  | { outcome: 'not_last_in_bin' }
+  | { outcome: 'has_active_rows'; activeCount: number };
+const mockDeleteRotationCardFromDB = jest.fn<(id: number) => Promise<DeleteRotationCardOutcomeMock>>();
+
 // PATCH /library/:id (updateAlbum) surface.
 const mockGetLibraryRowById = jest.fn<(id: number) => Promise<Record<string, unknown> | undefined>>();
 const mockUpdateAlbumInDB =
@@ -206,6 +218,10 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   getReleasesForArtist: mockGetReleasesForArtist,
   countReleasesForArtist: mockCountReleasesForArtist,
   updateRotation: mockUpdateRotation,
+  listRotationCardsFromDB: mockListRotationCardsFromDB,
+  addRotationCard: mockAddRotationCard,
+  renameRotationCard: mockRenameRotationCard,
+  deleteRotationCardFromDB: mockDeleteRotationCardFromDB,
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
@@ -288,6 +304,10 @@ import {
   updateArtistCard,
   getArtistReleases,
   updateRotation,
+  getRotationCards,
+  addRotationCard,
+  renameRotationCard,
+  deleteRotationCard,
 } from '../../../apps/backend/controllers/library.controller';
 import WxycError from '../../../apps/backend/utils/error';
 
@@ -2146,6 +2166,133 @@ describe('library.controller', () => {
         expect(mockGetFormatById).not.toHaveBeenCalled();
         expect(mockGetLabelById).not.toHaveBeenCalled();
         expect(res.status).toHaveBeenCalledWith(201);
+      });
+    });
+  });
+
+  describe('rotation cards CRUD (BS#2472)', () => {
+    beforeEach(() => {
+      mockListRotationCardsFromDB.mockReset();
+      mockAddRotationCard.mockReset();
+      mockRenameRotationCard.mockReset();
+      mockDeleteRotationCardFromDB.mockReset();
+    });
+
+    describe('getRotationCards', () => {
+      it('returns 200 with the service result', async () => {
+        const cards = [{ id: 1, bin: 'M', number: 1, name: null, active_count: 2 }];
+        mockListRotationCardsFromDB.mockResolvedValue(cards);
+        const req = {} as unknown as Request;
+        const res = mockResponse();
+
+        await getRotationCards(req, res, next);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        expect(res.json).toHaveBeenCalledWith(cards);
+      });
+    });
+
+    describe('addRotationCard', () => {
+      it('returns 400 for an invalid bin', async () => {
+        const req = { body: { bin: 'X' } } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(addRotationCard(req, res, next)).rejects.toThrow('Invalid bin');
+        expect(mockAddRotationCard).not.toHaveBeenCalled();
+      });
+
+      it('returns 400 when name is not a string', async () => {
+        const req = { body: { bin: 'M', name: 42 } } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(addRotationCard(req, res, next)).rejects.toThrow('name must be a string');
+        expect(mockAddRotationCard).not.toHaveBeenCalled();
+      });
+
+      it('returns 200 with the created card', async () => {
+        mockAddRotationCard.mockResolvedValue({ id: 5, bin: 'M', number: 3, name: 'Front row' });
+        const req = { body: { bin: 'm', name: 'Front row' } } as unknown as Request;
+        const res = mockResponse();
+
+        await addRotationCard(req, res, next);
+
+        expect(mockAddRotationCard).toHaveBeenCalledWith('M', 'Front row');
+        expect(res.status).toHaveBeenCalledWith(200);
+        expect(res.json).toHaveBeenCalledWith({ id: 5, bin: 'M', number: 3, name: 'Front row' });
+      });
+    });
+
+    describe('renameRotationCard', () => {
+      it('returns 400 for non-numeric id parameter', async () => {
+        const req = { params: { id: 'abc' }, body: { name: 'x' } } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(renameRotationCard(req, res, next)).rejects.toThrow('Invalid rotation card ID');
+      });
+
+      it('returns 404 when the card does not exist', async () => {
+        mockRenameRotationCard.mockResolvedValue(undefined);
+        const req = { params: { id: '5' }, body: { name: 'x' } } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(renameRotationCard(req, res, next)).rejects.toThrow('Rotation card not found');
+      });
+
+      it('returns 200 with the renamed card', async () => {
+        mockRenameRotationCard.mockResolvedValue({ id: 5, bin: 'M', number: 1, name: 'New name' });
+        const req = { params: { id: '5' }, body: { name: 'New name' } } as unknown as Request;
+        const res = mockResponse();
+
+        await renameRotationCard(req, res, next);
+
+        expect(mockRenameRotationCard).toHaveBeenCalledWith(5, 'New name');
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+    });
+
+    describe('deleteRotationCard', () => {
+      it('returns 404 when the card does not exist', async () => {
+        mockDeleteRotationCardFromDB.mockResolvedValue({ outcome: 'not_found' });
+        const req = { params: { id: '5' } } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(deleteRotationCard(req, res, next)).rejects.toThrow('Rotation card not found');
+      });
+
+      it('returns 409 with reason card_not_last_in_bin when a higher-numbered card exists', async () => {
+        mockDeleteRotationCardFromDB.mockResolvedValue({ outcome: 'not_last_in_bin' });
+        const req = { params: { id: '5' } } as unknown as Request;
+        const res = mockResponse();
+
+        await deleteRotationCard(req, res, next);
+
+        expect(res.status).toHaveBeenCalledWith(409);
+        expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ reason: 'card_not_last_in_bin' }));
+      });
+
+      it('returns 409 with reason card_has_active_rows when active rows remain', async () => {
+        mockDeleteRotationCardFromDB.mockResolvedValue({ outcome: 'has_active_rows', activeCount: 2 });
+        const req = { params: { id: '5' } } as unknown as Request;
+        const res = mockResponse();
+
+        await deleteRotationCard(req, res, next);
+
+        expect(res.status).toHaveBeenCalledWith(409);
+        expect(res.json).toHaveBeenCalledWith(
+          expect.objectContaining({ reason: 'card_has_active_rows', active_count: 2 })
+        );
+      });
+
+      it('returns 204 when the card is deleted', async () => {
+        mockDeleteRotationCardFromDB.mockResolvedValue({ outcome: 'deleted' });
+        const req = { params: { id: '5' } } as unknown as Request;
+        const res = mockResponse();
+        res.end = jest.fn().mockReturnValue(res) as unknown as Response['end'];
+
+        await deleteRotationCard(req, res, next);
+
+        expect(res.status).toHaveBeenCalledWith(204);
+        expect(res.end).toHaveBeenCalled();
       });
     });
   });

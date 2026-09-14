@@ -1282,6 +1282,92 @@ export const getUncataloguedRotation: RequestHandler = async (req, res) => {
   res.status(200).json(rotation);
 };
 
+/** Positive-int `id` path param for the `/rotation/cards/:id` write endpoints (BS#2472). */
+const parseCardId = (rawId: string): number => parseResourceId(rawId, 'rotation card');
+
+/**
+ * `GET /library/rotation/cards` (BS#2472). ROUTE REGISTRATION ORDER IS
+ * LOAD-BEARING, same trap as `getUncataloguedRotation` above — this literal
+ * must stay registered ahead of `GET /rotation/:id` or Express hands it "cards"
+ * as an id. Pinned by `library-rotation-route-order.route.test.ts`.
+ */
+export const getRotationCards: RequestHandler = async (_req, res) => {
+  const cards = await libraryService.listRotationCardsFromDB();
+  res.status(200).json(cards);
+};
+
+export type AddRotationCardRequest = { bin: string; name?: string };
+
+/** `POST /library/rotation/cards` (BS#2472) — `number` is server-assigned (bin's max + 1). */
+export const addRotationCard: RequestHandler<object, unknown, AddRotationCardRequest> = async (req, res) => {
+  const { body } = req;
+  const parsedBin = parseRotationBin(body.bin);
+  if (parsedBin.kind !== 'bin') {
+    throw new WxycError(`Invalid bin ${JSON.stringify(body.bin)}. Expected one of: ${ROTATION_BINS.join(', ')}.`, 400);
+  }
+  if (body.name !== undefined && typeof body.name !== 'string') {
+    throw new WxycError('Invalid Parameter: name must be a string', 400);
+  }
+
+  const card = await libraryService.addRotationCard(parsedBin.bin, body.name);
+  res.status(200).json(card);
+};
+
+export type UpdateRotationCardRequest = { name: string | null };
+
+/** `PATCH /library/rotation/cards/:id` (BS#2472) — rename only. */
+export const renameRotationCard: RequestHandler<{ id: string }, unknown, UpdateRotationCardRequest> = async (
+  req,
+  res
+) => {
+  const cardId = parseCardId(req.params.id);
+  const { name } = req.body;
+  if (name !== null && typeof name !== 'string') {
+    throw new WxycError('Missing Parameters: name', 400);
+  }
+
+  const card = await libraryService.renameRotationCard(cardId, name);
+  if (!card) {
+    throw new WxycError('Rotation card not found', 404);
+  }
+  res.status(200).json(card);
+};
+
+/**
+ * `DELETE /library/rotation/cards/:id` (BS#2472). 409 (conjunctive) unless
+ * the card is both the highest-numbered card in its bin and has zero active
+ * rotation rows — see `libraryService.deleteRotationCardFromDB`.
+ */
+export const deleteRotationCard: RequestHandler<{ id: string }> = async (req, res) => {
+  const cardId = parseCardId(req.params.id);
+  const result = await libraryService.deleteRotationCardFromDB(cardId);
+
+  switch (result.outcome) {
+    case 'not_found':
+      throw new WxycError('Rotation card not found', 404);
+    case 'not_last_in_bin':
+      res.status(409).json({
+        message: 'Cannot delete: a higher-numbered card exists in this bin. Bins shrink only from the top.',
+        reason: 'card_not_last_in_bin',
+      });
+      return;
+    case 'has_active_rows':
+      res.status(409).json({
+        message: `Cannot delete: ${result.activeCount} active rotation row${result.activeCount === 1 ? '' : 's'} still assigned to this card`,
+        reason: 'card_has_active_rows',
+        active_count: result.activeCount,
+      });
+      return;
+    case 'deleted':
+      res.status(204).end();
+      return;
+    default: {
+      const unhandled: never = result;
+      throw new WxycError(`Unhandled rotation card delete outcome: ${JSON.stringify(unhandled)}`, 500);
+    }
+  }
+};
+
 /**
  * `GET /library/rotation/:id` (BS#2410) — the single-row rotation read.
  *
