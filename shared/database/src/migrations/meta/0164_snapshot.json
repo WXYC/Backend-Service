@@ -1,5 +1,5 @@
 {
-  "id": "dd58bbfd-6450-4066-9242-8dfc6a5930e0",
+  "id": "c2d86f40-60bc-407c-8477-891b6566e835",
   "prevId": "bbaac5df-2c89-4307-9f1c-f21e277cca14",
   "version": "7",
   "dialect": "postgresql",
@@ -5792,7 +5792,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -5897,17 +5897,23 @@
         }
       },
       "indexes": {
-        "rotation_urls_rotation_id_idx": {
-          "name": "rotation_urls_rotation_id_idx",
+        "rotation_urls_rotation_id_position_idx": {
+          "name": "rotation_urls_rotation_id_position_idx",
           "columns": [
             {
               "expression": "rotation_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
+            },
+            {
+              "expression": "position",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
             }
           ],
-          "isUnique": false,
+          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}

@@ -1088,7 +1088,12 @@ export const rotation = wxyc_schema.table(
     // physical card within the row's bin this release is filed under.
     // Nullable — every existing row and every writer that predates the
     // Rotation Admin UI leaves it unset. No backfill in this PR; see #2477.
-    card_id: integer('card_id').references(() => rotation_cards.id),
+    // ON DELETE SET NULL: card deletion (#2472) is refused only while
+    // ACTIVE rows reference the card, but killed rows keep their reference
+    // forever — NO ACTION would make every once-used card undeletable at
+    // the SQL level. The epic decided killed rows may be uncarded (the UI
+    // shows — for uncarded), so deleting a card unfiles its killed rows.
+    card_id: integer('card_id').references(() => rotation_cards.id, { onDelete: 'set null' }),
   },
   (table) => {
     return {
@@ -1157,7 +1162,10 @@ export type RotationUrl = InferSelectModel<typeof rotation_urls>;
  * BS#2471 (WXYC/dj-site#1480 Rotation Admin, backend PR B1). A rotation entry
  * can carry more than one URL (label page, Bandcamp, streaming), so this is a
  * child table rather than an array column — ordered by `position` and
- * independently queryable/deletable per row.
+ * independently queryable/deletable per row. Unique on
+ * (rotation_id, position): one URL per slot, so `ORDER BY position` is
+ * deterministic and a stale-read `max(position)+1` writer collides instead
+ * of silently landing a duplicate slot.
  */
 export const rotation_urls = wxyc_schema.table(
   'rotation_urls',
@@ -1171,9 +1179,14 @@ export const rotation_urls = wxyc_schema.table(
   },
   (table) => {
     return {
-      // FK columns aren't auto-indexed by Postgres. Every read of a rotation
-      // row's URLs (in id/position order) filters on rotation_id.
-      rotationIdIdx: index('rotation_urls_rotation_id_idx').on(table.rotation_id),
+      // One URL per (rotation row, slot). Its leading column also does the
+      // FK-lookup duty (Postgres doesn't auto-index FK columns): every read
+      // of a rotation row's URLs filters on rotation_id, which a btree on
+      // (rotation_id, position) serves — no separate rotation_id index.
+      rotationIdPositionIdx: uniqueIndex('rotation_urls_rotation_id_position_idx').on(
+        table.rotation_id,
+        table.position
+      ),
     };
   }
 );

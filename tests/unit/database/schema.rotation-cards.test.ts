@@ -92,9 +92,14 @@ describe('schema: rotation_cards / rotation_urls substrate (migration 0164, BS#2
       expect(ddl).not.toMatch(/ADD COLUMN "card_id" integer NOT NULL/);
     });
 
-    it('FKs card_id to rotation_cards.id with no ON DELETE action', () => {
+    it('FKs card_id to rotation_cards.id ON DELETE SET NULL, so deleting a card unfiles its killed rows', () => {
+      // NO ACTION would make every once-used card undeletable: the delete
+      // endpoint (#2472) refuses deletion only while ACTIVE rows reference
+      // the card, but killed rows keep their reference forever. The epic
+      // decided killed rows may be uncarded, so the FK returns them to the
+      // unfiled (NULL) state instead of vetoing the delete.
       expect(ddl).toMatch(
-        /ALTER TABLE "wxyc_schema"\."rotation" ADD CONSTRAINT "rotation_card_id_rotation_cards_id_fk" FOREIGN KEY \("card_id"\) REFERENCES "wxyc_schema"\."rotation_cards"\("id"\) ON DELETE no action ON UPDATE no action;/
+        /ALTER TABLE "wxyc_schema"\."rotation" ADD CONSTRAINT "rotation_card_id_rotation_cards_id_fk" FOREIGN KEY \("card_id"\) REFERENCES "wxyc_schema"\."rotation_cards"\("id"\) ON DELETE set null ON UPDATE no action;/
       );
     });
 
@@ -109,9 +114,31 @@ describe('schema: rotation_cards / rotation_urls substrate (migration 0164, BS#2
       expect(migrationSql).toMatch(/CREATE INDEX CONCURRENTLY IF NOT EXISTS "rotation_card_id_idx"/);
     });
 
+    it('the CONCURRENTLY runbook in the header matches the DDL it tells ops to pre-build', () => {
+      // A runbook that drifts from the DDL is worse than none: ops builds an
+      // index the query cannot use, the IF NOT EXISTS migration no-ops, and
+      // the query never gets the index it needs. Same guard as
+      // schema.rotation-bin-fallback-idx.test.ts, whitespace-normalized
+      // because this header wraps the command across lines.
+      const ddlLine = ddl.match(/^CREATE INDEX IF NOT EXISTS "rotation_card_id_idx".*$/m);
+      if (ddlLine === null) throw new Error('no executable CREATE INDEX for rotation_card_id_idx');
+      const body = ddlLine[0].replace(/^CREATE INDEX IF NOT EXISTS /, '').replace(/;.*$/, '');
+      // Header comment lines, `-- ` prefixes stripped, collapsed to one
+      // whitespace-normalized string the wrapped runbook is contiguous in.
+      const headerText = migrationSql
+        .split('\n')
+        .filter((line) => line.startsWith('--'))
+        .map((line) => line.replace(/^--\s?/, ''))
+        .join(' ')
+        .replace(/\s+/g, ' ');
+      expect(headerText).toContain(`CREATE INDEX CONCURRENTLY IF NOT EXISTS ${body}`.replace(/\s+/g, ' '));
+    });
+
     it("declares the matching nullable, FK'd, partially-indexed column in schema.ts", () => {
       const def = extractTableDef('rotation');
-      expect(def).toMatch(/card_id:\s*integer\('card_id'\)\.references\(\(\)\s*=>\s*rotation_cards\.id\)/);
+      expect(def).toMatch(
+        /card_id:\s*integer\('card_id'\)\.references\(\(\)\s*=>\s*rotation_cards\.id,\s*\{\s*onDelete:\s*'set null'\s*\}\)/
+      );
       expect(def).not.toMatch(/card_id:[^,]*notNull\(\)/);
       expect(def).toMatch(
         /cardIdIdx:\s*index\('rotation_card_id_idx'\)\s*\.on\(table\.card_id\)\s*\.where\(sql`\$\{table\.kill_date\}\s*IS NULL`\)/
@@ -132,10 +159,18 @@ describe('schema: rotation_cards / rotation_urls substrate (migration 0164, BS#2
       );
     });
 
-    it('indexes rotation_id — Postgres does not auto-index FK columns', () => {
+    it('is unique on (rotation_id, position) — one URL per slot, deterministic ORDER BY position', () => {
       expect(ddl).toMatch(
-        /CREATE INDEX "rotation_urls_rotation_id_idx" ON "wxyc_schema"\."rotation_urls" USING btree \("rotation_id"\)/
+        /CREATE UNIQUE INDEX "rotation_urls_rotation_id_position_idx" ON "wxyc_schema"\."rotation_urls" USING btree \("rotation_id","position"\)/
       );
+    });
+
+    it('carries no separate rotation_id index — the unique index’s leading column serves FK lookups', () => {
+      // Postgres does not auto-index FK columns, but a btree on
+      // (rotation_id, position) answers every rotation_id-only lookup via
+      // its leading column; a second single-column index would be pure
+      // write amplification.
+      expect(ddl).not.toMatch(/"rotation_urls_rotation_id_idx"/);
     });
 
     it('declares the matching table in schema.ts with the same columns, FK, and index', () => {
@@ -146,7 +181,9 @@ describe('schema: rotation_cards / rotation_urls substrate (migration 0164, BS#2
       );
       expect(def).toMatch(/url:\s*text\('url'\)\.notNull\(\)/);
       expect(def).toMatch(/position:\s*integer\('position'\)\.notNull\(\)/);
-      expect(def).toMatch(/rotationIdIdx:\s*index\('rotation_urls_rotation_id_idx'\)\.on\(table\.rotation_id\)/);
+      expect(def).toMatch(
+        /rotationIdPositionIdx:\s*uniqueIndex\('rotation_urls_rotation_id_position_idx'\)\.on\(\s*table\.rotation_id,\s*table\.position\s*\)/
+      );
     });
   });
 
