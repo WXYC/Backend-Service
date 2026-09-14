@@ -1300,7 +1300,14 @@ export type AddRotationCardRequest = { bin: string; name?: string };
 
 /** `POST /library/rotation/cards` (BS#2472) — `number` is server-assigned (bin's max + 1). */
 export const addRotationCard: RequestHandler<object, unknown, AddRotationCardRequest> = async (req, res) => {
-  const { body } = req;
+  // Same body-parser 2.x hazard `updateArtistCard` normalizes above: Express
+  // 5 leaves `req.body` UNDEFINED for a body-less or non-JSON-typed request,
+  // so dereferencing it unguarded turns the likeliest smoke-test request
+  // (`curl -X POST` with no body) into a TypeError 500 instead of a 400.
+  const body: Partial<AddRotationCardRequest> = req.body ?? {};
+  if (typeof body !== 'object' || Array.isArray(body)) {
+    throw new WxycError('Bad Request: body must be a JSON object', 400);
+  }
   const parsedBin = parseRotationBin(body.bin);
   if (parsedBin.kind !== 'bin') {
     throw new WxycError(`Invalid bin ${JSON.stringify(body.bin)}. Expected one of: ${ROTATION_BINS.join(', ')}.`, 400);
@@ -1321,8 +1328,15 @@ export const renameRotationCard: RequestHandler<{ id: string }, unknown, UpdateR
   res
 ) => {
   const cardId = parseCardId(req.params.id);
-  const { name } = req.body;
-  if (name !== null && typeof name !== 'string') {
+  // Same `req.body ?? {}` normalization as `addRotationCard` above — a
+  // body-less PATCH must be the 400 one line down, not a destructure
+  // TypeError 500.
+  const body: Partial<UpdateRotationCardRequest> = req.body ?? {};
+  if (typeof body !== 'object' || Array.isArray(body)) {
+    throw new WxycError('Bad Request: body must be a JSON object', 400);
+  }
+  const { name } = body;
+  if (name === undefined || (name !== null && typeof name !== 'string')) {
     throw new WxycError('Missing Parameters: name', 400);
   }
 
@@ -1477,13 +1491,21 @@ export type RotationAddRequest = Omit<NewRotationRelease, 'id'>;
  */
 type AddRotationAllowlist = Pick<
   NewRotationRelease,
-  'album_id' | 'rotation_bin' | 'artist_name' | 'album_title' | 'record_label' | 'format_id' | 'label_id'
+  'album_id' | 'rotation_bin' | 'artist_name' | 'album_title' | 'record_label' | 'format_id' | 'label_id' | 'card_id'
 >;
 
 export function pickAddRotationFields(body: Partial<NewRotationRelease>): AddRotationAllowlist {
   const picked = {} as AddRotationAllowlist;
   if (body.album_id != null) picked.album_id = body.album_id;
   if (body.rotation_bin != null) picked.rotation_bin = body.rotation_bin;
+  // BS#2472: which physical card the row is filed under. Unconditional —
+  // unlike the snapshot trio and the pre-catalog FKs below, a card
+  // assignment is the rotation row's own state on linked and unlinked rows
+  // alike, so `album_id` does not gate it. Absent (or `null`, the
+  // `selected?.id ?? null` client shape) means "the service defaults to the
+  // bin's newest card"; the service also owns existence and bin-agreement
+  // validation (`resolveRotationCardId`).
+  if (body.card_id != null) picked.card_id = body.card_id;
   if (body.album_id == null) {
     if (body.artist_name != null) picked.artist_name = body.artist_name;
     if (body.album_title != null) picked.album_title = body.album_title;
@@ -1631,6 +1653,12 @@ async function assertRotationPrecatalogFk(
  * this tightening does not affect it. A caller that does send a numeric
  * string was relying on undocumented PostgreSQL coercion rather than the
  * documented contract.
+ *
+ * **Card filing (BS#2472):** `card_id` may accompany the add on both the
+ * catalogued and uncatalogued paths; absent (or `null`), the service files
+ * the row on the bin's newest card, so legacy writers that predate cards
+ * keep filing correctly. Existence (404) and bin agreement (the named 409
+ * below) live in `resolveRotationCardId` at the service layer.
  */
 export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = async (req, res) => {
   const { body } = req;
@@ -1654,6 +1682,18 @@ export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = 
   if (hasAlbumId && !(Number.isInteger(body.album_id) && (body.album_id as number) > 0)) {
     throw new WxycError(
       'Invalid Parameter: album_id must be a positive integer, or omitted for an uncatalogued release',
+      400
+    );
+  }
+
+  // BS#2472: an explicit card assignment may ride the add. Shape-guarded
+  // like `album_id` above (`null` means "absent", the `selected?.id ?? null`
+  // client shape); existence and bin agreement are the service's to assert —
+  // 404 for a dangling id, `RotationCardBinMismatchError` (the 409 below)
+  // for a card filed in a different bin than `rotation_bin`.
+  if (body.card_id != null && !(Number.isInteger(body.card_id) && body.card_id > 0)) {
+    throw new WxycError(
+      "Invalid Parameter: card_id must be a positive integer, or omitted to file on the bin's newest card",
       400
     );
   }
@@ -1691,7 +1731,19 @@ export const addRotation: RequestHandler<object, unknown, NewRotationRelease> = 
   }
 
   const picked = pickAddRotationFields(body);
-  const rotationRelease: RotationRelease = await libraryService.addToRotation(picked);
+  let rotationRelease: RotationRelease;
+  try {
+    rotationRelease = await libraryService.addToRotation(picked);
+  } catch (err) {
+    if (err instanceof libraryService.RotationCardBinMismatchError) {
+      // The named-reason 409 convention (`addArtist`, `deleteRotationCard`);
+      // `rotation_card_bin_mismatch` is the exact `LibraryFilingConflictReason`
+      // string the shared contract defines for this invariant.
+      res.status(409).json({ message: err.message, reason: 'rotation_card_bin_mismatch' });
+      return;
+    }
+    throw err;
+  }
   res.status(201).json(rotationRelease);
 };
 

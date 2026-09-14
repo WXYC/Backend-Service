@@ -222,6 +222,17 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   addRotationCard: mockAddRotationCard,
   renameRotationCard: mockRenameRotationCard,
   deleteRotationCardFromDB: mockDeleteRotationCardFromDB,
+  // Stand-in with the real constructor shape, so `addRotation`'s
+  // `err instanceof libraryService.RotationCardBinMismatchError` arm (the
+  // named 409) is exercisable against the mocked module.
+  RotationCardBinMismatchError: class RotationCardBinMismatchError extends Error {
+    constructor(cardId: number, cardBin: string, rotationBin: string) {
+      super(
+        `Rotation card ${cardId} is filed in bin '${cardBin}', but the rotation row is bound for bin '${rotationBin}'`
+      );
+      this.name = 'RotationCardBinMismatchError';
+    }
+  },
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
@@ -309,6 +320,9 @@ import {
   renameRotationCard,
   deleteRotationCard,
 } from '../../../apps/backend/controllers/library.controller';
+// The service module is mocked above, so this resolves to the factory's
+// stand-in class — the same object the controller's instanceof arm sees.
+import { RotationCardBinMismatchError } from '../../../apps/backend/services/library.service';
 import WxycError from '../../../apps/backend/utils/error';
 
 function mockResponse(): Response {
@@ -1821,6 +1835,37 @@ describe('library.controller', () => {
 
       expect(picked).toEqual({ rotation_bin: 'L', artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' });
     });
+
+    // BS#2472: `card_id` is UNCONDITIONAL — a card assignment is the
+    // rotation row's own state on linked and unlinked rows alike, so
+    // `album_id` does not gate it the way it gates the trio and the FKs.
+    it('picks card_id on a linked add (album_id present)', () => {
+      const picked = pickAddRotationFields({ album_id: 5, rotation_bin: 'M', card_id: 7 });
+
+      expect(picked).toEqual({ album_id: 5, rotation_bin: 'M', card_id: 7 });
+    });
+
+    it('picks card_id on an uncatalogued add (album_id absent)', () => {
+      const picked = pickAddRotationFields({
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+        card_id: 7,
+      });
+
+      expect(picked).toEqual({
+        rotation_bin: 'L',
+        artist_name: 'Jockstrap',
+        album_title: 'I Love You Jennifer B',
+        card_id: 7,
+      });
+    });
+
+    it('drops an explicitly-null card_id exactly as absent (the selected?.id ?? null shape)', () => {
+      const picked = pickAddRotationFields({ album_id: 5, rotation_bin: 'M', card_id: null });
+
+      expect(picked).toEqual({ album_id: 5, rotation_bin: 'M' });
+    });
   });
 
   describe('addRotation (BS#2109)', () => {
@@ -1964,6 +2009,57 @@ describe('library.controller', () => {
         addRotation({ body: { album_id: '2', rotation_bin: 'M' } } as unknown as Request, res, next)
       ).rejects.toThrow('album_id must be a positive integer');
       expect(mockAddToRotation).not.toHaveBeenCalled();
+    });
+
+    // BS#2472: an explicit card assignment rides the add, shape-guarded like
+    // album_id; existence and bin agreement live in the service.
+    it.each([0, -1, 1.5, '3'])('returns 400 for a non-positive-integer card_id (%p)', async (cardId) => {
+      const req = { body: { album_id: 5, rotation_bin: 'M', card_id: cardId } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(addRotation(req, res, next)).rejects.toThrow('card_id must be a positive integer');
+      expect(mockAddToRotation).not.toHaveBeenCalled();
+    });
+
+    it('passes card_id through to the service on a catalogued add', async () => {
+      mockAddToRotation.mockResolvedValue({ id: 1, album_id: 5, rotation_bin: 'M', card_id: 7 });
+      const req = { body: { album_id: 5, rotation_bin: 'M', card_id: 7 } } as unknown as Request;
+      const res = mockResponse();
+
+      await addRotation(req, res, next);
+
+      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M', card_id: 7 });
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('treats card_id: null exactly as absent (the selected?.id ?? null shape)', async () => {
+      mockAddToRotation.mockResolvedValue({ id: 1, album_id: 5, rotation_bin: 'M', card_id: null });
+      const req = { body: { album_id: 5, rotation_bin: 'M', card_id: null } } as unknown as Request;
+      const res = mockResponse();
+
+      await addRotation(req, res, next);
+
+      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M' });
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('maps RotationCardBinMismatchError onto the named 409 (rotation_card_bin_mismatch)', async () => {
+      mockAddToRotation.mockRejectedValue(new RotationCardBinMismatchError(7, 'S', 'M'));
+      const req = { body: { album_id: 5, rotation_bin: 'M', card_id: 7 } } as unknown as Request;
+      const res = mockResponse();
+
+      await addRotation(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ reason: 'rotation_card_bin_mismatch' }));
+    });
+
+    it('rethrows a non-card service failure untouched', async () => {
+      mockAddToRotation.mockRejectedValue(new WxycError('Rotation card not found', 404));
+      const req = { body: { album_id: 5, rotation_bin: 'M', card_id: 999 } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(addRotation(req, res, next)).rejects.toMatchObject({ statusCode: 404 });
     });
 
     it('returns 400 when a blank/whitespace-only artist_name or album_title is supplied', async () => {
@@ -2193,6 +2289,16 @@ describe('library.controller', () => {
     });
 
     describe('addRotationCard', () => {
+      it('returns 400 (not a TypeError 500) for a body-less POST', async () => {
+        // Express 5 + body-parser 2.x leave `req.body` UNDEFINED for a
+        // body-less or non-JSON-typed request.
+        const req = {} as unknown as Request;
+        const res = mockResponse();
+
+        await expect(addRotationCard(req, res, next)).rejects.toThrow('Invalid bin');
+        expect(mockAddRotationCard).not.toHaveBeenCalled();
+      });
+
       it('returns 400 for an invalid bin', async () => {
         const req = { body: { bin: 'X' } } as unknown as Request;
         const res = mockResponse();
@@ -2228,6 +2334,14 @@ describe('library.controller', () => {
         const res = mockResponse();
 
         await expect(renameRotationCard(req, res, next)).rejects.toThrow('Invalid rotation card ID');
+      });
+
+      it('returns 400 (not a destructure TypeError 500) for a body-less PATCH', async () => {
+        const req = { params: { id: '5' } } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(renameRotationCard(req, res, next)).rejects.toThrow('Missing Parameters: name');
+        expect(mockRenameRotationCard).not.toHaveBeenCalled();
       });
 
       it('returns 404 when the card does not exist', async () => {

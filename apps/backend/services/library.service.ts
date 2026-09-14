@@ -9,6 +9,7 @@ import {
   db,
   extractSqlState,
   isLockContentionError,
+  parseRotationBin,
   SUB_DEADLOCK_LOCK_TIMEOUT_MS,
   type RotationBin,
 } from '@wxyc/database';
@@ -497,6 +498,76 @@ export function classifyLmlResolveError(err: unknown): LmlResolveFallbackReason 
 }
 
 /**
+ * `POST /library/rotation` refused because the client-chosen card lives in a
+ * different bin than the row's `rotation_bin` (BS#2472). A dedicated error
+ * class rather than a `WxycError` or an outcome union: the controller maps
+ * exactly this failure onto the contract's named 409 (`reason:
+ * 'rotation_card_bin_mismatch'`, the `LibraryFilingConflictReason` member
+ * wxyc-shared defines for this invariant), while `addToRotation`'s happy
+ * path keeps returning the bare inserted row every existing caller expects.
+ */
+export class RotationCardBinMismatchError extends Error {
+  constructor(
+    readonly cardId: number,
+    readonly cardBin: RotationBin,
+    readonly rotationBin: string
+  ) {
+    super(
+      `Rotation card ${cardId} is filed in bin '${cardBin}', but the rotation row is bound for bin '${rotationBin}'`
+    );
+    this.name = 'RotationCardBinMismatchError';
+  }
+}
+
+/**
+ * Which `rotation_cards` row a new rotation row is filed under (BS#2472).
+ *
+ * - Client named a card: it must exist (404 — the reference is to a resource,
+ *   not a free value) and must live in the row's own `rotation_bin`
+ *   (`RotationCardBinMismatchError` → 409). Returns the validated id.
+ * - Client named none: the bin's newest card — highest `number`, id as the
+ *   tie-break `rotation_cards_bin_number_idx` makes unreachable — so the
+ *   legacy classic-form add keeps filing correctly without knowing cards
+ *   exist. A bin with no cards yet returns `undefined` and the row lands
+ *   unfiled, exactly like every pre-card row.
+ *
+ * The comparison normalizes the request bin through `parseRotationBin`
+ * rather than comparing raw: the controller validates the bin's spelling but
+ * forwards it as received, so `'h'` must match a card filed in `'H'`.
+ */
+const resolveRotationCardId = async (
+  rotationBin: RotationBin | null | undefined,
+  cardId: number | null | undefined
+): Promise<number | undefined> => {
+  const parsedBin = parseRotationBin(rotationBin);
+  const requestedBin = parsedBin.kind === 'bin' ? parsedBin.bin : undefined;
+
+  if (cardId != null) {
+    const [card] = await db
+      .select({ bin: rotation_cards.bin })
+      .from(rotation_cards)
+      .where(eq(rotation_cards.id, cardId))
+      .limit(1);
+    if (!card) {
+      throw new WxycError('Rotation card not found', 404);
+    }
+    if (card.bin !== requestedBin) {
+      throw new RotationCardBinMismatchError(cardId, card.bin, String(rotationBin));
+    }
+    return cardId;
+  }
+
+  if (requestedBin === undefined) return undefined;
+  const [newest] = await db
+    .select({ id: rotation_cards.id })
+    .from(rotation_cards)
+    .where(eq(rotation_cards.bin, requestedBin))
+    .orderBy(desc(rotation_cards.number), desc(rotation_cards.id))
+    .limit(1);
+  return newest?.id;
+};
+
+/**
  * Add an album to rotation (dj-site path, `POST /library/rotation`).
  *
  * Synchronously triple-writes `(discogs_release_id, discogs_release_id_source =
@@ -523,9 +594,21 @@ export function classifyLmlResolveError(err: unknown): LmlResolveFallbackReason 
  * appears in-rotation immediately on click. Blocking the music director on
  * an LML outage is worse than a temporarily-incomplete row, so the catch
  * arm proceeds rather than rethrowing.
+ *
+ * Card filing (BS#2472): before any of the above, `resolveRotationCardId`
+ * decides which `rotation_cards` row the new rotation row is filed under —
+ * the bin's newest card when the client named none (so legacy writers that
+ * don't know cards exist keep filing correctly), or the client's `card_id`
+ * once it is proven to exist and to live in the row's own bin.
  */
 export const addToRotation = async (newRotation: RotationAddRequest) => {
   const values: RotationAddRequest = { ...newRotation };
+
+  // Runs before the LML resolve below on purpose: a mismatched or dangling
+  // card must refuse the add without spending a network hop, and a defaulted
+  // card must land in the same INSERT as everything else.
+  const cardId = await resolveRotationCardId(values.rotation_bin, values.card_id);
+  if (cardId !== undefined) values.card_id = cardId;
 
   // Allowlist guard already runs at the controller layer, but the server-
   // derived fields below must always come from this function, not the
@@ -584,14 +667,28 @@ export const addToRotation = async (newRotation: RotationAddRequest) => {
 };
 
 /**
+ * The canonical active-rotation predicate — `kill_date IS NULL OR kill_date
+ * > CURRENT_DATE`, the rule `getRotationFromDB`'s doc block states and every
+ * deployed rotation read in this file applies. The card queries below MUST
+ * use it, not the narrower `kill_date IS NULL`: a future-dated kill is still
+ * rotating — the search projections still emit its `rotation_bin` — so under
+ * the narrow spelling its card would report `active_count: 0` and the delete
+ * guard would unfile a record DJs are still routed to. A fresh fragment per
+ * call so no two queries share one `SQL` instance. Consolidating the
+ * pre-existing hand-written spellings (`getRotationFromDB`, the search
+ * projections) onto one exported fragment — and replacing the partial
+ * `rotation_card_id_idx`, whose `kill_date IS NULL` predicate this broader
+ * filter cannot use — is BS#2479; correctness wins over the index here.
+ */
+const rotationActiveSql = () => sql`(${rotation.kill_date} IS NULL OR ${rotation.kill_date} > CURRENT_DATE)`;
+
+/**
  * `GET /library/rotation/cards` (BS#2472): every card across all bins, each
  * with a count of the rotation rows currently active on it — ONE grouped
  * query, not a per-card loop. The LEFT JOIN's own condition carries the
- * `kill_date IS NULL` filter (rather than a WHERE after the join) so a card
- * with zero active rows still appears with `active_count: 0` instead of
- * being dropped by the join; that condition is also what lets the join use
- * the partial `rotation_card_id_idx` (migration 0164), built on exactly this
- * predicate for exactly this query.
+ * active filter (`rotationActiveSql`, see above — NOT `kill_date IS NULL`)
+ * rather than a WHERE after the join, so a card with zero active rows still
+ * appears with `active_count: 0` instead of being dropped by the join.
  */
 export const listRotationCardsFromDB = async (): Promise<Array<RotationCard & { active_count: number }>> => {
   return db
@@ -603,28 +700,46 @@ export const listRotationCardsFromDB = async (): Promise<Array<RotationCard & { 
       active_count: sql<number>`count(${rotation.id})::int`,
     })
     .from(rotation_cards)
-    .leftJoin(rotation, and(eq(rotation.card_id, rotation_cards.id), isNull(rotation.kill_date)))
+    .leftJoin(rotation, and(eq(rotation.card_id, rotation_cards.id), rotationActiveSql()))
     .groupBy(rotation_cards.id)
     .orderBy(asc(rotation_cards.bin), asc(rotation_cards.number));
 };
 
 /**
  * `POST /library/rotation/cards` (BS#2472): `number` is server-assigned as
- * the bin's current max + 1 (1 for the bin's first card), matching
- * `generateAlbumCodeNumber`'s MAX+1 convention above — same single-operator
- * argument applies (WXYC has one librarian/MD at a time).
+ * the bin's current max + 1 (1 for the bin's first card).
+ *
+ * MAX+1-then-INSERT is two statements, and at READ COMMITTED no transaction
+ * serializes them — two concurrent same-bin creates (a double-clicked
+ * button) can both read max = N and both write N + 1. Unlike
+ * `generateAlbumCodeNumber`'s MAX+1 above (whose column carries no unique
+ * index, so the same interleaving silently duplicates), migration 0164 made
+ * `(bin, number)` unique, so the loser surfaces as SQLSTATE 23505. Handle it
+ * where it surfaces: one retry against a fresh MAX, then a 409 rather than
+ * an opaque 500 if the bin is somehow still contended.
  */
 export const addRotationCard = async (bin: RotationBin, name: string | null | undefined): Promise<RotationCard> => {
-  const [maxRow] = await db
-    .select({ number: rotation_cards.number })
-    .from(rotation_cards)
-    .where(eq(rotation_cards.bin, bin))
-    .orderBy(desc(rotation_cards.number))
-    .limit(1);
+  for (let attempt = 0; ; attempt++) {
+    const [maxRow] = await db
+      .select({ number: rotation_cards.number })
+      .from(rotation_cards)
+      .where(eq(rotation_cards.bin, bin))
+      .orderBy(desc(rotation_cards.number))
+      .limit(1);
 
-  const values: NewRotationCard = { bin, number: (maxRow?.number ?? 0) + 1, name: name ?? null };
-  const [card] = await db.insert(rotation_cards).values(values).returning();
-  return card;
+    const values: NewRotationCard = { bin, number: (maxRow?.number ?? 0) + 1, name: name ?? null };
+    try {
+      const [card] = await db.insert(rotation_cards).values(values).returning();
+      return card;
+    } catch (err) {
+      // Only the `rotation_cards_bin_number_idx` collision is retryable —
+      // anything else is a real failure and keeps its original shape.
+      if (extractSqlState(err) !== '23505') throw err;
+      if (attempt >= 1) {
+        throw new WxycError(`Another card was created in bin '${bin}' concurrently; retry`, 409);
+      }
+    }
+  }
 };
 
 /** `PATCH /library/rotation/cards/:id` (BS#2472) — rename only; `bin`/`number` are immutable via this endpoint. */
@@ -642,33 +757,66 @@ export type DeleteRotationCardOutcome =
 /**
  * `DELETE /library/rotation/cards/:id` (BS#2472). Refused (conjunctive)
  * unless the card is BOTH the highest-numbered card in its bin AND has zero
- * active rotation rows assigned to it — bins shrink only from the top, which
- * keeps `RotationCard.number` contiguous. Killed rows referencing the card
- * do not block deletion; they lose the reference via `rotation.card_id`'s
- * `ON DELETE SET NULL` (migration 0164).
+ * ACTIVE rotation rows assigned to it (`rotationActiveSql` — a future-dated
+ * kill is still rotating and still blocks deletion) — bins shrink only from
+ * the top, which keeps `RotationCard.number` contiguous. Killed rows
+ * referencing the card do not block deletion; they lose the reference via
+ * `rotation.card_id`'s `ON DELETE SET NULL` (migration 0164).
+ *
+ * Both refusal conditions are re-asserted in the DELETE's own WHERE rather
+ * than trusted from earlier SELECTs — `rotation` is a live write target, so
+ * a row filed onto this card (or a higher-numbered sibling created) between
+ * a check and an unguarded DELETE would be silently unfiled by the SET NULL
+ * behind a 204 that claimed the delete was safe. Same discipline as
+ * `updateRotation`'s `album_id IS NULL` guard above: a guarded write, then
+ * reads inside the same transaction to tell the refusal reasons apart when
+ * the write matches nothing.
  */
 export const deleteRotationCardFromDB = async (id: number): Promise<DeleteRotationCardOutcome> => {
-  const [card] = await db
-    .select({ bin: rotation_cards.bin, number: rotation_cards.number })
-    .from(rotation_cards)
-    .where(eq(rotation_cards.id, id))
-    .limit(1);
-  if (!card) return { outcome: 'not_found' };
+  return db.transaction(async (tx): Promise<DeleteRotationCardOutcome> => {
+    const deletedRows = (await tx.execute(sql`
+      DELETE FROM ${rotation_cards}
+      WHERE ${rotation_cards.id} = ${id}
+        AND ${rotation_cards.number} = (
+          SELECT max(sibling.number) FROM ${rotation_cards} AS sibling
+          WHERE sibling.bin = ${rotation_cards.bin}
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM ${rotation}
+          WHERE ${rotation.card_id} = ${rotation_cards.id} AND ${rotationActiveSql()}
+        )
+      RETURNING ${rotation_cards.id}
+    `)) as unknown as Array<{ id: number }>;
+    if (deletedRows.length > 0) return { outcome: 'deleted' };
 
-  const [{ maxNumber }] = await db
-    .select({ maxNumber: sql<number>`max(${rotation_cards.number})::int` })
-    .from(rotation_cards)
-    .where(eq(rotation_cards.bin, card.bin));
-  if (maxNumber !== card.number) return { outcome: 'not_last_in_bin' };
+    // The guarded DELETE matched nothing — classify why, inside the same
+    // transaction so the answer names the state that refused the write.
+    const [card] = await tx
+      .select({ bin: rotation_cards.bin, number: rotation_cards.number })
+      .from(rotation_cards)
+      .where(eq(rotation_cards.id, id))
+      .limit(1);
+    if (!card) return { outcome: 'not_found' };
 
-  const [{ activeCount }] = await db
-    .select({ activeCount: sql<number>`count(*)::int` })
-    .from(rotation)
-    .where(and(eq(rotation.card_id, id), isNull(rotation.kill_date)));
-  if (activeCount > 0) return { outcome: 'has_active_rows', activeCount };
+    const [{ maxNumber }] = await tx
+      .select({ maxNumber: sql<number>`max(${rotation_cards.number})::int` })
+      .from(rotation_cards)
+      .where(eq(rotation_cards.bin, card.bin));
+    if (maxNumber !== card.number) return { outcome: 'not_last_in_bin' };
 
-  await db.delete(rotation_cards).where(eq(rotation_cards.id, id));
-  return { outcome: 'deleted' };
+    const [{ activeCount }] = await tx
+      .select({ activeCount: sql<number>`count(*)::int` })
+      .from(rotation)
+      .where(and(eq(rotation.card_id, id), rotationActiveSql()));
+    if (activeCount > 0) return { outcome: 'has_active_rows', activeCount };
+
+    // Every guard passes on re-read, yet the DELETE matched nothing: a
+    // refusing fact existed at the DELETE's snapshot and was itself removed
+    // before these reads landed — two concurrent writers inside one request
+    // window. Refuse honestly rather than fabricate a specific reason; the
+    // librarian's retry runs against settled state.
+    throw new WxycError('Rotation card changed concurrently; retry the delete', 409);
+  });
 };
 
 /**
