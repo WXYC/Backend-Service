@@ -37,7 +37,11 @@ jest.mock('@wxyc/lml-client', () => ({
   envInt: (_name: string, fallback: number) => fallback,
 }));
 
-import { updateRotation, killRotationInDB } from '../../../apps/backend/services/library.service';
+import {
+  updateRotation,
+  killRotationInDB,
+  RotationCardBinMismatchError,
+} from '../../../apps/backend/services/library.service';
 
 /**
  * The disambiguating read `updateRotation` issues after a guarded zero-row
@@ -323,6 +327,91 @@ describe('updateRotation (BS#2113)', () => {
       await updateRotation(42, { format_id: null, label_id: null });
 
       expect(chain.set).toHaveBeenCalledWith({ format_id: null, label_id: null });
+    });
+  });
+
+  describe('card_id (BS#2473) — the within-bin move', () => {
+    test('an explicit null uncards the row without a card lookup', async () => {
+      const chain = createMockQueryChain([{ id: 42, card_id: null }]);
+      db.update.mockReturnValueOnce(chain);
+
+      const outcome = await updateRotation(42, { card_id: null });
+
+      expect(chain.set).toHaveBeenCalledWith({ card_id: null });
+      expect(db.select).not.toHaveBeenCalled();
+      expect(db.execute).not.toHaveBeenCalled();
+      expect(outcome).toEqual({ outcome: 'updated', rotation: { id: 42, card_id: null } });
+    });
+
+    test('a positive card_id validates against the ROW OWN bin (not a client-supplied one) via resolveRotationCardId', async () => {
+      mockSelectViaLimit([{ rotation_bin: 'M' }]); // the row's own bin
+      db.execute.mockResolvedValueOnce([{ bin: 'M' }]); // the named card lives in the same bin
+      const updateChain = createMockQueryChain([{ id: 42, card_id: 5 }]);
+      db.update.mockReturnValueOnce(updateChain);
+
+      const outcome = await updateRotation(42, { card_id: 5 });
+
+      expect(updateChain.set).toHaveBeenCalledWith({ card_id: 5 });
+      expect(outcome).toEqual({ outcome: 'updated', rotation: { id: 42, card_id: 5 } });
+    });
+
+    test('a card filed in a different bin than the row rejects with RotationCardBinMismatchError', async () => {
+      mockSelectViaLimit([{ rotation_bin: 'M' }]);
+      db.execute.mockResolvedValueOnce([{ bin: 'H' }]); // wrong bin
+
+      await expect(updateRotation(42, { card_id: 5 })).rejects.toBeInstanceOf(RotationCardBinMismatchError);
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    test('a dangling card_id 404s', async () => {
+      mockSelectViaLimit([{ rotation_bin: 'M' }]);
+      db.execute.mockResolvedValueOnce([]); // no such card
+
+      await expect(updateRotation(42, { card_id: 999 })).rejects.toMatchObject({ statusCode: 404 });
+    });
+  });
+
+  describe('urls (BS#2473) — wholesale replacement', () => {
+    test('a urls-only edit issues no rotation column UPDATE — reads the row, then deletes and reinserts', async () => {
+      mockSelectViaLimit([{ id: 42, rotation_bin: 'M' }]);
+      const deleteChain = createMockQueryChain();
+      db.delete.mockReturnValueOnce(deleteChain);
+      const insertChain = createMockQueryChain();
+      db.insert.mockReturnValueOnce(insertChain);
+
+      const outcome = await updateRotation(42, { urls: ['https://example.com/a'] });
+
+      expect(db.update).not.toHaveBeenCalled();
+      expect(db.delete).toHaveBeenCalledTimes(1);
+      expect(insertChain.values).toHaveBeenCalledWith([{ rotation_id: 42, url: 'https://example.com/a', position: 0 }]);
+      expect(outcome).toEqual({ outcome: 'updated', rotation: { id: 42, rotation_bin: 'M' } });
+    });
+
+    test('replacing with fewer urls than before still deletes the whole set first (no diffing)', async () => {
+      const updateChain = createMockQueryChain([{ id: 42, kill_date: '2024-06-01' }]);
+      db.update.mockReturnValueOnce(updateChain);
+      const deleteChain = createMockQueryChain();
+      db.delete.mockReturnValueOnce(deleteChain);
+      const insertChain = createMockQueryChain();
+      db.insert.mockReturnValueOnce(insertChain);
+
+      await updateRotation(42, { kill_date: '2024-06-01', urls: ['https://example.com/only-one-left'] });
+
+      expect(db.delete).toHaveBeenCalledTimes(1);
+      expect(insertChain.values).toHaveBeenCalledWith([
+        { rotation_id: 42, url: 'https://example.com/only-one-left', position: 0 },
+      ]);
+    });
+
+    test('urls: [] clears the set — delete runs, insert does not', async () => {
+      mockSelectViaLimit([{ id: 42 }]);
+      const deleteChain = createMockQueryChain();
+      db.delete.mockReturnValueOnce(deleteChain);
+
+      await updateRotation(42, { urls: [] });
+
+      expect(db.delete).toHaveBeenCalledTimes(1);
+      expect(db.insert).not.toHaveBeenCalled();
     });
   });
 

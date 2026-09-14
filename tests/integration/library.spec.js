@@ -1690,6 +1690,164 @@ describe('Library Rotation', () => {
       await auth.patch('/library/rotation/999999999').send({ add_date: '2024-01-15' }).expect(404);
     });
   });
+
+  /**
+   * `?status=`, `card`, `urls` (BS#2473). Bin 'S' (Singles) — the
+   * lightest-used bin in the seed fixture, same choice `rotation-cards.spec.js`
+   * makes — so this suite's rows and cards don't collide with the 'M'/'L'/'H'
+   * fixtures other tests in this file depend on.
+   */
+  describe('status param + card/urls (BS#2473)', () => {
+    const createdRotationIds = [];
+    const createdCardIds = [];
+
+    afterEach(async () => {
+      await deleteRotationRows(createdRotationIds);
+      createdRotationIds.length = 0;
+      if (createdCardIds.length) {
+        const sql = getTestDb();
+        await sql`DELETE FROM ${sql(SCHEMA)}.rotation_cards WHERE id IN ${sql(createdCardIds)}`;
+        createdCardIds.length = 0;
+      }
+    });
+
+    test('status defaults to active — byte-compatible with the pre-#2473 read', async () => {
+      const created = await auth.post('/library/rotation').send({ album_id: 2, rotation_bin: 'S' }).expect(201);
+      createdRotationIds.push(created.body.id);
+
+      const noParam = await auth.get('/library/rotation').expect(200);
+      const explicitActive = await auth.get('/library/rotation?status=active').expect(200);
+      const findRow = (res) => res.body.find((r) => r.rotation_id === created.body.id);
+
+      expect(findRow(noParam)).toBeDefined();
+      expect(findRow(explicitActive)).toEqual(findRow(noParam));
+    });
+
+    test('a future-dated kill appears in BOTH active and killed — non-partition semantics', async () => {
+      const created = await auth.post('/library/rotation').send({ album_id: 2, rotation_bin: 'S' }).expect(201);
+      createdRotationIds.push(created.body.id);
+      const futureDate = new Date();
+      futureDate.setDate(futureDate.getDate() + 30);
+      const futureIso = futureDate.toISOString().slice(0, 10);
+
+      await auth.patch(`/library/rotation/${created.body.id}`).send({ kill_date: futureIso }).expect(200);
+
+      const active = await auth.get('/library/rotation?status=active').expect(200);
+      const killed = await auth.get('/library/rotation?status=killed').expect(200);
+      const all = await auth.get('/library/rotation?status=all').expect(200);
+
+      expect(active.body.some((r) => r.rotation_id === created.body.id)).toBe(true);
+      expect(killed.body.some((r) => r.rotation_id === created.body.id)).toBe(true);
+      expect(all.body.some((r) => r.rotation_id === created.body.id)).toBe(true);
+    });
+
+    test('rejects an unrecognized status value', async () => {
+      const res = await auth.get('/library/rotation?status=retired').expect(400);
+
+      expectErrorContains(res, 'status must be one of');
+    });
+
+    test('additive shape: the default read still carries every pre-#2473 field, plus card and urls', async () => {
+      const res = await auth.get('/library/rotation').expect(200);
+
+      if (res.body.length > 0) {
+        expectFields(
+          res.body[0],
+          'id',
+          'artist_name',
+          'alphabetical_name',
+          'album_title',
+          'rotation_bin',
+          'rotation_id',
+          'card',
+          'urls'
+        );
+      }
+    });
+
+    test('urls round-trip on the catalogued write arm', async () => {
+      const created = await auth
+        .post('/library/rotation')
+        .send({ album_id: 2, rotation_bin: 'S', urls: ['https://example.com/a', 'https://example.com/b'] })
+        .expect(201);
+      createdRotationIds.push(created.body.id);
+
+      const list = await auth.get('/library/rotation').expect(200);
+      const row = list.body.find((r) => r.rotation_id === created.body.id);
+
+      expect(row.urls).toEqual(['https://example.com/a', 'https://example.com/b']);
+    });
+
+    test('urls round-trip on the free-text (uncatalogued) write arm', async () => {
+      const created = await auth
+        .post('/library/rotation')
+        .send({
+          rotation_bin: 'S',
+          artist_name: 'Csillagrablok',
+          album_title: 'Promo Tape',
+          urls: ['https://example.com/promo'],
+        })
+        .expect(201);
+      createdRotationIds.push(created.body.id);
+
+      const list = await auth.get('/library/rotation').expect(200);
+      const row = list.body.find((r) => r.rotation_id === created.body.id);
+
+      expect(row.urls).toEqual(['https://example.com/promo']);
+    });
+
+    test('POST rejects a malformed url', async () => {
+      const res = await auth
+        .post('/library/rotation')
+        .send({ album_id: 2, rotation_bin: 'S', urls: ['not a url'] })
+        .expect(400);
+
+      expectErrorContains(res, 'unusable URL');
+    });
+
+    test('PATCH wholesale-replaces urls with fewer than before', async () => {
+      const created = await auth
+        .post('/library/rotation')
+        .send({
+          album_id: 2,
+          rotation_bin: 'S',
+          urls: ['https://example.com/a', 'https://example.com/b', 'https://example.com/c'],
+        })
+        .expect(201);
+      createdRotationIds.push(created.body.id);
+
+      await auth
+        .patch(`/library/rotation/${created.body.id}`)
+        .send({ urls: ['https://example.com/only'] })
+        .expect(200);
+
+      const list = await auth.get('/library/rotation').expect(200);
+      const row = list.body.find((r) => r.rotation_id === created.body.id);
+
+      expect(row.urls).toEqual(['https://example.com/only']);
+    });
+
+    test('PATCH card_id moves the row within its bin, and naming a different bin 409s', async () => {
+      const cardS = await auth.post('/library/rotation/cards').send({ bin: 'S', name: 'Card S Test' }).expect(200);
+      createdCardIds.push(cardS.body.id);
+      const cardH = await auth.post('/library/rotation/cards').send({ bin: 'H', name: 'Card H Test' }).expect(200);
+      createdCardIds.push(cardH.body.id);
+      const created = await auth.post('/library/rotation').send({ album_id: 2, rotation_bin: 'S' }).expect(201);
+      createdRotationIds.push(created.body.id);
+
+      await auth.patch(`/library/rotation/${created.body.id}`).send({ card_id: cardS.body.id }).expect(200);
+
+      const list = await auth.get('/library/rotation').expect(200);
+      const row = list.body.find((r) => r.rotation_id === created.body.id);
+      expect(row.card).toEqual({ id: cardS.body.id, bin: 'S', number: cardS.body.number, name: 'Card S Test' });
+
+      const mismatch = await auth
+        .patch(`/library/rotation/${created.body.id}`)
+        .send({ card_id: cardH.body.id })
+        .expect(409);
+      expect(mismatch.body.reason).toBe('rotation_card_bin_mismatch');
+    });
+  });
 });
 
 describe('Library Artists', () => {

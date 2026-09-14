@@ -275,4 +275,42 @@ describe('addToRotation (BS#1380)', () => {
     // INSERT target was rotation (not library_identity).
     expect(db.insert).toHaveBeenCalledWith(rotation);
   });
+
+  describe('urls (BS#2473)', () => {
+    test('a non-empty urls array is inserted into rotation_urls, positioned by array index, inside the same transaction', async () => {
+      const selectChain = createMockQueryChain([]);
+      selectChain.limit = jest.fn().mockResolvedValue([]);
+      db.select.mockReturnValue(selectChain);
+
+      const insertChain = createMockQueryChain([{ id: 10, album_id: ALBUM_ID, rotation_bin: 'M' }]);
+      db.insert.mockReturnValue(insertChain);
+
+      await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' }, [
+        'https://example.com/a',
+        'https://example.com/b',
+      ]);
+
+      expect(db.insert).toHaveBeenCalledTimes(2);
+      const urlsValuesArg = insertChain.values.mock.calls[1][0];
+      expect(urlsValuesArg).toEqual([
+        { rotation_id: 10, url: 'https://example.com/a', position: 0 },
+        { rotation_id: 10, url: 'https://example.com/b', position: 1 },
+      ]);
+    });
+
+    test('an empty or absent urls array writes no rotation_urls rows', async () => {
+      const selectChain = createMockQueryChain([]);
+      selectChain.limit = jest.fn().mockResolvedValue([]);
+      db.select.mockReturnValue(selectChain);
+
+      const insertChain = createMockQueryChain([{ id: 11, album_id: ALBUM_ID, rotation_bin: 'M' }]);
+      db.insert.mockReturnValue(insertChain);
+
+      await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' }, []);
+      await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' });
+
+      // One rotation INSERT per call, and no second INSERT for either.
+      expect(db.insert).toHaveBeenCalledTimes(2);
+    });
+  });
 });
