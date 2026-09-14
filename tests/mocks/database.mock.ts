@@ -242,6 +242,20 @@ export const rotation = {
   discogs_release_id: 'rotation.discogs_release_id',
   discogs_release_id_resolve_attempted_at: 'rotation.discogs_release_id_resolve_attempted_at',
   tracklist_lookup_attempted_at: 'rotation.tracklist_lookup_attempted_at',
+  // BS#2471: nullable FK to rotation_cards.id, unbackfilled in this PR (#2477).
+  card_id: 'rotation.card_id',
+};
+export const rotation_cards = {
+  id: 'rotation_cards.id',
+  bin: 'rotation_cards.bin',
+  number: 'rotation_cards.number',
+  name: 'rotation_cards.name',
+};
+export const rotation_urls = {
+  id: 'rotation_urls.id',
+  rotation_id: 'rotation_urls.rotation_id',
+  url: 'rotation_urls.url',
+  position: 'rotation_urls.position',
 };
 export const library_identity = {
   library_id: 'library_identity.library_id',

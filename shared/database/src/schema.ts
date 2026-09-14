@@ -1084,10 +1084,22 @@ export const rotation = wxyc_schema.table(
     // *effective* `discogs_release_id` changes — paste-correction lands
     // at `(X', NULL)` and the next backfill tick re-resolves.
     lml_identity_id: integer('lml_identity_id'),
+    // BS#2471 (WXYC/dj-site#1480 Rotation Admin, backend PR B1): which
+    // physical card within the row's bin this release is filed under.
+    // Nullable — every existing row and every writer that predates the
+    // Rotation Admin UI leaves it unset. No backfill in this PR; see #2477.
+    card_id: integer('card_id').references(() => rotation_cards.id),
   },
   (table) => {
     return {
       albumIdIdx: index('album_id_idx').on(table.album_id),
+      // FK columns aren't auto-indexed by Postgres. Partial on the active
+      // set (`kill_date IS NULL`) because both the cards listing's per-card
+      // active count and the admin list's card filter only ever query
+      // active rows, against the whole rotation history.
+      cardIdIdx: index('rotation_card_id_idx')
+        .on(table.card_id)
+        .where(sql`${table.kill_date} IS NULL`),
       // BS#2080. Serves arm 2 of the `rotation_bin` fallback in
       // `FSEntryFieldsRaw` — the denormalized (artist, album) snapshot match
       // for library-unlinked rotation rows. The expression must stay
@@ -1110,6 +1122,58 @@ export const rotation = wxyc_schema.table(
         'rotation_discogs_release_id_not_sentinel',
         sql`${table.discogs_release_id} IS NULL OR ${table.discogs_release_id} > 0`
       ),
+    };
+  }
+);
+
+export type NewRotationCard = InferInsertModel<typeof rotation_cards>;
+export type RotationCard = InferSelectModel<typeof rotation_cards>;
+/**
+ * BS#2471 (WXYC/dj-site#1480 Rotation Admin, backend PR B1). A rotation bin
+ * physically subdivides into numbered, optionally-named cards. Card identity
+ * is the stable `id`; `number` is display order only — contiguity across a
+ * bin's cards is a service-layer rule decided on the epic, not a DB
+ * constraint, so gaps and renumbers are legal rows here. Schema only in this
+ * PR: `rotation.card_id` (below) ships nullable and unbackfilled — see #2477.
+ */
+export const rotation_cards = wxyc_schema.table(
+  'rotation_cards',
+  {
+    id: serial('id').primaryKey(),
+    bin: freqEnum('bin').notNull(),
+    number: integer('number').notNull(),
+    name: text('name'),
+  },
+  (table) => {
+    return {
+      binNumberIdx: uniqueIndex('rotation_cards_bin_number_idx').on(table.bin, table.number),
+    };
+  }
+);
+
+export type NewRotationUrl = InferInsertModel<typeof rotation_urls>;
+export type RotationUrl = InferSelectModel<typeof rotation_urls>;
+/**
+ * BS#2471 (WXYC/dj-site#1480 Rotation Admin, backend PR B1). A rotation entry
+ * can carry more than one URL (label page, Bandcamp, streaming), so this is a
+ * child table rather than an array column — ordered by `position` and
+ * independently queryable/deletable per row.
+ */
+export const rotation_urls = wxyc_schema.table(
+  'rotation_urls',
+  {
+    id: serial('id').primaryKey(),
+    rotation_id: integer('rotation_id')
+      .notNull()
+      .references(() => rotation.id, { onDelete: 'cascade' }),
+    url: text('url').notNull(),
+    position: integer('position').notNull(),
+  },
+  (table) => {
+    return {
+      // FK columns aren't auto-indexed by Postgres. Every read of a rotation
+      // row's URLs (in id/position order) filters on rotation_id.
+      rotationIdIdx: index('rotation_urls_rotation_id_idx').on(table.rotation_id),
     };
   }
 );
