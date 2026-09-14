@@ -327,6 +327,14 @@ library_route.patch('/:id', requirePermissions({ catalog: ['write'] }), libraryC
 // missing/found use below.
 library_route.delete('/:id', requirePermissions({ catalog: ['write'] }), libraryController.deleteAlbum);
 
+// BS#2491 (definitive-release-links epic): set a release's definitive
+// streaming/reference links, replace-wholesale, and reconcile them to LML.
+// `catalog: ['write']` — the MD/SM librarian bar, same as updateAlbum and the
+// rotation-add urls arm. A two-segment `/:id/urls` path and the only PUT on
+// this router, so it carries none of the `/:id` ordering hazards documented
+// throughout this file.
+library_route.put('/:id/urls', requirePermissions({ catalog: ['write'] }), libraryController.setAlbumUrls);
+
 // Missing/found stack-marking (BS#393): gated to catalog:read rather than
 // catalog:write so DJs (who only hold catalog:read per shared/authentication/
 // src/auth.roles.ts) can flag a stack missing/found while pulling records.
