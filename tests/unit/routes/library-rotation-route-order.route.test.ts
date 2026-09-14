@@ -137,6 +137,12 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   albumCodeNumberTaken: jest.fn(),
   recheckDiscogsAvailability: jest.fn(),
   updateRotation: mockUpdateRotation,
+  // BS#2472: card lifecycle CRUD — just enough to let the route module's
+  // import chain resolve; no test here exercises card behavior.
+  listRotationCardsFromDB: jest.fn(),
+  addRotationCard: jest.fn(),
+  renameRotationCard: jest.fn(),
+  deleteRotationCardFromDB: jest.fn(),
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
@@ -186,10 +192,11 @@ type RouteLayer = { route?: { path: string; methods: Record<string, boolean> } }
  * has to know what it would be missing.
  *
  * `/artists/:id` (BS#2156) predates `/rotation/:id` (BS#2410) and carries
- * three literals to the rotation block's one.
+ * three literals to the rotation block's two — `/rotation/cards` (BS#2472)
+ * joined `/rotation/uncatalogued` as a second shadowable literal.
  */
 const PARAM_FAMILIES = [
-  { param: '/rotation/:id', literals: ['/rotation/uncatalogued'] },
+  { param: '/rotation/:id', literals: ['/rotation/uncatalogued', '/rotation/cards'] },
   { param: '/artists/:id', literals: ['/artists/search', '/artists/peek-code', '/artists/by-code'] },
 ];
 

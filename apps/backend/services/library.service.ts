@@ -38,6 +38,8 @@ import {
   library_watermark,
   rotation,
   rotation_cards,
+  NewRotationCard,
+  RotationCard,
   LibraryArtistViewEntry,
 } from '@wxyc/database';
 import {
@@ -579,6 +581,94 @@ export const addToRotation = async (newRotation: RotationAddRequest) => {
 
   const insertedRotation: RotationRelease[] = await db.insert(rotation).values(values).returning();
   return insertedRotation[0];
+};
+
+/**
+ * `GET /library/rotation/cards` (BS#2472): every card across all bins, each
+ * with a count of the rotation rows currently active on it — ONE grouped
+ * query, not a per-card loop. The LEFT JOIN's own condition carries the
+ * `kill_date IS NULL` filter (rather than a WHERE after the join) so a card
+ * with zero active rows still appears with `active_count: 0` instead of
+ * being dropped by the join; that condition is also what lets the join use
+ * the partial `rotation_card_id_idx` (migration 0164), built on exactly this
+ * predicate for exactly this query.
+ */
+export const listRotationCardsFromDB = async (): Promise<Array<RotationCard & { active_count: number }>> => {
+  return db
+    .select({
+      id: rotation_cards.id,
+      bin: rotation_cards.bin,
+      number: rotation_cards.number,
+      name: rotation_cards.name,
+      active_count: sql<number>`count(${rotation.id})::int`,
+    })
+    .from(rotation_cards)
+    .leftJoin(rotation, and(eq(rotation.card_id, rotation_cards.id), isNull(rotation.kill_date)))
+    .groupBy(rotation_cards.id)
+    .orderBy(asc(rotation_cards.bin), asc(rotation_cards.number));
+};
+
+/**
+ * `POST /library/rotation/cards` (BS#2472): `number` is server-assigned as
+ * the bin's current max + 1 (1 for the bin's first card), matching
+ * `generateAlbumCodeNumber`'s MAX+1 convention above — same single-operator
+ * argument applies (WXYC has one librarian/MD at a time).
+ */
+export const addRotationCard = async (bin: RotationBin, name: string | null | undefined): Promise<RotationCard> => {
+  const [maxRow] = await db
+    .select({ number: rotation_cards.number })
+    .from(rotation_cards)
+    .where(eq(rotation_cards.bin, bin))
+    .orderBy(desc(rotation_cards.number))
+    .limit(1);
+
+  const values: NewRotationCard = { bin, number: (maxRow?.number ?? 0) + 1, name: name ?? null };
+  const [card] = await db.insert(rotation_cards).values(values).returning();
+  return card;
+};
+
+/** `PATCH /library/rotation/cards/:id` (BS#2472) — rename only; `bin`/`number` are immutable via this endpoint. */
+export const renameRotationCard = async (id: number, name: string | null): Promise<RotationCard | undefined> => {
+  const [card] = await db.update(rotation_cards).set({ name }).where(eq(rotation_cards.id, id)).returning();
+  return card;
+};
+
+export type DeleteRotationCardOutcome =
+  | { outcome: 'deleted' }
+  | { outcome: 'not_found' }
+  | { outcome: 'not_last_in_bin' }
+  | { outcome: 'has_active_rows'; activeCount: number };
+
+/**
+ * `DELETE /library/rotation/cards/:id` (BS#2472). Refused (conjunctive)
+ * unless the card is BOTH the highest-numbered card in its bin AND has zero
+ * active rotation rows assigned to it — bins shrink only from the top, which
+ * keeps `RotationCard.number` contiguous. Killed rows referencing the card
+ * do not block deletion; they lose the reference via `rotation.card_id`'s
+ * `ON DELETE SET NULL` (migration 0164).
+ */
+export const deleteRotationCardFromDB = async (id: number): Promise<DeleteRotationCardOutcome> => {
+  const [card] = await db
+    .select({ bin: rotation_cards.bin, number: rotation_cards.number })
+    .from(rotation_cards)
+    .where(eq(rotation_cards.id, id))
+    .limit(1);
+  if (!card) return { outcome: 'not_found' };
+
+  const [{ maxNumber }] = await db
+    .select({ maxNumber: sql<number>`max(${rotation_cards.number})::int` })
+    .from(rotation_cards)
+    .where(eq(rotation_cards.bin, card.bin));
+  if (maxNumber !== card.number) return { outcome: 'not_last_in_bin' };
+
+  const [{ activeCount }] = await db
+    .select({ activeCount: sql<number>`count(*)::int` })
+    .from(rotation)
+    .where(and(eq(rotation.card_id, id), isNull(rotation.kill_date)));
+  if (activeCount > 0) return { outcome: 'has_active_rows', activeCount };
+
+  await db.delete(rotation_cards).where(eq(rotation_cards.id, id));
+  return { outcome: 'deleted' };
 };
 
 /**
