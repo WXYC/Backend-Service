@@ -11,8 +11,8 @@
  *   JVM boot.
  *
  * What gets warmed:
- *   For every active rotation row (`kill_date IS NULL OR kill_date >
- *   CURRENT_DATE` — the same predicate `getRotationFromDB` uses), the warmer
+ *   For every active rotation row (`rotationActiveSql()` — the same
+ *   canonical predicate `getRotationFromDB` uses), the warmer
  *   calls `resolveRotationPickerSource` end-to-end so it goes through
  *   the same three-tier resolver real picker opens take. That means the
  *   warm walk shares the LML chokepoint with concurrent user traffic —
@@ -39,10 +39,10 @@
  *                                   from `app.ts` post-`listen`.
  */
 import * as Sentry from '@sentry/node';
-import { sql } from 'drizzle-orm';
 import {
   db,
   rotation,
+  rotationActiveSql,
   checkLiveActivity as defaultCheckLiveActivity,
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
   LIVE_ACTIVITY_PAUSE_MS_DEFAULT,
@@ -164,10 +164,7 @@ export async function warmRotationTracksCache(opts: WarmOptions = {}): Promise<W
   const lookbackSeconds = opts.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
   const pauseMs = opts.liveActivityPauseMs ?? LIVE_ACTIVITY_PAUSE_MS_DEFAULT;
 
-  const rows = await db
-    .select({ id: rotation.id })
-    .from(rotation)
-    .where(sql`${rotation.kill_date} > CURRENT_DATE OR ${rotation.kill_date} IS NULL`);
+  const rows = await db.select({ id: rotation.id }).from(rotation).where(rotationActiveSql());
 
   const counters: WarmCounters = {
     scanned: 0,

@@ -16,6 +16,9 @@ jest.mock('@wxyc/database', () => ({
   library_artist_view: {},
   rotation: {},
   rotation_cards: {},
+  // Invoked at module top level (LIBRARY_VIEW_JOINS_RAW), so the import
+  // chain needs a callable even though no test here renders SQL.
+  rotationActiveSql: () => ({}),
 }));
 
 jest.mock('@wxyc/lml-client', () => ({

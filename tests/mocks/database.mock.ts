@@ -250,6 +250,14 @@ export const rotation = {
   // BS#2471: nullable FK to rotation_cards.id, unbackfilled in this PR (#2477).
   card_id: 'rotation.card_id',
 };
+/**
+ * Double of schema.ts's canonical active-rotation predicate (BS#2479). Built
+ * with the same `` sql`...` `` shape over this file's sentinel columns, so a
+ * unit-rendered query shows the identical `rotation.kill_date IS NULL OR
+ * rotation.kill_date > CURRENT_DATE` text the real fragment produces — a
+ * fresh fragment per call, mirroring the real definition.
+ */
+export const rotationActiveSql = () => sql`(${rotation.kill_date} IS NULL OR ${rotation.kill_date} > CURRENT_DATE)`;
 export const rotation_cards = {
   id: 'rotation_cards.id',
   bin: 'rotation_cards.bin',

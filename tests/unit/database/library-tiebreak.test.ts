@@ -26,14 +26,41 @@ jest.mock('../../../shared/database/src/client.js', () => jest.requireActual('..
 import { db } from '../../mocks/database.mock';
 import { pickPrimaryLibraryRow } from '../../../shared/database/src/library-tiebreak';
 
+// drizzle's global Table-name symbol. `Symbol.for` survives the suite-wide
+// `drizzle-orm` mock: `pgSchema`/`pgTable` come from the UNMOCKED
+// `drizzle-orm/pg-core`, so the tiebreak's `${rotation}` /
+// `${rotation.album_id}` / `${rotationActiveSql()}` interpolations arrive as
+// real pg-core instances (and nested mock-sql fragments) in the mocked `sql`
+// tag's `values` — the renderer below turns them back into SQL-ish text so
+// the assertions can see identifiers, while bound params render as ''.
+const TABLE_NAME = Symbol.for('drizzle:Name');
+
 type SqlLike = {
   sql?: string | string[];
+  values?: unknown[];
   queryChunks?: Array<string | { value?: string | string[] }>;
+};
+const renderValue = (value: unknown): string => {
+  if (value === null || typeof value !== 'object') return ''; // bound param — renders empty, e.g. `ANY(::int[])`
+  const obj = value as { sql?: unknown; name?: unknown; table?: unknown };
+  if (Array.isArray(obj.sql)) return renderSql(value); // nested fragment (e.g. rotationActiveSql())
+  if (typeof obj.name === 'string' && obj.table && typeof obj.table === 'object') {
+    const tableName = (obj.table as Record<symbol, unknown>)[TABLE_NAME];
+    return typeof tableName === 'string' ? `"${tableName}"."${obj.name}"` : `"${obj.name}"`;
+  }
+  const tableName = (value as Record<symbol, unknown>)[TABLE_NAME];
+  if (typeof tableName === 'string') return `"${tableName}"`;
+  return '';
 };
 const renderSql = (value: unknown): string => {
   const obj = value as SqlLike | null | undefined;
   if (!obj) return '';
-  if (Array.isArray(obj.sql)) return obj.sql.join('');
+  if (Array.isArray(obj.sql)) {
+    // Mocked `` sql`...` `` template: interleave the static strings with the
+    // rendered interpolations.
+    const values = obj.values ?? [];
+    return obj.sql.map((chunk, i) => chunk + (i < values.length ? renderValue(values[i]) : '')).join('');
+  }
   if (typeof obj.sql === 'string') return obj.sql;
   if (obj.queryChunks) {
     return obj.queryChunks
@@ -131,7 +158,10 @@ describe('pickPrimaryLibraryRow (B-2.3)', () => {
     (db.execute as jest.Mock).mockResolvedValueOnce([{ id: 11 }]);
     await pickPrimaryLibraryRow([10, 11, 12]);
 
-    const serialized = JSON.stringify((db.execute as jest.Mock).mock.calls[0][0]);
+    // Only the string params are serializable — the schema interpolations
+    // (real pg-core tables/columns) carry circular table<->column references.
+    const call = (db.execute as jest.Mock).mock.calls[0][0] as { values?: unknown[] };
+    const serialized = JSON.stringify((call.values ?? []).filter((v) => typeof v === 'string'));
     expect(serialized).toContain('10');
     expect(serialized).toContain('11');
     expect(serialized).toContain('12');

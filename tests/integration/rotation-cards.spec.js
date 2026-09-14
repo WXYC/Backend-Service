@@ -137,10 +137,11 @@ describe('Rotation Cards', () => {
      * CURRENT_DATE`) does not imply the narrower partial predicate, so
      * Postgres could not prove the index applicable and fell back to a full
      * scan of `rotation` on every delete-guard check and every cards listing.
-     * Plain, not a `(card_id, kill_date)` composite — measured against a
-     * prod-shaped clone (the migration's own header has the numbers), the
-     * composite loses on the listing's GROUP BY query because the extra
-     * column widens every leaf entry of an index that query scans in full.
+     * Plain, not a `(card_id, kill_date)` composite — the minimal shape both
+     * consumers need: measured at the table's documented scale, both shapes
+     * answer both queries in well under a millisecond (the migration's own
+     * header has the numbers and the fixture), and plain is smaller and
+     * cheaper to maintain.
      *
      * `enable_seqscan = off` inside a ROLLED-BACK transaction neutralizes the
      * tiny-test-dataset confounder (same pattern as
@@ -172,6 +173,36 @@ describe('Rotation Cards', () => {
       expect(planJson).toContain('"Relation Name":"rotation"');
       expect(planJson).not.toContain('"Node Type":"Seq Scan"');
       expect(planJson).toContain('rotation_card_id_full_idx');
+    });
+  });
+
+  // BS#2479 AC: three surfaces must agree on a future-dated kill — it counts
+  // toward `active_count` (pinned above), it blocks card deletion (pinned
+  // below), and catalog search still emits `card`. This describe pins the
+  // third leg: the three search-projection JOINs (`LIBRARY_VIEW_JOINS_RAW`,
+  // `libraryViewQuery`, the track-search arm) are separate call sites that
+  // happen to agree via `rotationActiveSql()`, and neither of the other two
+  // tests would notice one of them narrowing its predicate.
+  describe('catalog search card emission', () => {
+    test('a FUTURE-dated kill still emits card (and rotation_bin) in catalog search (canonical predicate, not kill_date IS NULL)', async () => {
+      const card = await auth.post('/library/rotation/cards').send({ bin: 'S', name: 'Search Surface' }).expect(200);
+      createdCardIds.push(card.body.id);
+
+      const row = await auth.post('/library/rotation').send({ album_id: SEED_ALBUM_ID, rotation_bin: 'S' }).expect(201);
+      createdRotationIds.push(row.body.id);
+      await assignCard(row.body.id, card.body.id);
+      await scheduleKill(row.body.id);
+
+      // SEED_ALBUM_ID = 2 is Ravyn Lenae's "Crush" (dev_env/seed_db.sql).
+      // The search projection's rotation LEFT JOIN yields one result row per
+      // active rotation row, and parallel suites may hold their own active
+      // rows on the same seed album — so find the row carrying OUR card
+      // rather than pinning the album's result-row count.
+      const res = await auth.get('/library').query({ artist_name: 'Ravyn Lenae' }).expect(200);
+      const hit = res.body.find((r) => r.id === SEED_ALBUM_ID && r.card && r.card.id === card.body.id);
+      expect(hit).toBeDefined();
+      expect(hit.card).toEqual({ id: card.body.id, bin: 'S', number: card.body.number, name: 'Search Surface' });
+      expect(hit.rotation_bin).toBe('S');
     });
   });
 
