@@ -1277,9 +1277,7 @@ describe('library.controller', () => {
 
         expect(mockGenerateArtistNumber).not.toHaveBeenCalled();
         expect(res.status).toHaveBeenCalledWith(409);
-        expect(res.json).toHaveBeenCalledWith(
-          expect.objectContaining({ reason: 'artist_code_conflict' })
-        );
+        expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ reason: 'artist_code_conflict' }));
       });
     });
   });
