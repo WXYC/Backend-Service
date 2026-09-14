@@ -2131,7 +2131,9 @@ export const createLibraryFiling: RequestHandler<object, unknown, LibraryFilingR
   const supplied_code_number = release.code_number === undefined ? undefined : validateCodeNumber(release.code_number);
 
   let rotationBody: { rotation_bin: RotationBin; card_id?: number; urls?: string[] } | undefined;
-  if (body.rotation !== undefined) {
+  // != null: clients that serialize "no rotation" as an explicit null get the
+  // omitted-rotation filing, not a TypeError from the property reads below.
+  if (body.rotation != null) {
     const rot = body.rotation;
     if (rot.rotation_bin == null || parseRotationBin(rot.rotation_bin).kind !== 'bin') {
       throw new WxycError(
