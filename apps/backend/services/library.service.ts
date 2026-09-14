@@ -520,6 +520,13 @@ export class RotationCardBinMismatchError extends Error {
 }
 
 /**
+ * The transaction handle `db.transaction` hands its callback. Named so the
+ * card-resolution helper below can require one — its reads take row locks
+ * that are only meaningful inside the transaction whose write they protect.
+ */
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
  * Which `rotation_cards` row a new rotation row is filed under (BS#2472).
  *
  * - Client named a card: it must exist (404 — the reference is to a resource,
@@ -529,13 +536,28 @@ export class RotationCardBinMismatchError extends Error {
  *   tie-break `rotation_cards_bin_number_idx` makes unreachable — so the
  *   legacy classic-form add keeps filing correctly without knowing cards
  *   exist. A bin with no cards yet returns `undefined` and the row lands
- *   unfiled, exactly like every pre-card row.
+ *   unfiled, exactly like every pre-card row. (Post-migration-0165 every bin
+ *   starts with card 1, so this arm needs a bin's cards all deleted first —
+ *   legal while none has active rows.)
+ *
+ * Both reads take `FOR UPDATE` on the card row they resolve, and the caller
+ * must hold the transaction open across the rotation INSERT that consumes
+ * the answer. That lock is one half of the add/delete serialization —
+ * `deleteRotationCardFromDB` locks the same row before its guarded DELETE —
+ * closing the window where a card resolved here is deleted before the
+ * INSERT lands (a 23503 → 500 one way; a fresh row silently SET-NULL-unfiled
+ * behind a 201 the other). A card deleted before we acquire the lock reads
+ * as zero rows: 404 for an explicit card, next-best-or-unfiled for the
+ * defaulting arm (`FOR UPDATE` + `LIMIT 1` skips, not re-scans, a
+ * concurrently deleted top row — acceptable: that instant genuinely had no
+ * settled newest card).
  *
  * The comparison normalizes the request bin through `parseRotationBin`
  * rather than comparing raw: the controller validates the bin's spelling but
  * forwards it as received, so `'h'` must match a card filed in `'H'`.
  */
 const resolveRotationCardId = async (
+  tx: DbTransaction,
   rotationBin: RotationBin | null | undefined,
   cardId: number | null | undefined
 ): Promise<number | undefined> => {
@@ -543,11 +565,12 @@ const resolveRotationCardId = async (
   const requestedBin = parsedBin.kind === 'bin' ? parsedBin.bin : undefined;
 
   if (cardId != null) {
-    const [card] = await db
-      .select({ bin: rotation_cards.bin })
-      .from(rotation_cards)
-      .where(eq(rotation_cards.id, cardId))
-      .limit(1);
+    const cardRows = (await tx.execute(sql`
+      SELECT ${rotation_cards.bin} AS bin FROM ${rotation_cards}
+      WHERE ${rotation_cards.id} = ${cardId}
+      FOR UPDATE
+    `)) as unknown as Array<{ bin: RotationBin }>;
+    const card = cardRows[0];
     if (!card) {
       throw new WxycError('Rotation card not found', 404);
     }
@@ -558,13 +581,14 @@ const resolveRotationCardId = async (
   }
 
   if (requestedBin === undefined) return undefined;
-  const [newest] = await db
-    .select({ id: rotation_cards.id })
-    .from(rotation_cards)
-    .where(eq(rotation_cards.bin, requestedBin))
-    .orderBy(desc(rotation_cards.number), desc(rotation_cards.id))
-    .limit(1);
-  return newest?.id;
+  const newestRows = (await tx.execute(sql`
+    SELECT ${rotation_cards.id} AS id FROM ${rotation_cards}
+    WHERE ${rotation_cards.bin} = ${requestedBin}
+    ORDER BY ${rotation_cards.number} DESC, ${rotation_cards.id} DESC
+    LIMIT 1
+    FOR UPDATE
+  `)) as unknown as Array<{ id: number }>;
+  return newestRows[0]?.id;
 };
 
 /**
@@ -595,20 +619,21 @@ const resolveRotationCardId = async (
  * an LML outage is worse than a temporarily-incomplete row, so the catch
  * arm proceeds rather than rethrowing.
  *
- * Card filing (BS#2472): before any of the above, `resolveRotationCardId`
- * decides which `rotation_cards` row the new rotation row is filed under —
- * the bin's newest card when the client named none (so legacy writers that
- * don't know cards exist keep filing correctly), or the client's `card_id`
- * once it is proven to exist and to live in the row's own bin.
+ * Card filing (BS#2472): `resolveRotationCardId` decides which
+ * `rotation_cards` row the new rotation row is filed under — the bin's
+ * newest card when the client named none (so legacy writers that don't know
+ * cards exist keep filing correctly), or the client's `card_id` once it is
+ * proven to exist and to live in the row's own bin. It runs INSIDE the
+ * insert transaction, after the LML work above, deliberately on both
+ * counts: the card row lock it takes must span the INSERT that consumes the
+ * answer (the add/delete race — see the helper's doc block), and a row lock
+ * must never be held across a network hop, so the LML resolve happens
+ * first. The trade: an add naming a dangling or mismatched card spends the
+ * LML hop before its 404/409 — rare enough to pay for a lock window that
+ * contains exactly one SELECT and one INSERT.
  */
 export const addToRotation = async (newRotation: RotationAddRequest) => {
   const values: RotationAddRequest = { ...newRotation };
-
-  // Runs before the LML resolve below on purpose: a mismatched or dangling
-  // card must refuse the add without spending a network hop, and a defaulted
-  // card must land in the same INSERT as everything else.
-  const cardId = await resolveRotationCardId(values.rotation_bin, values.card_id);
-  if (cardId !== undefined) values.card_id = cardId;
 
   // Allowlist guard already runs at the controller layer, but the server-
   // derived fields below must always come from this function, not the
@@ -662,8 +687,13 @@ export const addToRotation = async (newRotation: RotationAddRequest) => {
     }
   }
 
-  const insertedRotation: RotationRelease[] = await db.insert(rotation).values(values).returning();
-  return insertedRotation[0];
+  return db.transaction(async (tx) => {
+    const cardId = await resolveRotationCardId(tx, values.rotation_bin, values.card_id);
+    if (cardId !== undefined) values.card_id = cardId;
+
+    const insertedRotation: RotationRelease[] = await tx.insert(rotation).values(values).returning();
+    return insertedRotation[0];
+  });
 };
 
 /**
@@ -763,17 +793,29 @@ export type DeleteRotationCardOutcome =
  * referencing the card do not block deletion; they lose the reference via
  * `rotation.card_id`'s `ON DELETE SET NULL` (migration 0164).
  *
- * Both refusal conditions are re-asserted in the DELETE's own WHERE rather
- * than trusted from earlier SELECTs — `rotation` is a live write target, so
- * a row filed onto this card (or a higher-numbered sibling created) between
- * a check and an unguarded DELETE would be silently unfiled by the SET NULL
- * behind a 204 that claimed the delete was safe. Same discipline as
- * `updateRotation`'s `album_id IS NULL` guard above: a guarded write, then
- * reads inside the same transaction to tell the refusal reasons apart when
- * the write matches nothing.
+ * Concurrency, in two layers. (1) The card row is locked `FOR UPDATE`
+ * before the guarded DELETE — the other half of the serialization
+ * `resolveRotationCardId` starts on the add path, which locks the card it
+ * resolves and holds that lock across its rotation INSERT. Whichever side
+ * commits first, the loser's next statement takes a fresh READ COMMITTED
+ * snapshot: an add that lost sees the card gone (404 / next-best default);
+ * a delete that lost sees the freshly filed active row and refuses. (2) The
+ * DELETE's own WHERE re-asserts both refusal conditions rather than
+ * trusting the lock or earlier SELECTs — a higher-numbered sibling CREATED
+ * mid-request takes no lock on this row, and only the re-asserted WHERE
+ * catches it. Same discipline as `updateRotation`'s `album_id IS NULL`
+ * guard above: a guarded write, then reads inside the same transaction to
+ * tell the refusal reasons apart when the write matches nothing.
  */
 export const deleteRotationCardFromDB = async (id: number): Promise<DeleteRotationCardOutcome> => {
   return db.transaction(async (tx): Promise<DeleteRotationCardOutcome> => {
+    const lockedRows = (await tx.execute(sql`
+      SELECT ${rotation_cards.id} AS id FROM ${rotation_cards}
+      WHERE ${rotation_cards.id} = ${id}
+      FOR UPDATE
+    `)) as unknown as Array<{ id: number }>;
+    if (lockedRows.length === 0) return { outcome: 'not_found' };
+
     const deletedRows = (await tx.execute(sql`
       DELETE FROM ${rotation_cards}
       WHERE ${rotation_cards.id} = ${id}

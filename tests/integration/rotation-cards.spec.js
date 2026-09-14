@@ -20,8 +20,9 @@ const SEED_ALBUM_ID = 2;
  * Every test picks its own bin ('S' — Singles is the lightest-used bin in
  * the seed fixture) so this suite's cards and the grouped active_count they
  * accumulate don't collide with rows other specs create in 'M'/'L'/'H'.
- * (The one exception: the empty-bin defaulting test reads bin 'L', which no
- * suite ever creates cards in.)
+ * (The one exception: the backfilled-card defaulting test reads bin 'L',
+ * where migration 0165's card 1 is the only card because this suite never
+ * creates one there.)
  */
 describe('Rotation Cards', () => {
   let auth;
@@ -142,14 +143,14 @@ describe('Rotation Cards', () => {
   });
 
   describe('DELETE /library/rotation/cards/:id', () => {
-    test('409s (not_last_in_bin) unless the card is the highest-numbered in its bin', async () => {
+    test('409s (card_not_highest_in_bin) unless the card is the highest-numbered in its bin', async () => {
       const lower = await auth.post('/library/rotation/cards').send({ bin: 'S' }).expect(200);
       createdCardIds.push(lower.body.id);
       const higher = await auth.post('/library/rotation/cards').send({ bin: 'S' }).expect(200);
       createdCardIds.push(higher.body.id);
 
       const res = await auth.delete(`/library/rotation/cards/${lower.body.id}`).expect(409);
-      expect(res.body.reason).toBe('card_not_last_in_bin');
+      expect(res.body.reason).toBe('card_not_highest_in_bin');
 
       // The top of the bin deletes fine; remove it from the cleanup list so
       // afterEach doesn't try to delete it again.
@@ -157,7 +158,7 @@ describe('Rotation Cards', () => {
       createdCardIds.splice(createdCardIds.indexOf(higher.body.id), 1);
     });
 
-    test('409s (has_active_rows) while an active rotation row is assigned to the card', async () => {
+    test('409s (card_has_active_rotations) while an active rotation row is assigned to the card', async () => {
       const card = await auth.post('/library/rotation/cards').send({ bin: 'S' }).expect(200);
       createdCardIds.push(card.body.id);
 
@@ -166,7 +167,7 @@ describe('Rotation Cards', () => {
       await assignCard(row.body.id, card.body.id);
 
       const blocked = await auth.delete(`/library/rotation/cards/${card.body.id}`).expect(409);
-      expect(blocked.body.reason).toBe('card_has_active_rows');
+      expect(blocked.body.reason).toBe('card_has_active_rotations');
 
       await auth.patch('/library/rotation').send({ rotation_id: row.body.id }).expect(200);
 
@@ -186,7 +187,7 @@ describe('Rotation Cards', () => {
       // The record is still on the shelf until the scheduled date; deleting
       // its card would ON-DELETE-SET-NULL a row DJs are still routed to.
       const blocked = await auth.delete(`/library/rotation/cards/${card.body.id}`).expect(409);
-      expect(blocked.body.reason).toBe('card_has_active_rows');
+      expect(blocked.body.reason).toBe('card_has_active_rotations');
     });
 
     test('returns 400 (not 500) for a body-less rename PATCH', async () => {
@@ -212,12 +213,22 @@ describe('Rotation Cards', () => {
       expect(row.body.card_id).toBe(newest.body.id);
     });
 
-    test('a bin with no cards leaves the row unfiled', async () => {
-      // Bin 'L' never has cards: no suite creates any there.
+    test("a bin this suite created no cards in defaults onto the bin's backfilled card", async () => {
+      // Migration 0165 seeded card 1 in EVERY bin and filed the bin's active
+      // rows onto it, so post-backfill a card-less add always finds a card —
+      // here bin 'L''s highest-numbered card, which is the backfilled one
+      // unless an operator has since added more. (The empty-bin arm — row
+      // lands unfiled — needs a bin's cards all deleted first; it is pinned
+      // at the unit level in library.service.rotationCards.test.ts.)
+      const cards = await auth.get('/library/rotation/cards').expect(200);
+      const binCards = cards.body.filter((c) => c.bin === 'L');
+      expect(binCards.length).toBeGreaterThan(0);
+      const newest = binCards.reduce((a, b) => (b.number > a.number ? b : a));
+
       const row = await auth.post('/library/rotation').send({ album_id: SEED_ALBUM_ID, rotation_bin: 'L' }).expect(201);
       createdRotationIds.push(row.body.id);
 
-      expect(row.body.card_id).toBeNull();
+      expect(row.body.card_id).toBe(newest.id);
     });
 
     test("accepts an explicit card_id whose card lives in the row's bin", async () => {

@@ -157,30 +157,33 @@ describe('deleteRotationCardFromDB (BS#2472)', () => {
     jest.clearAllMocks();
   });
 
+  // The transaction's raw statements arrive at `tx.execute` in a fixed
+  // order: (1) the FOR UPDATE lock on the card row, (2) the guarded DELETE.
+  // Each test queues exactly the sequence its path consumes.
+
+  test('not_found when the lock SELECT finds no card — the DELETE never runs', async () => {
+    db.execute.mockResolvedValueOnce([]);
+
+    const result = await deleteRotationCardFromDB(1);
+
+    expect(result).toEqual({ outcome: 'not_found' });
+    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(db.select).not.toHaveBeenCalled();
+  });
+
   test('deleted when the guarded DELETE matches — no classification reads run', async () => {
-    // The guarded DELETE (raw SQL via tx.execute, RETURNING id) matched.
-    db.execute.mockResolvedValueOnce([{ id: 1 }]);
+    db.execute.mockResolvedValueOnce([{ id: 1 }]).mockResolvedValueOnce([{ id: 1 }]);
 
     const result = await deleteRotationCardFromDB(1);
 
     expect(result).toEqual({ outcome: 'deleted' });
     expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.execute).toHaveBeenCalledTimes(2);
     expect(db.select).not.toHaveBeenCalled();
   });
 
-  test('not_found when the card does not exist', async () => {
-    // Guarded DELETE matches nothing (execute's default `[]`); the
-    // classification lookup finds no card either.
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([]);
-    db.select.mockReturnValue(selectChain);
-
-    const result = await deleteRotationCardFromDB(1);
-
-    expect(result).toEqual({ outcome: 'not_found' });
-  });
-
   test('not_last_in_bin when a higher-numbered sibling card exists', async () => {
+    db.execute.mockResolvedValueOnce([{ id: 1 }]).mockResolvedValueOnce([]);
     const selectChain = createMockQueryChain();
     selectChain.limit = jest.fn().mockResolvedValue([{ bin: 'M', number: 1 }]);
     // First terminal .where() call (after the card lookup) is the MAX(number) query.
@@ -196,6 +199,7 @@ describe('deleteRotationCardFromDB (BS#2472)', () => {
   });
 
   test('has_active_rows when the highest-numbered card still has active rotation rows', async () => {
+    db.execute.mockResolvedValueOnce([{ id: 1 }]).mockResolvedValueOnce([]);
     const selectChain = createMockQueryChain();
     selectChain.limit = jest.fn().mockResolvedValue([{ bin: 'M', number: 2 }]);
     selectChain.where = jest
@@ -211,9 +215,11 @@ describe('deleteRotationCardFromDB (BS#2472)', () => {
   });
 
   test('409s when every guard passes on re-read yet the guarded DELETE matched nothing', async () => {
-    // The double-race corner: a refusing fact existed at the DELETE's
+    // The remaining corner: a refusing fact (a higher-numbered sibling —
+    // sibling creation takes no lock on this row) existed at the DELETE's
     // snapshot and was itself removed before the classification reads. The
     // service refuses rather than fabricating a reason.
+    db.execute.mockResolvedValueOnce([{ id: 1 }]).mockResolvedValueOnce([]);
     const selectChain = createMockQueryChain();
     selectChain.limit = jest.fn().mockResolvedValue([{ bin: 'M', number: 2 }]);
     selectChain.where = jest
@@ -237,27 +243,26 @@ describe('addToRotation card resolution (BS#2472)', () => {
 
   // Uncatalogued adds (no `album_id`) keep these tests off the
   // library_identity → LML resolve path, which has its own suite
-  // (`library.service.addToRotation.test.ts`).
+  // (`library.service.addToRotation.test.ts`). Card resolution reads arrive
+  // as raw FOR-UPDATE statements on the transaction's `execute` — the lock
+  // must live in the same transaction as the INSERT it protects.
+
   const UNCATALOGUED = { artist_name: 'Juana Molina', album_title: 'DOGA' };
 
-  test("defaults a card-less add onto the bin's newest card", async () => {
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([{ id: 7 }]);
-    db.select.mockReturnValue(selectChain);
+  test("defaults a card-less add onto the bin's newest card, inside the insert transaction", async () => {
+    db.execute.mockResolvedValueOnce([{ id: 7 }]);
     const insertChain = createMockQueryChain([{ id: 42, rotation_bin: 'M', card_id: 7 }]);
     db.insert.mockReturnValue(insertChain);
 
     await addToRotation({ rotation_bin: 'M', ...UNCATALOGUED });
 
-    expect(selectChain.from).toHaveBeenCalledWith(rotation_cards);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
     const valuesArg = insertChain.values.mock.calls[0][0] as Record<string, unknown>;
     expect(valuesArg.card_id).toBe(7);
   });
 
   test('a bin with no cards leaves the row unfiled', async () => {
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([]);
-    db.select.mockReturnValue(selectChain);
+    db.execute.mockResolvedValueOnce([]);
     const insertChain = createMockQueryChain([{ id: 42, rotation_bin: 'M', card_id: null }]);
     db.insert.mockReturnValue(insertChain);
 
@@ -268,9 +273,7 @@ describe('addToRotation card resolution (BS#2472)', () => {
   });
 
   test("accepts an explicit card_id whose card lives in the row's bin", async () => {
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([{ bin: 'M' }]);
-    db.select.mockReturnValue(selectChain);
+    db.execute.mockResolvedValueOnce([{ bin: 'M' }]);
     const insertChain = createMockQueryChain([{ id: 42, rotation_bin: 'M', card_id: 7 }]);
     db.insert.mockReturnValue(insertChain);
 
@@ -283,9 +286,7 @@ describe('addToRotation card resolution (BS#2472)', () => {
   test('bin agreement is checked against the NORMALIZED request bin', async () => {
     // The controller validates the bin's spelling but forwards it raw, so a
     // lowercase 'm' must still match a card filed in 'M'.
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([{ bin: 'M' }]);
-    db.select.mockReturnValue(selectChain);
+    db.execute.mockResolvedValueOnce([{ bin: 'M' }]);
     const insertChain = createMockQueryChain([{ id: 42, rotation_bin: 'M', card_id: 7 }]);
     db.insert.mockReturnValue(insertChain);
 
@@ -295,9 +296,7 @@ describe('addToRotation card resolution (BS#2472)', () => {
   });
 
   test('throws RotationCardBinMismatchError when the card lives in a different bin', async () => {
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([{ bin: 'S' }]);
-    db.select.mockReturnValue(selectChain);
+    db.execute.mockResolvedValueOnce([{ bin: 'S' }]);
 
     await expect(addToRotation({ rotation_bin: 'M', card_id: 7, ...UNCATALOGUED })).rejects.toThrow(
       RotationCardBinMismatchError
@@ -306,9 +305,7 @@ describe('addToRotation card resolution (BS#2472)', () => {
   });
 
   test('404s a card_id that references no card', async () => {
-    const selectChain = createMockQueryChain();
-    selectChain.limit = jest.fn().mockResolvedValue([]);
-    db.select.mockReturnValue(selectChain);
+    db.execute.mockResolvedValueOnce([]);
 
     await expect(addToRotation({ rotation_bin: 'M', card_id: 999, ...UNCATALOGUED })).rejects.toMatchObject({
       statusCode: 404,
