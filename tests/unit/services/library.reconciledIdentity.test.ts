@@ -185,6 +185,10 @@ function makeViewRow(overrides: Partial<LibraryArtistViewEntry> = {}): LibraryAr
     discogs_unavailable: false,
     discogs_unavailable_note: null,
     last_discogs_recheck_at: null,
+    card_id: null,
+    card_bin: null,
+    card_number: null,
+    card_name: null,
     ...overrides,
   };
 }
@@ -265,6 +269,45 @@ describe('serializeLibraryArtistViewEntry', () => {
       expect(wire).not.toHaveProperty('discogs_unavailable');
       expect(wire).not.toHaveProperty('discogs_unavailable_note');
       expect(wire).not.toHaveProperty('last_discogs_recheck_at');
+    });
+  });
+
+  // BS#2476: the GET /library read path must emit the nested `card` the
+  // contract declares on AlbumSearchResult — built from the same flat card
+  // columns as the /library/query mappers — and must never leak those flat
+  // columns, which no schema declares.
+  describe('active rotation card (BS#2476)', () => {
+    test('an actively-rotating row serializes a nested card and strips the flat columns', () => {
+      const wire = serializeLibraryArtistViewEntry(
+        makeViewRow({ rotation_bin: 'H', card_id: 42, card_bin: 'H', card_number: 3, card_name: 'Heavy 3' })
+      );
+
+      expect(wire.card).toEqual({ id: 42, bin: 'H', number: 3, name: 'Heavy 3' });
+      expect(wire).not.toHaveProperty('card_id');
+      expect(wire).not.toHaveProperty('card_bin');
+      expect(wire).not.toHaveProperty('card_number');
+      expect(wire).not.toHaveProperty('card_name');
+    });
+
+    test('a row that is not actively rotating serializes card: null, with no flat leak', () => {
+      const wire = serializeLibraryArtistViewEntry(makeViewRow());
+
+      expect(wire.card).toBeNull();
+      expect(wire).not.toHaveProperty('card_id');
+      expect(wire).not.toHaveProperty('card_bin');
+      expect(wire).not.toHaveProperty('card_number');
+      expect(wire).not.toHaveProperty('card_name');
+    });
+
+    test("card.bin is the card's own bin, not the rotation row's", () => {
+      // Equality of the two bins is service-layer-enforced only (BS#2472);
+      // a violating row must surface as a mismatch, not be papered over.
+      const wire = serializeLibraryArtistViewEntry(
+        makeViewRow({ rotation_bin: 'H', card_id: 17, card_bin: 'M', card_number: 3, card_name: null })
+      );
+
+      expect(wire.rotation_bin).toBe('H');
+      expect(wire.card).toEqual({ id: 17, bin: 'M', number: 3, name: null });
     });
   });
 });

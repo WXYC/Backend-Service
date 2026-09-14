@@ -54,6 +54,7 @@ function primaryRow(overrides: Record<string, unknown> = {}) {
     label_id: 10,
     rotation_bin: null,
     card_id: null,
+    card_bin: null,
     card_number: null,
     card_name: null,
     plays: 5,
@@ -78,7 +79,9 @@ describe('searchLibrary: card on AlbumSearchResultRow (BS#2476)', () => {
 
   it('raw-row mapper (toAlbumSearchResultRow): active row carries card', async () => {
     db.execute
-      .mockResolvedValueOnce([primaryRow({ rotation_bin: 'H', card_id: 42, card_number: 3, card_name: 'Heavy 3' })])
+      .mockResolvedValueOnce([
+        primaryRow({ rotation_bin: 'H', card_id: 42, card_bin: 'H', card_number: 3, card_name: 'Heavy 3' }),
+      ])
       .mockResolvedValueOnce([{ total: 1 }]);
 
     const { results } = await searchLibrary(PARAMS);
@@ -92,6 +95,23 @@ describe('searchLibrary: card on AlbumSearchResultRow (BS#2476)', () => {
     const { results } = await searchLibrary(PARAMS);
 
     expect(results[0].card).toBeNull();
+  });
+
+  it("raw-row mapper: card.bin is the card's own bin, surfacing a rotation-row mismatch", async () => {
+    // rotation.rotation_bin = card's bin is a service-layer invariant only
+    // (BS#2472) — no DB constraint enforces it. A read must carry the card's
+    // own coordinate so a violating row (ETL write, direct SQL fix-up) shows
+    // up as a mismatch instead of misdirecting the DJ to the wrong bin.
+    db.execute
+      .mockResolvedValueOnce([
+        primaryRow({ rotation_bin: 'H', card_id: 17, card_bin: 'M', card_number: 3, card_name: null }),
+      ])
+      .mockResolvedValueOnce([{ total: 1 }]);
+
+    const { results } = await searchLibrary(PARAMS);
+
+    expect(results[0].rotation_bin).toBe('H');
+    expect(results[0].card).toEqual({ id: 17, bin: 'M', number: 3, name: null });
   });
 
   it('raw-row mapper: rotation without a card assigned carries no card', async () => {
@@ -120,6 +140,7 @@ describe('searchLibrary: card on AlbumSearchResultRow (BS#2476)', () => {
         label_id: null,
         rotation_bin: 'L',
         card_id: 7,
+        card_bin: 'L',
         card_number: 2,
         card_name: null,
         plays: 12,

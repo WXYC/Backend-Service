@@ -511,6 +511,10 @@ describe('GET /library/query — active rotation card (BS#2476)', () => {
   let auth;
   let sql;
   const uniq = Date.now();
+  // UNIQUE(bin, number): derive numbers from the same run-unique stamp the
+  // titles use so a re-run against a persistent dev DB can't collide with a
+  // previous run's fixture cards. Kept under int4 range (Date.now() is not).
+  const cardNumber = (n) => (uniq % 1_000_000) + n;
 
   beforeAll(() => {
     auth = createAuthRequest(request, global.access_token);
@@ -518,11 +522,15 @@ describe('GET /library/query — active rotation card (BS#2476)', () => {
   });
 
   async function makeAlbum(title) {
+    // 'Built to Spill' is in the integration seed for genre 11 — POST /library
+    // resolves artist_name against existing (artist, genre) rows and 400s on
+    // an unknown artist, so fixtures reuse a seeded one (same precedent as the
+    // PR #1154 block above).
     const res = await auth
       .post('/library')
       .send({
         album_title: title,
-        artist_name: 'Card Fixture Artist',
+        artist_name: 'Built to Spill',
         label: 'Card Fixture Label',
         genre_id: 11,
         format_id: 1,
@@ -547,7 +555,7 @@ describe('GET /library/query — active rotation card (BS#2476)', () => {
 
   test('an actively-rotating release emits card', async () => {
     const album = await makeAlbum(`Card Fixture Active ${uniq}`);
-    const cardId = await makeCard('H', 9001, 'Active Test Card');
+    const cardId = await makeCard('H', cardNumber(1), 'Active Test Card');
     await sql`
       INSERT INTO wxyc_schema.rotation (album_id, rotation_bin, card_id)
       VALUES (${album.id}, 'H', ${cardId})
@@ -555,12 +563,12 @@ describe('GET /library/query — active rotation card (BS#2476)', () => {
 
     const row = await findResult({ q: `Card Fixture Active ${uniq}`, limit: 50 }, album.id);
     expect(row.rotation_bin).toBe('H');
-    expect(row.card).toEqual({ id: cardId, bin: 'H', number: 9001, name: 'Active Test Card' });
+    expect(row.card).toEqual({ id: cardId, bin: 'H', number: cardNumber(1), name: 'Active Test Card' });
   });
 
-  test('a killed row — including one killed by a since-elapsed future kill_date — emits neither rotation_bin nor card', async () => {
+  test('a killed row (kill_date in the past) emits neither rotation_bin nor card', async () => {
     const album = await makeAlbum(`Card Fixture Killed ${uniq}`);
-    const cardId = await makeCard('M', 9002, 'Killed Test Card');
+    const cardId = await makeCard('M', cardNumber(2), 'Killed Test Card');
     await sql`
       INSERT INTO wxyc_schema.rotation (album_id, rotation_bin, card_id, kill_date)
       VALUES (${album.id}, 'M', ${cardId}, CURRENT_DATE - INTERVAL '1 day')
@@ -571,10 +579,27 @@ describe('GET /library/query — active rotation card (BS#2476)', () => {
     expect(row.card).toBeNull();
   });
 
+  test('a row with a strictly-future kill_date is still active: emits rotation_bin and card', async () => {
+    // Pins the `kill_date > CURRENT_DATE` arm of the canonical active
+    // predicate (`kill_date IS NULL OR kill_date > CURRENT_DATE`) — a bin
+    // about to roll is a normal state, and narrowing the JOIN to
+    // `kill_date IS NULL` must fail here, not just on the NULL arm.
+    const album = await makeAlbum(`Card Fixture Future Kill ${uniq}`);
+    const cardId = await makeCard('M', cardNumber(3), 'Future Kill Card');
+    await sql`
+      INSERT INTO wxyc_schema.rotation (album_id, rotation_bin, card_id, kill_date)
+      VALUES (${album.id}, 'M', ${cardId}, CURRENT_DATE + INTERVAL '30 days')
+    `;
+
+    const row = await findResult({ q: `Card Fixture Future Kill ${uniq}`, limit: 50 }, album.id);
+    expect(row.rotation_bin).toBe('M');
+    expect(row.card).toEqual({ id: cardId, bin: 'M', number: cardNumber(3), name: 'Future Kill Card' });
+  });
+
   test('rotation_bin and card come from the same live row, not a stale killed one in another bin', async () => {
     const album = await makeAlbum(`Card Fixture Mixed ${uniq}`);
-    const killedCardId = await makeCard('L', 9003, 'Stale Killed Card');
-    const liveCardId = await makeCard('S', 9004, 'Live Card');
+    const killedCardId = await makeCard('L', cardNumber(4), 'Stale Killed Card');
+    const liveCardId = await makeCard('S', cardNumber(5), 'Live Card');
     await sql`
       INSERT INTO wxyc_schema.rotation (album_id, rotation_bin, card_id, kill_date)
       VALUES (${album.id}, 'L', ${killedCardId}, CURRENT_DATE - INTERVAL '1 day')
@@ -586,6 +611,46 @@ describe('GET /library/query — active rotation card (BS#2476)', () => {
 
     const row = await findResult({ q: `Card Fixture Mixed ${uniq}`, limit: 50 }, album.id);
     expect(row.rotation_bin).toBe('S');
-    expect(row.card).toEqual({ id: liveCardId, bin: 'S', number: 9004, name: 'Live Card' });
+    expect(row.card).toEqual({ id: liveCardId, bin: 'S', number: cardNumber(5), name: 'Live Card' });
+  });
+
+  test("card.bin is the card's own bin, so a rotation row pointing at another bin's card surfaces as a mismatch", async () => {
+    // rotation.rotation_bin = card's bin is service-layer-enforced only
+    // (BS#2472, no DB constraint): a violating row — ETL write, direct SQL
+    // fix-up — must be visible on the read, not papered over by deriving
+    // card.bin from the rotation row.
+    const album = await makeAlbum(`Card Fixture Mismatch ${uniq}`);
+    const cardId = await makeCard('M', cardNumber(6), 'Mismatched Card');
+    await sql`
+      INSERT INTO wxyc_schema.rotation (album_id, rotation_bin, card_id)
+      VALUES (${album.id}, 'H', ${cardId})
+    `;
+
+    const row = await findResult({ q: `Card Fixture Mismatch ${uniq}`, limit: 50 }, album.id);
+    expect(row.rotation_bin).toBe('H');
+    expect(row.card).toEqual({ id: cardId, bin: 'M', number: cardNumber(6), name: 'Mismatched Card' });
+  });
+
+  test('GET /library emits the same nested card, and never the flat card_* columns', async () => {
+    // The other catalog search read path (fuzzySearchLibrary →
+    // serializeLibraryArtistViewEntry) must build `card` from the same
+    // projection — and the flat card_id/card_bin/card_number/card_name
+    // columns are undeclared in the contract, so they must not leak.
+    const album = await makeAlbum(`Card Fixture Library Path ${uniq}`);
+    const cardId = await makeCard('H', cardNumber(7), 'Library Path Card');
+    await sql`
+      INSERT INTO wxyc_schema.rotation (album_id, rotation_bin, card_id)
+      VALUES (${album.id}, 'H', ${cardId})
+    `;
+
+    const q = `Card Fixture Library Path ${uniq}`;
+    const res = await auth.get('/library').query({ artist_name: q, album_title: q }).expect(200);
+    const row = res.body.find((r) => r.id === album.id);
+    expect(row.rotation_bin).toBe('H');
+    expect(row.card).toEqual({ id: cardId, bin: 'H', number: cardNumber(7), name: 'Library Path Card' });
+    expect(row).not.toHaveProperty('card_id');
+    expect(row).not.toHaveProperty('card_bin');
+    expect(row).not.toHaveProperty('card_number');
+    expect(row).not.toHaveProperty('card_name');
   });
 });

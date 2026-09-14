@@ -74,6 +74,7 @@ import {
   type AliasHitFields,
 } from '../utils/alias-hits.js';
 import { rawProjection } from '../utils/sql-projection.js';
+import { withRotationCard, type RotationCardSource, type RotationCardWire } from '../utils/rotation-card.js';
 import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from './observability/cache-stats.js';
 
 // Schema-qualified reference to the `fold_artist_name(text)` SQL function
@@ -2001,8 +2002,12 @@ const LIBRARY_VIEW_PROJECTION = {
   last_discogs_recheck_at: library.last_discogs_recheck_at,
   // BS#2476: same CURRENT_DATE-filtered `rotation` LEFT JOIN as `rotation_bin`
   // (see `LIBRARY_VIEW_JOINS_RAW` / `libraryViewQuery`'s `rotation_cards` join
-  // below) — non-null only while the row is actively rotating.
+  // below) — non-null only while the row is actively rotating. `card_bin` is
+  // the card's OWN bin, not `rotation.rotation_bin`: their equality is a
+  // service-layer invariant (BS#2472), not a DB constraint, so reads carry
+  // the card's own coordinate and let a mismatched row surface as a mismatch.
   card_id: rotation_cards.id,
+  card_bin: rotation_cards.bin,
   card_number: rotation_cards.number,
   card_name: rotation_cards.name,
 } as const satisfies Record<keyof LibraryArtistViewEntry, Column>;
@@ -2361,7 +2366,7 @@ export const fuzzySearchLibrary = async (
  */
 export type LibraryArtistViewResponse = Omit<
   LibraryArtistViewEntry,
-  ReconciledIdentityKey | keyof DiscogsUnavailableSource
+  ReconciledIdentityKey | keyof DiscogsUnavailableSource | keyof RotationCardSource
 > & {
   reconciled_identity: ReconciledIdentity | null;
   matched_via?: TrackMatchHint[];
@@ -2369,6 +2374,7 @@ export type LibraryArtistViewResponse = Omit<
   discogsUnavailable: boolean;
   discogsUnavailableNote: string | null;
   lastDiscogsRecheckAt: Date | null;
+  card: RotationCardWire | null;
 };
 
 /**
@@ -2377,10 +2383,14 @@ export type LibraryArtistViewResponse = Omit<
  * return the same nested-identity shape, regardless of whether they read the
  * view or join `artists` directly. Tagged rows (carrying `matched_via`)
  * preserve the tag through serialization. BS#1895: also renames the three
- * discogs-unavailable columns to their camelCase wire form.
+ * discogs-unavailable columns to their camelCase wire form. BS#2476: replaces
+ * the four flat card columns with the nested `card` object, matching the
+ * `AlbumSearchResultRow` mappers on the /library/query path.
  */
 export function serializeLibraryArtistViewEntry(row: TaggedLibraryViewEntry): LibraryArtistViewResponse {
-  return withDiscogsUnavailableCamelCase(serializeReconciledIdentity(row)) as LibraryArtistViewResponse;
+  return withRotationCard(
+    withDiscogsUnavailableCamelCase(serializeReconciledIdentity(row))
+  ) as LibraryArtistViewResponse;
 }
 
 /**
