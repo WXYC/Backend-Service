@@ -16,10 +16,12 @@ import { getEntriesByShow } from '../../../apps/backend/services/flowsheet.servi
 describe('flowsheet.service', () => {
   describe('getEntriesByShow ordering (duplicate play_order tiebreak)', () => {
     // Chain: select → from → leftJoin(rotation) → leftJoin(library) →
-    // leftJoin(album_metadata) → where → orderBy.
+    // leftJoin(album_metadata) → leftJoin(labels) → where → orderBy. The 4th
+    // leftJoin was added in BS#2505 (rotation_label).
     const orderByMock = jest.fn().mockResolvedValue([]);
     const whereMock = jest.fn().mockReturnValue({ orderBy: orderByMock });
-    const leftJoinMock3 = jest.fn().mockReturnValue({ where: whereMock });
+    const leftJoinMock4 = jest.fn().mockReturnValue({ where: whereMock });
+    const leftJoinMock3 = jest.fn().mockReturnValue({ leftJoin: leftJoinMock4 });
     const leftJoinMock2 = jest.fn().mockReturnValue({ leftJoin: leftJoinMock3 });
     const leftJoinMock1 = jest.fn().mockReturnValue({ leftJoin: leftJoinMock2 });
     const fromMock = jest.fn().mockReturnValue({ leftJoin: leftJoinMock1 });
@@ -34,7 +36,9 @@ describe('flowsheet.service', () => {
       leftJoinMock2.mockReset();
       leftJoinMock2.mockReturnValue({ leftJoin: leftJoinMock3 });
       leftJoinMock3.mockReset();
-      leftJoinMock3.mockReturnValue({ where: whereMock });
+      leftJoinMock3.mockReturnValue({ leftJoin: leftJoinMock4 });
+      leftJoinMock4.mockReset();
+      leftJoinMock4.mockReturnValue({ where: whereMock });
       fromMock.mockReset();
       fromMock.mockReturnValue({ leftJoin: leftJoinMock1 });
       (db as unknown as { select: jest.Mock }).select = jest.fn().mockReturnValue({ from: fromMock });

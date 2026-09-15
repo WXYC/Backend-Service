@@ -13,6 +13,7 @@ import {
   user,
   flowsheet,
   flowsheet_watermark,
+  labels,
   library,
   rotation,
   show_djs,
@@ -131,6 +132,26 @@ const FSEntryFieldsRaw = {
   track_position: flowsheet.track_position,
   record_label: flowsheet.record_label,
   label_id: flowsheet.label_id,
+  // The rotation release's CANONICAL label, resolved `flowsheet.rotation_id ->
+  // rotation.label_id -> labels.label_name` (BS#2505). Distinct from
+  // `record_label` directly above, which is the free text a DJ typed mid-show
+  // and stays the unchanged snapshot and fallback: 2.5% of rotation releases
+  // carry more than one label spelling across their weekly plays, and the
+  // airplay report names each ranked line from the FIRST linked entry, so one
+  // variant names the whole line. Sourcing from the release removes the
+  // spelling contest at the root — there is no contest once every play of a
+  // release reads one linked row.
+  //
+  // NULL until BS#2412 backfills `rotation.label_id` from tubafrenzy's
+  // `COMPANY_ID`, and NULL forever for a release whose label never resolved to
+  // a `labels` row. The consumer falls back to `record_label`.
+  //
+  // The `labels` join keys on `rotation.label_id`, so it must follow the
+  // `rotation` join at every site below. Like that join it is deliberately
+  // UNWINDOWED: a killed release with plays in the window still resolves its
+  // label, matching the primary FK lane's "the writer's assertion outranks date
+  // arithmetic" rule (BS#2183).
+  rotation_label: labels.label_name,
   rotation_id: flowsheet.rotation_id,
   // Primary source is the FK join (`leftJoin(rotation, rotation.id = flowsheet.rotation_id)`).
   // Fallback fires only when that join misses (rotation.rotation_bin IS NULL) and the entry
@@ -357,6 +378,8 @@ export type FSEntryRaw = {
   track_position: string | null;
   record_label: string | null;
   label_id: number | null;
+  /** `labels.label_name` via `rotation.label_id`; null when unlinked (BS#2505). */
+  rotation_label: string | null;
   rotation_id: number | null;
   rotation_bin: string | null;
   artist_id: number | null;
@@ -450,6 +473,7 @@ export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
     track_position: raw.track_position,
     record_label: raw.record_label,
     label_id: raw.label_id,
+    rotation_label: raw.rotation_label,
     rotation_id: raw.rotation_id,
     rotation_bin: raw.rotation_bin,
     artist_id: raw.artist_id ?? null,
@@ -679,6 +703,10 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+    // Resolves FSEntryFieldsRaw.rotation_label (BS#2505). Appended last rather
+    // than beside the rotation join so the three pre-existing joins keep their
+    // positions; it only needs `rotation` already in the tree, which it is.
+    .leftJoin(labels, eq(labels.id, rotation.label_id))
     .orderBy(desc(flowsheet.add_time), desc(flowsheet.id));
 
   return raw.map(transformToIFSEntry);
@@ -720,6 +748,10 @@ export const getEntriesByRange = async (startId: number, endId: number): Promise
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+    // Resolves FSEntryFieldsRaw.rotation_label (BS#2505). Appended last rather
+    // than beside the rotation join so the three pre-existing joins keep their
+    // positions; it only needs `rotation` already in the tree, which it is.
+    .leftJoin(labels, eq(labels.id, rotation.label_id))
     .where(and(gte(flowsheet.id, startId), lte(flowsheet.id, endId)))
     .orderBy(desc(flowsheet.id));
 
@@ -762,6 +794,10 @@ export const getEntriesInTimeWindow = async (start: Date, end: Date): Promise<IF
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+    // Resolves FSEntryFieldsRaw.rotation_label (BS#2505). Appended last rather
+    // than beside the rotation join so the three pre-existing joins keep their
+    // positions; it only needs `rotation` already in the tree, which it is.
+    .leftJoin(labels, eq(labels.id, rotation.label_id))
     .where(and(gte(flowsheet.add_time, start), lt(flowsheet.add_time, end)))
     .orderBy(asc(flowsheet.add_time), asc(flowsheet.id));
 
@@ -873,6 +909,10 @@ export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+    // Resolves FSEntryFieldsRaw.rotation_label (BS#2505). Appended last rather
+    // than beside the rotation join so the three pre-existing joins keep their
+    // positions; it only needs `rotation` already in the tree, which it is.
+    .leftJoin(labels, eq(labels.id, rotation.label_id))
     .where(inArray(flowsheet.show_id, show_ids))
     // play_order can collide within a show: the tubafrenzy webhook and the
     // dj-site live-insert path assign it independently and the schema
@@ -2662,6 +2702,11 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         track_position: entry.track_position ?? null,
         record_label: entry.record_label,
         label_id: entry.label_id,
+        // BS#2505: the rotation release's canonical label, for the weekly
+        // airplay report. Additive and nullable — `record_label` above is
+        // unchanged and remains the fallback, so a consumer that ignores this
+        // field sees exactly its pre-2505 shape.
+        rotation_label: entry.rotation_label,
         request_flag: entry.request_flag,
         segue: entry.segue,
         rotation_bin: entry.rotation_bin,
