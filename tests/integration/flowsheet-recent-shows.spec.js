@@ -88,18 +88,26 @@ describe('recent shows (BS#2435)', () => {
     // Defensive pre-delete: a prior crashed run would otherwise collide on the
     // fixed user ids. Same pattern as dj-real-name-sentinel.spec.js.
     const userIds = Object.values(USERS).map((u) => u.id);
+    // `= ANY(${list})`, NOT `= ANY(${sql.array(list)}::varchar[])`. The cast
+    // form reaches Postgres as the single string "a,b,c" and fails with
+    // `malformed array literal` — postgres-js cannot infer a string array's
+    // element OID, and the explicit `::varchar[]` is applied to an already-
+    // flattened value rather than fixing it. A bare interpolated JS array
+    // serializes correctly and is what station-signup{,-admin,-review}.spec.js
+    // already do. The `::int[]` casts in afterAll are fine — numbers infer.
+    //
     // Shows first, and by owner rather than by id: a crashed run leaves the
     // deliberately-open `live` show behind, and `shows.primary_dj_id` is
     // ON DELETE SET NULL — so deleting only the users would orphan it as an
     // un-ownable open show that `joinShow` then routes the next go-live onto.
     await sql`
       DELETE FROM ${sql(SCHEMA)}.show_djs
-      WHERE dj_id = ANY(${sql.array(userIds)}::varchar[])
+      WHERE dj_id = ANY(${userIds})
          OR show_id IN (
-           SELECT id FROM ${sql(SCHEMA)}.shows WHERE primary_dj_id = ANY(${sql.array(userIds)}::varchar[])
+           SELECT id FROM ${sql(SCHEMA)}.shows WHERE primary_dj_id = ANY(${userIds})
          )`;
-    await sql`DELETE FROM ${sql(SCHEMA)}.shows WHERE primary_dj_id = ANY(${sql.array(userIds)}::varchar[])`;
-    await sql`DELETE FROM auth_user WHERE id = ANY(${sql.array(userIds)}::varchar[])`;
+    await sql`DELETE FROM ${sql(SCHEMA)}.shows WHERE primary_dj_id = ANY(${userIds})`;
+    await sql`DELETE FROM auth_user WHERE id = ANY(${userIds})`;
 
     for (const user of Object.values(USERS)) {
       await sql`
@@ -136,7 +144,7 @@ describe('recent shows (BS#2435)', () => {
       await sql`DELETE FROM ${sql(SCHEMA)}.show_djs WHERE show_id = ANY(${sql.array(ids)}::int[])`;
       await sql`DELETE FROM ${sql(SCHEMA)}.shows WHERE id = ANY(${sql.array(ids)}::int[])`;
     }
-    await sql`DELETE FROM auth_user WHERE id = ANY(${sql.array(Object.values(USERS).map((u) => u.id))}::varchar[])`;
+    await sql`DELETE FROM auth_user WHERE id = ANY(${Object.values(USERS).map((u) => u.id)})`;
     await sql.end({ timeout: 5 });
   });
 
