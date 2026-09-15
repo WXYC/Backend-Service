@@ -1187,6 +1187,32 @@ export const getOpenShows: RequestHandler<object, unknown, unknown, { window_hou
 };
 
 /**
+ * `GET /flowsheet/shows/recent` — recent shows and the DJs who were on them,
+ * newest first (BS#2435). The handoff read: a DJ arriving for a shift wants to
+ * know who preceded them, which neither `djs-on-air` (now only) nor
+ * `open-shows` (still-open only, `manage`-gated) answers.
+ *
+ * Gated to `flowsheet: ['read']` on the route — every signed-in station
+ * account. Deliberately NOT the `manage` tier its `open-shows` neighbour
+ * carries: nothing here is destructive, and the content is a list of who was on
+ * the radio, which is public by the time it airs.
+ *
+ * `window_hours` is the only parameter. There is no `limit`: the ordering
+ * already makes truncation drop the least useful rows — see
+ * `RECENT_SHOWS_MAX_ROWS`.
+ */
+export const getRecentShows: RequestHandler<object, unknown, unknown, { window_hours?: string }> = async (req, res) => {
+  const windowHours = parseBoundedInt(
+    req.query.window_hours,
+    'window_hours',
+    flowsheet_service.RECENT_SHOWS_DEFAULT_WINDOW_HOURS,
+    flowsheet_service.RECENT_SHOWS_MAX_WINDOW_HOURS
+  );
+
+  res.status(200).json(await flowsheet_service.getRecentShows(windowHours));
+};
+
+/**
  * `POST /flowsheet/shows/:id/force-end` — close a show the caller does not
  * own (BS#2235).
  *

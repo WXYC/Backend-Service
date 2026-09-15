@@ -24,6 +24,7 @@ import { jest } from '@jest/globals';
 export function createFlowsheetServiceMock() {
   return {
     getOpenShows: jest.fn<(hours?: number, limit?: number) => Promise<unknown>>(),
+    getRecentShows: jest.fn<(hours?: number) => Promise<unknown>>(),
     getShowById: jest.fn<(id: number) => Promise<unknown>>(),
     endShow: jest.fn<(show: unknown, endedAt?: Date) => Promise<unknown>>(),
     getLatestShow: jest.fn<() => Promise<unknown>>(),
@@ -33,6 +34,8 @@ export function createFlowsheetServiceMock() {
     OPEN_SHOWS_MAX_WINDOW_HOURS: 262_800,
     OPEN_SHOWS_DEFAULT_LIMIT: 100,
     OPEN_SHOWS_MAX_LIMIT: 500,
+    RECENT_SHOWS_DEFAULT_WINDOW_HOURS: 24,
+    RECENT_SHOWS_MAX_WINDOW_HOURS: 168,
   };
 }
 
@@ -42,6 +45,7 @@ export function createFlowsheetServiceMock() {
  */
 export function resetFlowsheetServiceMock(mock: ReturnType<typeof createFlowsheetServiceMock>, endInstant: Date) {
   mock.getOpenShows.mockReset().mockResolvedValue({ shows: [], total_in_window: 0, older_open_show_count: 0 });
+  mock.getRecentShows.mockReset().mockResolvedValue({ shows: [] });
   mock.getShowById.mockReset();
   mock.endShow.mockReset();
   mock.getLatestShow.mockReset().mockResolvedValue({ id: -1 });

@@ -1927,6 +1927,46 @@ export const getDJsInCurrentShow = async (): Promise<User[]> => {
 };
 
 /**
+ * One DJ on one show, as the wire carries them. `id` is nullable because a
+ * legacy/tubafrenzy DJ has no `auth_user` row; see wxyc-shared `OnAirDJ`
+ * (BS#1547).
+ */
+export type ShowDJHandle = { id: string | null; dj_name: string | null };
+
+/**
+ * Which handles a show is named by, as a pure decision.
+ *
+ * Account rows win outright when the show has any: each yields its
+ * `auth_user.id` and its Anonymous-filtered handle (a filtered-away name is
+ * `dj_name: null` against a real `id`, which is what `djs-on-air` has always
+ * reported). A show with NO account rows is legacy/tubafrenzy-mirrored, and its
+ * identity is the show-level chain's answer — one entry with a `null` id, or an
+ * empty list when even that is unresolvable.
+ *
+ * Extracted from `getOnAirDJs` by BS#2435 so `getRecentShows` applies the
+ * identical decision instead of a parallel copy: the two endpoints report on
+ * the same show whenever a DJ opens the sign-on page while someone is live, and
+ * a second copy of this precedence is how they would come to disagree. Same
+ * reasoning as the `resolveShowDjName` (BS#2119) and `recomputeHasResolvedSupport`
+ * (BS#1763) extractions — two consumers, one decision.
+ *
+ * `showLevelName` is the caller's already-resolved show-level name, not a show
+ * row: the live read resolves it lazily (`resolveDjNameForShow`, one query) and
+ * the windowed read resolves it from a column it already JOINed in. Passing the
+ * resolved value keeps this function free of the query builder and of the
+ * question of how many round trips the caller could afford.
+ */
+export const composeShowDJList = (
+  accountDJs: Array<{ id: string; djName: string | null }>,
+  showLevelName: string | null
+): ShowDJHandle[] => {
+  if (accountDJs.length > 0) {
+    return accountDJs.map((dj) => ({ id: dj.id, dj_name: resolveDjDisplayName(dj.djName ?? null) }));
+  }
+  return showLevelName ? [{ id: null, dj_name: showLevelName }] : [];
+};
+
+/**
  * The on-air DJ list backing GET /flowsheet/djs-on-air.
  *
  * When the open show has active `show_djs` rows (DJs with Backend-Service
@@ -1943,26 +1983,184 @@ export const getDJsInCurrentShow = async (): Promise<User[]> => {
  * `id` because there is no user account. Returns `[]` when off air (no open
  * show) or when the open legacy show has no resolvable name.
  *
- * `id` is nullable because a legacy DJ has no `auth_user.id`; see wxyc-shared
- * `OnAirDJ` (BS#1547).
+ * The precedence itself lives in `composeShowDJList`, shared with
+ * `getRecentShows` (BS#2435). `resolveDjNameForShow` is only paid for when the
+ * account arm is empty — it is a second query, and a BS-native show never needs
+ * it.
  */
-export const getOnAirDJs = async (): Promise<Array<{ id: string | null; dj_name: string | null }>> => {
+export const getOnAirDJs = async (): Promise<ShowDJHandle[]> => {
   const current_show = await getLatestShow();
   if (!current_show || current_show.end_time !== null) {
     return [];
   }
 
   const accountDJs = await getDJsInShow(current_show.id, true);
-  if (accountDJs.length > 0) {
-    return accountDJs.map((dj) => ({
-      id: dj.id as string,
-      dj_name: resolveDjDisplayName((dj.djName as string | null | undefined) ?? null),
-    }));
+  // Legacy/tubafrenzy-mirrored show: no account rows; identity is legacy_dj_name.
+  const showLevelName = accountDJs.length > 0 ? null : await resolveDjNameForShow(current_show);
+  return composeShowDJList(
+    accountDJs.map((dj) => ({ id: dj.id as string, djName: (dj.djName as string | null | undefined) ?? null })),
+    showLevelName
+  );
+};
+
+/** Lookback when the caller does not say — the shift a DJ is taking over from. */
+export const RECENT_SHOWS_DEFAULT_WINDOW_HOURS = 24;
+
+/**
+ * Hard ceiling on `window_hours`: one week.
+ *
+ * Deliberately far below `OPEN_SHOWS_MAX_WINDOW_HOURS` (which reaches 2006).
+ * This is a handoff read — "who had the room for the last few hours" — and the
+ * page consuming it renders every row. The archive walk is
+ * `GET /flowsheet/playlist` (BS#2399), which is paged and indexed for it.
+ */
+export const RECENT_SHOWS_MAX_WINDOW_HOURS = 168;
+
+/**
+ * Structural cap on rows, applied as a SQL `LIMIT` rather than exposed as a
+ * query parameter.
+ *
+ * There is no `limit` on this endpoint because the ordering makes one
+ * unnecessary: newest-first means truncation drops the OLDEST shows in the
+ * window, which are the least useful ones to a DJ arriving for a shift. A week
+ * of WXYC is well under this figure, so the cap is a backstop against a
+ * pathological window rather than a routine paging mechanism.
+ */
+export const RECENT_SHOWS_MAX_ROWS = 200;
+
+export type RecentShow = {
+  id: number;
+  show_name: string | null;
+  start_time: Date;
+  /** `null` while the show is still on the air, or when its sign-off was lost. */
+  end_time: Date | null;
+  /**
+   * Who had the room. Empty when the show carries no account rows AND no
+   * resolvable show-level handle — the show still appears, so a consumer can
+   * render "unknown" against real times rather than silently losing the row.
+   */
+  djs: ShowDJHandle[];
+};
+
+export type RecentShowsResult = { shows: RecentShow[] };
+
+/**
+ * The `shows` page behind `GET /flowsheet/shows/recent`, exported so a unit
+ * test can render its SQL without a live Postgres.
+ *
+ * Served by `shows_start_time_id_idx` (BS#2399): the filter, the range bound
+ * and the sort are all the indexed `(start_time, id)` key, scanned backwards
+ * and stopped at `limit`. Note it is NOT `shows_open_start_time_idx` (BS#2235),
+ * which is partial on `end_time IS NULL` — that index covers the 4% of rows
+ * this read is least interested in, since a show that has ENDED is exactly what
+ * a DJ taking over wants to see.
+ *
+ * `user` is LEFT JOINed so the shared `resolveShowDjName` chain runs in JS over
+ * columns fetched once, rather than one `resolveDjNameForShow` query per show —
+ * the same trade `getShowsInTimeWindow` (BS#2062) and `buildOpenShowsQuery`
+ * (BS#2235) make. `user.id` is selected alongside `djName` because the chain
+ * distinguishes "no user row" from "user row with an unusable djName".
+ *
+ * Unlike `buildOpenShowsQuery` this needs no pre-truncated subquery: nothing
+ * here aggregates or fans out, so the `LIMIT` sits directly on top of an
+ * ordered index scan and the 1:1 join to `auth_user` rides along bounded.
+ */
+export const buildRecentShowsQuery = (windowFloor: Date, limit: number = RECENT_SHOWS_MAX_ROWS) =>
+  db
+    .select({
+      id: shows.id,
+      show_name: shows.show_name,
+      start_time: shows.start_time,
+      end_time: shows.end_time,
+      dj_name_override: shows.dj_name_override,
+      legacy_dj_name: shows.legacy_dj_name,
+      primary_dj_id: shows.primary_dj_id,
+      user_id: user.id,
+      user_dj_name: user.djName,
+    })
+    .from(shows)
+    .leftJoin(user, eq(user.id, shows.primary_dj_id))
+    .where(gte(shows.start_time, windowFloor))
+    .orderBy(desc(shows.start_time), desc(shows.id))
+    .limit(limit);
+
+/**
+ * Active `show_djs` membership for a whole page of shows, in ONE statement —
+ * exported alongside its sibling so a unit test can pin that property.
+ *
+ * `active` is filtered for the same reason `getDJsInShow(id, true)` filters it
+ * behind `djs-on-air`: a co-host who left mid-show did not have the room for
+ * the show's whole length.
+ *
+ * Ordered by `(show_id, auth_user.id)` purely for determinism — `show_djs`
+ * carries no join timestamp and no serial id, so there is no "who arrived
+ * first" to read (BS#2237). The comparison is relational, not `localeCompare`,
+ * for the reason `activeMemberOnAirName` gives: the sort's only job is to be
+ * the same on every host.
+ */
+export const buildRecentShowDJsQuery = (showIds: number[]) =>
+  db
+    .select({ show_id: show_djs.show_id, id: user.id, djName: user.djName })
+    .from(show_djs)
+    .innerJoin(user, eq(user.id, show_djs.dj_id))
+    .where(and(inArray(show_djs.show_id, showIds), eq(show_djs.active, true)))
+    .orderBy(asc(show_djs.show_id), asc(user.id));
+
+/**
+ * Recent shows and who was on them, newest first — the handoff read behind
+ * `GET /flowsheet/shows/recent` (BS#2435).
+ *
+ * The question neither neighbour answers. `djs-on-air` reports who is on NOW
+ * and goes empty the moment a show ends; `open-shows` (BS#2235) lists only
+ * shows still open and is gated to `flowsheet: ['manage']`. A DJ arriving for a
+ * shift wants neither — they want the last few hours, closed shows included.
+ *
+ * **Handles, never legal names.** The request this came from asked for DJs'
+ * real names on a licensing argument the ticket takes apart: the tubafrenzy
+ * control it cites was a "Resume a Show" picker whose `djID` was hardcoded to
+ * zero, over a rolling 24 hours that retained nothing. Handles answer "who had
+ * the room", which is the operational question, and `auth_user.real_name` is
+ * not an input to any chain reachable from here (docs/pii.md).
+ *
+ * Two statements for the whole page, never one per show: the bounded `shows`
+ * window, then one `show_djs` read scoped to the ids that survived it. The
+ * membership read is skipped entirely on an empty page — drizzle compiles
+ * `inArray(col, [])` to a literal `false`, so it would be a round trip that
+ * cannot return a row (the same short-circuit `getDJsInShow` makes).
+ */
+export const getRecentShows = async (
+  windowHours: number = RECENT_SHOWS_DEFAULT_WINDOW_HOURS
+): Promise<RecentShowsResult> => {
+  const windowFloor = new Date(Date.now() - windowHours * 60 * 60 * 1000);
+  const rows = await buildRecentShowsQuery(windowFloor, RECENT_SHOWS_MAX_ROWS);
+  if (rows.length === 0) return { shows: [] };
+
+  const members = await buildRecentShowDJsQuery(rows.map((row) => row.id));
+  const membersByShow = new Map<number, Array<{ id: string; djName: string | null }>>();
+  for (const member of members) {
+    const bucket = membersByShow.get(member.show_id);
+    const entry = { id: member.id, djName: member.djName ?? null };
+    if (bucket) bucket.push(entry);
+    else membersByShow.set(member.show_id, [entry]);
   }
 
-  // Legacy/tubafrenzy-mirrored show: no account rows; identity is legacy_dj_name.
-  const legacyName = await resolveDjNameForShow(current_show);
-  return legacyName ? [{ id: null, dj_name: legacyName }] : [];
+  return {
+    shows: rows.map((row) => ({
+      id: row.id,
+      show_name: row.show_name ?? null,
+      start_time: row.start_time,
+      end_time: row.end_time ?? null,
+      djs: composeShowDJList(
+        membersByShow.get(row.id) ?? [],
+        resolveShowDjName({
+          dj_name_override: row.dj_name_override ?? null,
+          legacy_dj_name: row.legacy_dj_name ?? null,
+          primary_dj_id: row.primary_dj_id ?? null,
+          user: row.user_id == null ? null : { djName: row.user_dj_name ?? null },
+        })
+      ),
+    })),
+  };
 };
 
 export const getDJsInShow = async (show_id: number, activeOnly: boolean): Promise<User[]> => {
