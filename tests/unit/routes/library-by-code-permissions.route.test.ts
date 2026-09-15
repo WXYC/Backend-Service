@@ -46,10 +46,14 @@ function mockRole(role: string) {
 // touching a real DB, LML, or lru-cache.
 type ArtistConflictRow = { artist_id: number; artist_name: string; code_letters: string };
 const mockGetArtistsByCode = jestGlobals.fn<() => Promise<ArtistConflictRow[]>>();
+const mockBrowseArtistsInCodeBucket =
+  jestGlobals.fn<() => Promise<Array<ArtistConflictRow & { code_number: number }>>>();
 const mockGenreExists = jestGlobals.fn<() => Promise<boolean>>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getArtistsByCode: mockGetArtistsByCode,
+  browseArtistsInCodeBucket: mockBrowseArtistsInCodeBucket,
+  ARTIST_CODE_BUCKET_MAX_LIMIT: 500,
   genreExists: mockGenreExists,
   // Stub out other exports referenced at import time by library.controller.
   getAlbumFromDB: jest.fn(),
@@ -174,5 +178,45 @@ describe('GET /library/artists/by-code — permission tier (BS#2149)', () => {
     const res = await request(app).get('/library/artists/by-code').query(query);
     expect(res.status).toBe(401);
     expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * BS#2489 added the number-less browse to THIS route rather than as a new
+ * literal `/artists/browse`, which is the reason there is no new registration
+ * to order against `GET /artists/:id`. What still has to hold is that Express
+ * routes a two-parameter request here at all — a request without `code_number`
+ * is the same path and the same method, so it cannot be captured by `:id`, but
+ * these pin that it reaches the browse arm rather than the fully-specified one
+ * and that it inherits the identical `catalog:read` tier.
+ */
+describe('GET /library/artists/by-code — number-less browse (BS#2489)', () => {
+  const browseQuery = { genre_id: '11', code_letters: 'BU' };
+
+  beforeEach(() => {
+    mockGetArtistsByCode.mockReset().mockResolvedValue([]);
+    mockBrowseArtistsInCodeBucket
+      .mockReset()
+      .mockResolvedValue([{ artist_id: 9, artist_name: 'Built to Spill', code_letters: 'BU', code_number: 60 }]);
+    mockGenreExists.mockReset().mockResolvedValue(true);
+  });
+
+  test('a dj-role token (catalog:read) reaches the browse arm of this handler', async () => {
+    mockRole('dj');
+    const res = await request(app)
+      .get('/library/artists/by-code')
+      .query(browseQuery)
+      .set('Authorization', 'Bearer test-token');
+
+    expect(res.status).toBe(200);
+    expect(mockBrowseArtistsInCodeBucket).toHaveBeenCalledTimes(1);
+    expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+    expect(res.body.artists[0].code_number).toBe(60);
+  });
+
+  test('a request with no Authorization header is rejected', async () => {
+    const res = await request(app).get('/library/artists/by-code').query(browseQuery);
+    expect(res.status).toBe(401);
+    expect(mockBrowseArtistsInCodeBucket).not.toHaveBeenCalled();
   });
 });

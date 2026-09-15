@@ -16,6 +16,13 @@ const mockGetArtistById = jest.fn<(artistId: number) => Promise<ArtistConflictRo
 // GET /library/artists/by-code (BS#2149).
 const mockGetArtistsByCode =
   jest.fn<(codeLetters: string, genreId: number, codeNumber: number) => Promise<ArtistConflictRow[]>>();
+// The same route's number-less browse branch (BS#2489). Its rows carry the
+// number each artist holds, which `ArtistConflictRow` does not.
+type ArtistBucketRow = ArtistConflictRow & { code_number: number };
+const mockBrowseArtistsInCodeBucket =
+  jest.fn<
+    (codeLetters: string, genreId: number, page: { limit?: number; offset?: number }) => Promise<ArtistBucketRow[]>
+  >();
 const mockGenreExists = jest.fn<(genreId: number) => Promise<boolean>>();
 const mockGenerateArtistNumber = jest.fn<(codeLetters: string, genreId: number) => Promise<number>>();
 const mockInsertArtistWithGenreCrossreference =
@@ -205,6 +212,8 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   insertArtistWithGenreCrossreference: mockInsertArtistWithGenreCrossreference,
   getArtistByCode: mockGetArtistByCode,
   getArtistsByCode: mockGetArtistsByCode,
+  browseArtistsInCodeBucket: mockBrowseArtistsInCodeBucket,
+  ARTIST_CODE_BUCKET_MAX_LIMIT: 500,
   genreExists: mockGenreExists,
   getArtistById: mockGetArtistById,
   generateAlbumCodeNumber: mockGenerateAlbumCodeNumber,
@@ -1713,13 +1722,16 @@ describe('library.controller', () => {
     });
 
     describe('missing parameters', () => {
-      const ALL_PARAMS = ['genre_id', 'code_letters', 'code_number'] as const;
+      // `code_number` left this list in BS#2489: omitting it is the browse, not
+      // a refusal. The two that remain are the bucket's coordinates, and
+      // neither has a defensible default.
+      const REQUIRED_PARAMS = ['genre_id', 'code_letters'] as const;
 
       // Each case omits exactly one parameter and asserts the message names THAT
-      // one and none of the others. A message listing all three would satisfy a
-      // `toContain('code_number')` assertion no matter which parameter the
+      // one and none of the others. A message listing both would satisfy a
+      // `toContain('code_letters')` assertion no matter which parameter the
       // handler actually refused on -- the blind spot this suite had before.
-      it.each(ALL_PARAMS.map((p) => [p]))('names %s, and only %s, when it is the missing one', async (param) => {
+      it.each(REQUIRED_PARAMS.map((p) => [p]))('names %s, and only %s, when it is the missing one', async (param) => {
         const full: Array<[string, string]> = [
           ['genre_id', '11'],
           ['code_letters', 'BU'],
@@ -1736,10 +1748,11 @@ describe('library.controller', () => {
         expect(thrown).toBeInstanceOf(WxycError);
         expect((thrown as WxycError).statusCode).toBe(400);
         expect((thrown as WxycError).message).toContain(param);
-        for (const other of ALL_PARAMS.filter((p) => p !== param)) {
+        for (const other of REQUIRED_PARAMS.filter((p) => p !== param)) {
           expect((thrown as WxycError).message).not.toContain(other);
         }
         expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+        expect(mockBrowseArtistsInCodeBucket).not.toHaveBeenCalled();
       });
     });
 
@@ -1766,6 +1779,155 @@ describe('library.controller', () => {
 
         expect(mockGenreExists).toHaveBeenCalledTimes(1);
         expect(mockGenreExists).toHaveBeenCalledWith(11);
+      });
+    });
+
+    // BS#2489: the same route with `code_number` omitted browses the whole
+    // (genre_id, code_letters) bucket -- `chooseLibraryCodeOrArtist.jsp`'s
+    // blank-call-number path, which the librarian uses to check an assigned
+    // number against the shelf.
+    describe('genre + call-letters browse (BS#2489)', () => {
+      const browseReq = (query: Record<string, unknown> = {}) =>
+        ({ query: { genre_id: '11', code_letters: 'BU', ...query } }) as unknown as Request;
+
+      const member = (id: number, artist_name: string, code_number: number, code_letters = 'BU') => ({
+        artist_id: id,
+        artist_name,
+        code_letters,
+        code_number,
+      });
+
+      beforeEach(() => {
+        mockBrowseArtistsInCodeBucket.mockReset();
+        mockBrowseArtistsInCodeBucket.mockResolvedValue([]);
+      });
+
+      it('routes to the bucket browse rather than the fully-specified lookup', async () => {
+        mockBrowseArtistsInCodeBucket.mockResolvedValue([member(9, 'Built to Spill', 60)]);
+
+        const res = mockResponse();
+        await resolveArtistByCode(browseReq(), res, next);
+
+        expect(mockBrowseArtistsInCodeBucket).toHaveBeenCalledWith('BU', 11, { limit: undefined, offset: undefined });
+        expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      // The projection trap: the fully-specified branch echoes the parsed query
+      // parameter onto every row, and copying that `.map()` here would emit the
+      // same number on every row (or `undefined`) while still typechecking. The
+      // fixture carries distinct numbers so only a row-sourced field passes.
+      it("sources each row's code_number from the row, not from the request", async () => {
+        mockBrowseArtistsInCodeBucket.mockResolvedValue([
+          member(101, 'Bunny', 2),
+          member(102, 'Burial', 7),
+          member(103, 'Buzzcocks', 31),
+        ]);
+
+        const res = mockResponse();
+        await resolveArtistByCode(browseReq(), res, next);
+
+        expect(res.json).toHaveBeenCalledWith({
+          artists: [
+            { id: 101, artist_name: 'Bunny', code_letters: 'BU', code_number: 2, genre_id: 11 },
+            { id: 102, artist_name: 'Burial', code_letters: 'BU', code_number: 7, genre_id: 11 },
+            { id: 103, artist_name: 'Buzzcocks', code_letters: 'BU', code_number: 31, genre_id: 11 },
+          ],
+        });
+      });
+
+      it('normalizes code_letters before browsing, same as the fully-specified branch', async () => {
+        const res = mockResponse();
+        await resolveArtistByCode(browseReq({ code_letters: ' bu ' }), res, next);
+
+        expect(mockBrowseArtistsInCodeBucket).toHaveBeenCalledWith('BU', 11, expect.anything());
+      });
+
+      // An empty bucket under a valid genre is the librarian checking unused
+      // letters -- a normal outcome, not an exceptional one. It gets a 200 with
+      // an empty list, NOT the fully-specified branch's `code_not_assigned`
+      // 404, which asserts something about a code this request never named.
+      it('answers 200 with an empty list for an empty bucket in a known genre', async () => {
+        mockBrowseArtistsInCodeBucket.mockResolvedValue([]);
+        mockGenreExists.mockResolvedValue(true);
+
+        const res = mockResponse();
+        await resolveArtistByCode(browseReq({ code_letters: 'ZZ' }), res, next);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        expect(res.json).toHaveBeenCalledWith({ artists: [] });
+      });
+
+      it('keeps the genre_not_found 404 distinguishable from an empty bucket', async () => {
+        mockBrowseArtistsInCodeBucket.mockResolvedValue([]);
+        mockGenreExists.mockResolvedValue(false);
+
+        const res = mockResponse();
+        await resolveArtistByCode(browseReq({ genre_id: '999999' }), res, next);
+
+        expect(res.status).toHaveBeenCalledWith(404);
+        expect(res.json).toHaveBeenCalledWith({ message: 'Genre not found', reason: 'genre_not_found' });
+      });
+
+      it('does not probe genreExists when the bucket has members', async () => {
+        mockBrowseArtistsInCodeBucket.mockResolvedValue([member(9, 'Built to Spill', 60)]);
+
+        const res = mockResponse();
+        await resolveArtistByCode(browseReq(), res, next);
+
+        expect(mockGenreExists).not.toHaveBeenCalled();
+      });
+
+      // A present-but-empty `?code_number=` is a client bug, not an omission --
+      // the same reading `searchArtistsInGenre` applies to `?genre_id=`. Only an
+      // absent parameter browses.
+      it.each([
+        ['present but empty', ''],
+        ['whitespace', ' '],
+        ['malformed', 'not-a-number'],
+        ['negative', '-1'],
+      ])('still refuses a %s code_number rather than browsing', async (_label, raw) => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(browseReq({ code_number: raw }), res, next)).rejects.toThrow('code_number');
+        expect(mockBrowseArtistsInCodeBucket).not.toHaveBeenCalled();
+      });
+
+      it('passes limit and offset through to the service', async () => {
+        const res = mockResponse();
+        await resolveArtistByCode(browseReq({ limit: '50', offset: '100' }), res, next);
+
+        expect(mockBrowseArtistsInCodeBucket).toHaveBeenCalledWith('BU', 11, { limit: 50, offset: 100 });
+      });
+
+      it.each([
+        ['zero', '0'],
+        ['above the cap', '501'],
+        ['malformed', 'ten'],
+        ['negative', '-5'],
+      ])('rejects a %s limit with a 400', async (_label, raw) => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(browseReq({ limit: raw }), res, next)).rejects.toThrow('limit');
+        expect(mockBrowseArtistsInCodeBucket).not.toHaveBeenCalled();
+      });
+
+      it('rejects a malformed offset with a 400', async () => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(browseReq({ offset: '-1' }), res, next)).rejects.toThrow('offset');
+        expect(mockBrowseArtistsInCodeBucket).not.toHaveBeenCalled();
+      });
+
+      it('still requires genre_id and code_letters', async () => {
+        const res = mockResponse();
+
+        await expect(
+          resolveArtistByCode({ query: { code_letters: 'BU' } } as unknown as Request, res, next)
+        ).rejects.toThrow('genre_id');
+        await expect(
+          resolveArtistByCode({ query: { genre_id: '11' } } as unknown as Request, res, next)
+        ).rejects.toThrow('code_letters');
       });
     });
   });
