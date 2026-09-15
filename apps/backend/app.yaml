@@ -1388,6 +1388,100 @@ paths:
         '403':
           description: 'Caller lacks the `flowsheet: manage` permission'
 
+  /flowsheet/shows/recent:
+    get:
+      summary: Recent shows and the DJs who were on them (BS#2435)
+      description: >
+        The handoff read: shows that started inside the lookback window, newest
+        first, each with its start/end times and the on-air handles of the DJs
+        who had the room. Requires the `flowsheet: read` permission — every
+        signed-in station account, deliberately narrower than nothing and
+        deliberately wider than `/flowsheet/open-shows`'s `manage` gate, since
+        nothing here is destructive.
+
+        Answers what neither neighbour does: `/flowsheet/djs-on-air` reports who
+        is on NOW and goes empty the moment a show ends, and
+        `/flowsheet/open-shows` lists only shows still open.
+
+        Names are ON-AIR HANDLES, resolved through the same chain as
+        `/flowsheet/djs-on-air` (`composeShowDJList`). Legal names are out of
+        scope by design — see BS#2435's scope note and docs/pii.md. A
+        legacy/tubafrenzy-mirrored show has no `show_djs` rows and surfaces one
+        entry with `id: null`, named from `shows.legacy_dj_name`.
+      parameters:
+        - name: window_hours
+          in: query
+          required: false
+          description: >
+            Lookback in hours. Rejected with 400 rather than clamped when it is
+            not an integer in range. The one-week ceiling is deliberate: this is
+            a handoff read, not an archive walk — for that use
+            `/flowsheet/playlist`.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 168
+            default: 24
+      responses:
+        '200':
+          description: Shows inside the window, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  shows:
+                    type: array
+                    description: >
+                      Ordered by `start_time` DESC, tie-broken on `id` DESC.
+                      Capped at 200 rows; truncation therefore drops the oldest
+                      shows in the window, which is why no `limit` parameter is
+                      offered.
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        show_name:
+                          type: string
+                          nullable: true
+                        start_time:
+                          type: string
+                          format: date-time
+                        end_time:
+                          type: string
+                          format: date-time
+                          nullable: true
+                          description: Null while the show is still on the air, or when its sign-off was lost.
+                        djs:
+                          type: array
+                          description: >
+                            Who had the room. Empty when the show carries no
+                            account rows and no resolvable show-level handle —
+                            the show is still listed, so a consumer renders
+                            "unknown" against real times rather than losing the
+                            row.
+                          items:
+                            type: object
+                            properties:
+                              id:
+                                type: string
+                                nullable: true
+                                description: The DJ's `auth_user.id`, or null for a legacy/tubafrenzy DJ with no account.
+                              dj_name:
+                                type: string
+                                nullable: true
+                                description: >
+                                  The public on-air handle. Null when the handle
+                                  filters away (the literal "Anonymous"), which
+                                  `/flowsheet/djs-on-air` also reports as null.
+        '400':
+          description: 'window_hours was not an integer between 1 and 168'
+        '401':
+          description: 'No bearer token'
+        '403':
+          description: 'Caller lacks the `flowsheet: read` permission'
+
   /flowsheet/shows/{id}/force-end:
     post:
       summary: End a show the caller does not own (BS#2235)

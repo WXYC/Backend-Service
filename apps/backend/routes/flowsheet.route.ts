@@ -92,6 +92,16 @@ flowsheet_route.post(
 // router declares no parameterized GET that could shadow `/open-shows`.
 flowsheet_route.get('/open-shows', requirePermissions({ flowsheet: ['manage'] }), flowsheetController.getOpenShows);
 
+// The handoff read (BS#2435): who had the room recently. Gated only to
+// `flowsheet: ['read']`, unlike `/open-shows` directly above — nothing here is
+// destructive, and a list of who was on the radio is public by the time it
+// airs. It is still gated, though: `/range` is this router's only genuinely
+// unauthenticated read.
+//
+// Declared before `post('/shows/:id/force-end')` by convention only; that route
+// is a POST and carries a suffix, so `/shows/recent` cannot be shadowed by it.
+flowsheet_route.get('/shows/recent', requirePermissions({ flowsheet: ['read'] }), flowsheetController.getRecentShows);
+
 // No `showMemberMiddleware`: the entire point is to act on a show the caller is
 // not a member of.
 flowsheet_route.post(
