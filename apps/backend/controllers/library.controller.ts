@@ -1,4 +1,4 @@
-import { Request, RequestHandler } from 'express';
+import { Request, RequestHandler, Response } from 'express';
 import * as Sentry from '@sentry/node';
 import {
   Album,
@@ -788,6 +788,8 @@ type ArtistByCodeQuery = {
   genre_id?: string;
   code_letters?: string;
   code_number?: string;
+  limit?: string;
+  offset?: string;
 };
 
 /**
@@ -863,6 +865,68 @@ const validateCanonicalCodeLetters = (raw: string): string => {
 };
 
 /**
+ * Upper bound AND default for `?limit=` on the bucket browse — owned by the
+ * service, since the cap is a property of the query rather than of this route.
+ * Re-exported through the namespace import so the 400 message and the query
+ * can never disagree about the number.
+ */
+const { ARTIST_CODE_BUCKET_MAX_LIMIT } = libraryService;
+
+/**
+ * The number-less arm of `GET /library/artists/by-code` (BS#2489): browse the
+ * whole `(genre_id, code_letters)` bucket.
+ *
+ * Split out rather than inlined as an `if` arm because the two branches share
+ * only their coordinates: this one parses a different parameter set, has its
+ * own paging, and answers an empty result with a 200 where the fully-specified
+ * branch answers a 404.
+ */
+async function browseArtistCodeBucket(
+  query: ArtistByCodeQuery,
+  codeLetters: string,
+  genreId: number,
+  res: Response
+): Promise<void> {
+  const limit = parseNonNegativeInt(query.limit);
+  if (limit === null || (limit !== undefined && (limit < 1 || limit > ARTIST_CODE_BUCKET_MAX_LIMIT))) {
+    throw new WxycError(
+      `Invalid Parameter: limit must be an integer between 1 and ${ARTIST_CODE_BUCKET_MAX_LIMIT}`,
+      400
+    );
+  }
+
+  const offset = parseNonNegativeInt(query.offset);
+  if (offset === null) {
+    throw new WxycError('Invalid Parameter: offset must be a non-negative integer', 400);
+  }
+
+  const members = await libraryService.browseArtistsInCodeBucket(codeLetters, genreId, { limit, offset });
+
+  // Same round-trip discipline as the fully-specified branch: a non-empty
+  // bucket proves the genre exists, so `genreExists` is only probed to explain
+  // an empty one -- and only to separate a stale genre dropdown from a genuinely
+  // unused set of call letters, which is a 200 rather than a 404.
+  if (members.length === 0 && !(await libraryService.genreExists(genreId))) {
+    res.status(404).json({ message: 'Genre not found', reason: 'genre_not_found' });
+    return;
+  }
+
+  res.status(200).json({
+    // `code_number` is read from the ROW, not echoed from the request the way
+    // the fully-specified branch echoes its parsed parameter. It varies across
+    // a browse and is the whole point of the response; copying that `.map()`
+    // would emit one number on every row and still typecheck.
+    artists: members.map((member) => ({
+      id: member.artist_id,
+      artist_name: member.artist_name,
+      code_letters: member.code_letters,
+      code_number: member.code_number,
+      genre_id: genreId,
+    })),
+  });
+}
+
+/**
  * BS#2149: resolves a fully-specified library code to the artists that own it --
  * the `/wxycdb` "does this code already exist, and whose is it" question
  * `peek-code` (next-free-number) and `search` (name query) cannot answer.
@@ -888,17 +952,36 @@ const validateCanonicalCodeLetters = (raw: string): string => {
  * dropdown is stale, `code_not_assigned` means the code is free to create. A
  * client that has to string-match `message` to tell those apart cannot act on
  * either.
+ *
+ * BS#2489: `code_number` is OPTIONAL. Omit it and this browses the whole
+ * `(genre_id, code_letters)` bucket instead — the blank-call-number path
+ * `chooseLibraryCodeOrArtist.jsp` fell through to `multipleArtistsDisplay.jsp`
+ * for, which the librarian uses to check an assigned number against the shelf
+ * and to spot gaps in an occupied range. Extending this route rather than
+ * adding a literal `/artists/browse` was deliberate: the two branches answer
+ * the same question at two levels of specificity, and a new literal would have
+ * to be ordered ahead of `GET /artists/:id` to avoid being swallowed.
+ *
+ * The browse's outcomes deliberately differ from the fully-specified branch's
+ * in one place. An empty bucket under a known genre is a **200 with an empty
+ * list**, not a `code_not_assigned` 404: the librarian browsing unused letters
+ * is a normal outcome, and `code_not_assigned` asserts something about a code
+ * the request never named. `genre_not_found` is unchanged and still a 404, so
+ * a client can still tell a stale genre dropdown from an empty shelf — a
+ * distinction dj-site#1506 relies on to keep an outage from reading as an
+ * empty bucket.
  */
 export const resolveArtistByCode: RequestHandler = async (
   req: Request<object, object, object, ArtistByCodeQuery>,
   res
 ) => {
   const { query } = req;
-  // Name only the parameters actually missing. A fixed string listing all three
-  // would satisfy any "the error mentions code_number" assertion even when the
+  // Name only the parameters actually missing. A fixed string listing both
+  // would satisfy any "the error mentions code_letters" assertion even when the
   // handler refused on a different parameter, which is exactly the blind spot
-  // the BS#2149 review found in this route's first test.
-  const missing = (['genre_id', 'code_letters', 'code_number'] as const).filter((name) => query[name] === undefined);
+  // the BS#2149 review found in this route's first test. `code_number` is not
+  // in this list (BS#2489) — absent, it selects the browse.
+  const missing = (['genre_id', 'code_letters'] as const).filter((name) => query[name] === undefined);
   if (missing.length > 0) {
     throw new WxycError(`Missing query parameters: ${missing.join(', ')}`, 400);
   }
@@ -912,8 +995,6 @@ export const resolveArtistByCode: RequestHandler = async (
   }
 
   const genreId = parseCodeQueryInt(query.genre_id, 'genre_id', 1);
-  // Lower bound 0, not 1 — see the V/A note in this function's doc comment.
-  const codeNumber = parseCodeQueryInt(query.code_number, 'code_number', 0);
 
   // Validate against the column's real domain, then trim + upper-case -- see
   // `validateCanonicalCodeLetters` above for why a bare `.trim().toUpperCase()`
@@ -922,6 +1003,19 @@ export const resolveArtistByCode: RequestHandler = async (
   // pre-check to this fold is a separate change, deliberately not made here
   // because it alters an existing route's 409 behavior.)
   const codeLetters = validateCanonicalCodeLetters(query.code_letters);
+
+  // Only an ABSENT `code_number` browses. A present-but-empty `?code_number=`
+  // stays a 400, the same reading `searchArtistsInGenre` gives `?genre_id=`:
+  // the client meant to send a number and sent nothing, which is a bug rather
+  // than an omission, and `Number('')` is 0 — a legitimate V/A filing — so
+  // silently browsing would also hide it.
+  if (query.code_number === undefined) {
+    await browseArtistCodeBucket(query, codeLetters, genreId, res);
+    return;
+  }
+
+  // Lower bound 0, not 1 — see the V/A note in this function's doc comment.
+  const codeNumber = parseCodeQueryInt(query.code_number, 'code_number', 0);
 
   // Code lookup FIRST, genre check only to explain a miss: a hit proves the genre
   // exists (the lookup inner-joins `genre_artist_crossreference.genre_id`), so

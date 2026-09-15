@@ -3086,9 +3086,11 @@ describe('Library Artists By Code', () => {
   });
 
   // Each case omits exactly one parameter and asserts the message names THAT one
-  // and not the others -- a message listing all three would pass no matter which
-  // parameter the handler actually refused on.
-  test.each([['genre_id'], ['code_letters'], ['code_number']])(
+  // and not the other -- a message listing both would pass no matter which
+  // parameter the handler actually refused on. `code_number` left this list in
+  // BS#2489: omitting it selects the browse rather than a refusal, covered in
+  // 'Library Artists Code Bucket Browse' below.
+  test.each([['genre_id'], ['code_letters']])(
     'returns 400 naming %s, and only %s, when it is the one missing',
     async (param) => {
       const query = { genre_id: 11, code_letters: 'BU', code_number: 60 };
@@ -3097,7 +3099,7 @@ describe('Library Artists By Code', () => {
       const res = await auth.get('/library/artists/by-code').query(query).expect(400);
 
       expectErrorContains(res, param);
-      for (const other of ['genre_id', 'code_letters', 'code_number'].filter((p) => p !== param)) {
+      for (const other of ['genre_id', 'code_letters'].filter((p) => p !== param)) {
         expect(res.body.message).not.toContain(other);
       }
     }
@@ -3111,6 +3113,189 @@ describe('Library Artists By Code', () => {
     const res = await auth.get(path).expect(400);
 
     expectErrorContains(res, param);
+  });
+});
+
+// BS#2489: the same route with `code_number` omitted -- the blank-call-number
+// browse `chooseLibraryCodeOrArtist.jsp` fell through to
+// `multipleArtistsDisplay.jsp` for.
+describe('Library Artists Code Bucket Browse (BS#2489)', () => {
+  let auth;
+  let sql;
+
+  const GENRE_ID = 11;
+  const BUCKET_LETTERS = 'ZQ';
+  const SOLO_LETTERS = 'ZS';
+  const EMPTY_LETTERS = 'ZX';
+
+  // Seeded in an order that is NOT the number order, and with a repeated number,
+  // so the response order can only come from the ORDER BY: a browse that
+  // returned rows in insertion or physical order would answer
+  // Zeta/Alpha/Mid/Mid Twin instead of Alpha/Mid/Mid Twin/Zeta.
+  const BUCKET_SEED = [
+    { name: 'BS2489 Zeta', code: 30 },
+    { name: 'BS2489 Alpha', code: 3 },
+    { name: 'BS2489 Mid', code: 12 },
+    { name: 'BS2489 Mid Twin', code: 12 },
+  ];
+  const EXPECTED_ORDER = ['BS2489 Alpha', 'BS2489 Mid', 'BS2489 Mid Twin', 'BS2489 Zeta'];
+  const SOLO_SEED = { name: 'BS2489 Solo', code: 4 };
+
+  const seededArtistIds = [];
+
+  const seedArtist = async (name, codeLetters, artistGenreCode) => {
+    const [row] = await sql`
+      INSERT INTO ${sql(SCHEMA)}.artists (artist_name, alphabetical_name, code_letters)
+      VALUES (${name}, ${name}, ${codeLetters})
+      RETURNING id`;
+    seededArtistIds.push(row.id);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+      VALUES (${row.id}, ${GENRE_ID}, ${artistGenreCode})`;
+    return row.id;
+  };
+
+  beforeAll(async () => {
+    auth = createAuthRequest(request, global.access_token);
+    sql = getTestDb();
+
+    for (const { name, code } of BUCKET_SEED) {
+      await seedArtist(name, BUCKET_LETTERS, code);
+    }
+    await seedArtist(SOLO_SEED.name, SOLO_LETTERS, SOLO_SEED.code);
+  });
+
+  afterAll(async () => {
+    if (seededArtistIds.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.genre_artist_crossreference WHERE artist_id IN ${sql(seededArtistIds)}`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id IN ${sql(seededArtistIds)}`;
+    }
+  });
+
+  const browse = (query) => auth.get('/library/artists/by-code').query(query);
+
+  test('lists every artist in the bucket ascending by artist_genre_code', async () => {
+    const res = await browse({ genre_id: GENRE_ID, code_letters: BUCKET_LETTERS }).expect(200);
+
+    expect(res.body.artists.map((a) => a.artist_name)).toEqual(EXPECTED_ORDER);
+    expect(res.body.artists.map((a) => a.code_number)).toEqual([3, 12, 12, 30]);
+  });
+
+  // The projection trap: the fully-specified branch echoes the request's number
+  // onto every row. A browse that copied that `.map()` would emit one number
+  // four times (or `undefined`) and still typecheck on both sides of the wire.
+  test('carries the number each artist actually holds, not one repeated value', async () => {
+    const res = await browse({ genre_id: GENRE_ID, code_letters: BUCKET_LETTERS }).expect(200);
+
+    for (const artist of res.body.artists) {
+      expectFields(artist, 'id', 'artist_name', 'code_letters', 'code_number', 'genre_id');
+      expect(artist.code_letters).toBe(BUCKET_LETTERS);
+      expect(artist.genre_id).toBe(GENRE_ID);
+    }
+    expect(new Set(res.body.artists.map((a) => a.code_number)).size).toBeGreaterThan(1);
+  });
+
+  test('answers a single-member bucket with a one-element list', async () => {
+    const res = await browse({ genre_id: GENRE_ID, code_letters: SOLO_LETTERS }).expect(200);
+
+    expect(res.body.artists).toHaveLength(1);
+    expect(res.body.artists[0].artist_name).toBe(SOLO_SEED.name);
+    expect(res.body.artists[0].code_number).toBe(SOLO_SEED.code);
+  });
+
+  // A librarian checking unused call letters is a normal outcome, so an empty
+  // bucket under a KNOWN genre is a 200 with an empty list -- not the
+  // fully-specified branch's `code_not_assigned` 404, which asserts something
+  // about a code this request never named.
+  test('answers 200 with an empty list for an unused genre + letters combination', async () => {
+    const res = await browse({ genre_id: GENRE_ID, code_letters: EMPTY_LETTERS }).expect(200);
+
+    expect(res.body).toEqual({ artists: [] });
+  });
+
+  // ...and an unknown genre stays a 404 with its own reason, so dj-site can
+  // still tell a stale genre dropdown from an empty shelf.
+  test('answers 404 genre_not_found for an unknown genre_id', async () => {
+    const res = await browse({ genre_id: 999999, code_letters: BUCKET_LETTERS }).expect(404);
+
+    expect(res.body.reason).toBe('genre_not_found');
+    expectErrorContains(res, 'Genre not found');
+  });
+
+  test('normalizes code_letters the same way the fully-specified branch does', async () => {
+    const res = await browse({ genre_id: GENRE_ID, code_letters: ` ${BUCKET_LETTERS.toLowerCase()} ` }).expect(200);
+
+    expect(res.body.artists.map((a) => a.artist_name)).toEqual(EXPECTED_ORDER);
+  });
+
+  // The order is total (number, then name, then id), so paging cannot skip or
+  // repeat a row across the boundary even where two artists share a number.
+  test('pages the browse with limit and offset without skipping or repeating a row', async () => {
+    const firstPage = await browse({ genre_id: GENRE_ID, code_letters: BUCKET_LETTERS, limit: 2 }).expect(200);
+    const secondPage = await browse({
+      genre_id: GENRE_ID,
+      code_letters: BUCKET_LETTERS,
+      limit: 2,
+      offset: 2,
+    }).expect(200);
+
+    expect(firstPage.body.artists.map((a) => a.artist_name)).toEqual(EXPECTED_ORDER.slice(0, 2));
+    expect(secondPage.body.artists.map((a) => a.artist_name)).toEqual(EXPECTED_ORDER.slice(2));
+  });
+
+  test.each([
+    ['zero', 0],
+    ['above the cap', 501],
+    ['malformed', 'ten'],
+  ])('returns 400 for a %s limit', async (_label, limit) => {
+    const res = await browse({ genre_id: GENRE_ID, code_letters: BUCKET_LETTERS, limit }).expect(400);
+
+    expectErrorContains(res, 'limit');
+  });
+
+  test('returns 400 for a malformed offset', async () => {
+    const res = await browse({ genre_id: GENRE_ID, code_letters: BUCKET_LETTERS, offset: -1 }).expect(400);
+
+    expectErrorContains(res, 'offset');
+  });
+
+  // Only an ABSENT code_number browses; a present-but-empty one is a client bug
+  // and keeps its 400, matching how `searchArtistsInGenre` reads `?genre_id=`.
+  test('returns 400 for a present-but-empty code_number rather than browsing', async () => {
+    const res = await auth
+      .get(`/library/artists/by-code?genre_id=${GENRE_ID}&code_letters=${BUCKET_LETTERS}&code_number=`)
+      .expect(400);
+
+    expectErrorContains(res, 'code_number');
+  });
+
+  test.each([['genre_id'], ['code_letters']])('still returns 400 when %s is missing', async (param) => {
+    const query = { genre_id: GENRE_ID, code_letters: BUCKET_LETTERS };
+    delete query[param];
+
+    const res = await browse(query).expect(400);
+
+    expectErrorContains(res, param);
+  });
+
+  // The fully-specified path must be untouched by the optional parameter. A
+  // number that IS in the seeded bucket still resolves to exactly its owners,
+  // and the unassigned-code 404 keeps its own reason rather than collapsing
+  // into the browse's empty-list 200.
+  test('leaves the three-parameter path unchanged', async () => {
+    const exact = await browse({ genre_id: GENRE_ID, code_letters: BUCKET_LETTERS, code_number: 12 }).expect(200);
+
+    expect(exact.body.artists.map((a) => a.artist_name)).toEqual(['BS2489 Mid', 'BS2489 Mid Twin']);
+    for (const artist of exact.body.artists) {
+      expect(artist.code_number).toBe(12);
+    }
+
+    const unassigned = await browse({
+      genre_id: GENRE_ID,
+      code_letters: BUCKET_LETTERS,
+      code_number: 999999,
+    }).expect(404);
+    expect(unassigned.body.reason).toBe('code_not_assigned');
   });
 });
 

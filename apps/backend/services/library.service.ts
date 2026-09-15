@@ -3305,6 +3305,91 @@ export const getArtistsByCode = async (
 };
 
 /**
+ * One member of a `(genre_id, code_letters)` call-number bucket: the
+ * `ArtistCodeOwner` shape plus the number that artist actually holds.
+ *
+ * The number rides on the row here and deliberately does not on
+ * `ArtistCodeOwner`. The fully-specified lookups filter to a single
+ * `artist_genre_code`, so every row carries the caller's value by
+ * construction; a bucket browse is asked precisely because the numbers differ
+ * across the result set.
+ */
+export type ArtistCodeBucketMember = ArtistCodeOwner & { code_number: number };
+
+/**
+ * The shared body of the two reads over a `(code_letters, genre_id)` bucket:
+ * `generateArtistNumber`, which takes the highest number in it and adds one,
+ * and `browseArtistsInCodeBucket`, which returns the occupied set.
+ *
+ * Factored for the same reason as `artistCodeOwnerQuery` above, and with a
+ * sharper failure mode: the peek assigns the next shelf code and the browse is
+ * how a librarian verifies it, so the two disagreeing about which rows are in
+ * the bucket is how a duplicate number gets handed out. The peek reads one
+ * column of one row, which is why the wider projection costs it nothing.
+ */
+const artistCodeBucketQuery = (code_letters: string, genre_id: number) =>
+  db
+    .select({
+      artist_id: genre_artist_crossreference.artist_id,
+      artist_name: artists.artist_name,
+      code_letters: artists.code_letters,
+      code_number: genre_artist_crossreference.artist_genre_code,
+    })
+    .from(genre_artist_crossreference)
+    .innerJoin(artists, eq(genre_artist_crossreference.artist_id, artists.id))
+    .where(and(eq(artists.code_letters, code_letters), eq(genre_artist_crossreference.genre_id, genre_id)));
+
+/**
+ * Ceiling on `?limit=` for the bucket browse, and the default when the caller
+ * omits it — so omitting `limit` is "the largest page I could have asked for",
+ * never "the whole table", matching `UNCATALOGUED_ROTATION_MAX_LIMIT`.
+ *
+ * 500 is chosen to sit above the real distribution rather than to trim it: in
+ * the production clone the 24,091 memberships fall into 2,301 buckets whose
+ * median size is 3, 99th percentile 137, and largest 263 (`Rock`/`MA`). So the
+ * default page holds every bucket the station currently has, and the cap is a
+ * guard against unbounded growth rather than a window a client has to page.
+ * That matters for the browse's purpose — the librarian reads the highest
+ * assigned number off the BOTTOM of the list, so a truncated page is not a
+ * partial answer but a wrong one.
+ */
+export const ARTIST_CODE_BUCKET_MAX_LIMIT = 500;
+
+/** Optional window over a bucket. `limit` defaults to the max above. */
+export type ArtistCodeBucketPage = { limit?: number; offset?: number };
+
+/**
+ * BS#2489: every artist filed under `code_letters` in `genre_id`, ascending by
+ * the number each one holds — `chooseLibraryCodeOrArtist.jsp`'s blank-call-
+ * number path, which `LibraryCodeServlet` fell through to
+ * `multipleArtistsDisplay.jsp` for.
+ *
+ * The number ordered on is `genre_artist_crossreference.artist_genre_code`
+ * (the `7` in a `RO ME 7` card), NOT `library.code_number` (a release's number
+ * within one artist). The two are different columns that both surface as
+ * `code_number` in different projections; this browse answers artist/genre
+ * memberships, not releases.
+ *
+ * `artist_genre_code` alone is not a total order — a bucket can file several
+ * artists at one number (`V/A`/12/0 holds 27 in the production clone), so the
+ * `artist_name`/`id` tiebreak that `getArtistsByCode` uses follows it, both to
+ * make repeated calls agree and to keep `offset` paging from skipping or
+ * repeating a row.
+ */
+export const browseArtistsInCodeBucket = async (
+  code_letters: string,
+  genre_id: number,
+  page: ArtistCodeBucketPage = {}
+): Promise<ArtistCodeBucketMember[]> => {
+  const { limit = ARTIST_CODE_BUCKET_MAX_LIMIT, offset } = page;
+  const windowed = artistCodeBucketQuery(code_letters, genre_id)
+    .orderBy(asc(genre_artist_crossreference.artist_genre_code), asc(artists.artist_name), asc(artists.id))
+    .limit(limit);
+
+  return offset == null ? windowed : windowed.offset(offset);
+};
+
+/**
  * Look up an artist by id in the same `{ artist_id, artist_name, code_letters }`
  * shape `getArtistByCode` returns, so a 409 conflict payload can carry either
  * lookup's result through one consistent wire shape.
@@ -3815,18 +3900,14 @@ export const generateAlbumCodeNumber = async (artist_id: number, tx?: DbTransact
 };
 
 export const generateArtistNumber = async (code_letters: string, genre_id: number): Promise<number> => {
-  const response = await db
-    .select({ artist_genre_code: genre_artist_crossreference.artist_genre_code })
-    .from(genre_artist_crossreference)
-    .innerJoin(artists, eq(genre_artist_crossreference.artist_id, artists.id))
-    .where(and(eq(artists.code_letters, code_letters), eq(genre_artist_crossreference.genre_id, genre_id)))
+  const response = await artistCodeBucketQuery(code_letters, genre_id)
     .orderBy(desc(genre_artist_crossreference.artist_genre_code))
     .limit(1);
 
   // default to being first artist in the genre
   let artist_genre_code = 1;
   if (response.length) {
-    artist_genre_code = response[0].artist_genre_code + 1; //otherwise we increment on the last value
+    artist_genre_code = response[0].code_number + 1; //otherwise we increment on the last value
   }
   return artist_genre_code;
 };
