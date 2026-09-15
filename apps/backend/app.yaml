@@ -35,6 +35,24 @@ components:
           type: number
         record_label:
           type: string
+          description: >
+            Free-text label, as the DJ typed it mid-show. Unchanged by BS#2505
+            and still the fallback wherever `rotation_label` is null.
+        rotation_label:
+          type: string
+          nullable: true
+          description: >
+            BS#2505. The rotation release's CANONICAL label, resolved
+            `flowsheet.rotation_id -> rotation.label_id -> labels.label_name`.
+            Null when the entry has no rotation link, or when the linked
+            release has no `label_id` (pre-BS#2412, or a label that never
+            resolved to a `labels` row) — consumers fall back to
+            `record_label`. Resolved by id with no status filter, so a KILLED
+            release with plays in the window still names its label. Read-only:
+            it is a joined value, not a `flowsheet` column, so it is absent
+            from the mutation/peek echoes (`CLIENT_FACING_FLOWSHEET_COLUMNS`)
+            the same way `rotation_bin` is. SSOT: `FlowsheetEntryFields` /
+            `FlowsheetV2TrackEntry` in wxyc-shared api.yaml.
         request_flag:
           type: boolean
         track_position:

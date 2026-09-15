@@ -8,7 +8,7 @@
 // regression by itself; that needs an EXPLAIN against prod-shaped data.
 
 import { jest } from '@jest/globals';
-import { db, flowsheet, rotation, library, album_metadata } from '@wxyc/database';
+import { db, flowsheet, rotation, library, album_metadata, labels } from '@wxyc/database';
 import { desc, eq } from 'drizzle-orm';
 import { getEntriesByPage } from '../../../apps/backend/services/flowsheet.service';
 
@@ -32,9 +32,11 @@ describe('flowsheet.service', () => {
 
     // Outer chain: select(FSEntryFieldsRaw) -> from(page) ->
     // innerJoin(flowsheet) -> leftJoin(rotation) -> leftJoin(library) ->
-    // leftJoin(album_metadata) -> orderBy(desc(id)).
+    // leftJoin(album_metadata) -> leftJoin(labels) -> orderBy(desc(id)).
+    // The 4th leftJoin was added in BS#2505 (rotation_label).
     const outerOrderByMock = jest.fn().mockResolvedValue([]);
-    const leftJoin3Mock = jest.fn().mockReturnValue({ orderBy: outerOrderByMock });
+    const leftJoin4Mock = jest.fn().mockReturnValue({ orderBy: outerOrderByMock });
+    const leftJoin3Mock = jest.fn().mockReturnValue({ leftJoin: leftJoin4Mock });
     const leftJoin2Mock = jest.fn().mockReturnValue({ leftJoin: leftJoin3Mock });
     const leftJoin1Mock = jest.fn().mockReturnValue({ leftJoin: leftJoin2Mock });
     const innerJoinMock = jest.fn().mockReturnValue({ leftJoin: leftJoin1Mock });
@@ -53,6 +55,7 @@ describe('flowsheet.service', () => {
       subFromMock.mockClear();
       outerOrderByMock.mockClear();
       outerOrderByMock.mockResolvedValue([]);
+      leftJoin4Mock.mockClear();
       leftJoin3Mock.mockClear();
       leftJoin2Mock.mockClear();
       leftJoin1Mock.mockClear();
@@ -64,7 +67,8 @@ describe('flowsheet.service', () => {
       subOffsetMock.mockReturnValue({ limit: subLimitMock });
       subOrderByMock.mockReturnValue({ offset: subOffsetMock });
       subFromMock.mockReturnValue({ orderBy: subOrderByMock });
-      leftJoin3Mock.mockReturnValue({ orderBy: outerOrderByMock });
+      leftJoin4Mock.mockReturnValue({ orderBy: outerOrderByMock });
+      leftJoin3Mock.mockReturnValue({ leftJoin: leftJoin4Mock });
       leftJoin2Mock.mockReturnValue({ leftJoin: leftJoin3Mock });
       leftJoin1Mock.mockReturnValue({ leftJoin: leftJoin2Mock });
       innerJoinMock.mockReturnValue({ leftJoin: leftJoin1Mock });
@@ -88,7 +92,7 @@ describe('flowsheet.service', () => {
       expect(asMock).toHaveBeenCalledWith('page');
     });
 
-    it('joins the bounded id-page against flowsheet, then rotation/library/album_metadata', async () => {
+    it('joins the bounded id-page against flowsheet, then rotation/library/album_metadata/labels', async () => {
       await getEntriesByPage(5000, 100);
 
       expect(outerFromMock).toHaveBeenCalledWith(pageSubquery);
@@ -96,6 +100,10 @@ describe('flowsheet.service', () => {
       expect(leftJoin1Mock).toHaveBeenCalledWith(rotation, eq(rotation.id, flowsheet.rotation_id));
       expect(leftJoin2Mock).toHaveBeenCalledWith(library, eq(library.id, flowsheet.album_id));
       expect(leftJoin3Mock).toHaveBeenCalledWith(album_metadata, eq(album_metadata.album_id, flowsheet.album_id));
+      // BS#2505. Keys on `rotation.label_id`, so it must come after the
+      // rotation join — and it rides the same already-bounded page, so it adds
+      // no work to the deep-offset path this test exists to protect.
+      expect(leftJoin4Mock).toHaveBeenCalledWith(labels, eq(labels.id, rotation.label_id));
     });
 
     it('re-establishes the same add_time/id order on the outer query after the join', async () => {

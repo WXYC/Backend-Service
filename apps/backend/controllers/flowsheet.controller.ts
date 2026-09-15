@@ -83,6 +83,14 @@ export interface IFSEntry extends Omit<
   | 'composer_source'
 > {
   label_id: number | null;
+  // The rotation release's canonical label (BS#2505), resolved
+  // `rotation.label_id -> labels.label_name` on the read path. Declared here
+  // rather than inherited from `FSEntry` because it is a JOINED value, not a
+  // `flowsheet` column — the same class as `rotation_bin` below and
+  // `on_streaming`/`artist_id` further down, and the reason it is deliberately
+  // absent from CLIENT_FACING_FLOWSHEET_COLUMNS (which is `Pick<FSEntry, ...>`
+  // over the table model, so a joined field cannot appear there at all).
+  rotation_label: string | null;
   rotation_bin: string | null;
   on_streaming: boolean | null;
   // BS#1908 (Not-on-Discogs epic #1280): MD-set discogs-unavailable flag +

@@ -28,7 +28,7 @@
  */
 
 import { jest } from '@jest/globals';
-import { db, library } from '@wxyc/database';
+import { db, library, rotation, album_metadata, labels } from '@wxyc/database';
 import {
   getEntriesByPage,
   getEntriesByRange,
@@ -120,9 +120,12 @@ describe('flowsheet.service — discogs-unavailable SQL projection (BS#1908)', (
 
       const joinedTables = capture.leftJoinCalls.map((c) => c.table);
       expect(joinedTables).toContain(library);
-      // Still exactly 3 leftJoins (rotation, library, album_metadata) — the
-      // flag didn't add a 4th join or a second query.
-      expect(capture.leftJoinCalls).toHaveLength(3);
+      // The flag rides the EXISTING library join and adds no join of its own —
+      // that is what this assertion is about, and it still holds. The count
+      // moved 3 -> 4 when BS#2505 added `labels` for `rotation_label`; pinning
+      // the exact set rather than the bare number keeps the original meaning
+      // (no join was added FOR THE FLAG) legible after a legitimate addition.
+      expect(joinedTables).toEqual([rotation, library, album_metadata, labels]);
     });
 
     it('issues a constant number of db.select calls regardless of page size (no N+1)', async () => {
@@ -147,6 +150,7 @@ const makeRaw = (overrides: Partial<FSEntryRaw> = {}): FSEntryRaw => ({
   track_title: 'Call Your Name',
   track_position: null,
   record_label: 'self-released',
+  rotation_label: null,
   label_id: null,
   rotation_id: null,
   rotation_bin: null,
