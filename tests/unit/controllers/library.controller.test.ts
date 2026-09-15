@@ -2921,7 +2921,11 @@ describe('library.controller', () => {
 
       await getUncataloguedRotation(req, res, next);
 
-      expect(mockGetUncataloguedRotationFromDB).toHaveBeenCalledWith({ limit: undefined, offset: undefined });
+      expect(mockGetUncataloguedRotationFromDB).toHaveBeenCalledWith({
+        limit: undefined,
+        offset: undefined,
+        status: undefined,
+      });
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith(rows);
     });
@@ -2933,7 +2937,61 @@ describe('library.controller', () => {
 
       await getUncataloguedRotation(req, res, next);
 
-      expect(mockGetUncataloguedRotationFromDB).toHaveBeenCalledWith({ limit: 50, offset: 100 });
+      expect(mockGetUncataloguedRotationFromDB).toHaveBeenCalledWith({ limit: 50, offset: 100, status: undefined });
+    });
+
+    // BS#2504: `?status=` mirrors `GET /library/rotation`'s vocabulary so the
+    // killed backlog — the librarian's weekly worklist — is servable
+    // most-recently-killed first instead of scattered through a ~3.8k-row
+    // add-date-ordered cohort the 500-row cap then truncates.
+    describe('status (BS#2504)', () => {
+      it.each([['active'], ['killed'], ['all']])('passes %s through to the query', async (status) => {
+        mockGetUncataloguedRotationFromDB.mockResolvedValue([]);
+        const req = { query: { status } } as unknown as Request;
+        const res = mockResponse();
+
+        await getUncataloguedRotation(req, res, next);
+
+        expect(mockGetUncataloguedRotationFromDB).toHaveBeenCalledWith({
+          limit: undefined,
+          offset: undefined,
+          status,
+        });
+      });
+
+      // The parameter is optional and stays so: an omitted `status` reaches the
+      // query as `undefined`, never as a controller-chosen default. The default
+      // belongs to the read (see `getUncataloguedRotationFromDB`), and it is
+      // `all` rather than the sibling endpoint's `active` — this endpoint's
+      // back-compatible baseline is unfiltered.
+      it('does not substitute a default for an omitted status', async () => {
+        mockGetUncataloguedRotationFromDB.mockResolvedValue([]);
+        const req = { query: { limit: '10' } } as unknown as Request;
+        const res = mockResponse();
+
+        await getUncataloguedRotation(req, res, next);
+
+        const [args] = mockGetUncataloguedRotationFromDB.mock.calls[0] as [Record<string, unknown>];
+        expect(args.status).toBeUndefined();
+      });
+
+      it.each([['inactive'], ['KILLED'], [''], ['dead']])('returns 400 for status=%s', async (status) => {
+        const req = { query: { status } } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(getUncataloguedRotation(req, res, next)).rejects.toThrow('status must be one of');
+        expect(mockGetUncataloguedRotationFromDB).not.toHaveBeenCalled();
+      });
+
+      // Express's `simple` query parser yields string[] for a repeated key,
+      // which `.includes` rejects — a 400 rather than a driver-level 500.
+      it('returns 400 for a repeated status', async () => {
+        const req = { query: { status: ['active', 'killed'] } } as unknown as Request;
+        const res = mockResponse();
+
+        await expect(getUncataloguedRotation(req, res, next)).rejects.toThrow('status must be one of');
+        expect(mockGetUncataloguedRotationFromDB).not.toHaveBeenCalled();
+      });
     });
 
     it.each(['0', '501', 'abc', '10abc', '1.5', '-1'])('returns 400 for limit=%s', async (limit) => {

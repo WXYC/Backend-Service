@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, SQL, type Column } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, notInArray, or, sql, SQL, type Column } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
@@ -1513,8 +1513,16 @@ export function toRotationRowSummary(row: RotationRelease): UncataloguedRotation
  */
 export const UNCATALOGUED_ROTATION_MAX_LIMIT = 500;
 
-/** Optional window over the queue. `limit` defaults to the max above. */
-export type UncataloguedRotationPage = { limit?: number; offset?: number };
+/**
+ * Optional window over the queue. `limit` defaults to the max above.
+ *
+ * `status` (BS#2504) borrows `GET /library/rotation`'s vocabulary and NOT its
+ * default. There it defaults to `active`; here it defaults to `all`, because
+ * this endpoint shipped unfiltered and dj-site's "Awaiting Cataloging" facet
+ * reads it unparameterised — so an omitted `status` has to keep returning
+ * today's rows in today's order.
+ */
+export type UncataloguedRotationPage = { limit?: number; offset?: number; status?: RotationStatus };
 
 /**
  * Read-side query for `GET /library/rotation/uncatalogued` (BS#2109).
@@ -1546,16 +1554,63 @@ export type UncataloguedRotationPage = { limit?: number; offset?: number };
  * also sargable against `album_id_idx`, which `COALESCE(...)` was not.
  * `addRotation` (400 on `album_id: 0`) and `linkRotationToAlbum`
  * (`isNull(rotation.album_id)`) agree with this reading.
+ *
+ * **`status` (BS#2504) narrows the backlog and, for `killed`, reorders it.**
+ * The killed half is the librarian's weekly worklist — the releases the music
+ * director killed in the last week, which go into the "for library" bin to be
+ * catalogued and stickered. A rotation release's add date is uncorrelated with
+ * its kill date, so add-date order scatters those through the whole ~3.8k-row
+ * cohort and the 500-row cap frequently leaves a promo added a year ago and
+ * killed yesterday out of the response entirely. The client cannot repair
+ * that: sorting the delivered page reorders the wrong 500 rows.
+ *
+ * `killed` therefore orders `kill_date DESC, id ASC`, matching `/wxycdb`'s
+ * `RotationReleaseRepositoryImpl.findKilledUncataloged()`. `active` and `all`
+ * keep the add-date order. `id` follows in both so the sort is total and
+ * `offset` paging cannot skip or repeat a row.
+ *
+ * Two deliberate asymmetries with the `?status=` on `GET /library/rotation`:
+ *
+ *   - **The default is `all`, not `active`.** This endpoint shipped
+ *     unfiltered; an omitted parameter must return exactly what it returned
+ *     before, which is why the unfiltered branch is written out rather than
+ *     assembled through `and(..., undefined)`.
+ *   - **`active` and `killed` do not partition.** `active` is the canonical
+ *     `rotationActiveSql()` (`kill_date IS NULL OR kill_date > CURRENT_DATE`,
+ *     the one spelling, BS#2479) while `killed` is "carries a kill_date", so a
+ *     future-dated kill matches both — the same non-partition the sibling
+ *     documents, reproduced rather than quietly diverged from.
+ *
+ * **Index note.** The predicate is still `album_id IS NULL` against
+ * `album_id_idx`; `kill_date` is unindexed, and so is `add_date`. So `killed`
+ * sorts the same bounded cohort the existing add-date ordering already sorts,
+ * on a different key — it does not widen the scan or introduce a sort the
+ * query did not already pay for. (`CURRENT_DATE` is STABLE, not IMMUTABLE, so
+ * a partial index on the active predicate is not available here either; see
+ * the `rotation_card_id_full_idx` note in `schema.ts`.)
  */
 export const getUncataloguedRotationFromDB = async (
   page: UncataloguedRotationPage = {}
 ): Promise<UncataloguedRotationRow[]> => {
-  const { limit = UNCATALOGUED_ROTATION_MAX_LIMIT, offset } = page;
+  const { limit = UNCATALOGUED_ROTATION_MAX_LIMIT, offset, status = 'all' } = page;
+
+  const unlinked = isNull(rotation.album_id);
+  const where =
+    status === 'killed'
+      ? and(unlinked, isNotNull(rotation.kill_date))
+      : status === 'active'
+        ? and(unlinked, rotationActiveSql())
+        : unlinked;
+
   const windowed = db
     .select(UNCATALOGUED_ROTATION_PROJECTION)
     .from(rotation)
-    .where(isNull(rotation.album_id))
-    .orderBy(desc(rotation.add_date), asc(rotation.id))
+    .where(where)
+    .orderBy(
+      ...(status === 'killed'
+        ? ([desc(rotation.kill_date), asc(rotation.id)] as const)
+        : ([desc(rotation.add_date), asc(rotation.id)] as const))
+    )
     .limit(limit);
 
   return offset == null ? windowed : windowed.offset(offset);
