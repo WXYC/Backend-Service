@@ -1461,6 +1461,16 @@ function parseNonNegativeInt(raw: unknown): number | null | undefined {
  * depending on "omit ⇒ everything". dj-site#1161's queue UI pages with
  * `offset`.
  *
+ * Optional `?status=active|killed|all` (BS#2504) narrows the backlog, and for
+ * `killed` reorders it most-recently-killed first — the librarian's weekly
+ * worklist, which add-date order scatters through the cohort and the 500-row
+ * cap then truncates. The vocabulary is `getRotation`'s above and the values
+ * are validated against the same `ROTATION_STATUSES` list, so the two
+ * endpoints cannot drift apart on spelling; the **default differs on purpose**
+ * (`all` here, `active` there) because this endpoint shipped unfiltered and
+ * dj-site's Awaiting Cataloging facet reads it unparameterised. `undefined` is
+ * forwarded as `undefined` — the default is the query's, not this handler's.
+ *
  * ROUTE REGISTRATION ORDER IS LOAD-BEARING — must be registered ahead of any
  * `/rotation/:id`-style parameterized route (see `library.route.ts`), the
  * same trap already documented there for `/catalog` vs
@@ -1481,7 +1491,19 @@ export const getUncataloguedRotation: RequestHandler = async (req, res) => {
     throw new WxycError('Invalid Parameter: offset must be a non-negative integer', 400);
   }
 
-  const rotation = await libraryService.getUncataloguedRotationFromDB({ limit, offset });
+  // Same guard and same message as `getRotation` above. A repeated key arrives
+  // as string[], which `.includes` rejects — a 400 rather than an unhandled
+  // value reaching the query.
+  const { status } = req.query;
+  if (status !== undefined && !ROTATION_STATUSES.includes(status as (typeof ROTATION_STATUSES)[number])) {
+    throw new WxycError(`Invalid Parameter: status must be one of ${ROTATION_STATUSES.join(', ')}`, 400);
+  }
+
+  const rotation = await libraryService.getUncataloguedRotationFromDB({
+    limit,
+    offset,
+    status: status as libraryService.RotationStatus | undefined,
+  });
   res.status(200).json(rotation);
 };
 

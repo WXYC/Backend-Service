@@ -4387,3 +4387,265 @@ describe('Library Album Info', () => {
     });
   });
 });
+
+// BS#2504: `?status=` on the cataloging-backlog queue. The killed half is the
+// librarian's weekly worklist — the releases the music director killed in the
+// last week, which go into the "for library" bin to be catalogued. A rotation
+// release's add date is uncorrelated with its kill date, so add-date order
+// scatters those through the cohort and the 500-row cap frequently leaves a
+// promo added long ago and killed yesterday out of the response entirely.
+describe('GET /library/rotation/uncatalogued — status (BS#2504)', () => {
+  let auth;
+  let sql;
+
+  const seededRotationIds = {};
+
+  const uncatalogued = (query) => auth.get('/library/rotation/uncatalogued').query(query ?? {});
+
+  beforeAll(async () => {
+    auth = createAuthRequest(request, global.access_token);
+    sql = getTestDb();
+
+    // The two anchors are read ONCE, before any insert, and reused as fixed
+    // values. Recomputing `MIN(add_date)` per insert would have made each
+    // seeded row shift the baseline the next one measured against, so the
+    // relative order of the fixtures would depend on their insertion order —
+    // the precise kind of accident these tests exist to rule out. Cast to text
+    // so the driver hands back a plain `YYYY-MM-DD` rather than a Date whose
+    // timezone could move the day.
+    const [anchors] = await sql`
+      SELECT
+        MIN(add_date)::text AS oldest_add,
+        (GREATEST(MAX(kill_date), CURRENT_DATE) + 1)::text AS newest_kill
+      FROM ${sql(SCHEMA)}.rotation`;
+
+    const seed = async (key, artistName, albumTitle, addDate, killDate) => {
+      const [row] = await sql`
+        INSERT INTO ${sql(SCHEMA)}.rotation
+          (album_id, rotation_bin, artist_name, album_title, add_date, kill_date)
+        VALUES (NULL, 'L', ${artistName}, ${albumTitle}, ${addDate}, ${killDate})
+        RETURNING id`;
+      seededRotationIds[key] = row.id;
+    };
+
+    // Date arithmetic in JS, not SQL: `date - $1` leaves the parameter's type
+    // for Postgres to infer, and `date - unknown` is ambiguous between the
+    // integer and interval operators. A fully-formed `YYYY-MM-DD` cast to
+    // `date` has no such ambiguity.
+    const daysBeforeOldestAdd = (n) => {
+      const [y, m, d] = anchors.oldest_add.split('-').map(Number);
+      return sql`${new Date(Date.UTC(y, m - 1, d - n)).toISOString().slice(0, 10)}::date`;
+    };
+
+    // The newest kill in the table, by construction: GREATEST(max, today) + 1
+    // is larger than every existing kill_date whatever the fixture holds,
+    // which is what makes the limit=1 assertion deterministic. It is also
+    // strictly in the future, which is what makes this the row that proves
+    // `active` and `killed` do not partition.
+    await seed(
+      'newestKill',
+      'BS2504 Old Add Newest Kill',
+      'BS2504 Album A',
+      daysBeforeOldestAdd(2),
+      anchors.newest_kill
+    );
+    // Added long ago, killed yesterday: what the librarian's weekly worklist
+    // is actually made of, and the row add-date order buries.
+    await seed(
+      'oldAddKilledYesterday',
+      'BS2504 Old Add Killed Yesterday',
+      'BS2504 Album B',
+      daysBeforeOldestAdd(1),
+      sql`(CURRENT_DATE - 1)`
+    );
+    // Its mirror image: added today, killed long ago.
+    await seed(
+      'recentAddOldKill',
+      'BS2504 Recent Add Old Kill',
+      'BS2504 Album C',
+      sql`CURRENT_DATE`,
+      daysBeforeOldestAdd(3)
+    );
+    await seed('neverKilled', 'BS2504 Never Killed', 'BS2504 Album D', sql`(CURRENT_DATE - 1)`, null);
+  });
+
+  afterAll(async () => {
+    const ids = Object.values(seededRotationIds);
+    if (ids.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.rotation WHERE id IN ${sql(ids)}`;
+    }
+  });
+
+  const idsOf = (res) => res.body.map((r) => r.id);
+  const isSortedDescThenIdAsc = (rows, key) =>
+    rows.every((row, i) => {
+      if (i === 0) return true;
+      const prev = rows[i - 1];
+      if (prev[key] === row[key]) return prev.id < row.id;
+      return prev[key] > row[key];
+    });
+
+  // The hard back-compatibility requirement. dj-site's Awaiting Cataloging
+  // facet reads this endpoint unparameterised and filters kill state
+  // client-side over the delivered page, so an omitted `status` has to return
+  // today's rows in today's order.
+  describe('omitting status', () => {
+    test('still returns the whole unlinked cohort, both killed and unkilled', async () => {
+      const res = await uncatalogued().expect(200);
+
+      expectArray(res);
+      for (const row of res.body) {
+        expect(row.album_id).toBeNull();
+      }
+      expect(res.body.some((r) => r.kill_date !== null)).toBe(true);
+      expect(res.body.some((r) => r.kill_date === null)).toBe(true);
+      // All three seeded rows are in it — nothing is filtered out.
+      for (const id of Object.values(seededRotationIds)) {
+        expect(idsOf(res)).toContain(id);
+      }
+    });
+
+    test('still orders by add_date DESC, id ASC', async () => {
+      const res = await uncatalogued().expect(200);
+
+      expect(isSortedDescThenIdAsc(res.body, 'add_date')).toBe(true);
+    });
+
+    // `all` is this endpoint's default, unlike `GET /library/rotation`'s
+    // `?status=`, which defaults to `active`. Asserted as a whole-body deep
+    // equality rather than by length or first row.
+    test('is byte-identical to an explicit status=all', async () => {
+      const omitted = await uncatalogued().expect(200);
+      const explicit = await uncatalogued({ status: 'all' }).expect(200);
+
+      expect(explicit.body).toEqual(omitted.body);
+    });
+
+    test('still honours limit/offset over the unchanged order', async () => {
+      const all = await uncatalogued().expect(200);
+      const firstPage = await uncatalogued({ limit: 1 }).expect(200);
+      const secondPage = await uncatalogued({ limit: 1, offset: 1 }).expect(200);
+
+      expect(firstPage.body[0].id).toBe(all.body[0].id);
+      expect(secondPage.body[0].id).toBe(all.body[1].id);
+    });
+  });
+
+  describe('status=killed', () => {
+    test('returns only unlinked rows that carry a kill_date', async () => {
+      const res = await uncatalogued({ status: 'killed' }).expect(200);
+
+      expect(res.body.length).toBeGreaterThan(0);
+      for (const row of res.body) {
+        expect(row.album_id).toBeNull();
+        expect(row.kill_date).not.toBeNull();
+      }
+      expect(idsOf(res)).not.toContain(seededRotationIds.neverKilled);
+    });
+
+    test('orders most-recently-killed first, with an id tiebreak', async () => {
+      const res = await uncatalogued({ status: 'killed' }).expect(200);
+
+      expect(isSortedDescThenIdAsc(res.body, 'kill_date')).toBe(true);
+    });
+
+    // The row seeded with the table's largest kill_date is the first one
+    // served, on a single-row page — the endpoint is not merely sorting the
+    // page it would have sent anyway.
+    test('serves the most-recently-killed row first, even at limit=1', async () => {
+      const res = await uncatalogued({ status: 'killed', limit: 1 }).expect(200);
+
+      expect(res.body).toHaveLength(1);
+      expect(res.body[0].id).toBe(seededRotationIds.newestKill);
+
+      const defaultFirstPage = await uncatalogued({ limit: 1 }).expect(200);
+      expect(defaultFirstPage.body[0].id).not.toBe(seededRotationIds.newestKill);
+    });
+
+    // The acceptance criterion, stated as the comparison that gives it
+    // content: a row added long ago and killed yesterday outranks a row added
+    // today and killed long ago — the exact inversion of the default order,
+    // asserted on both facets so neither could pass by accident.
+    test('ranks a long-ago-added, killed-yesterday row above a recently-added, long-ago-killed one', async () => {
+      const killed = idsOf(await uncatalogued({ status: 'killed' }).expect(200));
+      expect(killed.indexOf(seededRotationIds.oldAddKilledYesterday)).toBeLessThan(
+        killed.indexOf(seededRotationIds.recentAddOldKill)
+      );
+
+      const byAddDate = idsOf(await uncatalogued().expect(200));
+      expect(byAddDate.indexOf(seededRotationIds.recentAddOldKill)).toBeLessThan(
+        byAddDate.indexOf(seededRotationIds.oldAddKilledYesterday)
+      );
+    });
+
+    test('pages the kill-date order without skipping or repeating a row', async () => {
+      const all = await uncatalogued({ status: 'killed' }).expect(200);
+      expect(all.body.length).toBeGreaterThan(1);
+
+      const firstPage = await uncatalogued({ status: 'killed', limit: 1 }).expect(200);
+      const secondPage = await uncatalogued({ status: 'killed', limit: 1, offset: 1 }).expect(200);
+
+      expect(firstPage.body[0].id).toBe(all.body[0].id);
+      expect(secondPage.body[0].id).toBe(all.body[1].id);
+      expect(firstPage.body[0].id).not.toBe(secondPage.body[0].id);
+    });
+  });
+
+  describe('status=active', () => {
+    // Deliberately NOT the complement of `killed`: a future-dated kill matches
+    // both, the same non-partition `GET /library/rotation` documents, because
+    // the canonical predicate is `kill_date IS NULL OR kill_date > CURRENT_DATE`.
+    test('returns unlinked rows that are not yet killed, in add-date order', async () => {
+      const res = await uncatalogued({ status: 'active' }).expect(200);
+
+      expect(res.body.length).toBeGreaterThan(0);
+      for (const row of res.body) {
+        expect(row.album_id).toBeNull();
+        expect(row.kill_date === null || row.kill_date > new Date().toISOString().slice(0, 10)).toBe(true);
+      }
+      expect(idsOf(res)).toContain(seededRotationIds.neverKilled);
+      expect(idsOf(res)).not.toContain(seededRotationIds.recentAddOldKill);
+      expect(idsOf(res)).not.toContain(seededRotationIds.oldAddKilledYesterday);
+      expect(isSortedDescThenIdAsc(res.body, 'add_date')).toBe(true);
+    });
+
+    test('and killed do not partition: a future-dated kill is in both', async () => {
+      const active = await uncatalogued({ status: 'active' }).expect(200);
+      const killed = await uncatalogued({ status: 'killed' }).expect(200);
+
+      const futureKill = seededRotationIds.newestKill;
+      expect(idsOf(active)).toContain(futureKill);
+      expect(idsOf(killed)).toContain(futureKill);
+    });
+  });
+
+  test.each([['active'], ['killed'], ['all']])('publishes the same projection for status=%s', async (status) => {
+    const res = await uncatalogued({ status }).expect(200);
+
+    expect(res.body.length).toBeGreaterThan(0);
+    expect(Object.keys(res.body[0]).sort()).toEqual([
+      'add_date',
+      'album_id',
+      'album_title',
+      'artist_name',
+      'format_id',
+      'id',
+      'kill_date',
+      'label_id',
+      'record_label',
+      'rotation_bin',
+    ]);
+  });
+
+  test.each([['dead'], ['KILLED'], ['']])('400s on status=%s, matching the limit/offset refusal shape', async (bad) => {
+    const res = await uncatalogued({ status: bad }).expect(400);
+
+    expectErrorContains(res, 'status must be one of');
+  });
+
+  test('400s on a repeated status', async () => {
+    const res = await auth.get('/library/rotation/uncatalogued?status=active&status=killed').expect(400);
+
+    expectErrorContains(res, 'status must be one of');
+  });
+});

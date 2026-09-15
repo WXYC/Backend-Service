@@ -25,7 +25,7 @@
  * read gets its terminal method's resolved value overridden per test.
  */
 import { jest } from '@jest/globals';
-import { db, createMockQueryChain, rotation, library, flowsheet } from '../../mocks/database.mock';
+import { db, createMockQueryChain, rotation, library, flowsheet, rotationActiveSql } from '../../mocks/database.mock';
 
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockIsLmlConfigured = jest.fn<() => boolean>();
@@ -159,6 +159,120 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
     await getUncataloguedRotationFromDB({ limit: 50, offset: 100 });
     expect(pagedChain.limit).toHaveBeenCalledWith(50);
     expect(pagedChain.offset).toHaveBeenCalledWith(100);
+  });
+
+  /**
+   * BS#2504 back-compatibility pin. `?status=` is new and OPTIONAL, and
+   * omitting it must return today's rows in today's order — dj-site's
+   * "Awaiting Cataloging" facet reads this endpoint unparameterised and
+   * filters kill state client-side over the delivered page.
+   *
+   * Asserted as the WHOLE predicate and the WHOLE ordering rather than by
+   * substring, so a status branch that leaked an always-on conjunct (even a
+   * tautological one) or reordered the default fails here. `and(...)` in the
+   * project-wide drizzle mock does not drop `undefined` conditions, which is
+   * exactly why the query branches explicitly instead of relying on it to.
+   */
+  it('omitting status leaves the predicate and the ordering byte-identical to the pre-BS#2504 query', async () => {
+    const chain = createMockQueryChain([]);
+    chain.orderBy = jest.fn().mockReturnValue(chain);
+    chain.limit = jest.fn().mockResolvedValue([]);
+    db.select.mockReturnValue(chain);
+
+    await getUncataloguedRotationFromDB();
+
+    expect(chain.where).toHaveBeenCalledTimes(1);
+    expect(chain.where).toHaveBeenCalledWith({ isNull: rotation.album_id });
+    expect(chain.orderBy).toHaveBeenCalledWith({ desc: rotation.add_date }, { asc: rotation.id });
+  });
+
+  describe('status (BS#2504)', () => {
+    function mockRead() {
+      const chain = createMockQueryChain([]);
+      chain.orderBy = jest.fn().mockReturnValue(chain);
+      chain.limit = jest.fn().mockResolvedValue([]);
+      db.select.mockReturnValue(chain);
+      return chain;
+    }
+
+    // `all` is the DEFAULT here, unlike `GET /library/rotation`, whose own
+    // `?status=` defaults to `active`. The two endpoints share the vocabulary
+    // and not the default: this one's back-compatible baseline is unfiltered,
+    // so `all` and an omitted parameter have to produce the same query.
+    it('treats an explicit all exactly like an omitted status', async () => {
+      const omitted = mockRead();
+      await getUncataloguedRotationFromDB();
+      const omittedWhere = omitted.where.mock.calls[0];
+      const omittedOrder = omitted.orderBy.mock.calls[0];
+
+      const explicit = mockRead();
+      await getUncataloguedRotationFromDB({ status: 'all' });
+
+      expect(explicit.where.mock.calls[0]).toEqual(omittedWhere);
+      expect(explicit.orderBy.mock.calls[0]).toEqual(omittedOrder);
+    });
+
+    // The point of the issue: kill-date-ordered, so a promo added a year ago
+    // and killed yesterday is on the first page instead of scattered through
+    // the add-date cohort and cut off by the 500-row cap. `id` follows to make
+    // the order total, so `offset` paging cannot skip or repeat a row.
+    it('orders killed rows most-recently-killed first, with a total-order id tiebreak', async () => {
+      const chain = mockRead();
+
+      await getUncataloguedRotationFromDB({ status: 'killed' });
+
+      expect(chain.where).toHaveBeenCalledWith({
+        and: [{ isNull: rotation.album_id }, { isNotNull: rotation.kill_date }],
+      });
+      expect(chain.orderBy).toHaveBeenCalledWith({ desc: rotation.kill_date }, { asc: rotation.id });
+    });
+
+    // `active` consumes the canonical `rotationActiveSql()` fragment rather
+    // than retyping `kill_date IS NULL`, which is both the BS#2479 rule and
+    // the reason a future-dated kill matches BOTH `active` and `killed` —
+    // the same deliberate non-partition `getRotationFromDB` documents.
+    it('filters active rows through the canonical active predicate, keeping the add-date order', async () => {
+      const chain = mockRead();
+
+      await getUncataloguedRotationFromDB({ status: 'active' });
+
+      expect(chain.where).toHaveBeenCalledWith({
+        and: [{ isNull: rotation.album_id }, rotationActiveSql()],
+      });
+      expect(chain.orderBy).toHaveBeenCalledWith({ desc: rotation.add_date }, { asc: rotation.id });
+    });
+
+    it('still bounds a status-filtered read with the same limit/offset window', async () => {
+      const chain = createMockQueryChain([]);
+      chain.orderBy = jest.fn().mockReturnValue(chain);
+      chain.limit = jest.fn().mockReturnValue(chain);
+      chain.offset = jest.fn().mockResolvedValue([]);
+      db.select.mockReturnValue(chain);
+
+      await getUncataloguedRotationFromDB({ status: 'killed', limit: 50, offset: 100 });
+
+      expect(chain.limit).toHaveBeenCalledWith(50);
+      expect(chain.offset).toHaveBeenCalledWith(100);
+    });
+
+    it('defaults a status-filtered read to the same 500 ceiling', async () => {
+      const chain = mockRead();
+
+      await getUncataloguedRotationFromDB({ status: 'killed' });
+
+      expect(chain.limit).toHaveBeenCalledWith(UNCATALOGUED_ROTATION_MAX_LIMIT);
+      expect(chain.offset).not.toHaveBeenCalled();
+    });
+
+    // The projection is the published contract and does not vary by facet.
+    it.each([['active'], ['killed'], ['all']])('projects the same published column set for %s', async (status) => {
+      mockRead();
+
+      await getUncataloguedRotationFromDB({ status: status as 'active' | 'killed' | 'all' });
+
+      const projection = db.select.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
+      expect(Object.keys(projection ?? {}).sort()).toEqual(PUBLISHED_ROTATION_COLUMNS);
+    });
   });
 
   it('surfaces two same-artist/same-title unlinked rows both (no collapse)', async () => {

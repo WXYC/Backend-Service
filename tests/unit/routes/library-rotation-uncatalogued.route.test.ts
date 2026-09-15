@@ -168,6 +168,47 @@ describe('GET /library/rotation/uncatalogued — route registration order (BS#21
     expect(mockGetRotationRowFromDB).not.toHaveBeenCalled();
   });
 
+  // BS#2504 added `?status=` to this endpoint. A query string is not part of
+  // the path Express matches on, so it cannot change which layer wins — but
+  // the literal-vs-`:id` pair is exactly the place where a "surely this is
+  // fine" assumption has cost time before, and the parameterized sibling now
+  // accepts anything in that segment. Pin it: the parameterized handler must
+  // stay untouched, and the status must reach the queue query.
+  test.each([['active'], ['killed'], ['all']])(
+    'the literal path still reaches getUncataloguedRotation with ?status=%s',
+    async (status) => {
+      mockGetUncataloguedRotationFromDB.mockReset().mockResolvedValue([]);
+      mockGetRotationRowFromDB.mockReset();
+
+      const res = await request(app)
+        .get('/library/rotation/uncatalogued')
+        .query({ status })
+        .set('Authorization', 'Bearer test-token');
+
+      expect(res.status).toBe(200);
+      expect(mockGetUncataloguedRotationFromDB).toHaveBeenCalledWith({
+        limit: undefined,
+        offset: undefined,
+        status,
+      });
+      expect(mockGetRotationRowFromDB).not.toHaveBeenCalled();
+    }
+  );
+
+  test('rejects an unknown ?status= with a 400 rather than routing elsewhere', async () => {
+    mockGetUncataloguedRotationFromDB.mockReset();
+    mockGetRotationRowFromDB.mockReset();
+
+    const res = await request(app)
+      .get('/library/rotation/uncatalogued')
+      .query({ status: 'dead' })
+      .set('Authorization', 'Bearer test-token');
+
+    expect(res.status).toBe(400);
+    expect(mockGetUncataloguedRotationFromDB).not.toHaveBeenCalled();
+    expect(mockGetRotationRowFromDB).not.toHaveBeenCalled();
+  });
+
   // The negative above only means something if the parameterized GET is
   // reachable at all. Without this, deleting `GET /rotation/:id` from the
   // router would leave the whole block green.
