@@ -40,7 +40,7 @@ jest.mock('@wxyc/database', () => {
 import { buildRecentShowsQuery, buildRecentShowDJsQuery } from '../../../apps/backend/services/flowsheet.service';
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
-const page = buildRecentShowsQuery(new Date('2026-09-14T22:00:00.000Z'), 200).toSQL();
+const page = buildRecentShowsQuery(new Date('2026-09-14T22:00:00.000Z')).toSQL();
 const membership = buildRecentShowDJsQuery([10, 11]).toSQL();
 
 describe('buildRecentShowsQuery — rendered statement (BS#2435)', () => {
@@ -92,11 +92,16 @@ describe('buildRecentShowDJsQuery — rendered statement (BS#2435)', () => {
     expect(membership.params.slice(0, 2)).toEqual([10, 11]);
   });
 
-  it('counts only active members, matching djs-on-air', () => {
-    // `getDJsInShow(show_id, true)` — the read behind `djs-on-air` — filters on
-    // `active`. Without the same filter here a DJ who left mid-show would be
-    // reported as having had the room for its whole length.
-    expect(membership.sql).toContain(`"${SCHEMA}"."show_djs"."active" = $3`);
+  it('does not filter on active, unlike djs-on-air', () => {
+    // `getDJsInShow(show_id, true)` filters `active` because `djs-on-air` asks
+    // who is in the room RIGHT NOW. This read asks who was on each show, and
+    // `endShow` clears `active` on every remaining membership at close — so on
+    // a closed show the flag records only that the show ended. Filtering it
+    // would return zero members for every properly-ended show, falling through
+    // to the show-level chain and reporting one `{ id: null }` primary where
+    // the co-hosts were. Closed shows are most of a 24-hour window, so that is
+    // the endpoint's own purpose defeated.
+    expect(membership.sql).not.toContain(`"${SCHEMA}"."show_djs"."active"`);
   });
 
   it('joins auth_user for the handle and orders deterministically', () => {

@@ -110,7 +110,7 @@ describe('getRecentShows', () => {
     expect(shows.map((s) => s.id)).toEqual([3, 2, 1]);
   });
 
-  it('groups every active account DJ onto their own show', async () => {
+  it('groups every account DJ onto their own show', async () => {
     primeReads({
       rows: [row({ id: 10 }), row({ id: 11 })],
       members: [

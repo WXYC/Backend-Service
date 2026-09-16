@@ -2065,7 +2065,7 @@ export type RecentShowsResult = { shows: RecentShow[] };
  * here aggregates or fans out, so the `LIMIT` sits directly on top of an
  * ordered index scan and the 1:1 join to `auth_user` rides along bounded.
  */
-export const buildRecentShowsQuery = (windowFloor: Date, limit: number = RECENT_SHOWS_MAX_ROWS) =>
+export const buildRecentShowsQuery = (windowFloor: Date) =>
   db
     .select({
       id: shows.id,
@@ -2082,15 +2082,23 @@ export const buildRecentShowsQuery = (windowFloor: Date, limit: number = RECENT_
     .leftJoin(user, eq(user.id, shows.primary_dj_id))
     .where(gte(shows.start_time, windowFloor))
     .orderBy(desc(shows.start_time), desc(shows.id))
-    .limit(limit);
+    .limit(RECENT_SHOWS_MAX_ROWS);
 
 /**
- * Active `show_djs` membership for a whole page of shows, in ONE statement —
- * exported alongside its sibling so a unit test can pin that property.
+ * `show_djs` membership for a whole page of shows, in ONE statement — exported
+ * alongside its sibling so a unit test can pin that property.
  *
- * `active` is filtered for the same reason `getDJsInShow(id, true)` filters it
- * behind `djs-on-air`: a co-host who left mid-show did not have the room for
- * the show's whole length.
+ * `active` is deliberately NOT filtered, which is where this read parts company
+ * with `getDJsInShow(id, true)` behind `djs-on-air`. That flag answers "is this
+ * DJ in the room right now", and `endShow` clears it on every remaining
+ * membership at close. So on a closed show it no longer separates "left early"
+ * from "stayed to the end" — it only records that the show ended, which every
+ * closed row here has done. Filtering it would empty the member list for every
+ * properly-ended show and fall through to the show-level chain, reporting one
+ * `{ id: null }` primary where the co-hosts were — and `id: null` is documented
+ * as meaning "legacy DJ with no account", which these DJs are not. The
+ * historical read `getShowMetadata` avoids the same trap by passing
+ * `getDJsInShow(id, false)`.
  *
  * Ordered by `(show_id, auth_user.id)` purely for determinism — `show_djs`
  * carries no join timestamp and no serial id, so there is no "who arrived
@@ -2103,7 +2111,7 @@ export const buildRecentShowDJsQuery = (showIds: number[]) =>
     .select({ show_id: show_djs.show_id, id: user.id, djName: user.djName })
     .from(show_djs)
     .innerJoin(user, eq(user.id, show_djs.dj_id))
-    .where(and(inArray(show_djs.show_id, showIds), eq(show_djs.active, true)))
+    .where(inArray(show_djs.show_id, showIds))
     .orderBy(asc(show_djs.show_id), asc(user.id));
 
 /**
@@ -2119,8 +2127,13 @@ export const buildRecentShowDJsQuery = (showIds: number[]) =>
  * real names on a licensing argument the ticket takes apart: the tubafrenzy
  * control it cites was a "Resume a Show" picker whose `djID` was hardcoded to
  * zero, over a rolling 24 hours that retained nothing. Handles answer "who had
- * the room", which is the operational question, and `auth_user.real_name` is
- * not an input to any chain reachable from here (docs/pii.md).
+ * the room", which is the operational question. Neither query selects
+ * `auth_user.real_name`, and no chain reachable from here reads it. That is the
+ * claim this makes and the only one it can: `shows.legacy_dj_name` feeds
+ * `resolveShowDjName`, and docs/pii.md records 839 of those values as roster
+ * legal names, so a legacy show's handle is not provably real-name-free by
+ * construction the way the account arm is (unreachable at the 168 h ceiling
+ * today — every such show predates it).
  *
  * Two statements for the whole page, never one per show: the bounded `shows`
  * window, then one `show_djs` read scoped to the ids that survived it. The
@@ -2132,7 +2145,7 @@ export const getRecentShows = async (
   windowHours: number = RECENT_SHOWS_DEFAULT_WINDOW_HOURS
 ): Promise<RecentShowsResult> => {
   const windowFloor = new Date(Date.now() - windowHours * 60 * 60 * 1000);
-  const rows = await buildRecentShowsQuery(windowFloor, RECENT_SHOWS_MAX_ROWS);
+  const rows = await buildRecentShowsQuery(windowFloor);
   if (rows.length === 0) return { shows: [] };
 
   const members = await buildRecentShowDJsQuery(rows.map((row) => row.id));
