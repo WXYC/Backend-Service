@@ -1,0 +1,35 @@
+-- 0169 library.artwork_lookup_attempted_at (BS#2522): the attempt-at marker for
+-- the search-path artwork warm.
+--
+-- `enrichWithArtwork` (apps/backend/services/library.service.ts) asks LML for a
+-- cover whenever a search returns a row with `artwork_url IS NULL`, and until
+-- now it recorded nothing when the answer was "there is no cover." A release LML
+-- cannot resolve therefore stayed NULL, was re-selected as un-cached by the very
+-- next search that returned it, and was re-asked forever. This column is where
+-- that definitive no-match is written so the next search can skip it.
+--
+-- Stamped ONLY on a responded no-match (the trust gate rejected the match, or
+-- the match carried no usable cover), left NULL on transient failures — timeout,
+-- 5xx, network, or a BS#1748 limiter shed / open breaker — which must stay
+-- immediately retryable. That is BS#1089's rule; see docs/migrations.md
+-- §Attempt-at markers for the shared shape this follows, and note the one
+-- deviation it records: re-attempt here is the searches themselves once a stamp
+-- ages out of the 7-day window, not a cron or warm walker.
+--
+-- Lock behavior: a nullable ADD COLUMN with no DEFAULT is catalog-only on PG11+
+-- — no table rewrite, no per-row work, so the AccessExclusiveLock on `library`
+-- is held only for the catalog update (and then to the COMMIT of the whole
+-- pending-migration batch, per docs/migrations.md's `single-transaction-migrate`
+-- rule). Expected duration: sub-second, independent of row count.
+--
+-- No backfill: NULL is the correct initial value for every existing row. It
+-- means "never attempted", which is exactly true, and leaves the whole table
+-- eligible on the next search — the same state the code is in today.
+--
+-- No index. The column is only ever read alongside an `id = ANY(...)` restriction
+-- of at most a page of search results, so the PK index already reduces the scan
+-- to those rows before this predicate is evaluated.
+--
+-- @no-precondition-needed: adds a nullable column with no DEFAULT and no
+-- constraint, so there is no invariant existing rows could violate.
+ALTER TABLE "wxyc_schema"."library" ADD COLUMN "artwork_lookup_attempted_at" timestamp with time zone;

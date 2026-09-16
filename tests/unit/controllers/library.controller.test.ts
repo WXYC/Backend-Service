@@ -3573,7 +3573,7 @@ describe('library.controller', () => {
 
       await searchLibraryQueryEndpoint(req, res, next);
 
-      expect(mockEnrichWithArtwork).toHaveBeenCalledWith(results);
+      expect(mockEnrichWithArtwork).toHaveBeenCalledWith(results, { maxLookups: ARTWORK_WARM_MAX_ROWS });
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ results, total: 1 }));
     });
@@ -3612,7 +3612,7 @@ describe('library.controller', () => {
       expect(results[0].artwork_url).toBe('https://i.discogs.com/doga.jpg');
     });
 
-    it('caps the warm at ARTWORK_WARM_MAX_ROWS un-cached rows', async () => {
+    it('bounds the warm with a lookup budget rather than a pre-sliced page', async () => {
       const results = Array.from({ length: 50 }, (_, i) => ({
         id: i + 1,
         artist_name: 'Stereolab',
@@ -3626,7 +3626,13 @@ describe('library.controller', () => {
 
       await searchLibraryQueryEndpoint(req, res, next);
 
-      expect(mockEnrichWithArtwork.mock.calls[0][0]).toHaveLength(ARTWORK_WARM_MAX_ROWS);
+      // The bound is `maxLookups`, applied inside the service AFTER it drops
+      // rows carrying a fresh negative marker. Slicing here instead would spend
+      // the whole budget on the same unresolvable head rows on every search and
+      // never reach the ones behind them, so handing over the full un-warmed
+      // page is load-bearing, not laziness.
+      expect(mockEnrichWithArtwork.mock.calls[0][0]).toHaveLength(50);
+      expect(mockEnrichWithArtwork.mock.calls[0][1]).toEqual({ maxLookups: ARTWORK_WARM_MAX_ROWS });
       // The full page still reaches the client; only the warm is bounded.
       expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ total: 50 }));
     });
@@ -3646,7 +3652,7 @@ describe('library.controller', () => {
 
       await searchLibraryQueryEndpoint(req, res, next);
 
-      expect(mockEnrichWithArtwork).toHaveBeenCalledWith([uncached]);
+      expect(mockEnrichWithArtwork).toHaveBeenCalledWith([uncached], { maxLookups: ARTWORK_WARM_MAX_ROWS });
     });
 
     it('does not warm when every row already carries artwork', async () => {

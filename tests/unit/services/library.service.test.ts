@@ -2117,8 +2117,32 @@ describe('library.service', () => {
   });
 
   describe('enrichWithArtwork', () => {
+    /**
+     * Stand up the BS#2522 negative-marker read that `enrichWithArtwork` issues
+     * before it spends any LML call. `suppressedIds` is the set the read
+     * resolves to — rows whose `artwork_lookup_attempted_at` is still inside the
+     * window — so `[]` (the default) means "nothing suppressed", the state every
+     * pre-existing test in this block assumes. Returns the chain so a test can
+     * inspect the predicate the read was built with.
+     */
+    function mockNegativeMarkerRead(suppressedIds: number[] = []) {
+      const chain = createMockQueryChain();
+      chain.where = jest.fn<() => Promise<{ id: number }[]>>().mockResolvedValue(suppressedIds.map((id) => ({ id })));
+      db.select.mockReturnValue(chain);
+      return chain;
+    }
+
+    /** The `db.update(...)` chain the marker stamp writes through. */
+    function mockStampWrite() {
+      const chain = createMockQueryChain();
+      db.update.mockReturnValue(chain);
+      chain.returning = jest.fn<() => Promise<unknown[]>>().mockResolvedValue([]);
+      return chain;
+    }
+
     beforeEach(() => {
       mockIsLmlConfigured.mockReturnValue(true);
+      mockNegativeMarkerRead();
     });
 
     it('returns results unchanged when LML is not configured', async () => {
@@ -2215,12 +2239,17 @@ describe('library.service', () => {
         found_on_compilation: false,
       });
 
+      const stamp = mockStampWrite();
       const results = [{ id: 1, artist_name: 'Unknown Artist', album_title: 'Unknown Album', artwork_url: null }];
 
       const enriched = await enrichWithArtwork(results);
 
       expect(enriched[0].artwork_url).toBeNull();
-      expect(db.update).not.toHaveBeenCalled();
+      // A direct match with no usable cover is a definitive "no artwork", not a
+      // failure to ask — so it stamps the negative marker (BS#2522) rather than
+      // writing nothing. The write is the marker, never `artwork_url` itself.
+      const setArg = stamp.set.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(Object.keys(setArg)).toEqual(['artwork_lookup_attempted_at']);
     });
 
     it('handles LML failure gracefully without throwing', async () => {
@@ -2289,12 +2318,191 @@ describe('library.service', () => {
         song_not_found: false,
       });
 
+      const stamp = mockStampWrite();
       const results = [{ id: 1, artist_name: 'Obscure Artist', album_title: 'Rare Album', artwork_url: null }];
 
       const enriched = await enrichWithArtwork(results);
 
       expect(enriched[0].artwork_url).toBeNull();
-      expect(db.update).not.toHaveBeenCalled();
+      const setArg = stamp.set.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(Object.keys(setArg)).toEqual(['artwork_lookup_attempted_at']);
+    });
+
+    /**
+     * BS#2522's negative marker. The discrimination these tests pin is the one
+     * BS#1089 demands and BS#1890 reopened: a *responded* no-match is durable
+     * knowledge and gets persisted, while a transient failure must leave the row
+     * immediately retryable. The two are separable here only because the lookup
+     * coordinator re-throws transients — a limiter shed, an open breaker, a
+     * timeout — instead of folding them into its `null` return, so the rejected
+     * `Promise.allSettled` arm is the discriminator. A test that let a throw
+     * stamp would be pinning the exact regression #1890 was filed for.
+     */
+    describe('negative marker', () => {
+      const untrustedMatch = {
+        results: [
+          {
+            library_item: { id: 7, title: 'Edits', artist: 'Chuquimamani-Condori', call_number: '', library_url: '' },
+            artwork: {
+              release_id: 555,
+              release_url: 'https://www.discogs.com/release/555',
+              artwork_url: 'https://i.discogs.com/edits.jpg',
+              confidence: 0.4,
+            },
+          },
+        ],
+        // The call site passes `requireSearchType: 'direct'`, so the coordinator's
+        // trust gate turns this into the `null` return that means "asked, and the
+        // answer was not good enough to use" — a definitive outcome, not a failure.
+        search_type: 'fallback',
+        song_not_found: false,
+        found_on_compilation: false,
+      };
+
+      it('stamps the marker with the database clock when the trust gate rejects the match', async () => {
+        mockLookupMetadata.mockResolvedValue(untrustedMatch);
+        const stamp = mockStampWrite();
+
+        await enrichWithArtwork([
+          { id: 7, artist_name: 'Chuquimamani-Condori', album_title: 'Edits', artwork_url: null },
+        ]);
+
+        const setArg = stamp.set.mock.calls[0]?.[0] as { artwork_lookup_attempted_at?: { sql?: ArrayLike<string> } };
+        // `NOW()` rather than a JS `new Date()`: the stamp and every other
+        // attempt-at marker in this schema record the server's clock, so a
+        // skewed app container can't write a timestamp the window then reads
+        // back as already-expired (or years in the future).
+        expect(Array.from(setArg.artwork_lookup_attempted_at?.sql ?? []).join('')).toBe('NOW()');
+      });
+
+      it('stamps under the same isNull(artwork_url) guard updateArtworkUrl uses', async () => {
+        mockLookupMetadata.mockResolvedValue(untrustedMatch);
+        const stamp = mockStampWrite();
+
+        await enrichWithArtwork([
+          { id: 7, artist_name: 'Chuquimamani-Condori', album_title: 'Edits', artwork_url: null },
+        ]);
+
+        // BS#718's race guard, borrowed: if a concurrent writer landed real
+        // artwork while this lookup was in flight, the row is answered and must
+        // not also be marked "we looked and found nothing".
+        expect(stamp.where.mock.calls[0]?.[0]).toEqual({
+          and: [{ eq: ['library.id', 7] }, { isNull: 'library.artwork_url' }],
+        });
+      });
+
+      it('stamps nothing when the lookup throws', async () => {
+        mockLookupMetadata.mockRejectedValue(new Error('LML timeout'));
+
+        await enrichWithArtwork([
+          { id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null },
+        ]);
+
+        // A timeout, a 5xx, or a BS#1748 limiter shed is "couldn't ask", not
+        // "asked and missed" — stamping here would suppress a resolvable row
+        // for the whole window on the strength of one bad minute.
+        expect(db.update).not.toHaveBeenCalled();
+      });
+
+      it('spends no LML call on a row whose marker is still fresh', async () => {
+        mockNegativeMarkerRead([7]);
+
+        const results = [{ id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null }];
+        const enriched = await enrichWithArtwork(results);
+
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+        expect(enriched[0].artwork_url).toBeNull();
+      });
+
+      it('reads the marker only for rows that still lack artwork, over the 7-day window', async () => {
+        const read = mockNegativeMarkerRead();
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+        mockStampWrite();
+
+        await enrichWithArtwork([
+          { id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null },
+          { id: 8, artist_name: 'Juana Molina', album_title: 'DOGA', artwork_url: 'https://i.discogs.com/doga.jpg' },
+        ]);
+
+        const where = read.where.mock.calls[0]?.[0] as {
+          and: [{ inArray: [string, number[]] }, { gt: [string, Date] }];
+        };
+        // Row 8 is already answered, so it is never asked about — the marker is
+        // a lookup-suppression record, and a row with artwork is suppressed by
+        // the artwork itself.
+        expect(where.and[0]).toEqual({ inArray: ['library.id', [7]] });
+        const [markerColumn, cutoff] = where.and[1].gt;
+        expect(markerColumn).toBe('library.artwork_lookup_attempted_at');
+        const ageDays = (Date.now() - cutoff.getTime()) / (24 * 60 * 60 * 1000);
+        expect(ageDays).toBeGreaterThan(6.9);
+        expect(ageDays).toBeLessThan(7.1);
+      });
+
+      it('spends a capped budget on eligible rows rather than on suppressed ones', async () => {
+        // The catalog-query warm caps its fan-out because `library-enrich-artwork`
+        // shares the process-wide class-2 limiter. Applying that cap BEFORE the
+        // marker filter is what made the warm never converge: a page whose first
+        // rows are all permanently unresolvable spent the whole budget on them
+        // every time, and the answerable rows behind them were never reached.
+        mockNegativeMarkerRead([1, 2]);
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+        mockStampWrite();
+
+        await enrichWithArtwork(
+          [1, 2, 3, 4].map((id) => ({
+            id,
+            artist_name: `Artist ${id}`,
+            album_title: `Album ${id}`,
+            artwork_url: null,
+          })),
+          { maxLookups: 2 }
+        );
+
+        expect(mockLookupMetadata.mock.calls.map((c) => (c as unknown[])[1])).toEqual(['Album 3', 'Album 4']);
+      });
+
+      it('fails open and still enriches when the marker read itself errors', async () => {
+        const chain = createMockQueryChain();
+        chain.where = jest.fn<() => Promise<never>>().mockRejectedValue(new Error('connection terminated'));
+        db.select.mockReturnValue(chain);
+        const update = createMockQueryChain();
+        db.update.mockReturnValue(update);
+        update.returning = jest.fn<() => Promise<unknown[]>>().mockResolvedValue([{ id: 7 }]);
+        mockLookupMetadata.mockResolvedValue({
+          results: [
+            {
+              library_item: { id: 7, title: 'Quiet Signs', artist: 'Jessica Pratt', call_number: '', library_url: '' },
+              artwork: {
+                release_id: 4242,
+                release_url: 'https://www.discogs.com/release/4242',
+                artwork_url: 'https://i.discogs.com/quiet-signs.jpg',
+                confidence: 0.95,
+              },
+            },
+          ],
+          search_type: 'direct',
+          song_not_found: false,
+          found_on_compilation: false,
+        });
+
+        const results = [{ id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null }];
+        const enriched = await enrichWithArtwork(results);
+
+        // The marker is an optimization over a decorative field. If its read is
+        // unavailable the honest degradation is the pre-BS#2522 behaviour — ask
+        // LML — not to drop artwork enrichment on the floor.
+        expect(enriched[0].artwork_url).toBe('https://i.discogs.com/quiet-signs.jpg');
+      });
     });
   });
 

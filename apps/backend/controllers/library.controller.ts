@@ -3902,7 +3902,10 @@ const MAX_LIMIT = 100;
  *
  * 5 matches the limiter's concurrency, so one page costs at most one full
  * permit-set and never queues behind itself. Repeated views of the same page
- * warm it further, a slice at a time.
+ * warm it further, a slice at a time — and BS#2522's negative marker is what
+ * makes that progress monotonic, by retiring rows LML has definitively answered
+ * so a later view's budget moves on to the next ones instead of re-buying the
+ * same five refusals.
  */
 export const ARTWORK_WARM_MAX_ROWS = 5;
 
@@ -4055,17 +4058,21 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
   //   - Only on a real text query. A `q`-less page is a browse — the Missing
   //     Releases screen pulls `MAX_LIMIT` rows this way — and warming it means
   //     warming the whole catalog a page at a time.
-  //   - Only `ARTWORK_WARM_MAX_ROWS` rows, chosen from those that have no
-  //     artwork yet so the budget is never spent re-confirming a warm row.
+  //   - Only `ARTWORK_WARM_MAX_ROWS` lookups, via `maxLookups` rather than a
+  //     slice here. The whole un-warmed page goes in and the service applies the
+  //     cap after dropping rows it has already definitively failed to resolve
+  //     (BS#2522), so the budget always buys lookups that can still teach us
+  //     something. Slicing first would hand the same permanently-unresolvable
+  //     head rows over on every search and never reach the rows behind them.
   //
   // Rows are passed by reference, so the cache-through still writes through to
   // the same objects `enrichWithArtwork` would have selected itself.
   //
   // It collects per-row failures internally; this `.catch` only keeps a
   // whole-promise rejection from becoming an unhandledRejection.
-  const unwarmed = q.trim() ? results.filter((row) => row.artwork_url == null).slice(0, ARTWORK_WARM_MAX_ROWS) : [];
+  const unwarmed = q.trim() ? results.filter((row) => row.artwork_url == null) : [];
   if (unwarmed.length > 0) {
-    libraryService.enrichWithArtwork(unwarmed).catch((err) => {
+    libraryService.enrichWithArtwork(unwarmed, { maxLookups: ARTWORK_WARM_MAX_ROWS }).catch((err) => {
       console.warn('[Library] Catalog-query artwork enrichment failed:', err);
     });
   }

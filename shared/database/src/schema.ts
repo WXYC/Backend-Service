@@ -654,6 +654,25 @@ export const library = wxyc_schema.table(
     date_found: timestamp('date_found', { withTimezone: true }),
     on_streaming: boolean('on_streaming'),
     artwork_url: varchar('artwork_url', { length: 512 }),
+    // Attempt-at marker (BS#2522) for the search-path artwork warm. Stamped by
+    // `enrichWithArtwork` only on a *definitive* no-artwork outcome — LML
+    // responded and the trust gate rejected the match, or it matched and
+    // carried no usable cover — so an unresolvable release stops being re-asked
+    // on every catalog search. Left NULL on transient failures (timeout, 5xx,
+    // BS#1748 limiter shed or open breaker), which stay immediately retryable;
+    // that transient/definitive split is BS#1089's rule and is only decidable
+    // here because the lookup coordinator re-throws transients rather than
+    // folding them into its `null` return. Written under the same
+    // `artwork_url IS NULL` race guard as `updateArtworkUrl` (BS#718), so a
+    // concurrent success is never overwritten by a negative. A stamp never
+    // outranks a real answer: every reader tests `artwork_url IS NULL` first,
+    // so artwork arriving from any other writer is served regardless of marker
+    // age. Distinct from `discogs_unavailable` below, which is a music
+    // director's deliberate statement rather than a lookup outcome. See
+    // docs/migrations.md §Attempt-at markers; re-attempt is the searches
+    // themselves once the stamp ages out of
+    // `ARTWORK_LOOKUP_NEGATIVE_WINDOW_MS` (no cron backstop exists).
+    artwork_lookup_attempted_at: timestamp('artwork_lookup_attempted_at', { withTimezone: true }),
     // Denormalized from artists.artist_name (Epic A.1). Nullable until A.2
     // backfills it from the artists join; A.3 keeps it current on insert and
     // cascades on artists UPDATE. A.5 reads it via search_doc.

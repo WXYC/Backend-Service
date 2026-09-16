@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, SQL, type Column } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, ne, notInArray, or, sql, SQL, type Column } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
@@ -2613,6 +2613,91 @@ export const updateCanonicalEntity = async (id: number, entityId: string, confid
 };
 
 /**
+ * How long a persisted `library.artwork_lookup_attempted_at` stamp suppresses
+ * re-asking LML for a row's cover. The stamped condition is "LML responded and
+ * there is no usable cover for this artist+album" — stable, since it turns on
+ * Discogs coverage and on the accuracy of the catalog's own artist/title text,
+ * neither of which churns daily. 7 days matches the sibling
+ * `ROTATION_TRACKLIST_LOOKUP_NEGATIVE_WINDOW_MS` above and for the same reason:
+ * it lets a music-director typo correction self-heal within a week without
+ * re-paying the lookup on every search in the meantime.
+ *
+ * Deliberately a constant rather than an env knob, unlike the `*_TTL_DAYS`
+ * siblings in `docs/env-vars.md`. Those all belong to cron jobs, where an
+ * operator tunes the TTL against a run cadence they also control. This marker
+ * has no job: it is stamped and re-read on the search path, so there is no
+ * cadence to tune it against — the only other runtime-stamped marker in this
+ * file is a plain constant too.
+ */
+const ARTWORK_LOOKUP_NEGATIVE_WINDOW_MS = 7 * MS_PER_DAY;
+
+/**
+ * Record that LML gave a definitive "no artwork" for a library row, so the next
+ * search that returns it can skip the lookup instead of re-asking forever.
+ *
+ * Call this ONLY on a responded outcome — a trust-gate rejection or a match
+ * carrying no usable cover. A transient failure (timeout, 5xx, network, a
+ * BS#1748 limiter shed or open breaker) must never reach here; the lookup
+ * coordinator re-throws those rather than returning `null`, which is what keeps
+ * the two separable at the call site below.
+ *
+ * Narrowed by `artwork_url IS NULL` for the same reason `updateArtworkUrl` is
+ * (BS#718): if another writer landed real artwork while this lookup was in
+ * flight, the row is answered, and marking it "looked, found nothing" would be
+ * a lie — harmless to the read path, which tests `artwork_url` first, but a
+ * misleading audit record. Failure is logged and swallowed: the marker is an
+ * optimization, and the caller is already off the response path.
+ */
+const stampArtworkLookupAttempt = async (id: number): Promise<void> => {
+  try {
+    await db
+      .update(library)
+      .set({ artwork_lookup_attempted_at: sql`NOW()` })
+      .where(and(eq(library.id, id), isNull(library.artwork_url)));
+  } catch (err) {
+    console.warn(
+      '[Library] failed to stamp library.artwork_lookup_attempted_at for library_id=%d: %s',
+      id,
+      (err as Error).message
+    );
+  }
+};
+
+/**
+ * The subset of `ids` still inside the negative window — rows LML has already
+ * definitively answered "no artwork" for recently enough that asking again would
+ * buy nothing.
+ *
+ * One indexed read keyed on the primary key, rather than threading
+ * `artwork_lookup_attempted_at` through every caller's row projection: the
+ * marker's whole lifecycle then stays inside the function that owns it, and
+ * neither `CATALOG_ROW_PROJECTION_COLUMNS` nor `LIBRARY_VIEW_PROJECTION` has to
+ * carry a column no consumer puts on the wire.
+ *
+ * Fails open. A read error returns the empty set, which restores the
+ * pre-marker behaviour (ask LML) rather than silently dropping enrichment — the
+ * marker suppresses work, so losing it costs lookups, not correctness.
+ */
+const selectFreshArtworkNegatives = async (ids: number[]): Promise<Set<number>> => {
+  if (ids.length === 0) return new Set();
+  try {
+    const rows = await db
+      .select({ id: library.id })
+      .from(library)
+      .where(
+        and(
+          inArray(library.id, ids),
+          gt(library.artwork_lookup_attempted_at, new Date(Date.now() - ARTWORK_LOOKUP_NEGATIVE_WINDOW_MS))
+        )
+      );
+    return new Set(rows.map((r) => r.id));
+  } catch (err) {
+    console.warn('[Library] artwork negative-marker read failed; enriching unfiltered:', (err as Error).message);
+    return new Set();
+  }
+};
+
+/**
  * Enrich search results with artwork URLs from LML.
  *
  * Results that already have artwork cached return as-is. For uncached results,
@@ -2624,6 +2709,19 @@ export const updateCanonicalEntity = async (id: number, entityId: string, confid
  * never awaited on the response path — so the mutation of `row.artwork_url`
  * below only benefits *future* searches via the `updateArtworkUrl` write, not
  * the in-flight request.
+ *
+ * BS#2522: a row LML definitively cannot answer is stamped with
+ * `artwork_lookup_attempted_at` and skipped for the next
+ * `ARTWORK_LOOKUP_NEGATIVE_WINDOW_MS`, so the warm converges instead of re-asking
+ * the same unresolvable releases on every search forever.
+ *
+ * `maxLookups` bounds how many LML calls one call may spend. It is applied
+ * AFTER the negative filter, and that order is the point: applied before, a page
+ * whose first rows are all permanently unresolvable would burn the entire budget
+ * on them every single time and never reach the answerable rows behind them.
+ * Callers on a shared limiter should set it (see `ARTWORK_WARM_MAX_ROWS`);
+ * omitting it leaves the fan-out unbounded, which is only safe where the caller
+ * already bounds its own result count.
  */
 type ArtworkEnrichable = {
   id: number;
@@ -2632,21 +2730,39 @@ type ArtworkEnrichable = {
   artwork_url: string | null | undefined;
 };
 
-export async function enrichWithArtwork<T extends ArtworkEnrichable>(results: T[]): Promise<T[]> {
+export async function enrichWithArtwork<T extends ArtworkEnrichable>(
+  results: T[],
+  options: { maxLookups?: number } = {}
+): Promise<T[]> {
   if (!isLmlConfigured()) return results;
 
   const uncached = results.filter((r) => r.artwork_url === null || r.artwork_url === undefined);
   if (uncached.length === 0) return results;
 
+  const suppressed = await selectFreshArtworkNegatives(uncached.map((r) => r.id));
+  const eligible = uncached.filter((r) => !suppressed.has(r.id));
+  const budgeted = options.maxLookups === undefined ? eligible : eligible.slice(0, options.maxLookups);
+  if (budgeted.length === 0) return results;
+
   const settlements = await Promise.allSettled(
-    uncached.map(async (row) => {
+    budgeted.map(async (row) => {
       const lookupResult = await lmlLookupCoordinator.lookup(row.artist_name, row.album_title, undefined, {
         caller: 'library-enrich-artwork',
         requireSearchType: 'direct',
       });
-      if (lookupResult === null) return;
+      // Both early returns below are LML having ANSWERED — the trust gate
+      // rejected the match, or the match carried no usable cover. Either is
+      // durable knowledge, so it gets stamped. A transient failure throws past
+      // this point into the rejected settlement arm and stamps nothing.
+      if (lookupResult === null) {
+        await stampArtworkLookupAttempt(row.id);
+        return;
+      }
       const artworkUrl = filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url);
-      if (!artworkUrl) return;
+      if (!artworkUrl) {
+        await stampArtworkLookupAttempt(row.id);
+        return;
+      }
       row.artwork_url = artworkUrl;
       await updateArtworkUrl(row.id, artworkUrl);
     })

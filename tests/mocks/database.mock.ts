@@ -157,6 +157,7 @@ export const library = {
   legacy_release_id: 'library.legacy_release_id',
   on_streaming: 'library.on_streaming',
   artwork_url: 'library.artwork_url',
+  artwork_lookup_attempted_at: 'library.artwork_lookup_attempted_at',
   artist_name: 'library.artist_name',
   search_doc: 'library.search_doc',
   canonical_entity_id: 'library.canonical_entity_id',
