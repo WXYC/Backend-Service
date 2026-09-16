@@ -11,7 +11,8 @@
  * Requires:
  *   - Database connection (DB_HOST, DB_NAME, etc.)
  *   - Auth server running (BETTER_AUTH_URL)
- *   - SES configured (AWS_ACCESS_KEY_ID, etc.)
+ *   - SES configured (SES_ACCESS_KEY_ID, SES_SECRET_ACCESS_KEY, AWS_REGION, SES_FROM_EMAIL).
+ *     Not AWS_ACCESS_KEY_ID: reserved SDK names shadow the instance role (BS#2518).
  *   - FRONTEND_SOURCE set to the frontend URL
  */
 

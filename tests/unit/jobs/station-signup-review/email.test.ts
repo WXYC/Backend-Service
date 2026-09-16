@@ -4,7 +4,7 @@
  * mocking shape verbatim: `@aws-sdk/client-ses` mocked before import, env
  * reset per test. No test here makes a live SES call.
  */
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 
 const mockSend = jest.fn().mockResolvedValue({} as never);
 jest.mock('@aws-sdk/client-ses', () => ({
@@ -130,6 +130,15 @@ describe('email.ts', () => {
    * deployment-ordering fallback and is covered by every other test here,
    * which still sets it.
    */
+  // In-body cleanup is skipped when an assertion throws, and a leaked
+  // SES_ACCESS_KEY_ID outranks the AWS_* values every other test here asserts —
+  // turning one genuine failure into a wall of unrelated ones. afterEach runs
+  // either way.
+  afterEach(() => {
+    delete process.env.SES_ACCESS_KEY_ID;
+    delete process.env.SES_SECRET_ACCESS_KEY;
+  });
+
   it('prefers SES_* credentials over the legacy AWS_* names', async () => {
     process.env.SES_ACCESS_KEY_ID = 'ses-key';
     process.env.SES_SECRET_ACCESS_KEY = 'ses-secret';
@@ -143,8 +152,5 @@ describe('email.ts', () => {
     expect(ses.SESClient as unknown as jest.Mock).toHaveBeenCalledWith(
       expect.objectContaining({ credentials: { accessKeyId: 'ses-key', secretAccessKey: 'ses-secret' } })
     );
-
-    delete process.env.SES_ACCESS_KEY_ID;
-    delete process.env.SES_SECRET_ACCESS_KEY;
   });
 });
