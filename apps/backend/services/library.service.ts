@@ -60,6 +60,7 @@ import {
   lookupBySong,
   lookupMetadata,
   isLmlConfigured,
+  isTrustedLmlAlbumMatch,
   LmlClientError,
   resolveIdentity,
   type LookupResponse,
@@ -2746,15 +2747,35 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
 
   const settlements = await Promise.allSettled(
     budgeted.map(async (row) => {
+      // Deliberately NOT `requireSearchType: 'direct'`, though the trust rule
+      // is unchanged and `isTrustedLmlAlbumMatch` below is the very predicate
+      // that gate applies. The coordinator's gate collapses "LML degraded" and
+      // "LML answered, and the match is untrusted" into the same `null`, and
+      // only the second of those may be stamped — so a caller that has to tell
+      // them apart must read the response itself. Asking without the gate
+      // changes nothing else: responses are cached raw, before any gating.
       const lookupResult = await lmlLookupCoordinator.lookup(row.artist_name, row.album_title, undefined, {
         caller: 'library-enrich-artwork',
-        requireSearchType: 'direct',
       });
-      // Both early returns below are LML having ANSWERED — the trust gate
-      // rejected the match, or the match carried no usable cover. Either is
-      // durable knowledge, so it gets stamped. A transient failure throws past
-      // this point into the rejected settlement arm and stamps nothing.
-      if (lookupResult === null) {
+      if (lookupResult === null) return;
+
+      // LML answered 200 but shed its enrichment tail — caller deadline,
+      // admission-control pressure, or an upstream it couldn't reach — or blew
+      // its own hard cap mid-pipeline. Either way `results` is empty or partial
+      // for reasons that say nothing about THIS release, so it is "couldn't
+      // ask", not "asked and missed", and must leave the row retryable. This
+      // caller sends a 4s budget, which makes `deadline_exceeded` LML's routine
+      // answer on a cold Discogs cascade — exactly the hard-to-resolve rows the
+      // marker exists for, so stamping here would poison the population it is
+      // meant to serve. Client-side sheds never reach this line: the
+      // coordinator re-throws those (BS#1748).
+      if (lookupResult.degraded || lookupResult.timeout) return;
+
+      // Below this point LML genuinely responded about this release, so both
+      // outcomes are durable knowledge and both get stamped: the match was
+      // untrusted, or it was trusted and carried no usable cover. A transient
+      // failure throws past all of this into the rejected settlement arm.
+      if (!isTrustedLmlAlbumMatch(lookupResult)) {
         await stampArtworkLookupAttempt(row.id);
         return;
       }
@@ -4125,6 +4146,23 @@ export const updateAlbumInDB = async (album_id: number, updates: UpdateAlbumRow)
     'discogs_unavailable_note',
   ] as const) {
     if (updates[key] !== undefined) set[key] = updates[key];
+  }
+  // Reset the artwork negative marker when the edit changes the pair the
+  // lookup keys on. `enrichWithArtwork` asks LML about `(artist_name,
+  // album_title)`, so a correction to either — or to `artist_id`, the column
+  // the denormalized `artist_name` is sourced from — makes a stored "LML has no
+  // cover for this" into a statement about a release that no longer exists
+  // under that name. `updateRotation` resets `tracklist_lookup_attempted_at` on
+  // the same trigger for the same reason.
+  //
+  // This is not in tension with the refill-then-swap rule below: clearing a
+  // marker strands nothing. It restores eligibility, so the worst case is one
+  // re-asked lookup, where clearing `artwork_url` would blank a column no
+  // recurring job repairs. The controller's post-write re-enrich is a single
+  // best-effort attempt — without this reset, one miss there would suppress the
+  // corrected row for the rest of the window.
+  if (updates.album_title !== undefined || updates.artist_name !== undefined || updates.artist_id !== undefined) {
+    set.artwork_lookup_attempted_at = null;
   }
   // Deliberately NOT nulling the LML-derived columns (on_streaming /
   // artwork_url / canonical_entity_*) here. The old reset-then-maybe-refill

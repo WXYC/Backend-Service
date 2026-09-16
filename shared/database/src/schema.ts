@@ -656,13 +656,20 @@ export const library = wxyc_schema.table(
     artwork_url: varchar('artwork_url', { length: 512 }),
     // Attempt-at marker (BS#2522) for the search-path artwork warm. Stamped by
     // `enrichWithArtwork` only on a *definitive* no-artwork outcome — LML
-    // responded and the trust gate rejected the match, or it matched and
-    // carried no usable cover — so an unresolvable release stops being re-asked
-    // on every catalog search. Left NULL on transient failures (timeout, 5xx,
-    // BS#1748 limiter shed or open breaker), which stay immediately retryable;
-    // that transient/definitive split is BS#1089's rule and is only decidable
-    // here because the lookup coordinator re-throws transients rather than
-    // folding them into its `null` return. Written under the same
+    // responded about this release and the match was untrusted, or it was
+    // trusted and carried no usable cover — so an unresolvable release stops
+    // being re-asked on every catalog search. Left NULL on every transient
+    // outcome, which stays immediately retryable: a throw (5xx, network, a
+    // BS#1748 client-side shed or open breaker, which the coordinator
+    // re-throws), and equally a 200 carrying `degraded` or `timeout`, which is
+    // LML shedding its own enrichment tail or blowing its hard cap and says
+    // nothing about this release. Nothing upstream distinguishes that second
+    // class — `shedReasonOf` reads only the client-side `outcome` — so the call
+    // site reads the response's own flags, which is why it applies the trust
+    // predicate in-process instead of using the coordinator's gate: the gate
+    // renders "degraded" and "answered, untrusted" as the same `null`, and only
+    // the second may be stamped. That split is BS#1089's rule. Written under
+    // the same
     // `artwork_url IS NULL` race guard as `updateArtworkUrl` (BS#718), so a
     // concurrent success is never overwritten by a negative. A stamp never
     // outranks a real answer: every reader tests `artwork_url IS NULL` first,
@@ -671,7 +678,10 @@ export const library = wxyc_schema.table(
     // director's deliberate statement rather than a lookup outcome. See
     // docs/migrations.md §Attempt-at markers; re-attempt is the searches
     // themselves once the stamp ages out of
-    // `ARTWORK_LOOKUP_NEGATIVE_WINDOW_MS` (no cron backstop exists).
+    // `ARTWORK_LOOKUP_NEGATIVE_WINDOW_MS` (no cron backstop exists), and
+    // `updateAlbumInDB` clears it outright when an edit changes `album_title`,
+    // `artist_name`, or `artist_id` — the marker answers a question about one
+    // (artist, album) pair, so a correction to that pair retires the answer.
     artwork_lookup_attempted_at: timestamp('artwork_lookup_attempted_at', { withTimezone: true }),
     // Denormalized from artists.artist_name (Epic A.1). Nullable until A.2
     // backfills it from the artists join; A.3 keeps it current on insert and

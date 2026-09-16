@@ -33,6 +33,9 @@ jest.mock('@wxyc/lml-client', () => ({
   getRelease: mockGetRelease,
   envInt: (_name: string, fallback: number) => fallback,
   LmlClientError: MockLmlClientError,
+  // Mirrors the real predicate exactly (`@wxyc/lml-client` `src/trust.ts`):
+  // `search_type === 'direct'`, fail-closed when the field is absent.
+  isTrustedLmlAlbumMatch: (response: { search_type?: string } | null | undefined) => response?.search_type === 'direct',
 }));
 
 // Backend code paths now route through the LmlLookupCoordinator (BS#885).
@@ -93,6 +96,7 @@ import {
   markAlbumFound,
   enrichWithArtwork,
   updateArtworkUrl,
+  updateAlbumInDB,
   resolveRotationPickerSource,
   __resetRotationLmlLookupCacheForTests,
   __rotationLmlCacheSizesForWarm,
@@ -2208,9 +2212,10 @@ describe('library.service', () => {
       // BS#1826 PR 2: `library-enrich-artwork`'s 2000ms budget is now the
       // class-2 policy override (env `LIBRARY_SEARCH_LML_BUDGET_MS`
       // preserved), not a call-site literal.
+      // No `requireSearchType`: the trust gate is applied in-process so the
+      // response's `degraded` / `timeout` flags stay readable (see the call site).
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
         caller: 'library-enrich-artwork',
-        requireSearchType: 'direct',
       });
       expect(db.update).toHaveBeenCalled();
     });
@@ -2306,7 +2311,6 @@ describe('library.service', () => {
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'LP5', undefined, {
         caller: 'library-enrich-artwork',
-        requireSearchType: 'direct',
       });
     });
 
@@ -2351,12 +2355,14 @@ describe('library.service', () => {
             },
           },
         ],
-        // The call site passes `requireSearchType: 'direct'`, so the coordinator's
-        // trust gate turns this into the `null` return that means "asked, and the
-        // answer was not good enough to use" — a definitive outcome, not a failure.
+        // Untrusted, but LML genuinely answered about this release: not direct,
+        // and neither transient flag is set. That combination is the only one
+        // that may be stamped.
         search_type: 'fallback',
         song_not_found: false,
         found_on_compilation: false,
+        degraded: false,
+        timeout: false,
       };
 
       it('stamps the marker with the database clock when the trust gate rejects the match', async () => {
@@ -2471,6 +2477,38 @@ describe('library.service', () => {
         expect(mockLookupMetadata.mock.calls.map((c) => (c as unknown[])[1])).toEqual(['Album 3', 'Album 4']);
       });
 
+      /**
+       * `LookupResponse.degraded` and `.timeout` are LML's own server-side
+       * transient signals, and they arrive on a plain 200 — the coordinator's
+       * `shedReasonOf` re-throw only covers CLIENT-side sheds (`outcome`), so
+       * nothing upstream of this call site turns them into a failure. Without
+       * an explicit check they reach the trust gate, fail it on an empty
+       * `results`, and read as a definitive no-match. This caller sends a 4s
+       * budget, so `deadline_exceeded` is LML's ordinary answer on a cold
+       * Discogs cascade; stamping it would suppress precisely the slow-to-
+       * resolve rows the marker is for, for a week, on the strength of one
+       * overrun. That is the BS#1089 regression in its original form.
+       */
+      it.each([
+        ['degraded', { degraded: true, degraded_reason: 'upstream_unavailable', timeout: false }],
+        ['deadline-exceeded', { degraded: true, degraded_reason: 'deadline_exceeded', timeout: false }],
+        ['timed out', { degraded: false, timeout: true }],
+      ])('stamps nothing when LML answers %s', async (_label, flags) => {
+        mockLookupMetadata.mockResolvedValue({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+          ...flags,
+        });
+
+        const results = [{ id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null }];
+        const enriched = await enrichWithArtwork(results);
+
+        expect(db.update).not.toHaveBeenCalled();
+        expect(enriched[0].artwork_url).toBeNull();
+      });
+
       it('fails open and still enriches when the marker read itself errors', async () => {
         const chain = createMockQueryChain();
         chain.where = jest.fn<() => Promise<never>>().mockRejectedValue(new Error('connection terminated'));
@@ -2503,6 +2541,75 @@ describe('library.service', () => {
         // LML — not to drop artwork enrichment on the floor.
         expect(enriched[0].artwork_url).toBe('https://i.discogs.com/quiet-signs.jpg');
       });
+    });
+  });
+
+  describe('updateAlbumInDB artwork-marker reset', () => {
+    function mockUpdateChain() {
+      const chain = createMockQueryChain();
+      db.update.mockReturnValue(chain);
+      chain.returning = jest.fn<() => Promise<{ id: number }[]>>().mockResolvedValue([{ id: 42 }]);
+      return chain;
+    }
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    /**
+     * The marker records an answer about one `(artist_name, album_title)` pair.
+     * Editing either — or `artist_id`, which is where the denormalized
+     * `artist_name` comes from — makes it an answer about a release that no
+     * longer exists under that name, so it must not keep suppressing lookups.
+     * `updateRotation` resets `tracklist_lookup_attempted_at` on exactly this
+     * trigger; this pins the same rule for the library-side marker.
+     */
+    it.each([
+      ['album_title', { album_title: 'Quiet Signs' }],
+      ['artist_name', { artist_name: 'Jessica Pratt' }],
+      ['artist_id', { artist_id: 99 }],
+    ])('clears the marker when %s changes', async (_label, updates) => {
+      const chain = mockUpdateChain();
+
+      await updateAlbumInDB(42, updates);
+
+      const setArg = chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(setArg).toHaveProperty('artwork_lookup_attempted_at', null);
+    });
+
+    /**
+     * The complement matters as much as the reset: these columns do not feed
+     * the lookup, so clearing the marker for them would re-arm the LML cost
+     * this feature exists to retire. Same shape as the rotation sibling's
+     * "a %s-only edit does NOT null tracklist_lookup_attempted_at" rule.
+     */
+    it.each([
+      ['genre_id', { genre_id: 3 }],
+      ['format_id', { format_id: 2 }],
+      ['label_id', { label_id: 7 }],
+      ['disc_quantity', { disc_quantity: 2 }],
+      ['discogs_unavailable', { discogs_unavailable: true }],
+    ])('leaves the marker alone on a %s-only edit', async (_label, updates) => {
+      const chain = mockUpdateChain();
+
+      await updateAlbumInDB(42, updates);
+
+      const setArg = chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(setArg).not.toHaveProperty('artwork_lookup_attempted_at');
+    });
+
+    it('does not null artwork_url alongside the marker', async () => {
+      const chain = mockUpdateChain();
+
+      await updateAlbumInDB(42, { album_title: 'Quiet Signs' });
+
+      // BS#1549: the reset-then-maybe-refill shape stranded rows blank when the
+      // post-write re-lookup missed. Clearing the marker restores eligibility;
+      // clearing the value would destroy data no recurring job repairs.
+      const setArg = chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(setArg).not.toHaveProperty('artwork_url');
+      expect(setArg).not.toHaveProperty('on_streaming');
+      expect(setArg).not.toHaveProperty('canonical_entity_id');
     });
   });
 
