@@ -89,6 +89,15 @@ const EXPECTED_ONLY_IN_WORKFLOW = [
   // `tests/integration/setup/login.js`), not by the backend process.
   'AUTH_PASSWORD',
 
+  // Why: CloudWatch opt-out for the `WXYC/AuthService RateLimited` emitter
+  // (BS#2169), read only by the auth service
+  // (apps/auth/auth-rate-limit-metrics.ts). Compose sets it on the `auth`
+  // service env block; in GHA CI's host-process model both services share
+  // workflow-level env, so it appears here. The backend's two siblings
+  // (MUTATION_4XX_METRICS_DISABLED, SSE_METRICS_DISABLED) ARE mirrored into
+  // the compose `backend` block and so are absent from both allowlists.
+  'AUTH_RATE_LIMIT_METRICS_DISABLED',
+
   // Why: auth-service host port (workflow's auth process binds on 8083).
   // The backend doesn't consume it directly — it encodes the auth URL via
   // BETTER_AUTH_URL (mirrored). Compose puts AUTH_PORT in the auth service

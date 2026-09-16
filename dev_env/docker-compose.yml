@@ -181,6 +181,11 @@ services:
       # started with — set STATION_PASSCODE_KEY in .env to override both at once.
       - STATION_SIGNUP_ENABLED=${STATION_SIGNUP_ENABLED:-true}
       - STATION_PASSCODE_KEY=${STATION_PASSCODE_KEY:-5a859c11b96205498dda4b3cbe21c1c956d472104ee1d85ca2058cb8535ab28b}
+      # WXYC/AuthService RateLimited publisher, off (BS#2533). Same rationale
+      # as the backend service's two below: the credential provider is pinned
+      # to the EC2 instance role, so an enabled emitter off EC2 can only burn
+      # its IMDS budget and log the failure.
+      - AUTH_RATE_LIMIT_METRICS_DISABLED=true
     ports:
       - '${CI_AUTH_PORT:-8083}:8080'
 
@@ -317,6 +322,16 @@ services:
       # the flag-OFF production configuration locally; with it off the takeover
       # spec fails loudly at `.expect(409)` rather than passing vacuously.
       - FLOWSHEET_TAKEOVER_ENABLED=${FLOWSHEET_TAKEOVER_ENABLED:-true}
+      # CloudWatch publishers, both off (BS#2533). Hardcoded, not
+      # ${}-substituted: the credential provider is pinned to the EC2 instance
+      # role, so nothing outside EC2 can publish a metric no matter what the
+      # developer's .env says — leaving these enabled would only spend the
+      # IMDS timeout budget on every flush and log the failure. Mirrored on
+      # the "Start services" step of .github/workflows/test.yml; the parity
+      # guard in tests/unit/scripts/ci-env-surface-parity.test.ts enforces
+      # that both surfaces keep agreeing.
+      - MUTATION_4XX_METRICS_DISABLED=true
+      - SSE_METRICS_DISABLED=true
     ports:
       - '${CI_PORT:-8081}:8080'
 
@@ -400,6 +415,8 @@ services:
       # the developer's .env (see BETTER_AUTH_SECRET/DEFAULT_ORG_SLUG above).
       - STATION_SIGNUP_ENABLED=true
       - STATION_PASSCODE_KEY=5a859c11b96205498dda4b3cbe21c1c956d472104ee1d85ca2058cb8535ab28b
+      # BS#2533, same reason as the ci-profile `auth` service above.
+      - AUTH_RATE_LIMIT_METRICS_DISABLED=true
     ports:
       - '${E2E_AUTH_PORT:-8084}:8080'
     healthcheck:
@@ -446,6 +463,9 @@ services:
       - BETTER_AUTH_ISSUER=http://e2e-auth:8080
       - BETTER_AUTH_JWKS_URL=http://e2e-auth:8080/auth/jwks
       - COGNITO_USERPOOL_ID=us-east-1_placeholder
+      # BS#2533, same reason as the ci-profile `backend` service above.
+      - MUTATION_4XX_METRICS_DISABLED=true
+      - SSE_METRICS_DISABLED=true
     ports:
       - '${E2E_BACKEND_PORT:-8085}:8080'
     healthcheck:

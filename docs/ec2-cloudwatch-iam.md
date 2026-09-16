@@ -101,6 +101,8 @@ batch).
 > ```
 >
 > Anything set as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` tops the AWS SDK's default credential chain for the whole process and shadows the instance role, so a correctly-attached policy is simply never consulted. That is BS#2518: the SES-only `no-reply-sender` credential sat under those reserved names and kept `WXYC/BackendService` from existing as a namespace for 105 days, while this doc's remedy was already in place. `sts get-caller-identity` should report `assumed-role/wxyc-ec2-backend`, not a `user/`.
+>
+> **Narrowed by BS#2533, not resolved by it.** The repo's own publishers no longer take part in that race: every `CloudWatchClient` is built by `createCloudWatchClient` (`shared/observability/src/metrics.ts`), whose credentials are pinned to `fromInstanceMetadata()`, so a stray `AWS_ACCESS_KEY_ID` cannot outrank the role for `WXYC/BackendService` / `WXYC/AuthService` application metrics. It still can for everything on the host that uses the default chain — the `amazon-cloudwatch-agent` this document is about (`CWAgent` host metrics), the S3 and SES clients in `apps/backend`, and `aws sts get-caller-identity` itself — so the check above stays the first thing to run.
 
 The acceptance bullets on #965:
 
