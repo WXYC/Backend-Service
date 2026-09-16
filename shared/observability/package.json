@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "^3.1127.0",
+    "@aws-sdk/credential-providers": "^3.1127.0",
     "@sentry/core": "^10.69.0",
     "@sentry/node": "^10.73.0"
   },
