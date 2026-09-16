@@ -192,11 +192,25 @@ describe('Dockerfile runtime stages ship @wxyc/observability', () => {
   it.each([
     ['backend', '../../../Dockerfile.backend', 'builder'],
     ['auth', '../../../Dockerfile.auth', 'auth-builder'],
+    ['enrichment-worker', '../../../Dockerfile.enrichment-worker', 'enrichment-worker-builder'],
   ])('Dockerfile.%s copies the package manifest and the built dist', (_app, relPath, builderDir) => {
     const source = readFileSync(resolve(__dirname, relPath), 'utf-8');
     expect(source).toContain('COPY ./shared/observability/package* ./shared/observability/');
     expect(source).toContain(
       `COPY --from=builder ./${builderDir}/shared/observability/dist ./shared/observability/dist`
     );
+  });
+
+  /**
+   * The worker carries a third edge the other two images do not (BS#2532).
+   * `Dockerfile.backend` and `Dockerfile.auth` build with `--workspace=shared/**`,
+   * which picks up a new shared package for free; the worker enumerates each
+   * one, so `@wxyc/observability` is built only while it is named explicitly.
+   * Drop that flag and the builder stage produces no `dist` for the COPY above
+   * to find — the image build fails, and no CI job builds these images.
+   */
+  it('Dockerfile.enrichment-worker builds @wxyc/observability in the builder stage', () => {
+    const source = readFileSync(resolve(__dirname, '../../../Dockerfile.enrichment-worker'), 'utf-8');
+    expect(source).toContain('--workspace=@wxyc/observability');
   });
 });
