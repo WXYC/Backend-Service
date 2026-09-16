@@ -1539,9 +1539,11 @@ export type UncataloguedRotationPage = { limit?: number; offset?: number; status
  *     row this predicate selects is unlinked by definition, so those joins
  *     would return NULL for every column on every row. Returns the raw
  *     `rotation` snapshot columns instead.
- *   - **Not restricted to active (`kill_date`) rows.** The queue is the
- *     full cataloging backlog (killed/historical releases still need
- *     cataloguing, or a record of never having been), not a live dropdown.
+ *   - **Not restricted to active (`kill_date`) rows by default.** The queue
+ *     is the full cataloging backlog (killed/historical releases still need
+ *     cataloguing, or a record of never having been), not a live dropdown —
+ *     which is why `status` below defaults to `all` where the dropdown's
+ *     defaults to `active`. Narrowing is opt-in, never assumed.
  *
  * **`album_id IS NULL` is the whole unlinked predicate.** An earlier draft
  * used `COALESCE(album_id, 0) = 0` on the belief that tubafrenzy writes a
