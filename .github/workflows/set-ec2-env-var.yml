@@ -288,6 +288,8 @@ jobs:
           # behavior with no redeploy. Every 409-aware client tolerates the flag
           # in either position, so it can be flipped back mid-show.
           FLOWSHEET_TAKEOVER_ENABLED: ${{ secrets.FLOWSHEET_TAKEOVER_ENABLED }}
+          SES_ACCESS_KEY_ID: ${{ secrets.SES_ACCESS_KEY_ID }}
+          SES_SECRET_ACCESS_KEY: ${{ secrets.SES_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
           KEY="${{ inputs.key }}"
@@ -316,6 +318,14 @@ jobs:
             STATION_SIGNUP_DOWNGRADE_ENABLED) VALUE="$STATION_SIGNUP_DOWNGRADE_ENABLED" ;;
             STATION_SIGNUP_ENABLED) VALUE="$STATION_SIGNUP_ENABLED" ;;
             FLOWSHEET_TAKEOVER_ENABLED) VALUE="$FLOWSHEET_TAKEOVER_ENABLED" ;;
+            # BS#2518. The SES credential has never had a provisioning path —
+            # neither spelling was on this allowlist — so rotating it was always a
+            # hand edit on the host. Adding the new names here so the rename does
+            # not inherit that gap. Requires the matching repo secrets to exist;
+            # without them this fails with "empty or not set", which is the honest
+            # error rather than "Unsupported secret_name".
+            SES_ACCESS_KEY_ID) VALUE="$SES_ACCESS_KEY_ID" ;;
+            SES_SECRET_ACCESS_KEY) VALUE="$SES_SECRET_ACCESS_KEY" ;;
             *)
               echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
               exit 1

@@ -82,7 +82,7 @@ Unlike `jobs/metadata-no-match-digest` (its structural donor), this job carries 
 
 ## Environment
 
-See [`docs/env-vars.md`](../../docs/env-vars.md) for `STATION_SIGNUP_ALERT_EMAIL`, `STATION_SIGNUP_DOWNGRADE_ENABLED`, and the shared SES vars (`SES_FROM_EMAIL`, `SES_CONFIGURATION_SET_NAME`, `EMAIL_ENABLED`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_REGION`).
+See [`docs/env-vars.md`](../../docs/env-vars.md) for `STATION_SIGNUP_ALERT_EMAIL`, `STATION_SIGNUP_DOWNGRADE_ENABLED`, and the shared SES vars (`SES_FROM_EMAIL`, `SES_CONFIGURATION_SET_NAME`, `EMAIL_ENABLED`, `SES_ACCESS_KEY_ID`/`SES_SECRET_ACCESS_KEY`/`AWS_REGION` — never the reserved `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` spelling, see BS#2518).
 
 `STATION_SIGNUP_ALERT_EMAIL` falls back to a built-in default rather than failing loudly — an unset variable must not kill the safety-net digest during exactly the weeks nobody is watching — but the fallback announces itself in a `warn` log line **and** in the digest body.
 

@@ -66,7 +66,7 @@ See `docs/env-vars.md` for the full reference. This job uses:
 
 - `DIGEST_RECIPIENT_EMAIL` (default `jake@wxyc.org`) -- the digest recipient.
 - `DIGEST_MAX_PLAY_AGE_HOURS` (default `48`) -- play-recency ceiling on `flowsheet.add_time`; see "Two-bound window" above. Positive integer via `requirePositiveInt`; `0` is rejected (it would blackhole the digest to empty forever, unlike `flowsheet-metadata-backfill`'s `BACKFILL_RECOVERY_WINDOW_HOURS` where `0` is a meaningful "disable the ceiling" setting).
-- `SES_FROM_EMAIL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` -- SES send config (shared with the auth service's transactional email).
+- `SES_FROM_EMAIL`, `SES_ACCESS_KEY_ID`, `SES_SECRET_ACCESS_KEY`, `AWS_REGION` -- SES send config (shared with the auth service's transactional email). **Do not set the credential as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`**: those are the AWS SDK's reserved global names and shadow the EC2 instance role for every AWS call in the process (BS#2518). The legacy spelling is still read as a fallback and warns when present.
 - `SES_CONFIGURATION_SET_NAME` (optional) -- set as `ConfigurationSetName` on the `SendEmailCommand` when present.
 - `EMAIL_ENABLED` (default enabled) -- set `false` for an observe-only run: `sendDigestEmail` short-circuits before any SES client is constructed (and without requiring `SES_FROM_EMAIL`), the job logs a preview of what it would have sent, and the watermark is left unadvanced. Test/CI always run with this `false` (`tests/setup/unit.setup.ts`).
 - `WXYC_SCHEMA_NAME` (default `wxyc_schema`) -- schema-qualifies the raw digest query so parallel Jest workers on per-schema DBs don't collide.

@@ -28,7 +28,30 @@ let sesClient: SESClient | null = null;
  * (BS#2518). This job has a self-contained sender by design, so the helper is
  * duplicated rather than imported, as `getConfigurationSetName` already is.
  */
+/**
+ * The legacy spelling being PRESENT is the hazard, not merely being used: while
+ * `AWS_ACCESS_KEY_ID` is set, it tops the default credential chain for the whole
+ * process regardless of which pair this module reads. Warn once so the residual
+ * unsafe state is observable — an unobservable one is exactly what let BS#2518
+ * run dark for 105 days — and so BS#2518 has a signal for when the fallback is
+ * safe to delete rather than an operator's memory.
+ */
+let warnedLegacyAwsCredentials = false;
+const warnIfLegacyCredentialsPresent = (): void => {
+  if (warnedLegacyAwsCredentials || !process.env.AWS_ACCESS_KEY_ID) {
+    return;
+  }
+  warnedLegacyAwsCredentials = true;
+  console.warn(
+    '[email] AWS_ACCESS_KEY_ID is set. It shadows the EC2 instance role for every ' +
+      'AWS SDK call in this process that does not pass explicit credentials. Move the ' +
+      'SES credential to SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY (see BS#2518).'
+  );
+};
+
 const resolveSesCredentials = (): { accessKeyId: string; secretAccessKey: string } | null => {
+  warnIfLegacyCredentialsPresent();
+
   const sesAccessKeyId = process.env.SES_ACCESS_KEY_ID;
   const sesSecretAccessKey = process.env.SES_SECRET_ACCESS_KEY;
   if (sesAccessKeyId && sesSecretAccessKey) {

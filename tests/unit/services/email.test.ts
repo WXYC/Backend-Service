@@ -327,6 +327,19 @@ describe('SES credential resolution (BS#2518)', () => {
     clearCredentialEnv();
   });
 
+  // Jest does not reset process.env between test FILES in a worker, and
+  // tests/setup/unit.setup.ts only DEFAULTS EMAIL_ENABLED (`?? 'false'`), so a
+  // value set here survives into every later file in the same worker. Leaving
+  // it 'true' with the credential vars deleted would arm the email path in
+  // suites that do not mock @aws-sdk/client-ses — tests/unit/auth/station-signup.test.ts
+  // mocks none — so this restores both halves, not just its own.
+  afterEach(() => {
+    clearCredentialEnv();
+    process.env.EMAIL_ENABLED = 'false';
+    process.env.AWS_ACCESS_KEY_ID = 'test';
+    process.env.AWS_SECRET_ACCESS_KEY = 'test';
+  });
+
   const resolutionCases = [
     {
       description: 'SES_* alone',
@@ -373,7 +386,9 @@ describe('SES credential resolution (BS#2518)', () => {
   it('throws naming both accepted spellings when no credentials are set', async () => {
     const { sendEmail } = await loadEmailModule();
 
-    await expect(send(sendEmail)).rejects.toThrow(/SES_ACCESS_KEY_ID.*SES_SECRET_ACCESS_KEY.*AWS_REGION/s);
+    await expect(send(sendEmail)).rejects.toThrow(
+      /SES_ACCESS_KEY_ID.*SES_SECRET_ACCESS_KEY.*AWS_REGION.*AWS_ACCESS_KEY_ID/s
+    );
   });
 });
 
