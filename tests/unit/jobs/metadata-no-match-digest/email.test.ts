@@ -151,20 +151,24 @@ describe('email.ts', () => {
   /**
    * BS#2518: these keys must travel under `SES_*`, not the AWS SDK's reserved
    * global names — under those names a single-purpose SES credential shadows
-   * the instance role for the whole process. The `AWS_*` path is a
-   * deployment-ordering fallback and is covered by every other test here,
-   * which still sets it.
+   * the instance role for the whole process.
+   *
+   * This job's sender is a deliberate copy of `shared/authentication/src/email.ts`
+   * (see its header), so the canonical suite's coverage does not reach it: the
+   * copy could lose its resolver's `SES_*`-only behaviour with every test in
+   * `tests/unit/services/email.test.ts` still green. Hence the local guard.
    */
-  // In-body cleanup is skipped when an assertion throws, and a leaked
-  // SES_ACCESS_KEY_ID outranks the AWS_* values every other test here asserts —
-  // turning one genuine failure into a wall of unrelated ones. afterEach runs
-  // either way.
+  // In-body cleanup is skipped when an assertion throws, and credentials
+  // leaking into later tests in this file turns one genuine failure into a wall
+  // of unrelated ones. afterEach runs either way.
   afterEach(() => {
     delete process.env.SES_ACCESS_KEY_ID;
     delete process.env.SES_SECRET_ACCESS_KEY;
+    delete process.env.AWS_ACCESS_KEY_ID;
+    delete process.env.AWS_SECRET_ACCESS_KEY;
   });
 
-  it('prefers SES_* credentials over the legacy AWS_* names', async () => {
+  it('reads credentials from SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY', async () => {
     process.env.SES_ACCESS_KEY_ID = 'ses-key';
     process.env.SES_SECRET_ACCESS_KEY = 'ses-secret';
     jest.clearAllMocks();
@@ -177,5 +181,22 @@ describe('email.ts', () => {
     expect(ses.SESClient as unknown as jest.Mock).toHaveBeenCalledWith(
       expect.objectContaining({ credentials: { accessKeyId: 'ses-key', secretAccessKey: 'ses-secret' } })
     );
+  });
+
+  it('no longer accepts the legacy AWS_* pair', async () => {
+    // Restoring the fallback in this copy re-opens the credential-chain
+    // shadowing for this cron's process. AWS_* alone is a configuration error.
+    delete process.env.SES_ACCESS_KEY_ID;
+    delete process.env.SES_SECRET_ACCESS_KEY;
+    process.env.AWS_ACCESS_KEY_ID = 'aws-key';
+    process.env.AWS_SECRET_ACCESS_KEY = 'aws-secret';
+    jest.clearAllMocks();
+    jest.resetModules();
+
+    const mod = await import('../../../../jobs/metadata-no-match-digest/email');
+    const ses = await import('@aws-sdk/client-ses');
+
+    await expect(mod.sendDigestEmail('jake@wxyc.org', content)).rejects.toThrow(/Missing SES configuration/);
+    expect(ses.SESClient as unknown as jest.Mock).not.toHaveBeenCalled();
   });
 });

@@ -341,39 +341,43 @@ describe('SES credential resolution (BS#2518)', () => {
     // later file sharing this worker.
   });
 
-  const resolutionCases = [
-    {
-      description: 'SES_* alone',
-      env: { SES_ACCESS_KEY_ID: 'ses-key', SES_SECRET_ACCESS_KEY: 'ses-secret' },
-      expected: { accessKeyId: 'ses-key', secretAccessKey: 'ses-secret' },
-    },
-    {
-      description: 'both set — SES_* is read and the reserved spelling ignored',
-      env: {
-        SES_ACCESS_KEY_ID: 'ses-key',
-        SES_SECRET_ACCESS_KEY: 'ses-secret',
-        AWS_ACCESS_KEY_ID: 'aws-key',
-        AWS_SECRET_ACCESS_KEY: 'aws-secret',
-      },
-      expected: { accessKeyId: 'ses-key', secretAccessKey: 'ses-secret' },
-    },
-  ];
-
-  it.each(resolutionCases)('reads credentials from $description', async ({ env, expected }) => {
-    Object.assign(process.env, env);
+  it('reads credentials from SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY', async () => {
+    process.env.SES_ACCESS_KEY_ID = 'ses-key';
+    process.env.SES_SECRET_ACCESS_KEY = 'ses-secret';
     const { sendEmail, SESClient } = await loadEmailModule();
 
     await send(sendEmail);
 
-    expect(SESClient).toHaveBeenCalledWith(expect.objectContaining({ region: 'us-east-1', credentials: expected }));
+    expect(SESClient).toHaveBeenCalledWith(
+      expect.objectContaining({
+        region: 'us-east-1',
+        credentials: { accessKeyId: 'ses-key', secretAccessKey: 'ses-secret' },
+      })
+    );
   });
 
-  it('does not mix halves across the two names', async () => {
-    // A partially-applied rename must fail loudly rather than pair an SES_ id
-    // with an AWS_ secret — that combination authenticates as nothing and
-    // would surface as an opaque SES signature error at send time.
+  it('reads SES_* and ignores the reserved spelling when both are set', async () => {
+    // Guards the inversion, not the fallback: a resolver that consulted AWS_*
+    // first would still pass every other test in this block.
     process.env.SES_ACCESS_KEY_ID = 'ses-key';
+    process.env.SES_SECRET_ACCESS_KEY = 'ses-secret';
+    process.env.AWS_ACCESS_KEY_ID = 'aws-key';
     process.env.AWS_SECRET_ACCESS_KEY = 'aws-secret';
+    const { sendEmail, SESClient } = await loadEmailModule();
+
+    await send(sendEmail);
+
+    expect(SESClient).toHaveBeenCalledWith(
+      expect.objectContaining({ credentials: { accessKeyId: 'ses-key', secretAccessKey: 'ses-secret' } })
+    );
+  });
+
+  it('treats a half-set SES_* pair as a configuration error, not half a credential', async () => {
+    // Both halves come from one spelling or the resolver yields null. An id
+    // without its secret must fail loudly here rather than reach SES as a
+    // partial credential, which authenticates as nothing and surfaces as an
+    // opaque signature failure at send time.
+    process.env.SES_ACCESS_KEY_ID = 'ses-key';
     const { sendEmail } = await loadEmailModule();
 
     await expect(send(sendEmail)).rejects.toThrow(/Missing SES configuration/);
@@ -382,16 +386,10 @@ describe('SES credential resolution (BS#2518)', () => {
   it('throws naming only the SES_* spelling when no credentials are set', async () => {
     const { sendEmail } = await loadEmailModule();
 
-    const error: unknown = await send(sendEmail).then(
-      () => null,
-      (e: unknown) => e
-    );
-
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toMatch(/SES_ACCESS_KEY_ID.*SES_SECRET_ACCESS_KEY.*AWS_REGION/s);
+    await expect(send(sendEmail)).rejects.toThrow(/SES_ACCESS_KEY_ID.*SES_SECRET_ACCESS_KEY.*AWS_REGION/s);
     // Naming the reserved spelling in the remedy is how an operator re-arms the
     // shadowing this removal closed, so the message must not offer it.
-    expect((error as Error).message).not.toMatch(/AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY/);
+    await expect(send(sendEmail)).rejects.not.toThrow(/AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY/);
   });
 
   it('no longer accepts the legacy AWS_* pair', async () => {
@@ -406,19 +404,24 @@ describe('SES credential resolution (BS#2518)', () => {
     expect(SESClient).not.toHaveBeenCalled();
   });
 
-  it('warns once while the reserved AWS_ACCESS_KEY_ID is still set', async () => {
+  it('warns once, not once per send, while the reserved AWS_ACCESS_KEY_ID is set', async () => {
     // Deleting the fallback does not delete the hazard: the variable being SET
     // is what tops the default credential chain, whatever this module reads.
     // Unobservability is what let BS#2518 run dark, so the detector outlives
-    // the fallback it was introduced alongside.
-    process.env.SES_ACCESS_KEY_ID = 'ses-key';
-    process.env.SES_SECRET_ACCESS_KEY = 'ses-secret';
+    // the fallback it shipped with.
+    //
+    // The unconfigured-SES path is the one that PINS the once-only guard.
+    // `getSesClient` memoizes only on success, so a succeeding send reaches
+    // `resolveSesCredentials` exactly once and would pass whether or not the
+    // guard exists. Here every send re-enters the resolver, so a missing guard
+    // warns twice — and this is the shape that matters, since a re-armed
+    // AWS_ACCESS_KEY_ID with no SES_* is precisely the misconfiguration.
     process.env.AWS_ACCESS_KEY_ID = 'aws-key';
     const { sendEmail } = await loadEmailModule();
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 
-    await send(sendEmail);
-    await send(sendEmail);
+    await expect(send(sendEmail)).rejects.toThrow(/Missing SES configuration/);
+    await expect(send(sendEmail)).rejects.toThrow(/Missing SES configuration/);
 
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0][0]).toMatch(/shadows the EC2 instance role/);

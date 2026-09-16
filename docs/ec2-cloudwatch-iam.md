@@ -93,6 +93,15 @@ batch).
 
 ## Verification
 
+> **If the policy is already attached and `PutMetricData` still returns `AccessDenied`, the role is probably not the identity in play.** Check the host env before touching IAM:
+>
+> ```sh
+> ssh wxyc-ec2 -- 'docker inspect -f "{{range .Config.Env}}{{println .}}{{end}}" backend | grep ^AWS_'
+> ssh wxyc-ec2 -- 'aws sts get-caller-identity'
+> ```
+>
+> Anything set as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` tops the AWS SDK's default credential chain for the whole process and shadows the instance role, so a correctly-attached policy is simply never consulted. That is BS#2518: the SES-only `no-reply-sender` credential sat under those reserved names and kept `WXYC/BackendService` from existing as a namespace for 105 days, while this doc's remedy was already in place. `sts get-caller-identity` should report `assumed-role/wxyc-ec2-backend`, not a `user/`.
+
 The acceptance bullets on #965:
 
 1. **Agent log clears `AccessDenied`** — within ~5 min of the attach:
