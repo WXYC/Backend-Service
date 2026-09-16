@@ -4,8 +4,16 @@
 
 import { config } from 'dotenv';
 import * as Sentry from '@sentry/node';
+import { warnIfReservedAwsCredentialsPresent } from '@wxyc/observability';
 
 config();
+
+// The worker publishes no CloudWatch metrics today, but it shares the EC2
+// host's `~/.env` with backend and auth — so a reserved AWS credential name
+// re-armed there is a fleet-wide fact, and any container that boots is a
+// chance to say so. Covering every preload, rather than only the processes
+// that happen to call CloudWatch today, is the point of BS#2532.
+warnIfReservedAwsCredentialsPresent();
 
 // Default 0.1 — the worker is many-instance and high-throughput; full sample
 // of every CDC handler transaction would dominate the BS Sentry budget. The

@@ -102,6 +102,14 @@ batch).
 >
 > Anything set as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` tops the AWS SDK's default credential chain for the whole process and shadows the instance role, so a correctly-attached policy is simply never consulted. That is BS#2518: the SES-only `no-reply-sender` credential sat under those reserved names and kept `WXYC/BackendService` from existing as a namespace for 105 days, while this doc's remedy was already in place. `sts get-caller-identity` should report `assumed-role/wxyc-ec2-backend`, not a `user/`.
 >
+> Since BS#2532 the container says so itself, so check the log before the host: every app's Sentry preload calls `warnIfReservedAwsCredentialsPresent` (`@wxyc/observability`) and a shadowed process logs `[observability] … shadows the EC2 instance role` once, at boot, naming each reserved variable it found.
+>
+> ```sh
+> ssh wxyc-ec2 -- 'docker logs backend 2>&1 | grep -m1 "shadows the EC2 instance role"'
+> ```
+>
+> A silent boot log is real evidence the chain is clean; it is not evidence the policy is attached, which is what the rest of this section checks.
+>
 > **Narrowed by BS#2533, not resolved by it.** The repo's own publishers no longer take part in that race: every `CloudWatchClient` is built by `createCloudWatchClient` (`shared/observability/src/metrics.ts`), whose credentials are pinned to `fromInstanceMetadata()`, so a stray `AWS_ACCESS_KEY_ID` cannot outrank the role for `WXYC/BackendService` / `WXYC/AuthService` application metrics. It still can for everything on the host that uses the default chain — the `amazon-cloudwatch-agent` this document is about (`CWAgent` host metrics), `aws sts get-caller-identity` and the CLI generally, and any SDK client added later without explicit credentials — so the check above stays the first thing to run.
 >
 > It does **not** apply to this repo's S3 or SES clients, and auditing them is wasted time: all five pass `credentials` explicitly and never consult the default chain (`apps/backend/services/digital-archive-store.service.ts`, `jobs/digital-archive-bind/store.ts`, `shared/authentication/src/email.ts`, and the two job mailers).

@@ -20,24 +20,6 @@ import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 let sesClient: SESClient | null = null;
 
 /**
- * Presence, not use, is the hazard — see `shared/authentication/src/email.ts`'s
- * `warnIfLegacyCredentialsPresent` for the full rationale (BS#2518).
- */
-let warnedLegacyAwsCredentials = false;
-const warnIfLegacyCredentialsPresent = (): void => {
-  if (warnedLegacyAwsCredentials || !process.env.AWS_ACCESS_KEY_ID) {
-    return;
-  }
-  warnedLegacyAwsCredentials = true;
-  console.warn(
-    '[email] AWS_ACCESS_KEY_ID is set. It shadows the EC2 instance role for every ' +
-      'AWS SDK call in this process that does not pass explicit credentials, and it is ' +
-      'NOT read for SES. Unset it and set SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY ' +
-      '(see BS#2518).'
-  );
-};
-
-/**
  * Reads `SES_ACCESS_KEY_ID` / `SES_SECRET_ACCESS_KEY`. See
  * `shared/authentication/src/email.ts`'s `resolveSesCredentials` for why these
  * keys must not travel under the AWS SDK's reserved global names: under those
@@ -46,10 +28,14 @@ const warnIfLegacyCredentialsPresent = (): void => {
  * (BS#2518). The transitional `AWS_*` fallback was deleted once prod carried
  * `SES_*`. This job has a self-contained sender by design, so the helper is
  * duplicated rather than imported, as `getConfigurationSetName` already is.
+ *
+ * Detecting a re-armed reserved name is NOT duplicated here any more. That
+ * check is `warnIfReservedAwsCredentialsPresent` in `@wxyc/observability`,
+ * called from every container's Sentry preload (BS#2532) — a per-sender copy
+ * could only ever warn a process that sends email, and then only once it
+ * actually sent one.
  */
 const resolveSesCredentials = (): { accessKeyId: string; secretAccessKey: string } | null => {
-  warnIfLegacyCredentialsPresent();
-
   const accessKeyId = process.env.SES_ACCESS_KEY_ID;
   const secretAccessKey = process.env.SES_SECRET_ACCESS_KEY;
   return accessKeyId && secretAccessKey ? { accessKeyId, secretAccessKey } : null;
