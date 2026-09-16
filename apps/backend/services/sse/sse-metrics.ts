@@ -42,10 +42,35 @@
  *     `jobs/flowsheet-metadata-backfill`) — that spike IS the guard working.
  *     A spike with no such job running means the threshold is misconfigured.
  *
- * Bounded sampling. Counters live in an in-memory `Map<topic, count>` and
- * flush on whichever comes first: the periodic timer (default 60 s) or when
- * the total buffered count exceeds `FLUSH_AT_BUFFER_SIZE`. ClientCount is a
- * gauge — sampled on the same timer tick.
+ * Two companion rules, deliberately opposite, both load-bearing. The three
+ * counters' companions carry the SUM across topics as a single datum
+ * (`'aggregated'`, not the `'perEntry'` N + N shape `responseMetrics.ts`
+ * ships) and are skipped entirely when the count is zero, so the namespace
+ * isn't polluted with zero points that could invite a misconfigured alarm.
+ * The gauge's companion is emitted on EVERY tick including `total === 0`, so
+ * a "ClientCount unexpectedly 0" alarm has a continuous series to evaluate.
+ *
+ * Bounded sampling. Counter buffering, coalescing, the aggregated companions
+ * and the swallow-on-failure live in `@wxyc/observability/metrics` as of
+ * BS#2191; this module owns the metric names, the `Topic` dimension, the
+ * companion decisions, the tick, and the opt-out. Counters flush on whichever
+ * comes first: the periodic timer (default 60 s) or 100 buffered increments.
+ * The emitter's own one-shot timer is switched off (`flushIntervalMs: null`)
+ * because the `setInterval` below already owns the cadence and must flush
+ * counters and sample the gauge on the SAME tick; a second, independently
+ * phased timer would publish extra datapoints at a cadence no alarm `Period`
+ * was sized for.
+ *
+ * The gauge stays out of the emitter on purpose. It has no `record()` call to
+ * buffer — it is sampled from `snapshotFn` on the tick — and it is not
+ * additive: the emitter coalesces by SUMMING, which is right for a counter
+ * and wrong for two gauge samples of the same topic. Its unconditional
+ * zero-total companion is also inexpressible in a "publish what was buffered"
+ * emitter. Consequence: two `PutMetricData` calls per tick, issued
+ * concurrently and failing/logging independently (`(counters)` vs `(gauges)`),
+ * which is the pre-BS#2191 behaviour and the reason a broken snapshot source
+ * cannot take the counters down with it. It also means two CloudWatch clients
+ * in this module — the emitter's and the gauge path's.
  *
  * Opt-out. `SSE_METRICS_DISABLED=true` short-circuits the module: no client
  * is created, no timer fires, and the `recordBroadcast` / `recordBroadcastFailure`
@@ -58,6 +83,7 @@
  */
 
 import { CloudWatchClient, PutMetricDataCommand, type MetricDatum } from '@aws-sdk/client-cloudwatch';
+import { createBufferedMetricEmitter } from '@wxyc/observability/metrics';
 
 const NAMESPACE = 'WXYC/BackendService';
 const METRIC_CLIENT_COUNT = 'SSE/ClientCount';
@@ -71,11 +97,6 @@ const FLUSH_AT_BUFFER_SIZE = 100;
 
 type TopicCount = Map<string, number>;
 
-let broadcastBuffer: TopicCount = new Map();
-let failureBuffer: TopicCount = new Map();
-let suppressedBuffer: TopicCount = new Map();
-let updateSuppressedBuffer: TopicCount = new Map();
-let bufferedTotal = 0;
 let flushTimer: NodeJS.Timeout | null = null;
 let cloudwatchClient: CloudWatchClient | null = null;
 let snapshotFn: (() => TopicCount) | null = null;
@@ -83,6 +104,20 @@ let snapshotFn: (() => TopicCount) | null = null;
 function isDisabled(): boolean {
   return process.env.SSE_METRICS_DISABLED === 'true';
 }
+
+/**
+ * Counter emitter. `FLUSH_AT_BUFFER_SIZE` counts total increments, not
+ * distinct topics — the emitter buffers one point per `record()` call and
+ * coalesces only at flush time, so `buffer.length` is exactly the
+ * `bufferedTotal` this module used to track by hand.
+ */
+const counters = createBufferedMetricEmitter({
+  namespace: NAMESPACE,
+  flushIntervalMs: null,
+  flushAtBufferSize: FLUSH_AT_BUFFER_SIZE,
+  isDisabled,
+  logPrefix: '[sse-metrics] (counters)',
+});
 
 function getClient(): CloudWatchClient {
   if (!cloudwatchClient) {
@@ -93,139 +128,51 @@ function getClient(): CloudWatchClient {
   return cloudwatchClient;
 }
 
-function incrementTopic(map: TopicCount, topic: string): void {
-  map.set(topic, (map.get(topic) ?? 0) + 1);
-}
-
 /** Record one broadcast event for the given topic. */
 export function recordBroadcast(topic: string): void {
-  if (isDisabled()) return;
-  incrementTopic(broadcastBuffer, topic);
-  bufferedTotal += 1;
-  if (bufferedTotal >= FLUSH_AT_BUFFER_SIZE) {
-    void flushCounters();
-  }
+  // Dashboard-only: no alarm reads an aggregate EventsBroadcast, so no
+  // companion. Adding one would double the cost and invite a misconfigured
+  // alarm on a series nothing asked for.
+  counters.record({
+    metricName: METRIC_EVENTS_BROADCAST,
+    dimensions: [{ name: 'Topic', value: topic }],
+  });
 }
 
 /** Record one per-client broadcast write failure for the given topic. */
 export function recordBroadcastFailure(topic: string): void {
-  if (isDisabled()) return;
-  incrementTopic(failureBuffer, topic);
-  bufferedTotal += 1;
-  if (bufferedTotal >= FLUSH_AT_BUFFER_SIZE) {
-    void flushCounters();
-  }
+  // Aggregated companion: one datum per flush carrying the sum across topics,
+  // the alarm input PutMetricAlarm can't compute for itself.
+  counters.record({
+    metricName: METRIC_BROADCAST_FAILURES,
+    dimensions: [{ name: 'Topic', value: topic }],
+    emitDimensionlessCompanion: 'aggregated',
+  });
 }
 
 /** Record one age-guard-suppressed flowsheet track INSERT for the given topic. */
 export function recordInsertSuppressed(topic: string): void {
-  if (isDisabled()) return;
-  incrementTopic(suppressedBuffer, topic);
-  bufferedTotal += 1;
-  if (bufferedTotal >= FLUSH_AT_BUFFER_SIZE) {
-    void flushCounters();
-  }
+  counters.record({
+    metricName: METRIC_INSERT_SUPPRESSED,
+    dimensions: [{ name: 'Topic', value: topic }],
+    emitDimensionlessCompanion: 'aggregated',
+  });
 }
 
 /**
  * Record one age-guard-suppressed terminal flowsheet track UPDATE for the
- * given topic. Sibling of `recordInsertSuppressed`; kept as its own buffer and
- * its own metric rather than folded into `SSE/InsertSuppressed` because the
- * two answer different questions — a spike here means a bulk UPDATE is running
- * (or `LIVE_FS_UPDATE_MAX_AGE_HOURS` is misconfigured), which is a distinct
+ * given topic. Sibling of `recordInsertSuppressed`; kept as its own metric
+ * rather than folded into `SSE/InsertSuppressed` because the two answer
+ * different questions — a spike here means a bulk UPDATE is running (or
+ * `LIVE_FS_UPDATE_MAX_AGE_HOURS` is misconfigured), which is a distinct
  * operational condition from a bulk import.
  */
 export function recordUpdateSuppressed(topic: string): void {
-  if (isDisabled()) return;
-  incrementTopic(updateSuppressedBuffer, topic);
-  bufferedTotal += 1;
-  if (bufferedTotal >= FLUSH_AT_BUFFER_SIZE) {
-    void flushCounters();
-  }
-}
-
-function buildCounterData(timestamp: Date): MetricDatum[] {
-  const data: MetricDatum[] = [];
-
-  for (const [topic, count] of broadcastBuffer) {
-    data.push({
-      MetricName: METRIC_EVENTS_BROADCAST,
-      Timestamp: timestamp,
-      Unit: 'Count',
-      Value: count,
-      Dimensions: [{ Name: 'Topic', Value: topic }],
-    });
-  }
-
-  for (const [topic, count] of failureBuffer) {
-    data.push({
-      MetricName: METRIC_BROADCAST_FAILURES,
-      Timestamp: timestamp,
-      Unit: 'Count',
-      Value: count,
-      Dimensions: [{ Name: 'Topic', Value: topic }],
-    });
-  }
-  // Dimensionless companion for the aggregate-failure alarm input — PutMetricAlarm
-  // can't aggregate across dimensions. Skipped when zero so the namespace isn't
-  // polluted with zero points that could invite a misconfigured alarm.
-  if (failureBuffer.size > 0) {
-    let total = 0;
-    for (const count of failureBuffer.values()) total += count;
-    data.push({
-      MetricName: METRIC_BROADCAST_FAILURES,
-      Timestamp: timestamp,
-      Unit: 'Count',
-      Value: total,
-      Dimensions: [],
-    });
-  }
-
-  for (const [topic, count] of suppressedBuffer) {
-    data.push({
-      MetricName: METRIC_INSERT_SUPPRESSED,
-      Timestamp: timestamp,
-      Unit: 'Count',
-      Value: count,
-      Dimensions: [{ Name: 'Topic', Value: topic }],
-    });
-  }
-  // Same alarm-input rationale as BroadcastFailures above.
-  if (suppressedBuffer.size > 0) {
-    let total = 0;
-    for (const count of suppressedBuffer.values()) total += count;
-    data.push({
-      MetricName: METRIC_INSERT_SUPPRESSED,
-      Timestamp: timestamp,
-      Unit: 'Count',
-      Value: total,
-      Dimensions: [],
-    });
-  }
-
-  for (const [topic, count] of updateSuppressedBuffer) {
-    data.push({
-      MetricName: METRIC_UPDATE_SUPPRESSED,
-      Timestamp: timestamp,
-      Unit: 'Count',
-      Value: count,
-      Dimensions: [{ Name: 'Topic', Value: topic }],
-    });
-  }
-  // Same alarm-input rationale again.
-  if (updateSuppressedBuffer.size > 0) {
-    let total = 0;
-    for (const count of updateSuppressedBuffer.values()) total += count;
-    data.push({
-      MetricName: METRIC_UPDATE_SUPPRESSED,
-      Timestamp: timestamp,
-      Unit: 'Count',
-      Value: total,
-      Dimensions: [],
-    });
-  }
-
-  return data;
+  counters.record({
+    metricName: METRIC_UPDATE_SUPPRESSED,
+    dimensions: [{ name: 'Topic', value: topic }],
+    emitDimensionlessCompanion: 'aggregated',
+  });
 }
 
 function buildGaugeData(timestamp: Date): MetricDatum[] {
@@ -258,6 +205,8 @@ function buildGaugeData(timestamp: Date): MetricDatum[] {
 
   // Dimensionless companion (alarm input) — always emitted, including total=0,
   // so a "ClientCount unexpectedly 0" alarm has a continuous series to evaluate.
+  // This is the rule that keeps the gauge out of the buffered emitter: an
+  // emitter publishes what was recorded, and a zero-total tick records nothing.
   data.push({
     MetricName: METRIC_CLIENT_COUNT,
     Timestamp: timestamp,
@@ -267,31 +216,6 @@ function buildGaugeData(timestamp: Date): MetricDatum[] {
   });
 
   return data;
-}
-
-async function flushCounters(): Promise<void> {
-  if (
-    broadcastBuffer.size === 0 &&
-    failureBuffer.size === 0 &&
-    suppressedBuffer.size === 0 &&
-    updateSuppressedBuffer.size === 0
-  )
-    return;
-
-  const timestamp = new Date();
-  const data = buildCounterData(timestamp);
-
-  broadcastBuffer = new Map();
-  failureBuffer = new Map();
-  suppressedBuffer = new Map();
-  updateSuppressedBuffer = new Map();
-  bufferedTotal = 0;
-
-  try {
-    await getClient().send(new PutMetricDataCommand({ Namespace: NAMESPACE, MetricData: data }));
-  } catch (err) {
-    console.error('[sse-metrics] PutMetricData (counters) failed; dropping batch:', err);
-  }
 }
 
 async function flushGauges(): Promise<void> {
@@ -307,7 +231,7 @@ async function flushGauges(): Promise<void> {
 }
 
 async function tick(): Promise<void> {
-  await Promise.all([flushCounters(), flushGauges()]);
+  await Promise.all([counters.flush(), flushGauges()]);
 }
 
 /**
@@ -343,11 +267,7 @@ export function stopSseMetrics(): void {
  */
 export function __resetForTests(): void {
   stopSseMetrics();
-  broadcastBuffer = new Map();
-  failureBuffer = new Map();
-  suppressedBuffer = new Map();
-  updateSuppressedBuffer = new Map();
-  bufferedTotal = 0;
+  counters.reset();
   cloudwatchClient = null;
   snapshotFn = null;
 }
