@@ -1,4 +1,25 @@
 /**
+ * `AWS_ACCESS_KEY_ID` being PRESENT is the hazard, independent of what this
+ * module reads: while it is set it tops the default credential chain for the
+ * whole process and shadows the EC2 instance role. The transitional fallback
+ * that once read it is gone, so this is now purely a regression detector — an
+ * unobservable re-arming is exactly what let BS#2518 run dark for 105 days.
+ */
+let warnedLegacyAwsCredentials = false;
+const warnIfLegacyCredentialsPresent = (): void => {
+  if (warnedLegacyAwsCredentials || !process.env.AWS_ACCESS_KEY_ID) {
+    return;
+  }
+  warnedLegacyAwsCredentials = true;
+  console.warn(
+    '[email] AWS_ACCESS_KEY_ID is set. It shadows the EC2 instance role for every ' +
+      'AWS SDK call in this process that does not pass explicit credentials, and it is ' +
+      'NOT read for SES. Unset it and set SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY ' +
+      '(see BS#2518).'
+  );
+};
+
+/**
  * Self-contained SES sender for the station-signup-review digest.
  *
  * Mirrors `jobs/metadata-no-match-digest/email.ts` verbatim (which itself
@@ -17,51 +38,21 @@ import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 let sesClient: SESClient | null = null;
 
 /**
- * Prefers `SES_*` over the legacy `AWS_*`, never mixing halves. See
+ * Reads `SES_ACCESS_KEY_ID` / `SES_SECRET_ACCESS_KEY`. See
  * `shared/authentication/src/email.ts`'s `resolveSesCredentials` for why these
  * keys must not travel under the AWS SDK's reserved global names: under those
  * names a single-purpose SES credential shadows the instance role for the whole
  * process, which is what left every CloudWatch metric dark for 105 days
- * (BS#2518). This job has a self-contained sender by design, so the helper is
+ * (BS#2518). The transitional `AWS_*` fallback was deleted once prod carried
+ * `SES_*`. This job has a self-contained sender by design, so the helper is
  * duplicated rather than imported, as `getConfigurationSetName` already is.
  */
-/**
- * The legacy spelling being PRESENT is the hazard, not merely being used: while
- * `AWS_ACCESS_KEY_ID` is set, it tops the default credential chain for the whole
- * process regardless of which pair this module reads. Warn once so the residual
- * unsafe state is observable — an unobservable one is exactly what let BS#2518
- * run dark for 105 days — and so BS#2518 has a signal for when the fallback is
- * safe to delete rather than an operator's memory.
- */
-let warnedLegacyAwsCredentials = false;
-const warnIfLegacyCredentialsPresent = (): void => {
-  if (warnedLegacyAwsCredentials || !process.env.AWS_ACCESS_KEY_ID) {
-    return;
-  }
-  warnedLegacyAwsCredentials = true;
-  console.warn(
-    '[email] AWS_ACCESS_KEY_ID is set. It shadows the EC2 instance role for every ' +
-      'AWS SDK call in this process that does not pass explicit credentials. Move the ' +
-      'SES credential to SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY (see BS#2518).'
-  );
-};
-
 const resolveSesCredentials = (): { accessKeyId: string; secretAccessKey: string } | null => {
   warnIfLegacyCredentialsPresent();
 
-  const sesAccessKeyId = process.env.SES_ACCESS_KEY_ID;
-  const sesSecretAccessKey = process.env.SES_SECRET_ACCESS_KEY;
-  if (sesAccessKeyId && sesSecretAccessKey) {
-    return { accessKeyId: sesAccessKeyId, secretAccessKey: sesSecretAccessKey };
-  }
-
-  const awsAccessKeyId = process.env.AWS_ACCESS_KEY_ID;
-  const awsSecretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
-  if (awsAccessKeyId && awsSecretAccessKey) {
-    return { accessKeyId: awsAccessKeyId, secretAccessKey: awsSecretAccessKey };
-  }
-
-  return null;
+  const accessKeyId = process.env.SES_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.SES_SECRET_ACCESS_KEY;
+  return accessKeyId && secretAccessKey ? { accessKeyId, secretAccessKey } : null;
 };
 
 const getSesClient = (): SESClient => {
@@ -70,10 +61,7 @@ const getSesClient = (): SESClient => {
   const credentials = resolveSesCredentials();
   const region = process.env.AWS_REGION;
   if (!credentials || !region) {
-    throw new Error(
-      'Missing SES configuration: SES_ACCESS_KEY_ID, SES_SECRET_ACCESS_KEY, AWS_REGION ' +
-        '(legacy AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are still accepted — see BS#2518)'
-    );
+    throw new Error('Missing SES configuration: SES_ACCESS_KEY_ID, SES_SECRET_ACCESS_KEY, AWS_REGION');
   }
 
   sesClient = new SESClient({ region, credentials });

@@ -10,8 +10,8 @@ jest.mock('@aws-sdk/client-ses', () => ({
 }));
 
 // Set required env vars before importing the module
-process.env.AWS_ACCESS_KEY_ID = 'test-key';
-process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+process.env.SES_ACCESS_KEY_ID = 'test-key';
+process.env.SES_SECRET_ACCESS_KEY = 'test-secret';
 process.env.AWS_REGION = 'us-east-1';
 process.env.SES_FROM_EMAIL = 'noreply@wxyc.org';
 // tests/setup/unit.setup.ts defaults EMAIL_ENABLED=false for the suite;
