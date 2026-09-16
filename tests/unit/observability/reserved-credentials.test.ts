@@ -172,11 +172,68 @@ describe('warnIfReservedAwsCredentialsPresent (BS#2532)', () => {
  * exists to avoid.
  */
 describe('reserved-credentials source', () => {
+  const sourcePath = path.resolve(__dirname, '../../../shared/observability/src/reserved-credentials.ts');
+
   it('imports no AWS SDK', () => {
-    const sourcePath = path.resolve(__dirname, '../../../shared/observability/src/reserved-credentials.ts');
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     const source = fs.readFileSync(sourcePath, 'utf-8');
 
     expect(source).not.toMatch(/@aws-sdk/);
+  });
+
+  /**
+   * The stronger form, and the one that actually holds the line. Matching on
+   * `@aws-sdk` only catches a DIRECT import: a re-export of this package's own
+   * `./metrics.js` pulls `@aws-sdk/client-cloudwatch` into the preload barrel
+   * of all three containers while containing no `@aws-sdk` string of its own,
+   * so the assertion above passes and the cost ships anyway. Asserting the
+   * documented invariant instead — this module imports NOTHING — closes the
+   * transitive hole without having to enumerate what must not be reached.
+   */
+  it('imports nothing at all', () => {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const source = fs.readFileSync(sourcePath, 'utf-8');
+
+    expect(source).not.toMatch(/^\s*import\s/m);
+    expect(source).not.toMatch(/^\s*export\s[^;]*\sfrom\s/m);
+  });
+});
+
+/**
+ * BS#2532's whole premise is that the detector existed but was not invoked
+ * where it mattered, so the function being correct is only half of it — the
+ * other half is that each preload still calls it. Nothing else in the suite
+ * pins that: delete the call from `apps/backend/instrument.ts` and typecheck,
+ * lint and every other test stay green while the container that publishes
+ * `WXYC/BackendService` silently loses the only detection of the condition
+ * that ran dark for 105 days.
+ *
+ * Source-text assertions rather than an import, because these files are
+ * `node --import` preloads whose module scope calls `Sentry.init()` and
+ * `config()` — importing one into a test would execute both.
+ *
+ * Mirrors the `instrument.ts wiring` block in
+ * `tests/unit/config/sentry-transaction-filter.test.ts`, which pins the other
+ * thing the preloads are load-bearing for.
+ */
+describe('instrument.ts wiring (BS#2532)', () => {
+  it.each([
+    ['backend', '../../../apps/backend/instrument.ts'],
+    ['auth', '../../../apps/auth/instrument.ts'],
+    ['enrichment-worker', '../../../apps/enrichment-worker/instrument.ts'],
+  ])('%s preload calls the detector after config()', (_app, relPath) => {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const source = fs.readFileSync(path.resolve(__dirname, relPath), 'utf-8');
+
+    expect(source).toMatch(/from ['"]@wxyc\/observability['"]/);
+    expect(source).toMatch(/warnIfReservedAwsCredentialsPresent\(\)/);
+
+    // Ordering matters: `config()` is what loads `.env` into `process.env`, so
+    // a detector called before it reads an environment the deploy has not
+    // finished populating and reports a clean host that is not clean.
+    const configAt = source.indexOf('config()');
+    const detectorAt = source.indexOf('warnIfReservedAwsCredentialsPresent()');
+    expect(configAt).toBeGreaterThanOrEqual(0);
+    expect(detectorAt).toBeGreaterThan(configAt);
   });
 });
