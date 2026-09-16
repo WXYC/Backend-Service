@@ -2,22 +2,67 @@ import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 
 let sesClient: SESClient | null = null;
 
+/**
+ * Resolves the SES credential pair, preferring `SES_*` over the legacy `AWS_*`.
+ *
+ * These keys authenticate one IAM user for one purpose, but were read from
+ * `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — the AWS SDK's RESERVED GLOBAL
+ * names. Anything set under those names sits at the top of the default
+ * credential chain for the whole process, so a single-purpose SES key silently
+ * became the identity for every other AWS SDK call that does not pass
+ * credentials explicitly. In production that shadowed the `wxyc-ec2-backend`
+ * instance role, and both CloudWatch publishers failed `AccessDenied` on
+ * `cloudwatch:PutMetricData` for 105 days — `WXYC/BackendService` never came
+ * into existence at all. See BS#2518.
+ *
+ * The `AWS_*` fallback is a DEPLOYMENT-ORDERING affordance, not a supported
+ * configuration: it is what lets this code ship before `~/.env` is rewritten,
+ * and lets the env be rolled back without a redeploy. Remove it once prod
+ * carries `SES_*` (tracked on BS#2518) — while it remains, the shadowing it
+ * exists to fix is still reachable.
+ *
+ * The pair comes from one source or the other, never half from each. An `SES_`
+ * id paired with an `AWS_` secret authenticates as nothing, and SES reports
+ * that as an opaque signature failure at send time rather than as the
+ * configuration error it is.
+ *
+ * `AWS_REGION` is deliberately NOT renamed: it carries no identity, so it
+ * shadows nothing.
+ */
+const resolveSesCredentials = (): { accessKeyId: string; secretAccessKey: string } | null => {
+  const sesAccessKeyId = process.env.SES_ACCESS_KEY_ID;
+  const sesSecretAccessKey = process.env.SES_SECRET_ACCESS_KEY;
+  if (sesAccessKeyId && sesSecretAccessKey) {
+    return { accessKeyId: sesAccessKeyId, secretAccessKey: sesSecretAccessKey };
+  }
+
+  const awsAccessKeyId = process.env.AWS_ACCESS_KEY_ID;
+  const awsSecretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+  if (awsAccessKeyId && awsSecretAccessKey) {
+    return { accessKeyId: awsAccessKeyId, secretAccessKey: awsSecretAccessKey };
+  }
+
+  return null;
+};
+
 const getSesClient = () => {
   if (sesClient) {
     return sesClient;
   }
 
-  const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+  const credentials = resolveSesCredentials();
   const region = process.env.AWS_REGION;
 
-  if (!accessKeyId || !secretAccessKey || !region) {
-    throw new Error('Missing AWS SES configuration: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION');
+  if (!credentials || !region) {
+    throw new Error(
+      'Missing SES configuration: SES_ACCESS_KEY_ID, SES_SECRET_ACCESS_KEY, AWS_REGION ' +
+        '(legacy AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are still accepted — see BS#2518)'
+    );
   }
 
   sesClient = new SESClient({
     region,
-    credentials: { accessKeyId, secretAccessKey },
+    credentials,
   });
 
   return sesClient;

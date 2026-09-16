@@ -287,6 +287,12 @@ jobs:
       - name: 'Type check: station-signup-attempt-prune'
         run: npm run typecheck --workspace=jobs/station-signup-attempt-prune
 
+      # BS#2009 gap again. Opted in while BS#2518 changed this job's SES
+      # credential resolution: root typecheck skips jobs/** and `tsup` is
+      # transpile-only, so the edited sender was verified by nothing in CI.
+      - name: 'Type check: metadata-no-match-digest'
+        run: npm run typecheck --workspace=jobs/metadata-no-match-digest
+
       - name: Lint
         run: npm run lint
 

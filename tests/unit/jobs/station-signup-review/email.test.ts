@@ -122,4 +122,29 @@ describe('email.ts', () => {
       expect(mod.isEmailSendingEnabled()).toBe(true);
     });
   });
+
+  /**
+   * BS#2518: these keys must travel under `SES_*`, not the AWS SDK's reserved
+   * global names — under those names a single-purpose SES credential shadows
+   * the instance role for the whole process. The `AWS_*` path is a
+   * deployment-ordering fallback and is covered by every other test here,
+   * which still sets it.
+   */
+  it('prefers SES_* credentials over the legacy AWS_* names', async () => {
+    process.env.SES_ACCESS_KEY_ID = 'ses-key';
+    process.env.SES_SECRET_ACCESS_KEY = 'ses-secret';
+    jest.clearAllMocks();
+    jest.resetModules();
+
+    const mod = await import('../../../../jobs/station-signup-review/email');
+    const ses = await import('@aws-sdk/client-ses');
+    await mod.sendStationSignupDigestEmail('station-manager@wxyc.org', content);
+
+    expect(ses.SESClient as unknown as jest.Mock).toHaveBeenCalledWith(
+      expect.objectContaining({ credentials: { accessKeyId: 'ses-key', secretAccessKey: 'ses-secret' } })
+    );
+
+    delete process.env.SES_ACCESS_KEY_ID;
+    delete process.env.SES_SECRET_ACCESS_KEY;
+  });
 });

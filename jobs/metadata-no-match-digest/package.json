@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node dist/job.js",
     "build": "tsup --minify",
+    "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
     "docker:build": "docker build -t wxyc_metadata_no_match_digest:ci -f ../../Dockerfile.metadata-no-match-digest ../../",
     "dev": "tsup --watch"

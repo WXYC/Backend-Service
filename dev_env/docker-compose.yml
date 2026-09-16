@@ -155,6 +155,11 @@ services:
       - DEFAULT_USER_DJ_NAME=${DEFAULT_USER_DJ_NAME}
       - DEFAULT_USER_REAL_NAME=${DEFAULT_USER_REAL_NAME}
       - CREATE_DEFAULT_USER=${CREATE_DEFAULT_USER}
+      # SES credentials travel under SES_* so they cannot shadow the default
+      # AWS credential chain (BS#2518). AWS_* is still passed through while
+      # the fallback exists, so an unmigrated local .env keeps working.
+      - SES_ACCESS_KEY_ID=${SES_ACCESS_KEY_ID}
+      - SES_SECRET_ACCESS_KEY=${SES_SECRET_ACCESS_KEY}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=${AWS_REGION}
