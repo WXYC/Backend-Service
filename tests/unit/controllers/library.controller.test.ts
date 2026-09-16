@@ -325,6 +325,7 @@ import {
   updateAlbum,
   setAlbumUrls,
   searchLibraryQueryEndpoint,
+  ARTWORK_WARM_MAX_ROWS,
   manualDiscogsRecheck,
   deleteAlbum,
   addRotation,
@@ -3562,38 +3563,124 @@ describe('library.controller', () => {
     it("warms the page's artwork without waiting for enrichment to resolve", async () => {
       const results = [{ id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', artwork_url: null }];
       mockSearchLibrary.mockResolvedValue({ results, total: 1 });
-      // Enrichment that never resolves — proves the response can't be waiting on it.
+      // Enrichment that never resolves. Awaiting it would hang this test to the
+      // suite timeout, so the handler resolving at all IS the assertion — a
+      // wall-clock threshold would add only a flake mode under load.
       mockEnrichWithArtwork.mockReturnValue(new Promise<unknown[]>(() => undefined));
 
       const req = { query: { q: 'juana' } } as unknown as Request;
       const res = mockResponse();
 
-      const start = Date.now();
       await searchLibraryQueryEndpoint(req, res, next);
-      const elapsed = Date.now() - start;
 
-      expect(elapsed).toBeLessThan(50);
       expect(mockEnrichWithArtwork).toHaveBeenCalledWith(results);
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ results, total: 1 }));
     });
 
-    it('excludes enrichment output from the envelope even when enrichment resolves immediately', async () => {
+    it('responds before enrichment can mutate the rows it hands over', async () => {
       const results = [{ id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', artwork_url: null }];
       mockSearchLibrary.mockResolvedValue({ results, total: 1 });
-      mockEnrichWithArtwork.mockResolvedValue([
-        { id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', artwork_url: 'https://i.discogs.com/doga.jpg' },
-      ]);
+      // `enrichWithArtwork` mutates `row.artwork_url` IN PLACE. Reproducing that
+      // is the whole point of this test: a mock that resolves a fresh array
+      // leaves it green wherever the call sits, because `toHaveBeenCalledWith`
+      // would compare the captured argument against the very object the
+      // controller passed in and find them trivially equal.
+      mockEnrichWithArtwork.mockImplementation((rows: unknown[]) => {
+        (rows as { artwork_url: string | null }[]).forEach((row) => {
+          row.artwork_url = 'https://i.discogs.com/doga.jpg';
+        });
+        return Promise.resolve(rows);
+      });
+
+      // Serialize at the moment of the call: `results` is mutated by the time
+      // the assertions below run, so a retained reference would prove nothing.
+      const serialized: string[] = [];
+      const res = {} as Response;
+      res.status = jest.fn().mockReturnValue(res) as unknown as Response['status'];
+      res.json = jest.fn((body: unknown) => {
+        serialized.push(JSON.stringify(body));
+        return res;
+      });
 
       const req = { query: { q: 'juana' } } as unknown as Request;
+      await searchLibraryQueryEndpoint(req, res, next);
+
+      expect(mockEnrichWithArtwork).toHaveBeenCalled();
+      expect(JSON.parse(serialized[0]).results[0].artwork_url).toBeNull();
+      // The mutation did land — on the rows, after the response went out.
+      expect(results[0].artwork_url).toBe('https://i.discogs.com/doga.jpg');
+    });
+
+    it('caps the warm at ARTWORK_WARM_MAX_ROWS un-cached rows', async () => {
+      const results = Array.from({ length: 50 }, (_, i) => ({
+        id: i + 1,
+        artist_name: 'Stereolab',
+        album_title: `Album ${i}`,
+        artwork_url: null,
+      }));
+      mockSearchLibrary.mockResolvedValue({ results, total: 50 });
+
+      const req = { query: { q: 'stereolab' } } as unknown as Request;
       const res = mockResponse();
 
       await searchLibraryQueryEndpoint(req, res, next);
 
-      // Same contract as `searchForAlbum`: enrichment still runs (and still
-      // writes artwork_url back for the next read), but the envelope is built
-      // from the raw rows before the detached promise can settle.
-      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ results }));
+      expect(mockEnrichWithArtwork.mock.calls[0][0]).toHaveLength(ARTWORK_WARM_MAX_ROWS);
+      // The full page still reaches the client; only the warm is bounded.
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ total: 50 }));
+    });
+
+    it('spends the warm budget only on rows that have no artwork yet', async () => {
+      const cached = {
+        id: 1,
+        artist_name: 'Stereolab',
+        album_title: 'Dots and Loops',
+        artwork_url: 'https://i.discogs.com/dots.jpg',
+      };
+      const uncached = { id: 2, artist_name: 'Cat Power', album_title: 'Moon Pix', artwork_url: null };
+      mockSearchLibrary.mockResolvedValue({ results: [cached, uncached], total: 2 });
+
+      const req = { query: { q: 'moon' } } as unknown as Request;
+      const res = mockResponse();
+
+      await searchLibraryQueryEndpoint(req, res, next);
+
+      expect(mockEnrichWithArtwork).toHaveBeenCalledWith([uncached]);
+    });
+
+    it('does not warm when every row already carries artwork', async () => {
+      const results = [
+        {
+          id: 1,
+          artist_name: 'Stereolab',
+          album_title: 'Dots and Loops',
+          artwork_url: 'https://i.discogs.com/dots.jpg',
+        },
+      ];
+      mockSearchLibrary.mockResolvedValue({ results, total: 1 });
+
+      const req = { query: { q: 'dots' } } as unknown as Request;
+      const res = mockResponse();
+
+      await searchLibraryQueryEndpoint(req, res, next);
+
+      expect(mockEnrichWithArtwork).not.toHaveBeenCalled();
+    });
+
+    it('does not warm a browse page (no text query)', async () => {
+      const results = [{ id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', artwork_url: null }];
+      mockSearchLibrary.mockResolvedValue({ results, total: 1 });
+
+      // `missing: true` with no `q` — the Missing Releases screen, which pulls
+      // up to 100 rows and is a browse, not a search.
+      const req = { query: { missing: 'true', limit: '100' } } as unknown as Request;
+      const res = mockResponse();
+
+      await searchLibraryQueryEndpoint(req, res, next);
+
+      expect(mockEnrichWithArtwork).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(200);
     });
 
     it('does not propagate enrichment errors as request failures', async () => {

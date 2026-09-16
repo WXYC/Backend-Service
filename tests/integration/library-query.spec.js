@@ -307,11 +307,10 @@ describe('GET /library/query cascade — modern Card Catalog serves matched_via 
     // discriminates, not the value alone. The CTA fixture is unflagged, hence
     // `false`; `flowsheet.spec.js` covers a flagged row on the mutation echo.
     expect(typeof hit.artist_id).toBe('number');
-    // Presence, not value: the endpoint now warms artwork fire-and-forget, so
-    // a fixture row can be `null` on one run and a real URL on a later one
-    // once the cache-through has written. What must never change is that the
-    // key reaches the wire at all — dropped from the SELECT it arrives
-    // `undefined`, which `JSON.stringify` omits.
+    // Cascade rows reach the wire through `taggedRowToAlbumSearchResultRow` over
+    // `LIBRARY_VIEW_PROJECTION_RAW`, NOT through `CATALOG_ROW_PROJECTION_COLUMNS`
+    // — so this pins the cascade arm only. The primary SQL path has its own
+    // assertion below; neither one covers the other.
     expect(hit).toHaveProperty('artwork_url');
     expect(hit.artwork_url === null || typeof hit.artwork_url === 'string').toBe(true);
     expect(hit).toHaveProperty('discogsUnavailable', false);
@@ -330,6 +329,26 @@ describe('GET /library/query cascade — modern Card Catalog serves matched_via 
     expect(res.body.total).toBe(res.body.results.length);
     expect(res.body.page).toBe(0);
     expect(res.body.totalPages).toBe(1);
+  });
+
+  test('primary SQL path emits artwork_url on every row', async () => {
+    // `artist:` is field-scoped, so it never reaches the cascade gate — these
+    // rows come from `CATALOG_ROW_PROJECTION_COLUMNS` via `toAlbumSearchResultRow`,
+    // the projection a dropped column would actually be dropped from. The unit
+    // tests cannot catch that: they hand their mocked rows every field.
+    //
+    // Presence, not value. The endpoint warms artwork fire-and-forget, so a
+    // fixture row can read `null` on one run and a real URL on a later one once
+    // the cache-through has written. What must never vary is that the key
+    // reaches the wire — absent from the SELECT it arrives `undefined`, which
+    // `JSON.stringify` omits entirely.
+    const res = await auth.get('/library/query').query({ q: 'artist:Stereolab', limit: 10 }).expect(200);
+
+    expect(res.body.results.length).toBeGreaterThan(0);
+    for (const row of res.body.results) {
+      expect(row).toHaveProperty('artwork_url');
+      expect(row.artwork_url === null || typeof row.artwork_url === 'string').toBe(true);
+    }
   });
 
   test('multi-word Track 2 query ("vi scose poise") returns Confield via LML fallback', async () => {

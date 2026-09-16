@@ -3879,6 +3879,34 @@ const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 
 /**
+ * How many un-warmed rows of one `/library/query` page may be sent to LML for
+ * artwork.
+ *
+ * `enrichWithArtwork` fans out with an uncapped `Promise.allSettled` over every
+ * un-cached row it is handed, and `library-enrich-artwork` is a class-2 caller
+ * — it shares the process-wide `defaultLimiter` (5 concurrent, 50/min, 5s
+ * bounded queue wait, circuit breaker) with `library-add-album`,
+ * `library-track-search`, `library-canonical-entity`, and `request-line`. An
+ * uncapped page is therefore not merely slow: at `MAX_LIMIT` it asks for twice
+ * the limiter's entire per-minute budget in one burst, sheds most of itself as
+ * `shed_limiter_saturated`, and each shed counts as a breaker failure — so a
+ * catalog search can trip the breaker OPEN and fast-fail adding an album or a
+ * request-line lookup. Class-2 sharing this limiter is deliberate (BS#994/#995
+ * — a long-held permit back-pressures concurrent interactive lookups); the cap
+ * is what keeps this endpoint inside that intent.
+ *
+ * `GET /library/` is not the precedent it looks like: `fuzzySearchLibrary`
+ * defaults to `n = 5`, so the sibling warm is inherently small, and its one
+ * caller that asks for more is a single submit rather than a debounced
+ * keystroke feeding an infinite scroll.
+ *
+ * 5 matches the limiter's concurrency, so one page costs at most one full
+ * permit-set and never queues behind itself. Repeated views of the same page
+ * warm it further, a slice at a time.
+ */
+export const ARTWORK_WARM_MAX_ROWS = 5;
+
+/**
  * GET /library/query — query-builder catalog search (Catalog Track Search
  * project, WXYC/projects/30).
  *
@@ -4009,23 +4037,38 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
   });
   const totalPages = Math.ceil(total / limit);
   res.status(200).json({ results, total, page, totalPages });
-  // `searchForAlbum`'s fire-and-forget artwork warm (BS#1828), on this
-  // endpoint too: off the response path so a slow/rate-limited LML is never
+
+  // `searchForAlbum`'s fire-and-forget artwork warm (BS#1828), on this endpoint
+  // too: off the response path so a slow/rate-limited LML is never
   // catalog-search latency, with the detached `updateArtworkUrl` cache-through
-  // landing an un-warmed release's `artwork_url` on the NEXT read. Nothing
-  // else on this path fills the column, so without it the projection above
-  // only ever carries artwork a release picked up via `GET /library/`.
+  // landing an un-warmed release's `artwork_url` on the NEXT read. Nothing else
+  // on this path fills the column, so without it the projection above only ever
+  // carries artwork a release happened to pick up via `GET /library/`.
   //
   // Started AFTER `res.json()`, where the sibling starts it before: this one
   // mutates `row.artwork_url` in place, and responding first makes "enriched
   // values never reach this response" hold by statement order rather than by
-  // the first await landing after serialization.
+  // the enrichment's first await landing after serialization.
   //
-  // `enrichWithArtwork` collects per-row failures itself; this `.catch` only
-  // keeps a whole-promise rejection from becoming an unhandledRejection.
-  libraryService.enrichWithArtwork(results).catch((err) => {
-    console.warn('[Library] Catalog-query artwork enrichment failed:', err);
-  });
+  // Bounded twice, because this endpoint is a browse surface where the sibling
+  // is not (see ARTWORK_WARM_MAX_ROWS):
+  //   - Only on a real text query. A `q`-less page is a browse — the Missing
+  //     Releases screen pulls `MAX_LIMIT` rows this way — and warming it means
+  //     warming the whole catalog a page at a time.
+  //   - Only `ARTWORK_WARM_MAX_ROWS` rows, chosen from those that have no
+  //     artwork yet so the budget is never spent re-confirming a warm row.
+  //
+  // Rows are passed by reference, so the cache-through still writes through to
+  // the same objects `enrichWithArtwork` would have selected itself.
+  //
+  // It collects per-row failures internally; this `.catch` only keeps a
+  // whole-promise rejection from becoming an unhandledRejection.
+  const unwarmed = q.trim() ? results.filter((row) => row.artwork_url == null).slice(0, ARTWORK_WARM_MAX_ROWS) : [];
+  if (unwarmed.length > 0) {
+    libraryService.enrichWithArtwork(unwarmed).catch((err) => {
+      console.warn('[Library] Catalog-query artwork enrichment failed:', err);
+    });
+  }
 };
 
 // ---------------------------------------------------------------------------
