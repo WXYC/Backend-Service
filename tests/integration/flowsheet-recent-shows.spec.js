@@ -4,8 +4,9 @@
  * `GET /flowsheet/shows/recent`: recent shows and who was on them, for a DJ
  * arriving for a shift. What only a live Postgres can prove — the window floor
  * actually excludes what it claims to; the `show_djs` grouping attaches the
- * right DJs to the right shows across a page; the `active` filter really drops
- * a departed co-host; a legacy show with NO `show_djs` rows still surfaces,
+ * right DJs to the right shows across a page; a CLOSED show — whose memberships
+ * `endShow` has all deactivated — still reports its co-hosts; a legacy show with
+ * NO `show_djs` rows still surfaces,
  * named from `shows.legacy_dj_name`; and this endpoint and
  * `GET /flowsheet/djs-on-air` return the same people for the show they both
  * report on.
@@ -37,7 +38,9 @@ const USERS = {
   // A handle `resolveDjDisplayName` filters away (BS#1286): a real account with
   // an unusable name, which must surface as `dj_name: null`, never blank.
   anon: { id: `${PREFIX}-user-anon`, djName: 'Anonymous' },
-  // Signed off mid-show: an inactive `show_djs` row.
+  // Signed off before the show ended. On a CLOSED show this is indistinguishable
+  // from the co-hosts who stayed — `endShow` deactivates every membership at
+  // close — so this DJ is listed like the rest. See the closed-show test below.
   departed: { id: `${PREFIX}-user-departed`, djName: 'DJ Flacko' },
 };
 
@@ -126,10 +129,16 @@ describe('recent shows (BS#2435)', () => {
     await insertShow('account', { startedHoursAgo: 4, endedHoursAgo: 2, legacyDjName: 'DJ Stale Handle' });
     await insertShow('live', { startedHoursAgo: 1, primaryDjId: USERS.meow.id });
 
-    await addShowDJ('account', USERS.meow);
-    await addShowDJ('account', USERS.vaquero);
-    await addShowDJ('account', USERS.anon);
+    // The `account` show is CLOSED, so every one of its memberships is written
+    // `active = false` — that is the only state `endShow` leaves behind, and
+    // seeding them `true` would model a row production never holds. Getting
+    // this wrong is what hid the defect this suite now pins: a read that
+    // filters `active` returns nothing for any properly-ended show.
+    await addShowDJ('account', USERS.meow, false);
+    await addShowDJ('account', USERS.vaquero, false);
+    await addShowDJ('account', USERS.anon, false);
     await addShowDJ('account', USERS.departed, false);
+    // The `live` show is still open, so its membership is genuinely active.
     await addShowDJ('live', USERS.meow);
   });
 
@@ -193,12 +202,22 @@ describe('recent shows (BS#2435)', () => {
     expect(findShow(body, 'legacy').djs).toEqual([{ id: null, dj_name: 'DJ Mouseness' }]);
   });
 
-  it('lists every active account DJ, ignoring the departed co-host and the stale legacy handle', async () => {
+  /**
+   * The regression this endpoint exists to avoid. `endShow` sets
+   * `show_djs.active = false` on every remaining membership at close, so a read
+   * that filters `active` finds no members for any properly-ended show, falls
+   * through to the show-level chain, and reports a single `{ id: null }`
+   * primary — losing every co-host on most of a 24-hour window, and mislabelling
+   * the survivor as an account-less legacy DJ.
+   */
+  it('lists every account DJ on a CLOSED show, whose memberships are all inactive', async () => {
     const show = findShow(await fetchRecent(), 'account');
 
-    expect(handles(show).sort()).toEqual(['El Vaquero', 'dj meowww', null].sort());
-    expect(handles(show)).not.toContain('DJ Flacko');
+    expect(handles(show).sort()).toEqual(['DJ Flacko', 'El Vaquero', 'dj meowww', null].sort());
+    // Account rows win over the show's stale legacy handle...
     expect(handles(show)).not.toContain('DJ Stale Handle');
+    // ...and every one carries a real account id, so none was fabricated by the
+    // legacy fallback, whose `id: null` means "no Backend-Service account".
     expect(show.djs.every((dj) => dj.id !== null)).toBe(true);
   });
 
