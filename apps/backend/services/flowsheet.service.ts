@@ -703,9 +703,8 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
-    // Resolves FSEntryFieldsRaw.rotation_label (BS#2505). Appended last rather
-    // than beside the rotation join so the three pre-existing joins keep their
-    // positions; it only needs `rotation` already in the tree, which it is.
+    // Must follow the `rotation` join: FSEntryFieldsRaw.rotation_label keys on
+    // rotation.label_id (BS#2505).
     .leftJoin(labels, eq(labels.id, rotation.label_id))
     .orderBy(desc(flowsheet.add_time), desc(flowsheet.id));
 
@@ -748,9 +747,8 @@ export const getEntriesByRange = async (startId: number, endId: number): Promise
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
-    // Resolves FSEntryFieldsRaw.rotation_label (BS#2505). Appended last rather
-    // than beside the rotation join so the three pre-existing joins keep their
-    // positions; it only needs `rotation` already in the tree, which it is.
+    // Must follow the `rotation` join: FSEntryFieldsRaw.rotation_label keys on
+    // rotation.label_id (BS#2505).
     .leftJoin(labels, eq(labels.id, rotation.label_id))
     .where(and(gte(flowsheet.id, startId), lte(flowsheet.id, endId)))
     .orderBy(desc(flowsheet.id));
@@ -794,9 +792,8 @@ export const getEntriesInTimeWindow = async (start: Date, end: Date): Promise<IF
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
-    // Resolves FSEntryFieldsRaw.rotation_label (BS#2505). Appended last rather
-    // than beside the rotation join so the three pre-existing joins keep their
-    // positions; it only needs `rotation` already in the tree, which it is.
+    // Must follow the `rotation` join: FSEntryFieldsRaw.rotation_label keys on
+    // rotation.label_id (BS#2505).
     .leftJoin(labels, eq(labels.id, rotation.label_id))
     .where(and(gte(flowsheet.add_time, start), lt(flowsheet.add_time, end)))
     .orderBy(asc(flowsheet.add_time), asc(flowsheet.id));
@@ -909,9 +906,8 @@ export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
-    // Resolves FSEntryFieldsRaw.rotation_label (BS#2505). Appended last rather
-    // than beside the rotation join so the three pre-existing joins keep their
-    // positions; it only needs `rotation` already in the tree, which it is.
+    // Must follow the `rotation` join: FSEntryFieldsRaw.rotation_label keys on
+    // rotation.label_id (BS#2505).
     .leftJoin(labels, eq(labels.id, rotation.label_id))
     .where(inArray(flowsheet.show_id, show_ids))
     // play_order can collide within a show: the tubafrenzy webhook and the
