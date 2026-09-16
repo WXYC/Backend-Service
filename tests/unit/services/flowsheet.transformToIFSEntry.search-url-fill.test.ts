@@ -35,6 +35,7 @@ const makeRaw = (overrides: Partial<FSEntryRaw> = {}): FSEntryRaw => ({
   label_id: null,
   rotation_id: null,
   rotation_bin: null,
+  rotation_label: null,
   artist_id: null,
   request_flag: false,
   segue: false,

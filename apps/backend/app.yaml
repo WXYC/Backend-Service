@@ -36,23 +36,9 @@ components:
         record_label:
           type: string
           description: >
-            Free-text label, as the DJ typed it mid-show. Unchanged by BS#2505
-            and still the fallback wherever `rotation_label` is null.
-        rotation_label:
-          type: string
-          nullable: true
-          description: >
-            BS#2505. The rotation release's CANONICAL label, resolved
-            `flowsheet.rotation_id -> rotation.label_id -> labels.label_name`.
-            Null when the entry has no rotation link, or when the linked
-            release has no `label_id` (pre-BS#2412, or a label that never
-            resolved to a `labels` row) — consumers fall back to
-            `record_label`. Resolved by id with no status filter, so a KILLED
-            release with plays in the window still names its label. Read-only:
-            it is a joined value, not a `flowsheet` column, so it is absent
-            from the mutation/peek echoes (`CLIENT_FACING_FLOWSHEET_COLUMNS`)
-            the same way `rotation_bin` is. SSOT: `FlowsheetEntryFields` /
-            `FlowsheetV2TrackEntry` in wxyc-shared api.yaml.
+            Free-text label, as the DJ typed it mid-show. Unchanged by BS#2505,
+            and still what the read path falls back to wherever the joined
+            `rotation_label` (see FlowsheetEntryV2) is null.
         request_flag:
           type: boolean
         track_position:
@@ -85,6 +71,7 @@ components:
       description: >
         Discriminated union keyed by entry_type.
         track entries include artist_name, album_title, track_title, record_label, rotation_bin, metadata fields.
+        track entries also carry rotation_label — the rotation release's CANONICAL label, resolved flowsheet.rotation_id -> rotation.label_id -> labels.label_name (BS#2505). Null when the entry has no rotation link, or when the linked release has no label_id (pre-BS#2412, or a label that never resolved to a labels row); consumers fall back to record_label. Resolved by id with no status filter, so a KILLED release with plays in the window still names its label. Read-only and read-path-only: it is a joined value rather than a flowsheet column, so it cannot live in CLIENT_FACING_FLOWSHEET_COLUMNS (a Pick<> over the table model) and is absent from the POST/PATCH/DELETE echoes on FlowsheetEntry, the same way rotation_bin is. Canonical wire contract: FlowsheetV2TrackEntry.rotation_label in wxyc-shared/api.yaml (the SSOT).
         track entries also carry artist_id — the resolved WXYC catalog artist id (flowsheet.album_id → library.artist_id), additive and nullable (null for free-form entries and library rows with no artist link). Shares the artists.id keyspace with concerts.headlining_artist_id / upcoming_show so on-device features (the On Tour likes match) can intersect a liked playcut against concert headliners (BS#1625). Canonical wire contract: FlowsheetV2TrackEntry.artist_id in wxyc-shared/api.yaml (the SSOT).
         track entries MAY also carry upcoming_show — an optional embedded Concert (see the Concert schema and GET /concerts) attached server-side at feed-assembly time when the track's resolved catalog artist (flowsheet.album_id → library.artist_id) has a curated, non-tombstoned, upcoming Triangle-area date (concerts.headlining_artist_id match; soonest date wins). Absent when there is no such match; older clients decode the absent field as "no touring CTA" (BS#1607). The canonical wire contract is FlowsheetV2TrackEntry.upcoming_show in wxyc-shared/api.yaml (the SSOT); this app.yaml is Swagger display only.
         show_start/show_end entries include dj_name and timestamp.
