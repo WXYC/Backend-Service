@@ -2223,6 +2223,20 @@ paths:
   /library/rotation:
     get:
       summary: Get rotation list
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [active, killed, all]
+            default: active
+          description: >-
+            Not a partition: `active` is `kill_date IS NULL OR kill_date >
+            CURRENT_DATE`, `killed` is `kill_date IS NOT NULL`, so a
+            future-dated kill appears in both; `all` applies no filter.
+            `GET /library/rotation/uncatalogued` takes the same three
+            values and defaults to `all`, not `active`.
       responses:
         '200':
           description: List of rotations
@@ -2232,6 +2246,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Rotation'
+        '400':
+          description: A status outside active|killed|all.
 
     post:
       summary: Add new rotation
@@ -2281,11 +2297,11 @@ paths:
         via `PATCH /library/rotation/{rotation_id}/link`. Deliberately NOT
         deduplicated the way `GET /library/rotation`'s dropdown shape is:
         two physically distinct promos sharing an artist and title are two
-        separate rows to catalogue, not one. Not restricted to active
-        (`kill_date`) rows — this is the full cataloging backlog, not a
-        live dropdown. `limit` defaults to its 500 maximum rather than to
-        the whole backlog (~3.8k rows, ≈700 KB of JSON); page with
-        `offset` to walk past it.
+        separate rows to catalogue, not one. Unfiltered by default —
+        `status` defaults to `all` here, so this is the whole backlog and
+        not a live dropdown (BS#2504). `limit` defaults to its 500 maximum
+        rather than to the whole backlog (~3.8k rows, ≈700 KB of JSON);
+        page with `offset` to walk past it.
       security:
         - BearerAuth: ['catalog-read']
       parameters:
@@ -2303,9 +2319,31 @@ paths:
           schema:
             type: integer
             minimum: 0
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [active, killed, all]
+            default: all
+          description: >-
+            BS#2504. Same three values as `GET /library/rotation`,
+            deliberately NOT the same default: `all` here, `active` there.
+            This endpoint shipped unfiltered and dj-site's Awaiting
+            Cataloging facet still reads it with no parameter, so an
+            omitted `status` keeps returning what it always returned. The
+            facets do not partition — `active` is `kill_date IS NULL OR
+            kill_date > CURRENT_DATE`, `killed` is `kill_date IS NOT
+            NULL` — so a future-dated kill matches both.
       responses:
         '200':
-          description: Uncatalogued rotation rows, newest add_date first.
+          description: >-
+            Uncatalogued rotation rows. `status=killed` orders them
+            `kill_date DESC, id ASC` (most recently killed first, matching
+            /wxycdb's `findKilledUncataloged()`), which sorts a
+            future-dated kill to the top; `active` and `all` keep
+            `add_date DESC, id ASC`. The `id` tiebreak makes both sorts
+            total, so `offset` paging cannot skip or repeat a row.
           content:
             application/json:
               schema:
@@ -2313,7 +2351,7 @@ paths:
                 items:
                   $ref: '#/components/schemas/UncataloguedRotationRow'
         '400':
-          description: Malformed limit or offset.
+          description: Malformed limit or offset, or a status outside active|killed|all.
         '401':
           description: Missing or invalid bearer token.
 
