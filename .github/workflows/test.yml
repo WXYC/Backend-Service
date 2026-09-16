@@ -645,6 +645,21 @@ jobs:
           # the auth service here must decrypt them with the SAME key.
           STATION_SIGNUP_ENABLED: 'true'
           STATION_PASSCODE_KEY: '5a859c11b96205498dda4b3cbe21c1c956d472104ee1d85ca2058cb8535ab28b'
+          # CloudWatch publishers, all three off (BS#2533). docs/env-vars.md
+          # had recommended disabling these off-EC2 since BS#845, but nothing
+          # ever set them, so every CI run published nothing and logged the
+          # rejection. Now that the credential provider is pinned to the EC2
+          # instance role there is no credential to reject with: an enabled
+          # emitter here would spend its IMDS budget on every flush reaching
+          # for a role this runner doesn't have. Disabled, no client is ever
+          # constructed. The first two are backend publishers and are
+          # mirrored in dev_env/docker-compose.yml's `backend` env;
+          # AUTH_RATE_LIMIT_METRICS_DISABLED is the auth service's and is
+          # mirrored on the `auth` service there (see the parity allowlist in
+          # tests/unit/scripts/ci-env-surface-parity.test.ts).
+          MUTATION_4XX_METRICS_DISABLED: 'true'
+          SSE_METRICS_DISABLED: 'true'
+          AUTH_RATE_LIMIT_METRICS_DISABLED: 'true'
         run: |
           node dev_env/mock-api-server/dist/server.js > /tmp/mock-api.log 2>&1 &
           node apps/auth/dist/app.js > /tmp/auth.log 2>&1 &
