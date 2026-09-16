@@ -8,5 +8,5 @@ export default defineConfig({
   outDir: 'dist',
   clean: true,
   sourcemap: true,
-  external: ['@sentry/core', '@sentry/node', '@aws-sdk/client-cloudwatch'],
+  external: ['@sentry/core', '@sentry/node', '@aws-sdk/client-cloudwatch', '@aws-sdk/credential-providers'],
 });
