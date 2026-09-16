@@ -2617,14 +2617,26 @@ paths:
 
   /library/artists/by-code:
     get:
-      summary: Resolve a fully-specified library code to the artists that own it
+      summary: Resolve a library code to its owners, or browse a whole call-letters bucket
       description: >-
-        Resolves `genre_id` + `code_letters` + `code_number` to every artist filed under that
-        code. The triple is not unique — the Various-Artists shelf files many distinct buckets
-        (`Soundtracks - A`, `Soundtracks - B`, …) under one `V/A` code — so the response is
-        always a list, ordered by `artist_name` then `id`. A code with a single owner returns a
-        one-element array. `code_letters` must be 1-4 characters from A-Z, 0-9, or `/` (the
-        `artists.code_letters` column domain); it is trimmed and upper-cased before matching.
+        Two modes, selected by whether `code_number` is present.
+
+        **Fully specified** (`code_number` given) resolves `genre_id` + `code_letters` +
+        `code_number` to every artist filed under that code. The triple is not unique — the
+        Various-Artists shelf files many distinct buckets (`Soundtracks - A`,
+        `Soundtracks - B`, …) under one `V/A` code — so the response is always a list, ordered
+        by `artist_name` then `id`. A code with a single owner returns a one-element array.
+
+        **Browse** (`code_number` omitted, BS#2489) returns every artist filed under the
+        `(genre_id, code_letters)` bucket, ordered by `code_number` then `artist_name` then
+        `id` — the shelf order a librarian reads to check an assigned number or spot a gap in
+        an occupied range. This is the path `chooseLibraryCodeOrArtist.jsp` fell through to
+        `multipleArtistsDisplay.jsp` for on a blank call number. Only an ABSENT `code_number`
+        browses: a present-but-empty `?code_number=` is still a 400, because `Number('')` is 0
+        and 0 is a legitimate V/A filing, so browsing on it would hide a client bug.
+
+        `code_letters` must be 1-4 characters from A-Z, 0-9, or `/` (the `artists.code_letters`
+        column domain); it is trimmed and upper-cased before matching.
       security:
         - BearerAuth: ['catalog-read']
       parameters:
@@ -2643,17 +2655,47 @@ paths:
             pattern: '^\s*[A-Za-z0-9/]{1,4}\s*$'
         - in: query
           name: code_number
-          required: true
+          required: false
           description: >-
             Accepts 0 — the Various-Artists filings are stored with an artist genre code of 0.
+            OMIT it to browse the whole `(genre_id, code_letters)` bucket instead (BS#2489).
+            Sending it empty (`?code_number=`) is a 400, not a browse.
           schema:
             type: integer
             minimum: 0
             maximum: 2147483647
+        - in: query
+          name: limit
+          required: false
+          description: >-
+            Window size for the browse; the default is also the ceiling. Validated on BOTH
+            modes so a malformed value is refused consistently, but read only by the browse —
+            the fully-specified lookup returns every owner of one exact code, which the triple
+            already bounds.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 500
+        - in: query
+          name: offset
+          required: false
+          description: >-
+            Rows to skip in the browse order. Same both-modes validation as `limit`.
+          schema:
+            type: integer
+            minimum: 0
       responses:
         '200':
           description: >-
-            The artists that own this code, ordered by artist_name then id.
+            Fully-specified: the artists that own this code, ordered by artist_name then id.
+            Browse: every artist in the bucket, ordered by code_number then artist_name then
+            id — and an EMPTY LIST when the genre exists but no artist is filed under those
+            call letters. That is a normal browse outcome, deliberately not the
+            `code_not_assigned` 404 the fully-specified mode returns, which asserts something
+            about a code the browse request never named. `genre_not_found` stays a 404 in both
+            modes, which is what lets dj-site#1506 tell a stale genre dropdown from an empty
+            shelf rather than reading an outage as an empty bucket.
 
             Deliberately NOT the same row object as `GET /library/artists/search`, which is
             one field wider, and deliberately not hoisted into a shared schema. That route
@@ -2687,16 +2729,23 @@ paths:
                         code_number:
                           type: integer
                           description: >-
-                            Echo of the request's `code_number`, identical on every row — not
-                            a per-row `artist_genre_code` the way the same-named field on
-                            `GET /library/artists/search` is.
+                            Mode-dependent, and this is the trap in the response. Fully
+                            specified, it is an ECHO of the request's `code_number`, identical
+                            on every row — not a per-row `artist_genre_code` the way the
+                            same-named field on `GET /library/artists/search` is. Browsing, it
+                            is the row's REAL `artist_genre_code` and varies across the list —
+                            it is the whole point of the browse, and a response builder that
+                            copied the echo would emit one number on every row and still
+                            typecheck.
                         genre_id:
                           type: integer
                           description: >-
                             Echo of the request's `genre_id`, identical on every row. No
                             `genre_name` travels with it: this lookup never joins `genres`.
         '400':
-          description: Invalid or missing genre_id, code_letters, or code_number
+          description: >-
+            Invalid or missing genre_id or code_letters; an invalid (as opposed to absent)
+            code_number; or a malformed limit or offset.
         '404':
           description: >-
             Two distinct outcomes, told apart by `reason`, never by the message text.

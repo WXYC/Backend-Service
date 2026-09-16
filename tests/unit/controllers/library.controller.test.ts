@@ -1919,6 +1919,22 @@ describe('library.controller', () => {
         expect(mockBrowseArtistsInCodeBucket).not.toHaveBeenCalled();
       });
 
+      // The page window is parsed BEFORE the dispatch on `code_number`, so
+      // whether a malformed one is refused does not depend on an unrelated
+      // parameter. Left in the browse arm only, `?limit=abc` was a 400 without
+      // `code_number` and a silent 200 with it — the same input, two answers.
+      // Neither service read may run: the refusal precedes both.
+      it.each([
+        ['limit', { limit: 'ten' }],
+        ['offset', { offset: '-1' }],
+      ])('rejects a malformed %s on the fully-specified lookup too', async (param, query) => {
+        const res = mockResponse();
+
+        await expect(resolveArtistByCode(browseReq({ code_number: '12', ...query }), res, next)).rejects.toThrow(param);
+        expect(mockGetArtistsByCode).not.toHaveBeenCalled();
+        expect(mockBrowseArtistsInCodeBucket).not.toHaveBeenCalled();
+      });
+
       it('still requires genre_id and code_letters', async () => {
         const res = mockResponse();
 

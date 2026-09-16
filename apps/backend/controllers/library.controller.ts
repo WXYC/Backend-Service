@@ -872,21 +872,20 @@ const validateCanonicalCodeLetters = (raw: string): string => {
  */
 const { ARTIST_CODE_BUCKET_MAX_LIMIT } = libraryService;
 
+type ArtistCodePageWindow = { limit?: number; offset?: number };
+
 /**
- * The number-less arm of `GET /library/artists/by-code` (BS#2489): browse the
- * whole `(genre_id, code_letters)` bucket.
+ * Parses `?limit=`/`?offset=` for `GET /library/artists/by-code`.
  *
- * Split out rather than inlined as an `if` arm because the two branches share
- * only their coordinates: this one parses a different parameter set, has its
- * own paging, and answers an empty result with a 200 where the fully-specified
- * branch answers a 404.
+ * Called for BOTH arms, before the dispatch on `code_number`, so that whether
+ * a malformed page window is refused does not depend on an unrelated
+ * parameter. Read only by the browse arm — the fully-specified lookup returns
+ * every owner of one exact code, a list the triple itself bounds, so there is
+ * nothing there to page. Validating it anyway is the cheaper half of the
+ * trade: `?limit=abc` is a 400 either way, rather than a 400 when browsing and
+ * a silent 200 when not.
  */
-async function browseArtistCodeBucket(
-  query: ArtistByCodeQuery,
-  codeLetters: string,
-  genreId: number,
-  res: Response
-): Promise<void> {
+const parseArtistCodePageWindow = (query: ArtistByCodeQuery): ArtistCodePageWindow => {
   const limit = parseNonNegativeInt(query.limit);
   if (limit === null || (limit !== undefined && (limit < 1 || limit > ARTIST_CODE_BUCKET_MAX_LIMIT))) {
     throw new WxycError(
@@ -900,7 +899,25 @@ async function browseArtistCodeBucket(
     throw new WxycError('Invalid Parameter: offset must be a non-negative integer', 400);
   }
 
-  const members = await libraryService.browseArtistsInCodeBucket(codeLetters, genreId, { limit, offset });
+  return { limit, offset };
+};
+
+/**
+ * The number-less arm of `GET /library/artists/by-code` (BS#2489): browse the
+ * whole `(genre_id, code_letters)` bucket.
+ *
+ * Split out rather than inlined as an `if` arm because the two branches share
+ * only their coordinates: this one parses a different parameter set, has its
+ * own paging, and answers an empty result with a 200 where the fully-specified
+ * branch answers a 404.
+ */
+async function browseArtistCodeBucket(
+  page: ArtistCodePageWindow,
+  codeLetters: string,
+  genreId: number,
+  res: Response
+): Promise<void> {
+  const members = await libraryService.browseArtistsInCodeBucket(codeLetters, genreId, page);
 
   // Same round-trip discipline as the fully-specified branch: a non-empty
   // bucket proves the genre exists, so `genreExists` is only probed to explain
@@ -1004,13 +1021,18 @@ export const resolveArtistByCode: RequestHandler = async (
   // because it alters an existing route's 409 behavior.)
   const codeLetters = validateCanonicalCodeLetters(query.code_letters);
 
+  // Parsed for both arms — see `parseArtistCodePageWindow`. Placed after the
+  // genre/letters validation so those refusals keep precedence and their
+  // messages are unchanged.
+  const page = parseArtistCodePageWindow(query);
+
   // Only an ABSENT `code_number` browses. A present-but-empty `?code_number=`
   // stays a 400, the same reading `searchArtistsInGenre` gives `?genre_id=`:
   // the client meant to send a number and sent nothing, which is a bug rather
   // than an omission, and `Number('')` is 0 — a legitimate V/A filing — so
   // silently browsing would also hide it.
   if (query.code_number === undefined) {
-    await browseArtistCodeBucket(query, codeLetters, genreId, res);
+    await browseArtistCodeBucket(page, codeLetters, genreId, res);
     return;
   }
 
