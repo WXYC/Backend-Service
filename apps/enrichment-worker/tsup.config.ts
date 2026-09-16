@@ -18,6 +18,6 @@ export default defineConfig((options) => ({
   clean: true,
   sourcemap: true,
   splitting: false,
-  external: ['@wxyc/database', 'drizzle-orm', 'postgres', '@sentry/node', '@wxyc/lml-client'],
+  external: ['@wxyc/database', 'drizzle-orm', 'postgres', '@sentry/node', '@wxyc/lml-client', '@wxyc/observability'],
   onSuccess: options.watch ? 'node --import ./dist/instrument.js ./dist/worker.js' : undefined,
 }));

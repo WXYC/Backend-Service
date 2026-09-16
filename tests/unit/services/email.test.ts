@@ -337,8 +337,8 @@ describe('SES credential resolution (BS#2518)', () => {
     process.env.SES_ACCESS_KEY_ID = 'test';
     process.env.SES_SECRET_ACCESS_KEY = 'test';
     // AWS_* is deliberately NOT restored: it is no longer a credential source,
-    // and leaving it set would trip `warnIfLegacyCredentialsPresent` in every
-    // later file sharing this worker.
+    // and leaving it set would trip `warnIfReservedAwsCredentialsPresent`
+    // (`@wxyc/observability`) in every later file sharing this worker.
   });
 
   it('reads credentials from SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY', async () => {
@@ -404,29 +404,14 @@ describe('SES credential resolution (BS#2518)', () => {
     expect(SESClient).not.toHaveBeenCalled();
   });
 
-  it('warns once, not once per send, while the reserved AWS_ACCESS_KEY_ID is set', async () => {
-    // Deleting the fallback does not delete the hazard: the variable being SET
-    // is what tops the default credential chain, whatever this module reads.
-    // Unobservability is what let BS#2518 run dark, so the detector outlives
-    // the fallback it shipped with.
-    //
-    // The unconfigured-SES path is the one that PINS the once-only guard.
-    // `getSesClient` memoizes only on success, so a succeeding send reaches
-    // `resolveSesCredentials` exactly once and would pass whether or not the
-    // guard exists. Here every send re-enters the resolver, so a missing guard
-    // warns twice — and this is the shape that matters, since a re-armed
-    // AWS_ACCESS_KEY_ID with no SES_* is precisely the misconfiguration.
-    process.env.AWS_ACCESS_KEY_ID = 'aws-key';
-    const { sendEmail } = await loadEmailModule();
-    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-
-    await expect(send(sendEmail)).rejects.toThrow(/Missing SES configuration/);
-    await expect(send(sendEmail)).rejects.toThrow(/Missing SES configuration/);
-
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toMatch(/shadows the EC2 instance role/);
-    warn.mockRestore();
-  });
+  // The companion "warns once while the reserved AWS_ACCESS_KEY_ID is set"
+  // case moved to tests/unit/observability/reserved-credentials.test.ts with
+  // the detector itself (BS#2532). It never belonged to this module: the
+  // variable being SET is the hazard whatever this module reads, and pinning
+  // it here implied a sender was the right place to notice — which is exactly
+  // the inversion #2532 fixed, since the container the shadowing silences
+  // sends no email at all. What stays here is credential RESOLUTION, which is
+  // this module's own behaviour.
 });
 
 // Test cases for new user detection logic (to be used in auth.definition)

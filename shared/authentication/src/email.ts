@@ -3,27 +3,6 @@ import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 let sesClient: SESClient | null = null;
 
 /**
- * `AWS_ACCESS_KEY_ID` being PRESENT is the hazard, independent of what this
- * module reads: while it is set it tops the default credential chain for the
- * whole process and shadows the EC2 instance role. The transitional fallback
- * that once read it is gone, so this is now purely a regression detector — an
- * unobservable re-arming is exactly what let BS#2518 run dark for 105 days.
- */
-let warnedLegacyAwsCredentials = false;
-const warnIfLegacyCredentialsPresent = (): void => {
-  if (warnedLegacyAwsCredentials || !process.env.AWS_ACCESS_KEY_ID) {
-    return;
-  }
-  warnedLegacyAwsCredentials = true;
-  console.warn(
-    '[email] AWS_ACCESS_KEY_ID is set. It shadows the EC2 instance role for every ' +
-      'AWS SDK call in this process that does not pass explicit credentials, and it is ' +
-      'NOT read for SES. Unset it and set SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY ' +
-      '(see BS#2518).'
-  );
-};
-
-/**
  * Resolves the SES credential pair from `SES_ACCESS_KEY_ID` / `SES_SECRET_ACCESS_KEY`.
  *
  * These keys authenticate one IAM user for one purpose, and must NOT travel
@@ -46,10 +25,18 @@ const warnIfLegacyCredentialsPresent = (): void => {
  *
  * `AWS_REGION` is deliberately NOT renamed: it carries no identity, so it
  * shadows nothing.
+ *
+ * Detecting a re-armed reserved name is deliberately NOT this resolver's job.
+ * A copy of that check used to live here and was byte-identical in the two
+ * digest crons, which inverted its coverage: `apps/backend` holds two of the
+ * repo's three `CloudWatchClient` constructions and sends no email, so the one
+ * container the shadowing actually silences was the one that never ran the
+ * check, while the senders that did ran it lazily on first send and not at all
+ * under `EMAIL_ENABLED=false`. It is now `warnIfReservedAwsCredentialsPresent`
+ * in `@wxyc/observability`, called from every container's Sentry preload
+ * (BS#2532).
  */
 const resolveSesCredentials = (): { accessKeyId: string; secretAccessKey: string } | null => {
-  warnIfLegacyCredentialsPresent();
-
   const accessKeyId = process.env.SES_ACCESS_KEY_ID;
   const secretAccessKey = process.env.SES_SECRET_ACCESS_KEY;
   return accessKeyId && secretAccessKey ? { accessKeyId, secretAccessKey } : null;

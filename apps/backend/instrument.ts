@@ -1,11 +1,17 @@
 import { config } from 'dotenv';
 import * as Sentry from '@sentry/node';
-import { filterSentryTransactionEvent } from '@wxyc/observability';
+import { filterSentryTransactionEvent, warnIfReservedAwsCredentialsPresent } from '@wxyc/observability';
 import { resolveTracesSampleRate } from './sentry-config.js';
 
 // Load .env before Sentry.init() so SENTRY_DSN is available.
 // In production, Docker --env-file sets vars before Node starts, so this is a no-op.
 config();
+
+// Immediately after config(), because .env is one of the ways a reserved AWS
+// credential name reaches this process. This container holds two of the repo's
+// three CloudWatchClient constructions and sends no email, so it is exactly the
+// process the old per-SES-sender placement could not warn (BS#2532/BS#2518).
+warnIfReservedAwsCredentialsPresent();
 
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
