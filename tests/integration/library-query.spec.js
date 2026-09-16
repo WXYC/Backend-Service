@@ -307,6 +307,13 @@ describe('GET /library/query cascade — modern Card Catalog serves matched_via 
     // discriminates, not the value alone. The CTA fixture is unflagged, hence
     // `false`; `flowsheet.spec.js` covers a flagged row on the mutation echo.
     expect(typeof hit.artist_id).toBe('number');
+    // Presence, not value: the endpoint now warms artwork fire-and-forget, so
+    // a fixture row can be `null` on one run and a real URL on a later one
+    // once the cache-through has written. What must never change is that the
+    // key reaches the wire at all — dropped from the SELECT it arrives
+    // `undefined`, which `JSON.stringify` omits.
+    expect(hit).toHaveProperty('artwork_url');
+    expect(hit.artwork_url === null || typeof hit.artwork_url === 'string').toBe(true);
     expect(hit).toHaveProperty('discogsUnavailable', false);
     expect(hit).toHaveProperty('discogsUnavailableNote', null);
     expect(hit).toHaveProperty('lastDiscogsRecheckAt', null);

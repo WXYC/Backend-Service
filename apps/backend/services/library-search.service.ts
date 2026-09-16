@@ -92,6 +92,13 @@ export type AlbumSearchResultRow = {
   plays: number | null;
   on_streaming: boolean | null;
   album_artist: string | null;
+  // Cache-through artwork, written by `enrichWithArtwork` and read straight
+  // off `library.artwork_url` — already spacer-gif-filtered at write time, so
+  // reads pass it through unchanged. `null` on a row LML has not resolved yet;
+  // consumers render their own placeholder rather than treating it as an
+  // error. The controller warms this endpoint's page fire-and-forget, so a
+  // null here is "not warmed yet", not "no artwork exists".
+  artwork_url: string | null;
   matched_via?: TrackMatchHint[];
   matched_via_alias?: ArtistMatchHint[];
   // BS#1895 (Not-on-Discogs epic #1280 sub-issue 5): the MD-set flag, so
@@ -178,6 +185,7 @@ const CATALOG_ROW_PROJECTION_COLUMNS = {
   plays: playsColumn,
   on_streaming: library_artist_view.on_streaming,
   album_artist: library_artist_view.album_artist,
+  artwork_url: library_artist_view.artwork_url,
   discogs_unavailable: library_artist_view.discogs_unavailable,
   discogs_unavailable_note: library_artist_view.discogs_unavailable_note,
   last_discogs_recheck_at: library_artist_view.last_discogs_recheck_at,
@@ -623,6 +631,7 @@ function taggedRowToAlbumSearchResultRow(row: TaggedLibraryViewEntry): AlbumSear
     plays: row.plays,
     on_streaming: row.on_streaming,
     album_artist: row.album_artist,
+    artwork_url: row.artwork_url,
     discogsUnavailable: row.discogs_unavailable,
     discogsUnavailableNote: row.discogs_unavailable_note,
     lastDiscogsRecheckAt: row.last_discogs_recheck_at,
@@ -659,6 +668,7 @@ type RawRow = {
   plays: number | null;
   on_streaming: boolean | null;
   album_artist: string | null;
+  artwork_url: string | null;
   discogs_unavailable: boolean;
   discogs_unavailable_note: string | null;
   // Raw `db.execute` rows can come back as either a `Date` or an
@@ -693,6 +703,7 @@ function toAlbumSearchResultRow(row: RawRow): AlbumSearchResultRow {
     plays: row.plays,
     on_streaming: row.on_streaming,
     album_artist: row.album_artist,
+    artwork_url: row.artwork_url,
     discogsUnavailable: row.discogs_unavailable,
     discogsUnavailableNote: row.discogs_unavailable_note,
     lastDiscogsRecheckAt: row.last_discogs_recheck_at,
