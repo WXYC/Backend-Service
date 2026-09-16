@@ -3,7 +3,16 @@
  * kill_date > CURRENT_DATE`) must be spelled ONCE — `rotationActiveSql()` in
  * `shared/database/src/schema.ts`, next to `rotation` itself — and every
  * other rotation read must consume that fragment rather than retyping the
- * predicate. Before this issue the predicate was hand-rolled independently
+ * predicate.
+ *
+ * BS#2504 extended the builder-helper arm to the KILLED twin
+ * (`rotationKilledSql()`), which this guard could not see: its operator
+ * alternation listed the active window's helpers only, so `isNotNull(
+ * rotation.kill_date)` was a free second spelling. The two predicates overlap
+ * rather than partition — a future-dated kill is both — so each needs its own
+ * fragment, and each needs to stay single-spelled.
+ *
+ * Before BS#2479 the active predicate was hand-rolled independently
  * across library.service.ts, the rotation-tracks cache warmer, the library
  * tiebreak, and several jobs — a silent drift risk, since a future edit to
  * one spelling would not touch the others.
@@ -64,9 +73,16 @@ const RAW_QUOTED =
 
 // Drizzle operator-helper comparisons over the live column — the shape a
 // query-builder retype would take (`or(isNull(rotation.kill_date),
-// gt(rotation.kill_date, ...))`). Any occurrence is a retype: the one
-// legitimate builder-side use of the column's active window is the fragment.
-const BUILDER_HELPERS = /\b(?:isNull|gt|gte|lt|lte)\(\s*[\w$.]*\.kill_date\s*[,)]/g;
+// gt(rotation.kill_date, ...))`). Any occurrence is a retype: the only
+// legitimate builder-side uses of this column's windows are the two fragments.
+//
+// `isNotNull` is in the alternation because of BS#2504. The original list
+// covered the ACTIVE window's operators only, so a second spelling of the
+// KILLED twin — `isNotNull(rotation.kill_date)` beside the `sql` template form
+// already in `getRotationFromDB` — walked straight past this guard one release
+// after it was built to stop exactly that. `\b` does not match mid-word, so
+// listing `isNull` never covered `isNotNull`.
+const BUILDER_HELPERS = /\b(?:isNull|isNotNull|gt|gte|lt|lte)\(\s*[\w$.]*\.kill_date\s*[,)]/g;
 
 function walk(dir: string, out: string[]): string[] {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

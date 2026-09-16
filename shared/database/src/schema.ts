@@ -1176,6 +1176,29 @@ export const rotation = wxyc_schema.table(
 export const rotationActiveSql = (): SQL =>
   sql`(${rotation.kill_date} IS NULL OR ${rotation.kill_date} > CURRENT_DATE)`;
 
+/**
+ * The canonical KILLED predicate — the twin of `rotationActiveSql()` above,
+ * and deliberately NOT its complement.
+ *
+ * A row whose `kill_date` is set but still in the future satisfies BOTH: the
+ * music director schedules a kill ahead, and the release keeps rotating until
+ * that date arrives. `active` and `killed` therefore overlap rather than
+ * partition, which is why this is its own fragment and not `not(...)`.
+ *
+ * It exists for the same reason its sibling does. BS#2479 collapsed four
+ * hand-rolled spellings of the active window into one fragment and built
+ * `tests/unit/database/schema.rotation-active-predicate.test.ts` to keep it
+ * that way — but the guard only ever watched the active half, so the killed
+ * half was free to acquire a second spelling (a drizzle `isNotNull` helper
+ * over this column, beside the `sql` template form) without anything
+ * noticing. That test now counts builder-helper retypes of both twins.
+ *
+ * Note for future editors: that guard greps source text and its builder-helper
+ * pattern has no comment immunity, so writing the helper-call form literally
+ * in prose anywhere under `apps/`, `jobs/` or `shared/` trips it.
+ */
+export const rotationKilledSql = (): SQL => sql`${rotation.kill_date} IS NOT NULL`;
+
 export type NewRotationCard = InferInsertModel<typeof rotation_cards>;
 export type RotationCard = InferSelectModel<typeof rotation_cards>;
 /**

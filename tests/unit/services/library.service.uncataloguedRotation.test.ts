@@ -25,7 +25,15 @@
  * read gets its terminal method's resolved value overridden per test.
  */
 import { jest } from '@jest/globals';
-import { db, createMockQueryChain, rotation, library, flowsheet, rotationActiveSql } from '../../mocks/database.mock';
+import {
+  db,
+  createMockQueryChain,
+  rotation,
+  library,
+  flowsheet,
+  rotationActiveSql,
+  rotationKilledSql,
+} from '../../mocks/database.mock';
 
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockIsLmlConfigured = jest.fn<() => boolean>();
@@ -222,7 +230,7 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
       await getUncataloguedRotationFromDB({ status: 'killed' });
 
       expect(chain.where).toHaveBeenCalledWith({
-        and: [{ isNull: rotation.album_id }, { isNotNull: rotation.kill_date }],
+        and: [{ isNull: rotation.album_id }, rotationKilledSql()],
       });
       expect(chain.orderBy).toHaveBeenCalledWith({ desc: rotation.kill_date }, { asc: rotation.id });
     });
