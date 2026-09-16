@@ -70,7 +70,10 @@
  * concurrently and failing/logging independently (`(counters)` vs `(gauges)`),
  * which is the pre-BS#2191 behaviour and the reason a broken snapshot source
  * cannot take the counters down with it. It also means two CloudWatch clients
- * in this module — the emitter's and the gauge path's.
+ * in this module — the emitter's and the gauge path's. Two instances, one
+ * construction: both are built by `createCloudWatchClient`
+ * (`@wxyc/observability/metrics`), which pins the credential provider to the
+ * EC2 instance role (BS#2533).
  *
  * Opt-out. `SSE_METRICS_DISABLED=true` short-circuits the module: no client
  * is created, no timer fires, and the `recordBroadcast` / `recordBroadcastFailure`
@@ -82,8 +85,8 @@
  * attempts a fresh send.
  */
 
-import { CloudWatchClient, PutMetricDataCommand, type MetricDatum } from '@aws-sdk/client-cloudwatch';
-import { createBufferedMetricEmitter } from '@wxyc/observability/metrics';
+import { PutMetricDataCommand, type CloudWatchClient, type MetricDatum } from '@aws-sdk/client-cloudwatch';
+import { createBufferedMetricEmitter, createCloudWatchClient } from '@wxyc/observability/metrics';
 
 const NAMESPACE = 'WXYC/BackendService';
 const METRIC_CLIENT_COUNT = 'SSE/ClientCount';
@@ -119,11 +122,16 @@ const counters = createBufferedMetricEmitter({
   logPrefix: '[sse-metrics] (counters)',
 });
 
+/**
+ * The gauge's own client. A second client INSTANCE, but not a second
+ * credential decision: `createCloudWatchClient` (`@wxyc/observability/metrics`)
+ * is the fleet's only construction site, and it pins the provider to the EC2
+ * instance role (BS#2533/BS#2518). Constructing one here directly would leave
+ * the gauge on the default chain, where `AWS_ACCESS_KEY_ID` outranks the role.
+ */
 function getClient(): CloudWatchClient {
   if (!cloudwatchClient) {
-    cloudwatchClient = new CloudWatchClient({
-      region: process.env.AWS_REGION || 'us-east-1',
-    });
+    cloudwatchClient = createCloudWatchClient();
   }
   return cloudwatchClient;
 }

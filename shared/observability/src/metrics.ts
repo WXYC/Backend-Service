@@ -4,6 +4,7 @@ import {
   type MetricDatum,
   type StandardUnit,
 } from '@aws-sdk/client-cloudwatch';
+import { fromInstanceMetadata } from '@aws-sdk/credential-providers';
 
 /**
  * Generic buffered CloudWatch metric emitter (BS#2169).
@@ -25,6 +26,13 @@ import {
  * emitter from that barrel would eagerly load `@aws-sdk/client-cloudwatch`
  * at process preload in both images. Import this file as
  * `@wxyc/observability/metrics` instead.
+ *
+ * Also owns the fleet's only `CloudWatchClient` construction
+ * (`createCloudWatchClient`, BS#2533), whose credential provider is pinned to
+ * the EC2 instance role so nothing in `process.env` can outrank it. The
+ * `SSE/ClientCount` gauge in `apps/backend/services/sse/sse-metrics.ts` keeps
+ * its own client instance — it is sampled rather than buffered — but builds it
+ * through that same function, so the credential decision is made once.
  *
  * Dimensioned + dimensionless companion is the caller's choice per call
  * (`emitDimensionlessCompanion`), not a package-wide default — see
@@ -123,6 +131,63 @@ export interface BufferedMetricEmitter {
   reset(): void;
 }
 
+/**
+ * Per-request budget for the IMDS round-trips behind `fromInstanceMetadata`.
+ * Both numbers are the SDK's own defaults today, pinned here so they become a
+ * local decision rather than an upstream one: raising `timeout` upstream would
+ * silently lengthen every flush in an environment where IMDS is unreachable,
+ * and `maxRetries > 0` would multiply that wait.
+ *
+ * On EC2 the link-local service answers in single-digit milliseconds, so the
+ * budget is never spent. Off EC2 it bounds the damage: the token `PUT` fails,
+ * the provider falls back to IMDSv1, that `GET` fails, and the flush gives up
+ * in ~2 s instead of hanging. Off-EC2 processes are not supposed to get that
+ * far — see the opt-out env vars in `docs/env-vars.md` — this is the backstop
+ * for one that is misconfigured.
+ */
+const IMDS_TIMEOUT_MS = 1_000;
+const IMDS_MAX_RETRIES = 0;
+
+/**
+ * The one place in the repo a `CloudWatchClient` is constructed (BS#2533).
+ *
+ * The credential provider is pinned to the EC2 instance role instead of being
+ * left to the SDK's default chain, which consults
+ * `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` FIRST. BS#2518 is what that
+ * ordering cost: a single-purpose SES credential parked under those reserved
+ * names outranked the `wxyc-ec2-backend` instance role, and
+ * `WXYC/BackendService` did not exist as a CloudWatch namespace for 105 days
+ * — silently, because the only alarm watching it read `notBreaching` on no
+ * data. BS#2530 deleted the code fallback and added a warning; this is the
+ * structural half, after which an `AWS_ACCESS_KEY_ID` on the host is untidy
+ * rather than catastrophic.
+ *
+ * `fromInstanceMetadata()` — not `fromNodeProviderChain()` minus its env
+ * provider. Keeping `fromIni`/`fromSSO` would let a developer's `~/.aws`
+ * profile publish into the production `WXYC/BackendService` namespace from a
+ * laptop, corrupting the very series the wxyc-canary alarms read. One
+ * identity publishes WXYC metrics, and it is the instance role. The
+ * consequence off EC2 is that no credential resolves at all, which is why
+ * every caller's opt-out env var is now actually set in CI and in the dev
+ * compose profiles (`docs/env-vars.md`) rather than merely recommended
+ * there: a disabled emitter never reaches this function.
+ *
+ * `AWS_REGION` is still honoured — a region names a place, not an identity,
+ * and nothing about it can shadow a role.
+ *
+ * Returns a NEW client per call and does not memoize the provider. Callers
+ * cache the client themselves (`getClient()` below, `sse-metrics.ts`'s gauge
+ * path), so this runs at most twice per process; memoizing would additionally
+ * make the provider's independence from `process.env` untestable, since a
+ * cached provider is trivially the same object either way.
+ */
+export function createCloudWatchClient(): CloudWatchClient {
+  return new CloudWatchClient({
+    region: process.env.AWS_REGION || 'us-east-1',
+    credentials: fromInstanceMetadata({ timeout: IMDS_TIMEOUT_MS, maxRetries: IMDS_MAX_RETRIES }),
+  });
+}
+
 const DEFAULT_FLUSH_INTERVAL_MS = 30_000;
 const DEFAULT_FLUSH_AT_BUFFER_SIZE = 10;
 
@@ -196,9 +261,7 @@ export function createBufferedMetricEmitter(options: BufferedMetricEmitterOption
 
   function getClient(): CloudWatchClient {
     if (!cloudwatchClient) {
-      cloudwatchClient = new CloudWatchClient({
-        region: process.env.AWS_REGION || 'us-east-1',
-      });
+      cloudwatchClient = createCloudWatchClient();
     }
     return cloudwatchClient;
   }
