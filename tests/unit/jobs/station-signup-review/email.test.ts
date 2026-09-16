@@ -25,8 +25,8 @@ describe('email.ts', () => {
 
   beforeEach(async () => {
     process.env.SES_FROM_EMAIL = 'test@wxyc.org';
-    process.env.AWS_ACCESS_KEY_ID = 'test';
-    process.env.AWS_SECRET_ACCESS_KEY = 'test';
+    process.env.SES_ACCESS_KEY_ID = 'test';
+    process.env.SES_SECRET_ACCESS_KEY = 'test';
     process.env.AWS_REGION = 'us-east-1';
     process.env.EMAIL_ENABLED = 'true';
     delete process.env.STATION_SIGNUP_ALERT_EMAIL;

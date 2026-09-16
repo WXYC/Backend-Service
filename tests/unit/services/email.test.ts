@@ -38,8 +38,8 @@ describe('sendEmail', () => {
   beforeEach(async () => {
     // Set up environment variables
     process.env.SES_FROM_EMAIL = 'test@wxyc.org';
-    process.env.AWS_ACCESS_KEY_ID = 'test';
-    process.env.AWS_SECRET_ACCESS_KEY = 'test';
+    process.env.SES_ACCESS_KEY_ID = 'test';
+    process.env.SES_SECRET_ACCESS_KEY = 'test';
     process.env.AWS_REGION = 'us-east-1';
     process.env.DEFAULT_ORG_NAME = 'WXYC';
     // tests/setup/unit.setup.ts defaults EMAIL_ENABLED=false for the suite;
@@ -186,8 +186,8 @@ describe('sendEmail', () => {
 describe('EMAIL_ENABLED gating', () => {
   beforeEach(() => {
     process.env.SES_FROM_EMAIL = 'test@wxyc.org';
-    process.env.AWS_ACCESS_KEY_ID = 'test';
-    process.env.AWS_SECRET_ACCESS_KEY = 'test';
+    process.env.SES_ACCESS_KEY_ID = 'test';
+    process.env.SES_SECRET_ACCESS_KEY = 'test';
     process.env.AWS_REGION = 'us-east-1';
     process.env.DEFAULT_ORG_NAME = 'WXYC';
 
@@ -260,8 +260,8 @@ describe('EMAIL_ENABLED gating', () => {
     // provision — failing dj-site's entire admin E2E suite.
     process.env.EMAIL_ENABLED = 'false';
     delete process.env.SES_FROM_EMAIL;
-    delete process.env.AWS_ACCESS_KEY_ID;
-    delete process.env.AWS_SECRET_ACCESS_KEY;
+    delete process.env.SES_ACCESS_KEY_ID;
+    delete process.env.SES_SECRET_ACCESS_KEY;
     delete process.env.AWS_REGION;
     const emailModule = await import('../../../shared/authentication/src/email');
 
@@ -289,12 +289,10 @@ describe('EMAIL_ENABLED gating', () => {
  * publishers failed `AccessDenied` on `cloudwatch:PutMetricData` for 105 days
  * and `WXYC/BackendService` never came into existence. See BS#2518.
  *
- * `SES_*` is therefore the name this credential must travel under. The `AWS_*`
- * fallback is a DEPLOYMENT-ORDERING affordance, not a supported configuration:
- * it is what lets this code ship before `~/.env` is rewritten, and lets the
- * env be rolled back without a redeploy. Remove it once prod carries `SES_*`
- * (tracked on BS#2518) — while it remains, the shadowing it exists to fix is
- * still possible.
+ * `SES_*` is therefore the name this credential must travel under. A
+ * transitional `AWS_*` fallback carried the cutover and was deleted once prod
+ * `~/.env` had been rewritten; the cases below pin that it stays deleted,
+ * because restoring it re-opens the shadowing it existed to fix.
  *
  * `AWS_REGION` is deliberately NOT renamed: it carries no identity, so it
  * shadows nothing, and both CloudWatch clients read it with a correct
@@ -336,8 +334,11 @@ describe('SES credential resolution (BS#2518)', () => {
   afterEach(() => {
     clearCredentialEnv();
     process.env.EMAIL_ENABLED = 'false';
-    process.env.AWS_ACCESS_KEY_ID = 'test';
-    process.env.AWS_SECRET_ACCESS_KEY = 'test';
+    process.env.SES_ACCESS_KEY_ID = 'test';
+    process.env.SES_SECRET_ACCESS_KEY = 'test';
+    // AWS_* is deliberately NOT restored: it is no longer a credential source,
+    // and leaving it set would trip `warnIfLegacyCredentialsPresent` in every
+    // later file sharing this worker.
   });
 
   const resolutionCases = [
@@ -347,12 +348,7 @@ describe('SES credential resolution (BS#2518)', () => {
       expected: { accessKeyId: 'ses-key', secretAccessKey: 'ses-secret' },
     },
     {
-      description: 'AWS_* alone (deployment-ordering fallback)',
-      env: { AWS_ACCESS_KEY_ID: 'aws-key', AWS_SECRET_ACCESS_KEY: 'aws-secret' },
-      expected: { accessKeyId: 'aws-key', secretAccessKey: 'aws-secret' },
-    },
-    {
-      description: 'both set — SES_* must win, so the cutover is not order-dependent',
+      description: 'both set — SES_* is read and the reserved spelling ignored',
       env: {
         SES_ACCESS_KEY_ID: 'ses-key',
         SES_SECRET_ACCESS_KEY: 'ses-secret',
@@ -383,12 +379,50 @@ describe('SES credential resolution (BS#2518)', () => {
     await expect(send(sendEmail)).rejects.toThrow(/Missing SES configuration/);
   });
 
-  it('throws naming both accepted spellings when no credentials are set', async () => {
+  it('throws naming only the SES_* spelling when no credentials are set', async () => {
     const { sendEmail } = await loadEmailModule();
 
-    await expect(send(sendEmail)).rejects.toThrow(
-      /SES_ACCESS_KEY_ID.*SES_SECRET_ACCESS_KEY.*AWS_REGION.*AWS_ACCESS_KEY_ID/s
+    const error: unknown = await send(sendEmail).then(
+      () => null,
+      (e: unknown) => e
     );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/SES_ACCESS_KEY_ID.*SES_SECRET_ACCESS_KEY.*AWS_REGION/s);
+    // Naming the reserved spelling in the remedy is how an operator re-arms the
+    // shadowing this removal closed, so the message must not offer it.
+    expect((error as Error).message).not.toMatch(/AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY/);
+  });
+
+  it('no longer accepts the legacy AWS_* pair', async () => {
+    // The regression guarded here: restoring the fallback re-opens the
+    // credential-chain shadowing that kept WXYC/BackendService from existing
+    // for 105 days. AWS_* alone must be a configuration error, never a send.
+    process.env.AWS_ACCESS_KEY_ID = 'aws-key';
+    process.env.AWS_SECRET_ACCESS_KEY = 'aws-secret';
+    const { sendEmail, SESClient } = await loadEmailModule();
+
+    await expect(send(sendEmail)).rejects.toThrow(/Missing SES configuration/);
+    expect(SESClient).not.toHaveBeenCalled();
+  });
+
+  it('warns once while the reserved AWS_ACCESS_KEY_ID is still set', async () => {
+    // Deleting the fallback does not delete the hazard: the variable being SET
+    // is what tops the default credential chain, whatever this module reads.
+    // Unobservability is what let BS#2518 run dark, so the detector outlives
+    // the fallback it was introduced alongside.
+    process.env.SES_ACCESS_KEY_ID = 'ses-key';
+    process.env.SES_SECRET_ACCESS_KEY = 'ses-secret';
+    process.env.AWS_ACCESS_KEY_ID = 'aws-key';
+    const { sendEmail } = await loadEmailModule();
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    await send(sendEmail);
+    await send(sendEmail);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/shadows the EC2 instance role/);
+    warn.mockRestore();
   });
 });
 
