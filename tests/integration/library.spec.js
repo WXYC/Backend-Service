@@ -4406,16 +4406,24 @@ describe('GET /library/rotation/uncatalogued — status (BS#2504)', () => {
     auth = createAuthRequest(request, global.access_token);
     sql = getTestDb();
 
-    // The two anchors are read ONCE, before any insert, and reused as fixed
-    // values. Recomputing `MIN(add_date)` per insert would have made each
-    // seeded row shift the baseline the next one measured against, so the
-    // relative order of the fixtures would depend on their insertion order —
-    // the precise kind of accident these tests exist to rule out. Cast to text
-    // so the driver hands back a plain `YYYY-MM-DD` rather than a Date whose
-    // timezone could move the day.
+    // Both anchors sit at the TOP of their respective orderings, and that is
+    // load-bearing rather than arbitrary. Every assertion below looks for a
+    // seeded row inside a response the endpoint caps at 500, so a fixture
+    // anchored off `MIN(add_date)` lands at position ~3,776 of the local
+    // `seed-clone.sql` cohort and falls off the page entirely — green in CI,
+    // whose `seed_db.sql` holds two rotation rows, and red against the database
+    // `npm run db:start` actually builds. Anchoring at the maximum makes the
+    // fixtures page-visible whatever the cohort size.
+    //
+    // Read ONCE, before any insert, and reused as fixed values: recomputing per
+    // insert would let each seeded row shift the baseline the next one measures
+    // against, making the fixtures' relative order depend on insertion order —
+    // the precise accident these tests exist to rule out. Cast to text so the
+    // driver hands back a plain `YYYY-MM-DD` rather than a Date whose timezone
+    // could move the day.
     const [anchors] = await sql`
       SELECT
-        MIN(add_date)::text AS oldest_add,
+        GREATEST(MAX(add_date), CURRENT_DATE)::text AS newest_add,
         (GREATEST(MAX(kill_date), CURRENT_DATE) + 1)::text AS newest_kill
       FROM ${sql(SCHEMA)}.rotation`;
 
@@ -4432,9 +4440,9 @@ describe('GET /library/rotation/uncatalogued — status (BS#2504)', () => {
     // for Postgres to infer, and `date - unknown` is ambiguous between the
     // integer and interval operators. A fully-formed `YYYY-MM-DD` cast to
     // `date` has no such ambiguity.
-    const daysBeforeOldestAdd = (n) => {
-      const [y, m, d] = anchors.oldest_add.split('-').map(Number);
-      return sql`${new Date(Date.UTC(y, m - 1, d - n)).toISOString().slice(0, 10)}::date`;
+    const daysAfterNewestAdd = (n) => {
+      const [y, m, d] = anchors.newest_add.split('-').map(Number);
+      return sql`${new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10)}::date`;
     };
 
     // The newest kill in the table, by construction: GREATEST(max, today) + 1
@@ -4446,27 +4454,32 @@ describe('GET /library/rotation/uncatalogued — status (BS#2504)', () => {
       'newestKill',
       'BS2504 Old Add Newest Kill',
       'BS2504 Album A',
-      daysBeforeOldestAdd(2),
+      daysAfterNewestAdd(2),
       anchors.newest_kill
     );
-    // Added long ago, killed yesterday: what the librarian's weekly worklist
-    // is actually made of, and the row add-date order buries.
+    // Added earlier, killed yesterday: what the librarian's weekly worklist is
+    // actually made of, and the row add-date order buries. The comparison that
+    // matters is against `recentAddOldKill` below — added LATER and killed
+    // EARLIER — so the two invert between the facets.
     await seed(
       'oldAddKilledYesterday',
       'BS2504 Old Add Killed Yesterday',
       'BS2504 Album B',
-      daysBeforeOldestAdd(1),
+      daysAfterNewestAdd(1),
       sql`(CURRENT_DATE - 1)`
     );
-    // Its mirror image: added today, killed long ago.
+    // Its mirror image: added later, killed earlier. Its kill date is two days
+    // back rather than genuinely ancient so it stays inside the killed facet's
+    // 500-row page — the inversion under test is the relative order against the
+    // row above, which a two-day gap establishes just as well as a decade.
     await seed(
       'recentAddOldKill',
       'BS2504 Recent Add Old Kill',
       'BS2504 Album C',
-      sql`CURRENT_DATE`,
-      daysBeforeOldestAdd(3)
+      daysAfterNewestAdd(3),
+      sql`(CURRENT_DATE - 2)`
     );
-    await seed('neverKilled', 'BS2504 Never Killed', 'BS2504 Album D', sql`(CURRENT_DATE - 1)`, null);
+    await seed('neverKilled', 'BS2504 Never Killed', 'BS2504 Album D', daysAfterNewestAdd(4), null);
   });
 
   afterAll(async () => {

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, notInArray, or, sql, SQL, type Column } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, SQL, type Column } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
@@ -12,6 +12,7 @@ import {
   isLockContentionError,
   parseRotationBin,
   rotationActiveSql,
+  rotationKilledSql,
   SUB_DEADLOCK_LOCK_TIMEOUT_MS,
   type RotationBin,
 } from '@wxyc/database';
@@ -496,7 +497,7 @@ export const getRotationFromDB = async (status: RotationStatus = 'active'): Prom
       AND ${genre_artist_crossreference.genre_id} = ${library.genre_id}
     LEFT JOIN ${rotation_cards} ON ${rotation_cards.id} = ${rotation.card_id}`;
   const statusPredicate =
-    status === 'killed' ? sql`${rotation.kill_date} IS NOT NULL` : status === 'all' ? sql`TRUE` : rotationActiveSql();
+    status === 'killed' ? rotationKilledSql() : status === 'all' ? sql`TRUE` : rotationActiveSql();
 
   const query =
     status === 'active'
@@ -1597,7 +1598,7 @@ export const getUncataloguedRotationFromDB = async (
   const unlinked = isNull(rotation.album_id);
   const where =
     status === 'killed'
-      ? and(unlinked, isNotNull(rotation.kill_date))
+      ? and(unlinked, rotationKilledSql())
       : status === 'active'
         ? and(unlinked, rotationActiveSql())
         : unlinked;
@@ -1606,11 +1607,9 @@ export const getUncataloguedRotationFromDB = async (
     .select(UNCATALOGUED_ROTATION_PROJECTION)
     .from(rotation)
     .where(where)
-    .orderBy(
-      ...(status === 'killed'
-        ? ([desc(rotation.kill_date), asc(rotation.id)] as const)
-        : ([desc(rotation.add_date), asc(rotation.id)] as const))
-    )
+    // `id` follows in both branches, written once, so the sort is total and
+    // `offset` paging cannot skip or repeat a row.
+    .orderBy(status === 'killed' ? desc(rotation.kill_date) : desc(rotation.add_date), asc(rotation.id))
     .limit(limit);
 
   return offset == null ? windowed : windowed.offset(offset);

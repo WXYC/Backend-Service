@@ -258,6 +258,7 @@ export const rotation = {
  * fresh fragment per call, mirroring the real definition.
  */
 export const rotationActiveSql = () => sql`(${rotation.kill_date} IS NULL OR ${rotation.kill_date} > CURRENT_DATE)`;
+export const rotationKilledSql = () => sql`${rotation.kill_date} IS NOT NULL`;
 export const rotation_cards = {
   id: 'rotation_cards.id',
   bin: 'rotation_cards.bin',
