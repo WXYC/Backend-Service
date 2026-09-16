@@ -1,0 +1,669 @@
+{
+  "_provenance": {
+    "issue": "WXYC/Backend-Service#2191",
+    "capturedFrom": "origin/main ff137e30 — apps/backend/middleware/responseMetrics.ts and apps/backend/services/sse/sse-metrics.ts as they stood BEFORE the migration onto @wxyc/observability/metrics",
+    "drivenBy": "tests/utils/metric-emitter-scenarios.ts (responseMetricsScenarios + sseMetricsScenarios), canonicalized by its canonicalize()",
+    "regenerate": "git show <pre-migration-rev>:apps/backend/middleware/responseMetrics.ts and :apps/backend/services/sse/sse-metrics.ts into a scratch dir, import them from a throwaway test that mocks @aws-sdk/client-cloudwatch, run every scenario through canonicalize(), and write the result here. Regenerating against POST-migration source proves nothing — the point of the fixture is that it predates the change.",
+    "consumedBy": [
+      "tests/unit/middleware/responseMetrics.equivalence.test.ts",
+      "tests/unit/services/sse-metrics.equivalence.test.ts"
+    ],
+    "notPinned": "Datum order within one PutMetricData call, and which of a tick’s two concurrent calls is issued first. CloudWatch treats MetricData as a set of independently-timestamped points; both of those did change in the migration and neither is observable."
+  },
+  "scenarios": {
+    "responseMetrics/single-403-post-flowsheet": {
+      "putMetricDataCalls": 1,
+      "callSignatures": ["MutationClientError,MutationClientError"],
+      "byMetric": {
+        "MutationClientError": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": []
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Route",
+                "Value": "POST /flowsheet/"
+              },
+              {
+                "Name": "StatusCode",
+                "Value": "403"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "responseMetrics/coalesced-three-identical": {
+      "putMetricDataCalls": 1,
+      "callSignatures": ["MutationClientError,MutationClientError"],
+      "byMetric": {
+        "MutationClientError": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 3,
+            "Dimensions": []
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 3,
+            "Dimensions": [
+              {
+                "Name": "Route",
+                "Value": "POST /flowsheet/"
+              },
+              {
+                "Name": "StatusCode",
+                "Value": "403"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "responseMetrics/two-distinct-keys": {
+      "putMetricDataCalls": 1,
+      "callSignatures": ["MutationClientError,MutationClientError,MutationClientError,MutationClientError"],
+      "byMetric": {
+        "MutationClientError": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": []
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Route",
+                "Value": "PATCH /flowsheet/play-order"
+              },
+              {
+                "Name": "StatusCode",
+                "Value": "409"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 2,
+            "Dimensions": []
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 2,
+            "Dimensions": [
+              {
+                "Name": "Route",
+                "Value": "POST /flowsheet/"
+              },
+              {
+                "Name": "StatusCode",
+                "Value": "403"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "responseMetrics/four-distinct-keys-mixed-statuses": {
+      "putMetricDataCalls": 1,
+      "callSignatures": [
+        "MutationClientError,MutationClientError,MutationClientError,MutationClientError,MutationClientError,MutationClientError,MutationClientError,MutationClientError"
+      ],
+      "byMetric": {
+        "MutationClientError": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": []
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": []
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": []
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Route",
+                "Value": "DELETE /flowsheet/"
+              },
+              {
+                "Name": "StatusCode",
+                "Value": "404"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Route",
+                "Value": "POST /flowsheet/"
+              },
+              {
+                "Name": "StatusCode",
+                "Value": "403"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Route",
+                "Value": "POST /flowsheet/"
+              },
+              {
+                "Name": "StatusCode",
+                "Value": "409"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 2,
+            "Dimensions": []
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 2,
+            "Dimensions": [
+              {
+                "Name": "Route",
+                "Value": "PATCH /flowsheet/play-order"
+              },
+              {
+                "Name": "StatusCode",
+                "Value": "400"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "responseMetrics/size-threshold-auto-flush-at-10": {
+      "putMetricDataCalls": 1,
+      "callSignatures": ["MutationClientError,MutationClientError"],
+      "byMetric": {
+        "MutationClientError": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 10,
+            "Dimensions": []
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "MutationClientError",
+            "Unit": "Count",
+            "Value": 10,
+            "Dimensions": [
+              {
+                "Name": "Route",
+                "Value": "DELETE /flowsheet/"
+              },
+              {
+                "Name": "StatusCode",
+                "Value": "409"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "responseMetrics/out-of-scope-requests-publish-nothing": {
+      "putMetricDataCalls": 0,
+      "callSignatures": [],
+      "byMetric": {}
+    },
+    "sse/events-broadcast-two-topics": {
+      "putMetricDataCalls": 1,
+      "callSignatures": ["SSE/EventsBroadcast,SSE/EventsBroadcast"],
+      "byMetric": {
+        "SSE/EventsBroadcast": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/EventsBroadcast",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "test-topic"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/EventsBroadcast",
+            "Unit": "Count",
+            "Value": 2,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "live-fs-topic"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "sse/broadcast-failures-two-topics": {
+      "putMetricDataCalls": 1,
+      "callSignatures": ["SSE/BroadcastFailures,SSE/BroadcastFailures,SSE/BroadcastFailures"],
+      "byMetric": {
+        "SSE/BroadcastFailures": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/BroadcastFailures",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "test-topic"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/BroadcastFailures",
+            "Unit": "Count",
+            "Value": 2,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "live-fs-topic"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/BroadcastFailures",
+            "Unit": "Count",
+            "Value": 3,
+            "Dimensions": []
+          }
+        ]
+      }
+    },
+    "sse/insert-suppressed-two-topics": {
+      "putMetricDataCalls": 1,
+      "callSignatures": ["SSE/InsertSuppressed,SSE/InsertSuppressed,SSE/InsertSuppressed"],
+      "byMetric": {
+        "SSE/InsertSuppressed": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/InsertSuppressed",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "test-topic"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/InsertSuppressed",
+            "Unit": "Count",
+            "Value": 2,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "live-fs-topic"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/InsertSuppressed",
+            "Unit": "Count",
+            "Value": 3,
+            "Dimensions": []
+          }
+        ]
+      }
+    },
+    "sse/update-suppressed-two-topics": {
+      "putMetricDataCalls": 1,
+      "callSignatures": ["SSE/UpdateSuppressed,SSE/UpdateSuppressed,SSE/UpdateSuppressed"],
+      "byMetric": {
+        "SSE/UpdateSuppressed": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/UpdateSuppressed",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "live-fs-topic"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/UpdateSuppressed",
+            "Unit": "Count",
+            "Value": 3,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "other-topic"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/UpdateSuppressed",
+            "Unit": "Count",
+            "Value": 4,
+            "Dimensions": []
+          }
+        ]
+      }
+    },
+    "sse/all-four-counters-plus-gauge": {
+      "putMetricDataCalls": 2,
+      "callSignatures": [
+        "SSE/BroadcastFailures,SSE/BroadcastFailures,SSE/EventsBroadcast,SSE/EventsBroadcast,SSE/InsertSuppressed,SSE/InsertSuppressed,SSE/InsertSuppressed,SSE/UpdateSuppressed,SSE/UpdateSuppressed",
+        "SSE/ClientCount,SSE/ClientCount,SSE/ClientCount"
+      ],
+      "byMetric": {
+        "SSE/BroadcastFailures": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/BroadcastFailures",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": []
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/BroadcastFailures",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "live-fs-topic"
+              }
+            ]
+          }
+        ],
+        "SSE/ClientCount": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/ClientCount",
+            "Unit": "Count",
+            "Value": 2,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "test-topic"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/ClientCount",
+            "Unit": "Count",
+            "Value": 7,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "live-fs-topic"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/ClientCount",
+            "Unit": "Count",
+            "Value": 9,
+            "Dimensions": []
+          }
+        ],
+        "SSE/EventsBroadcast": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/EventsBroadcast",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "live-fs-topic"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/EventsBroadcast",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "test-topic"
+              }
+            ]
+          }
+        ],
+        "SSE/InsertSuppressed": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/InsertSuppressed",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "live-fs-topic"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/InsertSuppressed",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "test-topic"
+              }
+            ]
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/InsertSuppressed",
+            "Unit": "Count",
+            "Value": 2,
+            "Dimensions": []
+          }
+        ],
+        "SSE/UpdateSuppressed": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/UpdateSuppressed",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": []
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/UpdateSuppressed",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "live-fs-topic"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "sse/gauge-only-empty-snapshot-emits-zero-companion": {
+      "putMetricDataCalls": 1,
+      "callSignatures": ["SSE/ClientCount"],
+      "byMetric": {
+        "SSE/ClientCount": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/ClientCount",
+            "Unit": "Count",
+            "Value": 0,
+            "Dimensions": []
+          }
+        ]
+      }
+    },
+    "sse/gauge-only-populated-snapshot": {
+      "putMetricDataCalls": 1,
+      "callSignatures": ["SSE/ClientCount,SSE/ClientCount"],
+      "byMetric": {
+        "SSE/ClientCount": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/ClientCount",
+            "Unit": "Count",
+            "Value": 3,
+            "Dimensions": []
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/ClientCount",
+            "Unit": "Count",
+            "Value": 3,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "live-fs-topic"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "sse/counters-only-no-gauge-registered": {
+      "putMetricDataCalls": 1,
+      "callSignatures": ["SSE/BroadcastFailures,SSE/BroadcastFailures,SSE/EventsBroadcast"],
+      "byMetric": {
+        "SSE/BroadcastFailures": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/BroadcastFailures",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": []
+          },
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/BroadcastFailures",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "live-fs-topic"
+              }
+            ]
+          }
+        ],
+        "SSE/EventsBroadcast": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/EventsBroadcast",
+            "Unit": "Count",
+            "Value": 1,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "live-fs-topic"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "sse/size-threshold-auto-flush-at-100": {
+      "putMetricDataCalls": 1,
+      "callSignatures": ["SSE/EventsBroadcast"],
+      "byMetric": {
+        "SSE/EventsBroadcast": [
+          {
+            "Namespace": "WXYC/BackendService",
+            "MetricName": "SSE/EventsBroadcast",
+            "Unit": "Count",
+            "Value": 100,
+            "Dimensions": [
+              {
+                "Name": "Topic",
+                "Value": "live-fs-topic"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "sse/empty-flush-publishes-nothing": {
+      "putMetricDataCalls": 0,
+      "callSignatures": [],
+      "byMetric": {}
+    }
+  }
+}
