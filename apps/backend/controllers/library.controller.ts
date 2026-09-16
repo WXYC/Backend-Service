@@ -3917,6 +3917,10 @@ const MAX_LIMIT = 100;
  * `GET /library/` (adds `label`, `rotation_bin`, `plays`,
  * `discogsUnavailable`, etc.). Contrast `GET /library/`'s bare array and
  * `GET /library/search`'s `{ success, results, total, query }` envelope.
+ *
+ * Artwork: rows carry `artwork_url` (`library.artwork_url`, `null` until LML
+ * has resolved one), and enrichment runs fire-and-forget after the response
+ * exactly as it does on `GET /library/` — see the call site below.
  */
 export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown, LibraryQueryParams> = async (
   req,
@@ -4005,6 +4009,23 @@ export const searchLibraryQueryEndpoint: RequestHandler<object, unknown, unknown
   });
   const totalPages = Math.ceil(total / limit);
   res.status(200).json({ results, total, page, totalPages });
+  // `searchForAlbum`'s fire-and-forget artwork warm (BS#1828), on this
+  // endpoint too: off the response path so a slow/rate-limited LML is never
+  // catalog-search latency, with the detached `updateArtworkUrl` cache-through
+  // landing an un-warmed release's `artwork_url` on the NEXT read. Nothing
+  // else on this path fills the column, so without it the projection above
+  // only ever carries artwork a release picked up via `GET /library/`.
+  //
+  // Started AFTER `res.json()`, where the sibling starts it before: this one
+  // mutates `row.artwork_url` in place, and responding first makes "enriched
+  // values never reach this response" hold by statement order rather than by
+  // the first await landing after serialization.
+  //
+  // `enrichWithArtwork` collects per-row failures itself; this `.catch` only
+  // keeps a whole-promise rejection from becoming an unhandledRejection.
+  libraryService.enrichWithArtwork(results).catch((err) => {
+    console.warn('[Library] Catalog-query artwork enrichment failed:', err);
+  });
 };
 
 // ---------------------------------------------------------------------------

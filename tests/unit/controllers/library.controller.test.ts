@@ -3530,6 +3530,7 @@ describe('library.controller', () => {
     beforeEach(() => {
       jest.clearAllMocks();
       mockSearchLibrary.mockResolvedValue({ results: [], total: 0 });
+      mockEnrichWithArtwork.mockResolvedValue([]);
     });
 
     it('returns 400 when the page key is repeated (Express yields string[]) (#1553)', async () => {
@@ -3556,6 +3557,58 @@ describe('library.controller', () => {
 
       expect(mockSearchLibrary).toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it("warms the page's artwork without waiting for enrichment to resolve", async () => {
+      const results = [{ id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', artwork_url: null }];
+      mockSearchLibrary.mockResolvedValue({ results, total: 1 });
+      // Enrichment that never resolves — proves the response can't be waiting on it.
+      mockEnrichWithArtwork.mockReturnValue(new Promise<unknown[]>(() => undefined));
+
+      const req = { query: { q: 'juana' } } as unknown as Request;
+      const res = mockResponse();
+
+      const start = Date.now();
+      await searchLibraryQueryEndpoint(req, res, next);
+      const elapsed = Date.now() - start;
+
+      expect(elapsed).toBeLessThan(50);
+      expect(mockEnrichWithArtwork).toHaveBeenCalledWith(results);
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ results, total: 1 }));
+    });
+
+    it('excludes enrichment output from the envelope even when enrichment resolves immediately', async () => {
+      const results = [{ id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', artwork_url: null }];
+      mockSearchLibrary.mockResolvedValue({ results, total: 1 });
+      mockEnrichWithArtwork.mockResolvedValue([
+        { id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', artwork_url: 'https://i.discogs.com/doga.jpg' },
+      ]);
+
+      const req = { query: { q: 'juana' } } as unknown as Request;
+      const res = mockResponse();
+
+      await searchLibraryQueryEndpoint(req, res, next);
+
+      // Same contract as `searchForAlbum`: enrichment still runs (and still
+      // writes artwork_url back for the next read), but the envelope is built
+      // from the raw rows before the detached promise can settle.
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ results }));
+    });
+
+    it('does not propagate enrichment errors as request failures', async () => {
+      const results = [{ id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', artwork_url: null }];
+      mockSearchLibrary.mockResolvedValue({ results, total: 1 });
+      mockEnrichWithArtwork.mockReturnValue(Promise.reject(new Error('enrichment failed')));
+
+      const req = { query: { q: 'juana' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(searchLibraryQueryEndpoint(req, res, next)).resolves.toBeUndefined();
+      expect(res.status).toHaveBeenCalledWith(200);
+      // Let the detached rejection settle into the controller's `.catch` so it
+      // can't surface as an unhandledRejection after this test completes.
+      await new Promise((resolve) => setTimeout(resolve, 10));
     });
   });
 
