@@ -1413,6 +1413,13 @@ paths:
         scope by design — see BS#2435's scope note and docs/pii.md. A
         legacy/tubafrenzy-mirrored show has no `show_djs` rows and surfaces one
         entry with `id: null`, named from `shows.legacy_dj_name`.
+
+        This block is Swagger display only and MIRRORS the SSOT; it does not
+        originate the shape. The canonical wire contract is
+        `GET /flowsheet/shows/recent` plus the `RecentShow` and
+        `RecentShowsResponse` schemas in `wxyc-shared/api.yaml` (1.58.0,
+        WXYC/wxyc-shared#469), which is what dj-site, iOS and Android generate
+        from. Change that spec first; this copy follows.
       parameters:
         - name: window_hours
           in: query
@@ -1468,6 +1475,13 @@ paths:
                             row.
                           items:
                             type: object
+                            description: >
+                              Inlined here only because this file declares no
+                              shared schemas; in the SSOT this is a `$ref` to
+                              `OnAirDJ`, the same schema `/flowsheet/djs-on-air`
+                              returns. Backend composes both from one function
+                              (`composeShowDJList`), so treat any divergence
+                              between the two copies as a bug in this one.
                             properties:
                               id:
                                 type: string
@@ -1555,6 +1569,10 @@ paths:
   /flowsheet/djs-on-air:
     get:
       summary: Get list of DJs currently on air
+      description: >
+        The same `OnAirDJ` rows `/flowsheet/shows/recent` carries in `djs[]` —
+        both are composed by `composeShowDJList`. Mirrors `OnAirDJ` in
+        `wxyc-shared/api.yaml` (the SSOT); this block is Swagger display only.
       responses:
         '200':
           description: List of active DJs
@@ -1566,9 +1584,22 @@ paths:
                   type: object
                   properties:
                     id:
-                      type: integer
+                      type: string
+                      nullable: true
+                      description: >
+                        The DJ's better-auth `auth_user.id` — an opaque
+                        `varchar(255)` string, not an integer. Null for a
+                        legacy/tubafrenzy-mirrored show whose on-air DJ has no
+                        Backend-Service account.
                     dj_name:
                       type: string
+                      nullable: true
+                      description: >
+                        The public on-air handle, never a legal name. Null when
+                        `resolveDjDisplayName` filters the handle away — a blank
+                        value or the literal "Anonymous" (BS#1286) — which
+                        `/flowsheet/shows/recent` reports as null too. Always
+                        present on the wire, carrying null.
 
   /flowsheet/on-air:
     get:
