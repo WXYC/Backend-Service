@@ -293,6 +293,24 @@ jobs:
         run: |
           set -euo pipefail
           KEY="${{ inputs.key }}"
+
+          # The allowlist below validates which SECRET is read; this validates
+          # the NAME it is written under, which is otherwise taken verbatim from
+          # inputs.key. Without it `-f key=AWS_ACCESS_KEY_ID -f
+          # secret_name=SES_ACCESS_KEY_ID` writes the SES credential to the
+          # host under the AWS SDK's reserved global name, which tops the
+          # default credential chain for every container on the box and shadows
+          # the wxyc-ec2-backend instance role. That is BS#2518 verbatim: it
+          # left WXYC/BackendService non-existent as a namespace for 105 days.
+          # BS#2530 deleted the code path that read these names, which makes
+          # this workflow the last remaining way to re-arm the hazard.
+          case "$KEY" in
+            AWS_ACCESS_KEY_ID | AWS_SECRET_ACCESS_KEY | AWS_SESSION_TOKEN | AWS_PROFILE)
+              echo "::error::'$KEY' is an AWS SDK reserved credential name and must never be set on the host. It shadows the wxyc-ec2-backend instance role for every container (BS#2518). Use SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY for the SES credential."
+              exit 1
+              ;;
+          esac
+
           SECRET_NAME="${{ inputs.secret_name || inputs.key }}"
           case "$SECRET_NAME" in
             LML_API_KEY) VALUE="$LML_API_KEY" ;;

@@ -1,25 +1,4 @@
 /**
- * `AWS_ACCESS_KEY_ID` being PRESENT is the hazard, independent of what this
- * module reads: while it is set it tops the default credential chain for the
- * whole process and shadows the EC2 instance role. The transitional fallback
- * that once read it is gone, so this is now purely a regression detector — an
- * unobservable re-arming is exactly what let BS#2518 run dark for 105 days.
- */
-let warnedLegacyAwsCredentials = false;
-const warnIfLegacyCredentialsPresent = (): void => {
-  if (warnedLegacyAwsCredentials || !process.env.AWS_ACCESS_KEY_ID) {
-    return;
-  }
-  warnedLegacyAwsCredentials = true;
-  console.warn(
-    '[email] AWS_ACCESS_KEY_ID is set. It shadows the EC2 instance role for every ' +
-      'AWS SDK call in this process that does not pass explicit credentials, and it is ' +
-      'NOT read for SES. Unset it and set SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY ' +
-      '(see BS#2518).'
-  );
-};
-
-/**
  * Self-contained SES sender for the station-signup-review digest.
  *
  * Mirrors `jobs/metadata-no-match-digest/email.ts` verbatim (which itself
@@ -36,6 +15,24 @@ const warnIfLegacyCredentialsPresent = (): void => {
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 
 let sesClient: SESClient | null = null;
+
+/**
+ * Presence, not use, is the hazard — see `shared/authentication/src/email.ts`'s
+ * `warnIfLegacyCredentialsPresent` for the full rationale (BS#2518).
+ */
+let warnedLegacyAwsCredentials = false;
+const warnIfLegacyCredentialsPresent = (): void => {
+  if (warnedLegacyAwsCredentials || !process.env.AWS_ACCESS_KEY_ID) {
+    return;
+  }
+  warnedLegacyAwsCredentials = true;
+  console.warn(
+    '[email] AWS_ACCESS_KEY_ID is set. It shadows the EC2 instance role for every ' +
+      'AWS SDK call in this process that does not pass explicit credentials, and it is ' +
+      'NOT read for SES. Unset it and set SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY ' +
+      '(see BS#2518).'
+  );
+};
 
 /**
  * Reads `SES_ACCESS_KEY_ID` / `SES_SECRET_ACCESS_KEY`. See
