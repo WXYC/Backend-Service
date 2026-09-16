@@ -277,6 +277,106 @@ describe('EMAIL_ENABLED gating', () => {
   });
 });
 
+/**
+ * Credential resolution for the SES client.
+ *
+ * These keys are SES-only (IAM user `no-reply-sender`, policy
+ * `no-reply-ses-sender-write-only`) but were read from `AWS_ACCESS_KEY_ID` /
+ * `AWS_SECRET_ACCESS_KEY` — the AWS SDK's RESERVED GLOBAL names. That put them
+ * at the top of the default credential chain for the whole process, shadowing
+ * the `wxyc-ec2-backend` instance role, so every other AWS SDK call that does
+ * not pass explicit credentials ran as an SES-only user. Both CloudWatch
+ * publishers failed `AccessDenied` on `cloudwatch:PutMetricData` for 105 days
+ * and `WXYC/BackendService` never came into existence. See BS#2518.
+ *
+ * `SES_*` is therefore the name this credential must travel under. The `AWS_*`
+ * fallback is a DEPLOYMENT-ORDERING affordance, not a supported configuration:
+ * it is what lets this code ship before `~/.env` is rewritten, and lets the
+ * env be rolled back without a redeploy. Remove it once prod carries `SES_*`
+ * (tracked on BS#2518) — while it remains, the shadowing it exists to fix is
+ * still possible.
+ *
+ * `AWS_REGION` is deliberately NOT renamed: it carries no identity, so it
+ * shadows nothing, and both CloudWatch clients read it with a correct
+ * `|| 'us-east-1'` fallback.
+ */
+describe('SES credential resolution (BS#2518)', () => {
+  const clearCredentialEnv = () => {
+    delete process.env.SES_ACCESS_KEY_ID;
+    delete process.env.SES_SECRET_ACCESS_KEY;
+    delete process.env.AWS_ACCESS_KEY_ID;
+    delete process.env.AWS_SECRET_ACCESS_KEY;
+  };
+
+  const loadEmailModule = async () => {
+    jest.clearAllMocks();
+    jest.resetModules();
+    const emailModule = await import('../../../shared/authentication/src/email');
+    const sesModule = await import('@aws-sdk/client-ses');
+    return { sendEmail: emailModule.sendEmail, SESClient: sesModule.SESClient as unknown as jest.Mock };
+  };
+
+  const send = (sendEmail: typeof import('../../../shared/authentication/src/email').sendEmail) =>
+    sendEmail({ type: 'passwordReset', to: 'dj@test.wxyc.org', url: 'https://example.com/reset' });
+
+  beforeEach(() => {
+    process.env.SES_FROM_EMAIL = 'test@wxyc.org';
+    process.env.AWS_REGION = 'us-east-1';
+    process.env.DEFAULT_ORG_NAME = 'WXYC';
+    process.env.EMAIL_ENABLED = 'true';
+    clearCredentialEnv();
+  });
+
+  const resolutionCases = [
+    {
+      description: 'SES_* alone',
+      env: { SES_ACCESS_KEY_ID: 'ses-key', SES_SECRET_ACCESS_KEY: 'ses-secret' },
+      expected: { accessKeyId: 'ses-key', secretAccessKey: 'ses-secret' },
+    },
+    {
+      description: 'AWS_* alone (deployment-ordering fallback)',
+      env: { AWS_ACCESS_KEY_ID: 'aws-key', AWS_SECRET_ACCESS_KEY: 'aws-secret' },
+      expected: { accessKeyId: 'aws-key', secretAccessKey: 'aws-secret' },
+    },
+    {
+      description: 'both set — SES_* must win, so the cutover is not order-dependent',
+      env: {
+        SES_ACCESS_KEY_ID: 'ses-key',
+        SES_SECRET_ACCESS_KEY: 'ses-secret',
+        AWS_ACCESS_KEY_ID: 'aws-key',
+        AWS_SECRET_ACCESS_KEY: 'aws-secret',
+      },
+      expected: { accessKeyId: 'ses-key', secretAccessKey: 'ses-secret' },
+    },
+  ];
+
+  it.each(resolutionCases)('reads credentials from $description', async ({ env, expected }) => {
+    Object.assign(process.env, env);
+    const { sendEmail, SESClient } = await loadEmailModule();
+
+    await send(sendEmail);
+
+    expect(SESClient).toHaveBeenCalledWith(expect.objectContaining({ region: 'us-east-1', credentials: expected }));
+  });
+
+  it('does not mix halves across the two names', async () => {
+    // A partially-applied rename must fail loudly rather than pair an SES_ id
+    // with an AWS_ secret — that combination authenticates as nothing and
+    // would surface as an opaque SES signature error at send time.
+    process.env.SES_ACCESS_KEY_ID = 'ses-key';
+    process.env.AWS_SECRET_ACCESS_KEY = 'aws-secret';
+    const { sendEmail } = await loadEmailModule();
+
+    await expect(send(sendEmail)).rejects.toThrow(/Missing SES configuration/);
+  });
+
+  it('throws naming both accepted spellings when no credentials are set', async () => {
+    const { sendEmail } = await loadEmailModule();
+
+    await expect(send(sendEmail)).rejects.toThrow(/SES_ACCESS_KEY_ID.*SES_SECRET_ACCESS_KEY.*AWS_REGION/s);
+  });
+});
+
 // Test cases for new user detection logic (to be used in auth.definition)
 const userDetectionCases = [
   { realName: '', expectedType: 'accountSetup', description: 'empty string' },

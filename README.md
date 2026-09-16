@@ -132,8 +132,11 @@ BETTER_AUTH_AUDIENCE=http://localhost:8082
 BETTER_AUTH_TRUSTED_ORIGINS=http://localhost:3000
 
 ### Password Reset Email (SES)
-AWS_ACCESS_KEY_ID={{placeholder}}
-AWS_SECRET_ACCESS_KEY={{placeholder}}
+# SES-only IAM credentials. Do NOT use AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY:
+# those are the SDK's reserved global names and shadow the instance role for
+# every other AWS call in the process (BS#2518).
+SES_ACCESS_KEY_ID={{placeholder}}
+SES_SECRET_ACCESS_KEY={{placeholder}}
 AWS_REGION=us-east-1
 SES_FROM_EMAIL=no-reply@example.com
 # Where users land after clicking the reset link

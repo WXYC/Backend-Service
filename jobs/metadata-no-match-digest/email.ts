@@ -19,17 +19,44 @@ import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 
 let sesClient: SESClient | null = null;
 
+/**
+ * Prefers `SES_*` over the legacy `AWS_*`, never mixing halves. See
+ * `shared/authentication/src/email.ts`'s `resolveSesCredentials` for why these
+ * keys must not travel under the AWS SDK's reserved global names: under those
+ * names a single-purpose SES credential shadows the instance role for the whole
+ * process, which is what left every CloudWatch metric dark for 105 days
+ * (BS#2518). This job has a self-contained sender by design, so the helper is
+ * duplicated rather than imported, as `getConfigurationSetName` already is.
+ */
+const resolveSesCredentials = (): { accessKeyId: string; secretAccessKey: string } | null => {
+  const sesAccessKeyId = process.env.SES_ACCESS_KEY_ID;
+  const sesSecretAccessKey = process.env.SES_SECRET_ACCESS_KEY;
+  if (sesAccessKeyId && sesSecretAccessKey) {
+    return { accessKeyId: sesAccessKeyId, secretAccessKey: sesSecretAccessKey };
+  }
+
+  const awsAccessKeyId = process.env.AWS_ACCESS_KEY_ID;
+  const awsSecretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+  if (awsAccessKeyId && awsSecretAccessKey) {
+    return { accessKeyId: awsAccessKeyId, secretAccessKey: awsSecretAccessKey };
+  }
+
+  return null;
+};
+
 const getSesClient = (): SESClient => {
   if (sesClient) return sesClient;
 
-  const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+  const credentials = resolveSesCredentials();
   const region = process.env.AWS_REGION;
-  if (!accessKeyId || !secretAccessKey || !region) {
-    throw new Error('Missing AWS SES configuration: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION');
+  if (!credentials || !region) {
+    throw new Error(
+      'Missing SES configuration: SES_ACCESS_KEY_ID, SES_SECRET_ACCESS_KEY, AWS_REGION ' +
+        '(legacy AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are still accepted — see BS#2518)'
+    );
   }
 
-  sesClient = new SESClient({ region, credentials: { accessKeyId, secretAccessKey } });
+  sesClient = new SESClient({ region, credentials });
   return sesClient;
 };
 
