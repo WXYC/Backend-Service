@@ -175,11 +175,31 @@ const IMDS_MAX_RETRIES = 0;
  * `AWS_REGION` is still honoured — a region names a place, not an identity,
  * and nothing about it can shadow a role.
  *
+ * Two things the pin genuinely changes, both currently inert, both worth
+ * knowing before this is read as "changes nothing off the happy path":
+ *
+ *   - `AWS_EC2_METADATA_DISABLED` stops being an escape hatch. The default
+ *     chain honours it; `@smithy/credential-provider-imds` does not mention
+ *     it at all. A hardened image that sets it to keep the SDK off
+ *     169.254.169.254 will find the emitters reaching for IMDS anyway — set
+ *     the caller's opt-out env var instead, which short-circuits before this
+ *     function is ever reached.
+ *   - ECS/Fargate and EKS/IRSA are no longer reachable. `fromInstanceMetadata`
+ *     bypasses `fromContainerMetadata` (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`)
+ *     and `fromTokenFile` (`AWS_WEB_IDENTITY_TOKEN_FILE`), so moving either
+ *     service off plain EC2 takes metrics dark in exactly the silent way
+ *     BS#2518 did. Today both run via `docker run` over SSH to `wxyc-ec2`;
+ *     a move to a container platform is the trigger to revisit this line.
+ *
  * Returns a NEW client per call and does not memoize the provider. Callers
  * cache the client themselves (`getClient()` below, `sse-metrics.ts`'s gauge
- * path), so this runs at most twice per process; memoizing would additionally
- * make the provider's independence from `process.env` untestable, since a
- * cached provider is trivially the same object either way.
+ * path), so this runs a small fixed number of times per process — three in
+ * `apps/backend` (the responseMetrics emitter, the SSE counters emitter, and
+ * the SSE gauge), one in `apps/auth`. Memoizing here would additionally make
+ * the provider's independence from `process.env` untestable, since a cached
+ * provider is trivially the same object either way. The client wraps whatever
+ * it is given in `memoizeIdentityProvider`, so IMDS is hit at cold start and
+ * on expiry, not per flush.
  */
 export function createCloudWatchClient(): CloudWatchClient {
   return new CloudWatchClient({

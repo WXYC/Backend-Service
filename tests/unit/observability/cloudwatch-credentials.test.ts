@@ -184,7 +184,13 @@ describe('createCloudWatchClient — pinned credential provider', () => {
  */
 describe('CloudWatch client construction sites', () => {
   const repoRoot = path.resolve(__dirname, '../../..');
-  const sourceRoots = ['apps', 'jobs', 'shared', 'scripts'];
+  // `dev_env` holds real TS/JS (the mock-api server) and is a plausible home
+  // for a throwaway publisher; without it a construction site there escapes
+  // the guard entirely. `tests` is deliberately NOT scanned: the match is a
+  // plain source-text regex, and this file names the forbidden construction
+  // twice in its own prose, so including it would make the guard fail on
+  // itself.
+  const sourceRoots = ['apps', 'jobs', 'shared', 'scripts', 'dev_env'];
 
   function walk(dir: string, out: string[]): string[] {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
