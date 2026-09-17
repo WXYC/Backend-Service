@@ -61,18 +61,33 @@ function mustFindMount(action: string): FlatMount {
 const forgetPasswordMount = mustFindMount('forget-password');
 const updateUserMount = mustFindMount('update-user');
 const orgCreateMount = mustFindMount('organization.create');
+const deleteUserMount = mustFindMount('delete-user');
 
-/** Captures the ONE middleware function a `mountPublicAccountAudit`/`mountAuthenticatedAccountAudit` call registers via `app.use('/auth', ...)`. */
-function captureMount(mountFn: (app: Express) => void): Middleware {
-  let captured: Middleware | undefined;
-  const fakeApp = { use: (_path: string, mw: Middleware) => (captured = mw) } as unknown as Express;
+/**
+ * Captures the ONE middleware function a `mountPublicAccountAudit`/
+ * `mountAuthenticatedAccountAudit` call registers via `app.use('/auth', ...)`.
+ * L2 (code review BS#2537 PR #2545, second round): also captures the PATH
+ * argument, so tests can pin that both dispatch layers register at '/auth'
+ * rather than assuming it.
+ */
+function captureMount(mountFn: (app: Express) => void): { middleware: Middleware; path: string } {
+  let middleware: Middleware | undefined;
+  let path: string | undefined;
+  const fakeApp = {
+    use: (usePath: string, mw: Middleware) => {
+      path = usePath;
+      middleware = mw;
+    },
+  } as unknown as Express;
   mountFn(fakeApp);
-  if (!captured) throw new Error('mount function never called app.use');
-  return captured;
+  if (!middleware || path === undefined) throw new Error('mount function never called app.use');
+  return { middleware, path };
 }
 
-const dispatchPublic = captureMount(mountPublicAccountAudit);
-const dispatchAuthenticated = captureMount(mountAuthenticatedAccountAudit);
+const publicMount = captureMount(mountPublicAccountAudit);
+const authenticatedMount = captureMount(mountAuthenticatedAccountAudit);
+const dispatchPublic = publicMount.middleware;
+const dispatchAuthenticated = authenticatedMount.middleware;
 
 function mockReq(overrides: Partial<Request> = {}): Request {
   return { method: 'POST', path: '/', headers: {}, body: {}, ...overrides } as Request;
@@ -357,5 +372,91 @@ describe('M1 close-without-finish guard (code review BS#2537 PR #2545) — manua
     res.triggerClose();
     await flush();
     expect(recordAccountAuditEvent).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('serializeSessionRead carve-out (MEDIUM 1, code review BS#2537 PR #2545, second round)', () => {
+  it('defers next() until the session promise settles on a flagged action (delete-user)', async () => {
+    let resolveSession!: (value: unknown) => void;
+    const pending = new Promise((resolve) => {
+      resolveSession = resolve;
+    });
+    auth.api.getSession = () => pending as never;
+
+    const res = mockRes();
+    const next = jest.fn();
+    dispatchAuthenticated(mockReq({ path: deleteUserMount.path, body: {} }), res, next as NextFunction);
+    await flush();
+    expect(next).not.toHaveBeenCalled();
+
+    resolveSession({ user: { id: 'self-1' }, session: {} });
+    await flush();
+    expect(next).toHaveBeenCalled();
+  });
+
+  it('calls next() synchronously (does not wait on the session promise) on an unflagged action (update-user)', async () => {
+    let resolveSession!: (value: unknown) => void;
+    const pending = new Promise((resolve) => {
+      resolveSession = resolve;
+    });
+    auth.api.getSession = () => pending as never;
+
+    const res = mockRes();
+    const next = jest.fn();
+    dispatchAuthenticated(mockReq({ path: updateUserMount.path, body: {} }), res, next as NextFunction);
+    await flush();
+    expect(next).toHaveBeenCalled();
+
+    resolveSession({ user: { id: 'self-1' }, session: {} }); // settle so the promise doesn't dangle into the next test
+    await flush();
+  });
+});
+
+describe('dispatch layer (L2, code review BS#2537 PR #2545, second round)', () => {
+  it('registers both mount functions at /auth', () => {
+    expect(publicMount.path).toBe('/auth');
+    expect(authenticatedMount.path).toBe('/auth');
+  });
+
+  it('normalizes a trailing slash before the Map lookup', async () => {
+    const { res } = await start(
+      dispatchPublic,
+      mockReq({ path: `${forgetPasswordMount.path}/`, body: { email: 'dj@wxyc.org' } })
+    );
+    await settle(res);
+    expectAudited({ action: forgetPasswordMount.action });
+  });
+
+  it('falls through to the original next() untouched on a Map miss', async () => {
+    const { res, next } = await start(dispatchPublic, mockReq({ path: '/not-a-real-flat-mount', body: {} }));
+    expect(next).toHaveBeenCalled();
+    await settle(res);
+    expect(recordAccountAuditEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe('await sessionPromise inside finishOnce (L3, code review BS#2537 PR #2545, second round)', () => {
+  // This is the regression test for the line that makes the concurrent
+  // (non-serializeSessionRead) path safe: without `await sessionPromise` in
+  // finishOnce, a 'finish' that fires before getSession resolves would
+  // record the row with actorId still null. Uses a manually-resolvable
+  // promise so 'finish' can be driven strictly before the session settles.
+  it('still records the resolved actor when finish fires before getSession settles', async () => {
+    let resolveSession!: (value: unknown) => void;
+    const pending = new Promise((resolve) => {
+      resolveSession = resolve;
+    });
+    auth.api.getSession = () => pending as never;
+
+    const { res } = await start(adminPrefixAuditMiddleware(), mockAdminReq({ path: '/set-role', body: {} }));
+    res.triggerFinish();
+    await flush();
+    // finishOnce is suspended inside `await sessionPromise` — the write
+    // must not have happened yet.
+    expect(recordAccountAuditEvent).not.toHaveBeenCalled();
+
+    resolveSession({ user: { id: 'late-actor' }, session: {} });
+    await flush();
+    expectAudited({ actorUserId: 'late-actor' });
   });
 });
