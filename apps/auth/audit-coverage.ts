@@ -149,6 +149,44 @@ export const FLAT_MOUNTS: readonly FlatMount[] = [
   { path: '/device/approve', action: 'device.approve', resolveActor: false, subject: 'body-user-id' },
   { path: '/device/deny', action: 'device.deny', resolveActor: false, subject: 'body-user-id' },
 
+  // OTP-based password-reset flow (BS#2547, M5 re-decision recorded
+  // 2026-09-17, parent epic #2534). The token-based flow above
+  // (`forget-password`/`reset-password`) has always been audited; these
+  // three were allowlisted at ship time (code review BS#2537 PR #2545,
+  // finding M5) with a comment marking them as needing an explicit
+  // re-decision, now resolved: audited. Path-derived dotted slugs distinct
+  // from the token flow's `forget-password` (decision 14) — a forensic
+  // query must be able to tell the OTP arm from the token arm. All three
+  // carry a plain `email` field in the request body (confirmed against the
+  // installed emailOTP plugin, node_modules/better-auth/dist/plugins/email-otp/routes.mjs:
+  // `ctx.body.email` on all three), so the existing `email-lookup` strategy
+  // applies unchanged, including its 2xx + writableFinished gate. Same
+  // pre-rate-limiter public-mount position and DoS-amplifier reasoning as
+  // `forget-password` above — see `app.ts`'s `rateLimitedPaths` for the
+  // three new limiter entries this requires.
+  {
+    path: '/email-otp/request-password-reset',
+    action: 'email-otp.request-password-reset',
+    resolveActor: false,
+    subject: 'email-lookup',
+  },
+  {
+    path: '/email-otp/reset-password',
+    action: 'email-otp.reset-password',
+    resolveActor: false,
+    subject: 'email-lookup',
+  },
+  // `/forget-password/email-otp` is better-auth's own @deprecated alias for
+  // `/email-otp/request-password-reset` (still live, still reachable) — a
+  // real, working, unaudited path today, audited for the same reason as its
+  // non-deprecated twin above.
+  {
+    path: '/forget-password/email-otp',
+    action: 'forget-password.email-otp',
+    resolveActor: false,
+    subject: 'email-lookup',
+  },
+
   // Authenticated self-service — mounted after the rate limiters, ahead of
   // the better-auth catch-all. subject: 'actor' — the caller's own account
   // is both actor and subject.
@@ -240,27 +278,25 @@ export const ALLOWLIST: ReadonlySet<string> = new Set([
   '/unlink-account',
   '/get-access-token',
 
-  // OTP send/verify, incl. the OTP-based reset/change variants — not part
-  // of Scope's audited surface; the primary password-based flows above are.
-  // Ratified as-written by the issue's allowlist bucket ("OTP send/verify"),
-  // NOT a dead-code judgment call: the emailOTP plugin IS configured and
-  // live in this deployment (M5, code review BS#2537 PR #2545).
+  // OTP send/verify — not part of Scope's audited surface; the primary
+  // password-based flows above are. Ratified as-written by the issue's
+  // allowlist bucket ("OTP send/verify"), NOT a dead-code judgment call:
+  // the emailOTP plugin IS configured and live in this deployment.
   '/email-otp/send-verification-otp',
   '/email-otp/check-verification-otp',
   '/email-otp/verify-email',
-  // LIVE, UNAUDITED account-modifying flows (M5): these two actually change
-  // the account's email/password via a code instead of a token, exactly
-  // like the audited /change-email and /reset-password mounts above, but
-  // ship zero account_audit_event rows. Allowlisted per the issue's literal
-  // Scope text, not because they're inert — flagged in the PR body as
-  // needing an explicit re-decision, not silently accepted.
+  // LIVE, UNAUDITED account-modifying flows — M5 RE-DECISION (BS#2547,
+  // 2026-09-17): this hole originally covered FIVE OTP paths (code review
+  // BS#2537 PR #2545, finding M5). The three password-reset-flow arms
+  // (`/email-otp/request-password-reset`, `/email-otp/reset-password`,
+  // `/forget-password/email-otp`) were re-decided as "audited" and moved to
+  // FLAT_MOUNTS above. These two EMAIL-CHANGE arms are explicitly NOT
+  // covered by that re-decision and remain pending one of their own — they
+  // change the account's email via a code instead of a token, exactly like
+  // the audited /change-email mount above, but still ship zero
+  // account_audit_event rows.
   '/email-otp/change-email',
   '/email-otp/request-email-change',
-  '/email-otp/request-password-reset',
-  // LIVE, UNAUDITED (M5) — see the comment on /email-otp/change-email
-  // above. This is the OTP-based POST /reset-password equivalent.
-  '/email-otp/reset-password',
-  '/forget-password/email-otp',
 
   '/get-session',
 

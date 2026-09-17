@@ -82,14 +82,56 @@ describe('flat mounts', () => {
 
   // Item 1 (simplify pass, code review BS#2537 PR #2545 follow-up).
   it('annotates the subject strategy correctly for each category', () => {
-    expect(FLAT_MOUNTS.find((m) => m.path === '/request-password-reset')?.subject).toBe('email-lookup');
+    const emailLookupPaths = [
+      '/request-password-reset',
+      '/email-otp/request-password-reset',
+      '/email-otp/reset-password',
+      '/forget-password/email-otp',
+    ];
+    for (const path of emailLookupPaths) {
+      expect(FLAT_MOUNTS.find((m) => m.path === path)?.subject).toBe('email-lookup');
+    }
     for (const path of ['/change-password', '/change-email', '/update-user', '/delete-user']) {
       expect(FLAT_MOUNTS.find((m) => m.path === path)?.subject).toBe('actor');
     }
     for (const mount of FLAT_MOUNTS) {
-      if (mount.path === '/request-password-reset' || mount.subject === 'actor') continue;
+      if (emailLookupPaths.includes(mount.path) || mount.subject === 'actor') continue;
       expect(mount.subject).toBe('body-user-id');
     }
+  });
+
+  // BS#2547 (M5 re-decision, parent epic #2534): the tally is the cheapest
+  // possible drift check for "did the three OTP password-reset mounts
+  // actually land with the right strategy" — counting the whole set is
+  // stronger than counting the four known paths above (which would report
+  // green even if a fifth stray email-lookup mount appeared and a real one
+  // among the four regressed to a different strategy by coincidence).
+  it('carries exactly four email-lookup mounts (1 token flow + 3 OTP arms, BS#2547)', () => {
+    const emailLookupMounts = FLAT_MOUNTS.filter((m) => m.subject === 'email-lookup');
+    expect(emailLookupMounts).toHaveLength(4);
+    expect(emailLookupMounts.map((m) => m.path).sort()).toEqual(
+      [
+        '/request-password-reset',
+        '/email-otp/request-password-reset',
+        '/email-otp/reset-password',
+        '/forget-password/email-otp',
+      ].sort()
+    );
+  });
+
+  it('mounts the three OTP password-reset arms public (resolveActor: false), per BS#2547', () => {
+    const otpPaths = ['/email-otp/request-password-reset', '/email-otp/reset-password', '/forget-password/email-otp'];
+    for (const path of otpPaths) {
+      expect(FLAT_MOUNTS.find((m) => m.path === path)?.resolveActor).toBe(false);
+    }
+  });
+
+  it('gives the three OTP password-reset arms path-derived dotted slugs distinct from the token flow (decision 14)', () => {
+    expect(FLAT_MOUNTS.find((m) => m.path === '/email-otp/request-password-reset')?.action).toBe(
+      'email-otp.request-password-reset'
+    );
+    expect(FLAT_MOUNTS.find((m) => m.path === '/email-otp/reset-password')?.action).toBe('email-otp.reset-password');
+    expect(FLAT_MOUNTS.find((m) => m.path === '/forget-password/email-otp')?.action).toBe('forget-password.email-otp');
   });
 });
 

@@ -649,6 +649,15 @@ if (!isTestEnv) {
     // comments (decision 11: "mounted ahead of the Express rate limiters")
     // literally true for this path, not just aspirational.
     '/auth/request-password-reset',
+    // BS#2547 (M5 re-decision, parent epic #2534): the OTP-based twins of
+    // request-password-reset/reset-password above are now audited via the
+    // email-lookup subject strategy — that strategy performs an auth_user
+    // read, and the public-mount 2xx gate's DoS argument (docs/authentication.md)
+    // only holds for these paths if the same brute-force limiter bounds
+    // per-attempt volume the way it already does for the token flow.
+    '/auth/email-otp/request-password-reset',
+    '/auth/email-otp/reset-password',
+    '/auth/forget-password/email-otp',
     '/auth/wxyc/lookup-email',
     '/auth/wxyc/complete-onboarding',
     // ADR 0008 — QR device-authorization. Including /code (anonymous,
