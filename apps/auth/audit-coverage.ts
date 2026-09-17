@@ -156,18 +156,41 @@ export const ADMIN_ACTIONS: ReadonlyMap<string, AdminAction> = new Map([
  * epic #2534-ratified audited scope (sign-in/sign-up stay out). `field`
  * names the discriminating body key; `actions` maps a body value to its own
  * action slug. A body value ABSENT from `actions` (including a missing or
- * non-string field) is not audited at all — `classifyFlatMountAction`
- * returns null and the request writes zero `account_audit_event` rows, the
- * same "unknown → skip" shape `ADMIN_ACTIONS`'s map-miss gate already uses.
- * This is how a `type: 'sign-in'` call through this path stays silent while
- * a `type: 'forget-password'` call on the exact same path records — without
+ * non-string field, or an inherited `Object.prototype` key — see M1's
+ * `Object.hasOwn` guard in `classifyFlatMountAction`) is not audited at all
+ * — `classifyFlatMountAction` returns null and the request writes zero
+ * `account_audit_event` rows, the same "unknown → skip" shape
+ * `ADMIN_ACTIONS`'s map-miss gate already uses. This is how a
+ * `type: 'sign-in'` call through this path stays silent while a
+ * `type: 'forget-password'` call on the exact same path records — without
  * scattering a body check into the middleware as a route-specific `if`.
+ *
+ * `fallbackAction` (H1, code review PR #2557, adjudicated VALID
+ * end-to-end): the action recorded when `field` is ABSENT from the request
+ * body entirely — a different case from "present but unmapped" above.
+ * Content-type spoofing (`Content-Type: application/jsonx`) can slip past
+ * `express.json()`'s exact `application/json` match while better-call's own
+ * broader regex (`/^application\/([a-z0-9.+-]*\+)?json/i`) still accepts
+ * and PROCESSES the request — so `req.body` here can be `undefined` for a
+ * request that IS a real, executed `forget-password` send (a working reset
+ * code goes out). Without a fallback, that shape classifies identically to
+ * the designed `sign-in` skip and writes ZERO rows — worse than a static
+ * mount's same bypass, which still nulls the subject but writes the row.
+ * Root cause (content-type parity between `express.json()` and better-call)
+ * is fixed separately (BS#2558, widening the parser's `type` match); this
+ * fallback is defense in depth so the discriminator stays fail-closed even
+ * if that parity ever regresses. Required (not optional) on every
+ * discriminated mount, mirroring `FlatMount`'s own "no silent runtime
+ * invariant" doctrine — a future discriminated mount can't forget to
+ * declare one.
  */
 export interface BodyDiscriminator {
   /** Request-body field this mount's real operation is selected by. */
   field: string;
   /** Body value (as submitted, not normalized) -> its own dotted action slug. */
   actions: Readonly<Record<string, string>>;
+  /** Recorded when `field` is absent from the body entirely (H1 fail-closed fallback — see this interface's doc comment). */
+  fallbackAction: string;
 }
 
 interface FlatMountFields {
@@ -209,15 +232,42 @@ export type FlatMount =
  * pure and co-located with the data it reads, so it's unit-testable without
  * Express (mirrors decision 4's "the compare function is unit-tested"
  * doctrine for the drift-check arms below). A static mount ignores `body`
- * entirely; a discriminated mount returns null for anything other than an
- * exact string match in `discriminator.actions` — no fuzzy matching, no
- * case-folding (better-auth's own `type` enum is submitted verbatim by
- * every real client, never normalized the way `email` is).
+ * entirely. A discriminated mount distinguishes three cases:
+ *
+ *   1. `field` ABSENT from `body` — `body` itself isn't a usable object
+ *      (null/undefined/non-object — e.g. never parsed at all), or the key
+ *      is simply missing. Fails closed to `discriminator.fallbackAction`
+ *      (H1, code review PR #2557) rather than skipping, since this is
+ *      exactly the shape a content-type-spoofed request that better-call
+ *      still processes produces (see `BodyDiscriminator`'s doc comment).
+ *   2. `field` PRESENT but not a mapped string (including any value not in
+ *      `discriminator.actions`) — the designed skip: returns null, no row.
+ *      No fuzzy matching, no case-folding (better-auth's own `type` enum is
+ *      submitted verbatim by every real client, never normalized the way
+ *      `email` is).
+ *   3. `field` PRESENT and mapped — returns that action.
+ *
+ * M1 (code review PR #2557, adjudicated VALID end-to-end): case 3's lookup
+ * guards the RESULT, not just the input. `actions[value]` is a bare index
+ * into an object literal — a value like `'constructor'`, `'__proto__'`,
+ * `'toString'`, or `'hasOwnProperty'` resolves an inherited
+ * `Object.prototype` member (a function, or the prototype object itself),
+ * which is truthy and NOT `undefined`, so guarding only the input value's
+ * type never catches it. `Object.hasOwn` rejects every inherited key
+ * outright; the `typeof resolved === 'string'` re-check is a second,
+ * independent guard in case a future `FLAT_MOUNTS` entry's `actions` map is
+ * ever built from anything other than a trusted literal.
  */
 export const classifyFlatMountAction = (mount: FlatMount, body: unknown): string | null => {
   if (mount.discriminator === undefined) return mount.action;
-  const value = (body as Record<string, unknown> | null | undefined)?.[mount.discriminator.field];
-  return typeof value === 'string' ? (mount.discriminator.actions[value] ?? null) : null;
+  const { field, actions, fallbackAction } = mount.discriminator;
+  if (body === null || typeof body !== 'object' || !(field in body)) {
+    return fallbackAction;
+  }
+  const value = (body as Record<string, unknown>)[field];
+  if (typeof value !== 'string') return null;
+  const resolved = Object.hasOwn(actions, value) ? actions[value] : undefined;
+  return typeof resolved === 'string' ? resolved : null;
 };
 
 export const FLAT_MOUNTS: readonly FlatMount[] = [
@@ -326,6 +376,14 @@ export const FLAT_MOUNTS: readonly FlatMount[] = [
   // not touch. If forget-password traffic through this shared endpoint
   // ever becomes real, that split is a follow-up, not a silent regression
   // introduced by leaving it alone now.
+  //
+  // fallbackAction (H1, code review PR #2557, adjudicated VALID
+  // end-to-end): `type` PRESENT-but-unmapped (e.g. `sign-in`) stays
+  // silent by design, but `type` genuinely ABSENT from a body that
+  // express.json() never parsed — a content-type-spoofed request
+  // better-call still processes for real — fails closed to this slug
+  // instead of also going silent. Defense in depth; the parser-parity
+  // root cause is BS#2558.
   {
     path: '/email-otp/send-verification-otp',
     resolveActor: false,
@@ -333,6 +391,7 @@ export const FLAT_MOUNTS: readonly FlatMount[] = [
     discriminator: {
       field: 'type',
       actions: { 'forget-password': 'email-otp.send-verification-otp.forget-password' },
+      fallbackAction: 'email-otp.send-verification-otp.type-absent',
     },
   },
 
