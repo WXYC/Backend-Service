@@ -649,15 +649,6 @@ if (!isTestEnv) {
     // comments (decision 11: "mounted ahead of the Express rate limiters")
     // literally true for this path, not just aspirational.
     '/auth/request-password-reset',
-    // BS#2547 (M5 re-decision, parent epic #2534): the OTP-based twins of
-    // request-password-reset/reset-password above are now audited via the
-    // email-lookup subject strategy — that strategy performs an auth_user
-    // read, and the public-mount 2xx gate's DoS argument (docs/authentication.md)
-    // only holds for these paths if the same brute-force limiter bounds
-    // per-attempt volume the way it already does for the token flow.
-    '/auth/email-otp/request-password-reset',
-    '/auth/email-otp/reset-password',
-    '/auth/forget-password/email-otp',
     '/auth/wxyc/lookup-email',
     '/auth/wxyc/complete-onboarding',
     // ADR 0008 — QR device-authorization. Including /code (anonymous,
@@ -699,6 +690,37 @@ if (!isTestEnv) {
     keyGenerator: rateLimitKeyFromRequest,
   });
   app.use('/auth/check-request-ban', checkRequestBanRateLimit);
+
+  // M3 (code review BS#2547): the three OTP password-reset arms get their
+  // OWN limiter, not `rateLimitedPaths`'s 10/15min brute-force tier —
+  // same reasoning as the station-signup limiter directly below, and the
+  // same shape (60s/120), adopted for the same reason: an OTP reset is a
+  // hand-copied-code flow (`emailOTP({ allowedAttempts: 5 })`,
+  // shared/authentication/src/auth.definition.ts), so a shared 10-per-15min
+  // bucket keyed only on X-Real-IP would let two DJs resetting before a
+  // shift drain it and lock out everyone's `POST /auth/sign-in` from the
+  // control room's shared egress IP for fifteen minutes with no operator
+  // recourse. The OTP itself already bounds guess attempts server-side
+  // (`allowedAttempts`); this limiter exists to bound DB-read / email-send
+  // volume without coupling reset traffic to sign-in's tier. The
+  // email-lookup subject-resolution DoS argument (docs/authentication.md)
+  // still holds — it's still an Express-layer limiter ahead of an
+  // `auth_user` read on every listed path, just a differently-sized one.
+  const otpPasswordResetRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 120,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please try again later.' },
+    keyGenerator: rateLimitKeyFromRequest,
+  });
+  for (const path of [
+    '/auth/email-otp/request-password-reset',
+    '/auth/email-otp/reset-password',
+    '/auth/forget-password/email-otp',
+  ]) {
+    app.use(path, otpPasswordResetRateLimit);
+  }
 
   // BS#2361 — station signup gets its OWN limiter, not `rateLimitedPaths`'s
   // 10/15min brute-force tier. Every legitimate caller of this endpoint

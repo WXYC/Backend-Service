@@ -45,6 +45,13 @@ import {
   mountPublicAccountAudit,
 } from '../../../apps/auth/account-audit-middleware';
 import { FLAT_MOUNTS, type FlatMount } from '../../../apps/auth/audit-coverage';
+// `drizzle-orm` is auto-mocked repo-wide (`tests/__mocks__/drizzle-orm.ts`,
+// a node_modules manual mock — applies without an explicit jest.mock()
+// call). Its `eq` returns the plain `{ eq: [left, right] }` shape, not a
+// real drizzle SQL fragment, so `tests/utils/render-sql.ts` (which renders
+// real `sql`-tagged fragments) doesn't recognize it — inspect `eq`'s own
+// mock calls directly instead.
+import { eq } from 'drizzle-orm';
 
 type Middleware = (req: Request, res: Response, next: NextFunction) => void;
 
@@ -267,6 +274,32 @@ describe('subject extraction', () => {
     expectAudited({ subjectUserId: null, outcome: 429 });
   });
 
+  // M1 (code review BS#2547): better-auth lowercases the email in every
+  // handler AND again in findUserByEmail, and stores it lowercase at create
+  // time — but the OTP arms' request schemas are plain z.string() (not
+  // z.email()), so a mixed-case submission reaches this middleware
+  // unchanged. Before the fix, `eq(user.email, email)` on the raw value
+  // would miss the lowercase-stored row: a mixed-case reset still succeeds
+  // (200, better-auth normalizes internally) while the audit row records
+  // subject_user_id NULL — a fully anonymous row for a successful
+  // credential change on a PUBLIC mount where actor is also never resolved.
+  // Exercised on forget-password (not just the new OTP arms) because the
+  // fix lives in the one shared `resolveUserIdByEmail` helper every
+  // email-lookup mount calls.
+  it('lowercases and trims the submitted email before the lookup, so a mixed-case submission still resolves a subject', async () => {
+    db._chain.limit.mockResolvedValueOnce([{ id: 'resolved-user-1' }]);
+    const { res } = await start(
+      dispatchPublic,
+      mockReq({ path: forgetPasswordMount.path, body: { email: '  DJ@WXYC.org  ' } })
+    );
+    await settle(res);
+    // `eq` is the mocked drizzle-orm import — its last call's args are
+    // exactly what `resolveUserIdByEmail` passed to `eq(user.email, ...)`.
+    expect(eq).toHaveBeenLastCalledWith('user.email', 'dj@wxyc.org');
+    const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(call.subjectUserId).toBe('resolved-user-1');
+  });
+
   it('extracts a generic body.userId on an admin-prefix mount', async () => {
     auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
     const { res } = await start(
@@ -300,30 +333,41 @@ describe('subject extraction', () => {
   // above via forget-password. Each asserts the recorded action slug, a
   // resolved subject from the DB lookup, and that the submitted email never
   // reaches any recorded field (AC#3).
-  it.each([
-    ['email-otp/request-password-reset', () => emailOtpRequestPasswordResetMount],
-    ['email-otp/reset-password', () => emailOtpResetPasswordMount],
-    ['forget-password/email-otp', () => forgetPasswordEmailOtpMount],
-  ])('resolves %s subject from email via DB, and never persists the email', async (_label, getMount) => {
-    const mount = getMount();
-    db._chain.limit.mockResolvedValueOnce([{ id: 'resolved-user-1' }]);
-    const { res } = await start(dispatchPublic, mockReq({ path: mount.path, body: { email: 'dj@wxyc.org' } }));
-    await settle(res);
-    const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
-    expect(call.action).toBe(mount.action);
-    expect(call.subjectUserId).toBe('resolved-user-1');
-    expect(JSON.stringify(call)).not.toContain('dj@wxyc.org');
-  });
+  //
+  // L3 (code review BS#2547): the request path is a HARD-CODED literal, not
+  // `mount.path` — that field is the exact same one the dispatcher's Map is
+  // keyed on, so driving the request off it would pass for ANY value,
+  // including an un-stripped `/auth/...` (the H1 mount-path-stripping
+  // failure shape this file's admin-side tests already guard against by
+  // hard-coding `'/set-role'` rather than deriving it). `getMount` is still
+  // used for the recorded `action` assertion, which is a distinct check —
+  // did dispatching at this literal path record the action the table says
+  // it should.
+  const OTP_PASSWORD_RESET_MOUNTS: ReadonlyArray<[label: string, path: string, getMount: () => FlatMount]> = [
+    ['email-otp/request-password-reset', '/email-otp/request-password-reset', () => emailOtpRequestPasswordResetMount],
+    ['email-otp/reset-password', '/email-otp/reset-password', () => emailOtpResetPasswordMount],
+    ['forget-password/email-otp', '/forget-password/email-otp', () => forgetPasswordEmailOtpMount],
+  ];
 
-  it.each([
-    ['email-otp/request-password-reset', () => emailOtpRequestPasswordResetMount],
-    ['email-otp/reset-password', () => emailOtpResetPasswordMount],
-    ['forget-password/email-otp', () => forgetPasswordEmailOtpMount],
-  ])(
-    'does not resolve %s subject on a non-2xx outcome (429-visibility DoS-amplifier guard)',
-    async (_label, getMount) => {
+  it.each(OTP_PASSWORD_RESET_MOUNTS)(
+    'resolves %s subject from email via DB, and never persists the email',
+    async (_label, path, getMount) => {
       const mount = getMount();
-      const { res } = await start(dispatchPublic, mockReq({ path: mount.path, body: { email: 'dj@wxyc.org' } }));
+      db._chain.limit.mockResolvedValueOnce([{ id: 'resolved-user-1' }]);
+      const { res } = await start(dispatchPublic, mockReq({ path, body: { email: 'dj@wxyc.org' } }));
+      await settle(res);
+      const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+      expect(call.action).toBe(mount.action);
+      expect(call.subjectUserId).toBe('resolved-user-1');
+      expect(JSON.stringify(call)).not.toContain('dj@wxyc.org');
+    }
+  );
+
+  it.each(OTP_PASSWORD_RESET_MOUNTS)(
+    'does not resolve %s subject on a non-2xx outcome (429-visibility DoS-amplifier guard)',
+    async (_label, path, getMount) => {
+      const mount = getMount();
+      const { res } = await start(dispatchPublic, mockReq({ path, body: { email: 'dj@wxyc.org' } }));
       res.statusCode = 429;
       await settle(res);
       expect(db._chain.limit).not.toHaveBeenCalled();
