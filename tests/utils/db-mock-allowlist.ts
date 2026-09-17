@@ -59,7 +59,6 @@ export const DB_MOCK_ALLOWLIST: DbMockAllowlist = {
     'oauthApplication',
     'oauthConsent',
     'organization',
-    'reviews',
     'rotation_library_view',
     'session',
     'shift_covers',

@@ -175,6 +175,25 @@ export const library_delete_denylist = {
   library_id: 'library_delete_denylist.library_id',
   deleted_at: 'library_delete_denylist.deleted_at',
 };
+// BS#2560. Written by `captureCatalogDeleteSnapshot` in the same transaction
+// as a catalog delete; permanent retention, no consumer yet (a restore
+// replay is future work).
+export const catalog_delete_snapshot = {
+  id: 'catalog_delete_snapshot.id',
+  batch_id: 'catalog_delete_snapshot.batch_id',
+  entity_kind: 'catalog_delete_snapshot.entity_kind',
+  entity_id: 'catalog_delete_snapshot.entity_id',
+  captured: 'catalog_delete_snapshot.captured',
+  captured_at: 'catalog_delete_snapshot.captured_at',
+  actor_user_id: 'catalog_delete_snapshot.actor_user_id',
+  actor_email: 'catalog_delete_snapshot.actor_email',
+  actor_role: 'catalog_delete_snapshot.actor_role',
+};
+// BS#2560. The unit suite maps the whole `@wxyc/database` module to this
+// file, so the capture helper needs a double or `deleteAlbumFromDB` throws
+// before reaching the behaviour those tests assert. Resolves void, like the
+// real one; assert on the call args when a test cares what was captured.
+export const captureCatalogDeleteSnapshot = jest.fn().mockResolvedValue(undefined);
 export const album_popularity = {
   logical_album_key: 'album_popularity.logical_album_key',
   plays: 'album_popularity.plays',
@@ -499,6 +518,17 @@ export const album_review_submissions = {
   norm_album: 'album_review_submissions.norm_album',
   add_date: 'album_review_submissions.add_date',
   last_modified: 'album_review_submissions.last_modified',
+};
+// BS#2560. `deleteAlbumFromDB` now reads this table to snapshot the DJ
+// reviews a delete would destroy, so the unit suite needs the double;
+// it was an allowlisted absent double until that read existed.
+export const reviews = {
+  id: 'reviews.id',
+  album_id: 'reviews.album_id',
+  review: 'reviews.review',
+  add_date: 'reviews.add_date',
+  last_modified: 'reviews.last_modified',
+  author: 'reviews.author',
 };
 export const album_critic_reviews = {
   id: 'album_critic_reviews.id',

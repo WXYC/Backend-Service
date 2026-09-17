@@ -7,6 +7,7 @@ import { RotationAddRequest } from '../controllers/library.controller.js';
 import WxycError from '../utils/error.js';
 import {
   db,
+  captureCatalogDeleteSnapshot,
   extractSqlState,
   intArrayLiteral,
   isLockContentionError,
@@ -24,6 +25,7 @@ import {
   NewArtist,
   NewGenre,
   RotationRelease,
+  album_critic_reviews,
   album_plays,
   album_popularity,
   artist_crossreference,
@@ -40,6 +42,7 @@ import {
   library_identity,
   library_identity_source,
   library_watermark,
+  reviews,
   rotation,
   rotation_cards,
   rotation_urls,
@@ -4439,15 +4442,18 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * is where this runs.
  *
  * **Durability.** The delete records the release's `legacy_release_id` in
- * `library_delete_denylist` in the same transaction. Without that,
- * `jobs/library-etl` — still cron-registered every 30 minutes — re-inserts
- * the release under a NEW `library.id`, stripped of every cascade-destroyed
- * dependent, the next time anything re-selects the still-present upstream
- * row. That is NOT on a 30-minute timer: the ETL's delta filter is
- * `TIME_LAST_MODIFIED > <last run>` and this delete never touches tubafrenzy,
- * so the trigger is a librarian editing the release upstream or an operator
- * forcing a full re-sync — open-ended rather than imminent. See the table's
- * docstring in `schema.ts` for the full mechanism and the un-delete recipe.
+ * `library_delete_denylist` in the same transaction. `jobs/library-etl` is
+ * no longer cron-registered — `cd8f058e` unscheduled it once tubafrenzy's
+ * MySQL froze and left it nothing to read — but it stays invocable by hand,
+ * and a hand-run would still re-insert the release under a NEW `library.id`,
+ * stripped of every cascade-destroyed dependent, the next time it re-selects
+ * the still-present upstream row. So the trigger is a librarian editing the
+ * release upstream or an operator forcing a full re-sync, not a schedule at
+ * all now. See the table's docstring in `schema.ts` for the full mechanism
+ * and the un-delete recipe. The same transaction also writes a
+ * `catalog_delete_snapshot` row via `captureCatalogDeleteSnapshot` (below)
+ * for every irreplaceable child, which is the actual undo path — the
+ * denylist only ever protected the parent row from being clobbered again.
  *
  * **Attribution.** `actor` is recorded on the denylist row. It is optional at
  * every field: a delete under `AUTH_BYPASS` records what it has. Losing the
@@ -4480,8 +4486,8 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * outlive the row it describes, so cascading or nulling it here would destroy
  * exactly the record an auditor came for. After a delete its `library_id`
  * resolves to nothing; a reader should treat that as "hard-deleted" — the
- * matching `library_delete_denylist` row (with the same id in `library_id`,
- * plus who and when) is the corroborating evidence — not as corruption, and
+ * matching `catalog_delete_snapshot` row (entity kind `'library'`, this id,
+ * who and when) is the corroborating evidence — not as corruption, and
  * an orphan scan over `library.id` must exclude it. Same reasoning is written
  * up on the table itself in `schema.ts` and in
  * `jobs/library-call-number-dedup/README.md`'s reference-site table, whose
@@ -4573,8 +4579,9 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // there, `IS DISTINCT FROM` rather than `<>` because the shape being
     // caught is precisely a NULL `album_id`), and the rotation clause
     // excludes the transitive arm. Deleting while any of these exist strands
-    // them forever — the denylist means no future `library` row will carry
-    // this `legacy_release_id` for the resolver to join to.
+    // them forever — not because of the denylist, but because
+    // `jobs/library-etl` is unscheduled now, so no future `library` row will
+    // ever exist for the resolver to join to.
     const legacyLinkedRows = await tx
       .select({ count: sql<number>`count(*)::int` })
       .from(flowsheet)
@@ -4601,6 +4608,36 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
         legacyLinkedPlayCount,
       };
     }
+
+    // Capture the seven irreplaceable children BEFORE any delete runs, so a
+    // failed capture rolls back with the delete instead of leaving the
+    // subtree unrecoverable. `album_metadata`, `library_identity` +
+    // `library_identity_source`, and `uncovered_release_search_markers` are
+    // deliberately NOT in this list — see the `catalog_delete_snapshot`
+    // docstring in `schema.ts` for why storing that derived, re-obtainable
+    // data would be a standing waste under this table's permanent retention.
+    await captureCatalogDeleteSnapshot(tx, {
+      entityKind: 'library',
+      entityId: album_id,
+      children: [
+        {
+          name: 'compilation_track_artist',
+          table: compilation_track_artist,
+          column: compilation_track_artist.library_id,
+        },
+        { name: 'library_urls', table: library_urls, column: library_urls.library_id },
+        { name: 'reviews', table: reviews, column: reviews.album_id },
+        { name: 'album_critic_reviews', table: album_critic_reviews, column: album_critic_reviews.album_id },
+        { name: 'bins', table: bins, column: bins.album_id },
+        { name: 'rotation', table: rotation, column: rotation.album_id },
+        {
+          name: 'artist_library_crossreference',
+          table: artist_library_crossreference,
+          column: artist_library_crossreference.library_id,
+        },
+      ],
+      actor: { userId: actor.userId, email: actor.email, role: actor.role },
+    });
 
     // Tombstone BEFORE the delete, so the denylist row and the delete commit
     // or roll back together. Unconditional: `library.legacy_release_id` is

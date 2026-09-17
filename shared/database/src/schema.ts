@@ -2033,25 +2033,17 @@ export const library_watermark = wxyc_schema.table(
  * informational only — it deliberately carries **no FK**, since the row it
  * names is deleted in the same transaction.
  *
- * **Un-deleting.** Clearing the denylist row is necessary but NOT sufficient,
- * and the earlier version of this note got that wrong. The ETL only ever
- * looks at releases whose upstream `TIME_LAST_MODIFIED` is greater than its
- * `cronjob_runs` watermark, and a Backend-side delete leaves that timestamp
- * where it was — older than every subsequent watermark — so a release whose
- * denylist row is simply removed is never re-selected and never comes back.
- * The release has to be pushed back into the candidate set as well:
- *
- * ```sql
- * DELETE FROM wxyc_schema.library_delete_denylist WHERE legacy_release_id = <id>;
- * -- then EITHER have a librarian re-save that release in tubafrenzy's
- * -- /wxycdb (bumps TIME_LAST_MODIFIED; the next half-hourly pass re-imports
- * -- it), OR force one full re-sync:
- * DELETE FROM wxyc_schema.cronjob_runs WHERE job_name = 'library-etl' OR job_name LIKE 'library-etl:%';
- * ```
- *
- * Either way the release returns under a FRESH `library.id`, without the
- * dependents that cascade-destroyed against the old one. See
- * `jobs/library-etl/README.md` for the full procedure and its caveats.
+ * **Un-deleting.** `jobs/library-etl` is unscheduled now (`cd8f058e`) and
+ * tubafrenzy's MySQL is frozen, so the ETL-driven resurrection path this
+ * note used to warn about is dormant, not just rare — clearing the denylist
+ * row alone no longer risks a surprise re-import via the next half-hourly
+ * pass, because there is no next half-hourly pass. The job stays invocable
+ * by hand (see its README), and if it is ever run again the same caveat
+ * applies as before: the release returns under a FRESH `library.id` without
+ * the dependents that cascade-destroyed against the old one. The real
+ * restore path is `catalog_delete_snapshot`, written in the same
+ * transaction as the delete, which captures those dependents so they don't
+ * have to be re-derived.
  *
  * **Who deleted it.** `deleted_by_*` records the authenticated subject at
  * delete time — this is the most destructive operation in the service and
@@ -2076,6 +2068,61 @@ export const library_delete_denylist = wxyc_schema.table('library_delete_denylis
   /** Normalized `WXYCRole` at delete time — which of the two `catalog:write` roles acted. */
   deleted_by_role: text('deleted_by_role'),
 });
+
+export type NewCatalogDeleteSnapshot = InferInsertModel<typeof catalog_delete_snapshot>;
+export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snapshot>;
+/**
+ * Before-state capture for a catalog delete (BS#2560 / F1), written in the
+ * SAME transaction as the delete it protects — a failed insert here rolls
+ * the delete back. Corrects the two things tubafrenzy's
+ * `AuditLibraryReleaseListener` got wrong: it fired after the fact (a
+ * `CHANGE_LOG` write that could fail independently of the delete it was
+ * supposed to protect, and was wrapped in a catch that logged and
+ * swallowed), and it covered releases only — no listener ever existed for
+ * artists, which is exactly why artist deletion was the unrecoverable one.
+ *
+ * `entity_kind` + `entity_id` name the deleted parent row — `'library'` /
+ * `library.id` for the release path this ships with, `'artist'` /
+ * `artists.id` once WXYC/Backend-Service#2562 wires the artist delete onto
+ * the same `captureCatalogDeleteSnapshot` helper. No FK on `entity_id`: the
+ * row it names is gone by the time this table is read, same reasoning as
+ * `library_delete_denylist.library_id` above. `captured` is a JSON object
+ * keyed by child table name, holding every row that referenced the deleted
+ * parent, read inside the same transaction before the delete runs.
+ *
+ * Captures the SEVEN irreplaceable children only — the ones a person typed
+ * and nothing recomputes: `compilation_track_artist`, `library_urls`,
+ * `reviews`, `album_critic_reviews`, `bins`, `rotation`,
+ * `artist_library_crossreference`. Deliberately excludes four DERIVED
+ * children, re-obtained after a restore rather than stored forever:
+ * `album_metadata` (re-enriched from LML), `library_identity` +
+ * `library_identity_source` (re-resolved), and
+ * `uncovered_release_search_markers` (a marker, not data). Retention here is
+ * PERMANENT — there is deliberately no prune job — which is exactly why
+ * storing derived data would be a standing waste rather than a one-time one.
+ *
+ * `batch_id` groups every snapshot row written by one delete request — the
+ * legacy `ChangeLogEntry.batchId` field, carried forward: an artist delete
+ * under #2562 that also captures each of its releases writes one batch.
+ */
+export const catalog_delete_snapshot = wxyc_schema.table(
+  'catalog_delete_snapshot',
+  {
+    id: serial('id').primaryKey(),
+    batch_id: uuid('batch_id').notNull(),
+    entity_kind: text('entity_kind').notNull(),
+    entity_id: integer('entity_id').notNull(),
+    captured: jsonb('captured').notNull(),
+    captured_at: timestamp('captured_at', { withTimezone: true }).defaultNow().notNull(),
+    /** better-auth user id (`req.auth.id`) of the librarian who issued the delete. */
+    actor_user_id: text('actor_user_id'),
+    /** Email claim from the same token, kept so the row stays legible after a user row is removed. */
+    actor_email: text('actor_email'),
+    /** Normalized `WXYCRole` at delete time. */
+    actor_role: text('actor_role'),
+  },
+  (table) => [index('catalog_delete_snapshot_entity_idx').on(table.entity_kind, table.entity_id)]
+);
 
 export const album_metadata = wxyc_schema.table('album_metadata', {
   // `.notNull()` is redundant with `.primaryKey()` at the SQL level (PK

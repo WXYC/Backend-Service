@@ -51,6 +51,12 @@
  *     against `pg_constraint.confdeltype` rather than the Drizzle model
  *     (which claimed cascade all along).
  *   - 404 on an unknown id.
+ *   - BS#2560 (F1): the delete writes a `catalog_delete_snapshot` row in the
+ *     same transaction, capturing the seven irreplaceable children
+ *     (`compilation_track_artist`, `library_urls`, `reviews`,
+ *     `album_critic_reviews`, `bins`, `rotation`,
+ *     `artist_library_crossreference`) as JSON, and a snapshot write that
+ *     fails rolls the whole delete back — no listener, no swallow.
  *
  * TEARDOWN: this spec shares a database with the rest of the integration
  * suite, and its 409 cases deliberately create rows the endpoint under test
@@ -170,6 +176,13 @@ describe('DELETE /library/:id (BS#2112)', () => {
           // Last: its FKs cascade rotation, album_metadata, reviews,
           // album_critic_reviews and compilation_track_artist away with it.
           await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id = ANY($1::int[])`, [createdAlbumIds]);
+          // No FK ties a snapshot row to the (now-gone) library row it
+          // describes — that's the point, see the schema.ts docstring — so
+          // it has to be cleared by hand like library_identity_history above.
+          await sql.unsafe(
+            `DELETE FROM "${SCHEMA}".catalog_delete_snapshot WHERE entity_kind = 'library' AND entity_id = ANY($1::int[])`,
+            [createdAlbumIds]
+          );
         }
       } finally {
         await sql.end();
@@ -617,5 +630,121 @@ describe('DELETE /library/:id (BS#2112)', () => {
     expect(rows[0].library_row).toBeNull();
 
     await sql.unsafe(`DELETE FROM "${SCHEMA}".library_identity_history WHERE library_id = $1`, [album.id]);
+  });
+
+  /**
+   * BS#2560 (F1). Captures the seven irreplaceable children as JSON, keyed by
+   * table name, in the same `catalog_delete_snapshot` row — one row per
+   * insert into `bins`/`rotation`/`reviews`/etc, populated for every table
+   * this delete can reach. `album_metadata`, `library_identity` +
+   * `library_identity_source`, and `uncovered_release_search_markers` are
+   * deliberately absent (derived data, re-obtained on restore rather than
+   * stored forever — see the schema.ts docstring).
+   */
+  test('writes a catalog_delete_snapshot row capturing the seven irreplaceable children', async () => {
+    const album = await createAlbum(`BS#2560 Snapshot ${uniq}`);
+
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".bins (dj_id, album_id, track_title) VALUES ($1, $2, 'snapshot probe bin')`,
+      [global.primary_dj_id, album.id]
+    );
+    await sql.unsafe(`INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin) VALUES ($1, 'H')`, [album.id]);
+    await sql.unsafe(`INSERT INTO "${SCHEMA}".reviews (album_id, review) VALUES ($1, 'snapshot probe review')`, [
+      album.id,
+    ]);
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".album_critic_reviews (album_id, source, source_url, snippet)
+       VALUES ($1, 'Probe Zine', 'https://example.com/snapshot-probe', 'a snapshot probe snippet')`,
+      [album.id]
+    );
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".compilation_track_artist (library_id, artist_name) VALUES ($1, 'Snapshot Probe Artist')`,
+      [album.id]
+    );
+    await sql.unsafe(`INSERT INTO "${SCHEMA}".library_urls (library_id, url, position) VALUES ($1, $2, 0)`, [
+      album.id,
+      'https://example.com/snapshot-probe-url',
+    ]);
+    await sql.unsafe(`INSERT INTO "${SCHEMA}".artist_library_crossreference (artist_id, library_id) VALUES ($1, $2)`, [
+      ART,
+      album.id,
+    ]);
+    // A derived child, deliberately never captured — asserted absent below.
+    await sql.unsafe(`INSERT INTO "${SCHEMA}".album_metadata (album_id) VALUES ($1)`, [album.id]);
+
+    await auth.delete(`/library/${album.id}`).expect(204);
+
+    const rows = await sql.unsafe(
+      `SELECT entity_kind, entity_id, captured, actor_user_id
+         FROM "${SCHEMA}".catalog_delete_snapshot WHERE entity_kind = 'library' AND entity_id = $1`,
+      [album.id]
+    );
+    expect(rows).toHaveLength(1);
+    const { captured } = rows[0];
+    expect(rows[0].entity_kind).toBe('library');
+    expect(typeof rows[0].actor_user_id).toBe('string');
+    expect(captured.bins).toHaveLength(1);
+    expect(captured.rotation).toHaveLength(1);
+    expect(captured.reviews).toHaveLength(1);
+    expect(captured.reviews[0].review).toBe('snapshot probe review');
+    expect(captured.album_critic_reviews).toHaveLength(1);
+    expect(captured.compilation_track_artist).toHaveLength(1);
+    expect(captured.library_urls).toHaveLength(1);
+    expect(captured.artist_library_crossreference).toHaveLength(1);
+    // The four derived children never appear in the captured JSON at all.
+    expect(captured.album_metadata).toBeUndefined();
+    expect(captured.library_identity).toBeUndefined();
+    expect(captured.library_identity_source).toBeUndefined();
+    expect(captured.uncovered_release_search_markers).toBeUndefined();
+  });
+
+  /**
+   * BS#2560 (F1) acceptance criterion: a failed snapshot rolls the delete
+   * back, unlike tubafrenzy's `AuditLibraryReleaseListener`, which fired
+   * after the fact behind a catch that logged and swallowed. Forces the
+   * failure with a trigger on `catalog_delete_snapshot` rather than mocking
+   * anything, since the whole point under test is real transactional
+   * atomicity.
+   */
+  test('rolls back the delete when the snapshot write fails', async () => {
+    const album = await createAlbum(`BS#2560 Snapshot Failure ${uniq}`);
+
+    await sql.unsafe(`
+      CREATE OR REPLACE FUNCTION "${SCHEMA}".bs2560_fail_snapshot() RETURNS trigger AS $trigger$
+      BEGIN
+        IF NEW.entity_id = ${album.id} THEN
+          RAISE EXCEPTION 'BS#2560 probe: forced snapshot failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $trigger$ LANGUAGE plpgsql;
+    `);
+    await sql.unsafe(`
+      CREATE TRIGGER bs2560_fail_snapshot_trigger
+      BEFORE INSERT ON "${SCHEMA}".catalog_delete_snapshot
+      FOR EACH ROW EXECUTE FUNCTION "${SCHEMA}".bs2560_fail_snapshot();
+    `);
+
+    try {
+      await auth.delete(`/library/${album.id}`).expect(500);
+
+      // Rolled back, not partially applied: the release survives, no
+      // snapshot row exists, and the denylist tombstone that would normally
+      // accompany the delete never landed either.
+      const stillThere = await sql.unsafe(`SELECT id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
+      expect(stillThere).toHaveLength(1);
+      const snapshot = await sql.unsafe(
+        `SELECT 1 FROM "${SCHEMA}".catalog_delete_snapshot WHERE entity_kind = 'library' AND entity_id = $1`,
+        [album.id]
+      );
+      expect(snapshot).toHaveLength(0);
+      const denylisted = await sql.unsafe(`SELECT 1 FROM "${SCHEMA}".library_delete_denylist WHERE library_id = $1`, [
+        album.id,
+      ]);
+      expect(denylisted).toHaveLength(0);
+    } finally {
+      await sql.unsafe(`DROP TRIGGER IF EXISTS bs2560_fail_snapshot_trigger ON "${SCHEMA}".catalog_delete_snapshot`);
+      await sql.unsafe(`DROP FUNCTION IF EXISTS "${SCHEMA}".bs2560_fail_snapshot()`);
+    }
   });
 });
