@@ -19,12 +19,28 @@ import { isIP } from 'net';
 
 let warnedMissingIpHmacKey = false;
 
+// Simplify pass (code review BS#2537 PR #2545 follow-up): this function now
+// runs per audited HTTP request (account-audit-middleware.ts), not just per
+// station-signup attempt, so re-deriving the Buffer from the raw env string
+// on every call is worth memoizing. Keyed on the RAW STRING, not an
+// unconditional first-call cache: `tests/unit/authentication/signup-ip-hash.test.ts`
+// mutates `process.env.STATION_SIGNUP_IP_HMAC_KEY` between cases and must
+// see each new value take effect immediately, not a stale cached key from
+// an earlier test.
+let cachedRawKey: string | undefined;
+let cachedKey: Buffer | null = null;
+
 function resolveSignupIpHmacKey(): Buffer | null {
   const raw = process.env.STATION_SIGNUP_IP_HMAC_KEY;
-  if (!raw) return null;
+  if (raw === cachedRawKey) return cachedKey;
+  cachedRawKey = raw;
+  if (!raw) {
+    cachedKey = null;
+    return cachedKey;
+  }
   const key = Buffer.from(raw, 'hex');
-  if (key.length !== 32) return null;
-  return key;
+  cachedKey = key.length === 32 ? key : null;
+  return cachedKey;
 }
 
 /** Trim, lowercase, and collapse an IPv4-mapped IPv6 address to its dotted quad. */

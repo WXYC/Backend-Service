@@ -1,9 +1,9 @@
 /**
  * Single source of truth for account-audit coverage (BS#2537, parent epic
- * #2534): audited prefix, GET-include exceptions, flat-mount table,
- * explicit-call-site set, and allowlist. `app.ts`'s mounts and
- * `scripts/check-audit-route-coverage.ts`'s two drift-check arms both import
- * from here, so a mount and the check it's measured against can't drift.
+ * #2534): admin action map, flat-mount table, explicit-call-site set, and
+ * allowlist. `app.ts`'s mounts and `scripts/check-audit-route-coverage.ts`'s
+ * two drift-check arms both import from here, so a mount and the check it's
+ * measured against can't drift.
  *
  * DEVIATION FROM THE ISSUE TEXT (reported in the PR body): the issue names a
  * flat mount at `/auth/forget-password`. Installed better-auth (^1.6.30) has
@@ -22,72 +22,81 @@
  * `/auth` is stripped (arm 2).
  */
 
-/** All 15 better-auth admin-plugin endpoints, `provision-user`, and the six
- * station-signup admin ops live under this prefix — a prefix match, so a
- * future addition under it is covered by construction. */
 export const ADMIN_PREFIX = '/admin';
 
-/** GET paths under ADMIN_PREFIX that ARE logged despite being reads — the
- * PII bulk reads named in Scope. `list-user-sessions` is POST in the
- * installed better-auth version (auto-covered by the non-GET rule either
- * way); kept here for a future version that reverts it to GET. */
-export const ADMIN_GET_INCLUDES: ReadonlySet<string> = new Set([
-  '/admin/get-user',
-  '/admin/list-users',
-  '/admin/list-user-sessions',
-]);
+export interface AdminAction {
+  action: string;
+  /** True only for the PII-bulk-read GETs (decision 3's explicit include list). Omitted (falsy) for every mutation. */
+  includeGet?: true;
+}
+
+const STATION_SIGNUP_ADMIN_PREFIX = `${ADMIN_PREFIX}/station-signup`;
 
 /**
- * The full known admin-prefix action surface, path -> dotted action slug.
- * Code-review finding (BS#2537 PR #2545, HIGH + M2): `adminPrefixAuditMiddleware`
- * used to derive the slug from `req.path` text and log every non-GET
- * request under the prefix regardless of whether the path was a real
- * action. Two live bugs followed — Express 5 strips the mount path, so
- * `req.path` inside the middleware never actually carried the `/admin`
- * segment the slug needed, and any anonymous request to
- * `/auth/admin/<garbage>` cost a getSession read + an INSERT while minting
- * an attacker-controlled action string. Both are fixed by looking the
- * canonical path up in this map instead of transforming request text: an
- * unlisted path is not a known action and is skipped before any work
- * happens (see `adminPrefixAuditMiddleware`), and the slug for a known path
- * can never be attacker-influenced.
- *
- * Every non-GET better-auth admin-plugin endpoint, `provision-user`,
- * `resolve-organization` is a GET-only read excluded here on purpose (GETs
- * are gated separately by `ADMIN_GET_INCLUDES`, and this map exists to gate
- * the non-GET surface + name known GET actions — resolve-organization not
- * being in `ADMIN_GET_INCLUDES` means it was never logged either way), and
- * the six station-signup admin ops (mounted as a nested router at
- * `/admin/station-signup/*`).
+ * The six station-signup admin op names, exactly as passed to
+ * `stationSignupAdminRoute('<op>', ...)` in `app.ts`. Exported so
+ * `tests/unit/auth/account-audit-coverage.test.ts` can assert two-way
+ * source-text parity against `app.ts` (simplify pass, code review BS#2537
+ * PR #2545) — this closes the drift-check blind spot the previously
+ * hand-listed six `ADMIN_ACTIONS` entries were: nothing caught `app.ts`
+ * growing a seventh op this file forgot to list.
  */
-export const ADMIN_ACTION_BY_PATH: ReadonlyMap<string, string> = new Map([
-  ['/admin/set-role', 'admin.set-role'],
-  ['/admin/get-user', 'admin.get-user'],
+export const STATION_SIGNUP_ADMIN_OPS = ['reveal', 'rotate', 'revoke', 'clear-cooldown', 'status', 'approve'] as const;
+
+/**
+ * The full known admin-prefix action surface, path -> { action, includeGet }.
+ * Simplify pass (code review BS#2537 PR #2545 follow-up): this used to be a
+ * path->slug Map plus a separate `ADMIN_GET_INCLUDES` Set, kept in sync by
+ * hand — one map removes that seam and the two GET entries just carry
+ * `includeGet: true` inline.
+ *
+ * This map is ALSO the coverage check's source of truth for "is this path a
+ * known admin action" (item 4 of the simplify pass): a path under `/admin`
+ * is covered iff it is a key here — mirroring the runtime `isKnown` gate in
+ * `account-audit-middleware.ts` exactly. That is a DELIBERATE behavior
+ * change to the CHECK relative to the earlier plain-prefix-match version: a
+ * future better-auth `/admin` endpoint absent from this map now FAILS
+ * `check:audit-coverage` instead of being silently assumed covered. That is
+ * the check doing its job — a map miss means nobody has looked at the new
+ * endpoint and decided whether it needs auditing yet, and the map (not a
+ * blanket prefix rule) is what makes that decision visible in a diff.
+ *
+ * Covers every non-GET better-auth admin-plugin endpoint, `provision-user`
+ * (`resolve-organization` is GET-only and not in this map — GETs are gated
+ * by `includeGet`, and resolve-organization isn't one of the two PII bulk
+ * reads, so it was never logged either way), and the six station-signup
+ * admin ops (mounted as a nested router at `/admin/station-signup/*`),
+ * derived from `STATION_SIGNUP_ADMIN_OPS` rather than hand-listed.
+ */
+export const ADMIN_ACTIONS: ReadonlyMap<string, AdminAction> = new Map([
+  ['/admin/set-role', { action: 'admin.set-role' }],
+  ['/admin/get-user', { action: 'admin.get-user', includeGet: true }],
   // M4 (code review BS#2537 PR #2545): the created user doesn't exist yet
   // at request time, so there is no `userId` in the body to extract — this
   // action's rows always write subject_user_id NULL. The new user's id is
   // only known from the RESPONSE, which the generic body-only extractor
   // never sees. Same follow-up as the organization mounts below.
-  ['/admin/create-user', 'admin.create-user'],
-  ['/admin/update-user', 'admin.update-user'],
-  ['/admin/list-users', 'admin.list-users'],
-  ['/admin/list-user-sessions', 'admin.list-user-sessions'],
-  ['/admin/unban-user', 'admin.unban-user'],
-  ['/admin/ban-user', 'admin.ban-user'],
-  ['/admin/impersonate-user', 'admin.impersonate-user'],
-  ['/admin/stop-impersonating', 'admin.stop-impersonating'],
-  ['/admin/revoke-user-session', 'admin.revoke-user-session'],
-  ['/admin/revoke-user-sessions', 'admin.revoke-user-sessions'],
-  ['/admin/remove-user', 'admin.remove-user'],
-  ['/admin/set-user-password', 'admin.set-user-password'],
-  ['/admin/has-permission', 'admin.has-permission'],
-  ['/admin/provision-user', 'admin.provision-user'],
-  ['/admin/station-signup/reveal', 'admin.station-signup.reveal'],
-  ['/admin/station-signup/rotate', 'admin.station-signup.rotate'],
-  ['/admin/station-signup/revoke', 'admin.station-signup.revoke'],
-  ['/admin/station-signup/clear-cooldown', 'admin.station-signup.clear-cooldown'],
-  ['/admin/station-signup/status', 'admin.station-signup.status'],
-  ['/admin/station-signup/approve', 'admin.station-signup.approve'],
+  ['/admin/create-user', { action: 'admin.create-user' }],
+  ['/admin/update-user', { action: 'admin.update-user' }],
+  ['/admin/list-users', { action: 'admin.list-users', includeGet: true }],
+  // `list-user-sessions` is POST in the installed better-auth version
+  // (auto-covered by the non-GET rule either way); `includeGet` is set
+  // here too, for a future version that reverts it to GET.
+  ['/admin/list-user-sessions', { action: 'admin.list-user-sessions', includeGet: true }],
+  ['/admin/unban-user', { action: 'admin.unban-user' }],
+  ['/admin/ban-user', { action: 'admin.ban-user' }],
+  ['/admin/impersonate-user', { action: 'admin.impersonate-user' }],
+  ['/admin/stop-impersonating', { action: 'admin.stop-impersonating' }],
+  ['/admin/revoke-user-session', { action: 'admin.revoke-user-session' }],
+  ['/admin/revoke-user-sessions', { action: 'admin.revoke-user-sessions' }],
+  ['/admin/remove-user', { action: 'admin.remove-user' }],
+  ['/admin/set-user-password', { action: 'admin.set-user-password' }],
+  ['/admin/has-permission', { action: 'admin.has-permission' }],
+  ['/admin/provision-user', { action: 'admin.provision-user' }],
+  ...STATION_SIGNUP_ADMIN_OPS.map((op): [string, AdminAction] => [
+    `${STATION_SIGNUP_ADMIN_PREFIX}/${op}`,
+    { action: `admin.station-signup.${op}` },
+  ]),
 ]);
 
 export interface FlatMount {
@@ -97,6 +106,18 @@ export interface FlatMount {
   action: string;
   /** False only for the genuinely unauthenticated mounts (no session to resolve). */
   resolveActor: boolean;
+  /**
+   * Which `subjectFrom` strategy this mount uses (simplify pass, code
+   * review BS#2537 PR #2545 follow-up): `'actor'` echoes the resolved
+   * actor id (self-service mounts — the caller's own account is both actor
+   * and subject); `'email-lookup'` is the one DB read this layer performs,
+   * resolving a submitted email to a user id so the email string itself
+   * never lands in the table (AC#3); `'body-user-id'` is the generic
+   * best-effort `body.userId` extractor (decision 12). Selected once at
+   * `flatMountAuditMiddleware(mount)` construction time rather than
+   * re-branching on `mount.action` per request.
+   */
+  subject: 'body-user-id' | 'actor' | 'email-lookup';
 }
 
 export const FLAT_MOUNTS: readonly FlatMount[] = [
@@ -106,41 +127,72 @@ export const FLAT_MOUNTS: readonly FlatMount[] = [
   // per ADR 0008 a real call to them DOES carry a session, but resolving
   // one here would be a pre-limiter DB-read DoS amplifier for garbage
   // traffic, so a real approval's actor is accepted-lost to NULL.
-  { path: '/request-password-reset', action: 'forget-password', resolveActor: false },
-  { path: '/reset-password', action: 'reset-password', resolveActor: false },
-  { path: '/device/approve', action: 'device.approve', resolveActor: false },
-  { path: '/device/deny', action: 'device.deny', resolveActor: false },
+  { path: '/request-password-reset', action: 'forget-password', resolveActor: false, subject: 'email-lookup' },
+  { path: '/reset-password', action: 'reset-password', resolveActor: false, subject: 'body-user-id' },
+  { path: '/device/approve', action: 'device.approve', resolveActor: false, subject: 'body-user-id' },
+  { path: '/device/deny', action: 'device.deny', resolveActor: false, subject: 'body-user-id' },
 
   // Authenticated self-service — mounted after the rate limiters, ahead of
-  // the better-auth catch-all.
-  { path: '/change-password', action: 'change-password', resolveActor: true },
-  { path: '/change-email', action: 'change-email', resolveActor: true },
-  { path: '/update-user', action: 'update-user', resolveActor: true },
-  { path: '/delete-user', action: 'delete-user', resolveActor: true },
+  // the better-auth catch-all. subject: 'actor' — the caller's own account
+  // is both actor and subject.
+  { path: '/change-password', action: 'change-password', resolveActor: true, subject: 'actor' },
+  { path: '/change-email', action: 'change-email', resolveActor: true, subject: 'actor' },
+  { path: '/update-user', action: 'update-user', resolveActor: true, subject: 'actor' },
+  { path: '/delete-user', action: 'delete-user', resolveActor: true, subject: 'actor' },
 
   // Authenticated organization mutations. KNOWN LIMITATION (M4, code review
   // BS#2537 PR #2545): every one of these bodies carries a target
   // identifier under a DIFFERENT field than `userId` — `invite-member` uses
   // `email`, `remove-member`/`update-member-role` use `memberIdOrEmail`/
   // `memberId`, `accept/cancel/reject-invitation` use `invitationId` — so
-  // `extractBodyUserId`'s generic `body.userId` lookup always misses and
-  // `subject_user_id` is NULL on every row these mounts write. Deliberately
-  // NOT widened to also try those field names: `memberIdOrEmail` can BE an
-  // email address, and this column must never carry PII (the same
-  // constraint AC#3 enforces for `forget-password`). Resolving a real
-  // member/invitation identifier to a `subject_user_id` needs its own
-  // lookup (member -> userId, invitation -> invited userId) and is a
-  // follow-up, not a drive-by fix here.
-  { path: '/organization/create', action: 'organization.create', resolveActor: true },
-  { path: '/organization/update', action: 'organization.update', resolveActor: true },
-  { path: '/organization/delete', action: 'organization.delete', resolveActor: true },
-  { path: '/organization/invite-member', action: 'organization.invite-member', resolveActor: true },
-  { path: '/organization/cancel-invitation', action: 'organization.cancel-invitation', resolveActor: true },
-  { path: '/organization/accept-invitation', action: 'organization.accept-invitation', resolveActor: true },
-  { path: '/organization/reject-invitation', action: 'organization.reject-invitation', resolveActor: true },
-  { path: '/organization/remove-member', action: 'organization.remove-member', resolveActor: true },
-  { path: '/organization/update-member-role', action: 'organization.update-member-role', resolveActor: true },
-  { path: '/organization/leave', action: 'organization.leave', resolveActor: true },
+  // the generic `body.userId` lookup always misses and `subject_user_id` is
+  // NULL on every row these mounts write. Deliberately NOT widened to also
+  // try those field names: `memberIdOrEmail` can BE an email address, and
+  // this column must never carry PII (the same constraint AC#3 enforces
+  // for `forget-password`). Resolving a real member/invitation identifier
+  // to a `subject_user_id` needs its own lookup (member -> userId,
+  // invitation -> invited userId) and is a follow-up, not a drive-by fix
+  // here.
+  { path: '/organization/create', action: 'organization.create', resolveActor: true, subject: 'body-user-id' },
+  { path: '/organization/update', action: 'organization.update', resolveActor: true, subject: 'body-user-id' },
+  { path: '/organization/delete', action: 'organization.delete', resolveActor: true, subject: 'body-user-id' },
+  {
+    path: '/organization/invite-member',
+    action: 'organization.invite-member',
+    resolveActor: true,
+    subject: 'body-user-id',
+  },
+  {
+    path: '/organization/cancel-invitation',
+    action: 'organization.cancel-invitation',
+    resolveActor: true,
+    subject: 'body-user-id',
+  },
+  {
+    path: '/organization/accept-invitation',
+    action: 'organization.accept-invitation',
+    resolveActor: true,
+    subject: 'body-user-id',
+  },
+  {
+    path: '/organization/reject-invitation',
+    action: 'organization.reject-invitation',
+    resolveActor: true,
+    subject: 'body-user-id',
+  },
+  {
+    path: '/organization/remove-member',
+    action: 'organization.remove-member',
+    resolveActor: true,
+    subject: 'body-user-id',
+  },
+  {
+    path: '/organization/update-member-role',
+    action: 'organization.update-member-role',
+    resolveActor: true,
+    subject: 'body-user-id',
+  },
+  { path: '/organization/leave', action: 'organization.leave', resolveActor: true, subject: 'body-user-id' },
 ];
 
 /** Hand-written Express routes (bare, `/auth` stripped) audited via an
@@ -255,13 +307,17 @@ export const ALLOWLIST: ReadonlySet<string> = new Set([
   '/test/reset-incomplete-user',
 ]);
 
-const isUnderAdminPrefix = (path: string): boolean => path === ADMIN_PREFIX || path.startsWith(`${ADMIN_PREFIX}/`);
-
 const isFlatMounted = (path: string): boolean => FLAT_MOUNTS.some((mount) => mount.path === path);
 
-/** True when this bare path is covered by SOME audited mechanism (prefix, flat mount, or explicit call site). */
+/**
+ * True when this bare path is covered by SOME audited mechanism (a known
+ * admin action, a flat mount, or an explicit call site). Method-blind — see
+ * `findUncoveredAuthApiEndpoints` for the method-aware admin + flat-mount
+ * treatment arm 1 needs (a GET-only endpoint isn't actually logged by
+ * either mechanism unless the admin entry's `includeGet` is set).
+ */
 export const isAudited = (path: string): boolean =>
-  isUnderAdminPrefix(path) || isFlatMounted(path) || EXPLICIT_CALL_SITES.has(path);
+  ADMIN_ACTIONS.has(path) || isFlatMounted(path) || EXPLICIT_CALL_SITES.has(path);
 
 export const isAllowlisted = (path: string): boolean => ALLOWLIST.has(path);
 
@@ -279,24 +335,27 @@ const isGetOnly = (methods: readonly string[]): boolean =>
  * router, so excluding them mirrors reality, not a coverage gap) must be
  * audited or allowlisted. Returns the uncovered ones.
  *
- * Method-aware for the admin prefix specifically (M3, code review BS#2537
- * PR #2545): `isAudited`'s prefix check alone treats EVERY path under
- * `/admin` as covered, but the coverage rule (decision 3) is "GETs only
- * from an explicit include list" — a GET under the prefix that is NOT in
- * `ADMIN_GET_INCLUDES` is not actually logged by the mount, so it must
- * clear the allowlist bar like any other unaudited endpoint instead of
- * riding through on the prefix match. Both admin GETs in the installed
- * better-auth version happen to be in the include list today, which is
- * exactly why this stayed green through the mount-path-stripping bug this
- * finding accompanied — nothing exercised the false-negative case.
+ * Method-aware in two places (M3 + simplify-pass item 4, code review
+ * BS#2537 PR #2545):
+ *   - Admin: a path counts as covered iff it is a KEY in `ADMIN_ACTIONS`
+ *     (not merely "under the prefix" — see that map's own doc comment for
+ *     why that's deliberate), and — when every method on the real endpoint
+ *     is GET — only if that entry's `includeGet` flag is set.
+ *   - Flat mounts: `flatMountAuditMiddleware` hard-codes `includeGet:
+ *     () => false` (every FlatMount is a POST-only mutation), so a GET-only
+ *     endpoint that happens to share a flat-mount's path is NOT covered by
+ *     that mount and must clear the allowlist bar like anything else.
  */
 export const findUncoveredAuthApiEndpoints = (endpoints: readonly AuthApiEndpoint[]): string[] =>
   endpoints
     .filter((endpoint) => {
-      const audited =
-        isGetOnly(endpoint.methods) && isUnderAdminPrefix(endpoint.path)
-          ? ADMIN_GET_INCLUDES.has(endpoint.path)
-          : isAudited(endpoint.path);
+      const getOnly = isGetOnly(endpoint.methods);
+      const adminAction = ADMIN_ACTIONS.get(endpoint.path);
+      const audited = adminAction
+        ? !getOnly || adminAction.includeGet === true
+        : isFlatMounted(endpoint.path)
+          ? !getOnly
+          : EXPLICIT_CALL_SITES.has(endpoint.path);
       return !audited && !isAllowlisted(endpoint.path);
     })
     .map((e) => e.path);
@@ -304,7 +363,9 @@ export const findUncoveredAuthApiEndpoints = (endpoints: readonly AuthApiEndpoin
 /**
  * Arm 2: every hand-written non-GET/OPTIONS/HEAD `/auth/...` Express route
  * registration (bare paths, `/auth` already stripped by the caller) must be
- * audited or allowlisted.
+ * audited or allowlisted. Method-blind by construction: the source-text
+ * sweep this feeds from only ever matches non-GET registrations in the
+ * first place, so `isAudited`'s method-blind form is exactly right here.
  */
 export const findUncoveredExpressRoutes = (barePaths: readonly string[]): string[] =>
   barePaths.filter((path) => !isAudited(path) && !isAllowlisted(path));
