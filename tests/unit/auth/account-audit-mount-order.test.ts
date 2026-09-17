@@ -55,4 +55,33 @@ describe('account-audit prefix mount ordering', () => {
     expect(limiterIndex).toBeGreaterThan(-1);
     expect(auditMountIndex).toBeLessThan(limiterIndex);
   });
+
+  // L5 (code review BS#2537 PR #2545): pin the two FLAT_MOUNTS loop
+  // positions themselves, not just the single-mount adminPrefixAuditMiddleware
+  // registration above. app.ts has TWO identical `for (const mount of
+  // FLAT_MOUNTS) {` headers, distinguished only by which side of
+  // `mount.resolveActor` they skip — the public loop (`if (mount.resolveActor)
+  // continue`) must sit ahead of the rate limiter (decision 11's
+  // DoS-amplifier argument), and the authenticated loop (`if
+  // (!mount.resolveActor) continue`) must sit after it and still ahead of
+  // the better-auth catch-all.
+  const limiterIndex = authAppSource.indexOf('const authMutationRateLimit = rateLimit(');
+  const catchAllIndex = authAppSource.indexOf("app.use('/auth', toNodeHandler(auth))");
+
+  it('registers the public FLAT_MOUNTS loop ahead of the rate limiter', () => {
+    const publicLoopIndex = authAppSource.indexOf(
+      'for (const mount of FLAT_MOUNTS) {\n  if (mount.resolveActor) continue;'
+    );
+    expect(publicLoopIndex).toBeGreaterThan(-1);
+    expect(publicLoopIndex).toBeLessThan(limiterIndex);
+  });
+
+  it('registers the authenticated FLAT_MOUNTS loop after the rate limiter and ahead of the catch-all', () => {
+    const authenticatedLoopIndex = authAppSource.indexOf(
+      'for (const mount of FLAT_MOUNTS) {\n  if (!mount.resolveActor) continue;'
+    );
+    expect(authenticatedLoopIndex).toBeGreaterThan(-1);
+    expect(authenticatedLoopIndex).toBeGreaterThan(limiterIndex);
+    expect(authenticatedLoopIndex).toBeLessThan(catchAllIndex);
+  });
 });

@@ -14,18 +14,32 @@ import * as Sentry from '@sentry/node';
 import { auth, deriveStationSignupIpHash } from '@wxyc/authentication';
 import { db, recordAccountAuditEvent, user } from '@wxyc/database';
 import { fromNodeHeaders } from 'better-auth/node';
-import { ADMIN_GET_INCLUDES, ADMIN_PREFIX, type FlatMount } from './audit-coverage.js';
+import { ADMIN_ACTION_BY_PATH, ADMIN_GET_INCLUDES, ADMIN_PREFIX, type FlatMount } from './audit-coverage.js';
 
 const MAX_BODY_CAPTURE_BYTES = 4096;
+
+/** better-auth's own `generateId()` default (shared/authentication/src/auth.definition.ts's `generateId(32)` call) is a 32-char a-zA-Z0-9 string. */
+const BETTER_AUTH_ID_LENGTH = 32;
 
 const onAuditError = (error: unknown): void => {
   Sentry.captureException(error, { tags: { subsystem: 'account-audit' } });
 };
 
+/**
+ * Coarse shape guard (L3, code review BS#2537 PR #2545), not a format
+ * validator: a body-supplied `userId` is caller-controlled input, and
+ * `subject_user_id` must never carry PII (the same constraint AC#3 enforces
+ * for `forget-password`'s email lookup). Rejects anything containing '@'
+ * (an email slipped into the wrong field) or implausibly long for a real
+ * better-auth id, without trying to validate the id actually exists.
+ */
+const isPlausibleUserId = (value: string): boolean =>
+  value.length > 0 && value.length <= BETTER_AUTH_ID_LENGTH && !value.includes('@');
+
 /** Best-effort, per decision 12: a string `userId` field where the body has one, else NULL. */
 const extractBodyUserId = (req: Request): string | null => {
   const value = (req.body as Record<string, unknown> | undefined)?.userId;
-  return typeof value === 'string' && value.length > 0 ? value : null;
+  return typeof value === 'string' && isPlausibleUserId(value) ? value : null;
 };
 
 /**
@@ -60,11 +74,23 @@ interface ResolvedMount {
   subjectFrom: (req: Request, actorId: string | null) => Promise<string | null>;
   /** GET requests are skipped unless this returns true (decision 3). */
   includeGet: (req: Request) => boolean;
+  /**
+   * M2 (code review BS#2537 PR #2545): omitted (or true) for every
+   * `FlatMount` — each is mounted at its own literal path, so any request
+   * this middleware instance ever sees already IS that one known action.
+   * `adminPrefixAuditMiddleware` supplies this because the whole point of a
+   * PREFIX mount is that it sees paths it doesn't recognize; without this
+   * gate, any anonymous request to `/auth/admin/<garbage>` cost a
+   * getSession read + an INSERT and minted an attacker-controlled action
+   * slug from raw path text.
+   */
+  isKnown?: (req: Request) => boolean;
 }
 
 function auditMiddleware(resolve: ResolvedMount) {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (req.method === 'OPTIONS' || req.method === 'HEAD') return next();
+    if (resolve.isKnown && !resolve.isKnown(req)) return next();
     if (req.method === 'GET' && !resolve.includeGet(req)) return next();
 
     const action = resolve.action(req);
@@ -74,8 +100,26 @@ function auditMiddleware(resolve: ResolvedMount) {
     let capturedBytes = 0;
     const capture = (chunk: unknown): void => {
       if (res.statusCode < 400 || capturedBytes >= MAX_BODY_CAPTURE_BYTES) return;
-      if (typeof chunk !== 'string' && !Buffer.isBuffer(chunk)) return;
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      // HIGH 2 (code review BS#2537 PR #2545): better-call's setResponse
+      // pumps `response.body.getReader()` values into res.write(value) as
+      // plain Uint8Array chunks — Buffer.isBuffer is false for those, so
+      // the old `typeof chunk !== 'string' && !Buffer.isBuffer(chunk)`
+      // guard silently dropped every better-auth ≥400 body and error_code
+      // stayed NULL for the whole better-auth surface. Buffer IS a
+      // Uint8Array subclass, so `instanceof Uint8Array` subsumes both.
+      if (typeof chunk !== 'string' && !(chunk instanceof Uint8Array)) return;
+      let buf: Buffer;
+      if (typeof chunk === 'string') buf = Buffer.from(chunk);
+      else if (Buffer.isBuffer(chunk)) buf = chunk;
+      // A non-Buffer Uint8Array view can be a slice of a larger shared
+      // ArrayBuffer, so respect its own byteOffset/byteLength rather than
+      // assuming the whole underlying buffer belongs to this chunk.
+      else buf = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+      // L2: truncate the chunk that crosses the cap rather than only
+      // checking it beforehand — without this, a single chunk arriving
+      // near the boundary could push capturedBytes past MAX_BODY_CAPTURE_BYTES.
+      const remaining = MAX_BODY_CAPTURE_BYTES - capturedBytes;
+      if (buf.length > remaining) buf = buf.subarray(0, remaining);
       capturedBody.push(buf);
       capturedBytes += buf.length;
     };
@@ -103,6 +147,20 @@ function auditMiddleware(resolve: ResolvedMount) {
       return () => {
         if (logged) return;
         logged = true;
+
+        // M1 (code review BS#2537 PR #2545): Node's default res.statusCode
+        // is 200 before any status is ever set, so a 'close' that fires
+        // WITHOUT a prior 'finish' (the request aborted mid-flight — client
+        // disconnect, etc.) would otherwise fabricate an outcome=200 row
+        // and wrongly satisfy the public-mount 2xx subject-resolution gate
+        // below for a request that never actually completed.
+        // res.writableFinished is Node's own signal that 'finish' genuinely
+        // fired (true immediately before 'finish' is emitted) — skip the
+        // row entirely when it's false rather than guess at, or invent a
+        // sentinel for, an outcome the request never reached. `outcome` is
+        // documented as "raw HTTP status", so a synthetic value (e.g. a
+        // 499-style convention) would misrepresent what the column means.
+        if (!res.writableFinished) return;
 
         let errorCode: string | null = null;
         if (res.statusCode >= 400 && capturedBody.length > 0) {
@@ -158,11 +216,25 @@ function auditMiddleware(resolve: ResolvedMount) {
 
 /** `/auth/admin/*` — every non-GET request, plus the named PII-bulk-read GETs. Action is path-derived. */
 export function adminPrefixAuditMiddleware() {
+  // HIGH 1 (code review BS#2537 PR #2545): Express 5 strips the mount path
+  // under `app.use('/auth/admin', middleware)` — a request to
+  // /auth/admin/set-role arrives here with req.path === '/set-role' (and
+  // req.baseUrl === '/auth/admin'), never '/admin/set-role'. This mount is
+  // registered exactly once (app.ts), so ADMIN_PREFIX + req.path
+  // reconstructs the bare canonical path audit-coverage.ts's tables key on.
+  const canonicalPath = (req: Request): string => ADMIN_PREFIX + req.path;
   return auditMiddleware({
-    action: (req) => req.path.replace(/^\//, '').split('/').join('.'),
+    // The slug now comes from a lookup, not a transform of request text —
+    // both HIGH 1 (the old transform silently produced 'set-role' instead
+    // of 'admin.set-role', colliding e.g. admin.update-user with the
+    // self-service update-user action) and M2 (a lookup miss means "not a
+    // known action" and is caught by isKnown below, so an unknown path can
+    // never mint an action string from attacker-controlled path text).
+    action: (req) => ADMIN_ACTION_BY_PATH.get(canonicalPath(req)) ?? '',
     resolveActor: true,
     subjectFrom: (req) => Promise.resolve(extractBodyUserId(req)),
-    includeGet: (req) => ADMIN_GET_INCLUDES.has(req.path),
+    includeGet: (req) => ADMIN_GET_INCLUDES.has(canonicalPath(req)),
+    isKnown: (req) => ADMIN_ACTION_BY_PATH.has(canonicalPath(req)),
   });
 }
 

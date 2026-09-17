@@ -18,7 +18,10 @@ describe('Auth service rate limiting', () => {
     expect(authAppSource).toMatch(/\/auth\/sign-in/);
     expect(authAppSource).toMatch(/\/auth\/sign-up/);
     expect(authAppSource).toMatch(/\/auth\/email-otp\/send-verification-otp/);
-    expect(authAppSource).toMatch(/\/auth\/forget-password/);
+    // M1 (code review BS#2537 PR #2545): was '/auth/forget-password', a
+    // string that matches no route in the installed better-auth version —
+    // the real "forgot password" route is request-password-reset.
+    expect(authAppSource).toMatch(/\/auth\/request-password-reset/);
   });
 
   it('disables rate limiting in test environments', () => {
