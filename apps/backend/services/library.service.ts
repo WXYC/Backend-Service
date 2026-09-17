@@ -4128,6 +4128,7 @@ export type UpdateAlbumRow = {
   alternate_artist_name?: string | null;
   disc_quantity?: number;
   code_number?: number;
+  code_volume_letters?: string | null;
   // BS#1281 (Not-on-Discogs 1a). `discogs_unavailable_note` accepts an
   // explicit null (clearing the note when the flag drops); the SET loop below
   // preserves null because `null !== undefined`.
@@ -4148,6 +4149,7 @@ export const updateAlbumInDB = async (album_id: number, updates: UpdateAlbumRow)
     'alternate_artist_name',
     'disc_quantity',
     'code_number',
+    'code_volume_letters',
     'discogs_unavailable',
     'discogs_unavailable_note',
   ] as const) {
@@ -4197,6 +4199,10 @@ export const getLibraryRowById = async (album_id: number) => {
       alternate_artist_name: library.alternate_artist_name,
       disc_quantity: library.disc_quantity,
       code_number: library.code_number,
+      // BS#2564: the PATCH handler needs the pre-edit value to compute the
+      // effective (artist_id, code_number, code_volume_letters) tuple for
+      // its collision check when a request edits only one of the two.
+      code_volume_letters: library.code_volume_letters,
       artist_name: library.artist_name,
       // BS#1281: the PATCH handler reads the live flag to judge a note-only
       // edit against the `flag ⟺ note` invariant.
@@ -4893,6 +4899,37 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
   });
 };
 
+/**
+ * The id of the album (if any, excluding `exclude_album_id`) that already
+ * owns this artist's `(code_number, code_volume_letters)` shelf slot (BS#2564,
+ * `PATCH /library/:id`'s artist-scoped call-code collision check).
+ *
+ * Volume letters compare case- and NULL-insensitively via
+ * `upper(coalesce(..., ''))`, matching the slot key
+ * `jobs/library-call-number-dedup` merges duplicates on — a PATCH must not be
+ * able to create the collision that job exists to drain.
+ */
+export const findConflictingAlbumId = async (
+  artist_id: number,
+  code_number: number,
+  code_volume_letters: string | null,
+  exclude_album_id: number
+): Promise<number | undefined> => {
+  const rows = await db
+    .select({ id: library.id })
+    .from(library)
+    .where(
+      and(
+        eq(library.artist_id, artist_id),
+        eq(library.code_number, code_number),
+        ne(library.id, exclude_album_id),
+        sql`upper(coalesce(${library.code_volume_letters}, '')) = upper(coalesce(${code_volume_letters}, ''))`
+      )
+    )
+    .limit(1);
+  return rows[0]?.id;
+};
+
 /** True when `artist_id` already owns an album with this `code_number` (excluding `exclude_album_id`). */
 export const albumCodeNumberTaken = async (
   artist_id: number,
@@ -4930,6 +4967,7 @@ export const getAlbumFromDB = async (album_id: number) => {
       code_letters: artists.code_letters,
       code_artist_number: genre_artist_crossreference.artist_genre_code,
       code_number: library.code_number,
+      code_volume_letters: library.code_volume_letters,
       artist_name: artists.artist_name,
       alphabetical_name: artists.alphabetical_name,
       album_title: library.album_title,

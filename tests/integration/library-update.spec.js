@@ -194,6 +194,112 @@ describe('PATCH /library/:id', () => {
       expect(res.body.code_number).toBe(2);
     });
   });
+
+  // BS#2564: makes code_number and code_volume_letters writable via PATCH,
+  // with an artist-scoped collision check on the (artist_id, code_number,
+  // code_volume_letters) tuple — mirroring the shelf-slot key
+  // `jobs/library-call-number-dedup` merges duplicates on, so a PATCH can't
+  // create the collision that job exists to drain.
+  describe('code_number and code_volume_letters (BS#2564)', () => {
+    let artist;
+    let otherArtist;
+    let base;
+    let baseLettered;
+
+    const mkAlbum = async (artist_id, code_number, code_volume_letters, title) => {
+      const body = {
+        album_title: title,
+        artist_id,
+        label: 'Patch Code Conflict Label',
+        genre_id: 11,
+        format_id: 1,
+        code_number,
+      };
+      if (code_volume_letters !== undefined) body.code_volume_letters = code_volume_letters;
+      const res = await auth.post('/library').send(body).expect(201);
+      return res.body;
+    };
+
+    beforeAll(async () => {
+      const a = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Patch Code Conflict Artist ${uniq}`,
+          code_letters: 'PE',
+          genre_id: 11,
+          code_number: 9200 + (uniq % 500),
+        })
+        .expect(201);
+      artist = a.body;
+
+      const b = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Patch Code Conflict Artist Other ${uniq}`,
+          code_letters: 'PF',
+          genre_id: 11,
+          code_number: 9200 + (uniq % 500),
+        })
+        .expect(201);
+      otherArtist = b.body;
+
+      base = await mkAlbum(artist.id, 1, undefined, `Patch Code Base ${uniq}`);
+      baseLettered = await mkAlbum(artist.id, 1, 'A', `Patch Code Base Lettered ${uniq}`);
+    });
+
+    test.each([
+      ['same code_number, both null volume letters', { code_number: 1 }, () => base],
+      [
+        'same code_number, empty-string volume letters treated as null',
+        { code_number: 1, code_volume_letters: '' },
+        () => base,
+      ],
+      [
+        'same code_number and letters, compared case-insensitively',
+        { code_number: 1, code_volume_letters: 'a' },
+        () => baseLettered,
+      ],
+    ])('%s collides with the existing release (409)', async (_desc, patch, conflicting) => {
+      const target = await mkAlbum(artist.id, 50, undefined, `Patch Code Target ${uniq}`);
+
+      const res = await auth.patch(`/library/${target.id}`).send(patch).expect(409);
+      expect(res.body.reason).toBe('album_code_conflict');
+      expect(res.body.album.id).toBe(conflicting().id);
+    });
+
+    test.each([
+      ['a different code_number', { code_number: 2 }],
+      ['the same code_number but distinguishing volume letters', { code_number: 1, code_volume_letters: 'Z' }],
+    ])('%s is written without a conflict', async (_desc, patch) => {
+      const target = await mkAlbum(artist.id, 50, undefined, `Patch Code Target ${uniq}`);
+
+      const res = await auth.patch(`/library/${target.id}`).send(patch).expect(200);
+      expect(res.body.code_number).toBe(patch.code_number);
+      if (patch.code_volume_letters !== undefined) {
+        expect(res.body.code_volume_letters).toBe(patch.code_volume_letters);
+      }
+    });
+
+    test('does not collide with an identical tuple filed under a different artist', async () => {
+      // artist already owns (code_number: 1, code_volume_letters: null) via
+      // `base`, but the check is artist-scoped, so otherArtist can hold the
+      // same tuple free of charge.
+      const target = await mkAlbum(otherArtist.id, 50, undefined, `Patch Code Target Scope ${uniq}`);
+
+      const res = await auth.patch(`/library/${target.id}`).send({ code_number: 1 }).expect(200);
+      expect(res.body.code_number).toBe(1);
+    });
+
+    test('rejects an out-of-range code_number and an over-length code_volume_letters', async () => {
+      const target = await mkAlbum(artist.id, 51, undefined, `Patch Code Target Validate ${uniq}`);
+
+      const badNumber = await auth.patch(`/library/${target.id}`).send({ code_number: 0 }).expect(400);
+      expectErrorContains(badNumber, 'code_number');
+
+      const badLetters = await auth.patch(`/library/${target.id}`).send({ code_volume_letters: 'TOOLONG' }).expect(400);
+      expectErrorContains(badLetters, 'code_volume_letters');
+    });
+  });
 });
 
 describe('GET /library/artists/search — review-feedback regressions (PR #1154)', () => {
