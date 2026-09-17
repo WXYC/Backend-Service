@@ -1,5 +1,5 @@
 /**
- * Observability for station-signup-attempt-prune: Sentry init + JSON logs.
+ * Observability for auth-log-prune: Sentry init + JSON logs.
  *
  * Mirrors jobs/station-signup-review/logger.ts verbatim -- the contract is
  * identical, the duplication keeps this job's build graph independent of the
