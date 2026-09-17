@@ -29,8 +29,11 @@ import rateLimit from 'express-rate-limit';
 import { rateLimitKeyFromRequest, sessionRateLimitKeyFromRequest } from './rate-limit-key';
 import { makeHandler as makeRateLimitMetricsHandler, flushRateLimitMetrics } from './auth-rate-limit-metrics';
 import { closeDatabaseConnection } from '@wxyc/database';
-import { adminPrefixAuditMiddleware, flatMountAuditMiddleware } from './account-audit-middleware';
-import { FLAT_MOUNTS } from './audit-coverage';
+import {
+  adminPrefixAuditMiddleware,
+  mountAuthenticatedAccountAudit,
+  mountPublicAccountAudit,
+} from './account-audit-middleware';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { checkRequestBanHandler } from './check-request-ban-handler';
 import { CompleteOnboardingError, completeOnboardingFromRequest } from './complete-onboarding';
@@ -97,11 +100,12 @@ app.use('/auth/admin', adminPrefixAuditMiddleware());
 // Account-audit flat mounts, public half (BS#2537). Ahead of the rate
 // limiters below (decision 11): no session exists on these paths, so
 // resolving one here would be a pre-limit DB-read DoS amplifier. `next()`
-// falls through to the rate limiter, then to the real handler.
-for (const mount of FLAT_MOUNTS) {
-  if (mount.resolveActor) continue;
-  app.use(`/auth${mount.path}`, flatMountAuditMiddleware(mount));
-}
+// falls through to the rate limiter, then to the real handler. One `/auth`
+// layer dispatching every public FlatMount internally (simplify pass, code
+// review BS#2537 PR #2545 follow-up) — this exact call site is a needle in
+// tests/unit/auth/account-audit-mount-order.test.ts, so keep its text
+// stable.
+mountPublicAccountAudit(app);
 
 // Test helper endpoints (must be registered BEFORE Better Auth handler).
 // Positive-list gate (BS#1097): enable only in explicit dev/test. A negative
@@ -788,10 +792,11 @@ if (!isTestEnv) {
 // better-auth catch-all below, like every other authenticated flat mount —
 // these resolve the caller's session (`resolveActor: true`) since there is
 // no rate limiter to get ahead of for a DoS-amplifier concern to attach to.
-for (const mount of FLAT_MOUNTS) {
-  if (!mount.resolveActor) continue;
-  app.use(`/auth${mount.path}`, flatMountAuditMiddleware(mount));
-}
+// One `/auth` layer dispatching every authenticated FlatMount internally
+// (simplify pass, code review BS#2537 PR #2545 follow-up) — this exact call
+// site is a needle in tests/unit/auth/account-audit-mount-order.test.ts, so
+// keep its text stable.
+mountAuthenticatedAccountAudit(app);
 
 app.post('/auth/wxyc/lookup-email', lookupEmailHandler);
 app.post('/auth/wxyc/complete-onboarding', completeOnboardingHandler);

@@ -16,10 +16,10 @@
  * distinguishable error steering them to sign in and finish via session mode.
  */
 
-import * as Sentry from '@sentry/node';
 import { auth, deriveStationSignupIpHash, revokeOutstandingAccountSetupTokens } from '@wxyc/authentication';
 import { recordAccountAuditEvent, type User } from '@wxyc/database';
 import { APIError } from 'better-auth/api';
+import { onAccountAuditError } from './account-audit-error.js';
 
 export class CompleteOnboardingError extends Error {
   constructor(
@@ -235,10 +235,6 @@ async function resolveOnboardingResult(
   return completeOnboardingWithSession(headers, { realName, djName });
 }
 
-const auditOnboardingError = (error: unknown): void => {
-  Sentry.captureException(error, { tags: { subsystem: 'account-audit' } });
-};
-
 /**
  * Explicit `recordAccountAuditEvent` call site (BS#2537, parent epic #2534
  * Scope: "both modes -- its internal auth.api.resetPassword never crosses an
@@ -246,32 +242,31 @@ const auditOnboardingError = (error: unknown): void => {
  * invite-token mode predates one), so there is no actor to resolve; the
  * subject is the completed account on success, best-effort NULL on failure
  * (decision 12) rather than duplicating token/session resolution here.
+ *
+ * Item 14 (simplify pass, code review BS#2537 PR #2545 follow-up): one
+ * `audit(fields)` partial application fixes the action/ipHash/source that
+ * were previously repeated across both call sites, and the error is
+ * narrowed ONCE (`known`) instead of two separate `instanceof` checks.
  */
 export async function completeOnboardingFromRequest(
   body: Record<string, unknown>,
   headers: Headers
 ): Promise<CompleteOnboardingResult> {
   const ipHash = deriveStationSignupIpHash(headers.get('x-real-ip') ?? undefined);
+  const audit = (fields: { subjectUserId?: string; outcome: number; errorCode?: string | null }): void => {
+    void recordAccountAuditEvent(
+      { action: 'wxyc.complete-onboarding', ipHash, source: 'http', ...fields },
+      { onError: onAccountAuditError }
+    );
+  };
+
   try {
     const result = await resolveOnboardingResult(body, headers);
-    void recordAccountAuditEvent(
-      {
-        action: 'wxyc.complete-onboarding',
-        subjectUserId: result.userId,
-        outcome: 200,
-        ipHash,
-        source: 'http',
-      },
-      { onError: auditOnboardingError }
-    );
+    audit({ subjectUserId: result.userId, outcome: 200 });
     return result;
   } catch (error) {
-    const statusCode = error instanceof CompleteOnboardingError ? error.statusCode : 500;
-    const errorCode = error instanceof CompleteOnboardingError ? (error.code ?? null) : null;
-    void recordAccountAuditEvent(
-      { action: 'wxyc.complete-onboarding', outcome: statusCode, errorCode, ipHash, source: 'http' },
-      { onError: auditOnboardingError }
-    );
+    const known = error instanceof CompleteOnboardingError ? error : null;
+    audit({ outcome: known?.statusCode ?? 500, errorCode: known?.code ?? null });
     throw error;
   }
 }

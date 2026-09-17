@@ -2,62 +2,26 @@
  * Integration tests for the account-audit decorator (BS#2537, parent epic
  * #2534), driven against the live CI auth service — the
  * `admin-create-user-email-verify.spec.js` / `device-authorization.spec.js`
- * idiom (`getAuthBaseUrl()`, a raw `postgres` client for the row
- * assertion), not the job-style `station-signup-review.spec.js`, which
- * drives a job by importing built `dist`.
+ * idiom, not the job-style `station-signup-review.spec.js`, which drives a
+ * job by importing built `dist`.
  *
  * The audit write is fire-and-forget after `res.on('finish')`, so the HTTP
  * response can return before the INSERT commits — every row assertion below
  * short-polls (the `waitForMetadata` idiom in `tests/utils/metadata_util.js`)
  * rather than reading immediately.
+ *
+ * Simplify pass (code review BS#2537 PR #2545 follow-up, item 19): the DB
+ * connection now goes through the shared `getTestDb()` pool
+ * (`tests/utils/db.js`), the same one `auth-log-prune.spec.js` uses,
+ * instead of a private single-use `postgres()` client; `getAuthBaseUrl` +
+ * `signInAsStationManager` moved to `tests/utils/account_audit_auth.js`,
+ * consumed only by this spec (see that module's header for why the eight
+ * other legacy specs carrying their own `getAuthBaseUrl` copy are a
+ * separate follow-up).
  */
 
-const postgres = require('postgres');
-
-function getAuthBaseUrl() {
-  if (process.env.BETTER_AUTH_URL) {
-    try {
-      return new URL(process.env.BETTER_AUTH_URL).toString().replace(/\/$/, '');
-    } catch {
-      // fall through
-    }
-  }
-  const host = process.env.AUTH_HOST || 'localhost';
-  const port = process.env.AUTH_PORT || process.env.CI_AUTH_PORT || 8083;
-  return `http://${host}:${port}/auth`;
-}
-
-function makeSql() {
-  return postgres({
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || process.env.CI_DB_PORT || '5433', 10),
-    database: process.env.DB_NAME || 'wxyc_db',
-    user: process.env.DB_USERNAME || 'test-user',
-    password: process.env.DB_PASSWORD || 'test-pw',
-    onnotice: () => {},
-    max: 2,
-  });
-}
-
-async function signInAsStationManager(authBaseUrl) {
-  const res = await fetch(`${authBaseUrl}/sign-in/username`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'test_station_manager', password: 'testpassword123' }),
-  });
-  if (!res.ok) {
-    throw new Error(`Sign-in failed: ${res.status} ${await res.text()}`);
-  }
-  const cookies = res.headers.getSetCookie();
-  if (!cookies || cookies.length === 0) {
-    throw new Error('No session cookie returned by sign-in');
-  }
-  const cookie = cookies.map((c) => c.split(';')[0].trim()).join('; ');
-
-  const sessionRes = await fetch(`${authBaseUrl}/get-session`, { headers: { Cookie: cookie } });
-  const session = await sessionRes.json();
-  return { cookie, managerId: session.user.id };
-}
+const { getTestDb } = require('../utils/db');
+const { getAuthBaseUrl, signInAsStationManager } = require('../utils/account_audit_auth');
 
 async function waitForAuditRow(sql, whereSql, params, maxWaitMs = 5000, pollIntervalMs = 250) {
   const startTime = Date.now();
@@ -81,12 +45,8 @@ describe('account_audit_event (BS#2537)', () => {
   const createdUserIds = [];
 
   beforeAll(async () => {
-    sql = makeSql();
+    sql = getTestDb();
     ({ cookie, managerId } = await signInAsStationManager(authBaseUrl));
-  });
-
-  afterAll(async () => {
-    if (sql) await sql.end();
   });
 
   afterEach(async () => {

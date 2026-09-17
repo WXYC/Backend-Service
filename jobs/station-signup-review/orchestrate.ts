@@ -137,7 +137,14 @@ export const run = async (): Promise<void> => {
       });
       // Explicit recordAccountAuditEvent call site (BS#2537, parent epic
       // #2534 Scope): this write path has no HTTP mount to hang a decorator
-      // on. source:'job', actor NULL (the actuator, not a person).
+      // on. source:'job', actor NULL (the actuator, not a person). The
+      // literal tag below deliberately does NOT import
+      // apps/auth/account-audit-error.ts's ACCOUNT_AUDIT_ERROR_TAG
+      // (simplify pass, code review BS#2537 PR #2545 follow-up) -- jobs/*
+      // and apps/auth are different npm workspaces, and importing across
+      // that boundary for one string constant isn't worth the coupling.
+      // Keep this literal ('account-audit') equal to that constant's value
+      // if it ever changes.
       for (const row of applied.downgraded) {
         void recordAccountAuditEvent(
           { action: 'job.self-signup-downgrade', subjectUserId: row.userId, outcome: 200, source: 'job' },

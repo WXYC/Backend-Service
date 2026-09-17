@@ -6,9 +6,20 @@ import { parseBearerToken } from '@wxyc/authentication';
 // consumes via `ipAddressHeaders: ['x-real-ip']` in
 // shared/authentication/src/auth.definition.ts). XFF is client-controlled
 // and must not influence rate-limit bucketing — see BS#774, BS#1048.
-export const rateLimitKeyFromRequest = (req: Pick<Request, 'headers' | 'socket'>): string => {
+//
+// Simplify pass (code review BS#2537 PR #2545 follow-up): the array-unwrap
+// is its own export, `realIpFromRequest`, so the account-audit middleware's
+// ip_hash derivation (apps/auth/account-audit-middleware.ts) can share it
+// instead of carrying a second copy. Pure refactor — rateLimitKeyFromRequest's
+// own behavior is unchanged. `app.ts`'s station-signup handler keeps its own
+// separate x-real-ip read (pre-existing, outside this pass).
+export const realIpFromRequest = (req: Pick<Request, 'headers'>): string | undefined => {
   const raw = req.headers['x-real-ip'];
-  const realIp = Array.isArray(raw) ? raw[0] : raw;
+  return Array.isArray(raw) ? raw[0] : raw;
+};
+
+export const rateLimitKeyFromRequest = (req: Pick<Request, 'headers' | 'socket'>): string => {
+  const realIp = realIpFromRequest(req);
   if (typeof realIp === 'string' && realIp.length > 0) return realIp;
   return req.socket.remoteAddress ?? 'unknown';
 };
