@@ -34,6 +34,18 @@ const stubWatermarkSelect = () => {
 const insertedRows = (chain: ReturnType<typeof createMockQueryChain>) =>
   chain.values.mock.calls[0]?.[0] as Record<string, unknown>[];
 
+/**
+ * "The fill decided there was nothing to write" — as distinct from "the fill
+ * threw and swallowed it", which also leaves `db.insert` untouched. Every
+ * no-write case has to assert both halves, or removing a guard makes the test
+ * pass for the wrong reason: the missing row simply crashes `nextPlayOrder`
+ * against an unstubbed chain and the `catch` hides it.
+ */
+const expectQuietNoOp = () => {
+  expect(db.insert).not.toHaveBeenCalled();
+  expect(mockCaptureException).not.toHaveBeenCalled();
+};
+
 describe('getBreakpointWatermark', () => {
   it('resolves to the last breakpoint radio_hour when one is set', async () => {
     stubWatermarkSelect().limit.mockResolvedValueOnce([
@@ -105,9 +117,12 @@ describe('fillMissingHourlyBreakpoints', () => {
       { radio_hour: new Date('2026-09-16T23:00:00.000Z'), add_time: null },
     ]);
 
+    db.select.mockReturnValue(playOrderChain());
+    db.insert.mockReturnValue(createMockQueryChain());
+
     await fillMissingHourlyBreakpoints(show, 'DJ Stardust', { now: new Date('2026-09-16T23:05:00.000Z') });
 
-    expect(db.insert).not.toHaveBeenCalled();
+    expectQuietNoOp();
   });
 
   it('does not re-create an hour a manually added breakpoint already marks', async () => {
@@ -120,9 +135,12 @@ describe('fillMissingHourlyBreakpoints', () => {
       { radio_hour: null, add_time: new Date('2026-09-16T22:58:00.000Z') },
     ]);
 
+    db.select.mockReturnValue(playOrderChain());
+    db.insert.mockReturnValue(createMockQueryChain());
+
     await fillMissingHourlyBreakpoints(show, 'DJ Stardust', { now: new Date('2026-09-16T23:05:00.000Z') });
 
-    expect(db.insert).not.toHaveBeenCalled();
+    expectQuietNoOp();
   });
 
   it('inserts exactly one breakpoint for a show missing one hour', async () => {
@@ -158,14 +176,18 @@ describe('fillMissingHourlyBreakpoints', () => {
         { radio_hour: new Date('2026-09-16T22:00:00.000Z'), add_time: null },
       ]);
 
+      db.select.mockReturnValue(playOrderChain());
+      db.insert.mockReturnValue(createMockQueryChain());
+
       // 7:05 PM EDT: the caller's own row will be labelled "7:00 PM", so 7:00
-      // is theirs to write and the fill has nothing left to do.
+      // is theirs to write and the fill has nothing left to do. Without the
+      // ceiling this generates a second 7:00 PM marker and inserts it.
       await fillMissingHourlyBreakpoints(show, 'DJ Stardust', {
         now: new Date('2026-09-16T23:05:00.000Z'),
         callerMarksCurrentHour: true,
       });
 
-      expect(db.insert).not.toHaveBeenCalled();
+      expectQuietNoOp();
     });
 
     it('still fills the earlier hours the caller is not claiming', async () => {
