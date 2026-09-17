@@ -83,7 +83,7 @@ The dev experience makes extensive use of Node.js project scripts. Here's a rund
 
 #### Code Quality
 
-- `npm run typecheck` : Runs `tsc --noEmit` across all workspaces to verify type safety without emitting files.
+- `npm run typecheck` : Runs `tsc --noEmit` to verify type safety without emitting files. Covers `@wxyc/database` + `shared/**` + `apps/**` only -- `jobs/**` and `tests/**` are not included; typecheck each job individually with `npm run typecheck --workspace=jobs/<name>`.
 - `npm run lint` : Runs ESLint with TypeScript type-checked rules and security analysis.
 - `npm run lint:fix` : Runs ESLint with auto-fix enabled.
 - `npm run format` : Formats all files with Prettier.

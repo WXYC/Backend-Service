@@ -1,5 +1,7 @@
 # @wxyc/auth-log-prune
 
+Renamed from `station-signup-attempt-prune` in WXYC/Backend-Service#2535 — EC2/ECR/Sentry artifacts predating the rename carry the old name.
+
 Daily EC2-cron job (BS#2363, split from `jobs/station-signup-review` / BS#2364) that deletes `station_signup_attempt` rows older than the 30-day audit retention window.
 
 ## What it does
