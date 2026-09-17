@@ -32,6 +32,9 @@ const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown> | undef
 const mockAddTrack = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockRemoveTrack = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
 const mockUpdateEntry = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
+// Auto-create hour breakpoints: no-op default, this file's addEntry tests
+// exercise a single insert (the request's own entry) and aren't about this.
+const mockFillMissingHourlyBreakpoints = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getLatestShow: mockGetLatestShow,
@@ -40,6 +43,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   addTrack: mockAddTrack,
   removeTrack: mockRemoveTrack,
   updateEntry: mockUpdateEntry,
+  fillMissingHourlyBreakpoints: mockFillMissingHourlyBreakpoints,
 }));
 
 const mockGetDiscogsUnavailableFlagsById = jest.fn<() => Promise<unknown>>();

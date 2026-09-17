@@ -11,12 +11,17 @@ const mockGetLatestShow = jest.fn<() => Promise<any>>();
 const mockResolveDjNameForShow = jest.fn<(show: unknown) => Promise<string | null>>();
 const mockAddTrack = jest.fn<(entry: any) => Promise<any>>();
 const mockGetAlbumFromDB = jest.fn<(id: number) => Promise<any>>();
+// Auto-create hour breakpoints: no-op default so this file's tests keep
+// observing exactly one addTrack call (their own entry) unless a test says
+// otherwise.
+const mockFillMissingHourlyBreakpoints = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getLatestShow: mockGetLatestShow,
   resolveDjNameForShow: mockResolveDjNameForShow,
   addTrack: mockAddTrack,
   getAlbumFromDB: mockGetAlbumFromDB,
+  fillMissingHourlyBreakpoints: mockFillMissingHourlyBreakpoints,
 }));
 
 import { addEntry } from '../../../apps/backend/controllers/flowsheet.controller';

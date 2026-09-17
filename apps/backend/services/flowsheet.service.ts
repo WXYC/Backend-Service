@@ -34,6 +34,7 @@ import {
   suppressMislabeledStreamingUrls,
   fillSynthesizedSearchUrls,
 } from '../utils/album-metadata-projection.js';
+import { generateMissingBreakpoints, nearestStationHour, MAX_AUTO_BREAKPOINTS } from '../utils/breakpoint-generator.js';
 import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { lookupCriticReviewsByAlbumIds } from './album-metadata-lookup.service.js';
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
@@ -997,6 +998,176 @@ export const removeTrack = async (entry_id: number): Promise<FSEntry | undefined
 
   const response = await db.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
   return response[0];
+};
+
+/**
+ * The instant to treat as "the show's last marker" when auto-filling hourly
+ * breakpoints (BS#2516): the show's most recently logged breakpoint (by
+ * insertion order, matching `lastLoggedShowEntryOrderBy`'s convention),
+ * falling back to the hour that row's `add_time` NAMES when `radio_hour` is
+ * absent, and to the show's own `start_time` when it has no breakpoint at all
+ * yet. Always read fresh from the database — the working hour must never be
+ * trusted from client input (the half of tubafrenzy#554 this repo inherits).
+ *
+ * The two fallbacks are deliberately asymmetric, and the asymmetry is the
+ * whole correctness argument:
+ *
+ *   - `add_time` on a breakpoint is `nearestStationHour`-rounded, because that
+ *     row NAMES an hour it was logged either side of. Every `radio_hour`-less
+ *     breakpoint has this shape: dj-site's control posts only `{ message,
+ *     entry_type }`, so a press at 6:58 PM stores "7:00 PM Breakpoint" with a
+ *     6:58 PM `add_time` and a NULL `radio_hour` (no follow-up filed yet to
+ *     make that control send one), and so does every row predating the
+ *     BS#1449 backfill. Flooring it would report
+ *     6:00 PM as the last marked hour and generate a SECOND 7:00 PM marker on
+ *     the next add — the duplicate #2516 requires be impossible, and the exact
+ *     boundary error `schema.ts` cites as `radio_hour`'s reason to exist.
+ *   - `start_time` is NOT rounded. It names no hour; it is just when the show
+ *     began, and `generateMissingBreakpoints` floors it like any other plain
+ *     instant. Rounding it would swallow a legitimate marker: a show starting
+ *     at 6:55 PM genuinely spans the 7:00 PM boundary.
+ *
+ * WHAT `lastLoggedShowEntryOrderBy` COSTS HERE. Its docstring asks each call
+ * site to state the consequence of `id DESC` meaning INSERTION order, not
+ * airtime: a row written later always wins, whatever hour it names. For this
+ * call site that is the right answer for every writer that exists — the fill
+ * inserts in ascending hour order, and neither dj-site control can address a
+ * past hour, so the highest-id breakpoint is also the latest-hour one. It is
+ * wrong for a marker inserted out of order after the fact (a historical import
+ * into a live show), which would drag the watermark backwards and re-generate
+ * hours the show already has. That is the same accepted exposure BS#2118 names,
+ * bounded the same way: historical imports run outside a live window.
+ */
+export const getBreakpointWatermark = async (show: Show): Promise<Date> => {
+  const rows = await db
+    .select({ radio_hour: flowsheet.radio_hour, add_time: flowsheet.add_time })
+    .from(flowsheet)
+    .where(and(eq(flowsheet.show_id, show.id), eq(flowsheet.entry_type, 'breakpoint')))
+    .orderBy(...lastLoggedShowEntryOrderBy())
+    .limit(1);
+  const lastBreakpoint = rows[0];
+  if (lastBreakpoint?.radio_hour) return lastBreakpoint.radio_hour;
+  if (lastBreakpoint?.add_time) return nearestStationHour(lastBreakpoint.add_time);
+  return show.start_time;
+};
+
+/**
+ * How many markers one fill may emit before it is worth a Sentry warning.
+ * Three means the show went two full hours with nothing logged; at that point
+ * the catch-up is describing an absence, not a busy DJ. Well below
+ * `MAX_AUTO_BREAKPOINTS` on purpose — a clamped fill is the loudest case, not
+ * the only one worth seeing.
+ */
+const LONG_CATCH_UP_WARN_THRESHOLD = 3;
+
+/**
+ * Inserts any top-of-hour breakpoints the show missed between its last
+ * marker and now (bounded by `generateMissingBreakpoints`'s cap), in
+ * ascending hour order. Intended to run once per `POST /flowsheet`, ahead of
+ * the caller's own entry, so a DJ signing on mid-hour still gets the hour
+ * markers they missed without having to remember to add them by hand.
+ *
+ * Best-effort by construction, and the caller depends on that: an hour marker
+ * is an annotation on the show, not a precondition for recording a play, so a
+ * DB blip here degrades to a missing marker rather than a DJ who cannot log
+ * their track. Same asymmetric-fallback disposition as the LML-timeout degrade
+ * (BS#873) and the library-linkage degrade (BS#1680). Nothing is lost by
+ * swallowing: the whole fill is one statement, so a failure writes nothing and
+ * the next add recomputes the same range from the same watermark.
+ *
+ * ONE multi-row INSERT rather than a loop over `addTrack`, with `play_order`
+ * taken from a single `nextPlayOrder` and walked — the shape
+ * `jobs/flowsheet-etl`, `jobs/flowsheet-april-gap-import` and
+ * `jobs/flowsheet-show-split` already use for bulk flowsheet writes. Latency is
+ * not the reason (even a capped fill is ~250 ms against a 35 s budget): each
+ * INSERT statement fires `touch_flowsheet_watermark` (migration 0084), an
+ * AFTER-STATEMENT trigger that takes an exclusive lock on the single
+ * `flowsheet_watermark` row EVERY flowsheet write in the fleet contends on. A
+ * 25-statement burst would take that global lock 25 times inside one DJ's
+ * request, and the trigger's `+ interval '1 second'` floor would push
+ * `last_modified_at` — the `Last-Modified` every iOS/dj-site poller conditions
+ * on — some 24 seconds into the future. One statement, one fire, no drift.
+ * (`cdc_flowsheet` is FOR EACH ROW, so the CDC fan-out is unchanged either way.)
+ *
+ * A long catch-up is reported at warning level. One or two markers is the
+ * ordinary case — a DJ who went a while between logs. Three or more means the
+ * show went two hours without a single entry, which in practice means either a
+ * show left open and silent or a watermark that was clamped outright
+ * (`generated === MAX_AUTO_BREAKPOINTS`). Both are the 2026-05-19 shape
+ * (WXYC/tubafrenzy#552), and what that incident most lacked was anyone
+ * noticing before a DJ complained.
+ *
+ * Deliberately the ONLY writer that fills. `startShow`, `endShow`,
+ * `createJoinNotification` and `createLeaveNotification` all insert into
+ * `flowsheet` without calling this, and the tubafrenzy webhook and the
+ * `jobs/flowsheet-*` importers must never call it — they mirror or reconstruct
+ * rows that already carry their own markers, so filling there would double-mark
+ * history. The consequence to know: a show that ran past the hour and then
+ * signed off never gets that final marker, because no add follows. That falls
+ * out of the "on add" decision in #2516, not from an oversight here.
+ *
+ * `callerMarksCurrentHour` is set when the request this runs ahead of is
+ * ITSELF adding a breakpoint. dj-site's control posts `{ message, entry_type }`
+ * with no `radio_hour`, and its duplicate guard only consults the client's
+ * polled copy of the flowsheet — so at 7:05 PM with the last marker at 6:00 PM
+ * the server would generate its own "7:00 PM Breakpoint" and then write the
+ * DJ's identical one, two rows from one click. With the flag set the fill stops
+ * below the hour the caller is claiming (`nearestStationHour(now)`, the same
+ * rounding dj-site labelled the row with) instead of skipping entirely, so a DJ
+ * marking 9:00 PM at 8:40 still gets the 8:00 PM hour they missed.
+ *
+ * `now` defaults to the real clock; the only reason to pass it is a
+ * deterministic test — production call sites never supply it, so the
+ * working hour is always resolved from the server's own clock.
+ */
+export const fillMissingHourlyBreakpoints = async (
+  show: Show,
+  dj_name: string | null,
+  { now = new Date(), callerMarksCurrentHour = false }: { now?: Date; callerMarksCurrentHour?: boolean } = {}
+): Promise<void> => {
+  try {
+    const watermark = await getBreakpointWatermark(show);
+    const ceiling = callerMarksCurrentHour ? new Date(nearestStationHour(now).getTime() - 1) : now;
+    const missing = generateMissingBreakpoints(watermark, ceiling);
+
+    if (missing.length >= LONG_CATCH_UP_WARN_THRESHOLD) {
+      Sentry.captureMessage('Hourly breakpoint fill ran an unusually long catch-up', {
+        level: 'warning',
+        tags: { subsystem: 'auto-hour-breakpoints' },
+        extra: {
+          show_id: show.id,
+          watermark: watermark.toISOString(),
+          generated: missing.length,
+          clamped: missing.length === MAX_AUTO_BREAKPOINTS,
+        },
+      });
+    }
+
+    if (missing.length === 0) return;
+
+    // `play_order` collides freely within a show by design (no per-show UNIQUE
+    // — see schema.ts), and reads tie-break on `flowsheet.id`, so walking one
+    // base is no more collision-prone than re-reading MAX per row would be.
+    const basePlayOrder = await nextPlayOrder(show.id);
+    await db.insert(flowsheet).values(
+      missing.map(({ radio_hour, message }, index) => ({
+        artist_name: '',
+        album_title: '',
+        track_title: '',
+        entry_type: 'breakpoint' as const,
+        message,
+        radio_hour,
+        show_id: show.id,
+        dj_name,
+        play_order: basePlayOrder + index,
+      }))
+    );
+  } catch (err) {
+    Sentry.captureException(err, {
+      tags: { subsystem: 'auto-hour-breakpoints' },
+      extra: { show_id: show.id },
+    });
+  }
 };
 
 function withArtistName<T extends PgSelectQueryBuilder>(qb: T, artist_name: string | null | undefined) {

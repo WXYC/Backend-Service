@@ -32,6 +32,9 @@ const mockAttachUpcomingShows = jest.fn((entries: unknown[]) => Promise.resolve(
 // tests/unit/services/flowsheet.attachCriticReviews.test.ts.
 const mockAttachCriticReviews = jest.fn((entries: unknown[]) => Promise.resolve(entries));
 const mockAddTrack = jest.fn<() => Promise<Record<string, unknown>>>();
+// Auto-create hour breakpoints: no-op default so every addEntry test not
+// specifically about the fill behavior sees today's single-insert shape.
+const mockFillMissingHourlyBreakpoints = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>();
 const mockGetOnAirDJName = jest.fn<() => Promise<string | null>>();
 const mockGetOnAirDJs = jest.fn<() => Promise<Array<{ id: string | null; dj_name: string | null }>>>();
@@ -67,6 +70,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   attachUpcomingShows: mockAttachUpcomingShows,
   attachCriticReviews: mockAttachCriticReviews,
   addTrack: mockAddTrack,
+  fillMissingHourlyBreakpoints: mockFillMissingHourlyBreakpoints,
   getLatestShow: mockGetLatestShow,
   getOnAirDJName: mockGetOnAirDJName,
   getOnAirDJs: mockGetOnAirDJs,
@@ -1372,6 +1376,51 @@ describe('flowsheet.controller', () => {
         })
       );
       expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    it('fills missing hourly breakpoints for the active show, ahead of the requested entry', async () => {
+      mockResolveDjNameForShow.mockResolvedValue('DJ Stardust');
+      mockAddTrack.mockResolvedValue({
+        id: 3,
+        show_id: activeShow.id,
+        entry_type: 'track',
+        play_order: 3,
+        add_time: new Date(),
+      });
+
+      const req = createMockBodyReq({
+        artist_name: 'Stereolab',
+        album_title: 'Aluminum Tunes',
+        track_title: 'Pack Yr Romantic Mind',
+      });
+      const res = createMockRes();
+
+      await addEntry(req as Request, res as Response, mockNext);
+
+      expect(mockFillMissingHourlyBreakpoints).toHaveBeenCalledWith(activeShow, 'DJ Stardust', {
+        callerMarksCurrentHour: false,
+      });
+      expect(mockFillMissingHourlyBreakpoints.mock.invocationCallOrder[0]).toBeLessThan(
+        mockAddTrack.mock.invocationCallOrder[0]
+      );
+    });
+
+    // The fill must know when the request is itself claiming an hour, or a DJ
+    // pressing the breakpoint control at 7:05 PM gets the server's generated
+    // "7:00 PM Breakpoint" AND their own — two rows from one click.
+    it.each([
+      ['an explicit breakpoint entry_type', { message: '7:00 PM Breakpoint', entry_type: 'breakpoint' }, true],
+      ['a message inferred as a breakpoint', { message: '7:00 PM Breakpoint' }, true],
+      ['an ordinary message', { message: 'PSA read' }, false],
+    ])('flags %s as callerMarksCurrentHour=%s', async (_label, body, expected) => {
+      mockResolveDjNameForShow.mockResolvedValue('DJ Stardust');
+      mockAddTrack.mockResolvedValue({ id: 4, show_id: activeShow.id, add_time: new Date() });
+
+      await addEntry(createMockBodyReq(body) as Request, createMockRes() as Response, mockNext);
+
+      expect(mockFillMissingHourlyBreakpoints).toHaveBeenCalledWith(activeShow, 'DJ Stardust', {
+        callerMarksCurrentHour: expected,
+      });
     });
   });
 

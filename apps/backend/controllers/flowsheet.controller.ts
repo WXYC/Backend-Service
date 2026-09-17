@@ -14,6 +14,7 @@ import * as flowsheetTakeoverConfig from '../config/flowsheetTakeover.js';
 import { recordGoLiveHandoff } from '../services/flowsheet/go-live-handoff-signal.js';
 import WxycError from '../utils/error.js';
 import { INT4_MAX } from '../utils/constants.js';
+import { BREAKPOINT_SUFFIX } from '../utils/breakpoint-generator.js';
 
 export type QueryParams = {
   page?: string;
@@ -521,10 +522,16 @@ export const getLatest: RequestHandler = async (req, res) => {
 /**
  * Infer the entry_type from the message content, matching the
  * discriminated union in wxyc-shared's FlowsheetEntryType.
+ *
+ * Keys on `BREAKPOINT_SUFFIX` rather than its own copy of the word so the
+ * generator that WRITES the string (BS#2516) and the inference that READS it
+ * cannot drift apart inside one process. `@wxyc/shared`'s
+ * `isFlowsheetBreakpointEntry` holds the third copy of this literal; the
+ * cross-repo consolidation is tracked separately.
  */
 function inferMessageEntryType(message: string | undefined): NewFSEntry['entry_type'] {
   if (message?.includes('Talkset')) return 'talkset';
-  if (message?.includes('Breakpoint')) return 'breakpoint';
+  if (message?.includes(BREAKPOINT_SUFFIX)) return 'breakpoint';
   return 'message';
 }
 
@@ -631,13 +638,29 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
   // path can read flowsheet.dj_name directly without joining shows -> auth_user.
   const dj_name = await flowsheet_service.resolveDjNameForShow(latestShow);
 
+  // Resolved once, ahead of the fill, because the fill has to know whether this
+  // request is itself claiming an hour — see the `callerMarksCurrentHour`
+  // argument below. The message branch reuses it rather than re-inferring.
+  const requestedEntryType =
+    body.message !== undefined ? (body.entry_type ?? inferMessageEntryType(body.message)) : undefined;
+
+  // BS#2516: fill in any top-of-hour markers the show missed since it was last
+  // touched, ahead of whatever this request is itself adding, so the sequence
+  // stays chronological and a DJ never has to remember to mark the hour by
+  // hand. Awaited but never a precondition — `fillMissingHourlyBreakpoints`
+  // swallows its own failures on purpose (see its docstring), so this call
+  // cannot turn a DB blip on an annotation into a DJ who can't log a play.
+  await flowsheet_service.fillMissingHourlyBreakpoints(latestShow, dj_name, {
+    callerMarksCurrentHour: requestedEntryType === 'breakpoint',
+  });
+
   if (body.message !== undefined) {
     //we're just throwing the message in there (whatever it may be): dj join event, psa event, talk set event, break-point
     const fsEntry: NewFSEntry = {
       artist_name: '',
       album_title: '',
       track_title: '',
-      entry_type: body.entry_type ?? inferMessageEntryType(body.message),
+      entry_type: requestedEntryType,
       message: body.message,
       show_id: latestShow.id,
       dj_name,
