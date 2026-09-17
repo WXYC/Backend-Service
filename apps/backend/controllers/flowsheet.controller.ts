@@ -681,6 +681,18 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       // one millisecond below, so the two paths tile: this row covers the hour
       // the fill deliberately left to it, with no shared hour and no gap.
       //
+      // KNOWN DIVERGENCE (BS#2573): `message` and `radio_hour` on this row are
+      // rounded from two different clocks. dj-site builds the text in the
+      // browser at click time (`stationBreakpointMessage`), the server rounds
+      // its own clock here, and a browser a couple of minutes off that
+      // straddles :30 persists "7:00 PM Breakpoint" alongside a 8:00 PM
+      // `radio_hour`. The readers disagree in turn -- the archived views render
+      // the hour from `radio_hour`, dj-site's one-per-hour guard keys on
+      // `message`. Not a regression (the watermark already reached the same
+      // hour through the `add_time` fallback), but the row is now
+      // self-contradictory where it used to be merely silent, and the label is
+      // the thing the DJ actually saw. Reconciling the two is its own change.
+      //
       // Explicit `null` for every other marker type, matching the gap-import
       // and tubafrenzy-ingest row builders. A talkset or a dj_join doesn't
       // stand for an hour, and a reader that keys on `radio_hour` must see

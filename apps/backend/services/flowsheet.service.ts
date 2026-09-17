@@ -1013,12 +1013,14 @@ export const removeTrack = async (entry_id: number): Promise<FSEntry | undefined
  * whole correctness argument:
  *
  *   - `add_time` on a breakpoint is `nearestStationHour`-rounded, because that
- *     row NAMES an hour it was logged either side of. Every `radio_hour`-less
- *     breakpoint has this shape: dj-site's control posts only `{ message,
- *     entry_type }`, so a press at 6:58 PM stores "7:00 PM Breakpoint" with a
- *     6:58 PM `add_time` and a NULL `radio_hour` (no follow-up filed yet to
- *     make that control send one), and so does every row predating the
- *     BS#1449 backfill. Flooring it would report
+ *     row NAMES an hour it was logged either side of. A `radio_hour`-less
+ *     breakpoint has this shape: a press at 6:58 PM stores "7:00 PM Breakpoint"
+ *     with a 6:58 PM `add_time` and a NULL `radio_hour`. This arm is now a
+ *     HISTORICAL one — BS#2567 made `addEntry` stamp `radio_hour` on every
+ *     client-submitted breakpoint, so the rows it still serves are the ones
+ *     written before that shipped, plus everything predating the BS#1449
+ *     backfill. It stays load-bearing for exactly that population; do not read
+ *     it as describing what the live write path does today. Flooring it would report
  *     6:00 PM as the last marked hour and generate a SECOND 7:00 PM marker on
  *     the next add — the duplicate #2516 requires be impossible, and the exact
  *     boundary error `schema.ts` cites as `radio_hour`'s reason to exist.
