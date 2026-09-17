@@ -65,7 +65,70 @@ app.set('trust proxy', true);
 // Parse JSON bodies first (needed for auth endpoints). `type` is widened to
 // match better-call's own JSON-parsing surface — see
 // `./json-content-type.ts`'s module doc for the full rationale (BS#2558).
-app.use(express.json({ type: isBetterCallJsonRequest }));
+//
+// Wrapped rather than mounted directly (BS#2558 PR #2566 review Finding 5):
+// a body-parser PARSE error (malformed JSON, or a body over the default
+// 100kb limit) calls `next(err)`, which skips every downstream non-error
+// middleware — including both account-audit mounts below (`adminPrefixAuditMiddleware`
+// at line ~101, `mountPublicAccountAudit` at line ~111) — and this file
+// registers no error handler until `fallbackErrorHandler` at the very
+// bottom. Left unwrapped, that handler unconditionally answers 500
+// (`./fallback-error-handler.ts`), regardless of the error's real status —
+// so on exactly the widened content types this predicate exists to fix, a
+// malformed or oversized body converted a would-be "audit row with NULL
+// subject" into "no audit row AND a misclassified 500" (confirmed
+// empirically against the real `fallbackErrorHandler` +
+// `shouldCaptureAuthExpressError` pipeline while investigating this
+// finding — not the 400/413 a naive read of Express's own default error
+// shape would suggest).
+//
+// The wrapper swallows a parse error and calls `next()` instead of
+// `next(err)`, restoring the pre-widening flow for these content types: the
+// audit mount runs, and downstream sees an unparsed `req.body`. Verified
+// empirically (not assumed) that this does NOT reproduce the two things
+// that would make it unsafe to adopt: (1) NO HANG — body-parser's `read()`
+// (via the `raw-body` package) fully drains the request stream BEFORE
+// attempting to parse it, so by the time a parse error fires the stream is
+// already ended; better-call's own `getRequest`, finding `req.body`
+// undefined and the raw stream already exhausted, treats the request as
+// having no body rather than blocking on one that will never arrive. (2)
+// NO CONFUSING BODY — better-call does not see the malformed bytes (the
+// stream is gone), so it never re-attempts to parse them; it proceeds with
+// an empty body straight into its own (or better-auth's) validation, which
+// answers its OWN clean error — a real behavior change from body-parser's
+// message to better-call's, but not a hang and not a wrong body. Nothing in
+// this codebase asserts on the specific body-parser error text this
+// bypasses (grepped for `entity.parse.failed` / `entity.too.large` /
+// `Unexpected token` / `Invalid JSON` under `apps/`, `shared/`, `jobs/`,
+// `tests/` — no hits in `apps/auth`).
+//
+// This swallow applies to every Content-Type `isBetterCallJsonRequest`
+// matches, which includes plain `application/json` — so it also fixes a
+// PRE-EXISTING (not BS#2558-introduced) defect for the original,
+// non-widened surface: a malformed `application/json` body has ALWAYS
+// 500'd via `fallbackErrorHandler` with no audit row, for as long as this
+// service has mounted `express.json()` at all. Post-fix, that request
+// reaches better-call's/better-auth's own validation instead and gets a
+// proper 4xx plus an audit row, the same as every other rejected request.
+// It also closes the oversized-body functional regression this widening
+// introduced: before this file's own `express.json()` started matching
+// `application/jsonx` et al., such a body reached better-call completely
+// unbounded (better-auth passes no `bodySizeLimit` to better-call, so
+// there was never a size ceiling on that path) and was processed in full.
+// With the swallow, body-parser's own default 100kb `limit` still applies
+// — its `raw-body` dependency aborts and discards the stream once a body
+// exceeds it, before `parse()` is ever called — so an oversized body no
+// longer reaches better-call with its actual content; better-call sees an
+// empty body and answers its own validation error instead. Net effect:
+// strictly safer than either the pre-BS#2558 baseline (fully unbounded) or
+// this PR without this fix (413-turned-500, no audit row) — bounded, and
+// auditable.
+//
+// Built once, outside the request handler — `express.json(...)` returns a
+// new middleware closure each call, and constructing one per request would
+// be wasted work on every single request through this service.
+const jsonBodyParser = express.json({ type: isBetterCallJsonRequest });
+app.use((req, res, next) => jsonBodyParser(req, res, () => next()));
 
 // Apply CORS globally to all routes (must be before auth handler).
 // Fail closed when neither FRONTEND_SOURCE nor BETTER_AUTH_TRUSTED_ORIGINS is
