@@ -71,17 +71,17 @@ describe('scripts/resolve-cron-schedule.sh', () => {
 
   it('ignores BACKFILL_CRON_SCHEDULE for other jobs (narrow override scope)', () => {
     // Override scope is narrow so a stale env var can't fan out across
-    // the whole matrix. station-signup-attempt-prune reads only its own package.json.
+    // the whole matrix. auth-log-prune reads only its own package.json.
     //
     // The sibling used here has moved twice, both times because the job
     // standing in for "a normal cron job" was itself retired: flowsheet-etl
     // went `job-type: one-shot` in Phase 3 of the tubafrenzy decommission
     // (WXYC/wiki#88), then library-etl did the same in Phase 3.5
-    // (WXYC/wiki#89). station-signup-attempt-prune is deliberately unrelated to the
+    // (WXYC/wiki#89). auth-log-prune is deliberately unrelated to the
     // decommission, so it is not a third one waiting to be retired.
-    const otherJobPkg = path.join(repoRoot, 'jobs/station-signup-attempt-prune/package.json');
+    const otherJobPkg = path.join(repoRoot, 'jobs/auth-log-prune/package.json');
     const otherDefault = JSON.parse(fs.readFileSync(otherJobPkg, 'utf-8'))['cron-schedule'];
-    const { stdout, status } = run('station-signup-attempt-prune', { BACKFILL_CRON_SCHEDULE: '*/15 * * * *' });
+    const { stdout, status } = run('auth-log-prune', { BACKFILL_CRON_SCHEDULE: '*/15 * * * *' });
     expect(status).toBe(0);
     expect(stdout.trim()).toBe(otherDefault);
   });
