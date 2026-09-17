@@ -691,36 +691,57 @@ if (!isTestEnv) {
   });
   app.use('/auth/check-request-ban', checkRequestBanRateLimit);
 
-  // M3 (code review BS#2547): the three OTP password-reset arms get their
-  // OWN limiter, not `rateLimitedPaths`'s 10/15min brute-force tier —
-  // same reasoning as the station-signup limiter directly below, and the
-  // same shape (60s/120), adopted for the same reason: an OTP reset is a
-  // hand-copied-code flow (`emailOTP({ allowedAttempts: 5 })`,
-  // shared/authentication/src/auth.definition.ts), so a shared 10-per-15min
-  // bucket keyed only on X-Real-IP would let two DJs resetting before a
-  // shift drain it and lock out everyone's `POST /auth/sign-in` from the
-  // control room's shared egress IP for fifteen minutes with no operator
-  // recourse. The OTP itself already bounds guess attempts server-side
-  // (`allowedAttempts`); this limiter exists to bound DB-read / email-send
-  // volume without coupling reset traffic to sign-in's tier. The
-  // email-lookup subject-resolution DoS argument (docs/authentication.md)
-  // still holds — it's still an Express-layer limiter ahead of an
-  // `auth_user` read on every listed path, just a differently-sized one.
-  const otpPasswordResetRateLimit = rateLimit({
-    windowMs: 60_000,
-    limit: 120,
+  // M3 (code review BS#2547, corrected on re-review): the three OTP
+  // password-reset arms get their OWN limiters, not `rateLimitedPaths`'s
+  // 10/15min brute-force tier — decoupling them from sign-in's shared
+  // bucket is right (two DJs resetting before a shift from the control
+  // room's one egress IP shouldn't be able to lock out everyone's sign-in).
+  // But the three paths do NOT have the same per-call cost, so they don't
+  // get the same budget — an earlier version of this fix copied
+  // `checkRequestBanRateLimit`'s 60s/120 shape onto all three, which is
+  // wrong for two of them:
+  //
+  //   - EMAIL-SENDING paths (`request-password-reset`, `forget-password`
+  //     alias): both call `sendVerificationOTP`, which fires a real SES
+  //     email. `emailOTP()` (shared/authentication/src/auth.definition.ts)
+  //     does not set `resendStrategy`, so there is no internal resend
+  //     cooldown — every call mints a fresh OTP and sends a fresh email.
+  //     A 120/min budget is a 120-message-per-minute mail-bomb vector
+  //     against any address a caller names, plus an SES cost/reputation
+  //     hit. This is the IDENTICAL operation, at the IDENTICAL cost, as
+  //     the token-based `POST /request-password-reset` above — which sits
+  //     in `rateLimitedPaths` at 10/15min — so it gets that same tier here,
+  //     just on its own instance (not folded back into `rateLimitedPaths`,
+  //     which would re-couple it to sign-in — the exact thing M3 fixed).
+  //   - The VERIFY/COMPLETE path (`email-otp/reset-password`) sends no
+  //     email at all, and better-auth already bounds guesses per
+  //     identifier server-side (`allowedAttempts: 5`). Sized instead for
+  //     hand-entry across a shared control-room IP: loose enough that one
+  //     DJ mistyping a code doesn't block the room's other resets, tight
+  //     enough to still bound the one `auth_user` read the email-lookup
+  //     subject strategy performs per call (the DoS argument in
+  //     docs/authentication.md).
+  const otpPasswordResetSendRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     message: { error: 'Too many requests, please try again later.' },
     keyGenerator: rateLimitKeyFromRequest,
   });
-  for (const path of [
-    '/auth/email-otp/request-password-reset',
-    '/auth/email-otp/reset-password',
-    '/auth/forget-password/email-otp',
-  ]) {
-    app.use(path, otpPasswordResetRateLimit);
+  for (const path of ['/auth/email-otp/request-password-reset', '/auth/forget-password/email-otp']) {
+    app.use(path, otpPasswordResetSendRateLimit);
   }
+
+  const otpPasswordResetVerifyRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 30,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please try again later.' },
+    keyGenerator: rateLimitKeyFromRequest,
+  });
+  app.use('/auth/email-otp/reset-password', otpPasswordResetVerifyRateLimit);
 
   // BS#2361 — station signup gets its OWN limiter, not `rateLimitedPaths`'s
   // 10/15min brute-force tier. Every legitimate caller of this endpoint

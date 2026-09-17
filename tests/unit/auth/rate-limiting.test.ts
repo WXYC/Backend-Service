@@ -87,32 +87,61 @@ describe('Auth service rate limiting', () => {
     });
   });
 
-  // M3 (code review BS#2547): the three OTP password-reset arms
-  // (email-otp/request-password-reset, email-otp/reset-password,
-  // forget-password/email-otp) get their OWN limiter, not
-  // `rateLimitedPaths`'s 10/15min brute-force tier — same reasoning and
-  // same shape (60s/120) as the station-signup limiter above: an OTP reset
-  // is a hand-copied-code flow, so a shared IP-keyed bucket would let two
-  // DJs resetting before a shift lock out everyone's sign-in from the
-  // control room's shared egress IP. L2 (code review BS#2547): these
-  // assertions use the same idiom as the station-signup block above —
-  // extract the exact source block and match within it — rather than a bare
+  // M3 (code review BS#2547, corrected on re-review): the three OTP
+  // password-reset arms get their OWN limiters, not `rateLimitedPaths`'s
+  // 10/15min brute-force tier — an OTP reset is a hand-copied-code flow, so
+  // a shared IP-keyed bucket would let two DJs resetting before a shift
+  // lock out everyone's sign-in from the control room's shared egress IP.
+  // But the three paths split across TWO limiters, not one, by per-call
+  // cost: `request-password-reset` and the `forget-password` alias both
+  // send a real SES email on every call (no `resendStrategy` configured),
+  // the identical operation and cost as the token-based
+  // `/request-password-reset` flow, so they share ITS 10/15min tier rather
+  // than the far looser budget a no-email donor (`checkRequestBanRateLimit`)
+  // would justify; `email-otp/reset-password` sends nothing and is already
+  // attempt-bounded server-side, so it gets a separate, looser 60s/30.
+  // L2 (code review BS#2547): these assertions use the same idiom as the
+  // station-signup block above — extract the exact source block and match
+  // within it — rather than a bare
   // `.toMatch(/\/auth\/email-otp\/reset-password/)` against the whole file,
   // which would pass on the literal appearing anywhere at all (a comment,
   // a different limiter, a dead string) and assert nothing about which
   // limiter the path is actually registered on.
-  describe('OTP password-reset limiter (BS#2547)', () => {
-    it('mounts its own 60s/120 limiter on the three OTP paths, keyed by rateLimitKeyFromRequest', () => {
+  describe('OTP password-reset limiters (BS#2547)', () => {
+    it('mounts the two email-sending OTP paths on their own 10/15min limiter, matching the token reset flow', () => {
       expect(authAppSource).toMatch(
-        /const otpPasswordResetRateLimit = rateLimit\(\{[\s\S]*?windowMs: 60_000,[\s\S]*?limit: 120,[\s\S]*?keyGenerator: rateLimitKeyFromRequest,[\s\S]*?\}\);/
+        /const otpPasswordResetSendRateLimit = rateLimit\(\{[\s\S]*?windowMs: 15 \* 60 \* 1000,[\s\S]*?limit: 10,[\s\S]*?keyGenerator: rateLimitKeyFromRequest,[\s\S]*?\}\);/
       );
       const mountBlock = authAppSource.match(
-        /for \(const path of \[([\s\S]*?)\]\) \{\s*app\.use\(path, otpPasswordResetRateLimit\);\s*\}/
+        /for \(const path of \[([\s\S]*?)\]\) \{\s*app\.use\(path, otpPasswordResetSendRateLimit\);\s*\}/
       )?.[1];
       expect(mountBlock).toBeDefined();
       expect(mountBlock).toMatch(/\/auth\/email-otp\/request-password-reset/);
-      expect(mountBlock).toMatch(/\/auth\/email-otp\/reset-password/);
       expect(mountBlock).toMatch(/\/auth\/forget-password\/email-otp/);
+      // NOT the verify path — that's a distinct, looser limiter below.
+      expect(mountBlock).not.toMatch(/\/auth\/email-otp\/reset-password'/);
+    });
+
+    it('mounts the verify-only OTP path on its own looser 60s/30 limiter, not the email-sending tier', () => {
+      expect(authAppSource).toMatch(
+        /const otpPasswordResetVerifyRateLimit = rateLimit\(\{[\s\S]*?windowMs: 60_000,[\s\S]*?limit: 30,[\s\S]*?keyGenerator: rateLimitKeyFromRequest,[\s\S]*?\}\);/
+      );
+      expect(authAppSource).toMatch(
+        /app\.use\(\s*['"]\/auth\/email-otp\/reset-password['"]\s*,\s*otpPasswordResetVerifyRateLimit\s*\)/
+      );
+    });
+
+    // Regression guard for exactly the mistake a future edit could
+    // reintroduce: merging the two tiers back into one instance would
+    // silently restore the mail-bomb exposure this split fixed.
+    it('mounts the email-sending paths and the verify path on DIFFERENT limiter instances', () => {
+      const sendMount = authAppSource.match(/app\.use\(path, (otpPasswordResetSendRateLimit)\);/)?.[1];
+      const verifyMount = authAppSource.match(
+        /app\.use\(\s*['"]\/auth\/email-otp\/reset-password['"]\s*,\s*(otpPasswordResetVerifyRateLimit)\s*\)/
+      )?.[1];
+      expect(sendMount).toBe('otpPasswordResetSendRateLimit');
+      expect(verifyMount).toBe('otpPasswordResetVerifyRateLimit');
+      expect(sendMount).not.toBe(verifyMount);
     });
 
     it('keeps the three OTP paths out of the 10/15min rateLimitedPaths tier', () => {
