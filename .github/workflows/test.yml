@@ -227,6 +227,25 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      # BS#2537: importing the real `auth` object resolves `@wxyc/database`
+      # to its BUILT dist (single tsup entry, no per-module dist file), so
+      # this step must land after "Type check" above, whose `lint:prebuild`
+      # is what builds it. Bare `tsx`, not the dotenvx-wrapped
+      # `check:audit-coverage` pre-push uses — this job never creates `.env`,
+      # so dotenvx would emit its `MISSING_ENV_FILE` banner. Dummy DB_* values
+      # suffice (postgres-js connects lazily; this script never queries).
+      # NODE_ENV=test is also required: `auth.definition.ts`'s OIDC
+      # login-page builder throws at import time on a missing FRONTEND_SOURCE
+      # unless NODE_ENV is development or test.
+      - name: Account-audit route coverage (BS#2537)
+        run: npm run check:audit-coverage:ci
+        env:
+          NODE_ENV: test
+          DB_HOST: localhost
+          DB_NAME: dummy
+          DB_USERNAME: dummy
+          DB_PASSWORD: dummy
+
       # BS#2009: `npm run typecheck` above covers apps/**, shared/**, and
       # @wxyc/database only — jobs/** is out of scope (repo convention; ~20
       # other jobs would surface an unknown pile of errors if typecheck's

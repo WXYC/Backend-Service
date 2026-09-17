@@ -44,3 +44,9 @@ npm run check:better-auth-mock-sync
 # that omitted the key. The assertion cannot fail either way. Kept separate from
 # the `|| true` pair above, and never given one: a finding here is always a bug.
 npm run check:db-mock-sync
+# `check:audit-coverage` (BS#2537) is hard-fail: it enumerates the real
+# better-auth route table plus app.ts's hand-written /auth routes and fails
+# when either finds a route in neither the account-audit-coverage audited set
+# nor its allowlist — the drift check the account-modification audit trail
+# depends on to stay complete as routes are added.
+npm run check:audit-coverage
