@@ -635,7 +635,16 @@ if (!isTestEnv) {
     '/auth/sign-in',
     '/auth/sign-up',
     '/auth/email-otp/send-verification-otp',
-    '/auth/forget-password',
+    // M1 (code review BS#2537 PR #2545): was the literal string
+    // '/auth/forget-password', which matches no better-auth route in the
+    // installed version (^1.6.30) — the real "forgot password" route is
+    // request-password-reset (see apps/auth/audit-coverage.ts's header).
+    // The dead string matched nothing, so this is a strict tightening, not
+    // a behavior change to anything that was actually rate-limited before.
+    // It also makes the account-audit middleware's public-mount doc
+    // comments (decision 11: "mounted ahead of the Express rate limiters")
+    // literally true for this path, not just aspirational.
+    '/auth/request-password-reset',
     '/auth/wxyc/lookup-email',
     '/auth/wxyc/complete-onboarding',
     // ADR 0008 — QR device-authorization. Including /code (anonymous,

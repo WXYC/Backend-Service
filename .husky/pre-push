@@ -48,5 +48,9 @@ npm run check:db-mock-sync
 # better-auth route table plus app.ts's hand-written /auth routes and fails
 # when either finds a route in neither the account-audit-coverage audited set
 # nor its allowlist — the drift check the account-modification audit trail
-# depends on to stay complete as routes are added.
+# depends on to stay complete as routes are added. It is dotenvx-wrapped
+# (importing `auth` pulls @wxyc/database, which throws at import without DB
+# env) — a fresh worktree needs its own copy of the gitignored `.env` (per
+# the repo's worktree convention) or this line fails with dotenvx's
+# MISSING_ENV_FILE banner, not the check's own output.
 npm run check:audit-coverage
