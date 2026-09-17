@@ -71,16 +71,36 @@ describe('scripts/resolve-cron-schedule.sh', () => {
 
   it('ignores BACKFILL_CRON_SCHEDULE for other jobs (narrow override scope)', () => {
     // Override scope is narrow so a stale env var can't fan out across
-    // the whole matrix. library-etl reads only its own package.json.
+    // the whole matrix. station-signup-attempt-prune reads only its own package.json.
     //
-    // This was flowsheet-etl until Phase 3 of the tubafrenzy decommission
-    // (WXYC/wiki#88) made it `job-type: one-shot` and dropped its now-inert
-    // `cron-schedule`. library-etl is the sibling that stays on `*/30`.
-    const otherJobPkg = path.join(repoRoot, 'jobs/library-etl/package.json');
+    // The sibling used here has moved twice, both times because the job
+    // standing in for "a normal cron job" was itself retired: flowsheet-etl
+    // went `job-type: one-shot` in Phase 3 of the tubafrenzy decommission
+    // (WXYC/wiki#88), then library-etl did the same in Phase 3.5
+    // (WXYC/wiki#89). station-signup-attempt-prune is deliberately unrelated to the
+    // decommission, so it is not a third one waiting to be retired.
+    const otherJobPkg = path.join(repoRoot, 'jobs/station-signup-attempt-prune/package.json');
     const otherDefault = JSON.parse(fs.readFileSync(otherJobPkg, 'utf-8'))['cron-schedule'];
-    const { stdout, status } = run('library-etl', { BACKFILL_CRON_SCHEDULE: '*/15 * * * *' });
+    const { stdout, status } = run('station-signup-attempt-prune', { BACKFILL_CRON_SCHEDULE: '*/15 * * * *' });
     expect(status).toBe(0);
     expect(stdout.trim()).toBe(otherDefault);
+  });
+
+  // WXYC/wiki#89 Phase 3.5: the catalog write-authority flip moved librarians
+  // to the dj-site edit UI, so tubafrenzy MySQL is no longer a catalog source
+  // and the every-30-minutes MySQL -> Backend import has nothing left to read.
+  // Going `one-shot` is what stops the deploy from re-registering the crontab
+  // entry; removing the installed entry on the host is a separate manual step
+  // (the deploy never deletes crontab lines, it only installs them).
+  //
+  // Pinned here rather than left implicit because the failure mode is silent:
+  // a job that keeps its `cron-schedule` gets re-registered by the next
+  // deploy of any target, quietly resurrecting a reader of a database that is
+  // being switched off.
+  it('library-etl is one-shot and carries no cron-schedule', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'jobs/library-etl/package.json'), 'utf-8'));
+    expect(pkg['job-type']).toBe('one-shot');
+    expect(pkg['cron-schedule']).toBeUndefined();
   });
 
   it('exits 1 when target package.json is missing', () => {
