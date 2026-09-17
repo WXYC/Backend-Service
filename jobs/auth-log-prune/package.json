@@ -1,0 +1,28 @@
+{
+  "name": "@wxyc/auth-log-prune",
+  "cron-schedule": "27 15 * * *",
+  "version": "1.0.0",
+  "description": "Daily EC2-cron auth-log prune (BS#2363): delete station_signup_attempt rows older than the 30-day audit retention window via the already-exported pruneSignupAttempts (shared/authentication/src/station-passcode.ts). Never touches station_passcode. Split from jobs/station-signup-review because the failure consequences differ -- a failed prune just grows the table, a failed review is a silent queue and a security gap -- and those want separate alerting.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_auth_log_prune:ci -f ../../Dockerfile.auth-log-prune ../../",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@sentry/node": "^10.73.0",
+    "@wxyc/authentication": "^1.0.0",
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

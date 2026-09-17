@@ -1,4 +1,4 @@
-# @wxyc/station-signup-attempt-prune
+# @wxyc/auth-log-prune
 
 Daily EC2-cron job (BS#2363, split from `jobs/station-signup-review` / BS#2364) that deletes `station_signup_attempt` rows older than the 30-day audit retention window.
 
@@ -14,7 +14,7 @@ The failure consequences differ: a failed prune just means a larger table (self-
 
 ## Retention boundary
 
-`pruneSignupAttempts({ olderThanDays, now })` deletes rows with `attempted_at < now - olderThanDays days` — strictly older than the cutoff, so a row exactly at the cutoff instant survives. `tests/integration/station-signup-attempt-prune.spec.js` pins both sides of that boundary against real Postgres, plus the no-op case where every row is within the window.
+`pruneSignupAttempts({ olderThanDays, now })` deletes rows with `attempted_at < now - olderThanDays days` — strictly older than the cutoff, so a row exactly at the cutoff instant survives. `tests/integration/auth-log-prune.spec.js` pins both sides of that boundary against real Postgres, plus the no-op case where every row is within the window.
 
 `pruneSignupAttempts` returns the driver's affected-row count (`deleted.count`), not a list of ids — the ids were never used for anything but `.length`, and shipping a full month of attempt-log ids back over the wire to count them would be real transfer and allocation for a number Postgres already reports.
 

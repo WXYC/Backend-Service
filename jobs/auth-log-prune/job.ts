@@ -12,7 +12,7 @@ import { closeDatabaseConnection } from '@wxyc/database';
 import { pruneSignupAttempts } from '@wxyc/authentication';
 import { initLogger, log, captureError, closeLogger, errorMessage } from './logger.js';
 
-const JOB_NAME = 'station-signup-attempt-prune';
+const JOB_NAME = 'auth-log-prune';
 
 const main = async () => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });

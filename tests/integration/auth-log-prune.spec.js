@@ -4,7 +4,7 @@
  * `drizzle-orm` cannot prove (see tests/integration/station-passcode.spec.js
  * for the fuller rationale, which this spec's harness mirrors).
  *
- * `jobs/station-signup-attempt-prune/job.ts` is a thin lifecycle wrapper
+ * `jobs/auth-log-prune/job.ts` is a thin lifecycle wrapper
  * around this exported function (see that job's job.ts); this spec exercises
  * the function directly rather than the process entrypoint.
  */
