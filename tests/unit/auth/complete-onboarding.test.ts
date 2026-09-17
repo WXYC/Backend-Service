@@ -27,11 +27,10 @@ jest.mock('@wxyc/authentication', () => ({
   // BS#2537: completeOnboardingFromRequest derives ip_hash for its explicit
   // account-audit call site. Real implementation, not a stub with everything
   // else here — it is pure (no DB import), matching the BS#1107 convention
-  // tests/mocks/authentication.mock.ts already applies to it.
-  deriveStationSignupIpHash: (
-    jest.requireActual('../../../shared/authentication/src/signup-ip-hash') as {
-      deriveStationSignupIpHash: (raw: string | undefined) => string | null;
-    }
+  // tests/mocks/authentication.mock.ts already applies to it. jest's generic
+  // form (not an `as` cast) so the module's real export type flows through.
+  deriveStationSignupIpHash: jest.requireActual<typeof import('../../../shared/authentication/src/signup-ip-hash')>(
+    '../../../shared/authentication/src/signup-ip-hash'
   ).deriveStationSignupIpHash,
 }));
 jest.mock('@wxyc/database', () => ({

@@ -18,11 +18,23 @@ jest.mock('@sentry/node', () => ({
 import { auth } from '../../mocks/authentication.mock';
 import { db, recordAccountAuditEvent } from '../../mocks/database.mock';
 import { adminPrefixAuditMiddleware, flatMountAuditMiddleware } from '../../../apps/auth/account-audit-middleware';
-import { FLAT_MOUNTS } from '../../../apps/auth/audit-coverage';
+import { FLAT_MOUNTS, type FlatMount } from '../../../apps/auth/audit-coverage';
 
-const forgetPasswordMount = FLAT_MOUNTS.find((m) => m.action === 'forget-password')!;
-const updateUserMount = FLAT_MOUNTS.find((m) => m.action === 'update-user')!;
-const orgCreateMount = FLAT_MOUNTS.find((m) => m.action === 'organization.create')!;
+// tests/tsconfig.json runs with strict: false, so .find() types as T (not
+// T | undefined) here and a `!` non-null assertion reads as unnecessary to
+// @typescript-eslint/no-unnecessary-type-assertion (error-severity under
+// tests/**). A throwing helper avoids the assertion entirely, is immune to
+// whichever tsconfig lints it, and fails with a clearer message than a bare
+// non-null assertion would if a FLAT_MOUNTS entry is ever renamed.
+function mustFindMount(action: string): FlatMount {
+  const mount = FLAT_MOUNTS.find((m) => m.action === action);
+  if (!mount) throw new Error(`no FLAT_MOUNTS entry for ${action}`);
+  return mount;
+}
+
+const forgetPasswordMount = mustFindMount('forget-password');
+const updateUserMount = mustFindMount('update-user');
+const orgCreateMount = mustFindMount('organization.create');
 
 function mockReq(overrides: Partial<Request> = {}): Request {
   return { method: 'POST', path: '/admin/set-role', headers: {}, body: {}, ...overrides } as Request;
