@@ -152,6 +152,7 @@ describe('body-discriminated FlatMount (BS#2551, Option A)', () => {
     expect(sendVerificationOtpMount?.discriminator).toEqual({
       field: 'type',
       actions: { 'forget-password': 'email-otp.send-verification-otp.forget-password' },
+      fallbackAction: 'email-otp.send-verification-otp.type-absent',
     });
     expect(sendVerificationOtpMount?.resolveActor).toBe(false);
     expect(sendVerificationOtpMount?.subject).toBe('email-lookup');
@@ -167,14 +168,48 @@ describe('body-discriminated FlatMount (BS#2551, Option A)', () => {
     expect(classifyFlatMountAction(sendVerificationOtpMount, { type })).toBeNull();
   });
 
-  it.each([undefined, null, 42, {}])('classifies a missing/non-string type (%p) to null', (type) => {
-    expect(classifyFlatMountAction(sendVerificationOtpMount, { type })).toBeNull();
+  it.each([undefined, null, 42, {}])(
+    'classifies a present-but-non-string type (%p) to null (field present, value unmapped)',
+    (type) => {
+      expect(classifyFlatMountAction(sendVerificationOtpMount, { type })).toBeNull();
+    }
+  );
+
+  // M1 (code review PR #2557, adjudicated VALID end-to-end): a bare
+  // `actions[value]` index resolves an inherited Object.prototype member
+  // for these keys — a Function or the prototype object itself, both
+  // truthy and neither `undefined` — so a guard on the INPUT value's type
+  // alone never catches them. Every one of these must classify to null
+  // (zero rows), the same as any other unmapped `type`. Adjudicator
+  // reproduced `type: 'constructor'` writing `action =
+  // 'function Object() { [native code] }'` and `'__proto__'` writing
+  // `'[object Object]'` before this fix; this is the regression test.
+  it.each(['constructor', '__proto__', 'toString', 'valueOf', 'hasOwnProperty'])(
+    'classifies an inherited Object.prototype key (type: %s) to null, never resolving the prototype member',
+    (type) => {
+      expect(classifyFlatMountAction(sendVerificationOtpMount, { type })).toBeNull();
+    }
+  );
+
+  // H1 (code review PR #2557, adjudicated VALID end-to-end): reversed from
+  // "classifies to null" — a body that never carries a `type` key at all
+  // (never parsed, e.g. content-type spoofing past express.json() while
+  // better-call's own broader parser still processes the request for
+  // real — see BodyDiscriminator's doc comment; root cause BS#2558) must
+  // NOT go silent the way a present-but-unmapped `type` does. Fails closed
+  // to `fallbackAction` so a row still lands.
+  it('fails closed to fallbackAction when the body has no type field at all', () => {
+    expect(classifyFlatMountAction(sendVerificationOtpMount, {})).toBe('email-otp.send-verification-otp.type-absent');
   });
 
-  it('classifies a body with no type field at all to null', () => {
-    expect(classifyFlatMountAction(sendVerificationOtpMount, {})).toBeNull();
-    expect(classifyFlatMountAction(sendVerificationOtpMount, undefined)).toBeNull();
-  });
+  it.each([undefined, null, 'not-an-object', 42, ['array']])(
+    'fails closed to fallbackAction when the body itself is unusable (%p)',
+    (body) => {
+      expect(classifyFlatMountAction(sendVerificationOtpMount, body)).toBe(
+        'email-otp.send-verification-otp.type-absent'
+      );
+    }
+  );
 
   it('leaves a static mount unaffected by classifyFlatMountAction (ignores body entirely)', () => {
     const forgetPassword = FLAT_MOUNTS.find((m) => m.action === 'forget-password');

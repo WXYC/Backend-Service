@@ -430,14 +430,50 @@ describe('body-discriminated mount /email-otp/send-verification-otp (BS#2551, Op
     expect(recordAccountAuditEvent).not.toHaveBeenCalled();
   });
 
-  it('records nothing for a request with no type field at all', async () => {
+  // H1 (code review PR #2557, adjudicated VALID end-to-end): REVERSED from
+  // "records nothing" — a body missing `type` entirely (not the same as
+  // `type: 'sign-in'`, which is present-but-unmapped and correctly stays
+  // silent above) must fail closed and still record a row, since this is
+  // exactly the shape a content-type-spoofed request that better-call still
+  // processes for real produces (see the FLAT_MOUNTS entry's comment and
+  // BodyDiscriminator's doc comment in audit-coverage.ts). Root cause
+  // (express.json() vs. better-call content-type parity) is BS#2558; this
+  // is the defense-in-depth half.
+  it('fails closed and records a row (fallbackAction) for a request with no type field at all', async () => {
+    db._chain.limit.mockResolvedValueOnce([{ id: 'resolved-user-1' }]);
     const { res } = await start(
       dispatchPublic,
       mockReq({ path: SEND_VERIFICATION_OTP_PATH, body: { email: 'dj@wxyc.org' } })
     );
     await settle(res);
-    expect(recordAccountAuditEvent).not.toHaveBeenCalled();
+    expectAudited({ action: 'email-otp.send-verification-otp.type-absent', subjectUserId: 'resolved-user-1' });
   });
+
+  // H1's other reachable shape: express.json() never populated req.body at
+  // all (the exact content-type-spoofing outcome the adjudicator
+  // reproduced — `Content-Type: application/jsonx` returns 200 and mails a
+  // real reset code while req.body is undefined here). Must fail closed
+  // the same as the no-type-field case above, not classify as "unknown,
+  // skip" the way it did before this fix.
+  it('fails closed and records a row when req.body itself is undefined (unparsed body)', async () => {
+    const { res } = await start(dispatchPublic, mockReq({ path: SEND_VERIFICATION_OTP_PATH, body: undefined }));
+    await settle(res);
+    expectAudited({ action: 'email-otp.send-verification-otp.type-absent' });
+  });
+
+  // M1 (code review PR #2557, adjudicated VALID end-to-end), driven through
+  // the real dispatcher rather than just the pure classifier: an inherited
+  // Object.prototype key must never resolve to a row, let alone one whose
+  // `action` is a stringified Function or `[object Object]`. Adjudicator
+  // reproduced `type: 'constructor'` writing exactly that before this fix.
+  it.each(['constructor', '__proto__', 'toString'])(
+    'records nothing for type: %s (inherited Object.prototype key, not a designed action)',
+    async (type) => {
+      const { res } = await start(dispatchPublic, mockReq({ path: SEND_VERIFICATION_OTP_PATH, body: { type } }));
+      await settle(res);
+      expect(recordAccountAuditEvent).not.toHaveBeenCalled();
+    }
+  );
 
   it('does not resolve the forget-password subject on a non-2xx outcome (429-visibility DoS-amplifier guard)', async () => {
     const { res } = await start(
