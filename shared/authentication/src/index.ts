@@ -22,6 +22,11 @@ export { accountSetupTokenExpiresInSeconds, ACCOUNT_SETUP_TOKEN_DEFAULT_SECONDS 
 export { revokeOutstandingAccountSetupTokens, ACCOUNT_SETUP_TOKEN_PREFIX } from './revoke-account-setup-tokens';
 export { bootstrapTrustedClients } from './bootstrap-trusted-clients';
 export { buildTrustedClients } from './oidc-trusted-clients';
+// The ip_hash derivation (BS#2359), absent from the barrel until now (BS#2537
+// / parent epic #2534 decision 8): the account-audit middleware needs it for
+// `account_audit_event.ip_hash`, which is the first consumer outside this
+// package.
+export { deriveStationSignupIpHash } from './signup-ip-hash';
 // Station-passcode lifecycle (BS#2359). Named individually, not `export *`,
 // so internals (encryption helpers, cooldown arithmetic, the advisory-lock
 // key) stay private to the module and only the lifecycle surface the four
