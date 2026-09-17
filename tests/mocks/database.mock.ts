@@ -590,6 +590,18 @@ export const slack_ban_moderators = {
   added_at: 'slack_ban_moderators.added_at',
   added_by_slack_user_id: 'slack_ban_moderators.added_by_slack_user_id',
 };
+export const account_audit_event = {
+  id: 'account_audit_event.id',
+  occurredAt: 'account_audit_event.occurred_at',
+  action: 'account_audit_event.action',
+  actorUserId: 'account_audit_event.actor_user_id',
+  impersonatorUserId: 'account_audit_event.impersonator_user_id',
+  subjectUserId: 'account_audit_event.subject_user_id',
+  outcome: 'account_audit_event.outcome',
+  errorCode: 'account_audit_event.error_code',
+  ipHash: 'account_audit_event.ip_hash',
+  source: 'account_audit_event.source',
+};
 export const specialty_shows = {};
 export const schedule = {};
 export const artist_crossreference = {};
@@ -662,6 +674,12 @@ export const updateLastRun = jest.fn().mockResolvedValue(undefined);
 export const runPollingLoop = jest.fn().mockResolvedValue(undefined);
 export const closeDatabaseConnection = jest.fn().mockResolvedValue(undefined);
 export const cronjob_runs = {};
+
+// Account-modification audit trail (from account-audit.ts, BS#2536).
+// jest.fn() stubs, not real implementations — without these, a caller under
+// unit test that imports either export resolves `undefined` and throws.
+export const recordAccountAuditEvent = jest.fn().mockResolvedValue(undefined);
+export const pruneAccountAuditEvents = jest.fn().mockResolvedValue(0);
 
 // Mock enum
 export const flowsheetEntryTypeEnum = () => ({});

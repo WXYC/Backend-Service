@@ -2,7 +2,7 @@
   "name": "@wxyc/auth-log-prune",
   "cron-schedule": "27 15 * * *",
   "version": "1.0.0",
-  "description": "Daily EC2-cron auth-log prune (BS#2363): delete station_signup_attempt rows older than the 30-day audit retention window via the already-exported pruneSignupAttempts (shared/authentication/src/station-passcode.ts). Never touches station_passcode. Split from jobs/station-signup-review because the failure consequences differ -- a failed prune just grows the table, a failed review is a silent queue and a security gap -- and those want separate alerting.",
+  "description": "Daily EC2-cron auth-log prune (BS#2363, extended by BS#2536): delete station_signup_attempt rows older than the 30-day audit retention window (pruneSignupAttempts) and account_audit_event rows older than ACCOUNT_AUDIT_RETENTION_DAYS (default 730, pruneAccountAuditEvents), under separate try/catch blocks so one table's prune failure cannot silently skip the other's. Never touches station_passcode. Split from jobs/station-signup-review because the failure consequences differ -- a failed prune just grows the table, a failed review is a silent queue and a security gap -- and those want separate alerting.",
   "type": "module",
   "main": "./dist/job.js",
   "scripts": {

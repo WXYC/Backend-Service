@@ -3285,6 +3285,74 @@ export const station_signup_attempt = pgTable(
 export type StationSignupAttempt = InferSelectModel<typeof station_signup_attempt>;
 export type NewStationSignupAttempt = InferInsertModel<typeof station_signup_attempt>;
 
+// Account-modification audit trail (parent epic #2534, substrate issue
+// #2536). Records who triggered an account modification, to whom, when, and
+// whether it succeeded — post-incident forensics first, institutional
+// accountability (impersonation, PII bulk reads) second, no before/after
+// value capture. Unprefixed (`account_audit_event`, not `auth_*`) for the
+// same reason `station_passcode` is unprefixed: this is ours, not
+// better-auth's, and stays outside the CLAUDE.md auth-tables sentinel list.
+//
+// NO FKs on actor_user_id / impersonator_user_id / subject_user_id, and this
+// is deliberate, not an oversight: `admin/remove-user` is itself an audited
+// action, and an `ON DELETE SET NULL` (the station_signup_attempt precedent)
+// would let a manager who deletes a user also erase themselves as actor from
+// every prior event touching that user. The `library_*` history tables'
+// governing rule applies instead — "a cascade or set-null would destroy or
+// anonymize exactly the record someone is auditing" — not
+// station_signup_attempt's SET NULL, which is affordable there only because
+// those rows expire at 30 days. Ids become opaque pseudonymous tombstones
+// after a referenced user is deleted, which is PII-deletion-compatible.
+//
+// Indexes: (subject_user_id, occurred_at) and (actor_user_id, occurred_at)
+// only. Deliberately NO standalone (occurred_at) index, documented here the
+// way station_signup_attempt documents its own omission above: the table is
+// write-mostly and — limiter-bounded on the public paths, a handful of
+// privileged ops per week — stays in the thousands of rows, so the daily
+// prune's range scan is a cheap seq scan and a third index would tax every
+// write for a query with no caller. Add it later if volume proves otherwise.
+export const account_audit_event = pgTable(
+  'account_audit_event',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull().defaultNow(),
+    // Path-derived dotted slug, e.g. 'admin.set-role', 'forget-password',
+    // 'job.self-signup-downgrade'. See apps/auth/audit-coverage.ts (coverage
+    // PR) for the authoritative action-name map.
+    action: text('action').notNull(),
+    // NULL = unauthenticated request or a job-sourced event.
+    actorUserId: varchar('actor_user_id', { length: 255 }),
+    // From auth_session.impersonatedBy when the actor was impersonating.
+    impersonatorUserId: varchar('impersonator_user_id', { length: 255 }),
+    // Best-effort resolution from the request body; NULL when unresolvable.
+    subjectUserId: varchar('subject_user_id', { length: 255 }),
+    // Raw HTTP status code. Jobs (source='job') use 200.
+    outcome: integer('outcome').notNull(),
+    // Populated only for outcome >= 400 responses whose JSON body carries a
+    // string `code` field (better-auth APIError codes, our typed Express
+    // errors). NULL otherwise.
+    errorCode: text('error_code'),
+    // Keyed HMAC over the client IP, the station_signup_attempt recipe
+    // (deriveStationSignupIpHash, shared STATION_SIGNUP_IP_HMAC_KEY). NULL
+    // for jobs, or when derivation fails (fails closed, never an unkeyed
+    // digest — see the ip_hash comment on station_signup_attempt above).
+    ipHash: varchar('ip_hash', { length: 16 }),
+    // 'http' | 'job' — an open string column rather than a pgEnum, matching
+    // the vocabulary tradeoff documented on station_signup_attempt.outcome:
+    // this table has few writers, all in this codebase, so a TypeScript
+    // union enforces the vocabulary at compile time without a migration
+    // for every future source.
+    source: text('source').notNull(),
+  },
+  (table) => [
+    index('account_audit_event_subject_user_id_occurred_at_idx').on(table.subjectUserId, table.occurredAt),
+    index('account_audit_event_actor_user_id_occurred_at_idx').on(table.actorUserId, table.occurredAt),
+  ]
+);
+
+export type AccountAuditEvent = InferSelectModel<typeof account_audit_event>;
+export type NewAccountAuditEvent = InferInsertModel<typeof account_audit_event>;
+
 // Cross-cache-identity substrate (§3.2 of the library-hook-canonicalization
 // plan). Three empty tables behind `BS_USE_LIBRARY_IDENTITY=false`. No writers
 // or readers reference these in this PR — backfill (§4 step 2) and the

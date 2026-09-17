@@ -21,3 +21,4 @@ export * from './int-array-literal.js';
 export * from './dj-name.js';
 export * from './last-logged-show-entry.js';
 export * from './sqlstate.js';
+export * from './account-audit.js';
