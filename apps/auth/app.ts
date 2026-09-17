@@ -34,6 +34,7 @@ import {
   mountAuthenticatedAccountAudit,
   mountPublicAccountAudit,
 } from './account-audit-middleware';
+import { isBetterCallJsonRequest } from './json-content-type';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { checkRequestBanHandler } from './check-request-ban-handler';
 import { CompleteOnboardingError, completeOnboardingFromRequest } from './complete-onboarding';
@@ -61,8 +62,10 @@ const app = express();
 // BS#1048). Mirrors the same line in apps/backend/app.ts.
 app.set('trust proxy', true);
 
-// Parse JSON bodies first (needed for auth endpoints)
-app.use(express.json());
+// Parse JSON bodies first (needed for auth endpoints). `type` is widened to
+// match better-call's own JSON-parsing surface — see
+// `./json-content-type.ts`'s module doc for the full rationale (BS#2558).
+app.use(express.json({ type: isBetterCallJsonRequest }));
 
 // Apply CORS globally to all routes (must be before auth handler).
 // Fail closed when neither FRONTEND_SOURCE nor BETTER_AUTH_TRUSTED_ORIGINS is
