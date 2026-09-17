@@ -43,6 +43,18 @@ export interface AdminAction {
    * for the carve-out this flag drives.
    */
   serializeSessionRead?: true;
+  /**
+   * M4 (code review BS#2547): true for an `ADMIN_ACTIONS` entry that
+   * classifies a HAND-WRITTEN Express route reusing this map for the
+   * runtime dispatcher's convenience, rather than a real better-auth
+   * admin-plugin endpoint — `provision-user` and the six station-signup ops
+   * (`STATION_SIGNUP_ADMIN_OPS`). Omitted (falsy) for every genuine
+   * better-auth endpoint. `findDeclaredMountsMissingFromAuthApi`'s reverse
+   * check reads this to exclude these entries — they were never in
+   * `auth.api` to begin with, so checking them against it would be a
+   * permanent false positive rather than a real drift signal.
+   */
+  handWritten?: true;
 }
 
 const STATION_SIGNUP_ADMIN_PREFIX = `${ADMIN_PREFIX}/station-signup`;
@@ -107,10 +119,16 @@ export const ADMIN_ACTIONS: ReadonlyMap<string, AdminAction> = new Map([
   ['/admin/remove-user', { action: 'admin.remove-user', serializeSessionRead: true }],
   ['/admin/set-user-password', { action: 'admin.set-user-password' }],
   ['/admin/has-permission', { action: 'admin.has-permission' }],
-  ['/admin/provision-user', { action: 'admin.provision-user' }],
+  // handWritten: true — app.ts's own POST /auth/admin/provision-user
+  // handler, registered ahead of the better-auth catch-all, not a
+  // better-auth endpoint. See AdminAction.handWritten's doc comment.
+  ['/admin/provision-user', { action: 'admin.provision-user', handWritten: true }],
+  // handWritten: true — the six station-signup ops are app.ts's own
+  // stationSignupAdminRouter, not better-auth endpoints. See
+  // AdminAction.handWritten's doc comment.
   ...STATION_SIGNUP_ADMIN_OPS.map((op): [string, AdminAction] => [
     `${STATION_SIGNUP_ADMIN_PREFIX}/${op}`,
-    { action: `admin.station-signup.${op}` },
+    { action: `admin.station-signup.${op}`, handWritten: true },
   ]),
 ]);
 
@@ -278,10 +296,27 @@ export const ALLOWLIST: ReadonlySet<string> = new Set([
   '/unlink-account',
   '/get-access-token',
 
-  // OTP send/verify — not part of Scope's audited surface; the primary
-  // password-based flows above are. Ratified as-written by the issue's
-  // allowlist bucket ("OTP send/verify"), NOT a dead-code judgment call:
-  // the emailOTP plugin IS configured and live in this deployment.
+  // OTP send/verify — ratified as-written by the issue's allowlist bucket
+  // ("OTP send/verify"), NOT a dead-code judgment call: the emailOTP plugin
+  // IS configured and live in this deployment.
+  //
+  // M2 (code review BS#2547): stated plainly, because the previous wording
+  // here ("not part of Scope's audited surface; the primary password-based
+  // flows above are") concealed a real gap rather than naming it.
+  // `/email-otp/send-verification-otp` accepts `type: 'forget-password'`
+  // and will mail a WORKING reset code on that call, writing the same
+  // verification row `/email-otp/reset-password` later consumes — so this
+  // endpoint is an UNAUDITED twin of the OTP request step audited above
+  // (`email-otp.request-password-reset`, `forget-password.email-otp`).
+  // Reset COMPLETION is audited on every path (`email-otp.reset-password`
+  // records the row regardless of which endpoint minted the code); it is
+  // specifically the send-via-this-shared-endpoint REQUEST step that isn't.
+  // Not fixed here: this table is path-keyed, and this same endpoint also
+  // serves the deliberately-allowlisted sign-in OTP flow
+  // (`/sign-in/email-otp` below), so auditing it correctly needs
+  // body-discriminated classification (branch on `type` inside the
+  // request), a mechanism extension out of scope for this re-decision.
+  // Tracked as a follow-up: WXYC/Backend-Service#2551.
   '/email-otp/send-verification-otp',
   '/email-otp/check-verification-otp',
   '/email-otp/verify-email',
@@ -422,3 +457,39 @@ export const findUncoveredAuthApiEndpoints = (endpoints: readonly AuthApiEndpoin
  */
 export const findUncoveredExpressRoutes = (barePaths: readonly string[]): string[] =>
   barePaths.filter((path) => !isAudited(path) && !isAllowlisted(path));
+
+/**
+ * Arm 3 (M4, code review BS#2547): the reverse direction of arm 1. Arm 1
+ * only ever asks "is every REACHABLE auth.api endpoint audited-or-
+ * allowlisted" — it says nothing about a declared mount whose endpoint has
+ * since been removed upstream. better-auth marks `/forget-password/email-otp`
+ * `@deprecated — will be removed in the next major version`; when that
+ * happens, arm 1 stays green (nothing newly unreachable needs classifying)
+ * while the `FLAT_MOUNTS` row, `app.ts`'s limiter string, and the
+ * documented action slug all silently become dead strings that can never
+ * fire again — the same defect class the BS#2537 M1 fix closed for the dead
+ * `/auth/forget-password` string (see this file's header comment). This arm
+ * catches that: every `FLAT_MOUNTS.path` and every `ADMIN_ACTIONS` key NOT
+ * flagged `handWritten` must still be a real, currently-reachable `auth.api`
+ * path.
+ *
+ * `handWritten` exclusion: `provision-user` and the six
+ * `/admin/station-signup/*` entries classify HAND-WRITTEN Express routes
+ * (`app.ts`'s own `provision-user` handler and `stationSignupAdminRouter`),
+ * reusing this map purely for the runtime dispatcher's convenience —
+ * `adminPrefixAuditMiddleware`'s canonical-path lookup doesn't care whether
+ * the path behind it is a real better-auth endpoint or not. They were never
+ * in `auth.api` and checking them here would be a permanent false positive,
+ * not a drift signal (confirmed by running this check before adding the
+ * flag: `/admin/provision-user` failed immediately). Station-signup's own
+ * coverage lives in `account-audit-mount-order.test.ts`'s
+ * `STATION_SIGNUP_ADMIN_OPS` parity assertion instead.
+ */
+export const findDeclaredMountsMissingFromAuthApi = (endpoints: readonly AuthApiEndpoint[]): string[] => {
+  const reachable = new Set(endpoints.map((e) => e.path));
+  const missingFlatMounts = FLAT_MOUNTS.filter((mount) => !reachable.has(mount.path)).map((mount) => mount.path);
+  const missingAdminActions = [...ADMIN_ACTIONS.entries()]
+    .filter(([path, action]) => action.handWritten !== true && !reachable.has(path))
+    .map(([path]) => path);
+  return [...missingFlatMounts, ...missingAdminActions];
+};

@@ -1,8 +1,10 @@
 /**
  * Fails if any account-modifying route is in neither the audited set nor the
- * allowlist (BS#2537, parent epic #2534 decision 4).
+ * allowlist (BS#2537, parent epic #2534 decision 4) — OR if a declared
+ * mount no longer corresponds to a real, reachable route upstream (M4, code
+ * review BS#2547).
  *
- * Two arms, both against `apps/auth/audit-coverage.ts`'s shared
+ * Three arms, all against `apps/auth/audit-coverage.ts`'s shared
  * audited/allowlist classification (the same module `apps/auth/app.ts`
  * imports for its mounts, so a mount and this check cannot drift from each
  * other):
@@ -12,6 +14,7 @@
  *      `toAuthEndpoints`) — this is why the check runs under `tsx`, not
  *      `jest`: `jest.unit.config.ts` maps better-auth to hand-written mocks,
  *      so a unit test would never see a route a library upgrade adds.
+ *      Every REACHABLE endpoint must be audited or allowlisted.
  *   2. Source-text sweep of every `apps/auth/*.ts` file's hand-written
  *      `app.post/put/patch/delete('/auth…')` or `router.post/put/patch/delete('/auth…')`
  *      registrations (non-anchored, whitespace-tolerant — several register
@@ -24,6 +27,20 @@
  *      still isn't matched — those don't start with `/auth` — and stay
  *      covered by the mount-order source-text test instead, per the
  *      module's own design note on `EXPLICIT_CALL_SITES`.
+ *   3. The REVERSE of arm 1 (M4): every declared `FLAT_MOUNTS` row and
+ *      every `ADMIN_ACTIONS` key (station-signup excluded — see
+ *      `findDeclaredMountsMissingFromAuthApi`'s doc comment) must still be
+ *      a real, reachable `auth.api` path. Arms 1-2 only ever ask "is
+ *      everything reachable covered" — they say nothing about a covered
+ *      mount whose endpoint was REMOVED upstream. better-auth marks
+ *      `/forget-password/email-otp` `@deprecated`; when it's actually
+ *      removed in a future major, arm 1 stays green (nothing newly
+ *      unreachable needs classifying) while the `FLAT_MOUNTS` row,
+ *      `app.ts`'s limiter string, and the documented action slug all
+ *      silently become dead strings that can never fire — the same defect
+ *      class the BS#2537 M1 fix closed for the dead `/auth/forget-password`
+ *      string. Arm 3 is what would have caught THAT before this fix
+ *      existed, not just OTP-specific.
  *
  * Run: `npm run check:audit-coverage` (dotenvx-wrapped, for pre-push —
  * importing `auth` pulls `@wxyc/database`, and
@@ -37,6 +54,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { auth } from '@wxyc/authentication';
 import {
+  findDeclaredMountsMissingFromAuthApi,
   findUncoveredAuthApiEndpoints,
   findUncoveredExpressRoutes,
   type AuthApiEndpoint,
@@ -75,10 +93,12 @@ function handWrittenAuthRoutes(): string[] {
 }
 
 function main(): void {
-  const uncoveredAuthApi = findUncoveredAuthApiEndpoints(reachableAuthApiEndpoints());
+  const reachable = reachableAuthApiEndpoints();
+  const uncoveredAuthApi = findUncoveredAuthApiEndpoints(reachable);
   const uncoveredExpress = findUncoveredExpressRoutes(handWrittenAuthRoutes());
+  const staleDeclaredMounts = findDeclaredMountsMissingFromAuthApi(reachable);
 
-  if (uncoveredAuthApi.length === 0 && uncoveredExpress.length === 0) {
+  if (uncoveredAuthApi.length === 0 && uncoveredExpress.length === 0 && staleDeclaredMounts.length === 0) {
     console.log('✓ account-audit coverage: every route is audited or allowlisted');
     return;
   }
@@ -94,8 +114,18 @@ function main(): void {
     );
     for (const p of uncoveredExpress) console.error(`  ${p}`);
   }
+  if (staleDeclaredMounts.length > 0) {
+    console.error(
+      `\ndeclared mount no longer exists upstream (${staleDeclaredMounts.length}) — FLAT_MOUNTS/ADMIN_ACTIONS ` +
+        'names a path that auth.api no longer reaches, so it is now a dead string that can never fire:'
+    );
+    for (const p of staleDeclaredMounts) console.error(`  ${p}`);
+  }
   console.error('\nAdd the new route to FLAT_MOUNTS/ADMIN_PREFIX coverage in apps/auth/audit-coverage.ts');
   console.error('if it modifies an account, or to ALLOWLIST with a comment naming why it does not.');
+  console.error(
+    'A "declared mount no longer exists upstream" failure means the opposite: remove or repoint the stale row.'
+  );
   process.exitCode = 1;
 }
 

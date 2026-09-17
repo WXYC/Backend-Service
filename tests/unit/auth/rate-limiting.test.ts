@@ -24,17 +24,6 @@ describe('Auth service rate limiting', () => {
     expect(authAppSource).toMatch(/\/auth\/request-password-reset/);
   });
 
-  // BS#2547 (M5 re-decision, parent epic #2534): the three OTP-based
-  // password-reset endpoints newly moved to FLAT_MOUNTS' public partition
-  // (apps/auth/audit-coverage.ts) with the email-lookup subject strategy,
-  // which performs an auth_user read — load-bearing, not optional, per the
-  // docs/authentication.md DoS argument the token-flow twins already rely on.
-  it('applies rate limiting to the newly-audited OTP password-reset endpoints', () => {
-    expect(authAppSource).toMatch(/\/auth\/email-otp\/request-password-reset/);
-    expect(authAppSource).toMatch(/\/auth\/email-otp\/reset-password/);
-    expect(authAppSource).toMatch(/\/auth\/forget-password\/email-otp/);
-  });
-
   it('disables rate limiting in test environments', () => {
     expect(authAppSource).toMatch(/isTestEnv/);
     expect(authAppSource).toMatch(/NODE_ENV.*test|USE_MOCK_SERVICES/);
@@ -95,6 +84,43 @@ describe('Auth service rate limiting', () => {
       expect(authAppSource).toMatch(
         /if \(isStationSignupEnabled\(\)\) \{\s*app\.post\(\s*['"]\/auth\/wxyc\/station-signup['"]\s*,\s*stationSignupHandler\s*\);\s*\}/
       );
+    });
+  });
+
+  // M3 (code review BS#2547): the three OTP password-reset arms
+  // (email-otp/request-password-reset, email-otp/reset-password,
+  // forget-password/email-otp) get their OWN limiter, not
+  // `rateLimitedPaths`'s 10/15min brute-force tier — same reasoning and
+  // same shape (60s/120) as the station-signup limiter above: an OTP reset
+  // is a hand-copied-code flow, so a shared IP-keyed bucket would let two
+  // DJs resetting before a shift lock out everyone's sign-in from the
+  // control room's shared egress IP. L2 (code review BS#2547): these
+  // assertions use the same idiom as the station-signup block above —
+  // extract the exact source block and match within it — rather than a bare
+  // `.toMatch(/\/auth\/email-otp\/reset-password/)` against the whole file,
+  // which would pass on the literal appearing anywhere at all (a comment,
+  // a different limiter, a dead string) and assert nothing about which
+  // limiter the path is actually registered on.
+  describe('OTP password-reset limiter (BS#2547)', () => {
+    it('mounts its own 60s/120 limiter on the three OTP paths, keyed by rateLimitKeyFromRequest', () => {
+      expect(authAppSource).toMatch(
+        /const otpPasswordResetRateLimit = rateLimit\(\{[\s\S]*?windowMs: 60_000,[\s\S]*?limit: 120,[\s\S]*?keyGenerator: rateLimitKeyFromRequest,[\s\S]*?\}\);/
+      );
+      const mountBlock = authAppSource.match(
+        /for \(const path of \[([\s\S]*?)\]\) \{\s*app\.use\(path, otpPasswordResetRateLimit\);\s*\}/
+      )?.[1];
+      expect(mountBlock).toBeDefined();
+      expect(mountBlock).toMatch(/\/auth\/email-otp\/request-password-reset/);
+      expect(mountBlock).toMatch(/\/auth\/email-otp\/reset-password/);
+      expect(mountBlock).toMatch(/\/auth\/forget-password\/email-otp/);
+    });
+
+    it('keeps the three OTP paths out of the 10/15min rateLimitedPaths tier', () => {
+      const tier = authAppSource.match(/const rateLimitedPaths = \[([\s\S]*?)\n {2}\];/)?.[1];
+      expect(tier).toBeDefined();
+      expect(tier).not.toMatch(/email-otp\/request-password-reset/);
+      expect(tier).not.toMatch(/email-otp\/reset-password/);
+      expect(tier).not.toMatch(/forget-password\/email-otp/);
     });
   });
 });

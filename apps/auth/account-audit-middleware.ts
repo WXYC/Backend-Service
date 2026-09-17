@@ -49,6 +49,20 @@ const extractBodyUserId = (req: Request): string | null => {
  * lands in `account_audit_event` (AC#3). Errors are swallowed to NULL —
  * failing to resolve a subject must never affect the response or the write.
  *
+ * M1 (code review BS#2547): lowercase + trim before the lookup, matching
+ * better-auth's own normalization — every OTP/token handler does
+ * `ctx.body.email.toLowerCase()` before calling `findUserByEmail`, and
+ * `auth_user.email` is stored lowercase at create time, but the OTP arms'
+ * request schemas are plain `z.string()` (not `z.email()`), so a mixed-case
+ * submission (`DJ@wxyc.org`) reaches this handler unchanged. Without this,
+ * `eq(user.email, email)` on the raw value misses the lowercase-stored row,
+ * so a mixed-case OTP reset — which still succeeds, since better-auth
+ * normalizes internally — writes an audit row with `subject_user_id` NULL.
+ * Combined with the public-mount actor skip, that is a fully anonymous row
+ * for a successful credential change: exactly what this trail exists to
+ * prevent. Applies to every `email-lookup` mount, not just the OTP arms —
+ * `forget-password` shares this helper and had the identical latent bug.
+ *
  * Simplify-pass disposition (item 12, code review BS#2537 PR #2545 follow-up):
  * `lookup-email.ts`/`station-signup.ts` resolve a user by a non-email field
  * via `(await auth.$context).adapter.findOne({ model: 'user', where: [...] })`
@@ -65,8 +79,10 @@ const extractBodyUserId = (req: Request): string | null => {
  */
 const resolveUserIdByEmail = async (email: unknown): Promise<string | null> => {
   if (typeof email !== 'string' || email.length === 0) return null;
+  const normalized = email.trim().toLowerCase();
+  if (normalized.length === 0) return null;
   try {
-    const rows = await db.select({ id: user.id }).from(user).where(eq(user.email, email)).limit(1);
+    const rows = await db.select({ id: user.id }).from(user).where(eq(user.email, normalized)).limit(1);
     return rows[0]?.id ?? null;
   } catch (error) {
     onAccountAuditError(error);

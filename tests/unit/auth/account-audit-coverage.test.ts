@@ -1,18 +1,22 @@
 /**
  * Unit tests for apps/auth/audit-coverage.ts (BS#2537, parent epic #2534):
  * the coverage-rule matrix (admin action map + GET includes, flat mounts,
- * explicit call sites, allowlist) and both drift-check arms' compare
- * functions. `scripts/check-audit-route-coverage.ts` is a thin runner over
- * this module and is not itself unit-tested (it is exercised end-to-end via
- * `npm run check:audit-coverage`, which this PR's report documents running
- * locally).
+ * explicit call sites, allowlist) and all three drift-check arms' compare
+ * functions (arm 3, `findDeclaredMountsMissingFromAuthApi`, added M4, code
+ * review BS#2547). `scripts/check-audit-route-coverage.ts` is a thin runner
+ * over this module and is not itself unit-tested (it is exercised
+ * end-to-end via `npm run check:audit-coverage`, which this PR's report
+ * documents running locally, including a manual bogus-path verification of
+ * arm 3).
  */
+import type { AuthApiEndpoint } from '../../../apps/auth/audit-coverage';
 import {
   ADMIN_ACTIONS,
   ADMIN_PREFIX,
   ALLOWLIST,
   FLAT_MOUNTS,
   STATION_SIGNUP_ADMIN_OPS,
+  findDeclaredMountsMissingFromAuthApi,
   findUncoveredAuthApiEndpoints,
   findUncoveredExpressRoutes,
   isAllowlisted,
@@ -251,5 +255,51 @@ describe('findUncoveredExpressRoutes — arm 2', () => {
 
   it('flags a hand-written route named in neither set', () => {
     expect(findUncoveredExpressRoutes(['/wxyc/not-yet-classified'])).toEqual(['/wxyc/not-yet-classified']);
+  });
+});
+
+describe('findDeclaredMountsMissingFromAuthApi — arm 3 (M4, code review BS#2547)', () => {
+  // Every FLAT_MOUNTS path, plus every ADMIN_ACTIONS path that ISN'T a
+  // hand-written entry (provision-user, station-signup) — a synthetic
+  // "everything declared is reachable" endpoint set. Built from the tables
+  // themselves rather than hardcoded so this test doesn't need updating
+  // every time a mount is added.
+  const fullyReachableEndpoints = (): AuthApiEndpoint[] => [
+    ...FLAT_MOUNTS.map((mount) => ({ path: mount.path, methods: ['POST'] })),
+    ...[...ADMIN_ACTIONS.entries()]
+      .filter(([, action]) => action.handWritten !== true)
+      .map(([path]) => ({ path, methods: ['POST'] })),
+  ];
+
+  it('reports nothing missing when every declared mount is reachable', () => {
+    expect(findDeclaredMountsMissingFromAuthApi(fullyReachableEndpoints())).toEqual([]);
+  });
+
+  // The regression this arm exists for: better-auth marking an endpoint
+  // `@deprecated` today and removing it in a future major. Simulated here
+  // by dropping one FLAT_MOUNTS path out of the reachable set.
+  it('flags a FLAT_MOUNTS path no longer present in auth.api', () => {
+    const missingPath = FLAT_MOUNTS[0].path;
+    const endpoints = fullyReachableEndpoints().filter((e) => e.path !== missingPath);
+    expect(findDeclaredMountsMissingFromAuthApi(endpoints)).toContain(missingPath);
+  });
+
+  it('flags a real ADMIN_ACTIONS path no longer present in auth.api', () => {
+    const endpoints = fullyReachableEndpoints().filter((e) => e.path !== '/admin/set-role');
+    expect(findDeclaredMountsMissingFromAuthApi(endpoints)).toContain('/admin/set-role');
+  });
+
+  // The false-positive this arm must NOT produce: provision-user and the
+  // six station-signup ops are hand-written Express routes that were never
+  // in auth.api to begin with (manually verified while building this arm —
+  // `/admin/provision-user` failed immediately before the `handWritten`
+  // flag was added). Even with NOTHING reachable, neither should be
+  // reported.
+  it('never flags provision-user or a station-signup op, even when nothing is reachable (handWritten exclusion)', () => {
+    const missing = findDeclaredMountsMissingFromAuthApi([]);
+    expect(missing).not.toContain('/admin/provision-user');
+    for (const op of STATION_SIGNUP_ADMIN_OPS) {
+      expect(missing).not.toContain(`${ADMIN_PREFIX}/station-signup/${op}`);
+    }
   });
 });
