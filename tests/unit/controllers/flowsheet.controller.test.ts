@@ -104,6 +104,7 @@ import {
   leaveShow,
 } from '../../../apps/backend/controllers/flowsheet.controller';
 import WxycError from '../../../apps/backend/utils/error';
+import { nearestStationHour } from '../../../apps/backend/utils/breakpoint-generator';
 import { INTERNAL_FLOWSHEET_COLUMNS, makeFullFlowsheetRow } from '../../fixtures/flowsheet-row.fixture';
 
 // Helper to create mock Express req/res/next
@@ -1398,6 +1399,7 @@ describe('flowsheet.controller', () => {
       await addEntry(req as Request, res as Response, mockNext);
 
       expect(mockFillMissingHourlyBreakpoints).toHaveBeenCalledWith(activeShow, 'DJ Stardust', {
+        now: expect.any(Date),
         callerMarksCurrentHour: false,
       });
       expect(mockFillMissingHourlyBreakpoints.mock.invocationCallOrder[0]).toBeLessThan(
@@ -1419,7 +1421,135 @@ describe('flowsheet.controller', () => {
       await addEntry(createMockBodyReq(body) as Request, createMockRes() as Response, mockNext);
 
       expect(mockFillMissingHourlyBreakpoints).toHaveBeenCalledWith(activeShow, 'DJ Stardust', {
+        now: expect.any(Date),
         callerMarksCurrentHour: expected,
+      });
+    });
+
+    // BS#2567: the message branch built its row from message/entry_type/
+    // show_id/dj_name only, so a client-submitted breakpoint (dj-site's
+    // manual hour-marker control) always landed with radio_hour NULL, and
+    // every reader fell back to add_time -- wrong about half the time, since
+    // a breakpoint is logged a minute either side of the hour it marks. The
+    // fill above already resolves radio_hour for the breakpoints the SERVER
+    // generates; this covers the client-submitted row it doesn't touch.
+    describe('radio_hour on a client-submitted breakpoint (BS#2567)', () => {
+      afterEach(() => {
+        jest.useRealTimers();
+        // `jest.clearAllMocks()` clears calls but keeps implementations, so the
+        // one test below that makes the fill consume time has to hand the
+        // module-level no-op default back.
+        mockFillMissingHourlyBreakpoints.mockResolvedValue(undefined);
+      });
+
+      it('sets radio_hour to the nearest station hour for a resolved breakpoint entry_type', async () => {
+        jest.useFakeTimers();
+        jest.setSystemTime(new Date('2026-09-16T23:58:00.000Z'));
+        mockAddTrack.mockResolvedValue({ id: 5, show_id: activeShow.id, add_time: new Date() });
+
+        const req = createMockBodyReq({ message: '12:00 AM Breakpoint', entry_type: 'breakpoint' });
+        await addEntry(req as Request, createMockRes() as Response, mockNext);
+
+        expect(mockAddTrack).toHaveBeenCalledWith(
+          expect.objectContaining({ radio_hour: new Date('2026-09-17T00:00:00.000Z') })
+        );
+      });
+
+      // nearestStationHour rounds to the closest boundary rather than
+      // flooring, so a marker either side of the hour resolves to the same
+      // instant -- the acceptance criterion this pins.
+      it.each([
+        ['6:59:30, rounding up to the next hour', '2026-09-16T18:59:30.000Z', '2026-09-16T19:00:00.000Z'],
+        ['7:00:30, rounding down to the same hour', '2026-09-16T19:00:30.000Z', '2026-09-16T19:00:00.000Z'],
+      ])('a breakpoint logged at %s resolves to the hour it marks', async (_label, loggedAt, expectedHour) => {
+        jest.useFakeTimers();
+        jest.setSystemTime(new Date(loggedAt));
+        mockAddTrack.mockResolvedValue({ id: 6, show_id: activeShow.id, add_time: new Date() });
+
+        await addEntry(
+          createMockBodyReq({ message: '7:00 PM Breakpoint', entry_type: 'breakpoint' }) as Request,
+          createMockRes() as Response,
+          mockNext
+        );
+
+        expect(mockAddTrack).toHaveBeenCalledWith(expect.objectContaining({ radio_hour: new Date(expectedHour) }));
+      });
+
+      it.each([
+        ['talkset', { message: 'Talkset', entry_type: 'talkset' }],
+        ['dj_join', { message: 'DJ Stardust joined the set!', entry_type: 'dj_join' }],
+        ['a plain message (PSA)', { message: 'PSA read' }],
+      ])('leaves radio_hour null for %s -- it does not stand for an hour', async (_label, body) => {
+        mockAddTrack.mockResolvedValue({ id: 7, show_id: activeShow.id, add_time: new Date() });
+
+        await addEntry(createMockBodyReq(body) as Request, createMockRes() as Response, mockNext);
+
+        expect(mockAddTrack).toHaveBeenCalledWith(expect.objectContaining({ radio_hour: null }));
+      });
+
+      // The exact defect BS#2516 eliminated: tubafrenzy carried the working
+      // hour in a hidden form field, and a stale tab replaying a week-old
+      // value turned into 168 spurious breakpoints on one show. The hour
+      // must come from the server clock, never from the request body.
+      it('ignores a client-supplied radio_hour and derives the hour from the server clock', async () => {
+        jest.useFakeTimers();
+        jest.setSystemTime(new Date('2026-09-16T19:00:10.000Z'));
+        mockAddTrack.mockResolvedValue({ id: 8, show_id: activeShow.id, add_time: new Date() });
+
+        const staleClientHour = '2026-08-01T00:00:00.000Z';
+        const req = createMockBodyReq({
+          message: '7:00 PM Breakpoint',
+          entry_type: 'breakpoint',
+          radio_hour: staleClientHour,
+        });
+
+        await addEntry(req as Request, createMockRes() as Response, mockNext);
+
+        expect(mockAddTrack).toHaveBeenCalledWith(
+          expect.objectContaining({ radio_hour: new Date('2026-09-16T19:00:00.000Z') })
+        );
+        const [insertedEntry] = mockAddTrack.mock.calls[0] as [Record<string, unknown>];
+        expect(insertedEntry.radio_hour).not.toEqual(new Date(staleClientHour));
+      });
+
+      // The hand-off with the fill above, checkable for the first time now that
+      // the caller's row carries a real hour. `fillMissingHourlyBreakpoints`
+      // stops one millisecond below `nearestStationHour(now)` when the caller
+      // is itself marking an hour, and this row claims exactly that hour — so
+      // the two tile, with no shared hour and no gap, only while both read the
+      // SAME instant.
+      //
+      // The fill mock burns 10ms here to stand in for the DB round-trip it
+      // really costs, and the clock starts five milliseconds below :30. Two
+      // separate `new Date()` reads would straddle the rounding boundary: the
+      // fill would stop below 7:00 PM while the row claimed 8:00 PM, and the
+      // 7:00 PM marker would be written by neither. A frozen clock cannot see
+      // that, which is why the elapsed time is arranged rather than assumed.
+      it('claims exactly the hour the fill stopped below, resolved from one shared instant', async () => {
+        jest.useFakeTimers();
+        jest.setSystemTime(new Date('2026-09-16T19:29:59.995Z'));
+        mockFillMissingHourlyBreakpoints.mockImplementation(() => {
+          jest.advanceTimersByTime(10);
+          return Promise.resolve();
+        });
+        mockAddTrack.mockResolvedValue({ id: 9, show_id: activeShow.id, add_time: new Date() });
+
+        await addEntry(
+          createMockBodyReq({ message: '7:00 PM Breakpoint', entry_type: 'breakpoint' }) as Request,
+          createMockRes() as Response,
+          mockNext
+        );
+
+        const [, , fillOptions] = mockFillMissingHourlyBreakpoints.mock.calls[0] as unknown as [
+          unknown,
+          unknown,
+          { now: Date; callerMarksCurrentHour: boolean },
+        ];
+        const [insertedEntry] = mockAddTrack.mock.calls[0] as [Record<string, unknown>];
+
+        expect(fillOptions.callerMarksCurrentHour).toBe(true);
+        expect(insertedEntry.radio_hour).toEqual(nearestStationHour(fillOptions.now));
+        expect(insertedEntry.radio_hour).toEqual(new Date('2026-09-16T19:00:00.000Z'));
       });
     });
   });

@@ -1116,9 +1116,14 @@ const LONG_CATCH_UP_WARN_THRESHOLD = 3;
  * rounding dj-site labelled the row with) instead of skipping entirely, so a DJ
  * marking 9:00 PM at 8:40 still gets the 8:00 PM hour they missed.
  *
- * `now` defaults to the real clock; the only reason to pass it is a
- * deterministic test — production call sites never supply it, so the
- * working hour is always resolved from the server's own clock.
+ * `now` defaults to the real clock. `addEntry` passes its own `new Date()`
+ * rather than letting it default, and must keep doing so (BS#2567): it stamps
+ * the caller's `radio_hour` from the same instant, and two separate reads a DB
+ * round-trip apart can land either side of :30 and round to different hours —
+ * the fill stopping below 6:00 PM while the caller's row claims 7:00 PM leaves
+ * the 6:00 PM marker unwritten by either. Whoever passes it, the instant is
+ * always read from the server's own clock; a client-supplied hour is the
+ * #2516 defect and never reaches here.
  */
 export const fillMissingHourlyBreakpoints = async (
   show: Show,
