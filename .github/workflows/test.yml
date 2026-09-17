@@ -4,6 +4,25 @@ on:
   pull_request:
     branches:
       - main
+  # BS#2570: nothing watched the merged state of `main` before this. Two PRs
+  # (#2541, #2546) were each green alone and red together -- neither touched a
+  # file the other touched, so they merged cleanly eleven minutes apart and
+  # `main` sat broken for 2h26m until an unrelated contributor's PR surfaced
+  # it as a failing job that read as their fault. A push trigger closes that
+  # gap by running CI against the merged state itself, not just each PR's
+  # view of it.
+  #
+  # Scoped to `detect-changes` -> `unit-tests` only (every other job below
+  # gets an explicit `github.event_name != 'push'` guard) -- unit-tests is the
+  # ~1m35s job that would have caught the collision, and running the full
+  # matrix (Integration-Tests' DB stack, migrate-dryrun's RDS snapshot
+  # restore) on every merge to `main` roughly doubles this repo's default-
+  # branch Actions spend against the $25 hard-stop budget (see the GHA
+  # billing-shape notes in CLAUDE.md), which is not a trade worth making for a
+  # signal unit-tests already provides on the PR that merged.
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       force_rebuild:
@@ -40,7 +59,16 @@ permissions:
   contents: read
 
 jobs:
-  # Detect what changed to conditionally run jobs
+  # Detect what changed to conditionally run jobs. Runs on every trigger,
+  # including `push` (BS#2570) -- `dorny/paths-filter@v4` supports push events
+  # natively: with no `base` input set, its default is the repository default
+  # branch, and per its own docs, when that's the same branch the push landed
+  # on, changes are detected "against the most recent commit on the same
+  # branch before the push" (i.e. `github.event.before`), not an empty set.
+  # The only degenerate case is no common ancestor / no previous commit (a
+  # brand-new branch), and even then it fails toward treating every file as
+  # added -- over-inclusive, never the silent-empty-set failure mode the
+  # original draft of this issue worried about.
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
@@ -170,7 +198,9 @@ jobs:
   # Fast lint and type check - always runs on code changes
   lint-and-typecheck:
     needs: detect-changes
-    if: needs.detect-changes.outputs.src == 'true'
+    # BS#2570: excluded from the post-merge `push` run -- see the `on.push`
+    # comment above for why post-merge stays scoped to unit-tests only.
+    if: needs.detect-changes.outputs.src == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -362,6 +392,10 @@ jobs:
   # bypass this whole check was written to close. No `npm ci`; the script
   # has no dependencies.
   auth-tables-doc-drift:
+    # BS#2570: excluded from the post-merge `push` run -- see the `on.push`
+    # comment above. Otherwise stays unconditional, per the comment above this
+    # job: it's a required check on every PR and must not report `skipped`.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -391,6 +425,10 @@ jobs:
   # runs alongside `lint-and-typecheck`, which is consistently ~2x longer. The
   # full suite costs roughly +30s of runner time inside a minute of existing
   # slack, and the repo is public, so those minutes are free.
+  #
+  # BS#2570: the one job (besides detect-changes) that also runs on `push` to
+  # `main` -- deliberately unguarded by `github.event_name` here, so it uses
+  # the exact same `src` gate post-merge as it does on a PR.
   unit-tests:
     needs: detect-changes
     if: needs.detect-changes.outputs.src == 'true'
@@ -460,7 +498,14 @@ jobs:
     # quirk where a required check reporting `conclusion=skipped` was treated
     # as passing; with doc-drift a direct required context, its own failure
     # blocks merge regardless of Integration-Tests' result.
-    if: ${{ !failure() && !cancelled() }}
+    #
+    # BS#2570: also excluded from the post-merge `push` run -- see the
+    # `on.push` comment above. Without this, the `!failure() && !cancelled()`
+    # form below is satisfied by a *skipped* lint-and-typecheck (its own
+    # BS#2570 push guard) exactly the way it's satisfied by a skipped
+    # lint-and-typecheck on a docs-only PR today, so this job would otherwise
+    # start its Postgres service container on every merge to `main`.
+    if: ${{ !failure() && !cancelled() && github.event_name != 'push' }}
     runs-on: ubuntu-latest
     services:
       # NOTE: postgres:18.0-alpine is newer than prod RDS (PostgreSQL 14.22)
@@ -774,7 +819,11 @@ jobs:
   migrate-dryrun:
     name: Migration Dry-Run (prod-shaped data)
     needs: [detect-changes]
-    if: needs.detect-changes.outputs.db-init == 'true'
+    # BS#2570: excluded from the post-merge `push` run -- see the `on.push`
+    # comment above. This job also restores a real RDS snapshot per run, the
+    # single most expensive step in the matrix, so it's the last one to add
+    # back to a post-merge trigger without measuring the cost first.
+    if: needs.detect-changes.outputs.db-init == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     # Widened from the workflow-level `contents: read` floor solely so the
     # probe can post its report. No other job in this file writes via
