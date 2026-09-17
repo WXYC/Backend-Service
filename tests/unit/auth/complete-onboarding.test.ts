@@ -24,6 +24,18 @@ jest.mock('@wxyc/authentication', () => ({
     },
   },
   revokeOutstandingAccountSetupTokens: (...args: unknown[]) => mockRevokeOutstandingAccountSetupTokens(...args),
+  // BS#2537: completeOnboardingFromRequest derives ip_hash for its explicit
+  // account-audit call site. Real implementation, not a stub with everything
+  // else here — it is pure (no DB import), matching the BS#1107 convention
+  // tests/mocks/authentication.mock.ts already applies to it.
+  deriveStationSignupIpHash: (
+    jest.requireActual('../../../shared/authentication/src/signup-ip-hash') as {
+      deriveStationSignupIpHash: (raw: string | undefined) => string | null;
+    }
+  ).deriveStationSignupIpHash,
+}));
+jest.mock('@wxyc/database', () => ({
+  recordAccountAuditEvent: jest.fn().mockResolvedValue(undefined),
 }));
 
 import {

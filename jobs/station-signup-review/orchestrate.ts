@@ -45,7 +45,8 @@
  * pending, not a "what's new since last time" feed. There is no partial-window
  * state to reconcile.
  */
-import { db } from '@wxyc/database';
+import * as Sentry from '@sentry/node';
+import { db, recordAccountAuditEvent } from '@wxyc/database';
 import { applyDowngrades, isDowngradeEnabled, planDowngrades } from './downgrade.js';
 import { buildStationSignupDigestEmail } from './format.js';
 import { queryPendingSelfSignups } from './query.js';
@@ -134,6 +135,15 @@ export const run = async (): Promise<void> => {
       log('info', 'downgraded', `downgraded ${applied.downgraded.length} account(s) from dj to member`, {
         user_ids: applied.downgraded.map((row) => row.userId),
       });
+      // Explicit recordAccountAuditEvent call site (BS#2537, parent epic
+      // #2534 Scope): this write path has no HTTP mount to hang a decorator
+      // on. source:'job', actor NULL (the actuator, not a person).
+      for (const row of applied.downgraded) {
+        void recordAccountAuditEvent(
+          { action: 'job.self-signup-downgrade', subjectUserId: row.userId, outcome: 200, source: 'job' },
+          { onError: (error) => Sentry.captureException(error, { tags: { subsystem: 'account-audit' } }) }
+        );
+      }
     }
     if (applied.raced.length > 0) {
       // The account's state moved between the plan and the write: it left

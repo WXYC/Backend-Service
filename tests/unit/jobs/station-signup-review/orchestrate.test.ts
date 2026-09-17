@@ -47,7 +47,12 @@ jest.mock('../../../../jobs/station-signup-review/logger', () => ({
 }));
 
 const mockDb = { __mock: 'db' };
-jest.mock('@wxyc/database', () => ({ db: mockDb }));
+// BS#2537: run() explicit-calls recordAccountAuditEvent per downgraded row
+// (parent epic #2534 Scope). Resolved-void by default so the orchestration
+// tests below, which mock every OTHER collaborator to pin plan->notify->apply
+// ordering, don't also need to assert on the audit write.
+const mockRecordAccountAuditEvent = jest.fn().mockResolvedValue(undefined);
+jest.mock('@wxyc/database', () => ({ db: mockDb, recordAccountAuditEvent: mockRecordAccountAuditEvent }));
 
 import { run } from '../../../../jobs/station-signup-review/orchestrate';
 
