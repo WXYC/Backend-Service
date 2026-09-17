@@ -166,6 +166,17 @@ jobs:
           STATION_PASSCODE_KEY: ${{ secrets.STATION_PASSCODE_KEY }}
           STATION_PASSCODE_KEY_PREVIOUS: ${{ secrets.STATION_PASSCODE_KEY_PREVIOUS }}
           STATION_SIGNUP_IP_HMAC_KEY: ${{ secrets.STATION_SIGNUP_IP_HMAC_KEY }}
+          # BS#2536 (parent epic #2534). Retention for the account_audit_event
+          # table, read by jobs/auth-log-prune. An integer day count, not a
+          # secret in the sensitive sense, but the resolve step below reads
+          # every settable var through the repo-secrets mechanism regardless
+          # of sensitivity, and it hard-fails on an empty value — so the
+          # GitHub repo secret must exist (provisioned out-of-band) before
+          # this workflow can set it. No restart_target applies: the
+          # consumer is a cron `docker run --env-file .env`, which re-reads
+          # the host .env on every run rather than a long-lived process that
+          # needs restarting.
+          ACCOUNT_AUDIT_RETENTION_DAYS: ${{ secrets.ACCOUNT_AUDIT_RETENTION_DAYS }}
           # better-auth trusted origins (WXYC/auto-dj-orchestrator#27 AC#4).
           # Not sensitive — it is a list of public origins — but carried through
           # the same allowlist as CREATE_AUTO_DJ_USER/DONATE_* above, because the
@@ -331,6 +342,7 @@ jobs:
             STATION_PASSCODE_KEY) VALUE="$STATION_PASSCODE_KEY" ;;
             STATION_PASSCODE_KEY_PREVIOUS) VALUE="$STATION_PASSCODE_KEY_PREVIOUS" ;;
             STATION_SIGNUP_IP_HMAC_KEY) VALUE="$STATION_SIGNUP_IP_HMAC_KEY" ;;
+            ACCOUNT_AUDIT_RETENTION_DAYS) VALUE="$ACCOUNT_AUDIT_RETENTION_DAYS" ;;
             BETTER_AUTH_TRUSTED_ORIGINS) VALUE="$BETTER_AUTH_TRUSTED_ORIGINS" ;;
             STATION_SIGNUP_ALERT_EMAIL) VALUE="$STATION_SIGNUP_ALERT_EMAIL" ;;
             STATION_SIGNUP_DOWNGRADE_ENABLED) VALUE="$STATION_SIGNUP_DOWNGRADE_ENABLED" ;;

@@ -1170,6 +1170,13 @@
       "when": 1789584282467,
       "tag": "0169_2522-artwork-lookup-attempted-at",
       "breakpoints": true
+    },
+    {
+      "idx": 170,
+      "version": "7",
+      "when": 1789606101355,
+      "tag": "0170_account-audit-event",
+      "breakpoints": true
     }
   ]
 }
