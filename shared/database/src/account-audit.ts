@@ -73,7 +73,17 @@ export async function recordAccountAuditEvent(
       source: event.source,
     });
   } catch (error) {
-    deps.onError(error);
+    // The catch body itself must not throw: a broken Sentry transport (or
+    // any other throwing onError) would turn a swallowed audit-write
+    // failure into an unhandled rejection in whatever fire-and-forget
+    // caller wires this up (the HTTP `res.on('finish')` decorator, per
+    // parent epic decision 2) — there is nothing left to report it to, so
+    // the only correct move is to drop it silently.
+    try {
+      deps.onError(error);
+    } catch {
+      /* nothing left to do */
+    }
   }
 }
 
@@ -96,6 +106,15 @@ export interface PruneAccountAuditEventsOptions {
  */
 export async function pruneAccountAuditEvents(options: PruneAccountAuditEventsOptions = {}): Promise<number> {
   const { olderThanDays = ACCOUNT_AUDIT_EVENT_DEFAULT_RETENTION_DAYS, now = new Date() } = options;
+  // This table's whole justification is surviving deletion (parent epic
+  // decision 5/9) — an unqualified DELETE from a non-positive or
+  // non-finite `olderThanDays` would wipe the entire audit trail instead of
+  // pruning it. `pruneSignupAttempts` has no equivalent guard; that is a
+  // pre-existing gap on a 30-day table, not a precedent to copy onto a
+  // table whose retention is the whole point.
+  if (!Number.isFinite(olderThanDays) || olderThanDays <= 0) {
+    throw new Error(`pruneAccountAuditEvents: olderThanDays must be a positive finite number, got ${olderThanDays}`);
+  }
   const cutoff = new Date(now.getTime() - olderThanDays * 24 * 60 * 60 * 1000);
   const deleted = await db.delete(account_audit_event).where(lt(account_audit_event.occurredAt, cutoff));
   return deleted.count;

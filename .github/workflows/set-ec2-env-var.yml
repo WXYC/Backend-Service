@@ -172,10 +172,19 @@ jobs:
           # every settable var through the repo-secrets mechanism regardless
           # of sensitivity, and it hard-fails on an empty value — so the
           # GitHub repo secret must exist (provisioned out-of-band) before
-          # this workflow can set it. No restart_target applies: the
-          # consumer is a cron `docker run --env-file .env`, which re-reads
-          # the host .env on every run rather than a long-lived process that
-          # needs restarting.
+          # this workflow can set it.
+          #
+          # ⚠️ THE `restart_target` IS IRRELEVANT FOR THIS KEY, and the restart
+          # it performs is pure collateral. This job is not a long-running
+          # container: EC2 cron invokes it as `docker run --env-file .env`,
+          # so it re-reads the host's `.env` on every run and the flip takes
+          # effect on the next scheduled run with no restart of anything.
+          # There is no `none` option, so the run will bounce whichever
+          # container `restart_target` names (default `backend`) for no
+          # reason. Prefer running this off-peak, or edit `~/.env` over SSH
+          # directly — for this key, unlike every other key in this
+          # allowlist, the hand-edit needs no container recreate to take
+          # effect.
           ACCOUNT_AUDIT_RETENTION_DAYS: ${{ secrets.ACCOUNT_AUDIT_RETENTION_DAYS }}
           # better-auth trusted origins (WXYC/auto-dj-orchestrator#27 AC#4).
           # Not sensitive — it is a list of public origins — but carried through
