@@ -102,7 +102,7 @@ interface ResolvedMount {
    * any-work gate for `adminPrefixAuditMiddleware`; every `FlatMount`
    * request is trivially known, since it's mounted at its own literal path.
    */
-  classify: (req: Request) => { action: string; includeGet: boolean } | null;
+  classify: (req: Request) => { action: string; includeGet: boolean; serializeSessionRead: boolean } | null;
   resolveActor: boolean;
   /** Public mounts (resolveActor:false) gate this to 2xx outcomes — decision 12's DoS-amplifier guard. */
   subjectFrom: (req: Request, actorId: string | null) => Promise<string | null>;
@@ -178,6 +178,24 @@ function auditMiddleware(resolve: ResolvedMount) {
     // promise settle quietly). Do NOT assign actorId/impersonatorId on
     // resolve without awaiting in finishOnce — that would race the finish
     // event on whichever of getSession vs the real handler finishes first.
+    //
+    // AVAILABILITY TRADE vs CORRECTNESS CARVE-OUT (MEDIUM 1, code review
+    // BS#2537 PR #2545, second round). The concurrent shape above trades a
+    // small correctness risk for latency: on MOST actions, running
+    // getSession and the real handler in parallel is safe because nothing
+    // the handler does can invalidate what getSession is reading. But a
+    // HANDFUL of actions can destroy the very session row this read is
+    // resolving — `delete-user`, `admin/stop-impersonating`,
+    // `admin/remove-user`, `admin/revoke-user-session(s)` — and for those,
+    // running concurrently risks the handler deleting the session between
+    // getSession's read and its response, recording `actor_user_id=NULL`
+    // (and, for `delete-user`, whose subject strategy is `'actor'`, ALSO
+    // `subject_user_id=NULL`) on exactly the rows that matter forensically
+    // most: a fully anonymous audit row for a session-destroying action.
+    // `classified.serializeSessionRead` (set via `AdminAction`/`FlatMount`
+    // in audit-coverage.ts) restores the PRE-REFACTOR shape — next() gated
+    // on the session read — for exactly those actions, and only those;
+    // every other action keeps the concurrent, lower-latency path.
     const sessionPromise: Promise<void> | null = resolve.resolveActor
       ? auth.api
           .getSession({ headers: fromNodeHeaders(req.headers) })
@@ -255,7 +273,11 @@ function auditMiddleware(resolve: ResolvedMount) {
     res.on('finish', () => void finishOnce());
     res.on('close', () => void finishOnce());
 
-    next();
+    if (sessionPromise && classified.serializeSessionRead) {
+      void sessionPromise.finally(() => next());
+    } else {
+      next();
+    }
   };
 }
 
@@ -275,7 +297,13 @@ export function adminPrefixAuditMiddleware() {
     // attacker-controlled path text (HIGH 1's other half of the fix).
     classify: (req) => {
       const known = ADMIN_ACTIONS.get(canonicalPath(req));
-      return known ? { action: known.action, includeGet: known.includeGet === true } : null;
+      return known
+        ? {
+            action: known.action,
+            includeGet: known.includeGet === true,
+            serializeSessionRead: known.serializeSessionRead === true,
+          }
+        : null;
     },
     resolveActor: true,
     subjectFrom: (req) => Promise.resolve(extractBodyUserId(req)),
@@ -285,7 +313,11 @@ export function adminPrefixAuditMiddleware() {
 /** One exact `FlatMount` — the mount and its subject-resolution strategy. */
 function flatMountAuditMiddleware(mount: FlatMount) {
   return auditMiddleware({
-    classify: () => ({ action: mount.action, includeGet: false }), // every FlatMount is a POST-only mutation; a stray GET 404s unlogged.
+    classify: () => ({
+      action: mount.action,
+      includeGet: false, // every FlatMount is a POST-only mutation; a stray GET 404s unlogged.
+      serializeSessionRead: mount.serializeSessionRead === true,
+    }),
     resolveActor: mount.resolveActor,
     subjectFrom: subjectFromStrategy(mount),
   });
@@ -311,15 +343,26 @@ function dispatchFlatMount(mounts: ReadonlyMap<string, ReturnType<typeof flatMou
   return (req: Request, res: Response, next: NextFunction): void => {
     // Express 5 strips '/auth' under app.use('/auth', middleware), so
     // req.path here is e.g. '/reset-password' — exactly a FlatMount.path.
-    // NOTED BEHAVIOR CHANGE (code review BS#2537 PR #2545, accepted): this
-    // is an EXACT match, unlike the old per-mount app.use, which
-    // prefix-matched sub-paths (e.g. /delete-user/callback under the
-    // /delete-user mount) — that old prefix behavior contradicted the
-    // allowlist's own declaration of /delete-user/callback as dead/unaudited,
-    // and every such sub-path is GET-only in the real API, so it was never
-    // actually LOGGED under the old behavior either (flat mounts never
-    // include GET) — only reached and immediately skipped. No recorded row
-    // changes; see the PR body.
+    // NOTED BEHAVIOR CHANGE (code review BS#2537 PR #2545 — corrected in the
+    // second review round, which caught the original comment here
+    // overclaiming "no recorded row changes"): this IS an exact match,
+    // unlike the old per-mount app.use, which prefix-matched sub-paths on a
+    // segment boundary. This DOES drop one row class: a non-GET request to
+    // a 404-bound sub-path, case-variant, or double-slash variant of a
+    // flat-mount path (e.g. POST /auth/delete-user/callback,
+    // /auth/Delete-User, /auth/delete-user//) used to prefix-match under
+    // the old app.use and get logged with outcome:404 once better-auth's
+    // own router failed to resolve it — that row is gone now, since an
+    // inexact path is a Map miss and falls straight to next(). Verified
+    // harmless: better-auth 404s every one of these regardless of which
+    // dispatch shape reaches it, so the row was never forensically
+    // meaningful — an attacker (or a typo) minting noise against a FIXED,
+    // already-known slug, not a probe of an unknown action. Losing it is a
+    // net positive, consistent with M2's doctrine on the admin side (an
+    // unrecognized path costs nothing rather than a getSession + INSERT).
+    // GET requests to these same sub-paths were already unlogged either way
+    // (flat mounts never include GET) — that part of the original claim
+    // still holds; see the PR body for the full correction.
     const path = req.path.length > 1 && req.path.endsWith('/') ? req.path.slice(0, -1) : req.path;
     const mw = mounts.get(path);
     if (!mw) return next();

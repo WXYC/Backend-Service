@@ -15,7 +15,7 @@
  */
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
-import { STATION_SIGNUP_ADMIN_OPS } from '../../../apps/auth/audit-coverage';
+import { ADMIN_PREFIX, STATION_SIGNUP_ADMIN_OPS } from '../../../apps/auth/audit-coverage';
 
 describe('account-audit prefix mount ordering', () => {
   const authAppSource = readFileSync(resolve(__dirname, '../../../apps/auth/app.ts'), 'utf-8');
@@ -72,8 +72,27 @@ describe('account-audit prefix mount ordering', () => {
   // registering a station-signup op this file forgot to list, or vice
   // versa. Same source-text read this describe block already does.
   it('STATION_SIGNUP_ADMIN_OPS names exactly the ops app.ts registers via stationSignupAdminRoute', () => {
-    const registeredOps = [...authAppSource.matchAll(/stationSignupAdminRoute\('([a-z-]+)'/g)].map((m) => m[1]);
+    // L5 (code review BS#2537 PR #2545, second round): widened from
+    // [a-z-]+ — an op name with a digit/underscore/uppercase character
+    // would have been invisible to that charset, silently shrinking
+    // registeredOps and making the parity assertion vacuously pass on a
+    // partial match instead of catching real drift.
+    const registeredOps = [...authAppSource.matchAll(/stationSignupAdminRoute\('([\w-]+)'/g)].map((m) => m[1]);
     expect(registeredOps.length).toBeGreaterThan(0);
     expect([...registeredOps].sort()).toEqual([...STATION_SIGNUP_ADMIN_OPS].sort());
+  });
+
+  // L5 (code review BS#2537 PR #2545, second round): app.ts and
+  // audit-coverage.ts each declare their OWN STATION_SIGNUP_ADMIN_PREFIX
+  // constant (app.ts's is '/auth'-qualified for its own app.use() call;
+  // audit-coverage.ts's is bare, matching that module's own path
+  // convention) — same name, same concept, two separate literals with
+  // nothing structurally tying them together. This pins that app.ts's
+  // value is always exactly '/auth' + audit-coverage.ts's bare prefix, so
+  // the two can't silently drift apart.
+  it("app.ts's STATION_SIGNUP_ADMIN_PREFIX equals '/auth' + audit-coverage.ts's station-signup prefix", () => {
+    const match = authAppSource.match(/const STATION_SIGNUP_ADMIN_PREFIX = '([^']+)';/);
+    expect(match).not.toBeNull();
+    expect(match?.[1]).toBe(`/auth${ADMIN_PREFIX}/station-signup`);
   });
 });

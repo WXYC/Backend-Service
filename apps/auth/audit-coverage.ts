@@ -28,6 +28,21 @@ export interface AdminAction {
   action: string;
   /** True only for the PII-bulk-read GETs (decision 3's explicit include list). Omitted (falsy) for every mutation. */
   includeGet?: true;
+  /**
+   * MEDIUM 1 (code review BS#2537 PR #2545, second round): true for an
+   * action that can DESTROY THE SESSION mid-request on the account it acts
+   * on — `stop-impersonating` ends the impersonation session,
+   * `remove-user`/`revoke-user-session(s)` can revoke the caller's own
+   * session row if a station manager targets themselves (or another
+   * manager targets them right back). The un-serialized `next()` the
+   * simplify pass introduced lets the real handler and the middleware's own
+   * `getSession` read run concurrently, so on these specific actions the
+   * handler can delete the session row before the read completes,
+   * recording `actor_user_id=NULL` on exactly the rows that matter
+   * forensically most. See `account-audit-middleware.ts`'s `auditMiddleware`
+   * for the carve-out this flag drives.
+   */
+  serializeSessionRead?: true;
 }
 
 const STATION_SIGNUP_ADMIN_PREFIX = `${ADMIN_PREFIX}/station-signup`;
@@ -86,10 +101,10 @@ export const ADMIN_ACTIONS: ReadonlyMap<string, AdminAction> = new Map([
   ['/admin/unban-user', { action: 'admin.unban-user' }],
   ['/admin/ban-user', { action: 'admin.ban-user' }],
   ['/admin/impersonate-user', { action: 'admin.impersonate-user' }],
-  ['/admin/stop-impersonating', { action: 'admin.stop-impersonating' }],
-  ['/admin/revoke-user-session', { action: 'admin.revoke-user-session' }],
-  ['/admin/revoke-user-sessions', { action: 'admin.revoke-user-sessions' }],
-  ['/admin/remove-user', { action: 'admin.remove-user' }],
+  ['/admin/stop-impersonating', { action: 'admin.stop-impersonating', serializeSessionRead: true }],
+  ['/admin/revoke-user-session', { action: 'admin.revoke-user-session', serializeSessionRead: true }],
+  ['/admin/revoke-user-sessions', { action: 'admin.revoke-user-sessions', serializeSessionRead: true }],
+  ['/admin/remove-user', { action: 'admin.remove-user', serializeSessionRead: true }],
   ['/admin/set-user-password', { action: 'admin.set-user-password' }],
   ['/admin/has-permission', { action: 'admin.has-permission' }],
   ['/admin/provision-user', { action: 'admin.provision-user' }],
@@ -118,6 +133,8 @@ export interface FlatMount {
    * re-branching on `mount.action` per request.
    */
   subject: 'body-user-id' | 'actor' | 'email-lookup';
+  /** Same MEDIUM 1 flag as `AdminAction.serializeSessionRead` (see that doc comment) — set only on `delete-user`, the one FlatMount whose action destroys the caller's own session mid-request. */
+  serializeSessionRead?: true;
 }
 
 export const FLAT_MOUNTS: readonly FlatMount[] = [
@@ -138,7 +155,7 @@ export const FLAT_MOUNTS: readonly FlatMount[] = [
   { path: '/change-password', action: 'change-password', resolveActor: true, subject: 'actor' },
   { path: '/change-email', action: 'change-email', resolveActor: true, subject: 'actor' },
   { path: '/update-user', action: 'update-user', resolveActor: true, subject: 'actor' },
-  { path: '/delete-user', action: 'delete-user', resolveActor: true, subject: 'actor' },
+  { path: '/delete-user', action: 'delete-user', resolveActor: true, subject: 'actor', serializeSessionRead: true },
 
   // Authenticated organization mutations. KNOWN LIMITATION (M4, code review
   // BS#2537 PR #2545): every one of these bodies carries a target

@@ -101,6 +101,36 @@ describe('isAllowlisted / isAudited never overlap', () => {
   });
 });
 
+describe('findUncoveredAuthApiEndpoints — arm 1', () => {
+  it('reports nothing uncovered for a fully-classified endpoint set', () => {
+    const endpoints = [
+      { path: '/admin/set-role', methods: ['POST'] },
+      { path: '/get-session', methods: ['GET', 'POST'] },
+      { path: '/reset-password', methods: ['POST'] },
+    ];
+    expect(findUncoveredAuthApiEndpoints(endpoints)).toEqual([]);
+  });
+
+  it('reports a path in neither the audited set nor the allowlist', () => {
+    const endpoints = [{ path: '/a-brand-new-mutation', methods: ['POST'] }];
+    expect(findUncoveredAuthApiEndpoints(endpoints)).toEqual(['/a-brand-new-mutation']);
+  });
+
+  // The AC#4 drift-verified-by-test case: allowlist a real path in the
+  // allowlist, feed it through the compare with a stand-in classifier that
+  // omits it, and confirm the omission is what the real check would flag.
+  // Restored (MEDIUM 2, code review BS#2537 PR #2545, second round): this
+  // block and its two siblings above it were dropped when the simplify pass
+  // replaced this describe block with the method-aware one below -- the
+  // map-based API refactor doesn't change any of these three assertions'
+  // behavior, so they're recreated verbatim.
+  it('flags a currently-allowlisted path once it is no longer in the allowlist', () => {
+    expect(isAllowlisted('/get-session')).toBe(true);
+    const withoutAllowlistEntry = (path: string): boolean => path !== '/get-session' && isAllowlisted(path);
+    expect(isAudited('/get-session') || withoutAllowlistEntry('/get-session')).toBe(false);
+  });
+});
+
 describe('findUncoveredAuthApiEndpoints is method-aware (M3 + simplify-pass item 4, code review BS#2537 PR #2545)', () => {
   it('does not flag a known admin GET that IS includeGet: true', () => {
     const endpoints = [{ path: '/admin/get-user', methods: ['GET'] }];
@@ -130,11 +160,12 @@ describe('findUncoveredAuthApiEndpoints is method-aware (M3 + simplify-pass item
     expect(findUncoveredAuthApiEndpoints(endpoints)).toEqual(['/admin/some-future-endpoint']);
   });
 
-  // Drift-verified-by-test (mirrors the allowlist-removal test above): this
+  // Drift-verified-by-test (mirrors the generic allowlist-removal case in
+  // the 'findUncoveredAuthApiEndpoints — arm 1' describe block above): this
   // proves the check WOULD fail on '/admin/get-user' itself if that map
   // entry (or just its includeGet flag) were ever removed, without
   // actually mutating the shared module-level map out from under other
-  // tests in this file — the endpoint above already IS the shape
+  // tests in this file — the endpoint two tests up already IS the shape
   // '/admin/get-user' would take the moment its entry disappears (GET,
   // admin-prefix, not allowlisted), and this assertion pins that today's
   // real map entry is the only thing standing between the two.
@@ -156,8 +187,9 @@ describe('findUncoveredAuthApiEndpoints is method-aware (M3 + simplify-pass item
     expect(findUncoveredAuthApiEndpoints(endpoints)).toEqual([]);
   });
 
-  // Drift-verified-by-test, same idiom as the admin case above: proves a
-  // GET at a real flat-mount path would fail today unless allowlisted.
+  // Drift-verified-by-test, same idiom as the ADMIN_ACTIONS-removal case
+  // immediately above in this same describe block: proves a GET at a real
+  // flat-mount path would fail today unless allowlisted.
   it('would fail on a GET at a flat-mount path today unless it were allowlisted', () => {
     const flatPath = FLAT_MOUNTS[0].path;
     expect(isAllowlisted(flatPath)).toBe(false);
