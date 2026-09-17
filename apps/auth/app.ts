@@ -704,6 +704,14 @@ if (!isTestEnv) {
   const rateLimitedPaths = [
     '/auth/sign-in',
     '/auth/sign-up',
+    // BS#2551: left in this shared 15min/10 bucket deliberately, not an
+    // oversight the OTP mounts below got a dedicated limiter for. Every
+    // real call to this endpoint today carries `type: 'sign-in'` (no WXYC
+    // client sends `forget-password` here), and 15min/10 is already the
+    // SAME tier `otpPasswordResetSendRateLimit` below uses for the
+    // dedicated email-sending reset mounts — there is no looser-bucket
+    // hazard to fix. See the FLAT_MOUNTS entry for this path in
+    // apps/auth/audit-coverage.ts for the full reasoning.
     '/auth/email-otp/send-verification-otp',
     // M1 (code review BS#2537 PR #2545): was the literal string
     // '/auth/forget-password', which matches no better-auth route in the

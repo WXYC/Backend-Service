@@ -2,8 +2,23 @@
  * Single source of truth for account-audit coverage (BS#2537, parent epic
  * #2534): admin action map, flat-mount table, explicit-call-site set, and
  * allowlist. `app.ts`'s mounts and `scripts/check-audit-route-coverage.ts`'s
- * two drift-check arms both import from here, so a mount and the check it's
- * measured against can't drift.
+ * three drift-check arms both import from here, so a mount and the check
+ * it's measured against can't drift.
+ *
+ * BS#2551 (Option A): a `FlatMount` can be CONDITIONALLY audited — see
+ * `BodyDiscriminator`/`classifyFlatMountAction` below. All three arms stay
+ * meaningful under that: arms 1 and 3 both reason PATH-ONLY (`isFlatMounted`
+ * checks membership by `.path`, never which values a `discriminator` maps),
+ * so a conditionally-audited path is "covered"/"still reachable" exactly
+ * like a static one — the classification has been reviewed and encoded,
+ * regardless of whether a given request's body ends up matching an audited
+ * value. Neither arm claims "every request through this path writes a row"
+ * for a STATIC mount either (a public mount's 2xx-only subject gate already
+ * means an audited path can still write a subject-NULL row) — arm coverage
+ * has never meant "every write path independent of runtime data", only
+ * "this path's audit behavior has been decided, not forgotten". Arm 2 never
+ * sees this distinction at all (it's blind to FLAT_MOUNTS internals, method-
+ * and discriminator-agnostic by construction).
  *
  * DEVIATION FROM THE ISSUE TEXT (reported in the PR body): the issue names a
  * flat mount at `/auth/forget-password`. Installed better-auth (^1.6.30) has
@@ -132,11 +147,32 @@ export const ADMIN_ACTIONS: ReadonlyMap<string, AdminAction> = new Map([
   ]),
 ]);
 
-export interface FlatMount {
+/**
+ * BS#2551 (Option A, decided over B/widen-scope and C/accept-gap): lets ONE
+ * `FlatMount.path` serve more than one logical better-auth operation while
+ * only some of them are audited — `/email-otp/send-verification-otp` is a
+ * single endpoint discriminated by a `type` body field into `sign-in`,
+ * `email-verification`, and `forget-password`, and only the last is in the
+ * epic #2534-ratified audited scope (sign-in/sign-up stay out). `field`
+ * names the discriminating body key; `actions` maps a body value to its own
+ * action slug. A body value ABSENT from `actions` (including a missing or
+ * non-string field) is not audited at all — `classifyFlatMountAction`
+ * returns null and the request writes zero `account_audit_event` rows, the
+ * same "unknown → skip" shape `ADMIN_ACTIONS`'s map-miss gate already uses.
+ * This is how a `type: 'sign-in'` call through this path stays silent while
+ * a `type: 'forget-password'` call on the exact same path records — without
+ * scattering a body check into the middleware as a route-specific `if`.
+ */
+export interface BodyDiscriminator {
+  /** Request-body field this mount's real operation is selected by. */
+  field: string;
+  /** Body value (as submitted, not normalized) -> its own dotted action slug. */
+  actions: Readonly<Record<string, string>>;
+}
+
+interface FlatMountFields {
   /** Bare better-auth path, e.g. '/reset-password'. */
   path: string;
-  /** Path-derived dotted action slug (decision 14). */
-  action: string;
   /** False only for the genuinely unauthenticated mounts (no session to resolve). */
   resolveActor: boolean;
   /**
@@ -154,6 +190,35 @@ export interface FlatMount {
   /** Same MEDIUM 1 flag as `AdminAction.serializeSessionRead` (see that doc comment) — set only on `delete-user`, the one FlatMount whose action destroys the caller's own session mid-request. */
   serializeSessionRead?: true;
 }
+
+/**
+ * A `FlatMount` carries EITHER a static `action` (decision 14's plain
+ * path-derived slug — the overwhelming majority of mounts, whose action
+ * never depends on anything in the request) OR a `discriminator` (BS#2551
+ * Option A) — never both, never neither. The union (rather than an optional
+ * `action` + optional `discriminator` on one interface) makes "exactly one"
+ * a compile-time property instead of a runtime invariant some future mount
+ * could violate silently.
+ */
+export type FlatMount =
+  | (FlatMountFields & { action: string; discriminator?: undefined })
+  | (FlatMountFields & { action?: undefined; discriminator: BodyDiscriminator });
+
+/**
+ * The one place a `FlatMount`'s runtime action is resolved from a request —
+ * pure and co-located with the data it reads, so it's unit-testable without
+ * Express (mirrors decision 4's "the compare function is unit-tested"
+ * doctrine for the drift-check arms below). A static mount ignores `body`
+ * entirely; a discriminated mount returns null for anything other than an
+ * exact string match in `discriminator.actions` — no fuzzy matching, no
+ * case-folding (better-auth's own `type` enum is submitted verbatim by
+ * every real client, never normalized the way `email` is).
+ */
+export const classifyFlatMountAction = (mount: FlatMount, body: unknown): string | null => {
+  if (mount.discriminator === undefined) return mount.action;
+  const value = (body as Record<string, unknown> | null | undefined)?.[mount.discriminator.field];
+  return typeof value === 'string' ? (mount.discriminator.actions[value] ?? null) : null;
+};
 
 export const FLAT_MOUNTS: readonly FlatMount[] = [
   // Public (decision 11) — no session exists; mounted ahead of the Express
@@ -203,6 +268,72 @@ export const FLAT_MOUNTS: readonly FlatMount[] = [
     action: 'forget-password.email-otp',
     resolveActor: false,
     subject: 'email-lookup',
+  },
+  // BS#2551 (Option A, decided over B/widen-scope and C/accept-gap; M2,
+  // code review BS#2550): `/email-otp/send-verification-otp` is a SHARED
+  // endpoint — better-auth's `type` enum on it is `sign-in`,
+  // `email-verification`, or `forget-password` (`change-email` is rejected
+  // with a 400 before it ever resolves an OTP — confirmed against
+  // node_modules/better-auth/dist/plugins/email-otp/routes.mjs). Called
+  // with `type: 'forget-password'` it runs the identical `resolveOTP(...,
+  // 'forget-password')` path and mails the same working reset code as the
+  // dedicated `email-otp.request-password-reset` mount above — the
+  // forensic gap this ticket closes. `type: 'sign-in'` is the epic
+  // #2534-ratified allowlisted flow (every current WXYC client's real
+  // traffic here) and must stay silent; `type: 'email-verification'` was
+  // never in audited scope either. The discriminator is exactly this: ONE
+  // value maps to an action, every other value (or a missing/non-string
+  // `type`) classifies to null and writes nothing — see
+  // `classifyFlatMountAction`.
+  //
+  // Action slug: `email-otp.send-verification-otp.forget-password`, not
+  // the bare path-derived `email-otp.send-verification-otp`. Decision 14
+  // is "path-derived dotted slugs", and this extends that convention
+  // one dot further — the same shape `ADMIN_ACTIONS` already uses for
+  // `admin.station-signup.<op>` (path prefix + a variant suffix), except
+  // the suffix here comes from the request body rather than a literal
+  // path segment, since the variant isn't reachable as its own path. Two
+  // reasons this is worth the extra segment over the bare slug: (1) a
+  // reader querying `action = 'email-otp.send-verification-otp.forget-
+  // password'` doesn't need to already know the discriminator's existence
+  // to know what happened — a bare `email-otp.send-verification-otp`
+  // would only be unambiguous BECAUSE this table happens to audit exactly
+  // one of the endpoint's three types, an invariant a future re-decision on
+  // the email-change types could quietly break; (2) it stays distinct from
+  // the sibling `email-otp.request-password-reset` action even though both
+  // endpoints run the same underlying `resolveOTP` call and are, for a DJ,
+  // functionally interchangeable password-reset requests — the epic's
+  // whole M2 complaint was that two interchangeable endpoints answered
+  // "who requested this reset code" differently, and collapsing their
+  // action slugs together now would make that no longer answerable from
+  // the recorded action alone (was it requested via the dedicated reset
+  // endpoint or the shared send-verification-otp one).
+  //
+  // Rate limiting: this path stays in `app.ts`'s shared `rateLimitedPaths`
+  // (`authMutationRateLimit`, 15min/10) rather than moving to the
+  // dedicated `otpPasswordResetSendRateLimit` PR #2550 introduced for the
+  // two other email-sending reset mounts. Both tiers are NUMERICALLY
+  // IDENTICAL (15min/10) — there is no "looser bucket" hazard to fix, only
+  // a "shared with sign-in" one. Left shared deliberately: every real call
+  // to this endpoint today carries `type: 'sign-in'` (no WXYC client sends
+  // `forget-password` here — see the issue's reachability note), so the
+  // shared bucket is bucketing the traffic it actually has, correctly.
+  // Splitting the limiter to isolate the newly-audited-but-currently-
+  // unreachable forget-password variant would need a NEW mechanism
+  // (body-discriminated rate limiting, peeking `req.body.type` before
+  // choosing a limiter instance) that no acceptance criterion here calls
+  // for and that this ticket's scope (audit classification, Option A) does
+  // not touch. If forget-password traffic through this shared endpoint
+  // ever becomes real, that split is a follow-up, not a silent regression
+  // introduced by leaving it alone now.
+  {
+    path: '/email-otp/send-verification-otp',
+    resolveActor: false,
+    subject: 'email-lookup',
+    discriminator: {
+      field: 'type',
+      actions: { 'forget-password': 'email-otp.send-verification-otp.forget-password' },
+    },
   },
 
   // Authenticated self-service — mounted after the rate limiters, ahead of
@@ -300,24 +431,21 @@ export const ALLOWLIST: ReadonlySet<string> = new Set([
   // ("OTP send/verify"), NOT a dead-code judgment call: the emailOTP plugin
   // IS configured and live in this deployment.
   //
-  // M2 (code review BS#2547): stated plainly, because the previous wording
-  // here ("not part of Scope's audited surface; the primary password-based
-  // flows above are") concealed a real gap rather than naming it.
-  // `/email-otp/send-verification-otp` accepts `type: 'forget-password'`
-  // and will mail a WORKING reset code on that call, writing the same
-  // verification row `/email-otp/reset-password` later consumes — so this
-  // endpoint is an UNAUDITED twin of the OTP request step audited above
-  // (`email-otp.request-password-reset`, `forget-password.email-otp`).
-  // Reset COMPLETION is audited on every path (`email-otp.reset-password`
-  // records the row regardless of which endpoint minted the code); it is
-  // specifically the send-via-this-shared-endpoint REQUEST step that isn't.
-  // Not fixed here: this table is path-keyed, and this same endpoint also
-  // serves the deliberately-allowlisted sign-in OTP flow
-  // (`/sign-in/email-otp` below), so auditing it correctly needs
-  // body-discriminated classification (branch on `type` inside the
-  // request), a mechanism extension out of scope for this re-decision.
-  // Tracked as a follow-up: WXYC/Backend-Service#2551.
-  '/email-otp/send-verification-otp',
+  // `/email-otp/send-verification-otp` is DELIBERATELY ABSENT from this
+  // allowlist, not merely renamed out of it: BS#2551 (Option A) moved it to
+  // `FLAT_MOUNTS` with a `discriminator`, so it is CONDITIONALLY audited —
+  // `type: 'forget-password'` records, `type: 'sign-in'` (and everything
+  // else) stays silent, same as before. `isFlatMounted`/`isAudited` treat
+  // the path as covered regardless of which discriminated value a given
+  // request carries — "covered" here means "this path's classification has
+  // been reviewed and encoded", not "every request through it writes a
+  // row"; ADMIN_ACTIONS' own `includeGet` flag already draws that same
+  // distinction for GET vs non-GET on one path. See the FLAT_MOUNTS entry
+  // above for the full M2-gap history (BS#2547 code review) and the action-
+  // slug rationale. `check-verification-otp` and `verify-email` below are
+  // unaffected — a check/verify step is never the ticket's audited action
+  // (that authority lives at completion, `email-otp.reset-password`) and
+  // BS#2551 never proposed touching either.
   '/email-otp/check-verification-otp',
   '/email-otp/verify-email',
   // LIVE, UNAUDITED account-modifying flows — M5 RE-DECISION (BS#2547,

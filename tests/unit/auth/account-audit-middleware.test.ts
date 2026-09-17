@@ -75,6 +75,14 @@ const deleteUserMount = mustFindMount('delete-user');
 const emailOtpRequestPasswordResetMount = mustFindMount('email-otp.request-password-reset');
 const emailOtpResetPasswordMount = mustFindMount('email-otp.reset-password');
 const forgetPasswordEmailOtpMount = mustFindMount('forget-password.email-otp');
+// BS#2551 (Option A): a body-discriminated mount has no static `.action`, so
+// it can't go through `mustFindMount` — found by path instead.
+function mustFindMountByPath(path: string): FlatMount {
+  const mount = FLAT_MOUNTS.find((m) => m.path === path);
+  if (!mount) throw new Error(`no FLAT_MOUNTS entry for ${path}`);
+  return mount;
+}
+const sendVerificationOtpMount = mustFindMountByPath('/email-otp/send-verification-otp');
 
 /**
  * Captures the ONE middleware function a `mountPublicAccountAudit`/
@@ -374,6 +382,77 @@ describe('subject extraction', () => {
       expectAudited({ action: mount.action, subjectUserId: null, outcome: 429 });
     }
   );
+});
+
+// BS#2551 (Option A, parent epic #2534): AC#2 of the issue — a unit test
+// must prove BOTH halves of the body-discriminated classification through
+// the REAL dispatcher, driven with the same hard-coded-literal-path
+// discipline as OTP_PASSWORD_RESET_MOUNTS above (L3, code review BS#2547 —
+// never derive the request path from `mount.path`, the exact field the
+// dispatcher's Map is keyed on).
+describe('body-discriminated mount /email-otp/send-verification-otp (BS#2551, Option A)', () => {
+  const SEND_VERIFICATION_OTP_PATH = '/email-otp/send-verification-otp';
+
+  it('records a row with a resolved subject and no raw email in any field when type is forget-password', async () => {
+    db._chain.limit.mockResolvedValueOnce([{ id: 'resolved-user-1' }]);
+    const { res } = await start(
+      dispatchPublic,
+      mockReq({ path: SEND_VERIFICATION_OTP_PATH, body: { type: 'forget-password', email: 'dj@wxyc.org' } })
+    );
+    await settle(res);
+    const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(call.action).toBe(sendVerificationOtpMount.discriminator?.actions['forget-password']);
+    expect(call.action).toBe('email-otp.send-verification-otp.forget-password');
+    expect(call.subjectUserId).toBe('resolved-user-1');
+    expect(JSON.stringify(call)).not.toContain('dj@wxyc.org');
+  });
+
+  it('records nothing when type is sign-in — the ratified-out-of-scope flow every real WXYC client sends here', async () => {
+    const getSessionSpy = jest.fn(() => Promise.resolve(null));
+    auth.api.getSession = getSessionSpy as never;
+    const { res, next } = await start(
+      dispatchPublic,
+      mockReq({ path: SEND_VERIFICATION_OTP_PATH, body: { type: 'sign-in', email: 'dj@wxyc.org' } })
+    );
+    expect(next).toHaveBeenCalled();
+    await settle(res);
+    expect(getSessionSpy).not.toHaveBeenCalled();
+    expect(db._chain.limit).not.toHaveBeenCalled();
+    expect(recordAccountAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it('records nothing when type is email-verification (also out of audited scope)', async () => {
+    const { res } = await start(
+      dispatchPublic,
+      mockReq({ path: SEND_VERIFICATION_OTP_PATH, body: { type: 'email-verification', email: 'dj@wxyc.org' } })
+    );
+    await settle(res);
+    expect(recordAccountAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it('records nothing for a request with no type field at all', async () => {
+    const { res } = await start(
+      dispatchPublic,
+      mockReq({ path: SEND_VERIFICATION_OTP_PATH, body: { email: 'dj@wxyc.org' } })
+    );
+    await settle(res);
+    expect(recordAccountAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it('does not resolve the forget-password subject on a non-2xx outcome (429-visibility DoS-amplifier guard)', async () => {
+    const { res } = await start(
+      dispatchPublic,
+      mockReq({ path: SEND_VERIFICATION_OTP_PATH, body: { type: 'forget-password', email: 'dj@wxyc.org' } })
+    );
+    res.statusCode = 429;
+    await settle(res);
+    expect(db._chain.limit).not.toHaveBeenCalled();
+    expectAudited({
+      action: 'email-otp.send-verification-otp.forget-password',
+      subjectUserId: null,
+      outcome: 429,
+    });
+  });
 });
 
 describe('error_code capture (≥400 JSON bodies only) — manual driving (interleaved statusCode/body writes)', () => {
