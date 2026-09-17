@@ -16,8 +16,9 @@
  * distinguishable error steering them to sign in and finish via session mode.
  */
 
-import { auth, revokeOutstandingAccountSetupTokens } from '@wxyc/authentication';
-import type { User } from '@wxyc/database';
+import * as Sentry from '@sentry/node';
+import { auth, deriveStationSignupIpHash, revokeOutstandingAccountSetupTokens } from '@wxyc/authentication';
+import { recordAccountAuditEvent, type User } from '@wxyc/database';
 import { APIError } from 'better-auth/api';
 
 export class CompleteOnboardingError extends Error {
@@ -205,7 +206,7 @@ export async function completeOnboardingWithSession(
   return toCompleteOnboardingResult(user);
 }
 
-export async function completeOnboardingFromRequest(
+async function resolveOnboardingResult(
   body: Record<string, unknown>,
   headers: Headers
 ): Promise<CompleteOnboardingResult> {
@@ -232,4 +233,45 @@ export async function completeOnboardingFromRequest(
   }
 
   return completeOnboardingWithSession(headers, { realName, djName });
+}
+
+const auditOnboardingError = (error: unknown): void => {
+  Sentry.captureException(error, { tags: { subsystem: 'account-audit' } });
+};
+
+/**
+ * Explicit `recordAccountAuditEvent` call site (BS#2537, parent epic #2534
+ * Scope: "both modes -- its internal auth.api.resetPassword never crosses an
+ * audited HTTP mount"). This endpoint is public (no session, and the
+ * invite-token mode predates one), so there is no actor to resolve; the
+ * subject is the completed account on success, best-effort NULL on failure
+ * (decision 12) rather than duplicating token/session resolution here.
+ */
+export async function completeOnboardingFromRequest(
+  body: Record<string, unknown>,
+  headers: Headers
+): Promise<CompleteOnboardingResult> {
+  const ipHash = deriveStationSignupIpHash(headers.get('x-real-ip') ?? undefined);
+  try {
+    const result = await resolveOnboardingResult(body, headers);
+    void recordAccountAuditEvent(
+      {
+        action: 'wxyc.complete-onboarding',
+        subjectUserId: result.userId,
+        outcome: 200,
+        ipHash,
+        source: 'http',
+      },
+      { onError: auditOnboardingError }
+    );
+    return result;
+  } catch (error) {
+    const statusCode = error instanceof CompleteOnboardingError ? error.statusCode : 500;
+    const errorCode = error instanceof CompleteOnboardingError ? (error.code ?? null) : null;
+    void recordAccountAuditEvent(
+      { action: 'wxyc.complete-onboarding', outcome: statusCode, errorCode, ipHash, source: 'http' },
+      { onError: auditOnboardingError }
+    );
+    throw error;
+  }
 }
