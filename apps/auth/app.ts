@@ -29,6 +29,8 @@ import rateLimit from 'express-rate-limit';
 import { rateLimitKeyFromRequest, sessionRateLimitKeyFromRequest } from './rate-limit-key';
 import { makeHandler as makeRateLimitMetricsHandler, flushRateLimitMetrics } from './auth-rate-limit-metrics';
 import { closeDatabaseConnection } from '@wxyc/database';
+import { adminPrefixAuditMiddleware, flatMountAuditMiddleware } from './account-audit-middleware';
+import { FLAT_MOUNTS } from './audit-coverage';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { checkRequestBanHandler } from './check-request-ban-handler';
 import { CompleteOnboardingError, completeOnboardingFromRequest } from './complete-onboarding';
@@ -81,6 +83,25 @@ app.use(
     exposedHeaders: ['Content-Length', 'Set-Cookie'],
   })
 );
+
+// Account-audit prefix mount (BS#2537, parent epic #2534 decision 3). MUST
+// register above every hand-written `/auth/admin/*` route below — in
+// particular `resolve-organization` (originally line 227), `provision-user`
+// (originally line 257), and the station-signup admin router (originally
+// line 530) — or Express sends those responses before this middleware ever
+// hooks `res.on('finish')` and coverage silently zeroes on exactly the
+// highest-value routes. `tests/unit/auth/account-audit-mount-order.test.ts`
+// pins this as a source-text index comparison.
+app.use('/auth/admin', adminPrefixAuditMiddleware());
+
+// Account-audit flat mounts, public half (BS#2537). Ahead of the rate
+// limiters below (decision 11): no session exists on these paths, so
+// resolving one here would be a pre-limit DB-read DoS amplifier. `next()`
+// falls through to the rate limiter, then to the real handler.
+for (const mount of FLAT_MOUNTS) {
+  if (mount.resolveActor) continue;
+  app.use(`/auth${mount.path}`, flatMountAuditMiddleware(mount));
+}
 
 // Test helper endpoints (must be registered BEFORE Better Auth handler).
 // Positive-list gate (BS#1097): enable only in explicit dev/test. A negative
@@ -752,6 +773,15 @@ if (!isTestEnv) {
   });
 
   app.use('/auth/get-session', getSessionIpRateLimit, getSessionIdentityRateLimit);
+}
+
+// Account-audit flat mounts, authenticated half (BS#2537). Ahead of the
+// better-auth catch-all below, like every other authenticated flat mount —
+// these resolve the caller's session (`resolveActor: true`) since there is
+// no rate limiter to get ahead of for a DoS-amplifier concern to attach to.
+for (const mount of FLAT_MOUNTS) {
+  if (!mount.resolveActor) continue;
+  app.use(`/auth${mount.path}`, flatMountAuditMiddleware(mount));
 }
 
 app.post('/auth/wxyc/lookup-email', lookupEmailHandler);
