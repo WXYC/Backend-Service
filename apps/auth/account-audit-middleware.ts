@@ -18,7 +18,7 @@ import { auth, deriveStationSignupIpHash } from '@wxyc/authentication';
 import { db, recordAccountAuditEvent, user } from '@wxyc/database';
 import { fromNodeHeaders } from 'better-auth/node';
 import { onAccountAuditError } from './account-audit-error.js';
-import { ADMIN_ACTIONS, ADMIN_PREFIX, FLAT_MOUNTS, type FlatMount } from './audit-coverage.js';
+import { ADMIN_ACTIONS, ADMIN_PREFIX, FLAT_MOUNTS, classifyFlatMountAction, type FlatMount } from './audit-coverage.js';
 import { realIpFromRequest } from './rate-limit-key.js';
 
 const MAX_BODY_CAPTURE_BYTES = 4096;
@@ -326,14 +326,28 @@ export function adminPrefixAuditMiddleware() {
   });
 }
 
-/** One exact `FlatMount` — the mount and its subject-resolution strategy. */
+/**
+ * One exact `FlatMount` — the mount and its subject-resolution strategy.
+ * BS#2551 (Option A): `classify` now goes through `classifyFlatMountAction`
+ * instead of returning `mount.action` unconditionally, so a discriminated
+ * mount (one path, several body-selected operations) can classify to null
+ * for a value outside its audited set — the same "unknown → skip" shape M2's
+ * admin-prefix gate already uses, applied here to a body field instead of a
+ * path. A static mount (the overwhelming majority) is unaffected:
+ * `classifyFlatMountAction` returns its constant `action` regardless of
+ * `req.body`.
+ */
 function flatMountAuditMiddleware(mount: FlatMount) {
   return auditMiddleware({
-    classify: () => ({
-      action: mount.action,
-      includeGet: false, // every FlatMount is a POST-only mutation; a stray GET 404s unlogged.
-      serializeSessionRead: mount.serializeSessionRead === true,
-    }),
+    classify: (req) => {
+      const action = classifyFlatMountAction(mount, req.body);
+      if (action === null) return null;
+      return {
+        action,
+        includeGet: false, // every FlatMount is a POST-only mutation; a stray GET 404s unlogged.
+        serializeSessionRead: mount.serializeSessionRead === true,
+      };
+    },
     resolveActor: mount.resolveActor,
     subjectFrom: subjectFromStrategy(mount),
   });

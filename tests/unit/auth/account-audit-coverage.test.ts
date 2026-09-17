@@ -16,6 +16,7 @@ import {
   ALLOWLIST,
   FLAT_MOUNTS,
   STATION_SIGNUP_ADMIN_OPS,
+  classifyFlatMountAction,
   findDeclaredMountsMissingFromAuthApi,
   findUncoveredAuthApiEndpoints,
   findUncoveredExpressRoutes,
@@ -91,6 +92,7 @@ describe('flat mounts', () => {
       '/email-otp/request-password-reset',
       '/email-otp/reset-password',
       '/forget-password/email-otp',
+      '/email-otp/send-verification-otp',
     ];
     for (const path of emailLookupPaths) {
       expect(FLAT_MOUNTS.find((m) => m.path === path)?.subject).toBe('email-lookup');
@@ -104,21 +106,23 @@ describe('flat mounts', () => {
     }
   });
 
-  // BS#2547 (M5 re-decision, parent epic #2534): the tally is the cheapest
-  // possible drift check for "did the three OTP password-reset mounts
-  // actually land with the right strategy" — counting the whole set is
-  // stronger than counting the four known paths above (which would report
-  // green even if a fifth stray email-lookup mount appeared and a real one
-  // among the four regressed to a different strategy by coincidence).
-  it('carries exactly four email-lookup mounts (1 token flow + 3 OTP arms, BS#2547)', () => {
+  // BS#2547 (M5 re-decision, parent epic #2534); extended by BS#2551
+  // (Option A) to five. The tally is the cheapest possible drift check for
+  // "did every email-lookup mount actually land with the right strategy" —
+  // counting the whole set is stronger than counting the known paths above
+  // (which would report green even if a stray email-lookup mount appeared
+  // and a real one among them regressed to a different strategy by
+  // coincidence).
+  it('carries exactly five email-lookup mounts (1 token flow + 3 OTP arms + 1 discriminated send-verification-otp, BS#2547/BS#2551)', () => {
     const emailLookupMounts = FLAT_MOUNTS.filter((m) => m.subject === 'email-lookup');
-    expect(emailLookupMounts).toHaveLength(4);
+    expect(emailLookupMounts).toHaveLength(5);
     expect(emailLookupMounts.map((m) => m.path).sort()).toEqual(
       [
         '/request-password-reset',
         '/email-otp/request-password-reset',
         '/email-otp/reset-password',
         '/forget-password/email-otp',
+        '/email-otp/send-verification-otp',
       ].sort()
     );
   });
@@ -136,6 +140,46 @@ describe('flat mounts', () => {
     );
     expect(FLAT_MOUNTS.find((m) => m.path === '/email-otp/reset-password')?.action).toBe('email-otp.reset-password');
     expect(FLAT_MOUNTS.find((m) => m.path === '/forget-password/email-otp')?.action).toBe('forget-password.email-otp');
+  });
+});
+
+describe('body-discriminated FlatMount (BS#2551, Option A)', () => {
+  const sendVerificationOtpMount = FLAT_MOUNTS.find((m) => m.path === '/email-otp/send-verification-otp');
+
+  it('declares /email-otp/send-verification-otp as a discriminated mount, not a static one', () => {
+    expect(sendVerificationOtpMount).toBeDefined();
+    expect(sendVerificationOtpMount?.action).toBeUndefined();
+    expect(sendVerificationOtpMount?.discriminator).toEqual({
+      field: 'type',
+      actions: { 'forget-password': 'email-otp.send-verification-otp.forget-password' },
+    });
+    expect(sendVerificationOtpMount?.resolveActor).toBe(false);
+    expect(sendVerificationOtpMount?.subject).toBe('email-lookup');
+  });
+
+  it('classifies type: forget-password to the discriminated action slug', () => {
+    expect(classifyFlatMountAction(sendVerificationOtpMount, { type: 'forget-password' })).toBe(
+      'email-otp.send-verification-otp.forget-password'
+    );
+  });
+
+  it.each(['sign-in', 'email-verification', 'change-email'])('classifies type: %s to null (not audited)', (type) => {
+    expect(classifyFlatMountAction(sendVerificationOtpMount, { type })).toBeNull();
+  });
+
+  it.each([undefined, null, 42, {}])('classifies a missing/non-string type (%p) to null', (type) => {
+    expect(classifyFlatMountAction(sendVerificationOtpMount, { type })).toBeNull();
+  });
+
+  it('classifies a body with no type field at all to null', () => {
+    expect(classifyFlatMountAction(sendVerificationOtpMount, {})).toBeNull();
+    expect(classifyFlatMountAction(sendVerificationOtpMount, undefined)).toBeNull();
+  });
+
+  it('leaves a static mount unaffected by classifyFlatMountAction (ignores body entirely)', () => {
+    const forgetPassword = FLAT_MOUNTS.find((m) => m.action === 'forget-password');
+    expect(classifyFlatMountAction(forgetPassword, { anything: 'goes' })).toBe('forget-password');
+    expect(classifyFlatMountAction(forgetPassword, undefined)).toBe('forget-password');
   });
 });
 
@@ -174,6 +218,25 @@ describe('findUncoveredAuthApiEndpoints — arm 1', () => {
     expect(isAllowlisted('/get-session')).toBe(true);
     const withoutAllowlistEntry = (path: string): boolean => path !== '/get-session' && isAllowlisted(path);
     expect(isAudited('/get-session') || withoutAllowlistEntry('/get-session')).toBe(false);
+  });
+
+  // BS#2551 (Option A): the same drift-verified-by-test idiom as above,
+  // applied to the NEW discriminated mount. Before this ticket,
+  // '/email-otp/send-verification-otp' was allowlisted, so removing its
+  // classification meant removing an ALLOWLIST entry (the case above).
+  // After this ticket it's the reverse: the path's ONLY coverage is its
+  // FLAT_MOUNTS row (confirmed here: not an ADMIN_ACTIONS key, not
+  // allowlisted), so a future edit that deletes that row WITHOUT
+  // re-allowlisting the path leaves nothing standing between it and arm
+  // 1's uncovered-endpoint report — the same shape as the generic
+  // '/a-brand-new-mutation' case two tests up.
+  it('would fail arm 1 if the FLAT_MOUNTS entry for /email-otp/send-verification-otp were removed without re-allowlisting it', () => {
+    const path = '/email-otp/send-verification-otp';
+    expect(ADMIN_ACTIONS.has(path)).toBe(false);
+    expect(isAllowlisted(path)).toBe(false);
+    // Covered TODAY, solely via its FLAT_MOUNTS row (non-GET, so the
+    // method-aware admin/flat-mount split above doesn't apply here).
+    expect(findUncoveredAuthApiEndpoints([{ path, methods: ['POST'] }])).toEqual([]);
   });
 });
 
