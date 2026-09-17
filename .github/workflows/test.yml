@@ -12,14 +12,31 @@ on:
   # gap by running CI against the merged state itself, not just each PR's
   # view of it.
   #
-  # Scoped to `detect-changes` -> `unit-tests` only (every other job below
-  # gets an explicit `github.event_name != 'push'` guard) -- unit-tests is the
-  # ~1m35s job that would have caught the collision, and running the full
-  # matrix (Integration-Tests' DB stack, migrate-dryrun's RDS snapshot
-  # restore) on every merge to `main` roughly doubles this repo's default-
-  # branch Actions spend against the $25 hard-stop budget (see the GHA
-  # billing-shape notes in CLAUDE.md), which is not a trade worth making for a
-  # signal unit-tests already provides on the PR that merged.
+  # Scoped to `detect-changes` -> `unit-tests` only; every other job below
+  # gets an explicit `github.event_name != 'push'` guard. `unit-tests` is the
+  # ~1m45s job that would have caught the 2026-09-17 collision, and it is the
+  # whole of what a post-merge run needs to buy.
+  #
+  # The reason to stop there is NOT Actions minutes. This repo is public, so
+  # its Linux runner time is free and unmetered -- the `unit-tests` comment
+  # below already says so, and a justification that contradicted it would be
+  # the first thing to mislead a future reader. What the rest of the matrix
+  # costs is charged somewhere other than the Actions bill:
+  #
+  #   * `migrate-dryrun` restores a real RDS snapshot per run. That is AWS
+  #     spend, it is the most expensive step in this file, and adding it here
+  #     would move it from "the PRs that touch db-init paths" to every merge
+  #     (~165/month at the current rate).
+  #   * `Integration-Tests` holds a Postgres service container for ~3 minutes
+  #     to re-derive a signal the merged PR's own run produced minutes
+  #     earlier, against the same tree.
+  #   * Duplicated jobs are duplicated flake. A post-merge red nobody can act
+  #     on is how people learn to ignore post-merge red, which would cost
+  #     exactly the signal this trigger exists to create.
+  #
+  # `tests/unit/scripts/ci-post-merge-job-set.test.ts` pins the resulting job
+  # set, so adding a job to this file without deciding its post-merge status
+  # fails there rather than silently running on every merge.
   push:
     branches:
       - main
