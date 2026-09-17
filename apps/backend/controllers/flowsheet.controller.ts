@@ -14,7 +14,7 @@ import * as flowsheetTakeoverConfig from '../config/flowsheetTakeover.js';
 import { recordGoLiveHandoff } from '../services/flowsheet/go-live-handoff-signal.js';
 import WxycError from '../utils/error.js';
 import { INT4_MAX } from '../utils/constants.js';
-import { BREAKPOINT_SUFFIX } from '../utils/breakpoint-generator.js';
+import { BREAKPOINT_SUFFIX, nearestStationHour } from '../utils/breakpoint-generator.js';
 
 export type QueryParams = {
   page?: string;
@@ -643,6 +643,16 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
   // argument below. The message branch reuses it rather than re-inferring.
   const requestedEntryType =
     body.message !== undefined ? (body.entry_type ?? inferMessageEntryType(body.message)) : undefined;
+  const callerMarksCurrentHour = requestedEntryType === 'breakpoint';
+
+  // BS#2567: one clock read for the whole request, shared by the fill's ceiling
+  // and the row's own `radio_hour` below. Two reads would be two instants, and
+  // an instant that lands either side of :30 rounds to a different hour: the
+  // fill would stop below 6:00 PM while the caller's row claimed 7:00 PM, and
+  // the 6:00 PM marker neither of them wrote is a hole in the hour sequence.
+  // Narrow — the two reads are a DB round-trip apart — but structural, and one
+  // shared instant removes it rather than shrinking it.
+  const now = new Date();
 
   // BS#2516: fill in any top-of-hour markers the show missed since it was last
   // touched, ahead of whatever this request is itself adding, so the sequence
@@ -650,9 +660,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
   // hand. Awaited but never a precondition — `fillMissingHourlyBreakpoints`
   // swallows its own failures on purpose (see its docstring), so this call
   // cannot turn a DB blip on an annotation into a DJ who can't log a play.
-  await flowsheet_service.fillMissingHourlyBreakpoints(latestShow, dj_name, {
-    callerMarksCurrentHour: requestedEntryType === 'breakpoint',
-  });
+  await flowsheet_service.fillMissingHourlyBreakpoints(latestShow, dj_name, { now, callerMarksCurrentHour });
 
   if (body.message !== undefined) {
     //we're just throwing the message in there (whatever it may be): dj join event, psa event, talk set event, break-point
@@ -662,6 +670,22 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       track_title: '',
       entry_type: requestedEntryType,
       message: body.message,
+      // BS#2567: the only field on this row that says which hour a breakpoint
+      // stands for, as opposed to when it was typed -- resolved server-side,
+      // the same way the auto-fill above resolves it for the breakpoints the
+      // server generates. Never taken from the request body: a client-supplied
+      // working hour is the BS#2516 defect (a stale tab replaying a week-old
+      // hidden form value) all over again.
+      //
+      // `nearestStationHour(now)` is exactly the hour the fill just stopped
+      // one millisecond below, so the two paths tile: this row covers the hour
+      // the fill deliberately left to it, with no shared hour and no gap.
+      //
+      // Explicit `null` for every other marker type, matching the gap-import
+      // and tubafrenzy-ingest row builders. A talkset or a dj_join doesn't
+      // stand for an hour, and a reader that keys on `radio_hour` must see
+      // that spelled out rather than inferred from an absent key.
+      radio_hour: callerMarksCurrentHour ? nearestStationHour(now) : null,
       show_id: latestShow.id,
       dj_name,
     };
